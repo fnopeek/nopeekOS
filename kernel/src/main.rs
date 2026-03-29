@@ -12,6 +12,7 @@ extern crate alloc;
 core::arch::global_asm!(include_str!("boot.s"), options(att_syntax));
 
 mod serial;
+mod csprng;
 mod audit;
 mod capability;
 mod heap;
@@ -127,6 +128,8 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     wasm::init();
     intent::bootstrap_wasm();
     vga::show_status(b"WASM runtime online (wasmi)");
+
+    csprng::init();
 
     kprintln!("[npk] Initializing Capability Vault...");
     let (vault_ref, root_id) = capability::Vault::init();

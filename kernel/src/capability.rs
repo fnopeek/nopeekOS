@@ -12,7 +12,6 @@ use crate::interrupts;
 const MAX_CAPABILITIES: usize = 256;
 
 static VAULT: Mutex<Vault> = Mutex::new(Vault::empty());
-static PRNG: Mutex<Xorshift128> = Mutex::new(Xorshift128::new());
 static ROOT_CAP: Mutex<u128> = Mutex::new(0);
 
 bitflags! {
@@ -121,9 +120,8 @@ impl Vault {
     }
 
     /// Initialize vault with root capability. Returns vault ref + root cap ID.
-    /// Also stores root cap for internal use (module cap creation).
+    /// Requires csprng::init() to be called first.
     pub fn init() -> (&'static Mutex<Vault>, u128) {
-        seed_prng();
         let root_id = next_id();
         {
             let mut vault = VAULT.lock();
@@ -240,57 +238,6 @@ impl core::fmt::Display for CapError {
     }
 }
 
-// === PRNG: xorshift128+ seeded from TSC ===
-
-struct Xorshift128 {
-    s0: u64,
-    s1: u64,
-}
-
-impl Xorshift128 {
-    const fn new() -> Self {
-        Xorshift128 { s0: 1, s1: 1 } // Non-zero placeholder, re-seeded in init
-    }
-
-    fn next_u128(&mut self) -> u128 {
-        let mut s1 = self.s0;
-        let s0 = self.s1;
-        self.s0 = s0;
-        s1 ^= s1 << 23;
-        s1 ^= s1 >> 17;
-        s1 ^= s0;
-        s1 ^= s0 >> 26;
-        self.s1 = s1;
-        let result = s0.wrapping_add(s1);
-        ((s0 as u128) << 64) | (result as u128)
-    }
-}
-
-fn seed_prng() {
-    let mut prng = PRNG.lock();
-    let tsc1 = rdtsc();
-    let tsc2 = rdtsc();
-    // Mix with constants to avoid zero state
-    prng.s0 = tsc1 ^ 0x6A09E667F3BCC908; // Fractional part of sqrt(2)
-    prng.s1 = tsc2 ^ 0xBB67AE8584CAA73B; // Fractional part of sqrt(3)
-    if prng.s0 == 0 { prng.s0 = 1; }
-    if prng.s1 == 0 { prng.s1 = 1; }
-    // Warm up: discard first few outputs
-    for _ in 0..16 { prng.next_u128(); }
-}
-
 fn next_id() -> u128 {
-    let mut prng = PRNG.lock();
-    loop {
-        let id = prng.next_u128();
-        if id != 0 { return id; } // Zero is reserved as "no capability"
-    }
-}
-
-fn rdtsc() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: rdtsc is always available on x86_64, side-effect-free
-    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi); }
-    ((hi as u64) << 32) | (lo as u64)
+    crate::csprng::random_u128()
 }
