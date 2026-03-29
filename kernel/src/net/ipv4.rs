@@ -22,15 +22,16 @@ pub fn handle_ipv4(data: &[u8]) {
     let _src_ip = &data[12..16];
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
 
-    // Only accept packets for our IP or broadcast
+    // Accept packets for our IP, broadcast, or during DHCP (IP = 0.0.0.0)
     let our_ip = arp::our_ip();
-    if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] { return; }
+    if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
 
     let payload = &data[ihl..total_len.min(data.len())];
 
     match protocol {
         PROTO_ICMP => super::icmp::handle_icmp(data, payload),
-        _ => {} // TCP/UDP later
+        PROTO_UDP => super::udp::handle_udp(data, payload),
+        _ => {}
     }
 }
 

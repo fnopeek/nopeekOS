@@ -8,6 +8,10 @@ pub mod eth;
 pub mod arp;
 pub mod ipv4;
 pub mod icmp;
+pub mod udp;
+pub mod dns;
+pub mod dhcp;
+pub mod ntp;
 
 use crate::virtio_net;
 

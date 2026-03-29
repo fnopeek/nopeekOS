@@ -126,6 +126,16 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
             }
         }
 
+        "resolve" | "dns" => {
+            if require_cap(vault, session, Rights::READ, "resolve") {
+                intent_resolve(args);
+            }
+        }
+        "time" | "clock" | "date" => {
+            if require_cap(vault, session, Rights::READ, "time") {
+                intent_time();
+            }
+        }
         "ping" => {
             if require_cap(vault, session, Rights::EXECUTE, "ping") {
                 intent_ping(args);
@@ -519,6 +529,25 @@ pub fn bootstrap_wasm() {
     }
     if stored > 0 {
         kprintln!("[npk] Bootstrap: stored {} WASM modules", stored);
+    }
+}
+
+fn intent_resolve(args: &str) {
+    let name = args.trim();
+    if name.is_empty() {
+        kprintln!("[npk] Usage: resolve <hostname>");
+        return;
+    }
+    match crate::net::dns::resolve(name) {
+        Some(ip) => kprintln!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
+        None => kprintln!("[npk] Could not resolve '{}'", name),
+    }
+}
+
+fn intent_time() {
+    match crate::net::ntp::unix_time() {
+        Some(t) => kprintln!("{}", crate::net::ntp::format_time(t)),
+        None => kprintln!("[npk] Time not synced (run 'ping' first to init network)"),
     }
 }
 
