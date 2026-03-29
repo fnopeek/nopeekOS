@@ -416,9 +416,9 @@ Aus Luzern.
 
 ---
 
-## Lizenz
+## License
 
-TBD – Evaluierung zwischen MIT, Apache 2.0, und proprietär.
+MIT – see [LICENSE](LICENSE)
 
 ## Author
 
