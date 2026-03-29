@@ -58,7 +58,17 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
             }
         }
 
-        // Intents requiring EXECUTE
+        // Intents requiring EXECUTE (WASM sandbox)
+        "add" => {
+            if require_cap(vault, session, Rights::EXECUTE, "add") {
+                intent_wasm_add(args);
+            }
+        }
+        "multiply" => {
+            if require_cap(vault, session, Rights::EXECUTE, "multiply") {
+                intent_wasm_multiply(args);
+            }
+        }
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, session, Rights::EXECUTE, "halt") {
                 intent_halt();
@@ -108,7 +118,7 @@ fn intent_status(vault: &Vault) {
     kprintln!("  Paging:        {} x 2MB + {} x 4KB, NX enabled", huge_pages, small_pages);
     kprintln!("  Capabilities:  {}/{} active", active_caps, max_caps);
     kprintln!("  Audit log:     {} events", audit_count);
-    kprintln!("  WASM Runtime:  not yet loaded");
+    kprintln!("  WASM Runtime:  wasmi (interpreter)");
     kprintln!("  Content Store: in-memory (empty)");
     kprintln!();
 }
@@ -178,12 +188,45 @@ fn intent_help() {
     kprintln!("    status       System overview          (requires READ)");
     kprintln!("    caps         Capability vault info    (requires READ)");
     kprintln!("    audit        Recent audit log         (requires AUDIT)");
+    kprintln!("    add <a> <b>  Add two numbers [WASM]   (requires EXECUTE)");
+    kprintln!("    multiply <a> <b>  Multiply [WASM]   (requires EXECUTE)");
     kprintln!("    echo <text>  Echo text");
-    kprintln!("    think <q>    AI reasoning placeholder");
     kprintln!("    about        About nopeekOS");
-    kprintln!("    philosophy   Design philosophy");
     kprintln!("    halt         Shutdown system          (requires EXECUTE)");
     kprintln!();
+}
+
+fn parse_two_ints(args: &str) -> Option<(i32, i32)> {
+    let mut parts = args.trim().splitn(2, ' ');
+    let a = parts.next()?.trim().parse::<i32>().ok()?;
+    let b = parts.next()?.trim().parse::<i32>().ok()?;
+    Some((a, b))
+}
+
+fn intent_wasm_add(args: &str) {
+    use crate::wasm;
+    let (a, b) = match parse_two_ints(args) {
+        Some(v) => v,
+        None => { kprintln!("[npk] Usage: add <a> <b>"); return; }
+    };
+
+    match wasm::execute(wasm::MODULE_ADD, "add", &[wasm::val_i32(a), wasm::val_i32(b)]) {
+        Ok(result) => kprintln!("{}", result.output),
+        Err(e) => kprintln!("[npk] WASM error: {}", e),
+    }
+}
+
+fn intent_wasm_multiply(args: &str) {
+    use crate::wasm;
+    let (a, b) = match parse_two_ints(args) {
+        Some(v) => v,
+        None => { kprintln!("[npk] Usage: multiply <a> <b>"); return; }
+    };
+
+    match wasm::execute(wasm::MODULE_MULTIPLY, "multiply", &[wasm::val_i32(a), wasm::val_i32(b)]) {
+        Ok(result) => kprintln!("{}", result.output),
+        Err(e) => kprintln!("[npk] WASM error: {}", e),
+    }
 }
 
 fn intent_echo(args: &str) { kprintln!("{}", args); }

@@ -21,6 +21,7 @@ mod paging;
 mod intent;
 mod store;
 mod vga;
+mod wasm;
 
 use core::panic::PanicInfo;
 
@@ -67,6 +68,10 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] Initializing Virtual Memory Manager...");
     paging::init();
     vga::show_status(b"Virtual memory online");
+
+    kprintln!("[npk] Initializing WASM Runtime...");
+    wasm::init();
+    vga::show_status(b"WASM runtime online (wasmi)");
 
     kprintln!("[npk] Initializing Capability Vault...");
     let (vault_ref, root_id) = capability::Vault::init();
