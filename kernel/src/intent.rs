@@ -554,6 +554,16 @@ fn intent_http(args: &str) {
     };
     let host = host.trim();
 
+    // Check for "> name" store redirect
+    let store_as = if let Some(idx) = path.find('>') {
+        let name = path[idx + 1..].trim();
+        if name.is_empty() { None } else { Some(alloc::string::String::from(name)) }
+    } else {
+        None
+    };
+    let path = if let Some(idx) = path.find('>') { path[..idx].trim() } else { path };
+    let path = if path.is_empty() { "/" } else { path };
+
     // Resolve hostname
     let ip = if let Some(ip) = parse_ip(host) {
         ip
@@ -611,14 +621,33 @@ fn intent_http(args: &str) {
         return;
     }
 
-    // Print response
-    match core::str::from_utf8(&response) {
-        Ok(s) => {
-            // Truncate for display
-            let display = if s.len() > 2048 { &s[..2048] } else { s };
-            kprintln!("{}", display);
+    // Strip HTTP headers if present (find \r\n\r\n)
+    let body_start = response.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(0);
+
+    if let Some(name) = store_as {
+        // Store response body in npkFS
+        let body = &response[body_start..];
+        match crate::npkfs::store(&name, body, 0) {
+            Ok(hash) => {
+                kprint!("[npk] Stored '{}' ({} bytes, hash: ", name, body.len());
+                for b in &hash[..4] { kprint!("{:02x}", b); }
+                kprintln!("...)");
+            }
+            Err(e) => kprintln!("[npk] Store error: {}", e),
         }
-        Err(_) => kprintln!("[npk] ({} bytes, binary response)", response.len()),
+    } else {
+        // Print response body
+        let body = &response[body_start..];
+        match core::str::from_utf8(body) {
+            Ok(s) => {
+                let display = if s.len() > 2048 { &s[..2048] } else { s };
+                kprintln!("{}", display);
+            }
+            Err(_) => kprintln!("[npk] ({} bytes, binary response)", body.len()),
+        }
     }
 }
 
