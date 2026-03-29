@@ -9,6 +9,12 @@ const ECHO_REQUEST: u8 = 8;
 const ECHO_REPLY: u8   = 0;
 
 static PING_RECEIVED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static TTL_EXPIRED_FROM: spin::Mutex<Option<[u8; 4]>> = spin::Mutex::new(None);
+
+/// Check if a TTL-expired ICMP was received (for traceroute)
+pub fn ttl_expired_from() -> Option<[u8; 4]> {
+    TTL_EXPIRED_FROM.lock().take()
+}
 
 pub fn ping_received() -> bool {
     PING_RECEIVED.swap(false, core::sync::atomic::Ordering::Relaxed)
@@ -22,6 +28,10 @@ pub fn handle_icmp(ip_packet: &[u8], data: &[u8]) {
 
     match icmp_type {
         ECHO_REQUEST => send_echo_reply(src_ip, data),
+        11 => {
+            // Time Exceeded (TTL expired in transit) — used by traceroute
+            *TTL_EXPIRED_FROM.lock() = Some(src_ip);
+        }
         ECHO_REPLY => {
             let seq = u16::from_be_bytes([data[6], data[7]]);
             kprintln!("[npk] PONG from {}.{}.{}.{} seq={}",
@@ -68,6 +78,18 @@ pub fn ping(dst_ip: [u8; 4], seq: u16) {
     ipv4::send(dst_ip, ipv4::PROTO_ICMP, &pkt);
     kprintln!("[npk] PING {}.{}.{}.{} seq={}",
         dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], seq);
+}
+
+/// Send ICMP echo with custom TTL (for traceroute)
+pub fn ping_ttl(dst_ip: [u8; 4], seq: u16, ttl: u8) {
+    let mut pkt = [0u8; 64];
+    pkt[0] = ECHO_REQUEST;
+    pkt[5] = 1;
+    pkt[6..8].copy_from_slice(&seq.to_be_bytes());
+    for i in 8..64 { pkt[i] = i as u8; }
+    let checksum = icmp_checksum(&pkt);
+    pkt[2..4].copy_from_slice(&checksum.to_be_bytes());
+    super::ipv4::send_with_ttl(dst_ip, super::ipv4::PROTO_ICMP, &pkt, ttl);
 }
 
 fn icmp_checksum(data: &[u8]) -> u16 {

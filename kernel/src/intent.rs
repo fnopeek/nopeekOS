@@ -136,6 +136,16 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
                 intent_time();
             }
         }
+        "traceroute" | "trace" => {
+            if require_cap(vault, session, Rights::EXECUTE, "traceroute") {
+                intent_traceroute(args);
+            }
+        }
+        "netstat" | "connections" => {
+            if require_cap(vault, session, Rights::READ, "netstat") {
+                intent_netstat();
+            }
+        }
         "http" | "curl" | "wget" => {
             if require_cap(vault, session, Rights::EXECUTE, "http") {
                 intent_http(args);
@@ -535,6 +545,76 @@ pub fn bootstrap_wasm() {
     if stored > 0 {
         kprintln!("[npk] Bootstrap: stored {} WASM modules", stored);
     }
+}
+
+fn intent_traceroute(args: &str) {
+    let target = args.trim();
+    if target.is_empty() {
+        kprintln!("[npk] Usage: traceroute <ip or hostname>");
+        return;
+    }
+
+    let ip = if let Some(ip) = parse_ip(target) {
+        ip
+    } else {
+        match crate::net::dns::resolve(target) {
+            Some(ip) => {
+                kprintln!("[npk] {} -> {}.{}.{}.{}", target, ip[0], ip[1], ip[2], ip[3]);
+                ip
+            }
+            None => { kprintln!("[npk] Could not resolve '{}'", target); return; }
+        }
+    };
+
+    // ARP resolve gateway
+    crate::net::arp::request([10, 0, 2, 2]);
+    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+
+    kprintln!("[npk] Traceroute to {}.{}.{}.{} (max 20 hops)", ip[0], ip[1], ip[2], ip[3]);
+
+    for ttl in 1..=20u8 {
+        crate::net::icmp::ping_ttl(ip, ttl as u16, ttl);
+
+        let t0 = crate::interrupts::ticks();
+        let mut found = false;
+
+        loop {
+            crate::net::poll();
+
+            if let Some(from) = crate::net::icmp::ttl_expired_from() {
+                kprintln!("  {:>2}  {}.{}.{}.{}", ttl, from[0], from[1], from[2], from[3]);
+                found = true;
+                break;
+            }
+            if crate::net::icmp::ping_received() {
+                kprintln!("  {:>2}  {}.{}.{}.{} (destination)", ttl, ip[0], ip[1], ip[2], ip[3]);
+                return; // reached destination
+            }
+            if crate::interrupts::ticks() - t0 > 100 { // 1s per hop
+                kprintln!("  {:>2}  *", ttl);
+                found = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+fn intent_netstat() {
+    let conns = crate::net::tcp::list_connections();
+    kprintln!();
+    kprintln!("  Active TCP Connections");
+    kprintln!("  ─────────────────────");
+    if conns.is_empty() {
+        kprintln!("  (none)");
+    } else {
+        kprintln!("  {:>6}  {:>21}  {}", "Local", "Remote", "State");
+        for (lport, rip, rport, state) in &conns {
+            kprintln!("  {:>6}  {}.{}.{}.{}:{:<5}  {}",
+                lport, rip[0], rip[1], rip[2], rip[3], rport, state);
+        }
+    }
+    kprintln!();
 }
 
 fn intent_http(args: &str) {

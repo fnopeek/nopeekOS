@@ -38,15 +38,19 @@ pub fn handle_ipv4(data: &[u8]) {
 
 /// Send an IPv4 packet
 pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) {
+    send_with_ttl(dst_ip, protocol, payload, 64);
+}
+
+/// Send an IPv4 packet with custom TTL (for traceroute)
+pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) {
     let src_ip = arp::our_ip();
     let total_len = (HEADER_LEN + payload.len()) as u16;
 
     let mut pkt = alloc::vec![0u8; total_len as usize];
 
-    // IPv4 header
-    pkt[0] = 0x45; // version 4, IHL 5 (20 bytes)
+    pkt[0] = 0x45;
     pkt[2..4].copy_from_slice(&total_len.to_be_bytes());
-    pkt[8] = 64;   // TTL
+    pkt[8] = ttl;
     pkt[9] = protocol;
     pkt[12..16].copy_from_slice(&src_ip);
     pkt[16..20].copy_from_slice(&dst_ip);
