@@ -13,8 +13,9 @@ bitflags = "2.4"      # Flag-basierte Enums
 version = "1.4"
 features = ["spin_no_std"]
 
-# WASM runtime (Phase 3)
-# wasmi = { version = "0.31", default-features = false }
+[dependencies.wasmi]
+version = "0.31"
+default-features = false
 
 [profile.dev]
 panic = "abort"
