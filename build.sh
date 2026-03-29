@@ -20,6 +20,7 @@ TARGET="x86_64-unknown-none"
 KERNEL_BIN="$PROJECT_DIR/target/$TARGET/debug/nopeekos-kernel"
 ISO_DIR="$PROJECT_DIR/target/iso"
 ISO_FILE="$PROJECT_DIR/target/nopeekos.iso"
+DISK_IMG="$PROJECT_DIR/target/disk.img"
 VM_NAME="nopeekOS"
 
 # Farben
@@ -71,6 +72,14 @@ GRUBCFG
     grub-mkrescue -o "$ISO_FILE" "$ISO_DIR" 2>/dev/null
 
     ok "ISO created: $ISO_FILE"
+
+    # Create persistent disk image for virtio-blk (once)
+    if [ ! -f "$DISK_IMG" ]; then
+        log "Creating 16MB disk image..."
+        dd if=/dev/zero of="$DISK_IMG" bs=1M count=16 2>/dev/null
+        ok "Disk image: $DISK_IMG"
+    fi
+
     echo ""
 }
 
@@ -94,6 +103,8 @@ run_qemu() {
         -display none \
         -m 128M \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
+        -device virtio-blk-pci,drive=drive0 \
         -no-reboot \
         -no-shutdown
 }
@@ -115,6 +126,8 @@ run_debug() {
         -display none \
         -m 128M \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
+        -device virtio-blk-pci,drive=drive0 \
         -no-reboot \
         -no-shutdown \
         -s -S

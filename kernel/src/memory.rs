@@ -136,6 +136,29 @@ pub fn deallocate_frame(addr: u64) {
     ALLOCATOR.lock().deallocate(addr);
 }
 
+/// Allocate `count` contiguous physical frames. Returns base physical address.
+pub fn allocate_contiguous(count: usize) -> Option<u64> {
+    if count == 0 { return None; }
+    let mut alloc = ALLOCATOR.lock();
+    let top = alloc.memory_top;
+    if count > top { return None; }
+
+    'outer: for start in 0..top - count + 1 {
+        for i in 0..count {
+            let frame = start + i;
+            let (byte, bit) = (frame / 8, frame % 8);
+            if alloc.bitmap[byte] & (1 << bit) != 0 {
+                continue 'outer;
+            }
+        }
+        for i in 0..count {
+            alloc.set_used(start + i);
+        }
+        return Some((start * PAGE_SIZE) as u64);
+    }
+    None
+}
+
 pub fn reserve_region(base: u64, length: u64) {
     ALLOCATOR.lock().mark_region_used(base, length);
 }
