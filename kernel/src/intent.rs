@@ -69,6 +69,25 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
                 intent_wasm_multiply(args);
             }
         }
+        "disk" | "blk" => {
+            let sub = args.trim();
+            if sub.is_empty() || sub == "info" {
+                if require_cap(vault, session, Rights::READ, "disk") {
+                    intent_disk_info();
+                }
+            } else if sub.starts_with("read ") || sub == "read" {
+                if require_cap(vault, session, Rights::READ, "disk read") {
+                    intent_disk_read(sub.strip_prefix("read").unwrap_or("").trim());
+                }
+            } else if sub.starts_with("write ") || sub == "write" {
+                if require_cap(vault, session, Rights::WRITE, "disk write") {
+                    intent_disk_write(sub.strip_prefix("write").unwrap_or("").trim());
+                }
+            } else {
+                kprintln!("[npk] Usage: disk [info|read <sector>|write <sector> <text>]");
+            }
+        }
+
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, session, Rights::EXECUTE, "halt") {
                 intent_halt();
@@ -119,6 +138,12 @@ fn intent_status(vault: &Vault) {
     kprintln!("  Capabilities:  {}/{} active", active_caps, max_caps);
     kprintln!("  Audit log:     {} events", audit_count);
     kprintln!("  WASM Runtime:  wasmi (interpreter)");
+    if let Some(cap) = crate::virtio_blk::capacity() {
+        let mb = (cap * crate::virtio_blk::SECTOR_SIZE as u64) / (1024 * 1024);
+        kprintln!("  Block device:  {} MB ({} sectors, virtio-blk)", mb, cap);
+    } else {
+        kprintln!("  Block device:  none");
+    }
     kprintln!("  Content Store: in-memory (empty)");
     kprintln!();
 }
@@ -190,6 +215,9 @@ fn intent_help() {
     kprintln!("    audit        Recent audit log         (requires AUDIT)");
     kprintln!("    add <a> <b>  Add two numbers [WASM]   (requires EXECUTE)");
     kprintln!("    multiply <a> <b>  Multiply [WASM]   (requires EXECUTE)");
+    kprintln!("    disk              Block device info      (requires READ)");
+    kprintln!("    disk read <n>     Read sector n          (requires READ)");
+    kprintln!("    disk write <n> <s>  Write to sector n    (requires WRITE)");
     kprintln!("    echo <text>  Echo text");
     kprintln!("    about        About nopeekOS");
     kprintln!("    halt         Shutdown system          (requires EXECUTE)");
@@ -264,6 +292,102 @@ fn intent_philosophy() {
     kprintln!("  an intent loop, and a human view.");
     kprintln!("  Everything else is generated.");
     kprintln!();
+}
+
+fn intent_disk_info() {
+    use crate::virtio_blk;
+    match virtio_blk::capacity() {
+        Some(cap) => {
+            let mb = (cap * virtio_blk::SECTOR_SIZE as u64) / (1024 * 1024);
+            kprintln!();
+            kprintln!("  Block Device (virtio-blk)");
+            kprintln!("  ────────────────────────");
+            kprintln!("  Capacity:  {} sectors ({} MB)", cap, mb);
+            kprintln!("  Sector:    {} bytes", virtio_blk::SECTOR_SIZE);
+            kprintln!("  Status:    online");
+            kprintln!();
+        }
+        None => kprintln!("[npk] No block device available"),
+    }
+}
+
+fn intent_disk_read(args: &str) {
+    use crate::virtio_blk;
+
+    let sector: u64 = match args.parse() {
+        Ok(n) => n,
+        Err(_) => { kprintln!("[npk] Usage: disk read <sector>"); return; }
+    };
+
+    let mut buf = [0u8; virtio_blk::SECTOR_SIZE];
+    match virtio_blk::read_sector(sector, &mut buf) {
+        Ok(()) => {
+            kprintln!();
+            kprintln!("  Sector {}:", sector);
+            hex_dump(&buf);
+            kprintln!();
+        }
+        Err(e) => kprintln!("[npk] Read error: {}", e),
+    }
+}
+
+fn intent_disk_write(args: &str) {
+    use crate::virtio_blk;
+
+    let mut parts = args.splitn(2, ' ');
+    let sector: u64 = match parts.next().and_then(|s| s.parse().ok()) {
+        Some(n) => n,
+        None => { kprintln!("[npk] Usage: disk write <sector> <text>"); return; }
+    };
+    let text = parts.next().unwrap_or("");
+    if text.is_empty() {
+        kprintln!("[npk] Usage: disk write <sector> <text>");
+        return;
+    }
+
+    let mut buf = [0u8; virtio_blk::SECTOR_SIZE];
+    let len = text.len().min(virtio_blk::SECTOR_SIZE);
+    buf[..len].copy_from_slice(&text.as_bytes()[..len]);
+
+    match virtio_blk::write_sector(sector, &buf) {
+        Ok(()) => kprintln!("[npk] Wrote {} bytes to sector {}", len, sector),
+        Err(e) => kprintln!("[npk] Write error: {}", e),
+    }
+}
+
+fn hex_dump(buf: &[u8; 512]) {
+    let mut prev = [0xFFu8; 16]; // impossible first value
+    let mut collapsed = false;
+
+    for row in 0..32 {
+        let off = row * 16;
+        let line = &buf[off..off + 16];
+
+        if row > 0 && line == &prev[..] {
+            if !collapsed {
+                kprintln!("  *");
+                collapsed = true;
+            }
+            continue;
+        }
+        collapsed = false;
+        prev.copy_from_slice(line);
+
+        kprint!("  {:04x}: ", off);
+        for (j, &b) in line.iter().enumerate() {
+            kprint!("{:02x} ", b);
+            if j == 7 { kprint!(" "); }
+        }
+        kprint!(" |");
+        for &b in line {
+            if b >= 0x20 && b < 0x7F {
+                kprint!("{}", b as char);
+            } else {
+                kprint!(".");
+            }
+        }
+        kprintln!("|");
+    }
 }
 
 fn intent_halt() -> ! {

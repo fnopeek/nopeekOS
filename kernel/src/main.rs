@@ -18,6 +18,8 @@ mod heap;
 mod interrupts;
 mod memory;
 mod paging;
+mod pci;
+mod virtio_blk;
 mod intent;
 mod store;
 mod vga;
@@ -68,6 +70,18 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] Initializing Virtual Memory Manager...");
     paging::init();
     vga::show_status(b"Virtual memory online");
+
+    kprintln!("[npk] Scanning PCI bus...");
+    let pci_count = pci::scan();
+    kprintln!("[npk] PCI: {} devices", pci_count);
+    vga::show_status(b"PCI bus scanned");
+
+    kprintln!("[npk] Probing virtio-blk...");
+    if virtio_blk::init() {
+        vga::show_status(b"virtio-blk online");
+    } else {
+        kprintln!("[npk] virtio-blk: not available (no disk attached)");
+    }
 
     kprintln!("[npk] Initializing WASM Runtime...");
     wasm::init();
