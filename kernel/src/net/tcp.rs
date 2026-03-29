@@ -536,6 +536,26 @@ fn close_cleanup(handle: usize) {
     CONNECTIONS.lock()[handle] = None;
 }
 
+/// List active connections for netstat display
+pub fn list_connections() -> alloc::vec::Vec<(u16, [u8; 4], u16, &'static str)> {
+    let conns = CONNECTIONS.lock();
+    let mut result = alloc::vec::Vec::new();
+    for slot in conns.iter().flatten() {
+        let state_str = match slot.state {
+            State::Closed => "CLOSED",
+            State::SynSent => "SYN_SENT",
+            State::Established => "ESTABLISHED",
+            State::FinWait1 => "FIN_WAIT_1",
+            State::FinWait2 => "FIN_WAIT_2",
+            State::CloseWait => "CLOSE_WAIT",
+            State::LastAck => "LAST_ACK",
+            State::TimeWait => "TIME_WAIT",
+        };
+        result.push((slot.local_port, slot.remote_ip, slot.remote_port, state_str));
+    }
+    result
+}
+
 #[derive(Debug)]
 pub enum TcpError {
     TooManyConnections,
