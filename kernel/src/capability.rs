@@ -13,6 +13,7 @@ const MAX_CAPABILITIES: usize = 256;
 
 static VAULT: Mutex<Vault> = Mutex::new(Vault::empty());
 static PRNG: Mutex<Xorshift128> = Mutex::new(Xorshift128::new());
+static ROOT_CAP: Mutex<u128> = Mutex::new(0);
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,27 +64,6 @@ pub struct Vault {
 impl Vault {
     const fn empty() -> Self {
         Vault { caps: [const { None }; MAX_CAPABILITIES], count: 0 }
-    }
-
-    /// Initialize vault with root capability. Returns vault ref + root cap ID.
-    pub fn init() -> (&'static Mutex<Vault>, u128) {
-        // Seed PRNG from CPU timestamp counter
-        seed_prng();
-
-        let root_id = next_id();
-        {
-            let mut vault = VAULT.lock();
-            vault.caps[0] = Some(Capability {
-                id: root_id,
-                resource: ResourceKind::Kernel,
-                rights: Rights::ALL,
-                parent: None,
-                active: true,
-                expires_at: None,
-            });
-            vault.count = 1;
-        }
-        (&VAULT, root_id)
     }
 
     /// Create a new capability delegated from parent.
@@ -138,6 +118,27 @@ impl Vault {
 
         audit::record(AuditOp::Create { parent_id, new_id: id });
         Ok(id)
+    }
+
+    /// Initialize vault with root capability. Returns vault ref + root cap ID.
+    /// Also stores root cap for internal use (module cap creation).
+    pub fn init() -> (&'static Mutex<Vault>, u128) {
+        seed_prng();
+        let root_id = next_id();
+        {
+            let mut vault = VAULT.lock();
+            vault.caps[0] = Some(Capability {
+                id: root_id,
+                resource: ResourceKind::Kernel,
+                rights: Rights::ALL,
+                parent: None,
+                active: true,
+                expires_at: None,
+            });
+            vault.count = 1;
+        }
+        *ROOT_CAP.lock() = root_id;
+        (&VAULT, root_id)
     }
 
     /// Revoke a capability and all its children (transitive)
@@ -198,6 +199,17 @@ impl Vault {
             self.revoke_recursive(children[i]);
         }
     }
+}
+
+/// Create a capability for a WASM module (delegates from root internally).
+pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<u128, CapError> {
+    let root = *ROOT_CAP.lock();
+    VAULT.lock().create(root, ResourceKind::Execute, rights, ttl_ticks)
+}
+
+/// Check a capability against the global vault.
+pub fn check_global(cap_id: u128, required: Rights) -> Result<(), CapError> {
+    VAULT.lock().check(cap_id, required).map(|_| ())
 }
 
 /// Short hex representation of a 128-bit cap ID (first 8 hex chars)
