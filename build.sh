@@ -110,6 +110,29 @@ run_qemu() {
         -no-shutdown
 }
 
+run_qemu_gui() {
+    if [ ! -f "$ISO_FILE" ]; then
+        err "No ISO found. Run './build.sh build' first."
+        exit 1
+    fi
+
+    log "Launching QEMU with GUI + serial on stdio..."
+    log "VGA window shows boot banner. Serial I/O in this terminal."
+    log "Ctrl-A X to quit."
+    echo ""
+
+    qemu-system-x86_64 \
+        -cdrom "$ISO_FILE" \
+        -serial stdio \
+        -m 128M \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
+        -device virtio-blk-pci,drive=drive0 \
+        -nic user,model=virtio-net-pci \
+        -no-reboot \
+        -no-shutdown
+}
+
 run_debug() {
     if [ ! -f "$ISO_FILE" ]; then
         err "No ISO found. Run './build.sh build' first."
@@ -301,6 +324,11 @@ case "${1:-}" in
         check_deps
         build
         run_qemu
+        ;;
+    qemu-gui|gui)
+        check_deps
+        build
+        run_qemu_gui
         ;;
     debug)
         check_deps
