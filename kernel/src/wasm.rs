@@ -7,7 +7,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use wasmi::{Caller, Engine, Linker, Module, Store, Value};
+use wasmi::{Caller, Config, Engine, Linker, Module, Store, Value};
 use spin::Mutex;
 use crate::{kprintln, kprint, capability};
 
@@ -22,10 +22,15 @@ struct HostState {
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
+/// Default fuel budget per module execution (~10M instructions)
+const DEFAULT_FUEL: u64 = 10_000_000;
+
 pub fn init() {
-    let engine = Engine::default();
+    let mut config = Config::default();
+    config.consume_fuel(true);
+    let engine = Engine::new(&config);
     *ENGINE.lock() = Some(engine);
-    kprintln!("[npk] WASM runtime: wasmi v0.31 (interpreter)");
+    kprintln!("[npk] WASM runtime: wasmi v0.31 (fuel-metered)");
 }
 
 /// Execute a WASM module with basic host functions (legacy API for built-in add/multiply)
@@ -54,6 +59,7 @@ fn execute_inner(
         output: String::new(),
         cap_id,
     });
+    store.add_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
     let mut linker = <Linker<HostState>>::new(engine);
     register_host_functions(&mut linker)?;
@@ -71,11 +77,11 @@ fn execute_inner(
 
     if num_results == 0 {
         func.call(&mut store, args, &mut [])
-            .map_err(|_| WasmError::ExecutionFailed)?;
+            .map_err(|e| map_exec_error(e))?;
     } else {
         let mut results = [Value::I32(0)];
         func.call(&mut store, args, &mut results)
-            .map_err(|_| WasmError::ExecutionFailed)?;
+            .map_err(|e| map_exec_error(e))?;
 
         let host = store.data();
         if host.output.is_empty() {
@@ -191,6 +197,11 @@ fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<S
     core::str::from_utf8(&buf).ok().map(String::from)
 }
 
+fn map_exec_error(e: wasmi::Error) -> WasmError {
+    let msg = alloc::format!("{}", e);
+    if msg.contains("fuel") { WasmError::FuelExhausted } else { WasmError::ExecutionFailed }
+}
+
 #[derive(Debug)]
 pub enum WasmError {
     NotInitialized,
@@ -199,6 +210,7 @@ pub enum WasmError {
     StartFailed,
     FunctionNotFound,
     ExecutionFailed,
+    FuelExhausted,
     HostFunctionError,
 }
 
@@ -211,6 +223,7 @@ impl core::fmt::Display for WasmError {
             WasmError::StartFailed => write!(f, "module start failed"),
             WasmError::FunctionNotFound => write!(f, "function not found"),
             WasmError::ExecutionFailed => write!(f, "execution failed"),
+            WasmError::FuelExhausted => write!(f, "execution limit exceeded (fuel exhausted)"),
             WasmError::HostFunctionError => write!(f, "host function error"),
         }
     }
