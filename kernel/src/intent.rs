@@ -88,6 +88,32 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
             }
         }
 
+        "store" | "save" => {
+            if require_cap(vault, session, Rights::WRITE, "store") {
+                intent_store(args, session);
+            }
+        }
+        "fetch" | "load" | "get" => {
+            if require_cap(vault, session, Rights::READ, "fetch") {
+                intent_fetch(args);
+            }
+        }
+        "delete" | "rm" | "remove" => {
+            if require_cap(vault, session, Rights::WRITE, "delete") {
+                intent_delete(args);
+            }
+        }
+        "list" | "ls" | "objects" => {
+            if require_cap(vault, session, Rights::READ, "list") {
+                intent_list();
+            }
+        }
+        "fsinfo" | "fs" => {
+            if require_cap(vault, session, Rights::READ, "fsinfo") {
+                intent_fsinfo();
+            }
+        }
+
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, session, Rights::EXECUTE, "halt") {
                 intent_halt();
@@ -144,7 +170,11 @@ fn intent_status(vault: &Vault) {
     } else {
         kprintln!("  Block device:  none");
     }
-    kprintln!("  Content Store: in-memory (empty)");
+    if let Some((_, free, objects, gen)) = crate::npkfs::stats() {
+        kprintln!("  npkFS:         {} objects, {} free blocks (gen {})", objects, free, gen);
+    } else {
+        kprintln!("  npkFS:         not mounted");
+    }
     kprintln!();
 }
 
@@ -215,6 +245,11 @@ fn intent_help() {
     kprintln!("    audit        Recent audit log         (requires AUDIT)");
     kprintln!("    add <a> <b>  Add two numbers [WASM]   (requires EXECUTE)");
     kprintln!("    multiply <a> <b>  Multiply [WASM]   (requires EXECUTE)");
+    kprintln!("    store <n> <data>  Store object            (requires WRITE)");
+    kprintln!("    fetch <name>     Fetch object            (requires READ)");
+    kprintln!("    delete <name>    Delete object           (requires WRITE)");
+    kprintln!("    list             List all objects        (requires READ)");
+    kprintln!("    fsinfo           Filesystem info         (requires READ)");
     kprintln!("    disk              Block device info      (requires READ)");
     kprintln!("    disk read <n>     Read sector n          (requires READ)");
     kprintln!("    disk write <n> <s>  Write to sector n    (requires WRITE)");
@@ -294,16 +329,120 @@ fn intent_philosophy() {
     kprintln!();
 }
 
+fn intent_store(args: &str, cap_id: u128) {
+    let mut parts = args.splitn(2, ' ');
+    let name = match parts.next() {
+        Some(n) if !n.is_empty() => n,
+        _ => { kprintln!("[npk] Usage: store <name> <data>"); return; }
+    };
+    let data = parts.next().unwrap_or("");
+    if data.is_empty() {
+        kprintln!("[npk] Usage: store <name> <data>");
+        return;
+    }
+
+    match crate::npkfs::store(name, data.as_bytes(), cap_id) {
+        Ok(hash) => {
+            kprint!("[npk] Stored '{}' ({} bytes, hash: ", name, data.len());
+            for b in &hash[..4] { kprint!("{:02x}", b); }
+            kprintln!("...)");
+        }
+        Err(e) => kprintln!("[npk] Store error: {}", e),
+    }
+}
+
+fn intent_fetch(args: &str) {
+    let name = args.trim();
+    if name.is_empty() {
+        kprintln!("[npk] Usage: fetch <name>");
+        return;
+    }
+
+    match crate::npkfs::fetch(name) {
+        Ok((data, _hash)) => {
+            match core::str::from_utf8(&data) {
+                Ok(s) => kprintln!("{}", s),
+                Err(_) => {
+                    kprintln!("[npk] ({} bytes, binary)", data.len());
+                }
+            }
+        }
+        Err(e) => kprintln!("[npk] Fetch error: {}", e),
+    }
+}
+
+fn intent_delete(args: &str) {
+    let name = args.trim();
+    if name.is_empty() {
+        kprintln!("[npk] Usage: delete <name>");
+        return;
+    }
+
+    match crate::npkfs::delete(name) {
+        Ok(()) => kprintln!("[npk] Deleted '{}'", name),
+        Err(e) => kprintln!("[npk] Delete error: {}", e),
+    }
+}
+
+fn intent_list() {
+    match crate::npkfs::list() {
+        Ok(entries) => {
+            kprintln!();
+            if entries.is_empty() {
+                kprintln!("  (no objects stored)");
+            } else {
+                for (name, size, hash) in &entries {
+                    kprint!("  {:<20} {:>8} B  ", name, size);
+                    for b in &hash[..4] { kprint!("{:02x}", b); }
+                    kprintln!("...");
+                }
+            }
+            if let Some((total, free, count, gen)) = crate::npkfs::stats() {
+                kprintln!();
+                kprintln!("  {} objects, {} free blocks / {} total (gen {})",
+                    count, free, total, gen);
+            }
+            kprintln!();
+        }
+        Err(e) => kprintln!("[npk] List error: {}", e),
+    }
+}
+
+fn intent_fsinfo() {
+    match crate::npkfs::stats() {
+        Some((total, free, objects, gen)) => {
+            let total_mb = total * crate::npkfs::BLOCK_SIZE as u64 / (1024 * 1024);
+            let free_mb = free * crate::npkfs::BLOCK_SIZE as u64 / (1024 * 1024);
+            let used = total - free;
+            kprintln!();
+            kprintln!("  npkFS – Content-Addressed Object Store");
+            kprintln!("  ──────────────────────────────────────");
+            kprintln!("  Total:       {} blocks ({} MB)", total, total_mb);
+            kprintln!("  Used:        {} blocks", used);
+            kprintln!("  Free:        {} blocks ({} MB)", free, free_mb);
+            kprintln!("  Objects:     {}", objects);
+            kprintln!("  Generation:  {}", gen);
+            kprintln!("  Hash:        BLAKE3");
+            kprintln!("  TRIM:        {}", if crate::virtio_blk::has_discard() { "active" } else { "unavailable" });
+            kprintln!();
+        }
+        None => kprintln!("[npk] Filesystem not mounted"),
+    }
+}
+
 fn intent_disk_info() {
     use crate::virtio_blk;
     match virtio_blk::capacity() {
         Some(cap) => {
             let mb = (cap * virtio_blk::SECTOR_SIZE as u64) / (1024 * 1024);
+            let blocks = virtio_blk::block_count().unwrap_or(0);
             kprintln!();
             kprintln!("  Block Device (virtio-blk)");
             kprintln!("  ────────────────────────");
-            kprintln!("  Capacity:  {} sectors ({} MB)", cap, mb);
+            kprintln!("  Capacity:  {} sectors / {} blocks ({} MB)", cap, blocks, mb);
             kprintln!("  Sector:    {} bytes", virtio_blk::SECTOR_SIZE);
+            kprintln!("  Block:     {} bytes", virtio_blk::BLOCK_SIZE);
+            kprintln!("  TRIM:      {}", if virtio_blk::has_discard() { "supported" } else { "not available" });
             kprintln!("  Status:    online");
             kprintln!();
         }
