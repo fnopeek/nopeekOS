@@ -31,6 +31,7 @@ pub fn handle_ipv4(data: &[u8]) {
     match protocol {
         PROTO_ICMP => super::icmp::handle_icmp(data, payload),
         PROTO_UDP => super::udp::handle_udp(data, payload),
+        PROTO_TCP => super::tcp::handle_tcp(data, payload),
         _ => {}
     }
 }

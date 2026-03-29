@@ -136,6 +136,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
                 intent_time();
             }
         }
+        "http" | "curl" | "wget" => {
+            if require_cap(vault, session, Rights::EXECUTE, "http") {
+                intent_http(args);
+            }
+        }
         "ping" => {
             if require_cap(vault, session, Rights::EXECUTE, "ping") {
                 intent_ping(args);
@@ -530,6 +535,101 @@ pub fn bootstrap_wasm() {
     if stored > 0 {
         kprintln!("[npk] Bootstrap: stored {} WASM modules", stored);
     }
+}
+
+fn intent_http(args: &str) {
+    let url = args.trim();
+    if url.is_empty() {
+        kprintln!("[npk] Usage: http <host> [path]");
+        return;
+    }
+
+    // Parse "host/path" or "host path"
+    let (host, path) = if let Some(idx) = url.find(' ') {
+        (&url[..idx], url[idx + 1..].trim())
+    } else if let Some(idx) = url.find('/') {
+        (&url[..idx], &url[idx..])
+    } else {
+        (url, "/")
+    };
+    let host = host.trim();
+
+    // Resolve hostname
+    let ip = if let Some(ip) = parse_ip(host) {
+        ip
+    } else {
+        match crate::net::dns::resolve(host) {
+            Some(ip) => {
+                kprintln!("[npk] {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
+                ip
+            }
+            None => {
+                kprintln!("[npk] Could not resolve '{}'", host);
+                return;
+            }
+        }
+    };
+
+    // ARP resolve gateway
+    crate::net::arp::request([10, 0, 2, 2]);
+    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+
+    // TCP connect
+    kprintln!("[npk] Connecting to {}.{}.{}.{}:80...", ip[0], ip[1], ip[2], ip[3]);
+    let handle = match crate::net::tcp::connect(ip, 80) {
+        Ok(h) => h,
+        Err(e) => { kprintln!("[npk] TCP error: {}", e); return; }
+    };
+
+    // Send HTTP GET
+    let request = alloc::format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    if let Err(e) = crate::net::tcp::send(handle, request.as_bytes()) {
+        kprintln!("[npk] Send error: {}", e);
+        let _ = crate::net::tcp::close(handle);
+        return;
+    }
+
+    // Receive response
+    let mut response = alloc::vec::Vec::new();
+    let mut buf = [0u8; 2048];
+    loop {
+        match crate::net::tcp::recv_blocking(handle, &mut buf, 500) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+        if response.len() > 8192 { break; } // limit output
+    }
+
+    let _ = crate::net::tcp::close(handle);
+
+    if response.is_empty() {
+        kprintln!("[npk] No response received");
+        return;
+    }
+
+    // Print response
+    match core::str::from_utf8(&response) {
+        Ok(s) => {
+            // Truncate for display
+            let display = if s.len() > 2048 { &s[..2048] } else { s };
+            kprintln!("{}", display);
+        }
+        Err(_) => kprintln!("[npk] ({} bytes, binary response)", response.len()),
+    }
+}
+
+fn parse_ip(s: &str) -> Option<[u8; 4]> {
+    let parts: alloc::vec::Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 { return None; }
+    let mut ip = [0u8; 4];
+    for (i, p) in parts.iter().enumerate() {
+        ip[i] = p.parse().ok()?;
+    }
+    Some(ip)
 }
 
 fn intent_resolve(args: &str) {
