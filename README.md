@@ -173,30 +173,38 @@ durch hardcoded Rust-Funktionen.
 **Erfolgskriterium:** `npk> hash "hello world"` ruft ein
 WASM-Modul auf, das den BLAKE3-Hash berechnet und zurückgibt.
 
-### Phase 5 – Content-Addressable Store
+### Phase 5 – Storage + npkFS
 
-Persistenz ohne Dateisystem.
+Two filesystem strategies: npkFS for internal use, FAT32/exFAT for external compatibility.
 
-- [ ] BLAKE3-basierter Content Store
-- [ ] In-Memory Store mit Persistence auf virtio-blk
-- [ ] Semantisches Tagging
-- [ ] Garbage Collection für nicht-referenzierte Objekte
-- [ ] WASM-Module im Store cachen
-- [ ] Deduplizierung
+**npkFS (internal, capability-native):**
+- [ ] virtio-blk driver (block device I/O)
+- [ ] npkFS on-disk format (capability-aware from day one)
+- [ ] Namespace layer (folders + filenames for humans)
+- [ ] BLAKE3 content-addressed backend (integrity + deduplication)
+- [ ] Every file access capability-gated + audit-logged
+- [ ] Semantic tagging (search by meaning, not path)
+- [ ] WASM module caching in content store
 
-**Ziel:** Alles wird content-adressiert gespeichert,
-nichts geht verloren, nichts ist doppelt.
+**External media (USB sticks, data exchange):**
+- [ ] FAT32 read/write (universal compatibility)
+- [ ] exFAT support (large files)
+- [ ] Auto-detect filesystem on mount
 
-### Phase 6 – Netzwerk + WASI-Erweiterung
+**Design:** Users see names and folders. Backend stores content by BLAKE3 hash.
+Like Git — you work with filenames, but internally it's hash objects.
+No root access, no chmod — every operation requires a capability token.
 
-Die Aussenwelt anbinden.
+### Phase 6 – Network
 
-- [ ] virtio-net Treiber (als capability-gated Modul)
-- [ ] TCP/IP Stack (smoltcp als WASM oder native)
-- [ ] Erweiterte WASI-Unterstützung
-- [ ] DNS Resolution
+Connecting to the outside world.
+
+- [ ] virtio-net driver (capability-gated)
+- [ ] TCP/IP stack (smoltcp, native Rust)
+- [ ] Extended WASI support
+- [ ] DNS resolution
 - [ ] TLS (rustls)
-- [ ] HTTP Client als WASM-Modul
+- [ ] HTTP client as WASM module
 
 **Ziel:** nopeekOS kann mit dem Netzwerk kommunizieren.
 
@@ -240,15 +248,16 @@ the gateway from isolated OS to the connected world.
 
 ## Technische Entscheide
 
-| Bereich            | Wahl                | Begründung                                     |
+| Area               | Choice              | Rationale                                      |
 |--------------------|---------------------|------------------------------------------------|
-| Kernel-Sprache     | Rust (no_std)       | Memory Safety ohne GC, eliminiert 70% CVE-Klassen |
-| Boot Protocol      | Multiboot2          | QEMU/GRUB/VirtualBox Support, simpler als UEFI |
-| Target             | x86_64              | QEMU + VirtualBox default, später aarch64      |
-| WASM Runtime       | wasmi → Cranelift   | no_std-kompatibel, später JIT                  |
-| Content Hashing    | BLAKE3              | Schnell, sicher, Rust-nativ                    |
-| Debugging          | QEMU GDB Stub       | Step-Through im Kernel                         |
-| Demo/Testing       | VirtualBox           | GUI, Snapshots, bereits installiert            |
+| Kernel language    | Rust (no_std)       | Memory safety without GC, eliminates 70% of CVE classes |
+| Boot protocol      | Multiboot2          | QEMU/GRUB/VirtualBox support, simpler than UEFI |
+| Target             | x86_64              | QEMU + VirtualBox default, later aarch64       |
+| WASM runtime       | wasmi → Cranelift   | no_std compatible, later JIT                   |
+| Internal FS        | npkFS               | Capability-native, BLAKE3 content-addressed    |
+| External FS        | FAT32/exFAT         | Universal compatibility for data exchange      |
+| Content hashing    | BLAKE3              | Fast, secure, pure Rust                        |
+| Debugging          | QEMU GDB stub       | Step-through kernel debugging                  |
 
 ---
 
