@@ -114,6 +114,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
             }
         }
 
+        "run" | "exec" => {
+            if require_cap(vault, session, Rights::EXECUTE, "run") {
+                intent_run(args);
+            }
+        }
+
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, session, Rights::EXECUTE, "halt") {
                 intent_halt();
@@ -253,6 +259,7 @@ fn intent_help() {
     kprintln!("    disk              Block device info      (requires READ)");
     kprintln!("    disk read <n>     Read sector n          (requires READ)");
     kprintln!("    disk write <n> <s>  Write to sector n    (requires WRITE)");
+    kprintln!("    run <module> [args]  Run WASM from npkFS  (requires EXECUTE)");
     kprintln!("    echo <text>  Echo text");
     kprintln!("    about        About nopeekOS");
     kprintln!("    halt         Shutdown system          (requires EXECUTE)");
@@ -405,6 +412,83 @@ fn intent_list() {
             kprintln!();
         }
         Err(e) => kprintln!("[npk] List error: {}", e),
+    }
+}
+
+fn intent_run(args: &str) {
+    use crate::{wasm, npkfs, capability};
+    use wasmi::Value;
+
+    let mut parts = args.trim().splitn(2, ' ');
+    let module_name = match parts.next() {
+        Some(n) if !n.is_empty() => n,
+        _ => { kprintln!("[npk] Usage: run <module> [args...]"); return; }
+    };
+    let arg_str = parts.next().unwrap_or("");
+
+    // Load module from npkFS
+    let (wasm_bytes, hash) = match npkfs::fetch(module_name) {
+        Ok(v) => v,
+        Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
+    };
+
+    // BLAKE3 integrity verified by npkfs::fetch
+
+    // Delegate a capability for this module: READ + EXECUTE, 60s TTL
+    let module_cap = match capability::create_module_cap(
+        capability::Rights::READ | capability::Rights::EXECUTE,
+        Some(6000), // 60 seconds at 100Hz
+    ) {
+        Ok(id) => id,
+        Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
+    };
+
+    kprint!("[npk] Running '{}' (hash: ", module_name);
+    for b in &hash[..4] { kprint!("{:02x}", b); }
+    kprintln!("..., cap: {:08x})", capability::short_id(module_cap));
+
+    // Parse args as i32 values
+    let args_vec: alloc::vec::Vec<Value> = arg_str.split_whitespace()
+        .filter_map(|s| s.parse::<i32>().ok())
+        .map(|v| Value::I32(v))
+        .collect();
+
+    // Determine function name: if no args, try _start; otherwise use module name
+    let func_name = if args_vec.is_empty() { "_start" } else { module_name };
+
+    match wasm::execute_sandboxed(&wasm_bytes, func_name, &args_vec, module_cap) {
+        Ok(result) => {
+            if !result.output.is_empty() {
+                kprintln!("{}", result.output);
+            }
+        }
+        Err(e) => kprintln!("[npk] Execution error: {}", e),
+    }
+}
+
+/// Store built-in WASM modules to npkFS on first boot.
+pub fn bootstrap_wasm() {
+    use crate::{wasm, npkfs};
+
+    if !npkfs::is_mounted() { return; }
+
+    let modules: &[(&str, &[u8])] = &[
+        ("hello", wasm::MODULE_HELLO),
+        ("fib", wasm::MODULE_FIB),
+        ("add", wasm::MODULE_ADD),
+        ("multiply", wasm::MODULE_MULTIPLY),
+    ];
+
+    let mut stored = 0;
+    for (name, data) in modules {
+        if npkfs::fetch(name).is_err() {
+            if npkfs::store(name, data, 0).is_ok() {
+                stored += 1;
+            }
+        }
+    }
+    if stored > 0 {
+        kprintln!("[npk] Bootstrap: stored {} WASM modules", stored);
     }
 }
 

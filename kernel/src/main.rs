@@ -100,6 +100,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
 
     kprintln!("[npk] Initializing WASM Runtime...");
     wasm::init();
+    intent::bootstrap_wasm();
     vga::show_status(b"WASM runtime online (wasmi)");
 
     kprintln!("[npk] Initializing Capability Vault...");

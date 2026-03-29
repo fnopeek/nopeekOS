@@ -2,27 +2,24 @@
 //!
 //! Sandboxed execution via wasmi interpreter.
 //! Every host function is capability-gated.
-//! WASM modules can only interact with the system through
-//! explicitly registered host functions.
+//! Modules loaded from npkFS execute with delegated capabilities —
+//! no ambient authority, no access beyond what was explicitly granted.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use wasmi::{Caller, Engine, Linker, Module, Store, Value};
 use spin::Mutex;
-use crate::kprintln;
+use crate::{kprintln, kprint, capability};
 
-/// Result from a WASM module execution
 pub struct WasmResult {
     pub output: String,
-    pub success: bool,
 }
 
-/// Host state passed to WASM host functions
 struct HostState {
     output: String,
+    cap_id: u128,
 }
 
-/// Global WASM engine (reused across invocations)
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
 pub fn init() {
@@ -31,8 +28,22 @@ pub fn init() {
     kprintln!("[npk] WASM runtime: wasmi v0.31 (interpreter)");
 }
 
-/// Execute a WASM module with the given function name and arguments
+/// Execute a WASM module with basic host functions (legacy API for built-in add/multiply)
 pub fn execute(wasm_bytes: &[u8], func_name: &str, args: &[Value]) -> Result<WasmResult, WasmError> {
+    execute_inner(wasm_bytes, func_name, args, 0)
+}
+
+/// Execute a WASM module loaded from npkFS with capability-gated host functions.
+/// The module receives a delegated capability token.
+pub fn execute_sandboxed(
+    wasm_bytes: &[u8], func_name: &str, args: &[Value], cap_id: u128,
+) -> Result<WasmResult, WasmError> {
+    execute_inner(wasm_bytes, func_name, args, cap_id)
+}
+
+fn execute_inner(
+    wasm_bytes: &[u8], func_name: &str, args: &[Value], cap_id: u128,
+) -> Result<WasmResult, WasmError> {
     let engine_guard = ENGINE.lock();
     let engine = engine_guard.as_ref().ok_or(WasmError::NotInitialized)?;
 
@@ -41,10 +52,11 @@ pub fn execute(wasm_bytes: &[u8], func_name: &str, args: &[Value]) -> Result<Was
 
     let mut store = Store::new(engine, HostState {
         output: String::new(),
+        cap_id,
     });
 
     let mut linker = <Linker<HostState>>::new(engine);
-    register_host_functions(&mut linker, engine)?;
+    register_host_functions(&mut linker)?;
 
     let instance = linker.instantiate(&mut store, &module)
         .map_err(|_| WasmError::InstantiationFailed)?
@@ -54,49 +66,129 @@ pub fn execute(wasm_bytes: &[u8], func_name: &str, args: &[Value]) -> Result<Was
     let func = instance.get_func(&store, func_name)
         .ok_or(WasmError::FunctionNotFound)?;
 
-    let mut results = [Value::I32(0)];
-    func.call(&mut store, args, &mut results)
-        .map_err(|_| WasmError::ExecutionFailed)?;
+    let ty = func.ty(&store);
+    let num_results = ty.results().len();
 
-    let host = store.data();
-    let mut output = host.output.clone();
+    if num_results == 0 {
+        func.call(&mut store, args, &mut [])
+            .map_err(|_| WasmError::ExecutionFailed)?;
+    } else {
+        let mut results = [Value::I32(0)];
+        func.call(&mut store, args, &mut results)
+            .map_err(|_| WasmError::ExecutionFailed)?;
 
-    // If no explicit output, format the return value
-    if output.is_empty() {
-        match results[0] {
-            Value::I32(v) => output = alloc::format!("{}", v),
-            Value::I64(v) => output = alloc::format!("{}", v),
-            _ => output = alloc::format!("{:?}", results[0]),
+        let host = store.data();
+        if host.output.is_empty() {
+            let output = match results[0] {
+                Value::I32(v) => alloc::format!("{}", v),
+                Value::I64(v) => alloc::format!("{}", v),
+                _ => alloc::format!("{:?}", results[0]),
+            };
+            return Ok(WasmResult { output });
         }
     }
 
-    Ok(WasmResult { output, success: true })
+    Ok(WasmResult { output: store.data().output.clone() })
 }
 
-/// Register host functions that WASM modules can call
-fn register_host_functions(linker: &mut Linker<HostState>, _engine: &Engine) -> Result<(), WasmError> {
-    // npk_print(ptr, len) — write to output buffer
+fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> {
+    // npk_print(ptr, len) — write to output buffer (no cap needed)
     linker.func_wrap("env", "npk_print",
         |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
-            let mem = caller.get_export("memory")
-                .and_then(|e| e.into_memory());
-            if let Some(mem) = mem {
-                let start = ptr as usize;
-                let end = start + len as usize;
-                let data = mem.data(&caller);
-                // Copy bytes out before borrowing caller mutably
-                if end <= data.len() {
-                    let mut buf = alloc::vec![0u8; len as usize];
-                    buf.copy_from_slice(&data[start..end]);
-                    if let Ok(s) = core::str::from_utf8(&buf) {
-                        caller.data_mut().output.push_str(s);
-                    }
-                }
+            if let Some(s) = read_wasm_str(&caller, ptr, len) {
+                caller.data_mut().output.push_str(&s);
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_log(ptr, len) — write to serial console (no cap needed, output only)
+    linker.func_wrap("env", "npk_log",
+        |caller: Caller<'_, HostState>, ptr: i32, len: i32| {
+            if let Some(s) = read_wasm_str(&caller, ptr, len) {
+                kprintln!("{}", s);
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_fetch(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1
+    linker.func_wrap("env", "npk_fetch",
+        |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
+         buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(cap_id, capability::Rights::READ).is_err() {
+                kprintln!("[npk] WASM: npk_fetch DENIED (no READ)");
+                return -1;
+            }
+
+            let name = match read_wasm_str(&caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+
+            let (content, _) = match crate::npkfs::fetch(&name) {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+
+            let write_len = content.len().min(buf_max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            if start + write_len <= data.len() {
+                data[start..start + write_len].copy_from_slice(&content[..write_len]);
+                write_len as i32
+            } else {
+                -1
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_store(name_ptr, name_len, data_ptr, data_len) -> 0 or -1
+    linker.func_wrap("env", "npk_store",
+        |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
+         data_ptr: i32, data_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(cap_id, capability::Rights::WRITE).is_err() {
+                kprintln!("[npk] WASM: npk_store DENIED (no WRITE)");
+                return -1;
+            }
+
+            let name = match read_wasm_str(&caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = data_ptr as usize;
+            let end = (start + data_len as usize).min(data.len());
+            if start >= end { return -1; }
+
+            match crate::npkfs::store(&name, &data[start..end], cap_id) {
+                Ok(_) => 0,
+                Err(_) => -1,
             }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     Ok(())
+}
+
+fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<String> {
+    let mem = caller.get_export("memory").and_then(|e| e.into_memory())?;
+    let data = mem.data(caller);
+    let start = ptr as usize;
+    let end = (start + len as usize).min(data.len());
+    if start >= end { return None; }
+    let mut buf = alloc::vec![0u8; end - start];
+    buf.copy_from_slice(&data[start..end]);
+    core::str::from_utf8(&buf).ok().map(String::from)
 }
 
 #[derive(Debug)]
@@ -115,42 +207,68 @@ impl core::fmt::Display for WasmError {
         match self {
             WasmError::NotInitialized => write!(f, "WASM runtime not initialized"),
             WasmError::InvalidModule => write!(f, "invalid WASM module"),
-            WasmError::InstantiationFailed => write!(f, "module instantiation failed"),
+            WasmError::InstantiationFailed => write!(f, "instantiation failed"),
             WasmError::StartFailed => write!(f, "module start failed"),
-            WasmError::FunctionNotFound => write!(f, "exported function not found"),
+            WasmError::FunctionNotFound => write!(f, "function not found"),
             WasmError::ExecutionFailed => write!(f, "execution failed"),
-            WasmError::HostFunctionError => write!(f, "host function registration error"),
+            WasmError::HostFunctionError => write!(f, "host function error"),
         }
     }
 }
 
-/// Helper to create Value::I32 without exposing wasmi types
 pub fn val_i32(v: i32) -> Value { Value::I32(v) }
 
 // === Built-in WASM modules ===
 
-/// Minimal WASM module: exports add(i32, i32) -> i32
-/// Built from: (module (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))
+/// add(i32, i32) -> i32
 pub const MODULE_ADD: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6D, // magic: \0asm
-    0x01, 0x00, 0x00, 0x00, // version: 1
-    // Type section: one function type (i32, i32) -> i32
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
     0x01, 0x07, 0x01, 0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F,
-    // Function section: function 0 uses type 0
     0x03, 0x02, 0x01, 0x00,
-    // Export section: "add" -> function 0
     0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
-    // Code section: function body
     0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B,
 ];
 
-/// Minimal WASM module: exports multiply(i32, i32) -> i32
-/// Built from: (module (func (export "multiply") (param i32 i32) (result i32) local.get 0 local.get 1 i32.mul))
+/// multiply(i32, i32) -> i32
 pub const MODULE_MULTIPLY: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6D,
-    0x01, 0x00, 0x00, 0x00,
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
     0x01, 0x07, 0x01, 0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F,
     0x03, 0x02, 0x01, 0x00,
     0x07, 0x0C, 0x01, 0x08, 0x6D, 0x75, 0x6C, 0x74, 0x69, 0x70, 0x6C, 0x79, 0x00, 0x00,
     0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6C, 0x0B,
+];
+
+/// _start() — calls npk_log("Hello from WASM sandbox!")
+pub const MODULE_HELLO: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // header
+    0x01, 0x09, 0x02, 0x60, 0x02, 0x7F, 0x7F, 0x00, 0x60, 0x00, 0x00, // types
+    0x02, 0x0F, 0x01, 0x03, 0x65, 0x6E, 0x76, 0x07, 0x6E, 0x70, 0x6B,
+        0x5F, 0x6C, 0x6F, 0x67, 0x00, 0x00, // import npk_log
+    0x03, 0x02, 0x01, 0x01, // function _start: type 1
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 page
+    0x07, 0x13, 0x02, 0x06, 0x6D, 0x65, 0x6D, 0x6F, 0x72, 0x79, 0x02, 0x00,
+        0x06, 0x5F, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x01, // exports
+    0x0A, 0x0A, 0x01, 0x08, 0x00, 0x41, 0x00, 0x41, 0x18, 0x10, 0x00, 0x0B, // code
+    0x0B, 0x1E, 0x01, 0x00, 0x41, 0x00, 0x0B, 0x18, // data header
+        0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x66, 0x72, 0x6F, 0x6D, 0x20,
+        0x57, 0x41, 0x53, 0x4D, 0x20, 0x73, 0x61, 0x6E, 0x64, 0x62, 0x6F,
+        0x78, 0x21, // "Hello from WASM sandbox!"
+];
+
+/// fib(i32) -> i32 — recursive fibonacci (Python-verified bytes)
+pub const MODULE_FIB: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x03, 0x02, 0x01, 0x00,
+    0x07, 0x07, 0x01, 0x03, 0x66, 0x69, 0x62, 0x00, 0x00,
+    0x0a, 0x1e, 0x01, 0x1c, 0x00,
+        0x20, 0x00, 0x41, 0x02, 0x48,
+        0x04, 0x7f,
+            0x20, 0x00,
+        0x05,
+            0x20, 0x00, 0x41, 0x01, 0x6b, 0x10, 0x00,
+            0x20, 0x00, 0x41, 0x02, 0x6b, 0x10, 0x00,
+            0x6a,
+        0x0b,
+        0x0b,
 ];
