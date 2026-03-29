@@ -89,6 +89,22 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] Probing virtio-net...");
     if virtio_net::init() {
         vga::show_status(b"virtio-net online");
+
+        kprintln!("[npk] Running DHCP...");
+        if net::dhcp::configure() {
+            vga::show_status(b"DHCP configured");
+        }
+
+        kprintln!("[npk] Syncing time (NTP)...");
+        // NTP server: QEMU user-mode routes to host's NTP
+        if net::ntp::sync([10, 0, 2, 3]) {
+            if let Some(t) = net::ntp::unix_time() {
+                kprintln!("[npk] Time: {}", net::ntp::format_time(t));
+            }
+            vga::show_status(b"NTP synced");
+        } else {
+            kprintln!("[npk] NTP: sync failed (non-critical)");
+        }
     } else {
         kprintln!("[npk] virtio-net: not available");
     }
