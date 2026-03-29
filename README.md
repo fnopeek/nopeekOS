@@ -1,440 +1,365 @@
 # nopeekOS
 
-**Ein AI-natives Betriebssystem. Von Grund auf neu gedacht.**
+**An AI-native operating system. Rethought from scratch.**
 
-Kein Unix-Klon. Kein POSIX. Kein Erbe aus den 70ern.
-Ein System, in dem AI der primäre Operator ist – und der Mensch der Dirigent.
-
----
-
-## Die Grundidee
-
-Warum sieht ein Betriebssystem aus wie es aussieht? Weil 1969 Menschen
-jeden Befehl manuell tippen mussten. Weil 1984 eine Desktop-Metapher
-nötig war. Weil 2024 immer noch Menschen Prozesse managen, Treiber
-installieren, und `chmod 755` eintippen.
-
-nopeekOS dreht die Frage um: **Was bleibt übrig, wenn man fünfzig Jahre
-an Annahmen entfernt?**
-
-Die Antwort:
-
-- Ein **Capability Vault** statt Permissions
-- Eine **WASM Sandbox** statt Prozesse
-- Ein **Intent Loop** statt eine Shell
-- Ein **Content Store** statt ein Dateisystem
-- Ein **Human View** statt ein Desktop
-
-Alles andere wird zur Laufzeit generiert.
+Not a Unix clone. Not POSIX. No legacy from the '70s.
+A system where AI is the primary operator -- and the human is the conductor.
 
 ---
 
-## Architektur
+## The Idea
+
+Why does an operating system look the way it does? Because in 1969 humans had to type every command manually. Because in 1984 a desktop metaphor was needed. Because in 2025 humans still manage processes, install drivers, and type `chmod 755`.
+
+nopeekOS flips the question: **What remains when you remove fifty years of assumptions?**
+
+- A **Capability Vault** instead of permissions
+- A **WASM Sandbox** instead of processes
+- An **Intent Loop** instead of a shell
+- A **Content-Addressed Store** instead of a filesystem
+- **Runtime-generated tools** instead of pre-installed software
+
+Everything else is generated at runtime.
+
+---
+
+## What It Can Do Today
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Human View                                                 │
-│  Minimaler, adaptiver Canvas. Serial → Framebuffer → UI.   │
-├─────────────────────────────────────────────────────────────┤
-│  Intent Loop                                                │
-│  Nimmt Absichten entgegen, nicht Befehle.                   │
-│  Phase 1-4: Pattern Matching    Phase 5+: AI Resolution    │
-├─────────────────────────────────────────────────────────────┤
-│  WASM Runtime (wasmi → Cranelift JIT)                       │
-│  Jede Ausführung ist ein sandboxed WASM-Modul.             │
-│  Capability-gated Host Functions statt Syscalls.            │
-├─────────────────────────────────────────────────────────────┤
-│  nopeekOS Kernel (Rust, no_std)                                │
-│  Memory Manager │ Capability Vault │ Audit Log │ Scheduler  │
-├─────────────────────────────────────────────────────────────┤
-│  Hardware (x86_64, später aarch64)                          │
-│  UEFI/Multiboot2 → Long Mode → Rust                        │
-└─────────────────────────────────────────────────────────────┘
+npk> status                          # Full system overview
+npk> store config version=1.0        # Store object (BLAKE3-hashed, COW B-tree)
+npk> fetch config                    # Retrieve with integrity check
+npk> list                            # All objects with hashes
+npk> run hello                       # Execute WASM from npkFS (sandboxed, cap-gated)
+npk> run fib 20                      # Compute fibonacci(20) = 6765 in WASM sandbox
+npk> ping 10.0.2.2                   # ICMP ping
+npk> traceroute 8.8.8.8              # Network path tracing
+npk> resolve google.com              # DNS resolution
+npk> http example.com /              # HTTP GET (full TCP/IP stack)
+npk> http example.com / > mypage     # Fetch and store in npkFS
+npk> disk read 0                     # Raw sector hex dump
+```
+
+Every operation is capability-gated. No ambient authority. No root. No sudo.
+
+---
+
+## Architecture
+
+```
+ ┌──────────────────────────────────────────────────────────┐
+ │  Intent Loop                                             │
+ │  Express intention, not instructions.                    │
+ ├──────────────────────────────────────────────────────────┤
+ │  WASM Runtime (wasmi, fuel-metered)                      │
+ │  Sandboxed modules loaded from npkFS.                    │
+ │  Capability-gated host functions. No ambient authority.  │
+ ├──────────────────────────────────────────────────────────┤
+ │  npkFS                          │  Network Stack         │
+ │  COW B-tree, BLAKE3 hashing     │  Ethernet, ARP, IPv4   │
+ │  Rotating superblock (8 slots)  │  ICMP, UDP, TCP        │
+ │  LRU cache, WAL journal         │  DNS, DHCP, NTP        │
+ │  Batch TRIM for SSD             │  HTTP client            │
+ ├──────────────────────────────────────────────────────────┤
+ │  Capability Vault           │  CSPRNG (ChaCha20)         │
+ │  128-bit tokens, deny-all   │  RDRAND-seeded when avail  │
+ │  Temporal scoping, audit    │  Forward secrecy re-keying │
+ ├──────────────────────────────────────────────────────────┤
+ │  Drivers                                                 │
+ │  PCI bus scanner, virtio-blk (TRIM), virtio-net          │
+ ├──────────────────────────────────────────────────────────┤
+ │  Kernel Core (Rust, no_std, ~5500 lines)                 │
+ │  Memory Manager, Heap, Paging+NX, IDT+PIC, Serial, VGA  │
+ ├──────────────────────────────────────────────────────────┤
+ │  Hardware: x86_64, Multiboot2                            │
+ └──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Kernprinzipien
+## Core Principles
 
-### Capabilities statt Permissions
+### Capabilities, Not Permissions
 
-Kein `chmod`, keine ACLs, kein root, kein sudo.
-Jede Ressource wird durch ein kryptographisches Token repräsentiert.
-Ein WASM-Modul kann nur das tun, wofür es ein Token hat.
-Tokens können delegiert (mit Einschränkung) und revoked werden.
-Alles ist auditierbar.
+No `chmod`, no ACLs, no root, no sudo.
+Every resource requires a cryptographic token (128-bit, ChaCha20 CSPRNG).
+WASM modules receive delegated capabilities with limited rights and expiry.
+Everything is audited.
 
-```rust
-Capability {
-    id:         u128,
-    resource:   ResourceKind,   // Memory, IO, Net, Store, ...
-    rights:     Rights,         // Read, Write, Execute, Delegate
-    scope:      Scope,          // Zeitlich + umfangmässig limitiert
-    provenance: ProvenanceChain // Wer hat es erstellt/delegiert
-}
-```
+**Security model: Deny by Default.** Without a token, nothing happens.
 
-**Security-Modell: Deny by Default.** Ohne Token passiert nichts.
-Kein "ambient authority". Kein implizites Vertrauen.
+### Intents, Not Commands
 
-### Intents statt Commands
+Instead of `curl -X GET http://...`, you say: `http example.com /`.
+The system handles DNS, TCP, HTTP -- the user expresses intent, not protocol details.
 
-Statt `nmap -sV 10.0.0.0/24` sagst du: *"Scan das Netzwerk 10.0.0.0/24"*.
-Der Intent Resolver entscheidet, welches WASM-Modul das erfüllt,
-welche Capabilities nötig sind, und ob der Intent sicher ist.
+### Content-Addressed Storage (npkFS)
 
-### Content-Addressable Store statt Filesystem
+No paths. No hierarchy. Every object identified by its BLAKE3 hash.
+SSD-native: Copy-on-Write B-tree, rotating superblock, batch TRIM/DISCARD.
+Store a web page: `http example.com / > mypage` -- content-addressed caching.
 
-Keine Pfade. Keine Hierarchie. Keine DLL-Hell.
-Jedes Objekt ist durch seinen BLAKE3-Hash adressiert.
-Suche läuft über semantische Tags, nicht über `/usr/bin/`.
+### WASM as Universal Execution
 
-### WASM als universelle Execution Unit
-
-Jede Ausführung ist ein WASM-Modul in einer Sandbox:
-- Kein direkter Hardware-Zugang
-- Nur über Host Functions (capability-gated)
-- Module sind ephemeral – nach Ausführung garbage-collected
-- Häufig genutzte Module werden cached (content-addressed)
-- Trust-Stufenmodell: Interpret → Verify → JIT → Native
+Every execution is a sandboxed WASM module:
+- Loaded from npkFS, BLAKE3-verified before execution
+- Each module gets its own delegated capability token (READ+EXECUTE, 60s TTL)
+- Fuel-metered: 10M instruction budget prevents infinite loops
+- Host functions capability-gated: `npk_fetch` needs READ, `npk_store` needs WRITE
 
 ---
 
-## Phasen
+## Completed Phases
 
-### Phase 1 – Bare Metal Boot ← AKTUELL
+### Phase 1 -- Bare Metal Boot
 
-Das absolute Minimum: Von Strom zu Rust.
+- [x] Multiboot2 boot (32-bit Protected Mode -> 64-bit Long Mode)
+- [x] Physical Memory Manager (bitmap allocator, contiguous allocation for DMA)
+- [x] Heap Allocator (linked-list, first-fit, coalescing)
+- [x] Virtual Memory (4-level paging, NX bit, identity-mapped first 1GB)
+- [x] Interrupts (IDT + PIC, 100Hz timer)
+- [x] Serial Console (COM1, 115200 baud, line editing)
+- [x] VGA Boot Banner
 
-- [x] Multiboot2 Header
-- [x] 32→64 bit Long Mode Transition (Page Tables, PAE, GDT)
-- [x] Rust `no_std` Kernel Entry Point
-- [x] Serial Console Driver (COM1, 115200 baud)
-- [x] VGA Boot Banner (visueller Indikator)
-- [x] Kernel Print Macros (`kprintln!`)
-- [ ] Physical Memory Manager (Buddy Allocator)
-- [ ] Interrupt Handling (IDT, PIC/APIC)
-- [ ] Paging (Higher-Half Kernel Mapping)
-- [ ] Basic Heap Allocator (für `alloc` Crate)
+### Phase 2 -- Capability System
 
-**Ziel:** nopeekOS bootet in QEMU/VirtualBox, zeigt den Banner,
-akzeptiert Input über Serial Console.
+- [x] Capability Vault (128-bit random token IDs)
+- [x] ChaCha20 CSPRNG (RFC 7539, RDRAND-seeded, forward secrecy)
+- [x] Token delegation with rights monotonicity
+- [x] Temporal scoping (tick-based expiry)
+- [x] Transitive revocation
+- [x] Audit log (ring buffer, all operations logged)
+- [x] Intent-capability coupling (every intent checked)
 
-**Erfolgskriterium:** `npk> echo hello` gibt `hello` zurück.
+### Phase 3 -- WASM Runtime
 
-### Phase 2 – Capability System
+- [x] wasmi v0.31 interpreter (no_std)
+- [x] Fuel metering (10M instruction budget, prevents hangs)
+- [x] Module loading from npkFS (BLAKE3 integrity check)
+- [x] Per-module delegated capabilities (READ+EXECUTE, 60s TTL)
+- [x] Host functions: `npk_log`, `npk_print`, `npk_fetch`, `npk_store`
+- [x] Bootstrap modules: hello, fib, add, multiply (auto-stored on first boot)
 
-Das Sicherheitsfundament, von Anfang an.
+### Phase 4 -- Block I/O + npkFS
 
-- [x] Capability Vault (in-memory Token Registry)
-- [x] Token Creation, Delegation, Revocation
-- [x] Transitive Revocation (Kinder werden mit-revoked)
-- [x] Rechte-Monotonie (delegierte Rechte ≤ Parent-Rechte)
-- [ ] Temporal Scoping (Capabilities mit Ablaufzeit)
-- [ ] Audit Log (unveränderlicher Ring Buffer)
-- [ ] Capability-basierte IPC zwischen Modulen
+- [x] PCI bus scanner (config space via 0xCF8/0xCFC)
+- [x] virtio-blk driver (legacy PCI, 4KB block API, TRIM/DISCARD)
+- [x] npkFS: Copy-on-Write B-tree (19 entries/leaf, 56 keys/internal node)
+- [x] BLAKE3 content hashing (integrity verification on every fetch)
+- [x] 8-slot rotating superblock (SSD wear leveling)
+- [x] LRU block cache (64 slots, 256KB, write coalescing)
+- [x] Circular WAL journal (crash recovery for deferred frees)
+- [x] Batch TRIM/DISCARD (merged adjacent ranges)
+- [x] Extent-based allocation
+- [x] Intents: `store`, `fetch`, `delete`, `list`, `fsinfo`, `disk read/write`
 
-**Ziel:** Jede Operation im System erfordert ein gültiges Token.
+### Phase 5 -- Network Stack
 
-**Erfolgskriterium:** Ein Intent ohne passende Capability wird
-sauber abgelehnt mit Audit-Eintrag.
+- [x] virtio-net driver (legacy PCI, RX/TX virtqueues, 32 RX buffers)
+- [x] Ethernet frame handling
+- [x] ARP (request/reply, 16-entry cache)
+- [x] IPv4 (send/receive, header checksum, custom TTL)
+- [x] ICMP (ping/pong, TTL exceeded for traceroute)
+- [x] UDP (stateless, port-based listeners)
+- [x] TCP (full state machine, no Nagle, 40ms delayed ACK, 3 retries max 10s)
+- [x] DNS resolver (A records, 16-entry cache)
+- [x] DHCP client (auto-configure IP at boot)
+- [x] NTP client (SNTP, wall-clock time)
+- [x] HTTP client (`http <host> [path]`, response stored in npkFS with `>`)
+- [x] Traceroute, netstat
 
-### Phase 3 – WASM Runtime
+---
 
-Die universelle Ausführungsumgebung.
+## Roadmap
 
-- [ ] wasmi Integration (no_std + alloc)
-- [ ] Host Function Binding (capability-gated)
-- [ ] WASM-Modul Loader (aus Content Store)
-- [ ] Sandbox Enforcement Tests
-- [ ] Basis-WASI Support (fd_write, fd_read, clock_time_get)
-- [ ] Modul-Lifecycle (Load → Execute → Cleanup)
+### Phase 6 -- Crypto & Driver Architecture
 
-**Ziel:** Beliebiger Code läuft isoliert als WASM-Modul.
+- [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
+- [ ] ChaCha20-Poly1305 AEAD encryption
+- [ ] TLS for secure connections
+- [ ] Hardware manifest collector (PCI + CPUID + ACPI probe)
+- [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
+- [ ] Driver mirror (fetch matching WASM drivers on demand based on HW manifest)
 
-**Erfolgskriterium:** Ein in Rust geschriebenes WASM-Modul
-wird geladen, führt eine Berechnung durch, gibt das Ergebnis
-über eine Host Function zurück – alles capability-gated.
-
-### Phase 4 – Intent Loop + WASM Integration
-
-Der Intent Loop wird zum echten Dispatcher.
-
-- [ ] Intent → WASM Module Mapping (statische Lookup Table)
-- [ ] Capability Scoping pro Intent
-- [ ] Result Formatting und Display
-- [ ] Error Handling (Modul crasht → System läuft weiter)
-- [ ] Intent History (Content Store)
-- [ ] Basis-Intents als WASM-Module (statt hardcoded)
-
-**Ziel:** Intents werden durch WASM-Module erfüllt, nicht
-durch hardcoded Rust-Funktionen.
-
-**Erfolgskriterium:** `npk> hash "hello world"` ruft ein
-WASM-Modul auf, das den BLAKE3-Hash berechnet und zurückgibt.
-
-### Phase 5 – Storage + npkFS
-
-Two filesystem strategies: npkFS for internal use, FAT32/exFAT for external compatibility.
-
-**npkFS (internal, capability-native):**
-- [ ] virtio-blk driver (block device I/O)
-- [ ] npkFS on-disk format (capability-aware from day one)
-- [ ] Namespace layer (folders + filenames for humans)
-- [ ] BLAKE3 content-addressed backend (integrity + deduplication)
-- [ ] Every file access capability-gated + audit-logged
-- [ ] Semantic tagging (search by meaning, not path)
-- [ ] WASM module caching in content store
-
-**External media (USB sticks, data exchange):**
-- [ ] FAT32 read/write (universal compatibility)
-- [ ] exFAT support (large files)
-- [ ] Auto-detect filesystem on mount
-
-**Design:** Users see names and folders. Backend stores content by BLAKE3 hash.
-Like Git — you work with filenames, but internally it's hash objects.
-No root access, no chmod — every operation requires a capability token.
-
-### Phase 6 – Network
-
-Connecting to the outside world.
-
-- [ ] virtio-net driver (capability-gated)
-- [ ] TCP/IP stack (smoltcp, native Rust)
-- [ ] Extended WASI support
-- [ ] DNS resolution
-- [ ] TLS (rustls)
-- [ ] HTTP client as WASM module
-
-**Ziel:** nopeekOS kann mit dem Netzwerk kommunizieren.
-
-**Erfolgskriterium:** `npk> fetch https://example.com`
-gibt den Response Body zurück.
-
-### Phase 7 – AI Integration
-
-Hier wird nopeekOS zu dem, was es sein soll.
-
-- [ ] External AI Service via virtio-net
-- [ ] Intent Resolution durch LLM
-- [ ] Runtime WASM-Generierung (AI schreibt Module)
-- [ ] Semantic Search im Content Store (Embeddings)
-- [ ] neurofabric Integration (Micro-LLM Fabric)
-
-**Ziel:** Der Mensch drückt eine Absicht aus,
-die AI generiert den Code, das System führt ihn aus.
-
-### Phase 8 – Human View
-
-The adaptive interface. Hybrid window manager inspired by
-Hyprland-style tiling + floating windows. Not a desktop metaphor —
-a projection of system state optimized for the human.
+### Phase 7 -- Human View
 
 - [ ] Framebuffer driver (VESA/GOP)
-- [ ] Bitmap font text renderer
-- [ ] Tiling window manager (Hyprland-inspired layout engine)
-- [ ] Floating window support (for transient views)
+- [ ] Tiling window manager (Hyprland-inspired)
 - [ ] Keyboard + mouse input (PS/2, virtio-input)
-- [ ] Declarative UI system (AI-generated views)
-- [ ] Web rendering engine (long-term: browser capability)
+- [ ] Web rendering engine (long-term)
 
-**Goal:** The human sees a projection of system state,
-not the system itself. Tiling for focus, floating for context.
+### Phase 8 -- AI Integration
 
-**North Star:** A browser running inside nopeekOS —
-the gateway from isolated OS to the connected world.
-
----
-
-## Technische Entscheide
-
-| Area               | Choice              | Rationale                                      |
-|--------------------|---------------------|------------------------------------------------|
-| Kernel language    | Rust (no_std)       | Memory safety without GC, eliminates 70% of CVE classes |
-| Boot protocol      | Multiboot2          | QEMU/GRUB/VirtualBox support, simpler than UEFI |
-| Target             | x86_64              | QEMU + VirtualBox default, later aarch64       |
-| WASM runtime       | wasmi → Cranelift   | no_std compatible, later JIT                   |
-| Internal FS        | npkFS               | Capability-native, BLAKE3 content-addressed    |
-| External FS        | FAT32/exFAT         | Universal compatibility for data exchange      |
-| Content hashing    | BLAKE3              | Fast, secure, pure Rust                        |
-| Debugging          | QEMU GDB stub       | Step-through kernel debugging                  |
+- [ ] External AI service via network
+- [ ] Intent resolution through LLM
+- [ ] Runtime WASM generation (AI writes modules)
+- [ ] Semantic search in content store
 
 ---
 
-## App-Kompatibilität
+## Technical Decisions
 
-nopeekOS ist kein POSIX-System. Existierende Software läuft nicht direkt.
-Es gibt mehrere Strategien um das zu adressieren:
-
-| Strategie                         | Was es bringt                                     |
-|-----------------------------------|---------------------------------------------------|
-| **WASI-Kompilation**              | C/Rust/Go → WASM. SQLite, CLI-Tools etc.          |
-| **POSIX-Shim (WASM-Modul)**      | Übersetzt POSIX-Syscalls in Host Functions         |
-| **Micro-VM (Firecracker-style)**  | Legacy Linux-Apps in isolierter VM                 |
-| **Cloud Gaming (GeForce Now)**    | Streaming statt lokaler GPU-Stack                  |
-| **Intent-basierter Ersatz**       | "Bearbeite Dokument" statt LibreOffice installieren|
-
-Langfristiges Ziel: **Du brauchst die App nicht, du brauchst das Ergebnis.**
-
----
-
-## Security-Architektur
-
-Prinzipien die ab Zeile 1 gelten:
-
-1. **Deny by Default** – Ohne Capability-Token passiert nichts
-2. **Least Privilege** – Jedes WASM-Modul bekommt nur was es braucht
-3. **Temporal Scoping** – Capabilities laufen ab
-4. **Audit Everything** – Jede Token-Operation wird geloggt
-5. **Formal Boundaries** – WASM-Sandbox ist die Trust Boundary
-6. **No Ambient Authority** – Kein root, kein sudo, keine Elevation
-
-Angriffsfläche: ~50'000–100'000 Zeilen Rust statt 30M+ Zeilen C (Linux)
-oder 50M+ (Windows). Faktor 300-600x weniger Code in der Trust Boundary.
+| Area | Choice | Rationale |
+|------|--------|-----------|
+| Language | Rust (no_std, nightly) | Memory safety without GC |
+| Boot | Multiboot2 | QEMU/GRUB compatible |
+| Target | x86_64 | Later aarch64 |
+| WASM | wasmi v0.31 | no_std, fuel metering |
+| Filesystem | npkFS | COW, BLAKE3, SSD-native |
+| Hashing | BLAKE3 | Fast, secure, streaming |
+| CSPRNG | ChaCha20 (RFC 7539) | RDRAND seed, forward secrecy |
+| Crypto (planned) | Hybrid classical + post-quantum | Future-proof |
+| TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
+| Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
 
 ---
 
-## Projektstruktur
+## Performance: npkFS vs ext4
+
+| Operation | npkFS | ext4 (theoretical) |
+|-----------|-------|---------------------|
+| Store | 5.2 I/O per op | 8-10 I/O per op |
+| Fetch (cached) | 0 I/O | 2 I/O (cold) |
+| Delete | 4.4 I/O per op | 8-10 I/O per op |
+
+~50% fewer disk writes per operation = ~50% less SSD wear.
+
+---
+
+## Project Structure
 
 ```
 nopeekOS/
-├── README.md                    # Diese Datei
-├── CLAUDE.md                    # AI-Entwicklungsguide
-├── Cargo.toml                   # Workspace
-├── build.sh                     # Build + QEMU/VirtualBox Launch
-├── rust-toolchain.toml          # Nightly + Komponenten
-├── x86_64-nopeekos.json         # Custom Bare-Metal Target
-├── .cargo/
-│   └── config.toml              # Build-Konfiguration
-├── .gitignore
-└── kernel/
-    ├── Cargo.toml
-    ├── linker.ld                # Memory Layout
-    └── src/
-        ├── boot.s               # Multiboot2 + Long Mode Transition
-        ├── main.rs              # Kernel Entry Point
-        ├── serial.rs            # Serial Console (Human Interface)
-        ├── capability.rs        # Capability Vault
-        ├── intent.rs            # Intent Loop
-        ├── store.rs             # Content Store (Placeholder)
-        └── vga.rs               # VGA Boot Banner
+├── build.sh                     # Build + QEMU/VirtualBox launch
+├── kernel/
+│   ├── Cargo.toml
+│   ├── linker.ld                # Memory layout (256KB stack, heap)
+│   └── src/
+│       ├── boot.s               # Multiboot2 -> Long Mode
+│       ├── main.rs              # Kernel entry, boot sequence
+│       ├── serial.rs            # Serial console + port I/O
+│       ├── csprng.rs            # ChaCha20 CSPRNG (RFC 7539)
+│       ├── capability.rs        # Capability Vault
+│       ├── audit.rs             # Audit log ring buffer
+│       ├── memory.rs            # Physical frame allocator
+│       ├── heap.rs              # Linked-list heap allocator
+│       ├── paging.rs            # Virtual memory manager
+│       ├── interrupts.rs        # IDT + PIC
+│       ├── pci.rs               # PCI bus scanner
+│       ├── virtio_blk.rs        # Block device driver (TRIM)
+│       ├── virtio_net.rs        # Network device driver
+│       ├── npkfs/               # Filesystem
+│       │   ├── mod.rs           # Public API: mkfs, mount, store, fetch
+│       │   ├── types.rs         # On-disk format definitions
+│       │   ├── cache.rs         # LRU block cache
+│       │   ├── bitmap.rs        # Block allocation + TRIM
+│       │   ├── superblock.rs    # Rotating superblock ring
+│       │   ├── journal.rs       # WAL for crash recovery
+│       │   └── btree.rs        # COW B-tree
+│       ├── net/                 # Network stack
+│       │   ├── mod.rs           # Packet dispatch + poll
+│       │   ├── eth.rs           # Ethernet
+│       │   ├── arp.rs           # ARP
+│       │   ├── ipv4.rs          # IPv4
+│       │   ├── icmp.rs          # ICMP (ping, traceroute)
+│       │   ├── udp.rs           # UDP
+│       │   ├── tcp.rs           # TCP
+│       │   ├── dns.rs           # DNS resolver
+│       │   ├── dhcp.rs          # DHCP client
+│       │   └── ntp.rs           # NTP time sync
+│       ├── wasm.rs              # WASM runtime + host functions
+│       ├── intent.rs            # Intent loop + all intents
+│       ├── vga.rs               # VGA text mode
+│       └── store.rs             # Content store (legacy)
 ```
 
 ---
 
-## Setup
-
-### Voraussetzungen
+## Build & Run
 
 ```bash
-# Rust Nightly (wird automatisch via rust-toolchain.toml gesetzt)
+# Prerequisites
 rustup toolchain install nightly
-rustup component add rust-src llvm-tools-preview --toolchain nightly
+rustup component add rust-src --toolchain nightly
+sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
+# or: sudo apt install grub-pc-bin xorriso mtools qemu-system-x86
 
-# Build-Tools
-sudo apt install grub-pc-bin xorriso mtools
-
-# VM (mindestens eines)
-sudo apt install qemu-system-x86     # Für Entwicklung + Debugging
-# VirtualBox: bereits installiert     # Für Demo + visuelles Testing
+# Build + Run
+./build.sh qemu          # Serial console in terminal
+./build.sh qemu-gui      # Serial + VGA window
+./build.sh debug         # With GDB stub on :1234
+./build.sh build         # Compile only
 ```
 
-### Build
-
-```bash
-chmod +x build.sh
-./build.sh build        # Kompiliert Kernel + erstellt ISO
-```
-
-### Run
-
-```bash
-# QEMU (Entwicklung) – Serial Console auf stdio
-./build.sh qemu
-
-# QEMU mit GDB-Stub (Debugging) – wartet auf GDB-Verbindung
-./build.sh debug
-# In zweitem Terminal:
-# gdb target/x86_64-unknown-none/debug/nopeekos-kernel -ex 'target remote :1234'
-
-# VirtualBox (Demo) – erstellt/aktualisiert VM automatisch
-./build.sh vbox
-
-# VirtualBox entfernen
-./build.sh vbox-clean
-```
-
-### Erster Boot
-
-Nach erfolgreichem Build und `./build.sh qemu` solltest du sehen:
+### First Boot
 
 ```
-                                __   ____  _____
-   ____  ____  ____  ___  ___  / /__/ __ \/ ___/
-  / __ \/ __ \/ __ \/ _ \/ _ \/ //_/ / / /\__ \
- / / / / /_/ / /_/ /  __/  __/ ,< / /_/ /___/ /
-/_/ /_/\____/ .___/\___/\___/_/|_|\____//____/
-           /_/
-
 [npk] AI-native Operating System v0.1.0
-[npk] Booting...
-
 [npk] Multiboot2: verified
-[npk] Initializing Capability Vault...
-[npk] Vault online. Root capability issued.
-[npk] Initializing Content Store...
-[npk] Store online.
-[npk] Starting Intent Loop...
+[npk] Interrupts enabled.
+[npk] Physical memory: 123 MB free
+[npk] Heap: 1024 KB
+[npk] Paging: 512 x 2MB, NX enabled
+[npk] PCI: 5 devices
+[npk] virtio-blk: 32768 sectors (16 MB), TRIM=yes
+[npk] virtio-net: MAC 52:54:00:12:34:56
+[npk] DHCP: configured 10.0.2.15
+[npk] npkfs: mounted (gen=1, 0 objects, 3830 free blocks)
+[npk] WASM runtime: wasmi v0.31 (fuel-metered)
+[npk] Bootstrap: stored 4 WASM modules
+[npk] CSPRNG: ChaCha20 (RDRAND-seeded)
+[npk] Vault online.
 
-[npk] ====================================
-[npk]  System ready. Express your intent.
-[npk] ====================================
+[npk] System ready. Express your intent.
 
 npk>
 ```
 
-Verfügbare Intents (Phase 1):
+---
 
-```
-npk> status          # System-Übersicht
-npk> caps            # Capability Vault Info
-npk> echo hello      # I/O-Test
-npk> think <frage>   # AI-Platzhalter
-npk> about           # Über nopeekOS
-npk> philosophy      # Design-Philosophie
-npk> halt            # System herunterfahren
-```
+## Security Architecture
+
+1. **Deny by Default** -- Without a capability token, nothing happens
+2. **Least Privilege** -- WASM modules get only what they need (READ+EXECUTE, no WRITE)
+3. **Temporal Scoping** -- Module capabilities expire after 60 seconds
+4. **Audit Everything** -- Every token operation logged
+5. **Formal Boundaries** -- WASM sandbox is the trust boundary
+6. **No Ambient Authority** -- No root, no sudo, no privilege elevation
+7. **Fuel Metering** -- 10M instruction budget per module prevents DoS
+8. **CSPRNG** -- ChaCha20 (RFC 7539) for all token generation, not predictable PRNG
+
+Attack surface: ~5500 lines of Rust in the trust boundary,
+vs 30M+ (Linux) or 50M+ (Windows). Factor 5000x less code.
 
 ---
 
-## Was nopeekOS NICHT ist
+## What nopeekOS Is NOT
 
-- **Kein Linux-Klon** – kein systemd, kein ext4, kein procfs
-- **Kein POSIX-System** – kein fork(), kein exec(), keine Pipes
-- **Kein Unikernel** – nicht single-purpose, sondern multi-intent
-- **Kein Container-Runtime** – WASM-Module sind leichter als Container
-- **Kein Desktop-OS (noch nicht)** – erst Fundament, dann Interface
-- **Kein akademisches Experiment** – jede Phase produziert lauffähigen Code
+- **Not a Linux clone** -- no systemd, no ext4, no procfs
+- **Not POSIX** -- no fork(), no exec(), no pipes
+- **Not a unikernel** -- multi-intent, not single-purpose
+- **Not a container runtime** -- WASM modules are lighter than containers
+- **Not an academic experiment** -- every phase produces working code
 
 ---
 
-## Langfristige Vision
+## Vision
 
 ```
-Heute:     Mensch installiert App → konfiguriert → bedient → debuggt
-Morgen:    Mensch äussert Absicht → System generiert → führt aus → liefert
+Today:    Human installs app -> configures -> operates -> debugs
+Tomorrow: Human expresses intent -> system generates -> executes -> delivers
 ```
 
-nopeekOS ist der Versuch, "morgen" zu bauen.
-Ohne Kompromisse an die Vergangenheit.
-Aus Luzern.
+nopeekOS is the attempt to build "tomorrow".
+Without compromise to the past.
+From Luzern.
 
 ---
 
 ## License
 
-MIT – see [LICENSE](LICENSE)
+MIT -- see [LICENSE](LICENSE)
 
 ## Author
 
-nopeek – [nopeek.ch](https://nopeek.ch)
+nopeek -- [nopeek.ch](https://nopeek.ch)
