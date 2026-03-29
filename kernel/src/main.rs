@@ -20,7 +20,9 @@ mod memory;
 mod paging;
 mod pci;
 mod virtio_blk;
+mod virtio_net;
 mod npkfs;
+mod net;
 mod intent;
 mod store;
 mod vga;
@@ -82,6 +84,13 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         vga::show_status(b"virtio-blk online");
     } else {
         kprintln!("[npk] virtio-blk: not available (no disk attached)");
+    }
+
+    kprintln!("[npk] Probing virtio-net...");
+    if virtio_net::init() {
+        vga::show_status(b"virtio-net online");
+    } else {
+        kprintln!("[npk] virtio-net: not available");
     }
 
     if virtio_blk::is_available() {

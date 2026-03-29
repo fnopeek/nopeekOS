@@ -15,6 +15,18 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: u128) -> ! {
     loop {
         kprint!("npk> ");
 
+        // Poll network while waiting for input
+        loop {
+            crate::net::poll();
+            let serial = crate::serial::SERIAL.lock();
+            if serial.has_data() {
+                drop(serial);
+                break;
+            }
+            drop(serial);
+            unsafe { core::arch::asm!("hlt"); }
+        }
+
         let serial = crate::serial::SERIAL.lock();
         let len = serial.read_line(&mut input_buf);
         drop(serial);
@@ -114,6 +126,17 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
             }
         }
 
+        "ping" => {
+            if require_cap(vault, session, Rights::EXECUTE, "ping") {
+                intent_ping(args);
+            }
+        }
+        "net" | "ifconfig" => {
+            if require_cap(vault, session, Rights::READ, "net") {
+                intent_net_info();
+            }
+        }
+
         "run" | "exec" => {
             if require_cap(vault, session, Rights::EXECUTE, "run") {
                 intent_run(args);
@@ -175,6 +198,13 @@ fn intent_status(vault: &Vault) {
         kprintln!("  Block device:  {} MB ({} sectors, virtio-blk)", mb, cap);
     } else {
         kprintln!("  Block device:  none");
+    }
+    if let Some(mac) = crate::virtio_net::mac() {
+        let ip = crate::net::arp::our_ip();
+        kprintln!("  Network:       {}.{}.{}.{} ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+            ip[0], ip[1], ip[2], ip[3], mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        kprintln!("  Network:       none");
     }
     if let Some((_, free, objects, gen)) = crate::npkfs::stats() {
         kprintln!("  npkFS:         {} objects, {} free blocks (gen {})", objects, free, gen);
@@ -489,6 +519,69 @@ pub fn bootstrap_wasm() {
     }
     if stored > 0 {
         kprintln!("[npk] Bootstrap: stored {} WASM modules", stored);
+    }
+}
+
+fn intent_ping(args: &str) {
+    let ip_str = args.trim();
+    if ip_str.is_empty() {
+        kprintln!("[npk] Usage: ping <ip>");
+        return;
+    }
+
+    let parts: alloc::vec::Vec<&str> = ip_str.split('.').collect();
+    if parts.len() != 4 {
+        kprintln!("[npk] Invalid IP format");
+        return;
+    }
+    let mut ip = [0u8; 4];
+    for (i, p) in parts.iter().enumerate() {
+        ip[i] = match p.parse::<u8>() {
+            Ok(v) => v,
+            Err(_) => { kprintln!("[npk] Invalid IP octet"); return; }
+        };
+    }
+
+    // Send ARP first to resolve gateway
+    crate::net::arp::request([10, 0, 2, 2]);
+    // Brief poll to get ARP reply
+    for _ in 0..100_000 {
+        crate::net::poll();
+        core::hint::spin_loop();
+    }
+
+    crate::net::icmp::ping(ip, 1);
+
+    // Poll for reply
+    let t0 = crate::interrupts::ticks();
+    loop {
+        crate::net::poll();
+        if crate::net::icmp::ping_received() {
+            break;
+        }
+        let elapsed = crate::interrupts::ticks() - t0;
+        if elapsed > 300 {
+            kprintln!("[npk] Ping timeout");
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn intent_net_info() {
+    if let Some(mac) = crate::virtio_net::mac() {
+        let ip = crate::net::arp::our_ip();
+        kprintln!();
+        kprintln!("  Network (virtio-net)");
+        kprintln!("  ───────────────────");
+        kprintln!("  MAC:     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        kprintln!("  IPv4:    {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        kprintln!("  Gateway: 10.0.2.2 (QEMU user-mode)");
+        kprintln!("  Status:  online");
+        kprintln!();
+    } else {
+        kprintln!("[npk] Network not available");
     }
 }
 

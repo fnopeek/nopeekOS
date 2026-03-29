@@ -105,6 +105,7 @@ run_qemu() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
+        -nic user,model=virtio-net-pci \
         -no-reboot \
         -no-shutdown
 }
@@ -128,6 +129,7 @@ run_debug() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
+        -nic user,model=virtio-net-pci \
         -no-reboot \
         -no-shutdown \
         -s -S
