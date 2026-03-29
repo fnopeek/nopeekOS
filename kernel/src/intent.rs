@@ -103,7 +103,9 @@ fn intent_status(vault: &Vault) {
     kprintln!("  Uptime:        {}m {}s", uptime / 60, uptime % 60);
     kprintln!("  Phase:         2 (Capability Enforcement)");
     kprintln!("  Architecture:  x86_64");
+    let (huge_pages, small_pages) = crate::paging::stats();
     kprintln!("  Memory:        {} MB free ({} frames)", free_mb, free_frames);
+    kprintln!("  Paging:        {} x 2MB + {} x 4KB, NX enabled", huge_pages, small_pages);
     kprintln!("  Capabilities:  {}/{} active", active_caps, max_caps);
     kprintln!("  Audit log:     {} events", audit_count);
     kprintln!("  WASM Runtime:  not yet loaded");

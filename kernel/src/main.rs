@@ -17,6 +17,7 @@ mod capability;
 mod heap;
 mod interrupts;
 mod memory;
+mod paging;
 mod intent;
 mod store;
 mod vga;
@@ -62,6 +63,10 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] Initializing Heap Allocator...");
     heap::init();
     vga::show_status(b"Heap allocator online");
+
+    kprintln!("[npk] Initializing Virtual Memory Manager...");
+    paging::init();
+    vga::show_status(b"Virtual memory online");
 
     kprintln!("[npk] Initializing Capability Vault...");
     let (vault_ref, root_id) = capability::Vault::init();
