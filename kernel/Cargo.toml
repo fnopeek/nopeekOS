@@ -17,6 +17,10 @@ features = ["spin_no_std"]
 version = "0.31"
 default-features = false
 
+[dependencies.blake3]
+version = "1.5"
+default-features = false
+
 [profile.dev]
 panic = "abort"
 

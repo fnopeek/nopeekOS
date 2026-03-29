@@ -20,6 +20,7 @@ mod memory;
 mod paging;
 mod pci;
 mod virtio_blk;
+mod npkfs;
 mod intent;
 mod store;
 mod vga;
@@ -83,6 +84,20 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         kprintln!("[npk] virtio-blk: not available (no disk attached)");
     }
 
+    if virtio_blk::is_available() {
+        kprintln!("[npk] Mounting npkFS...");
+        match npkfs::mount() {
+            Ok(()) => vga::show_status(b"npkFS mounted"),
+            Err(_) => {
+                kprintln!("[npk] npkFS: not formatted, formatting...");
+                match npkfs::mkfs().and_then(|_| npkfs::mount()) {
+                    Ok(()) => vga::show_status(b"npkFS formatted + mounted"),
+                    Err(e) => kprintln!("[npk] npkFS: failed: {}", e),
+                }
+            }
+        }
+    }
+
     kprintln!("[npk] Initializing WASM Runtime...");
     wasm::init();
     vga::show_status(b"WASM runtime online (wasmi)");
@@ -126,9 +141,7 @@ fn panic(info: &PanicInfo) -> ! {
     if let Some(location) = info.location() {
         kprintln!("[npk] at {}:{}", location.file(), location.line());
     }
-    if let Some(message) = info.message().as_str() {
-        kprintln!("[npk] {}", message);
-    }
+    kprintln!("[npk] {}", info.message());
     loop {
         unsafe { core::arch::asm!("cli; hlt"); }
     }
