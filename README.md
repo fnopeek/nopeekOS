@@ -218,17 +218,23 @@ die AI generiert den Code, das System führt ihn aus.
 
 ### Phase 8 – Human View
 
-Das adaptive Interface.
+The adaptive interface. Hybrid window manager inspired by
+Hyprland-style tiling + floating windows. Not a desktop metaphor —
+a projection of system state optimized for the human.
 
-- [ ] Framebuffer-Treiber (VESA/GOP)
-- [ ] Minimaler Text-Renderer (Bitmap Font)
-- [ ] Deklaratives UI-System
-- [ ] AI-generierte Views
-- [ ] Input-Handling (Keyboard, Mouse via virtio-input)
+- [ ] Framebuffer driver (VESA/GOP)
+- [ ] Bitmap font text renderer
+- [ ] Tiling window manager (Hyprland-inspired layout engine)
+- [ ] Floating window support (for transient views)
+- [ ] Keyboard + mouse input (PS/2, virtio-input)
+- [ ] Declarative UI system (AI-generated views)
+- [ ] Web rendering engine (long-term: browser capability)
 
-**Ziel:** Der Mensch sieht nicht das System,
-sondern eine Projektion des System-Zustands
-die für ihn optimiert ist.
+**Goal:** The human sees a projection of system state,
+not the system itself. Tiling for focus, floating for context.
+
+**North Star:** A browser running inside nopeekOS —
+the gateway from isolated OS to the connected world.
 
 ---
 
