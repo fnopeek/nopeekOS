@@ -26,6 +26,7 @@ const S_DRIVER_OK: u8   = 4;
 const S_FAILED: u8      = 128;
 
 const F_MAC: u32       = 1 << 5;
+#[allow(dead_code)]
 const F_STATUS: u32    = 1 << 16;
 
 const DESC_F_NEXT: u16  = 1;
@@ -58,6 +59,7 @@ struct VringDesc {
     next: u16,
 }
 
+#[allow(dead_code)]
 struct VirtioNet {
     io_base: u16,
     mac: [u8; 6],
@@ -130,7 +132,7 @@ pub fn init() -> bool {
             return false;
         }
 
-        let (rx_desc, rx_avail, rx_used, rx_mem) = match setup_queue(io, rx_qs) {
+        let (rx_desc, rx_avail, rx_used, _rx_mem) = match setup_queue(io, rx_qs) {
             Some(v) => v,
             None => {
                 outb(io + REG_STATUS, S_FAILED);
@@ -354,6 +356,7 @@ pub fn mac() -> Option<[u8; 6]> {
     DEVICE.lock().as_ref().map(|d| d.mac)
 }
 
+#[allow(dead_code)]
 pub fn is_available() -> bool {
     DEVICE.lock().is_some()
 }

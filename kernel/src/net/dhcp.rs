@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 use crate::kprintln;
-use super::{udp, arp, dns, eth};
+use super::{udp, arp, dns};
 use crate::virtio_net;
 
 const SERVER_PORT: u16 = 67;

@@ -142,6 +142,7 @@ impl Bitmap {
         self.trim_pending.clear();
     }
 
+    #[allow(dead_code)]
     pub fn mark_dirty(&mut self) { self.dirty = true; }
 }
 

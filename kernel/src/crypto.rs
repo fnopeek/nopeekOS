@@ -162,7 +162,7 @@ impl Poly1305 {
         self.h = [h0 as u32, h1 as u32, h2 as u32, h3 as u32, h4 as u32];
     }
 
-    fn finish(mut self) -> [u8; 16] {
+    fn finish(self) -> [u8; 16] {
         // Final carry
         let mut h0 = self.h[0] as u64;
         let mut h1 = self.h[1] as u64;

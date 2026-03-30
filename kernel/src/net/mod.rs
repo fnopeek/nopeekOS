@@ -28,6 +28,7 @@ pub fn poll() {
 }
 
 /// Network stack statistics
+#[allow(dead_code)]
 pub fn is_up() -> bool {
     virtio_net::is_available()
 }

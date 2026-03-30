@@ -378,7 +378,7 @@ fn split_leaf(
 fn fixup_path(
     cache: &mut BlockCache, bitmap: &mut Bitmap,
     path: &[(u64, usize); 8], depth: usize,
-    mut new_child: u64, _split: Option<(&[u8; 64], u64)>,
+    new_child: u64, _split: Option<(&[u8; 64], u64)>,
     old_blocks: &mut alloc::vec::Vec<u64>,
 ) -> Result<(u64, alloc::vec::Vec<u64>), FsError> {
     if depth == 0 {
@@ -454,7 +454,7 @@ fn fixup_path_split(
         // Update rightmost child if inserting at end
         if pos == n {
             // New key goes at end, right child becomes new rightmost
-            let old_rightmost = hdr.next_leaf;
+            let _old_rightmost = hdr.next_leaf;
             let mut new_hdr = hdr;
             new_hdr.num_entries += 1;
             new_hdr.next_leaf = right;

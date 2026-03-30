@@ -61,7 +61,8 @@ pub struct SuperblockRaw {
     pub object_count: u64,
     pub journal_head: u64,
     pub journal_seq: u64,
-    pub _reserved: [u8; 3968],
+    pub install_salt: [u8; 16],
+    pub _reserved: [u8; 3952],
     pub checksum: [u8; 32],
 }
 
@@ -75,6 +76,7 @@ impl SuperblockRaw {
         *blake3::hash(bytes).as_bytes()
     }
 
+    #[allow(dead_code)]
     pub fn is_valid(&self) -> bool {
         self.magic == MAGIC && self.version == VERSION && self.checksum == self.compute_checksum()
     }
@@ -120,6 +122,7 @@ pub struct BTreeNodeHeader {
 /// On-disk journal header (at JOURNAL_START)
 #[derive(Clone, Copy)]
 #[repr(C)]
+#[allow(dead_code)]
 pub struct JournalHeader {
     pub magic: [u8; 8],
     pub seq: u64,
@@ -130,6 +133,7 @@ pub struct JournalHeader {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
+#[allow(dead_code)]
 pub struct JournalFreeEntry {
     pub start_block: u64,
     pub count: u64,
@@ -148,6 +152,7 @@ pub enum FsError {
     NameTooLong,
     InvalidName,
     DiskFull,
+    #[allow(dead_code)]
     TooManyExtents,
 }
 

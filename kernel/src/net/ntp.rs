@@ -4,7 +4,6 @@
 //! Uses UDP port 123, parses NTP v4 response.
 
 use spin::Mutex;
-use crate::kprintln;
 use super::udp;
 
 const NTP_PORT: u16 = 123;

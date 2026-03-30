@@ -4,7 +4,7 @@
 //! Maintains a small in-memory ARP cache.
 
 use spin::Mutex;
-use crate::{kprintln, virtio_net};
+use crate::virtio_net;
 use super::eth;
 
 const ARP_REQUEST: u16 = 1;

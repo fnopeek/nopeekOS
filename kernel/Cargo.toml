@@ -21,11 +21,3 @@ features = ["prefer-btree-collections"]
 [dependencies.blake3]
 version = "1.8"
 default-features = false
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-opt-level = 2
-lto = true

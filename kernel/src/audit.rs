@@ -14,6 +14,7 @@ const MAX_ENTRIES: usize = 1024;
 static LOG: Mutex<AuditLog> = Mutex::new(AuditLog::new());
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum AuditOp {
     Create { parent_id: CapId, new_id: CapId },
     Revoke { revoker_id: CapId, target_id: CapId },
@@ -23,6 +24,7 @@ pub enum AuditOp {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum DenyReason {
     NotFound,
     Revoked,

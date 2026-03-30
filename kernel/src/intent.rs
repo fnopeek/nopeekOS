@@ -4,7 +4,7 @@
 //! Every intent requires a valid capability token.
 
 use crate::capability::{self, CapId, Vault, Rights};
-use crate::{kprint, kprintln};
+use crate::{kprint, kprintln, crypto, serial};
 use spin::Mutex;
 
 const INPUT_BUF_SIZE: usize = 512;
@@ -27,9 +27,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             unsafe { core::arch::asm!("hlt"); }
         }
 
-        let serial = crate::serial::SERIAL.lock();
-        let len = serial.read_line(&mut input_buf);
-        drop(serial);
+        let serial_port = serial::SERIAL.lock();
+        let len = serial_port.read_line(&mut input_buf);
+        drop(serial_port);
 
         if len == 0 { continue; }
 
@@ -41,8 +41,130 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         };
 
+        if input == "lock" {
+            intent_lock();
+            continue;
+        }
+
         dispatch_intent(input, vault, session_id);
     }
+}
+
+fn intent_lock() {
+    kprintln!("[npk] System locked. All capabilities suspended.");
+    kprintln!("[npk] Enter passphrase to unlock.");
+    crypto::clear_master_key();
+
+    let salt = crate::npkfs::install_salt().unwrap_or([0u8; 16]);
+    let mut attempts: u32 = 0;
+
+    loop {
+        if attempts > 0 {
+            let delay_secs = 1u64 << attempts.min(5);
+            kprintln!("[npk] Wait {} seconds...", delay_secs);
+            let start = crate::interrupts::ticks();
+            let delay_ticks = delay_secs * 100;
+            while crate::interrupts::ticks() - start < delay_ticks {
+                unsafe { core::arch::asm!("hlt"); }
+            }
+        }
+
+        kprint!("[npk] Passphrase: ");
+        let mut buf = [0u8; 128];
+        let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
+        if len == 0 { continue; }
+
+        let key = crypto::derive_master_key(&buf[..len], &salt);
+        for b in buf.iter_mut() { *b = 0; }
+
+        crypto::set_master_key(key);
+
+        match crate::npkfs::fetch(".npk-keycheck") {
+            Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
+                kprintln!("[npk] Unlocked.");
+                return;
+            }
+            _ => {
+                crypto::clear_master_key();
+                kprintln!("[npk] Wrong passphrase.");
+                attempts += 1;
+                if attempts >= 10 {
+                    kprintln!("[npk] Too many failed attempts. System halted.");
+                    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                }
+            }
+        }
+    }
+}
+
+fn intent_passwd() {
+    let salt = crate::npkfs::install_salt().unwrap_or([0u8; 16]);
+
+    // Verify current passphrase
+    kprint!("[npk] Current passphrase: ");
+    let mut buf = [0u8; 128];
+    let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
+    if len == 0 {
+        kprintln!("[npk] Cancelled.");
+        return;
+    }
+
+    let old_key = crypto::derive_master_key(&buf[..len], &salt);
+    for b in buf.iter_mut() { *b = 0; }
+
+    // Temporarily set old key to verify
+    let saved_key = crypto::get_master_key();
+    crypto::set_master_key(old_key);
+
+    match crate::npkfs::fetch(".npk-keycheck") {
+        Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {}
+        _ => {
+            // Restore original key
+            if let Some(k) = saved_key { crypto::set_master_key(k); }
+            kprintln!("[npk] Wrong passphrase. Aborted.");
+            return;
+        }
+    }
+
+    // Delete old keycheck (still encrypted with old key)
+    let _ = crate::npkfs::delete(".npk-keycheck");
+
+    // Get new passphrase
+    let new_key = loop {
+        kprint!("[npk] New passphrase: ");
+        let mut buf1 = [0u8; 128];
+        let len1 = { serial::SERIAL.lock().read_line_masked(&mut buf1) };
+        if len1 < 8 {
+            kprintln!("[npk] Too short. Minimum 8 characters.");
+            continue;
+        }
+
+        kprint!("[npk] Confirm passphrase: ");
+        let mut buf2 = [0u8; 128];
+        let len2 = { serial::SERIAL.lock().read_line_masked(&mut buf2) };
+
+        if len1 != len2 || buf1[..len1] != buf2[..len2] {
+            kprintln!("[npk] Passphrases do not match. Try again.");
+            for b in buf1.iter_mut() { *b = 0; }
+            for b in buf2.iter_mut() { *b = 0; }
+            continue;
+        }
+
+        let key = crypto::derive_master_key(&buf1[..len1], &salt);
+        for b in buf1.iter_mut() { *b = 0; }
+        for b in buf2.iter_mut() { *b = 0; }
+        break key;
+    };
+
+    // Set new key and re-encrypt keycheck
+    crypto::set_master_key(new_key);
+    match crate::npkfs::store(".npk-keycheck", b"nopeekOS.keycheck.v1.valid", capability::CAP_NULL) {
+        Ok(_) => kprintln!("[npk] Passphrase changed successfully."),
+        Err(e) => kprintln!("[npk] ERROR: Could not store new keycheck: {}", e),
+    }
+
+    kprintln!("[npk] NOTE: Existing objects remain encrypted with the old key.");
+    kprintln!("[npk]       They will be re-encrypted on next fetch+store cycle.");
 }
 
 fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
@@ -172,6 +294,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             if require_cap(vault, &session, Rights::EXECUTE, "halt") {
                 intent_halt();
             }
+        }
+
+        "passwd" | "password" | "passphrase" => {
+            intent_passwd();
         }
 
         // Unrestricted intents (informational)
@@ -315,6 +441,15 @@ fn intent_help() {
     kprintln!("    disk read <n>     Read sector n          (requires READ)");
     kprintln!("    disk write <n> <s>  Write to sector n    (requires WRITE)");
     kprintln!("    run <module> [args]  Run WASM from npkFS  (requires EXECUTE)");
+    kprintln!("    ping <host>  ICMP ping               (requires EXECUTE)");
+    kprintln!("    resolve <h>  DNS lookup               (requires READ)");
+    kprintln!("    http <h> [p] HTTP GET                 (requires EXECUTE)");
+    kprintln!("    traceroute   Trace network path       (requires EXECUTE)");
+    kprintln!("    netstat      Network connections       (requires READ)");
+    kprintln!("    net          Network interface info    (requires READ)");
+    kprintln!("    time         Current time              (requires READ)");
+    kprintln!("    lock         Lock system (clear keys, require passphrase)");
+    kprintln!("    passwd       Change passphrase");
     kprintln!("    echo <text>  Echo text");
     kprintln!("    about        About nopeekOS");
     kprintln!("    halt         Shutdown system          (requires EXECUTE)");
@@ -576,14 +711,14 @@ fn intent_traceroute(args: &str) {
         crate::net::icmp::ping_ttl(ip, ttl as u16, ttl);
 
         let t0 = crate::interrupts::ticks();
-        let mut found = false;
+        let mut _found = false;
 
         loop {
             crate::net::poll();
 
             if let Some(from) = crate::net::icmp::ttl_expired_from() {
                 kprintln!("  {:>2}  {}.{}.{}.{}", ttl, from[0], from[1], from[2], from[3]);
-                found = true;
+                _found = true;
                 break;
             }
             if crate::net::icmp::ping_received() {
@@ -592,7 +727,7 @@ fn intent_traceroute(args: &str) {
             }
             if crate::interrupts::ticks() - t0 > 100 { // 1s per hop
                 kprintln!("  {:>2}  *", ttl);
-                found = true;
+                _found = true;
                 break;
             }
             core::hint::spin_loop();
