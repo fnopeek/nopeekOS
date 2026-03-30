@@ -113,6 +113,38 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     // === Derive handshake keys ===
     let shared_secret = x25519::x25519(&private_key, &server_public_key);
 
+    // === DEBUG: Test X25519 with RFC 7748 test vector ===
+    {
+        let alice_sk: [u8; 32] = [
+            0x77,0x07,0x6d,0x0a,0x73,0x18,0xa5,0x7d,0x3c,0x16,0xc1,0x72,0x51,0xb2,0x66,0x45,
+            0xdf,0x4c,0x2f,0x87,0xeb,0xc0,0x99,0x2a,0xb1,0x77,0xfb,0xa5,0x1d,0xb9,0x2c,0x2a,
+        ];
+        let bob_pk: [u8; 32] = [
+            0xde,0x9e,0xdb,0x7d,0x7b,0x7d,0xc1,0xb4,0xd3,0x5b,0x61,0xc2,0xec,0xe4,0x35,0x37,
+            0x3f,0x83,0x43,0xc8,0x5b,0x78,0x67,0x4d,0xad,0xfc,0x7e,0x14,0x6f,0x88,0x2b,0x4f,
+        ];
+        // Test 1: scalar = 1 (with clamping: bit 254 set, low bits cleared)
+        // x25519([64,0,...,0], [9,0,...,0]) should NOT equal [9,0,...,0] (clamping changes scalar)
+        // But x25519_base with the RFC vector should give the expected pubkey
+        let shared = x25519::x25519(&alice_sk, &bob_pk);
+        kprintln!("[tls] X25519 shared[0..8]={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} (expect 4a5d9d5b a4ce2de1)",
+            shared[0], shared[1], shared[2], shared[3],
+            shared[4], shared[5], shared[6], shared[7]);
+
+        let alice_pk = x25519::x25519_base(&alice_sk);
+        kprintln!("[tls] X25519 pubkey[0..8]={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} (expect 8520f009 8930a754)",
+            alice_pk[0], alice_pk[1], alice_pk[2], alice_pk[3],
+            alice_pk[4], alice_pk[5], alice_pk[6], alice_pk[7]);
+
+        // Test 2: Simple scalar mul - scalar=all zeros with bit 254 set = [0,0,...,0,64]
+        // After clamping this is just 2^254. x25519(2^254, 9) has a known result.
+        let mut simple_sk = [0u8; 32];
+        simple_sk[31] = 64; // bit 254
+        let simple_pk = x25519::x25519_base(&simple_sk);
+        kprintln!("[tls] X25519 simple(2^254, 9)[0..4]={:02x}{:02x}{:02x}{:02x}",
+            simple_pk[0], simple_pk[1], simple_pk[2], simple_pk[3]);
+    }
+
     // === DEBUG: Test AEAD with RFC 8439 test vector ===
     {
         let test_key: [u8; 32] = [
@@ -167,6 +199,10 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     kprintln!("[tls] sh_hash[0..4]={:02x}{:02x}{:02x}{:02x} ch_len={} sh_len={}",
         sh_hash[0], sh_hash[1], sh_hash[2], sh_hash[3],
         client_hello.len(), server_hello.len());
+    // Debug: verify ClientHello starts with 0x01 (ClientHello type)
+    kprintln!("[tls] CH[0..4]={:02x}{:02x}{:02x}{:02x} SH[0..4]={:02x}{:02x}{:02x}{:02x}",
+        client_hello[0], client_hello[1], client_hello[2], client_hello[3],
+        server_hello[0], server_hello[1], server_hello[2], server_hello[3]);
 
     // Client/Server Handshake Traffic Secrets
     let client_hs_secret = hmac::derive_secret(&handshake_secret, b"c hs traffic", &sh_hash);
