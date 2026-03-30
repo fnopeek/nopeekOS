@@ -13,7 +13,7 @@ pub mod certstore;
 
 use alloc::vec::Vec;
 use sha256::Sha256;
-use crate::{crypto, csprng, net::tcp};
+use crate::{kprintln, crypto, csprng, net::tcp};
 
 // TLS 1.3 constants
 const TLS_VERSION_12: [u8; 2] = [0x03, 0x03]; // Record layer uses 1.2
@@ -106,20 +106,57 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     transcript.update(&server_hello);
 
     let server_public_key = parse_server_hello(&server_hello)?;
+    kprintln!("[tls] server_pubkey[0..4]={:02x}{:02x}{:02x}{:02x} our_pubkey[0..4]={:02x}{:02x}{:02x}{:02x}",
+        server_public_key[0], server_public_key[1], server_public_key[2], server_public_key[3],
+        public_key[0], public_key[1], public_key[2], public_key[3]);
 
     // === Derive handshake keys ===
     let shared_secret = x25519::x25519(&private_key, &server_public_key);
 
+    // === DEBUG: Test AEAD with RFC 8439 test vector ===
+    {
+        let test_key: [u8; 32] = [
+            0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+            0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f,
+        ];
+        let test_nonce: [u8; 12] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47];
+        let test_aad: &[u8] = &[0x50,0x51,0x52,0x53,0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7];
+        let test_pt = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+
+        let ct = crypto::aead_encrypt_aad(&test_key, &test_nonce, test_aad, test_pt);
+        kprintln!("[tls] AEAD test: ct[0..4]={:02x}{:02x}{:02x}{:02x} tag[-4..]={:02x}{:02x}{:02x}{:02x} len={}",
+            ct[0], ct[1], ct[2], ct[3],
+            ct[ct.len()-4], ct[ct.len()-3], ct[ct.len()-2], ct[ct.len()-1],
+            ct.len());
+        // Expected: ct[0..4]=d31a8d34, tag[-4..]=d0600691, len=130
+
+        let dec = crypto::aead_decrypt_aad(&test_key, &test_nonce, test_aad, &ct);
+        kprintln!("[tls] AEAD decrypt: {}", if dec.is_some() { "OK" } else { "FAIL" });
+    }
+    // === END DEBUG ===
+
     let empty_hash = sha256::sha256(&[]);
+
+    // Debug: verify SHA-256("") matches known value
+    // Expected: e3b0c442 98fc1c14 9afbf4c8 996fb924
+    kprintln!("[tls] SHA256('')={:02x}{:02x}{:02x}{:02x}...",
+        empty_hash[0], empty_hash[1], empty_hash[2], empty_hash[3]);
 
     // Early Secret
     let early_secret = hmac::hkdf_extract(&[0u8; 32], &[0u8; 32]);
+    kprintln!("[tls] early_secret[0..4]={:02x}{:02x}{:02x}{:02x}",
+        early_secret[0], early_secret[1], early_secret[2], early_secret[3]);
 
     // Derived Secret
     let derived = hmac::derive_secret(&early_secret, b"derived", &empty_hash);
+    kprintln!("[tls] derived[0..4]={:02x}{:02x}{:02x}{:02x}",
+        derived[0], derived[1], derived[2], derived[3]);
 
     // Handshake Secret
     let handshake_secret = hmac::hkdf_extract(&derived, &shared_secret);
+    kprintln!("[tls] hs_secret[0..4]={:02x}{:02x}{:02x}{:02x} shared[0..4]={:02x}{:02x}{:02x}{:02x}",
+        handshake_secret[0], handshake_secret[1], handshake_secret[2], handshake_secret[3],
+        shared_secret[0], shared_secret[1], shared_secret[2], shared_secret[3]);
 
     // Transcript hash up to ServerHello
     let mut transcript_clone = Sha256::new();
@@ -127,9 +164,15 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     transcript_clone.update(&server_hello);
     let sh_hash = transcript_clone.finalize();
 
+    kprintln!("[tls] sh_hash[0..4]={:02x}{:02x}{:02x}{:02x} ch_len={} sh_len={}",
+        sh_hash[0], sh_hash[1], sh_hash[2], sh_hash[3],
+        client_hello.len(), server_hello.len());
+
     // Client/Server Handshake Traffic Secrets
     let client_hs_secret = hmac::derive_secret(&handshake_secret, b"c hs traffic", &sh_hash);
     let server_hs_secret = hmac::derive_secret(&handshake_secret, b"s hs traffic", &sh_hash);
+    kprintln!("[tls] server_hs_secret[0..4]={:02x}{:02x}{:02x}{:02x}",
+        server_hs_secret[0], server_hs_secret[1], server_hs_secret[2], server_hs_secret[3]);
 
     // Handshake keys
     let server_hs_key = expand_to_key(&server_hs_secret);
@@ -151,11 +194,17 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     loop {
         let (ct, record) = recv_record(tcp_handle)?;
 
+        kprintln!("[tls] Record: ct=0x{:02x} len={}", ct, record.len());
+
         if ct == CT_CHANGE_CIPHER_SPEC {
+            kprintln!("[tls] Skipping CCS");
             continue; // Ignore legacy CCS
         }
 
         if ct != CT_APPLICATION_DATA {
+            kprintln!("[tls] Unexpected ct, first bytes: {:02x} {:02x}",
+                record.first().copied().unwrap_or(0),
+                record.get(1).copied().unwrap_or(0));
             return Err(TlsError::UnexpectedMessage);
         }
 
@@ -165,8 +214,18 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
 
         // AAD is the record header (content type + version + length of encrypted payload)
         let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
-        let plaintext = crypto::aead_decrypt_aad(&server_hs_key, &nonce, &aad, &record)
-            .ok_or(TlsError::DecryptError)?;
+        kprintln!("[tls] Decrypt: seq={} aad={:02x}{:02x}{:02x}{:02x}{:02x}",
+            server_hs_seq - 1, aad[0], aad[1], aad[2], aad[3], aad[4]);
+
+        let plaintext = match crypto::aead_decrypt_aad(&server_hs_key, &nonce, &aad, &record) {
+            Some(pt) => pt,
+            None => {
+                kprintln!("[tls] AEAD decrypt failed! key[0..4]={:02x}{:02x}{:02x}{:02x} iv[0..4]={:02x}{:02x}{:02x}{:02x}",
+                    server_hs_key[0], server_hs_key[1], server_hs_key[2], server_hs_key[3],
+                    server_hs_iv[0], server_hs_iv[1], server_hs_iv[2], server_hs_iv[3]);
+                return Err(TlsError::DecryptError);
+            }
+        };
 
         // Last byte of plaintext is the real content type
         if plaintext.is_empty() {
@@ -378,25 +437,34 @@ fn build_client_hello(random: &[u8; 32], pubkey: &[u8; 32], hostname: &str) -> V
     put_u16(&mut extensions, GROUP_X25519);
 
     // Key Share: x25519 public key
+    // Entry: group(2) + key_len(2) + key(32) = 36
     put_u16(&mut extensions, EXT_KEY_SHARE);
-    put_u16(&mut extensions, 36); // 2 + 2 + 32
-    put_u16(&mut extensions, 34); // client_shares length
+    put_u16(&mut extensions, 38); // extension data: shares_len(2) + 36
+    put_u16(&mut extensions, 36); // client_shares length
     put_u16(&mut extensions, GROUP_X25519);
     put_u16(&mut extensions, 32);
     extensions.extend_from_slice(pubkey);
 
-    // Signature Algorithms
+    // Signature Algorithms (offer both RSA and ECDSA for server compatibility)
     put_u16(&mut extensions, EXT_SIGNATURE_ALGORITHMS);
-    put_u16(&mut extensions, 4);
-    put_u16(&mut extensions, 2);
+    put_u16(&mut extensions, 12); // extension data length
+    put_u16(&mut extensions, 10); // list length
+    put_u16(&mut extensions, 0x0403); // ecdsa_secp256r1_sha256
+    put_u16(&mut extensions, 0x0804); // rsa_pss_rsae_sha256 (TLS 1.3)
     put_u16(&mut extensions, 0x0401); // rsa_pkcs1_sha256
+    put_u16(&mut extensions, 0x0503); // ecdsa_secp384r1_sha384
+    put_u16(&mut extensions, 0x0805); // rsa_pss_rsae_sha384
 
     // Build ClientHello body
     let mut body = Vec::new();
     body.push(TLS_VERSION_12[0]); // Legacy version
     body.push(TLS_VERSION_12[1]);
     body.extend_from_slice(random); // 32 bytes random
-    body.push(0); // Session ID length (0 = none)
+
+    // Session ID (32 bytes random for TLS 1.3 compatibility mode)
+    let session_id = csprng::random_256();
+    body.push(32);
+    body.extend_from_slice(&session_id);
 
     // Cipher suites
     put_u16(&mut body, 2); // Length
@@ -559,9 +627,17 @@ fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), TlsError> {
 fn recv_handshake_message(handle: usize, expected_type: u8) -> Result<Vec<u8>, TlsError> {
     let (ct, payload) = recv_record(handle)?;
     if ct != CT_HANDSHAKE {
+        kprintln!("[tls] Expected handshake (0x16), got content_type=0x{:02x}, len={}", ct, payload.len());
+        if !payload.is_empty() {
+            kprintln!("[tls] First bytes: {:02x} {:02x} {:02x} {:02x}",
+                payload[0], payload.get(1).copied().unwrap_or(0),
+                payload.get(2).copied().unwrap_or(0), payload.get(3).copied().unwrap_or(0));
+        }
         return Err(TlsError::UnexpectedMessage);
     }
     if payload.is_empty() || payload[0] != expected_type {
+        kprintln!("[tls] Expected hs_type=0x{:02x}, got 0x{:02x}", expected_type,
+            payload.first().copied().unwrap_or(0));
         return Err(TlsError::UnexpectedMessage);
     }
     Ok(payload)
