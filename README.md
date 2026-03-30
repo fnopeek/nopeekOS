@@ -36,6 +36,7 @@ npk> ping 10.0.2.2                   # ICMP ping
 npk> traceroute 8.8.8.8              # Network path tracing
 npk> resolve google.com              # DNS resolution
 npk> http example.com /              # HTTP GET (full TCP/IP stack)
+npk> https example.com /             # HTTPS GET (TLS 1.3)
 npk> http example.com / > mypage     # Fetch and store in npkFS
 npk> disk read 0                     # Raw sector hex dump
 ```
@@ -178,7 +179,11 @@ Every execution is a sandboxed WASM module:
 - [x] Passphrase-based identity (BLAKE3-KDF → 256-bit master key)
 - [x] Encryption at rest (all npkFS objects encrypted by default)
 - [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
-- [ ] TLS for secure connections
+- [x] TLS 1.3 (RFC 8446, ChaCha20-Poly1305 + X25519)
+- [x] HTTPS client (`https <host> [path]`)
+- [x] X.509 certificate chain validation
+- [x] Embedded root CAs (ISRG Root X1, DigiCert Global G2)
+- [x] SHA-256, HMAC-SHA256, HKDF, RSA PKCS#1 v1.5 verify
 - [ ] Hardware manifest collector (PCI + CPUID + ACPI probe)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 - [ ] Driver mirror (fetch matching WASM drivers on demand based on HW manifest)

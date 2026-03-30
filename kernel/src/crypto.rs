@@ -238,17 +238,20 @@ pub const TAG_SIZE: usize = 16;
 
 /// Encrypt and authenticate. Returns ciphertext || 16-byte tag.
 pub fn aead_encrypt(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Vec<u8> {
-    // Poly1305 key from ChaCha20 block 0
+    aead_encrypt_aad(key, nonce, &[], plaintext)
+}
+
+/// Encrypt and authenticate with Additional Authenticated Data (AAD).
+/// Used by TLS record layer. Returns ciphertext || 16-byte tag.
+pub fn aead_encrypt_aad(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let poly_block = chacha20_block(key, 0, nonce);
     let mut poly_key = [0u8; 32];
     poly_key.copy_from_slice(&poly_block[..32]);
 
-    // Encrypt with ChaCha20 starting at counter 1
     let mut ciphertext = plaintext.to_vec();
     chacha20_xor(key, nonce, 1, &mut ciphertext);
 
-    // MAC over: pad(AAD) || pad(ciphertext) || len(AAD) || len(CT)
-    let mac_input = build_mac_input(&[], &ciphertext);
+    let mac_input = build_mac_input(aad, &ciphertext);
     let tag = poly1305_mac(&poly_key, &mac_input);
 
     ciphertext.extend_from_slice(&tag);
@@ -257,6 +260,11 @@ pub fn aead_encrypt(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Vec<u
 
 /// Decrypt and verify. Returns plaintext or None if authentication fails.
 pub fn aead_decrypt(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[u8]) -> Option<Vec<u8>> {
+    aead_decrypt_aad(key, nonce, &[], ciphertext_and_tag)
+}
+
+/// Decrypt and verify with AAD. Used by TLS record layer.
+pub fn aead_decrypt_aad(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ciphertext_and_tag: &[u8]) -> Option<Vec<u8>> {
     if ciphertext_and_tag.len() < TAG_SIZE {
         return None;
     }
@@ -269,7 +277,7 @@ pub fn aead_decrypt(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[u8])
     let mut poly_key = [0u8; 32];
     poly_key.copy_from_slice(&poly_block[..32]);
 
-    let mac_input = build_mac_input(&[], ciphertext);
+    let mac_input = build_mac_input(aad, ciphertext);
     let expected_tag = poly1305_mac(&poly_key, &mac_input);
 
     // Constant-time comparison
