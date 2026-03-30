@@ -13,7 +13,7 @@ pub mod certstore;
 
 use alloc::vec::Vec;
 use sha256::Sha256;
-use crate::{kprintln, crypto, csprng, net::tcp};
+use crate::{crypto, csprng, net::tcp};
 
 // TLS 1.3 constants
 const TLS_VERSION_12: [u8; 2] = [0x03, 0x03]; // Record layer uses 1.2
@@ -106,89 +106,14 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     transcript.update(&server_hello);
 
     let server_public_key = parse_server_hello(&server_hello)?;
-    kprintln!("[tls] server_pubkey[0..4]={:02x}{:02x}{:02x}{:02x} our_pubkey[0..4]={:02x}{:02x}{:02x}{:02x}",
-        server_public_key[0], server_public_key[1], server_public_key[2], server_public_key[3],
-        public_key[0], public_key[1], public_key[2], public_key[3]);
 
     // === Derive handshake keys ===
     let shared_secret = x25519::x25519(&private_key, &server_public_key);
 
-    // === DEBUG: Test X25519 with RFC 7748 test vector ===
-    {
-        let alice_sk: [u8; 32] = [
-            0x77,0x07,0x6d,0x0a,0x73,0x18,0xa5,0x7d,0x3c,0x16,0xc1,0x72,0x51,0xb2,0x66,0x45,
-            0xdf,0x4c,0x2f,0x87,0xeb,0xc0,0x99,0x2a,0xb1,0x77,0xfb,0xa5,0x1d,0xb9,0x2c,0x2a,
-        ];
-        let bob_pk: [u8; 32] = [
-            0xde,0x9e,0xdb,0x7d,0x7b,0x7d,0xc1,0xb4,0xd3,0x5b,0x61,0xc2,0xec,0xe4,0x35,0x37,
-            0x3f,0x83,0x43,0xc8,0x5b,0x78,0x67,0x4d,0xad,0xfc,0x7e,0x14,0x6f,0x88,0x2b,0x4f,
-        ];
-        // Test 1: scalar = 1 (with clamping: bit 254 set, low bits cleared)
-        // x25519([64,0,...,0], [9,0,...,0]) should NOT equal [9,0,...,0] (clamping changes scalar)
-        // But x25519_base with the RFC vector should give the expected pubkey
-        let shared = x25519::x25519(&alice_sk, &bob_pk);
-        kprintln!("[tls] X25519 shared[0..8]={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} (expect 4a5d9d5b a4ce2de1)",
-            shared[0], shared[1], shared[2], shared[3],
-            shared[4], shared[5], shared[6], shared[7]);
-
-        let alice_pk = x25519::x25519_base(&alice_sk);
-        kprintln!("[tls] X25519 pubkey[0..8]={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} (expect 8520f009 8930a754)",
-            alice_pk[0], alice_pk[1], alice_pk[2], alice_pk[3],
-            alice_pk[4], alice_pk[5], alice_pk[6], alice_pk[7]);
-
-        // Test 2: Simple scalar mul - scalar=all zeros with bit 254 set = [0,0,...,0,64]
-        // After clamping this is just 2^254. x25519(2^254, 9) has a known result.
-        let mut simple_sk = [0u8; 32];
-        simple_sk[31] = 64; // bit 254
-        let simple_pk = x25519::x25519_base(&simple_sk);
-        kprintln!("[tls] X25519 simple(2^254, 9)[0..4]={:02x}{:02x}{:02x}{:02x}",
-            simple_pk[0], simple_pk[1], simple_pk[2], simple_pk[3]);
-    }
-
-    // === DEBUG: Test AEAD with RFC 8439 test vector ===
-    {
-        let test_key: [u8; 32] = [
-            0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
-            0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f,
-        ];
-        let test_nonce: [u8; 12] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47];
-        let test_aad: &[u8] = &[0x50,0x51,0x52,0x53,0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7];
-        let test_pt = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
-
-        let ct = crypto::aead_encrypt_aad(&test_key, &test_nonce, test_aad, test_pt);
-        kprintln!("[tls] AEAD test: ct[0..4]={:02x}{:02x}{:02x}{:02x} tag[-4..]={:02x}{:02x}{:02x}{:02x} len={}",
-            ct[0], ct[1], ct[2], ct[3],
-            ct[ct.len()-4], ct[ct.len()-3], ct[ct.len()-2], ct[ct.len()-1],
-            ct.len());
-        // Expected: ct[0..4]=d31a8d34, tag[-4..]=d0600691, len=130
-
-        let dec = crypto::aead_decrypt_aad(&test_key, &test_nonce, test_aad, &ct);
-        kprintln!("[tls] AEAD decrypt: {}", if dec.is_some() { "OK" } else { "FAIL" });
-    }
-    // === END DEBUG ===
-
     let empty_hash = sha256::sha256(&[]);
-
-    // Debug: verify SHA-256("") matches known value
-    // Expected: e3b0c442 98fc1c14 9afbf4c8 996fb924
-    kprintln!("[tls] SHA256('')={:02x}{:02x}{:02x}{:02x}...",
-        empty_hash[0], empty_hash[1], empty_hash[2], empty_hash[3]);
-
-    // Early Secret
     let early_secret = hmac::hkdf_extract(&[0u8; 32], &[0u8; 32]);
-    kprintln!("[tls] early_secret[0..4]={:02x}{:02x}{:02x}{:02x}",
-        early_secret[0], early_secret[1], early_secret[2], early_secret[3]);
-
-    // Derived Secret
     let derived = hmac::derive_secret(&early_secret, b"derived", &empty_hash);
-    kprintln!("[tls] derived[0..4]={:02x}{:02x}{:02x}{:02x}",
-        derived[0], derived[1], derived[2], derived[3]);
-
-    // Handshake Secret
     let handshake_secret = hmac::hkdf_extract(&derived, &shared_secret);
-    kprintln!("[tls] hs_secret[0..4]={:02x}{:02x}{:02x}{:02x} shared[0..4]={:02x}{:02x}{:02x}{:02x}",
-        handshake_secret[0], handshake_secret[1], handshake_secret[2], handshake_secret[3],
-        shared_secret[0], shared_secret[1], shared_secret[2], shared_secret[3]);
 
     // Transcript hash up to ServerHello
     let mut transcript_clone = Sha256::new();
@@ -196,19 +121,9 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     transcript_clone.update(&server_hello);
     let sh_hash = transcript_clone.finalize();
 
-    kprintln!("[tls] sh_hash[0..4]={:02x}{:02x}{:02x}{:02x} ch_len={} sh_len={}",
-        sh_hash[0], sh_hash[1], sh_hash[2], sh_hash[3],
-        client_hello.len(), server_hello.len());
-    // Debug: verify ClientHello starts with 0x01 (ClientHello type)
-    kprintln!("[tls] CH[0..4]={:02x}{:02x}{:02x}{:02x} SH[0..4]={:02x}{:02x}{:02x}{:02x}",
-        client_hello[0], client_hello[1], client_hello[2], client_hello[3],
-        server_hello[0], server_hello[1], server_hello[2], server_hello[3]);
-
     // Client/Server Handshake Traffic Secrets
     let client_hs_secret = hmac::derive_secret(&handshake_secret, b"c hs traffic", &sh_hash);
     let server_hs_secret = hmac::derive_secret(&handshake_secret, b"s hs traffic", &sh_hash);
-    kprintln!("[tls] server_hs_secret[0..4]={:02x}{:02x}{:02x}{:02x}",
-        server_hs_secret[0], server_hs_secret[1], server_hs_secret[2], server_hs_secret[3]);
 
     // Handshake keys
     let server_hs_key = expand_to_key(&server_hs_secret);
@@ -230,38 +145,18 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     loop {
         let (ct, record) = recv_record(tcp_handle)?;
 
-        kprintln!("[tls] Record: ct=0x{:02x} len={}", ct, record.len());
-
         if ct == CT_CHANGE_CIPHER_SPEC {
-            kprintln!("[tls] Skipping CCS");
-            continue; // Ignore legacy CCS
+            continue;
         }
-
         if ct != CT_APPLICATION_DATA {
-            kprintln!("[tls] Unexpected ct, first bytes: {:02x} {:02x}",
-                record.first().copied().unwrap_or(0),
-                record.get(1).copied().unwrap_or(0));
             return Err(TlsError::UnexpectedMessage);
         }
 
-        // Decrypt handshake record
         let nonce = build_nonce(&server_hs_iv, server_hs_seq);
         server_hs_seq += 1;
-
-        // AAD is the record header (content type + version + length of encrypted payload)
         let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
-        kprintln!("[tls] Decrypt: seq={} aad={:02x}{:02x}{:02x}{:02x}{:02x}",
-            server_hs_seq - 1, aad[0], aad[1], aad[2], aad[3], aad[4]);
-
-        let plaintext = match crypto::aead_decrypt_aad(&server_hs_key, &nonce, &aad, &record) {
-            Some(pt) => pt,
-            None => {
-                kprintln!("[tls] AEAD decrypt failed! key[0..4]={:02x}{:02x}{:02x}{:02x} iv[0..4]={:02x}{:02x}{:02x}{:02x}",
-                    server_hs_key[0], server_hs_key[1], server_hs_key[2], server_hs_key[3],
-                    server_hs_iv[0], server_hs_iv[1], server_hs_iv[2], server_hs_iv[3]);
-                return Err(TlsError::DecryptError);
-            }
-        };
+        let plaintext = crypto::aead_decrypt_aad(&server_hs_key, &nonce, &aad, &record)
+            .ok_or(TlsError::DecryptError)?;
 
         // Last byte of plaintext is the real content type
         if plaintext.is_empty() {
@@ -421,8 +316,6 @@ pub fn tls_send(session: &mut TlsSession, data: &[u8]) -> Result<(), TlsError> {
 pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsError> {
     let (ct, record) = recv_record(session.tcp_handle)?;
 
-    kprintln!("[tls] app_recv: ct=0x{:02x} len={} seq={}", ct, record.len(), session.server_seq);
-
     if ct == CT_CHANGE_CIPHER_SPEC {
         return Ok(0);
     }
@@ -434,13 +327,8 @@ pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
     session.server_seq += 1;
 
     let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
-    let plaintext = match crypto::aead_decrypt_aad(&session.server_app_key, &nonce, &aad, &record) {
-        Some(pt) => pt,
-        None => {
-            kprintln!("[tls] app decrypt FAILED");
-            return Err(TlsError::DecryptError);
-        }
-    };
+    let plaintext = crypto::aead_decrypt_aad(&session.server_app_key, &nonce, &aad, &record)
+        .ok_or(TlsError::DecryptError)?;
 
     if plaintext.is_empty() {
         return Ok(0);
@@ -449,12 +337,7 @@ pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
     let real_ct = plaintext[plaintext.len() - 1];
     let data = &plaintext[..plaintext.len() - 1];
 
-    kprintln!("[tls] app inner_ct=0x{:02x} data_len={}", real_ct, data.len());
-
     if real_ct == CT_ALERT {
-        if data.len() >= 2 {
-            kprintln!("[tls] Alert: level={} desc={}", data[0], data[1]);
-        }
         return Err(TlsError::HandshakeFailed("alert received"));
     }
 
@@ -701,17 +584,9 @@ fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), TlsError> {
 fn recv_handshake_message(handle: usize, expected_type: u8) -> Result<Vec<u8>, TlsError> {
     let (ct, payload) = recv_record(handle)?;
     if ct != CT_HANDSHAKE {
-        kprintln!("[tls] Expected handshake (0x16), got content_type=0x{:02x}, len={}", ct, payload.len());
-        if !payload.is_empty() {
-            kprintln!("[tls] First bytes: {:02x} {:02x} {:02x} {:02x}",
-                payload[0], payload.get(1).copied().unwrap_or(0),
-                payload.get(2).copied().unwrap_or(0), payload.get(3).copied().unwrap_or(0));
-        }
         return Err(TlsError::UnexpectedMessage);
     }
     if payload.is_empty() || payload[0] != expected_type {
-        kprintln!("[tls] Expected hs_type=0x{:02x}, got 0x{:02x}", expected_type,
-            payload.first().copied().unwrap_or(0));
         return Err(TlsError::UnexpectedMessage);
     }
     Ok(payload)

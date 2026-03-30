@@ -157,6 +157,7 @@ fn poly1305_mac(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
 }
 
 /// Multiply 130-bit accumulator by 128-bit r, reduce mod 2^130-5
+#[allow(unused_variables, unused_mut, unused_assignments)]
 fn poly1305_mulmod(acc_lo: &mut u128, acc_hi: &mut u8, r: u128) {
     // Split into 64-bit limbs for multiplication
     let a0 = *acc_lo as u64;
