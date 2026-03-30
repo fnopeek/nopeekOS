@@ -382,7 +382,7 @@ fn intent_caps(vault: &Vault) {
     kprintln!("  ────────────────");
     kprintln!("  Active tokens:  {}", active);
     kprintln!("  Max capacity:   {}", max);
-    kprintln!("  Token IDs:      128-bit random (xorshift128+)");
+    kprintln!("  Token IDs:      256-bit random (ChaCha20 CSPRNG)");
     kprintln!();
     kprintln!("  Security model: Deny by Default");
     kprintln!("  No ambient authority. No root user. No sudo.");
