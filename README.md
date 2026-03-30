@@ -27,21 +27,24 @@ Everything else is generated at runtime.
 
 ```
 npk> status                          # Full system overview
-npk> store config version=1.0        # Store object (BLAKE3-hashed, COW B-tree)
-npk> fetch config                    # Retrieve with integrity check
+npk> store config version=1.0        # Store object (BLAKE3-hashed, encrypted at rest)
+npk> fetch config                    # Retrieve + decrypt + integrity check
 npk> list                            # All objects with hashes
 npk> run hello                       # Execute WASM from npkFS (sandboxed, cap-gated)
 npk> run fib 20                      # Compute fibonacci(20) = 6765 in WASM sandbox
-npk> ping 10.0.2.2                   # ICMP ping
+npk> ping google.ch                  # ICMP ping (with DNS resolution)
 npk> traceroute 8.8.8.8              # Network path tracing
 npk> resolve google.com              # DNS resolution
 npk> http example.com /              # HTTP GET (full TCP/IP stack)
-npk> https example.com /             # HTTPS GET (TLS 1.3)
+npk> https sandbox.nopeek.ch /       # HTTPS GET (TLS 1.3, ChaCha20-Poly1305)
 npk> http example.com / > mypage     # Fetch and store in npkFS
+npk> lock                            # Lock system (clear keys)
+npk> passwd                          # Change passphrase
 npk> disk read 0                     # Raw sector hex dump
 ```
 
 Every operation is capability-gated. No ambient authority. No root. No sudo.
+All data encrypted at rest. Passphrase-based identity — no users, no accounts.
 
 ---
 
@@ -52,7 +55,7 @@ Every operation is capability-gated. No ambient authority. No root. No sudo.
  │  Intent Loop                                             │
  │  Express intention, not instructions.                    │
  ├──────────────────────────────────────────────────────────┤
- │  WASM Runtime (wasmi, fuel-metered)                      │
+ │  WASM Runtime (wasmi v1.0, fuel-metered)                  │
  │  Sandboxed modules loaded from npkFS.                    │
  │  Capability-gated host functions. No ambient authority.  │
  ├──────────────────────────────────────────────────────────┤
@@ -62,9 +65,10 @@ Every operation is capability-gated. No ambient authority. No root. No sudo.
  │  LRU cache, WAL journal         │  DNS, DHCP, NTP        │
  │  Batch TRIM for SSD             │  HTTP client            │
  ├──────────────────────────────────────────────────────────┤
- │  Capability Vault           │  CSPRNG (ChaCha20)         │
- │  256-bit tokens, deny-all   │  RDRAND-seeded when avail  │
- │  Temporal scoping, audit    │  Forward secrecy re-keying │
+ │  Capability Vault           │  Crypto Engine             │
+ │  256-bit tokens, deny-all   │  ChaCha20-Poly1305 AEAD   │
+ │  Passphrase identity        │  TLS 1.3, X25519, SHA-256 │
+ │  Temporal scoping, audit    │  CSPRNG (RDRAND/TSC seed)  │
  ├──────────────────────────────────────────────────────────┤
  │  Drivers                                                 │
  │  PCI bus scanner, virtio-blk (TRIM), virtio-net          │
@@ -215,7 +219,12 @@ Every execution is a sandboxed WASM module:
 | Filesystem | npkFS | COW, BLAKE3, SSD-native |
 | Hashing | BLAKE3 | Fast, secure, streaming |
 | CSPRNG | ChaCha20 (RFC 7539) | RDRAND seed, forward secrecy |
-| Crypto (planned) | Hybrid classical + post-quantum | Future-proof |
+| AEAD | ChaCha20-Poly1305 (RFC 8439) | Encryption at rest + TLS |
+| TLS | 1.3 (RFC 8446) | X25519 + ChaCha20-Poly1305 |
+| Identity | Passphrase → BLAKE3-KDF | No users, no accounts |
+| Key Exchange | X25519 (Curve25519) | Ephemeral, per-connection |
+| Certificates | X.509, 2 embedded root CAs | ISRG Root X1, DigiCert G2 |
+| Crypto libs | sha2, hmac, hkdf (RustCrypto) | Audited, no_std |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
 
@@ -274,10 +283,19 @@ nopeekOS/
 │       │   ├── dns.rs           # DNS resolver
 │       │   ├── dhcp.rs          # DHCP client
 │       │   └── ntp.rs           # NTP time sync
+│       ├── crypto.rs            # ChaCha20-Poly1305 AEAD, KDF
+│       ├── tls/                 # TLS 1.3 stack
+│       │   ├── mod.rs           # TLS handshake + record layer
+│       │   ├── sha256.rs        # SHA-256 (via sha2 crate)
+│       │   ├── hmac.rs          # HMAC-SHA256 + HKDF (via crates)
+│       │   ├── x25519.rs        # Curve25519 ECDH
+│       │   ├── rsa.rs           # RSA PKCS#1 v1.5 verify
+│       │   ├── asn1.rs          # ASN.1 DER parser
+│       │   ├── x509.rs          # X.509 certificate parser
+│       │   └── certstore.rs     # Root CAs + chain validation
 │       ├── wasm.rs              # WASM runtime + host functions
 │       ├── intent.rs            # Intent loop + all intents
-│       ├── vga.rs               # VGA text mode
-│       └── store.rs             # Content store (legacy)
+│       └── vga.rs               # VGA text mode
 ```
 
 ---
@@ -312,10 +330,21 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] virtio-net: MAC 52:54:00:12:34:56
 [npk] DHCP: configured 10.0.2.15
 [npk] npkfs: mounted (gen=1, 0 objects, 3830 free blocks)
-[npk] WASM runtime: wasmi v1.0 (fuel-metered)
-[npk] Bootstrap: stored 4 WASM modules
 [npk] CSPRNG: ChaCha20 (RDRAND-seeded)
-[npk] Vault online.
+[npk] WASM runtime: wasmi v1.0 (fuel-metered)
+
+[npk] ══════════════════════════════════
+[npk]  Welcome to nopeekOS.
+[npk]  No users. No root. No legacy.
+[npk]  Choose a passphrase to protect
+[npk]  this system. It cannot be recovered.
+[npk] ══════════════════════════════════
+
+[npk] New passphrase: ************
+[npk] Confirm passphrase: ************
+[npk] Identity configured. System is yours.
+[npk] Bootstrap: stored 4 WASM modules
+[npk] Vault online. Root cap: a10c2286
 
 [npk] System ready. Express your intent.
 
@@ -327,16 +356,16 @@ npk>
 ## Security Architecture
 
 1. **Deny by Default** -- Without a capability token, nothing happens
-2. **Least Privilege** -- WASM modules get only what they need (READ+EXECUTE, no WRITE)
-3. **Temporal Scoping** -- Module capabilities expire after 60 seconds
-4. **Audit Everything** -- Every token operation logged
-5. **Formal Boundaries** -- WASM sandbox is the trust boundary
-6. **No Ambient Authority** -- No root, no sudo, no privilege elevation
-7. **Fuel Metering** -- 10M instruction budget per module prevents DoS
-8. **CSPRNG** -- ChaCha20 (RFC 7539) for all token generation, not predictable PRNG
-
-Attack surface: ~5500 lines of Rust in the trust boundary,
-vs 30M+ (Linux) or 50M+ (Windows). Factor 5000x less code.
+2. **Encryption at Rest** -- All data encrypted with ChaCha20-Poly1305 AEAD
+3. **Passphrase Identity** -- No users, no accounts. Your passphrase IS your identity
+4. **256-bit Tokens** -- Post-quantum safe (Grover-resistant), ChaCha20 CSPRNG
+5. **Least Privilege** -- WASM modules get only what they need (READ+EXECUTE, no WRITE)
+6. **Temporal Scoping** -- Module capabilities expire after 60 seconds
+7. **Audit Everything** -- Every token operation logged
+8. **Formal Boundaries** -- WASM sandbox is the trust boundary
+9. **No Ambient Authority** -- No root, no sudo, no privilege elevation
+10. **Fuel Metering** -- 10M instruction budget per module prevents DoS
+11. **TLS 1.3** -- All network communication encrypted (X25519 + ChaCha20-Poly1305)
 
 ---
 
