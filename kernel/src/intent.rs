@@ -273,6 +273,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 intent_http(args);
             }
         }
+        "https" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "https") {
+                intent_https(args);
+            }
+        }
         "ping" => {
             if require_cap(vault, &session, Rights::EXECUTE, "ping") {
                 intent_ping(args);
@@ -444,6 +449,7 @@ fn intent_help() {
     kprintln!("    ping <host>  ICMP ping               (requires EXECUTE)");
     kprintln!("    resolve <h>  DNS lookup               (requires READ)");
     kprintln!("    http <h> [p] HTTP GET                 (requires EXECUTE)");
+    kprintln!("    https <h> [p] HTTPS GET (TLS 1.3)    (requires EXECUTE)");
     kprintln!("    traceroute   Trace network path       (requires EXECUTE)");
     kprintln!("    netstat      Network connections       (requires READ)");
     kprintln!("    net          Network interface info    (requires READ)");
@@ -1076,6 +1082,140 @@ fn hex_dump(buf: &[u8; 512]) {
             }
         }
         kprintln!("|");
+    }
+}
+
+fn intent_https(args: &str) {
+    use crate::tls;
+
+    let url = args.trim();
+    if url.is_empty() {
+        kprintln!("[npk] Usage: https <host> [path]");
+        return;
+    }
+
+    let (host, path) = if let Some(idx) = url.find(' ') {
+        (&url[..idx], url[idx + 1..].trim())
+    } else if let Some(idx) = url.find('/') {
+        (&url[..idx], &url[idx..])
+    } else {
+        (url, "/")
+    };
+    let host = host.trim();
+
+    // Check for "> name" store redirect
+    let store_as = if let Some(idx) = path.find('>') {
+        let name = path[idx + 1..].trim();
+        if name.is_empty() { None } else { Some(alloc::string::String::from(name)) }
+    } else {
+        None
+    };
+    let path = if let Some(idx) = path.find('>') { path[..idx].trim() } else { path };
+    let path = if path.is_empty() { "/" } else { path };
+
+    // Resolve hostname
+    let ip = if let Some(ip) = parse_ip(host) {
+        ip
+    } else {
+        match crate::net::dns::resolve(host) {
+            Some(ip) => {
+                kprintln!("[npk] {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
+                ip
+            }
+            None => {
+                kprintln!("[npk] Could not resolve '{}'", host);
+                return;
+            }
+        }
+    };
+
+    // ARP resolve gateway
+    crate::net::arp::request([10, 0, 2, 2]);
+    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+
+    // TCP connect on port 443
+    kprintln!("[npk] Connecting to {}.{}.{}.{}:443...", ip[0], ip[1], ip[2], ip[3]);
+    let handle = match crate::net::tcp::connect(ip, 443) {
+        Ok(h) => h,
+        Err(e) => { kprintln!("[npk] TCP error: {}", e); return; }
+    };
+
+    // TLS 1.3 handshake
+    kprintln!("[npk] TLS 1.3 handshake with '{}'...", host);
+    let mut session = match tls::tls_connect(handle, host) {
+        Ok(s) => {
+            kprintln!("[npk] TLS established (ChaCha20-Poly1305)");
+            s
+        }
+        Err(e) => {
+            kprintln!("[npk] TLS error: {}", e);
+            let _ = crate::net::tcp::close(handle);
+            return;
+        }
+    };
+
+    // Send HTTP/1.1 GET over TLS
+    let request = alloc::format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    if let Err(e) = tls::tls_send(&mut session, request.as_bytes()) {
+        kprintln!("[npk] TLS send error: {}", e);
+        let _ = tls::tls_close(&mut session);
+        return;
+    }
+
+    // Receive response
+    let mut response = alloc::vec::Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match tls::tls_recv(&mut session, &mut buf) {
+            Ok(0) => {
+                // Try once more (might be CCS)
+                match tls::tls_recv(&mut session, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+        if response.len() > 32768 { break; } // 32KB limit for API responses
+    }
+
+    let _ = tls::tls_close(&mut session);
+
+    if response.is_empty() {
+        kprintln!("[npk] No response received");
+        return;
+    }
+
+    // Strip HTTP headers
+    let body_start = response.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(0);
+
+    if let Some(name) = store_as {
+        let body = &response[body_start..];
+        match crate::npkfs::store(&name, body, capability::CAP_NULL) {
+            Ok(hash) => {
+                kprint!("[npk] Stored '{}' ({} bytes, hash: ", name, body.len());
+                for b in &hash[..4] { kprint!("{:02x}", b); }
+                kprintln!("...)");
+            }
+            Err(e) => kprintln!("[npk] Store error: {}", e),
+        }
+    } else {
+        // Print headers + body
+        if let Ok(text) = core::str::from_utf8(&response) {
+            for line in text.lines().take(50) {
+                kprintln!("{}", line);
+            }
+        } else {
+            kprintln!("[npk] ({} bytes, binary response)", response.len());
+        }
     }
 }
 

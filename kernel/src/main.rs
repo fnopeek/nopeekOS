@@ -26,6 +26,7 @@ mod virtio_net;
 mod npkfs;
 mod net;
 mod intent;
+mod tls;
 mod vga;
 mod wasm;
 
