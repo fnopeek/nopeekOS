@@ -1168,20 +1168,23 @@ fn intent_https(args: &str) {
     // Receive response
     let mut response = alloc::vec::Vec::new();
     let mut buf = [0u8; 4096];
+    let mut empty_count = 0;
     loop {
         match tls::tls_recv(&mut session, &mut buf) {
             Ok(0) => {
-                // Try once more (might be CCS)
-                match tls::tls_recv(&mut session, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => response.extend_from_slice(&buf[..n]),
-                    Err(_) => break,
-                }
+                // Skip non-app records (NewSessionTicket, CCS)
+                empty_count += 1;
+                if empty_count > 5 && response.is_empty() { break; }
+                if empty_count > 2 && !response.is_empty() { break; }
+                continue;
             }
-            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+                empty_count = 0;
+            }
             Err(_) => break,
         }
-        if response.len() > 32768 { break; } // 32KB limit for API responses
+        if response.len() > 32768 { break; }
     }
 
     let _ = tls::tls_close(&mut session);

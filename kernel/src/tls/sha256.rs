@@ -26,6 +26,7 @@ const H_INIT: [u32; 8] = [
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
+#[derive(Clone)]
 pub struct Sha256 {
     state: [u32; 8],
     buf: [u8; 64],

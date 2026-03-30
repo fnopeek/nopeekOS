@@ -288,14 +288,17 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
             if hs_end > inner.len() { break; }
 
             let hs_msg = &inner[pos..hs_end];
-            transcript.update(hs_msg);
 
             match hs_type {
-                HT_ENCRYPTED_EXTENSIONS => { /* Skip */ }
+                HT_ENCRYPTED_EXTENSIONS => {
+                    transcript.update(hs_msg);
+                }
                 HT_CERTIFICATE => {
+                    transcript.update(hs_msg);
                     cert_chain = parse_certificate_message(&inner[pos + 4..hs_end]);
                 }
                 HT_CERTIFICATE_VERIFY => {
+                    transcript.update(hs_msg);
                     if hs_len >= 4 {
                         _cert_verify_algo = ((inner[pos + 4] as u16) << 8) | inner[pos + 5] as u16;
                         let sig_len = ((inner[pos + 6] as usize) << 8) | inner[pos + 7] as usize;
@@ -305,6 +308,7 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
                     }
                 }
                 HT_FINISHED => {
+                    // Do NOT add to transcript before verifying!
                     server_finished = inner[pos + 4..hs_end].to_vec();
                 }
                 _ => { /* Unknown, skip */ }
@@ -328,6 +332,8 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
         .map_err(TlsError::CertificateError)?;
 
     // === Verify Finished ===
+    // Clone transcript state before finalizing (needed for app key derivation)
+    let transcript_before_sf = transcript.clone();
     let hs_hash = transcript.finalize();
 
     let finished_key = expand_finished_key(&server_hs_secret);
@@ -337,21 +343,25 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     }
 
     // === Send Client Finished ===
-    // Rebuild transcript hash including server finished
-    let mut full_transcript = Sha256::new();
-    full_transcript.update(&client_hello);
-    full_transcript.update(&server_hello);
-    // We need the hash at this point for client finished
-    // Use the hs_hash we already computed (it includes everything up to server Finished)
-    let client_finished_key = expand_finished_key(&client_hs_secret);
-    let client_finished_data = hmac::hmac_sha256(&client_finished_key, &hs_hash);
+    // Client Finished verify_data uses transcript including server Finished
+    let mut cf_transcript = transcript_before_sf.clone();
+    let mut sf_hs_msg = Vec::new();
+    sf_hs_msg.push(HT_FINISHED);
+    sf_hs_msg.push(0); sf_hs_msg.push(0); sf_hs_msg.push(server_finished.len() as u8);
+    sf_hs_msg.extend_from_slice(&server_finished);
+    cf_transcript.update(&sf_hs_msg);
+    let cf_hash = cf_transcript.finalize();
 
+    let client_finished_key = expand_finished_key(&client_hs_secret);
+    let client_finished_data = hmac::hmac_sha256(&client_finished_key, &cf_hash);
+
+    // Build the Finished handshake message
     let mut finished_msg = Vec::new();
     finished_msg.push(HT_FINISHED);
     finished_msg.push(0); finished_msg.push(0); finished_msg.push(32);
     finished_msg.extend_from_slice(&client_finished_data);
 
-    // Encrypt and send
+    // Encrypt and send Client Finished
     let client_nonce = build_nonce(&client_hs_iv, 0);
     let mut inner_with_ct = finished_msg.clone();
     inner_with_ct.push(CT_HANDSHAKE);
@@ -360,11 +370,22 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     send_record(tcp_handle, CT_APPLICATION_DATA, &encrypted)?;
 
     // === Derive Application Keys ===
+    // App traffic secrets use Hash(CH..SF) — transcript including server Finished
+    // Clone transcript (which is at CH..CV state), add SF, then finalize
+    let mut app_transcript = transcript_before_sf.clone();
+    // Add the server Finished message to transcript
+    let mut sf_msg = Vec::new();
+    sf_msg.push(HT_FINISHED);
+    sf_msg.push(0); sf_msg.push(0); sf_msg.push(server_finished.len() as u8);
+    sf_msg.extend_from_slice(&server_finished);
+    app_transcript.update(&sf_msg);
+    let app_hash = app_transcript.finalize();
+
     let derived2 = hmac::derive_secret(&handshake_secret, b"derived", &empty_hash);
     let master_secret = hmac::hkdf_extract(&derived2, &[0u8; 32]);
 
-    let client_app_secret = hmac::derive_secret(&master_secret, b"c ap traffic", &hs_hash);
-    let server_app_secret = hmac::derive_secret(&master_secret, b"s ap traffic", &hs_hash);
+    let client_app_secret = hmac::derive_secret(&master_secret, b"c ap traffic", &app_hash);
+    let server_app_secret = hmac::derive_secret(&master_secret, b"s ap traffic", &app_hash);
 
     let client_app_key = expand_to_key(&client_app_secret);
     let server_app_key = expand_to_key(&server_app_secret);
@@ -400,8 +421,10 @@ pub fn tls_send(session: &mut TlsSession, data: &[u8]) -> Result<(), TlsError> {
 pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsError> {
     let (ct, record) = recv_record(session.tcp_handle)?;
 
+    kprintln!("[tls] app_recv: ct=0x{:02x} len={} seq={}", ct, record.len(), session.server_seq);
+
     if ct == CT_CHANGE_CIPHER_SPEC {
-        return Ok(0); // Ignore, try again
+        return Ok(0);
     }
     if ct != CT_APPLICATION_DATA {
         return Err(TlsError::UnexpectedMessage);
@@ -411,8 +434,13 @@ pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
     session.server_seq += 1;
 
     let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
-    let plaintext = crypto::aead_decrypt_aad(&session.server_app_key, &nonce, &aad, &record)
-        .ok_or(TlsError::DecryptError)?;
+    let plaintext = match crypto::aead_decrypt_aad(&session.server_app_key, &nonce, &aad, &record) {
+        Some(pt) => pt,
+        None => {
+            kprintln!("[tls] app decrypt FAILED");
+            return Err(TlsError::DecryptError);
+        }
+    };
 
     if plaintext.is_empty() {
         return Ok(0);
@@ -421,8 +449,18 @@ pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
     let real_ct = plaintext[plaintext.len() - 1];
     let data = &plaintext[..plaintext.len() - 1];
 
+    kprintln!("[tls] app inner_ct=0x{:02x} data_len={}", real_ct, data.len());
+
     if real_ct == CT_ALERT {
+        if data.len() >= 2 {
+            kprintln!("[tls] Alert: level={} desc={}", data[0], data[1]);
+        }
         return Err(TlsError::HandshakeFailed("alert received"));
+    }
+
+    // Skip handshake messages (NewSessionTicket etc.) in app data phase
+    if real_ct == CT_HANDSHAKE {
+        return Ok(0);
     }
 
     let copy_len = data.len().min(buf.len());
