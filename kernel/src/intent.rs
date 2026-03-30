@@ -900,31 +900,38 @@ fn intent_resolve(args: &str) {
 }
 
 fn intent_time() {
+    if crate::net::ntp::unix_time().is_none() {
+        // Try to re-sync NTP
+        kprintln!("[npk] Syncing time...");
+        crate::net::ntp::sync([10, 0, 2, 3]);
+    }
     match crate::net::ntp::unix_time() {
         Some(t) => kprintln!("{}", crate::net::ntp::format_time(t)),
-        None => kprintln!("[npk] Time not synced (run 'ping' first to init network)"),
+        None => kprintln!("[npk] Time sync failed. Network may be unavailable."),
     }
 }
 
 fn intent_ping(args: &str) {
-    let ip_str = args.trim();
-    if ip_str.is_empty() {
-        kprintln!("[npk] Usage: ping <ip>");
+    let host = args.trim();
+    if host.is_empty() {
+        kprintln!("[npk] Usage: ping <host or ip>");
         return;
     }
 
-    let parts: alloc::vec::Vec<&str> = ip_str.split('.').collect();
-    if parts.len() != 4 {
-        kprintln!("[npk] Invalid IP format");
-        return;
-    }
-    let mut ip = [0u8; 4];
-    for (i, p) in parts.iter().enumerate() {
-        ip[i] = match p.parse::<u8>() {
-            Ok(v) => v,
-            Err(_) => { kprintln!("[npk] Invalid IP octet"); return; }
-        };
-    }
+    let ip = if let Some(ip) = parse_ip(host) {
+        ip
+    } else {
+        match crate::net::dns::resolve(host) {
+            Some(ip) => {
+                kprintln!("[npk] {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
+                ip
+            }
+            None => {
+                kprintln!("[npk] Could not resolve '{}'", host);
+                return;
+            }
+        }
+    };
 
     // Send ARP first to resolve gateway
     crate::net::arp::request([10, 0, 2, 2]);
