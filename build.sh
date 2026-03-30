@@ -17,7 +17,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET="x86_64-unknown-none"
-KERNEL_BIN="$PROJECT_DIR/target/$TARGET/debug/nopeekos-kernel"
+KERNEL_BIN="$PROJECT_DIR/target/$TARGET/release/nopeekos-kernel"
 ISO_DIR="$PROJECT_DIR/target/iso"
 ISO_FILE="$PROJECT_DIR/target/nopeekos.iso"
 DISK_IMG="$PROJECT_DIR/target/disk.img"
@@ -46,6 +46,7 @@ build() {
 
     # Rust bare-metal build (nightly features via rust-toolchain.toml)
     cargo build \
+        --release \
         --target "$TARGET" \
         -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem \
