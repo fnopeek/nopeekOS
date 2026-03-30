@@ -305,6 +305,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             intent_passwd();
         }
 
+        "clear" | "cls" => {
+            // ANSI escape: clear screen + cursor home
+            kprint!("\x1B[2J\x1B[H");
+        }
+
         // Unrestricted intents (informational)
         "help" | "?" => intent_help(),
         "echo" => intent_echo(args),
