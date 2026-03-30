@@ -7,6 +7,7 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 use crate::interrupts;
+use crate::capability::CapId;
 
 const MAX_ENTRIES: usize = 1024;
 
@@ -14,11 +15,11 @@ static LOG: Mutex<AuditLog> = Mutex::new(AuditLog::new());
 
 #[derive(Debug, Clone, Copy)]
 pub enum AuditOp {
-    Create { parent_id: u128, new_id: u128 },
-    Revoke { revoker_id: u128, target_id: u128 },
-    Check { cap_id: u128 },
+    Create { parent_id: CapId, new_id: CapId },
+    Revoke { revoker_id: CapId, target_id: CapId },
+    Check { cap_id: CapId },
     Denied { reason: DenyReason },
-    Expired { cap_id: u128 },
+    Expired { cap_id: CapId },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,7 +52,10 @@ impl AuditLog {
     fn ensure_init(&mut self) {
         if self.entries.is_none() {
             let mut v = Vec::with_capacity(MAX_ENTRIES);
-            v.resize(MAX_ENTRIES, AuditEntry { tick: 0, op: AuditOp::Check { cap_id: 0 } });
+            v.resize(MAX_ENTRIES, AuditEntry {
+                tick: 0,
+                op: AuditOp::Check { cap_id: [0u8; 32] },
+            });
             self.entries = Some(v);
         }
     }

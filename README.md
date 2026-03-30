@@ -62,7 +62,7 @@ Every operation is capability-gated. No ambient authority. No root. No sudo.
  │  Batch TRIM for SSD             │  HTTP client            │
  ├──────────────────────────────────────────────────────────┤
  │  Capability Vault           │  CSPRNG (ChaCha20)         │
- │  128-bit tokens, deny-all   │  RDRAND-seeded when avail  │
+ │  256-bit tokens, deny-all   │  RDRAND-seeded when avail  │
  │  Temporal scoping, audit    │  Forward secrecy re-keying │
  ├──────────────────────────────────────────────────────────┤
  │  Drivers                                                 │
@@ -82,7 +82,7 @@ Every operation is capability-gated. No ambient authority. No root. No sudo.
 ### Capabilities, Not Permissions
 
 No `chmod`, no ACLs, no root, no sudo.
-Every resource requires a cryptographic token (128-bit, ChaCha20 CSPRNG).
+Every resource requires a cryptographic token (256-bit, ChaCha20 CSPRNG, post-quantum safe).
 WASM modules receive delegated capabilities with limited rights and expiry.
 Everything is audited.
 
@@ -123,7 +123,7 @@ Every execution is a sandboxed WASM module:
 
 ### Phase 2 -- Capability System
 
-- [x] Capability Vault (128-bit random token IDs)
+- [x] Capability Vault (256-bit random token IDs (post-quantum safe))
 - [x] ChaCha20 CSPRNG (RFC 7539, RDRAND-seeded, forward secrecy)
 - [x] Token delegation with rights monotonicity
 - [x] Temporal scoping (tick-based expiry)
@@ -133,7 +133,7 @@ Every execution is a sandboxed WASM module:
 
 ### Phase 3 -- WASM Runtime
 
-- [x] wasmi v0.31 interpreter (no_std)
+- [x] wasmi v1.0 interpreter (no_std)
 - [x] Fuel metering (10M instruction budget, prevents hangs)
 - [x] Module loading from npkFS (BLAKE3 integrity check)
 - [x] Per-module delegated capabilities (READ+EXECUTE, 60s TTL)
@@ -172,10 +172,12 @@ Every execution is a sandboxed WASM module:
 
 ## Roadmap
 
-### Phase 6 -- Crypto & Driver Architecture
+### Phase 6 -- Crypto & Identity (in progress)
 
+- [x] ChaCha20-Poly1305 AEAD encryption (RFC 8439)
+- [x] Passphrase-based identity (BLAKE3-KDF → 256-bit master key)
+- [x] Encryption at rest (all npkFS objects encrypted by default)
 - [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
-- [ ] ChaCha20-Poly1305 AEAD encryption
 - [ ] TLS for secure connections
 - [ ] Hardware manifest collector (PCI + CPUID + ACPI probe)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
@@ -204,7 +206,7 @@ Every execution is a sandboxed WASM module:
 | Language | Rust (no_std, nightly) | Memory safety without GC |
 | Boot | Multiboot2 | QEMU/GRUB compatible |
 | Target | x86_64 | Later aarch64 |
-| WASM | wasmi v0.31 | no_std, fuel metering |
+| WASM | wasmi v1.0 | no_std, fuel metering |
 | Filesystem | npkFS | COW, BLAKE3, SSD-native |
 | Hashing | BLAKE3 | Fast, secure, streaming |
 | CSPRNG | ChaCha20 (RFC 7539) | RDRAND seed, forward secrecy |
@@ -305,7 +307,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] virtio-net: MAC 52:54:00:12:34:56
 [npk] DHCP: configured 10.0.2.15
 [npk] npkfs: mounted (gen=1, 0 objects, 3830 free blocks)
-[npk] WASM runtime: wasmi v0.31 (fuel-metered)
+[npk] WASM runtime: wasmi v1.0 (fuel-metered)
 [npk] Bootstrap: stored 4 WASM modules
 [npk] CSPRNG: ChaCha20 (RDRAND-seeded)
 [npk] Vault online.
@@ -358,7 +360,7 @@ From Luzern.
 
 ## License
 
-MIT -- see [LICENSE](LICENSE)
+GPL-3.0 -- see [LICENSE](LICENSE)
 
 ## Author
 

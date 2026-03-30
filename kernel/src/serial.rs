@@ -60,6 +60,37 @@ impl SerialPort {
         unsafe { (inb(self.base + 5) & 0x01) != 0 }
     }
 
+    /// Read a line with masked echo (shows '*'), returns length.
+    pub fn read_line_masked(&self, buf: &mut [u8]) -> usize {
+        let mut pos = 0;
+        loop {
+            let byte = self.read_byte();
+            match byte {
+                b'\r' | b'\n' => {
+                    self.write_byte(b'\r');
+                    self.write_byte(b'\n');
+                    return pos;
+                }
+                0x08 | 0x7F => {
+                    if pos > 0 {
+                        pos -= 1;
+                        self.write_byte(0x08);
+                        self.write_byte(b' ');
+                        self.write_byte(0x08);
+                    }
+                }
+                byte if byte >= 0x20 && byte < 0x7F => {
+                    if pos < buf.len() {
+                        buf[pos] = byte;
+                        pos += 1;
+                        self.write_byte(b'*');
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Read a line with echo, returns length
     pub fn read_line(&self, buf: &mut [u8]) -> usize {
         let mut pos = 0;

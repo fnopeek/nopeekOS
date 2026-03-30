@@ -6,10 +6,10 @@
 //! no ambient authority, no access beyond what was explicitly granted.
 
 use alloc::string::String;
-use alloc::vec::Vec;
-use wasmi::{Caller, Config, Engine, Linker, Module, Store, Value};
+use wasmi::{Caller, Config, Engine, Linker, Module, Store, Val};
 use spin::Mutex;
-use crate::{kprintln, kprint, capability};
+use crate::{kprintln, capability};
+use crate::capability::CapId;
 
 pub struct WasmResult {
     pub output: String,
@@ -17,7 +17,7 @@ pub struct WasmResult {
 
 struct HostState {
     output: String,
-    cap_id: u128,
+    cap_id: CapId,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -30,24 +30,24 @@ pub fn init() {
     config.consume_fuel(true);
     let engine = Engine::new(&config);
     *ENGINE.lock() = Some(engine);
-    kprintln!("[npk] WASM runtime: wasmi v0.31 (fuel-metered)");
+    kprintln!("[npk] WASM runtime: wasmi v1.0 (fuel-metered)");
 }
 
 /// Execute a WASM module with basic host functions (legacy API for built-in add/multiply)
-pub fn execute(wasm_bytes: &[u8], func_name: &str, args: &[Value]) -> Result<WasmResult, WasmError> {
-    execute_inner(wasm_bytes, func_name, args, 0)
+pub fn execute(wasm_bytes: &[u8], func_name: &str, args: &[Val]) -> Result<WasmResult, WasmError> {
+    execute_inner(wasm_bytes, func_name, args, capability::CAP_NULL)
 }
 
 /// Execute a WASM module loaded from npkFS with capability-gated host functions.
 /// The module receives a delegated capability token.
 pub fn execute_sandboxed(
-    wasm_bytes: &[u8], func_name: &str, args: &[Value], cap_id: u128,
+    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
 ) -> Result<WasmResult, WasmError> {
     execute_inner(wasm_bytes, func_name, args, cap_id)
 }
 
 fn execute_inner(
-    wasm_bytes: &[u8], func_name: &str, args: &[Value], cap_id: u128,
+    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
 ) -> Result<WasmResult, WasmError> {
     let engine_guard = ENGINE.lock();
     let engine = engine_guard.as_ref().ok_or(WasmError::NotInitialized)?;
@@ -59,15 +59,13 @@ fn execute_inner(
         output: String::new(),
         cap_id,
     });
-    store.add_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
+    store.set_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
     let mut linker = <Linker<HostState>>::new(engine);
     register_host_functions(&mut linker)?;
 
-    let instance = linker.instantiate(&mut store, &module)
-        .map_err(|_| WasmError::InstantiationFailed)?
-        .start(&mut store)
-        .map_err(|_| WasmError::StartFailed)?;
+    let instance = linker.instantiate_and_start(&mut store, &module)
+        .map_err(|_| WasmError::InstantiationFailed)?;
 
     let func = instance.get_func(&store, func_name)
         .ok_or(WasmError::FunctionNotFound)?;
@@ -79,15 +77,15 @@ fn execute_inner(
         func.call(&mut store, args, &mut [])
             .map_err(|e| map_exec_error(e))?;
     } else {
-        let mut results = [Value::I32(0)];
+        let mut results = [Val::I32(0)];
         func.call(&mut store, args, &mut results)
             .map_err(|e| map_exec_error(e))?;
 
         let host = store.data();
         if host.output.is_empty() {
             let output = match results[0] {
-                Value::I32(v) => alloc::format!("{}", v),
-                Value::I64(v) => alloc::format!("{}", v),
+                Val::I32(v) => alloc::format!("{}", v),
+                Val::I64(v) => alloc::format!("{}", v),
                 _ => alloc::format!("{:?}", results[0]),
             };
             return Ok(WasmResult { output });
@@ -121,7 +119,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
          buf_ptr: i32, buf_max: i32| -> i32 {
             let cap_id = caller.data().cap_id;
-            if capability::check_global(cap_id, capability::Rights::READ).is_err() {
+            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
                 kprintln!("[npk] WASM: npk_fetch DENIED (no READ)");
                 return -1;
             }
@@ -157,7 +155,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
          data_ptr: i32, data_len: i32| -> i32 {
             let cap_id = caller.data().cap_id;
-            if capability::check_global(cap_id, capability::Rights::WRITE).is_err() {
+            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
                 kprintln!("[npk] WASM: npk_store DENIED (no WRITE)");
                 return -1;
             }
@@ -207,7 +205,6 @@ pub enum WasmError {
     NotInitialized,
     InvalidModule,
     InstantiationFailed,
-    StartFailed,
     FunctionNotFound,
     ExecutionFailed,
     FuelExhausted,
@@ -220,7 +217,6 @@ impl core::fmt::Display for WasmError {
             WasmError::NotInitialized => write!(f, "WASM runtime not initialized"),
             WasmError::InvalidModule => write!(f, "invalid WASM module"),
             WasmError::InstantiationFailed => write!(f, "instantiation failed"),
-            WasmError::StartFailed => write!(f, "module start failed"),
             WasmError::FunctionNotFound => write!(f, "function not found"),
             WasmError::ExecutionFailed => write!(f, "execution failed"),
             WasmError::FuelExhausted => write!(f, "execution limit exceeded (fuel exhausted)"),
@@ -229,7 +225,7 @@ impl core::fmt::Display for WasmError {
     }
 }
 
-pub fn val_i32(v: i32) -> Value { Value::I32(v) }
+pub fn val_i32(v: i32) -> Val { Val::I32(v) }
 
 // === Built-in WASM modules ===
 

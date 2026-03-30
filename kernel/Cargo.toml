@@ -6,19 +6,20 @@ authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
 
 [dependencies]
-spin = "0.9"          # Spinlock (no_std mutex)
-bitflags = "2.4"      # Flag-basierte Enums
+spin = "0.10"         # Spinlock (no_std mutex)
+bitflags = "2.11"     # Flag-basierte Enums
 
 [dependencies.lazy_static]
-version = "1.4"
+version = "1.5"
 features = ["spin_no_std"]
 
 [dependencies.wasmi]
-version = "0.31"
+version = "1.0"
 default-features = false
+features = ["prefer-btree-collections"]
 
 [dependencies.blake3]
-version = "1.5"
+version = "1.8"
 default-features = false
 
 [profile.dev]
