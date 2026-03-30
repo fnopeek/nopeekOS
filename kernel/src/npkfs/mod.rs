@@ -60,6 +60,11 @@ pub fn mkfs() -> Result<(), FsError> {
     };
     cache.write(root_block, &root_buf)?;
 
+    // Generate random installation salt (unique per format)
+    let install_salt = crate::csprng::random_256();
+    let mut salt_16 = [0u8; 16];
+    salt_16.copy_from_slice(&install_salt[..16]);
+
     let mut sb = SuperblockRaw {
         magic: MAGIC,
         version: VERSION,
@@ -74,7 +79,8 @@ pub fn mkfs() -> Result<(), FsError> {
         object_count: 0,
         journal_head: 0,
         journal_seq: 0,
-        _reserved: [0u8; 3968],
+        install_salt: salt_16,
+        _reserved: [0u8; 3952],
         checksum: [0u8; 32],
     };
 
@@ -343,6 +349,13 @@ pub fn exists(name: &str) -> bool {
     key[..name.len()].copy_from_slice(name.as_bytes());
     btree::lookup(&mut fs.cache, fs.sb.btree_root, &key)
         .ok().flatten().is_some()
+}
+
+/// Get the installation salt from the superblock.
+pub fn install_salt() -> Option<[u8; 16]> {
+    let lock = FS.lock();
+    let fs = lock.as_ref()?;
+    Some(fs.sb.install_salt)
 }
 
 pub fn is_mounted() -> bool {

@@ -3,6 +3,7 @@
 //! 4-level x86_64 paging: PML4 → PDPT → PDT → PT → 4KB page.
 //! Works alongside boot.s 2MB identity mapping.
 //! Preparation for WASM sandbox memory isolation.
+#![allow(dead_code)]
 
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicU64, Ordering};

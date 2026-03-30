@@ -6,7 +6,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::kprintln;
 use super::udp;
 
 const DNS_PORT: u16 = 53;

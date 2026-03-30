@@ -1,6 +1,6 @@
 //! Ethernet frame handling
 
-use crate::{kprintln, virtio_net};
+use crate::virtio_net;
 
 pub const ETHERTYPE_ARP: u16  = 0x0806;
 pub const ETHERTYPE_IPV4: u16 = 0x0800;

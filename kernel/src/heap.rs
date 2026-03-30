@@ -199,6 +199,7 @@ pub fn init() {
     kprintln!("[npk] Heap: {} KB at {:#x}", INITIAL_HEAP_SIZE / 1024, heap_start);
 }
 
+#[allow(dead_code)]
 pub fn stats() -> (usize, usize) {
     let heap = HEAP.inner.lock();
     (heap.allocated_bytes, heap.heap_end - heap.heap_start)

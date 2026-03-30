@@ -26,7 +26,6 @@ mod virtio_net;
 mod npkfs;
 mod net;
 mod intent;
-mod store;
 mod vga;
 mod wasm;
 
@@ -111,6 +110,8 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         kprintln!("[npk] virtio-net: not available");
     }
 
+    csprng::init();
+
     if virtio_blk::is_available() {
         kprintln!("[npk] Mounting npkFS...");
         match npkfs::mount() {
@@ -129,8 +130,6 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     wasm::init();
     vga::show_status(b"WASM runtime online (wasmi)");
 
-    csprng::init();
-
     // === Identity: Passphrase → Master Key ===
     //
     // First boot (setup):  Choose passphrase → store keycheck object
@@ -138,12 +137,13 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     //
     // No users. No accounts. Your passphrase IS your identity.
 
-    let salt = {
+    // Per-installation random salt (generated at mkfs, stored in superblock)
+    let salt = npkfs::install_salt().unwrap_or_else(|| {
         let mut s = [0u8; 16];
-        let hash = blake3::hash(b"nopeekOS.installation.salt.v1");
+        let hash = blake3::hash(b"nopeekOS.fallback.salt");
         s.copy_from_slice(&hash.as_bytes()[..16]);
         s
-    };
+    });
 
     let is_setup = !npkfs::exists(".npk-keycheck");
 
@@ -158,7 +158,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         kprintln!("[npk] ══════════════════════════════════");
         kprintln!();
 
-        let master_key = loop {
+        let _master_key = loop {
             kprint!("[npk] New passphrase: ");
             let mut buf1 = [0u8; 128];
             let len1 = { serial::SERIAL.lock().read_line_masked(&mut buf1) };
@@ -185,7 +185,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         };
 
         // Store master key and write keycheck object
-        crypto::set_master_key(master_key);
+        crypto::set_master_key(_master_key);
 
         // The keycheck is a known plaintext that we can verify on next boot
         let keycheck_data = b"nopeekOS.keycheck.v1.valid";
@@ -204,7 +204,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         kprintln!();
 
         let mut attempts: u32 = 0;
-        let master_key = loop {
+        let _master_key = loop {
             // Exponential backoff: 0, 2, 4, 8, 16... seconds
             if attempts > 0 {
                 let delay_secs = 1u64 << attempts.min(5); // max 32s

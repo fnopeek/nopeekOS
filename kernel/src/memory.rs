@@ -87,6 +87,7 @@ impl FrameAllocator {
         None
     }
 
+    #[allow(dead_code)]
     fn deallocate(&mut self, addr: u64) {
         self.set_free((addr as usize) / PAGE_SIZE);
     }
@@ -132,6 +133,7 @@ pub fn allocate_frame() -> Option<u64> {
     ALLOCATOR.lock().allocate()
 }
 
+#[allow(dead_code)]
 pub fn deallocate_frame(addr: u64) {
     ALLOCATOR.lock().deallocate(addr);
 }

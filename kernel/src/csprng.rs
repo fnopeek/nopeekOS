@@ -47,6 +47,7 @@ impl ChaChaRng {
         val
     }
 
+    #[allow(dead_code)]
     fn next_u128(&mut self) -> u128 {
         let hi = self.next_u64() as u128;
         let lo = self.next_u64() as u128;
@@ -196,6 +197,7 @@ pub fn init() {
     }
 }
 
+#[allow(dead_code)]
 pub fn random_u128() -> u128 {
     let mut rng = RNG.lock();
     let rng = rng.as_mut().expect("CSPRNG not initialized");
@@ -215,6 +217,7 @@ pub fn random_256() -> [u8; 32] {
     }
 }
 
+#[allow(dead_code)]
 pub fn random_u64() -> u64 {
     let mut rng = RNG.lock();
     let rng = rng.as_mut().expect("CSPRNG not initialized");

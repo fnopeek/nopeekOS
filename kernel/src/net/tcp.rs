@@ -10,7 +10,6 @@
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
 use spin::Mutex;
-use crate::kprintln;
 use super::{ipv4, arp};
 
 const MAX_CONNECTIONS: usize = 16;
@@ -31,6 +30,7 @@ const ACK: u8 = 0x10;
 const HEADER_LEN: usize = 20; // no options (options added separately for SYN)
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum State {
     Closed,
     SynSent,
@@ -42,6 +42,7 @@ enum State {
     TimeWait,
 }
 
+#[allow(dead_code)]
 struct TcpConn {
     state: State,
     local_port: u16,

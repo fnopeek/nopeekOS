@@ -1,6 +1,5 @@
 //! IPv4 — Internet Protocol v4
 
-use crate::kprintln;
 use super::{eth, arp};
 
 pub const PROTO_ICMP: u8 = 1;

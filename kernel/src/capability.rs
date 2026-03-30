@@ -34,6 +34,7 @@ bitflags! {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ResourceKind {
     Kernel,
     Memory { base: usize, size: usize },
@@ -45,6 +46,7 @@ pub enum ResourceKind {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Capability {
     pub id: CapId,
     pub resource: ResourceKind,
@@ -146,6 +148,7 @@ impl Vault {
     }
 
     /// Revoke a capability and all its children (transitive)
+    #[allow(dead_code)]
     pub fn revoke(&mut self, revoker_id: CapId, target_id: CapId) -> Result<(), CapError> {
         let revoker = self.find(&revoker_id).ok_or(CapError::NotFound)?;
         if !revoker.rights.contains(Rights::REVOKE) {

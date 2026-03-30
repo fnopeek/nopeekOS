@@ -53,6 +53,7 @@ pub fn read8(addr: PciAddr, offset: u8) -> u8 {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PciDevice {
     pub addr: PciAddr,
     pub vendor_id: u16,
