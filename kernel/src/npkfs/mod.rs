@@ -19,7 +19,7 @@ use cache::BlockCache;
 use bitmap::Bitmap;
 use journal::Journal;
 use types::*;
-use crate::{kprintln, virtio_blk};
+use crate::{kprintln, virtio_blk, crypto};
 
 struct NpkFs {
     cache: BlockCache,
@@ -116,28 +116,39 @@ pub fn mount() -> Result<(), FsError> {
     Ok(())
 }
 
-/// Store an object. Returns BLAKE3 hash.
-pub fn store(name: &str, data: &[u8], cap_id: u128) -> Result<[u8; 32], FsError> {
+/// Store an object. Data is encrypted at rest with ChaCha20-Poly1305 AEAD.
+/// Returns BLAKE3 hash of the plaintext.
+pub fn store(name: &str, data: &[u8], cap_id: [u8; 32]) -> Result<[u8; 32], FsError> {
     validate_name(name)?;
     let hash = *blake3::hash(data).as_bytes();
     let tick = crate::interrupts::ticks();
+
+    // Encrypt data if master key is available
+    let encrypted = if let Some(master_key) = crypto::get_master_key() {
+        let obj_key = crypto::derive_object_key(&master_key, &hash);
+        let nonce = crypto::derive_nonce(&hash);
+        Some(crypto::aead_encrypt(&obj_key, &nonce, data))
+    } else {
+        None
+    };
+    let write_data = encrypted.as_deref().unwrap_or(data);
 
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
     // Allocate data blocks
-    let blocks_needed = (data.len() as u64 + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+    let blocks_needed = (write_data.len() as u64 + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
     let blocks_needed = blocks_needed.max(1);
 
     let data_start = fs.bitmap.alloc(blocks_needed)?;
 
-    // Write data blocks
+    // Write encrypted data blocks
     for i in 0..blocks_needed {
         let mut buf = [0u8; BLOCK_SIZE];
         let offset = i as usize * BLOCK_SIZE;
-        let end = (offset + BLOCK_SIZE).min(data.len());
-        if offset < data.len() {
-            buf[..end - offset].copy_from_slice(&data[offset..end]);
+        let end = (offset + BLOCK_SIZE).min(write_data.len());
+        if offset < write_data.len() {
+            buf[..end - offset].copy_from_slice(&write_data[offset..end]);
         }
         fs.cache.write(data_start + i, &buf)?;
     }
@@ -153,7 +164,7 @@ pub fn store(name: &str, data: &[u8], cap_id: u128) -> Result<[u8; 32], FsError>
     let entry = ObjectEntry {
         name: entry_name,
         content_hash: hash,
-        size: data.len() as u64,
+        size: write_data.len() as u64,
         cap_id,
         created_tick: tick,
         extent_count: 1,
@@ -219,14 +230,29 @@ pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
         }
     }
 
-    // Verify integrity
-    let hash = *blake3::hash(&data).as_bytes();
+    // Decrypt if master key is available (encrypted data includes 16-byte AEAD tag)
+    let plaintext = if let Some(master_key) = crypto::get_master_key() {
+        let obj_key = crypto::derive_object_key(&master_key, &entry.content_hash);
+        let nonce = crypto::derive_nonce(&entry.content_hash);
+        match crypto::aead_decrypt(&obj_key, &nonce, &data) {
+            Some(pt) => pt,
+            None => {
+                kprintln!("[npk] npkfs: DECRYPTION FAILED for '{}' (wrong key or corrupt)", name);
+                return Err(FsError::Corrupt);
+            }
+        }
+    } else {
+        data
+    };
+
+    // Verify integrity (BLAKE3 of plaintext)
+    let hash = *blake3::hash(&plaintext).as_bytes();
     if hash != entry.content_hash {
         kprintln!("[npk] npkfs: INTEGRITY FAILURE for '{}'", name);
         return Err(FsError::Corrupt);
     }
 
-    Ok((data, hash))
+    Ok((plaintext, hash))
 }
 
 /// Delete an object by name.
@@ -303,6 +329,20 @@ pub fn stats() -> Option<(u64, u64, u64, u64)> {
     let lock = FS.lock();
     let fs = lock.as_ref()?;
     Some((fs.sb.total_blocks, fs.sb.free_blocks, fs.sb.object_count, fs.generation))
+}
+
+/// Check if an object exists by name (B-tree lookup only, no data read).
+pub fn exists(name: &str) -> bool {
+    if validate_name(name).is_err() { return false; }
+    let mut lock = FS.lock();
+    let fs = match lock.as_mut() {
+        Some(fs) => fs,
+        None => return false,
+    };
+    let mut key = [0u8; 64];
+    key[..name.len()].copy_from_slice(name.as_bytes());
+    btree::lookup(&mut fs.cache, fs.sb.btree_root, &key)
+        .ok().flatten().is_some()
 }
 
 pub fn is_mounted() -> bool {

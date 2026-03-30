@@ -52,6 +52,15 @@ impl ChaChaRng {
         let lo = self.next_u64() as u128;
         (hi << 64) | lo
     }
+
+    fn next_256(&mut self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for i in 0..4 {
+            let val = self.next_u64();
+            out[i * 8..(i + 1) * 8].copy_from_slice(&val.to_le_bytes());
+        }
+        out
+    }
 }
 
 // === ChaCha20 core (RFC 7539) ===
@@ -193,6 +202,16 @@ pub fn random_u128() -> u128 {
     loop {
         let val = rng.next_u128();
         if val != 0 { return val; }
+    }
+}
+
+/// Generate a 256-bit random value for capability tokens (post-quantum safe).
+pub fn random_256() -> [u8; 32] {
+    let mut rng = RNG.lock();
+    let rng = rng.as_mut().expect("CSPRNG not initialized");
+    loop {
+        let val = rng.next_256();
+        if val != [0u8; 32] { return val; }
     }
 }
 

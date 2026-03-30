@@ -30,8 +30,8 @@ pub const BTREE_LEAF: u8 = 2;
 pub const NODE_HEADER_SIZE: usize = 16;
 pub const INTERNAL_ENTRY_SIZE: usize = 72; // 64 name + 8 child ptr
 pub const MAX_INTERNAL_KEYS: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / INTERNAL_ENTRY_SIZE; // 56
-pub const LEAF_ENTRY_SIZE: usize = 208; // with u128 alignment padding
-pub const MAX_LEAF_ENTRIES: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / LEAF_ENTRY_SIZE; // 19
+pub const LEAF_ENTRY_SIZE: usize = 216; // with 256-bit CapId
+pub const MAX_LEAF_ENTRIES: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / LEAF_ENTRY_SIZE; // 18
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -84,14 +84,14 @@ impl SuperblockRaw {
     }
 }
 
-/// B-tree leaf entry (196 bytes)
+/// B-tree leaf entry (216 bytes)
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct ObjectEntry {
     pub name: [u8; 64],
     pub content_hash: [u8; 32],
     pub size: u64,
-    pub cap_id: u128,
+    pub cap_id: [u8; 32],
     pub created_tick: u64,
     pub extent_count: u32,
     pub extents: [Extent; MAX_EXTENTS],

@@ -3,13 +3,13 @@
 //! Not a shell. Takes intents, not commands.
 //! Every intent requires a valid capability token.
 
-use crate::capability::{self, Vault, Rights};
+use crate::capability::{self, CapId, Vault, Rights};
 use crate::{kprint, kprintln};
 use spin::Mutex;
 
 const INPUT_BUF_SIZE: usize = 512;
 
-pub fn run_loop(vault: &'static Mutex<Vault>, session_id: u128) -> ! {
+pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut input_buf = [0u8; INPUT_BUF_SIZE];
 
     loop {
@@ -45,7 +45,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: u128) -> ! {
     }
 }
 
-fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
+fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
     if input.is_empty() { return; }
 
     let mut parts = input.splitn(2, ' ');
@@ -55,44 +55,44 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
     match verb {
         // Intents requiring READ
         "status" | "info" => {
-            if require_cap(vault, session, Rights::READ, "status") {
+            if require_cap(vault, &session, Rights::READ, "status") {
                 intent_status(&vault.lock());
             }
         }
         "caps" | "capabilities" => {
-            if require_cap(vault, session, Rights::READ, "caps") {
+            if require_cap(vault, &session, Rights::READ, "caps") {
                 intent_caps(&vault.lock());
             }
         }
         "audit" => {
-            if require_cap(vault, session, Rights::AUDIT, "audit") {
+            if require_cap(vault, &session, Rights::AUDIT, "audit") {
                 intent_audit();
             }
         }
 
         // Intents requiring EXECUTE (WASM sandbox)
         "add" => {
-            if require_cap(vault, session, Rights::EXECUTE, "add") {
+            if require_cap(vault, &session, Rights::EXECUTE, "add") {
                 intent_wasm_add(args);
             }
         }
         "multiply" => {
-            if require_cap(vault, session, Rights::EXECUTE, "multiply") {
+            if require_cap(vault, &session, Rights::EXECUTE, "multiply") {
                 intent_wasm_multiply(args);
             }
         }
         "disk" | "blk" => {
             let sub = args.trim();
             if sub.is_empty() || sub == "info" {
-                if require_cap(vault, session, Rights::READ, "disk") {
+                if require_cap(vault, &session, Rights::READ, "disk") {
                     intent_disk_info();
                 }
             } else if sub.starts_with("read ") || sub == "read" {
-                if require_cap(vault, session, Rights::READ, "disk read") {
+                if require_cap(vault, &session, Rights::READ, "disk read") {
                     intent_disk_read(sub.strip_prefix("read").unwrap_or("").trim());
                 }
             } else if sub.starts_with("write ") || sub == "write" {
-                if require_cap(vault, session, Rights::WRITE, "disk write") {
+                if require_cap(vault, &session, Rights::WRITE, "disk write") {
                     intent_disk_write(sub.strip_prefix("write").unwrap_or("").trim());
                 }
             } else {
@@ -101,75 +101,75 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
         }
 
         "store" | "save" => {
-            if require_cap(vault, session, Rights::WRITE, "store") {
+            if require_cap(vault, &session, Rights::WRITE, "store") {
                 intent_store(args, session);
             }
         }
         "fetch" | "load" | "get" => {
-            if require_cap(vault, session, Rights::READ, "fetch") {
+            if require_cap(vault, &session, Rights::READ, "fetch") {
                 intent_fetch(args);
             }
         }
         "delete" | "rm" | "remove" => {
-            if require_cap(vault, session, Rights::WRITE, "delete") {
+            if require_cap(vault, &session, Rights::WRITE, "delete") {
                 intent_delete(args);
             }
         }
         "list" | "ls" | "objects" => {
-            if require_cap(vault, session, Rights::READ, "list") {
+            if require_cap(vault, &session, Rights::READ, "list") {
                 intent_list();
             }
         }
         "fsinfo" | "fs" => {
-            if require_cap(vault, session, Rights::READ, "fsinfo") {
+            if require_cap(vault, &session, Rights::READ, "fsinfo") {
                 intent_fsinfo();
             }
         }
 
         "resolve" | "dns" => {
-            if require_cap(vault, session, Rights::READ, "resolve") {
+            if require_cap(vault, &session, Rights::READ, "resolve") {
                 intent_resolve(args);
             }
         }
         "time" | "clock" | "date" => {
-            if require_cap(vault, session, Rights::READ, "time") {
+            if require_cap(vault, &session, Rights::READ, "time") {
                 intent_time();
             }
         }
         "traceroute" | "trace" => {
-            if require_cap(vault, session, Rights::EXECUTE, "traceroute") {
+            if require_cap(vault, &session, Rights::EXECUTE, "traceroute") {
                 intent_traceroute(args);
             }
         }
         "netstat" | "connections" => {
-            if require_cap(vault, session, Rights::READ, "netstat") {
+            if require_cap(vault, &session, Rights::READ, "netstat") {
                 intent_netstat();
             }
         }
         "http" | "curl" | "wget" => {
-            if require_cap(vault, session, Rights::EXECUTE, "http") {
+            if require_cap(vault, &session, Rights::EXECUTE, "http") {
                 intent_http(args);
             }
         }
         "ping" => {
-            if require_cap(vault, session, Rights::EXECUTE, "ping") {
+            if require_cap(vault, &session, Rights::EXECUTE, "ping") {
                 intent_ping(args);
             }
         }
         "net" | "ifconfig" => {
-            if require_cap(vault, session, Rights::READ, "net") {
+            if require_cap(vault, &session, Rights::READ, "net") {
                 intent_net_info();
             }
         }
 
         "run" | "exec" => {
-            if require_cap(vault, session, Rights::EXECUTE, "run") {
+            if require_cap(vault, &session, Rights::EXECUTE, "run") {
                 intent_run(args);
             }
         }
 
         "halt" | "shutdown" | "poweroff" => {
-            if require_cap(vault, session, Rights::EXECUTE, "halt") {
+            if require_cap(vault, &session, Rights::EXECUTE, "halt") {
                 intent_halt();
             }
         }
@@ -189,7 +189,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: u128) {
 }
 
 /// Check capability before executing an intent. Returns true if allowed.
-fn require_cap(vault: &Mutex<Vault>, cap_id: u128, rights: Rights, intent: &str) -> bool {
+fn require_cap(vault: &Mutex<Vault>, cap_id: &CapId, rights: Rights, intent: &str) -> bool {
     let v = vault.lock();
     match v.check(cap_id, rights) {
         Ok(_) => true,
@@ -273,19 +273,19 @@ fn intent_audit() {
             match entry.op {
                 AuditOp::Create { parent_id, new_id } =>
                     kprintln!("  [{:>4}.{:03}s] CREATE {:08x} from {:08x}",
-                        secs, ms, capability::short_id(new_id), capability::short_id(parent_id)),
+                        secs, ms, capability::short_id(&new_id), capability::short_id(&parent_id)),
                 AuditOp::Revoke { revoker_id, target_id } =>
                     kprintln!("  [{:>4}.{:03}s] REVOKE {:08x} by {:08x}",
-                        secs, ms, capability::short_id(target_id), capability::short_id(revoker_id)),
+                        secs, ms, capability::short_id(&target_id), capability::short_id(&revoker_id)),
                 AuditOp::Check { cap_id } =>
                     kprintln!("  [{:>4}.{:03}s] CHECK  {:08x} OK",
-                        secs, ms, capability::short_id(cap_id)),
+                        secs, ms, capability::short_id(&cap_id)),
                 AuditOp::Denied { reason } =>
                     kprintln!("  [{:>4}.{:03}s] DENIED {:?}",
                         secs, ms, reason),
                 AuditOp::Expired { cap_id } =>
                     kprintln!("  [{:>4}.{:03}s] EXPIRED {:08x}",
-                        secs, ms, capability::short_id(cap_id)),
+                        secs, ms, capability::short_id(&cap_id)),
             }
         }
     }
@@ -391,7 +391,7 @@ fn intent_philosophy() {
     kprintln!();
 }
 
-fn intent_store(args: &str, cap_id: u128) {
+fn intent_store(args: &str, cap_id: CapId) {
     let mut parts = args.splitn(2, ' ');
     let name = match parts.next() {
         Some(n) if !n.is_empty() => n,
@@ -472,7 +472,7 @@ fn intent_list() {
 
 fn intent_run(args: &str) {
     use crate::{wasm, npkfs, capability};
-    use wasmi::Value;
+    use wasmi::Val;
 
     let mut parts = args.trim().splitn(2, ' ');
     let module_name = match parts.next() {
@@ -500,12 +500,12 @@ fn intent_run(args: &str) {
 
     kprint!("[npk] Running '{}' (hash: ", module_name);
     for b in &hash[..4] { kprint!("{:02x}", b); }
-    kprintln!("..., cap: {:08x})", capability::short_id(module_cap));
+    kprintln!("..., cap: {:08x})", capability::short_id(&module_cap));
 
     // Parse args as i32 values
-    let args_vec: alloc::vec::Vec<Value> = arg_str.split_whitespace()
+    let args_vec: alloc::vec::Vec<Val> = arg_str.split_whitespace()
         .filter_map(|s| s.parse::<i32>().ok())
-        .map(|v| Value::I32(v))
+        .map(|v| Val::I32(v))
         .collect();
 
     // Determine function name: if no args, try _start; otherwise use module name
@@ -537,7 +537,7 @@ pub fn bootstrap_wasm() {
     let mut stored = 0;
     for (name, data) in modules {
         if npkfs::fetch(name).is_err() {
-            if npkfs::store(name, data, 0).is_ok() {
+            if npkfs::store(name, data, capability::CAP_NULL).is_ok() {
                 stored += 1;
             }
         }
@@ -710,7 +710,7 @@ fn intent_http(args: &str) {
     if let Some(name) = store_as {
         // Store response body in npkFS
         let body = &response[body_start..];
-        match crate::npkfs::store(&name, body, 0) {
+        match crate::npkfs::store(&name, body, capability::CAP_NULL) {
             Ok(hash) => {
                 kprint!("[npk] Stored '{}' ({} bytes, hash: ", name, body.len());
                 for b in &hash[..4] { kprint!("{:02x}", b); }

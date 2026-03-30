@@ -1,7 +1,7 @@
 //! Capability System
 //!
 //! Security foundation of nopeekOS. No chmod, no ACLs, no users.
-//! Every permission is a token with a random 128-bit ID.
+//! Every permission is a token with a random 256-bit ID (post-quantum safe).
 //! Inspired by seL4 capabilities.
 
 use bitflags::bitflags;
@@ -9,10 +9,16 @@ use spin::Mutex;
 use crate::audit::{self, AuditOp, DenyReason};
 use crate::interrupts;
 
+/// 256-bit capability token ID (post-quantum: Grover-safe at 128-bit effective)
+pub type CapId = [u8; 32];
+
+/// Null capability (no access)
+pub const CAP_NULL: CapId = [0u8; 32];
+
 const MAX_CAPABILITIES: usize = 256;
 
 static VAULT: Mutex<Vault> = Mutex::new(Vault::empty());
-static ROOT_CAP: Mutex<u128> = Mutex::new(0);
+static ROOT_CAP: Mutex<CapId> = Mutex::new(CAP_NULL);
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,10 +46,10 @@ pub enum ResourceKind {
 
 #[derive(Debug, Clone)]
 pub struct Capability {
-    pub id: u128,
+    pub id: CapId,
     pub resource: ResourceKind,
     pub rights: Rights,
-    pub parent: Option<u128>,
+    pub parent: Option<CapId>,
     pub active: bool,
     /// Tick at which this capability expires. None = no expiry.
     pub expires_at: Option<u64>,
@@ -70,12 +76,12 @@ impl Vault {
     /// Temporal monotonicity: child expiry ≤ parent expiry.
     pub fn create(
         &mut self,
-        parent_id: u128,
+        parent_id: CapId,
         resource: ResourceKind,
         rights: Rights,
         ttl_ticks: Option<u64>,
-    ) -> Result<u128, CapError> {
-        let parent = self.find(parent_id).ok_or(CapError::NotFound)?;
+    ) -> Result<CapId, CapError> {
+        let parent = self.find(&parent_id).ok_or(CapError::NotFound)?;
         if !parent.active {
             audit::record(AuditOp::Denied { reason: DenyReason::Revoked });
             return Err(CapError::Revoked);
@@ -121,7 +127,7 @@ impl Vault {
 
     /// Initialize vault with root capability. Returns vault ref + root cap ID.
     /// Requires csprng::init() to be called first.
-    pub fn init() -> (&'static Mutex<Vault>, u128) {
+    pub fn init() -> (&'static Mutex<Vault>, CapId) {
         let root_id = next_id();
         {
             let mut vault = VAULT.lock();
@@ -140,33 +146,33 @@ impl Vault {
     }
 
     /// Revoke a capability and all its children (transitive)
-    pub fn revoke(&mut self, revoker_id: u128, target_id: u128) -> Result<(), CapError> {
-        let revoker = self.find(revoker_id).ok_or(CapError::NotFound)?;
+    pub fn revoke(&mut self, revoker_id: CapId, target_id: CapId) -> Result<(), CapError> {
+        let revoker = self.find(&revoker_id).ok_or(CapError::NotFound)?;
         if !revoker.rights.contains(Rights::REVOKE) {
             audit::record(AuditOp::Denied { reason: DenyReason::InsufficientRights });
             return Err(CapError::InsufficientRights);
         }
-        self.revoke_recursive(target_id);
+        self.revoke_recursive(&target_id);
         audit::record(AuditOp::Revoke { revoker_id, target_id });
         Ok(())
     }
 
     /// Check if a capability grants the required rights
-    pub fn check(&self, cap_id: u128, required: Rights) -> Result<&Capability, CapError> {
+    pub fn check(&self, cap_id: &CapId, required: Rights) -> Result<&Capability, CapError> {
         let cap = self.find(cap_id).ok_or(CapError::NotFound)?;
         if !cap.active {
             audit::record(AuditOp::Denied { reason: DenyReason::Revoked });
             return Err(CapError::Revoked);
         }
         if cap.is_expired() {
-            audit::record(AuditOp::Expired { cap_id });
+            audit::record(AuditOp::Expired { cap_id: *cap_id });
             return Err(CapError::Expired);
         }
         if !cap.rights.contains(required) {
             audit::record(AuditOp::Denied { reason: DenyReason::InsufficientRights });
             return Err(CapError::InsufficientRights);
         }
-        audit::record(AuditOp::Check { cap_id });
+        audit::record(AuditOp::Check { cap_id: *cap_id });
         Ok(cap)
     }
 
@@ -177,42 +183,42 @@ impl Vault {
         (active, MAX_CAPABILITIES)
     }
 
-    fn find(&self, id: u128) -> Option<&Capability> {
-        self.caps.iter().filter_map(|c| c.as_ref()).find(|c| c.id == id)
+    fn find(&self, id: &CapId) -> Option<&Capability> {
+        self.caps.iter().filter_map(|c| c.as_ref()).find(|c| c.id == *id)
     }
 
-    fn revoke_recursive(&mut self, target_id: u128) {
+    fn revoke_recursive(&mut self, target_id: &CapId) {
         for cap in self.caps.iter_mut().flatten() {
-            if cap.id == target_id { cap.active = false; }
+            if cap.id == *target_id { cap.active = false; }
         }
-        let mut children = [0u128; 64];
+        let mut children = [[0u8; 32]; 64];
         let mut child_count = 0;
         for cap in self.caps.iter().filter_map(|c| c.as_ref()) {
-            if cap.parent == Some(target_id) && cap.active && child_count < 64 {
+            if cap.parent.as_ref() == Some(target_id) && cap.active && child_count < 64 {
                 children[child_count] = cap.id;
                 child_count += 1;
             }
         }
         for i in 0..child_count {
-            self.revoke_recursive(children[i]);
+            self.revoke_recursive(&children[i]);
         }
     }
 }
 
 /// Create a capability for a WASM module (delegates from root internally).
-pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<u128, CapError> {
+pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId, CapError> {
     let root = *ROOT_CAP.lock();
     VAULT.lock().create(root, ResourceKind::Execute, rights, ttl_ticks)
 }
 
 /// Check a capability against the global vault.
-pub fn check_global(cap_id: u128, required: Rights) -> Result<(), CapError> {
+pub fn check_global(cap_id: &CapId, required: Rights) -> Result<(), CapError> {
     VAULT.lock().check(cap_id, required).map(|_| ())
 }
 
-/// Short hex representation of a 128-bit cap ID (first 8 hex chars)
-pub fn short_id(id: u128) -> u32 {
-    (id >> 96) as u32
+/// Short hex representation of a 256-bit cap ID (first 8 hex chars = 4 bytes)
+pub fn short_id(id: &CapId) -> u32 {
+    u32::from_be_bytes([id[0], id[1], id[2], id[3]])
 }
 
 #[derive(Debug)]
@@ -238,6 +244,6 @@ impl core::fmt::Display for CapError {
     }
 }
 
-fn next_id() -> u128 {
-    crate::csprng::random_u128()
+fn next_id() -> CapId {
+    crate::csprng::random_256()
 }
