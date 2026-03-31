@@ -32,6 +32,7 @@ mod rtc;
 mod vga;
 mod wasm;
 mod shell;
+mod keyboard;
 
 use core::panic::PanicInfo;
 
@@ -65,6 +66,8 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] Initializing IDT + PIC...");
     interrupts::init();
     kprintln!("[npk] Interrupts enabled.");
+    keyboard::init();
+    kprintln!("[npk] PS/2 keyboard: enabled (IRQ1)");
     vga::show_status(b"Interrupts enabled (IDT + PIC)");
 
     kprintln!("[npk] Initializing Physical Memory Manager...");
