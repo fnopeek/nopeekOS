@@ -1,11 +1,19 @@
 //! IPv4 — Internet Protocol v4
 
 use super::{eth, arp};
+use spin::Mutex;
 
 pub const PROTO_ICMP: u8 = 1;
 pub const PROTO_UDP: u8  = 17;
 pub const PROTO_TCP: u8  = 6;
 const HEADER_LEN: usize  = 20; // no options
+
+static GATEWAY: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 2]); // QEMU default
+static SUBNET:  Mutex<[u8; 4]> = Mutex::new([255, 255, 255, 0]);
+
+pub fn set_gateway(ip: [u8; 4]) { *GATEWAY.lock() = ip; }
+pub fn set_subnet(mask: [u8; 4]) { *SUBNET.lock() = mask; }
+pub fn gateway() -> [u8; 4] { *GATEWAY.lock() }
 
 pub fn handle_ipv4(data: &[u8]) {
     if data.len() < HEADER_LEN { return; }
@@ -61,11 +69,15 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) {
     // Payload
     pkt[HEADER_LEN..].copy_from_slice(payload);
 
-    // Resolve MAC (use gateway for non-local, or ARP cache)
-    let dst_mac = arp::lookup(dst_ip).unwrap_or(
-        // Default gateway MAC: try the gateway IP (10.0.2.2 in QEMU user-mode)
-        arp::lookup([10, 0, 2, 2]).unwrap_or(eth::BROADCAST)
-    );
+    // Resolve MAC: local subnet → ARP direct, else → gateway
+    let mask = *SUBNET.lock();
+    let src_masked = [src_ip[0] & mask[0], src_ip[1] & mask[1],
+                      src_ip[2] & mask[2], src_ip[3] & mask[3]];
+    let dst_masked = [dst_ip[0] & mask[0], dst_ip[1] & mask[1],
+                      dst_ip[2] & mask[2], dst_ip[3] & mask[3]];
+    let is_local = dst_ip == [255, 255, 255, 255] || src_masked == dst_masked;
+    let arp_target = if is_local { dst_ip } else { *GATEWAY.lock() };
+    let dst_mac = arp::lookup(arp_target).unwrap_or(eth::BROADCAST);
 
     let _ = eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt);
 }

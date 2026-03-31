@@ -17,7 +17,7 @@ pub fn intent_lock() {
             let start = crate::interrupts::ticks();
             let delay_ticks = delay_secs * 100;
             while crate::interrupts::ticks() - start < delay_ticks {
-                unsafe { core::arch::asm!("hlt"); }
+                core::hint::spin_loop();
             }
         }
 

@@ -150,8 +150,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
             close_cleanup(handle);
             return Err(TcpError::Timeout);
         }
-        // SAFETY: hlt sleeps until next interrupt (timer at 100Hz)
-        unsafe { core::arch::asm!("hlt"); }
+        core::hint::spin_loop();
     }
 
     Ok(handle)
@@ -209,8 +208,7 @@ pub fn accept(handle: usize, timeout_ticks: u64) -> Result<(), TcpError> {
         if timeout_ticks > 0 && crate::interrupts::ticks() - t0 > timeout_ticks {
             return Err(TcpError::Timeout);
         }
-        // SAFETY: hlt sleeps until next interrupt (timer at 100Hz)
-        unsafe { core::arch::asm!("hlt"); }
+        core::hint::spin_loop();
     }
 }
 
@@ -310,8 +308,7 @@ pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Resul
         if crate::interrupts::ticks() - t0 > timeout_ticks {
             return Ok(0);
         }
-        // SAFETY: hlt sleeps until next interrupt (timer at 100Hz)
-        unsafe { core::arch::asm!("hlt"); }
+        core::hint::spin_loop();
     }
 }
 

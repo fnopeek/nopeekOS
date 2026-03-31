@@ -46,21 +46,30 @@ pub fn init() {
     }
 }
 
-/// Check if a key is available in the buffer.
+/// Check if a key is available (IRQ buffer or polled port 0x60).
 pub fn has_key() -> bool {
     // SAFETY: single-core, IRQ handler is the only writer
-    unsafe { BUF_HEAD != BUF_TAIL }
+    unsafe {
+        if BUF_HEAD != BUF_TAIL { return true; }
+            // Check xHCI USB keyboard
+        crate::xhci::is_available()
+    }
 }
 
-/// Read next key from buffer. Returns None if empty.
+/// Read next key from buffer. Falls back to polling port 0x60.
 pub fn read_key() -> Option<u8> {
     unsafe {
-        if BUF_HEAD == BUF_TAIL {
-            return None;
+        // First check IRQ-driven buffer
+        if BUF_HEAD != BUF_TAIL {
+            let key = KEY_BUF[BUF_TAIL];
+            BUF_TAIL = (BUF_TAIL + 1) % BUF_SIZE;
+            return Some(key);
         }
-        let key = KEY_BUF[BUF_TAIL];
-        BUF_TAIL = (BUF_TAIL + 1) % BUF_SIZE;
-        Some(key)
+        // xHCI USB keyboard (real driver, no legacy emulation needed)
+        if let Some(k) = crate::xhci::poll_keyboard() {
+            return Some(k);
+        }
+        None
     }
 }
 
@@ -83,60 +92,45 @@ fn wait_write() {
     }
 }
 
-/// IRQ1 handler — called from interrupts.rs.
-pub fn irq_handler() {
-    // SAFETY: called from interrupt context, port 0x60 has the scancode
-    let scancode = unsafe { inb(DATA_PORT) };
-
-    // Extended scancode prefix (0xE0) — skip for now
-    if scancode == 0xE0 {
-        return;
-    }
+/// Decode a raw scancode into an ASCII character (handles modifiers).
+fn decode_scancode(scancode: u8) -> Option<u8> {
+    if scancode == 0xE0 { return None; }
 
     let released = scancode & 0x80 != 0;
     let code = scancode & 0x7F;
 
-    // Handle modifier keys
     match code {
-        0x2A | 0x36 => { // Left/Right Shift
-            SHIFT.store(!released, Ordering::Relaxed);
-            return;
-        }
-        0x1D => { // Left Ctrl
-            CTRL.store(!released, Ordering::Relaxed);
-            return;
-        }
-        0x3A => { // Caps Lock (toggle on press)
+        0x2A | 0x36 => { SHIFT.store(!released, Ordering::Relaxed); return None; }
+        0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; }
+        0x3A => {
             if !released {
                 let prev = CAPS_LOCK.load(Ordering::Relaxed);
                 CAPS_LOCK.store(!prev, Ordering::Relaxed);
             }
-            return;
+            return None;
         }
         _ => {}
     }
 
-    // Only process key presses, not releases
-    if released { return; }
+    if released { return None; }
 
     let shift = SHIFT.load(Ordering::Relaxed);
     let ctrl = CTRL.load(Ordering::Relaxed);
     let caps = CAPS_LOCK.load(Ordering::Relaxed);
 
-    // Ctrl+C → 0x03 (ETX)
-    if ctrl && code == 0x2E {
-        push_key(0x03);
-        return;
-    }
+    if ctrl && code == 0x2E { return Some(0x03); }
 
-    // Get layout based on config
     let layout = crate::config::get("keyboard");
-    let ch = match layout.as_deref() {
-        Some("de_CH") | Some("de") | Some("de_DE") => scancode_to_char_de(code, shift, caps),
-        _ => scancode_to_char_us(code, shift, caps),
-    };
+    match layout.as_deref() {
+        Some("us") => scancode_to_char_us(code, shift, caps),
+        _ => scancode_to_char_de(code, shift, caps), // default: de_CH
+    }
+}
 
-    if let Some(c) = ch {
+/// IRQ1 handler — called from interrupts.rs.
+pub fn irq_handler() {
+    let scancode = unsafe { inb(DATA_PORT) };
+    if let Some(c) = decode_scancode(scancode) {
         push_key(c);
     }
 }
