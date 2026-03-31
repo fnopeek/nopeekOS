@@ -35,6 +35,7 @@ mod shell;
 mod keyboard;
 mod nvme;
 mod blkdev;
+mod setup;
 
 use core::panic::PanicInfo;
 
@@ -133,30 +134,25 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
 
     csprng::init();
 
-    if virtio_blk::is_available() {
-        kprintln!("[npk] Mounting npkFS...");
-        match npkfs::mount() {
-            Ok(()) => vga::show_status(b"npkFS mounted"),
-            Err(_) => {
-                kprintln!("[npk] npkFS: not formatted, formatting...");
-                match npkfs::mkfs().and_then(|_| npkfs::mount()) {
-                    Ok(()) => vga::show_status(b"npkFS formatted + mounted"),
-                    Err(e) => kprintln!("[npk] npkFS: failed: {}", e),
-                }
-            }
-        }
-    }
-
     kprintln!("[npk] Initializing WASM Runtime...");
     wasm::init();
     vga::show_status(b"WASM runtime online (wasmi)");
 
     // === Identity: Passphrase → Master Key ===
     //
-    // First boot (setup):  Choose passphrase → store keycheck object
-    // Subsequent boots:    Enter passphrase → verify against keycheck
+    // First boot:       Setup wizard (storage, name, passphrase, settings)
+    // Subsequent boots: Enter passphrase → verify against keycheck
     //
     // No users. No accounts. Your passphrase IS your identity.
+
+    // Try to mount existing npkFS first
+    let mut mounted = false;
+    if blkdev::is_available() {
+        if npkfs::mount().is_ok() {
+            mounted = true;
+            vga::show_status(b"npkFS mounted");
+        }
+    }
 
     // Per-installation random salt (generated at mkfs, stored in superblock)
     let salt = npkfs::install_salt().unwrap_or_else(|| {
@@ -166,75 +162,17 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         s
     });
 
-    let is_setup = !npkfs::exists(".npk-keycheck");
+    let is_first_boot = !mounted || !npkfs::exists(".npk-keycheck");
 
-    if is_setup {
-        // === First boot: Setup ===
-        kprintln!();
-        kprintln!("[npk] ══════════════════════════════════");
-        kprintln!("[npk]  Welcome to nopeekOS.");
-        kprintln!("[npk]  No users. No root. No legacy.");
-        kprintln!("[npk]  Choose a passphrase to protect");
-        kprintln!("[npk]  this system. It cannot be recovered.");
-        kprintln!("[npk] ══════════════════════════════════");
-        kprintln!();
-
-        let _master_key = loop {
-            kprint!("[npk] New passphrase: ");
-            let mut buf1 = [0u8; 128];
-            let len1 = { serial::SERIAL.lock().read_line_masked(&mut buf1) };
-            if len1 < 8 {
-                kprintln!("[npk] Too short. Minimum 8 characters.");
-                continue;
-            }
-
-            kprint!("[npk] Confirm passphrase: ");
-            let mut buf2 = [0u8; 128];
-            let len2 = { serial::SERIAL.lock().read_line_masked(&mut buf2) };
-
-            if len1 != len2 || buf1[..len1] != buf2[..len2] {
-                kprintln!("[npk] Passphrases do not match. Try again.");
-                for b in buf1.iter_mut() { *b = 0; }
-                for b in buf2.iter_mut() { *b = 0; }
-                continue;
-            }
-
-            let key = crypto::derive_master_key(&buf1[..len1], &salt);
-            for b in buf1.iter_mut() { *b = 0; }
-            for b in buf2.iter_mut() { *b = 0; }
-            break key;
-        };
-
-        // Store master key and write keycheck object
-        crypto::set_master_key(_master_key);
-
-        // The keycheck is a known plaintext that we can verify on next boot
-        let keycheck_data = b"nopeekOS.keycheck.v1.valid";
-        match npkfs::store(".npk-keycheck", keycheck_data, capability::CAP_NULL) {
-            Ok(_) => {}
-            Err(e) => kprintln!("[npk] WARNING: Could not store keycheck: {}", e),
+    if is_first_boot {
+        // === First boot: Setup Wizard ===
+        if !setup::run_first_boot(&salt) {
+            kprintln!("[npk] Setup failed. System halted.");
+            loop { unsafe { core::arch::asm!("cli; hlt"); } }
         }
-
-        // Ask for display name
-        kprint!("[npk] What should I call you? ");
-        let mut name_buf = [0u8; 64];
-        let name_len = { serial::SERIAL.lock().read_line(&mut name_buf) };
-        if name_len > 0 {
-            if let Ok(name) = core::str::from_utf8(&name_buf[..name_len]) {
-                let name = name.trim();
-                if !name.is_empty() {
-                    config::set("name", name);
-                    kprintln!("[npk] Welcome, {}. System is yours.", name);
-                } else {
-                    kprintln!("[npk] Identity configured. System is yours.");
-                }
-            }
-        } else {
-            kprintln!("[npk] Identity configured. System is yours.");
-        }
-        vga::show_status(b"Identity configured");
+        vga::show_status(b"Setup complete");
     } else {
-        // === Subsequent boot: Verify ===
+        // === Subsequent boot: Verify passphrase ===
         kprintln!();
         kprintln!("[npk] ─────────────────────────────────");
         kprintln!("[npk]  Identity required.");
@@ -244,12 +182,11 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
 
         let mut attempts: u32 = 0;
         let _master_key = loop {
-            // Exponential backoff: 0, 2, 4, 8, 16... seconds
             if attempts > 0 {
-                let delay_secs = 1u64 << attempts.min(5); // max 32s
+                let delay_secs = 1u64 << attempts.min(5);
                 kprintln!("[npk] Wait {} seconds...", delay_secs);
                 let start = interrupts::ticks();
-                let delay_ticks = delay_secs * 100; // 100Hz timer
+                let delay_ticks = delay_secs * 100;
                 while interrupts::ticks() - start < delay_ticks {
                     // SAFETY: hlt until next timer interrupt
                     unsafe { core::arch::asm!("hlt"); }
@@ -267,30 +204,23 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
             let key = crypto::derive_master_key(&buf[..len], &salt);
             for b in buf.iter_mut() { *b = 0; }
 
-            // Temporarily set key to test decryption
             crypto::set_master_key(key);
 
             match npkfs::fetch(".npk-keycheck") {
-                Ok((data, _)) => {
-                    if &data[..] == b"nopeekOS.keycheck.v1.valid" {
-                        // Load config to get name for welcome message
-                        config::load();
-                        if let Some(name) = config::get("name") {
-                            kprintln!("[npk] Welcome back, {}.", name);
-                        } else {
-                            kprintln!("[npk] Identity verified.");
-                        }
-                        break key;
+                Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
+                    config::load();
+                    if let Some(name) = config::get("name") {
+                        kprintln!("[npk] Welcome back, {}.", name);
+                    } else {
+                        kprintln!("[npk] Identity verified.");
                     }
-                    // AEAD passed but content wrong — shouldn't happen
-                    kprintln!("[npk] Keycheck mismatch.");
+                    break key;
                 }
-                Err(_) => {
+                _ => {
                     kprintln!("[npk] Wrong passphrase.");
                 }
             }
 
-            // Wrong passphrase — clear key and retry
             crypto::clear_master_key();
             attempts += 1;
 
