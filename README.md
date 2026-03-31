@@ -73,7 +73,7 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  │  Drivers                                                 │
  │  PCI bus scanner, virtio-blk (TRIM), virtio-net          │
  ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, ~5500 lines)                 │
+ │  Kernel Core (Rust, no_std, ~11400 lines)                │
  │  Memory Manager, Heap, Paging+NX, IDT+PIC, Serial, VGA  │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
@@ -294,7 +294,14 @@ nopeekOS/
 │       │   ├── x509.rs          # X.509 certificate parser
 │       │   └── certstore.rs     # Root CAs + chain validation
 │       ├── wasm.rs              # WASM runtime + host functions
-│       ├── intent.rs            # Intent loop + all intents
+│       ├── intent/              # Intent loop
+│       │   ├── mod.rs           # Loop, dispatch, CWD, tab-completion
+│       │   ├── fs.rs            # store, fetch, cat, grep, head, wc, hexdump, list
+│       │   ├── net.rs           # ping, traceroute, netstat, resolve
+│       │   ├── http.rs          # HTTP/HTTPS GET (TLS 1.3)
+│       │   ├── wasm.rs          # run, add, multiply, bootstrap
+│       │   ├── system.rs        # status, time, help, caps, audit, halt, config
+│       │   └── auth.rs          # lock, passwd
 │       └── vga.rs               # VGA text mode
 ```
 
