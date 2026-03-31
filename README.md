@@ -188,18 +188,24 @@ Every execution is a sandboxed WASM module:
 - [x] X.509 certificate chain validation
 - [x] Embedded root CAs (ISRG Root X1, DigiCert Global G2)
 - [x] SHA-256, HMAC-SHA256, HKDF, RSA PKCS#1 v1.5 verify
+
+### Phase 7 -- Bare Metal (target: Intel N100 NUC)
+
+- [ ] PS/2 keyboard driver (IRQ1, Scancode Set 1, DE layout, USB-legacy via BIOS)
+- [ ] NVMe driver (PCIe, Admin/IO queues, Read/Write/TRIM)
+- [ ] Intel Ethernet driver (I226-V / igc, MMIO, RX/TX descriptor rings)
+- [ ] npk-shell: TLS-encrypted remote intent loop (TCP listener, passphrase auth)
+- [ ] Framebuffer driver (VESA/GOP)
 - [ ] Hardware manifest collector (PCI + CPUID + ACPI probe)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
-- [ ] Driver mirror (fetch matching WASM drivers on demand based on HW manifest)
 
-### Phase 7 -- Human View
+### Phase 8 -- Human View
 
-- [ ] Framebuffer driver (VESA/GOP)
 - [ ] Tiling window manager (Hyprland-inspired)
-- [ ] Keyboard + mouse input (PS/2, virtio-input)
+- [ ] Mouse input (PS/2, virtio-input)
 - [ ] Web rendering engine (long-term)
 
-### Phase 8 -- AI Integration
+### Phase 9 -- AI Integration
 
 - [ ] External AI service via network
 - [ ] Intent resolution through LLM

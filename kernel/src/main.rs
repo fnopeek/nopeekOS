@@ -31,6 +31,7 @@ mod config;
 mod rtc;
 mod vga;
 mod wasm;
+mod shell;
 
 use core::panic::PanicInfo;
 

@@ -165,6 +165,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  passwd                Change passphrase");
             kprintln!("  caps                  Show capability vault");
             kprintln!("  audit                 Security event log");
+            kprintln!("  shell                 Start encrypted remote shell (port 4444)");
             kprintln!();
         }
         "config" | "set" | "settings" => {
@@ -198,7 +199,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Content:   cat · grep · head · wc · hexdump");
             kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");
             kprintln!("  Exec:      run · add · multiply");
-            kprintln!("  Security:  lock · passwd · caps · audit");
+            kprintln!("  Security:  lock · passwd · caps · audit · shell");
             kprintln!("  Config:    set · get · config");
             kprintln!("  Disk:      disk read · disk write");
             kprintln!();

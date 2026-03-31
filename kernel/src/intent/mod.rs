@@ -476,6 +476,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             auth::intent_passwd();
         }
 
+        "shell" | "npk-shell" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "shell") {
+                crate::shell::serve_one(vault, session);
+            }
+        }
+
         "set" => {
             if require_cap(vault, &session, Rights::WRITE, "set") {
                 system::intent_set(args);
@@ -589,4 +595,14 @@ pub fn setup_home() {
     let home = home_dir();
     ensure_parents(&home);
     set_cwd(&home);
+}
+
+/// Expose CWD for npk-shell.
+pub fn get_cwd_for_shell() -> String {
+    get_cwd()
+}
+
+/// Execute an intent from npk-shell (dispatch without the loop).
+pub fn dispatch_for_shell(input: &str, vault: &'static Mutex<Vault>, session_id: CapId) {
+    dispatch_intent(input, vault, session_id);
 }
