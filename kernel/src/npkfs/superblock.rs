@@ -13,7 +13,7 @@ pub fn read_best(cache: &mut BlockCache) -> Result<Option<SuperblockRaw>, FsErro
 
     for slot in 0..SUPERBLOCK_SLOTS {
         let mut buf = AlignedBlock::zeroed();
-        if cache.read(slot, &mut buf.0).is_err() { continue; }
+        if cache.read(SUPERBLOCK_START + slot, &mut buf.0).is_err() { continue; }
 
         // SAFETY: AlignedBlock is 16-byte aligned, SuperblockRaw is repr(C) and BLOCK_SIZE
         let sb = unsafe { &*(buf.0.as_ptr() as *const SuperblockRaw) };
@@ -32,7 +32,7 @@ pub fn read_best(cache: &mut BlockCache) -> Result<Option<SuperblockRaw>, FsErro
 /// Write superblock to the next ring slot. Returns the slot used.
 pub fn write_next(cache: &mut BlockCache, sb: &mut SuperblockRaw) -> Result<u64, FsError> {
     sb.set_checksum();
-    let slot = sb.generation % SUPERBLOCK_SLOTS;
+    let slot = SUPERBLOCK_START + (sb.generation % SUPERBLOCK_SLOTS);
     let buf = unsafe { &*(sb as *const SuperblockRaw as *const [u8; BLOCK_SIZE]) };
     cache.write(slot, buf)?;
     Ok(slot)
@@ -43,7 +43,7 @@ pub fn write_all(cache: &mut BlockCache, sb: &mut SuperblockRaw) -> Result<(), F
     sb.set_checksum();
     let buf = unsafe { &*(sb as *const SuperblockRaw as *const [u8; BLOCK_SIZE]) };
     for slot in 0..SUPERBLOCK_SLOTS {
-        cache.write(slot, buf)?;
+        cache.write(SUPERBLOCK_START + slot, buf)?;
     }
     Ok(())
 }

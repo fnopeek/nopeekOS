@@ -15,9 +15,10 @@ pub const BTREE_MAGIC: u32 = 0x4E504B42; // "NPKB"
 pub const VERSION: u32 = 1;
 
 pub const SUPERBLOCK_SLOTS: u64 = 8;
-pub const JOURNAL_START: u64 = 8;
+pub const SUPERBLOCK_START: u64 = 1; // Block 0 reserved (MBR/GPT/UEFI)
+pub const JOURNAL_START: u64 = SUPERBLOCK_START + SUPERBLOCK_SLOTS; // 9
 pub const JOURNAL_BLOCKS: u64 = 256;
-pub const META_END: u64 = JOURNAL_START + JOURNAL_BLOCKS; // 264
+pub const META_END: u64 = JOURNAL_START + JOURNAL_BLOCKS; // 265
 
 pub const MAX_NAME_LEN: usize = 63;
 pub const MAX_EXTENTS: usize = 4;

@@ -46,8 +46,8 @@ pub fn intent_lock() {
                 kprintln!("[npk] Wrong passphrase.");
                 attempts += 1;
                 if attempts >= 10 {
-                    kprintln!("[npk] Too many failed attempts. System halted.");
-                    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                    kprintln!("[npk] Too many failed attempts.");
+                    crate::intent::system::intent_halt();
                 }
             }
         }
