@@ -5,10 +5,31 @@
 
 use core::fmt;
 use spin::Mutex;
+use alloc::string::String;
 
 const COM1: u16 = 0x3F8;
 
 pub static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(COM1));
+
+// Output capture for npk-shell: when active, all kprint output is also buffered
+static CAPTURE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Start capturing serial output into a buffer.
+pub fn start_capture() {
+    *CAPTURE.lock() = Some(String::new());
+}
+
+/// Stop capturing and return the captured output.
+pub fn stop_capture() -> String {
+    CAPTURE.lock().take().unwrap_or_default()
+}
+
+/// Append to capture buffer if active (called from write_str).
+fn capture_bytes(s: &str) {
+    if let Some(ref mut buf) = *CAPTURE.lock() {
+        buf.push_str(s);
+    }
+}
 
 pub struct SerialPort {
     base: u16,
@@ -131,6 +152,7 @@ impl fmt::Write for SerialPort {
             }
             self.write_byte(byte);
         }
+        capture_bytes(s);
         Ok(())
     }
 }

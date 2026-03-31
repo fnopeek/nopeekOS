@@ -33,6 +33,8 @@ const HEADER_LEN: usize = 20; // no options (options added separately for SYN)
 #[allow(dead_code)]
 enum State {
     Closed,
+    Listen,
+    SynReceived,
     SynSent,
     Established,
     FinWait1,
@@ -152,6 +154,91 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
     }
 
     Ok(handle)
+}
+
+/// Listen on a local port. Returns handle. Use accept() to wait for connection.
+pub fn listen(port: u16) -> Result<usize, TcpError> {
+    let conn = TcpConn {
+        state: State::Listen,
+        local_port: port,
+        remote_ip: [0; 4],
+        remote_port: 0,
+        snd_nxt: 0,
+        snd_una: 0,
+        snd_iss: 0,
+        rcv_nxt: 0,
+        rcv_irs: 0,
+        recv_buf: VecDeque::with_capacity(RECV_BUF_SIZE),
+        send_buf: Vec::new(),
+        retries: 0,
+        last_send_tick: 0,
+        ack_pending: false,
+        ack_tick: 0,
+        established: false,
+        closed: false,
+        error: false,
+    };
+
+    let mut conns = CONNECTIONS.lock();
+    let slot = conns.iter().position(|c| c.is_none())
+        .ok_or(TcpError::TooManyConnections)?;
+    conns[slot] = Some(conn);
+    Ok(slot)
+}
+
+/// Wait for an incoming connection on a listening handle. Blocking.
+pub fn accept(handle: usize, timeout_ticks: u64) -> Result<(), TcpError> {
+    let t0 = crate::interrupts::ticks();
+    loop {
+        super::poll();
+        tick_connections();
+
+        let conns = CONNECTIONS.lock();
+        if let Some(ref c) = conns[handle] {
+            if c.established { return Ok(()); }
+            if c.error || c.closed {
+                drop(conns);
+                return Err(TcpError::ConnectionFailed);
+            }
+        } else {
+            return Err(TcpError::NotConnected);
+        }
+        drop(conns);
+
+        if timeout_ticks > 0 && crate::interrupts::ticks() - t0 > timeout_ticks {
+            return Err(TcpError::Timeout);
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Reset a connection back to Listen state (for accepting next client).
+pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
+    let port = conn.local_port;
+
+    *conn = TcpConn {
+        state: State::Listen,
+        local_port: port,
+        remote_ip: [0; 4],
+        remote_port: 0,
+        snd_nxt: 0,
+        snd_una: 0,
+        snd_iss: 0,
+        rcv_nxt: 0,
+        rcv_irs: 0,
+        recv_buf: VecDeque::with_capacity(RECV_BUF_SIZE),
+        send_buf: Vec::new(),
+        retries: 0,
+        last_send_tick: 0,
+        ack_pending: false,
+        ack_tick: 0,
+        established: false,
+        closed: false,
+        error: false,
+    };
+    Ok(())
 }
 
 /// Send data on a connection. Buffers and sends immediately (no Nagle).
@@ -283,7 +370,41 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
     let idx = match idx {
         Some(i) => i,
         None => {
-            // No connection: send RST if not RST
+            // Check for a listener on this port
+            if flags & SYN != 0 {
+                let listen_idx = conns.iter().position(|c| {
+                    c.as_ref().map_or(false, |c|
+                        c.local_port == dst_port && c.state == State::Listen
+                    )
+                });
+                if let Some(li) = listen_idx {
+                    // Accept the SYN on the listening socket
+                    let iss = crate::interrupts::ticks() as u32;
+                    let conn = conns[li].as_mut().unwrap();
+                    conn.state = State::SynReceived;
+                    conn.remote_ip = src_ip;
+                    conn.remote_port = src_port;
+                    conn.rcv_irs = seq;
+                    conn.rcv_nxt = seq.wrapping_add(1);
+                    conn.snd_iss = iss;
+                    conn.snd_nxt = iss.wrapping_add(1);
+                    conn.snd_una = iss;
+                    conn.last_send_tick = crate::interrupts::ticks();
+
+                    // Send SYN-ACK with MSS option
+                    let mut opts = [0u8; 4];
+                    opts[0] = 2;  // MSS option kind
+                    opts[1] = 4;  // MSS option length
+                    opts[2..4].copy_from_slice(&MSS.to_be_bytes());
+
+                    send_segment_with_opts(
+                        src_ip, dst_port, src_port,
+                        iss, seq.wrapping_add(1), SYN | ACK, INITIAL_WINDOW, &[], &opts,
+                    );
+                    return;
+                }
+            }
+            // No connection and no listener: send RST if not RST
             if flags & RST == 0 {
                 send_segment(src_ip, dst_port, src_port, ack, seq.wrapping_add(1), RST | ACK, 0, &[]);
             }
@@ -301,6 +422,15 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
     }
 
     match conn.state {
+        State::SynReceived => {
+            // Waiting for ACK of our SYN-ACK
+            if flags & ACK != 0 {
+                conn.snd_una = ack;
+                conn.state = State::Established;
+                conn.established = true;
+            }
+        }
+
         State::SynSent => {
             if flags & SYN != 0 && flags & ACK != 0 {
                 // SYN-ACK received
@@ -544,6 +674,8 @@ pub fn list_connections() -> alloc::vec::Vec<(u16, [u8; 4], u16, &'static str)> 
     for slot in conns.iter().flatten() {
         let state_str = match slot.state {
             State::Closed => "CLOSED",
+            State::Listen => "LISTEN",
+            State::SynReceived => "SYN_RCVD",
             State::SynSent => "SYN_SENT",
             State::Established => "ESTABLISHED",
             State::FinWait1 => "FIN_WAIT_1",

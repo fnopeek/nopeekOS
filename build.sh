@@ -106,7 +106,7 @@ run_qemu() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
-        -nic user,model=virtio-net-pci \
+        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444 \
         -no-reboot \
         -no-shutdown
 }
@@ -129,7 +129,7 @@ run_qemu_gui() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
-        -nic user,model=virtio-net-pci \
+        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444 \
         -no-reboot \
         -no-shutdown
 }
@@ -153,7 +153,7 @@ run_debug() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
-        -nic user,model=virtio-net-pci \
+        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444 \
         -no-reboot \
         -no-shutdown \
         -s -S
