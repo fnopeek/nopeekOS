@@ -99,6 +99,7 @@ pub fn init() {
 
         // Hardware interrupt handlers
         IDT[PIC_OFFSET_MASTER as usize].set_handler(timer_handler as *const () as u64);
+        IDT[(PIC_OFFSET_MASTER + 1) as usize].set_handler(keyboard_handler as *const () as u64);
 
         // Load IDT
         let idt_reg = IdtRegister {
@@ -110,8 +111,8 @@ pub fn init() {
 
         pic_remap();
 
-        // Only unmask IRQ0 (timer) — needed for hlt wakeup
-        outb(PIC1_DATA, 0xFE);
+        // Unmask IRQ0 (timer) + IRQ1 (keyboard)
+        outb(PIC1_DATA, 0xFC);
         outb(PIC2_DATA, 0xFF);
 
         // Program PIT channel 0 to 100 Hz (10ms per tick)
@@ -216,6 +217,11 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     // No lock acquisition — deadlock-free
     unsafe { pic_eoi(0); }
+}
+
+extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
+    crate::keyboard::irq_handler();
+    unsafe { pic_eoi(1); }
 }
 
 fn halt_loop() -> ! {

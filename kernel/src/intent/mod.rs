@@ -94,7 +94,7 @@ fn ensure_parents(path: &str) {
     }
 }
 
-/// Read a line from serial with tab-completion, network polling, and shell check.
+/// Read a line from serial/keyboard with tab-completion, network polling, and shell check.
 fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: CapId) -> usize {
     let mut pos = 0;
 
@@ -103,14 +103,21 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         crate::net::poll();
         // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
-        let serial = serial::SERIAL.lock();
-        if !serial.has_data() {
+
+        // Check both serial and PS/2 keyboard for input
+        let byte = if let Some(key) = crate::keyboard::read_key() {
+            key
+        } else {
+            let serial = serial::SERIAL.lock();
+            if !serial.has_data() {
+                drop(serial);
+                unsafe { core::arch::asm!("hlt"); }
+                continue;
+            }
+            let b = serial.read_byte();
             drop(serial);
-            unsafe { core::arch::asm!("hlt"); }
-            continue;
-        }
-        let byte = serial.read_byte();
-        drop(serial);
+            b
+        };
 
         match byte {
             b'\r' | b'\n' => {
