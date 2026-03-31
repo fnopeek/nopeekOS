@@ -21,9 +21,10 @@ pub fn intent_status(vault: &Vault) {
     kprintln!("  Capabilities:  {}/{} active", active_caps, max_caps);
     kprintln!("  Audit log:     {} events", audit_count);
     kprintln!("  WASM Runtime:  wasmi (interpreter)");
-    if let Some(cap) = crate::virtio_blk::capacity() {
-        let mb = (cap * crate::virtio_blk::SECTOR_SIZE as u64) / (1024 * 1024);
-        kprintln!("  Block device:  {} MB ({} sectors, virtio-blk)", mb, cap);
+    if let Some(cap) = crate::blkdev::capacity() {
+        let mb = (cap * 512) / (1024 * 1024);
+        let dev = if crate::nvme::is_available() { "NVMe" } else { "virtio-blk" };
+        kprintln!("  Block device:  {} MB ({} sectors, {})", mb, cap, dev);
     } else {
         kprintln!("  Block device:  none");
     }

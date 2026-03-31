@@ -4,7 +4,7 @@
 //! SSD-friendly: minimizes write ops, groups flushes.
 
 use alloc::vec::Vec;
-use crate::{virtio_blk, memory};
+use crate::{blkdev, memory};
 use super::types::{BLOCK_SIZE, FsError};
 
 const CACHE_SLOTS: usize = 64;
@@ -26,7 +26,7 @@ impl BlockCache {
     pub fn new() -> Result<Self, FsError> {
         let pages = (CACHE_SLOTS * BLOCK_SIZE) / 4096;
         let data_base = memory::allocate_contiguous(pages)
-            .ok_or(FsError::Disk(virtio_blk::BlkError::NotInitialized))?;
+            .ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
         // SAFETY: Zeroing freshly allocated identity-mapped memory
         unsafe { core::ptr::write_bytes(data_base as *mut u8, 0, pages * 4096); }
 
@@ -73,7 +73,7 @@ impl BlockCache {
         let block = self.meta[slot].block;
         let ptr = self.slot_ptr(slot);
         let buf = unsafe { &*(ptr as *const [u8; BLOCK_SIZE]) };
-        virtio_blk::write_block(block, buf)?;
+        blkdev::write_block(block, buf)?;
         self.meta[slot].dirty = false;
         Ok(())
     }
@@ -92,7 +92,7 @@ impl BlockCache {
         }
 
         // Cache miss: load from disk
-        virtio_blk::read_block(block, buf)?;
+        blkdev::read_block(block, buf)?;
 
         // Cache it
         let slot = self.evict_slot()?;
