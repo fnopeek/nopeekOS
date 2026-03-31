@@ -27,6 +27,8 @@ mod npkfs;
 mod net;
 mod intent;
 mod tls;
+mod config;
+mod rtc;
 mod vga;
 mod wasm;
 
@@ -88,6 +90,15 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         kprintln!("[npk] virtio-blk: not available (no disk attached)");
     }
 
+    // RTC: immediate wall clock (no network needed)
+    if let Some(t) = rtc::read_unix_time() {
+        net::ntp::set_time(t);
+        kprintln!("[npk] RTC: {}", net::ntp::format_time(t));
+        vga::show_status(b"RTC clock set");
+    } else {
+        kprintln!("[npk] RTC: read failed");
+    }
+
     kprintln!("[npk] Probing virtio-net...");
     if virtio_net::init() {
         vga::show_status(b"virtio-net online");
@@ -98,14 +109,13 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         }
 
         kprintln!("[npk] Syncing time (NTP)...");
-        // NTP server: QEMU user-mode routes to host's NTP
-        if net::ntp::sync([10, 0, 2, 3]) {
+        if net::ntp::sync_via_dns("pool.ntp.org") {
             if let Some(t) = net::ntp::unix_time() {
-                kprintln!("[npk] Time: {}", net::ntp::format_time(t));
+                kprintln!("[npk] NTP: {}", net::ntp::format_time(t));
             }
             vga::show_status(b"NTP synced");
         } else {
-            kprintln!("[npk] NTP: sync failed (non-critical)");
+            kprintln!("[npk] NTP: sync failed (using RTC time)");
         }
     } else {
         kprintln!("[npk] virtio-net: not available");
@@ -191,8 +201,26 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         // The keycheck is a known plaintext that we can verify on next boot
         let keycheck_data = b"nopeekOS.keycheck.v1.valid";
         match npkfs::store(".npk-keycheck", keycheck_data, capability::CAP_NULL) {
-            Ok(_) => kprintln!("[npk] Identity configured. System is yours."),
+            Ok(_) => {}
             Err(e) => kprintln!("[npk] WARNING: Could not store keycheck: {}", e),
+        }
+
+        // Ask for display name
+        kprint!("[npk] What should I call you? ");
+        let mut name_buf = [0u8; 64];
+        let name_len = { serial::SERIAL.lock().read_line(&mut name_buf) };
+        if name_len > 0 {
+            if let Ok(name) = core::str::from_utf8(&name_buf[..name_len]) {
+                let name = name.trim();
+                if !name.is_empty() {
+                    config::set("name", name);
+                    kprintln!("[npk] Welcome, {}. System is yours.", name);
+                } else {
+                    kprintln!("[npk] Identity configured. System is yours.");
+                }
+            }
+        } else {
+            kprintln!("[npk] Identity configured. System is yours.");
         }
         vga::show_status(b"Identity configured");
     } else {
@@ -235,7 +263,13 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
             match npkfs::fetch(".npk-keycheck") {
                 Ok((data, _)) => {
                     if &data[..] == b"nopeekOS.keycheck.v1.valid" {
-                        kprintln!("[npk] Identity verified.");
+                        // Load config to get name for welcome message
+                        config::load();
+                        if let Some(name) = config::get("name") {
+                            kprintln!("[npk] Welcome back, {}.", name);
+                        } else {
+                            kprintln!("[npk] Identity verified.");
+                        }
                         break key;
                     }
                     // AEAD passed but content wrong — shouldn't happen
@@ -259,8 +293,14 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         vga::show_status(b"Identity verified");
     }
 
+    // Load system config (after identity — config is encrypted at rest)
+    config::load();
+
     // Bootstrap WASM modules (after identity — so they are encrypted at rest)
     intent::bootstrap_wasm();
+
+    // Create home directory and set as working directory
+    intent::setup_home();
 
     kprintln!("[npk] Initializing Capability Vault...");
     let (vault_ref, root_id) = capability::Vault::init();

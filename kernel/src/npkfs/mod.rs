@@ -122,9 +122,18 @@ pub fn mount() -> Result<(), FsError> {
     Ok(())
 }
 
+/// Store or replace an object. Deletes existing object first if present.
+pub fn upsert(name: &str, data: &[u8], cap_id: [u8; 32]) -> Result<[u8; 32], FsError> {
+    if exists(name) {
+        delete(name)?;
+    }
+    store(name, data, cap_id)
+}
+
 /// Store an object. Data is encrypted at rest with ChaCha20-Poly1305 AEAD.
 /// Returns BLAKE3 hash of the plaintext.
 pub fn store(name: &str, data: &[u8], cap_id: [u8; 32]) -> Result<[u8; 32], FsError> {
+    let name = clean_name(name);
     validate_name(name)?;
     let hash = *blake3::hash(data).as_bytes();
     let tick = crate::interrupts::ticks();
@@ -212,6 +221,7 @@ pub fn store(name: &str, data: &[u8], cap_id: [u8; 32]) -> Result<[u8; 32], FsEr
 
 /// Fetch an object by name. Returns (data, hash).
 pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
+    let name = clean_name(name);
     validate_name(name)?;
 
     let mut lock = FS.lock();
@@ -263,6 +273,7 @@ pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
 
 /// Delete an object by name.
 pub fn delete(name: &str) -> Result<(), FsError> {
+    let name = clean_name(name);
     validate_name(name)?;
 
     let mut lock = FS.lock();
@@ -339,6 +350,7 @@ pub fn stats() -> Option<(u64, u64, u64, u64)> {
 
 /// Check if an object exists by name (B-tree lookup only, no data read).
 pub fn exists(name: &str) -> bool {
+    let name = clean_name(name);
     if validate_name(name).is_err() { return false; }
     let mut lock = FS.lock();
     let fs = match lock.as_mut() {
@@ -362,10 +374,15 @@ pub fn is_mounted() -> bool {
     FS.lock().is_some()
 }
 
+/// Strip leading/trailing slashes from a name.
+fn clean_name(name: &str) -> &str {
+    name.trim_matches('/')
+}
+
 fn validate_name(name: &str) -> Result<(), FsError> {
     if name.is_empty() { return Err(FsError::InvalidName); }
     if name.len() > MAX_NAME_LEN { return Err(FsError::NameTooLong); }
-    if name.bytes().any(|b| b == 0 || b == b'/') { return Err(FsError::InvalidName); }
+    if name.bytes().any(|b| b == 0) { return Err(FsError::InvalidName); }
     Ok(())
 }
 

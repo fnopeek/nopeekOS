@@ -13,6 +13,22 @@ const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // seconds from 1900 to 1970
 /// Stored wall-clock time: Unix timestamp at the tick when it was set
 static WALL_CLOCK: Mutex<Option<(u64, u64)>> = Mutex::new(None); // (unix_secs, tick_at_sync)
 
+/// Set wall clock directly (e.g. from RTC).
+pub fn set_time(unix_secs: u64) {
+    let tick = crate::interrupts::ticks();
+    *WALL_CLOCK.lock() = Some((unix_secs, tick));
+}
+
+/// Resolve NTP server hostname via DNS, then sync.
+pub fn sync_via_dns(hostname: &str) -> bool {
+    if let Some(ip) = super::dns::resolve(hostname) {
+        sync(ip)
+    } else {
+        // Fallback: QEMU user-mode gateway
+        sync([10, 0, 2, 3])
+    }
+}
+
 /// Sync time from an NTP server. Blocking.
 pub fn sync(server_ip: [u8; 4]) -> bool {
     // Build SNTP request (48 bytes)
@@ -65,17 +81,34 @@ pub fn unix_time() -> Option<u64> {
     Some(base_unix + elapsed_secs)
 }
 
-/// Format Unix timestamp as "YYYY-MM-DD HH:MM:SS UTC"
+/// Format Unix timestamp as local time using timezone config.
+/// Shows "YYYY-MM-DD HH:MM:SS UTC+N" or "UTC" if no offset.
 pub fn format_time(unix: u64) -> alloc::string::String {
-    let secs = unix % 60;
-    let mins = (unix / 60) % 60;
-    let hours = (unix / 3600) % 24;
-    let days = unix / 86400;
+    let offset_mins = crate::config::timezone_offset_minutes();
+    let local_secs = (unix as i64 + offset_mins as i64 * 60) as u64;
 
-    // Simplified date calculation (no leap second handling)
+    let secs = local_secs % 60;
+    let mins = (local_secs / 60) % 60;
+    let hours = (local_secs / 3600) % 24;
+    let days = local_secs / 86400;
+
     let (year, month, day) = days_to_date(days);
 
-    alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", year, month, day, hours, mins, secs)
+    if offset_mins == 0 {
+        alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+            year, month, day, hours, mins, secs)
+    } else {
+        let sign = if offset_mins >= 0 { '+' } else { '-' };
+        let abs_hours = (offset_mins.abs() / 60) as u64;
+        let abs_mins = (offset_mins.abs() % 60) as u64;
+        if abs_mins == 0 {
+            alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC{}{}",
+                year, month, day, hours, mins, secs, sign, abs_hours)
+        } else {
+            alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC{}{}:{:02}",
+                year, month, day, hours, mins, secs, sign, abs_hours, abs_mins)
+        }
+    }
 }
 
 fn days_to_date(mut days: u64) -> (u64, u64, u64) {

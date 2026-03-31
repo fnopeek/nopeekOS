@@ -37,3 +37,19 @@ default-features = false
 [dependencies.hkdf]
 version = "0.12"
 default-features = false
+
+# ECDSA signature verification (for TLS certificate chain validation)
+[dependencies.p256]
+version = "0.13"
+default-features = false
+features = ["ecdsa"]
+
+[dependencies.p384]
+version = "0.13"
+default-features = false
+features = ["ecdsa"]
+
+[dependencies.ecdsa]
+version = "0.16"
+default-features = false
+features = ["verifying"]

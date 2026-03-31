@@ -5,31 +5,253 @@
 
 use crate::capability::{self, CapId, Vault, Rights};
 use crate::{kprint, kprintln, crypto, serial};
+use alloc::string::String;
 use spin::Mutex;
 
 const INPUT_BUF_SIZE: usize = 512;
+
+/// Current working directory (prefix for relative paths).
+static CWD: Mutex<String> = Mutex::new(String::new());
+
+/// Set the working directory.
+pub fn set_cwd(path: &str) {
+    let mut cwd = CWD.lock();
+    cwd.clear();
+    let clean = path.trim_matches('/');
+    cwd.push_str(clean);
+}
+
+/// Get the working directory.
+fn get_cwd() -> String {
+    CWD.lock().clone()
+}
+
+/// Get the home directory from config.
+fn home_dir() -> String {
+    match crate::config::get("name") {
+        Some(name) => alloc::format!("home/{}", name),
+        None => String::from("home"),
+    }
+}
+
+/// Resolve a name relative to cwd.
+/// - Absolute (starts with /): strip leading / and use as-is
+/// - ".." : go up one level
+/// - Relative: prepend cwd
+fn resolve_path(name: &str) -> String {
+    let name = name.trim();
+    let cwd = get_cwd();
+
+    // Build full path: absolute (starts with /) or relative (prepend cwd)
+    let full = if name.starts_with('/') {
+        String::from(name.trim_start_matches('/'))
+    } else if cwd.is_empty() {
+        String::from(name)
+    } else {
+        alloc::format!("{}/{}", cwd, name)
+    };
+
+    // Normalize: resolve . and .. components
+    let mut parts: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for component in full.split('/') {
+        match component {
+            "" | "." => {} // skip empty and current-dir
+            ".." => { parts.pop(); }
+            c => parts.push(c),
+        }
+    }
+
+    parts.join("/")
+}
+
+/// Read a line from serial with tab-completion and network polling.
+fn read_line_with_tab(buf: &mut [u8]) -> usize {
+    let mut pos = 0;
+
+    loop {
+        // Poll network while waiting
+        crate::net::poll();
+        let serial = serial::SERIAL.lock();
+        if !serial.has_data() {
+            drop(serial);
+            unsafe { core::arch::asm!("hlt"); }
+            continue;
+        }
+        let byte = serial.read_byte();
+        drop(serial);
+
+        match byte {
+            b'\r' | b'\n' => {
+                kprint!("\n");
+                return pos;
+            }
+            0x08 | 0x7F => {
+                // Backspace
+                if pos > 0 {
+                    pos -= 1;
+                    kprint!("\x08 \x08");
+                }
+            }
+            0x09 => {
+                // Tab — attempt completion
+                if let Ok(input) = core::str::from_utf8(&buf[..pos]) {
+                    if let Some(completion) = tab_complete(input) {
+                        for b in completion.as_bytes() {
+                            if pos < buf.len() {
+                                buf[pos] = *b;
+                                pos += 1;
+                            }
+                        }
+                        kprint!("{}", completion);
+                    }
+                }
+            }
+            b if b >= 0x20 && b < 0x7F => {
+                if pos < buf.len() {
+                    buf[pos] = b;
+                    pos += 1;
+                    kprint!("{}", b as char);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Tab-completion: find matching paths for the last word in the input.
+fn tab_complete(input: &str) -> Option<String> {
+    let last_space = input.rfind(' ').map(|i| i + 1).unwrap_or(0);
+    let partial = &input[last_space..];
+
+    // Resolve what's typed so far to an absolute prefix
+    // "" or ends with / → list contents of current dir
+    // "te" in home/florian → search for "home/florian/te"
+    let search = if partial.is_empty() || partial.ends_with('/') {
+        let base = if partial.is_empty() { get_cwd() } else { resolve_path(partial.trim_end_matches('/')) };
+        if base.is_empty() { String::new() } else { alloc::format!("{}/", base) }
+    } else {
+        resolve_path(partial)
+    };
+
+    let entries = match crate::npkfs::list() {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+
+    // Find all names that start with our search prefix
+    // Collapse to immediate children (files or first dir component)
+    let mut matches: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for (name, _, _) in &entries {
+        if name.starts_with(".npk-") { continue; }
+        if name.ends_with("/.dir") {
+            let dir = &name[..name.len() - 5];
+            if dir.starts_with(search.as_str()) {
+                let rest = &dir[search.len()..];
+                if rest.is_empty() {
+                    // Exact match: the dir itself (e.g. search="home/florian/test", dir="home/florian/test")
+                    let full = alloc::format!("{}/", dir);
+                    if !matches.contains(&full) { matches.push(full); }
+                } else {
+                    // Immediate child dir
+                    let child = if let Some(idx) = rest.find('/') { &rest[..idx] } else { rest };
+                    if !child.is_empty() {
+                        let full = alloc::format!("{}{}/", search, child);
+                        if !matches.contains(&full) { matches.push(full); }
+                    }
+                }
+            }
+            continue;
+        }
+        if name.starts_with(search.as_str()) {
+            let rest = &name[search.len()..];
+            if let Some(idx) = rest.find('/') {
+                let full = alloc::format!("{}{}/", search, &rest[..idx]);
+                if !matches.contains(&full) { matches.push(full); }
+            } else {
+                let full = String::from(name.as_str());
+                if !matches.contains(&full) { matches.push(full); }
+            }
+        }
+    }
+
+    if matches.is_empty() { return None; }
+
+    // Calculate how much the user already typed as resolved path
+    let typed_resolved = if partial.is_empty() || partial.ends_with('/') {
+        search.clone()
+    } else {
+        resolve_path(partial)
+    };
+
+    if matches.len() == 1 {
+        let full = &matches[0];
+        if full.len() > typed_resolved.len() {
+            return Some(String::from(&full[typed_resolved.len()..]));
+        }
+        return None;
+    }
+
+    // Multiple matches — try common prefix extension
+    let common = common_prefix(&matches);
+    if common.len() > typed_resolved.len() {
+        return Some(String::from(&common[typed_resolved.len()..]));
+    }
+
+    // Show options
+    kprint!("\n");
+    let display_base = if let Some(idx) = search.rfind('/') { &search[..idx + 1] } else { "" };
+    for m in &matches {
+        let rel = m.strip_prefix(display_base).unwrap_or(m);
+        kprint!("  {}  ", rel);
+    }
+    kprint!("\n");
+
+    // Re-print prompt + current input
+    let user = crate::config::get("name");
+    let cwd = get_cwd();
+    let user_str = user.as_deref().unwrap_or("npk");
+    if cwd.is_empty() {
+        kprint!("{}@npk /> {}", user_str, input);
+    } else {
+        kprint!("{}@npk {}> {}", user_str, cwd, input);
+    }
+
+    None
+}
+
+fn common_prefix(strings: &[String]) -> String {
+    if strings.is_empty() { return String::new(); }
+    let first = strings[0].as_bytes();
+    let mut len = first.len();
+    for s in &strings[1..] {
+        let b = s.as_bytes();
+        len = len.min(b.len());
+        for i in 0..len {
+            if first[i] != b[i] {
+                len = i;
+                break;
+            }
+        }
+    }
+    String::from(&strings[0][..len])
+}
 
 pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut input_buf = [0u8; INPUT_BUF_SIZE];
 
     loop {
-        kprint!("npk> ");
-
-        // Poll network while waiting for input
-        loop {
-            crate::net::poll();
-            let serial = crate::serial::SERIAL.lock();
-            if serial.has_data() {
-                drop(serial);
-                break;
+        {
+            let user = crate::config::get("name");
+            let cwd = get_cwd();
+            let user_str = user.as_deref().unwrap_or("npk");
+            if cwd.is_empty() {
+                kprint!("{}@npk /> ", user_str);
+            } else {
+                kprint!("{}@npk {}> ", user_str, cwd);
             }
-            drop(serial);
-            unsafe { core::arch::asm!("hlt"); }
         }
 
-        let serial_port = serial::SERIAL.lock();
-        let len = serial_port.read_line(&mut input_buf);
-        drop(serial_port);
+        let len = read_line_with_tab(&mut input_buf);
 
         if len == 0 { continue; }
 
@@ -81,7 +303,12 @@ fn intent_lock() {
 
         match crate::npkfs::fetch(".npk-keycheck") {
             Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
-                kprintln!("[npk] Unlocked.");
+                crate::config::load();
+                if let Some(name) = crate::config::get("name") {
+                    kprintln!("[npk] Welcome back, {}.", name);
+                } else {
+                    kprintln!("[npk] Unlocked.");
+                }
                 return;
             }
             _ => {
@@ -227,19 +454,55 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 intent_store(args, session);
             }
         }
-        "fetch" | "load" | "get" => {
+        "fetch" | "load" => {
             if require_cap(vault, &session, Rights::READ, "fetch") {
                 intent_fetch(args);
             }
         }
+        "cat" | "show" | "print" | "type" => {
+            if require_cap(vault, &session, Rights::READ, "cat") {
+                intent_cat(args);
+            }
+        }
+        "grep" | "search" | "find" => {
+            if require_cap(vault, &session, Rights::READ, "grep") {
+                intent_grep(args);
+            }
+        }
+        "head" => {
+            if require_cap(vault, &session, Rights::READ, "head") {
+                intent_head(args);
+            }
+        }
+        "wc" | "count" => {
+            if require_cap(vault, &session, Rights::READ, "wc") {
+                intent_wc(args);
+            }
+        }
+        "hexdump" | "hex" | "xxd" => {
+            if require_cap(vault, &session, Rights::READ, "hexdump") {
+                intent_hexdump(args);
+            }
+        }
+
         "delete" | "rm" | "remove" => {
             if require_cap(vault, &session, Rights::WRITE, "delete") {
                 intent_delete(args);
             }
         }
+        "mkdir" => {
+            if require_cap(vault, &session, Rights::WRITE, "mkdir") {
+                intent_mkdir(args);
+            }
+        }
+        "rmdir" => {
+            if require_cap(vault, &session, Rights::WRITE, "rmdir") {
+                intent_rmdir(args);
+            }
+        }
         "list" | "ls" | "objects" => {
             if require_cap(vault, &session, Rights::READ, "list") {
-                intent_list();
+                intent_list(args);
             }
         }
         "fsinfo" | "fs" => {
@@ -305,13 +568,37 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             intent_passwd();
         }
 
+        "set" => {
+            if require_cap(vault, &session, Rights::WRITE, "set") {
+                intent_set(args);
+            }
+        }
+        "get" => {
+            if require_cap(vault, &session, Rights::READ, "get") {
+                intent_get(args);
+            }
+        }
+        "config" | "settings" => {
+            if require_cap(vault, &session, Rights::READ, "config") {
+                intent_config();
+            }
+        }
+
+        "cd" => {
+            intent_cd(args);
+        }
+        "pwd" => {
+            let cwd = get_cwd();
+            if cwd.is_empty() { kprintln!("/"); } else { kprintln!("/{}", cwd); }
+        }
+
         "clear" | "cls" => {
             // ANSI escape: clear screen + cursor home
             kprint!("\x1B[2J\x1B[H");
         }
 
         // Unrestricted intents (informational)
-        "help" | "?" => intent_help(),
+        "help" | "?" => intent_help_topic(args.trim()),
         "echo" => intent_echo(args),
         "think" => intent_think(args),
         "about" => intent_about(),
@@ -428,39 +715,106 @@ fn intent_audit() {
     kprintln!();
 }
 
-fn intent_help() {
-    kprintln!();
-    kprintln!("  nopeekOS Intent Interface");
-    kprintln!("  ════════════════════════════════════════════════════");
-    kprintln!("  Express intention, not instructions.");
-    kprintln!("  Every intent is capability-gated. No ambient authority.");
-    kprintln!();
-    kprintln!("  System                          Storage");
-    kprintln!("  ──────                          ───────");
-    kprintln!("  status    System overview        store <n> <d>  Save object");
-    kprintln!("  caps      Capability vault       fetch <name>   Load object");
-    kprintln!("  audit     Security log           delete <name>  Remove object");
-    kprintln!("  time      Current time           list           All objects");
-    kprintln!("  about     About nopeekOS         fsinfo         Disk stats");
-    kprintln!();
-    kprintln!("  Network                         Execution");
-    kprintln!("  ───────                         ─────────");
-    kprintln!("  ping <host>       ICMP ping     run <mod> [args]  WASM module");
-    kprintln!("  resolve <host>    DNS lookup     add <a> <b>       Add [WASM]");
-    kprintln!("  http <h> [path]   HTTP GET       multiply <a> <b>  Mul [WASM]");
-    kprintln!("  https <h> [path]  HTTPS/TLS 1.3");
-    kprintln!("  traceroute <host> Path trace     Disk");
-    kprintln!("  netstat           Connections    ────");
-    kprintln!("  net               Interface      disk             Info");
-    kprintln!("                                   disk read <n>    Read sector");
-    kprintln!("  Security                         disk write <n>   Write sector");
-    kprintln!("  ────────");
-    kprintln!("  lock      Lock system            General");
-    kprintln!("  passwd    Change passphrase       ───────");
-    kprintln!("                                   clear   Clear screen");
-    kprintln!("                                   echo    Echo text");
-    kprintln!("                                   halt    Shutdown");
-    kprintln!();
+fn intent_help_topic(topic: &str) {
+    match topic {
+        "storage" | "store" | "fs" => {
+            kprintln!();
+            kprintln!("  Storage");
+            kprintln!("  ───────");
+            kprintln!("  store <name> <data>   Save object to content store");
+            kprintln!("  fetch <name>          Load and display object");
+            kprintln!("  delete <name>         Remove object");
+            kprintln!("  list                  List all objects with hashes");
+            kprintln!("  fsinfo                Disk usage and block stats");
+            kprintln!();
+        }
+        "content" | "tools" | "cat" | "grep" => {
+            kprintln!();
+            kprintln!("  Content Tools");
+            kprintln!("  ─────────────");
+            kprintln!("  cat <name>              Display object contents");
+            kprintln!("  grep <pattern> <name>   Search lines (case-insensitive)");
+            kprintln!("  head <name> [n]         Show first n lines (default 10)");
+            kprintln!("  wc <name>               Count lines, words, bytes");
+            kprintln!("  hexdump <name> [n]      Hex dump (default 256 bytes)");
+            kprintln!();
+            kprintln!("  Redirect: cat mypage > copy   grep html mypage > matches");
+            kprintln!();
+        }
+        "network" | "net" | "http" | "https" => {
+            kprintln!();
+            kprintln!("  Network");
+            kprintln!("  ───────");
+            kprintln!("  ping <host>              ICMP ping (IP or hostname)");
+            kprintln!("  resolve <host>           DNS lookup");
+            kprintln!("  traceroute <host>        Network path trace");
+            kprintln!("  netstat                  Active connections");
+            kprintln!("  net                      Interface info");
+            kprintln!();
+            kprintln!("  http  <host> [path]      HTTP GET (plaintext)");
+            kprintln!("  https <host> [path]      HTTPS GET (TLS 1.3)");
+            kprintln!("    Flags:  -h headers only  -b body only  -s silent");
+            kprintln!("    Store:  https example.com / > mypage");
+            kprintln!();
+        }
+        "exec" | "wasm" | "run" => {
+            kprintln!();
+            kprintln!("  Execution");
+            kprintln!("  ─────────");
+            kprintln!("  run <module> [args]   Execute WASM module from store");
+            kprintln!("  add <a> <b>           Add two numbers [WASM]");
+            kprintln!("  multiply <a> <b>      Multiply two numbers [WASM]");
+            kprintln!();
+        }
+        "security" | "lock" | "caps" => {
+            kprintln!();
+            kprintln!("  Security");
+            kprintln!("  ────────");
+            kprintln!("  lock                  Lock system (clear keys)");
+            kprintln!("  passwd                Change passphrase");
+            kprintln!("  caps                  Show capability vault");
+            kprintln!("  audit                 Security event log");
+            kprintln!();
+        }
+        "config" | "set" | "settings" => {
+            kprintln!();
+            kprintln!("  Configuration");
+            kprintln!("  ─────────────");
+            kprintln!("  set <key> <value>     Set config value");
+            kprintln!("  get <key>             Get config value");
+            kprintln!("  config                Show all settings");
+            kprintln!();
+            kprintln!("  Keys: timezone (+2), keyboard (de_CH), lang (de)");
+            kprintln!();
+        }
+        "disk" | "blk" => {
+            kprintln!();
+            kprintln!("  Disk");
+            kprintln!("  ────");
+            kprintln!("  disk                  Disk info");
+            kprintln!("  disk read <sector>    Raw sector hex dump");
+            kprintln!("  disk write <s> <txt>  Write text to sector");
+            kprintln!();
+        }
+        _ => {
+            // Main overview
+            kprintln!();
+            kprintln!("  nopeekOS");
+            kprintln!("  ════════");
+            kprintln!();
+            kprintln!("  System:    status · time · about · clear · halt");
+            kprintln!("  Storage:   store · fetch · delete · list · fsinfo");
+            kprintln!("  Content:   cat · grep · head · wc · hexdump");
+            kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");
+            kprintln!("  Exec:      run · add · multiply");
+            kprintln!("  Security:  lock · passwd · caps · audit");
+            kprintln!("  Config:    set · get · config");
+            kprintln!("  Disk:      disk read · disk write");
+            kprintln!();
+            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk)");
+            kprintln!();
+        }
+    }
 }
 
 fn parse_two_ints(args: &str) -> Option<(i32, i32)> {
@@ -545,9 +899,14 @@ fn intent_store(args: &str, cap_id: CapId) {
         return;
     }
 
-    match crate::npkfs::store(name, data.as_bytes(), cap_id) {
+    let path = resolve_path(name);
+    // Auto-create parent directories
+    if let Some(idx) = path.rfind('/') {
+        ensure_parents(&path[..idx]);
+    }
+    match crate::npkfs::upsert(&path, data.as_bytes(), cap_id) {
         Ok(hash) => {
-            kprint!("[npk] Stored '{}' ({} bytes, hash: ", name, data.len());
+            kprint!("[npk] Stored '{}' ({} bytes, hash: ", path, data.len());
             for b in &hash[..4] { kprint!("{:02x}", b); }
             kprintln!("...)");
         }
@@ -561,8 +920,9 @@ fn intent_fetch(args: &str) {
         kprintln!("[npk] Usage: fetch <name>");
         return;
     }
+    let path = resolve_path(name);
 
-    match crate::npkfs::fetch(name) {
+    match crate::npkfs::fetch(&path) {
         Ok((data, _hash)) => {
             match core::str::from_utf8(&data) {
                 Ok(s) => kprintln!("{}", s),
@@ -575,36 +935,442 @@ fn intent_fetch(args: &str) {
     }
 }
 
+/// Helper: fetch an npkFS object and return its data.
+/// Name is resolved relative to cwd.
+fn fetch_object(name: &str) -> Option<alloc::vec::Vec<u8>> {
+    let path = resolve_path(name);
+    match crate::npkfs::fetch(&path) {
+        Ok((data, _)) => Some(data),
+        Err(e) => { kprintln!("[npk] '{}': {}", name, e); None }
+    }
+}
+
+/// Parse "args > target" redirect syntax. Returns (args, Option<store_name>).
+fn parse_redirect(args: &str) -> (&str, Option<&str>) {
+    if let Some(idx) = args.rfind('>') {
+        let target = args[idx + 1..].trim();
+        let rest = args[..idx].trim();
+        if target.is_empty() { (args, None) } else { (rest, Some(target)) }
+    } else {
+        (args, None)
+    }
+}
+
+fn intent_cat(args: &str) {
+    let (args, redirect) = parse_redirect(args);
+    let name = args.trim();
+    if name.is_empty() {
+        kprintln!("[npk] Usage: cat <name> [> target]");
+        return;
+    }
+
+    let data = match fetch_object(name) {
+        Some(d) => d,
+        None => return,
+    };
+
+    if let Some(target) = redirect {
+        let target_path = resolve_path(target);
+        match crate::npkfs::upsert(&target_path, &data, capability::CAP_NULL) {
+            Ok(_) => kprintln!("[npk] Copied -> '{}' ({} bytes)", target_path, data.len()),
+            Err(e) => kprintln!("[npk] Store error: {}", e),
+        }
+        return;
+    }
+
+    match core::str::from_utf8(&data) {
+        Ok(text) => kprintln!("{}", text),
+        Err(_) => kprintln!("[npk] ({} bytes, binary — use 'hexdump {}')", data.len(), name),
+    }
+}
+
+fn intent_grep(args: &str) {
+    let (args, redirect) = parse_redirect(args);
+    let args = args.trim();
+
+    let (pattern, name) = match args.split_once(' ') {
+        Some((p, n)) => (p.trim(), n.trim()),
+        None => {
+            kprintln!("[npk] Usage: grep <pattern> <name> [> target]");
+            return;
+        }
+    };
+
+    let data = match fetch_object(name) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let text = match core::str::from_utf8(&data) {
+        Ok(t) => t,
+        Err(_) => { kprintln!("[npk] '{}' is binary", name); return; }
+    };
+
+    let pattern_lower = alloc::string::String::from(pattern).to_ascii_lowercase();
+    let mut matches = alloc::vec::Vec::new();
+    let mut match_count = 0u32;
+
+    for (i, line) in text.lines().enumerate() {
+        let line_lower = alloc::string::String::from(line).to_ascii_lowercase();
+        if line_lower.contains(pattern_lower.as_str()) {
+            match_count += 1;
+            if redirect.is_some() {
+                matches.extend_from_slice(line.as_bytes());
+                matches.push(b'\n');
+            } else {
+                kprintln!("  {:4}: {}", i + 1, line);
+            }
+        }
+    }
+
+    if let Some(target) = redirect {
+        let target_path = resolve_path(target);
+        match crate::npkfs::upsert(&target_path, &matches, capability::CAP_NULL) {
+            Ok(_) => kprintln!("[npk] {} matches -> '{}'", match_count, target_path),
+            Err(e) => kprintln!("[npk] Store error: {}", e),
+        }
+    } else if match_count == 0 {
+        kprintln!("[npk] No matches for '{}' in '{}'", pattern, name);
+    } else {
+        kprintln!("[npk] {} matches", match_count);
+    }
+}
+
+fn intent_head(args: &str) {
+    let args = args.trim();
+    let (name, count) = if let Some((n, c)) = args.rsplit_once(' ') {
+        match c.parse::<usize>() {
+            Ok(num) => (n.trim(), num),
+            Err(_) => (args, 10),
+        }
+    } else {
+        (args, 10)
+    };
+
+    if name.is_empty() {
+        kprintln!("[npk] Usage: head <name> [lines]");
+        return;
+    }
+
+    let data = match fetch_object(name) {
+        Some(d) => d,
+        None => return,
+    };
+
+    match core::str::from_utf8(&data) {
+        Ok(text) => {
+            for line in text.lines().take(count) {
+                kprintln!("{}", line);
+            }
+        }
+        Err(_) => kprintln!("[npk] '{}' is binary", name),
+    }
+}
+
+fn intent_wc(args: &str) {
+    let name = args.trim();
+    if name.is_empty() {
+        kprintln!("[npk] Usage: wc <name>");
+        return;
+    }
+
+    let data = match fetch_object(name) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let bytes = data.len();
+    match core::str::from_utf8(&data) {
+        Ok(text) => {
+            let lines = text.lines().count();
+            let words = text.split_whitespace().count();
+            kprintln!("  {} lines  {} words  {} bytes  {}", lines, words, bytes, name);
+        }
+        Err(_) => {
+            kprintln!("  {} bytes (binary)  {}", bytes, name);
+        }
+    }
+}
+
+fn intent_hexdump(args: &str) {
+    let args = args.trim();
+    // Optional limit: hexdump name 128
+    let (name, limit) = if let Some((n, l)) = args.rsplit_once(' ') {
+        match l.parse::<usize>() {
+            Ok(num) => (n.trim(), num),
+            Err(_) => (args, 256),
+        }
+    } else {
+        (args, 256)
+    };
+
+    if name.is_empty() {
+        kprintln!("[npk] Usage: hexdump <name> [bytes]");
+        return;
+    }
+
+    let data = match fetch_object(name) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let show = data.len().min(limit);
+    for (i, chunk) in data[..show].chunks(16).enumerate() {
+        kprint!("  {:04x}  ", i * 16);
+        for (j, &b) in chunk.iter().enumerate() {
+            kprint!("{:02x} ", b);
+            if j == 7 { kprint!(" "); }
+        }
+        // Padding for short lines
+        for j in chunk.len()..16 {
+            kprint!("   ");
+            if j == 7 { kprint!(" "); }
+        }
+        kprint!(" |");
+        for &b in chunk {
+            if b >= 0x20 && b <= 0x7E {
+                kprint!("{}", b as char);
+            } else {
+                kprint!(".");
+            }
+        }
+        kprintln!("|");
+    }
+
+    if show < data.len() {
+        kprintln!("[npk] ({} of {} bytes shown)", show, data.len());
+    }
+}
+
+fn intent_cd(args: &str) {
+    let raw = args.trim();
+
+    if raw.is_empty() || raw == "~" {
+        set_cwd(&home_dir());
+        return;
+    }
+
+    if raw == "/" {
+        set_cwd("");
+        return;
+    }
+
+    let target = raw.trim_end_matches('/');
+
+    if target == ".." {
+        let cwd = get_cwd();
+        match cwd.rfind('/') {
+            Some(idx) => set_cwd(&cwd[..idx]),
+            None => set_cwd(""),
+        }
+        return;
+    }
+
+    // Resolve path and verify it exists as a directory
+    let resolved = resolve_path(target);
+
+    // Root always exists
+    if resolved.is_empty() {
+        set_cwd("");
+        return;
+    }
+
+    let dir_marker = alloc::format!("{}/.dir", resolved);
+
+    // Check: either .dir marker exists, or objects with this prefix exist
+    let exists = crate::npkfs::exists(&dir_marker) || {
+        let prefix = alloc::format!("{}/", resolved);
+        crate::npkfs::list().map(|entries| {
+            entries.iter().any(|(n, _, _)| n.starts_with(prefix.as_str()))
+        }).unwrap_or(false)
+    };
+
+    if exists {
+        set_cwd(&resolved);
+    } else {
+        kprintln!("[npk] '{}': not found", target);
+    }
+}
+
+fn intent_mkdir(args: &str) {
+    let dir = args.trim().trim_end_matches('/');
+    if dir.is_empty() {
+        kprintln!("[npk] Usage: mkdir <path>");
+        return;
+    }
+    let resolved = resolve_path(dir);
+    let marker = alloc::format!("{}/.dir", resolved);
+    if crate::npkfs::exists(&marker) {
+        kprintln!("[npk] Directory '{}' already exists", resolved);
+        return;
+    }
+    ensure_parents(&resolved);
+    kprintln!("[npk] Created '{}'", resolved);
+}
+
+fn intent_rmdir(args: &str) {
+    let dir = args.trim().trim_end_matches('/');
+    if dir.is_empty() || dir == "." {
+        kprintln!("[npk] Usage: rmdir <path>");
+        return;
+    }
+    let resolved = resolve_path(dir);
+    let cwd = get_cwd();
+    if resolved == cwd || cwd.starts_with(&alloc::format!("{}/", resolved)) {
+        kprintln!("[npk] Cannot remove current working directory");
+        return;
+    }
+
+    let prefix = alloc::format!("{}/", resolved);
+    if let Ok(entries) = crate::npkfs::list() {
+        let has_content = entries.iter().any(|(n, _, _)| {
+            n.starts_with(prefix.as_str()) && !n.ends_with("/.dir")
+        });
+        if has_content {
+            kprintln!("[npk] Directory '{}' is not empty", resolved);
+            return;
+        }
+    }
+
+    let marker = alloc::format!("{}/.dir", resolved);
+    match crate::npkfs::delete(&marker) {
+        Ok(()) => kprintln!("[npk] Removed '{}'", resolved),
+        Err(_) => kprintln!("[npk] Directory '{}' not found", resolved),
+    }
+}
+
 fn intent_delete(args: &str) {
     let name = args.trim();
     if name.is_empty() {
         kprintln!("[npk] Usage: delete <name>");
         return;
     }
+    let path = resolve_path(name);
 
-    match crate::npkfs::delete(name) {
-        Ok(()) => kprintln!("[npk] Deleted '{}'", name),
+    match crate::npkfs::delete(&path) {
+        Ok(()) => kprintln!("[npk] Deleted '{}'", path),
         Err(e) => kprintln!("[npk] Delete error: {}", e),
     }
 }
 
-fn intent_list() {
+fn intent_list(args: &str) {
+    let filter = args.trim();
+    // Use explicit arg, or cwd, or root
+    let resolved = if !filter.is_empty() {
+        resolve_path(filter)
+    } else {
+        get_cwd()
+    };
+    let prefix = if !resolved.is_empty() {
+        let mut p = resolved;
+        if !p.ends_with('/') { p.push('/'); }
+        Some(p)
+    } else {
+        None
+    };
+
     match crate::npkfs::list() {
         Ok(entries) => {
-            kprintln!();
-            if entries.is_empty() {
-                kprintln!("  (no objects stored)");
-            } else {
-                for (name, size, hash) in &entries {
-                    kprint!("  {:<20} {:>8} B  ", name, size);
-                    for b in &hash[..4] { kprint!("{:02x}", b); }
-                    kprintln!("...");
+            // Filter and collect visible entries (hide .npk-* and .dir markers)
+            let visible: alloc::vec::Vec<_> = entries.iter()
+                .filter(|(name, _, _)| {
+                    if name.starts_with(".npk-") { return false; }
+                    if name.ends_with("/.dir") { return false; }
+                    if let Some(ref pfx) = prefix {
+                        return name.starts_with(pfx.as_str());
+                    }
+                    true
+                })
+                .collect();
+
+            // Collect known dirs (from .dir markers and from object prefixes)
+            let mut dirs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+            for (name, _, _) in &entries {
+                // .dir markers define empty dirs (register all levels)
+                if let Some(dir) = name.strip_suffix("/.dir") {
+                    let mut remaining = dir;
+                    loop {
+                        let d = alloc::string::String::from(remaining);
+                        if !dirs.contains(&d) { dirs.push(d); }
+                        match remaining.rfind('/') {
+                            Some(idx) => remaining = &remaining[..idx],
+                            None => break,
+                        }
+                    }
+                }
+                // Objects with / define implicit dirs (all levels)
+                let mut remaining = name.as_str();
+                while let Some(idx) = remaining.rfind('/') {
+                    remaining = &remaining[..idx];
+                    let d = alloc::string::String::from(remaining);
+                    if !dirs.contains(&d) { dirs.push(d); }
                 }
             }
-            if let Some((total, free, count, gen)) = crate::npkfs::stats() {
+            dirs.sort();
+
+            kprintln!();
+
+            if visible.is_empty() && dirs.is_empty() {
+                kprintln!("  (empty)");
+            } else {
+                // Determine the current "depth" we're listing
+                let prefix_str = prefix.as_deref().unwrap_or("");
+
+                // Show subdirectories at this level
+                let mut shown_dirs: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                for dir in &dirs {
+                    let rel = if !prefix_str.is_empty() {
+                        match dir.strip_prefix(prefix_str) {
+                            Some(r) => r,
+                            None => continue,
+                        }
+                    } else {
+                        dir.as_str()
+                    };
+                    // Only show immediate children (no nested /, no self-reference)
+                    if rel.is_empty() || rel == "." || rel.contains('/') { continue; }
+                    if shown_dirs.contains(&rel) { continue; }
+                    shown_dirs.push(rel);
+
+                    // Count objects in this dir
+                    let dir_prefix = alloc::format!("{}/", dir);
+                    let count = entries.iter()
+                        .filter(|(n, _, _)| n.starts_with(dir_prefix.as_str()) && !n.ends_with("/.dir") && !n.starts_with(".npk-"))
+                        .count();
+                    if count == 0 {
+                        kprintln!("  {}/", rel);
+                    } else {
+                        kprintln!("  {}/  ({} objects)", rel, count);
+                    }
+                }
+
+                // Show files at this level (no / after prefix)
+                for (name, size, hash) in &visible {
+                    let rel = if !prefix_str.is_empty() {
+                        match name.strip_prefix(prefix_str) {
+                            Some(r) => r,
+                            None => continue,
+                        }
+                    } else {
+                        name.as_str()
+                    };
+                    // Only show files at this level (not in subdirs)
+                    if rel.contains('/') { continue; }
+
+                    kprint!("  {:<24} ", rel);
+                    if *size >= 1024 {
+                        kprint!("{:>6} KB  ", size / 1024);
+                    } else {
+                        kprint!("{:>6} B   ", size);
+                    }
+                    for b in &hash[..4] { kprint!("{:02x}", b); }
+                    kprintln!();
+                }
+            }
+
+            if let Some((_, free, count, _)) = crate::npkfs::stats() {
                 kprintln!();
-                kprintln!("  {} objects, {} free blocks / {} total (gen {})",
-                    count, free, total, gen);
+                kprintln!("  {} objects, {} free blocks", count, free);
             }
             kprintln!();
         }
@@ -623,10 +1389,15 @@ fn intent_run(args: &str) {
     };
     let arg_str = parts.next().unwrap_or("");
 
-    // Load module from npkFS
-    let (wasm_bytes, hash) = match npkfs::fetch(module_name) {
+    // Load module from npkFS: try cwd-relative, then sys/wasm/
+    let resolved = resolve_path(module_name);
+    let sys_path = alloc::format!("sys/wasm/{}", module_name);
+    let (wasm_bytes, hash) = match npkfs::fetch(&resolved) {
         Ok(v) => v,
-        Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
+        Err(_) => match npkfs::fetch(&sys_path) {
+            Ok(v) => v,
+            Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
+        }
     };
 
     // BLAKE3 integrity verified by npkfs::fetch
@@ -670,10 +1441,10 @@ pub fn bootstrap_wasm() {
     if !npkfs::is_mounted() { return; }
 
     let modules: &[(&str, &[u8])] = &[
-        ("hello", wasm::MODULE_HELLO),
-        ("fib", wasm::MODULE_FIB),
-        ("add", wasm::MODULE_ADD),
-        ("multiply", wasm::MODULE_MULTIPLY),
+        ("sys/wasm/hello", wasm::MODULE_HELLO),
+        ("sys/wasm/fib", wasm::MODULE_FIB),
+        ("sys/wasm/add", wasm::MODULE_ADD),
+        ("sys/wasm/multiply", wasm::MODULE_MULTIPLY),
     ];
 
     let mut stored = 0;
@@ -687,6 +1458,26 @@ pub fn bootstrap_wasm() {
     if stored > 0 {
         kprintln!("[npk] Bootstrap: stored {} WASM modules", stored);
     }
+}
+
+/// Create initial directory structure and set cwd to home.
+/// Ensure all parent directories exist for a given path (create .dir markers).
+fn ensure_parents(path: &str) {
+    let mut current = String::new();
+    for part in path.split('/') {
+        if !current.is_empty() { current.push('/'); }
+        current.push_str(part);
+        let marker = alloc::format!("{}/.dir", current);
+        if !crate::npkfs::exists(&marker) {
+            let _ = crate::npkfs::store(&marker, b"", capability::CAP_NULL);
+        }
+    }
+}
+
+pub fn setup_home() {
+    let home = home_dir();
+    ensure_parents(&home);
+    set_cwd(&home);
 }
 
 fn intent_traceroute(args: &str) {
@@ -760,117 +1551,7 @@ fn intent_netstat() {
 }
 
 fn intent_http(args: &str) {
-    let url = args.trim();
-    if url.is_empty() {
-        kprintln!("[npk] Usage: http <host> [path]");
-        return;
-    }
-
-    // Parse "host/path" or "host path"
-    let (host, path) = if let Some(idx) = url.find(' ') {
-        (&url[..idx], url[idx + 1..].trim())
-    } else if let Some(idx) = url.find('/') {
-        (&url[..idx], &url[idx..])
-    } else {
-        (url, "/")
-    };
-    let host = host.trim();
-
-    // Check for "> name" store redirect
-    let store_as = if let Some(idx) = path.find('>') {
-        let name = path[idx + 1..].trim();
-        if name.is_empty() { None } else { Some(alloc::string::String::from(name)) }
-    } else {
-        None
-    };
-    let path = if let Some(idx) = path.find('>') { path[..idx].trim() } else { path };
-    let path = if path.is_empty() { "/" } else { path };
-
-    // Resolve hostname
-    let ip = if let Some(ip) = parse_ip(host) {
-        ip
-    } else {
-        match crate::net::dns::resolve(host) {
-            Some(ip) => {
-                kprintln!("[npk] {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
-                ip
-            }
-            None => {
-                kprintln!("[npk] Could not resolve '{}'", host);
-                return;
-            }
-        }
-    };
-
-    // ARP resolve gateway
-    crate::net::arp::request([10, 0, 2, 2]);
-    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
-
-    // TCP connect
-    kprintln!("[npk] Connecting to {}.{}.{}.{}:80...", ip[0], ip[1], ip[2], ip[3]);
-    let handle = match crate::net::tcp::connect(ip, 80) {
-        Ok(h) => h,
-        Err(e) => { kprintln!("[npk] TCP error: {}", e); return; }
-    };
-
-    // Send HTTP GET
-    let request = alloc::format!(
-        "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nConnection: close\r\n\r\n",
-        path, host
-    );
-    if let Err(e) = crate::net::tcp::send(handle, request.as_bytes()) {
-        kprintln!("[npk] Send error: {}", e);
-        let _ = crate::net::tcp::close(handle);
-        return;
-    }
-
-    // Receive response
-    let mut response = alloc::vec::Vec::new();
-    let mut buf = [0u8; 2048];
-    loop {
-        match crate::net::tcp::recv_blocking(handle, &mut buf, 500) {
-            Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&buf[..n]),
-            Err(_) => break,
-        }
-        if response.len() > 8192 { break; } // limit output
-    }
-
-    let _ = crate::net::tcp::close(handle);
-
-    if response.is_empty() {
-        kprintln!("[npk] No response received");
-        return;
-    }
-
-    // Strip HTTP headers if present (find \r\n\r\n)
-    let body_start = response.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(0);
-
-    if let Some(name) = store_as {
-        // Store response body in npkFS
-        let body = &response[body_start..];
-        match crate::npkfs::store(&name, body, capability::CAP_NULL) {
-            Ok(hash) => {
-                kprint!("[npk] Stored '{}' ({} bytes, hash: ", name, body.len());
-                for b in &hash[..4] { kprint!("{:02x}", b); }
-                kprintln!("...)");
-            }
-            Err(e) => kprintln!("[npk] Store error: {}", e),
-        }
-    } else {
-        // Print response body
-        let body = &response[body_start..];
-        match core::str::from_utf8(body) {
-            Ok(s) => {
-                let display = if s.len() > 2048 { &s[..2048] } else { s };
-                kprintln!("{}", display);
-            }
-            Err(_) => kprintln!("[npk] ({} bytes, binary response)", body.len()),
-        }
-    }
+    do_http_request(args, false);
 }
 
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
@@ -897,13 +1578,12 @@ fn intent_resolve(args: &str) {
 
 fn intent_time() {
     if crate::net::ntp::unix_time().is_none() {
-        // Try to re-sync NTP
         kprintln!("[npk] Syncing time...");
-        crate::net::ntp::sync([10, 0, 2, 3]);
+        crate::net::ntp::sync_via_dns("pool.ntp.org");
     }
     match crate::net::ntp::unix_time() {
         Some(t) => kprintln!("{}", crate::net::ntp::format_time(t)),
-        None => kprintln!("[npk] Time sync failed. Network may be unavailable."),
+        None => kprintln!("[npk] Time unavailable. No RTC or network."),
     }
 }
 
@@ -1094,14 +1774,52 @@ fn hex_dump(buf: &[u8; 512]) {
 }
 
 fn intent_https(args: &str) {
-    use crate::tls;
+    do_http_request(args, true);
+}
 
-    let url = args.trim();
+const HTTP_MAX_RESPONSE: usize = 128 * 1024; // 128 KB
+
+/// Flags parsed from HTTP/HTTPS arguments.
+struct HttpFlags {
+    headers_only: bool,  // -h: show only headers
+    body_only: bool,     // -b: show only body
+    silent: bool,        // -s: no status output
+}
+
+/// Parse flags from anywhere in the args, return flags + cleaned args.
+fn parse_http_args(args: &str) -> (HttpFlags, alloc::string::String) {
+    let mut flags = HttpFlags { headers_only: false, body_only: false, silent: false };
+    let mut cleaned = alloc::string::String::new();
+
+    for part in args.split_whitespace() {
+        match part {
+            "-h" => flags.headers_only = true,
+            "-b" => flags.body_only = true,
+            "-s" => flags.silent = true,
+            _ => {
+                if !cleaned.is_empty() { cleaned.push(' '); }
+                cleaned.push_str(part);
+            }
+        }
+    }
+
+    (flags, cleaned)
+}
+
+fn do_http_request(args: &str, use_tls: bool) {
+    let proto = if use_tls { "https" } else { "http" };
+    let (flags, url) = parse_http_args(args);
+    let url = url.as_str();
+
     if url.is_empty() {
-        kprintln!("[npk] Usage: https <host> [path]");
+        kprintln!("[npk] Usage: {} [-h|-b|-s] <host> [path] [> name]", proto);
+        kprintln!("[npk]   -h  Headers only");
+        kprintln!("[npk]   -b  Body only (no headers)");
+        kprintln!("[npk]   -s  Silent (no status messages)");
         return;
     }
 
+    // Parse "host path" or "host/path"
     let (host, path) = if let Some(idx) = url.find(' ') {
         (&url[..idx], url[idx + 1..].trim())
     } else if let Some(idx) = url.find('/') {
@@ -1127,7 +1845,9 @@ fn intent_https(args: &str) {
     } else {
         match crate::net::dns::resolve(host) {
             Some(ip) => {
-                kprintln!("[npk] {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
+                if !flags.silent {
+                    kprintln!("[npk] {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
+                }
                 ip
             }
             None => {
@@ -1141,92 +1861,182 @@ fn intent_https(args: &str) {
     crate::net::arp::request([10, 0, 2, 2]);
     for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
 
-    // TCP connect on port 443
-    kprintln!("[npk] Connecting to {}.{}.{}.{}:443...", ip[0], ip[1], ip[2], ip[3]);
-    let handle = match crate::net::tcp::connect(ip, 443) {
+    let port = if use_tls { 443u16 } else { 80 };
+    if !flags.silent {
+        kprintln!("[npk] Connecting to {}.{}.{}.{}:{}...", ip[0], ip[1], ip[2], ip[3], port);
+    }
+
+    let handle = match crate::net::tcp::connect(ip, port) {
         Ok(h) => h,
         Err(e) => { kprintln!("[npk] TCP error: {}", e); return; }
     };
 
-    // TLS 1.3 handshake
-    kprintln!("[npk] TLS 1.3 handshake with '{}'...", host);
-    let mut session = match tls::tls_connect(handle, host) {
-        Ok(s) => {
-            kprintln!("[npk] TLS established (ChaCha20-Poly1305)");
-            s
+    // TLS handshake (if HTTPS)
+    let mut tls_session = if use_tls {
+        if !flags.silent {
+            kprintln!("[npk] TLS 1.3 handshake with '{}'...", host);
         }
-        Err(e) => {
-            kprintln!("[npk] TLS error: {}", e);
-            let _ = crate::net::tcp::close(handle);
-            return;
+        match crate::tls::tls_connect(handle, host) {
+            Ok(s) => {
+                if !flags.silent {
+                    kprintln!("[npk] TLS established (ChaCha20-Poly1305)");
+                }
+                Some(s)
+            }
+            Err(e) => {
+                kprintln!("[npk] TLS error: {}", e);
+                let _ = crate::net::tcp::close(handle);
+                return;
+            }
         }
+    } else {
+        None
     };
 
-    // Send HTTP/1.1 GET over TLS
+    // Send HTTP GET
+    let http_ver = if use_tls { "1.1" } else { "1.0" };
     let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nConnection: close\r\n\r\n",
-        path, host
+        "GET {} HTTP/{}\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, http_ver, host
     );
-    if let Err(e) = tls::tls_send(&mut session, request.as_bytes()) {
-        kprintln!("[npk] TLS send error: {}", e);
-        let _ = tls::tls_close(&mut session);
+
+    let send_ok = if let Some(ref mut sess) = tls_session {
+        crate::tls::tls_send(sess, request.as_bytes()).is_ok()
+    } else {
+        crate::net::tcp::send(handle, request.as_bytes()).is_ok()
+    };
+    if !send_ok {
+        kprintln!("[npk] Send error");
+        if let Some(ref mut sess) = tls_session { let _ = crate::tls::tls_close(sess); }
+        else { let _ = crate::net::tcp::close(handle); }
         return;
     }
 
     // Receive response
     let mut response = alloc::vec::Vec::new();
     let mut buf = [0u8; 4096];
-    let mut empty_count = 0;
-    loop {
-        match tls::tls_recv(&mut session, &mut buf) {
-            Ok(0) => {
-                // Skip non-app records (NewSessionTicket, CCS)
-                empty_count += 1;
-                if empty_count > 5 && response.is_empty() { break; }
-                if empty_count > 2 && !response.is_empty() { break; }
-                continue;
-            }
-            Ok(n) => {
-                response.extend_from_slice(&buf[..n]);
-                empty_count = 0;
-            }
-            Err(_) => break,
-        }
-        if response.len() > 32768 { break; }
-    }
 
-    let _ = tls::tls_close(&mut session);
+    if let Some(ref mut sess) = tls_session {
+        let mut empty_count = 0;
+        loop {
+            match crate::tls::tls_recv(sess, &mut buf) {
+                Ok(0) => {
+                    empty_count += 1;
+                    if empty_count > 5 && response.is_empty() { break; }
+                    if empty_count > 2 && !response.is_empty() { break; }
+                }
+                Ok(n) => { response.extend_from_slice(&buf[..n]); empty_count = 0; }
+                Err(_) => break,
+            }
+            if response.len() > HTTP_MAX_RESPONSE { break; }
+        }
+        let _ = crate::tls::tls_close(sess);
+    } else {
+        loop {
+            match crate::net::tcp::recv_blocking(handle, &mut buf, 500) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+            if response.len() > HTTP_MAX_RESPONSE { break; }
+        }
+        let _ = crate::net::tcp::close(handle);
+    }
 
     if response.is_empty() {
         kprintln!("[npk] No response received");
         return;
     }
 
-    // Strip HTTP headers
-    let body_start = response.windows(4)
+    // Find header/body boundary
+    let header_end = response.windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(0);
+        .unwrap_or(response.len());
+    let body_start = if header_end < response.len() { header_end + 4 } else { response.len() };
 
     if let Some(name) = store_as {
+        let store_path = resolve_path(&name);
         let body = &response[body_start..];
-        match crate::npkfs::store(&name, body, capability::CAP_NULL) {
+        match crate::npkfs::upsert(&store_path, body, capability::CAP_NULL) {
             Ok(hash) => {
-                kprint!("[npk] Stored '{}' ({} bytes, hash: ", name, body.len());
+                kprint!("[npk] Stored '{}' ({} bytes, hash: ", store_path, body.len());
                 for b in &hash[..4] { kprint!("{:02x}", b); }
                 kprintln!("...)");
             }
             Err(e) => kprintln!("[npk] Store error: {}", e),
         }
-    } else {
-        // Print headers + body
-        if let Ok(text) = core::str::from_utf8(&response) {
-            for line in text.lines().take(50) {
-                kprintln!("{}", line);
-            }
-        } else {
-            kprintln!("[npk] ({} bytes, binary response)", response.len());
+        return;
+    }
+
+    // Display based on flags
+    if flags.headers_only {
+        if let Ok(hdrs) = core::str::from_utf8(&response[..header_end]) {
+            kprintln!("{}", hdrs);
         }
+    } else if flags.body_only {
+        print_response_data(&response[body_start..]);
+    } else {
+        // Full response: headers + body
+        print_response_data(&response);
+    }
+
+    if response.len() >= HTTP_MAX_RESPONSE {
+        kprintln!("\n[npk] (truncated at {} KB)", HTTP_MAX_RESPONSE / 1024);
+    }
+}
+
+fn print_response_data(data: &[u8]) {
+    match core::str::from_utf8(data) {
+        Ok(text) => kprintln!("{}", text),
+        Err(_) => kprintln!("[npk] ({} bytes, binary)", data.len()),
+    }
+}
+
+fn intent_set(args: &str) {
+    let args = args.trim();
+    if let Some((key, value)) = args.split_once(' ') {
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            kprintln!("[npk] Usage: set <key> <value>");
+            return;
+        }
+        crate::config::set(key, value);
+        kprintln!("[npk] {} = {}", key, value);
+    } else {
+        kprintln!("[npk] Usage: set <key> <value>");
+        kprintln!("[npk] Keys: timezone, keyboard, lang");
+        kprintln!("[npk] Example: set timezone +2");
+    }
+}
+
+fn intent_get(args: &str) {
+    let key = args.trim();
+    if key.is_empty() {
+        kprintln!("[npk] Usage: get <key>");
+        return;
+    }
+    match crate::config::get(key) {
+        Some(val) => kprintln!("{} = {}", key, val),
+        None => kprintln!("[npk] '{}' not set", key),
+    }
+}
+
+fn intent_config() {
+    let entries = crate::config::list();
+    if entries.is_empty() {
+        kprintln!("[npk] No configuration set.");
+        kprintln!("[npk] Use 'set <key> <value>' to configure.");
+    } else {
+        kprintln!();
+        for (k, v) in &entries {
+            kprintln!("  {} = {}", k, v);
+        }
+        kprintln!();
+    }
+    kprintln!("[npk] Available keys:");
+    for (key, desc) in crate::config::KNOWN_KEYS {
+        kprintln!("  {:12} {}", key, desc);
     }
 }
 
