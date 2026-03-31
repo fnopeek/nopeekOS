@@ -131,12 +131,19 @@ fn derive_keys(shared: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 12], [u8; 12]) {
 
 fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), &'static str> {
     let mut filled = 0;
+    let mut idle = 0u32;
     while filled < buf.len() {
         crate::net::poll();
-        let n = tcp::recv_blocking(handle, &mut buf[filled..], 1000)
+        let n = tcp::recv_blocking(handle, &mut buf[filled..], 100) // 1s poll
             .map_err(|_| "recv failed")?;
-        if n == 0 { return Err("connection closed"); }
-        filled += n;
+        if n > 0 {
+            filled += n;
+            idle = 0;
+        } else {
+            idle += 1;
+            // 30 minutes idle timeout (1800 × 1s polls)
+            if idle > 1800 { return Err("idle timeout"); }
+        }
     }
     Ok(())
 }
