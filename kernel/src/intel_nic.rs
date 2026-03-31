@@ -246,6 +246,29 @@ pub fn init() -> bool {
     let cmd = pci::read16(dev.addr, 0x04);
     pci::write32(dev.addr, 0x04, (cmd | 0x06) as u32); // Bus Master + Memory Space
 
+    // Enable bus mastering on PCIe bridge if device is behind one
+    if dev.addr.bus > 0 {
+        for d in 0u8..32 {
+            for f in 0u8..8 {
+                let ba = pci::PciAddr { bus: 0, device: d, function: f };
+                let bid = pci::read32(ba, 0x00);
+                if bid == 0xFFFF_FFFF || bid == 0 {
+                    if f == 0 { break; }
+                    continue;
+                }
+                // Header type 1 = PCI-PCI bridge
+                if pci::read8(ba, 0x0E) & 0x7F == 1 {
+                    let sec = pci::read8(ba, 0x19);
+                    let sub = pci::read8(ba, 0x1A);
+                    if dev.addr.bus >= sec && dev.addr.bus <= sub {
+                        pci::enable_bus_master(ba);
+                    }
+                }
+                if f == 0 && pci::read8(ba, 0x0E) & 0x80 == 0 { break; }
+            }
+        }
+    }
+
     // BAR0 (MMIO) — check if 32-bit or 64-bit
     let bar0_raw = pci::read32(dev.addr, 0x10);
     let bar0 = if bar0_raw & 0x04 != 0 {
@@ -336,15 +359,36 @@ pub fn init() -> bool {
     };
     unsafe { core::ptr::write_bytes(rx_bufs as *mut u8, 0, rx_buf_pages * 4096); }
 
+    // Enable receiver BEFORE per-queue setup (matches Linux igc driver order
+    // and our own TX path where TCTL_EN is set before TXDCTL enable).
+    // Read-modify-write to preserve UEFI firmware bits.
+    let rctl = r32(mmio, RCTL);
+    w32(mmio, RCTL, (rctl & !(3 << 12)) | RCTL_EN | RCTL_BAM | RCTL_SECRC);
+
     if is_igc {
-        // Disable RX queue first
+        // 1. Disable RX queue and wait for it
         w32(mmio, IGC_RXDCTL, 0);
-        for _ in 0..10_000 { core::hint::spin_loop(); }
+        for _ in 0..100_000 {
+            if r32(mmio, IGC_RXDCTL) & DCTL_ENABLE == 0 { break; }
+            core::hint::spin_loop();
+        }
 
-        // SRRCTL: advanced one-buffer, 2KB packet buffers
-        w32(mmio, IGC_SRRCTL, (1 << 25) | 2);
+        // 2. Ring base address + length (before SRRCTL, per Linux igc)
+        w32(mmio, qregs.rdbal, rx_descs as u32);
+        w32(mmio, qregs.rdbah, (rx_descs >> 32) as u32);
+        w32(mmio, qregs.rdlen, rx_ring_size as u32);
 
-        // Init advanced RX descriptors
+        // 3. SRRCTL: read-modify-write to preserve firmware bits (kernel patch)
+        let srrctl = r32(mmio, IGC_SRRCTL);
+        w32(mmio, IGC_SRRCTL, (srrctl & !((7 << 25) | 0x7F))
+            | (1 << 25)   // DESCTYPE = advanced one-buffer
+            | 2);         // BSIZEPACKET = 2KB
+
+        // 4. Head/tail to zero
+        w32(mmio, qregs.rdh, 0);
+        w32(mmio, qregs.rdt, 0);
+
+        // 5. Init advanced RX descriptors
         for i in 0..NUM_RX_DESC {
             let desc = (rx_descs + (i * 16) as u64) as *mut AdvRxDesc;
             unsafe {
@@ -353,21 +397,28 @@ pub fn init() -> bool {
             }
         }
 
-        w32(mmio, qregs.rdbal, rx_descs as u32);
-        w32(mmio, qregs.rdbah, (rx_descs >> 32) as u32);
-        w32(mmio, qregs.rdlen, rx_ring_size as u32);
-        w32(mmio, qregs.rdh, 0);
-        w32(mmio, qregs.rdt, 0); // Set to 0 initially, bump after enable
-
-        // Enable RX queue with thresholds
-        w32(mmio, IGC_RXDCTL, 8 | (8 << 8) | (4 << 16) | DCTL_ENABLE);
+        // 6. Enable RX queue (PTHRESH=8, HTHRESH=8, WTHRESH=1 per Linux igc)
+        w32(mmio, IGC_RXDCTL, 8 | (8 << 8) | (1 << 16) | DCTL_ENABLE);
+        let mut rxdctl_ok = false;
         for _ in 0..100_000 {
-            if r32(mmio, IGC_RXDCTL) & DCTL_ENABLE != 0 { break; }
+            if r32(mmio, IGC_RXDCTL) & DCTL_ENABLE != 0 {
+                rxdctl_ok = true;
+                break;
+            }
             core::hint::spin_loop();
         }
+        if !rxdctl_ok {
+            kprintln!("[npk] intel-nic: WARNING: RXDCTL enable FAILED");
+        }
 
-        // Now make descriptors available
+        // 7. Make descriptors available to NIC
         w32(mmio, qregs.rdt, (NUM_RX_DESC - 1) as u32);
+
+        // Debug readback
+        kprintln!("[npk] intel-nic: RCTL={:#010x} SRRCTL={:#010x} RXDCTL={:#010x}",
+            r32(mmio, RCTL), r32(mmio, IGC_SRRCTL), r32(mmio, IGC_RXDCTL));
+        kprintln!("[npk] intel-nic: RDH={} RDT={} RDLEN={}",
+            r32(mmio, qregs.rdh), r32(mmio, qregs.rdt), r32(mmio, qregs.rdlen));
     } else {
         // Legacy e1000 RX init
         for i in 0..NUM_RX_DESC {
@@ -384,9 +435,6 @@ pub fn init() -> bool {
         w32(mmio, qregs.rdh, 0);
         w32(mmio, qregs.rdt, (NUM_RX_DESC - 1) as u32);
     }
-
-    // Enable receiver
-    w32(mmio, RCTL, RCTL_EN | RCTL_BAM | RCTL_BSIZE_2K | RCTL_SECRC);
 
     // === Setup TX ===
     let tx_ring_size = NUM_TX_DESC * 16;

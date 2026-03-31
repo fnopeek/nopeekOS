@@ -42,7 +42,8 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // Ensure ARP for DNS server
     let dns_server = *DNS_SERVER.lock();
     super::arp::request(dns_server);
-    for _ in 0..50_000 {
+    let arp_wait = crate::interrupts::ticks() + 10; // ~100ms
+    while crate::interrupts::ticks() < arp_wait {
         super::poll();
         core::hint::spin_loop();
     }

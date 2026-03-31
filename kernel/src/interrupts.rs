@@ -8,16 +8,33 @@ use crate::kprintln;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic tick counter, incremented by timer IRQ at 100 Hz.
-/// 1 tick = 10ms. Wraps after ~5.8 billion years.
+/// Used on hardware with working PIT (e.g. QEMU).
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// TSC value at boot — for deriving ticks on hardware without PIT.
+static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// Call once at boot after calibrate_tsc().
+pub fn init_tsc_ticks() {
+    BOOT_TSC.store(rdtsc(), Ordering::Relaxed);
+}
+
+/// Monotonic 100 Hz tick counter. Works on all hardware:
+/// uses PIT timer IRQ if available, falls back to TSC.
 pub fn ticks() -> u64 {
-    TICKS.load(Ordering::Relaxed)
+    let pit = TICKS.load(Ordering::Relaxed);
+    if pit > 0 { return pit; }
+    // PIT not working (NUC, UEFI-only, no legacy timer) — derive from TSC
+    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    let period = freq / 100; // TSC cycles per 10ms tick
+    if period == 0 { return 0; }
+    let boot = BOOT_TSC.load(Ordering::Relaxed);
+    (rdtsc() - boot) / period
 }
 
 /// Seconds since boot (approximate)
 pub fn uptime_secs() -> u64 {
-    TICKS.load(Ordering::Relaxed) / 100
+    ticks() / 100
 }
 
 /// Read CPU Time Stamp Counter (works on all x86_64, no PIC needed).

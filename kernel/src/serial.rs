@@ -33,16 +33,22 @@ fn capture_bytes(s: &str) {
 
 pub struct SerialPort {
     base: u16,
+    port_exists: bool,
 }
 
 impl SerialPort {
     pub const fn new(base: u16) -> Self {
-        SerialPort { base }
+        SerialPort { base, port_exists: false }
     }
 
     /// Initialize COM1: 115200 baud, 8N1
-    pub fn init(&self) {
+    pub fn init(&mut self) {
         unsafe {
+            // Check if serial port exists (0xFF = no hardware)
+            if inb(self.base + 5) == 0xFF {
+                self.port_exists = false;
+                return;
+            }
             outb(self.base + 1, 0x00);       // Disable interrupts
             outb(self.base + 3, 0x80);       // Enable DLAB
             outb(self.base + 0, 0x01);       // Divisor low: 115200 baud
@@ -53,32 +59,45 @@ impl SerialPort {
             outb(self.base + 4, 0x1E);       // Loopback test
             outb(self.base + 0, 0xAE);
             if inb(self.base + 0) != 0xAE {
+                self.port_exists = false;
                 return; // Port defective
             }
             outb(self.base + 4, 0x0F);       // Normal operation
+            self.port_exists = true;
         }
     }
 
     pub fn write_byte(&self, byte: u8) {
+        if !self.port_exists { return; }
         unsafe {
             while (inb(self.base + 5) & 0x20) == 0 {}
             outb(self.base, byte);
         }
     }
 
-    /// Blocking read. Uses hlt to sleep until timer interrupt wakes us.
+    /// Write byte with framebuffer echo (for read_line echo on headless systems)
+    fn echo_byte(&self, byte: u8) {
+        self.write_byte(byte);
+        crate::framebuffer::write_byte(byte);
+    }
+
+    /// Blocking read. Polls both serial port and USB keyboard.
     pub fn read_byte(&self) -> u8 {
-        unsafe {
-            while (inb(self.base + 5) & 0x01) == 0 {
-                // SAFETY: hlt stops CPU until next interrupt (requires sti)
-                core::arch::asm!("hlt");
+        loop {
+            // Check keyboard first (USB/xHCI — primary on bare metal)
+            if let Some(key) = crate::keyboard::read_key() {
+                return key;
             }
-            inb(self.base)
+            // Check serial (only if port exists — 0xFF means no hardware)
+            if self.port_exists && self.has_data() {
+                return unsafe { inb(self.base) };
+            }
+            core::hint::spin_loop();
         }
     }
 
     pub fn has_data(&self) -> bool {
-        unsafe { (inb(self.base + 5) & 0x01) != 0 }
+        self.port_exists && unsafe { (inb(self.base + 5) & 0x01) != 0 }
     }
 
     /// Read a line with masked echo (shows '*'), returns length.
@@ -88,23 +107,23 @@ impl SerialPort {
             let byte = self.read_byte();
             match byte {
                 b'\r' | b'\n' => {
-                    self.write_byte(b'\r');
-                    self.write_byte(b'\n');
+                    self.echo_byte(b'\r');
+                    self.echo_byte(b'\n');
                     return pos;
                 }
                 0x08 | 0x7F => {
                     if pos > 0 {
                         pos -= 1;
-                        self.write_byte(0x08);
-                        self.write_byte(b' ');
-                        self.write_byte(0x08);
+                        self.echo_byte(0x08);
+                        self.echo_byte(b' ');
+                        self.echo_byte(0x08);
                     }
                 }
                 byte if byte >= 0x20 && byte < 0x7F => {
                     if pos < buf.len() {
                         buf[pos] = byte;
                         pos += 1;
-                        self.write_byte(b'*');
+                        self.echo_byte(b'*');
                     }
                 }
                 _ => {}
@@ -119,23 +138,23 @@ impl SerialPort {
             let byte = self.read_byte();
             match byte {
                 b'\r' | b'\n' => {
-                    self.write_byte(b'\r');
-                    self.write_byte(b'\n');
+                    self.echo_byte(b'\r');
+                    self.echo_byte(b'\n');
                     return pos;
                 }
                 0x08 | 0x7F => {
                     if pos > 0 {
                         pos -= 1;
-                        self.write_byte(0x08);
-                        self.write_byte(b' ');
-                        self.write_byte(0x08);
+                        self.echo_byte(0x08);
+                        self.echo_byte(b' ');
+                        self.echo_byte(0x08);
                     }
                 }
                 byte if byte >= 0x20 && byte < 0x7F => {
                     if pos < buf.len() {
                         buf[pos] = byte;
                         pos += 1;
-                        self.write_byte(byte);
+                        self.echo_byte(byte);
                     }
                 }
                 _ => {}

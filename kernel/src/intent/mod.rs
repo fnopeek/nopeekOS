@@ -111,7 +111,7 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             let serial = serial::SERIAL.lock();
             if !serial.has_data() {
                 drop(serial);
-                unsafe { core::arch::asm!("hlt"); }
+                core::hint::spin_loop();
                 continue;
             }
             let b = serial.read_byte();
@@ -516,8 +516,8 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
 
         "clear" | "cls" => {
-            // ANSI escape: clear screen + cursor home
-            kprint!("\x1B[2J\x1B[H");
+            crate::framebuffer::clear();
+            kprint!("\x1B[2J\x1B[H"); // ANSI for serial terminal
         }
 
         // Unrestricted intents (informational)

@@ -164,6 +164,7 @@ fn parse_dhcp_reply(data: &[u8], expected_type: u8) -> Option<([u8; 4], [u8; 4])
     let mut server_ip = [0u8; 4];
     let mut router = [0u8; 4];
     let mut dns_ip = [0u8; 4];
+    let mut subnet = [0u8; 4];
 
     while pos < data.len() {
         let opt = data[pos];
@@ -178,6 +179,7 @@ fn parse_dhcp_reply(data: &[u8], expected_type: u8) -> Option<([u8; 4], [u8; 4])
             53 if len >= 1 => msg_type = data[val_start],
             54 if len >= 4 => server_ip.copy_from_slice(&data[val_start..val_start + 4]),
             3 if len >= 4 => router.copy_from_slice(&data[val_start..val_start + 4]),
+            1 if len >= 4 => subnet.copy_from_slice(&data[val_start..val_start + 4]),
             6 if len >= 4 => dns_ip.copy_from_slice(&data[val_start..val_start + 4]),
             _ => {}
         }
@@ -187,9 +189,12 @@ fn parse_dhcp_reply(data: &[u8], expected_type: u8) -> Option<([u8; 4], [u8; 4])
 
     if msg_type != expected_type { return None; }
 
-    // Apply gateway and DNS if provided
+    // Apply gateway, subnet, and DNS
     if router != [0; 4] {
-        // Store gateway for later use (ARP cache will resolve it)
+        super::ipv4::set_gateway(router);
+    }
+    if subnet != [0; 4] {
+        super::ipv4::set_subnet(subnet);
     }
     if dns_ip != [0; 4] {
         dns::set_server(dns_ip);

@@ -39,6 +39,7 @@ mod intel_nic;
 mod netdev;
 mod setup;
 mod framebuffer;
+mod xhci;
 
 use core::panic::PanicInfo;
 
@@ -47,7 +48,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     vga::show_boot_banner();
 
     {
-        let serial = serial::SERIAL.lock();
+        let mut serial = serial::SERIAL.lock();
         serial.init();
     }
 
@@ -74,6 +75,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
 
     kprintln!("[npk] Interrupts enabled.");
     interrupts::calibrate_tsc();
+    interrupts::init_tsc_ticks();
     kprintln!("[npk] TSC: {} MHz", interrupts::tsc_freq() / 1_000_000);
     keyboard::init();
 
@@ -99,6 +101,11 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     let pci_count = pci::scan();
     kprintln!("[npk] PCI: {} devices", pci_count);
     vga::show_status(b"PCI bus scanned");
+
+    // USB keyboard (xHCI) — before any user input is needed
+    if xhci::init() {
+        vga::show_status(b"USB keyboard online");
+    }
 
     kprintln!("[npk] Probing block devices...");
     if virtio_blk::init() {
@@ -145,11 +152,8 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
 
     csprng::init();
 
-    // Start debug shell BEFORE setup (headless debug mode)
-    // Allows remote diagnosis when framebuffer doesn't work
-    if netdev::is_available() {
-        shell::start_debug_listener();
-    }
+    // Debug shell disabled — enable when needed:
+    // if netdev::is_available() { shell::start_debug_listener(); }
 
     kprintln!("[npk] Initializing WASM Runtime...");
     wasm::init();

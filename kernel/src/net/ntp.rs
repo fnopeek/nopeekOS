@@ -37,7 +37,8 @@ pub fn sync(server_ip: [u8; 4]) -> bool {
 
     // Ensure ARP
     super::arp::request(server_ip);
-    for _ in 0..50_000 {
+    let arp_wait = crate::interrupts::ticks() + 10; // ~100ms
+    while crate::interrupts::ticks() < arp_wait {
         super::poll();
         core::hint::spin_loop();
     }
@@ -63,7 +64,7 @@ pub fn sync(server_ip: [u8; 4]) -> bool {
                 break;
             }
         }
-        if crate::interrupts::ticks() - t0 > 300 { break; }
+        if crate::interrupts::ticks() - t0 > 300 { break; } // 3s timeout
         core::hint::spin_loop();
     }
 

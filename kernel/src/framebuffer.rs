@@ -68,8 +68,7 @@ pub fn init_from_multiboot2(mb_info_addr: u32) {
                     let _ = crate::paging::map_page(
                         pa, pa,
                         crate::paging::PageFlags::PRESENT
-                            | crate::paging::PageFlags::WRITABLE
-                            | crate::paging::PageFlags::NO_CACHE,
+                            | crate::paging::PageFlags::WRITABLE,
                     );
                 }
 
@@ -199,6 +198,60 @@ pub fn write_str(s: &str) {
             _ => {} // Ignore other control chars
         }
     }
+}
+
+/// Write a single byte to framebuffer (for echo from serial read).
+pub fn write_byte(byte: u8) {
+    let mut console = CONSOLE.lock();
+    let console = match console.as_mut() {
+        Some(c) => c,
+        None => return,
+    };
+    match byte {
+        b'\n' => {
+            console.col = 0;
+            console.row += 1;
+            if console.row >= console.rows {
+                console.row = console.rows - 1;
+                scroll(console);
+            }
+        }
+        b'\r' => { console.col = 0; }
+        0x08 => {
+            if console.col > 0 {
+                console.col -= 1;
+                draw_char(&console.info, b' ', console.col, console.row);
+            }
+        }
+        b if b >= 0x20 && b < 0x7F => {
+            draw_char(&console.info, b, console.col, console.row);
+            console.col += 1;
+            if console.col >= console.cols {
+                console.col = 0;
+                console.row += 1;
+                if console.row >= console.rows {
+                    console.row = console.rows - 1;
+                    scroll(console);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Clear the framebuffer screen.
+pub fn clear() {
+    let mut console = CONSOLE.lock();
+    let console = match console.as_mut() {
+        Some(c) => c,
+        None => return,
+    };
+    let fb = console.info.addr as *mut u8;
+    let total = console.info.pitch as usize * console.info.height as usize;
+    // SAFETY: clearing framebuffer memory
+    unsafe { core::ptr::write_bytes(fb, 0, total); }
+    console.col = 0;
+    console.row = 0;
 }
 
 /// Check if framebuffer is available.
