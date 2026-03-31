@@ -64,32 +64,36 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
 
     if multiboot_magic == 0x36d76289 {
         kprintln!("[npk] Multiboot2: verified");
-        vga::show_status(b"Multiboot2 verified");
     } else {
         kprintln!("[npk] WARNING: Multiboot2 magic mismatch: {:#x}", multiboot_magic);
     }
 
+
     kprintln!("[npk] Initializing IDT + PIC...");
     interrupts::init();
+
     kprintln!("[npk] Interrupts enabled.");
+    interrupts::calibrate_tsc();
+    kprintln!("[npk] TSC: {} MHz", interrupts::tsc_freq() / 1_000_000);
     keyboard::init();
-    kprintln!("[npk] PS/2 keyboard: enabled (IRQ1)");
-    vga::show_status(b"Interrupts enabled (IDT + PIC)");
 
     kprintln!("[npk] Initializing Physical Memory Manager...");
     memory::init(multiboot_info);
-    vga::show_status(b"Physical memory mapped");
+
 
     kprintln!("[npk] Initializing Heap Allocator...");
     heap::init();
-    vga::show_status(b"Heap allocator online");
+
+    // Start capturing boot log for debug shell (needs heap)
+    serial::start_capture();
 
     kprintln!("[npk] Initializing Virtual Memory Manager...");
     paging::init();
-    vga::show_status(b"Virtual memory online");
+
 
     // Framebuffer init (needs memory + paging for MMIO mapping)
     framebuffer::init_from_multiboot2(multiboot_info);
+
 
     kprintln!("[npk] Scanning PCI bus...");
     let pci_count = pci::scan();
@@ -140,6 +144,12 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     }
 
     csprng::init();
+
+    // Start debug shell BEFORE setup (headless debug mode)
+    // Allows remote diagnosis when framebuffer doesn't work
+    if netdev::is_available() {
+        shell::start_debug_listener();
+    }
 
     kprintln!("[npk] Initializing WASM Runtime...");
     wasm::init();

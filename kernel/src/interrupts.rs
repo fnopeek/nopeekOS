@@ -20,6 +20,66 @@ pub fn uptime_secs() -> u64 {
     TICKS.load(Ordering::Relaxed) / 100
 }
 
+/// Read CPU Time Stamp Counter (works on all x86_64, no PIC needed).
+pub fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi); }
+    ((hi as u64) << 32) | lo as u64
+}
+
+/// Estimate TSC frequency by calibrating against PIT (called once at boot).
+static TSC_FREQ: AtomicU64 = AtomicU64::new(2_000_000_000); // default 2GHz
+
+pub fn calibrate_tsc() {
+    // Use CPUID leaf 0x15 (TSC/crystal ratio) if available
+    let ebx: u32;
+    let ecx: u32;
+    unsafe {
+        // rbx is reserved by LLVM, so save/restore manually
+        let ebx_out: u64;
+        let ecx_out: u64;
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0x15",
+            "xor ecx, ecx",
+            "cpuid",
+            "mov {0}, rbx",
+            "mov {1}, rcx",
+            "pop rbx",
+            out(reg) ebx_out,
+            out(reg) ecx_out,
+            out("eax") _,
+            out("edx") _,
+        );
+        ebx = ebx_out as u32;
+        ecx = ecx_out as u32;
+    }
+    if ebx > 0 && ecx > 0 {
+        let freq = ecx as u64 * ebx as u64;
+        if freq > 100_000_000 {
+            TSC_FREQ.store(freq, Ordering::Relaxed);
+            return;
+        }
+    }
+    // Fallback: 2 GHz default
+    TSC_FREQ.store(2_000_000_000, Ordering::Relaxed);
+}
+
+/// Get TSC frequency in Hz.
+pub fn tsc_freq() -> u64 {
+    TSC_FREQ.load(Ordering::Relaxed)
+}
+
+/// Busy-wait for approximately `ms` milliseconds using TSC.
+pub fn delay_ms(ms: u64) {
+    let ticks_per_ms = TSC_FREQ.load(Ordering::Relaxed) / 1000;
+    let target = rdtsc() + ms * ticks_per_ms;
+    while rdtsc() < target {
+        core::hint::spin_loop();
+    }
+}
+
 const PIT_CHANNEL0: u16 = 0x40;
 const PIT_COMMAND: u16 = 0x43;
 const PIT_BASE_FREQ: u32 = 1_193_182;

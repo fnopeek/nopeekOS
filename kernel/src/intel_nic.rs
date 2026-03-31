@@ -36,29 +36,54 @@ const KNOWN_IDS: &[u16] = &[
     0x153B, // I217-V
 ];
 
-// Register offsets
+// Common registers
 const CTRL: u32     = 0x0000;  // Device Control
 const STATUS: u32   = 0x0008;  // Device Status
 const EERD: u32     = 0x0014;  // EEPROM Read
 const ICR: u32      = 0x00C0;  // Interrupt Cause Read (clear on read)
-const IMS: u32      = 0x00D0;  // Interrupt Mask Set
 const IMC: u32      = 0x00D8;  // Interrupt Mask Clear
 const RCTL: u32     = 0x0100;  // Receive Control
 const TCTL: u32     = 0x0400;  // Transmit Control
 const TIPG: u32     = 0x0410;  // Transmit IPG
-const RDBAL: u32    = 0x2800;  // RX Descriptor Base Low
-const RDBAH: u32    = 0x2804;  // RX Descriptor Base High
-const RDLEN: u32    = 0x2808;  // RX Descriptor Length
-const RDH: u32      = 0x2810;  // RX Descriptor Head
-const RDT: u32      = 0x2818;  // RX Descriptor Tail
-const TDBAL: u32    = 0x3800;  // TX Descriptor Base Low
-const TDBAH: u32    = 0x3804;  // TX Descriptor Base High
-const TDLEN: u32    = 0x3808;  // TX Descriptor Length
-const TDH: u32      = 0x3810;  // TX Descriptor Head
-const TDT: u32      = 0x3818;  // TX Descriptor Tail
 const RAL: u32      = 0x5400;  // Receive Address Low
 const RAH: u32      = 0x5404;  // Receive Address High
 const MTA: u32      = 0x5200;  // Multicast Table Array (128 entries)
+
+// e1000 classic queue registers
+const E1000_RDBAL: u32 = 0x2800;
+const E1000_RDBAH: u32 = 0x2804;
+const E1000_RDLEN: u32 = 0x2808;
+const E1000_RDH: u32   = 0x2810;
+const E1000_RDT: u32   = 0x2818;
+const E1000_TDBAL: u32 = 0x3800;
+const E1000_TDBAH: u32 = 0x3804;
+const E1000_TDLEN: u32 = 0x3808;
+const E1000_TDH: u32   = 0x3810;
+const E1000_TDT: u32   = 0x3818;
+
+// I225/I226 (igc) queue registers
+const IGC_RDBAL: u32 = 0xC000;
+const IGC_RDBAH: u32 = 0xC004;
+const IGC_RDLEN: u32 = 0xC008;
+const IGC_RDH: u32   = 0xC010;
+const IGC_RDT: u32   = 0xC018;
+const IGC_TDBAL: u32 = 0xE000;
+const IGC_TDBAH: u32 = 0xE004;
+const IGC_TDLEN: u32 = 0xE008;
+const IGC_TDH: u32   = 0xE010;
+const IGC_TDT: u32   = 0xE018;
+
+// I225/I226 descriptor control registers (queue enable)
+const IGC_RXDCTL: u32 = 0xC028;  // RX Descriptor Control queue 0
+const IGC_TXDCTL: u32 = 0xE028;  // TX Descriptor Control queue 0
+const IGC_SRRCTL: u32 = 0xC00C;  // Split Receive Control queue 0
+const DCTL_ENABLE: u32 = 1 << 25;
+
+// Status register bits
+const STATUS_LU: u32 = 1 << 1;  // Link Up
+
+// I225/I226 device IDs (use igc register offsets)
+const IGC_IDS: &[u16] = &[0x15F3, 0x15F2, 0x125C, 0x125B];
 
 // CTRL bits
 const CTRL_RST: u32     = 1 << 26;
@@ -95,10 +120,10 @@ const NUM_RX_DESC: usize = 32;
 const NUM_TX_DESC: usize = 32;
 const RX_BUF_SIZE: usize = 2048;
 
-/// RX Descriptor (legacy format, 16 bytes)
+/// Legacy RX Descriptor (16 bytes, for e1000)
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct RxDesc {
+struct LegacyRxDesc {
     addr: u64,
     length: u16,
     checksum: u16,
@@ -107,10 +132,10 @@ struct RxDesc {
     special: u16,
 }
 
-/// TX Descriptor (legacy format, 16 bytes)
+/// Legacy TX Descriptor (16 bytes, for e1000)
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct TxDesc {
+struct LegacyTxDesc {
     addr: u64,
     length: u16,
     cso: u8,
@@ -120,13 +145,67 @@ struct TxDesc {
     special: u16,
 }
 
+/// Advanced RX Descriptor — read format (16 bytes, for I225/I226)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AdvRxDesc {
+    pkt_addr: u64,     // Buffer physical address
+    hdr_addr: u64,     // Header buffer (0 for single-buffer)
+}
+
+/// Advanced RX Descriptor — writeback format
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AdvRxWB {
+    lo: u32,
+    hi: u32,
+    status_error: u32,
+    length_vlan: u32,  // bits [15:0] = length, [31:16] = vlan
+}
+
+/// Advanced TX Descriptor (16 bytes, for I225/I226)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AdvTxDesc {
+    buffer_addr: u64,
+    cmd_type_len: u32,
+    olinfo_status: u32,
+}
+
+// Advanced TX command bits
+const ADVTXD_DTYP_DATA: u32  = 0x00300000; // Data descriptor type
+const ADVTXD_DCMD_DEXT: u32  = 0x20000000; // Descriptor extension
+const ADVTXD_DCMD_EOP: u32   = 0x01000000; // End of packet
+const ADVTXD_DCMD_IFCS: u32  = 0x02000000; // Insert FCS
+const ADVTXD_DCMD_RS: u32    = 0x08000000; // Report status
+
+// Advanced TX status bits (writeback)
+const ADVTXD_STAT_DD: u32    = 1 << 0;
+
+struct QueueRegs {
+    rdbal: u32, rdbah: u32, rdlen: u32, rdh: u32, rdt: u32,
+    tdbal: u32, tdbah: u32, tdlen: u32, tdh: u32, tdt: u32,
+}
+
+const E1000_REGS: QueueRegs = QueueRegs {
+    rdbal: E1000_RDBAL, rdbah: E1000_RDBAH, rdlen: E1000_RDLEN, rdh: E1000_RDH, rdt: E1000_RDT,
+    tdbal: E1000_TDBAL, tdbah: E1000_TDBAH, tdlen: E1000_TDLEN, tdh: E1000_TDH, tdt: E1000_TDT,
+};
+
+const IGC_REGS: QueueRegs = QueueRegs {
+    rdbal: IGC_RDBAL, rdbah: IGC_RDBAH, rdlen: IGC_RDLEN, rdh: IGC_RDH, rdt: IGC_RDT,
+    tdbal: IGC_TDBAL, tdbah: IGC_TDBAH, tdlen: IGC_TDLEN, tdh: IGC_TDH, tdt: IGC_TDT,
+};
+
 struct IntelNic {
     mmio: u64,
     mac_addr: [u8; 6],
-    rx_descs: u64,      // Physical addr of RX descriptor ring
-    tx_descs: u64,      // Physical addr of TX descriptor ring
-    rx_bufs: u64,       // Physical addr of RX buffer pool
-    tx_bufs: u64,       // Physical addr of TX buffer pool
+    is_igc: bool,
+    regs: &'static QueueRegs,
+    rx_descs: u64,
+    tx_descs: u64,
+    rx_bufs: u64,
+    tx_bufs: u64,
     rx_cur: usize,
     tx_cur: usize,
 }
@@ -182,7 +261,12 @@ pub fn init() -> bool {
         return false;
     }
 
-    kprintln!("[npk] intel-nic: BAR0 = {:#x}", bar0);
+    // Select register set based on device ID
+    let is_igc = IGC_IDS.contains(&dev.device_id);
+    let qregs: &'static QueueRegs = if is_igc { &IGC_REGS } else { &E1000_REGS };
+    let variant = if is_igc { "igc" } else { "e1000" };
+
+    kprintln!("[npk] intel-nic: variant={}, BAR0 = {:#x}", variant, bar0);
 
     // Map BAR0 (128KB for modern Intel NICs)
     let map_size = 128 * 1024u64;
@@ -199,15 +283,14 @@ pub fn init() -> bool {
 
     let mmio = bar0;
 
-    // Reset
-    w32(mmio, IMC, 0xFFFF_FFFF); // Disable all interrupts
-    w32(mmio, CTRL, r32(mmio, CTRL) | CTRL_RST);
-    for _ in 0..100_000 { core::hint::spin_loop(); } // Brief delay
-    w32(mmio, IMC, 0xFFFF_FFFF); // Disable interrupts again after reset
-    let _ = r32(mmio, ICR); // Clear pending interrupts
+    // Don't full-reset — UEFI firmware already configured the PHY.
+    // Just disable interrupts (we poll).
+    w32(mmio, IMC, 0xFFFF_FFFF);
+    let _ = r32(mmio, ICR); // Clear pending
 
-    // Set link up
-    w32(mmio, CTRL, r32(mmio, CTRL) | CTRL_SLU | CTRL_ASDE);
+    // Preserve UEFI link config, ensure link-up + auto-speed
+    let ctrl = r32(mmio, CTRL);
+    w32(mmio, CTRL, (ctrl | CTRL_SLU | CTRL_ASDE) & !(CTRL_RST));
 
     // Read MAC from RAL/RAH
     let ral = r32(mmio, RAL);
@@ -253,20 +336,54 @@ pub fn init() -> bool {
     };
     unsafe { core::ptr::write_bytes(rx_bufs as *mut u8, 0, rx_buf_pages * 4096); }
 
-    // Initialize RX descriptors
-    for i in 0..NUM_RX_DESC {
-        let desc = (rx_descs + (i * 16) as u64) as *mut RxDesc;
-        unsafe {
-            (*desc).addr = rx_bufs + (i * RX_BUF_SIZE) as u64;
-            (*desc).status = 0;
-        }
-    }
+    if is_igc {
+        // Disable RX queue first
+        w32(mmio, IGC_RXDCTL, 0);
+        for _ in 0..10_000 { core::hint::spin_loop(); }
 
-    w32(mmio, RDBAL, rx_descs as u32);
-    w32(mmio, RDBAH, (rx_descs >> 32) as u32);
-    w32(mmio, RDLEN, rx_ring_size as u32);
-    w32(mmio, RDH, 0);
-    w32(mmio, RDT, (NUM_RX_DESC - 1) as u32);
+        // SRRCTL: advanced one-buffer, 2KB packet buffers
+        w32(mmio, IGC_SRRCTL, (1 << 25) | 2);
+
+        // Init advanced RX descriptors
+        for i in 0..NUM_RX_DESC {
+            let desc = (rx_descs + (i * 16) as u64) as *mut AdvRxDesc;
+            unsafe {
+                (*desc).pkt_addr = rx_bufs + (i * RX_BUF_SIZE) as u64;
+                (*desc).hdr_addr = 0;
+            }
+        }
+
+        w32(mmio, qregs.rdbal, rx_descs as u32);
+        w32(mmio, qregs.rdbah, (rx_descs >> 32) as u32);
+        w32(mmio, qregs.rdlen, rx_ring_size as u32);
+        w32(mmio, qregs.rdh, 0);
+        w32(mmio, qregs.rdt, 0); // Set to 0 initially, bump after enable
+
+        // Enable RX queue with thresholds
+        w32(mmio, IGC_RXDCTL, 8 | (8 << 8) | (4 << 16) | DCTL_ENABLE);
+        for _ in 0..100_000 {
+            if r32(mmio, IGC_RXDCTL) & DCTL_ENABLE != 0 { break; }
+            core::hint::spin_loop();
+        }
+
+        // Now make descriptors available
+        w32(mmio, qregs.rdt, (NUM_RX_DESC - 1) as u32);
+    } else {
+        // Legacy e1000 RX init
+        for i in 0..NUM_RX_DESC {
+            let desc = (rx_descs + (i * 16) as u64) as *mut LegacyRxDesc;
+            unsafe {
+                (*desc).addr = rx_bufs + (i * RX_BUF_SIZE) as u64;
+                (*desc).status = 0;
+            }
+        }
+
+        w32(mmio, qregs.rdbal, rx_descs as u32);
+        w32(mmio, qregs.rdbah, (rx_descs >> 32) as u32);
+        w32(mmio, qregs.rdlen, rx_ring_size as u32);
+        w32(mmio, qregs.rdh, 0);
+        w32(mmio, qregs.rdt, (NUM_RX_DESC - 1) as u32);
+    }
 
     // Enable receiver
     w32(mmio, RCTL, RCTL_EN | RCTL_BAM | RCTL_BSIZE_2K | RCTL_SECRC);
@@ -280,29 +397,68 @@ pub fn init() -> bool {
     };
     unsafe { core::ptr::write_bytes(tx_descs as *mut u8, 0, tx_ring_pages * 4096); }
 
-    // Allocate TX buffers
-    let tx_buf_pages = (NUM_TX_DESC * MTU + 4095) / 4096;
+    // Allocate TX buffers (2KB aligned per buffer, not MTU)
+    let tx_buf_pages = (NUM_TX_DESC * RX_BUF_SIZE + 4095) / 4096;
     let tx_bufs = match memory::allocate_contiguous(tx_buf_pages) {
         Some(a) => a,
         None => { kprintln!("[npk] intel-nic: TX buf alloc failed"); return false; }
     };
 
-    w32(mmio, TDBAL, tx_descs as u32);
-    w32(mmio, TDBAH, (tx_descs >> 32) as u32);
-    w32(mmio, TDLEN, tx_ring_size as u32);
-    w32(mmio, TDH, 0);
-    w32(mmio, TDT, 0);
+    if is_igc {
+        // 1. Disable TX queue
+        w32(mmio, IGC_TXDCTL, 0);
+        // Flush + wait
+        let _ = r32(mmio, STATUS);
+        for _ in 0..100_000 { core::hint::spin_loop(); }
 
-    // Transmit IPG values (IEEE 802.3)
-    w32(mmio, TIPG, 10 | (10 << 10) | (10 << 20));
+        // 2. Configure ring
+        w32(mmio, qregs.tdlen, tx_ring_size as u32);
+        w32(mmio, qregs.tdbal, tx_descs as u32);
+        w32(mmio, qregs.tdbah, (tx_descs >> 32) as u32);
+        w32(mmio, qregs.tdh, 0);
+        w32(mmio, qregs.tdt, 0);
 
-    // Enable transmitter
-    w32(mmio, TCTL, TCTL_EN | TCTL_PSP | (15 << TCTL_CT_SHIFT) | (64 << TCTL_COLD_SHIFT));
+        // 3. TIPG
+        w32(mmio, TIPG, 8 | (8 << 10) | (6 << 20)); // igc values from Linux
 
+        // 4. Enable transmitter
+        w32(mmio, TCTL, TCTL_EN | TCTL_PSP | (15 << TCTL_CT_SHIFT));
+
+        // 5. Enable TX queue with thresholds (PTHRESH=8, HTHRESH=1, WTHRESH=16)
+        w32(mmio, IGC_TXDCTL, 0x02100108);
+        for _ in 0..100_000 {
+            if r32(mmio, IGC_TXDCTL) & DCTL_ENABLE != 0 { break; }
+            core::hint::spin_loop();
+        }
+    } else {
+        w32(mmio, qregs.tdbal, tx_descs as u32);
+        w32(mmio, qregs.tdbah, (tx_descs >> 32) as u32);
+        w32(mmio, qregs.tdlen, tx_ring_size as u32);
+        w32(mmio, qregs.tdh, 0);
+        w32(mmio, qregs.tdt, 0);
+        w32(mmio, TIPG, 10 | (10 << 10) | (10 << 20));
+        w32(mmio, TCTL, TCTL_EN | TCTL_PSP | (15 << TCTL_CT_SHIFT) | (64 << TCTL_COLD_SHIFT));
+    }
+
+    // Wait for link up (max 3 seconds)
+    kprintln!("[npk] intel-nic: waiting for link...");
+    for _ in 0..3_000_000u32 {
+        if r32(mmio, STATUS) & STATUS_LU != 0 { break; }
+        core::hint::spin_loop();
+    }
+    if r32(mmio, STATUS) & STATUS_LU != 0 {
+        kprintln!("[npk] intel-nic: link up");
+    } else {
+        kprintln!("[npk] intel-nic: WARNING: no link");
+    }
+
+    // Debug: show buffer addresses
+    kprintln!("[npk] intel-nic: RX descs={:#x} bufs={:#x}", rx_descs, rx_bufs);
+    kprintln!("[npk] intel-nic: TX descs={:#x} bufs={:#x}", tx_descs, tx_bufs);
     kprintln!("[npk] intel-nic: online");
     AVAILABLE.store(true, Ordering::Relaxed);
     *DEVICE.lock() = Some(IntelNic {
-        mmio, mac_addr: mac,
+        mmio, mac_addr: mac, is_igc, regs: qregs,
         rx_descs, tx_descs,
         rx_bufs, tx_bufs,
         rx_cur: 0, tx_cur: 0,
@@ -325,36 +481,71 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
 
     let i = dev.tx_cur;
-
-    // Wait for previous descriptor to complete (if reused)
-    let desc = (dev.tx_descs + (i * 16) as u64) as *mut TxDesc;
-    for _ in 0..1_000_000u32 {
-        if unsafe { (*desc).status } & TXD_STAT_DD != 0 || unsafe { (*desc).cmd } == 0 {
-            break;
-        }
-        core::hint::spin_loop();
-    }
-
-    // Copy frame to TX buffer
-    let buf_addr = dev.tx_bufs + (i * MTU) as u64;
+    let buf_addr = dev.tx_bufs + (i * RX_BUF_SIZE) as u64; // 2KB aligned
     unsafe { core::ptr::copy_nonoverlapping(frame.as_ptr(), buf_addr as *mut u8, frame.len()); }
 
-    // Setup descriptor
-    unsafe {
-        (*desc).addr = buf_addr;
-        (*desc).length = frame.len() as u16;
-        (*desc).cmd = TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS;
-        (*desc).status = 0;
-        (*desc).cso = 0;
-        (*desc).css = 0;
-        (*desc).special = 0;
+    if dev.is_igc {
+        // Advanced TX descriptor
+        let desc = (dev.tx_descs + (i * 16) as u64) as *mut AdvTxDesc;
+
+        // Wait for previous descriptor done
+        for _ in 0..1_000_000u32 {
+            let wb_status = unsafe { core::ptr::read_volatile(&(*desc).olinfo_status) };
+            if wb_status & ADVTXD_STAT_DD != 0 || unsafe { (*desc).cmd_type_len } == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        let len = frame.len() as u32;
+        unsafe {
+            core::ptr::write_volatile(&mut (*desc).buffer_addr, buf_addr);
+            core::ptr::write_volatile(&mut (*desc).olinfo_status, len << 14);
+            // Write cmd_type_len LAST (this triggers the NIC)
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            core::ptr::write_volatile(&mut (*desc).cmd_type_len,
+                ADVTXD_DTYP_DATA | ADVTXD_DCMD_DEXT
+                | ADVTXD_DCMD_EOP | ADVTXD_DCMD_IFCS | ADVTXD_DCMD_RS
+                | len);
+        }
+    } else {
+        // Legacy TX descriptor
+        let desc = (dev.tx_descs + (i * 16) as u64) as *mut LegacyTxDesc;
+        for _ in 0..1_000_000u32 {
+            let status = unsafe { core::ptr::read_volatile(&(*desc).status) };
+            let cmd = unsafe { core::ptr::read_volatile(&(*desc).cmd) };
+            if status & TXD_STAT_DD != 0 || cmd == 0 { break; }
+            core::hint::spin_loop();
+        }
+        unsafe {
+            core::ptr::write_volatile(&mut (*desc).addr, buf_addr);
+            core::ptr::write_volatile(&mut (*desc).length, frame.len() as u16);
+            core::ptr::write_volatile(&mut (*desc).cso, 0);
+            core::ptr::write_volatile(&mut (*desc).css, 0);
+            core::ptr::write_volatile(&mut (*desc).special, 0);
+            core::ptr::write_volatile(&mut (*desc).status, 0);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            core::ptr::write_volatile(&mut (*desc).cmd, TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS);
+        }
     }
 
-    // Advance tail
     dev.tx_cur = (i + 1) % NUM_TX_DESC;
-    w32(dev.mmio, TDT, dev.tx_cur as u32);
+    // Write barrier: ensure descriptor is visible to NIC before tail bump
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    w32(dev.mmio, dev.regs.tdt, dev.tx_cur as u32);
 
+    TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     Ok(())
+}
+
+static TX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static RX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Debug: print TX/RX packet counts
+pub fn debug_stats() {
+    let tx = TX_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    let rx = RX_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    crate::kprintln!("[npk] intel-nic: TX={} RX={}", tx, rx);
 }
 
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
@@ -362,33 +553,55 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     let dev = lock.as_mut()?;
 
     let i = dev.rx_cur;
-    let desc = (dev.rx_descs + (i * 16) as u64) as *mut RxDesc;
-
-    let status = unsafe { core::ptr::read_volatile(&(*desc).status) };
-    if status & RXD_STAT_DD == 0 {
-        return None; // No packet
-    }
-
-    let len = unsafe { core::ptr::read_volatile(&(*desc).length) } as usize;
-    let len = len.min(MTU);
-
-    // Copy from RX buffer
     let buf_addr = dev.rx_bufs + (i * RX_BUF_SIZE) as u64;
-    unsafe { core::ptr::copy_nonoverlapping(buf_addr as *const u8, buf.as_mut_ptr(), len); }
 
-    // Reset descriptor for reuse
-    unsafe {
-        (*desc).status = 0;
-        (*desc).length = 0;
-        (*desc).errors = 0;
+    if dev.is_igc {
+        // Advanced RX: read writeback descriptor
+        let desc = (dev.rx_descs + (i * 16) as u64) as *const AdvRxWB;
+        let status = unsafe { core::ptr::read_volatile(&(*desc).status_error) };
+        if status & RXD_STAT_DD as u32 == 0 { return None; }
+
+        let length_vlan = unsafe { core::ptr::read_volatile(&(*desc).length_vlan) };
+        let len = (length_vlan & 0xFFFF) as usize;
+        let len = len.min(MTU);
+
+        unsafe { core::ptr::copy_nonoverlapping(buf_addr as *const u8, buf.as_mut_ptr(), len); }
+
+        // Reset descriptor to read format for reuse
+        let desc_w = (dev.rx_descs + (i * 16) as u64) as *mut AdvRxDesc;
+        unsafe {
+            (*desc_w).pkt_addr = buf_addr;
+            (*desc_w).hdr_addr = 0;
+        }
+
+        let old_cur = dev.rx_cur;
+        dev.rx_cur = (i + 1) % NUM_RX_DESC;
+        w32(dev.mmio, dev.regs.rdt, old_cur as u32);
+
+        Some(len)
+    } else {
+        // Legacy RX
+        let desc = (dev.rx_descs + (i * 16) as u64) as *mut LegacyRxDesc;
+        let status = unsafe { core::ptr::read_volatile(&(*desc).status) };
+        if status & RXD_STAT_DD == 0 { return None; }
+
+        let len = unsafe { core::ptr::read_volatile(&(*desc).length) } as usize;
+        let len = len.min(MTU);
+
+        unsafe { core::ptr::copy_nonoverlapping(buf_addr as *const u8, buf.as_mut_ptr(), len); }
+
+        unsafe {
+            (*desc).status = 0;
+            (*desc).length = 0;
+            (*desc).errors = 0;
+        }
+
+        let old_cur = dev.rx_cur;
+        dev.rx_cur = (i + 1) % NUM_RX_DESC;
+        w32(dev.mmio, dev.regs.rdt, old_cur as u32);
+
+        Some(len)
     }
-
-    // Advance and update tail
-    let old_cur = dev.rx_cur;
-    dev.rx_cur = (i + 1) % NUM_RX_DESC;
-    w32(dev.mmio, RDT, old_cur as u32);
-
-    Some(len)
 }
 
 /// Read MAC address from EEPROM (for NICs that don't expose it via RAL/RAH).

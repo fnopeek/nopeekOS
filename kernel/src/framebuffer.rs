@@ -206,6 +206,90 @@ pub fn is_available() -> bool {
     CONSOLE.lock().is_some()
 }
 
+// Early framebuffer state (set before heap is available)
+static mut EARLY_FB: Option<(u64, u32, u32, u32, u8)> = None; // (addr, pitch, w, h, bpp)
+static mut EARLY_X: u32 = 0;
+
+/// Super-early framebuffer probe: finds framebuffer, draws green bar.
+/// Works BEFORE heap/paging init (only needs 4GB identity mapping from boot.s).
+pub fn early_probe(mb_info_addr: u32) -> bool {
+    let base = mb_info_addr as usize;
+    let total_size = unsafe { *(base as *const u32) } as usize;
+
+    let mut offset = 8;
+    while offset + 8 <= total_size {
+        let tag_type = unsafe { *((base + offset) as *const u32) };
+        let tag_size = unsafe { *((base + offset + 4) as *const u32) } as usize;
+        if tag_size == 0 { break; }
+
+        if tag_type == 8 && tag_size >= 32 {
+            let addr = unsafe { *((base + offset + 8) as *const u64) };
+            let pitch = unsafe { *((base + offset + 16) as *const u32) };
+            let width = unsafe { *((base + offset + 20) as *const u32) };
+            let height = unsafe { *((base + offset + 24) as *const u32) };
+            let bpp = unsafe { *((base + offset + 28) as *const u8) };
+
+            if bpp >= 24 && width > 0 && height > 0 {
+                unsafe { EARLY_FB = Some((addr, pitch, width, height, bpp)); }
+                // Draw green bar
+                let fb = addr as *mut u8;
+                let bytes_pp = (bpp as u32 + 7) / 8;
+                for y in 0..4u32 {
+                    for x in 0..width {
+                        let off = (y * pitch + x * bytes_pp) as usize;
+                        unsafe {
+                            *fb.add(off) = 0x00;
+                            *fb.add(off + 1) = 0xFF;
+                            *fb.add(off + 2) = 0x00;
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+
+        if tag_type == 0 { break; }
+        offset += (tag_size + 7) & !7;
+    }
+    false
+}
+
+/// Write a debug character to the early framebuffer (no heap needed).
+pub fn early_debug(ch: u8) {
+    unsafe {
+        let (addr, pitch, _w, _h, bpp) = match EARLY_FB {
+            Some(fb) => fb,
+            None => return,
+        };
+        let bytes_pp = (bpp as u32 + 7) / 8;
+        let x0 = EARLY_X * (FONT_WIDTH + 2) + 8;
+        let y0 = 8u32;
+        EARLY_X += 1;
+
+        let glyph_start = ch as usize * FONT_HEIGHT as usize;
+        if glyph_start + FONT_HEIGHT as usize > FONT.len() { return; }
+
+        for dy in 0..FONT_HEIGHT {
+            let bits = FONT[glyph_start + dy as usize];
+            for dx in 0..FONT_WIDTH {
+                let px = x0 + dx;
+                let py = y0 + dy;
+                let off = (py * pitch + px * bytes_pp) as usize;
+                let fb = addr as *mut u8;
+                if bits & (0x80 >> dx) != 0 {
+                    *fb.add(off) = 0x00;
+                    *fb.add(off + 1) = 0xFF;
+                    *fb.add(off + 2) = 0x00;
+                } else {
+                    *fb.add(off) = 0x00;
+                    *fb.add(off + 1) = 0x00;
+                    *fb.add(off + 2) = 0x00;
+                }
+            }
+        }
+    }
+}
+
 // ============================================================
 // Embedded 8x16 Font (CP437, 128 printable ASCII characters)
 // ============================================================

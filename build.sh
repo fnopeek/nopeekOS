@@ -63,12 +63,9 @@ build() {
     cat > "$ISO_DIR/boot/grub/grub.cfg" << 'GRUBCFG'
 set timeout=0
 set default=0
-set gfxmode=1024x768x32,800x600x32,auto
-set gfxpayload=keep
 
-insmod all_video
-insmod gfxterm
-terminal_output gfxterm
+insmod efi_gop
+set gfxpayload=auto
 
 menuentry "nopeekOS" {
     multiboot2 /boot/kernel.bin
@@ -112,7 +109,7 @@ run_qemu() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
-        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444 \
+        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
         -no-reboot \
         -no-shutdown
 }
@@ -135,7 +132,7 @@ run_qemu_gui() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
-        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444 \
+        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
         -no-reboot \
         -no-shutdown
 }
@@ -159,7 +156,7 @@ run_debug() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
-        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444 \
+        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
         -no-reboot \
         -no-shutdown \
         -s -S
