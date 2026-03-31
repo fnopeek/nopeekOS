@@ -28,7 +28,7 @@ pub fn intent_status(vault: &Vault) {
     } else {
         kprintln!("  Block device:  none");
     }
-    if let Some(mac) = crate::virtio_net::mac() {
+    if let Some(mac) = crate::netdev::mac() {
         let ip = crate::net::arp::our_ip();
         kprintln!("  Network:       {}.{}.{}.{} ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
             ip[0], ip[1], ip[2], ip[3], mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

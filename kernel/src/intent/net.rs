@@ -134,7 +134,7 @@ pub fn intent_resolve(args: &str) {
 }
 
 pub fn intent_net_info() {
-    if let Some(mac) = crate::virtio_net::mac() {
+    if let Some(mac) = crate::netdev::mac() {
         let ip = crate::net::arp::our_ip();
         kprintln!();
         kprintln!("  Network (virtio-net)");

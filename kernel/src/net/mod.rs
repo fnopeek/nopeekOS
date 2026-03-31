@@ -14,12 +14,12 @@ pub mod dhcp;
 pub mod ntp;
 pub mod tcp;
 
-use crate::virtio_net;
+use crate::netdev;
 
 /// Process incoming packets and TCP timers
 pub fn poll() {
-    let mut buf = [0u8; virtio_net::MTU];
-    while let Some(len) = virtio_net::recv(&mut buf) {
+    let mut buf = [0u8; netdev::MTU];
+    while let Some(len) = netdev::recv(&mut buf) {
         if len >= 14 {
             eth::handle_frame(&buf[..len]);
         }
@@ -30,5 +30,5 @@ pub fn poll() {
 /// Network stack statistics
 #[allow(dead_code)]
 pub fn is_up() -> bool {
-    virtio_net::is_available()
+    netdev::is_available()
 }

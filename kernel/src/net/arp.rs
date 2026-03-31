@@ -4,7 +4,7 @@
 //! Maintains a small in-memory ARP cache.
 
 use spin::Mutex;
-use crate::virtio_net;
+use crate::netdev;
 use super::eth;
 
 const ARP_REQUEST: u16 = 1;
@@ -44,7 +44,7 @@ pub fn handle_arp(data: &[u8]) {
 
     if op == ARP_REQUEST && target_ip == our_ip {
         // Send ARP reply
-        let our_mac = virtio_net::mac().unwrap_or([0; 6]);
+        let our_mac = netdev::mac().unwrap_or([0; 6]);
         let mut reply = [0u8; 28];
         reply[0..2].copy_from_slice(&HTYPE_ETH.to_be_bytes());
         reply[2..4].copy_from_slice(&PTYPE_IPV4.to_be_bytes());
@@ -62,7 +62,7 @@ pub fn handle_arp(data: &[u8]) {
 
 /// Send an ARP request for the given IP
 pub fn request(target_ip: [u8; 4]) {
-    let our_mac = virtio_net::mac().unwrap_or([0; 6]);
+    let our_mac = netdev::mac().unwrap_or([0; 6]);
     let our_ip = *OUR_IP.lock();
 
     let mut pkt = [0u8; 28];
