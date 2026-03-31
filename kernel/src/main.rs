@@ -35,6 +35,8 @@ mod shell;
 mod keyboard;
 mod nvme;
 mod blkdev;
+mod intel_nic;
+mod netdev;
 mod setup;
 
 use core::panic::PanicInfo;
@@ -110,9 +112,10 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         kprintln!("[npk] RTC: read failed");
     }
 
-    kprintln!("[npk] Probing virtio-net...");
-    if virtio_net::init() {
-        vga::show_status(b"virtio-net online");
+    kprintln!("[npk] Probing network...");
+    let _net_up = virtio_net::init() || intel_nic::init();
+    if netdev::is_available() {
+        vga::show_status(b"Network online");
 
         kprintln!("[npk] Running DHCP...");
         if net::dhcp::configure() {
@@ -129,7 +132,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
             kprintln!("[npk] NTP: sync failed (using RTC time)");
         }
     } else {
-        kprintln!("[npk] virtio-net: not available");
+        kprintln!("[npk] No network device found.");
     }
 
     csprng::init();

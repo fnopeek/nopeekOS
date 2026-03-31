@@ -6,7 +6,7 @@
 use alloc::vec::Vec;
 use crate::kprintln;
 use super::{udp, arp, dns};
-use crate::virtio_net;
+use crate::netdev;
 
 const SERVER_PORT: u16 = 67;
 const CLIENT_PORT: u16 = 68;
@@ -19,7 +19,7 @@ const MSG_ACK: u8      = 5;
 
 /// Run DHCP to get network configuration. Blocking.
 pub fn configure() -> bool {
-    let mac = match virtio_net::mac() {
+    let mac = match netdev::mac() {
         Some(m) => m,
         None => return false,
     };
