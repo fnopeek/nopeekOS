@@ -19,7 +19,7 @@ use cache::BlockCache;
 use bitmap::Bitmap;
 use journal::Journal;
 use types::*;
-use crate::{kprintln, virtio_blk, crypto};
+use crate::{kprintln, blkdev, crypto};
 
 struct NpkFs {
     cache: BlockCache,
@@ -33,7 +33,7 @@ static FS: Mutex<Option<NpkFs>> = Mutex::new(None);
 
 /// Format the disk with npkFS.
 pub fn mkfs() -> Result<(), FsError> {
-    let total_blocks = virtio_blk::block_count().ok_or(FsError::Disk(virtio_blk::BlkError::NotInitialized))?;
+    let total_blocks = blkdev::block_count().ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
     if total_blocks < META_END + 16 {
         kprintln!("[npk] npkfs: disk too small ({} blocks)", total_blocks);
         return Err(FsError::DiskFull);

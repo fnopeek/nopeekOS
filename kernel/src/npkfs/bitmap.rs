@@ -4,7 +4,6 @@
 //! Batched TRIM/DISCARD for SSD friendliness.
 
 use alloc::vec::Vec;
-use crate::virtio_blk;
 use super::types::*;
 use super::cache::BlockCache;
 
@@ -137,7 +136,7 @@ impl Bitmap {
             merged.push((start, count));
         }
         for (start, count) in &merged {
-            let _ = virtio_blk::discard_blocks(*start, *count);
+            let _ = crate::blkdev::discard_blocks(*start, *count);
         }
         self.trim_pending.clear();
     }

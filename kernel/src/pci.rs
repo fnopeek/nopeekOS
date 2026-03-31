@@ -96,6 +96,51 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
     None
 }
 
+/// Find first PCI device matching class + subclass
+pub fn find_by_class(class: u8, subclass: u8) -> Option<PciDevice> {
+    for bus in 0u16..=255 {
+        for dev in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = PciAddr { bus: bus as u8, device: dev, function: func };
+                let id = read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 {
+                    if func == 0 { break; }
+                    continue;
+                }
+
+                let class_reg = read32(addr, 0x08);
+                let cls = ((class_reg >> 24) & 0xFF) as u8;
+                let sub = ((class_reg >> 16) & 0xFF) as u8;
+
+                if cls == class && sub == subclass {
+                    let vid = (id & 0xFFFF) as u16;
+                    let did = ((id >> 16) & 0xFFFF) as u16;
+                    return Some(PciDevice {
+                        addr,
+                        vendor_id: vid,
+                        device_id: did,
+                        bar0: read32(addr, 0x10),
+                        irq_line: read8(addr, 0x3C),
+                    });
+                }
+
+                if func == 0 && read8(addr, 0x0E) & 0x80 == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read 64-bit BAR (BAR0 + BAR1 for 64-bit MMIO devices like NVMe)
+pub fn read_bar64(addr: PciAddr, bar_offset: u8) -> u64 {
+    let low = read32(addr, bar_offset) as u64;
+    let high = read32(addr, bar_offset + 4) as u64;
+    // Clear type/prefetch bits from low word
+    (high << 32) | (low & 0xFFFF_FFF0)
+}
+
 /// Enable PCI bus mastering (required for DMA)
 pub fn enable_bus_master(addr: PciAddr) {
     let cmd = read32(addr, 0x04);

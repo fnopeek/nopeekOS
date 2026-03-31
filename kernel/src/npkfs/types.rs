@@ -1,8 +1,6 @@
 //! npkFS on-disk and in-memory types
 
-use crate::virtio_blk;
-
-pub const BLOCK_SIZE: usize = virtio_blk::BLOCK_SIZE;
+pub const BLOCK_SIZE: usize = 4096;
 
 /// Aligned 4KB buffer for safe casting to on-disk structs
 #[repr(C, align(16))]
@@ -143,7 +141,7 @@ pub const MAX_JOURNAL_ENTRIES: usize = (BLOCK_SIZE - 24) / 16; // 254
 
 #[derive(Debug)]
 pub enum FsError {
-    Disk(virtio_blk::BlkError),
+    Disk(crate::virtio_blk::BlkError),
     NotFormatted,
     NotMounted,
     Corrupt,
@@ -156,8 +154,8 @@ pub enum FsError {
     TooManyExtents,
 }
 
-impl From<virtio_blk::BlkError> for FsError {
-    fn from(e: virtio_blk::BlkError) -> Self { FsError::Disk(e) }
+impl From<crate::virtio_blk::BlkError> for FsError {
+    fn from(e: crate::virtio_blk::BlkError) -> Self { FsError::Disk(e) }
 }
 
 impl core::fmt::Display for FsError {

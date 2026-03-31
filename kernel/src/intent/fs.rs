@@ -460,7 +460,7 @@ pub fn intent_fsinfo() {
             kprintln!("  Objects:     {}", objects);
             kprintln!("  Generation:  {}", gen);
             kprintln!("  Hash:        BLAKE3");
-            kprintln!("  TRIM:        {}", if crate::virtio_blk::has_discard() { "active" } else { "unavailable" });
+            kprintln!("  TRIM:        {}", if crate::blkdev::has_discard() { "active" } else { "unavailable" });
             kprintln!();
         }
         None => kprintln!("[npk] Filesystem not mounted"),
@@ -468,18 +468,19 @@ pub fn intent_fsinfo() {
 }
 
 pub fn intent_disk_info() {
-    use crate::virtio_blk;
-    match virtio_blk::capacity() {
+    use crate::blkdev;
+    match blkdev::capacity() {
         Some(cap) => {
-            let mb = (cap * virtio_blk::SECTOR_SIZE as u64) / (1024 * 1024);
-            let blocks = virtio_blk::block_count().unwrap_or(0);
+            let mb = (cap * 512) / (1024 * 1024);
+            let blocks = blkdev::block_count().unwrap_or(0);
+            let dev = if crate::nvme::is_available() { "NVMe" } else { "virtio-blk" };
             kprintln!();
-            kprintln!("  Block Device (virtio-blk)");
+            kprintln!("  Block Device ({})", dev);
             kprintln!("  ────────────────────────");
             kprintln!("  Capacity:  {} sectors / {} blocks ({} MB)", cap, blocks, mb);
-            kprintln!("  Sector:    {} bytes", virtio_blk::SECTOR_SIZE);
-            kprintln!("  Block:     {} bytes", virtio_blk::BLOCK_SIZE);
-            kprintln!("  TRIM:      {}", if virtio_blk::has_discard() { "supported" } else { "not available" });
+            kprintln!("  Sector:    512 bytes");
+            kprintln!("  Block:     4096 bytes");
+            kprintln!("  TRIM:      {}", if blkdev::has_discard() { "supported" } else { "not available" });
             kprintln!("  Status:    online");
             kprintln!();
         }
@@ -488,15 +489,13 @@ pub fn intent_disk_info() {
 }
 
 pub fn intent_disk_read(args: &str) {
-    use crate::virtio_blk;
-
     let sector: u64 = match args.parse() {
         Ok(n) => n,
         Err(_) => { kprintln!("[npk] Usage: disk read <sector>"); return; }
     };
 
-    let mut buf = [0u8; virtio_blk::SECTOR_SIZE];
-    match virtio_blk::read_sector(sector, &mut buf) {
+    let mut buf = [0u8; 512];
+    match crate::blkdev::read_sector(sector, &mut buf) {
         Ok(()) => {
             kprintln!();
             kprintln!("  Sector {}:", sector);
@@ -508,8 +507,6 @@ pub fn intent_disk_read(args: &str) {
 }
 
 pub fn intent_disk_write(args: &str) {
-    use crate::virtio_blk;
-
     let mut parts = args.splitn(2, ' ');
     let sector: u64 = match parts.next().and_then(|s| s.parse().ok()) {
         Some(n) => n,
@@ -521,11 +518,11 @@ pub fn intent_disk_write(args: &str) {
         return;
     }
 
-    let mut buf = [0u8; virtio_blk::SECTOR_SIZE];
-    let len = text.len().min(virtio_blk::SECTOR_SIZE);
+    let mut buf = [0u8; 512];
+    let len = text.len().min(512);
     buf[..len].copy_from_slice(&text.as_bytes()[..len]);
 
-    match virtio_blk::write_sector(sector, &buf) {
+    match crate::blkdev::write_sector(sector, &buf) {
         Ok(()) => kprintln!("[npk] Wrote {} bytes to sector {}", len, sector),
         Err(e) => kprintln!("[npk] Write error: {}", e),
     }

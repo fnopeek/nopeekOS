@@ -33,6 +33,8 @@ mod vga;
 mod wasm;
 mod shell;
 mod keyboard;
+mod nvme;
+mod blkdev;
 
 use core::panic::PanicInfo;
 
@@ -87,11 +89,15 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] PCI: {} devices", pci_count);
     vga::show_status(b"PCI bus scanned");
 
-    kprintln!("[npk] Probing virtio-blk...");
+    kprintln!("[npk] Probing block devices...");
     if virtio_blk::init() {
         vga::show_status(b"virtio-blk online");
-    } else {
-        kprintln!("[npk] virtio-blk: not available (no disk attached)");
+    }
+    if nvme::init() {
+        vga::show_status(b"NVMe online");
+    }
+    if !virtio_blk::is_available() && !nvme::is_available() {
+        kprintln!("[npk] No block device found.");
     }
 
     // RTC: immediate wall clock (no network needed)
