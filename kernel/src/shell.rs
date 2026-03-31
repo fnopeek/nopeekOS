@@ -261,6 +261,100 @@ fn handle_session(handle: usize, vault: &'static Mutex<crate::capability::Vault>
     kprintln!("[npk-shell] Client disconnected.");
 }
 
+const DEBUG_PORT: u16 = 4445;
+
+/// Start a plaintext debug listener on port 4445 (pre-setup, no auth).
+/// Allows remote diagnosis when framebuffer doesn't work.
+/// Blocks until a client connects, then dumps boot log and disconnects.
+pub fn start_debug_listener() {
+    let handle = match tcp::listen(DEBUG_PORT) {
+        Ok(h) => h,
+        Err(e) => { kprintln!("[npk-debug] Listen failed: {}", e); return; }
+    };
+
+    kprintln!("[npk-debug] Debug shell on port {} (plaintext, waiting...)", DEBUG_PORT);
+
+    // Wait up to 60 seconds for a debug client
+    if let Err(_) = tcp::accept(handle, 6000) {
+        // No client connected — continue boot normally
+        let _ = tcp::close(handle);
+        kprintln!("[npk-debug] No client, continuing boot.");
+        return;
+    }
+
+    kprintln!("[npk-debug] Client connected.");
+
+    // Send the entire boot log captured so far
+    let boot_log = crate::serial::stop_capture();
+    crate::serial::start_capture(); // restart capture for further output
+
+    let banner = alloc::format!(
+        "=== nopeekOS Debug Shell (plaintext, port {}) ===\r\n\
+         === Boot log: ===\r\n{}\r\n\
+         === Type commands, 'exit' to continue boot ===\r\n",
+        DEBUG_PORT, boot_log
+    );
+    let _ = tcp::send(handle, banner.as_bytes());
+
+    // Simple line-based command loop (plaintext)
+    let mut buf = [0u8; 512];
+    loop {
+        let _ = tcp::send(handle, b"debug> ");
+
+        // Read a line
+        let mut line = alloc::vec::Vec::new();
+        loop {
+            crate::net::poll();
+            match tcp::recv_blocking(handle, &mut buf, 100) {
+                Ok(0) => {}
+                Ok(n) => {
+                    for &b in &buf[..n] {
+                        if b == b'\n' || b == b'\r' {
+                            break;
+                        }
+                        line.push(b);
+                    }
+                    if buf[..n].contains(&b'\n') || buf[..n].contains(&b'\r') {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = tcp::close(handle);
+                    return;
+                }
+            }
+        }
+
+        let input = core::str::from_utf8(&line).unwrap_or("").trim();
+        if input.is_empty() { continue; }
+
+        if input == "exit" || input == "quit" || input == "continue" {
+            let _ = tcp::send(handle, b"Continuing boot...\r\n");
+            let _ = tcp::close(handle);
+            kprintln!("[npk-debug] Client disconnected, resuming boot.");
+            return;
+        }
+
+        // Execute as diagnostic: show specific info
+        let response = match input {
+            "fb" | "framebuffer" => {
+                if crate::framebuffer::is_available() {
+                    alloc::format!("Framebuffer: active\r\n")
+                } else {
+                    alloc::format!("Framebuffer: NOT available\r\n")
+                }
+            }
+            "log" => {
+                let log = crate::serial::stop_capture();
+                crate::serial::start_capture();
+                alloc::format!("{}\r\n", log)
+            }
+            _ => alloc::format!("Unknown: '{}'. Commands: fb, log, exit\r\n", input),
+        };
+        let _ = tcp::send(handle, response.as_bytes());
+    }
+}
+
 /// Manual start from intent loop (kept for backwards compat).
 pub fn serve_one(vault: &'static spin::Mutex<crate::capability::Vault>, session_id: crate::capability::CapId) {
     let handle = match tcp::listen(SHELL_PORT) {

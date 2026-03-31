@@ -28,8 +28,8 @@ multiboot2_header:
     .short 5        /* type = framebuffer */
     .short 0        /* flags = required */
     .long 20        /* size */
-    .long 1024      /* preferred width */
-    .long 768       /* preferred height */
+    .long 1920      /* preferred width */
+    .long 1080      /* preferred height */
     .long 32        /* preferred bpp */
 
     /* End tag */

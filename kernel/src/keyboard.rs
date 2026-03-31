@@ -22,10 +22,18 @@ static CTRL: AtomicBool = AtomicBool::new(false);
 static CAPS_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// Initialize PS/2 keyboard controller.
+/// Safe on systems without PS/2 (returns silently).
 pub fn init() {
     unsafe {
-        // Flush any pending data from controller buffer
-        while (inb(STATUS_PORT) & 0x01) != 0 {
+        // Check if PS/2 controller exists (0xFF = no controller)
+        let status = inb(STATUS_PORT);
+        if status == 0xFF {
+            return; // No PS/2 controller (USB-only system)
+        }
+
+        // Flush any pending data from controller buffer (with timeout)
+        for _ in 0..1000 {
+            if (inb(STATUS_PORT) & 0x01) == 0 { break; }
             let _ = inb(DATA_PORT);
         }
 

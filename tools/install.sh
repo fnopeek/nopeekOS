@@ -156,7 +156,10 @@ mkdir -p "$MOUNT_DIR/boot/grub"
 cat > "$MOUNT_DIR/boot/grub/grub.cfg" << 'GRUBCFG'
 set timeout=0
 set default=0
-set gfxpayload=1024x768x32,800x600x32,auto
+
+insmod efi_gop
+set gfxmode=1920x1080x32,1280x720x32,auto
+set gfxpayload=keep
 
 menuentry "nopeekOS" {
     multiboot2 /boot/kernel.bin

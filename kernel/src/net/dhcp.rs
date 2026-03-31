@@ -29,15 +29,26 @@ pub fn configure() -> bool {
 
     udp::listen(CLIENT_PORT);
 
-    // 1. DISCOVER
+    // 1. DISCOVER (with retries)
     let discover = build_dhcp(&mac, MSG_DISCOVER, [0; 4], [0; 4]);
-    udp::send([255, 255, 255, 255], CLIENT_PORT, SERVER_PORT, &discover);
+    let mut offer = None;
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            kprintln!("[npk] DHCP: retry {}...", attempt + 1);
+        }
+        udp::send([255, 255, 255, 255], CLIENT_PORT, SERVER_PORT, &discover);
+        if let Some(v) = wait_dhcp_reply(MSG_OFFER) {
+            offer = Some(v);
+            break;
+        }
+    }
+    crate::intel_nic::debug_stats();
 
-    // 2. Wait for OFFER
-    let (offered_ip, server_ip) = match wait_dhcp_reply(MSG_OFFER) {
+    // 2. Check for OFFER
+    let (offered_ip, server_ip) = match offer {
         Some(v) => v,
         None => {
-            kprintln!("[npk] DHCP: no offer received");
+            kprintln!("[npk] DHCP: no offer received after 3 attempts");
             udp::unlisten(CLIENT_PORT);
             arp::set_ip([10, 0, 2, 15]); // fallback
             return false;
@@ -69,7 +80,8 @@ pub fn configure() -> bool {
 }
 
 fn wait_dhcp_reply(expected_type: u8) -> Option<([u8; 4], [u8; 4])> {
-    let t0 = crate::interrupts::ticks();
+    let start = crate::interrupts::rdtsc();
+    let timeout_ticks = crate::interrupts::tsc_freq() * 3; // 3 seconds
     loop {
         super::poll();
         if let Some((_src_ip, _src_port, data)) = udp::recv(CLIENT_PORT) {
@@ -77,7 +89,9 @@ fn wait_dhcp_reply(expected_type: u8) -> Option<([u8; 4], [u8; 4])> {
                 return Some(result);
             }
         }
-        if crate::interrupts::ticks() - t0 > 300 { return None; } // 3s timeout
+        if crate::interrupts::rdtsc() - start > timeout_ticks {
+            return None;
+        }
         core::hint::spin_loop();
     }
 }
