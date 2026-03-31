@@ -23,6 +23,15 @@ multiboot2_header:
     .long multiboot2_header_end - multiboot2_header
     .long -(0xE85250D6 + 0 + (multiboot2_header_end - multiboot2_header))
 
+    /* Framebuffer tag: request linear framebuffer from GRUB */
+    .align 8
+    .short 5        /* type = framebuffer */
+    .short 0        /* flags = required */
+    .long 20        /* size */
+    .long 1024      /* preferred width */
+    .long 768       /* preferred height */
+    .long 32        /* preferred bpp */
+
     /* End tag */
     .align 8
     .short 0

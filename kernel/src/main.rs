@@ -38,6 +38,7 @@ mod blkdev;
 mod intel_nic;
 mod netdev;
 mod setup;
+mod framebuffer;
 
 use core::panic::PanicInfo;
 
@@ -86,6 +87,9 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] Initializing Virtual Memory Manager...");
     paging::init();
     vga::show_status(b"Virtual memory online");
+
+    // Framebuffer init (needs memory + paging for MMIO mapping)
+    framebuffer::init_from_multiboot2(multiboot_info);
 
     kprintln!("[npk] Scanning PCI bus...");
     let pci_count = pci::scan();
