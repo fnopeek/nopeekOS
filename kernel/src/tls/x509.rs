@@ -209,7 +209,13 @@ fn strip_leading_zero(data: &[u8]) -> &[u8] {
 }
 
 fn check_basic_constraints_ca(ext_data: &[u8]) -> bool {
-    for ext in asn1::parse_sequence_contents(ext_data) {
+    // ext_data is the value of context [3], containing a SEQUENCE of extensions
+    let outer = match asn1::parse_tlv(ext_data) {
+        Some((tlv, _)) if tlv.tag == TAG_SEQUENCE => tlv,
+        _ => return false,
+    };
+
+    for ext in asn1::parse_sequence_contents(outer.value) {
         if ext.tag != TAG_SEQUENCE { continue; }
         let mut parts = asn1::parse_sequence_contents(ext.value);
         if let Some(oid) = parts.next() {

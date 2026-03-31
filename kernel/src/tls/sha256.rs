@@ -28,3 +28,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     h.update(data);
     h.finalize()
 }
+
+/// One-shot SHA-384 hash
+pub fn sha384(data: &[u8]) -> [u8; 48] {
+    use sha2::Sha384 as Sha384Inner;
+    let mut h = Sha384Inner::new();
+    h.update(data);
+    let result = h.finalize();
+    let mut out = [0u8; 48];
+    out.copy_from_slice(&result);
+    out
+}
