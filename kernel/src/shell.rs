@@ -7,13 +7,60 @@
 //!   4. All messages: len(2 BE) + ChaCha20-Poly1305(data + 16-byte tag)
 //!   5. Auth: server sends "PASSPHRASE?", client sends passphrase
 //!   6. On success: bidirectional encrypted intent loop
+//!
+//! Auto-starts at boot. Checked during intent loop idle time.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use spin::Mutex;
 use crate::{kprintln, crypto, csprng, net::tcp};
 use crate::tls::{x25519, hmac};
 
 const SHELL_PORT: u16 = 4444;
+
+/// Global listener handle (None = not started).
+static LISTENER: Mutex<Option<usize>> = Mutex::new(None);
+
+/// Start listening. Called once at boot after network + identity are up.
+pub fn start_listener() {
+    match tcp::listen(SHELL_PORT) {
+        Ok(handle) => {
+            *LISTENER.lock() = Some(handle);
+            kprintln!("[npk-shell] Listening on port {}", SHELL_PORT);
+        }
+        Err(e) => kprintln!("[npk-shell] Failed to listen: {}", e),
+    }
+}
+
+/// Non-blocking check: if a client connected, serve them, then re-listen.
+/// Called from the intent loop during idle polling.
+pub fn check_and_serve(vault: &'static Mutex<crate::capability::Vault>, session_id: crate::capability::CapId) {
+    let handle = match *LISTENER.lock() {
+        Some(h) => h,
+        None => return,
+    };
+
+    if !tcp::is_established(handle) {
+        return;
+    }
+
+    // Client connected — handle the session
+    kprintln!("\n[npk-shell] Client connected.");
+    handle_session(handle, vault, session_id);
+
+    // Re-listen for next client
+    match tcp::reset_to_listen(handle) {
+        Ok(()) => {}
+        Err(_) => {
+            // Fallback: close and re-create listener
+            let _ = tcp::close(handle);
+            match tcp::listen(SHELL_PORT) {
+                Ok(h) => { *LISTENER.lock() = Some(h); }
+                Err(_) => { *LISTENER.lock() = None; }
+            }
+        }
+    }
+}
 
 struct Session {
     tcp_handle: usize,
@@ -29,14 +76,12 @@ impl Session {
     fn send(&mut self, data: &[u8]) -> Result<(), &'static str> {
         let nonce = build_nonce(&self.send_iv, self.send_seq);
         self.send_seq += 1;
-
         let encrypted = crypto::aead_encrypt(&self.send_key, &nonce, data);
         let len = encrypted.len() as u16;
         let mut frame = Vec::with_capacity(2 + encrypted.len());
         frame.push((len >> 8) as u8);
         frame.push(len as u8);
         frame.extend_from_slice(&encrypted);
-
         tcp::send(self.tcp_handle, &frame).map_err(|_| "send failed")
     }
 
@@ -45,13 +90,10 @@ impl Session {
         recv_exact(self.tcp_handle, &mut hdr)?;
         let len = ((hdr[0] as usize) << 8) | hdr[1] as usize;
         if len == 0 || len > 65535 { return Err("invalid frame"); }
-
         let mut buf = alloc::vec![0u8; len];
         recv_exact(self.tcp_handle, &mut buf)?;
-
         let nonce = build_nonce(&self.recv_iv, self.recv_seq);
         self.recv_seq += 1;
-
         crypto::aead_decrypt(&self.recv_key, &nonce, &buf).ok_or("decrypt failed")
     }
 
@@ -76,7 +118,6 @@ fn build_nonce(iv: &[u8; 12], seq: u64) -> [u8; 12] {
 fn derive_keys(shared: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 12], [u8; 12]) {
     let salt = b"npk-shell-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
     let prk = hmac::hkdf_extract(salt, shared);
-
     let mut s2c_key = [0u8; 32];
     let mut c2s_key = [0u8; 32];
     let mut s2c_iv = [0u8; 12];
@@ -85,7 +126,6 @@ fn derive_keys(shared: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 12], [u8; 12]) {
     c2s_key.copy_from_slice(&hmac::hkdf_expand_label(&prk, b"c2s key", &[], 32));
     s2c_iv.copy_from_slice(&hmac::hkdf_expand_label(&prk, b"s2c iv", &[], 12));
     c2s_iv.copy_from_slice(&hmac::hkdf_expand_label(&prk, b"c2s iv", &[], 12));
-
     (s2c_key, c2s_key, s2c_iv, c2s_iv)
 }
 
@@ -107,36 +147,21 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     diff == 0
 }
 
-/// Start npk-shell server. Handles one client, then returns.
-pub fn serve_one(vault: &'static spin::Mutex<crate::capability::Vault>, session_id: crate::capability::CapId) {
-    let handle = match tcp::listen(SHELL_PORT) {
-        Ok(h) => h,
-        Err(e) => { kprintln!("[npk-shell] Listen failed: {}", e); return; }
-    };
-
-    kprintln!("[npk-shell] Listening on port {}...", SHELL_PORT);
-
-    // Accept (blocking)
-    if let Err(e) = tcp::accept(handle, 0) {
-        kprintln!("[npk-shell] Accept failed: {}", e);
-        let _ = tcp::close(handle);
-        return;
-    }
-    kprintln!("[npk-shell] Client connected. Key exchange...");
-
+/// Handle a single client session (key exchange, auth, intent loop).
+fn handle_session(handle: usize, vault: &'static Mutex<crate::capability::Vault>, session_id: crate::capability::CapId) {
     // X25519 key exchange
     let server_private = csprng::random_256();
     let server_public = x25519::x25519_base(&server_private);
 
     if tcp::send(handle, &server_public).is_err() {
-        kprintln!("[npk-shell] Failed to send pubkey");
+        kprintln!("[npk-shell] Key exchange failed");
         let _ = tcp::close(handle);
         return;
     }
 
     let mut client_public = [0u8; 32];
     if recv_exact(handle, &mut client_public).is_err() {
-        kprintln!("[npk-shell] Failed to receive client pubkey");
+        kprintln!("[npk-shell] Key exchange failed");
         let _ = tcp::close(handle);
         return;
     }
@@ -164,14 +189,13 @@ pub fn serve_one(vault: &'static spin::Mutex<crate::capability::Vault>, session_
 
     let passphrase = match sess.recv() {
         Ok(data) => data,
-        Err(e) => {
-            kprintln!("[npk-shell] Auth failed: {}", e);
+        Err(_) => {
+            kprintln!("[npk-shell] Auth failed.");
             let _ = tcp::close(handle);
             return;
         }
     };
 
-    // Verify passphrase
     let salt = crate::npkfs::install_salt().unwrap_or([0u8; 16]);
     let test_key = crypto::derive_master_key(&passphrase, &salt);
     let authed = match crypto::get_master_key() {
@@ -182,7 +206,7 @@ pub fn serve_one(vault: &'static spin::Mutex<crate::capability::Vault>, session_
 
     if !authed {
         let _ = sess.send_str("DENIED");
-        kprintln!("[npk-shell] Authentication failed.");
+        kprintln!("[npk-shell] Wrong passphrase.");
         let _ = tcp::close(handle);
         return;
     }
@@ -219,7 +243,6 @@ pub fn serve_one(vault: &'static spin::Mutex<crate::capability::Vault>, session_
             break;
         }
 
-        // Capture kprint output from intent execution
         crate::serial::start_capture();
         crate::intent::dispatch_for_shell(&input, vault, session_id);
         let output = crate::serial::stop_capture();
@@ -229,4 +252,22 @@ pub fn serve_one(vault: &'static spin::Mutex<crate::capability::Vault>, session_
 
     let _ = tcp::close(handle);
     kprintln!("[npk-shell] Client disconnected.");
+}
+
+/// Manual start from intent loop (kept for backwards compat).
+pub fn serve_one(vault: &'static spin::Mutex<crate::capability::Vault>, session_id: crate::capability::CapId) {
+    let handle = match tcp::listen(SHELL_PORT) {
+        Ok(h) => h,
+        Err(e) => { kprintln!("[npk-shell] Listen failed: {}", e); return; }
+    };
+
+    kprintln!("[npk-shell] Listening on port {}...", SHELL_PORT);
+
+    if let Err(e) = tcp::accept(handle, 0) {
+        kprintln!("[npk-shell] Accept failed: {}", e);
+        let _ = tcp::close(handle);
+        return;
+    }
+
+    handle_session(handle, vault, session_id);
 }

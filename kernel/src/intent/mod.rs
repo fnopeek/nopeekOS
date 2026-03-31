@@ -94,13 +94,15 @@ fn ensure_parents(path: &str) {
     }
 }
 
-/// Read a line from serial with tab-completion and network polling.
-fn read_line_with_tab(buf: &mut [u8]) -> usize {
+/// Read a line from serial with tab-completion, network polling, and shell check.
+fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: CapId) -> usize {
     let mut pos = 0;
 
     loop {
         // Poll network while waiting
         crate::net::poll();
+        // Check for incoming npk-shell connections
+        crate::shell::check_and_serve(vault, session_id);
         let serial = serial::SERIAL.lock();
         if !serial.has_data() {
             drop(serial);
@@ -281,7 +283,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
-        let len = read_line_with_tab(&mut input_buf);
+        let len = read_line_with_tab(&mut input_buf, vault, session_id);
 
         if len == 0 { continue; }
 

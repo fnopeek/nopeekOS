@@ -214,6 +214,12 @@ pub fn accept(handle: usize, timeout_ticks: u64) -> Result<(), TcpError> {
     }
 }
 
+/// Check if a listening handle has an established connection (non-blocking).
+pub fn is_established(handle: usize) -> bool {
+    let conns = CONNECTIONS.lock();
+    conns[handle].as_ref().map_or(false, |c| c.established)
+}
+
 /// Reset a connection back to Listen state (for accepting next client).
 pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
