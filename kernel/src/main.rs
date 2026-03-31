@@ -322,6 +322,9 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!("[npk] Console session: {:08x}", capability::short_id(&session_id));
     vga::show_status(b"Console session issued");
 
+    // Start npk-shell listener (encrypted remote access, port 4444)
+    shell::start_listener();
+
     kprintln!("[npk] Starting Intent Loop...");
     vga::show_status(b"Intent Loop running");
     vga::show_ready();
