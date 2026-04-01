@@ -8,7 +8,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 const UPDATE_HOST: &str = "raw.githubusercontent.com";
-const UPDATE_BASE: &str = "/nopeek/nopeekOS/main/release";
+const UPDATE_BASE: &str = "/fnopeek/nopeekOS/main/release";
 const MAX_KERNEL_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 const MAX_MANIFEST_SIZE: usize = 4096;
 const MAX_SIG_SIZE: usize = 512;
