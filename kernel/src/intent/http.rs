@@ -262,15 +262,19 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
     }
 
     // Receive response (up to max_size)
+    // Use higher patience for large downloads — network may have gaps
     let mut response = alloc::vec::Vec::new();
     let mut buf = [0u8; 4096];
-    let mut empty_count = 0;
+    let mut empty_count = 0u32;
     loop {
         match crate::tls::tls_recv(&mut tls_session, &mut buf) {
             Ok(0) => {
                 empty_count += 1;
-                if empty_count > 5 && response.is_empty() { break; }
-                if empty_count > 2 && !response.is_empty() { break; }
+                // More patience for large downloads: scale with expected size
+                let patience = if response.len() > 100_000 { 50 } else if !response.is_empty() { 10 } else { 5 };
+                if empty_count > patience { break; }
+                // Poll network while waiting for more data
+                for _ in 0..1000 { crate::net::poll(); core::hint::spin_loop(); }
             }
             Ok(n) => { response.extend_from_slice(&buf[..n]); empty_count = 0; }
             Err(_) => break,
