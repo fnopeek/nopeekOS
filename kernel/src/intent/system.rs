@@ -320,10 +320,19 @@ pub fn intent_reboot() -> ! {
     kprintln!("[npk] Rebooting...");
     kprintln!();
     unsafe {
-        // Method 1: Keyboard controller reset (port 0x64, pulse CPU reset line)
+        // Method 1: PCI CF9 reset (works on Intel chipsets / NUC)
+        // 0x06 = hard reset, 0x0E = full reset (warm)
+        core::arch::asm!("out dx, al", in("dx") 0xCF9u16, in("al") 0x06u8);
+
+        // Brief delay for reset to take effect
+        for _ in 0..1_000_000u64 { core::hint::spin_loop(); }
+
+        // Method 2: Keyboard controller reset (port 0x64)
         core::arch::asm!("out dx, al", in("dx") 0x64u16, in("al") 0xFEu8);
 
-        // Method 2: Triple-fault (guaranteed reboot on any x86)
+        for _ in 0..1_000_000u64 { core::hint::spin_loop(); }
+
+        // Method 3: Triple-fault (guaranteed reboot on any x86)
         let null_idt: [u8; 6] = [0; 6];
         core::arch::asm!("lidt [{}]", in(reg) &null_idt);
         core::arch::asm!("int3");
