@@ -235,9 +235,9 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
     let mut last_clock_update = crate::interrupts::ticks();
 
     loop {
-        // Update clock every 6000 ticks (~60s at 100Hz)
+        // Update clock every 10s (check if minute changed)
         let now = crate::interrupts::ticks();
-        if now.wrapping_sub(last_clock_update) >= 6000 {
+        if now.wrapping_sub(last_clock_update) >= 1000 {
             last_clock_update = now;
             framebuffer::with_fb(|fb| {
                 let info = fb.info();
