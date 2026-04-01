@@ -202,27 +202,128 @@ pub fn verify_p384_prehash(pubkey: &[u8], prehash: &[u8; 32], signature: &[u8]) 
 }
 
 fn cn_matches(cert: &X509Cert<'_>, hostname: &str) -> bool {
+    // Check CN first
     let cn = core::str::from_utf8(cert.subject_cn).unwrap_or("");
-    if cn.is_empty() { return false; }
-
-    // Exact match
-    if cn.eq_ignore_ascii_case(hostname) {
+    if !cn.is_empty() && name_matches(cn, hostname) {
         return true;
     }
 
+    // Check SANs in TBS raw bytes (OID 2.5.29.17 = subjectAltName)
+    if let Some(sans) = extract_sans(cert.tbs_raw) {
+        for san in SanIter::new(sans) {
+            if let Ok(name) = core::str::from_utf8(san) {
+                if name_matches(name, hostname) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if a certificate name (CN or SAN) matches the hostname.
+fn name_matches(name: &str, hostname: &str) -> bool {
+    if name.eq_ignore_ascii_case(hostname) {
+        return true;
+    }
     // Wildcard: *.example.com matches foo.example.com
-    if let Some(wildcard_domain) = cn.strip_prefix("*.") {
+    if let Some(wildcard_domain) = name.strip_prefix("*.") {
         if let Some(sub_domain) = hostname.strip_suffix(wildcard_domain) {
-            // Must match exactly one subdomain level (no dots in the matched part)
             if sub_domain.ends_with('.') && !sub_domain[..sub_domain.len() - 1].contains('.') {
                 return true;
             }
         }
-        // Also check if hostname is the wildcard domain itself minus the star
-        // e.g., *.example.com should NOT match example.com
     }
-
     false
+}
+
+// OID 2.5.29.17 = subjectAltName
+const OID_SAN: &[u8] = &[0x55, 0x1D, 0x11];
+
+/// Search TBS bytes for the SAN extension and return the inner SEQUENCE bytes.
+fn extract_sans(tbs: &[u8]) -> Option<&[u8]> {
+    // Scan for OID_SAN pattern in DER bytes
+    for i in 0..tbs.len().saturating_sub(OID_SAN.len() + 4) {
+        if &tbs[i..i + OID_SAN.len()] == OID_SAN {
+            // After OID, skip to the OCTET STRING containing the SAN SEQUENCE
+            let mut pos = i + OID_SAN.len();
+            // There may be a BOOLEAN (critical) before the OCTET STRING
+            while pos < tbs.len() {
+                let tag = tbs[pos];
+                if tag == 0x04 { // OCTET STRING
+                    pos += 1;
+                    let (len, hdr) = der_len(&tbs[pos..])?;
+                    pos += hdr;
+                    if pos + len <= tbs.len() {
+                        return Some(&tbs[pos..pos + len]);
+                    }
+                    return None;
+                } else if tag == 0x01 { // BOOLEAN (critical flag)
+                    pos += 1;
+                    let (len, hdr) = der_len(&tbs[pos..])?;
+                    pos += hdr + len;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn der_len(data: &[u8]) -> Option<(usize, usize)> {
+    if data.is_empty() { return None; }
+    if data[0] < 0x80 {
+        Some((data[0] as usize, 1))
+    } else if data[0] == 0x81 && data.len() > 1 {
+        Some((data[1] as usize, 2))
+    } else if data[0] == 0x82 && data.len() > 2 {
+        Some((((data[1] as usize) << 8) | data[2] as usize, 3))
+    } else {
+        None
+    }
+}
+
+/// Iterator over DNS names in a SAN extension (tag 0x82 = dNSName).
+struct SanIter<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SanIter<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        // Skip outer SEQUENCE tag if present
+        let mut pos = 0;
+        if !data.is_empty() && data[0] == 0x30 {
+            pos = 1;
+            if let Some((_, hdr)) = der_len(&data[1..]) {
+                pos += hdr;
+            }
+        }
+        SanIter { data, pos }
+    }
+}
+
+impl<'a> Iterator for SanIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        while self.pos < self.data.len() {
+            let tag = self.data[self.pos];
+            self.pos += 1;
+            let (len, hdr) = der_len(&self.data[self.pos..])?;
+            self.pos += hdr;
+            let value = &self.data[self.pos..self.pos + len.min(self.data.len() - self.pos)];
+            self.pos += len;
+
+            // Tag 0x82 = context-specific [2] = dNSName
+            if tag == 0x82 {
+                return Some(value);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug)]
