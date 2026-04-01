@@ -111,10 +111,10 @@ pub fn intent_update(_args: &str) {
         Err(e) => { kprintln!("[npk] Signature download failed: {}", e); return; }
     };
 
-    // 5. Verify ECDSA P-384 signature
+    // 5. Verify ECDSA P-384 signature (signs raw kernel data with SHA-384)
     kprint!("[npk] Verifying ECDSA P-384 signature... ");
     let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-    if !crate::tls::certstore::verify_p384_prehash384(pubkey, &hash, &sig_data) {
+    if !crate::tls::certstore::verify_p384_sha384(pubkey, &kernel_data, &sig_data) {
         kprintln!("FAILED");
         kprintln!("[npk] Invalid signature! Update rejected.");
         return;
