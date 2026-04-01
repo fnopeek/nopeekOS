@@ -320,24 +320,29 @@ pub fn intent_reboot() -> ! {
     kprintln!("[npk] Rebooting...");
     kprintln!();
     unsafe {
-        // Method 1: PCI CF9 reset (works on Intel chipsets / NUC)
-        // 0x06 = hard reset, 0x0E = full reset (warm)
+        // Disable interrupts first
+        core::arch::asm!("cli");
+
+        // Method 1: ACPI reset register (if available from FADT)
+        crate::acpi::reset();
+
+        // Method 2: PCI CF9 reset (Intel chipsets)
+        // Must write 0x02 first (enable reset), then 0x06 (trigger)
+        core::arch::asm!("out dx, al", in("dx") 0xCF9u16, in("al") 0x02u8);
+        for _ in 0..100_000u32 { core::hint::spin_loop(); }
         core::arch::asm!("out dx, al", in("dx") 0xCF9u16, in("al") 0x06u8);
+        for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
 
-        // Brief delay for reset to take effect
-        for _ in 0..1_000_000u64 { core::hint::spin_loop(); }
-
-        // Method 2: Keyboard controller reset (port 0x64)
+        // Method 3: Keyboard controller reset (port 0x64)
         core::arch::asm!("out dx, al", in("dx") 0x64u16, in("al") 0xFEu8);
+        for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
 
-        for _ in 0..1_000_000u64 { core::hint::spin_loop(); }
-
-        // Method 3: Triple-fault (guaranteed reboot on any x86)
+        // Method 4: Triple-fault (guaranteed reboot on any x86)
         let null_idt: [u8; 6] = [0; 6];
         core::arch::asm!("lidt [{}]", in(reg) &null_idt);
         core::arch::asm!("int3");
 
-        loop { core::arch::asm!("cli; hlt"); }
+        loop { core::arch::asm!("hlt"); }
     }
 }
 
