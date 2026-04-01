@@ -35,8 +35,8 @@ pub fn intent_status(vault: &Vault) {
     } else {
         kprintln!("  Network:       none");
     }
-    if let Some((_, free, objects, gen)) = crate::npkfs::stats() {
-        kprintln!("  npkFS:         {} objects, {} free blocks (gen {})", objects, free, gen);
+    if let Some((_, free, objects, generation)) = crate::npkfs::stats() {
+        kprintln!("  npkFS:         {} objects, {} free blocks (gen {})", objects, free, generation);
     } else {
         kprintln!("  npkFS:         not mounted");
     }

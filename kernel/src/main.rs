@@ -52,8 +52,8 @@ mod update_key;
 
 use core::panic::PanicInfo;
 
-#[no_mangle]
-pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     vga::show_boot_banner();
 
     {

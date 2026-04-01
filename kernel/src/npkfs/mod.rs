@@ -112,13 +112,13 @@ pub fn mount() -> Result<(), FsError> {
         cache.flush()?;
     }
 
-    let gen = sb.generation;
+    let generation = sb.generation;
     let jrnl = Journal::new(sb.journal_head, sb.journal_seq);
 
-    *FS.lock() = Some(NpkFs { cache, sb, bitmap: bmap, journal: jrnl, generation: gen });
+    *FS.lock() = Some(NpkFs { cache, sb, bitmap: bmap, journal: jrnl, generation });
 
     kprintln!("[npk] npkfs: mounted (gen={}, {} objects, {} free blocks)",
-        gen, sb.object_count, sb.free_blocks);
+        generation, sb.object_count, sb.free_blocks);
     Ok(())
 }
 

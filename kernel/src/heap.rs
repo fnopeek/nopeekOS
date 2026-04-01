@@ -188,7 +188,7 @@ unsafe impl GlobalAlloc for LockedHeap {
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::new();
 
-extern "C" {
+unsafe extern "C" {
     static __heap_start: u8;
 }
 
