@@ -2,6 +2,7 @@
 *.iso
 *.o
 *.bin
+!release/kernel.bin
 kernel/src/install_data/grub.efi
 kernel/src/install_data/kernel.bin
 update.key
