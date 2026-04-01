@@ -36,7 +36,7 @@ npk> ping google.ch                  # ICMP ping (with DNS resolution)
 npk> traceroute 8.8.8.8              # Network path tracing
 npk> resolve google.com              # DNS resolution
 npk> http example.com /              # HTTP GET (full TCP/IP stack)
-npk> https sandbox.nopeek.ch /       # HTTPS GET (TLS 1.3, ChaCha20-Poly1305)
+npk> https sandbox.nopeek.ch /       # HTTPS GET (TLS 1.3, AES-256-GCM / ChaCha20)
 npk> http example.com / > mypage     # Fetch and store in npkFS
 npk> lock                            # Lock system (clear keys)
 npk> passwd                          # Change passphrase
@@ -67,14 +67,14 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  ├──────────────────────────────────────────────────────────┤
  │  Capability Vault           │  Crypto Engine             │
  │  256-bit tokens, deny-all   │  ChaCha20-Poly1305 AEAD   │
- │  Passphrase identity        │  TLS 1.3, X25519, SHA-256 │
- │  Temporal scoping, audit    │  CSPRNG (RDRAND/TSC seed)  │
+ │  Passphrase identity        │  AES-128/256-GCM (TLS)    │
+ │  Temporal scoping, audit    │  TLS 1.3: X25519 + P-384  │
  ├──────────────────────────────────────────────────────────┤
  │  Drivers                                                 │
- │  PCI bus scanner, virtio-blk (TRIM), virtio-net          │
+ │  virtio-blk, virtio-net, NVMe, Intel I226-V, xHCI USB    │
  ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, ~11400 lines)                │
- │  Memory Manager, Heap, Paging+NX, IDT+PIC, Serial, VGA  │
+ │  Kernel Core (Rust, no_std, ~17500 lines)                │
+ │  64GB Paging, Heap, IDT+PIC, ACPI, Framebuffer, Serial  │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
  └──────────────────────────────────────────────────────────┘
@@ -121,7 +121,7 @@ Every execution is a sandboxed WASM module:
 - [x] Multiboot2 boot (32-bit Protected Mode -> 64-bit Long Mode)
 - [x] Physical Memory Manager (bitmap allocator, contiguous allocation for DMA)
 - [x] Heap Allocator (linked-list, first-fit, coalescing)
-- [x] Virtual Memory (4-level paging, NX bit, identity-mapped first 1GB)
+- [x] Virtual Memory (4-level paging, NX bit, 64GB identity-mapped via 1GB huge pages)
 - [x] Interrupts (IDT + PIC, 100Hz timer)
 - [x] Serial Console (COM1, 115200 baud, line editing)
 - [x] VGA Boot Banner
@@ -149,13 +149,14 @@ Every execution is a sandboxed WASM module:
 
 - [x] PCI bus scanner (config space via 0xCF8/0xCFC)
 - [x] virtio-blk driver (legacy PCI, 4KB block API, TRIM/DISCARD)
-- [x] npkFS: Copy-on-Write B-tree (19 entries/leaf, 56 keys/internal node)
-- [x] BLAKE3 content hashing (integrity verification on every fetch)
+- [x] npkFS: Copy-on-Write B-tree (19 entries/leaf, 56 keys/internal, recursive split)
+- [x] BLAKE3 content hashing + B-tree node checksums
 - [x] 8-slot rotating superblock (SSD wear leveling)
 - [x] LRU block cache (64 slots, 256KB, write coalescing)
-- [x] Circular WAL journal (crash recovery for deferred frees)
+- [x] 2-phase journal (crash-safe deferred frees, idempotent replay)
+- [x] Indirect extent blocks (3 direct + chained indirect, unlimited file size)
 - [x] Batch TRIM/DISCARD (merged adjacent ranges)
-- [x] Extent-based allocation
+- [x] Next-fit allocator (amortized O(1) block allocation)
 - [x] Intents: `store`, `fetch`, `delete`, `list`, `fsinfo`, `disk read/write`
 
 ### Phase 5 -- Network Stack
@@ -177,37 +178,41 @@ Every execution is a sandboxed WASM module:
 
 ## Roadmap
 
-### Phase 6 -- Crypto & Identity (in progress)
+### Phase 6 -- Crypto & Identity
 
 - [x] ChaCha20-Poly1305 AEAD encryption (RFC 8439)
 - [x] Passphrase-based identity (BLAKE3-KDF → 256-bit master key)
 - [x] Encryption at rest (all npkFS objects encrypted by default)
 - [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
-- [x] TLS 1.3 (RFC 8446, ChaCha20-Poly1305 + X25519)
-- [ ] TLS 1.3: AES-128-GCM + AES-256-GCM cipher suites (most servers require AES-GCM)
+- [x] TLS 1.3 (RFC 8446, X25519 + ECDH P-384 key exchange)
+- [x] TLS 1.3: AES-128-GCM-SHA256 + AES-256-GCM-SHA384 cipher suites (via RustCrypto aes-gcm crate)
 - [x] HTTPS client (`https <host> [path]`)
 - [x] X.509 certificate chain validation
-- [x] Embedded root CAs (ISRG Root X1, DigiCert Global G2)
+- [x] Embedded root CAs (ISRG Root X1, DigiCert G2, AAA, GTS Root R1)
 - [x] SHA-256, HMAC-SHA256, HKDF, RSA PKCS#1 v1.5 verify
 
 ### Phase 7 -- Bare Metal (target: Intel N100 NUC)
 
-- [x] xHCI USB keyboard driver (full xHCI init, BIOS handoff, HID boot protocol, DE layout)
+- [x] xHCI USB keyboard driver (BIOS handoff, HID boot protocol, disconnect detection)
+- [x] PS/2 keyboard (extended scancodes, arrow keys, lock-free ringbuffer)
 - [x] Intel I226-V Ethernet driver (igc, MMIO, RX/TX advanced descriptors, PCIe bridge)
-- [x] Framebuffer driver (UEFI GOP, Write-Back caching, scroll, clear)
+- [x] Framebuffer driver (UEFI GOP, shadow buffer, 32-bit pixel write)
 - [x] TSC timer fallback (CPUID 0x15 calibration, replaces PIT on UEFI-only systems)
-- [x] Gateway routing (DHCP gateway + subnet mask, local vs remote ARP)
-- [x] Serial port detection (skip on hardware without COM ports)
-- [x] Dual xHCI controller support (Thunderbolt + regular USB)
-- [ ] NVMe driver (PCIe, Admin/IO queues, Read/Write/TRIM)
+- [x] NVMe driver (PCIe BAR0 MMIO, Admin/IO queues, Read/Write/TRIM)
+- [x] 64GB RAM support (1GB huge pages, dynamic memory detection)
+- [x] Tick-based USB timeouts (CPU-speed independent)
+- [x] ACPI power-off (RSDP, FADT, DSDT \_S5 parsing)
+- [x] Gateway routing, serial detection, dual xHCI controllers
 - [ ] npk-shell: TLS-encrypted remote intent loop (TCP listener, passphrase auth)
-- [ ] Hardware manifest collector (PCI + CPUID + ACPI probe)
+- [ ] USB mouse (HID boot protocol, same xHCI infrastructure)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 
-### Phase 8 -- Human View
+### Phase 8 -- Human View (next)
 
-- [ ] Tiling window manager (Hyprland-inspired)
-- [ ] Mouse input (PS/2, virtio-input)
+- [ ] Tiling window manager (Hyprland-inspired, framebuffer compositing)
+- [ ] USB mouse input (xHCI HID, multi-device support)
+- [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
+- [ ] GPU acceleration (Intel UHD, hardware-accelerated compositing)
 - [ ] Web rendering engine (long-term)
 
 ### Phase 9 -- AI Integration
@@ -231,11 +236,12 @@ Every execution is a sandboxed WASM module:
 | Hashing | BLAKE3 | Fast, secure, streaming |
 | CSPRNG | ChaCha20 (RFC 7539) | RDRAND seed, forward secrecy |
 | AEAD | ChaCha20-Poly1305 (RFC 8439) | Encryption at rest + TLS |
-| TLS | 1.3 (RFC 8446) | X25519 + ChaCha20-Poly1305 |
+| AES-GCM | aes-gcm crate (RustCrypto) | TLS 1.3 (128/256-bit) |
+| TLS | 1.3 (RFC 8446) | X25519 + P-384, 3 cipher suites |
 | Identity | Passphrase → BLAKE3-KDF | No users, no accounts |
-| Key Exchange | X25519 (Curve25519) | Ephemeral, per-connection |
-| Certificates | X.509, 2 embedded root CAs | ISRG Root X1, DigiCert G2 |
-| Crypto libs | sha2, hmac, hkdf (RustCrypto) | Audited, no_std |
+| Key Exchange | X25519 + ECDH P-384 | Ephemeral, per-connection |
+| Certificates | X.509, 4 embedded root CAs | ISRG X1, DigiCert G2, AAA, GTS R1 |
+| Crypto libs | sha2, hmac, hkdf, aes-gcm, p384 | RustCrypto, audited, no_std |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
 
@@ -275,6 +281,12 @@ nopeekOS/
 │       ├── pci.rs               # PCI bus scanner
 │       ├── virtio_blk.rs        # Block device driver (TRIM)
 │       ├── virtio_net.rs        # Network device driver
+│       ├── nvme.rs              # NVMe driver (PCIe, TRIM)
+│       ├── blkdev.rs            # Block device abstraction
+│       ├── xhci.rs              # xHCI USB driver (keyboard)
+│       ├── keyboard.rs          # PS/2 keyboard (extended scancodes)
+│       ├── framebuffer.rs       # UEFI GOP framebuffer
+│       ├── acpi.rs              # ACPI power management
 │       ├── npkfs/               # Filesystem
 │       │   ├── mod.rs           # Public API: mkfs, mount, store, fetch
 │       │   ├── types.rs         # On-disk format definitions
@@ -297,8 +309,8 @@ nopeekOS/
 │       ├── crypto.rs            # ChaCha20-Poly1305 AEAD, KDF
 │       ├── tls/                 # TLS 1.3 stack
 │       │   ├── mod.rs           # TLS handshake + record layer
-│       │   ├── sha256.rs        # SHA-256 (via sha2 crate)
-│       │   ├── hmac.rs          # HMAC-SHA256 + HKDF (via crates)
+│       │   ├── sha256.rs        # SHA-256 + SHA-384 (via sha2 crate)
+│       │   ├── hmac.rs          # HMAC/HKDF SHA-256 + SHA-384
 │       │   ├── x25519.rs        # Curve25519 ECDH
 │       │   ├── rsa.rs           # RSA PKCS#1 v1.5 verify
 │       │   ├── asn1.rs          # ASN.1 DER parser
@@ -313,7 +325,9 @@ nopeekOS/
 │       │   ├── wasm.rs          # run, add, multiply, bootstrap
 │       │   ├── system.rs        # status, time, help, caps, audit, halt, config
 │       │   └── auth.rs          # lock, passwd
-│       └── vga.rs               # VGA text mode
+│       ├── vga.rs               # VGA text mode
+│       ├── config.rs            # Runtime configuration
+│       └── gpt.rs               # GPT partition detection
 ```
 
 ---
@@ -340,33 +354,27 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] AI-native Operating System v0.1.0
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
-[npk] Physical memory: 123 MB free
-[npk] Heap: 1024 KB
-[npk] Paging: 512 x 2MB, NX enabled
-[npk] PCI: 5 devices
-[npk] virtio-blk: 32768 sectors (16 MB), TRIM=yes
-[npk] virtio-net: MAC 52:54:00:12:34:56
-[npk] DHCP: configured 10.0.2.15
-[npk] npkfs: mounted (gen=1, 0 objects, 3830 free blocks)
+[npk] Physical memory: 15892 MB free (16 GB detected)
+[npk] Heap: 65536 KB
+[npk] Paging: 64 GB identity-mapped, NX enabled
+[npk] PCI: 8 devices
+[npk] nvme: KINGSTON SNV2S500G (SN: ...), TRIM=yes
+[npk] nvme: 465 GB (976773168 sectors)
+[npk] xhci: device on port 2
+[npk] xhci: USB keyboard (HID boot protocol)
+[npk] Framebuffer: 1920x1080 @ 0xfd000000 (32bpp)
+[npk] Intel I226-V: link UP, MAC 48:21:0b:...
+[npk] DHCP: configured 192.168.1.100
+[npk] npkfs: mounted (gen=42, 15 objects, 120000 free blocks)
 [npk] CSPRNG: ChaCha20 (RDRAND-seeded)
 [npk] WASM runtime: wasmi v1.0 (fuel-metered)
 
 [npk] ══════════════════════════════════
-[npk]  Welcome to nopeekOS.
-[npk]  No users. No root. No legacy.
-[npk]  Choose a passphrase to protect
-[npk]  this system. It cannot be recovered.
+[npk]  Welcome, Florian.
+[npk]  System ready. Express your intent.
 [npk] ══════════════════════════════════
 
-[npk] New passphrase: ************
-[npk] Confirm passphrase: ************
-[npk] Identity configured. System is yours.
-[npk] Bootstrap: stored 4 WASM modules
-[npk] Vault online. Root cap: a10c2286
-
-[npk] System ready. Express your intent.
-
-npk>
+Florian@npk ~>
 ```
 
 ---
@@ -383,7 +391,7 @@ npk>
 8. **Formal Boundaries** -- WASM sandbox is the trust boundary
 9. **No Ambient Authority** -- No root, no sudo, no privilege elevation
 10. **Fuel Metering** -- 10M instruction budget per module prevents DoS
-11. **TLS 1.3** -- All network communication encrypted (X25519 + ChaCha20-Poly1305)
+11. **TLS 1.3** -- All network communication encrypted (3 cipher suites, X25519 + P-384)
 
 ---
 

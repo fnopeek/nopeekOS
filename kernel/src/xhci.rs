@@ -243,6 +243,8 @@ struct XhciState {
     port_speed: u32,
     intr_ep_dci: u8,     // DCI of interrupt IN endpoint
     prev_keys: [u8; 6],  // previous HID report keys
+    port_num: u32,       // connected port number
+    error_count: u32,    // consecutive transfer errors
 }
 
 static STATE: spin::Mutex<Option<XhciState>> = spin::Mutex::new(None);
@@ -455,6 +457,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         intr_ring, intr_cycle: 1, intr_enqueue: 0,
         data_buf, slot_id: 0, port_speed: 0,
         intr_ep_dci: 0, prev_keys: [0; 6],
+        port_num: 0, error_count: 0,
     };
 
     // Power on all ports
@@ -484,6 +487,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         Some(p) => p,
         None => return false, // silently skip — try next controller
     };
+    state.port_num = port;
     kprintln!("[npk] xhci: device on port {}", port + 1);
 
     // Reset port
@@ -616,11 +620,13 @@ fn alloc_dma(pages: usize, _name: &str) -> u64 {
 }
 
 fn wait_for(base: u64, reg: u32, mask: u32, expected: u32) -> bool {
-    for _ in 0..1_000_000u32 {
+    // Tick-based timeout (500ms) — CPU-speed independent
+    let deadline = crate::interrupts::ticks() + 50; // 50 ticks = 500ms at 100Hz
+    loop {
         if r32(base, reg) & mask == expected { return true; }
+        if crate::interrupts::ticks() >= deadline { return false; }
         core::hint::spin_loop();
     }
-    false
 }
 
 fn portsc_off(port: u32) -> u32 {
@@ -665,9 +671,10 @@ fn bios_handoff(mmio: u64, mut off: u32) {
             // Found USB Legacy Support capability
             // Set OS Owned Semaphore (bit 24)
             w32(mmio, off, cap | (1 << 24));
-            // Wait for BIOS Owned Semaphore (bit 16) to clear
-            for _ in 0..1_000_000u32 {
-                if r32(mmio, off) & (1 << 16) == 0 { break; }
+            // Wait for BIOS Owned Semaphore (bit 16) to clear (1s timeout)
+            let deadline = crate::interrupts::ticks() + 100;
+            while r32(mmio, off) & (1 << 16) != 0 {
+                if crate::interrupts::ticks() >= deadline { break; }
                 core::hint::spin_loop();
             }
             // Disable SMI (clear USBLEGCTLSTS enable bits)
@@ -698,15 +705,16 @@ fn reset_port(state: &XhciState, port: u32) -> bool {
     let sc = r32(state.oper, off);
     w32(state.oper, off, (sc & !PORTSC_RW1C) | PORTSC_PR);
 
-    // Wait for reset complete
-    for _ in 0..1_000_000u32 {
+    // Wait for reset complete (500ms timeout)
+    let deadline = crate::interrupts::ticks() + 50;
+    loop {
         let sc = r32(state.oper, off);
         if sc & PORTSC_PED != 0 { return true; }  // Port Enabled = reset done
         if sc & PORTSC_PRC != 0 {
-            // Clear reset change
             w32(state.oper, off, (sc & !PORTSC_RW1C) | PORTSC_PRC);
             if sc & PORTSC_PED != 0 { return true; }
         }
+        if crate::interrupts::ticks() >= deadline { break; }
         core::hint::spin_loop();
     }
     false
@@ -729,8 +737,10 @@ fn post_command(state: &mut XhciState, param: u64, status: u32, mut control: u32
 }
 
 fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
-    // Poll event ring for command completion
-    for _ in 0..2_000_000u32 {
+    // Poll event ring for command completion (1s timeout)
+    let deadline = crate::interrupts::ticks() + 100;
+    loop {
+        if crate::interrupts::ticks() >= deadline { return None; }
         let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         let cycle = control & TRB_CYCLE;
         if cycle != state.evt_cycle { core::hint::spin_loop(); continue; }
@@ -755,7 +765,6 @@ fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
         }
         // Consume other events (port status change etc.)
     }
-    None
 }
 
 fn cmd_enable_slot(state: &mut XhciState) -> Option<u8> {
@@ -853,8 +862,10 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
     // Ring doorbell for slot, target EP0 (DCI=1)
     ring_doorbell(state, state.slot_id as u32, 1);
 
-    // Wait for transfer completion
-    for _ in 0..2_000_000u32 {
+    // Wait for transfer completion (1s timeout)
+    let deadline = crate::interrupts::ticks() + 100;
+    loop {
+        if crate::interrupts::ticks() >= deadline { return false; }
         let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { core::hint::spin_loop(); continue; }
 
@@ -877,7 +888,6 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
             // Unexpected command completion — consume and continue
         }
     }
-    false
 }
 
 fn usb_get_descriptor(state: &mut XhciState, desc_type: u16, length: u16) -> bool {
@@ -1048,10 +1058,22 @@ fn poll_events() {
 
         if trb_type == EVT_TRANSFER {
             if cc != CC_SUCCESS && cc != CC_SHORT_PACKET {
-                // Re-schedule even on error to keep polling
+                state.error_count += 1;
+                if state.error_count >= 3 {
+                    // Check if device is still connected
+                    let portsc = r32(state.oper, portsc_off(state.port_num));
+                    if portsc & PORTSC_CCS == 0 {
+                        crate::kprintln!("[npk] xhci: device disconnected");
+                        AVAILABLE.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                    state.error_count = 0; // Port still connected, reset counter
+                }
                 schedule_interrupt_transfer(state);
                 continue;
             }
+            state.error_count = 0;
+
             // Read HID boot protocol report from buffer
             let buf = state.data_buf + 2048;
             let modifiers = r8(buf, 0);

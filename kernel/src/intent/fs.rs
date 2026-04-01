@@ -38,6 +38,10 @@ pub fn intent_store(args: &str, cap_id: CapId) {
     }
 
     let path = resolve_path(name);
+    if let Err(e) = crate::npkfs::validate_user_name(&path) {
+        kprintln!("[npk] Store error: {}", e);
+        return;
+    }
     // Auto-create parent directories
     if let Some(idx) = path.rfind('/') {
         super::ensure_parents(&path[..idx]);
@@ -88,6 +92,10 @@ pub fn intent_cat(args: &str) {
 
     if let Some(target) = redirect {
         let target_path = resolve_path(target);
+        if let Err(e) = crate::npkfs::validate_user_name(&target_path) {
+            kprintln!("[npk] Store error: {}", e);
+            return;
+        }
         match crate::npkfs::upsert(&target_path, &data, capability::CAP_NULL) {
             Ok(_) => kprintln!("[npk] Copied -> '{}' ({} bytes)", target_path, data.len()),
             Err(e) => kprintln!("[npk] Store error: {}", e),

@@ -8,6 +8,26 @@ use super::types::*;
 use super::cache::BlockCache;
 use super::bitmap::Bitmap;
 
+const MAX_TREE_DEPTH: usize = 8;
+const CHECKSUM_OFFSET: usize = BLOCK_SIZE - 32; // BLAKE3 checksum at end of block
+
+fn compute_node_checksum(buf: &[u8; BLOCK_SIZE]) -> [u8; 32] {
+    *blake3::hash(&buf[..CHECKSUM_OFFSET]).as_bytes()
+}
+
+fn write_node_checksum(buf: &mut [u8; BLOCK_SIZE]) {
+    let cs = compute_node_checksum(buf);
+    buf[CHECKSUM_OFFSET..].copy_from_slice(&cs);
+}
+
+fn verify_node_checksum(buf: &[u8; BLOCK_SIZE]) -> bool {
+    let stored = &buf[CHECKSUM_OFFSET..];
+    // All zeros = old format without checksum, accept
+    if stored.iter().all(|&b| b == 0) { return true; }
+    let expected = compute_node_checksum(buf);
+    stored == expected
+}
+
 // === Node parsing helpers ===
 
 fn read_header(buf: &[u8; BLOCK_SIZE]) -> BTreeNodeHeader {
@@ -64,6 +84,22 @@ fn set_leaf_entry(buf: &mut [u8; BLOCK_SIZE], idx: usize, entry: &ObjectEntry) {
     buf[off..off + LEAF_ENTRY_SIZE].copy_from_slice(src);
 }
 
+/// Read a B-tree node block and verify its checksum.
+fn read_node(cache: &mut BlockCache, block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
+    cache.read(block, buf)?;
+    if !verify_node_checksum(buf) {
+        return Err(FsError::Corrupt);
+    }
+    Ok(())
+}
+
+/// Write a B-tree node block with checksum.
+fn write_node(cache: &mut BlockCache, block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
+    write_node_checksum(buf);
+    cache.write(block, buf)?;
+    Ok(())
+}
+
 fn make_empty_leaf() -> [u8; BLOCK_SIZE] {
     let mut buf = [0u8; BLOCK_SIZE];
     let hdr = BTreeNodeHeader {
@@ -85,7 +121,7 @@ pub fn lookup(
 
     loop {
         let mut buf = [0u8; BLOCK_SIZE];
-        cache.read(block, &mut buf)?;
+        read_node(cache, block, &mut buf)?;
         let hdr = read_header(&buf);
         if hdr.magic != BTREE_MAGIC { return Err(FsError::Corrupt); }
 
@@ -120,18 +156,18 @@ pub fn insert(
         hdr.num_entries = 1;
         write_header(&mut buf, &hdr);
         set_leaf_entry(&mut buf, 0, entry);
-        cache.write(new_block, &buf)?;
+        write_node(cache, new_block, &mut buf)?;
         return Ok((new_block, old_blocks));
     }
 
     // Walk to leaf, recording path
-    let mut path: [(u64, usize); 8] = [(0, 0); 8];
+    let mut path: [(u64, usize); MAX_TREE_DEPTH] = [(0, 0); MAX_TREE_DEPTH];
     let mut depth = 0usize;
     let mut block = root;
 
     loop {
         let mut buf = [0u8; BLOCK_SIZE];
-        cache.read(block, &mut buf)?;
+        read_node(cache, block, &mut buf)?;
         let hdr = read_header(&buf);
         if hdr.magic != BTREE_MAGIC { return Err(FsError::Corrupt); }
 
@@ -150,7 +186,7 @@ pub fn insert(
                     let new_block = bitmap.alloc(1)?;
                     let mut new_buf = buf;
                     insert_leaf_entry(&mut new_buf, &hdr, pos, entry);
-                    cache.write(new_block, &new_buf)?;
+                    write_node(cache, new_block, &mut new_buf)?;
                     old_blocks.push(block);
 
                     return fixup_path(cache, bitmap, &path, depth, new_block, None, &mut old_blocks);
@@ -166,6 +202,7 @@ pub fn insert(
             }
             BTREE_INTERNAL => {
                 let (child_idx, child_block) = find_child_with_idx(&buf, &hdr, &entry.name);
+                if depth >= MAX_TREE_DEPTH - 1 { return Err(FsError::TreeTooDeep); }
                 path[depth] = (block, child_idx);
                 depth += 1;
                 block = child_block;
@@ -183,13 +220,13 @@ pub fn delete(
     if root == 0 { return Err(FsError::ObjectNotFound); }
 
     let mut old_blocks = alloc::vec::Vec::new();
-    let mut path: [(u64, usize); 8] = [(0, 0); 8];
+    let mut path: [(u64, usize); MAX_TREE_DEPTH] = [(0, 0); MAX_TREE_DEPTH];
     let mut depth = 0usize;
     let mut block = root;
 
     loop {
         let mut buf = [0u8; BLOCK_SIZE];
-        cache.read(block, &mut buf)?;
+        read_node(cache, block, &mut buf)?;
         let hdr = read_header(&buf);
         if hdr.magic != BTREE_MAGIC { return Err(FsError::Corrupt); }
 
@@ -208,7 +245,7 @@ pub fn delete(
                 let new_block = bitmap.alloc(1)?;
                 let mut new_buf = buf;
                 remove_leaf_entry(&mut new_buf, &hdr, pos);
-                cache.write(new_block, &new_buf)?;
+                write_node(cache, new_block, &mut new_buf)?;
                 old_blocks.push(block);
 
                 if depth == 0 && hdr.num_entries == 1 {
@@ -220,6 +257,7 @@ pub fn delete(
             }
             BTREE_INTERNAL => {
                 let (child_idx, child_block) = find_child_with_idx(&buf, &hdr, name);
+                if depth >= MAX_TREE_DEPTH - 1 { return Err(FsError::TreeTooDeep); }
                 path[depth] = (block, child_idx);
                 depth += 1;
                 block = child_block;
@@ -239,7 +277,7 @@ pub fn iter_all<F: FnMut(&ObjectEntry)>(
     let mut block = root;
     loop {
         let mut buf = [0u8; BLOCK_SIZE];
-        cache.read(block, &mut buf)?;
+        read_node(cache, block, &mut buf)?;
         let hdr = read_header(&buf);
         if hdr.magic != BTREE_MAGIC { return Err(FsError::Corrupt); }
 
@@ -249,7 +287,7 @@ pub fn iter_all<F: FnMut(&ObjectEntry)>(
                 let mut leaf = block;
                 loop {
                     let mut lbuf = [0u8; BLOCK_SIZE];
-                    cache.read(leaf, &mut lbuf)?;
+                    read_node(cache, leaf, &mut lbuf)?;
                     let lhdr = read_header(&lbuf);
                     for i in 0..lhdr.num_entries as usize {
                         f(&leaf_entry(&lbuf, i));
@@ -353,7 +391,7 @@ fn split_leaf(
     for i in 0..mid {
         set_leaf_entry(&mut left_buf, i, &entries[i]);
     }
-    cache.write(left_block, &left_buf)?;
+    write_node(cache, left_block, &mut left_buf)?;
 
     // Right leaf
     let right_count = total - mid;
@@ -366,7 +404,7 @@ fn split_leaf(
     for i in 0..right_count {
         set_leaf_entry(&mut right_buf, i, &entries[mid + i]);
     }
-    cache.write(right_block, &right_buf)?;
+    write_node(cache, right_block, &mut right_buf)?;
 
     // Split key = first key of right node
     let split_key = entries[mid].name;
@@ -377,7 +415,7 @@ fn split_leaf(
 /// After COW of a leaf/child, update parent pointers up the path.
 fn fixup_path(
     cache: &mut BlockCache, bitmap: &mut Bitmap,
-    path: &[(u64, usize); 8], depth: usize,
+    path: &[(u64, usize); MAX_TREE_DEPTH], depth: usize,
     new_child: u64, _split: Option<(&[u8; 64], u64)>,
     old_blocks: &mut alloc::vec::Vec<u64>,
 ) -> Result<(u64, alloc::vec::Vec<u64>), FsError> {
@@ -390,7 +428,7 @@ fn fixup_path(
     for d in (0..depth).rev() {
         let (parent_block, child_idx) = path[d];
         let mut buf = [0u8; BLOCK_SIZE];
-        cache.read(parent_block, &mut buf)?;
+        read_node(cache, parent_block, &mut buf)?;
         let hdr = read_header(&buf);
 
         let new_parent = bitmap.alloc(1)?;
@@ -406,7 +444,7 @@ fn fixup_path(
             new_buf[8..16].copy_from_slice(&child_block.to_le_bytes());
         }
 
-        cache.write(new_parent, &new_buf)?;
+        write_node(cache, new_parent, &mut new_buf)?;
         old_blocks.push(parent_block);
         child_block = new_parent;
     }
@@ -417,7 +455,7 @@ fn fixup_path(
 /// After a leaf split, propagate the new key+child up the path.
 fn fixup_path_split(
     cache: &mut BlockCache, bitmap: &mut Bitmap,
-    path: &[(u64, usize); 8], depth: usize,
+    path: &[(u64, usize); MAX_TREE_DEPTH], depth: usize,
     left: u64, right: u64, split_key: &[u8; 64],
     old_blocks: &mut alloc::vec::Vec<u64>,
 ) -> Result<(u64, alloc::vec::Vec<u64>), FsError> {
@@ -431,14 +469,14 @@ fn fixup_path_split(
         };
         write_header(&mut buf, &hdr);
         set_internal_entry(&mut buf, 0, split_key, left);
-        cache.write(root_block, &buf)?;
+        write_node(cache, root_block, &mut buf)?;
         return Ok((root_block, core::mem::take(old_blocks)));
     }
 
     // Insert split key into parent
     let (parent_block, _child_idx) = path[depth - 1];
     let mut buf = [0u8; BLOCK_SIZE];
-    cache.read(parent_block, &mut buf)?;
+    read_node(cache, parent_block, &mut buf)?;
     let hdr = read_header(&buf);
     let n = hdr.num_entries as usize;
 
@@ -484,7 +522,7 @@ fn fixup_path_split(
             write_header(&mut new_buf, &new_hdr);
         }
 
-        cache.write(new_parent, &new_buf)?;
+        write_node(cache, new_parent, &mut new_buf)?;
         old_blocks.push(parent_block);
 
         // Continue fixup up the path
@@ -492,23 +530,120 @@ fn fixup_path_split(
         return fixup_path(cache, bitmap, path, remaining_depth, new_parent, None, old_blocks);
     }
 
-    // Parent full: would need to split internal node too.
-    // For Phase 5 with modest object counts, this is very unlikely.
-    // If it happens, return DiskFull as a simplification.
-    Err(FsError::DiskFull)
+    // Parent full: split the internal node and propagate up
+    let (int_left, int_right, int_split_key) =
+        split_internal(cache, bitmap, &buf, &hdr, split_key, left, right)?;
+    old_blocks.push(parent_block);
+
+    let remaining_depth = depth - 1;
+    fixup_path_split(cache, bitmap, path, remaining_depth,
+        int_left, int_right, &int_split_key, old_blocks)
+}
+
+/// Split a full internal node. Returns (left_block, right_block, split_key).
+/// The split_key is promoted to the parent (not stored in either child).
+fn split_internal(
+    cache: &mut BlockCache, bitmap: &mut Bitmap,
+    buf: &[u8; BLOCK_SIZE], hdr: &BTreeNodeHeader,
+    new_key: &[u8; 64], new_left_child: u64, new_right_child: u64,
+) -> Result<(u64, u64, [u8; 64]), FsError> {
+    let n = hdr.num_entries as usize;
+
+    // Collect all keys+children including the new entry, sorted
+    // Each internal entry: (key, left_child). Rightmost child is separate.
+    struct KeyChild { key: [u8; 64], child: u64 }
+    let mut entries = alloc::vec::Vec::with_capacity(n + 1);
+    let mut inserted = false;
+    for i in 0..n {
+        let key: [u8; 64] = internal_key(buf, i).try_into().unwrap();
+        if !inserted && new_key[..] < key[..] {
+            entries.push(KeyChild { key: *new_key, child: new_left_child });
+            inserted = true;
+        }
+        let child = internal_child(buf, i);
+        // If we just inserted new_key before this entry, the child pointer
+        // for this entry needs to be updated if it was the split point
+        if inserted && entries.len() == entries.capacity() - (n - i) {
+            entries.push(KeyChild { key, child });
+        } else {
+            entries.push(KeyChild { key, child });
+        }
+    }
+    if !inserted {
+        entries.push(KeyChild { key: *new_key, child: new_left_child });
+    }
+
+    // Determine the rightmost child for each half.
+    // After inserting new_key: the child left of new_key is new_left_child,
+    // the child right of new_key is new_right_child.
+    // We need to fix up the child pointers around the insertion point.
+    let insert_pos = entries.iter().position(|e| e.key == *new_key).unwrap();
+
+    // Fix child pointer: the entry AFTER the inserted key should have
+    // new_right_child as its left child. But in our representation,
+    // each entry's child is the LEFT child of that key.
+    // After insert_pos, the next entry's child is correct (was shifted).
+    // The rightmost child: if inserted at end, new_right_child is rightmost.
+    let rightmost = if insert_pos == entries.len() - 1 {
+        new_right_child
+    } else {
+        // The old rightmost child stays, but the entry after insert gets new_right_child
+        // Actually: entry[insert_pos].child = new_left_child (already set)
+        // entry[insert_pos+1] should have child = new_right_child
+        entries[insert_pos + 1].child = new_right_child;
+        hdr.next_leaf // old rightmost preserved
+    };
+
+    let total = entries.len(); // n + 1
+    let mid = total / 2;
+
+    // The median key is promoted (not stored in either child node)
+    let promoted_key = entries[mid].key;
+
+    // Left internal node: entries[0..mid]
+    let left_block = bitmap.alloc(1)?;
+    let right_block = bitmap.alloc(1)?;
+
+    let mut left_buf = [0u8; BLOCK_SIZE];
+    let left_hdr = BTreeNodeHeader {
+        magic: BTREE_MAGIC, node_type: BTREE_INTERNAL,
+        _pad: 0, num_entries: mid as u16,
+        next_leaf: entries[mid].child, // rightmost child of left = left child of promoted key
+    };
+    write_header(&mut left_buf, &left_hdr);
+    for i in 0..mid {
+        set_internal_entry(&mut left_buf, i, &entries[i].key, entries[i].child);
+    }
+    write_node(cache, left_block, &mut left_buf)?;
+
+    // Right internal node: entries[mid+1..total]
+    let right_count = total - mid - 1;
+    let mut right_buf = [0u8; BLOCK_SIZE];
+    let right_hdr = BTreeNodeHeader {
+        magic: BTREE_MAGIC, node_type: BTREE_INTERNAL,
+        _pad: 0, num_entries: right_count as u16,
+        next_leaf: rightmost,
+    };
+    write_header(&mut right_buf, &right_hdr);
+    for i in 0..right_count {
+        set_internal_entry(&mut right_buf, i, &entries[mid + 1 + i].key, entries[mid + 1 + i].child);
+    }
+    write_node(cache, right_block, &mut right_buf)?;
+
+    Ok((left_block, right_block, promoted_key))
 }
 
 /// Remove a child reference from the parent when a leaf becomes empty.
 fn remove_from_parent(
     cache: &mut BlockCache, bitmap: &mut Bitmap,
-    path: &[(u64, usize); 8], depth: usize,
+    path: &[(u64, usize); MAX_TREE_DEPTH], depth: usize,
     old_blocks: &mut alloc::vec::Vec<u64>,
 ) -> Result<(u64, alloc::vec::Vec<u64>), FsError> {
     if depth == 0 { return Ok((0, core::mem::take(old_blocks))); }
 
     let (parent_block, child_idx) = path[depth - 1];
     let mut buf = [0u8; BLOCK_SIZE];
-    cache.read(parent_block, &mut buf)?;
+    read_node(cache, parent_block, &mut buf)?;
     let hdr = read_header(&buf);
     let n = hdr.num_entries as usize;
 
@@ -539,7 +674,7 @@ fn remove_from_parent(
     new_hdr.num_entries -= 1;
     write_header(&mut new_buf, &new_hdr);
 
-    cache.write(new_parent, &new_buf)?;
+    write_node(cache, new_parent, &mut new_buf)?;
     old_blocks.push(parent_block);
 
     let remaining_depth = depth - 1;

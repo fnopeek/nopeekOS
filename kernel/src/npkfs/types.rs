@@ -21,16 +21,19 @@ pub const JOURNAL_BLOCKS: u64 = 256;
 pub const META_END: u64 = JOURNAL_START + JOURNAL_BLOCKS; // 265
 
 pub const MAX_NAME_LEN: usize = 63;
-pub const MAX_EXTENTS: usize = 4;
+pub const DIRECT_EXTENTS: usize = 3;
 pub const BTREE_INTERNAL: u8 = 1;
 pub const BTREE_LEAF: u8 = 2;
+
+// Indirect extent block: 255 extents + chain pointer
+pub const EXTENTS_PER_INDIRECT: usize = 255;
 
 // Per-node capacities
 pub const NODE_HEADER_SIZE: usize = 16;
 pub const INTERNAL_ENTRY_SIZE: usize = 72; // 64 name + 8 child ptr
 pub const MAX_INTERNAL_KEYS: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / INTERNAL_ENTRY_SIZE; // 56
-pub const LEAF_ENTRY_SIZE: usize = 216; // with 256-bit CapId
-pub const MAX_LEAF_ENTRIES: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / LEAF_ENTRY_SIZE; // 18
+pub const LEAF_ENTRY_SIZE: usize = 208;
+pub const MAX_LEAF_ENTRIES: usize = (BLOCK_SIZE - NODE_HEADER_SIZE - 32) / LEAF_ENTRY_SIZE; // 19 (32 = checksum)
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -94,8 +97,9 @@ pub struct ObjectEntry {
     pub size: u64,
     pub cap_id: [u8; 32],
     pub created_tick: u64,
-    pub extent_count: u32,
-    pub extents: [Extent; MAX_EXTENTS],
+    pub extent_count: u32,           // total extents (direct + indirect)
+    pub extents: [Extent; DIRECT_EXTENTS], // first 3 direct extents
+    pub indirect_block: u64,         // block with more extents (0 = none)
 }
 
 const _OE_SIZE_CHECK: () = assert!(core::mem::size_of::<ObjectEntry>() == LEAF_ENTRY_SIZE);
@@ -150,7 +154,9 @@ pub enum FsError {
     ObjectExists,
     NameTooLong,
     InvalidName,
+    ReservedName,
     DiskFull,
+    TreeTooDeep,
     #[allow(dead_code)]
     TooManyExtents,
 }
@@ -170,7 +176,9 @@ impl core::fmt::Display for FsError {
             FsError::ObjectExists => write!(f, "object already exists"),
             FsError::NameTooLong => write!(f, "name too long (max 63)"),
             FsError::InvalidName => write!(f, "invalid name"),
+            FsError::ReservedName => write!(f, "reserved name"),
             FsError::DiskFull => write!(f, "disk full"),
+            FsError::TreeTooDeep => write!(f, "B-tree too deep"),
             FsError::TooManyExtents => write!(f, "too many extents"),
         }
     }

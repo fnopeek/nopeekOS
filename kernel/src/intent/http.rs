@@ -114,7 +114,7 @@ fn do_http_request(args: &str, use_tls: bool) {
         match crate::tls::tls_connect(handle, host) {
             Ok(s) => {
                 if !flags.silent {
-                    kprintln!("[npk] TLS established (ChaCha20-Poly1305)");
+                    kprintln!("[npk] TLS established ({})", s.cipher_name());
                 }
                 Some(s)
             }

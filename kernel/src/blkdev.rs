@@ -95,8 +95,7 @@ pub fn has_discard() -> bool {
 
 pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
     if nvme::is_available() {
-        // TODO: NVMe Dataset Management
-        Err(BlkError::Unsupported)
+        nvme::discard_blocks(start, count)
     } else {
         virtio_blk::discard_blocks(start, count)
     }

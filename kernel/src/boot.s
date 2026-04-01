@@ -112,22 +112,23 @@ setup_page_tables:
     or $0x03, %eax
     mov %eax, (pml4)
 
-    /* PDPT[0] -> PDT */
-    mov $pdt, %eax
-    or $0x03, %eax
-    mov %eax, (pdpt)
-
-    /* PDT: 512 x 2MB Pages = 1GB Identity Map */
-    mov $pdt, %edi
-    mov $0x83, %eax
+    /* PDPT: 64 x 1GB Huge Pages = 64GB Identity Map */
+    /* Bit 0=Present, Bit 1=Writable, Bit 7=Huge (1GB page) */
+    mov $pdpt, %edi
+    movl $0x83, %eax        /* 0x83 = Present + Writable + Huge */
+    mov $0, %edx            /* high 32 bits of address (starts at 0) */
     mov $0, %ecx
-.fill_pdt:
-    mov %eax, (%edi)
-    add $0x200000, %eax
+.fill_pdpt:
+    mov %eax, (%edi)        /* low 32 bits */
+    mov %edx, 4(%edi)       /* high 32 bits */
+    add $0x40000000, %eax   /* +1GB */
+    jnc .no_carry
+    inc %edx                /* carry into high 32 bits for addresses > 4GB */
+.no_carry:
     add $8, %edi
     inc %ecx
-    cmp $512, %ecx
-    jne .fill_pdt
+    cmp $64, %ecx           /* 64 entries = 64GB */
+    jne .fill_pdpt
     ret
 
 enable_paging:
@@ -205,7 +206,6 @@ gdt64_pointer:
 
 pml4:   .space 4096
 pdpt:   .space 4096
-pdt:    .space 4096
 
 .align 4
 multiboot_magic: .space 4

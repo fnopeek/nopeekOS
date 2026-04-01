@@ -4,22 +4,35 @@
 //! Scancode Set 1 with US and DE_CH layouts.
 //! USB keyboards work via BIOS legacy PS/2 emulation.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::serial::{inb, outb};
 
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
 
-// Ring buffer for decoded key events
+// Lock-free ring buffer for decoded key events (interrupt-safe)
 const BUF_SIZE: usize = 64;
 static mut KEY_BUF: [u8; BUF_SIZE] = [0; BUF_SIZE];
-static mut BUF_HEAD: usize = 0;
-static mut BUF_TAIL: usize = 0;
+static BUF_HEAD: AtomicUsize = AtomicUsize::new(0);
+static BUF_TAIL: AtomicUsize = AtomicUsize::new(0);
 
 // Modifier state
 static SHIFT: AtomicBool = AtomicBool::new(false);
 static CTRL: AtomicBool = AtomicBool::new(false);
 static CAPS_LOCK: AtomicBool = AtomicBool::new(false);
+static EXTENDED: AtomicBool = AtomicBool::new(false);
+
+// Special key codes (escape sequences sent as ESC [ X)
+const KEY_UP: u8 = 0x80;
+const KEY_DOWN: u8 = 0x81;
+const KEY_LEFT: u8 = 0x82;
+const KEY_RIGHT: u8 = 0x83;
+const KEY_HOME: u8 = 0x84;
+const KEY_END: u8 = 0x85;
+const KEY_PGUP: u8 = 0x86;
+const KEY_PGDN: u8 = 0x87;
+const KEY_DEL: u8 = 0x88;
+const KEY_INSERT: u8 = 0x89;
 
 /// Initialize PS/2 keyboard controller.
 /// Safe on systems without PS/2 (returns silently).
@@ -49,40 +62,55 @@ pub fn init() {
 #[allow(dead_code)]
 /// Check if a key is available (IRQ buffer or polled port 0x60).
 pub fn has_key() -> bool {
-    // SAFETY: single-core, IRQ handler is the only writer
-    unsafe {
-        if BUF_HEAD != BUF_TAIL { return true; }
-            // Check xHCI USB keyboard
-        crate::xhci::is_available()
+    if BUF_HEAD.load(Ordering::Relaxed) != BUF_TAIL.load(Ordering::Relaxed) {
+        return true;
     }
+    crate::xhci::is_available()
 }
 
-/// Read next key from buffer. Falls back to polling port 0x60.
+/// Read next key from buffer. Falls back to xHCI USB keyboard.
 pub fn read_key() -> Option<u8> {
-    unsafe {
-        // First check IRQ-driven buffer
-        if BUF_HEAD != BUF_TAIL {
-            let key = KEY_BUF[BUF_TAIL];
-            BUF_TAIL = (BUF_TAIL + 1) % BUF_SIZE;
-            return Some(key);
-        }
-        // xHCI USB keyboard (real driver, no legacy emulation needed)
-        if let Some(k) = crate::xhci::poll_keyboard() {
-            return Some(k);
-        }
-        None
+    let head = BUF_HEAD.load(Ordering::Acquire);
+    let tail = BUF_TAIL.load(Ordering::Acquire);
+    if head != tail {
+        // SAFETY: single consumer (main loop), IRQ only writes via push_key
+        let key = unsafe { KEY_BUF[tail] };
+        BUF_TAIL.store((tail + 1) % BUF_SIZE, Ordering::Release);
+        return Some(key);
     }
+    // xHCI USB keyboard (real driver, no legacy emulation needed)
+    crate::xhci::poll_keyboard()
 }
 
 fn push_key(key: u8) {
-    unsafe {
-        let next = (BUF_HEAD + 1) % BUF_SIZE;
-        if next != BUF_TAIL {
-            KEY_BUF[BUF_HEAD] = key;
-            BUF_HEAD = next;
-        }
-        // Drop key if buffer full
+    let head = BUF_HEAD.load(Ordering::Relaxed);
+    let next = (head + 1) % BUF_SIZE;
+    if next != BUF_TAIL.load(Ordering::Relaxed) {
+        // SAFETY: single producer (IRQ handler), consumer only reads via read_key
+        unsafe { KEY_BUF[head] = key; }
+        BUF_HEAD.store(next, Ordering::Release);
     }
+    // Drop key if buffer full
+}
+
+/// Push an arrow key as ANSI escape sequence: ESC [ A/B/C/D
+fn push_arrow(code: u8) {
+    let ch = match code {
+        KEY_UP => b'A',
+        KEY_DOWN => b'B',
+        KEY_RIGHT => b'C',
+        KEY_LEFT => b'D',
+        KEY_HOME => b'H',
+        KEY_END => b'F',
+        KEY_DEL => b'3', // ESC [ 3 ~
+        KEY_PGUP => b'5',
+        KEY_PGDN => b'6',
+        KEY_INSERT => b'2',
+        _ => return,
+    };
+    push_key(0x1B); // ESC
+    push_key(b'[');
+    push_key(ch);
 }
 
 fn wait_write() {
@@ -93,13 +121,43 @@ fn wait_write() {
     }
 }
 
-/// Decode a raw scancode into an ASCII character (handles modifiers).
+/// Decode a raw scancode into an ASCII character (handles modifiers + extended).
 fn decode_scancode(scancode: u8) -> Option<u8> {
-    if scancode == 0xE0 { return None; }
+    // Extended prefix: set flag, wait for next scancode
+    if scancode == 0xE0 {
+        EXTENDED.store(true, Ordering::Relaxed);
+        return None;
+    }
+
+    let is_extended = EXTENDED.load(Ordering::Relaxed);
+    if is_extended {
+        EXTENDED.store(false, Ordering::Relaxed);
+    }
 
     let released = scancode & 0x80 != 0;
     let code = scancode & 0x7F;
 
+    // Handle extended scancodes (arrow keys, Home, End, etc.)
+    if is_extended {
+        if released { return None; }
+        match code {
+            0x48 => { push_arrow(KEY_UP); return None; }
+            0x50 => { push_arrow(KEY_DOWN); return None; }
+            0x4B => { push_arrow(KEY_LEFT); return None; }
+            0x4D => { push_arrow(KEY_RIGHT); return None; }
+            0x47 => { push_arrow(KEY_HOME); return None; }
+            0x4F => { push_arrow(KEY_END); return None; }
+            0x49 => { push_arrow(KEY_PGUP); return None; }
+            0x51 => { push_arrow(KEY_PGDN); return None; }
+            0x53 => { push_arrow(KEY_DEL); return None; }
+            0x52 => { push_arrow(KEY_INSERT); return None; }
+            0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; } // Right Ctrl
+            0x5B | 0x5C => { return None; } // Super/Meta (left/right) — no ASCII
+            _ => return None,
+        }
+    }
+
+    // Normal scancodes
     match code {
         0x2A | 0x36 => { SHIFT.store(!released, Ordering::Relaxed); return None; }
         0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; }
@@ -119,7 +177,7 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
     let ctrl = CTRL.load(Ordering::Relaxed);
     let caps = CAPS_LOCK.load(Ordering::Relaxed);
 
-    if ctrl && code == 0x2E { return Some(0x03); }
+    if ctrl && code == 0x2E { return Some(0x03); } // Ctrl+C
 
     let layout = crate::config::get("keyboard");
     match layout.as_deref() {
@@ -138,7 +196,6 @@ pub fn irq_handler() {
 
 /// Scancode Set 1 → ASCII (US layout)
 fn scancode_to_char_us(code: u8, shift: bool, caps: bool) -> Option<u8> {
-    // Base (unshifted) mapping for Scancode Set 1
     #[rustfmt::skip]
     const NORMAL: [u8; 58] = [
         0,   0x1B, b'1', b'2', b'3', b'4', b'5', b'6',  // 0x00-0x07
@@ -165,21 +222,11 @@ fn scancode_to_char_us(code: u8, shift: bool, caps: bool) -> Option<u8> {
 
     if code as usize >= NORMAL.len() { return None; }
 
-    let ch = if shift {
-        SHIFTED[code as usize]
-    } else {
-        NORMAL[code as usize]
-    };
-
+    let ch = if shift { SHIFTED[code as usize] } else { NORMAL[code as usize] };
     if ch == 0 { return None; }
 
-    // Caps lock: toggle case for letters only
-    if caps && !shift && ch >= b'a' && ch <= b'z' {
-        return Some(ch - 32);
-    }
-    if caps && shift && ch >= b'A' && ch <= b'Z' {
-        return Some(ch + 32);
-    }
+    if caps && !shift && ch >= b'a' && ch <= b'z' { return Some(ch - 32); }
+    if caps && shift && ch >= b'A' && ch <= b'Z' { return Some(ch + 32); }
 
     Some(ch)
 }
@@ -212,20 +259,11 @@ fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<u8> {
 
     if code as usize >= NORMAL.len() { return None; }
 
-    let ch = if shift {
-        SHIFTED[code as usize]
-    } else {
-        NORMAL[code as usize]
-    };
-
+    let ch = if shift { SHIFTED[code as usize] } else { NORMAL[code as usize] };
     if ch == 0 { return None; }
 
-    if caps && !shift && ch >= b'a' && ch <= b'z' {
-        return Some(ch - 32);
-    }
-    if caps && shift && ch >= b'A' && ch <= b'Z' {
-        return Some(ch + 32);
-    }
+    if caps && !shift && ch >= b'a' && ch <= b'z' { return Some(ch - 32); }
+    if caps && shift && ch >= b'A' && ch <= b'Z' { return Some(ch + 32); }
 
     Some(ch)
 }

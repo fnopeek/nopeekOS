@@ -10,7 +10,7 @@ use crate::kprintln;
 
 pub const PAGE_SIZE: usize = 4096;
 
-const MAX_MEMORY: usize = 1024 * 1024 * 1024; // 1GB (identity-mapped range)
+const MAX_MEMORY: usize = 64 * 1024 * 1024 * 1024; // 64GB (identity-mapped via 1GB huge pages)
 const MAX_FRAMES: usize = MAX_MEMORY / PAGE_SIZE;
 const BITMAP_SIZE: usize = MAX_FRAMES / 8; // 32KB
 

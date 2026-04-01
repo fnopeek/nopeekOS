@@ -50,9 +50,16 @@ features = ["ecdsa"]
 [dependencies.p384]
 version = "0.13"
 default-features = false
-features = ["ecdsa"]
+features = ["ecdsa", "ecdh"]
 
 [dependencies.ecdsa]
 version = "0.16"
 default-features = false
 features = ["verifying"]
+
+# AES-GCM for TLS 1.3 (TLS_AES_128_GCM_SHA256 + TLS_AES_256_GCM_SHA384)
+# Uses cpufeatures for AES-NI runtime detection (N100 has AES-NI)
+[dependencies.aes-gcm]
+version = "0.10"
+default-features = false
+features = ["aes", "alloc"]
