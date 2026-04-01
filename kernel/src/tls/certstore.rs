@@ -177,13 +177,12 @@ fn ecdsa_p384_verify_sha384(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool
     vk.verify_prehash(&digest, &sig).is_ok()
 }
 
-/// Verify an ECDSA P-384 signature over a SHA-384 prehash.
+/// Verify an ECDSA P-384 signature over raw data (hashes internally with SHA-384).
 /// pubkey: 97-byte uncompressed SEC1 point.
-/// prehash: 48-byte SHA-384 digest.
+/// data: the raw data that was signed.
 /// signature: DER-encoded ECDSA signature.
-pub fn verify_p384_prehash384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u8]) -> bool {
-    use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
-    use p384::ecdsa::signature::hazmat::PrehashVerifier;
+pub fn verify_p384_sha384(pubkey: &[u8], data: &[u8], signature: &[u8]) -> bool {
+    use p384::ecdsa::{VerifyingKey, Signature as P384Sig, signature::Verifier};
     use p384::EncodedPoint;
 
     let point = match EncodedPoint::from_bytes(pubkey) {
@@ -198,7 +197,8 @@ pub fn verify_p384_prehash384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u8
         Ok(s) => s,
         Err(_) => return false,
     };
-    vk.verify_prehash(prehash, &sig).is_ok()
+    // Verifier trait hashes data internally with SHA-384, then verifies
+    vk.verify(data, &sig).is_ok()
 }
 
 /// Verify an ECDSA P-384 signature over a prehashed message (SHA-256).
