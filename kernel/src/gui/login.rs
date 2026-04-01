@@ -24,8 +24,8 @@ struct Layout {
 
 impl Layout {
     fn compute(sw: u32, sh: u32, scale: u32) -> Self {
-        let input_w = 200 * scale;
-        let input_h = 50 * scale;
+        let input_w = 300 * scale;
+        let input_h = 40 * scale;
         let input_x = (sw.saturating_sub(input_w)) / 2;
 
         // Center vertically with clock above, input in middle
@@ -93,10 +93,10 @@ fn clear_greeting_area(shadow: *mut u8, info: &FbInfo, l: &Layout) {
 
 /// Draw the input field (light background, dark outline, rounded).
 fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
-    let radius = l.input_h / 2; // Fully rounded ends (pill shape)
-    let outline = 3 * l.scale;
+    let radius = 12 * l.scale; // Moderate rounding (not full pill)
+    let outline = 2 * l.scale;
 
-    // Outer border (dark gray)
+    // Outer border
     let border_color = if focused { Theme::BORDER_FOCUS } else { Theme::INPUT_OUTER };
     render::fill_rounded_rect_aa(shadow, info,
         l.input_x, l.input_y, l.input_w, l.input_h,
@@ -106,43 +106,47 @@ fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
     render::fill_rounded_rect_aa(shadow, info,
         l.input_x + outline, l.input_y + outline,
         l.input_w - 2 * outline, l.input_h - 2 * outline,
-        Theme::INPUT_INNER, radius - outline);
+        Theme::INPUT_INNER, radius.saturating_sub(outline));
 }
 
 /// Draw passphrase dots centered inside the input field.
 fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
-    let outline = 3 * l.scale;
+    let outline = 2 * l.scale;
+    let radius = 12 * l.scale;
 
     // Clear input interior (redraw inner fill)
-    let radius = l.input_h / 2;
     render::fill_rounded_rect_aa(shadow, info,
         l.input_x + outline, l.input_y + outline,
         l.input_w - 2 * outline, l.input_h - 2 * outline,
-        Theme::INPUT_INNER, radius - outline);
+        Theme::INPUT_INNER, radius.saturating_sub(outline));
 
     if count == 0 { return; }
 
-    // Dot sizing (matching hyprlock: dots_size=0.33, dots_spacing=0.15)
-    let dot_r = (l.input_h * 33 / 200).max(2 * l.scale); // 33% of half-height
-    let dot_spacing = (l.input_h * 15 / 100).max(2 * l.scale); // 15% of height
+    // Small dots: radius = 3px at 1080p, 6px at 4K
+    let dot_r = 3 * l.scale;
+    let dot_gap = 6 * l.scale; // gap between dots
     let dot_diameter = dot_r * 2;
-    let total_w = count as u32 * dot_diameter + (count as u32 - 1) * dot_spacing;
+    let total_w = count as u32 * dot_diameter + count.saturating_sub(1) as u32 * dot_gap;
+
+    // Clamp: don't let dots exceed field width
+    let usable_w = l.input_w - 2 * (outline + radius / 2);
+    let max_visible = (usable_w + dot_gap) / (dot_diameter + dot_gap);
+    let visible = (count as u32).min(max_visible);
 
     // Center dots horizontally in input field
-    let start_x = l.input_x + (l.input_w.saturating_sub(total_w)) / 2;
+    let vis_w = visible * dot_diameter + visible.saturating_sub(1) * dot_gap;
+    let start_x = l.input_x + (l.input_w.saturating_sub(vis_w)) / 2;
     let center_y = l.input_y + l.input_h / 2;
 
-    for i in 0..count {
-        let cx = start_x + i as u32 * (dot_diameter + dot_spacing) + dot_r;
-        if cx + dot_r >= l.input_x + l.input_w - outline { break; }
-        // Draw filled circle (anti-aliased dot)
+    for i in 0..visible as usize {
+        let cx = start_x + i as u32 * (dot_diameter + dot_gap) + dot_r;
+        // Draw filled circle
         let r2 = (dot_r * dot_r) as i32;
-        for dy in 0..dot_r * 2 + 2 {
-            for dx in 0..dot_r * 2 + 2 {
+        for dy in 0..dot_r * 2 {
+            for dx in 0..dot_r * 2 {
                 let ddx = dx as i32 - dot_r as i32;
                 let ddy = dy as i32 - dot_r as i32;
-                let dist = ddx * ddx + ddy * ddy;
-                if dist <= r2 {
+                if ddx * ddx + ddy * ddy <= r2 {
                     render::put_pixel(shadow, info,
                         cx - dot_r + dx, center_y - dot_r + dy,
                         Theme::INPUT_DOT);
@@ -154,17 +158,17 @@ fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
 
 /// Draw or hide the blinking cursor.
 fn draw_cursor(shadow: *mut u8, info: &FbInfo, l: &Layout, pos: usize, visible: bool) {
-    let dot_r = (l.input_h * 33 / 200).max(2 * l.scale);
-    let dot_spacing = (l.input_h * 15 / 100).max(2 * l.scale);
+    let dot_r = 3 * l.scale;
+    let dot_gap = 6 * l.scale;
     let dot_diameter = dot_r * 2;
 
     // Cursor position: after last dot (or center if empty)
     let cursor_x = if pos == 0 {
         l.input_x + l.input_w / 2
     } else {
-        let total_w = pos as u32 * dot_diameter + (pos as u32 - 1) * dot_spacing;
-        let start_x = l.input_x + (l.input_w.saturating_sub(total_w)) / 2;
-        start_x + pos as u32 * (dot_diameter + dot_spacing) + 2 * l.scale
+        let vis_w = pos as u32 * dot_diameter + pos.saturating_sub(1) as u32 * dot_gap;
+        let start_x = l.input_x + (l.input_w.saturating_sub(vis_w)) / 2;
+        start_x + pos as u32 * (dot_diameter + dot_gap) + l.scale
     };
     let cursor_y = l.input_y + l.input_h / 4;
     let cursor_w = 2 * l.scale;
