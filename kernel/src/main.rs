@@ -204,6 +204,20 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
             if npkfs::mount().is_ok() {
                 mounted = true;
                 vga::show_status(b"npkFS mounted");
+            } else if blkdev::is_available() {
+                // No existing npkFS: format and mount
+                kprintln!("[npk] npkfs: not found, formatting...");
+                match npkfs::mkfs() {
+                    Ok(()) => {
+                        if npkfs::mount().is_ok() {
+                            mounted = true;
+                            vga::show_status(b"npkFS formatted");
+                        } else {
+                            kprintln!("[npk] npkfs: mount after format failed");
+                        }
+                    }
+                    Err(e) => kprintln!("[npk] npkfs: format failed: {}", e),
+                }
             }
         }
     }

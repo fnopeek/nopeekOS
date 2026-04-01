@@ -44,6 +44,7 @@ const ADM_CREATE_IO_SQ: u8 = 0x01;
 // NVM opcodes
 const NVM_READ: u8 = 0x02;
 const NVM_WRITE: u8 = 0x01;
+const NVM_DSM: u8 = 0x09;   // Dataset Management (TRIM/Deallocate)
 
 // Queue sizes (entries)
 const ADMIN_QUEUE_SIZE: u16 = 16;
@@ -117,6 +118,7 @@ struct NvmeState {
     total_lbas: u64,            // Total logical blocks (512-byte sectors)
     model: [u8; 40],
     serial: [u8; 20],
+    oncs: u16,                  // Optional NVM Command Support (from Identify Controller)
     command_id: u16,
 }
 
@@ -246,7 +248,7 @@ pub fn init() -> bool {
     // Map BAR0 pages (NVMe registers are typically 16KB-64KB)
     // Map 64KB to be safe (covers registers + doorbells)
     let map_size = 64 * 1024u64;
-    let bar0_virt = bar0_phys; // Identity-map if in first 1GB, else we need a higher VA
+    let bar0_virt = bar0_phys; // Identity-mapped (64GB range covers all PCIe BARs)
     for offset in (0..map_size).step_by(4096) {
         let paddr = bar0_phys + offset;
         let vaddr = bar0_virt + offset;
@@ -332,6 +334,7 @@ pub fn init() -> bool {
         total_lbas: 0,
         model: [0; 40],
         serial: [0; 20],
+        oncs: 0,
         command_id: 1,
     };
 
@@ -362,9 +365,17 @@ pub fn init() -> bool {
         core::ptr::copy_nonoverlapping(buf.add(24), state.model.as_mut_ptr(), 40);
     }
 
+    // ONCS (Optional NVM Command Support) at offset 256 (2 bytes)
+    // Bit 2 = Dataset Management (TRIM/Deallocate)
+    unsafe {
+        state.oncs = core::ptr::read_volatile(buf.add(256) as *const u16);
+    }
+
     let model_str = core::str::from_utf8(&state.model).unwrap_or("?").trim();
     let serial_str = core::str::from_utf8(&state.serial).unwrap_or("?").trim();
-    kprintln!("[npk] nvme: {} (SN: {})", model_str, serial_str);
+    let has_trim = state.oncs & (1 << 2) != 0;
+    kprintln!("[npk] nvme: {} (SN: {}), TRIM={}", model_str, serial_str,
+        if has_trim { "yes" } else { "no" });
 
     // Identify Namespace 1 (CNS=0, NSID=1)
     unsafe { core::ptr::write_bytes(identify_buf as *mut u8, 0, 4096); }
@@ -546,8 +557,56 @@ pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
 }
 
 pub fn has_discard() -> bool {
-    // TODO: Check ONCS field from Identify Controller
-    false
+    match NVME.lock().as_ref() {
+        Some(state) => state.oncs & (1 << 2) != 0, // ONCS bit 2 = Dataset Management
+        None => false,
+    }
+}
+
+/// TRIM/Deallocate blocks via NVMe Dataset Management command.
+/// start = block number (4KB blocks), count = number of blocks.
+pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
+    if count == 0 { return Ok(()); }
+
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+
+    if state.oncs & (1 << 2) == 0 {
+        return Ok(()); // No DSM support, silent no-op (same as virtio)
+    }
+
+    let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
+
+    // Build Dataset Management Range entry (16 bytes)
+    // Offset 0: Context Attributes (4 bytes) — unused for deallocate
+    // Offset 4: Length in LBAs (4 bytes)
+    // Offset 8: Starting LBA (8 bytes)
+    let start_lba = start * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+    let lba_count = count * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+
+    // SAFETY: DMA buffer is a valid, identity-mapped 4KB page
+    unsafe {
+        let range = dma as *mut u8;
+        core::ptr::write_bytes(range, 0, 16);
+        // Length in LBAs at offset 4
+        core::ptr::copy_nonoverlapping(
+            &(lba_count as u32).to_le_bytes() as *const u8,
+            range.add(4), 4);
+        // Starting LBA at offset 8
+        core::ptr::copy_nonoverlapping(
+            &start_lba.to_le_bytes() as *const u8,
+            range.add(8), 8);
+    }
+
+    let mut cmd = SqEntry::zeroed();
+    cmd.opcode = NVM_DSM;
+    cmd.nsid = 1;
+    cmd.prp1 = dma;
+    cmd.cdw10 = 0;         // Number of ranges - 1 (0 = 1 range)
+    cmd.cdw11 = 1 << 2;   // AD (Attribute Deallocate) bit
+
+    io_command(state, cmd)?;
+    Ok(())
 }
 
 /// Return model name for display.

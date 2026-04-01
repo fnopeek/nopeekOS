@@ -16,6 +16,7 @@ pub struct Bitmap {
     free_count: u64,
     dirty: bool,
     trim_pending: Vec<(u64, u64)>,
+    alloc_cursor: u64, // Next-fit: start searching here
 }
 
 impl Bitmap {
@@ -43,6 +44,7 @@ impl Bitmap {
             free_count,
             dirty: false,
             trim_pending: Vec::new(),
+            alloc_cursor: sb.data_start,
         })
     }
 
@@ -62,19 +64,35 @@ impl Bitmap {
             data, bitmap_start, bitmap_count, data_start,
             total_blocks, free_count, dirty: true,
             trim_pending: Vec::new(),
+            alloc_cursor: data_start,
         }
     }
 
     pub fn free_count(&self) -> u64 { self.free_count }
 
     /// Allocate `count` contiguous blocks. Returns start block.
+    /// Uses next-fit: starts searching from last allocation point (amortized O(1)).
     pub fn alloc(&mut self, count: u64) -> Result<u64, FsError> {
         if count == 0 || count > self.free_count { return Err(FsError::DiskFull); }
 
-        let mut run_start = self.data_start;
+        // Search from cursor to end, then wrap around to data_start
+        if let Some(block) = self.find_run(self.alloc_cursor, self.total_blocks, count) {
+            return Ok(block);
+        }
+        // Wrap around
+        if self.alloc_cursor > self.data_start {
+            if let Some(block) = self.find_run(self.data_start, self.alloc_cursor, count) {
+                return Ok(block);
+            }
+        }
+        Err(FsError::DiskFull)
+    }
+
+    fn find_run(&mut self, from: u64, to: u64, count: u64) -> Option<u64> {
+        let mut run_start = from;
         let mut run_len = 0u64;
 
-        for b in self.data_start..self.total_blocks {
+        for b in from..to {
             if is_free(&self.data, b) {
                 if run_len == 0 { run_start = b; }
                 run_len += 1;
@@ -84,13 +102,17 @@ impl Bitmap {
                     }
                     self.free_count -= count;
                     self.dirty = true;
-                    return Ok(run_start);
+                    self.alloc_cursor = run_start + count;
+                    if self.alloc_cursor >= self.total_blocks {
+                        self.alloc_cursor = self.data_start;
+                    }
+                    return Some(run_start);
                 }
             } else {
                 run_len = 0;
             }
         }
-        Err(FsError::DiskFull)
+        None
     }
 
     /// Free a range of blocks. Queues TRIM for later.
@@ -136,7 +158,9 @@ impl Bitmap {
             merged.push((start, count));
         }
         for (start, count) in &merged {
-            let _ = crate::blkdev::discard_blocks(*start, *count);
+            if let Err(e) = crate::blkdev::discard_blocks(*start, *count) {
+                crate::kprintln!("[npk] TRIM failed at block {}: {}", start, e);
+            }
         }
         self.trim_pending.clear();
     }

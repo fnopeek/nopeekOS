@@ -136,8 +136,12 @@ pub fn init() {
     let (huge_pages, small_pages) = count_mappings(pml4);
     let mapped_mb = huge_pages * 2 + (small_pages * 4) / 1024;
 
-    kprintln!("[npk] Paging: {} MB mapped ({} x 2MB), NX enabled",
-        mapped_mb, huge_pages);
+    let mapped_gb = mapped_mb / 1024;
+    if mapped_gb > 0 {
+        kprintln!("[npk] Paging: {} GB identity-mapped, NX enabled", mapped_gb);
+    } else {
+        kprintln!("[npk] Paging: {} MB mapped, NX enabled", mapped_mb);
+    }
 }
 
 /// Map a 4KB virtual page to a physical frame
@@ -153,9 +157,9 @@ pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingEr
         let pdpt = get_or_create(pml4, pml4_index(vaddr))?;
         let pdpt_entry = read_entry(pdpt, pdpt_index(vaddr));
 
-        // Check for 1GB huge page
+        // 1GB huge page already covers this address — already mapped
         if pdpt_entry & PageFlags::PRESENT.bits() != 0 && pdpt_entry & PageFlags::HUGE.bits() != 0 {
-            return Err(PagingError::HugePageConflict);
+            return Err(PagingError::AlreadyMapped);
         }
 
         let pdt = get_or_create(pdpt, pdpt_index(vaddr))?;

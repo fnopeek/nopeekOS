@@ -1,7 +1,8 @@
 //! TLS 1.3 (RFC 8446)
 //!
 //! Minimal implementation for HTTPS client connections.
-//! Single cipher suite: TLS_CHACHA20_POLY1305_SHA256 (0x1303)
+//! Cipher suites: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+//!                TLS_CHACHA20_POLY1305_SHA256
 
 pub mod sha256;
 pub mod hmac;
@@ -33,9 +34,6 @@ const HT_CERTIFICATE: u8 = 0x0B;
 const HT_CERTIFICATE_VERIFY: u8 = 0x0F;
 const HT_FINISHED: u8 = 0x14;
 
-// Cipher suite: TLS_CHACHA20_POLY1305_SHA256
-const CIPHER_SUITE: [u8; 2] = [0x13, 0x03];
-
 // Extension types
 const EXT_SERVER_NAME: u16 = 0x0000;
 const EXT_SUPPORTED_VERSIONS: u16 = 0x002B;
@@ -43,20 +41,302 @@ const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_SUPPORTED_GROUPS: u16 = 0x000A;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000D;
 
-// Named group: x25519
+// Named groups
+const GROUP_SECP384R1: u16 = 0x0018;
 const GROUP_X25519: u16 = 0x001D;
+
+enum ServerKeyShare {
+    X25519([u8; 32]),
+    Secp384r1(Vec<u8>), // 97 bytes uncompressed point
+}
 
 // Max TLS record payload
 const MAX_RECORD_PAYLOAD: usize = 16384 + 256; // 16KB + overhead
 
+// ============================================================
+// Cipher Suite
+// ============================================================
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum CipherSuite {
+    Aes128Gcm,         // TLS_AES_128_GCM_SHA256 (0x1301)
+    Aes256Gcm,         // TLS_AES_256_GCM_SHA384 (0x1302)
+    Chacha20Poly1305,  // TLS_CHACHA20_POLY1305_SHA256 (0x1303)
+}
+
+impl CipherSuite {
+    fn key_len(self) -> usize {
+        match self {
+            CipherSuite::Aes128Gcm => 16,
+            _ => 32,
+        }
+    }
+
+    fn hash_len(self) -> usize {
+        match self {
+            CipherSuite::Aes256Gcm => 48,
+            _ => 32,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            CipherSuite::Aes128Gcm => "AES-128-GCM",
+            CipherSuite::Aes256Gcm => "AES-256-GCM",
+            CipherSuite::Chacha20Poly1305 => "ChaCha20-Poly1305",
+        }
+    }
+}
+
+// ============================================================
+// Transcript Hash (SHA-256 or SHA-384 depending on cipher suite)
+// ============================================================
+
+#[derive(Clone)]
+enum TranscriptHash {
+    S256(Sha256),
+    S384(sha256::Sha384),
+}
+
+impl TranscriptHash {
+    fn new(cs: CipherSuite) -> Self {
+        match cs {
+            CipherSuite::Aes256Gcm => TranscriptHash::S384(sha256::Sha384::new()),
+            _ => TranscriptHash::S256(Sha256::new()),
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            TranscriptHash::S256(h) => h.update(data),
+            TranscriptHash::S384(h) => h.update(data),
+        }
+    }
+
+    fn finalize(self) -> Vec<u8> {
+        match self {
+            TranscriptHash::S256(h) => h.finalize().to_vec(),
+            TranscriptHash::S384(h) => h.finalize().to_vec(),
+        }
+    }
+}
+
+// ============================================================
+// AEAD dispatch (ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM)
+// ============================================================
+
+fn tls_aead_encrypt(cs: CipherSuite, key: &[u8], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    match cs {
+        CipherSuite::Chacha20Poly1305 => {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(key);
+            crypto::aead_encrypt_aad(&k, nonce, aad, plaintext)
+        }
+        CipherSuite::Aes128Gcm => {
+            use aes_gcm::{Aes128Gcm, Nonce};
+            use aes_gcm::aead::{Aead, KeyInit, Payload};
+            let cipher = Aes128Gcm::new_from_slice(key).expect("AES-128 key");
+            cipher.encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+                .expect("AES-128-GCM encrypt")
+        }
+        CipherSuite::Aes256Gcm => {
+            use aes_gcm::{Aes256Gcm, Nonce};
+            use aes_gcm::aead::{Aead, KeyInit, Payload};
+            let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key");
+            cipher.encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+                .expect("AES-256-GCM encrypt")
+        }
+    }
+}
+
+fn tls_aead_decrypt(cs: CipherSuite, key: &[u8], nonce: &[u8; 12], aad: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+    match cs {
+        CipherSuite::Chacha20Poly1305 => {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(key);
+            crypto::aead_decrypt_aad(&k, nonce, aad, ciphertext)
+        }
+        CipherSuite::Aes128Gcm => {
+            use aes_gcm::{Aes128Gcm, Nonce};
+            use aes_gcm::aead::{Aead, KeyInit, Payload};
+            let cipher = Aes128Gcm::new_from_slice(key).ok()?;
+            cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad }).ok()
+        }
+        CipherSuite::Aes256Gcm => {
+            use aes_gcm::{Aes256Gcm, Nonce};
+            use aes_gcm::aead::{Aead, KeyInit, Payload};
+            let cipher = Aes256Gcm::new_from_slice(key).ok()?;
+            cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad }).ok()
+        }
+    }
+}
+
+// ============================================================
+// Key Schedule dispatch (SHA-256 or SHA-384)
+// ============================================================
+
+fn ks_empty_hash(cs: CipherSuite) -> Vec<u8> {
+    match cs {
+        CipherSuite::Aes256Gcm => sha256::sha384(&[]).to_vec(),
+        _ => sha256::sha256(&[]).to_vec(),
+    }
+}
+
+fn ks_extract(cs: CipherSuite, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
+    match cs {
+        CipherSuite::Aes256Gcm => hmac::hkdf_extract_384(salt, ikm).to_vec(),
+        _ => hmac::hkdf_extract(salt, ikm).to_vec(),
+    }
+}
+
+fn ks_derive_secret(cs: CipherSuite, secret: &[u8], label: &[u8], hash: &[u8]) -> Vec<u8> {
+    match cs {
+        CipherSuite::Aes256Gcm => {
+            let mut s = [0u8; 48];
+            s.copy_from_slice(secret);
+            let mut h = [0u8; 48];
+            h.copy_from_slice(hash);
+            hmac::derive_secret_384(&s, label, &h).to_vec()
+        }
+        _ => {
+            let mut s = [0u8; 32];
+            s.copy_from_slice(secret);
+            let mut h = [0u8; 32];
+            h.copy_from_slice(hash);
+            hmac::derive_secret(&s, label, &h).to_vec()
+        }
+    }
+}
+
+fn ks_expand_key(cs: CipherSuite, secret: &[u8]) -> Vec<u8> {
+    let len = cs.key_len();
+    match cs {
+        CipherSuite::Aes256Gcm => {
+            let mut s = [0u8; 48];
+            s.copy_from_slice(secret);
+            hmac::hkdf_expand_label_384(&s, b"key", &[], len)
+        }
+        _ => {
+            let mut s = [0u8; 32];
+            s.copy_from_slice(secret);
+            hmac::hkdf_expand_label(&s, b"key", &[], len)
+        }
+    }
+}
+
+fn ks_expand_iv(cs: CipherSuite, secret: &[u8]) -> [u8; 12] {
+    let expanded = match cs {
+        CipherSuite::Aes256Gcm => {
+            let mut s = [0u8; 48];
+            s.copy_from_slice(secret);
+            hmac::hkdf_expand_label_384(&s, b"iv", &[], 12)
+        }
+        _ => {
+            let mut s = [0u8; 32];
+            s.copy_from_slice(secret);
+            hmac::hkdf_expand_label(&s, b"iv", &[], 12)
+        }
+    };
+    let mut iv = [0u8; 12];
+    iv.copy_from_slice(&expanded);
+    iv
+}
+
+fn ks_finished_key(cs: CipherSuite, secret: &[u8]) -> Vec<u8> {
+    let len = cs.hash_len();
+    match cs {
+        CipherSuite::Aes256Gcm => {
+            let mut s = [0u8; 48];
+            s.copy_from_slice(secret);
+            hmac::hkdf_expand_label_384(&s, b"finished", &[], len)
+        }
+        _ => {
+            let mut s = [0u8; 32];
+            s.copy_from_slice(secret);
+            hmac::hkdf_expand_label(&s, b"finished", &[], len)
+        }
+    }
+}
+
+fn ks_hmac(cs: CipherSuite, key: &[u8], msg: &[u8]) -> Vec<u8> {
+    match cs {
+        CipherSuite::Aes256Gcm => hmac::hmac_sha384(key, msg).to_vec(),
+        _ => hmac::hmac_sha256(key, msg).to_vec(),
+    }
+}
+
+// ============================================================
+// P-384 ECDH Key Exchange
+// ============================================================
+
+struct P384KeyPair {
+    secret: p384::SecretKey,
+    public_uncompressed: [u8; 97], // 0x04 || x(48) || y(48)
+}
+
+fn p384_keygen() -> P384KeyPair {
+    // Generate 48 random bytes from CSPRNG
+    let r1 = csprng::random_256();
+    let r2 = csprng::random_256();
+    let mut key_bytes = [0u8; 48];
+    key_bytes[..32].copy_from_slice(&r1);
+    key_bytes[32..].copy_from_slice(&r2[..16]);
+
+    // Retry if invalid (zero or >= curve order)
+    let secret = loop {
+        if let Ok(sk) = p384::SecretKey::from_slice(&key_bytes) {
+            break sk;
+        }
+        // Reseed and retry (extremely unlikely)
+        let r = csprng::random_256();
+        key_bytes[..32].copy_from_slice(&r);
+    };
+
+    // Compute public key (uncompressed point)
+    use p384::elliptic_curve::sec1::ToEncodedPoint;
+    let pub_point = secret.public_key().to_encoded_point(false);
+    let pub_bytes = pub_point.as_bytes();
+    let mut public_uncompressed = [0u8; 97];
+    public_uncompressed.copy_from_slice(&pub_bytes[..97]);
+
+    P384KeyPair { secret, public_uncompressed }
+}
+
+fn p384_ecdh(secret: &p384::SecretKey, server_pub_bytes: &[u8]) -> Result<Vec<u8>, TlsError> {
+    use p384::elliptic_curve::sec1::FromEncodedPoint;
+
+    let server_point = p384::EncodedPoint::from_bytes(server_pub_bytes)
+        .map_err(|_| TlsError::HandshakeFailed("invalid P-384 point"))?;
+    let server_pk: Option<p384::PublicKey> = p384::PublicKey::from_encoded_point(&server_point).into();
+    let server_pk = server_pk
+        .ok_or(TlsError::HandshakeFailed("P-384 point not on curve"))?;
+
+    let shared = p384::ecdh::diffie_hellman(
+        secret.to_nonzero_scalar(),
+        server_pk.as_affine(),
+    );
+    Ok(shared.raw_secret_bytes().to_vec())
+}
+
+// ============================================================
+// TLS Session
+// ============================================================
+
 pub struct TlsSession {
     tcp_handle: usize,
-    client_app_key: [u8; 32],
+    cipher: CipherSuite,
+    client_app_key: [u8; 32], // first cipher.key_len() bytes used
     server_app_key: [u8; 32],
     client_app_iv: [u8; 12],
     server_app_iv: [u8; 12],
     client_seq: u64,
     server_seq: u64,
+}
+
+impl TlsSession {
+    pub fn cipher_name(&self) -> &'static str {
+        self.cipher.name()
+    }
 }
 
 #[derive(Debug)]
@@ -88,48 +368,56 @@ impl From<tcp::TcpError> for TlsError {
 
 /// Establish a TLS 1.3 connection over an existing TCP handle.
 pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsError> {
-    // Generate ephemeral X25519 key pair
-    let private_key = csprng::random_256();
-    let public_key = x25519::x25519_base(&private_key);
+    // Generate ephemeral key pairs for both groups
+    let x25519_private = csprng::random_256();
+    let x25519_public = x25519::x25519_base(&x25519_private);
+    let p384_keypair = p384_keygen();
     let client_random = csprng::random_256();
 
-    // Transcript hash (running SHA-256 over all handshake messages)
-    let mut transcript = Sha256::new();
-
     // === ClientHello ===
-    let client_hello = build_client_hello(&client_random, &public_key, hostname);
-    transcript.update(&client_hello);
+    let client_hello = build_client_hello(&client_random, &x25519_public, &p384_keypair.public_uncompressed, hostname);
     send_record(tcp_handle, CT_HANDSHAKE, &client_hello)?;
 
     // === ServerHello ===
     let server_hello = recv_handshake_message(tcp_handle, HT_SERVER_HELLO)?;
+    let (server_key_share, cipher) = parse_server_hello(&server_hello)?;
+
+    // Transcript hash with correct algorithm (determined by cipher suite)
+    let mut transcript = TranscriptHash::new(cipher);
+    transcript.update(&client_hello);
     transcript.update(&server_hello);
 
-    let server_public_key = parse_server_hello(&server_hello)?;
-
     // === Derive handshake keys ===
-    let shared_secret = x25519::x25519(&private_key, &server_public_key);
+    let shared_secret = match server_key_share {
+        ServerKeyShare::X25519(server_pub) => {
+            x25519::x25519(&x25519_private, &server_pub).to_vec()
+        }
+        ServerKeyShare::Secp384r1(server_pub) => {
+            p384_ecdh(&p384_keypair.secret, &server_pub)?
+        }
+    };
 
-    let empty_hash = sha256::sha256(&[]);
-    let early_secret = hmac::hkdf_extract(&[0u8; 32], &[0u8; 32]);
-    let derived = hmac::derive_secret(&early_secret, b"derived", &empty_hash);
-    let handshake_secret = hmac::hkdf_extract(&derived, &shared_secret);
+    let empty_hash = ks_empty_hash(cipher);
+    let zero_ikm = alloc::vec![0u8; cipher.hash_len()];
+    let early_secret = ks_extract(cipher, &zero_ikm, &zero_ikm);
+    let derived = ks_derive_secret(cipher, &early_secret, b"derived", &empty_hash);
+    let handshake_secret = ks_extract(cipher, &derived, &shared_secret);
 
     // Transcript hash up to ServerHello
-    let mut transcript_clone = Sha256::new();
-    transcript_clone.update(&client_hello);
-    transcript_clone.update(&server_hello);
-    let sh_hash = transcript_clone.finalize();
+    let mut transcript_sh = TranscriptHash::new(cipher);
+    transcript_sh.update(&client_hello);
+    transcript_sh.update(&server_hello);
+    let sh_hash = transcript_sh.finalize();
 
     // Client/Server Handshake Traffic Secrets
-    let client_hs_secret = hmac::derive_secret(&handshake_secret, b"c hs traffic", &sh_hash);
-    let server_hs_secret = hmac::derive_secret(&handshake_secret, b"s hs traffic", &sh_hash);
+    let client_hs_secret = ks_derive_secret(cipher, &handshake_secret, b"c hs traffic", &sh_hash);
+    let server_hs_secret = ks_derive_secret(cipher, &handshake_secret, b"s hs traffic", &sh_hash);
 
     // Handshake keys
-    let server_hs_key = expand_to_key(&server_hs_secret);
-    let server_hs_iv = expand_to_iv(&server_hs_secret);
-    let client_hs_key = expand_to_key(&client_hs_secret);
-    let client_hs_iv = expand_to_iv(&client_hs_secret);
+    let server_hs_key = ks_expand_key(cipher, &server_hs_secret);
+    let server_hs_iv = ks_expand_iv(cipher, &server_hs_secret);
+    let client_hs_key = ks_expand_key(cipher, &client_hs_secret);
+    let client_hs_iv = ks_expand_iv(cipher, &client_hs_secret);
 
     let mut server_hs_seq: u64 = 0;
 
@@ -155,7 +443,7 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
         let nonce = build_nonce(&server_hs_iv, server_hs_seq);
         server_hs_seq += 1;
         let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
-        let plaintext = crypto::aead_decrypt_aad(&server_hs_key, &nonce, &aad, &record)
+        let plaintext = tls_aead_decrypt(cipher, &server_hs_key, &nonce, &aad, &record)
             .ok_or(TlsError::DecryptError)?;
 
         // Last byte of plaintext is the real content type
@@ -227,17 +515,18 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
         .map_err(TlsError::CertificateError)?;
 
     // === Verify Finished ===
-    // Clone transcript state before finalizing (needed for app key derivation)
     let transcript_before_sf = transcript.clone();
     let hs_hash = transcript.finalize();
 
-    let finished_key = expand_finished_key(&server_hs_secret);
-    let expected_finished = hmac::hmac_sha256(&finished_key, &hs_hash);
-    if server_finished.len() != 32 || !constant_time_eq(&server_finished, &expected_finished) {
+    let finished_key = ks_finished_key(cipher, &server_hs_secret);
+    let expected_finished = ks_hmac(cipher, &finished_key, &hs_hash);
+    if server_finished.len() != cipher.hash_len() || !constant_time_eq(&server_finished, &expected_finished) {
         return Err(TlsError::HandshakeFailed("finished verify failed"));
     }
 
     // === Send Client Finished ===
+    let hash_len = cipher.hash_len();
+
     // Client Finished verify_data uses transcript including server Finished
     let mut cf_transcript = transcript_before_sf.clone();
     let mut sf_hs_msg = Vec::new();
@@ -247,13 +536,13 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     cf_transcript.update(&sf_hs_msg);
     let cf_hash = cf_transcript.finalize();
 
-    let client_finished_key = expand_finished_key(&client_hs_secret);
-    let client_finished_data = hmac::hmac_sha256(&client_finished_key, &cf_hash);
+    let client_finished_key = ks_finished_key(cipher, &client_hs_secret);
+    let client_finished_data = ks_hmac(cipher, &client_finished_key, &cf_hash);
 
     // Build the Finished handshake message
     let mut finished_msg = Vec::new();
     finished_msg.push(HT_FINISHED);
-    finished_msg.push(0); finished_msg.push(0); finished_msg.push(32);
+    finished_msg.push(0); finished_msg.push(0); finished_msg.push(hash_len as u8);
     finished_msg.extend_from_slice(&client_finished_data);
 
     // Encrypt and send Client Finished
@@ -261,14 +550,12 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     let mut inner_with_ct = finished_msg.clone();
     inner_with_ct.push(CT_HANDSHAKE);
     let aad = build_record_aad(CT_APPLICATION_DATA, inner_with_ct.len() + 16);
-    let encrypted = crypto::aead_encrypt_aad(&client_hs_key, &client_nonce, &aad, &inner_with_ct);
+    let encrypted = tls_aead_encrypt(cipher, &client_hs_key, &client_nonce, &aad, &inner_with_ct);
     send_record(tcp_handle, CT_APPLICATION_DATA, &encrypted)?;
 
     // === Derive Application Keys ===
     // App traffic secrets use Hash(CH..SF) — transcript including server Finished
-    // Clone transcript (which is at CH..CV state), add SF, then finalize
-    let mut app_transcript = transcript_before_sf.clone();
-    // Add the server Finished message to transcript
+    let mut app_transcript = transcript_before_sf;
     let mut sf_msg = Vec::new();
     sf_msg.push(HT_FINISHED);
     sf_msg.push(0); sf_msg.push(0); sf_msg.push(server_finished.len() as u8);
@@ -276,19 +563,25 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     app_transcript.update(&sf_msg);
     let app_hash = app_transcript.finalize();
 
-    let derived2 = hmac::derive_secret(&handshake_secret, b"derived", &empty_hash);
-    let master_secret = hmac::hkdf_extract(&derived2, &[0u8; 32]);
+    let derived2 = ks_derive_secret(cipher, &handshake_secret, b"derived", &empty_hash);
+    let master_secret = ks_extract(cipher, &derived2, &zero_ikm);
 
-    let client_app_secret = hmac::derive_secret(&master_secret, b"c ap traffic", &app_hash);
-    let server_app_secret = hmac::derive_secret(&master_secret, b"s ap traffic", &app_hash);
+    let client_app_secret = ks_derive_secret(cipher, &master_secret, b"c ap traffic", &app_hash);
+    let server_app_secret = ks_derive_secret(cipher, &master_secret, b"s ap traffic", &app_hash);
 
-    let client_app_key = expand_to_key(&client_app_secret);
-    let server_app_key = expand_to_key(&server_app_secret);
-    let client_app_iv = expand_to_iv(&client_app_secret);
-    let server_app_iv = expand_to_iv(&server_app_secret);
+    let client_key_vec = ks_expand_key(cipher, &client_app_secret);
+    let server_key_vec = ks_expand_key(cipher, &server_app_secret);
+    let client_app_iv = ks_expand_iv(cipher, &client_app_secret);
+    let server_app_iv = ks_expand_iv(cipher, &server_app_secret);
+
+    let mut client_app_key = [0u8; 32];
+    client_app_key[..client_key_vec.len()].copy_from_slice(&client_key_vec);
+    let mut server_app_key = [0u8; 32];
+    server_app_key[..server_key_vec.len()].copy_from_slice(&server_key_vec);
 
     Ok(TlsSession {
         tcp_handle,
+        cipher,
         client_app_key,
         server_app_key,
         client_app_iv,
@@ -306,8 +599,9 @@ pub fn tls_send(session: &mut TlsSession, data: &[u8]) -> Result<(), TlsError> {
     let nonce = build_nonce(&session.client_app_iv, session.client_seq);
     session.client_seq += 1;
 
+    let key = &session.client_app_key[..session.cipher.key_len()];
     let aad = build_record_aad(CT_APPLICATION_DATA, inner.len() + 16);
-    let encrypted = crypto::aead_encrypt_aad(&session.client_app_key, &nonce, &aad, &inner);
+    let encrypted = tls_aead_encrypt(session.cipher, key, &nonce, &aad, &inner);
     send_record(session.tcp_handle, CT_APPLICATION_DATA, &encrypted)?;
     Ok(())
 }
@@ -326,8 +620,9 @@ pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
     let nonce = build_nonce(&session.server_app_iv, session.server_seq);
     session.server_seq += 1;
 
+    let key = &session.server_app_key[..session.cipher.key_len()];
     let aad = build_record_aad(CT_APPLICATION_DATA, record.len());
-    let plaintext = crypto::aead_decrypt_aad(&session.server_app_key, &nonce, &aad, &record)
+    let plaintext = tls_aead_decrypt(session.cipher, key, &nonce, &aad, &record)
         .ok_or(TlsError::DecryptError)?;
 
     if plaintext.is_empty() {
@@ -362,8 +657,9 @@ pub fn tls_close(session: &mut TlsSession) -> Result<(), TlsError> {
     let nonce = build_nonce(&session.client_app_iv, session.client_seq);
     session.client_seq += 1;
 
+    let key = &session.client_app_key[..session.cipher.key_len()];
     let aad = build_record_aad(CT_APPLICATION_DATA, alert.len() + 16);
-    let encrypted = crypto::aead_encrypt_aad(&session.client_app_key, &nonce, &aad, &alert);
+    let encrypted = tls_aead_encrypt(session.cipher, key, &nonce, &aad, &alert);
     let _ = send_record(session.tcp_handle, CT_APPLICATION_DATA, &encrypted);
     let _ = tcp::close(session.tcp_handle);
     Ok(())
@@ -373,7 +669,7 @@ pub fn tls_close(session: &mut TlsSession) -> Result<(), TlsError> {
 // Internal helpers
 // ============================================================
 
-fn build_client_hello(random: &[u8; 32], pubkey: &[u8; 32], hostname: &str) -> Vec<u8> {
+fn build_client_hello(random: &[u8; 32], x25519_pub: &[u8; 32], p384_pub: &[u8; 97], hostname: &str) -> Vec<u8> {
     let mut extensions = Vec::new();
 
     // SNI extension
@@ -387,20 +683,29 @@ fn build_client_hello(random: &[u8; 32], pubkey: &[u8; 32], hostname: &str) -> V
     extensions.push(TLS_VERSION_13[0]);
     extensions.push(TLS_VERSION_13[1]);
 
-    // Supported Groups: x25519
+    // Supported Groups: secp384r1 + x25519
     put_u16(&mut extensions, EXT_SUPPORTED_GROUPS);
-    put_u16(&mut extensions, 4);
-    put_u16(&mut extensions, 2);
+    put_u16(&mut extensions, 6); // 2 groups x 2 bytes + list_len(2)
+    put_u16(&mut extensions, 4); // list length
+    put_u16(&mut extensions, GROUP_SECP384R1);
     put_u16(&mut extensions, GROUP_X25519);
 
-    // Key Share: x25519 public key
-    // Entry: group(2) + key_len(2) + key(32) = 36
+    // Key Share: both x25519 (36 bytes) and secp384r1 (101 bytes)
+    // x25519 entry: group(2) + key_len(2) + key(32) = 36
+    // P-384 entry: group(2) + key_len(2) + key(97) = 101
+    // Total shares: 36 + 101 = 137
+    let shares_len: u16 = 36 + 101;
     put_u16(&mut extensions, EXT_KEY_SHARE);
-    put_u16(&mut extensions, 38); // extension data: shares_len(2) + 36
-    put_u16(&mut extensions, 36); // client_shares length
+    put_u16(&mut extensions, shares_len + 2); // extension data: shares_len_field(2) + shares
+    put_u16(&mut extensions, shares_len);     // client_shares length
+    // secp384r1 key share (first = preferred)
+    put_u16(&mut extensions, GROUP_SECP384R1);
+    put_u16(&mut extensions, 97);
+    extensions.extend_from_slice(p384_pub);
+    // x25519 key share
     put_u16(&mut extensions, GROUP_X25519);
     put_u16(&mut extensions, 32);
-    extensions.extend_from_slice(pubkey);
+    extensions.extend_from_slice(x25519_pub);
 
     // Signature Algorithms (offer both RSA and ECDSA for server compatibility)
     put_u16(&mut extensions, EXT_SIGNATURE_ALGORITHMS);
@@ -423,9 +728,11 @@ fn build_client_hello(random: &[u8; 32], pubkey: &[u8; 32], hostname: &str) -> V
     body.push(32);
     body.extend_from_slice(&session_id);
 
-    // Cipher suites
-    put_u16(&mut body, 2); // Length
-    body.extend_from_slice(&CIPHER_SUITE);
+    // Cipher suites: all 3 TLS 1.3 suites (strongest first)
+    put_u16(&mut body, 6); // 3 suites x 2 bytes
+    put_u16(&mut body, 0x1302); // TLS_AES_256_GCM_SHA384
+    put_u16(&mut body, 0x1301); // TLS_AES_128_GCM_SHA256
+    put_u16(&mut body, 0x1303); // TLS_CHACHA20_POLY1305_SHA256
 
     // Compression methods
     body.push(1); // Length
@@ -455,8 +762,7 @@ fn build_sni_extension(hostname: &str) -> Vec<u8> {
     ext
 }
 
-fn parse_server_hello(msg: &[u8]) -> Result<[u8; 32], TlsError> {
-    // Skip: type(1) + length(3) + version(2) + random(32) + session_id_len(1) + session_id + cipher(2) + compression(1)
+fn parse_server_hello(msg: &[u8]) -> Result<(ServerKeyShare, CipherSuite), TlsError> {
     if msg.len() < 4 { return Err(TlsError::HandshakeFailed("ServerHello too short")); }
     let mut pos = 4; // Skip handshake header
 
@@ -470,7 +776,16 @@ fn parse_server_hello(msg: &[u8]) -> Result<[u8; 32], TlsError> {
     let sid_len = msg[pos] as usize;
     pos += 1 + sid_len;
 
-    pos += 2; // cipher suite
+    // Cipher suite selected by server
+    if pos + 2 > msg.len() { return Err(TlsError::HandshakeFailed("no cipher suite")); }
+    let cipher = match (msg[pos], msg[pos + 1]) {
+        (0x13, 0x01) => CipherSuite::Aes128Gcm,
+        (0x13, 0x02) => CipherSuite::Aes256Gcm,
+        (0x13, 0x03) => CipherSuite::Chacha20Poly1305,
+        _ => return Err(TlsError::HandshakeFailed("unsupported cipher suite")),
+    };
+    pos += 2;
+
     pos += 1; // compression
 
     // Extensions
@@ -479,31 +794,42 @@ fn parse_server_hello(msg: &[u8]) -> Result<[u8; 32], TlsError> {
     pos += 2;
 
     let ext_end = pos + ext_len;
-    let mut server_pubkey = [0u8; 32];
-    let mut found_key = false;
+    let mut key_share: Option<ServerKeyShare> = None;
 
     while pos + 4 <= ext_end && pos + 4 <= msg.len() {
         let ext_type = ((msg[pos] as u16) << 8) | msg[pos + 1] as u16;
         let data_len = ((msg[pos + 2] as usize) << 8) | msg[pos + 3] as usize;
         pos += 4;
 
-        if ext_type == EXT_KEY_SHARE && data_len >= 36 {
-            // group(2) + key_len(2) + key(32)
+        if ext_type == EXT_KEY_SHARE && data_len >= 4 {
+            // group(2) + key_len(2) + key(N)
+            let group = ((msg[pos] as u16) << 8) | msg[pos + 1] as u16;
+            let key_len = ((msg[pos + 2] as usize) << 8) | msg[pos + 3] as usize;
             let key_start = pos + 4;
-            if key_start + 32 <= msg.len() {
-                server_pubkey.copy_from_slice(&msg[key_start..key_start + 32]);
-                found_key = true;
+            if key_start + key_len <= msg.len() {
+                match group {
+                    GROUP_X25519 if key_len == 32 => {
+                        let mut k = [0u8; 32];
+                        k.copy_from_slice(&msg[key_start..key_start + 32]);
+                        key_share = Some(ServerKeyShare::X25519(k));
+                    }
+                    GROUP_SECP384R1 if key_len == 97 => {
+                        key_share = Some(ServerKeyShare::Secp384r1(
+                            msg[key_start..key_start + 97].to_vec()
+                        ));
+                    }
+                    _ => {}
+                }
             }
         }
 
         pos += data_len;
     }
 
-    if !found_key {
-        return Err(TlsError::HandshakeFailed("no server key_share"));
+    match key_share {
+        Some(ks) => Ok((ks, cipher)),
+        None => Err(TlsError::HandshakeFailed("no server key_share")),
     }
-
-    Ok(server_pubkey)
 }
 
 fn parse_certificate_message(data: &[u8]) -> Vec<Vec<u8>> {
@@ -584,6 +910,14 @@ fn recv_exact(handle: usize, buf: &mut [u8]) -> Result<(), TlsError> {
 fn recv_handshake_message(handle: usize, expected_type: u8) -> Result<Vec<u8>, TlsError> {
     let (ct, payload) = recv_record(handle)?;
     if ct != CT_HANDSHAKE {
+        if ct == CT_ALERT && payload.len() >= 2 {
+            return Err(TlsError::HandshakeFailed(match payload[1] {
+                40 => "server rejected handshake (alert 40)",
+                70 => "protocol version not supported",
+                71 => "insufficient security",
+                _ => "server sent alert",
+            }));
+        }
         return Err(TlsError::UnexpectedMessage);
     }
     if payload.is_empty() || payload[0] != expected_type {
@@ -610,27 +944,6 @@ fn build_record_aad(content_type: u8, length: usize) -> [u8; 5] {
         (length >> 8) as u8,
         length as u8,
     ]
-}
-
-fn expand_to_key(secret: &[u8; 32]) -> [u8; 32] {
-    let expanded = hmac::hkdf_expand_label(secret, b"key", &[], 32);
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&expanded);
-    key
-}
-
-fn expand_to_iv(secret: &[u8; 32]) -> [u8; 12] {
-    let expanded = hmac::hkdf_expand_label(secret, b"iv", &[], 12);
-    let mut iv = [0u8; 12];
-    iv.copy_from_slice(&expanded);
-    iv
-}
-
-fn expand_finished_key(secret: &[u8; 32]) -> [u8; 32] {
-    let expanded = hmac::hkdf_expand_label(secret, b"finished", &[], 32);
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&expanded);
-    key
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

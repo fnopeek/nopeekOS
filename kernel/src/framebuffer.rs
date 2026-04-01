@@ -122,12 +122,19 @@ fn clear_screen(info: &FbInfo) {
 fn put_pixel_shadow(console: &FbConsole, x: u32, y: u32, color: u32) {
     let info = &console.info;
     if x >= info.width || y >= info.height { return; }
-    let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
-    let offset = (y * info.pitch + x * bytes_per_pixel) as usize;
-    unsafe {
-        *console.shadow.add(offset) = (color & 0xFF) as u8;
-        *console.shadow.add(offset + 1) = ((color >> 8) & 0xFF) as u8;
-        *console.shadow.add(offset + 2) = ((color >> 16) & 0xFF) as u8;
+    if info.bpp == 32 {
+        // Single aligned 32-bit write (BGRA/RGBA, 99% of UEFI framebuffers)
+        let offset = (y * info.pitch + x * 4) as usize;
+        // SAFETY: shadow buffer is large enough, offset checked by bounds above
+        unsafe { *(console.shadow.add(offset) as *mut u32) = color; }
+    } else {
+        let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
+        let offset = (y * info.pitch + x * bytes_per_pixel) as usize;
+        unsafe {
+            *console.shadow.add(offset) = (color & 0xFF) as u8;
+            *console.shadow.add(offset + 1) = ((color >> 8) & 0xFF) as u8;
+            *console.shadow.add(offset + 2) = ((color >> 16) & 0xFF) as u8;
+        }
     }
 }
 
