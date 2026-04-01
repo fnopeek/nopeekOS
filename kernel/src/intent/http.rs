@@ -147,9 +147,9 @@ fn do_http_request(args: &str, use_tls: bool) {
         return;
     }
 
-    // Receive response
+    // Receive response (buffer >= max TLS record to avoid data loss)
     let mut response = alloc::vec::Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 17000];
 
     if let Some(ref mut sess) = tls_session {
         let mut empty_count = 0;
@@ -262,9 +262,9 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
     }
 
     // Receive response (up to max_size)
-    // Large downloads need real time-based patience
+    // Buffer must be >= max TLS record size (16KB) to avoid data loss
     let mut response = alloc::vec::Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 17000];
     let mut last_data_tick = crate::interrupts::ticks();
     let mut total_errors = 0u32;
     loop {
