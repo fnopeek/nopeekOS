@@ -8,10 +8,15 @@ use super::render;
 
 /// Generate the login background into the shadow buffer.
 pub fn draw_aurora(shadow: *mut u8, info: &FbInfo) {
+    draw_aurora_region(shadow, info, 0, 0, info.width, info.height);
+}
+
+/// Redraw a region of the aurora background (for clearing text areas).
+pub fn draw_aurora_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
     let w = info.width;
     let h = info.height;
 
-    for y in 0..h {
+    for y in ry..(ry + rh).min(h) {
         // Row pointer for fast 32bpp writes
         let row_ptr = if info.bpp == 32 {
             Some(unsafe { shadow.add((y * info.pitch) as usize) as *mut u32 })
@@ -19,7 +24,7 @@ pub fn draw_aurora(shadow: *mut u8, info: &FbInfo) {
             None
         };
 
-        for x in 0..w {
+        for x in rx..(rx + rw).min(w) {
             // Normalize to 0.0..1.0
             let nx = x as i32 * 1000 / w as i32; // 0..1000
             let ny = y as i32 * 1000 / h as i32;

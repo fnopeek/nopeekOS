@@ -6,5 +6,6 @@
 pub mod background;
 pub mod color;
 pub mod font;
+pub mod fonts;
 pub mod render;
 pub mod login;
