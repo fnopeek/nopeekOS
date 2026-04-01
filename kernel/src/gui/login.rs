@@ -54,7 +54,7 @@ fn draw_clock(shadow: *mut u8, info: &FbInfo, l: &Layout) {
     let unix = crate::rtc::read_unix_time().unwrap_or(0);
     let tz_offset: i64 = crate::config::get("timezone")
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+        .unwrap_or(2); // Default CEST (UTC+2), config overrides after auth
     let local = unix as i64 + tz_offset * 3600;
     let secs_today = ((local % 86400) + 86400) % 86400;
     let hour = secs_today / 3600;
@@ -231,10 +231,25 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
     let mut attempts: u32 = 0;
     let mut cursor_visible = true;
     let mut last_cursor_toggle = crate::interrupts::ticks();
+    let mut last_clock_update = crate::interrupts::ticks();
 
     loop {
-        // Cursor blink (toggle every 50 ticks = 500ms at 100Hz)
+        // Update clock every 6000 ticks (~60s at 100Hz)
         let now = crate::interrupts::ticks();
+        if now.wrapping_sub(last_clock_update) >= 6000 {
+            last_clock_update = now;
+            framebuffer::with_fb(|fb| {
+                let info = fb.info();
+                let (shadow, _) = fb.shadow_ptr();
+                // Clear clock area with aurora background
+                let (_, ch) = font::clock_char_size(layout.scale);
+                background::draw_aurora_region(shadow, info, 0, layout.clock_y, layout.screen_w, ch);
+                draw_clock(shadow, info, &layout);
+                framebuffer::blit_rect(fb, 0, layout.clock_y, layout.screen_w, ch);
+            });
+        }
+
+        // Cursor blink (toggle every 50 ticks = 500ms at 100Hz)
         if now.wrapping_sub(last_cursor_toggle) >= 50 {
             cursor_visible = !cursor_visible;
             last_cursor_toggle = now;
