@@ -14,7 +14,7 @@ use super::{ipv4, arp};
 
 const MAX_CONNECTIONS: usize = 16;
 const MSS: u16 = 1460; // standard Ethernet MSS
-const INITIAL_WINDOW: u16 = 14600; // ~10 segments
+const INITIAL_WINDOW: u16 = 65535; // Maximum TCP window (no window scaling)
 const MAX_RETRIES: u8 = 3;
 const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 const RECV_BUF_SIZE: usize = 65535;
