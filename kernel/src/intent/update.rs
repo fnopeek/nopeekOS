@@ -5,7 +5,6 @@
 
 use crate::{kprintln, kprint};
 use alloc::string::String;
-use alloc::vec::Vec;
 
 const UPDATE_HOST: &str = "raw.githubusercontent.com";
 const UPDATE_BASE: &str = "/fnopeek/nopeekOS/main/release";
