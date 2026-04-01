@@ -17,11 +17,18 @@ pub struct FbInfo {
 
 struct FbConsole {
     info: FbInfo,
+    /// Shadow buffer in RAM (all drawing goes here first, then blits to MMIO)
+    shadow: *mut u8,
+    shadow_size: usize,
     col: u32,
     row: u32,
     cols: u32,
     rows: u32,
 }
+
+// SAFETY: FbConsole is only accessed under a spinlock (CONSOLE mutex).
+// The shadow pointer is heap-allocated and exclusively owned.
+unsafe impl Send for FbConsole {}
 
 pub static CONSOLE: Mutex<Option<FbConsole>> = Mutex::new(None);
 
@@ -76,11 +83,17 @@ pub fn init_from_multiboot2(mb_info_addr: u32) {
                 let cols = width / FONT_WIDTH;
                 let rows = height / FONT_HEIGHT;
 
-                // Clear screen
+                // Allocate shadow buffer in RAM (fast WB-cached memory)
+                let shadow_size = pitch as usize * height as usize;
+                let layout = alloc::alloc::Layout::from_size_align(shadow_size, 16)
+                    .expect("shadow buffer layout");
+                let shadow = unsafe { alloc::alloc::alloc_zeroed(layout) };
+
+                // Clear MMIO framebuffer
                 clear_screen(&info);
 
                 *CONSOLE.lock() = Some(FbConsole {
-                    info, col: 0, row: 0, cols, rows,
+                    info, shadow, shadow_size, col: 0, row: 0, cols, rows,
                 });
 
                 crate::kprintln!("[npk] Framebuffer: {}x{} @ {:#x} ({}bpp)",
@@ -106,19 +119,21 @@ fn clear_screen(info: &FbInfo) {
     unsafe { core::ptr::write_bytes(fb, 0, size); }
 }
 
-fn put_pixel(info: &FbInfo, x: u32, y: u32, color: u32) {
+/// Write pixel to shadow buffer (RAM, fast).
+fn put_pixel_shadow(console: &FbConsole, x: u32, y: u32, color: u32) {
+    let info = &console.info;
     if x >= info.width || y >= info.height { return; }
     let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
     let offset = (y * info.pitch + x * bytes_per_pixel) as usize;
-    let fb = info.addr as *mut u8;
     unsafe {
-        *fb.add(offset) = (color & 0xFF) as u8;         // Blue
-        *fb.add(offset + 1) = ((color >> 8) & 0xFF) as u8;  // Green
-        *fb.add(offset + 2) = ((color >> 16) & 0xFF) as u8; // Red
+        *console.shadow.add(offset) = (color & 0xFF) as u8;
+        *console.shadow.add(offset + 1) = ((color >> 8) & 0xFF) as u8;
+        *console.shadow.add(offset + 2) = ((color >> 16) & 0xFF) as u8;
     }
 }
 
-fn draw_char(info: &FbInfo, c: u8, col: u32, row: u32) {
+/// Draw character to shadow buffer.
+fn draw_char(console: &FbConsole, c: u8, col: u32, row: u32) {
     let x0 = col * FONT_WIDTH;
     let y0 = row * FONT_HEIGHT;
     let glyph = &FONT[c as usize * FONT_HEIGHT as usize..];
@@ -128,31 +143,81 @@ fn draw_char(info: &FbInfo, c: u8, col: u32, row: u32) {
         let bits = glyph[dy as usize];
         for dx in 0..FONT_WIDTH {
             let color = if bits & (0x80 >> dx) != 0 { FG_COLOR } else { BG_COLOR };
-            put_pixel(info, x0 + dx, y0 + dy, color);
+            put_pixel_shadow(console, x0 + dx, y0 + dy, color);
         }
     }
 }
 
-fn scroll(console: &mut FbConsole) {
+/// Blit a region of the shadow buffer to the MMIO framebuffer.
+/// Only writes to MMIO (no reads from MMIO = fast).
+fn blit_region(console: &FbConsole, y_start: u32, y_end: u32) {
     let info = &console.info;
     let fb = info.addr as *mut u8;
-    let row_bytes = info.pitch as usize * FONT_HEIGHT as usize;
+    let start = (y_start * info.pitch) as usize;
+    let end = (y_end * info.pitch) as usize;
+    let len = end.min(console.shadow_size) - start;
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            console.shadow.add(start),
+            fb.add(start),
+            len,
+        );
+    }
+}
+
+/// Blit entire shadow buffer to MMIO framebuffer.
+fn blit_all(console: &FbConsole) {
+    let fb = console.info.addr as *mut u8;
+    unsafe {
+        core::ptr::copy_nonoverlapping(console.shadow, fb, console.shadow_size);
+    }
+}
+
+/// Blit a single character cell to MMIO.
+fn blit_char(console: &FbConsole, col: u32, row: u32) {
+    let info = &console.info;
+    let y_start = row * FONT_HEIGHT;
+    let y_end = y_start + FONT_HEIGHT;
+    let x_start = col * FONT_WIDTH;
+    let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
+    let fb = info.addr as *mut u8;
+    let char_bytes = (FONT_WIDTH * bytes_per_pixel) as usize;
+
+    for y in y_start..y_end.min(info.height) {
+        let offset = (y * info.pitch + x_start * bytes_per_pixel) as usize;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                console.shadow.add(offset),
+                fb.add(offset),
+                char_bytes,
+            );
+        }
+    }
+}
+
+/// Scroll shadow buffer only (no MMIO blit — caller handles batching).
+fn scroll_shadow(console: &mut FbConsole) {
+    let row_bytes = console.info.pitch as usize * FONT_HEIGHT as usize;
     let total_rows = console.rows as usize;
 
-    // Move everything up by one text row
     unsafe {
         core::ptr::copy(
-            fb.add(row_bytes),
-            fb,
+            console.shadow.add(row_bytes),
+            console.shadow,
             row_bytes * (total_rows - 1),
         );
-        // Clear last row
         core::ptr::write_bytes(
-            fb.add(row_bytes * (total_rows - 1)),
+            console.shadow.add(row_bytes * (total_rows - 1)),
             0,
             row_bytes,
         );
     }
+}
+
+/// Scroll with immediate blit (for single-byte writes like write_byte).
+fn scroll(console: &mut FbConsole) {
+    scroll_shadow(console);
+    blit_all(console);
 }
 
 /// Write a string to the framebuffer console.
@@ -163,6 +228,11 @@ pub fn write_str(s: &str) {
         None => return, // No framebuffer
     };
 
+    // Draw everything to shadow buffer first (no MMIO writes yet)
+    let mut dirty_min_row: u32 = console.rows;
+    let mut dirty_max_row: u32 = 0;
+    let mut scrolled = false;
+
     for byte in s.bytes() {
         match byte {
             b'\n' => {
@@ -170,33 +240,47 @@ pub fn write_str(s: &str) {
                 console.row += 1;
                 if console.row >= console.rows {
                     console.row = console.rows - 1;
-                    scroll(console);
+                    scroll_shadow(console);
+                    scrolled = true;
                 }
             }
             b'\r' => {
                 console.col = 0;
             }
             0x08 => {
-                // Backspace
                 if console.col > 0 {
                     console.col -= 1;
-                    draw_char(&console.info, b' ', console.col, console.row);
+                    draw_char(console, b' ', console.col, console.row);
+                    dirty_min_row = dirty_min_row.min(console.row);
+                    dirty_max_row = dirty_max_row.max(console.row);
                 }
             }
             byte if byte >= 0x20 && byte < 0x7F => {
-                draw_char(&console.info, byte, console.col, console.row);
+                draw_char(console, byte, console.col, console.row);
+                dirty_min_row = dirty_min_row.min(console.row);
+                dirty_max_row = dirty_max_row.max(console.row);
                 console.col += 1;
                 if console.col >= console.cols {
                     console.col = 0;
                     console.row += 1;
                     if console.row >= console.rows {
                         console.row = console.rows - 1;
-                        scroll(console);
+                        scroll_shadow(console);
+                        scrolled = true;
                     }
                 }
             }
-            _ => {} // Ignore other control chars
+            _ => {}
         }
+    }
+
+    // Single blit at the end: either full (if scrolled) or just dirty rows
+    if scrolled {
+        blit_all(console);
+    } else if dirty_max_row >= dirty_min_row {
+        let y_start = dirty_min_row * FONT_HEIGHT;
+        let y_end = (dirty_max_row + 1) * FONT_HEIGHT;
+        blit_region(console, y_start, y_end);
     }
 }
 
@@ -220,11 +304,13 @@ pub fn write_byte(byte: u8) {
         0x08 => {
             if console.col > 0 {
                 console.col -= 1;
-                draw_char(&console.info, b' ', console.col, console.row);
+                draw_char(console, b' ', console.col, console.row);
+                blit_char(console, console.col, console.row);
             }
         }
         b if b >= 0x20 && b < 0x7F => {
-            draw_char(&console.info, b, console.col, console.row);
+            draw_char(console, b, console.col, console.row);
+            blit_char(console, console.col, console.row);
             console.col += 1;
             if console.col >= console.cols {
                 console.col = 0;
@@ -246,10 +332,12 @@ pub fn clear() {
         Some(c) => c,
         None => return,
     };
+    // Clear both shadow and MMIO
+    unsafe {
+        core::ptr::write_bytes(console.shadow, 0, console.shadow_size);
+    }
     let fb = console.info.addr as *mut u8;
-    let total = console.info.pitch as usize * console.info.height as usize;
-    // SAFETY: clearing framebuffer memory
-    unsafe { core::ptr::write_bytes(fb, 0, total); }
+    unsafe { core::ptr::write_bytes(fb, 0, console.shadow_size); }
     console.col = 0;
     console.row = 0;
 }

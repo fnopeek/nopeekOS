@@ -40,6 +40,10 @@ mod netdev;
 mod setup;
 mod framebuffer;
 mod xhci;
+mod gpt;
+mod fat32;
+mod install;
+mod acpi;
 
 use core::panic::PanicInfo;
 
@@ -96,6 +100,9 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     // Framebuffer init (needs memory + paging for MMIO mapping)
     framebuffer::init_from_multiboot2(multiboot_info);
 
+    // ACPI init: parse Multiboot2 RSDP tag (UEFI), then find FADT for power-off
+    acpi::parse_multiboot2_rsdp(multiboot_info);
+    acpi::init();
 
     kprintln!("[npk] Scanning PCI bus...");
     let pci_count = pci::scan();
@@ -169,9 +176,31 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     // Try to mount existing npkFS first
     let mut mounted = false;
     if blkdev::is_available() {
+        // Detect GPT partition layout on NVMe (sets blkdev offset for npkFS)
+        if nvme::is_available() {
+            if let Some(offset) = gpt::detect_npkfs_offset() {
+                blkdev::set_partition_offset(offset);
+            }
+        }
+
         if npkfs::mount().is_ok() {
             mounted = true;
             vga::show_status(b"npkFS mounted");
+        } else if install::has_installer() && nvme::is_available() {
+            // No valid npkFS + installer build + NVMe present → install to NVMe
+            kprintln!();
+            kprintln!("[npk] No installation found on NVMe.");
+            match install::install_to_nvme() {
+                Ok(()) => {
+                    mounted = true;
+                    vga::show_status(b"Installed to NVMe");
+                }
+                Err(e) => {
+                    kprintln!("[npk] Installation failed: {}", e);
+                    kprintln!("[npk] System halted.");
+                    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                }
+            }
         }
     }
 
@@ -186,8 +215,8 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     let is_first_boot = !mounted || !npkfs::exists(".npk-keycheck");
 
     if is_first_boot {
-        // === First boot: Setup Wizard ===
-        if !setup::run_first_boot(&salt) {
+        // === First boot: Setup Wizard (identity, settings) ===
+        if !setup::run_fresh_install(&salt) {
             kprintln!("[npk] Setup failed. System halted.");
             loop { unsafe { core::arch::asm!("cli; hlt"); } }
         }
@@ -198,6 +227,8 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         kprintln!("[npk] ─────────────────────────────────");
         kprintln!("[npk]  Identity required.");
         kprintln!("[npk]  Your passphrase IS your identity.");
+        #[cfg(feature = "installer")]
+        kprintln!("[npk]  Type RESET to wipe and reinstall.");
         kprintln!("[npk] ─────────────────────────────────");
         kprintln!();
 
@@ -220,6 +251,54 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
             if len == 0 {
                 kprintln!("[npk] Passphrase cannot be empty.");
                 continue;
+            }
+
+            // Factory reset: only available on installer builds (USB stick)
+            #[cfg(feature = "installer")]
+            if len == 5 && &buf[..5] == b"RESET" {
+                kprintln!();
+                kprintln!("[npk] !! FACTORY RESET !!");
+                kprintln!("[npk] This will ERASE ALL DATA.");
+                kprint!("[npk] Type YES to confirm: ");
+                let mut confirm = [0u8; 16];
+                let clen = { serial::SERIAL.lock().read_line(&mut confirm) };
+                if clen == 3 && &confirm[..3] == b"YES" {
+                    for b in buf.iter_mut() { *b = 0; }
+
+                    // If installer build: full reinstall (GPT + ESP + npkFS)
+                    if install::has_installer() && nvme::is_available() {
+                        match install::install_to_nvme() {
+                            Ok(()) => {}
+                            Err(e) => {
+                                kprintln!("[npk] Installation failed: {}", e);
+                                kprintln!("[npk] System halted.");
+                                loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                            }
+                        }
+                    } else {
+                        kprintln!("[npk] Formatting...");
+                        let _ = npkfs::mkfs();
+                        let _ = npkfs::mount();
+                    }
+
+                    // Re-read salt from freshly formatted npkFS
+                    let salt = npkfs::install_salt().unwrap_or_else(|| {
+                        let mut s = [0u8; 16];
+                        let hash = blake3::hash(b"nopeekOS.fallback.salt");
+                        s.copy_from_slice(&hash.as_bytes()[..16]);
+                        s
+                    });
+
+                    kprintln!();
+                    if !setup::run_fresh_install(&salt) {
+                        kprintln!("[npk] Setup failed. System halted.");
+                        loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                    }
+                    break [0u8; 32]; // master key already set by setup
+                } else {
+                    kprintln!("[npk] Reset cancelled.");
+                    continue;
+                }
             }
 
             let key = crypto::derive_master_key(&buf[..len], &salt);

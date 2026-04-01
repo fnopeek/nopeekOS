@@ -7,6 +7,7 @@
 #   ./build.sh build        Kompiliert Kernel + erstellt ISO
 #   ./build.sh qemu         Build + Run in QEMU (Serial auf stdio)
 #   ./build.sh debug        Build + Run in QEMU mit GDB-Stub
+#   ./build.sh usb /dev/sdX  Build + EFI-bootbaren USB-Stick erstellen
 #   ./build.sh vbox         Build + Run in VirtualBox
 #   ./build.sh vbox-clean   VirtualBox VM entfernen
 #   ./build.sh all          Build + QEMU + VirtualBox
@@ -38,6 +39,8 @@ err()  { echo -e "${RED}[npk]${NC} $1"; }
 # ============================================================
 # Build
 # ============================================================
+
+INSTALL_DATA="$PROJECT_DIR/kernel/src/install_data"
 
 build() {
     log "Building kernel..."
@@ -84,6 +87,71 @@ GRUBCFG
         ok "Disk image: $DISK_IMG"
     fi
 
+    echo ""
+}
+
+# Two-pass build for USB installer kernel
+build_installer() {
+    log "Building installer kernel (two-pass)..."
+
+    cd "$PROJECT_DIR"
+    mkdir -p "$INSTALL_DATA"
+
+    # Pass 1: normal kernel (without embedded install data)
+    log "Pass 1: building base kernel..."
+    # Create empty placeholder so include_bytes! doesn't fail
+    [ -f "$INSTALL_DATA/kernel.bin" ] || touch "$INSTALL_DATA/kernel.bin"
+
+    cargo build \
+        --release \
+        --target "$TARGET" \
+        -Zbuild-std=core,alloc \
+        -Zbuild-std-features=compiler-builtins-mem \
+        2>&1
+
+    # Copy pass 1 kernel (this is what gets installed on NVMe)
+    cp "$KERNEL_BIN" "$INSTALL_DATA/kernel.bin"
+    ok "Pass 1: base kernel $(du -h "$INSTALL_DATA/kernel.bin" | cut -f1)"
+
+    # Create GRUB EFI binary (if not exists or kernel is newer)
+    if [ ! -f "$INSTALL_DATA/grub.efi" ] || [ "$INSTALL_DATA/grub.efi" -ot "$INSTALL_DATA/kernel.bin" ]; then
+        log "Building GRUB EFI binary..."
+        grub-mkimage \
+            --format=x86_64-efi \
+            --output="$INSTALL_DATA/grub.efi" \
+            --prefix=/boot/grub \
+            part_gpt fat multiboot2 efi_gop search search_fs_file normal boot
+        ok "GRUB EFI: $(du -h "$INSTALL_DATA/grub.efi" | cut -f1)"
+    fi
+
+    # NVMe grub.cfg (already exists in install_data/)
+    if [ ! -f "$INSTALL_DATA/grub.cfg" ]; then
+        cat > "$INSTALL_DATA/grub.cfg" << 'GRUBCFG'
+set timeout=0
+set default=0
+
+insmod efi_gop
+set gfxmode=1920x1080x32,1280x720x32,auto
+set gfxpayload=keep
+
+menuentry "nopeekOS" {
+    multiboot2 /boot/kernel.bin
+    boot
+}
+GRUBCFG
+    fi
+
+    # Pass 2: installer kernel (with embedded GRUB + kernel + config)
+    log "Pass 2: building installer kernel..."
+    cargo build \
+        --release \
+        --target "$TARGET" \
+        -Zbuild-std=core,alloc \
+        -Zbuild-std-features=compiler-builtins-mem \
+        --features installer \
+        2>&1
+
+    ok "Pass 2: installer kernel $(du -h "$KERNEL_BIN" | cut -f1)"
     echo ""
 }
 
@@ -248,6 +316,112 @@ run_vbox() {
     echo ""
 }
 
+# ============================================================
+# USB Stick
+# ============================================================
+
+write_usb() {
+    local device="${1:-}"
+    if [ -z "$device" ]; then
+        err "Usage: ./build.sh usb /dev/sdX"
+        err ""
+        err "List devices with: lsblk"
+        exit 1
+    fi
+
+    [ ! -b "$device" ] && { err "'$device' is not a block device."; exit 1; }
+    [ ! -f "$KERNEL_BIN" ] && { err "Kernel not found. Run build first."; exit 1; }
+
+    # Safety: never write to NVMe
+    if [[ "$device" == *"nvme"* ]]; then
+        err "Refusing to write to NVMe device: $device"
+        exit 1
+    fi
+
+    # Check tools
+    for cmd in sgdisk mkfs.fat grub-install; do
+        command -v "$cmd" &>/dev/null || { err "Missing: $cmd"; exit 1; }
+    done
+
+    local dev_size
+    dev_size=$(lsblk -bno SIZE "$device" 2>/dev/null | head -1)
+    local dev_size_gb=$((dev_size / 1024 / 1024 / 1024))
+
+    warn "This will ERASE ALL DATA on $device (${dev_size_gb} GB)!"
+    read -p "[npk] Continue? (yes/NO): " confirm
+    [ "$confirm" != "yes" ] && { err "Aborted."; exit 1; }
+
+    log "Unmounting existing partitions..."
+    for part in "${device}"* "${device}p"*; do
+        [ -b "$part" ] && sudo umount "$part" 2>/dev/null || true
+    done
+
+    log "Creating GPT partition table..."
+    sudo sgdisk --zap-all "$device" >/dev/null 2>&1 || true
+    sudo sgdisk \
+        --new=1:0:+512M  --typecode=1:EF00 --change-name=1:"ESP" \
+        --new=2:0:0      --typecode=2:8300 --change-name=2:"npkFS" \
+        "$device" >/dev/null
+    sudo partprobe "$device" 2>/dev/null || sleep 2
+
+    # Find partition names (sdX1 vs sdXp1)
+    local esp_part=""
+    for p in "${device}p1" "${device}1"; do
+        [ -b "$p" ] && esp_part="$p" && break
+    done
+    [ -z "$esp_part" ] && { sleep 2; sudo partprobe "$device" 2>/dev/null; }
+    for p in "${device}p1" "${device}1"; do
+        [ -b "$p" ] && esp_part="$p" && break
+    done
+    [ -z "$esp_part" ] && { err "Could not find ESP partition."; exit 1; }
+
+    log "Formatting ESP as FAT32..."
+    sudo mkfs.fat -F 32 -n NPKUSB "$esp_part" >/dev/null
+
+    local mnt
+    mnt=$(mktemp -d)
+    sudo mount "$esp_part" "$mnt"
+
+    log "Installing GRUB EFI bootloader..."
+    sudo grub-install \
+        --target=x86_64-efi \
+        --efi-directory="$mnt" \
+        --boot-directory="$mnt/boot" \
+        --removable \
+        --no-nvram \
+        2>/dev/null
+
+    log "Copying kernel..."
+    sudo cp "$KERNEL_BIN" "$mnt/boot/kernel.bin"
+
+    # Unique marker file so GRUB finds THIS partition, not NVMe
+    sudo touch "$mnt/.npk-usb-boot"
+
+    log "Writing GRUB config..."
+    sudo mkdir -p "$mnt/boot/grub"
+    sudo tee "$mnt/boot/grub/grub.cfg" > /dev/null << 'GRUBCFG'
+set timeout=0
+set default=0
+
+insmod efi_gop
+set gfxmode=1920x1080x32,1280x720x32,auto
+set gfxpayload=keep
+
+menuentry "nopeekOS" {
+    multiboot2 /boot/kernel.bin
+    boot
+}
+GRUBCFG
+
+    sync
+    sudo umount "$mnt"
+    rmdir "$mnt"
+
+    ok "USB stick ready: $device"
+    log "ESP: $esp_part (FAT32, GRUB EFI + kernel)"
+    log "Plug into NUC, select USB in boot menu."
+}
+
 clean_vbox() {
     if ! command -v VBoxManage &> /dev/null; then
         err "VBoxManage not found."
@@ -307,6 +481,7 @@ usage() {
     echo "  build       Compile kernel + create bootable ISO"
     echo "  qemu        Build + run in QEMU (serial on stdio)"
     echo "  debug       Build + run in QEMU with GDB stub (:1234)"
+    echo "  usb /dev/sdX  Build + create EFI-bootable USB stick"
     echo "  vbox        Build + run in VirtualBox (GUI)"
     echo "  vbox-clean  Remove VirtualBox VM"
     echo "  all         Build + show run options"
@@ -343,6 +518,11 @@ case "${1:-}" in
         check_deps
         build
         run_vbox
+        ;;
+    usb)
+        check_deps
+        build_installer
+        write_usb "${2:-}"
         ;;
     vbox-clean)
         clean_vbox

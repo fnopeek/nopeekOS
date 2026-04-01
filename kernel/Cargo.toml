@@ -5,6 +5,9 @@ edition = "2021"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
 
+[features]
+installer = []
+
 [dependencies]
 spin = "0.10"         # Spinlock (no_std mutex)
 bitflags = "2.11"     # Flag-basierte Enums

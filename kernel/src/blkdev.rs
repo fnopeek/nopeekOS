@@ -5,48 +5,71 @@
 
 use crate::{virtio_blk, nvme};
 use crate::virtio_blk::BlkError;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const SECTOR_SIZE: usize = 512;
 pub const BLOCK_SIZE: usize = 4096;
 
+/// Partition offset in 4KB blocks. All blkdev operations are shifted by this.
+/// Set by the installer when NVMe is partitioned (npkFS starts after ESP).
+/// Default 0 = whole disk (for virtio-blk / unpartitioned NVMe).
+static PARTITION_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Set partition offset (in 4KB blocks).
+pub fn set_partition_offset(blocks: u64) {
+    PARTITION_OFFSET.store(blocks, Ordering::Release);
+}
+
+/// Get current partition offset (in 4KB blocks).
+pub fn partition_offset() -> u64 {
+    PARTITION_OFFSET.load(Ordering::Acquire)
+}
+
 pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    let actual = block + PARTITION_OFFSET.load(Ordering::Acquire);
     if nvme::is_available() {
-        nvme::read_block(block, buf)
+        nvme::read_block(actual, buf)
     } else {
-        virtio_blk::read_block(block, buf)
+        virtio_blk::read_block(actual, buf)
     }
 }
 
 pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    let actual = block + PARTITION_OFFSET.load(Ordering::Acquire);
     if nvme::is_available() {
-        nvme::write_block(block, buf)
+        nvme::write_block(actual, buf)
     } else {
-        virtio_blk::write_block(block, buf)
+        virtio_blk::write_block(actual, buf)
     }
 }
 
 pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlkError> {
+    let offset_sectors = PARTITION_OFFSET.load(Ordering::Acquire) * 8;
+    let actual = sector + offset_sectors;
     if nvme::is_available() {
-        nvme::read_sector(sector, buf)
+        nvme::read_sector(actual, buf)
     } else {
-        virtio_blk::read_sector(sector, buf)
+        virtio_blk::read_sector(actual, buf)
     }
 }
 
 pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlkError> {
+    let offset_sectors = PARTITION_OFFSET.load(Ordering::Acquire) * 8;
+    let actual = sector + offset_sectors;
     if nvme::is_available() {
-        nvme::write_sector(sector, buf)
+        nvme::write_sector(actual, buf)
     } else {
-        virtio_blk::write_sector(sector, buf)
+        virtio_blk::write_sector(actual, buf)
     }
 }
 
 pub fn block_count() -> Option<u64> {
-    if nvme::is_available() {
+    let total = if nvme::is_available() {
         nvme::block_count()
     } else {
         virtio_blk::block_count()
-    }
+    };
+    total.map(|t| t.saturating_sub(PARTITION_OFFSET.load(Ordering::Acquire)))
 }
 
 pub fn capacity() -> Option<u64> {
