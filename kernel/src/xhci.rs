@@ -38,6 +38,7 @@ const CAP_RTSOFF:     u32 = 0x18;
 // === Operational register offsets (from oper_base) ===
 const OP_USBCMD:  u32 = 0x00;
 const OP_USBSTS:  u32 = 0x04;
+#[allow(dead_code)]
 const OP_DNCTRL:  u32 = 0x14;
 const OP_CRCR:    u32 = 0x18;
 const OP_DCBAAP:  u32 = 0x30;
@@ -55,8 +56,10 @@ const STS_CNR: u32 = 1 << 11; // Controller Not Ready
 const PORTSC_CCS:   u32 = 1 << 0;  // Current Connect Status
 const PORTSC_PED:   u32 = 1 << 1;  // Port Enabled
 const PORTSC_PR:    u32 = 1 << 4;  // Port Reset
+#[allow(dead_code)]
 const PORTSC_PLS_MASK: u32 = 0xF << 5; // Port Link State
 const PORTSC_PP:    u32 = 1 << 9;  // Port Power
+#[allow(dead_code)]
 const PORTSC_SPEED_MASK: u32 = 0xF << 10;
 const PORTSC_PRC:   u32 = 1 << 21; // Port Reset Change
 const PORTSC_CSC:   u32 = 1 << 17; // Connect Status Change
@@ -83,12 +86,14 @@ const TRB_LINK:           u32 = 6 << 10;
 const TRB_ENABLE_SLOT:    u32 = 9 << 10;
 const TRB_ADDRESS_DEVICE: u32 = 11 << 10;
 const TRB_CONFIGURE_EP:   u32 = 12 << 10;
+#[allow(dead_code)]
 const TRB_NOOP_CMD:       u32 = 23 << 10;
 
 // TRB control bits
 const TRB_CYCLE:     u32 = 1 << 0;
 const TRB_IOC:       u32 = 1 << 5;  // Interrupt On Completion
 const TRB_IDT:       u32 = 1 << 6;  // Immediate Data
+#[allow(dead_code)]
 const TRB_BSR:       u32 = 1 << 9;  // Block Set Address Request (address device)
 const TRB_DIR_IN:    u32 = 1 << 16; // Direction: IN
 const TRB_TRT_NO:    u32 = 0;       // Transfer Type: No Data
@@ -97,6 +102,7 @@ const TRB_TRT_IN:    u32 = 3 << 16; // Transfer Type: IN Data
 // Event TRB types (bits [15:10] of control)
 const EVT_TRANSFER:      u32 = 32 << 10;
 const EVT_CMD_COMPLETE:  u32 = 33 << 10;
+#[allow(dead_code)]
 const EVT_PORT_STATUS:   u32 = 34 << 10;
 
 // Completion codes
@@ -166,7 +172,7 @@ static HID_TO_ASCII_DE_SHIFT: [u8; 57] = [
     b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P',
     b'Q', b'R', b'S', b'T', b'U', b'V', b'W', b'X',
     b'Z', b'Y',
-    b'+', b'"', b'*', b'/', b'%', b'&', b'|', b'(', b')', b'=',
+    b'+', b'"', b'*', 0,    b'%', b'&', b'/', b'(', b')', b'=',  // Shift+4=ç→0, Shift+7=/
     b'\n', 0x1B, 0x08, b'\t', b' ',
     b'?', b'`', b'{', b'}', b'!',
     0, b':', b'"', b'>', b';', b':', b'_',
@@ -204,8 +210,10 @@ pub fn poll_keyboard() -> Option<u8> {
 
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 
+#[allow(dead_code)]
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Relaxed) }
 
+#[allow(dead_code)]
 struct XhciState {
     mmio: u64,
     oper: u64,          // operational registers base
@@ -673,6 +681,7 @@ fn bios_handoff(mmio: u64, mut off: u32) {
     }
 }
 
+#[allow(dead_code)]
 fn find_connected_port(state: &XhciState) -> Option<u32> {
     for p in 0..state.max_ports {
         let sc = r32(state.oper, portsc_off(p));
@@ -722,7 +731,7 @@ fn post_command(state: &mut XhciState, param: u64, status: u32, mut control: u32
 fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
     // Poll event ring for command completion
     for _ in 0..2_000_000u32 {
-        let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
+        let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         let cycle = control & TRB_CYCLE;
         if cycle != state.evt_cycle { core::hint::spin_loop(); continue; }
 
@@ -846,7 +855,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
 
     // Wait for transfer completion
     for _ in 0..2_000_000u32 {
-        let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
+        let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { core::hint::spin_loop(); continue; }
 
         state.evt_dequeue += 1;
@@ -1083,7 +1092,27 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], prev_keys: &[u8; 6]) {
                 else { HID_TO_ASCII[key as usize] }
             }
         } else {
-            0
+            // Numpad keys (HID usage 0x54-0x63)
+            match key {
+                0x54 => b'/',
+                0x55 => b'*',
+                0x56 => b'-',
+                0x57 => b'+',
+                0x58 => b'\n', // Numpad Enter
+                0x59 => b'1',
+                0x5A => b'2',
+                0x5B => b'3',
+                0x5C => b'4',
+                0x5D => b'5',
+                0x5E => b'6',
+                0x5F => b'7',
+                0x60 => b'8',
+                0x61 => b'9',
+                0x62 => b'0',
+                0x63 => b'.',
+                0x4C => 0x7F, // Delete
+                _ => 0,
+            }
         };
 
         if ch != 0 {

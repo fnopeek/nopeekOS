@@ -3,7 +3,6 @@
 //! Parses Multiboot2 framebuffer info, provides pixel-based text output.
 //! Replaces VGA text mode for UEFI systems without legacy VGA.
 
-use core::fmt;
 use spin::Mutex;
 
 /// Framebuffer info parsed from Multiboot2.
@@ -15,7 +14,7 @@ pub struct FbInfo {
     pub bpp: u8,
 }
 
-struct FbConsole {
+pub struct FbConsole {
     info: FbInfo,
     /// Shadow buffer in RAM (all drawing goes here first, then blits to MMIO)
     shadow: *mut u8,
@@ -342,15 +341,19 @@ pub fn clear() {
     console.row = 0;
 }
 
+#[allow(dead_code)]
 /// Check if framebuffer is available.
 pub fn is_available() -> bool {
     CONSOLE.lock().is_some()
 }
 
 // Early framebuffer state (set before heap is available)
+#[allow(dead_code)]
 static mut EARLY_FB: Option<(u64, u32, u32, u32, u8)> = None; // (addr, pitch, w, h, bpp)
+#[allow(dead_code)]
 static mut EARLY_X: u32 = 0;
 
+#[allow(dead_code)]
 /// Super-early framebuffer probe: finds framebuffer, draws green bar.
 /// Works BEFORE heap/paging init (only needs 4GB identity mapping from boot.s).
 pub fn early_probe(mb_info_addr: u32) -> bool {
@@ -395,6 +398,7 @@ pub fn early_probe(mb_info_addr: u32) -> bool {
     false
 }
 
+#[allow(dead_code)]
 /// Write a debug character to the early framebuffer (no heap needed).
 pub fn early_debug(ch: u8) {
     unsafe {

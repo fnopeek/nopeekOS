@@ -46,6 +46,7 @@ pub fn init() {
     }
 }
 
+#[allow(dead_code)]
 /// Check if a key is available (IRQ buffer or polled port 0x60).
 pub fn has_key() -> bool {
     // SAFETY: single-core, IRQ handler is the only writer
@@ -199,8 +200,8 @@ fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<u8> {
 
     #[rustfmt::skip]
     const SHIFTED: [u8; 58] = [
-        0,   0x1B, b'+', b'"', b'*', b'/', b'%', b'&',
-        b'|', b'(', b')', b'=', b'?', b'`', 0x08, b'\t',
+        0,   0x1B, b'+', b'"', b'*', 0,    b'%', b'&',  // Shift+4=ç (non-ASCII→0)
+        b'/', b'(', b')', b'=', b'?', b'`', 0x08, b'\t', // Shift+7=/
         b'Q', b'W', b'E', b'R', b'T', b'Z', b'U', b'I',
         b'O', b'P', b'{', b'}', b'\n', 0,   b'A', b'S',
         b'D', b'F', b'G', b'H', b'J', b'K', b'L', b':',

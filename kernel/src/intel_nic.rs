@@ -92,11 +92,16 @@ const CTRL_ASDE: u32    = 1 << 5;   // Auto-Speed Detection Enable
 
 // RCTL bits
 const RCTL_EN: u32      = 1 << 1;   // Receiver Enable
+#[allow(dead_code)]
 const RCTL_SBP: u32     = 1 << 2;   // Store Bad Packets
+#[allow(dead_code)]
 const RCTL_UPE: u32     = 1 << 3;   // Unicast Promiscuous
+#[allow(dead_code)]
 const RCTL_MPE: u32     = 1 << 4;   // Multicast Promiscuous
 const RCTL_BAM: u32     = 1 << 15;  // Broadcast Accept Mode
+#[allow(dead_code)]
 const RCTL_BSIZE_4K: u32 = (3 << 16) | (1 << 25); // Buffer size 4096
+#[allow(dead_code)]
 const RCTL_BSIZE_2K: u32 = 0;       // Buffer size 2048 (default)
 const RCTL_SECRC: u32   = 1 << 26;  // Strip Ethernet CRC
 
@@ -108,6 +113,7 @@ const TCTL_COLD_SHIFT: u32 = 12;    // Collision Distance
 
 // RX descriptor status bits
 const RXD_STAT_DD: u8   = 1 << 0;   // Descriptor Done
+#[allow(dead_code)]
 const RXD_STAT_EOP: u8  = 1 << 1;   // End of Packet
 
 // TX descriptor command bits

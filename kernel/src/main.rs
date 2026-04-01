@@ -40,8 +40,11 @@ mod netdev;
 mod setup;
 mod framebuffer;
 mod xhci;
+#[allow(dead_code)]
 mod gpt;
+#[allow(dead_code)]
 mod fat32;
+#[allow(dead_code, unused_imports)]
 mod install;
 mod acpi;
 
@@ -176,20 +179,9 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     // Try to mount existing npkFS first
     let mut mounted = false;
     if blkdev::is_available() {
-        // Detect GPT partition layout on NVMe (sets blkdev offset for npkFS)
-        if nvme::is_available() {
-            if let Some(offset) = gpt::detect_npkfs_offset() {
-                blkdev::set_partition_offset(offset);
-            }
-        }
-
-        if npkfs::mount().is_ok() {
-            mounted = true;
-            vga::show_status(b"npkFS mounted");
-        } else if install::has_installer() && nvme::is_available() {
-            // No valid npkFS + installer build + NVMe present → install to NVMe
+        // Installer build (USB stick): always install to NVMe, never ask for passphrase
+        if install::has_installer() && nvme::is_available() {
             kprintln!();
-            kprintln!("[npk] No installation found on NVMe.");
             match install::install_to_nvme() {
                 Ok(()) => {
                     mounted = true;
@@ -200,6 +192,18 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
                     kprintln!("[npk] System halted.");
                     loop { unsafe { core::arch::asm!("cli; hlt"); } }
                 }
+            }
+        } else {
+            // Normal boot: detect GPT partition layout, mount existing npkFS
+            if nvme::is_available() {
+                if let Some(offset) = gpt::detect_npkfs_offset() {
+                    blkdev::set_partition_offset(offset);
+                }
+            }
+
+            if npkfs::mount().is_ok() {
+                mounted = true;
+                vga::show_status(b"npkFS mounted");
             }
         }
     }

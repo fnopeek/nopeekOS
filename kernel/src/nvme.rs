@@ -92,6 +92,7 @@ struct CqEntry {
 }
 
 impl CqEntry {
+    #[allow(dead_code)]
     const fn zeroed() -> Self {
         CqEntry { dw0: 0, _rsvd: 0, sq_head: 0, sq_id: 0, command_id: 0, status: 0 }
     }
@@ -557,6 +558,7 @@ pub fn model_name() -> Option<alloc::string::String> {
     Some(alloc::string::String::from(s))
 }
 
+#[allow(dead_code)]
 /// Return capacity in GB.
 pub fn capacity_gb() -> Option<u64> {
     capacity().map(|sectors| (sectors * 512) / (1024 * 1024 * 1024))
