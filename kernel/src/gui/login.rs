@@ -315,9 +315,9 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                                     layout.status_y + 24 * layout.scale - layout.greeting_y);
                             });
 
-                            // Brief pause to show welcome
+                            // Quick flash of welcome message (0.5s)
                             let start = crate::interrupts::ticks();
-                            while crate::interrupts::ticks().wrapping_sub(start) < 150 {
+                            while crate::interrupts::ticks().wrapping_sub(start) < 50 {
                                 core::hint::spin_loop();
                             }
 
