@@ -13,6 +13,7 @@ static SUBNET:  Mutex<[u8; 4]> = Mutex::new([255, 255, 255, 0]);
 
 pub fn set_gateway(ip: [u8; 4]) { *GATEWAY.lock() = ip; }
 pub fn set_subnet(mask: [u8; 4]) { *SUBNET.lock() = mask; }
+#[allow(dead_code)]
 pub fn gateway() -> [u8; 4] { *GATEWAY.lock() }
 
 pub fn handle_ipv4(data: &[u8]) {

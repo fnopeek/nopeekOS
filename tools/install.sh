@@ -1,23 +1,23 @@
 #!/bin/bash
 # ============================================================
-# nopeekOS – Install to NVMe/SSD
+# nopeekOS – Install to USB/NVMe/SSD
 # ============================================================
 #
-# Installs nopeekOS to an NVMe SSD or any block device:
-#   - GPT partition table
-#   - EFI System Partition (512MB) with GRUB + kernel
-#   - npkFS data partition (rest of disk, formatted on first boot)
+# Installs nopeekOS to a block device:
+#   --efi (default):  GPT + EFI System Partition + GRUB EFI
+#   --legacy:         MBR + BIOS boot + GRUB i386-pc
 #
 # Usage:
-#   sudo ./tools/install.sh /dev/nvme0n1
+#   sudo ./tools/install.sh /dev/sdX              # EFI (default)
+#   sudo ./tools/install.sh --legacy /dev/sdX      # BIOS/Legacy
+#   sudo ./tools/install.sh --efi /dev/nvme0n1     # EFI explicit
 #
 # Run from any Linux environment (live USB, your laptop, etc.)
-# After install, set NVMe as first boot device in BIOS/UEFI.
 #
 # Prerequisites (Arch):
 #   pacman -S grub efibootmgr dosfstools gdisk
 # Prerequisites (Debian/Ubuntu):
-#   apt install grub-efi-amd64-bin dosfstools gdisk
+#   apt install grub-pc-bin grub-efi-amd64-bin dosfstools gdisk
 
 set -euo pipefail
 

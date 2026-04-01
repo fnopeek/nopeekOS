@@ -45,6 +45,7 @@ pub fn run_fresh_install(salt: &[u8; 16]) -> bool {
     setup_identity_and_settings(salt)
 }
 
+#[allow(dead_code)]
 /// Run the first-boot setup wizard (legacy, with storage questions).
 pub fn run_first_boot(salt: &[u8; 16]) -> bool {
     kprintln!();

@@ -184,6 +184,7 @@ Every execution is a sandboxed WASM module:
 - [x] Encryption at rest (all npkFS objects encrypted by default)
 - [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
 - [x] TLS 1.3 (RFC 8446, ChaCha20-Poly1305 + X25519)
+- [ ] TLS 1.3: AES-128-GCM + AES-256-GCM cipher suites (most servers require AES-GCM)
 - [x] HTTPS client (`https <host> [path]`)
 - [x] X.509 certificate chain validation
 - [x] Embedded root CAs (ISRG Root X1, DigiCert Global G2)

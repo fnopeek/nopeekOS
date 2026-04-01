@@ -518,7 +518,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "clear" | "cls" => {
             crate::framebuffer::clear();
             // ANSI clear only to serial (framebuffer doesn't interpret escape codes)
-            let mut serial = crate::serial::SERIAL.lock();
+            let serial = crate::serial::SERIAL.lock();
             for &b in b"\x1B[2J\x1B[H" {
                 serial.write_byte(b);
             }

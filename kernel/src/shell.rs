@@ -261,8 +261,10 @@ fn handle_session(handle: usize, vault: &'static Mutex<crate::capability::Vault>
     kprintln!("[npk-shell] Client disconnected.");
 }
 
+#[allow(dead_code)]
 const DEBUG_PORT: u16 = 4445;
 
+#[allow(dead_code)]
 /// Start a plaintext debug listener on port 4445 (pre-setup, no auth).
 /// Allows remote diagnosis when framebuffer doesn't work.
 /// Blocks until a client connects, then dumps boot log and disconnects.

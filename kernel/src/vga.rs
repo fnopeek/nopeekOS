@@ -14,8 +14,10 @@ const COLOR_GREEN: u8 = 0x0A;
 const COLOR_DARK: u8 = 0x08;    // dark gray on black
 
 static mut VGA_ROW: usize = 0;
+#[allow(dead_code)]
 static mut DEBUG_COL: usize = 0;
 
+#[allow(dead_code)]
 /// Write a single debug character to top-right corner of VGA.
 /// Call this at each boot stage to track progress on real hardware.
 pub fn debug_mark(ch: u8) {

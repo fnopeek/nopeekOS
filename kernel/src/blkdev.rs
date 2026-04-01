@@ -20,6 +20,7 @@ pub fn set_partition_offset(blocks: u64) {
     PARTITION_OFFSET.store(blocks, Ordering::Release);
 }
 
+#[allow(dead_code)]
 /// Get current partition offset (in 4KB blocks).
 pub fn partition_offset() -> u64 {
     PARTITION_OFFSET.load(Ordering::Acquire)

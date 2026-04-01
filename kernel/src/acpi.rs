@@ -98,7 +98,67 @@ fn find_pm1a_cnt() -> Option<u16> {
     let pm1a = unsafe { *((fadt_addr + 64) as *const u32) };
     if pm1a == 0 || pm1a > 0xFFFF { return None; }
 
+    // Try to read SLP_TYPa from DSDT \_S5 object
+    let dsdt_addr = unsafe { *((fadt_addr + 40) as *const u32) } as usize;
+    if dsdt_addr != 0 {
+        ensure_mapped(dsdt_addr, 64);
+        let dsdt_len = unsafe { *((dsdt_addr + 4) as *const u32) } as usize;
+        if dsdt_len > 36 && dsdt_len < 0x100000 {
+            ensure_mapped(dsdt_addr, dsdt_len);
+            if let Some(slp_typ) = find_s5_slp_typ(dsdt_addr, dsdt_len) {
+                SLP_TYP_S5.store(slp_typ, Ordering::Release);
+                crate::kprintln!("[npk] ACPI: SLP_TYPa for S5 = {}", slp_typ);
+            }
+        }
+    }
+
     Some(pm1a as u16)
+}
+
+/// Parse DSDT AML to find \_S5 object and extract SLP_TYPa value.
+fn find_s5_slp_typ(dsdt_addr: usize, dsdt_len: usize) -> Option<u16> {
+    let data = unsafe { core::slice::from_raw_parts(dsdt_addr as *const u8, dsdt_len) };
+
+    // Scan for "_S5_" (0x5F 0x53 0x35 0x5F)
+    for i in 0..data.len().saturating_sub(20) {
+        if &data[i..i + 4] == b"_S5_" {
+            // Expected AML: NameOp(0x08) before _S5_, PackageOp(0x12) after
+            if i == 0 || data[i - 1] != 0x08 { continue; }
+            let rest = &data[i + 4..];
+            if rest.is_empty() || rest[0] != 0x12 { continue; }
+
+            // Skip PackageOp + PkgLength
+            let mut pos = 1; // past PackageOp
+            // PkgLength encoding: if top 2 bits of first byte are 0, length is 1 byte
+            if pos >= rest.len() { continue; }
+            let pkg_lead = rest[pos];
+            if pkg_lead & 0xC0 == 0 {
+                pos += 1; // 1-byte PkgLength
+            } else {
+                let extra = ((pkg_lead >> 6) & 3) as usize;
+                pos += 1 + extra;
+            }
+
+            // Skip NumElements byte
+            if pos >= rest.len() { continue; }
+            pos += 1;
+
+            // Read SLP_TYPa: may be BytePrefix(0x0A) + byte, or raw byte, or WordPrefix, etc.
+            if pos >= rest.len() { continue; }
+            let slp_typ = if rest[pos] == 0x0A && pos + 1 < rest.len() {
+                rest[pos + 1] as u16 // BytePrefix
+            } else if rest[pos] == 0x0B && pos + 2 < rest.len() {
+                u16::from_le_bytes([rest[pos + 1], rest[pos + 2]]) // WordPrefix
+            } else if rest[pos] <= 0x0F {
+                rest[pos] as u16 // Small integer (0-15 encoded directly in some AML variants)
+            } else {
+                continue;
+            };
+
+            return Some(slp_typ);
+        }
+    }
+    None
 }
 
 /// Find RSDP: first from Multiboot2 tag, then scan legacy BIOS regions.
