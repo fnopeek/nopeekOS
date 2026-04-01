@@ -484,6 +484,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 system::intent_halt();
             }
         }
+        "reboot" | "restart" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "reboot") {
+                system::intent_reboot();
+            }
+        }
 
         "update" | "upgrade" => {
             if require_cap(vault, &session, Rights::EXECUTE, "update") {
