@@ -315,6 +315,23 @@ pub fn intent_config() {
     }
 }
 
+pub fn intent_reboot() -> ! {
+    kprintln!();
+    kprintln!("[npk] Rebooting...");
+    kprintln!();
+    unsafe {
+        // Method 1: Keyboard controller reset (port 0x64, pulse CPU reset line)
+        core::arch::asm!("out dx, al", in("dx") 0x64u16, in("al") 0xFEu8);
+
+        // Method 2: Triple-fault (guaranteed reboot on any x86)
+        let null_idt: [u8; 6] = [0; 6];
+        core::arch::asm!("lidt [{}]", in(reg) &null_idt);
+        core::arch::asm!("int3");
+
+        loop { core::arch::asm!("cli; hlt"); }
+    }
+}
+
 pub fn intent_halt() -> ! {
     kprintln!();
     kprintln!("[npk] Shutting down...");
