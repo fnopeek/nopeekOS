@@ -97,7 +97,7 @@ fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
     let outline = 2 * l.scale;
 
     // Outer border
-    let border_color = if focused { Theme::BORDER_FOCUS } else { Theme::INPUT_OUTER };
+    let border_color = if focused { background::accent_color() } else { Theme::INPUT_OUTER };
     render::fill_rounded_rect_aa(shadow, info,
         l.input_x, l.input_y, l.input_w, l.input_h,
         border_color, radius);
@@ -190,6 +190,10 @@ fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32
 /// Run the graphical login screen.
 /// Returns the 256-bit master key on success, or halts on lockout.
 pub fn run(salt: &[u8; 16]) -> [u8; 32] {
+    // Select random color scheme and set accent colors
+    background::init();
+    framebuffer::set_npk_color(background::accent_color());
+
     // Enable GUI mode (kprintln skips framebuffer, only serial)
     framebuffer::set_gui_mode(true);
 
