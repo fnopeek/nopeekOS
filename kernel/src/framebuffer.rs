@@ -65,7 +65,12 @@ const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
 const FG_COLOR: u32 = 0x00E8E8E8; // Near-white (was light gray)
 const BG_COLOR: u32 = 0x00000000; // Black
-const NPK_TAG_COLOR: u32 = 0x007B50A0; // Purple accent for [npk] tag
+/// Dynamic accent color for [npk] tag (set by GUI scheme, default purple)
+static NPK_TAG_COLOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x007B50A0);
+
+pub fn set_npk_color(color: u32) {
+    NPK_TAG_COLOR.store(color, core::sync::atomic::Ordering::Release);
+}
 
 /// Parse Multiboot2 boot info to find framebuffer tag.
 pub fn init_from_multiboot2(mb_info_addr: u32) {
@@ -345,7 +350,7 @@ pub fn write_str(s: &str) {
         let (byte, fg) = if i + 5 <= bytes.len() && &bytes[i..i+5] == b"[npk]" {
             // Emit all 5 chars in accent color
             for j in 0..5 {
-                emit_char(console, bytes[i + j], NPK_TAG_COLOR,
+                emit_char(console, bytes[i + j], NPK_TAG_COLOR.load(core::sync::atomic::Ordering::Relaxed),
                           &mut dirty_min_row, &mut dirty_max_row, &mut scrolled);
             }
             i += 5;
