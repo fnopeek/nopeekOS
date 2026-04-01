@@ -16,14 +16,14 @@ const MAX_SIG_SIZE: usize = 512;
 struct Manifest {
     version: String,
     size: usize,
-    sha256: [u8; 32],
+    sha384: [u8; 48],
 }
 
 fn parse_manifest(data: &[u8]) -> Result<Manifest, &'static str> {
     let text = core::str::from_utf8(data).map_err(|_| "manifest: invalid UTF-8")?;
     let mut version = None;
     let mut size = None;
-    let mut sha256 = None;
+    let mut sha384 = None;
 
     for line in text.lines() {
         let line = line.trim();
@@ -32,7 +32,7 @@ fn parse_manifest(data: &[u8]) -> Result<Manifest, &'static str> {
             match key.trim() {
                 "version" => version = Some(String::from(val.trim())),
                 "size" => size = val.trim().parse::<usize>().ok(),
-                "sha256" => sha256 = Some(hex_to_bytes32(val.trim())?),
+                "sha384" => sha384 = Some(hex_to_bytes48(val.trim())?),
                 _ => {}
             }
         }
@@ -41,16 +41,16 @@ fn parse_manifest(data: &[u8]) -> Result<Manifest, &'static str> {
     Ok(Manifest {
         version: version.ok_or("manifest: missing version")?,
         size: size.ok_or("manifest: missing size")?,
-        sha256: sha256.ok_or("manifest: missing sha256")?,
+        sha384: sha384.ok_or("manifest: missing sha384")?,
     })
 }
 
-fn hex_to_bytes32(hex: &str) -> Result<[u8; 32], &'static str> {
-    if hex.len() != 64 { return Err("sha256: expected 64 hex chars"); }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
+fn hex_to_bytes48(hex: &str) -> Result<[u8; 48], &'static str> {
+    if hex.len() != 96 { return Err("sha384: expected 96 hex chars"); }
+    let mut out = [0u8; 48];
+    for i in 0..48 {
         out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| "sha256: invalid hex")?;
+            .map_err(|_| "sha384: invalid hex")?;
     }
     Ok(out)
 }
@@ -93,10 +93,10 @@ pub fn intent_update(_args: &str) {
         return;
     }
 
-    // 3. Verify SHA-256
-    kprint!("[npk] Verifying SHA-256... ");
-    let hash = crate::tls::sha256::sha256(&kernel_data);
-    if hash != manifest.sha256 {
+    // 3. Verify SHA-384
+    kprint!("[npk] Verifying SHA-384... ");
+    let hash = crate::tls::sha256::sha384(&kernel_data);
+    if hash != manifest.sha384 {
         kprintln!("FAILED");
         kprintln!("[npk] Checksum mismatch! Update rejected.");
         return;
@@ -114,7 +114,7 @@ pub fn intent_update(_args: &str) {
     // 5. Verify ECDSA P-384 signature
     kprint!("[npk] Verifying ECDSA P-384 signature... ");
     let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-    if !crate::tls::certstore::verify_p384_prehash(pubkey, &hash, &sig_data) {
+    if !crate::tls::certstore::verify_p384_prehash384(pubkey, &hash, &sig_data) {
         kprintln!("FAILED");
         kprintln!("[npk] Invalid signature! Update rejected.");
         return;

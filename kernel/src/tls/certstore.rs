@@ -177,10 +177,32 @@ fn ecdsa_p384_verify_sha384(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool
     vk.verify_prehash(&digest, &sig).is_ok()
 }
 
-/// Verify an ECDSA P-384 signature over a prehashed message (SHA-256).
+/// Verify an ECDSA P-384 signature over a SHA-384 prehash.
 /// pubkey: 97-byte uncompressed SEC1 point.
-/// prehash: 32-byte SHA-256 digest.
+/// prehash: 48-byte SHA-384 digest.
 /// signature: DER-encoded ECDSA signature.
+pub fn verify_p384_prehash384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u8]) -> bool {
+    use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
+    use p384::ecdsa::signature::hazmat::PrehashVerifier;
+    use p384::EncodedPoint;
+
+    let point = match EncodedPoint::from_bytes(pubkey) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let vk = match VerifyingKey::from_encoded_point(&point) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let sig = match P384Sig::from_der(signature) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    vk.verify_prehash(prehash, &sig).is_ok()
+}
+
+/// Verify an ECDSA P-384 signature over a prehashed message (SHA-256).
+#[allow(dead_code)]
 pub fn verify_p384_prehash(pubkey: &[u8], prehash: &[u8; 32], signature: &[u8]) -> bool {
     use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
     use p384::ecdsa::signature::hazmat::PrehashVerifier;

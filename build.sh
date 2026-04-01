@@ -540,22 +540,22 @@ case "${1:-}" in
         # Read version from Cargo.toml
         VERSION=$(grep '^version' "$PROJECT_DIR/kernel/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
         SIZE=$(stat -c%s "$RELEASE_DIR/kernel.bin")
-        SHA256=$(sha256sum "$RELEASE_DIR/kernel.bin" | cut -d' ' -f1)
+        SHA384=$(openssl dgst -sha384 -hex "$RELEASE_DIR/kernel.bin" 2>/dev/null | awk '{print $NF}')
 
         # Write manifest
         cat > "$RELEASE_DIR/manifest" <<MANIFEST
 version=$VERSION
 size=$SIZE
-sha256=$SHA256
+sha384=$SHA384
 MANIFEST
 
         ok "Manifest: v$VERSION, $SIZE bytes"
-        log "SHA-256: $SHA256"
+        log "SHA-384: $SHA384"
 
         # Sign with ECDSA P-384 if key exists
         KEY_FILE="$PROJECT_DIR/update.key"
         if [ -f "$KEY_FILE" ]; then
-            openssl dgst -sha256 -sign "$KEY_FILE" -out "$RELEASE_DIR/kernel.sig" "$RELEASE_DIR/kernel.bin"
+            openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/kernel.sig" "$RELEASE_DIR/kernel.bin"
             ok "Signed with $KEY_FILE"
         else
             warn "No signing key found at $KEY_FILE"
