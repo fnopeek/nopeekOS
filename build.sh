@@ -540,12 +540,14 @@ case "${1:-}" in
         # Read version from Cargo.toml
         VERSION=$(grep '^version' "$PROJECT_DIR/kernel/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
         SIZE=$(stat -c%s "$RELEASE_DIR/kernel.bin")
+        SHA256=$(sha256sum "$RELEASE_DIR/kernel.bin" | cut -d' ' -f1)
         SHA384=$(openssl dgst -sha384 -hex "$RELEASE_DIR/kernel.bin" 2>/dev/null | awk '{print $NF}')
 
-        # Write manifest
+        # Write manifest (both hashes for backwards compatibility)
         cat > "$RELEASE_DIR/manifest" <<MANIFEST
 version=$VERSION
 size=$SIZE
+sha256=$SHA256
 sha384=$SHA384
 MANIFEST
 

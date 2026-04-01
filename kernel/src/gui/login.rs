@@ -307,7 +307,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                                 if let Some(n) = &name {
                                     draw_greeting_name(shadow, info, &layout, n);
                                 }
-                                draw_status(shadow, info, &layout, &welcome, Theme::ACCENT_GREEN);
+                                draw_status(shadow, info, &layout, &welcome, background::accent_color());
                                 // Blit greeting + status area
                                 framebuffer::blit_rect(fb,
                                     0, layout.greeting_y,
