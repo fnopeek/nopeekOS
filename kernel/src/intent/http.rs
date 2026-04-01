@@ -262,21 +262,25 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
     }
 
     // Receive response (up to max_size)
-    // Use higher patience for large downloads — network may have gaps
+    // Large downloads need real time-based patience, not just retry counts
     let mut response = alloc::vec::Vec::new();
     let mut buf = [0u8; 4096];
-    let mut empty_count = 0u32;
+    let mut last_data_tick = crate::interrupts::ticks();
     loop {
         match crate::tls::tls_recv(&mut tls_session, &mut buf) {
             Ok(0) => {
-                empty_count += 1;
-                // More patience for large downloads: scale with expected size
-                let patience = if response.len() > 100_000 { 50 } else if !response.is_empty() { 10 } else { 5 };
-                if empty_count > patience { break; }
-                // Poll network while waiting for more data
-                for _ in 0..1000 { crate::net::poll(); core::hint::spin_loop(); }
+                // No data — poll network and check timeout
+                for _ in 0..5000 { crate::net::poll(); core::hint::spin_loop(); }
+
+                let idle = crate::interrupts::ticks().wrapping_sub(last_data_tick);
+                // Timeout: 3s if we have data, 1s if empty
+                let timeout = if response.is_empty() { 100 } else { 300 };
+                if idle > timeout { break; }
             }
-            Ok(n) => { response.extend_from_slice(&buf[..n]); empty_count = 0; }
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+                last_data_tick = crate::interrupts::ticks();
+            }
             Err(_) => break,
         }
         if response.len() > max_size { break; }
