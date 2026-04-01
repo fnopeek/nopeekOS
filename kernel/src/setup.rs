@@ -33,7 +33,19 @@ fn read_passphrase() -> (alloc::vec::Vec<u8>, usize) {
     (vec, len)
 }
 
-/// Run the first-boot setup wizard. Returns true on success.
+/// Run fresh install setup (npkFS already formatted and mounted).
+/// Collects identity + settings only, no storage questions.
+pub fn run_fresh_install(salt: &[u8; 16]) -> bool {
+    kprintln!();
+    kprintln!("[npk] ══════════════════════════════════");
+    kprintln!("[npk]  Welcome to nopeekOS.");
+    kprintln!("[npk]  Choose your identity.");
+    kprintln!("[npk] ══════════════════════════════════");
+    kprintln!();
+    setup_identity_and_settings(salt)
+}
+
+/// Run the first-boot setup wizard (legacy, with storage questions).
 pub fn run_first_boot(salt: &[u8; 16]) -> bool {
     kprintln!();
     kprintln!("[npk] ══════════════════════════════════");
@@ -91,7 +103,11 @@ pub fn run_first_boot(salt: &[u8; 16]) -> bool {
     }
 
     kprintln!();
+    setup_identity_and_settings(salt)
+}
 
+/// Common identity + settings setup (used by both fresh install and legacy first boot)
+fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
     // === Identity ===
     kprintln!("[npk] Identity:");
 

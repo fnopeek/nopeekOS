@@ -304,15 +304,15 @@ pub fn intent_halt() -> ! {
         // Try QEMU exit (harmless on real hardware)
         core::arch::asm!("out dx, al", in("dx") 0xf4u16, in("al") 0u8);
 
-        // Try ACPI S5 (power off) via PM1a control block
-        // Common ACPI PM1a_CNT port: 0x604 (Intel/PIIX4) or 0x1804 (modern Intel PCH)
-        // SLP_TYP=5 (S5) shifted to bits [12:10], SLP_EN=bit 13
+        // ACPI S5 power-off (port discovered from FADT at boot)
+        crate::acpi::power_off();
+
+        // Fallback: hardcoded common PM1a_CNT ports
         let slp_s5: u16 = (5 << 10) | (1 << 13);
         core::arch::asm!("out dx, ax", in("dx") 0x604u16, in("ax") slp_s5);
         core::arch::asm!("out dx, ax", in("dx") 0x1804u16, in("ax") slp_s5);
 
-        // Fallback: triple-fault reboot (if power off didn't work)
-        // Load a null IDT and trigger an interrupt → triple fault → reset
+        // Last resort: triple-fault reboot
         let null_idt: [u8; 6] = [0; 6];
         core::arch::asm!("lidt [{}]", in(reg) &null_idt);
         core::arch::asm!("int3");

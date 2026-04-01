@@ -191,11 +191,15 @@ Every execution is a sandboxed WASM module:
 
 ### Phase 7 -- Bare Metal (target: Intel N100 NUC)
 
-- [ ] PS/2 keyboard driver (IRQ1, Scancode Set 1, DE layout, USB-legacy via BIOS)
+- [x] xHCI USB keyboard driver (full xHCI init, BIOS handoff, HID boot protocol, DE layout)
+- [x] Intel I226-V Ethernet driver (igc, MMIO, RX/TX advanced descriptors, PCIe bridge)
+- [x] Framebuffer driver (UEFI GOP, Write-Back caching, scroll, clear)
+- [x] TSC timer fallback (CPUID 0x15 calibration, replaces PIT on UEFI-only systems)
+- [x] Gateway routing (DHCP gateway + subnet mask, local vs remote ARP)
+- [x] Serial port detection (skip on hardware without COM ports)
+- [x] Dual xHCI controller support (Thunderbolt + regular USB)
 - [ ] NVMe driver (PCIe, Admin/IO queues, Read/Write/TRIM)
-- [ ] Intel Ethernet driver (I226-V / igc, MMIO, RX/TX descriptor rings)
 - [ ] npk-shell: TLS-encrypted remote intent loop (TCP listener, passphrase auth)
-- [ ] Framebuffer driver (VESA/GOP)
 - [ ] Hardware manifest collector (PCI + CPUID + ACPI probe)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 
