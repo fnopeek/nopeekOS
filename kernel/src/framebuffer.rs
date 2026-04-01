@@ -63,8 +63,9 @@ pub fn set_gui_mode(active: bool) {
 
 const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
-const FG_COLOR: u32 = 0x00CCCCCC; // Light gray
+const FG_COLOR: u32 = 0x00E8E8E8; // Near-white (was light gray)
 const BG_COLOR: u32 = 0x00000000; // Black
+const NPK_TAG_COLOR: u32 = 0x007B50A0; // Purple accent for [npk] tag
 
 /// Parse Multiboot2 boot info to find framebuffer tag.
 pub fn init_from_multiboot2(mb_info_addr: u32) {
@@ -168,8 +169,8 @@ fn put_pixel_shadow(console: &FbConsole, x: u32, y: u32, color: u32) {
     }
 }
 
-/// Draw character to shadow buffer.
-fn draw_char(console: &FbConsole, c: u8, col: u32, row: u32) {
+/// Draw character to shadow buffer with specified foreground color.
+fn draw_char_colored(console: &FbConsole, c: u8, col: u32, row: u32, fg: u32) {
     let x0 = col * FONT_WIDTH;
     let y0 = row * FONT_HEIGHT;
     let glyph = &FONT[c as usize * FONT_HEIGHT as usize..];
@@ -178,10 +179,15 @@ fn draw_char(console: &FbConsole, c: u8, col: u32, row: u32) {
         if dy as usize >= glyph.len() { break; }
         let bits = glyph[dy as usize];
         for dx in 0..FONT_WIDTH {
-            let color = if bits & (0x80 >> dx) != 0 { FG_COLOR } else { BG_COLOR };
+            let color = if bits & (0x80 >> dx) != 0 { fg } else { BG_COLOR };
             put_pixel_shadow(console, x0 + dx, y0 + dy, color);
         }
     }
+}
+
+/// Draw character to shadow buffer.
+fn draw_char(console: &FbConsole, c: u8, col: u32, row: u32) {
+    draw_char_colored(console, c, col, row, FG_COLOR);
 }
 
 /// Blit a region of the shadow buffer to the MMIO framebuffer.
@@ -275,6 +281,47 @@ pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
     }
 }
 
+/// Emit a single character to the console with a given foreground color.
+fn emit_char(console: &mut FbConsole, byte: u8, fg: u32,
+             dirty_min: &mut u32, dirty_max: &mut u32, scrolled: &mut bool) {
+    match byte {
+        b'\n' => {
+            console.col = 0;
+            console.row += 1;
+            if console.row >= console.rows {
+                console.row = console.rows - 1;
+                scroll_shadow(console);
+                *scrolled = true;
+            }
+        }
+        b'\r' => { console.col = 0; }
+        0x08 => {
+            if console.col > 0 {
+                console.col -= 1;
+                draw_char(console, b' ', console.col, console.row);
+                *dirty_min = (*dirty_min).min(console.row);
+                *dirty_max = (*dirty_max).max(console.row);
+            }
+        }
+        b if b >= 0x20 && b < 0x7F => {
+            draw_char_colored(console, b, console.col, console.row, fg);
+            *dirty_min = (*dirty_min).min(console.row);
+            *dirty_max = (*dirty_max).max(console.row);
+            console.col += 1;
+            if console.col >= console.cols {
+                console.col = 0;
+                console.row += 1;
+                if console.row >= console.rows {
+                    console.row = console.rows - 1;
+                    scroll_shadow(console);
+                    *scrolled = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Write a string to the framebuffer console.
 pub fn write_str(s: &str) {
     // GUI owns the framebuffer — skip text console writes
@@ -290,45 +337,25 @@ pub fn write_str(s: &str) {
     let mut dirty_max_row: u32 = 0;
     let mut scrolled = false;
 
-    for byte in s.bytes() {
-        match byte {
-            b'\n' => {
-                console.col = 0;
-                console.row += 1;
-                if console.row >= console.rows {
-                    console.row = console.rows - 1;
-                    scroll_shadow(console);
-                    scrolled = true;
-                }
+    // [npk] tag coloring: detect pattern and color those chars
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Check for [npk] pattern
+        let (byte, fg) = if i + 5 <= bytes.len() && &bytes[i..i+5] == b"[npk]" {
+            // Emit all 5 chars in accent color
+            for j in 0..5 {
+                emit_char(console, bytes[i + j], NPK_TAG_COLOR,
+                          &mut dirty_min_row, &mut dirty_max_row, &mut scrolled);
             }
-            b'\r' => {
-                console.col = 0;
-            }
-            0x08 => {
-                if console.col > 0 {
-                    console.col -= 1;
-                    draw_char(console, b' ', console.col, console.row);
-                    dirty_min_row = dirty_min_row.min(console.row);
-                    dirty_max_row = dirty_max_row.max(console.row);
-                }
-            }
-            byte if byte >= 0x20 && byte < 0x7F => {
-                draw_char(console, byte, console.col, console.row);
-                dirty_min_row = dirty_min_row.min(console.row);
-                dirty_max_row = dirty_max_row.max(console.row);
-                console.col += 1;
-                if console.col >= console.cols {
-                    console.col = 0;
-                    console.row += 1;
-                    if console.row >= console.rows {
-                        console.row = console.rows - 1;
-                        scroll_shadow(console);
-                        scrolled = true;
-                    }
-                }
-            }
-            _ => {}
-        }
+            i += 5;
+            continue;
+        } else {
+            (bytes[i], FG_COLOR)
+        };
+        i += 1;
+
+        emit_char(console, byte, fg, &mut dirty_min_row, &mut dirty_max_row, &mut scrolled);
     }
 
     // Single blit at the end: either full (if scrolled) or just dirty rows

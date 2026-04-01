@@ -1,7 +1,7 @@
-//! Graphical login screen.
+//! Graphical login screen (Hyprlock-inspired).
 //!
-//! Centered card with passphrase input, cursor blink, error/backoff states.
-//! Replaces the text-mode auth prompt in main.rs.
+//! Aurora background, large centered clock, greeting, light input field
+//! with centered dots. No card container — clean, minimal.
 
 use alloc::format;
 use super::{background, color::Theme, font, render};
@@ -10,41 +10,36 @@ use crate::framebuffer::{self, FbInfo};
 /// Layout computed from screen dimensions.
 struct Layout {
     scale: u32,
-    card_x: u32,
-    card_y: u32,
-    card_w: u32,
-    card_h: u32,
-    title_y: u32,
-    subtitle_y: u32,
+    screen_w: u32,
+    screen_h: u32,
+    // Vertical positions (all centered horizontally)
+    clock_y: u32,
+    greeting_y: u32,
     input_x: u32,
     input_y: u32,
     input_w: u32,
     input_h: u32,
     status_y: u32,
-    padding: u32,
 }
 
 impl Layout {
     fn compute(sw: u32, sh: u32, scale: u32) -> Self {
-        let padding = 24 * scale;
-        let card_w = (sw * 40 / 100).max(400 * scale).min(600 * scale);
-        let card_h = 260 * scale;
-        let card_x = (sw.saturating_sub(card_w)) / 2;
-        let card_y = (sh.saturating_sub(card_h)) / 2;
+        let input_w = 200 * scale;
+        let input_h = 50 * scale;
+        let input_x = (sw.saturating_sub(input_w)) / 2;
 
-        let title_y = card_y + padding;
-        let subtitle_y = title_y + 32 * scale;
-        let input_y = subtitle_y + 48 * scale;
-        let input_x = card_x + padding;
-        let input_w = card_w - 2 * padding;
-        let input_h = 36 * scale;
+        // Center vertically with clock above, input in middle
+        let center_y = sh / 2;
+        let input_y = center_y - input_h / 2 - 10 * scale;
+        let greeting_y = input_y - 40 * scale;
+        let clock_y = greeting_y - 70 * scale;
         let status_y = input_y + input_h + 16 * scale;
 
         Layout {
-            scale, card_x, card_y, card_w, card_h,
-            title_y, subtitle_y,
+            scale, screen_w: sw, screen_h: sh,
+            clock_y, greeting_y,
             input_x, input_y, input_w, input_h,
-            status_y, padding,
+            status_y,
         }
     }
 }
@@ -54,69 +49,103 @@ fn draw_background(shadow: *mut u8, info: &FbInfo) {
     background::draw_aurora(shadow, info);
 }
 
-/// Draw the card (semi-transparent rounded rectangle with rounded border).
-fn draw_card(shadow: *mut u8, info: &FbInfo, l: &Layout) {
-    let radius = 16 * l.scale;
-    let border = 1 * l.scale;
-    // Border: slightly larger rounded rect, ~60% opaque
-    render::fill_rounded_rect_blend(shadow, info,
-        l.card_x, l.card_y, l.card_w, l.card_h,
-        Theme::BORDER_CARD, radius, 160);
-    // Fill: inset, ~70% opaque (background shines through)
-    render::fill_rounded_rect_blend(shadow, info,
-        l.card_x + border, l.card_y + border,
-        l.card_w - 2 * border, l.card_h - 2 * border,
-        Theme::BG_CARD, radius - border, 180);
+/// Draw the large clock display.
+fn draw_clock(shadow: *mut u8, info: &FbInfo, l: &Layout) {
+    let unix = crate::rtc::read_unix_time().unwrap_or(0);
+    let tz_offset: i64 = crate::config::get("timezone")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let local = unix as i64 + tz_offset * 3600;
+    let secs_today = ((local % 86400) + 86400) % 86400;
+    let hour = secs_today / 3600;
+    let min = (secs_today % 3600) / 60;
+    let time_str = format!("{:02}:{:02}", hour, min);
+
+    // Large clock using dedicated clock font (32x64 or 16x32)
+    font::draw_clock_str_centered(shadow, info,
+        &time_str, 0, l.screen_w, l.clock_y,
+        Theme::FG_PRIMARY, None, l.scale);
 }
 
-/// Draw title and subtitle text.
-fn draw_title(shadow: *mut u8, info: &FbInfo, l: &Layout) {
+/// Draw the greeting text.
+fn draw_greeting(shadow: *mut u8, info: &FbInfo, l: &Layout) {
+    // Before auth we don't have the name yet, show generic greeting
     font::draw_str_centered(shadow, info,
-        "nopeekOS", l.card_x, l.card_w, l.title_y,
-        Theme::FG_PRIMARY, None, l.scale);
-    font::draw_str_centered(shadow, info,
-        "Identity required. Your passphrase IS your identity.",
-        l.card_x, l.card_w, l.subtitle_y,
+        "Enter Password...", 0, l.screen_w, l.greeting_y,
         Theme::FG_SECONDARY, None, l.scale);
 }
 
-/// Draw the input field background and border.
-fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
-    render::fill_rect(shadow, info,
-        l.input_x, l.input_y, l.input_w, l.input_h,
-        Theme::BG_INPUT);
-    let border_color = if focused { Theme::BORDER_FOCUS } else { Theme::BORDER_INPUT };
-    render::draw_border(shadow, info,
-        l.input_x, l.input_y, l.input_w, l.input_h,
-        border_color, 1);
+/// Draw greeting with name (after config is loaded on success).
+fn draw_greeting_name(shadow: *mut u8, info: &FbInfo, l: &Layout, name: &str) {
+    let msg = format!("Hi {}", name);
+    // Clear greeting area
+    clear_greeting_area(shadow, info, l);
+    font::draw_str_centered(shadow, info,
+        &msg, 0, l.screen_w, l.greeting_y,
+        Theme::FG_PRIMARY, None, l.scale);
 }
 
-/// Draw passphrase dots inside the input field.
+fn clear_greeting_area(shadow: *mut u8, info: &FbInfo, l: &Layout) {
+    let (_, ch) = font::char_size(l.scale);
+    let h = ch + 4 * l.scale;
+    background::draw_aurora_region(shadow, info, 0, l.greeting_y, info.width, h);
+}
+
+/// Draw the input field (light background, dark outline, rounded).
+fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
+    let radius = l.input_h / 2; // Fully rounded ends (pill shape)
+    let outline = 3 * l.scale;
+
+    // Outer border (dark gray)
+    let border_color = if focused { Theme::BORDER_FOCUS } else { Theme::INPUT_OUTER };
+    render::fill_rounded_rect_aa(shadow, info,
+        l.input_x, l.input_y, l.input_w, l.input_h,
+        border_color, radius);
+
+    // Inner fill (light)
+    render::fill_rounded_rect_aa(shadow, info,
+        l.input_x + outline, l.input_y + outline,
+        l.input_w - 2 * outline, l.input_h - 2 * outline,
+        Theme::INPUT_INNER, radius - outline);
+}
+
+/// Draw passphrase dots centered inside the input field.
 fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
-    let dot_r = 3 * l.scale;
-    let dot_spacing = 10 * l.scale;
-    let start_x = l.input_x + 8 * l.scale;
+    let outline = 3 * l.scale;
+
+    // Clear input interior (redraw inner fill)
+    let radius = l.input_h / 2;
+    render::fill_rounded_rect_aa(shadow, info,
+        l.input_x + outline, l.input_y + outline,
+        l.input_w - 2 * outline, l.input_h - 2 * outline,
+        Theme::INPUT_INNER, radius - outline);
+
+    if count == 0 { return; }
+
+    // Dot sizing (matching hyprlock: dots_size=0.33, dots_spacing=0.15)
+    let dot_r = (l.input_h * 33 / 200).max(2 * l.scale); // 33% of half-height
+    let dot_spacing = (l.input_h * 15 / 100).max(2 * l.scale); // 15% of height
+    let dot_diameter = dot_r * 2;
+    let total_w = count as u32 * dot_diameter + (count as u32 - 1) * dot_spacing;
+
+    // Center dots horizontally in input field
+    let start_x = l.input_x + (l.input_w.saturating_sub(total_w)) / 2;
     let center_y = l.input_y + l.input_h / 2;
 
-    // Clear the input interior first
-    render::fill_rect(shadow, info,
-        l.input_x + 1, l.input_y + 1,
-        l.input_w - 2, l.input_h - 2,
-        Theme::BG_INPUT);
-
     for i in 0..count {
-        let cx = start_x + i as u32 * dot_spacing + dot_r;
-        if cx + dot_r >= l.input_x + l.input_w { break; }
-        // Draw filled circle (dot)
+        let cx = start_x + i as u32 * (dot_diameter + dot_spacing) + dot_r;
+        if cx + dot_r >= l.input_x + l.input_w - outline { break; }
+        // Draw filled circle (anti-aliased dot)
         let r2 = (dot_r * dot_r) as i32;
-        for dy in 0..dot_r * 2 {
-            for dx in 0..dot_r * 2 {
+        for dy in 0..dot_r * 2 + 2 {
+            for dx in 0..dot_r * 2 + 2 {
                 let ddx = dx as i32 - dot_r as i32;
                 let ddy = dy as i32 - dot_r as i32;
-                if ddx * ddx + ddy * ddy <= r2 {
+                let dist = ddx * ddx + ddy * ddy;
+                if dist <= r2 {
                     render::put_pixel(shadow, info,
                         cx - dot_r + dx, center_y - dot_r + dy,
-                        Theme::FG_DOT);
+                        Theme::INPUT_DOT);
                 }
             }
         }
@@ -125,24 +154,32 @@ fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
 
 /// Draw or hide the blinking cursor.
 fn draw_cursor(shadow: *mut u8, info: &FbInfo, l: &Layout, pos: usize, visible: bool) {
-    let dot_spacing = 10 * l.scale;
-    let cursor_x = l.input_x + 8 * l.scale + pos as u32 * dot_spacing;
-    let cursor_y = l.input_y + 4 * l.scale;
+    let dot_r = (l.input_h * 33 / 200).max(2 * l.scale);
+    let dot_spacing = (l.input_h * 15 / 100).max(2 * l.scale);
+    let dot_diameter = dot_r * 2;
+
+    // Cursor position: after last dot (or center if empty)
+    let cursor_x = if pos == 0 {
+        l.input_x + l.input_w / 2
+    } else {
+        let total_w = pos as u32 * dot_diameter + (pos as u32 - 1) * dot_spacing;
+        let start_x = l.input_x + (l.input_w.saturating_sub(total_w)) / 2;
+        start_x + pos as u32 * (dot_diameter + dot_spacing) + 2 * l.scale
+    };
+    let cursor_y = l.input_y + l.input_h / 4;
     let cursor_w = 2 * l.scale;
-    let cursor_h = l.input_h - 8 * l.scale;
-    let color = if visible { Theme::CURSOR } else { Theme::BG_INPUT };
+    let cursor_h = l.input_h / 2;
+    let color = if visible { Theme::INPUT_DOT } else { Theme::INPUT_INNER };
     render::fill_rect(shadow, info, cursor_x, cursor_y, cursor_w, cursor_h, color);
 }
 
 /// Draw status message below input field.
 fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32) {
-    // Clear status area
-    render::fill_rect(shadow, info,
-        l.card_x + l.padding, l.status_y,
-        l.card_w - 2 * l.padding, 20 * l.scale,
-        Theme::BG_CARD);
+    // Clear status area (redraw aurora background strip)
+    let (_, ch) = font::char_size(l.scale);
+    background::draw_aurora_region(shadow, info, 0, l.status_y, l.screen_w, ch + 4 * l.scale);
     font::draw_str_centered(shadow, info,
-        msg, l.card_x, l.card_w, l.status_y,
+        msg, 0, l.screen_w, l.status_y,
         color, None, l.scale);
 }
 
@@ -166,8 +203,8 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
         draw_background(shadow, info);
-        draw_card(shadow, info, &layout);
-        draw_title(shadow, info, &layout);
+        draw_clock(shadow, info, &layout);
+        draw_greeting(shadow, info, &layout);
         draw_input_box(shadow, info, &layout, true);
         draw_cursor(shadow, info, &layout, 0, true);
         // Full blit
@@ -214,8 +251,8 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                         let (shadow, _) = fb.shadow_ptr();
                         draw_status(shadow, info, &layout, "Verifying...", Theme::FG_SECONDARY);
                         framebuffer::blit_rect(fb,
-                            layout.card_x, layout.status_y,
-                            layout.card_w, 20 * layout.scale);
+                            0, layout.status_y,
+                            layout.screen_w, 24 * layout.scale);
                     });
 
                     // Derive key (OUTSIDE fb lock)
@@ -230,7 +267,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             // Success!
                             crate::config::load();
                             let name = crate::config::get("name");
-                            let msg = match &name {
+                            let welcome = match &name {
                                 Some(n) => format!("Welcome back, {}.", n),
                                 None => alloc::string::String::from("Identity verified."),
                             };
@@ -238,10 +275,16 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             framebuffer::with_fb(|fb| {
                                 let info = fb.info();
                                 let (shadow, _) = fb.shadow_ptr();
-                                draw_status(shadow, info, &layout, &msg, Theme::ACCENT_GREEN);
+                                // Show personalized greeting
+                                if let Some(n) = &name {
+                                    draw_greeting_name(shadow, info, &layout, n);
+                                }
+                                draw_status(shadow, info, &layout, &welcome, Theme::ACCENT_GREEN);
+                                // Blit greeting + status area
                                 framebuffer::blit_rect(fb,
-                                    layout.card_x, layout.status_y,
-                                    layout.card_w, 20 * layout.scale);
+                                    0, layout.greeting_y,
+                                    layout.screen_w,
+                                    layout.status_y + 24 * layout.scale - layout.greeting_y);
                             });
 
                             // Brief pause to show welcome
@@ -250,7 +293,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                                 core::hint::spin_loop();
                             }
 
-                            // Exit GUI mode, clear screen for intent loop
+                            // Exit GUI mode, clear screen for loop
                             framebuffer::set_gui_mode(false);
                             framebuffer::clear();
                             return key;
@@ -275,48 +318,59 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             }
 
                             let delay_secs = 1u64 << attempts.min(5);
-                            let delay_msg = format!("Wrong passphrase. Wait {}s...", delay_secs);
+                            let fail_msg = format!("Wrong passphrase ({}/10). Wait {}s...", attempts, delay_secs);
 
+                            // Change input border to fail color
                             framebuffer::with_fb(|fb| {
                                 let info = fb.info();
                                 let (shadow, _) = fb.shadow_ptr();
-                                draw_input_box(shadow, info, &layout, true);
-                                draw_cursor(shadow, info, &layout, 0, true);
-                                draw_status(shadow, info, &layout, &delay_msg, Theme::ACCENT_RED);
+                                // Redraw input with fail color border
+                                let radius = layout.input_h / 2;
+                                render::fill_rounded_rect_aa(shadow, info,
+                                    layout.input_x, layout.input_y,
+                                    layout.input_w, layout.input_h,
+                                    Theme::FAIL_COLOR, radius);
+                                let outline = 3 * layout.scale;
+                                render::fill_rounded_rect_aa(shadow, info,
+                                    layout.input_x + outline, layout.input_y + outline,
+                                    layout.input_w - 2 * outline, layout.input_h - 2 * outline,
+                                    Theme::INPUT_INNER, radius - outline);
+                                draw_status(shadow, info, &layout, &fail_msg, Theme::FAIL_COLOR);
                                 framebuffer::blit_rect(fb,
-                                    layout.card_x, layout.input_y,
-                                    layout.card_w, layout.card_h - (layout.input_y - layout.card_y));
+                                    0, layout.input_y,
+                                    layout.screen_w,
+                                    layout.status_y + 24 * layout.scale - layout.input_y);
                             });
 
                             // Wait for backoff
                             let start = crate::interrupts::ticks();
                             let delay_ticks = delay_secs * 100;
                             while crate::interrupts::ticks().wrapping_sub(start) < delay_ticks {
-                                // Update countdown
                                 let elapsed = crate::interrupts::ticks().wrapping_sub(start);
                                 let remaining = (delay_ticks.saturating_sub(elapsed) + 99) / 100;
-                                let cd_msg = format!("Wrong passphrase. Wait {}s...", remaining);
+                                let cd_msg = format!("Wrong passphrase ({}/10). Wait {}s...", attempts, remaining);
                                 framebuffer::with_fb(|fb| {
                                     let info = fb.info();
                                     let (shadow, _) = fb.shadow_ptr();
-                                    draw_status(shadow, info, &layout, &cd_msg, Theme::ACCENT_RED);
+                                    draw_status(shadow, info, &layout, &cd_msg, Theme::FAIL_COLOR);
                                     framebuffer::blit_rect(fb,
-                                        layout.card_x, layout.status_y,
-                                        layout.card_w, 20 * layout.scale);
+                                        0, layout.status_y,
+                                        layout.screen_w, 24 * layout.scale);
                                 });
                                 core::hint::spin_loop();
                             }
 
-                            // Clear error, reset input
+                            // Reset input field
                             framebuffer::with_fb(|fb| {
                                 let info = fb.info();
                                 let (shadow, _) = fb.shadow_ptr();
                                 draw_input_box(shadow, info, &layout, true);
                                 draw_cursor(shadow, info, &layout, 0, true);
-                                draw_status(shadow, info, &layout, "", Theme::BG_CARD);
+                                draw_status(shadow, info, &layout, "", Theme::FG_SECONDARY);
                                 framebuffer::blit_rect(fb,
-                                    layout.card_x, layout.input_y,
-                                    layout.card_w, layout.card_h - (layout.input_y - layout.card_y));
+                                    0, layout.input_y,
+                                    layout.screen_w,
+                                    layout.status_y + 24 * layout.scale - layout.input_y);
                             });
 
                             cursor_visible = true;

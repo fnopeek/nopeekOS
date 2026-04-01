@@ -25,6 +25,13 @@ impl Theme {
     pub const BORDER_INPUT: u32  = 0x004A3570;  // Input field border
     pub const BORDER_FOCUS: u32  = 0x007B50A0;  // Focused input border (bright purple)
 
+    // Hyprlock-style input field
+    pub const INPUT_OUTER: u32   = 0x00151515;  // Input outline (dark gray)
+    pub const INPUT_INNER: u32   = 0x00C8C8C8;  // Input fill (light gray)
+    pub const INPUT_DOT: u32     = 0x000A0A0A;  // Dot color (near-black)
+    pub const CHECK_COLOR: u32   = 0x00CC8822;  // Verifying color (amber)
+    pub const FAIL_COLOR: u32    = 0x00CC2222;  // Fail color (red)
+
     // Cursor
     pub const CURSOR: u32        = 0x00E8E8E8;  // Blinking cursor bar
 }
