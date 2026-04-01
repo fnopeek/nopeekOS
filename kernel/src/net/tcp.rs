@@ -15,6 +15,12 @@ use super::{ipv4, arp};
 const MAX_CONNECTIONS: usize = 16;
 const MSS: u16 = 1460; // standard Ethernet MSS
 const INITIAL_WINDOW: u16 = 65535; // Maximum TCP window (no window scaling)
+
+/// Calculate current receive window based on free buffer space.
+fn recv_window(conn: &TcpConn) -> u16 {
+    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len());
+    (free as u16).min(INITIAL_WINDOW)
+}
 const MAX_RETRIES: u8 = 3;
 const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 const RECV_BUF_SIZE: usize = 65535;
@@ -265,7 +271,7 @@ pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
 
         send_segment(
             remote_ip, local_port, remote_port,
-            seq, conn.rcv_nxt, ACK | PSH, INITIAL_WINDOW, chunk,
+            seq, conn.rcv_nxt, ACK | PSH, recv_window(conn), chunk,
         );
     }
 
@@ -273,13 +279,26 @@ pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
 }
 
 /// Receive data. Returns available data (may be empty if nothing received yet).
+/// Sends a window update ACK if significant buffer space was freed.
 pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
 
-    let available = conn.recv_buf.len().min(buf.len());
+    let before = conn.recv_buf.len();
+    let available = before.min(buf.len());
     for i in 0..available {
         buf[i] = conn.recv_buf.pop_front().unwrap();
+    }
+
+    // Send window update if we freed significant space (>25% of buffer)
+    if available > 0 && conn.state == State::Established {
+        let freed = available;
+        if freed > RECV_BUF_SIZE / 4 || (before >= RECV_BUF_SIZE * 3 / 4 && conn.recv_buf.len() < RECV_BUF_SIZE / 2) {
+            send_segment(
+                conn.remote_ip, conn.local_port, conn.remote_port,
+                conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
+            );
+        }
     }
 
     Ok(available)
@@ -446,10 +465,10 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 conn.state = State::Established;
                 conn.established = true;
 
-                // Send ACK
+                // Send ACK with full window
                 send_segment(
                     conn.remote_ip, conn.local_port, conn.remote_port,
-                    conn.snd_nxt, conn.rcv_nxt, ACK, INITIAL_WINDOW, &[],
+                    conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
                 );
             }
         }
@@ -486,12 +505,11 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 );
             }
 
-            // Send delayed ACK if data was received
+            // Send ACK immediately for received data (with dynamic window)
             if conn.ack_pending && !payload.is_empty() {
-                // Send ACK immediately for data (PSH optimization)
                 send_segment(
                     conn.remote_ip, conn.local_port, conn.remote_port,
-                    conn.snd_nxt, conn.rcv_nxt, ACK, INITIAL_WINDOW, &[],
+                    conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
                 );
                 conn.ack_pending = false;
             }
@@ -544,7 +562,7 @@ pub fn tick_connections() {
         if slot.ack_pending && now - slot.ack_tick >= DELAYED_ACK_TICKS {
             send_segment(
                 slot.remote_ip, slot.local_port, slot.remote_port,
-                slot.snd_nxt, slot.rcv_nxt, ACK, INITIAL_WINDOW, &[],
+                slot.snd_nxt, slot.rcv_nxt, ACK, recv_window(slot), &[],
             );
             slot.ack_pending = false;
         }
