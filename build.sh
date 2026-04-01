@@ -527,6 +527,45 @@ case "${1:-}" in
     vbox-clean)
         clean_vbox
         ;;
+    release)
+        check_deps
+        build
+        log "Creating release artifacts..."
+        RELEASE_DIR="$PROJECT_DIR/release"
+        mkdir -p "$RELEASE_DIR"
+
+        # Copy kernel binary
+        cp "$KERNEL_BIN" "$RELEASE_DIR/kernel.bin"
+
+        # Read version from Cargo.toml
+        VERSION=$(grep '^version' "$PROJECT_DIR/kernel/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        SIZE=$(stat -c%s "$RELEASE_DIR/kernel.bin")
+        SHA256=$(sha256sum "$RELEASE_DIR/kernel.bin" | cut -d' ' -f1)
+
+        # Write manifest
+        cat > "$RELEASE_DIR/manifest" <<MANIFEST
+version=$VERSION
+size=$SIZE
+sha256=$SHA256
+MANIFEST
+
+        ok "Manifest: v$VERSION, $SIZE bytes"
+        log "SHA-256: $SHA256"
+
+        # Sign with ECDSA P-384 if key exists
+        KEY_FILE="$PROJECT_DIR/update.key"
+        if [ -f "$KEY_FILE" ]; then
+            openssl dgst -sha256 -sign "$KEY_FILE" -out "$RELEASE_DIR/kernel.sig" "$RELEASE_DIR/kernel.bin"
+            ok "Signed with $KEY_FILE"
+        else
+            warn "No signing key found at $KEY_FILE"
+            warn "Generate with: openssl ecparam -name secp384r1 -genkey -noout -out update.key"
+            warn "Extract pubkey: openssl ec -in update.key -pubout -outform DER -out update.pub"
+        fi
+
+        ok "Release artifacts in $RELEASE_DIR/"
+        ls -la "$RELEASE_DIR/"
+        ;;
     all)
         check_deps
         build

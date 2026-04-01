@@ -315,3 +315,227 @@ pub fn create_esp(
 
     Ok(())
 }
+
+// ============================================================
+// FAT32 Reader — for OTA update (find + overwrite kernel.bin)
+// ============================================================
+
+struct Fat32Reader {
+    /// Absolute start sector of ESP on NVMe
+    part_start: u64,
+    /// Sectors per FAT
+    fat_size: u32,
+    /// First data sector (relative to partition start)
+    data_start: u32,
+    /// Sectors per cluster
+    spc: u32,
+}
+
+impl Fat32Reader {
+    /// Parse the boot sector (BPB) to initialize the reader.
+    fn from_esp(part_start: u64) -> Result<Self, &'static str> {
+        let mut bs = [0u8; 512];
+        nvme::read_sector(part_start, &mut bs).map_err(|_| "ESP read error")?;
+
+        // Verify FAT32 signature
+        if bs[510] != 0x55 || bs[511] != 0xAA { return Err("ESP: bad signature"); }
+
+        let spc = bs[13] as u32;
+        if spc == 0 { return Err("ESP: bad SPC"); }
+        let reserved = u16::from_le_bytes([bs[14], bs[15]]) as u32;
+        let num_fats = bs[16] as u32;
+        let fat_size = u32::from_le_bytes([bs[36], bs[37], bs[38], bs[39]]);
+        let data_start = reserved + num_fats * fat_size;
+
+        Ok(Fat32Reader { part_start, fat_size, data_start, spc })
+    }
+
+    fn read_sector(&self, rel_sector: u32, buf: &mut [u8; 512]) -> Result<(), &'static str> {
+        nvme::read_sector(self.part_start + rel_sector as u64, buf)
+            .map_err(|_| "FAT32 read error")
+    }
+
+    fn write_sector(&self, rel_sector: u32, buf: &[u8; 512]) -> Result<(), &'static str> {
+        nvme::write_sector(self.part_start + rel_sector as u64, buf)
+            .map_err(|_| "FAT32 write error")
+    }
+
+    fn cluster_to_sector(&self, cluster: u32) -> u32 {
+        self.data_start + (cluster - 2) * self.spc
+    }
+
+    /// Read next cluster from FAT chain.
+    fn fat_next(&self, cluster: u32) -> Result<Option<u32>, &'static str> {
+        let offset_bytes = cluster as u64 * 4;
+        let fat_sector = RESERVED_SECTORS + (offset_bytes / 512) as u32;
+        let fat_offset = (offset_bytes % 512) as usize;
+
+        let mut sec = [0u8; 512];
+        self.read_sector(fat_sector, &mut sec)?;
+        let val = u32::from_le_bytes([
+            sec[fat_offset], sec[fat_offset + 1],
+            sec[fat_offset + 2], sec[fat_offset + 3],
+        ]) & 0x0FFF_FFFF;
+
+        if val >= 0x0FFF_FFF8 { Ok(None) } else { Ok(Some(val)) }
+    }
+
+    /// Write a FAT entry (both copies).
+    fn fat_write(&self, cluster: u32, value: u32) -> Result<(), &'static str> {
+        let offset_bytes = cluster as u64 * 4;
+        let fat_sector = (offset_bytes / 512) as u32;
+        let fat_offset = (offset_bytes % 512) as usize;
+
+        for fat_num in 0..2u32 {
+            let abs = RESERVED_SECTORS + fat_num * self.fat_size + fat_sector;
+            let mut sec = [0u8; 512];
+            self.read_sector(abs, &mut sec)?;
+            sec[fat_offset..fat_offset + 4].copy_from_slice(&value.to_le_bytes());
+            self.write_sector(abs, &sec)?;
+        }
+        Ok(())
+    }
+
+    /// Find a directory entry by 8.3 name in a given directory cluster.
+    /// Returns (first_cluster, file_size, dir_sector, entry_offset).
+    fn find_entry(&self, dir_cluster: u32, name: &[u8; 11])
+        -> Result<(u32, u32, u32, usize), &'static str>
+    {
+        let mut cluster = dir_cluster;
+        loop {
+            let sector = self.cluster_to_sector(cluster);
+            for s in 0..self.spc {
+                let mut sec = [0u8; 512];
+                self.read_sector(sector + s, &mut sec)?;
+                for i in 0..16 { // 16 entries per sector
+                    let off = i * 32;
+                    if sec[off] == 0x00 { return Err("entry not found"); }
+                    if sec[off] == 0xE5 { continue; } // deleted
+                    if &sec[off..off + 11] == name {
+                        let cl_lo = u16::from_le_bytes([sec[off + 26], sec[off + 27]]) as u32;
+                        let cl_hi = u16::from_le_bytes([sec[off + 20], sec[off + 21]]) as u32;
+                        let first_cl = (cl_hi << 16) | cl_lo;
+                        let size = u32::from_le_bytes([
+                            sec[off + 28], sec[off + 29], sec[off + 30], sec[off + 31],
+                        ]);
+                        return Ok((first_cl, size, sector + s, off));
+                    }
+                }
+            }
+            match self.fat_next(cluster)? {
+                Some(next) => cluster = next,
+                None => return Err("entry not found"),
+            }
+        }
+    }
+
+    /// Count clusters in a FAT chain.
+    fn chain_len(&self, first: u32) -> Result<u32, &'static str> {
+        let mut count = 0;
+        let mut cl = first;
+        loop {
+            count += 1;
+            match self.fat_next(cl)? {
+                Some(next) => cl = next,
+                None => return Ok(count),
+            }
+            if count > 100_000 { return Err("FAT chain too long"); }
+        }
+    }
+
+    /// Update directory entry size field.
+    fn update_entry_size(&self, dir_sector: u32, entry_offset: usize, new_size: u32)
+        -> Result<(), &'static str>
+    {
+        let mut sec = [0u8; 512];
+        self.read_sector(dir_sector, &mut sec)?;
+        sec[entry_offset + 28..entry_offset + 32].copy_from_slice(&new_size.to_le_bytes());
+        self.write_sector(dir_sector, &sec)
+    }
+}
+
+/// Update kernel.bin on the ESP partition.
+/// Finds the existing file, overwrites its data, extends FAT chain if needed.
+pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
+    let fs = Fat32Reader::from_esp(esp_start)?;
+
+    // Navigate: root (cluster 2) → /boot → KERNEL.BIN
+    let boot_name = make_name(b"BOOT", b"");
+    let (boot_cl, _, _, _) = fs.find_entry(ROOT_CLUSTER, &boot_name)?;
+
+    let kernel_name = make_name(b"KERNEL", b"BIN");
+    let (kernel_cl, old_size, dir_sec, dir_off) = fs.find_entry(boot_cl, &kernel_name)?;
+
+    let new_sectors = ((data.len() + 511) / 512) as u32;
+    let _old_clusters = fs.chain_len(kernel_cl)?;
+    let new_clusters = (new_sectors + fs.spc - 1) / fs.spc;
+
+    crate::kprintln!("[npk] ESP: kernel.bin at cluster {}, {} -> {} bytes",
+        kernel_cl, old_size, data.len());
+
+    // Write data to existing clusters (follow FAT chain)
+    let mut cl = kernel_cl;
+    let mut written = 0usize;
+    let mut clusters_used = 0u32;
+    loop {
+        let sector = fs.cluster_to_sector(cl);
+        for s in 0..fs.spc {
+            if written >= data.len() {
+                // Zero-pad remaining sectors in this cluster
+                let zero = [0u8; 512];
+                fs.write_sector(sector + s, &zero)?;
+            } else {
+                let mut sec = [0u8; 512];
+                let end = (written + 512).min(data.len());
+                sec[..end - written].copy_from_slice(&data[written..end]);
+                fs.write_sector(sector + s, &sec)?;
+                written = end;
+            }
+        }
+        clusters_used += 1;
+
+        if clusters_used >= new_clusters && written >= data.len() {
+            // Mark this as end of chain
+            fs.fat_write(cl, FAT_EOC)?;
+            // Free remaining old clusters
+            if let Ok(Some(next)) = fs.fat_next(cl) {
+                free_chain(&fs, next)?;
+            }
+            break;
+        }
+
+        match fs.fat_next(cl)? {
+            Some(next) => cl = next,
+            None => {
+                // Need more clusters — allocate after last known cluster
+                if clusters_used < new_clusters {
+                    let new_cl = cl + 1; // simple next-fit allocation
+                    fs.fat_write(cl, new_cl)?;
+                    fs.fat_write(new_cl, FAT_EOC)?;
+                    cl = new_cl;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Update directory entry with new file size
+    fs.update_entry_size(dir_sec, dir_off, data.len() as u32)?;
+
+    Ok(())
+}
+
+/// Free a FAT chain starting at the given cluster.
+fn free_chain(fs: &Fat32Reader, start: u32) -> Result<(), &'static str> {
+    let mut cl = start;
+    loop {
+        let next = fs.fat_next(cl)?;
+        fs.fat_write(cl, 0)?; // Mark as free
+        match next {
+            Some(n) => cl = n,
+            None => break,
+        }
+    }
+    Ok(())
+}

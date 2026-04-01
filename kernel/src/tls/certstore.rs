@@ -177,6 +177,30 @@ fn ecdsa_p384_verify_sha384(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool
     vk.verify_prehash(&digest, &sig).is_ok()
 }
 
+/// Verify an ECDSA P-384 signature over a prehashed message (SHA-256).
+/// pubkey: 97-byte uncompressed SEC1 point.
+/// prehash: 32-byte SHA-256 digest.
+/// signature: DER-encoded ECDSA signature.
+pub fn verify_p384_prehash(pubkey: &[u8], prehash: &[u8; 32], signature: &[u8]) -> bool {
+    use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
+    use p384::ecdsa::signature::hazmat::PrehashVerifier;
+    use p384::EncodedPoint;
+
+    let point = match EncodedPoint::from_bytes(pubkey) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let vk = match VerifyingKey::from_encoded_point(&point) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let sig = match P384Sig::from_der(signature) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    vk.verify_prehash(prehash, &sig).is_ok()
+}
+
 fn cn_matches(cert: &X509Cert<'_>, hostname: &str) -> bool {
     let cn = core::str::from_utf8(cert.subject_cn).unwrap_or("");
     if cn.is_empty() { return false; }

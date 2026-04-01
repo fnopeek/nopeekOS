@@ -39,6 +39,7 @@ mod intel_nic;
 mod netdev;
 mod setup;
 mod framebuffer;
+mod gui;
 mod xhci;
 #[allow(dead_code)]
 mod gpt;
@@ -47,6 +48,7 @@ mod fat32;
 #[allow(dead_code, unused_imports)]
 mod install;
 mod acpi;
+mod update_key;
 
 use core::panic::PanicInfo;
 
@@ -241,113 +243,13 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
         vga::show_status(b"Setup complete");
     } else {
         // === Subsequent boot: Verify passphrase ===
-        kprintln!();
-        kprintln!("[npk] ─────────────────────────────────");
-        kprintln!("[npk]  Identity required.");
-        kprintln!("[npk]  Your passphrase IS your identity.");
-        #[cfg(feature = "installer")]
-        kprintln!("[npk]  Type RESET to wipe and reinstall.");
-        kprintln!("[npk] ─────────────────────────────────");
-        kprintln!();
-
-        let mut attempts: u32 = 0;
-        let _master_key = loop {
-            if attempts > 0 {
-                let delay_secs = 1u64 << attempts.min(5);
-                kprintln!("[npk] Wait {} seconds...", delay_secs);
-                let start = interrupts::ticks();
-                let delay_ticks = delay_secs * 100;
-                while interrupts::ticks() - start < delay_ticks {
-                    // SAFETY: hlt until next timer interrupt
-                    unsafe { core::arch::asm!("hlt"); }
-                }
-            }
-
-            kprint!("[npk] Passphrase: ");
-            let mut buf = [0u8; 128];
-            let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
-            if len == 0 {
-                kprintln!("[npk] Passphrase cannot be empty.");
-                continue;
-            }
-
-            // Factory reset: only available on installer builds (USB stick)
-            #[cfg(feature = "installer")]
-            if len == 5 && &buf[..5] == b"RESET" {
-                kprintln!();
-                kprintln!("[npk] !! FACTORY RESET !!");
-                kprintln!("[npk] This will ERASE ALL DATA.");
-                kprint!("[npk] Type YES to confirm: ");
-                let mut confirm = [0u8; 16];
-                let clen = { serial::SERIAL.lock().read_line(&mut confirm) };
-                if clen == 3 && &confirm[..3] == b"YES" {
-                    for b in buf.iter_mut() { *b = 0; }
-
-                    // If installer build: full reinstall (GPT + ESP + npkFS)
-                    if install::has_installer() && nvme::is_available() {
-                        match install::install_to_nvme() {
-                            Ok(()) => {}
-                            Err(e) => {
-                                kprintln!("[npk] Installation failed: {}", e);
-                                kprintln!("[npk] System halted.");
-                                loop { unsafe { core::arch::asm!("cli; hlt"); } }
-                            }
-                        }
-                    } else {
-                        kprintln!("[npk] Formatting...");
-                        let _ = npkfs::mkfs();
-                        let _ = npkfs::mount();
-                    }
-
-                    // Re-read salt from freshly formatted npkFS
-                    let salt = npkfs::install_salt().unwrap_or_else(|| {
-                        let mut s = [0u8; 16];
-                        let hash = blake3::hash(b"nopeekOS.fallback.salt");
-                        s.copy_from_slice(&hash.as_bytes()[..16]);
-                        s
-                    });
-
-                    kprintln!();
-                    if !setup::run_fresh_install(&salt) {
-                        kprintln!("[npk] Setup failed. System halted.");
-                        loop { unsafe { core::arch::asm!("cli; hlt"); } }
-                    }
-                    break [0u8; 32]; // master key already set by setup
-                } else {
-                    kprintln!("[npk] Reset cancelled.");
-                    continue;
-                }
-            }
-
-            let key = crypto::derive_master_key(&buf[..len], &salt);
-            for b in buf.iter_mut() { *b = 0; }
-
-            crypto::set_master_key(key);
-
-            match npkfs::fetch(".npk-keycheck") {
-                Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
-                    config::load();
-                    if let Some(name) = config::get("name") {
-                        kprintln!("[npk] Welcome back, {}.", name);
-                    } else {
-                        kprintln!("[npk] Identity verified.");
-                    }
-                    break key;
-                }
-                _ => {
-                    kprintln!("[npk] Wrong passphrase.");
-                }
-            }
-
-            crypto::clear_master_key();
-            attempts += 1;
-
-            if attempts >= 10 {
-                kprintln!("[npk] Too many failed attempts. System halted.");
-                loop { unsafe { core::arch::asm!("cli; hlt"); } }
-            }
-        };
-
+        if framebuffer::is_available() {
+            // Graphical login screen
+            let _master_key = gui::login::run(&salt);
+        } else {
+            // Fallback: text-mode login (serial only, no framebuffer)
+            text_mode_auth(&salt);
+        }
         vga::show_status(b"Identity verified");
     }
 
@@ -393,6 +295,109 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
     kprintln!();
 
     intent::run_loop(vault_ref, session_id);
+}
+
+/// Text-mode passphrase authentication (fallback when no framebuffer).
+fn text_mode_auth(salt: &[u8; 16]) {
+    kprintln!();
+    kprintln!("[npk] ─────────────────────────────────");
+    kprintln!("[npk]  Identity required.");
+    kprintln!("[npk]  Your passphrase IS your identity.");
+    #[cfg(feature = "installer")]
+    kprintln!("[npk]  Type RESET to wipe and reinstall.");
+    kprintln!("[npk] ─────────────────────────────────");
+    kprintln!();
+
+    let mut attempts: u32 = 0;
+    loop {
+        if attempts > 0 {
+            let delay_secs = 1u64 << attempts.min(5);
+            kprintln!("[npk] Wait {} seconds...", delay_secs);
+            let start = interrupts::ticks();
+            let delay_ticks = delay_secs * 100;
+            while interrupts::ticks() - start < delay_ticks {
+                core::hint::spin_loop();
+            }
+        }
+
+        kprint!("[npk] Passphrase: ");
+        let mut buf = [0u8; 128];
+        let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
+        if len == 0 {
+            kprintln!("[npk] Passphrase cannot be empty.");
+            continue;
+        }
+
+        #[cfg(feature = "installer")]
+        if len == 5 && &buf[..5] == b"RESET" {
+            kprintln!();
+            kprintln!("[npk] !! FACTORY RESET !!");
+            kprintln!("[npk] This will ERASE ALL DATA.");
+            kprint!("[npk] Type YES to confirm: ");
+            let mut confirm = [0u8; 16];
+            let clen = { serial::SERIAL.lock().read_line(&mut confirm) };
+            if clen == 3 && &confirm[..3] == b"YES" {
+                for b in buf.iter_mut() { *b = 0; }
+                if install::has_installer() && nvme::is_available() {
+                    match install::install_to_nvme() {
+                        Ok(()) => {}
+                        Err(e) => {
+                            kprintln!("[npk] Installation failed: {}", e);
+                            kprintln!("[npk] System halted.");
+                            loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                        }
+                    }
+                } else {
+                    kprintln!("[npk] Formatting...");
+                    let _ = npkfs::mkfs();
+                    let _ = npkfs::mount();
+                }
+                let salt = npkfs::install_salt().unwrap_or_else(|| {
+                    let mut s = [0u8; 16];
+                    let hash = blake3::hash(b"nopeekOS.fallback.salt");
+                    s.copy_from_slice(&hash.as_bytes()[..16]);
+                    s
+                });
+                kprintln!();
+                if !setup::run_fresh_install(&salt) {
+                    kprintln!("[npk] Setup failed. System halted.");
+                    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                }
+                return;
+            } else {
+                kprintln!("[npk] Reset cancelled.");
+                continue;
+            }
+        }
+
+        let key = crypto::derive_master_key(&buf[..len], salt);
+        for b in buf.iter_mut() { *b = 0; }
+
+        crypto::set_master_key(key);
+
+        match npkfs::fetch(".npk-keycheck") {
+            Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
+                config::load();
+                if let Some(name) = config::get("name") {
+                    kprintln!("[npk] Welcome back, {}.", name);
+                } else {
+                    kprintln!("[npk] Identity verified.");
+                }
+                return;
+            }
+            _ => {
+                kprintln!("[npk] Wrong passphrase.");
+            }
+        }
+
+        crypto::clear_master_key();
+        attempts += 1;
+
+        if attempts >= 10 {
+            kprintln!("[npk] Too many failed attempts. System halted.");
+            loop { unsafe { core::arch::asm!("cli; hlt"); } }
+        }
+    }
 }
 
 #[panic_handler]
