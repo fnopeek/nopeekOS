@@ -262,26 +262,34 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
     }
 
     // Receive response (up to max_size)
-    // Large downloads need real time-based patience, not just retry counts
+    // Large downloads need real time-based patience
     let mut response = alloc::vec::Vec::new();
     let mut buf = [0u8; 4096];
     let mut last_data_tick = crate::interrupts::ticks();
+    let mut total_errors = 0u32;
     loop {
+        // Poll network before each recv attempt
+        for _ in 0..2000 { crate::net::poll(); core::hint::spin_loop(); }
+
         match crate::tls::tls_recv(&mut tls_session, &mut buf) {
             Ok(0) => {
-                // No data — poll network and check timeout
-                for _ in 0..5000 { crate::net::poll(); core::hint::spin_loop(); }
-
                 let idle = crate::interrupts::ticks().wrapping_sub(last_data_tick);
-                // Timeout: 3s if we have data, 1s if empty
-                let timeout = if response.is_empty() { 100 } else { 300 };
+                // Timeout: 5s if we have data, 2s if empty
+                let timeout = if response.is_empty() { 200 } else { 500 };
                 if idle > timeout { break; }
             }
             Ok(n) => {
                 response.extend_from_slice(&buf[..n]);
                 last_data_tick = crate::interrupts::ticks();
             }
-            Err(_) => break,
+            Err(_) => {
+                total_errors += 1;
+                // Don't break on first error — TLS can have transient issues
+                // Poll network and retry
+                for _ in 0..10000 { crate::net::poll(); core::hint::spin_loop(); }
+                let idle = crate::interrupts::ticks().wrapping_sub(last_data_tick);
+                if idle > 500 || total_errors > 20 { break; }
+            }
         }
         if response.len() > max_size { break; }
     }
