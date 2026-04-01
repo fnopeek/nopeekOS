@@ -226,3 +226,73 @@ fn print_response_data(data: &[u8]) {
         Err(_) => kprintln!("[npk] ({} bytes, binary)", data.len()),
     }
 }
+
+/// Reusable HTTPS GET — returns the response body as Vec<u8>.
+/// Supports large downloads (up to max_size bytes, default 4 MB).
+pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    // Resolve hostname
+    let ip = if let Some(ip) = parse_ip(host) {
+        ip
+    } else {
+        crate::net::dns::resolve(host).ok_or("DNS resolution failed")?
+    };
+
+    // ARP resolve gateway
+    crate::net::arp::request([10, 0, 2, 2]);
+    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+
+    let handle = crate::net::tcp::connect(ip, 443).map_err(|_| "TCP connect failed")?;
+
+    let mut tls_session = match crate::tls::tls_connect(handle, host) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = crate::net::tcp::close(handle);
+            return Err("TLS handshake failed");
+        }
+    };
+
+    // Send HTTP GET
+    let request = alloc::format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    if crate::tls::tls_send(&mut tls_session, request.as_bytes()).is_err() {
+        let _ = crate::tls::tls_close(&mut tls_session);
+        return Err("HTTP send failed");
+    }
+
+    // Receive response (up to max_size)
+    let mut response = alloc::vec::Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut empty_count = 0;
+    loop {
+        match crate::tls::tls_recv(&mut tls_session, &mut buf) {
+            Ok(0) => {
+                empty_count += 1;
+                if empty_count > 5 && response.is_empty() { break; }
+                if empty_count > 2 && !response.is_empty() { break; }
+            }
+            Ok(n) => { response.extend_from_slice(&buf[..n]); empty_count = 0; }
+            Err(_) => break,
+        }
+        if response.len() > max_size { break; }
+    }
+    let _ = crate::tls::tls_close(&mut tls_session);
+
+    if response.is_empty() { return Err("empty response"); }
+
+    // Extract body (skip HTTP headers)
+    let header_end = response.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(response.len());
+    let body_start = if header_end < response.len() { header_end + 4 } else { response.len() };
+
+    // Check HTTP status
+    if let Ok(hdr) = core::str::from_utf8(&response[..header_end.min(64)]) {
+        if !hdr.contains("200") {
+            return Err("HTTP non-200 response");
+        }
+    }
+
+    Ok(response[body_start..].to_vec())
+}

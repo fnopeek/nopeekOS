@@ -10,7 +10,7 @@ pub fn intent_status(vault: &Vault) {
     let audit_count = crate::audit::total_count();
 
     kprintln!();
-    kprintln!("  nopeekOS v0.1.0 – AI-native Operating System");
+    kprintln!("  nopeekOS v{} – AI-native Operating System", env!("CARGO_PKG_VERSION"));
     kprintln!("  ──────────────────────────────────────────");
     kprintln!("  Uptime:        {}m {}s", uptime / 60, uptime % 60);
     kprintln!("  Phase:         2 (Capability Enforcement)");
@@ -41,6 +41,26 @@ pub fn intent_status(vault: &Vault) {
         kprintln!("  npkFS:         not mounted");
     }
     kprintln!();
+}
+
+pub fn intent_uname(args: &str) {
+    let all = args.contains("-a") || args.is_empty();
+    if all {
+        kprintln!("nopeekOS {} x86_64 release (rustc {})",
+            env!("CARGO_PKG_VERSION"),
+            rustc_version());
+    } else {
+        if args.contains("-s") { kprintln!("nopeekOS"); }
+        if args.contains("-r") || args.contains("-v") {
+            kprintln!("{}", env!("CARGO_PKG_VERSION"));
+        }
+        if args.contains("-m") { kprintln!("x86_64"); }
+    }
+}
+
+fn rustc_version() -> &'static str {
+    // Embedded at compile time via env
+    option_env!("RUSTC_VERSION").unwrap_or("nightly")
 }
 
 pub fn intent_caps(vault: &Vault) {

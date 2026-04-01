@@ -3,6 +3,7 @@
 //! Parses Multiboot2 framebuffer info, provides pixel-based text output.
 //! Replaces VGA text mode for UEFI systems without legacy VGA.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 /// Framebuffer info parsed from Multiboot2.
@@ -29,7 +30,36 @@ pub struct FbConsole {
 // The shadow pointer is heap-allocated and exclusively owned.
 unsafe impl Send for FbConsole {}
 
+impl FbConsole {
+    pub fn info(&self) -> &FbInfo {
+        &self.info
+    }
+
+    /// Raw shadow buffer pointer and size.
+    /// SAFETY: Caller must ensure exclusive access (e.g. via CONSOLE lock).
+    pub fn shadow_ptr(&self) -> (*mut u8, usize) {
+        (self.shadow, self.shadow_size)
+    }
+}
+
+/// Execute a closure with exclusive access to the framebuffer console.
+pub fn with_fb<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut FbConsole) -> R,
+{
+    let mut console = CONSOLE.lock();
+    console.as_mut().map(f)
+}
+
 pub static CONSOLE: Mutex<Option<FbConsole>> = Mutex::new(None);
+
+/// When true, write_str/write_byte skip the framebuffer (GUI owns it).
+/// kprintln still goes to serial.
+static GUI_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_gui_mode(active: bool) {
+    GUI_MODE.store(active, Ordering::Release);
+}
 
 const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
@@ -226,8 +256,29 @@ fn scroll(console: &mut FbConsole) {
     blit_all(console);
 }
 
+/// Blit a rectangular region from shadow buffer to MMIO framebuffer.
+pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
+    let info = &console.info;
+    if info.bpp != 32 { return; } // only 32bpp supported for rect blit
+    let fb = info.addr as *mut u8;
+    for row in y..(y + h).min(info.height) {
+        let offset = (row * info.pitch + x * 4) as usize;
+        let len = ((w.min(info.width.saturating_sub(x))) * 4) as usize;
+        // SAFETY: shadow and fb are valid for shadow_size bytes, bounds checked above
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                console.shadow.add(offset),
+                fb.add(offset),
+                len,
+            );
+        }
+    }
+}
+
 /// Write a string to the framebuffer console.
 pub fn write_str(s: &str) {
+    // GUI owns the framebuffer — skip text console writes
+    if GUI_MODE.load(Ordering::Relaxed) { return; }
     let mut console = CONSOLE.lock();
     let console = match console.as_mut() {
         Some(c) => c,
@@ -292,6 +343,7 @@ pub fn write_str(s: &str) {
 
 /// Write a single byte to framebuffer (for echo from serial read).
 pub fn write_byte(byte: u8) {
+    if GUI_MODE.load(Ordering::Relaxed) { return; }
     let mut console = CONSOLE.lock();
     let console = match console.as_mut() {
         Some(c) => c,
@@ -447,7 +499,7 @@ pub fn early_debug(ch: u8) {
 // ============================================================
 
 #[rustfmt::skip]
-static FONT: [u8; 2048] = [
+pub static FONT: [u8; 2048] = [
     // 0x00-0x1F: control chars (blank)
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,

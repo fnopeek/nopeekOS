@@ -103,6 +103,33 @@ pub fn detect_npkfs_offset() -> Option<u64> {
     Some(start_lba / 8)
 }
 
+/// Detect existing GPT and return ESP (EFI System Partition) sector offset.
+pub fn detect_esp_offset() -> Option<u64> {
+    if !nvme::is_available() { return None; }
+
+    let mut hdr = [0u8; 512];
+    nvme::read_sector(1, &mut hdr).ok()?;
+
+    // Check GPT signature
+    if &hdr[0..8] != b"EFI PART" { return None; }
+
+    // Read first partition entry (sector 2, offset 0 = first entry = ESP)
+    let mut entry_sec = [0u8; 512];
+    nvme::read_sector(2, &mut entry_sec).ok()?;
+
+    // Check type GUID matches ESP
+    if &entry_sec[0..16] != &ESP_TYPE_GUID { return None; }
+
+    // Read starting LBA (offset 32 within entry)
+    let start_lba = u64::from_le_bytes([
+        entry_sec[32], entry_sec[33], entry_sec[34], entry_sec[35],
+        entry_sec[36], entry_sec[37], entry_sec[38], entry_sec[39],
+    ]);
+
+    if start_lba == 0 { return None; }
+    Some(start_lba)
+}
+
 /// Write GPT to NVMe. Returns the sector where npkFS partition starts.
 pub fn write_gpt() -> Result<u64, &'static str> {
     let total_sectors = nvme::capacity().ok_or("NVMe not available")?;

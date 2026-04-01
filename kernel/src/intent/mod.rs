@@ -5,9 +5,10 @@
 
 mod auth;
 mod fs;
-mod http;
+pub(crate) mod http;
 mod net;
 mod system;
+mod update;
 mod wasm;
 
 use crate::capability::{self, CapId, Vault, Rights};
@@ -325,6 +326,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 system::intent_status(&vault.lock());
             }
         }
+        "uname" | "version" | "kernel" => {
+            system::intent_uname(args);
+        }
         "caps" | "capabilities" => {
             if require_cap(vault, &session, Rights::READ, "caps") {
                 system::intent_caps(&vault.lock());
@@ -478,6 +482,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, &session, Rights::EXECUTE, "halt") {
                 system::intent_halt();
+            }
+        }
+
+        "update" | "upgrade" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "update") {
+                update::intent_update(args);
             }
         }
 
