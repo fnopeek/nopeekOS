@@ -3,51 +3,56 @@
 use crate::{kprint, kprintln, crypto, serial};
 
 pub fn intent_lock() {
-    kprintln!("[npk] System locked. All capabilities suspended.");
-    kprintln!("[npk] Enter passphrase to unlock.");
+    kprintln!("[npk] System locked.");
     crypto::clear_master_key();
 
     let salt = crate::npkfs::install_salt().unwrap_or([0u8; 16]);
-    let mut attempts: u32 = 0;
 
-    loop {
-        if attempts > 0 {
-            let delay_secs = 1u64 << attempts.min(5);
-            kprintln!("[npk] Wait {} seconds...", delay_secs);
-            let start = crate::interrupts::ticks();
-            let delay_ticks = delay_secs * 100;
-            while crate::interrupts::ticks() - start < delay_ticks {
-                core::hint::spin_loop();
-            }
-        }
-
-        kprint!("[npk] Passphrase: ");
-        let mut buf = [0u8; 128];
-        let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
-        if len == 0 { continue; }
-
-        let key = crypto::derive_master_key(&buf[..len], &salt);
-        for b in buf.iter_mut() { *b = 0; }
-
-        crypto::set_master_key(key);
-
-        match crate::npkfs::fetch(".npk-keycheck") {
-            Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
-                crate::config::load();
-                if let Some(name) = crate::config::get("name") {
-                    kprintln!("[npk] Welcome back, {}.", name);
-                } else {
-                    kprintln!("[npk] Unlocked.");
+    // Use GUI login screen if framebuffer available
+    if crate::framebuffer::is_available() {
+        let _key = crate::gui::login::run(&salt);
+    } else {
+        // Fallback: text-mode unlock
+        let mut attempts: u32 = 0;
+        loop {
+            if attempts > 0 {
+                let delay_secs = 1u64 << attempts.min(5);
+                kprintln!("[npk] Wait {} seconds...", delay_secs);
+                let start = crate::interrupts::ticks();
+                let delay_ticks = delay_secs * 100;
+                while crate::interrupts::ticks() - start < delay_ticks {
+                    core::hint::spin_loop();
                 }
-                return;
             }
-            _ => {
-                crypto::clear_master_key();
-                kprintln!("[npk] Wrong passphrase.");
-                attempts += 1;
-                if attempts >= 10 {
-                    kprintln!("[npk] Too many failed attempts.");
-                    crate::intent::system::intent_halt();
+
+            kprint!("[npk] Passphrase: ");
+            let mut buf = [0u8; 128];
+            let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
+            if len == 0 { continue; }
+
+            let key = crypto::derive_master_key(&buf[..len], &salt);
+            for b in buf.iter_mut() { *b = 0; }
+
+            crypto::set_master_key(key);
+
+            match crate::npkfs::fetch(".npk-keycheck") {
+                Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
+                    crate::config::load();
+                    if let Some(name) = crate::config::get("name") {
+                        kprintln!("[npk] Welcome back, {}.", name);
+                    } else {
+                        kprintln!("[npk] Unlocked.");
+                    }
+                    return;
+                }
+                _ => {
+                    crypto::clear_master_key();
+                    kprintln!("[npk] Wrong passphrase.");
+                    attempts += 1;
+                    if attempts >= 10 {
+                        kprintln!("[npk] Too many failed attempts.");
+                        crate::intent::system::intent_halt();
+                    }
                 }
             }
         }

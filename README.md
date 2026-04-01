@@ -38,6 +38,9 @@ npk> resolve google.com              # DNS resolution
 npk> http example.com /              # HTTP GET (full TCP/IP stack)
 npk> https sandbox.nopeek.ch /       # HTTPS GET (TLS 1.3, AES-256-GCM / ChaCha20)
 npk> http example.com / > mypage     # Fetch and store in npkFS
+npk> update                          # OTA update (ECDSA P-384 signed, SHA-256 verified)
+npk> reboot                          # ACPI reset + PCI CF9 + triple-fault fallback
+npk> uname                           # Kernel version info
 npk> lock                            # Lock system (clear keys)
 npk> passwd                          # Change passphrase
 npk> disk read 0                     # Raw sector hex dump
@@ -52,6 +55,11 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
 
 ```
  ┌──────────────────────────────────────────────────────────┐
+ │  GUI Layer                                               │
+ │  Login screen (Hyprlock-inspired), Spleen bitmap fonts   │
+ │  Procedural aurora background, 4K auto-scaling           │
+ │  Damage tracking, subpixel anti-aliased compositing      │
+ ├──────────────────────────────────────────────────────────┤
  │  Intent Loop                                             │
  │  Express intention, not instructions.                    │
  ├──────────────────────────────────────────────────────────┤
@@ -63,17 +71,19 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  │  COW B-tree, BLAKE3 hashing     │  Ethernet, ARP, IPv4   │
  │  Rotating superblock (8 slots)  │  ICMP, UDP, TCP        │
  │  LRU cache, WAL journal         │  DNS, DHCP, NTP        │
- │  Batch TRIM for SSD             │  HTTP client            │
+ │  Batch TRIM for SSD             │  HTTP/HTTPS client      │
  ├──────────────────────────────────────────────────────────┤
  │  Capability Vault           │  Crypto Engine             │
  │  256-bit tokens, deny-all   │  ChaCha20-Poly1305 AEAD   │
  │  Passphrase identity        │  AES-128/256-GCM (TLS)    │
  │  Temporal scoping, audit    │  TLS 1.3: X25519 + P-384  │
  ├──────────────────────────────────────────────────────────┤
- │  Drivers                                                 │
- │  virtio-blk, virtio-net, NVMe, Intel I226-V, xHCI USB    │
+ │  OTA Updates                │  Drivers                   │
+ │  ECDSA P-384 signed         │  virtio-blk, virtio-net    │
+ │  SHA-256 verified           │  NVMe, I226-V, xHCI USB    │
+ │  ESP FAT32 kernel write     │                            │
  ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, ~17500 lines)                │
+ │  Kernel Core (Rust, no_std, ~48000 lines)                │
  │  64GB Paging, Heap, IDT+PIC, ACPI, Framebuffer, Serial  │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
@@ -190,6 +200,8 @@ Every execution is a sandboxed WASM module:
 - [x] X.509 certificate chain validation
 - [x] Embedded root CAs (ISRG Root X1, DigiCert G2, AAA, GTS Root R1)
 - [x] SHA-256, HMAC-SHA256, HKDF, RSA PKCS#1 v1.5 verify
+- [x] X.509 SAN (Subject Alternative Name) for TLS hostname verification
+- [x] ECDSA P-384 signature verification (OTA updates)
 
 ### Phase 7 -- Bare Metal (target: Intel N100 NUC)
 
@@ -207,8 +219,19 @@ Every execution is a sandboxed WASM module:
 - [ ] USB mouse (HID boot protocol, same xHCI infrastructure)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 
-### Phase 8 -- Human View (next)
+### Phase 8 -- Human View (in progress)
 
+- [x] GUI login screen (Hyprlock-inspired: large clock, centered dots, pill input)
+- [x] Spleen bitmap font system (8x16, 16x32, 32x64, BSD 2-Clause licensed)
+- [x] Procedural aurora background (animated, per-frame generated)
+- [x] 4K auto-scaling (2x when resolution >1920px)
+- [x] Semi-transparent rounded rectangles with 4x4 subpixel anti-aliasing
+- [x] Damage tracking for efficient framebuffer updates
+- [x] OTA update system (`update` intent, ECDSA P-384 signed, SHA-256 verified)
+- [x] `build.sh release` for signing kernel + manifest generation
+- [x] `reboot` intent (ACPI reset register + PCI CF9 + keyboard controller + triple-fault)
+- [x] `uname`/`version`/`kernel` intents
+- [x] Purple `[npk]` accent color in boot output
 - [ ] Tiling window manager (Hyprland-inspired, framebuffer compositing)
 - [ ] USB mouse input (xHCI HID, multi-device support)
 - [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
@@ -228,7 +251,7 @@ Every execution is a sandboxed WASM module:
 
 | Area | Choice | Rationale |
 |------|--------|-----------|
-| Language | Rust (no_std, nightly) | Memory safety without GC |
+| Language | Rust (no_std, nightly, edition 2024) | Memory safety without GC |
 | Boot | Multiboot2 | QEMU/GRUB compatible |
 | Target | x86_64 | Later aarch64 |
 | WASM | wasmi v1.0 | no_std, fuel metering |
@@ -242,6 +265,8 @@ Every execution is a sandboxed WASM module:
 | Key Exchange | X25519 + ECDH P-384 | Ephemeral, per-connection |
 | Certificates | X.509, 4 embedded root CAs | ISRG X1, DigiCert G2, AAA, GTS R1 |
 | Crypto libs | sha2, hmac, hkdf, aes-gcm, p384 | RustCrypto, audited, no_std |
+| Bitmap Font | Spleen (8x16, 16x32, 32x64) | BSD 2-Clause, clean glyphs |
+| OTA Updates | ECDSA P-384 + SHA-256 | Signed manifests, ESP FAT32 write |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
 
@@ -323,8 +348,12 @@ nopeekOS/
 │       │   ├── net.rs           # ping, traceroute, netstat, resolve
 │       │   ├── http.rs          # HTTP/HTTPS GET (TLS 1.3)
 │       │   ├── wasm.rs          # run, add, multiply, bootstrap
-│       │   ├── system.rs        # status, time, help, caps, audit, halt, config
+│       │   ├── system.rs        # status, time, help, caps, audit, halt, config, uname, reboot
+│       │   ├── update.rs        # OTA update (ECDSA P-384, SHA-256, ESP FAT32)
 │       │   └── auth.rs          # lock, passwd
+│       ├── gui/                 # GUI subsystem
+│       │   ├── mod.rs           # Login screen, aurora background
+│       │   └── font.rs          # Spleen bitmap fonts (8x16, 16x32, 32x64)
 │       ├── vga.rs               # VGA text mode
 │       ├── config.rs            # Runtime configuration
 │       └── gpt.rs               # GPT partition detection
@@ -346,12 +375,13 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ./build.sh qemu-gui      # Serial + VGA window
 ./build.sh debug         # With GDB stub on :1234
 ./build.sh build         # Compile only
+./build.sh release       # Build + sign kernel (ECDSA P-384) + generate manifest
 ```
 
 ### First Boot
 
 ```
-[npk] AI-native Operating System v0.1.0
+[npk] AI-native Operating System v0.5.0
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] Physical memory: 15892 MB free (16 GB detected)
@@ -392,6 +422,7 @@ Florian@npk ~>
 9. **No Ambient Authority** -- No root, no sudo, no privilege elevation
 10. **Fuel Metering** -- 10M instruction budget per module prevents DoS
 11. **TLS 1.3** -- All network communication encrypted (3 cipher suites, X25519 + P-384)
+12. **Signed OTA Updates** -- ECDSA P-384 signed kernel images, SHA-256 integrity check
 
 ---
 
