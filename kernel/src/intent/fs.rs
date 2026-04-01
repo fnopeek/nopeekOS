@@ -455,7 +455,7 @@ pub fn intent_list(args: &str) {
 
 pub fn intent_fsinfo() {
     match crate::npkfs::stats() {
-        Some((total, free, objects, gen)) => {
+        Some((total, free, objects, generation)) => {
             let total_mb = total * crate::npkfs::BLOCK_SIZE as u64 / (1024 * 1024);
             let free_mb = free * crate::npkfs::BLOCK_SIZE as u64 / (1024 * 1024);
             let used = total - free;
@@ -466,7 +466,7 @@ pub fn intent_fsinfo() {
             kprintln!("  Used:        {} blocks", used);
             kprintln!("  Free:        {} blocks ({} MB)", free, free_mb);
             kprintln!("  Objects:     {}", objects);
-            kprintln!("  Generation:  {}", gen);
+            kprintln!("  Generation:  {}", generation);
             kprintln!("  Hash:        BLAKE3");
             kprintln!("  TRIM:        {}", if crate::blkdev::has_discard() { "active" } else { "unavailable" });
             kprintln!();

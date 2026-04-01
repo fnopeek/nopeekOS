@@ -93,7 +93,7 @@ impl FrameAllocator {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     static __heap_start: u8;
 }
 
