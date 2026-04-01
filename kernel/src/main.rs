@@ -164,6 +164,10 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     csprng::init();
 
+    // Select random color scheme for boot messages and login screen
+    gui::background::init();
+    framebuffer::set_npk_color(gui::background::accent_color());
+
     // Debug shell disabled — enable when needed:
     // if netdev::is_available() { shell::start_debug_listener(); }
 

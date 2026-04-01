@@ -190,11 +190,8 @@ fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32
 /// Run the graphical login screen.
 /// Returns the 256-bit master key on success, or halts on lockout.
 pub fn run(salt: &[u8; 16]) -> [u8; 32] {
-    // Select random color scheme and set accent colors
-    background::init();
-    framebuffer::set_npk_color(background::accent_color());
-
     // Enable GUI mode (kprintln skips framebuffer, only serial)
+    // Color scheme already selected in main.rs after csprng::init()
     framebuffer::set_gui_mode(true);
 
     // Read screen dimensions
