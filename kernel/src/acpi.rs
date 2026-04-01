@@ -8,6 +8,9 @@ use core::sync::atomic::{AtomicU16, Ordering};
 static PM1A_CNT_PORT: AtomicU16 = AtomicU16::new(0);
 /// Cached SLP_TYPa value for S5 state (default 5, works on most Intel)
 static SLP_TYP_S5: AtomicU16 = AtomicU16::new(5);
+/// Cached ACPI reset register info (address_space, address, value)
+static RESET_PORT: AtomicU16 = AtomicU16::new(0);
+static RESET_VAL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// Cached RSDP address from Multiboot2 (set before init)
 static RSDP_ADDR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -49,6 +52,16 @@ pub fn init() {
         crate::kprintln!("[npk] ACPI: PM1a_CNT at {:#x}", port);
     } else {
         crate::kprintln!("[npk] ACPI: PM1a_CNT not found");
+    }
+}
+
+/// Perform ACPI reset via FADT reset register.
+pub fn reset() {
+    let port = RESET_PORT.load(Ordering::Acquire);
+    let val = RESET_VAL.load(Ordering::Acquire);
+    if port == 0 { return; }
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") port, in("al") val);
     }
 }
 
@@ -97,6 +110,22 @@ fn find_pm1a_cnt() -> Option<u16> {
     ensure_mapped(fadt_addr, 256);
     let pm1a = unsafe { *((fadt_addr + 64) as *const u32) };
     if pm1a == 0 || pm1a > 0xFFFF { return None; }
+
+    // FADT offset 116: RESET_REG (Generic Address Structure)
+    // GAS: address_space(1) + bit_width(1) + bit_offset(1) + access_size(1) + address(8)
+    // FADT offset 128: RESET_VALUE (1 byte)
+    let fadt_len = unsafe { *((fadt_addr + 4) as *const u32) } as usize;
+    if fadt_len >= 129 {
+        let reset_space = unsafe { *((fadt_addr + 116) as *const u8) };
+        let reset_addr = unsafe { *((fadt_addr + 120) as *const u64) };
+        let reset_val = unsafe { *((fadt_addr + 128) as *const u8) };
+        // address_space 1 = System I/O
+        if reset_space == 1 && reset_addr > 0 && reset_addr <= 0xFFFF {
+            RESET_PORT.store(reset_addr as u16, Ordering::Release);
+            RESET_VAL.store(reset_val, Ordering::Release);
+            crate::kprintln!("[npk] ACPI: reset register at {:#x} val={:#x}", reset_addr, reset_val);
+        }
+    }
 
     // Try to read SLP_TYPa from DSDT \_S5 object
     let dsdt_addr = unsafe { *((fadt_addr + 40) as *const u32) } as usize;
