@@ -193,31 +193,20 @@ pub fn verify_p384_prehash_384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u
     use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
     use p384::ecdsa::signature::hazmat::PrehashVerifier;
     use p384::EncodedPoint;
-    use crate::kprintln;
-
-    kprintln!("[dbg] pubkey: {} bytes, first: {:02x}{:02x}{:02x}{:02x}",
-        pubkey.len(), pubkey[0], pubkey[1], pubkey[2], pubkey[3]);
-    kprintln!("[dbg] prehash: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
-        prehash[0], prehash[1], prehash[2], prehash[3],
-        prehash[44], prehash[45], prehash[46], prehash[47]);
-    kprintln!("[dbg] sig: {} bytes, first: {:02x}{:02x}{:02x}{:02x}",
-        signature.len(), signature[0], signature[1], signature[2], signature[3]);
 
     let point = match EncodedPoint::from_bytes(pubkey) {
         Ok(p) => p,
-        Err(_) => { kprintln!("[dbg] FAIL: EncodedPoint::from_bytes"); return false; }
+        Err(_) => return false,
     };
     let vk = match VerifyingKey::from_encoded_point(&point) {
         Ok(k) => k,
-        Err(_) => { kprintln!("[dbg] FAIL: VerifyingKey::from_encoded_point"); return false; }
+        Err(_) => return false,
     };
     let sig = match P384Sig::from_der(signature) {
         Ok(s) => s,
-        Err(_) => { kprintln!("[dbg] FAIL: Signature::from_der"); return false; }
+        Err(_) => return false,
     };
-    let result = vk.verify_prehash(prehash, &sig);
-    kprintln!("[dbg] verify_prehash result: {}", if result.is_ok() { "OK" } else { "FAIL" });
-    result.is_ok()
+    vk.verify_prehash(prehash, &sig).is_ok()
 }
 
 fn cn_matches(cert: &X509Cert<'_>, hostname: &str) -> bool {
