@@ -551,6 +551,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "dmesg" | "bootlog" => {
             system::intent_dmesg();
         }
+        "gpu" => {
+            system::intent_gpu(args);
+        }
         "history" => {
             system::intent_history();
         }

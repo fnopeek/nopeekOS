@@ -73,6 +73,54 @@ pub fn intent_uptime() {
     }
 }
 
+pub fn intent_gpu(args: &str) {
+    match args.trim() {
+        "init" | "activate" => {
+            if crate::gpu::is_native() {
+                kprintln!("[npk] GPU: native driver already active ({})", crate::gpu::driver_name());
+                return;
+            }
+            if !crate::gpu::native_detected() {
+                kprintln!("[npk] GPU: no native GPU detected");
+                return;
+            }
+            kprintln!("[npk] GPU: activating native driver...");
+            match crate::gpu::activate_native() {
+                Ok(fb) => {
+                    // Reinitialize framebuffer console with new resolution
+                    crate::framebuffer::init_from_gpu();
+                    kprintln!("[npk] GPU: {}x{} active", fb.width, fb.height);
+                }
+                Err(e) => {
+                    kprintln!("[npk] GPU: activation failed: {:?}", e);
+                    kprintln!("[npk] GOP framebuffer unchanged");
+                }
+            }
+        }
+        "status" | "" => {
+            kprintln!("  Driver:   {}", crate::gpu::driver_name());
+            if let Some(fb) = crate::gpu::framebuffer_info() {
+                kprintln!("  Mode:     {}x{} {}bpp", fb.width, fb.height, fb.bpp);
+                kprintln!("  Address:  {:#x}", fb.addr);
+                kprintln!("  Pitch:    {} bytes", fb.pitch);
+            }
+            if let Some(name) = crate::gpu::native_gpu_name() {
+                kprintln!("  Native:   {} (detected, use 'gpu init' to activate)", name);
+            }
+            let modes = crate::gpu::supported_modes();
+            if !modes.is_empty() {
+                kprintln!("  Modes:");
+                for m in &modes {
+                    kprintln!("    {}x{} @ {}Hz", m.width, m.height, m.hz);
+                }
+            }
+        }
+        _ => {
+            kprintln!("Usage: gpu [status|init]");
+        }
+    }
+}
+
 pub fn intent_dmesg() {
     // Stop capture, print, restart — so dmesg output itself isn't appended
     let log = crate::serial::stop_capture();
