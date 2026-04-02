@@ -1,6 +1,6 @@
 //! Framebuffer Console
 //!
-//! Parses Multiboot2 framebuffer info, provides pixel-based text output.
+//! Pixel-based text output using framebuffer from GPU subsystem.
 //! Replaces VGA text mode for UEFI systems without legacy VGA.
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -72,80 +72,62 @@ pub fn set_npk_color(color: u32) {
     NPK_TAG_COLOR.store(color, core::sync::atomic::Ordering::Release);
 }
 
-/// Parse Multiboot2 boot info to find framebuffer tag.
-pub fn init_from_multiboot2(mb_info_addr: u32) {
-    let base = mb_info_addr as usize;
-    // First 8 bytes: total_size (u32) + reserved (u32)
-    let total_size = unsafe { *(base as *const u32) } as usize;
-
-    let mut offset = 8;
-    while offset + 8 <= total_size {
-        let tag_type = unsafe { *((base + offset) as *const u32) };
-        let tag_size = unsafe { *((base + offset + 4) as *const u32) } as usize;
-
-        if tag_size == 0 { break; }
-
-        // Tag type 8 = Framebuffer info
-        if tag_type == 8 {
-            crate::kprintln!("[npk] Multiboot2: framebuffer tag found (size={})", tag_size);
+/// Initialize framebuffer console from GPU subsystem.
+/// Call after gpu::init() has detected and configured a display.
+pub fn init_from_gpu() {
+    let gpu_fb = match crate::gpu::framebuffer_info() {
+        Some(fb) => fb,
+        None => {
+            crate::kprintln!("[npk] Framebuffer: not available (VGA text mode fallback)");
+            return;
         }
+    };
 
-        if tag_type == 8 && tag_size >= 32 {
-            let addr = unsafe { *((base + offset + 8) as *const u64) };
-            let pitch = unsafe { *((base + offset + 16) as *const u32) };
-            let width = unsafe { *((base + offset + 20) as *const u32) };
-            let height = unsafe { *((base + offset + 24) as *const u32) };
-            let bpp = unsafe { *((base + offset + 28) as *const u8) };
-            let fb_type = unsafe { *((base + offset + 29) as *const u8) };
+    let addr = gpu_fb.addr;
+    let pitch = gpu_fb.pitch;
+    let width = gpu_fb.width;
+    let height = gpu_fb.height;
+    let bpp = gpu_fb.bpp;
 
-            crate::kprintln!("[npk] Framebuffer: {}x{} bpp={} type={} addr={:#x}",
-                width, height, bpp, fb_type, addr);
+    crate::kprintln!("[npk] Framebuffer: {}x{} @ {:#x} ({}bpp, {})",
+        width, height, addr, bpp, crate::gpu::driver_name());
 
-            // Type 1 = RGB, Type 2 = text mode
-            if (fb_type == 1 || fb_type == 0) && bpp >= 24 {
-                // Map framebuffer pages
-                let fb_size = pitch as u64 * height as u64;
-                for page_off in (0..fb_size).step_by(4096) {
-                    let pa = addr + page_off;
-                    let _ = crate::paging::map_page(
-                        pa, pa,
-                        crate::paging::PageFlags::PRESENT
-                            | crate::paging::PageFlags::WRITABLE,
-                    );
-                }
-
-                let info = FbInfo { addr, pitch, width, height, bpp };
-                let cols = width / FONT_WIDTH;
-                let rows = height / FONT_HEIGHT;
-
-                // Allocate shadow buffer in RAM (fast WB-cached memory)
-                let shadow_size = pitch as usize * height as usize;
-                let layout = alloc::alloc::Layout::from_size_align(shadow_size, 16)
-                    .expect("shadow buffer layout");
-                let shadow = unsafe { alloc::alloc::alloc_zeroed(layout) };
-
-                // Clear MMIO framebuffer
-                clear_screen(&info);
-
-                *CONSOLE.lock() = Some(FbConsole {
-                    info, shadow, shadow_size, col: 0, row: 0, cols, rows,
-                });
-
-                crate::kprintln!("[npk] Framebuffer: {}x{} @ {:#x} ({}bpp)",
-                    width, height, addr, bpp);
-                return;
-            }
+    // Map framebuffer pages (for GOP; Intel Xe uses identity-mapped RAM)
+    if !crate::gpu::is_native() {
+        let fb_size = pitch as u64 * height as u64;
+        for page_off in (0..fb_size).step_by(4096) {
+            let pa = addr + page_off;
+            let _ = crate::paging::map_page(
+                pa, pa,
+                crate::paging::PageFlags::PRESENT
+                    | crate::paging::PageFlags::WRITABLE,
+            );
         }
-
-        // Tag type 0 = end
-        if tag_type == 0 { break; }
-
-        // Next tag (aligned to 8 bytes)
-        offset += (tag_size + 7) & !7;
     }
 
-    // No framebuffer found — fall back to VGA text mode
-    crate::kprintln!("[npk] Framebuffer: not available (VGA text mode fallback)");
+    let info = FbInfo { addr, pitch, width, height, bpp };
+    let cols = width / FONT_WIDTH;
+    let rows = height / FONT_HEIGHT;
+
+    // Allocate shadow buffer in RAM (fast WB-cached memory)
+    let shadow_size = pitch as usize * height as usize;
+    let layout = alloc::alloc::Layout::from_size_align(shadow_size, 16)
+        .expect("shadow buffer layout");
+    let shadow = unsafe { alloc::alloc::alloc_zeroed(layout) };
+
+    // Clear MMIO framebuffer
+    clear_screen(&info);
+
+    *CONSOLE.lock() = Some(FbConsole {
+        info, shadow, shadow_size, col: 0, row: 0, cols, rows,
+    });
+}
+
+/// Legacy init: parse Multiboot2 directly (used before gpu module exists).
+/// Delegates to gpu::init() + init_from_gpu().
+pub fn init_from_multiboot2(mb_info_addr: u32) {
+    crate::gpu::init(mb_info_addr);
+    init_from_gpu();
 }
 
 fn clear_screen(info: &FbInfo) {
