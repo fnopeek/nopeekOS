@@ -629,16 +629,8 @@ impl IntelXeDriver {
         kprintln!("[npk]   Plane: {}x{} stride={} surf={:#x}",
             timing.width, timing.height, stride_64b * 64, self.fb_ggtt_offset);
 
-        // Step 11: Re-enable pipe
-        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
-        mmio_write32(self.bar0, TRANSCONF_A, pipe | (1 << 31));
-        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 1 << 30, 200_000) {
-            kprintln!("[npk]   Pipe re-enable timeout");
-            return Err(GpuError::PipelineFailed);
-        }
-        kprintln!("[npk]   Pipe enabled");
-
-        // Return aperture address — CPU writes go through BAR2 → GGTT → RAM
+        // Update fb info NOW (before pipe re-enable which might timeout).
+        // The framebuffer, GGTT, and aperture are all valid at this point.
         let fb = FramebufferInfo {
             addr: aperture_addr,
             pitch,
@@ -646,9 +638,18 @@ impl IntelXeDriver {
             height: timing.height,
             bpp: 32,
         };
-
         self.fb = Some(fb);
         self.active_timing = Some(timing);
+
+        // Step 11: Re-enable pipe
+        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
+        mmio_write32(self.bar0, TRANSCONF_A, pipe | (1 << 31));
+        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 1 << 30, 500_000) {
+            kprintln!("[npk]   Pipe re-enable timeout (continuing anyway)");
+        } else {
+            kprintln!("[npk]   Pipe enabled");
+        }
+
         Ok(fb)
     }
 
