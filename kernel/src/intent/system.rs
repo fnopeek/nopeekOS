@@ -75,6 +75,9 @@ pub fn intent_uptime() {
 
 pub fn intent_gpu(args: &str) {
     match args.trim() {
+        "dump" | "regs" => {
+            crate::gpu::dump_native();
+        }
         "init" | "activate" => {
             if crate::gpu::is_native() {
                 kprintln!("[npk] GPU: native driver already active ({})", crate::gpu::driver_name());
