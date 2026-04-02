@@ -548,6 +548,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "uptime" => {
             system::intent_uptime();
         }
+        "dmesg" | "bootlog" => {
+            system::intent_dmesg();
+        }
         "history" => {
             system::intent_history();
         }
