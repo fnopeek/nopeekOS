@@ -73,6 +73,18 @@ pub fn intent_uptime() {
     }
 }
 
+pub fn intent_dmesg() {
+    // Stop capture, print, restart — so dmesg output itself isn't appended
+    let log = crate::serial::stop_capture();
+    if log.is_empty() {
+        kprintln!("(no boot log captured)");
+    } else {
+        // Print without going through capture (direct serial + framebuffer)
+        kprintln!("{}", log);
+    }
+    crate::serial::start_capture();
+}
+
 pub fn intent_uname(args: &str) {
     let all = args.contains("-a") || args.is_empty();
     if all {
@@ -245,7 +257,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  nopeekOS");
             kprintln!("  ════════");
             kprintln!();
-            kprintln!("  System:    status · uptime · time · about · clear · halt");
+            kprintln!("  System:    status · uptime · time · dmesg · about · clear · halt");
             kprintln!("  Storage:   store · fetch · delete · list · fsinfo");
             kprintln!("  Content:   cat · grep · head · wc · hexdump");
             kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");
