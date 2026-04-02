@@ -319,6 +319,79 @@ impl IntelXeDriver {
         self.device_name
     }
 
+    /// Test PLL locking by reading firmware values, disabling, re-writing, re-enabling.
+    /// Does NOT touch the display pipeline — only the PLL.
+    pub fn test_pll(&self) {
+        let (enable_reg, cfgcr0_reg, cfgcr1_reg) = self.dpll_regs();
+
+        // Read current firmware PLL state
+        let orig_enable = mmio_read32(self.bar0, enable_reg);
+        let orig_cfgcr0 = mmio_read32(self.bar0, cfgcr0_reg);
+        let orig_cfgcr1 = mmio_read32(self.bar0, cfgcr1_reg);
+
+        kprintln!("[npk]   DPLL{} test: ENABLE={:#010x} CFGCR0={:#010x} CFGCR1={:#010x}",
+            self.firmware_dpll, orig_enable, orig_cfgcr0, orig_cfgcr1);
+
+        let locked = orig_enable & (1 << 30) != 0;
+        let enabled = orig_enable & (1 << 31) != 0;
+        kprintln!("[npk]   Current state: enabled={} locked={}", enabled, locked);
+
+        if !enabled {
+            kprintln!("[npk]   PLL not enabled, nothing to test");
+            return;
+        }
+
+        // Step 1: Disable the display pipeline first (must stop using PLL before disabling it)
+        kprintln!("[npk]   Step 1: Disabling pipe + transcoder...");
+        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
+        mmio_write32(self.bar0, PIPE_CONF_A, pipe & !(1 << 31));
+        let _ = poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 200_000);
+
+        // Disable DDI buffer
+        let ddi_ctl = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
+        let ddi = mmio_read32(self.bar0, ddi_ctl);
+        mmio_write32(self.bar0, ddi_ctl, ddi & !(1 << 31));
+        let _ = poll_timeout(self.bar0, ddi_ctl, 1 << 7, 1 << 7, 200_000);
+
+        // Disable transcoder DDI function
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
+
+        kprintln!("[npk]   Step 2: Disabling DPLL{}...", self.firmware_dpll);
+        mmio_write32(self.bar0, enable_reg, orig_enable & !(1 << 31));
+
+        // Wait for PLL to unlock
+        if !poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000) {
+            kprintln!("[npk]   WARNING: PLL unlock timeout");
+        }
+        let after_disable = mmio_read32(self.bar0, enable_reg);
+        kprintln!("[npk]   After disable: ENABLE={:#010x}", after_disable);
+
+        // Step 3: Write back the SAME CFGCR values
+        kprintln!("[npk]   Step 3: Writing CFGCR0={:#010x} CFGCR1={:#010x}",
+            orig_cfgcr0, orig_cfgcr1);
+        mmio_write32(self.bar0, cfgcr0_reg, orig_cfgcr0);
+        mmio_write32(self.bar0, cfgcr1_reg, orig_cfgcr1);
+        // Posting read to ensure writes complete
+        let _ = mmio_read32(self.bar0, cfgcr1_reg);
+
+        // Step 4: Re-enable PLL
+        kprintln!("[npk]   Step 4: Enabling DPLL{}...", self.firmware_dpll);
+        mmio_write32(self.bar0, enable_reg, 1 << 31);
+
+        // Poll for lock
+        let locked = poll_timeout(self.bar0, enable_reg, 1 << 30, 1 << 30, 1_000_000);
+        let final_val = mmio_read32(self.bar0, enable_reg);
+        kprintln!("[npk]   Result: ENABLE={:#010x} locked={}", final_val, locked);
+
+        if locked {
+            kprintln!("[npk]   SUCCESS: PLL re-locked with firmware values!");
+            kprintln!("[npk]   (screen will stay black — display pipeline disabled)");
+        } else {
+            kprintln!("[npk]   FAILED: PLL did not re-lock");
+            kprintln!("[npk]   This means the PLL enable sequence itself is wrong");
+        }
+    }
+
     pub fn current_hz(&self) -> u8 {
         self.active_timing.map_or(0, |t| t.hz)
     }

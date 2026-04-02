@@ -78,6 +78,20 @@ pub fn intent_gpu(args: &str) {
         "dump" | "regs" => {
             crate::gpu::dump_native();
         }
+        "test-pll" | "test" => {
+            // Test PLL re-lock with firmware values (will kill display!)
+            kprintln!("[npk] WARNING: This will disable the display!");
+            kprintln!("[npk] Log saved to gpu-init-log after test.");
+
+            let pre_log = crate::serial::stop_capture();
+            crate::serial::start_capture();
+
+            crate::gpu::test_pll();
+
+            let log = crate::serial::stop_capture();
+            crate::serial::start_capture();
+            let _ = crate::npkfs::store("gpu-init-log", log.as_bytes(), [0u8; 32]);
+        }
         "init" | "activate" => {
             if crate::gpu::is_native() {
                 kprintln!("[npk] GPU: native driver already active ({})", crate::gpu::driver_name());
