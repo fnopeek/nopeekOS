@@ -145,6 +145,15 @@ fn find_timing(width: u32, height: u32, hz: u8) -> Option<&'static DisplayTiming
     None
 }
 
+/// Match firmware's active resolution to a known timing.
+fn match_firmware_timing(width: u32, height: u32) -> &'static DisplayTiming {
+    if width == 3840 && height == 2160 { return &TIMING_4K_30; }
+    if width == 2560 && height == 1440 { return &TIMING_1440P_60; }
+    if width == 1920 && height == 1080 { return &TIMING_1080P_60; }
+    kprintln!("[npk]   Unknown firmware resolution {}x{}, assuming 1080p", width, height);
+    &TIMING_1080P_60
+}
+
 // ── DPLL Parameters ─────────────────────────────────────────────────
 
 /// Pre-calculated PLL parameters for known pixel clocks.
@@ -269,11 +278,6 @@ pub struct IntelXeDriver {
     active_timing: Option<&'static DisplayTiming>,
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
     firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
-    // Saved firmware combo PHY TX registers (restored after DDI disable/enable)
-    fw_tx_dw2: u32,
-    fw_tx_dw4: u32,
-    fw_tx_dw5: u32,
-    fw_tx_dw7: u32,
 }
 
 impl IntelXeDriver {
@@ -341,10 +345,6 @@ impl IntelXeDriver {
             active_timing: None,
             ddi_port: 0,
             firmware_dpll: 1,
-            fw_tx_dw2: 0,
-            fw_tx_dw4: 0,
-            fw_tx_dw5: 0,
-            fw_tx_dw7: 0,
         }
     }
 
@@ -446,7 +446,10 @@ impl IntelXeDriver {
 
     // ── Initialization ──────────────────────────────────────────────
 
-    /// Full display pipeline initialization. Attempts 4K@60, falls back.
+    /// Initialize display by taking over the firmware's running pipeline.
+    /// The firmware (UEFI) already configured DDI, PHY, DPLL, and transcoder.
+    /// We just allocate our own framebuffer and swap the plane surface pointer.
+    /// This avoids tearing down the DDI/PHY (which we can't properly restore).
     pub fn init(&mut self) -> Result<FramebufferInfo, GpuError> {
         // Enable PCI memory space + bus mastering
         let cmd = pci::read32(self.pci_addr, 0x04);
@@ -456,56 +459,96 @@ impl IntelXeDriver {
             return Err(GpuError::MappingFailed);
         }
 
-        // BAR0 already mapped during detect (new())
-
-        // Detect available DDI ports
+        // Detect firmware DDI/DPLL config (read-only, no writes)
         self.detect_ddi_ports();
 
-        // Power up display engine
+        // Ensure power wells are on (usually already by firmware)
         self.power_on()?;
 
-        // Initialize core display clock
+        // Ensure DBUF is enabled
         self.init_cdclk()?;
 
-        // Disable firmware display pipeline before reprogramming PLL
-        // (PLL cannot be reprogrammed while actively driving a transcoder)
-        kprintln!("[npk]   GPU: disabling firmware pipeline...");
-        self.disable_display();
-
-        // Try modes: 1080p first (safe, no HDMI 2.0 scrambling), then 4K@30
-        // 4K@60 needs HDMI 2.0 sink-side scrambling via SCDC (not yet implemented)
-        let modes = [
-            (&TIMING_1080P_60, "1080p@60Hz"),
-            (&TIMING_4K_30, "4K@30Hz"),
-        ];
-
-        for (timing, label) in modes {
-            kprintln!("[npk]   GPU: trying {}...", label);
-            match self.enable_display(timing) {
-                Ok(fb) => {
-                    self.fb = Some(fb);
-                    self.active_timing = Some(timing);
-                    return Ok(fb);
-                }
-                Err(e) => {
-                    kprintln!("[npk]   GPU: {} failed: {:?}", label, e);
-                    self.disable_display();
-                }
-            }
+        // Check if firmware has an active display pipeline
+        let transconf = mmio_read32(self.bar0, TRANSCONF_A);
+        if transconf & (1 << 30) == 0 {
+            kprintln!("[npk]   GPU: no firmware pipe active, cannot take over");
+            return Err(GpuError::PipelineFailed);
         }
 
-        Err(GpuError::PipelineFailed)
+        // Read firmware's active resolution from transcoder A
+        let htotal_reg = mmio_read32(self.bar0, TRANS_HTOTAL_A);
+        let vtotal_reg = mmio_read32(self.bar0, TRANS_VTOTAL_A);
+        let fw_width = (htotal_reg & 0xFFFF) + 1;
+        let fw_height = (vtotal_reg & 0xFFFF) + 1;
+        kprintln!("[npk]   Firmware active mode: {}x{}", fw_width, fw_height);
+
+        // Match to our timing data
+        let timing = match_firmware_timing(fw_width, fw_height);
+
+        // Allocate contiguous framebuffer memory
+        let fb = self.allocate_framebuffer(timing)?;
+
+        // Map framebuffer in GGTT so GPU can scan it out
+        self.program_ggtt()?;
+
+        // Swap the plane surface to our framebuffer.
+        // The firmware DDI, PHY, DPLL, transcoder, and pipe all stay running.
+        // Writing PLANE_SURF triggers an atomic page flip at next vblank.
+        self.configure_plane(timing)?;
+
+        self.fb = Some(fb);
+        self.active_timing = Some(timing);
+
+        Ok(fb)
     }
 
     /// Set a new display mode (after initial init).
+    /// Reprogrms DPLL + transcoder timings, but keeps DDI/PHY running.
     pub fn set_mode(&mut self, width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError> {
         let timing = find_timing(width, height, hz)
             .ok_or(GpuError::UnsupportedMode)?;
 
-        self.disable_display();
+        let need_pll_change = self.active_timing
+            .map_or(true, |t| t.pixel_clock_khz != timing.pixel_clock_khz);
+
+        // Disable plane
+        let plane = mmio_read32(self.bar0, PLANE_CTL_1_A);
+        mmio_write32(self.bar0, PLANE_CTL_1_A, plane & !(1 << 31));
+        mmio_write32(self.bar0, PLANE_SURF_1_A, 0);
+
+        // Disable pipe (must stop before changing DPLL/timings)
+        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
+        mmio_write32(self.bar0, TRANSCONF_A, pipe & !(1 << 31));
+        let _ = poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000);
+
+        // Free old framebuffer GGTT entries
         self.free_framebuffer();
 
-        let fb = self.enable_display(timing)?;
+        // Reprogram DPLL if pixel clock changes
+        if need_pll_change {
+            self.program_dpll(timing)?;
+        }
+
+        // Program new transcoder timings
+        self.program_transcoder(timing);
+        mmio_write32(self.bar0, PIPE_SRCSZ_A,
+            ((timing.width - 1) << 16) | (timing.height - 1));
+
+        // Allocate new framebuffer
+        let fb = self.allocate_framebuffer(timing)?;
+        self.program_ggtt()?;
+
+        // Re-enable pipe
+        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
+        mmio_write32(self.bar0, TRANSCONF_A, pipe | (1 << 31));
+        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 1 << 30, 100_000) {
+            kprintln!("[npk]   Pipe A re-enable timeout");
+            return Err(GpuError::PipelineFailed);
+        }
+
+        // Configure plane (triggers scanout from new framebuffer)
+        self.configure_plane(timing)?;
+
         self.fb = Some(fb);
         self.active_timing = Some(timing);
         Ok(fb)
@@ -656,18 +699,7 @@ impl IntelXeDriver {
         let clk_sel = mmio_read32(self.bar0, TRANS_CLK_SEL_A);
         let dpll_sel = (clk_sel >> 29) & 0x7;
         kprintln!("[npk]   Firmware clock source: DPLL{}", dpll_sel);
-        // Store for use during modesetting
         self.firmware_dpll = dpll_sel as u8;
-
-        // Save combo PHY TX registers (voltage swing / signal integrity)
-        // These must be restored after any DDI buffer disable/enable cycle
-        // Currently hardcoded for PHY B (DDI-B) — TODO: support PHY A
-        self.fw_tx_dw2 = mmio_read32(self.bar0, ICL_PORT_TX_DW2_LN0_B);
-        self.fw_tx_dw4 = mmio_read32(self.bar0, ICL_PORT_TX_DW4_LN0_B);
-        self.fw_tx_dw5 = mmio_read32(self.bar0, ICL_PORT_TX_DW5_LN0_B);
-        self.fw_tx_dw7 = mmio_read32(self.bar0, ICL_PORT_TX_DW7_LN0_B);
-        kprintln!("[npk]   PHY TX saved: DW2={:#010x} DW4={:#010x} DW5={:#010x} DW7={:#010x}",
-            self.fw_tx_dw2, self.fw_tx_dw4, self.fw_tx_dw5, self.fw_tx_dw7);
     }
 
     // ── Power Management ────────────────────────────────────────────
@@ -752,87 +784,6 @@ impl IntelXeDriver {
     }
 
     // ── Display Pipeline ────────────────────────────────────────────
-
-    fn enable_display(&mut self, timing: &'static DisplayTiming) -> Result<FramebufferInfo, GpuError> {
-        // Step 1: Allocate framebuffer
-        let fb = self.allocate_framebuffer(timing)?;
-
-        // Step 2: Program GGTT entries for framebuffer
-        self.program_ggtt()?;
-
-        // Step 3: Program DPLL for pixel clock
-        self.program_dpll(timing)?;
-
-        // Step 4a: Route DPLL to DDI/PHY via ICL_DPCLKA_CFGCR0
-        // This is SEPARATE from TRANS_CLK_SEL — without it the PHY has no clock!
-        // Bits [phy*2+1 : phy*2] = DPLL select, Bit [phy+10] = clock off
-        self.enable_ddi_clock()?;
-
-        // Step 4b: Select clock source for transcoder
-        // TRANS_CLK_SEL: bits 31:29 = DPLL select (1 = DPLL0, 2 = DPLL1)
-        let dpll_sel = (self.firmware_dpll as u32 + 1) << 29;
-        kprintln!("[npk]   TRANS_CLK_SEL: {:#010x} (DPLL{})", dpll_sel, self.firmware_dpll);
-        mmio_write32(self.bar0, TRANS_CLK_SEL_A, dpll_sel);
-
-        // Step 5: Program transcoder timings
-        self.program_transcoder(timing);
-
-        // Step 6: Configure DDI
-        self.enable_ddi(timing)?;
-
-        // Step 7: Set pipe source size: (width-1) << 16 | (height-1)
-        mmio_write32(self.bar0, PIPE_SRCSZ_A,
-            ((timing.width - 1) << 16) | (timing.height - 1));
-
-        // Step 8: Configure plane
-        self.configure_plane(timing)?;
-
-        // Step 9: Enable pipe
-        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
-        mmio_write32(self.bar0, TRANSCONF_A, pipe | (1 << 31));
-        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 1 << 30, 100_000) {
-            kprintln!("[npk]   Pipe A enable timeout");
-            return Err(GpuError::PipelineFailed);
-        }
-        kprintln!("[npk]   Pipe A enabled");
-
-        Ok(fb)
-    }
-
-    fn disable_display(&mut self) {
-        // Full disable: plane → pipe → DDI buffer → transcoder func → DPLL
-        // Following i915 teardown order. TX registers will be restored on re-enable.
-        kprintln!("[npk]   GPU: disabling current display pipeline...");
-
-        // Disable plane
-        let plane = mmio_read32(self.bar0, PLANE_CTL_1_A);
-        mmio_write32(self.bar0, PLANE_CTL_1_A, plane & !(1 << 31));
-        mmio_write32(self.bar0, PLANE_SURF_1_A, 0);
-
-        // Disable pipe (TRANSCONF)
-        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
-        mmio_write32(self.bar0, TRANSCONF_A, pipe & !(1 << 31));
-        let _ = poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000);
-
-        // Disable DDI buffer
-        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
-        let ddi = mmio_read32(self.bar0, ddi_ctl_reg);
-        if ddi & (1 << 31) != 0 {
-            mmio_write32(self.bar0, ddi_ctl_reg, ddi & !(1 << 31));
-            let _ = poll_timeout(self.bar0, ddi_ctl_reg, 1 << 7, 1 << 7, 200_000);
-        }
-
-        // Disable transcoder DDI function
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
-
-        // Disable DPLL
-        let (enable_reg, _, _) = self.dpll_regs();
-        let dpll = mmio_read32(self.bar0, enable_reg);
-        mmio_write32(self.bar0, enable_reg, dpll & !(1 << 31));
-        let _ = poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000);
-
-        kprintln!("[npk]   GPU: pipeline disabled");
-    }
 
     // ── Framebuffer Allocation ──────────────────────────────────────
 
@@ -957,38 +908,6 @@ impl IntelXeDriver {
         Ok(())
     }
 
-    // ── DDI Clock Routing ─────────────────────────────────────────
-
-    /// Route DPLL to DDI/PHY via ICL_DPCLKA_CFGCR0.
-    /// Without this, the combo PHY transmitter has no clock and produces no signal.
-    fn enable_ddi_clock(&self) -> Result<(), GpuError> {
-        let phy = self.ddi_port as u32; // PHY index = DDI port (0=A, 1=B)
-        let pll_id = self.firmware_dpll as u32;
-
-        // Read current value
-        let mut val = mmio_read32(self.bar0, ICL_DPCLKA_CFGCR0);
-        kprintln!("[npk]   DPCLKA_CFGCR0 before: {:#010x}", val);
-
-        // Set CLK_SEL for this PHY to our DPLL
-        // Bits [phy*2+1 : phy*2] = DPLL select
-        let clk_sel_mask = 0x3u32 << (phy * 2);
-        let clk_sel = pll_id << (phy * 2);
-        val = (val & !clk_sel_mask) | clk_sel;
-        mmio_write32(self.bar0, ICL_DPCLKA_CFGCR0, val);
-
-        // Clear CLK_OFF bit (enable clock to DDI)
-        // Bit [phy+10] = clock off
-        let clk_off = 1u32 << (phy + 10);
-        val = val & !clk_off;
-        mmio_write32(self.bar0, ICL_DPCLKA_CFGCR0, val);
-
-        let final_val = mmio_read32(self.bar0, ICL_DPCLKA_CFGCR0);
-        kprintln!("[npk]   DPCLKA_CFGCR0 after:  {:#010x} (PHY {} → DPLL{})",
-            final_val, phy, pll_id);
-
-        Ok(())
-    }
-
     // ── Transcoder Timing ───────────────────────────────────────────
 
     fn program_transcoder(&self, t: &DisplayTiming) {
@@ -1012,67 +931,6 @@ impl IntelXeDriver {
 
         kprintln!("[npk]   Transcoder: {}x{} htotal={} vtotal={}",
             t.width, t.height, h_total, v_total);
-    }
-
-    // ── DDI / HDMI ──────────────────────────────────────────────────
-
-    fn enable_ddi(&self, timing: &DisplayTiming) -> Result<(), GpuError> {
-        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
-
-        // Configure TRANS_DDI_FUNC_CTL for HDMI mode (TGL+ format)
-        // Bits 30:27 = DDI select (TGL+: 4 bits, 0=A, 1=B, ...)
-        // Bits 26:24 = Mode (0 = HDMI)
-        // Bits 22:20 = BPC (0 = 8bpc)
-        // Bit 17 = PVSYNC (positive V sync)
-        // Bit 16 = PHSYNC (positive H sync)
-        // Bit 4 = HIGH_TMDS_CHAR_RATE (for >340 MHz, HDMI 2.0)
-        // Bit 0 = HDMI_SCRAMBLING (for >340 MHz, HDMI 2.0)
-        let hdmi_2_0 = timing.pixel_clock_khz > 340000;
-        let ddi_sel = self.ddi_port as u32 + 1;            // TGL+ is 1-indexed: 1=A, 2=B
-
-        // Use DVI mode (1) for clocks <= 340 MHz (no infoframes needed, matches firmware)
-        // Use HDMI mode (0) with scrambling for clocks > 340 MHz (HDMI 2.0)
-        let mode = if hdmi_2_0 { 0u32 } else { 1 };        // DVI=1, HDMI=0
-        let ddi_func = (1u32 << 31)                        // enable
-            | (ddi_sel << 27)                               // DDI select (TGL+ 4-bit)
-            | (mode << 24)                                  // DVI or HDMI mode
-            | (1 << 17)                                     // PVSYNC (positive)
-            | (1 << 16)                                     // PHSYNC (positive)
-            | (1 << 8)                                      // bit 8 (firmware sets this)
-            | (if hdmi_2_0 { (1 << 4) | (1 << 0) } else { 0 }); // HDMI 2.0 scrambling
-
-        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} (mode={}, HDMI2.0={})",
-            ddi_func, if hdmi_2_0 { "HDMI" } else { "DVI" }, hdmi_2_0);
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, ddi_func);
-
-        // Restore combo PHY TX voltage swing from firmware values
-        // These registers control signal integrity — without them, PHY produces no signal
-        kprintln!("[npk]   Restoring PHY TX: DW2={:#010x} DW4={:#010x} DW5={:#010x} DW7={:#010x}",
-            self.fw_tx_dw2, self.fw_tx_dw4, self.fw_tx_dw5, self.fw_tx_dw7);
-        // Write via GRP registers (sets all 4 lanes at once)
-        mmio_write32(self.bar0, ICL_PORT_TX_DW5_GRP_B, self.fw_tx_dw5);
-        mmio_write32(self.bar0, ICL_PORT_TX_DW2_GRP_B, self.fw_tx_dw2);
-        mmio_write32(self.bar0, ICL_PORT_TX_DW4_GRP_B, self.fw_tx_dw4);
-        mmio_write32(self.bar0, ICL_PORT_TX_DW7_GRP_B, self.fw_tx_dw7);
-
-        // Enable DDI buffer (after TX is configured)
-        kprintln!("[npk]   DDI_BUF_CTL: enabling");
-        mmio_write32(self.bar0, ddi_ctl_reg, 1u32 << 31);
-        // Posting read
-        let _ = mmio_read32(self.bar0, ddi_ctl_reg);
-
-        // Wait for DDI active (bit 7 = idle → should clear)
-        for _ in 0..200_000u32 {
-            if mmio_read32(self.bar0, ddi_ctl_reg) & (1 << 7) == 0 {
-                kprintln!("[npk]   DDI-{} enabled (HDMI)", (b'A' + self.ddi_port) as char);
-                return Ok(());
-            }
-            core::hint::spin_loop();
-        }
-
-        let val = mmio_read32(self.bar0, ddi_ctl_reg);
-        kprintln!("[npk]   DDI-{} enabled (DDI_BUF={:#010x})", (b'A' + self.ddi_port) as char, val);
-        Ok(())
     }
 
     // ── Plane Configuration ─────────────────────────────────────────
