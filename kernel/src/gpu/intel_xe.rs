@@ -31,13 +31,13 @@ const SFUSE_STRAP: u32         = 0xC2014;
 const CDCLK_CTL: u32           = 0x46000;
 const DBUF_CTL_S1: u32         = 0x45008;
 
-// DPLL (Display PLL)
+// DPLL (Display PLL) — ICL/TGL/ADL offsets
 const DPLL_ENABLE_0: u32       = 0x46010;
 const DPLL_ENABLE_1: u32       = 0x46014;
-const DPLL_CFGCR0_0: u32      = 0x164284;
-const DPLL_CFGCR1_0: u32      = 0x164288;
-const DPLL_CFGCR0_1: u32      = 0x16428C;
-const DPLL_CFGCR1_1: u32      = 0x164290;
+const DPLL_CFGCR0_0: u32      = 0x164000;  // ICL+ DPLL0
+const DPLL_CFGCR1_0: u32      = 0x164004;
+const DPLL_CFGCR0_1: u32      = 0x164080;  // ICL+ DPLL1
+const DPLL_CFGCR1_1: u32      = 0x164084;
 
 // Transcoder A timing
 const TRANS_HTOTAL_A: u32      = 0x60000;
@@ -142,36 +142,61 @@ struct PllParams {
 }
 
 fn pll_for_clock(pixel_clock_khz: u32) -> Option<PllParams> {
-    // Intel combo PHY PLL: DCO = ref_clk * (int + frac/2^15)
-    // Output = DCO / (pdiv * qdiv * kdiv) / 5 (HDMI uses /5 for TMDS)
-    // Reference clock = 24 MHz
+    // Intel combo PHY PLL (ICL/TGL/ADL):
+    //   AFE_clock = pixel_clock * 5 (for HDMI TMDS)
+    //   DCO = AFE_clock * divider
+    //   DCO range: [7,998,000 .. 10,000,000] kHz
+    //   divider = pdiv * qdiv * kdiv
+    //   Reference clock = 24 MHz
+    //   dco_integer = DCO / ref_clk (integer part)
+    //   dco_fraction = remainder * 0x8000 / ref_clk
     match pixel_clock_khz {
         594000 => Some(PllParams {
-            // 594 MHz: DCO = 8910 MHz, 8910/24 = 371.25
-            dco_integer: 371, dco_fraction: 0x2000, // 0.25 * 2^15
-            pdiv: 2, qdiv: 1, kdiv: 3,
-            // Verify: 8910 / (2*1*3) / 5 * 2 = 594 MHz
+            // AFE=2970 MHz, div=3, DCO=8910 MHz, 8910/24=371.25
+            dco_integer: 371, dco_fraction: 0x2000,
+            pdiv: 3, qdiv: 1, kdiv: 1,
         }),
         297000 => Some(PllParams {
-            // 297 MHz: DCO = 8910 MHz, same as above but different dividers
+            // AFE=1485 MHz, div=6, DCO=8910 MHz
             dco_integer: 371, dco_fraction: 0x2000,
-            pdiv: 2, qdiv: 2, kdiv: 3,
-            // Verify: 8910 / (2*2*3) / 5 * 2 = 297 MHz
+            pdiv: 3, qdiv: 1, kdiv: 2,
         }),
         148500 => Some(PllParams {
-            // 148.5 MHz: DCO = 8910 MHz
+            // AFE=742.5 MHz, div=12, DCO=8910 MHz
             dco_integer: 371, dco_fraction: 0x2000,
-            pdiv: 2, qdiv: 4, kdiv: 3,
-            // Verify: 8910 / (2*4*3) / 5 * 2 = 148.5 MHz
+            pdiv: 3, qdiv: 2, kdiv: 2,
         }),
         241500 => Some(PllParams {
-            // 241.5 MHz: DCO = 7245 MHz, 7245/24 = 301.875
-            dco_integer: 301, dco_fraction: 0x7000, // 0.875 * 2^15 ≈ 28672
-            pdiv: 2, qdiv: 1, kdiv: 3,
-            // Verify: 7245 / (2*1*3) / 5 * 2 = 241.5 MHz
+            // AFE=1207.5 MHz, div=7, DCO=8452.5 MHz, 8452.5/24=352.1875
+            dco_integer: 352, dco_fraction: 0x1800,
+            pdiv: 7, qdiv: 1, kdiv: 1,
         }),
         _ => None,
     }
+}
+
+/// Encode PLL params into DPLL_CFGCR0/CFGCR1 register values (TGL+ format).
+fn encode_cfgcr(params: &PllParams) -> (u32, u32) {
+    // CFGCR0: dco_fraction[24:9] | dco_integer[8:0]
+    let cfgcr0 = ((params.dco_fraction as u32) << 9) | (params.dco_integer as u32 & 0x1FF);
+
+    // CFGCR1: QDIV_RATIO[31:24] | QDIV_MODE[23] | CFSELOVRD[13] | KDIV[7:5] | PDIV[3:2]
+    let pdiv_enc: u32 = match params.pdiv {
+        2 => 0x1, 3 => 0x2, 5 => 0x4, 7 => 0x6, _ => 0x1,
+    };
+    let kdiv_enc: u32 = match params.kdiv {
+        1 => 0x1, 2 => 0x2, 3 => 0x4, _ => 0x1,
+    };
+    let qdiv_mode = if params.qdiv > 1 { 1u32 } else { 0 };
+    let qdiv_ratio = params.qdiv as u32;
+
+    let cfgcr1 = (qdiv_ratio << 24)
+        | (qdiv_mode << 23)
+        | (1 << 13)             // TGL CFSELOVRD_NORMAL_XTAL
+        | (kdiv_enc << 5)
+        | (pdiv_enc << 2);
+
+    (cfgcr0, cfgcr1)
 }
 
 // ── MMIO Helpers ────────────────────────────────────────────────────
@@ -602,9 +627,9 @@ impl IntelXeDriver {
         // Step 6: Configure DDI
         self.enable_ddi(timing)?;
 
-        // Step 7: Set pipe source size
+        // Step 7: Set pipe source size: (width-1) << 16 | (height-1)
         mmio_write32(self.bar0, PIPE_SRCSZ_A,
-            ((timing.height - 1) << 16) | (timing.width - 1));
+            ((timing.width - 1) << 16) | (timing.height - 1));
 
         // Step 8: Configure plane
         self.configure_plane(timing)?;
@@ -623,28 +648,34 @@ impl IntelXeDriver {
 
     fn disable_display(&mut self) {
         // Disable in reverse order: plane → pipe → transcoder → DDI → DPLL
+        kprintln!("[npk]   GPU: disabling current display pipeline...");
 
         // Disable plane
         let plane = mmio_read32(self.bar0, PLANE_CTL_1_A);
         mmio_write32(self.bar0, PLANE_CTL_1_A, plane & !(1 << 31));
         mmio_write32(self.bar0, PLANE_SURF_1_A, 0); // trigger update
 
-        // Disable pipe
+        // Disable pipe (TRANSCONF)
         let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
         mmio_write32(self.bar0, PIPE_CONF_A, pipe & !(1 << 31));
-        let _ = poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 100_000);
+        let _ = poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 200_000);
+
+        // Disable DDI buffer first (before transcoder DDI func)
+        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
+        let ddi = mmio_read32(self.bar0, ddi_ctl_reg);
+        mmio_write32(self.bar0, ddi_ctl_reg, ddi & !(1 << 31));
+        // Wait for DDI idle (bit 7 = 1)
+        let _ = poll_timeout(self.bar0, ddi_ctl_reg, 1 << 7, 1 << 7, 200_000);
 
         // Disable transcoder DDI function
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
 
-        // Disable DDI buffer
-        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
-        let ddi = mmio_read32(self.bar0, ddi_ctl_reg);
-        mmio_write32(self.bar0, ddi_ctl_reg, ddi & !(1 << 31));
-
         // Disable DPLL
         let dpll = mmio_read32(self.bar0, DPLL_ENABLE_0);
         mmio_write32(self.bar0, DPLL_ENABLE_0, dpll & !(1 << 31));
+        let _ = poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 30, 0, 200_000);
+
+        kprintln!("[npk]   GPU: pipeline disabled");
     }
 
     // ── Framebuffer Allocation ──────────────────────────────────────
@@ -727,50 +758,32 @@ impl IntelXeDriver {
         let params = pll_for_clock(timing.pixel_clock_khz)
             .ok_or(GpuError::PllLockFailed)?;
 
+        let (cfgcr0, cfgcr1) = encode_cfgcr(&params);
+
         kprintln!("[npk]   DPLL0: {} kHz (dco_int={}, dco_frac={:#x}, p={} q={} k={})",
             timing.pixel_clock_khz, params.dco_integer, params.dco_fraction,
             params.pdiv, params.qdiv, params.kdiv);
+        kprintln!("[npk]   DPLL0: CFGCR0={:#010x} CFGCR1={:#010x}", cfgcr0, cfgcr1);
 
         // Disable DPLL0 first
         let dpll = mmio_read32(self.bar0, DPLL_ENABLE_0);
         if dpll & (1 << 31) != 0 {
             mmio_write32(self.bar0, DPLL_ENABLE_0, dpll & !(1 << 31));
-            let _ = poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 0, 0, 100_000);
+            // Poll for PLL unlock (bit 30 = lock status on TGL+)
+            let _ = poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 30, 0, 100_000);
         }
 
-        // DPLL_CFGCR0: DCO integer (bits 9:0) + DCO fraction (bits 25:10)
-        let cfgcr0 = (params.dco_integer as u32 & 0x3FF)
-            | ((params.dco_fraction as u32 & 0xFFFF) << 10);
+        // Write PLL configuration
         mmio_write32(self.bar0, DPLL_CFGCR0_0, cfgcr0);
-
-        // DPLL_CFGCR1: pdiv (bits 4:2), qdiv (bits 7:6 for mode, bit 5 for enable), kdiv (bits 9:8)
-        let pdiv_enc = match params.pdiv {
-            2 => 1u32,
-            3 => 2,
-            5 => 4,
-            7 => 8,
-            _ => 1,
-        };
-        let kdiv_enc = match params.kdiv {
-            1 => 1u32,
-            2 => 2,
-            3 => 4,  // kdiv=3 encoded as 4? — verify against PRM
-            _ => 1,
-        };
-        let qdiv_enc = if params.qdiv > 1 {
-            (1u32 << 5) | ((params.qdiv as u32) << 6) // qdiv enable + ratio
-        } else {
-            0
-        };
-        let cfgcr1 = (pdiv_enc << 2) | qdiv_enc | (kdiv_enc << 8);
         mmio_write32(self.bar0, DPLL_CFGCR1_0, cfgcr1);
 
         // Enable DPLL0
         mmio_write32(self.bar0, DPLL_ENABLE_0, 1 << 31);
 
-        // Poll for PLL lock (bit 0)
-        if !poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 0, 1 << 0, 500_000) {
-            kprintln!("[npk]   DPLL0 lock TIMEOUT");
+        // Poll for PLL lock (bit 30 on TGL+)
+        if !poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 30, 1 << 30, 500_000) {
+            let val = mmio_read32(self.bar0, DPLL_ENABLE_0);
+            kprintln!("[npk]   DPLL0 lock TIMEOUT (DPLL_ENABLE={:#010x})", val);
             return Err(GpuError::PllLockFailed);
         }
 
@@ -805,29 +818,38 @@ impl IntelXeDriver {
 
     // ── DDI / HDMI ──────────────────────────────────────────────────
 
-    fn enable_ddi(&self, _timing: &DisplayTiming) -> Result<(), GpuError> {
+    fn enable_ddi(&self, timing: &DisplayTiming) -> Result<(), GpuError> {
         let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
 
-        // Configure TRANS_DDI_FUNC_CTL for HDMI mode
-        // Bits 30:28 = DDI select (0=A, 1=B)
+        // Configure TRANS_DDI_FUNC_CTL for HDMI mode (TGL+ format)
+        // Bits 30:27 = DDI select (TGL+: 4 bits, 0=A, 1=B, ...)
         // Bits 26:24 = Mode (0 = HDMI)
         // Bits 22:20 = BPC (0 = 8bpc)
-        // Bit 3:1 = sync polarity (both positive for CEA modes)
-        // Bit 0 = enable
-        let ddi_func = ((self.ddi_port as u32) << 28)
-            | (0 << 24)    // HDMI mode
-            | (0 << 20)    // 8 bpc
-            | (3 << 1)     // H+ V+ sync polarity
-            | (1 << 0);    // enable
+        // Bit 17 = PVSYNC (positive V sync)
+        // Bit 16 = PHSYNC (positive H sync)
+        // Bit 4 = HIGH_TMDS_CHAR_RATE (for >340 MHz, HDMI 2.0)
+        // Bit 0 = HDMI_SCRAMBLING (for >340 MHz, HDMI 2.0)
+        let hdmi_2_0 = timing.pixel_clock_khz > 340000;
+        let ddi_func = (1u32 << 31)                        // enable
+            | ((self.ddi_port as u32) << 27)               // DDI select (TGL+ 4-bit)
+            | (0 << 24)                                     // HDMI mode
+            | (0 << 20)                                     // 8 bpc
+            | (1 << 17)                                     // PVSYNC (positive)
+            | (1 << 16)                                     // PHSYNC (positive)
+            | (if hdmi_2_0 { (1 << 4) | (1 << 0) } else { 0 }); // HDMI 2.0 scrambling
+
+        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} (HDMI 2.0={})", ddi_func, hdmi_2_0);
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, ddi_func);
 
-        // Enable DDI buffer
-        let ddi_buf = mmio_read32(self.bar0, ddi_ctl_reg);
-        mmio_write32(self.bar0, ddi_ctl_reg, ddi_buf | (1 << 31));
+        // Enable DDI buffer: enable + 4 lanes for HDMI
+        // DDI_BUF_CTL: bit 31 = enable, bits [3:1] = port width = (4-1) = 3
+        let ddi_buf_val = (1u32 << 31) | (3 << 1);
+        kprintln!("[npk]   DDI_BUF_CTL: {:#010x}", ddi_buf_val);
+        mmio_write32(self.bar0, ddi_ctl_reg, ddi_buf_val);
 
-        // Wait for DDI to become active (bit 4 = idle, should clear)
+        // Wait for DDI to become active (bit 7 = idle, should clear)
         for _ in 0..100_000u32 {
-            if mmio_read32(self.bar0, ddi_ctl_reg) & (1 << 4) == 0 {
+            if mmio_read32(self.bar0, ddi_ctl_reg) & (1 << 7) == 0 {
                 kprintln!("[npk]   DDI-{} enabled (HDMI)",
                     (b'A' + self.ddi_port) as char);
                 return Ok(());
@@ -835,7 +857,6 @@ impl IntelXeDriver {
             core::hint::spin_loop();
         }
 
-        // DDI might still work even if idle doesn't clear immediately
         kprintln!("[npk]   DDI-{} enabled (idle bit still set — may work)",
             (b'A' + self.ddi_port) as char);
         Ok(())
