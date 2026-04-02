@@ -65,6 +65,9 @@ const PLANE_SURF_1_A: u32     = 0x7019C;
 const DDI_BUF_CTL_A: u32      = 0x64000;
 const DDI_BUF_CTL_B: u32      = 0x64100;
 
+// DDI Clock routing (ICL+) — routes DPLL to DDI/PHY (separate from TRANS_CLK_SEL!)
+const ICL_DPCLKA_CFGCR0: u32  = 0x164280;
+
 // GGTT base (within BAR0)
 const GGTT_BASE: u32           = 0x800000;
 
@@ -525,6 +528,10 @@ impl IntelXeDriver {
         kprintln!("[npk]   DPLL1_CFGCR0: {:#010x}", dpll1_c0);
         kprintln!("[npk]   DPLL1_CFGCR1: {:#010x}", dpll1_c1);
 
+        // DDI clock routing
+        let dpclka = mmio_read32(self.bar0, ICL_DPCLKA_CFGCR0);
+        kprintln!("[npk]   DPCLKA_CFGCR0: {:#010x}", dpclka);
+
         // Transcoder A clock selection
         let clk_sel = mmio_read32(self.bar0, TRANS_CLK_SEL_A);
         kprintln!("[npk]   TRANS_CLK_SEL_A: {:#010x}", clk_sel);
@@ -725,7 +732,12 @@ impl IntelXeDriver {
         // Step 3: Program DPLL for pixel clock
         self.program_dpll(timing)?;
 
-        // Step 4: Select clock source for transcoder
+        // Step 4a: Route DPLL to DDI/PHY via ICL_DPCLKA_CFGCR0
+        // This is SEPARATE from TRANS_CLK_SEL — without it the PHY has no clock!
+        // Bits [phy*2+1 : phy*2] = DPLL select, Bit [phy+10] = clock off
+        self.enable_ddi_clock()?;
+
+        // Step 4b: Select clock source for transcoder
         // TRANS_CLK_SEL: bits 31:29 = DPLL select (1 = DPLL0, 2 = DPLL1)
         let dpll_sel = (self.firmware_dpll as u32 + 1) << 29;
         kprintln!("[npk]   TRANS_CLK_SEL: {:#010x} (DPLL{})", dpll_sel, self.firmware_dpll);
@@ -905,6 +917,38 @@ impl IntelXeDriver {
         }
 
         kprintln!("[npk]   DPLL{} locked at {} kHz", self.firmware_dpll, timing.pixel_clock_khz);
+        Ok(())
+    }
+
+    // ── DDI Clock Routing ─────────────────────────────────────────
+
+    /// Route DPLL to DDI/PHY via ICL_DPCLKA_CFGCR0.
+    /// Without this, the combo PHY transmitter has no clock and produces no signal.
+    fn enable_ddi_clock(&self) -> Result<(), GpuError> {
+        let phy = self.ddi_port as u32; // PHY index = DDI port (0=A, 1=B)
+        let pll_id = self.firmware_dpll as u32;
+
+        // Read current value
+        let mut val = mmio_read32(self.bar0, ICL_DPCLKA_CFGCR0);
+        kprintln!("[npk]   DPCLKA_CFGCR0 before: {:#010x}", val);
+
+        // Set CLK_SEL for this PHY to our DPLL
+        // Bits [phy*2+1 : phy*2] = DPLL select
+        let clk_sel_mask = 0x3u32 << (phy * 2);
+        let clk_sel = pll_id << (phy * 2);
+        val = (val & !clk_sel_mask) | clk_sel;
+        mmio_write32(self.bar0, ICL_DPCLKA_CFGCR0, val);
+
+        // Clear CLK_OFF bit (enable clock to DDI)
+        // Bit [phy+10] = clock off
+        let clk_off = 1u32 << (phy + 10);
+        val = val & !clk_off;
+        mmio_write32(self.bar0, ICL_DPCLKA_CFGCR0, val);
+
+        let final_val = mmio_read32(self.bar0, ICL_DPCLKA_CFGCR0);
+        kprintln!("[npk]   DPCLKA_CFGCR0 after:  {:#010x} (PHY {} → DPLL{})",
+            final_val, phy, pll_id);
+
         Ok(())
     }
 
