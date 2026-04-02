@@ -250,8 +250,10 @@ pub fn create_esp(
     let grub_sectors = ((grub_efi.len() + 511) / 512) as u32;
     let grub_cl = fs.alloc_clusters(grub_sectors);
 
+    // Reserve 8192 clusters (4MB) for kernel — room for OTA growth
+    const KERNEL_RESERVED: u32 = 8192;
     let kernel_sectors = ((kernel.len() + 511) / 512) as u32;
-    let kernel_cl = fs.alloc_clusters(kernel_sectors);
+    let kernel_cl = fs.alloc_clusters(KERNEL_RESERVED);
 
     let cfg_cl = fs.alloc_clusters(1);
 
@@ -262,7 +264,7 @@ pub fn create_esp(
     fs.write_fat_chain(boot_cl, 1)?;
     fs.write_fat_chain(grubdir_cl, 1)?;
     fs.write_fat_chain(grub_cl, grub_sectors)?;
-    fs.write_fat_chain(kernel_cl, kernel_sectors)?;
+    fs.write_fat_chain(kernel_cl, KERNEL_RESERVED)?;
     fs.write_fat_chain(cfg_cl, 1)?;
 
     // Write directories
@@ -467,11 +469,16 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
     let (kernel_cl, old_size, dir_sec, dir_off) = fs.find_entry(boot_cl, &kernel_name)?;
 
     let new_sectors = ((data.len() + 511) / 512) as u32;
-    let _old_clusters = fs.chain_len(kernel_cl)?;
+    let old_clusters = fs.chain_len(kernel_cl)?;
     let new_clusters = (new_sectors + fs.spc - 1) / fs.spc;
 
-    crate::kprintln!("[npk] ESP: kernel.bin at cluster {}, {} -> {} bytes",
-        kernel_cl, old_size, data.len());
+    crate::kprintln!("[npk] ESP: kernel.bin at cluster {}, {} -> {} bytes ({}/{} clusters)",
+        kernel_cl, old_size, data.len(), new_clusters, old_clusters);
+
+    // Safety check: new kernel must fit in pre-allocated cluster chain
+    if new_clusters > old_clusters {
+        return Err("kernel too large for ESP (exceeds reserved space)");
+    }
 
     // Write data to existing clusters (follow FAT chain)
     let mut cl = kernel_cl;
