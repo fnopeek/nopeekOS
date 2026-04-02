@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use super::{FramebufferInfo, GpuError, ModeInfo};
-use crate::{kprintln, pci, memory};
+use crate::{kprintln, pci, paging, memory};
 
 // ── PCI Device IDs ──────────────────────────────────────────────────
 
@@ -299,6 +299,22 @@ impl IntelXeDriver {
 
         if self.bar0 == 0 {
             return Err(GpuError::MappingFailed);
+        }
+
+        // Map BAR0 (16MB MMIO registers + GGTT)
+        let bar0_size = 16 * 1024 * 1024u64;
+        kprintln!("[npk]   GPU: mapping BAR0 {:#x} ({}MB)...", self.bar0, bar0_size / (1024*1024));
+        for offset in (0..bar0_size).step_by(4096) {
+            match paging::map_page(
+                self.bar0 + offset, self.bar0 + offset,
+                paging::PageFlags::PRESENT | paging::PageFlags::WRITABLE | paging::PageFlags::NO_CACHE,
+            ) {
+                Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
+                Err(e) => {
+                    kprintln!("[npk]   GPU: BAR0 map failed at {:#x}: {:?}", self.bar0 + offset, e);
+                    return Err(GpuError::MappingFailed);
+                }
+            }
         }
 
         // Detect available DDI ports
