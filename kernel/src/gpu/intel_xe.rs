@@ -31,13 +31,13 @@ const SFUSE_STRAP: u32         = 0xC2014;
 const CDCLK_CTL: u32           = 0x46000;
 const DBUF_CTL_S1: u32         = 0x45008;
 
-// DPLL (Display PLL) — ICL/TGL/ADL offsets
+// DPLL (Display PLL) — TGL/ADL offsets (NOT ICL!)
 const DPLL_ENABLE_0: u32       = 0x46010;
 const DPLL_ENABLE_1: u32       = 0x46014;
-const DPLL_CFGCR0_0: u32      = 0x164000;  // ICL+ DPLL0
-const DPLL_CFGCR1_0: u32      = 0x164004;
-const DPLL_CFGCR0_1: u32      = 0x164080;  // ICL+ DPLL1
-const DPLL_CFGCR1_1: u32      = 0x164084;
+const DPLL_CFGCR0_0: u32      = 0x164284;  // TGL/ADL DPLL0
+const DPLL_CFGCR1_0: u32      = 0x164288;
+const DPLL_CFGCR0_1: u32      = 0x16428C;  // TGL/ADL DPLL1
+const DPLL_CFGCR1_1: u32      = 0x164290;
 
 // Transcoder A timing
 const TRANS_HTOTAL_A: u32      = 0x60000;
@@ -244,6 +244,7 @@ pub struct IntelXeDriver {
     fb_pages: u32,        // Number of 4KB pages allocated
     active_timing: Option<&'static DisplayTiming>,
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
+    firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
 }
 
 impl IntelXeDriver {
@@ -310,6 +311,7 @@ impl IntelXeDriver {
             fb_pages: 0,
             active_timing: None,
             ddi_port: 0,
+            firmware_dpll: 1, // Default DPLL1 (NUC firmware uses this)
         }
     }
 
@@ -427,10 +429,14 @@ impl IntelXeDriver {
         let dpll0_c0 = mmio_read32(self.bar0, DPLL_CFGCR0_0);
         let dpll0_c1 = mmio_read32(self.bar0, DPLL_CFGCR1_0);
         let dpll1_en = mmio_read32(self.bar0, DPLL_ENABLE_1);
+        let dpll1_c0 = mmio_read32(self.bar0, DPLL_CFGCR0_1);
+        let dpll1_c1 = mmio_read32(self.bar0, DPLL_CFGCR1_1);
         kprintln!("[npk]   DPLL0_ENABLE: {:#010x}", dpll0_en);
         kprintln!("[npk]   DPLL0_CFGCR0: {:#010x}", dpll0_c0);
         kprintln!("[npk]   DPLL0_CFGCR1: {:#010x}", dpll0_c1);
         kprintln!("[npk]   DPLL1_ENABLE: {:#010x}", dpll1_en);
+        kprintln!("[npk]   DPLL1_CFGCR0: {:#010x}", dpll1_c0);
+        kprintln!("[npk]   DPLL1_CFGCR1: {:#010x}", dpll1_c1);
 
         // Transcoder A clock selection
         let clk_sel = mmio_read32(self.bar0, TRANS_CLK_SEL_A);
@@ -455,12 +461,14 @@ impl IntelXeDriver {
         // Transcoder DDI function control
         let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
         kprintln!("[npk]   TRANS_DDI_FUNC_CTL_A: {:#010x}", ddi_func);
-        if ddi_func & 1 != 0 {
-            let ddi_sel = (ddi_func >> 28) & 0x7;
+        if ddi_func & (1 << 31) != 0 {
+            // TGL+ port select is bits [30:27], encoding: 1=A, 2=B, 3=C
+            let ddi_sel = (ddi_func >> 27) & 0xF;
+            let port_letter = if ddi_sel > 0 { (b'A' + ddi_sel as u8 - 1) as char } else { '?' };
             let mode = (ddi_func >> 24) & 0x7;
             let bpc = (ddi_func >> 20) & 0x7;
             kprintln!("[npk]     DDI={}, mode={}, bpc={}, enabled",
-                (b'A' + ddi_sel as u8) as char,
+                port_letter,
                 match mode { 0 => "HDMI", 1 => "DVI", 2 => "DP-SST", 4 => "DP-MST", _ => "?" },
                 match bpc { 0 => "8", 1 => "10", 2 => "6", 3 => "12", _ => "?" });
         } else {
@@ -512,16 +520,26 @@ impl IntelXeDriver {
 
         // Read TRANS_DDI_FUNC_CTL to see what the firmware configured
         let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
-        if ddi_func & 1 != 0 {
+        if ddi_func & (1 << 31) != 0 {
             // Firmware has an active DDI — use the same port
-            let ddi_sel = ((ddi_func >> 28) & 0x7) as u8;
-            kprintln!("[npk]   Firmware using DDI-{} (inheriting)",
-                (b'A' + ddi_sel) as char);
-            self.ddi_port = ddi_sel;
+            // TGL+ port select is bits [30:27]
+            let ddi_sel = ((ddi_func >> 27) & 0xF) as u8;
+            // TGL+ encoding: 1=A, 2=B, 3=C, ...
+            let port = if ddi_sel > 0 { ddi_sel - 1 } else { 0 };
+            kprintln!("[npk]   Firmware using DDI-{} (TRANS_DDI={:#010x})",
+                (b'A' + port) as char, ddi_func);
+            self.ddi_port = port;
         } else {
-            self.ddi_port = 0; // DDI-A default
-            kprintln!("[npk]   No active DDI found, defaulting to DDI-A");
+            self.ddi_port = 1; // DDI-B default (NUC HDMI is on DDI-B)
+            kprintln!("[npk]   No active DDI found, defaulting to DDI-B");
         }
+
+        // Detect which DPLL the firmware uses
+        let clk_sel = mmio_read32(self.bar0, TRANS_CLK_SEL_A);
+        let dpll_sel = (clk_sel >> 29) & 0x7;
+        kprintln!("[npk]   Firmware clock source: DPLL{}", dpll_sel);
+        // Store for use during modesetting
+        self.firmware_dpll = dpll_sel as u8;
     }
 
     // ── Power Management ────────────────────────────────────────────
@@ -619,7 +637,9 @@ impl IntelXeDriver {
 
         // Step 4: Select clock source for transcoder
         // TRANS_CLK_SEL: bits 31:29 = DPLL select (1 = DPLL0, 2 = DPLL1)
-        mmio_write32(self.bar0, TRANS_CLK_SEL_A, 1 << 29); // DPLL0
+        let dpll_sel = (self.firmware_dpll as u32 + 1) << 29;
+        kprintln!("[npk]   TRANS_CLK_SEL: {:#010x} (DPLL{})", dpll_sel, self.firmware_dpll);
+        mmio_write32(self.bar0, TRANS_CLK_SEL_A, dpll_sel);
 
         // Step 5: Program transcoder timings
         self.program_transcoder(timing);
@@ -670,10 +690,11 @@ impl IntelXeDriver {
         // Disable transcoder DDI function
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
 
-        // Disable DPLL
-        let dpll = mmio_read32(self.bar0, DPLL_ENABLE_0);
-        mmio_write32(self.bar0, DPLL_ENABLE_0, dpll & !(1 << 31));
-        let _ = poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 30, 0, 200_000);
+        // Disable DPLL (whichever firmware used)
+        let (enable_reg, _, _) = self.dpll_regs();
+        let dpll = mmio_read32(self.bar0, enable_reg);
+        mmio_write32(self.bar0, enable_reg, dpll & !(1 << 31));
+        let _ = poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000);
 
         kprintln!("[npk]   GPU: pipeline disabled");
     }
@@ -754,40 +775,50 @@ impl IntelXeDriver {
 
     // ── DPLL Programming ────────────────────────────────────────────
 
+    /// Get DPLL register offsets for the active DPLL (0 or 1).
+    fn dpll_regs(&self) -> (u32, u32, u32) {
+        if self.firmware_dpll == 0 {
+            (DPLL_ENABLE_0, DPLL_CFGCR0_0, DPLL_CFGCR1_0)
+        } else {
+            (DPLL_ENABLE_1, DPLL_CFGCR0_1, DPLL_CFGCR1_1)
+        }
+    }
+
     fn program_dpll(&self, timing: &DisplayTiming) -> Result<(), GpuError> {
         let params = pll_for_clock(timing.pixel_clock_khz)
             .ok_or(GpuError::PllLockFailed)?;
 
         let (cfgcr0, cfgcr1) = encode_cfgcr(&params);
+        let (enable_reg, cfgcr0_reg, cfgcr1_reg) = self.dpll_regs();
 
-        kprintln!("[npk]   DPLL0: {} kHz (dco_int={}, dco_frac={:#x}, p={} q={} k={})",
-            timing.pixel_clock_khz, params.dco_integer, params.dco_fraction,
+        kprintln!("[npk]   DPLL{}: {} kHz (dco_int={}, dco_frac={:#x}, p={} q={} k={})",
+            self.firmware_dpll, timing.pixel_clock_khz,
+            params.dco_integer, params.dco_fraction,
             params.pdiv, params.qdiv, params.kdiv);
-        kprintln!("[npk]   DPLL0: CFGCR0={:#010x} CFGCR1={:#010x}", cfgcr0, cfgcr1);
+        kprintln!("[npk]   DPLL{}: CFGCR0={:#010x} CFGCR1={:#010x}", self.firmware_dpll, cfgcr0, cfgcr1);
 
-        // Disable DPLL0 first
-        let dpll = mmio_read32(self.bar0, DPLL_ENABLE_0);
+        // Disable DPLL first
+        let dpll = mmio_read32(self.bar0, enable_reg);
         if dpll & (1 << 31) != 0 {
-            mmio_write32(self.bar0, DPLL_ENABLE_0, dpll & !(1 << 31));
-            // Poll for PLL unlock (bit 30 = lock status on TGL+)
-            let _ = poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 30, 0, 100_000);
+            mmio_write32(self.bar0, enable_reg, dpll & !(1 << 31));
+            let _ = poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000);
         }
 
         // Write PLL configuration
-        mmio_write32(self.bar0, DPLL_CFGCR0_0, cfgcr0);
-        mmio_write32(self.bar0, DPLL_CFGCR1_0, cfgcr1);
+        mmio_write32(self.bar0, cfgcr0_reg, cfgcr0);
+        mmio_write32(self.bar0, cfgcr1_reg, cfgcr1);
 
-        // Enable DPLL0
-        mmio_write32(self.bar0, DPLL_ENABLE_0, 1 << 31);
+        // Enable DPLL
+        mmio_write32(self.bar0, enable_reg, 1 << 31);
 
         // Poll for PLL lock (bit 30 on TGL+)
-        if !poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 30, 1 << 30, 500_000) {
-            let val = mmio_read32(self.bar0, DPLL_ENABLE_0);
-            kprintln!("[npk]   DPLL0 lock TIMEOUT (DPLL_ENABLE={:#010x})", val);
+        if !poll_timeout(self.bar0, enable_reg, 1 << 30, 1 << 30, 500_000) {
+            let val = mmio_read32(self.bar0, enable_reg);
+            kprintln!("[npk]   DPLL{} lock TIMEOUT (DPLL_ENABLE={:#010x})", self.firmware_dpll, val);
             return Err(GpuError::PllLockFailed);
         }
 
-        kprintln!("[npk]   DPLL0 locked at {} kHz", timing.pixel_clock_khz);
+        kprintln!("[npk]   DPLL{} locked at {} kHz", self.firmware_dpll, timing.pixel_clock_khz);
         Ok(())
     }
 
