@@ -65,30 +65,9 @@ enum GpuBackend {
 
 static GPU: Mutex<GpuBackend> = Mutex::new(GpuBackend::None);
 
-/// Initialize GPU subsystem. Tries native drivers first, falls back to GOP.
+/// Initialize GPU subsystem. Uses GOP, detects native GPU for later activation.
 pub fn init(multiboot_info: u32) {
-    // Try Intel Xe (native modesetting, 4K support)
-    match intel_xe::IntelXeDriver::detect() {
-        Some(mut drv) => {
-            let name = drv.name();
-            crate::kprintln!("[npk] GPU: {} detected", name);
-
-            match drv.init() {
-                Ok(fb) => {
-                    crate::kprintln!("[npk] GPU: {}x{} @ {}Hz (native)",
-                        fb.width, fb.height, drv.current_hz());
-                    *GPU.lock() = GpuBackend::IntelXe(drv);
-                    return;
-                }
-                Err(e) => {
-                    crate::kprintln!("[npk] GPU: Intel Xe init failed: {:?}, falling back to GOP", e);
-                }
-            }
-        }
-        None => {}
-    }
-
-    // Fallback: GOP framebuffer from bootloader
+    // Always start with GOP (safe, bootloader-provided framebuffer)
     match gop::GopDriver::from_multiboot2(multiboot_info) {
         Some(drv) => {
             crate::kprintln!("[npk] GPU: GOP {}x{} (bootloader)",
@@ -99,6 +78,51 @@ pub fn init(multiboot_info: u32) {
             crate::kprintln!("[npk] GPU: no display available");
         }
     }
+
+    // Detect native GPU (PCI scan only — no hardware init yet)
+    match intel_xe::IntelXeDriver::detect() {
+        Some(drv) => {
+            crate::kprintln!("[npk] GPU: {} available (use 'gpu init' to activate)",
+                drv.name());
+            *DETECTED_XE.lock() = Some(drv);
+        }
+        None => {}
+    }
+}
+
+/// Detected but not yet initialized Intel Xe driver.
+static DETECTED_XE: Mutex<Option<intel_xe::IntelXeDriver>> = Mutex::new(None);
+
+/// Activate native GPU driver (Intel Xe). Call from intent loop, not boot.
+/// Returns description of result for user output.
+pub fn activate_native() -> Result<FramebufferInfo, GpuError> {
+    let mut detected = DETECTED_XE.lock();
+    let mut drv = detected.take().ok_or(GpuError::NotFound)?;
+
+    match drv.init() {
+        Ok(fb) => {
+            crate::kprintln!("[npk] GPU: {}x{} @ {}Hz (native)",
+                fb.width, fb.height, drv.current_hz());
+            *GPU.lock() = GpuBackend::IntelXe(drv);
+            Ok(fb)
+        }
+        Err(e) => {
+            crate::kprintln!("[npk] GPU: Intel Xe init failed: {:?}", e);
+            // Put driver back so user can retry
+            *detected = Some(drv);
+            Err(e)
+        }
+    }
+}
+
+/// Check if a native GPU was detected (but not necessarily activated).
+pub fn native_detected() -> bool {
+    DETECTED_XE.lock().is_some()
+}
+
+/// Name of detected native GPU (if any).
+pub fn native_gpu_name() -> Option<&'static str> {
+    DETECTED_XE.lock().as_ref().map(|d| d.name())
 }
 
 /// Get current framebuffer info (if any GPU is active).
