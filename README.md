@@ -45,6 +45,8 @@ npk> uptime                          # Time since boot
 npk> history                         # Last 32 commands (arrow up/down to recall)
 npk> lock                            # Lock system (clear keys)
 npk> passwd                          # Change passphrase
+npk> gpu init                          # Initialize Intel Xe GPU
+npk> gpu 4k                           # Switch to native 4K@30Hz
 npk> disk read 0                     # Raw sector hex dump
 ```
 
@@ -83,9 +85,9 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  │  OTA Updates                │  Drivers                   │
  │  ECDSA P-384 signed         │  virtio-blk, virtio-net    │
  │  SHA-256 verified           │  NVMe, I226-V, xHCI USB    │
- │  ESP FAT32 kernel write     │                            │
+ │  ESP FAT32 kernel write     │  Intel Xe GPU (4K display)  │
  ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, ~49000 lines)                │
+ │  Kernel Core (Rust, no_std, ~51000 lines)                │
  │  64GB Paging, Heap, IDT+PIC, ACPI, Framebuffer, Serial  │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
@@ -240,7 +242,7 @@ Every execution is a sandboxed WASM module:
 - [ ] Tiling window manager (Hyprland-inspired, framebuffer compositing)
 - [ ] USB mouse input (xHCI HID, multi-device support)
 - [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
-- [ ] GPU acceleration (Intel UHD, hardware-accelerated compositing)
+- [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@30Hz HDMI via DDI-B, DPLL1, combo PHY)
 - [ ] Web rendering engine (long-term)
 
 ### Phase 9 -- AI Integration
@@ -273,6 +275,7 @@ Every execution is a sandboxed WASM module:
 | Bitmap Font | Spleen (8x16, 16x32, 32x64) | BSD 2-Clause, clean glyphs |
 | OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
+| GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@30Hz HDMI, GGTT aperture |
 | Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
 
 ---
@@ -397,7 +400,8 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] nvme: 465 GB (976773168 sectors)
 [npk] xhci: device on port 2
 [npk] xhci: USB keyboard (HID boot protocol)
-[npk] Framebuffer: 1920x1080 @ 0xfd000000 (32bpp)
+[npk] Intel Xe GPU: ADL-N (device 46d0), 4K@30Hz HDMI
+[npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
 [npk] DHCP: configured 192.168.1.100
 [npk] npkfs: mounted (gen=42, 15 objects, 120000 free blocks)
