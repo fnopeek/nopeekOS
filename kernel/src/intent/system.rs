@@ -87,16 +87,35 @@ pub fn intent_gpu(args: &str) {
                 kprintln!("[npk] GPU: no native GPU detected");
                 return;
             }
+
+            // Capture serial output during init (survives black screen)
+            // Stop normal capture, start fresh for GPU init
+            let pre_log = crate::serial::stop_capture();
+            crate::serial::start_capture();
+
             kprintln!("[npk] GPU: activating native driver...");
-            match crate::gpu::activate_native() {
+            let result = crate::gpu::activate_native();
+
+            // Save GPU init log to npkFS (readable after reboot)
+            let gpu_log = crate::serial::stop_capture();
+            // Restore pre-existing capture
+            crate::serial::start_capture();
+
+            // Store log in npkFS (unencrypted, no cap needed — use zero cap)
+            let log_data = alloc::format!("{}\n--- GPU INIT RESULT: {:?} ---\n", gpu_log,
+                result.as_ref().map(|fb| alloc::format!("OK {}x{}", fb.width, fb.height))
+                    .unwrap_or_else(|e| alloc::format!("{:?}", e)));
+            let _ = crate::npkfs::store("gpu-init-log", log_data.as_bytes(), [0u8; 32]);
+
+            match result {
                 Ok(fb) => {
-                    // Reinitialize framebuffer console with new resolution
                     crate::framebuffer::init_from_gpu();
                     kprintln!("[npk] GPU: {}x{} active", fb.width, fb.height);
                 }
                 Err(e) => {
                     kprintln!("[npk] GPU: activation failed: {:?}", e);
                     kprintln!("[npk] GOP framebuffer unchanged");
+                    kprintln!("[npk] Log saved (use 'cat gpu-init-log' after reboot)");
                 }
             }
         }
