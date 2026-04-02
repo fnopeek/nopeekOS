@@ -952,20 +952,24 @@ impl IntelXeDriver {
         // Bit 0 = HDMI_SCRAMBLING (for >340 MHz, HDMI 2.0)
         let hdmi_2_0 = timing.pixel_clock_khz > 340000;
         let ddi_sel = self.ddi_port as u32 + 1;            // TGL+ is 1-indexed: 1=A, 2=B
+
+        // Use DVI mode (1) for clocks <= 340 MHz (no infoframes needed, matches firmware)
+        // Use HDMI mode (0) with scrambling for clocks > 340 MHz (HDMI 2.0)
+        let mode = if hdmi_2_0 { 0u32 } else { 1 };        // DVI=1, HDMI=0
         let ddi_func = (1u32 << 31)                        // enable
             | (ddi_sel << 27)                               // DDI select (TGL+ 4-bit)
-            | (0 << 24)                                     // HDMI mode
-            | (0 << 20)                                     // 8 bpc
+            | (mode << 24)                                  // DVI or HDMI mode
             | (1 << 17)                                     // PVSYNC (positive)
             | (1 << 16)                                     // PHSYNC (positive)
+            | (1 << 8)                                      // bit 8 (firmware sets this)
             | (if hdmi_2_0 { (1 << 4) | (1 << 0) } else { 0 }); // HDMI 2.0 scrambling
 
-        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} (HDMI 2.0={})", ddi_func, hdmi_2_0);
+        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} (mode={}, HDMI2.0={})",
+            ddi_func, if hdmi_2_0 { "HDMI" } else { "DVI" }, hdmi_2_0);
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, ddi_func);
 
-        // Enable DDI buffer: enable + 4 lanes for HDMI
-        // DDI_BUF_CTL: bit 31 = enable, bits [3:1] = port width = (4-1) = 3
-        let ddi_buf_val = (1u32 << 31) | (3 << 1);
+        // Enable DDI buffer (no port width for HDMI/DVI — firmware uses 0x80000000)
+        let ddi_buf_val = 1u32 << 31;
         kprintln!("[npk]   DDI_BUF_CTL: {:#010x}", ddi_buf_val);
         mmio_write32(self.bar0, ddi_ctl_reg, ddi_buf_val);
 
