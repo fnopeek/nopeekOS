@@ -19,6 +19,7 @@ static BUF_TAIL: AtomicUsize = AtomicUsize::new(0);
 // Modifier state
 static SHIFT: AtomicBool = AtomicBool::new(false);
 static CTRL: AtomicBool = AtomicBool::new(false);
+static ALT_GR: AtomicBool = AtomicBool::new(false);
 static CAPS_LOCK: AtomicBool = AtomicBool::new(false);
 static EXTENDED: AtomicBool = AtomicBool::new(false);
 
@@ -139,6 +140,12 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
 
     // Handle extended scancodes (arrow keys, Home, End, etc.)
     if is_extended {
+        // Modifiers: handle BOTH press and release
+        match code {
+            0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; }   // Right Ctrl
+            0x38 => { ALT_GR.store(!released, Ordering::Relaxed); return None; } // AltGr (Right Alt)
+            _ => {}
+        }
         if released { return None; }
         match code {
             0x48 => { push_arrow(KEY_UP); return None; }
@@ -151,13 +158,12 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
             0x51 => { push_arrow(KEY_PGDN); return None; }
             0x53 => { push_arrow(KEY_DEL); return None; }
             0x52 => { push_arrow(KEY_INSERT); return None; }
-            0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; } // Right Ctrl
-            0x5B | 0x5C => { return None; } // Super/Meta (left/right) — no ASCII
+            0x5B | 0x5C => { return None; } // Super/Meta (left/right)
             _ => return None,
         }
     }
 
-    // Normal scancodes
+    // Normal scancodes — modifiers
     match code {
         0x2A | 0x36 => { SHIFT.store(!released, Ordering::Relaxed); return None; }
         0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; }
@@ -175,14 +181,23 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
 
     let shift = SHIFT.load(Ordering::Relaxed);
     let ctrl = CTRL.load(Ordering::Relaxed);
+    let alt_gr = ALT_GR.load(Ordering::Relaxed);
     let caps = CAPS_LOCK.load(Ordering::Relaxed);
 
     if ctrl && code == 0x2E { return Some(0x03); } // Ctrl+C
 
     let layout = crate::config::get("keyboard");
-    match layout.as_deref() {
-        Some("us") => scancode_to_char_us(code, shift, caps),
-        _ => scancode_to_char_de(code, shift, caps), // default: de_CH
+    let is_de = !matches!(layout.as_deref(), Some("us"));
+
+    // AltGr: special characters (de_CH layout)
+    if alt_gr && is_de {
+        return altgr_char_de(code);
+    }
+
+    if is_de {
+        scancode_to_char_de(code, shift, caps)
+    } else {
+        scancode_to_char_us(code, shift, caps)
     }
 }
 
@@ -229,6 +244,23 @@ fn scancode_to_char_us(code: u8, shift: bool, caps: bool) -> Option<u8> {
     if caps && shift && ch >= b'A' && ch <= b'Z' { return Some(ch + 32); }
 
     Some(ch)
+}
+
+/// AltGr characters for Swiss German (de_CH) keyboard layout.
+/// PS/2 Scancode Set 1 → ASCII.
+fn altgr_char_de(code: u8) -> Option<u8> {
+    match code {
+        0x03 => Some(b'@'),   // AltGr+2
+        0x04 => Some(b'#'),   // AltGr+3
+        0x08 => Some(b'|'),   // AltGr+7
+        0x0D => Some(b'~'),   // AltGr+^
+        0x1A => Some(b'['),   // AltGr+ü
+        0x1B => Some(b']'),   // AltGr+¨
+        0x28 => Some(b'{'),   // AltGr+ä
+        0x2B => Some(b'}'),   // AltGr+$
+        0x56 => Some(b'\\'),  // AltGr+<
+        _ => None,
+    }
 }
 
 /// Scancode Set 1 → ASCII (Swiss German / DE_CH layout)
