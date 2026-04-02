@@ -153,13 +153,15 @@ pub fn intent_gpu(args: &str) {
                     .unwrap_or_else(|e| alloc::format!("{:?}", e)));
             let _ = crate::npkfs::store("gpu-init-log", log_data.as_bytes(), [0u8; 32]);
 
+            // Always reinit console — display hardware is already at 4K
+            // even if pipe re-enable timed out
+            crate::framebuffer::init_from_gpu();
             match result {
                 Ok(fb) => {
-                    crate::framebuffer::init_from_gpu();
                     kprintln!("[npk] GPU: {}x{} active", fb.width, fb.height);
                 }
                 Err(e) => {
-                    kprintln!("[npk] GPU: mode switch failed: {:?}", e);
+                    kprintln!("[npk] GPU: mode switch partial: {:?} (display may work)", e);
                     kprintln!("[npk] Log saved (use 'cat gpu-init-log' after reboot)");
                 }
             }
