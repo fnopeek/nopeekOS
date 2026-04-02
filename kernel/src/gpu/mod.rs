@@ -115,6 +115,21 @@ pub fn activate_native() -> Result<FramebufferInfo, GpuError> {
     }
 }
 
+/// Dump native GPU registers (read-only, safe).
+pub fn dump_native() {
+    let detected = DETECTED_XE.lock();
+    if let Some(ref drv) = *detected {
+        drv.dump_registers();
+    } else {
+        // Already activated?
+        let gpu = GPU.lock();
+        match &*gpu {
+            GpuBackend::IntelXe(drv) => drv.dump_registers(),
+            _ => crate::kprintln!("[npk] GPU: no native GPU detected"),
+        }
+    }
+}
+
 /// Check if a native GPU was detected (but not necessarily activated).
 pub fn native_detected() -> bool {
     DETECTED_XE.lock().is_some()

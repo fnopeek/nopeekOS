@@ -243,6 +243,10 @@ impl IntelXeDriver {
     }
 
     fn new(dev: pci::PciDevice, device_id: u16, name: &'static str) -> Self {
+        // Enable PCI memory space access
+        let cmd = pci::read32(dev.addr, 0x04);
+        pci::write32(dev.addr, 0x04, cmd | 0x06);
+
         let bar0 = pci::read_bar64(dev.addr, 0x10);
         let bar2 = pci::read_bar64(dev.addr, 0x18);
 
@@ -250,6 +254,24 @@ impl IntelXeDriver {
             dev.addr.bus, dev.addr.device, dev.addr.function, name);
         kprintln!("[npk]   BAR0 (MMIO): {:#x}", bar0);
         kprintln!("[npk]   BAR2 (aperture): {:#x}", bar2);
+
+        // Map BAR0 (16MB) so registers are accessible for dump and init
+        if bar0 != 0 {
+            let bar0_size = 16 * 1024 * 1024u64;
+            for offset in (0..bar0_size).step_by(4096) {
+                match paging::map_page(
+                    bar0 + offset, bar0 + offset,
+                    paging::PageFlags::PRESENT | paging::PageFlags::WRITABLE | paging::PageFlags::NO_CACHE,
+                ) {
+                    Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
+                    Err(_) => {
+                        kprintln!("[npk]   GPU: BAR0 map failed at offset {:#x}", offset);
+                        break;
+                    }
+                }
+            }
+            kprintln!("[npk]   GPU: BAR0 mapped (16MB)");
+        }
 
         Self {
             pci_addr: dev.addr,
@@ -301,21 +323,7 @@ impl IntelXeDriver {
             return Err(GpuError::MappingFailed);
         }
 
-        // Map BAR0 (16MB MMIO registers + GGTT)
-        let bar0_size = 16 * 1024 * 1024u64;
-        kprintln!("[npk]   GPU: mapping BAR0 {:#x} ({}MB)...", self.bar0, bar0_size / (1024*1024));
-        for offset in (0..bar0_size).step_by(4096) {
-            match paging::map_page(
-                self.bar0 + offset, self.bar0 + offset,
-                paging::PageFlags::PRESENT | paging::PageFlags::WRITABLE | paging::PageFlags::NO_CACHE,
-            ) {
-                Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
-                Err(e) => {
-                    kprintln!("[npk]   GPU: BAR0 map failed at {:#x}: {:?}", self.bar0 + offset, e);
-                    return Err(GpuError::MappingFailed);
-                }
-            }
-        }
+        // BAR0 already mapped during detect (new())
 
         // Detect available DDI ports
         self.detect_ddi_ports();
@@ -365,6 +373,109 @@ impl IntelXeDriver {
         Ok(fb)
     }
 
+    // ── Register Dump ────────────────────────────────────────────────
+
+    /// Dump current display engine state (read-only, no writes).
+    /// Use this to understand what the firmware configured.
+    pub fn dump_registers(&self) {
+        kprintln!("[npk]   === Intel Xe Display Register Dump ===");
+        kprintln!("[npk]   BAR0: {:#x}", self.bar0);
+
+        // Fuses
+        let fuse = mmio_read32(self.bar0, FUSE_STATUS);
+        let sfuse = mmio_read32(self.bar0, SFUSE_STRAP);
+        kprintln!("[npk]   FUSE_STATUS:  {:#010x}", fuse);
+        kprintln!("[npk]   SFUSE_STRAP:  {:#010x}", sfuse);
+
+        // Power
+        let pwr = mmio_read32(self.bar0, PWR_WELL_CTL2);
+        kprintln!("[npk]   PWR_WELL_CTL2: {:#010x}", pwr);
+
+        // CDCLK
+        let cdclk = mmio_read32(self.bar0, CDCLK_CTL);
+        let dbuf = mmio_read32(self.bar0, DBUF_CTL_S1);
+        kprintln!("[npk]   CDCLK_CTL:    {:#010x}", cdclk);
+        kprintln!("[npk]   DBUF_CTL_S1:  {:#010x}", dbuf);
+
+        // DPLL 0 and 1
+        let dpll0_en = mmio_read32(self.bar0, DPLL_ENABLE_0);
+        let dpll0_c0 = mmio_read32(self.bar0, DPLL_CFGCR0_0);
+        let dpll0_c1 = mmio_read32(self.bar0, DPLL_CFGCR1_0);
+        let dpll1_en = mmio_read32(self.bar0, DPLL_ENABLE_1);
+        kprintln!("[npk]   DPLL0_ENABLE: {:#010x}", dpll0_en);
+        kprintln!("[npk]   DPLL0_CFGCR0: {:#010x}", dpll0_c0);
+        kprintln!("[npk]   DPLL0_CFGCR1: {:#010x}", dpll0_c1);
+        kprintln!("[npk]   DPLL1_ENABLE: {:#010x}", dpll1_en);
+
+        // Transcoder A clock selection
+        let clk_sel = mmio_read32(self.bar0, TRANS_CLK_SEL_A);
+        kprintln!("[npk]   TRANS_CLK_SEL_A: {:#010x}", clk_sel);
+
+        // Transcoder A timings
+        let htotal = mmio_read32(self.bar0, TRANS_HTOTAL_A);
+        let hblank = mmio_read32(self.bar0, TRANS_HBLANK_A);
+        let hsync  = mmio_read32(self.bar0, TRANS_HSYNC_A);
+        let vtotal = mmio_read32(self.bar0, TRANS_VTOTAL_A);
+        let vblank = mmio_read32(self.bar0, TRANS_VBLANK_A);
+        let vsync  = mmio_read32(self.bar0, TRANS_VSYNC_A);
+        kprintln!("[npk]   TRANS_HTOTAL_A: {:#010x}  (active={}, total={})",
+            htotal, (htotal & 0xFFFF) + 1, (htotal >> 16) + 1);
+        kprintln!("[npk]   TRANS_HBLANK_A: {:#010x}", hblank);
+        kprintln!("[npk]   TRANS_HSYNC_A:  {:#010x}", hsync);
+        kprintln!("[npk]   TRANS_VTOTAL_A: {:#010x}  (active={}, total={})",
+            vtotal, (vtotal & 0xFFFF) + 1, (vtotal >> 16) + 1);
+        kprintln!("[npk]   TRANS_VBLANK_A: {:#010x}", vblank);
+        kprintln!("[npk]   TRANS_VSYNC_A:  {:#010x}", vsync);
+
+        // Transcoder DDI function control
+        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        kprintln!("[npk]   TRANS_DDI_FUNC_CTL_A: {:#010x}", ddi_func);
+        if ddi_func & 1 != 0 {
+            let ddi_sel = (ddi_func >> 28) & 0x7;
+            let mode = (ddi_func >> 24) & 0x7;
+            let bpc = (ddi_func >> 20) & 0x7;
+            kprintln!("[npk]     DDI={}, mode={}, bpc={}, enabled",
+                (b'A' + ddi_sel as u8) as char,
+                match mode { 0 => "HDMI", 1 => "DVI", 2 => "DP-SST", 4 => "DP-MST", _ => "?" },
+                match bpc { 0 => "8", 1 => "10", 2 => "6", 3 => "12", _ => "?" });
+        } else {
+            kprintln!("[npk]     (disabled)");
+        }
+
+        // Pipe A
+        let pipe_conf = mmio_read32(self.bar0, PIPE_CONF_A);
+        let pipe_src = mmio_read32(self.bar0, PIPE_SRCSZ_A);
+        kprintln!("[npk]   PIPE_CONF_A:  {:#010x}  (enabled={})",
+            pipe_conf, pipe_conf & (1 << 31) != 0);
+        kprintln!("[npk]   PIPE_SRCSZ_A: {:#010x}  ({}x{})",
+            pipe_src, (pipe_src & 0xFFFF) + 1, (pipe_src >> 16) + 1);
+
+        // Plane 1
+        let plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
+        let plane_stride = mmio_read32(self.bar0, PLANE_STRIDE_1_A);
+        let plane_pos = mmio_read32(self.bar0, PLANE_POS_1_A);
+        let plane_size = mmio_read32(self.bar0, PLANE_SIZE_1_A);
+        let plane_surf = mmio_read32(self.bar0, PLANE_SURF_1_A);
+        kprintln!("[npk]   PLANE_CTL_1_A:    {:#010x}  (enabled={})",
+            plane_ctl, plane_ctl & (1 << 31) != 0);
+        kprintln!("[npk]   PLANE_STRIDE_1_A: {} ({}B per row)",
+            plane_stride, plane_stride * 64);
+        kprintln!("[npk]   PLANE_POS_1_A:    {:#010x}", plane_pos);
+        kprintln!("[npk]   PLANE_SIZE_1_A:   {:#010x}  ({}x{})",
+            plane_size, (plane_size & 0xFFFF) + 1, (plane_size >> 16) + 1);
+        kprintln!("[npk]   PLANE_SURF_1_A:   {:#010x}  (GGTT offset)", plane_surf);
+
+        // DDI buffer control
+        let ddi_a = mmio_read32(self.bar0, DDI_BUF_CTL_A);
+        let ddi_b = mmio_read32(self.bar0, DDI_BUF_CTL_B);
+        kprintln!("[npk]   DDI_BUF_CTL_A: {:#010x}  (enabled={})",
+            ddi_a, ddi_a & (1 << 31) != 0);
+        kprintln!("[npk]   DDI_BUF_CTL_B: {:#010x}  (enabled={})",
+            ddi_b, ddi_b & (1 << 31) != 0);
+
+        kprintln!("[npk]   === End Register Dump ===");
+    }
+
     // ── DDI Port Detection ──────────────────────────────────────────
 
     fn detect_ddi_ports(&mut self) {
@@ -374,17 +485,18 @@ impl IntelXeDriver {
         kprintln!("[npk]   FUSE_STATUS: {:#010x}", fuse);
         kprintln!("[npk]   SFUSE_STRAP: {:#010x}", sfuse);
 
-        // On ADL-N NUC, HDMI is typically on DDI-A or DDI-B.
-        // Check which DDIs are fused present (FUSE_STATUS bits).
-        // Bit 27: DDI-B present, Bit 26: DDI-C present, Bit 25: DDI-D present
-        // DDI-A is always present on ADL.
-
-        // Default to DDI-A, override if we find HDMI on another port
-        self.ddi_port = 0; // DDI-A
-
-        // Try to detect which DDI has a sink connected by reading the
-        // DDI_BUF_CTL status bits. If DDI-A doesn't work, try DDI-B.
-        kprintln!("[npk]   Using DDI-A (default for HDMI)");
+        // Read TRANS_DDI_FUNC_CTL to see what the firmware configured
+        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        if ddi_func & 1 != 0 {
+            // Firmware has an active DDI — use the same port
+            let ddi_sel = ((ddi_func >> 28) & 0x7) as u8;
+            kprintln!("[npk]   Firmware using DDI-{} (inheriting)",
+                (b'A' + ddi_sel) as char);
+            self.ddi_port = ddi_sel;
+        } else {
+            self.ddi_port = 0; // DDI-A default
+            kprintln!("[npk]   No active DDI found, defaulting to DDI-A");
+        }
     }
 
     // ── Power Management ────────────────────────────────────────────
