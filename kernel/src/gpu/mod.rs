@@ -130,6 +130,20 @@ pub fn dump_native() {
     }
 }
 
+/// Test PLL re-lock with firmware values.
+pub fn test_pll() {
+    let detected = DETECTED_XE.lock();
+    if let Some(ref drv) = *detected {
+        drv.test_pll();
+    } else {
+        let gpu = GPU.lock();
+        match &*gpu {
+            GpuBackend::IntelXe(drv) => drv.test_pll(),
+            _ => crate::kprintln!("[npk] GPU: no native GPU detected"),
+        }
+    }
+}
+
 /// Check if a native GPU was detected (but not necessarily activated).
 pub fn native_detected() -> bool {
     DETECTED_XE.lock().is_some()
