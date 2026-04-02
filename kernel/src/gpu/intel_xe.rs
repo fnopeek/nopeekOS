@@ -757,7 +757,10 @@ impl IntelXeDriver {
     }
 
     fn disable_display(&mut self) {
-        // Disable in reverse order: plane → pipe → transcoder → DDI → DPLL
+        // Disable: plane → pipe → transcoder func → DPLL
+        // NOTE: Do NOT disable DDI_BUF_CTL — the combo PHY TX state is lost
+        // when DDI buffer is disabled, and we don't reprogram TX voltage swing.
+        // Keeping DDI buffer alive preserves the firmware's PHY configuration.
         kprintln!("[npk]   GPU: disabling current display pipeline...");
 
         // Disable plane
@@ -770,14 +773,7 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, TRANSCONF_A, pipe & !(1 << 31));
         let _ = poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000);
 
-        // Disable DDI buffer first (before transcoder DDI func)
-        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
-        let ddi = mmio_read32(self.bar0, ddi_ctl_reg);
-        mmio_write32(self.bar0, ddi_ctl_reg, ddi & !(1 << 31));
-        // Wait for DDI idle (bit 7 = 1)
-        let _ = poll_timeout(self.bar0, ddi_ctl_reg, 1 << 7, 1 << 7, 200_000);
-
-        // Disable transcoder DDI function
+        // Disable transcoder DDI function (but NOT DDI buffer itself)
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
 
         // Disable DPLL (whichever firmware used)
@@ -786,7 +782,7 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, enable_reg, dpll & !(1 << 31));
         let _ = poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000);
 
-        kprintln!("[npk]   GPU: pipeline disabled");
+        kprintln!("[npk]   GPU: pipeline disabled (DDI buffer preserved)");
     }
 
     // ── Framebuffer Allocation ──────────────────────────────────────
@@ -968,23 +964,17 @@ impl IntelXeDriver {
             ddi_func, if hdmi_2_0 { "HDMI" } else { "DVI" }, hdmi_2_0);
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, ddi_func);
 
-        // Enable DDI buffer (no port width for HDMI/DVI — firmware uses 0x80000000)
-        let ddi_buf_val = 1u32 << 31;
-        kprintln!("[npk]   DDI_BUF_CTL: {:#010x}", ddi_buf_val);
-        mmio_write32(self.bar0, ddi_ctl_reg, ddi_buf_val);
-
-        // Wait for DDI to become active (bit 7 = idle, should clear)
-        for _ in 0..100_000u32 {
-            if mmio_read32(self.bar0, ddi_ctl_reg) & (1 << 7) == 0 {
-                kprintln!("[npk]   DDI-{} enabled (HDMI)",
-                    (b'A' + self.ddi_port) as char);
-                return Ok(());
-            }
-            core::hint::spin_loop();
+        // Keep DDI buffer from firmware — don't re-write DDI_BUF_CTL
+        // Combo PHY TX voltage swing is set by firmware; re-writing DDI_BUF_CTL
+        // can lose the PHY state. Just verify it's still enabled.
+        let ddi_buf = mmio_read32(self.bar0, ddi_ctl_reg);
+        kprintln!("[npk]   DDI_BUF_CTL: {:#010x} (preserved from firmware)", ddi_buf);
+        if ddi_buf & (1 << 31) == 0 {
+            // DDI buffer was disabled — re-enable (may not work without PHY TX init)
+            kprintln!("[npk]   WARNING: DDI buffer was off, re-enabling");
+            mmio_write32(self.bar0, ddi_ctl_reg, 1u32 << 31);
         }
-
-        kprintln!("[npk]   DDI-{} enabled (idle bit still set — may work)",
-            (b'A' + self.ddi_port) as char);
+        kprintln!("[npk]   DDI-{} active (HDMI)", (b'A' + self.ddi_port) as char);
         Ok(())
     }
 
