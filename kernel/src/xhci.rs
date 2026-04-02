@@ -1133,6 +1133,15 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], prev_keys: &[u8; 6]) {
                 0x62 => b'0',
                 0x63 => b'.',
                 0x4C => 0x7F, // Delete
+                // Arrow keys → ANSI escape sequences (ESC [ A/B/C/D)
+                0x4F => { push_key(0x1B); push_key(b'['); push_key(b'C'); 0 } // Right
+                0x50 => { push_key(0x1B); push_key(b'['); push_key(b'D'); 0 } // Left
+                0x51 => { push_key(0x1B); push_key(b'['); push_key(b'B'); 0 } // Down
+                0x52 => { push_key(0x1B); push_key(b'['); push_key(b'A'); 0 } // Up
+                0x4A => { push_key(0x1B); push_key(b'['); push_key(b'H'); 0 } // Home
+                0x4D => { push_key(0x1B); push_key(b'['); push_key(b'F'); 0 } // End
+                0x4B => { push_key(0x1B); push_key(b'['); push_key(b'5'); 0 } // PgUp
+                0x4E => { push_key(0x1B); push_key(b'['); push_key(b'6'); 0 } // PgDn
                 _ => 0,
             }
         };

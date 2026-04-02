@@ -43,6 +43,21 @@ pub fn intent_status(vault: &Vault) {
     kprintln!();
 }
 
+pub fn intent_history() {
+    let hist = super::HISTORY.lock();
+    if hist.count == 0 {
+        kprintln!("(no history)");
+        return;
+    }
+    let start = if hist.count > super::HIST_MAX { hist.count - super::HIST_MAX } else { 0 };
+    for i in start..hist.count {
+        let idx = i % super::HIST_MAX;
+        if let Ok(s) = core::str::from_utf8(&hist.lines[idx][..hist.lens[idx]]) {
+            kprintln!("  {:3}  {}", i + 1, s);
+        }
+    }
+}
+
 pub fn intent_uptime() {
     let secs = crate::interrupts::uptime_secs();
     let days = secs / 86400;
