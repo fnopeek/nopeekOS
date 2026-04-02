@@ -449,10 +449,11 @@ impl IntelXeDriver {
 
     // ── Initialization ──────────────────────────────────────────────
 
-    /// Initialize display by taking over the firmware's running pipeline.
-    /// The firmware (UEFI) already configured DDI, PHY, DPLL, and transcoder.
-    /// We just allocate our own framebuffer and swap the plane surface pointer.
-    /// This avoids tearing down the DDI/PHY (which we can't properly restore).
+    /// Initialize display by reusing the firmware's existing framebuffer.
+    /// The firmware (UEFI) already has a fully working display pipeline:
+    /// DDI, PHY, DPLL, transcoder, pipe, plane, and GGTT are all configured.
+    /// We just find the physical address of the firmware's framebuffer and
+    /// return it — the system draws on it directly, no GPU register changes.
     pub fn init(&mut self) -> Result<FramebufferInfo, GpuError> {
         // Enable PCI memory space + bus mastering
         let cmd = pci::read32(self.pci_addr, 0x04);
@@ -487,47 +488,53 @@ impl IntelXeDriver {
         let fw_height = (vtotal_reg & 0xFFFF) + 1;
         kprintln!("[npk]   Firmware mode: {}x{}", fw_width, fw_height);
 
-        // Log firmware plane state (what we're replacing)
+        // Log firmware plane state
         let fw_plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
         let fw_plane_stride = mmio_read32(self.bar0, PLANE_STRIDE_1_A);
         let fw_plane_surf = mmio_read32(self.bar0, PLANE_SURF_1_A);
-        let fw_plane_size = mmio_read32(self.bar0, PLANE_SIZE_1_A);
-        kprintln!("[npk]   FW plane: CTL={:#010x} STRIDE={} SURF={:#010x} SIZE={:#010x}",
-            fw_plane_ctl, fw_plane_stride, fw_plane_surf, fw_plane_size);
+        kprintln!("[npk]   FW plane: CTL={:#010x} STRIDE={} SURF={:#010x}",
+            fw_plane_ctl, fw_plane_stride, fw_plane_surf);
 
-        // Match to our timing data
+        // Read the firmware's framebuffer physical address from GGTT.
+        // PLANE_SURF gives the GGTT offset; the GGTT entry at that offset
+        // contains the physical page address the display is scanning.
+        let ggtt_entry_idx = fw_plane_surf / 4096;
+        let ggtt_entry_off = ggtt_entry_idx * 8;
+        let ggtt_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + ggtt_entry_off);
+        let ggtt_hi = mmio_read32(self.bar0, GGTT_BASE as u32 + ggtt_entry_off + 4);
+        let fw_fb_phys = ((ggtt_hi as u64) << 32 | ggtt_lo as u64) & 0xFFFF_FFFF_FFFF_F000;
+
+        kprintln!("[npk]   FW GGTT[{}]: {:#010x}_{:08x} → phys {:#x}",
+            ggtt_entry_idx, ggtt_hi, ggtt_lo, fw_fb_phys);
+
+        if ggtt_lo & 1 == 0 {
+            kprintln!("[npk]   GPU: firmware GGTT entry not valid");
+            return Err(GpuError::PipelineFailed);
+        }
+
+        // Use the firmware's framebuffer directly — no allocation, no GGTT
+        // changes, no register writes. The display already scans this memory.
+        let pitch = fw_width * 4;
         let timing = match_firmware_timing(fw_width, fw_height);
 
-        // Allocate contiguous framebuffer memory
-        let fb = self.allocate_framebuffer(timing)?;
+        self.fb_phys = fw_fb_phys;
+        self.fb_ggtt_offset = fw_plane_surf;
+        self.fb_pages = (pitch * fw_height + 4095) / 4096;
 
-        // Write test pattern: bright white bar at top (50 rows)
-        // This verifies the framebuffer is actually being scanned out
-        let test_rows: usize = 50;
-        let row_bytes = timing.width as usize * 4;
-        // SAFETY: fb_phys is identity-mapped, contiguous, freshly allocated
+        let fb = FramebufferInfo {
+            addr: fw_fb_phys,
+            pitch,
+            width: fw_width,
+            height: fw_height,
+            bpp: 32,
+        };
+
+        // Test: write white bar to firmware's FB — should appear immediately
+        // SAFETY: fw_fb_phys is identity-mapped system RAM (UMA, no discrete VRAM)
         unsafe {
-            core::ptr::write_bytes(self.fb_phys as *mut u8, 0xFF, row_bytes * test_rows);
+            core::ptr::write_bytes(fw_fb_phys as *mut u8, 0xFF, pitch as usize * 50);
         }
-        kprintln!("[npk]   Test pattern: {} white rows at phys {:#x}", test_rows, self.fb_phys);
-
-        // Map framebuffer in GGTT so GPU can scan it out
-        self.program_ggtt()?;
-
-        // Invalidate GGTT TLB so hardware sees the new entries
-        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
-        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
-        kprintln!("[npk]   GGTT TLB invalidated");
-
-        // Configure plane and trigger page flip.
-        // The firmware DDI, PHY, DPLL, transcoder, and pipe all stay running.
-        // On Gen 12, plane registers are double-buffered — all changes take
-        // effect atomically when PLANE_SURF is written (triggers vblank flip).
-        self.configure_plane(timing)?;
-
-        // Verify: read back PLANE_SURF to confirm write
-        let readback = mmio_read32(self.bar0, PLANE_SURF_1_A);
-        kprintln!("[npk]   PLANE_SURF readback: {:#010x}", readback);
+        kprintln!("[npk]   Test: 50 white rows at FW phys {:#x}", fw_fb_phys);
 
         self.fb = Some(fb);
         self.active_timing = Some(timing);
