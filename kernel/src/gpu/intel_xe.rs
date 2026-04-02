@@ -68,6 +68,18 @@ const DDI_BUF_CTL_B: u32      = 0x64100;
 // DDI Clock routing (ICL+) — routes DPLL to DDI/PHY (separate from TRANS_CLK_SEL!)
 const ICL_DPCLKA_CFGCR0: u32  = 0x164280;
 
+// Combo PHY TX registers (for voltage swing / signal integrity)
+// PHY A base = 0x162000, PHY B base = 0x6C000
+// GRP = group write (all 4 lanes), LN0 = lane 0 (read)
+const ICL_PORT_TX_DW2_GRP_B: u32 = 0x6CD08;
+const ICL_PORT_TX_DW2_LN0_B: u32 = 0x6CF08;
+const ICL_PORT_TX_DW4_GRP_B: u32 = 0x6CD10;
+const ICL_PORT_TX_DW4_LN0_B: u32 = 0x6CF10;
+const ICL_PORT_TX_DW5_GRP_B: u32 = 0x6CD14;
+const ICL_PORT_TX_DW5_LN0_B: u32 = 0x6CF14;
+const ICL_PORT_TX_DW7_GRP_B: u32 = 0x6CD1C;
+const ICL_PORT_TX_DW7_LN0_B: u32 = 0x6CF1C;
+
 // GGTT base (within BAR0)
 const GGTT_BASE: u32           = 0x800000;
 
@@ -257,6 +269,11 @@ pub struct IntelXeDriver {
     active_timing: Option<&'static DisplayTiming>,
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
     firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
+    // Saved firmware combo PHY TX registers (restored after DDI disable/enable)
+    fw_tx_dw2: u32,
+    fw_tx_dw4: u32,
+    fw_tx_dw5: u32,
+    fw_tx_dw7: u32,
 }
 
 impl IntelXeDriver {
@@ -323,7 +340,11 @@ impl IntelXeDriver {
             fb_pages: 0,
             active_timing: None,
             ddi_port: 0,
-            firmware_dpll: 1, // Default DPLL1 (NUC firmware uses this)
+            firmware_dpll: 1,
+            fw_tx_dw2: 0,
+            fw_tx_dw4: 0,
+            fw_tx_dw5: 0,
+            fw_tx_dw7: 0,
         }
     }
 
@@ -637,6 +658,16 @@ impl IntelXeDriver {
         kprintln!("[npk]   Firmware clock source: DPLL{}", dpll_sel);
         // Store for use during modesetting
         self.firmware_dpll = dpll_sel as u8;
+
+        // Save combo PHY TX registers (voltage swing / signal integrity)
+        // These must be restored after any DDI buffer disable/enable cycle
+        // Currently hardcoded for PHY B (DDI-B) — TODO: support PHY A
+        self.fw_tx_dw2 = mmio_read32(self.bar0, ICL_PORT_TX_DW2_LN0_B);
+        self.fw_tx_dw4 = mmio_read32(self.bar0, ICL_PORT_TX_DW4_LN0_B);
+        self.fw_tx_dw5 = mmio_read32(self.bar0, ICL_PORT_TX_DW5_LN0_B);
+        self.fw_tx_dw7 = mmio_read32(self.bar0, ICL_PORT_TX_DW7_LN0_B);
+        kprintln!("[npk]   PHY TX saved: DW2={:#010x} DW4={:#010x} DW5={:#010x} DW7={:#010x}",
+            self.fw_tx_dw2, self.fw_tx_dw4, self.fw_tx_dw5, self.fw_tx_dw7);
     }
 
     // ── Power Management ────────────────────────────────────────────
@@ -769,32 +800,38 @@ impl IntelXeDriver {
     }
 
     fn disable_display(&mut self) {
-        // Disable: plane → pipe → transcoder func → DPLL
-        // NOTE: Do NOT disable DDI_BUF_CTL — the combo PHY TX state is lost
-        // when DDI buffer is disabled, and we don't reprogram TX voltage swing.
-        // Keeping DDI buffer alive preserves the firmware's PHY configuration.
+        // Full disable: plane → pipe → DDI buffer → transcoder func → DPLL
+        // Following i915 teardown order. TX registers will be restored on re-enable.
         kprintln!("[npk]   GPU: disabling current display pipeline...");
 
         // Disable plane
         let plane = mmio_read32(self.bar0, PLANE_CTL_1_A);
         mmio_write32(self.bar0, PLANE_CTL_1_A, plane & !(1 << 31));
-        mmio_write32(self.bar0, PLANE_SURF_1_A, 0); // trigger update
+        mmio_write32(self.bar0, PLANE_SURF_1_A, 0);
 
         // Disable pipe (TRANSCONF)
         let pipe = mmio_read32(self.bar0, TRANSCONF_A);
         mmio_write32(self.bar0, TRANSCONF_A, pipe & !(1 << 31));
         let _ = poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000);
 
-        // Disable transcoder DDI function (but NOT DDI buffer itself)
+        // Disable DDI buffer
+        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
+        let ddi = mmio_read32(self.bar0, ddi_ctl_reg);
+        if ddi & (1 << 31) != 0 {
+            mmio_write32(self.bar0, ddi_ctl_reg, ddi & !(1 << 31));
+            let _ = poll_timeout(self.bar0, ddi_ctl_reg, 1 << 7, 1 << 7, 200_000);
+        }
+
+        // Disable transcoder DDI function
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
 
-        // Disable DPLL (whichever firmware used)
+        // Disable DPLL
         let (enable_reg, _, _) = self.dpll_regs();
         let dpll = mmio_read32(self.bar0, enable_reg);
         mmio_write32(self.bar0, enable_reg, dpll & !(1 << 31));
         let _ = poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000);
 
-        kprintln!("[npk]   GPU: pipeline disabled (DDI buffer preserved)");
+        kprintln!("[npk]   GPU: pipeline disabled");
     }
 
     // ── Framebuffer Allocation ──────────────────────────────────────
@@ -1008,17 +1045,33 @@ impl IntelXeDriver {
             ddi_func, if hdmi_2_0 { "HDMI" } else { "DVI" }, hdmi_2_0);
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, ddi_func);
 
-        // Keep DDI buffer from firmware — don't re-write DDI_BUF_CTL
-        // Combo PHY TX voltage swing is set by firmware; re-writing DDI_BUF_CTL
-        // can lose the PHY state. Just verify it's still enabled.
-        let ddi_buf = mmio_read32(self.bar0, ddi_ctl_reg);
-        kprintln!("[npk]   DDI_BUF_CTL: {:#010x} (preserved from firmware)", ddi_buf);
-        if ddi_buf & (1 << 31) == 0 {
-            // DDI buffer was disabled — re-enable (may not work without PHY TX init)
-            kprintln!("[npk]   WARNING: DDI buffer was off, re-enabling");
-            mmio_write32(self.bar0, ddi_ctl_reg, 1u32 << 31);
+        // Restore combo PHY TX voltage swing from firmware values
+        // These registers control signal integrity — without them, PHY produces no signal
+        kprintln!("[npk]   Restoring PHY TX: DW2={:#010x} DW4={:#010x} DW5={:#010x} DW7={:#010x}",
+            self.fw_tx_dw2, self.fw_tx_dw4, self.fw_tx_dw5, self.fw_tx_dw7);
+        // Write via GRP registers (sets all 4 lanes at once)
+        mmio_write32(self.bar0, ICL_PORT_TX_DW5_GRP_B, self.fw_tx_dw5);
+        mmio_write32(self.bar0, ICL_PORT_TX_DW2_GRP_B, self.fw_tx_dw2);
+        mmio_write32(self.bar0, ICL_PORT_TX_DW4_GRP_B, self.fw_tx_dw4);
+        mmio_write32(self.bar0, ICL_PORT_TX_DW7_GRP_B, self.fw_tx_dw7);
+
+        // Enable DDI buffer (after TX is configured)
+        kprintln!("[npk]   DDI_BUF_CTL: enabling");
+        mmio_write32(self.bar0, ddi_ctl_reg, 1u32 << 31);
+        // Posting read
+        let _ = mmio_read32(self.bar0, ddi_ctl_reg);
+
+        // Wait for DDI active (bit 7 = idle → should clear)
+        for _ in 0..200_000u32 {
+            if mmio_read32(self.bar0, ddi_ctl_reg) & (1 << 7) == 0 {
+                kprintln!("[npk]   DDI-{} enabled (HDMI)", (b'A' + self.ddi_port) as char);
+                return Ok(());
+            }
+            core::hint::spin_loop();
         }
-        kprintln!("[npk]   DDI-{} active (HDMI)", (b'A' + self.ddi_port) as char);
+
+        let val = mmio_read32(self.bar0, ddi_ctl_reg);
+        kprintln!("[npk]   DDI-{} enabled (DDI_BUF={:#010x})", (b'A' + self.ddi_port) as char, val);
         Ok(())
     }
 
