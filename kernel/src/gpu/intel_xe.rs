@@ -947,8 +947,9 @@ impl IntelXeDriver {
         // Bit 4 = HIGH_TMDS_CHAR_RATE (for >340 MHz, HDMI 2.0)
         // Bit 0 = HDMI_SCRAMBLING (for >340 MHz, HDMI 2.0)
         let hdmi_2_0 = timing.pixel_clock_khz > 340000;
+        let ddi_sel = self.ddi_port as u32 + 1;            // TGL+ is 1-indexed: 1=A, 2=B
         let ddi_func = (1u32 << 31)                        // enable
-            | ((self.ddi_port as u32) << 27)               // DDI select (TGL+ 4-bit)
+            | (ddi_sel << 27)                               // DDI select (TGL+ 4-bit)
             | (0 << 24)                                     // HDMI mode
             | (0 << 20)                                     // 8 bpc
             | (1 << 17)                                     // PVSYNC (positive)
