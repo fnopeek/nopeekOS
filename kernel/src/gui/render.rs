@@ -162,13 +162,15 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
     // 8x8 subpixel sampling for smooth edges (64 levels vs old 16)
     let r_f = r as i32;
 
-    for corner in 0..4u32 {
-        let (cx, cy) = match corner {
-            0 => (x + r, y + r),
-            1 => (x + w - r - 1, y + r),
-            2 => (x + r, y + h - r - 1),
-            _ => (x + w - r - 1, y + h - r - 1),
-        };
+    // Corner centers: exact radius from each edge (no -1 offset)
+    // This ensures arcs meet the straight edges seamlessly
+    let corners: [(u32, u32, bool, bool); 4] = [
+        (x + r,     y + r,     true,  true),   // top-left:  dx goes left,  dy goes up
+        (x + w - r, y + r,     false, true),   // top-right: dx goes right, dy goes up
+        (x + r,     y + h - r, true,  false),  // bot-left:  dx goes left,  dy goes down
+        (x + w - r, y + h - r, false, false),  // bot-right: dx goes right, dy goes down
+    ];
+    for &(cx, cy, flip_x, flip_y) in &corners {
         for dy in 0..r {
             for dx in 0..r {
                 // 8x8 subpixel grid (64 samples per pixel)
@@ -185,18 +187,14 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
                 }
                 if coverage == 0 { continue; }
 
-                let (px, py) = match corner {
-                    0 => (cx - dx, cy - dy),
-                    1 => (cx + dx, cy - dy),
-                    2 => (cx - dx, cy + dy),
-                    _ => (cx + dx, cy + dy),
-                };
+                let px = if flip_x { cx - 1 - dx } else { cx + dx };
+                let py = if flip_y { cy - 1 - dy } else { cy + dy };
 
                 if coverage == 64 {
                     put_pixel(shadow, info, px, py, color);
                 } else {
                     let bg = read_pixel(shadow, info, px, py);
-                    let blended = blend(color, bg, coverage * 4); // 0..256
+                    let blended = blend(color, bg, coverage * 4);
                     put_pixel(shadow, info, px, py, blended);
                 }
             }

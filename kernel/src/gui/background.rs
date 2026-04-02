@@ -28,7 +28,16 @@ pub struct ColorScheme {
 }
 
 /// All available color schemes.
-pub static SCHEMES: [ColorScheme; 7] = [
+pub static SCHEMES: [ColorScheme; 8] = [
+    // 0: Deep Blue (black with blue tones)
+    ColorScheme {
+        base_r: 2, base_g: 3, base_b: 12,
+        streak_r: 15, streak_g: 40, streak_b: 120,
+        glow_r: 40, glow_g: 80, glow_b: 180,
+        glow2_r: 20, glow2_g: 50, glow2_b: 130,
+        accent: 0x002060B0,
+        border_focus: 0x002060B0,
+    },
     // 0: Violet Aurora (original)
     ColorScheme {
         base_r: 10, base_g: 5, base_b: 20,
@@ -94,10 +103,11 @@ pub static SCHEMES: [ColorScheme; 7] = [
     },
 ];
 
-/// Select a random color scheme at boot.
+/// Select a color scheme at boot. Default: Deep Blue (0).
 pub fn init() {
-    let idx = (crate::csprng::random_u64() % SCHEMES.len() as u64) as u8;
-    ACTIVE_SCHEME.store(idx, Ordering::Release);
+    // Use Deep Blue as default; set to random with:
+    // let idx = (crate::csprng::random_u64() % SCHEMES.len() as u64) as u8;
+    ACTIVE_SCHEME.store(0, Ordering::Release);
 }
 
 /// Get the currently active scheme.
