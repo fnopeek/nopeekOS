@@ -142,58 +142,66 @@ struct PllParams {
 }
 
 fn pll_for_clock(pixel_clock_khz: u32) -> Option<PllParams> {
-    // Intel combo PHY PLL (ICL/TGL/ADL):
-    //   AFE_clock = pixel_clock * 5 (for HDMI TMDS)
+    // Intel combo PHY PLL (TGL/ADL):
+    //   AFE_clock = pixel_clock * 5 (HDMI TMDS)
     //   DCO = AFE_clock * divider
     //   DCO range: [7,998,000 .. 10,000,000] kHz
-    //   divider = pdiv * qdiv * kdiv
-    //   Reference clock = 24 MHz
-    //   dco_integer = DCO / ref_clk (integer part)
-    //   dco_fraction = remainder * 0x8000 / ref_clk
+    //   Reference clock = 19.2 MHz (N100 / ADL-N)
+    //   dco_integer = DCO / 19200 (integer part)
+    //   dco_fraction = remainder * 0x8000 / 19200
+    //
+    // All modes use same DCO (8,910,000 kHz), only dividers differ.
+    // dco_integer = 464 (0x1D0), dco_fraction = 0x800
+    // Verified against firmware CFGCR0 = 0x001001D0
     match pixel_clock_khz {
         594000 => Some(PllParams {
-            // AFE=2970 MHz, div=3, DCO=8910 MHz, 8910/24=371.25
-            dco_integer: 371, dco_fraction: 0x2000,
+            // AFE=2970 MHz, div=3, DCO=8910 MHz
+            dco_integer: 464, dco_fraction: 0x800,
             pdiv: 3, qdiv: 1, kdiv: 1,
         }),
         297000 => Some(PllParams {
             // AFE=1485 MHz, div=6, DCO=8910 MHz
-            dco_integer: 371, dco_fraction: 0x2000,
+            dco_integer: 464, dco_fraction: 0x800,
             pdiv: 3, qdiv: 1, kdiv: 2,
         }),
         148500 => Some(PllParams {
             // AFE=742.5 MHz, div=12, DCO=8910 MHz
-            dco_integer: 371, dco_fraction: 0x2000,
-            pdiv: 3, qdiv: 2, kdiv: 2,
+            // Verified: matches firmware CFGCR1=0x00000E84
+            dco_integer: 464, dco_fraction: 0x800,
+            pdiv: 2, qdiv: 3, kdiv: 2,
         }),
         241500 => Some(PllParams {
-            // AFE=1207.5 MHz, div=7, DCO=8452.5 MHz, 8452.5/24=352.1875
-            dco_integer: 352, dco_fraction: 0x1800,
+            // AFE=1207.5 MHz, div=7, DCO=8452.5 MHz
+            dco_integer: 440, dco_fraction: 0x1800,
             pdiv: 7, qdiv: 1, kdiv: 1,
         }),
         _ => None,
     }
 }
 
-/// Encode PLL params into DPLL_CFGCR0/CFGCR1 register values (TGL+ format).
+/// Encode PLL params into DPLL_CFGCR0/CFGCR1 register values (TGL/ADL format).
+/// Bit layout verified against NUC firmware values.
 fn encode_cfgcr(params: &PllParams) -> (u32, u32) {
     // CFGCR0: dco_fraction[24:9] | dco_integer[8:0]
     let cfgcr0 = ((params.dco_fraction as u32) << 9) | (params.dco_integer as u32 & 0x1FF);
 
-    // CFGCR1: QDIV_RATIO[31:24] | QDIV_MODE[23] | CFSELOVRD[13] | KDIV[7:5] | PDIV[3:2]
+    // CFGCR1 (actual TGL/ADL layout, verified against firmware):
+    //   QDIV_RATIO [17:10]
+    //   QDIV_MODE  [9]     — 1 if qdiv > 1
+    //   KDIV       [8:6]   — encoded: 1→1, 2→2, 3→4
+    //   PDIV       [5:2]   — encoded: 2→1, 3→2, 5→4, 7→6
     let pdiv_enc: u32 = match params.pdiv {
-        2 => 0x1, 3 => 0x2, 5 => 0x4, 7 => 0x6, _ => 0x1,
+        2 => 1, 3 => 2, 5 => 4, 7 => 6, _ => 1,
     };
     let kdiv_enc: u32 = match params.kdiv {
-        1 => 0x1, 2 => 0x2, 3 => 0x4, _ => 0x1,
+        1 => 1, 2 => 2, 3 => 4, _ => 1,
     };
     let qdiv_mode = if params.qdiv > 1 { 1u32 } else { 0 };
-    let qdiv_ratio = params.qdiv as u32;
+    let qdiv_ratio = if params.qdiv > 1 { params.qdiv as u32 } else { 0 };
 
-    let cfgcr1 = (qdiv_ratio << 24)
-        | (qdiv_mode << 23)
-        | (1 << 13)             // TGL CFSELOVRD_NORMAL_XTAL
-        | (kdiv_enc << 5)
+    let cfgcr1 = (qdiv_ratio << 10)
+        | (qdiv_mode << 9)
+        | (kdiv_enc << 6)
         | (pdiv_enc << 2);
 
     (cfgcr0, cfgcr1)
@@ -433,6 +441,11 @@ impl IntelXeDriver {
 
         // Initialize core display clock
         self.init_cdclk()?;
+
+        // Disable firmware display pipeline before reprogramming PLL
+        // (PLL cannot be reprogrammed while actively driving a transcoder)
+        kprintln!("[npk]   GPU: disabling firmware pipeline...");
+        self.disable_display();
 
         // Try modes in preference order: 4K@60 → 4K@30 → 1080p
         let modes = [
