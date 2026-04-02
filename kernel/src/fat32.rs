@@ -475,9 +475,10 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
     crate::kprintln!("[npk] ESP: kernel.bin at cluster {}, {} -> {} bytes ({}/{} clusters)",
         kernel_cl, old_size, data.len(), new_clusters, old_clusters);
 
-    // Safety check: new kernel must fit in pre-allocated cluster chain
-    if new_clusters > old_clusters {
-        return Err("kernel too large for ESP (exceeds reserved space)");
+    // Safety check: kernel must stay within 4MB (8192 sectors)
+    const MAX_KERNEL_CLUSTERS: u32 = 8192;
+    if new_clusters > MAX_KERNEL_CLUSTERS {
+        return Err("kernel too large for ESP (exceeds 4MB limit)");
     }
 
     // Write data to existing clusters (follow FAT chain)
