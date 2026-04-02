@@ -115,11 +115,28 @@ pub fn init_from_gpu() {
     let cols = width / eff_w;
     let rows = height / eff_h;
 
+    // Free old shadow buffer before allocating new one (prevents OOM on mode switch)
+    {
+        let old = CONSOLE.lock().take();
+        if let Some(old_console) = old {
+            if !old_console.shadow.is_null() && old_console.shadow_size > 0 {
+                let old_layout = alloc::alloc::Layout::from_size_align(
+                    old_console.shadow_size, 16).unwrap();
+                unsafe { alloc::alloc::dealloc(old_console.shadow, old_layout); }
+            }
+        }
+    }
+
     // Allocate shadow buffer in RAM (fast WB-cached memory)
     let shadow_size = pitch as usize * height as usize;
     let layout = alloc::alloc::Layout::from_size_align(shadow_size, 16)
         .expect("shadow buffer layout");
     let shadow = unsafe { alloc::alloc::alloc_zeroed(layout) };
+
+    if shadow.is_null() {
+        crate::kprintln!("[npk] Framebuffer: shadow alloc failed ({}KB)", shadow_size / 1024);
+        return;
+    }
 
     // Clear MMIO framebuffer
     clear_screen(&info);
