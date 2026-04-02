@@ -93,7 +93,7 @@ fn clear_greeting_area(shadow: *mut u8, info: &FbInfo, l: &Layout) {
 
 /// Draw the input field (light background, dark outline, rounded).
 fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
-    let radius = 12 * l.scale; // Moderate rounding (not full pill)
+    let radius = l.input_h / 2; // Full pill shape (semicircle ends)
     let outline = 2 * l.scale;
 
     // Outer border

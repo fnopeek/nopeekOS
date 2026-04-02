@@ -249,6 +249,16 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     } else {
         // === Subsequent boot: Verify passphrase ===
         if framebuffer::is_available() {
+            // Activate native GPU + 4K before login screen
+            if gpu::native_detected() {
+                match gpu::activate_native() {
+                    Ok(fb) => {
+                        framebuffer::init_from_gpu();
+                        kprintln!("[npk] GPU: {}x{} (native)", fb.width, fb.height);
+                    }
+                    Err(_) => kprintln!("[npk] GPU: native init failed, using GOP"),
+                }
+            }
             // Graphical login screen
             let _master_key = gui::login::run(&salt);
         } else {

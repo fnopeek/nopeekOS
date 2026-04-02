@@ -159,9 +159,8 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
     fill_rect(shadow, info, x + w - r, y + r, r, h - 2 * r, color);
 
     // Anti-aliased corners using distance-based alpha blending
-    // We use 4x subpixel sampling for smooth edges
+    // 8x8 subpixel sampling for smooth edges (64 levels vs old 16)
     let r_f = r as i32;
-    let r2_f = r_f * r_f;
 
     for corner in 0..4u32 {
         let (cx, cy) = match corner {
@@ -172,15 +171,14 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
         };
         for dy in 0..r {
             for dx in 0..r {
-                // 4x4 subpixel grid for anti-aliasing
+                // 8x8 subpixel grid (64 samples per pixel)
                 let mut coverage = 0u32;
-                for sy in 0..4u32 {
-                    for sx in 0..4u32 {
-                        // Subpixel position (scaled by 4)
-                        let sdx = dx as i32 * 4 + sx as i32 + 2;
-                        let sdy = dy as i32 * 4 + sy as i32 + 2;
+                for sy in 0..8u32 {
+                    for sx in 0..8u32 {
+                        let sdx = dx as i32 * 8 + sx as i32 + 4;
+                        let sdy = dy as i32 * 8 + sy as i32 + 4;
                         let dist = sdx * sdx + sdy * sdy;
-                        if dist <= r_f * r_f * 16 {
+                        if dist <= r_f * r_f * 64 {
                             coverage += 1;
                         }
                     }
@@ -194,13 +192,11 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
                     _ => (cx + dx, cy + dy),
                 };
 
-                if coverage == 16 {
-                    // Fully inside — solid color
+                if coverage == 64 {
                     put_pixel(shadow, info, px, py, color);
                 } else {
-                    // Partially covered — blend with existing background
                     let bg = read_pixel(shadow, info, px, py);
-                    let blended = blend(color, bg, coverage * 16); // coverage 0..256
+                    let blended = blend(color, bg, coverage * 4); // 0..256
                     put_pixel(shadow, info, px, py, blended);
                 }
             }
