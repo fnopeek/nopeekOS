@@ -267,6 +267,7 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
     let mut buf = [0u8; 17000];
     let mut last_data_tick = crate::interrupts::ticks();
     let mut total_errors = 0u32;
+    let mut content_complete: Option<usize> = None; // body_start + content_length
     loop {
         // Poll network before each recv attempt
         for _ in 0..2000 { crate::net::poll(); core::hint::spin_loop(); }
@@ -281,6 +282,25 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
             Ok(n) => {
                 response.extend_from_slice(&buf[..n]);
                 last_data_tick = crate::interrupts::ticks();
+                // Parse Content-Length once we have headers
+                if content_complete.is_none() {
+                    if let Some(hdr_end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let body_start = hdr_end + 4;
+                        if let Ok(hdr) = core::str::from_utf8(&response[..hdr_end]) {
+                            for line in hdr.lines() {
+                                let lower = line.trim();
+                                if lower.len() > 16 {
+                                    let key = &lower[..16];
+                                    if key.eq_ignore_ascii_case("content-length: ") {
+                                        if let Ok(cl) = lower[16..].trim().parse::<usize>() {
+                                            content_complete = Some(body_start + cl);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Err(_) => {
                 total_errors += 1;
@@ -290,6 +310,10 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
                 let idle = crate::interrupts::ticks().wrapping_sub(last_data_tick);
                 if idle > 500 || total_errors > 20 { break; }
             }
+        }
+        // Exit early if we have the full body per Content-Length
+        if let Some(expected) = content_complete {
+            if response.len() >= expected { break; }
         }
         if response.len() > max_size { break; }
     }
