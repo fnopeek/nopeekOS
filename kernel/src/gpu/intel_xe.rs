@@ -448,11 +448,11 @@ impl IntelXeDriver {
         kprintln!("[npk]   GPU: disabling firmware pipeline...");
         self.disable_display();
 
-        // Try modes in preference order: 4K@60 → 4K@30 → 1080p
+        // Try modes: 1080p first (safe, no HDMI 2.0 scrambling), then 4K@30
+        // 4K@60 needs HDMI 2.0 sink-side scrambling via SCDC (not yet implemented)
         let modes = [
-            (&TIMING_4K_60, "4K@60Hz"),
-            (&TIMING_4K_30, "4K@30Hz"),
             (&TIMING_1080P_60, "1080p@60Hz"),
+            (&TIMING_4K_30, "4K@30Hz"),
         ];
 
         for (timing, label) in modes {
