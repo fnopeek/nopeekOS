@@ -450,10 +450,9 @@ impl IntelXeDriver {
     // ── Initialization ──────────────────────────────────────────────
 
     /// Initialize display by reusing the firmware's existing framebuffer.
-    /// The firmware (UEFI) already has a fully working display pipeline:
-    /// DDI, PHY, DPLL, transcoder, pipe, plane, and GGTT are all configured.
-    /// We just find the physical address of the firmware's framebuffer and
-    /// return it — the system draws on it directly, no GPU register changes.
+    /// The firmware (UEFI) already has a fully working display pipeline.
+    /// We use the GOP framebuffer address (known-good, already being drawn to)
+    /// and record hardware state for future mode changes.
     pub fn init(&mut self) -> Result<FramebufferInfo, GpuError> {
         // Enable PCI memory space + bus mastering
         let cmd = pci::read32(self.pci_addr, 0x04);
@@ -495,46 +494,39 @@ impl IntelXeDriver {
         kprintln!("[npk]   FW plane: CTL={:#010x} STRIDE={} SURF={:#010x}",
             fw_plane_ctl, fw_plane_stride, fw_plane_surf);
 
-        // Read the firmware's framebuffer physical address from GGTT.
-        // PLANE_SURF gives the GGTT offset; the GGTT entry at that offset
-        // contains the physical page address the display is scanning.
+        // Diagnostic: read GGTT entry to see physical address (LOG ONLY, no writes)
         let ggtt_entry_idx = fw_plane_surf / 4096;
         let ggtt_entry_off = ggtt_entry_idx * 8;
         let ggtt_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + ggtt_entry_off);
         let ggtt_hi = mmio_read32(self.bar0, GGTT_BASE as u32 + ggtt_entry_off + 4);
-        let fw_fb_phys = ((ggtt_hi as u64) << 32 | ggtt_lo as u64) & 0xFFFF_FFFF_FFFF_F000;
+        kprintln!("[npk]   FW GGTT[{}]: {:#010x}_{:08x}",
+            ggtt_entry_idx, ggtt_hi, ggtt_lo);
 
-        kprintln!("[npk]   FW GGTT[{}]: {:#010x}_{:08x} → phys {:#x}",
-            ggtt_entry_idx, ggtt_hi, ggtt_lo, fw_fb_phys);
-
-        if ggtt_lo & 1 == 0 {
-            kprintln!("[npk]   GPU: firmware GGTT entry not valid");
-            return Err(GpuError::PipelineFailed);
-        }
-
-        // Use the firmware's framebuffer directly — no allocation, no GGTT
-        // changes, no register writes. The display already scans this memory.
-        let pitch = fw_width * 4;
-        let timing = match_firmware_timing(fw_width, fw_height);
-
-        self.fb_phys = fw_fb_phys;
-        self.fb_ggtt_offset = fw_plane_surf;
-        self.fb_pages = (pitch * fw_height + 4095) / 4096;
-
-        let fb = FramebufferInfo {
-            addr: fw_fb_phys,
-            pitch,
-            width: fw_width,
-            height: fw_height,
-            bpp: 32,
+        // Use the GOP framebuffer address — it's the same memory the display
+        // is already scanning, and it's known-good (text is rendering on it).
+        // The GGTT entry might point to stolen memory (not CPU-accessible),
+        // but the GOP address from Multiboot2 is always safe.
+        let gop_addr = crate::framebuffer::with_fb(|fb| {
+            let info = fb.info();
+            (info.addr, info.pitch, info.width, info.height, info.bpp)
+        });
+        let (addr, pitch, width, height, bpp) = match gop_addr {
+            Some(v) => v,
+            None => {
+                kprintln!("[npk]   GPU: no GOP framebuffer to take over");
+                return Err(GpuError::PipelineFailed);
+            }
         };
 
-        // Test: write white bar to firmware's FB — should appear immediately
-        // SAFETY: fw_fb_phys is identity-mapped system RAM (UMA, no discrete VRAM)
-        unsafe {
-            core::ptr::write_bytes(fw_fb_phys as *mut u8, 0xFF, pitch as usize * 50);
-        }
-        kprintln!("[npk]   Test: 50 white rows at FW phys {:#x}", fw_fb_phys);
+        kprintln!("[npk]   GOP FB: {:#x} {}x{} pitch={}", addr, width, height, pitch);
+
+        let timing = match_firmware_timing(width, height);
+
+        self.fb_phys = addr;
+        self.fb_ggtt_offset = fw_plane_surf;
+        self.fb_pages = (pitch * height + 4095) / 4096;
+
+        let fb = FramebufferInfo { addr, pitch, width, height, bpp };
 
         self.fb = Some(fb);
         self.active_timing = Some(timing);
