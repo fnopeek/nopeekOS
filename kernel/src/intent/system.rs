@@ -133,6 +133,37 @@ pub fn intent_gpu(args: &str) {
                 }
             }
         }
+        "4k" | "4k30" => {
+            if !crate::gpu::is_native() {
+                kprintln!("[npk] GPU: native driver not active (run 'gpu init' first)");
+                return;
+            }
+
+            let pre_log = crate::serial::stop_capture();
+            crate::serial::start_capture();
+
+            kprintln!("[npk] GPU: switching to 4K@30Hz...");
+            let result = crate::gpu::set_mode(3840, 2160, 30);
+
+            let gpu_log = crate::serial::stop_capture();
+            crate::serial::start_capture();
+
+            let log_data = alloc::format!("{}\n--- GPU MODE RESULT: {:?} ---\n", gpu_log,
+                result.as_ref().map(|fb| alloc::format!("OK {}x{}", fb.width, fb.height))
+                    .unwrap_or_else(|e| alloc::format!("{:?}", e)));
+            let _ = crate::npkfs::store("gpu-init-log", log_data.as_bytes(), [0u8; 32]);
+
+            match result {
+                Ok(fb) => {
+                    crate::framebuffer::init_from_gpu();
+                    kprintln!("[npk] GPU: {}x{} active", fb.width, fb.height);
+                }
+                Err(e) => {
+                    kprintln!("[npk] GPU: mode switch failed: {:?}", e);
+                    kprintln!("[npk] Log saved (use 'cat gpu-init-log' after reboot)");
+                }
+            }
+        }
         "status" | "" => {
             kprintln!("  Driver:   {}", crate::gpu::driver_name());
             if let Some(fb) = crate::gpu::framebuffer_info() {
