@@ -402,10 +402,9 @@ impl IntelXeDriver {
         // Enable PW2 (Power Group 2): bit 3 = request, bit 2 = state
         self.enable_power_well(1, "PW2")?;
 
-        // Enable DDI power well for our port
-        // DDI-A = index 2, DDI-B = index 3
-        let ddi_pw_idx = 2 + self.ddi_port as u32;
-        self.enable_power_well(ddi_pw_idx, "DDI")?;
+        // Note: Combo PHY DDI ports (HDMI on ADL-N) do NOT need separate
+        // DDI power wells. Those are for TypeC/TBT ports only.
+        // PW1 + PW2 cover all combo PHY display functionality.
 
         kprintln!("[npk]   GPU: power wells enabled");
         Ok(())
