@@ -24,6 +24,8 @@ pub struct FbConsole {
     row: u32,
     cols: u32,
     rows: u32,
+    /// Pixel scale factor (2 for 4K, 1 otherwise). Each glyph pixel becomes scale×scale.
+    scale: u32,
 }
 
 // SAFETY: FbConsole is only accessed under a spinlock (CONSOLE mutex).
@@ -106,8 +108,12 @@ pub fn init_from_gpu() {
     }
 
     let info = FbInfo { addr, pitch, width, height, bpp };
-    let cols = width / FONT_WIDTH;
-    let rows = height / FONT_HEIGHT;
+    // 2x pixel scaling for 4K (each glyph pixel → 2×2 block)
+    let scale = if width > 1920 { 2u32 } else { 1 };
+    let eff_w = FONT_WIDTH * scale;
+    let eff_h = FONT_HEIGHT * scale;
+    let cols = width / eff_w;
+    let rows = height / eff_h;
 
     // Allocate shadow buffer in RAM (fast WB-cached memory)
     let shadow_size = pitch as usize * height as usize;
@@ -119,7 +125,7 @@ pub fn init_from_gpu() {
     clear_screen(&info);
 
     *CONSOLE.lock() = Some(FbConsole {
-        info, shadow, shadow_size, col: 0, row: 0, cols, rows,
+        info, shadow, shadow_size, col: 0, row: 0, cols, rows, scale,
     });
 }
 
@@ -157,9 +163,11 @@ fn put_pixel_shadow(console: &FbConsole, x: u32, y: u32, color: u32) {
 }
 
 /// Draw character to shadow buffer with specified foreground color.
+/// At scale > 1, each glyph pixel becomes a scale×scale block.
 fn draw_char_colored(console: &FbConsole, c: u8, col: u32, row: u32, fg: u32) {
-    let x0 = col * FONT_WIDTH;
-    let y0 = row * FONT_HEIGHT;
+    let s = console.scale;
+    let x0 = col * FONT_WIDTH * s;
+    let y0 = row * FONT_HEIGHT * s;
     let glyph = &FONT[c as usize * FONT_HEIGHT as usize..];
 
     for dy in 0..FONT_HEIGHT {
@@ -167,7 +175,12 @@ fn draw_char_colored(console: &FbConsole, c: u8, col: u32, row: u32, fg: u32) {
         let bits = glyph[dy as usize];
         for dx in 0..FONT_WIDTH {
             let color = if bits & (0x80 >> dx) != 0 { fg } else { BG_COLOR };
-            put_pixel_shadow(console, x0 + dx, y0 + dy, color);
+            // Write scale×scale block
+            for sy in 0..s {
+                for sx in 0..s {
+                    put_pixel_shadow(console, x0 + dx * s + sx, y0 + dy * s + sy, color);
+                }
+            }
         }
     }
 }
@@ -205,12 +218,13 @@ fn blit_all(console: &FbConsole) {
 /// Blit a single character cell to MMIO.
 fn blit_char(console: &FbConsole, col: u32, row: u32) {
     let info = &console.info;
-    let y_start = row * FONT_HEIGHT;
-    let y_end = y_start + FONT_HEIGHT;
-    let x_start = col * FONT_WIDTH;
+    let s = console.scale;
+    let y_start = row * FONT_HEIGHT * s;
+    let y_end = y_start + FONT_HEIGHT * s;
+    let x_start = col * FONT_WIDTH * s;
     let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
     let fb = info.addr as *mut u8;
-    let char_bytes = (FONT_WIDTH * bytes_per_pixel) as usize;
+    let char_bytes = (FONT_WIDTH * s * bytes_per_pixel) as usize;
 
     for y in y_start..y_end.min(info.height) {
         let offset = (y * info.pitch + x_start * bytes_per_pixel) as usize;
@@ -226,7 +240,7 @@ fn blit_char(console: &FbConsole, col: u32, row: u32) {
 
 /// Scroll shadow buffer only (no MMIO blit — caller handles batching).
 fn scroll_shadow(console: &mut FbConsole) {
-    let row_bytes = console.info.pitch as usize * FONT_HEIGHT as usize;
+    let row_bytes = console.info.pitch as usize * (FONT_HEIGHT * console.scale) as usize;
     let total_rows = console.rows as usize;
 
     unsafe {
@@ -346,11 +360,12 @@ pub fn write_str(s: &str) {
     }
 
     // Single blit at the end: either full (if scrolled) or just dirty rows
+    let s = console.scale;
     if scrolled {
         blit_all(console);
     } else if dirty_max_row >= dirty_min_row {
-        let y_start = dirty_min_row * FONT_HEIGHT;
-        let y_end = (dirty_max_row + 1) * FONT_HEIGHT;
+        let y_start = dirty_min_row * FONT_HEIGHT * s;
+        let y_end = (dirty_max_row + 1) * FONT_HEIGHT * s;
         blit_region(console, y_start, y_end);
     }
 }
