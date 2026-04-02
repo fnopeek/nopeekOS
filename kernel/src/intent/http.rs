@@ -93,7 +93,8 @@ fn do_http_request(args: &str, use_tls: bool) {
     };
 
     // ARP resolve gateway
-    crate::net::arp::request([10, 0, 2, 2]);
+    let gw = crate::net::ipv4::gateway();
+    crate::net::arp::request(gw);
     for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
 
     let port = if use_tls { 443u16 } else { 80 };
@@ -228,7 +229,11 @@ fn print_response_data(data: &[u8]) {
 }
 
 /// Reusable HTTPS GET — returns the response body as Vec<u8>.
-/// Supports large downloads (up to max_size bytes, default 4 MB).
+///
+/// Proper HTTP/1.1 implementation (RFC 7230):
+///   Phase 1: Receive headers (read until \r\n\r\n)
+///   Phase 2: Parse status + Content-Length / Transfer-Encoding
+///   Phase 3: Receive body (exactly Content-Length bytes, or read-until-close)
 pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::Vec<u8>, &'static str> {
     // Resolve hostname
     let ip = if let Some(ip) = parse_ip(host) {
@@ -237,13 +242,14 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
         crate::net::dns::resolve(host).ok_or("DNS resolution failed")?
     };
 
-    // ARP resolve gateway
-    crate::net::arp::request([10, 0, 2, 2]);
+    // ARP resolve gateway (use actual gateway from DHCP, not hardcoded)
+    let gw = crate::net::ipv4::gateway();
+    crate::net::arp::request(gw);
     for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
 
     let handle = crate::net::tcp::connect(ip, 443).map_err(|_| "TCP connect failed")?;
 
-    let mut tls_session = match crate::tls::tls_connect(handle, host) {
+    let mut tls = match crate::tls::tls_connect(handle, host) {
         Ok(s) => s,
         Err(_) => {
             let _ = crate::net::tcp::close(handle);
@@ -251,88 +257,193 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
         }
     };
 
-    // Send HTTP GET
+    // Send HTTP/1.1 GET
     let request = alloc::format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, host
     );
-    if crate::tls::tls_send(&mut tls_session, request.as_bytes()).is_err() {
-        let _ = crate::tls::tls_close(&mut tls_session);
+    if crate::tls::tls_send(&mut tls, request.as_bytes()).is_err() {
+        let _ = crate::tls::tls_close(&mut tls);
         return Err("HTTP send failed");
     }
 
-    // Receive response (up to max_size)
-    // Buffer must be >= max TLS record size (16KB) to avoid data loss
-    let mut response = alloc::vec::Vec::new();
-    let mut buf = [0u8; 17000];
-    let mut last_data_tick = crate::interrupts::ticks();
-    let mut total_errors = 0u32;
-    let mut content_complete: Option<usize> = None; // body_start + content_length
-    loop {
-        // Poll network before each recv attempt
-        for _ in 0..2000 { crate::net::poll(); core::hint::spin_loop(); }
+    // ── Phase 1: Receive HTTP headers ──────────────────────────
+    // Read TLS records until we have the full header block (\r\n\r\n).
+    let mut raw = alloc::vec::Vec::new();
+    let mut buf = [0u8; 17000]; // >= max TLS record (16KB)
+    let mut header_end = None;
 
-        match crate::tls::tls_recv(&mut tls_session, &mut buf) {
-            Ok(0) => {
-                let idle = crate::interrupts::ticks().wrapping_sub(last_data_tick);
-                // Timeout: 5s if we have data, 2s if empty
-                let timeout = if response.is_empty() { 200 } else { 500 };
-                if idle > timeout { break; }
-            }
+    loop {
+        match tls_recv_poll(&mut tls, &mut buf) {
+            Ok(0) => continue,
             Ok(n) => {
-                response.extend_from_slice(&buf[..n]);
-                last_data_tick = crate::interrupts::ticks();
-                // Parse Content-Length once we have headers
-                if content_complete.is_none() {
-                    if let Some(hdr_end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let body_start = hdr_end + 4;
-                        if let Ok(hdr) = core::str::from_utf8(&response[..hdr_end]) {
-                            for line in hdr.lines() {
-                                let lower = line.trim();
-                                if lower.len() > 16 {
-                                    let key = &lower[..16];
-                                    if key.eq_ignore_ascii_case("content-length: ") {
-                                        if let Ok(cl) = lower[16..].trim().parse::<usize>() {
-                                            content_complete = Some(body_start + cl);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = Some(pos);
+                    break;
                 }
             }
-            Err(_) => {
-                total_errors += 1;
-                // Don't break on first error — TLS can have transient issues
-                // Poll network and retry
-                for _ in 0..10000 { crate::net::poll(); core::hint::spin_loop(); }
-                let idle = crate::interrupts::ticks().wrapping_sub(last_data_tick);
-                if idle > 500 || total_errors > 20 { break; }
+            Err(_) => break,
+        }
+        if raw.len() > 32_768 { return close_err(&mut tls, "headers too large"); }
+    }
+
+    let hdr_end = match header_end {
+        Some(pos) => pos,
+        None => return close_err(&mut tls, "no HTTP headers received"),
+    };
+    let body_start = hdr_end + 4;
+
+    // ── Phase 2: Parse HTTP status + headers ───────────────────
+    let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
+
+    // Status code (first line: "HTTP/1.1 200 OK")
+    let status = parse_status_code(hdr_str).unwrap_or(0);
+    if status < 200 || status >= 300 {
+        let _ = crate::tls::tls_close(&mut tls);
+        return Err("HTTP non-2xx response");
+    }
+
+    let content_length = parse_header_value(hdr_str, "content-length")
+        .and_then(|v| v.trim().parse::<usize>().ok());
+    let chunked = parse_header_value(hdr_str, "transfer-encoding")
+        .map(|v| v.contains("chunked"))
+        .unwrap_or(false);
+
+    // ── Phase 3: Receive body ──────────────────────────────────
+    // Body bytes we already have from phase 1 (may be partial or complete).
+    let mut body = raw[body_start..].to_vec();
+
+    if let Some(cl) = content_length {
+        // Content-Length: read exactly `cl` bytes
+        while body.len() < cl && body.len() < max_size {
+            match tls_recv_poll(&mut tls, &mut buf) {
+                Ok(0) => continue,
+                Ok(n) => body.extend_from_slice(&buf[..n]),
+                Err(_) => break,
             }
         }
-        // Exit early if we have the full body per Content-Length
-        if let Some(expected) = content_complete {
-            if response.len() >= expected { break; }
-        }
-        if response.len() > max_size { break; }
-    }
-    let _ = crate::tls::tls_close(&mut tls_session);
-
-    if response.is_empty() { return Err("empty response"); }
-
-    // Extract body (skip HTTP headers)
-    let header_end = response.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .unwrap_or(response.len());
-    let body_start = if header_end < response.len() { header_end + 4 } else { response.len() };
-
-    // Check HTTP status
-    if let Ok(hdr) = core::str::from_utf8(&response[..header_end.min(64)]) {
-        if !hdr.contains("200") {
-            return Err("HTTP non-200 response");
+        body.truncate(cl); // trim any excess (shouldn't happen with well-behaved servers)
+    } else if chunked {
+        // Transfer-Encoding: chunked — decode chunks
+        let chunked_raw = body;
+        body = decode_chunked(&chunked_raw, &mut tls, &mut buf, max_size);
+    } else {
+        // Connection: close — read until server closes (fallback per RFC 7230 §3.3.3)
+        loop {
+            match tls_recv_poll(&mut tls, &mut buf) {
+                Ok(0) => continue,
+                Ok(n) => body.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+            if body.len() > max_size { break; }
         }
     }
 
-    Ok(response[body_start..].to_vec())
+    let _ = crate::tls::tls_close(&mut tls);
+    if body.is_empty() && content_length != Some(0) {
+        return Err("empty body");
+    }
+    Ok(body)
+}
+
+/// TLS recv with network polling. Retries on Ok(0) up to a hard timeout.
+fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usize, &'static str> {
+    let start = crate::interrupts::ticks();
+    loop {
+        for _ in 0..2000 { crate::net::poll(); core::hint::spin_loop(); }
+        match crate::tls::tls_recv(tls, buf) {
+            Ok(0) => {
+                // TLS returned no app data (NewSessionTicket, CCS, etc.) — retry
+                if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
+                    return Err("recv timeout"); // 15 seconds hard timeout
+                }
+            }
+            Ok(n) => return Ok(n),
+            Err(_) => return Err("recv error"),
+        }
+    }
+}
+
+fn close_err(tls: &mut crate::tls::TlsSession, msg: &'static str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let _ = crate::tls::tls_close(tls);
+    Err(msg)
+}
+
+/// Parse HTTP status code from first header line.
+fn parse_status_code(headers: &str) -> Option<u16> {
+    // "HTTP/1.1 200 OK" → 200
+    let first_line = headers.lines().next()?;
+    let mut parts = first_line.split_whitespace();
+    parts.next()?; // "HTTP/1.1"
+    parts.next()?.parse().ok()
+}
+
+/// Find a header value by name (case-insensitive).
+fn parse_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    for line in headers.lines() {
+        if let Some((key, val)) = line.split_once(':') {
+            if key.trim().eq_ignore_ascii_case(name) {
+                return Some(val.trim());
+            }
+        }
+    }
+    None
+}
+
+/// Decode chunked transfer encoding (RFC 7230 §4.1).
+fn decode_chunked(
+    initial: &[u8],
+    tls: &mut crate::tls::TlsSession,
+    buf: &mut [u8],
+    max_size: usize,
+) -> alloc::vec::Vec<u8> {
+    // Accumulate all chunked data, then decode
+    let mut raw = initial.to_vec();
+
+    // Read until we see "0\r\n" (final chunk)
+    let mut attempts = 0;
+    while !has_final_chunk(&raw) && raw.len() < max_size {
+        match tls_recv_poll(tls, buf) {
+            Ok(0) => { attempts += 1; if attempts > 50 { break; } }
+            Ok(n) => { raw.extend_from_slice(&buf[..n]); attempts = 0; }
+            Err(_) => break,
+        }
+    }
+
+    // Decode: each chunk is "SIZE\r\n DATA \r\n", final "0\r\n\r\n"
+    let mut body = alloc::vec::Vec::new();
+    let mut pos = 0;
+    loop {
+        // Find chunk size line
+        let line_end = match raw[pos..].windows(2).position(|w| w == b"\r\n") {
+            Some(p) => pos + p,
+            None => break,
+        };
+        let size_str = match core::str::from_utf8(&raw[pos..line_end]) {
+            Ok(s) => s.trim(),
+            Err(_) => break,
+        };
+        // Chunk size may have extensions after ';' — ignore them
+        let size_hex = size_str.split(';').next().unwrap_or("").trim();
+        let chunk_size = match usize::from_str_radix(size_hex, 16) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        if chunk_size == 0 { break; } // final chunk
+
+        let data_start = line_end + 2;
+        let data_end = data_start + chunk_size;
+        if data_end > raw.len() { break; } // incomplete
+        body.extend_from_slice(&raw[data_start..data_end]);
+        pos = data_end + 2; // skip trailing \r\n
+        if body.len() > max_size { break; }
+    }
+    body
+}
+
+fn has_final_chunk(data: &[u8]) -> bool {
+    // Look for "0\r\n\r\n" anywhere (final chunk marker)
+    data.windows(5).any(|w| w == b"0\r\n\r\n")
+        || data.windows(3).any(|w| w == b"0\r\n") // might not have trailing \r\n yet
 }
