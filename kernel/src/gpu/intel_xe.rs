@@ -564,13 +564,17 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, PLANE_SURF_1_A, 0);
         kprintln!("[npk]   Plane disabled");
 
-        // Step 2: Disable pipe (must stop before changing DPLL/timings)
-        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
-        mmio_write32(self.bar0, PIPE_CONF_A, pipe & !(1 << 31));
-        if !poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 200_000) {
-            kprintln!("[npk]   Pipe disable timeout");
-        }
-        kprintln!("[npk]   Pipe disabled");
+        // Step 2: Disable pipe — try BOTH possible config registers
+        // ADL-N: PIPE_CONF may be at 0x70008 or 0xF0008 depending on stepping
+        let pipe_val = mmio_read32(self.bar0, PIPE_CONF_A);
+        kprintln!("[npk]   PIPE_CONF(0x70008): {:#010x}", pipe_val);
+        // Write disable to both offsets (harmless if one is invalid)
+        mmio_write32(self.bar0, 0x70008, 0);  // PIPE_CONF_A
+        mmio_write32(self.bar0, 0xF0008, 0);  // TRANSCONF_A
+        // Blind wait ~20ms for pipe to drain (don't rely on polling)
+        for _ in 0..2_000_000u32 { core::hint::spin_loop(); }
+        let after = mmio_read32(self.bar0, PIPE_CONF_A);
+        kprintln!("[npk]   Pipe after disable: {:#010x}", after);
 
         // Step 3: Free old GGTT entries (no-op if fb_pages == 0)
         self.free_framebuffer();
@@ -580,10 +584,13 @@ impl IntelXeDriver {
             self.program_dpll(timing)?;
         }
 
-        // Step 5: Program transcoder timings
+        // Step 5: Program transcoder timings + pipe source size
         self.program_transcoder(timing);
-        mmio_write32(self.bar0, PIPE_SRCSZ_A,
-            ((timing.width - 1) << 16) | (timing.height - 1));
+        let srcsz = ((timing.width - 1) << 16) | (timing.height - 1);
+        mmio_write32(self.bar0, PIPE_SRCSZ_A, srcsz);
+        // Also try pipe-domain offset 0x7001C (in case 0x6001C is transcoder-only)
+        mmio_write32(self.bar0, 0x7001C, srcsz);
+        kprintln!("[npk]   PIPE_SRCSZ: {:#010x} (written to 0x6001C + 0x7001C)", srcsz);
 
         // Step 6: Allocate framebuffer (contiguous physical RAM)
         let pitch = timing.width * 4;
@@ -652,14 +659,17 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Step 11: Re-enable pipe
-        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
-        mmio_write32(self.bar0, PIPE_CONF_A, pipe | (1 << 31));
-        if !poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 1 << 30, 500_000) {
-            kprintln!("[npk]   Pipe re-enable timeout (continuing anyway)");
-        } else {
-            kprintln!("[npk]   Pipe enabled");
-        }
+        // Step 11: Re-enable pipe (write to both possible offsets)
+        mmio_write32(self.bar0, 0x70008, 1 << 31);  // PIPE_CONF_A
+        mmio_write32(self.bar0, 0xF0008, 1 << 31);  // TRANSCONF_A
+        // Wait for pipe to start
+        for _ in 0..2_000_000u32 { core::hint::spin_loop(); }
+        kprintln!("[npk]   Pipe enabled (blind)");
+
+        // Write PIPE_SRCSZ again after enable (some HW needs it live)
+        let srcsz = ((timing.width - 1) << 16) | (timing.height - 1);
+        mmio_write32(self.bar0, PIPE_SRCSZ_A, srcsz);
+        mmio_write32(self.bar0, 0x7001C, srcsz);
 
         Ok(fb)
     }
