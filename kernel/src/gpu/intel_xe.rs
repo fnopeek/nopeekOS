@@ -49,8 +49,9 @@ const TRANS_VSYNC_A: u32       = 0x60014;
 const TRANS_DDI_FUNC_CTL_A: u32 = 0x60400;
 const TRANS_CLK_SEL_A: u32     = 0x46140;
 
-// Pipe A
-const PIPE_CONF_A: u32         = 0x70008;
+// Pipe A — TRANSCONF on ICL+ (NOT 0x70008 which is pre-ICL)
+const PIPE_CONF_A: u32         = 0x70008;  // Legacy offset (read works, write may not)
+const TRANSCONF_A: u32         = 0xF0008;  // ICL+/TGL+/ADL transcoder config
 const PIPE_SRCSZ_A: u32       = 0x6001C;
 
 // Plane 1 on Pipe A
@@ -351,9 +352,9 @@ impl IntelXeDriver {
 
         // Step 1: Disable the display pipeline first (must stop using PLL before disabling it)
         kprintln!("[npk]   Step 1: Disabling pipe + transcoder...");
-        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
-        mmio_write32(self.bar0, PIPE_CONF_A, pipe & !(1 << 31));
-        let _ = poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 200_000);
+        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
+        mmio_write32(self.bar0, TRANSCONF_A, pipe & !(1 << 31));
+        let _ = poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000);
 
         // Disable DDI buffer
         let ddi_ctl = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
@@ -563,9 +564,12 @@ impl IntelXeDriver {
 
         // Pipe A
         let pipe_conf = mmio_read32(self.bar0, PIPE_CONF_A);
+        let transconf = mmio_read32(self.bar0, TRANSCONF_A);
         let pipe_src = mmio_read32(self.bar0, PIPE_SRCSZ_A);
         kprintln!("[npk]   PIPE_CONF_A:  {:#010x}  (enabled={})",
             pipe_conf, pipe_conf & (1 << 31) != 0);
+        kprintln!("[npk]   TRANSCONF_A:  {:#010x}  (enabled={})",
+            transconf, transconf & (1 << 31) != 0);
         kprintln!("[npk]   PIPE_SRCSZ_A: {:#010x}  ({}x{})",
             pipe_src, (pipe_src & 0xFFFF) + 1, (pipe_src >> 16) + 1);
 
@@ -741,9 +745,9 @@ impl IntelXeDriver {
         self.configure_plane(timing)?;
 
         // Step 9: Enable pipe
-        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
-        mmio_write32(self.bar0, PIPE_CONF_A, pipe | (1 << 31));
-        if !poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 1 << 30, 100_000) {
+        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
+        mmio_write32(self.bar0, TRANSCONF_A, pipe | (1 << 31));
+        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 1 << 30, 100_000) {
             kprintln!("[npk]   Pipe A enable timeout");
             return Err(GpuError::PipelineFailed);
         }
@@ -762,9 +766,9 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, PLANE_SURF_1_A, 0); // trigger update
 
         // Disable pipe (TRANSCONF)
-        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
-        mmio_write32(self.bar0, PIPE_CONF_A, pipe & !(1 << 31));
-        let _ = poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 200_000);
+        let pipe = mmio_read32(self.bar0, TRANSCONF_A);
+        mmio_write32(self.bar0, TRANSCONF_A, pipe & !(1 << 31));
+        let _ = poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000);
 
         // Disable DDI buffer first (before transcoder DDI func)
         let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
