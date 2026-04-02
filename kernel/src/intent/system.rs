@@ -43,6 +43,21 @@ pub fn intent_status(vault: &Vault) {
     kprintln!();
 }
 
+pub fn intent_uptime() {
+    let secs = crate::interrupts::uptime_secs();
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    let s = secs % 60;
+    if days > 0 {
+        kprintln!("up {}d {}h {}m {}s", days, hours, mins, s);
+    } else if hours > 0 {
+        kprintln!("up {}h {}m {}s", hours, mins, s);
+    } else {
+        kprintln!("up {}m {}s", mins, s);
+    }
+}
+
 pub fn intent_uname(args: &str) {
     let all = args.contains("-a") || args.is_empty();
     if all {
@@ -215,7 +230,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  nopeekOS");
             kprintln!("  ════════");
             kprintln!();
-            kprintln!("  System:    status · time · about · clear · halt");
+            kprintln!("  System:    status · uptime · time · about · clear · halt");
             kprintln!("  Storage:   store · fetch · delete · list · fsinfo");
             kprintln!("  Content:   cat · grep · head · wc · hexdump");
             kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");

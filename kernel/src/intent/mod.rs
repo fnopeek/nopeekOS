@@ -437,6 +437,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 net::intent_resolve(args);
             }
         }
+        "uptime" => {
+            system::intent_uptime();
+        }
         "time" | "clock" | "date" => {
             if require_cap(vault, &session, Rights::READ, "time") {
                 system::intent_time();
