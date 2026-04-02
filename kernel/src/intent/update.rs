@@ -111,6 +111,7 @@ pub fn intent_update(_args: &str) {
     };
 
     // 5. Verify ECDSA P-384 signature (reuse SHA-384 hash from step 3)
+    kprintln!("[npk] Signature: {} bytes", sig_data.len());
     kprint!("[npk] Verifying ECDSA P-384 signature... ");
     let pubkey = &crate::update_key::UPDATE_PUB_KEY;
     if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {

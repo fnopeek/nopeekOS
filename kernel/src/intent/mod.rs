@@ -18,6 +18,67 @@ use spin::Mutex;
 
 const INPUT_BUF_SIZE: usize = 512;
 
+// -- Command history --
+const HIST_MAX: usize = 32;
+const HIST_LINE: usize = 256;
+
+struct History {
+    lines: [[u8; HIST_LINE]; HIST_MAX],
+    lens: [usize; HIST_MAX],
+    count: usize,
+    cursor: usize,
+}
+
+impl History {
+    fn push(&mut self, line: &[u8]) {
+        if line.is_empty() { return; }
+        let len = line.len().min(HIST_LINE);
+        // Skip duplicate of last entry
+        if self.count > 0 {
+            let last = (self.count - 1) % HIST_MAX;
+            if self.lens[last] == len && self.lines[last][..len] == line[..len] {
+                self.cursor = self.count;
+                return;
+            }
+        }
+        let idx = self.count % HIST_MAX;
+        self.lines[idx][..len].copy_from_slice(&line[..len]);
+        self.lens[idx] = len;
+        self.count += 1;
+        self.cursor = self.count;
+    }
+
+    fn up(&mut self) -> Option<(&[u8], usize)> {
+        if self.count == 0 || self.cursor == 0 { return None; }
+        let start = if self.count > HIST_MAX { self.count - HIST_MAX } else { 0 };
+        if self.cursor <= start { return None; }
+        self.cursor -= 1;
+        let idx = self.cursor % HIST_MAX;
+        Some((&self.lines[idx], self.lens[idx]))
+    }
+
+    fn down(&mut self) -> Option<(&[u8], usize)> {
+        if self.cursor >= self.count { return None; }
+        self.cursor += 1;
+        if self.cursor >= self.count {
+            return None; // back to empty line
+        }
+        let idx = self.cursor % HIST_MAX;
+        Some((&self.lines[idx], self.lens[idx]))
+    }
+
+    fn reset_cursor(&mut self) {
+        self.cursor = self.count;
+    }
+}
+
+static HISTORY: Mutex<History> = Mutex::new(History {
+    lines: [[0; HIST_LINE]; HIST_MAX],
+    lens: [0; HIST_MAX],
+    count: 0,
+    cursor: 0,
+});
+
 /// Current working directory (prefix for relative paths).
 static CWD: Mutex<String> = Mutex::new(String::new());
 
@@ -95,9 +156,12 @@ fn ensure_parents(path: &str) {
     }
 }
 
-/// Read a line from serial/keyboard with tab-completion, network polling, and shell check.
+/// Read a line from serial/keyboard with tab-completion, history, and network polling.
 fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: CapId) -> usize {
     let mut pos = 0;
+    let mut esc: u8 = 0; // 0=normal, 1=got ESC, 2=got ESC[
+
+    HISTORY.lock().reset_cursor();
 
     loop {
         // Poll network while waiting
@@ -120,9 +184,53 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             b
         };
 
+        // Handle ANSI escape sequences (ESC [ A/B/C/D)
+        if esc == 1 {
+            esc = if byte == 0x5b { 2 } else { 0 };
+            continue;
+        }
+        if esc == 2 {
+            esc = 0;
+            match byte {
+                b'A' => {
+                    // Arrow up — previous history entry
+                    let mut hist = HISTORY.lock();
+                    if let Some((line, len)) = hist.up() {
+                        let len = len.min(buf.len());
+                        // Clear current line
+                        for _ in 0..pos { kprint!("\x08 \x08"); }
+                        buf[..len].copy_from_slice(&line[..len]);
+                        pos = len;
+                        if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                            kprint!("{}", s);
+                        }
+                    }
+                }
+                b'B' => {
+                    // Arrow down — next history entry
+                    let mut hist = HISTORY.lock();
+                    for _ in 0..pos { kprint!("\x08 \x08"); }
+                    if let Some((line, len)) = hist.down() {
+                        let len = len.min(buf.len());
+                        buf[..len].copy_from_slice(&line[..len]);
+                        pos = len;
+                        if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                            kprint!("{}", s);
+                        }
+                    } else {
+                        pos = 0; // back to empty line
+                    }
+                }
+                _ => {} // ignore other sequences (left, right, etc.)
+            }
+            continue;
+        }
+
         match byte {
+            0x1b => { esc = 1; }
             b'\r' | b'\n' => {
                 kprint!("\n");
+                HISTORY.lock().push(&buf[..pos]);
                 return pos;
             }
             0x08 | 0x7F => {
