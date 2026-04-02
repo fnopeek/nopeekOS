@@ -83,6 +83,9 @@ const ICL_PORT_TX_DW7_LN0_B: u32 = 0x6CF1C;
 // GGTT base (within BAR0)
 const GGTT_BASE: u32           = 0x800000;
 
+// GGTT TLB invalidation (Gen 8+)
+const GFX_FLSH_CNTL_GEN6: u32 = 0x101008;
+
 // ── Display Timings ─────────────────────────────────────────────────
 
 /// CEA-861 standard timings
@@ -470,6 +473,8 @@ impl IntelXeDriver {
 
         // Check if firmware has an active display pipeline
         let transconf = mmio_read32(self.bar0, TRANSCONF_A);
+        kprintln!("[npk]   TRANSCONF_A: {:#010x} (enabled={}, active={})",
+            transconf, transconf & (1 << 31) != 0, transconf & (1 << 30) != 0);
         if transconf & (1 << 30) == 0 {
             kprintln!("[npk]   GPU: no firmware pipe active, cannot take over");
             return Err(GpuError::PipelineFailed);
@@ -480,7 +485,15 @@ impl IntelXeDriver {
         let vtotal_reg = mmio_read32(self.bar0, TRANS_VTOTAL_A);
         let fw_width = (htotal_reg & 0xFFFF) + 1;
         let fw_height = (vtotal_reg & 0xFFFF) + 1;
-        kprintln!("[npk]   Firmware active mode: {}x{}", fw_width, fw_height);
+        kprintln!("[npk]   Firmware mode: {}x{}", fw_width, fw_height);
+
+        // Log firmware plane state (what we're replacing)
+        let fw_plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
+        let fw_plane_stride = mmio_read32(self.bar0, PLANE_STRIDE_1_A);
+        let fw_plane_surf = mmio_read32(self.bar0, PLANE_SURF_1_A);
+        let fw_plane_size = mmio_read32(self.bar0, PLANE_SIZE_1_A);
+        kprintln!("[npk]   FW plane: CTL={:#010x} STRIDE={} SURF={:#010x} SIZE={:#010x}",
+            fw_plane_ctl, fw_plane_stride, fw_plane_surf, fw_plane_size);
 
         // Match to our timing data
         let timing = match_firmware_timing(fw_width, fw_height);
@@ -488,13 +501,33 @@ impl IntelXeDriver {
         // Allocate contiguous framebuffer memory
         let fb = self.allocate_framebuffer(timing)?;
 
+        // Write test pattern: bright white bar at top (50 rows)
+        // This verifies the framebuffer is actually being scanned out
+        let test_rows: usize = 50;
+        let row_bytes = timing.width as usize * 4;
+        // SAFETY: fb_phys is identity-mapped, contiguous, freshly allocated
+        unsafe {
+            core::ptr::write_bytes(self.fb_phys as *mut u8, 0xFF, row_bytes * test_rows);
+        }
+        kprintln!("[npk]   Test pattern: {} white rows at phys {:#x}", test_rows, self.fb_phys);
+
         // Map framebuffer in GGTT so GPU can scan it out
         self.program_ggtt()?;
 
-        // Swap the plane surface to our framebuffer.
+        // Invalidate GGTT TLB so hardware sees the new entries
+        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
+        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+        kprintln!("[npk]   GGTT TLB invalidated");
+
+        // Configure plane and trigger page flip.
         // The firmware DDI, PHY, DPLL, transcoder, and pipe all stay running.
-        // Writing PLANE_SURF triggers an atomic page flip at next vblank.
+        // On Gen 12, plane registers are double-buffered — all changes take
+        // effect atomically when PLANE_SURF is written (triggers vblank flip).
         self.configure_plane(timing)?;
+
+        // Verify: read back PLANE_SURF to confirm write
+        let readback = mmio_read32(self.bar0, PLANE_SURF_1_A);
+        kprintln!("[npk]   PLANE_SURF readback: {:#010x}", readback);
 
         self.fb = Some(fb);
         self.active_timing = Some(timing);
@@ -843,10 +876,10 @@ impl IntelXeDriver {
         for i in 0..self.fb_pages {
             let phys_addr = self.fb_phys + (i as u64) * 4096;
             // GGTT PTE format (Gen 12):
-            //   Bits 63:12 = physical page address
+            //   Bits 47:12 = physical page address
+            //   Bit 1 = local memory (0 = system RAM)
             //   Bit 0 = valid/present
-            //   Bits 4:2 = cache control (0 = UC, 1 = WC)
-            let ggtt_entry: u64 = (phys_addr & 0xFFFF_FFFF_FFFF_F000) | 0x01; // valid, UC
+            let ggtt_entry: u64 = (phys_addr & 0xFFFF_FFFF_FFFF_F000) | 0x01; // valid, system mem
 
             let entry_offset = ((start_entry + i) * 8) as u32;
             mmio_write64(ggtt_base, entry_offset, ggtt_entry);
@@ -855,7 +888,14 @@ impl IntelXeDriver {
         // Flush GGTT writes with a read-back
         let _ = mmio_read32(self.bar0, GGTT_BASE);
 
-        kprintln!("[npk]   GGTT: {} entries programmed", self.fb_pages);
+        // Log first and last entries for verification
+        let first_off = (start_entry * 8) as u32;
+        let last_off = ((start_entry + self.fb_pages - 1) * 8) as u32;
+        let first_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + first_off);
+        let first_hi = mmio_read32(self.bar0, GGTT_BASE as u32 + first_off + 4);
+        let last_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + last_off);
+        kprintln!("[npk]   GGTT: {} entries @ offset {:#x} (entry[0]={:#010x}_{:08x}, last_lo={:#010x})",
+            self.fb_pages, self.fb_ggtt_offset, first_hi, first_lo, last_lo);
         Ok(())
     }
 
