@@ -1091,8 +1091,9 @@ fn poll_events() {
 }
 
 fn process_hid_report(modifiers: u8, keys: &[u8; 6], prev_keys: &[u8; 6]) {
-    let shift = (modifiers & 0x22) != 0; // L/R Shift
+    let shift = (modifiers & 0x22) != 0;  // L/R Shift
     let _ctrl = (modifiers & 0x11) != 0;  // L/R Ctrl
+    let alt_gr = (modifiers & 0x40) != 0; // Right Alt (AltGr)
 
     // Determine layout
     let is_de = match crate::config::get("keyboard") {
@@ -1104,6 +1105,14 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], prev_keys: &[u8; 6]) {
         if key == 0 || key == 1 { continue; } // no key / error rollover
         // Only process newly pressed keys
         if prev_keys.contains(&key) { continue; }
+
+        // AltGr: special characters (de_CH)
+        if alt_gr && is_de {
+            if let Some(ch) = altgr_char_de_hid(key) {
+                push_key(ch);
+                continue;
+            }
+        }
 
         let ch = if (key as usize) < HID_TO_ASCII.len() {
             if is_de {
@@ -1149,5 +1158,22 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], prev_keys: &[u8; 6]) {
         if ch != 0 {
             push_key(ch);
         }
+    }
+}
+
+/// AltGr characters for Swiss German (de_CH) keyboard layout.
+/// HID usage codes → ASCII.
+fn altgr_char_de_hid(key: u8) -> Option<u8> {
+    match key {
+        0x1F => Some(b'@'),   // AltGr+2
+        0x20 => Some(b'#'),   // AltGr+3
+        0x24 => Some(b'|'),   // AltGr+7
+        0x2E => Some(b'~'),   // AltGr+^ (= key)
+        0x2F => Some(b'['),   // AltGr+ü ([ key)
+        0x30 => Some(b']'),   // AltGr+¨ (] key)
+        0x34 => Some(b'{'),   // AltGr+ä (' key)
+        0x31 => Some(b'}'),   // AltGr+$ (\ key)
+        0x64 => Some(b'\\'),  // AltGr+< (non-US \)
+        _ => None,
     }
 }
