@@ -39,6 +39,7 @@ mod intel_nic;
 mod netdev;
 mod setup;
 mod framebuffer;
+mod gpu;
 mod gui;
 mod xhci;
 #[allow(dead_code)]

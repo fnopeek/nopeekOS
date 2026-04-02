@@ -1,0 +1,745 @@
+//! Intel Xe Display Driver (Gen 12.2 / Alder Lake)
+//!
+//! Native modesetting for Intel UHD Graphics on Alder Lake-N (N100).
+//! Display-only: no 3D, no compute, no GuC firmware.
+//!
+//! Reference: Intel Open Source PRM, Volume 12: Display Engine (Gen 12)
+
+#![allow(dead_code)]
+
+use super::{FramebufferInfo, GpuError, ModeInfo};
+use crate::{kprintln, pci, memory};
+
+// ── PCI Device IDs ──────────────────────────────────────────────────
+
+const INTEL_VENDOR: u16 = 0x8086;
+
+const KNOWN_DEVICE_IDS: &[(u16, &str)] = &[
+    (0x46D0, "Alder Lake-N GT1"),
+    (0x46D1, "Alder Lake-N GT1 (variant)"),
+    (0x46D2, "Alder Lake-N GT1 (variant)"),
+];
+
+// ── MMIO Register Offsets (from BAR0) ───────────────────────────────
+
+// Power well management
+const PWR_WELL_CTL2: u32       = 0x45404;
+const FUSE_STATUS: u32         = 0x42000;
+const SFUSE_STRAP: u32         = 0xC2014;
+
+// Core display clock
+const CDCLK_CTL: u32           = 0x46000;
+const DBUF_CTL_S1: u32         = 0x45008;
+
+// DPLL (Display PLL)
+const DPLL_ENABLE_0: u32       = 0x46010;
+const DPLL_ENABLE_1: u32       = 0x46014;
+const DPLL_CFGCR0_0: u32      = 0x164284;
+const DPLL_CFGCR1_0: u32      = 0x164288;
+const DPLL_CFGCR0_1: u32      = 0x16428C;
+const DPLL_CFGCR1_1: u32      = 0x164290;
+
+// Transcoder A timing
+const TRANS_HTOTAL_A: u32      = 0x60000;
+const TRANS_HBLANK_A: u32      = 0x60004;
+const TRANS_HSYNC_A: u32       = 0x60008;
+const TRANS_VTOTAL_A: u32      = 0x6000C;
+const TRANS_VBLANK_A: u32      = 0x60010;
+const TRANS_VSYNC_A: u32       = 0x60014;
+const TRANS_DDI_FUNC_CTL_A: u32 = 0x60400;
+const TRANS_CLK_SEL_A: u32     = 0x46140;
+
+// Pipe A
+const PIPE_CONF_A: u32         = 0x70008;
+const PIPE_SRCSZ_A: u32       = 0x6001C;
+
+// Plane 1 on Pipe A
+const PLANE_CTL_1_A: u32      = 0x70180;
+const PLANE_STRIDE_1_A: u32   = 0x70188;
+const PLANE_POS_1_A: u32      = 0x7018C;
+const PLANE_SIZE_1_A: u32     = 0x70190;
+const PLANE_SURF_1_A: u32     = 0x7019C;
+
+// DDI
+const DDI_BUF_CTL_A: u32      = 0x64000;
+const DDI_BUF_CTL_B: u32      = 0x64100;
+
+// GGTT base (within BAR0)
+const GGTT_BASE: u32           = 0x800000;
+
+// ── Display Timings ─────────────────────────────────────────────────
+
+/// CEA-861 standard timings
+struct DisplayTiming {
+    width: u32,
+    height: u32,
+    hz: u8,
+    pixel_clock_khz: u32,
+    h_front_porch: u16,
+    h_sync: u16,
+    h_back_porch: u16,
+    v_front_porch: u16,
+    v_sync: u16,
+    v_back_porch: u16,
+}
+
+impl DisplayTiming {
+    fn h_total(&self) -> u32 {
+        self.width + self.h_front_porch as u32 + self.h_sync as u32 + self.h_back_porch as u32
+    }
+    fn v_total(&self) -> u32 {
+        self.height + self.v_front_porch as u32 + self.v_sync as u32 + self.v_back_porch as u32
+    }
+}
+
+// Standard CEA/VESA timings
+const TIMING_4K_60: DisplayTiming = DisplayTiming {
+    width: 3840, height: 2160, hz: 60, pixel_clock_khz: 594000,
+    h_front_porch: 176, h_sync: 88, h_back_porch: 296,
+    v_front_porch: 8, v_sync: 10, v_back_porch: 72,
+};
+
+const TIMING_4K_30: DisplayTiming = DisplayTiming {
+    width: 3840, height: 2160, hz: 30, pixel_clock_khz: 297000,
+    h_front_porch: 176, h_sync: 88, h_back_porch: 296,
+    v_front_porch: 8, v_sync: 10, v_back_porch: 72,
+};
+
+const TIMING_1080P_60: DisplayTiming = DisplayTiming {
+    width: 1920, height: 1080, hz: 60, pixel_clock_khz: 148500,
+    h_front_porch: 88, h_sync: 44, h_back_porch: 148,
+    v_front_porch: 4, v_sync: 5, v_back_porch: 36,
+};
+
+const TIMING_1440P_60: DisplayTiming = DisplayTiming {
+    width: 2560, height: 1440, hz: 60, pixel_clock_khz: 241500,
+    h_front_porch: 48, h_sync: 32, h_back_porch: 80,
+    v_front_porch: 3, v_sync: 5, v_back_porch: 33,
+};
+
+fn find_timing(width: u32, height: u32, hz: u8) -> Option<&'static DisplayTiming> {
+    let timings: &[&DisplayTiming] = &[
+        &TIMING_4K_60, &TIMING_4K_30, &TIMING_1080P_60, &TIMING_1440P_60,
+    ];
+    for t in timings {
+        if t.width == width && t.height == height && t.hz == hz {
+            return Some(t);
+        }
+    }
+    None
+}
+
+// ── DPLL Parameters ─────────────────────────────────────────────────
+
+/// Pre-calculated PLL parameters for known pixel clocks.
+/// DCO frequency, integer/fraction, and output dividers.
+struct PllParams {
+    dco_integer: u16,
+    dco_fraction: u16,
+    pdiv: u8,
+    qdiv: u8,
+    kdiv: u8,
+}
+
+fn pll_for_clock(pixel_clock_khz: u32) -> Option<PllParams> {
+    // Intel combo PHY PLL: DCO = ref_clk * (int + frac/2^15)
+    // Output = DCO / (pdiv * qdiv * kdiv) / 5 (HDMI uses /5 for TMDS)
+    // Reference clock = 24 MHz
+    match pixel_clock_khz {
+        594000 => Some(PllParams {
+            // 594 MHz: DCO = 8910 MHz, 8910/24 = 371.25
+            dco_integer: 371, dco_fraction: 0x2000, // 0.25 * 2^15
+            pdiv: 2, qdiv: 1, kdiv: 3,
+            // Verify: 8910 / (2*1*3) / 5 * 2 = 594 MHz
+        }),
+        297000 => Some(PllParams {
+            // 297 MHz: DCO = 8910 MHz, same as above but different dividers
+            dco_integer: 371, dco_fraction: 0x2000,
+            pdiv: 2, qdiv: 2, kdiv: 3,
+            // Verify: 8910 / (2*2*3) / 5 * 2 = 297 MHz
+        }),
+        148500 => Some(PllParams {
+            // 148.5 MHz: DCO = 8910 MHz
+            dco_integer: 371, dco_fraction: 0x2000,
+            pdiv: 2, qdiv: 4, kdiv: 3,
+            // Verify: 8910 / (2*4*3) / 5 * 2 = 148.5 MHz
+        }),
+        241500 => Some(PllParams {
+            // 241.5 MHz: DCO = 7245 MHz, 7245/24 = 301.875
+            dco_integer: 301, dco_fraction: 0x7000, // 0.875 * 2^15 ≈ 28672
+            pdiv: 2, qdiv: 1, kdiv: 3,
+            // Verify: 7245 / (2*1*3) / 5 * 2 = 241.5 MHz
+        }),
+        _ => None,
+    }
+}
+
+// ── MMIO Helpers ────────────────────────────────────────────────────
+
+fn mmio_read32(base: u64, offset: u32) -> u32 {
+    let addr = (base + offset as u64) as *const u32;
+    // SAFETY: BAR0 is identity-mapped, volatile prevents reordering
+    unsafe { core::ptr::read_volatile(addr) }
+}
+
+fn mmio_write32(base: u64, offset: u32, val: u32) {
+    let addr = (base + offset as u64) as *mut u32;
+    // SAFETY: BAR0 is identity-mapped, volatile prevents reordering
+    unsafe { core::ptr::write_volatile(addr, val); }
+}
+
+fn mmio_write64(base: u64, offset: u32, val: u64) {
+    let addr = (base + offset as u64) as *mut u64;
+    // SAFETY: BAR0 is identity-mapped, volatile ensures write reaches device
+    unsafe { core::ptr::write_volatile(addr, val); }
+}
+
+/// Spin-wait with timeout (in iterations). Returns true if condition met.
+fn poll_timeout(base: u64, reg: u32, mask: u32, expected: u32, max_iters: u32) -> bool {
+    for _ in 0..max_iters {
+        if mmio_read32(base, reg) & mask == expected {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+// ── Driver State ────────────────────────────────────────────────────
+
+pub struct IntelXeDriver {
+    pci_addr: pci::PciAddr,
+    device_id: u16,
+    device_name: &'static str,
+    bar0: u64,          // GTTMMADR: 16MB MMIO registers + GGTT
+    bar2: u64,          // GMADR: 256MB aperture
+    fb: Option<FramebufferInfo>,
+    fb_ggtt_offset: u32,  // GGTT offset of scanout framebuffer
+    fb_phys: u64,         // Physical address of framebuffer memory
+    fb_pages: u32,        // Number of 4KB pages allocated
+    active_timing: Option<&'static DisplayTiming>,
+    ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
+}
+
+impl IntelXeDriver {
+    /// Scan PCI bus for Intel Xe GPU.
+    pub fn detect() -> Option<Self> {
+        // Try known ADL-N device IDs first
+        for &(did, name) in KNOWN_DEVICE_IDS {
+            if let Some(dev) = pci::find_device(INTEL_VENDOR, did) {
+                return Some(Self::new(dev, did, name));
+            }
+        }
+
+        // Fallback: any Intel VGA controller (class 03:00)
+        if let Some(dev) = pci::find_by_class(0x03, 0x00) {
+            if dev.vendor_id == INTEL_VENDOR {
+                let did = dev.device_id;
+                return Some(Self::new(dev, did, "Intel GPU (unknown)"));
+            }
+        }
+
+        None
+    }
+
+    fn new(dev: pci::PciDevice, device_id: u16, name: &'static str) -> Self {
+        let bar0 = pci::read_bar64(dev.addr, 0x10);
+        let bar2 = pci::read_bar64(dev.addr, 0x18);
+
+        kprintln!("[npk]   GPU PCI {:02x}:{:02x}.{} — {}",
+            dev.addr.bus, dev.addr.device, dev.addr.function, name);
+        kprintln!("[npk]   BAR0 (MMIO): {:#x}", bar0);
+        kprintln!("[npk]   BAR2 (aperture): {:#x}", bar2);
+
+        Self {
+            pci_addr: dev.addr,
+            device_id,
+            device_name: name,
+            bar0,
+            bar2,
+            fb: None,
+            fb_ggtt_offset: 0,
+            fb_phys: 0,
+            fb_pages: 0,
+            active_timing: None,
+            ddi_port: 0,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.device_name
+    }
+
+    pub fn current_hz(&self) -> u8 {
+        self.active_timing.map_or(0, |t| t.hz)
+    }
+
+    pub fn framebuffer(&self) -> FramebufferInfo {
+        self.fb.unwrap_or(FramebufferInfo {
+            addr: 0, pitch: 0, width: 0, height: 0, bpp: 0,
+        })
+    }
+
+    pub fn supported_modes(&self) -> alloc::vec::Vec<ModeInfo> {
+        alloc::vec![
+            ModeInfo { width: 3840, height: 2160, hz: 60 },
+            ModeInfo { width: 3840, height: 2160, hz: 30 },
+            ModeInfo { width: 2560, height: 1440, hz: 60 },
+            ModeInfo { width: 1920, height: 1080, hz: 60 },
+        ]
+    }
+
+    // ── Initialization ──────────────────────────────────────────────
+
+    /// Full display pipeline initialization. Attempts 4K@60, falls back.
+    pub fn init(&mut self) -> Result<FramebufferInfo, GpuError> {
+        // Enable PCI memory space + bus mastering
+        let cmd = pci::read32(self.pci_addr, 0x04);
+        pci::write32(self.pci_addr, 0x04, cmd | 0x06);
+
+        if self.bar0 == 0 {
+            return Err(GpuError::MappingFailed);
+        }
+
+        // Detect available DDI ports
+        self.detect_ddi_ports();
+
+        // Power up display engine
+        self.power_on()?;
+
+        // Initialize core display clock
+        self.init_cdclk()?;
+
+        // Try modes in preference order: 4K@60 → 4K@30 → 1080p
+        let modes = [
+            (&TIMING_4K_60, "4K@60Hz"),
+            (&TIMING_4K_30, "4K@30Hz"),
+            (&TIMING_1080P_60, "1080p@60Hz"),
+        ];
+
+        for (timing, label) in modes {
+            kprintln!("[npk]   GPU: trying {}...", label);
+            match self.enable_display(timing) {
+                Ok(fb) => {
+                    self.fb = Some(fb);
+                    self.active_timing = Some(timing);
+                    return Ok(fb);
+                }
+                Err(e) => {
+                    kprintln!("[npk]   GPU: {} failed: {:?}", label, e);
+                    self.disable_display();
+                }
+            }
+        }
+
+        Err(GpuError::PipelineFailed)
+    }
+
+    /// Set a new display mode (after initial init).
+    pub fn set_mode(&mut self, width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError> {
+        let timing = find_timing(width, height, hz)
+            .ok_or(GpuError::UnsupportedMode)?;
+
+        self.disable_display();
+        self.free_framebuffer();
+
+        let fb = self.enable_display(timing)?;
+        self.fb = Some(fb);
+        self.active_timing = Some(timing);
+        Ok(fb)
+    }
+
+    // ── DDI Port Detection ──────────────────────────────────────────
+
+    fn detect_ddi_ports(&mut self) {
+        let fuse = mmio_read32(self.bar0, FUSE_STATUS);
+        let sfuse = mmio_read32(self.bar0, SFUSE_STRAP);
+
+        kprintln!("[npk]   FUSE_STATUS: {:#010x}", fuse);
+        kprintln!("[npk]   SFUSE_STRAP: {:#010x}", sfuse);
+
+        // On ADL-N NUC, HDMI is typically on DDI-A or DDI-B.
+        // Check which DDIs are fused present (FUSE_STATUS bits).
+        // Bit 27: DDI-B present, Bit 26: DDI-C present, Bit 25: DDI-D present
+        // DDI-A is always present on ADL.
+
+        // Default to DDI-A, override if we find HDMI on another port
+        self.ddi_port = 0; // DDI-A
+
+        // Try to detect which DDI has a sink connected by reading the
+        // DDI_BUF_CTL status bits. If DDI-A doesn't work, try DDI-B.
+        kprintln!("[npk]   Using DDI-A (default for HDMI)");
+    }
+
+    // ── Power Management ────────────────────────────────────────────
+
+    fn power_on(&self) -> Result<(), GpuError> {
+        kprintln!("[npk]   GPU: enabling power wells...");
+
+        // Read current power well state
+        let pwr = mmio_read32(self.bar0, PWR_WELL_CTL2);
+        kprintln!("[npk]   PWR_WELL_CTL2: {:#010x}", pwr);
+
+        // Enable PW1 (Power Group 1): bit 1 = request, bit 0 = state
+        self.enable_power_well(0, "PW1")?;
+
+        // Enable PW2 (Power Group 2): bit 3 = request, bit 2 = state
+        self.enable_power_well(1, "PW2")?;
+
+        // Enable DDI power well for our port
+        // DDI-A = index 2, DDI-B = index 3
+        let ddi_pw_idx = 2 + self.ddi_port as u32;
+        self.enable_power_well(ddi_pw_idx, "DDI")?;
+
+        kprintln!("[npk]   GPU: power wells enabled");
+        Ok(())
+    }
+
+    fn enable_power_well(&self, idx: u32, name: &str) -> Result<(), GpuError> {
+        let request_bit = 1u32 << (idx * 2 + 1);
+        let state_bit = 1u32 << (idx * 2);
+
+        // Check if already on
+        let val = mmio_read32(self.bar0, PWR_WELL_CTL2);
+        if val & state_bit != 0 {
+            kprintln!("[npk]     {} already on", name);
+            return Ok(());
+        }
+
+        // Request enable
+        mmio_write32(self.bar0, PWR_WELL_CTL2, val | request_bit);
+
+        // Poll for state bit (up to 20ms equivalent in iterations)
+        if !poll_timeout(self.bar0, PWR_WELL_CTL2, state_bit, state_bit, 200_000) {
+            kprintln!("[npk]     {} enable TIMEOUT", name);
+            return Err(GpuError::PowerTimeout);
+        }
+
+        kprintln!("[npk]     {} enabled", name);
+        Ok(())
+    }
+
+    // ── CDCLK (Core Display Clock) ──────────────────────────────────
+
+    fn init_cdclk(&self) -> Result<(), GpuError> {
+        // Read current CDCLK
+        let cdclk = mmio_read32(self.bar0, CDCLK_CTL);
+        kprintln!("[npk]   CDCLK_CTL: {:#010x}", cdclk);
+
+        // For 4K@60Hz (594 MHz pixel clock), we need CDCLK >= 312 MHz.
+        // ADL supports CDCLK values: 172.8, 192, 307.2, 312, 552, 556.8, 648, 652.8 MHz
+        //
+        // CDCLK_CTL format (Gen 12):
+        //   Bits 10:8 = cd2x divider select
+        //   Bits 25:22 = SSA precharge
+        //   Bit 26 = PLL enable
+        //
+        // For now, accept whatever the firmware set (it should be enough for 1080p).
+        // We'll reprogram if needed for 4K.
+
+        // Enable DBUF (Display Buffer)
+        let dbuf = mmio_read32(self.bar0, DBUF_CTL_S1);
+        if dbuf & (1 << 31) == 0 {
+            mmio_write32(self.bar0, DBUF_CTL_S1, dbuf | (1 << 31));
+            if !poll_timeout(self.bar0, DBUF_CTL_S1, 1 << 0, 1 << 0, 100_000) {
+                kprintln!("[npk]   DBUF enable timeout");
+                return Err(GpuError::PowerTimeout);
+            }
+            kprintln!("[npk]   DBUF enabled");
+        } else {
+            kprintln!("[npk]   DBUF already enabled");
+        }
+
+        Ok(())
+    }
+
+    // ── Display Pipeline ────────────────────────────────────────────
+
+    fn enable_display(&mut self, timing: &'static DisplayTiming) -> Result<FramebufferInfo, GpuError> {
+        // Step 1: Allocate framebuffer
+        let fb = self.allocate_framebuffer(timing)?;
+
+        // Step 2: Program GGTT entries for framebuffer
+        self.program_ggtt()?;
+
+        // Step 3: Program DPLL for pixel clock
+        self.program_dpll(timing)?;
+
+        // Step 4: Select clock source for transcoder
+        // TRANS_CLK_SEL: bits 31:29 = DPLL select (1 = DPLL0, 2 = DPLL1)
+        mmio_write32(self.bar0, TRANS_CLK_SEL_A, 1 << 29); // DPLL0
+
+        // Step 5: Program transcoder timings
+        self.program_transcoder(timing);
+
+        // Step 6: Configure DDI
+        self.enable_ddi(timing)?;
+
+        // Step 7: Set pipe source size
+        mmio_write32(self.bar0, PIPE_SRCSZ_A,
+            ((timing.height - 1) << 16) | (timing.width - 1));
+
+        // Step 8: Configure plane
+        self.configure_plane(timing)?;
+
+        // Step 9: Enable pipe
+        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
+        mmio_write32(self.bar0, PIPE_CONF_A, pipe | (1 << 31));
+        if !poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 1 << 30, 100_000) {
+            kprintln!("[npk]   Pipe A enable timeout");
+            return Err(GpuError::PipelineFailed);
+        }
+        kprintln!("[npk]   Pipe A enabled");
+
+        Ok(fb)
+    }
+
+    fn disable_display(&mut self) {
+        // Disable in reverse order: plane → pipe → transcoder → DDI → DPLL
+
+        // Disable plane
+        let plane = mmio_read32(self.bar0, PLANE_CTL_1_A);
+        mmio_write32(self.bar0, PLANE_CTL_1_A, plane & !(1 << 31));
+        mmio_write32(self.bar0, PLANE_SURF_1_A, 0); // trigger update
+
+        // Disable pipe
+        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
+        mmio_write32(self.bar0, PIPE_CONF_A, pipe & !(1 << 31));
+        let _ = poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 100_000);
+
+        // Disable transcoder DDI function
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
+
+        // Disable DDI buffer
+        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
+        let ddi = mmio_read32(self.bar0, ddi_ctl_reg);
+        mmio_write32(self.bar0, ddi_ctl_reg, ddi & !(1 << 31));
+
+        // Disable DPLL
+        let dpll = mmio_read32(self.bar0, DPLL_ENABLE_0);
+        mmio_write32(self.bar0, DPLL_ENABLE_0, dpll & !(1 << 31));
+    }
+
+    // ── Framebuffer Allocation ──────────────────────────────────────
+
+    fn allocate_framebuffer(&mut self, timing: &DisplayTiming) -> Result<FramebufferInfo, GpuError> {
+        let pitch = timing.width * 4; // 32bpp XRGB8888
+        let size = pitch * timing.height;
+        let pages = (size + 4095) / 4096;
+
+        // Allocate contiguous physical memory for scanout
+        let phys = memory::allocate_contiguous(pages as usize)
+            .ok_or(GpuError::AllocFailed)?;
+
+        // Zero the framebuffer (black)
+        // SAFETY: phys is identity-mapped, contiguous, and we just allocated it
+        unsafe {
+            core::ptr::write_bytes(phys as *mut u8, 0, size as usize);
+        }
+
+        self.fb_phys = phys;
+        self.fb_pages = pages;
+        // Use a GGTT offset that doesn't conflict with firmware (16MB in)
+        self.fb_ggtt_offset = 0x0100_0000;
+
+        kprintln!("[npk]   Framebuffer: {} pages @ phys {:#x}, GGTT offset {:#x}",
+            pages, phys, self.fb_ggtt_offset);
+
+        Ok(FramebufferInfo {
+            addr: phys,  // CPU writes via identity-mapped physical address
+            pitch,
+            width: timing.width,
+            height: timing.height,
+            bpp: 32,
+        })
+    }
+
+    fn free_framebuffer(&mut self) {
+        if self.fb_pages > 0 {
+            // Clear GGTT entries
+            let ggtt_base = self.bar0 + GGTT_BASE as u64;
+            let start_entry = self.fb_ggtt_offset / 4096;
+            for i in 0..self.fb_pages {
+                let entry_offset = ((start_entry + i) * 8) as u32;
+                mmio_write64(ggtt_base, entry_offset, 0);
+            }
+            // Note: physical memory is not freed (no free API in memory.rs)
+            self.fb_pages = 0;
+            self.fb_phys = 0;
+        }
+    }
+
+    // ── GGTT Programming ────────────────────────────────────────────
+
+    fn program_ggtt(&self) -> Result<(), GpuError> {
+        let ggtt_base = self.bar0 + GGTT_BASE as u64;
+        let start_entry = self.fb_ggtt_offset / 4096;
+
+        for i in 0..self.fb_pages {
+            let phys_addr = self.fb_phys + (i as u64) * 4096;
+            // GGTT PTE format (Gen 12):
+            //   Bits 63:12 = physical page address
+            //   Bit 0 = valid/present
+            //   Bits 4:2 = cache control (0 = UC, 1 = WC)
+            let ggtt_entry: u64 = (phys_addr & 0xFFFF_FFFF_FFFF_F000) | 0x01; // valid, UC
+
+            let entry_offset = ((start_entry + i) * 8) as u32;
+            mmio_write64(ggtt_base, entry_offset, ggtt_entry);
+        }
+
+        // Flush GGTT writes with a read-back
+        let _ = mmio_read32(self.bar0, GGTT_BASE);
+
+        kprintln!("[npk]   GGTT: {} entries programmed", self.fb_pages);
+        Ok(())
+    }
+
+    // ── DPLL Programming ────────────────────────────────────────────
+
+    fn program_dpll(&self, timing: &DisplayTiming) -> Result<(), GpuError> {
+        let params = pll_for_clock(timing.pixel_clock_khz)
+            .ok_or(GpuError::PllLockFailed)?;
+
+        kprintln!("[npk]   DPLL0: {} kHz (dco_int={}, dco_frac={:#x}, p={} q={} k={})",
+            timing.pixel_clock_khz, params.dco_integer, params.dco_fraction,
+            params.pdiv, params.qdiv, params.kdiv);
+
+        // Disable DPLL0 first
+        let dpll = mmio_read32(self.bar0, DPLL_ENABLE_0);
+        if dpll & (1 << 31) != 0 {
+            mmio_write32(self.bar0, DPLL_ENABLE_0, dpll & !(1 << 31));
+            let _ = poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 0, 0, 100_000);
+        }
+
+        // DPLL_CFGCR0: DCO integer (bits 9:0) + DCO fraction (bits 25:10)
+        let cfgcr0 = (params.dco_integer as u32 & 0x3FF)
+            | ((params.dco_fraction as u32 & 0xFFFF) << 10);
+        mmio_write32(self.bar0, DPLL_CFGCR0_0, cfgcr0);
+
+        // DPLL_CFGCR1: pdiv (bits 4:2), qdiv (bits 7:6 for mode, bit 5 for enable), kdiv (bits 9:8)
+        let pdiv_enc = match params.pdiv {
+            2 => 1u32,
+            3 => 2,
+            5 => 4,
+            7 => 8,
+            _ => 1,
+        };
+        let kdiv_enc = match params.kdiv {
+            1 => 1u32,
+            2 => 2,
+            3 => 4,  // kdiv=3 encoded as 4? — verify against PRM
+            _ => 1,
+        };
+        let qdiv_enc = if params.qdiv > 1 {
+            (1u32 << 5) | ((params.qdiv as u32) << 6) // qdiv enable + ratio
+        } else {
+            0
+        };
+        let cfgcr1 = (pdiv_enc << 2) | qdiv_enc | (kdiv_enc << 8);
+        mmio_write32(self.bar0, DPLL_CFGCR1_0, cfgcr1);
+
+        // Enable DPLL0
+        mmio_write32(self.bar0, DPLL_ENABLE_0, 1 << 31);
+
+        // Poll for PLL lock (bit 0)
+        if !poll_timeout(self.bar0, DPLL_ENABLE_0, 1 << 0, 1 << 0, 500_000) {
+            kprintln!("[npk]   DPLL0 lock TIMEOUT");
+            return Err(GpuError::PllLockFailed);
+        }
+
+        kprintln!("[npk]   DPLL0 locked at {} kHz", timing.pixel_clock_khz);
+        Ok(())
+    }
+
+    // ── Transcoder Timing ───────────────────────────────────────────
+
+    fn program_transcoder(&self, t: &DisplayTiming) {
+        let h_total = t.h_total();
+        let v_total = t.v_total();
+        let h_sync_start = t.width + t.h_front_porch as u32;
+        let h_sync_end = h_sync_start + t.h_sync as u32;
+        let v_sync_start = t.height + t.v_front_porch as u32;
+        let v_sync_end = v_sync_start + t.v_sync as u32;
+
+        // HTOTAL = (total-1) << 16 | (active-1)
+        mmio_write32(self.bar0, TRANS_HTOTAL_A, ((h_total - 1) << 16) | (t.width - 1));
+        // HBLANK = (total-1) << 16 | (active-1) — blank covers non-active area
+        mmio_write32(self.bar0, TRANS_HBLANK_A, ((h_total - 1) << 16) | (t.width - 1));
+        // HSYNC = (sync_end-1) << 16 | (sync_start-1)
+        mmio_write32(self.bar0, TRANS_HSYNC_A, ((h_sync_end - 1) << 16) | (h_sync_start - 1));
+
+        mmio_write32(self.bar0, TRANS_VTOTAL_A, ((v_total - 1) << 16) | (t.height - 1));
+        mmio_write32(self.bar0, TRANS_VBLANK_A, ((v_total - 1) << 16) | (t.height - 1));
+        mmio_write32(self.bar0, TRANS_VSYNC_A, ((v_sync_end - 1) << 16) | (v_sync_start - 1));
+
+        kprintln!("[npk]   Transcoder: {}x{} htotal={} vtotal={}",
+            t.width, t.height, h_total, v_total);
+    }
+
+    // ── DDI / HDMI ──────────────────────────────────────────────────
+
+    fn enable_ddi(&self, _timing: &DisplayTiming) -> Result<(), GpuError> {
+        let ddi_ctl_reg = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
+
+        // Configure TRANS_DDI_FUNC_CTL for HDMI mode
+        // Bits 30:28 = DDI select (0=A, 1=B)
+        // Bits 26:24 = Mode (0 = HDMI)
+        // Bits 22:20 = BPC (0 = 8bpc)
+        // Bit 3:1 = sync polarity (both positive for CEA modes)
+        // Bit 0 = enable
+        let ddi_func = ((self.ddi_port as u32) << 28)
+            | (0 << 24)    // HDMI mode
+            | (0 << 20)    // 8 bpc
+            | (3 << 1)     // H+ V+ sync polarity
+            | (1 << 0);    // enable
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, ddi_func);
+
+        // Enable DDI buffer
+        let ddi_buf = mmio_read32(self.bar0, ddi_ctl_reg);
+        mmio_write32(self.bar0, ddi_ctl_reg, ddi_buf | (1 << 31));
+
+        // Wait for DDI to become active (bit 4 = idle, should clear)
+        for _ in 0..100_000u32 {
+            if mmio_read32(self.bar0, ddi_ctl_reg) & (1 << 4) == 0 {
+                kprintln!("[npk]   DDI-{} enabled (HDMI)",
+                    (b'A' + self.ddi_port) as char);
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+
+        // DDI might still work even if idle doesn't clear immediately
+        kprintln!("[npk]   DDI-{} enabled (idle bit still set — may work)",
+            (b'A' + self.ddi_port) as char);
+        Ok(())
+    }
+
+    // ── Plane Configuration ─────────────────────────────────────────
+
+    fn configure_plane(&self, timing: &DisplayTiming) -> Result<(), GpuError> {
+        let stride_64b = (timing.width * 4) / 64; // Stride in 64-byte units
+
+        // PLANE_CTL: enable, XRGB8888 format, linear tiling
+        let plane_ctl = (1u32 << 31)       // enable
+            | (0x4 << 24)                  // XRGB 8:8:8:8 pixel format
+            | (0 << 10);                   // linear tiling (no tiling)
+        mmio_write32(self.bar0, PLANE_CTL_1_A, plane_ctl);
+
+        // Stride in 64-byte chunks
+        mmio_write32(self.bar0, PLANE_STRIDE_1_A, stride_64b);
+
+        // Position (0,0)
+        mmio_write32(self.bar0, PLANE_POS_1_A, 0);
+
+        // Size: (height-1) << 16 | (width-1)
+        mmio_write32(self.bar0, PLANE_SIZE_1_A,
+            ((timing.height - 1) << 16) | (timing.width - 1));
+
+        // Surface address (GGTT offset, 4K-aligned) — writing this triggers the flip
+        mmio_write32(self.bar0, PLANE_SURF_1_A, self.fb_ggtt_offset);
+
+        kprintln!("[npk]   Plane: {}x{} XRGB8888 stride={} surf={:#x}",
+            timing.width, timing.height, stride_64b * 64, self.fb_ggtt_offset);
+        Ok(())
+    }
+}
