@@ -112,13 +112,13 @@ fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
 /// Draw passphrase dots centered inside the input field.
 fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
     let outline = 2 * l.scale;
-    let radius = 12 * l.scale;
+    let inner_r = (l.input_h - 2 * outline) / 2; // Pill shape matching draw_input_box
 
     // Clear input interior (redraw inner fill)
     render::fill_rounded_rect_aa(shadow, info,
         l.input_x + outline, l.input_y + outline,
         l.input_w - 2 * outline, l.input_h - 2 * outline,
-        Theme::INPUT_INNER, radius.saturating_sub(outline));
+        Theme::INPUT_INNER, inner_r);
 
     if count == 0 { return; }
 
@@ -129,7 +129,8 @@ fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
     let total_w = count as u32 * dot_diameter + count.saturating_sub(1) as u32 * dot_gap;
 
     // Clamp: don't let dots exceed field width
-    let usable_w = l.input_w - 2 * (outline + radius / 2);
+    let outer_r = l.input_h / 2;
+    let usable_w = l.input_w - 2 * (outline + outer_r / 2);
     let max_visible = (usable_w + dot_gap) / (dot_diameter + dot_gap);
     let visible = (count as u32).min(max_visible);
 
@@ -352,17 +353,18 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             framebuffer::with_fb(|fb| {
                                 let info = fb.info();
                                 let (shadow, _) = fb.shadow_ptr();
-                                // Redraw input with fail color border
+                                // Redraw input with fail color border (pill shape)
                                 let radius = layout.input_h / 2;
                                 render::fill_rounded_rect_aa(shadow, info,
                                     layout.input_x, layout.input_y,
                                     layout.input_w, layout.input_h,
                                     Theme::FAIL_COLOR, radius);
                                 let outline = 3 * layout.scale;
+                                let inner_r = (layout.input_h - 2 * outline) / 2;
                                 render::fill_rounded_rect_aa(shadow, info,
                                     layout.input_x + outline, layout.input_y + outline,
                                     layout.input_w - 2 * outline, layout.input_h - 2 * outline,
-                                    Theme::INPUT_INNER, radius - outline);
+                                    Theme::INPUT_INNER, inner_r);
                                 draw_status(shadow, info, &layout, &fail_msg, Theme::FAIL_COLOR);
                                 framebuffer::blit_rect(fb,
                                     0, layout.input_y,
