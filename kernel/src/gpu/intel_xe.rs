@@ -49,9 +49,14 @@ const TRANS_VSYNC_A: u32       = 0x60014;
 const TRANS_DDI_FUNC_CTL_A: u32 = 0x60400;
 const TRANS_CLK_SEL_A: u32     = 0x46140;
 
-// Pipe A — TRANSCONF on ICL+ (NOT 0x70008 which is pre-ICL)
-const PIPE_CONF_A: u32         = 0x70008;  // Pipe enable/disable (ADL-N uses this, NOT 0xF0008)
+// Pipe A
+const PIPE_CONF_A: u32         = 0x70008;  // Pipe enable/disable
 const PIPE_SRCSZ_A: u32       = 0x6001C;
+
+// Pipe Scaler (PS) — firmware may use this to scale 1080p on 4K monitors
+const PS_CTRL_1A: u32         = 0x68180;  // Scaler 1 control (bit 31 = enable)
+const PS_WIN_POS_1A: u32      = 0x68170;  // Scaler 1 window position
+const PS_WIN_SZ_1A: u32       = 0x68174;  // Scaler 1 window size
 
 // Plane 1 on Pipe A
 const PLANE_CTL_1_A: u32      = 0x70180;
@@ -575,6 +580,17 @@ impl IntelXeDriver {
         for _ in 0..2_000_000u32 { core::hint::spin_loop(); }
         let after = mmio_read32(self.bar0, PIPE_CONF_A);
         kprintln!("[npk]   Pipe after disable: {:#010x}", after);
+
+        // Step 2b: Disable pipe scaler (firmware may use it for 1080p→4K upscale)
+        let ps_ctrl = mmio_read32(self.bar0, PS_CTRL_1A);
+        let ps_winsz = mmio_read32(self.bar0, PS_WIN_SZ_1A);
+        kprintln!("[npk]   Scaler: CTRL={:#010x} WIN_SZ={:#010x}", ps_ctrl, ps_winsz);
+        if ps_ctrl & (1 << 31) != 0 {
+            kprintln!("[npk]   Disabling pipe scaler (was limiting output)");
+            mmio_write32(self.bar0, PS_CTRL_1A, 0);
+            // Posting read
+            let _ = mmio_read32(self.bar0, PS_CTRL_1A);
+        }
 
         // Step 3: Free old GGTT entries (no-op if fb_pages == 0)
         self.free_framebuffer();
