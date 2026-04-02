@@ -524,7 +524,7 @@ impl IntelXeDriver {
 
         self.fb_phys = addr;
         self.fb_ggtt_offset = fw_plane_surf;
-        self.fb_pages = (pitch * height + 4095) / 4096;
+        self.fb_pages = 0; // Not our allocation — don't free firmware GGTT entries
 
         let fb = FramebufferInfo { addr, pitch, width, height, bpp };
 
@@ -534,52 +534,118 @@ impl IntelXeDriver {
         Ok(fb)
     }
 
-    /// Set a new display mode (after initial init).
-    /// Reprogrms DPLL + transcoder timings, but keeps DDI/PHY running.
+    /// Set a new display mode. Reprogrms DPLL + transcoder timings,
+    /// allocates new framebuffer via GGTT, returns aperture address.
+    /// DDI/PHY stay running — only pipe+plane are cycled.
     pub fn set_mode(&mut self, width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError> {
         let timing = find_timing(width, height, hz)
             .ok_or(GpuError::UnsupportedMode)?;
 
+        kprintln!("[npk]   set_mode: {}x{}@{}Hz (pclk={}kHz)", width, height, hz, timing.pixel_clock_khz);
+        kprintln!("[npk]   BAR2 (aperture): {:#x}", self.bar2);
+
         let need_pll_change = self.active_timing
             .map_or(true, |t| t.pixel_clock_khz != timing.pixel_clock_khz);
 
-        // Disable plane
-        let plane = mmio_read32(self.bar0, PLANE_CTL_1_A);
-        mmio_write32(self.bar0, PLANE_CTL_1_A, plane & !(1 << 31));
+        // Step 1: Disable plane
+        let plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
+        mmio_write32(self.bar0, PLANE_CTL_1_A, plane_ctl & !(1 << 31));
         mmio_write32(self.bar0, PLANE_SURF_1_A, 0);
+        kprintln!("[npk]   Plane disabled");
 
-        // Disable pipe (must stop before changing DPLL/timings)
+        // Step 2: Disable pipe (must stop before changing DPLL/timings)
         let pipe = mmio_read32(self.bar0, TRANSCONF_A);
         mmio_write32(self.bar0, TRANSCONF_A, pipe & !(1 << 31));
-        let _ = poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000);
+        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 0, 200_000) {
+            kprintln!("[npk]   Pipe disable timeout");
+        }
+        kprintln!("[npk]   Pipe disabled");
 
-        // Free old framebuffer GGTT entries
+        // Step 3: Free old GGTT entries (no-op if fb_pages == 0)
         self.free_framebuffer();
 
-        // Reprogram DPLL if pixel clock changes
+        // Step 4: Reprogram DPLL if pixel clock changes
         if need_pll_change {
             self.program_dpll(timing)?;
         }
 
-        // Program new transcoder timings
+        // Step 5: Program transcoder timings
         self.program_transcoder(timing);
         mmio_write32(self.bar0, PIPE_SRCSZ_A,
             ((timing.width - 1) << 16) | (timing.height - 1));
 
-        // Allocate new framebuffer
-        let fb = self.allocate_framebuffer(timing)?;
-        self.program_ggtt()?;
+        // Step 6: Allocate framebuffer (contiguous physical RAM)
+        let pitch = timing.width * 4;
+        let fb_size = pitch * timing.height;
+        let pages = (fb_size + 4095) / 4096;
+        let phys = memory::allocate_contiguous(pages as usize)
+            .ok_or(GpuError::AllocFailed)?;
 
-        // Re-enable pipe
+        // SAFETY: phys is identity-mapped, contiguous, freshly allocated
+        unsafe { core::ptr::write_bytes(phys as *mut u8, 0, fb_size as usize); }
+
+        self.fb_phys = phys;
+        self.fb_pages = pages;
+        self.fb_ggtt_offset = 0x0100_0000; // 16MB into GGTT (avoid firmware entries)
+
+        kprintln!("[npk]   FB: {} pages @ phys {:#x}, GGTT offset {:#x}",
+            pages, phys, self.fb_ggtt_offset);
+
+        // Step 7: Program GGTT entries (32-bit writes for MMIO safety)
+        self.program_ggtt_32()?;
+
+        // Step 8: Invalidate GGTT TLB
+        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
+        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+        kprintln!("[npk]   GGTT TLB invalidated");
+
+        // Step 9: Map aperture pages for CPU access (BAR2 + GGTT offset)
+        let aperture_addr = self.bar2 + self.fb_ggtt_offset as u64;
+        let map_flags = paging::PageFlags::PRESENT
+            | paging::PageFlags::WRITABLE
+            | paging::PageFlags::NO_CACHE;
+        for off in (0..fb_size as u64).step_by(4096) {
+            match paging::map_page(aperture_addr + off, aperture_addr + off, map_flags) {
+                Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
+                Err(e) => {
+                    kprintln!("[npk]   Aperture map failed at +{:#x}: {:?}", off, e);
+                    return Err(GpuError::MappingFailed);
+                }
+            }
+        }
+        kprintln!("[npk]   Aperture mapped: {:#x} ({} pages)", aperture_addr, pages);
+
+        // Step 10: Configure plane (match firmware CTL including bit 3)
+        let new_plane_ctl = (1u32 << 31)    // enable
+            | (0x4 << 24)                    // XRGB 8:8:8:8
+            | (1 << 3);                      // bit 3 (matches firmware)
+        let stride_64b = pitch / 64;
+        mmio_write32(self.bar0, PLANE_CTL_1_A, new_plane_ctl);
+        mmio_write32(self.bar0, PLANE_STRIDE_1_A, stride_64b);
+        mmio_write32(self.bar0, PLANE_POS_1_A, 0);
+        mmio_write32(self.bar0, PLANE_SIZE_1_A,
+            ((timing.height - 1) << 16) | (timing.width - 1));
+        mmio_write32(self.bar0, PLANE_SURF_1_A, self.fb_ggtt_offset); // triggers flip
+        kprintln!("[npk]   Plane: {}x{} stride={} surf={:#x}",
+            timing.width, timing.height, stride_64b * 64, self.fb_ggtt_offset);
+
+        // Step 11: Re-enable pipe
         let pipe = mmio_read32(self.bar0, TRANSCONF_A);
         mmio_write32(self.bar0, TRANSCONF_A, pipe | (1 << 31));
-        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 1 << 30, 100_000) {
-            kprintln!("[npk]   Pipe A re-enable timeout");
+        if !poll_timeout(self.bar0, TRANSCONF_A, 1 << 30, 1 << 30, 200_000) {
+            kprintln!("[npk]   Pipe re-enable timeout");
             return Err(GpuError::PipelineFailed);
         }
+        kprintln!("[npk]   Pipe enabled");
 
-        // Configure plane (triggers scanout from new framebuffer)
-        self.configure_plane(timing)?;
+        // Return aperture address — CPU writes go through BAR2 → GGTT → RAM
+        let fb = FramebufferInfo {
+            addr: aperture_addr,
+            pitch,
+            width: timing.width,
+            height: timing.height,
+            bpp: 32,
+        };
 
         self.fb = Some(fb);
         self.active_timing = Some(timing);
@@ -895,6 +961,32 @@ impl IntelXeDriver {
         let last_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + last_off);
         kprintln!("[npk]   GGTT: {} entries @ offset {:#x} (entry[0]={:#010x}_{:08x}, last_lo={:#010x})",
             self.fb_pages, self.fb_ggtt_offset, first_hi, first_lo, last_lo);
+        Ok(())
+    }
+
+    /// Program GGTT entries using 32-bit writes (safer for MMIO than 64-bit).
+    fn program_ggtt_32(&self) -> Result<(), GpuError> {
+        let start_entry = self.fb_ggtt_offset / 4096;
+
+        for i in 0..self.fb_pages {
+            let phys_addr = self.fb_phys + (i as u64) * 4096;
+            let entry_lo = (phys_addr as u32 & 0xFFFF_F000) | 0x01; // valid, system mem
+            let entry_hi = (phys_addr >> 32) as u32;
+
+            let off = GGTT_BASE as u32 + (start_entry + i) * 8;
+            mmio_write32(self.bar0, off, entry_lo);
+            mmio_write32(self.bar0, off + 4, entry_hi);
+        }
+
+        // Flush with read-back
+        let _ = mmio_read32(self.bar0, GGTT_BASE);
+
+        // Log first entry for verification
+        let first_off = GGTT_BASE as u32 + start_entry * 8;
+        let lo = mmio_read32(self.bar0, first_off);
+        let hi = mmio_read32(self.bar0, first_off + 4);
+        kprintln!("[npk]   GGTT: {} entries @ {:#x} (first={:#010x}_{:08x})",
+            self.fb_pages, self.fb_ggtt_offset, hi, lo);
         Ok(())
     }
 
