@@ -531,6 +531,18 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
+        // Try 4K@30 immediately (skip the 1080p intermediate step)
+        kprintln!("[npk]   Attempting 4K@30Hz...");
+        match self.set_mode(3840, 2160, 30) {
+            Ok(fb4k) => {
+                kprintln!("[npk]   4K@30Hz active");
+                return Ok(fb4k);
+            }
+            Err(e) => {
+                kprintln!("[npk]   4K failed: {:?}, staying at {}x{}", e, width, height);
+            }
+        }
+
         Ok(fb)
     }
 
