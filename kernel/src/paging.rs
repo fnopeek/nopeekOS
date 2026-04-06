@@ -21,13 +21,18 @@ bitflags! {
         const PRESENT       = 1 << 0;
         const WRITABLE      = 1 << 1;
         const USER          = 1 << 2;
-        const WRITE_THROUGH = 1 << 3;
-        const NO_CACHE      = 1 << 4;
+        const WRITE_THROUGH = 1 << 3;  // PWT — also selects PAT index bit 0
+        const NO_CACHE      = 1 << 4;  // PCD — also selects PAT index bit 1
         const ACCESSED      = 1 << 5;
         const DIRTY         = 1 << 6;
-        const HUGE          = 1 << 7;
+        const HUGE          = 1 << 7;  // PS bit (PDT/PDPT: huge page; PT: PAT index bit 2)
         const GLOBAL        = 1 << 8;
         const NO_EXECUTE    = 1 << 63;
+
+        /// Write-Combining: PAT index 5 = PWT(1) + PCD(0) + PAT(1)
+        /// PAT bit for 4KB PTEs is bit 7 (same position as HUGE, but used at PT level).
+        /// Requires PAT MSR to have WC at index 5.
+        const WRITE_COMBINE = (1 << 3) | (1 << 7);  // PWT + PAT
     }
 }
 
@@ -128,6 +133,20 @@ pub fn init() {
             in("ecx") 0xC000_0080u32,
             in("eax") efer as u32,
             in("edx") (efer >> 32) as u32);
+    }
+
+    // Program PAT MSR (0x277) to add Write-Combining on index 5.
+    // Default PAT: 0=WB, 1=WT, 2=UC-, 3=UC, 4=WB, 5=WT, 6=UC-, 7=UC
+    // We change: index 5 from WT(0x04) to WC(0x01)
+    // PAT MSR layout: each index is 8 bits, indices 0-3 in low dword, 4-7 in high dword.
+    // SAFETY: Only changes PAT entry 5 which is unused (no existing page uses PWT+PAT).
+    unsafe {
+        let pat_lo: u32 = 0x00070406; // [3]=UC(0x00) [2]=UC-(0x07) [1]=WT(0x04) [0]=WB(0x06)
+        let pat_hi: u32 = 0x00070106; // [7]=UC(0x00) [6]=UC-(0x07) [5]=WC(0x01) [4]=WB(0x06)
+        core::arch::asm!("wrmsr",
+            in("ecx") 0x277u32,
+            in("eax") pat_lo,
+            in("edx") pat_hi);
     }
 
     let pml4 = read_cr3();
