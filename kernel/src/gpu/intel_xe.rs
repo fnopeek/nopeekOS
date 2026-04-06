@@ -114,6 +114,11 @@ const SCDC_I2C_ADDR: u8        = 0x54;    // 7-bit I2C address
 const SCDC_TMDS_CONFIG: u8     = 0x20;    // TMDS_Config register
 const SCDC_SCRAMBLER_STATUS: u8 = 0x21;   // Scrambler_Status (read-only)
 
+// TRANS_DDI_FUNC_CTL mode select (bits [26:24])
+const TRANS_DDI_MODE_MASK: u32                 = 0x7 << 24;
+const TRANS_DDI_MODE_HDMI: u32                 = 0 << 24;  // HDMI mode (required for scrambling)
+const TRANS_DDI_MODE_DVI: u32                  = 1 << 24;  // DVI mode (no scrambling, max 340MHz)
+
 // TRANS_DDI_FUNC_CTL scrambling bits (HDMI 2.0)
 const TRANS_DDI_HDMI_SCRAMBLING: u32          = 1 << 0;
 const TRANS_DDI_HIGH_TMDS_CHAR_RATE: u32      = 1 << 4;
@@ -1352,12 +1357,16 @@ impl IntelXeDriver {
             return false;
         }
 
-        // Step 2: Enable scrambling in transcoder (source side).
-        // Must happen within 100ms of sink config per HDMI 2.0 spec.
+        // Step 2: Switch from DVI mode to HDMI mode + enable scrambling.
+        // Firmware sets DVI mode (0b001) which doesn't support scrambling.
+        // HDMI 2.0 scrambling requires HDMI mode (0b000).
         let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
-        let new_func = ddi_func | TRANS_DDI_SCRAMBLING_MASK;
+        let new_func = (ddi_func & !TRANS_DDI_MODE_MASK)  // clear mode bits
+            | TRANS_DDI_MODE_HDMI                          // set HDMI mode
+            | TRANS_DDI_SCRAMBLING_MASK;                   // enable scrambling
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, new_func);
-        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x}", ddi_func, new_func);
+        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x} (DVI->HDMI+scrambling)",
+            ddi_func, new_func);
 
         // Step 3: Wait for monitor to lock to scrambled signal (~200ms)
         for _ in 0..20_000_000u32 { core::hint::spin_loop(); }
@@ -1381,10 +1390,11 @@ impl IntelXeDriver {
 
     /// Disable HDMI 2.0 scrambling (for modes <=340 MHz TMDS).
     fn disable_scrambling(&self) {
-        // Clear all transcoder scrambling bits
+        // Clear scrambling bits and restore DVI mode
         let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A,
-            ddi_func & !TRANS_DDI_SCRAMBLING_MASK);
+        let new_func = (ddi_func & !TRANS_DDI_SCRAMBLING_MASK & !TRANS_DDI_MODE_MASK)
+            | TRANS_DDI_MODE_DVI;
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, new_func);
 
         // Tell monitor to disable scrambling
         self.gmbus_reset();
