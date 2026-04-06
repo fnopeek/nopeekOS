@@ -199,13 +199,41 @@ fn push_key(k: u8) {
 pub fn poll_keyboard() -> Option<u8> {
     if !AVAILABLE.load(Ordering::Relaxed) { return None; }
     poll_events();
+
+    // Check key buffer first (newly pressed keys)
     // SAFETY: single-core
     unsafe {
-        if KEY_HEAD == KEY_TAIL { return None; }
-        let k = KEY_BUF[KEY_TAIL];
-        KEY_TAIL = (KEY_TAIL + 1) % KEY_BUF_SIZE;
-        Some(k)
+        if KEY_HEAD != KEY_TAIL {
+            let k = KEY_BUF[KEY_TAIL];
+            KEY_TAIL = (KEY_TAIL + 1) % KEY_BUF_SIZE;
+            return Some(k);
+        }
     }
+
+    // Timer-based key repeat for held keys
+    let mut state_lock = STATE.lock();
+    if let Some(ref mut state) = *state_lock {
+        if state.repeat_key != 0 {
+            let now = crate::interrupts::ticks();
+            let held_ms = (now - state.repeat_start) * 10; // ticks are ~10ms each (100Hz)
+            let since_last = (now - state.repeat_last) * 10;
+
+            // Initial delay 500ms, then repeat every 50ms
+            if held_ms >= 50 && since_last >= 5 {
+                state.repeat_last = now;
+                let is_de = match crate::config::get("keyboard") {
+                    Some(ref s) if s == "us" => false,
+                    _ => true,
+                };
+                let ch = hid_to_char(state.repeat_key, state.repeat_shift, state.repeat_altgr, is_de);
+                if ch != 0 {
+                    return Some(ch);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -244,7 +272,10 @@ struct XhciState {
     intr_ep_dci: u8,     // DCI of interrupt IN endpoint
     prev_keys: [u8; 6],  // previous HID report keys
     repeat_key: u8,      // key currently held for repeat
-    repeat_count: u32,   // how many reports key has been held
+    repeat_shift: bool,  // shift state when repeat started
+    repeat_altgr: bool,  // altgr state when repeat started
+    repeat_start: u64,   // tick when key was first pressed
+    repeat_last: u64,    // tick when last repeat was emitted
     port_num: u32,       // connected port number
     error_count: u32,    // consecutive transfer errors
 }
@@ -458,7 +489,8 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         ep0_ring, ep0_cycle: 1, ep0_enqueue: 0,
         intr_ring, intr_cycle: 1, intr_enqueue: 0,
         data_buf, slot_id: 0, port_speed: 0,
-        intr_ep_dci: 0, prev_keys: [0; 6], repeat_key: 0, repeat_count: 0,
+        intr_ep_dci: 0, prev_keys: [0; 6],
+        repeat_key: 0, repeat_shift: false, repeat_altgr: false, repeat_start: 0, repeat_last: 0,
         port_num: 0, error_count: 0,
     };
 
@@ -1103,28 +1135,21 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         _ => true, // default de_CH
     };
 
-    // Key repeat: if same key is held across reports, generate repeat events.
-    // Initial delay ~500ms (15 reports @ ~30Hz), then ~100ms repeat (3 reports).
-    let held_key = keys.iter().find(|&&k| k != 0 && k != 1 && state.prev_keys.contains(&k));
-    if let Some(&key) = held_key {
-        if key == state.repeat_key {
-            state.repeat_count += 1;
-            // Initial delay: 15 reports, then repeat every 3 reports
-            if state.repeat_count >= 15 && (state.repeat_count - 15) % 3 == 0 {
-                // Re-emit the held key
-                let ch = hid_to_char(key, shift, alt_gr, is_de);
-                if ch != 0 {
-                    push_key(ch);
-                }
-            }
-        } else {
-            state.repeat_key = key;
-            state.repeat_count = 0;
-        }
-    } else {
+    // Find the first non-zero key in the current report for repeat tracking
+    let first_key = keys.iter().find(|&&k| k != 0 && k != 1).copied().unwrap_or(0);
+
+    if first_key == 0 {
+        // All keys released — stop repeat
         state.repeat_key = 0;
-        state.repeat_count = 0;
+    } else if !state.prev_keys.contains(&first_key) {
+        // New key pressed — start repeat timer
+        state.repeat_key = first_key;
+        state.repeat_shift = shift;
+        state.repeat_altgr = alt_gr;
+        state.repeat_start = crate::interrupts::ticks();
+        state.repeat_last = state.repeat_start;
     }
+    // If same key still held, repeat_key stays set and poll_keyboard() handles timing
 
     for &key in keys.iter() {
         if key == 0 || key == 1 { continue; } // no key / error rollover
