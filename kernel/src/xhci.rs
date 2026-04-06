@@ -219,7 +219,7 @@ pub fn poll_keyboard() -> Option<u8> {
             let since_last = (now - state.repeat_last) * 10;
 
             // Initial delay 500ms, then repeat every 50ms
-            if held_ms >= 50 && since_last >= 5 {
+            if held_ms >= 500 && since_last >= 50 {
                 state.repeat_last = now;
                 let is_de = match crate::config::get("keyboard") {
                     Some(ref s) if s == "us" => false,
