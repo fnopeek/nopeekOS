@@ -92,8 +92,8 @@ const GMBUS3: u32              = 0xC510C;  // Data
 const GMBUS4: u32              = 0xC5110;  // Interrupt mask
 const GMBUS5: u32              = 0xC5120;  // 2-byte index register
 
-// GMBUS0 pin pair select (platform-specific, ADL combo PHY)
-const GMBUS_PIN_DPB: u32       = 0x05;    // DDI-B (HDMI) — i915: GMBUS_PIN_2_BXT
+// GMBUS0 pin pair select (ICP/TGP/ADL combo PHY, from gmbus_pins_icp[])
+const GMBUS_PIN_DPB: u32       = 0x02;    // DDI-B (HDMI) — i915: GMBUS_PIN_2_BXT = "dpb"
 
 // GMBUS1 bits
 const GMBUS_SW_CLR_INT: u32    = 1 << 31;
@@ -106,8 +106,8 @@ const GMBUS_SLAVE_READ: u32    = 1 << 0;
 
 // GMBUS2 bits
 const GMBUS_HW_RDY: u32        = 1 << 11;
-const GMBUS_NAK: u32           = 1 << 10;
-const GMBUS_ACTIVE: u32        = 1 << 7;
+const GMBUS_NAK: u32           = 1 << 10;  // SATOER
+const GMBUS_ACTIVE: u32        = 1 << 9;
 
 // HDMI SCDC (Status and Control Data Channel)
 const SCDC_I2C_ADDR: u8        = 0x54;    // 7-bit I2C address
@@ -115,8 +115,16 @@ const SCDC_TMDS_CONFIG: u8     = 0x20;    // TMDS_Config register
 const SCDC_SCRAMBLER_STATUS: u8 = 0x21;   // Scrambler_Status (read-only)
 
 // TRANS_DDI_FUNC_CTL scrambling bits (HDMI 2.0)
-const TRANS_DDI_HDMI_SCRAMBLING: u32       = 1 << 0;
-const TRANS_DDI_HIGH_TMDS_CHAR_RATE: u32   = 1 << 4;
+const TRANS_DDI_HDMI_SCRAMBLING: u32          = 1 << 0;
+const TRANS_DDI_HIGH_TMDS_CHAR_RATE: u32      = 1 << 4;
+const TRANS_DDI_HDMI_SCRAMBLER_RESET_FREQ: u32 = 1 << 6;
+const TRANS_DDI_HDMI_SCRAMBLER_CTS_ENABLE: u32 = 1 << 7;
+
+// All scrambling bits combined
+const TRANS_DDI_SCRAMBLING_MASK: u32 = TRANS_DDI_HDMI_SCRAMBLING
+    | TRANS_DDI_HIGH_TMDS_CHAR_RATE
+    | TRANS_DDI_HDMI_SCRAMBLER_RESET_FREQ
+    | TRANS_DDI_HDMI_SCRAMBLER_CTS_ENABLE;
 
 // GGTT base (within BAR0)
 const GGTT_BASE: u32           = 0x800000;
@@ -719,7 +727,14 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Step 11: Re-enable pipe (write to both possible offsets)
+        // Step 11: Enable HDMI 2.0 scrambling BEFORE pipe enable (i915 sequence)
+        if needs_scrambling {
+            if !self.enable_scrambling() {
+                kprintln!("[npk]   WARNING: scrambling failed, display may not sync");
+            }
+        }
+
+        // Step 12: Re-enable pipe (write to both possible offsets)
         mmio_write32(self.bar0, 0x70008, 1 << 31);  // PIPE_CONF_A
         mmio_write32(self.bar0, 0xF0008, 1 << 31);  // TRANSCONF_A
         // Wait for pipe to start
@@ -730,13 +745,6 @@ impl IntelXeDriver {
         let srcsz = ((timing.width - 1) << 16) | (timing.height - 1);
         mmio_write32(self.bar0, PIPE_SRCSZ_A, srcsz);
         mmio_write32(self.bar0, 0x7001C, srcsz);
-
-        // Step 12: Enable HDMI 2.0 scrambling if TMDS > 340 MHz
-        if needs_scrambling {
-            if !self.enable_scrambling() {
-                kprintln!("[npk]   WARNING: scrambling failed, display may not sync");
-            }
-        }
 
         Ok(fb)
     }
@@ -1311,20 +1319,13 @@ impl IntelXeDriver {
     // ── HDMI 2.0 Scrambling ─────────────────────────────────────────
 
     /// Enable HDMI 2.0 scrambling for TMDS >340 MHz (required for 4K@60).
-    /// Sets SCDC registers on the monitor via I2C and scrambling bits in the transcoder.
+    /// Follows i915 sequence: configure sink (SCDC) FIRST, then source (transcoder).
     /// Retries SCDC writes if monitor isn't connected yet (HDMI input switching).
     fn enable_scrambling(&self) -> bool {
         kprintln!("[npk]   Enabling HDMI 2.0 scrambling...");
 
-        // Step 1: Set scrambling bits in transcoder DDI function control
-        // Do this FIRST so the GPU outputs a scrambled signal immediately.
-        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A,
-            ddi_func | TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE);
-        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x}",
-            ddi_func, ddi_func | TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE);
-
-        // Step 2: Tell the monitor to enable scrambling via SCDC I2C.
+        // Step 1: Tell the monitor to enable scrambling via SCDC I2C (BEFORE source).
+        // i915 does this in intel_hdmi_handle_sink_scrambling() before DDI enable.
         // Retry up to 10 times with ~500ms pause — monitor may not be
         // connected yet (e.g. HDMI input auto-switching during reboot).
         let mut scdc_ok = false;
@@ -1341,7 +1342,7 @@ impl IntelXeDriver {
             if attempt < 9 {
                 kprintln!("[npk]   SCDC write failed (attempt {}), monitor not ready — retrying...",
                     attempt + 1);
-                // ~500ms pause (spin loop, no timer IRQ needed)
+                // ~500ms pause
                 for _ in 0..50_000_000u32 { core::hint::spin_loop(); }
             }
         }
@@ -1350,6 +1351,13 @@ impl IntelXeDriver {
             kprintln!("[npk]   SCDC: all retries failed — monitor may not support HDMI 2.0");
             return false;
         }
+
+        // Step 2: Enable scrambling in transcoder (source side).
+        // Must happen within 100ms of sink config per HDMI 2.0 spec.
+        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        let new_func = ddi_func | TRANS_DDI_SCRAMBLING_MASK;
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, new_func);
+        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x}", ddi_func, new_func);
 
         // Step 3: Wait for monitor to lock to scrambled signal (~200ms)
         for _ in 0..20_000_000u32 { core::hint::spin_loop(); }
@@ -1362,7 +1370,6 @@ impl IntelXeDriver {
                 if !locked {
                     kprintln!("[npk]   WARNING: monitor did not lock to scrambled signal");
                 }
-                // Proceed even if not locked — some monitors work without reporting status
                 true
             }
             None => {
@@ -1374,10 +1381,10 @@ impl IntelXeDriver {
 
     /// Disable HDMI 2.0 scrambling (for modes <=340 MHz TMDS).
     fn disable_scrambling(&self) {
-        // Clear transcoder scrambling bits
+        // Clear all transcoder scrambling bits
         let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A,
-            ddi_func & !(TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE));
+            ddi_func & !TRANS_DDI_SCRAMBLING_MASK);
 
         // Tell monitor to disable scrambling
         self.gmbus_reset();
