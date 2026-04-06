@@ -282,6 +282,18 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
                 let _ = npkfs::store(&name, log.as_bytes(), [0u8; 32]);
                 kprintln!("[npk] GPU log saved: {}", name);
             }
+
+            // Auto-upgrade to highest refresh rate if monitor is now connected
+            if gpu::is_native() && gpu::current_hz() < 60 {
+                kprintln!("[npk] GPU: upgrading to 4K@60Hz...");
+                match gpu::set_mode(3840, 2160, 60) {
+                    Ok(fb) => {
+                        framebuffer::init_from_gpu();
+                        kprintln!("[npk] GPU: {}x{}@60Hz active", fb.width, fb.height);
+                    }
+                    Err(_) => kprintln!("[npk] GPU: 4K@60 upgrade failed, staying at 30Hz"),
+                }
+            }
         } else {
             // Fallback: text-mode login (serial only, no framebuffer)
             text_mode_auth(&salt);
