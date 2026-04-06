@@ -607,6 +607,8 @@ impl IntelXeDriver {
 
         kprintln!("[npk]   set_mode: {}x{}@{}Hz (pclk={}kHz)", width, height, hz, timing.pixel_clock_khz);
         kprintln!("[npk]   BAR2 (aperture): {:#x}", self.bar2);
+        let cdclk = mmio_read32(self.bar0, CDCLK_CTL);
+        kprintln!("[npk]   CDCLK_CTL: {:#010x}", cdclk);
 
         let need_pll_change = self.active_timing
             .map_or(true, |t| t.pixel_clock_khz != timing.pixel_clock_khz);
@@ -1357,13 +1359,37 @@ impl IntelXeDriver {
             return false;
         }
 
-        // Step 2: Switch from DVI mode to HDMI mode + enable scrambling.
-        // Firmware sets DVI mode (0b001) which doesn't support scrambling.
-        // HDMI 2.0 scrambling requires HDMI mode (0b000).
+        // Step 2: Cycle TRANS_DDI_FUNC_CTL: disable, switch DVI→HDMI, enable scrambling.
+        // i915 does a full disable/reconfigure/enable cycle (intel_ddi_disable_transcoder_func
+        // + intel_ddi_enable_transcoder_func). Just flipping bits in-place doesn't work.
         let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
-        let new_func = (ddi_func & !TRANS_DDI_MODE_MASK)  // clear mode bits
-            | TRANS_DDI_MODE_HDMI                          // set HDMI mode
-            | TRANS_DDI_SCRAMBLING_MASK;                   // enable scrambling
+        kprintln!("[npk]   TRANS_DDI_FUNC_CTL before: {:#010x}", ddi_func);
+
+        // Disable transcoder DDI function
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
+        for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
+
+        // Also disable + re-enable DDI buffer for clean handshake
+        let ddi_ctl = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
+        let ddi_buf = mmio_read32(self.bar0, ddi_ctl);
+        if ddi_buf & (1 << 31) != 0 {
+            mmio_write32(self.bar0, ddi_ctl, ddi_buf & !(1 << 31));
+            // Wait for DDI idle (bit 7 = 1 when idle)
+            let _ = poll_timeout(self.bar0, ddi_ctl, 1 << 7, 1 << 7, 200_000);
+            kprintln!("[npk]   DDI buffer disabled");
+            for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
+        }
+
+        // Re-enable DDI buffer
+        mmio_write32(self.bar0, ddi_ctl, ddi_buf | (1 << 31));
+        for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
+        kprintln!("[npk]   DDI buffer re-enabled");
+
+        // Write new TRANS_DDI_FUNC_CTL: HDMI mode + scrambling + enable
+        let new_func = (ddi_func & !TRANS_DDI_MODE_MASK & !TRANS_DDI_SCRAMBLING_MASK)
+            | TRANS_DDI_MODE_HDMI
+            | TRANS_DDI_SCRAMBLING_MASK
+            | (1 << 31);  // enable
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, new_func);
         kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x} (DVI->HDMI+scrambling)",
             ddi_func, new_func);
