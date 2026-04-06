@@ -535,17 +535,9 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Try 4K@60 first, then 4K@30 as fallback
-        kprintln!("[npk]   Attempting 4K@60Hz...");
-        match self.set_mode(3840, 2160, 60) {
-            Ok(fb4k) => {
-                kprintln!("[npk]   4K@60Hz active");
-                return Ok(fb4k);
-            }
-            Err(e) => {
-                kprintln!("[npk]   4K@60 failed: {:?}, trying 4K@30...", e);
-            }
-        }
+        // Boot with 4K@30 (safe, no HDMI 2.0 scrambling needed).
+        // 4K@60 requires TMDS >340MHz which needs SCDC scrambling — use 'gpu 4k60' manually.
+        kprintln!("[npk]   Attempting 4K@30Hz...");
         match self.set_mode(3840, 2160, 30) {
             Ok(fb4k) => {
                 kprintln!("[npk]   4K@30Hz active");
