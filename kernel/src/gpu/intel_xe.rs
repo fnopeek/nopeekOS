@@ -693,10 +693,11 @@ impl IntelXeDriver {
         kprintln!("[npk]   GGTT TLB invalidated");
 
         // Step 9: Map aperture pages for CPU access (BAR2 + GGTT offset)
+        // Use Write-Combining for ~5-10x faster sequential framebuffer writes.
         let aperture_addr = self.bar2 + self.fb_ggtt_offset as u64;
         let map_flags = paging::PageFlags::PRESENT
             | paging::PageFlags::WRITABLE
-            | paging::PageFlags::NO_CACHE;
+            | paging::PageFlags::WRITE_COMBINE;
         for off in (0..fb_size as u64).step_by(4096) {
             match paging::map_page(aperture_addr + off, aperture_addr + off, map_flags) {
                 Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
