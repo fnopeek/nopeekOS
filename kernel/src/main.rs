@@ -251,13 +251,22 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
         if framebuffer::is_available() {
             // Activate native GPU + 4K before login screen
             if gpu::native_detected() {
+                // Capture serial output during GPU init for diagnostics
+                let _ = serial::stop_capture();
+                serial::start_capture();
+
                 match gpu::activate_native() {
                     Ok(fb) => {
                         framebuffer::init_from_gpu();
                         kprintln!("[npk] GPU: {}x{} (native)", fb.width, fb.height);
                     }
-                    Err(_) => kprintln!("[npk] GPU: native init failed, using GOP"),
+                    Err(e) => kprintln!("[npk] GPU: native init failed: {:?}, using GOP", e),
                 }
+
+                // Save GPU init log
+                let gpu_log = serial::stop_capture();
+                serial::start_capture();
+                let _ = npkfs::store("gpu-init-log", gpu_log.as_bytes(), [0u8; 32]);
             }
             // Graphical login screen
             let _master_key = gui::login::run(&salt);

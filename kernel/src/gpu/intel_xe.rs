@@ -569,23 +569,16 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Try 4K@60 first (needs HDMI 2.0 scrambling), fallback to 4K@30
-        // Probe SCDC first to check if the monitor supports HDMI 2.0
-        self.gmbus_reset();
-        let scdc_ok = self.gmbus_read_byte(SCDC_I2C_ADDR, SCDC_SCRAMBLER_STATUS);
-        if scdc_ok.is_some() {
-            kprintln!("[npk]   SCDC reachable — monitor supports HDMI 2.0, trying 4K@60...");
-            match self.set_mode(3840, 2160, 60) {
-                Ok(fb4k) => {
-                    kprintln!("[npk]   4K@60Hz active");
-                    return Ok(fb4k);
-                }
-                Err(e) => {
-                    kprintln!("[npk]   4K@60 failed: {:?}, trying 4K@30...", e);
-                }
+        // Try 4K@60 (HDMI 2.0 + scrambling), fallback to 4K@30
+        kprintln!("[npk]   Attempting 4K@60Hz...");
+        match self.set_mode(3840, 2160, 60) {
+            Ok(fb4k) => {
+                kprintln!("[npk]   4K@60Hz active");
+                return Ok(fb4k);
             }
-        } else {
-            kprintln!("[npk]   SCDC not reachable — HDMI 1.4 only, skipping 4K@60");
+            Err(e) => {
+                kprintln!("[npk]   4K@60 failed: {:?}, trying 4K@30...", e);
+            }
         }
         match self.set_mode(3840, 2160, 30) {
             Ok(fb4k) => {
@@ -1327,27 +1320,47 @@ impl IntelXeDriver {
 
     /// Enable HDMI 2.0 scrambling for TMDS >340 MHz (required for 4K@60).
     /// Sets SCDC registers on the monitor via I2C and scrambling bits in the transcoder.
+    /// Retries SCDC writes if monitor isn't connected yet (HDMI input switching).
     fn enable_scrambling(&self) -> bool {
         kprintln!("[npk]   Enabling HDMI 2.0 scrambling...");
 
-        self.gmbus_reset();
-
-        // Step 1: Tell the monitor to enable scrambling + high TMDS clock ratio
-        // SCDC TMDS_Config (0x20): bit 0 = scrambling, bit 1 = clock ratio 1/40
-        if !self.gmbus_write_byte(SCDC_I2C_ADDR, SCDC_TMDS_CONFIG, 0x03) {
-            kprintln!("[npk]   SCDC write failed — monitor may not support HDMI 2.0");
-            return false;
-        }
-
-        // Step 2: Set scrambling bits in transcoder DDI function control
+        // Step 1: Set scrambling bits in transcoder DDI function control
+        // Do this FIRST so the GPU outputs a scrambled signal immediately.
         let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
         mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A,
             ddi_func | TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE);
         kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x}",
             ddi_func, ddi_func | TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE);
 
-        // Step 3: Wait for monitor to lock (~100ms)
-        for _ in 0..10_000_000u32 { core::hint::spin_loop(); }
+        // Step 2: Tell the monitor to enable scrambling via SCDC I2C.
+        // Retry up to 10 times with ~500ms pause — monitor may not be
+        // connected yet (e.g. HDMI input auto-switching during reboot).
+        let mut scdc_ok = false;
+        for attempt in 0..10u32 {
+            self.gmbus_reset();
+
+            // SCDC TMDS_Config (0x20): bit 0 = scrambling, bit 1 = clock ratio 1/40
+            if self.gmbus_write_byte(SCDC_I2C_ADDR, SCDC_TMDS_CONFIG, 0x03) {
+                kprintln!("[npk]   SCDC configured (attempt {})", attempt + 1);
+                scdc_ok = true;
+                break;
+            }
+
+            if attempt < 9 {
+                kprintln!("[npk]   SCDC write failed (attempt {}), monitor not ready — retrying...",
+                    attempt + 1);
+                // ~500ms pause (spin loop, no timer IRQ needed)
+                for _ in 0..50_000_000u32 { core::hint::spin_loop(); }
+            }
+        }
+
+        if !scdc_ok {
+            kprintln!("[npk]   SCDC: all retries failed — monitor may not support HDMI 2.0");
+            return false;
+        }
+
+        // Step 3: Wait for monitor to lock to scrambled signal (~200ms)
+        for _ in 0..20_000_000u32 { core::hint::spin_loop(); }
 
         // Step 4: Check scrambler status
         match self.gmbus_read_byte(SCDC_I2C_ADDR, SCDC_SCRAMBLER_STATUS) {
@@ -1357,11 +1370,11 @@ impl IntelXeDriver {
                 if !locked {
                     kprintln!("[npk]   WARNING: monitor did not lock to scrambled signal");
                 }
-                locked
+                // Proceed even if not locked — some monitors work without reporting status
+                true
             }
             None => {
-                kprintln!("[npk]   SCDC status read failed");
-                // Proceed anyway — some monitors don't report status but still work
+                kprintln!("[npk]   SCDC status read failed — proceeding anyway");
                 true
             }
         }
