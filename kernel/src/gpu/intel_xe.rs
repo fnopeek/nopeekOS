@@ -535,15 +535,24 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Try 4K@30 immediately (skip the 1080p intermediate step)
-        kprintln!("[npk]   Attempting 4K@30Hz...");
+        // Try 4K@60 first, then 4K@30 as fallback
+        kprintln!("[npk]   Attempting 4K@60Hz...");
+        match self.set_mode(3840, 2160, 60) {
+            Ok(fb4k) => {
+                kprintln!("[npk]   4K@60Hz active");
+                return Ok(fb4k);
+            }
+            Err(e) => {
+                kprintln!("[npk]   4K@60 failed: {:?}, trying 4K@30...", e);
+            }
+        }
         match self.set_mode(3840, 2160, 30) {
             Ok(fb4k) => {
                 kprintln!("[npk]   4K@30Hz active");
                 return Ok(fb4k);
             }
             Err(e) => {
-                kprintln!("[npk]   4K failed: {:?}, staying at {}x{}", e, width, height);
+                kprintln!("[npk]   4K@30 failed: {:?}, staying at {}x{}", e, width, height);
             }
         }
 
@@ -892,16 +901,18 @@ impl IntelXeDriver {
         let cdclk = mmio_read32(self.bar0, CDCLK_CTL);
         kprintln!("[npk]   CDCLK_CTL: {:#010x}", cdclk);
 
-        // For 4K@60Hz (594 MHz pixel clock), we need CDCLK >= 312 MHz.
-        // ADL supports CDCLK values: 172.8, 192, 307.2, 312, 552, 556.8, 648, 652.8 MHz
-        //
-        // CDCLK_CTL format (Gen 12):
-        //   Bits 10:8 = cd2x divider select
+        // ADL CDCLK_CTL format (Gen 12):
+        //   Bits 10:8 = cd2x divider select (0=bypass/1x, 1=/2)
         //   Bits 25:22 = SSA precharge
         //   Bit 26 = PLL enable
         //
-        // For now, accept whatever the firmware set (it should be enough for 1080p).
-        // We'll reprogram if needed for 4K.
+        // ADL CDCLK frequencies (from ref clock 38.4 MHz with cd2x):
+        //   cd2x=0 (bypass): 172.8, 192, 307.2, 312, 552, 556.8, 648, 652.8 MHz
+        //
+        // For 4K@60Hz (594 MHz pixel clock), CDCLK must be >= 312 MHz.
+        // Firmware typically sets 312 or higher for HDMI output.
+        // Log current value for diagnostics but don't reprogram yet —
+        // if 4K@60 fails, CDCLK will be a suspect to investigate.
 
         // Enable DBUF (Display Buffer)
         let dbuf = mmio_read32(self.bar0, DBUF_CTL_S1);

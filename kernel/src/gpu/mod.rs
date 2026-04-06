@@ -194,6 +194,15 @@ pub fn driver_name() -> &'static str {
     }
 }
 
+/// Current refresh rate (0 if unknown/GOP).
+pub fn current_hz() -> u8 {
+    let gpu = GPU.lock();
+    match &*gpu {
+        GpuBackend::IntelXe(drv) => drv.current_hz(),
+        _ => 0,
+    }
+}
+
 /// Check if a native GPU driver is active (not just GOP fallback).
 pub fn is_native() -> bool {
     let gpu = GPU.lock();

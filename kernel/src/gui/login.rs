@@ -213,9 +213,15 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
         draw_greeting(shadow, info, &layout);
         draw_input_box(shadow, info, &layout, true);
         draw_cursor(shadow, info, &layout, 0, true);
-        // Debug: show resolution in bottom-right corner
-        let res_str = format!("{}x{} {}bpp scale:{}x v{}",
-            info.width, info.height, info.bpp, scale, env!("CARGO_PKG_VERSION"));
+        // Debug: show resolution + refresh rate in bottom-right corner
+        let hz = crate::gpu::current_hz();
+        let res_str = if hz > 0 {
+            format!("{}x{}@{}Hz {}bpp scale:{}x v{}",
+                info.width, info.height, hz, info.bpp, scale, env!("CARGO_PKG_VERSION"))
+        } else {
+            format!("{}x{} {}bpp scale:{}x v{}",
+                info.width, info.height, info.bpp, scale, env!("CARGO_PKG_VERSION"))
+        };
         let text_w = font::measure_str(&res_str, 1);
         let rx = info.width.saturating_sub(text_w + 8);
         let ry = info.height - 20;
