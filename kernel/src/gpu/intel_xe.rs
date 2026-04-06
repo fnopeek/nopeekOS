@@ -84,6 +84,40 @@ const ICL_PORT_TX_DW5_LN0_B: u32 = 0x6CF14;
 const ICL_PORT_TX_DW7_GRP_B: u32 = 0x6CD1C;
 const ICL_PORT_TX_DW7_LN0_B: u32 = 0x6CF1C;
 
+// GMBUS (I2C controller for DDC/SCDC)
+const GMBUS0: u32              = 0xC5100;  // Clock/Port Select (Gen 9+: 0xC5100)
+const GMBUS1: u32              = 0xC5104;  // Command/Status
+const GMBUS2: u32              = 0xC5108;  // Status
+const GMBUS3: u32              = 0xC510C;  // Data
+const GMBUS4: u32              = 0xC5110;  // Interrupt mask
+const GMBUS5: u32              = 0xC5120;  // 2-byte index register
+
+// GMBUS0 pin pair select (platform-specific, ADL combo PHY)
+const GMBUS_PIN_DPB: u32       = 0x05;    // DDI-B (HDMI) — i915: GMBUS_PIN_2_BXT
+
+// GMBUS1 bits
+const GMBUS_SW_CLR_INT: u32    = 1 << 31;
+const GMBUS_SW_RDY: u32        = 1 << 30;
+const GMBUS_CYCLE_WAIT: u32    = 1 << 25;
+const GMBUS_CYCLE_INDEX: u32   = 1 << 26;  // use GMBUS5 index
+const GMBUS_CYCLE_STOP: u32    = 1 << 27;
+const GMBUS_SLAVE_WRITE: u32   = 0 << 0;
+const GMBUS_SLAVE_READ: u32    = 1 << 0;
+
+// GMBUS2 bits
+const GMBUS_HW_RDY: u32        = 1 << 11;
+const GMBUS_NAK: u32           = 1 << 10;
+const GMBUS_ACTIVE: u32        = 1 << 7;
+
+// HDMI SCDC (Status and Control Data Channel)
+const SCDC_I2C_ADDR: u8        = 0x54;    // 7-bit I2C address
+const SCDC_TMDS_CONFIG: u8     = 0x20;    // TMDS_Config register
+const SCDC_SCRAMBLER_STATUS: u8 = 0x21;   // Scrambler_Status (read-only)
+
+// TRANS_DDI_FUNC_CTL scrambling bits (HDMI 2.0)
+const TRANS_DDI_HDMI_SCRAMBLING: u32       = 1 << 0;
+const TRANS_DDI_HIGH_TMDS_CHAR_RATE: u32   = 1 << 4;
+
 // GGTT base (within BAR0)
 const GGTT_BASE: u32           = 0x800000;
 
@@ -535,9 +569,24 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Boot with 4K@30 (safe, no HDMI 2.0 scrambling needed).
-        // 4K@60 requires TMDS >340MHz which needs SCDC scrambling — use 'gpu 4k60' manually.
-        kprintln!("[npk]   Attempting 4K@30Hz...");
+        // Try 4K@60 first (needs HDMI 2.0 scrambling), fallback to 4K@30
+        // Probe SCDC first to check if the monitor supports HDMI 2.0
+        self.gmbus_reset();
+        let scdc_ok = self.gmbus_read_byte(SCDC_I2C_ADDR, SCDC_SCRAMBLER_STATUS);
+        if scdc_ok.is_some() {
+            kprintln!("[npk]   SCDC reachable — monitor supports HDMI 2.0, trying 4K@60...");
+            match self.set_mode(3840, 2160, 60) {
+                Ok(fb4k) => {
+                    kprintln!("[npk]   4K@60Hz active");
+                    return Ok(fb4k);
+                }
+                Err(e) => {
+                    kprintln!("[npk]   4K@60 failed: {:?}, trying 4K@30...", e);
+                }
+            }
+        } else {
+            kprintln!("[npk]   SCDC not reachable — HDMI 1.4 only, skipping 4K@60");
+        }
         match self.set_mode(3840, 2160, 30) {
             Ok(fb4k) => {
                 kprintln!("[npk]   4K@30Hz active");
@@ -563,6 +612,15 @@ impl IntelXeDriver {
 
         let need_pll_change = self.active_timing
             .map_or(true, |t| t.pixel_clock_khz != timing.pixel_clock_khz);
+
+        let needs_scrambling = timing.pixel_clock_khz > 340000;
+        let had_scrambling = self.active_timing
+            .map_or(false, |t| t.pixel_clock_khz > 340000);
+
+        // Step 0: Disable old scrambling before tearing down pipeline
+        if had_scrambling && !needs_scrambling {
+            self.disable_scrambling();
+        }
 
         // Step 1: Disable plane
         let plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
@@ -687,6 +745,13 @@ impl IntelXeDriver {
         let srcsz = ((timing.width - 1) << 16) | (timing.height - 1);
         mmio_write32(self.bar0, PIPE_SRCSZ_A, srcsz);
         mmio_write32(self.bar0, 0x7001C, srcsz);
+
+        // Step 12: Enable HDMI 2.0 scrambling if TMDS > 340 MHz
+        if needs_scrambling {
+            if !self.enable_scrambling() {
+                kprintln!("[npk]   WARNING: scrambling failed, display may not sync");
+            }
+        }
 
         Ok(fb)
     }
@@ -1132,5 +1197,185 @@ impl IntelXeDriver {
         kprintln!("[npk]   Plane: {}x{} XRGB8888 stride={} surf={:#x}",
             timing.width, timing.height, stride_64b * 64, self.fb_ggtt_offset);
         Ok(())
+    }
+
+    // ── GMBUS I2C (for HDMI SCDC) ──────────────────────────────────
+
+    /// Wait for GMBUS to become idle/ready.
+    fn gmbus_wait_idle(&self) -> bool {
+        for _ in 0..50_000u32 {
+            let st = mmio_read32(self.bar0, GMBUS2);
+            if st & GMBUS_ACTIVE == 0 {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+
+    /// Wait for GMBUS HW_RDY (data transferred).
+    fn gmbus_wait_hw_rdy(&self) -> bool {
+        for _ in 0..100_000u32 {
+            let st = mmio_read32(self.bar0, GMBUS2);
+            if st & GMBUS_NAK != 0 {
+                kprintln!("[npk]   GMBUS: NAK received");
+                return false;
+            }
+            if st & GMBUS_HW_RDY != 0 {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+
+    /// Reset GMBUS after error or before use.
+    fn gmbus_reset(&self) {
+        // Set SW_CLR_INT to clear any pending state
+        mmio_write32(self.bar0, GMBUS1, GMBUS_SW_CLR_INT);
+        mmio_write32(self.bar0, GMBUS1, 0);
+        // Select no port
+        mmio_write32(self.bar0, GMBUS0, 0);
+        let _ = mmio_read32(self.bar0, GMBUS2);
+    }
+
+    /// Write a single byte to an I2C register via GMBUS.
+    fn gmbus_write_byte(&self, slave_addr: u8, reg: u8, val: u8) -> bool {
+        let pin = if self.ddi_port == 1 { GMBUS_PIN_DPB } else { 1 };
+
+        // Select port
+        mmio_write32(self.bar0, GMBUS0, pin);
+
+        if !self.gmbus_wait_idle() {
+            kprintln!("[npk]   GMBUS: not idle before write");
+            self.gmbus_reset();
+            return false;
+        }
+
+        // Data: reg byte + value byte (little-endian in GMBUS3)
+        mmio_write32(self.bar0, GMBUS3, (val as u32) << 8 | reg as u32);
+
+        // Command: 2 bytes, write, slave address, WAIT+STOP cycle
+        let cmd = GMBUS_SW_RDY
+            | GMBUS_CYCLE_WAIT
+            | GMBUS_CYCLE_STOP
+            | (2u32 << 16)                          // byte count = 2 (reg + val)
+            | ((slave_addr as u32) << 1)            // slave addr (7-bit, shifted)
+            | GMBUS_SLAVE_WRITE;
+        mmio_write32(self.bar0, GMBUS1, cmd);
+
+        let ok = self.gmbus_wait_hw_rdy();
+        // Wait for bus to go idle
+        self.gmbus_wait_idle();
+        // Clean up
+        mmio_write32(self.bar0, GMBUS1, GMBUS_SW_CLR_INT);
+        mmio_write32(self.bar0, GMBUS1, 0);
+        mmio_write32(self.bar0, GMBUS0, 0);
+
+        if ok {
+            kprintln!("[npk]   GMBUS: wrote {:#04x}={:#04x} to slave {:#04x}", reg, val, slave_addr);
+        } else {
+            kprintln!("[npk]   GMBUS: write FAILED (reg={:#04x} val={:#04x})", reg, val);
+        }
+        ok
+    }
+
+    /// Read a single byte from an I2C register via GMBUS (indexed read).
+    fn gmbus_read_byte(&self, slave_addr: u8, reg: u8) -> Option<u8> {
+        let pin = if self.ddi_port == 1 { GMBUS_PIN_DPB } else { 1 };
+
+        // Select port
+        mmio_write32(self.bar0, GMBUS0, pin);
+
+        if !self.gmbus_wait_idle() {
+            kprintln!("[npk]   GMBUS: not idle before read");
+            self.gmbus_reset();
+            return None;
+        }
+
+        // Set index register (GMBUS5) for indexed read
+        mmio_write32(self.bar0, GMBUS5, (reg as u32) | (1 << 31)); // index enable
+
+        // Command: 1 byte, read, slave address, INDEX+WAIT+STOP
+        let cmd = GMBUS_SW_RDY
+            | GMBUS_CYCLE_WAIT
+            | GMBUS_CYCLE_STOP
+            | GMBUS_CYCLE_INDEX
+            | (1u32 << 16)                          // byte count = 1
+            | ((slave_addr as u32) << 1)
+            | GMBUS_SLAVE_READ;
+        mmio_write32(self.bar0, GMBUS1, cmd);
+
+        let ok = self.gmbus_wait_hw_rdy();
+        let data = if ok {
+            let d = mmio_read32(self.bar0, GMBUS3);
+            Some((d & 0xFF) as u8)
+        } else {
+            None
+        };
+
+        self.gmbus_wait_idle();
+        mmio_write32(self.bar0, GMBUS5, 0); // disable index
+        mmio_write32(self.bar0, GMBUS1, GMBUS_SW_CLR_INT);
+        mmio_write32(self.bar0, GMBUS1, 0);
+        mmio_write32(self.bar0, GMBUS0, 0);
+
+        data
+    }
+
+    // ── HDMI 2.0 Scrambling ─────────────────────────────────────────
+
+    /// Enable HDMI 2.0 scrambling for TMDS >340 MHz (required for 4K@60).
+    /// Sets SCDC registers on the monitor via I2C and scrambling bits in the transcoder.
+    fn enable_scrambling(&self) -> bool {
+        kprintln!("[npk]   Enabling HDMI 2.0 scrambling...");
+
+        self.gmbus_reset();
+
+        // Step 1: Tell the monitor to enable scrambling + high TMDS clock ratio
+        // SCDC TMDS_Config (0x20): bit 0 = scrambling, bit 1 = clock ratio 1/40
+        if !self.gmbus_write_byte(SCDC_I2C_ADDR, SCDC_TMDS_CONFIG, 0x03) {
+            kprintln!("[npk]   SCDC write failed — monitor may not support HDMI 2.0");
+            return false;
+        }
+
+        // Step 2: Set scrambling bits in transcoder DDI function control
+        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A,
+            ddi_func | TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE);
+        kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x}",
+            ddi_func, ddi_func | TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE);
+
+        // Step 3: Wait for monitor to lock (~100ms)
+        for _ in 0..10_000_000u32 { core::hint::spin_loop(); }
+
+        // Step 4: Check scrambler status
+        match self.gmbus_read_byte(SCDC_I2C_ADDR, SCDC_SCRAMBLER_STATUS) {
+            Some(status) => {
+                let locked = status & 0x01 != 0;
+                kprintln!("[npk]   SCDC Scrambler_Status: {:#04x} (locked={})", status, locked);
+                if !locked {
+                    kprintln!("[npk]   WARNING: monitor did not lock to scrambled signal");
+                }
+                locked
+            }
+            None => {
+                kprintln!("[npk]   SCDC status read failed");
+                // Proceed anyway — some monitors don't report status but still work
+                true
+            }
+        }
+    }
+
+    /// Disable HDMI 2.0 scrambling (for modes <=340 MHz TMDS).
+    fn disable_scrambling(&self) {
+        // Clear transcoder scrambling bits
+        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A,
+            ddi_func & !(TRANS_DDI_HDMI_SCRAMBLING | TRANS_DDI_HIGH_TMDS_CHAR_RATE));
+
+        // Tell monitor to disable scrambling
+        self.gmbus_reset();
+        let _ = self.gmbus_write_byte(SCDC_I2C_ADDR, SCDC_TMDS_CONFIG, 0x00);
     }
 }
