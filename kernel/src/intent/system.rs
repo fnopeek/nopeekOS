@@ -81,7 +81,7 @@ pub fn intent_gpu(args: &str) {
         "test-pll" | "test" => {
             // Test PLL re-lock with firmware values (will kill display!)
             kprintln!("[npk] WARNING: This will disable the display!");
-            kprintln!("[npk] Log saved to gpu-init-log after test.");
+            kprintln!("[npk] Log will be saved after test.");
 
             let pre_log = crate::serial::stop_capture();
             crate::serial::start_capture();
@@ -90,7 +90,9 @@ pub fn intent_gpu(args: &str) {
 
             let log = crate::serial::stop_capture();
             crate::serial::start_capture();
-            let _ = crate::npkfs::store("gpu-init-log", log.as_bytes(), [0u8; 32]);
+            let log_name = crate::gpu::next_log_name();
+            let _ = crate::npkfs::store(&log_name, log.as_bytes(), [0u8; 32]);
+            kprintln!("[npk] Log saved: {}", log_name);
         }
         "init" | "activate" => {
             if crate::gpu::is_native() {
@@ -119,7 +121,9 @@ pub fn intent_gpu(args: &str) {
             let log_data = alloc::format!("{}\n--- GPU INIT RESULT: {:?} ---\n", gpu_log,
                 result.as_ref().map(|fb| alloc::format!("OK {}x{}", fb.width, fb.height))
                     .unwrap_or_else(|e| alloc::format!("{:?}", e)));
-            let _ = crate::npkfs::store("gpu-init-log", log_data.as_bytes(), [0u8; 32]);
+            let log_name = crate::gpu::next_log_name();
+            let _ = crate::npkfs::store(&log_name, log_data.as_bytes(), [0u8; 32]);
+            kprintln!("[npk] Log saved: {}", log_name);
 
             match result {
                 Ok(fb) => {
@@ -129,7 +133,7 @@ pub fn intent_gpu(args: &str) {
                 Err(e) => {
                     kprintln!("[npk] GPU: activation failed: {:?}", e);
                     kprintln!("[npk] GOP framebuffer unchanged");
-                    kprintln!("[npk] Log saved (use 'cat gpu-init-log' after reboot)");
+                    kprintln!("[npk] Check log with 'list gpu'");
                 }
             }
         }
@@ -153,7 +157,9 @@ pub fn intent_gpu(args: &str) {
             let log_data = alloc::format!("{}\n--- GPU MODE RESULT: {:?} ---\n", gpu_log,
                 result.as_ref().map(|fb| alloc::format!("OK {}x{}", fb.width, fb.height))
                     .unwrap_or_else(|e| alloc::format!("{:?}", e)));
-            let _ = crate::npkfs::store("gpu-init-log", log_data.as_bytes(), [0u8; 32]);
+            let log_name = crate::gpu::next_log_name();
+            let _ = crate::npkfs::store(&log_name, log_data.as_bytes(), [0u8; 32]);
+            kprintln!("[npk] Log saved: {}", log_name);
 
             // Always reinit console — display hardware is already at new mode
             // even if pipe re-enable timed out
@@ -164,7 +170,7 @@ pub fn intent_gpu(args: &str) {
                 }
                 Err(e) => {
                     kprintln!("[npk] GPU: mode switch partial: {:?} (display may work)", e);
-                    kprintln!("[npk] Log saved (use 'cat gpu-init-log' after reboot)");
+                    kprintln!("[npk] Check log with 'list gpu'");
                 }
             }
         }
