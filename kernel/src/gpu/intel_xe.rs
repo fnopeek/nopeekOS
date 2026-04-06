@@ -582,9 +582,17 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Boot safe at 4K@30 (no scrambling needed, always works).
-        // Use 'gpu 4k60' to switch manually once display is confirmed.
-        kprintln!("[npk]   Attempting 4K@30Hz...");
+        // Try 4K@60 (HDMI 2.0 scrambling), fallback to 4K@30
+        kprintln!("[npk]   Attempting 4K@60Hz...");
+        match self.set_mode(3840, 2160, 60) {
+            Ok(fb4k) => {
+                kprintln!("[npk]   4K@60Hz active");
+                return Ok(fb4k);
+            }
+            Err(e) => {
+                kprintln!("[npk]   4K@60 failed: {:?}, trying 4K@30...", e);
+            }
+        }
         match self.set_mode(3840, 2160, 30) {
             Ok(fb4k) => {
                 kprintln!("[npk]   4K@30Hz active");
