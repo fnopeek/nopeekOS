@@ -133,17 +133,19 @@ pub fn intent_gpu(args: &str) {
                 }
             }
         }
-        "4k" | "4k30" => {
+        "4k" | "4k30" | "4k60" => {
             if !crate::gpu::is_native() {
                 kprintln!("[npk] GPU: native driver not active (run 'gpu init' first)");
                 return;
             }
 
+            let hz: u8 = if args.trim() == "4k60" { 60 } else { 30 };
+
             let pre_log = crate::serial::stop_capture();
             crate::serial::start_capture();
 
-            kprintln!("[npk] GPU: switching to 4K@30Hz...");
-            let result = crate::gpu::set_mode(3840, 2160, 30);
+            kprintln!("[npk] GPU: switching to 4K@{}Hz...", hz);
+            let result = crate::gpu::set_mode(3840, 2160, hz);
 
             let gpu_log = crate::serial::stop_capture();
             crate::serial::start_capture();
@@ -153,7 +155,7 @@ pub fn intent_gpu(args: &str) {
                     .unwrap_or_else(|e| alloc::format!("{:?}", e)));
             let _ = crate::npkfs::store("gpu-init-log", log_data.as_bytes(), [0u8; 32]);
 
-            // Always reinit console — display hardware is already at 4K
+            // Always reinit console — display hardware is already at new mode
             // even if pipe re-enable timed out
             crate::framebuffer::init_from_gpu();
             match result {
@@ -185,7 +187,7 @@ pub fn intent_gpu(args: &str) {
             }
         }
         _ => {
-            kprintln!("Usage: gpu [status|init]");
+            kprintln!("Usage: gpu [status|init|4k|4k30|4k60]");
         }
     }
 }
