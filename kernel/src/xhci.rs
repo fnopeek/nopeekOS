@@ -243,6 +243,8 @@ struct XhciState {
     port_speed: u32,
     intr_ep_dci: u8,     // DCI of interrupt IN endpoint
     prev_keys: [u8; 6],  // previous HID report keys
+    repeat_key: u8,      // key currently held for repeat
+    repeat_count: u32,   // how many reports key has been held
     port_num: u32,       // connected port number
     error_count: u32,    // consecutive transfer errors
 }
@@ -456,7 +458,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         ep0_ring, ep0_cycle: 1, ep0_enqueue: 0,
         intr_ring, intr_cycle: 1, intr_enqueue: 0,
         data_buf, slot_id: 0, port_speed: 0,
-        intr_ep_dci: 0, prev_keys: [0; 6],
+        intr_ep_dci: 0, prev_keys: [0; 6], repeat_key: 0, repeat_count: 0,
         port_num: 0, error_count: 0,
     };
 
@@ -1081,7 +1083,7 @@ fn poll_events() {
             for i in 0..6 {
                 keys[i] = r8(buf, (2 + i) as u32);
             }
-            process_hid_report(modifiers, &keys, &state.prev_keys);
+            process_hid_report(modifiers, &keys, state);
             state.prev_keys = keys;
 
             // Re-schedule next transfer
@@ -1090,7 +1092,7 @@ fn poll_events() {
     }
 }
 
-fn process_hid_report(modifiers: u8, keys: &[u8; 6], prev_keys: &[u8; 6]) {
+fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
     let shift = (modifiers & 0x22) != 0;  // L/R Shift
     let _ctrl = (modifiers & 0x11) != 0;  // L/R Ctrl
     let alt_gr = (modifiers & 0x40) != 0; // Right Alt (AltGr)
@@ -1101,62 +1103,92 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], prev_keys: &[u8; 6]) {
         _ => true, // default de_CH
     };
 
+    // Key repeat: if same key is held across reports, generate repeat events.
+    // Initial delay ~500ms (15 reports @ ~30Hz), then ~100ms repeat (3 reports).
+    let held_key = keys.iter().find(|&&k| k != 0 && k != 1 && state.prev_keys.contains(&k));
+    if let Some(&key) = held_key {
+        if key == state.repeat_key {
+            state.repeat_count += 1;
+            // Initial delay: 15 reports, then repeat every 3 reports
+            if state.repeat_count >= 15 && (state.repeat_count - 15) % 3 == 0 {
+                // Re-emit the held key
+                let ch = hid_to_char(key, shift, alt_gr, is_de);
+                if ch != 0 {
+                    push_key(ch);
+                }
+            }
+        } else {
+            state.repeat_key = key;
+            state.repeat_count = 0;
+        }
+    } else {
+        state.repeat_key = 0;
+        state.repeat_count = 0;
+    }
+
     for &key in keys.iter() {
         if key == 0 || key == 1 { continue; } // no key / error rollover
         // Only process newly pressed keys
-        if prev_keys.contains(&key) { continue; }
+        if state.prev_keys.contains(&key) { continue; }
 
-        // AltGr: special characters (de_CH)
-        if alt_gr && is_de {
-            if let Some(ch) = altgr_char_de_hid(key) {
-                push_key(ch);
-                continue;
-            }
+        // Arrow keys and special multi-byte sequences
+        match key {
+            0x4F => { push_key(0x1B); push_key(b'['); push_key(b'C'); continue; } // Right
+            0x50 => { push_key(0x1B); push_key(b'['); push_key(b'D'); continue; } // Left
+            0x51 => { push_key(0x1B); push_key(b'['); push_key(b'B'); continue; } // Down
+            0x52 => { push_key(0x1B); push_key(b'['); push_key(b'A'); continue; } // Up
+            0x4A => { push_key(0x1B); push_key(b'['); push_key(b'H'); continue; } // Home
+            0x4D => { push_key(0x1B); push_key(b'['); push_key(b'F'); continue; } // End
+            0x4B => { push_key(0x1B); push_key(b'['); push_key(b'5'); continue; } // PgUp
+            0x4E => { push_key(0x1B); push_key(b'['); push_key(b'6'); continue; } // PgDn
+            _ => {}
         }
 
-        let ch = if (key as usize) < HID_TO_ASCII.len() {
-            if is_de {
-                if shift { HID_TO_ASCII_DE_SHIFT[key as usize] }
-                else { HID_TO_ASCII_DE[key as usize] }
-            } else {
-                if shift { HID_TO_ASCII_SHIFT[key as usize] }
-                else { HID_TO_ASCII[key as usize] }
-            }
-        } else {
-            // Numpad keys (HID usage 0x54-0x63)
-            match key {
-                0x54 => b'/',
-                0x55 => b'*',
-                0x56 => b'-',
-                0x57 => b'+',
-                0x58 => b'\n', // Numpad Enter
-                0x59 => b'1',
-                0x5A => b'2',
-                0x5B => b'3',
-                0x5C => b'4',
-                0x5D => b'5',
-                0x5E => b'6',
-                0x5F => b'7',
-                0x60 => b'8',
-                0x61 => b'9',
-                0x62 => b'0',
-                0x63 => b'.',
-                0x4C => 0x7F, // Delete
-                // Arrow keys → ANSI escape sequences (ESC [ A/B/C/D)
-                0x4F => { push_key(0x1B); push_key(b'['); push_key(b'C'); 0 } // Right
-                0x50 => { push_key(0x1B); push_key(b'['); push_key(b'D'); 0 } // Left
-                0x51 => { push_key(0x1B); push_key(b'['); push_key(b'B'); 0 } // Down
-                0x52 => { push_key(0x1B); push_key(b'['); push_key(b'A'); 0 } // Up
-                0x4A => { push_key(0x1B); push_key(b'['); push_key(b'H'); 0 } // Home
-                0x4D => { push_key(0x1B); push_key(b'['); push_key(b'F'); 0 } // End
-                0x4B => { push_key(0x1B); push_key(b'['); push_key(b'5'); 0 } // PgUp
-                0x4E => { push_key(0x1B); push_key(b'['); push_key(b'6'); 0 } // PgDn
-                _ => 0,
-            }
-        };
-
+        let ch = hid_to_char(key, shift, alt_gr, is_de);
         if ch != 0 {
             push_key(ch);
+        }
+    }
+}
+
+/// Convert HID keycode to ASCII character. Returns 0 for unhandled keys.
+fn hid_to_char(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> u8 {
+    // AltGr: special characters (de_CH)
+    if alt_gr && is_de {
+        if let Some(ch) = altgr_char_de_hid(key) {
+            return ch;
+        }
+    }
+
+    if (key as usize) < HID_TO_ASCII.len() {
+        if is_de {
+            if shift { HID_TO_ASCII_DE_SHIFT[key as usize] }
+            else { HID_TO_ASCII_DE[key as usize] }
+        } else {
+            if shift { HID_TO_ASCII_SHIFT[key as usize] }
+            else { HID_TO_ASCII[key as usize] }
+        }
+    } else {
+        match key {
+            0x54 => b'/',
+            0x55 => b'*',
+            0x56 => b'-',
+            0x57 => b'+',
+            0x58 => b'\n', // Numpad Enter
+            0x59 => b'1',
+            0x5A => b'2',
+            0x5B => b'3',
+            0x5C => b'4',
+            0x5D => b'5',
+            0x5E => b'6',
+            0x5F => b'7',
+            0x60 => b'8',
+            0x61 => b'9',
+            0x62 => b'0',
+            0x63 => b'.',
+            0x4C => 0x7F, // Delete
+            // Arrow keys are multi-byte — handled separately, not via repeat
+            _ => 0,
         }
     }
 }
