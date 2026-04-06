@@ -208,3 +208,39 @@ pub fn is_native() -> bool {
     let gpu = GPU.lock();
     matches!(&*gpu, GpuBackend::IntelXe(_))
 }
+
+/// Auto-incrementing GPU log counter.
+static GPU_LOG_SEQ: Mutex<u32> = Mutex::new(0);
+
+/// Generate a unique GPU log name: gpu-log-NNN-YYYY-MM-DD
+pub fn next_log_name() -> alloc::string::String {
+    let mut seq = GPU_LOG_SEQ.lock();
+    *seq += 1;
+    let n = *seq;
+
+    // Try RTC for date, fallback to seq-only
+    if let Some(unix) = crate::rtc::read_unix_time() {
+        // Convert unix timestamp to date
+        let days = unix / 86400;
+        let mut y = 1970u32;
+        let mut rem = days;
+        loop {
+            let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366u64 } else { 365 };
+            if rem < days_in_year { break; }
+            rem -= days_in_year;
+            y += 1;
+        }
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let mdays: [u64; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 0u32;
+        for md in &mdays {
+            if rem < *md { break; }
+            rem -= *md;
+            m += 1;
+        }
+        let d = rem as u32 + 1;
+        alloc::format!("gpu-log-{:03}-{:04}-{:02}-{:02}", n, y, m + 1, d)
+    } else {
+        alloc::format!("gpu-log-{:03}", n)
+    }
+}
