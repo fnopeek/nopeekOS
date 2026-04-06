@@ -45,8 +45,9 @@ npk> uptime                          # Time since boot
 npk> history                         # Last 32 commands (arrow up/down to recall)
 npk> lock                            # Lock system (clear keys)
 npk> passwd                          # Change passphrase
-npk> gpu init                          # Initialize Intel Xe GPU
-npk> gpu 4k                           # Switch to native 4K@30Hz
+npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
+npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
+npk> gpu 4k                           # Switch to 4K@30Hz
 npk> disk read 0                     # Raw sector hex dump
 ```
 
@@ -85,9 +86,9 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  │  OTA Updates                │  Drivers                   │
  │  ECDSA P-384 signed         │  virtio-blk, virtio-net    │
  │  SHA-256 verified           │  NVMe, I226-V, xHCI USB    │
- │  ESP FAT32 kernel write     │  Intel Xe GPU (4K display)  │
+ │  ESP FAT32 kernel write     │  Intel Xe GPU (4K@60Hz)     │
  ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, ~51000 lines)                │
+ │  Kernel Core (Rust, no_std, ~51k lines)                   │
  │  64GB Paging, Heap, IDT+PIC, ACPI, Framebuffer, Serial  │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
@@ -242,7 +243,10 @@ Every execution is a sandboxed WASM module:
 - [ ] Tiling window manager (Hyprland-inspired, framebuffer compositing)
 - [ ] USB mouse input (xHCI HID, multi-device support)
 - [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
-- [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@30Hz HDMI via DDI-B, DPLL1, combo PHY)
+- [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@60Hz HDMI 2.0 via DDI-B, DPLL1, combo PHY)
+- [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI→HDMI mode switch, auto-fallback to 4K@30)
+- [x] Write-Combining framebuffer (PAT MSR, ~5-10x faster blits)
+- [x] USB keyboard key repeat (timer-based, 500ms delay, 50ms rate)
 - [ ] Web rendering engine (long-term)
 
 ### Phase 9 -- AI Integration
@@ -275,7 +279,7 @@ Every execution is a sandboxed WASM module:
 | Bitmap Font | Spleen (8x16, 16x32, 32x64) | BSD 2-Clause, clean glyphs |
 | OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
-| GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@30Hz HDMI, GGTT aperture |
+| GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@60Hz HDMI 2.0, GGTT+WC aperture |
 | Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
 
 ---
@@ -359,6 +363,10 @@ nopeekOS/
 │       │   ├── system.rs        # status, time, help, caps, audit, halt, config, uname, reboot
 │       │   ├── update.rs        # OTA update (ECDSA P-384, SHA-256, ESP FAT32)
 │       │   └── auth.rs          # lock, passwd
+│       ├── gpu/                 # GPU subsystem
+│       │   ├── mod.rs           # Backend abstraction (GOP/Intel Xe)
+│       │   ├── intel_xe.rs      # Intel Xe Gen 12.2 display driver
+│       │   └── gop.rs           # UEFI GOP fallback
 │       ├── gui/                 # GUI subsystem
 │       │   ├── mod.rs           # Login screen, aurora background
 │       │   └── font.rs          # Spleen bitmap fonts (8x16, 16x32, 32x64)
@@ -400,7 +408,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] nvme: 465 GB (976773168 sectors)
 [npk] xhci: device on port 2
 [npk] xhci: USB keyboard (HID boot protocol)
-[npk] Intel Xe GPU: ADL-N (device 46d0), 4K@30Hz HDMI
+[npk] Intel Xe GPU: ADL-N (device 46d0), 4K@60Hz HDMI 2.0
 [npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
 [npk] DHCP: configured 192.168.1.100
