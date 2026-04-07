@@ -125,8 +125,8 @@ const DESC_DEVICE:        u16 = 0x0100;
 const DESC_CONFIG:        u16 = 0x0200;
 
 const NUM_CMD_TRBS: usize = 32;
-const NUM_EVT_TRBS: usize = 32;
-const NUM_TR_TRBS:  usize = 32;
+const NUM_EVT_TRBS: usize = 128;
+const NUM_TR_TRBS:  usize = 64;
 
 // HID usage code to ASCII table (boot protocol, US layout base)
 static HID_TO_ASCII: [u8; 57] = [
@@ -1567,8 +1567,8 @@ fn poll_events() {
         None => return,
     };
 
-    // Check event ring for completions
-    for _ in 0..8 {
+    // Check event ring for completions (drain all pending)
+    for _ in 0..NUM_EVT_TRBS {
         let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { break; }
 
