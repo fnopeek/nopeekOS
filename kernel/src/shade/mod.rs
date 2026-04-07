@@ -225,9 +225,13 @@ pub fn poll_render() {
                     let cw = win.content_w(border).saturating_sub(pad * 2);
                     let ch = win.content_h(border).saturating_sub(pad * 2);
 
-                    // Render text (per-line clearing, preserves transparent bg)
-                    terminal::render_to_window(shadow, info, cx, cy, cw, ch, scale, win.terminal_idx);
-                    framebuffer::blit_rect(fb, cx, cy, cw, ch);
+                    // Full window re-render (aurora+blend+text, preserves transparency)
+                    let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
+                    crate::gui::background::draw_aurora_region(shadow, info,
+                        win.x, win.y, win.width, win.height);
+                    compositor::Compositor::render_window(shadow, info, win,
+                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                    framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
                 }
             }
         }

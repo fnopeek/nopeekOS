@@ -272,8 +272,9 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 if pos > 0 {
                     pos -= 1;
                     kprint!("\x08 \x08");
+                    // Full re-render to clear old character pixel (restore transparent bg)
                     if crate::shade::is_active() {
-                        crate::shade::render_input_line();
+                        crate::shade::render_frame();
                     }
                 }
             }
