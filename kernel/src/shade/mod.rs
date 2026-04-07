@@ -236,8 +236,6 @@ pub fn poll_render() {
 
                     // Full window re-render (aurora+blend+text, preserves transparency)
                     let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
-                    crate::gui::background::draw_aurora_region(shadow, info,
-                        win.x, win.y, win.width, win.height);
                     compositor::Compositor::render_window(shadow, info, win,
                         comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);

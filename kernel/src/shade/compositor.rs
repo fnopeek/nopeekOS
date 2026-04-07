@@ -320,27 +320,30 @@ impl Compositor {
             win.terminal_idx)
     }
 
-    /// Render a single window: rounded border + semi-transparent bg + terminal text.
+    /// Render a single window: aurora overwrite + border blend + content blend + text.
     pub(crate) fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
                      border_color: u32) {
-        let cx = win.content_x(border);
-        let cy = win.content_y(border);
-        let cw = win.content_w(border);
-        let ch = win.content_h(border);
+        // 1. FULL OVERWRITE: aurora kills all old pixels (fixes ghost text)
+        background::draw_aurora_region(shadow, info,
+            win.x, win.y, win.width, win.height);
 
-        // 1. Thin border: blend border_color at moderate opacity (subtle, not dominant)
+        // 2. Border blend (on clean aurora)
         render::fill_rounded_rect_blend(shadow, info,
             win.x, win.y, win.width, win.height,
             border_color, rounding, 180);
 
-        // 2. Content area (darker bg, blends on top)
+        // 3. Content blend (on clean border blend)
+        let cx = win.content_x(border);
+        let cy = win.content_y(border);
+        let cw = win.content_w(border);
+        let ch = win.content_h(border);
         let inner_r = rounding.saturating_sub(border);
         render::fill_rounded_rect_blend(shadow, info,
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
 
-        // 3. Terminal text (each window has its own buffer)
+        // 4. Text on clean background
         let pad = 6 * scale;
         terminal::render_to_window(shadow, info,
             cx + pad, cy + pad,
@@ -370,7 +373,6 @@ impl Compositor {
 
             if needs_render {
                 if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
-                    background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
                     let border_color = if win.focused { self.border_active } else { self.border_inactive };
                     Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
                     regions.push((win.x, win.y, win.width, win.height));
