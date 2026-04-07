@@ -170,6 +170,11 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
 
+        // Poll USB mouse events
+        while let Some(evt) = crate::xhci::poll_mouse() {
+            crate::shade::handle_mouse(&evt);
+        }
+
         // Check for shade compositor actions (Mod+key)
         if let Some(action) = crate::shade::input::poll_action() {
             use crate::shade::input::ShadeAction;
