@@ -757,11 +757,13 @@ pub fn init_mouse() -> bool {
 
 fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
     // Reset port
+    kprintln!("[npk] xhci: mouse: resetting port {}...", port + 1);
     if !reset_port(state, port) {
         kprintln!("[npk] xhci: mouse port reset failed");
         return false;
     }
     let port_speed = (r32(state.oper, portsc_off(port)) >> 10) & 0xF;
+    kprintln!("[npk] xhci: mouse: port {} reset ok, speed={}", port + 1, port_speed);
     state.mouse_port_speed = port_speed;
     state.mouse_port_num = port;
 
@@ -773,10 +775,19 @@ fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
     let saved_dev_ctx = state.device_ctx;
     let saved_port_speed = state.port_speed;
 
-    // Switch to mouse EP0 context
+    // Clear mouse EP0 ring + device context (may have stale data from keyboard probe)
+    // SAFETY: zeroing DMA memory
+    unsafe {
+        core::ptr::write_bytes(state.mouse_ep0_ring as *mut u8, 0, 4096);
+        core::ptr::write_bytes(state.mouse_device_ctx as *mut u8, 0, 4096);
+    }
+    write_trb(state.mouse_ep0_ring, NUM_TR_TRBS - 1, state.mouse_ep0_ring, 0,
+        TRB_LINK | TRB_CYCLE | (1 << 1));
+
+    // Switch to mouse EP0 context (fresh state)
     state.ep0_ring = state.mouse_ep0_ring;
-    state.ep0_cycle = state.mouse_ep0_cycle;
-    state.ep0_enqueue = state.mouse_ep0_enqueue;
+    state.ep0_cycle = 1;
+    state.ep0_enqueue = 0;
     state.device_ctx = state.mouse_device_ctx;
     state.port_speed = port_speed;
 
@@ -799,12 +810,14 @@ fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
 
 fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
     // Enable Slot for mouse
+    kprintln!("[npk] xhci: mouse: enable slot...");
     let slot_id = match cmd_enable_slot(state) {
         Some(s) => s,
         None => { kprintln!("[npk] xhci: mouse enable slot failed"); return false; }
     };
     state.slot_id = slot_id;
     state.mouse_slot_id = slot_id;
+    kprintln!("[npk] xhci: mouse: slot {} assigned", slot_id);
 
     // Set DCBAA entry for mouse slot
     // SAFETY: writing to DMA array
@@ -823,12 +836,15 @@ fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
         SPEED_SUPER => 512,
         _ => 64,
     };
+    kprintln!("[npk] xhci: mouse: addressing device (maxpkt={})...", max_packet);
     if !cmd_address_device(state, port, max_packet) {
         kprintln!("[npk] xhci: mouse address device failed");
         return false;
     }
+    kprintln!("[npk] xhci: mouse: device addressed");
 
     // Get Configuration Descriptor (9 bytes first)
+    kprintln!("[npk] xhci: mouse: getting config descriptor...");
     if !usb_get_descriptor(state, DESC_CONFIG, 9) {
         kprintln!("[npk] xhci: mouse get config desc failed");
         return false;
