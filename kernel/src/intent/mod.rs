@@ -296,8 +296,8 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 if pos < buf.len() {
                     buf[pos] = b;
                     pos += 1;
+                    crate::shade::terminal::scroll_reset(); // Back to bottom on input
                     kprint!("{}", b as char);
-                    // Fast: only re-render the current input line (not full window)
                     if crate::shade::is_active() {
                         crate::shade::render_input_line();
                     }

@@ -183,6 +183,14 @@ pub fn handle_action(action: input::ShadeAction) {
             });
             render_frame();
         }
+        ShadeAction::ScrollUp => {
+            terminal::scroll_up(10);
+            render_frame();
+        }
+        ShadeAction::ScrollDown => {
+            terminal::scroll_down(10);
+            render_frame();
+        }
         ShadeAction::Lock => {
             // Lock handled by intent loop
         }

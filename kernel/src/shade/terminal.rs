@@ -6,7 +6,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// Maximum lines and columns in each terminal buffer.
-const MAX_LINES: usize = 200;
+const MAX_LINES: usize = 1000;
 const MAX_COLS: usize = 256;
 /// Maximum number of independent terminal sessions.
 const MAX_TERMINALS: usize = 8;
@@ -19,6 +19,8 @@ pub struct TerminalBuffer {
     total: usize,
     /// Current cursor column.
     col: usize,
+    /// View scroll offset (lines from bottom, 0 = latest).
+    pub scroll_offset: usize,
     /// Whether this slot is in use.
     pub in_use: bool,
 }
@@ -30,6 +32,7 @@ impl TerminalBuffer {
             lens: [0; MAX_LINES],
             total: 0,
             col: 0,
+            scroll_offset: 0,
             in_use: false,
         }
     }
@@ -83,6 +86,7 @@ impl TerminalBuffer {
         self.lens = [0; MAX_LINES];
         self.total = 0;
         self.col = 0;
+        self.scroll_offset = 0;
     }
 
     /// Get visible lines for rendering.
@@ -269,7 +273,16 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Draw text directly on transparent background (no fill)
+    // Restore input line background (aurora + blend for just 1 line = fast, ~2ms)
+    crate::gui::background::draw_aurora_region(shadow, info,
+        win_cx, last_line_y, win_cw, char_h);
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_cx, last_line_y, win_cw, char_h,
+        crate::gui::background::accent_color(), 0, 180);
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_cx, last_line_y, win_cw, char_h,
+        bg_color, 0, opacity);
+
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
     if visible_len > 0 {
@@ -285,6 +298,35 @@ pub fn render_input_line(
     }
 
     Some((win_cx, last_line_y, win_cw, char_h))
+}
+
+/// Scroll the active terminal up (show older content).
+pub fn scroll_up(lines: usize) {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return; }
+    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+    let term = &mut terms[idx];
+    let max_scroll = term.total.saturating_sub(10); // Don't scroll past beginning
+    term.scroll_offset = (term.scroll_offset + lines).min(max_scroll);
+    DIRTY.store(true, Ordering::Release);
+}
+
+/// Scroll the active terminal down (show newer content).
+pub fn scroll_down(lines: usize) {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return; }
+    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+    let term = &mut terms[idx];
+    term.scroll_offset = term.scroll_offset.saturating_sub(lines);
+    DIRTY.store(true, Ordering::Release);
+}
+
+/// Reset scroll to bottom (show latest content).
+pub fn scroll_reset() {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return; }
+    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+    terms[idx].scroll_offset = 0;
 }
 
 /// Save the current input buffer to the active terminal's saved state.
