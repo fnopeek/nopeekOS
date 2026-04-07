@@ -58,7 +58,7 @@ impl Compositor {
             .unwrap_or(8) * scale;
         let border = crate::config::get("shade.border")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(2) * scale;
+            .unwrap_or(1) * scale;
         let border_active = crate::config::get("shade.border_active")
             .and_then(|s| parse_hex_color(&s))
             .unwrap_or_else(|| background::accent_color());
@@ -70,7 +70,7 @@ impl Compositor {
             .unwrap_or(10) * scale;
         let opacity = crate::config::get("shade.opacity")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(200);
+            .unwrap_or(160);
 
         Compositor {
             screen_w,
@@ -329,10 +329,10 @@ impl Compositor {
         let cw = win.content_w(border);
         let ch = win.content_h(border);
 
-        // 1. Semi-transparent rounded window (border color, blends with aurora)
+        // 1. Thin border: blend border_color at moderate opacity (subtle, not dominant)
         render::fill_rounded_rect_blend(shadow, info,
             win.x, win.y, win.width, win.height,
-            border_color, rounding, 230);
+            border_color, rounding, 180);
 
         // 2. Content area (darker bg, blends on top)
         let inner_r = rounding.saturating_sub(border);
