@@ -416,6 +416,46 @@ impl Compositor {
         }
     }
 
+    /// Focus the nearest window in the given direction from the focused window.
+    pub fn focus_direction(&mut self, dx: i32, dy: i32) {
+        let fid = match self.focused { Some(id) => id, None => return };
+        let focused = match self.windows.iter().find(|w| w.id == fid) {
+            Some(w) => (w.x as i32 + w.width as i32 / 2, w.y as i32 + w.height as i32 / 2),
+            None => return,
+        };
+
+        let mut best: Option<(WindowId, i32)> = None;
+
+        for win in &self.windows {
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible { continue; }
+
+            let cx = win.x as i32 + win.width as i32 / 2;
+            let cy = win.y as i32 + win.height as i32 / 2;
+            let rel_x = cx - focused.0;
+            let rel_y = cy - focused.1;
+
+            // Check if this window is in the right direction
+            let in_direction = match (dx, dy) {
+                (1, 0) => rel_x > 0,   // Right
+                (-1, 0) => rel_x < 0,  // Left
+                (0, 1) => rel_y > 0,   // Down
+                (0, -1) => rel_y < 0,  // Up
+                _ => false,
+            };
+            if !in_direction { continue; }
+
+            // Distance (Manhattan for simplicity)
+            let dist = rel_x.abs() + rel_y.abs();
+            if best.is_none() || dist < best.unwrap().1 {
+                best = Some((win.id, dist));
+            }
+        }
+
+        if let Some((target_id, _)) = best {
+            self.focus_window(target_id);
+        }
+    }
+
     /// Focus next window on active workspace (cycle).
     pub fn focus_next(&mut self) {
         let ws_windows: Vec<WindowId> = self.z_order.iter()

@@ -25,9 +25,11 @@ pub enum ShadeAction {
     Workspace(u8),
     /// Mod+Shift+1..4: move window to workspace
     MoveToWorkspace(u8),
-    /// Mod+Right/Left: cycle focus
-    FocusNext,
-    FocusPrev,
+    /// Mod+Arrow: spatial focus (find window in direction)
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
     /// Mod+L: lock
     Lock,
 }
@@ -108,8 +110,10 @@ pub fn try_arrow_keybind(direction: u8) -> bool {
     if !crate::shade::is_active() { return false; }
 
     match direction {
-        b'A' | b'C' => { push_action(ShadeAction::FocusNext); true }  // Up/Right
-        b'B' | b'D' => { push_action(ShadeAction::FocusPrev); true }  // Down/Left
+        b'A' => { push_action(ShadeAction::FocusUp); true }
+        b'B' => { push_action(ShadeAction::FocusDown); true }
+        b'C' => { push_action(ShadeAction::FocusRight); true }
+        b'D' => { push_action(ShadeAction::FocusLeft); true }
         _ => false,
     }
 }

@@ -173,7 +173,8 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         if let Some(action) = crate::shade::input::poll_action() {
             use crate::shade::input::ShadeAction;
             match action {
-                ShadeAction::FocusNext | ShadeAction::FocusPrev |
+                ShadeAction::FocusLeft | ShadeAction::FocusRight |
+                ShadeAction::FocusUp | ShadeAction::FocusDown |
                 ShadeAction::Workspace(_) | ShadeAction::MoveToWorkspace(_) => {
                     // Save current input to old terminal
                     crate::shade::terminal::save_input(&buf[..pos], pos);
