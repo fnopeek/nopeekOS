@@ -25,6 +25,8 @@ pub fn poll() {
         }
     }
     tcp::tick_connections();
+    // Progressive shade render (shows output during long network operations)
+    crate::shade::poll_render();
 }
 
 /// Network stack statistics
