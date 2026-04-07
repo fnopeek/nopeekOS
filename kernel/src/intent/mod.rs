@@ -188,6 +188,8 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             match action {
                 ShadeAction::FocusLeft | ShadeAction::FocusRight |
                 ShadeAction::FocusUp | ShadeAction::FocusDown |
+                ShadeAction::SwapLeft | ShadeAction::SwapRight |
+                ShadeAction::SwapUp | ShadeAction::SwapDown |
                 ShadeAction::Workspace(_) | ShadeAction::MoveToWorkspace(_) => {
                     // Save current input to old terminal
                     crate::shade::terminal::save_input(&buf[..pos], pos);

@@ -566,6 +566,39 @@ impl Compositor {
         evt.dx != 0 || evt.dy != 0
     }
 
+    /// Swap focused window with the nearest window in the given direction.
+    pub fn swap_direction(&mut self, dx: i32, dy: i32) {
+        let fid = match self.focused { Some(id) => id, None => return };
+        let focused = match self.windows.iter().find(|w| w.id == fid) {
+            Some(w) => (w.x as i32 + w.width as i32 / 2, w.y as i32 + w.height as i32 / 2),
+            None => return,
+        };
+
+        // Find nearest window in direction (same logic as focus_direction)
+        let mut best: Option<(WindowId, i32)> = None;
+        for win in &self.windows {
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible { continue; }
+            let cx = win.x as i32 + win.width as i32 / 2;
+            let cy = win.y as i32 + win.height as i32 / 2;
+            let rel_x = cx - focused.0;
+            let rel_y = cy - focused.1;
+            let in_direction = match (dx, dy) {
+                (1, 0) => rel_x > 0, (-1, 0) => rel_x < 0,
+                (0, 1) => rel_y > 0, (0, -1) => rel_y < 0,
+                _ => false,
+            };
+            if !in_direction { continue; }
+            let dist = rel_x.abs() + rel_y.abs();
+            if best.is_none() || dist < best.unwrap().1 {
+                best = Some((win.id, dist));
+            }
+        }
+
+        if let Some((target_id, _)) = best {
+            self.swap_window_order(fid, target_id);
+        }
+    }
+
     /// Swap two windows in the tiling order. Retile assigns new positions.
     fn swap_window_order(&mut self, a: WindowId, b: WindowId) {
         let a_idx = self.windows.iter().position(|w| w.id == a);
