@@ -214,7 +214,7 @@ pub fn intent_shade(args: &str) {
                 crate::shade::init();
             }
             crate::shade::with_compositor(|comp| {
-                comp.create_window("terminal", 0, 0, 800, 600);
+                comp.create_window("loop", 0, 0, 800, 600);
                 let id2 = comp.create_window("editor", 0, 0, 800, 600);
                 let id3 = comp.create_window("status", 0, 0, 800, 300);
 
