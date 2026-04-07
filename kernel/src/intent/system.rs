@@ -206,15 +206,8 @@ pub fn intent_shade(args: &str) {
                 return;
             }
             crate::shade::init();
-            // Create a demo terminal window
             crate::shade::with_compositor(|comp| {
-                let id = comp.create_window("terminal", 0, 0, 800, 600);
-                // Fill with dark background
-                if let Some(win) = comp.window_mut(id) {
-                    win.clear(0x00101018);
-                    // Draw a simple prompt text
-                    // (Content will be rendered by WASM modules in the future)
-                }
+                comp.create_window("terminal", 0, 0, 800, 600);
             });
             crate::shade::render_frame();
             kprintln!("[npk] shade: compositor active");
@@ -223,18 +216,17 @@ pub fn intent_shade(args: &str) {
             if !crate::shade::is_active() {
                 crate::shade::init();
             }
-            // Create demo windows to show tiling
             crate::shade::with_compositor(|comp| {
-                let _id1 = comp.create_window("terminal", 0, 0, 800, 600);
+                comp.create_window("terminal", 0, 0, 800, 600);
                 let id2 = comp.create_window("editor", 0, 0, 800, 600);
                 let id3 = comp.create_window("status", 0, 0, 800, 300);
 
                 // Color the windows differently
                 if let Some(win) = comp.window_mut(id2) {
-                    win.clear(0x00180820);
+                    win.bg_color = 0x00180820;
                 }
                 if let Some(win) = comp.window_mut(id3) {
-                    win.clear(0x00081820);
+                    win.bg_color = 0x00081820;
                 }
             });
             crate::shade::render_frame();
