@@ -280,11 +280,9 @@ impl Compositor {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                 if win.workspace != self.active_workspace || !win.visible { continue; }
 
-                // Restore aurora under window area, then draw window on top
-                background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
-
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
-                    if win.focused { self.border_active } else { self.border_inactive });
+                    if win.focused { self.border_active } else { self.border_inactive },
+                    win.focused);
             }
         }
 
@@ -310,7 +308,7 @@ impl Compositor {
 
         // Restore aurora, re-render window (content changed)
         background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
-        Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
+        Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color, true);
 
         Some((win.x, win.y, win.width, win.height))
     }
@@ -318,44 +316,34 @@ impl Compositor {
     /// Render a single window: rounded border + semi-transparent bg + terminal text.
     fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
-                     border_color: u32) {
-        // Content area dimensions
+                     border_color: u32, is_focused: bool) {
         let cx = win.content_x(border);
         let cy = win.content_y(border);
         let cw = win.content_w(border);
         let ch = win.content_h(border);
         let inner_r = rounding.saturating_sub(border);
 
-        // 1. Semi-transparent content area (blends directly with aurora)
+        // 1. Opaque rounded border (AA corners, covers aurora in window area)
+        render::fill_rounded_rect_aa(shadow, info,
+            win.x, win.y, win.width, win.height,
+            border_color, rounding);
+
+        // 2. Restore aurora inside content area for true transparency
+        background::draw_aurora_region(shadow, info, cx, cy, cw, ch);
+
+        // 3. Semi-transparent content bg (blends with restored aurora)
         render::fill_rounded_rect_blend(shadow, info,
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
 
-        // 2. Border as rounded outline: draw outer rounded rect only in border strip
-        //    Top strip
-        render::fill_rounded_rect_blend(shadow, info,
-            win.x, win.y, win.width, border,
-            border_color, rounding, 240);
-        //    Bottom strip
-        render::fill_rounded_rect_blend(shadow, info,
-            win.x, win.y + win.height - border, win.width, border,
-            border_color, rounding, 240);
-        //    Left strip (between top and bottom)
-        render::fill_rect(shadow, info,
-            win.x, win.y + border, border, win.height.saturating_sub(border * 2),
-            border_color);
-        //    Right strip
-        render::fill_rect(shadow, info,
-            win.x + win.width - border, win.y + border,
-            border, win.height.saturating_sub(border * 2),
-            border_color);
-
-        // 3. Render terminal text content inside the window
-        let pad = 6 * scale;
-        terminal::render_to_window(shadow, info,
-            cx + pad, cy + pad,
-            cw.saturating_sub(pad * 2), ch.saturating_sub(pad * 2),
-            scale);
+        // 4. Terminal text only in focused window
+        if is_focused {
+            let pad = 6 * scale;
+            terminal::render_to_window(shadow, info,
+                cx + pad, cy + pad,
+                cw.saturating_sub(pad * 2), ch.saturating_sub(pad * 2),
+                scale);
+        }
     }
 
     /// Render only changed regions. Returns list of (x, y, w, h) to blit.
@@ -382,7 +370,7 @@ impl Compositor {
                 if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                     background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
                     let border_color = if win.focused { self.border_active } else { self.border_inactive };
-                    Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
+                    Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color, win.focused);
                     regions.push((win.x, win.y, win.width, win.height));
                 }
             }
