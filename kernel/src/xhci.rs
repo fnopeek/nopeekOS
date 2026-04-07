@@ -1670,10 +1670,10 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         // Mod+special keys: push shade actions directly (avoids ESC sequence race)
         if super_held && crate::shade::is_active() {
             let handled = match key {
-                0x4F => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusRight); true }
-                0x50 => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusLeft); true }
-                0x51 => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusDown); true }
-                0x52 => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusUp); true }
+                0x4F => { crate::shade::input::push_action_direct(if shift { crate::shade::input::ShadeAction::SwapRight } else { crate::shade::input::ShadeAction::FocusRight }); true }
+                0x50 => { crate::shade::input::push_action_direct(if shift { crate::shade::input::ShadeAction::SwapLeft } else { crate::shade::input::ShadeAction::FocusLeft }); true }
+                0x51 => { crate::shade::input::push_action_direct(if shift { crate::shade::input::ShadeAction::SwapDown } else { crate::shade::input::ShadeAction::FocusDown }); true }
+                0x52 => { crate::shade::input::push_action_direct(if shift { crate::shade::input::ShadeAction::SwapUp } else { crate::shade::input::ShadeAction::FocusUp }); true }
                 0x4B => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::ScrollUp); true }
                 0x4E => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::ScrollDown); true }
                 _ => false,
