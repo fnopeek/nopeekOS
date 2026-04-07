@@ -52,6 +52,11 @@ fn is_mod_held() -> bool {
     }
 }
 
+/// Push a pending action (public for xHCI direct dispatch).
+pub fn push_action_direct(action: ShadeAction) {
+    push_action(action);
+}
+
 /// Push a pending action.
 fn push_action(action: ShadeAction) {
     // SAFETY: single-core, no preemption

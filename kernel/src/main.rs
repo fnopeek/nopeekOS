@@ -333,17 +333,15 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // Start npk-shell listener (encrypted remote access, port 4444)
     shell::start_listener();
 
+    // Suppress framebuffer output before shade takes over (no flash)
+    if framebuffer::is_available() {
+        framebuffer::set_gui_mode(true);
+    }
+
     kprintln!("[npk] Starting Intent Loop...");
-    vga::show_status(b"Intent Loop running");
-    vga::show_ready();
+    kprintln!("[npk] System ready. Express your intent.");
 
-    kprintln!();
-    kprintln!("[npk] ====================================");
-    kprintln!("[npk]  System ready. Express your intent.");
-    kprintln!("[npk] ====================================");
-    kprintln!();
-
-    // Start shade compositor AFTER boot messages (so they stay on serial only)
+    // Start shade compositor
     if framebuffer::is_available() {
         shade::init();
         shade::render_frame();
