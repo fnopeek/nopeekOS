@@ -1161,7 +1161,21 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         // Only process newly pressed keys
         if state.prev_keys.contains(&key) { continue; }
 
-        // Arrow keys and special multi-byte sequences
+        // Mod+special keys: push shade actions directly (avoids ESC sequence race)
+        if super_held && crate::shade::is_active() {
+            let handled = match key {
+                0x4F => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusRight); true }
+                0x50 => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusLeft); true }
+                0x51 => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusDown); true }
+                0x52 => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::FocusUp); true }
+                0x4B => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::ScrollUp); true }
+                0x4E => { crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::ScrollDown); true }
+                _ => false,
+            };
+            if handled { continue; }
+        }
+
+        // Arrow keys and special multi-byte sequences (when mod NOT held)
         match key {
             0x4F => { push_key(0x1B); push_key(b'['); push_key(b'C'); continue; } // Right
             0x50 => { push_key(0x1B); push_key(b'['); push_key(b'D'); continue; } // Left
