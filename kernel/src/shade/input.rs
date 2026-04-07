@@ -108,8 +108,8 @@ pub fn try_arrow_keybind(direction: u8) -> bool {
     if !crate::shade::is_active() { return false; }
 
     match direction {
-        b'C' => { push_action(ShadeAction::FocusNext); true }
-        b'D' => { push_action(ShadeAction::FocusPrev); true }
+        b'A' | b'C' => { push_action(ShadeAction::FocusNext); true }  // Up/Right
+        b'B' | b'D' => { push_action(ShadeAction::FocusPrev); true }  // Down/Left
         _ => false,
     }
 }

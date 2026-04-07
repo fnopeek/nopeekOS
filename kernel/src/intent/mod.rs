@@ -274,6 +274,10 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     buf[pos] = b;
                     pos += 1;
                     kprint!("{}", b as char);
+                    // Live typing: re-render focused window to show input
+                    if crate::shade::is_active() {
+                        crate::shade::render_terminal_update();
+                    }
                 }
             }
             _ => {}
@@ -674,8 +678,14 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
 
         "clear" | "cls" => {
-            crate::framebuffer::clear();
-            // ANSI clear only to serial (framebuffer doesn't interpret escape codes)
+            if crate::shade::is_active() {
+                // Shade mode: clear terminal buffer and re-render focused window
+                crate::shade::terminal::clear();
+                crate::shade::render_terminal_update();
+            } else {
+                crate::framebuffer::clear();
+            }
+            // ANSI clear to serial
             let serial = crate::serial::SERIAL.lock();
             for &b in b"\x1B[2J\x1B[H" {
                 serial.write_byte(b);
