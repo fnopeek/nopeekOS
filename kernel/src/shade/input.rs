@@ -30,6 +30,9 @@ pub enum ShadeAction {
     FocusRight,
     FocusUp,
     FocusDown,
+    /// Mod+PageUp/PageDown: scroll terminal
+    ScrollUp,
+    ScrollDown,
     /// Mod+L: lock
     Lock,
 }
@@ -114,6 +117,8 @@ pub fn try_arrow_keybind(direction: u8) -> bool {
         b'B' => { push_action(ShadeAction::FocusDown); true }
         b'C' => { push_action(ShadeAction::FocusRight); true }
         b'D' => { push_action(ShadeAction::FocusLeft); true }
+        b'5' => { push_action(ShadeAction::ScrollUp); true }   // PageUp
+        b'6' => { push_action(ShadeAction::ScrollDown); true } // PageDown
         _ => false,
     }
 }
