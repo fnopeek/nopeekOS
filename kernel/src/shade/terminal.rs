@@ -110,6 +110,17 @@ pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
+/// Clear the terminal buffer.
+pub fn clear() {
+    if !is_active() { return; }
+    let term = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL) };
+    term.lines = [[0; MAX_COLS]; MAX_LINES];
+    term.lens = [0; MAX_LINES];
+    term.total = 0;
+    term.col = 0;
+    term.scroll_offset = 0;
+}
+
 /// Write a string to the shade terminal buffer (called from serial::write_str).
 pub fn write(s: &str) {
     if !is_active() { return; }

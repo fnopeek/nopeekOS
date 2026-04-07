@@ -2,7 +2,7 @@
 //!
 //! No per-window pixel buffers. Windows are metadata (position, size, state).
 //! The compositor renders directly to the framebuffer shadow buffer.
-//! This is memory-efficient and matches the tiling paradigm (no overlap).
+//! Uses dwindle layout (Hyprland-style recursive binary split).
 
 use alloc::vec::Vec;
 use crate::framebuffer::FbInfo;
@@ -44,8 +44,10 @@ pub struct Compositor {
     pub rounding: u32,
     /// Window background opacity (0=transparent, 256=opaque).
     pub opacity: u32,
-    /// Full redraw needed.
+    /// Full redraw needed (including aurora background).
     pub needs_full_redraw: bool,
+    /// Aurora background has been drawn (skip on partial updates).
+    aurora_drawn: bool,
 }
 
 #[allow(dead_code)]
@@ -87,6 +89,7 @@ impl Compositor {
             rounding,
             opacity,
             needs_full_redraw: true,
+            aurora_drawn: false,
         }
     }
 
@@ -108,7 +111,7 @@ impl Compositor {
         win.workspace = self.active_workspace;
 
         self.windows.push(win);
-        self.z_order.insert(0, id); // New window on top
+        self.z_order.insert(0, id);
         self.focus_window(id);
         self.retile();
         self.needs_full_redraw = true;
@@ -141,11 +144,9 @@ impl Compositor {
         self.focused = Some(id);
         self.set_focused_flag(id);
 
-        // Move to front of Z-order
         self.z_order.retain(|&wid| wid != id);
         self.z_order.insert(0, id);
 
-        // Update bar title
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             self.bar.set_title(&win.title);
         }
@@ -188,8 +189,8 @@ impl Compositor {
         }
     }
 
-    /// Recalculate tiled window positions for the active workspace.
-    /// Master-stack layout: first window gets left half, rest stack on right.
+    /// Dwindle tiling: recursively split space in half for each window.
+    /// 1 window = full area. 2 = left/right split. 3 = left + right split top/bottom. etc.
     pub fn retile(&mut self) {
         let (area_x, area_y, area_w, area_h) = self.workspace_area();
 
@@ -203,47 +204,72 @@ impl Compositor {
         if tiled.is_empty() { return; }
 
         let gap = self.gaps;
-        let n = tiled.len();
+        self.dwindle_layout(&tiled, area_x, area_y, area_w, area_h, gap, true);
+    }
 
-        if n == 1 {
+    /// Recursive dwindle: assign position to first window, recurse for rest.
+    fn dwindle_layout(&mut self, ids: &[WindowId],
+                      x: u32, y: u32, w: u32, h: u32,
+                      gap: u32, split_horizontal: bool) {
+        if ids.is_empty() { return; }
+
+        if ids.len() == 1 {
             for win in &mut self.windows {
-                if win.id == tiled[0] {
-                    win.x = area_x;
-                    win.y = area_y;
-                    win.width = area_w;
-                    win.height = area_h;
+                if win.id == ids[0] {
+                    win.x = x;
+                    win.y = y;
+                    win.width = w;
+                    win.height = h;
                     win.dirty = true;
                     break;
                 }
             }
-        } else {
-            let master_w = (area_w - gap) / 2;
-            let stack_w = area_w - master_w - gap;
-            let stack_count = n - 1;
-            let stack_h = (area_h - gap * (stack_count as u32 - 1)) / stack_count as u32;
+            return;
+        }
 
+        // Split: first window takes one half, rest take the other half
+        if split_horizontal {
+            let left_w = (w.saturating_sub(gap)) / 2;
+            let right_w = w.saturating_sub(left_w + gap);
+            // First window: left half
             for win in &mut self.windows {
-                if win.id == tiled[0] {
-                    win.x = area_x;
-                    win.y = area_y;
-                    win.width = master_w;
-                    win.height = area_h;
+                if win.id == ids[0] {
+                    win.x = x;
+                    win.y = y;
+                    win.width = left_w;
+                    win.height = h;
                     win.dirty = true;
-                } else if let Some(si) = tiled[1..].iter().position(|&t| t == win.id) {
-                    win.x = area_x + master_w + gap;
-                    win.y = area_y + si as u32 * (stack_h + gap);
-                    win.width = stack_w;
-                    win.height = stack_h;
-                    win.dirty = true;
+                    break;
                 }
             }
+            // Rest: right half, split vertically next time
+            self.dwindle_layout(&ids[1..], x + left_w + gap, y, right_w, h, gap, false);
+        } else {
+            let top_h = (h.saturating_sub(gap)) / 2;
+            let bottom_h = h.saturating_sub(top_h + gap);
+            // First window: top half
+            for win in &mut self.windows {
+                if win.id == ids[0] {
+                    win.x = x;
+                    win.y = y;
+                    win.width = w;
+                    win.height = top_h;
+                    win.dirty = true;
+                    break;
+                }
+            }
+            // Rest: bottom half, split horizontally next time
+            self.dwindle_layout(&ids[1..], x, y + top_h + gap, w, bottom_h, gap, true);
         }
     }
 
     /// Render the full compositor scene to the shadow buffer.
     pub fn render(&mut self, shadow: *mut u8, info: &FbInfo) {
-        // Background (aurora)
-        background::draw_aurora(shadow, info);
+        // Only redraw aurora when needed (expensive at 4K)
+        if !self.aurora_drawn || self.needs_full_redraw {
+            background::draw_aurora(shadow, info);
+            self.aurora_drawn = true;
+        }
 
         // Render windows (back to front)
         let border = self.border;
@@ -253,6 +279,10 @@ impl Compositor {
         for &wid in self.z_order.iter().rev() {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                 if win.workspace != self.active_workspace || !win.visible { continue; }
+
+                // Restore aurora under window area, then draw window on top
+                background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
+
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
                     if win.focused { self.border_active } else { self.border_inactive });
             }
@@ -267,26 +297,60 @@ impl Compositor {
         self.needs_full_redraw = false;
     }
 
+    /// Render only the focused window's content (fast path for typing).
+    pub fn render_focused_content(&self, shadow: *mut u8, info: &FbInfo) -> Option<(u32, u32, u32, u32)> {
+        let fid = self.focused?;
+        let win = self.windows.iter().find(|w| w.id == fid && w.workspace == self.active_workspace)?;
+
+        let border = self.border;
+        let rounding = self.rounding;
+        let opacity = self.opacity;
+        let scale = self.scale;
+        let border_color = self.border_active;
+
+        // Restore aurora, re-render window (content changed)
+        background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
+        Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
+
+        Some((win.x, win.y, win.width, win.height))
+    }
+
     /// Render a single window: rounded border + semi-transparent bg + terminal text.
     fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
                      border_color: u32) {
-        // Rounded border
-        render::fill_rounded_rect_aa(shadow, info,
-            win.x, win.y, win.width, win.height,
-            border_color, rounding);
-
-        // Semi-transparent content area (blends with aurora underneath)
+        // Content area dimensions
         let cx = win.content_x(border);
         let cy = win.content_y(border);
         let cw = win.content_w(border);
         let ch = win.content_h(border);
         let inner_r = rounding.saturating_sub(border);
+
+        // 1. Semi-transparent content area (blends directly with aurora)
         render::fill_rounded_rect_blend(shadow, info,
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
 
-        // Render terminal text content inside the window
+        // 2. Border as rounded outline: draw outer rounded rect only in border strip
+        //    Top strip
+        render::fill_rounded_rect_blend(shadow, info,
+            win.x, win.y, win.width, border,
+            border_color, rounding, 240);
+        //    Bottom strip
+        render::fill_rounded_rect_blend(shadow, info,
+            win.x, win.y + win.height - border, win.width, border,
+            border_color, rounding, 240);
+        //    Left strip (between top and bottom)
+        render::fill_rect(shadow, info,
+            win.x, win.y + border, border, win.height.saturating_sub(border * 2),
+            border_color);
+        //    Right strip
+        render::fill_rect(shadow, info,
+            win.x + win.width - border, win.y + border,
+            border, win.height.saturating_sub(border * 2),
+            border_color);
+
+        // 3. Render terminal text content inside the window
         let pad = 6 * scale;
         terminal::render_to_window(shadow, info,
             cx + pad, cy + pad,
