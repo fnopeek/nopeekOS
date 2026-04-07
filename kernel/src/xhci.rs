@@ -325,6 +325,9 @@ struct XhciState {
     repeat_last: u64,    // tick when last repeat was emitted
     port_num: u32,       // connected port number
     error_count: u32,    // consecutive transfer errors
+    // Port probed during keyboard search but wasn't keyboard (reuse for mouse)
+    probed_port: u32,    // 0xFFFF = none
+    probed_slot: u8,
     // Mouse device (second USB device on same controller)
     has_mouse: bool,
     mouse_slot_id: u8,
@@ -559,6 +562,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         intr_ep_dci: 0, prev_keys: [0; 6],
         repeat_key: 0, repeat_shift: false, repeat_altgr: false, repeat_start: 0, repeat_last: 0,
         port_num: 0, error_count: 0,
+        probed_port: 0xFFFF, probed_slot: 0,
         has_mouse: false, mouse_slot_id: 0,
         mouse_device_ctx, mouse_ep0_ring, mouse_ep0_cycle: 1, mouse_ep0_enqueue: 0,
         mouse_intr_ring, mouse_intr_cycle: 1, mouse_intr_enqueue: 0,
@@ -600,8 +604,13 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         if attempt >= 2 { break; } // only 2 resource sets available
         kprintln!("[npk] xhci: trying port {} (attempt {})", p + 1, attempt);
 
-        // Second attempt: switch to mouse DMA resources
+        // Second attempt: save probe EP0 state, switch to mouse DMA resources
         if attempt == 1 {
+            // Save EP0 state from attempt 0 (the probed non-keyboard device)
+            // so init_mouse can reuse its slot without re-enumerating
+            state.mouse_ep0_cycle = state.ep0_cycle;
+            state.mouse_ep0_enqueue = state.ep0_enqueue;
+            // Switch to fresh mouse resources for keyboard enumeration
             state.device_ctx = state.mouse_device_ctx;
             state.ep0_ring = state.mouse_ep0_ring;
             state.ep0_cycle = 1;
@@ -679,6 +688,9 @@ fn init_controller(dev: pci::PciDevice) -> bool {
                 Some(v) => v,
                 None => {
                     kprintln!("[npk] xhci: port {} not a keyboard, skipping", p + 1);
+                    // Save probed device info — init_mouse can reuse this slot
+                    state.probed_port = p;
+                    state.probed_slot = slot_id;
                     attempt += 1;
                     continue;
                 }
@@ -737,9 +749,22 @@ pub fn init_mouse() -> bool {
     let kbd_port = state.port_num;
     let max_ports = state.max_ports;
 
-    // Scan remaining ports for a connected device
+    // First: try the port that was already probed during keyboard search.
+    // That device is already addressed (slot active) — no reset needed.
+    if state.probed_port != 0xFFFF && state.probed_port != kbd_port {
+        let p = state.probed_port;
+        kprintln!("[npk] xhci: reusing probed device on port {} (slot {})", p + 1, state.probed_slot);
+        if try_init_mouse_reuse(state) {
+            kprintln!("[npk] xhci: USB mouse (HID boot protocol)");
+            state.has_mouse = true;
+            MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+            return true;
+        }
+    }
+
+    // Fallback: scan remaining ports for a mouse (fresh enumeration)
     for p in 0..max_ports {
-        if p == kbd_port { continue; }
+        if p == kbd_port || p == state.probed_port { continue; }
         let portsc = r32(state.oper, portsc_off(p));
         if portsc & PORTSC_CCS == 0 { continue; }
 
@@ -747,17 +772,107 @@ pub fn init_mouse() -> bool {
 
         if try_init_mouse_on_port(state, p) {
             kprintln!("[npk] xhci: USB mouse (HID boot protocol)");
-            kprintln!("[npk] xhci: DEBUG — pausing 15s to read mouse init output...");
-            crate::interrupts::delay_ms(15000);
             state.has_mouse = true;
             MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
             return true;
         }
     }
     kprintln!("[npk] xhci: no mouse found on any port");
-    kprintln!("[npk] xhci: DEBUG — pausing 15s to read mouse init output...");
-    crate::interrupts::delay_ms(15000);
     false
+}
+
+/// Reuse the already-addressed device from keyboard probe (no port reset needed).
+fn try_init_mouse_reuse(state: &mut XhciState) -> bool {
+    let port = state.probed_port;
+    let slot = state.probed_slot;
+    state.mouse_port_num = port;
+    state.mouse_port_speed = (r32(state.oper, portsc_off(port)) >> 10) & 0xF;
+
+    // Save keyboard EP0 context
+    let saved_slot = state.slot_id;
+    let saved_ep0 = state.ep0_ring;
+    let saved_ep0_cycle = state.ep0_cycle;
+    let saved_ep0_enq = state.ep0_enqueue;
+    let saved_dev_ctx = state.device_ctx;
+    let saved_port_speed = state.port_speed;
+
+    // Switch to probed device's EP0 context (already has valid state from probe)
+    state.slot_id = slot;
+    state.mouse_slot_id = slot;
+    state.ep0_ring = state.mouse_ep0_ring;
+    state.ep0_cycle = state.mouse_ep0_cycle;
+    state.ep0_enqueue = state.mouse_ep0_enqueue;
+    state.device_ctx = state.mouse_device_ctx;
+    state.port_speed = state.mouse_port_speed;
+
+    // Device is already addressed — just get config descriptor and set up mouse
+    kprintln!("[npk] xhci: mouse: getting config descriptor (reuse)...");
+    let success = if !usb_get_descriptor(state, DESC_CONFIG, 9) {
+        kprintln!("[npk] xhci: mouse reuse: get config desc failed");
+        false
+    } else {
+        let total_len = u16::from_le_bytes([
+            r8(state.data_buf, 2), r8(state.data_buf, 3)
+        ]) as usize;
+        let config_val = r8(state.data_buf, 5);
+        let fetch_len = total_len.min(512) as u16;
+
+        if !usb_get_descriptor(state, DESC_CONFIG, fetch_len) {
+            kprintln!("[npk] xhci: mouse reuse: get full config desc failed");
+            false
+        } else {
+            match find_mouse_endpoint(state, fetch_len as usize) {
+                Some((mouse_iface, intr_ep, intr_max_pkt, intr_interval)) => {
+                    kprintln!("[npk] xhci: mouse iface={} ep={:#04x} maxpkt={} interval={}",
+                        mouse_iface, intr_ep, intr_max_pkt, intr_interval);
+
+                    if !usb_set_config(state, config_val) {
+                        kprintln!("[npk] xhci: mouse set config failed");
+                        false
+                    } else {
+                        let _ = usb_set_protocol(state, mouse_iface, 0);
+                        let _ = usb_set_idle(state, mouse_iface);
+
+                        let ep_dci = (intr_ep & 0x0F) * 2 + 1;
+                        state.mouse_intr_ep_dci = ep_dci;
+
+                        // Configure endpoint using mouse's interrupt ring
+                        let saved_intr = state.intr_ring;
+                        state.intr_ring = state.mouse_intr_ring;
+                        let ok = cmd_configure_endpoint(state, ep_dci, intr_max_pkt, intr_interval);
+                        state.intr_ring = saved_intr;
+
+                        if !ok {
+                            kprintln!("[npk] xhci: mouse configure endpoint failed");
+                            false
+                        } else {
+                            schedule_mouse_interrupt_transfer(state);
+                            kprintln!("[npk] xhci: mouse: interrupt transfer scheduled");
+                            true
+                        }
+                    }
+                }
+                None => {
+                    kprintln!("[npk] xhci: mouse reuse: no mouse interface found");
+                    false
+                }
+            }
+        }
+    };
+
+    // Save mouse EP0 state
+    state.mouse_ep0_cycle = state.ep0_cycle;
+    state.mouse_ep0_enqueue = state.ep0_enqueue;
+
+    // Restore keyboard EP0 context
+    state.slot_id = saved_slot;
+    state.ep0_ring = saved_ep0;
+    state.ep0_cycle = saved_ep0_cycle;
+    state.ep0_enqueue = saved_ep0_enq;
+    state.device_ctx = saved_dev_ctx;
+    state.port_speed = saved_port_speed;
+
+    success
 }
 
 fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
