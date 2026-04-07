@@ -528,7 +528,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     }
 
     // Program controller
-    w32(oper, OP_CONFIG, 2); // MaxSlotsEn = 2 (keyboard + mouse)
+    w32(oper, OP_CONFIG, 4); // MaxSlotsEn = 4 (room for probe + keyboard + mouse)
     w64(oper, OP_DCBAAP, dcbaa);
     w64(oper, OP_CRCR, cmd_ring | 1); // cycle bit = 1
 
@@ -578,16 +578,31 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // Wait for device attachment + link training (500ms for all devices)
     crate::interrupts::delay_ms(500);
 
+    // Save original DMA resource pointers (attempt 0 uses primary, attempt 1 uses mouse set)
+    let orig_device_ctx = state.device_ctx;
+    let orig_ep0_ring = state.ep0_ring;
+
     // Try each connected port until we find a keyboard.
-    // Non-keyboard devices (e.g. mouse) are skipped — their slot is freed
-    // and they'll be picked up later by init_mouse().
+    // Non-keyboard devices are left alone (slot stays allocated, no cleanup).
+    // Each attempt uses separate DMA resources to avoid corruption.
+    let mut attempt = 0u32;
     for p in 0..max_ports {
         if r32(oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
+        if attempt >= 2 { break; } // only 2 resource sets available
         kprintln!("[npk] xhci: device on port {}", p + 1);
+
+        // Second attempt: switch to mouse DMA resources
+        if attempt == 1 {
+            state.device_ctx = state.mouse_device_ctx;
+            state.ep0_ring = state.mouse_ep0_ring;
+            state.ep0_cycle = 1;
+            state.ep0_enqueue = 0;
+        }
 
         // Reset port
         if !reset_port(&state, p) {
             kprintln!("[npk] xhci: port reset failed");
+            attempt += 1;
             continue;
         }
         state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
@@ -595,7 +610,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         // Enable Slot
         let slot_id = match cmd_enable_slot(&mut state) {
             Some(s) => s,
-            None => { kprintln!("[npk] xhci: enable slot failed"); continue; }
+            None => { kprintln!("[npk] xhci: enable slot failed"); attempt += 1; continue; }
         };
         state.slot_id = slot_id;
 
@@ -618,15 +633,13 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         };
         if !cmd_address_device(&mut state, p, max_packet) {
             kprintln!("[npk] xhci: address device failed");
-            cmd_disable_slot(&mut state, slot_id);
-            reset_ep0_ring(&mut state);
+            attempt += 1;
             continue;
         }
 
         // Get Configuration Descriptor (9 bytes first to get total length)
         if !usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
-            cmd_disable_slot(&mut state, slot_id);
-            reset_ep0_ring(&mut state);
+            attempt += 1;
             continue;
         }
         let total_len = u16::from_le_bytes([
@@ -637,8 +650,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         // Get full Configuration Descriptor
         let fetch_len = total_len.min(512) as u16;
         if !usb_get_descriptor(&mut state, DESC_CONFIG, fetch_len) {
-            cmd_disable_slot(&mut state, slot_id);
-            reset_ep0_ring(&mut state);
+            attempt += 1;
             continue;
         }
 
@@ -648,15 +660,18 @@ fn init_controller(dev: pci::PciDevice) -> bool {
                 Some(v) => v,
                 None => {
                     kprintln!("[npk] xhci: port {} not a keyboard, skipping", p + 1);
-                    cmd_disable_slot(&mut state, slot_id);
-                    reset_ep0_ring(&mut state);
+                    attempt += 1;
                     continue;
                 }
             };
         kprintln!("[npk] xhci: keyboard iface={} ep={:#04x} maxpkt={} interval={}",
             kbd_iface, intr_ep, intr_max_pkt, intr_interval);
 
-        // Found keyboard! Complete setup.
+        // Found keyboard! If we used mouse resources, swap so mouse gets the other set.
+        if attempt == 1 {
+            state.mouse_device_ctx = orig_device_ctx;
+            state.mouse_ep0_ring = orig_ep0_ring;
+        }
         state.port_num = p;
 
         if !usb_set_config(&mut state, config_val) {
