@@ -263,10 +263,11 @@ fn read_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32) -> u32 {
 }
 
 /// Alpha blend: mix foreground and background. alpha = 0..256 (0=bg, 256=fg).
+#[inline(always)]
 fn blend(fg: u32, bg: u32, alpha: u32) -> u32 {
     let inv = 256 - alpha;
-    let r = (((fg >> 16) & 0xFF) * alpha + ((bg >> 16) & 0xFF) * inv) / 256;
-    let g = (((fg >> 8) & 0xFF) * alpha + ((bg >> 8) & 0xFF) * inv) / 256;
-    let b = ((fg & 0xFF) * alpha + (bg & 0xFF) * inv) / 256;
+    let r = (((fg >> 16) & 0xFF) * alpha + ((bg >> 16) & 0xFF) * inv) >> 8;
+    let g = (((fg >> 8) & 0xFF) * alpha + ((bg >> 8) & 0xFF) * inv) >> 8;
+    let b = ((fg & 0xFF) * alpha + (bg & 0xFF) * inv) >> 8;
     (r << 16) | (g << 8) | b
 }
