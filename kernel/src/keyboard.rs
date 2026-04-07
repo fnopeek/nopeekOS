@@ -16,12 +16,27 @@ static mut KEY_BUF: [u8; BUF_SIZE] = [0; BUF_SIZE];
 static BUF_HEAD: AtomicUsize = AtomicUsize::new(0);
 static BUF_TAIL: AtomicUsize = AtomicUsize::new(0);
 
-// Modifier state
+// Modifier state (shared across all keyboard drivers)
 static SHIFT: AtomicBool = AtomicBool::new(false);
 static CTRL: AtomicBool = AtomicBool::new(false);
 static ALT_GR: AtomicBool = AtomicBool::new(false);
+static SUPER: AtomicBool = AtomicBool::new(false);
 static CAPS_LOCK: AtomicBool = AtomicBool::new(false);
 static EXTENDED: AtomicBool = AtomicBool::new(false);
+
+// --- Public modifier API (used by shade, any driver can write) ---
+
+/// Set Super/GUI/Meta key state. Called by any keyboard driver.
+pub fn set_super(held: bool) { SUPER.store(held, Ordering::Release); }
+
+/// Set Shift key state. Called by any keyboard driver.
+pub fn set_shift(held: bool) { SHIFT.store(held, Ordering::Release); }
+
+/// Query modifier state (used by shade::input).
+pub fn is_super_held() -> bool { SUPER.load(Ordering::Acquire) }
+pub fn is_ctrl_held() -> bool { CTRL.load(Ordering::Acquire) }
+pub fn is_shift_held() -> bool { SHIFT.load(Ordering::Acquire) }
+pub fn is_alt_held() -> bool { ALT_GR.load(Ordering::Acquire) }
 
 // Special key codes (escape sequences sent as ESC [ X)
 const KEY_UP: u8 = 0x80;
@@ -158,7 +173,7 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
             0x51 => { push_arrow(KEY_PGDN); return None; }
             0x53 => { push_arrow(KEY_DEL); return None; }
             0x52 => { push_arrow(KEY_INSERT); return None; }
-            0x5B | 0x5C => { return None; } // Super/Meta (left/right)
+            0x5B | 0x5C => { set_super(!released); return None; } // Super/Meta (left/right)
             _ => return None,
         }
     }

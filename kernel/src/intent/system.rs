@@ -237,9 +237,7 @@ pub fn intent_shade(args: &str) {
                 kprintln!("[npk] shade: not running");
                 return;
             }
-            // Clear compositor and restore text console
-            *crate::shade::COMPOSITOR.lock() = None;
-            crate::framebuffer::clear();
+            crate::shade::stop();
             kprintln!("[npk] shade: stopped");
         }
         "ws" | "workspace" => {

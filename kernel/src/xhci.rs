@@ -1128,6 +1128,11 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
     let shift = (modifiers & 0x22) != 0;  // L/R Shift
     let _ctrl = (modifiers & 0x11) != 0;  // L/R Ctrl
     let alt_gr = (modifiers & 0x40) != 0; // Right Alt (AltGr)
+    let super_held = (modifiers & 0x88) != 0; // L/R GUI (Super)
+
+    // Update shared modifier state (used by shade compositor)
+    crate::keyboard::set_super(super_held);
+    crate::keyboard::set_shift(shift);
 
     // Determine layout
     let is_de = match crate::config::get("keyboard") {
