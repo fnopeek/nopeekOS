@@ -13,22 +13,12 @@ use super::bar::ShadeBar;
 use super::terminal;
 use super::cursor::MouseState;
 
-/// Drag operation state (Mod+LMB move, Mod+RMB resize).
-#[derive(Clone, Copy)]
-pub enum DragMode { Move, Resize }
-
+/// Swap-drag state: Mod+LMB swaps windows in the tiling grid.
 #[derive(Clone, Copy)]
 pub struct DragState {
     pub window: WindowId,
-    pub mode: DragMode,
-    /// Mouse position when drag started.
-    pub start_mx: i32,
-    pub start_my: i32,
-    /// Window position/size when drag started.
-    pub start_wx: u32,
-    pub start_wy: u32,
-    pub start_ww: u32,
-    pub start_wh: u32,
+    /// Last window we swapped with (prevent repeated swaps on same target).
+    pub last_target: Option<WindowId>,
 }
 
 /// Compositor manages all windows, the bar, and rendering state.
@@ -528,80 +518,37 @@ impl Compositor {
 
         let mod_held = crate::keyboard::is_super_held();
 
-        // Handle active drag
-        if let Some(drag) = self.drag {
-            if self.mouse.left_held() || self.mouse.right_held() {
-                let dx = mx - drag.start_mx;
-                let dy = my - drag.start_my;
-                if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
-                    match drag.mode {
-                        DragMode::Move => {
-                            win.x = (drag.start_wx as i32 + dx).max(0) as u32;
-                            win.y = (drag.start_wy as i32 + dy).max(0) as u32;
-                            win.dirty = true;
-                        }
-                        DragMode::Resize => {
-                            win.width = (drag.start_ww as i32 + dx).max(100) as u32;
-                            win.height = (drag.start_wh as i32 + dy).max(100) as u32;
-                            win.dirty = true;
-                        }
+        // Handle active swap-drag: swap windows when cursor enters another window
+        if let Some(mut drag) = self.drag {
+            if self.mouse.left_held() {
+                // Check if cursor is over a different window → swap
+                if let Some(target) = self.window_at(mx, my) {
+                    if target != drag.window && drag.last_target != Some(target) {
+                        // Swap source and target in the tiling order
+                        self.swap_window_order(drag.window, target);
+                        drag.last_target = Some(target);
+                        self.drag = Some(drag);
+                        self.focus_window(drag.window);
+                        return true; // render_damaged handles the 2 swapped windows
                     }
                 }
-                // Mark all windows dirty (need to redraw aurora behind old position)
-                for w in &mut self.windows { w.dirty = true; }
-                self.needs_full_redraw = true;
-                return true;
+                return false; // cursor moving, no scene change needed
             } else {
-                // Button released — snap back to tiled layout
-                if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
-                    win.state = WindowState::Tiled;
-                }
+                // Button released — end swap mode
                 self.drag = None;
-                self.retile();
-                self.needs_full_redraw = true;
-                return true;
+                return false;
             }
         }
 
-        // Mod+LMB: start move drag (window becomes floating)
+        // Mod+LMB: start swap-drag
         if mod_held && self.mouse.left_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
-                if let Some(win) = self.windows.iter_mut().find(|w| w.id == wid) {
-                    win.state = WindowState::Floating;
-                    let drag = DragState {
-                        window: wid,
-                        mode: DragMode::Move,
-                        start_mx: mx, start_my: my,
-                        start_wx: win.x, start_wy: win.y,
-                        start_ww: win.width, start_wh: win.height,
-                    };
-                    self.drag = Some(drag);
-                    self.focus_window(wid);
-                    self.retile();
-                    self.needs_full_redraw = true;
-                    return true;
-                }
-            }
-        }
-
-        // Mod+RMB: start resize drag (window becomes floating)
-        if mod_held && self.mouse.right_clicked() {
-            if let Some(wid) = self.window_at(mx, my) {
-                if let Some(win) = self.windows.iter_mut().find(|w| w.id == wid) {
-                    win.state = WindowState::Floating;
-                    let drag = DragState {
-                        window: wid,
-                        mode: DragMode::Resize,
-                        start_mx: mx, start_my: my,
-                        start_wx: win.x, start_wy: win.y,
-                        start_ww: win.width, start_wh: win.height,
-                    };
-                    self.drag = Some(drag);
-                    self.focus_window(wid);
-                    self.retile();
-                    self.needs_full_redraw = true;
-                    return true;
-                }
+                self.drag = Some(DragState {
+                    window: wid,
+                    last_target: None,
+                });
+                self.focus_window(wid);
+                return true;
             }
         }
 
@@ -617,6 +564,17 @@ impl Compositor {
 
         // Mouse moved — cursor needs redraw (handled by caller)
         evt.dx != 0 || evt.dy != 0
+    }
+
+    /// Swap two windows in the tiling order. Retile assigns new positions.
+    fn swap_window_order(&mut self, a: WindowId, b: WindowId) {
+        let a_idx = self.windows.iter().position(|w| w.id == a);
+        let b_idx = self.windows.iter().position(|w| w.id == b);
+        if let (Some(ai), Some(bi)) = (a_idx, b_idx) {
+            self.windows.swap(ai, bi);
+            self.retile(); // Assigns correct positions based on new order
+            // Only the 2 swapped windows need re-rendering (retile marks them dirty)
+        }
     }
 
     /// Find the topmost window at screen coordinates (x, y).
