@@ -261,10 +261,10 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                         buf[..len].copy_from_slice(&line[..len]);
                         pos = len;
                         cursor = len;
-                        if !crate::shade::is_active() {
-                            if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
-                                kprint!("{}", s);
-                            }
+                        if crate::shade::is_active() {
+                            crate::shade::terminal::rewrite_input(&buf, pos);
+                        } else if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                            kprint!("{}", s);
                         }
                     }
                 }
@@ -279,14 +279,17 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                         buf[..len].copy_from_slice(&line[..len]);
                         pos = len;
                         cursor = len;
-                        if !crate::shade::is_active() {
-                            if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
-                                kprint!("{}", s);
-                            }
+                        if crate::shade::is_active() {
+                            crate::shade::terminal::rewrite_input(&buf, pos);
+                        } else if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                            kprint!("{}", s);
                         }
                     } else {
                         pos = 0;
                         cursor = 0;
+                        if crate::shade::is_active() {
+                            crate::shade::terminal::rewrite_input(&buf, 0);
+                        }
                     }
                 }
                 b'C' => {
