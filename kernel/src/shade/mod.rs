@@ -45,6 +45,11 @@ pub fn init() {
     // Set GUI mode so kprintln doesn't draw directly to framebuffer
     framebuffer::set_gui_mode(true);
 
+    // Create initial terminal window (fills entire workspace)
+    with_compositor(|comp| {
+        comp.create_window("terminal", 0, 0, screen_w, screen_h);
+    });
+
     crate::kprintln!("[npk] shade: compositor {}x{} scale:{}x", screen_w, screen_h, scale);
 }
 

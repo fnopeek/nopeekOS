@@ -53,11 +53,15 @@ impl TerminalBuffer {
                 self.col = 0;
             }
             0x08 => {
+                // Backspace: move cursor left, shrink line length
                 if self.col > 0 {
                     self.col -= 1;
                     let idx = self.total % MAX_LINES;
                     self.lines[idx][self.col] = b' ';
-                    self.lens[idx] = self.col;
+                    // Only shrink lens if we're at the end
+                    if self.col < self.lens[idx] {
+                        self.lens[idx] = self.col;
+                    }
                 }
             }
             byte if byte >= 0x20 && byte < 0x7F => {
@@ -246,9 +250,12 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Clear last line area (fill with bg)
-    crate::gui::render::fill_rect(shadow, info,
-        win_cx, last_line_y, win_cw, char_h, bg_color);
+    // Clear last line area: restore aurora + blend bg (matches window transparency)
+    crate::gui::background::draw_aurora_region(shadow, info,
+        win_cx, last_line_y, win_cw, char_h);
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_cx, last_line_y, win_cw, char_h,
+        bg_color, 0, opacity);
 
     // Draw current line text
     let (line_data, len) = term.current_line();
