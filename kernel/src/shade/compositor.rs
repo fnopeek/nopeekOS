@@ -109,6 +109,7 @@ impl Compositor {
 
         let mut win = Window::new(id, title, x, y, w, h);
         win.workspace = self.active_workspace;
+        win.terminal_idx = terminal::allocate().unwrap_or(0);
 
         self.windows.push(win);
         self.z_order.insert(0, id);
@@ -121,6 +122,10 @@ impl Compositor {
 
     /// Close a window by ID.
     pub fn close_window(&mut self, id: WindowId) {
+        // Free terminal buffer before removing window
+        if let Some(win) = self.windows.iter().find(|w| w.id == id) {
+            terminal::free(win.terminal_idx);
+        }
         self.windows.retain(|w| w.id != id);
         self.z_order.retain(|&wid| wid != id);
 
@@ -149,6 +154,8 @@ impl Compositor {
 
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             self.bar.set_title(&win.title);
+            // Switch active terminal to this window's buffer
+            terminal::set_active_terminal(win.terminal_idx);
         }
 
         self.needs_full_redraw = true;
@@ -281,8 +288,7 @@ impl Compositor {
                 if win.workspace != self.active_workspace || !win.visible { continue; }
 
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
-                    if win.focused { self.border_active } else { self.border_inactive },
-                    win.focused);
+                    if win.focused { self.border_active } else { self.border_inactive });
             }
         }
 
@@ -295,55 +301,51 @@ impl Compositor {
         self.needs_full_redraw = false;
     }
 
-    /// Render only the focused window's content (fast path for typing).
-    pub fn render_focused_content(&self, shadow: *mut u8, info: &FbInfo) -> Option<(u32, u32, u32, u32)> {
+    /// Fast render: only the current input line of the focused window.
+    pub fn render_input_line(&self, shadow: *mut u8, info: &FbInfo) -> Option<(u32, u32, u32, u32)> {
         let fid = self.focused?;
         let win = self.windows.iter().find(|w| w.id == fid && w.workspace == self.active_workspace)?;
 
         let border = self.border;
-        let rounding = self.rounding;
-        let opacity = self.opacity;
         let scale = self.scale;
-        let border_color = self.border_active;
+        let pad = 6 * scale;
+        let cx = win.content_x(border) + pad;
+        let cy = win.content_y(border) + pad;
+        let cw = win.content_w(border).saturating_sub(pad * 2);
+        let ch = win.content_h(border).saturating_sub(pad * 2);
 
-        // Restore aurora, re-render window (content changed)
-        background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
-        Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color, true);
-
-        Some((win.x, win.y, win.width, win.height))
+        terminal::render_input_line(shadow, info,
+            cx, cy, cw, ch,
+            win.bg_color, self.opacity,
+            win.terminal_idx)
     }
 
     /// Render a single window: rounded border + semi-transparent bg + terminal text.
     fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
-                     border_color: u32, is_focused: bool) {
+                     border_color: u32) {
         let cx = win.content_x(border);
         let cy = win.content_y(border);
         let cw = win.content_w(border);
         let ch = win.content_h(border);
-        let inner_r = rounding.saturating_sub(border);
 
-        // 1. Opaque rounded border (AA corners, covers aurora in window area)
-        render::fill_rounded_rect_aa(shadow, info,
+        // 1. Semi-transparent rounded window (border color, blends with aurora)
+        render::fill_rounded_rect_blend(shadow, info,
             win.x, win.y, win.width, win.height,
-            border_color, rounding);
+            border_color, rounding, 230);
 
-        // 2. Restore aurora inside content area for true transparency
-        background::draw_aurora_region(shadow, info, cx, cy, cw, ch);
-
-        // 3. Semi-transparent content bg (blends with restored aurora)
+        // 2. Content area (darker bg, blends on top)
+        let inner_r = rounding.saturating_sub(border);
         render::fill_rounded_rect_blend(shadow, info,
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
 
-        // 4. Terminal text only in focused window
-        if is_focused {
-            let pad = 6 * scale;
-            terminal::render_to_window(shadow, info,
-                cx + pad, cy + pad,
-                cw.saturating_sub(pad * 2), ch.saturating_sub(pad * 2),
-                scale);
-        }
+        // 3. Terminal text (each window has its own buffer)
+        let pad = 6 * scale;
+        terminal::render_to_window(shadow, info,
+            cx + pad, cy + pad,
+            cw.saturating_sub(pad * 2), ch.saturating_sub(pad * 2),
+            scale, win.terminal_idx);
     }
 
     /// Render only changed regions. Returns list of (x, y, w, h) to blit.
@@ -370,7 +372,7 @@ impl Compositor {
                 if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                     background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
                     let border_color = if win.focused { self.border_active } else { self.border_inactive };
-                    Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color, win.focused);
+                    Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
                     regions.push((win.x, win.y, win.width, win.height));
                 }
             }

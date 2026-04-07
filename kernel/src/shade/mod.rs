@@ -182,14 +182,14 @@ pub fn handle_action(action: input::ShadeAction) {
     }
 }
 
-/// Fast re-render of just the focused window content (for typing feedback).
-pub fn render_terminal_update() {
+/// Fast re-render of just the current input line (for live typing feedback).
+pub fn render_input_line() {
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref comp) = *COMPOSITOR.lock() {
-            if let Some((x, y, w, h)) = comp.render_focused_content(shadow, info) {
+            if let Some((x, y, w, h)) = comp.render_input_line(shadow, info) {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
         }
