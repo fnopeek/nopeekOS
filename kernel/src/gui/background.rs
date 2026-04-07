@@ -3,9 +3,16 @@
 //! 7 aurora themes, randomly selected at boot.
 //! Pure math — no embedded images, zero extra bytes in the kernel.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicBool, Ordering};
 use crate::framebuffer::FbInfo;
 use super::render;
+
+/// Cached aurora background — rendered once, then memcpy for regions.
+static mut AURORA_CACHE: *mut u8 = core::ptr::null_mut();
+static mut AURORA_CACHE_PITCH: u32 = 0;
+static mut AURORA_CACHE_W: u32 = 0;
+static mut AURORA_CACHE_H: u32 = 0;
+static AURORA_CACHED: AtomicBool = AtomicBool::new(false);
 
 /// Currently active color scheme (set once at boot).
 static ACTIVE_SCHEME: AtomicU8 = AtomicU8::new(0);
@@ -121,13 +128,71 @@ pub fn accent_color() -> u32 {
     active_scheme().accent
 }
 
-/// Generate the background into the shadow buffer.
+/// Generate the full aurora into the cache, then copy to shadow buffer.
 pub fn draw_aurora(shadow: *mut u8, info: &FbInfo) {
-    draw_aurora_region(shadow, info, 0, 0, info.width, info.height);
+    ensure_cache(info);
+    // Copy full cache → shadow
+    let cache = unsafe { AURORA_CACHE };
+    if !cache.is_null() {
+        let size = info.height as usize * info.pitch as usize;
+        // SAFETY: copying cached aurora to shadow buffer
+        unsafe { core::ptr::copy_nonoverlapping(cache, shadow, size); }
+    }
 }
 
-/// Redraw a region of the aurora background.
+/// Redraw a region of the aurora background (fast memcpy from cache).
 pub fn draw_aurora_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
+    ensure_cache(info);
+    let cache = unsafe { AURORA_CACHE };
+    if !cache.is_null() {
+        // Copy region from cache → shadow (row by row)
+        let pitch = info.pitch as usize;
+        let x0 = rx as usize;
+        let x1 = ((rx + rw) as usize).min(info.width as usize);
+        let bytes = (x1 - x0) * 4;
+        for y in ry..(ry + rh).min(info.height) {
+            let off = y as usize * pitch + x0 * 4;
+            // SAFETY: copying from cache to shadow within bounds
+            unsafe { core::ptr::copy_nonoverlapping(cache.add(off), shadow.add(off), bytes); }
+        }
+        return;
+    }
+    // Fallback: render directly (no cache available)
+    draw_aurora_direct(shadow, info, rx, ry, rw, rh);
+}
+
+/// Ensure the aurora cache exists and is populated.
+fn ensure_cache(info: &FbInfo) {
+    if AURORA_CACHED.load(Ordering::Acquire) {
+        let (cw, ch) = unsafe { (AURORA_CACHE_W, AURORA_CACHE_H) };
+        if cw == info.width && ch == info.height { return; } // Cache valid
+    }
+    // Allocate cache buffer
+    let size = info.height as usize * info.pitch as usize;
+    let pages = (size + 4095) / 4096;
+    let cache = match crate::memory::allocate_contiguous(pages) {
+        Some(addr) => addr as *mut u8,
+        None => return, // No memory — fall back to direct rendering
+    };
+    // Render aurora into cache
+    draw_aurora_direct(cache, info, 0, 0, info.width, info.height);
+    // SAFETY: single-core, no concurrent access
+    unsafe {
+        AURORA_CACHE = cache;
+        AURORA_CACHE_PITCH = info.pitch;
+        AURORA_CACHE_W = info.width;
+        AURORA_CACHE_H = info.height;
+    }
+    AURORA_CACHED.store(true, Ordering::Release);
+}
+
+/// Invalidate the aurora cache (call when scheme changes).
+pub fn invalidate_cache() {
+    AURORA_CACHED.store(false, Ordering::Release);
+}
+
+/// Render aurora directly to a buffer (the expensive computation).
+fn draw_aurora_direct(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
     let w = info.width;
     let h = info.height;
     let s = active_scheme();
