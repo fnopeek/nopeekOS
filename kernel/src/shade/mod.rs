@@ -40,20 +40,9 @@ pub fn init() {
 
     *COMPOSITOR.lock() = Some(comp);
 
-    // Enable terminal capture
+    // Enable terminal capture + GUI mode (no window yet — Mod+Enter opens first loop)
     terminal::set_active(true);
-    // Set GUI mode so kprintln doesn't draw directly to framebuffer
     framebuffer::set_gui_mode(true);
-
-    crate::kprintln!("[npk] shade: compositor {}x{} scale:{}x", screen_w, screen_h, scale);
-
-    // Create initial terminal window AFTER boot log (so boot text doesn't appear in it)
-    with_compositor(|comp| {
-        comp.create_window("loop", 0, 0, screen_w, screen_h);
-    });
-
-    // Clean prompt only (no boot output in this window)
-    terminal::write_prompt();
 }
 
 /// Execute a closure with exclusive access to the compositor.
@@ -236,8 +225,12 @@ pub fn poll_render() {
                     let cw = win.content_w(border).saturating_sub(pad * 2);
                     let ch = win.content_h(border).saturating_sub(pad * 2);
 
-                    // Fast: clear text area with bg_color, then redraw text
-                    crate::gui::render::fill_rect(shadow, info, cx, cy, cw, ch, win.bg_color);
+                    // Clear text area: aurora + border blend + content blend (matches window)
+                    crate::gui::background::draw_aurora_region(shadow, info, cx, cy, cw, ch);
+                    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+                        cx, cy, cw, ch, comp.border_active, 0, 180);
+                    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+                        cx, cy, cw, ch, win.bg_color, 0, comp.opacity);
                     terminal::render_to_window(shadow, info, cx, cy, cw, ch, scale, win.terminal_idx);
                     framebuffer::blit_rect(fb, cx, cy, cw, ch);
                 }
