@@ -250,26 +250,34 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     let mut hist = HISTORY.lock();
                     if let Some((line, len)) = hist.up() {
                         let len = len.min(buf.len());
-                        for _ in 0..pos { kprint!("\x08 \x08"); }
+                        if !crate::shade::is_active() {
+                            for _ in 0..pos { kprint!("\x08 \x08"); }
+                        }
                         buf[..len].copy_from_slice(&line[..len]);
                         pos = len;
                         cursor = len;
-                        if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
-                            kprint!("{}", s);
+                        if !crate::shade::is_active() {
+                            if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                                kprint!("{}", s);
+                            }
                         }
                     }
                 }
                 b'B' => {
                     // Arrow down — next history entry
                     let mut hist = HISTORY.lock();
-                    for _ in 0..pos { kprint!("\x08 \x08"); }
+                    if !crate::shade::is_active() {
+                        for _ in 0..pos { kprint!("\x08 \x08"); }
+                    }
                     if let Some((line, len)) = hist.down() {
                         let len = len.min(buf.len());
                         buf[..len].copy_from_slice(&line[..len]);
                         pos = len;
                         cursor = len;
-                        if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
-                            kprint!("{}", s);
+                        if !crate::shade::is_active() {
+                            if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                                kprint!("{}", s);
+                            }
                         }
                     } else {
                         pos = 0;
@@ -318,24 +326,18 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             0x08 | 0x7F => {
                 // Backspace — delete char left of cursor
                 if cursor > 0 {
-                    // Shift everything after cursor left by 1
                     for i in cursor..pos {
                         buf[i - 1] = buf[i];
                     }
                     pos -= 1;
                     cursor -= 1;
-                    kprint!("\x08");
-                    // Reprint from cursor to end + clear trailing char
-                    if let Ok(s) = core::str::from_utf8(&buf[cursor..pos]) {
-                        kprint!("{}", s);
-                    }
-                    kprint!(" ");
-                    // Move cursor back to correct position
-                    for _ in 0..(pos - cursor + 1) { kprint!("\x08"); }
                     if crate::shade::is_active() {
+                        crate::shade::terminal::rewrite_input(&buf, pos);
                         crate::shade::terminal::set_cursor_pos(
                             crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
                         crate::shade::render_input_line();
+                    } else {
+                        kprint!("\x08 \x08");
                     }
                 }
             }
@@ -354,7 +356,7 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 }
             }
             b if b >= 0x20 && b < 0x7F => {
-                if pos < buf.len() {
+                if pos < buf.len() - 1 {
                     // Insert at cursor position (shift right)
                     if cursor < pos {
                         for i in (cursor..pos).rev() {
@@ -365,16 +367,13 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     pos += 1;
                     cursor += 1;
                     crate::shade::terminal::scroll_reset();
-                    // Print from cursor to end (redraws shifted chars)
-                    if let Ok(s) = core::str::from_utf8(&buf[cursor - 1..pos]) {
-                        kprint!("{}", s);
-                    }
-                    // Move cursor back to correct position
-                    for _ in 0..(pos - cursor) { kprint!("\x08"); }
                     if crate::shade::is_active() {
+                        crate::shade::terminal::rewrite_input(&buf, pos);
                         crate::shade::terminal::set_cursor_pos(
                             crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
                         crate::shade::render_input_line();
+                    } else {
+                        kprint!("{}", b as char);
                     }
                 }
             }
