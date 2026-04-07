@@ -60,10 +60,14 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
 
 ```
  ┌──────────────────────────────────────────────────────────┐
+ │  Shade Compositor (Hyprland-inspired tiling WM)         │
+ │  Dwindle tiling, animated window swap, cursor overlay   │
+ │  Aurora background (cached), shadebar, damage tracking  │
+ ├──────────────────────────────────────────────────────────┤
  │  GUI Layer                                               │
  │  Login screen (Hyprlock-inspired), Spleen bitmap fonts   │
  │  Procedural aurora background, 4K auto-scaling           │
- │  Damage tracking, subpixel anti-aliased compositing      │
+ │  Subpixel anti-aliased compositing, rounded corners      │
  ├──────────────────────────────────────────────────────────┤
  │  Intent Loop                                             │
  │  Express intention, not instructions.                    │
@@ -88,7 +92,7 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  │  SHA-256 verified           │  NVMe, I226-V, xHCI USB    │
  │  ESP FAT32 kernel write     │  Intel Xe GPU (4K@60Hz)     │
  ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, ~51k lines)                   │
+ │  Kernel Core (Rust, no_std, ~44k lines)                   │
  │  64GB Paging, Heap, IDT+PIC, ACPI, Framebuffer, Serial  │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
@@ -240,8 +244,17 @@ Every execution is a sandboxed WASM module:
 - [x] Command history (arrow up/down, 32 entries, ring buffer)
 - [x] AltGr support for Swiss German keyboard (@ # | [ ] { } \ ~)
 - [x] Purple `[npk]` accent color in boot output
-- [ ] Tiling window manager (Hyprland-inspired, framebuffer compositing)
-- [x] USB mouse input (xHCI HID, boot protocol, click-to-focus, Mod+LMB move, Mod+RMB resize)
+- [x] Shade compositor (Hyprland-inspired tiling WM, dwindle layout)
+- [x] Per-window terminal sessions (8 max, independent input/output, save/restore)
+- [x] Shadebar (Waybar-inspired: workspace indicators, clock, window title)
+- [x] Window keybindings: Mod+Enter/Q/1-4/Arrows/Shift+Arrows/Ctrl+Arrows/F/V/PgUp/PgDn
+- [x] Smooth window swap animation (ease-out cubic, 250ms)
+- [x] Aurora background cache (render once, memcpy per region, ~100x faster)
+- [x] USB mouse input (xHCI HID, composite device support, multi-device)
+- [x] Software cursor overlay (drawn on MMIO FB, no ghost cursors)
+- [x] Click-to-focus, Mod+LMB swap-drag, Mod+RMB resize-drag
+- [x] Tiling-aware resize (adjusts dwindle split ratio, neighbors adapt)
+- [x] Text cursor navigation (Left/Right/Home/End, insert at position, history recall)
 - [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
 - [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@60Hz HDMI 2.0 via DDI-B, DPLL1, combo PHY)
 - [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI→HDMI mode switch, auto-fallback to 4K@30)
@@ -280,6 +293,9 @@ Every execution is a sandboxed WASM module:
 | OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@60Hz HDMI 2.0, GGTT+WC aperture |
+| Compositor | Shade (native Rust) | Dwindle tiling, aurora cache, cursor overlay |
+| Mouse | xHCI HID boot protocol | Composite device support, multi-device, overlay cursor |
+| Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
 | Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
 
 ---
@@ -367,6 +383,14 @@ nopeekOS/
 │       │   ├── mod.rs           # Backend abstraction (GOP/Intel Xe)
 │       │   ├── intel_xe.rs      # Intel Xe Gen 12.2 display driver
 │       │   └── gop.rs           # UEFI GOP fallback
+│       ├── shade/               # Shade compositor (tiling WM)
+│       │   ├── mod.rs           # Init, render, mouse handling, animation tick
+│       │   ├── compositor.rs    # Window management, dwindle tiling, swap animation
+│       │   ├── window.rs        # Window metadata (position, state, resize delta)
+│       │   ├── bar.rs           # Shadebar (workspaces, clock, title)
+│       │   ├── terminal.rs      # Per-window terminal buffers, cursor, input state
+│       │   ├── input.rs         # Keybindings (Mod+key → ShadeAction)
+│       │   └── cursor.rs        # Software mouse cursor (MMIO overlay)
 │       ├── gui/                 # GUI subsystem
 │       │   ├── mod.rs           # Login screen, aurora background
 │       │   └── font.rs          # Spleen bitmap fonts (8x16, 16x32, 32x64)
@@ -397,7 +421,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ### First Boot
 
 ```
-[npk] AI-native Operating System v0.5.0
+[npk] AI-native Operating System v0.18.1
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] Physical memory: 15892 MB free (16 GB detected)
@@ -406,8 +430,8 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] PCI: 8 devices
 [npk] nvme: KINGSTON SNV2S500G (SN: ...), TRIM=yes
 [npk] nvme: 465 GB (976773168 sectors)
-[npk] xhci: device on port 2
 [npk] xhci: USB keyboard (HID boot protocol)
+[npk] xhci: USB mouse (HID boot protocol)
 [npk] Intel Xe GPU: ADL-N (device 46d0), 4K@60Hz HDMI 2.0
 [npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
