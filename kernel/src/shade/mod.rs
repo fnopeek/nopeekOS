@@ -141,19 +141,19 @@ pub fn handle_action(action: input::ShadeAction) {
         }
         ShadeAction::FocusLeft => {
             with_compositor(|comp| comp.focus_direction(-1, 0));
-            render_frame();
+            render_damaged();
         }
         ShadeAction::FocusRight => {
             with_compositor(|comp| comp.focus_direction(1, 0));
-            render_frame();
+            render_damaged();
         }
         ShadeAction::FocusUp => {
             with_compositor(|comp| comp.focus_direction(0, -1));
-            render_frame();
+            render_damaged();
         }
         ShadeAction::FocusDown => {
             with_compositor(|comp| comp.focus_direction(0, 1));
-            render_frame();
+            render_damaged();
         }
         ShadeAction::ToggleFullscreen => {
             with_compositor(|comp| {
@@ -185,11 +185,22 @@ pub fn handle_action(action: input::ShadeAction) {
         }
         ShadeAction::ScrollUp => {
             terminal::scroll_up(10);
-            render_frame();
+            // Mark focused window dirty for re-render
+            with_compositor(|comp| {
+                if let Some(fid) = comp.focused {
+                    if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
+                }
+            });
+            render_damaged();
         }
         ShadeAction::ScrollDown => {
             terminal::scroll_down(10);
-            render_frame();
+            with_compositor(|comp| {
+                if let Some(fid) = comp.focused {
+                    if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
+                }
+            });
+            render_damaged();
         }
         ShadeAction::Lock => {
             // Lock handled by intent loop

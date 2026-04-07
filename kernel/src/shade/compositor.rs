@@ -154,11 +154,9 @@ impl Compositor {
 
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             self.bar.set_title(&win.title);
-            // Switch active terminal to this window's buffer
             terminal::set_active_terminal(win.terminal_idx);
         }
-
-        self.needs_full_redraw = true;
+        // Don't set needs_full_redraw — render_damaged handles 2 windows only
     }
 
     /// Switch to workspace.
@@ -410,11 +408,14 @@ impl Compositor {
             .count()
     }
 
-    /// Update focused flag on all windows.
+    /// Update focused flag — only mark changed windows dirty.
     fn set_focused_flag(&mut self, focused_id: WindowId) {
         for win in &mut self.windows {
+            let was = win.focused;
             win.focused = win.id == focused_id;
-            win.dirty = true;
+            if win.focused != was {
+                win.dirty = true; // Only re-render windows that changed
+            }
         }
     }
 

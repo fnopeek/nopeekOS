@@ -37,6 +37,11 @@ pub enum ShadeAction {
     Lock,
 }
 
+/// Check if the configured mod key is currently held (public for ESC state capture).
+pub fn is_mod_active() -> bool {
+    is_mod_held()
+}
+
 /// Check if the configured mod key is currently held.
 /// Reads `shade.mod` config: "super" (default), "ctrl", "alt".
 fn is_mod_held() -> bool {
@@ -107,9 +112,9 @@ pub fn try_keybind(key: u8) -> bool {
 }
 
 /// Handle arrow key shade actions (called for ESC [ sequences).
-/// `direction`: 'A'=up, 'B'=down, 'C'=right, 'D'=left
+/// Mod state already verified by caller (captured at ESC time).
+/// `direction`: 'A'=up, 'B'=down, 'C'=right, 'D'=left, '5'=PgUp, '6'=PgDn
 pub fn try_arrow_keybind(direction: u8) -> bool {
-    if !is_mod_held() { return false; }
     if !crate::shade::is_active() { return false; }
 
     match direction {
