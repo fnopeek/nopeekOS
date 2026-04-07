@@ -48,6 +48,7 @@ mod gpt;
 mod fat32;
 #[allow(dead_code, unused_imports)]
 mod install;
+mod shade;
 mod acpi;
 mod update_key;
 
@@ -331,6 +332,13 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     // Start npk-shell listener (encrypted remote access, port 4444)
     shell::start_listener();
+
+    // Start shade compositor (after login, GPU, and config are ready)
+    if framebuffer::is_available() {
+        shade::init();
+        shade::render_frame();
+        vga::show_status(b"Shade compositor active");
+    }
 
     kprintln!("[npk] Starting Intent Loop...");
     vga::show_status(b"Intent Loop running");
