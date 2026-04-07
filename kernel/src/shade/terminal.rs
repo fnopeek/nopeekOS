@@ -119,6 +119,8 @@ static mut SAVED_POS: [usize; MAX_TERMINALS] = [0; MAX_TERMINALS];
 /// Currently active terminal index (receives kprintln output).
 static ACTIVE_IDX: AtomicU8 = AtomicU8::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Set when new content is written (cleared after render).
+static DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// Enable/disable terminal capture.
 pub fn set_active(active: bool) {
@@ -172,7 +174,18 @@ pub fn write(s: &str) {
     if idx < MAX_TERMINALS {
         let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
         terms[idx].write_str(s);
+        DIRTY.store(true, Ordering::Release);
     }
+}
+
+/// Check if terminal has new content since last render.
+pub fn is_dirty() -> bool {
+    DIRTY.load(Ordering::Acquire)
+}
+
+/// Clear dirty flag (called after render).
+pub fn clear_dirty() {
+    DIRTY.store(false, Ordering::Release);
 }
 
 /// Render a specific terminal's content into a window region.

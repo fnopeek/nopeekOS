@@ -214,6 +214,38 @@ pub fn render_input_line() {
     });
 }
 
+/// Progressive render: if terminal has new output, re-render the focused window's text.
+/// Fast path: only clears + redraws text (no aurora, no blend). Call from net::poll().
+pub fn poll_render() {
+    if !is_active() { return; }
+    if !terminal::is_dirty() { return; }
+    terminal::clear_dirty();
+
+    framebuffer::with_fb(|fb| {
+        let info = fb.info();
+        let (shadow, _) = fb.shadow_ptr();
+
+        if let Some(ref comp) = *COMPOSITOR.lock() {
+            if let Some(fid) = comp.focused {
+                if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
+                    let border = comp.border;
+                    let scale = comp.scale;
+                    let pad = 6 * scale;
+                    let cx = win.content_x(border) + pad;
+                    let cy = win.content_y(border) + pad;
+                    let cw = win.content_w(border).saturating_sub(pad * 2);
+                    let ch = win.content_h(border).saturating_sub(pad * 2);
+
+                    // Fast: clear text area with bg_color, then redraw text
+                    crate::gui::render::fill_rect(shadow, info, cx, cy, cw, ch, win.bg_color);
+                    terminal::render_to_window(shadow, info, cx, cy, cw, ch, scale, win.terminal_idx);
+                    framebuffer::blit_rect(fb, cx, cy, cw, ch);
+                }
+            }
+        }
+    });
+}
+
 /// Stop shade compositor.
 pub fn stop() {
     terminal::set_active(false);
