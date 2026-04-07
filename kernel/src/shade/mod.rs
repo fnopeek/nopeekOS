@@ -150,12 +150,20 @@ pub fn handle_action(action: input::ShadeAction) {
             });
             render_frame();
         }
-        ShadeAction::FocusNext => {
-            with_compositor(|comp| comp.focus_next());
+        ShadeAction::FocusLeft => {
+            with_compositor(|comp| comp.focus_direction(-1, 0));
             render_frame();
         }
-        ShadeAction::FocusPrev => {
-            with_compositor(|comp| comp.focus_prev());
+        ShadeAction::FocusRight => {
+            with_compositor(|comp| comp.focus_direction(1, 0));
+            render_frame();
+        }
+        ShadeAction::FocusUp => {
+            with_compositor(|comp| comp.focus_direction(0, -1));
+            render_frame();
+        }
+        ShadeAction::FocusDown => {
+            with_compositor(|comp| comp.focus_direction(0, 1));
             render_frame();
         }
         ShadeAction::ToggleFullscreen => {
