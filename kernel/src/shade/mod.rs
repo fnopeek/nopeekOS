@@ -191,6 +191,7 @@ pub fn handle_action(action: input::ShadeAction) {
 
 /// Fast re-render of just the current input line (for live typing feedback).
 pub fn render_input_line() {
+    terminal::clear_dirty(); // Prevent poll_render from doing full window render
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
