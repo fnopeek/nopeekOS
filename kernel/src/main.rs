@@ -302,6 +302,11 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
         vga::show_status(b"Identity verified");
     }
 
+    // Suppress framebuffer immediately after login (shade takes over)
+    if framebuffer::is_available() {
+        framebuffer::set_gui_mode(true);
+    }
+
     // Load system config (after identity — config is encrypted at rest)
     config::load();
 
@@ -333,15 +338,10 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // Start npk-shell listener (encrypted remote access, port 4444)
     shell::start_listener();
 
-    // Suppress framebuffer output before shade takes over (no flash)
-    if framebuffer::is_available() {
-        framebuffer::set_gui_mode(true);
-    }
-
     kprintln!("[npk] Starting Intent Loop...");
     kprintln!("[npk] System ready. Express your intent.");
 
-    // Start shade compositor
+    // Start shade compositor (GUI_MODE already set after login)
     if framebuffer::is_available() {
         shade::init();
         shade::render_frame();
