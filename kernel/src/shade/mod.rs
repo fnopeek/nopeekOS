@@ -77,17 +77,18 @@ pub fn render_frame() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            comp.mouse.erase(shadow, info); // Remove cursor before scene render
-            comp.render(shadow, info);
+            comp.render(shadow, info); // Scene only — no cursor on shadow
+
+            // Full blit shadow → MMIO
+            let mut damage = render::DamageTracker::new(info.width, info.height);
+            damage.mark_all();
+            damage.flush(fb);
+
+            // Cursor overlay on MMIO (after blit)
             if crate::xhci::mouse_available() {
-                comp.mouse.draw(shadow, info); // Redraw on fresh scene
+                comp.mouse.redraw_overlay(shadow, info);
             }
         }
-
-        // Full blit
-        let mut damage = render::DamageTracker::new(info.width, info.height);
-        damage.mark_all();
-        damage.flush(fb);
     });
 }
 
@@ -99,15 +100,13 @@ pub fn render_damaged() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            // Erase cursor before rendering (cursor was on old scene)
-            comp.mouse.erase(shadow, info);
-            let regions = comp.render_damaged(shadow, info);
-            // Redraw cursor on updated scene
-            if crate::xhci::mouse_available() {
-                comp.mouse.draw(shadow, info);
-            }
+            let regions = comp.render_damaged(shadow, info); // Scene only
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
+            }
+            // Cursor overlay on MMIO (after blit)
+            if crate::xhci::mouse_available() {
+                comp.mouse.redraw_overlay(shadow, info);
             }
         }
     });
@@ -278,7 +277,7 @@ pub fn poll_render() {
     });
 }
 
-/// Process a mouse event: update compositor state, redraw cursor.
+/// Process a mouse event: update compositor state, redraw cursor overlay.
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     let needs_scene_redraw = with_compositor(|comp| comp.handle_mouse(evt)).unwrap_or(false);
 
@@ -287,24 +286,15 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            comp.mouse.erase(shadow, info); // Always erase old cursor first
-
             if needs_scene_redraw {
-                // Scene changed (focus, drag) — use damaged render (not full aurora!)
+                // Scene changed (focus, drag) — render damaged regions to shadow, blit
                 let regions = comp.render_damaged(shadow, info);
-                if crate::xhci::mouse_available() {
-                    comp.mouse.draw(shadow, info);
-                }
                 for (x, y, w, h) in regions {
                     framebuffer::blit_rect(fb, x, y, w, h);
                 }
-                // Also blit cursor region if outside damage regions
-                comp.mouse.blit_cursor_regions(fb);
-            } else {
-                // Only cursor moved — draw new cursor, blit both regions
-                comp.mouse.draw(shadow, info);
-                comp.mouse.blit_cursor_regions(fb);
             }
+            // Cursor overlay: restore old pos from shadow→MMIO, draw new pos on MMIO
+            comp.mouse.redraw_overlay(shadow, info);
         }
     });
 }
