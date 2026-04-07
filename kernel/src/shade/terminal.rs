@@ -224,6 +224,10 @@ pub fn render_to_window(
 
         let len = *len;
         let visible_len = len.min(cols as usize);
+
+        // Clear this line only (per-line fill, not full content area)
+        crate::gui::render::fill_rect(shadow, info, x, py, w, char_h, 0x00101018);
+
         if visible_len == 0 { continue; }
 
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
