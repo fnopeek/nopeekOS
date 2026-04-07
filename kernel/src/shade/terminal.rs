@@ -111,6 +111,11 @@ static mut TERMINALS: [TerminalBuffer; MAX_TERMINALS] = {
     [INIT; MAX_TERMINALS]
 };
 
+/// Per-terminal saved input state (for switching between windows).
+const MAX_INPUT: usize = 512;
+static mut SAVED_INPUT: [[u8; MAX_INPUT]; MAX_TERMINALS] = [[0; MAX_INPUT]; MAX_TERMINALS];
+static mut SAVED_POS: [usize; MAX_TERMINALS] = [0; MAX_TERMINALS];
+
 /// Currently active terminal index (receives kprintln output).
 static ACTIVE_IDX: AtomicU8 = AtomicU8::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -273,4 +278,40 @@ pub fn render_input_line(
     }
 
     Some((win_cx, last_line_y, win_cw, char_h))
+}
+
+/// Save the current input buffer to the active terminal's saved state.
+pub fn save_input(buf: &[u8], pos: usize) {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return; }
+    let saved = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_INPUT) };
+    let spos = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_POS) };
+    let len = pos.min(MAX_INPUT);
+    saved[idx][..len].copy_from_slice(&buf[..len]);
+    spos[idx] = len;
+}
+
+/// Restore the saved input buffer from the active terminal.
+/// Returns the number of bytes restored (= pos).
+pub fn restore_input(buf: &mut [u8]) -> usize {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return 0; }
+    let saved = unsafe { &*core::ptr::addr_of!(SAVED_INPUT) };
+    let spos = unsafe { &*core::ptr::addr_of!(SAVED_POS) };
+    let len = spos[idx].min(buf.len());
+    buf[..len].copy_from_slice(&saved[idx][..len]);
+    len
+}
+
+/// Write the prompt string to the active terminal buffer.
+pub fn write_prompt() {
+    if !is_active() { return; }
+    let user = crate::config::get("name");
+    let cwd = crate::intent::get_cwd_for_shell();
+    let user_str = user.as_deref().unwrap_or("npk");
+    if cwd.is_empty() {
+        write(&alloc::format!("{}@npk /> ", user_str));
+    } else {
+        write(&alloc::format!("{}@npk {}> ", user_str, cwd));
+    }
 }
