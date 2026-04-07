@@ -45,14 +45,14 @@ pub fn init() {
     // Set GUI mode so kprintln doesn't draw directly to framebuffer
     framebuffer::set_gui_mode(true);
 
-    // Create initial terminal window (fills entire workspace)
+    crate::kprintln!("[npk] shade: compositor {}x{} scale:{}x", screen_w, screen_h, scale);
+
+    // Create initial terminal window AFTER boot log (so boot text doesn't appear in it)
     with_compositor(|comp| {
         comp.create_window("terminal", 0, 0, screen_w, screen_h);
     });
 
-    crate::kprintln!("[npk] shade: compositor {}x{} scale:{}x", screen_w, screen_h, scale);
-
-    // Write initial prompt so the window isn't empty
+    // Clean prompt only (no boot output in this window)
     terminal::write_prompt();
 }
 
@@ -218,12 +218,12 @@ pub fn stop() {
 pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)] {
     &[
         ("shade.gaps", "8", "Gap between tiled windows (px at 1x)"),
-        ("shade.border", "2", "Window border width (px at 1x)"),
+        ("shade.border", "1", "Window border width (px at 1x)"),
         ("shade.border_active", "", "Active window border color (hex, default: accent)"),
         ("shade.border_inactive", "3a2555", "Inactive window border color (hex)"),
         ("shade.bar_height", "28", "Shadebar height (px at 1x)"),
         ("shade.bar_position", "top", "Shadebar position (top/bottom)"),
         ("shade.rounding", "10", "Window corner radius (px at 1x)"),
-        ("shade.opacity", "200", "Window background opacity (0-256)"),
+        ("shade.opacity", "160", "Window background opacity (0-256, lower=more transparent)"),
     ]
 }
