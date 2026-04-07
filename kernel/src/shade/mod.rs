@@ -12,6 +12,7 @@ pub mod bar;
 pub mod compositor;
 pub mod terminal;
 pub mod input;
+pub mod cursor;
 
 use spin::Mutex;
 
@@ -77,6 +78,9 @@ pub fn render_frame() {
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.render(shadow, info);
+            if comp.mouse.visible || crate::xhci::mouse_available() {
+                comp.mouse.draw(shadow, info);
+            }
         }
 
         // Full blit
@@ -94,7 +98,13 @@ pub fn render_damaged() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            // Erase cursor before rendering (cursor was on old scene)
+            comp.mouse.erase(shadow, info);
             let regions = comp.render_damaged(shadow, info);
+            // Redraw cursor on updated scene
+            if crate::xhci::mouse_available() {
+                comp.mouse.draw(shadow, info);
+            }
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
@@ -227,6 +237,12 @@ pub fn render_input_line() {
 /// Fast path: only clears + redraws text (no aurora, no blend). Call from net::poll().
 pub fn poll_render() {
     if !is_active() { return; }
+
+    // Poll mouse events (keeps cursor responsive during long commands)
+    while let Some(evt) = crate::xhci::poll_mouse() {
+        handle_mouse(&evt);
+    }
+
     if !terminal::is_dirty() { return; }
     terminal::clear_dirty();
 
@@ -254,6 +270,42 @@ pub fn poll_render() {
             }
         }
     });
+}
+
+/// Process a mouse event: update compositor state, redraw cursor.
+pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
+    let needs_scene_redraw = with_compositor(|comp| comp.handle_mouse(evt)).unwrap_or(false);
+
+    if needs_scene_redraw {
+        // Full scene changed (focus switch, drag) — redraw everything + cursor
+        framebuffer::with_fb(|fb| {
+            let info = fb.info();
+            let (shadow, _) = fb.shadow_ptr();
+
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                comp.render(shadow, info);
+                comp.mouse.draw(shadow, info);
+            }
+
+            let mut damage = crate::gui::render::DamageTracker::new(info.width, info.height);
+            damage.mark_all();
+            damage.flush(fb);
+        });
+    } else {
+        // Only cursor moved — erase old, draw new, blit both regions
+        framebuffer::with_fb(|fb| {
+            let info = fb.info();
+            let (shadow, _) = fb.shadow_ptr();
+
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                let old_x = comp.mouse.saved_x;
+                let old_y = comp.mouse.saved_y;
+                comp.mouse.erase(shadow, info);
+                comp.mouse.draw(shadow, info);
+                comp.mouse.blit_cursor_regions(fb);
+            }
+        });
+    }
 }
 
 /// Stop shade compositor.

@@ -11,6 +11,25 @@ use crate::gui::{background, render};
 use super::window::{Window, WindowId, WindowState};
 use super::bar::ShadeBar;
 use super::terminal;
+use super::cursor::MouseState;
+
+/// Drag operation state (Mod+LMB move, Mod+RMB resize).
+#[derive(Clone, Copy)]
+pub enum DragMode { Move, Resize }
+
+#[derive(Clone, Copy)]
+pub struct DragState {
+    pub window: WindowId,
+    pub mode: DragMode,
+    /// Mouse position when drag started.
+    pub start_mx: i32,
+    pub start_my: i32,
+    /// Window position/size when drag started.
+    pub start_wx: u32,
+    pub start_wy: u32,
+    pub start_ww: u32,
+    pub start_wh: u32,
+}
 
 /// Compositor manages all windows, the bar, and rendering state.
 #[allow(dead_code)]
@@ -48,6 +67,10 @@ pub struct Compositor {
     pub needs_full_redraw: bool,
     /// Aurora background has been drawn (skip on partial updates).
     aurora_drawn: bool,
+    /// Mouse cursor state.
+    pub mouse: MouseState,
+    /// Drag state: which window is being dragged, and the grab offset.
+    pub drag: Option<DragState>,
 }
 
 #[allow(dead_code)]
@@ -90,6 +113,12 @@ impl Compositor {
             opacity,
             needs_full_redraw: true,
             aurora_drawn: false,
+            mouse: {
+                let mut m = MouseState::new();
+                m.init(screen_w, screen_h);
+                m
+            },
+            drag: None,
         }
     }
 
@@ -489,6 +518,117 @@ impl Compositor {
             .unwrap_or(0);
         let prev_idx = if current_idx == 0 { ws_windows.len() - 1 } else { current_idx - 1 };
         self.focus_window(ws_windows[prev_idx]);
+    }
+
+    /// Process a mouse event. Returns true if the scene needs re-rendering.
+    pub fn handle_mouse(&mut self, evt: &crate::xhci::MouseEvent) -> bool {
+        self.mouse.update(evt.dx, evt.dy, evt.buttons);
+        let mx = self.mouse.x;
+        let my = self.mouse.y;
+
+        let mod_held = crate::keyboard::is_super_held();
+
+        // Handle active drag
+        if let Some(drag) = self.drag {
+            if self.mouse.left_held() || self.mouse.right_held() {
+                let dx = mx - drag.start_mx;
+                let dy = my - drag.start_my;
+                if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
+                    match drag.mode {
+                        DragMode::Move => {
+                            win.x = (drag.start_wx as i32 + dx).max(0) as u32;
+                            win.y = (drag.start_wy as i32 + dy).max(0) as u32;
+                            win.dirty = true;
+                        }
+                        DragMode::Resize => {
+                            win.width = (drag.start_ww as i32 + dx).max(100) as u32;
+                            win.height = (drag.start_wh as i32 + dy).max(100) as u32;
+                            win.dirty = true;
+                        }
+                    }
+                }
+                self.needs_full_redraw = true;
+                return true;
+            } else {
+                // Button released — end drag
+                self.drag = None;
+                return true;
+            }
+        }
+
+        // Mod+LMB: start move drag (window becomes floating)
+        if mod_held && self.mouse.left_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                if let Some(win) = self.windows.iter_mut().find(|w| w.id == wid) {
+                    win.state = WindowState::Floating;
+                    let drag = DragState {
+                        window: wid,
+                        mode: DragMode::Move,
+                        start_mx: mx, start_my: my,
+                        start_wx: win.x, start_wy: win.y,
+                        start_ww: win.width, start_wh: win.height,
+                    };
+                    self.drag = Some(drag);
+                    self.focus_window(wid);
+                    self.retile();
+                    self.needs_full_redraw = true;
+                    return true;
+                }
+            }
+        }
+
+        // Mod+RMB: start resize drag (window becomes floating)
+        if mod_held && self.mouse.right_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                if let Some(win) = self.windows.iter_mut().find(|w| w.id == wid) {
+                    win.state = WindowState::Floating;
+                    let drag = DragState {
+                        window: wid,
+                        mode: DragMode::Resize,
+                        start_mx: mx, start_my: my,
+                        start_wx: win.x, start_wy: win.y,
+                        start_ww: win.width, start_wh: win.height,
+                    };
+                    self.drag = Some(drag);
+                    self.focus_window(wid);
+                    self.retile();
+                    self.needs_full_redraw = true;
+                    return true;
+                }
+            }
+        }
+
+        // Regular LMB click: focus window
+        if self.mouse.left_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                if self.focused != Some(wid) {
+                    self.focus_window(wid);
+                    return true;
+                }
+            }
+        }
+
+        // Mouse moved — cursor needs redraw (handled by caller)
+        evt.dx != 0 || evt.dy != 0
+    }
+
+    /// Find the topmost window at screen coordinates (x, y).
+    fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+        // Z-order: front to back (first match = topmost)
+        for &wid in &self.z_order {
+            if let Some(win) = self.windows.iter().find(|w| w.id == wid
+                && w.workspace == self.active_workspace && w.visible)
+            {
+                let wx = win.x as i32;
+                let wy = win.y as i32;
+                let ww = win.width as i32;
+                let wh = win.height as i32;
+                if x >= wx && x < wx + ww && y >= wy && y < wy + wh {
+                    return Some(wid);
+                }
+            }
+        }
+        None
     }
 }
 

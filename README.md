@@ -221,7 +221,7 @@ Every execution is a sandboxed WASM module:
 - [x] ACPI power-off (RSDP, FADT, DSDT \_S5 parsing)
 - [x] Gateway routing, serial detection, dual xHCI controllers
 - [ ] npk-shell: TLS-encrypted remote intent loop (TCP listener, passphrase auth)
-- [ ] USB mouse (HID boot protocol, same xHCI infrastructure)
+- [x] USB mouse (HID boot protocol, xHCI multi-device, software cursor, click-to-focus, Mod+drag)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 
 ### Phase 8 -- Human View (in progress)
@@ -241,7 +241,7 @@ Every execution is a sandboxed WASM module:
 - [x] AltGr support for Swiss German keyboard (@ # | [ ] { } \ ~)
 - [x] Purple `[npk]` accent color in boot output
 - [ ] Tiling window manager (Hyprland-inspired, framebuffer compositing)
-- [ ] USB mouse input (xHCI HID, multi-device support)
+- [x] USB mouse input (xHCI HID, boot protocol, click-to-focus, Mod+LMB move, Mod+RMB resize)
 - [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
 - [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@60Hz HDMI 2.0 via DDI-B, DPLL1, combo PHY)
 - [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI→HDMI mode switch, auto-fallback to 4K@30)
@@ -320,7 +320,7 @@ nopeekOS/
 │       ├── virtio_net.rs        # Network device driver
 │       ├── nvme.rs              # NVMe driver (PCIe, TRIM)
 │       ├── blkdev.rs            # Block device abstraction
-│       ├── xhci.rs              # xHCI USB driver (keyboard)
+│       ├── xhci.rs              # xHCI USB driver (keyboard + mouse)
 │       ├── keyboard.rs          # PS/2 keyboard (extended scancodes)
 │       ├── framebuffer.rs       # UEFI GOP framebuffer
 │       ├── acpi.rs              # ACPI power management

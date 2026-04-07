@@ -32,6 +32,9 @@ pub fn set_super(held: bool) { SUPER.store(held, Ordering::Release); }
 /// Set Shift key state. Called by any keyboard driver.
 pub fn set_shift(held: bool) { SHIFT.store(held, Ordering::Release); }
 
+/// Set Ctrl key state. Called by any keyboard driver.
+pub fn set_ctrl(held: bool) { CTRL.store(held, Ordering::Release); }
+
 /// Query modifier state (used by shade::input).
 pub fn is_super_held() -> bool { SUPER.load(Ordering::Acquire) }
 pub fn is_ctrl_held() -> bool { CTRL.load(Ordering::Acquire) }

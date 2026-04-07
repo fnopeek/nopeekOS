@@ -124,6 +124,9 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // USB keyboard (xHCI) — before any user input is needed
     if xhci::init() {
         vga::show_status(b"USB keyboard online");
+        if xhci::init_mouse() {
+            vga::show_status(b"USB mouse online");
+        }
     }
 
     kprintln!("[npk] Probing block devices...");
