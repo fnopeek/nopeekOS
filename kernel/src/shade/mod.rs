@@ -225,9 +225,7 @@ pub fn poll_render() {
                     let cw = win.content_w(border).saturating_sub(pad * 2);
                     let ch = win.content_h(border).saturating_sub(pad * 2);
 
-                    // Fast: solid bg fill (no aurora/blend = instant)
-                    crate::gui::render::fill_rect(shadow, info,
-                        cx, cy, cw, ch, win.bg_color);
+                    // Render text (per-line clearing, preserves transparent bg)
                     terminal::render_to_window(shadow, info, cx, cy, cw, ch, scale, win.terminal_idx);
                     framebuffer::blit_rect(fb, cx, cy, cw, ch);
                 }
