@@ -268,24 +268,29 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Draw current line text with bg_color per character (no separate background fill,
-    // avoids visible "dark bar" from blend mismatch with window background)
+    // Redraw line background matching window render (aurora → border blend → content blend)
+    crate::gui::background::draw_aurora_region(shadow, info,
+        win_cx, last_line_y, win_cw, char_h);
+    // Border blend (same opacity as compositor: 180)
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_cx, last_line_y, win_cw, char_h,
+        crate::gui::background::accent_color(), 0, 180);
+    // Content blend
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_cx, last_line_y, win_cw, char_h,
+        bg_color, 0, opacity);
+
+    // Draw current line text (no per-char bg, background already matches)
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
-    let prompt_color = crate::gui::background::accent_color();
-    let fg = 0x00E8E8E8u32;
-    let text_bg = Some(bg_color);
-
-    // Clear the line first (fill with bg_color for characters beyond text)
-    crate::gui::render::fill_rect(shadow, info,
-        win_cx, last_line_y, win_cw, char_h, bg_color);
-
     if visible_len > 0 {
+        let prompt_color = crate::gui::background::accent_color();
+        let fg = 0x00E8E8E8u32;
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
             if text.contains("@npk") {
-                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, prompt_color, text_bg, 1);
+                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, prompt_color, None, 1);
             } else {
-                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, fg, text_bg, 1);
+                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, fg, None, 1);
             }
         }
     }

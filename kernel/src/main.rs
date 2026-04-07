@@ -333,13 +333,6 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // Start npk-shell listener (encrypted remote access, port 4444)
     shell::start_listener();
 
-    // Start shade compositor (after login, GPU, and config are ready)
-    if framebuffer::is_available() {
-        shade::init();
-        shade::render_frame();
-        vga::show_status(b"Shade compositor active");
-    }
-
     kprintln!("[npk] Starting Intent Loop...");
     vga::show_status(b"Intent Loop running");
     vga::show_ready();
@@ -349,6 +342,12 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     kprintln!("[npk]  System ready. Express your intent.");
     kprintln!("[npk] ====================================");
     kprintln!();
+
+    // Start shade compositor AFTER boot messages (so they stay on serial only)
+    if framebuffer::is_available() {
+        shade::init();
+        shade::render_frame();
+    }
 
     intent::run_loop(vault_ref, session_id);
 }
