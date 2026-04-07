@@ -578,6 +578,15 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // Wait for device attachment + link training (500ms for all devices)
     crate::interrupts::delay_ms(500);
 
+    // Debug: show all port states
+    for p in 0..max_ports {
+        let sc = r32(oper, portsc_off(p));
+        if sc & PORTSC_CCS != 0 {
+            let speed = (sc >> 10) & 0xF;
+            kprintln!("[npk] xhci: port {} connected (speed={}, portsc={:#010x})", p + 1, speed, sc);
+        }
+    }
+
     // Save original DMA resource pointers (attempt 0 uses primary, attempt 1 uses mouse set)
     let orig_device_ctx = state.device_ctx;
     let orig_ep0_ring = state.ep0_ring;
@@ -589,7 +598,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     for p in 0..max_ports {
         if r32(oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
         if attempt >= 2 { break; } // only 2 resource sets available
-        kprintln!("[npk] xhci: device on port {}", p + 1);
+        kprintln!("[npk] xhci: trying port {} (attempt {})", p + 1, attempt);
 
         // Second attempt: switch to mouse DMA resources
         if attempt == 1 {
@@ -600,19 +609,23 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         }
 
         // Reset port
+        kprintln!("[npk] xhci: resetting port {}...", p + 1);
         if !reset_port(&state, p) {
             kprintln!("[npk] xhci: port reset failed");
             attempt += 1;
             continue;
         }
         state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+        kprintln!("[npk] xhci: port {} reset ok, speed={}", p + 1, state.port_speed);
 
         // Enable Slot
+        kprintln!("[npk] xhci: enable slot...");
         let slot_id = match cmd_enable_slot(&mut state) {
             Some(s) => s,
             None => { kprintln!("[npk] xhci: enable slot failed"); attempt += 1; continue; }
         };
         state.slot_id = slot_id;
+        kprintln!("[npk] xhci: slot {} assigned", slot_id);
 
         // Set DCBAA entry for this slot
         // SAFETY: writing to DMA array
@@ -631,14 +644,18 @@ fn init_controller(dev: pci::PciDevice) -> bool {
             SPEED_SUPER => 512,
             _ => 64,
         };
+        kprintln!("[npk] xhci: addressing device (maxpkt={})...", max_packet);
         if !cmd_address_device(&mut state, p, max_packet) {
             kprintln!("[npk] xhci: address device failed");
             attempt += 1;
             continue;
         }
+        kprintln!("[npk] xhci: device addressed");
 
         // Get Configuration Descriptor (9 bytes first to get total length)
+        kprintln!("[npk] xhci: getting config descriptor...");
         if !usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
+            kprintln!("[npk] xhci: get config desc failed");
             attempt += 1;
             continue;
         }
@@ -649,7 +666,9 @@ fn init_controller(dev: pci::PciDevice) -> bool {
 
         // Get full Configuration Descriptor
         let fetch_len = total_len.min(512) as u16;
+        kprintln!("[npk] xhci: getting full config desc ({} bytes)...", fetch_len);
         if !usb_get_descriptor(&mut state, DESC_CONFIG, fetch_len) {
+            kprintln!("[npk] xhci: get full config desc failed");
             attempt += 1;
             continue;
         }
@@ -1284,6 +1303,7 @@ fn find_keyboard_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8
             let iface_class = r8(buf, (pos + 5) as u32);
             let iface_subclass = r8(buf, (pos + 6) as u32);
             let iface_protocol = r8(buf, (pos + 7) as u32);
+            crate::kprintln!("[npk] xhci: iface class={} sub={} proto={}", iface_class, iface_subclass, iface_protocol);
             // HID class=3, boot subclass=1, keyboard protocol=1
             in_kbd_iface = iface_class == 3 && iface_subclass == 1 && iface_protocol == 1;
             if in_kbd_iface {
