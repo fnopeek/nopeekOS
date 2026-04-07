@@ -1,15 +1,17 @@
-//! Shade Terminal — text buffer for rendering intent loop output inside windows.
+//! Shade Terminal — per-window text buffers for independent terminal sessions.
 //!
-//! When shade is active, kprintln output is captured here and rendered
-//! as text content inside the focused terminal window.
+//! Each window gets its own TerminalBuffer. kprintln output goes to the
+//! active (focused) terminal. Windows are completely independent.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-/// Maximum lines and columns in the terminal buffer.
+/// Maximum lines and columns in each terminal buffer.
 const MAX_LINES: usize = 200;
 const MAX_COLS: usize = 256;
+/// Maximum number of independent terminal sessions.
+const MAX_TERMINALS: usize = 8;
 
-/// Terminal text buffer.
+/// Terminal text buffer (one per window).
 pub struct TerminalBuffer {
     lines: [[u8; MAX_COLS]; MAX_LINES],
     lens: [usize; MAX_LINES],
@@ -17,8 +19,8 @@ pub struct TerminalBuffer {
     total: usize,
     /// Current cursor column.
     col: usize,
-    /// View scroll offset (lines from bottom).
-    pub scroll_offset: usize,
+    /// Whether this slot is in use.
+    pub in_use: bool,
 }
 
 impl TerminalBuffer {
@@ -28,18 +30,16 @@ impl TerminalBuffer {
             lens: [0; MAX_LINES],
             total: 0,
             col: 0,
-            scroll_offset: 0,
+            in_use: false,
         }
     }
 
-    /// Write a string to the terminal buffer.
     pub fn write_str(&mut self, s: &str) {
         for &byte in s.as_bytes() {
             self.write_byte(byte);
         }
     }
 
-    /// Write a single byte.
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => {
@@ -47,14 +47,12 @@ impl TerminalBuffer {
                 self.col = 0;
                 let idx = self.total % MAX_LINES;
                 self.lens[idx] = 0;
-                // Clear next line
                 self.lines[idx] = [0; MAX_COLS];
             }
             b'\r' => {
                 self.col = 0;
             }
             0x08 => {
-                // Backspace
                 if self.col > 0 {
                     self.col -= 1;
                     let idx = self.total % MAX_LINES;
@@ -76,11 +74,17 @@ impl TerminalBuffer {
         }
     }
 
-    /// Get visible lines for rendering. Returns iterator of (line_content, length).
-    /// `visible_rows` is how many lines fit on screen.
+    pub fn clear(&mut self) {
+        self.lines = [[0; MAX_COLS]; MAX_LINES];
+        self.lens = [0; MAX_LINES];
+        self.total = 0;
+        self.col = 0;
+    }
+
+    /// Get visible lines for rendering.
     pub fn visible_lines(&self, visible_rows: usize) -> impl Iterator<Item = (&[u8], usize)> {
-        let end = self.total + 1; // Include current line
-        let start = end.saturating_sub(visible_rows).saturating_sub(self.scroll_offset);
+        let end = self.total + 1;
+        let start = end.saturating_sub(visible_rows);
         let count = visible_rows.min(end.saturating_sub(start));
 
         (0..count).map(move |i| {
@@ -90,14 +94,21 @@ impl TerminalBuffer {
         })
     }
 
-    /// Total lines written.
-    pub fn line_count(&self) -> usize {
-        self.total + 1
+    /// Get the current (bottom) line content for fast input rendering.
+    pub fn current_line(&self) -> (&[u8], usize) {
+        let idx = self.total % MAX_LINES;
+        (&self.lines[idx][..], self.lens[idx])
     }
 }
 
-/// Global terminal buffer (protected by shade compositor lock).
-static mut TERMINAL: TerminalBuffer = TerminalBuffer::new();
+/// All terminal buffers.
+static mut TERMINALS: [TerminalBuffer; MAX_TERMINALS] = {
+    const INIT: TerminalBuffer = TerminalBuffer::new();
+    [INIT; MAX_TERMINALS]
+};
+
+/// Currently active terminal index (receives kprintln output).
+static ACTIVE_IDX: AtomicU8 = AtomicU8::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Enable/disable terminal capture.
@@ -105,46 +116,75 @@ pub fn set_active(active: bool) {
     ACTIVE.store(active, Ordering::Release);
 }
 
-/// Check if terminal capture is active.
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
-/// Clear the terminal buffer.
+/// Allocate a new terminal buffer. Returns index (0-7) or None if full.
+pub fn allocate() -> Option<u8> {
+    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+    for (i, t) in terms.iter_mut().enumerate() {
+        if !t.in_use {
+            t.in_use = true;
+            t.clear();
+            return Some(i as u8);
+        }
+    }
+    None
+}
+
+/// Free a terminal buffer.
+pub fn free(idx: u8) {
+    if (idx as usize) < MAX_TERMINALS {
+        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+        terms[idx as usize].in_use = false;
+    }
+}
+
+/// Set which terminal receives kprintln output.
+pub fn set_active_terminal(idx: u8) {
+    ACTIVE_IDX.store(idx, Ordering::Release);
+}
+
+/// Clear the active terminal buffer.
 pub fn clear() {
     if !is_active() { return; }
-    let term = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL) };
-    term.lines = [[0; MAX_COLS]; MAX_LINES];
-    term.lens = [0; MAX_LINES];
-    term.total = 0;
-    term.col = 0;
-    term.scroll_offset = 0;
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx < MAX_TERMINALS {
+        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+        terms[idx].clear();
+    }
 }
 
-/// Write a string to the shade terminal buffer (called from serial::write_str).
+/// Write to the active terminal (called from serial::write_str).
 pub fn write(s: &str) {
     if !is_active() { return; }
-    // SAFETY: single-core, no preemption. write_str is called under serial lock.
-    let term = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL) };
-    term.write_str(s);
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx < MAX_TERMINALS {
+        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+        terms[idx].write_str(s);
+    }
 }
 
-/// Render terminal content into a window region on the shadow buffer.
+/// Render a specific terminal's content into a window region.
 pub fn render_to_window(
     shadow: *mut u8,
     info: &crate::framebuffer::FbInfo,
     x: u32, y: u32, w: u32, h: u32,
     _scale: u32,
+    terminal_idx: u8,
 ) {
-    let (char_w, char_h) = crate::gui::font::char_size(1); // Always use small font
+    if (terminal_idx as usize) >= MAX_TERMINALS { return; }
+
+    let (char_w, char_h) = crate::gui::font::char_size(1);
     let cols = w / char_w;
     let rows = h / char_h;
     if cols == 0 || rows == 0 { return; }
 
     let visible_rows = rows as usize;
+    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
+    let term = &terms[terminal_idx as usize];
 
-    // SAFETY: single-core, called under compositor lock
-    let term = unsafe { &*core::ptr::addr_of!(TERMINAL) };
     let lines: alloc::vec::Vec<(alloc::vec::Vec<u8>, usize)> = term.visible_lines(visible_rows)
         .map(|(data, len)| {
             let mut v = alloc::vec![0u8; len];
@@ -153,7 +193,7 @@ pub fn render_to_window(
         })
         .collect();
 
-    let fg = 0x00E8E8E8u32; // Near-white text
+    let fg = 0x00E8E8E8u32;
     let prompt_color = crate::gui::background::accent_color();
 
     for (i, (line_data, len)) in lines.iter().enumerate() {
@@ -165,21 +205,65 @@ pub fn render_to_window(
         if visible_len == 0 { continue; }
 
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
-            // Color [npk] prefix with accent color
             if text.starts_with("[npk]") {
                 crate::gui::font::draw_str(shadow, info, "[npk]", x, py, prompt_color, None, 1);
                 if visible_len > 5 {
                     if let Ok(rest) = core::str::from_utf8(&line_data[5..visible_len]) {
-                        let rest_x = x + 5 * char_w;
-                        crate::gui::font::draw_str(shadow, info, rest, rest_x, py, fg, None, 1);
+                        crate::gui::font::draw_str(shadow, info, rest, x + 5 * char_w, py, fg, None, 1);
                     }
                 }
             } else if text.contains("@npk") {
-                // Prompt line: color with accent
                 crate::gui::font::draw_str(shadow, info, text, x, py, prompt_color, None, 1);
             } else {
                 crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
             }
         }
     }
+}
+
+/// Fast render: only the current input line of the active terminal.
+/// Returns the blit region (x, y, w, h) or None.
+pub fn render_input_line(
+    shadow: *mut u8,
+    info: &crate::framebuffer::FbInfo,
+    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
+    bg_color: u32, opacity: u32,
+    terminal_idx: u8,
+) -> Option<(u32, u32, u32, u32)> {
+    if (terminal_idx as usize) >= MAX_TERMINALS { return None; }
+
+    let (char_w, char_h) = crate::gui::font::char_size(1);
+    let cols = win_cw / char_w;
+    let rows = win_ch / char_h;
+    if cols == 0 || rows == 0 { return None; }
+
+    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
+    let term = &terms[terminal_idx as usize];
+
+    // Calculate Y position of the last visible line
+    let visible_rows = rows as usize;
+    let end = term.total + 1;
+    let visible_count = visible_rows.min(end);
+    let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
+
+    // Clear last line area (fill with bg)
+    crate::gui::render::fill_rect(shadow, info,
+        win_cx, last_line_y, win_cw, char_h, bg_color);
+
+    // Draw current line text
+    let (line_data, len) = term.current_line();
+    let visible_len = len.min(cols as usize);
+    if visible_len > 0 {
+        if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
+            let prompt_color = crate::gui::background::accent_color();
+            let fg = 0x00E8E8E8u32;
+            if text.contains("@npk") {
+                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, prompt_color, None, 1);
+            } else {
+                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, fg, None, 1);
+            }
+        }
+    }
+
+    Some((win_cx, last_line_y, win_cw, char_h))
 }

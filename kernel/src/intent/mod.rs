@@ -253,6 +253,9 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 if pos > 0 {
                     pos -= 1;
                     kprint!("\x08 \x08");
+                    if crate::shade::is_active() {
+                        crate::shade::render_input_line();
+                    }
                 }
             }
             0x09 => {
@@ -274,6 +277,10 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     buf[pos] = b;
                     pos += 1;
                     kprint!("{}", b as char);
+                    // Fast: only re-render the current input line (not full window)
+                    if crate::shade::is_active() {
+                        crate::shade::render_input_line();
+                    }
                 }
             }
             _ => {}
@@ -677,7 +684,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             if crate::shade::is_active() {
                 // Shade mode: clear terminal buffer and re-render focused window
                 crate::shade::terminal::clear();
-                crate::shade::render_terminal_update();
+                crate::shade::render_frame();
             } else {
                 crate::framebuffer::clear();
             }

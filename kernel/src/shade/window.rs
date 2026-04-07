@@ -42,6 +42,8 @@ pub struct Window {
     pub dirty: bool,
     /// Workspace index (0-based).
     pub workspace: u8,
+    /// Terminal buffer index (separate session per window).
+    pub terminal_idx: u8,
 }
 
 #[allow(dead_code)]
@@ -61,6 +63,7 @@ impl Window {
             focused: false,
             dirty: true,
             workspace: 0,
+            terminal_idx: 0,
         }
     }
 
