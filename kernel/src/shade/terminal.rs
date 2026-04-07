@@ -136,6 +136,45 @@ pub fn set_cursor_pos(pos: usize) {
     unsafe { INPUT_CURSOR_POS = pos; }
 }
 
+/// Rewrite the input portion of the current terminal line.
+/// Keeps the prompt intact, overwrites from `prompt_len` onward with `input`,
+/// and clears any trailing chars from the previous content.
+pub fn rewrite_input(input: &[u8], input_len: usize) {
+    if !is_active() { return; }
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return; }
+    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+    let term = &mut terms[idx];
+    let line_idx = term.total % MAX_LINES;
+
+    // Find prompt length: everything already on the line before user input starts.
+    // The prompt ends at the current col minus whatever the caller's pos is.
+    // But we don't know the prompt length directly. Instead, we store it.
+    let prompt_len = unsafe { PROMPT_LEN };
+
+    // Rewrite from prompt_len onward
+    let max = MAX_COLS.min(prompt_len + input_len);
+    for i in prompt_len..max {
+        term.lines[line_idx][i] = input[i - prompt_len];
+    }
+    // Clear any trailing chars (line got shorter)
+    for i in max..term.lens[line_idx] {
+        term.lines[line_idx][i] = b' ';
+    }
+    term.lens[line_idx] = max;
+    term.col = max;
+    DIRTY.store(true, Ordering::Release);
+}
+
+/// Stored prompt length for the active terminal.
+static mut PROMPT_LEN: usize = 0;
+
+/// Set the prompt length (called after write_prompt).
+pub fn set_prompt_len(len: usize) {
+    // SAFETY: single-core
+    unsafe { PROMPT_LEN = len; }
+}
+
 /// Get the current line length in the active terminal (for cursor offset calculation).
 pub fn current_line_len() -> usize {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
@@ -407,9 +446,11 @@ pub fn write_prompt() {
     let user = crate::config::get("name");
     let cwd = crate::intent::get_cwd_for_shell();
     let user_str = user.as_deref().unwrap_or("npk");
-    if cwd.is_empty() {
-        write(&alloc::format!("{}@npk /> ", user_str));
+    let prompt = if cwd.is_empty() {
+        alloc::format!("{}@npk /> ", user_str)
     } else {
-        write(&alloc::format!("{}@npk {}> ", user_str, cwd));
-    }
+        alloc::format!("{}@npk {}> ", user_str, cwd)
+    };
+    set_prompt_len(prompt.len());
+    write(&prompt);
 }

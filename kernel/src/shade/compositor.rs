@@ -671,8 +671,8 @@ impl Compositor {
         let b_idx = self.windows.iter().position(|w| w.id == b);
         if let (Some(ai), Some(bi)) = (a_idx, b_idx) {
             self.windows.swap(ai, bi);
-            self.retile(); // Assigns correct positions based on new order
-            // Only the 2 swapped windows need re-rendering (retile marks them dirty)
+            self.retile();
+            self.needs_full_redraw = true; // Full redraw: aurora between windows needs refresh
         }
     }
 
