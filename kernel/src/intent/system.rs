@@ -198,6 +198,108 @@ pub fn intent_gpu(args: &str) {
     }
 }
 
+pub fn intent_shade(args: &str) {
+    match args.trim() {
+        "init" | "start" => {
+            if crate::shade::is_active() {
+                kprintln!("[npk] shade: already running");
+                return;
+            }
+            crate::shade::init();
+            // Create a demo terminal window
+            crate::shade::with_compositor(|comp| {
+                let id = comp.create_window("terminal", 0, 0, 800, 600);
+                // Fill with dark background
+                if let Some(win) = comp.window_mut(id) {
+                    win.clear(0x00101018);
+                    // Draw a simple prompt text
+                    // (Content will be rendered by WASM modules in the future)
+                }
+            });
+            crate::shade::render_frame();
+            kprintln!("[npk] shade: compositor active");
+        }
+        "demo" => {
+            if !crate::shade::is_active() {
+                crate::shade::init();
+            }
+            // Create demo windows to show tiling
+            crate::shade::with_compositor(|comp| {
+                let _id1 = comp.create_window("terminal", 0, 0, 800, 600);
+                let id2 = comp.create_window("editor", 0, 0, 800, 600);
+                let id3 = comp.create_window("status", 0, 0, 800, 300);
+
+                // Color the windows differently
+                if let Some(win) = comp.window_mut(id2) {
+                    win.clear(0x00180820);
+                }
+                if let Some(win) = comp.window_mut(id3) {
+                    win.clear(0x00081820);
+                }
+            });
+            crate::shade::render_frame();
+            kprintln!("[npk] shade: demo mode (3 windows, master-stack layout)");
+        }
+        "stop" | "exit" => {
+            if !crate::shade::is_active() {
+                kprintln!("[npk] shade: not running");
+                return;
+            }
+            // Clear compositor and restore text console
+            *crate::shade::COMPOSITOR.lock() = None;
+            crate::framebuffer::clear();
+            kprintln!("[npk] shade: stopped");
+        }
+        "ws" | "workspace" => {
+            kprintln!("[npk] Usage: shade ws <1-4>");
+        }
+        sub if sub.starts_with("ws ") || sub.starts_with("workspace ") => {
+            let num_str = sub.split_whitespace().nth(1).unwrap_or("");
+            if let Ok(ws) = num_str.parse::<u8>() {
+                if ws >= 1 && ws <= 4 {
+                    crate::shade::with_compositor(|comp| {
+                        comp.switch_workspace(ws - 1);
+                    });
+                    crate::shade::render_frame();
+                    kprintln!("[npk] shade: workspace {}", ws);
+                } else {
+                    kprintln!("[npk] shade: workspace 1-4");
+                }
+            }
+        }
+        "config" => {
+            kprintln!();
+            kprintln!("  Shade Compositor");
+            kprintln!("  ────────────────");
+            for (key, default, desc) in crate::shade::default_config() {
+                let current = crate::config::get(key);
+                let val = current.as_deref().unwrap_or(default);
+                kprintln!("  {:24} = {:8}  {}", key, val, desc);
+            }
+            kprintln!();
+            kprintln!("  Use 'set <key> <value>' to change.");
+            kprintln!();
+        }
+        "status" | "" => {
+            if crate::shade::is_active() {
+                crate::shade::with_compositor(|comp| {
+                    kprintln!("  shade: active");
+                    kprintln!("  screen: {}x{} scale:{}x", comp.screen_w, comp.screen_h, comp.scale);
+                    kprintln!("  windows: {}", comp.window_count());
+                    kprintln!("  workspace: {}/4", comp.active_workspace + 1);
+                    kprintln!("  gaps: {}px  border: {}px", comp.gaps, comp.border);
+                    kprintln!("  bar: {:?} ({}px)", comp.bar.position, comp.bar.height);
+                });
+            } else {
+                kprintln!("[npk] shade: not running (use 'shade init' to start)");
+            }
+        }
+        _ => {
+            kprintln!("Usage: shade [init|demo|stop|status|config|ws <1-4>]");
+        }
+    }
+}
+
 pub fn intent_dmesg() {
     // Stop capture, print, restart — so dmesg output itself isn't appended
     let log = crate::serial::stop_capture();
@@ -367,6 +469,26 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Keys: timezone (+2), keyboard (de_CH), lang (de)");
             kprintln!();
         }
+        "shade" | "compositor" | "wm" | "display" => {
+            kprintln!();
+            kprintln!("  Shade Compositor");
+            kprintln!("  ────────────────");
+            kprintln!("  shade init             Start compositor");
+            kprintln!("  shade demo             Demo with 3 tiled windows");
+            kprintln!("  shade stop             Stop compositor, return to text");
+            kprintln!("  shade status           Current compositor state");
+            kprintln!("  shade config           Show/change compositor settings");
+            kprintln!("  shade ws <1-4>         Switch workspace");
+            kprintln!();
+            kprintln!("  Config keys (set via 'set <key> <value>'):");
+            kprintln!("    shade.gaps            Gap between windows (px, default: 8)");
+            kprintln!("    shade.border          Border width (px, default: 2)");
+            kprintln!("    shade.border_active   Active border color (hex)");
+            kprintln!("    shade.border_inactive Inactive border color (hex)");
+            kprintln!("    shade.bar_height      Status bar height (px, default: 28)");
+            kprintln!("    shade.bar_position    Bar position (top/bottom)");
+            kprintln!();
+        }
         "disk" | "blk" => {
             kprintln!();
             kprintln!("  Disk");
@@ -389,9 +511,10 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Exec:      run · add · multiply");
             kprintln!("  Security:  lock · passwd · caps · audit · shell");
             kprintln!("  Config:    set · get · config");
+            kprintln!("  Display:   gpu · shade");
             kprintln!("  Disk:      disk read · disk write");
             kprintln!();
-            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk)");
+            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade)");
             kprintln!();
         }
     }

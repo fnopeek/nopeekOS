@@ -554,6 +554,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "gpu" => {
             system::intent_gpu(args);
         }
+        "shade" => {
+            system::intent_shade(args);
+        }
         "history" => {
             system::intent_history();
         }
