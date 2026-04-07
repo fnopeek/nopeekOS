@@ -717,11 +717,15 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         // Schedule first interrupt transfer
         schedule_interrupt_transfer(&mut state);
         kprintln!("[npk] xhci: USB keyboard (HID boot protocol)");
+        kprintln!("[npk] xhci: DEBUG — pausing 10s so you can read above...");
+        crate::interrupts::delay_ms(10000);
         AVAILABLE.store(true, Ordering::Relaxed);
         *STATE.lock() = Some(state);
         return true;
     }
 
+    kprintln!("[npk] xhci: no keyboard found on any port — waiting 10s for debug...");
+    crate::interrupts::delay_ms(10000);
     false // No keyboard found on any port
 }
 
