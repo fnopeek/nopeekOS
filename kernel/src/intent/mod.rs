@@ -160,6 +160,7 @@ fn ensure_parents(path: &str) {
 fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: CapId) -> usize {
     let mut pos = 0;
     let mut esc: u8 = 0; // 0=normal, 1=got ESC, 2=got ESC[
+    let mut esc_mod = false; // Was mod key held when ESC was received?
 
     HISTORY.lock().reset_cursor();
 
@@ -221,8 +222,8 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         }
         if esc == 2 {
             esc = 0;
-            // Check shade arrow keybinds (Mod+Arrow)
-            if crate::shade::input::try_arrow_keybind(byte) {
+            // Check shade arrow keybinds (uses saved mod state from ESC time)
+            if esc_mod && crate::shade::input::try_arrow_keybind(byte) {
                 continue;
             }
             match byte {
@@ -261,7 +262,11 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         }
 
         match byte {
-            0x1b => { esc = 1; }
+            0x1b => {
+                esc = 1;
+                // Capture mod state NOW (before next USB report clears it)
+                esc_mod = crate::shade::input::is_mod_active();
+            }
             b'\r' | b'\n' => {
                 kprint!("\n");
                 HISTORY.lock().push(&buf[..pos]);
