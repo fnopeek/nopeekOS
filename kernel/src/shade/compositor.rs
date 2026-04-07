@@ -321,7 +321,7 @@ impl Compositor {
     }
 
     /// Render a single window: rounded border + semi-transparent bg + terminal text.
-    fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
+    pub(crate) fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
                      border_color: u32) {
         let cx = win.content_x(border);

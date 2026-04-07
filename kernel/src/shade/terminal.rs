@@ -225,9 +225,6 @@ pub fn render_to_window(
         let len = *len;
         let visible_len = len.min(cols as usize);
 
-        // Clear this line only (per-line fill, not full content area)
-        crate::gui::render::fill_rect(shadow, info, x, py, w, char_h, 0x00101018);
-
         if visible_len == 0 { continue; }
 
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
@@ -272,10 +269,7 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Fast path: solid bg fill + text only (no aurora, no blend = <1ms)
-    crate::gui::render::fill_rect(shadow, info,
-        win_cx, last_line_y, win_cw, char_h, bg_color);
-
+    // Draw text directly on transparent background (no fill)
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
     if visible_len > 0 {
