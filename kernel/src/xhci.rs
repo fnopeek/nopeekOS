@@ -717,15 +717,11 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         // Schedule first interrupt transfer
         schedule_interrupt_transfer(&mut state);
         kprintln!("[npk] xhci: USB keyboard (HID boot protocol)");
-        kprintln!("[npk] xhci: DEBUG — pausing 10s so you can read above...");
-        crate::interrupts::delay_ms(10000);
         AVAILABLE.store(true, Ordering::Relaxed);
         *STATE.lock() = Some(state);
         return true;
     }
 
-    kprintln!("[npk] xhci: no keyboard found on any port — waiting 10s for debug...");
-    crate::interrupts::delay_ms(10000);
     false // No keyboard found on any port
 }
 
@@ -1296,7 +1292,11 @@ fn find_keyboard_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8
     let mut pos = 0usize;
     let mut in_kbd_iface = false;
     let mut kbd_iface = 0u8;
+    let mut has_mouse_iface = false;
+    let mut kbd_result: Option<(u8, u8, u16, u8)> = None;
 
+    // Single pass: collect keyboard endpoint AND check for mouse interface.
+    // If both exist, it's a composite mouse device — skip its keyboard interface.
     while pos + 1 < total_len {
         let len = r8(buf, pos as u32) as usize;
         let dtype = r8(buf, (pos + 1) as u32);
@@ -1307,7 +1307,10 @@ fn find_keyboard_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8
             let iface_class = r8(buf, (pos + 5) as u32);
             let iface_subclass = r8(buf, (pos + 6) as u32);
             let iface_protocol = r8(buf, (pos + 7) as u32);
-            crate::kprintln!("[npk] xhci: iface class={} sub={} proto={}", iface_class, iface_subclass, iface_protocol);
+            // Track mouse interface (composite device detection)
+            if iface_class == 3 && iface_subclass == 1 && iface_protocol == 2 {
+                has_mouse_iface = true;
+            }
             // HID class=3, boot subclass=1, keyboard protocol=1
             in_kbd_iface = iface_class == 3 && iface_subclass == 1 && iface_protocol == 1;
             if in_kbd_iface {
@@ -1316,22 +1319,29 @@ fn find_keyboard_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8
         }
 
         // Endpoint descriptor (type 5)
-        if dtype == 5 && len >= 7 && in_kbd_iface {
+        if dtype == 5 && len >= 7 && in_kbd_iface && kbd_result.is_none() {
             let ep_addr = r8(buf, (pos + 2) as u32);
             let ep_attr = r8(buf, (pos + 3) as u32);
             let max_pkt = u16::from_le_bytes([
                 r8(buf, (pos + 4) as u32), r8(buf, (pos + 5) as u32)
             ]);
             let interval = r8(buf, (pos + 6) as u32);
-            // Interrupt IN endpoint: attr bits [1:0] = 3 (interrupt), addr bit 7 = IN
+            // Interrupt IN endpoint
             if (ep_attr & 0x03) == 3 && (ep_addr & 0x80) != 0 {
-                return Some((kbd_iface, ep_addr, max_pkt, interval));
+                kbd_result = Some((kbd_iface, ep_addr, max_pkt, interval));
             }
         }
 
         pos += len;
     }
-    None
+
+    // Composite mouse device (has both mouse + keyboard interfaces) — skip.
+    // The keyboard interface is likely media keys, not the real keyboard.
+    if has_mouse_iface {
+        crate::kprintln!("[npk] xhci: composite mouse device — skipping keyboard interface");
+        return None;
+    }
+    kbd_result
 }
 
 // === Configure Interrupt Endpoint ===
