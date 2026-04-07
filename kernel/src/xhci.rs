@@ -84,6 +84,7 @@ const TRB_DATA_STAGE:     u32 = 3 << 10;
 const TRB_STATUS_STAGE:   u32 = 4 << 10;
 const TRB_LINK:           u32 = 6 << 10;
 const TRB_ENABLE_SLOT:    u32 = 9 << 10;
+const TRB_DISABLE_SLOT:   u32 = 10 << 10;
 const TRB_ADDRESS_DEVICE: u32 = 11 << 10;
 const TRB_CONFIGURE_EP:   u32 = 12 << 10;
 #[allow(dead_code)]
@@ -574,141 +575,120 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         }
     }
 
-    // Wait for device attachment + link training (USB spec: up to ~500ms)
-    // Quick scan: check immediately, then wait up to 500ms
-    let mut found_port = None;
-    for _ in 0..5u32 {
-        crate::interrupts::delay_ms(100);
-        for p in 0..max_ports {
-            if r32(oper, portsc_off(p)) & PORTSC_CCS != 0 {
-                found_port = Some(p);
-                break;
-            }
+    // Wait for device attachment + link training (500ms for all devices)
+    crate::interrupts::delay_ms(500);
+
+    // Try each connected port until we find a keyboard.
+    // Non-keyboard devices (e.g. mouse) are skipped — their slot is freed
+    // and they'll be picked up later by init_mouse().
+    for p in 0..max_ports {
+        if r32(oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
+        kprintln!("[npk] xhci: device on port {}", p + 1);
+
+        // Reset port
+        if !reset_port(&state, p) {
+            kprintln!("[npk] xhci: port reset failed");
+            continue;
         }
-        if found_port.is_some() { break; }
-    }
+        state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
 
-    let port = match found_port {
-        Some(p) => p,
-        None => return false, // silently skip — try next controller
-    };
-    state.port_num = port;
-    kprintln!("[npk] xhci: device on port {}", port + 1);
-
-    // Reset port
-    if !reset_port(&state, port) {
-        kprintln!("[npk] xhci: port reset failed");
-        return false;
-    }
-    state.port_speed = (r32(state.oper, portsc_off(port)) >> 10) & 0xF;
-    kprintln!("[npk] xhci: port speed = {}", state.port_speed);
-
-    // Enable Slot
-    let slot_id = match cmd_enable_slot(&mut state) {
-        Some(s) => s,
-        None => { kprintln!("[npk] xhci: enable slot failed"); return false; }
-    };
-    state.slot_id = slot_id;
-    kprintln!("[npk] xhci: slot {}", slot_id);
-
-    // Set DCBAA entry for this slot
-    // SAFETY: writing to DMA array
-    unsafe {
-        core::ptr::write_volatile(
-            (state.dcbaa as *mut u64).add(slot_id as usize),
-            state.device_ctx
-        );
-    }
-
-    // Address Device
-    let max_packet = match state.port_speed {
-        SPEED_LOW => 8u16,
-        SPEED_FULL => 8,
-        SPEED_HIGH => 64,
-        SPEED_SUPER => 512,
-        _ => 64,
-    };
-    if !cmd_address_device(&mut state, port, max_packet) {
-        kprintln!("[npk] xhci: address device failed");
-        return false;
-    }
-    kprintln!("[npk] xhci: device addressed");
-
-    // Get Device Descriptor (8 bytes to get bMaxPacketSize0)
-    if !usb_get_descriptor(&mut state, DESC_DEVICE, 8) {
-        kprintln!("[npk] xhci: get device desc failed");
-        return false;
-    }
-    let real_max_packet = r8(state.data_buf, 7) as u16;
-    if real_max_packet > 0 && real_max_packet != max_packet {
-        // Would need Evaluate Context to update — skip for now, usually matches
-    }
-
-    // Get full Device Descriptor (18 bytes)
-    if !usb_get_descriptor(&mut state, DESC_DEVICE, 18) {
-        kprintln!("[npk] xhci: get full device desc failed");
-        return false;
-    }
-    let dev_class = r8(state.data_buf, 4);
-    kprintln!("[npk] xhci: device class={:#04x}", dev_class);
-
-    // Get Configuration Descriptor (9 bytes first to get total length)
-    if !usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
-        kprintln!("[npk] xhci: get config desc failed");
-        return false;
-    }
-    let total_len = u16::from_le_bytes([
-        r8(state.data_buf, 2), r8(state.data_buf, 3)
-    ]) as usize;
-    let config_val = r8(state.data_buf, 5);
-
-    // Get full Configuration Descriptor
-    let fetch_len = total_len.min(512) as u16;
-    if !usb_get_descriptor(&mut state, DESC_CONFIG, fetch_len) {
-        kprintln!("[npk] xhci: get full config desc failed");
-        return false;
-    }
-
-    // Parse for HID keyboard interface + interrupt IN endpoint
-    let (kbd_iface, intr_ep, intr_max_pkt, intr_interval) =
-        match find_keyboard_endpoint(&state, fetch_len as usize) {
-            Some(v) => v,
-            None => { kprintln!("[npk] xhci: no keyboard interface found"); return false; }
+        // Enable Slot
+        let slot_id = match cmd_enable_slot(&mut state) {
+            Some(s) => s,
+            None => { kprintln!("[npk] xhci: enable slot failed"); continue; }
         };
-    kprintln!("[npk] xhci: keyboard iface={} ep={:#04x} maxpkt={} interval={}",
-        kbd_iface, intr_ep, intr_max_pkt, intr_interval);
+        state.slot_id = slot_id;
 
-    // Set Configuration
-    if !usb_set_config(&mut state, config_val) {
-        kprintln!("[npk] xhci: set config failed");
-        return false;
+        // Set DCBAA entry for this slot
+        // SAFETY: writing to DMA array
+        unsafe {
+            core::ptr::write_volatile(
+                (state.dcbaa as *mut u64).add(slot_id as usize),
+                state.device_ctx
+            );
+        }
+
+        // Address Device
+        let max_packet = match state.port_speed {
+            SPEED_LOW => 8u16,
+            SPEED_FULL => 8,
+            SPEED_HIGH => 64,
+            SPEED_SUPER => 512,
+            _ => 64,
+        };
+        if !cmd_address_device(&mut state, p, max_packet) {
+            kprintln!("[npk] xhci: address device failed");
+            cmd_disable_slot(&mut state, slot_id);
+            reset_ep0_ring(&mut state);
+            continue;
+        }
+
+        // Get Configuration Descriptor (9 bytes first to get total length)
+        if !usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
+            cmd_disable_slot(&mut state, slot_id);
+            reset_ep0_ring(&mut state);
+            continue;
+        }
+        let total_len = u16::from_le_bytes([
+            r8(state.data_buf, 2), r8(state.data_buf, 3)
+        ]) as usize;
+        let config_val = r8(state.data_buf, 5);
+
+        // Get full Configuration Descriptor
+        let fetch_len = total_len.min(512) as u16;
+        if !usb_get_descriptor(&mut state, DESC_CONFIG, fetch_len) {
+            cmd_disable_slot(&mut state, slot_id);
+            reset_ep0_ring(&mut state);
+            continue;
+        }
+
+        // Check for keyboard interface
+        let (kbd_iface, intr_ep, intr_max_pkt, intr_interval) =
+            match find_keyboard_endpoint(&state, fetch_len as usize) {
+                Some(v) => v,
+                None => {
+                    kprintln!("[npk] xhci: port {} not a keyboard, skipping", p + 1);
+                    cmd_disable_slot(&mut state, slot_id);
+                    reset_ep0_ring(&mut state);
+                    continue;
+                }
+            };
+        kprintln!("[npk] xhci: keyboard iface={} ep={:#04x} maxpkt={} interval={}",
+            kbd_iface, intr_ep, intr_max_pkt, intr_interval);
+
+        // Found keyboard! Complete setup.
+        state.port_num = p;
+
+        if !usb_set_config(&mut state, config_val) {
+            kprintln!("[npk] xhci: set config failed");
+            return false;
+        }
+
+        // Set Protocol = Boot Protocol (0)
+        if !usb_set_protocol(&mut state, kbd_iface, 0) {
+            // Non-fatal, some keyboards default to boot protocol
+        }
+
+        // Set Idle (rate=0)
+        let _ = usb_set_idle(&mut state, kbd_iface);
+
+        // Configure Endpoint (interrupt IN)
+        let ep_dci = (intr_ep & 0x0F) * 2 + 1;
+        state.intr_ep_dci = ep_dci;
+        if !cmd_configure_endpoint(&mut state, ep_dci, intr_max_pkt, intr_interval) {
+            kprintln!("[npk] xhci: configure endpoint failed");
+            return false;
+        }
+
+        // Schedule first interrupt transfer
+        schedule_interrupt_transfer(&mut state);
+        kprintln!("[npk] xhci: USB keyboard (HID boot protocol)");
+        AVAILABLE.store(true, Ordering::Relaxed);
+        *STATE.lock() = Some(state);
+        return true;
     }
 
-    // Set Protocol = Boot Protocol (0)
-    if !usb_set_protocol(&mut state, kbd_iface, 0) {
-        kprintln!("[npk] xhci: set protocol failed");
-        // Non-fatal, some keyboards default to boot protocol
-    }
-
-    // Set Idle (rate=0)
-    let _ = usb_set_idle(&mut state, kbd_iface);
-
-    // Configure Endpoint (interrupt IN)
-    let ep_dci = (intr_ep & 0x0F) * 2 + 1; // DCI for IN endpoint
-    state.intr_ep_dci = ep_dci;
-    kprintln!("[npk] xhci: configuring endpoint DCI={}", ep_dci);
-    if !cmd_configure_endpoint(&mut state, ep_dci, intr_max_pkt, intr_interval) {
-        kprintln!("[npk] xhci: configure endpoint failed");
-        return false;
-    }
-    kprintln!("[npk] xhci: endpoint configured, scheduling transfer");
-
-    // Schedule first interrupt transfer
-    schedule_interrupt_transfer(&mut state);
-    kprintln!("[npk] xhci: USB keyboard online");
-    AVAILABLE.store(true, Ordering::Relaxed);
-    *STATE.lock() = Some(state);
-    true
+    false // No keyboard found on any port
 }
 
 /// Initialize USB mouse on the same xHCI controller (different port).
@@ -1113,6 +1093,28 @@ fn cmd_enable_slot(state: &mut XhciState) -> Option<u8> {
     let (cc, slot) = wait_command_completion(state)?;
     if cc != CC_SUCCESS { return None; }
     Some(slot as u8)
+}
+
+fn cmd_disable_slot(state: &mut XhciState, slot_id: u8) {
+    let slot_field = (slot_id as u32) << 24;
+    post_command(state, 0, 0, TRB_DISABLE_SLOT | slot_field);
+    let _ = wait_command_completion(state); // best effort
+    // Clear DCBAA entry
+    // SAFETY: writing to DMA array
+    unsafe {
+        core::ptr::write_volatile(
+            (state.dcbaa as *mut u64).add(slot_id as usize),
+            0u64
+        );
+    }
+}
+
+fn reset_ep0_ring(state: &mut XhciState) {
+    // SAFETY: zeroing DMA-allocated ring memory
+    unsafe { core::ptr::write_bytes(state.ep0_ring as *mut u8, 0, 4096); }
+    write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    state.ep0_cycle = 1;
+    state.ep0_enqueue = 0;
 }
 
 fn cmd_address_device(state: &mut XhciState, port: u32, max_packet: u16) -> bool {
