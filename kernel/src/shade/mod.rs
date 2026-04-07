@@ -49,7 +49,7 @@ pub fn init() {
 
     // Create initial terminal window AFTER boot log (so boot text doesn't appear in it)
     with_compositor(|comp| {
-        comp.create_window("terminal", 0, 0, screen_w, screen_h);
+        comp.create_window("loop", 0, 0, screen_w, screen_h);
     });
 
     // Clean prompt only (no boot output in this window)
@@ -124,7 +124,7 @@ pub fn handle_action(action: input::ShadeAction) {
     match action {
         ShadeAction::NewWindow => {
             with_compositor(|comp| {
-                comp.create_window("terminal", 0, 0, 800, 600);
+                comp.create_window("loop", 0, 0, 800, 600);
             });
             // Write prompt to the new terminal
             terminal::write_prompt();
