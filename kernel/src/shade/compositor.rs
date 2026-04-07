@@ -1,15 +1,12 @@
 //! Compositor — manages windows, Z-order, tiling layout, and rendering.
 //!
-//! The compositor owns all windows and the shadebar. It handles:
-//! - Window creation/destruction
-//! - Focus management
-//! - Tiling layout (binary split, Hyprland-style)
-//! - Damage tracking (only redraw changed regions)
-//! - Compositing window buffers onto the main shadow buffer
+//! No per-window pixel buffers. Windows are metadata (position, size, state).
+//! The compositor renders directly to the framebuffer shadow buffer.
+//! This is memory-efficient and matches the tiling paradigm (no overlap).
 
 use alloc::vec::Vec;
 use crate::framebuffer::FbInfo;
-use crate::gui::{background, color::Theme, render};
+use crate::gui::{background, render};
 
 use super::window::{Window, WindowId, WindowState};
 use super::bar::ShadeBar;
@@ -94,9 +91,8 @@ impl Compositor {
         let id = WindowId(self.next_id);
         self.next_id += 1;
 
-        let mut win = Window::new(id, title, x, y, w, h, self.border);
+        let mut win = Window::new(id, title, x, y, w, h);
         win.workspace = self.active_workspace;
-        win.clear(0x00101018); // Dark default background
 
         self.windows.push(win);
         self.z_order.insert(0, id); // New window on top
@@ -113,7 +109,6 @@ impl Compositor {
         self.z_order.retain(|&wid| wid != id);
 
         if self.focused == Some(id) {
-            // Focus next window in Z-order
             self.focused = self.z_order.first()
                 .and_then(|&top_id| {
                     self.windows.iter().find(|w| w.id == top_id && w.workspace == self.active_workspace)
@@ -151,7 +146,6 @@ impl Compositor {
         self.active_workspace = ws;
         self.bar.set_workspace(ws);
 
-        // Focus first window on new workspace
         self.focused = self.z_order.iter()
             .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws))
             .copied();
@@ -182,11 +176,10 @@ impl Compositor {
     }
 
     /// Recalculate tiled window positions for the active workspace.
-    /// Uses a simple binary split layout (master-stack like Hyprland default).
+    /// Master-stack layout: first window gets left half, rest stack on right.
     pub fn retile(&mut self) {
         let (area_x, area_y, area_w, area_h) = self.workspace_area();
 
-        // Collect tiled windows on active workspace
         let tiled: Vec<WindowId> = self.windows.iter()
             .filter(|w| w.workspace == self.active_workspace
                      && w.state == WindowState::Tiled
@@ -199,22 +192,18 @@ impl Compositor {
         let gap = self.gaps;
         let n = tiled.len();
 
-        let border = self.border;
-
         if n == 1 {
-            // Single window: fill entire workspace area
             for win in &mut self.windows {
                 if win.id == tiled[0] {
                     win.x = area_x;
                     win.y = area_y;
                     win.width = area_w;
                     win.height = area_h;
-                    Self::resize_window_buffer(win, border);
+                    win.dirty = true;
                     break;
                 }
             }
         } else {
-            // Master-stack: first window gets left half, rest stack on right
             let master_w = (area_w - gap) / 2;
             let stack_w = area_w - master_w - gap;
             let stack_count = n - 1;
@@ -222,43 +211,29 @@ impl Compositor {
 
             for win in &mut self.windows {
                 if win.id == tiled[0] {
-                    // Master window
                     win.x = area_x;
                     win.y = area_y;
                     win.width = master_w;
                     win.height = area_h;
-                    Self::resize_window_buffer(win, border);
+                    win.dirty = true;
                 } else if let Some(si) = tiled[1..].iter().position(|&t| t == win.id) {
-                    // Stack window
                     win.x = area_x + master_w + gap;
                     win.y = area_y + si as u32 * (stack_h + gap);
                     win.width = stack_w;
                     win.height = stack_h;
-                    Self::resize_window_buffer(win, border);
+                    win.dirty = true;
                 }
             }
         }
     }
 
-    /// Resize a window's content buffer to match its current dimensions.
-    fn resize_window_buffer(win: &mut Window, border: u32) {
-        let new_buf_w = win.width.saturating_sub(border * 2);
-        let new_buf_h = win.height.saturating_sub(border * 2);
-        if new_buf_w != win.buf_w || new_buf_h != win.buf_h {
-            win.buf_w = new_buf_w;
-            win.buf_h = new_buf_h;
-            let new_size = (new_buf_w * new_buf_h * 4) as usize;
-            win.buffer = alloc::vec![0u8; new_size];
-            win.clear(0x00101018);
-        }
-    }
-
-    /// Render the full compositor scene.
+    /// Render the full compositor scene to the shadow buffer.
     pub fn render(&mut self, shadow: *mut u8, info: &FbInfo) {
         // Background (aurora)
         background::draw_aurora(shadow, info);
 
         // Render windows (back to front)
+        let border = self.border;
         for &wid in self.z_order.iter().rev() {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                 if win.workspace != self.active_workspace || !win.visible { continue; }
@@ -267,22 +242,21 @@ impl Compositor {
                 let border_color = if win.focused { self.border_active } else { self.border_inactive };
                 render::fill_rect(shadow, info, win.x, win.y, win.width, win.height, border_color);
 
-                // Blit window content
-                win.blit_to(shadow, info, self.border);
+                // Fill content area with window background
+                win.render_to(shadow, info, border);
             }
         }
 
         // Shadebar
         self.bar.render(shadow, info, self.screen_w, self.screen_h);
 
-        // Mark all windows as clean
         for win in &mut self.windows {
             win.dirty = false;
         }
         self.needs_full_redraw = false;
     }
 
-    /// Render only changed regions. Returns list of (x, y, w, h) blitted.
+    /// Render only changed regions. Returns list of (x, y, w, h) to blit.
     pub fn render_damaged(&mut self, shadow: *mut u8, info: &FbInfo) -> Vec<(u32, u32, u32, u32)> {
         if self.needs_full_redraw {
             self.render(shadow, info);
@@ -290,8 +264,8 @@ impl Compositor {
         }
 
         let mut regions = Vec::new();
+        let border = self.border;
 
-        // Check for dirty windows
         for wid_idx in (0..self.z_order.len()).rev() {
             let wid = self.z_order[wid_idx];
             let needs_render = self.windows.iter()
@@ -301,28 +275,21 @@ impl Compositor {
 
             if needs_render {
                 if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
-                    // Redraw aurora background for this region
                     background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
-
-                    // Redraw border
                     let border_color = if win.focused { self.border_active } else { self.border_inactive };
                     render::fill_rect(shadow, info, win.x, win.y, win.width, win.height, border_color);
-
-                    // Blit content
-                    win.blit_to(shadow, info, self.border);
+                    win.render_to(shadow, info, border);
                     regions.push((win.x, win.y, win.width, win.height));
                 }
             }
         }
 
-        // Redraw bar if dirty
         if self.bar.dirty {
             self.bar.render(shadow, info, self.screen_w, self.screen_h);
             let bar_y = self.bar.y(self.screen_h);
             regions.push((0, bar_y, self.screen_w, self.bar.height));
         }
 
-        // Mark all clean
         for win in &mut self.windows {
             win.dirty = false;
         }
