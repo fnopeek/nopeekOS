@@ -89,9 +89,10 @@ impl TerminalBuffer {
         self.scroll_offset = 0;
     }
 
-    /// Get visible lines for rendering.
+    /// Get visible lines for rendering (respects scroll_offset).
     pub fn visible_lines(&self, visible_rows: usize) -> impl Iterator<Item = (&[u8], usize)> {
-        let end = self.total + 1;
+        let max_end = self.total + 1;
+        let end = max_end.saturating_sub(self.scroll_offset);
         let start = end.saturating_sub(visible_rows);
         let count = visible_rows.min(end.saturating_sub(start));
 
