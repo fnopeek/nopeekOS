@@ -225,12 +225,9 @@ pub fn poll_render() {
                     let cw = win.content_w(border).saturating_sub(pad * 2);
                     let ch = win.content_h(border).saturating_sub(pad * 2);
 
-                    // Clear text area: aurora + border blend + content blend (matches window)
-                    crate::gui::background::draw_aurora_region(shadow, info, cx, cy, cw, ch);
-                    crate::gui::render::fill_rounded_rect_blend(shadow, info,
-                        cx, cy, cw, ch, comp.border_active, 0, 180);
-                    crate::gui::render::fill_rounded_rect_blend(shadow, info,
-                        cx, cy, cw, ch, win.bg_color, 0, comp.opacity);
+                    // Fast: solid bg fill (no aurora/blend = instant)
+                    crate::gui::render::fill_rect(shadow, info,
+                        cx, cy, cw, ch, win.bg_color);
                     terminal::render_to_window(shadow, info, cx, cy, cw, ch, scale, win.terminal_idx);
                     framebuffer::blit_rect(fb, cx, cy, cw, ch);
                 }
