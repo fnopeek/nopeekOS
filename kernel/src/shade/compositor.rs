@@ -547,11 +547,18 @@ impl Compositor {
                         }
                     }
                 }
+                // Mark all windows dirty (need to redraw aurora behind old position)
+                for w in &mut self.windows { w.dirty = true; }
                 self.needs_full_redraw = true;
                 return true;
             } else {
-                // Button released — end drag
+                // Button released — snap back to tiled layout
+                if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
+                    win.state = WindowState::Tiled;
+                }
                 self.drag = None;
+                self.retile();
+                self.needs_full_redraw = true;
                 return true;
             }
         }

@@ -170,9 +170,16 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
 
-        // Poll USB mouse events
-        while let Some(evt) = crate::xhci::poll_mouse() {
-            crate::shade::handle_mouse(&evt);
+        // Poll USB mouse events (batch: process all pending, render once)
+        if let Some(evt) = crate::xhci::poll_mouse() {
+            let mut last_evt = evt;
+            while let Some(next) = crate::xhci::poll_mouse() {
+                // Update mouse state without rendering for intermediate events
+                crate::shade::with_compositor(|comp| comp.handle_mouse(&last_evt));
+                last_evt = next;
+            }
+            // Only render for the final event
+            crate::shade::handle_mouse(&last_evt);
         }
 
         // Check for shade compositor actions (Mod+key)
