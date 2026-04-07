@@ -747,11 +747,16 @@ pub fn init_mouse() -> bool {
 
         if try_init_mouse_on_port(state, p) {
             kprintln!("[npk] xhci: USB mouse (HID boot protocol)");
+            kprintln!("[npk] xhci: DEBUG — pausing 15s to read mouse init output...");
+            crate::interrupts::delay_ms(15000);
             state.has_mouse = true;
             MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
             return true;
         }
     }
+    kprintln!("[npk] xhci: no mouse found on any port");
+    kprintln!("[npk] xhci: DEBUG — pausing 15s to read mouse init output...");
+    crate::interrupts::delay_ms(15000);
     false
 }
 
