@@ -13,6 +13,19 @@ use super::bar::ShadeBar;
 use super::terminal;
 use super::cursor::MouseState;
 
+/// Swap animation state — windows glide from old to new position.
+#[derive(Clone, Copy)]
+pub struct SwapAnimation {
+    pub win_a: WindowId,
+    pub win_b: WindowId,
+    pub a_from: (u32, u32, u32, u32), // x, y, w, h
+    pub b_from: (u32, u32, u32, u32),
+    pub a_to: (u32, u32, u32, u32),
+    pub b_to: (u32, u32, u32, u32),
+    pub start_tick: u64,
+    pub duration: u64, // ticks (100Hz → 25 = 250ms)
+}
+
 /// Drag mode: swap windows or resize split.
 #[derive(Clone, Copy, PartialEq)]
 pub enum DragMode { Swap, Resize }
@@ -72,6 +85,8 @@ pub struct Compositor {
     pub mouse: MouseState,
     /// Drag state: which window is being dragged, and the grab offset.
     pub drag: Option<DragState>,
+    /// Active swap animation (windows gliding to new positions).
+    pub animation: Option<SwapAnimation>,
 }
 
 #[allow(dead_code)]
@@ -120,6 +135,7 @@ impl Compositor {
                 m
             },
             drag: None,
+            animation: None,
         }
     }
 
@@ -665,14 +681,104 @@ impl Compositor {
         }
     }
 
-    /// Swap two windows in the tiling order. Retile assigns new positions.
+    /// Swap two windows with smooth animation.
     fn swap_window_order(&mut self, a: WindowId, b: WindowId) {
+        // Complete any active animation first
+        self.finish_animation();
+
+        // Save old positions
+        let a_from = self.windows.iter().find(|w| w.id == a)
+            .map(|w| (w.x, w.y, w.width, w.height)).unwrap_or((0,0,0,0));
+        let b_from = self.windows.iter().find(|w| w.id == b)
+            .map(|w| (w.x, w.y, w.width, w.height)).unwrap_or((0,0,0,0));
+
+        // Swap order and retile (calculates new positions)
         let a_idx = self.windows.iter().position(|w| w.id == a);
         let b_idx = self.windows.iter().position(|w| w.id == b);
         if let (Some(ai), Some(bi)) = (a_idx, b_idx) {
             self.windows.swap(ai, bi);
-            self.retile();
-            self.needs_full_redraw = true; // Full redraw: aurora between windows needs refresh
+        }
+        self.retile();
+
+        // Save new positions
+        let a_to = self.windows.iter().find(|w| w.id == a)
+            .map(|w| (w.x, w.y, w.width, w.height)).unwrap_or((0,0,0,0));
+        let b_to = self.windows.iter().find(|w| w.id == b)
+            .map(|w| (w.x, w.y, w.width, w.height)).unwrap_or((0,0,0,0));
+
+        // Start animation: put windows back at old positions, animate to new
+        if a_from != a_to || b_from != b_to {
+            // Set windows to starting position
+            if let Some(w) = self.windows.iter_mut().find(|w| w.id == a) {
+                w.x = a_from.0; w.y = a_from.1; w.width = a_from.2; w.height = a_from.3;
+            }
+            if let Some(w) = self.windows.iter_mut().find(|w| w.id == b) {
+                w.x = b_from.0; w.y = b_from.1; w.width = b_from.2; w.height = b_from.3;
+            }
+            self.animation = Some(SwapAnimation {
+                win_a: a, win_b: b,
+                a_from, b_from, a_to, b_to,
+                start_tick: crate::interrupts::ticks(),
+                duration: 25, // 250ms at 100Hz
+            });
+        }
+        self.needs_full_redraw = true;
+    }
+
+    /// Advance swap animation. Returns true if a frame was updated.
+    pub fn tick_animation(&mut self) -> bool {
+        let anim = match self.animation { Some(a) => a, None => return false };
+        let now = crate::interrupts::ticks();
+        let elapsed = now.saturating_sub(anim.start_tick);
+
+        if elapsed >= anim.duration {
+            self.finish_animation();
+            return true;
+        }
+
+        // Ease-out cubic: t' = 1 - (1-t)³  (fast start, smooth deceleration)
+        let t = (elapsed * 1000 / anim.duration) as i64; // 0..1000
+        let inv = 1000 - t;
+        let t_ease = 1000 - (inv * inv * inv / 1_000_000);
+
+        let lerp = |from: u32, to: u32| -> u32 {
+            let f = from as i64;
+            let delta = to as i64 - f;
+            (f + delta * t_ease / 1000) as u32
+        };
+
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == anim.win_a) {
+            w.x = lerp(anim.a_from.0, anim.a_to.0);
+            w.y = lerp(anim.a_from.1, anim.a_to.1);
+            w.width = lerp(anim.a_from.2, anim.a_to.2);
+            w.height = lerp(anim.a_from.3, anim.a_to.3);
+            w.dirty = true;
+        }
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == anim.win_b) {
+            w.x = lerp(anim.b_from.0, anim.b_to.0);
+            w.y = lerp(anim.b_from.1, anim.b_to.1);
+            w.width = lerp(anim.b_from.2, anim.b_to.2);
+            w.height = lerp(anim.b_from.3, anim.b_to.3);
+            w.dirty = true;
+        }
+        self.needs_full_redraw = true;
+        true
+    }
+
+    /// Instantly complete any active animation.
+    fn finish_animation(&mut self) {
+        if let Some(anim) = self.animation.take() {
+            if let Some(w) = self.windows.iter_mut().find(|w| w.id == anim.win_a) {
+                w.x = anim.a_to.0; w.y = anim.a_to.1;
+                w.width = anim.a_to.2; w.height = anim.a_to.3;
+                w.dirty = true;
+            }
+            if let Some(w) = self.windows.iter_mut().find(|w| w.id == anim.win_b) {
+                w.x = anim.b_to.0; w.y = anim.b_to.1;
+                w.width = anim.b_to.2; w.height = anim.b_to.3;
+                w.dirty = true;
+            }
+            self.needs_full_redraw = true;
         }
     }
 

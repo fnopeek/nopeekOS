@@ -270,6 +270,12 @@ pub fn render_input_line() {
 pub fn poll_render() {
     if !is_active() { return; }
 
+    // Tick swap animation (smooth window transition)
+    let animating = with_compositor(|comp| comp.tick_animation()).unwrap_or(false);
+    if animating {
+        render_frame();
+    }
+
     // Poll mouse events (batch: update state for all, render only last)
     if let Some(evt) = crate::xhci::poll_mouse() {
         let mut last = evt;
