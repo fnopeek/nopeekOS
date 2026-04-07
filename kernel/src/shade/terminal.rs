@@ -268,19 +268,10 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Redraw line background matching window render (aurora → border blend → content blend)
-    crate::gui::background::draw_aurora_region(shadow, info,
-        win_cx, last_line_y, win_cw, char_h);
-    // Border blend (same opacity as compositor: 180)
-    crate::gui::render::fill_rounded_rect_blend(shadow, info,
-        win_cx, last_line_y, win_cw, char_h,
-        crate::gui::background::accent_color(), 0, 180);
-    // Content blend
-    crate::gui::render::fill_rounded_rect_blend(shadow, info,
-        win_cx, last_line_y, win_cw, char_h,
-        bg_color, 0, opacity);
+    // Fast path: solid bg fill + text only (no aurora, no blend = <1ms)
+    crate::gui::render::fill_rect(shadow, info,
+        win_cx, last_line_y, win_cw, char_h, bg_color);
 
-    // Draw current line text (no per-char bg, background already matches)
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
     if visible_len > 0 {
