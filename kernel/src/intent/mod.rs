@@ -274,10 +274,6 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     buf[pos] = b;
                     pos += 1;
                     kprint!("{}", b as char);
-                    // Live typing: re-render focused window to show input
-                    if crate::shade::is_active() {
-                        crate::shade::render_terminal_update();
-                    }
                 }
             }
             _ => {}
