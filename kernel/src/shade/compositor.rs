@@ -13,12 +13,23 @@ use super::bar::ShadeBar;
 use super::terminal;
 use super::cursor::MouseState;
 
-/// Swap-drag state: Mod+LMB swaps windows in the tiling grid.
+/// Drag mode: swap windows or resize split.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DragMode { Swap, Resize }
+
+/// Drag state for Mod+LMB (swap) or Mod+RMB (resize).
 #[derive(Clone, Copy)]
 pub struct DragState {
     pub window: WindowId,
+    pub mode: DragMode,
     /// Last window we swapped with (prevent repeated swaps on same target).
     pub last_target: Option<WindowId>,
+    /// Mouse position when drag started (for resize delta).
+    pub start_mx: i32,
+    pub start_my: i32,
+    /// Resize delta when drag started.
+    pub start_rw: i32,
+    pub start_rh: i32,
 }
 
 /// Compositor manages all windows, the bar, and rendering state.
@@ -251,11 +262,18 @@ impl Compositor {
             return;
         }
 
-        // Split: first window takes one half, rest take the other half
+        // Split: first window takes one half (+resize delta), rest take the other half
+        // Look up first window's resize delta for split adjustment
+        let (delta_w, delta_h) = self.windows.iter()
+            .find(|w| w.id == ids[0])
+            .map(|w| (w.resize_w, w.resize_h))
+            .unwrap_or((0, 0));
+
         if split_horizontal {
-            let left_w = (w.saturating_sub(gap)) / 2;
+            let half = (w.saturating_sub(gap)) / 2;
+            let left_w = (half as i32 + delta_w).clamp(100, w.saturating_sub(gap + 100) as i32) as u32;
             let right_w = w.saturating_sub(left_w + gap);
-            // First window: left half
+            // First window: left half (adjusted by delta)
             for win in &mut self.windows {
                 if win.id == ids[0] {
                     win.x = x;
@@ -269,9 +287,10 @@ impl Compositor {
             // Rest: right half, split vertically next time
             self.dwindle_layout(&ids[1..], x + left_w + gap, y, right_w, h, gap, false);
         } else {
-            let top_h = (h.saturating_sub(gap)) / 2;
+            let half = (h.saturating_sub(gap)) / 2;
+            let top_h = (half as i32 + delta_h).clamp(80, h.saturating_sub(gap + 80) as i32) as u32;
             let bottom_h = h.saturating_sub(top_h + gap);
-            // First window: top half
+            // First window: top half (adjusted by delta)
             for win in &mut self.windows {
                 if win.id == ids[0] {
                     win.x = x;
@@ -518,25 +537,41 @@ impl Compositor {
 
         let mod_held = crate::keyboard::is_super_held();
 
-        // Handle active swap-drag: swap windows when cursor enters another window
+        // Handle active drag (swap or resize)
         if let Some(mut drag) = self.drag {
-            if self.mouse.left_held() {
-                // Check if cursor is over a different window → swap
-                if let Some(target) = self.window_at(mx, my) {
-                    if target != drag.window && drag.last_target != Some(target) {
-                        // Swap source and target in the tiling order
-                        self.swap_window_order(drag.window, target);
-                        drag.last_target = Some(target);
-                        self.drag = Some(drag);
-                        self.focus_window(drag.window);
-                        return true; // render_damaged handles the 2 swapped windows
+            let held = match drag.mode {
+                DragMode::Swap => self.mouse.left_held(),
+                DragMode::Resize => self.mouse.right_held(),
+            };
+            if held {
+                match drag.mode {
+                    DragMode::Swap => {
+                        if let Some(target) = self.window_at(mx, my) {
+                            if target != drag.window && drag.last_target != Some(target) {
+                                self.swap_window_order(drag.window, target);
+                                drag.last_target = Some(target);
+                                self.drag = Some(drag);
+                                self.focus_window(drag.window);
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    DragMode::Resize => {
+                        let dx = mx - drag.start_mx;
+                        let dy = my - drag.start_my;
+                        if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
+                            win.resize_w = drag.start_rw + dx;
+                            win.resize_h = drag.start_rh + dy;
+                        }
+                        self.retile();
+                        self.needs_full_redraw = true;
+                        return true;
                     }
                 }
-                return false; // cursor moving, no scene change needed
             } else {
-                // Button released — end swap mode
                 self.drag = None;
-                return false;
+                return drag.mode == DragMode::Resize; // resize needs final render
             }
         }
 
@@ -544,8 +579,27 @@ impl Compositor {
         if mod_held && self.mouse.left_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
                 self.drag = Some(DragState {
-                    window: wid,
+                    window: wid, mode: DragMode::Swap,
                     last_target: None,
+                    start_mx: 0, start_my: 0, start_rw: 0, start_rh: 0,
+                });
+                self.focus_window(wid);
+                return true;
+            }
+        }
+
+        // Mod+RMB: start resize-drag
+        if mod_held && self.mouse.right_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                let (rw, rh) = self.windows.iter()
+                    .find(|w| w.id == wid)
+                    .map(|w| (w.resize_w, w.resize_h))
+                    .unwrap_or((0, 0));
+                self.drag = Some(DragState {
+                    window: wid, mode: DragMode::Resize,
+                    last_target: None,
+                    start_mx: mx, start_my: my,
+                    start_rw: rw, start_rh: rh,
                 });
                 self.focus_window(wid);
                 return true;
@@ -566,14 +620,12 @@ impl Compositor {
         evt.dx != 0 || evt.dy != 0
     }
 
-    /// Resize focused window by dx/dy pixels. Makes it floating for custom size.
+    /// Resize focused window by adjusting its tiling split delta.
     pub fn resize_focused(&mut self, dx: i32, dy: i32) {
         if let Some(fid) = self.focused {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == fid) {
-                win.width = (win.width as i32 + dx).max(200) as u32;
-                win.height = (win.height as i32 + dy).max(100) as u32;
-                win.state = WindowState::Floating;
-                win.dirty = true;
+                win.resize_w += dx;
+                win.resize_h += dy;
             }
             self.retile();
             self.needs_full_redraw = true;
