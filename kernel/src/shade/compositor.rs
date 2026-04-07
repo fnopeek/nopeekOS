@@ -10,6 +10,7 @@ use crate::gui::{background, render};
 
 use super::window::{Window, WindowId, WindowState};
 use super::bar::ShadeBar;
+use super::terminal;
 
 /// Compositor manages all windows, the bar, and rendering state.
 #[allow(dead_code)]
@@ -39,6 +40,10 @@ pub struct Compositor {
     pub border_active: u32,
     /// Inactive window border color.
     pub border_inactive: u32,
+    /// Corner radius (in pixels, scaled).
+    pub rounding: u32,
+    /// Window background opacity (0=transparent, 256=opaque).
+    pub opacity: u32,
     /// Full redraw needed.
     pub needs_full_redraw: bool,
 }
@@ -58,6 +63,12 @@ impl Compositor {
         let border_inactive = crate::config::get("shade.border_inactive")
             .and_then(|s| parse_hex_color(&s))
             .unwrap_or(0x003A2555);
+        let rounding = crate::config::get("shade.rounding")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(10) * scale;
+        let opacity = crate::config::get("shade.opacity")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(200);
 
         Compositor {
             screen_w,
@@ -73,6 +84,8 @@ impl Compositor {
             border,
             border_active,
             border_inactive,
+            rounding,
+            opacity,
             needs_full_redraw: true,
         }
     }
@@ -234,16 +247,14 @@ impl Compositor {
 
         // Render windows (back to front)
         let border = self.border;
+        let rounding = self.rounding;
+        let opacity = self.opacity;
+        let scale = self.scale;
         for &wid in self.z_order.iter().rev() {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                 if win.workspace != self.active_workspace || !win.visible { continue; }
-
-                // Draw border
-                let border_color = if win.focused { self.border_active } else { self.border_inactive };
-                render::fill_rect(shadow, info, win.x, win.y, win.width, win.height, border_color);
-
-                // Fill content area with window background
-                win.render_to(shadow, info, border);
+                Self::render_window(shadow, info, win, border, rounding, opacity, scale,
+                    if win.focused { self.border_active } else { self.border_inactive });
             }
         }
 
@@ -256,6 +267,33 @@ impl Compositor {
         self.needs_full_redraw = false;
     }
 
+    /// Render a single window: rounded border + semi-transparent bg + terminal text.
+    fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
+                     border: u32, rounding: u32, opacity: u32, scale: u32,
+                     border_color: u32) {
+        // Rounded border
+        render::fill_rounded_rect_aa(shadow, info,
+            win.x, win.y, win.width, win.height,
+            border_color, rounding);
+
+        // Semi-transparent content area (blends with aurora underneath)
+        let cx = win.content_x(border);
+        let cy = win.content_y(border);
+        let cw = win.content_w(border);
+        let ch = win.content_h(border);
+        let inner_r = rounding.saturating_sub(border);
+        render::fill_rounded_rect_blend(shadow, info,
+            cx, cy, cw, ch,
+            win.bg_color, inner_r, opacity);
+
+        // Render terminal text content inside the window
+        let pad = 6 * scale;
+        terminal::render_to_window(shadow, info,
+            cx + pad, cy + pad,
+            cw.saturating_sub(pad * 2), ch.saturating_sub(pad * 2),
+            scale);
+    }
+
     /// Render only changed regions. Returns list of (x, y, w, h) to blit.
     pub fn render_damaged(&mut self, shadow: *mut u8, info: &FbInfo) -> Vec<(u32, u32, u32, u32)> {
         if self.needs_full_redraw {
@@ -265,6 +303,9 @@ impl Compositor {
 
         let mut regions = Vec::new();
         let border = self.border;
+        let rounding = self.rounding;
+        let opacity = self.opacity;
+        let scale = self.scale;
 
         for wid_idx in (0..self.z_order.len()).rev() {
             let wid = self.z_order[wid_idx];
@@ -277,8 +318,7 @@ impl Compositor {
                 if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                     background::draw_aurora_region(shadow, info, win.x, win.y, win.width, win.height);
                     let border_color = if win.focused { self.border_active } else { self.border_inactive };
-                    render::fill_rect(shadow, info, win.x, win.y, win.width, win.height, border_color);
-                    win.render_to(shadow, info, border);
+                    Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
                     regions.push((win.x, win.y, win.width, win.height));
                 }
             }

@@ -173,6 +173,7 @@ impl fmt::Write for SerialPort {
         }
         capture_bytes(s);
         crate::framebuffer::write_str(s);
+        crate::shade::terminal::write(s);
         Ok(())
     }
 }

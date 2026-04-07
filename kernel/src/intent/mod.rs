@@ -169,6 +169,12 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
 
+        // Check for shade compositor actions (Mod+key)
+        if let Some(action) = crate::shade::input::poll_action() {
+            crate::shade::handle_action(action);
+            continue;
+        }
+
         // Check both serial and PS/2 keyboard for input
         let byte = if let Some(key) = crate::keyboard::read_key() {
             key
@@ -184,6 +190,11 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             b
         };
 
+        // Intercept shade keybindings (Mod+key) before intent loop
+        if crate::shade::input::try_keybind(byte) {
+            continue;
+        }
+
         // Handle ANSI escape sequences (ESC [ A/B/C/D)
         if esc == 1 {
             esc = if byte == 0x5b { 2 } else { 0 };
@@ -191,6 +202,10 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         }
         if esc == 2 {
             esc = 0;
+            // Check shade arrow keybinds (Mod+Arrow)
+            if crate::shade::input::try_arrow_keybind(byte) {
+                continue;
+            }
             match byte {
                 b'A' => {
                     // Arrow up — previous history entry
@@ -417,6 +432,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         }
 
         dispatch_intent(input, vault, session_id);
+
+        // Re-render shade compositor to show new output
+        if crate::shade::is_active() {
+            crate::shade::render_frame();
+        }
     }
 }
 
