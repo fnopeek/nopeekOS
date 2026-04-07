@@ -171,6 +171,11 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
 
+        // Tick swap animation
+        if crate::shade::with_compositor(|comp| comp.tick_animation()).unwrap_or(false) {
+            crate::shade::render_frame();
+        }
+
         // Poll USB mouse events (batch: process all pending, render once)
         if let Some(evt) = crate::xhci::poll_mouse() {
             let mut last_evt = evt;
