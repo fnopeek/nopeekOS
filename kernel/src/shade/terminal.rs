@@ -127,6 +127,29 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set when new content is written (cleared after render).
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
+/// Input cursor position (for rendering blinking cursor on input line).
+static mut INPUT_CURSOR_POS: usize = 0;
+
+/// Set the input cursor position (called from intent loop on every key/move).
+pub fn set_cursor_pos(pos: usize) {
+    // SAFETY: single-core
+    unsafe { INPUT_CURSOR_POS = pos; }
+}
+
+/// Get the current line length in the active terminal (for cursor offset calculation).
+pub fn current_line_len() -> usize {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return 0; }
+    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
+    terms[idx].current_line().1
+}
+
+/// Get the input cursor position.
+pub fn cursor_pos() -> usize {
+    // SAFETY: single-core
+    unsafe { INPUT_CURSOR_POS }
+}
+
 /// Enable/disable terminal capture.
 pub fn set_active(active: bool) {
     ACTIVE.store(active, Ordering::Release);
@@ -298,6 +321,18 @@ pub fn render_input_line(
         }
     }
 
+    // Draw text cursor (blinking block at cursor position)
+    let cur = cursor_pos();
+    // Blink: ~500ms on / 500ms off (based on tick counter, 100Hz)
+    let blink_on = (crate::interrupts::ticks() / 50) & 1 == 0;
+    if blink_on {
+        let cursor_x = win_cx + cur as u32 * char_w;
+        if cursor_x + 2 <= win_cx + win_cw {
+            let cursor_color = 0x00E8E8E8u32;
+            crate::gui::render::fill_rect(shadow, info, cursor_x, last_line_y, 2, char_h, cursor_color);
+        }
+    }
+
     Some((win_cx, last_line_y, win_cw, char_h))
 }
 
@@ -330,27 +365,44 @@ pub fn scroll_reset() {
     terms[idx].scroll_offset = 0;
 }
 
-/// Save the current input buffer to the active terminal's saved state.
+/// Per-terminal saved cursor position.
+static mut SAVED_CURSOR: [usize; MAX_TERMINALS] = [0; MAX_TERMINALS];
+
+/// Save the current input buffer + cursor position to the active terminal's saved state.
 pub fn save_input(buf: &[u8], pos: usize) {
+    save_input_with_cursor(buf, pos, pos);
+}
+
+/// Save input buffer, pos, and cursor position.
+pub fn save_input_with_cursor(buf: &[u8], pos: usize, cursor: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     if idx >= MAX_TERMINALS { return; }
     let saved = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_INPUT) };
     let spos = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_POS) };
+    let scur = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_CURSOR) };
     let len = pos.min(MAX_INPUT);
     saved[idx][..len].copy_from_slice(&buf[..len]);
     spos[idx] = len;
+    scur[idx] = cursor.min(len);
 }
 
 /// Restore the saved input buffer from the active terminal.
-/// Returns the number of bytes restored (= pos).
-pub fn restore_input(buf: &mut [u8]) -> usize {
+/// Returns (pos, cursor).
+pub fn restore_input_with_cursor(buf: &mut [u8]) -> (usize, usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return 0; }
+    if idx >= MAX_TERMINALS { return (0, 0); }
     let saved = unsafe { &*core::ptr::addr_of!(SAVED_INPUT) };
     let spos = unsafe { &*core::ptr::addr_of!(SAVED_POS) };
+    let scur = unsafe { &*core::ptr::addr_of!(SAVED_CURSOR) };
     let len = spos[idx].min(buf.len());
     buf[..len].copy_from_slice(&saved[idx][..len]);
-    len
+    (len, scur[idx].min(len))
+}
+
+/// Restore the saved input buffer from the active terminal (legacy, cursor=pos).
+pub fn restore_input(buf: &mut [u8]) -> usize {
+    let (pos, _) = restore_input_with_cursor(buf);
+    pos
 }
 
 /// Write the prompt string to the active terminal buffer.

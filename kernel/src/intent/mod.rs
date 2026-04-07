@@ -158,7 +158,8 @@ fn ensure_parents(path: &str) {
 
 /// Read a line from serial/keyboard with tab-completion, history, and network polling.
 fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: CapId) -> usize {
-    let mut pos = 0;
+    let mut pos = 0;      // total bytes in buffer
+    let mut cursor = 0;   // cursor position within buffer (can be < pos)
     let mut esc: u8 = 0; // 0=normal, 1=got ESC, 2=got ESC[
     let mut esc_mod = false; // Was mod key held when ESC was received?
 
@@ -190,17 +191,20 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 ShadeAction::FocusUp | ShadeAction::FocusDown |
                 ShadeAction::SwapLeft | ShadeAction::SwapRight |
                 ShadeAction::SwapUp | ShadeAction::SwapDown |
+                ShadeAction::ResizeLeft | ShadeAction::ResizeRight |
+                ShadeAction::ResizeUp | ShadeAction::ResizeDown |
                 ShadeAction::Workspace(_) | ShadeAction::MoveToWorkspace(_) => {
-                    // Save current input to old terminal
-                    crate::shade::terminal::save_input(&buf[..pos], pos);
+                    crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
                     crate::shade::handle_action(action);
-                    // Restore new terminal's saved input
-                    pos = crate::shade::terminal::restore_input(buf);
+                    let (p, c) = crate::shade::terminal::restore_input_with_cursor(buf);
+                    pos = p;
+                    cursor = c;
                 }
                 ShadeAction::NewWindow => {
-                    crate::shade::terminal::save_input(&buf[..pos], pos);
+                    crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
                     crate::shade::handle_action(action);
-                    pos = 0; // New window starts fresh
+                    pos = 0;
+                    cursor = 0;
                 }
                 _ => {
                     crate::shade::handle_action(action);
@@ -246,10 +250,10 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     let mut hist = HISTORY.lock();
                     if let Some((line, len)) = hist.up() {
                         let len = len.min(buf.len());
-                        // Clear current line
                         for _ in 0..pos { kprint!("\x08 \x08"); }
                         buf[..len].copy_from_slice(&line[..len]);
                         pos = len;
+                        cursor = len;
                         if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
                             kprint!("{}", s);
                         }
@@ -263,14 +267,36 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                         let len = len.min(buf.len());
                         buf[..len].copy_from_slice(&line[..len]);
                         pos = len;
+                        cursor = len;
                         if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
                             kprint!("{}", s);
                         }
                     } else {
-                        pos = 0; // back to empty line
+                        pos = 0;
+                        cursor = 0;
                     }
                 }
-                _ => {} // ignore other sequences (left, right, etc.)
+                b'C' => {
+                    // Arrow right — move cursor right
+                    if cursor < pos { cursor += 1; }
+                }
+                b'D' => {
+                    // Arrow left — move cursor left
+                    if cursor > 0 { cursor -= 1; }
+                }
+                b'H' => {
+                    // Home — cursor to start of input
+                    cursor = 0;
+                }
+                b'F' => {
+                    // End — cursor to end of input
+                    cursor = pos;
+                }
+                0x7E => {} // consume trailing ~ from PgUp/PgDn sequences
+                _ => {}
+            }
+            if crate::shade::is_active() {
+                crate::shade::render_input_line();
             }
             continue;
         }
@@ -282,17 +308,31 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 esc_mod = crate::shade::input::is_mod_active();
             }
             b'\r' | b'\n' => {
+                cursor = pos; // move cursor to end before newline
                 kprint!("\n");
                 HISTORY.lock().push(&buf[..pos]);
                 return pos;
             }
             0x08 | 0x7F => {
-                // Backspace
-                if pos > 0 {
+                // Backspace — delete char left of cursor
+                if cursor > 0 {
+                    // Shift everything after cursor left by 1
+                    for i in cursor..pos {
+                        buf[i - 1] = buf[i];
+                    }
                     pos -= 1;
-                    kprint!("\x08 \x08");
-                    // Input line already does aurora+blend for 1 line (clears old char)
+                    cursor -= 1;
+                    kprint!("\x08");
+                    // Reprint from cursor to end + clear trailing char
+                    if let Ok(s) = core::str::from_utf8(&buf[cursor..pos]) {
+                        kprint!("{}", s);
+                    }
+                    kprint!(" ");
+                    // Move cursor back to correct position
+                    for _ in 0..(pos - cursor + 1) { kprint!("\x08"); }
                     if crate::shade::is_active() {
+                        crate::shade::terminal::set_cursor_pos(
+                            crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
                         crate::shade::render_input_line();
                     }
                 }
@@ -313,11 +353,25 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             }
             b if b >= 0x20 && b < 0x7F => {
                 if pos < buf.len() {
-                    buf[pos] = b;
+                    // Insert at cursor position (shift right)
+                    if cursor < pos {
+                        for i in (cursor..pos).rev() {
+                            buf[i + 1] = buf[i];
+                        }
+                    }
+                    buf[cursor] = b;
                     pos += 1;
-                    crate::shade::terminal::scroll_reset(); // Back to bottom on input
-                    kprint!("{}", b as char);
+                    cursor += 1;
+                    crate::shade::terminal::scroll_reset();
+                    // Print from cursor to end (redraws shifted chars)
+                    if let Ok(s) = core::str::from_utf8(&buf[cursor - 1..pos]) {
+                        kprint!("{}", s);
+                    }
+                    // Move cursor back to correct position
+                    for _ in 0..(pos - cursor) { kprint!("\x08"); }
                     if crate::shade::is_active() {
+                        crate::shade::terminal::set_cursor_pos(
+                            crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
                         crate::shade::render_input_line();
                     }
                 }

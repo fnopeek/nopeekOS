@@ -35,6 +35,11 @@ pub enum ShadeAction {
     SwapRight,
     SwapUp,
     SwapDown,
+    /// Mod+Ctrl+Arrow: resize focused window
+    ResizeLeft,
+    ResizeRight,
+    ResizeUp,
+    ResizeDown,
     /// Mod+PageUp/PageDown: scroll terminal
     ScrollUp,
     ScrollDown,
@@ -128,12 +133,13 @@ pub fn try_arrow_keybind(direction: u8) -> bool {
     if !crate::shade::is_active() { return false; }
 
     let shift = crate::keyboard::is_shift_held();
+    let ctrl = crate::keyboard::is_ctrl_held();
 
     match direction {
-        b'A' => { push_action(if shift { ShadeAction::SwapUp } else { ShadeAction::FocusUp }); true }
-        b'B' => { push_action(if shift { ShadeAction::SwapDown } else { ShadeAction::FocusDown }); true }
-        b'C' => { push_action(if shift { ShadeAction::SwapRight } else { ShadeAction::FocusRight }); true }
-        b'D' => { push_action(if shift { ShadeAction::SwapLeft } else { ShadeAction::FocusLeft }); true }
+        b'A' => { push_action(if ctrl { ShadeAction::ResizeUp } else if shift { ShadeAction::SwapUp } else { ShadeAction::FocusUp }); true }
+        b'B' => { push_action(if ctrl { ShadeAction::ResizeDown } else if shift { ShadeAction::SwapDown } else { ShadeAction::FocusDown }); true }
+        b'C' => { push_action(if ctrl { ShadeAction::ResizeRight } else if shift { ShadeAction::SwapRight } else { ShadeAction::FocusRight }); true }
+        b'D' => { push_action(if ctrl { ShadeAction::ResizeLeft } else if shift { ShadeAction::SwapLeft } else { ShadeAction::FocusLeft }); true }
         b'5' => { push_action(ShadeAction::ScrollUp); true }   // PageUp
         b'6' => { push_action(ShadeAction::ScrollDown); true } // PageDown
         _ => false,
