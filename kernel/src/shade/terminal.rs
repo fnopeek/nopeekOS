@@ -321,16 +321,12 @@ pub fn render_input_line(
         }
     }
 
-    // Draw text cursor (blinking block at cursor position)
+    // Draw text cursor (solid bar at cursor position)
     let cur = cursor_pos();
-    // Blink: ~500ms on / 500ms off (based on tick counter, 100Hz)
-    let blink_on = (crate::interrupts::ticks() / 50) & 1 == 0;
-    if blink_on {
-        let cursor_x = win_cx + cur as u32 * char_w;
-        if cursor_x + 2 <= win_cx + win_cw {
-            let cursor_color = 0x00E8E8E8u32;
-            crate::gui::render::fill_rect(shadow, info, cursor_x, last_line_y, 2, char_h, cursor_color);
-        }
+    let cursor_x = win_cx + cur as u32 * char_w;
+    if cursor_x + 2 <= win_cx + win_cw {
+        let cursor_color = 0x00E8E8E8u32;
+        crate::gui::render::fill_rect(shadow, info, cursor_x, last_line_y, 2, char_h, cursor_color);
     }
 
     Some((win_cx, last_line_y, win_cw, char_h))

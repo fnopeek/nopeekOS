@@ -44,6 +44,9 @@ pub struct Window {
     pub workspace: u8,
     /// Terminal buffer index (separate session per window).
     pub terminal_idx: u8,
+    /// Resize delta for tiling split adjustment (pixels, can be negative).
+    pub resize_w: i32,
+    pub resize_h: i32,
 }
 
 #[allow(dead_code)]
@@ -64,6 +67,8 @@ impl Window {
             dirty: true,
             workspace: 0,
             terminal_idx: 0,
+            resize_w: 0,
+            resize_h: 0,
         }
     }
 

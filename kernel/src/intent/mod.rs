@@ -296,6 +296,8 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 _ => {}
             }
             if crate::shade::is_active() {
+                crate::shade::terminal::set_cursor_pos(
+                    crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
                 crate::shade::render_input_line();
             }
             continue;
