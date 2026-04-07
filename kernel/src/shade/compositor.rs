@@ -566,6 +566,20 @@ impl Compositor {
         evt.dx != 0 || evt.dy != 0
     }
 
+    /// Resize focused window by dx/dy pixels. Makes it floating for custom size.
+    pub fn resize_focused(&mut self, dx: i32, dy: i32) {
+        if let Some(fid) = self.focused {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == fid) {
+                win.width = (win.width as i32 + dx).max(200) as u32;
+                win.height = (win.height as i32 + dy).max(100) as u32;
+                win.state = WindowState::Floating;
+                win.dirty = true;
+            }
+            self.retile();
+            self.needs_full_redraw = true;
+        }
+    }
+
     /// Swap focused window with the nearest window in the given direction.
     pub fn swap_direction(&mut self, dx: i32, dy: i32) {
         let fid = match self.focused { Some(id) => id, None => return };

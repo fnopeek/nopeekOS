@@ -181,6 +181,22 @@ pub fn handle_action(action: input::ShadeAction) {
             with_compositor(|comp| comp.swap_direction(0, 1));
             render_frame();
         }
+        ShadeAction::ResizeLeft => {
+            with_compositor(|comp| comp.resize_focused(-40, 0));
+            render_frame();
+        }
+        ShadeAction::ResizeRight => {
+            with_compositor(|comp| comp.resize_focused(40, 0));
+            render_frame();
+        }
+        ShadeAction::ResizeUp => {
+            with_compositor(|comp| comp.resize_focused(0, -40));
+            render_frame();
+        }
+        ShadeAction::ResizeDown => {
+            with_compositor(|comp| comp.resize_focused(0, 40));
+            render_frame();
+        }
         ShadeAction::ToggleFullscreen => {
             with_compositor(|comp| {
                 if let Some(id) = comp.focused {
