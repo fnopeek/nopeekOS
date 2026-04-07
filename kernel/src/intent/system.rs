@@ -206,9 +206,6 @@ pub fn intent_shade(args: &str) {
                 return;
             }
             crate::shade::init();
-            crate::shade::with_compositor(|comp| {
-                comp.create_window("terminal", 0, 0, 800, 600);
-            });
             crate::shade::render_frame();
             kprintln!("[npk] shade: compositor active");
         }

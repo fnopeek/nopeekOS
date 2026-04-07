@@ -51,6 +51,9 @@ pub fn init() {
     });
 
     crate::kprintln!("[npk] shade: compositor {}x{} scale:{}x", screen_w, screen_h, scale);
+
+    // Write initial prompt so the window isn't empty
+    terminal::write_prompt();
 }
 
 /// Execute a closure with exclusive access to the compositor.
@@ -123,6 +126,8 @@ pub fn handle_action(action: input::ShadeAction) {
             with_compositor(|comp| {
                 comp.create_window("terminal", 0, 0, 800, 600);
             });
+            // Write prompt to the new terminal
+            terminal::write_prompt();
             render_frame();
         }
         ShadeAction::CloseWindow => {

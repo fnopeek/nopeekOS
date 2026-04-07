@@ -171,7 +171,25 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
 
         // Check for shade compositor actions (Mod+key)
         if let Some(action) = crate::shade::input::poll_action() {
-            crate::shade::handle_action(action);
+            use crate::shade::input::ShadeAction;
+            match action {
+                ShadeAction::FocusNext | ShadeAction::FocusPrev |
+                ShadeAction::Workspace(_) | ShadeAction::MoveToWorkspace(_) => {
+                    // Save current input to old terminal
+                    crate::shade::terminal::save_input(&buf[..pos], pos);
+                    crate::shade::handle_action(action);
+                    // Restore new terminal's saved input
+                    pos = crate::shade::terminal::restore_input(buf);
+                }
+                ShadeAction::NewWindow => {
+                    crate::shade::terminal::save_input(&buf[..pos], pos);
+                    crate::shade::handle_action(action);
+                    pos = 0; // New window starts fresh
+                }
+                _ => {
+                    crate::shade::handle_action(action);
+                }
+            }
             continue;
         }
 
@@ -418,6 +436,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 kprint!("{}@npk /> ", user_str);
             } else {
                 kprint!("{}@npk {}> ", user_str, cwd);
+            }
+            // Show prompt in shade window immediately
+            if crate::shade::is_active() {
+                crate::shade::render_input_line();
             }
         }
 
