@@ -145,20 +145,36 @@ pub fn allocate_contiguous(count: usize) -> Option<u64> {
     let top = alloc.memory_top;
     if count > top { return None; }
 
-    'outer: for start in 0..top - count + 1 {
+    // Search from top of memory downward — high RAM is almost always free,
+    // avoids O(n*count) scan through busy low memory regions.
+    let mut start = top - count;
+    loop {
+        let mut ok = true;
+        let mut skip_to = start;
         for i in 0..count {
             let frame = start + i;
             let (byte, bit) = (frame / 8, frame % 8);
             if alloc.bitmap[byte] & (1 << bit) != 0 {
-                continue 'outer;
+                // Frame is used — skip past it
+                ok = false;
+                if start == 0 { return None; }
+                skip_to = if frame > count { frame - count } else { 0 };
+                break;
             }
         }
-        for i in 0..count {
-            alloc.set_used(start + i);
+        if ok {
+            for i in 0..count {
+                alloc.set_used(start + i);
+            }
+            return Some((start * PAGE_SIZE) as u64);
         }
-        return Some((start * PAGE_SIZE) as u64);
+        if skip_to >= start {
+            if start == 0 { return None; }
+            start -= 1;
+        } else {
+            start = skip_to;
+        }
     }
-    None
 }
 
 pub fn reserve_region(base: u64, length: u64) {
