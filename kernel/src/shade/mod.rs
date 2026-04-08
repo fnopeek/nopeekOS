@@ -70,6 +70,15 @@ pub fn focus_window(id: WindowId) {
     with_compositor(|comp| comp.focus_window(id));
 }
 
+/// Force a full redraw (e.g. after wallpaper change).
+pub fn force_redraw() {
+    with_compositor(|comp| {
+        comp.aurora_drawn = false;
+        comp.needs_full_redraw = true;
+    });
+    render_frame();
+}
+
 /// Draw the entire compositor state to the framebuffer.
 pub fn render_frame() {
     framebuffer::with_fb(|fb| {
@@ -127,6 +136,7 @@ pub fn handle_action(action: input::ShadeAction) {
             });
             // Write prompt to the new terminal
             terminal::write_prompt();
+            terminal::set_cursor_pos(terminal::current_line_len());
             render_frame();
         }
         ShadeAction::CloseWindow => {

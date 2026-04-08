@@ -476,6 +476,33 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    shade.bar_position    Bar position (top/bottom)");
             kprintln!();
         }
+        "wallpaper" | "wp" | "background" => {
+            kprintln!();
+            kprintln!("  Wallpaper");
+            kprintln!("  ─────────");
+            kprintln!("  wallpaper set <name>   Set wallpaper from npkFS");
+            kprintln!("  wallpaper clear        Revert to aurora background");
+            kprintln!("  wallpaper list         List available wallpapers");
+            kprintln!("  wallpaper random       Set random wallpaper");
+            kprintln!();
+            kprintln!("  Wallpapers live in ~/wallpapers/");
+            kprintln!("  Download: https <host> /image.png > wallpapers/name");
+            kprintln!("  A random wallpaper is set on each login.");
+            kprintln!("  Theme colors are extracted automatically.");
+            kprintln!();
+        }
+        "packages" | "install" | "modules" => {
+            kprintln!();
+            kprintln!("  Package Manager");
+            kprintln!("  ───────────────");
+            kprintln!("  install <module>       Download + verify + install WASM module");
+            kprintln!("  uninstall <module>     Remove installed module");
+            kprintln!("  modules                List installed modules");
+            kprintln!();
+            kprintln!("  Modules are signed (ECDSA P-384) and verified.");
+            kprintln!("  Source: raw.githubusercontent.com/fnopeek/nopeekOS/");
+            kprintln!();
+        }
         "disk" | "blk" => {
             kprintln!();
             kprintln!("  Disk");
@@ -496,12 +523,13 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Content:   cat · grep · head · wc · hexdump");
             kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");
             kprintln!("  Exec:      run · add · multiply");
+            kprintln!("  Packages:  install · uninstall · modules");
             kprintln!("  Security:  lock · passwd · caps · audit · shell");
             kprintln!("  Config:    set · get · config");
-            kprintln!("  Display:   gpu · shade");
+            kprintln!("  Display:   gpu · shade · wallpaper");
             kprintln!("  Disk:      disk read · disk write");
             kprintln!();
-            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade)");
+            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper)");
             kprintln!();
         }
     }

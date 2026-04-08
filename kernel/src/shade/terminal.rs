@@ -336,8 +336,8 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Restore input line background (aurora + blend for just 1 line = fast, ~2ms)
-    crate::gui::background::draw_aurora_region(shadow, info,
+    // Restore input line background (wallpaper/aurora + blend for just 1 line = fast, ~2ms)
+    crate::gui::background::draw_background_region(shadow, info,
         win_cx, last_line_y, win_cw, char_h);
     crate::gui::render::fill_rounded_rect_blend(shadow, info,
         win_cx, last_line_y, win_cw, char_h,

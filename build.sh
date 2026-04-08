@@ -563,6 +563,36 @@ MANIFEST
             warn "Extract pubkey: openssl ec -in update.key -pubout -outform DER -out update.pub"
         fi
 
+        # Sign WASM modules in release/modules/ (if any)
+        if [ -d "$RELEASE_DIR/modules" ]; then
+            log "Signing WASM modules..."
+            MODULE_MANIFEST=""
+            for wasm_file in "$RELEASE_DIR/modules/"*.wasm; do
+                [ -f "$wasm_file" ] || continue
+                MOD_NAME=$(basename "$wasm_file" .wasm)
+                MOD_SIZE=$(stat -c%s "$wasm_file")
+                MOD_SHA=$(openssl dgst -sha384 -hex "$wasm_file" 2>/dev/null | awk '{print $NF}')
+                MOD_VER=$(head -1 "$RELEASE_DIR/modules/${MOD_NAME}.version" 2>/dev/null || echo "0.1.0")
+
+                MODULE_MANIFEST="${MODULE_MANIFEST}[${MOD_NAME}]
+version=${MOD_VER}
+size=${MOD_SIZE}
+sha384=${MOD_SHA}
+
+"
+                # Sign module
+                if [ -f "$KEY_FILE" ]; then
+                    openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/modules/${MOD_NAME}.sig" "$wasm_file"
+                    ok "Signed module: $MOD_NAME ($MOD_SIZE bytes)"
+                fi
+            done
+
+            if [ -n "$MODULE_MANIFEST" ]; then
+                echo "$MODULE_MANIFEST" > "$RELEASE_DIR/modules/manifest"
+                ok "Module manifest written"
+            fi
+        fi
+
         ok "Release artifacts in $RELEASE_DIR/"
         ls -la "$RELEASE_DIR/"
         ;;
