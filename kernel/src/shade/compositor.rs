@@ -109,7 +109,7 @@ impl Compositor {
             .unwrap_or(10) * scale;
         let opacity = crate::config::get("shade.opacity")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(160);
+            .unwrap_or(200);
 
         Compositor {
             screen_w,
