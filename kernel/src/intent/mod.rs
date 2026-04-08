@@ -518,13 +518,18 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             let user = crate::config::get("name");
             let cwd = get_cwd();
             let user_str = user.as_deref().unwrap_or("npk");
-            if cwd.is_empty() {
-                kprint!("{}@npk /> ", user_str);
+            let prompt_len = if cwd.is_empty() {
+                let p = alloc::format!("{}@npk /> ", user_str);
+                kprint!("{}", p);
+                p.len()
             } else {
-                kprint!("{}@npk {}> ", user_str, cwd);
-            }
-            // Reset cursor to end of prompt for new input line
+                let p = alloc::format!("{}@npk {}> ", user_str, cwd);
+                kprint!("{}", p);
+                p.len()
+            };
+            // Update prompt length + reset cursor for new input line
             if crate::shade::is_active() {
+                crate::shade::terminal::set_prompt_len(prompt_len);
                 crate::shade::terminal::set_cursor_pos(
                     crate::shade::terminal::current_line_len());
                 crate::shade::render_input_line();
