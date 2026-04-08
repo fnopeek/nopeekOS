@@ -130,6 +130,16 @@ static DIRTY: AtomicBool = AtomicBool::new(false);
 /// Input cursor position (for rendering blinking cursor on input line).
 static mut INPUT_CURSOR_POS: usize = 0;
 
+/// Cached background pixels for the input line (saved after full render).
+/// Avoids re-blending on every keystroke — just restore + draw text.
+const INPUT_LINE_CACHE_MAX: usize = 3840 * 4; // max 4K width × 4 bytes
+static mut INPUT_LINE_CACHE: [u8; INPUT_LINE_CACHE_MAX] = [0; INPUT_LINE_CACHE_MAX];
+static mut INPUT_LINE_CACHE_X: u32 = 0;
+static mut INPUT_LINE_CACHE_Y: u32 = 0;
+static mut INPUT_LINE_CACHE_W: u32 = 0;
+static mut INPUT_LINE_CACHE_H: u32 = 0;
+static mut INPUT_LINE_CACHE_VALID: bool = false;
+
 /// Set the input cursor position (called from intent loop on every key/move).
 pub fn set_cursor_pos(pos: usize) {
     // SAFETY: single-core
@@ -316,10 +326,7 @@ pub fn render_to_window(
 pub fn render_input_line(
     shadow: *mut u8,
     info: &crate::framebuffer::FbInfo,
-    win_x: u32, win_w: u32,               // window coords (for bg + border)
-    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32, // content coords (for text)
-    border_color: u32, border_opacity: u32,
-    bg_color: u32, opacity: u32,
+    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
     terminal_idx: u8,
 ) -> Option<(u32, u32, u32, u32)> {
     if (terminal_idx as usize) >= MAX_TERMINALS { return None; }
@@ -338,18 +345,32 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Replicate render_window's three-layer blend at correct coordinates:
-    // 1. Background at window coords (same as full render)
-    crate::gui::background::draw_background_region(shadow, info,
-        win_x, last_line_y, win_w, char_h);
-    // 2. Border blend at window coords (matches full-window border layer)
-    crate::gui::render::fill_rounded_rect_blend(shadow, info,
-        win_x, last_line_y, win_w, char_h,
-        border_color, 0, border_opacity);
-    // 3. Content bg blend at content coords
-    crate::gui::render::fill_rounded_rect_blend(shadow, info,
-        win_cx, last_line_y, win_cw, char_h,
-        bg_color, 0, opacity);
+    // Restore cached background pixels (saved after full render_window).
+    // This is pixel-perfect: exact same pixels from the full render.
+    let cache_valid = unsafe { INPUT_LINE_CACHE_VALID };
+    let pitch = info.pitch as usize;
+    if cache_valid {
+        let cx = unsafe { INPUT_LINE_CACHE_X } as usize;
+        let cw = unsafe { INPUT_LINE_CACHE_W } as usize;
+        let ch = unsafe { INPUT_LINE_CACHE_H } as usize;
+        let cy = unsafe { INPUT_LINE_CACHE_Y } as usize;
+        let bytes_per_row = cw * 4;
+        // Restore at the current input line position (may differ from cached y if lines scrolled)
+        for row in 0..char_h.min(ch as u32) {
+            let cache_off = row as usize * bytes_per_row;
+            let shadow_off = (last_line_y + row) as usize * pitch + cx * 4;
+            if cache_off + bytes_per_row <= INPUT_LINE_CACHE_MAX {
+                // SAFETY: single-core, bounds checked
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (core::ptr::addr_of!(INPUT_LINE_CACHE) as *const u8).add(cache_off),
+                        shadow.add(shadow_off),
+                        bytes_per_row.min(pitch - cx * 4),
+                    );
+                }
+            }
+        }
+    }
 
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
@@ -374,6 +395,53 @@ pub fn render_input_line(
     }
 
     Some((win_cx, last_line_y, win_cw, char_h))
+}
+
+/// Cache the input line background from the shadow buffer after a full render.
+/// Called from render_window after drawing the focused window.
+pub fn cache_input_line_bg(
+    shadow: *mut u8,
+    info: &crate::framebuffer::FbInfo,
+    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
+    terminal_idx: u8,
+) {
+    if (terminal_idx as usize) >= MAX_TERMINALS { return; }
+    let (_, char_h) = crate::gui::font::char_size(1);
+    let rows = win_ch / char_h;
+    if rows == 0 { return; }
+
+    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
+    let term = &terms[terminal_idx as usize];
+    let visible_count = (rows as usize).min(term.total + 1);
+    let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
+
+    let pitch = info.pitch as usize;
+    let bytes_per_row = (win_cw as usize) * 4;
+    let total_bytes = bytes_per_row * char_h as usize;
+    if total_bytes > INPUT_LINE_CACHE_MAX { return; }
+
+    // SAFETY: single-core, bounds checked
+    unsafe {
+        for row in 0..char_h {
+            let shadow_off = (last_line_y + row) as usize * pitch + win_cx as usize * 4;
+            let cache_off = row as usize * bytes_per_row;
+            core::ptr::copy_nonoverlapping(
+                shadow.add(shadow_off),
+                (core::ptr::addr_of_mut!(INPUT_LINE_CACHE) as *mut u8).add(cache_off),
+                bytes_per_row,
+            );
+        }
+        INPUT_LINE_CACHE_X = win_cx;
+        INPUT_LINE_CACHE_Y = last_line_y;
+        INPUT_LINE_CACHE_W = win_cw;
+        INPUT_LINE_CACHE_H = char_h;
+        INPUT_LINE_CACHE_VALID = true;
+    }
+}
+
+/// Invalidate the input line cache (call when window layout changes).
+pub fn invalidate_input_cache() {
+    unsafe { INPUT_LINE_CACHE_VALID = false; }
 }
 
 /// Scroll the active terminal up (show older content).
