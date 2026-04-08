@@ -226,9 +226,10 @@ fn generate_demo_wallpapers() {
         return;
     }
 
-    // Use native framebuffer resolution for pixel-perfect quality (no scaling)
-    let w: u32 = fb_w;
-    let h: u32 = fb_h;
+    // Use 1080p — good quality, fast to generate (~8MB vs 33MB at 4K)
+    // Scaled up to native resolution when set as wallpaper
+    let w: u32 = 1920;
+    let h: u32 = 1080;
 
     ensure_wallpaper_dir();
     let wp_dir = wallpaper_dir();
