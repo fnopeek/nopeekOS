@@ -101,17 +101,23 @@ fn set_wallpaper(name: &str) {
     }
 
     let resolved = super::resolve_path(name);
-    kprint!("[npk] Loading {}... ", resolved);
 
-    let (data, _) = match crate::npkfs::fetch(&resolved) {
-        Ok(d) => d,
-        Err(_) => {
-            kprintln!("not found");
-            return;
+    // Try resolved path first, then wallpapers/ directory as fallback
+    let wp_path = alloc::format!("{}/{}", wallpaper_dir(), name);
+    let (final_path, data) = match crate::npkfs::fetch(&resolved) {
+        Ok((d, h)) => (resolved, d),
+        Err(_) => match crate::npkfs::fetch(&wp_path) {
+            Ok((d, h)) => (wp_path, d),
+            Err(_) => {
+                kprintln!("[npk] Wallpaper '{}' not found.", name);
+                return;
+            }
         }
     };
 
-    apply_wallpaper_data(&resolved, &data);
+    kprint!("[npk] Loading {}... ", final_path);
+
+    apply_wallpaper_data(&final_path, &data);
 }
 
 /// Apply raw image data as wallpaper.
@@ -220,9 +226,9 @@ fn generate_demo_wallpapers() {
         return;
     }
 
-    // Use a smaller resolution for storage (scaled up when set as wallpaper)
-    let w: u32 = 640;
-    let h: u32 = 360;
+    // Use native framebuffer resolution for pixel-perfect quality (no scaling)
+    let w: u32 = fb_w;
+    let h: u32 = fb_h;
 
     ensure_wallpaper_dir();
     let wp_dir = wallpaper_dir();

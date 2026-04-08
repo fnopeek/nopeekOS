@@ -442,7 +442,17 @@ impl Compositor {
 
             if needs_render {
                 if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
-                    let border_color = if win.focused { self.border_active } else { self.border_inactive };
+                    let active_border = if crate::theme::is_active() {
+                        crate::gui::background::accent_color()
+                    } else {
+                        self.border_active
+                    };
+                    let inactive_border = if crate::theme::is_active() {
+                        crate::theme::inactive_border()
+                    } else {
+                        self.border_inactive
+                    };
+                    let border_color = if win.focused { active_border } else { inactive_border };
                     Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
                     regions.push((win.x, win.y, win.width, win.height));
                 }
