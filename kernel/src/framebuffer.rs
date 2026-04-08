@@ -63,6 +63,30 @@ pub fn set_gui_mode(active: bool) {
     GUI_MODE.store(active, Ordering::Release);
 }
 
+/// Get the current framebuffer resolution.
+pub fn get_resolution() -> (u32, u32) {
+    let console = CONSOLE.lock();
+    match console.as_ref() {
+        Some(c) => (c.info.width, c.info.height),
+        None => (0, 0),
+    }
+}
+
+/// Get a copy of the current FbInfo.
+pub fn get_info() -> FbInfo {
+    let console = CONSOLE.lock();
+    match console.as_ref() {
+        Some(c) => FbInfo {
+            addr: c.info.addr,
+            pitch: c.info.pitch,
+            width: c.info.width,
+            height: c.info.height,
+            bpp: c.info.bpp,
+        },
+        None => FbInfo { addr: 0, pitch: 0, width: 0, height: 0, bpp: 0 },
+    }
+}
+
 const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
 const FG_COLOR: u32 = 0x00E8E8E8; // Near-white (was light gray)

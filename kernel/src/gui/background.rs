@@ -1,7 +1,8 @@
 //! Procedural background generator with multiple color schemes.
 //!
-//! 7 aurora themes, randomly selected at boot.
-//! Pure math — no embedded images, zero extra bytes in the kernel.
+//! Supports two modes:
+//! 1. Procedural aurora (7 themes, zero embedded images)
+//! 2. Custom wallpaper (set via WASM module, pixels in wallpaper buffer)
 
 use core::sync::atomic::{AtomicU8, AtomicBool, Ordering};
 use crate::framebuffer::FbInfo;
@@ -13,6 +14,12 @@ static mut AURORA_CACHE_PITCH: u32 = 0;
 static mut AURORA_CACHE_W: u32 = 0;
 static mut AURORA_CACHE_H: u32 = 0;
 static AURORA_CACHED: AtomicBool = AtomicBool::new(false);
+
+/// Custom wallpaper buffer (set via WASM, overrides aurora).
+static mut WALLPAPER: *mut u8 = core::ptr::null_mut();
+static mut WALLPAPER_W: u32 = 0;
+static mut WALLPAPER_H: u32 = 0;
+static WALLPAPER_SET: AtomicBool = AtomicBool::new(false);
 
 /// Currently active color scheme (set once at boot).
 static ACTIVE_SCHEME: AtomicU8 = AtomicU8::new(0);
@@ -126,6 +133,111 @@ pub fn active_scheme() -> &'static ColorScheme {
 /// Get the accent color for the active scheme.
 pub fn accent_color() -> u32 {
     active_scheme().accent
+}
+
+/// Set a custom wallpaper from raw BGRA pixel data.
+/// The data is copied into a kernel-owned buffer and scaled to fit the framebuffer.
+pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
+    let target_w = info.width;
+    let target_h = info.height;
+    let size = target_h as usize * info.pitch as usize;
+    let pages = (size + 4095) / 4096;
+
+    // Allocate (or reuse) wallpaper buffer
+    let buf = if !unsafe { WALLPAPER.is_null() } && unsafe { WALLPAPER_W == target_w && WALLPAPER_H == target_h } {
+        unsafe { WALLPAPER }
+    } else {
+        match crate::memory::allocate_contiguous(pages) {
+            Some(addr) => addr as *mut u8,
+            None => return,
+        }
+    };
+
+    // Bilinear-ish scale: nearest-neighbor for speed (good enough for wallpapers)
+    for ty in 0..target_h {
+        let sy = (ty as u64 * h as u64 / target_h as u64) as u32;
+        for tx in 0..target_w {
+            let sx = (tx as u64 * w as u64 / target_w as u64) as u32;
+            let src_off = (sy * w + sx) as usize * 4;
+            if src_off + 3 >= pixels.len() { continue; }
+            let b = pixels[src_off] as u32;
+            let g = pixels[src_off + 1] as u32;
+            let r = pixels[src_off + 2] as u32;
+            let pixel = (r << 16) | (g << 8) | b;
+            let dst_off = (ty * info.pitch + tx * 4) as usize;
+            // SAFETY: bounds checked by allocation size
+            unsafe { *(buf.add(dst_off) as *mut u32) = pixel; }
+        }
+    }
+
+    // SAFETY: single-core
+    unsafe {
+        WALLPAPER = buf;
+        WALLPAPER_W = target_w;
+        WALLPAPER_H = target_h;
+    }
+    WALLPAPER_SET.store(true, Ordering::Release);
+
+    // Extract theme from wallpaper pixels
+    let pixel_count = (w * h) as usize;
+    let palette = crate::theme::extract_palette(pixels, pixel_count);
+    crate::theme::set_palette(&palette);
+}
+
+/// Check if a custom wallpaper is active.
+pub fn has_wallpaper() -> bool {
+    WALLPAPER_SET.load(Ordering::Acquire)
+}
+
+/// Clear the custom wallpaper, revert to aurora.
+pub fn clear_wallpaper() {
+    WALLPAPER_SET.store(false, Ordering::Release);
+    crate::theme::clear();
+}
+
+/// Draw background (wallpaper if set, otherwise aurora) — full screen.
+pub fn draw_background(shadow: *mut u8, info: &FbInfo) {
+    if has_wallpaper() {
+        draw_wallpaper(shadow, info);
+    } else {
+        draw_aurora(shadow, info);
+    }
+}
+
+/// Draw background region (wallpaper if set, otherwise aurora).
+pub fn draw_background_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
+    if has_wallpaper() {
+        draw_wallpaper_region(shadow, info, rx, ry, rw, rh);
+    } else {
+        draw_aurora_region(shadow, info, rx, ry, rw, rh);
+    }
+}
+
+/// Copy wallpaper buffer to shadow buffer (full screen).
+fn draw_wallpaper(shadow: *mut u8, info: &FbInfo) {
+    let wp = unsafe { WALLPAPER };
+    if wp.is_null() { return; }
+    let size = info.height as usize * info.pitch as usize;
+    // SAFETY: wallpaper buffer is same size as shadow
+    unsafe { core::ptr::copy_nonoverlapping(wp, shadow, size); }
+}
+
+/// Copy wallpaper region to shadow buffer.
+fn draw_wallpaper_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
+    let wp = unsafe { WALLPAPER };
+    if wp.is_null() {
+        draw_aurora_region(shadow, info, rx, ry, rw, rh);
+        return;
+    }
+    let pitch = info.pitch as usize;
+    let x0 = rx as usize;
+    let x1 = ((rx + rw) as usize).min(info.width as usize);
+    let bytes = (x1 - x0) * 4;
+    for y in ry..(ry + rh).min(info.height) {
+        let off = y as usize * pitch + x0 * 4;
+        // SAFETY: copying from wallpaper to shadow within bounds
+        unsafe { core::ptr::copy_nonoverlapping(wp.add(off), shadow.add(off), bytes); }
+    }
 }
 
 /// Generate the full aurora into the cache, then copy to shadow buffer.

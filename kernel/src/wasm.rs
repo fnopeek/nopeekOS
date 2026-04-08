@@ -181,6 +181,76 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_get_fb_size() -> (width << 16) | height
+    linker.func_wrap("env", "npk_get_fb_size",
+        |_caller: Caller<'_, HostState>| -> i64 {
+            let (w, h) = crate::framebuffer::get_resolution();
+            ((w as i64) << 32) | (h as i64)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_set_wallpaper(ptr, len, width, height) -> 0 or -1
+    // Receives raw BGRA pixel data, sets it as the compositor wallpaper.
+    linker.func_wrap("env", "npk_set_wallpaper",
+        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32,
+         width: i32, height: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+                kprintln!("[npk] WASM: npk_set_wallpaper DENIED (no WRITE)");
+                return -1;
+            }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = ptr as usize;
+            let pixel_bytes = (width as usize) * (height as usize) * 4;
+            let end = start + pixel_bytes;
+            if end > data.len() || end > len as usize + start { return -1; }
+
+            let info = crate::framebuffer::get_info();
+            crate::gui::background::set_wallpaper(
+                &data[start..end], width as u32, height as u32, &info);
+
+            // Force compositor full redraw
+            crate::shade::force_redraw();
+            kprintln!("[npk] Wallpaper set ({}x{}, theme extracted)", width, height);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_set_theme(ptr) -> 0 or -1
+    // Receives 16 u32 colors (64 bytes), sets as theme palette.
+    linker.func_wrap("env", "npk_set_theme",
+        |mut caller: Caller<'_, HostState>, ptr: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+                return -1;
+            }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = ptr as usize;
+            if start + 64 > data.len() { return -1; }
+
+            let mut colors = [0u32; 16];
+            for i in 0..16 {
+                let off = start + i * 4;
+                colors[i] = u32::from_le_bytes([
+                    data[off], data[off + 1], data[off + 2], data[off + 3],
+                ]);
+            }
+            crate::theme::set_palette(&colors);
+            crate::shade::force_redraw();
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     Ok(())
 }
 

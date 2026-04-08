@@ -9,6 +9,8 @@ pub(crate) mod http;
 mod net;
 mod system;
 mod update;
+mod install;
+mod wallpaper;
 mod wasm;
 
 use crate::capability::{self, CapId, Vault, Rights};
@@ -96,7 +98,7 @@ fn get_cwd() -> String {
 }
 
 /// Get the home directory from config.
-fn home_dir() -> String {
+pub(crate) fn home_dir() -> String {
     match crate::config::get("name") {
         Some(name) => alloc::format!("home/{}", name),
         None => String::from("home"),
@@ -107,7 +109,7 @@ fn home_dir() -> String {
 /// - Absolute (starts with /): strip leading / and use as-is
 /// - ".." : go up one level
 /// - Relative: prepend cwd
-fn resolve_path(name: &str) -> String {
+pub(crate) fn resolve_path(name: &str) -> String {
     let name = name.trim();
     let cwd = get_cwd();
 
@@ -144,7 +146,7 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
 }
 
 /// Ensure all parent directories exist for a given path (create .dir markers).
-fn ensure_parents(path: &str) {
+pub(crate) fn ensure_parents(path: &str) {
     let mut current = String::new();
     for part in path.split('/') {
         if !current.is_empty() { current.push('/'); }
@@ -521,8 +523,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             } else {
                 kprint!("{}@npk {}> ", user_str, cwd);
             }
-            // Show prompt in shade window immediately
+            // Reset cursor to end of prompt for new input line
             if crate::shade::is_active() {
+                crate::shade::terminal::set_cursor_pos(
+                    crate::shade::terminal::current_line_len());
                 crate::shade::render_input_line();
             }
         }
@@ -752,6 +756,24 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        "install" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "install") {
+                install::intent_install(args);
+            }
+        }
+        "uninstall" | "remove" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "uninstall") {
+                install::intent_uninstall(args);
+            }
+        }
+        "modules" => {
+            install::intent_modules();
+        }
+
+        "wallpaper" | "wp" => {
+            wallpaper::intent_wallpaper(args);
+        }
+
         "passwd" | "password" | "passphrase" => {
             auth::intent_passwd();
         }
@@ -879,11 +901,15 @@ fn intent_cd(args: &str) {
 
 /// Re-export public API for main.rs
 pub use wasm::bootstrap_wasm;
+pub use wallpaper::random_wallpaper;
 
 /// Create initial directory structure and set cwd to home.
 pub fn setup_home() {
     let home = home_dir();
     ensure_parents(&home);
+    // Ensure wallpapers directory exists
+    let wp_dir = alloc::format!("{}/wallpapers", home);
+    ensure_parents(&wp_dir);
     set_cwd(&home);
 }
 

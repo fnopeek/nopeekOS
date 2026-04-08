@@ -79,8 +79,8 @@ pub struct Compositor {
     pub opacity: u32,
     /// Full redraw needed (including aurora background).
     pub needs_full_redraw: bool,
-    /// Aurora background has been drawn (skip on partial updates).
-    aurora_drawn: bool,
+    /// Background has been drawn (skip on partial updates).
+    pub aurora_drawn: bool,
     /// Mouse cursor state.
     pub mouse: MouseState,
     /// Drag state: which window is being dragged, and the grab offset.
@@ -324,9 +324,9 @@ impl Compositor {
 
     /// Render the full compositor scene to the shadow buffer.
     pub fn render(&mut self, shadow: *mut u8, info: &FbInfo) {
-        // Only redraw aurora when needed (expensive at 4K)
+        // Only redraw background when needed (expensive at 4K)
         if !self.aurora_drawn || self.needs_full_redraw {
-            background::draw_aurora(shadow, info);
+            background::draw_background(shadow, info);
             self.aurora_drawn = true;
         }
 
@@ -372,18 +372,25 @@ impl Compositor {
             win.terminal_idx)
     }
 
-    /// Render a single window: aurora overwrite + border blend + content blend + text.
+    /// Render a single window: background overwrite + border blend + content blend + text.
     pub(crate) fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
                      border_color: u32) {
-        // 1. FULL OVERWRITE: aurora kills all old pixels (fixes ghost text)
-        background::draw_aurora_region(shadow, info,
+        // 1. FULL OVERWRITE: background kills all old pixels (fixes ghost text)
+        background::draw_background_region(shadow, info,
             win.x, win.y, win.width, win.height);
 
-        // 2. Border blend (on clean aurora)
-        render::fill_rounded_rect_blend(shadow, info,
-            win.x, win.y, win.width, win.height,
-            border_color, rounding, 180);
+        // 2. Border blend (gradient if theme active + window focused)
+        if crate::theme::is_active() && win.focused {
+            let (ga, gb) = crate::theme::border_gradient();
+            render::fill_rounded_rect_gradient(shadow, info,
+                win.x, win.y, win.width, win.height,
+                ga, gb, rounding, 200);
+        } else {
+            render::fill_rounded_rect_blend(shadow, info,
+                win.x, win.y, win.width, win.height,
+                border_color, rounding, 180);
+        }
 
         // 3. Content blend (on clean border blend)
         let cx = win.content_x(border);

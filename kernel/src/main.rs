@@ -51,6 +51,7 @@ mod install;
 mod shade;
 mod acpi;
 mod update_key;
+mod theme;
 
 use alloc::string::String;
 use spin::Mutex;
@@ -347,6 +348,8 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // Start shade compositor (GUI_MODE already set after login)
     if framebuffer::is_available() {
         shade::init();
+        // Random wallpaper on boot (if any in wallpapers/)
+        intent::random_wallpaper();
         shade::render_frame();
     }
 
