@@ -131,11 +131,27 @@ pub fn active_scheme() -> &'static ColorScheme {
 }
 
 /// Get the accent color — from theme if active, otherwise from aurora scheme.
+/// Ensures minimum brightness for readability on dark backgrounds.
 pub fn accent_color() -> u32 {
-    if crate::theme::is_active() {
+    let color = if crate::theme::is_active() {
         crate::theme::accent()
     } else {
-        active_scheme().accent
+        return active_scheme().accent;
+    };
+    // Ensure accent is bright enough to read on dark window bg (~0x10)
+    let r = (color >> 16) & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = color & 0xFF;
+    let lum = (r * 299 + g * 587 + b * 114) / 1000;
+    if lum < 100 {
+        // Too dark — brighten by boosting toward white
+        let boost = 100 - lum;
+        let r = (r + boost).min(255);
+        let g = (g + boost).min(255);
+        let b = (b + boost).min(255);
+        (r << 16) | (g << 8) | b
+    } else {
+        color
     }
 }
 
