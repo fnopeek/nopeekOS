@@ -376,9 +376,20 @@ impl Compositor {
         let cw = win.content_w(border).saturating_sub(pad * 2);
         let ch = win.content_h(border).saturating_sub(pad * 2);
 
+        // Determine border color + opacity matching render_window exactly
+        let (border_color, border_opacity) = if crate::theme::is_active() && win.focused {
+            let (_, gb) = crate::theme::border_gradient();
+            (gb, 200u32)
+        } else {
+            let c = if win.focused { self.border_active } else { self.border_inactive };
+            (c, 180u32)
+        };
+
         terminal::render_input_line(shadow, info,
-            cx, cy, cw, ch,
-            win.bg_color,
+            win.x, win.width, // window coords for background + border
+            cx, cy, cw, ch,   // content coords for text
+            border_color, border_opacity,
+            win.bg_color, self.opacity,
             win.terminal_idx)
     }
 
