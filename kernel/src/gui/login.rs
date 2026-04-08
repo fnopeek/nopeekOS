@@ -44,25 +44,22 @@ impl Layout {
     }
 }
 
-/// Compute the login gradient color for a given y position.
-/// Smooth gradient from 0x0E (top) to 0x1E (bottom) with slight warm tint.
-fn login_gradient_pixel(y: u32, h: u32) -> u32 {
-    let t = y as u64 * 10000 / h.max(1) as u64; // Higher precision to avoid banding
-    let base = 0x0E + (t as u32 * 0x10 / 10000);
-    // Slight warm tint: red channel +1 in lower half
-    let r = base + if t > 5000 { 1 } else { 0 };
-    (r << 16) | (base << 8) | base
-}
+/// 4x4 Bayer dithering matrix (ordered dithering to eliminate gradient banding).
+const BAYER4: [[u8; 4]; 4] = [
+    [ 0,  8,  2, 10],
+    [12,  4, 14,  6],
+    [ 3, 11,  1,  9],
+    [15,  7, 13,  5],
+];
 
-/// Draw the login background — subtle dark gray gradient (top-dark → bottom-slightly-lighter).
+/// Draw the login background — smooth dark gray gradient with dithering.
 fn draw_background(shadow: *mut u8, info: &FbInfo) {
     let w = info.width;
     let h = info.height;
     for y in 0..h {
-        let pixel = login_gradient_pixel(y, h);
         let row = unsafe { shadow.add((y * info.pitch) as usize) as *mut u32 };
         for x in 0..w {
-            unsafe { *row.add(x as usize) = pixel; }
+            unsafe { *row.add(x as usize) = login_pixel(x, y, h); }
         }
     }
 }
@@ -71,12 +68,27 @@ fn draw_background(shadow: *mut u8, info: &FbInfo) {
 fn draw_login_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
     let h = info.height;
     for y in ry..(ry + rh).min(h) {
-        let pixel = login_gradient_pixel(y, h);
         let row = unsafe { shadow.add((y * info.pitch) as usize) as *mut u32 };
         for x in rx..(rx + rw).min(info.width) {
-            unsafe { *row.add(x as usize) = pixel; }
+            unsafe { *row.add(x as usize) = login_pixel(x, y, h); }
         }
     }
+}
+
+/// Compute a single pixel for the login gradient with dithering.
+fn login_pixel(x: u32, y: u32, h: u32) -> u32 {
+    // Gradient value in fixed-point (0..65536 maps to 0x0C..0x20 = 20 levels)
+    let t = y as u64 * 65536 / h.max(1) as u64;
+    // Base value * 256 for sub-pixel precision
+    let val256 = 0x0C * 256 + (t as u32 * 0x14 / 256); // range 0x0C..0x20
+    let base = val256 / 256;
+    let frac = val256 % 256; // fractional part (0..255)
+
+    // Ordered dithering: compare fractional part against Bayer threshold
+    let threshold = BAYER4[(y % 4) as usize][(x % 4) as usize] as u32 * 16;
+    let v = if frac > threshold { base + 1 } else { base };
+    let v = v.min(0x22);
+    (v << 16) | (v << 8) | v
 }
 
 /// Draw the large clock display.
