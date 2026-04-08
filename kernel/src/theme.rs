@@ -21,9 +21,27 @@ pub fn set_palette(colors: &[u32; 16]) {
     unsafe {
         PALETTE = *colors;
         // Border gradient: color1 → color2 (like Hyprland pywal setup)
-        BORDER_GRADIENT = (colors[1], colors[2]);
+        // Ensure minimum brightness for visibility on dark backgrounds
+        BORDER_GRADIENT = (ensure_bright(colors[1]), ensure_bright(colors[2]));
     }
     THEME_ACTIVE.store(true, Ordering::Release);
+}
+
+/// Ensure a color has minimum luminance for readability.
+fn ensure_bright(color: u32) -> u32 {
+    let r = (color >> 16) & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = color & 0xFF;
+    let lum = (r * 299 + g * 587 + b * 114) / 1000;
+    if lum < 80 {
+        let boost = 80 - lum;
+        let r = (r + boost * 2).min(255);
+        let g = (g + boost * 2).min(255);
+        let b = (b + boost * 2).min(255);
+        (r << 16) | (g << 8) | b
+    } else {
+        color
+    }
 }
 
 /// Get the full palette.

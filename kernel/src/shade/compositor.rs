@@ -376,11 +376,15 @@ impl Compositor {
         let cw = win.content_w(border).saturating_sub(pad * 2);
         let ch = win.content_h(border).saturating_sub(pad * 2);
 
-        // Border color for the focused window (same as render_window)
-        let border_color = if crate::theme::is_active() {
-            crate::gui::background::accent_color()
-        } else {
+        // Border color must match render_window's border layer exactly.
+        // With theme gradient: use midpoint of ga/gb (the gradient covers the full rect)
+        let border_color = if crate::theme::is_active() && win.focused {
+            let (ga, gb) = crate::theme::border_gradient();
+            crate::theme::lerp_color(ga, gb, 500)
+        } else if win.focused {
             self.border_active
+        } else {
+            if crate::theme::is_active() { crate::theme::inactive_border() } else { self.border_inactive }
         };
 
         terminal::render_input_line(shadow, info,
