@@ -44,9 +44,36 @@ impl Layout {
     }
 }
 
-/// Draw the background (wallpaper if set, otherwise aurora).
+/// Compute the login gradient color for a given y position.
+fn login_gradient_pixel(y: u32, h: u32) -> u32 {
+    let t = y as u64 * 1000 / h.max(1) as u64;
+    let base = 0x0C + (t as u32 * 0x0E / 1000);
+    (base << 16) | (base << 8) | base
+}
+
+/// Draw the login background — subtle dark gray gradient (top-dark → bottom-slightly-lighter).
 fn draw_background(shadow: *mut u8, info: &FbInfo) {
-    background::draw_background(shadow, info);
+    let w = info.width;
+    let h = info.height;
+    for y in 0..h {
+        let pixel = login_gradient_pixel(y, h);
+        let row = unsafe { shadow.add((y * info.pitch) as usize) as *mut u32 };
+        for x in 0..w {
+            unsafe { *row.add(x as usize) = pixel; }
+        }
+    }
+}
+
+/// Redraw a region of the login gradient background.
+fn draw_login_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
+    let h = info.height;
+    for y in ry..(ry + rh).min(h) {
+        let pixel = login_gradient_pixel(y, h);
+        let row = unsafe { shadow.add((y * info.pitch) as usize) as *mut u32 };
+        for x in rx..(rx + rw).min(info.width) {
+            unsafe { *row.add(x as usize) = pixel; }
+        }
+    }
 }
 
 /// Draw the large clock display.
@@ -88,7 +115,7 @@ fn draw_greeting_name(shadow: *mut u8, info: &FbInfo, l: &Layout, name: &str) {
 fn clear_greeting_area(shadow: *mut u8, info: &FbInfo, l: &Layout) {
     let (_, ch) = font::char_size(l.scale);
     let h = ch + 4 * l.scale;
-    background::draw_background_region(shadow, info, 0, l.greeting_y, info.width, h);
+    draw_login_region(shadow, info, 0, l.greeting_y, info.width, h);
 }
 
 /// Draw the input field (light background, dark outline, rounded).
@@ -182,7 +209,7 @@ fn draw_cursor(shadow: *mut u8, info: &FbInfo, l: &Layout, pos: usize, visible: 
 fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32) {
     // Clear status area (redraw aurora background strip)
     let (_, ch) = font::char_size(l.scale);
-    background::draw_background_region(shadow, info, 0, l.status_y, l.screen_w, ch + 4 * l.scale);
+    draw_login_region(shadow, info, 0, l.status_y, l.screen_w, ch + 4 * l.scale);
     font::draw_str_centered(shadow, info,
         msg, 0, l.screen_w, l.status_y,
         color, None, l.scale);
@@ -251,7 +278,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                 let (shadow, _) = fb.shadow_ptr();
                 // Clear clock area with aurora background
                 let (_, ch) = font::clock_char_size(layout.scale);
-                background::draw_background_region(shadow, info, 0, layout.clock_y, layout.screen_w, ch);
+                draw_login_region(shadow, info, 0, layout.clock_y, layout.screen_w, ch);
                 draw_clock(shadow, info, &layout);
                 framebuffer::blit_rect(fb, 0, layout.clock_y, layout.screen_w, ch);
             });

@@ -130,9 +130,13 @@ pub fn active_scheme() -> &'static ColorScheme {
     &SCHEMES[idx % SCHEMES.len()]
 }
 
-/// Get the accent color for the active scheme.
+/// Get the accent color — from theme if active, otherwise from aurora scheme.
 pub fn accent_color() -> u32 {
-    active_scheme().accent
+    if crate::theme::is_active() {
+        crate::theme::accent()
+    } else {
+        active_scheme().accent
+    }
 }
 
 /// Set a custom wallpaper from raw BGRA pixel data.
