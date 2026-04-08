@@ -97,8 +97,18 @@ impl ShadeBar {
         let bar_y = self.y(screen_h);
         let accent = background::accent_color();
 
-        // Background: dark semi-transparent strip
-        render::fill_rect(shadow, info, 0, bar_y, screen_w, self.height, 0x00101018);
+        // Background: dark strip (theme-aware)
+        let bar_bg = if crate::theme::is_active() {
+            // Darken theme bg color
+            let bg = crate::theme::bg_color();
+            let r = ((bg >> 16) & 0xFF) / 2;
+            let g = ((bg >> 8) & 0xFF) / 2;
+            let b = (bg & 0xFF) / 2;
+            (r << 16) | (g << 8) | b
+        } else {
+            0x00101018
+        };
+        render::fill_rect(shadow, info, 0, bar_y, screen_w, self.height, bar_bg);
 
         // Bottom border line (1px accent)
         let border_y = match self.position {
@@ -116,11 +126,17 @@ impl ShadeBar {
         let ws_y = bar_y + (self.height.saturating_sub(ws_size)) / 2;
         let mut x = padding;
 
+        let inactive_ws_bg = if crate::theme::is_active() {
+            crate::theme::inactive_border()
+        } else {
+            0x00333344
+        };
+
         for i in 0..self.workspace_count {
             let color = if i == self.active_workspace {
                 accent
             } else {
-                0x00333344
+                inactive_ws_bg
             };
             // Rounded workspace indicator
             let radius = 3 * self.scale;
@@ -128,7 +144,7 @@ impl ShadeBar {
 
             // Workspace number
             let num = format!("{}", i + 1);
-            let text_color = if i == self.active_workspace { 0x00FFFFFF } else { 0x00888899 };
+            let text_color = if i == self.active_workspace { 0x00FFFFFF } else { 0x00999999 };
             let (cw, ch) = font::char_size(1);
             let tx = x + (ws_size.saturating_sub(cw)) / 2;
             let ty = ws_y + (ws_size.saturating_sub(ch)) / 2;

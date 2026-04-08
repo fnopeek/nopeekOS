@@ -339,8 +339,18 @@ impl Compositor {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                 if win.workspace != self.active_workspace || !win.visible { continue; }
 
+                let active_border = if crate::theme::is_active() {
+                    crate::gui::background::accent_color()
+                } else {
+                    self.border_active
+                };
+                let inactive_border = if crate::theme::is_active() {
+                    crate::theme::inactive_border()
+                } else {
+                    self.border_inactive
+                };
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
-                    if win.focused { self.border_active } else { self.border_inactive });
+                    if win.focused { active_border } else { inactive_border });
             }
         }
 
