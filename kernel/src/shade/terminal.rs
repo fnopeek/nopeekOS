@@ -346,30 +346,34 @@ pub fn render_input_line(
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
     // Restore cached background pixels (saved after full render_window).
-    // This is pixel-perfect: exact same pixels from the full render.
     let cache_valid = unsafe { INPUT_LINE_CACHE_VALID };
     let pitch = info.pitch as usize;
     if cache_valid {
         let cx = unsafe { INPUT_LINE_CACHE_X } as usize;
         let cw = unsafe { INPUT_LINE_CACHE_W } as usize;
-        let ch = unsafe { INPUT_LINE_CACHE_H } as usize;
-        let cy = unsafe { INPUT_LINE_CACHE_Y } as usize;
+        let ch_cached = unsafe { INPUT_LINE_CACHE_H } as usize;
         let bytes_per_row = cw * 4;
-        // Restore at the current input line position (may differ from cached y if lines scrolled)
-        for row in 0..char_h.min(ch as u32) {
-            let cache_off = row as usize * bytes_per_row;
-            let shadow_off = (last_line_y + row) as usize * pitch + cx * 4;
-            if cache_off + bytes_per_row <= INPUT_LINE_CACHE_MAX {
-                // SAFETY: single-core, bounds checked
+        let rows_to_copy = (char_h as usize).min(ch_cached);
+        for row in 0..rows_to_copy {
+            let cache_off = row * bytes_per_row;
+            let shadow_off = (last_line_y as usize + row) * pitch + cx * 4;
+            if cache_off + bytes_per_row <= INPUT_LINE_CACHE_MAX
+               && shadow_off + bytes_per_row <= (info.height as usize) * pitch
+            {
+                // SAFETY: single-core, bounds checked above
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         (core::ptr::addr_of!(INPUT_LINE_CACHE) as *const u8).add(cache_off),
                         shadow.add(shadow_off),
-                        bytes_per_row.min(pitch - cx * 4),
+                        bytes_per_row,
                     );
                 }
             }
         }
+    } else {
+        // No cache — fallback: clear with bg_color
+        crate::gui::render::fill_rect(shadow, info,
+            win_cx, last_line_y, win_cw, char_h, 0x00101018);
     }
 
     let (line_data, len) = term.current_line();
