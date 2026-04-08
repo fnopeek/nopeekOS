@@ -336,12 +336,18 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Clear input line with solid window background color.
-    // The full window render blends wallpaper→border→bg, but at opacity 200/256
-    // the result is dominated by bg_color. Using solid fill avoids visible
-    // mismatch between full render and per-keystroke line repaint.
+    // Sample the actual rendered background color from the line above.
+    // This captures the exact result of wallpaper→border→bg blend from the
+    // full render, avoiding any mismatch from re-blending.
+    let sample_y = if last_line_y >= char_h { last_line_y - 1 } else { last_line_y };
+    let effective_bg = if info.bpp == 32 && sample_y < info.height {
+        let off = (sample_y * info.pitch + win_cx * 4) as usize;
+        unsafe { *(shadow.add(off) as *const u32) }
+    } else {
+        bg_color
+    };
     crate::gui::render::fill_rect(shadow, info,
-        win_cx, last_line_y, win_cw, char_h, bg_color);
+        win_cx, last_line_y, win_cw, char_h, effective_bg);
 
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
