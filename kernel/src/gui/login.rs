@@ -44,9 +44,9 @@ impl Layout {
     }
 }
 
-/// Draw the procedural aurora background.
+/// Draw the background (wallpaper if set, otherwise aurora).
 fn draw_background(shadow: *mut u8, info: &FbInfo) {
-    background::draw_aurora(shadow, info);
+    background::draw_background(shadow, info);
 }
 
 /// Draw the large clock display.
@@ -88,13 +88,13 @@ fn draw_greeting_name(shadow: *mut u8, info: &FbInfo, l: &Layout, name: &str) {
 fn clear_greeting_area(shadow: *mut u8, info: &FbInfo, l: &Layout) {
     let (_, ch) = font::char_size(l.scale);
     let h = ch + 4 * l.scale;
-    background::draw_aurora_region(shadow, info, 0, l.greeting_y, info.width, h);
+    background::draw_background_region(shadow, info, 0, l.greeting_y, info.width, h);
 }
 
 /// Draw the input field (light background, dark outline, rounded).
 fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
     let radius = l.input_h / 2; // Full pill shape (semicircle ends)
-    let outline = 2 * l.scale;
+    let outline = 1 * l.scale;
 
     // Outer border
     let border_color = if focused { background::accent_color() } else { Theme::INPUT_OUTER };
@@ -111,7 +111,7 @@ fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
 
 /// Draw passphrase dots centered inside the input field.
 fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
-    let outline = 2 * l.scale;
+    let outline = 1 * l.scale;
     let inner_r = (l.input_h - 2 * outline) / 2; // Pill shape matching draw_input_box
 
     // Clear input interior (redraw inner fill)
@@ -182,7 +182,7 @@ fn draw_cursor(shadow: *mut u8, info: &FbInfo, l: &Layout, pos: usize, visible: 
 fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32) {
     // Clear status area (redraw aurora background strip)
     let (_, ch) = font::char_size(l.scale);
-    background::draw_aurora_region(shadow, info, 0, l.status_y, l.screen_w, ch + 4 * l.scale);
+    background::draw_background_region(shadow, info, 0, l.status_y, l.screen_w, ch + 4 * l.scale);
     font::draw_str_centered(shadow, info,
         msg, 0, l.screen_w, l.status_y,
         color, None, l.scale);
@@ -251,7 +251,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                 let (shadow, _) = fb.shadow_ptr();
                 // Clear clock area with aurora background
                 let (_, ch) = font::clock_char_size(layout.scale);
-                background::draw_aurora_region(shadow, info, 0, layout.clock_y, layout.screen_w, ch);
+                background::draw_background_region(shadow, info, 0, layout.clock_y, layout.screen_w, ch);
                 draw_clock(shadow, info, &layout);
                 framebuffer::blit_rect(fb, 0, layout.clock_y, layout.screen_w, ch);
             });
