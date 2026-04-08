@@ -24,8 +24,8 @@ struct Layout {
 
 impl Layout {
     fn compute(sw: u32, sh: u32, scale: u32) -> Self {
-        let input_w = 300 * scale;
-        let input_h = 40 * scale;
+        let input_w = 220 * scale;
+        let input_h = 34 * scale;
         let input_x = (sw.saturating_sub(input_w)) / 2;
 
         // Center vertically with clock above, input in middle
@@ -45,10 +45,13 @@ impl Layout {
 }
 
 /// Compute the login gradient color for a given y position.
+/// Smooth gradient from 0x0E (top) to 0x1E (bottom) with slight warm tint.
 fn login_gradient_pixel(y: u32, h: u32) -> u32 {
-    let t = y as u64 * 1000 / h.max(1) as u64;
-    let base = 0x0C + (t as u32 * 0x0E / 1000);
-    (base << 16) | (base << 8) | base
+    let t = y as u64 * 10000 / h.max(1) as u64; // Higher precision to avoid banding
+    let base = 0x0E + (t as u32 * 0x10 / 10000);
+    // Slight warm tint: red channel +1 in lower half
+    let r = base + if t > 5000 { 1 } else { 0 };
+    (r << 16) | (base << 8) | base
 }
 
 /// Draw the login background — subtle dark gray gradient (top-dark → bottom-slightly-lighter).
@@ -123,8 +126,8 @@ fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
     let radius = l.input_h / 2; // Full pill shape (semicircle ends)
     let outline = 1 * l.scale;
 
-    // Outer border
-    let border_color = if focused { background::accent_color() } else { Theme::INPUT_OUTER };
+    // Outer border (neutral gray, no accent color on login)
+    let border_color = if focused { 0x00444444 } else { Theme::INPUT_OUTER };
     render::fill_rounded_rect_aa(shadow, info,
         l.input_x, l.input_y, l.input_w, l.input_h,
         border_color, radius);
@@ -341,7 +344,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                                 if let Some(n) = &name {
                                     draw_greeting_name(shadow, info, &layout, n);
                                 }
-                                draw_status(shadow, info, &layout, &welcome, background::accent_color());
+                                draw_status(shadow, info, &layout, &welcome, 0x00C8C8C8);
                                 // Blit greeting + status area
                                 framebuffer::blit_rect(fb,
                                     0, layout.greeting_y,
