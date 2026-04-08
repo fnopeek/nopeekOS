@@ -45,6 +45,13 @@ npk> uptime                          # Time since boot
 npk> history                         # Last 32 commands (arrow up/down to recall)
 npk> lock                            # Lock system (clear keys)
 npk> passwd                          # Change passphrase
+npk> install wallpaper                 # Install WASM module (signed, verified)
+npk> uninstall wallpaper               # Remove module
+npk> modules                          # List installed modules
+npk> wallpaper demo                    # Generate 3 demo wallpapers + auto-theme
+npk> wallpaper set ocean              # Set wallpaper (extracts theme colors)
+npk> wallpaper random                  # Random wallpaper from collection
+npk> wallpaper clear                   # Revert to aurora background
 npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
 npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
 npk> gpu 4k                           # Switch to 4K@30Hz
@@ -62,7 +69,8 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  ┌──────────────────────────────────────────────────────────┐
  │  Shade Compositor (Hyprland-inspired tiling WM)         │
  │  Dwindle tiling, animated window swap, cursor overlay   │
- │  Aurora background (cached), shadebar, damage tracking  │
+ │  Wallpaper + aurora, gradient borders, theme system     │
+ │  Shadebar, damage tracking, input line bg cache         │
  ├──────────────────────────────────────────────────────────┤
  │  GUI Layer                                               │
  │  Login screen (Hyprlock-inspired), Spleen bitmap fonts   │
@@ -421,7 +429,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ### First Boot
 
 ```
-[npk] AI-native Operating System v0.18.1
+[npk] AI-native Operating System v0.19.14
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] Physical memory: 15892 MB free (16 GB detected)
