@@ -376,22 +376,9 @@ impl Compositor {
         let cw = win.content_w(border).saturating_sub(pad * 2);
         let ch = win.content_h(border).saturating_sub(pad * 2);
 
-        // Border color + opacity must match render_window's border layer exactly.
-        // Gradient: opacity 200, color at bottom of window (gb, since input line is at bottom)
-        // Solid: opacity 180, border_active/inactive
-        let (border_color, border_opacity) = if crate::theme::is_active() && win.focused {
-            let (_, gb) = crate::theme::border_gradient();
-            (gb, 200u32)
-        } else if win.focused {
-            (self.border_active, 180u32)
-        } else {
-            let c = if crate::theme::is_active() { crate::theme::inactive_border() } else { self.border_inactive };
-            (c, 180u32)
-        };
-
         terminal::render_input_line(shadow, info,
             cx, cy, cw, ch,
-            border_color, border_opacity, win.bg_color, self.opacity,
+            win.bg_color,
             win.terminal_idx)
     }
 
