@@ -538,6 +538,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
         let len = read_line_with_tab(&mut input_buf, vault, session_id);
 
+        // Full redraw after Enter to clear cursor artifacts from previous line
+        if crate::shade::is_active() {
+            crate::shade::render_frame();
+        }
+
         if len == 0 { continue; }
 
         let input = match core::str::from_utf8(&input_buf[..len]) {
