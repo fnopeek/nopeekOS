@@ -376,9 +376,16 @@ impl Compositor {
         let cw = win.content_w(border).saturating_sub(pad * 2);
         let ch = win.content_h(border).saturating_sub(pad * 2);
 
+        // Border color for the focused window (same as render_window)
+        let border_color = if crate::theme::is_active() {
+            crate::gui::background::accent_color()
+        } else {
+            self.border_active
+        };
+
         terminal::render_input_line(shadow, info,
             cx, cy, cw, ch,
-            win.bg_color, self.opacity,
+            border_color, win.bg_color, self.opacity,
             win.terminal_idx)
     }
 

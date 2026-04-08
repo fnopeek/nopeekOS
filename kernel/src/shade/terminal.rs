@@ -317,7 +317,7 @@ pub fn render_input_line(
     shadow: *mut u8,
     info: &crate::framebuffer::FbInfo,
     win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
-    bg_color: u32, opacity: u32,
+    border_color: u32, bg_color: u32, opacity: u32,
     terminal_idx: u8,
 ) -> Option<(u32, u32, u32, u32)> {
     if (terminal_idx as usize) >= MAX_TERMINALS { return None; }
@@ -336,9 +336,15 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Restore input line background (wallpaper/aurora + window bg blend)
+    // Restore input line background — must match render_window's two-layer blend:
+    // 1. Background (wallpaper/aurora)
+    // 2. Border color blend (same as the full window border layer)
+    // 3. Window bg_color blend
     crate::gui::background::draw_background_region(shadow, info,
         win_cx, last_line_y, win_cw, char_h);
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_cx, last_line_y, win_cw, char_h,
+        border_color, 0, 180);
     crate::gui::render::fill_rounded_rect_blend(shadow, info,
         win_cx, last_line_y, win_cw, char_h,
         bg_color, 0, opacity);
