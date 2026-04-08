@@ -226,9 +226,9 @@ fn generate_demo_wallpapers() {
         return;
     }
 
-    // Use native framebuffer resolution for pixel-perfect quality
-    let w: u32 = fb_w;
-    let h: u32 = fb_h;
+    // Small resolution — fast to generate + store, scaled up when set
+    let w: u32 = 320;
+    let h: u32 = 180;
 
     ensure_wallpaper_dir();
     let wp_dir = wallpaper_dir();
@@ -317,9 +317,16 @@ fn generate_demo_wallpapers() {
             Ok(_) => kprintln!("OK ({}x{})", w, h),
             Err(e) => { kprintln!("failed: {:?}", e); continue; }
         }
+        // Flush output to screen
+        if crate::shade::is_active() {
+            crate::shade::render_frame();
+        }
     }
 
     kprintln!("[npk] 3 demo wallpapers generated.");
+    if crate::shade::is_active() {
+        crate::shade::render_frame();
+    }
     kprintln!("[npk] Setting random wallpaper...");
     random_wallpaper();
 }
