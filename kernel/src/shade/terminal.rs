@@ -316,8 +316,10 @@ pub fn render_to_window(
 pub fn render_input_line(
     shadow: *mut u8,
     info: &crate::framebuffer::FbInfo,
-    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
-    bg_color: u32,
+    win_x: u32, win_w: u32,               // window coords (for bg + border)
+    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32, // content coords (for text)
+    border_color: u32, border_opacity: u32,
+    bg_color: u32, opacity: u32,
     terminal_idx: u8,
 ) -> Option<(u32, u32, u32, u32)> {
     if (terminal_idx as usize) >= MAX_TERMINALS { return None; }
@@ -336,18 +338,18 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Sample the actual rendered background color from the line above.
-    // This captures the exact result of wallpaper→border→bg blend from the
-    // full render, avoiding any mismatch from re-blending.
-    let sample_y = if last_line_y >= char_h { last_line_y - 1 } else { last_line_y };
-    let effective_bg = if info.bpp == 32 && sample_y < info.height {
-        let off = (sample_y * info.pitch + win_cx * 4) as usize;
-        unsafe { *(shadow.add(off) as *const u32) }
-    } else {
-        bg_color
-    };
-    crate::gui::render::fill_rect(shadow, info,
-        win_cx, last_line_y, win_cw, char_h, effective_bg);
+    // Replicate render_window's three-layer blend at correct coordinates:
+    // 1. Background at window coords (same as full render)
+    crate::gui::background::draw_background_region(shadow, info,
+        win_x, last_line_y, win_w, char_h);
+    // 2. Border blend at window coords (matches full-window border layer)
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_x, last_line_y, win_w, char_h,
+        border_color, 0, border_opacity);
+    // 3. Content bg blend at content coords
+    crate::gui::render::fill_rounded_rect_blend(shadow, info,
+        win_cx, last_line_y, win_cw, char_h,
+        bg_color, 0, opacity);
 
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
