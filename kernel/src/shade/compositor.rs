@@ -376,20 +376,8 @@ impl Compositor {
         let cw = win.content_w(border).saturating_sub(pad * 2);
         let ch = win.content_h(border).saturating_sub(pad * 2);
 
-        // Determine border color + opacity matching render_window exactly
-        let (border_color, border_opacity) = if crate::theme::is_active() && win.focused {
-            let (_, gb) = crate::theme::border_gradient();
-            (gb, 200u32)
-        } else {
-            let c = if win.focused { self.border_active } else { self.border_inactive };
-            (c, 180u32)
-        };
-
         terminal::render_input_line(shadow, info,
-            win.x, win.width, // window coords for background + border
-            cx, cy, cw, ch,   // content coords for text
-            border_color, border_opacity,
-            win.bg_color, self.opacity,
+            cx, cy, cw, ch,
             win.terminal_idx)
     }
 
@@ -423,11 +411,20 @@ impl Compositor {
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
 
-        // 4. Text on clean background
+        // 4. Cache the clean background for the input line (before text)
         let pad = 6 * scale;
+        let text_x = cx + pad;
+        let text_y = cy + pad;
+        let text_w = cw.saturating_sub(pad * 2);
+        let text_h = ch.saturating_sub(pad * 2);
+        if win.focused {
+            terminal::cache_input_line_bg(shadow, info,
+                text_x, text_y, text_w, text_h, win.terminal_idx);
+        }
+
+        // 5. Text on clean background
         terminal::render_to_window(shadow, info,
-            cx + pad, cy + pad,
-            cw.saturating_sub(pad * 2), ch.saturating_sub(pad * 2),
+            text_x, text_y, text_w, text_h,
             scale, win.terminal_idx);
     }
 
