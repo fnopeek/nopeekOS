@@ -31,10 +31,22 @@ pub(crate) static COMPOSITOR: Mutex<Option<Compositor>> = Mutex::new(None);
 
 /// Initialize shade compositor. Call after login + GPU setup.
 pub fn init() {
-    let (screen_w, screen_h) = framebuffer::with_fb(|fb| {
+    let (screen_w, screen_h, pitch) = framebuffer::with_fb(|fb| {
         let info = fb.info();
-        (info.width, info.height)
-    }).unwrap_or((1920, 1080));
+        (info.width, info.height, info.pitch)
+    }).unwrap_or((1920, 1080, 1920 * 4));
+
+    // Initialize layer compositor (3 layers: Background, Chrome, Text)
+    crate::layers::init(screen_w, screen_h, pitch);
+
+    // Render background into Layer 0
+    if crate::layers::is_initialized() {
+        if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+            let info = framebuffer::get_info();
+            crate::gui::background::draw_background(bg_buf, &info);
+            crate::layers::mark_full_dirty(crate::layers::LAYER_BG);
+        }
+    }
 
     let scale = font::scale_for(screen_w);
     let comp = Compositor::new(screen_w, screen_h, scale);
@@ -72,6 +84,15 @@ pub fn focus_window(id: WindowId) {
 
 /// Force a full redraw (e.g. after wallpaper change).
 pub fn force_redraw() {
+    // Re-render background into Layer 0 if layers are active
+    if crate::layers::is_initialized() {
+        if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+            let info = framebuffer::get_info();
+            crate::gui::background::draw_background(bg_buf, &info);
+            crate::layers::mark_full_dirty(crate::layers::LAYER_BG);
+        }
+    }
+
     with_compositor(|comp| {
         comp.aurora_drawn = false;
         comp.needs_full_redraw = true;
@@ -81,19 +102,53 @@ pub fn force_redraw() {
 
 /// Draw the entire compositor state to the framebuffer.
 pub fn render_frame() {
+    if crate::layers::is_initialized() {
+        render_frame_layered();
+    } else {
+        render_frame_legacy();
+    }
+}
+
+/// Layer-based render: write to layer buffers, then composite.
+fn render_frame_layered() {
+    let info = framebuffer::get_info();
+
+    // Render chrome (borders, content rects) into Layer 1
+    // Render text into Layer 2
+    if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        comp.render_to_layers(&info);
+    }
+
+    // Composite all layers → shadow → MMIO
+    framebuffer::with_fb(|fb| {
+        let (shadow, _) = fb.shadow_ptr();
+        let info = fb.info();
+        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+
+        // Cursor overlay on MMIO (after composite)
+        if crate::xhci::mouse_available() {
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                if !regions.is_empty() {
+                    comp.mouse.redraw_overlay(shadow, info);
+                }
+            }
+        }
+    });
+}
+
+/// Legacy render (fallback when layers not initialized).
+fn render_frame_legacy() {
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            comp.render(shadow, info); // Scene only — no cursor on shadow
+            comp.render(shadow, info);
 
-            // Full blit shadow → MMIO
             let mut damage = render::DamageTracker::new(info.width, info.height);
             damage.mark_all();
             damage.flush(fb);
 
-            // Cursor overlay on MMIO (after blit)
             if crate::xhci::mouse_available() {
                 comp.mouse.redraw_overlay(shadow, info);
             }
@@ -104,16 +159,47 @@ pub fn render_frame() {
 /// Render only damaged regions (efficient partial update).
 #[allow(dead_code)]
 pub fn render_damaged() {
+    if crate::layers::is_initialized() {
+        render_damaged_layered();
+    } else {
+        render_damaged_legacy();
+    }
+}
+
+fn render_damaged_layered() {
+    let info = framebuffer::get_info();
+
+    // Re-render only dirty windows to layers
+    if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        comp.render_damaged_to_layers(&info);
+    }
+
+    // Composite dirty regions → shadow → MMIO
+    framebuffer::with_fb(|fb| {
+        let (shadow, _) = fb.shadow_ptr();
+        let info = fb.info();
+        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+
+        if crate::xhci::mouse_available() {
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                if !regions.is_empty() {
+                    comp.mouse.redraw_overlay(shadow, info);
+                }
+            }
+        }
+    });
+}
+
+fn render_damaged_legacy() {
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            let regions = comp.render_damaged(shadow, info); // Scene only
+            let regions = comp.render_damaged(shadow, info);
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
-            // Cursor overlay on MMIO (after blit)
             if crate::xhci::mouse_available() {
                 comp.mouse.redraw_overlay(shadow, info);
             }
@@ -262,7 +348,39 @@ pub fn handle_action(action: input::ShadeAction) {
 
 /// Fast re-render of just the current input line (for live typing feedback).
 pub fn render_input_line() {
-    terminal::clear_dirty(); // Prevent poll_render from doing full window render
+    terminal::clear_dirty();
+
+    if crate::layers::is_initialized() {
+        render_input_line_layered();
+    } else {
+        render_input_line_legacy();
+    }
+}
+
+fn render_input_line_layered() {
+    let info = framebuffer::get_info();
+
+    if let Some(ref comp) = *COMPOSITOR.lock() {
+        if let Some(region) = comp.render_input_line_to_layer(&info) {
+            crate::layers::mark_dirty(crate::layers::LAYER_TEXT, region.0, region.1, region.2, region.3);
+        }
+    }
+
+    // Composite the dirty text region
+    framebuffer::with_fb(|fb| {
+        let (shadow, _) = fb.shadow_ptr();
+        let info = fb.info();
+        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+
+        if crate::xhci::mouse_available() && !regions.is_empty() {
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                comp.mouse.redraw_overlay(shadow, info);
+            }
+        }
+    });
+}
+
+fn render_input_line_legacy() {
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -276,7 +394,7 @@ pub fn render_input_line() {
 }
 
 /// Progressive render: if terminal has new output, re-render the focused window's text.
-/// Fast path: only clears + redraws text (no aurora, no blend). Call from net::poll().
+/// Fast path: only redraws text layer. Call from net::poll().
 pub fn poll_render() {
     if !is_active() { return; }
 
@@ -299,6 +417,40 @@ pub fn poll_render() {
     if !terminal::is_dirty() { return; }
     terminal::clear_dirty();
 
+    if crate::layers::is_initialized() {
+        poll_render_layered();
+    } else {
+        poll_render_legacy();
+    }
+}
+
+fn poll_render_layered() {
+    let info = framebuffer::get_info();
+
+    // Re-render text for focused window into Layer 2
+    if let Some(ref comp) = *COMPOSITOR.lock() {
+        if let Some(fid) = comp.focused {
+            if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
+                comp.render_text_to_layer(&info, win);
+            }
+        }
+    }
+
+    // Composite dirty text region
+    framebuffer::with_fb(|fb| {
+        let (shadow, _) = fb.shadow_ptr();
+        let info = fb.info();
+        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+
+        if crate::xhci::mouse_available() && !regions.is_empty() {
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                comp.mouse.redraw_overlay(shadow, info);
+            }
+        }
+    });
+}
+
+fn poll_render_legacy() {
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -306,15 +458,6 @@ pub fn poll_render() {
         if let Some(ref comp) = *COMPOSITOR.lock() {
             if let Some(fid) = comp.focused {
                 if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                    let border = comp.border;
-                    let scale = comp.scale;
-                    let pad = 6 * scale;
-                    let cx = win.content_x(border) + pad;
-                    let cy = win.content_y(border) + pad;
-                    let cw = win.content_w(border).saturating_sub(pad * 2);
-                    let ch = win.content_h(border).saturating_sub(pad * 2);
-
-                    // Full window re-render (aurora+blend+text, preserves transparency)
                     let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
                     compositor::Compositor::render_window(shadow, info, win,
                         comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
