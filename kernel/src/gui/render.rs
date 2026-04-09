@@ -325,3 +325,97 @@ fn blend(fg: u32, bg: u32, alpha: u32) -> u32 {
     let b = ((fg & 0xFF) * alpha + (bg & 0xFF) * inv) >> 8;
     (r << 16) | (g << 8) | b
 }
+
+// ── Layer-aware rendering (writes alpha channel for compositing) ───────
+
+/// Fill a rounded rectangle with color + alpha byte for layer compositing.
+/// Unlike fill_rounded_rect_blend, this does NOT read existing pixels —
+/// it writes color with the alpha byte set in the high byte.
+/// The layer compositor handles blending with lower layers.
+pub fn fill_rounded_rect_alpha(buf: *mut u8, info: &FbInfo,
+                               x: u32, y: u32, w: u32, h: u32,
+                               color: u32, radius: u32, alpha: u32) {
+    if w < 2 || h < 2 { return; }
+    let r = radius.min(w / 2).min(h / 2);
+    let r_f = r as i32;
+    let base = (alpha.min(255) << 24) | (color & 0x00FFFFFF);
+
+    for py in y..(y + h).min(info.height) {
+        for px in x..(x + w).min(info.width) {
+            let in_x = px.saturating_sub(x);
+            let in_y = py.saturating_sub(y);
+
+            let (corner_dx, corner_dy) = {
+                let dx = if in_x < r { r - in_x } else if in_x >= w - r { in_x - (w - r) + 1 } else { 0 };
+                let dy = if in_y < r { r - in_y } else if in_y >= h - r { in_y - (h - r) + 1 } else { 0 };
+                (dx as i32, dy as i32)
+            };
+
+            if corner_dx > 0 && corner_dy > 0 {
+                let mut coverage = 0u32;
+                for sy in 0..4u32 {
+                    for sx in 0..4u32 {
+                        let sdx = corner_dx * 4 - sx as i32 - 2;
+                        let sdy = corner_dy * 4 - sy as i32 - 2;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 16 {
+                            coverage += 1;
+                        }
+                    }
+                }
+                if coverage == 0 { continue; }
+                let a = (alpha * coverage / 16).min(255);
+                put_pixel(buf, info, px, py, (a << 24) | (color & 0x00FFFFFF));
+            } else {
+                put_pixel(buf, info, px, py, base);
+            }
+        }
+    }
+}
+
+/// Fill a rounded rectangle with a gradient + alpha byte for layer compositing.
+pub fn fill_rounded_rect_gradient_alpha(buf: *mut u8, info: &FbInfo,
+                                        x: u32, y: u32, w: u32, h: u32,
+                                        color_a: u32, color_b: u32,
+                                        radius: u32, alpha: u32) {
+    if w < 2 || h < 2 { return; }
+    let r = radius.min(w / 2).min(h / 2);
+    let r_f = r as i32;
+    let diag_max = (w + h) as u64;
+
+    for py in y..(y + h).min(info.height) {
+        for px in x..(x + w).min(info.width) {
+            let in_x = px.saturating_sub(x);
+            let in_y = py.saturating_sub(y);
+
+            let (corner_dx, corner_dy) = {
+                let dx = if in_x < r { r - in_x } else if in_x >= w - r { in_x - (w - r) + 1 } else { 0 };
+                let dy = if in_y < r { r - in_y } else if in_y >= h - r { in_y - (h - r) + 1 } else { 0 };
+                (dx as i32, dy as i32)
+            };
+
+            // Gradient interpolation
+            let t = ((in_x as u64 + in_y as u64) * 1000 / diag_max.max(1)) as u32;
+            let color = crate::theme::lerp_color(color_a, color_b, t.min(1000));
+
+            if corner_dx > 0 && corner_dy > 0 {
+                let mut coverage = 0u32;
+                for sy in 0..4u32 {
+                    for sx in 0..4u32 {
+                        let sdx = corner_dx * 4 - sx as i32 - 2;
+                        let sdy = corner_dy * 4 - sy as i32 - 2;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 16 {
+                            coverage += 1;
+                        }
+                    }
+                }
+                if coverage == 0 { continue; }
+                let a = (alpha * coverage / 16).min(255);
+                put_pixel(buf, info, px, py, (a << 24) | (color & 0x00FFFFFF));
+            } else {
+                put_pixel(buf, info, px, py, (alpha.min(255) << 24) | (color & 0x00FFFFFF));
+            }
+        }
+    }
+}
+
+
