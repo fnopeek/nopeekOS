@@ -351,6 +351,9 @@ pub fn handle_action(action: input::ShadeAction) {
 pub fn render_input_line() {
     terminal::clear_dirty();
 
+    // Check layers BEFORE entering with_fb (layers_usable locks CONSOLE via get_info)
+    let use_layers = layers_usable();
+
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -376,7 +379,7 @@ pub fn render_input_line() {
                     // 1. Restore background — try BG layer first (has wallpaper),
                     //    fall back to draw_background_region if layer unavailable
                     let mut bg_restored = false;
-                    if layers_usable() {
+                    if use_layers {
                         if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
                             let pitch = info.pitch as usize;
                             let x1 = (cx + cw).min(info.width);
