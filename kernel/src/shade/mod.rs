@@ -351,19 +351,14 @@ pub fn handle_action(action: input::ShadeAction) {
 pub fn render_input_line() {
     terminal::clear_dirty();
 
-    if layers_usable() {
-        render_input_line_layered();
-    } else {
-        render_input_line_legacy();
-    }
+    // Always use direct background restore — no cache, no layer dependency.
+    // Works regardless of resolution changes or layer state.
+    render_input_line_direct();
 }
 
-fn render_input_line_layered() {
-    // BG layer as background source — no cache needed.
-    // 1. Copy BG → shadow for input line region (clean aurora/wallpaper)
-    // 2. Blend content bg on top (dark tint at opacity)
-    // 3. Draw text + cursor directly
-    // 4. Blit to MMIO
+fn render_input_line_direct() {
+    // Direct background restore — no cache, no layer, always works.
+    // Uses draw_background_region (the same function render_window uses).
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -371,12 +366,6 @@ fn render_input_line_layered() {
         if let Some(ref comp) = *COMPOSITOR.lock() {
             if let Some(fid) = comp.focused {
                 if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                    let bg_buf = match crate::layers::buffer(crate::layers::LAYER_BG) {
-                        Some((buf, _, _, _)) => buf,
-                        None => return,
-                    };
-
-                    let pitch = info.pitch as usize;
                     let pad = 6 * comp.scale;
                     let cx = win.content_x(comp.border) + pad;
                     let cy = win.content_y(comp.border) + pad;
@@ -392,21 +381,9 @@ fn render_input_line_layered() {
                     let visible = (rows as usize).min(total + 1);
                     let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
 
-                    // 1. Copy BG → shadow (aurora/wallpaper pixels)
-                    let x1 = (cx + cw).min(info.width) as usize;
-                    let bytes = x1.saturating_sub(cx as usize) * 4;
-                    if bytes > 0 {
-                        for row in 0..char_h {
-                            if last_y + row < info.height {
-                                let off = (last_y + row) as usize * pitch + cx as usize * 4;
-                                // SAFETY: both buffers are pitch*height, bounds checked
-                                unsafe {
-                                    core::ptr::copy_nonoverlapping(
-                                        bg_buf.add(off), shadow.add(off), bytes);
-                                }
-                            }
-                        }
-                    }
+                    // 1. Restore background from aurora/wallpaper (always correct)
+                    crate::gui::background::draw_background_region(shadow, info,
+                        cx, last_y, cw, char_h);
 
                     // 2. Blend content bg (dark tint at opacity)
                     render::fill_rounded_rect_blend(shadow, info,
