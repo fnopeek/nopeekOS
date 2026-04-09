@@ -8,7 +8,7 @@ use core::ptr;
 use spin::Mutex;
 use crate::kprintln;
 
-const INITIAL_HEAP_SIZE: usize = 64 * 1024 * 1024; // 64MB (NVMe bitmap can need ~15MB)
+const INITIAL_HEAP_SIZE: usize = 256 * 1024 * 1024; // 256MB (layers need ~100MB at 4K)
 const BLOCK_ALIGN: usize = 16;
 const HEADER_SIZE: usize = core::mem::size_of::<AllocHeader>();
 const MIN_BLOCK_SIZE: usize = core::mem::size_of::<FreeNode>();
