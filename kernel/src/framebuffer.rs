@@ -249,10 +249,24 @@ fn blit_region(console: &FbConsole, y_start: u32, y_end: u32) {
 }
 
 /// Blit entire shadow buffer to MMIO framebuffer.
+/// Splits into chunks and drains xHCI events between chunks to prevent USB stall.
 fn blit_all(console: &FbConsole) {
     let fb = console.info.addr as *mut u8;
-    unsafe {
-        core::ptr::copy_nonoverlapping(console.shadow, fb, console.shadow_size);
+    let pitch = console.info.pitch as usize;
+    let height = console.info.height as usize;
+    // Blit in 256-row chunks, drain USB events between chunks
+    let chunk = 256;
+    let mut row = 0;
+    while row < height {
+        let rows = chunk.min(height - row);
+        let off = row * pitch;
+        let len = rows * pitch;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                console.shadow.add(off), fb.add(off), len);
+        }
+        crate::xhci::poll_events();
+        row += rows;
     }
 }
 
@@ -305,10 +319,12 @@ fn scroll(console: &mut FbConsole) {
 }
 
 /// Blit a rectangular region from shadow buffer to MMIO framebuffer.
+/// Drains xHCI events periodically to prevent USB controller stall during large blits.
 pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
     let info = &console.info;
     if info.bpp != 32 { return; } // only 32bpp supported for rect blit
     let fb = info.addr as *mut u8;
+    let mut row_count = 0u32;
     for row in y..(y + h).min(info.height) {
         let offset = (row * info.pitch + x * 4) as usize;
         let len = ((w.min(info.width.saturating_sub(x))) * 4) as usize;
@@ -319,6 +335,11 @@ pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
                 fb.add(offset),
                 len,
             );
+        }
+        // Drain USB events every 256 rows to prevent xHCI event ring overflow
+        row_count += 1;
+        if row_count & 0xFF == 0 {
+            crate::xhci::poll_events();
         }
     }
 }
