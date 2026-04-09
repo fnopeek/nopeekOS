@@ -433,6 +433,7 @@ nopeekOS/
 │       │   ├── mod.rs           # Backend abstraction (GOP/Intel Xe)
 │       │   ├── intel_xe.rs      # Intel Xe Gen 12.2 display driver
 │       │   └── gop.rs           # UEFI GOP fallback
+│       ├── layers.rs            # Layer compositor (BG/Chrome/Text buffers)
 │       ├── shade/               # Shade compositor (tiling WM)
 │       │   ├── mod.rs           # Init, render, mouse handling, animation tick
 │       │   ├── compositor.rs    # Window management, dwindle tiling, swap animation
@@ -471,7 +472,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ### First Boot
 
 ```
-[npk] AI-native Operating System v0.19.14
+[npk] AI-native Operating System v0.20.22
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] Physical memory: 15892 MB free (16 GB detected)
