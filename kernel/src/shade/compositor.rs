@@ -835,6 +835,206 @@ impl Compositor {
         }
         None
     }
+
+    // ── Layer-based rendering ──────────────────────────────────────────
+
+    /// Render all windows to layer buffers (Chrome → Layer 1, Text → Layer 2).
+    /// Background (Layer 0) is rendered once in shade::init / force_redraw.
+    pub fn render_to_layers(&mut self, info: &FbInfo) {
+        use crate::layers::{LAYER_CHROME, LAYER_TEXT};
+
+        if self.needs_full_redraw {
+            crate::layers::clear(LAYER_CHROME);
+            crate::layers::clear(LAYER_TEXT);
+        }
+
+        let border = self.border;
+        let rounding = self.rounding;
+        let opacity = self.opacity;
+        let scale = self.scale;
+
+        // Render windows back to front
+        for &wid in self.z_order.iter().rev() {
+            if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
+                if win.workspace != self.active_workspace || !win.visible { continue; }
+
+                let border_color = self.layer_border_color(win);
+                Self::render_chrome_to_layer(info, win, border, rounding, opacity, border_color);
+                self.render_text_to_layer(info, win);
+            }
+        }
+
+        // Shadebar → Chrome layer
+        if let Some((chrome_buf, _w, _h, _p)) = crate::layers::buffer(LAYER_CHROME) {
+            self.bar.render(chrome_buf, info, self.screen_w, self.screen_h);
+            let bar_y = self.bar.y(self.screen_h);
+            crate::layers::mark_dirty(LAYER_CHROME, 0, bar_y, self.screen_w, self.bar.height);
+        }
+
+        for win in &mut self.windows {
+            win.dirty = false;
+        }
+        self.needs_full_redraw = false;
+    }
+
+    /// Render only dirty windows to layer buffers.
+    pub fn render_damaged_to_layers(&mut self, info: &FbInfo) {
+        use crate::layers::{LAYER_CHROME, LAYER_TEXT};
+
+        if self.needs_full_redraw {
+            self.render_to_layers(info);
+            return;
+        }
+
+        let border = self.border;
+        let rounding = self.rounding;
+        let opacity = self.opacity;
+
+        for wid_idx in (0..self.z_order.len()).rev() {
+            let wid = self.z_order[wid_idx];
+            let needs_render = self.windows.iter()
+                .find(|w| w.id == wid)
+                .map(|w| w.dirty && w.workspace == self.active_workspace && w.visible)
+                .unwrap_or(false);
+
+            if needs_render {
+                if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
+                    let border_color = self.layer_border_color(win);
+                    Self::render_chrome_to_layer(info, win, border, rounding, opacity, border_color);
+                    self.render_text_to_layer(info, win);
+                }
+            }
+        }
+
+        if self.bar.dirty {
+            if let Some((chrome_buf, _w, _h, _p)) = crate::layers::buffer(LAYER_CHROME) {
+                self.bar.render(chrome_buf, info, self.screen_w, self.screen_h);
+                let bar_y = self.bar.y(self.screen_h);
+                crate::layers::mark_dirty(LAYER_CHROME, 0, bar_y, self.screen_w, self.bar.height);
+            }
+        }
+
+        for win in &mut self.windows {
+            win.dirty = false;
+        }
+    }
+
+    /// Render window chrome (border + content bg) to Layer 1.
+    fn render_chrome_to_layer(info: &FbInfo, win: &Window,
+                              border: u32, rounding: u32, opacity: u32,
+                              border_color: u32) {
+        let chrome_buf = match crate::layers::buffer(crate::layers::LAYER_CHROME) {
+            Some((buf, _, _, _)) => buf,
+            None => return,
+        };
+
+        // Clear window region first (transparent)
+        let pitch = info.pitch as usize;
+        let x1 = (win.x + win.width).min(info.width);
+        let y1 = (win.y + win.height).min(info.height);
+        for row in win.y..y1 {
+            let off = row as usize * pitch + win.x as usize * 4;
+            let bytes = (x1 - win.x) as usize * 4;
+            // SAFETY: bounds checked above
+            unsafe { core::ptr::write_bytes(chrome_buf.add(off), 0, bytes); }
+        }
+
+        // Border (gradient or solid) — with alpha in high byte for compositing
+        if crate::theme::is_active() && win.focused {
+            let (ga, gb) = crate::theme::border_gradient();
+            render::fill_rounded_rect_gradient(chrome_buf, info,
+                win.x, win.y, win.width, win.height,
+                ga, gb, rounding, 200);
+        } else {
+            render::fill_rounded_rect_blend(chrome_buf, info,
+                win.x, win.y, win.width, win.height,
+                border_color, rounding, 180);
+        }
+
+        // Content area (inner rect with bg color)
+        let cx = win.content_x(border);
+        let cy = win.content_y(border);
+        let cw = win.content_w(border);
+        let ch = win.content_h(border);
+        let inner_r = rounding.saturating_sub(border);
+        render::fill_rounded_rect_blend(chrome_buf, info,
+            cx, cy, cw, ch,
+            win.bg_color, inner_r, opacity);
+
+        crate::layers::mark_dirty(crate::layers::LAYER_CHROME,
+            win.x, win.y, win.width, win.height);
+    }
+
+    /// Render terminal text for a window to Layer 2.
+    pub fn render_text_to_layer(&self, info: &FbInfo, win: &Window) {
+        let text_buf = match crate::layers::buffer(crate::layers::LAYER_TEXT) {
+            Some((buf, _, _, _)) => buf,
+            None => return,
+        };
+
+        let border = self.border;
+        let scale = self.scale;
+        let pad = 6 * scale;
+        let cx = win.content_x(border) + pad;
+        let cy = win.content_y(border) + pad;
+        let cw = win.content_w(border).saturating_sub(pad * 2);
+        let ch = win.content_h(border).saturating_sub(pad * 2);
+
+        // Clear text region (transparent black)
+        let pitch = info.pitch as usize;
+        let x1 = (cx + cw).min(info.width);
+        let y1 = (cy + ch).min(info.height);
+        for row in cy..y1 {
+            let off = row as usize * pitch + cx as usize * 4;
+            let bytes = (x1 - cx) as usize * 4;
+            // SAFETY: bounds checked
+            unsafe { core::ptr::write_bytes(text_buf.add(off), 0, bytes); }
+        }
+
+        // Render text characters into text layer
+        terminal::render_to_window(text_buf, info, cx, cy, cw, ch, scale, win.terminal_idx);
+
+        crate::layers::mark_dirty(crate::layers::LAYER_TEXT, cx, cy, cw, ch);
+    }
+
+    /// Render only the input line to Layer 2 (fast path for typing).
+    pub fn render_input_line_to_layer(&self, info: &FbInfo) -> Option<(u32, u32, u32, u32)> {
+        let fid = self.focused?;
+        let win = self.windows.iter().find(|w| w.id == fid && w.workspace == self.active_workspace)?;
+
+        let text_buf = match crate::layers::buffer(crate::layers::LAYER_TEXT) {
+            Some((buf, _, _, _)) => buf,
+            None => return None,
+        };
+
+        let border = self.border;
+        let scale = self.scale;
+        let pad = 6 * scale;
+        let cx = win.content_x(border) + pad;
+        let cy = win.content_y(border) + pad;
+        let cw = win.content_w(border).saturating_sub(pad * 2);
+        let ch = win.content_h(border).saturating_sub(pad * 2);
+
+        // Render input line directly to text layer (no cache hack needed!)
+        terminal::render_input_line_to_layer(text_buf, info, cx, cy, cw, ch, win.terminal_idx)
+    }
+
+    /// Get border color for a window (theme-aware).
+    fn layer_border_color(&self, win: &Window) -> u32 {
+        if win.focused {
+            if crate::theme::is_active() {
+                crate::gui::background::accent_color()
+            } else {
+                self.border_active
+            }
+        } else {
+            if crate::theme::is_active() {
+                crate::theme::inactive_border()
+            } else {
+                self.border_inactive
+            }
+        }
+    }
 }
 
 /// Parse a hex color string ("RRGGBB") to u32.

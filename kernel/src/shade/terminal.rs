@@ -401,6 +401,65 @@ pub fn render_input_line(
     Some((win_cx, last_line_y, win_cw, char_h))
 }
 
+/// Layer-based input line render: clear text region + draw text + cursor.
+/// No background cache needed — text layer is transparent, composited on top.
+pub fn render_input_line_to_layer(
+    text_buf: *mut u8,
+    info: &crate::framebuffer::FbInfo,
+    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
+    terminal_idx: u8,
+) -> Option<(u32, u32, u32, u32)> {
+    if (terminal_idx as usize) >= MAX_TERMINALS { return None; }
+
+    let (char_w, char_h) = crate::gui::font::char_size(1);
+    let cols = win_cw / char_w;
+    let rows = win_ch / char_h;
+    if cols == 0 || rows == 0 { return None; }
+
+    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
+    let term = &terms[terminal_idx as usize];
+
+    let visible_rows = rows as usize;
+    let end = term.total + 1;
+    let visible_count = visible_rows.min(end);
+    let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
+
+    // Clear the input line region in text layer (transparent)
+    let pitch = info.pitch as usize;
+    let x1 = (win_cx + win_cw).min(info.width) as usize;
+    let bytes = (x1 - win_cx as usize) * 4;
+    for row in 0..char_h {
+        let off = (last_line_y + row) as usize * pitch + win_cx as usize * 4;
+        // SAFETY: bounds checked
+        unsafe { core::ptr::write_bytes(text_buf.add(off), 0, bytes); }
+    }
+
+    // Draw text
+    let (line_data, len) = term.current_line();
+    let visible_len = len.min(cols as usize);
+    if visible_len > 0 {
+        let prompt_color = crate::gui::background::accent_color();
+        let fg = 0x00E8E8E8u32;
+        if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
+            if text.contains("@npk") {
+                crate::gui::font::draw_str(text_buf, info, text, win_cx, last_line_y, prompt_color, None, 1);
+            } else {
+                crate::gui::font::draw_str(text_buf, info, text, win_cx, last_line_y, fg, None, 1);
+            }
+        }
+    }
+
+    // Draw text cursor
+    let cur = cursor_pos();
+    let cursor_x = win_cx + cur as u32 * char_w;
+    if cursor_x + 2 <= win_cx + win_cw {
+        let cursor_color = 0x00E8E8E8u32;
+        crate::gui::render::fill_rect(text_buf, info, cursor_x, last_line_y, 2, char_h, cursor_color);
+    }
+
+    Some((win_cx, last_line_y, win_cw, char_h))
+}
+
 /// Cache the input line background from the shadow buffer after a full render.
 /// Called from render_window after drawing the focused window.
 pub fn cache_input_line_bg(

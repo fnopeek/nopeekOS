@@ -67,40 +67,48 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
 
 ```
  ┌──────────────────────────────────────────────────────────┐
- │  Shade Compositor (Hyprland-inspired tiling WM)         │
- │  Dwindle tiling, animated window swap, cursor overlay   │
- │  Wallpaper + aurora, gradient borders, theme system     │
- │  Shadebar, damage tracking, input line bg cache         │
+ │  Linux Apps (Firefox, etc.)                              │
+ │  MicroVM (VT-x/VT-d, Mini-Linux, virtio bridges)        │
  ├──────────────────────────────────────────────────────────┤
- │  GUI Layer                                               │
- │  Login screen (Hyprlock-inspired), Spleen bitmap fonts   │
- │  Procedural aurora background, 4K auto-scaling           │
- │  Subpixel anti-aliased compositing, rounded corners      │
+ │  WASM Modules (sandboxed, capability-gated)              │
+ │  shade.wasm — Compositor (tiling, borders, bar, theme)   │
+ │  loop.wasm  — Intent Loop (command dispatch, terminal)   │
+ │  wallpaper.wasm — PNG decoder + color extraction         │
+ │  Future: file manager, browser, user apps                │
  ├──────────────────────────────────────────────────────────┤
- │  Intent Loop                                             │
- │  Express intention, not instructions.                    │
+ │  WASM Runtime                                            │
+ │  wasmi v1.0 (interpreter, fuel-metered)                  │
+ │  → Cranelift JIT (WASM → x86_64, near-native speed)     │
  ├──────────────────────────────────────────────────────────┤
- │  WASM Runtime (wasmi v1.0, fuel-metered)                  │
- │  Sandboxed modules loaded from npkFS.                    │
- │  Capability-gated host functions. No ambient authority.  │
+ │  Host-Function API (npk_*)                               │
+ │  npk_layer_write/composite — Layer-based rendering       │
+ │  npk_fb_info — Screen dimensions, scale                  │
+ │  npk_input_poll — Keyboard/mouse events                  │
+ │  npk_fs_* — npkFS access    │  npk_net_* — Network      │
  ├──────────────────────────────────────────────────────────┤
- │  npkFS                          │  Network Stack         │
- │  COW B-tree, BLAKE3 hashing     │  Ethernet, ARP, IPv4   │
- │  Rotating superblock (8 slots)  │  ICMP, UDP, TCP        │
- │  LRU cache, WAL journal         │  DNS, DHCP, NTP        │
- │  Batch TRIM for SSD             │  HTTP/HTTPS client      │
+ │  Layer Compositor            │  Network Stack            │
+ │  Background / Chrome / Text  │  Ethernet, ARP, IPv4      │
+ │  / Cursor layers             │  ICMP, UDP, TCP           │
+ │  Dirty-region compositing    │  DNS, DHCP, NTP           │
+ │  Shadow → MMIO blit          │  HTTP/HTTPS client        │
  ├──────────────────────────────────────────────────────────┤
- │  Capability Vault           │  Crypto Engine             │
- │  256-bit tokens, deny-all   │  ChaCha20-Poly1305 AEAD   │
- │  Passphrase identity        │  AES-128/256-GCM (TLS)    │
- │  Temporal scoping, audit    │  TLS 1.3: X25519 + P-384  │
+ │  npkFS                      │  Crypto Engine             │
+ │  COW B-tree, BLAKE3 hashing │  ChaCha20-Poly1305 AEAD   │
+ │  Rotating superblock        │  AES-128/256-GCM (TLS)    │
+ │  LRU cache, WAL journal     │  TLS 1.3: X25519 + P-384  │
+ │  Batch TRIM for SSD         │  ECDSA P-384 signatures   │
  ├──────────────────────────────────────────────────────────┤
- │  OTA Updates                │  Drivers                   │
- │  ECDSA P-384 signed         │  virtio-blk, virtio-net    │
- │  SHA-256 verified           │  NVMe, I226-V, xHCI USB    │
- │  ESP FAT32 kernel write     │  Intel Xe GPU (4K@60Hz)     │
+ │  Capability Vault           │  OTA Updates               │
+ │  256-bit tokens, deny-all   │  ECDSA P-384 signed        │
+ │  Passphrase identity        │  SHA-384 verified           │
+ │  Temporal scoping, audit    │  npk install (modules)     │
  ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, ~44k lines)                   │
+ │  GPU HAL                    │  Drivers                   │
+ │  GOP (QEMU/VBox/any HW)    │  virtio-blk, virtio-net    │
+ │  Intel Xe (4K@60Hz HDMI)   │  NVMe, I226-V, xHCI USB   │
+ │  VirtIO GPU (planned)       │  PS/2 keyboard             │
+ ├──────────────────────────────────────────────────────────┤
+ │  Kernel Core (Rust, no_std, Microkernel)                 │
  │  64GB Paging, Heap, IDT+PIC, ACPI, Framebuffer, Serial  │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
@@ -270,7 +278,35 @@ Every execution is a sandboxed WASM module:
 - [x] USB keyboard key repeat (timer-based, 500ms delay, 50ms rate)
 - [ ] Web rendering engine (long-term)
 
-### Phase 9 -- AI Integration
+### Phase 9 -- Microkernel Migration (in progress)
+
+The kernel is transitioning from monolithic to microkernel. Everything that isn't
+hardware abstraction moves to WASM modules, communicating via host functions.
+SMP from day one — each core runs its own workload.
+
+**Layer Compositor**
+- [ ] Layer-based rendering (Background / Chrome / Text / Cursor layers)
+- [ ] Dirty-region compositing (only changed layers re-composited)
+- [ ] Host-function API (`npk_layer_*`, `npk_fb_info`, `npk_input_poll`)
+
+**SMP (Symmetric Multiprocessing)**
+- [ ] AP startup (APIC/SIPI, per-core stacks, GDT/IDT)
+- [ ] Per-core scheduler (WASM modules pinned to cores)
+- [ ] Core assignment: Core 0 = Kernel/IRQ, Core 1 = Compositor, Core 2 = Loop/Apps, Core 3 = Background/MicroVM
+- [ ] Power states (C-states per core, throttle idle cores, wake on demand)
+- [ ] APIC timer per core (replaces shared PIC/TSC tick)
+
+**WASM Migration**
+- [ ] Shade compositor → WASM module (`shade.wasm`)
+- [ ] Intent loop → WASM module (`loop.wasm`)
+- [ ] Cranelift JIT (WASM → x86_64, near-native performance)
+
+**GPU + Virtualization**
+- [ ] GPU HAL: VirtIO GPU backend (QEMU/VBox support)
+- [ ] MicroVM (VT-x/VT-d, Mini-Linux kernel for Linux app compatibility)
+- [ ] virtio bridges for MicroVM (blk, net, gpu)
+
+### Phase 10 -- AI Integration
 
 - [ ] External AI service via network
 - [ ] Intent resolution through LLM
@@ -301,10 +337,16 @@ Every execution is a sandboxed WASM module:
 | OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@60Hz HDMI 2.0, GGTT+WC aperture |
-| Compositor | Shade (native Rust) | Dwindle tiling, aurora cache, cursor overlay |
+| Compositor | Shade (→ WASM module) | Dwindle tiling, layer-based rendering |
+| Rendering | Layer compositor | Background/Chrome/Text/Cursor, dirty-region compositing |
+| GPU HAL | GOP + Intel Xe (+ VirtIO planned) | Vendor-neutral, same API for all backends |
 | Mouse | xHCI HID boot protocol | Composite device support, multi-device, overlay cursor |
 | Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
-| Drivers (planned) | WASM modules | Sandboxed, on-demand from mirror |
+| WASM (future) | Cranelift JIT | WASM → x86_64, near-native for compositor/browser |
+| Linux apps (future) | MicroVM (VT-x/VT-d) | Mini-Linux kernel, virtio bridges |
+| Modules | npk install | ECDSA P-384 signed, SHA-384 verified, OTA from GitHub |
+| SMP | 4 cores (N100) | Core 0 = Kernel, 1 = Compositor, 2 = Apps, 3 = Background |
+| Power | C-states per core | Idle cores sleep, wake on IPI, throttle when underused |
 
 ---
 

@@ -52,6 +52,7 @@ mod shade;
 mod acpi;
 mod update_key;
 mod theme;
+mod layers;
 
 use alloc::string::String;
 use spin::Mutex;
