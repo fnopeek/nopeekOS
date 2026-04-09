@@ -206,7 +206,7 @@ pub struct MouseEvent {
 }
 
 // Mouse event buffer
-const MOUSE_BUF_SIZE: usize = 32;
+const MOUSE_BUF_SIZE: usize = 128;
 static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0 }; MOUSE_BUF_SIZE];
 static mut MOUSE_HEAD: usize = 0;
 static mut MOUSE_TAIL: usize = 0;
@@ -342,6 +342,7 @@ struct XhciState {
     mouse_port_num: u32,
     mouse_port_speed: u32,
     mouse_prev_buttons: u8,
+    mouse_error_count: u32,
 }
 
 static STATE: spin::Mutex<Option<XhciState>> = spin::Mutex::new(None);
@@ -568,6 +569,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         mouse_intr_ring, mouse_intr_cycle: 1, mouse_intr_enqueue: 0,
         mouse_intr_ep_dci: 0, mouse_port_num: 0, mouse_port_speed: 0,
         mouse_prev_buttons: 0,
+        mouse_error_count: 0,
     };
 
     // Power on all ports
@@ -1594,6 +1596,20 @@ fn poll_events() {
             if is_mouse {
                 if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
                     process_mouse_report(state);
+                    state.mouse_error_count = 0;
+                } else {
+                    state.mouse_error_count += 1;
+                    if state.mouse_error_count >= 10 {
+                        // Too many errors — reset mouse endpoint
+                        state.mouse_error_count = 0;
+                        let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
+                        if portsc & PORTSC_CCS == 0 {
+                            crate::kprintln!("[npk] xhci: mouse disconnected");
+                            state.has_mouse = false;
+                            MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
+                            continue;
+                        }
+                    }
                 }
                 schedule_mouse_interrupt_transfer(state);
             } else {
