@@ -358,15 +358,20 @@ pub fn render_input_line() {
 }
 
 fn render_input_line_layered() {
+    // Use full text re-render (same path as poll_render_layered).
+    // Re-renders all text lines for the focused window into Layer 2.
+    // Slightly less efficient than partial update, but guarantees correct compositing.
     let info = framebuffer::get_info();
 
     if let Some(ref comp) = *COMPOSITOR.lock() {
-        if let Some(region) = comp.render_input_line_to_layer(&info) {
-            crate::layers::mark_dirty(crate::layers::LAYER_TEXT, region.0, region.1, region.2, region.3);
+        if let Some(fid) = comp.focused {
+            if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
+                comp.render_text_to_layer(&info, win);
+            }
         }
     }
 
-    // Composite the dirty text region
+    // Composite dirty text region
     framebuffer::with_fb(|fb| {
         let (shadow, _) = fb.shadow_ptr();
         let info = fb.info();
@@ -472,22 +477,42 @@ fn poll_render_legacy() {
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     let needs_scene_redraw = with_compositor(|comp| comp.handle_mouse(evt)).unwrap_or(false);
 
-    framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
-
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            if needs_scene_redraw {
-                // Scene changed (focus, drag) — render damaged regions to shadow, blit
-                let regions = comp.render_damaged(shadow, info);
-                for (x, y, w, h) in regions {
-                    framebuffer::blit_rect(fb, x, y, w, h);
-                }
+    if crate::layers::is_initialized() {
+        if needs_scene_redraw {
+            let info = framebuffer::get_info();
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                comp.render_damaged_to_layers(&info);
             }
-            // Cursor overlay: restore old pos from shadow→MMIO, draw new pos on MMIO
-            comp.mouse.redraw_overlay(shadow, info);
         }
-    });
+
+        framebuffer::with_fb(|fb| {
+            let (shadow, _) = fb.shadow_ptr();
+            let info = fb.info();
+
+            if needs_scene_redraw {
+                crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+            }
+
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                comp.mouse.redraw_overlay(shadow, info);
+            }
+        });
+    } else {
+        framebuffer::with_fb(|fb| {
+            let info = fb.info();
+            let (shadow, _) = fb.shadow_ptr();
+
+            if let Some(ref mut comp) = *COMPOSITOR.lock() {
+                if needs_scene_redraw {
+                    let regions = comp.render_damaged(shadow, info);
+                    for (x, y, w, h) in regions {
+                        framebuffer::blit_rect(fb, x, y, w, h);
+                    }
+                }
+                comp.mouse.redraw_overlay(shadow, info);
+            }
+        });
+    }
 }
 
 /// Stop shade compositor.
