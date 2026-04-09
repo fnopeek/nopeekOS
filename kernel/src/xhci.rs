@@ -1562,7 +1562,9 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
     ring_doorbell(state, state.slot_id as u32, state.intr_ep_dci as u32);
 }
 
-fn poll_events() {
+/// Drain pending xHCI events. Call frequently during long operations
+/// to prevent event ring overflow (which stalls the controller).
+pub fn poll_events() {
     let mut lock = STATE.lock();
     let state = match lock.as_mut() {
         Some(s) => s,
