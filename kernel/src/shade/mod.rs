@@ -351,14 +351,6 @@ pub fn handle_action(action: input::ShadeAction) {
 pub fn render_input_line() {
     terminal::clear_dirty();
 
-    // Always use direct background restore — no cache, no layer dependency.
-    // Works regardless of resolution changes or layer state.
-    render_input_line_direct();
-}
-
-fn render_input_line_direct() {
-    // Direct background restore — no cache, no layer, always works.
-    // Uses draw_background_region (the same function render_window uses).
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -381,9 +373,33 @@ fn render_input_line_direct() {
                     let visible = (rows as usize).min(total + 1);
                     let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
 
-                    // 1. Restore background from aurora/wallpaper (always correct)
-                    crate::gui::background::draw_background_region(shadow, info,
-                        cx, last_y, cw, char_h);
+                    // 1. Restore background — try BG layer first (has wallpaper),
+                    //    fall back to draw_background_region if layer unavailable
+                    let mut bg_restored = false;
+                    if layers_usable() {
+                        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                            let pitch = info.pitch as usize;
+                            let x1 = (cx + cw).min(info.width);
+                            let bytes = x1.saturating_sub(cx) as usize * 4;
+                            if bytes > 0 {
+                                for row in 0..char_h {
+                                    let py = last_y + row;
+                                    if py < info.height {
+                                        let off = py as usize * pitch + cx as usize * 4;
+                                        unsafe {
+                                            core::ptr::copy_nonoverlapping(
+                                                bg_buf.add(off), shadow.add(off), bytes);
+                                        }
+                                    }
+                                }
+                                bg_restored = true;
+                            }
+                        }
+                    }
+                    if !bg_restored {
+                        crate::gui::background::draw_background_region(shadow, info,
+                            cx, last_y, cw, char_h);
+                    }
 
                     // 2. Blend content bg (dark tint at opacity)
                     render::fill_rounded_rect_blend(shadow, info,
