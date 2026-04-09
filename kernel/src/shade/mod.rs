@@ -44,14 +44,19 @@ pub fn init() {
     }).unwrap_or((1920, 1080, 1920 * 4));
 
     // Initialize layer compositor (3 layers: Background, Chrome, Text)
+    crate::kprintln!("[npk] shade::init: {}x{} pitch={}", screen_w, screen_h, pitch);
     crate::layers::init(screen_w, screen_h, pitch);
+    crate::kprintln!("[npk] shade::init: layers_initialized={}", crate::layers::is_initialized());
 
     // Render background into Layer 0
     if crate::layers::is_initialized() {
         if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
             let info = framebuffer::get_info();
+            crate::kprintln!("[npk] shade::init: drawing bg into layer ({}x{})", info.width, info.height);
             crate::gui::background::draw_background(bg_buf, &info);
             crate::layers::mark_full_dirty(crate::layers::LAYER_BG);
+        } else {
+            crate::kprintln!("[npk] shade::init: BG layer buffer is None!");
         }
     }
 
@@ -377,9 +382,19 @@ pub fn render_input_line() {
                     // 1. Restore background — try BG layer (preserves wallpaper)
                     //    Check resolution inline (no layers_usable() → no CONSOLE deadlock)
                     let mut restored_from_layer = false;
-                    if crate::layers::is_initialized()
-                        && crate::layers::matches_resolution(info.width, info.height, info.pitch)
-                    {
+                    let layers_init = crate::layers::is_initialized();
+                    let layers_match = if layers_init {
+                        crate::layers::matches_resolution(info.width, info.height, info.pitch)
+                    } else { false };
+
+                    // DEBUG: print once on first keystroke
+                    static ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                    if !ONCE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                        crate::kprintln!("[dbg] input_line: fb={}x{} p={} init={} match={} cx={} ly={} cw={} ch={}",
+                            info.width, info.height, info.pitch, layers_init, layers_match, cx, last_y, cw, char_h);
+                    }
+
+                    if layers_init && layers_match {
                         if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
                             let pitch = info.pitch as usize;
                             let x1 = (cx + cw).min(info.width);
