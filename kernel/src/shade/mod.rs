@@ -44,19 +44,14 @@ pub fn init() {
     }).unwrap_or((1920, 1080, 1920 * 4));
 
     // Initialize layer compositor (3 layers: Background, Chrome, Text)
-    crate::kprintln!("[npk] shade::init: {}x{} pitch={}", screen_w, screen_h, pitch);
     crate::layers::init(screen_w, screen_h, pitch);
-    crate::kprintln!("[npk] shade::init: layers_initialized={}", crate::layers::is_initialized());
 
     // Render background into Layer 0
     if crate::layers::is_initialized() {
         if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
             let info = framebuffer::get_info();
-            crate::kprintln!("[npk] shade::init: drawing bg into layer ({}x{})", info.width, info.height);
             crate::gui::background::draw_background(bg_buf, &info);
             crate::layers::mark_full_dirty(crate::layers::LAYER_BG);
-        } else {
-            crate::kprintln!("[npk] shade::init: BG layer buffer is None!");
         }
     }
 
@@ -387,21 +382,6 @@ pub fn render_input_line() {
                         crate::layers::matches_resolution(info.width, info.height, info.pitch)
                     } else { false };
 
-                    // DEBUG: print once on first keystroke
-                    static ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-                    if !ONCE.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                        crate::kprintln!("[dbg] input_line: fb={}x{} p={} init={} match={} cx={} ly={} cw={} ch={}",
-                            info.width, info.height, info.pitch, layers_init, layers_match, cx, last_y, cw, char_h);
-                        // Sample pixel from BG layer and shadow at input line position
-                        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                            let sample_off = last_y as usize * info.pitch as usize + (cx + cw / 2) as usize * 4;
-                            let bg_px = unsafe { *(bg_buf.add(sample_off) as *const u32) };
-                            let shadow_px = unsafe { *(shadow.add(sample_off) as *const u32) };
-                            crate::kprintln!("[dbg] pixel@({},{}) bg_layer=0x{:08X} shadow=0x{:08X}",
-                                cx + cw / 2, last_y, bg_px, shadow_px);
-                        }
-                    }
-
                     if layers_init && layers_match {
                         if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
                             let pitch = info.pitch as usize;
@@ -430,7 +410,21 @@ pub fn render_input_line() {
                             cx, last_y, cw, char_h);
                     }
 
-                    // 3. Blend content bg (dark tint at opacity)
+                    // 3. Blend border tint first (render_window does this for the whole window)
+                    let border_color = if win.focused {
+                        if crate::theme::is_active() {
+                            crate::gui::background::accent_color()
+                        } else { comp.border_active }
+                    } else {
+                        if crate::theme::is_active() {
+                            crate::theme::inactive_border()
+                        } else { comp.border_inactive }
+                    };
+                    render::fill_rounded_rect_blend(shadow, info,
+                        cx, last_y, cw, char_h,
+                        border_color, 0, 180);
+
+                    // 4. Blend content bg on top (dark tint at opacity)
                     render::fill_rounded_rect_blend(shadow, info,
                         cx, last_y, cw, char_h,
                         win.bg_color, 0, comp.opacity);
