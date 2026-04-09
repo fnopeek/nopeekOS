@@ -193,6 +193,14 @@ pub fn current_line_len() -> usize {
     terms[idx].current_line().1
 }
 
+/// Get total line count in the active terminal (for input line Y calculation).
+pub fn line_count() -> usize {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return 0; }
+    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
+    terms[idx].total
+}
+
 /// Get the input cursor position.
 pub fn cursor_pos() -> usize {
     // SAFETY: single-core
