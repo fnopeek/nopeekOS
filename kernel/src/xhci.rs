@@ -1241,14 +1241,12 @@ fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
 
-        // ERDP fix: point to the event we just processed (not the next one)
-        let processed_idx = state.evt_dequeue;
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (processed_idx * 16) as u64;
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
         let ir0 = state.rt + 0x20;
         w64(ir0, 0x18, erdp | (1 << 3));
 
@@ -1384,14 +1382,12 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
         let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { core::hint::spin_loop(); continue; }
 
-        // ERDP fix: point to the event we just processed
-        let processed_idx = state.evt_dequeue;
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (processed_idx * 16) as u64;
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
         let ir0 = state.rt + 0x20;
         w64(ir0, 0x18, erdp | (1 << 3));
 
@@ -1590,7 +1586,7 @@ pub fn poll_events() {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (processed_idx * 16) as u64;
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
         let ir0 = state.rt + 0x20;
         w64(ir0, 0x18, erdp | (1 << 3));
 
