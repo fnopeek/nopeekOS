@@ -216,6 +216,13 @@ pub fn buffer(layer_idx: usize) -> Option<(*mut u8, u32, u32, u32)> {
     Some((stack.layers[layer_idx].buf, stack.width, stack.height, stack.pitch))
 }
 
+/// Check if layer dimensions match the current framebuffer.
+/// If not, the BG layer should NOT be used (resolution changed after init).
+pub fn matches_resolution(width: u32, height: u32, pitch: u32) -> bool {
+    let stack = LAYERS.lock();
+    stack.initialized && stack.width == width && stack.height == height && stack.pitch == pitch
+}
+
 /// Mark a region of a layer as dirty (needs re-compositing).
 pub fn mark_dirty(layer_idx: usize, x: u32, y: u32, w: u32, h: u32) {
     let mut stack = LAYERS.lock();
