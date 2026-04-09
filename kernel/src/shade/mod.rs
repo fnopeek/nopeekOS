@@ -348,17 +348,10 @@ pub fn handle_action(action: input::ShadeAction) {
 }
 
 /// Fast re-render of just the current input line (for live typing feedback).
+/// Single function — no cache, no legacy fallback, no deadlock.
 pub fn render_input_line() {
     terminal::clear_dirty();
 
-    if layers_usable() {
-        render_input_line_layered();
-    } else {
-        render_input_line_legacy();
-    }
-}
-
-fn render_input_line_layered() {
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -381,33 +374,45 @@ fn render_input_line_layered() {
                     let visible = (rows as usize).min(total + 1);
                     let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
 
-                    // 1. Copy background from BG layer (has wallpaper or aurora)
-                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                        let pitch = info.pitch as usize;
-                        let x1 = (cx + cw).min(info.width);
-                        let copy_cw = x1.saturating_sub(cx);
-                        let bytes = copy_cw as usize * 4;
+                    // 1. Restore background — try BG layer (preserves wallpaper)
+                    //    Check resolution inline (no layers_usable() → no CONSOLE deadlock)
+                    let mut restored_from_layer = false;
+                    if crate::layers::is_initialized()
+                        && crate::layers::matches_resolution(info.width, info.height, info.pitch)
+                    {
+                        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                            let pitch = info.pitch as usize;
+                            let x1 = (cx + cw).min(info.width);
+                            let bytes = x1.saturating_sub(cx) as usize * 4;
 
-                        if bytes > 0 {
-                            for row in 0..char_h {
-                                let py = last_y + row;
-                                if py < info.height {
-                                    let off = py as usize * pitch + cx as usize * 4;
-                                    unsafe {
-                                        core::ptr::copy_nonoverlapping(
-                                            bg_buf.add(off), shadow.add(off), bytes);
+                            if bytes > 0 {
+                                for row in 0..char_h {
+                                    let py = last_y + row;
+                                    if py < info.height {
+                                        let off = py as usize * pitch + cx as usize * 4;
+                                        unsafe {
+                                            core::ptr::copy_nonoverlapping(
+                                                bg_buf.add(off), shadow.add(off), bytes);
+                                        }
                                     }
                                 }
+                                restored_from_layer = true;
                             }
                         }
                     }
 
-                    // 2. Blend content bg (dark tint at opacity)
+                    // 2. Fallback: resolution changed (gpu 4k60) → recalculate background
+                    if !restored_from_layer {
+                        crate::gui::background::draw_background_region(shadow, info,
+                            cx, last_y, cw, char_h);
+                    }
+
+                    // 3. Blend content bg (dark tint at opacity)
                     render::fill_rounded_rect_blend(shadow, info,
                         cx, last_y, cw, char_h,
                         win.bg_color, 0, comp.opacity);
 
-                    // 3. Draw text
+                    // 4. Draw text
                     let terms = terminal::current_line_data();
                     let visible_len = terms.1.min(cols as usize);
                     if visible_len > 0 {
@@ -422,29 +427,16 @@ fn render_input_line_layered() {
                         }
                     }
 
-                    // 4. Draw cursor
+                    // 5. Draw cursor
                     let cur = terminal::cursor_pos();
                     let cursor_x = cx + cur as u32 * char_w;
                     if cursor_x + 2 <= cx + cw {
                         render::fill_rect(shadow, info, cursor_x, last_y, 2, char_h, 0x00E8E8E8);
                     }
 
-                    // 5. Blit to MMIO
+                    // 6. Blit to MMIO
                     framebuffer::blit_rect(fb, cx, last_y, cw, char_h);
                 }
-            }
-        }
-    });
-}
-
-fn render_input_line_legacy() {
-    framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
-
-        if let Some(ref comp) = *COMPOSITOR.lock() {
-            if let Some((x, y, w, h)) = comp.render_input_line(shadow, info) {
-                framebuffer::blit_rect(fb, x, y, w, h);
             }
         }
     });
