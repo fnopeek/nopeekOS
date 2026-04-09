@@ -193,6 +193,18 @@ pub fn current_line_len() -> usize {
     terms[idx].current_line().1
 }
 
+/// Get the current (input) line data and length from the active terminal.
+pub fn current_line_data() -> ([u8; 256], usize) {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return ([0; 256], 0); }
+    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
+    let (data, len) = terms[idx].current_line();
+    let mut buf = [0u8; 256];
+    let copy_len = len.min(256);
+    buf[..copy_len].copy_from_slice(&data[..copy_len]);
+    (buf, len)
+}
+
 /// Get total line count in the active terminal (for input line Y calculation).
 pub fn line_count() -> usize {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
