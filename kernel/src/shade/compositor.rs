@@ -920,6 +920,7 @@ impl Compositor {
     }
 
     /// Render window chrome (border + content bg) to Layer 1.
+    /// Uses _alpha variants that write the alpha byte for layer compositing.
     fn render_chrome_to_layer(info: &FbInfo, win: &Window,
                               border: u32, rounding: u32, opacity: u32,
                               border_color: u32) {
@@ -939,25 +940,25 @@ impl Compositor {
             unsafe { core::ptr::write_bytes(chrome_buf.add(off), 0, bytes); }
         }
 
-        // Border (gradient or solid) — with alpha in high byte for compositing
+        // Border (gradient or solid) — alpha byte set for compositor
         if crate::theme::is_active() && win.focused {
             let (ga, gb) = crate::theme::border_gradient();
-            render::fill_rounded_rect_gradient(chrome_buf, info,
+            render::fill_rounded_rect_gradient_alpha(chrome_buf, info,
                 win.x, win.y, win.width, win.height,
                 ga, gb, rounding, 200);
         } else {
-            render::fill_rounded_rect_blend(chrome_buf, info,
+            render::fill_rounded_rect_alpha(chrome_buf, info,
                 win.x, win.y, win.width, win.height,
                 border_color, rounding, 180);
         }
 
-        // Content area (inner rect with bg color)
+        // Content area (inner rect with bg color) — alpha byte set
         let cx = win.content_x(border);
         let cy = win.content_y(border);
         let cw = win.content_w(border);
         let ch = win.content_h(border);
         let inner_r = rounding.saturating_sub(border);
-        render::fill_rounded_rect_blend(chrome_buf, info,
+        render::fill_rounded_rect_alpha(chrome_buf, info,
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
 
