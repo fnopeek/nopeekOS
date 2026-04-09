@@ -132,8 +132,9 @@ static mut INPUT_CURSOR_POS: usize = 0;
 
 /// Cached background pixels for the input line (saved after full render).
 /// Avoids re-blending on every keystroke — just restore + draw text.
+// Heap-allocated input line cache (allocated on first use, avoids 983KB BSS bloat)
 const INPUT_LINE_CACHE_MAX: usize = 3840 * 4 * 64; // max 4K width × 4 bytes × 64px font height
-static mut INPUT_LINE_CACHE: [u8; INPUT_LINE_CACHE_MAX] = [0; INPUT_LINE_CACHE_MAX];
+static mut INPUT_LINE_CACHE: *mut u8 = core::ptr::null_mut();
 static mut INPUT_LINE_CACHE_X: u32 = 0;
 static mut INPUT_LINE_CACHE_Y: u32 = 0;
 static mut INPUT_LINE_CACHE_W: u32 = 0;
@@ -366,7 +367,7 @@ pub fn render_input_line(
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
     // Restore cached background pixels (saved after full render_window).
-    let cache_valid = unsafe { INPUT_LINE_CACHE_VALID };
+    let cache_valid = unsafe { INPUT_LINE_CACHE_VALID && !INPUT_LINE_CACHE.is_null() };
     let pitch = info.pitch as usize;
     if cache_valid {
         let cx = unsafe { INPUT_LINE_CACHE_X } as usize;
@@ -383,7 +384,7 @@ pub fn render_input_line(
                 // SAFETY: single-core, bounds checked above
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        (core::ptr::addr_of!(INPUT_LINE_CACHE) as *const u8).add(cache_off),
+                        INPUT_LINE_CACHE.add(cache_off),
                         shadow.add(shadow_off),
                         bytes_per_row,
                     );
@@ -503,14 +504,23 @@ pub fn cache_input_line_bg(
     let total_bytes = bytes_per_row * char_h as usize;
     if total_bytes > INPUT_LINE_CACHE_MAX { return; }
 
-    // SAFETY: single-core, bounds checked
+    // Allocate cache on first use (avoids 983KB BSS)
+    unsafe {
+        if INPUT_LINE_CACHE.is_null() {
+            let layout = alloc::alloc::Layout::from_size_align(INPUT_LINE_CACHE_MAX, 16).unwrap();
+            INPUT_LINE_CACHE = alloc::alloc::alloc_zeroed(layout);
+            if INPUT_LINE_CACHE.is_null() { return; }
+        }
+    }
+
+    // SAFETY: single-core, bounds checked, cache allocated above
     unsafe {
         for row in 0..char_h {
             let shadow_off = (last_line_y + row) as usize * pitch + win_cx as usize * 4;
             let cache_off = row as usize * bytes_per_row;
             core::ptr::copy_nonoverlapping(
                 shadow.add(shadow_off),
-                (core::ptr::addr_of_mut!(INPUT_LINE_CACHE) as *mut u8).add(cache_off),
+                INPUT_LINE_CACHE.add(cache_off),
                 bytes_per_row,
             );
         }
