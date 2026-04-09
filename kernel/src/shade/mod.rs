@@ -392,6 +392,14 @@ pub fn render_input_line() {
                     if !ONCE.swap(true, core::sync::atomic::Ordering::Relaxed) {
                         crate::kprintln!("[dbg] input_line: fb={}x{} p={} init={} match={} cx={} ly={} cw={} ch={}",
                             info.width, info.height, info.pitch, layers_init, layers_match, cx, last_y, cw, char_h);
+                        // Sample pixel from BG layer and shadow at input line position
+                        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                            let sample_off = last_y as usize * info.pitch as usize + (cx + cw / 2) as usize * 4;
+                            let bg_px = unsafe { *(bg_buf.add(sample_off) as *const u32) };
+                            let shadow_px = unsafe { *(shadow.add(sample_off) as *const u32) };
+                            crate::kprintln!("[dbg] pixel@({},{}) bg_layer=0x{:08X} shadow=0x{:08X}",
+                                cx + cw / 2, last_y, bg_px, shadow_px);
+                        }
                     }
 
                     if layers_init && layers_match {
