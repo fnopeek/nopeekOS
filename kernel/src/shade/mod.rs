@@ -352,8 +352,11 @@ pub fn render_input_line() {
 }
 
 fn render_input_line_layered() {
-    // Use BG layer as cached background — restore input line from bg layer
-    // to shadow, then re-render chrome+text on top. No per-pixel compositing.
+    // BG layer as background source — no cache needed.
+    // 1. Copy BG → shadow for input line region (clean aurora/wallpaper)
+    // 2. Blend content bg on top (dark tint at opacity)
+    // 3. Draw text + cursor directly
+    // 4. Blit to MMIO
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -361,47 +364,68 @@ fn render_input_line_layered() {
         if let Some(ref comp) = *COMPOSITOR.lock() {
             if let Some(fid) = comp.focused {
                 if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                    // Restore window region from BG layer → shadow (clean background)
-                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                        let pitch = info.pitch as usize;
-                        let pad = 6 * comp.scale;
-                        let cx = win.content_x(comp.border) + pad;
-                        let cy = win.content_y(comp.border) + pad;
-                        let cw = win.content_w(comp.border).saturating_sub(pad * 2);
-                        let ch = win.content_h(comp.border).saturating_sub(pad * 2);
+                    let bg_buf = match crate::layers::buffer(crate::layers::LAYER_BG) {
+                        Some((buf, _, _, _)) => buf,
+                        None => return,
+                    };
 
-                        let (_, char_h) = crate::gui::font::char_size(1);
-                        let rows = ch / char_h;
-                        if rows > 0 {
-                            let terms_total = terminal::line_count();
-                            let visible = (rows as usize).min(terms_total + 1);
-                            let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
+                    let pitch = info.pitch as usize;
+                    let pad = 6 * comp.scale;
+                    let cx = win.content_x(comp.border) + pad;
+                    let cy = win.content_y(comp.border) + pad;
+                    let cw = win.content_w(comp.border).saturating_sub(pad * 2);
+                    let ch = win.content_h(comp.border).saturating_sub(pad * 2);
 
-                            // Copy bg → shadow for input line region
-                            let x1 = (cx + cw).min(info.width) as usize;
-                            let bytes = (x1 - cx as usize) * 4;
-                            for row in 0..char_h {
-                                let off = (last_y + row) as usize * pitch + cx as usize * 4;
-                                unsafe {
-                                    core::ptr::copy_nonoverlapping(
-                                        bg_buf.add(off), shadow.add(off), bytes);
-                                }
-                            }
+                    let (char_w, char_h) = crate::gui::font::char_size(1);
+                    let cols = cw / char_w;
+                    let rows = ch / char_h;
+                    if cols == 0 || rows == 0 { return; }
 
-                            // Blend chrome (content bg) on top
-                            let inner_r = comp.rounding.saturating_sub(comp.border);
-                            render::fill_rounded_rect_blend(shadow, info,
-                                cx, last_y, cw, char_h,
-                                win.bg_color, 0, comp.opacity);
+                    let total = terminal::line_count();
+                    let visible = (rows as usize).min(total + 1);
+                    let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
 
-                            // Draw text on top
-                            terminal::render_input_line(shadow, info,
-                                cx, cy, cw, ch, win.terminal_idx);
-
-                            // Blit to MMIO
-                            framebuffer::blit_rect(fb, cx, last_y, cw, char_h);
+                    // 1. Copy BG → shadow (aurora/wallpaper pixels)
+                    let x1 = (cx + cw).min(info.width) as usize;
+                    let bytes = (x1 - cx as usize) * 4;
+                    for row in 0..char_h {
+                        let off = (last_y + row) as usize * pitch + cx as usize * 4;
+                        // SAFETY: both buffers are pitch*height, bounds checked
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                bg_buf.add(off), shadow.add(off), bytes);
                         }
                     }
+
+                    // 2. Blend content bg (dark tint at opacity)
+                    render::fill_rounded_rect_blend(shadow, info,
+                        cx, last_y, cw, char_h,
+                        win.bg_color, 0, comp.opacity);
+
+                    // 3. Draw text
+                    let terms = terminal::current_line_data();
+                    let visible_len = terms.1.min(cols as usize);
+                    if visible_len > 0 {
+                        let prompt_color = crate::gui::background::accent_color();
+                        let fg = 0x00E8E8E8u32;
+                        if let Ok(text) = core::str::from_utf8(&terms.0[..visible_len]) {
+                            if text.contains("@npk") {
+                                crate::gui::font::draw_str(shadow, info, text, cx, last_y, prompt_color, None, 1);
+                            } else {
+                                crate::gui::font::draw_str(shadow, info, text, cx, last_y, fg, None, 1);
+                            }
+                        }
+                    }
+
+                    // 4. Draw cursor
+                    let cur = terminal::cursor_pos();
+                    let cursor_x = cx + cur as u32 * char_w;
+                    if cursor_x + 2 <= cx + cw {
+                        render::fill_rect(shadow, info, cursor_x, last_y, 2, char_h, 0x00E8E8E8);
+                    }
+
+                    // 5. Blit to MMIO
+                    framebuffer::blit_rect(fb, cx, last_y, cw, char_h);
                 }
             }
         }
