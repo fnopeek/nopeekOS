@@ -756,7 +756,7 @@ impl Compositor {
                 win_a: a, win_b: b,
                 a_from, b_from, a_to, b_to,
                 start_tick: crate::interrupts::ticks(),
-                duration: 25, // 250ms at 100Hz
+                duration: 15, // 150ms at 100Hz
             });
         }
         self.needs_full_redraw = true;
