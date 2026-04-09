@@ -1241,16 +1241,16 @@ fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
 
-        // Advance dequeue
+        // ERDP fix: point to the event we just processed (not the next one)
+        let processed_idx = state.evt_dequeue;
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        // Update ERDP
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let erdp = state.evt_ring + (processed_idx * 16) as u64;
         let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3)); // EHB bit
+        w64(ir0, 0x18, erdp | (1 << 3));
 
         if trb_type == EVT_CMD_COMPLETE {
             let slot = (control >> 24) & 0xFF;
@@ -1384,12 +1384,14 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
         let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { core::hint::spin_loop(); continue; }
 
+        // ERDP fix: point to the event we just processed
+        let processed_idx = state.evt_dequeue;
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let erdp = state.evt_ring + (processed_idx * 16) as u64;
         let ir0 = state.rt + 0x20;
         w64(ir0, 0x18, erdp | (1 << 3));
 
@@ -1579,17 +1581,20 @@ pub fn poll_events() {
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
 
+        // ERDP fix: write the index of the event we JUST processed (not the next one)
+        // xHCI spec 4.9.4: ERDP points to the last processed event TRB
+        let processed_idx = state.evt_dequeue;
+
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let erdp = state.evt_ring + (processed_idx * 16) as u64;
         let ir0 = state.rt + 0x20;
         w64(ir0, 0x18, erdp | (1 << 3));
 
         if trb_type == EVT_TRANSFER {
-            // Determine if this is a mouse or keyboard event by TRB pointer
             let trb_addr = param;
             let is_mouse = state.has_mouse
                 && trb_addr >= state.mouse_intr_ring
@@ -1599,10 +1604,12 @@ pub fn poll_events() {
                 if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
                     process_mouse_report(state);
                     state.mouse_error_count = 0;
+                } else if cc == 19 {
+                    // Missed Service Error — harmless, GUI was blocking CPU.
+                    // Just reschedule without counting as error.
                 } else {
                     state.mouse_error_count += 1;
                     if state.mouse_error_count >= 10 {
-                        // Too many errors — reset mouse endpoint
                         state.mouse_error_count = 0;
                         let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
                         if portsc & PORTSC_CCS == 0 {
@@ -1615,7 +1622,20 @@ pub fn poll_events() {
                 }
                 schedule_mouse_interrupt_transfer(state);
             } else {
-                if cc != CC_SUCCESS && cc != CC_SHORT_PACKET {
+                if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
+                    state.error_count = 0;
+
+                    let buf = state.data_buf + 2048;
+                    let modifiers = r8(buf, 0);
+                    let mut keys = [0u8; 6];
+                    for i in 0..6 {
+                        keys[i] = r8(buf, (2 + i) as u32);
+                    }
+                    process_hid_report(modifiers, &keys, state);
+                    state.prev_keys = keys;
+                } else if cc == 19 {
+                    // Missed Service Error — harmless for keyboard too
+                } else {
                     state.error_count += 1;
                     if state.error_count >= 3 {
                         let portsc = r32(state.oper, portsc_off(state.port_num));
@@ -1626,21 +1646,7 @@ pub fn poll_events() {
                         }
                         state.error_count = 0;
                     }
-                    schedule_interrupt_transfer(state);
-                    continue;
                 }
-                state.error_count = 0;
-
-                // Read HID boot protocol report from buffer
-                let buf = state.data_buf + 2048;
-                let modifiers = r8(buf, 0);
-                let mut keys = [0u8; 6];
-                for i in 0..6 {
-                    keys[i] = r8(buf, (2 + i) as u32);
-                }
-                process_hid_report(modifiers, &keys, state);
-                state.prev_keys = keys;
-
                 schedule_interrupt_transfer(state);
             }
         }
