@@ -29,6 +29,13 @@ pub use bar::ShadeBar;
 /// Global compositor instance.
 pub(crate) static COMPOSITOR: Mutex<Option<Compositor>> = Mutex::new(None);
 
+/// Check if layer system is usable (initialized AND matches current framebuffer).
+fn layers_usable() -> bool {
+    if !crate::layers::is_initialized() { return false; }
+    let info = framebuffer::get_info();
+    crate::layers::matches_resolution(info.width, info.height, info.pitch)
+}
+
 /// Initialize shade compositor. Call after login + GPU setup.
 pub fn init() {
     let (screen_w, screen_h, pitch) = framebuffer::with_fb(|fb| {
@@ -102,7 +109,7 @@ pub fn force_redraw() {
 
 /// Draw the entire compositor state to the framebuffer.
 pub fn render_frame() {
-    if crate::layers::is_initialized() {
+    if layers_usable() {
         render_frame_layered();
     } else {
         render_frame_legacy();
@@ -159,7 +166,7 @@ fn render_frame_legacy() {
 /// Render only damaged regions (efficient partial update).
 #[allow(dead_code)]
 pub fn render_damaged() {
-    if crate::layers::is_initialized() {
+    if layers_usable() {
         render_damaged_layered();
     } else {
         render_damaged_legacy();
@@ -344,7 +351,7 @@ pub fn handle_action(action: input::ShadeAction) {
 pub fn render_input_line() {
     terminal::clear_dirty();
 
-    if crate::layers::is_initialized() {
+    if layers_usable() {
         render_input_line_layered();
     } else {
         render_input_line_legacy();
@@ -469,7 +476,7 @@ pub fn poll_render() {
     if !terminal::is_dirty() { return; }
     terminal::clear_dirty();
 
-    if crate::layers::is_initialized() {
+    if layers_usable() {
         poll_render_layered();
     } else {
         poll_render_legacy();
