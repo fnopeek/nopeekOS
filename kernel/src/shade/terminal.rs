@@ -132,7 +132,7 @@ static mut INPUT_CURSOR_POS: usize = 0;
 
 /// Cached background pixels for the input line (saved after full render).
 /// Avoids re-blending on every keystroke — just restore + draw text.
-const INPUT_LINE_CACHE_MAX: usize = 3840 * 4; // max 4K width × 4 bytes
+const INPUT_LINE_CACHE_MAX: usize = 3840 * 4 * 64; // max 4K width × 4 bytes × 64px font height
 static mut INPUT_LINE_CACHE: [u8; INPUT_LINE_CACHE_MAX] = [0; INPUT_LINE_CACHE_MAX];
 static mut INPUT_LINE_CACHE_X: u32 = 0;
 static mut INPUT_LINE_CACHE_Y: u32 = 0;
