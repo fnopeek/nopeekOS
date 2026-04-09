@@ -125,7 +125,7 @@ const DESC_DEVICE:        u16 = 0x0100;
 const DESC_CONFIG:        u16 = 0x0200;
 
 const NUM_CMD_TRBS: usize = 32;
-const NUM_EVT_TRBS: usize = 128;
+const NUM_EVT_TRBS: usize = 256;
 const NUM_TR_TRBS:  usize = 64;
 
 // HID usage code to ASCII table (boot protocol, US layout base)

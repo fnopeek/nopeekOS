@@ -351,9 +351,14 @@ pub fn handle_action(action: input::ShadeAction) {
 pub fn render_input_line() {
     terminal::clear_dirty();
 
-    // Check layers BEFORE entering with_fb (layers_usable locks CONSOLE via get_info)
-    let use_layers = layers_usable();
+    if layers_usable() {
+        render_input_line_layered();
+    } else {
+        render_input_line_legacy();
+    }
+}
 
+fn render_input_line_layered() {
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -376,32 +381,25 @@ pub fn render_input_line() {
                     let visible = (rows as usize).min(total + 1);
                     let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
 
-                    // 1. Restore background — try BG layer first (has wallpaper),
-                    //    fall back to draw_background_region if layer unavailable
-                    let mut bg_restored = false;
-                    if use_layers {
-                        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                            let pitch = info.pitch as usize;
-                            let x1 = (cx + cw).min(info.width);
-                            let bytes = x1.saturating_sub(cx) as usize * 4;
-                            if bytes > 0 {
-                                for row in 0..char_h {
-                                    let py = last_y + row;
-                                    if py < info.height {
-                                        let off = py as usize * pitch + cx as usize * 4;
-                                        unsafe {
-                                            core::ptr::copy_nonoverlapping(
-                                                bg_buf.add(off), shadow.add(off), bytes);
-                                        }
+                    // 1. Copy background from BG layer (has wallpaper or aurora)
+                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                        let pitch = info.pitch as usize;
+                        let x1 = (cx + cw).min(info.width);
+                        let copy_cw = x1.saturating_sub(cx);
+                        let bytes = copy_cw as usize * 4;
+
+                        if bytes > 0 {
+                            for row in 0..char_h {
+                                let py = last_y + row;
+                                if py < info.height {
+                                    let off = py as usize * pitch + cx as usize * 4;
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            bg_buf.add(off), shadow.add(off), bytes);
                                     }
                                 }
-                                bg_restored = true;
                             }
                         }
-                    }
-                    if !bg_restored {
-                        crate::gui::background::draw_background_region(shadow, info,
-                            cx, last_y, cw, char_h);
                     }
 
                     // 2. Blend content bg (dark tint at opacity)
