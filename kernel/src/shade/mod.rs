@@ -109,28 +109,28 @@ pub fn render_frame() {
     }
 }
 
-/// Layer-based render: write to layer buffers, then composite.
+/// Layer-based render: use BG layer as background cache, render chrome+text to shadow.
 fn render_frame_layered() {
-    let info = framebuffer::get_info();
-
-    // Render chrome (borders, content rects) into Layer 1
-    // Render text into Layer 2
-    if let Some(ref mut comp) = *COMPOSITOR.lock() {
-        comp.render_to_layers(&info);
-    }
-
-    // Composite all layers → shadow → MMIO
     framebuffer::with_fb(|fb| {
-        let (shadow, _) = fb.shadow_ptr();
         let info = fb.info();
-        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+        let (shadow, _) = fb.shadow_ptr();
 
-        // Cursor overlay on MMIO (after composite)
-        if crate::xhci::mouse_available() {
-            if let Some(ref mut comp) = *COMPOSITOR.lock() {
-                if !regions.is_empty() {
-                    comp.mouse.redraw_overlay(shadow, info);
-                }
+        // Copy BG layer → shadow as clean background
+        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+            let size = info.pitch as usize * info.height as usize;
+            unsafe { core::ptr::copy_nonoverlapping(bg_buf, shadow, size); }
+        }
+
+        // Render chrome + text directly to shadow (proven approach)
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            comp.render(shadow, info);
+
+            let mut damage = render::DamageTracker::new(info.width, info.height);
+            damage.mark_all();
+            damage.flush(fb);
+
+            if crate::xhci::mouse_available() {
+                comp.mouse.redraw_overlay(shadow, info);
             }
         }
     });
@@ -167,24 +167,18 @@ pub fn render_damaged() {
 }
 
 fn render_damaged_layered() {
-    let info = framebuffer::get_info();
-
-    // Re-render only dirty windows to layers
-    if let Some(ref mut comp) = *COMPOSITOR.lock() {
-        comp.render_damaged_to_layers(&info);
-    }
-
-    // Composite dirty regions → shadow → MMIO
+    // Use BG layer for background restore, then legacy render_damaged for chrome+text
     framebuffer::with_fb(|fb| {
-        let (shadow, _) = fb.shadow_ptr();
         let info = fb.info();
-        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+        let (shadow, _) = fb.shadow_ptr();
 
-        if crate::xhci::mouse_available() {
-            if let Some(ref mut comp) = *COMPOSITOR.lock() {
-                if !regions.is_empty() {
-                    comp.mouse.redraw_overlay(shadow, info);
-                }
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            let regions = comp.render_damaged(shadow, info);
+            for (x, y, w, h) in regions {
+                framebuffer::blit_rect(fb, x, y, w, h);
+            }
+            if crate::xhci::mouse_available() {
+                comp.mouse.redraw_overlay(shadow, info);
             }
         }
     });
@@ -358,28 +352,57 @@ pub fn render_input_line() {
 }
 
 fn render_input_line_layered() {
-    // Use full text re-render (same path as poll_render_layered).
-    // Re-renders all text lines for the focused window into Layer 2.
-    // Slightly less efficient than partial update, but guarantees correct compositing.
-    let info = framebuffer::get_info();
-
-    if let Some(ref comp) = *COMPOSITOR.lock() {
-        if let Some(fid) = comp.focused {
-            if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                comp.render_text_to_layer(&info, win);
-            }
-        }
-    }
-
-    // Composite dirty text region
+    // Use BG layer as cached background — restore input line from bg layer
+    // to shadow, then re-render chrome+text on top. No per-pixel compositing.
     framebuffer::with_fb(|fb| {
-        let (shadow, _) = fb.shadow_ptr();
         let info = fb.info();
-        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+        let (shadow, _) = fb.shadow_ptr();
 
-        if crate::xhci::mouse_available() && !regions.is_empty() {
-            if let Some(ref mut comp) = *COMPOSITOR.lock() {
-                comp.mouse.redraw_overlay(shadow, info);
+        if let Some(ref comp) = *COMPOSITOR.lock() {
+            if let Some(fid) = comp.focused {
+                if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
+                    // Restore window region from BG layer → shadow (clean background)
+                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                        let pitch = info.pitch as usize;
+                        let pad = 6 * comp.scale;
+                        let cx = win.content_x(comp.border) + pad;
+                        let cy = win.content_y(comp.border) + pad;
+                        let cw = win.content_w(comp.border).saturating_sub(pad * 2);
+                        let ch = win.content_h(comp.border).saturating_sub(pad * 2);
+
+                        let (_, char_h) = crate::gui::font::char_size(1);
+                        let rows = ch / char_h;
+                        if rows > 0 {
+                            let terms_total = terminal::line_count();
+                            let visible = (rows as usize).min(terms_total + 1);
+                            let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
+
+                            // Copy bg → shadow for input line region
+                            let x1 = (cx + cw).min(info.width) as usize;
+                            let bytes = (x1 - cx as usize) * 4;
+                            for row in 0..char_h {
+                                let off = (last_y + row) as usize * pitch + cx as usize * 4;
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        bg_buf.add(off), shadow.add(off), bytes);
+                                }
+                            }
+
+                            // Blend chrome (content bg) on top
+                            let inner_r = comp.rounding.saturating_sub(comp.border);
+                            render::fill_rounded_rect_blend(shadow, info,
+                                cx, last_y, cw, char_h,
+                                win.bg_color, 0, comp.opacity);
+
+                            // Draw text on top
+                            terminal::render_input_line(shadow, info,
+                                cx, cy, cw, ch, win.terminal_idx);
+
+                            // Blit to MMIO
+                            framebuffer::blit_rect(fb, cx, last_y, cw, char_h);
+                        }
+                    }
+                }
             }
         }
     });
@@ -430,26 +453,35 @@ pub fn poll_render() {
 }
 
 fn poll_render_layered() {
-    let info = framebuffer::get_info();
-
-    // Re-render text for focused window into Layer 2
-    if let Some(ref comp) = *COMPOSITOR.lock() {
-        if let Some(fid) = comp.focused {
-            if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                comp.render_text_to_layer(&info, win);
-            }
-        }
-    }
-
-    // Composite dirty text region
+    // Focused window text changed — use BG layer to restore background, then re-render window
     framebuffer::with_fb(|fb| {
-        let (shadow, _) = fb.shadow_ptr();
         let info = fb.info();
-        let regions = crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
+        let (shadow, _) = fb.shadow_ptr();
 
-        if crate::xhci::mouse_available() && !regions.is_empty() {
-            if let Some(ref mut comp) = *COMPOSITOR.lock() {
-                comp.mouse.redraw_overlay(shadow, info);
+        if let Some(ref comp) = *COMPOSITOR.lock() {
+            if let Some(fid) = comp.focused {
+                if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
+                    // Restore window region from BG layer
+                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                        let pitch = info.pitch as usize;
+                        let y1 = (win.y + win.height).min(info.height);
+                        let x1 = (win.x + win.width).min(info.width);
+                        let bytes = (x1 - win.x) as usize * 4;
+                        for row in win.y..y1 {
+                            let off = row as usize * pitch + win.x as usize * 4;
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    bg_buf.add(off), shadow.add(off), bytes);
+                            }
+                        }
+                    }
+
+                    // Re-render window chrome + text on clean background
+                    let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
+                    compositor::Compositor::render_window(shadow, info, win,
+                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                    framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
+                }
             }
         }
     });
@@ -477,42 +509,20 @@ fn poll_render_legacy() {
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     let needs_scene_redraw = with_compositor(|comp| comp.handle_mouse(evt)).unwrap_or(false);
 
-    if crate::layers::is_initialized() {
-        if needs_scene_redraw {
-            let info = framebuffer::get_info();
-            if let Some(ref mut comp) = *COMPOSITOR.lock() {
-                comp.render_damaged_to_layers(&info);
-            }
-        }
+    framebuffer::with_fb(|fb| {
+        let info = fb.info();
+        let (shadow, _) = fb.shadow_ptr();
 
-        framebuffer::with_fb(|fb| {
-            let (shadow, _) = fb.shadow_ptr();
-            let info = fb.info();
-
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
             if needs_scene_redraw {
-                crate::layers::composite(shadow, info.addr, info.pitch, info.width, info.height);
-            }
-
-            if let Some(ref mut comp) = *COMPOSITOR.lock() {
-                comp.mouse.redraw_overlay(shadow, info);
-            }
-        });
-    } else {
-        framebuffer::with_fb(|fb| {
-            let info = fb.info();
-            let (shadow, _) = fb.shadow_ptr();
-
-            if let Some(ref mut comp) = *COMPOSITOR.lock() {
-                if needs_scene_redraw {
-                    let regions = comp.render_damaged(shadow, info);
-                    for (x, y, w, h) in regions {
-                        framebuffer::blit_rect(fb, x, y, w, h);
-                    }
+                let regions = comp.render_damaged(shadow, info);
+                for (x, y, w, h) in regions {
+                    framebuffer::blit_rect(fb, x, y, w, h);
                 }
-                comp.mouse.redraw_overlay(shadow, info);
             }
-        });
-    }
+            comp.mouse.redraw_overlay(shadow, info);
+        }
+    });
 }
 
 /// Stop shade compositor.
