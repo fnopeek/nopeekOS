@@ -394,13 +394,17 @@ fn render_input_line_layered() {
 
                     // 1. Copy BG → shadow (aurora/wallpaper pixels)
                     let x1 = (cx + cw).min(info.width) as usize;
-                    let bytes = (x1 - cx as usize) * 4;
-                    for row in 0..char_h {
-                        let off = (last_y + row) as usize * pitch + cx as usize * 4;
-                        // SAFETY: both buffers are pitch*height, bounds checked
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                bg_buf.add(off), shadow.add(off), bytes);
+                    let bytes = x1.saturating_sub(cx as usize) * 4;
+                    if bytes > 0 {
+                        for row in 0..char_h {
+                            if last_y + row < info.height {
+                                let off = (last_y + row) as usize * pitch + cx as usize * 4;
+                                // SAFETY: both buffers are pitch*height, bounds checked
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        bg_buf.add(off), shadow.add(off), bytes);
+                                }
+                            }
                         }
                     }
 
@@ -497,12 +501,14 @@ fn poll_render_layered() {
                         let pitch = info.pitch as usize;
                         let y1 = (win.y + win.height).min(info.height);
                         let x1 = (win.x + win.width).min(info.width);
-                        let bytes = (x1 - win.x) as usize * 4;
-                        for row in win.y..y1 {
-                            let off = row as usize * pitch + win.x as usize * 4;
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    bg_buf.add(off), shadow.add(off), bytes);
+                        let bytes = x1.saturating_sub(win.x) as usize * 4;
+                        if bytes > 0 {
+                            for row in win.y..y1 {
+                                let off = row as usize * pitch + win.x as usize * 4;
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        bg_buf.add(off), shadow.add(off), bytes);
+                                }
                             }
                         }
                     }
