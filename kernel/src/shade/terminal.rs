@@ -448,11 +448,14 @@ pub fn render_input_line_to_layer(
     // Clear the input line region in text layer (transparent)
     let pitch = info.pitch as usize;
     let x1 = (win_cx + win_cw).min(info.width) as usize;
-    let bytes = (x1 - win_cx as usize) * 4;
+    let bytes = x1.saturating_sub(win_cx as usize) * 4;
+    if bytes == 0 { return None; }
     for row in 0..char_h {
-        let off = (last_line_y + row) as usize * pitch + win_cx as usize * 4;
-        // SAFETY: bounds checked
-        unsafe { core::ptr::write_bytes(text_buf.add(off), 0, bytes); }
+        if last_line_y + row < info.height {
+            let off = (last_line_y + row) as usize * pitch + win_cx as usize * 4;
+            // SAFETY: bounds checked
+            unsafe { core::ptr::write_bytes(text_buf.add(off), 0, bytes); }
+        }
     }
 
     // Draw text

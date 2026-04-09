@@ -287,7 +287,8 @@ impl Compositor {
 
         if split_horizontal {
             let half = (w.saturating_sub(gap)) / 2;
-            let left_w = (half as i32 + delta_w).clamp(100, w.saturating_sub(gap + 100) as i32) as u32;
+            let max_w = w.saturating_sub(gap).saturating_sub(100).max(100) as i32;
+            let left_w = (half as i32 + delta_w).clamp(100, max_w) as u32;
             let right_w = w.saturating_sub(left_w + gap);
             // First window: left half (adjusted by delta)
             for win in &mut self.windows {
@@ -304,7 +305,8 @@ impl Compositor {
             self.dwindle_layout(&ids[1..], x + left_w + gap, y, right_w, h, gap, false);
         } else {
             let half = (h.saturating_sub(gap)) / 2;
-            let top_h = (half as i32 + delta_h).clamp(80, h.saturating_sub(gap + 80) as i32) as u32;
+            let max_h = h.saturating_sub(gap).saturating_sub(80).max(80) as i32;
+            let top_h = (half as i32 + delta_h).clamp(80, max_h) as u32;
             let bottom_h = h.saturating_sub(top_h + gap);
             // First window: top half (adjusted by delta)
             for win in &mut self.windows {
