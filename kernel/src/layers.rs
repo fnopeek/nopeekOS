@@ -100,10 +100,16 @@ pub fn init(width: u32, height: u32, pitch: u32) {
         }
     }
 
-    // Sanity check: don't even try if total needed exceeds heap ceiling
+    // Check if we have enough heap before trying (need 3 × buf_size)
     let total_needed = buf_size * LAYER_COUNT;
-    crate::kprintln!("[npk] layers: allocating {} MB for {} buffers",
-        total_needed / (1024 * 1024), LAYER_COUNT);
+    let (used, total) = crate::heap::stats();
+    let available = total.saturating_sub(used);
+    if total_needed > available / 2 {
+        // Don't allocate if layers would use >50% of remaining heap
+        crate::kprintln!("[npk] layers: skipped (need {}MB, {}MB free)",
+            total_needed / (1024 * 1024), available / (1024 * 1024));
+        return;
+    }
 
     let layout = alloc::alloc::Layout::from_size_align(buf_size, 16)
         .expect("layer buffer layout");
