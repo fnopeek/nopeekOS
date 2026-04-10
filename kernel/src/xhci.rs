@@ -5,7 +5,7 @@
 
 use crate::{kprintln, pci, paging, memory};
 use crate::paging::PageFlags;
-use core::sync::atomic::{AtomicBool, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 
 // === MMIO helpers ===
 
@@ -179,20 +179,19 @@ static HID_TO_ASCII_DE_SHIFT: [u8; 57] = [
     0, b':', b'"', b'>', b';', b':', b'_',
 ];
 
-// Key buffer (shared with keyboard.rs via poll_keyboard)
+// Key buffer — IRQ-safe SPSC ring (producer: IRQ/poll, consumer: main thread)
 const KEY_BUF_SIZE: usize = 32;
 static mut KEY_BUF: [u8; KEY_BUF_SIZE] = [0; KEY_BUF_SIZE];
-static mut KEY_HEAD: usize = 0;
-static mut KEY_TAIL: usize = 0;
+static KEY_HEAD: AtomicUsize = AtomicUsize::new(0);
+static KEY_TAIL: AtomicUsize = AtomicUsize::new(0);
 
 fn push_key(k: u8) {
-    // SAFETY: single-core, no concurrent access
-    unsafe {
-        let next = (KEY_HEAD + 1) % KEY_BUF_SIZE;
-        if next != KEY_TAIL {
-            KEY_BUF[KEY_HEAD] = k;
-            KEY_HEAD = next;
-        }
+    let head = KEY_HEAD.load(Ordering::Relaxed);
+    let next = (head + 1) % KEY_BUF_SIZE;
+    if next != KEY_TAIL.load(Ordering::Acquire) {
+        // SAFETY: single producer (IRQ or poll), head only written here
+        unsafe { KEY_BUF[head] = k; }
+        KEY_HEAD.store(next, Ordering::Release);
     }
 }
 
@@ -205,20 +204,19 @@ pub struct MouseEvent {
     pub scroll: i8,
 }
 
-// Mouse event buffer
+// Mouse event buffer — IRQ-safe SPSC ring (producer: IRQ/poll, consumer: main thread)
 const MOUSE_BUF_SIZE: usize = 128;
 static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0 }; MOUSE_BUF_SIZE];
-static mut MOUSE_HEAD: usize = 0;
-static mut MOUSE_TAIL: usize = 0;
+static MOUSE_HEAD: AtomicUsize = AtomicUsize::new(0);
+static MOUSE_TAIL: AtomicUsize = AtomicUsize::new(0);
 
 fn push_mouse(evt: MouseEvent) {
-    // SAFETY: single-core, no concurrent access
-    unsafe {
-        let next = (MOUSE_HEAD + 1) % MOUSE_BUF_SIZE;
-        if next != MOUSE_TAIL {
-            MOUSE_BUF[MOUSE_HEAD] = evt;
-            MOUSE_HEAD = next;
-        }
+    let head = MOUSE_HEAD.load(Ordering::Relaxed);
+    let next = (head + 1) % MOUSE_BUF_SIZE;
+    if next != MOUSE_TAIL.load(Ordering::Acquire) {
+        // SAFETY: single producer (IRQ or poll), head only written here
+        unsafe { MOUSE_BUF[head] = evt; }
+        MOUSE_HEAD.store(next, Ordering::Release);
     }
 }
 
@@ -228,13 +226,13 @@ pub fn poll_keyboard() -> Option<u8> {
     poll_events();
 
     // Check key buffer first (newly pressed keys)
-    // SAFETY: single-core
-    unsafe {
-        if KEY_HEAD != KEY_TAIL {
-            let k = KEY_BUF[KEY_TAIL];
-            KEY_TAIL = (KEY_TAIL + 1) % KEY_BUF_SIZE;
-            return Some(k);
-        }
+    let head = KEY_HEAD.load(Ordering::Acquire);
+    let tail = KEY_TAIL.load(Ordering::Relaxed);
+    if head != tail {
+        // SAFETY: single consumer (main thread), tail only written here
+        let k = unsafe { KEY_BUF[tail] };
+        KEY_TAIL.store((tail + 1) % KEY_BUF_SIZE, Ordering::Release);
+        return Some(k);
     }
 
     // Timer-based key repeat for held keys
@@ -268,13 +266,13 @@ pub fn poll_mouse() -> Option<MouseEvent> {
     if !MOUSE_AVAILABLE.load(Ordering::Relaxed) { return None; }
     poll_events();
 
-    // SAFETY: single-core
-    unsafe {
-        if MOUSE_HEAD != MOUSE_TAIL {
-            let evt = MOUSE_BUF[MOUSE_TAIL];
-            MOUSE_TAIL = (MOUSE_TAIL + 1) % MOUSE_BUF_SIZE;
-            return Some(evt);
-        }
+    let head = MOUSE_HEAD.load(Ordering::Acquire);
+    let tail = MOUSE_TAIL.load(Ordering::Relaxed);
+    if head != tail {
+        // SAFETY: single consumer (main thread), tail only written here
+        let evt = unsafe { MOUSE_BUF[tail] };
+        MOUSE_TAIL.store((tail + 1) % MOUSE_BUF_SIZE, Ordering::Release);
+        return Some(evt);
     }
     None
 }
