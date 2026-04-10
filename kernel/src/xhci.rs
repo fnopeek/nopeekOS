@@ -125,7 +125,7 @@ const DESC_DEVICE:        u16 = 0x0100;
 const DESC_CONFIG:        u16 = 0x0200;
 
 const NUM_CMD_TRBS: usize = 32;
-const NUM_EVT_TRBS: usize = 256;
+const NUM_EVT_TRBS: usize = 1024;
 const NUM_TR_TRBS:  usize = 64;
 
 // HID usage code to ASCII table (boot protocol, US layout base)
@@ -206,7 +206,7 @@ pub struct MouseEvent {
 }
 
 // Mouse event buffer
-const MOUSE_BUF_SIZE: usize = 128;
+const MOUSE_BUF_SIZE: usize = 512;
 static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0 }; MOUSE_BUF_SIZE];
 static mut MOUSE_HEAD: usize = 0;
 static mut MOUSE_TAIL: usize = 0;
@@ -1672,6 +1672,13 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
     if first_key == 0 {
         // All keys released — stop repeat
         state.repeat_key = 0;
+    } else if state.repeat_key != 0 && !keys.contains(&state.repeat_key) {
+        // Repeated key was released while another is held — follow current key
+        state.repeat_key = first_key;
+        state.repeat_shift = shift;
+        state.repeat_altgr = alt_gr;
+        state.repeat_start = crate::interrupts::ticks();
+        state.repeat_last = state.repeat_start;
     } else if !state.prev_keys.contains(&first_key) {
         // New key pressed — start repeat timer
         state.repeat_key = first_key;
@@ -1680,7 +1687,6 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         state.repeat_start = crate::interrupts::ticks();
         state.repeat_last = state.repeat_start;
     }
-    // If same key still held, repeat_key stays set and poll_keyboard() handles timing
 
     for &key in keys.iter() {
         if key == 0 || key == 1 { continue; } // no key / error rollover
