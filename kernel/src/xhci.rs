@@ -290,6 +290,26 @@ pub fn poll_mouse() -> Option<MouseEvent> {
 /// Check if USB mouse is available.
 pub fn mouse_available() -> bool { MOUSE_AVAILABLE.load(Ordering::Relaxed) }
 
+/// Debug: print mouse transfer state (call from intent loop when mouse freezes).
+pub fn mouse_debug() {
+    let sched = MOUSE_SCHED.load(core::sync::atomic::Ordering::Relaxed);
+    let compl = MOUSE_COMPL.load(core::sync::atomic::Ordering::Relaxed);
+    let total = MOUSE_TOTAL.load(core::sync::atomic::Ordering::Relaxed);
+    let avail = MOUSE_AVAILABLE.load(Ordering::Relaxed);
+    crate::kprintln!("[npk] mouse: avail={} total={} sched={} compl={} pending={}",
+        avail, total, sched, compl, sched.saturating_sub(compl));
+    let lock = STATE.lock();
+    if let Some(ref state) = *lock {
+        crate::kprintln!("[npk] mouse: has={} enq={} cycle={} errors={}",
+            state.has_mouse, state.mouse_intr_enqueue, state.mouse_intr_cycle, state.mouse_error_count);
+        // Check event ring state
+        let (_, _, control) = read_trb(state.evt_ring, state.evt_dequeue);
+        let evt_cycle_match = (control & TRB_CYCLE) == state.evt_cycle;
+        crate::kprintln!("[npk] mouse: evt_deq={} evt_cycle={} next_trb_match={}",
+            state.evt_dequeue, state.evt_cycle, evt_cycle_match);
+    }
+}
+
 #[allow(dead_code)]
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Relaxed) }
 
@@ -1074,7 +1094,19 @@ fn find_mouse_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8, u
     None
 }
 
+static MOUSE_SCHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static MOUSE_COMPL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn schedule_mouse_interrupt_transfer(state: &mut XhciState) {
+    let sched = MOUSE_SCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    let compl = MOUSE_COMPL.load(core::sync::atomic::Ordering::Relaxed);
+    // Warn if schedule count diverges from completion count (ring overflow risk)
+    let pending = sched.saturating_sub(compl);
+    if pending > (NUM_TR_TRBS as u64 - 2) {
+        crate::kprintln!("[npk] xhci: MOUSE TR OVERFLOW! sched={} compl={} pending={} enq={}",
+            sched, compl, pending, state.mouse_intr_enqueue);
+    }
+
     let idx = state.mouse_intr_enqueue;
     let cycle = state.mouse_intr_cycle;
     // Mouse uses data_buf+3072 (keyboard uses data_buf+2048)
@@ -1603,6 +1635,7 @@ pub fn poll_events() {
                 && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
 
             if is_mouse {
+                MOUSE_COMPL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
                     process_mouse_report(state);
                     state.mouse_error_count = 0;
