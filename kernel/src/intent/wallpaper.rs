@@ -288,7 +288,7 @@ fn generate_demo_wallpapers() {
         // Generate bilinear gradient with subtle noise
         for y in 0..h {
             // Keep USB input alive during generation (~32M pixels)
-            if y % 256 == 0 { crate::xhci::poll_events(); }
+            // Timer IRQ handles USB polling during generation
             let fy = y as u32 * 1000 / h;
             for x in 0..w {
                 let fx = x as u32 * 1000 / w;
