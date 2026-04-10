@@ -251,6 +251,33 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_sys_info(key) -> i64 — system information for apps (e.g. top)
+    // Keys: 0=cores, 1=uptime_secs, 2=free_mb, 3=heap_used, 4=heap_total,
+    //        5=tasks_spawned, 6=tasks_completed, 7=steals, 8=workers,
+    //        9=has_mwait, 10=tsc_mhz, 11=queue_len(core N, pass core in high bits)
+    linker.func_wrap("env", "npk_sys_info",
+        |_caller: Caller<'_, HostState>, key: i32| -> i64 {
+            match key & 0xFF {
+                0 => crate::smp::per_core::core_count() as i64,
+                1 => crate::interrupts::uptime_secs() as i64,
+                2 => { let (_, mb) = crate::memory::stats(); mb as i64 },
+                3 => { let (used, _) = crate::heap::stats(); used as i64 },
+                4 => { let (_, total) = crate::heap::stats(); total as i64 },
+                5 => { let (s, _, _, _) = crate::smp::scheduler::stats(); s as i64 },
+                6 => { let (_, c, _, _) = crate::smp::scheduler::stats(); c as i64 },
+                7 => { let (_, _, st, _) = crate::smp::scheduler::stats(); st as i64 },
+                8 => { let (_, _, _, w) = crate::smp::scheduler::stats(); w as i64 },
+                9 => if crate::smp::per_core::has_mwait() { 1 } else { 0 },
+                10 => (crate::interrupts::tsc_freq() / 1_000_000) as i64,
+                11 => {
+                    let core = (key >> 8) as usize;
+                    crate::smp::scheduler::queue_len(core) as i64
+                },
+                _ => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     Ok(())
 }
 

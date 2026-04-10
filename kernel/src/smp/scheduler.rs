@@ -180,6 +180,13 @@ static mut DEQUES: [WorkDeque; MAX_CORES] = {
 /// Number of active worker cores (excludes BSP)
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Total tasks spawned (monotonic counter)
+static TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
+/// Total tasks completed
+static TASKS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+/// Total steals performed
+static STEALS: AtomicU64 = AtomicU64::new(0);
+
 /// Global wake signal — ALL APs MONITOR this address.
 /// Set to 1 when new work is available, cleared by APs after waking.
 /// Aligned to cache line to avoid false sharing.
@@ -232,7 +239,7 @@ pub fn spawn(priority: Priority, func: fn(u64), arg: u64) {
     // SAFETY: spawn() is called from BSP, DEQUES[0] owner is BSP
     let pushed = unsafe { DEQUES[0].push(task) };
     if pushed {
-        // Wake sleeping APs
+        TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
         WORK_AVAILABLE.flag.store(1, Ordering::Release);
     } else {
         func(arg);
@@ -293,4 +300,30 @@ pub fn wake_flag_ptr() -> *const AtomicU32 {
 /// Clear global wake flag (called by AP after waking)
 pub fn clear_wake() {
     WORK_AVAILABLE.flag.store(0, Ordering::Relaxed);
+}
+
+/// Record a completed task (called after task.func returns)
+pub fn mark_completed() {
+    TASKS_COMPLETED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a successful steal
+pub fn mark_stolen() {
+    STEALS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Scheduler stats: (spawned, completed, steals, workers, queue_depths)
+pub fn stats() -> (u64, u64, u64, usize) {
+    (
+        TASKS_SPAWNED.load(Ordering::Relaxed),
+        TASKS_COMPLETED.load(Ordering::Relaxed),
+        STEALS.load(Ordering::Relaxed),
+        WORKER_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+/// Per-core queue depth (for top display)
+pub fn queue_len(core_id: usize) -> usize {
+    if core_id >= MAX_CORES { return 0; }
+    unsafe { DEQUES[core_id].len() }
 }

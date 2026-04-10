@@ -22,7 +22,7 @@ pub struct CoreInfo {
     pub state: CoreState,
 }
 
-static CORES: Mutex<Vec<CoreInfo>> = Mutex::new(Vec::new());
+pub static CORES: Mutex<Vec<CoreInfo>> = Mutex::new(Vec::new());
 static CORE_COUNT: AtomicUsize = AtomicUsize::new(1);
 
 /// Set to true once scheduler is initialized and APs should start working
