@@ -327,14 +327,20 @@ pub fn render_to_window(
 
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
             if text.starts_with("[npk]") {
+                // System message: [npk] in accent, rest in white
                 crate::gui::font::draw_str(shadow, info, "[npk]", x, py, prompt_color, None, 1);
                 if visible_len > 5 {
                     if let Ok(rest) = core::str::from_utf8(&line_data[5..visible_len]) {
                         crate::gui::font::draw_str(shadow, info, rest, x + 5 * char_w, py, fg, None, 1);
                     }
                 }
-            } else if text.contains("@npk") {
-                crate::gui::font::draw_str(shadow, info, text, x, py, prompt_color, None, 1);
+            } else if let Some(pos) = text.find("> ") {
+                // Prompt line: path> in accent, input in white
+                let prompt_end = pos + 2; // include "> "
+                crate::gui::font::draw_str(shadow, info, &text[..prompt_end], x, py, prompt_color, None, 1);
+                if visible_len > prompt_end {
+                    crate::gui::font::draw_str(shadow, info, &text[prompt_end..], x + prompt_end as u32 * char_w, py, fg, None, 1);
+                }
             } else {
                 crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
             }
@@ -403,8 +409,12 @@ pub fn render_input_line(
         let prompt_color = crate::gui::background::accent_color();
         let fg = 0x00E8E8E8u32;
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
-            if text.contains("@npk") {
-                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, prompt_color, None, 1);
+            if let Some(pos) = text.find("> ") {
+                let prompt_end = pos + 2;
+                crate::gui::font::draw_str(shadow, info, &text[..prompt_end], win_cx, last_line_y, prompt_color, None, 1);
+                if visible_len > prompt_end {
+                    crate::gui::font::draw_str(shadow, info, &text[prompt_end..], win_cx + prompt_end as u32 * char_w, last_line_y, fg, None, 1);
+                }
             } else {
                 crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, fg, None, 1);
             }
@@ -465,8 +475,12 @@ pub fn render_input_line_to_layer(
         let prompt_color = crate::gui::background::accent_color();
         let fg = 0x00E8E8E8u32;
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
-            if text.contains("@npk") {
-                crate::gui::font::draw_str(text_buf, info, text, win_cx, last_line_y, prompt_color, None, 1);
+            if let Some(pos) = text.find("> ") {
+                let prompt_end = pos + 2;
+                crate::gui::font::draw_str(text_buf, info, &text[..prompt_end], win_cx, last_line_y, prompt_color, None, 1);
+                if visible_len > prompt_end {
+                    crate::gui::font::draw_str(text_buf, info, &text[prompt_end..], win_cx + prompt_end as u32 * char_w, last_line_y, fg, None, 1);
+                }
             } else {
                 crate::gui::font::draw_str(text_buf, info, text, win_cx, last_line_y, fg, None, 1);
             }
