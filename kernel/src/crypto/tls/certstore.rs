@@ -7,16 +7,16 @@ use super::x509::{self, X509Cert, KeyType};
 use super::sha256;
 
 /// ISRG Root X1 (Let's Encrypt) — covers ~60% of the web
-const ISRG_ROOT_X1_DER: &[u8] = include_bytes!("../../certs/isrg_root_x1.der");
+const ISRG_ROOT_X1_DER: &[u8] = include_bytes!("../../../certs/isrg_root_x1.der");
 
 /// DigiCert Global Root G2 — covers Anthropic, Cloudflare, etc.
-const DIGICERT_GLOBAL_G2_DER: &[u8] = include_bytes!("../../certs/digicert_global_g2.der");
+const DIGICERT_GLOBAL_G2_DER: &[u8] = include_bytes!("../../../certs/digicert_global_g2.der");
 
 /// AAA Certificate Services (Comodo/Sectigo) — covers Cloudflare default certs
-const AAA_CERT_SERVICES_DER: &[u8] = include_bytes!("../../certs/aaa_certificate_services.der");
+const AAA_CERT_SERVICES_DER: &[u8] = include_bytes!("../../../certs/aaa_certificate_services.der");
 
 /// Google Trust Services Root R1 — covers Google services
-const GTS_ROOT_R1_DER: &[u8] = include_bytes!("../../certs/gts_root_r1.der");
+const GTS_ROOT_R1_DER: &[u8] = include_bytes!("../../../certs/gts_root_r1.der");
 
 const ROOT_CERTS: &[&[u8]] = &[
     ISRG_ROOT_X1_DER,
