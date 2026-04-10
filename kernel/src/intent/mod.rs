@@ -173,9 +173,9 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
 
-        // Tick swap animation (async — renders on worker core)
+        // Tick swap animation — SYNCHRONOUS (animation needs immediate frame updates)
         if crate::shade::with_compositor(|comp| comp.tick_animation()).unwrap_or(false) {
-            crate::shade::render_frame_async();
+            crate::shade::render_frame();
         }
 
         // Process each mouse event with clean cursor restore + redraw
