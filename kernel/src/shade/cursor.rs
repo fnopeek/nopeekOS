@@ -10,7 +10,7 @@
 //! Core 0 (input) writes position in ~2ns without any lock.
 //! Cursor overlay reads atomics and draws directly to MMIO.
 
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 /// Cursor dimensions.
 const CURSOR_W: u32 = 12;
@@ -244,6 +244,29 @@ pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
     DRAWN_X.store(cx, Ordering::Relaxed);
     DRAWN_Y.store(cy, Ordering::Relaxed);
     DRAWN.store(true, Ordering::Relaxed);
+}
+
+/// Draw cursor from IRQ context — no locks, no shadow restore.
+/// Writes directly to MMIO using cached framebuffer info.
+/// Any trail artifact is cleaned up by the next render_frame().
+pub fn draw_cursor_irq() {
+    let addr = IRQ_FB_ADDR.load(Ordering::Relaxed);
+    if addr == 0 { return; }
+    let pitch = IRQ_FB_PITCH.load(Ordering::Relaxed) as usize;
+    let sw = SCREEN_W.load(Ordering::Relaxed);
+    let sh = SCREEN_H.load(Ordering::Relaxed);
+    let (cx, cy) = atomic_pos();
+    draw_cursor_on_mmio(addr as *mut u8, pitch, sw, sh, cx, cy);
+}
+
+/// Cached framebuffer MMIO address for IRQ-safe cursor draw
+static IRQ_FB_ADDR: AtomicU64 = AtomicU64::new(0);
+static IRQ_FB_PITCH: AtomicU32 = AtomicU32::new(0);
+
+/// Cache framebuffer info for IRQ cursor draw. Call after GPU init.
+pub fn cache_fb_info(addr: u64, pitch: u32) {
+    IRQ_FB_ADDR.store(addr, Ordering::Relaxed);
+    IRQ_FB_PITCH.store(pitch, Ordering::Relaxed);
 }
 
 /// Draw cursor bitmap directly to MMIO framebuffer at given position.

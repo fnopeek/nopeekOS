@@ -69,6 +69,10 @@ pub fn init() {
     // Initialize lock-free cursor position (centered, screen bounds for clamping)
     cursor::init_atomic(screen_w, screen_h);
 
+    // Cache framebuffer MMIO address for IRQ-safe cursor draw
+    let fb_info = framebuffer::get_info();
+    cursor::cache_fb_info(fb_info.addr, fb_info.pitch);
+
     *COMPOSITOR.lock() = Some(comp);
     ACTIVE.store(true, Ordering::Release);
 
