@@ -33,6 +33,10 @@ pub(crate) static COMPOSITOR: Mutex<Option<Compositor>> = Mutex::new(None);
 /// Lock-free active flag (avoids COMPOSITOR lock from xHCI poll context).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// True while a render task is queued/running on a worker core.
+/// Prevents flooding the scheduler with duplicate render tasks.
+static RENDER_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Check if layer system is usable (initialized AND matches current framebuffer).
 fn layers_usable() -> bool {
     if !crate::layers::is_initialized() { return false; }
@@ -122,6 +126,26 @@ pub fn render_frame() {
     } else {
         render_frame_legacy();
     }
+}
+
+/// Non-blocking render: dispatches to a worker core via SMP scheduler.
+/// Core 0 returns immediately — no waiting for 4K framebuffer blit.
+/// Duplicate calls while a render is in-flight are silently skipped.
+pub fn render_frame_async() {
+    if !is_active() { return; }
+    if RENDER_PENDING.swap(true, Ordering::AcqRel) {
+        return; // Already queued — skip
+    }
+    crate::smp::scheduler::spawn(
+        crate::smp::scheduler::Priority::Interactive,
+        render_frame_task,
+        0,
+    );
+}
+
+fn render_frame_task(_arg: u64) {
+    render_frame();
+    RENDER_PENDING.store(false, Ordering::Release);
 }
 
 /// Layer-based render: use BG layer as background cache, render chrome+text to shadow.

@@ -173,9 +173,9 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
         // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
 
-        // Tick swap animation
+        // Tick swap animation (async — renders on worker core)
         if crate::shade::with_compositor(|comp| comp.tick_animation()).unwrap_or(false) {
-            crate::shade::render_frame();
+            crate::shade::render_frame_async();
         }
 
         // Process each mouse event with clean cursor restore + redraw
@@ -541,9 +541,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
         dispatch_intent(input, vault, session_id);
 
-        // Re-render shade compositor to show new output
+        // Re-render shade compositor to show new output (async — worker core)
         if crate::shade::is_active() {
-            crate::shade::render_frame();
+            crate::shade::render_frame_async();
         }
     }
 }
@@ -803,7 +803,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             if crate::shade::is_active() {
                 // Shade mode: clear terminal buffer and re-render focused window
                 crate::shade::terminal::clear();
-                crate::shade::render_frame();
+                crate::shade::render_frame_async();
             } else {
                 crate::framebuffer::clear();
             }
