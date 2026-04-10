@@ -173,8 +173,9 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
         }
     };
 
-    // Bilinear-ish scale: nearest-neighbor for speed (good enough for wallpapers)
+    // Nearest-neighbor scale (good enough for wallpapers)
     for ty in 0..target_h {
+        if ty % 256 == 0 { crate::xhci::poll_events(); } // keep USB input alive
         let sy = (ty as u64 * h as u64 / target_h as u64) as u32;
         for tx in 0..target_w {
             let sx = (tx as u64 * w as u64 / target_w as u64) as u32;

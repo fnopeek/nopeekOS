@@ -91,6 +91,9 @@ pub fn focus_window(id: WindowId) {
 
 /// Force a full redraw (e.g. after wallpaper change).
 pub fn force_redraw() {
+    // Invalidate input line cache — will be rebuilt by render_window
+    terminal::invalidate_input_cache();
+
     // Re-render background into Layer 0 if layers are active
     if crate::layers::is_initialized() {
         if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
@@ -348,7 +351,7 @@ pub fn handle_action(action: input::ShadeAction) {
 }
 
 /// Fast re-render of just the current input line (for live typing feedback).
-/// Single function — no cache, no legacy fallback, no deadlock.
+/// Uses INPUT_LINE_CACHE from render_window for pixel-perfect background match.
 pub fn render_input_line() {
     terminal::clear_dirty();
 
@@ -365,94 +368,11 @@ pub fn render_input_line() {
                     let cw = win.content_w(comp.border).saturating_sub(pad * 2);
                     let ch = win.content_h(comp.border).saturating_sub(pad * 2);
 
-                    let (char_w, char_h) = crate::gui::font::char_size(1);
-                    let cols = cw / char_w;
-                    let rows = ch / char_h;
-                    if cols == 0 || rows == 0 { return; }
-
-                    let total = terminal::line_count();
-                    let visible = (rows as usize).min(total + 1);
-                    let last_y = cy + (visible as u32).saturating_sub(1) * char_h;
-
-                    // 1. Restore background — try BG layer (preserves wallpaper)
-                    //    Check resolution inline (no layers_usable() → no CONSOLE deadlock)
-                    let mut restored_from_layer = false;
-                    let layers_init = crate::layers::is_initialized();
-                    let layers_match = if layers_init {
-                        crate::layers::matches_resolution(info.width, info.height, info.pitch)
-                    } else { false };
-
-                    if layers_init && layers_match {
-                        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                            let pitch = info.pitch as usize;
-                            let x1 = (cx + cw).min(info.width);
-                            let bytes = x1.saturating_sub(cx) as usize * 4;
-
-                            if bytes > 0 {
-                                for row in 0..char_h {
-                                    let py = last_y + row;
-                                    if py < info.height {
-                                        let off = py as usize * pitch + cx as usize * 4;
-                                        unsafe {
-                                            core::ptr::copy_nonoverlapping(
-                                                bg_buf.add(off), shadow.add(off), bytes);
-                                        }
-                                    }
-                                }
-                                restored_from_layer = true;
-                            }
-                        }
+                    if let Some((x, y, w, h)) = terminal::render_input_line(
+                        shadow, &info, cx, cy, cw, ch, win.terminal_idx,
+                    ) {
+                        framebuffer::blit_rect(fb, x, y, w, h);
                     }
-
-                    // 2. Fallback: resolution changed (gpu 4k60) → recalculate background
-                    if !restored_from_layer {
-                        crate::gui::background::draw_background_region(shadow, info,
-                            cx, last_y, cw, char_h);
-                    }
-
-                    // 3. Blend border tint first (render_window does this for the whole window)
-                    let border_color = if win.focused {
-                        if crate::theme::is_active() {
-                            crate::gui::background::accent_color()
-                        } else { comp.border_active }
-                    } else {
-                        if crate::theme::is_active() {
-                            crate::theme::inactive_border()
-                        } else { comp.border_inactive }
-                    };
-                    render::fill_rounded_rect_blend(shadow, info,
-                        cx, last_y, cw, char_h,
-                        border_color, 0, 180);
-
-                    // 4. Blend content bg on top (dark tint at opacity)
-                    render::fill_rounded_rect_blend(shadow, info,
-                        cx, last_y, cw, char_h,
-                        win.bg_color, 0, comp.opacity);
-
-                    // 4. Draw text
-                    let terms = terminal::current_line_data();
-                    let visible_len = terms.1.min(cols as usize);
-                    if visible_len > 0 {
-                        let prompt_color = crate::gui::background::accent_color();
-                        let fg = 0x00E8E8E8u32;
-                        if let Ok(text) = core::str::from_utf8(&terms.0[..visible_len]) {
-                            if text.contains("@npk") {
-                                crate::gui::font::draw_str(shadow, info, text, cx, last_y, prompt_color, None, 1);
-                            } else {
-                                crate::gui::font::draw_str(shadow, info, text, cx, last_y, fg, None, 1);
-                            }
-                        }
-                    }
-
-                    // 5. Draw cursor
-                    let cur = terminal::cursor_pos();
-                    let cursor_x = cx + cur as u32 * char_w;
-                    if cursor_x + 2 <= cx + cw {
-                        render::fill_rect(shadow, info, cursor_x, last_y, 2, char_h, 0x00E8E8E8);
-                    }
-
-                    // 6. Blit to MMIO
-                    framebuffer::blit_rect(fb, cx, last_y, cw, char_h);
                 }
             }
         }
