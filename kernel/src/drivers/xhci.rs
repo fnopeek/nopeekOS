@@ -218,13 +218,6 @@ fn push_mouse(evt: MouseEvent) {
         unsafe { MOUSE_BUF[head] = evt; }
         MOUSE_HEAD.store(next, Ordering::Release);
     }
-
-    // Update atomic cursor position from IRQ context (no lock, ~2ns).
-    // This keeps the cursor moving even while the main loop is in render_frame().
-    if crate::shade::is_active() {
-        crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
-        crate::shade::cursor::draw_cursor_irq();
-    }
 }
 
 /// Poll for a key from the USB keyboard. Called from keyboard.rs.
