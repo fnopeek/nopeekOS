@@ -240,8 +240,10 @@ Every execution is a sandboxed WASM module:
 - [x] Tick-based USB timeouts (CPU-speed independent)
 - [x] ACPI power-off (RSDP, FADT, DSDT \_S5 parsing)
 - [x] Gateway routing, serial detection, dual xHCI controllers
+- [x] APIC timer (auto-detect PIT vs APIC, TSC-calibrated, 100Hz periodic)
 - [ ] npk-shell: TLS-encrypted remote intent loop (TCP listener, passphrase auth)
 - [x] USB mouse (HID boot protocol, xHCI multi-device, software cursor, click-to-focus, Mod+drag)
+- [x] IRQ-driven USB polling (APIC timer drains xHCI, atomic SPSC ring buffers)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 
 ### Phase 8 -- Human View (in progress)
@@ -276,6 +278,9 @@ Every execution is a sandboxed WASM module:
 - [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI→HDMI mode switch, auto-fallback to 4K@30)
 - [x] Write-Combining framebuffer (PAT MSR, ~5-10x faster blits)
 - [x] USB keyboard key repeat (timer-based, 500ms delay, 50ms rate)
+- [x] Growable heap (64MB initial, on-demand 64MB chunks, max 2GB, local O(1) coalescing)
+- [x] Wallpaper demo (4 procedural themes, quarter-res, auto-theme extraction)
+- [ ] VSync (VBI-synchronized blits, eliminates tearing)
 - [ ] Web rendering engine (long-term)
 
 ### Phase 9 -- Microkernel Migration (in progress)
@@ -340,7 +345,9 @@ SMP from day one — each core runs its own workload.
 | Compositor | Shade (→ WASM module) | Dwindle tiling, layer-based rendering |
 | Rendering | Layer compositor | Background/Chrome/Text/Cursor, dirty-region compositing |
 | GPU HAL | GOP + Intel Xe (+ VirtIO planned) | Vendor-neutral, same API for all backends |
-| Mouse | xHCI HID boot protocol | Composite device support, multi-device, overlay cursor |
+| Mouse | xHCI HID boot protocol | Composite device, overlay cursor, IRQ-driven polling |
+| USB Polling | APIC timer (100Hz) | IRQ drains xHCI → atomic SPSC buffers, no main-thread HW access |
+| Heap | Growable (64MB→2GB) | On-demand 64MB chunks, local O(1) coalescing |
 | Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
 | WASM (future) | Cranelift JIT | WASM → x86_64, near-native for compositor/browser |
 | Linux apps (future) | MicroVM (VT-x/VT-d) | Mini-Linux kernel, virtio bridges |
@@ -472,17 +479,18 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ### First Boot
 
 ```
-[npk] AI-native Operating System v0.20.22
+[npk] AI-native Operating System v0.22.4
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] Physical memory: 15892 MB free (16 GB detected)
-[npk] Heap: 65536 KB
+[npk] Heap: 64 MB (grows on demand, max 2048 MB)
 [npk] Paging: 64 GB identity-mapped, NX enabled
 [npk] PCI: 8 devices
 [npk] nvme: KINGSTON SNV2S500G (SN: ...), TRIM=yes
 [npk] nvme: 465 GB (976773168 sectors)
 [npk] xhci: USB keyboard (HID boot protocol)
 [npk] xhci: USB mouse (HID boot protocol)
+[npk] APIC timer: 100Hz (base=0xfee00000)
 [npk] Intel Xe GPU: ADL-N (device 46d0), 4K@60Hz HDMI 2.0
 [npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
@@ -496,7 +504,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk]  System ready. Express your intent.
 [npk] ══════════════════════════════════
 
-Florian@npk ~>
+~>
 ```
 
 ---
