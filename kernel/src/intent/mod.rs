@@ -474,14 +474,9 @@ fn tab_complete(input: &str) -> Option<String> {
     kprint!("\n");
 
     // Re-print prompt + current input
-    let user = crate::config::get("name");
     let cwd = get_cwd();
-    let user_str = user.as_deref().unwrap_or("npk");
-    if cwd.is_empty() {
-        kprint!("{}@npk /> {}", user_str, input);
-    } else {
-        kprint!("{}@npk {}> {}", user_str, cwd, input);
-    }
+    let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+    kprint!("{}> {}", path, input);
 
     None
 }
@@ -508,18 +503,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
     loop {
         {
-            let user = crate::config::get("name");
             let cwd = get_cwd();
-            let user_str = user.as_deref().unwrap_or("npk");
-            let prompt_len = if cwd.is_empty() {
-                let p = alloc::format!("{}@npk /> ", user_str);
-                kprint!("{}", p);
-                p.len()
-            } else {
-                let p = alloc::format!("{}@npk {}> ", user_str, cwd);
-                kprint!("{}", p);
-                p.len()
-            };
+            let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+            let p = alloc::format!("{}> ", path);
+            kprint!("{}", p);
+            let prompt_len = p.len();
             // Update prompt length + reset cursor for new input line
             if crate::shade::is_active() {
                 crate::shade::terminal::set_prompt_len(prompt_len);
