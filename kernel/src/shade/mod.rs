@@ -173,10 +173,11 @@ fn render_frame_layered() {
             let mut damage = render::DamageTracker::new(info.width, info.height);
             damage.mark_all();
             damage.flush(fb);
+        }
 
-            if crate::xhci::mouse_available() {
-                comp.mouse.redraw_overlay(shadow, info);
-            }
+        // Cursor overlay: lock-free (reads atomic position, draws to MMIO)
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -193,10 +194,10 @@ fn render_frame_legacy() {
             let mut damage = render::DamageTracker::new(info.width, info.height);
             damage.mark_all();
             damage.flush(fb);
+        }
 
-            if crate::xhci::mouse_available() {
-                comp.mouse.redraw_overlay(shadow, info);
-            }
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -221,9 +222,9 @@ fn render_damaged_layered() {
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
-            if crate::xhci::mouse_available() {
-                comp.mouse.redraw_overlay(shadow, info);
-            }
+        }
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -238,9 +239,9 @@ fn render_damaged_legacy() {
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
-            if crate::xhci::mouse_available() {
-                comp.mouse.redraw_overlay(shadow, info);
-            }
+        }
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -409,10 +410,10 @@ pub fn render_input_line() {
                     }
                 }
             }
-            // Redraw cursor overlay after blit (blit overwrites MMIO)
-            if crate::xhci::mouse_available() {
-                comp.mouse.redraw_overlay(shadow, &info);
-            }
+        }
+        // Redraw cursor overlay after blit (lock-free, reads atomic position)
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
