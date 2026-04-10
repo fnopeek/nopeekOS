@@ -302,6 +302,82 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     unsafe { pic_eoi(1); }
 }
 
+/// APIC timer handler — fires on hardware without PIT (NUC, UEFI-only).
+/// Same function as PIT timer: tick counter + USB event drain.
+extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::xhci::poll_events_irq();
+    // APIC EOI: write 0 to End-of-Interrupt register
+    let apic_base = APIC_BASE.load(Ordering::Relaxed);
+    if apic_base != 0 {
+        unsafe { core::ptr::write_volatile((apic_base + 0xB0) as *mut u32, 0); }
+    }
+}
+
+/// APIC base address (from MSR 0x1B).
+static APIC_BASE: AtomicU64 = AtomicU64::new(0);
+const APIC_TIMER_VECTOR: u8 = 48;
+
+/// Initialize Local APIC timer (for hardware without PIT).
+/// Call after init() — detects if PIT is working, sets up APIC timer if not.
+pub fn init_apic_timer() {
+    // Check if PIT timer is already working (TICKS > 0 after a short delay)
+    let t0 = TICKS.load(Ordering::Relaxed);
+    // Wait ~50ms using TSC
+    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    let wait_cycles = freq / 20; // 50ms
+    let start = rdtsc();
+    while rdtsc() - start < wait_cycles {
+        core::hint::spin_loop();
+    }
+    if TICKS.load(Ordering::Relaxed) > t0 {
+        return; // PIT works — no APIC timer needed
+    }
+
+    // Read APIC base from MSR 0x1B
+    let (lo, hi): (u32, u32);
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
+    let apic_base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
+    APIC_BASE.store(apic_base, Ordering::Relaxed);
+
+    // Map APIC page (identity-mapped, uncacheable)
+    let _ = crate::paging::map_page(apic_base, apic_base,
+        crate::paging::PageFlags::PRESENT | crate::paging::PageFlags::WRITABLE | crate::paging::PageFlags::NO_CACHE);
+
+    unsafe {
+        let base = apic_base as *mut u8;
+
+        // Install APIC timer handler in IDT
+        IDT[APIC_TIMER_VECTOR as usize].set_handler(apic_timer_handler as *const () as u64);
+
+        // Enable APIC: set Spurious Interrupt Vector Register (offset 0xF0)
+        // Bit 8 = APIC enable, bits 0-7 = spurious vector (use 0xFF)
+        let svr = core::ptr::read_volatile(base.add(0xF0) as *const u32);
+        core::ptr::write_volatile(base.add(0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
+
+        // Set timer divide = 16 (offset 0x3E0, value 0x03)
+        core::ptr::write_volatile(base.add(0x3E0) as *mut u32, 0x03);
+
+        // Calibrate: measure APIC ticks per 10ms using TSC
+        core::ptr::write_volatile(base.add(0x380) as *mut u32, 0xFFFF_FFFF); // max initial count
+        let tsc_start = rdtsc();
+        let tsc_10ms = freq / 100;
+        while rdtsc() - tsc_start < tsc_10ms { core::hint::spin_loop(); }
+        let elapsed = 0xFFFF_FFFFu32 - core::ptr::read_volatile(base.add(0x390) as *const u32);
+
+        // Set timer: periodic mode, vector APIC_TIMER_VECTOR
+        // LVT Timer Register (offset 0x320): bit 17 = periodic, bits 0-7 = vector
+        core::ptr::write_volatile(base.add(0x320) as *mut u32,
+            (1 << 17) | APIC_TIMER_VECTOR as u32);
+
+        // Set initial count (ticks per 10ms = 100Hz)
+        core::ptr::write_volatile(base.add(0x380) as *mut u32, elapsed);
+
+        kprintln!("[npk] APIC timer: {}Hz (base={:#x}, ticks/10ms={})",
+            TARGET_FREQ, apic_base, elapsed);
+    }
+}
+
 fn halt_loop() -> ! {
     loop {
         unsafe { core::arch::asm!("cli; hlt"); }
