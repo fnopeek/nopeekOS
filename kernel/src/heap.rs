@@ -158,9 +158,8 @@ impl Heap {
 
             // Add new chunk as free block (coalesces locally with neighbors)
             self.insert_free_block(start, size);
-
-            kprintln!("[npk] Heap: grew +{} MB (total {} MB)",
-                size / (1024 * 1024), self.total_size / (1024 * 1024));
+            // NOTE: no kprintln here — we're inside GlobalAlloc::alloc,
+            // and kprintln can allocate (capture_bytes → String::push_str) → deadlock.
             true
         } else {
             false
