@@ -130,15 +130,24 @@ fn render_frame_layered() {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
-        // Copy BG layer → shadow as clean background
+        // Copy BG layer → shadow as clean background (33MB at 4K)
+        // Poll USB events during copy to prevent xHCI endpoint stall.
         if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-            let size = info.pitch as usize * info.height as usize;
-            unsafe { core::ptr::copy_nonoverlapping(bg_buf, shadow, size); }
+            let pitch = info.pitch as usize;
+            for y in 0..info.height as usize {
+                let off = y * pitch;
+                unsafe { core::ptr::copy_nonoverlapping(bg_buf.add(off), shadow.add(off), pitch); }
+                if y & 0xFF == 0 { crate::xhci::poll_events(); }
+            }
         }
 
-        // Render chrome + text directly to shadow (proven approach)
+        // Render chrome + text directly to shadow
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            // BG layer already copied — skip background redraw in comp.render
+            comp.aurora_drawn = true;
             comp.render(shadow, info);
+
+            crate::xhci::poll_events();
 
             let mut damage = render::DamageTracker::new(info.width, info.height);
             damage.mark_all();
@@ -182,12 +191,12 @@ pub fn render_damaged() {
 }
 
 fn render_damaged_layered() {
-    // Use BG layer for background restore, then legacy render_damaged for chrome+text
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            crate::xhci::poll_events();
             let regions = comp.render_damaged(shadow, info);
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
