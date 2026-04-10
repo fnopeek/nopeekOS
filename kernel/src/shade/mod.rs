@@ -401,14 +401,9 @@ pub fn poll_render() {
         render_frame();
     }
 
-    // Poll mouse events (batch: update state for all, render only last)
-    if let Some(evt) = crate::xhci::poll_mouse() {
-        let mut last = evt;
-        while let Some(next) = crate::xhci::poll_mouse() {
-            with_compositor(|comp| comp.handle_mouse(&last));
-            last = next;
-        }
-        handle_mouse(&last);
+    // Process each mouse event with clean cursor restore + redraw
+    while let Some(evt) = crate::xhci::poll_mouse() {
+        handle_mouse(&evt);
     }
 
     if !terminal::is_dirty() { return; }
