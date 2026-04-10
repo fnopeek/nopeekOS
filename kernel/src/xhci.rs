@@ -223,7 +223,12 @@ fn push_mouse(evt: MouseEvent) {
 /// Poll for a key from the USB keyboard. Called from keyboard.rs.
 pub fn poll_keyboard() -> Option<u8> {
     if !AVAILABLE.load(Ordering::Relaxed) { return None; }
-    // Timer IRQ drains hardware — we only read software buffer
+    // Fallback: if KEY_BUF is empty, drain hardware directly.
+    // Normally the timer IRQ fills KEY_BUF, but during early boot
+    // (setup, login) or if interrupts are delayed, this ensures input works.
+    if KEY_HEAD.load(Ordering::Relaxed) == KEY_TAIL.load(Ordering::Relaxed) {
+        poll_events();
+    }
 
     // Check key buffer first (newly pressed keys)
     let head = KEY_HEAD.load(Ordering::Acquire);
@@ -264,7 +269,6 @@ static MOUSE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Poll for a mouse event from USB mouse.
 pub fn poll_mouse() -> Option<MouseEvent> {
     if !MOUSE_AVAILABLE.load(Ordering::Relaxed) { return None; }
-    // Timer IRQ drains hardware — we only read software buffer
 
     let head = MOUSE_HEAD.load(Ordering::Acquire);
     let tail = MOUSE_TAIL.load(Ordering::Relaxed);
