@@ -292,7 +292,8 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
 
 extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    // No lock acquisition — deadlock-free
+    // Drain USB events from interrupt context (try_lock, never blocks)
+    crate::xhci::poll_events_irq();
     unsafe { pic_eoi(0); }
 }
 

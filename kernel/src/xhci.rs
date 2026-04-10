@@ -248,10 +248,7 @@ pub fn poll_keyboard() -> Option<u8> {
             // Initial delay 500ms, then repeat every 50ms
             if held_ms >= 500 && since_last >= 50 {
                 state.repeat_last = now;
-                let is_de = match crate::config::get("keyboard") {
-                    Some(ref s) if s == "us" => false,
-                    _ => true,
-                };
+                let is_de = IS_DE_LAYOUT.load(Ordering::Relaxed);
                 let ch = hid_to_char(state.repeat_key, state.repeat_shift, state.repeat_altgr, is_de);
                 if ch != 0 {
                     return Some(ch);
@@ -1560,16 +1557,40 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
     ring_doorbell(state, state.slot_id as u32, state.intr_ep_dci as u32);
 }
 
+/// IRQ-safe: try to drain USB events. Called from timer interrupt (100Hz).
+/// Uses try_lock — skips if main thread holds the lock (no deadlock).
+pub fn poll_events_irq() {
+    if let Some(mut lock) = STATE.try_lock() {
+        if let Some(ref mut state) = *lock {
+            drain_events(state);
+        }
+    }
+}
+
 /// Drain pending xHCI events. Call frequently during long operations
 /// to prevent event ring overflow (which stalls the controller).
+/// Cached keyboard layout (avoids config::get allocation in IRQ context).
+static IS_DE_LAYOUT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Call after config is loaded to cache keyboard layout.
+pub fn cache_keyboard_layout() {
+    let is_de = match crate::config::get("keyboard") {
+        Some(ref s) if s == "us" => false,
+        _ => true,
+    };
+    IS_DE_LAYOUT.store(is_de, Ordering::Relaxed);
+}
+
 pub fn poll_events() {
     let mut lock = STATE.lock();
     let state = match lock.as_mut() {
         Some(s) => s,
         None => return,
     };
+    drain_events(state);
+}
 
-    // Check event ring for completions (drain all pending)
+fn drain_events(state: &mut XhciState) {
     for _ in 0..NUM_EVT_TRBS {
         let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { break; }
@@ -1609,7 +1630,6 @@ pub fn poll_events() {
                         state.mouse_error_count = 0;
                         let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
                         if portsc & PORTSC_CCS == 0 {
-                            crate::kprintln!("[npk] xhci: mouse disconnected");
                             state.has_mouse = false;
                             MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
                             continue;
@@ -1636,7 +1656,6 @@ pub fn poll_events() {
                     if state.error_count >= 3 {
                         let portsc = r32(state.oper, portsc_off(state.port_num));
                         if portsc & PORTSC_CCS == 0 {
-                            crate::kprintln!("[npk] xhci: device disconnected");
                             AVAILABLE.store(false, Ordering::Relaxed);
                             return;
                         }
@@ -1660,11 +1679,8 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
     crate::keyboard::set_shift(shift);
     crate::keyboard::set_ctrl(ctrl);
 
-    // Determine layout
-    let is_de = match crate::config::get("keyboard") {
-        Some(ref s) if s == "us" => false,
-        _ => true, // default de_CH
-    };
+    // Use cached layout (IRQ-safe, no allocation)
+    let is_de = IS_DE_LAYOUT.load(Ordering::Relaxed);
 
     // Find the first non-zero key in the current report for repeat tracking
     let first_key = keys.iter().find(|&&k| k != 0 && k != 1).copied().unwrap_or(0);

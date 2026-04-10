@@ -314,6 +314,7 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     // Load system config (after identity — config is encrypted at rest)
     config::load();
+    xhci::cache_keyboard_layout();
 
     // Bootstrap WASM modules (after identity — so they are encrypted at rest)
     intent::bootstrap_wasm();
