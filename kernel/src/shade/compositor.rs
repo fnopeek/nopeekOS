@@ -669,8 +669,9 @@ impl Compositor {
             }
         }
 
-        // Mouse moved — cursor needs redraw (handled by caller)
-        evt.dx != 0 || evt.dy != 0
+        // Mouse moved — cursor overlay is handled separately by redraw_overlay,
+        // no scene redraw needed for simple movement.
+        false
     }
 
     /// Resize focused window by adjusting its tiling split delta.
