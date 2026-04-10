@@ -543,7 +543,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
         // Re-render shade compositor to show new output (async — worker core)
         if crate::shade::is_active() {
-            crate::shade::render_frame_async();
+            crate::shade::render_frame();
         }
     }
 }
@@ -803,7 +803,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             if crate::shade::is_active() {
                 // Shade mode: clear terminal buffer and re-render focused window
                 crate::shade::terminal::clear();
-                crate::shade::render_frame_async();
+                crate::shade::render_frame();
             } else {
                 crate::framebuffer::clear();
             }
