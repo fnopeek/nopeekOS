@@ -1295,14 +1295,15 @@ fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
 
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let ir0 = state.rt + 0x20;
+        w64(ir0, 0x18, erdp | (1 << 3));
+
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
 
         if trb_type == EVT_CMD_COMPLETE {
             let slot = (control >> 24) & 0xFF;
@@ -1436,14 +1437,15 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
         let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { core::hint::spin_loop(); continue; }
 
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let ir0 = state.rt + 0x20;
+        w64(ir0, 0x18, erdp | (1 << 3));
+
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
 
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
@@ -1631,18 +1633,16 @@ pub fn poll_events() {
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
 
-        // ERDP fix: write the index of the event we JUST processed (not the next one)
-        // xHCI spec 4.9.4: ERDP points to the last processed event TRB
-        let processed_idx = state.evt_dequeue;
+        // ERDP: point to the event we JUST processed (xHCI spec 5.5.2.3.3)
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let ir0 = state.rt + 0x20;
+        w64(ir0, 0x18, erdp | (1 << 3));
 
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
 
         if trb_type == EVT_TRANSFER {
             let trb_addr = param;
