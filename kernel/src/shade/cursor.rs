@@ -211,34 +211,39 @@ impl MouseState {
 /// No COMPOSITOR lock needed. Called from Core 0 after update_atomic().
 pub fn redraw_overlay_lockfree() {
     if !take_dirty() { return; }
-
     crate::framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
-        let mmio = info.addr as *mut u8;
-        let pitch = info.pitch as usize;
-        let sw = info.width as i32;
-        let sh = info.height as i32;
-
-        // Restore old cursor area from shadow → MMIO
-        static DRAWN_X: AtomicI32 = AtomicI32::new(0);
-        static DRAWN_Y: AtomicI32 = AtomicI32::new(0);
-        static DRAWN: AtomicBool = AtomicBool::new(false);
-
-        if DRAWN.load(Ordering::Relaxed) {
-            let dx = DRAWN_X.load(Ordering::Relaxed);
-            let dy = DRAWN_Y.load(Ordering::Relaxed);
-            blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
-        }
-
-        // Draw cursor at current atomic position
-        let (cx, cy) = atomic_pos();
-        draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
-
-        DRAWN_X.store(cx, Ordering::Relaxed);
-        DRAWN_Y.store(cy, Ordering::Relaxed);
-        DRAWN.store(true, Ordering::Relaxed);
+        redraw_overlay_lockfree_inner(fb);
     });
+}
+
+/// Inner lock-free cursor draw — called when we already have fb access.
+/// Used from render paths after scene blit (which overwrites MMIO cursor area).
+pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
+    let info = fb.info();
+    let (shadow, _) = fb.shadow_ptr();
+    let mmio = info.addr as *mut u8;
+    let pitch = info.pitch as usize;
+    let sw = info.width as i32;
+    let sh = info.height as i32;
+
+    static DRAWN_X: AtomicI32 = AtomicI32::new(0);
+    static DRAWN_Y: AtomicI32 = AtomicI32::new(0);
+    static DRAWN: AtomicBool = AtomicBool::new(false);
+
+    // Restore old cursor area from shadow → MMIO
+    if DRAWN.load(Ordering::Relaxed) {
+        let dx = DRAWN_X.load(Ordering::Relaxed);
+        let dy = DRAWN_Y.load(Ordering::Relaxed);
+        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
+    }
+
+    // Draw cursor at current atomic position
+    let (cx, cy) = atomic_pos();
+    draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
+
+    DRAWN_X.store(cx, Ordering::Relaxed);
+    DRAWN_Y.store(cy, Ordering::Relaxed);
+    DRAWN.store(true, Ordering::Relaxed);
 }
 
 /// Draw cursor bitmap directly to MMIO framebuffer at given position.
