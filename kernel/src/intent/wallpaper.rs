@@ -226,9 +226,9 @@ fn generate_demo_wallpapers() {
         return;
     }
 
-    // Native resolution — no scaling artifacts, growable heap handles 32MB
-    let w: u32 = fb_w;
-    let h: u32 = fb_h;
+    // Quarter resolution — gradients scale perfectly, 2MB vs 32MB per image
+    let w: u32 = fb_w / 4;
+    let h: u32 = fb_h / 4;
 
     ensure_wallpaper_dir();
     let wp_dir = wallpaper_dir();
@@ -245,24 +245,31 @@ fn generate_demo_wallpapers() {
     let themes = [
         DemoTheme {
             name: "ocean",
-            tl: (5, 10, 45),      // deep navy
-            tr: (15, 80, 140),     // ocean blue
-            bl: (8, 40, 80),       // dark teal
-            br: (30, 180, 200),    // bright cyan
+            tl: (2, 3, 15),        // near black
+            tr: (5, 30, 60),       // dark navy
+            bl: (10, 60, 120),     // deep ocean
+            br: (60, 200, 240),    // bright cyan
         },
         DemoTheme {
             name: "sunset",
-            tl: (60, 10, 50),      // dark purple
-            tr: (220, 80, 40),     // orange
-            bl: (30, 5, 40),       // deep violet
-            br: (240, 140, 80),    // warm amber
+            tl: (10, 2, 15),       // near black
+            tr: (80, 10, 30),      // dark crimson
+            bl: (160, 40, 20),     // deep orange
+            br: (255, 160, 80),    // bright amber
         },
         DemoTheme {
             name: "forest",
-            tl: (5, 25, 10),       // dark forest
-            tr: (20, 100, 40),     // emerald
-            bl: (10, 15, 8),       // deep earth
-            br: (60, 180, 80),     // bright green
+            tl: (2, 8, 3),         // near black
+            tr: (8, 40, 15),       // dark forest
+            bl: (15, 80, 30),      // deep emerald
+            br: (80, 220, 100),    // bright green
+        },
+        DemoTheme {
+            name: "aurora",
+            tl: (5, 2, 18),        // near black
+            tr: (30, 10, 80),      // dark indigo
+            bl: (80, 20, 160),     // deep purple
+            br: (180, 100, 255),   // bright violet
         },
     ];
 
@@ -298,13 +305,13 @@ fn generate_demo_wallpapers() {
                 let g = (g as i32 + wave * 6 / 256).clamp(0, 255) as u8;
                 let b = (b as i32 + wave * 10 / 256).clamp(0, 255) as u8;
 
-                // Add subtle radial glow in center
-                let dx = (fx as i32 - 500).abs();
-                let dy = (fy as i32 - 450).abs();
-                let glow = 120i32.saturating_sub((dx * dx + dy * dy) / 800).max(0);
-                let r = (r as i32 + glow / 6).min(255) as u8;
-                let g = (g as i32 + glow / 5).min(255) as u8;
-                let b = (b as i32 + glow / 4).min(255) as u8;
+                // Radial glow toward bottom-right (reinforces dark→bright gradient)
+                let dx = (fx as i32 - 700).abs();
+                let dy = (fy as i32 - 650).abs();
+                let glow = 180i32.saturating_sub((dx * dx + dy * dy) / 600).max(0);
+                let r = (r as i32 + glow / 5).min(255) as u8;
+                let g = (g as i32 + glow / 4).min(255) as u8;
+                let b = (b as i32 + glow / 3).min(255) as u8;
 
                 let off = 8 + ((y * w + x) as usize) * 4;
                 data[off]     = b; // B
@@ -325,7 +332,7 @@ fn generate_demo_wallpapers() {
         }
     }
 
-    kprintln!("[npk] 3 demo wallpapers generated.");
+    kprintln!("[npk] {} demo wallpapers generated.", themes.len());
     if crate::shade::is_active() {
         crate::shade::render_frame();
     }
