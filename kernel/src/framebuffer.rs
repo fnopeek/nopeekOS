@@ -265,7 +265,7 @@ fn blit_all(console: &FbConsole) {
             core::ptr::copy_nonoverlapping(
                 console.shadow.add(off), fb.add(off), len);
         }
-        crate::xhci::poll_events();
+        // Timer IRQ handles USB polling
         row += rows;
     }
 }
@@ -336,11 +336,7 @@ pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
                 len,
             );
         }
-        // Drain USB events every 256 rows to prevent xHCI event ring overflow
-        row_count += 1;
-        if row_count & 0xFF == 0 {
-            crate::xhci::poll_events();
-        }
+        // Timer IRQ handles USB polling — no manual drain needed during blit
     }
 }
 
