@@ -1555,13 +1555,49 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
     ring_doorbell(state, state.slot_id as u32, state.intr_ep_dci as u32);
 }
 
-/// IRQ-safe: try to drain USB events. Called from timer interrupt (100Hz).
-/// Uses try_lock — skips if main thread holds the lock (no deadlock).
+/// IRQ-safe: drain MOUSE events only. Called from timer interrupt (100Hz).
+/// Keyboard events stay in the event ring for the main thread to process
+/// (process_hid_report is not safe from IRQ context).
 pub fn poll_events_irq() {
     if let Some(mut lock) = STATE.try_lock() {
         if let Some(ref mut state) = *lock {
-            drain_events(state);
+            drain_mouse_events(state);
         }
+    }
+}
+
+/// IRQ-safe drain: only process mouse transfer completions.
+/// Stops at first non-mouse event (keyboard events left for main thread).
+fn drain_mouse_events(state: &mut XhciState) {
+    if !state.has_mouse { return; }
+    for _ in 0..NUM_EVT_TRBS {
+        let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
+        if control & TRB_CYCLE != state.evt_cycle { break; }
+
+        let trb_type = control & (0x3F << 10);
+        if trb_type != EVT_TRANSFER { break; } // not a transfer event — stop
+
+        let trb_addr = param;
+        let is_mouse = trb_addr >= state.mouse_intr_ring
+            && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
+        if !is_mouse { break; } // keyboard event — leave for main thread
+
+        let cc = (status >> 24) & 0xFF;
+
+        // Advance dequeue + ERDP
+        state.evt_dequeue += 1;
+        if state.evt_dequeue >= NUM_EVT_TRBS {
+            state.evt_dequeue = 0;
+            state.evt_cycle ^= 1;
+        }
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let ir0 = state.rt + 0x20;
+        w64(ir0, 0x18, erdp | (1 << 3));
+
+        if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
+            process_mouse_report(state);
+        }
+        schedule_mouse_interrupt_transfer(state);
     }
 }
 
