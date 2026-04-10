@@ -126,7 +126,7 @@ const DESC_CONFIG:        u16 = 0x0200;
 
 const NUM_CMD_TRBS: usize = 32;
 const NUM_EVT_TRBS: usize = 1024;
-const NUM_TR_TRBS:  usize = 64;
+const NUM_TR_TRBS:  usize = 256;
 
 // HID usage code to ASCII table (boot protocol, US layout base)
 static HID_TO_ASCII: [u8; 57] = [
