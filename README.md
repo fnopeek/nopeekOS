@@ -45,7 +45,9 @@ npk> uptime                          # Time since boot
 npk> history                         # Last 32 commands (arrow up/down to recall)
 npk> lock                            # Lock system (clear keys)
 npk> passwd                          # Change passphrase
+npk> top                               # System monitor (WASM app: cores, memory, scheduler)
 npk> install wallpaper                 # Install WASM module (signed, verified)
+npk> install top                       # Install system monitor app
 npk> uninstall wallpaper               # Remove module
 npk> modules                          # List installed modules
 npk> wallpaper demo                    # Generate 3 demo wallpapers + auto-theme
@@ -295,11 +297,15 @@ SMP is live -- all cores boot and are ready for work.
 - [x] INIT-SIPI-SIPI AP startup (sequential boot, atomic readiness counter)
 - [x] Per-AP infrastructure (64KB stack, shared GDT/IDT/CR3, LAPIC enabled)
 - [x] Tested on Intel N100 NUC (4 cores) and QEMU (configurable via -smp)
-- [ ] Work-stealing scheduler (per-core task queues, lock-free deque)
-- [ ] MONITOR/MWAIT wakeup (hardware sleep, nanosecond wake on memory write)
+- [x] Work-stealing scheduler (Chase-Lev SPMC deque, 256 tasks/core)
+- [x] MONITOR/MWAIT wakeup (hardware C0 sleep, nanosecond wake on memory write)
+- [x] spawn()/spawn_local() API with priority system (Critical/Interactive/Normal/Background)
+- [x] Global WORK_AVAILABLE signal (cache-line aligned, all APs monitor)
+- [x] Lock-free mouse cursor (AtomicI32 x/y, no COMPOSITOR lock for movement)
+- [x] npk_sys_info() host function (system stats for WASM apps)
+- [ ] Double-buffer framebuffer (lock-free swap for async rendering)
 - [ ] Per-core APIC timer
 - [ ] Thermal load balancing (migrate tasks when core >80% busy)
-- [ ] C-states for idle cores (HLT -> deeper states)
 
 **Layer Compositor**
 - [ ] Layer-based rendering (Background / Chrome / Text / Cursor layers)
@@ -358,7 +364,8 @@ SMP is live -- all cores boot and are ready for work.
 | Linux apps (future) | MicroVM (VT-x/VT-d) | Mini-Linux kernel, virtio bridges |
 | Modules | npk install | ECDSA P-384 signed, SHA-384 verified, OTA from GitHub |
 | SMP | N cores (no limit) | Core 0 = Kernel/IRQ, Cores 1..N = work-stealing pool |
-| SMP Wakeup | MONITOR/MWAIT (planned) | Nanosecond wake on memory write, no IPI overhead |
+| SMP Scheduler | Chase-Lev SPMC deque | Owner push/pop, thieves steal, MONITOR/MWAIT sleep |
+| SMP Wakeup | MONITOR/MWAIT | Nanosecond wake on memory write, HLT fallback |
 | Power | C-states per core | Idle cores sleep, wake on demand, thermal balancing |
 
 ---
@@ -517,7 +524,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.23.2
+[npk] AI-native Operating System v0.26.1
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] TSC: 691 MHz
