@@ -111,6 +111,8 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     // Framebuffer init (needs memory + paging for MMIO mapping)
     framebuffer::init_from_multiboot2(multiboot_info);
+    // Set [npk] tag color immediately (consistent throughout boot)
+    framebuffer::set_npk_color(0x007B50A0); // nopeekOS purple
 
     // ACPI init: parse Multiboot2 RSDP tag (UEFI), then find FADT for power-off
     acpi::parse_multiboot2_rsdp(multiboot_info);
@@ -178,9 +180,8 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     csprng::init();
 
-    // Select random color scheme for boot messages and login screen
+    // Select random color scheme for login screen aurora background
     gui::background::init();
-    framebuffer::set_npk_color(gui::background::accent_color());
 
     // Debug shell disabled — enable when needed:
     // if netdev::is_available() { shell::start_debug_listener(); }
