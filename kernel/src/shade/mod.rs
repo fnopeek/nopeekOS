@@ -66,6 +66,9 @@ pub fn init() {
     let scale = font::scale_for(screen_w);
     let comp = Compositor::new(screen_w, screen_h, scale);
 
+    // Initialize lock-free cursor position (centered, screen bounds for clamping)
+    cursor::init_atomic(screen_w, screen_h);
+
     *COMPOSITOR.lock() = Some(comp);
     ACTIVE.store(true, Ordering::Release);
 
@@ -497,22 +500,29 @@ fn poll_render_legacy() {
 
 /// Process a mouse event: update compositor state, redraw cursor overlay.
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
-    let needs_scene_redraw = with_compositor(|comp| comp.handle_mouse(evt)).unwrap_or(false);
+    // FAST PATH (lock-free, ~2ns): update atomic position + redraw cursor overlay.
+    // Core 0 never blocks here, even if Core 1 holds COMPOSITOR lock for rendering.
+    cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
+    cursor::redraw_overlay_lockfree();
 
-    framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
+    // SLOW PATH (only on button events): take COMPOSITOR lock for focus/drag.
+    // Clicks are rare (~1% of mouse events), so contention is minimal.
+    if cursor::has_button_event() {
+        // Sync atomic state into compositor's MouseState so click logic works
+        let (x, y) = cursor::atomic_pos();
+        let (btn, prev) = cursor::atomic_buttons();
+        let needs_scene_redraw = with_compositor(|comp| {
+            comp.mouse.x = x;
+            comp.mouse.y = y;
+            comp.mouse.buttons = btn;
+            comp.mouse.prev_buttons = prev;
+            comp.handle_mouse_buttons()
+        }).unwrap_or(false);
 
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            if needs_scene_redraw {
-                let regions = comp.render_damaged(shadow, info);
-                for (x, y, w, h) in regions {
-                    framebuffer::blit_rect(fb, x, y, w, h);
-                }
-            }
-            comp.mouse.redraw_overlay(shadow, info);
+        if needs_scene_redraw {
+            render_frame_async();
         }
-    });
+    }
 }
 
 /// Stop shade compositor.

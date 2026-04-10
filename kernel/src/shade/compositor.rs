@@ -673,6 +673,95 @@ impl Compositor {
         false
     }
 
+    /// Handle only button events (click, drag, release). Position already in self.mouse.
+    /// Called from lock-free input path — only when buttons change.
+    pub fn handle_mouse_buttons(&mut self) -> bool {
+        let mx = self.mouse.x;
+        let my = self.mouse.y;
+        let mod_held = crate::keyboard::is_super_held();
+
+        // Active drag
+        if let Some(mut drag) = self.drag {
+            let held = match drag.mode {
+                DragMode::Swap => self.mouse.left_held(),
+                DragMode::Resize => self.mouse.right_held(),
+            };
+            if held {
+                match drag.mode {
+                    DragMode::Swap => {
+                        if let Some(target) = self.window_at(mx, my) {
+                            if target != drag.window && drag.last_target != Some(target) {
+                                self.swap_window_order(drag.window, target);
+                                drag.last_target = Some(target);
+                                self.drag = Some(drag);
+                                self.focus_window(drag.window);
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    DragMode::Resize => {
+                        let dx = mx - drag.start_mx;
+                        let dy = my - drag.start_my;
+                        if let Some(win) = self.windows.iter_mut().find(|w| w.id == drag.window) {
+                            win.resize_w = drag.start_rw + dx;
+                            win.resize_h = drag.start_rh + dy;
+                        }
+                        self.retile();
+                        self.needs_full_redraw = true;
+                        return true;
+                    }
+                }
+            } else {
+                self.drag = None;
+                return drag.mode == DragMode::Resize;
+            }
+        }
+
+        // Mod+LMB: start swap-drag
+        if mod_held && self.mouse.left_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                self.drag = Some(DragState {
+                    window: wid, mode: DragMode::Swap,
+                    last_target: None,
+                    start_mx: 0, start_my: 0, start_rw: 0, start_rh: 0,
+                });
+                self.focus_window(wid);
+                return true;
+            }
+        }
+
+        // Mod+RMB: start resize-drag
+        if mod_held && self.mouse.right_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                let (rw, rh) = self.windows.iter()
+                    .find(|w| w.id == wid)
+                    .map(|w| (w.resize_w, w.resize_h))
+                    .unwrap_or((0, 0));
+                self.drag = Some(DragState {
+                    window: wid, mode: DragMode::Resize,
+                    last_target: None,
+                    start_mx: mx, start_my: my,
+                    start_rw: rw, start_rh: rh,
+                });
+                self.focus_window(wid);
+                return true;
+            }
+        }
+
+        // Regular LMB click: focus window
+        if self.mouse.left_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                if self.focused != Some(wid) {
+                    self.focus_window(wid);
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     /// Resize focused window by adjusting its tiling split delta.
     pub fn resize_focused(&mut self, dx: i32, dy: i32) {
         if let Some(fid) = self.focused {

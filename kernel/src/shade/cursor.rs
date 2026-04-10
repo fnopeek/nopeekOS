@@ -5,10 +5,89 @@
 //! - Cursor is drawn directly on the MMIO framebuffer
 //! - On move: restore old area from shadow→MMIO, draw cursor at new pos on MMIO
 //! - No save/restore array needed, no ghost cursors possible
+//!
+//! Lock-free fast path: mouse position is stored as atomics.
+//! Core 0 (input) writes position in ~2ns without any lock.
+//! Cursor overlay reads atomics and draws directly to MMIO.
+
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicBool, Ordering};
 
 /// Cursor dimensions.
 const CURSOR_W: u32 = 12;
 const CURSOR_H: u32 = 19;
+
+// ── Lock-free mouse position (written by Core 0, read by anyone) ──
+
+static ATOMIC_X: AtomicI32 = AtomicI32::new(0);
+static ATOMIC_Y: AtomicI32 = AtomicI32::new(0);
+static ATOMIC_BUTTONS: AtomicU8 = AtomicU8::new(0);
+static ATOMIC_PREV_BUTTONS: AtomicU8 = AtomicU8::new(0);
+static MOUSE_DIRTY: AtomicBool = AtomicBool::new(false);
+static SCREEN_W: AtomicI32 = AtomicI32::new(1920);
+static SCREEN_H: AtomicI32 = AtomicI32::new(1080);
+
+/// Update mouse position atomically. NO LOCK needed.
+/// Called from Core 0 input polling — takes ~2 nanoseconds.
+pub fn update_atomic(dx: i8, dy: i8, buttons: u8) {
+    let sw = SCREEN_W.load(Ordering::Relaxed);
+    let sh = SCREEN_H.load(Ordering::Relaxed);
+    let old_btn = ATOMIC_BUTTONS.load(Ordering::Relaxed);
+
+    let x = (ATOMIC_X.load(Ordering::Relaxed) + dx as i32).clamp(0, sw - 1);
+    let y = (ATOMIC_Y.load(Ordering::Relaxed) + dy as i32).clamp(0, sh - 1);
+
+    ATOMIC_X.store(x, Ordering::Relaxed);
+    ATOMIC_Y.store(y, Ordering::Relaxed);
+    ATOMIC_PREV_BUTTONS.store(old_btn, Ordering::Relaxed);
+    ATOMIC_BUTTONS.store(buttons, Ordering::Release);
+    MOUSE_DIRTY.store(true, Ordering::Release);
+}
+
+/// Read current atomic mouse position
+pub fn atomic_pos() -> (i32, i32) {
+    (ATOMIC_X.load(Ordering::Relaxed), ATOMIC_Y.load(Ordering::Relaxed))
+}
+
+/// Read atomic buttons (current, previous)
+pub fn atomic_buttons() -> (u8, u8) {
+    (ATOMIC_BUTTONS.load(Ordering::Acquire), ATOMIC_PREV_BUTTONS.load(Ordering::Relaxed))
+}
+
+/// Check and clear dirty flag
+pub fn take_dirty() -> bool {
+    MOUSE_DIRTY.swap(false, Ordering::Acquire)
+}
+
+/// Was left button just clicked? (lock-free)
+pub fn atomic_left_clicked() -> bool {
+    let (cur, prev) = atomic_buttons();
+    (cur & 1) != 0 && (prev & 1) == 0
+}
+
+/// Was right button just clicked? (lock-free)
+pub fn atomic_right_clicked() -> bool {
+    let (cur, prev) = atomic_buttons();
+    (cur & 2) != 0 && (prev & 2) == 0
+}
+
+/// Any button action that needs compositor attention? (click, release)
+pub fn has_button_event() -> bool {
+    let (cur, prev) = atomic_buttons();
+    cur != prev
+}
+
+/// Set screen dimensions for atomic clamping
+pub fn set_screen_size(w: u32, h: u32) {
+    SCREEN_W.store(w as i32, Ordering::Relaxed);
+    SCREEN_H.store(h as i32, Ordering::Relaxed);
+}
+
+/// Initialize atomic position (centered)
+pub fn init_atomic(screen_w: u32, screen_h: u32) {
+    set_screen_size(screen_w, screen_h);
+    ATOMIC_X.store((screen_w / 2) as i32, Ordering::Relaxed);
+    ATOMIC_Y.store((screen_h / 2) as i32, Ordering::Relaxed);
+}
 
 /// Arrow cursor bitmap (1 = white outline, 2 = black fill, 0 = transparent).
 static CURSOR_BITMAP: [u8; (CURSOR_W * CURSOR_H) as usize] = [
@@ -125,6 +204,58 @@ impl MouseState {
         self.drawn_x = self.x;
         self.drawn_y = self.y;
         self.drawn = true;
+    }
+}
+
+/// Lock-free cursor redraw: reads atomic position, draws directly to MMIO.
+/// No COMPOSITOR lock needed. Called from Core 0 after update_atomic().
+pub fn redraw_overlay_lockfree() {
+    if !take_dirty() { return; }
+
+    crate::framebuffer::with_fb(|fb| {
+        let info = fb.info();
+        let (shadow, _) = fb.shadow_ptr();
+        let mmio = info.addr as *mut u8;
+        let pitch = info.pitch as usize;
+        let sw = info.width as i32;
+        let sh = info.height as i32;
+
+        // Restore old cursor area from shadow → MMIO
+        static DRAWN_X: AtomicI32 = AtomicI32::new(0);
+        static DRAWN_Y: AtomicI32 = AtomicI32::new(0);
+        static DRAWN: AtomicBool = AtomicBool::new(false);
+
+        if DRAWN.load(Ordering::Relaxed) {
+            let dx = DRAWN_X.load(Ordering::Relaxed);
+            let dy = DRAWN_Y.load(Ordering::Relaxed);
+            blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
+        }
+
+        // Draw cursor at current atomic position
+        let (cx, cy) = atomic_pos();
+        draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
+
+        DRAWN_X.store(cx, Ordering::Relaxed);
+        DRAWN_Y.store(cy, Ordering::Relaxed);
+        DRAWN.store(true, Ordering::Relaxed);
+    });
+}
+
+/// Draw cursor bitmap directly to MMIO framebuffer at given position.
+fn draw_cursor_on_mmio(mmio: *mut u8, pitch: usize, sw: i32, sh: i32, x: i32, y: i32) {
+    for row in 0..CURSOR_H as i32 {
+        let py = y + row;
+        if py < 0 || py >= sh { continue; }
+        for col in 0..CURSOR_W as i32 {
+            let px = x + col;
+            if px < 0 || px >= sw { continue; }
+            let bmp = CURSOR_BITMAP[(row as usize) * CURSOR_W as usize + col as usize];
+            if bmp == 0 { continue; }
+            let off = py as usize * pitch + px as usize * 4;
+            let color: u32 = if bmp == 1 { 0x00FFFFFF } else { 0x00000000 };
+            // SAFETY: writing to MMIO framebuffer within bounds
+            unsafe { core::ptr::write_volatile(mmio.add(off) as *mut u32, color); }
+        }
     }
 }
 
