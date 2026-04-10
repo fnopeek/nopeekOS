@@ -226,9 +226,9 @@ fn generate_demo_wallpapers() {
         return;
     }
 
-    // Small resolution — fast to generate + store, scaled up when set
-    let w: u32 = 320;
-    let h: u32 = 180;
+    // Native resolution — no scaling artifacts, growable heap handles 32MB
+    let w: u32 = fb_w;
+    let h: u32 = fb_h;
 
     ensure_wallpaper_dir();
     let wp_dir = wallpaper_dir();
@@ -280,6 +280,8 @@ fn generate_demo_wallpapers() {
 
         // Generate bilinear gradient with subtle noise
         for y in 0..h {
+            // Keep USB input alive during generation (~32M pixels)
+            if y % 256 == 0 { crate::xhci::poll_events(); }
             let fy = y as u32 * 1000 / h;
             for x in 0..w {
                 let fx = x as u32 * 1000 / w;
