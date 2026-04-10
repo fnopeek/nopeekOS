@@ -174,6 +174,7 @@ run_qemu() {
         -serial stdio \
         -display none \
         -m 128M \
+        -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
@@ -197,6 +198,7 @@ run_qemu_gui() {
         -cdrom "$ISO_FILE" \
         -serial stdio \
         -m 128M \
+        -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
@@ -221,6 +223,7 @@ run_debug() {
         -serial stdio \
         -display none \
         -m 128M \
+        -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
