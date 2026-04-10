@@ -78,6 +78,28 @@ pub fn power_off() {
     }
 }
 
+/// Find an ACPI table by 4-byte signature (e.g., b"APIC" for MADT).
+/// Returns the physical address of the table header.
+pub fn find_table(sig: &[u8; 4]) -> Option<usize> {
+    let rsdp = find_rsdp()?;
+    let revision = unsafe { *rsdp.add(15) };
+
+    if revision >= 2 {
+        let xsdt_addr = unsafe { *(rsdp.add(24) as *const u64) } as usize;
+        ensure_mapped(xsdt_addr, 4096);
+        find_table_in_xsdt(xsdt_addr, sig)
+    } else {
+        let rsdt_addr = unsafe { *(rsdp.add(16) as *const u32) } as usize;
+        ensure_mapped(rsdt_addr, 4096);
+        find_table_in_rsdt(rsdt_addr, sig)
+    }
+}
+
+/// Public wrapper: ensure a physical address range is identity-mapped.
+pub fn ensure_mapped_pub(addr: usize, size: usize) {
+    ensure_mapped(addr, size);
+}
+
 /// Ensure a memory region is identity-mapped so we can read ACPI tables.
 fn ensure_mapped(addr: usize, size: usize) {
     let start = addr & !0xFFF;

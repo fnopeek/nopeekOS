@@ -53,6 +53,7 @@ mod acpi;
 mod update_key;
 mod theme;
 mod layers;
+mod smp;
 
 use alloc::string::String;
 use spin::Mutex;
@@ -134,6 +135,9 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // APIC timer: if PIT doesn't work (NUC/UEFI-only), use Local APIC for 100Hz ticks.
     // Must be after xhci::init so poll_events_irq can drain USB events.
     interrupts::init_apic_timer();
+
+    // SMP: discover cores via ACPI MADT, boot Application Processors
+    smp::init();
 
     kprintln!("[npk] Probing block devices...");
     if virtio_blk::init() {

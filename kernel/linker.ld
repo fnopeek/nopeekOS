@@ -29,6 +29,11 @@ SECTIONS {
         __bss_end = .;
     }
 
+    /* SMP trampoline: copied to 0x8000 at runtime for AP boot */
+    .smp_trampoline ALIGN(16) : {
+        KEEP(*(.smp_trampoline))
+    }
+
     /* Stack: 256KB, 16-byte aligned (Debug-Mode braucht mehr wegen fehlender Optimierung) */
     . = ALIGN(16);
     __stack_bottom = .;
