@@ -211,13 +211,18 @@ static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, d
 static mut MOUSE_HEAD: usize = 0;
 static mut MOUSE_TAIL: usize = 0;
 
+static MOUSE_TOTAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn push_mouse(evt: MouseEvent) {
+    let total = MOUSE_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     // SAFETY: single-core, no concurrent access
     unsafe {
         let next = (MOUSE_HEAD + 1) % MOUSE_BUF_SIZE;
         if next != MOUSE_TAIL {
             MOUSE_BUF[MOUSE_HEAD] = evt;
             MOUSE_HEAD = next;
+        } else if total % 100 == 0 {
+            crate::kprintln!("[npk] xhci: mouse buf full (total={})", total);
         }
     }
 }
@@ -1605,16 +1610,19 @@ pub fn poll_events() {
                     // Missed Service Error — harmless, GUI was blocking CPU.
                     // Just reschedule without counting as error.
                 } else {
+                    crate::kprintln!("[npk] xhci: mouse CC={} (err #{})",
+                        cc, state.mouse_error_count + 1);
                     state.mouse_error_count += 1;
                     if state.mouse_error_count >= 10 {
                         state.mouse_error_count = 0;
                         let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
                         if portsc & PORTSC_CCS == 0 {
-                            crate::kprintln!("[npk] xhci: mouse disconnected");
+                            crate::kprintln!("[npk] xhci: mouse disconnected (PORTSC CCS=0)");
                             state.has_mouse = false;
                             MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
                             continue;
                         }
+                        crate::kprintln!("[npk] xhci: mouse 10 errors but still connected, continuing");
                     }
                 }
                 schedule_mouse_interrupt_transfer(state);
