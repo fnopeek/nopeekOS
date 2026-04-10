@@ -58,8 +58,6 @@ use alloc::string::String;
 use spin::Mutex;
 use core::panic::PanicInfo;
 
-/// GPU boot log held in RAM until master key is available after login.
-static GPU_BOOT_LOG: Mutex<Option<String>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
@@ -266,10 +264,6 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
         if framebuffer::is_available() {
             // Activate native GPU + 4K before login screen
             if gpu::native_detected() {
-                // Capture serial output during GPU init for diagnostics
-                let _ = serial::stop_capture();
-                serial::start_capture();
-
                 match gpu::activate_native() {
                     Ok(fb) => {
                         framebuffer::init_from_gpu();
@@ -277,21 +271,9 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
                     }
                     Err(e) => kprintln!("[npk] GPU: native init failed: {:?}, using GOP", e),
                 }
-
-                // Keep GPU log in RAM — save to npkFS after login (needs master key)
-                let gpu_log = serial::stop_capture();
-                serial::start_capture();
-                GPU_BOOT_LOG.lock().replace(gpu_log);
             }
             // Graphical login screen
             let _master_key = gui::login::run(&salt);
-
-            // Now we have the master key — save GPU boot log if present
-            if let Some(log) = GPU_BOOT_LOG.lock().take() {
-                let name = gpu::next_log_name();
-                let _ = npkfs::store(&name, log.as_bytes(), [0u8; 32]);
-                kprintln!("[npk] GPU log saved: {}", name);
-            }
 
             // Auto-upgrade to highest refresh rate if monitor is now connected
             if gpu::is_native() && gpu::current_hz() < 60 {
