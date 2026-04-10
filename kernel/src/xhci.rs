@@ -298,8 +298,8 @@ pub fn mouse_debug() {
     let avail = MOUSE_AVAILABLE.load(Ordering::Relaxed);
     crate::kprintln!("[npk] mouse: avail={} total={} sched={} compl={} pending={}",
         avail, total, sched, compl, sched.saturating_sub(compl));
-    let lock = STATE.lock();
-    if let Some(ref state) = *lock {
+    let mut lock = STATE.lock();
+    if let Some(ref mut state) = *lock {
         crate::kprintln!("[npk] mouse: has={} enq={} cycle={} errors={}",
             state.has_mouse, state.mouse_intr_enqueue, state.mouse_intr_cycle, state.mouse_error_count);
         // Check event ring state
@@ -307,6 +307,22 @@ pub fn mouse_debug() {
         let evt_cycle_match = (control & TRB_CYCLE) == state.evt_cycle;
         crate::kprintln!("[npk] mouse: evt_deq={} evt_cycle={} next_trb_match={}",
             state.evt_dequeue, state.evt_cycle, evt_cycle_match);
+
+        // Check port status
+        let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
+        crate::kprintln!("[npk] mouse: PORTSC={:#010x} CCS={} PED={} PR={}",
+            portsc, (portsc >> 0) & 1, (portsc >> 1) & 1, (portsc >> 4) & 1);
+
+        // Check pending TRB at current enqueue-1 (the one waiting)
+        let pending_idx = if state.mouse_intr_enqueue == 0 { NUM_TR_TRBS - 2 } else { state.mouse_intr_enqueue - 1 };
+        let (trb_param, trb_status, trb_ctrl) = read_trb(state.mouse_intr_ring, pending_idx);
+        crate::kprintln!("[npk] mouse: pending TRB[{}] param={:#x} status={} ctrl={:#x} cycle={}",
+            pending_idx, trb_param, trb_status, trb_ctrl, trb_ctrl & 1);
+
+        // Re-ring doorbell to see if controller wakes up
+        crate::kprintln!("[npk] mouse: re-ringing doorbell (slot={} ep={})",
+            state.mouse_slot_id, state.mouse_intr_ep_dci);
+        ring_doorbell(state, state.mouse_slot_id as u32, state.mouse_intr_ep_dci as u32);
     }
 }
 
