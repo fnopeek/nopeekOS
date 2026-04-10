@@ -722,6 +722,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 net::intent_netstat();
             }
         }
+        "mouse" => {
+            crate::xhci::mouse_debug();
+        }
         "http" | "curl" | "wget" => {
             if require_cap(vault, &session, Rights::EXECUTE, "http") {
                 http::intent_http(args);
