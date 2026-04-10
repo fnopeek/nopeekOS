@@ -9,6 +9,7 @@
 core::arch::global_asm!(include_str!("trampoline.s"), options(att_syntax));
 
 pub mod per_core;
+pub mod scheduler;
 
 use crate::kprintln;
 use alloc::vec::Vec;
@@ -80,6 +81,15 @@ pub fn init() {
     }
 
     kprintln!("[npk] smp: {}/{} APs online", online, ap_ids.len());
+
+    if online > 0 {
+        // Initialize scheduler and wake APs into their work loops
+        scheduler::init(online as usize);
+        per_core::start_scheduler();
+
+        let wakeup = if per_core::has_mwait() { "MONITOR/MWAIT" } else { "HLT" };
+        kprintln!("[npk] smp: scheduler ready (work-stealing, {})", wakeup);
+    }
 }
 
 /// Read Local APIC base from MSR 0x1B
