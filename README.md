@@ -26,7 +26,7 @@ Everything else is generated at runtime.
 ## What It Can Do Today
 
 ```
-npk> status                          # Full system overview
+npk> status                          # Full system overview (cores, RAM, disk, net)
 npk> store config version=1.0        # Store object (BLAKE3-hashed, encrypted at rest)
 npk> fetch config                    # Retrieve + decrypt + integrity check
 npk> list                            # All objects with hashes
@@ -59,7 +59,7 @@ npk> disk read 0                     # Raw sector hex dump
 ```
 
 Every operation is capability-gated. No ambient authority. No root. No sudo.
-All data encrypted at rest. Passphrase-based identity — no users, no accounts.
+All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
 
 ---
 
@@ -86,11 +86,11 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  │  npk_input_poll — Keyboard/mouse events                  │
  │  npk_fs_* — npkFS access    │  npk_net_* — Network      │
  ├──────────────────────────────────────────────────────────┤
- │  Layer Compositor            │  Network Stack            │
- │  Background / Chrome / Text  │  Ethernet, ARP, IPv4      │
- │  / Cursor layers             │  ICMP, UDP, TCP           │
- │  Dirty-region compositing    │  DNS, DHCP, NTP           │
- │  Shadow → MMIO blit          │  HTTP/HTTPS client        │
+ │  SMP Scheduler              │  Layer Compositor          │
+ │  Work-stealing pool         │  Background / Chrome /     │
+ │  Core 0 = Kernel/IRQ        │  Text / Cursor layers      │
+ │  Cores 1..N = Workers       │  Dirty-region compositing  │
+ │  MONITOR/MWAIT wakeup       │  Shadow → MMIO blit        │
  ├──────────────────────────────────────────────────────────┤
  │  npkFS                      │  Crypto Engine             │
  │  COW B-tree, BLAKE3 hashing │  ChaCha20-Poly1305 AEAD   │
@@ -103,13 +103,13 @@ All data encrypted at rest. Passphrase-based identity — no users, no accounts.
  │  Passphrase identity        │  SHA-384 verified           │
  │  Temporal scoping, audit    │  npk install (modules)     │
  ├──────────────────────────────────────────────────────────┤
- │  GPU HAL                    │  Drivers                   │
- │  GOP (QEMU/VBox/any HW)    │  virtio-blk, virtio-net    │
- │  Intel Xe (4K@60Hz HDMI)   │  NVMe, I226-V, xHCI USB   │
- │  VirtIO GPU (planned)       │  PS/2 keyboard             │
+ │  GPU HAL                    │  Network Stack             │
+ │  GOP (QEMU/VBox/any HW)    │  Ethernet, ARP, IPv4       │
+ │  Intel Xe (4K@60Hz HDMI)   │  ICMP, UDP, TCP            │
+ │  VirtIO GPU (planned)       │  DNS, DHCP, NTP, HTTP/S   │
  ├──────────────────────────────────────────────────────────┤
  │  Kernel Core (Rust, no_std, Microkernel)                 │
- │  64GB Paging, Heap, IDT+PIC, ACPI, Framebuffer, Serial  │
+ │  SMP (N cores), 64GB Paging, Heap, IDT, ACPI, Serial    │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, Multiboot2                            │
  └──────────────────────────────────────────────────────────┘
@@ -216,7 +216,7 @@ Every execution is a sandboxed WASM module:
 ### Phase 6 -- Crypto & Identity
 
 - [x] ChaCha20-Poly1305 AEAD encryption (RFC 8439)
-- [x] Passphrase-based identity (BLAKE3-KDF → 256-bit master key)
+- [x] Passphrase-based identity (BLAKE3-KDF -> 256-bit master key)
 - [x] Encryption at rest (all npkFS objects encrypted by default)
 - [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
 - [x] TLS 1.3 (RFC 8446, X25519 + ECDH P-384 key exchange)
@@ -246,7 +246,7 @@ Every execution is a sandboxed WASM module:
 - [x] IRQ-driven USB polling (APIC timer drains xHCI, atomic SPSC ring buffers)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 
-### Phase 8 -- Human View (in progress)
+### Phase 8 -- Human View
 
 - [x] GUI login screen (Hyprlock-inspired: large clock, centered dots, pill input)
 - [x] Spleen bitmap font system (8x16, 16x32, 32x64, BSD 2-Clause licensed)
@@ -275,7 +275,7 @@ Every execution is a sandboxed WASM module:
 - [x] Text cursor navigation (Left/Right/Home/End, insert at position, history recall)
 - [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
 - [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@60Hz HDMI 2.0 via DDI-B, DPLL1, combo PHY)
-- [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI→HDMI mode switch, auto-fallback to 4K@30)
+- [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI->HDMI mode switch, auto-fallback to 4K@30)
 - [x] Write-Combining framebuffer (PAT MSR, ~5-10x faster blits)
 - [x] USB keyboard key repeat (timer-based, 500ms delay, 50ms rate)
 - [x] Growable heap (64MB initial, on-demand 64MB chunks, max 2GB, local O(1) coalescing)
@@ -283,28 +283,33 @@ Every execution is a sandboxed WASM module:
 - [ ] VSync (VBI-synchronized blits, eliminates tearing)
 - [ ] Web rendering engine (long-term)
 
-### Phase 9 -- Microkernel Migration (in progress)
+### Phase 9 -- SMP & Microkernel Migration (in progress)
 
 The kernel is transitioning from monolithic to microkernel. Everything that isn't
 hardware abstraction moves to WASM modules, communicating via host functions.
-SMP from day one — each core runs its own workload.
+SMP is live -- all cores boot and are ready for work.
+
+**SMP (Symmetric Multiprocessing)**
+- [x] ACPI MADT parsing (Type 0 Local APIC + Type 9 x2APIC, no core limit)
+- [x] AP trampoline (16-bit real -> 32-bit protected -> 64-bit long mode, copied to 0x8000)
+- [x] INIT-SIPI-SIPI AP startup (sequential boot, atomic readiness counter)
+- [x] Per-AP infrastructure (64KB stack, shared GDT/IDT/CR3, LAPIC enabled)
+- [x] Tested on Intel N100 NUC (4 cores) and QEMU (configurable via -smp)
+- [ ] Work-stealing scheduler (per-core task queues, lock-free deque)
+- [ ] MONITOR/MWAIT wakeup (hardware sleep, nanosecond wake on memory write)
+- [ ] Per-core APIC timer
+- [ ] Thermal load balancing (migrate tasks when core >80% busy)
+- [ ] C-states for idle cores (HLT -> deeper states)
 
 **Layer Compositor**
 - [ ] Layer-based rendering (Background / Chrome / Text / Cursor layers)
 - [ ] Dirty-region compositing (only changed layers re-composited)
 - [ ] Host-function API (`npk_layer_*`, `npk_fb_info`, `npk_input_poll`)
 
-**SMP (Symmetric Multiprocessing)**
-- [ ] AP startup (APIC/SIPI, per-core stacks, GDT/IDT)
-- [ ] Per-core scheduler (WASM modules pinned to cores)
-- [ ] Core assignment: Core 0 = Kernel/IRQ, Core 1 = Compositor, Core 2 = Loop/Apps, Core 3 = Background/MicroVM
-- [ ] Power states (C-states per core, throttle idle cores, wake on demand)
-- [ ] APIC timer per core (replaces shared PIC/TSC tick)
-
 **WASM Migration**
-- [ ] Shade compositor → WASM module (`shade.wasm`)
-- [ ] Intent loop → WASM module (`loop.wasm`)
-- [ ] Cranelift JIT (WASM → x86_64, near-native performance)
+- [ ] Shade compositor -> WASM module (`shade.wasm`)
+- [ ] Intent loop -> WASM module (`loop.wasm`)
+- [ ] Cranelift JIT (WASM -> x86_64, near-native performance)
 
 **GPU + Virtualization**
 - [ ] GPU HAL: VirtIO GPU backend (QEMU/VBox support)
@@ -334,7 +339,7 @@ SMP from day one — each core runs its own workload.
 | AEAD | ChaCha20-Poly1305 (RFC 8439) | Encryption at rest + TLS |
 | AES-GCM | aes-gcm crate (RustCrypto) | TLS 1.3 (128/256-bit) |
 | TLS | 1.3 (RFC 8446) | X25519 + P-384, 3 cipher suites |
-| Identity | Passphrase → BLAKE3-KDF | No users, no accounts |
+| Identity | Passphrase -> BLAKE3-KDF | No users, no accounts |
 | Key Exchange | X25519 + ECDH P-384 | Ephemeral, per-connection |
 | Certificates | X.509, 4 embedded root CAs | ISRG X1, DigiCert G2, AAA, GTS R1 |
 | Crypto libs | sha2, hmac, hkdf, aes-gcm, p384 | RustCrypto, audited, no_std |
@@ -342,18 +347,19 @@ SMP from day one — each core runs its own workload.
 | OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@60Hz HDMI 2.0, GGTT+WC aperture |
-| Compositor | Shade (→ WASM module) | Dwindle tiling, layer-based rendering |
+| Compositor | Shade (-> WASM module) | Dwindle tiling, layer-based rendering |
 | Rendering | Layer compositor | Background/Chrome/Text/Cursor, dirty-region compositing |
 | GPU HAL | GOP + Intel Xe (+ VirtIO planned) | Vendor-neutral, same API for all backends |
 | Mouse | xHCI HID boot protocol | Composite device, overlay cursor, IRQ-driven polling |
-| USB Polling | APIC timer (100Hz) | IRQ drains xHCI → atomic SPSC buffers, no main-thread HW access |
-| Heap | Growable (64MB→2GB) | On-demand 64MB chunks, local O(1) coalescing |
+| USB Polling | APIC timer (100Hz) | IRQ drains xHCI -> atomic SPSC buffers, no main-thread HW access |
+| Heap | Growable (64MB->2GB) | On-demand 64MB chunks, local O(1) coalescing |
 | Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
-| WASM (future) | Cranelift JIT | WASM → x86_64, near-native for compositor/browser |
+| WASM (future) | Cranelift JIT | WASM -> x86_64, near-native for compositor/browser |
 | Linux apps (future) | MicroVM (VT-x/VT-d) | Mini-Linux kernel, virtio bridges |
 | Modules | npk install | ECDSA P-384 signed, SHA-384 verified, OTA from GitHub |
-| SMP | 4 cores (N100) | Core 0 = Kernel, 1 = Compositor, 2 = Apps, 3 = Background |
-| Power | C-states per core | Idle cores sleep, wake on IPI, throttle when underused |
+| SMP | N cores (no limit) | Core 0 = Kernel/IRQ, Cores 1..N = work-stealing pool |
+| SMP Wakeup | MONITOR/MWAIT (planned) | Nanosecond wake on memory write, no IPI overhead |
+| Power | C-states per core | Idle cores sleep, wake on demand, thermal balancing |
 
 ---
 
@@ -373,88 +379,120 @@ SMP from day one — each core runs its own workload.
 
 ```
 nopeekOS/
-├── build.sh                     # Build + QEMU/VirtualBox launch
+├── build.sh                          # Build + QEMU/VirtualBox launch
 ├── kernel/
 │   ├── Cargo.toml
-│   ├── linker.ld                # Memory layout (256KB stack, heap)
+│   ├── linker.ld                     # Memory layout (256KB stack, heap)
 │   └── src/
-│       ├── boot.s               # Multiboot2 -> Long Mode
-│       ├── main.rs              # Kernel entry, boot sequence
-│       ├── serial.rs            # Serial console + port I/O
-│       ├── csprng.rs            # ChaCha20 CSPRNG (RFC 7539)
-│       ├── capability.rs        # Capability Vault
-│       ├── audit.rs             # Audit log ring buffer
-│       ├── memory.rs            # Physical frame allocator
-│       ├── heap.rs              # Linked-list heap allocator
-│       ├── paging.rs            # Virtual memory manager
-│       ├── interrupts.rs        # IDT + PIC
-│       ├── pci.rs               # PCI bus scanner
-│       ├── virtio_blk.rs        # Block device driver (TRIM)
-│       ├── virtio_net.rs        # Network device driver
-│       ├── nvme.rs              # NVMe driver (PCIe, TRIM)
-│       ├── blkdev.rs            # Block device abstraction
-│       ├── xhci.rs              # xHCI USB driver (keyboard + mouse)
-│       ├── keyboard.rs          # PS/2 keyboard (extended scancodes)
-│       ├── framebuffer.rs       # UEFI GOP framebuffer
-│       ├── acpi.rs              # ACPI power management
-│       ├── npkfs/               # Filesystem
-│       │   ├── mod.rs           # Public API: mkfs, mount, store, fetch
-│       │   ├── types.rs         # On-disk format definitions
-│       │   ├── cache.rs         # LRU block cache
-│       │   ├── bitmap.rs        # Block allocation + TRIM
-│       │   ├── superblock.rs    # Rotating superblock ring
-│       │   ├── journal.rs       # WAL for crash recovery
-│       │   └── btree.rs        # COW B-tree
-│       ├── net/                 # Network stack
-│       │   ├── mod.rs           # Packet dispatch + poll
-│       │   ├── eth.rs           # Ethernet
-│       │   ├── arp.rs           # ARP
-│       │   ├── ipv4.rs          # IPv4
-│       │   ├── icmp.rs          # ICMP (ping, traceroute)
-│       │   ├── udp.rs           # UDP
-│       │   ├── tcp.rs           # TCP
-│       │   ├── dns.rs           # DNS resolver
-│       │   ├── dhcp.rs          # DHCP client
-│       │   └── ntp.rs           # NTP time sync
-│       ├── crypto.rs            # ChaCha20-Poly1305 AEAD, KDF
-│       ├── tls/                 # TLS 1.3 stack
-│       │   ├── mod.rs           # TLS handshake + record layer
-│       │   ├── sha256.rs        # SHA-256 + SHA-384 (via sha2 crate)
-│       │   ├── hmac.rs          # HMAC/HKDF SHA-256 + SHA-384
-│       │   ├── x25519.rs        # Curve25519 ECDH
-│       │   ├── rsa.rs           # RSA PKCS#1 v1.5 verify
-│       │   ├── asn1.rs          # ASN.1 DER parser
-│       │   ├── x509.rs          # X.509 certificate parser
-│       │   └── certstore.rs     # Root CAs + chain validation
-│       ├── wasm.rs              # WASM runtime + host functions
-│       ├── intent/              # Intent loop
-│       │   ├── mod.rs           # Loop, dispatch, CWD, tab-completion
-│       │   ├── fs.rs            # store, fetch, cat, grep, head, wc, hexdump, list
-│       │   ├── net.rs           # ping, traceroute, netstat, resolve
-│       │   ├── http.rs          # HTTP/HTTPS GET (TLS 1.3)
-│       │   ├── wasm.rs          # run, add, multiply, bootstrap
-│       │   ├── system.rs        # status, time, help, caps, audit, halt, config, uname, reboot
-│       │   ├── update.rs        # OTA update (ECDSA P-384, SHA-256, ESP FAT32)
-│       │   └── auth.rs          # lock, passwd
-│       ├── gpu/                 # GPU subsystem
-│       │   ├── mod.rs           # Backend abstraction (GOP/Intel Xe)
-│       │   ├── intel_xe.rs      # Intel Xe Gen 12.2 display driver
-│       │   └── gop.rs           # UEFI GOP fallback
-│       ├── layers.rs            # Layer compositor (BG/Chrome/Text buffers)
-│       ├── shade/               # Shade compositor (tiling WM)
-│       │   ├── mod.rs           # Init, render, mouse handling, animation tick
-│       │   ├── compositor.rs    # Window management, dwindle tiling, swap animation
-│       │   ├── window.rs        # Window metadata (position, state, resize delta)
-│       │   ├── bar.rs           # Shadebar (workspaces, clock, title)
-│       │   ├── terminal.rs      # Per-window terminal buffers, cursor, input state
-│       │   ├── input.rs         # Keybindings (Mod+key → ShadeAction)
-│       │   └── cursor.rs        # Software mouse cursor (MMIO overlay)
-│       ├── gui/                 # GUI subsystem
-│       │   ├── mod.rs           # Login screen, aurora background
-│       │   └── font.rs          # Spleen bitmap fonts (8x16, 16x32, 32x64)
-│       ├── vga.rs               # VGA text mode
-│       ├── config.rs            # Runtime configuration
-│       └── gpt.rs               # GPT partition detection
+│       ├── boot.s                    # Multiboot2 -> Long Mode
+│       ├── main.rs                   # Kernel entry, boot sequence, module re-exports
+│       ├── interrupts.rs             # IDT + PIC + APIC timer
+│       ├── vga.rs                    # VGA text mode (boot banner)
+│       ├── config.rs                 # Runtime configuration
+│       │
+│       ├── drivers/                  # Hardware drivers
+│       │   ├── serial.rs             #   COM1 serial console + kprint macros
+│       │   ├── pci.rs                #   PCI bus scanner
+│       │   ├── nvme.rs               #   NVMe (PCIe, TRIM)
+│       │   ├── virtio_blk.rs         #   virtio block device
+│       │   ├── virtio_net.rs         #   virtio network device
+│       │   ├── intel_nic.rs          #   Intel I226-V Ethernet
+│       │   ├── xhci.rs              #   xHCI USB (keyboard + mouse)
+│       │   ├── keyboard.rs           #   PS/2 keyboard
+│       │   ├── framebuffer.rs        #   UEFI GOP framebuffer
+│       │   ├── rtc.rs                #   Real-time clock
+│       │   ├── blkdev.rs             #   Block device abstraction
+│       │   ├── netdev.rs             #   Network device abstraction
+│       │   └── acpi.rs               #   ACPI (power, MADT, table lookup)
+│       │
+│       ├── mm/                       # Memory management
+│       │   ├── memory.rs             #   Physical frame allocator (bitmap)
+│       │   ├── heap.rs               #   Growable heap (64MB->2GB)
+│       │   └── paging.rs             #   4-level paging, NX, WC
+│       │
+│       ├── security/                 # Security subsystem
+│       │   ├── capability.rs         #   Capability Vault (256-bit tokens)
+│       │   ├── audit.rs              #   Audit log ring buffer
+│       │   └── csprng.rs             #   ChaCha20 CSPRNG
+│       │
+│       ├── crypto/                   # Cryptography engine
+│       │   ├── aead.rs               #   ChaCha20-Poly1305 AEAD, KDF
+│       │   ├── update_key.rs         #   ECDSA P-384 OTA signing key
+│       │   └── tls/                  #   TLS 1.3 stack
+│       │       ├── mod.rs            #     Handshake + record layer
+│       │       ├── sha256.rs         #     SHA-256/384 (via sha2 crate)
+│       │       ├── hmac.rs           #     HMAC/HKDF
+│       │       ├── x25519.rs         #     Curve25519 ECDH
+│       │       ├── rsa.rs            #     RSA PKCS#1 v1.5 verify
+│       │       ├── asn1.rs           #     ASN.1 DER parser
+│       │       ├── x509.rs           #     X.509 certificate parser
+│       │       └── certstore.rs      #     Root CAs + chain validation
+│       │
+│       ├── storage/                  # Storage subsystem
+│       │   ├── fat32.rs              #   FAT32 (ESP access for OTA)
+│       │   ├── gpt.rs                #   GPT partition detection
+│       │   └── npkfs/                #   Content-addressed filesystem
+│       │       ├── mod.rs            #     API: mkfs, mount, store, fetch
+│       │       ├── types.rs          #     On-disk format
+│       │       ├── btree.rs          #     COW B-tree
+│       │       ├── cache.rs          #     LRU block cache
+│       │       ├── bitmap.rs         #     Block allocation + TRIM
+│       │       ├── superblock.rs     #     Rotating superblock ring
+│       │       └── journal.rs        #     WAL for crash recovery
+│       │
+│       ├── smp/                      # Symmetric Multiprocessing
+│       │   ├── mod.rs                #   MADT parsing, SIPI, init
+│       │   ├── trampoline.s          #   AP boot (16->32->64 bit)
+│       │   └── per_core.rs           #   CoreInfo, AP entry
+│       │
+│       ├── net/                      # Network stack
+│       │   ├── mod.rs                #   Packet dispatch + poll
+│       │   ├── eth.rs                #   Ethernet
+│       │   ├── arp.rs                #   ARP
+│       │   ├── ipv4.rs               #   IPv4
+│       │   ├── icmp.rs               #   ICMP (ping, traceroute)
+│       │   ├── udp.rs                #   UDP
+│       │   ├── tcp.rs                #   TCP
+│       │   ├── dns.rs                #   DNS resolver
+│       │   ├── dhcp.rs               #   DHCP client
+│       │   └── ntp.rs                #   NTP time sync
+│       │
+│       ├── gpu/                      # GPU subsystem
+│       │   ├── mod.rs                #   Backend abstraction (GOP/Xe)
+│       │   ├── intel_xe.rs           #   Intel Xe Gen 12.2 display
+│       │   └── gop.rs                #   UEFI GOP fallback
+│       │
+│       ├── gui/                      # GUI subsystem
+│       │   ├── mod.rs                #   Module index
+│       │   ├── login.rs              #   Graphical login screen
+│       │   ├── background.rs         #   Procedural aurora
+│       │   ├── font.rs               #   Spleen bitmap fonts
+│       │   ├── render.rs             #   Rounded rects, gradients
+│       │   ├── theme.rs              #   Color themes
+│       │   └── layers.rs             #   Layer compositor
+│       │
+│       ├── shade/                    # Shade compositor (tiling WM)
+│       │   ├── mod.rs                #   Init, render, mouse, tick
+│       │   ├── compositor.rs         #   Dwindle tiling, swap anim
+│       │   ├── window.rs             #   Window metadata
+│       │   ├── bar.rs                #   Shadebar (workspaces, clock)
+│       │   ├── terminal.rs           #   Per-window terminal buffers
+│       │   ├── input.rs              #   Keybindings
+│       │   └── cursor.rs             #   Software mouse cursor
+│       │
+│       ├── intent/                   # Intent loop
+│       │   ├── mod.rs                #   Dispatch, CWD, tab-completion
+│       │   ├── fs.rs                 #   store, fetch, cat, grep, list
+│       │   ├── net.rs                #   ping, traceroute, resolve
+│       │   ├── http.rs               #   HTTP/HTTPS GET
+│       │   ├── wasm.rs               #   run, bootstrap
+│       │   ├── system.rs             #   status, help, halt, config
+│       │   ├── update.rs             #   OTA update
+│       │   └── auth.rs               #   lock, passwd
+│       │
+│       ├── wasm.rs                   # WASM runtime + host functions
+│       ├── shell.rs                  # npk-shell (remote access)
+│       └── setup.rs                  # First-boot setup wizard
 ```
 
 ---
@@ -469,40 +507,41 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 # or: sudo apt install grub-pc-bin xorriso mtools qemu-system-x86
 
 # Build + Run
-./build.sh qemu          # Serial console in terminal
+./build.sh qemu          # Serial console in terminal (4 cores)
 ./build.sh qemu-gui      # Serial + VGA window
 ./build.sh debug         # With GDB stub on :1234
 ./build.sh build         # Compile only
 ./build.sh release       # Build + sign kernel (ECDSA P-384) + generate manifest
 ```
 
-### First Boot
+### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.22.4
+[npk] AI-native Operating System v0.23.2
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
+[npk] TSC: 691 MHz
 [npk] Physical memory: 15892 MB free (16 GB detected)
+[npk] Kernel footprint: 6340 KB
 [npk] Heap: 64 MB (grows on demand, max 2048 MB)
 [npk] Paging: 64 GB identity-mapped, NX enabled
+[npk] APIC timer: 100Hz (base=0xfee00000)
+[npk] smp: 4 cores detected (BSP + 3 APs)
+[npk] smp: 3/3 APs online
 [npk] PCI: 8 devices
-[npk] nvme: KINGSTON SNV2S500G (SN: ...), TRIM=yes
-[npk] nvme: 465 GB (976773168 sectors)
+[npk] nvme: KINGSTON SNV2S500G, TRIM=yes, 465 GB
 [npk] xhci: USB keyboard (HID boot protocol)
 [npk] xhci: USB mouse (HID boot protocol)
-[npk] APIC timer: 100Hz (base=0xfee00000)
 [npk] Intel Xe GPU: ADL-N (device 46d0), 4K@60Hz HDMI 2.0
 [npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
 [npk] DHCP: configured 192.168.1.100
-[npk] npkfs: mounted (gen=42, 15 objects, 120000 free blocks)
+[npk] npkfs: mounted (gen=42, 15 objects)
 [npk] CSPRNG: ChaCha20 (RDRAND-seeded)
 [npk] WASM runtime: wasmi v1.0 (fuel-metered)
 
-[npk] ══════════════════════════════════
-[npk]  Welcome, Florian.
-[npk]  System ready. Express your intent.
-[npk] ══════════════════════════════════
+[npk] Welcome, Florian.
+[npk] System ready. Express your intent.
 
 ~>
 ```
