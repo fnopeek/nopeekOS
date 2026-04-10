@@ -14,6 +14,7 @@ pub mod terminal;
 pub mod input;
 pub mod cursor;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 use crate::framebuffer::{self};
@@ -28,6 +29,9 @@ pub use bar::ShadeBar;
 
 /// Global compositor instance.
 pub(crate) static COMPOSITOR: Mutex<Option<Compositor>> = Mutex::new(None);
+
+/// Lock-free active flag (avoids COMPOSITOR lock from xHCI poll context).
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Check if layer system is usable (initialized AND matches current framebuffer).
 fn layers_usable() -> bool {
@@ -59,6 +63,7 @@ pub fn init() {
     let comp = Compositor::new(screen_w, screen_h, scale);
 
     *COMPOSITOR.lock() = Some(comp);
+    ACTIVE.store(true, Ordering::Release);
 
     // Enable terminal capture + GUI mode (no window yet — Mod+Enter opens first loop)
     terminal::set_active(true);
@@ -211,9 +216,9 @@ fn render_damaged_legacy() {
     });
 }
 
-/// Check if shade compositor is active.
+/// Check if shade compositor is active (lock-free, safe from any context).
 pub fn is_active() -> bool {
-    COMPOSITOR.lock().is_some()
+    ACTIVE.load(Ordering::Acquire)
 }
 
 /// Process a shade action (called from intent loop).
@@ -487,6 +492,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
 
 /// Stop shade compositor.
 pub fn stop() {
+    ACTIVE.store(false, Ordering::Release);
     terminal::set_active(false);
     framebuffer::set_gui_mode(false);
     *COMPOSITOR.lock() = None;
