@@ -1566,22 +1566,15 @@ pub fn poll_events_irq() {
     }
 }
 
-/// IRQ-safe drain: only process mouse transfer completions.
-/// Stops at first non-mouse event (keyboard events left for main thread).
+/// IRQ-safe drain: process all transfer completions but skip keyboard HID processing.
+/// Mouse events: full processing (push to buffer + reschedule).
+/// Keyboard events: consume + reschedule only (main thread does process_hid_report).
 fn drain_mouse_events(state: &mut XhciState) {
-    if !state.has_mouse { return; }
     for _ in 0..NUM_EVT_TRBS {
         let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { break; }
 
         let trb_type = control & (0x3F << 10);
-        if trb_type != EVT_TRANSFER { break; } // not a transfer event — stop
-
-        let trb_addr = param;
-        let is_mouse = trb_addr >= state.mouse_intr_ring
-            && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
-        if !is_mouse { break; } // keyboard event — leave for main thread
-
         let cc = (status >> 24) & 0xFF;
 
         // Advance dequeue + ERDP
@@ -1594,10 +1587,24 @@ fn drain_mouse_events(state: &mut XhciState) {
         let ir0 = state.rt + 0x20;
         w64(ir0, 0x18, erdp | (1 << 3));
 
-        if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
-            process_mouse_report(state);
+        if trb_type != EVT_TRANSFER { continue; }
+
+        let trb_addr = param;
+        let is_mouse = state.has_mouse
+            && trb_addr >= state.mouse_intr_ring
+            && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
+
+        if is_mouse {
+            // Full mouse processing
+            if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
+                process_mouse_report(state);
+            }
+            schedule_mouse_interrupt_transfer(state);
+        } else {
+            // Keyboard: consume event + reschedule transfer (keep endpoint alive)
+            // Skip process_hid_report — main thread handles key processing
+            schedule_interrupt_transfer(state);
         }
-        schedule_mouse_interrupt_transfer(state);
     }
 }
 
