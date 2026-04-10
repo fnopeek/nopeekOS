@@ -332,7 +332,7 @@ impl Compositor {
             self.aurora_drawn = true;
         }
 
-        // Render windows (back to front), poll USB between windows
+        // Render windows (back to front)
         let border = self.border;
         let rounding = self.rounding;
         let opacity = self.opacity;
@@ -353,7 +353,6 @@ impl Compositor {
                 };
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
                     if win.focused { active_border } else { inactive_border });
-                crate::xhci::poll_events();
             }
         }
 
@@ -391,7 +390,6 @@ impl Compositor {
         // 1. FULL OVERWRITE: background kills all old pixels (fixes ghost text)
         background::draw_background_region(shadow, info,
             win.x, win.y, win.width, win.height);
-        crate::xhci::poll_events();
 
         // 2. Border blend (gradient if theme active + window focused)
         if crate::theme::is_active() && win.focused {
@@ -466,7 +464,6 @@ impl Compositor {
                     };
                     let border_color = if win.focused { active_border } else { inactive_border };
                     Self::render_window(shadow, info, win, border, rounding, opacity, scale, border_color);
-                    crate::xhci::poll_events();
                     regions.push((win.x, win.y, win.width, win.height));
                 }
             }
@@ -672,8 +669,7 @@ impl Compositor {
             }
         }
 
-        // Mouse moved — cursor overlay is handled separately by redraw_overlay,
-        // no scene redraw needed for simple movement.
+        // Cursor overlay handled by redraw_overlay — no scene redraw for movement
         false
     }
 

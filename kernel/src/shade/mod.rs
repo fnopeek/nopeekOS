@@ -373,7 +373,7 @@ pub fn render_input_line() {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
-        if let Some(ref comp) = *COMPOSITOR.lock() {
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
             if let Some(fid) = comp.focused {
                 if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
                     let pad = 6 * comp.scale;
@@ -388,6 +388,10 @@ pub fn render_input_line() {
                         framebuffer::blit_rect(fb, x, y, w, h);
                     }
                 }
+            }
+            // Redraw cursor overlay after blit (blit overwrites MMIO)
+            if crate::xhci::mouse_available() {
+                comp.mouse.redraw_overlay(shadow, &info);
             }
         }
     });
