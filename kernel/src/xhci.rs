@@ -1555,21 +1555,20 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
     ring_doorbell(state, state.slot_id as u32, state.intr_ep_dci as u32);
 }
 
-/// IRQ-safe: drain MOUSE events only. Called from timer interrupt (100Hz).
-/// Keyboard events stay in the event ring for the main thread to process
-/// (process_hid_report is not safe from IRQ context).
+/// IRQ-safe: drain ALL xHCI events. Called from timer interrupt (100Hz).
+/// This is the ONLY code that talks to xHCI hardware — main thread
+/// only reads from software ring buffers (KEY_BUF / MOUSE_BUF).
 pub fn poll_events_irq() {
     if let Some(mut lock) = STATE.try_lock() {
         if let Some(ref mut state) = *lock {
-            drain_mouse_events(state);
+            drain_all_events(state);
         }
     }
 }
 
-/// IRQ-safe drain: process all transfer completions but skip keyboard HID processing.
-/// Mouse events: full processing (push to buffer + reschedule).
-/// Keyboard events: consume + reschedule only (main thread does process_hid_report).
-fn drain_mouse_events(state: &mut XhciState) {
+/// Drain all pending xHCI events from the event ring.
+/// Called exclusively from timer IRQ — no competing consumers.
+fn drain_all_events(state: &mut XhciState) {
     for _ in 0..NUM_EVT_TRBS {
         let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { break; }
@@ -1595,14 +1594,21 @@ fn drain_mouse_events(state: &mut XhciState) {
             && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
 
         if is_mouse {
-            // Full mouse processing
             if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
                 process_mouse_report(state);
             }
             schedule_mouse_interrupt_transfer(state);
         } else {
-            // Keyboard: consume event + reschedule transfer (keep endpoint alive)
-            // Skip process_hid_report — main thread handles key processing
+            if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
+                let buf = state.data_buf + 2048;
+                let modifiers = r8(buf, 0);
+                let mut keys = [0u8; 6];
+                for i in 0..6 {
+                    keys[i] = r8(buf, (2 + i) as u32);
+                }
+                process_hid_report(modifiers, &keys, state);
+                state.prev_keys = keys;
+            }
             schedule_interrupt_transfer(state);
         }
     }
