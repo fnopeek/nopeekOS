@@ -352,16 +352,11 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             framebuffer::with_fb(|fb| {
                                 let info = fb.info();
                                 let (shadow, _) = fb.shadow_ptr();
-                                // Show personalized greeting
-                                if let Some(n) = &name {
-                                    draw_greeting_name(shadow, info, &layout, n);
-                                }
                                 draw_status(shadow, info, &layout, &welcome, 0x00C8C8C8);
-                                // Blit greeting + status area
                                 framebuffer::blit_rect(fb,
-                                    0, layout.greeting_y,
+                                    0, layout.status_y,
                                     layout.screen_w,
-                                    layout.status_y + 24 * layout.scale - layout.greeting_y);
+                                    24 * layout.scale);
                             });
 
                             // Quick flash of welcome message (0.5s)
