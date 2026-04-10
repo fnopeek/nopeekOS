@@ -525,7 +525,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         }).unwrap_or(false);
 
         if needs_scene_redraw {
-            render_frame_async();
+            render_frame();
         }
     }
 }
