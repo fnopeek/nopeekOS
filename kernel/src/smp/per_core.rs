@@ -110,27 +110,25 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
 
         // No work — sleep efficiently
         if use_mwait {
-            // MONITOR/MWAIT: watch the wake_flag, sleep until it changes
-            let flag_ptr = super::scheduler::wake_flag_ptr(cid);
-            super::scheduler::clear_wake(cid);
+            // MONITOR/MWAIT: all APs watch the GLOBAL WORK_AVAILABLE flag.
+            // When BSP (or any core) spawns work, it writes 1 → hardware wakes us.
+            let flag_ptr = super::scheduler::wake_flag_ptr();
+            super::scheduler::clear_wake();
 
-            // SAFETY: MONITOR sets up address monitoring, MWAIT sleeps.
-            // Both are safe unprivileged instructions on ring 0.
+            // SAFETY: MONITOR/MWAIT are safe ring-0 instructions.
             unsafe {
-                // MONITOR: watch the address in RAX
                 core::arch::asm!(
                     "monitor",
                     in("rax") flag_ptr,
-                    in("ecx") 0u32,  // extensions (0 = default)
-                    in("edx") 0u32,  // hints (0 = default)
+                    in("ecx") 0u32,
+                    in("edx") 0u32,
                 );
-                // Only MWAIT if still no work (avoid missed-wakeup race)
+                // Re-check after MONITOR (avoid missed-wakeup race)
                 if super::scheduler::next_task(cid).is_none() {
-                    // MWAIT: sleep until monitored write or interrupt
                     core::arch::asm!(
                         "mwait",
-                        in("eax") 0u32,  // hints: C0 (lightest sleep)
-                        in("ecx") 0u32,  // extensions (0 = default)
+                        in("eax") 0u32,  // C0 — lightest sleep, fastest wake
+                        in("ecx") 0u32,
                     );
                 }
             }
