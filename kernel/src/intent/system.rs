@@ -14,9 +14,13 @@ pub fn intent_status(vault: &Vault) {
     kprintln!("  ──────────────────────────────────────────");
     kprintln!("  Uptime:        {}m {}s", uptime / 60, uptime % 60);
     kprintln!("  Phase:         2 (Capability Enforcement)");
-    kprintln!("  Architecture:  x86_64, {} cores", crate::smp::per_core::core_count());
+    let cores = crate::smp::per_core::core_count();
+    let wakeup = if crate::smp::per_core::has_mwait() { "MWAIT" } else { "HLT" };
+    kprintln!("  CPU:           x86_64, {} cores (work-stealing, {})", cores, wakeup);
+    let (heap_used, heap_total) = crate::heap::stats();
     let (huge_pages, small_pages) = crate::paging::stats();
     kprintln!("  Memory:        {} MB free ({} frames)", free_mb, free_frames);
+    kprintln!("  Heap:          {} KB / {} MB", heap_used / 1024, heap_total / (1024 * 1024));
     kprintln!("  Paging:        {} x 2MB + {} x 4KB, NX enabled", huge_pages, small_pages);
     kprintln!("  Capabilities:  {}/{} active", active_caps, max_caps);
     kprintln!("  Audit log:     {} events", audit_count);
