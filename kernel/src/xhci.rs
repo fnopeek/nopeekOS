@@ -125,8 +125,8 @@ const DESC_DEVICE:        u16 = 0x0100;
 const DESC_CONFIG:        u16 = 0x0200;
 
 const NUM_CMD_TRBS: usize = 32;
-const NUM_EVT_TRBS: usize = 1024;
-const NUM_TR_TRBS:  usize = 256;
+const NUM_EVT_TRBS: usize = 256;
+const NUM_TR_TRBS:  usize = 64;
 
 // HID usage code to ASCII table (boot protocol, US layout base)
 static HID_TO_ASCII: [u8; 57] = [
@@ -206,23 +206,18 @@ pub struct MouseEvent {
 }
 
 // Mouse event buffer
-const MOUSE_BUF_SIZE: usize = 512;
+const MOUSE_BUF_SIZE: usize = 128;
 static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0 }; MOUSE_BUF_SIZE];
 static mut MOUSE_HEAD: usize = 0;
 static mut MOUSE_TAIL: usize = 0;
 
-static MOUSE_TOTAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
 fn push_mouse(evt: MouseEvent) {
-    let total = MOUSE_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     // SAFETY: single-core, no concurrent access
     unsafe {
         let next = (MOUSE_HEAD + 1) % MOUSE_BUF_SIZE;
         if next != MOUSE_TAIL {
             MOUSE_BUF[MOUSE_HEAD] = evt;
             MOUSE_HEAD = next;
-        } else if total % 100 == 0 {
-            crate::kprintln!("[npk] xhci: mouse buf full (total={})", total);
         }
     }
 }
@@ -289,42 +284,6 @@ pub fn poll_mouse() -> Option<MouseEvent> {
 
 /// Check if USB mouse is available.
 pub fn mouse_available() -> bool { MOUSE_AVAILABLE.load(Ordering::Relaxed) }
-
-/// Debug: print mouse transfer state (call from intent loop when mouse freezes).
-pub fn mouse_debug() {
-    let sched = MOUSE_SCHED.load(core::sync::atomic::Ordering::Relaxed);
-    let compl = MOUSE_COMPL.load(core::sync::atomic::Ordering::Relaxed);
-    let total = MOUSE_TOTAL.load(core::sync::atomic::Ordering::Relaxed);
-    let avail = MOUSE_AVAILABLE.load(Ordering::Relaxed);
-    crate::kprintln!("[npk] mouse: avail={} total={} sched={} compl={} pending={}",
-        avail, total, sched, compl, sched.saturating_sub(compl));
-    let mut lock = STATE.lock();
-    if let Some(ref mut state) = *lock {
-        crate::kprintln!("[npk] mouse: has={} enq={} cycle={} errors={}",
-            state.has_mouse, state.mouse_intr_enqueue, state.mouse_intr_cycle, state.mouse_error_count);
-        // Check event ring state
-        let (_, _, control) = read_trb(state.evt_ring, state.evt_dequeue);
-        let evt_cycle_match = (control & TRB_CYCLE) == state.evt_cycle;
-        crate::kprintln!("[npk] mouse: evt_deq={} evt_cycle={} next_trb_match={}",
-            state.evt_dequeue, state.evt_cycle, evt_cycle_match);
-
-        // Check port status
-        let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
-        crate::kprintln!("[npk] mouse: PORTSC={:#010x} CCS={} PED={} PR={}",
-            portsc, (portsc >> 0) & 1, (portsc >> 1) & 1, (portsc >> 4) & 1);
-
-        // Check pending TRB at current enqueue-1 (the one waiting)
-        let pending_idx = if state.mouse_intr_enqueue == 0 { NUM_TR_TRBS - 2 } else { state.mouse_intr_enqueue - 1 };
-        let (trb_param, trb_status, trb_ctrl) = read_trb(state.mouse_intr_ring, pending_idx);
-        crate::kprintln!("[npk] mouse: pending TRB[{}] param={:#x} status={} ctrl={:#x} cycle={}",
-            pending_idx, trb_param, trb_status, trb_ctrl, trb_ctrl & 1);
-
-        // Re-ring doorbell to see if controller wakes up
-        crate::kprintln!("[npk] mouse: re-ringing doorbell (slot={} ep={})",
-            state.mouse_slot_id, state.mouse_intr_ep_dci);
-        ring_doorbell(state, state.mouse_slot_id as u32, state.mouse_intr_ep_dci as u32);
-    }
-}
 
 #[allow(dead_code)]
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Relaxed) }
@@ -518,8 +477,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // Allocate DMA structures (all page-aligned, zeroed)
     let dcbaa = alloc_dma(1, "DCBAA");
     let cmd_ring = alloc_dma(1, "cmd ring");
-    let evt_pages = (NUM_EVT_TRBS * 16 + 4095) / 4096;
-    let evt_ring = alloc_dma(evt_pages, "evt ring");
+    let evt_ring = alloc_dma(1, "evt ring");
     let evt_seg_table = alloc_dma(1, "evt seg table");
     let input_ctx = alloc_dma(1, "input ctx");
     let device_ctx = alloc_dma(1, "device ctx");
@@ -1110,19 +1068,7 @@ fn find_mouse_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8, u
     None
 }
 
-static MOUSE_SCHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static MOUSE_COMPL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
 fn schedule_mouse_interrupt_transfer(state: &mut XhciState) {
-    let sched = MOUSE_SCHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
-    let compl = MOUSE_COMPL.load(core::sync::atomic::Ordering::Relaxed);
-    // Warn if schedule count diverges from completion count (ring overflow risk)
-    let pending = sched.saturating_sub(compl);
-    if pending > (NUM_TR_TRBS as u64 - 2) {
-        crate::kprintln!("[npk] xhci: MOUSE TR OVERFLOW! sched={} compl={} pending={} enq={}",
-            sched, compl, pending, state.mouse_intr_enqueue);
-    }
-
     let idx = state.mouse_intr_enqueue;
     let cycle = state.mouse_intr_cycle;
     // Mouse uses data_buf+3072 (keyboard uses data_buf+2048)
@@ -1295,15 +1241,14 @@ fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
 
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
-
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let ir0 = state.rt + 0x20;
+        w64(ir0, 0x18, erdp | (1 << 3));
 
         if trb_type == EVT_CMD_COMPLETE {
             let slot = (control >> 24) & 0xFF;
@@ -1437,15 +1382,14 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
         let (_param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
         if control & TRB_CYCLE != state.evt_cycle { core::hint::spin_loop(); continue; }
 
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
-
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let ir0 = state.rt + 0x20;
+        w64(ir0, 0x18, erdp | (1 << 3));
 
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
@@ -1633,16 +1577,18 @@ pub fn poll_events() {
         let trb_type = control & (0x3F << 10);
         let cc = (status >> 24) & 0xFF;
 
-        // ERDP: point to the event we JUST processed (xHCI spec 5.5.2.3.3)
-        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-        let ir0 = state.rt + 0x20;
-        w64(ir0, 0x18, erdp | (1 << 3));
+        // ERDP fix: write the index of the event we JUST processed (not the next one)
+        // xHCI spec 4.9.4: ERDP points to the last processed event TRB
+        let processed_idx = state.evt_dequeue;
 
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {
             state.evt_dequeue = 0;
             state.evt_cycle ^= 1;
         }
+        let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
+        let ir0 = state.rt + 0x20;
+        w64(ir0, 0x18, erdp | (1 << 3));
 
         if trb_type == EVT_TRANSFER {
             let trb_addr = param;
@@ -1651,7 +1597,6 @@ pub fn poll_events() {
                 && trb_addr < state.mouse_intr_ring + (NUM_TR_TRBS * 16) as u64;
 
             if is_mouse {
-                MOUSE_COMPL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
                     process_mouse_report(state);
                     state.mouse_error_count = 0;
@@ -1659,19 +1604,16 @@ pub fn poll_events() {
                     // Missed Service Error — harmless, GUI was blocking CPU.
                     // Just reschedule without counting as error.
                 } else {
-                    crate::kprintln!("[npk] xhci: mouse CC={} (err #{})",
-                        cc, state.mouse_error_count + 1);
                     state.mouse_error_count += 1;
                     if state.mouse_error_count >= 10 {
                         state.mouse_error_count = 0;
                         let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
                         if portsc & PORTSC_CCS == 0 {
-                            crate::kprintln!("[npk] xhci: mouse disconnected (PORTSC CCS=0)");
+                            crate::kprintln!("[npk] xhci: mouse disconnected");
                             state.has_mouse = false;
                             MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
                             continue;
                         }
-                        crate::kprintln!("[npk] xhci: mouse 10 errors but still connected, continuing");
                     }
                 }
                 schedule_mouse_interrupt_transfer(state);
