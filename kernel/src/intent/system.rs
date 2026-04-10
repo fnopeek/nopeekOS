@@ -14,7 +14,7 @@ pub fn intent_status(vault: &Vault) {
     kprintln!("  ──────────────────────────────────────────");
     kprintln!("  Uptime:        {}m {}s", uptime / 60, uptime % 60);
     kprintln!("  Phase:         2 (Capability Enforcement)");
-    kprintln!("  Architecture:  x86_64");
+    kprintln!("  Architecture:  x86_64, {} cores", crate::smp::per_core::core_count());
     let (huge_pages, small_pages) = crate::paging::stats();
     kprintln!("  Memory:        {} MB free ({} frames)", free_mb, free_frames);
     kprintln!("  Paging:        {} x 2MB + {} x 4KB, NX enabled", huge_pages, small_pages);
