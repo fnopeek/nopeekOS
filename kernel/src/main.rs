@@ -11,49 +11,40 @@ extern crate alloc;
 
 core::arch::global_asm!(include_str!("boot.s"), options(att_syntax));
 
-mod serial;
+// ── Module groups ──────────────────────────────────────────────
+mod drivers;
+pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic};
+pub use drivers::{xhci, keyboard, framebuffer, rtc, blkdev, netdev, acpi};
+
+mod mm;
+pub use mm::{memory, heap, paging};
+
+mod security;
+pub use security::{capability, audit, csprng};
+
 mod crypto;
-mod csprng;
-mod audit;
-mod capability;
-mod heap;
+pub use crypto::{tls, update_key};
+
+mod storage;
+pub use storage::{npkfs, fat32, gpt};
+
+mod gui;
+pub use gui::{theme, layers};
+
+// ── Standalone modules ────────────────────────────────────────
 mod interrupts;
-mod memory;
-mod paging;
-mod pci;
-mod virtio_blk;
-mod virtio_net;
-mod npkfs;
 mod net;
 mod intent;
-mod tls;
 mod config;
-mod rtc;
 mod vga;
 mod wasm;
 mod shell;
-mod keyboard;
-mod nvme;
-mod blkdev;
-mod intel_nic;
-mod netdev;
 mod setup;
-mod framebuffer;
 mod gpu;
-mod gui;
-mod xhci;
-#[allow(dead_code)]
-mod gpt;
-#[allow(dead_code)]
-mod fat32;
+mod shade;
+mod smp;
 #[allow(dead_code, unused_imports)]
 mod install;
-mod shade;
-mod acpi;
-mod update_key;
-mod theme;
-mod layers;
-mod smp;
 
 use alloc::string::String;
 use spin::Mutex;
