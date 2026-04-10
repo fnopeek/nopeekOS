@@ -269,6 +269,10 @@ static MOUSE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Poll for a mouse event from USB mouse.
 pub fn poll_mouse() -> Option<MouseEvent> {
     if !MOUSE_AVAILABLE.load(Ordering::Relaxed) { return None; }
+    // Fallback: drain hardware if buffer empty (NUC has no PIT → no timer IRQ)
+    if MOUSE_HEAD.load(Ordering::Relaxed) == MOUSE_TAIL.load(Ordering::Relaxed) {
+        poll_events();
+    }
 
     let head = MOUSE_HEAD.load(Ordering::Acquire);
     let tail = MOUSE_TAIL.load(Ordering::Relaxed);
