@@ -4,7 +4,7 @@
 //! Scales from 1 (BSP only) to 1024+ cores.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,8 +25,29 @@ pub struct CoreInfo {
 static CORES: Mutex<Vec<CoreInfo>> = Mutex::new(Vec::new());
 static CORE_COUNT: AtomicUsize = AtomicUsize::new(1);
 
+/// Set to true once scheduler is initialized and APs should start working
+static SCHEDULER_READY: AtomicBool = AtomicBool::new(false);
+
+/// True if CPU supports MONITOR/MWAIT (detected at boot)
+static HAS_MWAIT: AtomicBool = AtomicBool::new(false);
+
 pub fn register_bsp(apic_id: u32) {
     CORES.lock().push(CoreInfo { id: 0, apic_id, state: CoreState::Bsp });
+    // Detect MONITOR/MWAIT support via CPUID.01H:ECX bit 3
+    let ecx: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 1",
+            "cpuid",
+            "mov {0:e}, ecx",
+            "pop rbx",
+            out(reg) ecx,
+            out("eax") _,
+            out("edx") _,
+        );
+    }
+    HAS_MWAIT.store(ecx & (1 << 3) != 0, Ordering::Release);
 }
 
 pub fn register_ap(apic_id: u32, core_id: u32) {
@@ -46,11 +67,21 @@ pub fn core_count() -> usize {
     CORE_COUNT.load(Ordering::Acquire)
 }
 
+/// Signal APs to start their scheduler loops
+pub fn start_scheduler() {
+    SCHEDULER_READY.store(true, Ordering::Release);
+}
+
+/// Check if MONITOR/MWAIT is available
+pub fn has_mwait() -> bool {
+    HAS_MWAIT.load(Ordering::Relaxed)
+}
+
 /// AP Rust entry — called by trampoline after long mode transition.
 /// Interrupts are disabled (cli from trampoline). IDT is loaded.
 #[unsafe(no_mangle)]
-pub extern "C" fn smp_ap_entry(_core_id: u32) -> ! {
-    // Enable Local APIC (needed for future IPI wakeup)
+pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
+    // Enable Local APIC (needed for IPI wakeup fallback)
     let apic_base = super::read_apic_base();
     // SAFETY: APIC MMIO is identity-mapped, each core sees its own LAPIC
     unsafe {
@@ -61,9 +92,51 @@ pub extern "C" fn smp_ap_entry(_core_id: u32) -> ! {
     // Signal BSP: this AP is alive
     super::AP_STARTED.fetch_add(1, Ordering::Release);
 
-    // Halt loop — Phase B scheduler will wake via IPI
+    // Wait until scheduler is initialized
+    while !SCHEDULER_READY.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+
+    // Enter scheduler loop
+    let cid = core_id as usize;
+    let use_mwait = HAS_MWAIT.load(Ordering::Relaxed);
+
     loop {
-        // SAFETY: cli+hlt is safe; core sleeps until NMI/SMI/RESET
-        unsafe { core::arch::asm!("cli; hlt"); }
+        // Try to get work (own deque first, then steal)
+        if let Some(task) = super::scheduler::next_task(cid) {
+            (task.func)(task.arg);
+            continue;
+        }
+
+        // No work — sleep efficiently
+        if use_mwait {
+            // MONITOR/MWAIT: watch the wake_flag, sleep until it changes
+            let flag_ptr = super::scheduler::wake_flag_ptr(cid);
+            super::scheduler::clear_wake(cid);
+
+            // SAFETY: MONITOR sets up address monitoring, MWAIT sleeps.
+            // Both are safe unprivileged instructions on ring 0.
+            unsafe {
+                // MONITOR: watch the address in RAX
+                core::arch::asm!(
+                    "monitor",
+                    in("rax") flag_ptr,
+                    in("ecx") 0u32,  // extensions (0 = default)
+                    in("edx") 0u32,  // hints (0 = default)
+                );
+                // Only MWAIT if still no work (avoid missed-wakeup race)
+                if super::scheduler::next_task(cid).is_none() {
+                    // MWAIT: sleep until monitored write or interrupt
+                    core::arch::asm!(
+                        "mwait",
+                        in("eax") 0u32,  // hints: C0 (lightest sleep)
+                        in("ecx") 0u32,  // extensions (0 = default)
+                    );
+                }
+            }
+        } else {
+            // Fallback: HLT with interrupts enabled (wakes on any interrupt)
+            unsafe { core::arch::asm!("sti; hlt; cli"); }
+        }
     }
 }
