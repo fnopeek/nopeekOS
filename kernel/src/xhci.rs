@@ -477,7 +477,8 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // Allocate DMA structures (all page-aligned, zeroed)
     let dcbaa = alloc_dma(1, "DCBAA");
     let cmd_ring = alloc_dma(1, "cmd ring");
-    let evt_ring = alloc_dma(1, "evt ring");
+    let evt_pages = (NUM_EVT_TRBS * 16 + 4095) / 4096;
+    let evt_ring = alloc_dma(evt_pages, "evt ring");
     let evt_seg_table = alloc_dma(1, "evt seg table");
     let input_ctx = alloc_dma(1, "input ctx");
     let device_ctx = alloc_dma(1, "device ctx");
