@@ -335,21 +335,16 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         |_caller: Caller<'_, HostState>, ms: i32| -> i32 {
             if ms <= 0 || ms > 60000 { return -1; }
 
-            // Render current frame before sleeping
-            if crate::shade::is_active() {
-                crate::shade::render_frame();
-            }
-
-            // Busy-wait with periodic event processing
+            // Busy-wait with periodic event processing.
+            // poll_render handles mouse events + dirty window re-render (partial, fast).
+            // No full render_frame — that would block the mouse at 4K.
             let freq = crate::interrupts::tsc_freq();
             let ticks_per_ms = freq / 1000;
             let target = crate::interrupts::rdtsc() + (ms as u64) * ticks_per_ms;
             while crate::interrupts::rdtsc() < target {
-                // Process mouse events + animations during sleep
                 if crate::shade::is_active() {
                     crate::shade::poll_render();
                 }
-                // Brief spin to not saturate event processing
                 for _ in 0..10_000 { core::hint::spin_loop(); }
             }
 

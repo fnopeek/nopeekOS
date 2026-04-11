@@ -4,7 +4,7 @@
 //! Scales from 1 (BSP only) to 1024+ cores.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,9 +31,19 @@ static SCHEDULER_READY: AtomicBool = AtomicBool::new(false);
 /// True if CPU supports MONITOR/MWAIT (detected at boot)
 static HAS_MWAIT: AtomicBool = AtomicBool::new(false);
 
-/// Per-core current frequency in MHz (updated via MSR 0x198)
+/// Per-core average frequency in MHz (APERF/TSC ratio)
 static CORE_MHZ: [AtomicU32; 256] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; 256]
+};
+
+/// Per-core APERF + TSC snapshots for delta computation
+static LAST_APERF: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+static LAST_TSC: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
 };
 
@@ -87,15 +97,33 @@ pub fn has_mwait() -> bool {
     HAS_MWAIT.load(Ordering::Relaxed)
 }
 
-/// Read current CPU frequency from MSR 0x198 (IA32_PERF_STATUS).
-/// Bits [15:8] = current ratio × 100 MHz bus clock.
+/// Update per-core average frequency using APERF/TSC ratio.
+/// APERF (MSR 0xE8) counts actual clock cycles — stops during C-states.
+/// TSC counts at constant rate — continues during sleep.
+/// Result: avg_mhz = (delta_aperf / delta_tsc) * tsc_mhz
+/// Idle cores show low MHz, active cores show turbo MHz.
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
-    let lo: u32;
-    // SAFETY: MSR 0x198 is readable on all x86_64 Intel CPUs in ring 0
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x198u32, out("eax") lo, out("edx") _); }
-    let ratio = (lo >> 8) & 0xFF;
-    CORE_MHZ[core_id].store(ratio * 100, Ordering::Relaxed);
+
+    // SAFETY: APERF MSR 0xE8 available on all Intel since Core 2 (2006)
+    let (a_lo, a_hi): (u32, u32);
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi); }
+    let aperf = ((a_hi as u64) << 32) | a_lo as u64;
+    let tsc = crate::interrupts::rdtsc();
+
+    let prev_aperf = LAST_APERF[core_id].swap(aperf, Ordering::Relaxed);
+    let prev_tsc = LAST_TSC[core_id].swap(tsc, Ordering::Relaxed);
+
+    if prev_tsc == 0 { return; } // First call — no delta yet
+
+    let delta_aperf = aperf.wrapping_sub(prev_aperf);
+    let delta_tsc = tsc.wrapping_sub(prev_tsc);
+    if delta_tsc == 0 { return; }
+
+    let tsc_mhz = crate::interrupts::tsc_freq() / 1_000_000;
+    let avg_mhz = delta_aperf.saturating_mul(tsc_mhz) / delta_tsc;
+
+    CORE_MHZ[core_id].store(avg_mhz as u32, Ordering::Relaxed);
 }
 
 /// Get last measured frequency in MHz for a core.
@@ -189,12 +217,13 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     loop {
         // Try to get work (own deque first, then steal)
         if let Some(task) = super::scheduler::next_task(cid) {
-            update_core_freq(cid);
             (task.func)(task.arg);
+            update_core_freq(cid); // After work: captures active frequency
             continue;
         }
 
-        // Update frequency before sleep (shows idle MHz in top)
+        // Before sleep: APERF delta covers period since last update
+        // (includes any work done + idle time → true average)
         update_core_freq(cid);
 
         // No work — sleep efficiently
