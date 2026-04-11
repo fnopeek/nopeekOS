@@ -207,17 +207,45 @@ impl MouseState {
     }
 }
 
-/// Lock-free cursor redraw: reads atomic position, draws directly to MMIO.
-/// No COMPOSITOR lock needed. Called from Core 0 after update_atomic().
+// ── Shared cursor-drawn state (used by both lock-free and inner paths) ──
+
+static DRAWN_LF_X: AtomicI32 = AtomicI32::new(0);
+static DRAWN_LF_Y: AtomicI32 = AtomicI32::new(0);
+static DRAWN_LF: AtomicBool = AtomicBool::new(false);
+
+/// Truly lock-free cursor redraw: NO CONSOLE lock, uses cached atomic pointers.
+/// Called from Core 0 after update_atomic(). Never blocks on render_frame.
 pub fn redraw_overlay_lockfree() {
     if !take_dirty() { return; }
-    crate::framebuffer::with_fb(|fb| {
-        redraw_overlay_lockfree_inner(fb);
-    });
+
+    let shadow = crate::framebuffer::cached_shadow_front();
+    if shadow.is_null() { return; }
+
+    let mmio_addr = IRQ_FB_ADDR.load(Ordering::Relaxed);
+    if mmio_addr == 0 { return; }
+    let mmio = mmio_addr as *mut u8;
+    let pitch = IRQ_FB_PITCH.load(Ordering::Relaxed) as usize;
+    let sw = SCREEN_W.load(Ordering::Relaxed);
+    let sh = SCREEN_H.load(Ordering::Relaxed);
+
+    // Restore old cursor area from shadow_front → MMIO
+    if DRAWN_LF.load(Ordering::Relaxed) {
+        let dx = DRAWN_LF_X.load(Ordering::Relaxed);
+        let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
+        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
+    }
+
+    // Draw cursor at current atomic position
+    let (cx, cy) = atomic_pos();
+    draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
+
+    DRAWN_LF_X.store(cx, Ordering::Relaxed);
+    DRAWN_LF_Y.store(cy, Ordering::Relaxed);
+    DRAWN_LF.store(true, Ordering::Relaxed);
 }
 
-/// Inner lock-free cursor draw — called when we already have fb access.
-/// Used from render paths after scene blit (which overwrites MMIO cursor area).
+/// Inner cursor draw — called from render paths that already hold CONSOLE lock.
+/// Uses shared DRAWN_LF state so lock-free path and inner path stay in sync.
 pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
     let info = fb.info();
     let (shadow, _) = fb.shadow_ptr();
@@ -226,14 +254,10 @@ pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
     let sw = info.width as i32;
     let sh = info.height as i32;
 
-    static DRAWN_X: AtomicI32 = AtomicI32::new(0);
-    static DRAWN_Y: AtomicI32 = AtomicI32::new(0);
-    static DRAWN: AtomicBool = AtomicBool::new(false);
-
-    // Restore old cursor area from shadow → MMIO
-    if DRAWN.load(Ordering::Relaxed) {
-        let dx = DRAWN_X.load(Ordering::Relaxed);
-        let dy = DRAWN_Y.load(Ordering::Relaxed);
+    // Restore old cursor area from front → MMIO
+    if DRAWN_LF.load(Ordering::Relaxed) {
+        let dx = DRAWN_LF_X.load(Ordering::Relaxed);
+        let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
         blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
     }
 
@@ -241,9 +265,9 @@ pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
     let (cx, cy) = atomic_pos();
     draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
 
-    DRAWN_X.store(cx, Ordering::Relaxed);
-    DRAWN_Y.store(cy, Ordering::Relaxed);
-    DRAWN.store(true, Ordering::Relaxed);
+    DRAWN_LF_X.store(cx, Ordering::Relaxed);
+    DRAWN_LF_Y.store(cy, Ordering::Relaxed);
+    DRAWN_LF.store(true, Ordering::Relaxed);
 }
 
 /// Draw cursor from IRQ context — no locks, no shadow restore.
