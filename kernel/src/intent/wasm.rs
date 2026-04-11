@@ -92,6 +92,40 @@ pub fn intent_run(args: &str) {
     }
 }
 
+/// Run a WASM module in interactive mode (direct terminal output, live loop).
+/// Used for apps like `top` that update the screen continuously.
+pub fn intent_run_interactive(module_name: &str) {
+    use crate::{wasm, npkfs, capability};
+
+    // Load module from npkFS
+    let sys_path = alloc::format!("sys/wasm/{}", module_name);
+    let resolved = resolve_path(module_name);
+    let (wasm_bytes, hash) = match npkfs::fetch(&resolved) {
+        Ok(v) => v,
+        Err(_) => match npkfs::fetch(&sys_path) {
+            Ok(v) => v,
+            Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
+        }
+    };
+
+    let module_cap = match capability::create_module_cap(
+        capability::Rights::READ | capability::Rights::EXECUTE,
+        Some(600_000), // 100 minutes at 100Hz — long-running
+    ) {
+        Ok(id) => id,
+        Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
+    };
+
+    kprint!("[npk] Running '{}' (hash: ", module_name);
+    for b in &hash[..4] { kprint!("{:02x}", b); }
+    kprintln!("..., interactive)");
+
+    match wasm::execute_interactive(&wasm_bytes, "_start", &[], module_cap) {
+        Ok(_) => {}
+        Err(e) => kprintln!("[npk] Execution error: {}", e),
+    }
+}
+
 /// Store built-in WASM modules to npkFS on first boot.
 pub fn bootstrap_wasm() {
     use crate::{wasm, npkfs};

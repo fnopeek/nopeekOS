@@ -4,7 +4,7 @@
 //! Scales from 1 (BSP only) to 1024+ cores.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use spin::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,16 @@ static SCHEDULER_READY: AtomicBool = AtomicBool::new(false);
 
 /// True if CPU supports MONITOR/MWAIT (detected at boot)
 static HAS_MWAIT: AtomicBool = AtomicBool::new(false);
+
+/// Per-core current frequency in MHz (updated via MSR 0x198)
+static CORE_MHZ: [AtomicU32; 256] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; 256]
+};
+
+/// Platform frequency limits (set once by enable_hwp)
+static MAX_TURBO_MHZ: AtomicU32 = AtomicU32::new(0);
+static MIN_EFF_MHZ: AtomicU32 = AtomicU32::new(0);
 
 pub fn register_bsp(apic_id: u32) {
     CORES.lock().push(CoreInfo { id: 0, apic_id, state: CoreState::Bsp });
@@ -77,6 +87,78 @@ pub fn has_mwait() -> bool {
     HAS_MWAIT.load(Ordering::Relaxed)
 }
 
+/// Read current CPU frequency from MSR 0x198 (IA32_PERF_STATUS).
+/// Bits [15:8] = current ratio × 100 MHz bus clock.
+pub fn update_core_freq(core_id: usize) {
+    if core_id >= 256 { return; }
+    let lo: u32;
+    // SAFETY: MSR 0x198 is readable on all x86_64 Intel CPUs in ring 0
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x198u32, out("eax") lo, out("edx") _); }
+    let ratio = (lo >> 8) & 0xFF;
+    CORE_MHZ[core_id].store(ratio * 100, Ordering::Relaxed);
+}
+
+/// Get last measured frequency in MHz for a core.
+pub fn core_freq_mhz(core_id: usize) -> u32 {
+    if core_id >= 256 { return 0; }
+    CORE_MHZ[core_id].load(Ordering::Relaxed)
+}
+
+/// Max turbo frequency in MHz (from HWP capabilities).
+pub fn max_turbo_mhz() -> u32 { MAX_TURBO_MHZ.load(Ordering::Relaxed) }
+
+/// Min efficiency frequency in MHz (from HWP capabilities).
+pub fn min_eff_mhz() -> u32 { MIN_EFF_MHZ.load(Ordering::Relaxed) }
+
+/// Enable Hardware P-states (HWP / Speed Shift) on the current core.
+/// CPU automatically scales frequency: idle → min, load → turbo.
+/// Returns true if HWP was enabled successfully.
+pub fn enable_hwp() -> bool {
+    // Check HWP support: CPUID.06H:EAX bit 7
+    let eax: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 6",
+            "cpuid",
+            "mov {0:e}, eax",
+            "pop rbx",
+            out(reg) eax,
+            out("ecx") _,
+            out("edx") _,
+        );
+    }
+    if eax & (1 << 7) == 0 { return false; }
+
+    // Enable HWP: MSR 0x770 (IA32_PM_ENABLE) = 1
+    // SAFETY: HWP supported (checked above), ring 0
+    unsafe { core::arch::asm!("wrmsr", in("ecx") 0x770u32, in("eax") 1u32, in("edx") 0u32); }
+
+    // Read HWP capabilities: MSR 0x771 (IA32_HWP_CAPABILITIES)
+    // [7:0]=Highest, [15:8]=Guaranteed, [23:16]=Efficient, [31:24]=Lowest
+    let cap_lo: u32;
+    // SAFETY: MSR 0x771 exists when HWP is supported
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x771u32, out("eax") cap_lo, out("edx") _); }
+    let highest = cap_lo & 0xFF;
+    let lowest = (cap_lo >> 24) & 0xFF;
+
+    // Store platform limits (first caller wins)
+    if MAX_TURBO_MHZ.load(Ordering::Relaxed) == 0 {
+        MAX_TURBO_MHZ.store(highest * 100, Ordering::Relaxed);
+        MIN_EFF_MHZ.store(lowest * 100, Ordering::Relaxed);
+    }
+
+    // Configure HWP request: MSR 0x774 (IA32_HWP_REQUEST)
+    // [7:0]=Min, [15:8]=Max, [23:16]=Desired(0=auto), [31:24]=EPP(128=balanced)
+    let hwp_req = (lowest as u32)
+        | ((highest as u32) << 8)
+        | (128u32 << 24); // EPP = balanced
+    // SAFETY: MSR 0x774 exists when HWP is enabled
+    unsafe { core::arch::asm!("wrmsr", in("ecx") 0x774u32, in("eax") hwp_req, in("edx") 0u32); }
+
+    true
+}
+
 /// AP Rust entry — called by trampoline after long mode transition.
 /// Interrupts are disabled (cli from trampoline). IDT is loaded.
 #[unsafe(no_mangle)]
@@ -88,6 +170,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         let svr = core::ptr::read_volatile((apic_base + 0xF0) as *const u32);
         core::ptr::write_volatile((apic_base + 0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
     }
+
+    // Enable HWP on this AP (per-core frequency scaling)
+    enable_hwp();
 
     // Signal BSP: this AP is alive
     super::AP_STARTED.fetch_add(1, Ordering::Release);
@@ -104,9 +189,13 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     loop {
         // Try to get work (own deque first, then steal)
         if let Some(task) = super::scheduler::next_task(cid) {
+            update_core_freq(cid);
             (task.func)(task.arg);
             continue;
         }
+
+        // Update frequency before sleep (shows idle MHz in top)
+        update_core_freq(cid);
 
         // No work — sleep efficiently
         if use_mwait {
@@ -127,7 +216,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
                 if super::scheduler::next_task(cid).is_none() {
                     core::arch::asm!(
                         "mwait",
-                        in("eax") 0u32,  // C0 — lightest sleep, fastest wake
+                        in("eax") 0x01u32, // C1E — clock gated, frequency drops
                         in("ecx") 0u32,
                     );
                 }

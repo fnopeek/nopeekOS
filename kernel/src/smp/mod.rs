@@ -54,6 +54,13 @@ pub fn init() {
     let bsp_id = read_apic_id(apic_base);
     per_core::register_bsp(bsp_id);
 
+    // Enable HWP (hardware frequency scaling) on BSP
+    if per_core::enable_hwp() {
+        per_core::update_core_freq(0);
+        kprintln!("[npk] HWP: {}-{} MHz (auto-scaling)",
+            per_core::min_eff_mhz(), per_core::max_turbo_mhz());
+    }
+
     // Discover APs from ACPI MADT
     let ap_ids = parse_madt(bsp_id);
     if ap_ids.is_empty() {

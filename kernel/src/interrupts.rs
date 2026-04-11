@@ -291,9 +291,13 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
 // === IRQ Handlers ===
 
 extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let tick = TICKS.fetch_add(1, Ordering::Relaxed);
     // Drain USB events from interrupt context (try_lock, never blocks)
     crate::xhci::poll_events_irq();
+    // Update BSP frequency once per second (for top display)
+    if tick % 100 == 0 {
+        crate::smp::per_core::update_core_freq(0);
+    }
     unsafe { pic_eoi(0); }
 }
 
@@ -305,8 +309,12 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
 /// APIC timer handler — fires on hardware without PIT (NUC, UEFI-only).
 /// Same function as PIT timer: tick counter + USB event drain.
 extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let tick = TICKS.fetch_add(1, Ordering::Relaxed);
     crate::xhci::poll_events_irq();
+    // Update BSP frequency once per second (for top display)
+    if tick % 100 == 0 {
+        crate::smp::per_core::update_core_freq(0);
+    }
     // APIC EOI: write 0 to End-of-Interrupt register
     let apic_base = APIC_BASE.load(Ordering::Relaxed);
     if apic_base != 0 {
