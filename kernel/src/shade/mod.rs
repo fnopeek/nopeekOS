@@ -583,6 +583,10 @@ fn poll_render_legacy() {
     });
 }
 
+/// True while a Mod+LMB/RMB drag is active (swap or resize).
+/// When set, handle_mouse enters slow path on EVERY event (not just button changes).
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Process a mouse event: update compositor state, redraw cursor overlay.
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // FAST PATH (lock-free, ~2ns): update atomic position + redraw cursor overlay.
@@ -590,13 +594,12 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
     cursor::redraw_overlay_lockfree();
 
-    // SLOW PATH (only on button events): take COMPOSITOR lock for focus/drag.
-    // Clicks are rare (~1% of mouse events), so contention is minimal.
-    if cursor::has_button_event() {
-        // Sync atomic state into compositor's MouseState so click logic works
+    // SLOW PATH: take COMPOSITOR lock for focus/drag.
+    // Enter on button state change (click/release) OR during active drag (every move).
+    if cursor::has_button_event() || DRAG_ACTIVE.load(Ordering::Relaxed) {
         let (x, y) = cursor::atomic_pos();
         let (btn, prev) = cursor::atomic_buttons();
-        let (needs_redraw, needs_full) = with_compositor(|comp| {
+        let (needs_redraw, needs_full, dragging) = with_compositor(|comp| {
             comp.mouse.x = x;
             comp.mouse.y = y;
             comp.mouse.buttons = btn;
@@ -604,8 +607,10 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
             let redraw = comp.handle_mouse_buttons();
             let full = comp.needs_full_redraw;
             comp.needs_full_redraw = false;
-            (redraw, full)
-        }).unwrap_or((false, false));
+            (redraw, full, comp.drag.is_some())
+        }).unwrap_or((false, false, false));
+
+        DRAG_ACTIVE.store(dragging, Ordering::Relaxed);
 
         if needs_redraw {
             if needs_full {
