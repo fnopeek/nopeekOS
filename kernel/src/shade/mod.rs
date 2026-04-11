@@ -455,16 +455,20 @@ pub fn poll_render() {
     if !terminal::is_dirty() { return; }
     terminal::clear_dirty();
 
-    // Partial render: only re-render visible windows on current workspace.
-    // Much faster than full render_frame (one window rect vs full 4K scene).
+    // Partial render: only re-render dirty or focused windows (not all).
+    // Focus change marks old+new windows dirty. Terminal output marks focused dirty.
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
-        if let Some(ref comp) = *COMPOSITOR.lock() {
-            for win in &comp.windows {
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            let focused_id = comp.focused;
+            for win in &mut comp.windows {
                 if win.workspace != comp.active_workspace { continue; }
                 if !win.visible { continue; }
+                // Only render windows that are dirty OR focused (active terminal output)
+                if !win.dirty && Some(win.id) != focused_id { continue; }
+                win.dirty = false;
 
                 // Restore window region from BG layer
                 if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
@@ -582,16 +586,25 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         // Sync atomic state into compositor's MouseState so click logic works
         let (x, y) = cursor::atomic_pos();
         let (btn, prev) = cursor::atomic_buttons();
-        let needs_scene_redraw = with_compositor(|comp| {
+        let (needs_redraw, needs_full) = with_compositor(|comp| {
             comp.mouse.x = x;
             comp.mouse.y = y;
             comp.mouse.buttons = btn;
             comp.mouse.prev_buttons = prev;
-            comp.handle_mouse_buttons()
-        }).unwrap_or(false);
+            let redraw = comp.handle_mouse_buttons();
+            let full = comp.needs_full_redraw;
+            comp.needs_full_redraw = false;
+            (redraw, full)
+        }).unwrap_or((false, false));
 
-        if needs_scene_redraw {
-            render_frame();
+        if needs_redraw {
+            if needs_full {
+                // Retile/resize/swap → full scene render needed
+                render_frame();
+            } else {
+                // Focus change → partial render (only dirty windows)
+                terminal::mark_dirty();
+            }
         }
     }
 }

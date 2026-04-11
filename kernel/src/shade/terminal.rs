@@ -304,6 +304,11 @@ pub fn is_dirty() -> bool {
     DIRTY.load(Ordering::Acquire)
 }
 
+/// Mark terminal as dirty (triggers partial re-render on next poll_render).
+pub fn mark_dirty() {
+    DIRTY.store(true, Ordering::Release);
+}
+
 /// Clear dirty flag (called after render).
 pub fn clear_dirty() {
     DIRTY.store(false, Ordering::Release);
