@@ -122,11 +122,11 @@ pub fn intent_install(args: &str) {
     let version_key = alloc::format!("sys/wasm/{}.version", name);
     if let Ok((ver_data, _)) = crate::npkfs::fetch(&version_key) {
         if let Ok(installed_ver) = core::str::from_utf8(&ver_data) {
-            if installed_ver == entry.version {
+            if installed_ver.trim() == entry.version.trim() {
                 kprintln!("[npk] {} v{} already installed.", name, entry.version);
                 return;
             }
-            kprintln!("[npk] Updating {} v{} → v{}", name, installed_ver, entry.version);
+            kprintln!("[npk] Updating {} v{} -> v{}", name, installed_ver.trim(), entry.version);
         }
     } else {
         kprintln!("[npk] Installing {} v{} ({} bytes)...", name, entry.version, entry.size);
@@ -189,12 +189,12 @@ pub fn update_all_modules() -> usize {
     let manifest_path = alloc::format!("{}/manifest", MODULE_BASE);
     let manifest_data = match super::http::https_get(MODULE_HOST, &manifest_path, MAX_MANIFEST_SIZE) {
         Ok(d) => d,
-        Err(_) => return 0,
+        Err(e) => { kprintln!("[npk] Module manifest fetch failed: {}", e); return 0; }
     };
 
     let modules = match parse_manifest(&manifest_data) {
         Ok(m) => m,
-        Err(_) => return 0,
+        Err(e) => { kprintln!("[npk] Module manifest parse error: {}", e); return 0; }
     };
 
     // Get list of installed modules
@@ -212,35 +212,40 @@ pub fn update_all_modules() -> usize {
         let is_installed = entries.iter().any(|(n, _, _)| n == &store_name);
         if !is_installed { continue; }
 
-        // Check version — skip if already up to date
+        // Check version — skip if already up to date (trim for safety)
         let version_key = alloc::format!("sys/wasm/{}.version", remote.name);
-        if let Ok((ver_data, _)) = crate::npkfs::fetch(&version_key) {
-            if let Ok(installed_ver) = core::str::from_utf8(&ver_data) {
-                if installed_ver == remote.version {
-                    continue;
-                }
-                kprintln!("[npk]   {} v{} -> v{}", remote.name, installed_ver, remote.version);
+        let installed_ver_str = crate::npkfs::fetch(&version_key).ok()
+            .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(|s| String::from(s.trim())));
+
+        let remote_ver = remote.version.trim();
+
+        if let Some(ref local_ver) = installed_ver_str {
+            if local_ver == remote_ver {
+                kprintln!("[npk]   {} v{} (up to date)", remote.name, local_ver);
+                continue;
             }
+            kprintln!("[npk]   {} v{} -> v{}", remote.name, local_ver, remote_ver);
         } else {
-            kprintln!("[npk]   {} -> v{}", remote.name, remote.version);
+            kprintln!("[npk]   {} -> v{} (no local version)", remote.name, remote_ver);
         }
 
         // Download module
+        kprint!("[npk]   downloading... ");
         let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, remote.name);
         let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, MAX_MODULE_SIZE) {
             Ok(d) => d,
-            Err(e) => { kprintln!("[npk]   {} download failed: {}", remote.name, e); continue; }
+            Err(e) => { kprintln!("failed: {}", e); continue; }
         };
 
         if wasm_data.len() != remote.size {
-            kprintln!("[npk]   {} size mismatch", remote.name);
+            kprintln!("size mismatch (got {} expected {})", wasm_data.len(), remote.size);
             continue;
         }
 
         // Verify SHA-384
         let hash = crate::tls::sha256::sha384(&wasm_data);
         if hash != remote.sha384 {
-            kprintln!("[npk]   {} checksum failed", remote.name);
+            kprintln!("checksum failed");
             continue;
         }
 
@@ -248,19 +253,22 @@ pub fn update_all_modules() -> usize {
         let sig_path = alloc::format!("{}/{}.sig", MODULE_BASE, remote.name);
         let sig_data = match super::http::https_get(MODULE_HOST, &sig_path, MAX_SIG_SIZE) {
             Ok(d) => d,
-            Err(_) => { kprintln!("[npk]   {} signature download failed", remote.name); continue; }
+            Err(e) => { kprintln!("sig failed: {}", e); continue; }
         };
 
         let pubkey = &crate::update_key::UPDATE_PUB_KEY;
         if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-            kprintln!("[npk]   {} signature invalid", remote.name);
+            kprintln!("signature invalid");
             continue;
         }
 
         // Store updated module
         if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
-            let _ = crate::npkfs::store(&version_key, remote.version.as_bytes(), crate::capability::CAP_NULL);
+            let _ = crate::npkfs::store(&version_key, remote_ver.as_bytes(), crate::capability::CAP_NULL);
+            kprintln!("OK");
             updated += 1;
+        } else {
+            kprintln!("store failed");
         }
     }
 
