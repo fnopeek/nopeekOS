@@ -527,8 +527,15 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
             if crate::wasm::has_wasm_app(focused_term) {
+                // Render dirty terminals (all windows, including non-focused)
                 crate::shade::poll_render();
                 crate::net::poll();
+
+                // Process mouse events explicitly (cursor movement + clicks)
+                while let Some(evt) = crate::xhci::poll_mouse() {
+                    crate::shade::handle_mouse(&evt);
+                }
+
                 // Route keyboard: shade keybinds → compositor, else → app
                 while let Some(key) = crate::keyboard::read_key() {
                     if crate::shade::input::try_keybind(key) {
@@ -539,7 +546,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     }
                     crate::wasm::push_app_key(focused_term, key);
                 }
-                core::hint::spin_loop();
+
+                for _ in 0..10_000 { core::hint::spin_loop(); }
                 continue;
             }
         }
