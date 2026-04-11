@@ -55,112 +55,76 @@ static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
-// ── WASM Input Buffer (Core 0 writes, worker reads) ───────────
+// ── Per-App Key Buffers (Core 0 writes, worker reads) ─────────
+//
+// Each terminal has its own SPSC ring buffer. Core 0 pushes keys
+// based on which window is focused. Apps read via npk_input_wait.
 
-use core::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtOrd};
 
-const WASM_KEY_BUF_SIZE: usize = 32;
-static mut WASM_KEY_BUF: [u8; WASM_KEY_BUF_SIZE] = [0; WASM_KEY_BUF_SIZE];
-static WASM_KEY_HEAD: AtomicUsize = AtomicUsize::new(0);
-static WASM_KEY_TAIL: AtomicUsize = AtomicUsize::new(0);
+const APP_KEY_BUF_SIZE: usize = 32;
+const MAX_APP_BUFS: usize = 8;
 
-/// Push a key to the WASM input buffer (called from Core 0 wait loop).
-fn push_wasm_key(key: u8) {
-    let head = WASM_KEY_HEAD.load(AtOrd::Relaxed);
-    let next = (head + 1) % WASM_KEY_BUF_SIZE;
-    if next != WASM_KEY_TAIL.load(AtOrd::Acquire) {
-        // SAFETY: single producer (Core 0 wait loop)
-        unsafe { WASM_KEY_BUF[head] = key; }
-        WASM_KEY_HEAD.store(next, AtOrd::Release);
+static mut APP_KEY_BUFS: [([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize); MAX_APP_BUFS] = [
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
+];
+
+/// Per-terminal flag: true if a WASM app is running in this terminal.
+static APP_RUNNING: [AtomicBool; MAX_APP_BUFS] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+
+/// Push a key to an app's input buffer. Called from Core 0.
+pub fn push_app_key(terminal_idx: u8, key: u8) {
+    let idx = terminal_idx as usize;
+    if idx >= MAX_APP_BUFS { return; }
+    // SAFETY: single producer (Core 0), idx bounds checked
+    let (buf, head, tail) = unsafe { &mut APP_KEY_BUFS[idx] };
+    let h = head.load(AtOrd::Relaxed);
+    let next = (h + 1) % APP_KEY_BUF_SIZE;
+    if next != tail.load(AtOrd::Acquire) {
+        buf[h] = key;
+        head.store(next, AtOrd::Release);
     }
 }
 
-/// Pop a key from the WASM input buffer (called from worker via npk_input_poll).
-fn pop_wasm_key() -> Option<u8> {
-    let tail = WASM_KEY_TAIL.load(AtOrd::Relaxed);
-    let head = WASM_KEY_HEAD.load(AtOrd::Acquire);
-    if tail == head { return None; }
-    // SAFETY: single consumer (worker core via npk_input_poll)
-    let key = unsafe { WASM_KEY_BUF[tail] };
-    WASM_KEY_TAIL.store((tail + 1) % WASM_KEY_BUF_SIZE, AtOrd::Release);
+/// Pop a key from an app's input buffer. Called from worker core.
+fn pop_app_key(terminal_idx: u8) -> Option<u8> {
+    let idx = terminal_idx as usize;
+    if idx >= MAX_APP_BUFS { return None; }
+    // SAFETY: single consumer (worker core), idx bounds checked
+    let (buf, head, tail) = unsafe { &APP_KEY_BUFS[idx] };
+    let t = tail.load(AtOrd::Relaxed);
+    if t == head.load(AtOrd::Acquire) { return None; }
+    let key = buf[t];
+    tail.store((t + 1) % APP_KEY_BUF_SIZE, AtOrd::Release);
     Some(key)
 }
 
-/// Terminal index that currently has a running WASM app (255 = none).
-static WASM_TERMINAL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(255);
+/// Clear an app's key buffer. Called when spawning a new app.
+fn clear_app_key_buf(terminal_idx: u8) {
+    let idx = terminal_idx as usize;
+    if idx >= MAX_APP_BUFS { return; }
+    let (_, head, tail) = unsafe { &mut APP_KEY_BUFS[idx] };
+    head.store(0, AtOrd::Relaxed);
+    tail.store(0, AtOrd::Relaxed);
+}
 
 /// Check if the given terminal has a running WASM app.
 pub fn has_wasm_app(terminal_idx: u8) -> bool {
-    WASM_TERMINAL.load(core::sync::atomic::Ordering::Acquire) == terminal_idx
-}
-
-/// Route keyboard input to a running WASM app.
-/// Called from intent loop when focused window has a WASM app.
-/// Handles shade keybindings, forwards regular keys to WASM.
-///
-/// ESC sequences (arrows) arrive as 3 bytes with slight delay.
-/// We use a state machine like read_line_with_tab does.
-static mut ROUTE_ESC: bool = false;
-static mut ROUTE_ESC_BRACKET: bool = false;
-static mut ROUTE_ESC_MOD: bool = false;
-
-pub fn route_keys_to_wasm() {
-    while let Some(key) = crate::keyboard::read_key() {
-        // SAFETY: single-core access (Core 0 only)
-        let esc = unsafe { ROUTE_ESC };
-        let esc_bracket = unsafe { ROUTE_ESC_BRACKET };
-        let esc_mod = unsafe { ROUTE_ESC_MOD };
-
-        if esc && !esc_bracket {
-            // Got ESC, waiting for '['
-            unsafe { ROUTE_ESC = false; }
-            if key == b'[' {
-                unsafe { ROUTE_ESC_BRACKET = true; }
-                continue;
-            }
-            // Not a sequence — forward ESC + this key
-            push_wasm_key(0x1B);
-            push_wasm_key(key);
-            continue;
-        }
-
-        if esc_bracket {
-            // Got ESC [, waiting for direction
-            unsafe { ROUTE_ESC_BRACKET = false; }
-            if esc_mod && crate::shade::input::try_arrow_keybind(key) {
-                if let Some(action) = crate::shade::input::poll_action() {
-                    crate::shade::handle_action(action);
-                }
-                continue;
-            }
-            // Not a shade keybind — forward full sequence
-            push_wasm_key(0x1B);
-            push_wasm_key(b'[');
-            push_wasm_key(key);
-            continue;
-        }
-
-        // Start of ESC sequence
-        if key == 0x1B {
-            unsafe {
-                ROUTE_ESC = true;
-                ROUTE_ESC_BRACKET = false;
-                ROUTE_ESC_MOD = crate::shade::input::is_mod_active();
-            }
-            continue;
-        }
-
-        // Shade keybinding (Mod+letter)
-        if crate::shade::input::try_keybind(key) {
-            if let Some(action) = crate::shade::input::poll_action() {
-                crate::shade::handle_action(action);
-            }
-            continue;
-        }
-
-        // Regular key → WASM app
-        push_wasm_key(key);
-    }
+    let idx = terminal_idx as usize;
+    if idx >= MAX_APP_BUFS { return false; }
+    APP_RUNNING[idx].load(AtOrd::Acquire)
 }
 
 /// Spawn a WASM module on a worker core. Returns immediately.
@@ -176,12 +140,11 @@ pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) -> 
     jobs[slot] = Some(WasmJob { bytes: wasm_bytes, cap_id, terminal_idx });
     drop(jobs);
 
-    // Clear WASM input buffer
-    WASM_KEY_HEAD.store(0, AtOrd::Relaxed);
-    WASM_KEY_TAIL.store(0, AtOrd::Relaxed);
-
-    // Mark this terminal as having a WASM app
-    WASM_TERMINAL.store(terminal_idx, core::sync::atomic::Ordering::Release);
+    // Clear per-app input buffer + mark terminal as having an app
+    clear_app_key_buf(terminal_idx);
+    if (terminal_idx as usize) < MAX_APP_BUFS {
+        APP_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
+    }
 
     crate::smp::scheduler::spawn(
         crate::smp::scheduler::Priority::Interactive,
@@ -204,6 +167,7 @@ fn wasm_worker_task(arg: u64) {
         Some(j) => j,
         None => return,
     };
+    let terminal_idx = job.terminal_idx;
 
     // Clone engine (Arc internally, cheap)
     let engine = match ENGINE.lock().as_ref().cloned() {
@@ -242,8 +206,10 @@ fn wasm_worker_task(arg: u64) {
 
     let _ = func.call(&mut store, &[], &mut []);
 
-    // Clear WASM terminal marker + signal completion
-    WASM_TERMINAL.store(255, core::sync::atomic::Ordering::Release);
+    // Clear app marker + signal completion
+    if (terminal_idx as usize) < MAX_APP_BUFS {
+        APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
+    }
     JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
 }
 
@@ -581,13 +547,42 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_input_poll() -> key or -1 — reads from WASM input buffer
-    // Core 0 routes keys here after filtering shade keybindings.
+    // npk_input_poll() -> key or -1 — non-blocking read from per-app buffer
     linker.func_wrap("env", "npk_input_poll",
-        |_caller: Caller<'_, HostState>| -> i32 {
-            match pop_wasm_key() {
+        |caller: Caller<'_, HostState>| -> i32 {
+            match pop_app_key(caller.data().terminal_idx) {
                 Some(k) => k as i32,
                 None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_input_wait(timeout_ms) -> key or -1 — blocking wait with timeout
+    // Spins on worker core checking per-app key buffer + TSC deadline.
+    // Replaces npk_sleep + npk_input_poll pattern in one call.
+    linker.func_wrap("env", "npk_input_wait",
+        |caller: Caller<'_, HostState>, timeout_ms: i32| -> i32 {
+            let term_idx = caller.data().terminal_idx;
+            if timeout_ms <= 0 {
+                return match pop_app_key(term_idx) {
+                    Some(k) => k as i32,
+                    None => -1,
+                };
+            }
+
+            let ms = (timeout_ms as u64).min(60_000);
+            let freq = crate::interrupts::tsc_freq();
+            let ticks_per_ms = freq / 1000;
+            let deadline = crate::interrupts::rdtsc() + ms * ticks_per_ms;
+
+            loop {
+                if let Some(k) = pop_app_key(term_idx) {
+                    return k as i32;
+                }
+                if crate::interrupts::rdtsc() >= deadline {
+                    return -1; // timeout
+                }
+                core::hint::spin_loop();
             }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
