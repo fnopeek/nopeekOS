@@ -441,13 +441,50 @@ pub fn poll_render() {
     if !terminal::is_dirty() { return; }
     terminal::clear_dirty();
 
-    // Full render to update ALL visible windows (not just focused).
-    // Needed for WASM apps (top) running in non-focused windows.
-    // Triggers once per dirty event (~1/s for top) — acceptable at 4K.
-    render_frame();
+    // Partial render: only re-render visible windows on current workspace.
+    // Much faster than full render_frame (one window rect vs full 4K scene).
+    framebuffer::with_fb(|fb| {
+        let info = fb.info();
+        let (shadow, _) = fb.shadow_ptr();
+
+        if let Some(ref comp) = *COMPOSITOR.lock() {
+            for win in &comp.windows {
+                if win.workspace != comp.active_workspace { continue; }
+                if !win.visible { continue; }
+
+                // Restore window region from BG layer
+                if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                    let pitch = info.pitch as usize;
+                    let y1 = (win.y + win.height).min(info.height);
+                    let x1 = (win.x + win.width).min(info.width);
+                    let bytes = x1.saturating_sub(win.x) as usize * 4;
+                    if bytes > 0 {
+                        for row in win.y..y1 {
+                            let off = row as usize * pitch + win.x as usize * 4;
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    bg_buf.add(off), shadow.add(off), bytes);
+                            }
+                        }
+                    }
+                }
+
+                // Re-render window chrome + text
+                let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
+                compositor::Compositor::render_window(shadow, info, win,
+                    comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
+            }
+        }
+
+        // Redraw cursor overlay
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
+        }
+    });
     return;
 
-    // Legacy partial render (only focused window) — kept for reference
+    // Legacy partial render path (kept for reference)
     #[allow(unreachable_code)]
     if layers_usable() {
         poll_render_layered();
