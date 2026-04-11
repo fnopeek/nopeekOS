@@ -269,6 +269,11 @@ pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
+/// Check and clear deferred render flag (for callers with their own mouse loop).
+pub fn take_deferred_render() -> bool {
+    DEFERRED_RENDER.swap(false, Ordering::Relaxed)
+}
+
 /// Process a shade action (called from intent loop).
 pub fn handle_action(action: input::ShadeAction) {
     use input::ShadeAction;
@@ -452,6 +457,11 @@ pub fn poll_render() {
         handle_mouse(&evt);
     }
 
+    // Deferred scene redraw (drag resize/swap sets this to avoid blocking event loop)
+    if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
+        render_frame();
+    }
+
     if !terminal::is_dirty() { return; }
     terminal::clear_dirty();
 
@@ -587,9 +597,9 @@ fn poll_render_legacy() {
 /// When set, handle_mouse enters slow path on EVERY event (not just button changes).
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Last tick when a drag-triggered render_frame was executed.
-/// Throttles drag renders to ~33fps (every 3 ticks at 100Hz).
-static LAST_DRAG_RENDER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Set by handle_mouse when a full scene redraw is needed but deferred.
+/// poll_render picks this up AFTER processing all mouse events.
+static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 
 /// Process a mouse event: update compositor state, redraw cursor overlay.
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
@@ -604,17 +614,6 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     let is_drag = DRAG_ACTIVE.load(Ordering::Relaxed);
 
     if is_button_change || is_drag {
-        // During active drag, throttle the ENTIRE slow path to ~33fps.
-        // Button changes (click/release) are always processed immediately.
-        if is_drag && !is_button_change {
-            let now = crate::interrupts::ticks();
-            let last = LAST_DRAG_RENDER.load(Ordering::Relaxed);
-            if now.saturating_sub(last) < 3 {
-                return; // Skip this drag-move event entirely
-            }
-            LAST_DRAG_RENDER.store(now, Ordering::Relaxed);
-        }
-
         let (x, y) = cursor::atomic_pos();
         let (btn, prev) = cursor::atomic_buttons();
         let (needs_redraw, needs_full, dragging) = with_compositor(|comp| {
@@ -632,7 +631,13 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
 
         if needs_redraw {
             if needs_full {
-                render_frame();
+                if dragging {
+                    // DEFER: don't render inside the event loop — blocks cursor.
+                    // poll_render renders AFTER all events are drained.
+                    DEFERRED_RENDER.store(true, Ordering::Relaxed);
+                } else {
+                    render_frame();
+                }
             } else {
                 terminal::mark_dirty();
             }
