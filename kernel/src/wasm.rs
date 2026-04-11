@@ -97,26 +97,56 @@ pub fn has_wasm_app(terminal_idx: u8) -> bool {
 /// Route keyboard input to a running WASM app.
 /// Called from intent loop when focused window has a WASM app.
 /// Handles shade keybindings, forwards regular keys to WASM.
+///
+/// ESC sequences (arrows) arrive as 3 bytes with slight delay.
+/// We use a state machine like read_line_with_tab does.
+static mut ROUTE_ESC: bool = false;
+static mut ROUTE_ESC_BRACKET: bool = false;
+static mut ROUTE_ESC_MOD: bool = false;
+
 pub fn route_keys_to_wasm() {
     while let Some(key) = crate::keyboard::read_key() {
-        // ESC sequence: might be Mod+arrow
-        if key == 0x1B {
-            let mod_active = crate::shade::input::is_mod_active();
-            if let Some(b'[') = crate::keyboard::read_key() {
-                if let Some(dir) = crate::keyboard::read_key() {
-                    if mod_active && crate::shade::input::try_arrow_keybind(dir) {
-                        if let Some(action) = crate::shade::input::poll_action() {
-                            crate::shade::handle_action(action);
-                        }
-                        continue;
-                    }
-                    push_wasm_key(0x1B);
-                    push_wasm_key(b'[');
-                    push_wasm_key(dir);
-                    continue;
-                }
+        // SAFETY: single-core access (Core 0 only)
+        let esc = unsafe { ROUTE_ESC };
+        let esc_bracket = unsafe { ROUTE_ESC_BRACKET };
+        let esc_mod = unsafe { ROUTE_ESC_MOD };
+
+        if esc && !esc_bracket {
+            // Got ESC, waiting for '['
+            unsafe { ROUTE_ESC = false; }
+            if key == b'[' {
+                unsafe { ROUTE_ESC_BRACKET = true; }
+                continue;
             }
+            // Not a sequence — forward ESC + this key
             push_wasm_key(0x1B);
+            push_wasm_key(key);
+            continue;
+        }
+
+        if esc_bracket {
+            // Got ESC [, waiting for direction
+            unsafe { ROUTE_ESC_BRACKET = false; }
+            if esc_mod && crate::shade::input::try_arrow_keybind(key) {
+                if let Some(action) = crate::shade::input::poll_action() {
+                    crate::shade::handle_action(action);
+                }
+                continue;
+            }
+            // Not a shade keybind — forward full sequence
+            push_wasm_key(0x1B);
+            push_wasm_key(b'[');
+            push_wasm_key(key);
+            continue;
+        }
+
+        // Start of ESC sequence
+        if key == 0x1B {
+            unsafe {
+                ROUTE_ESC = true;
+                ROUTE_ESC_BRACKET = false;
+                ROUTE_ESC_MOD = crate::shade::input::is_mod_active();
+            }
             continue;
         }
 
