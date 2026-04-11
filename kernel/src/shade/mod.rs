@@ -441,6 +441,14 @@ pub fn poll_render() {
     if !terminal::is_dirty() { return; }
     terminal::clear_dirty();
 
+    // Full render to update ALL visible windows (not just focused).
+    // Needed for WASM apps (top) running in non-focused windows.
+    // Triggers once per dirty event (~1/s for top) — acceptable at 4K.
+    render_frame();
+    return;
+
+    // Legacy partial render (only focused window) — kept for reference
+    #[allow(unreachable_code)]
     if layers_usable() {
         poll_render_layered();
     } else {

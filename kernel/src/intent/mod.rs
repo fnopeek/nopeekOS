@@ -168,6 +168,15 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
     HISTORY.lock().reset_cursor();
 
     loop {
+        // If focus changed to a WASM app window (e.g. mouse click), exit immediately
+        if crate::shade::is_active() {
+            let ft = crate::shade::terminal::active_idx();
+            if crate::wasm::has_wasm_app(ft) {
+                crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
+                return 0;
+            }
+        }
+
         // Poll network while waiting
         crate::net::poll();
         // Check for incoming npk-shell connections
