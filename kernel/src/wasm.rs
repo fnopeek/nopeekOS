@@ -55,6 +55,37 @@ static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
+// ── WASM Input Buffer (Core 0 writes, worker reads) ───────────
+
+use core::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+
+const WASM_KEY_BUF_SIZE: usize = 32;
+static mut WASM_KEY_BUF: [u8; WASM_KEY_BUF_SIZE] = [0; WASM_KEY_BUF_SIZE];
+static WASM_KEY_HEAD: AtomicUsize = AtomicUsize::new(0);
+static WASM_KEY_TAIL: AtomicUsize = AtomicUsize::new(0);
+
+/// Push a key to the WASM input buffer (called from Core 0 wait loop).
+fn push_wasm_key(key: u8) {
+    let head = WASM_KEY_HEAD.load(AtOrd::Relaxed);
+    let next = (head + 1) % WASM_KEY_BUF_SIZE;
+    if next != WASM_KEY_TAIL.load(AtOrd::Acquire) {
+        // SAFETY: single producer (Core 0 wait loop)
+        unsafe { WASM_KEY_BUF[head] = key; }
+        WASM_KEY_HEAD.store(next, AtOrd::Release);
+    }
+}
+
+/// Pop a key from the WASM input buffer (called from worker via npk_input_poll).
+fn pop_wasm_key() -> Option<u8> {
+    let tail = WASM_KEY_TAIL.load(AtOrd::Relaxed);
+    let head = WASM_KEY_HEAD.load(AtOrd::Acquire);
+    if tail == head { return None; }
+    // SAFETY: single consumer (worker core via npk_input_poll)
+    let key = unsafe { WASM_KEY_BUF[tail] };
+    WASM_KEY_TAIL.store((tail + 1) % WASM_KEY_BUF_SIZE, AtOrd::Release);
+    Some(key)
+}
+
 /// Spawn a WASM module on a worker core and wait for completion.
 /// Core 0 keeps rendering + processing mouse while waiting.
 /// Uses the current terminal — no new window needed.
@@ -75,11 +106,54 @@ pub fn run_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) {
         slot as u64,
     );
 
-    // Wait on Core 0 — keep UI responsive (render + mouse)
+    // Clear WASM input buffer
+    WASM_KEY_HEAD.store(0, AtOrd::Relaxed);
+    WASM_KEY_TAIL.store(0, AtOrd::Relaxed);
+
+    // Wait on Core 0 — keep UI responsive (render + mouse + keyboard)
     while !JOB_DONE[slot].load(core::sync::atomic::Ordering::Acquire) {
+        // Process rendering + mouse events
         if crate::shade::is_active() {
             crate::shade::poll_render();
         }
+
+        // Process keyboard input: shade keybindings → dispatch, regular → WASM buffer
+        while let Some(key) = crate::keyboard::read_key() {
+            // ESC sequence: might be arrow key with Mod held
+            if key == 0x1B {
+                let mod_active = crate::shade::input::is_mod_active();
+                // Try to read '[' + direction
+                if let Some(b'[') = crate::keyboard::read_key() {
+                    if let Some(dir) = crate::keyboard::read_key() {
+                        if mod_active && crate::shade::input::try_arrow_keybind(dir) {
+                            if let Some(action) = crate::shade::input::poll_action() {
+                                crate::shade::handle_action(action);
+                            }
+                            continue;
+                        }
+                        // Not a shade keybind — forward ESC sequence to WASM
+                        push_wasm_key(0x1B);
+                        push_wasm_key(b'[');
+                        push_wasm_key(dir);
+                        continue;
+                    }
+                }
+                push_wasm_key(0x1B);
+                continue;
+            }
+
+            // Try shade keybinding (Mod+letter)
+            if crate::shade::input::try_keybind(key) {
+                if let Some(action) = crate::shade::input::poll_action() {
+                    crate::shade::handle_action(action);
+                }
+                continue;
+            }
+
+            // Regular key → forward to WASM module
+            push_wasm_key(key);
+        }
+
         for _ in 0..10_000 { core::hint::spin_loop(); }
     }
 }
@@ -472,10 +546,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_input_poll() -> key or -1 — non-blocking keyboard read
+    // npk_input_poll() -> key or -1 — reads from WASM input buffer
+    // Core 0 routes keys here after filtering shade keybindings.
     linker.func_wrap("env", "npk_input_poll",
         |_caller: Caller<'_, HostState>| -> i32 {
-            match crate::keyboard::read_key() {
+            match pop_wasm_key() {
                 Some(k) => k as i32,
                 None => -1,
             }
