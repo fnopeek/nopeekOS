@@ -48,6 +48,18 @@ pub fn rdtsc() -> u64 {
 /// Estimate TSC frequency by calibrating against PIT (called once at boot).
 static TSC_FREQ: AtomicU64 = AtomicU64::new(2_000_000_000); // default 2GHz
 
+/// Raw CPUID 0x15 values for diagnostics (stored at boot)
+static CPUID15_EAX: AtomicU64 = AtomicU64::new(0);
+static CPUID15_EBX: AtomicU64 = AtomicU64::new(0);
+static CPUID15_ECX: AtomicU64 = AtomicU64::new(0);
+
+/// Get raw CPUID 0x15 values: (eax, ebx, ecx)
+pub fn cpuid15() -> (u32, u32, u32) {
+    (CPUID15_EAX.load(Ordering::Relaxed) as u32,
+     CPUID15_EBX.load(Ordering::Relaxed) as u32,
+     CPUID15_ECX.load(Ordering::Relaxed) as u32)
+}
+
 pub fn calibrate_tsc() {
     // CPUID leaf 0x15: TSC frequency = ECX * EBX / EAX
     // EAX = denominator, EBX = numerator, ECX = crystal clock (Hz)
@@ -74,6 +86,10 @@ pub fn calibrate_tsc() {
         ebx = ebx_out as u32;
         ecx = ecx_out as u32;
     }
+    CPUID15_EAX.store(eax as u64, Ordering::Relaxed);
+    CPUID15_EBX.store(ebx as u64, Ordering::Relaxed);
+    CPUID15_ECX.store(ecx as u64, Ordering::Relaxed);
+
     if eax > 0 && ebx > 0 && ecx > 0 {
         let freq = (ecx as u64 * ebx as u64) / eax as u64;
         if freq > 100_000_000 {

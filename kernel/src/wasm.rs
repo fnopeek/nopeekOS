@@ -329,6 +329,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     let core = (key >> 8) as usize;
                     crate::smp::per_core::core_usage(core) as i64
                 },
+                // CPUID 0x15 raw values for diagnostics
+                16 => { let (eax, _, _) = crate::interrupts::cpuid15(); eax as i64 },
+                17 => { let (_, ebx, _) = crate::interrupts::cpuid15(); ebx as i64 },
+                18 => { let (_, _, ecx) = crate::interrupts::cpuid15(); ecx as i64 },
                 _ => -1,
             }
         },
