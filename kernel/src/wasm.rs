@@ -6,6 +6,7 @@
 //! no ambient authority, no access beyond what was explicitly granted.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use wasmi::{Caller, Config, Engine, Linker, Module, Store, Val};
 use spin::Mutex;
 use crate::{kprint, kprintln, capability};
@@ -20,6 +21,8 @@ struct HostState {
     cap_id: CapId,
     /// When true, npk_print writes directly to terminal instead of buffering
     direct_output: bool,
+    /// Terminal index for direct output (255 = use active terminal via kprint)
+    terminal_idx: u8,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -29,6 +32,89 @@ const DEFAULT_FUEL: u64 = 10_000_000;
 
 /// Fuel budget for interactive apps (top, etc.) — effectively unlimited
 const INTERACTIVE_FUEL: u64 = 1_000_000_000;
+
+// ── Worker-Core WASM Jobs ──────────────────────────────────────
+
+const MAX_WASM_JOBS: usize = 4;
+
+struct WasmJob {
+    bytes: Vec<u8>,
+    cap_id: CapId,
+    terminal_idx: u8,
+}
+
+static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> = Mutex::new([
+    None, None, None, None,
+]);
+
+/// Spawn an interactive WASM module on a worker core.
+/// Returns immediately — the module runs in background.
+/// terminal_idx: which terminal the app writes to.
+pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) -> bool {
+    let mut jobs = WASM_JOBS.lock();
+    // Find a free slot
+    let slot = match jobs.iter().position(|j| j.is_none()) {
+        Some(i) => i,
+        None => { kprintln!("[npk] No free WASM job slots"); return false; }
+    };
+    jobs[slot] = Some(WasmJob { bytes: wasm_bytes, cap_id, terminal_idx });
+    drop(jobs);
+
+    crate::smp::scheduler::spawn(
+        crate::smp::scheduler::Priority::Interactive,
+        wasm_worker_task,
+        slot as u64,
+    );
+    true
+}
+
+/// Worker-core entry: picks up a WasmJob and runs it.
+fn wasm_worker_task(arg: u64) {
+    let slot = arg as usize;
+    let job = {
+        let mut jobs = WASM_JOBS.lock();
+        if slot >= MAX_WASM_JOBS { return; }
+        jobs[slot].take()
+    };
+    let job = match job {
+        Some(j) => j,
+        None => return,
+    };
+
+    // Clone engine (Arc internally, cheap)
+    let engine = match ENGINE.lock().as_ref().cloned() {
+        Some(e) => e,
+        None => return,
+    };
+
+    let module = match Module::new(&engine, &job.bytes) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    let mut store = Store::new(&engine, HostState {
+        output: String::new(),
+        cap_id: job.cap_id,
+        direct_output: true,
+        terminal_idx: job.terminal_idx,
+    });
+    let _ = store.set_fuel(INTERACTIVE_FUEL);
+
+    let mut linker = <Linker<HostState>>::new(&engine);
+    if register_host_functions(&mut linker).is_err() { return; }
+
+    let instance = match linker.instantiate_and_start(&mut store, &module) {
+        Ok(i) => i,
+        Err(_) => return,
+    };
+
+    let func = match instance.get_func(&store, "_start") {
+        Some(f) => f,
+        None => return,
+    };
+
+    let _ = func.call(&mut store, &[], &mut []);
+}
 
 pub fn init() {
     let mut config = Config::default();
@@ -69,6 +155,7 @@ pub fn execute_interactive(
         output: String::new(),
         cap_id,
         direct_output: true,
+        terminal_idx: 255, // active terminal
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -100,6 +187,7 @@ fn execute_inner(
         output: String::new(),
         cap_id,
         direct_output: false,
+        terminal_idx: 255,
     });
     store.set_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -143,7 +231,14 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
             if let Some(s) = read_wasm_str(&caller, ptr, len) {
                 if caller.data().direct_output {
-                    kprint!("{}", s);
+                    let idx = caller.data().terminal_idx;
+                    if idx < 8 {
+                        // Write to specific terminal (worker-core safe)
+                        crate::shade::terminal::write_idx(idx as usize, &s);
+                    } else {
+                        // Fallback: write to active terminal via kprint
+                        kprint!("{}", s);
+                    }
                 } else {
                     caller.data_mut().output.push_str(&s);
                 }
@@ -370,10 +465,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_clear() — clear the active terminal
+    // npk_clear() — clear the app's terminal
     linker.func_wrap("env", "npk_clear",
-        |_caller: Caller<'_, HostState>| {
-            crate::shade::terminal::clear();
+        |caller: Caller<'_, HostState>| {
+            let idx = caller.data().terminal_idx;
+            if idx < 8 {
+                crate::shade::terminal::clear_idx(idx as usize);
+            } else {
+                crate::shade::terminal::clear();
+            }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
