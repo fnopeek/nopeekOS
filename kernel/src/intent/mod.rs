@@ -522,14 +522,24 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut input_buf = [0u8; INPUT_BUF_SIZE];
 
     loop {
-        // If focused window has a running WASM app, route keys there
-        // instead of showing a prompt. Intent loop stays responsive.
+        // If focused window has a running WASM app, route keys there.
+        // No prompt, no read_line — just dispatch keys to the app's buffer.
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
             if crate::wasm::has_wasm_app(focused_term) {
-                crate::wasm::route_keys_to_wasm();
                 crate::shade::poll_render();
-                for _ in 0..10_000 { core::hint::spin_loop(); }
+                crate::net::poll();
+                // Route keyboard: shade keybinds → compositor, else → app
+                while let Some(key) = crate::keyboard::read_key() {
+                    if crate::shade::input::try_keybind(key) {
+                        if let Some(action) = crate::shade::input::poll_action() {
+                            crate::shade::handle_action(action);
+                        }
+                        continue;
+                    }
+                    crate::wasm::push_app_key(focused_term, key);
+                }
+                core::hint::spin_loop();
                 continue;
             }
         }

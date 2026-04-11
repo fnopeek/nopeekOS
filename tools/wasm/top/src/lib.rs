@@ -1,6 +1,7 @@
 //! top — nopeekOS system monitor (WASM module)
 //!
 //! Live-updating display: per-core CPU usage, frequency, memory, scheduler.
+//! Uses the App Display API: npk_print, npk_clear, npk_input_wait, npk_sys_info.
 //! Press 'q' to exit.
 
 #![no_std]
@@ -8,12 +9,17 @@
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
+// ── App Display API ──────────────────────────────────────────────
+
 unsafe extern "C" {
+    /// Write text to the app's display area.
     fn npk_print(ptr: i32, len: i32);
-    fn npk_sys_info(key: i32) -> i64;
-    fn npk_sleep(ms: i32) -> i32;
-    fn npk_input_poll() -> i32;
+    /// Clear the app's display.
     fn npk_clear();
+    /// Wait for a key press or timeout. Returns key (0-255) or -1 (timeout).
+    fn npk_input_wait(timeout_ms: i32) -> i32;
+    /// Query system information.
+    fn npk_sys_info(key: i32) -> i64;
 }
 
 fn print(s: &str) {
@@ -137,7 +143,7 @@ pub extern "C" fn _start() {
         print("  done="); print_num(completed);
         print("  steals="); print_num(steals); print("\n");
 
-        // Debug: CPUID 0x15 + TSC
+        // Debug
         let c15_eax = sys(16);
         let c15_ebx = sys(17);
         let c15_ecx = sys(18);
@@ -148,12 +154,8 @@ pub extern "C" fn _start() {
 
         print("  [q] quit\n");
 
-        unsafe { npk_sleep(1000); }
-
-        loop {
-            let key = unsafe { npk_input_poll() };
-            if key < 0 { break; }
-            if key == 0x71 || key == 0x51 { return; }
-        }
+        // Wait for key or 1-second timeout — instant response to 'q'
+        let key = unsafe { npk_input_wait(1000) };
+        if key == 0x71 || key == 0x51 { return; } // 'q' or 'Q'
     }
 }
