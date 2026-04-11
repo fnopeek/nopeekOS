@@ -43,11 +43,7 @@ static CORE_USAGE: [AtomicU32; 256] = {
     [ZERO; 256]
 };
 
-/// Per-core snapshots for delta computation
-static LAST_APERF: [AtomicU64; 256] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; 256]
-};
+/// Per-core MPERF + TSC snapshots for usage delta
 static LAST_MPERF: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
@@ -107,53 +103,43 @@ pub fn has_mwait() -> bool {
     HAS_MWAIT.load(Ordering::Relaxed)
 }
 
-/// Update per-core frequency and CPU usage using APERF/MPERF/TSC.
+/// Update per-core CPU usage and frequency.
 ///
-/// Like Linux aperfmperf.c:
-///   avg_freq = tsc_freq * delta_APERF / delta_MPERF
-///   usage %  = delta_MPERF * 100 / delta_TSC
+/// Usage:  MPERF/TSC * 100 (MPERF stops during C-states, TSC doesn't)
+/// Freq:   MSR 0x198 (IA32_PERF_STATUS) bits [15:8] = current ratio * 100 MHz
 ///
-/// APERF (0xE8): counts at actual core frequency, stops in C-states
-/// MPERF (0xE7): counts at max non-turbo rate, stops in C-states
-/// TSC:          counts at constant rate, never stops
+/// APERF/MPERF frequency formula gives wrong values on Gracemont E-cores,
+/// so we use the direct PERF_STATUS register for MHz instead.
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
 
-    // SAFETY: APERF/MPERF MSRs available on all Intel since Core 2
-    let (a_lo, a_hi): (u32, u32);
+    // Read MPERF (MSR 0xE7) for usage calculation
     let (m_lo, m_hi): (u32, u32);
-    unsafe {
-        core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi);
-        core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi);
-    }
-    let aperf = ((a_hi as u64) << 32) | a_lo as u64;
+    // SAFETY: MPERF MSR available on all Intel since Core 2
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi); }
     let mperf = ((m_hi as u64) << 32) | m_lo as u64;
     let tsc = crate::interrupts::rdtsc();
 
-    let prev_aperf = LAST_APERF[core_id].swap(aperf, Ordering::Relaxed);
     let prev_mperf = LAST_MPERF[core_id].swap(mperf, Ordering::Relaxed);
     let prev_tsc = LAST_TSC_CORE[core_id].swap(tsc, Ordering::Relaxed);
 
     if prev_tsc == 0 { return; } // First call — no delta yet
 
-    let delta_aperf = aperf.wrapping_sub(prev_aperf);
     let delta_mperf = mperf.wrapping_sub(prev_mperf);
     let delta_tsc = tsc.wrapping_sub(prev_tsc);
 
-    // CPU usage = MPERF/TSC * 100 (MPERF stops during idle, TSC doesn't)
+    // CPU usage = MPERF/TSC * 100
     if delta_tsc > 0 {
         let usage = (delta_mperf * 100).checked_div(delta_tsc).unwrap_or(0);
         CORE_USAGE[core_id].store(usage.min(100) as u32, Ordering::Relaxed);
     }
 
-    // Frequency = TSC_freq * APERF/MPERF (like Linux aperfmperf.c)
-    if delta_mperf > 0 {
-        let tsc_mhz = crate::interrupts::tsc_freq() / 1_000_000;
-        let avg_mhz = delta_aperf.saturating_mul(tsc_mhz) / delta_mperf;
-        CORE_MHZ[core_id].store(avg_mhz as u32, Ordering::Relaxed);
-    } else {
-        CORE_MHZ[core_id].store(0, Ordering::Relaxed);
-    }
+    // Frequency from PERF_STATUS: bits [15:8] = current ratio * 100 MHz bus
+    let perf_lo: u32;
+    // SAFETY: MSR 0x198 readable on all x86_64 Intel in ring 0
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x198u32, out("eax") perf_lo, out("edx") _); }
+    let ratio = (perf_lo >> 8) & 0xFF;
+    CORE_MHZ[core_id].store(ratio * 100, Ordering::Relaxed);
 }
 
 /// Get last measured frequency in MHz for a core.
