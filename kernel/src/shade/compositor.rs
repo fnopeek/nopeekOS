@@ -201,6 +201,8 @@ impl Compositor {
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             self.bar.set_title(&win.title);
             terminal::set_active_terminal(win.terminal_idx);
+            // Restore saved cursor position for the newly active terminal
+            terminal::restore_cursor();
         }
         // Don't set needs_full_redraw — render_damaged handles 2 windows only
     }
