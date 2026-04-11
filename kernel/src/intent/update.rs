@@ -72,73 +72,88 @@ pub fn intent_update(_args: &str) {
 
     let current = env!("CARGO_PKG_VERSION");
     kprintln!("[npk] Available: v{} (current: v{})", manifest.version, current);
-    kprintln!("[npk] Size: {} bytes", manifest.size);
+
+    let mut kernel_updated = false;
 
     if manifest.version == current {
-        kprintln!("[npk] Already up to date.");
-        return;
-    }
+        kprintln!("[npk] Kernel up to date.");
+    } else {
+        kprintln!("[npk] Size: {} bytes", manifest.size);
 
-    // 2. Download kernel
-    kprintln!("[npk] Downloading kernel.bin ({} KB)...", manifest.size / 1024);
-    let kernel_path = alloc::format!("{}/kernel.bin", UPDATE_BASE);
-    let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, MAX_KERNEL_SIZE) {
-        Ok(d) => d,
-        Err(e) => { kprintln!("[npk] Download failed: {}", e); return; }
-    };
+        // 2. Download kernel
+        kprintln!("[npk] Downloading kernel.bin ({} KB)...", manifest.size / 1024);
+        let kernel_path = alloc::format!("{}/kernel.bin", UPDATE_BASE);
+        let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, MAX_KERNEL_SIZE) {
+            Ok(d) => d,
+            Err(e) => { kprintln!("[npk] Download failed: {}", e); return; }
+        };
 
-    if kernel_data.len() != manifest.size {
-        kprintln!("[npk] Size mismatch: got {} expected {}", kernel_data.len(), manifest.size);
-        return;
-    }
-
-    // 3. Verify SHA-384
-    kprint!("[npk] Verifying SHA-384... ");
-    let hash = crate::tls::sha256::sha384(&kernel_data);
-    if hash != manifest.sha384 {
-        kprintln!("FAILED");
-        kprintln!("[npk] Checksum mismatch! Update rejected.");
-        return;
-    }
-    kprintln!("OK");
-
-    // 4. Download signature
-    kprintln!("[npk] Downloading signature...");
-    let sig_path = alloc::format!("{}/kernel.sig", UPDATE_BASE);
-    let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
-        Ok(d) => d,
-        Err(e) => { kprintln!("[npk] Signature download failed: {}", e); return; }
-    };
-
-    // 5. Verify ECDSA P-384 signature (reuse SHA-384 hash from step 3)
-    kprint!("[npk] Verifying ECDSA P-384 signature... ");
-    let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-    if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-        kprintln!("FAILED");
-        kprintln!("[npk] Invalid signature! Update rejected.");
-        return;
-    }
-    kprintln!("OK");
-
-    // 6. Find ESP partition
-    kprint!("[npk] Locating ESP partition... ");
-    let esp_start = match crate::gpt::detect_esp_offset() {
-        Some(s) => { kprintln!("sector {}", s); s }
-        None => { kprintln!("not found"); kprintln!("[npk] No ESP partition. Is this a GPT disk?"); return; }
-    };
-
-    // 7. Write to ESP
-    kprintln!("[npk] Writing kernel to ESP...");
-    match crate::fat32::update_kernel(esp_start, &kernel_data) {
-        Ok(()) => {}
-        Err(e) => {
-            kprintln!("[npk] ESP write failed: {}", e);
+        if kernel_data.len() != manifest.size {
+            kprintln!("[npk] Size mismatch: got {} expected {}", kernel_data.len(), manifest.size);
             return;
         }
+
+        // 3. Verify SHA-384
+        kprint!("[npk] Verifying SHA-384... ");
+        let hash = crate::tls::sha256::sha384(&kernel_data);
+        if hash != manifest.sha384 {
+            kprintln!("FAILED");
+            kprintln!("[npk] Checksum mismatch! Update rejected.");
+            return;
+        }
+        kprintln!("OK");
+
+        // 4. Download signature
+        kprintln!("[npk] Downloading signature...");
+        let sig_path = alloc::format!("{}/kernel.sig", UPDATE_BASE);
+        let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
+            Ok(d) => d,
+            Err(e) => { kprintln!("[npk] Signature download failed: {}", e); return; }
+        };
+
+        // 5. Verify ECDSA P-384 signature (reuse SHA-384 hash from step 3)
+        kprint!("[npk] Verifying ECDSA P-384 signature... ");
+        let pubkey = &crate::update_key::UPDATE_PUB_KEY;
+        if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
+            kprintln!("FAILED");
+            kprintln!("[npk] Invalid signature! Update rejected.");
+            return;
+        }
+        kprintln!("OK");
+
+        // 6. Find ESP partition
+        kprint!("[npk] Locating ESP partition... ");
+        let esp_start = match crate::gpt::detect_esp_offset() {
+            Some(s) => { kprintln!("sector {}", s); s }
+            None => { kprintln!("not found"); kprintln!("[npk] No ESP partition. Is this a GPT disk?"); return; }
+        };
+
+        // 7. Write to ESP
+        kprintln!("[npk] Writing kernel to ESP...");
+        match crate::fat32::update_kernel(esp_start, &kernel_data) {
+            Ok(()) => {}
+            Err(e) => {
+                kprintln!("[npk] ESP write failed: {}", e);
+                return;
+            }
+        }
+
+        kprintln!("[npk] Kernel v{} installed.", manifest.version);
+        kernel_updated = true;
     }
 
-    kprintln!("[npk] ====================================");
-    kprintln!("[npk]  Update v{} installed!", manifest.version);
-    kprintln!("[npk]  Type 'reboot' to apply.");
-    kprintln!("[npk] ====================================");
+    // 8. Update installed WASM modules
+    kprintln!("[npk] Checking modules...");
+    let mod_count = super::install::update_all_modules();
+    if mod_count > 0 {
+        kprintln!("[npk] {} module(s) updated.", mod_count);
+    } else {
+        kprintln!("[npk] Modules up to date.");
+    }
+
+    if kernel_updated {
+        kprintln!("[npk] ====================================");
+        kprintln!("[npk]  Type 'reboot' to apply.");
+        kprintln!("[npk] ====================================");
+    }
 }
