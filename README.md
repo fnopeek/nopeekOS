@@ -568,7 +568,16 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 9. **No Ambient Authority** -- No root, no sudo, no privilege elevation
 10. **Fuel Metering** -- 10M instruction budget per module prevents DoS
 11. **TLS 1.3** -- All network communication encrypted (3 cipher suites, X25519 + P-384)
-12. **Signed OTA Updates** -- ECDSA P-384 signed kernel images, SHA-384 integrity check
+12. **Signed OTA Updates** -- ECDSA P-384 signed kernel + modules, SHA-384 integrity check
+
+> **Future: Code Signing Key Hierarchy**
+>
+> Currently all artifacts (kernel, WASM modules) are signed with a single ECDSA P-384 key.
+> When third-party modules become possible, this needs to evolve:
+> - Separate keys for kernel vs. modules (compromise isolation)
+> - Per-publisher keys for third-party WASM apps
+> - Root key (offline) signs sub-keys; sub-keys sign artifacts
+> - Sub-key revocation mechanism (capability-based, temporal)
 
 ---
 
