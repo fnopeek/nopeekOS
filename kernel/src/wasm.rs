@@ -8,7 +8,7 @@
 use alloc::string::String;
 use wasmi::{Caller, Config, Engine, Linker, Module, Store, Val};
 use spin::Mutex;
-use crate::{kprintln, capability};
+use crate::{kprint, kprintln, capability};
 use crate::capability::CapId;
 
 pub struct WasmResult {
@@ -18,12 +18,17 @@ pub struct WasmResult {
 struct HostState {
     output: String,
     cap_id: CapId,
+    /// When true, npk_print writes directly to terminal instead of buffering
+    direct_output: bool,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
 /// Default fuel budget per module execution (~10M instructions)
 const DEFAULT_FUEL: u64 = 10_000_000;
+
+/// Fuel budget for interactive apps (top, etc.) — effectively unlimited
+const INTERACTIVE_FUEL: u64 = 1_000_000_000;
 
 pub fn init() {
     let mut config = Config::default();
@@ -46,6 +51,42 @@ pub fn execute_sandboxed(
     execute_inner(wasm_bytes, func_name, args, cap_id)
 }
 
+/// Execute a WASM module in interactive mode (live display).
+/// npk_print writes directly to terminal. Used for long-running apps (top).
+pub fn execute_interactive(
+    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
+) -> Result<WasmResult, WasmError> {
+    // Clone engine to release ENGINE lock — interactive apps run for a long time
+    let engine = {
+        let guard = ENGINE.lock();
+        guard.as_ref().ok_or(WasmError::NotInitialized)?.clone()
+    };
+
+    let module = Module::new(&engine, wasm_bytes)
+        .map_err(|_| WasmError::InvalidModule)?;
+
+    let mut store = Store::new(&engine, HostState {
+        output: String::new(),
+        cap_id,
+        direct_output: true,
+    });
+    store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
+
+    let mut linker = <Linker<HostState>>::new(&engine);
+    register_host_functions(&mut linker)?;
+
+    let instance = linker.instantiate_and_start(&mut store, &module)
+        .map_err(|_| WasmError::InstantiationFailed)?;
+
+    let func = instance.get_func(&store, func_name)
+        .ok_or(WasmError::FunctionNotFound)?;
+
+    func.call(&mut store, args, &mut [])
+        .map_err(|e| map_exec_error(e))?;
+
+    Ok(WasmResult { output: String::new() })
+}
+
 fn execute_inner(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
 ) -> Result<WasmResult, WasmError> {
@@ -58,6 +99,7 @@ fn execute_inner(
     let mut store = Store::new(engine, HostState {
         output: String::new(),
         cap_id,
+        direct_output: false,
     });
     store.set_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -96,11 +138,15 @@ fn execute_inner(
 }
 
 fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmError> {
-    // npk_print(ptr, len) — write to output buffer (no cap needed)
+    // npk_print(ptr, len) — write to output buffer or directly to terminal
     linker.func_wrap("env", "npk_print",
         |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
             if let Some(s) = read_wasm_str(&caller, ptr, len) {
-                caller.data_mut().output.push_str(&s);
+                if caller.data().direct_output {
+                    kprint!("{}", s);
+                } else {
+                    caller.data_mut().output.push_str(&s);
+                }
             }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
@@ -273,8 +319,58 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     let core = (key >> 8) as usize;
                     crate::smp::scheduler::queue_len(core) as i64
                 },
+                12 => {
+                    let core = (key >> 8) as usize;
+                    crate::smp::per_core::core_freq_mhz(core) as i64
+                },
+                13 => crate::smp::per_core::max_turbo_mhz() as i64,
+                14 => crate::smp::per_core::min_eff_mhz() as i64,
                 _ => -1,
             }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_sleep(ms) -> 0 — sleep for N milliseconds, render + process events during wait
+    linker.func_wrap("env", "npk_sleep",
+        |_caller: Caller<'_, HostState>, ms: i32| -> i32 {
+            if ms <= 0 || ms > 60000 { return -1; }
+
+            // Render current frame before sleeping
+            if crate::shade::is_active() {
+                crate::shade::render_frame();
+            }
+
+            // Busy-wait with periodic event processing
+            let freq = crate::interrupts::tsc_freq();
+            let ticks_per_ms = freq / 1000;
+            let target = crate::interrupts::rdtsc() + (ms as u64) * ticks_per_ms;
+            while crate::interrupts::rdtsc() < target {
+                // Process mouse events + animations during sleep
+                if crate::shade::is_active() {
+                    crate::shade::poll_render();
+                }
+                // Brief spin to not saturate event processing
+                for _ in 0..10_000 { core::hint::spin_loop(); }
+            }
+
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_input_poll() -> key or -1 — non-blocking keyboard read
+    linker.func_wrap("env", "npk_input_poll",
+        |_caller: Caller<'_, HostState>| -> i32 {
+            match crate::keyboard::read_key() {
+                Some(k) => k as i32,
+                None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_clear() — clear the active terminal
+    linker.func_wrap("env", "npk_clear",
+        |_caller: Caller<'_, HostState>| {
+            crate::shade::terminal::clear();
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 

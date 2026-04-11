@@ -563,7 +563,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
         "top" | "htop" => {
-            wasm::intent_run("top");
+            wasm::intent_run_interactive("top");
         }
         "uname" | "version" | "kernel" => {
             system::intent_uname(args);
