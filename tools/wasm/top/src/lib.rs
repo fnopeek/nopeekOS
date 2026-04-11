@@ -1,6 +1,6 @@
 //! top — nopeekOS system monitor (WASM module)
 //!
-//! Live-updating display: per-core frequency, memory, scheduler stats.
+//! Live-updating display: per-core CPU usage, frequency, memory, scheduler.
 //! Runs in interactive mode — npk_print writes directly to terminal.
 //! Press 'q' to exit.
 
@@ -50,8 +50,8 @@ fn print_num_padded(n: i64, width: usize) {
     print_num(n);
 }
 
-fn print_bar(used: i64, total: i64, width: usize) {
-    let filled = if total > 0 { (used * width as i64 / total) as usize } else { 0 };
+fn print_bar(pct: i64, width: usize) {
+    let filled = (pct as usize * width / 100).min(width);
     let empty = width.saturating_sub(filled);
     print("[");
     let mut i = 0;
@@ -76,7 +76,6 @@ pub extern "C" fn _start() {
         let steals = sys(7);
         let workers = sys(8);
         let has_mwait = sys(9);
-        let tsc_mhz = sys(10);
         let max_turbo = sys(13);
         let min_eff = sys(14);
 
@@ -102,11 +101,7 @@ pub extern "C" fn _start() {
             print_num(min_eff);
             print("-");
             print_num(max_turbo);
-            print(" MHz (HWP auto-scaling)");
-        } else {
-            print("TSC ");
-            print_num(tsc_mhz);
-            print(" MHz");
+            print(" MHz (HWP)");
         }
         print("  [");
         print_num(workers);
@@ -116,14 +111,20 @@ pub extern "C" fn _start() {
 
         print("  ──────────────────────────────────────────────────\n\n");
 
-        // Per-core status with frequency
-        print("  CORE    MHz  QUEUE  STATUS\n");
-        print("  ────  ─────  ─────  ──────\n");
+        // Per-core status
+        print("  CORE  USAGE    MHz  QUEUE  STATUS\n");
+        print("  ────  ─────  ─────  ─────  ──────\n");
 
         let mut i: i64 = 0;
         while i < cores {
             print("  ");
             print_num_padded(i, 4);
+
+            // CPU usage %
+            let usage = sys(15 | ((i as i32) << 8) as i32);
+            print("  ");
+            print_num_padded(usage, 3);
+            print("%");
 
             // Per-core MHz
             let mhz = sys(12 | ((i as i32) << 8) as i32);
@@ -138,7 +139,7 @@ pub extern "C" fn _start() {
             // Status
             if i == 0 {
                 print("  kernel/irq");
-            } else if qlen > 0 {
+            } else if usage > 5 {
                 print("  working");
             } else {
                 print("  idle");
@@ -158,12 +159,12 @@ pub extern "C" fn _start() {
         print(" KB / ");
         print_num(heap_total / (1024 * 1024));
         print(" MB  ");
-        print_bar(heap_used, heap_total, 20);
+        print_bar(heap_used * 100 / heap_total.max(1), 20);
         print("\n");
 
         // Scheduler
         print("\n  SCHEDULER\n  ─────────\n");
-        print("  Spawned:   ");
+        print("  Spawned: ");
         print_num(spawned);
         print("  Completed: ");
         print_num(completed);
@@ -173,14 +174,14 @@ pub extern "C" fn _start() {
 
         print("\n  [q] quit\n");
 
-        // Sleep 1 second (renders frame, processes events)
+        // Sleep 1 second
         unsafe { npk_sleep(1000); }
 
-        // Drain input buffer, check for 'q'
+        // Check for 'q'
         loop {
             let key = unsafe { npk_input_poll() };
             if key < 0 { break; }
-            if key == 0x71 || key == 0x51 { return; } // 'q' or 'Q'
+            if key == 0x71 || key == 0x51 { return; }
         }
     }
 }

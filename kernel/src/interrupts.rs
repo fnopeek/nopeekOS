@@ -49,7 +49,9 @@ pub fn rdtsc() -> u64 {
 static TSC_FREQ: AtomicU64 = AtomicU64::new(2_000_000_000); // default 2GHz
 
 pub fn calibrate_tsc() {
-    // Use CPUID leaf 0x15 (TSC/crystal ratio) if available
+    // CPUID leaf 0x15: TSC frequency = ECX * EBX / EAX
+    // EAX = denominator, EBX = numerator, ECX = crystal clock (Hz)
+    let eax: u32;
     let ebx: u32;
     let ecx: u32;
     unsafe {
@@ -66,21 +68,24 @@ pub fn calibrate_tsc() {
             "pop rbx",
             out(reg) ebx_out,
             out(reg) ecx_out,
-            out("eax") _,
+            out("eax") eax,
             out("edx") _,
         );
         ebx = ebx_out as u32;
         ecx = ecx_out as u32;
     }
-    if ebx > 0 && ecx > 0 {
-        let freq = ecx as u64 * ebx as u64;
+    if eax > 0 && ebx > 0 && ecx > 0 {
+        let freq = (ecx as u64 * ebx as u64) / eax as u64;
         if freq > 100_000_000 {
             TSC_FREQ.store(freq, Ordering::Relaxed);
+            kprintln!("[npk] TSC: {} MHz (CPUID 0x15: crystal={}Hz ratio={}/{})",
+                freq / 1_000_000, ecx, ebx, eax);
             return;
         }
     }
     // Fallback: 2 GHz default
     TSC_FREQ.store(2_000_000_000, Ordering::Relaxed);
+    kprintln!("[npk] TSC: 2000 MHz (default, CPUID 0x15 not available)");
 }
 
 /// Get TSC frequency in Hz.
