@@ -196,6 +196,12 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 ShadeAction::Workspace(_) | ShadeAction::MoveToWorkspace(_) => {
                     crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
                     crate::shade::handle_action(action);
+                    // If focus switched to a WASM app window, exit read_line
+                    // so run_loop can enter key routing mode
+                    let new_term = crate::shade::terminal::active_idx();
+                    if crate::wasm::has_wasm_app(new_term) {
+                        return 0;
+                    }
                     let (p, c) = crate::shade::terminal::restore_input_with_cursor(buf);
                     pos = p;
                     cursor = c;
@@ -203,6 +209,11 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 ShadeAction::NewWindow => {
                     crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
                     crate::shade::handle_action(action);
+                    // If new window somehow has WASM app, exit
+                    let new_term = crate::shade::terminal::active_idx();
+                    if crate::wasm::has_wasm_app(new_term) {
+                        return 0;
+                    }
                     pos = 0;
                     cursor = 0;
                 }
