@@ -37,14 +37,20 @@ static CORE_MHZ: [AtomicU32; 256] = {
     [ZERO; 256]
 };
 
-/// Per-core CPU usage in percent (MPERF/TSC ratio, 0-100)
+/// Per-core CPU usage in percent (0-100)
 static CORE_USAGE: [AtomicU32; 256] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
     [ZERO; 256]
 };
 
-/// Per-core MPERF + TSC snapshots for usage delta
-static LAST_MPERF: [AtomicU64; 256] = {
+/// Per-core cumulative busy TSC cycles (only incremented during actual task work)
+static CORE_BUSY_TSC: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+
+/// Snapshots for delta computation
+static LAST_BUSY: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
 };
@@ -105,32 +111,25 @@ pub fn has_mwait() -> bool {
 
 /// Update per-core CPU usage and frequency.
 ///
-/// Usage:  MPERF/TSC * 100 (MPERF stops during C-states, TSC doesn't)
-/// Freq:   MSR 0x198 (IA32_PERF_STATUS) bits [15:8] = current ratio * 100 MHz
-///
-/// APERF/MPERF frequency formula gives wrong values on Gracemont E-cores,
-/// so we use the direct PERF_STATUS register for MHz instead.
+/// Usage: explicit busy-TSC tracking (task execution time / total time).
+///        Independent of MPERF behavior — works on all CPUs.
+/// Freq:  MSR 0x198 (IA32_PERF_STATUS) bits [15:8] = current ratio * 100 MHz
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
 
-    // Read MPERF (MSR 0xE7) for usage calculation
-    let (m_lo, m_hi): (u32, u32);
-    // SAFETY: MPERF MSR available on all Intel since Core 2
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi); }
-    let mperf = ((m_hi as u64) << 32) | m_lo as u64;
+    let busy = CORE_BUSY_TSC[core_id].load(Ordering::Relaxed);
     let tsc = crate::interrupts::rdtsc();
 
-    let prev_mperf = LAST_MPERF[core_id].swap(mperf, Ordering::Relaxed);
+    let prev_busy = LAST_BUSY[core_id].swap(busy, Ordering::Relaxed);
     let prev_tsc = LAST_TSC_CORE[core_id].swap(tsc, Ordering::Relaxed);
 
-    if prev_tsc == 0 { return; } // First call — no delta yet
+    if prev_tsc == 0 { return; } // First call
 
-    let delta_mperf = mperf.wrapping_sub(prev_mperf);
+    let delta_busy = busy.wrapping_sub(prev_busy);
     let delta_tsc = tsc.wrapping_sub(prev_tsc);
 
-    // CPU usage = MPERF/TSC * 100
     if delta_tsc > 0 {
-        let usage = (delta_mperf * 100).checked_div(delta_tsc).unwrap_or(0);
+        let usage = (delta_busy * 100).checked_div(delta_tsc).unwrap_or(0);
         CORE_USAGE[core_id].store(usage.min(100) as u32, Ordering::Relaxed);
     }
 
@@ -140,6 +139,12 @@ pub fn update_core_freq(core_id: usize) {
     unsafe { core::arch::asm!("rdmsr", in("ecx") 0x198u32, out("eax") perf_lo, out("edx") _); }
     let ratio = (perf_lo >> 8) & 0xFF;
     CORE_MHZ[core_id].store(ratio * 100, Ordering::Relaxed);
+}
+
+/// Record task execution time on a core (called from AP work loop).
+pub fn add_busy_tsc(core_id: usize, cycles: u64) {
+    if core_id >= 256 { return; }
+    CORE_BUSY_TSC[core_id].fetch_add(cycles, Ordering::Relaxed);
 }
 
 /// Get last measured frequency in MHz for a core.
@@ -239,13 +244,13 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     loop {
         // Try to get work (own deque first, then steal)
         if let Some(task) = super::scheduler::next_task(cid) {
+            let t0 = crate::interrupts::rdtsc();
             (task.func)(task.arg);
-            update_core_freq(cid); // After work: captures active frequency
+            add_busy_tsc(cid, crate::interrupts::rdtsc() - t0);
             continue;
         }
 
-        // Before sleep: APERF delta covers period since last update
-        // (includes any work done + idle time → true average)
+        // Before sleep: update usage stats (delta covers work + idle since last call)
         update_core_freq(cid);
 
         // No work — sleep efficiently
