@@ -250,6 +250,11 @@ pub fn free(idx: u8) {
     }
 }
 
+/// Get the active terminal index.
+pub fn active_idx() -> u8 {
+    ACTIVE_IDX.load(Ordering::Acquire)
+}
+
 /// Set which terminal receives kprintln output.
 pub fn set_active_terminal(idx: u8) {
     ACTIVE_IDX.store(idx, Ordering::Release);

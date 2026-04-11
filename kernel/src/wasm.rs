@@ -47,16 +47,25 @@ static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> = Mutex::new([
     None, None, None, None,
 ]);
 
-/// Spawn an interactive WASM module on a worker core.
-/// Returns immediately — the module runs in background.
-/// terminal_idx: which terminal the app writes to.
-pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) -> bool {
+/// Per-job completion flag (set by worker, read by BSP)
+static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+];
+
+/// Spawn a WASM module on a worker core and wait for completion.
+/// Core 0 keeps rendering + processing mouse while waiting.
+/// Uses the current terminal — no new window needed.
+pub fn run_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) {
     let mut jobs = WASM_JOBS.lock();
-    // Find a free slot
     let slot = match jobs.iter().position(|j| j.is_none()) {
         Some(i) => i,
-        None => { kprintln!("[npk] No free WASM job slots"); return false; }
+        None => { kprintln!("[npk] No free WASM job slots"); return; }
     };
+
+    JOB_DONE[slot].store(false, core::sync::atomic::Ordering::Relaxed);
     jobs[slot] = Some(WasmJob { bytes: wasm_bytes, cap_id, terminal_idx });
     drop(jobs);
 
@@ -65,10 +74,17 @@ pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) -> 
         wasm_worker_task,
         slot as u64,
     );
-    true
+
+    // Wait on Core 0 — keep UI responsive (render + mouse)
+    while !JOB_DONE[slot].load(core::sync::atomic::Ordering::Acquire) {
+        if crate::shade::is_active() {
+            crate::shade::poll_render();
+        }
+        for _ in 0..10_000 { core::hint::spin_loop(); }
+    }
 }
 
-/// Worker-core entry: picks up a WasmJob and runs it.
+/// Worker-core entry: runs WASM module, signals completion.
 fn wasm_worker_task(arg: u64) {
     let slot = arg as usize;
     let job = {
@@ -84,12 +100,12 @@ fn wasm_worker_task(arg: u64) {
     // Clone engine (Arc internally, cheap)
     let engine = match ENGINE.lock().as_ref().cloned() {
         Some(e) => e,
-        None => return,
+        None => { JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release); return; }
     };
 
     let module = match Module::new(&engine, &job.bytes) {
         Ok(m) => m,
-        Err(_) => return,
+        Err(_) => { JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release); return; }
     };
 
     let mut store = Store::new(&engine, HostState {
@@ -101,19 +117,25 @@ fn wasm_worker_task(arg: u64) {
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
     let mut linker = <Linker<HostState>>::new(&engine);
-    if register_host_functions(&mut linker).is_err() { return; }
+    if register_host_functions(&mut linker).is_err() {
+        JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
+        return;
+    }
 
     let instance = match linker.instantiate_and_start(&mut store, &module) {
         Ok(i) => i,
-        Err(_) => return,
+        Err(_) => { JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release); return; }
     };
 
     let func = match instance.get_func(&store, "_start") {
         Some(f) => f,
-        None => return,
+        None => { JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release); return; }
     };
 
     let _ = func.call(&mut store, &[], &mut []);
+
+    // Signal completion
+    JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
 }
 
 pub fn init() {
@@ -433,22 +455,17 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_sleep(ms) -> 0 — sleep for N milliseconds, render + process events during wait
+    // npk_sleep(ms) -> 0 — sleep for N milliseconds.
+    // Worker-core: just waits (Core 0 handles rendering via poll_render).
     linker.func_wrap("env", "npk_sleep",
         |_caller: Caller<'_, HostState>, ms: i32| -> i32 {
             if ms <= 0 || ms > 60000 { return -1; }
 
-            // Busy-wait with periodic event processing.
-            // poll_render handles mouse events + dirty window re-render (partial, fast).
-            // No full render_frame — that would block the mouse at 4K.
             let freq = crate::interrupts::tsc_freq();
             let ticks_per_ms = freq / 1000;
             let target = crate::interrupts::rdtsc() + (ms as u64) * ticks_per_ms;
             while crate::interrupts::rdtsc() < target {
-                if crate::shade::is_active() {
-                    crate::shade::poll_render();
-                }
-                for _ in 0..10_000 { core::hint::spin_loop(); }
+                core::hint::spin_loop();
             }
 
             0
