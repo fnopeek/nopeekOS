@@ -31,18 +31,28 @@ static SCHEDULER_READY: AtomicBool = AtomicBool::new(false);
 /// True if CPU supports MONITOR/MWAIT (detected at boot)
 static HAS_MWAIT: AtomicBool = AtomicBool::new(false);
 
-/// Per-core average frequency in MHz (APERF/TSC ratio)
+/// Per-core average frequency in MHz (APERF/MPERF ratio)
 static CORE_MHZ: [AtomicU32; 256] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
     [ZERO; 256]
 };
 
-/// Per-core APERF + TSC snapshots for delta computation
+/// Per-core CPU usage in percent (MPERF/TSC ratio, 0-100)
+static CORE_USAGE: [AtomicU32; 256] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; 256]
+};
+
+/// Per-core snapshots for delta computation
 static LAST_APERF: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
 };
-static LAST_TSC: [AtomicU64; 256] = {
+static LAST_MPERF: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+static LAST_TSC_CORE: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
 };
@@ -97,33 +107,53 @@ pub fn has_mwait() -> bool {
     HAS_MWAIT.load(Ordering::Relaxed)
 }
 
-/// Update per-core average frequency using APERF/TSC ratio.
-/// APERF (MSR 0xE8) counts actual clock cycles — stops during C-states.
-/// TSC counts at constant rate — continues during sleep.
-/// Result: avg_mhz = (delta_aperf / delta_tsc) * tsc_mhz
-/// Idle cores show low MHz, active cores show turbo MHz.
+/// Update per-core frequency and CPU usage using APERF/MPERF/TSC.
+///
+/// Like Linux aperfmperf.c:
+///   avg_freq = tsc_freq * delta_APERF / delta_MPERF
+///   usage %  = delta_MPERF * 100 / delta_TSC
+///
+/// APERF (0xE8): counts at actual core frequency, stops in C-states
+/// MPERF (0xE7): counts at max non-turbo rate, stops in C-states
+/// TSC:          counts at constant rate, never stops
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
 
-    // SAFETY: APERF MSR 0xE8 available on all Intel since Core 2 (2006)
+    // SAFETY: APERF/MPERF MSRs available on all Intel since Core 2
     let (a_lo, a_hi): (u32, u32);
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi); }
+    let (m_lo, m_hi): (u32, u32);
+    unsafe {
+        core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi);
+        core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi);
+    }
     let aperf = ((a_hi as u64) << 32) | a_lo as u64;
+    let mperf = ((m_hi as u64) << 32) | m_lo as u64;
     let tsc = crate::interrupts::rdtsc();
 
     let prev_aperf = LAST_APERF[core_id].swap(aperf, Ordering::Relaxed);
-    let prev_tsc = LAST_TSC[core_id].swap(tsc, Ordering::Relaxed);
+    let prev_mperf = LAST_MPERF[core_id].swap(mperf, Ordering::Relaxed);
+    let prev_tsc = LAST_TSC_CORE[core_id].swap(tsc, Ordering::Relaxed);
 
     if prev_tsc == 0 { return; } // First call — no delta yet
 
     let delta_aperf = aperf.wrapping_sub(prev_aperf);
+    let delta_mperf = mperf.wrapping_sub(prev_mperf);
     let delta_tsc = tsc.wrapping_sub(prev_tsc);
-    if delta_tsc == 0 { return; }
 
-    let tsc_mhz = crate::interrupts::tsc_freq() / 1_000_000;
-    let avg_mhz = delta_aperf.saturating_mul(tsc_mhz) / delta_tsc;
+    // CPU usage = MPERF/TSC * 100 (MPERF stops during idle, TSC doesn't)
+    if delta_tsc > 0 {
+        let usage = (delta_mperf * 100).checked_div(delta_tsc).unwrap_or(0);
+        CORE_USAGE[core_id].store(usage.min(100) as u32, Ordering::Relaxed);
+    }
 
-    CORE_MHZ[core_id].store(avg_mhz as u32, Ordering::Relaxed);
+    // Frequency = TSC_freq * APERF/MPERF (like Linux aperfmperf.c)
+    if delta_mperf > 0 {
+        let tsc_mhz = crate::interrupts::tsc_freq() / 1_000_000;
+        let avg_mhz = delta_aperf.saturating_mul(tsc_mhz) / delta_mperf;
+        CORE_MHZ[core_id].store(avg_mhz as u32, Ordering::Relaxed);
+    } else {
+        CORE_MHZ[core_id].store(0, Ordering::Relaxed);
+    }
 }
 
 /// Get last measured frequency in MHz for a core.
@@ -137,6 +167,12 @@ pub fn max_turbo_mhz() -> u32 { MAX_TURBO_MHZ.load(Ordering::Relaxed) }
 
 /// Min efficiency frequency in MHz (from HWP capabilities).
 pub fn min_eff_mhz() -> u32 { MIN_EFF_MHZ.load(Ordering::Relaxed) }
+
+/// Per-core CPU usage in percent (0-100).
+pub fn core_usage(core_id: usize) -> u32 {
+    if core_id >= 256 { return 0; }
+    CORE_USAGE[core_id].load(Ordering::Relaxed)
+}
 
 /// Enable Hardware P-states (HWP / Speed Shift) on the current core.
 /// CPU automatically scales frequency: idle → min, load → turbo.
