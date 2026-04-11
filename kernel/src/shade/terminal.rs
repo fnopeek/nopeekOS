@@ -611,11 +611,17 @@ static mut SAVED_CURSOR: [usize; MAX_TERMINALS] = [0; MAX_TERMINALS];
 
 /// Restore cursor position from per-terminal saved state.
 /// Called during focus_window() to sync global cursor with new terminal.
+/// Clamps to saved input length — never positions cursor beyond actual content.
 pub fn restore_cursor() {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     if idx >= MAX_TERMINALS { return; }
+    let spos = unsafe { &*core::ptr::addr_of!(SAVED_POS) };
     let scur = unsafe { &*core::ptr::addr_of!(SAVED_CURSOR) };
-    set_cursor_pos(scur[idx]);
+    let pos = spos[idx];
+    let cursor = scur[idx].min(pos);
+    // Set cursor relative to current line content
+    let line_len = current_line_len();
+    set_cursor_pos(line_len.saturating_sub(pos.saturating_sub(cursor)));
 }
 
 /// Save the current input buffer + cursor position to the active terminal's saved state.

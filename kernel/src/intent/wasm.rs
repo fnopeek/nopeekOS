@@ -92,8 +92,8 @@ pub fn intent_run(args: &str) {
     }
 }
 
-/// Run a WASM module on a worker core in its own window.
-/// Returns immediately — intent loop stays responsive.
+/// Run a WASM module on a worker core in the current window.
+/// Returns immediately — intent loop routes keys when this window is focused.
 pub fn intent_run_interactive(module_name: &str) {
     use crate::{wasm, npkfs, capability};
 
@@ -115,28 +115,18 @@ pub fn intent_run_interactive(module_name: &str) {
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
 
-    // Create a new window for this app
-    let terminal_idx = crate::shade::with_compositor(|comp| {
-        let wid = comp.create_window(module_name, 0, 0, 800, 600);
-        comp.windows.iter().find(|w| w.id == wid).map(|w| w.terminal_idx)
-    }).flatten();
-
-    let term_idx = match terminal_idx {
-        Some(idx) => idx,
-        None => { kprintln!("[npk] Failed to create window"); return; }
-    };
+    // Use current terminal — top takes over this window
+    let term_idx = crate::shade::terminal::active_idx();
 
     kprint!("[npk] '{}' started (hash: ", module_name);
     for b in &hash[..4] { kprint!("{:02x}", b); }
     kprintln!("...)");
 
     // Spawn on worker core — returns immediately
+    // Intent loop will route keys when this window is focused
     if !wasm::spawn_on_worker(wasm_bytes.to_vec(), module_cap, term_idx) {
         kprintln!("[npk] Failed to spawn '{}'", module_name);
     }
-
-    // Render the new window layout
-    crate::shade::render_frame();
 }
 
 /// Store built-in WASM modules to npkFS on first boot.
