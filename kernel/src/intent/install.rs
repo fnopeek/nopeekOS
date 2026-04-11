@@ -170,6 +170,10 @@ pub fn intent_install(args: &str) {
     }
     kprintln!("OK");
 
+    // Delete old version before storing (npkFS doesn't overwrite)
+    let _ = crate::npkfs::delete(&store_name);
+    let _ = crate::npkfs::delete(&version_key);
+
     // Store in npkFS
     if let Err(e) = crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL) {
         kprintln!("[npk] Failed to store module: {:?}", e);
@@ -262,7 +266,10 @@ pub fn update_all_modules() -> usize {
             continue;
         }
 
-        // Store updated module
+        // Delete old module + version before storing new one (npkFS doesn't overwrite)
+        let _ = crate::npkfs::delete(&store_name);
+        let _ = crate::npkfs::delete(&version_key);
+
         if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
             let _ = crate::npkfs::store(&version_key, remote_ver.as_bytes(), crate::capability::CAP_NULL);
             kprintln!("OK");
