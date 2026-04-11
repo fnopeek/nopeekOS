@@ -235,7 +235,7 @@ Every execution is a sandboxed WASM module:
 - [x] xHCI USB keyboard driver (BIOS handoff, HID boot protocol, disconnect detection)
 - [x] PS/2 keyboard (extended scancodes, arrow keys, lock-free ringbuffer)
 - [x] Intel I226-V Ethernet driver (igc, MMIO, RX/TX advanced descriptors, PCIe bridge)
-- [x] Framebuffer driver (UEFI GOP, shadow buffer, 32-bit pixel write)
+- [x] Framebuffer driver (UEFI GOP, double-buffer shadow A/B, 32-bit pixel write)
 - [x] TSC timer fallback (CPUID 0x15 calibration, replaces PIT on UEFI-only systems)
 - [x] NVMe driver (PCIe BAR0 MMIO, Admin/IO queues, Read/Write/TRIM)
 - [x] 64GB RAM support (1GB huge pages, dynamic memory detection)
@@ -271,8 +271,8 @@ Every execution is a sandboxed WASM module:
 - [x] Smooth window swap animation (ease-out cubic, 250ms)
 - [x] Aurora background cache (render once, memcpy per region, ~100x faster)
 - [x] USB mouse input (xHCI HID, composite device support, multi-device)
-- [x] Software cursor overlay (drawn on MMIO FB, no ghost cursors)
-- [x] Click-to-focus, Mod+LMB swap-drag, Mod+RMB resize-drag
+- [x] Software cursor overlay (truly lock-free, cached shadow_front AtomicPtr)
+- [x] Click-to-focus, Mod+LMB swap-drag, Mod+RMB resize-drag (throttled 33fps)
 - [x] Tiling-aware resize (adjusts dwindle split ratio, neighbors adapt)
 - [x] Text cursor navigation (Left/Right/Home/End, insert at position, history recall)
 - [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
@@ -301,10 +301,10 @@ SMP is live -- all cores boot and are ready for work.
 - [x] MONITOR/MWAIT wakeup (C1E sleep, nanosecond wake on memory write)
 - [x] spawn()/spawn_local() API with priority system (Critical/Interactive/Normal/Background)
 - [x] Global WORK_AVAILABLE signal (cache-line aligned, all APs monitor)
-- [x] Lock-free mouse cursor (AtomicI32 x/y, no COMPOSITOR lock for movement)
+- [x] Lock-free mouse cursor (AtomicI32 x/y, cached AtomicPtr shadow, no lock for movement)
 - [x] Intel HWP auto-scaling (per-core, efficiency→turbo, CPUID-based)
 - [x] WASM apps on worker cores (non-blocking, per-app key buffers)
-- [ ] Double-buffer framebuffer (lock-free swap for async rendering)
+- [x] Double-buffer framebuffer (shadow A/B, render→back, swap, blit←front, commit_front)
 - [ ] Per-core APIC timer
 - [ ] Thermal load balancing (migrate tasks when core >80% busy)
 
@@ -367,7 +367,7 @@ SMP is live -- all cores boot and are ready for work.
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@60Hz HDMI 2.0, GGTT+WC aperture |
 | Compositor | Shade (-> WASM module) | Dwindle tiling, layer-based rendering |
-| Rendering | Layer compositor | Background/Chrome/Text/Cursor, dirty-region compositing |
+| Rendering | Layer compositor + double-buffer | Shadow A/B swap, selective partial render, dirty-region compositing |
 | GPU HAL | GOP + Intel Xe (+ VirtIO planned) | Vendor-neutral, same API for all backends |
 | Mouse | xHCI HID boot protocol | Composite device, overlay cursor, IRQ-driven polling |
 | USB Polling | APIC timer (100Hz) | IRQ drains xHCI -> atomic SPSC buffers, no main-thread HW access |
