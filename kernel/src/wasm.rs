@@ -86,19 +86,72 @@ fn pop_wasm_key() -> Option<u8> {
     Some(key)
 }
 
-/// Spawn a WASM module on a worker core and wait for completion.
-/// Core 0 keeps rendering + processing mouse while waiting.
-/// Uses the current terminal — no new window needed.
-pub fn run_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) {
+/// Terminal index that currently has a running WASM app (255 = none).
+static WASM_TERMINAL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(255);
+
+/// Check if the given terminal has a running WASM app.
+pub fn has_wasm_app(terminal_idx: u8) -> bool {
+    WASM_TERMINAL.load(core::sync::atomic::Ordering::Acquire) == terminal_idx
+}
+
+/// Route keyboard input to a running WASM app.
+/// Called from intent loop when focused window has a WASM app.
+/// Handles shade keybindings, forwards regular keys to WASM.
+pub fn route_keys_to_wasm() {
+    while let Some(key) = crate::keyboard::read_key() {
+        // ESC sequence: might be Mod+arrow
+        if key == 0x1B {
+            let mod_active = crate::shade::input::is_mod_active();
+            if let Some(b'[') = crate::keyboard::read_key() {
+                if let Some(dir) = crate::keyboard::read_key() {
+                    if mod_active && crate::shade::input::try_arrow_keybind(dir) {
+                        if let Some(action) = crate::shade::input::poll_action() {
+                            crate::shade::handle_action(action);
+                        }
+                        continue;
+                    }
+                    push_wasm_key(0x1B);
+                    push_wasm_key(b'[');
+                    push_wasm_key(dir);
+                    continue;
+                }
+            }
+            push_wasm_key(0x1B);
+            continue;
+        }
+
+        // Shade keybinding (Mod+letter)
+        if crate::shade::input::try_keybind(key) {
+            if let Some(action) = crate::shade::input::poll_action() {
+                crate::shade::handle_action(action);
+            }
+            continue;
+        }
+
+        // Regular key → WASM app
+        push_wasm_key(key);
+    }
+}
+
+/// Spawn a WASM module on a worker core. Returns immediately.
+/// The app gets its own window and terminal.
+pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) -> bool {
     let mut jobs = WASM_JOBS.lock();
     let slot = match jobs.iter().position(|j| j.is_none()) {
         Some(i) => i,
-        None => { kprintln!("[npk] No free WASM job slots"); return; }
+        None => { kprintln!("[npk] No free WASM job slots"); return false; }
     };
 
     JOB_DONE[slot].store(false, core::sync::atomic::Ordering::Relaxed);
     jobs[slot] = Some(WasmJob { bytes: wasm_bytes, cap_id, terminal_idx });
     drop(jobs);
+
+    // Clear WASM input buffer
+    WASM_KEY_HEAD.store(0, AtOrd::Relaxed);
+    WASM_KEY_TAIL.store(0, AtOrd::Relaxed);
+
+    // Mark this terminal as having a WASM app
+    WASM_TERMINAL.store(terminal_idx, core::sync::atomic::Ordering::Release);
 
     crate::smp::scheduler::spawn(
         crate::smp::scheduler::Priority::Interactive,
@@ -106,56 +159,7 @@ pub fn run_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8) {
         slot as u64,
     );
 
-    // Clear WASM input buffer
-    WASM_KEY_HEAD.store(0, AtOrd::Relaxed);
-    WASM_KEY_TAIL.store(0, AtOrd::Relaxed);
-
-    // Wait on Core 0 — keep UI responsive (render + mouse + keyboard)
-    while !JOB_DONE[slot].load(core::sync::atomic::Ordering::Acquire) {
-        // Process rendering + mouse events
-        if crate::shade::is_active() {
-            crate::shade::poll_render();
-        }
-
-        // Process keyboard input: shade keybindings → dispatch, regular → WASM buffer
-        while let Some(key) = crate::keyboard::read_key() {
-            // ESC sequence: might be arrow key with Mod held
-            if key == 0x1B {
-                let mod_active = crate::shade::input::is_mod_active();
-                // Try to read '[' + direction
-                if let Some(b'[') = crate::keyboard::read_key() {
-                    if let Some(dir) = crate::keyboard::read_key() {
-                        if mod_active && crate::shade::input::try_arrow_keybind(dir) {
-                            if let Some(action) = crate::shade::input::poll_action() {
-                                crate::shade::handle_action(action);
-                            }
-                            continue;
-                        }
-                        // Not a shade keybind — forward ESC sequence to WASM
-                        push_wasm_key(0x1B);
-                        push_wasm_key(b'[');
-                        push_wasm_key(dir);
-                        continue;
-                    }
-                }
-                push_wasm_key(0x1B);
-                continue;
-            }
-
-            // Try shade keybinding (Mod+letter)
-            if crate::shade::input::try_keybind(key) {
-                if let Some(action) = crate::shade::input::poll_action() {
-                    crate::shade::handle_action(action);
-                }
-                continue;
-            }
-
-            // Regular key → forward to WASM module
-            push_wasm_key(key);
-        }
-
-        for _ in 0..10_000 { core::hint::spin_loop(); }
-    }
+    true
 }
 
 /// Worker-core entry: runs WASM module, signals completion.
@@ -208,7 +212,8 @@ fn wasm_worker_task(arg: u64) {
 
     let _ = func.call(&mut store, &[], &mut []);
 
-    // Signal completion
+    // Clear WASM terminal marker + signal completion
+    WASM_TERMINAL.store(255, core::sync::atomic::Ordering::Release);
     JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
 }
 
