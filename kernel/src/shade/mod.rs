@@ -176,13 +176,17 @@ fn render_frame_layered() {
             comp.render(back, fb.info());
         }
 
-        // Swap: back becomes front (cursor now sees the new frame)
+        // Swap front index (blit_rect now reads from new frame)
+        // Cached pointer stays on OLD front — cursor matches MMIO during blit.
         fb.swap_buffers();
 
         // Blit new front → MMIO
         let mut damage = render::DamageTracker::new(screen_w, screen_h);
         damage.mark_all();
         damage.flush(fb);
+
+        // NOW update cached pointer — MMIO matches new front
+        fb.commit_front();
 
         // Cursor overlay on MMIO
         if crate::xhci::mouse_available() {
@@ -207,6 +211,8 @@ fn render_frame_legacy() {
         let mut damage = render::DamageTracker::new(screen_w, screen_h);
         damage.mark_all();
         damage.flush(fb);
+
+        fb.commit_front();
 
         if crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);

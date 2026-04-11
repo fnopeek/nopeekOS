@@ -67,9 +67,15 @@ impl FbConsole {
     }
 
     /// Swap front ↔ back. Call after rendering to back is complete.
-    /// Updates the cached atomic pointer for lock-free cursor.
+    /// Does NOT update the cached cursor pointer — call commit_front() after blit.
+    /// This ensures lock-free cursor reads from the buffer that matches MMIO.
     pub fn swap_buffers(&mut self) {
         self.front = 1 - self.front;
+    }
+
+    /// Update cached front pointer for lock-free cursor. Call AFTER blit to MMIO.
+    /// Until this is called, lock-free cursor reads from the old front (matching MMIO).
+    pub fn commit_front(&self) {
         SHADOW_FRONT_CACHED.store(self.front_ptr(), Ordering::Release);
     }
 }
