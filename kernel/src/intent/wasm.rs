@@ -92,7 +92,8 @@ pub fn intent_run(args: &str) {
     }
 }
 
-/// Run a WASM module in interactive mode (direct terminal output, live loop).
+/// Run a WASM module on a worker core with its own window.
+/// Returns immediately — the module runs in background.
 /// Used for apps like `top` that update the screen continuously.
 pub fn intent_run_interactive(module_name: &str) {
     use crate::{wasm, npkfs, capability};
@@ -110,20 +111,37 @@ pub fn intent_run_interactive(module_name: &str) {
 
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ | capability::Rights::EXECUTE,
-        Some(600_000), // 100 minutes at 100Hz — long-running
+        Some(600_000), // 100 minutes at 100Hz
     ) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
 
-    kprint!("[npk] Running '{}' (hash: ", module_name);
-    for b in &hash[..4] { kprint!("{:02x}", b); }
-    kprintln!("..., interactive)");
+    // Create a new window for this app
+    let terminal_idx = crate::shade::with_compositor(|comp| {
+        let wid = comp.create_window(module_name, 0, 0, 800, 600);
+        comp.windows.iter().find(|w| w.id == wid).map(|w| w.terminal_idx)
+    }).flatten();
 
-    match wasm::execute_interactive(&wasm_bytes, "_start", &[], module_cap) {
-        Ok(_) => {}
-        Err(e) => kprintln!("[npk] Execution error: {}", e),
+    let term_idx = match terminal_idx {
+        Some(idx) => idx as u8,
+        None => {
+            kprintln!("[npk] Failed to create window for '{}'", module_name);
+            return;
+        }
+    };
+
+    kprint!("[npk] Running '{}' on worker core (hash: ", module_name);
+    for b in &hash[..4] { kprint!("{:02x}", b); }
+    kprintln!("..., window={}))", term_idx);
+
+    // Spawn on worker core — returns immediately
+    if !wasm::spawn_on_worker(wasm_bytes.to_vec(), module_cap, term_idx) {
+        kprintln!("[npk] Failed to spawn '{}' on worker core", module_name);
     }
+
+    // Render the new window layout
+    crate::shade::render_frame();
 }
 
 /// Store built-in WASM modules to npkFS on first boot.

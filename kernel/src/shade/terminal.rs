@@ -265,10 +265,28 @@ pub fn clear() {
     }
 }
 
+/// Clear a specific terminal by index (for WASM apps on worker cores).
+pub fn clear_idx(idx: usize) {
+    if idx < MAX_TERMINALS {
+        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+        terms[idx].clear();
+        DIRTY.store(true, Ordering::Release);
+    }
+}
+
 /// Write to the active terminal (called from serial::write_str).
 pub fn write(s: &str) {
     if !is_active() { return; }
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx < MAX_TERMINALS {
+        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
+        terms[idx].write_str(s);
+        DIRTY.store(true, Ordering::Release);
+    }
+}
+
+/// Write to a specific terminal by index (for WASM apps on worker cores).
+pub fn write_idx(idx: usize, s: &str) {
     if idx < MAX_TERMINALS {
         let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
         terms[idx].write_str(s);
