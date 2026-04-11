@@ -537,6 +537,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_mouse(&evt);
                 }
 
+                // Check for shade actions pushed directly by xHCI driver
+                // (Mod+Arrow, PageUp/Down — bypasses try_keybind)
+                if let Some(action) = crate::shade::input::poll_action() {
+                    crate::shade::handle_action(action);
+                }
+
                 // Route keyboard with ESC state machine (across iterations)
                 while let Some(key) = crate::keyboard::read_key() {
                     if wasm_esc == 1 {
