@@ -155,50 +155,58 @@ fn render_frame_task(_arg: u64) {
     RENDER_PENDING.store(false, Ordering::Release);
 }
 
-/// Layer-based render: use BG layer as background cache, render chrome+text to shadow.
+/// Layer-based render with double-buffer: render to back, swap, blit from front.
+/// Cursor reads from front via cached atomic — never blocked by this render.
 fn render_frame_layered() {
     framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
+        let screen_w = fb.info().width;
+        let screen_h = fb.info().height;
+        let pitch = fb.info().pitch;
+        let back = fb.shadow_back();
 
-        // Copy BG layer → shadow as clean background (33MB at 4K)
-        // Timer IRQ handles USB polling — no manual poll_events needed.
+        // Render scene to BACK buffer (front stays stable for cursor)
         if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-            let size = info.pitch as usize * info.height as usize;
-            unsafe { core::ptr::copy_nonoverlapping(bg_buf, shadow, size); }
+            let size = pitch as usize * screen_h as usize;
+            // SAFETY: bg_buf and back are valid for size bytes
+            unsafe { core::ptr::copy_nonoverlapping(bg_buf, back, size); }
         }
 
-        // Render chrome + text directly to shadow
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            // BG layer already copied — skip background redraw in comp.render
             comp.aurora_drawn = true;
-            comp.render(shadow, info);
-
-            let mut damage = render::DamageTracker::new(info.width, info.height);
-            damage.mark_all();
-            damage.flush(fb);
+            comp.render(back, fb.info());
         }
 
-        // Cursor overlay: lock-free (reads atomic position, draws to MMIO)
+        // Swap: back becomes front (cursor now sees the new frame)
+        fb.swap_buffers();
+
+        // Blit new front → MMIO
+        let mut damage = render::DamageTracker::new(screen_w, screen_h);
+        damage.mark_all();
+        damage.flush(fb);
+
+        // Cursor overlay on MMIO
         if crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
 
-/// Legacy render (fallback when layers not initialized).
+/// Legacy render with double-buffer (fallback when layers not initialized).
 fn render_frame_legacy() {
     framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
+        let screen_w = fb.info().width;
+        let screen_h = fb.info().height;
+        let back = fb.shadow_back();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            comp.render(shadow, info);
-
-            let mut damage = render::DamageTracker::new(info.width, info.height);
-            damage.mark_all();
-            damage.flush(fb);
+            comp.render(back, fb.info());
         }
+
+        fb.swap_buffers();
+
+        let mut damage = render::DamageTracker::new(screen_w, screen_h);
+        damage.mark_all();
+        damage.flush(fb);
 
         if crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);

@@ -3,7 +3,7 @@
 //! Pixel-based text output using framebuffer from GPU subsystem.
 //! Replaces VGA text mode for UEFI systems without legacy VGA.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use spin::Mutex;
 
 /// Framebuffer info parsed from Multiboot2.
@@ -17,9 +17,14 @@ pub struct FbInfo {
 
 pub struct FbConsole {
     info: FbInfo,
-    /// Shadow buffer in RAM (all drawing goes here first, then blits to MMIO)
+    /// Shadow buffer A in RAM (double-buffer: one of the two render targets)
     shadow: *mut u8,
+    /// Shadow buffer B in RAM (double-buffer: the other render target)
+    shadow_b: *mut u8,
     shadow_size: usize,
+    /// Which buffer is front (0 = shadow/A, 1 = shadow_b/B).
+    /// Front is displayed (blit source + cursor restore). Back is render target.
+    front: usize,
     col: u32,
     row: u32,
     cols: u32,
@@ -29,18 +34,43 @@ pub struct FbConsole {
 }
 
 // SAFETY: FbConsole is only accessed under a spinlock (CONSOLE mutex).
-// The shadow pointer is heap-allocated and exclusively owned.
+// The shadow pointers are heap-allocated and exclusively owned.
 unsafe impl Send for FbConsole {}
+
+/// Cached front-buffer pointer for lock-free cursor drawing.
+/// Updated on swap_buffers() and init. Cursor reads this without CONSOLE lock.
+static SHADOW_FRONT_CACHED: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Read cached front-buffer pointer (lock-free, for cursor overlay).
+pub fn cached_shadow_front() -> *mut u8 {
+    SHADOW_FRONT_CACHED.load(Ordering::Acquire)
+}
 
 impl FbConsole {
     pub fn info(&self) -> &FbInfo {
         &self.info
     }
 
-    /// Raw shadow buffer pointer and size.
-    /// SAFETY: Caller must ensure exclusive access (e.g. via CONSOLE lock).
+    /// Front buffer pointer (blit source, cursor restore).
+    fn front_ptr(&self) -> *mut u8 {
+        if self.front == 0 { self.shadow } else { self.shadow_b }
+    }
+
+    /// Back buffer pointer (render target for full redraws).
+    pub fn shadow_back(&self) -> *mut u8 {
+        if self.front == 0 { self.shadow_b } else { self.shadow }
+    }
+
+    /// Front buffer pointer + size (for blitting and partial updates).
     pub fn shadow_ptr(&self) -> (*mut u8, usize) {
-        (self.shadow, self.shadow_size)
+        (self.front_ptr(), self.shadow_size)
+    }
+
+    /// Swap front ↔ back. Call after rendering to back is complete.
+    /// Updates the cached atomic pointer for lock-free cursor.
+    pub fn swap_buffers(&mut self) {
+        self.front = 1 - self.front;
+        SHADOW_FRONT_CACHED.store(self.front_ptr(), Ordering::Release);
     }
 }
 
@@ -139,34 +169,47 @@ pub fn init_from_gpu() {
     let cols = width / eff_w;
     let rows = height / eff_h;
 
-    // Free old shadow buffer before allocating new one (prevents OOM on mode switch)
+    // Free old shadow buffers before allocating new ones (prevents OOM on mode switch)
     {
+        SHADOW_FRONT_CACHED.store(core::ptr::null_mut(), Ordering::Release);
         let old = CONSOLE.lock().take();
         if let Some(old_console) = old {
+            let old_layout = alloc::alloc::Layout::from_size_align(
+                old_console.shadow_size, 16).unwrap();
             if !old_console.shadow.is_null() && old_console.shadow_size > 0 {
-                let old_layout = alloc::alloc::Layout::from_size_align(
-                    old_console.shadow_size, 16).unwrap();
                 unsafe { alloc::alloc::dealloc(old_console.shadow, old_layout); }
+            }
+            if !old_console.shadow_b.is_null() && old_console.shadow_size > 0 {
+                unsafe { alloc::alloc::dealloc(old_console.shadow_b, old_layout); }
             }
         }
     }
 
-    // Allocate shadow buffer in RAM (fast WB-cached memory)
+    // Allocate two shadow buffers for double-buffering (fast WB-cached RAM)
     let shadow_size = pitch as usize * height as usize;
     let layout = alloc::alloc::Layout::from_size_align(shadow_size, 16)
         .expect("shadow buffer layout");
     let shadow = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    let shadow_b = unsafe { alloc::alloc::alloc_zeroed(layout) };
 
-    if shadow.is_null() {
-        crate::kprintln!("[npk] Framebuffer: shadow alloc failed ({}KB)", shadow_size / 1024);
+    if shadow.is_null() || shadow_b.is_null() {
+        crate::kprintln!("[npk] Framebuffer: shadow alloc failed ({}KB x2)", shadow_size / 1024);
+        if !shadow.is_null() { unsafe { alloc::alloc::dealloc(shadow, layout); } }
+        if !shadow_b.is_null() { unsafe { alloc::alloc::dealloc(shadow_b, layout); } }
         return;
     }
+
+    crate::kprintln!("[npk] Framebuffer: double-buffer {}KB x2", shadow_size / 1024);
 
     // Clear MMIO framebuffer
     clear_screen(&info);
 
+    // Initialize cached pointer for lock-free cursor
+    SHADOW_FRONT_CACHED.store(shadow, Ordering::Release);
+
     *CONSOLE.lock() = Some(FbConsole {
-        info, shadow, shadow_size, col: 0, row: 0, cols, rows, scale,
+        info, shadow, shadow_b, shadow_size, front: 0,
+        col: 0, row: 0, cols, rows, scale,
     });
 }
 
@@ -231,30 +274,29 @@ fn draw_char(console: &FbConsole, c: u8, col: u32, row: u32) {
     draw_char_colored(console, c, col, row, FG_COLOR);
 }
 
-/// Blit a region of the shadow buffer to the MMIO framebuffer.
-/// Only writes to MMIO (no reads from MMIO = fast).
+/// Blit a region of the front buffer to the MMIO framebuffer.
 fn blit_region(console: &FbConsole, y_start: u32, y_end: u32) {
     let info = &console.info;
     let fb = info.addr as *mut u8;
+    let front = console.front_ptr();
     let start = (y_start * info.pitch) as usize;
     let end = (y_end * info.pitch) as usize;
     let len = end.min(console.shadow_size) - start;
     unsafe {
         core::ptr::copy_nonoverlapping(
-            console.shadow.add(start),
+            front.add(start),
             fb.add(start),
             len,
         );
     }
 }
 
-/// Blit entire shadow buffer to MMIO framebuffer.
-/// Splits into chunks and drains xHCI events between chunks to prevent USB stall.
+/// Blit entire front buffer to MMIO framebuffer in 256-row chunks.
 fn blit_all(console: &FbConsole) {
     let fb = console.info.addr as *mut u8;
+    let front = console.front_ptr();
     let pitch = console.info.pitch as usize;
     let height = console.info.height as usize;
-    // Blit in 256-row chunks, drain USB events between chunks
     let chunk = 256;
     let mut row = 0;
     while row < height {
@@ -263,14 +305,13 @@ fn blit_all(console: &FbConsole) {
         let len = rows * pitch;
         unsafe {
             core::ptr::copy_nonoverlapping(
-                console.shadow.add(off), fb.add(off), len);
+                front.add(off), fb.add(off), len);
         }
-        // Timer IRQ handles USB polling
         row += rows;
     }
 }
 
-/// Blit a single character cell to MMIO.
+/// Blit a single character cell from front buffer to MMIO.
 fn blit_char(console: &FbConsole, col: u32, row: u32) {
     let info = &console.info;
     let s = console.scale;
@@ -279,13 +320,14 @@ fn blit_char(console: &FbConsole, col: u32, row: u32) {
     let x_start = col * FONT_WIDTH * s;
     let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
     let fb = info.addr as *mut u8;
+    let front = console.front_ptr();
     let char_bytes = (FONT_WIDTH * s * bytes_per_pixel) as usize;
 
     for y in y_start..y_end.min(info.height) {
         let offset = (y * info.pitch + x_start * bytes_per_pixel) as usize;
         unsafe {
             core::ptr::copy_nonoverlapping(
-                console.shadow.add(offset),
+                front.add(offset),
                 fb.add(offset),
                 char_bytes,
             );
@@ -318,25 +360,23 @@ fn scroll(console: &mut FbConsole) {
     blit_all(console);
 }
 
-/// Blit a rectangular region from shadow buffer to MMIO framebuffer.
-/// Drains xHCI events periodically to prevent USB controller stall during large blits.
+/// Blit a rectangular region from front buffer to MMIO framebuffer.
 pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
     let info = &console.info;
-    if info.bpp != 32 { return; } // only 32bpp supported for rect blit
+    if info.bpp != 32 { return; }
     let fb = info.addr as *mut u8;
-    let mut row_count = 0u32;
+    let front = console.front_ptr();
     for row in y..(y + h).min(info.height) {
         let offset = (row * info.pitch + x * 4) as usize;
         let len = ((w.min(info.width.saturating_sub(x))) * 4) as usize;
-        // SAFETY: shadow and fb are valid for shadow_size bytes, bounds checked above
+        // SAFETY: front buffer and fb are valid for shadow_size bytes, bounds checked above
         unsafe {
             core::ptr::copy_nonoverlapping(
-                console.shadow.add(offset),
+                front.add(offset),
                 fb.add(offset),
                 len,
             );
         }
-        // Timer IRQ handles USB polling — no manual drain needed during blit
     }
 }
 
@@ -470,16 +510,16 @@ pub fn write_byte(byte: u8) {
     }
 }
 
-/// Clear the framebuffer screen.
+/// Clear the framebuffer screen (both shadow buffers + MMIO).
 pub fn clear() {
     let mut console = CONSOLE.lock();
     let console = match console.as_mut() {
         Some(c) => c,
         None => return,
     };
-    // Clear both shadow and MMIO
     unsafe {
         core::ptr::write_bytes(console.shadow, 0, console.shadow_size);
+        core::ptr::write_bytes(console.shadow_b, 0, console.shadow_size);
     }
     let fb = console.info.addr as *mut u8;
     unsafe { core::ptr::write_bytes(fb, 0, console.shadow_size); }
