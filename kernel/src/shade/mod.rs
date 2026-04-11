@@ -482,6 +482,10 @@ fn poll_render_layered() {
                 }
             }
         }
+        // Redraw cursor overlay after blit (was overwritten by window render)
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
+        }
     });
 }
 
@@ -499,6 +503,9 @@ fn poll_render_legacy() {
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
                 }
             }
+        }
+        if crate::xhci::mouse_available() {
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
