@@ -587,6 +587,10 @@ fn poll_render_legacy() {
 /// When set, handle_mouse enters slow path on EVERY event (not just button changes).
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Last tick when a drag-triggered render_frame was executed.
+/// Throttles drag renders to ~33fps (every 3 ticks at 100Hz).
+static LAST_DRAG_RENDER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Process a mouse event: update compositor state, redraw cursor overlay.
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // FAST PATH (lock-free, ~2ns): update atomic position + redraw cursor overlay.
@@ -614,8 +618,17 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
 
         if needs_redraw {
             if needs_full {
-                // Retile/resize/swap → full scene render needed
-                render_frame();
+                if dragging {
+                    // Throttle drag renders to ~33fps (not 1000fps!)
+                    let now = crate::interrupts::ticks();
+                    let last = LAST_DRAG_RENDER.load(Ordering::Relaxed);
+                    if now.saturating_sub(last) >= 3 {
+                        LAST_DRAG_RENDER.store(now, Ordering::Relaxed);
+                        render_frame();
+                    }
+                } else {
+                    render_frame();
+                }
             } else {
                 // Focus change → partial render (only dirty windows)
                 terminal::mark_dirty();
