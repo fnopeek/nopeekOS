@@ -298,27 +298,40 @@ SMP is live -- all cores boot and are ready for work.
 - [x] Per-AP infrastructure (64KB stack, shared GDT/IDT/CR3, LAPIC enabled)
 - [x] Tested on Intel N100 NUC (4 cores) and QEMU (configurable via -smp)
 - [x] Work-stealing scheduler (Chase-Lev SPMC deque, 256 tasks/core)
-- [x] MONITOR/MWAIT wakeup (hardware C0 sleep, nanosecond wake on memory write)
+- [x] MONITOR/MWAIT wakeup (C1E sleep, nanosecond wake on memory write)
 - [x] spawn()/spawn_local() API with priority system (Critical/Interactive/Normal/Background)
 - [x] Global WORK_AVAILABLE signal (cache-line aligned, all APs monitor)
 - [x] Lock-free mouse cursor (AtomicI32 x/y, no COMPOSITOR lock for movement)
-- [x] npk_sys_info() host function (system stats for WASM apps)
+- [x] Intel HWP auto-scaling (per-core, efficiency→turbo, CPUID-based)
+- [x] WASM apps on worker cores (non-blocking, per-app key buffers)
 - [ ] Double-buffer framebuffer (lock-free swap for async rendering)
 - [ ] Per-core APIC timer
 - [ ] Thermal load balancing (migrate tasks when core >80% busy)
 
-**Layer Compositor**
-- [ ] Layer-based rendering (Background / Chrome / Text / Cursor layers)
-- [ ] Dirty-region compositing (only changed layers re-composited)
-- [ ] Host-function API (`npk_layer_*`, `npk_fb_info`, `npk_input_poll`)
+**App Display API**
+- [x] `npk_print` / `npk_clear` — write/clear app's terminal display
+- [x] `npk_input_wait(timeout_ms)` — blocking wait for key or timeout
+- [x] `npk_sys_info(key)` — system information (cores, memory, freq, usage)
+- [x] Per-app SPSC key buffers (APP_KEY_BUFS[8], one per terminal)
+- [x] Inline key routing (shade keybinds intercepted, rest to app)
+- [x] OTA module updates (`update` checks kernel + WASM modules)
+- [ ] Widget API (`npk_widget_list`, `npk_widget_input`, `npk_widget_select`)
+- [ ] Per-window intent loops (loop.wasm on separate cores)
 
-**WASM Migration**
-- [ ] Shade compositor -> WASM module (`shade.wasm`)
-- [ ] Intent loop -> WASM module (`loop.wasm`)
-- [ ] Cranelift JIT (WASM -> x86_64, near-native performance)
+**WASM Runtime**
+- [x] wasmi v1.0 interpreter (register-based, fuel-metered)
+- [x] Interactive execution on worker cores (1B fuel budget)
+- [ ] Cranelift JIT or custom Mini-JIT (WASM → x86_64, for GPU drivers)
+- [ ] Process tracking (per-app CPU time, memory, name)
 
-**GPU + Virtualization**
-- [ ] GPU HAL: VirtIO GPU backend (QEMU/VBox support)
+**GPU Rendering (planned)**
+- [ ] GPU HAL trait: init, set_mode, alloc_vram, submit_batch, flip
+- [ ] Intel Xe 2D: command streamer, batch buffers, EU shaders
+- [ ] GPU driver as WASM+JIT module (near-native, capability-gated)
+- [ ] Double-buffer with GPU swap (zero-copy, no FB lock)
+- [ ] VirtIO GPU backend (QEMU/VBox support)
+
+**Virtualization**
 - [ ] MicroVM (VT-x/VT-d, Mini-Linux kernel for Linux app compatibility)
 - [ ] virtio bridges for MicroVM (blk, net, gpu)
 
