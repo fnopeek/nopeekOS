@@ -487,8 +487,18 @@ pub fn poll_render() {
                     }
                 }
 
-                // Re-render window chrome + text
-                let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
+                // Re-render window chrome + text (use theme colors if active)
+                let active_border = if crate::theme::is_active() {
+                    crate::gui::background::accent_color()
+                } else {
+                    comp.border_active
+                };
+                let inactive_border = if crate::theme::is_active() {
+                    crate::theme::inactive_border()
+                } else {
+                    comp.border_inactive
+                };
+                let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
                     comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
