@@ -164,16 +164,33 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
     let mut cursor = 0;   // cursor position within buffer (can be < pos)
     let mut esc: u8 = 0; // 0=normal, 1=got ESC, 2=got ESC[
     let mut esc_mod = false; // Was mod key held when ESC was received?
+    let mut last_term = crate::shade::terminal::active_idx();
 
     HISTORY.lock().reset_cursor();
 
     loop {
-        // If focus changed to a WASM app window (e.g. mouse click), exit immediately
+        // Detect focus change via mouse click (active terminal changed externally)
         if crate::shade::is_active() {
             let ft = crate::shade::terminal::active_idx();
+
+            // If focus changed to a WASM app window, exit immediately
             if crate::wasm::has_wasm_app(ft) {
                 crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
                 return 0;
+            }
+
+            // Mouse-click focus change to another shell terminal
+            if ft != last_term {
+                // Save current input to OLD terminal
+                crate::shade::terminal::set_active_terminal(last_term);
+                crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
+                crate::shade::terminal::set_active_terminal(ft);
+                // Restore input from NEW terminal
+                let (p, c) = crate::shade::terminal::restore_input_with_cursor(buf);
+                pos = p;
+                cursor = c;
+                last_term = ft;
+                continue;
             }
         }
 
@@ -214,6 +231,7 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     let (p, c) = crate::shade::terminal::restore_input_with_cursor(buf);
                     pos = p;
                     cursor = c;
+                    last_term = crate::shade::terminal::active_idx();
                 }
                 ShadeAction::NewWindow => {
                     crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
@@ -225,6 +243,7 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                     }
                     pos = 0;
                     cursor = 0;
+                    last_term = new_term;
                 }
                 _ => {
                     crate::shade::handle_action(action);
