@@ -609,6 +609,15 @@ pub fn scroll_reset() {
 /// Per-terminal saved cursor position.
 static mut SAVED_CURSOR: [usize; MAX_TERMINALS] = [0; MAX_TERMINALS];
 
+/// Restore cursor position from per-terminal saved state.
+/// Called during focus_window() to sync global cursor with new terminal.
+pub fn restore_cursor() {
+    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    if idx >= MAX_TERMINALS { return; }
+    let scur = unsafe { &*core::ptr::addr_of!(SAVED_CURSOR) };
+    set_cursor_pos(scur[idx]);
+}
+
 /// Save the current input buffer + cursor position to the active terminal's saved state.
 pub fn save_input(buf: &[u8], pos: usize) {
     save_input_with_cursor(buf, pos, pos);
