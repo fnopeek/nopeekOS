@@ -549,7 +549,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     // ESC state for WASM key routing (persists across loop iterations)
     let mut wasm_esc: u8 = 0;     // 0=normal, 1=got ESC, 2=got ESC[
     let mut wasm_esc_mod = false;  // was Mod held when ESC arrived?
-    let mut from_wasm = false;     // true when transitioning WASM → shell (skip prompt)
+    let mut from_wasm = false;     // true when transitioning WASM → shell
+    let mut wasm_term: u8 = 255;   // which terminal was running the WASM app
 
     loop {
         // If focused window has a running WASM app, route keys there.
@@ -557,6 +558,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             let focused_term = crate::shade::terminal::active_idx();
             if crate::wasm::has_wasm_app(focused_term) {
                 from_wasm = true;
+                wasm_term = focused_term;
                 crate::shade::poll_render();
                 crate::net::poll();
 
@@ -627,10 +629,30 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
-        // Restore saved input when returning from WASM focus (prompt already on screen)
+        // Transition from WASM mode to shell
         let (mut resume_pos, mut resume_cursor) = if from_wasm {
             from_wasm = false;
-            crate::shade::terminal::restore_input_with_cursor(&mut input_buf)
+            let current = crate::shade::terminal::active_idx();
+            if current == wasm_term {
+                // App exited (same terminal) → need fresh prompt after app output
+                kprintln!();
+                // Fall through to normal prompt below
+                let cwd = get_cwd();
+                let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+                let p = alloc::format!("{}> ", path);
+                kprint!("{}", p);
+                let prompt_len = p.len();
+                if crate::shade::is_active() {
+                    crate::shade::terminal::set_prompt_len(prompt_len);
+                    crate::shade::terminal::set_cursor_pos(
+                        crate::shade::terminal::current_line_len());
+                    crate::shade::render_frame();
+                }
+                (0usize, 0usize)
+            } else {
+                // Focus switched to different shell terminal → restore its input
+                crate::shade::terminal::restore_input_with_cursor(&mut input_buf)
+            }
         } else {
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
