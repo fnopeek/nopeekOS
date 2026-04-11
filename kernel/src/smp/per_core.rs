@@ -59,6 +59,12 @@ static LAST_TSC_CORE: [AtomicU64; 256] = {
     [ZERO; 256]
 };
 
+/// Per-core active flag: true while executing a scheduler task
+static CORE_ACTIVE: [AtomicBool; 256] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; 256]
+};
+
 /// Platform frequency limits (set once by enable_hwp)
 static MAX_TURBO_MHZ: AtomicU32 = AtomicU32::new(0);
 static MIN_EFF_MHZ: AtomicU32 = AtomicU32::new(0);
@@ -160,8 +166,11 @@ pub fn max_turbo_mhz() -> u32 { MAX_TURBO_MHZ.load(Ordering::Relaxed) }
 pub fn min_eff_mhz() -> u32 { MIN_EFF_MHZ.load(Ordering::Relaxed) }
 
 /// Per-core CPU usage in percent (0-100).
+/// For cores running long-lived tasks (WASM apps), returns 100% while active.
 pub fn core_usage(core_id: usize) -> u32 {
     if core_id >= 256 { return 0; }
+    // If core is currently executing a task, it's 100% busy
+    if CORE_ACTIVE[core_id].load(Ordering::Relaxed) { return 100; }
     CORE_USAGE[core_id].load(Ordering::Relaxed)
 }
 
@@ -244,9 +253,11 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     loop {
         // Try to get work (own deque first, then steal)
         if let Some(task) = super::scheduler::next_task(cid) {
+            CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
             let t0 = crate::interrupts::rdtsc();
             (task.func)(task.arg);
             add_busy_tsc(cid, crate::interrupts::rdtsc() - t0);
+            CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             continue;
         }
 

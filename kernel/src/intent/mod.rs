@@ -521,66 +521,62 @@ fn common_prefix(strings: &[String]) -> String {
 pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut input_buf = [0u8; INPUT_BUF_SIZE];
 
+    // ESC state for WASM key routing (persists across loop iterations)
+    let mut wasm_esc: u8 = 0;     // 0=normal, 1=got ESC, 2=got ESC[
+    let mut wasm_esc_mod = false;  // was Mod held when ESC arrived?
+
     loop {
         // If focused window has a running WASM app, route keys there.
-        // No prompt, no read_line — just dispatch keys to the app's buffer.
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
             if crate::wasm::has_wasm_app(focused_term) {
-                // Render dirty terminals (all windows, including non-focused)
                 crate::shade::poll_render();
                 crate::net::poll();
 
-                // Process mouse events explicitly (cursor movement + clicks)
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);
                 }
 
-                // Route keyboard: shade keybinds → compositor, else → app
+                // Route keyboard with ESC state machine (across iterations)
                 while let Some(key) = crate::keyboard::read_key() {
-                    // Shade Mod+letter keybinds (Mod+Q, Mod+Enter, Mod+1-4, etc.)
-                    if crate::shade::input::try_keybind(key) {
-                        if let Some(action) = crate::shade::input::poll_action() {
-                            crate::shade::handle_action(action);
+                    if wasm_esc == 1 {
+                        // Got ESC last time, waiting for '['
+                        wasm_esc = 0;
+                        if key == b'[' {
+                            wasm_esc = 2;
+                            continue;
                         }
+                        crate::wasm::push_app_key(focused_term, 0x1B);
+                        crate::wasm::push_app_key(focused_term, key);
                         continue;
                     }
 
-                    // ESC sequence: check for Mod+Arrow (focus/swap/resize)
-                    if key == 0x1B {
-                        let mod_held = crate::shade::input::is_mod_active();
-                        // Wait briefly for '[' + direction bytes
-                        let mut got_bracket = false;
-                        for _ in 0..5000 {
-                            if let Some(b) = crate::keyboard::read_key() {
-                                if b == b'[' { got_bracket = true; break; }
-                                // Not '[' — forward ESC + byte to app
-                                crate::wasm::push_app_key(focused_term, 0x1B);
-                                crate::wasm::push_app_key(focused_term, b);
-                                break;
+                    if wasm_esc == 2 {
+                        // Got ESC [, this is the direction byte
+                        wasm_esc = 0;
+                        if wasm_esc_mod && crate::shade::input::try_arrow_keybind(key) {
+                            if let Some(action) = crate::shade::input::poll_action() {
+                                crate::shade::handle_action(action);
                             }
-                            core::hint::spin_loop();
+                            continue;
                         }
-                        if !got_bracket { continue; }
+                        crate::wasm::push_app_key(focused_term, 0x1B);
+                        crate::wasm::push_app_key(focused_term, b'[');
+                        crate::wasm::push_app_key(focused_term, key);
+                        continue;
+                    }
 
-                        // Read direction byte
-                        let mut handled = false;
-                        for _ in 0..5000 {
-                            if let Some(dir) = crate::keyboard::read_key() {
-                                if mod_held && crate::shade::input::try_arrow_keybind(dir) {
-                                    if let Some(action) = crate::shade::input::poll_action() {
-                                        crate::shade::handle_action(action);
-                                    }
-                                    handled = true;
-                                } else {
-                                    // Not a shade keybind — forward sequence to app
-                                    crate::wasm::push_app_key(focused_term, 0x1B);
-                                    crate::wasm::push_app_key(focused_term, b'[');
-                                    crate::wasm::push_app_key(focused_term, dir);
-                                }
-                                break;
-                            }
-                            core::hint::spin_loop();
+                    // New ESC sequence
+                    if key == 0x1B {
+                        wasm_esc = 1;
+                        wasm_esc_mod = crate::shade::input::is_mod_active();
+                        continue;
+                    }
+
+                    // Mod+letter keybinds
+                    if crate::shade::input::try_keybind(key) {
+                        if let Some(action) = crate::shade::input::poll_action() {
+                            crate::shade::handle_action(action);
                         }
                         continue;
                     }
