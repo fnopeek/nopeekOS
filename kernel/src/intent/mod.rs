@@ -210,6 +210,11 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             crate::shade::handle_mouse(&evt);
         }
 
+        // Deferred scene redraw (drag resize/swap — rendered after all events drained)
+        if crate::shade::take_deferred_render() {
+            crate::shade::render_frame();
+        }
+
         // Check for shade compositor actions (Mod+key)
         if let Some(action) = crate::shade::input::poll_action() {
             use crate::shade::input::ShadeAction;
@@ -557,6 +562,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);
+                }
+
+                if crate::shade::take_deferred_render() {
+                    crate::shade::render_frame();
                 }
 
                 // Check for shade actions pushed directly by xHCI driver
