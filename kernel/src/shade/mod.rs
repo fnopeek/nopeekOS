@@ -600,7 +600,21 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
 
     // SLOW PATH: take COMPOSITOR lock for focus/drag.
     // Enter on button state change (click/release) OR during active drag (every move).
-    if cursor::has_button_event() || DRAG_ACTIVE.load(Ordering::Relaxed) {
+    let is_button_change = cursor::has_button_event();
+    let is_drag = DRAG_ACTIVE.load(Ordering::Relaxed);
+
+    if is_button_change || is_drag {
+        // During active drag, throttle the ENTIRE slow path to ~33fps.
+        // Button changes (click/release) are always processed immediately.
+        if is_drag && !is_button_change {
+            let now = crate::interrupts::ticks();
+            let last = LAST_DRAG_RENDER.load(Ordering::Relaxed);
+            if now.saturating_sub(last) < 3 {
+                return; // Skip this drag-move event entirely
+            }
+            LAST_DRAG_RENDER.store(now, Ordering::Relaxed);
+        }
+
         let (x, y) = cursor::atomic_pos();
         let (btn, prev) = cursor::atomic_buttons();
         let (needs_redraw, needs_full, dragging) = with_compositor(|comp| {
@@ -618,19 +632,8 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
 
         if needs_redraw {
             if needs_full {
-                if dragging {
-                    // Throttle drag renders to ~33fps (not 1000fps!)
-                    let now = crate::interrupts::ticks();
-                    let last = LAST_DRAG_RENDER.load(Ordering::Relaxed);
-                    if now.saturating_sub(last) >= 3 {
-                        LAST_DRAG_RENDER.store(now, Ordering::Relaxed);
-                        render_frame();
-                    }
-                } else {
-                    render_frame();
-                }
+                render_frame();
             } else {
-                // Focus change → partial render (only dirty windows)
                 terminal::mark_dirty();
             }
         }
