@@ -584,7 +584,7 @@ impl Compositor {
         self.focus_window(ws_windows[prev_idx]);
     }
 
-    /// Process a mouse event. Returns true if the scene needs re-rendering.
+    /// Process a mouse event (legacy path). Returns true if the scene needs re-rendering.
     pub fn handle_mouse(&mut self, evt: &crate::xhci::MouseEvent) -> bool {
         self.mouse.update(evt.dx, evt.dy, evt.buttons);
         let mx = self.mouse.x;
@@ -601,16 +601,17 @@ impl Compositor {
             if held {
                 match drag.mode {
                     DragMode::Swap => {
+                        let mut swapped = false;
                         if let Some(target) = self.window_at(mx, my) {
                             if target != drag.window && drag.last_target != Some(target) {
                                 self.swap_window_order(drag.window, target);
                                 drag.last_target = Some(target);
-                                self.drag = Some(drag);
                                 self.focus_window(drag.window);
-                                return true;
+                                swapped = true;
                             }
                         }
-                        return false;
+                        self.drag = Some(drag); // Keep drag alive
+                        return swapped;
                     }
                     DragMode::Resize => {
                         let dx = mx - drag.start_mx;
@@ -619,6 +620,7 @@ impl Compositor {
                             win.resize_w = drag.start_rw + dx;
                             win.resize_h = drag.start_rh + dy;
                         }
+                        self.drag = Some(drag); // Keep drag alive
                         self.retile();
                         self.needs_full_redraw = true;
                         return true;
@@ -691,16 +693,17 @@ impl Compositor {
             if held {
                 match drag.mode {
                     DragMode::Swap => {
+                        let mut swapped = false;
                         if let Some(target) = self.window_at(mx, my) {
                             if target != drag.window && drag.last_target != Some(target) {
                                 self.swap_window_order(drag.window, target);
                                 drag.last_target = Some(target);
-                                self.drag = Some(drag);
                                 self.focus_window(drag.window);
-                                return true;
+                                swapped = true;
                             }
                         }
-                        return false;
+                        self.drag = Some(drag); // Keep drag alive
+                        return swapped;
                     }
                     DragMode::Resize => {
                         let dx = mx - drag.start_mx;
@@ -709,6 +712,7 @@ impl Compositor {
                             win.resize_w = drag.start_rw + dx;
                             win.resize_h = drag.start_rh + dy;
                         }
+                        self.drag = Some(drag); // Keep drag alive
                         self.retile();
                         self.needs_full_redraw = true;
                         return true;
