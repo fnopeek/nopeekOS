@@ -664,14 +664,9 @@ pub fn restore_input(buf: &mut [u8]) -> usize {
 /// Write the prompt string to the active terminal buffer.
 pub fn write_prompt() {
     if !is_active() { return; }
-    let user = crate::config::get("name");
     let cwd = crate::intent::get_cwd_for_shell();
-    let user_str = user.as_deref().unwrap_or("npk");
-    let prompt = if cwd.is_empty() {
-        alloc::format!("{}@npk /> ", user_str)
-    } else {
-        alloc::format!("{}@npk {}> ", user_str, cwd)
-    };
+    let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+    let prompt = alloc::format!("{}> ", path);
     set_prompt_len(prompt.len());
     write(&prompt);
 }
