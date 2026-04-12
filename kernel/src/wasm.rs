@@ -25,6 +25,8 @@ struct HostState {
     terminal_idx: u8,
     /// Core ID this WASM app is running on (for CPU usage tracking)
     core_id: usize,
+    /// Process ID in the process table
+    pid: u32,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -87,121 +89,6 @@ static APP_RUNNING: [AtomicBool; MAX_APP_BUFS] = [
     AtomicBool::new(false), AtomicBool::new(false),
     AtomicBool::new(false), AtomicBool::new(false),
 ];
-
-// ── Process Tracking (lock-free, per terminal slot) ──────────
-
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::AtomicU32;
-
-/// Process name (fixed-size, set once at spawn)
-static mut PROC_NAME: [[u8; 32]; MAX_APP_BUFS] = [[0; 32]; MAX_APP_BUFS];
-static PROC_NAME_LEN: [AtomicUsize; MAX_APP_BUFS] = {
-    const ZERO: AtomicUsize = AtomicUsize::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-
-/// Per-process cumulative busy TSC (actual work, excludes wait time)
-static PROC_CPU_TSC: [AtomicU64; MAX_APP_BUFS] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-
-/// Per-process CPU usage in percent (computed from delta busy/total TSC)
-static PROC_CPU_PCT: [AtomicU32; MAX_APP_BUFS] = {
-    const ZERO: AtomicU32 = AtomicU32::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-
-/// Snapshots for per-process delta computation
-static PROC_LAST_BUSY: [AtomicU64; MAX_APP_BUFS] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-static PROC_LAST_TSC: [AtomicU64; MAX_APP_BUFS] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-
-/// WASM linear memory size in bytes
-static PROC_MEM: [AtomicU32; MAX_APP_BUFS] = {
-    const ZERO: AtomicU32 = AtomicU32::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-
-/// Which core the process is running on
-static PROC_CORE: [AtomicU32; MAX_APP_BUFS] = {
-    const ZERO: AtomicU32 = AtomicU32::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-
-/// TSC timestamp when process started
-static PROC_START_TSC: [AtomicU64; MAX_APP_BUFS] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; MAX_APP_BUFS]
-};
-
-/// Add busy TSC cycles to a process (called alongside per-core flush).
-pub fn add_proc_busy_tsc(terminal_idx: u8, cycles: u64) {
-    let idx = terminal_idx as usize;
-    if idx < MAX_APP_BUFS {
-        PROC_CPU_TSC[idx].fetch_add(cycles, AtOrd::Relaxed);
-    }
-}
-
-/// Update per-process CPU usage percentage (delta-based, called from npk_sys_info).
-fn update_proc_usage(idx: usize) {
-    if idx >= MAX_APP_BUFS { return; }
-    if !APP_RUNNING[idx].load(AtOrd::Relaxed) { return; }
-
-    let busy = PROC_CPU_TSC[idx].load(AtOrd::Relaxed);
-    let tsc = crate::interrupts::rdtsc();
-
-    let prev_busy = PROC_LAST_BUSY[idx].swap(busy, AtOrd::Relaxed);
-    let prev_tsc = PROC_LAST_TSC[idx].swap(tsc, AtOrd::Relaxed);
-
-    if prev_tsc == 0 { return; }
-
-    let delta_busy = busy.wrapping_sub(prev_busy);
-    let delta_tsc = tsc.wrapping_sub(prev_tsc);
-
-    if delta_tsc > 0 {
-        let pct = (delta_busy * 100).checked_div(delta_tsc).unwrap_or(0);
-        PROC_CPU_PCT[idx].store(pct.min(100) as u32, AtOrd::Relaxed);
-    }
-}
-
-fn register_process(terminal_idx: u8, name: &str, core_id: usize) {
-    let idx = terminal_idx as usize;
-    if idx >= MAX_APP_BUFS { return; }
-
-    // Set name
-    let len = name.len().min(32);
-    // SAFETY: single writer (worker core), idx bounds checked
-    unsafe {
-        PROC_NAME[idx][..len].copy_from_slice(&name.as_bytes()[..len]);
-        if len < 32 { PROC_NAME[idx][len..].fill(0); }
-    }
-    PROC_NAME_LEN[idx].store(len, AtOrd::Release);
-
-    // Reset counters
-    PROC_CPU_TSC[idx].store(0, AtOrd::Relaxed);
-    PROC_CPU_PCT[idx].store(0, AtOrd::Relaxed);
-    PROC_LAST_BUSY[idx].store(0, AtOrd::Relaxed);
-    PROC_LAST_TSC[idx].store(0, AtOrd::Relaxed);
-    PROC_MEM[idx].store(0, AtOrd::Relaxed);
-    PROC_CORE[idx].store(core_id as u32, AtOrd::Relaxed);
-    PROC_START_TSC[idx].store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
-}
-
-fn deregister_process(terminal_idx: u8) {
-    let idx = terminal_idx as usize;
-    if idx >= MAX_APP_BUFS { return; }
-    PROC_NAME_LEN[idx].store(0, AtOrd::Relaxed);
-    PROC_CPU_TSC[idx].store(0, AtOrd::Relaxed);
-    PROC_CPU_PCT[idx].store(0, AtOrd::Relaxed);
-    PROC_MEM[idx].store(0, AtOrd::Relaxed);
-    PROC_START_TSC[idx].store(0, AtOrd::Relaxed);
-}
 
 /// Push a key to an app's input buffer. Called from Core 0.
 pub fn push_app_key(terminal_idx: u8, key: u8) {
@@ -305,9 +192,9 @@ fn wasm_worker_task(arg: u64) {
 
     let core_id = crate::smp::per_core::current_core_id();
 
-    // Register process for tracking
+    // Register process in process table
     let name_str = core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?");
-    register_process(terminal_idx, name_str, core_id);
+    let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
 
     let mut store = Store::new(&engine, HostState {
         output: String::new(),
@@ -315,12 +202,13 @@ fn wasm_worker_task(arg: u64) {
         direct_output: true,
         terminal_idx: job.terminal_idx,
         core_id,
+        pid,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
     let mut linker = <Linker<HostState>>::new(&engine);
     if register_host_functions(&mut linker).is_err() {
-        deregister_process(terminal_idx);
+        crate::process::exit(pid);
         JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
         return;
     }
@@ -328,7 +216,7 @@ fn wasm_worker_task(arg: u64) {
     let instance = match linker.instantiate_and_start(&mut store, &module) {
         Ok(i) => i,
         Err(_) => {
-            deregister_process(terminal_idx);
+            crate::process::exit(pid);
             JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
             return;
         }
@@ -336,13 +224,13 @@ fn wasm_worker_task(arg: u64) {
 
     // Track WASM linear memory size
     if let Some(mem) = instance.get_memory(&store, "memory") {
-        PROC_MEM[terminal_idx as usize].store(mem.data_size(&store) as u32, AtOrd::Relaxed);
+        crate::process::set_memory(pid, mem.data_size(&store) as u32);
     }
 
     let func = match instance.get_func(&store, "_start") {
         Some(f) => f,
         None => {
-            deregister_process(terminal_idx);
+            crate::process::exit(pid);
             JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
             return;
         }
@@ -352,11 +240,11 @@ fn wasm_worker_task(arg: u64) {
 
     // Update final memory usage
     if let Some(mem) = instance.get_memory(&store, "memory") {
-        PROC_MEM[terminal_idx as usize].store(mem.data_size(&store) as u32, AtOrd::Relaxed);
+        crate::process::set_memory(pid, mem.data_size(&store) as u32);
     }
 
     // Deregister process + clear app marker + signal completion
-    deregister_process(terminal_idx);
+    crate::process::exit(pid);
     if (terminal_idx as usize) < MAX_APP_BUFS {
         APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
     }
@@ -404,6 +292,7 @@ pub fn execute_interactive(
         direct_output: true,
         terminal_idx: 255, // active terminal
         core_id: 0, // runs on Core 0 (non-worker path)
+        pid: 0,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -437,6 +326,7 @@ fn execute_inner(
         direct_output: false,
         terminal_idx: 255,
         core_id: 0,
+        pid: 0,
     });
     store.set_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -678,69 +568,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 17 => { let (_, ebx, _) = crate::interrupts::cpuid15(); ebx as i64 },
                 18 => { let (_, _, ecx) = crate::interrupts::cpuid15(); ecx as i64 },
 
-                // ── Process tracking (keys 20-27) ────────────────
-                // 20: process count (number of running WASM apps)
-                20 => {
-                    let mut count = 0i64;
-                    for i in 0..MAX_APP_BUFS {
-                        if APP_RUNNING[i].load(AtOrd::Relaxed) { count += 1; }
-                    }
-                    count
-                },
-                // 21: process active (1/0) for terminal idx in high bits
-                21 => {
-                    let idx = (key >> 8) as usize;
-                    if idx < MAX_APP_BUFS && APP_RUNNING[idx].load(AtOrd::Relaxed) { 1 } else { 0 }
-                },
-                // 22: process CPU usage % for terminal idx
-                22 => {
-                    let idx = (key >> 8) as usize;
-                    update_proc_usage(idx);
-                    if idx < MAX_APP_BUFS { PROC_CPU_PCT[idx].load(AtOrd::Relaxed) as i64 } else { 0 }
-                },
-                // 23: process memory in KB for terminal idx
-                23 => {
-                    let idx = (key >> 8) as usize;
-                    if idx < MAX_APP_BUFS { (PROC_MEM[idx].load(AtOrd::Relaxed) / 1024) as i64 } else { 0 }
-                },
-                // 24: process core_id for terminal idx
-                24 => {
-                    let idx = (key >> 8) as usize;
-                    if idx < MAX_APP_BUFS { PROC_CORE[idx].load(AtOrd::Relaxed) as i64 } else { -1 }
-                },
-                // 25: process name bytes 0-7 as i64 (little-endian packed)
-                25 => {
-                    let idx = (key >> 8) as usize;
-                    if idx >= MAX_APP_BUFS { return 0; }
-                    let len = PROC_NAME_LEN[idx].load(AtOrd::Acquire);
-                    if len == 0 { return 0; }
-                    let mut val = 0u64;
-                    // SAFETY: idx bounds checked, single writer set name before APP_RUNNING
-                    let name = unsafe { &PROC_NAME[idx] };
-                    for i in 0..8.min(len) { val |= (name[i] as u64) << (i * 8); }
-                    val as i64
-                },
-                // 26: process name bytes 8-15 as i64
-                26 => {
-                    let idx = (key >> 8) as usize;
-                    if idx >= MAX_APP_BUFS { return 0; }
-                    let len = PROC_NAME_LEN[idx].load(AtOrd::Acquire);
-                    if len <= 8 { return 0; }
-                    let mut val = 0u64;
-                    let name = unsafe { &PROC_NAME[idx] };
-                    for i in 8..16.min(len) { val |= (name[i] as u64) << ((i - 8) * 8); }
-                    val as i64
-                },
-                // 27: process uptime in seconds for terminal idx
-                27 => {
-                    let idx = (key >> 8) as usize;
-                    if idx >= MAX_APP_BUFS { return 0; }
-                    let start = PROC_START_TSC[idx].load(AtOrd::Relaxed);
-                    if start == 0 { return 0; }
-                    let freq = crate::interrupts::tsc_freq();
-                    if freq == 0 { return 0; }
-                    ((crate::interrupts::rdtsc() - start) / freq) as i64
-                },
+                // ── Process tracking (keys 20-29) → process table ──
+                // 20: count, 21: pid_at_index, 22-29: query by PID
+                20..=29 => crate::process::sys_info(key),
                 _ => -1,
             }
         },
@@ -787,9 +617,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 };
             }
 
-            // Flush work done since last checkpoint, update stats
+            // Flush work done since last checkpoint, update process table
             let flushed = crate::smp::per_core::flush_busy(core_id);
-            add_proc_busy_tsc(term_idx, flushed);
+            crate::process::add_busy_tsc(caller.data().pid, flushed);
             crate::smp::per_core::update_core_freq(core_id);
             crate::smp::per_core::set_active(core_id, false);
 
