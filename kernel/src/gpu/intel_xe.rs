@@ -1730,8 +1730,11 @@ impl IntelXeDriver {
             ctx.add(1).write(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
 
             // Pair 1: CTX_CONTEXT_CONTROL (must be first!)
+            // Bit 0: ENGINE_CTX_RESTORE_INHIBIT — MUST be 0 (allow restore!)
+            // Bit 3: INHIBIT_SYN_CTX_SWITCH — 1 (no sync context switches)
+            // Masked write: (mask << 16) | value = 0x00090008
             ctx.add(2).write(0x22244);  // RING_CONTEXT_CONTROL
-            ctx.add(3).write(0x00010001); // inhibit sync context switch
+            ctx.add(3).write(0x0009_0008);
 
             // Pair 2: RING_HEAD
             ctx.add(4).write(BCS_RING_HEAD);
