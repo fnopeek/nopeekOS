@@ -281,7 +281,9 @@ pub fn handle_action(action: input::ShadeAction) {
             with_compositor(|comp| {
                 comp.create_window("loop", 0, 0, 800, 600);
             });
-            // run_loop prints the prompt via IntentSession
+            // Terminal was freshly allocated (cleared) — reset session prompt
+            // so run_loop prints a fresh one with full render
+            crate::intent::reset_session_prompt(terminal::active_idx());
             render_frame();
         }
         ShadeAction::CloseWindow => {
