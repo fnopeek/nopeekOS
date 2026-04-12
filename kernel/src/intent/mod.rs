@@ -879,9 +879,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             from_wasm = false;
             let current = crate::shade::terminal::active_idx();
             if current == wasm_term {
+                // WASM app exited on this terminal — need fresh prompt
                 kprintln!();
+                need_prompt = true;
             }
-            need_prompt = true;
+            // If focus switched to a different terminal, don't set need_prompt
+            // (that terminal's session already has its own prompt state)
             if crate::shade::is_active() {
                 crate::shade::render_frame();
             }
