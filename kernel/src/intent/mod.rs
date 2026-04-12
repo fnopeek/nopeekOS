@@ -859,6 +859,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             &mut **((*sessions_ptr()).get_mut(&term).unwrap() as *mut Box<IntentSession>)
         };
 
+        // Fresh session (created by compositor) that never had a prompt
+        if !need_prompt && session.prompt_len == 0 {
+            need_prompt = true;
+        }
+
         if need_prompt {
             // Fresh prompt (after command, WASM exit, intent completion, or new session)
             session.reset_input();
