@@ -672,8 +672,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             // Intent running on worker — don't show prompt, just poll events
             if has_running_intent(focused_term) {
                 from_intent = true;
-                crate::shade::poll_render();
-                crate::net::poll();
+
+                // 1. Process mouse FIRST (handle_mouse draws cursor)
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);
                 }
@@ -683,9 +683,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
                 }
-                // Consume keys (don't buffer — intent has the terminal)
+
+                // 2. Render dirty terminals (worker output) — after mouse
+                crate::shade::poll_render();
+
+                // 3. Consume keys (don't buffer — intent has the terminal)
                 while crate::keyboard::read_key().is_some() {}
-                // Slower poll (~1ms) to avoid render stutter from frequent dirty flags
+
                 for _ in 0..100_000 { core::hint::spin_loop(); }
                 continue;
             }
