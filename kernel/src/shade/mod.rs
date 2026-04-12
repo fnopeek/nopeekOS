@@ -179,10 +179,6 @@ fn render_frame_layered() {
         // Swap front index (blit_rect now reads from new frame)
         fb.swap_buffers();
 
-        // VSync: wait for vblank before blit to minimize tearing.
-        // Starts the CPU blit at the beginning of the blank period.
-        crate::gpu::wait_vblank();
-
         // Blit new front → MMIO
         let mut damage = render::DamageTracker::new(screen_w, screen_h);
         damage.mark_all();
@@ -210,7 +206,6 @@ fn render_frame_legacy() {
         }
 
         fb.swap_buffers();
-        crate::gpu::wait_vblank();
 
         let mut damage = render::DamageTracker::new(screen_w, screen_h);
         damage.mark_all();
