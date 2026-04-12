@@ -531,14 +531,35 @@ impl GpuHal for IntelXeDriver {
         let rst = mmio_read32(self.bar0, BCS_RESET_CTL);
         kprintln!("  FW_ACK:     GT={} RN={} MD={}", fw_ack & 1, fw_rn & 1, fw_md & 1);
         kprintln!("  RING_MODE:  {:#010x} (execlist={})", mode, mode & GFX_RUN_LIST_ENABLE != 0);
-        kprintln!("  MI_MODE:    {:#010x}", mi);
-        kprintln!("  RING_HEAD:  {:#010x} (off={})", head, head & RING_HEAD_MASK);
-        kprintln!("  RING_TAIL:  {:#010x} (off={})", tail, tail & RING_HEAD_MASK);
-        kprintln!("  RING_START: {:#010x}", start);
-        kprintln!("  RING_CTL:   {:#010x} (valid={})", ctl, ctl & 1);
+        kprintln!("  MMIO HEAD:  {:#010x} TAIL: {:#010x}", head, tail);
+        kprintln!("  MMIO START: {:#010x} CTL:  {:#010x}", start, ctl);
         kprintln!("  HWS_PGA:    {:#010x}", hws);
         kprintln!("  ELSQ_ST:    {:#010x}", elsq_st);
         kprintln!("  RESET_CTL:  {:#010x}", rst);
+        // LRC values from RAM (GPU writes here on context-save)
+        if self.bcs_lrc_phys != 0 {
+            let ctx = (self.bcs_lrc_phys + 4096) as *const u32;
+            // SAFETY: lrc_phys is identity-mapped, within our allocation
+            unsafe {
+                let lh = core::ptr::read_volatile(ctx.add(5));  // HEAD val
+                let lt = core::ptr::read_volatile(ctx.add(7));  // TAIL val
+                let ls = core::ptr::read_volatile(ctx.add(9));  // START val
+                let lc = core::ptr::read_volatile(ctx.add(11)); // CTL val
+                let lx = core::ptr::read_volatile(ctx.add(3));  // CTX_CTRL val
+                kprintln!("  LRC HEAD:   {} TAIL: {} START: {:#x} CTL: {:#x}",
+                    lh, lt, ls, lc);
+                kprintln!("  LRC CTXCTL: {:#010x}", lx);
+            }
+            // HWSP first 4 DWORDs
+            let hwsp = self.bcs_lrc_phys as *const u32;
+            unsafe {
+                kprintln!("  HWSP[0-3]:  {:#010x} {:#010x} {:#010x} {:#010x}",
+                    core::ptr::read_volatile(hwsp),
+                    core::ptr::read_volatile(hwsp.add(1)),
+                    core::ptr::read_volatile(hwsp.add(2)),
+                    core::ptr::read_volatile(hwsp.add(3)));
+            }
+        }
     }
 }
 
@@ -1680,17 +1701,45 @@ impl IntelXeDriver {
         // ── Step 7: Single ELSQ submit with FORCE_RESTORE ───────────
         self.elsq_submit(true);
 
-        // Poll: check if RING_HEAD advances (GPU processed the ring)
-        let probe_ok = poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, 8, 500_000);
-        let head = mmio_read32(self.bar0, BCS_RING_HEAD);
-        let tail = mmio_read32(self.bar0, BCS_RING_TAIL);
-        let ctl = mmio_read32(self.bar0, BCS_RING_CTL);
+        // ── Step 8: Probe — check LRC + HWSP in RAM ────────────────
+        // Gen 12 ExecList does NOT update RING_HEAD MMIO live.
+        // After context runs + saves, GPU writes HEAD back to LRC in RAM.
+        // We check: (a) LRC HEAD value, (b) HWSP modifications, (c) MMIO as fallback.
+        let lrc_head_ptr = (self.bcs_lrc_phys + 4096 + 5 * 4) as *const u32; // ctx[5] = HEAD val
+        let hwsp_ptr = self.bcs_lrc_phys as *const u32; // HWSP page 0
+
+        // Poll LRC HEAD in system RAM (GPU writes here on context-save)
+        let mut probe_ok = false;
+        for _ in 0..1_000_000u32 {
+            // SAFETY: lrc_phys is identity-mapped, within our allocation
+            let lrc_head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+            if lrc_head == 8 {
+                probe_ok = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        // Read diagnostics
+        let lrc_head_final = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+        let lrc_tail_final = unsafe { core::ptr::read_volatile(
+            (self.bcs_lrc_phys + 4096 + 7 * 4) as *const u32) };
+        let lrc_start_final = unsafe { core::ptr::read_volatile(
+            (self.bcs_lrc_phys + 4096 + 9 * 4) as *const u32) };
+        let hwsp_0 = unsafe { core::ptr::read_volatile(hwsp_ptr) };
+        let hwsp_1 = unsafe { core::ptr::read_volatile(hwsp_ptr.add(1)) };
+        let mmio_head = mmio_read32(self.bar0, BCS_RING_HEAD);
         let status = mmio_read32(self.bar0, BCS_ELSQ_STATUS_LO);
-        kprintln!("[npk]   BCS: probe HEAD={:#x} TAIL={:#x} CTL={:#010x} ELSQ_ST={:#010x}",
-            head & RING_HEAD_MASK, tail & RING_HEAD_MASK, ctl, status);
+
+        kprintln!("[npk]   BCS: LRC HEAD={} TAIL={} START={:#x}",
+            lrc_head_final, lrc_tail_final, lrc_start_final);
+        kprintln!("[npk]   BCS: HWSP[0]={:#010x} [1]={:#010x}", hwsp_0, hwsp_1);
+        kprintln!("[npk]   BCS: MMIO HEAD={:#x} ELSQ_ST={:#010x}",
+            mmio_head & RING_HEAD_MASK, status);
+        kprintln!("[npk]   BCS: probe={}", probe_ok);
 
         if !probe_ok {
-            kprintln!("[npk]   BCS: ELSQ probe failed — HEAD did not advance");
+            kprintln!("[npk]   BCS: probe failed — context did not run");
             kprintln!("[npk]   BCS: falling back to CPU blit");
             return Err(GpuError::PipelineFailed);
         }
