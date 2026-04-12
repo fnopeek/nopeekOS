@@ -141,6 +141,12 @@ const GFX_FLSH_CNTL_GEN6: u32 = 0x101008;
 
 // ── BCS (Blitter Command Streamer) — Gen 12 ────────────────────────
 
+// GT Forcewake (required before accessing GT engine registers like BCS)
+// Display registers have their own power domain (PWR_WELL_CTL2).
+// GT engines (Render, BCS, Compute) are power-gated until forcewake.
+const FORCEWAKE_GT: u32        = 0xA188;    // Request: masked bit write
+const FORCEWAKE_ACK_GT: u32    = 0x130044;  // Ack: poll bit 0
+
 // BCS engine MMIO registers (engine base = 0x22000)
 const BCS_RING_TAIL: u32       = 0x22030;  // Write pointer (CPU updates)
 const BCS_RING_HEAD: u32       = 0x22034;  // Read pointer (GPU advances)
@@ -464,11 +470,13 @@ impl GpuHal for IntelXeDriver {
             kprintln!("  BCS regs: no BAR0");
             return;
         }
+        let fw_ack = mmio_read32(self.bar0, FORCEWAKE_ACK_GT);
         let head = mmio_read32(self.bar0, BCS_RING_HEAD);
         let tail = mmio_read32(self.bar0, BCS_RING_TAIL);
         let start = mmio_read32(self.bar0, BCS_RING_START);
         let ctl = mmio_read32(self.bar0, BCS_RING_CTL);
         let hws = mmio_read32(self.bar0, BCS_HWS_PGA);
+        kprintln!("  FW_ACK_GT:  {:#010x} (wake={})", fw_ack, fw_ack & 1);
         kprintln!("  RING_HEAD:  {:#010x} (off={})", head, head & RING_HEAD_MASK);
         kprintln!("  RING_TAIL:  {:#010x} (off={})", tail, tail & RING_HEAD_MASK);
         kprintln!("  RING_START: {:#010x}", start);
@@ -1520,6 +1528,21 @@ impl IntelXeDriver {
         // Invalidate GGTT TLB
         mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
         let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+
+        // Acquire GT forcewake — BCS registers are power-gated without this.
+        // Without forcewake, all BCS MMIO reads return 0 and writes are dropped.
+        let fw_ack_before = mmio_read32(self.bar0, FORCEWAKE_ACK_GT);
+        kprintln!("[npk]   BCS: FORCEWAKE_ACK before={:#010x}", fw_ack_before);
+
+        // Masked bit write: bit 16 = enable mask for bit 0, bit 0 = request wake
+        mmio_write32(self.bar0, FORCEWAKE_GT, (1 << 16) | 1);
+
+        if !poll_timeout(self.bar0, FORCEWAKE_ACK_GT, 1, 1, 500_000) {
+            let ack = mmio_read32(self.bar0, FORCEWAKE_ACK_GT);
+            kprintln!("[npk]   BCS: GT forcewake TIMEOUT (ack={:#010x})", ack);
+            return Err(GpuError::PowerTimeout);
+        }
+        kprintln!("[npk]   BCS: GT forcewake acquired");
 
         // Stop BCS if running (clear RING_CTL valid bit)
         mmio_write32(self.bar0, BCS_RING_CTL, 0);
