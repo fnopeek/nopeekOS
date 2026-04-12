@@ -124,7 +124,7 @@ pub fn intent_run_interactive(module_name: &str) {
 
     // Spawn on worker core — returns immediately
     // Intent loop will route keys when this window is focused
-    if !wasm::spawn_on_worker(wasm_bytes.to_vec(), module_cap, term_idx) {
+    if !wasm::spawn_on_worker(wasm_bytes.to_vec(), module_cap, term_idx, module_name) {
         kprintln!("[npk] Failed to spawn '{}'", module_name);
     }
 }

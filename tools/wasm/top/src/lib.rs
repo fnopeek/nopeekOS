@@ -1,6 +1,7 @@
 //! top — nopeekOS system monitor (WASM module)
 //!
 //! Live-updating display: per-core CPU usage, frequency, memory, scheduler.
+//! Process tracking: running WASM apps with name, CPU%, memory, core.
 //! Uses the App Display API: npk_print, npk_clear, npk_input_wait, npk_sys_info.
 //! Press 'q' to exit.
 
@@ -55,6 +56,23 @@ fn bar(pct: i64, w: usize) {
     i = 0;
     while i < w - f { print(" "); i += 1; }
     print("]");
+}
+
+/// Decode up to 8 bytes from a packed i64 into a buffer. Returns bytes written.
+fn unpack_name(val: i64, buf: &mut [u8], offset: usize) -> usize {
+    let v = val as u64;
+    let mut count = 0;
+    let mut i = 0;
+    while i < 8 {
+        let b = ((v >> (i * 8)) & 0xFF) as u8;
+        if b == 0 { break; }
+        if offset + count < buf.len() {
+            buf[offset + count] = b;
+            count += 1;
+        }
+        i += 1;
+    }
+    count
 }
 
 #[unsafe(no_mangle)]
@@ -130,6 +148,65 @@ pub extern "C" fn _start() {
             i += 1;
         }
 
+        // Processes
+        let proc_count = sys(20);
+        if proc_count > 0 {
+            print("\n  PROCESSES\n  ─────────\n");
+            print("  TERM  NAME              CPU%   MEM    CORE  UPTIME\n");
+            print("  ────  ────              ────   ───    ────  ──────\n");
+
+            let mut t: i32 = 0;
+            while t < 8 {
+                let active = sys(21 | (t << 8));
+                if active != 0 {
+                    print("  ");
+                    pad(t as i64, 4);
+
+                    // Decode name from packed i64s
+                    let mut name_buf = [0u8; 16];
+                    let n1 = unpack_name(sys(25 | (t << 8)), &mut name_buf, 0);
+                    let n2 = unpack_name(sys(26 | (t << 8)), &mut name_buf, n1);
+                    let name_len = n1 + n2;
+                    print("  ");
+                    if name_len > 0 {
+                        let mut j = 0;
+                        while j < name_len {
+                            let ch = [name_buf[j]];
+                            unsafe { npk_print(ch.as_ptr() as i32, 1); }
+                            j += 1;
+                        }
+                        // Pad to 16 chars
+                        let mut p = name_len;
+                        while p < 16 { print(" "); p += 1; }
+                    } else {
+                        print("?               ");
+                    }
+
+                    let cpu = sys(22 | (t << 8));
+                    print("  ");
+                    pad(cpu, 3);
+                    print("%");
+
+                    let mem_kb = sys(23 | (t << 8));
+                    print("  ");
+                    pad(mem_kb, 4);
+                    print("K");
+
+                    let core = sys(24 | (t << 8));
+                    print("  ");
+                    pad(core, 4);
+
+                    let pup = sys(27 | (t << 8));
+                    print("  ");
+                    print_num(pup);
+                    print("s");
+
+                    print("\n");
+                }
+                t += 1;
+            }
+        }
+
         // Memory
         print("\n  MEMORY\n  ──────\n");
         print("  RAM:  "); print_num(free_mb); print(" MB free\n");
@@ -143,16 +220,7 @@ pub extern "C" fn _start() {
         print("  done="); print_num(completed);
         print("  steals="); print_num(steals); print("\n");
 
-        // Debug
-        let c15_eax = sys(16);
-        let c15_ebx = sys(17);
-        let c15_ecx = sys(18);
-        print("\n  TSC: "); print_num(tsc_mhz); print(" MHz");
-        print("  (CPUID 0x15: "); print_num(c15_ecx);
-        print("*"); print_num(c15_ebx);
-        print("/"); print_num(c15_eax); print(")\n");
-
-        print("  [q] quit\n");
+        print("\n  [q] quit\n");
 
         // Wait for key or 1-second timeout — instant response to 'q'
         let key = unsafe { npk_input_wait(1000) };

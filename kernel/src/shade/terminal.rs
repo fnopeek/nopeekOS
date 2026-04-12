@@ -290,13 +290,30 @@ pub fn write(s: &str) {
     }
 }
 
+/// Per-terminal dirty flags (set by worker-core WASM output, read by poll_render).
+static TERM_DIRTY: [AtomicBool; MAX_TERMINALS] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; MAX_TERMINALS]
+};
+
 /// Write to a specific terminal by index (for WASM apps on worker cores).
 pub fn write_idx(idx: usize, s: &str) {
     if idx < MAX_TERMINALS {
         let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
         terms[idx].write_str(s);
+        TERM_DIRTY[idx].store(true, Ordering::Release);
         DIRTY.store(true, Ordering::Release);
     }
+}
+
+/// Check if a specific terminal has new content.
+pub fn is_term_dirty(idx: usize) -> bool {
+    if idx < MAX_TERMINALS { TERM_DIRTY[idx].load(Ordering::Acquire) } else { false }
+}
+
+/// Clear per-terminal dirty flag.
+pub fn clear_term_dirty(idx: usize) {
+    if idx < MAX_TERMINALS { TERM_DIRTY[idx].store(false, Ordering::Release); }
 }
 
 /// Check if terminal has new content since last render.

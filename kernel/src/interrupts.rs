@@ -315,6 +315,11 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     let tick = TICKS.fetch_add(1, Ordering::Relaxed);
     // Drain USB events from interrupt context (try_lock, never blocks)
     crate::xhci::poll_events_irq();
+    // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
+    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    if freq > 0 {
+        crate::smp::per_core::add_busy_tsc(0, freq / 100);
+    }
     // Update BSP frequency once per second (for top display)
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);
@@ -332,6 +337,11 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
     let tick = TICKS.fetch_add(1, Ordering::Relaxed);
     crate::xhci::poll_events_irq();
+    // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
+    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    if freq > 0 {
+        crate::smp::per_core::add_busy_tsc(0, freq / 100);
+    }
     // Update BSP frequency once per second (for top display)
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);

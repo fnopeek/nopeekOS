@@ -65,6 +65,13 @@ static CORE_ACTIVE: [AtomicBool; 256] = {
     [FALSE; 256]
 };
 
+/// Per-core work-start TSC (set when task begins or resumes after wait).
+/// Used for checkpoint-based busy tracking in long-running WASM apps.
+static WORK_START_TSC: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+
 /// Platform frequency limits (set once by enable_hwp)
 static MAX_TURBO_MHZ: AtomicU32 = AtomicU32::new(0);
 static MIN_EFF_MHZ: AtomicU32 = AtomicU32::new(0);
@@ -153,6 +160,30 @@ pub fn add_busy_tsc(core_id: usize, cycles: u64) {
     CORE_BUSY_TSC[core_id].fetch_add(cycles, Ordering::Relaxed);
 }
 
+/// Start tracking work time for a core (called when task begins or resumes).
+pub fn start_work(core_id: usize) {
+    if core_id >= 256 { return; }
+    WORK_START_TSC[core_id].store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+}
+
+/// Flush accumulated work time since last start_work (called before wait/idle).
+/// Returns the flushed cycles count.
+pub fn flush_busy(core_id: usize) -> u64 {
+    if core_id >= 256 { return 0; }
+    let start = WORK_START_TSC[core_id].swap(0, Ordering::Relaxed);
+    if start == 0 { return 0; }
+    let elapsed = crate::interrupts::rdtsc().saturating_sub(start);
+    CORE_BUSY_TSC[core_id].fetch_add(elapsed, Ordering::Relaxed);
+    elapsed
+}
+
+/// Set per-core active flag (true = executing work, false = waiting/idle).
+pub fn set_active(core_id: usize, active: bool) {
+    if core_id < 256 {
+        CORE_ACTIVE[core_id].store(active, Ordering::Relaxed);
+    }
+}
+
 /// Get last measured frequency in MHz for a core.
 pub fn core_freq_mhz(core_id: usize) -> u32 {
     if core_id >= 256 { return 0; }
@@ -165,13 +196,22 @@ pub fn max_turbo_mhz() -> u32 { MAX_TURBO_MHZ.load(Ordering::Relaxed) }
 /// Min efficiency frequency in MHz (from HWP capabilities).
 pub fn min_eff_mhz() -> u32 { MIN_EFF_MHZ.load(Ordering::Relaxed) }
 
-/// Per-core CPU usage in percent (0-100).
-/// For cores running long-lived tasks (WASM apps), returns 100% while active.
+/// Per-core CPU usage in percent (0-100), based on delta busy/total TSC.
 pub fn core_usage(core_id: usize) -> u32 {
     if core_id >= 256 { return 0; }
-    // If core is currently executing a task, it's 100% busy
-    if CORE_ACTIVE[core_id].load(Ordering::Relaxed) { return 100; }
     CORE_USAGE[core_id].load(Ordering::Relaxed)
+}
+
+/// Read current core's sequential ID via LAPIC.
+pub fn current_core_id() -> usize {
+    let (lo, hi): (u32, u32);
+    // SAFETY: MSR 0x1B (APIC base) always readable on x86_64 ring 0
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
+    let apic_base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
+    // SAFETY: APIC MMIO is identity-mapped
+    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    let cores = CORES.lock();
+    cores.iter().position(|c| c.apic_id == apic_id).unwrap_or(0)
 }
 
 /// Enable Hardware P-states (HWP / Speed Shift) on the current core.
@@ -254,9 +294,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // Try to get work (own deque first, then steal)
         if let Some(task) = super::scheduler::next_task(cid) {
             CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
-            let t0 = crate::interrupts::rdtsc();
+            start_work(cid);
             (task.func)(task.arg);
-            add_busy_tsc(cid, crate::interrupts::rdtsc() - t0);
+            flush_busy(cid);
             CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             continue;
         }
