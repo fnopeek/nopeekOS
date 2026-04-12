@@ -200,14 +200,15 @@ const MI_LRI_FORCE_POSTED: u32  = 1 << 12;     // Posted write (no ack wait)
 const MI_BB_END: u32            = 0x0A << 23;   // MI_BATCH_BUFFER_END
 
 // XY_FAST_COPY_BLT (Gen 9+, 10 DWORDs)
-const XY_FAST_COPY_BLT_CMD: u32 = (2 << 29) | (0x42 << 22);
+// Bits 21+20: force GGTT for dst+src addresses (otherwise PPGTT → page fault)
+const XY_FAST_COPY_BLT_CMD: u32 = (2 << 29) | (0x42 << 22) | (1 << 21) | (1 << 20);
 const XY_FAST_COPY_BLT_DEPTH_32: u32 = 3 << 24;
 
 // Context descriptor flags (Gen 12)
 const CTX_VALID: u32            = 1 << 0;
-const CTX_FORCE_RESTORE: u32    = 1 << 1;   // Bit 1! (Bit 2 = FORCE_PD_RESTORE, not the same!)
-const CTX_LEGACY_32B: u32       = 1 << 3;   // GGTT addressing (Advanced=bit4 needs PPGTT!)
-const CTX_PRIVILEGE: u32        = 1 << 8;    // Privileged context
+const CTX_FORCE_RESTORE: u32    = 1 << 2;   // Bit 2 = Force Context Restore
+const CTX_ADVANCED: u32         = 1 << 4;   // Advanced context (Gen 12, PPGTT)
+const CTX_PRIVILEGE: u32        = 1 << 8;   // Privileged context
 
 // GGTT layout for BCS resources (beyond framebuffer at 0x0100_0000)
 const BCS_RING_GGTT: u32        = 0x0400_0000;  // 64MB: ring buffer (4KB)
@@ -1783,14 +1784,16 @@ impl IntelXeDriver {
     /// Submit BCS context via ELSQ. Always uses FORCE_RESTORE for
     /// stateless ring operation (HEAD/TAIL reset from LRC each time).
     fn elsq_submit(&self, _force_restore: bool) {
-        let lrca_ggtt = BCS_LRC_GGTT + 4096;
+        // LRCA = page 0 of LRC (HWSP). GPU adds +4096 for context state.
+        // Bug was: we pointed at page 1, GPU read uninitialized memory as context.
+        let lrca_ggtt = BCS_LRC_GGTT; // page 0!
 
-        // Legacy 32B (bit 3) = GGTT addressing. Advanced (bit 4) needs PPGTT!
-        // FORCE_RESTORE (bit 1) always set — stateless ring hack.
+        // Advanced context (bit 4) + FORCE_RESTORE (bit 2) always.
+        // BLT commands use GGTT bits to avoid PPGTT page faults.
         let desc_lo: u32 = lrca_ggtt
             | CTX_PRIVILEGE
-            | CTX_LEGACY_32B         // bit 3 = GGTT
-            | CTX_FORCE_RESTORE      // bit 1 = always force restore
+            | CTX_ADVANCED           // bit 4
+            | CTX_FORCE_RESTORE      // bit 2 = always force restore
             | CTX_VALID;
 
         let desc_hi: u32 = 1;
