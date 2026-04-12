@@ -169,11 +169,18 @@ pub fn intent_gpu(args: &str) {
         }
         "status" | "" => {
             kprintln!("  Driver:   {}", crate::gpu::driver_name());
+            kprintln!("  HAL:      active");
             if let Some(fb) = crate::gpu::framebuffer_info() {
                 kprintln!("  Mode:     {}x{} {}bpp", fb.width, fb.height, fb.bpp);
                 kprintln!("  Address:  {:#x}", fb.addr);
                 kprintln!("  Pitch:    {} bytes", fb.pitch);
             }
+            let hz = crate::gpu::current_hz();
+            if hz > 0 {
+                kprintln!("  Refresh:  {}Hz", hz);
+            }
+            kprintln!("  VSync:    {}", if crate::gpu::supports_flip() { "yes (PIPE_FRMCNT)" } else { "no (GOP)" });
+            kprintln!("  Flip:     {}", if crate::gpu::supports_flip() { "hardware (PLANE_SURF)" } else { "CPU blit" });
             if let Some(name) = crate::gpu::native_gpu_name() {
                 kprintln!("  Native:   {} (detected, use 'gpu init' to activate)", name);
             }
