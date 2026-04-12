@@ -332,6 +332,23 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     // Start shade compositor (GUI_MODE already set after login)
     if framebuffer::is_available() {
+        // Initialize BCS blitter engine (GPU blit instead of CPU copy)
+        if gpu::is_native() {
+            if gpu::init_blit_engine() {
+                kprintln!("[npk] BCS: blitter engine ready");
+                if let Some((pa, pb, pages)) = framebuffer::shadow_phys_info() {
+                    if pages > 0 {
+                        gpu::map_shadows_for_blit(pa, pb, pages);
+                        let (ga, gb) = gpu::shadow_ggtt();
+                        framebuffer::set_shadow_ggtt(ga, gb);
+                        kprintln!("[npk] BCS: shadows mapped (A={:#x} B={:#x})", ga, gb);
+                    }
+                }
+            } else {
+                kprintln!("[npk] BCS: init failed, using CPU blit");
+            }
+        }
+
         shade::init();
         // Random wallpaper on boot (if any in wallpapers/)
         intent::random_wallpaper();

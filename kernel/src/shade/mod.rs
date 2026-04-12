@@ -179,10 +179,13 @@ fn render_frame_layered() {
         // Swap front index (blit_rect now reads from new frame)
         fb.swap_buffers();
 
-        // Blit new front → MMIO
-        let mut damage = render::DamageTracker::new(screen_w, screen_h);
-        damage.mark_all();
-        damage.flush(fb);
+        // Blit new front → MMIO (GPU path if available, else CPU)
+        let gpu_ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
+        if !gpu_ok {
+            let mut damage = render::DamageTracker::new(screen_w, screen_h);
+            damage.mark_all();
+            damage.flush(fb);
+        }
 
         // NOW update cached pointer — MMIO matches new front
         fb.commit_front();
@@ -199,6 +202,7 @@ fn render_frame_legacy() {
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
+        let pitch = fb.info().pitch;
         let back = fb.shadow_back();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
@@ -207,9 +211,13 @@ fn render_frame_legacy() {
 
         fb.swap_buffers();
 
-        let mut damage = render::DamageTracker::new(screen_w, screen_h);
-        damage.mark_all();
-        damage.flush(fb);
+        // GPU blit path (or CPU fallback)
+        let gpu_ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
+        if !gpu_ok {
+            let mut damage = render::DamageTracker::new(screen_w, screen_h);
+            damage.mark_all();
+            damage.flush(fb);
+        }
 
         fb.commit_front();
 
@@ -217,6 +225,18 @@ fn render_frame_legacy() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
+}
+
+/// Try GPU BCS blit from front shadow → MMIO framebuffer.
+/// Returns true if GPU blit succeeded, false = caller should CPU-blit.
+fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> bool {
+    if !crate::gpu::supports_blit() { return false; }
+
+    let src_ggtt = fb.front_ggtt();
+    let dst_ggtt = crate::gpu::fb_ggtt_offset();
+    if src_ggtt == 0 || dst_ggtt == 0 { return false; }
+
+    crate::gpu::gpu_blit_rect(src_ggtt, pitch, dst_ggtt, pitch, 0, 0, pitch / 4, h)
 }
 
 /// Render only damaged regions (efficient partial update).

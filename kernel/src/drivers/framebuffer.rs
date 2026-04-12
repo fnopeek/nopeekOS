@@ -31,6 +31,10 @@ pub struct FbConsole {
     rows: u32,
     /// Pixel scale factor (2 for 4K, 1 otherwise). Each glyph pixel becomes scale×scale.
     scale: u32,
+    /// GGTT offset of shadow A (0 = not mapped for GPU blit)
+    pub shadow_a_ggtt: u32,
+    /// GGTT offset of shadow B (0 = not mapped for GPU blit)
+    pub shadow_b_ggtt: u32,
 }
 
 // SAFETY: FbConsole is only accessed under a spinlock (CONSOLE mutex).
@@ -78,6 +82,16 @@ impl FbConsole {
     pub fn commit_front(&self) {
         SHADOW_FRONT_CACHED.store(self.front_ptr(), Ordering::Release);
     }
+
+    /// Physical addresses + page count of shadow buffers (identity-mapped).
+    pub fn shadow_phys_info(&self) -> (u64, u64, u32) {
+        (self.shadow as u64, self.shadow_b as u64, (self.shadow_size / 4096) as u32)
+    }
+
+    /// GGTT offset of the current front buffer (for GPU blit source).
+    pub fn front_ggtt(&self) -> u32 {
+        if self.front == 0 { self.shadow_a_ggtt } else { self.shadow_b_ggtt }
+    }
 }
 
 /// Execute a closure with exclusive access to the framebuffer console.
@@ -121,6 +135,24 @@ pub fn get_info() -> FbInfo {
         },
         None => FbInfo { addr: 0, pitch: 0, width: 0, height: 0, bpp: 0 },
     }
+}
+
+/// Get shadow buffer physical addresses + page count (for GPU GGTT mapping).
+pub fn shadow_phys_info() -> Option<(u64, u64, u32)> {
+    with_fb(|fb| fb.shadow_phys_info())
+}
+
+/// Get front buffer's GGTT offset (for GPU blit source).
+pub fn front_ggtt() -> u32 {
+    with_fb(|fb| fb.front_ggtt()).unwrap_or(0)
+}
+
+/// Store GGTT offsets after GPU mapping.
+pub fn set_shadow_ggtt(a: u32, b: u32) {
+    with_fb(|fb| {
+        fb.shadow_a_ggtt = a;
+        fb.shadow_b_ggtt = b;
+    });
 }
 
 const FONT_WIDTH: u32 = 8;
@@ -181,7 +213,7 @@ pub fn init_from_gpu() {
         let old = CONSOLE.lock().take();
         if let Some(old_console) = old {
             let old_layout = alloc::alloc::Layout::from_size_align(
-                old_console.shadow_size, 16).unwrap();
+                old_console.shadow_size, 4096).unwrap();
             if !old_console.shadow.is_null() && old_console.shadow_size > 0 {
                 unsafe { alloc::alloc::dealloc(old_console.shadow, old_layout); }
             }
@@ -192,8 +224,9 @@ pub fn init_from_gpu() {
     }
 
     // Allocate two shadow buffers for double-buffering (fast WB-cached RAM)
+    // Page-aligned (4096) so they can be GGTT-mapped for GPU BCS blit
     let shadow_size = pitch as usize * height as usize;
-    let layout = alloc::alloc::Layout::from_size_align(shadow_size, 16)
+    let layout = alloc::alloc::Layout::from_size_align(shadow_size, 4096)
         .expect("shadow buffer layout");
     let shadow = unsafe { alloc::alloc::alloc_zeroed(layout) };
     let shadow_b = unsafe { alloc::alloc::alloc_zeroed(layout) };
@@ -216,6 +249,7 @@ pub fn init_from_gpu() {
     *CONSOLE.lock() = Some(FbConsole {
         info, shadow, shadow_b, shadow_size, front: 0,
         col: 0, row: 0, cols, rows, scale,
+        shadow_a_ggtt: 0, shadow_b_ggtt: 0,
     });
 }
 

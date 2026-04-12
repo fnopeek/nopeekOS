@@ -91,6 +91,33 @@ pub trait GpuHal: Send {
 
     /// True if the driver supports hardware page flip + vblank sync.
     fn supports_flip(&self) -> bool;
+
+    /// Initialize hardware blit engine (BCS). Returns true on success.
+    fn init_blit_engine(&mut self) -> bool { false }
+
+    /// True if hardware blit (BCS) is available.
+    fn supports_blit(&self) -> bool { false }
+
+    /// Submit a rectangular blit from src GGTT → dst GGTT.
+    fn blit_rect_hw(
+        &mut self, src_ggtt: u32, src_pitch: u32,
+        dst_ggtt: u32, dst_pitch: u32,
+        x: u32, y: u32, w: u32, h: u32,
+    ) -> bool { let _ = (src_ggtt, src_pitch, dst_ggtt, dst_pitch, x, y, w, h); false }
+
+    /// Map physical buffer into GPU address space for blit. Returns GGTT offset.
+    fn map_for_blit(&mut self, phys_a: u64, phys_b: u64, pages: u32) {
+        let _ = (phys_a, phys_b, pages);
+    }
+
+    /// Get framebuffer GGTT offset (for BCS destination).
+    fn fb_gpu_addr(&self) -> u32 { 0 }
+
+    /// Get shadow buffer GGTT offsets (A, B). 0 = not mapped.
+    fn shadow_gpu_addr(&self) -> (u32, u32) { (0, 0) }
+
+    /// Visual BCS test — blit a colored square to screen.
+    fn test_blit(&mut self) -> bool { false }
 }
 
 static GPU: Mutex<Option<Box<dyn GpuHal>>> = Mutex::new(None);
@@ -229,6 +256,67 @@ pub fn wait_vblank() {
 pub fn supports_flip() -> bool {
     match GPU.lock().as_ref() {
         Some(drv) => drv.supports_flip(),
+        None => false,
+    }
+}
+
+// ── BCS Blit API ────────────────────────────────────────────────────
+
+/// Initialize hardware blit engine. Call after activate_native().
+pub fn init_blit_engine() -> bool {
+    match GPU.lock().as_mut() {
+        Some(drv) => drv.init_blit_engine(),
+        None => false,
+    }
+}
+
+/// True if hardware blit (BCS) is available.
+pub fn supports_blit() -> bool {
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.supports_blit(),
+        None => false,
+    }
+}
+
+/// Submit GPU blit: copy rectangle from src GGTT → dst GGTT.
+pub fn gpu_blit_rect(
+    src_ggtt: u32, src_pitch: u32,
+    dst_ggtt: u32, dst_pitch: u32,
+    x: u32, y: u32, w: u32, h: u32,
+) -> bool {
+    match GPU.lock().as_mut() {
+        Some(drv) => drv.blit_rect_hw(src_ggtt, src_pitch, dst_ggtt, dst_pitch, x, y, w, h),
+        None => false,
+    }
+}
+
+/// Map shadow buffers into GPU address space for blit.
+pub fn map_shadows_for_blit(phys_a: u64, phys_b: u64, pages: u32) {
+    if let Some(drv) = GPU.lock().as_mut() {
+        drv.map_for_blit(phys_a, phys_b, pages);
+    }
+}
+
+/// Get framebuffer GGTT offset (for BCS destination).
+pub fn fb_ggtt_offset() -> u32 {
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.fb_gpu_addr(),
+        None => 0,
+    }
+}
+
+/// Get shadow buffer GGTT offsets (A, B).
+pub fn shadow_ggtt() -> (u32, u32) {
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.shadow_gpu_addr(),
+        None => (0, 0),
+    }
+}
+
+/// Visual BCS test.
+pub fn test_blit() -> bool {
+    match GPU.lock().as_mut() {
+        Some(drv) => drv.test_blit(),
         None => false,
     }
 }
