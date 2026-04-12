@@ -1589,9 +1589,13 @@ impl IntelXeDriver {
 
         // ── Step 3: Acquire ALL forcewake domains ────────────────────
         // Request GT + Render + Media (masked bit write: bit 16 = mask, bit 0 = value)
+        // Posted reads after each write flush the PCIe bus (writes are async/posted).
         mmio_write32(self.bar0, FORCEWAKE_GT, (1 << 16) | 1);
+        let _ = mmio_read32(self.bar0, FORCEWAKE_GT); // posted read flush
         mmio_write32(self.bar0, FORCEWAKE_RENDER, (1 << 16) | 1);
+        let _ = mmio_read32(self.bar0, FORCEWAKE_RENDER); // posted read flush
         mmio_write32(self.bar0, FORCEWAKE_MEDIA, (1 << 16) | 1);
+        let _ = mmio_read32(self.bar0, FORCEWAKE_MEDIA); // posted read flush
 
         // Poll all three acks
         let gt_ok = poll_timeout(self.bar0, FORCEWAKE_ACK_GT, 1, 1, 500_000);
@@ -1604,16 +1608,16 @@ impl IntelXeDriver {
             return Err(GpuError::PowerTimeout);
         }
 
-        // Verify BCS registers are writable: write to RING_MODE, read back
-        mmio_write32(self.bar0, BCS_RING_MODE, 0);
+        // Verify BCS registers are accessible: read RING_MODE + RESET_CTL
         let mode_readback = mmio_read32(self.bar0, BCS_RING_MODE);
         let reset_readback = mmio_read32(self.bar0, BCS_RESET_CTL);
         kprintln!("[npk]   BCS: probe RING_MODE={:#010x} RESET_CTL={:#010x}",
             mode_readback, reset_readback);
 
         // ── Step 4: Engine reset ────────────────────────────────────
-        // 4a: Request reset via RING_RESET_CTL
+        // 4a: Request reset via RING_RESET_CTL (masked write)
         mmio_write32(self.bar0, BCS_RESET_CTL, (1 << 16) | RESET_CTL_REQUEST);
+        let _ = mmio_read32(self.bar0, BCS_RESET_CTL); // posted read flush
         if !poll_timeout(self.bar0, BCS_RESET_CTL, RESET_CTL_READY, RESET_CTL_READY, 500_000) {
             kprintln!("[npk]   BCS: reset request timeout (CTL={:#010x})",
                 mmio_read32(self.bar0, BCS_RESET_CTL));
@@ -1621,13 +1625,19 @@ impl IntelXeDriver {
         } else {
             kprintln!("[npk]   BCS: reset ready");
         }
-        // 4b: Trigger BCS domain reset
-        let gdrst = mmio_read32(self.bar0, GEN6_GDRST);
-        mmio_write32(self.bar0, GEN6_GDRST, gdrst | GEN11_GRDOM_BLT);
-        // Poll for reset complete (bit clears)
-        let _ = poll_timeout(self.bar0, GEN6_GDRST, GEN11_GRDOM_BLT, 0, 500_000);
-        // 4c: Clear reset request
+        // 4b: Trigger BCS domain reset — GEN6_GDRST is a MASKED register on Gen 11+!
+        // Must set mask bit (bit 18 = GEN11_GRDOM_BLT << 16) for write to take effect.
+        mmio_write32(self.bar0, GEN6_GDRST,
+            (GEN11_GRDOM_BLT << 16) | GEN11_GRDOM_BLT);
+        let _ = mmio_read32(self.bar0, GEN6_GDRST); // posted read flush
+        // Poll for reset complete (bit clears when reset done)
+        if !poll_timeout(self.bar0, GEN6_GDRST, GEN11_GRDOM_BLT, 0, 500_000) {
+            kprintln!("[npk]   BCS: GDRST timeout (reg={:#010x})",
+                mmio_read32(self.bar0, GEN6_GDRST));
+        }
+        // 4c: Clear reset request (masked write)
         mmio_write32(self.bar0, BCS_RESET_CTL, (1 << 16) | 0);
+        let _ = mmio_read32(self.bar0, BCS_RESET_CTL); // posted read flush
         for _ in 0..100_000u32 { core::hint::spin_loop(); }
         kprintln!("[npk]   BCS: engine reset complete");
 
