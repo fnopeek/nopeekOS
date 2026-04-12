@@ -838,6 +838,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if from_intent {
             from_intent = false;
             need_prompt = true;
+            // Flush worker output before printing prompt
+            if crate::shade::is_active() {
+                crate::shade::render_frame();
+            }
         }
         if from_wasm {
             from_wasm = false;
@@ -846,6 +850,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 kprintln!();
             }
             need_prompt = true;
+            if crate::shade::is_active() {
+                crate::shade::render_frame();
+            }
         }
 
         // Get session for active terminal (create if needed)
