@@ -206,7 +206,7 @@ const XY_FAST_COPY_BLT_DEPTH_32: u32 = 3 << 24;
 // Context descriptor flags (Gen 12)
 const CTX_VALID: u32            = 1 << 0;
 const CTX_FORCE_RESTORE: u32    = 1 << 2;
-const CTX_LEGACY_32B: u32       = 1 << 3;   // 32-bit legacy addressing (GGTT)
+const CTX_ADVANCED: u32         = 1 << 4;   // Advanced context (Gen 12, Legacy 32-bit removed!)
 const CTX_PRIVILEGE: u32        = 1 << 8;    // Privileged context
 
 // GGTT layout for BCS resources (beyond framebuffer at 0x0100_0000)
@@ -1697,100 +1697,107 @@ impl IntelXeDriver {
 
     /// Populate BCS Logical Ring Context (LRC) image.
     ///
-    /// Layout: page 0 = HWSP, page 1 = context register state.
-    /// The context state is a sequence of MI_LOAD_REGISTER_IMM (MI_LRI)
-    /// commands that the GPU executes to restore engine state.
+    /// Gen 12 hardcoded layout: the GPU does NOT execute MI_LRI dynamically.
+    /// The hardware has a fixed mapping: DWORD N always goes to register X.
+    /// The register addresses in the LRC are just markers — positions are fixed.
+    ///
+    /// Layout from gen12_xcs_offsets (i915 intel_lrc.c):
+    ///   [0]  = NOP
+    ///   [1]  = MI_LRI header (13 pairs = 25 DWORDs)
+    ///   [2]  = CTX_CONTEXT_CONTROL addr,  [3]  = value
+    ///   [4]  = RING_HEAD addr,            [5]  = value
+    ///   [6]  = RING_TAIL addr,            [7]  = value  ← update_lrc_tail writes here
+    ///   [8]  = RING_START addr,           [9]  = value
+    ///   [10] = RING_CTL addr,             [11] = value
+    ///   [12..27] = BB_HEAD, BB_STATE, etc. (zeroed)
     fn populate_bcs_lrc(&self) {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32; // page 1 = context state
-        let ring_ggtt = BCS_RING_GGTT;
-        let ring_size = 4096u32; // 4KB ring
 
-        // SAFETY: lrc_phys is identity-mapped, page 1 is within our allocation
+        // SAFETY: lrc_phys is identity-mapped, page 1 is within our 2-page allocation
         unsafe {
-            let mut i = 0usize;
+            // Zero entire context page first
+            core::ptr::write_bytes(ctx as *mut u8, 0, 4096);
 
-            // NOP (required header per gen12_xcs_offsets)
-            ctx.add(i).write(MI_NOOP); i += 1;
+            // Gen 12 hardcoded context layout (order is critical!)
+            ctx.add(0).write(MI_NOOP);
 
-            // MI_LRI: load 13 register/value pairs (posted)
-            // Header: MI_LRI opcode | posted | (count * 2 - 1)
-            let lri_count = 6u32; // we load 6 registers
-            ctx.add(i).write(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (lri_count * 2 - 1));
-            i += 1;
+            // MI_LRI: 13 register/value pairs, posted
+            ctx.add(1).write(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
 
-            // RING_START (engine offset 0x38 → absolute 0x22038)
-            ctx.add(i).write(BCS_RING_START); i += 1;
-            ctx.add(i).write(ring_ggtt);      i += 1;
+            // Pair 1: CTX_CONTEXT_CONTROL (must be first!)
+            ctx.add(2).write(0x22244);  // RING_CONTEXT_CONTROL
+            ctx.add(3).write(0x00010001); // inhibit sync context switch
 
-            // RING_HEAD (engine offset 0x34)
-            ctx.add(i).write(BCS_RING_HEAD); i += 1;
-            ctx.add(i).write(0);              i += 1;
+            // Pair 2: RING_HEAD
+            ctx.add(4).write(BCS_RING_HEAD);
+            ctx.add(5).write(0);
 
-            // RING_TAIL (engine offset 0x30)
-            ctx.add(i).write(BCS_RING_TAIL); i += 1;
-            ctx.add(i).write(0);              i += 1;
+            // Pair 3: RING_TAIL (update_lrc_tail writes to ctx[7])
+            ctx.add(6).write(BCS_RING_TAIL);
+            ctx.add(7).write(0);
 
-            // RING_CTL (engine offset 0x3C): size + valid
-            ctx.add(i).write(BCS_RING_CTL); i += 1;
-            ctx.add(i).write((ring_size - 4096) | RING_CTL_VALID); i += 1;
+            // Pair 4: RING_START
+            ctx.add(8).write(BCS_RING_START);
+            ctx.add(9).write(BCS_RING_GGTT);
 
-            // MI_MODE (engine offset 0x9C): clear stop ring
-            ctx.add(i).write(BCS_MI_MODE); i += 1;
-            ctx.add(i).write(0);            i += 1;
+            // Pair 5: RING_CTL (4KB ring, valid)
+            ctx.add(10).write(BCS_RING_CTL);
+            ctx.add(11).write((4096 - 4096) | RING_CTL_VALID);
 
-            // IMR (engine offset 0xA8): mask all interrupts
-            ctx.add(i).write(BCS_IMR); i += 1;
-            ctx.add(i).write(0xFFFF_FFFF); i += 1;
-
-            // Fill rest with NOOPs up to a safe boundary
-            while i < 64 {
-                ctx.add(i).write(MI_NOOP); i += 1;
-            }
+            // Pairs 6-13: BB_HEAD, BB_STATE, etc. (all zero, must be present)
+            ctx.add(12).write(0x22168); // BB_HEAD_U
+            ctx.add(13).write(0);
+            ctx.add(14).write(0x22140); // BB_HEAD_L
+            ctx.add(15).write(0);
+            ctx.add(16).write(0x22110); // BB_STATE
+            ctx.add(17).write(0);
+            ctx.add(18).write(0x2211C); // SECOND_BB_HEAD_U
+            ctx.add(19).write(0);
+            ctx.add(20).write(0x22114); // SECOND_BB_HEAD_L
+            ctx.add(21).write(0);
+            ctx.add(22).write(0x22118); // SECOND_BB_STATE
+            ctx.add(23).write(0);
+            ctx.add(24).write(0x221C0); // BB_PER_CTX_PTR
+            ctx.add(25).write(0);
+            ctx.add(26).write(0x221C4); // INDIRECT_CTX
+            ctx.add(27).write(0);
         }
     }
 
     /// Update RING_TAIL value in the LRC context image.
+    /// Position [7] = RING_TAIL value (hardcoded Gen 12 layout).
     fn update_lrc_tail(&self, tail_bytes: u32) {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32;
-        // RING_TAIL value is at offset 8 in our LRC (after NOP + LRI header +
-        // RING_START pair + RING_HEAD pair + RING_TAIL register addr)
-        // Layout: [0]=NOP, [1]=LRI, [2]=START_reg, [3]=START_val,
-        //         [4]=HEAD_reg, [5]=HEAD_val, [6]=TAIL_reg, [7]=TAIL_val
         // SAFETY: within our allocated LRC page
-        unsafe {
-            ctx.add(7).write(tail_bytes);
-        }
+        unsafe { ctx.add(7).write(tail_bytes); }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Submit BCS context via ELSQ (Enhanced ExecList Submission Queue).
     fn elsq_submit(&self, force_restore: bool) {
-        // Build 64-bit context descriptor
-        // Low DW: LRCA (page 1 = context state, not HWSP) | flags
-        // The LRCA points to the context register state, which is page 1
-        // of our LRC allocation (page 0 is HWSP).
-        let lrca_ggtt = BCS_LRC_GGTT + 4096; // page 1 GGTT offset
+        // LRCA = page 1 of LRC (page 0 = HWSP)
+        let lrca_ggtt = BCS_LRC_GGTT + 4096;
 
-        let mut desc_lo: u32 = lrca_ggtt    // bits [31:12] = LRCA
-            | CTX_PRIVILEGE                   // bit 8 = privileged
-            | CTX_LEGACY_32B                  // bit 3 = GGTT 32-bit addressing
-            | CTX_VALID;                      // bit 0 = valid
+        // Gen 12: Advanced Context (bit 4). Legacy 32-bit (bit 3) is REMOVED!
+        let mut desc_lo: u32 = lrca_ggtt
+            | CTX_PRIVILEGE
+            | CTX_ADVANCED      // bit 4 = Advanced Context Mode
+            | CTX_VALID;
         if force_restore {
-            desc_lo |= CTX_FORCE_RESTORE;     // bit 2 = force context restore
+            desc_lo |= CTX_FORCE_RESTORE;
         }
 
-        let desc_hi: u32 = 1; // context ID (arbitrary, nonzero)
+        let desc_hi: u32 = 1; // context ID
 
         kprintln!("[npk]   BCS: ELSQ desc={:#010x}_{:08x} (LRCA={:#x})",
             desc_hi, desc_lo, lrca_ggtt);
 
-        // Write context descriptor to ELSQ port 0
+        // Write descriptor to ELSQ port 0
         mmio_write32(self.bar0, BCS_ELSQ0_LO, desc_lo);
         mmio_write32(self.bar0, BCS_ELSQ0_HI, desc_hi);
-        // Clear port 1 (unused)
+        // Clear port 1
         mmio_write32(self.bar0, BCS_ELSQ1_LO, 0);
         mmio_write32(self.bar0, BCS_ELSQ1_HI, 0);
-
         // Trigger load
         mmio_write32(self.bar0, BCS_ELSQ_CONTROL, 1);
     }
