@@ -115,6 +115,19 @@ pub extern "C" fn _start() {
         print("]\n");
         print("  ──────────────────────────────────────────────────\n\n");
 
+        // Build core→process map (which cores have WASM apps)
+        let mut core_has_proc = [false; 16];
+        {
+            let mut t: i32 = 0;
+            while t < 8 {
+                if sys(21 | (t << 8)) != 0 {
+                    let c = sys(24 | (t << 8));
+                    if c >= 0 && (c as usize) < 16 { core_has_proc[c as usize] = true; }
+                }
+                t += 1;
+            }
+        }
+
         // Per-core
         print("  CORE  USAGE    MHz  QUEUE  ROLE\n");
         print("  ────  ─────  ─────  ─────  ────\n");
@@ -139,6 +152,8 @@ pub extern "C" fn _start() {
 
             if i == 0 {
                 print("  kernel/irq");
+            } else if core_has_proc[i as usize] {
+                print("  wasm");
             } else if usage > 5 {
                 print("  worker");
             } else {
