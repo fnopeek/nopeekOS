@@ -387,9 +387,17 @@ pub(crate) fn ensure_parents(path: &str) {
 }
 
 /// Sync session state to terminal.rs saved input (for cursor restore on focus change).
+/// Temporarily switches to the session's terminal to save to the correct slot.
 fn sync_session_to_terminal(session: &IntentSession) {
+    let current = crate::shade::terminal::active_idx();
+    if current != session.terminal_idx {
+        crate::shade::terminal::set_active_terminal(session.terminal_idx);
+    }
     crate::shade::terminal::save_input_with_cursor(
         &session.input_buf[..session.pos], session.pos, session.cursor);
+    if current != session.terminal_idx {
+        crate::shade::terminal::set_active_terminal(current);
+    }
 }
 
 /// Read a line from serial/keyboard with tab-completion, history, and network polling.
@@ -901,9 +909,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
             need_prompt = false;
         } else {
-            // Resuming session after focus change — sync prompt_len for terminal rendering
+            // Resuming session after focus change — sync prompt_len + cursor
             if crate::shade::is_active() {
                 crate::shade::terminal::set_prompt_len(session.prompt_len);
+                crate::shade::terminal::set_cursor_pos(
+                    crate::shade::terminal::current_line_len()
+                        .saturating_sub(session.pos.saturating_sub(session.cursor)));
             }
         }
 
