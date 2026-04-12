@@ -279,9 +279,48 @@ pub fn clear_idx(idx: usize) {
     }
 }
 
+/// Per-core output redirect (indexed by LAPIC ID, 255 = no redirect).
+/// Workers set this before intent dispatch so kprintln goes to the right terminal.
+static CORE_OUTPUT: [AtomicU8; 256] = {
+    const NONE: AtomicU8 = AtomicU8::new(255);
+    [NONE; 256]
+};
+
+/// Set output redirect for the current core (call before intent dispatch on worker).
+pub fn set_output_redirect(terminal_idx: u8) {
+    let apic_base = crate::interrupts::apic_base();
+    if apic_base == 0 { return; }
+    // SAFETY: APIC MMIO is identity-mapped, reading LAPIC ID register
+    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    CORE_OUTPUT[apic_id as usize & 0xFF].store(terminal_idx, Ordering::Release);
+}
+
+/// Clear output redirect for the current core.
+pub fn clear_output_redirect() {
+    let apic_base = crate::interrupts::apic_base();
+    if apic_base == 0 { return; }
+    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    CORE_OUTPUT[apic_id as usize & 0xFF].store(255, Ordering::Release);
+}
+
 /// Write to the active terminal (called from serial::write_str).
+/// If the current core has an output redirect set, writes to that terminal instead.
 pub fn write(s: &str) {
     if !is_active() { return; }
+
+    // Check per-core output redirect (workers running intents)
+    let apic_base = crate::interrupts::apic_base();
+    if apic_base != 0 {
+        // SAFETY: APIC MMIO is identity-mapped
+        let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+        let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Relaxed);
+        if redirect < MAX_TERMINALS as u8 {
+            write_idx(redirect as usize, s);
+            return;
+        }
+    }
+
+    // Default: write to active terminal (Core 0 path)
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     if idx < MAX_TERMINALS {
         let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };

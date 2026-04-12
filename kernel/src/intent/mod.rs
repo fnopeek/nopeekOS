@@ -84,6 +84,121 @@ static HISTORY: Mutex<History> = Mutex::new(History {
 /// Current working directory (prefix for relative paths).
 static CWD: Mutex<String> = Mutex::new(String::new());
 
+// ── Intent Job System (dispatch intents to worker cores) ─────
+//
+// Heavy intents (http, update, install, etc.) are spawned as tasks
+// on worker cores. Core 0 returns to the event loop immediately.
+// Output is redirected to the intent's terminal via CORE_OUTPUT.
+
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering as AtOrd};
+
+const MAX_INTENT_JOBS: usize = 4;
+
+struct IntentJob {
+    command: [u8; INPUT_BUF_SIZE],
+    command_len: usize,
+    terminal_idx: u8,
+    session_id: CapId,
+}
+
+static INTENT_JOBS: Mutex<[Option<IntentJob>; MAX_INTENT_JOBS]> = Mutex::new([
+    None, None, None, None,
+]);
+
+/// Per-terminal flag: true if an intent is running on a worker.
+static INTENT_RUNNING: [AtomicBool; 8] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+
+/// Global vault reference (set once in run_loop, used by workers).
+static VAULT_REF: AtomicPtr<Mutex<Vault>> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Check if a terminal has an intent running on a worker.
+pub fn has_running_intent(terminal_idx: u8) -> bool {
+    let idx = terminal_idx as usize;
+    if idx >= 8 { return false; }
+    INTENT_RUNNING[idx].load(AtOrd::Acquire)
+}
+
+/// Spawn an intent on a worker core. Returns true if dispatched.
+fn spawn_intent_on_worker(input: &str, terminal_idx: u8, session_id: CapId) -> bool {
+    let mut jobs = INTENT_JOBS.lock();
+    let slot = match jobs.iter().position(|j| j.is_none()) {
+        Some(i) => i,
+        None => return false,
+    };
+
+    let mut command = [0u8; INPUT_BUF_SIZE];
+    let len = input.len().min(INPUT_BUF_SIZE);
+    command[..len].copy_from_slice(&input.as_bytes()[..len]);
+
+    jobs[slot] = Some(IntentJob { command, command_len: len, terminal_idx, session_id });
+    drop(jobs);
+
+    INTENT_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
+
+    crate::smp::scheduler::spawn(
+        crate::smp::scheduler::Priority::Normal,
+        intent_worker_task,
+        slot as u64,
+    );
+
+    true
+}
+
+/// Worker-core entry: executes an intent, writes output to the terminal.
+fn intent_worker_task(arg: u64) {
+    let slot = arg as usize;
+    let job = {
+        let mut jobs = INTENT_JOBS.lock();
+        if slot >= MAX_INTENT_JOBS { return; }
+        jobs[slot].take()
+    };
+    let job = match job { Some(j) => j, None => return };
+
+    let input = match core::str::from_utf8(&job.command[..job.command_len]) {
+        Ok(s) => s.trim(),
+        Err(_) => {
+            INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
+            return;
+        }
+    };
+
+    // Redirect kprint output to this terminal
+    crate::shade::terminal::set_output_redirect(job.terminal_idx);
+
+    // Get vault reference
+    let vault_ptr = VAULT_REF.load(AtOrd::Acquire);
+    if !vault_ptr.is_null() {
+        // SAFETY: vault_ptr is a &'static Mutex<Vault> set in run_loop
+        let vault: &'static Mutex<Vault> = unsafe { &*vault_ptr };
+        dispatch_intent(input, vault, job.session_id);
+    }
+
+    // Print new prompt
+    let cwd = get_cwd();
+    let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+    kprint!("\n{}> ", path);
+
+    // Clear redirect + mark done
+    crate::shade::terminal::clear_output_redirect();
+    INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
+
+    // Trigger re-render
+    crate::shade::terminal::mark_dirty();
+}
+
+/// Check if an intent should run on Core 0 (needs interactive input or compositor).
+fn is_core0_intent(verb: &str) -> bool {
+    matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
+                   "clear" | "cls" | "shade" | "shell" | "npk-shell" |
+                   "cd" | "pwd" | "top" | "htop")
+}
+
+
 /// Set the working directory.
 pub fn set_cwd(path: &str) {
     let mut cwd = CWD.lock();
@@ -546,6 +661,9 @@ fn common_prefix(strings: &[String]) -> String {
 pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut input_buf = [0u8; INPUT_BUF_SIZE];
 
+    // Store vault reference for worker cores
+    VAULT_REF.store(vault as *const _ as *mut _, AtOrd::Release);
+
     // ESC state for WASM key routing (persists across loop iterations)
     let mut wasm_esc: u8 = 0;     // 0=normal, 1=got ESC, 2=got ESC[
     let mut wasm_esc_mod = false;  // was Mod held when ESC arrived?
@@ -553,9 +671,29 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut wasm_term: u8 = 255;   // which terminal was running the WASM app
 
     loop {
-        // If focused window has a running WASM app, route keys there.
+        // If focused window has a running WASM app or intent, route keys / wait.
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
+
+            // Intent running on worker — don't show prompt, just poll events
+            if has_running_intent(focused_term) {
+                crate::shade::poll_render();
+                crate::net::poll();
+                while let Some(evt) = crate::xhci::poll_mouse() {
+                    crate::shade::handle_mouse(&evt);
+                }
+                if crate::shade::take_deferred_render() {
+                    crate::shade::render_frame();
+                }
+                if let Some(action) = crate::shade::input::poll_action() {
+                    crate::shade::handle_action(action);
+                }
+                // Consume keys (don't buffer — intent has the terminal)
+                while crate::keyboard::read_key().is_some() {}
+                for _ in 0..10_000 { core::hint::spin_loop(); }
+                continue;
+            }
+
             if crate::wasm::has_wasm_app(focused_term) {
                 from_wasm = true;
                 wasm_term = focused_term;
@@ -689,6 +827,18 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if input == "lock" {
             auth::intent_lock();
             continue;
+        }
+
+        // Check if this intent can run on a worker core
+        let verb = input.splitn(2, ' ').next().unwrap_or("");
+        if !is_core0_intent(verb) && crate::shade::is_active() {
+            let term_idx = crate::shade::terminal::active_idx();
+            if spawn_intent_on_worker(input, term_idx, session_id) {
+                // Worker will execute the intent and print prompt when done.
+                // Core 0 goes back to event loop immediately.
+                continue;
+            }
+            // Fallback: no free job slots, run on Core 0
         }
 
         dispatch_intent(input, vault, session_id);
