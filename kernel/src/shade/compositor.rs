@@ -156,6 +156,7 @@ impl Compositor {
         let mut win = Window::new(id, title, x, y, w, h);
         win.workspace = self.active_workspace;
         win.terminal_idx = terminal::allocate().unwrap_or(0);
+        crate::intent::create_session(win.terminal_idx);
 
         self.windows.push(win);
         self.z_order.insert(0, id);
@@ -168,8 +169,9 @@ impl Compositor {
 
     /// Close a window by ID.
     pub fn close_window(&mut self, id: WindowId) {
-        // Free terminal buffer before removing window
+        // Free session + terminal buffer before removing window
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
+            crate::intent::destroy_session(win.terminal_idx);
             terminal::free(win.terminal_idx);
         }
         self.windows.retain(|w| w.id != id);
