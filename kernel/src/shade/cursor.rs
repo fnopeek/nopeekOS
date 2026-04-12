@@ -283,16 +283,27 @@ pub fn draw_cursor_irq() {
     draw_cursor_on_mmio(addr as *mut u8, pitch, sw, sh, cx, cy);
 }
 
-/// Draw cursor after scene blit — NO erase step (blit_rect already wrote clean scene).
-/// Avoids the erase-then-draw flicker that redraw_overlay_lockfree_inner causes.
+/// Draw cursor after scene blit. Erases old position ONLY if cursor moved
+/// (no blink when stationary, no ghost when moved).
 pub fn draw_cursor_after_blit(fb: &mut crate::framebuffer::FbConsole) {
     let info = fb.info();
+    let (shadow, _) = fb.shadow_ptr();
     let mmio = info.addr as *mut u8;
     let pitch = info.pitch as usize;
     let sw = info.width as i32;
     let sh = info.height as i32;
 
     let (cx, cy) = atomic_pos();
+
+    // Erase old cursor only if it moved (avoid blink when stationary)
+    if DRAWN_LF.load(Ordering::Relaxed) {
+        let dx = DRAWN_LF_X.load(Ordering::Relaxed);
+        let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
+        if dx != cx || dy != cy {
+            blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
+        }
+    }
+
     draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
 
     DRAWN_LF_X.store(cx, Ordering::Relaxed);

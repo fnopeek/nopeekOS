@@ -669,6 +669,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut wasm_esc_mod = false;  // was Mod held when ESC arrived?
     let mut from_wasm = false;     // true when transitioning WASM → shell
     let mut wasm_term: u8 = 255;   // which terminal was running the WASM app
+    let mut from_intent = false;   // true when worker intent just finished
 
     loop {
         // If focused window has a running WASM app or intent, route keys / wait.
@@ -677,6 +678,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
             // Intent running on worker — don't show prompt, just poll events
             if has_running_intent(focused_term) {
+                from_intent = true;
                 crate::shade::poll_render();
                 crate::net::poll();
                 while let Some(evt) = crate::xhci::poll_mouse() {
@@ -690,7 +692,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 }
                 // Consume keys (don't buffer — intent has the terminal)
                 while crate::keyboard::read_key().is_some() {}
-                for _ in 0..10_000 { core::hint::spin_loop(); }
+                // Slower poll (~1ms) to avoid render stutter from frequent dirty flags
+                for _ in 0..100_000 { core::hint::spin_loop(); }
                 continue;
             }
 
@@ -767,6 +770,20 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
+        // Transition from worker intent — prompt already printed by worker
+        if from_intent {
+            from_intent = false;
+            if crate::shade::is_active() {
+                let cwd = get_cwd();
+                let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+                let prompt_len = alloc::format!("{}> ", path).len();
+                crate::shade::terminal::set_prompt_len(prompt_len);
+                crate::shade::terminal::set_cursor_pos(
+                    crate::shade::terminal::current_line_len());
+                crate::shade::render_frame();
+            }
+        }
+
         // Transition from WASM mode to shell
         let (mut resume_pos, mut resume_cursor) = if from_wasm {
             from_wasm = false;
@@ -791,6 +808,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 // Focus switched to different shell terminal → restore its input
                 crate::shade::terminal::restore_input_with_cursor(&mut input_buf)
             }
+        } else if from_intent {
+            // Should not reach here (handled above), but safety
+            (0usize, 0usize)
         } else {
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
