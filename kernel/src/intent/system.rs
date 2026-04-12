@@ -167,22 +167,95 @@ pub fn intent_gpu(args: &str) {
                 }
             }
         }
+        "blit init" => {
+            if !crate::gpu::is_native() {
+                kprintln!("[npk] GPU: native driver not active (run 'gpu init' first)");
+                return;
+            }
+            if crate::gpu::supports_blit() {
+                kprintln!("[npk] BCS: already initialized");
+                return;
+            }
+            kprintln!("[npk] Initializing BCS blitter engine...");
+            if crate::gpu::init_blit_engine() {
+                kprintln!("[npk] BCS: blitter engine ready");
+                // Map shadow buffers into GGTT for GPU blit
+                if let Some((phys_a, phys_b, pages)) = crate::framebuffer::shadow_phys_info() {
+                    if pages > 0 {
+                        crate::gpu::map_shadows_for_blit(phys_a, phys_b, pages);
+                        let (ga, gb) = crate::gpu::shadow_ggtt();
+                        crate::framebuffer::set_shadow_ggtt(ga, gb);
+                        kprintln!("[npk] BCS: shadow A GGTT={:#x}, shadow B GGTT={:#x}", ga, gb);
+                    }
+                }
+            } else {
+                kprintln!("[npk] BCS: init failed");
+            }
+        }
+        "blit test" => {
+            if !crate::gpu::supports_blit() {
+                kprintln!("[npk] BCS: not initialized (run 'gpu blit init')");
+                return;
+            }
+            crate::gpu::test_blit();
+        }
+        "blit status" | "blit" => {
+            kprintln!("  BCS:      {}", if crate::gpu::supports_blit() { "ready" } else { "not initialized" });
+            let (ga, gb) = crate::gpu::shadow_ggtt();
+            if ga != 0 {
+                kprintln!("  Shadow A: GGTT {:#x}", ga);
+                kprintln!("  Shadow B: GGTT {:#x}", gb);
+            }
+            let fb_ggtt = crate::gpu::fb_ggtt_offset();
+            if fb_ggtt != 0 {
+                kprintln!("  FB GGTT:  {:#x}", fb_ggtt);
+            }
+        }
         "status" | "" => {
             kprintln!("  Driver:   {}", crate::gpu::driver_name());
-            kprintln!("  HAL:      active");
+            kprintln!("  Native:   {}", if crate::gpu::is_native() { "yes" } else { "no (GOP)" });
             if let Some(fb) = crate::gpu::framebuffer_info() {
                 kprintln!("  Mode:     {}x{} {}bpp", fb.width, fb.height, fb.bpp);
-                kprintln!("  Address:  {:#x}", fb.addr);
-                kprintln!("  Pitch:    {} bytes", fb.pitch);
+                kprintln!("  FB addr:  {:#x}", fb.addr);
+                kprintln!("  Pitch:    {} bytes ({} KB/line)", fb.pitch, fb.pitch / 1024);
+                let fb_mb = (fb.pitch as u64 * fb.height as u64) / (1024 * 1024);
+                kprintln!("  FB size:  {} MB", fb_mb);
             }
             let hz = crate::gpu::current_hz();
             if hz > 0 {
                 kprintln!("  Refresh:  {}Hz", hz);
             }
-            kprintln!("  VSync:    {}", if crate::gpu::supports_flip() { "yes (PIPE_FRMCNT)" } else { "no (GOP)" });
+            kprintln!("  VSync:    {}", if crate::gpu::supports_flip() { "hardware (PIPE_FRMCNT)" } else { "no (GOP)" });
             kprintln!("  Flip:     {}", if crate::gpu::supports_flip() { "hardware (PLANE_SURF)" } else { "CPU blit" });
+
+            // BCS blitter status
+            let bcs_ok = crate::gpu::supports_blit();
+            kprintln!("  BCS:      {}", if bcs_ok { "active" } else { "off" });
+            if bcs_ok {
+                let fb_ggtt = crate::gpu::fb_ggtt_offset();
+                let (ga, gb) = crate::gpu::shadow_ggtt();
+                let front = crate::framebuffer::front_ggtt();
+                kprintln!("  FB GGTT:  {:#x}", fb_ggtt);
+                kprintln!("  Shadow A: GGTT {:#x}", ga);
+                kprintln!("  Shadow B: GGTT {:#x}", gb);
+                kprintln!("  Front:    GGTT {:#x} ({})",
+                    front, if front == ga { "A" } else if front == gb { "B" } else { "?" });
+                kprintln!("  Blit:     GPU (XY_FAST_COPY_BLT)");
+            } else {
+                kprintln!("  Blit:     CPU (memcpy)");
+            }
+
+            // Shadow buffer info
+            if let Some((pa, pb, pages)) = crate::framebuffer::shadow_phys_info() {
+                kprintln!("  Shadow:   {} pages ({} MB) x2", pages, pages * 4 / 1024);
+                kprintln!("  Phys A:   {:#x}", pa);
+                kprintln!("  Phys B:   {:#x}", pb);
+            }
+
             if let Some(name) = crate::gpu::native_gpu_name() {
-                kprintln!("  Native:   {} (detected, use 'gpu init' to activate)", name);
+                if !crate::gpu::is_native() {
+                    kprintln!("  Pending:  {} (use 'gpu init')", name);
+                }
             }
             let modes = crate::gpu::supported_modes();
             if !modes.is_empty() {
@@ -193,7 +266,7 @@ pub fn intent_gpu(args: &str) {
             }
         }
         _ => {
-            kprintln!("Usage: gpu [status|init|4k|4k30|4k60]");
+            kprintln!("Usage: gpu [status|init|4k|blit init|blit test|blit status]");
         }
     }
 }

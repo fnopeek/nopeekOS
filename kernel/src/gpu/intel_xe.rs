@@ -139,6 +139,35 @@ const GGTT_BASE: u32           = 0x800000;
 // GGTT TLB invalidation (Gen 8+)
 const GFX_FLSH_CNTL_GEN6: u32 = 0x101008;
 
+// ── BCS (Blitter Command Streamer) — Gen 12 ────────────────────────
+
+// BCS engine MMIO registers (engine base = 0x22000)
+const BCS_RING_TAIL: u32       = 0x22030;  // Write pointer (CPU updates)
+const BCS_RING_HEAD: u32       = 0x22034;  // Read pointer (GPU advances)
+const BCS_RING_START: u32      = 0x22038;  // Ring buffer start (GGTT offset)
+const BCS_RING_CTL: u32        = 0x2203C;  // Ring control (size + enable)
+const BCS_HWS_PGA: u32         = 0x22080;  // HWSP address (GGTT offset, Gen 6+)
+
+// Ring control bits
+const RING_CTL_VALID: u32      = 1 << 0;
+
+// RING_HEAD mask (bits [20:2] = byte offset within ring)
+const RING_HEAD_MASK: u32      = 0x001FFFFC;
+
+// XY_FAST_COPY_BLT (Gen 9+, 10 DWORDs)
+const XY_FAST_COPY_BLT_CMD: u32 = (2 << 29) | (0x42 << 22);
+const XY_FAST_COPY_BLT_DEPTH_32: u32 = 3 << 24;
+
+// MI_NOOP (padding)
+const MI_NOOP: u32             = 0;
+
+// GGTT layout for BCS resources (beyond framebuffer at 0x0100_0000)
+const BCS_RING_GGTT: u32       = 0x0400_0000;  // 64MB: ring buffer (4KB)
+const BCS_HWSP_GGTT: u32       = 0x0400_1000;  // 64MB+4K: HWSP (4KB)
+const BCS_TEST_GGTT: u32       = 0x0400_2000;  // test surface (16KB)
+const SHADOW_A_GGTT_BASE: u32  = 0x0800_0000;  // 128MB: shadow buffer A
+const SHADOW_B_GGTT_BASE: u32  = 0x0A00_0000;  // 160MB: shadow buffer B
+
 // ── Display Timings ─────────────────────────────────────────────────
 
 /// CEA-861 standard timings
@@ -334,6 +363,14 @@ pub struct IntelXeDriver {
     active_timing: Option<&'static DisplayTiming>,
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
     firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
+    // BCS engine state
+    bcs_ring_phys: u64,   // Physical address of ring buffer (4KB)
+    bcs_hwsp_phys: u64,   // Physical address of HWSP (4KB)
+    bcs_initialized: bool,
+    // Shadow buffer GGTT state
+    shadow_a_ggtt: u32,   // GGTT offset of shadow buffer A (0 = not mapped)
+    shadow_b_ggtt: u32,   // GGTT offset of shadow buffer B (0 = not mapped)
+    shadow_pages: u32,    // Pages per shadow buffer
 }
 
 // ── GpuHal implementation ──────────────────────────────────
@@ -388,6 +425,38 @@ impl GpuHal for IntelXeDriver {
 
     fn supports_flip(&self) -> bool {
         self.bar0 != 0 && self.fb.is_some()
+    }
+
+    fn init_blit_engine(&mut self) -> bool {
+        self.init_bcs().is_ok()
+    }
+
+    fn supports_blit(&self) -> bool {
+        self.bcs_ready()
+    }
+
+    fn blit_rect_hw(
+        &mut self, src_ggtt: u32, src_pitch: u32,
+        dst_ggtt: u32, dst_pitch: u32,
+        x: u32, y: u32, w: u32, h: u32,
+    ) -> bool {
+        self.submit_blit(src_ggtt, src_pitch, dst_ggtt, dst_pitch, x, y, w, h)
+    }
+
+    fn map_for_blit(&mut self, phys_a: u64, phys_b: u64, pages: u32) {
+        self.map_shadows(phys_a, phys_b, pages);
+    }
+
+    fn fb_gpu_addr(&self) -> u32 {
+        self.fb_ggtt()
+    }
+
+    fn shadow_gpu_addr(&self) -> (u32, u32) {
+        self.shadow_ggtt()
+    }
+
+    fn test_blit(&mut self) -> bool {
+        self.test_blit()
     }
 }
 
@@ -456,6 +525,12 @@ impl IntelXeDriver {
             active_timing: None,
             ddi_port: 0,
             firmware_dpll: 1,
+            bcs_ring_phys: 0,
+            bcs_hwsp_phys: 0,
+            bcs_initialized: false,
+            shadow_a_ggtt: 0,
+            shadow_b_ggtt: 0,
+            shadow_pages: 0,
         }
     }
 
@@ -1387,6 +1462,272 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, GMBUS0, 0);
 
         data
+    }
+
+    // ── BCS (Blitter Command Streamer) ────────────────────────────────
+
+    /// Initialize the Blitter Command Streamer for hardware blit.
+    /// Allocates ring buffer + HWSP, maps in GGTT, programs BCS MMIO.
+    pub fn init_bcs(&mut self) -> Result<(), GpuError> {
+        if self.bar0 == 0 { return Err(GpuError::MappingFailed); }
+        if self.bcs_initialized {
+            kprintln!("[npk]   BCS: already initialized");
+            return Ok(());
+        }
+
+        kprintln!("[npk]   BCS: initializing blitter engine...");
+
+        // Allocate ring buffer (1 page = 4KB)
+        let ring_phys = memory::allocate_contiguous(1)
+            .ok_or(GpuError::AllocFailed)?;
+        // SAFETY: ring_phys is identity-mapped, freshly allocated
+        unsafe { core::ptr::write_bytes(ring_phys as *mut u8, 0, 4096); }
+
+        // Allocate HWSP (1 page = 4KB)
+        let hwsp_phys = memory::allocate_contiguous(1)
+            .ok_or(GpuError::AllocFailed)?;
+        // SAFETY: hwsp_phys is identity-mapped, freshly allocated
+        unsafe { core::ptr::write_bytes(hwsp_phys as *mut u8, 0, 4096); }
+
+        self.bcs_ring_phys = ring_phys;
+        self.bcs_hwsp_phys = hwsp_phys;
+
+        kprintln!("[npk]   BCS: ring @ phys {:#x} → GGTT {:#x}", ring_phys, BCS_RING_GGTT);
+        kprintln!("[npk]   BCS: HWSP @ phys {:#x} → GGTT {:#x}", hwsp_phys, BCS_HWSP_GGTT);
+
+        // Map ring buffer in GGTT
+        self.map_pages_ggtt_at(ring_phys, 1, BCS_RING_GGTT);
+        // Map HWSP in GGTT
+        self.map_pages_ggtt_at(hwsp_phys, 1, BCS_HWSP_GGTT);
+
+        // Invalidate GGTT TLB
+        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
+        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+
+        // Stop BCS if running (clear RING_CTL valid bit)
+        mmio_write32(self.bar0, BCS_RING_CTL, 0);
+        for _ in 0..100_000u32 { core::hint::spin_loop(); }
+
+        // Program HWSP address (GGTT offset for Gen 6+)
+        mmio_write32(self.bar0, BCS_HWS_PGA, BCS_HWSP_GGTT);
+
+        // Program ring buffer start (GGTT offset)
+        mmio_write32(self.bar0, BCS_RING_START, BCS_RING_GGTT);
+
+        // Reset head and tail to 0
+        mmio_write32(self.bar0, BCS_RING_TAIL, 0);
+
+        // Enable ring: (ring_size - 4096) | RING_VALID
+        // For 4KB ring: (4096 - 4096) | 1 = 1
+        mmio_write32(self.bar0, BCS_RING_CTL, RING_CTL_VALID);
+
+        // Verify ring is alive — HEAD should read as 0
+        let head = mmio_read32(self.bar0, BCS_RING_HEAD);
+        let ctl = mmio_read32(self.bar0, BCS_RING_CTL);
+        kprintln!("[npk]   BCS: HEAD={:#x} CTL={:#010x}", head & RING_HEAD_MASK, ctl);
+
+        self.bcs_initialized = true;
+        kprintln!("[npk]   BCS: blitter engine ready");
+        Ok(())
+    }
+
+    /// Map contiguous physical pages into GGTT at a given offset.
+    fn map_pages_ggtt_at(&self, phys: u64, pages: u32, ggtt_offset: u32) {
+        let start_entry = ggtt_offset / 4096;
+        for i in 0..pages {
+            let page_phys = phys + (i as u64) * 4096;
+            let entry_lo = (page_phys as u32 & 0xFFFF_F000) | 0x01; // valid, system mem
+            let entry_hi = (page_phys >> 32) as u32;
+            let off = GGTT_BASE as u32 + (start_entry + i) * 8;
+            mmio_write32(self.bar0, off, entry_lo);
+            mmio_write32(self.bar0, off + 4, entry_hi);
+        }
+    }
+
+    /// Map shadow buffers into GGTT for BCS access.
+    /// `phys_a` / `phys_b` are physical addresses (= virtual with identity mapping).
+    pub fn map_shadows(&mut self, phys_a: u64, phys_b: u64, pages: u32) {
+        if self.bar0 == 0 { return; }
+
+        kprintln!("[npk]   BCS: mapping shadow A ({} pages @ {:#x}) → GGTT {:#x}",
+            pages, phys_a, SHADOW_A_GGTT_BASE);
+        self.map_pages_ggtt_at(phys_a, pages, SHADOW_A_GGTT_BASE);
+
+        kprintln!("[npk]   BCS: mapping shadow B ({} pages @ {:#x}) → GGTT {:#x}",
+            pages, phys_b, SHADOW_B_GGTT_BASE);
+        self.map_pages_ggtt_at(phys_b, pages, SHADOW_B_GGTT_BASE);
+
+        // Invalidate GGTT TLB
+        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
+        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+
+        self.shadow_a_ggtt = SHADOW_A_GGTT_BASE;
+        self.shadow_b_ggtt = SHADOW_B_GGTT_BASE;
+        self.shadow_pages = pages;
+
+        kprintln!("[npk]   BCS: shadow buffers mapped in GGTT");
+    }
+
+    /// Submit XY_FAST_COPY_BLT: copy a rectangle from src to dst via BCS.
+    /// Addresses are GGTT offsets. Returns true if blit completed.
+    pub fn submit_blit(
+        &mut self,
+        src_ggtt: u32,
+        src_pitch: u32,
+        dst_ggtt: u32,
+        dst_pitch: u32,
+        x: u32, y: u32,
+        w: u32, h: u32,
+    ) -> bool {
+        if !self.bcs_initialized || self.bar0 == 0 { return false; }
+
+        // Wait for ring idle (HEAD == TAIL)
+        let cur_tail = mmio_read32(self.bar0, BCS_RING_TAIL) & RING_HEAD_MASK;
+        if cur_tail != 0 {
+            let cur_head = mmio_read32(self.bar0, BCS_RING_HEAD) & RING_HEAD_MASK;
+            if cur_head != cur_tail {
+                if !poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, cur_tail, 1_000_000) {
+                    return false;
+                }
+            }
+        }
+
+        // Write XY_FAST_COPY_BLT to ring buffer at offset 0
+        let ring = self.bcs_ring_phys as *mut u32;
+        // SAFETY: ring buffer is identity-mapped contiguous page, we write 10 DWORDs
+        unsafe {
+            ring.add(0).write_volatile(XY_FAST_COPY_BLT_CMD | 8); // 10 DW, len=8
+            ring.add(1).write_volatile(XY_FAST_COPY_BLT_DEPTH_32 | dst_pitch);
+            ring.add(2).write_volatile((y << 16) | x);             // dst Y1, X1
+            ring.add(3).write_volatile(((y + h) << 16) | (x + w)); // dst Y2, X2
+            ring.add(4).write_volatile(dst_ggtt);                   // dst addr low
+            ring.add(5).write_volatile(0);                          // dst addr high
+            ring.add(6).write_volatile((y << 16) | x);             // src Y1, X1
+            ring.add(7).write_volatile(src_pitch);                  // src pitch
+            ring.add(8).write_volatile(src_ggtt);                   // src addr low
+            ring.add(9).write_volatile(0);                          // src addr high
+            // MI_NOOP padding to cache-line boundary (optional but good practice)
+            ring.add(10).write_volatile(MI_NOOP);
+            ring.add(11).write_volatile(MI_NOOP);
+        }
+
+        // Memory fence: ensure ring writes are visible before tail update
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        let tail_bytes = 10 * 4; // 10 DWORDs = 40 bytes
+
+        // Update RING_TAIL — kicks the GPU
+        mmio_write32(self.bar0, BCS_RING_TAIL, tail_bytes);
+
+        // Poll for completion (HEAD catches up to TAIL)
+        poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, tail_bytes, 2_000_000)
+    }
+
+    /// Visual test: fill a 64×64 magenta square via BCS blit.
+    pub fn test_blit(&mut self) -> bool {
+        if !self.bcs_initialized {
+            kprintln!("[npk]   BCS: not initialized (run 'gpu blit init')");
+            return false;
+        }
+
+        let fb = match self.fb {
+            Some(ref f) => *f,
+            None => {
+                kprintln!("[npk]   BCS: no framebuffer");
+                return false;
+            }
+        };
+
+        kprintln!("[npk]   BCS test: blitting 64x64 magenta square at (100,100)...");
+
+        // Allocate 4 pages for test surface (64×64 @ 32bpp, pitch=256, = 16KB = 4 pages)
+        let test_phys = match memory::allocate_contiguous(4) {
+            Some(p) => p,
+            None => {
+                kprintln!("[npk]   BCS test: allocation failed");
+                return false;
+            }
+        };
+
+        // Fill with magenta (0x00FF00FF = XRGB magenta)
+        let ptr = test_phys as *mut u32;
+        // SAFETY: test_phys is freshly allocated, identity-mapped, 4 contiguous pages
+        unsafe {
+            for i in 0..(4 * 1024) { // 4096 u32s = 16384 bytes = 4 pages
+                ptr.add(i).write_volatile(0x00FF00FF);
+            }
+        }
+
+        // Map test surface in GGTT
+        self.map_pages_ggtt_at(test_phys, 4, BCS_TEST_GGTT);
+        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
+        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+
+        kprintln!("[npk]   BCS test: src GGTT={:#x} (pitch=256), dst GGTT={:#x} (pitch={})",
+            BCS_TEST_GGTT, self.fb_ggtt_offset, fb.pitch);
+
+        // Read BCS state before submit
+        let head_before = mmio_read32(self.bar0, BCS_RING_HEAD);
+        let tail_before = mmio_read32(self.bar0, BCS_RING_TAIL);
+        let ctl = mmio_read32(self.bar0, BCS_RING_CTL);
+        kprintln!("[npk]   BCS pre:  HEAD={:#x} TAIL={:#x} CTL={:#010x}",
+            head_before & RING_HEAD_MASK, tail_before & RING_HEAD_MASK, ctl);
+
+        // Submit blit: 64×64 from test surface to framebuffer at (100, 100)
+        // Note: source pitch=256 (64px * 4), source coords (0,0)
+        // Destination pitch=fb.pitch, destination coords (100,100)
+        let ring = self.bcs_ring_phys as *mut u32;
+        // SAFETY: same as submit_blit
+        unsafe {
+            ring.add(0).write_volatile(XY_FAST_COPY_BLT_CMD | 8);
+            ring.add(1).write_volatile(XY_FAST_COPY_BLT_DEPTH_32 | fb.pitch);
+            ring.add(2).write_volatile((100 << 16) | 100);           // dst (100,100)
+            ring.add(3).write_volatile(((100 + 64) << 16) | (100 + 64)); // dst (164,164)
+            ring.add(4).write_volatile(self.fb_ggtt_offset);          // dst = framebuffer
+            ring.add(5).write_volatile(0);
+            ring.add(6).write_volatile(0);                            // src (0,0)
+            ring.add(7).write_volatile(256);                          // src pitch = 64*4
+            ring.add(8).write_volatile(BCS_TEST_GGTT);               // src = test surface
+            ring.add(9).write_volatile(0);
+            ring.add(10).write_volatile(MI_NOOP);
+            ring.add(11).write_volatile(MI_NOOP);
+        }
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mmio_write32(self.bar0, BCS_RING_TAIL, 40);
+
+        // Poll for completion
+        let ok = poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, 40, 5_000_000);
+
+        let head_after = mmio_read32(self.bar0, BCS_RING_HEAD);
+        let tail_after = mmio_read32(self.bar0, BCS_RING_TAIL);
+        kprintln!("[npk]   BCS post: HEAD={:#x} TAIL={:#x} ok={}",
+            head_after & RING_HEAD_MASK, tail_after & RING_HEAD_MASK, ok);
+
+        if ok {
+            kprintln!("[npk]   BCS test: SUCCESS — magenta square at (100,100)");
+        } else {
+            kprintln!("[npk]   BCS test: TIMEOUT — HEAD did not advance");
+            kprintln!("[npk]   Legacy ring mode may not work on Gen 12");
+            kprintln!("[npk]   (ExecList/ELSP path needed — future work)");
+        }
+
+        ok
+    }
+
+    /// Get the GGTT offset of the framebuffer (for BCS destination).
+    pub fn fb_ggtt(&self) -> u32 {
+        self.fb_ggtt_offset
+    }
+
+    /// Get shadow GGTT offsets (A, B).
+    pub fn shadow_ggtt(&self) -> (u32, u32) {
+        (self.shadow_a_ggtt, self.shadow_b_ggtt)
+    }
+
+    /// Check if BCS is initialized and ready.
+    pub fn bcs_ready(&self) -> bool {
+        self.bcs_initialized
     }
 
     // ── HDMI 2.0 Scrambling ─────────────────────────────────────────
