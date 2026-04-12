@@ -669,28 +669,28 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
 
-            // Intent running on worker — don't show prompt, just poll events
+            // Intent running on worker — same event loop as WASM routing
             if has_running_intent(focused_term) {
                 from_intent = true;
+                crate::shade::poll_render();
+                crate::net::poll();
 
-                // 1. Process mouse FIRST (handle_mouse draws cursor)
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);
                 }
+
                 if crate::shade::take_deferred_render() {
                     crate::shade::render_frame();
                 }
+
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
                 }
 
-                // 2. Render dirty terminals (worker output) — after mouse
-                crate::shade::poll_render();
+                // Consume keys (intent owns the terminal)
+                while let Some(_key) = crate::keyboard::read_key() {}
 
-                // 3. Consume keys (don't buffer — intent has the terminal)
-                while crate::keyboard::read_key().is_some() {}
-
-                for _ in 0..100_000 { core::hint::spin_loop(); }
+                for _ in 0..10_000 { core::hint::spin_loop(); }
                 continue;
             }
 
