@@ -200,14 +200,18 @@ const MI_LRI_FORCE_POSTED: u32  = 1 << 12;     // Posted write (no ack wait)
 const MI_BB_END: u32            = 0x0A << 23;   // MI_BATCH_BUFFER_END
 
 // XY_FAST_COPY_BLT (Gen 9+, 10 DWORDs)
-// Bits 21+20: force GGTT for dst+src addresses (otherwise PPGTT → page fault)
-const XY_FAST_COPY_BLT_CMD: u32 = (2 << 29) | (0x42 << 22) | (1 << 21) | (1 << 20);
+// Bits 21:20 = Source Tiling (NOT GGTT flag! 00=linear, correct for us)
+// Bits 14:13 = Dest Tiling (00=linear)
+const XY_FAST_COPY_BLT_CMD: u32 = (2 << 29) | (0x42 << 22);
 const XY_FAST_COPY_BLT_DEPTH_32: u32 = 3 << 24;
 
 // Context descriptor flags (Gen 12)
+// Addressing mode: bits [4:3]. i915 uses INTEL_LEGACY_32B_CONTEXT = 1 << 3
+// on ALL Gen 12 hardware. "Legacy" means 32-bit VA, not legacy ring mode.
+// "Advanced" (bit 4) requires 4-level PPGTT page tables we don't have.
 const CTX_VALID: u32            = 1 << 0;
 const CTX_FORCE_RESTORE: u32    = 1 << 2;   // Bit 2 = Force Context Restore
-const CTX_ADVANCED: u32         = 1 << 4;   // Advanced context (Gen 12, PPGTT)
+const CTX_LEGACY_32B: u32       = 1 << 3;   // 32-bit VA (i915 default on Gen 12)
 const CTX_PRIVILEGE: u32        = 1 << 8;   // Privileged context
 
 // GGTT layout for BCS resources (beyond framebuffer at 0x0100_0000)
@@ -1788,11 +1792,11 @@ impl IntelXeDriver {
         // Bug was: we pointed at page 1, GPU read uninitialized memory as context.
         let lrca_ggtt = BCS_LRC_GGTT; // page 0!
 
-        // Advanced context (bit 4) + FORCE_RESTORE (bit 2) always.
-        // BLT commands use GGTT bits to avoid PPGTT page faults.
+        // Legacy 32B (bit 3) = i915 default on Gen 12.
+        // FORCE_RESTORE (bit 2) always set — stateless ring.
         let desc_lo: u32 = lrca_ggtt
             | CTX_PRIVILEGE
-            | CTX_ADVANCED           // bit 4
+            | CTX_LEGACY_32B         // bit 3 (proven by i915 source)
             | CTX_FORCE_RESTORE      // bit 2 = always force restore
             | CTX_VALID;
 
