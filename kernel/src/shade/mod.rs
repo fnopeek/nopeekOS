@@ -523,10 +523,9 @@ pub fn poll_render() {
             }
         }
 
-        // Redraw cursor (erase only if moved, then draw). handle_mouse already
-        // cleaned up previous position before poll_render was called.
+        // Redraw cursor overlay (erase old + draw new)
         if crate::xhci::mouse_available() {
-            cursor::draw_cursor_after_blit(fb);
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
     return;
