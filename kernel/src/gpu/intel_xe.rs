@@ -188,6 +188,7 @@ const RING_HEAD_MASK: u32       = 0x001FFFFC;
 
 // RING_MODE bits
 const GFX_RUN_LIST_ENABLE: u32  = 1 << 15;
+const GFX_PREFETCH_DISABLE: u32 = 1 << 10;  // Gen 12: MUST be set!
 
 // RESET_CTL bits
 const RESET_CTL_REQUEST: u32    = 1 << 0;
@@ -1670,9 +1671,11 @@ impl IntelXeDriver {
         kprintln!("[npk]   BCS: engine reset complete (RESET_CTL={:#010x})", rst_after);
 
         // ── Step 5: Enable ExecList mode ────────────────────────────
-        // RING_MODE bit 15 = GFX_RUN_LIST_ENABLE (masked write)
-        mmio_write32(self.bar0, BCS_RING_MODE,
-            (GFX_RUN_LIST_ENABLE << 16) | GFX_RUN_LIST_ENABLE);
+        // RING_MODE: bit 15 = GFX_RUN_LIST_ENABLE
+        //            bit 10 = GFX_PREFETCH_DISABLE (Gen 12 requirement!)
+        // Without PREFETCH_DISABLE, GPU tries to prefetch context data and fails.
+        let mode_bits = GFX_RUN_LIST_ENABLE | GFX_PREFETCH_DISABLE;
+        mmio_write32(self.bar0, BCS_RING_MODE, (mode_bits << 16) | mode_bits);
         let mode = mmio_read32(self.bar0, BCS_RING_MODE);
         kprintln!("[npk]   BCS: RING_MODE={:#010x} (execlist={})",
             mode, mode & GFX_RUN_LIST_ENABLE != 0);
