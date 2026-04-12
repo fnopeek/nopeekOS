@@ -321,7 +321,7 @@ fn intent_worker_task(arg: u64) {
 fn is_core0_intent(verb: &str) -> bool {
     matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
                    "clear" | "cls" | "shade" | "shell" | "npk-shell" |
-                   "cd" | "pwd" | "top" | "htop" | "history")
+                   "cd" | "pwd" | "top" | "htop" | "history" | "gpu")
 }
 
 
@@ -905,7 +905,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 crate::shade::terminal::set_prompt_len(session.prompt_len);
                 crate::shade::terminal::set_cursor_pos(
                     crate::shade::terminal::current_line_len());
-                crate::shade::render_input_line();
+                crate::shade::render_frame();
             }
             need_prompt = false;
         } else {
