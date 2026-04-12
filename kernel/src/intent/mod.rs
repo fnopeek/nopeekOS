@@ -138,18 +138,24 @@ fn sessions_ptr() -> *mut BTreeMap<u8, Box<IntentSession>> {
 pub fn create_session(terminal_idx: u8) {
     // SAFETY: Core 0 only
     unsafe {
-        if let Some(existing) = (*sessions_ptr()).get_mut(&terminal_idx) {
-            // Session exists but terminal was freshly allocated (cleared) —
-            // reset prompt so run_loop prints a fresh one with full render.
-            existing.prompt_len = 0;
-            existing.reset_input();
-            return;
-        }
+        if (*sessions_ptr()).contains_key(&terminal_idx) { return; }
         (*sessions_ptr()).insert(terminal_idx, Box::new(IntentSession::new(terminal_idx)));
     }
     // Initialize CWD for the new session (inherit from focused terminal's CWD)
     let cwd = get_cwd();
     CWDS.lock().entry(terminal_idx).or_insert(cwd);
+}
+
+/// Reset session prompt after terminal was freshly allocated (cleared).
+/// Forces run_loop to print a fresh prompt with full render.
+pub fn reset_session_prompt(terminal_idx: u8) {
+    // SAFETY: Core 0 only
+    unsafe {
+        if let Some(s) = (*sessions_ptr()).get_mut(&terminal_idx) {
+            s.prompt_len = 0;
+            s.reset_input();
+        }
+    }
 }
 
 /// Destroy the session for the given terminal.
