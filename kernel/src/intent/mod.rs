@@ -760,6 +760,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut wasm_term: u8 = 255;
     let mut from_intent = false;
     let mut need_prompt = true;
+    let mut shade_was_active = crate::shade::is_active();
 
     loop {
         // If focused window has a running WASM app or intent, route keys / wait.
@@ -895,7 +896,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
         if need_prompt {
             // Fresh prompt (after command, WASM exit, intent completion, or new session)
-            let first_prompt = session.prompt_len == 0;
+            let shade_active = crate::shade::is_active();
+            let shade_just_started = shade_active && !shade_was_active;
+            shade_was_active = shade_active;
+            let first_prompt = session.prompt_len == 0 || shade_just_started;
             session.reset_input();
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
