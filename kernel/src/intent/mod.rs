@@ -737,6 +737,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut from_wasm = false;
     let mut wasm_term: u8 = 255;
     let mut from_intent = false;
+    let mut need_prompt = true;
 
     loop {
         // If focused window has a running WASM app or intent, route keys / wait.
@@ -833,9 +834,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
-        // Transition flags
+        // Transition flags — need fresh prompt after WASM/intent completion
         if from_intent {
             from_intent = false;
+            need_prompt = true;
         }
         if from_wasm {
             from_wasm = false;
@@ -843,30 +845,40 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             if current == wasm_term {
                 kprintln!();
             }
+            need_prompt = true;
         }
 
         // Get session for active terminal (create if needed)
         let term = crate::shade::terminal::active_idx();
         if session_mut(term).is_none() {
             create_session(term);
+            need_prompt = true; // new session always needs a prompt
         }
         // SAFETY: Core 0 only, session exists after create above, no aliasing
         let session = unsafe {
             &mut **((*sessions_ptr()).get_mut(&term).unwrap() as *mut Box<IntentSession>)
         };
 
-        // Print prompt
-        session.reset_input();
-        let cwd = get_cwd();
-        let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
-        let p = alloc::format!("{}> ", path);
-        kprint!("{}", p);
-        session.prompt_len = p.len();
-        if crate::shade::is_active() {
-            crate::shade::terminal::set_prompt_len(session.prompt_len);
-            crate::shade::terminal::set_cursor_pos(
-                crate::shade::terminal::current_line_len());
-            crate::shade::render_input_line();
+        if need_prompt {
+            // Fresh prompt (after command, WASM exit, intent completion, or new session)
+            session.reset_input();
+            let cwd = get_cwd();
+            let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+            let p = alloc::format!("{}> ", path);
+            kprint!("{}", p);
+            session.prompt_len = p.len();
+            if crate::shade::is_active() {
+                crate::shade::terminal::set_prompt_len(session.prompt_len);
+                crate::shade::terminal::set_cursor_pos(
+                    crate::shade::terminal::current_line_len());
+                crate::shade::render_input_line();
+            }
+            need_prompt = false;
+        } else {
+            // Resuming session after focus change — sync prompt_len for terminal rendering
+            if crate::shade::is_active() {
+                crate::shade::terminal::set_prompt_len(session.prompt_len);
+            }
         }
 
         // Read input into session
@@ -876,18 +888,20 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             crate::shade::render_frame();
         }
 
-        if len == 0 { continue; }
+        if len == 0 { continue; } // focus change — don't set need_prompt
 
         let input = match core::str::from_utf8(&session.input_buf[..len]) {
             Ok(s) => s.trim(),
             Err(_) => {
                 kprintln!("[npk] invalid UTF-8 input");
+                need_prompt = true;
                 continue;
             }
         };
 
         if input == "lock" {
             auth::intent_lock();
+            need_prompt = true;
             continue;
         }
 
@@ -896,6 +910,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if !is_core0_intent(verb) && crate::shade::is_active() {
             let term_idx = crate::shade::terminal::active_idx();
             if spawn_intent_on_worker(input, term_idx, session_id) {
+                // Worker prints prompt when done via from_intent transition
                 continue;
             }
         }
@@ -905,6 +920,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if crate::shade::is_active() {
             crate::shade::render_frame();
         }
+
+        need_prompt = true;
     }
 }
 
