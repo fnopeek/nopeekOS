@@ -523,9 +523,9 @@ pub fn poll_render() {
             }
         }
 
-        // Redraw cursor overlay
+        // Redraw cursor overlay (draw-only, no erase — blit_rect already cleaned MMIO)
         if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
+            cursor::draw_cursor_after_blit(fb);
         }
     });
     return;

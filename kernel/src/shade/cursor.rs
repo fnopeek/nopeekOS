@@ -283,6 +283,23 @@ pub fn draw_cursor_irq() {
     draw_cursor_on_mmio(addr as *mut u8, pitch, sw, sh, cx, cy);
 }
 
+/// Draw cursor after scene blit — NO erase step (blit_rect already wrote clean scene).
+/// Avoids the erase-then-draw flicker that redraw_overlay_lockfree_inner causes.
+pub fn draw_cursor_after_blit(fb: &mut crate::framebuffer::FbConsole) {
+    let info = fb.info();
+    let mmio = info.addr as *mut u8;
+    let pitch = info.pitch as usize;
+    let sw = info.width as i32;
+    let sh = info.height as i32;
+
+    let (cx, cy) = atomic_pos();
+    draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
+
+    DRAWN_LF_X.store(cx, Ordering::Relaxed);
+    DRAWN_LF_Y.store(cy, Ordering::Relaxed);
+    DRAWN_LF.store(true, Ordering::Relaxed);
+}
+
 /// Cached framebuffer MMIO address for IRQ-safe cursor draw
 static IRQ_FB_ADDR: AtomicU64 = AtomicU64::new(0);
 static IRQ_FB_PITCH: AtomicU32 = AtomicU32::new(0);
