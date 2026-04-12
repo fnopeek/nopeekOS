@@ -7,7 +7,8 @@
 
 #![allow(dead_code)]
 
-use super::{FramebufferInfo, GpuError, ModeInfo};
+use super::{FramebufferInfo, GpuError, GpuHal, ModeInfo};
+use alloc::vec::Vec;
 use crate::{kprintln, pci, paging, memory};
 
 // ── PCI Device IDs ──────────────────────────────────────────────────
@@ -52,6 +53,7 @@ const TRANS_CLK_SEL_A: u32     = 0x46140;
 // Pipe A
 const PIPE_CONF_A: u32         = 0x70008;  // Pipe enable/disable
 const PIPE_SRCSZ_A: u32       = 0x6001C;
+const PIPE_FRMCNT_A: u32      = 0x70044;  // Frame counter (increments at vblank)
 
 // Pipe Scaler (PS) — firmware may use this to scale 1080p on 4K monitors
 const PS_CTRL_1A: u32         = 0x68180;  // Scaler 1 control (bit 31 = enable)
@@ -332,6 +334,61 @@ pub struct IntelXeDriver {
     active_timing: Option<&'static DisplayTiming>,
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
     firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
+}
+
+// ── GpuHal implementation ──────────────────────────────────
+
+impl GpuHal for IntelXeDriver {
+    fn name(&self) -> &'static str {
+        self.device_name
+    }
+
+    fn set_mode(&mut self, width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError> {
+        // Delegate to the existing set_mode implementation
+        IntelXeDriver::set_mode(self, width, height, hz)
+    }
+
+    fn framebuffer(&self) -> FramebufferInfo {
+        self.fb.unwrap_or(FramebufferInfo {
+            addr: 0, pitch: 0, width: 0, height: 0, bpp: 0,
+        })
+    }
+
+    fn supported_modes(&self) -> Vec<ModeInfo> {
+        alloc::vec![
+            ModeInfo { width: 3840, height: 2160, hz: 60 },
+            ModeInfo { width: 3840, height: 2160, hz: 30 },
+            ModeInfo { width: 2560, height: 1440, hz: 60 },
+            ModeInfo { width: 1920, height: 1080, hz: 60 },
+        ]
+    }
+
+    fn current_hz(&self) -> u8 {
+        self.active_timing.map_or(0, |t| t.hz)
+    }
+
+    fn is_native(&self) -> bool { true }
+
+    fn flip(&mut self, surface_addr: u64) {
+        if self.bar0 == 0 { return; }
+        // Write PLANE_SURF — GPU reads new address at next vblank
+        mmio_write32(self.bar0, PLANE_SURF_1_A, surface_addr as u32);
+    }
+
+    fn wait_vblank(&self) {
+        if self.bar0 == 0 { return; }
+        // Poll frame counter until it increments (= vblank occurred)
+        let cnt = mmio_read32(self.bar0, PIPE_FRMCNT_A);
+        let mut spins = 0u32;
+        while mmio_read32(self.bar0, PIPE_FRMCNT_A) == cnt && spins < 2_000_000 {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+    }
+
+    fn supports_flip(&self) -> bool {
+        self.bar0 != 0 && self.fb.is_some()
+    }
 }
 
 impl IntelXeDriver {

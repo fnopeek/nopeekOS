@@ -1,7 +1,8 @@
-//! GPU Abstraction Layer
+//! GPU Hardware Abstraction Layer
 //!
-//! Vendor-neutral GPU driver interface. Detects available GPU hardware
-//! at boot and provides a unified API for display output.
+//! Driver-agnostic GPU interface via GpuHal trait.
+//! Any GPU driver (Intel, AMD, NVIDIA) implements the trait.
+//! The kernel only talks to the trait, never to hardware directly.
 //!
 //! Backends:
 //! - GOP: UEFI Graphics Output Protocol (fallback, bootloader-provided)
@@ -12,6 +13,8 @@
 pub mod gop;
 pub mod intel_xe;
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 /// GPU driver error.
@@ -56,14 +59,41 @@ pub struct FramebufferInfo {
     pub bpp: u8,
 }
 
-/// Active GPU driver instance.
-enum GpuBackend {
-    None,
-    Gop(gop::GopDriver),
-    IntelXe(intel_xe::IntelXeDriver),
+// ── GpuHal Trait — driver-agnostic interface ──────────────
+
+/// Hardware Abstraction Layer for GPU drivers.
+/// Implement this trait for any GPU: Intel, AMD, NVIDIA, virtual.
+pub trait GpuHal: Send {
+    /// Human-readable driver name (e.g. "Intel Xe ADL-N").
+    fn name(&self) -> &'static str;
+
+    /// Set display mode. Returns framebuffer info for CPU rendering.
+    fn set_mode(&mut self, width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError>;
+
+    /// Current framebuffer info.
+    fn framebuffer(&self) -> FramebufferInfo;
+
+    /// List of supported display modes.
+    fn supported_modes(&self) -> Vec<ModeInfo>;
+
+    /// Current refresh rate in Hz (0 if unknown).
+    fn current_hz(&self) -> u8;
+
+    /// True if this is a native driver (not GOP fallback).
+    fn is_native(&self) -> bool;
+
+    /// Schedule page flip — GPU scans from new surface at next vblank.
+    /// `surface_addr` is driver-specific (GGTT offset for Intel, phys for others).
+    fn flip(&mut self, surface_addr: u64);
+
+    /// Wait for vertical blank (synchronous). Returns immediately if unsupported.
+    fn wait_vblank(&self);
+
+    /// True if the driver supports hardware page flip + vblank sync.
+    fn supports_flip(&self) -> bool;
 }
 
-static GPU: Mutex<GpuBackend> = Mutex::new(GpuBackend::None);
+static GPU: Mutex<Option<Box<dyn GpuHal>>> = Mutex::new(None);
 
 /// Initialize GPU subsystem. Uses GOP, detects native GPU for later activation.
 pub fn init(multiboot_info: u32) {
@@ -72,7 +102,7 @@ pub fn init(multiboot_info: u32) {
         Some(drv) => {
             crate::kprintln!("[npk] GPU: GOP {}x{} (bootloader)",
                 drv.framebuffer().width, drv.framebuffer().height);
-            *GPU.lock() = GpuBackend::Gop(drv);
+            *GPU.lock() = Some(Box::new(drv) as Box<dyn GpuHal>);
         }
         None => {
             crate::kprintln!("[npk] GPU: no display available");
@@ -94,53 +124,42 @@ pub fn init(multiboot_info: u32) {
 static DETECTED_XE: Mutex<Option<intel_xe::IntelXeDriver>> = Mutex::new(None);
 
 /// Activate native GPU driver (Intel Xe). Call from intent loop, not boot.
-/// Returns description of result for user output.
 pub fn activate_native() -> Result<FramebufferInfo, GpuError> {
     let mut detected = DETECTED_XE.lock();
     let mut drv = detected.take().ok_or(GpuError::NotFound)?;
 
     match drv.init() {
         Ok(fb) => {
-            crate::kprintln!("[npk] GPU: {}x{} @ {}Hz (native)",
+            crate::kprintln!("[npk] GPU: {}x{} @ {}Hz (native, HAL)",
                 fb.width, fb.height, drv.current_hz());
-            *GPU.lock() = GpuBackend::IntelXe(drv);
+            *GPU.lock() = Some(Box::new(drv) as Box<dyn GpuHal>);
             Ok(fb)
         }
         Err(e) => {
             crate::kprintln!("[npk] GPU: Intel Xe init failed: {:?}", e);
-            // Put driver back so user can retry
             *detected = Some(drv);
             Err(e)
         }
     }
 }
 
-/// Dump native GPU registers (read-only, safe).
+/// Dump native GPU registers (Intel Xe specific, debug only).
 pub fn dump_native() {
     let detected = DETECTED_XE.lock();
     if let Some(ref drv) = *detected {
         drv.dump_registers();
     } else {
-        // Already activated?
-        let gpu = GPU.lock();
-        match &*gpu {
-            GpuBackend::IntelXe(drv) => drv.dump_registers(),
-            _ => crate::kprintln!("[npk] GPU: no native GPU detected"),
-        }
+        crate::kprintln!("[npk] GPU: use before 'gpu init' for register dump");
     }
 }
 
-/// Test PLL re-lock with firmware values.
+/// Test PLL re-lock (Intel Xe specific, debug only).
 pub fn test_pll() {
     let detected = DETECTED_XE.lock();
     if let Some(ref drv) = *detected {
         drv.test_pll();
     } else {
-        let gpu = GPU.lock();
-        match &*gpu {
-            GpuBackend::IntelXe(drv) => drv.test_pll(),
-            _ => crate::kprintln!("[npk] GPU: no native GPU detected"),
-        }
+        crate::kprintln!("[npk] GPU: no detected GPU for PLL test");
     }
 }
 
@@ -156,57 +175,62 @@ pub fn native_gpu_name() -> Option<&'static str> {
 
 /// Get current framebuffer info (if any GPU is active).
 pub fn framebuffer_info() -> Option<FramebufferInfo> {
-    let gpu = GPU.lock();
-    match &*gpu {
-        GpuBackend::None => None,
-        GpuBackend::Gop(drv) => Some(drv.framebuffer()),
-        GpuBackend::IntelXe(drv) => Some(drv.framebuffer()),
-    }
+    GPU.lock().as_ref().map(|drv| drv.framebuffer())
 }
 
-/// Try to set a new display mode. Returns new framebuffer info on success.
+/// Try to set a new display mode.
 pub fn set_mode(width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError> {
-    let mut gpu = GPU.lock();
-    match &mut *gpu {
-        GpuBackend::None => Err(GpuError::NotFound),
-        GpuBackend::Gop(_) => Err(GpuError::UnsupportedMode), // GOP can't switch modes
-        GpuBackend::IntelXe(drv) => drv.set_mode(width, height, hz),
+    match GPU.lock().as_mut() {
+        Some(drv) => drv.set_mode(width, height, hz),
+        None => Err(GpuError::NotFound),
     }
 }
 
 /// List supported display modes.
-pub fn supported_modes() -> alloc::vec::Vec<ModeInfo> {
-    let gpu = GPU.lock();
-    match &*gpu {
-        GpuBackend::None => alloc::vec::Vec::new(),
-        GpuBackend::Gop(drv) => drv.supported_modes(),
-        GpuBackend::IntelXe(drv) => drv.supported_modes(),
+pub fn supported_modes() -> Vec<ModeInfo> {
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.supported_modes(),
+        None => Vec::new(),
     }
 }
 
 /// Get name of active GPU driver.
 pub fn driver_name() -> &'static str {
-    let gpu = GPU.lock();
-    match &*gpu {
-        GpuBackend::None => "none",
-        GpuBackend::Gop(_) => "GOP",
-        GpuBackend::IntelXe(drv) => drv.name(),
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.name(),
+        None => "none",
     }
 }
 
 /// Current refresh rate (0 if unknown/GOP).
 pub fn current_hz() -> u8 {
-    let gpu = GPU.lock();
-    match &*gpu {
-        GpuBackend::IntelXe(drv) => drv.current_hz(),
-        _ => 0,
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.current_hz(),
+        None => 0,
     }
 }
 
 /// Check if a native GPU driver is active (not just GOP fallback).
 pub fn is_native() -> bool {
-    let gpu = GPU.lock();
-    matches!(&*gpu, GpuBackend::IntelXe(_))
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.is_native(),
+        None => false,
+    }
+}
+
+/// Wait for vertical blank (pass-through to HAL).
+pub fn wait_vblank() {
+    if let Some(drv) = GPU.lock().as_ref() {
+        drv.wait_vblank();
+    }
+}
+
+/// Check if hardware flip is supported.
+pub fn supports_flip() -> bool {
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.supports_flip(),
+        None => false,
+    }
 }
 
 /// Auto-incrementing GPU log counter.

@@ -3,10 +3,31 @@
 //! Uses the framebuffer provided by the bootloader via Multiboot2.
 //! No modesetting — resolution is fixed at boot by GRUB/UEFI.
 
-use super::{FramebufferInfo, ModeInfo};
+use super::{FramebufferInfo, GpuError, GpuHal, ModeInfo};
+use alloc::vec::Vec;
 
 pub struct GopDriver {
     fb: FramebufferInfo,
+}
+
+impl GpuHal for GopDriver {
+    fn name(&self) -> &'static str { "GOP" }
+
+    fn set_mode(&mut self, _w: u32, _h: u32, _hz: u8) -> Result<FramebufferInfo, GpuError> {
+        Err(GpuError::UnsupportedMode) // GOP can't switch modes
+    }
+
+    fn framebuffer(&self) -> FramebufferInfo { self.fb }
+
+    fn supported_modes(&self) -> Vec<ModeInfo> {
+        alloc::vec![ModeInfo { width: self.fb.width, height: self.fb.height, hz: 60 }]
+    }
+
+    fn current_hz(&self) -> u8 { 0 }
+    fn is_native(&self) -> bool { false }
+    fn flip(&mut self, _surface_addr: u64) { /* GOP: no hardware flip */ }
+    fn wait_vblank(&self) { /* GOP: no vblank access */ }
+    fn supports_flip(&self) -> bool { false }
 }
 
 impl GopDriver {
