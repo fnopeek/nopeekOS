@@ -89,9 +89,9 @@ where
     COMPOSITOR.lock().as_mut().map(f)
 }
 
-/// Create a new window. Returns the window ID.
+/// Create a new window. Returns the window ID, or None if no terminal slots.
 pub fn create_window(title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<WindowId> {
-    with_compositor(|comp| comp.create_window(title, x, y, w, h))
+    with_compositor(|comp| comp.create_window(title, x, y, w, h)).flatten()
 }
 
 /// Close and remove a window.
