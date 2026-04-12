@@ -215,15 +215,15 @@ pub fn intent_shade(args: &str) {
             }
             crate::shade::with_compositor(|comp| {
                 comp.create_window("loop", 0, 0, 800, 600);
-                let id2 = comp.create_window("editor", 0, 0, 800, 600);
-                let id3 = comp.create_window("status", 0, 0, 800, 300);
-
-                // Color the windows differently
-                if let Some(win) = comp.window_mut(id2) {
-                    win.bg_color = 0x00180820;
+                if let Some(id2) = comp.create_window("editor", 0, 0, 800, 600) {
+                    if let Some(win) = comp.window_mut(id2) {
+                        win.bg_color = 0x00180820;
+                    }
                 }
-                if let Some(win) = comp.window_mut(id3) {
-                    win.bg_color = 0x00081820;
+                if let Some(id3) = comp.create_window("status", 0, 0, 800, 300) {
+                    if let Some(win) = comp.window_mut(id3) {
+                        win.bg_color = 0x00081820;
+                    }
                 }
             });
             crate::shade::render_frame();
