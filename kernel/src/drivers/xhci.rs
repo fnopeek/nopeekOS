@@ -5,7 +5,7 @@
 
 use crate::{kprintln, pci, paging, memory};
 use crate::paging::PageFlags;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
 
 // === MMIO helpers ===
 
@@ -221,18 +221,11 @@ fn push_mouse(evt: MouseEvent) {
 }
 
 /// Poll for a key from the USB keyboard. Called from keyboard.rs.
+/// Reads from software buffer only — timer IRQ drains hardware.
 pub fn poll_keyboard() -> Option<u8> {
     if !AVAILABLE.load(Ordering::Relaxed) { return None; }
-    // Fallback: drain hardware if buffer empty (try_lock to avoid blocking timer IRQ)
-    if KEY_HEAD.load(Ordering::Relaxed) == KEY_TAIL.load(Ordering::Relaxed) {
-        if let Some(mut lock) = STATE.try_lock() {
-            if let Some(ref mut state) = *lock {
-                drain_events(state);
-            }
-        }
-    }
 
-    // Check key buffer first (newly pressed keys)
+    // Read from software key buffer (filled by timer IRQ)
     let head = KEY_HEAD.load(Ordering::Acquire);
     let tail = KEY_TAIL.load(Ordering::Relaxed);
     if head != tail {
@@ -242,25 +235,25 @@ pub fn poll_keyboard() -> Option<u8> {
         return Some(k);
     }
 
-    // Timer-based key repeat for held keys (try_lock to avoid blocking timer IRQ)
-    if let Some(mut state_lock) = STATE.try_lock() {
-    if let Some(ref mut state) = *state_lock {
-        if state.repeat_key != 0 {
-            let now = crate::interrupts::ticks();
-            let held_ms = (now - state.repeat_start) * 10; // ticks are ~10ms each (100Hz)
-            let since_last = (now - state.repeat_last) * 10;
-
-            // Initial delay 500ms, then repeat every 50ms
-            if held_ms >= 500 && since_last >= 50 {
-                state.repeat_last = now;
-                let is_de = IS_DE_LAYOUT.load(Ordering::Relaxed);
-                let ch = hid_to_char(state.repeat_key, state.repeat_shift, state.repeat_altgr, is_de);
-                if ch != 0 {
-                    return Some(ch);
-                }
+    // Timer-based key repeat (lock-free: read repeat state from atomics)
+    let rk = REPEAT_KEY.load(Ordering::Relaxed);
+    if rk != 0 {
+        let now = crate::interrupts::ticks();
+        let start = REPEAT_START.load(Ordering::Relaxed);
+        let last = REPEAT_LAST.load(Ordering::Relaxed);
+        let held_ms = (now.wrapping_sub(start)) * 10;
+        let since_last = (now.wrapping_sub(last)) * 10;
+        if held_ms >= 500 && since_last >= 50 {
+            REPEAT_LAST.store(now, Ordering::Relaxed);
+            let is_de = IS_DE_LAYOUT.load(Ordering::Relaxed);
+            let shift = REPEAT_SHIFT.load(Ordering::Relaxed);
+            let altgr = REPEAT_ALTGR.load(Ordering::Relaxed);
+            let ch = hid_to_char(rk, shift, altgr, is_de);
+            if ch != 0 {
+                return Some(ch);
             }
         }
-    }}
+    }
 
     None
 }
@@ -268,17 +261,17 @@ pub fn poll_keyboard() -> Option<u8> {
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 static MOUSE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
+// Lock-free key repeat state (written by timer IRQ, read by poll_keyboard)
+static REPEAT_KEY: AtomicU8 = AtomicU8::new(0);
+static REPEAT_SHIFT: AtomicBool = AtomicBool::new(false);
+static REPEAT_ALTGR: AtomicBool = AtomicBool::new(false);
+static REPEAT_START: AtomicU64 = AtomicU64::new(0);
+static REPEAT_LAST: AtomicU64 = AtomicU64::new(0);
+
 /// Poll for a mouse event from USB mouse.
+/// Reads from software buffer only — timer IRQ drains hardware.
 pub fn poll_mouse() -> Option<MouseEvent> {
     if !MOUSE_AVAILABLE.load(Ordering::Relaxed) { return None; }
-    // Fallback: drain hardware if buffer empty (try_lock to avoid blocking timer IRQ)
-    if MOUSE_HEAD.load(Ordering::Relaxed) == MOUSE_TAIL.load(Ordering::Relaxed) {
-        if let Some(mut lock) = STATE.try_lock() {
-            if let Some(ref mut state) = *lock {
-                drain_events(state);
-            }
-        }
-    }
 
     let head = MOUSE_HEAD.load(Ordering::Acquire);
     let tail = MOUSE_TAIL.load(Ordering::Relaxed);
@@ -1642,6 +1635,8 @@ pub fn cache_keyboard_layout() {
     IS_DE_LAYOUT.store(is_de, Ordering::Relaxed);
 }
 
+/// Drain xHCI events from main loop context. Only needed during early boot
+/// (before timer IRQ is active). After boot, timer IRQ drains exclusively.
 pub fn poll_events() {
     if let Some(mut lock) = STATE.try_lock() {
         if let Some(ref mut state) = *lock {
@@ -1748,20 +1743,33 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
     if first_key == 0 {
         // All keys released — stop repeat
         state.repeat_key = 0;
+        REPEAT_KEY.store(0, Ordering::Relaxed);
     } else if state.repeat_key != 0 && !keys.contains(&state.repeat_key) {
         // Repeated key was released while another is held — follow current key
         state.repeat_key = first_key;
         state.repeat_shift = shift;
         state.repeat_altgr = alt_gr;
-        state.repeat_start = crate::interrupts::ticks();
-        state.repeat_last = state.repeat_start;
+        let now = crate::interrupts::ticks();
+        state.repeat_start = now;
+        state.repeat_last = now;
+        REPEAT_KEY.store(first_key, Ordering::Relaxed);
+        REPEAT_SHIFT.store(shift, Ordering::Relaxed);
+        REPEAT_ALTGR.store(alt_gr, Ordering::Relaxed);
+        REPEAT_START.store(now, Ordering::Relaxed);
+        REPEAT_LAST.store(now, Ordering::Relaxed);
     } else if !state.prev_keys.contains(&first_key) {
         // New key pressed — start repeat timer
         state.repeat_key = first_key;
         state.repeat_shift = shift;
         state.repeat_altgr = alt_gr;
-        state.repeat_start = crate::interrupts::ticks();
-        state.repeat_last = state.repeat_start;
+        let now = crate::interrupts::ticks();
+        state.repeat_start = now;
+        state.repeat_last = now;
+        REPEAT_KEY.store(first_key, Ordering::Relaxed);
+        REPEAT_SHIFT.store(shift, Ordering::Relaxed);
+        REPEAT_ALTGR.store(alt_gr, Ordering::Relaxed);
+        REPEAT_START.store(now, Ordering::Relaxed);
+        REPEAT_LAST.store(now, Ordering::Relaxed);
     }
 
     for &key in keys.iter() {
