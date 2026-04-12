@@ -285,11 +285,11 @@ Every execution is a sandboxed WASM module:
 - [ ] VSync (VBI-synchronized blits, eliminates tearing)
 - [ ] Web rendering engine (long-term)
 
-### Phase 9 -- SMP & Microkernel Migration (in progress)
+### Phase 9 -- SMP & Event-Driven Architecture (in progress)
 
-The kernel is transitioning from monolithic to microkernel. Everything that isn't
-hardware abstraction moves to WASM modules, communicating via host functions.
-SMP is live -- all cores boot and are ready for work.
+The kernel is transitioning to an event-driven microkernel. Core 0 becomes a thin
+event dispatcher (IRQ + input + blit). All work moves to worker cores via the
+Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 
 **SMP (Symmetric Multiprocessing)**
 - [x] ACPI MADT parsing (Type 0 Local APIC + Type 9 x2APIC, no core limit)
@@ -308,27 +308,35 @@ SMP is live -- all cores boot and are ready for work.
 - [ ] Per-core APIC timer
 - [ ] Thermal load balancing (migrate tasks when core >80% busy)
 
+**Event-Driven Intent Architecture**
+- [ ] IntentSession struct on heap (input_buf, cursor, history, cwd per window)
+- [ ] Core 0 = event dispatcher only (never blocks >100μs)
+- [ ] handle_key() as fire-and-forget task on worker core
+- [ ] execute_intent() spawns sub-tasks for heavy work
+- [ ] HTTP/HTTPS as async worker task (currently blocks Core 0 for 5-20s)
+- [ ] OTA update as async worker task (currently blocks 15-100s)
+- [ ] Module install as async worker task (currently blocks 15-60s)
+
 **App Display API**
 - [x] `npk_print` / `npk_clear` — write/clear app's terminal display
 - [x] `npk_input_wait(timeout_ms)` — blocking wait for key or timeout
-- [x] `npk_sys_info(key)` — system information (cores, memory, freq, usage)
+- [x] `npk_sys_info(key)` — system information (cores, memory, freq, usage, processes)
 - [x] Per-app SPSC key buffers (APP_KEY_BUFS[8], one per terminal)
 - [x] Inline key routing (shade keybinds intercepted, rest to app)
 - [x] OTA module updates (`update` checks kernel + WASM modules)
+- [x] Process tracking (per-app CPU time, memory, core, name, uptime)
 - [ ] Widget API (`npk_widget_list`, `npk_widget_input`, `npk_widget_select`)
-- [ ] Per-window intent loops (loop.wasm on separate cores)
 
 **WASM Runtime**
 - [x] wasmi v1.0 interpreter (register-based, fuel-metered)
 - [x] Interactive execution on worker cores (1B fuel budget)
-- [ ] Cranelift JIT or custom Mini-JIT (WASM → x86_64, for GPU drivers)
-- [ ] Process tracking (per-app CPU time, memory, name)
+- [ ] Dynamic process table (heap-allocated, independent of terminals)
 
 **GPU Rendering (planned)**
 - [ ] GPU HAL trait: init, set_mode, alloc_vram, submit_batch, flip
 - [ ] Intel Xe 2D: command streamer, batch buffers, EU shaders
-- [ ] GPU driver as WASM+JIT module (near-native, capability-gated)
-- [ ] Double-buffer with GPU swap (zero-copy, no FB lock)
+- [ ] GPU-accelerated compositing (worker renders, Core 0 submits flip)
+- [ ] VSync (VBI-synchronized, eliminates tearing)
 - [ ] VirtIO GPU backend (QEMU/VBox support)
 
 **Virtualization**
@@ -366,17 +374,18 @@ SMP is live -- all cores boot and are ready for work.
 | OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
 | GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@60Hz HDMI 2.0, GGTT+WC aperture |
-| Compositor | Shade (-> WASM module) | Dwindle tiling, layer-based rendering |
+| Compositor | Shade (native Rust) | Dwindle tiling, layer-based rendering |
 | Rendering | Layer compositor + double-buffer | Shadow A/B swap, selective partial render, dirty-region compositing |
 | GPU HAL | GOP + Intel Xe (+ VirtIO planned) | Vendor-neutral, same API for all backends |
 | Mouse | xHCI HID boot protocol | Composite device, overlay cursor, IRQ-driven polling |
 | USB Polling | APIC timer (100Hz) | IRQ drains xHCI -> atomic SPSC buffers, no main-thread HW access |
 | Heap | Growable (64MB->2GB) | On-demand 64MB chunks, local O(1) coalescing |
 | Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
-| WASM (future) | Cranelift JIT | WASM -> x86_64, near-native for compositor/browser |
+| Intent Model | Event-driven, heap state | Fire-and-forget tasks, no Core blocked when idle |
+| Core 0 | Event dispatcher only | IRQ + input + blit, never blocks >100μs |
 | Linux apps (future) | MicroVM (VT-x/VT-d) | Mini-Linux kernel, virtio bridges |
 | Modules | npk install | ECDSA P-384 signed, SHA-384 verified, OTA from GitHub |
-| SMP | N cores (no limit) | Core 0 = Kernel/IRQ, Cores 1..N = work-stealing pool |
+| SMP | N cores (no limit) | Core 0 = event dispatcher, Cores 1..N = work-stealing pool |
 | SMP Scheduler | Chase-Lev SPMC deque | Owner push/pop, thieves steal, MONITOR/MWAIT sleep |
 | SMP Wakeup | MONITOR/MWAIT | Nanosecond wake on memory write, HLT fallback |
 | Power | C-states per core | Idle cores sleep, wake on demand, thermal balancing |
