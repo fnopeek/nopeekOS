@@ -609,11 +609,11 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// poll_render picks this up AFTER processing all mouse events.
 static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 
-/// Process a mouse event: update compositor state, redraw cursor overlay.
+/// Process a mouse event: handle buttons/drag, redraw cursor.
+/// Position is already updated by timer IRQ (process_mouse_report).
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
-    // FAST PATH (lock-free, ~2ns): update atomic position + redraw cursor overlay.
-    // Core 0 never blocks here, even if Core 1 holds COMPOSITOR lock for rendering.
-    cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
+    // Position + cursor draw already done by timer IRQ (immediate, lock-free).
+    // Main loop only needs to: redraw cursor (cleanup after blit_rect) + handle buttons.
     cursor::redraw_overlay_lockfree();
 
     // SLOW PATH: take COMPOSITOR lock for focus/drag.

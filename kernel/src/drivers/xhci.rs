@@ -1098,6 +1098,11 @@ fn process_mouse_report(state: &mut XhciState) {
     if dx != 0 || dy != 0 || buttons != state.mouse_prev_buttons || scroll != 0 {
         push_mouse(MouseEvent { buttons, dx, dy, scroll });
         state.mouse_prev_buttons = buttons;
+
+        // Update cursor position + draw IMMEDIATELY from IRQ context.
+        // This makes the cursor responsive even when Core 0 is in blit_rect.
+        crate::shade::cursor::update_atomic(dx, dy, buttons);
+        crate::shade::cursor::redraw_overlay_lockfree();
     }
 }
 
