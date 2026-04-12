@@ -523,9 +523,10 @@ pub fn poll_render() {
             }
         }
 
-        // Redraw cursor overlay (draw-only, no erase — blit_rect already cleaned MMIO)
+        // Redraw cursor overlay (full erase+draw — handle_mouse may have drawn
+        // cursor at a position outside blit_rect, which needs cleanup)
         if crate::xhci::mouse_available() {
-            cursor::draw_cursor_after_blit(fb);
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
     return;

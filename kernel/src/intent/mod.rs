@@ -178,16 +178,9 @@ fn intent_worker_task(arg: u64) {
         dispatch_intent(input, vault, job.session_id);
     }
 
-    // Print new prompt
-    let cwd = get_cwd();
-    let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
-    kprint!("\n{}> ", path);
-
-    // Clear redirect + mark done
+    // Clear redirect + mark done (Core 0 prints the prompt when it detects completion)
     crate::shade::terminal::clear_output_redirect();
     INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
-
-    // Trigger re-render
     crate::shade::terminal::mark_dirty();
 }
 
@@ -770,18 +763,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
-        // Transition from worker intent — prompt already printed by worker
+        // Transition from worker intent — fall through to normal prompt
         if from_intent {
             from_intent = false;
-            if crate::shade::is_active() {
-                let cwd = get_cwd();
-                let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
-                let prompt_len = alloc::format!("{}> ", path).len();
-                crate::shade::terminal::set_prompt_len(prompt_len);
-                crate::shade::terminal::set_cursor_pos(
-                    crate::shade::terminal::current_line_len());
-                crate::shade::render_frame();
-            }
+            // Worker finished — Core 0 prints a fresh prompt below
         }
 
         // Transition from WASM mode to shell
