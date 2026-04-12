@@ -472,6 +472,14 @@ pub fn poll_render() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            // Propagate per-terminal dirty flags to window dirty flags
+            for win in &mut comp.windows {
+                if terminal::is_term_dirty(win.terminal_idx as usize) {
+                    win.dirty = true;
+                    terminal::clear_term_dirty(win.terminal_idx as usize);
+                }
+            }
+
             let focused_id = comp.focused;
             for win in &mut comp.windows {
                 if win.workspace != comp.active_workspace { continue; }
