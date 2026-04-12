@@ -1768,71 +1768,72 @@ impl IntelXeDriver {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32; // page 1 = context state
 
         // SAFETY: lrc_phys is identity-mapped, page 1 is within our 2-page allocation
+        // ALL writes MUST be write_volatile — GPU reads from RAM but the Rust
+        // compiler doesn't see the consumer. Non-volatile writes get eliminated.
         unsafe {
             // Zero entire context page first
             core::ptr::write_bytes(ctx as *mut u8, 0, 4096);
 
             // Gen 12 hardcoded context layout (order is critical!)
-            ctx.add(0).write(MI_NOOP);
+            ctx.add(0).write_volatile(MI_NOOP);
 
             // MI_LRI: 13 register/value pairs, posted
-            ctx.add(1).write(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
+            ctx.add(1).write_volatile(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
 
             // Pair 1: CTX_CONTEXT_CONTROL (must be first!)
             // Bit 0: ENGINE_CTX_RESTORE_INHIBIT — MUST be 0 (allow restore!)
             // Bit 3: INHIBIT_SYN_CTX_SWITCH — 1 (no sync context switches)
             // Masked write: (mask << 16) | value = 0x00090008
-            ctx.add(2).write(0x22244);  // RING_CONTEXT_CONTROL
-            ctx.add(3).write(0x0009_0008);
+            ctx.add(2).write_volatile(0x22244);
+            ctx.add(3).write_volatile(0x0009_0008);
 
             // Pair 2: RING_HEAD
-            ctx.add(4).write(BCS_RING_HEAD);
-            ctx.add(5).write(0);
+            ctx.add(4).write_volatile(BCS_RING_HEAD);
+            ctx.add(5).write_volatile(0);
 
             // Pair 3: RING_TAIL (update_lrc_tail writes to ctx[7])
-            ctx.add(6).write(BCS_RING_TAIL);
-            ctx.add(7).write(0);
+            ctx.add(6).write_volatile(BCS_RING_TAIL);
+            ctx.add(7).write_volatile(0);
 
             // Pair 4: RING_START
-            ctx.add(8).write(BCS_RING_START);
-            ctx.add(9).write(BCS_RING_GGTT);
+            ctx.add(8).write_volatile(BCS_RING_START);
+            ctx.add(9).write_volatile(BCS_RING_GGTT);
 
             // Pair 5: RING_CTL (4KB ring, valid)
-            ctx.add(10).write(BCS_RING_CTL);
-            ctx.add(11).write((4096 - 4096) | RING_CTL_VALID);
+            ctx.add(10).write_volatile(BCS_RING_CTL);
+            ctx.add(11).write_volatile((4096 - 4096) | RING_CTL_VALID);
 
             // Pairs 6-13: BB_HEAD, BB_STATE, etc. (all zero, must be present)
-            ctx.add(12).write(0x22168); // BB_HEAD_U
-            ctx.add(13).write(0);
-            ctx.add(14).write(0x22140); // BB_HEAD_L
-            ctx.add(15).write(0);
-            ctx.add(16).write(0x22110); // BB_STATE
-            ctx.add(17).write(0);
-            ctx.add(18).write(0x2211C); // SECOND_BB_HEAD_U
-            ctx.add(19).write(0);
-            ctx.add(20).write(0x22114); // SECOND_BB_HEAD_L
-            ctx.add(21).write(0);
-            ctx.add(22).write(0x22118); // SECOND_BB_STATE
-            ctx.add(23).write(0);
-            ctx.add(24).write(0x221C0); // BB_PER_CTX_PTR
-            ctx.add(25).write(0);
-            ctx.add(26).write(0x221C4); // INDIRECT_CTX
-            ctx.add(27).write(0);
+            ctx.add(12).write_volatile(0x22168);
+            ctx.add(13).write_volatile(0);
+            ctx.add(14).write_volatile(0x22140);
+            ctx.add(15).write_volatile(0);
+            ctx.add(16).write_volatile(0x22110);
+            ctx.add(17).write_volatile(0);
+            ctx.add(18).write_volatile(0x2211C);
+            ctx.add(19).write_volatile(0);
+            ctx.add(20).write_volatile(0x22114);
+            ctx.add(21).write_volatile(0);
+            ctx.add(22).write_volatile(0x22118);
+            ctx.add(23).write_volatile(0);
+            ctx.add(24).write_volatile(0x221C0);
+            ctx.add(25).write_volatile(0);
+            ctx.add(26).write_volatile(0x221C4);
+            ctx.add(27).write_volatile(0);
         }
     }
 
     /// Update RING_TAIL in LRC and reset HEAD to 0 (stateless ring hack).
     ///
-    /// Since we always write commands at ring offset 0, we reset HEAD=0
-    /// and set TAIL=N before each submit. Combined with FORCE_RESTORE,
-    /// the GPU always starts fresh — no ring wrap-around tracking needed.
+    /// MUST use write_volatile — the GPU reads this from RAM, but the
+    /// Rust compiler doesn't know that. Non-volatile writes get eliminated
+    /// as "dead stores" in release builds.
     fn update_lrc_tail(&self, tail_bytes: u32) {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32;
         // SAFETY: within our allocated LRC page
         unsafe {
-            // Gen 12 hardcoded: [5]=HEAD value, [7]=TAIL value
-            ctx.add(5).write(0);             // Reset HEAD to 0
-            ctx.add(7).write(tail_bytes);    // Set new TAIL
+            ctx.add(5).write_volatile(0);             // Reset HEAD to 0
+            ctx.add(7).write_volatile(tail_bytes);    // Set new TAIL
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
