@@ -115,16 +115,23 @@ pub extern "C" fn _start() {
         print("]\n");
         print("  ──────────────────────────────────────────────────\n\n");
 
-        // Build core→process map (which cores have WASM apps)
+        // Query process table
+        let proc_count = sys(20);
+
+        // Build core→process map via process table PIDs
         let mut core_has_proc = [false; 16];
+        let mut pids = [0i32; 32]; // cache PIDs for reuse below
+        let pid_count = proc_count.min(32) as usize;
         {
-            let mut t: i32 = 0;
-            while t < 8 {
-                if sys(21 | (t << 8)) != 0 {
-                    let c = sys(24 | (t << 8));
+            let mut i: i32 = 0;
+            while (i as usize) < pid_count {
+                let pid = sys(21 | (i << 8)) as i32;
+                pids[i as usize] = pid;
+                if pid > 0 {
+                    let c = sys(24 | (pid << 8));
                     if c >= 0 && (c as usize) < 16 { core_has_proc[c as usize] = true; }
                 }
-                t += 1;
+                i += 1;
             }
         }
 
@@ -163,24 +170,23 @@ pub extern "C" fn _start() {
             i += 1;
         }
 
-        // Processes
-        let proc_count = sys(20);
+        // Processes (PID-based iteration)
         if proc_count > 0 {
             print("\n  PROCESSES\n  ─────────\n");
-            print("  TERM  NAME              CPU%   MEM    CORE  UPTIME\n");
-            print("  ────  ────              ────   ───    ────  ──────\n");
+            print("   PID  NAME            KIND     CPU%   MEM    CORE  UPTIME\n");
+            print("  ────  ────            ────     ────   ───    ────  ──────\n");
 
-            let mut t: i32 = 0;
-            while t < 8 {
-                let active = sys(21 | (t << 8));
-                if active != 0 {
+            let mut i: usize = 0;
+            while i < pid_count {
+                let pid = pids[i];
+                if pid > 0 {
                     print("  ");
-                    pad(t as i64, 4);
+                    pad(pid as i64, 4);
 
                     // Decode name from packed i64s
                     let mut name_buf = [0u8; 16];
-                    let n1 = unpack_name(sys(25 | (t << 8)), &mut name_buf, 0);
-                    let n2 = unpack_name(sys(26 | (t << 8)), &mut name_buf, n1);
+                    let n1 = unpack_name(sys(25 | (pid << 8)), &mut name_buf, 0);
+                    let n2 = unpack_name(sys(26 | (pid << 8)), &mut name_buf, n1);
                     let name_len = n1 + n2;
                     print("  ");
                     if name_len > 0 {
@@ -190,35 +196,43 @@ pub extern "C" fn _start() {
                             unsafe { npk_print(ch.as_ptr() as i32, 1); }
                             j += 1;
                         }
-                        // Pad to 16 chars
                         let mut p = name_len;
-                        while p < 16 { print(" "); p += 1; }
+                        while p < 14 { print(" "); p += 1; }
                     } else {
-                        print("?               ");
+                        print("?             ");
                     }
 
-                    let cpu = sys(22 | (t << 8));
+                    // Kind
+                    let kind = sys(29 | (pid << 8));
+                    match kind {
+                        0 => print("  intent  "),
+                        1 => print("  wasm    "),
+                        2 => print("  system  "),
+                        _ => print("  ?       "),
+                    }
+
+                    let cpu = sys(22 | (pid << 8));
                     print("  ");
                     pad(cpu, 3);
                     print("%");
 
-                    let mem_kb = sys(23 | (t << 8));
+                    let mem_kb = sys(23 | (pid << 8));
                     print("  ");
                     pad(mem_kb, 4);
                     print("K");
 
-                    let core = sys(24 | (t << 8));
+                    let core = sys(24 | (pid << 8));
                     print("  ");
                     pad(core, 4);
 
-                    let pup = sys(27 | (t << 8));
+                    let pup = sys(27 | (pid << 8));
                     print("  ");
                     print_num(pup);
                     print("s");
 
                     print("\n");
                 }
-                t += 1;
+                i += 1;
             }
         }
 

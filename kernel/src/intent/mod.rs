@@ -286,6 +286,15 @@ fn intent_worker_task(arg: u64) {
         }
     };
 
+    // Extract verb for process name
+    let verb = input.splitn(2, ' ').next().unwrap_or("?");
+    let core_id = crate::smp::per_core::current_core_id();
+
+    // Register in process table
+    let pid = crate::process::spawn(verb, crate::process::KIND_INTENT,
+                                     job.terminal_idx, core_id as u8);
+    let start_tsc = crate::interrupts::rdtsc();
+
     // Redirect kprint output to this terminal
     crate::shade::terminal::set_output_redirect(job.terminal_idx);
 
@@ -296,6 +305,11 @@ fn intent_worker_task(arg: u64) {
         let vault: &'static Mutex<Vault> = unsafe { &*vault_ptr };
         dispatch_intent(input, vault, job.session_id);
     }
+
+    // Track CPU time + deregister process
+    let elapsed = crate::interrupts::rdtsc().saturating_sub(start_tsc);
+    crate::process::add_busy_tsc(pid, elapsed);
+    crate::process::exit(pid);
 
     // Clear redirect + mark done (Core 0 prints the prompt when it detects completion)
     crate::shade::terminal::clear_output_redirect();

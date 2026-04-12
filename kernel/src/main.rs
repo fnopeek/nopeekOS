@@ -43,6 +43,7 @@ mod setup;
 mod gpu;
 mod shade;
 mod smp;
+mod process;
 #[allow(dead_code, unused_imports)]
 mod install;
 
