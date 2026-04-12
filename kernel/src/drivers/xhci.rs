@@ -223,11 +223,13 @@ fn push_mouse(evt: MouseEvent) {
 /// Poll for a key from the USB keyboard. Called from keyboard.rs.
 pub fn poll_keyboard() -> Option<u8> {
     if !AVAILABLE.load(Ordering::Relaxed) { return None; }
-    // Fallback: if KEY_BUF is empty, drain hardware directly.
-    // Normally the timer IRQ fills KEY_BUF, but during early boot
-    // (setup, login) or if interrupts are delayed, this ensures input works.
+    // Fallback: drain hardware if buffer empty (try_lock to avoid blocking timer IRQ)
     if KEY_HEAD.load(Ordering::Relaxed) == KEY_TAIL.load(Ordering::Relaxed) {
-        poll_events();
+        if let Some(mut lock) = STATE.try_lock() {
+            if let Some(ref mut state) = *lock {
+                drain_events(state);
+            }
+        }
     }
 
     // Check key buffer first (newly pressed keys)
@@ -240,8 +242,8 @@ pub fn poll_keyboard() -> Option<u8> {
         return Some(k);
     }
 
-    // Timer-based key repeat for held keys
-    let mut state_lock = STATE.lock();
+    // Timer-based key repeat for held keys (try_lock to avoid blocking timer IRQ)
+    if let Some(mut state_lock) = STATE.try_lock() {
     if let Some(ref mut state) = *state_lock {
         if state.repeat_key != 0 {
             let now = crate::interrupts::ticks();
@@ -258,7 +260,7 @@ pub fn poll_keyboard() -> Option<u8> {
                 }
             }
         }
-    }
+    }}
 
     None
 }
@@ -269,9 +271,13 @@ static MOUSE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Poll for a mouse event from USB mouse.
 pub fn poll_mouse() -> Option<MouseEvent> {
     if !MOUSE_AVAILABLE.load(Ordering::Relaxed) { return None; }
-    // Fallback: drain hardware if buffer empty (NUC has no PIT → no timer IRQ)
+    // Fallback: drain hardware if buffer empty (try_lock to avoid blocking timer IRQ)
     if MOUSE_HEAD.load(Ordering::Relaxed) == MOUSE_TAIL.load(Ordering::Relaxed) {
-        poll_events();
+        if let Some(mut lock) = STATE.try_lock() {
+            if let Some(ref mut state) = *lock {
+                drain_events(state);
+            }
+        }
     }
 
     let head = MOUSE_HEAD.load(Ordering::Acquire);
