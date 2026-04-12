@@ -205,9 +205,11 @@ pub fn intent_shade(args: &str) {
                 kprintln!("[npk] shade: already running");
                 return;
             }
+            // Destroy pre-shade sessions so terminals start clean
+            for i in 0..8u8 { crate::intent::destroy_session(i); }
             crate::shade::init();
-            // Create first window automatically (same path as Mod+Enter)
-            crate::shade::handle_action(crate::shade::input::ShadeAction::NewWindow);
+            crate::shade::render_frame();
+            kprintln!("[npk] shade: compositor active (Mod+Enter for first window)");
         }
         "demo" => {
             if !crate::shade::is_active() {
