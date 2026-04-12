@@ -282,9 +282,7 @@ pub fn handle_action(action: input::ShadeAction) {
             with_compositor(|comp| {
                 comp.create_window("loop", 0, 0, 800, 600);
             });
-            // Write prompt to the new terminal
-            terminal::write_prompt();
-            terminal::set_cursor_pos(terminal::current_line_len());
+            // run_loop prints the prompt via IntentSession
             render_frame();
         }
         ShadeAction::CloseWindow => {
