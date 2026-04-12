@@ -149,9 +149,15 @@ const GFX_FLSH_CNTL_GEN6: u32 = 0x101008;
 //
 // Reference: i915 intel_execlists_submission.c, intel_lrc.c
 
-// GT Forcewake (required before accessing GT engine registers)
-const FORCEWAKE_GT: u32          = 0xA188;    // Request: masked bit write
-const FORCEWAKE_ACK_GT: u32      = 0x130044;  // Ack: poll bit 0
+// Forcewake domains (Gen 9+ multithreaded, masked bit writes)
+// BCS at 0x22000 needs GT domain per i915 range table, but ADL-N
+// may need all domains — request all three to be safe.
+const FORCEWAKE_GT: u32          = 0xA188;    // GT domain request
+const FORCEWAKE_ACK_GT: u32      = 0x130044;  // GT domain ack
+const FORCEWAKE_RENDER: u32      = 0xA278;    // Render domain request
+const FORCEWAKE_ACK_RENDER: u32  = 0x0D84;    // Render domain ack
+const FORCEWAKE_MEDIA: u32       = 0xA270;    // Media domain request
+const FORCEWAKE_ACK_MEDIA: u32   = 0x0D88;    // Media domain ack
 
 // BCS engine MMIO registers (engine base = 0x22000)
 const BCS_RING_TAIL: u32        = 0x22030;
@@ -507,6 +513,8 @@ impl GpuHal for IntelXeDriver {
             return;
         }
         let fw_ack = mmio_read32(self.bar0, FORCEWAKE_ACK_GT);
+        let fw_rn = mmio_read32(self.bar0, FORCEWAKE_ACK_RENDER);
+        let fw_md = mmio_read32(self.bar0, FORCEWAKE_ACK_MEDIA);
         let head = mmio_read32(self.bar0, BCS_RING_HEAD);
         let tail = mmio_read32(self.bar0, BCS_RING_TAIL);
         let start = mmio_read32(self.bar0, BCS_RING_START);
@@ -516,7 +524,7 @@ impl GpuHal for IntelXeDriver {
         let mi = mmio_read32(self.bar0, BCS_MI_MODE);
         let elsq_st = mmio_read32(self.bar0, BCS_ELSQ_STATUS_LO);
         let rst = mmio_read32(self.bar0, BCS_RESET_CTL);
-        kprintln!("  FW_ACK_GT:  {:#010x} (wake={})", fw_ack, fw_ack & 1);
+        kprintln!("  FW_ACK:     GT={} RN={} MD={}", fw_ack & 1, fw_rn & 1, fw_md & 1);
         kprintln!("  RING_MODE:  {:#010x} (execlist={})", mode, mode & GFX_RUN_LIST_ENABLE != 0);
         kprintln!("  MI_MODE:    {:#010x}", mi);
         kprintln!("  RING_HEAD:  {:#010x} (off={})", head, head & RING_HEAD_MASK);
@@ -1579,13 +1587,29 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
         let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
 
-        // ── Step 3: Acquire GT forcewake ────────────────────────────
+        // ── Step 3: Acquire ALL forcewake domains ────────────────────
+        // Request GT + Render + Media (masked bit write: bit 16 = mask, bit 0 = value)
         mmio_write32(self.bar0, FORCEWAKE_GT, (1 << 16) | 1);
-        if !poll_timeout(self.bar0, FORCEWAKE_ACK_GT, 1, 1, 500_000) {
+        mmio_write32(self.bar0, FORCEWAKE_RENDER, (1 << 16) | 1);
+        mmio_write32(self.bar0, FORCEWAKE_MEDIA, (1 << 16) | 1);
+
+        // Poll all three acks
+        let gt_ok = poll_timeout(self.bar0, FORCEWAKE_ACK_GT, 1, 1, 500_000);
+        let rn_ok = poll_timeout(self.bar0, FORCEWAKE_ACK_RENDER, 1, 1, 500_000);
+        let md_ok = poll_timeout(self.bar0, FORCEWAKE_ACK_MEDIA, 1, 1, 500_000);
+        kprintln!("[npk]   BCS: forcewake GT={} RENDER={} MEDIA={}",
+            gt_ok, rn_ok, md_ok);
+        if !gt_ok {
             kprintln!("[npk]   BCS: GT forcewake TIMEOUT");
             return Err(GpuError::PowerTimeout);
         }
-        kprintln!("[npk]   BCS: GT forcewake acquired");
+
+        // Verify BCS registers are writable: write to RING_MODE, read back
+        mmio_write32(self.bar0, BCS_RING_MODE, 0);
+        let mode_readback = mmio_read32(self.bar0, BCS_RING_MODE);
+        let reset_readback = mmio_read32(self.bar0, BCS_RESET_CTL);
+        kprintln!("[npk]   BCS: probe RING_MODE={:#010x} RESET_CTL={:#010x}",
+            mode_readback, reset_readback);
 
         // ── Step 4: Engine reset ────────────────────────────────────
         // 4a: Request reset via RING_RESET_CTL
