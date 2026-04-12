@@ -1643,12 +1643,11 @@ pub fn cache_keyboard_layout() {
 }
 
 pub fn poll_events() {
-    let mut lock = STATE.lock();
-    let state = match lock.as_mut() {
-        Some(s) => s,
-        None => return,
-    };
-    drain_events(state);
+    if let Some(mut lock) = STATE.try_lock() {
+        if let Some(ref mut state) = *lock {
+            drain_events(state);
+        }
+    }
 }
 
 fn drain_events(state: &mut XhciState) {
