@@ -895,6 +895,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
         if need_prompt {
             // Fresh prompt (after command, WASM exit, intent completion, or new session)
+            let first_prompt = session.prompt_len == 0;
             session.reset_input();
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
@@ -905,7 +906,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 crate::shade::terminal::set_prompt_len(session.prompt_len);
                 crate::shade::terminal::set_cursor_pos(
                     crate::shade::terminal::current_line_len());
-                crate::shade::render_frame();
+                if first_prompt {
+                    // New window needs full render to show prompt
+                    crate::shade::render_frame();
+                } else {
+                    // Existing window — fast input line update only
+                    crate::shade::render_input_line();
+                }
             }
             need_prompt = false;
         } else {
