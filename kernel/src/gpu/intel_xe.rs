@@ -1803,23 +1803,53 @@ impl IntelXeDriver {
             ctx.add(10).write_volatile(BCS_RING_CTL);
             ctx.add(11).write_volatile((4096 - 4096) | RING_CTL_VALID);
 
-            // Pairs 6-13: BB_HEAD, BB_STATE, etc. (all zero, must be present)
-            ctx.add(12).write_volatile(0x22168);
+            // Pairs 6-13: BB regs, CCID, semaphore (matching gen12_xcs_offsets order)
+            ctx.add(12).write_volatile(0x22168); // BBADDR_UDW
             ctx.add(13).write_volatile(0);
-            ctx.add(14).write_volatile(0x22140);
+            ctx.add(14).write_volatile(0x22140); // BBADDR
             ctx.add(15).write_volatile(0);
-            ctx.add(16).write_volatile(0x22110);
+            ctx.add(16).write_volatile(0x22110); // BB_STATE
             ctx.add(17).write_volatile(0);
-            ctx.add(18).write_volatile(0x2211C);
+            ctx.add(18).write_volatile(0x221C0); // BB_PER_CTX_PTR
             ctx.add(19).write_volatile(0);
-            ctx.add(20).write_volatile(0x22114);
+            ctx.add(20).write_volatile(0x221C4); // INDIRECT_CTX
             ctx.add(21).write_volatile(0);
-            ctx.add(22).write_volatile(0x22118);
+            ctx.add(22).write_volatile(0x221C8); // INDIRECT_CTX_OFFSET
             ctx.add(23).write_volatile(0);
-            ctx.add(24).write_volatile(0x221C0);
+            ctx.add(24).write_volatile(0x22180); // CCID
             ctx.add(25).write_volatile(0);
-            ctx.add(26).write_volatile(0x221C4);
+            ctx.add(26).write_volatile(0x222B4); // semaphore
             ctx.add(27).write_volatile(0);
+
+            // ── Second LRI section (gen12_xcs_offsets requires both!) ────
+            // NOP(5): DWords 28-32
+            ctx.add(28).write_volatile(MI_NOOP);
+            ctx.add(29).write_volatile(MI_NOOP);
+            ctx.add(30).write_volatile(MI_NOOP);
+            ctx.add(31).write_volatile(MI_NOOP);
+            ctx.add(32).write_volatile(MI_NOOP);
+
+            // MI_LRI: 9 register/value pairs (timestamp + status regs)
+            ctx.add(33).write_volatile(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (9 * 2 - 1));
+
+            ctx.add(34).write_volatile(0x223A8); // CTX_TIMESTAMP
+            ctx.add(35).write_volatile(0);
+            ctx.add(36).write_volatile(0x2228C); // CTX_STATUS[7]
+            ctx.add(37).write_volatile(0);
+            ctx.add(38).write_volatile(0x22288); // CTX_STATUS[6]
+            ctx.add(39).write_volatile(0);
+            ctx.add(40).write_volatile(0x22284); // CTX_STATUS[5]
+            ctx.add(41).write_volatile(0);
+            ctx.add(42).write_volatile(0x22280); // CTX_STATUS[4]
+            ctx.add(43).write_volatile(0);
+            ctx.add(44).write_volatile(0x2227C); // CTX_STATUS[3]
+            ctx.add(45).write_volatile(0);
+            ctx.add(46).write_volatile(0x22278); // CTX_STATUS[2]
+            ctx.add(47).write_volatile(0);
+            ctx.add(48).write_volatile(0x22274); // CTX_STATUS[1]
+            ctx.add(49).write_volatile(0);
+            ctx.add(50).write_volatile(0x22270); // CTX_STATUS[0]
+            ctx.add(51).write_volatile(0);
         }
     }
 
