@@ -205,8 +205,8 @@ const XY_FAST_COPY_BLT_DEPTH_32: u32 = 3 << 24;
 
 // Context descriptor flags (Gen 12)
 const CTX_VALID: u32            = 1 << 0;
-const CTX_FORCE_RESTORE: u32    = 1 << 2;
-const CTX_ADVANCED: u32         = 1 << 4;   // Advanced context (Gen 12, Legacy 32-bit removed!)
+const CTX_FORCE_RESTORE: u32    = 1 << 1;   // Bit 1! (Bit 2 = FORCE_PD_RESTORE, not the same!)
+const CTX_LEGACY_32B: u32       = 1 << 3;   // GGTT addressing (Advanced=bit4 needs PPGTT!)
 const CTX_PRIVILEGE: u32        = 1 << 8;    // Privileged context
 
 // GGTT layout for BCS resources (beyond framebuffer at 0x0100_0000)
@@ -1764,41 +1764,44 @@ impl IntelXeDriver {
         }
     }
 
-    /// Update RING_TAIL value in the LRC context image.
-    /// Position [7] = RING_TAIL value (hardcoded Gen 12 layout).
+    /// Update RING_TAIL in LRC and reset HEAD to 0 (stateless ring hack).
+    ///
+    /// Since we always write commands at ring offset 0, we reset HEAD=0
+    /// and set TAIL=N before each submit. Combined with FORCE_RESTORE,
+    /// the GPU always starts fresh — no ring wrap-around tracking needed.
     fn update_lrc_tail(&self, tail_bytes: u32) {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32;
         // SAFETY: within our allocated LRC page
-        unsafe { ctx.add(7).write(tail_bytes); }
+        unsafe {
+            // Gen 12 hardcoded: [5]=HEAD value, [7]=TAIL value
+            ctx.add(5).write(0);             // Reset HEAD to 0
+            ctx.add(7).write(tail_bytes);    // Set new TAIL
+        }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Submit BCS context via ELSQ (Enhanced ExecList Submission Queue).
-    fn elsq_submit(&self, force_restore: bool) {
-        // LRCA = page 1 of LRC (page 0 = HWSP)
+    /// Submit BCS context via ELSQ. Always uses FORCE_RESTORE for
+    /// stateless ring operation (HEAD/TAIL reset from LRC each time).
+    fn elsq_submit(&self, _force_restore: bool) {
         let lrca_ggtt = BCS_LRC_GGTT + 4096;
 
-        // Gen 12: Advanced Context (bit 4). Legacy 32-bit (bit 3) is REMOVED!
-        let mut desc_lo: u32 = lrca_ggtt
+        // Legacy 32B (bit 3) = GGTT addressing. Advanced (bit 4) needs PPGTT!
+        // FORCE_RESTORE (bit 1) always set — stateless ring hack.
+        let desc_lo: u32 = lrca_ggtt
             | CTX_PRIVILEGE
-            | CTX_ADVANCED      // bit 4 = Advanced Context Mode
+            | CTX_LEGACY_32B         // bit 3 = GGTT
+            | CTX_FORCE_RESTORE      // bit 1 = always force restore
             | CTX_VALID;
-        if force_restore {
-            desc_lo |= CTX_FORCE_RESTORE;
-        }
 
-        let desc_hi: u32 = 1; // context ID
+        let desc_hi: u32 = 1;
 
         kprintln!("[npk]   BCS: ELSQ desc={:#010x}_{:08x} (LRCA={:#x})",
             desc_hi, desc_lo, lrca_ggtt);
 
-        // Write descriptor to ELSQ port 0
         mmio_write32(self.bar0, BCS_ELSQ0_LO, desc_lo);
         mmio_write32(self.bar0, BCS_ELSQ0_HI, desc_hi);
-        // Clear port 1
         mmio_write32(self.bar0, BCS_ELSQ1_LO, 0);
         mmio_write32(self.bar0, BCS_ELSQ1_HI, 0);
-        // Trigger load
         mmio_write32(self.bar0, BCS_ELSQ_CONTROL, 1);
     }
 
