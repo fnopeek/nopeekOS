@@ -357,6 +357,9 @@ extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
 static APIC_BASE: AtomicU64 = AtomicU64::new(0);
 const APIC_TIMER_VECTOR: u8 = 48;
 
+/// Get cached APIC base (for per-core identification via LAPIC ID register).
+pub fn apic_base() -> u64 { APIC_BASE.load(Ordering::Relaxed) }
+
 /// Initialize Local APIC timer (for hardware without PIT).
 /// Call after init() — detects if PIT is working, sets up APIC timer if not.
 pub fn init_apic_timer() {
