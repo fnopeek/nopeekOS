@@ -759,11 +759,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     // Store vault reference for worker cores
     VAULT_REF.store(vault as *const _ as *mut _, AtOrd::Release);
 
-    // Ensure initial terminal has a session
-    let init_term = crate::shade::terminal::active_idx();
-    if session_mut(init_term).is_none() {
-        create_session(init_term);
-    }
+    // Session is created by compositor::create_window (not here).
+    // Pre-shade: serial-only output, no session needed.
 
     // WASM key routing state (not per-session — persists across focus changes)
     let mut wasm_esc: u8 = 0;
