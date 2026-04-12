@@ -319,8 +319,16 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
                     in("ecx") 0u32,
                     in("edx") 0u32,
                 );
-                // Re-check after MONITOR (avoid missed-wakeup race)
-                if super::scheduler::next_task(cid).is_none() {
+                // Re-check after MONITOR (avoid missed-wakeup race).
+                // If a task arrived between clear_wake and MONITOR, execute it
+                // instead of sleeping (next_task extracts from queue — must not drop!).
+                if let Some(task) = super::scheduler::next_task(cid) {
+                    CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
+                    start_work(cid);
+                    (task.func)(task.arg);
+                    flush_busy(cid);
+                    CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
+                } else {
                     core::arch::asm!(
                         "mwait",
                         in("eax") 0x01u32, // C1E — clock gated, frequency drops
