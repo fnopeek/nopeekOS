@@ -149,14 +149,17 @@ impl Compositor {
     }
 
     /// Create a new window and add it to the current workspace.
-    pub fn create_window(&mut self, title: &str, x: u32, y: u32, w: u32, h: u32) -> WindowId {
+    /// Returns None if no terminal slots available.
+    pub fn create_window(&mut self, title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<WindowId> {
+        let terminal_idx = terminal::allocate()?;
+
         let id = WindowId(self.next_id);
         self.next_id += 1;
 
         let mut win = Window::new(id, title, x, y, w, h);
         win.workspace = self.active_workspace;
-        win.terminal_idx = terminal::allocate().unwrap_or(0);
-        crate::intent::create_session(win.terminal_idx);
+        win.terminal_idx = terminal_idx;
+        crate::intent::create_session(terminal_idx);
 
         self.windows.push(win);
         self.z_order.insert(0, id);
@@ -164,7 +167,7 @@ impl Compositor {
         self.retile();
         self.needs_full_redraw = true;
 
-        id
+        Some(id)
     }
 
     /// Close a window by ID.
