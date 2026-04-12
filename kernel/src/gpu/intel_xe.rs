@@ -1521,13 +1521,33 @@ impl IntelXeDriver {
         // For 4KB ring: (4096 - 4096) | 1 = 1
         mmio_write32(self.bar0, BCS_RING_CTL, RING_CTL_VALID);
 
-        // Verify ring is alive — HEAD should read as 0
+        // Verify ring is alive
         let head = mmio_read32(self.bar0, BCS_RING_HEAD);
         let ctl = mmio_read32(self.bar0, BCS_RING_CTL);
         kprintln!("[npk]   BCS: HEAD={:#x} CTL={:#010x}", head & RING_HEAD_MASK, ctl);
 
+        // Probe: write MI_NOOP to ring and check if GPU processes it
+        let ring = ring_phys as *mut u32;
+        // SAFETY: ring_phys is identity-mapped, freshly allocated
+        unsafe { ring.write_volatile(MI_NOOP); }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mmio_write32(self.bar0, BCS_RING_TAIL, 4); // 1 DWORD = 4 bytes
+
+        let probe_ok = poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, 4, 200_000);
+        let probe_head = mmio_read32(self.bar0, BCS_RING_HEAD);
+        kprintln!("[npk]   BCS: probe HEAD={:#x} (expected 0x4) ok={}",
+            probe_head & RING_HEAD_MASK, probe_ok);
+
+        if !probe_ok {
+            kprintln!("[npk]   BCS: legacy ring not functional on this GPU");
+            kprintln!("[npk]   BCS: falling back to CPU blit");
+            // Disable ring
+            mmio_write32(self.bar0, BCS_RING_CTL, 0);
+            return Err(GpuError::PipelineFailed);
+        }
+
         self.bcs_initialized = true;
-        kprintln!("[npk]   BCS: blitter engine ready");
+        kprintln!("[npk]   BCS: blitter engine ready (probe passed)");
         Ok(())
     }
 
