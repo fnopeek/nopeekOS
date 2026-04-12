@@ -1640,11 +1640,13 @@ impl IntelXeDriver {
             kprintln!("[npk]   BCS: GDRST timeout (reg={:#010x})",
                 mmio_read32(self.bar0, GEN6_GDRST));
         }
-        // 4c: Clear reset request (masked write)
-        mmio_write32(self.bar0, BCS_RESET_CTL, (1 << 16) | 0);
+        // 4c: Clear reset request AND CAT_ERROR (bits 0 + 2, masked write)
+        // CAT_ERROR left set could prevent engine from accepting new contexts!
+        mmio_write32(self.bar0, BCS_RESET_CTL, (0x05 << 16) | 0); // mask bits 0+2, clear both
         let _ = mmio_read32(self.bar0, BCS_RESET_CTL); // posted read flush
         for _ in 0..100_000u32 { core::hint::spin_loop(); }
-        kprintln!("[npk]   BCS: engine reset complete");
+        let rst_after = mmio_read32(self.bar0, BCS_RESET_CTL);
+        kprintln!("[npk]   BCS: engine reset complete (RESET_CTL={:#010x})", rst_after);
 
         // ── Step 5: Enable ExecList mode ────────────────────────────
         // RING_MODE bit 15 = GFX_RUN_LIST_ENABLE (masked write)
@@ -1660,14 +1662,10 @@ impl IntelXeDriver {
         // Mask all interrupts (we poll, don't use IRQs)
         mmio_write32(self.bar0, BCS_IMR, 0xFFFF_FFFF);
 
-        // ── Step 6: Populate LRC context image ──────────────────────
+        // ── Step 6: Populate LRC + write probe commands ─────────────
         self.populate_bcs_lrc();
 
-        // ── Step 7: Submit context via ELSQ ─────────────────────────
-        self.elsq_submit(true); // force_restore on first submit
-
-        // ── Step 8: Probe — check HWSP seqno update ────────────────
-        // Write MI_NOOP + MI_USER_INTERRUPT to ring, update tail in LRC
+        // Write MI_NOOPs to ring buffer (probe commands)
         let ring = ring_phys as *mut u32;
         // SAFETY: ring is identity-mapped, freshly allocated
         unsafe {
@@ -1676,9 +1674,11 @@ impl IntelXeDriver {
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        // Update tail in LRC context and re-submit
-        self.update_lrc_tail(8); // 2 DWORDs = 8 bytes
-        self.elsq_submit(false);
+        // Set TAIL=8 in LRC BEFORE submit (single submit, no double-submit race)
+        self.update_lrc_tail(8);
+
+        // ── Step 7: Single ELSQ submit with FORCE_RESTORE ───────────
+        self.elsq_submit(true);
 
         // Poll: check if RING_HEAD advances (GPU processed the ring)
         let probe_ok = poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, 8, 500_000);
