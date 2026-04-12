@@ -295,6 +295,16 @@ pub fn set_output_redirect(terminal_idx: u8) {
     CORE_OUTPUT[apic_id as usize & 0xFF].store(terminal_idx, Ordering::Release);
 }
 
+/// Get the output redirect terminal for the current core (None if no redirect / Core 0).
+pub fn output_redirect_terminal() -> Option<u8> {
+    let apic_base = crate::interrupts::apic_base();
+    if apic_base == 0 { return None; }
+    // SAFETY: APIC MMIO is identity-mapped, reading LAPIC ID register
+    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Acquire);
+    if redirect < MAX_TERMINALS as u8 { Some(redirect) } else { None }
+}
+
 /// Clear output redirect for the current core.
 pub fn clear_output_redirect() {
     let apic_base = crate::interrupts::apic_base();

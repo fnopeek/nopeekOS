@@ -15,6 +15,8 @@ mod wasm;
 
 use crate::capability::{self, CapId, Vault, Rights};
 use crate::{kprint, kprintln, serial};
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use spin::Mutex;
 
@@ -74,15 +76,132 @@ impl History {
     }
 }
 
-static HISTORY: Mutex<History> = Mutex::new(History {
-    lines: [[0; HIST_LINE]; HIST_MAX],
-    lens: [0; HIST_MAX],
-    count: 0,
-    cursor: 0,
-});
+// ── IntentSession (per-window heap state) ───────────────────
 
-/// Current working directory (prefix for relative paths).
-static CWD: Mutex<String> = Mutex::new(String::new());
+/// Per-window session: input state, command history.
+/// Heap-allocated, one per window, owned by Core 0.
+pub struct IntentSession {
+    /// Input buffer (what the user is typing).
+    pub input_buf: [u8; INPUT_BUF_SIZE],
+    /// Number of valid bytes in input_buf.
+    pub pos: usize,
+    /// Cursor position within input (0..=pos).
+    pub cursor: usize,
+    /// ESC state machine: 0=normal, 1=got ESC, 2=got ESC[.
+    pub esc: u8,
+    /// Was Mod key held when ESC was received?
+    pub esc_mod: bool,
+    /// Per-session command history.
+    pub history: History,
+    /// Prompt length (for rewrite_input offset).
+    pub prompt_len: usize,
+    /// Which terminal buffer this session owns.
+    pub terminal_idx: u8,
+}
+
+impl IntentSession {
+    pub fn new(terminal_idx: u8) -> Self {
+        Self {
+            input_buf: [0u8; INPUT_BUF_SIZE],
+            pos: 0,
+            cursor: 0,
+            esc: 0,
+            esc_mod: false,
+            history: History {
+                lines: [[0; HIST_LINE]; HIST_MAX],
+                lens: [0; HIST_MAX],
+                count: 0,
+                cursor: 0,
+            },
+            prompt_len: 0,
+            terminal_idx,
+        }
+    }
+
+    /// Reset input state (after Enter or new prompt).
+    pub fn reset_input(&mut self) {
+        self.pos = 0;
+        self.cursor = 0;
+    }
+}
+
+/// Per-window sessions, indexed by terminal_idx.
+// SAFETY: only accessed from Core 0 (event dispatcher owns all session state)
+static mut SESSIONS: BTreeMap<u8, Box<IntentSession>> = BTreeMap::new();
+
+/// Raw pointer access to SESSIONS (avoids static_mut_refs lint).
+fn sessions_ptr() -> *mut BTreeMap<u8, Box<IntentSession>> {
+    core::ptr::addr_of_mut!(SESSIONS)
+}
+
+/// Create a new session for the given terminal (idempotent).
+pub fn create_session(terminal_idx: u8) {
+    // SAFETY: Core 0 only
+    unsafe {
+        if (*sessions_ptr()).contains_key(&terminal_idx) { return; }
+        (*sessions_ptr()).insert(terminal_idx, Box::new(IntentSession::new(terminal_idx)));
+    }
+    // Initialize CWD for the new session (inherit from focused terminal's CWD)
+    let cwd = get_cwd();
+    CWDS.lock().entry(terminal_idx).or_insert(cwd);
+}
+
+/// Destroy the session for the given terminal.
+pub fn destroy_session(terminal_idx: u8) {
+    // SAFETY: Core 0 only
+    unsafe { (*sessions_ptr()).remove(&terminal_idx); }
+    CWDS.lock().remove(&terminal_idx);
+}
+
+/// Get a mutable reference to a session. Core 0 only.
+fn session_mut(terminal_idx: u8) -> Option<&'static mut IntentSession> {
+    // SAFETY: Core 0 only, no aliasing (one terminal active at a time)
+    unsafe { (*sessions_ptr()).get_mut(&terminal_idx).map(|b| &mut **b) }
+}
+
+/// Per-terminal CWD (accessible from all cores via Mutex).
+/// Separate from IntentSession because workers need read access (resolve_path).
+static CWDS: Mutex<BTreeMap<u8, String>> = Mutex::new(BTreeMap::new());
+
+/// Current working directory for the active terminal (or worker redirect).
+fn get_cwd() -> String {
+    let term = current_terminal();
+    CWDS.lock().get(&term).cloned().unwrap_or_default()
+}
+
+/// Set CWD for the current terminal.
+pub fn set_cwd(path: &str) {
+    let term = current_terminal();
+    let mut cwds = CWDS.lock();
+    let mut clean = String::new();
+    let trimmed = path.trim_matches('/');
+    if !trimmed.is_empty() {
+        for part in trimmed.split('/') {
+            if part == "." { continue; }
+            if part == ".." {
+                if let Some(idx) = clean.rfind('/') {
+                    clean.truncate(idx);
+                } else {
+                    clean.clear();
+                }
+                continue;
+            }
+            if !clean.is_empty() { clean.push('/'); }
+            clean.push_str(part);
+        }
+    }
+    cwds.insert(term, clean);
+}
+
+/// Determine which terminal the current core is operating on.
+/// Workers: output redirect terminal. Core 0: active terminal.
+fn current_terminal() -> u8 {
+    if let Some(redirect) = crate::shade::terminal::output_redirect_terminal() {
+        redirect
+    } else {
+        crate::shade::terminal::active_idx()
+    }
+}
 
 // ── Intent Job System (dispatch intents to worker cores) ─────
 //
@@ -188,22 +307,9 @@ fn intent_worker_task(arg: u64) {
 fn is_core0_intent(verb: &str) -> bool {
     matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
                    "clear" | "cls" | "shade" | "shell" | "npk-shell" |
-                   "cd" | "pwd" | "top" | "htop")
+                   "cd" | "pwd" | "top" | "htop" | "history")
 }
 
-
-/// Set the working directory.
-pub fn set_cwd(path: &str) {
-    let mut cwd = CWD.lock();
-    cwd.clear();
-    let clean = path.trim_matches('/');
-    cwd.push_str(clean);
-}
-
-/// Get the working directory.
-fn get_cwd() -> String {
-    CWD.lock().clone()
-}
 
 /// Get the home directory from config.
 pub(crate) fn home_dir() -> String {
@@ -266,64 +372,54 @@ pub(crate) fn ensure_parents(path: &str) {
     }
 }
 
-/// Read a line from serial/keyboard with tab-completion, history, and network polling.
-fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: CapId,
-                      init_pos: usize, init_cursor: usize) -> usize {
-    let mut pos = init_pos;
-    let mut cursor = init_cursor;
-    let mut esc: u8 = 0; // 0=normal, 1=got ESC, 2=got ESC[
-    let mut esc_mod = false; // Was mod key held when ESC was received?
-    let mut last_term = crate::shade::terminal::active_idx();
+/// Sync session state to terminal.rs saved input (for cursor restore on focus change).
+fn sync_session_to_terminal(session: &IntentSession) {
+    crate::shade::terminal::save_input_with_cursor(
+        &session.input_buf[..session.pos], session.pos, session.cursor);
+}
 
-    HISTORY.lock().reset_cursor();
+/// Read a line from serial/keyboard with tab-completion, history, and network polling.
+/// All input state lives in the session (input_buf, pos, cursor, esc, history).
+/// Returns number of bytes read, or 0 if focus changed / mode switched.
+fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
+                      session_id: CapId) -> usize {
+    session.history.reset_cursor();
 
     loop {
-        // Detect focus change via mouse click (active terminal changed externally)
+        // Detect focus change (mouse click, shade action, WASM switch)
         if crate::shade::is_active() {
             let ft = crate::shade::terminal::active_idx();
 
-            // If focus changed to a WASM app window, exit immediately
             if crate::wasm::has_wasm_app(ft) {
-                crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
+                sync_session_to_terminal(session);
                 return 0;
             }
 
-            // Mouse-click focus change to another shell terminal
-            if ft != last_term {
-                // Save current input to OLD terminal
-                crate::shade::terminal::set_active_terminal(last_term);
-                crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
-                crate::shade::terminal::set_active_terminal(ft);
-                // Restore input from NEW terminal
-                let (p, c) = crate::shade::terminal::restore_input_with_cursor(buf);
-                pos = p;
-                cursor = c;
-                last_term = ft;
-                continue;
+            // Focus changed to a different terminal — return so run_loop can switch sessions
+            if ft != session.terminal_idx {
+                sync_session_to_terminal(session);
+                return 0;
             }
         }
 
         // Poll network while waiting
         crate::net::poll();
-        // Check for incoming npk-shell connections
         crate::shell::check_and_serve(vault, session_id);
 
-        // Tick swap animation — SYNCHRONOUS (animation needs immediate frame updates)
+        // Tick swap animation
         if crate::shade::with_compositor(|comp| comp.tick_animation()).unwrap_or(false) {
             crate::shade::render_frame();
         }
 
-        // Process each mouse event with clean cursor restore + redraw
         while let Some(evt) = crate::xhci::poll_mouse() {
             crate::shade::handle_mouse(&evt);
         }
 
-        // Deferred scene redraw (drag resize/swap — rendered after all events drained)
         if crate::shade::take_deferred_render() {
             crate::shade::render_frame();
         }
 
-        // Check for shade compositor actions (Mod+key)
+        // Shade compositor actions (Mod+key)
         if let Some(action) = crate::shade::input::poll_action() {
             use crate::shade::input::ShadeAction;
             match action {
@@ -334,30 +430,17 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 ShadeAction::ResizeLeft | ShadeAction::ResizeRight |
                 ShadeAction::ResizeUp | ShadeAction::ResizeDown |
                 ShadeAction::Workspace(_) | ShadeAction::MoveToWorkspace(_) => {
-                    crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
+                    sync_session_to_terminal(session);
                     crate::shade::handle_action(action);
-                    // If focus switched to a WASM app window, exit read_line
-                    // so run_loop can enter key routing mode
                     let new_term = crate::shade::terminal::active_idx();
-                    if crate::wasm::has_wasm_app(new_term) {
+                    if new_term != session.terminal_idx || crate::wasm::has_wasm_app(new_term) {
                         return 0;
                     }
-                    let (p, c) = crate::shade::terminal::restore_input_with_cursor(buf);
-                    pos = p;
-                    cursor = c;
-                    last_term = crate::shade::terminal::active_idx();
                 }
                 ShadeAction::NewWindow => {
-                    crate::shade::terminal::save_input_with_cursor(&buf[..pos], pos, cursor);
+                    sync_session_to_terminal(session);
                     crate::shade::handle_action(action);
-                    // If new window somehow has WASM app, exit
-                    let new_term = crate::shade::terminal::active_idx();
-                    if crate::wasm::has_wasm_app(new_term) {
-                        return 0;
-                    }
-                    pos = 0;
-                    cursor = 0;
-                    last_term = new_term;
+                    return 0; // run_loop creates session for new window
                 }
                 _ => {
                     crate::shade::handle_action(action);
@@ -366,7 +449,7 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             continue;
         }
 
-        // Check both serial and PS/2 keyboard for input
+        // Read keyboard / serial input
         let byte = if let Some(key) = crate::keyboard::read_key() {
             key
         } else {
@@ -381,87 +464,76 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
             b
         };
 
-        // Intercept shade keybindings (Mod+key) before intent loop
         if crate::shade::input::try_keybind(byte) {
             continue;
         }
 
-        // Handle ANSI escape sequences (ESC [ A/B/C/D)
-        if esc == 1 {
-            esc = if byte == 0x5b { 2 } else { 0 };
+        // ANSI escape sequences
+        if session.esc == 1 {
+            session.esc = if byte == 0x5b { 2 } else { 0 };
             continue;
         }
-        if esc == 2 {
-            esc = 0;
-            // Check shade arrow keybinds (uses saved mod state from ESC time)
-            if esc_mod && crate::shade::input::try_arrow_keybind(byte) {
+        if session.esc == 2 {
+            session.esc = 0;
+            if session.esc_mod && crate::shade::input::try_arrow_keybind(byte) {
                 continue;
             }
             match byte {
                 b'A' => {
                     // Arrow up — previous history entry
-                    let mut hist = HISTORY.lock();
-                    if let Some((line, len)) = hist.up() {
-                        let len = len.min(buf.len());
+                    if let Some((line, len)) = session.history.up() {
+                        let len = len.min(session.input_buf.len());
                         if !crate::shade::is_active() {
-                            for _ in 0..pos { kprint!("\x08 \x08"); }
+                            for _ in 0..session.pos { kprint!("\x08 \x08"); }
                         }
-                        buf[..len].copy_from_slice(&line[..len]);
-                        pos = len;
-                        cursor = len;
+                        session.input_buf[..len].copy_from_slice(&line[..len]);
+                        session.pos = len;
+                        session.cursor = len;
                         if crate::shade::is_active() {
-                            crate::shade::terminal::rewrite_input(&buf, pos);
-                        } else if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                            crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
+                        } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
                             kprint!("{}", s);
                         }
                     }
                 }
                 b'B' => {
                     // Arrow down — next history entry
-                    let mut hist = HISTORY.lock();
                     if !crate::shade::is_active() {
-                        for _ in 0..pos { kprint!("\x08 \x08"); }
+                        for _ in 0..session.pos { kprint!("\x08 \x08"); }
                     }
-                    if let Some((line, len)) = hist.down() {
-                        let len = len.min(buf.len());
-                        buf[..len].copy_from_slice(&line[..len]);
-                        pos = len;
-                        cursor = len;
+                    if let Some((line, len)) = session.history.down() {
+                        let len = len.min(session.input_buf.len());
+                        session.input_buf[..len].copy_from_slice(&line[..len]);
+                        session.pos = len;
+                        session.cursor = len;
                         if crate::shade::is_active() {
-                            crate::shade::terminal::rewrite_input(&buf, pos);
-                        } else if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
+                            crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
+                        } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
                             kprint!("{}", s);
                         }
                     } else {
-                        pos = 0;
-                        cursor = 0;
+                        session.pos = 0;
+                        session.cursor = 0;
                         if crate::shade::is_active() {
-                            crate::shade::terminal::rewrite_input(&buf, 0);
+                            crate::shade::terminal::rewrite_input(&session.input_buf, 0);
                         }
                     }
                 }
                 b'C' => {
-                    // Arrow right — move cursor right
-                    if cursor < pos { cursor += 1; }
+                    if session.cursor < session.pos { session.cursor += 1; }
                 }
                 b'D' => {
-                    // Arrow left — move cursor left
-                    if cursor > 0 { cursor -= 1; }
+                    if session.cursor > 0 { session.cursor -= 1; }
                 }
-                b'H' => {
-                    // Home — cursor to start of input
-                    cursor = 0;
-                }
-                b'F' => {
-                    // End — cursor to end of input
-                    cursor = pos;
-                }
-                0x7E => {} // consume trailing ~ from PgUp/PgDn sequences
+                b'H' => { session.cursor = 0; }
+                b'F' => { session.cursor = session.pos; }
+                0x7E => {}
                 _ => {}
             }
             if crate::shade::is_active() {
                 crate::shade::terminal::set_cursor_pos(
-                    crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
+                    crate::shade::terminal::current_line_len()
+                        .saturating_sub(session.pos - session.cursor));
                 crate::shade::render_input_line();
             }
             continue;
@@ -469,28 +541,27 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
 
         match byte {
             0x1b => {
-                esc = 1;
-                // Capture mod state NOW (before next USB report clears it)
-                esc_mod = crate::shade::input::is_mod_active();
+                session.esc = 1;
+                session.esc_mod = crate::shade::input::is_mod_active();
             }
             b'\r' | b'\n' => {
-                cursor = pos; // move cursor to end before newline
+                session.cursor = session.pos;
                 kprint!("\n");
-                HISTORY.lock().push(&buf[..pos]);
-                return pos;
+                session.history.push(&session.input_buf[..session.pos]);
+                return session.pos;
             }
             0x08 | 0x7F => {
-                // Backspace — delete char left of cursor
-                if cursor > 0 {
-                    for i in cursor..pos {
-                        buf[i - 1] = buf[i];
+                if session.cursor > 0 {
+                    for i in session.cursor..session.pos {
+                        session.input_buf[i - 1] = session.input_buf[i];
                     }
-                    pos -= 1;
-                    cursor -= 1;
+                    session.pos -= 1;
+                    session.cursor -= 1;
                     if crate::shade::is_active() {
-                        crate::shade::terminal::rewrite_input(&buf, pos);
+                        crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                         crate::shade::terminal::set_cursor_pos(
-                            crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
+                            crate::shade::terminal::current_line_len()
+                                .saturating_sub(session.pos - session.cursor));
                         crate::shade::render_input_line();
                     } else {
                         kprint!("\x08 \x08");
@@ -498,13 +569,12 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 }
             }
             0x09 => {
-                // Tab — attempt completion
-                if let Ok(input) = core::str::from_utf8(&buf[..pos]) {
+                if let Ok(input) = core::str::from_utf8(&session.input_buf[..session.pos]) {
                     if let Some(completion) = tab_complete(input) {
-                        for b in completion.as_bytes() {
-                            if pos < buf.len() {
-                                buf[pos] = *b;
-                                pos += 1;
+                        for cb in completion.as_bytes() {
+                            if session.pos < session.input_buf.len() {
+                                session.input_buf[session.pos] = *cb;
+                                session.pos += 1;
                             }
                         }
                         kprint!("{}", completion);
@@ -512,21 +582,21 @@ fn read_line_with_tab(buf: &mut [u8], vault: &'static Mutex<Vault>, session_id: 
                 }
             }
             b if b >= 0x20 && b < 0x7F => {
-                if pos < buf.len() - 1 {
-                    // Insert at cursor position (shift right)
-                    if cursor < pos {
-                        for i in (cursor..pos).rev() {
-                            buf[i + 1] = buf[i];
+                if session.pos < session.input_buf.len() - 1 {
+                    if session.cursor < session.pos {
+                        for i in (session.cursor..session.pos).rev() {
+                            session.input_buf[i + 1] = session.input_buf[i];
                         }
                     }
-                    buf[cursor] = b;
-                    pos += 1;
-                    cursor += 1;
+                    session.input_buf[session.cursor] = b;
+                    session.pos += 1;
+                    session.cursor += 1;
                     crate::shade::terminal::scroll_reset();
                     if crate::shade::is_active() {
-                        crate::shade::terminal::rewrite_input(&buf, pos);
+                        crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                         crate::shade::terminal::set_cursor_pos(
-                            crate::shade::terminal::current_line_len().saturating_sub(pos - cursor));
+                            crate::shade::terminal::current_line_len()
+                                .saturating_sub(session.pos - session.cursor));
                         crate::shade::render_input_line();
                     } else {
                         kprint!("{}", b as char);
@@ -652,24 +722,28 @@ fn common_prefix(strings: &[String]) -> String {
 }
 
 pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
-    let mut input_buf = [0u8; INPUT_BUF_SIZE];
-
     // Store vault reference for worker cores
     VAULT_REF.store(vault as *const _ as *mut _, AtOrd::Release);
 
-    // ESC state for WASM key routing (persists across loop iterations)
-    let mut wasm_esc: u8 = 0;     // 0=normal, 1=got ESC, 2=got ESC[
-    let mut wasm_esc_mod = false;  // was Mod held when ESC arrived?
-    let mut from_wasm = false;     // true when transitioning WASM → shell
-    let mut wasm_term: u8 = 255;   // which terminal was running the WASM app
-    let mut from_intent = false;   // true when worker intent just finished
+    // Ensure initial terminal has a session
+    let init_term = crate::shade::terminal::active_idx();
+    if session_mut(init_term).is_none() {
+        create_session(init_term);
+    }
+
+    // WASM key routing state (not per-session — persists across focus changes)
+    let mut wasm_esc: u8 = 0;
+    let mut wasm_esc_mod = false;
+    let mut from_wasm = false;
+    let mut wasm_term: u8 = 255;
+    let mut from_intent = false;
 
     loop {
         // If focused window has a running WASM app or intent, route keys / wait.
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
 
-            // Intent running on worker — same event loop as WASM routing
+            // Intent running on worker — event loop without input
             if has_running_intent(focused_term) {
                 from_intent = true;
                 crate::shade::poll_render();
@@ -687,13 +761,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_action(action);
                 }
 
-                // Consume keys (intent owns the terminal)
                 while let Some(_key) = crate::keyboard::read_key() {}
 
                 for _ in 0..10_000 { core::hint::spin_loop(); }
                 continue;
             }
 
+            // WASM app running — route keys to app
             if crate::wasm::has_wasm_app(focused_term) {
                 from_wasm = true;
                 wasm_term = focused_term;
@@ -708,16 +782,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::render_frame();
                 }
 
-                // Check for shade actions pushed directly by xHCI driver
-                // (Mod+Arrow, PageUp/Down — bypasses try_keybind)
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
                 }
 
-                // Route keyboard with ESC state machine (across iterations)
                 while let Some(key) = crate::keyboard::read_key() {
                     if wasm_esc == 1 {
-                        // Got ESC last time, waiting for '['
                         wasm_esc = 0;
                         if key == b'[' {
                             wasm_esc = 2;
@@ -729,7 +799,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     }
 
                     if wasm_esc == 2 {
-                        // Got ESC [, this is the direction byte
                         wasm_esc = 0;
                         if wasm_esc_mod && crate::shade::input::try_arrow_keybind(key) {
                             if let Some(action) = crate::shade::input::poll_action() {
@@ -743,14 +812,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                         continue;
                     }
 
-                    // New ESC sequence
                     if key == 0x1B {
                         wasm_esc = 1;
                         wasm_esc_mod = crate::shade::input::is_mod_active();
                         continue;
                     }
 
-                    // Mod+letter keybinds
                     if crate::shade::input::try_keybind(key) {
                         if let Some(action) = crate::shade::input::poll_action() {
                             crate::shade::handle_action(action);
@@ -758,7 +825,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                         continue;
                     }
 
-                    // Regular key → app
                     crate::wasm::push_app_key(focused_term, key);
                 }
 
@@ -767,65 +833,52 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
-        // Transition from worker intent — fall through to normal prompt
+        // Transition flags
         if from_intent {
             from_intent = false;
-            // Worker finished — Core 0 prints a fresh prompt below
         }
-
-        // Transition from WASM mode to shell
-        let (mut resume_pos, mut resume_cursor) = if from_wasm {
+        if from_wasm {
             from_wasm = false;
             let current = crate::shade::terminal::active_idx();
             if current == wasm_term {
-                // App exited (same terminal) → need fresh prompt after app output
                 kprintln!();
-                // Fall through to normal prompt below
-                let cwd = get_cwd();
-                let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
-                let p = alloc::format!("{}> ", path);
-                kprint!("{}", p);
-                let prompt_len = p.len();
-                if crate::shade::is_active() {
-                    crate::shade::terminal::set_prompt_len(prompt_len);
-                    crate::shade::terminal::set_cursor_pos(
-                        crate::shade::terminal::current_line_len());
-                    crate::shade::render_frame();
-                }
-                (0usize, 0usize)
-            } else {
-                // Focus switched to different shell terminal → restore its input
-                crate::shade::terminal::restore_input_with_cursor(&mut input_buf)
             }
-        } else if from_intent {
-            // Should not reach here (handled above), but safety
-            (0usize, 0usize)
-        } else {
-            let cwd = get_cwd();
-            let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
-            let p = alloc::format!("{}> ", path);
-            kprint!("{}", p);
-            let prompt_len = p.len();
-            if crate::shade::is_active() {
-                crate::shade::terminal::set_prompt_len(prompt_len);
-                crate::shade::terminal::set_cursor_pos(
-                    crate::shade::terminal::current_line_len());
-                crate::shade::render_input_line();
-            }
-            (0usize, 0usize)
+        }
+
+        // Get session for active terminal (create if needed)
+        let term = crate::shade::terminal::active_idx();
+        if session_mut(term).is_none() {
+            create_session(term);
+        }
+        // SAFETY: Core 0 only, session exists after create above, no aliasing
+        let session = unsafe {
+            &mut **((*sessions_ptr()).get_mut(&term).unwrap() as *mut Box<IntentSession>)
         };
 
-        let len = read_line_with_tab(&mut input_buf, vault, session_id,
-                                     resume_pos, resume_cursor);
+        // Print prompt
+        session.reset_input();
+        let cwd = get_cwd();
+        let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+        let p = alloc::format!("{}> ", path);
+        kprint!("{}", p);
+        session.prompt_len = p.len();
+        if crate::shade::is_active() {
+            crate::shade::terminal::set_prompt_len(session.prompt_len);
+            crate::shade::terminal::set_cursor_pos(
+                crate::shade::terminal::current_line_len());
+            crate::shade::render_input_line();
+        }
 
-        // Full redraw after Enter to clear cursor artifacts from previous line
+        // Read input into session
+        let len = read_line_with_tab(session, vault, session_id);
+
         if crate::shade::is_active() {
             crate::shade::render_frame();
         }
 
         if len == 0 { continue; }
 
-        let input = match core::str::from_utf8(&input_buf[..len]) {
+        let input = match core::str::from_utf8(&session.input_buf[..len]) {
             Ok(s) => s.trim(),
             Err(_) => {
                 kprintln!("[npk] invalid UTF-8 input");
@@ -843,16 +896,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if !is_core0_intent(verb) && crate::shade::is_active() {
             let term_idx = crate::shade::terminal::active_idx();
             if spawn_intent_on_worker(input, term_idx, session_id) {
-                // Worker will execute the intent and print prompt when done.
-                // Core 0 goes back to event loop immediately.
                 continue;
             }
-            // Fallback: no free job slots, run on Core 0
         }
 
         dispatch_intent(input, vault, session_id);
 
-        // Re-render shade compositor to show new output (async — worker core)
         if crate::shade::is_active() {
             crate::shade::render_frame();
         }
@@ -1221,6 +1270,30 @@ pub fn setup_home() {
 /// Expose CWD for npk-shell.
 pub fn get_cwd_for_shell() -> String {
     get_cwd()
+}
+
+/// Print the active terminal's command history.
+pub fn print_active_history() {
+    let term = crate::shade::terminal::active_idx();
+    // SAFETY: Core 0 only (history is a Core 0-only intent)
+    // SAFETY: Core 0 only (history is a Core 0-only intent)
+    let session = unsafe { (*sessions_ptr()).get(&term) };
+    if let Some(s) = session {
+        let hist = &s.history;
+        if hist.count == 0 {
+            kprintln!("(no history)");
+            return;
+        }
+        let start = if hist.count > HIST_MAX { hist.count - HIST_MAX } else { 0 };
+        for i in start..hist.count {
+            let idx = i % HIST_MAX;
+            if let Ok(text) = core::str::from_utf8(&hist.lines[idx][..hist.lens[idx]]) {
+                kprintln!("  {:3}  {}", i + 1, text);
+            }
+        }
+    } else {
+        kprintln!("(no history)");
+    }
 }
 
 /// Execute an intent from npk-shell (dispatch without the loop).
