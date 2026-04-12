@@ -230,7 +230,7 @@ pub fn intent_gpu(args: &str) {
 
             // BCS blitter status
             let bcs_ok = crate::gpu::supports_blit();
-            kprintln!("  BCS:      {}", if bcs_ok { "active" } else { "off" });
+            kprintln!("  BCS:      {}", if bcs_ok { "active" } else { "off (probe failed)" });
             if bcs_ok {
                 let fb_ggtt = crate::gpu::fb_ggtt_offset();
                 let (ga, gb) = crate::gpu::shadow_ggtt();
@@ -243,6 +243,12 @@ pub fn intent_gpu(args: &str) {
                 kprintln!("  Blit:     GPU (XY_FAST_COPY_BLT)");
             } else {
                 kprintln!("  Blit:     CPU (memcpy)");
+            }
+
+            // BCS register dump (always, for debug)
+            if crate::gpu::is_native() {
+                kprintln!("  --- BCS regs ---");
+                crate::gpu::dump_bcs_regs();
             }
 
             // Shadow buffer info

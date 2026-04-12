@@ -118,6 +118,9 @@ pub trait GpuHal: Send {
 
     /// Visual BCS test — blit a colored square to screen.
     fn test_blit(&mut self) -> bool { false }
+
+    /// Dump BCS engine registers for debug (printed via kprintln).
+    fn dump_bcs_regs(&self) {}
 }
 
 static GPU: Mutex<Option<Box<dyn GpuHal>>> = Mutex::new(None);
@@ -318,6 +321,13 @@ pub fn test_blit() -> bool {
     match GPU.lock().as_mut() {
         Some(drv) => drv.test_blit(),
         None => false,
+    }
+}
+
+/// Dump BCS register state for debug.
+pub fn dump_bcs_regs() {
+    if let Some(drv) = GPU.lock().as_ref() {
+        drv.dump_bcs_regs();
     }
 }
 
