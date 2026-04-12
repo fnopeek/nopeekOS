@@ -458,6 +458,23 @@ impl GpuHal for IntelXeDriver {
     fn test_blit(&mut self) -> bool {
         self.test_blit()
     }
+
+    fn dump_bcs_regs(&self) {
+        if self.bar0 == 0 {
+            kprintln!("  BCS regs: no BAR0");
+            return;
+        }
+        let head = mmio_read32(self.bar0, BCS_RING_HEAD);
+        let tail = mmio_read32(self.bar0, BCS_RING_TAIL);
+        let start = mmio_read32(self.bar0, BCS_RING_START);
+        let ctl = mmio_read32(self.bar0, BCS_RING_CTL);
+        let hws = mmio_read32(self.bar0, BCS_HWS_PGA);
+        kprintln!("  RING_HEAD:  {:#010x} (off={})", head, head & RING_HEAD_MASK);
+        kprintln!("  RING_TAIL:  {:#010x} (off={})", tail, tail & RING_HEAD_MASK);
+        kprintln!("  RING_START: {:#010x}", start);
+        kprintln!("  RING_CTL:   {:#010x} (valid={})", ctl, ctl & 1);
+        kprintln!("  HWS_PGA:    {:#010x}", hws);
+    }
 }
 
 impl IntelXeDriver {
