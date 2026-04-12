@@ -206,8 +206,8 @@ pub fn intent_shade(args: &str) {
                 return;
             }
             crate::shade::init();
-            crate::shade::render_frame();
-            kprintln!("[npk] shade: compositor active");
+            // Create first window automatically (same path as Mod+Enter)
+            crate::shade::handle_action(crate::shade::input::ShadeAction::NewWindow);
         }
         "demo" => {
             if !crate::shade::is_active() {
