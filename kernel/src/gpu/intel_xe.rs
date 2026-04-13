@@ -165,10 +165,12 @@ const BCS_RING_HEAD: u32        = 0x22034;
 const BCS_RING_START: u32       = 0x22038;
 const BCS_RING_CTL: u32         = 0x2203C;
 const BCS_HWS_PGA: u32          = 0x22080;
-const BCS_MI_MODE: u32          = 0x2209C;  // MI mode (bit 9 = MODE_IDLE)
-const BCS_RING_MODE: u32        = 0x2229C;  // Ring mode (bit 15 = ExecList enable)
+const BCS_MI_MODE: u32          = 0x2209C;  // MI mode (bit 0 = STOP_RING)
+const BCS_HWSTAM: u32           = 0x22098;  // HW Status Mask
+const BCS_RING_MODE: u32        = 0x2229C;  // Ring mode (Gen11+: bit 3 = disable legacy)
 const BCS_RESET_CTL: u32        = 0x220D0;  // Engine reset control
 const BCS_IMR: u32              = 0x220A8;  // Interrupt mask
+const BCS_CTX_STATUS_PTR: u32   = 0x223A0;  // Context Status Buffer read/write pointers
 
 // ELSQ (Enhanced ExecList Submission Queue) — Gen 11+
 const BCS_ELSQ0_LO: u32         = 0x22510;  // Context descriptor 0, low DW
@@ -187,8 +189,10 @@ const RING_CTL_VALID: u32       = 1 << 0;
 const RING_HEAD_MASK: u32       = 0x001FFFFC;
 
 // RING_MODE bits
-const GFX_RUN_LIST_ENABLE: u32  = 1 << 15;
+const GFX_RUN_LIST_ENABLE: u32  = 1 << 15;  // Gen 8-10 ExecList enable (readback indicator on Gen11+)
+const GEN11_GFX_DISABLE_LEGACY_MODE: u32 = 1 << 3;  // Gen 11+: replaces GFX_RUN_LIST_ENABLE
 const GFX_PREFETCH_DISABLE: u32 = 1 << 10;  // Gen 12: MUST be set!
+const STOP_RING: u32            = 1 << 0;   // MI_MODE bit 0: stop command streamer
 
 // RESET_CTL bits
 const RESET_CTL_REQUEST: u32    = 1 << 0;
@@ -531,7 +535,8 @@ impl GpuHal for IntelXeDriver {
         let elsq_st = mmio_read32(self.bar0, BCS_ELSQ_STATUS_LO);
         let rst = mmio_read32(self.bar0, BCS_RESET_CTL);
         kprintln!("  FW_ACK:     GT={} RN={} MD={}", fw_ack & 1, fw_rn & 1, fw_md & 1);
-        kprintln!("  RING_MODE:  {:#010x} (execlist={})", mode, mode & GFX_RUN_LIST_ENABLE != 0);
+        kprintln!("  RING_MODE:  {:#010x} (execlist={}, legacy_off={})",
+            mode, mode & GFX_RUN_LIST_ENABLE != 0, mode & GEN11_GFX_DISABLE_LEGACY_MODE != 0);
         kprintln!("  MMIO HEAD:  {:#010x} TAIL: {:#010x}", head, tail);
         kprintln!("  MMIO START: {:#010x} CTL:  {:#010x}", start, ctl);
         kprintln!("  HWS_PGA:    {:#010x}", hws);
@@ -1577,7 +1582,7 @@ impl IntelXeDriver {
     ///   2. Map in GGTT
     ///   3. Acquire GT forcewake
     ///   4. Engine reset (RING_RESET_CTL + GEN6_GDRST)
-    ///   5. Enable ExecList mode (RING_MODE bit 15)
+    ///   5. Enable ExecList mode (i915 enable_execlists + reset_csb_pointers)
     ///   6. Populate LRC context image (MI_LRI with ring config)
     ///   7. Build context descriptor + submit via ELSQ
     ///   8. Probe: MI_NOOP in ring, check HWSP seqno
@@ -1672,21 +1677,38 @@ impl IntelXeDriver {
         let rst_after = mmio_read32(self.bar0, BCS_RESET_CTL);
         kprintln!("[npk]   BCS: engine reset complete (RESET_CTL={:#010x})", rst_after);
 
-        // ── Step 5: Enable ExecList mode ────────────────────────────
-        // RING_MODE: bit 15 = GFX_RUN_LIST_ENABLE
-        //            bit 10 = GFX_PREFETCH_DISABLE (Gen 12 requirement!)
-        // Without PREFETCH_DISABLE, GPU tries to prefetch context data and fails.
-        let mode_bits = GFX_RUN_LIST_ENABLE | GFX_PREFETCH_DISABLE;
+        // ── Step 5: Enable ExecList mode (i915 enable_execlists) ─────
+        // 5a: HWSTAM — mask all HW status interrupts (we poll, don't use IRQs)
+        mmio_write32(self.bar0, BCS_HWSTAM, 0xFFFF_FFFF);
+
+        // 5b: RING_MODE — Gen 11+ uses GEN11_GFX_DISABLE_LEGACY_MODE (bit 3),
+        //     NOT GFX_RUN_LIST_ENABLE (bit 15). Bit 15 is just a readback indicator.
+        //     Also set PREFETCH_DISABLE (bit 10) — Gen 12 requirement.
+        let mode_bits = GEN11_GFX_DISABLE_LEGACY_MODE | GFX_PREFETCH_DISABLE;
         mmio_write32(self.bar0, BCS_RING_MODE, (mode_bits << 16) | mode_bits);
+
+        // 5c: MI_MODE — clear STOP_RING! After reset, command streamer is stopped.
+        //     Without this, GPU accepts context via ELSQ but never executes ring.
+        //     i915: ENGINE_WRITE(RING_MI_MODE, _MASKED_BIT_DISABLE(STOP_RING))
+        mmio_write32(self.bar0, BCS_MI_MODE, (STOP_RING << 16) | 0);
+        let _ = mmio_read32(self.bar0, BCS_MI_MODE); // posted read flush
+
+        // 5d: HWS_PGA — HWSP GGTT address
+        mmio_write32(self.bar0, BCS_HWS_PGA, BCS_LRC_GGTT);
+        let _ = mmio_read32(self.bar0, BCS_HWS_PGA); // posted read flush
+
+        // 5e: Initialize CSB pointers (i915 reset_csb_pointers)
+        //     Gen 12 has 12 CSB entries. reset_value = 12 - 1 = 11 (0xB).
+        //     Format: mask[31:16]=0xFFFF, write_ptr[15:8]=11, read_ptr[7:0]=11
+        mmio_write32(self.bar0, BCS_CTX_STATUS_PTR, 0xFFFF_0B0B);
+        let _ = mmio_read32(self.bar0, BCS_CTX_STATUS_PTR); // posted read flush
+
+        // 5f: Mask all interrupts
+        mmio_write32(self.bar0, BCS_IMR, 0xFFFF_FFFF);
+
         let mode = mmio_read32(self.bar0, BCS_RING_MODE);
         kprintln!("[npk]   BCS: RING_MODE={:#010x} (execlist={})",
             mode, mode & GFX_RUN_LIST_ENABLE != 0);
-
-        // Set HWS_PGA to LRC page 0 (HWSP) GGTT offset
-        mmio_write32(self.bar0, BCS_HWS_PGA, BCS_LRC_GGTT);
-
-        // Mask all interrupts (we poll, don't use IRQs)
-        mmio_write32(self.bar0, BCS_IMR, 0xFFFF_FFFF);
 
         // ── Step 6: Populate LRC + write probe commands ─────────────
         self.populate_bcs_lrc();
@@ -1786,12 +1808,13 @@ impl IntelXeDriver {
             ctx.add(1).write_volatile(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
 
             // Pair 1: CTX_CONTEXT_CONTROL (must be first!)
-            // Bit 0: ENGINE_CTX_RESTORE_INHIBIT — 1 for fresh context (no saved state to restore)
-            // Bit 3: INHIBIT_SYN_CTX_SWITCH — 1 (no sync context switches)
-            // Masked write: mask=0x0009, value=0x0009 → both bits SET
-            // i915: _MASKED_BIT_ENABLE(RESTORE_INHIBIT | INHIBIT_SYN_CTX_SWITCH) = 0x00090009
+            // i915 init_common_regs(inhibit=true):
+            //   _MASKED_BIT_ENABLE(RESTORE_INHIBIT)       → bit 0: set (no saved state)
+            //   _MASKED_BIT_ENABLE(INHIBIT_SYN_CTX_SWITCH) → bit 3: set
+            //   _MASKED_BIT_DISABLE(SAVE_INHIBIT)          → bit 2: clear (allow save!)
+            // mask=0x000D (bits 0,2,3), value=0x0009 (bits 0,3 set, bit 2 clear)
             ctx.add(2).write_volatile(0x22244);
-            ctx.add(3).write_volatile(0x0009_0009);
+            ctx.add(3).write_volatile(0x000D_0009);
 
             // Pair 2: RING_HEAD
             ctx.add(4).write_volatile(BCS_RING_HEAD);
@@ -1888,7 +1911,7 @@ impl IntelXeDriver {
             | CTX_LEGACY_32B         // bit 3 (i915 default on Gen 12)
             | CTX_VALID;             // bit 0
 
-        let desc_hi: u32 = 1;
+        let desc_hi: u32 = 0;  // i915: upper 32 bits = context ID (0 for single context)
 
         kprintln!("[npk]   BCS: ELSQ desc={:#010x}_{:08x} (LRCA={:#x})",
             desc_hi, desc_lo, lrca_ggtt);
