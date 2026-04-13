@@ -202,7 +202,7 @@ const RESET_CTL_READY: u32      = 1 << 1;
 
 // MI commands
 const MI_NOOP: u32              = 0;
-const MI_LRI_CMD: u32           = 0x11 << 23;  // MI_LOAD_REGISTER_IMM
+const MI_LRI_CMD: u32           = 0x22 << 23;  // MI_LOAD_REGISTER_IMM (opcode 0x22!)
 const MI_LRI_FORCE_POSTED: u32  = 1 << 12;     // Posted write (no ack wait)
 const MI_BB_END: u32            = 0x0A << 23;   // MI_BATCH_BUFFER_END
 
