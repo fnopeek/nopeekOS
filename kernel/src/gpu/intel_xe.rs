@@ -1596,21 +1596,23 @@ impl IntelXeDriver {
         // SAFETY: identity-mapped, freshly allocated
         unsafe { core::ptr::write_bytes(ring_phys as *mut u8, 0, 4096); }
 
-        // LRC = 2 pages: page 0 = HWSP, page 1 = context register state
-        let lrc_phys = memory::allocate_contiguous(2)
+        // LRC = 5 pages: page 0 = HWSP, pages 1-4 = context state + power context save area
+        // GPU writes additional "power context" state beyond the LRI template on context-save.
+        // Gen 12 BCS HW context is ~80 DWORDs but save area needs extra pages.
+        let lrc_phys = memory::allocate_contiguous(5)
             .ok_or(GpuError::AllocFailed)?;
         // SAFETY: identity-mapped, freshly allocated
-        unsafe { core::ptr::write_bytes(lrc_phys as *mut u8, 0, 8192); }
+        unsafe { core::ptr::write_bytes(lrc_phys as *mut u8, 0, 5 * 4096); }
 
         self.bcs_ring_phys = ring_phys;
         self.bcs_lrc_phys = lrc_phys;
 
         kprintln!("[npk]   BCS: ring  phys={:#x} → GGTT {:#x}", ring_phys, BCS_RING_GGTT);
-        kprintln!("[npk]   BCS: LRC   phys={:#x} → GGTT {:#x} (2 pages)", lrc_phys, BCS_LRC_GGTT);
+        kprintln!("[npk]   BCS: LRC   phys={:#x} → GGTT {:#x} (5 pages)", lrc_phys, BCS_LRC_GGTT);
 
         // ── Step 2: Map in GGTT ─────────────────────────────────────
         self.map_pages_ggtt_at(ring_phys, 1, BCS_RING_GGTT);
-        self.map_pages_ggtt_at(lrc_phys, 2, BCS_LRC_GGTT);
+        self.map_pages_ggtt_at(lrc_phys, 5, BCS_LRC_GGTT);
         mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
         let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
 
@@ -1770,7 +1772,7 @@ impl IntelXeDriver {
     fn populate_bcs_lrc(&self) {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32; // page 1 = context state
 
-        // SAFETY: lrc_phys is identity-mapped, page 1 is within our 2-page allocation
+        // SAFETY: lrc_phys is identity-mapped, page 1 is within our 5-page allocation
         // ALL writes MUST be write_volatile — GPU reads from RAM but the Rust
         // compiler doesn't see the consumer. Non-volatile writes get eliminated.
         unsafe {
@@ -1784,11 +1786,12 @@ impl IntelXeDriver {
             ctx.add(1).write_volatile(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
 
             // Pair 1: CTX_CONTEXT_CONTROL (must be first!)
-            // Bit 0: ENGINE_CTX_RESTORE_INHIBIT — MUST be 0 (allow restore!)
+            // Bit 0: ENGINE_CTX_RESTORE_INHIBIT — 1 for fresh context (no saved state to restore)
             // Bit 3: INHIBIT_SYN_CTX_SWITCH — 1 (no sync context switches)
-            // Masked write: (mask << 16) | value = 0x00090008
+            // Masked write: mask=0x0009, value=0x0009 → both bits SET
+            // i915: _MASKED_BIT_ENABLE(RESTORE_INHIBIT | INHIBIT_SYN_CTX_SWITCH) = 0x00090009
             ctx.add(2).write_volatile(0x22244);
-            ctx.add(3).write_volatile(0x0009_0008);
+            ctx.add(3).write_volatile(0x0009_0009);
 
             // Pair 2: RING_HEAD
             ctx.add(4).write_volatile(BCS_RING_HEAD);
@@ -1878,13 +1881,12 @@ impl IntelXeDriver {
         // Bug was: we pointed at page 1, GPU read uninitialized memory as context.
         let lrca_ggtt = BCS_LRC_GGTT; // page 0!
 
-        // Legacy 32B (bit 3) = i915 default on Gen 12.
-        // FORCE_RESTORE (bit 2) always set — stateless ring.
+        // i915 lrc_descriptor(): LRCA | LEGACY_32B | CTX_VALID = LRCA | 0x9
+        // Bit 8 is NOT privilege on Gen 12 — it's GEN12_CTX_CTRL_OAR_CONTEXT_ENABLE
+        // FORCE_RESTORE only needed when TAIL unchanged on re-submit (i915 fallback)
         let desc_lo: u32 = lrca_ggtt
-            | CTX_PRIVILEGE
-            | CTX_LEGACY_32B         // bit 3 (proven by i915 source)
-            | CTX_FORCE_RESTORE      // bit 2 = always force restore
-            | CTX_VALID;
+            | CTX_LEGACY_32B         // bit 3 (i915 default on Gen 12)
+            | CTX_VALID;             // bit 0
 
         let desc_hi: u32 = 1;
 
