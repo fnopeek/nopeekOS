@@ -2009,8 +2009,19 @@ impl IntelXeDriver {
         self.update_lrc_tail(tail_bytes);
         self.elsq_submit(false);
 
-        // Poll HEAD for completion (short timeout — BCS blit is fast)
-        poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, tail_bytes, 500_000)
+        // Poll LRC HEAD in RAM (not MMIO — MMIO RING_HEAD is unreliable on Gen 12).
+        // GPU writes HEAD back to LRC on context-save. This is the same approach
+        // used in the init probe, and avoids race conditions with cursor overlay.
+        let lrc_head_ptr = (self.bcs_lrc_phys + 4096 + 5 * 4) as *const u32; // ctx[5] = HEAD val
+        for _ in 0..500_000u32 {
+            // SAFETY: lrc_phys is identity-mapped, within our 5-page allocation
+            let head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+            if head == tail_bytes {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
     }
 
     /// Visual test: blit a 64×64 magenta square via BCS.
@@ -2062,9 +2073,16 @@ impl IntelXeDriver {
         self.update_lrc_tail(48);
         self.elsq_submit(false);
 
-        let ok = poll_timeout(self.bar0, BCS_RING_HEAD, RING_HEAD_MASK, 48, 2_000_000);
-        let head = mmio_read32(self.bar0, BCS_RING_HEAD);
-        kprintln!("[npk]   BCS test: HEAD={:#x} ok={}", head & RING_HEAD_MASK, ok);
+        // Poll LRC HEAD in RAM (reliable on Gen 12, unlike MMIO RING_HEAD)
+        let lrc_head_ptr = (self.bcs_lrc_phys + 4096 + 5 * 4) as *const u32;
+        let mut ok = false;
+        for _ in 0..2_000_000u32 {
+            let head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+            if head == 48 { ok = true; break; }
+            core::hint::spin_loop();
+        }
+        let head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+        kprintln!("[npk]   BCS test: LRC HEAD={} ok={}", head, ok);
 
         if ok {
             kprintln!("[npk]   BCS test: SUCCESS — magenta square at (100,100)");
