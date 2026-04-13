@@ -136,8 +136,10 @@ const TRANS_DDI_SCRAMBLING_MASK: u32 = TRANS_DDI_HDMI_SCRAMBLING
 // GGTT base (within BAR0)
 const GGTT_BASE: u32           = 0x800000;
 
-// GGTT TLB invalidation (Gen 8+)
-const GFX_FLSH_CNTL_GEN6: u32 = 0x101008;
+// GGTT TLB invalidation
+const GFX_FLSH_CNTL_GEN6: u32 = 0x101008;  // Gen 8-11 GGTT flush
+const GEN12_GUC_TLB_INV_CR: u32 = 0xCEE8;  // Gen 12 GGTT TLB invalidation (required!)
+const GEN12_BLT_TLB_INV_CR: u32 = 0xCEE4;  // Gen 12 BCS per-engine TLB invalidation
 
 // ── BCS (Blitter Command Streamer) — Gen 12 ExecList (ELSQ) ─────────
 //
@@ -1619,8 +1621,15 @@ impl IntelXeDriver {
         // ── Step 2: Map in GGTT ─────────────────────────────────────
         self.map_pages_ggtt_at(ring_phys, 1, BCS_RING_GGTT);
         self.map_pages_ggtt_at(lrc_phys, 5, BCS_LRC_GGTT);
+        // Gen 12 GGTT TLB invalidation (i915 guc_ggtt_invalidate):
+        // GFX_FLSH_CNTL_GEN6 alone is NOT sufficient on Gen 12!
+        // Must also write GEN12_GUC_TLB_INV_CR + BLT engine TLB.
         mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
         let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+        mmio_write32(self.bar0, GEN12_GUC_TLB_INV_CR, 1);
+        let _ = mmio_read32(self.bar0, GEN12_GUC_TLB_INV_CR);
+        mmio_write32(self.bar0, GEN12_BLT_TLB_INV_CR, 1);
+        let _ = mmio_read32(self.bar0, GEN12_BLT_TLB_INV_CR);
 
         // ── Step 3: Acquire ALL forcewake domains ────────────────────
         // Request GT + Render + Media (masked bit write: bit 16 = mask, bit 0 = value)
@@ -1947,8 +1956,13 @@ impl IntelXeDriver {
         kprintln!("[npk]   BCS: mapping shadow B ({} pages) → GGTT {:#x}", pages, SHADOW_B_GGTT_BASE);
         self.map_pages_ggtt_at(phys_b, pages, SHADOW_B_GGTT_BASE);
 
+        // Gen 12 GGTT TLB invalidation
         mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
         let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+        mmio_write32(self.bar0, GEN12_GUC_TLB_INV_CR, 1);
+        let _ = mmio_read32(self.bar0, GEN12_GUC_TLB_INV_CR);
+        mmio_write32(self.bar0, GEN12_BLT_TLB_INV_CR, 1);
+        let _ = mmio_read32(self.bar0, GEN12_BLT_TLB_INV_CR);
 
         self.shadow_a_ggtt = SHADOW_A_GGTT_BASE;
         self.shadow_b_ggtt = SHADOW_B_GGTT_BASE;
