@@ -1931,9 +1931,6 @@ impl IntelXeDriver {
 
         let desc_hi: u32 = 0;  // i915: upper 32 bits = context ID (0 for single context)
 
-        kprintln!("[npk]   BCS: ELSQ desc={:#010x}_{:08x} (LRCA={:#x})",
-            desc_hi, desc_lo, lrca_ggtt);
-
         mmio_write32(self.bar0, BCS_ELSQ0_LO, desc_lo);
         mmio_write32(self.bar0, BCS_ELSQ0_HI, desc_hi);
         mmio_write32(self.bar0, BCS_ELSQ1_LO, 0);
