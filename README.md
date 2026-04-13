@@ -92,7 +92,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  Work-stealing pool         │  Background / Chrome /     │
  │  Core 0 = Kernel/IRQ        │  Text / Cursor layers      │
  │  Cores 1..N = Workers       │  Dirty-region compositing  │
- │  MONITOR/MWAIT wakeup       │  Shadow → MMIO blit        │
+ │  MONITOR/MWAIT wakeup       │  GPU BCS blit (ExecList)   │
  ├──────────────────────────────────────────────────────────┤
  │  npkFS                      │  Crypto Engine             │
  │  COW B-tree, BLAKE3 hashing │  ChaCha20-Poly1305 AEAD   │
