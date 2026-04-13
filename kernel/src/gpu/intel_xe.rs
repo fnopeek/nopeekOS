@@ -192,7 +192,7 @@ const RING_HEAD_MASK: u32       = 0x001FFFFC;
 const GFX_RUN_LIST_ENABLE: u32  = 1 << 15;  // Gen 8-10 ExecList enable (readback indicator on Gen11+)
 const GEN11_GFX_DISABLE_LEGACY_MODE: u32 = 1 << 3;  // Gen 11+: replaces GFX_RUN_LIST_ENABLE
 const GFX_PREFETCH_DISABLE: u32 = 1 << 10;  // Gen 12: MUST be set!
-const STOP_RING: u32            = 1 << 0;   // MI_MODE bit 0: stop command streamer
+const STOP_RING: u32            = 1 << 8;   // MI_MODE bit 8 (REG_BIT(8) in i915)
 
 // RESET_CTL bits
 const RESET_CTL_REQUEST: u32    = 1 << 0;
@@ -539,6 +539,7 @@ impl GpuHal for IntelXeDriver {
             mode, mode & GFX_RUN_LIST_ENABLE != 0, mode & GEN11_GFX_DISABLE_LEGACY_MODE != 0);
         kprintln!("  MMIO HEAD:  {:#010x} TAIL: {:#010x}", head, tail);
         kprintln!("  MMIO START: {:#010x} CTL:  {:#010x}", start, ctl);
+        kprintln!("  MI_MODE:    {:#010x} (stop_ring={})", mi, mi & STOP_RING != 0);
         kprintln!("  HWS_PGA:    {:#010x}", hws);
         kprintln!("  ELSQ_ST:    {:#010x}", elsq_st);
         kprintln!("  RESET_CTL:  {:#010x}", rst);
@@ -1681,10 +1682,10 @@ impl IntelXeDriver {
         // 5a: HWSTAM — mask all HW status interrupts (we poll, don't use IRQs)
         mmio_write32(self.bar0, BCS_HWSTAM, 0xFFFF_FFFF);
 
-        // 5b: RING_MODE — Gen 11+ uses GEN11_GFX_DISABLE_LEGACY_MODE (bit 3),
-        //     NOT GFX_RUN_LIST_ENABLE (bit 15). Bit 15 is just a readback indicator.
+        // 5b: RING_MODE — set both GEN11_GFX_DISABLE_LEGACY_MODE (bit 3) AND
+        //     GFX_RUN_LIST_ENABLE (bit 15) for ADL-N compatibility.
         //     Also set PREFETCH_DISABLE (bit 10) — Gen 12 requirement.
-        let mode_bits = GEN11_GFX_DISABLE_LEGACY_MODE | GFX_PREFETCH_DISABLE;
+        let mode_bits = GFX_RUN_LIST_ENABLE | GEN11_GFX_DISABLE_LEGACY_MODE | GFX_PREFETCH_DISABLE;
         mmio_write32(self.bar0, BCS_RING_MODE, (mode_bits << 16) | mode_bits);
 
         // 5c: MI_MODE — clear STOP_RING! After reset, command streamer is stopped.
