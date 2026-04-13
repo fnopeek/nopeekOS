@@ -1658,6 +1658,14 @@ impl IntelXeDriver {
         kprintln!("[npk]   BCS: probe RING_MODE={:#010x} RESET_CTL={:#010x}",
             mode_readback, reset_readback);
 
+        // Re-invalidate GGTT TLB NOW that forcewake is held!
+        // TLB regs at 0xCExx are in FORCEWAKE_GT range — writes without
+        // forcewake are silently dropped by hardware.
+        mmio_write32(self.bar0, GEN12_GUC_TLB_INV_CR, 1);
+        let _ = mmio_read32(self.bar0, GEN12_GUC_TLB_INV_CR);
+        mmio_write32(self.bar0, GEN12_BLT_TLB_INV_CR, 1);
+        let _ = mmio_read32(self.bar0, GEN12_BLT_TLB_INV_CR);
+
         // ── Step 4: Engine reset ────────────────────────────────────
         // 4a: Request reset via RING_RESET_CTL (masked write)
         mmio_write32(self.bar0, BCS_RESET_CTL, (1 << 16) | RESET_CTL_REQUEST);
