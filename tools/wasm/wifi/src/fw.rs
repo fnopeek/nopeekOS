@@ -27,40 +27,45 @@ pub fn download(mmio: i32) -> bool {
     print_dec(FW_DATA.len());
     host::print(" bytes\n");
 
-    // Step 1: Disable CPU — exact rtw89_mac_disable_cpu_ax() sequence
-    host::print("[wifi] Disabling CPU (rtw89 sequence)...\n");
-    // Clear WCPU_EN
+    // Step 1+2: Ultra-minimal CPU restart in FWDL mode.
+    // Don't touch anything except WCPU_EN and FWDL_EN.
+    host::print("[wifi] Minimal CPU restart...\n");
+
+    // Show current state
+    let plat0 = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    let fwc0 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::print("  PLATFORM_EN=0x"); host::print_hex32(plat0); host::print("\n");
+    host::print("  FW_CTRL=0x"); host::print_hex32(fwc0); host::print("\n");
+
+    // A) Stop CPU
     let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val &= !regs::B_AX_WCPU_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    // Clear FWDL_EN + path ready bits
-    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    val &= !(regs::B_AX_WCPU_FWDL_EN | regs::B_AX_H2C_PATH_RDY | regs::B_AX_FWDL_PATH_RDY);
-    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
-    // Clear CPU clock
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
-    val &= !regs::B_AX_CPU_CLK_EN;
-    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
-    // Disable firmware watchdog (RTL8852B: toggle APB_WRAP_EN)
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val &= !regs::B_AX_APB_WRAP_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    val |= regs::B_AX_APB_WRAP_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    // Toggle PLATFORM_EN (clear then set)
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val &= !regs::B_AX_PLATFORM_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    val |= regs::B_AX_PLATFORM_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    host::sleep_ms(5);
-    let fw_d = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::print("  FW_CTRL after disable: 0x"); host::print_hex32(fw_d); host::print("\n");
+    host::sleep_ms(10);
 
-    // Step 2: Enable CPU in FWDL mode — NO DMA pre-init!
-    // Keep UEFI's DLE/HFC/DMA config intact. Just restart CPU.
-    enable_cpu_fwdl(mmio);
-    host::sleep_ms(50);
+    // B) Set FWDL_EN (tells boot ROM to enter download mode on next start)
+    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    val |= regs::B_AX_WCPU_FWDL_EN;
+    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
+
+    // C) Set boot reason
+    host::mmio_w16(mmio, regs::R_AX_BOOT_REASON,
+        regs::RTW89_FW_DLFW_RESUME as u16);
+
+    // D) Ensure CPU clock is on
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    val |= regs::B_AX_CPU_CLK_EN;
+    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
+
+    // E) Start CPU
+    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val |= regs::B_AX_WCPU_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+
+    host::sleep_ms(100); // generous wait for boot ROM
+
+    let fwc1 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::print("  FW_CTRL after restart: 0x"); host::print_hex32(fwc1); host::print("\n");
 
     // Step 5: Wait for H2C_PATH_RDY (bit 1) — comes FIRST, before header!
     // rtw89: fwdl_check_path_ready(true) checks H2C path, not FWDL path
