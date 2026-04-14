@@ -34,13 +34,34 @@ pub fn download(mmio: i32) -> bool {
     pcie_flr();
     host::sleep_ms(200); // device needs time to come back after FLR
 
+    // Re-enable bus mastering (FLR may clear it)
+    host::pci_enable_bus_master();
+
     // Re-read chip to verify it's back
     let chip_id = host::mmio_r32(mmio, 0x0000);
     host::print("  Chip after FLR: 0x"); host::print_hex32(chip_id); host::print("\n");
     let fwc0 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
     host::print("  FW_CTRL after FLR: 0x"); host::print_hex32(fwc0); host::print("\n");
+    let plat0 = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    host::print("  PLATFORM_EN after FLR: 0x"); host::print_hex32(plat0); host::print("\n");
 
-    // Step 2: Enable FWDL mode (rtw89 enable_cpu_ax sequence)
+    // Step 2: After FLR, explicitly disable CPU first (clean state)
+    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val &= !regs::B_AX_WCPU_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    host::sleep_ms(10);
+
+    // Step 3: HCI Function Enable (needed after FLR reset)
+    let hci_val = regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
+                | regs::B_AX_DISPATCHER_EN | regs::B_AX_PKT_BUF_EN;
+    host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, hci_val);
+
+    // Enable AXIDMA
+    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val |= regs::B_AX_AXIDMA_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+
+    // Step 4: Enable FWDL mode
     enable_cpu_fwdl(mmio);
     host::sleep_ms(100);
 
