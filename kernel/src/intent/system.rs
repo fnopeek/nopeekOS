@@ -241,8 +241,12 @@ pub fn intent_gpu(args: &str) {
                 kprintln!("  Front:    GGTT {:#x} ({})",
                     front, if front == ga { "A" } else if front == gb { "B" } else { "?" });
                 kprintln!("  Blit:     GPU (XY_FAST_COPY_BLT)");
+                let mouse = crate::xhci::mouse_available();
+                kprintln!("  Cursor:   {}", if mouse { "GPU-composited (save-under)" } else { "none" });
             } else {
                 kprintln!("  Blit:     CPU (memcpy)");
+                let mouse = crate::xhci::mouse_available();
+                kprintln!("  Cursor:   {}", if mouse { "MMIO overlay" } else { "none" });
             }
 
             // BCS register dump (always, for debug)
