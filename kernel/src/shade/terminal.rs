@@ -239,12 +239,16 @@ pub fn is_active() -> bool {
 }
 
 /// Allocate a new terminal buffer on the heap. Returns index or None if out of memory.
+/// Uses alloc_zeroed to avoid 264KB stack frame (kernel stack is only 256KB).
 pub fn allocate() -> Option<u8> {
     for i in 0..MAX_SLOTS {
         if TERM_PTRS[i].load(Ordering::Acquire).is_null() {
-            let term = Box::new(TerminalBuffer::new());
-            let ptr = Box::into_raw(term);
-            // SAFETY: Core 0 only, no concurrent allocation race
+            // SAFETY: TerminalBuffer is ~264KB — too large for the 256KB kernel stack.
+            // Allocate zeroed memory directly on the heap and cast to TerminalBuffer.
+            // All fields are zero-initialized (arrays of 0, usize=0, bool=false).
+            let layout = alloc::alloc::Layout::new::<TerminalBuffer>();
+            let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut TerminalBuffer;
+            if ptr.is_null() { return None; }
             TERM_PTRS[i].store(ptr, Ordering::Release);
             return Some(i as u8);
         }
@@ -256,8 +260,9 @@ pub fn allocate() -> Option<u8> {
 pub fn free(idx: u8) {
     let ptr = TERM_PTRS[idx as usize].swap(core::ptr::null_mut(), Ordering::AcqRel);
     if !ptr.is_null() {
-        // SAFETY: ptr was created by Box::into_raw in allocate()
-        unsafe { drop(Box::from_raw(ptr)); }
+        // SAFETY: ptr was created by alloc_zeroed in allocate()
+        let layout = alloc::alloc::Layout::new::<TerminalBuffer>();
+        unsafe { alloc::alloc::dealloc(ptr as *mut u8, layout); }
     }
 }
 
