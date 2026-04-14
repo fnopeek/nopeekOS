@@ -27,45 +27,22 @@ pub fn download(mmio: i32) -> bool {
     print_dec(FW_DATA.len());
     host::print(" bytes\n");
 
-    // Step 1+2: Ultra-minimal CPU restart in FWDL mode.
-    // Don't touch anything except WCPU_EN and FWDL_EN.
-    host::print("[wifi] Minimal CPU restart...\n");
+    // Step 1: PCIe Function Level Reset (FLR)
+    // Linux PCI subsystem resets devices before driver loads — we never did this.
+    // FLR completely resets the device hardware, including CPU/boot ROM.
+    host::print("[wifi] PCIe Function Level Reset...\n");
+    pcie_flr();
+    host::sleep_ms(200); // device needs time to come back after FLR
 
-    // Show current state
-    let plat0 = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    // Re-read chip to verify it's back
+    let chip_id = host::mmio_r32(mmio, 0x0000);
+    host::print("  Chip after FLR: 0x"); host::print_hex32(chip_id); host::print("\n");
     let fwc0 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::print("  PLATFORM_EN=0x"); host::print_hex32(plat0); host::print("\n");
-    host::print("  FW_CTRL=0x"); host::print_hex32(fwc0); host::print("\n");
+    host::print("  FW_CTRL after FLR: 0x"); host::print_hex32(fwc0); host::print("\n");
 
-    // A) Stop CPU
-    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val &= !regs::B_AX_WCPU_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    host::sleep_ms(10);
-
-    // B) Set FWDL_EN (tells boot ROM to enter download mode on next start)
-    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    val |= regs::B_AX_WCPU_FWDL_EN;
-    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
-
-    // C) Set boot reason
-    host::mmio_w16(mmio, regs::R_AX_BOOT_REASON,
-        regs::RTW89_FW_DLFW_RESUME as u16);
-
-    // D) Ensure CPU clock is on
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
-    val |= regs::B_AX_CPU_CLK_EN;
-    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
-
-    // E) Start CPU
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val |= regs::B_AX_WCPU_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-
-    host::sleep_ms(100); // generous wait for boot ROM
-
-    let fwc1 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::print("  FW_CTRL after restart: 0x"); host::print_hex32(fwc1); host::print("\n");
+    // Step 2: Enable FWDL mode (rtw89 enable_cpu_ax sequence)
+    enable_cpu_fwdl(mmio);
+    host::sleep_ms(100);
 
     // Step 5: Wait for H2C_PATH_RDY (bit 1) — comes FIRST, before header!
     // rtw89: fwdl_check_path_ready(true) checks H2C path, not FWDL path
@@ -522,6 +499,49 @@ fn wait_fw_ready(mmio: i32) -> bool {
         host::sleep_ms(10);
     }
     false
+}
+
+/// PCIe Function Level Reset — hardware-resets the entire WiFi device.
+/// Walks the PCIe capability list to find the Express capability,
+/// then sets bit 15 (BCR_FLR) in Device Control register.
+fn pcie_flr() {
+    // Find PCIe Express Capability in config space
+    // Walk capability list starting from offset 0x34
+    let mut cap_ptr = (host::pci_read_config(0x34) & 0xFF) as u8;
+    let mut pcie_cap_offset = 0u8;
+
+    while cap_ptr != 0 {
+        let cap_id = (host::pci_read_config(cap_ptr) & 0xFF) as u8;
+        if cap_id == 0x10 { // PCI Express Capability
+            pcie_cap_offset = cap_ptr;
+            break;
+        }
+        cap_ptr = ((host::pci_read_config(cap_ptr) >> 8) & 0xFF) as u8;
+    }
+
+    if pcie_cap_offset == 0 {
+        host::print("  PCIe capability not found!\n");
+        return;
+    }
+
+    host::print("  PCIe cap at 0x");
+    host::print_hex32(pcie_cap_offset as u32);
+
+    // Check if FLR is supported (Device Capabilities, offset +4, bit 28)
+    let dev_cap = host::pci_read_config(pcie_cap_offset + 4);
+    if dev_cap & (1 << 28) == 0 {
+        host::print(" — FLR not supported!\n");
+        return;
+    }
+    host::print(" — FLR supported\n");
+
+    // Trigger FLR: set bit 15 in Device Control register (offset +8)
+    let dev_ctrl_off = pcie_cap_offset + 8;
+    let mut dev_ctrl = host::pci_read_config(dev_ctrl_off);
+    dev_ctrl |= 0x8000; // PCI_EXP_DEVCTL_BCR_FLR
+    host::pci_write_config(dev_ctrl_off, dev_ctrl);
+
+    host::print("  FLR triggered!\n");
 }
 
 fn print_dec(n: usize) {
