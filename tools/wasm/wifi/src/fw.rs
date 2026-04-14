@@ -74,7 +74,26 @@ pub fn download(mmio: i32) -> bool {
     enable_cpu_fwdl(mmio);
     host::sleep_ms(50);
 
-    dump_state(mmio, "cpu-on");
+    // ── Summary ─────────────────────────────────────────────────
+    let (si_ok, si_fail) = unsafe { (XTAL_SI_OK, XTAL_SI_FAIL) };
+    host::print("[wifi] XTAL_SI: ");
+    print_dec(si_ok as usize); host::print("/");
+    print_dec((si_ok + si_fail) as usize); host::print(" OK");
+    if si_fail > 0 { host::print(" *** FAIL ***"); }
+    host::print("\n");
+
+    // Key registers after full init
+    let fw = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    let plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    let clk = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    let dmac = host::mmio_r32(mmio, regs::R_AX_DMAC_FUNC_EN);
+    let boot_dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
+    host::print("  FW_CTRL=0x"); host::print_hex32(fw);
+    host::print(" PLAT=0x"); host::print_hex32(plat);
+    host::print("\n  CLK=0x"); host::print_hex32(clk);
+    host::print(" DMAC=0x"); host::print_hex32(dmac);
+    host::print("\n  BOOT_DBG=0x"); host::print_hex32(boot_dbg);
+    host::print("\n");
 
     // ── Step 7: Wait for H2C_PATH_RDY ───────────────────────────
     host::print("[wifi] Waiting H2C path ready...\n");
@@ -175,46 +194,28 @@ pub fn pcie_flr() {
     }
 }
 
-/// Debug flag: print XTAL SI status on first call
-static mut XTAL_DBG: bool = true;
+/// XTAL SI success counter
+static mut XTAL_SI_OK: u32 = 0;
+static mut XTAL_SI_FAIL: u32 = 0;
 
 /// Write to an XTAL SI register via the indirect interface at 0x0270.
-/// `offset` = XTAL SI register address, `val` = data, `mask` = which bits to write.
 fn write_xtal_si(mmio: i32, offset: u8, val: u8, mask: u8) -> bool {
-    // Debug: show XTAL SI CTRL state on first call
-    unsafe {
-        if XTAL_DBG {
-            XTAL_DBG = false;
-            let pre = host::mmio_r32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL);
-            host::print("  XTAL_SI_CTRL before: 0x");
-            host::print_hex32(pre);
-            host::print("\n");
-        }
-    }
-
-    // Build command: CMD_POLL | mode=write(0) | bitmask | data | addr
     let cmd: u32 = (1u32 << 31)
         | ((mask as u32) << 16)
         | ((val as u32) << 8)
         | (offset as u32);
     host::mmio_w32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL, cmd);
 
-    // Poll until CMD_POLL clears — Linux uses 50µs interval, 50ms timeout.
-    // We use 1ms interval (WASM sleep granularity), 50 iterations = 50ms.
-    for i in 0..50 {
+    for _ in 0..50 {
         let v = host::mmio_r32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL);
         if v & (1u32 << 31) == 0 {
+            unsafe { XTAL_SI_OK += 1; }
             return true;
-        }
-        if i == 0 {
-            // First poll failed — print what we see
-            host::print("  XTAL_SI poll[0]: 0x");
-            host::print_hex32(v);
-            host::print("\n");
         }
         host::sleep_ms(1);
     }
-    false // silent timeout — pwr_on will report overall status
+    unsafe { XTAL_SI_FAIL += 1; }
+    false
 }
 
 // ═══════════════════════════════════════════════════════════════════
