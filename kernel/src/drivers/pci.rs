@@ -147,6 +147,113 @@ pub fn enable_bus_master(addr: PciAddr) {
     write32(addr, 0x04, cmd | 0x04);
 }
 
+/// Assign an MMIO address to an unassigned BAR and configure the parent bridge.
+/// `bar_offset` is the config space offset of the BAR (e.g. 0x18 for BAR2).
+/// Returns the assigned physical address, or 0 on failure.
+pub fn assign_bar_mmio(dev: PciAddr, bar_offset: u8) -> u64 {
+    // ── Step 1: Probe BAR size ──────────────────────────────────
+    let cmd = read32(dev, 0x04);
+    write32(dev, 0x04, cmd & !0x06); // disable memory + bus master
+
+    let saved_lo = read32(dev, bar_offset);
+    let saved_hi = read32(dev, bar_offset + 4);
+    let is_64bit = saved_lo & 0x04 != 0;
+
+    write32(dev, bar_offset, 0xFFFF_FFFF);
+    if is_64bit { write32(dev, bar_offset + 4, 0xFFFF_FFFF); }
+
+    let size_lo = read32(dev, bar_offset);
+    let size_hi = if is_64bit { read32(dev, bar_offset + 4) } else { 0 };
+
+    let size_mask = if is_64bit {
+        ((size_hi as u64) << 32) | ((size_lo as u64) & !0xF)
+    } else {
+        (size_lo as u64) & !0xF
+    };
+    let bar_size = (!size_mask).wrapping_add(1);
+
+    if bar_size == 0 || bar_size > 0x0100_0000 {
+        // Restore and bail
+        write32(dev, bar_offset, saved_lo);
+        if is_64bit { write32(dev, bar_offset + 4, saved_hi); }
+        write32(dev, 0x04, cmd);
+        return 0;
+    }
+
+    // ── Step 2: Pick address (simple bump allocator) ────────────
+    // Use 0xFD000000 region — above typical TOLUD, below APIC/ECAM
+    static NEXT_ADDR: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0xFD00_0000);
+
+    let align = if bar_size < 0x1000 { 0x1000 } else { bar_size as u32 };
+    let mut addr = NEXT_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    addr = (addr + align - 1) & !(align - 1); // align up
+    NEXT_ADDR.store(addr + bar_size as u32, core::sync::atomic::Ordering::Relaxed);
+
+    // ── Step 3: Write BAR ───────────────────────────────────────
+    write32(dev, bar_offset, addr);
+    if is_64bit { write32(dev, bar_offset + 4, 0); }
+
+    // Re-enable memory space + bus master
+    write32(dev, 0x04, cmd | 0x06);
+
+    kprintln!("[npk] PCI BAR assigned: {:02x}:{:02x}.{} offset 0x{:02x} → {:#x} (size {:#x})",
+        dev.bus, dev.device, dev.function, bar_offset, addr, bar_size);
+
+    // ── Step 4: Configure parent bridge memory window ───────────
+    if dev.bus > 0 {
+        configure_bridge_window(dev.bus, addr, bar_size as u32);
+    }
+
+    addr as u64
+}
+
+/// Find the PCIe root port (bridge on bus 0) that forwards to `target_bus`
+/// and set its Memory Base/Limit to include `addr..addr+size`.
+fn configure_bridge_window(target_bus: u8, addr: u32, size: u32) {
+    for dev in 0u8..32 {
+        for func in 0u8..8 {
+            let bridge = PciAddr { bus: 0, device: dev, function: func };
+            let id = read32(bridge, 0x00);
+            if id == 0xFFFF_FFFF || id == 0 {
+                if func == 0 { break; }
+                continue;
+            }
+
+            // Check: is this a PCI-PCI bridge? (header type = 0x01)
+            let hdr = read8(bridge, 0x0E) & 0x7F;
+            if hdr != 0x01 {
+                if func == 0 && read8(bridge, 0x0E) & 0x80 == 0 { break; }
+                continue;
+            }
+
+            // Check: does this bridge's secondary bus match?
+            let sec_bus = read8(bridge, 0x19);
+            if sec_bus != target_bus {
+                if func == 0 && read8(bridge, 0x0E) & 0x80 == 0 { break; }
+                continue;
+            }
+
+            // Found the bridge! Set Memory Base/Limit (offset 0x20)
+            // Format: bits [15:4] = address [31:20], granularity = 1MB
+            let base_val = ((addr >> 16) & 0xFFF0) as u16;
+            let end = addr + size - 1;
+            let limit_val = ((end >> 16) & 0xFFF0) as u16;
+            let mem_window = ((limit_val as u32) << 16) | (base_val as u32);
+            write32(bridge, 0x20, mem_window);
+
+            // Enable memory forwarding on the bridge
+            let bcmd = read32(bridge, 0x04);
+            write32(bridge, 0x04, bcmd | 0x06);
+
+            kprintln!("[npk] Bridge {:02x}:{:02x}.{} memory window: {:#x}-{:#x}",
+                0, dev, func, addr, end);
+            return;
+        }
+    }
+    kprintln!("[npk] WARNING: no bridge found for bus {}", target_bus);
+}
+
 /// Check if MSI-X is enabled (not just present) — affects legacy VirtIO config offset
 pub fn msix_enabled(addr: PciAddr) -> bool {
     let status = read16(addr, 0x06);

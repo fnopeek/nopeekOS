@@ -793,11 +793,17 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
             let bar_offset = 0x10 + (bar_idx as u8) * 4;
             let bar_raw = pci::read32(hw.pci_addr, bar_offset);
-            let bar_base = if bar_raw & 0x04 != 0 {
+            let mut bar_base = if bar_raw & 0x04 != 0 {
                 pci::read_bar64(hw.pci_addr, bar_offset)
             } else {
                 (bar_raw & 0xFFFF_FFF0) as u64
             };
+
+            // If BAR is unassigned (UEFI didn't configure it), assign it now
+            if bar_base == 0 && bar_raw & 0x01 == 0 {
+                bar_base = pci::assign_bar_mmio(hw.pci_addr, bar_offset);
+                if bar_base == 0 { return -1; }
+            }
             if bar_base == 0 { return -1; }
 
             let page_count = pages as usize;
