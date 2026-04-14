@@ -177,6 +177,15 @@ pub fn allocate_contiguous(count: usize) -> Option<u64> {
     }
 }
 
+/// Deallocate `count` contiguous physical frames starting at `base`.
+pub fn deallocate_contiguous(base: u64, count: usize) {
+    let mut alloc = ALLOCATOR.lock();
+    let start_frame = (base as usize) / PAGE_SIZE;
+    for i in 0..count {
+        alloc.set_free(start_frame + i);
+    }
+}
+
 pub fn reserve_region(base: u64, length: u64) {
     ALLOCATOR.lock().mark_region_used(base, length);
 }

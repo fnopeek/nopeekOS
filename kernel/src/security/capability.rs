@@ -43,6 +43,7 @@ pub enum ResourceKind {
     Store,
     Display,
     Execute,
+    PciDevice { bus: u8, device: u8, function: u8 },
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +218,29 @@ pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId
 /// Check a capability against the global vault.
 pub fn check_global(cap_id: &CapId, required: Rights) -> Result<(), CapError> {
     VAULT.lock().check(cap_id, required).map(|_| ())
+}
+
+/// Create a capability for a WASM driver module bound to a specific PCI device.
+pub fn create_driver_cap(
+    bus: u8, device: u8, function: u8,
+    rights: Rights, ttl_ticks: Option<u64>,
+) -> Result<CapId, CapError> {
+    let root = *ROOT_CAP.lock();
+    VAULT.lock().create(root, ResourceKind::PciDevice { bus, device, function }, rights, ttl_ticks)
+}
+
+/// Check that a capability grants access to a specific PCI device.
+pub fn check_pci_device(
+    cap_id: &CapId, required: Rights, bus: u8, device: u8, function: u8,
+) -> Result<(), CapError> {
+    let vault = VAULT.lock();
+    let cap = vault.check(cap_id, required)?;
+    match cap.resource {
+        ResourceKind::PciDevice { bus: b, device: d, function: f }
+            if b == bus && d == device && f == function => Ok(()),
+        ResourceKind::Kernel => Ok(()),
+        _ => Err(CapError::InsufficientRights),
+    }
 }
 
 /// Short hex representation of a 256-bit cap ID (first 8 hex chars = 4 bytes)

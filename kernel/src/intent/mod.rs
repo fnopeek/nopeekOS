@@ -1177,6 +1177,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 wasm::intent_run(args);
             }
         }
+        "driver" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "driver") {
+                wasm::intent_run_driver(args);
+            }
+        }
 
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, &session, Rights::EXECUTE, "halt") {

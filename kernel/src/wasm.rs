@@ -11,10 +11,26 @@ use wasmi::{Caller, Config, Engine, Linker, Module, Store, Val};
 use spin::Mutex;
 use crate::{kprint, kprintln, capability};
 use crate::capability::CapId;
+use crate::drivers::pci;
 
 pub struct WasmResult {
     pub output: String,
 }
+
+/// Hardware driver state for WASM modules that access PCI devices.
+struct HwDriverState {
+    pci_addr: pci::PciAddr,
+    vendor_id: u16,
+    device_id: u16,
+    mmio_maps: Vec<(u64, usize)>,   // handle -> (base_virt, page_count)
+    dma_allocs: Vec<(u64, usize)>,  // handle -> (phys_addr, page_count)
+    bus_master_enabled: bool,
+    registered_as_netdev: bool,
+}
+
+const MAX_MMIO_MAPS: usize = 4;
+const MAX_DMA_ALLOCS: usize = 64;
+const MAX_DMA_PAGES: usize = 256; // 1MB total
 
 struct HostState {
     output: String,
@@ -27,6 +43,8 @@ struct HostState {
     core_id: usize,
     /// Process ID in the process table
     pid: u32,
+    /// Hardware driver state (only set for driver modules)
+    hw: Option<HwDriverState>,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -196,6 +214,7 @@ fn wasm_worker_task(arg: u64) {
         terminal_idx: job.terminal_idx,
         core_id,
         pid,
+        hw: None,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -230,6 +249,9 @@ fn wasm_worker_task(arg: u64) {
     };
 
     let _ = func.call(&mut store, &[], &mut []);
+
+    // Cleanup hardware resources before process exit
+    cleanup_hw_state(store.data_mut());
 
     // Update final memory usage
     if let Some(mem) = instance.get_memory(&store, "memory") {
@@ -287,6 +309,7 @@ pub fn execute_interactive(
         terminal_idx: 255, // active terminal
         core_id: 0, // runs on Core 0 (non-worker path)
         pid: 0,
+        hw: None,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -321,6 +344,7 @@ fn execute_inner(
         terminal_idx: 255,
         core_id: 0,
         pid: 0,
+        hw: None,
     });
     store.set_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -652,7 +676,427 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // ── Hardware Driver Host Functions ────────────────────────────
+
+    // npk_pci_bind(vendor_id, device_id) -> 0=ok, -1=not found, -2=denied
+    linker.func_wrap("env", "npk_pci_bind",
+        |mut caller: Caller<'_, HostState>, vendor: i32, device: i32| -> i32 {
+            let vid = vendor as u16;
+            let did = device as u16;
+            let dev = match pci::find_device(vid, did) {
+                Some(d) => d,
+                None => return -1,
+            };
+            let cap_id = caller.data().cap_id;
+            let a = dev.addr;
+            if capability::check_pci_device(&cap_id, capability::Rights::EXECUTE, a.bus, a.device, a.function).is_err()
+                && capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+                kprintln!("[npk] WASM: npk_pci_bind DENIED {:04x}:{:04x}", vid, did);
+                return -2;
+            }
+            caller.data_mut().hw = Some(HwDriverState {
+                pci_addr: dev.addr,
+                vendor_id: vid,
+                device_id: did,
+                mmio_maps: Vec::new(),
+                dma_allocs: Vec::new(),
+                bus_master_enabled: false,
+                registered_as_netdev: false,
+            });
+            kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
+                a.bus, a.device, a.function, vid, did);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_pci_bind_class(class, subclass) -> 0=ok, -1=not found, -2=denied
+    linker.func_wrap("env", "npk_pci_bind_class",
+        |mut caller: Caller<'_, HostState>, class: i32, subclass: i32| -> i32 {
+            let cls = class as u8;
+            let sub = subclass as u8;
+            let dev = match pci::find_by_class(cls, sub) {
+                Some(d) => d,
+                None => return -1,
+            };
+            let cap_id = caller.data().cap_id;
+            let a = dev.addr;
+            if capability::check_pci_device(&cap_id, capability::Rights::EXECUTE, a.bus, a.device, a.function).is_err()
+                && capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+                kprintln!("[npk] WASM: npk_pci_bind_class DENIED {:02x}:{:02x}", cls, sub);
+                return -2;
+            }
+            kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
+                a.bus, a.device, a.function, dev.vendor_id, dev.device_id);
+            caller.data_mut().hw = Some(HwDriverState {
+                pci_addr: dev.addr,
+                vendor_id: dev.vendor_id,
+                device_id: dev.device_id,
+                mmio_maps: Vec::new(),
+                dma_allocs: Vec::new(),
+                bus_master_enabled: false,
+                registered_as_netdev: false,
+            });
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_pci_read_config(offset) -> u32 value or -1
+    linker.func_wrap("env", "npk_pci_read_config",
+        |caller: Caller<'_, HostState>, offset: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            if offset < 0 || offset > 255 { return -1; }
+            pci::read32(hw.pci_addr, offset as u8) as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_pci_write_config(offset, value) -> 0 or -1
+    linker.func_wrap("env", "npk_pci_write_config",
+        |caller: Caller<'_, HostState>, offset: i32, value: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            if offset < 0 || offset > 255 { return -1; }
+            pci::write32(hw.pci_addr, offset as u8, value as u32);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_pci_enable_bus_master() -> 0 or -1
+    linker.func_wrap("env", "npk_pci_enable_bus_master",
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            let hw = match caller.data_mut().hw.as_mut() {
+                Some(h) => h,
+                None => return -1,
+            };
+            pci::enable_bus_master(hw.pci_addr);
+            // Also enable memory space
+            let cmd = pci::read32(hw.pci_addr, 0x04);
+            pci::write32(hw.pci_addr, 0x04, cmd | 0x06);
+            hw.bus_master_enabled = true;
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_mmio_map_bar(bar_index, page_count) -> handle or -1
+    linker.func_wrap("env", "npk_mmio_map_bar",
+        |mut caller: Caller<'_, HostState>, bar_idx: i32, pages: i32| -> i32 {
+            let hw = match caller.data_mut().hw.as_mut() {
+                Some(h) => h,
+                None => return -1,
+            };
+            if bar_idx < 0 || bar_idx > 5 || pages <= 0 || pages > 256 { return -1; }
+            if hw.mmio_maps.len() >= MAX_MMIO_MAPS { return -1; }
+
+            let bar_offset = 0x10 + (bar_idx as u8) * 4;
+            let bar_raw = pci::read32(hw.pci_addr, bar_offset);
+            let bar_base = if bar_raw & 0x04 != 0 {
+                pci::read_bar64(hw.pci_addr, bar_offset)
+            } else {
+                (bar_raw & 0xFFFF_FFF0) as u64
+            };
+            if bar_base == 0 { return -1; }
+
+            let page_count = pages as usize;
+            for i in 0..page_count {
+                let addr = bar_base + (i * 4096) as u64;
+                // SAFETY: identity-mapped MMIO region for bound PCI device BAR
+                let _ = crate::paging::map_page(
+                    addr, addr,
+                    crate::paging::PageFlags::PRESENT
+                        | crate::paging::PageFlags::WRITABLE
+                        | crate::paging::PageFlags::NO_CACHE,
+                );
+            }
+            let handle = hw.mmio_maps.len();
+            hw.mmio_maps.push((bar_base, page_count));
+            kprintln!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} ({} pages)",
+                bar_idx, bar_base, page_count);
+            handle as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_mmio_read32(handle, offset) -> u32
+    linker.func_wrap("env", "npk_mmio_read32",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.mmio_maps.len() { return -1; }
+            let (base, pages) = hw.mmio_maps[h];
+            let off = offset as usize;
+            if off + 4 > pages * 4096 { return -1; }
+            // SAFETY: validated MMIO region within mapped BAR
+            unsafe { core::ptr::read_volatile((base + off as u64) as *const u32) as i32 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_mmio_write32(handle, offset, value) -> 0 or -1
+    linker.func_wrap("env", "npk_mmio_write32",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32, value: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.mmio_maps.len() { return -1; }
+            let (base, pages) = hw.mmio_maps[h];
+            let off = offset as usize;
+            if off + 4 > pages * 4096 { return -1; }
+            // SAFETY: validated MMIO region within mapped BAR
+            unsafe { core::ptr::write_volatile((base + off as u64) as *mut u32, value as u32) }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_mmio_read64(handle, offset) -> i64
+    linker.func_wrap("env", "npk_mmio_read64",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i64 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.mmio_maps.len() { return -1; }
+            let (base, pages) = hw.mmio_maps[h];
+            let off = offset as usize;
+            if off + 8 > pages * 4096 { return -1; }
+            // SAFETY: validated MMIO region within mapped BAR
+            let lo = unsafe { core::ptr::read_volatile((base + off as u64) as *const u32) } as u64;
+            let hi = unsafe { core::ptr::read_volatile((base + off as u64 + 4) as *const u32) } as u64;
+            (hi << 32 | lo) as i64
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_mmio_write64(handle, offset, value) -> 0 or -1
+    linker.func_wrap("env", "npk_mmio_write64",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32, value: i64| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.mmio_maps.len() { return -1; }
+            let (base, pages) = hw.mmio_maps[h];
+            let off = offset as usize;
+            if off + 8 > pages * 4096 { return -1; }
+            let v = value as u64;
+            // SAFETY: validated MMIO region within mapped BAR
+            unsafe {
+                core::ptr::write_volatile((base + off as u64) as *mut u32, v as u32);
+                core::ptr::write_volatile((base + off as u64 + 4) as *mut u32, (v >> 32) as u32);
+            }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_dma_alloc(page_count) -> handle or -1
+    linker.func_wrap("env", "npk_dma_alloc",
+        |mut caller: Caller<'_, HostState>, pages: i32| -> i32 {
+            let hw = match caller.data_mut().hw.as_mut() {
+                Some(h) => h,
+                None => return -1,
+            };
+            if pages <= 0 || pages > 64 { return -1; }
+            let page_count = pages as usize;
+            if hw.dma_allocs.len() >= MAX_DMA_ALLOCS { return -1; }
+            let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
+            if total + page_count > MAX_DMA_PAGES { return -1; }
+
+            let phys = match crate::memory::allocate_contiguous(page_count) {
+                Some(p) => p,
+                None => return -1,
+            };
+            // SAFETY: zeroing freshly allocated DMA memory
+            unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
+            let handle = hw.dma_allocs.len();
+            hw.dma_allocs.push((phys, page_count));
+            handle as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_dma_phys_addr(handle) -> physical address as i64
+    linker.func_wrap("env", "npk_dma_phys_addr",
+        |caller: Caller<'_, HostState>, handle: i32| -> i64 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.dma_allocs.len() { return -1; }
+            hw.dma_allocs[h].0 as i64
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_dma_read(handle, dma_offset, wasm_ptr, len) -> 0 or -1
+    linker.func_wrap("env", "npk_dma_read",
+        |mut caller: Caller<'_, HostState>, handle: i32, dma_off: i32,
+         wasm_ptr: i32, len: i32| -> i32 {
+            let (phys, pages) = {
+                let hw = match caller.data().hw.as_ref() {
+                    Some(h) => h,
+                    None => return -1,
+                };
+                let h = handle as usize;
+                if h >= hw.dma_allocs.len() { return -1; }
+                hw.dma_allocs[h]
+            };
+            let off = dma_off as usize;
+            let length = len as usize;
+            if off + length > pages * 4096 { return -1; }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let dst = wasm_ptr as usize;
+            if dst + length > data.len() { return -1; }
+            // SAFETY: copying from validated DMA buffer to WASM linear memory
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (phys + off as u64) as *const u8,
+                    data[dst..].as_mut_ptr(),
+                    length,
+                );
+            }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_dma_write(handle, dma_offset, wasm_ptr, len) -> 0 or -1
+    linker.func_wrap("env", "npk_dma_write",
+        |caller: Caller<'_, HostState>, handle: i32, dma_off: i32,
+         wasm_ptr: i32, len: i32| -> i32 {
+            let (phys, pages) = {
+                let hw = match caller.data().hw.as_ref() {
+                    Some(h) => h,
+                    None => return -1,
+                };
+                let h = handle as usize;
+                if h >= hw.dma_allocs.len() { return -1; }
+                hw.dma_allocs[h]
+            };
+            let off = dma_off as usize;
+            let length = len as usize;
+            if off + length > pages * 4096 { return -1; }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let src = wasm_ptr as usize;
+            if src + length > data.len() { return -1; }
+            // SAFETY: copying from WASM linear memory to validated DMA buffer
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data[src..].as_ptr(),
+                    (phys + off as u64) as *mut u8,
+                    length,
+                );
+            }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_dma_read32(handle, offset) -> u32
+    linker.func_wrap("env", "npk_dma_read32",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.dma_allocs.len() { return -1; }
+            let (phys, pages) = hw.dma_allocs[h];
+            let off = offset as usize;
+            if off + 4 > pages * 4096 { return -1; }
+            // SAFETY: reading from validated DMA buffer
+            unsafe { core::ptr::read_volatile((phys + off as u64) as *const u32) as i32 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_dma_write32(handle, offset, value) -> 0 or -1
+    linker.func_wrap("env", "npk_dma_write32",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32, value: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.dma_allocs.len() { return -1; }
+            let (phys, pages) = hw.dma_allocs[h];
+            let off = offset as usize;
+            if off + 4 > pages * 4096 { return -1; }
+            // SAFETY: writing to validated DMA buffer
+            unsafe { core::ptr::write_volatile((phys + off as u64) as *mut u32, value as u32) }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_memory_fence() -> 0
+    linker.func_wrap("env", "npk_memory_fence",
+        |_caller: Caller<'_, HostState>| -> i32 {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_netdev_register(mac_ptr) -> 0 or -1
+    linker.func_wrap("env", "npk_netdev_register",
+        |mut caller: Caller<'_, HostState>, mac_ptr: i32| -> i32 {
+            let hw = match caller.data_mut().hw.as_mut() {
+                Some(h) => h,
+                None => return -1,
+            };
+            if hw.registered_as_netdev { return -1; } // already registered
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = mac_ptr as usize;
+            if start + 6 > data.len() { return -1; }
+            let mut mac = [0u8; 6];
+            mac.copy_from_slice(&data[start..start + 6]);
+
+            crate::netdev::register_wasm_nic(mac);
+            // Re-borrow after register call
+            if let Some(h) = caller.data_mut().hw.as_mut() {
+                h.registered_as_netdev = true;
+            }
+            kprintln!("[npk] WASM driver registered as NIC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     Ok(())
+}
+
+/// Free all hardware resources allocated by a WASM driver module.
+fn cleanup_hw_state(state: &mut HostState) {
+    if let Some(hw) = state.hw.take() {
+        let mut total_pages = 0usize;
+        for &(phys, pages) in &hw.dma_allocs {
+            crate::memory::deallocate_contiguous(phys, pages);
+            total_pages += pages;
+        }
+        if hw.registered_as_netdev {
+            crate::netdev::unregister_wasm_nic();
+        }
+        if !hw.dma_allocs.is_empty() || hw.registered_as_netdev {
+            kprintln!("[npk] driver cleanup: freed {} DMA buffers ({} pages)",
+                hw.dma_allocs.len(), total_pages);
+        }
+    }
 }
 
 fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<String> {
