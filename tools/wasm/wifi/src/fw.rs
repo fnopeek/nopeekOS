@@ -59,14 +59,18 @@ pub fn download(mmio: i32) -> bool {
     }
     dump_state(mmio, "pwr-on");
 
-    // ── Step 3: PCIe DMA pre-init (BEFORE DLE!) ───────────────────
-    // Must come before DLE/HFC: BDRAM reset in here would clear DLE config.
-    pcie_dma_pre_init(mmio);
+    // ── Step 3: Enable HCI DMA (rtw89_mac_ctrl_hci_dma_trx) ─────
+    // MUST come before dmac_pre_init — enables HCI TX/RX DMA engines.
+    // Without this, H2C path can never become ready.
+    host::mmio_set32(mmio, regs::R_AX_HCI_FUNC_EN, 0x03); // TXDMA_EN | RXDMA_EN
 
     // ── Step 4: DMAC/DLE/HFC pre-init for FWDL ─────────────────
     if !dmac_pre_init_dlfw(mmio) {
         host::print("[wifi] WARNING: DLE init incomplete\n");
     }
+
+    // ── Step 5: PCIe DMA pre-init ───────────────────────────────
+    pcie_dma_pre_init(mmio);
 
     // ── Step 5: Disable CPU (clean state before FWDL) ───────────
     disable_cpu(mmio);
@@ -109,8 +113,10 @@ pub fn download(mmio: i32) -> bool {
             break;
         }
         if i < 5 || i % 500 == 0 {
+            let dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
             host::print("  ["); print_dec(i as usize);
-            host::print("] FW_CTRL=0x"); host::print_hex32(val);
+            host::print("] FW=0x"); host::print_hex32(val);
+            host::print(" DBG=0x"); host::print_hex32(dbg);
             host::print("\n");
         }
         host::sleep_ms(1);
