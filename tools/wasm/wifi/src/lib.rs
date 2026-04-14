@@ -17,7 +17,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.23\n");
+    host::print("[wifi] RTL8852BE driver v0.24\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -36,20 +36,16 @@ pub extern "C" fn _start() {
     // ── Step 2: Enable bus master + memory space ──────────────────
     host::pci_enable_bus_master();
 
-    // Debug: read BAR0 before mapping
-    let bar0_lo = host::pci_read_config(0x10);
-    let bar0_hi = host::pci_read_config(0x14);
-    host::print("[wifi] BAR0: 0x");
-    host::print_hex32(bar0_hi); host::print_hex32(bar0_lo); host::print("\n");
-
-    // ── Step 3: Map BAR0 — 16 pages (64KB) for MMIO registers ───
-    let mmio = host::mmio_map_bar(0, 16);
+    // ── Step 3: Map BAR2 — RTL8852BE MMIO is on BAR2, not BAR0 ──
+    // BAR0 is I/O space (bit 0=1), BAR2 has the MMIO registers.
+    // Linux rtw89: bar_id = 2 hardcoded in rtw89_pci_setup_mapping().
+    let mmio = host::mmio_map_bar(2, 16);
     if mmio < 0 {
-        host::print("[wifi] MMIO map failed (BAR0 zero or already mapped?)\n");
+        host::print("[wifi] MMIO map BAR2 failed\n");
         return;
     }
     unsafe { MMIO = mmio; }
-    host::print("[wifi] BAR0 mapped\n");
+    host::print("[wifi] BAR2 mapped (64KB)\n");
     host::print("\n");
 
     // ── Step 4: Chip probe — read key registers ──────────────────
