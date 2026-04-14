@@ -13,6 +13,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum Priority {
     Background = 0,
     Normal = 1,
@@ -247,6 +248,7 @@ pub fn spawn(priority: Priority, func: fn(u64), arg: u64) {
 }
 
 /// Spawn a sub-task from a worker AP. Pushes to the calling core's OWN deque.
+#[allow(dead_code)]
 pub fn spawn_local(core_id: usize, priority: Priority, func: fn(u64), arg: u64) {
     let task = Task {
         id: alloc_task_id(),
@@ -303,11 +305,13 @@ pub fn clear_wake() {
 }
 
 /// Record a completed task (called after task.func returns)
+#[allow(dead_code)]
 pub fn mark_completed() {
     TASKS_COMPLETED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record a successful steal
+#[allow(dead_code)]
 pub fn mark_stolen() {
     STEALS.fetch_add(1, Ordering::Relaxed);
 }

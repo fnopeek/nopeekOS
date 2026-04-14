@@ -105,9 +105,9 @@ fn set_wallpaper(name: &str) {
     // Try resolved path first, then wallpapers/ directory as fallback
     let wp_path = alloc::format!("{}/{}", wallpaper_dir(), name);
     let (final_path, data) = match crate::npkfs::fetch(&resolved) {
-        Ok((d, h)) => (resolved, d),
+        Ok((d, _h)) => (resolved, d),
         Err(_) => match crate::npkfs::fetch(&wp_path) {
-            Ok((d, h)) => (wp_path, d),
+            Ok((d, _h)) => (wp_path, d),
             Err(_) => {
                 kprintln!("[npk] Wallpaper '{}' not found.", name);
                 return;

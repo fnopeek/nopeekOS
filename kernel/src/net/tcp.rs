@@ -163,6 +163,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
 }
 
 /// Listen on a local port. Returns handle. Use accept() to wait for connection.
+#[allow(dead_code)]
 pub fn listen(port: u16) -> Result<usize, TcpError> {
     let conn = TcpConn {
         state: State::Listen,
@@ -193,6 +194,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
 }
 
 /// Wait for an incoming connection on a listening handle. Blocking.
+#[allow(dead_code)]
 pub fn accept(handle: usize, timeout_ticks: u64) -> Result<(), TcpError> {
     let t0 = crate::interrupts::ticks();
     loop {
@@ -219,12 +221,14 @@ pub fn accept(handle: usize, timeout_ticks: u64) -> Result<(), TcpError> {
 }
 
 /// Check if a listening handle has an established connection (non-blocking).
+#[allow(dead_code)]
 pub fn is_established(handle: usize) -> bool {
     let conns = CONNECTIONS.lock();
     conns[handle].as_ref().map_or(false, |c| c.established)
 }
 
 /// Reset a connection back to Listen state (for accepting next client).
+#[allow(dead_code)]
 pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;

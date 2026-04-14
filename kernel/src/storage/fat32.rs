@@ -252,7 +252,7 @@ pub fn create_esp(
 
     // Reserve 8192 clusters (4MB) for kernel — room for OTA growth
     const KERNEL_RESERVED: u32 = 8192;
-    let kernel_sectors = ((kernel.len() + 511) / 512) as u32;
+    let _kernel_sectors = ((kernel.len() + 511) / 512) as u32;
     let kernel_cl = fs.alloc_clusters(KERNEL_RESERVED);
 
     let cfg_cl = fs.alloc_clusters(1);

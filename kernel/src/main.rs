@@ -48,8 +48,6 @@ mod process;
 #[allow(dead_code, unused_imports)]
 mod install;
 
-use alloc::string::String;
-use spin::Mutex;
 use core::panic::PanicInfo;
 
 

@@ -120,6 +120,7 @@ pub fn fill_rect(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, w: u32, h: u32,
 }
 
 /// Draw a border (outline) of given thickness.
+#[allow(dead_code)]
 pub fn draw_border(shadow: *mut u8, info: &FbInfo,
                    x: u32, y: u32, w: u32, h: u32, color: u32, thickness: u32) {
     // Top

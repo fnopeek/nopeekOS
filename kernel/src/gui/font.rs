@@ -88,6 +88,7 @@ fn draw_char_with(shadow: *mut u8, info: &FbInfo, font: &FontDesc,
 }
 
 /// Draw a single character at pixel position (UI scale).
+#[allow(dead_code)]
 pub fn draw_char(shadow: *mut u8, info: &FbInfo,
                  ch: u8, px_x: u32, px_y: u32,
                  fg: u32, bg: Option<u32>, scale: u32) {

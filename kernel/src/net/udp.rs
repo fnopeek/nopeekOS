@@ -66,6 +66,7 @@ pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
 }
 
 /// Register a listener on a UDP port. Returns false if no slot available.
+#[allow(dead_code)]
 pub fn listen(port: u16) -> bool {
     let mut listeners = LISTENERS.lock();
     // Already listening?

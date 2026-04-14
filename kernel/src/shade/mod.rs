@@ -35,6 +35,7 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// True while a render task is queued/running on a worker core.
 /// Prevents flooding the scheduler with duplicate render tasks.
+#[allow(dead_code)]
 static RENDER_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Check if layer system is usable (initialized AND matches current framebuffer).
@@ -90,11 +91,13 @@ where
 }
 
 /// Create a new window. Returns the window ID, or None if no terminal slots.
+#[allow(dead_code)]
 pub fn create_window(title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<WindowId> {
     with_compositor(|comp| comp.create_window(title, x, y, w, h)).flatten()
 }
 
 /// Close and remove a window.
+#[allow(dead_code)]
 pub fn close_window(id: WindowId) {
     with_compositor(|comp| comp.close_window(id));
 }
@@ -133,26 +136,6 @@ pub fn render_frame() {
     } else {
         render_frame_legacy();
     }
-}
-
-/// Non-blocking render: dispatches to a worker core via SMP scheduler.
-/// Core 0 returns immediately — no waiting for 4K framebuffer blit.
-/// Duplicate calls while a render is in-flight are silently skipped.
-pub fn render_frame_async() {
-    if !is_active() { return; }
-    if RENDER_PENDING.swap(true, Ordering::AcqRel) {
-        return; // Already queued — skip
-    }
-    crate::smp::scheduler::spawn(
-        crate::smp::scheduler::Priority::Interactive,
-        render_frame_task,
-        0,
-    );
-}
-
-fn render_frame_task(_arg: u64) {
-    render_frame();
-    RENDER_PENDING.store(false, Ordering::Release);
 }
 
 /// Layer-based render with double-buffer: render to back, swap, blit from front.
@@ -686,7 +669,7 @@ static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
-pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
+pub fn handle_mouse(_evt: &crate::xhci::MouseEvent) {
     // Position + cursor draw already done by timer IRQ (immediate, lock-free).
     // Main loop only needs to: redraw cursor (cleanup after blit_rect) + handle buttons.
     cursor::redraw_overlay_lockfree();

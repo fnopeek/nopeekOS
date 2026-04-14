@@ -4,6 +4,7 @@
 
 pub struct Theme;
 
+#[allow(dead_code)]
 impl Theme {
     // Background
     #[allow(dead_code)]

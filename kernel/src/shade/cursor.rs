@@ -59,12 +59,14 @@ pub fn take_dirty() -> bool {
 }
 
 /// Was left button just clicked? (lock-free)
+#[allow(dead_code)]
 pub fn atomic_left_clicked() -> bool {
     let (cur, prev) = atomic_buttons();
     (cur & 1) != 0 && (prev & 1) == 0
 }
 
 /// Was right button just clicked? (lock-free)
+#[allow(dead_code)]
 pub fn atomic_right_clicked() -> bool {
     let (cur, prev) = atomic_buttons();
     (cur & 2) != 0 && (prev & 2) == 0
@@ -113,6 +115,7 @@ static CURSOR_BITMAP: [u8; (CURSOR_W * CURSOR_H) as usize] = [
 ];
 
 /// Mouse state — position, buttons, and overlay tracking.
+#[allow(dead_code)]
 pub struct MouseState {
     pub x: i32,
     pub y: i32,
@@ -162,15 +165,18 @@ impl MouseState {
     }
     pub fn left_held(&self) -> bool { (self.buttons & 1) != 0 }
     pub fn right_held(&self) -> bool { (self.buttons & 2) != 0 }
+    #[allow(dead_code)]
     pub fn left_released(&self) -> bool {
         (self.buttons & 1) == 0 && (self.prev_buttons & 1) != 0
     }
+    #[allow(dead_code)]
     pub fn right_released(&self) -> bool {
         (self.buttons & 2) == 0 && (self.prev_buttons & 2) != 0
     }
 
     /// Redraw cursor overlay: restore old position from shadow→MMIO, draw at new position on MMIO.
     /// Call after any scene blit, or when cursor moves.
+    #[allow(dead_code)]
     pub fn redraw_overlay(&mut self, shadow: *mut u8, info: &crate::framebuffer::FbInfo) {
         let mmio = info.addr as *mut u8;
         let pitch = info.pitch as usize;
@@ -273,6 +279,7 @@ pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
 /// Draw cursor from IRQ context — no locks, no shadow restore.
 /// Writes directly to MMIO using cached framebuffer info.
 /// Any trail artifact is cleaned up by the next render_frame().
+#[allow(dead_code)]
 pub fn draw_cursor_irq() {
     let addr = IRQ_FB_ADDR.load(Ordering::Relaxed);
     if addr == 0 { return; }
@@ -285,6 +292,7 @@ pub fn draw_cursor_irq() {
 
 /// Draw cursor after scene blit. Erases old position ONLY if cursor moved
 /// (no blink when stationary, no ghost when moved).
+#[allow(dead_code)]
 pub fn draw_cursor_after_blit(fb: &mut crate::framebuffer::FbConsole) {
     let info = fb.info();
     let (shadow, _) = fb.shadow_ptr();

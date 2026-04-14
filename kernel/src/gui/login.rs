@@ -4,14 +4,14 @@
 //! with centered dots. No card container — clean, minimal.
 
 use alloc::format;
-use super::{background, color::Theme, font, render};
+use super::{color::Theme, font, render};
 use crate::framebuffer::{self, FbInfo};
 
 /// Layout computed from screen dimensions.
 struct Layout {
     scale: u32,
     screen_w: u32,
-    screen_h: u32,
+    _screen_h: u32,
     // Vertical positions (all centered horizontally)
     clock_y: u32,
     greeting_y: u32,
@@ -36,7 +36,7 @@ impl Layout {
         let status_y = input_y + input_h + 16 * scale;
 
         Layout {
-            scale, screen_w: sw, screen_h: sh,
+            scale, screen_w: sw, _screen_h: sh,
             clock_y, greeting_y,
             input_x, input_y, input_w, input_h,
             status_y,
@@ -117,22 +117,6 @@ fn draw_greeting(shadow: *mut u8, info: &FbInfo, l: &Layout) {
         Theme::FG_SECONDARY, None, l.scale);
 }
 
-/// Draw greeting with name (after config is loaded on success).
-fn draw_greeting_name(shadow: *mut u8, info: &FbInfo, l: &Layout, name: &str) {
-    let msg = format!("Hi {}", name);
-    // Clear greeting area
-    clear_greeting_area(shadow, info, l);
-    font::draw_str_centered(shadow, info,
-        &msg, 0, l.screen_w, l.greeting_y,
-        Theme::FG_PRIMARY, None, l.scale);
-}
-
-fn clear_greeting_area(shadow: *mut u8, info: &FbInfo, l: &Layout) {
-    let (_, ch) = font::char_size(l.scale);
-    let h = ch + 4 * l.scale;
-    draw_login_region(shadow, info, 0, l.greeting_y, info.width, h);
-}
-
 /// Draw the input field (light background, dark outline, rounded).
 fn draw_input_box(shadow: *mut u8, info: &FbInfo, l: &Layout, focused: bool) {
     let radius = l.input_h / 2; // Full pill shape (semicircle ends)
@@ -168,7 +152,7 @@ fn draw_dots(shadow: *mut u8, info: &FbInfo, l: &Layout, count: usize) {
     let dot_r = 3 * l.scale;
     let dot_gap = 6 * l.scale; // gap between dots
     let dot_diameter = dot_r * 2;
-    let total_w = count as u32 * dot_diameter + count.saturating_sub(1) as u32 * dot_gap;
+    let _total_w = count as u32 * dot_diameter + count.saturating_sub(1) as u32 * dot_gap;
 
     // Clamp: don't let dots exceed field width
     let outer_r = l.input_h / 2;
