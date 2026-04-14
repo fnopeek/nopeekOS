@@ -52,19 +52,24 @@ pub fn download(mmio: i32) -> bool {
     }
     dump_state(mmio, "pwr-on");
 
-    // ── Step 3: PCIe DMA pre-init ───────────────────────────────
+    // ── Step 3: DMAC/DLE/HFC pre-init for FWDL ────────────────────
+    if !dmac_pre_init_dlfw(mmio) {
+        host::print("[wifi] WARNING: DLE init incomplete\n");
+    }
+
+    // ── Step 4: PCIe DMA pre-init ───────────────────────────────
     pcie_dma_pre_init(mmio);
 
-    // ── Step 4: Disable CPU (clean state before FWDL) ───────────
+    // ── Step 5: Disable CPU (clean state before FWDL) ───────────
     disable_cpu(mmio);
 
-    // ── Step 5: Enable CPU in FWDL mode ─────────────────────────
+    // ── Step 6: Enable CPU in FWDL mode ─────────────────────────
     enable_cpu_fwdl(mmio);
     host::sleep_ms(50);
 
     dump_state(mmio, "cpu-on");
 
-    // ── Step 6: Wait for H2C_PATH_RDY ───────────────────────────
+    // ── Step 7: Wait for H2C_PATH_RDY ───────────────────────────
     host::print("[wifi] Waiting H2C path ready...\n");
     let mut h2c_ready = false;
     for i in 0..2000u32 {
@@ -455,6 +460,117 @@ fn enable_cpu_fwdl(mmio: i32) {
 // ═══════════════════════════════════════════════════════════════════
 //  PCIe DMA pre-init
 // ═══════════════════════════════════════════════════════════════════
+
+/// DLE + HFC initialization for firmware download mode.
+/// Based on rtw89_mac_dmac_pre_init → hci_func_en + dmac_func_pre_en + dle_init(DLFW) + hfc_init.
+fn dmac_pre_init_dlfw(mmio: i32) -> bool {
+    host::print("[wifi] DMAC/DLE/HFC init (DLFW)...\n");
+
+    // ── hci_func_en_ax: write (NOT set) basic DMAC enables ──────
+    let val = regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
+            | regs::B_AX_DISPATCHER_EN | regs::B_AX_PKT_BUF_EN;
+    host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, val);
+
+    // ── dmac_func_pre_en_ax: enable dispatcher clock ────────────
+    const B_AX_DISPATCHER_CLK_EN: u32 = 1 << 18;
+    host::mmio_w32(mmio, regs::R_AX_DMAC_CLK_EN, B_AX_DISPATCHER_CLK_EN);
+
+    // ── dle_init(RTW89_QTA_DLFW) ────────────────────────────────
+
+    // 1. Disable DLE
+    host::mmio_clr32(mmio, regs::R_AX_DMAC_FUNC_EN,
+        regs::B_AX_DLE_WDE_EN | regs::B_AX_DLE_PLE_EN);
+
+    // 2. Enable DLE clocks
+    const B_AX_DLE_WDE_CLK_EN: u32 = 1 << 26;
+    const B_AX_DLE_PLE_CLK_EN: u32 = 1 << 23;
+    host::mmio_set32(mmio, regs::R_AX_DMAC_CLK_EN,
+        B_AX_DLE_WDE_CLK_EN | B_AX_DLE_PLE_CLK_EN);
+
+    // 3. Configure WDE buffer: wde_size9 = {PG_64, lnk=0, unlnk=1024}
+    //    page_sel=0(64B), bound=0, free_page_num=0
+    let mut wde = host::mmio_r32(mmio, regs::R_AX_WDE_PKTBUF_CFG);
+    wde &= !(0x3 | (0x3F << 8) | (0x1FFF << 16));
+    // page_sel=0, bound=0, free_pages=0
+    host::mmio_w32(mmio, regs::R_AX_WDE_PKTBUF_CFG, wde);
+
+    // 4. Configure PLE buffer: ple_size8 = {PG_128, lnk=64, unlnk=960}
+    //    WDE total = (0+1024)*64 = 65536, bound = 65536/8192 = 8
+    //    page_sel=1(128B), bound=8, free_page_num=64
+    let mut ple = host::mmio_r32(mmio, regs::R_AX_PLE_PKTBUF_CFG);
+    ple &= !(0x3 | (0x3F << 8) | (0x1FFF << 16));
+    ple |= 1;           // page_sel = 1 (128-byte pages)
+    ple |= 8 << 8;      // start_bound = 8
+    ple |= 64 << 16;    // free_page_num = 64
+    host::mmio_w32(mmio, regs::R_AX_PLE_PKTBUF_CFG, ple);
+
+    // 5. Set quotas (DLFW mode: wde_qt4 all zeros, ple_qt13 minimal)
+    //    WDE: all 4 channels = {min=0, max=0}
+    for i in 0u32..4 {
+        host::mmio_w32(mmio, 0x8C40 + i * 4, 0); // R_AX_WDE_QTAn_CFG
+    }
+    //    PLE: qt13 = {0,0,16,48, 0,0,0,0, 0,0,0}
+    //    Format: min[11:0] | max[27:16]
+    let ple_qt: [u32; 11] = [
+        0,                          // QTA0: mpdu  {min=0, max=0}
+        0,                          // QTA1: qtv   {min=0, max=0}
+        (16 << 16) | 16,           // QTA2: cpuio {min=16, max=16}
+        (48 << 16) | 48,           // QTA3: wcpu  {min=48, max=48}
+        0, 0, 0, 0, 0, 0, 0,      // QTA4-QTA10: all zero
+    ];
+    for i in 0u32..11 {
+        host::mmio_w32(mmio, 0x9040 + i * 4, ple_qt[i as usize]);
+    }
+
+    // 6. Enable DLE
+    host::mmio_set32(mmio, regs::R_AX_DMAC_FUNC_EN,
+        regs::B_AX_DLE_WDE_EN | regs::B_AX_DLE_PLE_EN);
+
+    // 7. Poll WDE ready (R_AX_WDE_INI_STATUS bits [1:0] = 0x3)
+    let mut wde_ok = false;
+    for _ in 0..200 {
+        if host::mmio_r32(mmio, 0x8D00) & 0x3 == 0x3 {
+            wde_ok = true;
+            break;
+        }
+        host::sleep_ms(1);
+    }
+    if !wde_ok {
+        host::print("  WDE not ready: 0x");
+        host::print_hex32(host::mmio_r32(mmio, 0x8D00));
+        host::print("\n");
+    }
+
+    // 8. Poll PLE ready (R_AX_PLE_INI_STATUS bits [1:0] = 0x3)
+    let mut ple_ok = false;
+    for _ in 0..200 {
+        if host::mmio_r32(mmio, 0x9100) & 0x3 == 0x3 {
+            ple_ok = true;
+            break;
+        }
+        host::sleep_ms(1);
+    }
+    if !ple_ok {
+        host::print("  PLE not ready: 0x");
+        host::print_hex32(host::mmio_r32(mmio, 0x9100));
+        host::print("\n");
+    }
+
+    // ── hfc_init(reset=true, en=false, h2c_en=true) ────────────
+    // For DLFW: only enable CH12 (H2C) flow control, not full HFC
+    let mut hfc = host::mmio_r32(mmio, 0x8A00); // R_AX_HCI_FC_CTRL
+    hfc &= !(1u32); // clear HCI_FC_EN
+    hfc |= 1 << 3;  // set HCI_FC_CH12_EN
+    host::mmio_w32(mmio, 0x8A00, hfc);
+
+    host::print("  DLE: WDE=");
+    host::print(if wde_ok { "OK" } else { "FAIL" });
+    host::print(" PLE=");
+    host::print(if ple_ok { "OK" } else { "FAIL" });
+    host::print("\n");
+
+    wde_ok && ple_ok
+}
 
 /// Setup PCIe DMA: stop all channels, reset BDRAM, re-enable HCI for CH12.
 fn pcie_dma_pre_init(mmio: i32) {
