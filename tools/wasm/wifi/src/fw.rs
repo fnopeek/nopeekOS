@@ -184,13 +184,16 @@ fn power_cycle(mmio: i32) {
     host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
 
     // Poll until OFFMAC clears (hardware auto-clears when done)
+    let mut off_ok = false;
     for _ in 0..200 {
         let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-        if v & regs::B_AX_APFM_OFFMAC == 0 { break; }
+        if v & regs::B_AX_APFM_OFFMAC == 0 { off_ok = true; break; }
         host::sleep_ms(1);
     }
     host::sleep_ms(10);
-    host::print("  MAC powered off\n");
+    let pw_off = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    host::print("  PW_CTRL after off: 0x"); host::print_hex32(pw_off);
+    if off_ok { host::print(" (OFFMAC cleared)\n"); } else { host::print(" (OFFMAC STUCK!)\n"); }
 
     // ── Phase 2: Power ON ───────────────────────────────────────
 
@@ -222,19 +225,24 @@ fn power_cycle(mmio: i32) {
     host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
 
     // Poll until ONMAC clears (hardware auto-clears when done)
+    let mut on_ok = false;
     for _ in 0..200 {
         let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-        if v & regs::B_AX_APFN_ONMAC == 0 { break; }
+        if v & regs::B_AX_APFN_ONMAC == 0 { on_ok = true; break; }
         host::sleep_ms(1);
     }
     host::sleep_ms(10);
+    let pw_on = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    host::print("  PW_CTRL after on: 0x"); host::print_hex32(pw_on);
+    if on_ok { host::print(" (ONMAC cleared)\n"); } else { host::print(" (ONMAC STUCK!)\n"); }
 
-    // Verify SYS_STATUS1 — firmware should NOT be running now
+    let fw_after = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::print("  FW_CTRL after power cycle: 0x"); host::print_hex32(fw_after);
+    let fwdl_sts = (fw_after >> 5) & 0x7;
+    host::print(" (FWDL_STS="); print_dec(fwdl_sts as usize); host::print(")\n");
+
     let status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
-    host::print("  SYS_STATUS1 after power cycle: 0x");
-    host::print_hex32(status);
-    host::print("\n");
-    host::print("  MAC powered on\n");
+    host::print("  SYS_STATUS1: 0x"); host::print_hex32(status); host::print("\n");
 }
 
 /// Enable CPU in firmware download mode
@@ -318,11 +326,21 @@ fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
 /// Wait for FWDL path to be ready (poll R_AX_WCPU_FW_CTRL bit 2)
 fn wait_fwdl_path_ready(mmio: i32) -> bool {
     host::print("[wifi] Waiting for FWDL path ready...\n");
-    for _ in 0..1000 {
+    let mut last_val = 0u32;
+    for i in 0..2000 { // 2 seconds
         let val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
         if val & regs::B_AX_FWDL_PATH_RDY != 0 {
-            host::print("[wifi] FWDL path ready\n");
+            host::print("[wifi] FWDL path ready! FW_CTRL=0x");
+            host::print_hex32(val);
+            host::print("\n");
             return true;
+        }
+        // Log changes
+        if val != last_val && (i < 10 || i % 100 == 0) {
+            host::print("  poll["); print_dec(i); host::print("]: FW_CTRL=0x");
+            host::print_hex32(val);
+            host::print("\n");
+            last_val = val;
         }
         host::sleep_ms(1);
     }
