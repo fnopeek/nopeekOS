@@ -86,60 +86,77 @@ pub fn download(mmio: i32) -> bool {
     true
 }
 
-/// PCIe DMA pre-init: stop DMA, clear indices, reset BDRAM, enable only CH12
-/// This is required before FWDL path becomes ready.
-/// Based on rtw89_pci_ops_mac_pre_init_ax().
+/// PCIe DMA pre-init: hard-stop ALL DMA, reset MAC, clear indices, enable CH12.
+/// The UEFI leaves the chip in an active DMA state — we need an aggressive reset.
 fn pcie_dma_pre_init(mmio: i32) {
     host::print("[wifi] PCIe DMA pre-init...\n");
 
-    // 1. Stop WPDMA
-    let mut val = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
-    val |= regs::B_AX_STOP_WPDMA;
-    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, val);
+    // 0. Show initial DMA state
+    let busy0 = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+    host::print("  DMA_BUSY before: 0x"); host::print_hex32(busy0); host::print("\n");
 
-    // 2. Disable HCI TX/RX DMA
+    // 1. Hard-stop ALL DMA: set every stop bit
+    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0xFFFFFFFF);
+    host::sleep_ms(2);
+
+    // 2. Disable HCI TX/RX
     let mut cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
     cfg &= !(regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
     host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
+    host::sleep_ms(2);
 
-    // 3. Wait for DMA idle
-    for _ in 0..1000 {
+    // 3. Reset SYS_FUNC_EN to force MAC/HCI reset
+    let func = host::mmio_r32(mmio, regs::R_AX_SYS_FUNC_EN);
+    // Clear and re-set function enable to force reset
+    host::mmio_w32(mmio, regs::R_AX_SYS_FUNC_EN, 0);
+    host::sleep_ms(2);
+    host::mmio_w32(mmio, regs::R_AX_SYS_FUNC_EN, func);
+    host::sleep_ms(5);
+
+    // 4. Stop DMA again after reset
+    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0xFFFFFFFF);
+    host::sleep_ms(2);
+
+    // 5. Wait for DMA idle (up to 500ms)
+    let mut idle = false;
+    for i in 0..50 {
         let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
-        if busy == 0 { break; }
-        host::sleep_ms(1);
+        if busy == 0 { idle = true; break; }
+        if i == 49 {
+            host::print("  DMA_BUSY still: 0x"); host::print_hex32(busy);
+            host::print(" (continuing anyway)\n");
+        }
+        host::sleep_ms(10);
     }
+    if idle { host::print("  DMA idle\n"); }
 
-    // 4. Clear all TX/RX ring indices
-    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, regs::B_AX_CLR_ALL_CH);
-    host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0x3); // clear RXQ + RPQ
+    // 6. Clear ALL TX/RX ring indices
+    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0xFFFFFFFF);
+    host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0xFFFFFFFF);
+    host::sleep_ms(1);
 
-    // 5. Reset BDRAM
+    // 7. Reset BDRAM
     cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
     cfg |= regs::B_AX_RST_BDRAM;
     host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
-    // Poll until BDRAM reset clears
-    for _ in 0..1000 {
+    for _ in 0..100 {
         let v = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
         if v & regs::B_AX_RST_BDRAM == 0 { break; }
         host::sleep_ms(1);
     }
 
-    // 6. Stop all TX DMA channels, then enable only CH12 for FWDL
-    let mut stop = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
-    stop |= 0x7FFFF; // stop all channels (bits [18:0])
-    stop &= !regs::B_AX_STOP_CH12; // but clear CH12 stop → enable CH12
+    // 8. Configure DMA stop: stop all channels EXCEPT CH12
+    let stop = 0x0007FFFF & !regs::B_AX_STOP_CH12; // all channels stopped, CH12 open
     host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, stop);
+    host::sleep_ms(1);
 
-    // 7. Clear WPDMA stop + PCIEIO stop
-    stop = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
-    stop &= !(regs::B_AX_STOP_WPDMA | regs::B_AX_STOP_PCIEIO);
-    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, stop);
-
-    // 8. Re-enable HCI TX/RX DMA
+    // 9. Re-enable HCI TX/RX DMA
     cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
     cfg |= regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN;
     host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
 
+    let busy1 = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+    host::print("  DMA_BUSY after: 0x"); host::print_hex32(busy1); host::print("\n");
     host::print("[wifi] PCIe DMA pre-init done\n");
 }
 
