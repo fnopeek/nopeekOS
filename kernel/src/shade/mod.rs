@@ -514,8 +514,10 @@ pub fn render_input_line() {
 
 /// Progressive render: if terminal has new output, re-render the focused window's text.
 /// Fast path: only redraws text layer. Call from net::poll().
+/// Only Core 0 may call this — compositor + framebuffer are not thread-safe.
 pub fn poll_render() {
     if !is_active() { return; }
+    if crate::smp::per_core::current_core_id() != 0 { return; }
 
     // Tick swap animation (smooth window transition)
     let animating = with_compositor(|comp| comp.tick_animation()).unwrap_or(false);
