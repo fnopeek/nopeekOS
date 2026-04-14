@@ -57,22 +57,10 @@ pub fn download(mmio: i32) -> bool {
     let fw_d = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
     host::print("  FW_CTRL after disable: 0x"); host::print_hex32(fw_d); host::print("\n");
 
-    // Step 2: PCIe DMA pre-init (CRITICAL — FWDL path won't be ready without this)
-    pcie_dma_pre_init(mmio);
-    host::sleep_ms(10);
-
-    // Step 3: Setup H2C ring (CH12) for DMA transfer
-    let (ring_dma, data_dma) = match setup_ch12_ring(mmio) {
-        Some(r) => r,
-        None => {
-            host::print("[wifi] CH12 ring setup failed\n");
-            return false;
-        }
-    };
-
-    // Step 4: Enable CPU in firmware download mode
+    // Step 2: Enable CPU in FWDL mode — NO DMA pre-init!
+    // Keep UEFI's DLE/HFC/DMA config intact. Just restart CPU.
     enable_cpu_fwdl(mmio);
-    host::sleep_ms(10);
+    host::sleep_ms(50);
 
     // Step 5: Wait for H2C_PATH_RDY (bit 1) — comes FIRST, before header!
     // rtw89: fwdl_check_path_ready(true) checks H2C path, not FWDL path
@@ -97,7 +85,16 @@ pub fn download(mmio: i32) -> bool {
         return false;
     }
 
-    // Step 6: Send firmware HEADER via CH12 DMA
+    // Step 6: Setup CH12 ring NOW (after H2C path is ready)
+    let (ring_dma, data_dma) = match setup_ch12_ring(mmio) {
+        Some(r) => r,
+        None => {
+            host::print("[wifi] CH12 ring setup failed\n");
+            return false;
+        }
+    };
+
+    // Step 7: Send firmware HEADER via CH12 DMA
     let hdr_len = fw_header_len();
     host::print("[wifi] Sending FW header (");
     print_dec(hdr_len);
@@ -105,17 +102,17 @@ pub fn download(mmio: i32) -> bool {
     send_fw_chunk(ring_dma, data_dma, mmio, 0, hdr_len);
     host::sleep_ms(20);
 
-    // Step 7: Wait for FWDL_PATH_RDY (bit 2) — comes AFTER header!
+    // Step 8: Wait for FWDL_PATH_RDY (bit 2) — comes AFTER header!
     if !wait_fwdl_path_ready(mmio) {
         host::print("[wifi] FWDL path not ready after header\n");
         return false;
     }
 
-    // Step 8: Clear halt channels
+    // Step 9: Clear halt channels
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
-    // Step 9: Send remaining firmware body in chunks
+    // Step 10: Send remaining firmware body in chunks
     send_firmware_body(mmio, ring_dma, data_dma, hdr_len);
 
     // Step 9: Wait for firmware ready
