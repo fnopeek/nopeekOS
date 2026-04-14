@@ -139,6 +139,48 @@ pub fn deallocate_frame(addr: u64) {
 }
 
 /// Allocate `count` contiguous physical frames. Returns base physical address.
+/// Allocate contiguous frames below a physical address limit.
+/// `limit_bytes` = 0 means no limit (use all memory).
+pub fn allocate_contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> {
+    if count == 0 { return None; }
+    let mut alloc = ALLOCATOR.lock();
+    let top = if limit_bytes > 0 {
+        let max_frame = (limit_bytes / PAGE_SIZE as u64) as usize;
+        max_frame.min(alloc.memory_top)
+    } else {
+        alloc.memory_top
+    };
+    if count > top { return None; }
+
+    let mut start = top - count;
+    loop {
+        let mut ok = true;
+        let mut skip_to = start;
+        for i in 0..count {
+            let frame = start + i;
+            let (byte, bit) = (frame / 8, frame % 8);
+            if alloc.bitmap[byte] & (1 << bit) != 0 {
+                ok = false;
+                if start == 0 { return None; }
+                skip_to = if frame > count { frame - count } else { 0 };
+                break;
+            }
+        }
+        if ok {
+            for i in 0..count {
+                alloc.set_used(start + i);
+            }
+            return Some((start * PAGE_SIZE) as u64);
+        }
+        if skip_to >= start {
+            if start == 0 { return None; }
+            start -= 1;
+        } else {
+            start = skip_to;
+        }
+    }
+}
+
 pub fn allocate_contiguous(count: usize) -> Option<u64> {
     if count == 0 { return None; }
     let mut alloc = ALLOCATOR.lock();

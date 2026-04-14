@@ -914,7 +914,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
             if total + page_count > MAX_DMA_PAGES { return -1; }
 
-            let phys = match crate::memory::allocate_contiguous(page_count) {
+            // DMA buffers MUST be below 4GB — PCIe TX BD has 32-bit address field
+            let phys = match crate::memory::allocate_contiguous_below(page_count, 0x1_0000_0000) {
                 Some(p) => p,
                 None => return -1,
             };
