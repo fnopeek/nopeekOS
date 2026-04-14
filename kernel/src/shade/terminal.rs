@@ -3,15 +3,19 @@
 //! Each window gets its own TerminalBuffer. kprintln output goes to the
 //! active (focused) terminal. Windows are completely independent.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use alloc::boxed::Box;
 
 /// Maximum lines and columns in each terminal buffer.
 const MAX_LINES: usize = 1000;
 const MAX_COLS: usize = 256;
-/// Maximum number of independent terminal sessions.
-const MAX_TERMINALS: usize = 16;
+const MAX_INPUT: usize = 512;
 
-/// Terminal text buffer (one per window).
+/// Terminal slots — u8 index range, only pointers stored statically (~2KB).
+/// Actual TerminalBuffers (~264KB each) are heap-allocated on demand.
+const MAX_SLOTS: usize = 256;
+
+/// Terminal text buffer (one per window, heap-allocated on demand).
 pub struct TerminalBuffer {
     lines: [[u8; MAX_COLS]; MAX_LINES],
     lens: [usize; MAX_LINES],
@@ -21,19 +25,23 @@ pub struct TerminalBuffer {
     col: usize,
     /// View scroll offset (lines from bottom, 0 = latest).
     pub scroll_offset: usize,
-    /// Whether this slot is in use.
-    pub in_use: bool,
+    /// Saved input state (for window focus switching).
+    saved_input: [u8; MAX_INPUT],
+    saved_pos: usize,
+    saved_cursor: usize,
 }
 
 impl TerminalBuffer {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         TerminalBuffer {
             lines: [[0; MAX_COLS]; MAX_LINES],
             lens: [0; MAX_LINES],
             total: 0,
             col: 0,
             scroll_offset: 0,
-            in_use: false,
+            saved_input: [0; MAX_INPUT],
+            saved_pos: 0,
+            saved_cursor: 0,
         }
     }
 
@@ -110,16 +118,24 @@ impl TerminalBuffer {
     }
 }
 
-/// All terminal buffers.
-static mut TERMINALS: [TerminalBuffer; MAX_TERMINALS] = {
-    const INIT: TerminalBuffer = TerminalBuffer::new();
-    [INIT; MAX_TERMINALS]
+/// Heap-allocated terminal buffers. Pointer is non-null when slot is in use.
+static TERM_PTRS: [AtomicPtr<TerminalBuffer>; MAX_SLOTS] = {
+    const NULL: AtomicPtr<TerminalBuffer> = AtomicPtr::new(core::ptr::null_mut());
+    [NULL; MAX_SLOTS]
 };
 
-/// Per-terminal saved input state (for switching between windows).
-const MAX_INPUT: usize = 512;
-static mut SAVED_INPUT: [[u8; MAX_INPUT]; MAX_TERMINALS] = [[0; MAX_INPUT]; MAX_TERMINALS];
-static mut SAVED_POS: [usize; MAX_TERMINALS] = [0; MAX_TERMINALS];
+/// Get a shared reference to a terminal buffer (None if slot empty).
+fn term_ref(idx: usize) -> Option<&'static TerminalBuffer> {
+    let ptr = TERM_PTRS[idx].load(Ordering::Acquire);
+    if ptr.is_null() { None } else { unsafe { Some(&*ptr) } }
+}
+
+/// Get a mutable reference to a terminal buffer (None if slot empty).
+/// SAFETY: Only called from Core 0 or with exclusive access (output redirect).
+fn term_mut(idx: usize) -> Option<&'static mut TerminalBuffer> {
+    let ptr = TERM_PTRS[idx].load(Ordering::Acquire);
+    if ptr.is_null() { None } else { unsafe { Some(&mut *ptr) } }
+}
 
 /// Currently active terminal index (receives kprintln output).
 static ACTIVE_IDX: AtomicU8 = AtomicU8::new(0);
@@ -153,9 +169,7 @@ pub fn set_cursor_pos(pos: usize) {
 pub fn rewrite_input(input: &[u8], input_len: usize) {
     if !is_active() { return; }
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return; }
-    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-    let term = &mut terms[idx];
+    let term = match term_mut(idx) { Some(t) => t, None => return };
     let line_idx = term.total % MAX_LINES;
 
     // Find prompt length: everything already on the line before user input starts.
@@ -189,17 +203,14 @@ pub fn set_prompt_len(len: usize) {
 /// Get the current line length in the active terminal (for cursor offset calculation).
 pub fn current_line_len() -> usize {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return 0; }
-    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
-    terms[idx].current_line().1
+    match term_ref(idx) { Some(t) => t.current_line().1, None => 0 }
 }
 
 /// Get the current (input) line data and length from the active terminal.
 pub fn current_line_data() -> ([u8; 256], usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return ([0; 256], 0); }
-    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
-    let (data, len) = terms[idx].current_line();
+    let term = match term_ref(idx) { Some(t) => t, None => return ([0; 256], 0) };
+    let (data, len) = term.current_line();
     let mut buf = [0u8; 256];
     let copy_len = len.min(256);
     buf[..copy_len].copy_from_slice(&data[..copy_len]);
@@ -209,9 +220,7 @@ pub fn current_line_data() -> ([u8; 256], usize) {
 /// Get total line count in the active terminal (for input line Y calculation).
 pub fn line_count() -> usize {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return 0; }
-    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
-    terms[idx].total
+    match term_ref(idx) { Some(t) => t.total, None => 0 }
 }
 
 /// Get the input cursor position.
@@ -229,24 +238,26 @@ pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
-/// Allocate a new terminal buffer. Returns index (0-7) or None if full.
+/// Allocate a new terminal buffer on the heap. Returns index or None if out of memory.
 pub fn allocate() -> Option<u8> {
-    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-    for (i, t) in terms.iter_mut().enumerate() {
-        if !t.in_use {
-            t.in_use = true;
-            t.clear();
+    for i in 0..MAX_SLOTS {
+        if TERM_PTRS[i].load(Ordering::Acquire).is_null() {
+            let term = Box::new(TerminalBuffer::new());
+            let ptr = Box::into_raw(term);
+            // SAFETY: Core 0 only, no concurrent allocation race
+            TERM_PTRS[i].store(ptr, Ordering::Release);
             return Some(i as u8);
         }
     }
     None
 }
 
-/// Free a terminal buffer.
+/// Free a terminal buffer (returns heap memory).
 pub fn free(idx: u8) {
-    if (idx as usize) < MAX_TERMINALS {
-        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-        terms[idx as usize].in_use = false;
+    let ptr = TERM_PTRS[idx as usize].swap(core::ptr::null_mut(), Ordering::AcqRel);
+    if !ptr.is_null() {
+        // SAFETY: ptr was created by Box::into_raw in allocate()
+        unsafe { drop(Box::from_raw(ptr)); }
     }
 }
 
@@ -264,17 +275,13 @@ pub fn set_active_terminal(idx: u8) {
 pub fn clear() {
     if !is_active() { return; }
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx < MAX_TERMINALS {
-        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-        terms[idx].clear();
-    }
+    if let Some(t) = term_mut(idx) { t.clear(); }
 }
 
 /// Clear a specific terminal by index (for WASM apps on worker cores).
 pub fn clear_idx(idx: usize) {
-    if idx < MAX_TERMINALS {
-        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-        terms[idx].clear();
+    if let Some(t) = term_mut(idx) {
+        t.clear();
         DIRTY.store(true, Ordering::Release);
     }
 }
@@ -302,7 +309,7 @@ pub fn output_redirect_terminal() -> Option<u8> {
     // SAFETY: APIC MMIO is identity-mapped, reading LAPIC ID register
     let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
     let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Acquire);
-    if redirect < MAX_TERMINALS as u8 { Some(redirect) } else { None }
+    if redirect != 255 && term_ref(redirect as usize).is_some() { Some(redirect) } else { None }
 }
 
 /// Clear output redirect for the current core.
@@ -324,7 +331,7 @@ pub fn write(s: &str) {
         // SAFETY: APIC MMIO is identity-mapped
         let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
         let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Relaxed);
-        if redirect < MAX_TERMINALS as u8 {
+        if redirect != 255 {
             write_idx(redirect as usize, s);
             return;
         }
@@ -332,24 +339,22 @@ pub fn write(s: &str) {
 
     // Default: write to active terminal (Core 0 path)
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx < MAX_TERMINALS {
-        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-        terms[idx].write_str(s);
+    if let Some(t) = term_mut(idx) {
+        t.write_str(s);
         DIRTY.store(true, Ordering::Release);
     }
 }
 
 /// Per-terminal dirty flags (set by worker-core WASM output, read by poll_render).
-static TERM_DIRTY: [AtomicBool; MAX_TERMINALS] = {
+static TERM_DIRTY: [AtomicBool; MAX_SLOTS] = {
     const FALSE: AtomicBool = AtomicBool::new(false);
-    [FALSE; MAX_TERMINALS]
+    [FALSE; MAX_SLOTS]
 };
 
 /// Write to a specific terminal by index (for WASM apps on worker cores).
 pub fn write_idx(idx: usize, s: &str) {
-    if idx < MAX_TERMINALS {
-        let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-        terms[idx].write_str(s);
+    if let Some(t) = term_mut(idx) {
+        t.write_str(s);
         TERM_DIRTY[idx].store(true, Ordering::Release);
         DIRTY.store(true, Ordering::Release);
     }
@@ -357,12 +362,12 @@ pub fn write_idx(idx: usize, s: &str) {
 
 /// Check if a specific terminal has new content.
 pub fn is_term_dirty(idx: usize) -> bool {
-    if idx < MAX_TERMINALS { TERM_DIRTY[idx].load(Ordering::Acquire) } else { false }
+    if idx < MAX_SLOTS { TERM_DIRTY[idx].load(Ordering::Acquire) } else { false }
 }
 
 /// Clear per-terminal dirty flag.
 pub fn clear_term_dirty(idx: usize) {
-    if idx < MAX_TERMINALS { TERM_DIRTY[idx].store(false, Ordering::Release); }
+    if idx < MAX_SLOTS { TERM_DIRTY[idx].store(false, Ordering::Release); }
 }
 
 /// Check if terminal has new content since last render.
@@ -388,7 +393,7 @@ pub fn render_to_window(
     _scale: u32,
     terminal_idx: u8,
 ) {
-    if (terminal_idx as usize) >= MAX_TERMINALS { return; }
+    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return };
 
     let (char_w, char_h) = crate::gui::font::char_size(1);
     let cols = w / char_w;
@@ -396,8 +401,6 @@ pub fn render_to_window(
     if cols == 0 || rows == 0 { return; }
 
     let visible_rows = rows as usize;
-    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
-    let term = &terms[terminal_idx as usize];
 
     let lines: alloc::vec::Vec<(alloc::vec::Vec<u8>, usize)> = term.visible_lines(visible_rows)
         .map(|(data, len)| {
@@ -450,15 +453,12 @@ pub fn render_input_line(
     win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
     terminal_idx: u8,
 ) -> Option<(u32, u32, u32, u32)> {
-    if (terminal_idx as usize) >= MAX_TERMINALS { return None; }
+    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return None };
 
     let (char_w, char_h) = crate::gui::font::char_size(1);
     let cols = win_cw / char_w;
     let rows = win_ch / char_h;
     if cols == 0 || rows == 0 { return None; }
-
-    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
-    let term = &terms[terminal_idx as usize];
 
     // Calculate Y position of the last visible line
     let visible_rows = rows as usize;
@@ -534,15 +534,12 @@ pub fn render_input_line_to_layer(
     win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
     terminal_idx: u8,
 ) -> Option<(u32, u32, u32, u32)> {
-    if (terminal_idx as usize) >= MAX_TERMINALS { return None; }
+    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return None };
 
     let (char_w, char_h) = crate::gui::font::char_size(1);
     let cols = win_cw / char_w;
     let rows = win_ch / char_h;
     if cols == 0 || rows == 0 { return None; }
-
-    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
-    let term = &terms[terminal_idx as usize];
 
     let visible_rows = rows as usize;
     let end = term.total + 1;
@@ -600,13 +597,10 @@ pub fn cache_input_line_bg(
     win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
     terminal_idx: u8,
 ) {
-    if (terminal_idx as usize) >= MAX_TERMINALS { return; }
+    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return };
     let (_, char_h) = crate::gui::font::char_size(1);
     let rows = win_ch / char_h;
     if rows == 0 { return; }
-
-    let terms = unsafe { &*core::ptr::addr_of!(TERMINALS) };
-    let term = &terms[terminal_idx as usize];
     let visible_count = (rows as usize).min(term.total + 1);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
@@ -651,46 +645,34 @@ pub fn invalidate_input_cache() {
 /// Scroll the active terminal up (show older content).
 pub fn scroll_up(lines: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return; }
-    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-    let term = &mut terms[idx];
-    let max_scroll = term.total.saturating_sub(10); // Don't scroll past beginning
-    term.scroll_offset = (term.scroll_offset + lines).min(max_scroll);
-    DIRTY.store(true, Ordering::Release);
+    if let Some(term) = term_mut(idx) {
+        let max_scroll = term.total.saturating_sub(10);
+        term.scroll_offset = (term.scroll_offset + lines).min(max_scroll);
+        DIRTY.store(true, Ordering::Release);
+    }
 }
 
 /// Scroll the active terminal down (show newer content).
 pub fn scroll_down(lines: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return; }
-    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-    let term = &mut terms[idx];
-    term.scroll_offset = term.scroll_offset.saturating_sub(lines);
-    DIRTY.store(true, Ordering::Release);
+    if let Some(term) = term_mut(idx) {
+        term.scroll_offset = term.scroll_offset.saturating_sub(lines);
+        DIRTY.store(true, Ordering::Release);
+    }
 }
 
 /// Reset scroll to bottom (show latest content).
 pub fn scroll_reset() {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return; }
-    let terms = unsafe { &mut *core::ptr::addr_of_mut!(TERMINALS) };
-    terms[idx].scroll_offset = 0;
+    if let Some(term) = term_mut(idx) { term.scroll_offset = 0; }
 }
 
-/// Per-terminal saved cursor position.
-static mut SAVED_CURSOR: [usize; MAX_TERMINALS] = [0; MAX_TERMINALS];
-
 /// Restore cursor position from per-terminal saved state.
-/// Called during focus_window() to sync global cursor with new terminal.
-/// Clamps to saved input length — never positions cursor beyond actual content.
 pub fn restore_cursor() {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return; }
-    let spos = unsafe { &*core::ptr::addr_of!(SAVED_POS) };
-    let scur = unsafe { &*core::ptr::addr_of!(SAVED_CURSOR) };
-    let pos = spos[idx];
-    let cursor = scur[idx].min(pos);
-    // Set cursor relative to current line content
+    let term = match term_ref(idx) { Some(t) => t, None => return };
+    let pos = term.saved_pos;
+    let cursor = term.saved_cursor.min(pos);
     let line_len = current_line_len();
     set_cursor_pos(line_len.saturating_sub(pos.saturating_sub(cursor)));
 }
@@ -703,27 +685,20 @@ pub fn save_input(buf: &[u8], pos: usize) {
 /// Save input buffer, pos, and cursor position.
 pub fn save_input_with_cursor(buf: &[u8], pos: usize, cursor: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return; }
-    let saved = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_INPUT) };
-    let spos = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_POS) };
-    let scur = unsafe { &mut *core::ptr::addr_of_mut!(SAVED_CURSOR) };
+    let term = match term_mut(idx) { Some(t) => t, None => return };
     let len = pos.min(MAX_INPUT);
-    saved[idx][..len].copy_from_slice(&buf[..len]);
-    spos[idx] = len;
-    scur[idx] = cursor.min(len);
+    term.saved_input[..len].copy_from_slice(&buf[..len]);
+    term.saved_pos = len;
+    term.saved_cursor = cursor.min(len);
 }
 
-/// Restore the saved input buffer from the active terminal.
-/// Returns (pos, cursor).
+/// Restore the saved input buffer from the active terminal. Returns (pos, cursor).
 pub fn restore_input_with_cursor(buf: &mut [u8]) -> (usize, usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if idx >= MAX_TERMINALS { return (0, 0); }
-    let saved = unsafe { &*core::ptr::addr_of!(SAVED_INPUT) };
-    let spos = unsafe { &*core::ptr::addr_of!(SAVED_POS) };
-    let scur = unsafe { &*core::ptr::addr_of!(SAVED_CURSOR) };
-    let len = spos[idx].min(buf.len());
-    buf[..len].copy_from_slice(&saved[idx][..len]);
-    (len, scur[idx].min(len))
+    let term = match term_ref(idx) { Some(t) => t, None => return (0, 0) };
+    let len = term.saved_pos.min(buf.len());
+    buf[..len].copy_from_slice(&term.saved_input[..len]);
+    (len, term.saved_cursor.min(len))
 }
 
 /// Restore the saved input buffer from the active terminal (legacy, cursor=pos).
