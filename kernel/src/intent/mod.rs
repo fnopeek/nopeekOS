@@ -981,7 +981,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             crate::shade::render_frame();
         }
 
-        need_prompt = true;
+        // Don't print prompt if dispatch spawned a WASM app (e.g. top)
+        let term_idx = crate::shade::terminal::active_idx();
+        if !crate::wasm::has_wasm_app(term_idx) {
+            need_prompt = true;
+        }
     }
 }
 
