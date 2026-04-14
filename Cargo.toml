@@ -1,6 +1,6 @@
 [workspace]
 members = ["kernel"]
-exclude = ["tools/wasm/wallpaper", "tools/wasm/top"]
+exclude = ["tools/wasm/wallpaper", "tools/wasm/top", "tools/wasm/wifi"]
 resolver = "2"
 
 [profile.dev]
