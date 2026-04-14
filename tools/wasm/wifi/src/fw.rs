@@ -286,9 +286,9 @@ fn pwr_on(mmio: i32) -> bool {
     host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APDM_HPDN);
     host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APFM_SWLPS);
 
-    // Poll RDY_SYSPWR
+    // Poll RDY_SYSPWR (up to 100ms after FLR)
     let mut ok = false;
-    for _ in 0..20 {
+    for _ in 0..100 {
         if host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL) & regs::B_AX_RDY_SYSPWR != 0 {
             ok = true;
             break;
@@ -300,7 +300,7 @@ fn pwr_on(mmio: i32) -> bool {
     // ── AFE LDO ─────────────────────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_SYS_AFE_LDO_CTRL, regs::B_AX_AON_OFF_PC_EN);
     ok = false;
-    for _ in 0..20 {
+    for _ in 0..100 {
         if host::mmio_r32(mmio, regs::R_AX_SYS_AFE_LDO_CTRL) & regs::B_AX_AON_OFF_PC_EN != 0 {
             ok = true;
             break;
@@ -319,9 +319,9 @@ fn pwr_on(mmio: i32) -> bool {
     host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_EN_WLON);
     host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APFN_ONMAC);
 
-    // Poll ONMAC cleared (auto-clears when done)
+    // Poll ONMAC cleared (auto-clears when done, up to 100ms)
     ok = false;
-    for _ in 0..20 {
+    for _ in 0..100 {
         if host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL) & regs::B_AX_APFN_ONMAC == 0 {
             ok = true;
             break;
@@ -341,36 +341,13 @@ fn pwr_on(mmio: i32) -> bool {
     // ── PCIe: disable calibration ───────────────────────────────
     host::mmio_clr32(mmio, regs::R_AX_SYS_SDIO_CTRL, regs::B_AX_PCIE_CALIB_EN_V1);
 
-    // ── ADIE PAD power + XTAL SI crystal init ───────────────────
+    // ── ADIE PAD power ────────────────────────────────────────────
+    // XTAL SI writes skipped: analog die retains UEFI config across FLR.
+    // XTAL SI CMD_POLL stuck (no WL_XTAL_GNT after FLR) — safe to skip.
     host::mmio_set32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
         regs::B_AX_SYM_PADPDN_WL_PTA_1P3);
-
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        regs::XTAL_SI_GND_SHDN_WL, regs::XTAL_SI_GND_SHDN_WL);
-
     host::mmio_set32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
         regs::B_AX_SYM_PADPDN_WL_RFC_1P3);
-
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        regs::XTAL_SI_SHDN_WL, regs::XTAL_SI_SHDN_WL);
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        regs::XTAL_SI_OFF_WEI, regs::XTAL_SI_OFF_WEI);
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        regs::XTAL_SI_OFF_EI, regs::XTAL_SI_OFF_EI);
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        0, regs::XTAL_SI_RFC2RF);
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        regs::XTAL_SI_PON_WEI, regs::XTAL_SI_PON_WEI);
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        regs::XTAL_SI_PON_EI, regs::XTAL_SI_PON_EI);
-    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
-        0, regs::XTAL_SI_SRAM2RFC);
-    write_xtal_si(mmio, regs::XTAL_SI_SRAM_CTRL,
-        0, regs::XTAL_SI_SRAM_DIS);
-    write_xtal_si(mmio, regs::XTAL_SI_XTAL_XMD_2,
-        0, regs::XTAL_SI_LDO_LPS);
-    write_xtal_si(mmio, regs::XTAL_SI_XTAL_XMD_4,
-        0, regs::XTAL_SI_LPS_CAP);
 
     // ── ISO control ─────────────────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_PMC_DBG_CTRL2,
