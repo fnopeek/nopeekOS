@@ -33,13 +33,19 @@ pub extern "C" fn _start() {
     }
     host::print("[wifi] PCI bind OK\n");
 
-    // ── Step 2: Enable bus master ────────────────────────────────
+    // ── Step 2: Enable bus master + memory space ──────────────────
     host::pci_enable_bus_master();
+
+    // Debug: read BAR0 before mapping
+    let bar0_lo = host::pci_read_config(0x10);
+    let bar0_hi = host::pci_read_config(0x14);
+    host::print("[wifi] BAR0: 0x");
+    host::print_hex32(bar0_hi); host::print_hex32(bar0_lo); host::print("\n");
 
     // ── Step 3: Map BAR0 — 16 pages (64KB) for MMIO registers ───
     let mmio = host::mmio_map_bar(0, 16);
     if mmio < 0 {
-        host::print("[wifi] MMIO map failed\n");
+        host::print("[wifi] MMIO map failed (BAR0 zero or already mapped?)\n");
         return;
     }
     unsafe { MMIO = mmio; }
