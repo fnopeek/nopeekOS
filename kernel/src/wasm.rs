@@ -69,26 +69,19 @@ static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] = [
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtOrd};
 
 const APP_KEY_BUF_SIZE: usize = 32;
-const MAX_APP_BUFS: usize = 8;
+const MAX_APP_BUFS: usize = 16;
 
-static mut APP_KEY_BUFS: [([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize); MAX_APP_BUFS] = [
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-    ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0)),
-];
+static mut APP_KEY_BUFS: [([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize); MAX_APP_BUFS] = {
+    const INIT: ([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize) =
+        ([0; APP_KEY_BUF_SIZE], AtomicUsize::new(0), AtomicUsize::new(0));
+    [INIT; MAX_APP_BUFS]
+};
 
 /// Per-terminal flag: true if a WASM app is running in this terminal.
-static APP_RUNNING: [AtomicBool; MAX_APP_BUFS] = [
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-];
+static APP_RUNNING: [AtomicBool; MAX_APP_BUFS] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; MAX_APP_BUFS]
+};
 
 /// Push a key to an app's input buffer. Called from Core 0.
 pub fn push_app_key(terminal_idx: u8, key: u8) {
@@ -371,7 +364,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if let Some(s) = read_wasm_str(&caller, ptr, len) {
                 if caller.data().direct_output {
                     let idx = caller.data().terminal_idx;
-                    if idx < 8 {
+                    if (idx as usize) < MAX_APP_BUFS {
                         // Write to specific terminal (worker-core safe)
                         crate::shade::terminal::write_idx(idx as usize, &s);
                     } else {
@@ -650,7 +643,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     linker.func_wrap("env", "npk_clear",
         |caller: Caller<'_, HostState>| {
             let idx = caller.data().terminal_idx;
-            if idx < 8 {
+            if (idx as usize) < MAX_APP_BUFS {
                 crate::shade::terminal::clear_idx(idx as usize);
             } else {
                 crate::shade::terminal::clear();

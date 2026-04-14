@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 const MAX_LINES: usize = 1000;
 const MAX_COLS: usize = 256;
 /// Maximum number of independent terminal sessions.
-const MAX_TERMINALS: usize = 8;
+const MAX_TERMINALS: usize = 16;
 
 /// Terminal text buffer (one per window).
 pub struct TerminalBuffer {

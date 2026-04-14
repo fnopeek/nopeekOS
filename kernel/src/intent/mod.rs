@@ -236,13 +236,14 @@ static INTENT_JOBS: Mutex<[Option<IntentJob>; MAX_INTENT_JOBS]> = Mutex::new([
     None, None, None, None,
 ]);
 
+/// Maximum terminals (must match shade::terminal::MAX_TERMINALS).
+const MAX_TERMS: usize = 16;
+
 /// Per-terminal flag: true if an intent is running on a worker.
-static INTENT_RUNNING: [AtomicBool; 8] = [
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-];
+static INTENT_RUNNING: [AtomicBool; MAX_TERMS] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; MAX_TERMS]
+};
 
 /// Global vault reference (set once in run_loop, used by workers).
 static VAULT_REF: AtomicPtr<Mutex<Vault>> = AtomicPtr::new(core::ptr::null_mut());
@@ -250,7 +251,7 @@ static VAULT_REF: AtomicPtr<Mutex<Vault>> = AtomicPtr::new(core::ptr::null_mut()
 /// Check if a terminal has an intent running on a worker.
 pub fn has_running_intent(terminal_idx: u8) -> bool {
     let idx = terminal_idx as usize;
-    if idx >= 8 { return false; }
+    if idx >= MAX_TERMS { return false; }
     INTENT_RUNNING[idx].load(AtOrd::Acquire)
 }
 
