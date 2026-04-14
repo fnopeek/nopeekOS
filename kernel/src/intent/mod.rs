@@ -1119,6 +1119,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "uptime" => {
             system::intent_uptime();
         }
+        "lspci" | "pci" => {
+            if require_cap(vault, &session, Rights::READ, "lspci") {
+                system::intent_lspci(args);
+            }
+        }
         "dmesg" | "bootlog" => {
             system::intent_dmesg();
         }
