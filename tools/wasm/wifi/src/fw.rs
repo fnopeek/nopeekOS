@@ -41,6 +41,12 @@ pub fn download(mmio: i32) -> bool {
     val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
     val &= !regs::B_AX_CPU_CLK_EN;
     host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
+    // Disable firmware watchdog (RTL8852B: toggle APB_WRAP_EN)
+    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val &= !regs::B_AX_APB_WRAP_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    val |= regs::B_AX_APB_WRAP_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
     // Toggle PLATFORM_EN (clear then set)
     val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val &= !regs::B_AX_PLATFORM_EN;
@@ -133,7 +139,19 @@ pub fn download(mmio: i32) -> bool {
 fn pcie_dma_pre_init(mmio: i32) {
     host::print("[wifi] PCIe DMA pre-init...\n");
 
-    // 0. Show initial DMA state
+    // 0. HCI Function Enable — CRITICAL: enables MAC, DMAC, Dispatcher, PacketBuf
+    // Without this, DMA engine doesn't function at all!
+    let hci_val = regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
+                | regs::B_AX_DISPATCHER_EN | regs::B_AX_PKT_BUF_EN;
+    host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, hci_val);
+    host::print("  DMAC_FUNC_EN set: 0x"); host::print_hex32(hci_val); host::print("\n");
+
+    // 0b. Enable AXIDMA
+    let mut plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    plat |= regs::B_AX_AXIDMA_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, plat);
+
+    // 1. Show initial DMA state
     let busy0 = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
     host::print("  DMA_BUSY before: 0x"); host::print_hex32(busy0); host::print("\n");
 
