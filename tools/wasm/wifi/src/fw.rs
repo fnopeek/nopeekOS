@@ -43,14 +43,9 @@ pub fn download(mmio: i32) -> bool {
 
     dump_state(mmio, "initial");
 
-    // ── Step 1: Power OFF (clean UEFI state) ────────────────────
-    host::print("[wifi] Power off...\n");
-    if !pwr_off(mmio) {
-        host::print("[wifi] WARNING: pwr_off incomplete\n");
-    }
-    dump_state(mmio, "pwr-off");
-
-    // ── Step 2: Power ON (full XTAL/LDO/ISO/func_en) ───────────
+    // ── Step 1: Power ON ────────────────────────────────────────
+    // Skip pwr_off: UEFI already has the chip powered, OFFMAC hangs.
+    // Go straight to pwr_on which handles everything from current state.
     host::print("[wifi] Power on...\n");
     if !pwr_on(mmio) {
         host::print("[wifi] WARNING: pwr_on incomplete\n");
@@ -143,9 +138,23 @@ pub fn download(mmio: i32) -> bool {
 //  XTAL SI indirect register access
 // ═══════════════════════════════════════════════════════════════════
 
+/// Debug flag: print XTAL SI status on first call
+static mut XTAL_DBG: bool = true;
+
 /// Write to an XTAL SI register via the indirect interface at 0x0270.
 /// `offset` = XTAL SI register address, `val` = data, `mask` = which bits to write.
 fn write_xtal_si(mmio: i32, offset: u8, val: u8, mask: u8) -> bool {
+    // Debug: show XTAL SI CTRL state on first call
+    unsafe {
+        if XTAL_DBG {
+            XTAL_DBG = false;
+            let pre = host::mmio_r32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL);
+            host::print("  XTAL_SI_CTRL before: 0x");
+            host::print_hex32(pre);
+            host::print("\n");
+        }
+    }
+
     // Build command: CMD_POLL | mode=write(0) | bitmask | data | addr
     let cmd: u32 = (1u32 << 31)
         | ((mask as u32) << 16)
@@ -153,18 +162,22 @@ fn write_xtal_si(mmio: i32, offset: u8, val: u8, mask: u8) -> bool {
         | (offset as u32);
     host::mmio_w32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL, cmd);
 
-    // Poll until CMD_POLL clears (up to 50ms)
-    for _ in 0..50 {
+    // Poll until CMD_POLL clears — Linux uses 50µs interval, 50ms timeout.
+    // We use 1ms interval (WASM sleep granularity), 50 iterations = 50ms.
+    for i in 0..50 {
         let v = host::mmio_r32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL);
         if v & (1u32 << 31) == 0 {
             return true;
         }
+        if i == 0 {
+            // First poll failed — print what we see
+            host::print("  XTAL_SI poll[0]: 0x");
+            host::print_hex32(v);
+            host::print("\n");
+        }
         host::sleep_ms(1);
     }
-    host::print("[wifi] XTAL SI timeout @0x");
-    host::print_hex32(offset as u32);
-    host::print("\n");
-    false
+    false // silent timeout — pwr_on will report overall status
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -425,8 +438,13 @@ fn enable_cpu_fwdl(mmio: i32) {
     val |= 0x2 << 16;
     host::mmio_w32(mmio, regs::R_AX_SEC_CTRL, val);
 
-    // Write boot reason = FWDL_RESUME (3)
-    host::mmio_w16(mmio, regs::R_AX_BOOT_REASON, regs::RTW89_FW_DLFW_RESUME as u16);
+    // Write boot reason = FWDL_RESUME (3) — masked write, only bits [2:0]
+    let aligned = regs::R_AX_BOOT_REASON & !0x3; // 0x01E4
+    let shift = (regs::R_AX_BOOT_REASON & 0x2) * 8; // 16 (byte 2 of word)
+    let mut br = host::mmio_r32(mmio, aligned);
+    br &= !((0x7u32) << shift); // clear bits [2:0] of boot reason byte
+    br |= (regs::RTW89_FW_DLFW_RESUME) << shift;
+    host::mmio_w32(mmio, aligned, br);
 
     // Enable WCPU — boot ROM starts in FWDL mode
     host::mmio_set32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_WCPU_EN);
