@@ -772,10 +772,37 @@ fn wait_fwdl_path_ready(mmio: i32) -> bool {
     false
 }
 
-/// Firmware header length — first 0x60 bytes (section table).
+/// Parse firmware header length from binary.
+/// Linux: base_hdr = sizeof(fw_hdr) + section_num * sizeof(fw_hdr_section)
+///      = 32 + section_num * 16
+/// section_num is in FW_HDR word 6, bits [15:8].
 fn fw_header_len() -> usize {
-    if FW_DATA.len() < 0x60 { return FW_DATA.len(); }
-    0x60
+    if FW_DATA.len() < 0x20 { return FW_DATA.len(); }
+
+    // Word 6 at offset 0x18: section_num in bits [15:8]
+    let w6 = u32::from_le_bytes([FW_DATA[0x18], FW_DATA[0x19], FW_DATA[0x1A], FW_DATA[0x1B]]);
+    let section_num = ((w6 >> 8) & 0xFF) as usize;
+
+    // Word 7 at offset 0x1C: dynamic_hdr_en = bit 16
+    let w7 = u32::from_le_bytes([FW_DATA[0x1C], FW_DATA[0x1D], FW_DATA[0x1E], FW_DATA[0x1F]]);
+    let dyn_hdr = (w7 >> 16) & 1;
+
+    let hdr_len = if dyn_hdr != 0 {
+        // Dynamic header: length in word 3 bits [23:16]
+        let w3 = u32::from_le_bytes([FW_DATA[0x0C], FW_DATA[0x0D], FW_DATA[0x0E], FW_DATA[0x0F]]);
+        ((w3 >> 16) & 0xFF) as usize
+    } else {
+        // Static header: 32-byte base + 16 bytes per section
+        32 + section_num * 16
+    };
+
+    host::print("  FW hdr: ");
+    print_dec(section_num);
+    host::print(" sections, ");
+    print_dec(hdr_len);
+    host::print(" bytes\n");
+
+    hdr_len
 }
 
 /// Wait for firmware ready — FWDL_STS in WCPU_FW_CTRL bits [7:5] == 7.
