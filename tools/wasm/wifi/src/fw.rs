@@ -48,14 +48,21 @@ pub fn download(mmio: i32) -> bool {
     enable_cpu_fwdl(mmio);
     host::sleep_ms(10);
 
-    // Step 5: Wait for FWDL path ready
+    // Step 5: Send firmware HEADER first via CH12 DMA
+    // Key insight from rtw89: header is sent BEFORE checking FWDL_PATH_RDY.
+    // The header download triggers the path to become ready.
+    let hdr_len = fw_header_len();
+    host::print("[wifi] Sending FW header (");
+    print_dec(hdr_len);
+    host::print(" bytes)...\n");
+    send_fw_chunk(ring_dma, data_dma, mmio, 0, hdr_len);
+    host::sleep_ms(20);
+
+    // Step 6: NOW wait for FWDL path ready (triggered by header)
     if !wait_fwdl_path_ready(mmio) {
-        host::print("[wifi] FWDL path not ready\n");
-        // Debug: print relevant registers
+        host::print("[wifi] FWDL path not ready after header send\n");
         let ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
         host::print("  WCPU_FW_CTRL=0x"); host::print_hex32(ctrl); host::print("\n");
-        let plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-        host::print("  PLATFORM_EN=0x"); host::print_hex32(plat); host::print("\n");
         let init = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
         host::print("  PCIE_INIT=0x"); host::print_hex32(init); host::print("\n");
         let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
@@ -63,14 +70,14 @@ pub fn download(mmio: i32) -> bool {
         return false;
     }
 
-    // Step 6: Clear halt channels
+    // Step 7: Clear halt channels
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
-    // Step 6: Send firmware in chunks via CH12
-    send_firmware(mmio, ring_dma, data_dma);
+    // Step 8: Send remaining firmware body in chunks
+    send_firmware_body(mmio, ring_dma, data_dma, hdr_len);
 
-    // Step 7: Wait for firmware ready
+    // Step 9: Wait for firmware ready
     if !wait_fw_ready(mmio) {
         let status = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
         host::print("[wifi] FW ready TIMEOUT! WCPU_FW_CTRL=0x");
@@ -273,51 +280,66 @@ fn wait_fwdl_path_ready(mmio: i32) -> bool {
     false
 }
 
-/// Send the firmware binary in chunks via CH12 ring
-fn send_firmware(mmio: i32, ring_dma: i32, data_dma: i32) {
+/// Firmware header length — the rtw89 header starts at offset 0x60.
+/// The first 0x60 bytes are the section table, then the actual header follows.
+/// For rtw8852b_fw-1.bin, the header is typically 0x60 bytes (96 bytes).
+fn fw_header_len() -> usize {
+    // Read header length from firmware: offset 0x04 bits [15:0] in section table
+    // For safety, use the section table size (first 0x60 bytes)
+    if FW_DATA.len() < 0x60 { return FW_DATA.len(); }
+    0x60
+}
+
+/// BD ring state — tracks the current write index across multiple sends
+static mut BD_IDX: u16 = 0;
+
+/// Send a single firmware chunk via CH12 DMA ring
+fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: usize) {
     let data_phys = host::dma_phys(data_dma);
+
+    // Copy data to DMA buffer
+    host::dma_write_buf(data_dma, 0, &FW_DATA[offset..offset + len]);
+    host::fence();
+
+    // Write TX BD
+    let bd_idx = unsafe { BD_IDX };
+    let bd_offset = (bd_idx as u32) * (BD_SIZE as u32);
+    let word0 = (len as u32) | ((BD_OPT_LS as u32) << 16);
+    host::dma_w32(ring_dma, bd_offset, word0);
+    host::dma_w32(ring_dma, bd_offset + 4, data_phys as u32);
+    host::fence();
+
+    // Advance ring index
+    let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
+    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx as u32);
+
+    // Wait for hardware to consume
+    for _ in 0..500 {
+        let reg = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
+        let hw_idx = (reg >> 16) & 0xFFF;
+        if hw_idx == new_idx as u32 { break; }
+        host::sleep_ms(1);
+    }
+
+    unsafe { BD_IDX = new_idx; }
+}
+
+/// Send firmware body (everything after header) in chunks via CH12
+fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usize) {
     let total = FW_DATA.len();
-    let mut offset = 0usize;
-    let mut bd_idx = 0u16;
+    let mut offset = start_offset;
     let mut chunk_num = 0usize;
 
-    host::print("[wifi] Downloading firmware: ");
+    host::print("[wifi] Downloading firmware body: ");
 
     while offset < total {
         let remaining = total - offset;
         let chunk_len = if remaining > FW_CHUNK_SIZE { FW_CHUNK_SIZE } else { remaining };
 
-        // Copy firmware chunk from WASM memory to DMA buffer
-        host::dma_write_buf(data_dma, 0, &FW_DATA[offset..offset + chunk_len]);
-        host::fence();
-
-        // Write TX BD at ring_dma + bd_idx * 8
-        let bd_offset = (bd_idx as u32) * (BD_SIZE as u32);
-        let opt = if offset + chunk_len >= total { BD_OPT_LS } else { 0 };
-
-        // BD format: length(u16) | option(u16) | dma_addr(u32)
-        let word0 = (chunk_len as u32) | ((opt as u32) << 16);
-        host::dma_w32(ring_dma, bd_offset, word0);
-        host::dma_w32(ring_dma, bd_offset + 4, data_phys as u32);
-        host::fence();
-
-        // Update host write index → tells hardware new BD is available
-        bd_idx = (bd_idx + 1) % CH12_BD_COUNT;
-        let idx_val = bd_idx as u32; // HOST_IDX in bits [11:0]
-        host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, idx_val);
-
-        // Wait for hardware to consume (poll HW_IDX == our bd_idx)
-        for _ in 0..500 {
-            let reg = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
-            let hw_idx = (reg >> 16) & 0xFFF;
-            if hw_idx == bd_idx as u32 { break; }
-            host::sleep_ms(1);
-        }
+        send_fw_chunk(ring_dma, data_dma, mmio, offset, chunk_len);
 
         offset += chunk_len;
         chunk_num += 1;
-
-        // Progress dot every 10 chunks (~40KB)
         if chunk_num % 10 == 0 { host::print("."); }
     }
 
