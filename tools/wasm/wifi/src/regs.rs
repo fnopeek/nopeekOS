@@ -23,6 +23,13 @@ pub const R_AX_WCPU_FW_CTRL: u32      = 0x01E0;
 pub const R_AX_BOOT_REASON: u32       = 0x01E6;
 pub const RTW89_FW_DLFW_RESUME: u32   = 3; // firmware download boot reason
 
+// Additional registers from rtw89_mac_enable_cpu_ax
+pub const R_AX_UDM1: u32              = 0x01F4;
+pub const R_AX_UDM2: u32              = 0x01F8;
+pub const R_AX_SEC_CTRL: u32          = 0x0C00;
+pub const B_AX_SEC_IDMEM_MASK: u32    = 0x3 << 16;
+pub const B_AX_BOOT_REASON_MASK: u32  = 0x7; // bits [2:0] at offset 0x01E6
+
 // ── PCIe / DMA ───────────────────────────────────────────────────
 
 pub const R_AX_PCIE_INIT_CFG1: u32    = 0x1000;
