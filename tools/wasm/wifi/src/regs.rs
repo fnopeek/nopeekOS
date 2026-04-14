@@ -97,6 +97,7 @@ pub const B_AX_RDY_SYSPWR: u32        = 1 << 17;
 // R_AX_PLATFORM_ENABLE (0x0088) bits
 pub const B_AX_PLATFORM_EN: u32  = 1 << 0;
 pub const B_AX_WCPU_EN: u32      = 1 << 1;
+pub const B_AX_APB_WRAP_EN: u32  = 1 << 2;  // firmware watchdog control
 pub const B_AX_AXIDMA_EN: u32    = 1 << 3;
 pub const B_AX_H_AXIDMA_EN: u32  = 1 << 14;
 
@@ -108,6 +109,7 @@ pub const B_AX_FWDL_PATH_RDY: u32   = 1 << 2;
 // R_AX_DMAC_FUNC_EN (0x8400) bits
 pub const B_AX_MAC_FUNC_EN: u32     = 1 << 30;
 pub const B_AX_DMAC_FUNC_EN: u32    = 1 << 29;
+pub const B_AX_PKT_BUF_EN: u32      = 1 << 22;
 pub const B_AX_DISPATCHER_EN: u32   = 1 << 18;
 
 // ── Firmware Download Status Bits ────────────────────────────────
