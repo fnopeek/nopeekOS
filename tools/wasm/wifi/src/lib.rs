@@ -17,7 +17,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.25\n");
+    host::print("[wifi] RTL8852BE driver v0.26\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -36,33 +36,49 @@ pub extern "C" fn _start() {
     // ── Step 2: Enable bus master + memory space ──────────────────
     host::pci_enable_bus_master();
 
-    // ── Step 3: Dump all BARs to find MMIO ────────────────────────
-    host::print("[wifi] PCI BARs:\n");
-    for i in 0u8..6 {
-        let off = 0x10 + i * 4;
-        let val = host::pci_read_config(off);
-        host::print("  BAR"); host::print_hex32(i as u32);
-        host::print(" [0x"); host::print_hex32(off as u32);
-        host::print("]: 0x"); host::print_hex32(val); host::print("\n");
-    }
+    // ── Step 3: Assign + map BAR2 (MMIO registers) ────────────────
+    // UEFI doesn't assign BARs for the WiFi chip — we do it ourselves.
+    // BAR2 (0x18) is a 64-bit memory BAR. We assign 0xFD000000 (in the
+    // PCI MMIO hole above TOLUD, below ECAM).
 
-    // Try BAR2 first (Linux rtw89 uses bar_id=2), fallback to BAR0
-    let mut mmio = host::mmio_map_bar(2, 16);
-    if mmio >= 0 {
-        host::print("[wifi] BAR2 mapped\n");
-    } else {
-        host::print("[wifi] BAR2 failed, trying BAR0...\n");
-        mmio = host::mmio_map_bar(0, 16);
-        if mmio >= 0 {
-            host::print("[wifi] BAR0 mapped\n");
-        }
-    }
+    // Disable memory decode while we touch BARs
+    let cmd = host::pci_read_config(0x04);
+    host::pci_write_config(0x04, cmd & !0x06);
+
+    // Probe BAR2 size: write all-1s, read back, decode
+    host::pci_write_config(0x18, 0xFFFFFFFF);
+    host::pci_write_config(0x1C, 0xFFFFFFFF);
+    let size_lo = host::pci_read_config(0x18);
+    let size_hi = host::pci_read_config(0x1C);
+    let size_mask = ((size_hi as u64) << 32) | ((size_lo as u64) & !0xF);
+    let bar_size = (!size_mask).wrapping_add(1);
+    host::print("[wifi] BAR2 size: 0x");
+    host::print_hex32(bar_size as u32);
+    host::print("\n");
+
+    // Assign address 0xFD000000 to BAR2 (64-bit: low=0x18, high=0x1C)
+    const WIFI_MMIO_ADDR: u32 = 0xFD00_0000;
+    host::pci_write_config(0x18, WIFI_MMIO_ADDR);
+    host::pci_write_config(0x1C, 0x0000_0000);
+
+    // Re-enable memory space + bus master
+    host::pci_write_config(0x04, cmd | 0x06);
+
+    // Verify BAR2 was written
+    let bar2_check = host::pci_read_config(0x18);
+    host::print("[wifi] BAR2 assigned: 0x");
+    host::print_hex32(bar2_check);
+    host::print("\n");
+
+    // Map BAR2
+    let mmio = host::mmio_map_bar(2, 16);
     if mmio < 0 {
-        host::print("[wifi] No MMIO BAR available\n");
+        host::print("[wifi] MMIO map failed\n");
         host::print("[wifi] Press 'q' to exit\n");
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
     unsafe { MMIO = mmio; }
+    host::print("[wifi] BAR2 mapped (64KB)\n");
     host::print("\n");
 
     // ── Step 4: Chip probe — read key registers ──────────────────
