@@ -141,7 +141,7 @@ pub fn download(mmio: i32) -> bool {
     host::print("[wifi] Sending header (");
     print_dec(hdr_len);
     host::print(" bytes)...\n");
-    send_fw_chunk(ring_dma, data_dma, mmio, 0, hdr_len);
+    send_fw_header(ring_dma, data_dma, mmio, hdr_len);
     host::sleep_ms(20);
 
     // ── Step 9: Wait FWDL_PATH_RDY ──────────────────────────────
@@ -699,20 +699,56 @@ fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
     Some((ring_dma, data_dma))
 }
 
-/// Send a single firmware chunk via CH12 DMA ring.
-fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: usize) {
+// H2C header constants for FWDL (from Linux fw.h)
+const H2C_CAT_MAC: u32 = 1;
+const H2C_CL_MAC_FWDL: u32 = 3;
+// H2C_FUNC_MAC_FWHDR_DL = 0
+
+/// H2C sequence counter
+static mut H2C_SEQ: u8 = 0;
+
+/// Send firmware HEADER via CH12 with proper H2C descriptor.
+/// Linux: rtw89_h2c_pkt_set_hdr_fwdl + rtw89_h2c_tx
+fn send_fw_header(ring_dma: i32, data_dma: i32, mmio: i32, hdr_len: usize) {
     let data_phys = host::dma_phys(data_dma);
-    let total_len = TXDESC_SIZE + len;
+    let total_len = 8 + hdr_len; // H2C header + FW header data
 
-    // Write 8-byte TX descriptor (zeroed for fwcmd)
-    host::dma_w32(data_dma, 0, 0);
-    host::dma_w32(data_dma, 4, 0);
+    // Build 8-byte H2C descriptor (fwcmd_hdr)
+    let seq = unsafe { H2C_SEQ };
+    // hdr0: DEL_TYPE[19:16]=0 | CAT[1:0]=1 | CLASS[7:2]=3 | FUNC[15:8]=0 | SEQ[31:24]
+    let hdr0: u32 = (H2C_CAT_MAC)
+                   | (H2C_CL_MAC_FWDL << 2)
+                   | ((seq as u32) << 24);
+    // hdr1: TOTAL_LEN[13:0] = data_len + 8
+    let hdr1: u32 = (total_len as u32) & 0x3FFF;
 
-    // Copy firmware data after the descriptor
-    host::dma_write_buf(data_dma, TXDESC_SIZE as u32, &FW_DATA[offset..offset + len]);
+    host::dma_w32(data_dma, 0, hdr0);
+    host::dma_w32(data_dma, 4, hdr1);
+
+    // Copy FW header data after H2C descriptor
+    host::dma_write_buf(data_dma, 8, &FW_DATA[..hdr_len]);
     host::fence();
 
-    // Write TX BD: length(u16) | option(u16) | dma_addr(u32)
+    unsafe { H2C_SEQ = seq.wrapping_add(1); }
+
+    // Write TX BD and advance ring
+    submit_bd(ring_dma, data_dma, data_phys, mmio, total_len);
+}
+
+/// Send a firmware SECTION chunk via CH12 — raw data, NO H2C descriptor.
+/// Linux: rtw89_fw_h2c_alloc_skb_no_hdr + rtw89_h2c_tx
+fn send_fw_section(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: usize) {
+    let data_phys = host::dma_phys(data_dma);
+
+    // Raw firmware data, no H2C header
+    host::dma_write_buf(data_dma, 0, &FW_DATA[offset..offset + len]);
+    host::fence();
+
+    submit_bd(ring_dma, data_dma, data_phys, mmio, len);
+}
+
+/// Submit a TX BD to the CH12 ring and advance the write pointer.
+fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len: usize) {
     let bd_idx = unsafe { BD_IDX };
     let bd_offset = (bd_idx as u32) * (BD_SIZE as u32);
     let word0 = (total_len as u32) | ((BD_OPT_LS as u32) << 16);
@@ -720,7 +756,6 @@ fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: us
     host::dma_w32(ring_dma, bd_offset + 4, data_phys as u32);
     host::fence();
 
-    // Advance ring write pointer — direct 32-bit write (avoids RMW of HW_IDX)
     let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx as u32);
 
@@ -728,7 +763,8 @@ fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: us
     unsafe { BD_IDX = new_idx; }
 }
 
-/// Send firmware body (everything after header) in chunks via CH12.
+/// Send firmware body (sections after header) in chunks via CH12.
+/// Linux: raw section data, NO H2C descriptor, in FWDL_SECTION_PER_PKT_LEN chunks.
 fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usize) {
     let total = FW_DATA.len();
     let mut offset = start_offset;
@@ -740,11 +776,11 @@ fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usi
         let remaining = total - offset;
         let chunk_len = if remaining > FW_CHUNK_SIZE { FW_CHUNK_SIZE } else { remaining };
 
-        send_fw_chunk(ring_dma, data_dma, mmio, offset, chunk_len);
+        send_fw_section(ring_dma, data_dma, mmio, offset, chunk_len);
 
         offset += chunk_len;
         chunk_num += 1;
-        if chunk_num % 10 == 0 { host::print("."); }
+        if chunk_num % 50 == 0 { host::print("."); }
     }
 
     host::print(" done (");
