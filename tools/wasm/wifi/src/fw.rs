@@ -27,41 +27,24 @@ pub fn download(mmio: i32) -> bool {
     print_dec(FW_DATA.len());
     host::print(" bytes\n");
 
-    // Step 1: PCIe Function Level Reset (FLR)
-    // Linux PCI subsystem resets devices before driver loads — we never did this.
-    // FLR completely resets the device hardware, including CPU/boot ROM.
-    host::print("[wifi] PCIe Function Level Reset...\n");
-    pcie_flr();
-    host::sleep_ms(200); // device needs time to come back after FLR
-
-    // Re-enable bus mastering (FLR may clear it)
-    host::pci_enable_bus_master();
-
-    // Re-read chip to verify it's back
-    let chip_id = host::mmio_r32(mmio, 0x0000);
-    host::print("  Chip after FLR: 0x"); host::print_hex32(chip_id); host::print("\n");
+    // Step 1: After FLR (done in lib.rs), device is factory-fresh.
+    // Show post-FLR state
     let fwc0 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
     host::print("  FW_CTRL after FLR: 0x"); host::print_hex32(fwc0); host::print("\n");
     let plat0 = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     host::print("  PLATFORM_EN after FLR: 0x"); host::print_hex32(plat0); host::print("\n");
 
-    // Step 2: After FLR, explicitly disable CPU first (clean state)
-    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val &= !regs::B_AX_WCPU_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    host::sleep_ms(10);
-
-    // Step 3: HCI Function Enable (needed after FLR reset)
+    // Step 2: HCI Function Enable (device is reset, needs this)
     let hci_val = regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
                 | regs::B_AX_DISPATCHER_EN | regs::B_AX_PKT_BUF_EN;
     host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, hci_val);
 
-    // Enable AXIDMA
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val |= regs::B_AX_AXIDMA_EN;
+    // Enable AXIDMA + PLATFORM_EN
+    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val |= regs::B_AX_AXIDMA_EN | regs::B_AX_PLATFORM_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 
-    // Step 4: Enable FWDL mode
+    // Step 3: Enable FWDL mode
     enable_cpu_fwdl(mmio);
     host::sleep_ms(100);
 
@@ -525,7 +508,7 @@ fn wait_fw_ready(mmio: i32) -> bool {
 /// PCIe Function Level Reset — hardware-resets the entire WiFi device.
 /// Walks the PCIe capability list to find the Express capability,
 /// then sets bit 15 (BCR_FLR) in Device Control register.
-fn pcie_flr() {
+pub fn pcie_flr() {
     // Find PCIe Express Capability in config space
     // Walk capability list starting from offset 0x34
     let mut cap_ptr = (host::pci_read_config(0x34) & 0xFF) as u8;
