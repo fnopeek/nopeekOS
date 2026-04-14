@@ -225,8 +225,7 @@ pub fn intent_gpu(args: &str) {
             if hz > 0 {
                 kprintln!("  Refresh:  {}Hz", hz);
             }
-            let has_vsync = crate::gpu::supports_flip() && crate::gpu::supports_blit();
-            kprintln!("  VSync:    {}", if has_vsync { "active (wait_vblank + BCS blit)" } else if crate::gpu::supports_flip() { "available (no BCS)" } else { "no (GOP)" });
+            kprintln!("  VSync:    {}", if crate::gpu::supports_flip() { "planned (PLANE_SURF double-buffer)" } else { "no (GOP)" });
             kprintln!("  Flip:     {}", if crate::gpu::supports_flip() { "hardware (PLANE_SURF)" } else { "CPU blit" });
 
             // BCS blitter status
