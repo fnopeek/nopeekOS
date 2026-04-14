@@ -73,6 +73,24 @@ pub const R_AX_DLE_EMPTY1: u32        = 0x8434;
 pub const R_AX_CMAC_FUNC_EN: u32      = 0xC000;
 pub const R_AX_CK_EN: u32             = 0xC004;
 
+// ── Register Bit Definitions ─────────────────────────────────────
+
+// R_AX_PLATFORM_ENABLE (0x0088) bits
+pub const B_AX_PLATFORM_EN: u32  = 1 << 0;
+pub const B_AX_WCPU_EN: u32      = 1 << 1;
+pub const B_AX_AXIDMA_EN: u32    = 1 << 3;
+pub const B_AX_H_AXIDMA_EN: u32  = 1 << 14;
+
+// R_AX_WCPU_FW_CTRL (0x01E0) bits
+pub const B_AX_WCPU_FWDL_EN: u32    = 1 << 0;
+pub const B_AX_H2C_PATH_RDY: u32    = 1 << 1;
+pub const B_AX_FWDL_PATH_RDY: u32   = 1 << 2;
+
+// R_AX_DMAC_FUNC_EN (0x8400) bits
+pub const B_AX_MAC_FUNC_EN: u32     = 1 << 30;
+pub const B_AX_DMAC_FUNC_EN: u32    = 1 << 29;
+pub const B_AX_DISPATCHER_EN: u32   = 1 << 18;
+
 // ── Firmware Download Status Bits ────────────────────────────────
 
 pub const FWDL_WCPU_FW_INIT_RDY: u32  = 1 << 0;
