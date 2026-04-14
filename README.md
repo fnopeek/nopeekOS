@@ -243,7 +243,7 @@ Every execution is a sandboxed WASM module:
 - [x] ACPI power-off (RSDP, FADT, DSDT \_S5 parsing)
 - [x] Gateway routing, serial detection, dual xHCI controllers
 - [x] APIC timer (auto-detect PIT vs APIC, TSC-calibrated, 100Hz periodic)
-- [ ] npk-shell: TLS-encrypted remote intent loop (TCP listener, passphrase auth)
+- [ ] SSH-compatible remote access (replaces old npk-shell prototype)
 - [x] USB mouse (HID boot protocol, xHCI multi-device, software cursor, click-to-focus, Mod+drag)
 - [x] IRQ-driven USB polling (APIC timer drains xHCI, atomic SPSC ring buffers)
 - [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
@@ -265,7 +265,7 @@ Every execution is a sandboxed WASM module:
 - [x] AltGr support for Swiss German keyboard (@ # | [ ] { } \ ~)
 - [x] Purple `[npk]` accent color in boot output
 - [x] Shade compositor (Hyprland-inspired tiling WM, dwindle layout)
-- [x] Per-window terminal sessions (8 max, independent input/output, save/restore)
+- [x] Per-window terminal sessions (heap-allocated, no limit, independent input/output)
 - [x] Shadebar (Waybar-inspired: workspace indicators, clock, window title)
 - [x] Window keybindings: Mod+Enter/Q/1-4/Arrows/Shift+Arrows/Ctrl+Arrows/F/V/PgUp/PgDn
 - [x] Smooth window swap animation (ease-out cubic, 250ms)
@@ -275,14 +275,16 @@ Every execution is a sandboxed WASM module:
 - [x] Click-to-focus, Mod+LMB swap-drag, Mod+RMB resize-drag (throttled 33fps)
 - [x] Tiling-aware resize (adjusts dwindle split ratio, neighbors adapt)
 - [x] Text cursor navigation (Left/Right/Home/End, insert at position, history recall)
-- [ ] KeyEvent abstraction (Unicode chars, arrow keys, modifiers)
+- [x] KeyEvent abstraction (KeyCode + Modifiers, layout-independent, no ESC state machine)
 - [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@60Hz HDMI 2.0 via DDI-B, DPLL1, combo PHY)
 - [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI->HDMI mode switch, auto-fallback to 4K@30)
 - [x] Write-Combining framebuffer (PAT MSR, ~5-10x faster blits)
 - [x] USB keyboard key repeat (timer-based, 500ms delay, 50ms rate)
 - [x] Growable heap (64MB initial, on-demand 64MB chunks, max 2GB, local O(1) coalescing)
 - [x] Wallpaper demo (4 procedural themes, quarter-res, auto-theme extraction)
-- [ ] VSync (VBI-synchronized blits, eliminates tearing)
+- [x] BCS blitter engine (Gen 12 ExecList, GPU-accelerated compositing)
+- [x] GPU-composited cursor (save-under, eliminates blit race)
+- [ ] VSync via PLANE_SURF double-buffer flip (zero-tearing + zero-latency)
 - [ ] Web rendering engine (long-term)
 
 ### Phase 9 -- SMP & Event-Driven Architecture (in progress)
@@ -309,41 +311,64 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [ ] Thermal load balancing (migrate tasks when core >80% busy)
 
 **Event-Driven Intent Architecture**
-- [ ] IntentSession struct on heap (input_buf, cursor, history, cwd per window)
-- [ ] Core 0 = event dispatcher only (never blocks >100μs)
+- [x] IntentSession struct on heap (input_buf, cursor, history, cwd per window)
+- [x] Core 0 = event dispatcher only (never blocks >100μs)
 - [ ] handle_key() as fire-and-forget task on worker core
-- [ ] execute_intent() spawns sub-tasks for heavy work
-- [ ] HTTP/HTTPS as async worker task (currently blocks Core 0 for 5-20s)
-- [ ] OTA update as async worker task (currently blocks 15-100s)
-- [ ] Module install as async worker task (currently blocks 15-60s)
+- [x] execute_intent() spawns sub-tasks for heavy work
+- [x] HTTP/HTTPS as async worker task (non-blocking, UI stays responsive)
+- [x] OTA update as async worker task (non-blocking)
+- [x] Module install as async worker task (non-blocking)
 
 **App Display API**
 - [x] `npk_print` / `npk_clear` — write/clear app's terminal display
 - [x] `npk_input_wait(timeout_ms)` — blocking wait for key or timeout
 - [x] `npk_sys_info(key)` — system information (cores, memory, freq, usage, processes)
-- [x] Per-app SPSC key buffers (APP_KEY_BUFS[8], one per terminal)
+- [x] Per-app SPSC key buffers (one per terminal, heap-allocated)
 - [x] Inline key routing (shade keybinds intercepted, rest to app)
 - [x] OTA module updates (`update` checks kernel + WASM modules)
 - [x] Process tracking (per-app CPU time, memory, core, name, uptime)
+- [x] Windows registered in process table (each loop gets a PID)
 - [ ] Widget API (`npk_widget_list`, `npk_widget_input`, `npk_widget_select`)
 
 **WASM Runtime**
 - [x] wasmi v1.0 interpreter (register-based, fuel-metered)
 - [x] Interactive execution on worker cores (1B fuel budget)
-- [ ] Dynamic process table (heap-allocated, independent of terminals)
+- [x] Dynamic process table (BTreeMap, heap-allocated, unlimited PIDs)
 
-**GPU Rendering (planned)**
-- [ ] GPU HAL trait: init, set_mode, alloc_vram, submit_batch, flip
-- [ ] Intel Xe 2D: command streamer, batch buffers, EU shaders
-- [ ] GPU-accelerated compositing (worker renders, Core 0 submits flip)
-- [ ] VSync (VBI-synchronized, eliminates tearing)
+**GPU Rendering**
+- [x] GPU HAL trait: init, set_mode, blit_rect_hw, flip, wait_vblank, supports_blit
+- [x] BCS Blitter Engine (Gen 12 ExecList/ELSQ, XY_FAST_COPY_BLT)
+- [x] GPU-accelerated compositing (shadow → MMIO via BCS, zero-CPU blit)
+- [x] GPU-composited cursor (save-under pattern, no MMIO overlay race)
+- [ ] VSync (PLANE_SURF double-buffer flip, zero-tearing + zero-latency)
 - [ ] VirtIO GPU backend (QEMU/VBox support)
 
 **Virtualization**
 - [ ] MicroVM (VT-x/VT-d, Mini-Linux kernel for Linux app compatibility)
 - [ ] virtio bridges for MicroVM (blk, net, gpu)
 
-### Phase 10 -- AI Integration
+### Phase 10 -- Widget API & GUI Apps
+
+Reusable UI components for WASM applications. Every widget is a host function —
+apps describe layout, the compositor renders. No per-app framebuffers.
+
+- [ ] `npk_widget_list(items, selected)` — scrollable list (file manager, settings)
+- [ ] `npk_widget_input(prompt, buf)` — text input field with cursor
+- [ ] `npk_widget_select(options, selected)` — dropdown / choice selector
+- [ ] `npk_widget_text(content, scroll)` — scrollable text view
+- [ ] `npk_widget_progress(value, max)` — progress bar
+- [ ] `npk_widget_layout(rows, cols)` — grid layout for combining widgets
+- [ ] Keyboard navigation (Tab between widgets, Enter to select)
+- [ ] Mouse interaction (click on widget, scroll list)
+- [ ] Theming (widgets inherit shade theme colors)
+- [ ] File manager app (Thunar-inspired: tree view, file list, preview)
+- [ ] Settings app (keyboard layout, shade config, theme)
+
+Design principle: widgets are **data-driven** — the app passes data (list items,
+current selection), the host renders. The app never touches pixels directly.
+This allows the compositor to handle focus, theming, scaling, and accessibility.
+
+### Phase 11 -- AI Integration
 
 - [ ] External AI service via network
 - [ ] Intent resolution through LLM
@@ -377,9 +402,11 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 | Compositor | Shade (native Rust) | Dwindle tiling, layer-based rendering |
 | Rendering | Layer compositor + double-buffer | Shadow A/B swap, selective partial render, dirty-region compositing |
 | GPU HAL | GOP + Intel Xe (+ VirtIO planned) | Vendor-neutral, same API for all backends |
-| Mouse | xHCI HID boot protocol | Composite device, overlay cursor, IRQ-driven polling |
+| Input | KeyEvent (KeyCode + Modifiers) | Layout-independent, no ESC state machines, foundation for configurable keybindings |
+| Mouse | xHCI HID boot protocol | Composite device, GPU-composited cursor (save-under), IRQ-driven polling |
 | USB Polling | APIC timer (100Hz) | IRQ drains xHCI -> atomic SPSC buffers, no main-thread HW access |
 | Heap | Growable (64MB->2GB) | On-demand 64MB chunks, local O(1) coalescing |
+| Terminals | Heap-allocated (AtomicPtr) | ~264KB per window, on-demand alloc/free, no artificial limit |
 | Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
 | Intent Model | Event-driven, heap state | Fire-and-forget tasks, no Core blocked when idle |
 | Core 0 | Event dispatcher only | IRQ + input + blit, never blocks >100μs |
@@ -519,8 +546,8 @@ nopeekOS/
 │       │   ├── update.rs             #   OTA update
 │       │   └── auth.rs               #   lock, passwd
 │       │
+│       ├── input.rs                   # KeyEvent abstraction (KeyCode, Modifiers)
 │       ├── wasm.rs                   # WASM runtime + host functions
-│       ├── shell.rs                  # npk-shell (remote access)
 │       └── setup.rs                  # First-boot setup wizard
 ```
 
@@ -546,7 +573,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.26.1
+[npk] AI-native Operating System v0.43.1
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] TSC: 691 MHz
@@ -563,6 +590,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] xhci: USB mouse (HID boot protocol)
 [npk] Intel Xe GPU: ADL-N (device 46d0), 4K@60Hz HDMI 2.0
 [npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
+[npk] BCS: blitter engine ready
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
 [npk] DHCP: configured 192.168.1.100
 [npk] npkfs: mounted (gen=42, 15 objects)
