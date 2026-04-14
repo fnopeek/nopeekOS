@@ -1,7 +1,12 @@
 //! RTL8852BE firmware download
 //!
-//! Sequence: disable CPU → enable FWDL → setup H2C ring (CH12) →
-//! send firmware header → send firmware sections → verify ready.
+//! Full sequence based on Linux rtw89 driver (rtw8852b.c + mac.c):
+//!   1. pwr_off  — clean UEFI state (disable CPU, XTAL SI restore, OFFMAC)
+//!   2. pwr_on   — full power-on (SPS, XTAL SI, ISO, LDO, DMAC/CMAC func_en)
+//!   3. PCIe DMA pre-init (stop DMA, reset BDRAM, enable HCI)
+//!   4. disable_cpu — clean CPU state
+//!   5. enable_cpu  — FWDL mode (WCPU_EN + FWDL_EN)
+//!   6. H2C_PATH_RDY → CH12 ring → header → FWDL_PATH_RDY → body → FW ready
 
 use crate::host;
 use crate::regs;
@@ -20,58 +25,76 @@ const FW_CHUNK_SIZE: usize = 4000;
 // CH12 ring: 16 buffer descriptors
 const CH12_BD_COUNT: u16 = 16;
 
+// TX descriptor size for AX generation (RTL8852B): 8 bytes
+const TXDESC_SIZE: usize = 8;
+
+/// BD ring state — tracks the current write index across multiple sends
+static mut BD_IDX: u16 = 0;
+
+// ═══════════════════════════════════════════════════════════════════
+//  Main entry point
+// ═══════════════════════════════════════════════════════════════════
+
 /// Run the full firmware download sequence.
-/// Returns true if firmware is ready.
 pub fn download(mmio: i32) -> bool {
-    host::print("[wifi] Firmware embedded: ");
+    host::print("[wifi] Firmware: ");
     print_dec(FW_DATA.len());
     host::print(" bytes\n");
 
-    // Step 1: After FLR (done in lib.rs), device is factory-fresh.
-    // Show post-FLR state
-    let fwc0 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::print("  FW_CTRL after FLR: 0x"); host::print_hex32(fwc0); host::print("\n");
-    let plat0 = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    host::print("  PLATFORM_EN after FLR: 0x"); host::print_hex32(plat0); host::print("\n");
+    dump_state(mmio, "initial");
 
-    // Step 2: HCI Function Enable (device is reset, needs this)
-    let hci_val = regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
-                | regs::B_AX_DISPATCHER_EN | regs::B_AX_PKT_BUF_EN;
-    host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, hci_val);
+    // ── Step 1: Power OFF (clean UEFI state) ────────────────────
+    host::print("[wifi] Power off...\n");
+    if !pwr_off(mmio) {
+        host::print("[wifi] WARNING: pwr_off incomplete\n");
+    }
+    dump_state(mmio, "pwr-off");
 
-    // Enable AXIDMA + PLATFORM_EN
-    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val |= regs::B_AX_AXIDMA_EN | regs::B_AX_PLATFORM_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    // ── Step 2: Power ON (full XTAL/LDO/ISO/func_en) ───────────
+    host::print("[wifi] Power on...\n");
+    if !pwr_on(mmio) {
+        host::print("[wifi] WARNING: pwr_on incomplete\n");
+    }
+    dump_state(mmio, "pwr-on");
 
-    // Step 3: Enable FWDL mode
+    // ── Step 3: PCIe DMA pre-init ───────────────────────────────
+    pcie_dma_pre_init(mmio);
+
+    // ── Step 4: Disable CPU (clean state before FWDL) ───────────
+    disable_cpu(mmio);
+
+    // ── Step 5: Enable CPU in FWDL mode ─────────────────────────
     enable_cpu_fwdl(mmio);
-    host::sleep_ms(100);
+    host::sleep_ms(50);
 
-    // Step 5: Wait for H2C_PATH_RDY (bit 1) — comes FIRST, before header!
-    // rtw89: fwdl_check_path_ready(true) checks H2C path, not FWDL path
-    host::print("[wifi] Waiting for H2C path ready...\n");
+    dump_state(mmio, "cpu-on");
+
+    // ── Step 6: Wait for H2C_PATH_RDY ───────────────────────────
+    host::print("[wifi] Waiting H2C path ready...\n");
     let mut h2c_ready = false;
-    for i in 0..2000 {
+    for i in 0..2000u32 {
         let val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
         if val & regs::B_AX_H2C_PATH_RDY != 0 {
-            host::print("[wifi] H2C path ready! FW_CTRL=0x");
-            host::print_hex32(val); host::print("\n");
+            host::print("[wifi] H2C ready (");
+            print_dec(i as usize);
+            host::print("ms)\n");
             h2c_ready = true;
             break;
         }
-        if i < 5 || i % 200 == 0 {
-            host::print("  poll["); print_dec(i); host::print("]: FW_CTRL=0x");
-            host::print_hex32(val); host::print("\n");
+        if i < 5 || i % 500 == 0 {
+            host::print("  ["); print_dec(i as usize);
+            host::print("] FW_CTRL=0x"); host::print_hex32(val);
+            host::print("\n");
         }
         host::sleep_ms(1);
     }
     if !h2c_ready {
-        host::print("[wifi] H2C path not ready — aborting\n");
+        host::print("[wifi] H2C path NOT READY\n");
+        dump_state(mmio, "h2c-fail");
         return false;
     }
 
-    // Step 6: Setup CH12 ring NOW (after H2C path is ready)
+    // ── Step 7: Setup CH12 ring ─────────────────────────────────
     let (ring_dma, data_dma) = match setup_ch12_ring(mmio) {
         Some(r) => r,
         None => {
@@ -80,268 +103,393 @@ pub fn download(mmio: i32) -> bool {
         }
     };
 
-    // Step 7: Send firmware HEADER via CH12 DMA
+    // ── Step 8: Send FW header ──────────────────────────────────
     let hdr_len = fw_header_len();
-    host::print("[wifi] Sending FW header (");
+    host::print("[wifi] Sending header (");
     print_dec(hdr_len);
     host::print(" bytes)...\n");
     send_fw_chunk(ring_dma, data_dma, mmio, 0, hdr_len);
     host::sleep_ms(20);
 
-    // Step 8: Wait for FWDL_PATH_RDY (bit 2) — comes AFTER header!
+    // ── Step 9: Wait FWDL_PATH_RDY ──────────────────────────────
     if !wait_fwdl_path_ready(mmio) {
         host::print("[wifi] FWDL path not ready after header\n");
         return false;
     }
 
-    // Step 9: Clear halt channels
+    // ── Step 10: Clear halt channels ────────────────────────────
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
-    // Step 10: Send remaining firmware body in chunks
+    // ── Step 11: Send firmware body ─────────────────────────────
     send_firmware_body(mmio, ring_dma, data_dma, hdr_len);
 
-    // Step 9: Wait for firmware ready
+    // ── Step 12: Wait FW ready ──────────────────────────────────
     if !wait_fw_ready(mmio) {
         let status = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-        host::print("[wifi] FW ready TIMEOUT! WCPU_FW_CTRL=0x");
+        host::print("[wifi] FW TIMEOUT! FW_CTRL=0x");
         host::print_hex32(status);
         let dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
-        host::print(" BOOT_DBG=0x");
-        host::print_hex32(dbg);
+        host::print(" BOOT_DBG=0x"); host::print_hex32(dbg);
         host::print("\n");
         return false;
     }
 
-    host::print("[wifi] Firmware loaded and running!\n");
+    host::print("[wifi] Firmware loaded!\n");
     true
 }
 
-/// PCIe DMA pre-init: hard-stop ALL DMA, reset MAC, clear indices, enable CH12.
-/// The UEFI leaves the chip in an active DMA state — we need an aggressive reset.
-fn pcie_dma_pre_init(mmio: i32) {
-    host::print("[wifi] PCIe DMA pre-init...\n");
+// ═══════════════════════════════════════════════════════════════════
+//  XTAL SI indirect register access
+// ═══════════════════════════════════════════════════════════════════
 
-    // 0. HCI Function Enable — CRITICAL: enables MAC, DMAC, Dispatcher, PacketBuf
-    // Without this, DMA engine doesn't function at all!
-    let hci_val = regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
-                | regs::B_AX_DISPATCHER_EN | regs::B_AX_PKT_BUF_EN;
-    host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, hci_val);
-    host::print("  DMAC_FUNC_EN set: 0x"); host::print_hex32(hci_val); host::print("\n");
+/// Write to an XTAL SI register via the indirect interface at 0x0270.
+/// `offset` = XTAL SI register address, `val` = data, `mask` = which bits to write.
+fn write_xtal_si(mmio: i32, offset: u8, val: u8, mask: u8) -> bool {
+    // Build command: CMD_POLL | mode=write(0) | bitmask | data | addr
+    let cmd: u32 = (1u32 << 31)
+        | ((mask as u32) << 16)
+        | ((val as u32) << 8)
+        | (offset as u32);
+    host::mmio_w32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL, cmd);
 
-    // 0b. Enable AXIDMA
-    let mut plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    plat |= regs::B_AX_AXIDMA_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, plat);
-
-    // 1. Show initial DMA state
-    let busy0 = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
-    host::print("  DMA_BUSY before: 0x"); host::print_hex32(busy0); host::print("\n");
-
-    // 1. Hard-stop ALL DMA: set every stop bit
-    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0xFFFFFFFF);
-    host::sleep_ms(2);
-
-    // 2. Disable HCI TX/RX
-    let mut cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-    cfg &= !(regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
-    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
-    host::sleep_ms(2);
-
-    // 3. Wait for DMA idle (up to 500ms)
-    let mut idle = false;
-    for i in 0..50 {
-        let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
-        if busy == 0 { idle = true; break; }
-        if i == 49 {
-            host::print("  DMA_BUSY still: 0x"); host::print_hex32(busy);
-            host::print(" (continuing anyway)\n");
+    // Poll until CMD_POLL clears (up to 50ms)
+    for _ in 0..50 {
+        let v = host::mmio_r32(mmio, regs::R_AX_WLAN_XTAL_SI_CTRL);
+        if v & (1u32 << 31) == 0 {
+            return true;
         }
-        host::sleep_ms(10);
+        host::sleep_ms(1);
     }
-    if idle { host::print("  DMA idle\n"); }
-
-    // 6. Clear ALL TX/RX ring indices
-    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0xFFFFFFFF);
-    host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0xFFFFFFFF);
-    host::sleep_ms(1);
-
-    // 7. Reset BDRAM — Realtek does NOT auto-clear this bit!
-    cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-    cfg |= regs::B_AX_RST_BDRAM;
-    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
-    host::sleep_ms(2);
-    // Manually clear the reset bit
-    cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-    cfg &= !regs::B_AX_RST_BDRAM;
-    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
-    host::sleep_ms(2);
-
-    // 8. Configure DMA stop: stop all channels EXCEPT CH12
-    let stop = 0x0007FFFF & !regs::B_AX_STOP_CH12; // all channels stopped, CH12 open
-    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, stop);
-    host::sleep_ms(1);
-
-    // 9. Re-enable HCI TX/RX DMA
-    cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-    cfg |= regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN;
-    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
-
-    let busy1 = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
-    host::print("  DMA_BUSY after: 0x"); host::print_hex32(busy1); host::print("\n");
-    host::print("[wifi] PCIe DMA pre-init done\n");
+    host::print("[wifi] XTAL SI timeout @0x");
+    host::print_hex32(offset as u32);
+    host::print("\n");
+    false
 }
 
-/// Full MAC power-off + power-on cycle.
-/// The UEFI leaves firmware running — a simple CPU disable is not enough.
-/// Based on rtw8852b_pwr_off_func() + rtw8852b_pwr_on_func().
-fn power_cycle(mmio: i32) {
-    host::print("[wifi] Power cycling MAC...\n");
+// ═══════════════════════════════════════════════════════════════════
+//  Power OFF — rtw8852b_pwr_off_func()
+// ═══════════════════════════════════════════════════════════════════
 
-    // ── Phase 1: Power OFF ──────────────────────────────────────
+/// Full power-off sequence (based on Linux rtw8852b_pwr_off_func).
+/// Cleans UEFI state so we can re-initialize from scratch.
+fn pwr_off(mmio: i32) -> bool {
+    // ── Disable CPU first ───────────────────────────────────────
+    host::mmio_clr32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_WCPU_EN);
+    host::mmio_clr32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_AXIDMA_EN);
+    host::mmio_clr32(mmio, regs::R_AX_WCPU_FW_CTRL, regs::B_AX_WCPU_FWDL_EN);
 
-    // Disable WCPU
-    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val &= !regs::B_AX_WCPU_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    // ── XTAL SI: restore power-off defaults ─────────────────────
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, regs::XTAL_SI_RFC2RF, regs::XTAL_SI_RFC2RF);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, 0, regs::XTAL_SI_OFF_EI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, 0, regs::XTAL_SI_OFF_WEI);
+    write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S0, 0, regs::XTAL_SI_RF00);
+    write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S1, 0, regs::XTAL_SI_RF10);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, regs::XTAL_SI_SRAM2RFC, regs::XTAL_SI_SRAM2RFC);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, 0, regs::XTAL_SI_PON_EI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, 0, regs::XTAL_SI_PON_WEI);
 
-    // Disable AXI DMA
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val &= !regs::B_AX_AXIDMA_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    // ── System power down ───────────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_EN_WLON);
+    host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+    host::mmio_clr8(mmio, regs::R_AX_SYS_FUNC_EN,
+        regs::B_AX_FEN_BB_GLB_RSTN | regs::B_AX_FEN_BBRSTB);
+    host::mmio_clr32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
+        regs::B_AX_SYM_PADPDN_WL_RFC_1P3);
 
-    // Clear FWDL enable
-    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    val &= !regs::B_AX_WCPU_FWDL_EN;
-    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, 0, regs::XTAL_SI_SHDN_WL);
 
-    // Request MAC power OFF via SYS_PW_CTRL
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-    val |= regs::B_AX_APFM_OFFMAC;
-    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
+    host::mmio_clr32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
+        regs::B_AX_SYM_PADPDN_WL_PTA_1P3);
 
-    // Poll until OFFMAC clears (hardware auto-clears when done)
-    let mut off_ok = false;
-    for _ in 0..200 {
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL, 0, regs::XTAL_SI_GND_SHDN_WL);
+
+    // ── Request MAC power off ───────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APFM_OFFMAC);
+
+    // Poll OFFMAC cleared (auto-clears when done)
+    let mut ok = false;
+    for _ in 0..20 {
         let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-        if v & regs::B_AX_APFM_OFFMAC == 0 { off_ok = true; break; }
+        if v & regs::B_AX_APFM_OFFMAC == 0 {
+            ok = true;
+            break;
+        }
         host::sleep_ms(1);
     }
-    host::sleep_ms(10);
-    let pw_off = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-    host::print("  PW_CTRL after off: 0x"); host::print_hex32(pw_off);
-    if off_ok { host::print(" (OFFMAC cleared)\n"); } else { host::print(" (OFFMAC STUCK!)\n"); }
-
-    // ── Phase 2: Power ON ───────────────────────────────────────
-
-    // Clear suspend modes
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-    val &= !(regs::B_AX_AFSM_WLSUS_EN | regs::B_AX_AFSM_PCIE_SUS_EN);
-    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
-
-    // Clear power-down and low-power states
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-    val &= !(regs::B_AX_APDM_HPDN | regs::B_AX_APFM_SWLPS);
-    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
-
-    // Wait for system power ready
-    for _ in 0..200 {
-        let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-        if v & regs::B_AX_RDY_SYSPWR != 0 { break; }
-        host::sleep_ms(1);
+    if !ok {
+        host::print("  OFFMAC stuck\n");
     }
 
-    // Enable WLAN
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-    val |= regs::B_AX_EN_WLON;
-    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
+    // ── PCIe post-off config ────────────────────────────────────
+    host::mmio_w32(mmio, regs::R_AX_WLLPS_CTRL, regs::SW_LPS_OPTION);
+    host::mmio_set32(mmio, regs::R_AX_SYS_SWR_CTRL1, regs::B_AX_SYM_CTRL_SPS_PWMFREQ);
+    host::mmio_w32_mask(mmio, regs::R_AX_SPS_DIG_ON_CTRL0,
+        regs::B_AX_REG_ZCDC_H_MASK, 0x3);
+    host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APFM_SWLPS);
 
-    // Request MAC power ON
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-    val |= regs::B_AX_APFN_ONMAC;
-    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
-
-    // Poll until ONMAC clears (hardware auto-clears when done)
-    let mut on_ok = false;
-    for _ in 0..200 {
-        let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-        if v & regs::B_AX_APFN_ONMAC == 0 { on_ok = true; break; }
-        host::sleep_ms(1);
-    }
-    host::sleep_ms(10);
-    let pw_on = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
-    host::print("  PW_CTRL after on: 0x"); host::print_hex32(pw_on);
-    if on_ok { host::print(" (ONMAC cleared)\n"); } else { host::print(" (ONMAC STUCK!)\n"); }
-
-    let fw_after = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::print("  FW_CTRL after power cycle: 0x"); host::print_hex32(fw_after);
-    let fwdl_sts = (fw_after >> 5) & 0x7;
-    host::print(" (FWDL_STS="); print_dec(fwdl_sts as usize); host::print(")\n");
-
-    let status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
-    host::print("  SYS_STATUS1: 0x"); host::print_hex32(status); host::print("\n");
+    ok
 }
 
-/// Enable CPU in FWDL mode — exact rtw89_mac_enable_cpu_ax() sequence
+// ═══════════════════════════════════════════════════════════════════
+//  Power ON — rtw8852b_pwr_on_func()
+// ═══════════════════════════════════════════════════════════════════
+
+/// Full power-on sequence (based on Linux rtw8852b_pwr_on_func).
+/// Initializes XTAL, LDO, ISO, SPS, then enables DMAC + CMAC.
+fn pwr_on(mmio: i32) -> bool {
+    // ── Wake from low-power ─────────────────────────────────────
+    host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL,
+        regs::B_AX_AFSM_WLSUS_EN | regs::B_AX_AFSM_PCIE_SUS_EN);
+    host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL,
+        regs::B_AX_DIS_WLBT_PDNSUSEN_SOPC);
+    host::mmio_set32(mmio, regs::R_AX_WLLPS_CTRL,
+        regs::B_AX_DIS_WLBT_LPSEN_LOPC);
+    host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APDM_HPDN);
+    host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APFM_SWLPS);
+
+    // Poll RDY_SYSPWR
+    let mut ok = false;
+    for _ in 0..20 {
+        if host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL) & regs::B_AX_RDY_SYSPWR != 0 {
+            ok = true;
+            break;
+        }
+        host::sleep_ms(1);
+    }
+    if !ok { host::print("  RDY_SYSPWR timeout\n"); return false; }
+
+    // ── AFE LDO ─────────────────────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_SYS_AFE_LDO_CTRL, regs::B_AX_AON_OFF_PC_EN);
+    ok = false;
+    for _ in 0..20 {
+        if host::mmio_r32(mmio, regs::R_AX_SYS_AFE_LDO_CTRL) & regs::B_AX_AON_OFF_PC_EN != 0 {
+            ok = true;
+            break;
+        }
+        host::sleep_ms(1);
+    }
+    if !ok { host::print("  AON_OFF_PC timeout\n"); return false; }
+
+    // ── SPS dig off config (default non-RFE5 path) ──────────────
+    host::mmio_w32_mask(mmio, regs::R_AX_SPS_DIG_OFF_CTRL0,
+        regs::B_AX_C1_L1_MASK, 0x1);
+    host::mmio_w32_mask(mmio, regs::R_AX_SPS_DIG_OFF_CTRL0,
+        regs::B_AX_C3_L1_MASK, 0x3);
+
+    // ── Enable WLAN + request MAC power on ──────────────────────
+    host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_EN_WLON);
+    host::mmio_set32(mmio, regs::R_AX_SYS_PW_CTRL, regs::B_AX_APFN_ONMAC);
+
+    // Poll ONMAC cleared (auto-clears when done)
+    ok = false;
+    for _ in 0..20 {
+        if host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL) & regs::B_AX_APFN_ONMAC == 0 {
+            ok = true;
+            break;
+        }
+        host::sleep_ms(1);
+    }
+    if !ok { host::print("  ONMAC timeout\n"); return false; }
+
+    // ── Platform enable reset dance ─────────────────────────────
+    // rtw89 toggles PLATFORM_EN via write8 five times (set-clr-set-clr-set)
+    host::mmio_set8(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_PLATFORM_EN as u8);
+    host::mmio_clr8(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_PLATFORM_EN as u8);
+    host::mmio_set8(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_PLATFORM_EN as u8);
+    host::mmio_clr8(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_PLATFORM_EN as u8);
+    host::mmio_set8(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_PLATFORM_EN as u8);
+
+    // ── PCIe: disable calibration ───────────────────────────────
+    host::mmio_clr32(mmio, regs::R_AX_SYS_SDIO_CTRL, regs::B_AX_PCIE_CALIB_EN_V1);
+
+    // ── ADIE PAD power + XTAL SI crystal init ───────────────────
+    host::mmio_set32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
+        regs::B_AX_SYM_PADPDN_WL_PTA_1P3);
+
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_GND_SHDN_WL, regs::XTAL_SI_GND_SHDN_WL);
+
+    host::mmio_set32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
+        regs::B_AX_SYM_PADPDN_WL_RFC_1P3);
+
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_SHDN_WL, regs::XTAL_SI_SHDN_WL);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_OFF_WEI, regs::XTAL_SI_OFF_WEI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_OFF_EI, regs::XTAL_SI_OFF_EI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        0, regs::XTAL_SI_RFC2RF);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_PON_WEI, regs::XTAL_SI_PON_WEI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_PON_EI, regs::XTAL_SI_PON_EI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        0, regs::XTAL_SI_SRAM2RFC);
+    write_xtal_si(mmio, regs::XTAL_SI_SRAM_CTRL,
+        0, regs::XTAL_SI_SRAM_DIS);
+    write_xtal_si(mmio, regs::XTAL_SI_XTAL_XMD_2,
+        0, regs::XTAL_SI_LDO_LPS);
+    write_xtal_si(mmio, regs::XTAL_SI_XTAL_XMD_4,
+        0, regs::XTAL_SI_LPS_CAP);
+
+    // ── ISO control ─────────────────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_PMC_DBG_CTRL2,
+        regs::B_AX_SYSON_DIS_PMCR_AX_WRMSK);
+    host::mmio_set32(mmio, regs::R_AX_SYS_ISO_CTRL, regs::B_AX_ISO_EB2CORE);
+    host::mmio_clr32(mmio, regs::R_AX_SYS_ISO_CTRL, regs::B_AX_PWC_EV2EF_B15);
+
+    host::sleep_ms(1);
+
+    host::mmio_clr32(mmio, regs::R_AX_SYS_ISO_CTRL, regs::B_AX_PWC_EV2EF_B14);
+    host::mmio_clr32(mmio, regs::R_AX_PMC_DBG_CTRL2,
+        regs::B_AX_SYSON_DIS_PMCR_AX_WRMSK);
+
+    // ── DMAC Function Enable (full set from rtw8852b_pwr_on_func) ─
+    host::mmio_set32(mmio, regs::R_AX_DMAC_FUNC_EN,
+        regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
+        | regs::B_AX_MPDU_PROC_EN | regs::B_AX_WD_RLS_EN
+        | regs::B_AX_DLE_WDE_EN | regs::B_AX_TXPKT_CTRL_EN
+        | regs::B_AX_STA_SCH_EN | regs::B_AX_DLE_PLE_EN
+        | regs::B_AX_PKT_BUF_EN | regs::B_AX_DMAC_TBL_EN
+        | regs::B_AX_PKT_IN_EN | regs::B_AX_DLE_CPUIO_EN
+        | regs::B_AX_DISPATCHER_EN | regs::B_AX_BBRPT_EN
+        | regs::B_AX_MAC_SEC_EN | regs::B_AX_DMACREG_GCKEN);
+
+    // ── CMAC Function Enable ────────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_CMAC_FUNC_EN,
+        regs::B_AX_CMAC_EN | regs::B_AX_CMAC_TXEN | regs::B_AX_CMAC_RXEN
+        | regs::B_AX_FORCE_CMACREG_GCKEN | regs::B_AX_PHYINTF_EN
+        | regs::B_AX_CMAC_DMA_EN | regs::B_AX_PTCLTOP_EN
+        | regs::B_AX_SCHEDULER_EN | regs::B_AX_TMAC_EN | regs::B_AX_RMAC_EN);
+
+    // ── Pinmux: EESK func = BT_LOG ─────────────────────────────
+    host::mmio_w32_mask(mmio, regs::R_AX_EECS_EESK_FUNC_SEL,
+        regs::B_AX_PINMUX_EESK_FUNC_SEL_MASK, 0x1);
+
+    true
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  CPU control
+// ═══════════════════════════════════════════════════════════════════
+
+/// Disable CPU — clean state before FWDL.
+/// Based on rtw89_mac_disable_cpu / disable_cpu_ax.
+fn disable_cpu(mmio: i32) {
+    // Stop WCPU
+    host::mmio_clr32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_WCPU_EN);
+
+    // Clear FW control state
+    host::mmio_clr32(mmio, regs::R_AX_WCPU_FW_CTRL,
+        regs::B_AX_WCPU_FWDL_EN | regs::B_AX_H2C_PATH_RDY | regs::B_AX_FWDL_PATH_RDY);
+
+    // Stop CPU clock
+    host::mmio_clr32(mmio, regs::R_AX_SYS_CLK_CTRL, regs::B_AX_CPU_CLK_EN);
+
+    // Toggle APB_WRAP (watchdog reset)
+    host::mmio_clr32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_APB_WRAP_EN);
+    host::mmio_set32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_APB_WRAP_EN);
+
+    // Toggle PLATFORM_EN
+    host::mmio_clr32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_PLATFORM_EN);
+    host::mmio_set32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_PLATFORM_EN);
+}
+
+/// Enable CPU in FWDL mode — rtw89_mac_enable_cpu_ax(fwdl=true).
 fn enable_cpu_fwdl(mmio: i32) {
-    host::print("[wifi] Enabling FWDL mode (rtw89 sequence)...\n");
-
-    // Check WCPU is actually disabled
-    let plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    if plat & regs::B_AX_WCPU_EN != 0 {
-        host::print("  WARNING: WCPU still enabled!\n");
-    }
-
-    // 1. Clear UDM registers
+    // Clear UDM registers
     host::mmio_w32(mmio, regs::R_AX_UDM1, 0);
     host::mmio_w32(mmio, regs::R_AX_UDM2, 0);
 
-    // 2. Clear all halt channels
+    // Clear halt channels
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H, 0);
 
-    // 3. Enable CPU clock
-    let mut val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
-    val |= regs::B_AX_CPU_CLK_EN;
-    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
+    // Enable CPU clock
+    host::mmio_set32(mmio, regs::R_AX_SYS_CLK_CTRL, regs::B_AX_CPU_CLK_EN);
 
-    // 4. Set FW_CTRL: clear path ready + status, then set FWDL_EN
-    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    // Set FW_CTRL: clear state, set FWDL_EN
+    let mut val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
     val &= !(regs::B_AX_WCPU_FWDL_EN | regs::B_AX_H2C_PATH_RDY | regs::B_AX_FWDL_PATH_RDY);
-    // Clear FWDL_STS field (bits [7:5]) to INITIAL_STATE (0)
-    val &= !((0x7u32) << 5);
-    // Set FWDL_EN
+    val &= !((0x7u32) << 5); // clear FWDL_STS field
     val |= regs::B_AX_WCPU_FWDL_EN;
     host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
 
-    // 5. RTL8852B specific: set SEC_IDMEM_SIZE_CONFIG = 2
+    // Set SEC_IDMEM_SIZE_CONFIG = 2
     val = host::mmio_r32(mmio, regs::R_AX_SEC_CTRL);
     val &= !regs::B_AX_SEC_IDMEM_MASK;
     val |= 0x2 << 16;
     host::mmio_w32(mmio, regs::R_AX_SEC_CTRL, val);
 
-    // 6. Set boot reason — write16_mask to R_AX_BOOT_REASON bits [2:0]
-    // 0x01E6 is 16-bit aligned, use mmio_w16
-    host::mmio_w16(mmio, regs::R_AX_BOOT_REASON,
-        regs::RTW89_FW_DLFW_RESUME as u16);
+    // Write boot reason = FWDL_RESUME (3)
+    host::mmio_w16(mmio, regs::R_AX_BOOT_REASON, regs::RTW89_FW_DLFW_RESUME as u16);
 
-    // 7. Enable WCPU — boot ROM starts in FWDL mode
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val |= regs::B_AX_WCPU_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-
-    host::sleep_ms(50);
-
-    let ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::print("  FW_CTRL after enable: 0x"); host::print_hex32(ctrl); host::print("\n");
+    // Enable WCPU — boot ROM starts in FWDL mode
+    host::mmio_set32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_WCPU_EN);
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  PCIe DMA pre-init
+// ═══════════════════════════════════════════════════════════════════
+
+/// Setup PCIe DMA: stop all channels, reset BDRAM, re-enable HCI for CH12.
+fn pcie_dma_pre_init(mmio: i32) {
+    host::print("[wifi] PCIe DMA init...\n");
+
+    // Enable AXIDMA
+    host::mmio_set32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_AXIDMA_EN);
+
+    // Hard-stop ALL DMA
+    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0xFFFFFFFF);
+    host::sleep_ms(2);
+
+    // Disable HCI TX/RX
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1,
+        regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
+    host::sleep_ms(2);
+
+    // Wait DMA idle (up to 500ms)
+    for i in 0..50 {
+        let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+        if busy == 0 { break; }
+        if i == 49 {
+            host::print("  DMA busy: 0x"); host::print_hex32(busy); host::print("\n");
+        }
+        host::sleep_ms(10);
+    }
+
+    // Clear ALL TX/RX ring indices
+    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0xFFFFFFFF);
+    host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0xFFFFFFFF);
+    host::sleep_ms(1);
+
+    // Reset BDRAM (Realtek does NOT auto-clear this bit)
+    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
+    host::sleep_ms(2);
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
+    host::sleep_ms(2);
+
+    // Stop all channels EXCEPT CH12
+    let stop = 0x0007FFFF & !regs::B_AX_STOP_CH12;
+    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, stop);
+    host::sleep_ms(1);
+
+    // Re-enable HCI TX/RX DMA
+    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1,
+        regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  CH12 ring setup + firmware transfer
+// ═══════════════════════════════════════════════════════════════════
+
 /// Setup CH12 (FW command) DMA ring.
-/// Returns (ring_dma_handle, data_dma_handle) or None on failure.
 fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
-    // Allocate 1 page for ring descriptors (16 BDs × 8 bytes = 128 bytes)
+    // Allocate 1 page for ring descriptors (16 BDs x 8 bytes = 128 bytes)
     let ring_dma = host::dma_alloc(1);
     if ring_dma < 0 { return None; }
     let ring_phys = host::dma_phys(ring_dma);
@@ -350,74 +498,33 @@ fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
     let data_dma = host::dma_alloc(2);
     if data_dma < 0 { return None; }
 
-    // Program CH12 ring base address (32-bit writes)
+    // Program CH12 ring base address
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
 
-    // Set ring size — MUST be 16-bit write! (rtw89 uses rtw89_write16)
+    // Set ring size — MUST be 16-bit write
     host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT);
 
-    // Reset ring index — also 16-bit write for host_idx
+    // Reset ring index
     host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, 0);
 
-    host::print("[wifi] CH12 ring: phys=0x");
+    // Reset BD_IDX
+    unsafe { BD_IDX = 0; }
+
+    host::print("[wifi] CH12 ring @ 0x");
     host::print_hex32((ring_phys >> 32) as u32);
     host::print_hex32(ring_phys as u32);
-    host::print(" (");
-    print_dec(CH12_BD_COUNT as usize);
-    host::print(" BDs)\n");
+    host::print("\n");
 
     Some((ring_dma, data_dma))
 }
 
-/// Wait for FWDL path to be ready (poll R_AX_WCPU_FW_CTRL bit 2)
-fn wait_fwdl_path_ready(mmio: i32) -> bool {
-    host::print("[wifi] Waiting for FWDL path ready...\n");
-    let mut last_val = 0u32;
-    for i in 0..2000 { // 2 seconds
-        let val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-        if val & regs::B_AX_FWDL_PATH_RDY != 0 {
-            host::print("[wifi] FWDL path ready! FW_CTRL=0x");
-            host::print_hex32(val);
-            host::print("\n");
-            return true;
-        }
-        // Log changes
-        if val != last_val && (i < 10 || i % 100 == 0) {
-            host::print("  poll["); print_dec(i); host::print("]: FW_CTRL=0x");
-            host::print_hex32(val);
-            host::print("\n");
-            last_val = val;
-        }
-        host::sleep_ms(1);
-    }
-    false
-}
-
-/// Firmware header length — the rtw89 header starts at offset 0x60.
-/// The first 0x60 bytes are the section table, then the actual header follows.
-/// For rtw8852b_fw-1.bin, the header is typically 0x60 bytes (96 bytes).
-fn fw_header_len() -> usize {
-    // Read header length from firmware: offset 0x04 bits [15:0] in section table
-    // For safety, use the section table size (first 0x60 bytes)
-    if FW_DATA.len() < 0x60 { return FW_DATA.len(); }
-    0x60
-}
-
-/// BD ring state — tracks the current write index across multiple sends
-static mut BD_IDX: u16 = 0;
-
-// TX descriptor size for AX generation (RTL8852B): 8 bytes
-// Prepended before firmware data in the DMA buffer.
-const TXDESC_SIZE: usize = 8;
-
 /// Send a single firmware chunk via CH12 DMA ring.
-/// Prepends an 8-byte TX descriptor (zeroed for fwcmd) before the data.
 fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: usize) {
     let data_phys = host::dma_phys(data_dma);
     let total_len = TXDESC_SIZE + len;
 
-    // Write 8-byte TX descriptor (zeroed for fwcmd — rtw89 uses memset(0) + fill)
+    // Write 8-byte TX descriptor (zeroed for fwcmd)
     host::dma_w32(data_dma, 0, 0);
     host::dma_w32(data_dma, 4, 0);
 
@@ -433,33 +540,21 @@ fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: us
     host::dma_w32(ring_dma, bd_offset + 4, data_phys as u32);
     host::fence();
 
-    // Read index register BEFORE update
-    let idx_before = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
-
-    // Advance ring write pointer — MUST be 16-bit write!
+    // Advance ring write pointer — MUST be 16-bit write
     let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
     host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx);
 
-    // Don't wait for HW_IDX — CH12 (fwcmd) doesn't advance HW_IDX like data channels.
-    // rtw89 fwcmd_submit() also doesn't wait. Just check the state after a short delay.
     host::sleep_ms(5);
-    let idx_after = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
-    host::print("  BD submitted: idx 0x");
-    host::print_hex32(idx_before);
-    host::print(" -> 0x");
-    host::print_hex32(idx_after);
-    host::print("\n");
-
     unsafe { BD_IDX = new_idx; }
 }
 
-/// Send firmware body (everything after header) in chunks via CH12
+/// Send firmware body (everything after header) in chunks via CH12.
 fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usize) {
     let total = FW_DATA.len();
     let mut offset = start_offset;
     let mut chunk_num = 0usize;
 
-    host::print("[wifi] Downloading firmware body: ");
+    host::print("[wifi] Downloading body: ");
 
     while offset < total {
         let remaining = total - offset;
@@ -477,27 +572,47 @@ fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usi
     host::print(" chunks)\n");
 }
 
-/// Poll for firmware ready — real status is in R_AX_SYS_STATUS1 bit 0,
-/// NOT in WCPU_FW_CTRL (where bit 0 is FWDL_EN that we set ourselves!)
-fn wait_fw_ready(mmio: i32) -> bool {
-    host::print("[wifi] Waiting for firmware ready...\n");
-    for i in 0..500 {
-        // Real FW ready: SYS_STATUS1 bit 0
-        let status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
-        let rdy = status & 1 != 0;
+// ═══════════════════════════════════════════════════════════════════
+//  Polling helpers
+// ═══════════════════════════════════════════════════════════════════
 
-        // Checksum fail: still in WCPU_FW_CTRL
-        let fw_ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-        let chk_fail = fw_ctrl & regs::FWDL_CHECKSUM_FAIL != 0;
-
-        if rdy && !chk_fail {
-            host::print("[wifi] FW ready after ");
-            print_dec(i * 10);
-            host::print("ms\n");
+/// Wait for FWDL path ready (bit 2 in WCPU_FW_CTRL).
+fn wait_fwdl_path_ready(mmio: i32) -> bool {
+    host::print("[wifi] Waiting FWDL path ready...\n");
+    for i in 0..2000u32 {
+        let val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+        if val & regs::B_AX_FWDL_PATH_RDY != 0 {
+            host::print("[wifi] FWDL ready (");
+            print_dec(i as usize);
+            host::print("ms)\n");
             return true;
         }
-        if rdy && chk_fail && i > 100 {
-            host::print("[wifi] FW ready but checksum fail persists\n");
+        host::sleep_ms(1);
+    }
+    false
+}
+
+/// Firmware header length — first 0x60 bytes (section table).
+fn fw_header_len() -> usize {
+    if FW_DATA.len() < 0x60 { return FW_DATA.len(); }
+    0x60
+}
+
+/// Wait for firmware ready — SYS_STATUS1 bit 0.
+fn wait_fw_ready(mmio: i32) -> bool {
+    host::print("[wifi] Waiting FW ready...\n");
+    for i in 0..500u32 {
+        let status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
+        let fw_ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+
+        if status & 1 != 0 && fw_ctrl & regs::FWDL_CHECKSUM_FAIL == 0 {
+            host::print("[wifi] FW ready (");
+            print_dec((i * 10) as usize);
+            host::print("ms)\n");
+            return true;
+        }
+        if status & 1 != 0 && fw_ctrl & regs::FWDL_CHECKSUM_FAIL != 0 && i > 100 {
+            host::print("[wifi] FW ready but checksum fail\n");
             return false;
         }
         host::sleep_ms(10);
@@ -505,47 +620,20 @@ fn wait_fw_ready(mmio: i32) -> bool {
     false
 }
 
-/// PCIe Function Level Reset — hardware-resets the entire WiFi device.
-/// Walks the PCIe capability list to find the Express capability,
-/// then sets bit 15 (BCR_FLR) in Device Control register.
-pub fn pcie_flr() {
-    // Find PCIe Express Capability in config space
-    // Walk capability list starting from offset 0x34
-    let mut cap_ptr = (host::pci_read_config(0x34) & 0xFF) as u8;
-    let mut pcie_cap_offset = 0u8;
+// ═══════════════════════════════════════════════════════════════════
+//  Debug helpers
+// ═══════════════════════════════════════════════════════════════════
 
-    while cap_ptr != 0 {
-        let cap_id = (host::pci_read_config(cap_ptr) & 0xFF) as u8;
-        if cap_id == 0x10 { // PCI Express Capability
-            pcie_cap_offset = cap_ptr;
-            break;
-        }
-        cap_ptr = ((host::pci_read_config(cap_ptr) >> 8) & 0xFF) as u8;
-    }
-
-    if pcie_cap_offset == 0 {
-        host::print("  PCIe capability not found!\n");
-        return;
-    }
-
-    host::print("  PCIe cap at 0x");
-    host::print_hex32(pcie_cap_offset as u32);
-
-    // Check if FLR is supported (Device Capabilities, offset +4, bit 28)
-    let dev_cap = host::pci_read_config(pcie_cap_offset + 4);
-    if dev_cap & (1 << 28) == 0 {
-        host::print(" — FLR not supported!\n");
-        return;
-    }
-    host::print(" — FLR supported\n");
-
-    // Trigger FLR: set bit 15 in Device Control register (offset +8)
-    let dev_ctrl_off = pcie_cap_offset + 8;
-    let mut dev_ctrl = host::pci_read_config(dev_ctrl_off);
-    dev_ctrl |= 0x8000; // PCI_EXP_DEVCTL_BCR_FLR
-    host::pci_write_config(dev_ctrl_off, dev_ctrl);
-
-    host::print("  FLR triggered!\n");
+/// Dump key register state for debugging.
+fn dump_state(mmio: i32, label: &str) {
+    host::print("  ["); host::print(label); host::print("] ");
+    host::print("PW=0x");
+    host::print_hex32(host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL));
+    host::print(" FW=0x");
+    host::print_hex32(host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL));
+    host::print(" PLAT=0x");
+    host::print_hex32(host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE));
+    host::print("\n");
 }
 
 fn print_dec(n: usize) {

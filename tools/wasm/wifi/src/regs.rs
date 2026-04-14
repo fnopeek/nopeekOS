@@ -7,11 +7,21 @@ pub const R_AX_SYS_FUNC_EN: u32       = 0x0002;
 pub const R_AX_SYS_PW_CTRL: u32       = 0x0004;
 pub const R_AX_SYS_CLK_CTRL: u32      = 0x0008;
 pub const B_AX_CPU_CLK_EN: u32        = 1 << 14;
+pub const R_AX_SYS_SWR_CTRL1: u32     = 0x0010;
+pub const R_AX_SYS_ADIE_PAD_PWR_CTRL: u32 = 0x0018;
 pub const R_AX_SYS_AFE_LDO_CTRL: u32  = 0x0020;
 pub const R_AX_GPIO_MUXCFG: u32       = 0x0040;
+pub const R_AX_SYS_SDIO_CTRL: u32     = 0x0070;
 pub const R_AX_PLATFORM_ENABLE: u32   = 0x0088;
+pub const R_AX_WLLPS_CTRL: u32        = 0x0090;
+pub const R_AX_PMC_DBG_CTRL2: u32     = 0x00CC;
 pub const R_AX_SYS_CFG1: u32          = 0x00F0;
 pub const R_AX_SYS_STATUS1: u32       = 0x00F4;
+pub const R_AX_SPS_DIG_ON_CTRL0: u32  = 0x0200;
+pub const R_AX_WLAN_XTAL_SI_CTRL: u32 = 0x0270;
+pub const R_AX_EECS_EESK_FUNC_SEL: u32 = 0x02D8;
+pub const R_AX_WLRF_CTRL: u32         = 0x02F0;
+pub const R_AX_SPS_DIG_OFF_CTRL0: u32 = 0x0400;
 
 // ── Firmware / CPU Control ───────────────────────────────────────
 
@@ -93,6 +103,51 @@ pub const B_AX_AFSM_PCIE_SUS_EN: u32 = 1 << 12;
 pub const B_AX_APDM_HPDN: u32        = 1 << 15;
 pub const B_AX_EN_WLON: u32           = 1 << 16;
 pub const B_AX_RDY_SYSPWR: u32        = 1 << 17;
+pub const B_AX_DIS_WLBT_PDNSUSEN_SOPC: u32 = 1 << 18;
+
+// R_AX_SYS_ISO_CTRL (0x0000) bits
+pub const B_AX_ISO_EB2CORE: u32      = 1 << 8;
+pub const B_AX_PWC_EV2EF_B14: u32    = 1 << 14;
+pub const B_AX_PWC_EV2EF_B15: u32    = 1 << 15;
+
+// R_AX_SYS_FUNC_EN (0x0002) bits (byte access)
+pub const B_AX_FEN_BBRSTB: u8        = 1 << 0;
+pub const B_AX_FEN_BB_GLB_RSTN: u8   = 1 << 1;
+
+// R_AX_WLLPS_CTRL (0x0090) bits
+pub const B_AX_DIS_WLBT_LPSEN_LOPC: u32 = 1 << 1;
+
+// R_AX_SYS_AFE_LDO_CTRL (0x0020) bits
+pub const B_AX_AON_OFF_PC_EN: u32    = 1 << 23;
+
+// R_AX_SYS_ADIE_PAD_PWR_CTRL (0x0018) bits
+pub const B_AX_SYM_PADPDN_WL_RFC_1P3: u32 = 1 << 5;
+pub const B_AX_SYM_PADPDN_WL_PTA_1P3: u32 = 1 << 6;
+
+// R_AX_PMC_DBG_CTRL2 (0x00CC) bits
+pub const B_AX_SYSON_DIS_PMCR_AX_WRMSK: u32 = 1 << 2;
+
+// R_AX_SYS_SDIO_CTRL (0x0070) bits
+pub const B_AX_PCIE_CALIB_EN_V1: u32 = 1 << 12;
+
+// R_AX_WLRF_CTRL (0x02F0) bits
+pub const B_AX_AFC_AFEDIG: u32       = 1 << 17;
+
+// R_AX_SYS_SWR_CTRL1 (0x0010) bits
+pub const B_AX_SYM_CTRL_SPS_PWMFREQ: u32 = 1 << 10;
+
+// R_AX_SPS_DIG_OFF_CTRL0 (0x0400) field masks
+pub const B_AX_C1_L1_MASK: u32       = 0x3;       // GENMASK(1,0)
+pub const B_AX_C3_L1_MASK: u32       = 0x30;      // GENMASK(5,4)
+
+// R_AX_SPS_DIG_ON_CTRL0 (0x0200) field masks
+pub const B_AX_REG_ZCDC_H_MASK: u32  = 0x3 << 17; // GENMASK(18,17)
+
+// R_AX_EECS_EESK_FUNC_SEL (0x02D8) field masks
+pub const B_AX_PINMUX_EESK_FUNC_SEL_MASK: u32 = 0xF0; // GENMASK(7,4)
+
+// Power-off constants
+pub const SW_LPS_OPTION: u32         = 0x0001A0B2;
 
 // R_AX_PLATFORM_ENABLE (0x0088) bits
 pub const B_AX_PLATFORM_EN: u32  = 1 << 0;
@@ -106,11 +161,35 @@ pub const B_AX_WCPU_FWDL_EN: u32    = 1 << 0;
 pub const B_AX_H2C_PATH_RDY: u32    = 1 << 1;
 pub const B_AX_FWDL_PATH_RDY: u32   = 1 << 2;
 
-// R_AX_DMAC_FUNC_EN (0x8400) bits
+// R_AX_DMAC_FUNC_EN (0x8400) bits — full set from rtw8852b_pwr_on_func
 pub const B_AX_MAC_FUNC_EN: u32     = 1 << 30;
 pub const B_AX_DMAC_FUNC_EN: u32    = 1 << 29;
+pub const B_AX_MPDU_PROC_EN: u32    = 1 << 28;
+pub const B_AX_WD_RLS_EN: u32       = 1 << 27;
+pub const B_AX_DLE_WDE_EN: u32      = 1 << 26;
+pub const B_AX_TXPKT_CTRL_EN: u32   = 1 << 25;
+pub const B_AX_STA_SCH_EN: u32      = 1 << 24;
+pub const B_AX_DLE_PLE_EN: u32      = 1 << 23;
 pub const B_AX_PKT_BUF_EN: u32      = 1 << 22;
+pub const B_AX_DMAC_TBL_EN: u32     = 1 << 21;
+pub const B_AX_PKT_IN_EN: u32       = 1 << 20;
+pub const B_AX_DLE_CPUIO_EN: u32    = 1 << 19;
 pub const B_AX_DISPATCHER_EN: u32   = 1 << 18;
+pub const B_AX_BBRPT_EN: u32        = 1 << 17;
+pub const B_AX_MAC_SEC_EN: u32      = 1 << 16;
+pub const B_AX_DMACREG_GCKEN: u32   = 1 << 15;
+
+// R_AX_CMAC_FUNC_EN (0xC000) bits
+pub const B_AX_CMAC_EN: u32         = 1 << 30;
+pub const B_AX_CMAC_TXEN: u32       = 1 << 29;
+pub const B_AX_CMAC_RXEN: u32       = 1 << 28;
+pub const B_AX_FORCE_CMACREG_GCKEN: u32 = 1 << 15;
+pub const B_AX_PHYINTF_EN: u32      = 1 << 5;
+pub const B_AX_CMAC_DMA_EN: u32     = 1 << 4;
+pub const B_AX_PTCLTOP_EN: u32      = 1 << 3;
+pub const B_AX_SCHEDULER_EN: u32    = 1 << 2;
+pub const B_AX_TMAC_EN: u32         = 1 << 1;
+pub const B_AX_RMAC_EN: u32         = 1 << 0;
 
 // ── Firmware Download Status Bits ────────────────────────────────
 
@@ -149,3 +228,36 @@ pub const B_AX_RST_BDRAM: u32    = 1 << 3;
 
 pub const RTL8852B_VENDOR: u16 = 0x10EC;
 pub const RTL8852B_DEVICE: u16 = 0xB852;
+
+// ── XTAL SI Indirect Access ─────────────────────────────────────
+// Written via R_AX_WLAN_XTAL_SI_CTRL (0x0270):
+//   BIT(31) = CMD_POLL (set to trigger, clears when done)
+//   [25:24] = mode (0=write, 1=read)
+//   [23:16] = bitmask
+//   [15:8]  = data
+//   [7:0]   = address (offset)
+
+// XTAL SI register offsets
+pub const XTAL_SI_ANAPAR_WL: u8   = 0x90;
+pub const XTAL_SI_WL_RFC_S0: u8   = 0x80;
+pub const XTAL_SI_WL_RFC_S1: u8   = 0x81;
+pub const XTAL_SI_SRAM_CTRL: u8   = 0xA1;
+pub const XTAL_SI_XTAL_XMD_2: u8  = 0x24;
+pub const XTAL_SI_XTAL_XMD_4: u8  = 0x26;
+
+// XTAL SI bit masks for ANAPAR_WL (offset 0x90)
+pub const XTAL_SI_PON_WEI: u8     = 1 << 0;
+pub const XTAL_SI_PON_EI: u8      = 1 << 1;
+pub const XTAL_SI_OFF_WEI: u8     = 1 << 2;
+pub const XTAL_SI_OFF_EI: u8      = 1 << 3;
+pub const XTAL_SI_RFC2RF: u8      = 1 << 4;
+pub const XTAL_SI_SHDN_WL: u8     = 1 << 5;
+pub const XTAL_SI_GND_SHDN_WL: u8 = 1 << 6;
+pub const XTAL_SI_SRAM2RFC: u8    = 1 << 7;
+
+// XTAL SI bit masks for other offsets
+pub const XTAL_SI_SRAM_DIS: u8    = 1 << 1;  // SRAM_CTRL (0xA1)
+pub const XTAL_SI_RF00: u8        = 1 << 0;  // WL_RFC_S0 (0x80)
+pub const XTAL_SI_RF10: u8        = 1 << 0;  // WL_RFC_S1 (0x81)
+pub const XTAL_SI_LDO_LPS: u8     = 0x70;    // XTAL_XMD_2 GENMASK(6,4)
+pub const XTAL_SI_LPS_CAP: u8     = 0x0F;    // XTAL_XMD_4 GENMASK(3,0)
