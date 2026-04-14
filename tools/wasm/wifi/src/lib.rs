@@ -1,0 +1,125 @@
+//! wifi — RTL8852BE WiFi 6 driver (WASM module)
+//!
+//! Phase 1: Chip probe — bind PCI device, map BAR0, read chip registers.
+//! Uses the nopeekOS WASM Driver ABI (npk_pci_*, npk_mmio_*, npk_dma_*).
+
+#![no_std]
+
+mod host;
+mod regs;
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+
+/// MMIO handle for BAR0 (set during init, used everywhere)
+static mut MMIO: i32 = -1;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() {
+    host::print("[wifi] RTL8852BE driver v0.1\n");
+
+    // ── Step 1: Bind PCI device ──────────────────────────────────
+    let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
+    if rc != 0 {
+        host::print("[wifi] PCI bind failed (");
+        match rc {
+            -1 => host::print("not found"),
+            -2 => host::print("denied"),
+            _ => host::print("unknown error"),
+        }
+        host::print(")\n");
+        return;
+    }
+    host::print("[wifi] PCI bind OK\n");
+
+    // ── Step 2: Enable bus mastering (DMA) ───────────────────────
+    host::pci_enable_bus_master();
+    host::print("[wifi] Bus mastering enabled\n");
+
+    // ── Step 3: Map BAR0 — 16 pages (64KB) for MMIO registers ───
+    let mmio = host::mmio_map_bar(0, 16);
+    if mmio < 0 {
+        host::print("[wifi] MMIO map failed\n");
+        return;
+    }
+    unsafe { MMIO = mmio; }
+    host::print("[wifi] BAR0 mapped (64KB)\n");
+    host::print("\n");
+
+    // ── Step 4: Chip probe — read key registers ──────────────────
+    host::print("  RTL8852BE Register Dump\n");
+    host::print("  ─────────────────────────────────\n");
+
+    // PCI config space
+    let subsys = host::pci_read_config(0x2C);
+    host::log_reg("PCI Subsystem     ", subsys);
+
+    let pci_cmd = host::pci_read_config(0x04);
+    host::log_reg("PCI Command/Status", pci_cmd);
+
+    // System registers
+    let sys_iso = host::mmio_r32(mmio, regs::R_AX_SYS_ISO_CTRL);
+    host::log_reg("SYS_ISO_CTRL      ", sys_iso);
+
+    let sys_func = host::mmio_r32(mmio, regs::R_AX_SYS_FUNC_EN);
+    host::log_reg("SYS_FUNC_EN       ", sys_func);
+
+    let sys_pw = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    host::log_reg("SYS_PW_CTRL       ", sys_pw);
+
+    let sys_clk = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    host::log_reg("SYS_CLK_CTRL      ", sys_clk);
+
+    let sys_cfg = host::mmio_r32(mmio, regs::R_AX_SYS_CFG1);
+    host::log_reg("SYS_CFG1          ", sys_cfg);
+
+    let platform = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    host::log_reg("PLATFORM_ENABLE   ", platform);
+
+    // Firmware status
+    let fw_ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::log_reg("WCPU_FW_CTRL      ", fw_ctrl);
+
+    let boot_dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
+    host::log_reg("BOOT_DBG          ", boot_dbg);
+
+    let boot_reason = host::mmio_r32(mmio, regs::R_AX_BOOT_REASON);
+    host::log_reg("BOOT_REASON       ", boot_reason);
+
+    // HCI / DMA status
+    let hci_func = host::mmio_r32(mmio, regs::R_AX_HCI_FUNC_EN);
+    host::log_reg("HCI_FUNC_EN       ", hci_func);
+
+    let pcie_init = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    host::log_reg("PCIE_INIT_CFG1    ", pcie_init);
+
+    let dmac_func = host::mmio_r32(mmio, regs::R_AX_DMAC_FUNC_EN);
+    host::log_reg("DMAC_FUNC_EN      ", dmac_func);
+
+    // Halt channels
+    let halt_h2c = host::mmio_r32(mmio, regs::R_AX_HALT_H2C_CTRL);
+    host::log_reg("HALT_H2C_CTRL     ", halt_h2c);
+
+    let halt_c2h = host::mmio_r32(mmio, regs::R_AX_HALT_C2H_CTRL);
+    host::log_reg("HALT_C2H_CTRL     ", halt_c2h);
+
+    host::print("\n");
+
+    // ── Interpret firmware status ────────────────────────────────
+    if fw_ctrl & regs::FWDL_WCPU_FW_INIT_RDY != 0 {
+        host::print("[wifi] Firmware: READY (was loaded by UEFI/previous boot?)\n");
+    } else {
+        host::print("[wifi] Firmware: NOT LOADED (expected — needs download)\n");
+    }
+    if fw_ctrl & regs::FWDL_CHECKSUM_FAIL != 0 {
+        host::print("[wifi] WARNING: Firmware checksum fail flag set\n");
+    }
+
+    host::print("\n[wifi] Phase 1 complete — press 'q' to exit\n");
+
+    // ── Wait for user input ──────────────────────────────────────
+    loop {
+        let key = host::input_wait(1000);
+        if key == 0x71 { return; } // 'q'
+    }
+}
