@@ -55,8 +55,8 @@ impl FbConsole {
         &self.info
     }
 
-    /// Front buffer pointer (blit source, cursor restore).
-    fn front_ptr(&self) -> *mut u8 {
+    /// Front buffer pointer (blit source, cursor restore, GPU-composited cursor).
+    pub fn front_ptr(&self) -> *mut u8 {
         if self.front == 0 { self.shadow } else { self.shadow_b }
     }
 
