@@ -98,6 +98,32 @@ pub const FWDL_CHECKSUM_FAIL: u32     = 1 << 4;
 pub const FWDL_SECURITY_FAIL: u32     = 1 << 5;
 pub const FWDL_CV_NOT_MATCH: u32      = 1 << 6;
 
+// ── PCIe DMA Control ─────────────────────────────────────────────
+
+pub const R_AX_PCIE_DMA_STOP1: u32    = 0x1010;
+pub const R_AX_TXBD_RWPTR_CLR1: u32   = 0x1014;
+pub const R_AX_RXBD_RWPTR_CLR: u32    = 0x1018;
+pub const R_AX_PCIE_DMA_BUSY1: u32    = 0x101C;
+
+pub const B_AX_STOP_CH12: u32    = 1 << 18;
+pub const B_AX_STOP_WPDMA: u32   = 1 << 19;
+pub const B_AX_STOP_PCIEIO: u32  = 1 << 20;
+
+// Bits in R_AX_TXBD_RWPTR_CLR1: set to clear corresponding ring index
+pub const B_AX_CLR_ACH0_IDX: u32  = 1 << 0;
+pub const B_AX_CLR_ACH1_IDX: u32  = 1 << 1;
+pub const B_AX_CLR_ACH2_IDX: u32  = 1 << 2;
+pub const B_AX_CLR_ACH3_IDX: u32  = 1 << 3;
+pub const B_AX_CLR_CH8_IDX: u32   = 1 << 8;
+pub const B_AX_CLR_CH9_IDX: u32   = 1 << 9;
+pub const B_AX_CLR_CH12_IDX: u32  = 1 << 10;
+pub const B_AX_CLR_ALL_CH: u32    = 0x7FF; // bits [10:0]
+
+// R_AX_PCIE_INIT_CFG1 (0x1000) DMA control bits
+pub const B_AX_TXHCI_EN: u32     = 1 << 11;
+pub const B_AX_RXHCI_EN: u32     = 1 << 13;
+pub const B_AX_RST_BDRAM: u32    = 1 << 3;
+
 // ── Chip Constants ───────────────────────────────────────────────
 
 pub const RTL8852B_VENDOR: u16 = 0x10EC;
