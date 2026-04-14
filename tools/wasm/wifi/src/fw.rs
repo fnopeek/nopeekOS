@@ -375,30 +375,15 @@ fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: us
     let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
     host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx);
 
-    // Wait for hardware to consume (HW_IDX should advance in upper 16 bits)
-    let mut consumed = false;
-    for i in 0..500 {
-        let reg = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
-        let hw_idx = (reg >> 16) & 0xFFF;
-        if hw_idx == new_idx as u32 { consumed = true; break; }
-        if i == 499 {
-            host::print("  BD TIMEOUT! before=0x");
-            host::print_hex32(idx_before);
-            host::print(" now=0x");
-            host::print_hex32(reg);
-            host::print("\n  BD=0x");
-            host::print_hex32(host::dma_r32(ring_dma, bd_offset));
-            host::print(":0x");
-            host::print_hex32(host::dma_r32(ring_dma, bd_offset + 4));
-            host::print(" phys=0x");
-            host::print_hex32(data_phys as u32);
-            host::print("\n");
-        }
-        host::sleep_ms(1);
-    }
-    if consumed {
-        host::print("  BD consumed OK\n");
-    }
+    // Don't wait for HW_IDX — CH12 (fwcmd) doesn't advance HW_IDX like data channels.
+    // rtw89 fwcmd_submit() also doesn't wait. Just check the state after a short delay.
+    host::sleep_ms(5);
+    let idx_after = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
+    host::print("  BD submitted: idx 0x");
+    host::print_hex32(idx_before);
+    host::print(" -> 0x");
+    host::print_hex32(idx_after);
+    host::print("\n");
 
     unsafe { BD_IDX = new_idx; }
 }
