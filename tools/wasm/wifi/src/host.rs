@@ -69,6 +69,17 @@ pub fn mmio_w32(handle: i32, offset: u32, val: u32) {
     unsafe { npk_mmio_write32(handle, offset as i32, val as i32); }
 }
 
+/// Write a 16-bit value to an MMIO register using aligned read-modify-write.
+/// Offset must be 2-byte aligned (but not necessarily 4-byte aligned).
+pub fn mmio_w16(handle: i32, offset: u32, val: u16) {
+    let aligned = offset & !0x3;
+    let shift = (offset & 0x2) * 8; // 0 or 16
+    let mut word = mmio_r32(handle, aligned);
+    word &= !(0xFFFF << shift);
+    word |= (val as u32) << shift;
+    mmio_w32(handle, aligned, word);
+}
+
 pub fn mmio_r64(handle: i32, offset: u32) -> u64 {
     unsafe { npk_mmio_read64(handle, offset as i32) as u64 }
 }
