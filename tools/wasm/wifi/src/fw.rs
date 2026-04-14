@@ -858,6 +858,7 @@ fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usi
 /// Wait for FWDL path ready (bit 2 in WCPU_FW_CTRL).
 fn wait_fwdl_path_ready(mmio: i32) -> bool {
     host::print("[wifi] Waiting FWDL path ready...\n");
+    let mut last_sts = 0xFFu32;
     for i in 0..2000u32 {
         let val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
         if val & regs::B_AX_FWDL_PATH_RDY != 0 {
@@ -865,6 +866,14 @@ fn wait_fwdl_path_ready(mmio: i32) -> bool {
             print_dec(i as usize);
             host::print("ms)\n");
             return true;
+        }
+        let sts = (val >> 5) & 0x7;
+        if sts != last_sts || i < 5 || i % 500 == 0 {
+            host::print("  ["); print_dec(i as usize);
+            host::print("] FW_CTRL=0x"); host::print_hex32(val);
+            host::print(" STS="); print_dec(sts as usize);
+            host::print("\n");
+            last_sts = sts;
         }
         host::sleep_ms(1);
     }
