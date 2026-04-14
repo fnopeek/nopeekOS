@@ -33,9 +33,25 @@ pub extern "C" fn _start() {
     }
     host::print("[wifi] PCI bind OK\n");
 
-    // ── Step 2: Enable bus mastering (DMA) ───────────────────────
+    // ── Step 2: Save BAR0 + PCIe FLR + Restore BAR0 ────────────
+    // FLR resets the device completely (including BAR0!). We must
+    // save BAR0 before, do FLR, then restore BAR0 and re-enable.
+    let bar0_lo = host::pci_read_config(0x10);
+    let bar0_hi = host::pci_read_config(0x14);
+    host::print("[wifi] BAR0 saved: 0x");
+    host::print_hex32(bar0_hi); host::print_hex32(bar0_lo); host::print("\n");
+
+    host::print("[wifi] PCIe FLR...\n");
+    fw::pcie_flr();
+    host::sleep_ms(200);
+
+    // Restore BAR0
+    host::pci_write_config(0x10, bar0_lo);
+    host::pci_write_config(0x14, bar0_hi);
+
+    // Re-enable bus mastering + memory space
     host::pci_enable_bus_master();
-    host::print("[wifi] Bus mastering enabled\n");
+    host::print("[wifi] BAR0 restored, bus master enabled\n");
 
     // ── Step 3: Map BAR0 — 16 pages (64KB) for MMIO registers ───
     let mmio = host::mmio_map_bar(0, 16);
