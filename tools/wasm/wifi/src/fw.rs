@@ -59,13 +59,14 @@ pub fn download(mmio: i32) -> bool {
     }
     dump_state(mmio, "pwr-on");
 
-    // ── Step 3: DMAC/DLE/HFC pre-init for FWDL ───────────────────
+    // ── Step 3: PCIe DMA pre-init (BEFORE DLE!) ───────────────────
+    // Must come before DLE/HFC: BDRAM reset in here would clear DLE config.
+    pcie_dma_pre_init(mmio);
+
+    // ── Step 4: DMAC/DLE/HFC pre-init for FWDL ─────────────────
     if !dmac_pre_init_dlfw(mmio) {
         host::print("[wifi] WARNING: DLE init incomplete\n");
     }
-
-    // ── Step 4: PCIe DMA pre-init ───────────────────────────────
-    pcie_dma_pre_init(mmio);
 
     // ── Step 5: Disable CPU (clean state before FWDL) ───────────
     disable_cpu(mmio);
