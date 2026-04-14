@@ -107,10 +107,13 @@ pub extern "C" fn _start() {
     host::print("\n");
 
     // ── Interpret firmware status ────────────────────────────────
-    if fw_ctrl & regs::FWDL_WCPU_FW_INIT_RDY != 0 {
-        host::print("[wifi] Firmware: READY (was loaded by UEFI/previous boot?)\n");
+    // Real FW ready is in SYS_STATUS1 bit 0, NOT WCPU_FW_CTRL bit 0!
+    let sys_status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
+    host::log_reg("SYS_STATUS1       ", sys_status);
+    if sys_status & 1 != 0 {
+        host::print("[wifi] Firmware: RUNNING (loaded by UEFI/previous boot)\n");
     } else {
-        host::print("[wifi] Firmware: NOT LOADED (expected — needs download)\n");
+        host::print("[wifi] Firmware: NOT RUNNING (needs download)\n");
     }
     if fw_ctrl & regs::FWDL_CHECKSUM_FAIL != 0 {
         host::print("[wifi] WARNING: Firmware checksum fail flag set\n");

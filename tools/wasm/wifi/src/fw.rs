@@ -105,19 +105,7 @@ fn pcie_dma_pre_init(mmio: i32) {
     host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
     host::sleep_ms(2);
 
-    // 3. Reset SYS_FUNC_EN to force MAC/HCI reset
-    let func = host::mmio_r32(mmio, regs::R_AX_SYS_FUNC_EN);
-    // Clear and re-set function enable to force reset
-    host::mmio_w32(mmio, regs::R_AX_SYS_FUNC_EN, 0);
-    host::sleep_ms(2);
-    host::mmio_w32(mmio, regs::R_AX_SYS_FUNC_EN, func);
-    host::sleep_ms(5);
-
-    // 4. Stop DMA again after reset
-    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0xFFFFFFFF);
-    host::sleep_ms(2);
-
-    // 5. Wait for DMA idle (up to 500ms)
+    // 3. Wait for DMA idle (up to 500ms)
     let mut idle = false;
     for i in 0..50 {
         let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
@@ -135,15 +123,16 @@ fn pcie_dma_pre_init(mmio: i32) {
     host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0xFFFFFFFF);
     host::sleep_ms(1);
 
-    // 7. Reset BDRAM
+    // 7. Reset BDRAM — Realtek does NOT auto-clear this bit!
     cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
     cfg |= regs::B_AX_RST_BDRAM;
     host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
-    for _ in 0..100 {
-        let v = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-        if v & regs::B_AX_RST_BDRAM == 0 { break; }
-        host::sleep_ms(1);
-    }
+    host::sleep_ms(2);
+    // Manually clear the reset bit
+    cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    cfg &= !regs::B_AX_RST_BDRAM;
+    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
+    host::sleep_ms(2);
 
     // 8. Configure DMA stop: stop all channels EXCEPT CH12
     let stop = 0x0007FFFF & !regs::B_AX_STOP_CH12; // all channels stopped, CH12 open
@@ -202,10 +191,14 @@ fn enable_cpu_fwdl(mmio: i32) {
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
     // 2. Set boot reason to FWDL resume
-    // R_AX_BOOT_REASON is a byte register at 0x01E6
-    let mut val = host::mmio_r32(mmio, regs::R_AX_BOOT_REASON);
-    val = (val & 0xFFFFFF00) | regs::RTW89_FW_DLFW_RESUME;
-    host::mmio_w32(mmio, regs::R_AX_BOOT_REASON, val);
+    // R_AX_BOOT_REASON (0x01E6) is a BYTE register — must use aligned read-modify-write.
+    // Aligned 32-bit register is at 0x01E4. BOOT_REASON is byte [2] = bits [23:16].
+    let aligned_addr = regs::R_AX_BOOT_REASON & !0x3; // 0x01E4
+    let byte_pos = (regs::R_AX_BOOT_REASON & 0x3) * 8; // bit 16
+    let mut val = host::mmio_r32(mmio, aligned_addr);
+    val &= !(0xFF << byte_pos); // clear byte
+    val |= (regs::RTW89_FW_DLFW_RESUME & 0xFF) << byte_pos;
+    host::mmio_w32(mmio, aligned_addr, val);
 
     // 3. Enable CPU clock
     val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
@@ -227,7 +220,11 @@ fn enable_cpu_fwdl(mmio: i32) {
     val |= regs::B_AX_WCPU_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 
-    host::sleep_ms(5);
+    host::sleep_ms(50); // give boot ROM time to start
+
+    // Debug: show state after enable
+    let ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::print("  FW_CTRL after enable: 0x"); host::print_hex32(ctrl); host::print("\n");
 }
 
 /// Setup CH12 (FW command) DMA ring.
@@ -329,13 +326,18 @@ fn send_firmware(mmio: i32, ring_dma: i32, data_dma: i32) {
     host::print(" chunks)\n");
 }
 
-/// Poll R_AX_WCPU_FW_CTRL for firmware ready (timeout 5 seconds)
+/// Poll for firmware ready — real status is in R_AX_SYS_STATUS1 bit 0,
+/// NOT in WCPU_FW_CTRL (where bit 0 is FWDL_EN that we set ourselves!)
 fn wait_fw_ready(mmio: i32) -> bool {
     host::print("[wifi] Waiting for firmware ready...\n");
     for i in 0..500 {
-        let val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-        let rdy = val & regs::FWDL_WCPU_FW_INIT_RDY != 0;
-        let chk_fail = val & regs::FWDL_CHECKSUM_FAIL != 0;
+        // Real FW ready: SYS_STATUS1 bit 0
+        let status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
+        let rdy = status & 1 != 0;
+
+        // Checksum fail: still in WCPU_FW_CTRL
+        let fw_ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+        let chk_fail = fw_ctrl & regs::FWDL_CHECKSUM_FAIL != 0;
 
         if rdy && !chk_fail {
             host::print("[wifi] FW ready after ");
@@ -344,8 +346,7 @@ fn wait_fw_ready(mmio: i32) -> bool {
             return true;
         }
         if rdy && chk_fail && i > 100 {
-            // FW says ready but checksum still fails after 1 second
-            host::print("[wifi] FW reports ready but checksum fail persists\n");
+            host::print("[wifi] FW ready but checksum fail persists\n");
             return false;
         }
         host::sleep_ms(10);
