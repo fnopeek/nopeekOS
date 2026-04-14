@@ -47,9 +47,30 @@ pub fn download(mmio: i32) -> bool {
     enable_cpu_fwdl(mmio);
     host::sleep_ms(10);
 
-    // Step 5: Send firmware HEADER first via CH12 DMA
-    // Key insight from rtw89: header is sent BEFORE checking FWDL_PATH_RDY.
-    // The header download triggers the path to become ready.
+    // Step 5: Wait for H2C_PATH_RDY (bit 1) — comes FIRST, before header!
+    // rtw89: fwdl_check_path_ready(true) checks H2C path, not FWDL path
+    host::print("[wifi] Waiting for H2C path ready...\n");
+    let mut h2c_ready = false;
+    for i in 0..2000 {
+        let val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+        if val & regs::B_AX_H2C_PATH_RDY != 0 {
+            host::print("[wifi] H2C path ready! FW_CTRL=0x");
+            host::print_hex32(val); host::print("\n");
+            h2c_ready = true;
+            break;
+        }
+        if i < 5 || i % 200 == 0 {
+            host::print("  poll["); print_dec(i); host::print("]: FW_CTRL=0x");
+            host::print_hex32(val); host::print("\n");
+        }
+        host::sleep_ms(1);
+    }
+    if !h2c_ready {
+        host::print("[wifi] H2C path not ready — aborting\n");
+        return false;
+    }
+
+    // Step 6: Send firmware HEADER via CH12 DMA
     let hdr_len = fw_header_len();
     host::print("[wifi] Sending FW header (");
     print_dec(hdr_len);
@@ -57,23 +78,17 @@ pub fn download(mmio: i32) -> bool {
     send_fw_chunk(ring_dma, data_dma, mmio, 0, hdr_len);
     host::sleep_ms(20);
 
-    // Step 6: NOW wait for FWDL path ready (triggered by header)
+    // Step 7: Wait for FWDL_PATH_RDY (bit 2) — comes AFTER header!
     if !wait_fwdl_path_ready(mmio) {
-        host::print("[wifi] FWDL path not ready after header send\n");
-        let ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-        host::print("  WCPU_FW_CTRL=0x"); host::print_hex32(ctrl); host::print("\n");
-        let init = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-        host::print("  PCIE_INIT=0x"); host::print_hex32(init); host::print("\n");
-        let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
-        host::print("  DMA_BUSY=0x"); host::print_hex32(busy); host::print("\n");
+        host::print("[wifi] FWDL path not ready after header\n");
         return false;
     }
 
-    // Step 7: Clear halt channels
+    // Step 8: Clear halt channels
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
-    // Step 8: Send remaining firmware body in chunks
+    // Step 9: Send remaining firmware body in chunks
     send_firmware_body(mmio, ring_dma, data_dma, hdr_len);
 
     // Step 9: Wait for firmware ready
