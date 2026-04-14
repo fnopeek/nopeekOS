@@ -36,16 +36,18 @@ See README.md for the full vision and phase planning.
 ./build.sh vbox-clean   # Remove VirtualBox VM
 ```
 
-## Current Phase: 1 (Bare Metal Boot)
+## Current Phase: 9 (SMP & Event-Driven Architecture)
 
-Focus: Kernel boots, serial I/O works, intent loop runs.
+Focus: Event-driven microkernel, GPU compositing, unlimited windows.
 Completed: IDT+PIC, physical memory manager, heap allocator, SMP (4 cores),
   xHCI (keyboard+mouse), NVMe, Intel Xe GPU (4K@60Hz native modesetting),
   shade compositor (windows, drag, resize), WASM sandbox, npkFS, OTA updates,
   network stack (TCP/TLS 1.3), login screen, double-buffer framebuffer,
-  BCS blitter engine (GPU blit via Gen 12 ExecList/ELSQ — zero-CPU compositing).
-In progress: GPU-composited cursor (cursor in shadow buffer, single GPU blit path).
-Next: Phase 2 (Capability enforcement, audit log).
+  BCS blitter engine (GPU blit via Gen 12 ExecList/ELSQ — zero-CPU compositing),
+  GPU-composited cursor (save-under), async worker intents (http/update non-blocking),
+  heap-allocated terminals (no window limit), KeyEvent abstraction (typed input).
+In progress: Widget API (reusable GUI components for WASM apps).
+Next: File manager app, configurable keybindings, VSync (PLANE_SURF flip).
 
 ## Security Checkpoint
 
