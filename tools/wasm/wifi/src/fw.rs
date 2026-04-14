@@ -19,8 +19,8 @@ static FW_DATA: &[u8] = include_bytes!("rtw8852b_fw.bin");
 const BD_SIZE: usize = 8;
 const BD_OPT_LS: u16 = 1 << 14; // Last Segment
 
-// Firmware download chunk size (4KB - 48 bytes header room)
-const FW_CHUNK_SIZE: usize = 4000;
+// Firmware download chunk size — must match Linux FWDL_SECTION_PER_PKT_LEN
+const FW_CHUNK_SIZE: usize = 2020;
 
 // CH12 ring: 16 buffer descriptors
 const CH12_BD_COUNT: u16 = 16;
@@ -486,12 +486,12 @@ fn enable_cpu_fwdl(mmio: i32) {
     val |= 0x2 << 16;
     host::mmio_w32(mmio, regs::R_AX_SEC_CTRL, val);
 
-    // Write boot reason = FWDL_RESUME (3) — masked write, only bits [2:0]
+    // Write boot reason = 0 (initial FW download, NOT 3=DLFW_RESUME)
+    // Linux: mac->fwdl_enable_wcpu(rtwdev, 0, true, false)
     let aligned = regs::R_AX_BOOT_REASON & !0x3; // 0x01E4
-    let shift = (regs::R_AX_BOOT_REASON & 0x2) * 8; // 16 (byte 2 of word)
+    let shift = (regs::R_AX_BOOT_REASON & 0x2) * 8; // 16
     let mut br = host::mmio_r32(mmio, aligned);
-    br &= !((0x7u32) << shift); // clear bits [2:0] of boot reason byte
-    br |= (regs::RTW89_FW_DLFW_RESUME) << shift;
+    br &= !((0x7u32) << shift); // clear bits [2:0] → boot_reason = 0
     host::mmio_w32(mmio, aligned, br);
 
     // Enable WCPU — boot ROM starts in FWDL mode
@@ -644,11 +644,14 @@ fn pcie_dma_pre_init(mmio: i32) {
     host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0xFFFFFFFF);
     host::sleep_ms(1);
 
-    // Reset BDRAM (Realtek does NOT auto-clear this bit)
+    // Reset BDRAM — set bit, poll for auto-clear (Linux polls, NOT manual clear)
     host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
-    host::sleep_ms(2);
-    host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
-    host::sleep_ms(2);
+    for _ in 0..200 {
+        if host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1) & regs::B_AX_RST_BDRAM == 0 {
+            break;
+        }
+        host::sleep_ms(1);
+    }
 
     // Stop all channels EXCEPT CH12
     let stop = 0x0007FFFF & !regs::B_AX_STOP_CH12;
@@ -775,24 +778,32 @@ fn fw_header_len() -> usize {
     0x60
 }
 
-/// Wait for firmware ready — SYS_STATUS1 bit 0.
+/// Wait for firmware ready — FWDL_STS in WCPU_FW_CTRL bits [7:5] == 7.
+/// Linux: rtw89_fw_check_rdy polls for RTW89_FWDL_WCPU_FW_INIT_RDY (7).
 fn wait_fw_ready(mmio: i32) -> bool {
     host::print("[wifi] Waiting FW ready...\n");
-    for i in 0..500u32 {
-        let status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
+    for i in 0..400u32 {
         let fw_ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+        let fwdl_sts = (fw_ctrl >> 5) & 0x7;
 
-        if status & 1 != 0 && fw_ctrl & regs::FWDL_CHECKSUM_FAIL == 0 {
-            host::print("[wifi] FW ready (");
-            print_dec((i * 10) as usize);
-            host::print("ms)\n");
+        if fwdl_sts == 7 { // FWDL_WCPU_FW_INIT_RDY
+            host::print("[wifi] FW ready! (");
+            print_dec((i) as usize);
+            host::print("ms) FW_CTRL=0x");
+            host::print_hex32(fw_ctrl);
+            host::print("\n");
             return true;
         }
-        if status & 1 != 0 && fw_ctrl & regs::FWDL_CHECKSUM_FAIL != 0 && i > 100 {
-            host::print("[wifi] FW ready but checksum fail\n");
+        if fwdl_sts == 2 { // CHECKSUM_FAIL
+            host::print("[wifi] FW checksum fail\n");
             return false;
         }
-        host::sleep_ms(10);
+        if i % 100 == 99 {
+            host::print("  FW_CTRL=0x"); host::print_hex32(fw_ctrl);
+            host::print(" STS="); print_dec(fwdl_sts as usize);
+            host::print("\n");
+        }
+        host::sleep_ms(1);
     }
     false
 }
