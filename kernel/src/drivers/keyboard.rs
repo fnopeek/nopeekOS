@@ -87,7 +87,8 @@ pub fn has_key() -> bool {
     crate::xhci::is_available()
 }
 
-/// Read next key from buffer. Falls back to xHCI USB keyboard.
+/// Read next raw key byte from buffer. Falls back to xHCI USB keyboard.
+/// Prefer `read_event()` for typed KeyEvent with modifiers.
 pub fn read_key() -> Option<u8> {
     let head = BUF_HEAD.load(Ordering::Acquire);
     let tail = BUF_TAIL.load(Ordering::Acquire);
@@ -99,6 +100,49 @@ pub fn read_key() -> Option<u8> {
     }
     // xHCI USB keyboard (real driver, no legacy emulation needed)
     crate::xhci::poll_keyboard()
+}
+
+/// Read next key as a typed KeyEvent. Converts ANSI escape sequences
+/// (ESC [ A/B/C/D/H/F/2/3/5/6) to KeyCode variants. Captures current
+/// modifier state (Shift, Ctrl, Alt, AltGr, Super) in the event.
+pub fn read_event() -> Option<crate::input::KeyEvent> {
+    use crate::input::{KeyEvent, KeyCode, Modifiers};
+    let byte = read_key()?;
+    let mods = Modifiers::current();
+
+    match byte {
+        0x1B => {
+            // ESC — might be start of ANSI escape sequence (pushed as 3 bytes by push_arrow)
+            if let Some(bracket) = read_key() {
+                if bracket == b'[' {
+                    if let Some(code) = read_key() {
+                        let key = match code {
+                            b'A' => KeyCode::Up,
+                            b'B' => KeyCode::Down,
+                            b'C' => KeyCode::Right,
+                            b'D' => KeyCode::Left,
+                            b'H' => KeyCode::Home,
+                            b'F' => KeyCode::End,
+                            b'5' => KeyCode::PageUp,
+                            b'6' => KeyCode::PageDown,
+                            b'3' => KeyCode::Delete,
+                            b'2' => KeyCode::Insert,
+                            _ => return Some(KeyEvent::special(KeyCode::Escape, mods)),
+                        };
+                        return Some(KeyEvent::special(key, mods));
+                    }
+                }
+                // ESC + non-bracket: return ESC (bracket byte is lost — rare edge case)
+            }
+            Some(KeyEvent::special(KeyCode::Escape, mods))
+        }
+        b'\r' | b'\n' => Some(KeyEvent::special(KeyCode::Enter, mods)),
+        0x08 => Some(KeyEvent::special(KeyCode::Backspace, mods)),
+        0x7F => Some(KeyEvent::special(KeyCode::Delete, mods)),
+        b'\t' => Some(KeyEvent::special(KeyCode::Tab, mods)),
+        c if c >= 0x20 && c < 0x7F => Some(KeyEvent::char(c, mods)),
+        c => Some(KeyEvent::char(c, mods)), // control chars etc.
+    }
 }
 
 fn push_key(key: u8) {

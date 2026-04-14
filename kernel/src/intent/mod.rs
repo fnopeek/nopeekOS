@@ -484,9 +484,9 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             continue;
         }
 
-        // Read keyboard / serial input
-        let byte = if let Some(key) = crate::keyboard::read_key() {
-            key
+        // Read keyboard input as KeyEvent (or serial fallback)
+        let event = if let Some(evt) = crate::keyboard::read_event() {
+            evt
         } else {
             let serial = serial::SERIAL.lock();
             if !serial.has_data() {
@@ -496,96 +496,88 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             }
             let b = serial.read_byte();
             drop(serial);
-            b
+            // Serial: basic byte-to-KeyEvent (no modifier capture)
+            match b {
+                b'\r' | b'\n' => crate::input::KeyEvent::special(crate::input::KeyCode::Enter, crate::input::Modifiers::NONE),
+                0x08 | 0x7F => crate::input::KeyEvent::special(crate::input::KeyCode::Backspace, crate::input::Modifiers::NONE),
+                b'\t' => crate::input::KeyEvent::special(crate::input::KeyCode::Tab, crate::input::Modifiers::NONE),
+                0x1B => crate::input::KeyEvent::special(crate::input::KeyCode::Escape, crate::input::Modifiers::NONE),
+                c => crate::input::KeyEvent::char(c, crate::input::Modifiers::NONE),
+            }
         };
 
-        if crate::shade::input::try_keybind(byte) {
+        // Shade keybindings (Mod+key) — consumes the event if matched
+        if crate::shade::input::try_keybind_event(&event) {
             continue;
         }
 
-        // ANSI escape sequences
-        if session.esc == 1 {
-            session.esc = if byte == 0x5b { 2 } else { 0 };
-            continue;
-        }
-        if session.esc == 2 {
-            session.esc = 0;
-            if session.esc_mod && crate::shade::input::try_arrow_keybind(byte) {
-                continue;
-            }
-            match byte {
-                b'A' => {
-                    // Arrow up — previous history entry
-                    if let Some((line, len)) = session.history.up() {
-                        let len = len.min(session.input_buf.len());
-                        if !crate::shade::is_active() {
-                            for _ in 0..session.pos { kprint!("\x08 \x08"); }
-                        }
-                        session.input_buf[..len].copy_from_slice(&line[..len]);
-                        session.pos = len;
-                        session.cursor = len;
-                        if crate::shade::is_active() {
-                            crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
-                        } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
-                            kprint!("{}", s);
-                        }
-                    }
-                }
-                b'B' => {
-                    // Arrow down — next history entry
+        use crate::input::KeyCode;
+        match event.key {
+            KeyCode::Up => {
+                if let Some((line, len)) = session.history.up() {
+                    let len = len.min(session.input_buf.len());
                     if !crate::shade::is_active() {
                         for _ in 0..session.pos { kprint!("\x08 \x08"); }
                     }
-                    if let Some((line, len)) = session.history.down() {
-                        let len = len.min(session.input_buf.len());
-                        session.input_buf[..len].copy_from_slice(&line[..len]);
-                        session.pos = len;
-                        session.cursor = len;
-                        if crate::shade::is_active() {
-                            crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
-                        } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
-                            kprint!("{}", s);
-                        }
-                    } else {
-                        session.pos = 0;
-                        session.cursor = 0;
-                        if crate::shade::is_active() {
-                            crate::shade::terminal::rewrite_input(&session.input_buf, 0);
-                        }
+                    session.input_buf[..len].copy_from_slice(&line[..len]);
+                    session.pos = len;
+                    session.cursor = len;
+                    if crate::shade::is_active() {
+                        crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
+                    } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
+                        kprint!("{}", s);
                     }
                 }
-                b'C' => {
-                    if session.cursor < session.pos { session.cursor += 1; }
+            }
+            KeyCode::Down => {
+                if !crate::shade::is_active() {
+                    for _ in 0..session.pos { kprint!("\x08 \x08"); }
                 }
-                b'D' => {
-                    if session.cursor > 0 { session.cursor -= 1; }
+                if let Some((line, len)) = session.history.down() {
+                    let len = len.min(session.input_buf.len());
+                    session.input_buf[..len].copy_from_slice(&line[..len]);
+                    session.pos = len;
+                    session.cursor = len;
+                    if crate::shade::is_active() {
+                        crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
+                    } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
+                        kprint!("{}", s);
+                    }
+                } else {
+                    session.pos = 0;
+                    session.cursor = 0;
+                    if crate::shade::is_active() {
+                        crate::shade::terminal::rewrite_input(&session.input_buf, 0);
+                    }
                 }
-                b'H' => { session.cursor = 0; }
-                b'F' => { session.cursor = session.pos; }
-                0x7E => {}
-                _ => {}
             }
-            if crate::shade::is_active() {
-                crate::shade::terminal::set_cursor_pos(
-                    crate::shade::terminal::current_line_len()
-                        .saturating_sub(session.pos - session.cursor));
-                crate::shade::render_input_line();
+            KeyCode::Right => {
+                if session.cursor < session.pos { session.cursor += 1; }
             }
-            continue;
-        }
-
-        match byte {
-            0x1b => {
-                session.esc = 1;
-                session.esc_mod = crate::shade::input::is_mod_active();
+            KeyCode::Left => {
+                if session.cursor > 0 { session.cursor -= 1; }
             }
-            b'\r' | b'\n' => {
+            KeyCode::Home => { session.cursor = 0; }
+            KeyCode::End => { session.cursor = session.pos; }
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Insert => {}
+            KeyCode::Delete => {
+                if session.cursor < session.pos {
+                    for i in session.cursor..session.pos - 1 {
+                        session.input_buf[i] = session.input_buf[i + 1];
+                    }
+                    session.pos -= 1;
+                    if crate::shade::is_active() {
+                        crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
+                    }
+                }
+            }
+            KeyCode::Enter => {
                 session.cursor = session.pos;
                 kprint!("\n");
                 session.history.push(&session.input_buf[..session.pos]);
                 return session.pos;
             }
-            0x08 | 0x7F => {
+            KeyCode::Backspace => {
                 if session.cursor > 0 {
                     for i in session.cursor..session.pos {
                         session.input_buf[i - 1] = session.input_buf[i];
@@ -602,8 +594,9 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                         kprint!("\x08 \x08");
                     }
                 }
+                continue; // skip cursor update below
             }
-            0x09 => {
+            KeyCode::Tab => {
                 if let Ok(input) = core::str::from_utf8(&session.input_buf[..session.pos]) {
                     if let Some(completion) = tab_complete(input) {
                         for cb in completion.as_bytes() {
@@ -615,9 +608,12 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                         kprint!("{}", completion);
                     }
                 }
+                continue; // skip cursor update below
             }
-            b if b >= 0x20 && b < 0x7F => {
-                if session.pos < session.input_buf.len() - 1 {
+            KeyCode::Escape => { continue; }
+            KeyCode::F(_) => { continue; }
+            KeyCode::Char(b) => {
+                if b >= 0x20 && b < 0x7F && session.pos < session.input_buf.len() - 1 {
                     if session.cursor < session.pos {
                         for i in (session.cursor..session.pos).rev() {
                             session.input_buf[i + 1] = session.input_buf[i];
@@ -637,8 +633,16 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                         kprint!("{}", b as char);
                     }
                 }
+                continue; // skip cursor update below
             }
-            _ => {}
+        }
+
+        // Update cursor position for navigation keys (Up/Down/Left/Right/Home/End)
+        if crate::shade::is_active() {
+            crate::shade::terminal::set_cursor_pos(
+                crate::shade::terminal::current_line_len()
+                    .saturating_sub(session.pos - session.cursor));
+            crate::shade::render_input_line();
         }
     }
 }
