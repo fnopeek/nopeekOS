@@ -33,6 +33,7 @@ pub use gui::{theme, layers};
 
 // ── Standalone modules ────────────────────────────────────────
 mod interrupts;
+mod input;
 mod net;
 mod intent;
 mod config;

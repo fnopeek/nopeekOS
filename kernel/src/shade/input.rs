@@ -84,7 +84,7 @@ pub fn poll_action() -> Option<ShadeAction> {
     p.take()
 }
 
-/// Try to handle a key press as a shade keybinding.
+/// Try to handle a key press as a shade keybinding (legacy u8 path).
 /// Returns true if the key was consumed (don't pass to intent loop).
 pub fn try_keybind(key: u8) -> bool {
     if !is_mod_held() { return false; }
@@ -93,55 +93,68 @@ pub fn try_keybind(key: u8) -> bool {
     let shift = crate::keyboard::is_shift_held();
 
     match key {
-        b'\n' | b'\r' => {
-            push_action(ShadeAction::NewWindow);
-            true
-        }
-        b'q' | b'Q' => {
-            push_action(ShadeAction::CloseWindow);
-            true
-        }
-        b'f' | b'F' => {
-            push_action(ShadeAction::ToggleFullscreen);
-            true
-        }
-        b'v' | b'V' => {
-            push_action(ShadeAction::ToggleFloating);
-            true
-        }
-        b'l' | b'L' => {
-            push_action(ShadeAction::Lock);
-            true
-        }
+        b'\n' | b'\r' => { push_action(ShadeAction::NewWindow); true }
+        b'q' | b'Q' => { push_action(ShadeAction::CloseWindow); true }
+        b'f' | b'F' => { push_action(ShadeAction::ToggleFullscreen); true }
+        b'v' | b'V' => { push_action(ShadeAction::ToggleFloating); true }
+        b'l' | b'L' => { push_action(ShadeAction::Lock); true }
         b'1'..=b'4' => {
             let ws = key - b'0';
-            if shift {
-                push_action(ShadeAction::MoveToWorkspace(ws - 1));
-            } else {
-                push_action(ShadeAction::Workspace(ws - 1));
-            }
+            if shift { push_action(ShadeAction::MoveToWorkspace(ws - 1)); }
+            else { push_action(ShadeAction::Workspace(ws - 1)); }
             true
         }
         _ => false,
     }
 }
 
-/// Handle arrow key shade actions (called for ESC [ sequences).
-/// Mod state already verified by caller (captured at ESC time).
-/// `direction`: 'A'=up, 'B'=down, 'C'=right, 'D'=left, '5'=PgUp, '6'=PgDn
+/// Handle arrow key shade actions (legacy, called for ESC [ sequences).
 pub fn try_arrow_keybind(direction: u8) -> bool {
     if !crate::shade::is_active() { return false; }
-
     let shift = crate::keyboard::is_shift_held();
     let ctrl = crate::keyboard::is_ctrl_held();
-
     match direction {
         b'A' => { push_action(if ctrl { ShadeAction::ResizeUp } else if shift { ShadeAction::SwapUp } else { ShadeAction::FocusUp }); true }
         b'B' => { push_action(if ctrl { ShadeAction::ResizeDown } else if shift { ShadeAction::SwapDown } else { ShadeAction::FocusDown }); true }
         b'C' => { push_action(if ctrl { ShadeAction::ResizeRight } else if shift { ShadeAction::SwapRight } else { ShadeAction::FocusRight }); true }
         b'D' => { push_action(if ctrl { ShadeAction::ResizeLeft } else if shift { ShadeAction::SwapLeft } else { ShadeAction::FocusLeft }); true }
-        b'5' => { push_action(ShadeAction::ScrollUp); true }   // PageUp
-        b'6' => { push_action(ShadeAction::ScrollDown); true } // PageDown
+        b'5' => { push_action(ShadeAction::ScrollUp); true }
+        b'6' => { push_action(ShadeAction::ScrollDown); true }
+        _ => false,
+    }
+}
+
+/// Try to handle a KeyEvent as a shade keybinding.
+/// Unified handler — no separate arrow function needed.
+/// Returns true if consumed.
+pub fn try_keybind_event(event: &crate::input::KeyEvent) -> bool {
+    use crate::input::KeyCode;
+    if !event.modifiers.super_key { return false; }
+    if !crate::shade::is_active() { return false; }
+
+    let shift = event.modifiers.shift;
+    let ctrl = event.modifiers.ctrl;
+
+    match event.key {
+        KeyCode::Enter => { push_action(ShadeAction::NewWindow); true }
+        KeyCode::Char(b'q') | KeyCode::Char(b'Q') => { push_action(ShadeAction::CloseWindow); true }
+        KeyCode::Char(b'f') | KeyCode::Char(b'F') => { push_action(ShadeAction::ToggleFullscreen); true }
+        KeyCode::Char(b'v') | KeyCode::Char(b'V') => { push_action(ShadeAction::ToggleFloating); true }
+        KeyCode::Char(b'l') | KeyCode::Char(b'L') => { push_action(ShadeAction::Lock); true }
+        KeyCode::Char(b'1'..=b'4') => {
+            if let KeyCode::Char(c) = event.key {
+                let ws = c - b'0';
+                if shift { push_action(ShadeAction::MoveToWorkspace(ws - 1)); }
+                else { push_action(ShadeAction::Workspace(ws - 1)); }
+            }
+            true
+        }
+        KeyCode::Up => { push_action(if ctrl { ShadeAction::ResizeUp } else if shift { ShadeAction::SwapUp } else { ShadeAction::FocusUp }); true }
+        KeyCode::Down => { push_action(if ctrl { ShadeAction::ResizeDown } else if shift { ShadeAction::SwapDown } else { ShadeAction::FocusDown }); true }
+        KeyCode::Right => { push_action(if ctrl { ShadeAction::ResizeRight } else if shift { ShadeAction::SwapRight } else { ShadeAction::FocusRight }); true }
+        KeyCode::Left => { push_action(if ctrl { ShadeAction::ResizeLeft } else if shift { ShadeAction::SwapLeft } else { ShadeAction::FocusLeft }); true }
+        KeyCode::PageUp => { push_action(ShadeAction::ScrollUp); true }
+        KeyCode::PageDown => { push_action(ShadeAction::ScrollDown); true }
         _ => false,
     }
 }
