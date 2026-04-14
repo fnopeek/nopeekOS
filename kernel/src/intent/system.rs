@@ -76,7 +76,7 @@ pub fn intent_gpu(args: &str) {
             kprintln!("[npk] WARNING: This will disable the display!");
             kprintln!("[npk] Log will be saved after test.");
 
-            let pre_log = crate::serial::stop_capture();
+            let _pre_log = crate::serial::stop_capture();
             crate::serial::start_capture();
 
             crate::gpu::test_pll();
@@ -99,7 +99,7 @@ pub fn intent_gpu(args: &str) {
 
             // Capture serial output during init (survives black screen)
             // Stop normal capture, start fresh for GPU init
-            let pre_log = crate::serial::stop_capture();
+            let _pre_log = crate::serial::stop_capture();
             crate::serial::start_capture();
 
             kprintln!("[npk] GPU: activating native driver...");
@@ -138,7 +138,7 @@ pub fn intent_gpu(args: &str) {
 
             let hz: u8 = if args.trim() == "4k60" { 60 } else { 30 };
 
-            let pre_log = crate::serial::stop_capture();
+            let _pre_log = crate::serial::stop_capture();
             crate::serial::start_capture();
 
             kprintln!("[npk] GPU: switching to 4K@{}Hz...", hz);

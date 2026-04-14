@@ -110,6 +110,7 @@ pub fn show_status(label: &[u8]) {
     }
 }
 
+#[allow(dead_code)]
 pub fn show_ready() {
     blank_line();
     write_line(b"  Serial console active on COM1", COLOR_DARK);

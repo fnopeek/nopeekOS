@@ -958,7 +958,7 @@ impl Compositor {
         let border = self.border;
         let rounding = self.rounding;
         let opacity = self.opacity;
-        let scale = self.scale;
+        let _scale = self.scale;
 
         // Render windows back to front
         for &wid in self.z_order.iter().rev() {
@@ -986,7 +986,7 @@ impl Compositor {
 
     /// Render only dirty windows to layer buffers.
     pub fn render_damaged_to_layers(&mut self, info: &FbInfo) {
-        use crate::layers::{LAYER_CHROME, LAYER_TEXT};
+        use crate::layers::LAYER_CHROME;
 
         if self.needs_full_redraw {
             self.render_to_layers(info);

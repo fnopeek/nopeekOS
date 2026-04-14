@@ -38,6 +38,7 @@ pub struct ColorScheme {
     // UI accent color (for [npk] tag, borders)
     pub accent: u32,
     // Input field border (focused)
+    #[allow(dead_code)]
     pub border_focus: u32,
 }
 
@@ -320,6 +321,7 @@ fn ensure_cache(info: &FbInfo) {
 }
 
 /// Invalidate the aurora cache (call when scheme changes).
+#[allow(dead_code)]
 pub fn invalidate_cache() {
     AURORA_CACHED.store(false, Ordering::Release);
 }

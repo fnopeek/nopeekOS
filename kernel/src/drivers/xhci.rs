@@ -84,6 +84,7 @@ const TRB_DATA_STAGE:     u32 = 3 << 10;
 const TRB_STATUS_STAGE:   u32 = 4 << 10;
 const TRB_LINK:           u32 = 6 << 10;
 const TRB_ENABLE_SLOT:    u32 = 9 << 10;
+#[allow(dead_code)]
 const TRB_DISABLE_SLOT:   u32 = 10 << 10;
 const TRB_ADDRESS_DEVICE: u32 = 11 << 10;
 const TRB_CONFIGURE_EP:   u32 = 12 << 10;
@@ -121,6 +122,7 @@ const USB_SET_PROTOCOL:   u8 = 0x0B;
 const USB_SET_IDLE:       u8 = 0x0A;
 
 // Descriptor types
+#[allow(dead_code)]
 const DESC_DEVICE:        u16 = 0x0100;
 const DESC_CONFIG:        u16 = 0x0200;
 
@@ -1272,6 +1274,7 @@ fn cmd_enable_slot(state: &mut XhciState) -> Option<u8> {
     Some(slot as u8)
 }
 
+#[allow(dead_code)]
 fn cmd_disable_slot(state: &mut XhciState, slot_id: u8) {
     let slot_field = (slot_id as u32) << 24;
     post_command(state, 0, 0, TRB_DISABLE_SLOT | slot_field);
@@ -1286,6 +1289,7 @@ fn cmd_disable_slot(state: &mut XhciState, slot_id: u8) {
     }
 }
 
+#[allow(dead_code)]
 fn reset_ep0_ring(state: &mut XhciState) {
     // SAFETY: zeroing DMA-allocated ring memory
     unsafe { core::ptr::write_bytes(state.ep0_ring as *mut u8, 0, 4096); }
@@ -1660,7 +1664,7 @@ fn drain_events(state: &mut XhciState) {
 
         // ERDP fix: write the index of the event we JUST processed (not the next one)
         // xHCI spec 4.9.4: ERDP points to the last processed event TRB
-        let processed_idx = state.evt_dequeue;
+        let _processed_idx = state.evt_dequeue;
 
         state.evt_dequeue += 1;
         if state.evt_dequeue >= NUM_EVT_TRBS {

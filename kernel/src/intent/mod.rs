@@ -26,7 +26,7 @@ const INPUT_BUF_SIZE: usize = 512;
 const HIST_MAX: usize = 32;
 const HIST_LINE: usize = 256;
 
-struct History {
+pub(crate) struct History {
     lines: [[u8; HIST_LINE]; HIST_MAX],
     lens: [usize; HIST_MAX],
     count: usize,
@@ -87,10 +87,6 @@ pub struct IntentSession {
     pub pos: usize,
     /// Cursor position within input (0..=pos).
     pub cursor: usize,
-    /// ESC state machine: 0=normal, 1=got ESC, 2=got ESC[.
-    pub esc: u8,
-    /// Was Mod key held when ESC was received?
-    pub esc_mod: bool,
     /// Per-session command history.
     pub history: History,
     /// Prompt length (for rewrite_input offset).
@@ -105,8 +101,6 @@ impl IntentSession {
             input_buf: [0u8; INPUT_BUF_SIZE],
             pos: 0,
             cursor: 0,
-            esc: 0,
-            esc_mod: false,
             history: History {
                 lines: [[0; HIST_LINE]; HIST_MAX],
                 lens: [0; HIST_MAX],
@@ -1201,7 +1195,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 install::intent_install(args);
             }
         }
-        "uninstall" | "remove" => {
+        "uninstall" => {
             if require_cap(vault, &session, Rights::EXECUTE, "uninstall") {
                 install::intent_uninstall(args);
             }
@@ -1382,7 +1376,8 @@ pub fn print_active_history() {
     }
 }
 
-/// Execute an intent from npk-shell (dispatch without the loop).
+/// Execute an intent from remote shell (dispatch without the loop).
+#[allow(dead_code)]
 pub fn dispatch_for_shell(input: &str, vault: &'static Mutex<Vault>, session_id: CapId) {
     dispatch_intent(input, vault, session_id);
 }

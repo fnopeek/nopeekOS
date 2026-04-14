@@ -4,7 +4,6 @@
 //! active (focused) terminal. Windows are completely independent.
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
-use alloc::boxed::Box;
 
 /// Maximum lines and columns in each terminal buffer.
 const MAX_LINES: usize = 1000;
@@ -32,6 +31,7 @@ pub struct TerminalBuffer {
 }
 
 impl TerminalBuffer {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         TerminalBuffer {
             lines: [[0; MAX_COLS]; MAX_LINES],
@@ -207,6 +207,7 @@ pub fn current_line_len() -> usize {
 }
 
 /// Get the current (input) line data and length from the active terminal.
+#[allow(dead_code)]
 pub fn current_line_data() -> ([u8; 256], usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     let term = match term_ref(idx) { Some(t) => t, None => return ([0; 256], 0) };
@@ -218,6 +219,7 @@ pub fn current_line_data() -> ([u8; 256], usize) {
 }
 
 /// Get total line count in the active terminal (for input line Y calculation).
+#[allow(dead_code)]
 pub fn line_count() -> usize {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     match term_ref(idx) { Some(t) => t.total, None => 0 }
@@ -683,6 +685,7 @@ pub fn restore_cursor() {
 }
 
 /// Save the current input buffer + cursor position to the active terminal's saved state.
+#[allow(dead_code)]
 pub fn save_input(buf: &[u8], pos: usize) {
     save_input_with_cursor(buf, pos, pos);
 }
@@ -698,6 +701,7 @@ pub fn save_input_with_cursor(buf: &[u8], pos: usize, cursor: usize) {
 }
 
 /// Restore the saved input buffer from the active terminal. Returns (pos, cursor).
+#[allow(dead_code)]
 pub fn restore_input_with_cursor(buf: &mut [u8]) -> (usize, usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     let term = match term_ref(idx) { Some(t) => t, None => return (0, 0) };
@@ -707,12 +711,14 @@ pub fn restore_input_with_cursor(buf: &mut [u8]) -> (usize, usize) {
 }
 
 /// Restore the saved input buffer from the active terminal (legacy, cursor=pos).
+#[allow(dead_code)]
 pub fn restore_input(buf: &mut [u8]) -> usize {
     let (pos, _) = restore_input_with_cursor(buf);
     pos
 }
 
 /// Write the prompt string to the active terminal buffer.
+#[allow(dead_code)]
 pub fn write_prompt() {
     if !is_active() { return; }
     let cwd = crate::intent::get_cwd_for_shell();

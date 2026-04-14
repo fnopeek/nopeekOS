@@ -16,6 +16,7 @@ pub enum CoreState {
 
 pub struct CoreInfo {
     /// Sequential index (0 = BSP)
+    #[allow(dead_code)]
     pub id: u32,
     /// Hardware APIC ID (may not be sequential)
     pub apic_id: u32,

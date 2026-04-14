@@ -267,6 +267,7 @@ pub fn execute_sandboxed(
 
 /// Execute a WASM module in interactive mode (live display).
 /// npk_print writes directly to terminal. Used for long-running apps (top).
+#[allow(dead_code)]
 pub fn execute_interactive(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
 ) -> Result<WasmResult, WasmError> {
@@ -465,7 +466,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_set_wallpaper(ptr, len, width, height) -> 0 or -1
     // Receives raw BGRA pixel data, sets it as the compositor wallpaper.
     linker.func_wrap("env", "npk_set_wallpaper",
-        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32,
+        |caller: Caller<'_, HostState>, ptr: i32, len: i32,
          width: i32, height: i32| -> i32 {
             let cap_id = caller.data().cap_id;
             if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
@@ -497,7 +498,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_set_theme(ptr) -> 0 or -1
     // Receives 16 u32 colors (64 bytes), sets as theme palette.
     linker.func_wrap("env", "npk_set_theme",
-        |mut caller: Caller<'_, HostState>, ptr: i32| -> i32 {
+        |caller: Caller<'_, HostState>, ptr: i32| -> i32 {
             let cap_id = caller.data().cap_id;
             if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
                 return -1;

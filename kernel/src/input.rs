@@ -46,6 +46,7 @@ pub struct Modifiers {
 }
 
 /// Empty event for array initialization.
+#[allow(dead_code)]
 pub const EMPTY_EVENT: KeyEvent = KeyEvent { key: KeyCode::Char(0), modifiers: Modifiers::NONE };
 
 impl KeyEvent {

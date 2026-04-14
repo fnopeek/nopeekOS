@@ -118,7 +118,7 @@ impl ShadeBar {
         render::fill_rect(shadow, info, 0, border_y, screen_w, self.scale, accent);
 
         let padding = 8 * self.scale;
-        let font_scale = 1.min(self.scale); // bar uses small font
+        let _font_scale = 1.min(self.scale); // bar uses small font
 
         // === Left: Workspace indicators ===
         let ws_size = 12 * self.scale;

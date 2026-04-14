@@ -115,7 +115,7 @@ fn read_apic_id(apic_base: u64) -> u32 {
 }
 
 /// Copy trampoline to 0x8000 and fill in shared data (CR3, GDT, IDT, entry)
-fn setup_trampoline(apic_base: u64) {
+fn setup_trampoline(_apic_base: u64) {
     unsafe {
         let start = &smp_trampoline_start as *const u8;
         let end = &smp_trampoline_end as *const u8;
