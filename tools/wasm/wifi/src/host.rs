@@ -88,6 +88,46 @@ pub fn mmio_r64(handle: i32, offset: u32) -> u64 {
     unsafe { npk_mmio_read64(handle, offset as i32) as u64 }
 }
 
+/// Read-modify-write: set bits in a 32-bit MMIO register.
+pub fn mmio_set32(handle: i32, offset: u32, bits: u32) {
+    let val = mmio_r32(handle, offset);
+    mmio_w32(handle, offset, val | bits);
+}
+
+/// Read-modify-write: clear bits in a 32-bit MMIO register.
+pub fn mmio_clr32(handle: i32, offset: u32, bits: u32) {
+    let val = mmio_r32(handle, offset);
+    mmio_w32(handle, offset, val & !bits);
+}
+
+/// Read-modify-write: write a field value into a masked region.
+/// `val` is the unshifted value (shifted to mask position automatically).
+pub fn mmio_w32_mask(handle: i32, offset: u32, mask: u32, val: u32) {
+    let shift = mask.trailing_zeros();
+    let mut word = mmio_r32(handle, offset);
+    word &= !mask;
+    word |= (val << shift) & mask;
+    mmio_w32(handle, offset, word);
+}
+
+/// Read-modify-write: set bits in a byte within a 32-bit MMIO register.
+pub fn mmio_set8(handle: i32, offset: u32, bits: u8) {
+    let aligned = offset & !0x3;
+    let shift = (offset & 0x3) * 8;
+    let mut word = mmio_r32(handle, aligned);
+    word |= (bits as u32) << shift;
+    mmio_w32(handle, aligned, word);
+}
+
+/// Read-modify-write: clear bits in a byte within a 32-bit MMIO register.
+pub fn mmio_clr8(handle: i32, offset: u32, bits: u8) {
+    let aligned = offset & !0x3;
+    let shift = (offset & 0x3) * 8;
+    let mut word = mmio_r32(handle, aligned);
+    word &= !((bits as u32) << shift);
+    mmio_w32(handle, aligned, word);
+}
+
 pub fn dma_alloc(pages: u16) -> i32 {
     unsafe { npk_dma_alloc(pages as i32) }
 }
