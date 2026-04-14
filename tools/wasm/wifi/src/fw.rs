@@ -246,15 +246,15 @@ fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
     let data_dma = host::dma_alloc(2);
     if data_dma < 0 { return None; }
 
-    // Program CH12 ring base address
+    // Program CH12 ring base address (32-bit writes)
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
 
-    // Set ring size (number of BDs)
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT as u32);
+    // Set ring size — MUST be 16-bit write! (rtw89 uses rtw89_write16)
+    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT);
 
-    // Reset ring index (host_idx = 0, hw_idx = 0)
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, 0);
+    // Reset ring index — also 16-bit write for host_idx
+    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, 0);
 
     host::print("[wifi] CH12 ring: phys=0x");
     host::print_hex32((ring_phys >> 32) as u32);
@@ -293,32 +293,62 @@ fn fw_header_len() -> usize {
 /// BD ring state — tracks the current write index across multiple sends
 static mut BD_IDX: u16 = 0;
 
-/// Send a single firmware chunk via CH12 DMA ring
+// TX descriptor size for AX generation (RTL8852B): 8 bytes
+// Prepended before firmware data in the DMA buffer.
+const TXDESC_SIZE: usize = 8;
+
+/// Send a single firmware chunk via CH12 DMA ring.
+/// Prepends an 8-byte TX descriptor (zeroed for fwcmd) before the data.
 fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: usize) {
     let data_phys = host::dma_phys(data_dma);
+    let total_len = TXDESC_SIZE + len;
 
-    // Copy data to DMA buffer
-    host::dma_write_buf(data_dma, 0, &FW_DATA[offset..offset + len]);
+    // Write 8-byte TX descriptor (zeroed for fwcmd — rtw89 uses memset(0) + fill)
+    host::dma_w32(data_dma, 0, 0);
+    host::dma_w32(data_dma, 4, 0);
+
+    // Copy firmware data after the descriptor
+    host::dma_write_buf(data_dma, TXDESC_SIZE as u32, &FW_DATA[offset..offset + len]);
     host::fence();
 
-    // Write TX BD
+    // Write TX BD: length(u16) | option(u16) | dma_addr(u32)
     let bd_idx = unsafe { BD_IDX };
     let bd_offset = (bd_idx as u32) * (BD_SIZE as u32);
-    let word0 = (len as u32) | ((BD_OPT_LS as u32) << 16);
+    let word0 = (total_len as u32) | ((BD_OPT_LS as u32) << 16);
     host::dma_w32(ring_dma, bd_offset, word0);
     host::dma_w32(ring_dma, bd_offset + 4, data_phys as u32);
     host::fence();
 
-    // Advance ring index
-    let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx as u32);
+    // Read index register BEFORE update
+    let idx_before = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
 
-    // Wait for hardware to consume
-    for _ in 0..500 {
+    // Advance ring write pointer — MUST be 16-bit write!
+    let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
+    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx);
+
+    // Wait for hardware to consume (HW_IDX should advance in upper 16 bits)
+    let mut consumed = false;
+    for i in 0..500 {
         let reg = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
         let hw_idx = (reg >> 16) & 0xFFF;
-        if hw_idx == new_idx as u32 { break; }
+        if hw_idx == new_idx as u32 { consumed = true; break; }
+        if i == 499 {
+            host::print("  BD TIMEOUT! before=0x");
+            host::print_hex32(idx_before);
+            host::print(" now=0x");
+            host::print_hex32(reg);
+            host::print("\n  BD=0x");
+            host::print_hex32(host::dma_r32(ring_dma, bd_offset));
+            host::print(":0x");
+            host::print_hex32(host::dma_r32(ring_dma, bd_offset + 4));
+            host::print(" phys=0x");
+            host::print_hex32(data_phys as u32);
+            host::print("\n");
+        }
         host::sleep_ms(1);
+    }
+    if consumed {
+        host::print("  BD consumed OK\n");
     }
 
     unsafe { BD_IDX = new_idx; }
