@@ -57,6 +57,10 @@ pub fn pci_read_config(offset: u8) -> u32 {
     unsafe { npk_pci_read_config(offset as i32) as u32 }
 }
 
+pub fn pci_write_config(offset: u8, value: u32) {
+    unsafe { npk_pci_write_config(offset as i32, value as i32); }
+}
+
 pub fn mmio_map_bar(bar: u8, pages: u16) -> i32 {
     unsafe { npk_mmio_map_bar(bar as i32, pages as i32) }
 }
