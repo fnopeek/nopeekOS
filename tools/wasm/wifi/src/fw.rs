@@ -736,9 +736,16 @@ fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
     // Reset BD_IDX
     unsafe { BD_IDX = 0; }
 
-    host::print("[wifi] CH12 ring @ 0x");
-    host::print_hex32((ring_phys >> 32) as u32);
+    let data_phys = host::dma_phys(data_dma);
+    host::print("[wifi] DMA ring=0x");
+    host::print_hex32((ring_phys >> 32) as u32); host::print("_");
     host::print_hex32(ring_phys as u32);
+    host::print(" data=0x");
+    host::print_hex32((data_phys >> 32) as u32); host::print("_");
+    host::print_hex32(data_phys as u32);
+    if (ring_phys >> 32) != 0 || (data_phys >> 32) != 0 {
+        host::print(" *** OVER 4GB! ***");
+    }
     host::print("\n");
 
     Some((ring_dma, data_dma))
