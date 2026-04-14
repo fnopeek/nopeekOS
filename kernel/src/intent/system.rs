@@ -736,6 +736,190 @@ pub fn intent_reboot() -> ! {
     }
 }
 
+pub fn intent_lspci(args: &str) {
+    use crate::drivers::pci::{self, PciAddr};
+
+    let verbose = args.contains("-v");
+    let mut count = 0u16;
+
+    kprintln!();
+    for bus in 0u16..=255 {
+        for dev in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = PciAddr { bus: bus as u8, device: dev, function: func };
+                let id = pci::read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 {
+                    if func == 0 { break; }
+                    continue;
+                }
+
+                let vid = (id & 0xFFFF) as u16;
+                let did = ((id >> 16) & 0xFFFF) as u16;
+                let class_reg = pci::read32(addr, 0x08);
+                let cls = ((class_reg >> 24) & 0xFF) as u8;
+                let sub = ((class_reg >> 16) & 0xFF) as u8;
+                let prog_if = ((class_reg >> 8) & 0xFF) as u8;
+                let rev = (class_reg & 0xFF) as u8;
+
+                let class_name = pci_class_name(cls, sub, prog_if);
+                let dev_name = pci_device_name(vid, did);
+
+                kprintln!("  {:02x}:{:02x}.{}  {:04x}:{:04x}  {}",
+                    bus, dev, func, vid, did, class_name);
+                if !dev_name.is_empty() {
+                    kprintln!("           {}", dev_name);
+                }
+
+                if verbose {
+                    let bar0 = pci::read32(addr, 0x10);
+                    let irq = pci::read8(addr, 0x3C);
+                    let cmd = pci::read16(addr, 0x04);
+                    kprintln!("           rev {:02x}  prog-if {:02x}  IRQ {}  BAR0 {:08x}",
+                        rev, prog_if, irq, bar0);
+                    kprintln!("           cmd: {}{}{}",
+                        if cmd & 0x04 != 0 { "bus-master " } else { "" },
+                        if cmd & 0x02 != 0 { "mem " } else { "" },
+                        if cmd & 0x01 != 0 { "io" } else { "" });
+                }
+
+                count += 1;
+
+                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    kprintln!();
+    kprintln!("  {} PCI devices found", count);
+    kprintln!();
+}
+
+fn pci_class_name(cls: u8, sub: u8, prog_if: u8) -> &'static str {
+    match (cls, sub, prog_if) {
+        (0x00, 0x00, _) => "Legacy device",
+        (0x00, 0x01, _) => "VGA-compatible",
+        (0x01, 0x00, _) => "SCSI controller",
+        (0x01, 0x01, _) => "IDE controller",
+        (0x01, 0x06, _) => "SATA controller",
+        (0x01, 0x08, 0x02) => "NVMe controller",
+        (0x01, 0x08, _) => "NVM controller",
+        (0x02, 0x00, _) => "Ethernet controller",
+        (0x02, 0x80, _) => "Network controller",
+        (0x03, 0x00, _) => "VGA controller",
+        (0x03, 0x80, _) => "Display controller",
+        (0x04, 0x00, _) => "Video controller",
+        (0x04, 0x01, _) => "Audio controller",
+        (0x04, 0x03, _) => "HD Audio controller",
+        (0x06, 0x00, _) => "Host bridge",
+        (0x06, 0x01, _) => "ISA bridge",
+        (0x06, 0x04, _) => "PCI-to-PCI bridge",
+        (0x06, 0x80, _) => "System bridge",
+        (0x07, 0x00, _) => "Serial controller",
+        (0x07, 0x80, _) => "Communication controller",
+        (0x08, 0x00, _) => "PIC",
+        (0x08, 0x01, _) => "DMA controller",
+        (0x08, 0x02, _) => "Timer",
+        (0x08, 0x03, _) => "RTC controller",
+        (0x08, 0x80, _) => "System peripheral",
+        (0x0C, 0x03, 0x00) => "UHCI USB controller",
+        (0x0C, 0x03, 0x10) => "OHCI USB controller",
+        (0x0C, 0x03, 0x20) => "EHCI USB controller",
+        (0x0C, 0x03, 0x30) => "xHCI USB controller",
+        (0x0C, 0x03, _) => "USB controller",
+        (0x0C, 0x05, _) => "SMBus controller",
+        (0x0D, 0x00, _) => "IrDA controller",
+        (0x0D, 0x80, _) => "Wireless controller",
+        (0x0E, 0x00, _) => "I2O controller",
+        (0x0F, _, _) => "Satellite controller",
+        (0x10, _, _) => "Crypto controller",
+        (0x11, _, _) => "Signal processing",
+        (0xFF, _, _) => "Unassigned",
+        _ => "Unknown",
+    }
+}
+
+fn pci_device_name(vendor: u16, device: u16) -> &'static str {
+    match (vendor, device) {
+        // Intel WiFi
+        (0x8086, 0x2723) => "Intel Wi-Fi 6 AX200",
+        (0x8086, 0x2725) => "Intel Wi-Fi 6E AX210",
+        (0x8086, 0x4DF0) => "Intel Wi-Fi 6 AX201",
+        (0x8086, 0xA0F0) => "Intel Wi-Fi 6 AX201",
+        (0x8086, 0x06F0) => "Intel Wi-Fi 6 AX201",
+        (0x8086, 0x34F0) => "Intel Wi-Fi 6 AX201",
+        (0x8086, 0x51F0) => "Intel Wi-Fi 6E AX211",
+        (0x8086, 0x51F1) => "Intel Wi-Fi 6E AX211",
+        (0x8086, 0x54F0) => "Intel Wi-Fi 6E AX211",
+        (0x8086, 0x7AF0) => "Intel Wi-Fi 6E AX211",
+        (0x8086, 0x7E40) => "Intel Wi-Fi 7 BE200",
+        (0x8086, 0xE440) => "Intel Wi-Fi 7 BE200",
+        (0x8086, 0x272B) => "Intel Wi-Fi 7 BE202",
+        // Intel Ethernet
+        (0x8086, 0x15F3) => "Intel I225-V (2.5GbE)",
+        (0x8086, 0x15F2) => "Intel I225-LM (2.5GbE)",
+        (0x8086, 0x125C) => "Intel I226-V (2.5GbE)",
+        (0x8086, 0x125B) => "Intel I226-LM (2.5GbE)",
+        (0x8086, 0x15E3) => "Intel I219-LM",
+        (0x8086, 0x0D4F) => "Intel I219-V",
+        (0x8086, 0x15BE) => "Intel I219-LM",
+        (0x8086, 0x15BD) => "Intel I219-V",
+        // Intel GPU
+        (0x8086, 0x46A6) => "Intel Alder Lake-N [UHD Graphics]",
+        (0x8086, 0x46D0) => "Intel Alder Lake-N [UHD Graphics]",
+        (0x8086, 0x46D1) => "Intel Alder Lake-N [UHD Graphics]",
+        (0x8086, 0x46D2) => "Intel Alder Lake-N [UHD Graphics]",
+        (0x8086, 0xA7A0) => "Intel Raptor Lake [UHD Graphics]",
+        (0x8086, 0xA720) => "Intel Raptor Lake [UHD Graphics]",
+        (0x8086, 0xA780) => "Intel Raptor Lake [UHD Graphics]",
+        (0x8086, 0x4628) => "Intel Alder Lake [Iris Xe]",
+        (0x8086, 0x4626) => "Intel Alder Lake [Iris Xe]",
+        (0x8086, 0x46A8) => "Intel Alder Lake [Iris Xe]",
+        // Intel NVMe
+        (0x8086, 0xF1A8) => "Intel SSD 660p/670p",
+        (0x8086, 0xF1AA) => "Intel SSD 670p",
+        // Intel Host Bridge / ISA / misc
+        (0x8086, 0x4617) => "Intel Alder Lake Host Bridge",
+        (0x8086, 0x461C) => "Intel Alder Lake Host Bridge",
+        (0x8086, 0x4601) => "Intel Alder Lake Host Bridge",
+        (0x8086, 0x4649) => "Intel Alder Lake PCIe RP",
+        (0x8086, 0x464D) => "Intel Alder Lake PCIe RP",
+        (0x8086, 0x4641) => "Intel Alder Lake PCH",
+        (0x8086, 0x51A3) => "Intel Alder Lake-P ISA Bridge",
+        (0x8086, 0x51EF) => "Intel Alder Lake-P SMBus",
+        (0x8086, 0x51E8) => "Intel Alder Lake-P Serial IO I2C",
+        // Intel HD Audio
+        (0x8086, 0x51C8) => "Intel Alder Lake-P HD Audio",
+        (0x8086, 0x51CA) => "Intel Alder Lake-P HD Audio",
+        (0x8086, 0x4DC8) => "Intel Alder Lake-N HD Audio",
+        // Intel Thunderbolt / USB
+        (0x8086, 0x461E) => "Intel Alder Lake Thunderbolt 4",
+        (0x8086, 0x51ED) => "Intel Alder Lake-P xHCI",
+        (0x8086, 0x4DED) => "Intel Alder Lake-N xHCI",
+        // Samsung NVMe
+        (0x144D, 0xA808) => "Samsung 970 EVO Plus",
+        (0x144D, 0xA809) => "Samsung 980 PRO",
+        (0x144D, 0xA80A) => "Samsung 990 PRO",
+        // Virtio (QEMU)
+        (0x1AF4, 0x1000) => "VirtIO Network (legacy)",
+        (0x1AF4, 0x1041) => "VirtIO Network",
+        (0x1AF4, 0x1001) => "VirtIO Block (legacy)",
+        (0x1AF4, 0x1042) => "VirtIO Block",
+        (0x1AF4, 0x1050) => "VirtIO GPU",
+        // Realtek
+        (0x10EC, 0x8168) => "Realtek RTL8111/8168",
+        (0x10EC, 0x8125) => "Realtek RTL8125 (2.5GbE)",
+        // QEMU/VBox
+        (0x8086, 0x100E) => "Intel 82540EM (QEMU e1000)",
+        (0x8086, 0x29C0) => "Intel 82G33 Host Bridge (QEMU)",
+        (0x8086, 0x2918) => "Intel ICH9 LPC (QEMU)",
+        (0x8086, 0x2922) => "Intel ICH9 AHCI (QEMU)",
+        (0x8086, 0x2930) => "Intel ICH9 SMBus (QEMU)",
+        (0x1234, 0x1111) => "QEMU/Bochs VGA",
+        _ => "",
+    }
+}
+
 pub fn intent_halt() -> ! {
     kprintln!();
     kprintln!("[npk] Shutting down...");
