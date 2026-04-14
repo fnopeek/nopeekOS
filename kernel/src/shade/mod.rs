@@ -179,8 +179,35 @@ fn render_frame_layered() {
         // Swap front index (blit_rect now reads from new frame)
         fb.swap_buffers();
 
-        // Blit new front → MMIO (GPU path if available, else CPU)
-        let gpu_ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
+        // Blit new front → MMIO (GPU path with composited cursor, else CPU + overlay)
+        let gpu_ok = if crate::gpu::supports_blit() && crate::xhci::mouse_available() {
+            // GPU path: composite cursor INTO shadow before blit
+            let (cx, cy) = cursor::atomic_pos();
+            let front = fb.front_ptr();
+            let p = pitch as usize;
+            let sw = screen_w as i32;
+            let sh = screen_h as i32;
+
+            // Save-under: preserve clean pixels, draw cursor, GPU blit, restore
+            cursor::save_cursor_region(front, p, sw, sh, cx, cy);
+            cursor::draw_cursor_on_shadow(front, p, sw, sh, cx, cy);
+
+            let ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
+
+            // Restore shadow to clean state (overlay + poll_render need it clean)
+            cursor::restore_cursor_region(front, p, sw, sh, cx, cy);
+
+            if ok {
+                cursor::set_drawn_state(cx, cy);
+            }
+            ok
+        } else if crate::gpu::supports_blit() {
+            // GPU without mouse — just blit
+            try_gpu_blit(fb, pitch, screen_w, screen_h)
+        } else {
+            false
+        };
+
         if !gpu_ok {
             let mut damage = render::DamageTracker::new(screen_w, screen_h);
             damage.mark_all();
@@ -190,8 +217,8 @@ fn render_frame_layered() {
         // NOW update cached pointer — MMIO matches new front
         fb.commit_front();
 
-        // Cursor overlay on MMIO
-        if crate::xhci::mouse_available() {
+        // Cursor overlay only for CPU path (GPU path already has cursor in frame)
+        if !gpu_ok && crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
@@ -211,8 +238,31 @@ fn render_frame_legacy() {
 
         fb.swap_buffers();
 
-        // GPU blit path (or CPU fallback)
-        let gpu_ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
+        // GPU blit with composited cursor, or CPU + overlay fallback
+        let gpu_ok = if crate::gpu::supports_blit() && crate::xhci::mouse_available() {
+            let (cx, cy) = cursor::atomic_pos();
+            let front = fb.front_ptr();
+            let p = pitch as usize;
+            let sw = screen_w as i32;
+            let sh = screen_h as i32;
+
+            cursor::save_cursor_region(front, p, sw, sh, cx, cy);
+            cursor::draw_cursor_on_shadow(front, p, sw, sh, cx, cy);
+
+            let ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
+
+            cursor::restore_cursor_region(front, p, sw, sh, cx, cy);
+
+            if ok {
+                cursor::set_drawn_state(cx, cy);
+            }
+            ok
+        } else if crate::gpu::supports_blit() {
+            try_gpu_blit(fb, pitch, screen_w, screen_h)
+        } else {
+            false
+        };
+
         if !gpu_ok {
             let mut damage = render::DamageTracker::new(screen_w, screen_h);
             damage.mark_all();
@@ -221,7 +271,7 @@ fn render_frame_legacy() {
 
         fb.commit_front();
 
-        if crate::xhci::mouse_available() {
+        if !gpu_ok && crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
