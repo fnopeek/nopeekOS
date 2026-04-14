@@ -144,45 +144,73 @@ fn pcie_dma_pre_init(mmio: i32) {
 }
 
 /// Disable the WCPU — reset stale firmware state
+/// Based on rtw89_mac_disable_cpu()
 fn disable_cpu(mmio: i32) {
     host::print("[wifi] Disabling CPU...\n");
 
-    // Clear WCPU enable and FWDL enable
+    // 1. Clear WCPU enable
     let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val &= !regs::B_AX_WCPU_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 
-    // Clear FWDL enable in FW_CTRL
-    let mut ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    ctrl &= !regs::B_AX_WCPU_FWDL_EN;
-    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, ctrl);
+    // 2. Enable CPU clock (needed even during disable for clean shutdown)
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    val |= regs::B_AX_CPU_CLK_EN;
+    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
 
-    host::sleep_ms(1);
+    // 3. Clear FWDL enable
+    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    val &= !regs::B_AX_WCPU_FWDL_EN;
+    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
 
-    // Disable AXI DMA
-    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    // 4. Halt H2C
+    host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
+    host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
+
+    host::sleep_ms(5);
+
+    // 5. Disable AXI DMA
+    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val &= !regs::B_AX_AXIDMA_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 }
 
 /// Enable CPU in firmware download mode
+/// Based on rtw89_mac_enable_cpu() + rtw89_mac_fwdl_enable()
 fn enable_cpu_fwdl(mmio: i32) {
     host::print("[wifi] Enabling FWDL mode...\n");
 
-    // Enable FWDL mode
-    let mut ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    ctrl |= regs::B_AX_WCPU_FWDL_EN;
-    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, ctrl);
+    // 1. Clear halt channels
+    host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
+    host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
-    // Enable AXI DMA
-    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    // 2. Set boot reason to FWDL resume
+    // R_AX_BOOT_REASON is a byte register at 0x01E6
+    let mut val = host::mmio_r32(mmio, regs::R_AX_BOOT_REASON);
+    val = (val & 0xFFFFFF00) | regs::RTW89_FW_DLFW_RESUME;
+    host::mmio_w32(mmio, regs::R_AX_BOOT_REASON, val);
+
+    // 3. Enable CPU clock
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    val |= regs::B_AX_CPU_CLK_EN;
+    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
+
+    // 4. Enable FWDL mode in FW_CTRL
+    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    val |= regs::B_AX_WCPU_FWDL_EN;
+    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
+
+    // 5. Enable AXI DMA
+    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val |= regs::B_AX_AXIDMA_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 
-    // Enable WCPU
+    // 6. Enable WCPU
     val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val |= regs::B_AX_WCPU_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+
+    host::sleep_ms(5);
 }
 
 /// Setup CH12 (FW command) DMA ring.

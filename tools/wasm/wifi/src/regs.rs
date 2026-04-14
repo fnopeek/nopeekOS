@@ -6,6 +6,7 @@ pub const R_AX_SYS_ISO_CTRL: u32      = 0x0000;
 pub const R_AX_SYS_FUNC_EN: u32       = 0x0002;
 pub const R_AX_SYS_PW_CTRL: u32       = 0x0004;
 pub const R_AX_SYS_CLK_CTRL: u32      = 0x0008;
+pub const B_AX_CPU_CLK_EN: u32        = 1 << 14;
 pub const R_AX_SYS_AFE_LDO_CTRL: u32  = 0x0020;
 pub const R_AX_GPIO_MUXCFG: u32       = 0x0040;
 pub const R_AX_PLATFORM_ENABLE: u32   = 0x0088;
@@ -20,6 +21,7 @@ pub const R_AX_HALT_H2C: u32          = 0x0168;
 pub const R_AX_HALT_C2H: u32          = 0x016C;
 pub const R_AX_WCPU_FW_CTRL: u32      = 0x01E0;
 pub const R_AX_BOOT_REASON: u32       = 0x01E6;
+pub const RTW89_FW_DLFW_RESUME: u32   = 3; // firmware download boot reason
 
 // ── PCIe / DMA ───────────────────────────────────────────────────
 
