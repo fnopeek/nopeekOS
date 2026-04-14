@@ -17,7 +17,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.31\n");
+    host::print("[wifi] RTL8852BE driver v0.32\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -33,16 +33,13 @@ pub extern "C" fn _start() {
     }
     host::print("[wifi] PCI bind OK\n");
 
-    // ── Step 2: FLR — hard reset to clean device state ────────────
-    // Clears stuck XTAL SI, CPU state, firmware state from previous runs.
-    // Also clears BARs, but kernel auto-assigns them in step 3.
-    fw::pcie_flr();
-    host::sleep_ms(200);
-
-    // ── Step 3: Enable bus master + memory space ──────────────────
+    // ── Step 2: Enable bus master + memory space ──────────────────
+    // NO FLR! FLR resets the Digital Die but NOT the Analog Die,
+    // desynchronizing the XTAL SI interface between them.
+    // Instead we use soft MAC reset (pwr_off → pwr_on) in fw::download().
     host::pci_enable_bus_master();
 
-    // ── Step 4: Map BAR2 (MMIO registers) ─────────────────────────
+    // ── Step 3: Map BAR2 (MMIO registers) ─────────────────────────
     // RTL8852BE: BAR0=I/O, BAR2=MMIO (Linux rtw89: bar_id=2).
     // Kernel auto-assigns address + configures bridge if BAR is empty.
     let mmio = host::mmio_map_bar(2, 16);

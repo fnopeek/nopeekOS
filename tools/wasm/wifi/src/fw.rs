@@ -43,16 +43,23 @@ pub fn download(mmio: i32) -> bool {
 
     dump_state(mmio, "initial");
 
-    // ── Step 1: Power ON ────────────────────────────────────────
-    // Skip pwr_off: UEFI already has the chip powered, OFFMAC hangs.
-    // Go straight to pwr_on which handles everything from current state.
+    // ── Step 1: Power OFF (soft MAC reset, no FLR!) ─────────────
+    // FLR is forbidden: it desynchronizes DDIE↔ADIE (kills XTAL SI).
+    // Soft pwr_off properly shuts down the MAC while keeping analog die intact.
+    host::print("[wifi] Power off...\n");
+    if !pwr_off(mmio) {
+        host::print("[wifi] WARNING: pwr_off incomplete\n");
+    }
+    dump_state(mmio, "pwr-off");
+
+    // ── Step 2: Power ON (full sequence with XTAL SI) ───────────
     host::print("[wifi] Power on...\n");
     if !pwr_on(mmio) {
         host::print("[wifi] WARNING: pwr_on incomplete\n");
     }
     dump_state(mmio, "pwr-on");
 
-    // ── Step 3: DMAC/DLE/HFC pre-init for FWDL ────────────────────
+    // ── Step 3: DMAC/DLE/HFC pre-init for FWDL ───────────────────
     if !dmac_pre_init_dlfw(mmio) {
         host::print("[wifi] WARNING: DLE init incomplete\n");
     }
@@ -346,13 +353,39 @@ fn pwr_on(mmio: i32) -> bool {
     // ── PCIe: disable calibration ───────────────────────────────
     host::mmio_clr32(mmio, regs::R_AX_SYS_SDIO_CTRL, regs::B_AX_PCIE_CALIB_EN_V1);
 
-    // ── ADIE PAD power ────────────────────────────────────────────
-    // XTAL SI writes skipped: analog die retains UEFI config across FLR.
-    // XTAL SI CMD_POLL stuck (no WL_XTAL_GNT after FLR) — safe to skip.
+    // ── ADIE PAD power + XTAL SI crystal init ───────────────────
+    // Without FLR, DDIE↔ADIE sync is intact → XTAL SI should work.
     host::mmio_set32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
         regs::B_AX_SYM_PADPDN_WL_PTA_1P3);
+
+    if !write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_GND_SHDN_WL, regs::XTAL_SI_GND_SHDN_WL) {
+        host::print("  XTAL SI failed\n");
+    }
+
     host::mmio_set32(mmio, regs::R_AX_SYS_ADIE_PAD_PWR_CTRL,
         regs::B_AX_SYM_PADPDN_WL_RFC_1P3);
+
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_SHDN_WL, regs::XTAL_SI_SHDN_WL);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_OFF_WEI, regs::XTAL_SI_OFF_WEI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_OFF_EI, regs::XTAL_SI_OFF_EI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        0, regs::XTAL_SI_RFC2RF);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_PON_WEI, regs::XTAL_SI_PON_WEI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        regs::XTAL_SI_PON_EI, regs::XTAL_SI_PON_EI);
+    write_xtal_si(mmio, regs::XTAL_SI_ANAPAR_WL,
+        0, regs::XTAL_SI_SRAM2RFC);
+    write_xtal_si(mmio, regs::XTAL_SI_SRAM_CTRL,
+        0, regs::XTAL_SI_SRAM_DIS);
+    write_xtal_si(mmio, regs::XTAL_SI_XTAL_XMD_2,
+        0, regs::XTAL_SI_LDO_LPS);
+    write_xtal_si(mmio, regs::XTAL_SI_XTAL_XMD_4,
+        0, regs::XTAL_SI_LPS_CAP);
 
     // ── ISO control ─────────────────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_PMC_DBG_CTRL2,
@@ -638,11 +671,11 @@ fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
 
-    // Set ring size — MUST be 16-bit write
-    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT);
+    // Set ring size — direct 32-bit write (upper bits ignored by HW)
+    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT as u32);
 
-    // Reset ring index
-    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, 0);
+    // Reset ring index — direct 32-bit write (avoids RMW of HW_IDX)
+    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, 0);
 
     // Reset BD_IDX
     unsafe { BD_IDX = 0; }
@@ -676,9 +709,9 @@ fn send_fw_chunk(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: us
     host::dma_w32(ring_dma, bd_offset + 4, data_phys as u32);
     host::fence();
 
-    // Advance ring write pointer — MUST be 16-bit write
+    // Advance ring write pointer — direct 32-bit write (avoids RMW of HW_IDX)
     let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
-    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx);
+    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx as u32);
 
     host::sleep_ms(5);
     unsafe { BD_IDX = new_idx; }
