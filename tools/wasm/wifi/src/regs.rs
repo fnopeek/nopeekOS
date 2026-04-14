@@ -77,6 +77,16 @@ pub const R_AX_CK_EN: u32             = 0xC004;
 
 // ── Register Bit Definitions ─────────────────────────────────────
 
+// R_AX_SYS_PW_CTRL (0x0004) bits
+pub const B_AX_APFN_ONMAC: u32       = 1 << 8;
+pub const B_AX_APFM_OFFMAC: u32      = 1 << 9;
+pub const B_AX_APFM_SWLPS: u32       = 1 << 10;
+pub const B_AX_AFSM_WLSUS_EN: u32    = 1 << 11;
+pub const B_AX_AFSM_PCIE_SUS_EN: u32 = 1 << 12;
+pub const B_AX_APDM_HPDN: u32        = 1 << 15;
+pub const B_AX_EN_WLON: u32           = 1 << 16;
+pub const B_AX_RDY_SYSPWR: u32        = 1 << 17;
+
 // R_AX_PLATFORM_ENABLE (0x0088) bits
 pub const B_AX_PLATFORM_EN: u32  = 1 << 0;
 pub const B_AX_WCPU_EN: u32      = 1 << 1;

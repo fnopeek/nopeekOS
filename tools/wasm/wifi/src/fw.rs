@@ -27,9 +27,8 @@ pub fn download(mmio: i32) -> bool {
     print_dec(FW_DATA.len());
     host::print(" bytes\n");
 
-    // Step 1: Disable CPU (clear stale firmware state)
-    disable_cpu(mmio);
-    host::sleep_ms(10);
+    // Step 1: Full power cycle — UEFI left firmware running, need hard reset
+    power_cycle(mmio);
 
     // Step 2: PCIe DMA pre-init (CRITICAL — FWDL path won't be ready without this)
     pcie_dma_pre_init(mmio);
@@ -156,36 +155,86 @@ fn pcie_dma_pre_init(mmio: i32) {
     host::print("[wifi] PCIe DMA pre-init done\n");
 }
 
-/// Disable the WCPU — reset stale firmware state
-/// Based on rtw89_mac_disable_cpu()
-fn disable_cpu(mmio: i32) {
-    host::print("[wifi] Disabling CPU...\n");
+/// Full MAC power-off + power-on cycle.
+/// The UEFI leaves firmware running — a simple CPU disable is not enough.
+/// Based on rtw8852b_pwr_off_func() + rtw8852b_pwr_on_func().
+fn power_cycle(mmio: i32) {
+    host::print("[wifi] Power cycling MAC...\n");
 
-    // 1. Clear WCPU enable
+    // ── Phase 1: Power OFF ──────────────────────────────────────
+
+    // Disable WCPU
     let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val &= !regs::B_AX_WCPU_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 
-    // 2. Enable CPU clock (needed even during disable for clean shutdown)
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
-    val |= regs::B_AX_CPU_CLK_EN;
-    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
+    // Disable AXI DMA
+    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val &= !regs::B_AX_AXIDMA_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 
-    // 3. Clear FWDL enable
+    // Clear FWDL enable
     val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
     val &= !regs::B_AX_WCPU_FWDL_EN;
     host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
 
-    // 4. Halt H2C
-    host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
-    host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
+    // Request MAC power OFF via SYS_PW_CTRL
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    val |= regs::B_AX_APFM_OFFMAC;
+    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
 
-    host::sleep_ms(5);
+    // Poll until OFFMAC clears (hardware auto-clears when done)
+    for _ in 0..200 {
+        let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+        if v & regs::B_AX_APFM_OFFMAC == 0 { break; }
+        host::sleep_ms(1);
+    }
+    host::sleep_ms(10);
+    host::print("  MAC powered off\n");
 
-    // 5. Disable AXI DMA
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val &= !regs::B_AX_AXIDMA_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    // ── Phase 2: Power ON ───────────────────────────────────────
+
+    // Clear suspend modes
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    val &= !(regs::B_AX_AFSM_WLSUS_EN | regs::B_AX_AFSM_PCIE_SUS_EN);
+    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
+
+    // Clear power-down and low-power states
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    val &= !(regs::B_AX_APDM_HPDN | regs::B_AX_APFM_SWLPS);
+    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
+
+    // Wait for system power ready
+    for _ in 0..200 {
+        let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+        if v & regs::B_AX_RDY_SYSPWR != 0 { break; }
+        host::sleep_ms(1);
+    }
+
+    // Enable WLAN
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    val |= regs::B_AX_EN_WLON;
+    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
+
+    // Request MAC power ON
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+    val |= regs::B_AX_APFN_ONMAC;
+    host::mmio_w32(mmio, regs::R_AX_SYS_PW_CTRL, val);
+
+    // Poll until ONMAC clears (hardware auto-clears when done)
+    for _ in 0..200 {
+        let v = host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL);
+        if v & regs::B_AX_APFN_ONMAC == 0 { break; }
+        host::sleep_ms(1);
+    }
+    host::sleep_ms(10);
+
+    // Verify SYS_STATUS1 — firmware should NOT be running now
+    let status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
+    host::print("  SYS_STATUS1 after power cycle: 0x");
+    host::print_hex32(status);
+    host::print("\n");
+    host::print("  MAC powered on\n");
 }
 
 /// Enable CPU in firmware download mode
