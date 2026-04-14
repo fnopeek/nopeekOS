@@ -135,10 +135,19 @@ pub fn download(mmio: i32) -> bool {
     // ── Step 5: PCIe DMA pre-init ───────────────────────────────
     pcie_dma_pre_init(mmio);
 
-    // ── Step 5: Disable CPU (clean state before FWDL) ───────────
-    disable_cpu(mmio);
+    // ── Step 6: Setup CH12 ring BEFORE CPU enable ───────────────
+    // Linux: rtw89_pci_ops_reset programs all rings in pci_pre_init,
+    // BEFORE enable_cpu. The DMA engine caches ring addresses.
+    let (ring_dma, data_dma) = match setup_ch12_ring(mmio) {
+        Some(r) => r,
+        None => {
+            host::print("[wifi] CH12 ring setup failed\n");
+            return false;
+        }
+    };
 
-    // ── Step 6: Enable CPU in FWDL mode ─────────────────────────
+    // ── Step 7: Disable + Enable CPU in FWDL mode ───────────────
+    disable_cpu(mmio);
     enable_cpu_fwdl(mmio);
     host::sleep_ms(50);
 
@@ -146,24 +155,9 @@ pub fn download(mmio: i32) -> bool {
     let (si_ok, si_fail) = unsafe { (XTAL_SI_OK, XTAL_SI_FAIL) };
     host::print("[wifi] XTAL_SI: ");
     print_dec(si_ok as usize); host::print("/");
-    print_dec((si_ok + si_fail) as usize); host::print(" OK");
-    if si_fail > 0 { host::print(" *** FAIL ***"); }
-    host::print("\n");
+    print_dec((si_ok + si_fail) as usize); host::print(" OK\n");
 
-    // Key registers after full init
-    let fw = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    let plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    let clk = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
-    let dmac = host::mmio_r32(mmio, regs::R_AX_DMAC_FUNC_EN);
-    let boot_dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
-    host::print("  FW_CTRL=0x"); host::print_hex32(fw);
-    host::print(" PLAT=0x"); host::print_hex32(plat);
-    host::print("\n  CLK=0x"); host::print_hex32(clk);
-    host::print(" DMAC=0x"); host::print_hex32(dmac);
-    host::print("\n  BOOT_DBG=0x"); host::print_hex32(boot_dbg);
-    host::print("\n");
-
-    // ── Step 7: Wait for H2C_PATH_RDY ───────────────────────────
+    // ── Step 8: Wait for H2C_PATH_RDY ───────────────────────────
     host::print("[wifi] Waiting H2C path ready...\n");
     let mut h2c_ready = false;
     for i in 0..2000u32 {
@@ -176,30 +170,18 @@ pub fn download(mmio: i32) -> bool {
             break;
         }
         if i < 5 || i % 500 == 0 {
-            let dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
             host::print("  ["); print_dec(i as usize);
             host::print("] FW=0x"); host::print_hex32(val);
-            host::print(" DBG=0x"); host::print_hex32(dbg);
             host::print("\n");
         }
         host::sleep_ms(1);
     }
     if !h2c_ready {
         host::print("[wifi] H2C path NOT READY\n");
-        dump_state(mmio, "h2c-fail");
         return false;
     }
 
-    // ── Step 7: Setup CH12 ring ─────────────────────────────────
-    let (ring_dma, data_dma) = match setup_ch12_ring(mmio) {
-        Some(r) => r,
-        None => {
-            host::print("[wifi] CH12 ring setup failed\n");
-            return false;
-        }
-    };
-
-    // ── Step 8: Send FW header ──────────────────────────────────
+    // ── Step 9: Send FW header ──────────────────────────────────
     let (hdr_send_len, body_offset) = fw_header_info();
     host::print("[wifi] Sending header (");
     print_dec(hdr_send_len);
