@@ -27,8 +27,25 @@ pub fn download(mmio: i32) -> bool {
     print_dec(FW_DATA.len());
     host::print(" bytes\n");
 
-    // Step 1: Full power cycle — UEFI left firmware running, need hard reset
-    power_cycle(mmio);
+    // Step 1: Disable CPU (keep UEFI power-on config, just restart CPU in FWDL mode)
+    // Don't power cycle — OFFMAC resets XTAL/LDO/ISO that UEFI configured.
+    host::print("[wifi] Disabling CPU...\n");
+    let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val &= !regs::B_AX_WCPU_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    // Enable CPU clock for clean state transition
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    val |= regs::B_AX_CPU_CLK_EN;
+    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
+    // Clear old FWDL state
+    val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    val &= !(regs::B_AX_WCPU_FWDL_EN);
+    host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
+    host::sleep_ms(10);
+    let fw_after = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::print("  FW_CTRL after disable: 0x"); host::print_hex32(fw_after);
+    let sts = (fw_after >> 5) & 0x7;
+    host::print(" (STS="); print_dec(sts as usize); host::print(")\n");
 
     // Step 2: PCIe DMA pre-init (CRITICAL — FWDL path won't be ready without this)
     pcie_dma_pre_init(mmio);
