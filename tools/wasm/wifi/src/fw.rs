@@ -200,11 +200,11 @@ pub fn download(mmio: i32) -> bool {
     };
 
     // ── Step 8: Send FW header ──────────────────────────────────
-    let hdr_len = fw_header_len();
+    let (hdr_send_len, body_offset) = fw_header_info();
     host::print("[wifi] Sending header (");
-    print_dec(hdr_len);
+    print_dec(hdr_send_len);
     host::print(" bytes)...\n");
-    send_fw_header(ring_dma, data_dma, mmio, hdr_len);
+    send_fw_header(ring_dma, data_dma, mmio, hdr_send_len);
     host::sleep_ms(20);
 
     // ── Step 9: Wait FWDL_PATH_RDY ──────────────────────────────
@@ -218,7 +218,7 @@ pub fn download(mmio: i32) -> bool {
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
     // ── Step 11: Send firmware body ─────────────────────────────
-    send_firmware_body(mmio, ring_dma, data_dma, hdr_len);
+    send_firmware_body(mmio, ring_dma, data_dma, body_offset);
 
     // ── Step 12: Wait FW ready ──────────────────────────────────
     if !wait_fw_ready(mmio) {
@@ -875,32 +875,38 @@ fn wait_fwdl_path_ready(mmio: i32) -> bool {
 /// Linux: base_hdr = sizeof(fw_hdr) + section_num * sizeof(fw_hdr_section)
 ///      = 32 + section_num * 16
 /// section_num is in FW_HDR word 6, bits [15:8].
-fn fw_header_len() -> usize {
+/// Parse firmware header and return (send_len, body_offset).
+/// send_len = base header to send to chip (WITHOUT dynamic header).
+/// body_offset = where firmware sections start (AFTER full header).
+fn fw_header_info() -> (usize, usize) {
     let fw = fw_data();
-    if fw.len() < 0x20 { return fw.len(); }
+    if fw.len() < 0x20 { return (fw.len(), fw.len()); }
 
     let w6 = u32::from_le_bytes([fw[0x18], fw[0x19], fw[0x1A], fw[0x1B]]);
     let section_num = ((w6 >> 8) & 0xFF) as usize;
+    let base_hdr_len = 32 + section_num * 16;
 
     let w7 = u32::from_le_bytes([fw[0x1C], fw[0x1D], fw[0x1E], fw[0x1F]]);
     let dyn_hdr = (w7 >> 16) & 1;
 
-    let hdr_len = if dyn_hdr != 0 {
+    let (send_len, body_offset) = if dyn_hdr != 0 {
         let w3 = u32::from_le_bytes([fw[0x0C], fw[0x0D], fw[0x0E], fw[0x0F]]);
-        ((w3 >> 16) & 0xFF) as usize
+        let full_hdr = ((w3 >> 16) & 0xFF) as usize;
+        // Linux: sends base_hdr only, body starts after full header
+        (base_hdr_len, full_hdr)
     } else {
-        32 + section_num * 16
+        (base_hdr_len, base_hdr_len)
     };
 
-    host::print("  FW hdr: ");
+    host::print("  FW: ");
     print_dec(section_num);
-    host::print(" sections, ");
-    print_dec(hdr_len);
-    host::print(" bytes (dyn=");
-    print_dec(dyn_hdr as usize);
-    host::print(")\n");
+    host::print(" sections, send=");
+    print_dec(send_len);
+    host::print(" body@");
+    print_dec(body_offset);
+    host::print("\n");
 
-    hdr_len
+    (send_len, body_offset)
 }
 
 /// Wait for firmware ready — FWDL_STS in WCPU_FW_CTRL bits [7:5] == 7.
