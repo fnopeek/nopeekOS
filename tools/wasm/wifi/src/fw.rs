@@ -12,7 +12,65 @@ use crate::host;
 use crate::regs;
 
 /// Embedded firmware blob (rtw8852b_fw-1.bin from linux-firmware)
-static FW_DATA: &[u8] = include_bytes!("rtw8852b_fw.bin");
+/// This is an MFW container (sig=0xFF). The actual FW is extracted at runtime.
+static MFW_DATA: &[u8] = include_bytes!("rtw8852b_fw.bin");
+
+/// Actual firmware slice (set by mfw_find_fw)
+static mut FW_OFFSET: usize = 0;
+static mut FW_SIZE: usize = 0;
+
+fn fw_data() -> &'static [u8] {
+    unsafe { &MFW_DATA[FW_OFFSET..FW_OFFSET + FW_SIZE] }
+}
+
+/// Parse MFW container and find the NORMAL firmware (type=5).
+/// Sets FW_OFFSET and FW_SIZE for the rest of the download.
+fn mfw_find_fw() -> bool {
+    if MFW_DATA.len() < 16 || MFW_DATA[0] != 0xFF {
+        // Not MFW, use entire blob as firmware
+        unsafe { FW_OFFSET = 0; FW_SIZE = MFW_DATA.len(); }
+        return true;
+    }
+
+    let fw_nr = MFW_DATA[1] as usize;
+    host::print("  MFW container: ");
+    print_dec(fw_nr);
+    host::print(" entries\n");
+
+    // Each mfw_info is 16 bytes, starting at offset 16
+    for i in 0..fw_nr {
+        let off = 16 + i * 16;
+        if off + 16 > MFW_DATA.len() { break; }
+        let cv = MFW_DATA[off];
+        let typ = MFW_DATA[off + 1];
+        let shift = u32::from_le_bytes([
+            MFW_DATA[off + 4], MFW_DATA[off + 5],
+            MFW_DATA[off + 6], MFW_DATA[off + 7],
+        ]) as usize;
+        let size = u32::from_le_bytes([
+            MFW_DATA[off + 8], MFW_DATA[off + 9],
+            MFW_DATA[off + 10], MFW_DATA[off + 11],
+        ]) as usize;
+
+        // type 5 = RTW89_FW_NORMAL, pick first match (lowest cv)
+        if typ == 5 && shift + size <= MFW_DATA.len() {
+            host::print("  Using fw[");
+            print_dec(i);
+            host::print("]: cv=");
+            print_dec(cv as usize);
+            host::print(" offset=0x");
+            host::print_hex32(shift as u32);
+            host::print(" size=");
+            print_dec(size);
+            host::print("\n");
+            unsafe { FW_OFFSET = shift; FW_SIZE = size; }
+            return true;
+        }
+    }
+
+    host::print("  No NORMAL firmware found in MFW!\n");
+    false
+}
 
 // ── TX Buffer Descriptor (BD) format ─────────────────────────────
 // 8 bytes: length(u16) | option(u16) | dma_addr(u32)
@@ -37,8 +95,13 @@ static mut BD_IDX: u16 = 0;
 
 /// Run the full firmware download sequence.
 pub fn download(mmio: i32) -> bool {
+    // Parse MFW container to find actual firmware
+    if !mfw_find_fw() {
+        host::print("[wifi] MFW parse failed\n");
+        return false;
+    }
     host::print("[wifi] Firmware: ");
-    print_dec(FW_DATA.len());
+    print_dec(fw_data().len());
     host::print(" bytes\n");
 
     dump_state(mmio, "initial");
@@ -726,7 +789,7 @@ fn send_fw_header(ring_dma: i32, data_dma: i32, mmio: i32, hdr_len: usize) {
     host::dma_w32(data_dma, 4, hdr1);
 
     // Copy FW header data after H2C descriptor
-    host::dma_write_buf(data_dma, 8, &FW_DATA[..hdr_len]);
+    host::dma_write_buf(data_dma, 8, &fw_data()[..hdr_len]);
     host::fence();
 
     unsafe { H2C_SEQ = seq.wrapping_add(1); }
@@ -741,7 +804,7 @@ fn send_fw_section(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: 
     let data_phys = host::dma_phys(data_dma);
 
     // Raw firmware data, no H2C header
-    host::dma_write_buf(data_dma, 0, &FW_DATA[offset..offset + len]);
+    host::dma_write_buf(data_dma, 0, &fw_data()[offset..offset + len]);
     host::fence();
 
     submit_bd(ring_dma, data_dma, data_phys, mmio, len);
@@ -766,7 +829,7 @@ fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len
 /// Send firmware body (sections after header) in chunks via CH12.
 /// Linux: raw section data, NO H2C descriptor, in FWDL_SECTION_PER_PKT_LEN chunks.
 fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usize) {
-    let total = FW_DATA.len();
+    let total = fw_data().len();
     let mut offset = start_offset;
     let mut chunk_num = 0usize;
 
@@ -813,22 +876,19 @@ fn wait_fwdl_path_ready(mmio: i32) -> bool {
 ///      = 32 + section_num * 16
 /// section_num is in FW_HDR word 6, bits [15:8].
 fn fw_header_len() -> usize {
-    if FW_DATA.len() < 0x20 { return FW_DATA.len(); }
+    let fw = fw_data();
+    if fw.len() < 0x20 { return fw.len(); }
 
-    // Word 6 at offset 0x18: section_num in bits [15:8]
-    let w6 = u32::from_le_bytes([FW_DATA[0x18], FW_DATA[0x19], FW_DATA[0x1A], FW_DATA[0x1B]]);
+    let w6 = u32::from_le_bytes([fw[0x18], fw[0x19], fw[0x1A], fw[0x1B]]);
     let section_num = ((w6 >> 8) & 0xFF) as usize;
 
-    // Word 7 at offset 0x1C: dynamic_hdr_en = bit 16
-    let w7 = u32::from_le_bytes([FW_DATA[0x1C], FW_DATA[0x1D], FW_DATA[0x1E], FW_DATA[0x1F]]);
+    let w7 = u32::from_le_bytes([fw[0x1C], fw[0x1D], fw[0x1E], fw[0x1F]]);
     let dyn_hdr = (w7 >> 16) & 1;
 
     let hdr_len = if dyn_hdr != 0 {
-        // Dynamic header: length in word 3 bits [23:16]
-        let w3 = u32::from_le_bytes([FW_DATA[0x0C], FW_DATA[0x0D], FW_DATA[0x0E], FW_DATA[0x0F]]);
+        let w3 = u32::from_le_bytes([fw[0x0C], fw[0x0D], fw[0x0E], fw[0x0F]]);
         ((w3 >> 16) & 0xFF) as usize
     } else {
-        // Static header: 32-byte base + 16 bytes per section
         32 + section_num * 16
     };
 
@@ -836,7 +896,9 @@ fn fw_header_len() -> usize {
     print_dec(section_num);
     host::print(" sections, ");
     print_dec(hdr_len);
-    host::print(" bytes\n");
+    host::print(" bytes (dyn=");
+    print_dec(dyn_hdr as usize);
+    host::print(")\n");
 
     hdr_len
 }
