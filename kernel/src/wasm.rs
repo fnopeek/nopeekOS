@@ -69,7 +69,7 @@ static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] = [
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtOrd};
 
 const APP_KEY_BUF_SIZE: usize = 32;
-const MAX_APP_BUFS: usize = 16;
+const MAX_APP_BUFS: usize = 256;
 
 static mut APP_KEY_BUFS: [([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize); MAX_APP_BUFS] = {
     const INIT: ([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize) =

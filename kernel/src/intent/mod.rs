@@ -237,7 +237,7 @@ static INTENT_JOBS: Mutex<[Option<IntentJob>; MAX_INTENT_JOBS]> = Mutex::new([
 ]);
 
 /// Maximum terminals (must match shade::terminal::MAX_TERMINALS).
-const MAX_TERMS: usize = 16;
+const MAX_TERMS: usize = 256;
 
 /// Per-terminal flag: true if an intent is running on a worker.
 static INTENT_RUNNING: [AtomicBool; MAX_TERMS] = {
