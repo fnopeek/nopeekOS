@@ -278,6 +278,7 @@ fn render_frame_legacy() {
 }
 
 /// Try GPU BCS blit from front shadow → MMIO framebuffer.
+/// VSync: waits for vertical blank before blit to eliminate tearing.
 /// Returns true if GPU blit succeeded, false = caller should CPU-blit.
 fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> bool {
     if !crate::gpu::supports_blit() { return false; }
@@ -285,6 +286,11 @@ fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> boo
     let src_ggtt = fb.front_ggtt();
     let dst_ggtt = crate::gpu::fb_ggtt_offset();
     if src_ggtt == 0 || dst_ggtt == 0 { return false; }
+
+    // VSync: wait for vertical blank so blit starts during blanking interval
+    if crate::gpu::supports_flip() {
+        crate::gpu::wait_vblank();
+    }
 
     crate::gpu::gpu_blit_rect(src_ggtt, pitch, dst_ggtt, pitch, 0, 0, pitch / 4, h)
 }
