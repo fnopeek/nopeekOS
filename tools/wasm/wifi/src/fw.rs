@@ -27,25 +27,29 @@ pub fn download(mmio: i32) -> bool {
     print_dec(FW_DATA.len());
     host::print(" bytes\n");
 
-    // Step 1: Disable CPU (keep UEFI power-on config, just restart CPU in FWDL mode)
-    // Don't power cycle — OFFMAC resets XTAL/LDO/ISO that UEFI configured.
-    host::print("[wifi] Disabling CPU...\n");
+    // Step 1: Disable CPU — exact rtw89_mac_disable_cpu_ax() sequence
+    host::print("[wifi] Disabling CPU (rtw89 sequence)...\n");
+    // Clear WCPU_EN
     let mut val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val &= !regs::B_AX_WCPU_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
-    // Enable CPU clock for clean state transition
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
-    val |= regs::B_AX_CPU_CLK_EN;
-    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
-    // Clear old FWDL state
+    // Clear FWDL_EN + path ready bits
     val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    val &= !(regs::B_AX_WCPU_FWDL_EN);
+    val &= !(regs::B_AX_WCPU_FWDL_EN | regs::B_AX_H2C_PATH_RDY | regs::B_AX_FWDL_PATH_RDY);
     host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
-    host::sleep_ms(10);
-    let fw_after = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::print("  FW_CTRL after disable: 0x"); host::print_hex32(fw_after);
-    let sts = (fw_after >> 5) & 0x7;
-    host::print(" (STS="); print_dec(sts as usize); host::print(")\n");
+    // Clear CPU clock
+    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    val &= !regs::B_AX_CPU_CLK_EN;
+    host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
+    // Toggle PLATFORM_EN (clear then set)
+    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    val &= !regs::B_AX_PLATFORM_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    val |= regs::B_AX_PLATFORM_EN;
+    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    host::sleep_ms(5);
+    let fw_d = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::print("  FW_CTRL after disable: 0x"); host::print_hex32(fw_d); host::print("\n");
 
     // Step 2: PCIe DMA pre-init (CRITICAL — FWDL path won't be ready without this)
     pcie_dma_pre_init(mmio);
@@ -277,48 +281,58 @@ fn power_cycle(mmio: i32) {
     host::print("  SYS_STATUS1: 0x"); host::print_hex32(status); host::print("\n");
 }
 
-/// Enable CPU in firmware download mode
-/// Based on rtw89_mac_enable_cpu() + rtw89_mac_fwdl_enable()
+/// Enable CPU in FWDL mode — exact rtw89_mac_enable_cpu_ax() sequence
 fn enable_cpu_fwdl(mmio: i32) {
-    host::print("[wifi] Enabling FWDL mode...\n");
+    host::print("[wifi] Enabling FWDL mode (rtw89 sequence)...\n");
 
-    // 1. Clear halt channels
+    // Check WCPU is actually disabled
+    let plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+    if plat & regs::B_AX_WCPU_EN != 0 {
+        host::print("  WARNING: WCPU still enabled!\n");
+    }
+
+    // 1. Clear UDM registers
+    host::mmio_w32(mmio, regs::R_AX_UDM1, 0);
+    host::mmio_w32(mmio, regs::R_AX_UDM2, 0);
+
+    // 2. Clear all halt channels
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
-
-    // 2. Set boot reason to FWDL resume
-    // R_AX_BOOT_REASON (0x01E6) is a BYTE register — must use aligned read-modify-write.
-    // Aligned 32-bit register is at 0x01E4. BOOT_REASON is byte [2] = bits [23:16].
-    let aligned_addr = regs::R_AX_BOOT_REASON & !0x3; // 0x01E4
-    let byte_pos = (regs::R_AX_BOOT_REASON & 0x3) * 8; // bit 16
-    let mut val = host::mmio_r32(mmio, aligned_addr);
-    val &= !(0xFF << byte_pos); // clear byte
-    val |= (regs::RTW89_FW_DLFW_RESUME & 0xFF) << byte_pos;
-    host::mmio_w32(mmio, aligned_addr, val);
+    host::mmio_w32(mmio, regs::R_AX_HALT_H2C, 0);
+    host::mmio_w32(mmio, regs::R_AX_HALT_C2H, 0);
 
     // 3. Enable CPU clock
-    val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
+    let mut val = host::mmio_r32(mmio, regs::R_AX_SYS_CLK_CTRL);
     val |= regs::B_AX_CPU_CLK_EN;
     host::mmio_w32(mmio, regs::R_AX_SYS_CLK_CTRL, val);
 
-    // 4. Enable FWDL mode in FW_CTRL
+    // 4. Set FW_CTRL: clear path ready + status, then set FWDL_EN
     val = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    val &= !(regs::B_AX_WCPU_FWDL_EN | regs::B_AX_H2C_PATH_RDY | regs::B_AX_FWDL_PATH_RDY);
+    // Clear FWDL_STS field (bits [7:5]) to INITIAL_STATE (0)
+    val &= !((0x7u32) << 5);
+    // Set FWDL_EN
     val |= regs::B_AX_WCPU_FWDL_EN;
     host::mmio_w32(mmio, regs::R_AX_WCPU_FW_CTRL, val);
 
-    // 5. Enable AXI DMA
-    val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
-    val |= regs::B_AX_AXIDMA_EN;
-    host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
+    // 5. RTL8852B specific: set SEC_IDMEM_SIZE_CONFIG = 2
+    val = host::mmio_r32(mmio, regs::R_AX_SEC_CTRL);
+    val &= !regs::B_AX_SEC_IDMEM_MASK;
+    val |= 0x2 << 16;
+    host::mmio_w32(mmio, regs::R_AX_SEC_CTRL, val);
 
-    // 6. Enable WCPU
+    // 6. Set boot reason — write16_mask to R_AX_BOOT_REASON bits [2:0]
+    // 0x01E6 is 16-bit aligned, use mmio_w16
+    host::mmio_w16(mmio, regs::R_AX_BOOT_REASON,
+        regs::RTW89_FW_DLFW_RESUME as u16);
+
+    // 7. Enable WCPU — boot ROM starts in FWDL mode
     val = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
     val |= regs::B_AX_WCPU_EN;
     host::mmio_w32(mmio, regs::R_AX_PLATFORM_ENABLE, val);
 
-    host::sleep_ms(50); // give boot ROM time to start
+    host::sleep_ms(50);
 
-    // Debug: show state after enable
     let ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
     host::print("  FW_CTRL after enable: 0x"); host::print_hex32(ctrl); host::print("\n");
 }
