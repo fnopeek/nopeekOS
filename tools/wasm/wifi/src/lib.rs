@@ -7,6 +7,7 @@
 
 mod host;
 mod regs;
+mod fw;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -115,7 +116,23 @@ pub extern "C" fn _start() {
         host::print("[wifi] WARNING: Firmware checksum fail flag set\n");
     }
 
-    host::print("\n[wifi] Phase 1 complete — press 'q' to exit\n");
+    // ── Phase 2: Firmware download ─────────────────────────────────
+    host::print("[wifi] Starting firmware download...\n");
+    if !fw::download(mmio) {
+        host::print("[wifi] Firmware download FAILED\n");
+        host::print("[wifi] Press 'q' to exit\n");
+        loop {
+            if host::input_wait(1000) == 0x71 { return; }
+        }
+    }
+
+    // Re-read firmware status after download
+    let fw_ctrl2 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::log_reg("WCPU_FW_CTRL (post)", fw_ctrl2);
+    let boot_dbg2 = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
+    host::log_reg("BOOT_DBG (post)    ", boot_dbg2);
+
+    host::print("\n[wifi] Phase 2 complete — press 'q' to exit\n");
 
     // ── Wait for user input ──────────────────────────────────────
     loop {
