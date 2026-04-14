@@ -31,8 +31,8 @@ pub fn download(mmio: i32) -> bool {
     disable_cpu(mmio);
     host::sleep_ms(10);
 
-    // Step 2: Enable CPU in firmware download mode
-    enable_cpu_fwdl(mmio);
+    // Step 2: PCIe DMA pre-init (CRITICAL — FWDL path won't be ready without this)
+    pcie_dma_pre_init(mmio);
     host::sleep_ms(10);
 
     // Step 3: Setup H2C ring (CH12) for DMA transfer
@@ -44,13 +44,26 @@ pub fn download(mmio: i32) -> bool {
         }
     };
 
-    // Step 4: Wait for FWDL path ready
+    // Step 4: Enable CPU in firmware download mode
+    enable_cpu_fwdl(mmio);
+    host::sleep_ms(10);
+
+    // Step 5: Wait for FWDL path ready
     if !wait_fwdl_path_ready(mmio) {
         host::print("[wifi] FWDL path not ready\n");
+        // Debug: print relevant registers
+        let ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+        host::print("  WCPU_FW_CTRL=0x"); host::print_hex32(ctrl); host::print("\n");
+        let plat = host::mmio_r32(mmio, regs::R_AX_PLATFORM_ENABLE);
+        host::print("  PLATFORM_EN=0x"); host::print_hex32(plat); host::print("\n");
+        let init = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+        host::print("  PCIE_INIT=0x"); host::print_hex32(init); host::print("\n");
+        let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+        host::print("  DMA_BUSY=0x"); host::print_hex32(busy); host::print("\n");
         return false;
     }
 
-    // Step 5: Clear halt channels
+    // Step 6: Clear halt channels
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
@@ -71,6 +84,63 @@ pub fn download(mmio: i32) -> bool {
 
     host::print("[wifi] Firmware loaded and running!\n");
     true
+}
+
+/// PCIe DMA pre-init: stop DMA, clear indices, reset BDRAM, enable only CH12
+/// This is required before FWDL path becomes ready.
+/// Based on rtw89_pci_ops_mac_pre_init_ax().
+fn pcie_dma_pre_init(mmio: i32) {
+    host::print("[wifi] PCIe DMA pre-init...\n");
+
+    // 1. Stop WPDMA
+    let mut val = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
+    val |= regs::B_AX_STOP_WPDMA;
+    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, val);
+
+    // 2. Disable HCI TX/RX DMA
+    let mut cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    cfg &= !(regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
+    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
+
+    // 3. Wait for DMA idle
+    for _ in 0..1000 {
+        let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+        if busy == 0 { break; }
+        host::sleep_ms(1);
+    }
+
+    // 4. Clear all TX/RX ring indices
+    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, regs::B_AX_CLR_ALL_CH);
+    host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0x3); // clear RXQ + RPQ
+
+    // 5. Reset BDRAM
+    cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    cfg |= regs::B_AX_RST_BDRAM;
+    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
+    // Poll until BDRAM reset clears
+    for _ in 0..1000 {
+        let v = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+        if v & regs::B_AX_RST_BDRAM == 0 { break; }
+        host::sleep_ms(1);
+    }
+
+    // 6. Stop all TX DMA channels, then enable only CH12 for FWDL
+    let mut stop = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
+    stop |= 0x7FFFF; // stop all channels (bits [18:0])
+    stop &= !regs::B_AX_STOP_CH12; // but clear CH12 stop → enable CH12
+    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, stop);
+
+    // 7. Clear WPDMA stop + PCIEIO stop
+    stop = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
+    stop &= !(regs::B_AX_STOP_WPDMA | regs::B_AX_STOP_PCIEIO);
+    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, stop);
+
+    // 8. Re-enable HCI TX/RX DMA
+    cfg = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    cfg |= regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN;
+    host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg);
+
+    host::print("[wifi] PCIe DMA pre-init done\n");
 }
 
 /// Disable the WCPU — reset stale firmware state
