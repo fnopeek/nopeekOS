@@ -138,6 +138,31 @@ pub fn download(mmio: i32) -> bool {
 //  XTAL SI indirect register access
 // ═══════════════════════════════════════════════════════════════════
 
+/// PCIe Function Level Reset — hard-resets the device via config space.
+/// BARs are cleared but kernel auto-assigns them in mmio_map_bar.
+pub fn pcie_flr() {
+    // Walk PCIe capability list to find Express Capability (ID=0x10)
+    let mut cap_ptr = (host::pci_read_config(0x34) & 0xFF) as u8;
+    while cap_ptr != 0 {
+        let cap_id = (host::pci_read_config(cap_ptr) & 0xFF) as u8;
+        if cap_id == 0x10 {
+            // Check FLR support (DevCap bit 28)
+            let dev_cap = host::pci_read_config(cap_ptr + 4);
+            if dev_cap & (1 << 28) == 0 {
+                host::print("[wifi] FLR not supported\n");
+                return;
+            }
+            // Trigger FLR (DevCtl bit 15)
+            let mut dev_ctrl = host::pci_read_config(cap_ptr + 8);
+            dev_ctrl |= 0x8000;
+            host::pci_write_config(cap_ptr + 8, dev_ctrl);
+            host::print("[wifi] FLR triggered\n");
+            return;
+        }
+        cap_ptr = ((host::pci_read_config(cap_ptr) >> 8) & 0xFF) as u8;
+    }
+}
+
 /// Debug flag: print XTAL SI status on first call
 static mut XTAL_DBG: bool = true;
 
