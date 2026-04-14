@@ -161,6 +161,10 @@ impl Compositor {
         win.terminal_idx = terminal_idx;
         crate::intent::create_session(terminal_idx);
 
+        // Register window as a process in the process table
+        let pid = crate::process::spawn("loop", crate::process::KIND_SYSTEM, terminal_idx, 0);
+        win.pid = pid;
+
         self.windows.push(win);
         self.z_order.insert(0, id);
         self.focus_window(id);
@@ -172,10 +176,11 @@ impl Compositor {
 
     /// Close a window by ID.
     pub fn close_window(&mut self, id: WindowId) {
-        // Free session + terminal buffer before removing window
+        // Free session + terminal buffer + process before removing window
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             crate::intent::destroy_session(win.terminal_idx);
             terminal::free(win.terminal_idx);
+            if win.pid != 0 { crate::process::exit(win.pid); }
         }
         self.windows.retain(|w| w.id != id);
         self.z_order.retain(|&wid| wid != id);

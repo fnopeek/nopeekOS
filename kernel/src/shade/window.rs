@@ -47,6 +47,8 @@ pub struct Window {
     /// Resize delta for tiling split adjustment (pixels, can be negative).
     pub resize_w: i32,
     pub resize_h: i32,
+    /// Process ID in process table (0 = not registered).
+    pub pid: u32,
 }
 
 #[allow(dead_code)]
@@ -69,6 +71,7 @@ impl Window {
             terminal_idx: 0,
             resize_w: 0,
             resize_h: 0,
+            pid: 0,
         }
     }
 
