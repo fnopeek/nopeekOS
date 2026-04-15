@@ -17,7 +17,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.54\n");
+    host::print("[wifi] RTL8852BE driver v0.55\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -166,26 +166,11 @@ pub extern "C" fn _start() {
     host::log_reg("HALT_C2H          ", halt_c2h);
     host::log_reg("HALT_C2H_CTRL     ", halt_c2h_ctrl);
 
-    // MAC/DMAC status after FW boot
+    // MAC/DMAC status after FW boot (skip CMAC — might not be enabled yet)
     let hci_func = host::mmio_r32(mmio, regs::R_AX_HCI_FUNC_EN);
     let dmac_func = host::mmio_r32(mmio, regs::R_AX_DMAC_FUNC_EN);
-    let cmac_func = host::mmio_r32(mmio, regs::R_AX_CMAC_FUNC_EN);
     host::log_reg("HCI_FUNC_EN       ", hci_func);
     host::log_reg("DMAC_FUNC_EN      ", dmac_func);
-    host::log_reg("CMAC_FUNC_EN      ", cmac_func);
-
-    // Read efuse-loaded MAC address from WLAN MAC register
-    // R_AX_MACID0 at 0xC120 (first 4 bytes), R_AX_MACID1 at 0xC124 (last 2)
-    let mac0 = host::mmio_r32(mmio, 0xC120);
-    let mac1 = host::mmio_r32(mmio, 0xC124);
-    host::print("  MAC addr: ");
-    host::print_hex16(((mac0 >> 0) & 0xFF) as u16); host::print(":");
-    host::print_hex16(((mac0 >> 8) & 0xFF) as u16); host::print(":");
-    host::print_hex16(((mac0 >> 16) & 0xFF) as u16); host::print(":");
-    host::print_hex16(((mac0 >> 24) & 0xFF) as u16); host::print(":");
-    host::print_hex16(((mac1 >> 0) & 0xFF) as u16); host::print(":");
-    host::print_hex16(((mac1 >> 8) & 0xFF) as u16);
-    host::print("\n");
 
     host::print("\n[wifi] Phase 3 complete — press 'q' to exit\n");
 
