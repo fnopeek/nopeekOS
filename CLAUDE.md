@@ -46,9 +46,11 @@ Completed: IDT+PIC, physical memory manager, heap allocator, SMP (4 cores),
   BCS blitter engine (GPU blit via Gen 12 ExecList/ELSQ — zero-CPU compositing),
   GPU-composited cursor (save-under), async worker intents (http/update non-blocking),
   heap-allocated terminals (no window limit), KeyEvent abstraction (typed input),
-  WASM Driver ABI (PCI/MMIO/DMA host functions), WiFi RTL8852BE probe + power-on.
-In progress: WiFi firmware download (FWDL_PATH_RDY), Widget API.
-Next: WiFi scan/connect, file manager app, VSync (PLANE_SURF flip).
+  WASM Driver ABI (PCI/MMIO/DMA host functions),
+  WiFi RTL8852BE firmware download (FWDL complete, FW running, STS=7).
+In progress: WiFi MAC init + scan, Widget API.
+Next: WiFi association, file manager app, VSync (PLANE_SURF flip).
+Known bug: `run wifi` (worker core) crashes, `driver wifi` (Core 0) works — MMIO map_page conflict with 1GB huge pages.
 
 ## Security Checkpoint
 
