@@ -190,14 +190,8 @@ pub fn download(mmio: i32) -> bool {
     disable_cpu(mmio);
     enable_cpu_fwdl(mmio);
 
-    // Linux: rtw89_fwdl_secure_idmem_share_mode(idmem_share_mode)
-    // Overrides SEC_CTRL[17:16] AFTER enable_cpu. idmem_share_mode comes
-    // from FW header w7[21:18]. For our firmware: 0.
-    // enable_cpu set it to 2, but Linux resets it based on the FW header.
-    let w7 = u32::from_le_bytes([fw_data()[0x1C], fw_data()[0x1D], fw_data()[0x1E], fw_data()[0x1F]]);
-    let idmem_share = ((w7 >> 18) & 0xF) as u32;
-    host::mmio_w32_mask(mmio, regs::R_AX_SEC_CTRL, regs::B_AX_SEC_IDMEM_MASK, idmem_share);
-
+    // Note: rtw89_fwdl_secure_idmem_share_mode_ax is a NO-OP without secure boot.
+    // SEC_CTRL[17:16] stays at 2 from enable_cpu (correct for 8852B).
     host::sleep_ms(5);
 
     // ── Summary ─────────────────────────────────────────────────
@@ -954,7 +948,9 @@ fn send_fw_section(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: 
     submit_bd(ring_dma, data_dma, data_phys, mmio, WD_BODY_SIZE + len);
 }
 
-/// Submit a TX BD to the CH12 ring and advance the write pointer.
+/// Submit a TX BD to the CH12 ring, advance write pointer, and wait for DMA completion.
+/// Polls CH12_TXBD_IDX until HW_IDX advances, ensuring the DMA engine finished reading
+/// our data buffer before we overwrite it for the next chunk.
 fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len: usize) {
     let bd_idx = unsafe { BD_IDX };
     let bd_offset = (bd_idx as u32) * (BD_SIZE as u32);
@@ -966,7 +962,14 @@ fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len
     let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx as u32);
 
-    host::sleep_ms(5);
+    // Wait for DMA engine to process this BD (HW_IDX == new HOST_IDX)
+    for _ in 0..500u32 {
+        let idx = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
+        let hw_idx = ((idx >> 16) & 0xFFFF) as u16;
+        if hw_idx == new_idx { break; }
+        // Tight poll — DMA transfer of ~2KB takes microseconds
+    }
+
     unsafe { BD_IDX = new_idx; }
 }
 
