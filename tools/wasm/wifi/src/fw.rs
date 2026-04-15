@@ -890,6 +890,15 @@ fn send_fw_header(ring_dma: i32, data_dma: i32, mmio: i32, hdr_len: usize) {
 
     unsafe { H2C_SEQ = seq.wrapping_add(1); }
 
+    // Debug: dump first 48 bytes of DMA buffer (WD + H2C + start of FW header)
+    host::print("  TX[");
+    for i in 0..12u32 {
+        if i > 0 && i % 8 == 0 { host::print("\n     "); }
+        if i > 0 { host::print(" "); }
+        host::print_hex32(host::dma_r32(data_dma, i * 4));
+    }
+    host::print("]\n");
+
     // BD length = total DMA buffer size (WD + H2C + data)
     submit_bd(ring_dma, data_dma, data_phys, mmio, dma_total);
 }
