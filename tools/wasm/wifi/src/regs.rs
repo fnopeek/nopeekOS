@@ -47,22 +47,46 @@ pub const R_AX_HAXI_INIT_CFG1: u32    = 0x1000;
 pub const R_AX_HAXI_DMA_STOP1: u32    = 0x1010;
 pub const R_AX_HAXI_DMA_BUSY1: u32    = 0x101C;
 
-// TX BD ring addresses (CH12 = FW command channel)
-pub const R_AX_CH12_TXBD_DESA_L: u32  = 0x1130;
-pub const R_AX_CH12_TXBD_DESA_H: u32  = 0x1134;
-pub const R_AX_CH12_TXBD_NUM: u32     = 0x1138;
-pub const R_AX_CH12_TXBD_IDX: u32     = 0x113C;
+// TX BD ring addresses — from Linux rtw89_pci_ch_dma_addr_set
+// Format per channel: NUM, IDX, BDRAM_CTRL, DESA_L, DESA_H
+//
+// 8852B unmasked TX channels: ACH0-ACH3, CH8, CH9, CH12
+// (ACH4-ACH7, CH10, CH11 are masked via tx_dma_ch_mask)
+pub const R_AX_ACH0_TXBD_NUM: u32     = 0x1024;
+pub const R_AX_ACH0_BDRAM_CTRL: u32   = 0x1200;
+pub const R_AX_ACH0_TXBD_DESA_L: u32  = 0x1110;
+pub const R_AX_ACH0_TXBD_DESA_H: u32  = 0x1114;
+
+pub const R_AX_ACH1_BDRAM_CTRL: u32   = 0x1204;
+pub const R_AX_ACH1_TXBD_DESA_L: u32  = 0x1118;
+
+pub const R_AX_ACH2_BDRAM_CTRL: u32   = 0x1208;
+pub const R_AX_ACH2_TXBD_DESA_L: u32  = 0x1120;
+
+pub const R_AX_ACH3_BDRAM_CTRL: u32   = 0x120C;
+pub const R_AX_ACH3_TXBD_DESA_L: u32  = 0x1128;
+
+pub const R_AX_CH8_BDRAM_CTRL: u32    = 0x1220;
+pub const R_AX_CH8_TXBD_DESA_L: u32   = 0x1150;
+
+pub const R_AX_CH9_BDRAM_CTRL: u32    = 0x1224;
+pub const R_AX_CH9_TXBD_DESA_L: u32   = 0x1158;
+
+// CH12 = FWCMD queue — correct addresses from Linux!
+pub const R_AX_CH12_TXBD_NUM: u32     = 0x1038;
+pub const R_AX_CH12_TXBD_IDX: u32     = 0x1080;
+pub const R_AX_CH12_BDRAM_CTRL: u32   = 0x1228;
+pub const R_AX_CH12_TXBD_DESA_L: u32  = 0x1160;
+pub const R_AX_CH12_TXBD_DESA_H: u32  = 0x1164;
 
 // RX BD ring addresses
+pub const R_AX_RXQ_RXBD_NUM: u32      = 0x1020;
 pub const R_AX_RXQ_RXBD_DESA_L: u32   = 0x1100;
 pub const R_AX_RXQ_RXBD_DESA_H: u32   = 0x1104;
-pub const R_AX_RXQ_RXBD_NUM: u32      = 0x1108;
-pub const R_AX_RXQ_RXBD_IDX: u32      = 0x110C;
 
-pub const R_AX_RPQ_RXBD_DESA_L: u32   = 0x1110;
-pub const R_AX_RPQ_RXBD_DESA_H: u32   = 0x1114;
-pub const R_AX_RPQ_RXBD_NUM: u32      = 0x1118;
-pub const R_AX_RPQ_RXBD_IDX: u32      = 0x111C;
+pub const R_AX_RPQ_RXBD_NUM: u32      = 0x1022;
+pub const R_AX_RPQ_RXBD_DESA_L: u32   = 0x1108;
+pub const R_AX_RPQ_RXBD_DESA_H: u32   = 0x110C;
 
 // ── PCIe Configuration ──────────────────────────────────────────
 

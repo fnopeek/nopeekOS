@@ -177,21 +177,16 @@ pub fn download(mmio: i32) -> bool {
         host::print("[wifi] WARNING: DLE init incomplete\n");
     }
 
-    // ── Step 5: PCIe DMA pre-init ───────────────────────────────
-    pcie_dma_pre_init(mmio);
-
-    // ── Step 6: Setup CH12 ring BEFORE CPU enable ───────────────
-    // Linux: rtw89_pci_ops_reset programs all rings in pci_pre_init,
-    // BEFORE enable_cpu. The DMA engine caches ring addresses.
-    let (ring_dma, data_dma) = match setup_ch12_ring(mmio) {
+    // ── Step 5: PCIe DMA pre-init (includes ALL ring setup) ─────
+    let (ring_dma, data_dma) = match pcie_dma_pre_init(mmio) {
         Some(r) => r,
         None => {
-            host::print("[wifi] CH12 ring setup failed\n");
+            host::print("[wifi] PCIe DMA init failed\n");
             return false;
         }
     };
 
-    // ── Step 7: Disable + Enable CPU in FWDL mode ───────────────
+    // ── Step 6: Disable + Enable CPU in FWDL mode ───────────────
     disable_cpu(mmio);
     enable_cpu_fwdl(mmio);
     host::sleep_ms(50);
@@ -718,108 +713,138 @@ fn dmac_pre_init_dlfw(mmio: i32) -> bool {
     wde_ok && ple_ok
 }
 
-/// Setup PCIe DMA: stop all channels, reset BDRAM, re-enable HCI for CH12.
-/// Includes all PCIe helper functions from Linux rtw89_pci_ops_mac_pre_init_ax.
-fn pcie_dma_pre_init(mmio: i32) {
+/// Complete PCIe DMA pre-init matching Linux rtw89_pci_ops_mac_pre_init_ax.
+/// Includes: PCIe helpers, DMA stop, mode_op, ALL ring setup + BDRAM, DMA enable.
+/// Returns (ch12_ring_dma, ch12_data_dma) handles for firmware transfer.
+fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     host::print("[wifi] PCIe DMA init...\n");
 
     // ── PCIe pre-init helpers (Linux: called before DMA stop) ────
-    // l1off_pwroff: disable L1off power-off (0x1008 clr BIT(5))
-    host::mmio_clr32(mmio, 0x1008, 1 << 5);
-
-    // aphy_pwrcut: disable analog PHY power-cut (0x0004 clr BIT(14))
-    host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL, 1 << 14);
-
-    // hci_ldo: set DIS_L2_CTRL_LDO_HCI, clear DIS_WLSUS_AFT_PDN (0x0070)
-    host::mmio_set32(mmio, regs::R_AX_SYS_SDIO_CTRL, 1 << 15);
-    host::mmio_clr32(mmio, regs::R_AX_SYS_SDIO_CTRL, 1 << 14);
-
-    // power_wake_ax: raise wake signal (0x0074 set BIT(5))
-    host::mmio_set32(mmio, 0x0074, 1 << 5);
-
-    // set_sic: disable SIC force clock-req (0x13F0 clr BIT(4))
-    host::mmio_clr32(mmio, regs::R_AX_PCIE_EXP_CTRL, 1 << 4);
-
-    // set_lbc: LBC watchdog enable, timer=2ms (0x11D8)
-    let mut lbc = host::mmio_r32(mmio, 0x11D8);
-    lbc &= !(0xF << 4);  // clear timer field [7:4]
-    lbc |= 8 << 4;       // timer = 2ms
-    lbc |= 0x3;          // BIT(0)=LBC_EN, BIT(1)=LBC_FLAG
+    host::mmio_clr32(mmio, 0x1008, 1 << 5);           // l1off_pwroff
+    host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL, 1 << 14); // aphy_pwrcut
+    host::mmio_set32(mmio, regs::R_AX_SYS_SDIO_CTRL, 1 << 15); // hci_ldo set
+    host::mmio_clr32(mmio, regs::R_AX_SYS_SDIO_CTRL, 1 << 14); // hci_ldo clr
+    host::mmio_set32(mmio, 0x0074, 1 << 5);           // power_wake_ax
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_EXP_CTRL, 1 << 4); // set_sic
+    let mut lbc = host::mmio_r32(mmio, 0x11D8);       // set_lbc
+    lbc &= !(0xF << 4); lbc |= 8 << 4; lbc |= 0x3;
     host::mmio_w32(mmio, 0x11D8, lbc);
+    host::mmio_set32(mmio, 0x11C0, 0x3);               // set_dbg
+    host::mmio_w32_mask(mmio, regs::R_AX_PCIE_EXP_CTRL, 0x3, 1);
+    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, (1 << 23) | (1 << 22)); // set_keep_reg
 
-    // set_dbg: enable stuck debug (0x11C0, 0x13F0)
-    host::mmio_set32(mmio, 0x11C0, 0x3);          // ASFF_FULL_NO_STK | EN_STUCK_DBG
-    host::mmio_w32_mask(mmio, regs::R_AX_PCIE_EXP_CTRL, 0x3, 1); // only EN_STUCK_DBG
+    // ── 5b. Stop WPDMA ──────────────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, 1 << 19);
 
-    // set_keep_reg: keep register state across TX/RX resets (0x1000 BIT(23)|BIT(22))
-    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, (1 << 23) | (1 << 22));
-
-    // Enable AXIDMA
-    host::mmio_set32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_AXIDMA_EN);
-
-    // Hard-stop ALL DMA
-    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0xFFFFFFFF);
-    host::sleep_ms(2);
-
-    // Disable HCI TX/RX
+    // ── 5c. ctrl_dma_all(false): stop PCIEIO + disable TXHCI/RXHCI
+    host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, 1 << 20);
     host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1,
         regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
-    host::sleep_ms(2);
 
-    // Wait DMA idle (up to 500ms)
-    for i in 0..50 {
+    // ── 5d. Poll DMA idle ───────────────────────────────────────
+    for i in 0..100 {
         let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
         if busy == 0 { break; }
-        if i == 49 {
-            host::print("  DMA busy: 0x"); host::print_hex32(busy); host::print("\n");
-        }
-        host::sleep_ms(10);
+        if i == 99 { host::print("  DMA busy!\n"); }
+        host::sleep_ms(5);
     }
 
-    // Clear ALL TX/RX ring indices
-    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0xFFFFFFFF);
-    host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0xFFFFFFFF);
-    host::sleep_ms(1);
+    // ── 5e. Clear all ring indices ──────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0x070F); // ACH0-3,CH8,CH9,CH12
+    host::mmio_set32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0x03);    // RXQ + RPQ
 
-    // ── mode_op: configure PCIe DMA engine (Linux: rtw89_pci_mode_op) ──
-    // These must be set BEFORE BDRAM reset and DMA enable.
+    // ── 5f. mode_op ─────────────────────────────────────────────
     {
-        // PCIE_INIT_CFG1 (0x1000): TX burst=2048B[10:8]=7, RX burst=128B[16:14]=3,
-        //                          LATENCY_CONTROL[12]=1 (multi-tag mode)
         let mut cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-        cfg1 &= !(0x7 << 8);   // clear B_AX_PCIE_MAX_TXDMA_MASK
-        cfg1 |= 7 << 8;        // TX burst = 2048B
-        cfg1 &= !(0x7 << 14);  // clear B_AX_PCIE_MAX_RXDMA_MASK
-        cfg1 |= 3 << 14;       // RX burst = 128B
-        cfg1 |= 1 << 12;       // B_AX_LATENCY_CONTROL (tag mode)
-        // Clear RXBD_MODE bit[18] (MAC_AX_RXBD_PKT)
-        cfg1 &= !(1 << 18);
+        cfg1 &= !(1 << 18);     // clear RXBD_MODE
+        cfg1 &= !(0x7 << 8);  cfg1 |= 7 << 8;   // TX burst = 2048B
+        cfg1 &= !(0x7 << 14); cfg1 |= 3 << 14;  // RX burst = 128B
+        cfg1 |= 1 << 12;      // LATENCY_CONTROL
         host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg1);
 
-        // PCIE_EXP_CTRL (0x13F0): max tag num [18:16] = 7 (MAC_AX_TAG_NUM_8)
         host::mmio_w32_mask(mmio, regs::R_AX_PCIE_EXP_CTRL,
             regs::B_AX_MAX_TAG_NUM_MASK, 7);
 
-        // PCIE_INIT_CFG2 (0x1004): WD DMA intervals
-        //   idle[27:24]=1 (256ns), active[19:16]=1 (256ns)
         let mut cfg2 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG2);
-        cfg2 &= !(0xF << 24);  // clear WD_ITVL_IDLE
-        cfg2 |= 1 << 24;       // idle = 256ns
-        cfg2 &= !(0xF << 16);  // clear WD_ITVL_ACT
-        cfg2 |= 1 << 16;       // active = 256ns
+        cfg2 &= !(0xF << 24); cfg2 |= 1 << 24;  // WD idle = 256ns
+        cfg2 &= !(0xF << 16); cfg2 |= 1 << 16;  // WD active = 256ns
         host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG2, cfg2);
 
-        // TX address info mode: 8-byte select (for BD truncation mode)
-        host::mmio_set32(mmio, regs::R_AX_TX_ADDR_INFO_MODE, 1); // HOST_ADDR_INFO_8B_SEL
-        host::mmio_clr32(mmio, regs::R_AX_PKTIN_SETTING, 1 << 1); // clear WD_ADDR_INFO_LENGTH
-
-        // AXI master stop toggle — resets DMA engine to latch new config
-        // Linux: rtw89_pci_mode_op sets then clears B_AX_STOP_AXI_MST (BIT(17))
-        host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, 1 << 17);
-        host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1, 1 << 17);
+        host::mmio_set32(mmio, regs::R_AX_TX_ADDR_INFO_MODE, 1);
+        host::mmio_clr32(mmio, regs::R_AX_PKTIN_SETTING, 1 << 1);
     }
 
-    // Reset BDRAM — set bit, poll for auto-clear (Linux polls, NOT manual clear)
+    // ── 5g. ops_reset: program ALL rings + BDRAM ────────────────
+    // Allocate DMA buffers: 1 shared page for dummy rings, 1 for CH12 ring, 2 for data
+    let dummy_dma = host::dma_alloc(1);
+    if dummy_dma < 0 { return None; }
+    let dummy_phys = host::dma_phys(dummy_dma) as u32;
+
+    let ring_dma = host::dma_alloc(1);
+    if ring_dma < 0 { return None; }
+    let ring_phys = host::dma_phys(ring_dma);
+
+    let data_dma = host::dma_alloc(2);
+    if data_dma < 0 { return None; }
+    let data_phys = host::dma_phys(data_dma);
+
+    host::print("  CH12 ring=0x"); host::print_hex32(ring_phys as u32);
+    host::print(" data=0x"); host::print_hex32(data_phys as u32);
+    host::print("\n");
+
+    // TX rings: ACH0-ACH3, CH8, CH9 (dummy), CH12 (real)
+    // BDRAM table (rtw89_bd_ram_table_single):
+    //   ACH0: start=0, max=5, min=2  → 0x00020500
+    //   ACH1: start=5, max=5, min=2  → 0x00020505
+    //   ACH2: start=10, max=5, min=2 → 0x0002050A
+    //   ACH3: start=15, max=5, min=2 → 0x0002050F
+    //   CH8:  start=20, max=4, min=1 → 0x00010414
+    //   CH9:  start=24, max=4, min=1 → 0x00010418
+    //   CH12: start=28, max=4, min=1 → 0x0001041C
+
+    // ACH0
+    host::mmio_w32(mmio, regs::R_AX_ACH0_BDRAM_CTRL, 0x00020500);
+    host::mmio_w32(mmio, regs::R_AX_ACH0_TXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_ACH0_TXBD_DESA_H, 0);
+    // ACH1
+    host::mmio_w32(mmio, regs::R_AX_ACH1_BDRAM_CTRL, 0x00020505);
+    host::mmio_w32(mmio, regs::R_AX_ACH1_TXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_ACH1_TXBD_DESA_L + 4, 0);
+    // ACH2
+    host::mmio_w32(mmio, regs::R_AX_ACH2_BDRAM_CTRL, 0x0002050A);
+    host::mmio_w32(mmio, regs::R_AX_ACH2_TXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_ACH2_TXBD_DESA_L + 4, 0);
+    // ACH3
+    host::mmio_w32(mmio, regs::R_AX_ACH3_BDRAM_CTRL, 0x0002050F);
+    host::mmio_w32(mmio, regs::R_AX_ACH3_TXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_ACH3_TXBD_DESA_L + 4, 0);
+    // CH8
+    host::mmio_w32(mmio, regs::R_AX_CH8_BDRAM_CTRL, 0x00010414);
+    host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_L + 4, 0);
+    // CH9
+    host::mmio_w32(mmio, regs::R_AX_CH9_BDRAM_CTRL, 0x00010418);
+    host::mmio_w32(mmio, regs::R_AX_CH9_TXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_CH9_TXBD_DESA_L + 4, 0);
+
+    // CH12 — FWCMD queue (the one we actually use)
+    host::mmio_w32(mmio, regs::R_AX_CH12_BDRAM_CTRL, 0x0001041C);
+    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
+    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
+    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT as u32);
+
+    // RX rings: RXQ + RPQ (valid addresses required, even if unused for FWDL)
+    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_H, 0);
+    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_NUM, 1);
+    host::mmio_w32(mmio, regs::R_AX_RPQ_RXBD_DESA_L, dummy_phys);
+    host::mmio_w32(mmio, regs::R_AX_RPQ_RXBD_DESA_H, 0);
+    host::mmio_w32(mmio, regs::R_AX_RPQ_RXBD_NUM, 1);
+
+    // Reset BD_IDX for CH12
+    unsafe { BD_IDX = 0; }
+
+    // ── 5h. BDRAM reset ─────────────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
     for _ in 0..200 {
         if host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1) & regs::B_AX_RST_BDRAM == 0 {
@@ -828,55 +853,16 @@ fn pcie_dma_pre_init(mmio: i32) {
         host::sleep_ms(1);
     }
 
-    // Stop all channels EXCEPT CH12
-    let stop = 0x0007FFFF & !regs::B_AX_STOP_CH12;
-    host::mmio_w32(mmio, regs::R_AX_PCIE_DMA_STOP1, stop);
-    host::sleep_ms(1);
+    // ── 5i. Stop all TX channels ────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x00070F00); // TX_STOP1_MASK_V1
 
-    // Re-enable HCI TX/RX DMA
+    // ── 5j. Enable CH12 only ────────────────────────────────────
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, regs::B_AX_STOP_CH12);
+
+    // ── 5k. ctrl_dma_all(true): clear PCIEIO + enable TXHCI/RXHCI
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, 1 << 20); // clear STOP_PCIEIO
     host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1,
         regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  CH12 ring setup + firmware transfer
-// ═══════════════════════════════════════════════════════════════════
-
-/// Setup CH12 (FW command) DMA ring.
-fn setup_ch12_ring(mmio: i32) -> Option<(i32, i32)> {
-    // Allocate 1 page for ring descriptors (16 BDs x 8 bytes = 128 bytes)
-    let ring_dma = host::dma_alloc(1);
-    if ring_dma < 0 { return None; }
-    let ring_phys = host::dma_phys(ring_dma);
-
-    // Allocate 2 pages for data buffer (8KB, enough for fw chunks)
-    let data_dma = host::dma_alloc(2);
-    if data_dma < 0 { return None; }
-
-    // Program CH12 ring base address
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
-
-    // Set ring size — direct 32-bit write (upper bits ignored by HW)
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT as u32);
-
-    // Reset ring index — direct 32-bit write (avoids RMW of HW_IDX)
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, 0);
-
-    // Reset BD_IDX
-    unsafe { BD_IDX = 0; }
-
-    let data_phys = host::dma_phys(data_dma);
-    host::print("[wifi] DMA ring=0x");
-    host::print_hex32((ring_phys >> 32) as u32); host::print("_");
-    host::print_hex32(ring_phys as u32);
-    host::print(" data=0x");
-    host::print_hex32((data_phys >> 32) as u32); host::print("_");
-    host::print_hex32(data_phys as u32);
-    if (ring_phys >> 32) != 0 || (data_phys >> 32) != 0 {
-        host::print(" *** OVER 4GB! ***");
-    }
-    host::print("\n");
 
     Some((ring_dma, data_dma))
 }
