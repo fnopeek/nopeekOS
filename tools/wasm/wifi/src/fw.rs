@@ -960,14 +960,17 @@ fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len
     host::fence();
 
     let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx as u32);
+
+    // CRITICAL: use 16-bit RMW write to preserve HW_IDX in upper 16 bits!
+    // Linux: rtw89_write16(rtwdev, addr.idx, wp) — only writes HOST_IDX.
+    // mmio_w32 would zero HW_IDX, causing DMA to reprocess old BDs = data corruption.
+    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx);
 
     // Wait for DMA engine to process this BD (HW_IDX == new HOST_IDX)
     for _ in 0..500u32 {
         let idx = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
         let hw_idx = ((idx >> 16) & 0xFFFF) as u16;
         if hw_idx == new_idx { break; }
-        // Tight poll — DMA transfer of ~2KB takes microseconds
     }
 
     unsafe { BD_IDX = new_idx; }
