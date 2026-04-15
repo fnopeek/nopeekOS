@@ -249,7 +249,8 @@ Every execution is a sandboxed WASM module:
 - [x] USB mouse (HID boot protocol, xHCI multi-device, software cursor, click-to-focus, Mod+drag)
 - [x] IRQ-driven USB polling (APIC timer drains xHCI, atomic SPSC ring buffers)
 - [x] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
-- [ ] WiFi driver (RTL8852BE, WASM module, firmware download in progress)
+- [x] WiFi driver: RTL8852BE firmware download (WASM module, PCIe DMA, MFW container)
+- [ ] WiFi driver: MAC init, RF calibration, scan, association
 
 ### Phase 8 -- Human View
 
@@ -344,8 +345,8 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [x] PCI BAR auto-assignment + PCIe bridge window configuration
 - [x] DMA buffer allocation below 4GB (32-bit TX BD constraint)
 - [x] WiFi driver: RTL8852BE probe, power-on, XTAL SI, DLE/HFC, DMA rings
-- [ ] WiFi driver: firmware download completion (FWDL_PATH_RDY)
-- [ ] WiFi driver: MAC init, scan, association, data path
+- [x] WiFi driver: firmware download (MFW cv-matching, WD+H2C, BDRAM, all sections)
+- [ ] WiFi driver: MAC init, RF calibration, scan, association, data path
 
 **GPU Rendering**
 - [x] GPU HAL trait: init, set_mode, blit_rect_hw, flip, wait_vblank, supports_blit
