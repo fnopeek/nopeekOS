@@ -17,7 +17,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.53\n");
+    host::print("[wifi] RTL8852BE driver v0.54\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -134,13 +134,60 @@ pub extern "C" fn _start() {
         }
     }
 
-    // Re-read firmware status after download
-    let fw_ctrl2 = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
-    host::log_reg("WCPU_FW_CTRL (post)", fw_ctrl2);
-    let boot_dbg2 = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
-    host::log_reg("BOOT_DBG (post)    ", boot_dbg2);
+    // ── Phase 3: Post-FWDL status ──────────────────────────────────
+    host::print("\n[wifi] Phase 3: Firmware status\n");
+    host::print("  ─────────────────────────────────\n");
 
-    host::print("\n[wifi] Phase 2 complete — press 'q' to exit\n");
+    let fw_ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
+    host::log_reg("WCPU_FW_CTRL      ", fw_ctrl);
+
+    let sys_status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
+    host::log_reg("SYS_STATUS1       ", sys_status);
+    if sys_status & 1 != 0 {
+        host::print("  Firmware: RUNNING\n");
+    }
+
+    let boot_dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
+    host::log_reg("BOOT_DBG          ", boot_dbg);
+
+    // Read UDM registers — firmware may write version/status here
+    let udm0 = host::mmio_r32(mmio, 0x01F0); // R_AX_UDM0
+    let udm1 = host::mmio_r32(mmio, 0x01F4); // R_AX_UDM1
+    let udm2 = host::mmio_r32(mmio, 0x01F8); // R_AX_UDM2
+    let udm3 = host::mmio_r32(mmio, 0x01FC); // R_AX_UDM3
+    host::log_reg("UDM0 (FW info)    ", udm0);
+    host::log_reg("UDM1              ", udm1);
+    host::log_reg("UDM2              ", udm2);
+    host::log_reg("UDM3              ", udm3);
+
+    // C2H registers — firmware may have sent us a message
+    let halt_c2h = host::mmio_r32(mmio, regs::R_AX_HALT_C2H);
+    let halt_c2h_ctrl = host::mmio_r32(mmio, regs::R_AX_HALT_C2H_CTRL);
+    host::log_reg("HALT_C2H          ", halt_c2h);
+    host::log_reg("HALT_C2H_CTRL     ", halt_c2h_ctrl);
+
+    // MAC/DMAC status after FW boot
+    let hci_func = host::mmio_r32(mmio, regs::R_AX_HCI_FUNC_EN);
+    let dmac_func = host::mmio_r32(mmio, regs::R_AX_DMAC_FUNC_EN);
+    let cmac_func = host::mmio_r32(mmio, regs::R_AX_CMAC_FUNC_EN);
+    host::log_reg("HCI_FUNC_EN       ", hci_func);
+    host::log_reg("DMAC_FUNC_EN      ", dmac_func);
+    host::log_reg("CMAC_FUNC_EN      ", cmac_func);
+
+    // Read efuse-loaded MAC address from WLAN MAC register
+    // R_AX_MACID0 at 0xC120 (first 4 bytes), R_AX_MACID1 at 0xC124 (last 2)
+    let mac0 = host::mmio_r32(mmio, 0xC120);
+    let mac1 = host::mmio_r32(mmio, 0xC124);
+    host::print("  MAC addr: ");
+    host::print_hex16(((mac0 >> 0) & 0xFF) as u16); host::print(":");
+    host::print_hex16(((mac0 >> 8) & 0xFF) as u16); host::print(":");
+    host::print_hex16(((mac0 >> 16) & 0xFF) as u16); host::print(":");
+    host::print_hex16(((mac0 >> 24) & 0xFF) as u16); host::print(":");
+    host::print_hex16(((mac1 >> 0) & 0xFF) as u16); host::print(":");
+    host::print_hex16(((mac1 >> 8) & 0xFF) as u16);
+    host::print("\n");
+
+    host::print("\n[wifi] Phase 3 complete — press 'q' to exit\n");
 
     // ── Wait for user input ──────────────────────────────────────
     loop {
