@@ -189,7 +189,16 @@ pub fn download(mmio: i32) -> bool {
     // ── Step 6: Disable + Enable CPU in FWDL mode ───────────────
     disable_cpu(mmio);
     enable_cpu_fwdl(mmio);
-    host::sleep_ms(50);
+
+    // Linux: rtw89_fwdl_secure_idmem_share_mode(idmem_share_mode)
+    // Overrides SEC_CTRL[17:16] AFTER enable_cpu. idmem_share_mode comes
+    // from FW header w7[21:18]. For our firmware: 0.
+    // enable_cpu set it to 2, but Linux resets it based on the FW header.
+    let w7 = u32::from_le_bytes([fw_data()[0x1C], fw_data()[0x1D], fw_data()[0x1E], fw_data()[0x1F]]);
+    let idmem_share = ((w7 >> 18) & 0xF) as u32;
+    host::mmio_w32_mask(mmio, regs::R_AX_SEC_CTRL, regs::B_AX_SEC_IDMEM_MASK, idmem_share);
+
+    host::sleep_ms(5);
 
     // ── Summary ─────────────────────────────────────────────────
     let (si_ok, si_fail) = unsafe { (XTAL_SI_OK, XTAL_SI_FAIL) };
@@ -988,11 +997,8 @@ fn send_firmware_sections(mmio: i32, ring_dma: i32, data_dma: i32, body_offset: 
         let sec_len = (w1 & 0x00FFFFFF) as usize; // bits [23:0]
         let sec_type = ((w1 >> 24) & 0xF) as u8;  // bits [27:24]
 
-        if sec_type == FW_SEC_TYPE_BB {
-            host::print("[S"); print_dec(s); host::print(":BB skip] ");
-            data_offset += sec_len;
-            continue;
-        }
+        // Note: Linux skips BB (type=9) with include_bb=false, but the boot ROM
+        // still expects all section data (STS=1 if BB is skipped). Send everything.
 
         // Send this section in FW_CHUNK_SIZE chunks
         let mut sent = 0usize;
@@ -1082,27 +1088,44 @@ fn fw_header_info() -> (usize, usize) {
 /// Wait for firmware ready — FWDL_STS in WCPU_FW_CTRL bits [7:5] == 7.
 /// Linux: rtw89_fw_check_rdy polls for RTW89_FWDL_WCPU_FW_INIT_RDY (7).
 fn wait_fw_ready(mmio: i32) -> bool {
+    // Wait for DMA to finish processing all BDs first
+    let host_idx = unsafe { BD_IDX };
+    for _ in 0..100u32 {
+        let idx = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
+        let hw_idx = ((idx >> 16) & 0xFFFF) as u16;
+        if hw_idx == host_idx { break; }
+        host::sleep_ms(1);
+    }
+
     host::print("[wifi] Waiting FW ready...\n");
-    for i in 0..400u32 {
+    let mut last_dbg = 0u32;
+    for i in 0..2000u32 {
         let fw_ctrl = host::mmio_r32(mmio, regs::R_AX_WCPU_FW_CTRL);
         let fwdl_sts = (fw_ctrl >> 5) & 0x7;
 
         if fwdl_sts == 7 { // FWDL_WCPU_FW_INIT_RDY
             host::print("[wifi] FW ready! (");
-            print_dec((i) as usize);
+            print_dec(i as usize);
             host::print("ms) FW_CTRL=0x");
             host::print_hex32(fw_ctrl);
             host::print("\n");
             return true;
         }
-        if fwdl_sts == 2 { // CHECKSUM_FAIL
-            host::print("[wifi] FW checksum fail\n");
+        if fwdl_sts >= 2 && fwdl_sts <= 5 { // error states
+            host::print("[wifi] FW error STS=");
+            print_dec(fwdl_sts as usize);
+            host::print(" FW_CTRL=0x"); host::print_hex32(fw_ctrl);
+            host::print("\n");
             return false;
         }
-        if i % 100 == 99 {
-            host::print("  FW_CTRL=0x"); host::print_hex32(fw_ctrl);
-            host::print(" STS="); print_dec(fwdl_sts as usize);
+        // Track BOOT_DBG progress
+        let dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
+        if dbg != last_dbg || i % 500 == 0 {
+            host::print("  ["); print_dec(i as usize);
+            host::print("] STS="); print_dec(fwdl_sts as usize);
+            host::print(" DBG=0x"); host::print_hex32(dbg);
             host::print("\n");
+            last_dbg = dbg;
         }
         host::sleep_ms(1);
     }
