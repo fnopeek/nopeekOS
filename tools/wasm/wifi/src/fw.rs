@@ -719,8 +719,40 @@ fn dmac_pre_init_dlfw(mmio: i32) -> bool {
 }
 
 /// Setup PCIe DMA: stop all channels, reset BDRAM, re-enable HCI for CH12.
+/// Includes all PCIe helper functions from Linux rtw89_pci_ops_mac_pre_init_ax.
 fn pcie_dma_pre_init(mmio: i32) {
     host::print("[wifi] PCIe DMA init...\n");
+
+    // ── PCIe pre-init helpers (Linux: called before DMA stop) ────
+    // l1off_pwroff: disable L1off power-off (0x1008 clr BIT(5))
+    host::mmio_clr32(mmio, 0x1008, 1 << 5);
+
+    // aphy_pwrcut: disable analog PHY power-cut (0x0004 clr BIT(14))
+    host::mmio_clr32(mmio, regs::R_AX_SYS_PW_CTRL, 1 << 14);
+
+    // hci_ldo: set DIS_L2_CTRL_LDO_HCI, clear DIS_WLSUS_AFT_PDN (0x0070)
+    host::mmio_set32(mmio, regs::R_AX_SYS_SDIO_CTRL, 1 << 15);
+    host::mmio_clr32(mmio, regs::R_AX_SYS_SDIO_CTRL, 1 << 14);
+
+    // power_wake_ax: raise wake signal (0x0074 set BIT(5))
+    host::mmio_set32(mmio, 0x0074, 1 << 5);
+
+    // set_sic: disable SIC force clock-req (0x13F0 clr BIT(4))
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_EXP_CTRL, 1 << 4);
+
+    // set_lbc: LBC watchdog enable, timer=2ms (0x11D8)
+    let mut lbc = host::mmio_r32(mmio, 0x11D8);
+    lbc &= !(0xF << 4);  // clear timer field [7:4]
+    lbc |= 8 << 4;       // timer = 2ms
+    lbc |= 0x3;          // BIT(0)=LBC_EN, BIT(1)=LBC_FLAG
+    host::mmio_w32(mmio, 0x11D8, lbc);
+
+    // set_dbg: enable stuck debug (0x11C0, 0x13F0)
+    host::mmio_set32(mmio, 0x11C0, 0x3);          // ASFF_FULL_NO_STK | EN_STUCK_DBG
+    host::mmio_w32_mask(mmio, regs::R_AX_PCIE_EXP_CTRL, 0x3, 1); // only EN_STUCK_DBG
+
+    // set_keep_reg: keep register state across TX/RX resets (0x1000 BIT(23)|BIT(22))
+    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, (1 << 23) | (1 << 22));
 
     // Enable AXIDMA
     host::mmio_set32(mmio, regs::R_AX_PLATFORM_ENABLE, regs::B_AX_AXIDMA_EN);
