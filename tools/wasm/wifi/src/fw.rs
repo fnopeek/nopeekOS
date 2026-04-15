@@ -254,8 +254,8 @@ pub fn download(mmio: i32) -> bool {
     host::mmio_w32(mmio, regs::R_AX_HALT_H2C_CTRL, 0);
     host::mmio_w32(mmio, regs::R_AX_HALT_C2H_CTRL, 0);
 
-    // ── Step 11: Send firmware body ─────────────────────────────
-    send_firmware_body(mmio, ring_dma, data_dma, body_offset);
+    // ── Step 11: Send firmware body (section by section, skip BB) ─
+    send_firmware_sections(mmio, ring_dma, data_dma, body_offset);
 
     // ── Step 12: Wait FW ready ──────────────────────────────────
     if !wait_fw_ready(mmio) {
@@ -961,28 +961,54 @@ fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len
     unsafe { BD_IDX = new_idx; }
 }
 
-/// Send firmware body (sections after header) in chunks via CH12.
-/// Linux: raw section data, NO H2C descriptor, in FWDL_SECTION_PER_PKT_LEN chunks.
-fn send_firmware_body(mmio: i32, ring_dma: i32, data_dma: i32, start_offset: usize) {
-    let total = fw_data().len();
-    let mut offset = start_offset;
-    let mut chunk_num = 0usize;
+/// Section type constants (from Linux rtw89 fw.h)
+const FW_SEC_TYPE_BB: u8 = 9; // RTW89_FW_SEC_TYPE_BB — skip during normal FWDL
 
-    host::print("[wifi] Downloading body: ");
+/// Send firmware sections individually, skipping BB (baseband) sections.
+/// Linux: rtw89_fw_download_main iterates sections, __rtw89_fw_download_main
+/// sends each in 2020-byte chunks. BB sections (type=9) are skipped when
+/// include_bb=false (which is the normal FWDL path).
+fn send_firmware_sections(mmio: i32, ring_dma: i32, data_dma: i32, body_offset: usize) {
+    let fw = fw_data();
 
-    while offset < total {
-        let remaining = total - offset;
-        let chunk_len = if remaining > FW_CHUNK_SIZE { FW_CHUNK_SIZE } else { remaining };
+    // Parse section headers from the FW header (after 32-byte base header)
+    let w6 = u32::from_le_bytes([fw[0x18], fw[0x19], fw[0x1A], fw[0x1B]]);
+    let section_num = ((w6 >> 8) & 0xFF) as usize;
 
-        send_fw_section(ring_dma, data_dma, mmio, offset, chunk_len);
+    let mut data_offset = body_offset; // where section data starts in fw blob
+    let mut total_chunks = 0usize;
 
-        offset += chunk_len;
-        chunk_num += 1;
-        if chunk_num % 50 == 0 { host::print("."); }
+    host::print("[wifi] Downloading ");
+    print_dec(section_num);
+    host::print(" sections: ");
+
+    for s in 0..section_num {
+        let shdr = 32 + s * 16; // section header offset in fw blob
+        let w1 = u32::from_le_bytes([fw[shdr + 4], fw[shdr + 5], fw[shdr + 6], fw[shdr + 7]]);
+        let sec_len = (w1 & 0x00FFFFFF) as usize; // bits [23:0]
+        let sec_type = ((w1 >> 24) & 0xF) as u8;  // bits [27:24]
+
+        if sec_type == FW_SEC_TYPE_BB {
+            host::print("[S"); print_dec(s); host::print(":BB skip] ");
+            data_offset += sec_len;
+            continue;
+        }
+
+        // Send this section in FW_CHUNK_SIZE chunks
+        let mut sent = 0usize;
+        while sent < sec_len {
+            let remaining = sec_len - sent;
+            let chunk_len = if remaining > FW_CHUNK_SIZE { FW_CHUNK_SIZE } else { remaining };
+            send_fw_section(ring_dma, data_dma, mmio, data_offset + sent, chunk_len);
+            sent += chunk_len;
+            total_chunks += 1;
+        }
+        host::print("[S"); print_dec(s); host::print(":"); print_dec(sec_len); host::print("] ");
+        data_offset += sec_len;
     }
 
-    host::print(" done (");
-    print_dec(chunk_num);
+    host::print("done (");
+    print_dec(total_chunks);
     host::print(" chunks)\n");
 }
 
