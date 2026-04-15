@@ -45,9 +45,10 @@ Completed: IDT+PIC, physical memory manager, heap allocator, SMP (4 cores),
   network stack (TCP/TLS 1.3), login screen, double-buffer framebuffer,
   BCS blitter engine (GPU blit via Gen 12 ExecList/ELSQ — zero-CPU compositing),
   GPU-composited cursor (save-under), async worker intents (http/update non-blocking),
-  heap-allocated terminals (no window limit), KeyEvent abstraction (typed input).
-In progress: Widget API (reusable GUI components for WASM apps).
-Next: File manager app, configurable keybindings, VSync (PLANE_SURF flip).
+  heap-allocated terminals (no window limit), KeyEvent abstraction (typed input),
+  WASM Driver ABI (PCI/MMIO/DMA host functions), WiFi RTL8852BE probe + power-on.
+In progress: WiFi firmware download (FWDL_PATH_RDY), Widget API.
+Next: WiFi scan/connect, file manager app, VSync (PLANE_SURF flip).
 
 ## Security Checkpoint
 

@@ -76,6 +76,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  shade.wasm — Compositor (tiling, borders, bar, theme)   │
  │  loop.wasm  — Intent Loop (command dispatch, terminal)   │
  │  wallpaper.wasm — PNG decoder + color extraction         │
+ │  wifi.wasm  — RTL8852BE WiFi driver (PCIe, DMA, FW)     │
  │  Future: file manager, browser, user apps                │
  ├──────────────────────────────────────────────────────────┤
  │  WASM Runtime                                            │
@@ -87,6 +88,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  npk_fb_info — Screen dimensions, scale                  │
  │  npk_input_poll — Keyboard/mouse events                  │
  │  npk_fs_* — npkFS access    │  npk_net_* — Network      │
+ │  npk_pci_*/mmio_*/dma_* — Driver ABI (capability-gated) │
  ├──────────────────────────────────────────────────────────┤
  │  SMP Scheduler              │  Layer Compositor          │
  │  Work-stealing pool         │  Background / Chrome /     │
@@ -246,7 +248,8 @@ Every execution is a sandboxed WASM module:
 - [ ] SSH-compatible remote access (replaces old npk-shell prototype)
 - [x] USB mouse (HID boot protocol, xHCI multi-device, software cursor, click-to-focus, Mod+drag)
 - [x] IRQ-driven USB polling (APIC timer drains xHCI, atomic SPSC ring buffers)
-- [ ] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
+- [x] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
+- [ ] WiFi driver (RTL8852BE, WASM module, firmware download in progress)
 
 ### Phase 8 -- Human View
 
@@ -335,6 +338,15 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [x] Interactive execution on worker cores (1B fuel budget)
 - [x] Dynamic process table (BTreeMap, heap-allocated, unlimited PIDs)
 
+**WASM Driver ABI**
+- [x] Hardware host functions: `npk_pci_config_read/write`, `npk_mmio_map/read/write`, `npk_dma_alloc`
+- [x] Device-bound capability validation (each MMIO/DMA call checked)
+- [x] PCI BAR auto-assignment + PCIe bridge window configuration
+- [x] DMA buffer allocation below 4GB (32-bit TX BD constraint)
+- [x] WiFi driver: RTL8852BE probe, power-on, XTAL SI, DLE/HFC, DMA rings
+- [ ] WiFi driver: firmware download completion (FWDL_PATH_RDY)
+- [ ] WiFi driver: MAC init, scan, association, data path
+
 **GPU Rendering**
 - [x] GPU HAL trait: init, set_mode, blit_rect_hw, flip, wait_vblank, supports_blit
 - [x] BCS Blitter Engine (Gen 12 ExecList/ELSQ, XY_FAST_COPY_BLT)
@@ -412,6 +424,8 @@ This allows the compositor to handle focus, theming, scaling, and accessibility.
 | Core 0 | Event dispatcher only | IRQ + input + blit, never blocks >100μs |
 | Linux apps (future) | MicroVM (VT-x/VT-d) | Mini-Linux kernel, virtio bridges |
 | Modules | npk install | ECDSA P-384 signed, SHA-384 verified, OTA from GitHub |
+| WiFi | RTL8852BE (WASM driver) | PCIe MMIO, DMA, MFW firmware download, capability-gated |
+| Driver ABI | Host functions (npk_pci_*, npk_mmio_*, npk_dma_*) | Stable ABI, device-bound, sandboxed |
 | SMP | N cores (no limit) | Core 0 = event dispatcher, Cores 1..N = work-stealing pool |
 | SMP Scheduler | Chase-Lev SPMC deque | Owner push/pop, thieves steal, MONITOR/MWAIT sleep |
 | SMP Wakeup | MONITOR/MWAIT | Nanosecond wake on memory write, HLT fallback |
@@ -549,6 +563,13 @@ nopeekOS/
 │       ├── input.rs                   # KeyEvent abstraction (KeyCode, Modifiers)
 │       ├── wasm.rs                   # WASM runtime + host functions
 │       └── setup.rs                  # First-boot setup wizard
+│
+├── tools/wasm/wifi/                  # WiFi driver (WASM module)
+│   └── src/
+│       ├── lib.rs                    #   Entry point, init + FW download sequence
+│       ├── host.rs                   #   Host function bindings (PCI, MMIO, DMA)
+│       ├── regs.rs                   #   RTL8852BE register definitions
+│       └── fw.rs                     #   MFW container parser, firmware upload
 ```
 
 ---
@@ -573,7 +594,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.43.1
+[npk] AI-native Operating System v0.46.1
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] TSC: 691 MHz
@@ -592,6 +613,7 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 [npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
 [npk] BCS: blitter engine ready
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
+[npk] WiFi: RTL8852BE (10ec:b852) probed, BAR2 MMIO assigned
 [npk] DHCP: configured 192.168.1.100
 [npk] npkfs: mounted (gen=42, 15 objects)
 [npk] CSPRNG: ChaCha20 (RDRAND-seeded)

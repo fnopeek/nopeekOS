@@ -64,6 +64,14 @@ pub const R_AX_RPQ_RXBD_DESA_H: u32   = 0x1114;
 pub const R_AX_RPQ_RXBD_NUM: u32      = 0x1118;
 pub const R_AX_RPQ_RXBD_IDX: u32      = 0x111C;
 
+// ── PCIe Configuration ──────────────────────────────────────────
+
+pub const R_AX_PCIE_INIT_CFG2: u32     = 0x1004;
+pub const R_AX_PCIE_EXP_CTRL: u32     = 0x13F0;
+pub const B_AX_MAX_TAG_NUM_MASK: u32   = 0x7 << 16; // GENMASK(18,16)
+pub const R_AX_TX_ADDR_INFO_MODE: u32 = 0x8810;
+pub const R_AX_PKTIN_SETTING: u32     = 0x9A00;
+
 // ── LTR / Power Management ──────────────────────────────────────
 
 pub const R_AX_LTR_DEC_CTRL: u32      = 0x1600;

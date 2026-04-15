@@ -23,9 +23,10 @@ fn fw_data() -> &'static [u8] {
     unsafe { &MFW_DATA[FW_OFFSET..FW_OFFSET + FW_SIZE] }
 }
 
-/// Parse MFW container and find the NORMAL firmware (type=5).
+/// Parse MFW container and find the NORMAL firmware (type=5) matching chip cv.
 /// Sets FW_OFFSET and FW_SIZE for the rest of the download.
-fn mfw_find_fw() -> bool {
+/// Linux: rtw89_mfw_recognize — picks highest cv <= chip_cv with mp=0.
+fn mfw_find_fw(mmio: i32) -> bool {
     if MFW_DATA.len() < 16 || MFW_DATA[0] != 0xFF {
         // Not MFW, use entire blob as firmware
         unsafe { FW_OFFSET = 0; FW_SIZE = MFW_DATA.len(); }
@@ -37,12 +38,23 @@ fn mfw_find_fw() -> bool {
     print_dec(fw_nr);
     host::print(" entries\n");
 
-    // Each mfw_info is 16 bytes, starting at offset 16
+    // Read chip version from SYS_CFG1[15:12] — determines which firmware to use
+    let sys_cfg1 = host::mmio_r32(mmio, regs::R_AX_SYS_CFG1);
+    let chip_cv = ((sys_cfg1 >> 12) & 0xF) as u8;
+    host::print("  Chip CV = ");
+    print_dec(chip_cv as usize);
+    host::print("\n");
+
+    // Find best matching firmware: highest cv <= chip_cv, type=5 (NORMAL), mp=0
+    let mut best_idx: Option<usize> = None;
+    let mut best_cv: u8 = 0;
+
     for i in 0..fw_nr {
         let off = 16 + i * 16;
         if off + 16 > MFW_DATA.len() { break; }
         let cv = MFW_DATA[off];
         let typ = MFW_DATA[off + 1];
+        let mp = MFW_DATA[off + 2];
         let shift = u32::from_le_bytes([
             MFW_DATA[off + 4], MFW_DATA[off + 5],
             MFW_DATA[off + 6], MFW_DATA[off + 7],
@@ -52,24 +64,44 @@ fn mfw_find_fw() -> bool {
             MFW_DATA[off + 10], MFW_DATA[off + 11],
         ]) as usize;
 
-        // type 5 = RTW89_FW_NORMAL, pick first match (lowest cv)
-        if typ == 5 && shift + size <= MFW_DATA.len() {
+        if typ == 5 && mp == 0 && cv <= chip_cv && shift + size <= MFW_DATA.len() {
+            if best_idx.is_none() || cv > best_cv {
+                best_idx = Some(i);
+                best_cv = cv;
+            }
+        }
+    }
+
+    match best_idx {
+        Some(i) => {
+            let off = 16 + i * 16;
+            let shift = u32::from_le_bytes([
+                MFW_DATA[off + 4], MFW_DATA[off + 5],
+                MFW_DATA[off + 6], MFW_DATA[off + 7],
+            ]) as usize;
+            let size = u32::from_le_bytes([
+                MFW_DATA[off + 8], MFW_DATA[off + 9],
+                MFW_DATA[off + 10], MFW_DATA[off + 11],
+            ]) as usize;
             host::print("  Using fw[");
             print_dec(i);
             host::print("]: cv=");
-            print_dec(cv as usize);
+            print_dec(best_cv as usize);
             host::print(" offset=0x");
             host::print_hex32(shift as u32);
             host::print(" size=");
             print_dec(size);
             host::print("\n");
             unsafe { FW_OFFSET = shift; FW_SIZE = size; }
-            return true;
+            true
+        }
+        None => {
+            host::print("  No matching NORMAL firmware found for chip CV ");
+            print_dec(chip_cv as usize);
+            host::print("!\n");
+            false
         }
     }
-
-    host::print("  No NORMAL firmware found in MFW!\n");
-    false
 }
 
 // ── TX Buffer Descriptor (BD) format ─────────────────────────────
@@ -77,14 +109,27 @@ fn mfw_find_fw() -> bool {
 const BD_SIZE: usize = 8;
 const BD_OPT_LS: u16 = 1 << 14; // Last Segment
 
+// ── WiFi Descriptor (WD) body ────────────────────────────────────
+// 24 bytes (6 dwords), prepended to ALL CH12 DMA transfers.
+// The PCIe DMA engine reads the WD to know how to process the packet.
+// Linux: struct rtw89_txwd_body, pushed by rtw89_pci_fwcmd_submit.
+const WD_BODY_SIZE: usize = 24;
+
+// WD dword0: CHANNEL_DMA = 12 (CH12 = H2C/FWCMD), FW_DL = 0
+// Used for FW HEADER download (H2C descriptor follows WD).
+const WD_DWORD0_FWCMD_HDR: u32 = 12 << 16;
+
+// WD dword0: CHANNEL_DMA = 12, FW_DL = 1
+// Used for FW SECTION download (raw data follows WD, no H2C descriptor).
+const WD_DWORD0_FWCMD_BODY: u32 = (1 << 20) | (12 << 16);
+
+// WD dword2: PKT_SIZE in bits [13:0] — data length after WD (set per-packet)
+
 // Firmware download chunk size — must match Linux FWDL_SECTION_PER_PKT_LEN
 const FW_CHUNK_SIZE: usize = 2020;
 
 // CH12 ring: 16 buffer descriptors
 const CH12_BD_COUNT: u16 = 16;
-
-// TX descriptor size for AX generation (RTL8852B): 8 bytes
-const TXDESC_SIZE: usize = 8;
 
 /// BD ring state — tracks the current write index across multiple sends
 static mut BD_IDX: u16 = 0;
@@ -95,8 +140,8 @@ static mut BD_IDX: u16 = 0;
 
 /// Run the full firmware download sequence.
 pub fn download(mmio: i32) -> bool {
-    // Parse MFW container to find actual firmware
-    if !mfw_find_fw() {
+    // Parse MFW container to find actual firmware matching chip version
+    if !mfw_find_fw(mmio) {
         host::print("[wifi] MFW parse failed\n");
         return false;
     }
@@ -689,6 +734,39 @@ fn pcie_dma_pre_init(mmio: i32) {
     host::mmio_w32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0xFFFFFFFF);
     host::sleep_ms(1);
 
+    // ── mode_op: configure PCIe DMA engine (Linux: rtw89_pci_mode_op) ──
+    // These must be set BEFORE BDRAM reset and DMA enable.
+    {
+        // PCIE_INIT_CFG1 (0x1000): TX burst=2048B[10:8]=7, RX burst=128B[16:14]=3,
+        //                          LATENCY_CONTROL[12]=1 (multi-tag mode)
+        let mut cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+        cfg1 &= !(0x7 << 8);   // clear B_AX_PCIE_MAX_TXDMA_MASK
+        cfg1 |= 7 << 8;        // TX burst = 2048B
+        cfg1 &= !(0x7 << 14);  // clear B_AX_PCIE_MAX_RXDMA_MASK
+        cfg1 |= 3 << 14;       // RX burst = 128B
+        cfg1 |= 1 << 12;       // B_AX_LATENCY_CONTROL (tag mode)
+        // Clear RXBD_MODE bit[18] (MAC_AX_RXBD_PKT)
+        cfg1 &= !(1 << 18);
+        host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG1, cfg1);
+
+        // PCIE_EXP_CTRL (0x13F0): max tag num [18:16] = 7 (MAC_AX_TAG_NUM_8)
+        host::mmio_w32_mask(mmio, regs::R_AX_PCIE_EXP_CTRL,
+            regs::B_AX_MAX_TAG_NUM_MASK, 7);
+
+        // PCIE_INIT_CFG2 (0x1004): WD DMA intervals
+        //   idle[27:24]=1 (256ns), active[19:16]=1 (256ns)
+        let mut cfg2 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG2);
+        cfg2 &= !(0xF << 24);  // clear WD_ITVL_IDLE
+        cfg2 |= 1 << 24;       // idle = 256ns
+        cfg2 &= !(0xF << 16);  // clear WD_ITVL_ACT
+        cfg2 |= 1 << 16;       // active = 256ns
+        host::mmio_w32(mmio, regs::R_AX_PCIE_INIT_CFG2, cfg2);
+
+        // TX address info mode: 8-byte select (for BD truncation mode)
+        host::mmio_set32(mmio, regs::R_AX_TX_ADDR_INFO_MODE, 1); // HOST_ADDR_INFO_8B_SEL
+        host::mmio_clr32(mmio, regs::R_AX_PKTIN_SETTING, 1 << 1); // clear WD_ADDR_INFO_LENGTH
+    }
+
     // Reset BDRAM — set bit, poll for auto-clear (Linux polls, NOT manual clear)
     host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
     for _ in 0..200 {
@@ -759,44 +837,65 @@ const H2C_CL_MAC_FWDL: u32 = 3;
 /// H2C sequence counter
 static mut H2C_SEQ: u8 = 0;
 
-/// Send firmware HEADER via CH12 with proper H2C descriptor.
-/// Linux: rtw89_h2c_pkt_set_hdr_fwdl + rtw89_h2c_tx
+/// Send firmware HEADER via CH12 with WD + H2C descriptor.
+/// Linux: rtw89_pci_fwcmd_submit prepends 24-byte WD body,
+///        rtw89_h2c_pkt_set_hdr_fwdl prepends 8-byte H2C header.
+/// Buffer layout: [WD 24B][H2C 8B][FW header data]
 fn send_fw_header(ring_dma: i32, data_dma: i32, mmio: i32, hdr_len: usize) {
     let data_phys = host::dma_phys(data_dma);
-    let total_len = 8 + hdr_len; // H2C header + FW header data
+    let h2c_payload = 8 + hdr_len;           // H2C total_len = hdr + payload
+    let dma_total = WD_BODY_SIZE + h2c_payload; // WD + H2C + data
 
-    // Build 8-byte H2C descriptor (fwcmd_hdr)
+    // ── WiFi Descriptor (24 bytes) ─────────────────────────────────
+    // dword0: ch_dma=12, fw_dl=0 (header download uses fw_dl=false)
+    host::dma_w32(data_dma, 0, WD_DWORD0_FWCMD_HDR);
+    host::dma_w32(data_dma, 4, 0);       // dword1 = 0
+    host::dma_w32(data_dma, 8, (h2c_payload as u32) & 0x3FFF); // dword2: PKT_SIZE
+    host::dma_w32(data_dma, 12, 0);      // dword3 = 0
+    host::dma_w32(data_dma, 16, 0);      // dword4 = 0
+    host::dma_w32(data_dma, 20, 0);      // dword5 = 0
+
+    // ── H2C descriptor (8 bytes) after WD ──────────────────────────
     let seq = unsafe { H2C_SEQ };
-    // hdr0: DEL_TYPE[19:16]=0 | CAT[1:0]=1 | CLASS[7:2]=3 | FUNC[15:8]=0 | SEQ[31:24]
     let hdr0: u32 = (H2C_CAT_MAC)
                    | (H2C_CL_MAC_FWDL << 2)
                    | ((seq as u32) << 24);
-    // hdr1: TOTAL_LEN[13:0] = data_len + 8
-    let hdr1: u32 = (total_len as u32) & 0x3FFF;
+    let hdr1: u32 = (h2c_payload as u32) & 0x3FFF; // TOTAL_LEN = H2C hdr + data
+    host::dma_w32(data_dma, WD_BODY_SIZE as u32, hdr0);
+    host::dma_w32(data_dma, WD_BODY_SIZE as u32 + 4, hdr1);
 
-    host::dma_w32(data_dma, 0, hdr0);
-    host::dma_w32(data_dma, 4, hdr1);
-
-    // Copy FW header data after H2C descriptor
-    host::dma_write_buf(data_dma, 8, &fw_data()[..hdr_len]);
+    // ── FW header data after WD + H2C ──────────────────────────────
+    host::dma_write_buf(data_dma, (WD_BODY_SIZE + 8) as u32, &fw_data()[..hdr_len]);
     host::fence();
 
     unsafe { H2C_SEQ = seq.wrapping_add(1); }
 
-    // Write TX BD and advance ring
-    submit_bd(ring_dma, data_dma, data_phys, mmio, total_len);
+    // BD length = total DMA buffer size (WD + H2C + data)
+    submit_bd(ring_dma, data_dma, data_phys, mmio, dma_total);
 }
 
-/// Send a firmware SECTION chunk via CH12 — raw data, NO H2C descriptor.
-/// Linux: rtw89_fw_h2c_alloc_skb_no_hdr + rtw89_h2c_tx
+/// Send a firmware SECTION chunk via CH12 — WD + raw data, NO H2C descriptor.
+/// Linux: rtw89_pci_fwcmd_submit prepends 24-byte WD body.
+///        Section data uses fw_dl=1 (no H2C header).
+/// Buffer layout: [WD 24B][section data]
 fn send_fw_section(ring_dma: i32, data_dma: i32, mmio: i32, offset: usize, len: usize) {
     let data_phys = host::dma_phys(data_dma);
 
-    // Raw firmware data, no H2C header
-    host::dma_write_buf(data_dma, 0, &fw_data()[offset..offset + len]);
+    // ── WiFi Descriptor (24 bytes) ─────────────────────────────────
+    // dword0: ch_dma=12, fw_dl=1 (section download uses fw_dl=true)
+    host::dma_w32(data_dma, 0, WD_DWORD0_FWCMD_BODY);
+    host::dma_w32(data_dma, 4, 0);       // dword1 = 0
+    host::dma_w32(data_dma, 8, (len as u32) & 0x3FFF); // dword2: PKT_SIZE
+    host::dma_w32(data_dma, 12, 0);      // dword3 = 0
+    host::dma_w32(data_dma, 16, 0);      // dword4 = 0
+    host::dma_w32(data_dma, 20, 0);      // dword5 = 0
+
+    // ── Raw firmware data after WD, no H2C header ──────────────────
+    host::dma_write_buf(data_dma, WD_BODY_SIZE as u32, &fw_data()[offset..offset + len]);
     host::fence();
 
-    submit_bd(ring_dma, data_dma, data_phys, mmio, len);
+    // BD length = WD + section data
+    submit_bd(ring_dma, data_dma, data_phys, mmio, WD_BODY_SIZE + len);
 }
 
 /// Submit a TX BD to the CH12 ring and advance the write pointer.
