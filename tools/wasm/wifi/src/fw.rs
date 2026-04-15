@@ -234,7 +234,22 @@ pub fn download(mmio: i32) -> bool {
     send_fw_header(ring_dma, data_dma, mmio, hdr_send_len);
     host::sleep_ms(20);
 
-    // ── Step 9: Wait FWDL_PATH_RDY ──────────────────────────────
+    // ── DMA diagnostic after header send ─────────────────────────
+    {
+        let stop = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
+        let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+        let cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+        let idx  = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_IDX);
+        let dbg  = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
+        host::print("  DMA_STOP=0x"); host::print_hex32(stop);
+        host::print(" BUSY=0x"); host::print_hex32(busy);
+        host::print("\n  CFG1=0x"); host::print_hex32(cfg1);
+        host::print(" CH12_IDX=0x"); host::print_hex32(idx);
+        host::print(" BOOT_DBG=0x"); host::print_hex32(dbg);
+        host::print("\n");
+    }
+
+    // ── Step 10: Wait FWDL_PATH_RDY ─────────────────────────────
     if !wait_fwdl_path_ready(mmio) {
         host::print("[wifi] FWDL path not ready after header\n");
         return false;
@@ -765,6 +780,11 @@ fn pcie_dma_pre_init(mmio: i32) {
         // TX address info mode: 8-byte select (for BD truncation mode)
         host::mmio_set32(mmio, regs::R_AX_TX_ADDR_INFO_MODE, 1); // HOST_ADDR_INFO_8B_SEL
         host::mmio_clr32(mmio, regs::R_AX_PKTIN_SETTING, 1 << 1); // clear WD_ADDR_INFO_LENGTH
+
+        // AXI master stop toggle — resets DMA engine to latch new config
+        // Linux: rtw89_pci_mode_op sets then clears B_AX_STOP_AXI_MST (BIT(17))
+        host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, 1 << 17);
+        host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1, 1 << 17);
     }
 
     // Reset BDRAM — set bit, poll for auto-clear (Linux polls, NOT manual clear)
