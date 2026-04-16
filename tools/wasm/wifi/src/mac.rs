@@ -97,11 +97,9 @@ pub fn init(mmio: i32) -> bool {
     host::print("\n[wifi] Phase 4: MAC init\n");
 
     // ── 0. Enable BB/RF — MUST come before MAC init! ──────────────
-    // Linux: rtw89_chip_enable_bb_rf() / rtw8852b_mac_enable_bb_rf()
+    // Linux: rtw8852bx_mac_enable_bb_rf() — full 5-step sequence.
     // Without this, the radio hardware is off and firmware can't scan.
-    host::mmio_set8(mmio, regs::R_AX_SYS_FUNC_EN,
-        regs::B_AX_FEN_BBRSTB | regs::B_AX_FEN_BB_GLB_RSTN);
-    host::mmio_set32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+    enable_bb_rf(mmio);
     host::print("  BB/RF: enabled\n");
 
     // ── 1. DLE re-init with SCC quotas ─────────────────────────────
@@ -123,14 +121,11 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_w32(mmio, 0xC160, 0xFFFFFFFF); // CMAC_ERR_IMR
 
     // ── 6. Host report mode (set_host_rpr_ax) ─────────────────────
-    // Without this, firmware floods RXQ with TX release reports (type 8).
-    // RPR_MODE = POH (2), route to RPQ not RXQ.
-    host::mmio_w32_mask(mmio, 0x8440, 0x3, 2); // R_AX_WDRLS_CFG: MODE=POH
-    host::mmio_w32(mmio, 0x9410, 0xFFFFFFFF);   // R_AX_RLSRPT0_CFG0: filter all
-    let mut rpt1 = host::mmio_r32(mmio, 0x9414); // R_AX_RLSRPT0_CFG1
-    rpt1 &= !(0xFF | (0xFF << 16));
-    rpt1 |= 30 | (255 << 16);  // AGGNUM=30, TO=255
-    host::mmio_w32(mmio, 0x9414, rpt1);
+    // Linux: mac.c set_host_rpr_ax — route TX release reports to RPQ.
+    host::mmio_w32_mask(mmio, 0x9408, 0x3, 2);  // R_AX_WDRLS_CFG: MODE=POH
+    host::mmio_set32(mmio, 0x9410, 0xFFFF_FFFF); // R_AX_RLSRPT0_CFG0: filter all
+    host::mmio_w32_mask(mmio, 0x9414, 0xFF, 30);       // AGGNUM=30
+    host::mmio_w32_mask(mmio, 0x9414, 0xFF << 16, 255); // TO=255
     host::print("  RPR: POH mode\n");
 
     // ── 7. PCIe post-init ──────────────────────────────────────────
@@ -138,6 +133,32 @@ pub fn init(mmio: i32) -> bool {
 
     host::print("[wifi] MAC init complete\n");
     true
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  BB/RF Enable — rtw8852bx_mac_enable_bb_rf()
+// ═══════════════════════════════════════════════════════════════════
+
+fn enable_bb_rf(mmio: i32) {
+    // Step 1: Enable BB reset + global reset
+    host::mmio_set8(mmio, regs::R_AX_SYS_FUNC_EN,
+        regs::B_AX_FEN_BBRSTB | regs::B_AX_FEN_BB_GLB_RSTN);
+
+    // Step 2: SPS digital supply voltage
+    host::mmio_w32_mask(mmio, regs::R_AX_SPS_DIG_ON_CTRL0,
+        regs::B_AX_REG_ZCDC_H_MASK, 0x1);
+
+    // Step 3: AFE toggle (clr-clr-set) — NOT just set!
+    host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+    host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+    host::mmio_set32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+
+    // Step 4: XTAL SI — enable RF switches S0 + S1
+    fw::write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S0, 0xC7, 0xFF);
+    fw::write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S1, 0xC7, 0xFF);
+
+    // Step 5: PHY register access cycle time
+    host::mmio_set8(mmio, 0x8040, 0x01); // R_AX_PHYREG_SET = XYN_CYCLE
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -453,8 +474,13 @@ fn rxq_poll(mmio: i32) -> u32 {
     while si != hw_idx && count < 8 {
         let buf_off = (si as u32) * (RX_BUF_SIZE as u32);
 
+        // Skip 4-byte rxbd_info (FS/LS/TAG) before the RX descriptor.
+        // Linux: rtw89_pci_rxbd_deliver_ax reads rxbd_info first, then
+        // calls rtw89_core_query_rxdesc at skb->data + sizeof(rxbd_info).
+        let rxd_off = buf_off + 4;
+
         // Read AX RX descriptor dword0
-        let rxd0 = host::dma_r32(data_dma, buf_off);
+        let rxd0 = host::dma_r32(data_dma, rxd_off);
         let pkt_type = (rxd0 & AX_RXD_RPKT_TYPE_MASK) >> 24;
         let pkt_len = rxd0 & AX_RXD_RPKT_LEN_MASK;
         let shift = ((rxd0 & AX_RXD_SHIFT_MASK) >> 14) * 2;
@@ -465,8 +491,8 @@ fn rxq_poll(mmio: i32) -> u32 {
         let ti = (pkt_type & 0xF) as usize;
         unsafe { RX_BY_TYPE[ti] += 1; }
 
-        // Payload offset = RX descriptor + shift + driver info
-        let payload_off = buf_off + rxd_len + shift + drv_info;
+        // Payload offset = rxbd_info(4) + RX descriptor + shift + driver info
+        let payload_off = buf_off + 4 + rxd_len + shift + drv_info;
 
         if pkt_type == RX_TYPE_C2H {
             handle_c2h(data_dma, payload_off);
@@ -700,11 +726,11 @@ pub fn scan(mmio: i32) {
     host::print("  WiFi frames: "); fw::print_dec(wifi_frames as usize); host::print("\n");
     host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
 
-    // Dump first RX descriptor for debugging
+    // Dump first buffer: rxbd_info + RXD for debugging
     let data_dma = unsafe { RXQ_DATA_DMA };
     if data_dma >= 0 {
-        host::print("  RXD[0]: ");
-        for i in 0..4u32 {
+        host::print("  BUF[0]: ");
+        for i in 0..6u32 { // rxbd_info(1dw) + rxd(4dw) + payload start
             host::print_hex32(host::dma_r32(data_dma, i * 4));
             host::print(" ");
         }
