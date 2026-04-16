@@ -387,10 +387,8 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_w32(mmio, R_AX_LTR_IDLE_LATENCY, 0x9003_9003);
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
 
-    // Reset RXQ write pointer — direct 32-bit write!
-    // NEVER use mmio_w16 for ring IDX registers — RMW would clobber HW_IDX.
-    // Hardware ignores upper 16 bits (HW_IDX) on host writes.
-    host::mmio_w32(mmio, R_AX_RXQ_RXBD_IDX, (RXQ_BD_COUNT - 1) as u32);
+    // Reset RXQ write pointer
+    host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
     unsafe { RXQ_SW_IDX = 0; }
 
     // Enable ALL TX DMA channels (clear stop bits)
@@ -477,9 +475,8 @@ fn rxq_poll(mmio: i32) -> u32 {
 
     if count > 0 {
         unsafe { RXQ_SW_IDX = si; }
-        // Direct 32-bit write — NEVER RMW on split IDX registers!
         let wp = if si == 0 { RXQ_BD_COUNT - 1 } else { si - 1 };
-        host::mmio_w32(mmio, R_AX_RXQ_RXBD_IDX, wp as u32);
+        host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, wp);
     }
 
     count

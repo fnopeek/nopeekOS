@@ -887,8 +887,7 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     }
 
     // Set RXQ write pointer AFTER BDRAM reset (Linux: rx_ring_eq_is_full → wp=len-1)
-    // Direct 32-bit write — NEVER RMW on split IDX registers!
-    host::mmio_w32(mmio, 0x1050, 31); // R_AX_RXQ_RXBD_IDX host_wp=31
+    host::mmio_w16(mmio, 0x1050, 31); // R_AX_RXQ_RXBD_IDX host_wp=31
 
     // ── 5i. Stop all TX channels ────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x00070F00); // TX_STOP1_MASK_V1
@@ -998,8 +997,9 @@ fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len
     // CRITICAL: use 16-bit RMW write to preserve HW_IDX in upper 16 bits!
     // Linux: rtw89_write16(rtwdev, addr.idx, wp) — only writes HOST_IDX.
     // mmio_w32 would zero HW_IDX, causing DMA to reprocess old BDs = data corruption.
-    // Direct 32-bit write — hardware ignores upper 16 bits (HW_IDX) on host write
-    host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx as u32);
+    // Use mmio_w16 (RMW) — RTL8852B does NOT ignore upper 16 bits on w32!
+    // Linux uses writew (true 16-bit write). RMW race is negligible during FWDL.
+    host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx);
 
     // Wait for DMA engine to process this BD (HW_IDX == new HOST_IDX)
     for _ in 0..500u32 {
