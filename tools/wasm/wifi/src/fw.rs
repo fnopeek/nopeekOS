@@ -132,7 +132,11 @@ const FW_CHUNK_SIZE: usize = 2020;
 const CH12_BD_COUNT: u16 = 16;
 
 /// BD ring state — tracks the current write index across multiple sends
-static mut BD_IDX: u16 = 0;
+pub static mut BD_IDX: u16 = 0;
+
+/// DMA handles for CH12 ring (set during FWDL, reused for H2C after init)
+pub static mut RING_DMA: i32 = -1;
+pub static mut DATA_DMA: i32 = -1;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Main entry point
@@ -185,6 +189,8 @@ pub fn download(mmio: i32) -> bool {
             return false;
         }
     };
+    // Save DMA handles for post-FWDL H2C commands
+    unsafe { RING_DMA = ring_dma; DATA_DMA = data_dma; }
 
     // ── Step 6: Disable + Enable CPU in FWDL mode ───────────────
     disable_cpu(mmio);
@@ -1154,7 +1160,47 @@ fn dump_state(mmio: i32, label: &str) {
     host::print("\n");
 }
 
-fn print_dec(n: usize) {
+/// Send an H2C command via CH12 (reuses FWDL ring).
+/// Payload is raw H2C body (without WD or H2C header).
+pub fn h2c_send(mmio: i32, cat: u8, class: u8, func: u8, payload: &[u8]) {
+    let ring_dma = unsafe { RING_DMA };
+    let data_dma = unsafe { DATA_DMA };
+    if ring_dma < 0 || data_dma < 0 { return; }
+    let data_phys = host::dma_phys(data_dma);
+
+    let h2c_len = 8 + payload.len(); // H2C header + payload
+    let total = WD_BODY_SIZE + h2c_len;
+
+    // WiFi Descriptor (24B): ch_dma=12, fw_dl=0
+    host::dma_w32(data_dma, 0, WD_DWORD0_FWCMD_HDR);
+    host::dma_w32(data_dma, 4, 0);
+    host::dma_w32(data_dma, 8, (h2c_len as u32) & 0x3FFF);
+    host::dma_w32(data_dma, 12, 0);
+    host::dma_w32(data_dma, 16, 0);
+    host::dma_w32(data_dma, 20, 0);
+
+    // H2C header (8B)
+    let seq = unsafe { H2C_SEQ };
+    let hdr0: u32 = (cat as u32 & 0x3)
+        | ((class as u32 & 0x3F) << 2)
+        | ((func as u32) << 8)
+        | ((seq as u32) << 24);
+    let hdr1: u32 = (h2c_len as u32) & 0x3FFF;
+    host::dma_w32(data_dma, WD_BODY_SIZE as u32, hdr0);
+    host::dma_w32(data_dma, WD_BODY_SIZE as u32 + 4, hdr1);
+
+    // Payload
+    if !payload.is_empty() {
+        host::dma_write_buf(data_dma, (WD_BODY_SIZE + 8) as u32, payload);
+    }
+    host::fence();
+
+    unsafe { H2C_SEQ = seq.wrapping_add(1); }
+
+    submit_bd(ring_dma, data_dma, data_phys, mmio, total);
+}
+
+pub fn print_dec(n: usize) {
     if n >= 10 { print_dec(n / 10); }
     let d = (n % 10) as u8 + b'0';
     let s = [d];
