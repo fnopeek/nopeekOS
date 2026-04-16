@@ -52,8 +52,9 @@ static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 /// Default fuel budget per module execution (~10M instructions)
 const DEFAULT_FUEL: u64 = 10_000_000;
 
-/// Fuel budget for interactive apps (top, etc.) — effectively unlimited
-const INTERACTIVE_FUEL: u64 = 1_000_000_000;
+/// Fuel budget for interactive apps and drivers — effectively unlimited.
+/// WiFi driver needs ~2B for FWDL + MAC init + scan loop.
+const INTERACTIVE_FUEL: u64 = 10_000_000_000;
 
 // ── Worker-Core WASM Jobs ──────────────────────────────────────
 

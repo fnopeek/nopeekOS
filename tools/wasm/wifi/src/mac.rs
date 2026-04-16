@@ -639,21 +639,29 @@ pub fn scan(mmio: i32) {
     fw::h2c_send(mmio, 1, 9, 0x17, &scan_cmd);
 
     // ── Poll for results ───────────────────────────────────────────
-    host::print("  Listening for results (20s)...\n");
-    let mut total_c2h = 0u32;
-    for _ in 0..200u32 { // 200 × 100ms = 20 seconds
+    host::print("  Listening for results (30s, 'q' to stop)...\n");
+    let mut total_rx = 0u32;
+    for tick in 0..300u32 { // 300 × 100ms = 30 seconds
         let n = rxq_poll(mmio);
-        total_c2h += n;
-        host::sleep_ms(100);
+        total_rx += n;
 
-        // Check for key press to abort
-        let key = host::input_wait(0);
+        // Use input_wait as combined sleep + key check
+        let key = host::input_wait(100); // 100ms timeout
         if key == 0x71 { break; } // 'q'
+
+        // Progress every 5 seconds
+        if tick > 0 && tick % 50 == 0 {
+            host::print("  [");
+            fw::print_dec((tick / 10) as usize);
+            host::print("s] ");
+            fw::print_dec(total_rx as usize);
+            host::print(" packets\n");
+        }
     }
 
     let wifi_frames = unsafe { WIFI_FRAME_COUNT };
     host::print("[wifi] Scan done (");
-    fw::print_dec(total_c2h as usize);
+    fw::print_dec(total_rx as usize);
     host::print(" RX packets, ");
     fw::print_dec(wifi_frames as usize);
     host::print(" WiFi frames)\n");
