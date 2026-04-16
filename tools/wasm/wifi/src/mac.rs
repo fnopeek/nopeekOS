@@ -128,7 +128,10 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_w32_mask(mmio, 0x9414, 0xFF << 16, 255); // TO=255
     host::print("  RPR: POH mode\n");
 
-    // ── 7. PCIe post-init ──────────────────────────────────────────
+    // ── 7. Set up RXQ ring BEFORE enabling DMA ─────────────────────
+    if !rxq_init(mmio) { return false; }
+
+    // ── 8. PCIe post-init (stop DMA, reconfigure, restart) ─────────
     pcie_post_init(mmio);
 
     host::print("[wifi] MAC init complete\n");
@@ -371,22 +374,42 @@ fn cmac_init(mmio: i32) {
 // ═══════════════════════════════════════════════════════════════════
 
 fn pcie_post_init(mmio: i32) {
-    // LTR setup
+    // ── Stop DMA to reconfigure rings ──────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20)); // WPDMA + PCIEIO
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1,
+        regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
+
+    // Wait DMA idle
+    for _ in 0..100 {
+        if host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1) == 0 { break; }
+        host::sleep_ms(1);
+    }
+
+    // ── Clear all ring indices ─────────────────────────────────────
+    host::mmio_set32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0x7FF); // all TX
+    host::mmio_set32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0x03);   // RXQ + RPQ
+
+    // Reset CH12 BD index (our H2C ring)
+    unsafe { fw::BD_IDX = 0; }
+
+    // ── Re-set RXQ write pointer (tell FW all buffers available) ───
+    host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
+    unsafe { RXQ_SW_IDX = 0; }
+
+    // ── LTR setup ──────────────────────────────────────────────────
     let mut ltr0 = host::mmio_r32(mmio, R_AX_LTR_CTRL_0);
     ltr0 |= (1 << 0) | (1 << 1) | (1 << 2); // HW_EN + EN + WD_NOEMP_CHK
     host::mmio_w32(mmio, R_AX_LTR_CTRL_0, ltr0);
     host::mmio_w32(mmio, R_AX_LTR_IDLE_LATENCY, 0x9003_9003);
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
 
-    // Enable ALL TX DMA channels (clear stop bits)
-    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x000F_FF00); // TX_STOP1_MASK
-    // Clear WPDMA + PCIEIO stops
-    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20));
-    // Enable TXHCI + RXHCI
+    // ── Restart DMA — all channels ─────────────────────────────────
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x000F_FF00); // TX channels
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20)); // WPDMA + PCIEIO
     host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1,
         regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
 
-    host::print("  PCIe: DMA enabled\n");
+    host::print("  PCIe: DMA restarted\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════
