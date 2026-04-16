@@ -404,7 +404,21 @@ fn rxq_init(mmio: i32) -> bool {
     true
 }
 
-/// Poll RXQ for new entries. Returns number of new C2H messages processed.
+// AX RX descriptor dword0 fields (from Linux txrx.h)
+const AX_RXD_RPKT_LEN_MASK: u32      = 0x0000_3FFF; // [13:0]
+const AX_RXD_SHIFT_MASK: u32         = 0x0000_C000; // [15:14]
+const AX_RXD_RPKT_TYPE_MASK: u32     = 0x0F00_0000; // [27:24]
+const AX_RXD_DRV_INFO_SIZE_MASK: u32 = 0x7000_0000; // [30:28]
+const AX_RXD_LONG_RXD: u32           = 0x8000_0000; // [31]
+
+// Packet types
+const RX_TYPE_WIFI: u32 = 0;
+const RX_TYPE_C2H: u32  = 10;
+
+/// Scan statistics
+static mut WIFI_FRAME_COUNT: u32 = 0;
+
+/// Poll RXQ for new entries. Returns number of new packets processed.
 fn rxq_poll(mmio: i32) -> u32 {
     let (bd_dma, data_dma, sw_idx) = unsafe { (RXQ_BD_DMA, RXQ_DATA_DMA, RXQ_SW_IDX) };
     if bd_dma < 0 { return 0; }
@@ -415,57 +429,27 @@ fn rxq_poll(mmio: i32) -> u32 {
     let mut si = sw_idx;
 
     while si != hw_idx {
-        // Read RX data from buffer at sw_idx
         let buf_off = (si as u32) * (RX_BUF_SIZE as u32);
 
-        // Read C2H header (8 bytes)
-        let w0 = host::dma_r32(data_dma, buf_off);
-        let w1 = host::dma_r32(data_dma, buf_off + 4);
+        // Read AX RX descriptor dword0
+        let rxd0 = host::dma_r32(data_dma, buf_off);
+        let pkt_type = (rxd0 & AX_RXD_RPKT_TYPE_MASK) >> 24;
+        let pkt_len = rxd0 & AX_RXD_RPKT_LEN_MASK;
+        let shift = ((rxd0 & AX_RXD_SHIFT_MASK) >> 14) * 2;
+        let drv_info = ((rxd0 & AX_RXD_DRV_INFO_SIZE_MASK) >> 28) * 8;
+        let rxd_len = if rxd0 & AX_RXD_LONG_RXD != 0 { 32u32 } else { 16u32 };
 
-        let cat = w0 & 0x3;
-        let class = (w0 >> 2) & 0x3F;
-        let func = (w0 >> 8) & 0xFF;
-        let _len = w1 & 0x3FFF;
+        // Payload offset = RX descriptor + shift + driver info
+        let payload_off = buf_off + rxd_len + shift + drv_info;
 
-        // Handle scan offload response: CAT=1, CLASS=8(OFLD), FUNC=3
-        if cat == 1 && class == 8 && func == 3 {
-            let w2 = host::dma_r32(data_dma, buf_off + 8);
-            let pri_ch = w2 & 0xFF;
-            let rsn = (w2 >> 16) & 0xF;
-            let status = (w2 >> 20) & 0xF;
-            match rsn {
-                3 => { // ENTER_CH
-                    host::print("  [scan] ch ");
-                    fw::print_dec(pri_ch as usize);
-                    host::print("\n");
-                }
-                5 => { // END_SCAN
-                    host::print("  [scan] complete (status=");
-                    fw::print_dec(status as usize);
-                    host::print(")\n");
-                }
-                _ => {
-                    host::print("  [c2h] rsn=");
-                    fw::print_dec(rsn as usize);
-                    host::print(" ch=");
-                    fw::print_dec(pri_ch as usize);
-                    host::print("\n");
-                }
-            }
-        } else if cat == 1 && class == 0 {
-            // FW info messages (ACK, log, etc)
-            host::print("  [c2h] info func=");
-            fw::print_dec(func as usize);
-            host::print("\n");
-        } else {
-            host::print("  [c2h] cat=");
-            fw::print_dec(cat as usize);
-            host::print(" cls=");
-            fw::print_dec(class as usize);
-            host::print(" fn=");
-            fw::print_dec(func as usize);
-            host::print("\n");
+        if pkt_type == RX_TYPE_C2H {
+            // C2H message — parse header at payload offset
+            handle_c2h(data_dma, payload_off);
+        } else if pkt_type == RX_TYPE_WIFI && pkt_len > 24 {
+            // 802.11 frame — try to extract SSID from beacons
+            handle_wifi_frame(data_dma, payload_off, pkt_len);
         }
+        // Silently skip PPDU_STAT, CHAN_INFO, etc.
 
         si = (si + 1) % RXQ_BD_COUNT;
         count += 1;
@@ -473,11 +457,122 @@ fn rxq_poll(mmio: i32) -> u32 {
 
     if count > 0 {
         unsafe { RXQ_SW_IDX = si; }
-        // Advance host read pointer — tell HW we consumed the buffers
+        // Advance host read pointer
         host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, if si == 0 { RXQ_BD_COUNT - 1 } else { si - 1 });
     }
 
     count
+}
+
+/// Handle a C2H firmware message.
+fn handle_c2h(dma: i32, off: u32) {
+    let w0 = host::dma_r32(dma, off);
+    let w1 = host::dma_r32(dma, off + 4);
+
+    let cat = w0 & 0x3;
+    let class = (w0 >> 2) & 0x3F;
+    let func = (w0 >> 8) & 0xFF;
+    let _len = w1 & 0x3FFF;
+
+    // Scan offload response: CAT=1, CLASS=8(OFLD), FUNC=3
+    if cat == 1 && class == 8 && func == 3 {
+        let w2 = host::dma_r32(dma, off + 8);
+        let pri_ch = w2 & 0xFF;
+        let rsn = (w2 >> 16) & 0xF;
+        let status = (w2 >> 20) & 0xF;
+        match rsn {
+            3 => { // ENTER_CH
+                host::print("  [scan] ch ");
+                fw::print_dec(pri_ch as usize);
+                host::print("\n");
+            }
+            5 => { // END_SCAN
+                host::print("  [scan] complete (status=");
+                fw::print_dec(status as usize);
+                host::print(")\n");
+            }
+            _ => {
+                host::print("  [c2h] scan rsn=");
+                fw::print_dec(rsn as usize);
+                host::print(" ch=");
+                fw::print_dec(pri_ch as usize);
+                host::print("\n");
+            }
+        }
+    } else {
+        host::print("  [c2h] cat=");
+        fw::print_dec(cat as usize);
+        host::print(" cls=");
+        fw::print_dec(class as usize);
+        host::print(" fn=");
+        fw::print_dec(func as usize);
+        host::print("\n");
+    }
+}
+
+/// Handle a received WiFi frame — extract SSID from beacons/probe responses.
+fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
+    unsafe { WIFI_FRAME_COUNT += 1; }
+
+    // 802.11 header: FC(2) + Duration(2) + Addr1(6) + Addr2(6) + Addr3(6) + SeqCtrl(2) = 24 bytes
+    if len < 24 + 12 { return; } // too short for beacon
+
+    // Read frame control (first 2 bytes of 802.11 header)
+    let fc_word = host::dma_r32(dma, off);
+    let fc = fc_word & 0xFFFF;
+    let frame_type = (fc >> 2) & 0x3;    // type field
+    let frame_subtype = (fc >> 4) & 0xF;  // subtype field
+
+    // Only process beacon (type=0/mgmt, subtype=8) or probe response (subtype=5)
+    if frame_type != 0 { return; }
+    if frame_subtype != 8 && frame_subtype != 5 { return; }
+
+    // Beacon/Probe fixed fields after 802.11 header:
+    // Timestamp(8) + Interval(2) + Capability(2) = 12 bytes
+    // Then Information Elements follow
+    let ie_start = off + 24 + 12;
+    let ie_end = off + len;
+    if ie_start >= ie_end { return; }
+
+    // Find SSID IE (tag=0)
+    let mut pos = ie_start;
+    while pos + 2 <= ie_end {
+        let tag_len = host::dma_r32(dma, pos & !3); // aligned read
+        let byte_off = (pos & 3) * 8;
+        let tag = ((tag_len >> byte_off) & 0xFF) as u8;
+
+        // Read length byte
+        let len_pos = pos + 1;
+        let tag_len2 = host::dma_r32(dma, len_pos & !3);
+        let byte_off2 = (len_pos & 3) * 8;
+        let ie_len = ((tag_len2 >> byte_off2) & 0xFF) as u32;
+
+        if tag == 0 && ie_len > 0 && ie_len <= 32 {
+            // SSID found! Read SSID bytes
+            let mut ssid = [0u8; 33];
+            let ssid_start = pos + 2;
+            let mut buf = [0u8; 4];
+            for i in 0..ie_len {
+                let addr = ssid_start + i;
+                let w = host::dma_r32(dma, addr & !3);
+                let shift = (addr & 3) * 8;
+                ssid[i as usize] = ((w >> shift) & 0xFF) as u8;
+            }
+
+            // Print SSID
+            host::print("  ");
+            let s = core::str::from_utf8(&ssid[..ie_len as usize]).unwrap_or("?");
+            host::print(s);
+            host::print("\n");
+            return;
+        }
+
+        if tag == 0 && ie_len == 0 {
+            return; // hidden SSID
+        }
+
+        pos += 2 + ie_len;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -556,7 +651,10 @@ pub fn scan(mmio: i32) {
         if key == 0x71 { break; } // 'q'
     }
 
+    let wifi_frames = unsafe { WIFI_FRAME_COUNT };
     host::print("[wifi] Scan done (");
     fw::print_dec(total_c2h as usize);
-    host::print(" C2H messages)\n");
+    host::print(" RX packets, ");
+    fw::print_dec(wifi_frames as usize);
+    host::print(" WiFi frames)\n");
 }
