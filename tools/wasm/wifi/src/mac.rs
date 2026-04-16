@@ -129,15 +129,11 @@ pub fn init(mmio: i32) -> bool {
     host::print("  RPR: POH mode\n");
 
     // ── 7. PHY init — load BB, RF, NCTL register tables ─────────
-    // MUST happen BEFORE DMA restart! Otherwise firmware floods RXQ
-    // during the ~3 seconds of PHY register writes.
     crate::phy::init(mmio);
 
-    // ── 8. Set up RXQ ring ─────────────────────────────────────────
-    if !rxq_init(mmio) { return false; }
-
-    // ── 9. PCIe post-init (stop DMA, reconfigure, restart) ─────────
-    // DMA starts AFTER PHY is configured — radio is ready to receive.
+    // ── 8. PCIe post-init — just enable DMA channels ──────────────
+    // NO BDRAM reset! Ring addresses were configured in fw.rs pre_init
+    // and persist across FWDL. Just enable channels like Linux mac_post_init.
     pcie_post_init(mmio);
 
     host::print("[wifi] MAC + PHY init complete\n");
@@ -380,81 +376,29 @@ fn cmac_init(mmio: i32) {
 // ═══════════════════════════════════════════════════════════════════
 
 fn pcie_post_init(mmio: i32) {
-    // ── Stop DMA to reconfigure rings ──────────────────────────────
-    host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20)); // WPDMA + PCIEIO
-    host::mmio_clr32(mmio, regs::R_AX_PCIE_INIT_CFG1,
-        regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
+    // Linux: rtw89_pci_ops_mac_post_init_ax — simple DMA enable.
+    // NO BDRAM reset, NO ring reconfiguration.
+    // Rings were set up in fw.rs pre_init and persist across FWDL.
 
-    // Wait DMA idle
-    for _ in 0..100 {
-        if host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1) == 0 { break; }
-        host::sleep_ms(1);
-    }
-
-    // ── Clear all ring indices ─────────────────────────────────────
-    host::mmio_set32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0x7FF); // all TX
-    host::mmio_set32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0x03);   // RXQ + RPQ
-
-    // ── BD RAM reset (critical after ring reconfiguration!) ────────
-    // Without this, hardware uses stale BD state from FWDL dummy rings.
-    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
-    for _ in 0..200 {
-        if host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1) & regs::B_AX_RST_BDRAM == 0 {
-            break;
-        }
-        host::sleep_ms(1);
-    }
-
-    // ── Re-program ALL ring addresses AFTER BDRAM reset ──────────
-    // Linux: rtw89_pci_reset_trx_rings writes DESA/NUM/IDX after reset.
-    // BDRAM reset clears the hardware's ring state!
-
-    // ── Re-program ALL rings after BDRAM reset ───────────────────
-    // Linux order: write16(NUM) → write32(BDRAM) → write32(DESA_L/H) → write16(IDX)
-
-    // CH12 TX ring (H2C)
-    let ring_dma_h = unsafe { fw::RING_DMA };
-    if ring_dma_h >= 0 {
-        let ring_phys = host::dma_phys(ring_dma_h);
-        host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_NUM, 16);
-        host::mmio_w32(mmio, regs::R_AX_CH12_BDRAM_CTRL, 0x0001041C);
-        host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
-        host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
-    }
-    unsafe { fw::BD_IDX = 0; }
-
-    // RXQ ring
-    let rxq_dma = unsafe { RXQ_BD_DMA };
-    if rxq_dma >= 0 {
-        let base_phys = host::dma_phys(rxq_dma);
-        host::mmio_w16(mmio, regs::R_AX_RXQ_RXBD_NUM, RXQ_BD_COUNT);
-        host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_L, base_phys as u32);
-        host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_H, (base_phys >> 32) as u32);
-        host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
-    }
-    unsafe { RXQ_SW_IDX = 0; }
-
-    // Verify
-    let desa_rb = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
-    let idx_rb = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
-    host::print("  RXQ: DESA=0x"); host::print_hex32(desa_rb);
-    host::print(" IDX=0x"); host::print_hex32(idx_rb);
-    host::print("\n");
-
-    // ── LTR setup ──────────────────────────────────────────────────
+    // LTR setup
     let mut ltr0 = host::mmio_r32(mmio, R_AX_LTR_CTRL_0);
-    ltr0 |= (1 << 0) | (1 << 1) | (1 << 2); // HW_EN + EN + WD_NOEMP_CHK
+    ltr0 |= (1 << 0) | (1 << 1) | (1 << 2);
     host::mmio_w32(mmio, R_AX_LTR_CTRL_0, ltr0);
     host::mmio_w32(mmio, R_AX_LTR_IDLE_LATENCY, 0x9003_9003);
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
 
-    // ── Restart DMA — all channels ─────────────────────────────────
-    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x000F_FF00); // TX channels
-    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20)); // WPDMA + PCIEIO
-    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1,
-        regs::B_AX_TXHCI_EN | regs::B_AX_RXHCI_EN);
+    // Enable ALL TX DMA channels (clear stop bits)
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x000F_FF00);
+    // Clear WPDMA + PCIEIO stops
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20));
 
-    host::print("  PCIe: DMA restarted\n");
+    // Verify RXQ state (set in fw.rs, should persist)
+    let desa = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
+    let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+    host::print("  RXQ: DESA=0x"); host::print_hex32(desa);
+    host::print(" IDX=0x"); host::print_hex32(idx);
+    host::print("\n");
+    host::print("  PCIe: DMA enabled\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -462,63 +406,9 @@ fn pcie_post_init(mmio: i32) {
 // ═══════════════════════════════════════════════════════════════════
 
 const RXQ_BD_COUNT: u16 = 32;
-const RX_BUF_SIZE: u16 = 4096; // 1 page per buffer
 
-/// RXQ state
-static mut RXQ_BD_DMA: i32 = -1;
-static mut RXQ_DATA_DMA: i32 = -1;
+/// RXQ state — DMA handle is in fw::RXQ_DMA (set during pre_init)
 static mut RXQ_SW_IDX: u16 = 0;
-
-fn rxq_init(mmio: i32) -> bool {
-    // Single allocation for BD ring + data buffers.
-    // Layout: [BD ring: 1 page][Data buffers: RXQ_BD_COUNT pages]
-    let total_pages = 1 + RXQ_BD_COUNT;
-    let dma = host::dma_alloc(total_pages);
-    if dma < 0 { host::print("  RXQ: alloc failed\n"); return false; }
-    let base_phys = host::dma_phys(dma);
-
-    let bd_phys = base_phys;                    // page 0 = BD ring
-    let data_phys = base_phys + 4096;           // pages 1..33 = data buffers
-
-    // Pre-fill BDs: each BD points to a 4KB buffer in the data region
-    for i in 0..RXQ_BD_COUNT {
-        let bd_off = (i as u32) * 8;
-        let buf_phys = data_phys + (i as u64) * (RX_BUF_SIZE as u64);
-        let word0 = RX_BUF_SIZE as u32; // buf_size, opt=0
-        let word1 = buf_phys as u32;     // lower 32 bits
-        host::dma_w32(dma, bd_off, word0);
-        host::dma_w32(dma, bd_off + 4, word1);
-    }
-    host::fence();
-
-    // DON'T write DESA/NUM/IDX here — BDRAM reset in pcie_post_init erases them!
-    // The register writes happen in pcie_post_init AFTER BDRAM reset.
-
-    unsafe {
-        RXQ_BD_DMA = dma;
-        RXQ_DATA_DMA = dma; // same handle, data at offset 4096
-        RXQ_SW_IDX = 0;
-    }
-
-    // Diagnostic: verify ring setup
-    host::print("  RXQ: ring=0x"); host::print_hex32(bd_phys as u32);
-    host::print(" data=0x"); host::print_hex32(data_phys as u32);
-    host::print(" ("); fw::print_dec(RXQ_BD_COUNT as usize); host::print(" bufs)\n");
-
-    // Verify BD[0] content
-    let bd0_w0 = host::dma_r32(dma, 0);
-    let bd0_w1 = host::dma_r32(dma, 4);
-    host::print("  BD[0]: sz=0x"); host::print_hex32(bd0_w0);
-    host::print(" dma=0x"); host::print_hex32(bd0_w1); host::print("\n");
-
-    // Verify register values after write
-    let reg_desa = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
-    let reg_num = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_NUM);
-    host::print("  REG: DESA=0x"); host::print_hex32(reg_desa);
-    host::print(" NUM="); fw::print_dec(reg_num as usize); host::print("\n");
-
-    true
-}
 
 // AX RX descriptor dword0 fields (from Linux txrx.h)
 const AX_RXD_RPKT_LEN_MASK: u32      = 0x0000_3FFF; // [13:0]
@@ -539,7 +429,7 @@ static mut BEACON_COUNT: u32 = 0;
 
 /// Poll RXQ for new entries. Max 8 packets per call to avoid CPU hogging.
 fn rxq_poll(mmio: i32) -> u32 {
-    let (bd_dma, data_dma, sw_idx) = unsafe { (RXQ_BD_DMA, RXQ_DATA_DMA, RXQ_SW_IDX) };
+    let (bd_dma, data_dma, sw_idx) = unsafe { (fw::RXQ_DMA, fw::RXQ_DMA, RXQ_SW_IDX) };
     if bd_dma < 0 { return 0; }
 
     let idx_reg = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
@@ -549,7 +439,7 @@ fn rxq_poll(mmio: i32) -> u32 {
 
     while si != hw_idx && count < 8 {
         // Data buffers start at page 1 (offset 4096) in the unified DMA allocation
-        let buf_off = 4096 + (si as u32) * (RX_BUF_SIZE as u32);
+        let buf_off = 4096 + (si as u32) * (4096u32);
 
         // Skip 4-byte rxbd_info (FS/LS/TAG) before the RX descriptor.
         let rxd_off = buf_off + 4;
@@ -802,7 +692,7 @@ pub fn scan(mmio: i32) {
     host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
 
     // Dump first buffer: rxbd_info + RXD for debugging (data at offset 4096)
-    let data_dma = unsafe { RXQ_DATA_DMA };
+    let data_dma = unsafe { fw::RXQ_DMA };
     if data_dma >= 0 {
         host::print("  BUF[0]: ");
         for i in 0..6u32 {
