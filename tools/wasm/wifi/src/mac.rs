@@ -96,6 +96,14 @@ const R_AX_RXQ_RXBD_IDX: u32      = 0x1070;
 pub fn init(mmio: i32) -> bool {
     host::print("\n[wifi] Phase 4: MAC init\n");
 
+    // ── 0. Enable BB/RF — MUST come before MAC init! ──────────────
+    // Linux: rtw89_chip_enable_bb_rf() / rtw8852b_mac_enable_bb_rf()
+    // Without this, the radio hardware is off and firmware can't scan.
+    host::mmio_set8(mmio, regs::R_AX_SYS_FUNC_EN,
+        regs::B_AX_FEN_BBRSTB | regs::B_AX_FEN_BB_GLB_RSTN);
+    host::mmio_set32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+    host::print("  BB/RF: enabled\n");
+
     // ── 1. DLE re-init with SCC quotas ─────────────────────────────
     if !dle_init(mmio) { return false; }
 
@@ -114,7 +122,18 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_w32(mmio, 0x8520, 0xFFFFFFFF); // DMAC_ERR_IMR
     host::mmio_w32(mmio, 0xC160, 0xFFFFFFFF); // CMAC_ERR_IMR
 
-    // ── 6. PCIe post-init ──────────────────────────────────────────
+    // ── 6. Host report mode (set_host_rpr_ax) ─────────────────────
+    // Without this, firmware floods RXQ with TX release reports (type 8).
+    // RPR_MODE = POH (2), route to RPQ not RXQ.
+    host::mmio_w32_mask(mmio, 0x8440, 0x3, 2); // R_AX_WDRLS_CFG: MODE=POH
+    host::mmio_w32(mmio, 0x9410, 0xFFFFFFFF);   // R_AX_RLSRPT0_CFG0: filter all
+    let mut rpt1 = host::mmio_r32(mmio, 0x9414); // R_AX_RLSRPT0_CFG1
+    rpt1 &= !(0xFF | (0xFF << 16));
+    rpt1 |= 30 | (255 << 16);  // AGGNUM=30, TO=255
+    host::mmio_w32(mmio, 0x9414, rpt1);
+    host::print("  RPR: POH mode\n");
+
+    // ── 7. PCIe post-init ──────────────────────────────────────────
     pcie_post_init(mmio);
 
     host::print("[wifi] MAC init complete\n");
