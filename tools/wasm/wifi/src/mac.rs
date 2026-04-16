@@ -134,7 +134,10 @@ pub fn init(mmio: i32) -> bool {
     // ── 8. PCIe post-init (stop DMA, reconfigure, restart) ─────────
     pcie_post_init(mmio);
 
-    host::print("[wifi] MAC init complete\n");
+    // ── 9. PHY init — load BB, RF, NCTL register tables ───────────
+    crate::phy::init(mmio);
+
+    host::print("[wifi] MAC + PHY init complete\n");
     true
 }
 
