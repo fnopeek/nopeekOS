@@ -411,14 +411,17 @@ const AX_RXD_RPKT_TYPE_MASK: u32     = 0x0F00_0000; // [27:24]
 const AX_RXD_DRV_INFO_SIZE_MASK: u32 = 0x7000_0000; // [30:28]
 const AX_RXD_LONG_RXD: u32           = 0x8000_0000; // [31]
 
-// Packet types
+// Packet types (from Linux core.h rtw89_core_rx_type)
 const RX_TYPE_WIFI: u32 = 0;
+const RX_TYPE_PPDU: u32 = 1;
 const RX_TYPE_C2H: u32  = 10;
 
-/// Scan statistics
+/// Packet type counters for diagnostics
+static mut RX_BY_TYPE: [u32; 16] = [0; 16];
 static mut WIFI_FRAME_COUNT: u32 = 0;
+static mut BEACON_COUNT: u32 = 0;
 
-/// Poll RXQ for new entries. Returns number of new packets processed.
+/// Poll RXQ for new entries. Max 8 packets per call to avoid CPU hogging.
 fn rxq_poll(mmio: i32) -> u32 {
     let (bd_dma, data_dma, sw_idx) = unsafe { (RXQ_BD_DMA, RXQ_DATA_DMA, RXQ_SW_IDX) };
     if bd_dma < 0 { return 0; }
@@ -428,7 +431,7 @@ fn rxq_poll(mmio: i32) -> u32 {
     let mut count = 0u32;
     let mut si = sw_idx;
 
-    while si != hw_idx {
+    while si != hw_idx && count < 8 {
         let buf_off = (si as u32) * (RX_BUF_SIZE as u32);
 
         // Read AX RX descriptor dword0
@@ -439,17 +442,18 @@ fn rxq_poll(mmio: i32) -> u32 {
         let drv_info = ((rxd0 & AX_RXD_DRV_INFO_SIZE_MASK) >> 28) * 8;
         let rxd_len = if rxd0 & AX_RXD_LONG_RXD != 0 { 32u32 } else { 16u32 };
 
+        // Track packet types
+        let ti = (pkt_type & 0xF) as usize;
+        unsafe { RX_BY_TYPE[ti] += 1; }
+
         // Payload offset = RX descriptor + shift + driver info
         let payload_off = buf_off + rxd_len + shift + drv_info;
 
         if pkt_type == RX_TYPE_C2H {
-            // C2H message — parse header at payload offset
             handle_c2h(data_dma, payload_off);
-        } else if pkt_type == RX_TYPE_WIFI && pkt_len > 24 {
-            // 802.11 frame — try to extract SSID from beacons
+        } else if pkt_type == RX_TYPE_WIFI && pkt_len > 36 {
             handle_wifi_frame(data_dma, payload_off, pkt_len);
         }
-        // Silently skip PPDU_STAT, CHAN_INFO, etc.
 
         si = (si + 1) % RXQ_BD_COUNT;
         count += 1;
@@ -457,7 +461,6 @@ fn rxq_poll(mmio: i32) -> u32 {
 
     if count > 0 {
         unsafe { RXQ_SW_IDX = si; }
-        // Advance host read pointer
         host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, if si == 0 { RXQ_BD_COUNT - 1 } else { si - 1 });
     }
 
@@ -526,6 +529,7 @@ fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
     // Only process beacon (type=0/mgmt, subtype=8) or probe response (subtype=5)
     if frame_type != 0 { return; }
     if frame_subtype != 8 && frame_subtype != 5 { return; }
+    unsafe { BEACON_COUNT += 1; }
 
     // Beacon/Probe fixed fields after 802.11 header:
     // Timestamp(8) + Interval(2) + Capability(2) = 12 bytes
@@ -638,16 +642,16 @@ pub fn scan(mmio: i32) {
     host::print("  Starting passive scan...\n");
     fw::h2c_send(mmio, 1, 9, 0x17, &scan_cmd);
 
-    // ── Poll for results ───────────────────────────────────────────
-    host::print("  Listening for results (30s, 'q' to stop)...\n");
+    // ── Poll for results (15 seconds) ────────────────────────────
+    host::print("  Listening (15s)...\n");
     let mut total_rx = 0u32;
-    for tick in 0..300u32 { // 300 × 100ms = 30 seconds
+    // 150 ticks × 100ms = 15 seconds max
+    for tick in 0..150u32 {
         let n = rxq_poll(mmio);
         total_rx += n;
 
-        // Use input_wait as combined sleep + key check
-        let key = host::input_wait(100); // 100ms timeout
-        if key == 0x71 { break; } // 'q'
+        // 100ms sleep (don't use input_wait — key routing may be broken)
+        host::sleep_ms(100);
 
         // Progress every 5 seconds
         if tick > 0 && tick % 50 == 0 {
@@ -655,14 +659,36 @@ pub fn scan(mmio: i32) {
             fw::print_dec((tick / 10) as usize);
             host::print("s] ");
             fw::print_dec(total_rx as usize);
-            host::print(" packets\n");
+            host::print(" pkts\n");
         }
     }
 
+    // ── Diagnostik ─────────────────────────────────────────────────
+    host::print("\n[wifi] Scan results:\n");
+    let types = unsafe { RX_BY_TYPE };
     let wifi_frames = unsafe { WIFI_FRAME_COUNT };
-    host::print("[wifi] Scan done (");
-    fw::print_dec(total_rx as usize);
-    host::print(" RX packets, ");
-    fw::print_dec(wifi_frames as usize);
-    host::print(" WiFi frames)\n");
+    let beacons = unsafe { BEACON_COUNT };
+    host::print("  RX total: "); fw::print_dec(total_rx as usize); host::print("\n");
+    host::print("  By type: ");
+    for i in 0..16u32 {
+        if types[i as usize] > 0 {
+            host::print("t"); fw::print_dec(i as usize);
+            host::print("="); fw::print_dec(types[i as usize] as usize);
+            host::print(" ");
+        }
+    }
+    host::print("\n");
+    host::print("  WiFi frames: "); fw::print_dec(wifi_frames as usize); host::print("\n");
+    host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
+
+    // Dump first RX descriptor for debugging
+    let data_dma = unsafe { RXQ_DATA_DMA };
+    if data_dma >= 0 {
+        host::print("  RXD[0]: ");
+        for i in 0..4u32 {
+            host::print_hex32(host::dma_r32(data_dma, i * 4));
+            host::print(" ");
+        }
+        host::print("\n");
+    }
 }
