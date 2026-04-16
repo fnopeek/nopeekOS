@@ -387,12 +387,16 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_w32(mmio, R_AX_LTR_IDLE_LATENCY, 0x9003_9003);
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
 
+    // Reset RXQ write pointer — firmware may have advanced it during FWDL
+    host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
+    unsafe { RXQ_SW_IDX = 0; }
+
     // Enable ALL TX DMA channels (clear stop bits)
     host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x000F_FF00);
     // Clear WPDMA + PCIEIO stops
     host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20));
 
-    // Verify RXQ state (set in fw.rs, should persist)
+    // Verify RXQ state
     let desa = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
     let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
     host::print("  RXQ: DESA=0x"); host::print_hex32(desa);
