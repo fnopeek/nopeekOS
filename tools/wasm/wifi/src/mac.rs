@@ -389,6 +389,16 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_set32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, 0x7FF); // all TX
     host::mmio_set32(mmio, regs::R_AX_RXBD_RWPTR_CLR, 0x03);   // RXQ + RPQ
 
+    // ── BD RAM reset (critical after ring reconfiguration!) ────────
+    // Without this, hardware uses stale BD state from FWDL dummy rings.
+    host::mmio_set32(mmio, regs::R_AX_PCIE_INIT_CFG1, regs::B_AX_RST_BDRAM);
+    for _ in 0..200 {
+        if host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1) & regs::B_AX_RST_BDRAM == 0 {
+            break;
+        }
+        host::sleep_ms(1);
+    }
+
     // Reset CH12 BD index (our H2C ring)
     unsafe { fw::BD_IDX = 0; }
 
@@ -461,9 +471,23 @@ fn rxq_init(mmio: i32) -> bool {
         RXQ_SW_IDX = 0;
     }
 
-    host::print("  RXQ: ");
-    fw::print_dec(RXQ_BD_COUNT as usize);
-    host::print(" buffers ready\n");
+    // Diagnostic: verify ring setup
+    host::print("  RXQ: ring=0x"); host::print_hex32(bd_phys as u32);
+    host::print(" data=0x"); host::print_hex32(data_phys as u32);
+    host::print(" ("); fw::print_dec(RXQ_BD_COUNT as usize); host::print(" bufs)\n");
+
+    // Verify BD[0] content
+    let bd0_w0 = host::dma_r32(bd_dma, 0);
+    let bd0_w1 = host::dma_r32(bd_dma, 4);
+    host::print("  BD[0]: sz=0x"); host::print_hex32(bd0_w0);
+    host::print(" dma=0x"); host::print_hex32(bd0_w1); host::print("\n");
+
+    // Verify register values after write
+    let reg_desa = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
+    let reg_num = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_NUM);
+    host::print("  REG: DESA=0x"); host::print_hex32(reg_desa);
+    host::print(" NUM="); fw::print_dec(reg_num as usize); host::print("\n");
+
     true
 }
 
@@ -655,12 +679,6 @@ fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
 pub fn scan(mmio: i32) {
     host::print("\n[wifi] Phase 5: WiFi scan\n");
 
-    // Set up RXQ for C2H responses
-    if !rxq_init(mmio) {
-        host::print("[wifi] RXQ init failed — cannot scan\n");
-        return;
-    }
-
     // ── Send channel list ──────────────────────────────────────────
     // H2C: ADD_SCANOFLD_CH (CAT=1, CLASS=9, FUNC=0x16)
     // Header: ch_num(u8), elem_size(u8=7), arg(u8=0), rsvd(u8=0)
@@ -711,6 +729,12 @@ pub fn scan(mmio: i32) {
     fw::h2c_send(mmio, 1, 9, 0x17, &scan_cmd);
 
     // ── Poll for results (15 seconds) ────────────────────────────
+    // Show initial RXQ state
+    let idx0 = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+    host::print("  RXQ IDX=0x"); host::print_hex32(idx0);
+    host::print(" (host="); fw::print_dec((idx0 & 0xFFFF) as usize);
+    host::print(" hw="); fw::print_dec(((idx0 >> 16) & 0xFFFF) as usize);
+    host::print(")\n");
     host::print("  Listening (15s)...\n");
     let mut total_rx = 0u32;
     // 150 ticks × 100ms = 15 seconds max
