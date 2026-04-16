@@ -409,33 +409,36 @@ fn pcie_post_init(mmio: i32) {
     // Linux: rtw89_pci_reset_trx_rings writes DESA/NUM/IDX after reset.
     // BDRAM reset clears the hardware's ring state!
 
-    // CH12 TX ring (H2C) — re-program from saved handles
+    // ── Re-program ALL rings after BDRAM reset ───────────────────
+    // Linux order: write16(NUM) → write32(BDRAM) → write32(DESA_L/H) → write16(IDX)
+
+    // CH12 TX ring (H2C)
     let ring_dma_h = unsafe { fw::RING_DMA };
     if ring_dma_h >= 0 {
         let ring_phys = host::dma_phys(ring_dma_h);
+        host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_NUM, 16);
+        host::mmio_w32(mmio, regs::R_AX_CH12_BDRAM_CTRL, 0x0001041C);
         host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
         host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
-        host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_NUM, 16); // CH12_BD_COUNT
-        host::mmio_w32(mmio, regs::R_AX_CH12_BDRAM_CTRL, 0x0001041C);
     }
     unsafe { fw::BD_IDX = 0; }
 
-    // RXQ ring — program from rxq_init allocation
+    // RXQ ring
     let rxq_dma = unsafe { RXQ_BD_DMA };
     if rxq_dma >= 0 {
         let base_phys = host::dma_phys(rxq_dma);
+        host::mmio_w16(mmio, regs::R_AX_RXQ_RXBD_NUM, RXQ_BD_COUNT);
         host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_L, base_phys as u32);
         host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_H, (base_phys >> 32) as u32);
-        host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_NUM, RXQ_BD_COUNT as u32);
         host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
     }
     unsafe { RXQ_SW_IDX = 0; }
 
-    // Verify registers after write
+    // Verify
     let desa_rb = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
-    let num_rb = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_NUM);
-    host::print("  REG: DESA=0x"); host::print_hex32(desa_rb);
-    host::print(" NUM="); fw::print_dec((num_rb & 0xFFFF) as usize);
+    let idx_rb = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+    host::print("  RXQ: DESA=0x"); host::print_hex32(desa_rb);
+    host::print(" IDX=0x"); host::print_hex32(idx_rb);
     host::print("\n");
 
     // ── LTR setup ──────────────────────────────────────────────────
