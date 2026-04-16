@@ -87,7 +87,7 @@ const R_AX_LTR_IDLE_LATENCY: u32  = 0x8418;
 const R_AX_LTR_ACTIVE_LATENCY: u32 = 0x841C;
 
 // RXQ index register
-const R_AX_RXQ_RXBD_IDX: u32      = 0x1070;
+const R_AX_RXQ_RXBD_IDX: u32      = 0x1050;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Main entry
