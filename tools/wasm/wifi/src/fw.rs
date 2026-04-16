@@ -315,7 +315,7 @@ static mut XTAL_SI_OK: u32 = 0;
 static mut XTAL_SI_FAIL: u32 = 0;
 
 /// Write to an XTAL SI register via the indirect interface at 0x0270.
-fn write_xtal_si(mmio: i32, offset: u8, val: u8, mask: u8) -> bool {
+pub fn write_xtal_si(mmio: i32, offset: u8, val: u8, mask: u8) -> bool {
     let cmd: u32 = (1u32 << 31)
         | ((mask as u32) << 16)
         | ((val as u32) << 8)
