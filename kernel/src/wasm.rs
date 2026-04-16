@@ -809,13 +809,16 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let page_count = pages as usize;
             for i in 0..page_count {
                 let addr = bar_base + (i * 4096) as u64;
-                // SAFETY: identity-mapped MMIO region for bound PCI device BAR
-                let _ = crate::paging::map_page(
+                // SAFETY: identity-mapped MMIO region for bound PCI device BAR.
+                // map_page splits huge pages to set NO_CACHE for MMIO access.
+                if let Err(e) = crate::paging::map_page(
                     addr, addr,
                     crate::paging::PageFlags::PRESENT
                         | crate::paging::PageFlags::WRITABLE
                         | crate::paging::PageFlags::NO_CACHE,
-                );
+                ) {
+                    kprintln!("[npk] WASM MMIO map {:#x}: {}", addr, e);
+                }
             }
             let handle = hw.mmio_maps.len();
             hw.mmio_maps.push((bar_base, page_count));

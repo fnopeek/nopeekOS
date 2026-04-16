@@ -81,6 +81,69 @@ fn flush_tlb(vaddr: u64) {
     unsafe { core::arch::asm!("invlpg [{}]", in(reg) vaddr); }
 }
 
+/// Full TLB flush by reloading CR3. Required after splitting huge pages
+/// because invlpg on a single address doesn't cover the entire old huge page.
+fn flush_tlb_all() {
+    // SAFETY: Reloading CR3 with same value flushes all non-global TLB entries
+    unsafe {
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3);
+        core::arch::asm!("mov cr3, {}", in(reg) cr3);
+    }
+}
+
+/// Split a 1GB huge page (PDPT entry) into 512 × 2MB huge pages (PDT).
+/// Preserves the original identity mapping with the same base flags.
+/// Returns the physical address of the new PDT.
+/// SAFETY: pdpt must be valid, index must point to a 1GB huge page entry.
+unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> {
+    let entry = read_entry(pdpt, index);
+    let huge_base = entry_addr(entry); // 1GB-aligned physical base
+    // Preserve original flags (Present, Writable, etc.) but keep HUGE for 2MB entries
+    let base_flags = (entry & 0xFF) | PageFlags::HUGE.bits(); // keep bits [7:0], ensure HUGE
+
+    let pdt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
+    zero_frame(pdt);
+
+    // Fill 512 entries: each maps 2MB, all with HUGE bit
+    for i in 0..ENTRY_COUNT {
+        let phys = huge_base + (i as u64) * (2 * 1024 * 1024);
+        write_entry(pdt, i, phys | base_flags);
+    }
+
+    // Replace PDPT entry: point to PDT, remove HUGE bit
+    let new_entry = pdt | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits();
+    write_entry(pdpt, index, new_entry);
+
+    Ok(pdt)
+}
+
+/// Split a 2MB huge page (PDT entry) into 512 × 4KB pages (PT).
+/// Preserves the original identity mapping with the same base flags.
+/// Returns the physical address of the new PT.
+/// SAFETY: pdt must be valid, index must point to a 2MB huge page entry.
+unsafe fn split_2mb_to_4kb(pdt: u64, index: usize) -> Result<u64, PagingError> {
+    let entry = read_entry(pdt, index);
+    let huge_base = entry_addr(entry); // 2MB-aligned physical base
+    // Preserve flags but remove HUGE (bit 7 is PAT at PT level, not HUGE)
+    let base_flags = entry & 0x67; // Present, Writable, User, Accessed, Dirty — no HUGE
+
+    let pt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
+    zero_frame(pt);
+
+    // Fill 512 entries: each maps 4KB
+    for i in 0..ENTRY_COUNT {
+        let phys = huge_base + (i as u64) * 4096;
+        write_entry(pt, i, phys | base_flags);
+    }
+
+    // Replace PDT entry: point to PT, remove HUGE bit
+    let new_entry = pt | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits();
+    write_entry(pdt, index, new_entry);
+
+    Ok(pt)
+}
+
 // === Table access (identity-mapped) ===
 
 /// Read a page table entry. SAFETY: table_phys must be in identity-mapped range.
@@ -163,7 +226,9 @@ pub fn init() {
     }
 }
 
-/// Map a 4KB virtual page to a physical frame
+/// Map a 4KB virtual page to a physical frame.
+/// Automatically splits 1GB and 2MB huge pages when a different mapping
+/// (e.g. NO_CACHE for MMIO) is needed at 4KB granularity.
 pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingError> {
     if vaddr & 0xFFF != 0 || paddr & 0xFFF != 0 {
         return Err(PagingError::NotAligned);
@@ -171,28 +236,38 @@ pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingEr
 
     let pml4 = PML4_PHYS.load(Ordering::Relaxed);
 
-    // SAFETY: All table accesses are within identity-mapped first 1GB
+    // SAFETY: All table accesses are within identity-mapped range
     unsafe {
         let pdpt = get_or_create(pml4, pml4_index(vaddr))?;
         let pdpt_entry = read_entry(pdpt, pdpt_index(vaddr));
 
-        // 1GB huge page already covers this address — already mapped
+        // 1GB huge page covers this address — split into 512 × 2MB pages
         if pdpt_entry & PageFlags::PRESENT.bits() != 0 && pdpt_entry & PageFlags::HUGE.bits() != 0 {
-            return Err(PagingError::AlreadyMapped);
+            split_1gb_to_2mb(pdpt, pdpt_index(vaddr))?;
+            flush_tlb_all(); // full TLB flush after huge page split
         }
 
         let pdt = get_or_create(pdpt, pdpt_index(vaddr))?;
         let pdt_entry = read_entry(pdt, pdt_index(vaddr));
 
-        // Check for 2MB huge page
+        // 2MB huge page covers this address — split into 512 × 4KB pages
         if pdt_entry & PageFlags::PRESENT.bits() != 0 && pdt_entry & PageFlags::HUGE.bits() != 0 {
-            return Err(PagingError::HugePageConflict);
+            split_2mb_to_4kb(pdt, pdt_index(vaddr))?;
+            flush_tlb_all(); // full TLB flush after huge page split
         }
 
         let pt = get_or_create(pdt, pdt_index(vaddr))?;
         let pt_entry = read_entry(pt, pt_index(vaddr));
 
         if pt_entry & PageFlags::PRESENT.bits() != 0 {
+            // Page already mapped at 4KB level — update flags if different
+            let old_paddr = entry_addr(pt_entry);
+            if old_paddr == paddr {
+                // Same physical address — just update flags (e.g. add NO_CACHE)
+                write_entry(pt, pt_index(vaddr), paddr | flags.bits());
+                flush_tlb(vaddr);
+                return Ok(());
+            }
             return Err(PagingError::AlreadyMapped);
         }
 
