@@ -9,6 +9,7 @@ mod host;
 mod regs;
 mod fw;
 mod mac;
+mod phy;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -43,7 +44,8 @@ pub extern "C" fn _start() {
     // ── Step 3: Map BAR2 (MMIO registers) ─────────────────────────
     // RTL8852BE: BAR0=I/O, BAR2=MMIO (Linux rtw89: bar_id=2).
     // Kernel auto-assigns address + configures bridge if BAR is empty.
-    let mmio = host::mmio_map_bar(2, 16);
+    // Map 256KB (64 pages) — PHY registers go beyond 0x10000
+    let mmio = host::mmio_map_bar(2, 64);
     if mmio < 0 {
         host::print("[wifi] MMIO map BAR2 failed\n");
         host::print("[wifi] Press 'q' to exit\n");
