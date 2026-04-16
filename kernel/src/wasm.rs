@@ -53,8 +53,7 @@ static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 const DEFAULT_FUEL: u64 = 10_000_000;
 
 /// Fuel budget for interactive apps and drivers — effectively unlimited.
-/// WiFi driver needs ~2B for FWDL + MAC init + scan loop.
-const INTERACTIVE_FUEL: u64 = 10_000_000_000;
+const INTERACTIVE_FUEL: u64 = u64::MAX / 2;
 
 // ── Worker-Core WASM Jobs ──────────────────────────────────────
 
