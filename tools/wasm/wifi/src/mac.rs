@@ -484,8 +484,8 @@ fn rxq_init(mmio: i32) -> bool {
     host::print(" ("); fw::print_dec(RXQ_BD_COUNT as usize); host::print(" bufs)\n");
 
     // Verify BD[0] content
-    let bd0_w0 = host::dma_r32(bd_dma, 0);
-    let bd0_w1 = host::dma_r32(bd_dma, 4);
+    let bd0_w0 = host::dma_r32(dma, 0);
+    let bd0_w1 = host::dma_r32(dma, 4);
     host::print("  BD[0]: sz=0x"); host::print_hex32(bd0_w0);
     host::print(" dma=0x"); host::print_hex32(bd0_w1); host::print("\n");
 
