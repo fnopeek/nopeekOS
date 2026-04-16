@@ -231,7 +231,7 @@ fn dle_init(mmio: i32) -> bool {
 fn hfc_init(mmio: i32) {
     // Disable HFC before config
     let mut fc = host::mmio_r32(mmio, R_AX_HCI_FC_CTRL);
-    fc &= !0x3; // clear FC_EN + CH12_EN
+    fc &= !((1 << 0) | (1 << 3)); // clear FC_EN + CH12_EN
     host::mmio_w32(mmio, R_AX_HCI_FC_CTRL, fc);
 
     // Per-channel config: R_AX_ACH0_PAGE_CTRL + ch*4
@@ -262,7 +262,7 @@ fn hfc_init(mmio: i32) {
 
     // Enable HFC + H2C
     fc = host::mmio_r32(mmio, R_AX_HCI_FC_CTRL);
-    fc |= 0x3; // FC_EN + CH12_EN
+    fc |= (1 << 0) | (1 << 3); // FC_EN (bit 0) + CH12_EN (bit 3)
     host::mmio_w32(mmio, R_AX_HCI_FC_CTRL, fc);
 
     host::print("  HFC: OK\n");
@@ -387,8 +387,10 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_w32(mmio, R_AX_LTR_IDLE_LATENCY, 0x9003_9003);
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
 
-    // Reset RXQ write pointer — firmware may have advanced it during FWDL
-    host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
+    // Reset RXQ write pointer — direct 32-bit write!
+    // NEVER use mmio_w16 for ring IDX registers — RMW would clobber HW_IDX.
+    // Hardware ignores upper 16 bits (HW_IDX) on host writes.
+    host::mmio_w32(mmio, R_AX_RXQ_RXBD_IDX, (RXQ_BD_COUNT - 1) as u32);
     unsafe { RXQ_SW_IDX = 0; }
 
     // Enable ALL TX DMA channels (clear stop bits)
@@ -475,7 +477,9 @@ fn rxq_poll(mmio: i32) -> u32 {
 
     if count > 0 {
         unsafe { RXQ_SW_IDX = si; }
-        host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, if si == 0 { RXQ_BD_COUNT - 1 } else { si - 1 });
+        // Direct 32-bit write — NEVER RMW on split IDX registers!
+        let wp = if si == 0 { RXQ_BD_COUNT - 1 } else { si - 1 };
+        host::mmio_w32(mmio, R_AX_RXQ_RXBD_IDX, wp as u32);
     }
 
     count
