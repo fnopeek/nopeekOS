@@ -128,14 +128,17 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_w32_mask(mmio, 0x9414, 0xFF << 16, 255); // TO=255
     host::print("  RPR: POH mode\n");
 
-    // ── 7. Set up RXQ ring BEFORE enabling DMA ─────────────────────
+    // ── 7. PHY init — load BB, RF, NCTL register tables ─────────
+    // MUST happen BEFORE DMA restart! Otherwise firmware floods RXQ
+    // during the ~3 seconds of PHY register writes.
+    crate::phy::init(mmio);
+
+    // ── 8. Set up RXQ ring ─────────────────────────────────────────
     if !rxq_init(mmio) { return false; }
 
-    // ── 8. PCIe post-init (stop DMA, reconfigure, restart) ─────────
+    // ── 9. PCIe post-init (stop DMA, reconfigure, restart) ─────────
+    // DMA starts AFTER PHY is configured — radio is ready to receive.
     pcie_post_init(mmio);
-
-    // ── 9. PHY init — load BB, RF, NCTL register tables ───────────
-    crate::phy::init(mmio);
 
     host::print("[wifi] MAC + PHY init complete\n");
     true
@@ -475,9 +478,11 @@ fn rxq_init(mmio: i32) -> bool {
     }
 
     // Diagnostic: verify ring setup
-    host::print("  RXQ: ring=0x"); host::print_hex32(bd_phys as u32);
+    host::print("  RXQ: bd_h="); fw::print_dec(bd_dma as usize);
+    host::print(" data_h="); fw::print_dec(data_dma as usize);
+    host::print(" ring=0x"); host::print_hex32(bd_phys as u32);
     host::print(" data=0x"); host::print_hex32(data_phys as u32);
-    host::print(" ("); fw::print_dec(RXQ_BD_COUNT as usize); host::print(" bufs)\n");
+    host::print("\n");
 
     // Verify BD[0] content
     let bd0_w0 = host::dma_r32(bd_dma, 0);
