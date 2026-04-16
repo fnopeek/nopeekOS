@@ -134,9 +134,10 @@ const CH12_BD_COUNT: u16 = 16;
 /// BD ring state — tracks the current write index across multiple sends
 pub static mut BD_IDX: u16 = 0;
 
-/// DMA handles for CH12 ring (set during FWDL, reused for H2C after init)
+/// DMA handles (set during FWDL pre-init, reused after init)
 pub static mut RING_DMA: i32 = -1;
 pub static mut DATA_DMA: i32 = -1;
+pub static mut RXQ_DMA: i32 = -1; // RXQ: page 0=BD ring, pages 1-32=data
 
 // ═══════════════════════════════════════════════════════════════════
 //  Main entry point
@@ -842,13 +843,37 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT as u32);
 
-    // RX rings: RXQ + RPQ (valid addresses required, even if unused for FWDL)
-    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_L, dummy_phys);
-    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_H, 0);
-    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_NUM, 1);
+    // ── RXQ: allocate REAL ring (not dummy!) ───────────────────────
+    // Linux allocates rings during probe, BEFORE BDRAM reset.
+    // 33 pages: page 0 = BD ring, pages 1-32 = data buffers
+    let rxq_dma = host::dma_alloc(33);
+    if rxq_dma < 0 { return None; }
+    let rxq_phys = host::dma_phys(rxq_dma);
+    let rxq_data_phys = rxq_phys + 4096;
+
+    // Pre-fill 32 RX BDs pointing to data buffers
+    for i in 0u32..32 {
+        let buf_phys = rxq_data_phys + (i as u64) * 4096;
+        host::dma_w32(rxq_dma, i * 8, 4096);          // buf_size=4096, opt=0
+        host::dma_w32(rxq_dma, i * 8 + 4, buf_phys as u32); // DMA addr
+    }
+    host::fence();
+
+    // Program RXQ registers (Linux: write16 for NUM, write32 for DESA)
+    host::mmio_w16(mmio, regs::R_AX_RXQ_RXBD_NUM, 32);
+    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_L, rxq_phys as u32);
+    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_H, (rxq_phys >> 32) as u32);
+
+    // RPQ: dummy (1 entry)
+    host::mmio_w16(mmio, regs::R_AX_RPQ_RXBD_NUM, 1);
     host::mmio_w32(mmio, regs::R_AX_RPQ_RXBD_DESA_L, dummy_phys);
     host::mmio_w32(mmio, regs::R_AX_RPQ_RXBD_DESA_H, 0);
-    host::mmio_w32(mmio, regs::R_AX_RPQ_RXBD_NUM, 1);
+
+    // Save RXQ handle for mac.rs scan polling
+    unsafe { RXQ_DMA = rxq_dma; }
+
+    host::print("  RXQ: 0x"); host::print_hex32(rxq_phys as u32);
+    host::print(" (32 bufs)\n");
 
     // Reset BD_IDX for CH12
     unsafe { BD_IDX = 0; }
@@ -861,6 +886,9 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
         }
         host::sleep_ms(1);
     }
+
+    // Set RXQ write pointer AFTER BDRAM reset (Linux: rx_ring_eq_is_full → wp=len-1)
+    host::mmio_w16(mmio, 0x1050, 31); // R_AX_RXQ_RXBD_IDX = 31 (32 buffers available)
 
     // ── 5i. Stop all TX channels ────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x00070F00); // TX_STOP1_MASK_V1
