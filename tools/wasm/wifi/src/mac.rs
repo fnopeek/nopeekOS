@@ -441,29 +441,30 @@ static mut RXQ_DATA_DMA: i32 = -1;
 static mut RXQ_SW_IDX: u16 = 0;
 
 fn rxq_init(mmio: i32) -> bool {
-    // Allocate BD ring (1 page = 512 BDs max)
-    let bd_dma = host::dma_alloc(1);
-    if bd_dma < 0 { host::print("  RXQ: BD alloc failed\n"); return false; }
+    // Single allocation for BD ring + data buffers to avoid kernel
+    // contiguous allocator bug (returns same phys addr for separate allocs).
+    // Layout: [BD ring: 1 page][Data buffers: RXQ_BD_COUNT pages]
+    let total_pages = 1 + RXQ_BD_COUNT;
+    let dma = host::dma_alloc(total_pages);
+    if dma < 0 { host::print("  RXQ: alloc failed\n"); return false; }
+    let base_phys = host::dma_phys(dma);
 
-    // Allocate RX data buffers (32 pages = 32 × 4KB buffers)
-    let data_dma = host::dma_alloc(RXQ_BD_COUNT as u16);
-    if data_dma < 0 { host::print("  RXQ: data alloc failed\n"); return false; }
-    let data_phys = host::dma_phys(data_dma);
+    let bd_phys = base_phys;                    // page 0 = BD ring
+    let data_phys = base_phys + 4096;           // pages 1..33 = data buffers
+    let data_off_in_dma = 4096u32;              // offset within DMA handle
 
-    // Pre-fill BDs: each BD points to a 4KB buffer
+    // Pre-fill BDs: each BD points to a 4KB buffer in the data region
     for i in 0..RXQ_BD_COUNT {
         let bd_off = (i as u32) * 8;
         let buf_phys = data_phys + (i as u64) * (RX_BUF_SIZE as u64);
-        // RX BD: buf_size[15:0] | opt[31:16] | dma_addr[63:32]
-        let word0 = RX_BUF_SIZE as u32; // buf_size, opt=0 (DMA addr < 4GB)
+        let word0 = RX_BUF_SIZE as u32; // buf_size, opt=0
         let word1 = buf_phys as u32;     // lower 32 bits
-        host::dma_w32(bd_dma, bd_off, word0);
-        host::dma_w32(bd_dma, bd_off + 4, word1);
+        host::dma_w32(dma, bd_off, word0);
+        host::dma_w32(dma, bd_off + 4, word1);
     }
     host::fence();
 
     // Configure RXQ ring registers
-    let bd_phys = host::dma_phys(bd_dma);
     host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_L, bd_phys as u32);
     host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_H, (bd_phys >> 32) as u32);
     host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_NUM, RXQ_BD_COUNT as u32);
@@ -472,17 +473,15 @@ fn rxq_init(mmio: i32) -> bool {
     host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
 
     unsafe {
-        RXQ_BD_DMA = bd_dma;
-        RXQ_DATA_DMA = data_dma;
+        RXQ_BD_DMA = dma;
+        RXQ_DATA_DMA = dma; // same handle, data at offset 4096
         RXQ_SW_IDX = 0;
     }
 
     // Diagnostic: verify ring setup
-    host::print("  RXQ: bd_h="); fw::print_dec(bd_dma as usize);
-    host::print(" data_h="); fw::print_dec(data_dma as usize);
-    host::print(" ring=0x"); host::print_hex32(bd_phys as u32);
+    host::print("  RXQ: ring=0x"); host::print_hex32(bd_phys as u32);
     host::print(" data=0x"); host::print_hex32(data_phys as u32);
-    host::print("\n");
+    host::print(" ("); fw::print_dec(RXQ_BD_COUNT as usize); host::print(" bufs)\n");
 
     // Verify BD[0] content
     let bd0_w0 = host::dma_r32(bd_dma, 0);
@@ -527,11 +526,10 @@ fn rxq_poll(mmio: i32) -> u32 {
     let mut si = sw_idx;
 
     while si != hw_idx && count < 8 {
-        let buf_off = (si as u32) * (RX_BUF_SIZE as u32);
+        // Data buffers start at page 1 (offset 4096) in the unified DMA allocation
+        let buf_off = 4096 + (si as u32) * (RX_BUF_SIZE as u32);
 
         // Skip 4-byte rxbd_info (FS/LS/TAG) before the RX descriptor.
-        // Linux: rtw89_pci_rxbd_deliver_ax reads rxbd_info first, then
-        // calls rtw89_core_query_rxdesc at skb->data + sizeof(rxbd_info).
         let rxd_off = buf_off + 4;
 
         // Read AX RX descriptor dword0
@@ -781,12 +779,12 @@ pub fn scan(mmio: i32) {
     host::print("  WiFi frames: "); fw::print_dec(wifi_frames as usize); host::print("\n");
     host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
 
-    // Dump first buffer: rxbd_info + RXD for debugging
+    // Dump first buffer: rxbd_info + RXD for debugging (data at offset 4096)
     let data_dma = unsafe { RXQ_DATA_DMA };
     if data_dma >= 0 {
         host::print("  BUF[0]: ");
-        for i in 0..6u32 { // rxbd_info(1dw) + rxd(4dw) + payload start
-            host::print_hex32(host::dma_r32(data_dma, i * 4));
+        for i in 0..6u32 {
+            host::print_hex32(host::dma_r32(data_dma, 4096 + i * 4));
             host::print(" ");
         }
         host::print("\n");
