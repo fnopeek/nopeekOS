@@ -21,7 +21,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.67 — MACID 0 init\n");
+    host::print("[wifi] RTL8852BE driver v0.68 — BAR2 sizing in driver\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -37,18 +37,34 @@ pub extern "C" fn _start() {
     }
     host::print("[wifi] PCI bind OK\n");
 
-    // ── Step 2: Enable bus master + memory space ──────────────────
+    // ── Step 2: Size BAR2 before enabling memory ─────────────────
+    // Linux trusts the kernel (pci_resource_len). We don't have that luxury,
+    // so size it ourselves via the 0xFFFFFFFF-write trick. Memory bit must
+    // be off during sizing to avoid stray accesses with garbage BAR.
+    let cmd = host::pci_read_config(0x04);
+    host::pci_write_config(0x04, cmd & !0x02);
+    let saved_bar2 = host::pci_read_config(0x18);
+    host::pci_write_config(0x18, 0xFFFF_FFFF);
+    let bar2_probe = host::pci_read_config(0x18);
+    host::pci_write_config(0x18, saved_bar2);
+    host::pci_write_config(0x04, cmd);
+    let bar2_size = (!(bar2_probe & 0xFFFF_FFF0)).wrapping_add(1);
+    let bar2_pages = (bar2_size / 4096) as u16;
+    host::print("[wifi] BAR2 size: 0x"); host::print_hex32(bar2_size);
+    host::print(" ("); fw::print_dec(bar2_pages as usize); host::print(" pages)\n");
+
+    // ── Step 3: Enable bus master + memory space ──────────────────
     // NO FLR! FLR resets the Digital Die but NOT the Analog Die,
     // desynchronizing the XTAL SI interface between them.
     // Instead we use soft MAC reset (pwr_off → pwr_on) in fw::download().
     host::pci_enable_bus_master();
 
-    // ── Step 3: Map BAR2 (MMIO registers) ─────────────────────────
+    // ── Step 4: Map BAR2 (MMIO registers) ─────────────────────────
     // RTL8852BE: BAR0=I/O, BAR2=MMIO (Linux rtw89: bar_id=2).
-    // Kernel auto-assigns address + configures bridge if BAR is empty.
-    // Map 512KB (128 pages) — R_AX_INDIR_ACCESS_ENTRY lives at 0x40000
-    // and is required for dmac_tbl_init / cmac_tbl_init (mac.c:4291/4306).
-    let mmio = host::mmio_map_bar(2, 128);
+    // Map the actual BAR size — R_AX_INDIR_ACCESS_ENTRY at 0x40000 needs
+    // at least 128 pages for dmac_tbl_init / cmac_tbl_init (mac.c:4291).
+    let requested = if bar2_pages >= 128 { 128 } else { bar2_pages };
+    let mmio = host::mmio_map_bar(2, requested);
     if mmio < 0 {
         host::print("[wifi] MMIO map BAR2 failed\n");
         host::print("[wifi] Press 'q' to exit\n");
