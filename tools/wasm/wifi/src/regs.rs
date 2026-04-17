@@ -79,12 +79,13 @@ pub const R_AX_CH12_BDRAM_CTRL: u32   = 0x1228;
 pub const R_AX_CH12_TXBD_DESA_L: u32  = 0x1160;
 pub const R_AX_CH12_TXBD_DESA_H: u32  = 0x1164;
 
-// RX BD ring addresses
+// RX BD ring addresses (Linux rtw89 reg.h + rtw89_pci_ch_dma_addr_set)
 pub const R_AX_RXQ_RXBD_NUM: u32      = 0x1020;
+pub const R_AX_RPQ_RXBD_NUM: u32      = 0x1022;
+pub const R_AX_RXQ_RXBD_IDX: u32      = 0x1050;
+pub const R_AX_RPQ_RXBD_IDX: u32      = 0x1054;
 pub const R_AX_RXQ_RXBD_DESA_L: u32   = 0x1100;
 pub const R_AX_RXQ_RXBD_DESA_H: u32   = 0x1104;
-
-pub const R_AX_RPQ_RXBD_NUM: u32      = 0x1022;
 pub const R_AX_RPQ_RXBD_DESA_L: u32   = 0x1108;
 pub const R_AX_RPQ_RXBD_DESA_H: u32   = 0x110C;
 

@@ -863,6 +863,43 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_mmio_read16(handle, offset) -> u16 as i32
+    linker.func_wrap("env", "npk_mmio_read16",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.mmio_maps.len() { return -1; }
+            let (base, pages) = hw.mmio_maps[h];
+            let off = offset as usize;
+            if off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
+            // SAFETY: validated MMIO region within mapped BAR, 2-byte aligned
+            unsafe { core::ptr::read_volatile((base + off as u64) as *const u16) as i32 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_mmio_write16(handle, offset, value) -> 0 or -1
+    // True 16-bit MMIO write — required for split registers like RX/TX BD IDX
+    // (HOST_IDX[15:0] + HW_IDX[31:16]). A 32-bit RMW would clobber HW_IDX.
+    linker.func_wrap("env", "npk_mmio_write16",
+        |caller: Caller<'_, HostState>, handle: i32, offset: i32, value: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() {
+                Some(h) => h,
+                None => return -1,
+            };
+            let h = handle as usize;
+            if h >= hw.mmio_maps.len() { return -1; }
+            let (base, pages) = hw.mmio_maps[h];
+            let off = offset as usize;
+            if off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
+            // SAFETY: validated MMIO region within mapped BAR, 2-byte aligned
+            unsafe { core::ptr::write_volatile((base + off as u64) as *mut u16, value as u16) }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_mmio_read64(handle, offset) -> i64
     linker.func_wrap("env", "npk_mmio_read64",
         |caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i64 {

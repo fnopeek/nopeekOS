@@ -86,8 +86,8 @@ const R_AX_LTR_CTRL_1: u32        = 0x8414;
 const R_AX_LTR_IDLE_LATENCY: u32  = 0x8418;
 const R_AX_LTR_ACTIVE_LATENCY: u32 = 0x841C;
 
-// RXQ index register
-const R_AX_RXQ_RXBD_IDX: u32      = 0x1050;
+// RXQ index register — now defined in regs.rs
+use crate::regs::R_AX_RXQ_RXBD_IDX;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Main entry
@@ -387,8 +387,8 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_w32(mmio, R_AX_LTR_IDLE_LATENCY, 0x9003_9003);
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
 
-    // Reset RXQ write pointer
-    host::mmio_w16(mmio, R_AX_RXQ_RXBD_IDX, RXQ_BD_COUNT - 1);
+    // Ring addresses + wp were set in fw.rs pre_init and persist across FWDL.
+    // Linux mac_post_init_ax does NOT touch RXBD_IDX — don't fight the firmware.
     unsafe { RXQ_SW_IDX = 0; }
 
     // Enable ALL TX DMA channels (clear stop bits)
