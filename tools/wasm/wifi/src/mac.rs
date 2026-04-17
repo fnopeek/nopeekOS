@@ -96,11 +96,14 @@ use crate::regs::R_AX_RXQ_RXBD_IDX;
 pub fn init(mmio: i32) -> bool {
     host::print("\n[wifi] Phase 4: MAC init\n");
 
+    dbg_checkpoint(mmio, "start");
+
     // ── 0. Enable BB/RF — MUST come before MAC init! ──────────────
     // Linux: rtw8852bx_mac_enable_bb_rf() — full 5-step sequence.
     // Without this, the radio hardware is off and firmware can't scan.
     enable_bb_rf(mmio);
     host::print("  BB/RF: enabled\n");
+    dbg_checkpoint(mmio, "after BB/RF");
 
     // ── 1. DLE re-init with SCC quotas ─────────────────────────────
     if !dle_init(mmio) { return false; }
@@ -112,9 +115,11 @@ pub fn init(mmio: i32) -> bool {
     sta_sch_init(mmio);
     mpdu_proc_init(mmio);
     sec_eng_init(mmio);
+    dbg_checkpoint(mmio, "after DMAC");
 
     // ── 4. CMAC init ───────────────────────────────────────────────
     cmac_init(mmio);
+    dbg_checkpoint(mmio, "after CMAC");
 
     // ── 5. Enable IMRs (simplified) ────────────────────────────────
     host::mmio_w32(mmio, 0x8520, 0xFFFFFFFF); // DMAC_ERR_IMR
@@ -128,8 +133,11 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_w32_mask(mmio, 0x9414, 0xFF << 16, 255); // TO=255
     host::print("  RPR: POH mode\n");
 
+    dbg_checkpoint(mmio, "before PHY");
+
     // ── 7. PHY init — load BB, RF, NCTL register tables ─────────
     crate::phy::init(mmio);
+    dbg_checkpoint(mmio, "after PHY");
 
     // ── 8. PCIe post-init — just enable DMA channels ──────────────
     // NO BDRAM reset! Ring addresses were configured in fw.rs pre_init
@@ -138,6 +146,20 @@ pub fn init(mmio: i32) -> bool {
 
     host::print("[wifi] MAC + PHY init complete\n");
     true
+}
+
+/// Debug helper: dump a few registers to find where the 0x1000 range dies.
+/// CFG1 (0x1000) vs HCI_OPT_CTRL (0x0074) vs SYS_CFG1 (0x00F0):
+/// if CFG1=0xFFFFFFFF but the others are sane, only PCIe DMA block is gated.
+fn dbg_checkpoint(mmio: i32, tag: &str) {
+    let cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    let opt  = host::mmio_r32(mmio, 0x0074);
+    let sys  = host::mmio_r32(mmio, regs::R_AX_SYS_CFG1);
+    host::print("  [dbg "); host::print(tag);
+    host::print("] CFG1=0x"); host::print_hex32(cfg1);
+    host::print(" OPT=0x"); host::print_hex32(opt);
+    host::print(" SYS=0x"); host::print_hex32(sys);
+    host::print("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════
