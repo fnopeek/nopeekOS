@@ -1,31 +1,31 @@
-//! PHY initialization — BB, RF, and NCTL register tables.
-//! 1:1 port of Linux rtw89 rtw89_phy_init_reg + rtw89_phy_sel_headline.
+//! PHY initialization — strict 1:1 port of Linux rtw89_phy_init_bb_reg +
+//! rtw89_phy_init_rf_reg + rtw89_phy_init_rf_nctl.
 //!
-//! Table format (extracted from rtw8852b_table.c):
-//!   [count:u32][addr:u32, data:u32] × count, little-endian.
+//! Structure:
+//!   1. BB table (MMIO writes via config_bb_reg)
+//!   2. bb_reset
+//!   3. BB gain table — NOT MMIO. Linux parses each entry's "addr" as a
+//!      struct (type/path/gain_band/cfg_type) and stores values in RAM
+//!      for later per-channel RSSI calibration. Writing them as MMIO
+//!      clobbers SYS_ISO_CTRL / SYS_PW_CTRL (addrs 0x000..0x002 overlap
+//!      PCIe power regs) and kills the chip. We skip the table for now.
+//!   4. RF table per path (path A: base 0xE000; path B: base 0xF000)
+//!      Each entry routed via rtw89_phy_write_rf_v1:
+//!         - bit 16 of addr set (ad_sel=1) → direct MMIO at base+((addr&0xff)<<2)
+//!         - else                         → SWSI at R_SWSI_DATA_V1 (0x0370)
+//!   5. preinit_rf_nctl_ax (mandatory before NCTL, polls 0x8080 == 0x4)
+//!   6. NCTL table (MMIO writes, addrs 0x8000+)
 //!
-//! Each addr is encoded:
-//!   [31:28] = cond opcode
-//!               0x4 = PHY_COND_CHECK
-//!               0x8 = PHY_COND_BRANCH_IF
-//!               0x9 = PHY_COND_BRANCH_ELIF
-//!               0xa = PHY_COND_BRANCH_ELSE
-//!               0xb = PHY_COND_BRANCH_END
-//!               0xf = PHY_HEADLINE_VALID (at top of table)
-//!               other = normal register write
-//!   [27:0]  = target (MMIO addr for writes; (rfe<<16)|pkg<<8|cv for predicates)
-//!
-//! Linux picks cfg_target via sel_headline in 4 fallback cases based on
-//! (rfe_type, cv) from EFUSE + hal. We don't have EFUSE yet, so rfe is
-//! a constant — the fallback cases still select a sane default headline.
-//! If sel_headline fails entirely (no case matches), we skip the whole
-//! table (same as Linux), leaving the chip untouched.
+//! Conditional state machine (PHY_COND_BRANCH_IF/ELIF/ELSE/END/CHECK) is
+//! implemented per Linux rtw89_phy_init_reg. Our flat .bin tables trigger
+//! the parser with headline_size=0 (no headers), so only the unconditional
+//! pre-IF entries exist — functional for basic init.
 
 use crate::host;
 use crate::fw;
 
 static BB_TABLE: &[u8]      = include_bytes!("rtw8852b_bb.bin");
-static BB_GAIN_TABLE: &[u8] = include_bytes!("rtw8852b_bb_gain.bin");
+static _BB_GAIN_TABLE: &[u8] = include_bytes!("rtw8852b_bb_gain.bin");
 static RF_A_TABLE: &[u8]    = include_bytes!("rtw8852b_rf_a.bin");
 static RF_B_TABLE: &[u8]    = include_bytes!("rtw8852b_rf_b.bin");
 static NCTL_TABLE: &[u8]    = include_bytes!("rtw8852b_nctl.bin");
@@ -38,107 +38,142 @@ const PHY_COND_BRANCH_END:  u32 = 0xb;
 const PHY_HEADLINE_VALID:   u32 = 0xf;
 const PHY_COND_DONT_CARE:   u8  = 0xff;
 
-// SWSI register layout (Linux reg.h)
+// SWSI RF indirect write (Linux reg.h)
 const R_SWSI_DATA_V1: u32 = 0x0370;
-// const R_SWSI_BIT_MASK_V1: u32 = 0x0374;  // only needed for masked writes
 
-// 8852B RF base addresses per path (Linux rtw8852b.c)
+// 8852B RF base addresses (Linux rtw8852b.c: .rf_base_addr = {0xe000, 0xf000})
 const RF_BASE_ADDR_A: u32 = 0xE000;
 const RF_BASE_ADDR_B: u32 = 0xF000;
 const RTW89_RF_ADDR_ADSEL_MASK: u32 = 1 << 16;
+const RFREG_MASK: u32 = 0xF_FFFF;
 
-// 8852BE: we currently don't read EFUSE. Use rfe=0, cv=2.
-// If headline selection logs "no match" for a table, change RFE here
-// and recompile. Linux' rfe_type for 8852B can be 0, 1, 2, or 5.
+// preinit_rf_nctl_ax register addresses (Linux reg.h)
+const R_IOQ_IQK_DPK:   u32 = 0x0C60;
+const R_GNT_BT_WGT_EN: u32 = 0x0C6C;
+const R_P0_PATH_RST:   u32 = 0x58AC;
+const R_P1_PATH_RST:   u32 = 0x78AC;
+const R_NCTL_CFG:      u32 = 0x8000;
+const R_NCTL_POLL:     u32 = 0x8080;
+
+// 8852BE: rfe/cv values. cv=2 confirmed from SYS_CFG1 register dump.
+// rfe=0 is a guess since we don't read EFUSE yet — if sel_headline aborts
+// a table with rfe=0, swap to 1, 2, or 5 and recompile.
 const RFE: u8 = 0;
 const CV:  u8 = 2;
 
-fn cfg_compare(rfe: u8, cv: u8) -> u32 {
-    // get_phy_compare(rfe, cv) = (rfe << 16) | cv
-    ((rfe as u32) << 16) | (cv as u32)
-}
+fn get_phy_cond(addr: u32) -> u32    { (addr >> 28) & 0xF }
+fn get_phy_target(addr: u32) -> u32  { addr & 0x0FFF_FFFF }
+fn get_phy_cond_rfe(addr: u32) -> u8 { ((addr >> 16) & 0xFF) as u8 }
+fn get_phy_cond_cv(addr: u32) -> u8  { (addr & 0xFF) as u8 }
+fn cfg_compare(rfe: u8, cv: u8) -> u32 { ((rfe as u32) << 16) | (cv as u32) }
 
-fn get_phy_cond(addr: u32) -> u32     { (addr >> 28) & 0xF }
-fn get_phy_target(addr: u32) -> u32   { addr & 0x0FFF_FFFF }
-fn get_phy_cond_rfe(addr: u32) -> u8  { ((addr >> 16) & 0xFF) as u8 }
-fn get_phy_cond_cv(addr: u32) -> u8   { (addr & 0xFF) as u8 }
+// ═══════════════════════════════════════════════════════════════════
+//  Entry point — mirrors Linux chip->ops->bb_cfg + rfk_init sequence
+// ═══════════════════════════════════════════════════════════════════
 
 pub fn init(mmio: i32) {
     host::print("  PHY: rfe="); fw::print_dec(RFE as usize);
     host::print(" cv=");         fw::print_dec(CV as usize); host::print("\n");
 
-    dbg(mmio, "phy start");
-
-    host::print("  PHY: loading BB regs...\n");
+    // 1) BB table — rtw89_phy_init_bb_reg → config_bb_reg (direct MMIO)
+    host::print("  PHY: BB regs...\n");
     let bb = run_table(mmio, BB_TABLE, WriteKind::Bb);
     report("BB", &bb);
-    dbg(mmio, "after BB");
 
+    // 2) bb_reset — rtw89_phy_bb_reset → __rtw8852bx_bb_reset (toggle GLB_RSTN)
     bb_reset(mmio);
-    dbg(mmio, "after bb_reset");
 
-    host::print("  PHY: loading BB gain...\n");
-    let gain = run_table(mmio, BB_GAIN_TABLE, WriteKind::Bb);
-    report("BBgain", &gain);
-    dbg(mmio, "after BBgain");
+    // 3) BB gain — Linux calls config_bb_gain which parses struct fields
+    //    and stores in rtw89_phy_bb_gain_info; NEVER writes the 'addr' as
+    //    MMIO. Writing them as MMIO hits SYS_ISO_CTRL/SYS_PW_CTRL at 0x00
+    //    and kills the chip. Skip until the struct parser is implemented.
+    host::print("  PHY: BB gain... SKIPPED (needs config_bb_gain struct parser)\n");
 
-    host::print("  PHY: loading RF path A...\n");
+    // 4) RF tables — rtw89_phy_init_rf_reg → write_rf_v1 (ad_sel branch)
+    host::print("  PHY: RF path A...\n");
     let rfa = run_table(mmio, RF_A_TABLE, WriteKind::Rf(0));
     report("RF_A", &rfa);
-    dbg(mmio, "after RF_A");
 
-    host::print("  PHY: loading RF path B...\n");
+    host::print("  PHY: RF path B...\n");
     let rfb = run_table(mmio, RF_B_TABLE, WriteKind::Rf(1));
     report("RF_B", &rfb);
-    dbg(mmio, "after RF_B");
 
-    host::print("  PHY: loading NCTL...\n");
+    // 5) preinit_rf_nctl_ax — MANDATORY before NCTL. Without this the
+    //    NCTL block isn't clocked and polling 0x8080 never returns 0x4.
+    preinit_rf_nctl_ax(mmio);
+
+    // 6) NCTL table — rtw89_phy_init_rf_nctl → config_bb_reg (direct MMIO)
+    host::print("  PHY: NCTL...\n");
     let nctl = run_table(mmio, NCTL_TABLE, WriteKind::Bb);
     report("NCTL", &nctl);
-    dbg(mmio, "after NCTL");
 
-    let total = bb.written + gain.written + rfa.written + rfb.written + nctl.written;
-    host::print("  PHY: done (");
-    fw::print_dec(total as usize);
+    let total = bb.written + rfa.written + rfb.written + nctl.written;
+    host::print("  PHY: done ("); fw::print_dec(total as usize);
     host::print(" regs written)\n");
 }
 
-/// Log PCIE_INIT_CFG1 (0x1000). When it reads 0xFFFFFFFF the chip has
-/// become unreachable on the bus — that pinpoints the killer sub-phase.
-fn dbg(mmio: i32, tag: &str) {
-    let cfg1 = host::mmio_r32(mmio, 0x1000);
-    host::print("    [dbg "); host::print(tag);
-    host::print("] CFG1=0x"); host::print_hex32(cfg1);
-    host::print("\n");
+// ═══════════════════════════════════════════════════════════════════
+//  preinit_rf_nctl_ax — 1:1 port of Linux rtw89_phy_preinit_rf_nctl_ax
+// ═══════════════════════════════════════════════════════════════════
+
+fn preinit_rf_nctl_ax(mmio: i32) {
+    host::print("  PHY: preinit NCTL...\n");
+
+    // IQK/DPK clock & reset
+    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x3);         // enable IQK+DPK clks
+    host::mmio_set32(mmio, R_GNT_BT_WGT_EN, 0x1);         // BT grant weighting
+    host::mmio_set32(mmio, R_P0_PATH_RST,   0x08000000);  // Path 0 reset
+    host::mmio_set32(mmio, R_P1_PATH_RST,   0x08000000);  // Path 1 reset (8852B: yes)
+    // 8852B extra step (Linux: chip_id == RTL8852B || RTL8852BT)
+    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x2);         // kick IQK
+
+    // Kick NCTL then poll 0x8080 until it reads 0x4 (max ~1000 iterations × 10us)
+    host::mmio_w32(mmio, R_NCTL_CFG, 0x8);
+
+    for i in 0..1000u32 {
+        host::mmio_w32(mmio, R_NCTL_POLL, 0x4);
+        // 1us delay — sleep_ms(0) doesn't work; tight loop is fine on x86.
+        for _ in 0..100 { core::hint::spin_loop(); }
+        let v = host::mmio_r32(mmio, R_NCTL_POLL);
+        if v == 0x4 {
+            host::print("    NCTL ready after "); fw::print_dec(i as usize);
+            host::print(" iters\n");
+            return;
+        }
+    }
+    host::print("    WARN: NCTL poll timeout\n");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  rtw89_phy_init_reg state machine (1:1 Linux)
+// ═══════════════════════════════════════════════════════════════════
 
 #[derive(Copy, Clone)]
 enum WriteKind {
     Bb,
-    Rf(u8), // path
+    Rf(u8),
 }
 
 struct TableStats {
     written: u32,
     skipped: u32,
     headline_size: u32,
-    headline_case: u8,   // 0=none, 1..4 from Linux
+    headline_case: u8,
     cfg_target: u32,
     aborted: bool,
 }
 
 fn report(tag: &str, s: &TableStats) {
     host::print("    "); host::print(tag);
-    host::print(": headline_size="); fw::print_dec(s.headline_size as usize);
+    host::print(": hdr="); fw::print_dec(s.headline_size as usize);
     host::print(" case="); fw::print_dec(s.headline_case as usize);
-    host::print(" cfg_target=0x"); host::print_hex32(s.cfg_target);
+    host::print(" cfg=0x"); host::print_hex32(s.cfg_target);
     host::print(" w="); fw::print_dec(s.written as usize);
     host::print(" skip="); fw::print_dec(s.skipped as usize);
-    if s.aborted { host::print(" ABORTED"); }
+    if s.aborted { host::print(" ABORT"); }
     host::print("\n");
 }
 
-/// 1:1 Linux rtw89_phy_init_reg. Returns stats.
 fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
     let mut stats = TableStats {
         written: 0, skipped: 0, headline_size: 0, headline_case: 0,
@@ -147,27 +182,20 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
     if table.len() < 4 { return stats; }
     let n_regs = u32::from_le_bytes([table[0], table[1], table[2], table[3]]) as usize;
 
-    // Step 1: sel_headline — pick the best headline entry.
     let (headline_size, headline_idx, case) = match sel_headline(table, n_regs, RFE, CV) {
         Some(r) => r,
-        None => {
-            // Linux: rtw89_err("invalid PHY package") + return.
-            // We skip the table entirely, chip untouched.
-            return stats;
-        }
+        None => return stats, // Linux behavior: "invalid PHY package" → skip table
     };
     stats.headline_size = headline_size as u32;
     stats.headline_case = case;
 
-    // Step 2: cfg_target = get_phy_target(headline entry address)
+    // cfg_target from the chosen headline entry (or entry 0 if no headlines).
     let hdr_off = 4 + headline_idx * 8;
-    let hdr_addr = u32::from_le_bytes([
-        table[hdr_off], table[hdr_off+1], table[hdr_off+2], table[hdr_off+3],
-    ]);
-    let cfg_target = get_phy_target(hdr_addr);
-    stats.cfg_target = cfg_target;
+    let hdr_addr = if hdr_off + 4 <= table.len() {
+        u32::from_le_bytes([table[hdr_off], table[hdr_off+1], table[hdr_off+2], table[hdr_off+3]])
+    } else { 0 };
+    stats.cfg_target = get_phy_target(hdr_addr);
 
-    // Step 3: walk the body, executing the state machine.
     let mut is_matched = true;
     let mut target_found = false;
     let mut branch_target: u32 = 0;
@@ -178,13 +206,11 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
         let addr = u32::from_le_bytes([table[off], table[off+1], table[off+2], table[off+3]]);
         let data = u32::from_le_bytes([table[off+4], table[off+5], table[off+6], table[off+7]]);
 
-        let cond = get_phy_cond(addr);
-        match cond {
+        match get_phy_cond(addr) {
             PHY_COND_BRANCH_IF | PHY_COND_BRANCH_ELIF => {
                 branch_target = get_phy_target(addr);
             }
             PHY_COND_BRANCH_ELSE => {
-                // Linux: is_matched = false; if !target_found abort.
                 is_matched = false;
                 if !target_found {
                     stats.aborted = true;
@@ -198,7 +224,7 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
             PHY_COND_CHECK => {
                 if target_found {
                     is_matched = false;
-                } else if branch_target == cfg_target {
+                } else if branch_target == stats.cfg_target {
                     is_matched = true;
                     target_found = true;
                 } else {
@@ -208,7 +234,7 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
             }
             _ => {
                 if is_matched {
-                    write_entry(mmio, kind, addr, data);
+                    write_entry(mmio, kind, get_phy_target(addr), data);
                     stats.written += 1;
                 } else {
                     stats.skipped += 1;
@@ -220,10 +246,9 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
     stats
 }
 
-/// 1:1 Linux rtw89_phy_sel_headline. Returns (headline_size, chosen_idx, case)
-/// on success, None when no case matches.
-fn sel_headline(table: &[u8], n_regs: usize, rfe: u8, cv: u8) -> Option<(usize, usize, u8)> {
-    // count headline entries (leading cond==0xf)
+fn sel_headline(table: &[u8], n_regs: usize, rfe: u8, cv: u8)
+    -> Option<(usize, usize, u8)>
+{
     let mut headline_size = 0usize;
     for i in 0..n_regs {
         let off = 4 + i * 8;
@@ -233,9 +258,6 @@ fn sel_headline(table: &[u8], n_regs: usize, rfe: u8, cv: u8) -> Option<(usize, 
         headline_size += 1;
     }
     if headline_size == 0 {
-        // Linux: `*headline_size = 0; return 0;` — success, cfg_target becomes
-        // get_phy_target(table->regs[0].addr). Keep same semantics: return
-        // headline_idx=0 so caller reads entry 0 for cfg_target.
         return Some((0, 0, 0));
     }
 
@@ -256,64 +278,66 @@ fn sel_headline(table: &[u8], n_regs: usize, rfe: u8, cv: u8) -> Option<(usize, 
         if get_phy_target(hdr(i)) == compare { return Some((headline_size, i, 2)); }
     }
 
-    // case 3: RFE match, CV max in table
+    // case 3: RFE match, CV max
     let mut cv_max: u8 = 0;
-    let mut matched_idx: Option<usize> = None;
+    let mut matched: Option<usize> = None;
     for i in 0..headline_size {
         let a = hdr(i);
         if get_phy_cond_rfe(a) == rfe {
             let c = get_phy_cond_cv(a);
-            if c >= cv_max {
-                cv_max = c;
-                matched_idx = Some(i);
-            }
+            if c >= cv_max { cv_max = c; matched = Some(i); }
         }
     }
-    if let Some(i) = matched_idx { return Some((headline_size, i, 3)); }
+    if let Some(i) = matched { return Some((headline_size, i, 3)); }
 
-    // case 4: RFE don't care, CV max in table
+    // case 4: RFE don't care, CV max
     let mut cv_max: u8 = 0;
-    let mut matched_idx: Option<usize> = None;
+    let mut matched: Option<usize> = None;
     for i in 0..headline_size {
         let a = hdr(i);
         if get_phy_cond_rfe(a) == PHY_COND_DONT_CARE {
             let c = get_phy_cond_cv(a);
-            if c >= cv_max {
-                cv_max = c;
-                matched_idx = Some(i);
-            }
+            if c >= cv_max { cv_max = c; matched = Some(i); }
         }
     }
-    if let Some(i) = matched_idx { return Some((headline_size, i, 4)); }
+    if let Some(i) = matched { return Some((headline_size, i, 4)); }
 
     None
 }
 
-/// Execute one `config` call (BB or RF). Handles delay encodings.
-fn write_entry(mmio: i32, kind: WriteKind, addr_full: u32, data: u32) {
-    let addr = get_phy_target(addr_full);
-    // Linux rtw89_phy_config_bb_reg checks reg->addr (full), but the only
-    // delay encodings are at addr 0xFE/FD/FC/FB/FA/F9 with cond=0, so they
-    // survive both interpretations.
+// ═══════════════════════════════════════════════════════════════════
+//  write_entry — dispatches delay vs MMIO/SWSI
+// ═══════════════════════════════════════════════════════════════════
+
+fn write_entry(mmio: i32, kind: WriteKind, addr: u32, data: u32) {
+    // Delay encodings — same for BB and RF paths (rtw89_phy_config_bb_reg
+    // and rtw89_phy_config_rf_reg check these explicitly).
     match addr {
         0xFE => { host::sleep_ms(50); return; }
         0xFD => { host::sleep_ms(5);  return; }
         0xFC => { host::sleep_ms(1);  return; }
-        0xFB | 0xFA | 0xF9 => { return; } // microsecond delays, skip
+        0xFB | 0xFA | 0xF9 => { return; }
         _ => {}
     }
 
     match kind {
         WriteKind::Bb => {
+            // Linux rtw89_phy_config_bb_reg → rtw89_phy_write32(addr, data)
             host::mmio_w32(mmio, addr, data);
         }
         WriteKind::Rf(path) => {
-            // rtw89_phy_write_rf_v1: ad_sel = addr & BIT(16)
+            // Linux rtw89_phy_write_rf_v1:
+            //   ad_sel = addr & BIT(16) → route
+            //     ad_sel=1: rtw89_phy_write_rf (direct MMIO, masked RFREG_MASK)
+            //     ad_sel=0: rtw89_phy_write_rf_a (SWSI)
+            // Table entries use mask = RFREG_MASK = 0xFFFFF.
             if addr & RTW89_RF_ADDR_ADSEL_MASK != 0 {
-                // direct MMIO into base_addr[path] + ((addr & 0xff) << 2)
                 let base = if path == 0 { RF_BASE_ADDR_A } else { RF_BASE_ADDR_B };
                 let direct = base + ((addr & 0xFF) << 2);
-                host::mmio_w32(mmio, direct, data & 0xFFFFF);
+                // rtw89_phy_write32_mask(direct_addr, RFREG_MASK, data)
+                let old = host::mmio_r32(mmio, direct);
+                let new = (old & !RFREG_MASK) | (data & RFREG_MASK);
+                host::mmio_w32(mmio, direct, new);
             } else {
                 write_rf_swsi(mmio, path, addr, data);
             }
@@ -321,19 +345,15 @@ fn write_entry(mmio: i32, kind: WriteKind, addr_full: u32, data: u32) {
     }
 }
 
-/// SWSI RF write — rtw89_phy_write_rf_a for mask == RFREG_MASK path.
-/// Register layout: [31] BIT_MASK_EN | [30:28] PATH | [27:20] ADDR | [19:0] DATA.
+/// SWSI RF write (Linux rtw89_phy_write_rf_a, mask == RFREG_MASK path).
+/// R_SWSI_DATA_V1: [31]=bit_mask_en | [30:28]=path | [27:20]=addr | [19:0]=data
 fn write_rf_swsi(mmio: i32, path: u8, addr: u32, data: u32) {
-    // Poll busy: bit 31 of R_SWSI_DATA_V1 must be 0 (linux uses a different
-    // busy register; this is the best we have without reading swsi_busy).
     for _ in 0..1000u32 {
-        if host::mmio_r32(mmio, R_SWSI_DATA_V1) & (1 << 31) == 0 {
-            break;
-        }
+        if host::mmio_r32(mmio, R_SWSI_DATA_V1) & (1 << 31) == 0 { break; }
     }
-    let val = (data & 0xFFFFF)                 // [19:0] VAL
-            | ((addr & 0xFF) << 20)            // [27:20] ADDR
-            | (((path as u32) & 0x7) << 28);   // [30:28] PATH (BIT_MASK_EN=0)
+    let val = (data & RFREG_MASK)
+            | ((addr & 0xFF) << 20)
+            | (((path as u32) & 0x7) << 28);
     host::mmio_w32(mmio, R_SWSI_DATA_V1, val);
 }
 
