@@ -22,7 +22,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.73 — PPDU status rpt → HOST\n");
+    host::print("[wifi] RTL8852BE driver v0.74 — VIF init skipped (A/B test)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -168,11 +168,12 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── Phase 5: VIF init — 1:1 Linux rtw89_mac_vif_init ──────────
-    if !vif::init(mmio, 0 /*macid=0*/) {
-        host::print("[wifi] VIF init FAILED — press 'q' to exit\n");
-        loop { if host::input_wait(1000) == 0x71 { return; } }
-    }
+    // ── Phase 5: VIF init (TEMPORARILY SKIPPED for A/B test) ─────
+    // v0.73 with full VIF init: FW ACKed only macid_pause, ignored
+    // role_maintain/join_info/addr_cam/default_cmac_tbl + subsequent
+    // scan H2Cs. Hypothesis: one of those H2Cs has malformed payload
+    // and poisons FW's H2C queue. Skip to see if plain scan works.
+    // let _ = vif::init(mmio, 0);
 
     // ── Phase 6: WiFi scan ─────────────────────────────────────────
     mac::scan(mmio);
