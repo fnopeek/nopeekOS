@@ -82,16 +82,14 @@ pub fn init(mmio: i32) {
 
     host::print("  PHY: BB regs...\n");
     let bb = run_table(mmio, BB_TABLE, WriteKind::Bb);
-    report("BB", &bb);
-    dbg(mmio, "after-BB");
-
-    // bb_reset — NOW using the correct 1:1 Linux impl (P0/P1 TXPW_RSTB,
-    // TSSI_TRK, S0/S1 HW_SI_DIS, RSTB_ASYNC). Linux calls this at the end
-    // of phy_init_bb_reg, right after BB table + gain table. Commits the
-    // BB state; without it the BB subsystem destabilises PCIe.
-    host::print("  PHY: bb_reset...\n");
+    // bb_reset IMMEDIATELY after last BB write, before any serial prints.
+    // Linux phy_init_bb_reg runs BB table → init_txpwr_unit → bb_gain →
+    // bb_reset, all in tight sequence. Our serial prints take 10-15ms
+    // and the BB subsystem destabilises during that gap.
     bb_reset(mmio);
-    dbg(mmio, "after-bb_reset");
+    report("BB", &bb);
+    host::print("  PHY: bb_reset done\n");
+    dbg(mmio, "after-BB+bb_reset");
 
     host::print("  PHY: BB gain... SKIPPED (needs config_bb_gain struct parser)\n");
 
