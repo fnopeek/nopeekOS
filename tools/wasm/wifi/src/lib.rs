@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.89 — fix MPDU_MAX_LEN (was zero, rejected all frames)\n");
+    host::print("[wifi] RTL8852BE driver v0.90 — VIF init + SCAN_ONCE fix\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -171,7 +171,15 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── Phase 5: Full Linux set_channel + rfk_channel flow ────────
+    // ── Phase 5: VIF init — register MACID 0 as STATION role with FW.
+    // Without this the scan_offload command is parsed (DONE_ACK returns) but
+    // silently dropped by FW because macid=0 has no registered role.
+    // Linux does this via rtw89_mac_vif_init before any scan.
+    if !vif::init(mmio, 0) {
+        host::print("[wifi] VIF init FAILED — continuing anyway\n");
+    }
+
+    // ── Phase 6: Full Linux set_channel + rfk_channel flow ────────
     // Linux rtw8852b_ops wraps this as:
     //   set_channel_help(ENTER) → set_channel → rfk_channel → set_channel_help(EXIT)
     // where rfk_channel = rx_dck + iqk + tssi + dpk. We skip TSSI/DPK
@@ -183,7 +191,7 @@ pub extern "C" fn _start() {
     chan::set_channel_help_exit(mmio);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
 
-    // ── Phase 6: WiFi scan ─────────────────────────────────────────
+    // ── Phase 7: WiFi scan ─────────────────────────────────────────
     mac::scan(mmio);
 
     // ── Done — wait for exit ───────────────────────────────────────
