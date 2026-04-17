@@ -74,42 +74,46 @@ fn cfg_compare(rfe: u8, cv: u8) -> u32 { ((rfe as u32) << 16) | (cv as u32) }
 pub fn init(mmio: i32) {
     host::print("  PHY: rfe="); fw::print_dec(RFE as usize);
     host::print(" cv=");         fw::print_dec(CV as usize); host::print("\n");
+    dbg(mmio, "phy-start");
 
-    // 1) BB table — rtw89_phy_init_bb_reg → config_bb_reg (direct MMIO)
     host::print("  PHY: BB regs...\n");
     let bb = run_table(mmio, BB_TABLE, WriteKind::Bb);
     report("BB", &bb);
+    dbg(mmio, "after-BB");
 
-    // 2) bb_reset — rtw89_phy_bb_reset → __rtw8852bx_bb_reset (toggle GLB_RSTN)
     bb_reset(mmio);
+    dbg(mmio, "after-bb_reset");
 
-    // 3) BB gain — Linux calls config_bb_gain which parses struct fields
-    //    and stores in rtw89_phy_bb_gain_info; NEVER writes the 'addr' as
-    //    MMIO. Writing them as MMIO hits SYS_ISO_CTRL/SYS_PW_CTRL at 0x00
-    //    and kills the chip. Skip until the struct parser is implemented.
     host::print("  PHY: BB gain... SKIPPED (needs config_bb_gain struct parser)\n");
 
-    // 4) RF tables — rtw89_phy_init_rf_reg → write_rf_v1 (ad_sel branch)
     host::print("  PHY: RF path A...\n");
     let rfa = run_table(mmio, RF_A_TABLE, WriteKind::Rf(0));
     report("RF_A", &rfa);
+    dbg(mmio, "after-RF_A");
 
     host::print("  PHY: RF path B...\n");
     let rfb = run_table(mmio, RF_B_TABLE, WriteKind::Rf(1));
     report("RF_B", &rfb);
+    dbg(mmio, "after-RF_B");
 
-    // 5) preinit_rf_nctl_ax — MANDATORY before NCTL. Without this the
-    //    NCTL block isn't clocked and polling 0x8080 never returns 0x4.
     preinit_rf_nctl_ax(mmio);
+    dbg(mmio, "after-preinit_nctl");
 
-    // 6) NCTL table — rtw89_phy_init_rf_nctl → config_bb_reg (direct MMIO)
     host::print("  PHY: NCTL...\n");
     let nctl = run_table(mmio, NCTL_TABLE, WriteKind::Bb);
     report("NCTL", &nctl);
+    dbg(mmio, "after-NCTL");
 
     let total = bb.written + rfa.written + rfb.written + nctl.written;
     host::print("  PHY: done ("); fw::print_dec(total as usize);
     host::print(" regs written)\n");
+}
+
+fn dbg(mmio: i32, tag: &str) {
+    let cfg1 = host::mmio_r32(mmio, 0x1000);
+    host::print("    [dbg "); host::print(tag);
+    host::print("] CFG1=0x"); host::print_hex32(cfg1);
+    host::print("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -119,20 +123,26 @@ pub fn init(mmio: i32) {
 fn preinit_rf_nctl_ax(mmio: i32) {
     host::print("  PHY: preinit NCTL...\n");
 
-    // IQK/DPK clock & reset
-    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x3);         // enable IQK+DPK clks
-    host::mmio_set32(mmio, R_GNT_BT_WGT_EN, 0x1);         // BT grant weighting
-    host::mmio_set32(mmio, R_P0_PATH_RST,   0x08000000);  // Path 0 reset
-    host::mmio_set32(mmio, R_P1_PATH_RST,   0x08000000);  // Path 1 reset (8852B: yes)
-    // 8852B extra step (Linux: chip_id == RTL8852B || RTL8852BT)
-    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x2);         // kick IQK
+    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x3);
+    dbg(mmio, "preinit: IQK_DPK|=3");
 
-    // Kick NCTL then poll 0x8080 until it reads 0x4 (max ~1000 iterations × 10us)
+    host::mmio_set32(mmio, R_GNT_BT_WGT_EN, 0x1);
+    dbg(mmio, "preinit: BT_WGT|=1");
+
+    host::mmio_set32(mmio, R_P0_PATH_RST,   0x08000000);
+    dbg(mmio, "preinit: P0_RST|=bit27");
+
+    host::mmio_set32(mmio, R_P1_PATH_RST,   0x08000000);
+    dbg(mmio, "preinit: P1_RST|=bit27");
+
+    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x2);
+    dbg(mmio, "preinit: IQK_DPK|=2");
+
     host::mmio_w32(mmio, R_NCTL_CFG, 0x8);
+    dbg(mmio, "preinit: NCTL_CFG=8");
 
     for i in 0..1000u32 {
         host::mmio_w32(mmio, R_NCTL_POLL, 0x4);
-        // 1us delay — sleep_ms(0) doesn't work; tight loop is fine on x86.
         for _ in 0..100 { core::hint::spin_loop(); }
         let v = host::mmio_r32(mmio, R_NCTL_POLL);
         if v == 0x4 {
