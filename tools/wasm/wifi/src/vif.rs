@@ -103,19 +103,19 @@ pub fn init(mmio: i32, macid: u8) -> bool {
     //    CAT=1, CLASS=9, FUNC=0x8, rack=1, dack=0, 32B payload
     host::print("  H2C: macid_pause(unpause)...\n");
     h2c_macid_pause(mmio, macid, false);
-    wait_c2h(mmio, 200, "macid_pause");
+    wait_c2h(mmio, 1000,"macid_pause");
 
     // 5. role_maintain(CREATE) — Linux fw.c:4857
     //    CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x4, rack=0, dack=1, 4B payload
     host::print("  H2C: role_maintain(CREATE)...\n");
     h2c_role_maintain(mmio, macid, 0 /*port*/, 0 /*band*/);
-    wait_c2h(mmio, 200, "role_maintain");
+    wait_c2h(mmio, 1000,"role_maintain");
 
     // 6. join_info(dis_conn=true) — Linux fw.c:4953
     //    CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x0, rack=0, dack=1, 4B payload (AX)
     host::print("  H2C: join_info(dis_conn)...\n");
     h2c_join_info(mmio, macid, 0 /*port*/, 0 /*band*/);
-    wait_c2h(mmio, 200, "join_info");
+    wait_c2h(mmio, 1000,"join_info");
 
     // 7. (cam_init is software-only, no H2C)
 
@@ -123,13 +123,13 @@ pub fn init(mmio: i32, macid: u8) -> bool {
     //    CAT=1, CLASS=6 (ADDR_CAM_UPDATE), FUNC=0x0, rack=0, dack=1, 60B payload (AX)
     host::print("  H2C: addr_cam_upd(CREATE)...\n");
     h2c_cam(mmio, macid, 0 /*port*/);
-    wait_c2h(mmio, 200, "addr_cam");
+    wait_c2h(mmio, 1000,"addr_cam");
 
     // 9. default_cmac_tbl — Linux fw.c:3521
     //    CAT=1, CLASS=5 (FR_EXCHG), FUNC=0x2 (CCTLINFO_UD for 8852b), rack=0, dack=1, 68B
     host::print("  H2C: default_cmac_tbl...\n");
     h2c_default_cmac_tbl(mmio, macid);
-    wait_c2h(mmio, 200, "default_cmac_tbl");
+    wait_c2h(mmio, 1000,"default_cmac_tbl");
 
     host::print("[wifi] VIF init complete\n");
     true
