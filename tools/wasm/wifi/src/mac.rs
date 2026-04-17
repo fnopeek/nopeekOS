@@ -1057,23 +1057,25 @@ pub fn scan(mmio: i32) {
     host::print(" (host="); fw::print_dec((idx0 & 0xFFFF) as usize);
     host::print(" hw="); fw::print_dec(((idx0 >> 16) & 0xFFFF) as usize);
     host::print(")\n");
-    host::print("  Listening (15s)...\n");
+    host::print("  Listening (30s)...\n");
     let mut total_rx = 0u32;
-    // 150 ticks × 100ms = 15 seconds max
-    for tick in 0..150u32 {
+    // 300 ticks × 100ms = 30 seconds max (FW may be slow; scan ~585ms per pass)
+    for tick in 0..300u32 {
         let n = rxq_poll(mmio);
         total_rx += n;
 
         // 100ms sleep (don't use input_wait — key routing may be broken)
         host::sleep_ms(100);
 
-        // Progress every 5 seconds
+        // Progress every 5 seconds — also show RXQ IDX to see if HW is advancing.
         if tick > 0 && tick % 50 == 0 {
+            let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
             host::print("  [");
             fw::print_dec((tick / 10) as usize);
-            host::print("s] ");
-            fw::print_dec(total_rx as usize);
-            host::print(" pkts\n");
+            host::print("s] pkts="); fw::print_dec(total_rx as usize);
+            host::print(" RXQ=host:"); fw::print_dec((idx & 0xFFFF) as usize);
+            host::print(" hw:"); fw::print_dec(((idx >> 16) & 0xFFFF) as usize);
+            host::print("\n");
         }
     }
 
