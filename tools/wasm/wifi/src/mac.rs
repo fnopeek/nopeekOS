@@ -160,6 +160,46 @@ pub fn init(mmio: i32) -> bool {
     crate::phy::init(mmio);
     dbg_checkpoint(mmio, "after PHY");
 
+    // ── 7.2. phy_bb_reset + bb_reset_en(2G, true) — Linux phy.c:1313, rtw8852b.c:542/566
+    //
+    // After BB/RF/NCTL tables, Linux calls rtw89_phy_bb_reset which for
+    // 8852b toggles TXPW_RSTB MANON + TSSI_TRK and then runs bb_reset_all
+    // (toggle S0/S1_HW_SI_DIS + RSTB_ASYNC). Without this the BB DSP
+    // stays in an indeterminate post-table state.
+    //
+    // Even more critical: rtw8852b_bb_reset_en(2G, true) clears RXCCA_DIS
+    // and PD_HIT_DIS — enabling Packet Detection. Without PD the receiver
+    // literally does not see any frame arrive → our 0 beacons.
+    // All PHY space, so + PHY_CR_BASE (0x10000).
+    let cr_base: u32 = 0x10000;
+    // rtw8852b_bb_reset — path 0 + path 1 TXPW manual on, TSSI trk en
+    host::mmio_set32(mmio, cr_base + 0x58DC, 1 << 30);    // P0_TXPW_RSTB.MANON
+    host::mmio_set32(mmio, cr_base + 0x5818, 1 << 30);    // P0_TSSI_TRK.EN
+    host::mmio_set32(mmio, cr_base + 0x78DC, 1 << 30);    // P1_TXPW_RSTB.MANON
+    host::mmio_set32(mmio, cr_base + 0x7818, 1 << 30);    // P1_TSSI_TRK.EN
+    // bb_reset_all
+    host::mmio_w32_mask(mmio, cr_base + 0x1200, 0x7 << 28, 7);  // S0_HW_SI_DIS[30:28] = 7
+    host::mmio_w32_mask(mmio, cr_base + 0x3200, 0x7 << 28, 7);  // S1_HW_SI_DIS[30:28] = 7
+    host::sleep_ms(1);
+    host::mmio_set32(mmio, cr_base + 0x0704, 1 << 1);     // RSTB_ASYNC.ALL = 1
+    host::mmio_clr32(mmio, cr_base + 0x0704, 1 << 1);     // RSTB_ASYNC.ALL = 0
+    host::mmio_w32_mask(mmio, cr_base + 0x1200, 0x7 << 28, 0);  // S0_HW_SI_DIS[30:28] = 0
+    host::mmio_w32_mask(mmio, cr_base + 0x3200, 0x7 << 28, 0);  // S1_HW_SI_DIS[30:28] = 0
+    host::mmio_set32(mmio, cr_base + 0x0704, 1 << 1);     // RSTB_ASYNC.ALL = 1
+    // Clear path 0/1 TXPW manual + TSSI trk
+    host::mmio_clr32(mmio, cr_base + 0x58DC, 1 << 30);
+    host::mmio_clr32(mmio, cr_base + 0x5818, 1 << 30);
+    host::mmio_clr32(mmio, cr_base + 0x78DC, 1 << 30);
+    host::mmio_clr32(mmio, cr_base + 0x7818, 1 << 30);
+
+    // rtw8852b_bb_reset_en(RTW89_BAND_2G, phy_idx=0, en=true) — THIS enables PD/RXCCA
+    host::mmio_w32_mask(mmio, cr_base + 0x1200, 0x7 << 28, 0);  // S0_HW_SI_DIS clr
+    host::mmio_w32_mask(mmio, cr_base + 0x3200, 0x7 << 28, 0);  // S1_HW_SI_DIS clr
+    host::mmio_set32(mmio, cr_base + 0x0704, 1 << 1);           // RSTB_ASYNC.ALL = 1
+    host::mmio_clr32(mmio, cr_base + 0x2344, 1 << 31);          // RXCCA.DIS = 0 (2G: enable CCA)
+    host::mmio_clr32(mmio, cr_base + 0x0C3C, 1 << 9);           // PD_CTRL.PD_HIT_DIS = 0 (ENABLE packet detect)
+    host::print("  BB: reset + bb_reset_en(2G, true) → PD + CCA enabled\n");
+
     // ── 7.3. cfg_txrx_path(RF_AB, 2G) — Linux rtw8852bx_bb_cfg_txrx_path
     //   (rtw8852b_common.c:1743) — enables RX antenna path. All writes are
     //   PHY-space, so each address gets + PHY_CR_BASE (0x10000).
