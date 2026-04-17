@@ -856,6 +856,25 @@ fn handle_c2h(dma: i32, off: u32) {
                 host::print("\n");
             }
         }
+    } else if cat == 1 && class == 0 && func == 1 {
+        // DONE_ACK — decode H2C identity + return code
+        // Linux fw.h:3820  W2_CAT[1:0]|W2_CLASS[7:2]|W2_FUNC[15:8]|W2_H2C_RETURN[23:16]|W2_SEQ[31:24]
+        let w2 = host::dma_r32(dma, off + 8);
+        let h2c_cat    =  w2        & 0x3;
+        let h2c_class  = (w2 >> 2)  & 0x3F;
+        let h2c_func   = (w2 >> 8)  & 0xFF;
+        let h2c_return = (w2 >> 16) & 0xFF;
+        let h2c_seq    = (w2 >> 24) & 0xFF;
+        host::print("  [c2h] DONE_ACK h2c(cat=");
+        fw::print_dec(h2c_cat as usize);
+        host::print(" cls=");  fw::print_dec(h2c_class as usize);
+        host::print(" fn=0x"); host::print_hex32(h2c_func);
+        host::print(" seq=");  fw::print_dec(h2c_seq as usize);
+        host::print(" ret=");  fw::print_dec(h2c_return as usize);
+        if h2c_return != 0 { host::print(" !!FAIL!!"); }
+        host::print(")\n");
+    } else if cat == 1 && class == 0 && func == 0 {
+        host::print("  [c2h] REC_ACK\n");
     } else {
         host::print("  [c2h] cat=");
         fw::print_dec(cat as usize);
@@ -1036,11 +1055,10 @@ pub fn scan(mmio: i32) {
     // w0: MACID=0, NORM_CY=0, PORT_ID=0, BAND=0, OP=1(start)
     let w0: u32 = 1 << 20; // OP = 1 (enable scan)
     // w1: NOTIFY_END=1, SCAN_TYPE=0 (RTW89_SCAN_ONCE), START_MODE=0(immediate)
-    //     SCAN_TYPE is option->repeat — 0=ONCE, 1=NORMAL (looping). Our
-    //     previous value 1 would let FW restart the scan forever.
+    //     SCAN_TYPE is option->repeat — 0=ONCE, 1=NORMAL (looping).
     let w1: u32 = 1; // NOTIFY_END only
-    // w2: NORM_PD=50 (50ms normal period)
-    let w2: u32 = 50;
+    // w2: NORM_PD=0, SLOW_PD=0 (Linux default — option = {0} unless explicitly set)
+    let w2: u32 = 0;
     scan_cmd[0..4].copy_from_slice(&w0.to_le_bytes());
     scan_cmd[4..8].copy_from_slice(&w1.to_le_bytes());
     scan_cmd[8..12].copy_from_slice(&w2.to_le_bytes());
