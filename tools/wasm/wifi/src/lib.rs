@@ -14,6 +14,8 @@ mod rfk;
 mod rfk_tables;
 mod vif;
 mod chan;
+mod iqk;
+mod iqk_tables;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -23,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.83.1 — fix print ch label\n");
+    host::print("[wifi] RTL8852BE driver v0.84 — IQK framework (tables + preset/restore)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -175,6 +177,7 @@ pub extern "C" fn _start() {
     // channels but the receiver stays deaf. Linux calls set_channel once
     // per chanctx assign; we do it once before scan starts.
     chan::set_channel_2g(mmio, 7);
+    iqk::run(mmio);
 
     // ── Phase 6: WiFi scan ─────────────────────────────────────────
     mac::scan(mmio);
