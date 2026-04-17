@@ -135,14 +135,9 @@ pub fn init(mmio: i32) -> bool {
 
     dbg_checkpoint(mmio, "before PHY");
 
-    // ── 7. PHY init SKIPPED for v0.59.3 diagnostic ─────────────
-    // Our phy.rs write_bb_table treats every addr != {0xFE,0xFD,0xFC,0xFB,
-    // 0xFA,0xF9} as an MMIO write — but Linux rtw89_phy_init_reg parses
-    // conditional branch opcodes (PHY_COND_BRANCH_IF/ELIF/ELSE/END/CHECK)
-    // encoded in the addr field. We're writing the opcodes into random
-    // MMIO addresses, which kills the chip. Re-enable after rewriting.
-    // crate::phy::init(mmio);
-    dbg_checkpoint(mmio, "after PHY (skipped)");
+    // ── 7. PHY init — now with proper conditional state machine ───
+    crate::phy::init(mmio);
+    dbg_checkpoint(mmio, "after PHY");
 
     // ── 8. PCIe post-init — just enable DMA channels ──────────────
     // NO BDRAM reset! Ring addresses were configured in fw.rs pre_init
