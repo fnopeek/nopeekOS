@@ -160,6 +160,19 @@ pub fn init(mmio: i32) -> bool {
     crate::phy::init(mmio);
     dbg_checkpoint(mmio, "after PHY");
 
+    // ── 7.5. cfg_ppdu_status(HOST) — Linux mac.c:6155 rtw89_mac_cfg_ppdu_status_ax
+    // Enables PPDU status reports + routes them to HOST. Without this, RX
+    // frames stay in FW-internal space and never reach the RXQ DMA ring.
+    //   R_AX_PPDU_STAT = 0xCE40:
+    //     bit 0 = B_AX_PPDU_STAT_RPT_EN
+    //     bit 1 = B_AX_APP_MAC_INFO_RPT
+    //     bit 3 = B_AX_APP_PLCP_HDR_RPT
+    //     bit 5 = B_AX_PPDU_STAT_RPT_CRC32
+    //   R_AX_HW_RPT_FWD = 0x9C18, mask [1:0] = RTW89_PRPT_DEST_HOST(1)
+    host::mmio_w32(mmio, 0xCE40, (1 << 0) | (1 << 1) | (1 << 3) | (1 << 5));
+    host::mmio_w32_mask(mmio, 0x9C18, 0x3, 1);
+    host::print("  PPDU: status rpt → HOST\n");
+
     // ── 8. H2C set_ofld_cfg — Linux rtw89_fw_h2c_set_ofld_cfg (fw.c:5228)
     // Sent after mac_init + phy tables, tells FW the offload config.
     // Linux: rack=0, dack=1 (fw.c:5243) → FW MUST send DONE_ACK back.
