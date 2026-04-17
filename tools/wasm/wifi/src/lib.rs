@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.88 — enable CMAC/DMAC clocks + CRPRT\n");
+    host::print("[wifi] RTL8852BE driver v0.89 — fix MPDU_MAX_LEN (was zero, rejected all frames)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
