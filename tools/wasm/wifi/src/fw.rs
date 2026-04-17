@@ -859,9 +859,11 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     }
     host::fence();
 
-    // Program RXQ + RPQ NUM as single 32-bit write (0x1020: RXQ[15:0] + RPQ[31:16])
-    // Avoids RMW race on adjacent 16-bit registers
-    host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_NUM, 32 | (1 << 16)); // RXQ=32, RPQ=1
+    // Program RXQ + RPQ NUM as SEPARATE write16 (Linux rtw89_pci_reset_trx_rings).
+    // 0x1020 = RXQ_RXBD_NUM, 0x1022 = RPQ_RXBD_NUM. A combined write32 on 0x1020
+    // would stomp on HW-owned fields in the adjacent register.
+    host::mmio_w16(mmio, regs::R_AX_RXQ_RXBD_NUM, 32);
+    host::mmio_w16(mmio, regs::R_AX_RPQ_RXBD_NUM, 1);
 
     host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_L, rxq_phys as u32);
     host::mmio_w32(mmio, regs::R_AX_RXQ_RXBD_DESA_H, (rxq_phys >> 32) as u32);
@@ -886,8 +888,10 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
         host::sleep_ms(1);
     }
 
-    // Set RXQ write pointer AFTER BDRAM reset (Linux: rx_ring_eq_is_full → wp=len-1)
-    host::mmio_w16(mmio, 0x1050, 31); // R_AX_RXQ_RXBD_IDX host_wp=31
+    // NO RXQ IDX write here. 8852BE has rx_ring_eq_is_full=false in Linux,
+    // meaning wp=0 and the IDX register is left alone after BDRAM reset.
+    // Writing IDX=31 tricks the firmware into thinking 31 buffers are pre-filled,
+    // which corrupts the HW_IDX tracking.
 
     // ── 5i. Stop all TX channels ────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x00070F00); // TX_STOP1_MASK_V1

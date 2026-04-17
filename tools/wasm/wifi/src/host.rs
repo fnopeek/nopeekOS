@@ -14,6 +14,8 @@ unsafe extern "C" {
 
     // MMIO
     fn npk_mmio_map_bar(bar_idx: i32, pages: i32) -> i32;
+    fn npk_mmio_read16(handle: i32, offset: i32) -> i32;
+    fn npk_mmio_write16(handle: i32, offset: i32, value: i32) -> i32;
     fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
     fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
     fn npk_mmio_read64(handle: i32, offset: i32) -> i64;
@@ -73,15 +75,18 @@ pub fn mmio_w32(handle: i32, offset: u32, val: u32) {
     unsafe { npk_mmio_write32(handle, offset as i32, val as i32); }
 }
 
-/// Write a 16-bit value to an MMIO register using aligned read-modify-write.
-/// Offset must be 2-byte aligned (but not necessarily 4-byte aligned).
+/// Read a 16-bit MMIO register (true 16-bit bus access, no RMW).
+/// Offset must be 2-byte aligned.
+pub fn mmio_r16(handle: i32, offset: u32) -> u16 {
+    unsafe { npk_mmio_read16(handle, offset as i32) as u16 }
+}
+
+/// Write a 16-bit MMIO register (true 16-bit bus access, no RMW).
+/// Required for split registers like RX/TX BD IDX where the upper 16 bits
+/// are HW-owned and must not be clobbered by a 32-bit RMW.
+/// Offset must be 2-byte aligned.
 pub fn mmio_w16(handle: i32, offset: u32, val: u16) {
-    let aligned = offset & !0x3;
-    let shift = (offset & 0x2) * 8; // 0 or 16
-    let mut word = mmio_r32(handle, aligned);
-    word &= !(0xFFFF << shift);
-    word |= (val as u32) << shift;
-    mmio_w32(handle, aligned, word);
+    unsafe { npk_mmio_write16(handle, offset as i32, val as i32); }
 }
 
 pub fn mmio_r64(handle: i32, offset: u32) -> u64 {
