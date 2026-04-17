@@ -517,7 +517,8 @@ fn pwr_on(mmio: i32) -> bool {
     host::mmio_clr32(mmio, regs::R_AX_PMC_DBG_CTRL2,
         regs::B_AX_SYSON_DIS_PMCR_AX_WRMSK);
 
-    // ── DMAC Function Enable (full set from rtw8852b_pwr_on_func) ─
+    // ── DMAC Function Enable (full set from rtw8852b_pwr_on_func +
+    //    sys_init_ax dmac_func_en_ax, including B_AX_DMAC_CRPRT) ──
     host::mmio_set32(mmio, regs::R_AX_DMAC_FUNC_EN,
         regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
         | regs::B_AX_MPDU_PROC_EN | regs::B_AX_WD_RLS_EN
@@ -526,14 +527,36 @@ fn pwr_on(mmio: i32) -> bool {
         | regs::B_AX_PKT_BUF_EN | regs::B_AX_DMAC_TBL_EN
         | regs::B_AX_PKT_IN_EN | regs::B_AX_DLE_CPUIO_EN
         | regs::B_AX_DISPATCHER_EN | regs::B_AX_BBRPT_EN
-        | regs::B_AX_MAC_SEC_EN | regs::B_AX_DMACREG_GCKEN);
+        | regs::B_AX_MAC_SEC_EN | regs::B_AX_DMACREG_GCKEN
+        | regs::B_AX_DMAC_CRPRT);
 
-    // ── CMAC Function Enable ────────────────────────────────────
+    // ── DMAC Clock Enable — Linux sys_init_ax:1664 ────────────────
+    // Enables clocks for all DMAC sub-blocks. Without these DMA/packet-
+    // in/dispatcher/wd_rls do not tick → RX DMA never completes.
+    host::mmio_set32(mmio, regs::R_AX_DMAC_CLK_EN,
+        regs::B_AX_MAC_SEC_CLK_EN | regs::B_AX_DISPATCHER_CLK_EN
+        | regs::B_AX_DLE_CPUIO_CLK_EN | regs::B_AX_PKT_IN_CLK_EN
+        | regs::B_AX_STA_SCH_CLK_EN | regs::B_AX_TXPKT_CTRL_CLK_EN
+        | regs::B_AX_WD_RLS_CLK_EN | regs::B_AX_BBRPT_CLK_EN);
+
+    // ── CMAC Clock Enable — Linux cmac_func_en_ax:1624 ────────────
+    // Must come BEFORE CMAC_FUNC_EN. Enables clocks for RMAC, TMAC,
+    // PHYINTF, CMAC_DMA, Scheduler, PTCLTOP, CMAC. Without RMAC_CKEN
+    // and CMAC_DMA_CKEN the RX path from PHY → MAC → DMA is dead:
+    // frames may enter the radio but never reach the host ring.
+    host::mmio_set32(mmio, regs::R_AX_CK_EN,
+        regs::B_AX_CMAC_CKEN | regs::B_AX_PHYINTF_CKEN
+        | regs::B_AX_CMAC_DMA_CKEN | regs::B_AX_PTCLTOP_CKEN
+        | regs::B_AX_SCHEDULER_CKEN | regs::B_AX_TMAC_CKEN
+        | regs::B_AX_RMAC_CKEN);
+
+    // ── CMAC Function Enable (with B_AX_CMAC_CRPRT) ───────────────
     host::mmio_set32(mmio, regs::R_AX_CMAC_FUNC_EN,
         regs::B_AX_CMAC_EN | regs::B_AX_CMAC_TXEN | regs::B_AX_CMAC_RXEN
         | regs::B_AX_FORCE_CMACREG_GCKEN | regs::B_AX_PHYINTF_EN
         | regs::B_AX_CMAC_DMA_EN | regs::B_AX_PTCLTOP_EN
-        | regs::B_AX_SCHEDULER_EN | regs::B_AX_TMAC_EN | regs::B_AX_RMAC_EN);
+        | regs::B_AX_SCHEDULER_EN | regs::B_AX_TMAC_EN | regs::B_AX_RMAC_EN
+        | regs::B_AX_CMAC_CRPRT);
 
     // ── Pinmux: EESK func = BT_LOG ─────────────────────────────
     host::mmio_w32_mask(mmio, regs::R_AX_EECS_EESK_FUNC_SEL,

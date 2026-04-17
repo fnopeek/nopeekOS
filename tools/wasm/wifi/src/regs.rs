@@ -212,7 +212,23 @@ pub const B_AX_BBRPT_EN: u32        = 1 << 17;
 pub const B_AX_MAC_SEC_EN: u32      = 1 << 16;
 pub const B_AX_DMACREG_GCKEN: u32   = 1 << 15;
 
+// R_AX_DMAC_FUNC_EN extra (Linux has this, we missed it)
+pub const B_AX_DMAC_CRPRT: u32      = 1 << 31;
+
+// R_AX_DMAC_CLK_EN (0x8404) bits — Linux dmac_func_en_ax writes these
+// to enable clocks for all DMAC sub-blocks. Without these the DMAC
+// subsystem runs without clocks → RX/TX DMA dead.
+pub const B_AX_WD_RLS_CLK_EN: u32      = 1 << 27;
+pub const B_AX_TXPKT_CTRL_CLK_EN: u32  = 1 << 25;
+pub const B_AX_STA_SCH_CLK_EN: u32     = 1 << 24;
+pub const B_AX_PKT_IN_CLK_EN: u32      = 1 << 20;
+pub const B_AX_DLE_CPUIO_CLK_EN: u32   = 1 << 19;
+pub const B_AX_DISPATCHER_CLK_EN: u32  = 1 << 18;
+pub const B_AX_BBRPT_CLK_EN: u32       = 1 << 17;
+pub const B_AX_MAC_SEC_CLK_EN: u32     = 1 << 16;
+
 // R_AX_CMAC_FUNC_EN (0xC000) bits
+pub const B_AX_CMAC_CRPRT: u32      = 1 << 31;
 pub const B_AX_CMAC_EN: u32         = 1 << 30;
 pub const B_AX_CMAC_TXEN: u32       = 1 << 29;
 pub const B_AX_CMAC_RXEN: u32       = 1 << 28;
@@ -223,6 +239,16 @@ pub const B_AX_PTCLTOP_EN: u32      = 1 << 3;
 pub const B_AX_SCHEDULER_EN: u32    = 1 << 2;
 pub const B_AX_TMAC_EN: u32         = 1 << 1;
 pub const B_AX_RMAC_EN: u32         = 1 << 0;
+
+// R_AX_CK_EN (0xC004) bits — CMAC sub-block clocks. Without these the
+// CMAC RX pipe is dead: RMAC, PHYINTF, CMAC_DMA all gate receive.
+pub const B_AX_CMAC_CKEN: u32       = 1 << 30;
+pub const B_AX_PHYINTF_CKEN: u32    = 1 << 5;
+pub const B_AX_CMAC_DMA_CKEN: u32   = 1 << 4;
+pub const B_AX_PTCLTOP_CKEN: u32    = 1 << 3;
+pub const B_AX_SCHEDULER_CKEN: u32  = 1 << 2;
+pub const B_AX_TMAC_CKEN: u32       = 1 << 1;
+pub const B_AX_RMAC_CKEN: u32       = 1 << 0;
 
 // ── Firmware Download Status Bits ────────────────────────────────
 
