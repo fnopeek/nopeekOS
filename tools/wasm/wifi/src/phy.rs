@@ -68,9 +68,10 @@ const R_NCTL_CFG:      u32 = 0x8000;
 const R_NCTL_POLL:     u32 = 0x8080;
 
 // 8852BE: rfe/cv values. cv=2 confirmed from SYS_CFG1 register dump.
-// rfe=0 is a guess since we don't read EFUSE yet — if sel_headline aborts
-// a table with rfe=0, swap to 1, 2, or 5 and recompile.
-const RFE: u8 = 0;
+// v0.63.1 with full Linux tables showed rfe=0 fails all 4 sel_headline
+// cases (RF_A headlines have rfe ∈ {1..8, 0x29, 0x2B}). 1 is most common
+// for 8852BE consumer cards. If still aborts, try 2.
+const RFE: u8 = 1;
 const CV:  u8 = 2;
 
 fn get_phy_cond(addr: u32) -> u32    { (addr >> 28) & 0xF }
