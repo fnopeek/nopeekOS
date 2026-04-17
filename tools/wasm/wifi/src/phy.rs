@@ -38,7 +38,15 @@ const PHY_COND_BRANCH_END:  u32 = 0xb;
 const PHY_HEADLINE_VALID:   u32 = 0xf;
 const PHY_COND_DONT_CARE:   u8  = 0xff;
 
-// SWSI RF indirect write (Linux reg.h)
+// Linux rtw89_phy_gen_ax.cr_base — ALL PHY/BB/RF/NCTL register addresses
+// in the Linux phy table constants and in rtw89_phy_write32() helpers are
+// relative to this base. MAC registers (R_AX_* with cr_base=0) stay at
+// their raw offset, but everything going through rtw89_phy_write32/_mask
+// lands at addr + CR_BASE. Missing this offset was writing the BB table
+// into SYS/PCIe/MAC registers, killing the chip.
+const PHY_CR_BASE: u32 = 0x10000;
+
+// SWSI RF indirect write (Linux reg.h) — PHY-space addresses, add CR_BASE
 const R_SWSI_DATA_V1: u32 = 0x0370;
 // SWSI busy status register (Linux rtw89_phy_check_swsi_busy)
 const R_SWSI_V1:        u32 = 0x174C;
@@ -129,29 +137,19 @@ fn dbg(mmio: i32, tag: &str) {
 
 fn preinit_rf_nctl_ax(mmio: i32) {
     host::print("  PHY: preinit NCTL...\n");
+    // All addresses here are PHY-space (Linux uses rtw89_phy_write32_*) → +CR_BASE
 
-    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x3);
-    dbg(mmio, "preinit: IQK_DPK|=3");
-
-    host::mmio_set32(mmio, R_GNT_BT_WGT_EN, 0x1);
-    dbg(mmio, "preinit: BT_WGT|=1");
-
-    host::mmio_set32(mmio, R_P0_PATH_RST,   0x08000000);
-    dbg(mmio, "preinit: P0_RST|=bit27");
-
-    host::mmio_set32(mmio, R_P1_PATH_RST,   0x08000000);
-    dbg(mmio, "preinit: P1_RST|=bit27");
-
-    host::mmio_set32(mmio, R_IOQ_IQK_DPK,   0x2);
-    dbg(mmio, "preinit: IQK_DPK|=2");
-
-    host::mmio_w32(mmio, R_NCTL_CFG, 0x8);
-    dbg(mmio, "preinit: NCTL_CFG=8");
+    host::mmio_set32(mmio, PHY_CR_BASE + R_IOQ_IQK_DPK,   0x3);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_GNT_BT_WGT_EN, 0x1);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_P0_PATH_RST,   0x08000000);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_P1_PATH_RST,   0x08000000);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_IOQ_IQK_DPK,   0x2);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_NCTL_CFG, 0x8);
 
     for i in 0..1000u32 {
-        host::mmio_w32(mmio, R_NCTL_POLL, 0x4);
+        host::mmio_w32(mmio, PHY_CR_BASE + R_NCTL_POLL, 0x4);
         for _ in 0..100 { core::hint::spin_loop(); }
-        let v = host::mmio_r32(mmio, R_NCTL_POLL);
+        let v = host::mmio_r32(mmio, PHY_CR_BASE + R_NCTL_POLL);
         if v == 0x4 {
             host::print("    NCTL ready after "); fw::print_dec(i as usize);
             host::print(" iters\n");
@@ -378,19 +376,18 @@ fn write_entry(mmio: i32, kind: WriteKind, addr: u32, data: u32) {
 
     match kind {
         WriteKind::Bb => {
-            // Linux rtw89_phy_config_bb_reg → rtw89_phy_write32(addr, data)
-            host::mmio_w32(mmio, addr, data);
+            // Linux rtw89_phy_config_bb_reg → rtw89_phy_write32(addr+cr_base, data)
+            host::mmio_w32(mmio, PHY_CR_BASE + addr, data);
         }
         WriteKind::Rf(path) => {
-            // Linux rtw89_phy_write_rf_v1:
-            //   ad_sel = addr & BIT(16) → route
-            //     ad_sel=1: rtw89_phy_write_rf (direct MMIO, masked RFREG_MASK)
-            //     ad_sel=0: rtw89_phy_write_rf_a (SWSI)
-            // Table entries use mask = RFREG_MASK = 0xFFFFF.
+            // Linux rtw89_phy_write_rf_v1: ad_sel = addr & BIT(16)
+            //   ad_sel=1: rtw89_phy_write_rf → rtw89_phy_write32_mask(direct, mask, data)
+            //             direct = base_addr[path] + ((addr&0xff)<<2), MASKED by RFREG_MASK.
+            //             All via rtw89_phy_write32_mask → +cr_base.
+            //   ad_sel=0: rtw89_phy_write_rf_a → SWSI (also via rtw89_phy_write32_mask → +cr_base)
             if addr & RTW89_RF_ADDR_ADSEL_MASK != 0 {
                 let base = if path == 0 { RF_BASE_ADDR_A } else { RF_BASE_ADDR_B };
-                let direct = base + ((addr & 0xFF) << 2);
-                // rtw89_phy_write32_mask(direct_addr, RFREG_MASK, data)
+                let direct = PHY_CR_BASE + base + ((addr & 0xFF) << 2);
                 let old = host::mmio_r32(mmio, direct);
                 let new = (old & !RFREG_MASK) | (data & RFREG_MASK);
                 host::mmio_w32(mmio, direct, new);
@@ -402,23 +399,18 @@ fn write_entry(mmio: i32, kind: WriteKind, addr: u32, data: u32) {
 }
 
 /// SWSI RF write (Linux rtw89_phy_write_rf_a, mask == RFREG_MASK path).
-/// R_SWSI_DATA_V1: [31]=bit_mask_en | [30:28]=path | [27:20]=addr | [19:0]=data
-///
-/// Busy is polled at R_SWSI_V1 (0x174C) bits 24 (W_BUSY) and 25 (R_BUSY),
-/// NOT bit 31 of R_SWSI_DATA_V1 — that's a data bit, not busy. Polling the
-/// wrong bit makes the poll return immediately, flooding the SWSI command
-/// queue and hanging the chip after ~32 rapid writes.
+/// R_SWSI_DATA_V1 layout: [31]=bit_mask_en | [30:28]=path | [27:20]=addr | [19:0]=data
+/// All SWSI registers are PHY-space → need +PHY_CR_BASE offset.
 fn write_rf_swsi(mmio: i32, path: u8, addr: u32, data: u32) {
-    // Linux: read_poll_timeout_atomic with sleep=1us, timeout=30us.
     for _ in 0..30u32 {
-        let v = host::mmio_r32(mmio, R_SWSI_V1);
+        let v = host::mmio_r32(mmio, PHY_CR_BASE + R_SWSI_V1);
         if v & (B_SWSI_W_BUSY_V1 | B_SWSI_R_BUSY_V1) == 0 { break; }
-        for _ in 0..100 { core::hint::spin_loop(); } // ~1us
+        for _ in 0..100 { core::hint::spin_loop(); }
     }
     let val = (data & RFREG_MASK)
             | ((addr & 0xFF) << 20)
             | (((path as u32) & 0x7) << 28);
-    host::mmio_w32(mmio, R_SWSI_DATA_V1, val);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_SWSI_DATA_V1, val);
 }
 
 /// 1:1 Linux rtw8852b_bb_reset (rtw8852b.c:566) + rtw8852bx_bb_reset_all
@@ -441,35 +433,35 @@ fn bb_reset(mmio: i32) {
     const R_RSTB_ASYNC:   u32 = 0x0704;
     const B_RSTB_ASYNC_ALL: u32 = 1 << 1;
 
-    // Pre-gate: hold TXPW reset + TSSI tracking
-    host::mmio_set32(mmio, R_P0_TXPW_RSTB, B_TXPW_RSTB_MANON);
-    host::mmio_set32(mmio, R_P0_TSSI_TRK,  B_TSSI_TRK_EN);
-    host::mmio_set32(mmio, R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON);
-    host::mmio_set32(mmio, R_P1_TSSI_TRK,  B_TSSI_TRK_EN);
+    // All addresses are PHY-space (Linux uses rtw89_phy_write32_*) → +CR_BASE
+
+    // Pre-gate
+    host::mmio_set32(mmio, PHY_CR_BASE + R_P0_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_P0_TSSI_TRK,  B_TSSI_TRK_EN);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_P1_TSSI_TRK,  B_TSSI_TRK_EN);
 
     // rtw8852bx_bb_reset_all body
-    // Trigger HW_SI_DIS field [30:28] = 0x7 on both streams
-    let s0 = host::mmio_r32(mmio, R_S0_HW_SI_DIS);
-    host::mmio_w32(mmio, R_S0_HW_SI_DIS, (s0 & !B_HW_SI_DIS_W_R_TRIG_MASK) | (0x7 << 28));
-    let s1 = host::mmio_r32(mmio, R_S1_HW_SI_DIS);
-    host::mmio_w32(mmio, R_S1_HW_SI_DIS, (s1 & !B_HW_SI_DIS_W_R_TRIG_MASK) | (0x7 << 28));
+    let s0 = host::mmio_r32(mmio, PHY_CR_BASE + R_S0_HW_SI_DIS);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_S0_HW_SI_DIS, (s0 & !B_HW_SI_DIS_W_R_TRIG_MASK) | (0x7 << 28));
+    let s1 = host::mmio_r32(mmio, PHY_CR_BASE + R_S1_HW_SI_DIS);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_S1_HW_SI_DIS, (s1 & !B_HW_SI_DIS_W_R_TRIG_MASK) | (0x7 << 28));
 
     host::sleep_ms(1); // Linux fsleep(1)
 
-    host::mmio_set32(mmio, R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
-    host::mmio_clr32(mmio, R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
+    host::mmio_clr32(mmio, PHY_CR_BASE + R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
 
-    // Clear HW_SI_DIS trigger
-    let s0 = host::mmio_r32(mmio, R_S0_HW_SI_DIS);
-    host::mmio_w32(mmio, R_S0_HW_SI_DIS, s0 & !B_HW_SI_DIS_W_R_TRIG_MASK);
-    let s1 = host::mmio_r32(mmio, R_S1_HW_SI_DIS);
-    host::mmio_w32(mmio, R_S1_HW_SI_DIS, s1 & !B_HW_SI_DIS_W_R_TRIG_MASK);
+    let s0 = host::mmio_r32(mmio, PHY_CR_BASE + R_S0_HW_SI_DIS);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_S0_HW_SI_DIS, s0 & !B_HW_SI_DIS_W_R_TRIG_MASK);
+    let s1 = host::mmio_r32(mmio, PHY_CR_BASE + R_S1_HW_SI_DIS);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_S1_HW_SI_DIS, s1 & !B_HW_SI_DIS_W_R_TRIG_MASK);
 
-    host::mmio_set32(mmio, R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
+    host::mmio_set32(mmio, PHY_CR_BASE + R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
 
-    // Post-gate: release TXPW reset + TSSI tracking
-    host::mmio_clr32(mmio, R_P0_TXPW_RSTB, B_TXPW_RSTB_MANON);
-    host::mmio_clr32(mmio, R_P0_TSSI_TRK,  B_TSSI_TRK_EN);
-    host::mmio_clr32(mmio, R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON);
-    host::mmio_clr32(mmio, R_P1_TSSI_TRK,  B_TSSI_TRK_EN);
+    // Post-gate
+    host::mmio_clr32(mmio, PHY_CR_BASE + R_P0_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_clr32(mmio, PHY_CR_BASE + R_P0_TSSI_TRK,  B_TSSI_TRK_EN);
+    host::mmio_clr32(mmio, PHY_CR_BASE + R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_clr32(mmio, PHY_CR_BASE + R_P1_TSSI_TRK,  B_TSSI_TRK_EN);
 }
