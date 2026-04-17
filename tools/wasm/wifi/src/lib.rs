@@ -21,7 +21,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.66 — H2C rack/dack + C2H diag\n");
+    host::print("[wifi] RTL8852BE driver v0.67 — MACID 0 init\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -46,8 +46,9 @@ pub extern "C" fn _start() {
     // ── Step 3: Map BAR2 (MMIO registers) ─────────────────────────
     // RTL8852BE: BAR0=I/O, BAR2=MMIO (Linux rtw89: bar_id=2).
     // Kernel auto-assigns address + configures bridge if BAR is empty.
-    // Map 256KB (64 pages) — PHY registers go beyond 0x10000
-    let mmio = host::mmio_map_bar(2, 64);
+    // Map 512KB (128 pages) — R_AX_INDIR_ACCESS_ENTRY lives at 0x40000
+    // and is required for dmac_tbl_init / cmac_tbl_init (mac.c:4291/4306).
+    let mmio = host::mmio_map_bar(2, 128);
     if mmio < 0 {
         host::print("[wifi] MMIO map BAR2 failed\n");
         host::print("[wifi] Press 'q' to exit\n");
