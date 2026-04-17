@@ -219,6 +219,10 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
     let mut target_found = false;
     let mut branch_target: u32 = 0;
 
+    let mut last_addr: u32 = 0;
+    let mut last_data: u32 = 0;
+    let mut last_written_at: u32 = 0;
+
     for i in headline_size..n_regs {
         let off = 4 + i * 8;
         if off + 8 > table.len() { break; }
@@ -256,8 +260,12 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
                     let target = get_phy_target(addr);
                     write_entry(mmio, kind, target, data);
                     stats.written += 1;
-                    // Periodic liveness check — find exact killer entry.
-                    let check_freq = 32u32;
+                    last_addr = addr;
+                    last_data = data;
+                    last_written_at = stats.written;
+                    let _ = last_addr; let _ = last_data; let _ = last_written_at; // used below
+                    // Periodic liveness check — tight window for killer.
+                    let check_freq = 16u32;
                     if stats.written % check_freq == 0 {
                         let cfg1 = host::mmio_r32(mmio, 0x1000);
                         if cfg1 == 0xFFFF_FFFF {
@@ -275,6 +283,21 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
                     stats.skipped += 1;
                 }
             }
+        }
+    }
+
+    // Final kill check — catches killers in the last <16 writes that never
+    // hit a periodic checkpoint. Reports the last written entry as the
+    // prime suspect (it's within 0..check_freq writes of the actual death).
+    if stats.written > 0 {
+        let cfg1 = host::mmio_r32(mmio, 0x1000);
+        if cfg1 == 0xFFFF_FFFF {
+            host::print("    [final-kill] after w=");
+            fw::print_dec(stats.written as usize);
+            host::print(" last_addr=0x"); host::print_hex32(last_addr);
+            host::print(" last_data=0x"); host::print_hex32(last_data);
+            host::print("\n");
+            stats.aborted = true;
         }
     }
 
