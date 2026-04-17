@@ -221,8 +221,12 @@ const BACKUP_RF_REGS: [u32; 11] = [
 //  Helpers
 // ═══════════════════════════════════════════════════════════════════
 
-fn udelay_1() { for _ in 0..100 { core::hint::spin_loop(); } }
-fn udelay_200() { for _ in 0..20000 { core::hint::spin_loop(); } }
+// Each iteration includes an MMIO read (~300-500ns on PCIe) plus spin_loops.
+// Linux uses udelay(1) = real 1 microsecond. Our old 100×spin_loop was
+// ~100-300ns — 5-10× too short. Bumped to 1000 spin_loops for ~1-3µs floor;
+// combined with the MMIO read this stays >= 1µs per iteration.
+fn udelay_1() { for _ in 0..1000 { core::hint::spin_loop(); } }
+fn udelay_200() { for _ in 0..200000 { core::hint::spin_loop(); } }
 
 fn backup_bb(mmio: i32, out: &mut [u32; 3]) {
     for (i, &addr) in BACKUP_BB_REGS.iter().enumerate() {
@@ -278,8 +282,10 @@ fn rr(mmio: i32, path: u8, addr: u32) -> u32 {
 // ═══════════════════════════════════════════════════════════════════
 fn iqk_check_cal(mmio: i32, path: u8) -> bool {
     let mut ok = false;
-    // read_poll_timeout_atomic: 1us period, 8200us timeout, check byte 0 == 0x55
-    for _ in 0..8200u32 {
+    // Linux: read_poll_timeout_atomic(1us, 8200us). Our udelay_1 may still
+    // undershoot, so give the loop more iterations (20000) to guarantee
+    // the calibration has at least ~20ms of wall clock to settle.
+    for _ in 0..20000u32 {
         let v = pr(mmio, R_RFK_ST) & 0xFF;
         if v == 0x55 { ok = true; break; }
         udelay_1();
