@@ -876,6 +876,12 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     host::print("  RXQ: 0x"); host::print_hex32(rxq_phys as u32);
     host::print(" (32 bufs)\n");
 
+    // DEBUG: readback DESA immediately after write (before any reset)
+    let d1 = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
+    let c1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    host::print("  [dbg pre-BDRAM] DESA_L=0x"); host::print_hex32(d1);
+    host::print(" CFG1=0x"); host::print_hex32(c1); host::print("\n");
+
     // Reset BD_IDX for CH12
     unsafe { BD_IDX = 0; }
 
@@ -888,10 +894,14 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
         host::sleep_ms(1);
     }
 
+    // DEBUG: readback DESA after BDRAM reset
+    let d2 = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
+    let c2 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    host::print("  [dbg post-BDRAM] DESA_L=0x"); host::print_hex32(d2);
+    host::print(" CFG1=0x"); host::print_hex32(c2); host::print("\n");
+
     // NO RXQ IDX write here. 8852BE has rx_ring_eq_is_full=false in Linux,
     // meaning wp=0 and the IDX register is left alone after BDRAM reset.
-    // Writing IDX=31 tricks the firmware into thinking 31 buffers are pre-filled,
-    // which corrupts the HW_IDX tracking.
 
     // ── 5i. Stop all TX channels ────────────────────────────────
     host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x00070F00); // TX_STOP1_MASK_V1

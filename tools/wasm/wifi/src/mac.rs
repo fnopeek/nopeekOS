@@ -396,11 +396,15 @@ fn pcie_post_init(mmio: i32) {
     // Clear WPDMA + PCIEIO stops
     host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20));
 
-    // Verify RXQ state
+    // Verify RXQ state + sanity check PCIe range is accessible post-FWDL
     let desa = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
     let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+    let cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+    let ch12d = host::mmio_r32(mmio, regs::R_AX_CH12_TXBD_DESA_L);
     host::print("  RXQ: DESA=0x"); host::print_hex32(desa);
     host::print(" IDX=0x"); host::print_hex32(idx);
+    host::print(" CFG1=0x"); host::print_hex32(cfg1);
+    host::print(" CH12D=0x"); host::print_hex32(ch12d);
     host::print("\n");
     host::print("  PCIe: DMA enabled\n");
 }
