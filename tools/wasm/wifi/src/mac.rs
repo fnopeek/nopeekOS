@@ -953,10 +953,87 @@ fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Listen-only Mode (v0.94 diagnostic)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Passive listen on the currently-tuned channel, no FW scan_offload.
+///
+/// Purpose: isolate whether the RX pipe (RF → CMAC → RMAC → RXQ DMA) is
+/// live at all. If we see type-0 (WiFi) frames here, the radio + MAC path
+/// works and the scan_offload ret=4 problem is truly about FW state. If
+/// we still see only type-10 (C2H), something upstream of RMAC is dead.
+pub fn listen_only(mmio: i32, seconds: u32) {
+    host::print("\n[wifi] Phase 5: passive listen on current channel\n");
+
+    // Promiscuous RX filter — accept EVERYTHING:
+    //   clear A1_MATCH (don't require dest = our MAC)
+    //   clear BCN_CHK_EN (don't drop beacons from other BSSIDs)
+    //   clear A_BC (bit 2) — don't apply broadcast addr filter
+    //   keep MC, BC_CAM_MATCH, UC_CAM_MATCH, PWR_MGNT, FTM_REQ, UID_FILTER
+    //   preserve MPDU_MAX_LEN [21:16]
+    let cur = host::mmio_r32(mmio, 0xCE20);
+    let cfg_mask: u32 = !(0x3F << 16);
+    let promisc: u32 = 0x03004438; // same as scan mode
+    host::mmio_w32(mmio, 0xCE20, (cur & !cfg_mask) | (promisc & cfg_mask));
+    host::print("  RX_FLTR: promiscuous (A1/BCN_CHK/A_BC off)\n");
+
+    // EDCCA to MAX so CCA doesn't suppress weak beacons.
+    const R_EDCCA_LVL: u32 = 0x1_4884;
+    const EDCCA_MAX: u32 = 249;
+    let cur = host::mmio_r32(mmio, R_EDCCA_LVL);
+    let new = (cur & !0xFF_00_FF_FF)
+            | EDCCA_MAX | (EDCCA_MAX << 8) | (EDCCA_MAX << 24);
+    host::mmio_w32(mmio, R_EDCCA_LVL, new);
+    host::print("  EDCCA: MAX\n");
+
+    let idx0 = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+    host::print("  RXQ start: host:"); fw::print_dec((idx0 & 0xFFFF) as usize);
+    host::print(" hw:"); fw::print_dec(((idx0 >> 16) & 0xFFFF) as usize);
+    host::print("\n");
+    host::print("  Listening ("); fw::print_dec(seconds as usize);
+    host::print("s) on ch 7...\n");
+
+    let mut total_rx = 0u32;
+    let ticks = seconds * 10; // 100ms per tick
+    for tick in 0..ticks {
+        let n = rxq_poll(mmio);
+        total_rx += n;
+        host::sleep_ms(100);
+        if tick > 0 && tick % 50 == 0 {
+            let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+            host::print("  [");
+            fw::print_dec((tick / 10) as usize);
+            host::print("s] pkts="); fw::print_dec(total_rx as usize);
+            host::print(" RXQ=host:"); fw::print_dec((idx & 0xFFFF) as usize);
+            host::print(" hw:"); fw::print_dec(((idx >> 16) & 0xFFFF) as usize);
+            host::print("\n");
+        }
+    }
+
+    host::print("\n[wifi] Listen results:\n");
+    let types = unsafe { RX_BY_TYPE };
+    let wifi_frames = unsafe { WIFI_FRAME_COUNT };
+    let beacons = unsafe { BEACON_COUNT };
+    host::print("  RX total: "); fw::print_dec(total_rx as usize); host::print("\n");
+    host::print("  By type: ");
+    for i in 0..16u32 {
+        if types[i as usize] > 0 {
+            host::print("t"); fw::print_dec(i as usize);
+            host::print("="); fw::print_dec(types[i as usize] as usize);
+            host::print(" ");
+        }
+    }
+    host::print("\n");
+    host::print("  WiFi frames: "); fw::print_dec(wifi_frames as usize); host::print("\n");
+    host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  WiFi Scan
 // ═══════════════════════════════════════════════════════════════════
 
 /// Start a passive scan on 2.4GHz channels 1-13.
+#[allow(dead_code)]
 pub fn scan(mmio: i32) {
     host::print("\n[wifi] Phase 5: WiFi scan\n");
 

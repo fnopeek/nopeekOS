@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.93 — minimal VIF: role_maintain + addr_cam\n");
+    host::print("[wifi] RTL8852BE driver v0.94 — LISTEN-ONLY on ch 7, no scan\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -171,28 +171,21 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── Phase 5: Minimal VIF — v0.92 proved FW rejects scanofld with
-    //    ret=4. Hypothesis: MACID 0 is not registered as STATION role.
-    //    Send only role_maintain + addr_cam (no port_update MMIO pokes
-    //    that wedged FW in v0.90).
-    if !vif::init(mmio, 0) {
-        host::print("[wifi] VIF minimal init FAILED — continuing\n");
-    }
-
-    // ── Phase 6: Full Linux set_channel + rfk_channel flow ────────
-    // Linux rtw8852b_ops wraps this as:
-    //   set_channel_help(ENTER) → set_channel → rfk_channel → set_channel_help(EXIT)
-    // where rfk_channel = rx_dck + iqk + tssi + dpk. We skip TSSI/DPK
-    // (TX-only) but rx_dck + iqk are essential for RX.
+    // ── Phase 5: Tune RF to channel 7 (user's home AP) + full RFK.
+    //    SKIP VIF/scan_offload entirely. We just want to see if the RX
+    //    pipe delivers any airborne WiFi frame when the radio is tuned.
     chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 7);
-    rfk::rx_dck(mmio);       // per-channel RX DC offset calibration
-    iqk::run(mmio);          // full IQK with BB+RF backup/restore
+    rfk::rx_dck(mmio);
+    iqk::run(mmio);
     chan::set_channel_help_exit(mmio);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
 
-    // ── Phase 7: WiFi scan ─────────────────────────────────────────
-    mac::scan(mmio);
+    // ── Phase 6: listen-only (no scan_offload) ─────────────────────
+    // Diagnostic: if WiFi frames arrive here, the RX pipe is alive and
+    // the scan_offload ret=4 problem is isolated to FW/VIF state.
+    // If not, the whole receive pipeline is the real bug.
+    mac::listen_only(mmio, 60);
 
     // ── Done — wait for exit ───────────────────────────────────────
     host::print("\n[wifi] Press 'q' to exit\n");
