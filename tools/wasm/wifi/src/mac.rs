@@ -981,17 +981,33 @@ pub fn scan(mmio: i32) {
     // buf[2] = arg = 0, buf[3] = rsvd = 0
 
     // 2.4GHz channels: center = primary = channel number
+    // Linux prep_chan_list_ax (fw.c:8596) + add_chan_ax (fw.c:8314) values:
+    //   period      = RTW89_CHANNEL_TIME (45) for 2.4G non-P2P
+    //   dwell_time  = 0 (not set for non-DFS)
+    //   bw          = RTW89_SCAN_WIDTH (0) = 20MHz
+    //   ch_band     = RTW89_BAND_2G (0)
+    //   notify_action = RTW89_SCANOFLD_DEBUG_MASK (0x1F)  ← enables all notifs
+    //   tx_pkt      = true (bit 12)  — FW may not TX since num_pkt=0
+    //   probe_id    = RTW89_SCANOFLD_PKT_NONE (0xFF)  ← no probe request
+    //   pause_data  = true (ACTIVE chan_type in Linux 2G path)
+    //   num_pkt     = 0 (passive)
     let channels: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
     for (i, &ch) in channels.iter().enumerate() {
         let off = 4 + i * 28;
-        // w0: period[7:0]=0 | dwell[15:8]=50 | center_ch[23:16] | pri_ch[31:24]
-        let w0: u32 = (50 << 8) | ((ch as u32) << 16) | ((ch as u32) << 24);
-        // w1: bw=0(20MHz) | action=0 | ch_band=0(2.4GHz) | rest=0
-        let w1: u32 = 0;
-        // w2-w6: all zero (no probe request IDs for passive scan)
+        // w0: period[7:0]=45 | dwell[15:8]=0 | center_ch[23:16] | pri_ch[31:24]
+        let w0: u32 = 45u32
+            | ((ch as u32) << 16)
+            | ((ch as u32) << 24);
+        // w1: bw[2:0]=0 | action[7:3]=0x1F | num_pkt[11:8]=0 | tx[12]=1
+        //     | pause_data[13]=1 | ch_band[15:14]=0 | probe_id[23:16]=0xFF
+        //     | dfs[24]=0 | tx_null[25]=0 | random[26]=0
+        let w1: u32 = (0x1F << 3)
+            | (1 << 12)       // tx_pkt
+            | (1 << 13)       // pause_data
+            | (0xFF << 16);   // probe_id = PKT_NONE
         buf[off..off + 4].copy_from_slice(&w0.to_le_bytes());
         buf[off + 4..off + 8].copy_from_slice(&w1.to_le_bytes());
-        // w2-w6 already zero
+        // w2..w6 already zero (no pkt_ids for passive scan with num_pkt=0)
     }
 
     host::print("  Sending channel list (");
