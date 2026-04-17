@@ -1205,7 +1205,10 @@ fn dump_state(mmio: i32, label: &str) {
 
 /// Send an H2C command via CH12 (reuses FWDL ring).
 /// Payload is raw H2C body (without WD or H2C header).
-pub fn h2c_send(mmio: i32, cat: u8, class: u8, func: u8, payload: &[u8]) {
+/// `rack` = request REC_ACK (auto-forced when seq % 4 == 0 for RTW89_CHIP_AX).
+/// `dack` = request DONE_ACK from FW (sets H2C_HDR_DONE_ACK bit 15 in hdr1).
+/// Linux rtw89_h2c_pkt_set_hdr (fw.c:1564).
+pub fn h2c_send(mmio: i32, cat: u8, class: u8, func: u8, rack: bool, dack: bool, payload: &[u8]) {
     let ring_dma = unsafe { RING_DMA };
     let data_dma = unsafe { DATA_DMA };
     if ring_dma < 0 || data_dma < 0 { return; }
@@ -1222,13 +1225,19 @@ pub fn h2c_send(mmio: i32, cat: u8, class: u8, func: u8, payload: &[u8]) {
     host::dma_w32(data_dma, 16, 0);
     host::dma_w32(data_dma, 20, 0);
 
-    // H2C header (8B)
+    // H2C header (8B) — Linux rtw89_h2c_pkt_set_hdr (fw.c:1564)
     let seq = unsafe { H2C_SEQ };
+    // RTW89_CHIP_AX && (seq % 4 == 0) → rack forced true (fw.c:1573)
+    let rack = rack || (seq % 4 == 0);
+    // hdr0: CAT[1:0] | CLASS[7:2] | FUNC[15:8] | DEL_TYPE[19:16]=0 | SEQ[31:24]
     let hdr0: u32 = (cat as u32 & 0x3)
         | ((class as u32 & 0x3F) << 2)
         | ((func as u32) << 8)
         | ((seq as u32) << 24);
-    let hdr1: u32 = (h2c_len as u32) & 0x3FFF;
+    // hdr1: TOTAL_LEN[13:0] | REC_ACK[14] | DONE_ACK[15]
+    let mut hdr1: u32 = (h2c_len as u32) & 0x3FFF;
+    if rack { hdr1 |= 1 << 14; }
+    if dack { hdr1 |= 1 << 15; }
     host::dma_w32(data_dma, WD_BODY_SIZE as u32, hdr0);
     host::dma_w32(data_dma, WD_BODY_SIZE as u32 + 4, hdr1);
 
