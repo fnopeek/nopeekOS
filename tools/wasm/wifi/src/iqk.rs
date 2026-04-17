@@ -207,12 +207,55 @@ struct IqkState {
     _is_wb_rxiqk: [bool; 2],
 }
 
+// ── BB/RF backup tables (Linux rtw8852b_backup_bb_regs / _rf_regs) ─
+// IQK corrupts these; Linux _doiqk backs them up before and restores after.
+// Skipping this step leaves TXPW_RSTB + R_RXCCA + per-path RF in IQK state
+// after IQK finishes → RX pipe never recovers. rfk.c:113.
+const BACKUP_BB_REGS: [u32; 3] = [0x2344, 0x5800, 0x7800];
+// 11 RF registers backed up per path. 0x10005 has bit16 (ad_sel=1).
+const BACKUP_RF_REGS: [u32; 11] = [
+    0xDE, 0xDF, 0x8B, 0x90, 0x97, 0x85, 0x1E, 0x00, 0x02, 0x05, 0x10005,
+];
+
 // ═══════════════════════════════════════════════════════════════════
 //  Helpers
 // ═══════════════════════════════════════════════════════════════════
 
 fn udelay_1() { for _ in 0..100 { core::hint::spin_loop(); } }
 fn udelay_200() { for _ in 0..20000 { core::hint::spin_loop(); } }
+
+fn backup_bb(mmio: i32, out: &mut [u32; 3]) {
+    for (i, &addr) in BACKUP_BB_REGS.iter().enumerate() {
+        out[i] = host::mmio_r32(mmio, CR + addr);
+    }
+}
+fn restore_bb(mmio: i32, saved: &[u32; 3]) {
+    for (i, &addr) in BACKUP_BB_REGS.iter().enumerate() {
+        host::mmio_w32(mmio, CR + addr, saved[i]);
+    }
+}
+fn backup_rf(mmio: i32, path: u8, out: &mut [u32; 11]) {
+    for (i, &addr) in BACKUP_RF_REGS.iter().enumerate() {
+        out[i] = rf_read(mmio, path, addr);
+    }
+}
+fn restore_rf(mmio: i32, path: u8, saved: &[u32; 11]) {
+    for (i, &addr) in BACKUP_RF_REGS.iter().enumerate() {
+        rf_write_mask(mmio, path, addr, RFREG_MASK, saved[i]);
+    }
+}
+
+/// _wait_rx_mode — poll RR_MOD.MOD_MASK until != 2 (TX). Linux rfk.c:1569.
+/// Aborts IQK if the chip is stuck in TX mode at IQK entry.
+fn wait_rx_mode(mmio: i32) {
+    for path in 0u8..2 {
+        for _ in 0..5000u32 {
+            let v = (rf_read(mmio, path, RR_MOD) & RR_MOD_MASK) >> RR_MOD_MASK.trailing_zeros();
+            if v != 2 { break; }
+            udelay_1();
+        }
+    }
+}
 
 fn pw(mmio: i32, addr: u32, val: u32) {
     host::mmio_w32(mmio, CR + addr, val);
@@ -709,7 +752,7 @@ fn iqk_by_path(mmio: i32, state: &mut IqkState, path: u8) {
 //  Mirrors Linux _doiqk (rfk.c:1596) for the RF_AB kpath.
 // ═══════════════════════════════════════════════════════════════════
 pub fn run(mmio: i32) {
-    host::print("  IQK: start (full LOK+TXK+RXK, 1:1 Linux)\n");
+    host::print("  IQK: start (full 1:1 Linux, backup/restore BB+RF)\n");
 
     // State — defaults match rtw89_iqk_info after _iqk_init.
     // Channel is 2G ch 7 @ 20 MHz (set by chan::set_channel_2g(mmio, 7)).
@@ -727,6 +770,10 @@ pub fn run(mmio: i32) {
         _is_wb_rxiqk: [false; 2],
     };
 
+    // _wait_rx_mode — make sure the radio is in RX (not TX) before IQK.
+    // Linux rtw8852b_iqk calls this under chip_stop_sch_tx.
+    wait_rx_mode(mmio);
+
     // _iqk_init — R_IQKINF = 0
     pw(mmio, R_IQKINF, 0);
 
@@ -739,31 +786,33 @@ pub fn run(mmio: i32) {
         pwm(mmio, R_IQKCH, B_IQKCH_CH   << shift, state.ch[p as usize] as u32);
     }
 
-    // _iqk_macbb_setting — apply SET_NONDBCC table (once, covers both paths)
-    apply_reg3(mmio, RTW8852B_SET_NONDBCC_PATH01);
-    host::print("  IQK: macbb set applied\n");
-
-    // For each path: preset + by_path + restore
+    // Per-path: backup BB+RF, run full IQK path, restore BB+RF.
+    // Linux _doiqk pattern — without backup/restore, IQK permanently
+    // corrupts 3 BB regs (0x2344, 0x5800, 0x7800) and 11 RF regs per
+    // path, leaving the RX pipe in IQK state after IQK finishes.
     for path in 0u8..2 {
+        let mut bb_save = [0u32; 3];
+        let mut rf_save = [0u32; 11];
+        backup_bb(mmio, &mut bb_save);
+        backup_rf(mmio, path, &mut rf_save);
+
+        // _iqk_macbb_setting — apply SET_NONDBCC table per path
+        apply_reg3(mmio, RTW8852B_SET_NONDBCC_PATH01);
+
         host::print("  IQK: path ");
         fw::print_dec(path as usize);
-        host::print(" preset...\n");
+        host::print(" preset + LOK+TXK+RXK...\n");
         iqk_preset(mmio, path);
-
-        host::print("  IQK: path ");
-        fw::print_dec(path as usize);
-        host::print(" LOK+TXK+RXK...\n");
         iqk_by_path(mmio, &mut state, path);
-
-        host::print("  IQK: path ");
-        fw::print_dec(path as usize);
-        host::print(" restore...\n");
         iqk_restore(mmio, &state, path);
-    }
 
-    // _iqk_afebb_restore — apply RESTORE_NONDBCC table (once)
-    apply_reg3(mmio, RTW8852B_RESTORE_NONDBCC_PATH01);
-    host::print("  IQK: afebb restore applied\n");
+        // _iqk_afebb_restore — apply RESTORE_NONDBCC
+        apply_reg3(mmio, RTW8852B_RESTORE_NONDBCC_PATH01);
+
+        restore_bb(mmio, &bb_save);
+        restore_rf(mmio, path, &rf_save);
+    }
+    host::print("  IQK: BB+RF restored\n");
 
     // Final status report
     host::print("  IQK: done | A: cor=");
