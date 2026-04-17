@@ -134,6 +134,10 @@ pub fn init(mmio: i32) {
     host::print("  PHY: edcca_init done\n");
     dbg(mmio, "after-edcca_init");
 
+    // RFK baseline — Linux rtw8852b_rfk_init (rtw8852b.c:649)
+    rfk_init(mmio);
+    dbg(mmio, "after-rfk_init");
+
     let total = bb.written + rfa.written + rfb.written + nctl.written;
     host::print("  PHY: done ("); fw::print_dec(total as usize);
     host::print(" regs written)\n");
@@ -411,6 +415,147 @@ fn write_entry(mmio: i32, kind: WriteKind, addr: u32, data: u32) {
             }
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  RF register read/write helpers — used by RFK functions
+//  Linux rtw89_phy_{read,write}_rf_v1 — route via ad_sel bit.
+// ═══════════════════════════════════════════════════════════════════
+
+const R_SWSI_READ_ADDR_V1: u32 = 0x0378;
+// B_SWSI_READ_ADDR_ADDR_V1 = GENMASK(7,0), B_SWSI_READ_ADDR_PATH_V1 = GENMASK(10,8)
+const B_SWSI_R_DATA_DONE_V1: u32 = 1 << 26;
+const R_SWSI_BIT_MASK_V1: u32 = 0x0374;
+
+/// Read an RF register. Returns the full 20-bit value (unmasked).
+/// Linux rtw89_phy_read_rf_v1 — dispatches ad_sel=1 to direct MMIO,
+/// ad_sel=0 to SWSI read via R_SWSI_READ_ADDR_V1.
+fn rf_read(mmio: i32, path: u8, addr: u32) -> u32 {
+    if addr & RTW89_RF_ADDR_ADSEL_MASK != 0 {
+        // Direct MMIO read (Linux rtw89_phy_read_rf): base + (addr & 0xff) << 2
+        let base = if path == 0 { RF_BASE_ADDR_A } else { RF_BASE_ADDR_B };
+        let direct = PHY_CR_BASE + base + ((addr & 0xFF) << 2);
+        return host::mmio_r32(mmio, direct) & RFREG_MASK;
+    }
+    // SWSI read (Linux rtw89_phy_read_rf_a)
+    // Wait busy clear
+    for _ in 0..30u32 {
+        let v = host::mmio_r32(mmio, PHY_CR_BASE + R_SWSI_V1);
+        if v & (B_SWSI_W_BUSY_V1 | B_SWSI_R_BUSY_V1) == 0 { break; }
+        for _ in 0..100 { core::hint::spin_loop(); }
+    }
+    // Trigger read: path[10:8] | addr[7:0]
+    let req = ((path as u32 & 0x7) << 8) | (addr & 0xFF);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_SWSI_READ_ADDR_V1, req);
+    for _ in 0..200 { core::hint::spin_loop(); } // ~2us
+    // Poll B_SWSI_R_DATA_DONE
+    for _ in 0..30u32 {
+        let v = host::mmio_r32(mmio, PHY_CR_BASE + R_SWSI_V1);
+        if v & B_SWSI_R_DATA_DONE_V1 != 0 {
+            return v & RFREG_MASK;
+        }
+        for _ in 0..100 { core::hint::spin_loop(); }
+    }
+    0xFFFFFFFF // timeout marker
+}
+
+/// Write an RF register with a bit mask. Read-modify-write internally.
+fn rf_write_mask(mmio: i32, path: u8, addr: u32, mask: u32, data: u32) {
+    let mask = mask & RFREG_MASK;
+    let shift = if mask == 0 { 0 } else { mask.trailing_zeros() };
+    if mask == RFREG_MASK {
+        // Full register write
+        rf_write_full(mmio, path, addr, data & RFREG_MASK);
+    } else {
+        let cur = rf_read(mmio, path, addr);
+        let new_val = (cur & !mask) | ((data << shift) & mask);
+        rf_write_full(mmio, path, addr, new_val);
+    }
+}
+
+/// Write full RF register (unmasked) — RFREG_MASK = 0xFFFFF.
+fn rf_write_full(mmio: i32, path: u8, addr: u32, data: u32) {
+    if addr & RTW89_RF_ADDR_ADSEL_MASK != 0 {
+        let base = if path == 0 { RF_BASE_ADDR_A } else { RF_BASE_ADDR_B };
+        let direct = PHY_CR_BASE + base + ((addr & 0xFF) << 2);
+        let old = host::mmio_r32(mmio, direct);
+        host::mmio_w32(mmio, direct, (old & !RFREG_MASK) | (data & RFREG_MASK));
+    } else {
+        write_rf_swsi(mmio, path, addr, data);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  RFK: baseline — 1:1 Linux rtw8852b_rfk_init
+//  rtw8852b.c:649 → dpk_init + rck + dack + rx_dck
+//  We implement dpk_init + rck for now (minimal baseline);
+//  dack/rx_dck are much larger and can be added if still needed.
+// ═══════════════════════════════════════════════════════════════════
+
+// RF register addresses (Linux reg.h)
+const RR_MOD: u32      = 0x00;
+const RR_MOD_MASK: u32 = 0xF0000;     // GENMASK(19,16)
+const RR_MOD_V_RX: u32 = 0x3;
+const RR_RSV1: u32     = 0x05;
+const RR_RSV1_RST: u32 = 0x1;         // BIT(0)
+const RR_RCKC: u32     = 0x1B;
+const RR_RCKC_CA: u32  = 0x7C00;      // GENMASK(14,10)
+const RR_RCKS: u32     = 0x1C;
+
+// DPK backoff registers (PHY space, CR_BASE applies)
+const R_DPD_BF: u32      = 0x4CF8;
+const B_DPD_BF_OFDM: u32 = 0x1F00;    // GENMASK(12,8)
+const B_DPD_BF_SCA: u32  = 0x3E;      // GENMASK(5,1) — from Linux bb def
+const R_DPD_CH0A: u32    = 0x5800;    // Per-path base (path 0 = 0x5800, path 1 = 0x5900)
+const B_DPD_CFG: u32     = 0x00FF_FFFF; // bottom 24 bits
+
+fn rfk_init(mmio: i32) {
+    host::print("  RFK: dpk_init\n");
+    set_dpd_backoff(mmio);
+    host::print("  RFK: rck path A\n");
+    rck(mmio, 0);
+    host::print("  RFK: rck path B\n");
+    rck(mmio, 1);
+    host::print("  RFK: baseline done\n");
+}
+
+/// 1:1 Linux _set_dpd_backoff for phy=0 (rtw8852b_rfk.c:2692).
+fn set_dpd_backoff(mmio: i32) {
+    // phy_read32_mask(R_DPD_BF + (phy << 13), B_DPD_BF_OFDM/SCA)
+    // For phy=0, offset=0.
+    let v = host::mmio_r32(mmio, PHY_CR_BASE + R_DPD_BF);
+    let ofdm_bkof = (v & B_DPD_BF_OFDM) >> B_DPD_BF_OFDM.trailing_zeros();
+    let tx_scale  = (v & B_DPD_BF_SCA)  >> B_DPD_BF_SCA.trailing_zeros();
+    if ofdm_bkof + tx_scale >= 44 {
+        // Linux: for each path, write B_DPD_CFG=0x7f7f7f at R_DPD_CH0A + (path << 8)
+        for path in 0..2u32 {
+            let reg = PHY_CR_BASE + R_DPD_CH0A + (path << 8);
+            let cur = host::mmio_r32(mmio, reg);
+            host::mmio_w32(mmio, reg, (cur & !B_DPD_CFG) | 0x7F7F7F);
+        }
+    }
+}
+
+/// 1:1 Linux _rck (rtw8852b_rfk.c:336).
+fn rck(mmio: i32, path: u8) {
+    let rf_reg5 = rf_read(mmio, path, RR_RSV1);
+    rf_write_mask(mmio, path, RR_RSV1, RR_RSV1_RST, 0x0);
+    rf_write_mask(mmio, path, RR_MOD, RR_MOD_MASK, RR_MOD_V_RX);
+
+    // RCK trigger
+    rf_write_full(mmio, path, RR_RCKC, 0x00240);
+
+    // Poll RR_RCKS bit 3 (~30us timeout, Linux: 2us sleep × 30)
+    for _ in 0..30u32 {
+        let v = rf_read(mmio, path, RR_RCKS);
+        if v & (1 << 3) != 0 { break; }
+        for _ in 0..200 { core::hint::spin_loop(); }
+    }
+
+    let rck_val = (rf_read(mmio, path, RR_RCKC) & RR_RCKC_CA) >> RR_RCKC_CA.trailing_zeros();
+
+    rf_write_full(mmio, path, RR_RCKC, rck_val);
+    rf_write_full(mmio, path, RR_RSV1, rf_reg5);
 }
 
 /// SWSI RF write (Linux rtw89_phy_write_rf_a, mask == RFREG_MASK path).
