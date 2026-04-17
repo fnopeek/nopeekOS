@@ -161,17 +161,52 @@ pub fn init(mmio: i32) -> bool {
     dbg_checkpoint(mmio, "after PHY");
 
     // ── 8. H2C set_ofld_cfg — Linux rtw89_fw_h2c_set_ofld_cfg (fw.c:5228)
-    // Sent after mac_init + phy tables, tells FW the offload config. Payload
-    // is a fixed 8-byte blob. Without it, FW doesn't know how to respond to
-    // scan offload requests.
+    // Sent after mac_init + phy tables, tells FW the offload config.
+    // Linux: rack=0, dack=1 (fw.c:5243) → FW MUST send DONE_ACK back.
     //   CAT=1 (MAC), CLASS=9 (MAC_FW_OFLD), FUNC=0x14 (OFLD_CFG)
     let ofld_cfg: [u8; 8] = [0x09, 0x00, 0x00, 0x00, 0x5E, 0x00, 0x00, 0x00];
-    fw::h2c_send(mmio, 1, 9, 0x14, &ofld_cfg);
-    host::sleep_ms(10);
-    host::print("  H2C: set_ofld_cfg sent\n");
+    host::print("  H2C: set_ofld_cfg (dack=1)...\n");
+    fw::h2c_send(mmio, 1, 9, 0x14, false, true, &ofld_cfg);
+
+    // ── 8.5. Diagnose: wait for C2H DONE_ACK (up to 200ms) ─────────
+    // If FW is alive and H2C pipe is bidirectional, RXQ HW_IDX should
+    // increment within a few ms. If it doesn't, the pipe itself is dead
+    // (not an init problem further down).
+    diag_wait_c2h(mmio, 200, "ofld_cfg");
 
     host::print("[wifi] MAC + PHY init complete\n");
     true
+}
+
+/// Diagnose: poll RXQ IDX for up to `max_ms` ms, report any HW_IDX advance.
+/// Used to verify H2C → C2H pipe bidirectionality.
+fn diag_wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
+    let idx0 = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+    let hw0 = (idx0 >> 16) & 0xFFFF;
+    for ms in 0..max_ms {
+        let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+        let hw = (idx >> 16) & 0xFFFF;
+        if hw != hw0 {
+            host::print("  [diag "); host::print(tag);
+            host::print("] C2H arrived after ");
+            fw::print_dec(ms as usize);
+            host::print("ms (hw ");
+            fw::print_dec(hw0 as usize);
+            host::print("→");
+            fw::print_dec(hw as usize);
+            host::print(")\n");
+            // Drain what we got
+            rxq_poll(mmio);
+            return;
+        }
+        host::sleep_ms(1);
+    }
+    host::print("  [diag "); host::print(tag);
+    host::print("] NO C2H after ");
+    fw::print_dec(max_ms as usize);
+    host::print("ms (hw still ");
+    fw::print_dec(hw0 as usize);
+    host::print(") — H2C pipe 1-way\n");
 }
 
 /// Debug helper: dump a few registers to find where the 0x1000 range dies.
@@ -737,8 +772,9 @@ pub fn scan(mmio: i32) {
     host::print("  Sending channel list (");
     fw::print_dec(N_CH as usize);
     host::print(" channels)...\n");
-    fw::h2c_send(mmio, 1, 9, 0x16, &buf[..hdr_len]);
-    host::sleep_ms(50);
+    // Linux: rack=1, dack=1 (fw.c:6393) — FW must send DONE_ACK + WAIT_COND_ADD_CH
+    fw::h2c_send(mmio, 1, 9, 0x16, true, true, &buf[..hdr_len]);
+    diag_wait_c2h(mmio, 200, "add_scanofld_ch");
 
     // ── Start scan ─────────────────────────────────────────────────
     // H2C: SCANOFLD (CAT=1, CLASS=9, FUNC=0x17)
@@ -755,7 +791,9 @@ pub fn scan(mmio: i32) {
     scan_cmd[8..12].copy_from_slice(&w2.to_le_bytes());
 
     host::print("  Starting passive scan...\n");
-    fw::h2c_send(mmio, 1, 9, 0x17, &scan_cmd);
+    // Linux: rack=1, dack=1 (fw.c:6585)
+    fw::h2c_send(mmio, 1, 9, 0x17, true, true, &scan_cmd);
+    diag_wait_c2h(mmio, 200, "scanofld_start");
 
     // ── Poll for results (15 seconds) ────────────────────────────
     // Show initial RXQ state
