@@ -610,7 +610,9 @@ fn handle_c2h(dma: i32, off: u32) {
     let _len = w1 & 0x3FFF;
 
     // Scan offload response: CAT=1, CLASS=8(OFLD), FUNC=3
-    if cat == 1 && class == 8 && func == 3 {
+    // C2H classes (Linux mac.h:472): 0=INFO (REC_ACK, DONE_ACK, C2H_LOG),
+    //                                 1=OFLD (func 4=MACID_PAUSE_RSP, 9=SCANOFLD_RSP)
+    if cat == 1 && class == 1 && func == 9 {
         let w2 = host::dma_r32(dma, off + 8);
         let pri_ch = w2 & 0xFF;
         let rsn = (w2 >> 16) & 0xF;
