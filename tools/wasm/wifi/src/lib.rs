@@ -22,7 +22,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.80 — chinfo w1 notify_action=0x1F\n");
+    host::print("[wifi] RTL8852BE driver v0.81 — only role_maintain(CREATE) before scan\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -168,12 +168,30 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── Phase 5: VIF init (TEMPORARILY SKIPPED for A/B test) ─────
-    // v0.73 with full VIF init: FW ACKed only macid_pause, ignored
-    // role_maintain/join_info/addr_cam/default_cmac_tbl + subsequent
-    // scan H2Cs. Hypothesis: one of those H2Cs has malformed payload
-    // and poisons FW's H2C queue. Skip to see if plain scan works.
-    // let _ = vif::init(mmio, 0);
+    // ── Phase 5: Minimal VIF hint — ONLY role_maintain(CREATE) ────
+    // v0.74-0.80 showed: without role_maintain FW ACKs scan H2Cs but
+    // never actually scans (no SCANOFLD_RSP C2Hs, no channel notifies).
+    // Likely FW rejects scan because MACID 0 isn't registered.
+    //
+    // v0.71 full vif::init poisoned the H2C queue. Try ONLY role_maintain
+    // — the minimum that registers MACID 0 with FW — nothing else.
+    // CAT=1 (MAC), CLASS=8 (MEDIA_RPT), FUNC=0x4 (FWROLE_MAINTAIN), rack=0 dack=1
+    //
+    // Payload (4B) for macid=0, STATION, port=0, band=0, CREATE:
+    //   w0 = SELF_ROLE_CLIENT(0)<<8 | UPD_MODE_CREATE(0)<<10
+    //      | WIFI_ROLE_STATION(1)<<13 | BAND(0)<<17 | PORT(0)<<19
+    //      = 0x00002000
+    let role_payload: [u8; 4] = 0x00002000u32.to_le_bytes();
+    host::print("  H2C: role_maintain(macid=0, STATION, CREATE)...\n");
+    fw::h2c_send(mmio, 1, 8, 0x4, false, true, &role_payload);
+    for _ in 0..1000u32 {
+        let idx = host::mmio_r32(mmio, 0x1080);
+        if (idx >> 16) & 0xFFFF != 0x01 {
+            host::print("  [role_maintain] C2H arrived\n");
+            break;
+        }
+        host::sleep_ms(1);
+    }
 
     // ── Phase 6: WiFi scan ─────────────────────────────────────────
     mac::scan(mmio);
