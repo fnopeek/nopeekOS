@@ -688,6 +688,26 @@ fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
 pub fn scan(mmio: i32) {
     host::print("\n[wifi] Phase 5: WiFi scan\n");
 
+    // ── config_edcca(scan=true) — Linux phy.c:8042 ────────────────────
+    // Saves current EDCCA levels + sets them to EDCCA_MAX (249) so that
+    // the CCA engine doesn't filter out real frames during scan. Without
+    // this the FW scans but RX is suppressed by noise floor.
+    // Registers (all PHY-space, +CR_BASE):
+    //   R_SEG0R_EDCCA_LVL_V1 = 0x4884
+    //   B_EDCCA_LVL_MSK0 = GENMASK(7,0)    (edcca_mask)
+    //   B_EDCCA_LVL_MSK1 = GENMASK(15,8)   (edcca_p_mask)
+    //   B_EDCCA_LVL_MSK3 = GENMASK(31,24)  (ppdu_mask)
+    // EDCCA_MAX = 249 (phy.h:130)
+    const R_EDCCA_LVL: u32 = 0x1_4884; // 0x4884 + PHY_CR_BASE (0x10000)
+    const EDCCA_MAX: u32 = 249;
+    let cur = host::mmio_r32(mmio, R_EDCCA_LVL);
+    let new = (cur & !0xFF_00_FF_FF)
+            | EDCCA_MAX
+            | (EDCCA_MAX << 8)
+            | (EDCCA_MAX << 24);
+    host::mmio_w32(mmio, R_EDCCA_LVL, new);
+    host::print("  EDCCA: set to MAX for scan\n");
+
     // ── Send channel list ──────────────────────────────────────────
     // H2C: ADD_SCANOFLD_CH (CAT=1, CLASS=9, FUNC=0x16)
     // Header: ch_num(u8), elem_size(u8=7), arg(u8=0), rsvd(u8=0)
