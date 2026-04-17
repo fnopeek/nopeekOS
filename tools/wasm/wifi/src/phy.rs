@@ -44,7 +44,7 @@ const PHY_COND_DONT_CARE:   u8  = 0xff;
 // their raw offset, but everything going through rtw89_phy_write32/_mask
 // lands at addr + CR_BASE. Missing this offset was writing the BB table
 // into SYS/PCIe/MAC registers, killing the chip.
-const PHY_CR_BASE: u32 = 0x10000;
+pub const PHY_CR_BASE: u32 = 0x10000;
 
 // SWSI RF indirect write (Linux reg.h) — PHY-space addresses, add CR_BASE
 const R_SWSI_DATA_V1: u32 = 0x0370;
@@ -135,8 +135,12 @@ pub fn init(mmio: i32) {
     dbg(mmio, "after-edcca_init");
 
     // RFK baseline — Linux rtw8852b_rfk_init (rtw8852b.c:649)
+    // Part 1: dpk_init + rck (inline in phy.rs)
     rfk_init(mmio);
-    dbg(mmio, "after-rfk_init");
+    dbg(mmio, "after-rck/dpk");
+    // Part 2: dack + rx_dck (rfk.rs module)
+    crate::rfk::init(mmio);
+    dbg(mmio, "after-dack/rx_dck");
 
     let total = bb.written + rfa.written + rfb.written + nctl.written;
     host::print("  PHY: done ("); fw::print_dec(total as usize);
@@ -430,7 +434,7 @@ const R_SWSI_BIT_MASK_V1: u32 = 0x0374;
 /// Read an RF register. Returns the full 20-bit value (unmasked).
 /// Linux rtw89_phy_read_rf_v1 — dispatches ad_sel=1 to direct MMIO,
 /// ad_sel=0 to SWSI read via R_SWSI_READ_ADDR_V1.
-fn rf_read(mmio: i32, path: u8, addr: u32) -> u32 {
+pub fn rf_read(mmio: i32, path: u8, addr: u32) -> u32 {
     if addr & RTW89_RF_ADDR_ADSEL_MASK != 0 {
         // Direct MMIO read (Linux rtw89_phy_read_rf): base + (addr & 0xff) << 2
         let base = if path == 0 { RF_BASE_ADDR_A } else { RF_BASE_ADDR_B };
@@ -460,7 +464,7 @@ fn rf_read(mmio: i32, path: u8, addr: u32) -> u32 {
 }
 
 /// Write an RF register with a bit mask. Read-modify-write internally.
-fn rf_write_mask(mmio: i32, path: u8, addr: u32, mask: u32, data: u32) {
+pub fn rf_write_mask(mmio: i32, path: u8, addr: u32, mask: u32, data: u32) {
     let mask = mask & RFREG_MASK;
     let shift = if mask == 0 { 0 } else { mask.trailing_zeros() };
     if mask == RFREG_MASK {
@@ -474,7 +478,7 @@ fn rf_write_mask(mmio: i32, path: u8, addr: u32, mask: u32, data: u32) {
 }
 
 /// Write full RF register (unmasked) — RFREG_MASK = 0xFFFFF.
-fn rf_write_full(mmio: i32, path: u8, addr: u32, data: u32) {
+pub fn rf_write_full(mmio: i32, path: u8, addr: u32, data: u32) {
     if addr & RTW89_RF_ADDR_ADSEL_MASK != 0 {
         let base = if path == 0 { RF_BASE_ADDR_A } else { RF_BASE_ADDR_B };
         let direct = PHY_CR_BASE + base + ((addr & 0xFF) << 2);
