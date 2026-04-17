@@ -80,58 +80,30 @@ const TBTT_AGG_DEF: u32 = 1;
 // ═══════════════════════════════════════════════════════════════════
 
 pub fn init(mmio: i32, macid: u8) -> bool {
-    host::print("\n[wifi] Phase 5: VIF init (macid=");
+    host::print("\n[wifi] Phase 5: VIF init — minimal (role_maintain + addr_cam) macid=");
     fw::print_dec(macid as usize);
-    host::print(")\n");
+    host::print("\n");
 
-    // 1. port_update for port 0 in NO_LINK state
-    host::print("  VIF: port_update(port=0, NOLINK)\n");
-    port_update_p0_nolink(mmio);
-
-    // 2-3. dmac_tbl_init + cmac_tbl_init — SKIPPED
+    // v0.93 minimal path — skip everything except the two H2Cs that register
+    // MACID 0 with the FW so scan_offload stops returning ret=4.
     //
-    // Linux mac.c:4296 guards these with `!secure_boot`. On 8852BE chips where
-    // EFUSE has MSS bits set, secure_boot=true and Linux never writes these
-    // tables — FW manages MACID defaults internally.
-    //
-    // Empirical: calling dmac_tbl_init+cmac_tbl_init consistently kills
-    // H2C→C2H (set_ofld_cfg gets ACK, everything after is silent). Skipping
-    // them matches the secure_boot code path that production 8852BE follows.
-    host::print("  VIF: dmac/cmac_tbl_init SKIPPED (secure_boot path)\n");
+    //   SKIPPED: port_update (pure MMIO CMAC-port poke — v0.90 showed this
+    //   wedged FW response times; FW itself doesn't need the port init
+    //   for passive scan)
+    //   SKIPPED: macid_pause     (MACID 0 is unpaused by default)
+    //   SKIPPED: join_info       (NO_LINK is default for fresh FW)
+    //   SKIPPED: default_cmac_tbl (68B CCTLINFO_UD — only needed for TX)
+    //   SKIPPED: dmac/cmac_tbl_init (secure_boot path)
 
-    // 4. macid_pause(unpause) — Linux mac.c:4325 / fw.c:5088
-    //    CAT=1, CLASS=9, FUNC=0x8, rack=1, dack=0, 32B payload
-    host::print("  H2C: macid_pause(unpause)...\n");
-    h2c_macid_pause(mmio, macid, false);
-    wait_c2h(mmio, 1000,"macid_pause");
+    host::print("  H2C: role_maintain(CREATE, STATION, port=0, band=0)...\n");
+    h2c_role_maintain(mmio, macid, 0, 0);
+    wait_c2h(mmio, 2000, "role_maintain");
 
-    // 5. role_maintain(CREATE) — Linux fw.c:4857
-    //    CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x4, rack=0, dack=1, 4B payload
-    host::print("  H2C: role_maintain(CREATE)...\n");
-    h2c_role_maintain(mmio, macid, 0 /*port*/, 0 /*band*/);
-    wait_c2h(mmio, 1000,"role_maintain");
-
-    // 6. join_info(dis_conn=true) — Linux fw.c:4953
-    //    CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x0, rack=0, dack=1, 4B payload (AX)
-    host::print("  H2C: join_info(dis_conn)...\n");
-    h2c_join_info(mmio, macid, 0 /*port*/, 0 /*band*/);
-    wait_c2h(mmio, 1000,"join_info");
-
-    // 7. (cam_init is software-only, no H2C)
-
-    // 8. h2c_cam(CREATE) — Linux fw.c:2221
-    //    CAT=1, CLASS=6 (ADDR_CAM_UPDATE), FUNC=0x0, rack=0, dack=1, 60B payload (AX)
     host::print("  H2C: addr_cam_upd(CREATE)...\n");
-    h2c_cam(mmio, macid, 0 /*port*/);
-    wait_c2h(mmio, 1000,"addr_cam");
+    h2c_cam(mmio, macid, 0);
+    wait_c2h(mmio, 2000, "addr_cam");
 
-    // 9. default_cmac_tbl — Linux fw.c:3521
-    //    CAT=1, CLASS=5 (FR_EXCHG), FUNC=0x2 (CCTLINFO_UD for 8852b), rack=0, dack=1, 68B
-    host::print("  H2C: default_cmac_tbl...\n");
-    h2c_default_cmac_tbl(mmio, macid);
-    wait_c2h(mmio, 1000,"default_cmac_tbl");
-
-    host::print("[wifi] VIF init complete\n");
+    host::print("[wifi] VIF minimal init complete\n");
     true
 }
 
