@@ -782,6 +782,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_mmio_map_bar(bar_index, page_count) -> handle or -1
+    //
+    // Sizes the BAR first and clamps `pages` to the actual BAR size. This
+    // prevents drivers from mapping past the end of a BAR into whatever PCI
+    // address space follows (usually another device's BAR), which would
+    // silently corrupt that device or generate UR responses.
     linker.func_wrap("env", "npk_mmio_map_bar",
         |mut caller: Caller<'_, HostState>, bar_idx: i32, pages: i32| -> i32 {
             let hw = match caller.data_mut().hw.as_mut() {
@@ -793,20 +798,37 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
             let bar_offset = 0x10 + (bar_idx as u8) * 4;
             let bar_raw = pci::read32(hw.pci_addr, bar_offset);
-            let mut bar_base = if bar_raw & 0x04 != 0 {
+            let is_64bit = bar_raw & 0x04 != 0;
+            let mut bar_base = if is_64bit {
                 pci::read_bar64(hw.pci_addr, bar_offset)
             } else {
                 (bar_raw & 0xFFFF_FFF0) as u64
             };
 
-            // If BAR is unassigned (UEFI didn't configure it), assign it now
+            // If BAR is unassigned (UEFI didn't configure it), assign it now.
+            // assign_bar_mmio sizes the BAR internally; we just need the base.
             if bar_base == 0 && bar_raw & 0x01 == 0 {
                 bar_base = pci::assign_bar_mmio(hw.pci_addr, bar_offset);
                 if bar_base == 0 { return -1; }
             }
             if bar_base == 0 { return -1; }
 
-            let page_count = pages as usize;
+            // Size the BAR: disable memory, write 0xFFFFFFFF, read back, restore.
+            // Safe at this point because the driver hasn't started using the
+            // BAR yet (mmio_map_bar is the first access after pci_bind).
+            let cmd = pci::read32(hw.pci_addr, 0x04);
+            pci::write32(hw.pci_addr, 0x04, cmd & !0x02);
+            let saved_lo = pci::read32(hw.pci_addr, bar_offset);
+            pci::write32(hw.pci_addr, bar_offset, 0xFFFF_FFFF);
+            let size_lo = pci::read32(hw.pci_addr, bar_offset);
+            pci::write32(hw.pci_addr, bar_offset, saved_lo);
+            let bar_size = (!((size_lo & !0xF) as u64)).wrapping_add(1) & 0xFFFF_FFFF;
+            pci::write32(hw.pci_addr, 0x04, cmd);
+
+            let max_pages = (bar_size as usize) / 4096;
+            let requested = pages as usize;
+            let page_count = if requested > max_pages { max_pages } else { requested };
+
             for i in 0..page_count {
                 let addr = bar_base + (i * 4096) as u64;
                 // SAFETY: identity-mapped MMIO region for bound PCI device BAR.
@@ -822,8 +844,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             }
             let handle = hw.mmio_maps.len();
             hw.mmio_maps.push((bar_base, page_count));
-            kprintln!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} ({} pages)",
-                bar_idx, bar_base, page_count);
+            kprintln!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} — BAR size {:#x}, requested {} pages, mapped {} pages",
+                bar_idx, bar_base, bar_size, requested, page_count);
             handle as i32
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
