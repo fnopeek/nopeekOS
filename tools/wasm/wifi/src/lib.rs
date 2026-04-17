@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.92 — decode DONE_ACK return code + fix w2\n");
+    host::print("[wifi] RTL8852BE driver v0.93 — minimal VIF: role_maintain + addr_cam\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -171,12 +171,15 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── VIF init: DISABLED. v0.90 tried it and the full port_update +
-    //    5-H2C chain made FW slow/unresponsive. Scan worked fine-ish on
-    //    v0.89 without VIF (FW ack'd commands fast, just didn't actually
-    //    run the scan). Try scan without VIF again + longer listen.
+    // ── Phase 5: Minimal VIF — v0.92 proved FW rejects scanofld with
+    //    ret=4. Hypothesis: MACID 0 is not registered as STATION role.
+    //    Send only role_maintain + addr_cam (no port_update MMIO pokes
+    //    that wedged FW in v0.90).
+    if !vif::init(mmio, 0) {
+        host::print("[wifi] VIF minimal init FAILED — continuing\n");
+    }
 
-    // ── Phase 5: Full Linux set_channel + rfk_channel flow ────────
+    // ── Phase 6: Full Linux set_channel + rfk_channel flow ────────
     // Linux rtw8852b_ops wraps this as:
     //   set_channel_help(ENTER) → set_channel → rfk_channel → set_channel_help(EXIT)
     // where rfk_channel = rx_dck + iqk + tssi + dpk. We skip TSSI/DPK
