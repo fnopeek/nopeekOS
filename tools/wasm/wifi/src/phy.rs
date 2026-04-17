@@ -40,6 +40,10 @@ const PHY_COND_DONT_CARE:   u8  = 0xff;
 
 // SWSI RF indirect write (Linux reg.h)
 const R_SWSI_DATA_V1: u32 = 0x0370;
+// SWSI busy status register (Linux rtw89_phy_check_swsi_busy)
+const R_SWSI_V1:        u32 = 0x174C;
+const B_SWSI_W_BUSY_V1: u32 = 1 << 24;
+const B_SWSI_R_BUSY_V1: u32 = 1 << 25;
 
 // 8852B RF base addresses (Linux rtw8852b.c: .rf_base_addr = {0xe000, 0xf000})
 const RF_BASE_ADDR_A: u32 = 0xE000;
@@ -373,9 +377,17 @@ fn write_entry(mmio: i32, kind: WriteKind, addr: u32, data: u32) {
 
 /// SWSI RF write (Linux rtw89_phy_write_rf_a, mask == RFREG_MASK path).
 /// R_SWSI_DATA_V1: [31]=bit_mask_en | [30:28]=path | [27:20]=addr | [19:0]=data
+///
+/// Busy is polled at R_SWSI_V1 (0x174C) bits 24 (W_BUSY) and 25 (R_BUSY),
+/// NOT bit 31 of R_SWSI_DATA_V1 — that's a data bit, not busy. Polling the
+/// wrong bit makes the poll return immediately, flooding the SWSI command
+/// queue and hanging the chip after ~32 rapid writes.
 fn write_rf_swsi(mmio: i32, path: u8, addr: u32, data: u32) {
-    for _ in 0..1000u32 {
-        if host::mmio_r32(mmio, R_SWSI_DATA_V1) & (1 << 31) == 0 { break; }
+    // Linux: read_poll_timeout_atomic with sleep=1us, timeout=30us.
+    for _ in 0..30u32 {
+        let v = host::mmio_r32(mmio, R_SWSI_V1);
+        if v & (B_SWSI_W_BUSY_V1 | B_SWSI_R_BUSY_V1) == 0 { break; }
+        for _ in 0..100 { core::hint::spin_loop(); } // ~1us
     }
     let val = (data & RFREG_MASK)
             | ((addr & 0xFF) << 20)
