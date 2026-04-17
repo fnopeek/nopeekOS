@@ -88,15 +88,16 @@ pub fn init(mmio: i32, macid: u8) -> bool {
     host::print("  VIF: port_update(port=0, NOLINK)\n");
     port_update_p0_nolink(mmio);
 
-    // 2. dmac_tbl_init — Linux mac.c:4291
-    host::print("  VIF: dmac_tbl_init(macid=");
-    fw::print_dec(macid as usize); host::print(")\n");
-    dmac_tbl_init(mmio, macid);
-
-    // 3. cmac_tbl_init — Linux mac.c:4306
-    host::print("  VIF: cmac_tbl_init(macid=");
-    fw::print_dec(macid as usize); host::print(")\n");
-    cmac_tbl_init(mmio, macid);
+    // 2-3. dmac_tbl_init + cmac_tbl_init — SKIPPED
+    //
+    // Linux mac.c:4296 guards these with `!secure_boot`. On 8852BE chips where
+    // EFUSE has MSS bits set, secure_boot=true and Linux never writes these
+    // tables — FW manages MACID defaults internally.
+    //
+    // Empirical: calling dmac_tbl_init+cmac_tbl_init consistently kills
+    // H2C→C2H (set_ofld_cfg gets ACK, everything after is silent). Skipping
+    // them matches the secure_boot code path that production 8852BE follows.
+    host::print("  VIF: dmac/cmac_tbl_init SKIPPED (secure_boot path)\n");
 
     // 4. macid_pause(unpause) — Linux mac.c:4325 / fw.c:5088
     //    CAT=1, CLASS=9, FUNC=0x8, rack=1, dack=0, 32B payload
