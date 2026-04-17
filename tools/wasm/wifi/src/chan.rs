@@ -95,12 +95,44 @@ const BW_ADC_SEL_B: u32   = 0xC1EC;
 const BW_WBADC_SEL_A: u32 = 0xC0E4;
 const BW_WBADC_SEL_B: u32 = 0xC1E4;
 
+/// SCO mapping table (rtw8852bx_sco_mapping, rtw8852b_common.c:519):
+///   ch 1 → 109
+///   ch 2..6 → 108
+///   ch 7..10 → 107
+///   ch 11..14 → 106
+fn sco_mapping_2g(ch: u8) -> u32 {
+    match ch {
+        1 => 109,
+        2..=6 => 108,
+        7..=10 => 107,
+        11..=14 => 106,
+        _ => 0,
+    }
+}
+
+/// SCO Barker thresholds (rtw8852bx_sco_barker_threshold, ch 1..14)
+const SCO_BARKER: [u32; 14] = [
+    0x1CFEA, 0x1D0E1, 0x1D1D7, 0x1D2CD, 0x1D3C3, 0x1D4B9, 0x1D5B0,
+    0x1D6A6, 0x1D79C, 0x1D892, 0x1D988, 0x1DA7F, 0x1DB75, 0x1DDC4,
+];
+
+/// SCO CCK thresholds (rtw8852bx_sco_cck_threshold, ch 1..14)
+const SCO_CCK: [u32; 14] = [
+    0x27DE3, 0x27F35, 0x28088, 0x281DA, 0x2832D, 0x2847F, 0x285D2,
+    0x28724, 0x28877, 0x289C9, 0x28B1C, 0x28C6E, 0x28DC1, 0x290ED,
+];
+
 // ═══════════════════════════════════════════════════════════════════
-//  set_channel(channel=1, 2.4GHz, 20MHz)
+//  set_channel(channel=ch, 2.4GHz, 20MHz)  — ch ∈ 1..13
 // ═══════════════════════════════════════════════════════════════════
 
-pub fn set_channel_1_2g(mmio: i32) {
-    host::print("  CHAN: set_channel(ch=1, 2.4GHz, 20MHz)\n");
+/// Convenience: default scan baseline = channel 1.
+pub fn set_channel_1_2g(mmio: i32) { set_channel_2g(mmio, 1); }
+
+pub fn set_channel_2g(mmio: i32, ch: u8) {
+    host::print("  CHAN: set_channel(ch=");
+    crate::fw::print_dec(ch as usize);
+    host::print(", 2.4GHz, 20MHz)\n");
 
     // ── 1. set_channel_mac (__rtw8852bx_set_channel_mac) ─────────
     //   BW=20MHz → RFMOD mask clr (0 = 20MHz), TX_SUB_CARRIER = 0
@@ -110,15 +142,17 @@ pub fn set_channel_1_2g(mmio: i32) {
     host::mmio_set32(mmio, R_AX_TXRATE_CHK, B_AX_BAND_MODE);
     host::mmio_clr32(mmio, R_AX_TXRATE_CHK, B_AX_CHECK_CCK_EN | B_AX_RTS_LIMIT_IN_OFDM6);
 
-    // ── 2. set_channel_bb ────────────────────────────────────────
-    //   2a. SCO CCK thresholds for ch 1 (rtw8852bx_ctrl_sco_cck)
-    host::mmio_w32_mask(mmio, CR + R_RXSCOBC, B_RXSCO_TH, 0x1CFEA);
-    host::mmio_w32_mask(mmio, CR + R_RXSCOCCK, B_RXSCO_TH, 0x27DE3);
+    let ch_idx = (ch as usize).saturating_sub(1).min(13);
 
-    //   2b. ctrl_ch: path A/B band_sel = 1 (2G), SCO comp = 109 (ch 1)
+    // ── 2. set_channel_bb ────────────────────────────────────────
+    //   2a. SCO CCK thresholds per channel (rtw8852bx_ctrl_sco_cck)
+    host::mmio_w32_mask(mmio, CR + R_RXSCOBC, B_RXSCO_TH, SCO_BARKER[ch_idx]);
+    host::mmio_w32_mask(mmio, CR + R_RXSCOCCK, B_RXSCO_TH, SCO_CCK[ch_idx]);
+
+    //   2b. ctrl_ch: path A/B band_sel = 1 (2G), SCO comp per channel
     host::mmio_w32_mask(mmio, CR + R_PATH0_BAND_SEL_V1, B_PATH_BAND_SEL_V1, 1);
     host::mmio_w32_mask(mmio, CR + R_PATH1_BAND_SEL_V1, B_PATH_BAND_SEL_V1, 1);
-    host::mmio_w32_mask(mmio, CR + R_FC0_BW_V1, B_FC0_BW_INV, 109);
+    host::mmio_w32_mask(mmio, CR + R_FC0_BW_V1, B_FC0_BW_INV, sco_mapping_2g(ch));
 
     //   2c. CCK TX FIR coefficients for ch != 14 (ch 1 case)
     //   From rtw8852b_common.c:788-795
@@ -155,8 +189,8 @@ pub fn set_channel_1_2g(mmio: i32) {
     host::mmio_set32(mmio, CR + R_UPD_CLK_ADC, B_ENABLE_CCK);
     host::mmio_clr32(mmio, CR + R_RXCCA, B_RXCCA_DIS);
 
-    //   2f. chan_idx encoding for 2G ch=1: BASE_IDX_2G(0)<<4 | ch(1) = 0x01
-    host::mmio_w32_mask(mmio, CR + R_MAC_PIN_SEL, B_CH_IDX_SEG0, 0x01);
+    //   2f. chan_idx encoding for 2G: BASE_IDX_2G(0)<<4 | ch = ch for 2G
+    host::mmio_w32_mask(mmio, CR + R_MAC_PIN_SEL, B_CH_IDX_SEG0, ch as u32);
 
     // ── 3. set_channel_rf (rtw8852b_ctrl_bw_ch) ──────────────────
     //   3a. _ctrl_ch: _ch_setting for path A/B with dav=true and false
@@ -168,7 +202,7 @@ pub fn set_channel_1_2g(mmio: i32) {
         let mut v = rf_read(mmio, path, RR_CFGCH);
         v &= !(RR_CFGCH_BAND1 | RR_CFGCH_POW_LCK | RR_CFGCH_TRX_AH
              | RR_CFGCH_BCN | RR_CFGCH_BAND0 | RR_CFGCH_CH | RR_CFGCH_BW2);
-        v |= 1; // CH = 1 (2G)
+        v |= ch as u32;  // CH = ch (2G, no BAND bits)
         v |= RR_CFGCH_BW2;
         rf_write(mmio, path, RR_CFGCH, RFREG_MASK, v);
         // Trigger LCK: toggle LCKST.BIN 0 → 1

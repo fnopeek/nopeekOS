@@ -23,7 +23,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.82 — set_channel(1, 2.4GHz, 20MHz)\n");
+    host::print("[wifi] RTL8852BE driver v0.83 — set_channel(7, user's AP)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -174,7 +174,7 @@ pub extern "C" fn _start() {
     // post-table default state with no LO tuned — scan_offload switches
     // channels but the receiver stays deaf. Linux calls set_channel once
     // per chanctx assign; we do it once before scan starts.
-    chan::set_channel_1_2g(mmio);
+    chan::set_channel_2g(mmio, 7);
 
     // ── Phase 6: WiFi scan ─────────────────────────────────────────
     mac::scan(mmio);
