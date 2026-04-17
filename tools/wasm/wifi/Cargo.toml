@@ -1,6 +1,6 @@
 [package]
 name = "wifi"
-version = "0.61.6"
+version = "0.61.7"
 edition = "2024"
 
 [lib]

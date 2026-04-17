@@ -257,10 +257,7 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
                     write_entry(mmio, kind, target, data);
                     stats.written += 1;
                     // Periodic liveness check — find exact killer entry.
-                    let check_freq = match kind {
-                        WriteKind::Rf(_) => 32,
-                        WriteKind::Bb    => 128,
-                    };
+                    let check_freq = 32u32;
                     if stats.written % check_freq == 0 {
                         let cfg1 = host::mmio_r32(mmio, 0x1000);
                         if cfg1 == 0xFFFF_FFFF {
