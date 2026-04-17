@@ -85,8 +85,13 @@ pub fn init(mmio: i32) {
     report("BB", &bb);
     dbg(mmio, "after-BB");
 
-    bb_reset(mmio);
-    dbg(mmio, "after-bb_reset");
+    // bb_reset SKIPPED — our previous impl toggled SYS_FUNC_EN.BB_GLB_RSTN
+    // (hard BB global reset), which isn't what Linux rtw8852b_bb_reset does.
+    // Linux does ~13 specific PHY register writes (P0/P1_TXPW_RSTB, TSSI_TRK,
+    // S0/S1_HW_SI_DIS, RSTB_ASYNC). Our hard reset was pulling PCIe down.
+    // bb_reset is a refresh step after table load — safe to skip for now.
+    host::print("  PHY: bb_reset... SKIPPED (wrong Linux mapping, TODO)\n");
+    dbg(mmio, "after-bb_reset(skip)");
 
     host::print("  PHY: BB gain... SKIPPED (needs config_bb_gain struct parser)\n");
 
