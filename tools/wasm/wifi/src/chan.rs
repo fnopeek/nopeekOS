@@ -233,3 +233,102 @@ pub fn set_channel_2g(mmio: i32, ch: u8) {
     crate::fw::print_dec(ch as usize);
     host::print(" (2.4GHz, 20MHz)\n");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  set_channel_help — 1:1 port of rtw8852b_set_channel_help
+//  Wraps set_channel with ENTER (quiesce) and EXIT (re-enable) blocks.
+//  Linux rtw8852b.c:627.
+// ═══════════════════════════════════════════════════════════════════
+
+// Register addresses used by help_enter/exit + bb_reset_en + adc_en + tssi_cont_en.
+const R_ADC_FIFO: u32       = 0x20FC;
+const B_ADC_FIFO_RST: u32   = 0xFF << 24;
+const R_PD_CTRL: u32        = 0x0C3C;
+const B_PD_HIT_DIS: u32     = 1 << 9;
+const R_S0_HW_SI_DIS: u32   = 0x1200;
+const R_S1_HW_SI_DIS: u32   = 0x3200;
+const B_HW_SI_DIS_TRIG: u32 = 0x7 << 28;
+const R_RSTB_ASYNC: u32     = 0x0704;
+const B_RSTB_ASYNC_ALL: u32 = 1 << 1;
+const R_P0_TSSI_TRK: u32    = 0x5818;
+const R_P0_TXPW_RSTB: u32   = 0x58DC;
+const R_P1_TSSI_TRK: u32    = 0x7818;
+const R_P1_TXPW_RSTB: u32   = 0x78DC;
+const B_TSSI_TRK_EN: u32    = 1 << 30;
+const B_TXPW_RSTB_MANON: u32 = 1 << 30;
+const R_AX_PPDU_STAT: u32   = 0xCE40;
+const B_AX_PPDU_STAT_RPT_EN: u32 = 1 << 0;
+const B_AX_PPDU_STAT_RPT_CRC32: u32 = 1 << 5;
+const B_AX_APP_PLCP_HDR_RPT: u32 = 1 << 3;
+const B_AX_APP_MAC_INFO_RPT: u32 = 1 << 1;
+const R_AX_HW_RPT_FWD: u32  = 0xBF0C;
+const B_AX_FWD_PPDU_STAT_MASK: u32 = 0x3 << 24;
+const RTW89_PRPT_DEST_HOST: u32 = 0;
+
+/// _tssi_cont_en / rtw8852b_tssi_cont_en_phyidx with en=false/true.
+fn tssi_cont_en(mmio: i32, en: bool) {
+    let v = if en { 0 } else { 1 };
+    host::mmio_w32_mask(mmio, CR + R_P0_TXPW_RSTB, B_TXPW_RSTB_MANON, v);
+    host::mmio_w32_mask(mmio, CR + R_P0_TSSI_TRK,  B_TSSI_TRK_EN,     v);
+    host::mmio_w32_mask(mmio, CR + R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON, v);
+    host::mmio_w32_mask(mmio, CR + R_P1_TSSI_TRK,  B_TSSI_TRK_EN,     v);
+}
+
+/// rtw8852b_adc_en — en=false: ADC_FIFO_RST=0xf (reset), en=true: =0 (run).
+fn adc_en(mmio: i32, en: bool) {
+    let v = if en { 0 } else { 0xF };
+    host::mmio_w32_mask(mmio, CR + R_ADC_FIFO, B_ADC_FIFO_RST, v);
+}
+
+/// rtw8852b_bb_reset_en (Linux rtw8852b.c:542, 2G branch only).
+fn bb_reset_en(mmio: i32, en: bool) {
+    if en {
+        host::mmio_w32_mask(mmio, CR + R_S0_HW_SI_DIS, B_HW_SI_DIS_TRIG, 0x0);
+        host::mmio_w32_mask(mmio, CR + R_S1_HW_SI_DIS, B_HW_SI_DIS_TRIG, 0x0);
+        host::mmio_w32_mask(mmio, CR + R_RSTB_ASYNC,   B_RSTB_ASYNC_ALL, 1);
+        // 2G: clear RXCCA_DIS
+        host::mmio_w32_mask(mmio, CR + R_RXCCA,   B_RXCCA_DIS,   0x0);
+        host::mmio_w32_mask(mmio, CR + R_PD_CTRL, B_PD_HIT_DIS,  0x0);
+    } else {
+        host::mmio_w32_mask(mmio, CR + R_RXCCA,   B_RXCCA_DIS,   0x1);
+        host::mmio_w32_mask(mmio, CR + R_PD_CTRL, B_PD_HIT_DIS,  0x1);
+        host::mmio_w32_mask(mmio, CR + R_S0_HW_SI_DIS, B_HW_SI_DIS_TRIG, 0x7);
+        host::mmio_w32_mask(mmio, CR + R_S1_HW_SI_DIS, B_HW_SI_DIS_TRIG, 0x7);
+        host::sleep_ms(1); // fsleep(1) in Linux
+        host::mmio_w32_mask(mmio, CR + R_RSTB_ASYNC,   B_RSTB_ASYNC_ALL, 0);
+    }
+}
+
+/// rtw89_mac_cfg_ppdu_status — Linux mac.c:6155.
+fn mac_cfg_ppdu_status(mmio: i32, enable: bool) {
+    if !enable {
+        host::mmio_clr32(mmio, R_AX_PPDU_STAT, B_AX_PPDU_STAT_RPT_EN);
+        return;
+    }
+    host::mmio_w32(mmio, R_AX_PPDU_STAT,
+        B_AX_PPDU_STAT_RPT_EN | B_AX_APP_MAC_INFO_RPT
+        | B_AX_APP_PLCP_HDR_RPT | B_AX_PPDU_STAT_RPT_CRC32);
+    host::mmio_w32_mask(mmio, R_AX_HW_RPT_FWD,
+        B_AX_FWD_PPDU_STAT_MASK, RTW89_PRPT_DEST_HOST);
+}
+
+/// 1:1 port of rtw8852b_set_channel_help(enter=true).
+/// Quiesces TX, TSSI, ADC, PPDU reporting and disables BB reset before
+/// set_channel runs. Matches Linux rtw8852b.c:633.
+pub fn set_channel_help_enter(mmio: i32) {
+    mac_cfg_ppdu_status(mmio, false);
+    tssi_cont_en(mmio, false);
+    adc_en(mmio, false);
+    host::sleep_ms(1); // fsleep(40)
+    bb_reset_en(mmio, false);
+}
+
+/// 1:1 port of rtw8852b_set_channel_help(enter=false) — the EXIT path.
+/// Re-enables ADC, TSSI, PPDU reporting and kicks BB reset. Without
+/// this the chip stays in the quiesced state and RX is dead.
+pub fn set_channel_help_exit(mmio: i32) {
+    mac_cfg_ppdu_status(mmio, true);
+    adc_en(mmio, true);
+    tssi_cont_en(mmio, true);
+    bb_reset_en(mmio, true);
+}

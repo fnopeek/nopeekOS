@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.86 — full IQK (LOK+TXK+RXK) 1:1 Linux\n");
+    host::print("[wifi] RTL8852BE driver v0.87 — full Linux rfk_channel flow\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -171,13 +171,17 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── Phase 5: set_channel(1, 2.4GHz, 20MHz) ───────────────────
-    // Tune RF to channel 1 BEFORE scan. Without this the radio is in a
-    // post-table default state with no LO tuned — scan_offload switches
-    // channels but the receiver stays deaf. Linux calls set_channel once
-    // per chanctx assign; we do it once before scan starts.
+    // ── Phase 5: Full Linux set_channel + rfk_channel flow ────────
+    // Linux rtw8852b_ops wraps this as:
+    //   set_channel_help(ENTER) → set_channel → rfk_channel → set_channel_help(EXIT)
+    // where rfk_channel = rx_dck + iqk + tssi + dpk. We skip TSSI/DPK
+    // (TX-only) but rx_dck + iqk are essential for RX.
+    chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 7);
-    iqk::run(mmio);
+    rfk::rx_dck(mmio);       // per-channel RX DC offset calibration
+    iqk::run(mmio);          // full IQK with BB+RF backup/restore
+    chan::set_channel_help_exit(mmio);
+    host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
 
     // ── Phase 6: WiFi scan ─────────────────────────────────────────
     mac::scan(mmio);
