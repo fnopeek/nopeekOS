@@ -12,6 +12,7 @@ mod mac;
 mod phy;
 mod rfk;
 mod rfk_tables;
+mod vif;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -21,7 +22,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.68 — BAR2 sizing in driver\n");
+    host::print("[wifi] RTL8852BE driver v0.70 — full VIF init (port_update + 4 H2Cs)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -167,7 +168,13 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── Phase 5: WiFi scan ─────────────────────────────────────────
+    // ── Phase 5: VIF init — 1:1 Linux rtw89_mac_vif_init ──────────
+    if !vif::init(mmio, 0 /*macid=0*/) {
+        host::print("[wifi] VIF init FAILED — press 'q' to exit\n");
+        loop { if host::input_wait(1000) == 0x71 { return; } }
+    }
+
+    // ── Phase 6: WiFi scan ─────────────────────────────────────────
     mac::scan(mmio);
 
     // ── Done — wait for exit ───────────────────────────────────────
