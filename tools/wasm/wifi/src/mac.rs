@@ -167,15 +167,73 @@ pub fn init(mmio: i32) -> bool {
     let ofld_cfg: [u8; 8] = [0x09, 0x00, 0x00, 0x00, 0x5E, 0x00, 0x00, 0x00];
     host::print("  H2C: set_ofld_cfg (dack=1)...\n");
     fw::h2c_send(mmio, 1, 9, 0x14, false, true, &ofld_cfg);
-
-    // ── 8.5. Diagnose: wait for C2H DONE_ACK (up to 200ms) ─────────
-    // If FW is alive and H2C pipe is bidirectional, RXQ HW_IDX should
-    // increment within a few ms. If it doesn't, the pipe itself is dead
-    // (not an init problem further down).
     diag_wait_c2h(mmio, 200, "ofld_cfg");
+
+    // ── 9. MACID 0 tables — Linux rtw89_mac_vif_init (mac.c:4933) ─────
+    // Before FW will treat MACID 0 as an active STA, the DMAC and CMAC
+    // tables for MACID 0 must be initialized via indirect-access writes.
+    // Without these, FW scan_offload accepts the command and ACKs it,
+    // but no RX path is wired up to MACID 0 → no beacons delivered.
+    host::print("  MAC: dmac_tbl_init(macid=0)\n");
+    dmac_tbl_init(mmio, 0);
+    host::print("  MAC: cmac_tbl_init(macid=0)\n");
+    cmac_tbl_init(mmio, 0);
+
+    // ── 10. macid_pause(0, false) — Linux mac.c:4325 / fw.c:5088 ─────
+    // Tells FW "MACID 0 is active and not paused". Without this, FW may
+    // drop any RX frames destined for MACID 0.
+    //   CAT=1 (MAC), CLASS=9 (FW_OFLD), FUNC=0x8 (MACID_PAUSE), rack=1 dack=0
+    //   Payload (32B): pause_grp[4]=0, mask_grp[4] = {BIT(0), 0, 0, 0}
+    let mut pause_payload = [0u8; 32];
+    pause_payload[16] = 0x01; // mask_grp[0] = BIT(0) → MACID 0
+    host::print("  H2C: macid_pause(0, false)...\n");
+    fw::h2c_send(mmio, 1, 9, 0x8, true, false, &pause_payload);
+    diag_wait_c2h(mmio, 200, "macid_pause");
 
     host::print("[wifi] MAC + PHY init complete\n");
     true
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  DMAC/CMAC table init — Linux mac.c:4291/4306
+// ═══════════════════════════════════════════════════════════════════
+//
+// The DMAC and CMAC tables are per-MACID register banks accessed via
+// two MAC registers:
+//   R_AX_FILTER_MODEL_ADDR  = 0x0C04  — write target base addr here
+//   R_AX_INDIR_ACCESS_ENTRY = 0x40000 — then write data through this window
+//
+// DMAC_TBL_BASE_ADDR = 0x18800000, CMAC_TBL_BASE_ADDR = 0x18840000
+// Each MACID gets 16 bytes in DMAC (4 u32s) and 32 bytes in CMAC (8 u32s).
+
+const R_AX_FILTER_MODEL_ADDR: u32  = 0x0C04;
+const R_AX_INDIR_ACCESS_ENTRY: u32 = 0x40000;
+const DMAC_TBL_BASE_ADDR: u32 = 0x18800000;
+const CMAC_TBL_BASE_ADDR: u32 = 0x18840000;
+const CCTL_INFO_SIZE: u32 = 32;
+
+/// Linux mac.c:4291 rtw89_mac_dmac_tbl_init — 4 u32 writes per MACID.
+fn dmac_tbl_init(mmio: i32, macid: u8) {
+    for i in 0..4u32 {
+        let target = DMAC_TBL_BASE_ADDR + ((macid as u32) << 4) + (i << 2);
+        host::mmio_w32(mmio, R_AX_FILTER_MODEL_ADDR, target);
+        host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY, 0);
+    }
+}
+
+/// Linux mac.c:4306 rtw89_mac_cmac_tbl_init — 8 u32 writes per MACID.
+/// Values from Linux are hardcoded defaults for an initial STA entry.
+fn cmac_tbl_init(mmio: i32, macid: u8) {
+    let target = CMAC_TBL_BASE_ADDR + (macid as u32) * CCTL_INFO_SIZE;
+    host::mmio_w32(mmio, R_AX_FILTER_MODEL_ADDR, target);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 0,  0x4);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 4,  0x400A0004);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 8,  0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 12, 0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 16, 0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 20, 0x0E43000B);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 24, 0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 28, 0x000B8109);
 }
 
 /// Diagnose: poll RXQ IDX for up to `max_ms` ms, report any HW_IDX advance.
