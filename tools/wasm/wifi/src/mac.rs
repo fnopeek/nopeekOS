@@ -160,6 +160,16 @@ pub fn init(mmio: i32) -> bool {
     crate::phy::init(mmio);
     dbg_checkpoint(mmio, "after PHY");
 
+    // ── 8. H2C set_ofld_cfg — Linux rtw89_fw_h2c_set_ofld_cfg (fw.c:5228)
+    // Sent after mac_init + phy tables, tells FW the offload config. Payload
+    // is a fixed 8-byte blob. Without it, FW doesn't know how to respond to
+    // scan offload requests.
+    //   CAT=1 (MAC), CLASS=9 (MAC_FW_OFLD), FUNC=0x14 (OFLD_CFG)
+    let ofld_cfg: [u8; 8] = [0x09, 0x00, 0x00, 0x00, 0x5E, 0x00, 0x00, 0x00];
+    fw::h2c_send(mmio, 1, 9, 0x14, &ofld_cfg);
+    host::sleep_ms(10);
+    host::print("  H2C: set_ofld_cfg sent\n");
+
     host::print("[wifi] MAC + PHY init complete\n");
     true
 }

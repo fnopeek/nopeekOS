@@ -120,6 +120,20 @@ pub fn init(mmio: i32) {
     report("NCTL", &nctl);
     dbg(mmio, "after-NCTL");
 
+    // edcca_init — Linux rtw89_phy_edcca_init for 8852B is 1 register write.
+    // Without proper EDCCA threshold, the MAC's CCA engine thinks the channel
+    // is always busy → RX is blocked for real frames.
+    //   R_TX_COLLISION_T2R_ST = 0x0C70
+    //   B_TX_COLLISION_T2R_ST_M = GENMASK(25, 20)
+    //   value = 0x29
+    const R_TX_COLLISION_T2R_ST: u32 = 0x0C70;
+    const TX_COLL_MASK: u32 = 0x3F << 20;
+    let v = host::mmio_r32(mmio, PHY_CR_BASE + R_TX_COLLISION_T2R_ST);
+    host::mmio_w32(mmio, PHY_CR_BASE + R_TX_COLLISION_T2R_ST,
+                   (v & !TX_COLL_MASK) | (0x29 << 20));
+    host::print("  PHY: edcca_init done\n");
+    dbg(mmio, "after-edcca_init");
+
     let total = bb.written + rfa.written + rfb.written + nctl.written;
     host::print("  PHY: done ("); fw::print_dec(total as usize);
     host::print(" regs written)\n");
