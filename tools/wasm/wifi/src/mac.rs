@@ -175,8 +175,9 @@ fn enable_bb_rf(mmio: i32) {
     host::mmio_w32_mask(mmio, regs::R_AX_SPS_DIG_ON_CTRL0,
         regs::B_AX_REG_ZCDC_H_MASK, 0x1);
 
-    // Step 3: AFE toggle (clr-clr-set) — NOT just set!
-    host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+    // Step 3: AFE toggle — Linux __rtw8852bx_mac_enable_bb_rf does SET-CLR-SET,
+    // not CLR-CLR-SET. The glitch pattern matters for AFE digital supply.
+    host::mmio_set32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
     host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
     host::mmio_set32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
 
