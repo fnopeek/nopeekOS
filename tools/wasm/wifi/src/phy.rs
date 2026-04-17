@@ -67,32 +67,49 @@ pub fn init(mmio: i32) {
     host::print("  PHY: rfe="); fw::print_dec(RFE as usize);
     host::print(" cv=");         fw::print_dec(CV as usize); host::print("\n");
 
+    dbg(mmio, "phy start");
+
     host::print("  PHY: loading BB regs...\n");
     let bb = run_table(mmio, BB_TABLE, WriteKind::Bb);
     report("BB", &bb);
+    dbg(mmio, "after BB");
 
     bb_reset(mmio);
+    dbg(mmio, "after bb_reset");
 
     host::print("  PHY: loading BB gain...\n");
     let gain = run_table(mmio, BB_GAIN_TABLE, WriteKind::Bb);
     report("BBgain", &gain);
+    dbg(mmio, "after BBgain");
 
     host::print("  PHY: loading RF path A...\n");
     let rfa = run_table(mmio, RF_A_TABLE, WriteKind::Rf(0));
     report("RF_A", &rfa);
+    dbg(mmio, "after RF_A");
 
     host::print("  PHY: loading RF path B...\n");
     let rfb = run_table(mmio, RF_B_TABLE, WriteKind::Rf(1));
     report("RF_B", &rfb);
+    dbg(mmio, "after RF_B");
 
     host::print("  PHY: loading NCTL...\n");
     let nctl = run_table(mmio, NCTL_TABLE, WriteKind::Bb);
     report("NCTL", &nctl);
+    dbg(mmio, "after NCTL");
 
     let total = bb.written + gain.written + rfa.written + rfb.written + nctl.written;
     host::print("  PHY: done (");
     fw::print_dec(total as usize);
     host::print(" regs written)\n");
+}
+
+/// Log PCIE_INIT_CFG1 (0x1000). When it reads 0xFFFFFFFF the chip has
+/// become unreachable on the bus — that pinpoints the killer sub-phase.
+fn dbg(mmio: i32, tag: &str) {
+    let cfg1 = host::mmio_r32(mmio, 0x1000);
+    host::print("    [dbg "); host::print(tag);
+    host::print("] CFG1=0x"); host::print_hex32(cfg1);
+    host::print("\n");
 }
 
 #[derive(Copy, Clone)]
