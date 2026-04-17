@@ -121,7 +121,16 @@ pub fn init(mmio: i32) -> bool {
     cmac_init(mmio);
     dbg_checkpoint(mmio, "after CMAC");
 
-    // ── 5. Enable IMRs (simplified) ────────────────────────────────
+    // ── 4.5. chip_func_en_ax (Linux mac.c:1675) — MISSING until now ───
+    // For 8852B: write32_set(R_AX_SPS_DIG_ON_CTRL0, B_AX_OCP_L1_MASK).
+    // This sets the Over-Current Protection L1 threshold bits [15:13].
+    // Without this, the SPS digital regulator runs with default OCP,
+    // and heavy BB register writes can trip the overcurrent protection,
+    // which pulls PCIe power down → chip unreachable after BB table.
+    host::mmio_set32(mmio, regs::R_AX_SPS_DIG_ON_CTRL0, 0x7 << 13); // B_AX_OCP_L1_MASK
+    dbg_checkpoint(mmio, "after chip_func_en");
+
+    // ── 5. Enable IMRs (simplified, matches Linux DMAC_ERR_IMR_EN=all) ──
     host::mmio_w32(mmio, 0x8520, 0xFFFFFFFF); // DMAC_ERR_IMR
     host::mmio_w32(mmio, 0xC160, 0xFFFFFFFF); // CMAC_ERR_IMR
 
@@ -133,12 +142,16 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_w32_mask(mmio, 0x9414, 0xFF << 16, 255); // TO=255
     host::print("  RPR: POH mode\n");
 
-    dbg_checkpoint(mmio, "before PHY");
+    // ── 6.5. mac_post_init BEFORE phy::init — Linux order ─────────
+    // Linux runs mac_post_init_ax (LTR + enable all DMA + TX_ADDR_INFO +
+    // clear STOP_WPDMA|STOP_PCIEIO) at the END of mac_init, BEFORE
+    // core_start proceeds to reset_bb_rf + phy tables. We had this call
+    // AFTER phy::init, leaving PCIe in a stopped state during BB writes.
+    pcie_post_init(mmio);
+    dbg_checkpoint(mmio, "after mac_post_init");
 
-    // ── 6.5. reset_bb_rf (disable + enable) — MATCHES Linux core_start ───
+    // ── 6.6. reset_bb_rf (disable + enable) — MATCHES Linux core_start ───
     // Linux calls rtw89_chip_reset_bb_rf between mac_init and phy_init_bb_reg.
-    // This brings BB/RF into a clean state so PHY tables load safely.
-    // Without this step BB/RF are in a partial state after mac_init.
     host::print("  PHY: reset_bb_rf (disable+enable)\n");
     reset_bb_rf(mmio);
     dbg_checkpoint(mmio, "after reset_bb_rf");
@@ -146,11 +159,6 @@ pub fn init(mmio: i32) -> bool {
     // ── 7. PHY init — BB + RF + NCTL tables ───
     crate::phy::init(mmio);
     dbg_checkpoint(mmio, "after PHY");
-
-    // ── 8. PCIe post-init — just enable DMA channels ──────────────
-    // NO BDRAM reset! Ring addresses were configured in fw.rs pre_init
-    // and persist across FWDL. Just enable channels like Linux mac_post_init.
-    pcie_post_init(mmio);
 
     host::print("[wifi] MAC + PHY init complete\n");
     true
