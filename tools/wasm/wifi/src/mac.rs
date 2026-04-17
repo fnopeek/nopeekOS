@@ -160,6 +160,44 @@ pub fn init(mmio: i32) -> bool {
     crate::phy::init(mmio);
     dbg_checkpoint(mmio, "after PHY");
 
+    // ── 7.3. cfg_txrx_path(RF_AB, 2G) — Linux rtw8852bx_bb_cfg_txrx_path
+    //   (rtw8852b_common.c:1743) — enables RX antenna path. All writes are
+    //   PHY-space, so each address gets + PHY_CR_BASE (0x10000).
+    // Matches RF_AB (dual-path) + rx_nss=2 branch.
+    const CR: u32 = 0x10000;
+    //   R_CHBW_MOD_V1=0x49C4, B_ANT_RX_SEG0=GENMASK(3,0) → 3 (RF_AB)
+    host::mmio_w32_mask(mmio, CR + 0x49C4, 0xF, 3);
+    //   R_FC0_BW_V1=0x49C0, B_ANT_RX_1RCCA_SEG0=GENMASK(17,14) → 3
+    host::mmio_w32_mask(mmio, CR + 0x49C0, 0xF << 14, 3);
+    //   R_FC0_BW_V1=0x49C0, B_ANT_RX_1RCCA_SEG1=GENMASK(21,18) → 3
+    host::mmio_w32_mask(mmio, CR + 0x49C0, 0xF << 18, 3);
+    //   R_RXHT_MCS_LIMIT=0x0D18, B_RXHT_MCS_LIMIT=GENMASK(9,8) → 1 (2-stream)
+    host::mmio_w32_mask(mmio, CR + 0x0D18, 0x3 << 8, 1);
+    //   R_RXVHT_MCS_LIMIT=0x0D18, B_RXVHT_MCS_LIMIT=GENMASK(22,21) → 1
+    host::mmio_w32_mask(mmio, CR + 0x0D18, 0x3 << 21, 1);
+    //   R_RXHE=0x0D80, B_RXHE_USER_MAX=GENMASK(13,6) → 4
+    host::mmio_w32_mask(mmio, CR + 0x0D80, 0xFF << 6, 4);
+    //   R_RXHE, B_RXHE_MAX_NSS=GENMASK(16,14) → 1
+    host::mmio_w32_mask(mmio, CR + 0x0D80, 0x7 << 14, 1);
+    //   R_RXHE, B_RXHETB_MAX_NSS=GENMASK(25,23) → 1
+    host::mmio_w32_mask(mmio, CR + 0x0D80, 0x7 << 23, 1);
+    //   RFMODE — both P0 and P1 set same for RF_AB:
+    //   R_P0_RFMODE=0x12AC, B_P0_RFMODE_ORI_TXRX_FTM_TX=GENMASK(31,4) → 0x1233312
+    host::mmio_w32_mask(mmio, CR + 0x12AC, 0xFFFFFFF0, 0x1233312);
+    //   R_P0_RFMODE_FTM_RX=0x12B0, B_P0_RFMODE_FTM_RX=GENMASK(11,0) → 0x333
+    host::mmio_w32_mask(mmio, CR + 0x12B0, 0xFFF, 0x333);
+    //   R_P1_RFMODE=0x32AC → 0x1233312
+    host::mmio_w32_mask(mmio, CR + 0x32AC, 0xFFFFFFF0, 0x1233312);
+    //   R_P1_RFMODE_FTM_RX=0x32B0 → 0x333
+    host::mmio_w32_mask(mmio, CR + 0x32B0, 0xFFF, 0x333);
+    //   TXPW reset toggle (P1 for rx_path != RF_A)
+    //   R_P1_TXPW_RSTB=0x78DC, bit 30=MANON, bit 31=TSSI → 1 then 3
+    host::mmio_w32_mask(mmio, CR + 0x78DC, (1<<30) | (1<<31), 1);
+    host::mmio_w32_mask(mmio, CR + 0x78DC, (1<<30) | (1<<31), 3);
+    //   R_MAC_SEL=0x09A4, B_MAC_SEL_MOD=GENMASK(4,2) → 0
+    host::mmio_w32_mask(mmio, CR + 0x09A4, 0x7 << 2, 0);
+    host::print("  TXRX path: RF_AB configured (2G)\n");
+
     // ── 7.5. cfg_ppdu_status(HOST) — Linux mac.c:6155 rtw89_mac_cfg_ppdu_status_ax
     // Enables PPDU status reports + routes them to HOST. Without this, RX
     // frames stay in FW-internal space and never reach the RXQ DMA ring.
