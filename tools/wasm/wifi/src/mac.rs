@@ -772,6 +772,20 @@ fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
 pub fn scan(mmio: i32) {
     host::print("\n[wifi] Phase 5: WiFi scan\n");
 
+    // ── RX filter for scan — Linux fw.c:9103 rtw89_hw_scan_start
+    // DEFAULT_AX_RX_FLTR drops everything not matching A1 (our MAC), so
+    // beacons from other APs get filtered out before reaching RXQ.
+    //
+    //   DEFAULT = UID_FILTER(3<<24) | A_FTM_REQ | A_PWR_MGNT | A_BCN_CHK_EN
+    //           | A_BC_CAM_MATCH | A_UC_CAM_MATCH | A_MC | A_BC | A_A1_MATCH
+    //           = 0x030044BE
+    //   SCAN   = DEFAULT & ~(A_BCN_CHK_EN | A_BC | A_A1_MATCH)
+    //           = 0x03004438   ← let broadcasts + beacons through
+    //
+    // R_AX_RX_FLTR_OPT = 0xCE20 (reg.h:3312)
+    host::mmio_w32(mmio, 0xCE20, 0x03004438);
+    host::print("  RX_FLTR: scan mode (BCN_CHK/BC/A1 off)\n");
+
     // ── config_edcca(scan=true) — Linux phy.c:8042 ────────────────────
     // Saves current EDCCA levels + sets them to EDCCA_MAX (249) so that
     // the CCA engine doesn't filter out real frames during scan. Without
