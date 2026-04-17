@@ -684,6 +684,13 @@ fn cmac_init(mmio: i32) {
     host::mmio_set32(mmio, R_AX_RESPBA_CAM_CTRL, 1 << 2);   // SSN_SEL
     host::mmio_w32_mask(mmio, R_AX_RCR, 0xF, 1);             // CH_EN = 1
 
+    //   9b. B_AX_RX_MPDU_MAX_LEN_MASK — bits [21:16] of R_AX_RX_FLTR_OPT.
+    //   Linux rmac_init_ax:2862 computes this from c0_rx_qta * ple_pg_size
+    //   / 512. A zero value makes the RMAC reject every incoming WiFi frame
+    //   as "too long" — this is why our scan saw only C2H messages (type 10)
+    //   and zero WiFi frames (type 0). Safe upper bound: 0x3F = 63 → 32 KB.
+    host::mmio_w32_mask(mmio, R_AX_RX_FLTR_OPT, 0x3F << 16, 0x3F);
+
     // 10. CMAC com
     host::mmio_w32_mask(mmio, R_AX_PTCL_RRSR1, 0xF << 8, 3); // OFDM+CCK
 
@@ -945,8 +952,13 @@ pub fn scan(mmio: i32) {
     //           = 0x03004438   ← let broadcasts + beacons through
     //
     // R_AX_RX_FLTR_OPT = 0xCE20 (reg.h:3312)
-    host::mmio_w32(mmio, 0xCE20, 0x03004438);
-    host::print("  RX_FLTR: scan mode (BCN_CHK/BC/A1 off)\n");
+    // Linux mac.c:2612 uses a PRESERVE-MASK = ~B_AX_RX_MPDU_MAX_LEN_MASK so
+    // that a scan-mode rx_fltr write cannot zero out MPDU_MAX_LEN. A raw
+    // w32 would drop MAX_LEN to 0 and RMAC would reject every beacon.
+    let cur = host::mmio_r32(mmio, 0xCE20);
+    let cfg_mask: u32 = !(0x3F << 16); // preserve bits [21:16]
+    host::mmio_w32(mmio, 0xCE20, (cur & !cfg_mask) | (0x03004438 & cfg_mask));
+    host::print("  RX_FLTR: scan mode (BCN_CHK/BC/A1 off, MPDU_MAX_LEN preserved)\n");
 
     // ── config_edcca(scan=true) — Linux phy.c:8042 ────────────────────
     // Saves current EDCCA levels + sets them to EDCCA_MAX (249) so that
