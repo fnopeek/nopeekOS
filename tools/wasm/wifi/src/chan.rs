@@ -229,5 +229,7 @@ pub fn set_channel_2g(mmio: i32, ch: u8) {
         rf_write(mmio, path, RR_LUTWE2, RR_LUTWE2_RTXBW, 0);
     }
 
-    host::print("  CHAN: RF tuned to channel 1 (2.4GHz, 20MHz)\n");
+    host::print("  CHAN: RF tuned to channel ");
+    crate::fw::print_dec(ch as usize);
+    host::print(" (2.4GHz, 20MHz)\n");
 }
