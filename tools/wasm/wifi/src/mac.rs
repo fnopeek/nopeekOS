@@ -220,6 +220,62 @@ pub fn init(mmio: i32) -> bool {
     }
     host::print("  BB: sethw (EN_SOUND clr + MACID pwr table 0)\n");
 
+    // ── 7.26. phy_dig_init (8852b subset) — Linux phy.c:6838 __rtw89_phy_dig_init
+    //   For 8852B hal.support_igi=false (core.c:6294) so update_gain_para and
+    //   set_igi_cr are NO-OP. dig_para_reset + dig_update_para are software-
+    //   state only. The only MMIO bits are dig_dyn_pd_th(rssi=22, enable=false)
+    //   and sdagc_follow_pagc_config(false). These set PD thresholds to 0
+    //   (most sensitive) and disable pagcugc enables.
+    //
+    //   dig_regs for 8852b (rtw8852b.c:217):
+    //     seg0_pd_reg       = R_SEG0R_PD_V1         = 0x4860
+    //     pd_lower_bound    = [10:6]
+    //     pd_spatial_reuse  = bit 30
+    //     bmode_pd_reg      = R_BMODE_PDTH_EN_V1    = 0x4B74
+    //     bmode_cca_lim_en  = bit 30
+    //     bmode_lower_reg   = R_BMODE_PDTH_V1       = 0x4B64
+    //     bmode_lower_mask  = [31:24]
+    //     p0_p20_pagcugc_en = R_PATH0_P20_FOLLOW_BY_PAGCUGC_V2 = 0x46E8, bit 5
+    //     p0_s20_pagcugc_en = 0x46EC, bit 5
+    //     p1_p20_pagcugc_en = 0x47A8, bit 5
+    //     p1_s20_pagcugc_en = 0x47AC, bit 5
+    //   support_cckpd=true for 8852b (cv>CAV) → CCK PD writes also run.
+    //   With enable=false: everything goes to 0 (max sensitivity for scan).
+    host::mmio_w32_mask(mmio, cr_base + 0x4860, 0x1F << 6, 0);   // PD_LOWER_BOUND=0
+    host::mmio_w32_mask(mmio, cr_base + 0x4860, 1 << 30, 0);     // spatial_reuse_en=0
+    host::mmio_w32_mask(mmio, cr_base + 0x4B74, 1 << 30, 0);     // bmode CCA limit en=0
+    host::mmio_w32_mask(mmio, cr_base + 0x4B64, 0xFFu32 << 24, 0); // bmode PD lower=0
+    host::mmio_w32_mask(mmio, cr_base + 0x46E8, 1 << 5, 0);      // p0 p20 pagcugc=0
+    host::mmio_w32_mask(mmio, cr_base + 0x46EC, 1 << 5, 0);      // p0 s20 pagcugc=0
+    host::mmio_w32_mask(mmio, cr_base + 0x47A8, 1 << 5, 0);      // p1 p20 pagcugc=0
+    host::mmio_w32_mask(mmio, cr_base + 0x47AC, 1 << 5, 0);      // p1 s20 pagcugc=0
+    host::print("  PHY: dig_init (PD thresholds = 0)\n");
+
+    // ── 7.28. env_monitor_init → ccx_top_setting_init — Linux phy.c:5799
+    //   Enables CCX measurement engine for channel quality tracking.
+    //   ccx_regs_ax (phy.c:8318 area): setting_addr = R_CCX = 0x0C00
+    //     en_mask             = B_CCX_EN_MSK             = BIT(0)
+    //     trig_opt_mask       = B_CCX_TRIG_OPT_MSK       = BIT(1)
+    //     measurement_trig    = B_MEASUREMENT_TRIG_MSK   = BIT(2)
+    //     edcca_opt_mask      = B_CCX_EDCCA_OPT_MSK      = GENMASK(6, 4)
+    //   RTW89_CCX_EDCCA_BW20_0 = 0
+    host::mmio_w32_mask(mmio, cr_base + 0x0C00, 1 << 0, 1);
+    host::mmio_w32_mask(mmio, cr_base + 0x0C00, 1 << 1, 1);
+    host::mmio_w32_mask(mmio, cr_base + 0x0C00, 1 << 2, 1);
+    host::mmio_w32_mask(mmio, cr_base + 0x0C00, 0x7 << 4, 0);
+    host::print("  PHY: ccx_top (CCX engine enabled)\n");
+
+    // ── 7.29. cfo_init (subset) — Linux phy.c:4957
+    //   Runs dcfo_comp_init. 8852b has cfo_hw_comp=true (rtw8852b.c:1032) so:
+    //     PHY R_DCFO_OPT (0x4494), B_DCFO_OPT_EN (BIT(29)) = 1
+    //     PHY R_DCFO_WEIGHT (0x4490), B_DCFO_WEIGHT_MSK (GENMASK(27,24)) = 8
+    //     MAC R_AX_PWR_UL_CTRL2 (0xD248), B_AX_PWR_UL_CFO_MASK ([2:0]) = 6
+    //   Skipping crystal_cap setting (needs efuse xtal_cap we don't parse).
+    host::mmio_w32_mask(mmio, cr_base + 0x4494, 1 << 29, 1);
+    host::mmio_w32_mask(mmio, cr_base + 0x4490, 0xF << 24, 8);
+    host::mmio_w32_mask(mmio, 0xD248, 0x7, 6);
+    host::print("  PHY: cfo_init (DCFO + hw comp)\n");
+
     // ── 7.27. physts_parsing_init — Linux phy.c:6683 for PHY_0
     //   Configures how FW extracts PHY status info from received PPDUs.
     //   Without this, RX frames reach the MAC but have invalid/missing
