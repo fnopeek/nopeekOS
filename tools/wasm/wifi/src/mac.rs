@@ -135,7 +135,15 @@ pub fn init(mmio: i32) -> bool {
 
     dbg_checkpoint(mmio, "before PHY");
 
-    // ── 7. PHY init — now with proper conditional state machine ───
+    // ── 6.5. reset_bb_rf (disable + enable) — MATCHES Linux core_start ───
+    // Linux calls rtw89_chip_reset_bb_rf between mac_init and phy_init_bb_reg.
+    // This brings BB/RF into a clean state so PHY tables load safely.
+    // Without this step BB/RF are in a partial state after mac_init.
+    host::print("  PHY: reset_bb_rf (disable+enable)\n");
+    reset_bb_rf(mmio);
+    dbg_checkpoint(mmio, "after reset_bb_rf");
+
+    // ── 7. PHY init — BB + RF + NCTL tables ───
     crate::phy::init(mmio);
     dbg_checkpoint(mmio, "after PHY");
 
@@ -167,6 +175,7 @@ fn dbg_checkpoint(mmio: i32, tag: &str) {
 // ═══════════════════════════════════════════════════════════════════
 
 fn enable_bb_rf(mmio: i32) {
+    // Linux __rtw8852bx_mac_enable_bb_rf, order matters.
     // Step 1: Enable BB reset + global reset
     host::mmio_set8(mmio, regs::R_AX_SYS_FUNC_EN,
         regs::B_AX_FEN_BBRSTB | regs::B_AX_FEN_BB_GLB_RSTN);
@@ -175,20 +184,50 @@ fn enable_bb_rf(mmio: i32) {
     host::mmio_w32_mask(mmio, regs::R_AX_SPS_DIG_ON_CTRL0,
         regs::B_AX_REG_ZCDC_H_MASK, 0x1);
 
-    // Step 3: AFE toggle — Linux docs SET-CLR-SET but empirically that kills
-    // BB writes on our board. Revert to CLR-CLR-SET which keeps BB safe.
-    // TODO: investigate why the "Linux-correct" pattern breaks — likely a
-    // pre-state difference from missing earlier init step.
+    // Step 3: AFE toggle — Linux does SET-CLR-SET. We keep CLR-CLR-SET for now
+    // because empirically SET-CLR-SET kills BB writes. Re-evaluate once
+    // earlier init steps (disable_bb_rf, reset_bb_rf) are correct.
     host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
     host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
     host::mmio_set32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
 
-    // Step 4: XTAL SI — enable RF switches S0 + S1
+    // Step 4: XTAL SI — enable RF switches S0 + S1 (write 0xC7 full mask)
     fw::write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S0, 0xC7, 0xFF);
     fw::write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S1, 0xC7, 0xFF);
 
     // Step 5: PHY register access cycle time
     host::mmio_set8(mmio, 0x8040, 0x01); // R_AX_PHYREG_SET = XYN_CYCLE
+}
+
+/// 1:1 Linux __rtw8852bx_mac_disable_bb_rf (rtw8852b_common.c:2036).
+/// Clears WLRF_CTRL.AFEDIG, clears BBRSTB+BB_GLB_RSTN, clears RFC S0/S1
+/// enable bits via XTAL SI. Read-modify-write on XTAL SI needs a read,
+/// which we don't have; Linux reads the current value and clears one bit.
+/// We approximate by writing 0x00 with mask 0x01 (XTAL_SI_RF00S_EN/S1_EN
+/// lives at bit 0) — only clears the target bit, other bits stay 0 after
+/// pwr_on which is what Linux achieves via RMW in the common case.
+pub fn disable_bb_rf(mmio: i32) {
+    // Step 1: Clear AFE digital
+    host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
+
+    // Step 2: Clear BB reset + global reset
+    host::mmio_clr8(mmio, regs::R_AX_SYS_FUNC_EN,
+        regs::B_AX_FEN_BBRSTB | regs::B_AX_FEN_BB_GLB_RSTN);
+
+    // Step 3: Clear XTAL_SI_RF00S_EN on S0 (bit 0)
+    //         Clear XTAL_SI_RF10S_EN on S1 (bit 0)
+    // Linux does read-modify-write; we write value=0 with mask=0x01 so only
+    // bit 0 is affected.
+    fw::write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S0, 0x00, 0x01);
+    fw::write_xtal_si(mmio, regs::XTAL_SI_WL_RFC_S1, 0x00, 0x01);
+}
+
+/// 1:1 Linux rtw89_chip_reset_bb_rf (mac.h:1321): disable then enable.
+/// Linux calls this in core_start BETWEEN mac_init and phy_init_bb_reg,
+/// so BB/RF is brought into a clean state before PHY tables are loaded.
+pub fn reset_bb_rf(mmio: i32) {
+    disable_bb_rf(mmio);
+    enable_bb_rf(mmio);
 }
 
 // ═══════════════════════════════════════════════════════════════════
