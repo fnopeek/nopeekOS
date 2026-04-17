@@ -1,0 +1,475 @@
+//! VIF (Virtual Interface) init — 1:1 port of Linux rtw89_mac_vif_init
+//!
+//! Linux chain (mac.c:4933):
+//!   1. rtw89_mac_port_update           (mac.c:4992)
+//!   2. rtw89_mac_dmac_tbl_init         (mac.c:4291)
+//!   3. rtw89_mac_cmac_tbl_init         (mac.c:4306)
+//!   4. rtw89_mac_set_macid_pause       (mac.c:4325) → fw.c:5088
+//!   5. rtw89_fw_h2c_role_maintain      (fw.c:4857)
+//!   6. rtw89_fw_h2c_join_info          (fw.c:4953)
+//!   7. rtw89_cam_init                  (cam.c:741)       [software only]
+//!   8. rtw89_fw_h2c_cam                (fw.c:2221)
+//!   9. rtw89_chip_h2c_default_cmac_tbl (fw.c:3521)
+//!
+//! All tailored for: STATION, port 0, band 0, MACID 0, NOT CONNECTED (dis_conn=true).
+
+use crate::host;
+use crate::fw;
+
+/// Our pseudo MAC address (will be used as scan_mac_addr — like Linux random scan mac).
+pub const STA_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+// ── rtw89 enum values (core.h) ────────────────────────────────────
+const NET_TYPE_NO_LINK: u32    = 0;
+const WIFI_ROLE_STATION: u32   = 1;
+const SELF_ROLE_CLIENT: u32    = 0;
+const UPD_MODE_CREATE: u32     = 0;
+const ADDR_CAM_SEC_NORMAL: u32 = 2;
+const BSSID_MATCH_ALL: u32     = 0x3F;         // GENMASK(5,0)
+
+// CAM entry sizes (mac.h)
+const ADDR_CAM_ENT_SIZE: u32  = 0x40;
+const BSSID_CAM_ENT_SIZE: u32 = 0x08;
+
+// MACID table base addresses (mac.h:309/315)
+const R_AX_FILTER_MODEL_ADDR: u32  = 0x0C04;
+const R_AX_INDIR_ACCESS_ENTRY: u32 = 0x40000;
+const DMAC_TBL_BASE_ADDR: u32 = 0x18800000;
+const CMAC_TBL_BASE_ADDR: u32 = 0x18840000;
+const CCTL_INFO_SIZE: u32 = 32;
+
+// Port 0 register addresses (reg.h) — rtw89_port_base_ax (mac.c:4347)
+const R_AX_PORT_CFG_P0: u32        = 0xC400;
+const R_AX_TBTT_PROHIB_P0: u32     = 0xC404;
+const R_AX_BCN_AREA_P0: u32        = 0xC408;
+const R_AX_BCNERLYINT_CFG_P0: u32  = 0xC40C;
+const R_AX_TBTTERLYINT_CFG_P0: u32 = 0xC40E;
+const R_AX_TBTT_AGG_P0: u32        = 0xC412;
+const R_AX_BCN_SPACE_CFG_P0: u32   = 0xC414;
+const R_AX_DTIM_CTRL_P0: u32       = 0xC426;
+const R_AX_BCN_CNT_TMR_P0: u32     = 0xC434;
+const R_AX_MD_TSFT_STMP_CTL: u32   = 0xCA08;
+const R_AX_PTCL_BSS_COLOR_0: u32   = 0xC6A0;
+const R_AX_MBSSID_CTRL: u32        = 0xC568;
+const R_AX_MBSSID_DROP_0: u32      = 0xC63C;
+const R_AX_P0MB_HGQ_WINDOW_CFG_0: u32 = 0xC590;
+const R_AX_BCN_PSR_RPT_P0: u32     = 0xCE84;
+
+// Port cfg bit masks (reg.h)
+const B_AX_BRK_SETUP: u32       = 1 << 16;
+const B_AX_TBTT_PROHIB_EN: u32  = 1 << 13;
+const B_AX_BCNTX_EN: u32        = 1 << 12;
+const B_AX_NET_TYPE_MASK: u32   = 0x3 << 10;
+const B_AX_TSFTR_RST: u32       = 1 << 5;
+const B_AX_RX_BSSID_FIT_EN: u32 = 1 << 4;
+const B_AX_TSF_UDT_EN: u32      = 1 << 3;
+const B_AX_PORT_FUNC_EN: u32    = 1 << 2;
+const B_AX_TXBCN_RPT_EN: u32    = 1 << 1;
+const B_AX_RXBCN_RPT_EN: u32    = 1 << 0;
+
+// Defaults from mac.c:4435
+const BCN_INTERVAL: u32 = 100;
+const BCN_ERLY_DEF: u32 = 160;
+const BCN_SETUP_DEF: u32 = 2;
+const BCN_HOLD_DEF: u32 = 200;
+const TBTT_ERLY_DEF: u32 = 5;
+const TBTT_AGG_DEF: u32 = 1;
+
+// ═══════════════════════════════════════════════════════════════════
+//  Main entry — full VIF init for MACID 0, port 0, band 0
+// ═══════════════════════════════════════════════════════════════════
+
+pub fn init(mmio: i32, macid: u8) -> bool {
+    host::print("\n[wifi] Phase 5: VIF init (macid=");
+    fw::print_dec(macid as usize);
+    host::print(")\n");
+
+    // 1. port_update for port 0 in NO_LINK state
+    host::print("  VIF: port_update(port=0, NOLINK)\n");
+    port_update_p0_nolink(mmio);
+
+    // 2. dmac_tbl_init — Linux mac.c:4291
+    host::print("  VIF: dmac_tbl_init(macid=");
+    fw::print_dec(macid as usize); host::print(")\n");
+    dmac_tbl_init(mmio, macid);
+
+    // 3. cmac_tbl_init — Linux mac.c:4306
+    host::print("  VIF: cmac_tbl_init(macid=");
+    fw::print_dec(macid as usize); host::print(")\n");
+    cmac_tbl_init(mmio, macid);
+
+    // 4. macid_pause(unpause) — Linux mac.c:4325 / fw.c:5088
+    //    CAT=1, CLASS=9, FUNC=0x8, rack=1, dack=0, 32B payload
+    host::print("  H2C: macid_pause(unpause)...\n");
+    h2c_macid_pause(mmio, macid, false);
+    wait_c2h(mmio, 200, "macid_pause");
+
+    // 5. role_maintain(CREATE) — Linux fw.c:4857
+    //    CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x4, rack=0, dack=1, 4B payload
+    host::print("  H2C: role_maintain(CREATE)...\n");
+    h2c_role_maintain(mmio, macid, 0 /*port*/, 0 /*band*/);
+    wait_c2h(mmio, 200, "role_maintain");
+
+    // 6. join_info(dis_conn=true) — Linux fw.c:4953
+    //    CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x0, rack=0, dack=1, 4B payload (AX)
+    host::print("  H2C: join_info(dis_conn)...\n");
+    h2c_join_info(mmio, macid, 0 /*port*/, 0 /*band*/);
+    wait_c2h(mmio, 200, "join_info");
+
+    // 7. (cam_init is software-only, no H2C)
+
+    // 8. h2c_cam(CREATE) — Linux fw.c:2221
+    //    CAT=1, CLASS=6 (ADDR_CAM_UPDATE), FUNC=0x0, rack=0, dack=1, 60B payload (AX)
+    host::print("  H2C: addr_cam_upd(CREATE)...\n");
+    h2c_cam(mmio, macid, 0 /*port*/);
+    wait_c2h(mmio, 200, "addr_cam");
+
+    // 9. default_cmac_tbl — Linux fw.c:3521
+    //    CAT=1, CLASS=5 (FR_EXCHG), FUNC=0x2 (CCTLINFO_UD for 8852b), rack=0, dack=1, 68B
+    host::print("  H2C: default_cmac_tbl...\n");
+    h2c_default_cmac_tbl(mmio, macid);
+    wait_c2h(mmio, 200, "default_cmac_tbl");
+
+    host::print("[wifi] VIF init complete\n");
+    true
+}
+
+fn wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
+    // R_AX_RXQ_RXBD_IDX = 0x1080 — use the same address as mac.rs
+    const R_AX_RXQ_RXBD_IDX: u32 = 0x1080;
+    let idx0 = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+    let hw0 = (idx0 >> 16) & 0xFFFF;
+    for ms in 0..max_ms {
+        let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
+        let hw = (idx >> 16) & 0xFFFF;
+        if hw != hw0 {
+            host::print("    [diag "); host::print(tag);
+            host::print("] C2H after "); fw::print_dec(ms as usize);
+            host::print("ms (hw "); fw::print_dec(hw0 as usize);
+            host::print("→"); fw::print_dec(hw as usize); host::print(")\n");
+            return;
+        }
+        host::sleep_ms(1);
+    }
+    host::print("    [diag "); host::print(tag);
+    host::print("] NO C2H after "); fw::print_dec(max_ms as usize);
+    host::print("ms\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  port_update — STA on port 0 in NO_LINK state
+// ═══════════════════════════════════════════════════════════════════
+
+fn port_update_p0_nolink(mmio: i32) {
+    // rtw89_mac_port_cfg_func_sw (mac.c:4445):
+    //   early returns if PORT_FUNC_EN is not already set; on first init it isn't, skip.
+
+    // rtw89_mac_port_cfg_tx_rpt(false) / rx_rpt(false) — clear both in PORT_CFG
+    host::mmio_clr32(mmio, R_AX_PORT_CFG_P0, B_AX_TXBCN_RPT_EN | B_AX_RXBCN_RPT_EN);
+
+    // rtw89_mac_port_cfg_net_type — NET_TYPE = NO_LINK (0)
+    host::mmio_w32_mask(mmio, R_AX_PORT_CFG_P0, B_AX_NET_TYPE_MASK, NET_TYPE_NO_LINK);
+
+    // rtw89_mac_port_cfg_bcn_prct — NO_LINK → clear TBTT_PROHIB_EN | BRK_SETUP
+    host::mmio_clr32(mmio, R_AX_PORT_CFG_P0, B_AX_TBTT_PROHIB_EN | B_AX_BRK_SETUP);
+
+    // rtw89_mac_port_cfg_rx_sw — not INFRA/ADHOC → clear RX_BSSID_FIT_EN
+    host::mmio_clr32(mmio, R_AX_PORT_CFG_P0, B_AX_RX_BSSID_FIT_EN);
+
+    // rtw89_mac_port_cfg_rx_sync_by_nettype — NO_LINK → clear TSF_UDT_EN
+    host::mmio_clr32(mmio, R_AX_PORT_CFG_P0, B_AX_TSF_UDT_EN);
+
+    // rtw89_mac_port_cfg_tx_sw_by_nettype — not AP/ADHOC → clear BCNTX_EN
+    host::mmio_clr32(mmio, R_AX_PORT_CFG_P0, B_AX_BCNTX_EN);
+
+    // rtw89_mac_port_cfg_bcn_intv — BCN_SPACE_MASK = BCN_INTERVAL=100
+    // bcn_space @ 0xC414, BCN_SPACE_MASK = GENMASK(15,0)
+    host::mmio_w32_mask(mmio, R_AX_BCN_SPACE_CFG_P0, 0xFFFF, BCN_INTERVAL);
+
+    // rtw89_mac_port_cfg_hiq_win — NO_LINK → win = 0 (8-bit write)
+    // R_AX_P0MB_HGQ_WINDOW_CFG_0 = 0xC590. Low byte = win value.
+    host::mmio_w32_mask(mmio, R_AX_P0MB_HGQ_WINDOW_CFG_0, 0xFF, 0);
+
+    // rtw89_mac_port_cfg_hiq_dtim — set UPD_HGQMD|UPD_TIMIE in md_tsft, DTIM_NUM=0
+    // md_tsft @ 0xCA08 — 8-bit set of bits 0,1
+    host::mmio_set8(mmio, R_AX_MD_TSFT_STMP_CTL, 0x03);
+    // dtim_ctrl @ 0xC426 (16-bit reg), DTIM_NUM_MASK = GENMASK(15,8) → upper byte
+    // Access as 32-bit at 0xC424, DTIM is bits [31:24]
+    host::mmio_w32_mask(mmio, 0xC424, 0xFF << 24, 0);
+
+    // rtw89_mac_port_cfg_hiq_drop — clear bit(port) in PORT_DROP_4_0_MASK (GENMASK(20,16))
+    //   and also bit 0 (for port 0)
+    let drop = host::mmio_r32(mmio, R_AX_MBSSID_DROP_0);
+    let drop_new = drop & !((1u32 << 16) | 1u32);
+    host::mmio_w32(mmio, R_AX_MBSSID_DROP_0, drop_new);
+
+    // rtw89_mac_port_cfg_bcn_setup_time — TBTT_SETUP_MASK = GENMASK(7,0) = BCN_SETUP_DEF=2
+    host::mmio_w32_mask(mmio, R_AX_TBTT_PROHIB_P0, 0xFF, BCN_SETUP_DEF);
+
+    // rtw89_mac_port_cfg_bcn_hold_time — TBTT_HOLD_MASK = GENMASK(27,16) = BCN_HOLD_DEF=200
+    host::mmio_w32_mask(mmio, R_AX_TBTT_PROHIB_P0, 0xFFF << 16, BCN_HOLD_DEF);
+
+    // rtw89_mac_port_cfg_bcn_mask_area — BCN_MSK_AREA_MASK = GENMASK(27,16) = 0
+    host::mmio_w32_mask(mmio, R_AX_BCN_AREA_P0, 0xFFF << 16, 0);
+
+    // rtw89_mac_port_cfg_tbtt_early — 16-bit at 0xC40E, TBTTERLY_MASK = GENMASK(11,0) = 5
+    // 32-bit access at 0xC40C (BCNERLY) has TBTTERLY in bits [27:16] (shifted by 16)
+    host::mmio_w32_mask(mmio, R_AX_BCNERLYINT_CFG_P0, 0xFFF << 16, TBTT_ERLY_DEF);
+
+    // rtw89_mac_port_cfg_tbtt_agg — 16-bit at 0xC412, TBTT_AGG_NUM_MASK = GENMASK(15,8) = 1
+    // 32-bit at 0xC410 would have it at [31:24]. Let me just use 0xC410 aligned.
+    // Actually TBTT_AGG @ 0xC412 is in upper 16 of 0xC410. Upper-byte of that 16-bit = bits [31:24]
+    host::mmio_w32_mask(mmio, 0xC410, 0xFF << 24, TBTT_AGG_DEF);
+
+    // rtw89_mac_port_cfg_bss_color — port 0: BSS_COLOB_AX_PORT_0_MASK = GENMASK(5,0) = 0
+    host::mmio_w32_mask(mmio, R_AX_PTCL_BSS_COLOR_0, 0x3F, 0);
+
+    // rtw89_mac_port_cfg_mbssid — NO_LINK + port 0: clear P0MB_ALL_MASK = GENMASK(23,1)
+    host::mmio_clr32(mmio, R_AX_MBSSID_CTRL, 0x00FF_FFFE);
+
+    // rtw89_mac_port_cfg_func_en(true) — set PORT_FUNC_EN
+    host::mmio_set32(mmio, R_AX_PORT_CFG_P0, B_AX_PORT_FUNC_EN);
+
+    // rtw89_mac_port_tsf_resync_all — iterates all vifs; lone STA = no-op.
+
+    // fsleep(BCN_ERLY_SET_DLY) = 20 μs; sleep_ms(1) is our minimum granularity.
+    host::sleep_ms(1);
+
+    // rtw89_mac_port_cfg_bcn_early — BCNERLY_MASK = GENMASK(11,0) = 160
+    host::mmio_w32_mask(mmio, R_AX_BCNERLYINT_CFG_P0, 0xFFF, BCN_ERLY_DEF);
+
+    // rtw89_mac_port_cfg_bcn_psr_rpt — BCAID_P0_MASK = GENMASK(10,0), bssid_index=0
+    host::mmio_w32_mask(mmio, R_AX_BCN_PSR_RPT_P0, 0x7FF, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  dmac_tbl_init + cmac_tbl_init (for macid X)
+// ═══════════════════════════════════════════════════════════════════
+
+fn dmac_tbl_init(mmio: i32, macid: u8) {
+    // Linux mac.c:4291 — 4 iterations, writes 0 to each of 4 u32s.
+    for i in 0..4u32 {
+        let target = DMAC_TBL_BASE_ADDR + ((macid as u32) << 4) + (i << 2);
+        host::mmio_w32(mmio, R_AX_FILTER_MODEL_ADDR, target);
+        host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY, 0);
+    }
+}
+
+fn cmac_tbl_init(mmio: i32, macid: u8) {
+    // Linux mac.c:4306 — sets target once, writes 8 u32 defaults.
+    let target = CMAC_TBL_BASE_ADDR + (macid as u32) * CCTL_INFO_SIZE;
+    host::mmio_w32(mmio, R_AX_FILTER_MODEL_ADDR, target);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 0,  0x4);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 4,  0x400A0004);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 8,  0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 12, 0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 16, 0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 20, 0x0E43000B);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 24, 0);
+    host::mmio_w32(mmio, R_AX_INDIR_ACCESS_ENTRY + 28, 0x000B8109);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  H2C: macid_pause — Linux fw.c:5088
+// ═══════════════════════════════════════════════════════════════════
+
+fn h2c_macid_pause(mmio: i32, macid: u8, pause: bool) {
+    // struct rtw89_fw_macid_pause_grp: pause_grp[4] + mask_grp[4] = 32 bytes
+    let mut payload = [0u8; 32];
+    let grp = (macid >> 5) as usize;
+    let sh = (macid & 0x1F) as u32;
+    let set_bit: u32 = 1u32 << sh;
+    // mask_grp[grp] @ offset 16 + grp*4
+    let moff = 16 + grp * 4;
+    payload[moff..moff + 4].copy_from_slice(&set_bit.to_le_bytes());
+    if pause {
+        // pause_grp[grp] @ offset 0 + grp*4
+        let poff = grp * 4;
+        payload[poff..poff + 4].copy_from_slice(&set_bit.to_le_bytes());
+    }
+    // CAT=1, CLASS=9, FUNC=0x8, rack=1, dack=0
+    fw::h2c_send(mmio, 1, 9, 0x8, true, false, &payload);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  H2C: role_maintain — Linux fw.c:4857
+// ═══════════════════════════════════════════════════════════════════
+
+fn h2c_role_maintain(mmio: i32, macid: u8, port: u8, band: u8) {
+    // struct rtw89_h2c_role_maintain: 1 × __le32 (4 bytes)
+    //   w0:
+    //     MACID    [7:0]
+    //     SELF_ROLE[9:8]
+    //     UPD_MODE [12:10]
+    //     WIFI_ROLE[16:13]
+    //     BAND     [18:17]
+    //     PORT     [21:19]
+    //     MACID_EXT[31:24]
+    let w0: u32 = (macid as u32) & 0xFF
+        | ((SELF_ROLE_CLIENT & 0x3) << 8)
+        | ((UPD_MODE_CREATE & 0x7) << 10)
+        | ((WIFI_ROLE_STATION & 0xF) << 13)
+        | (((band as u32) & 0x3) << 17)
+        | (((port as u32) & 0x7) << 19);
+    let payload: [u8; 4] = w0.to_le_bytes();
+    // CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x4, rack=0, dack=1
+    fw::h2c_send(mmio, 1, 8, 0x4, false, true, &payload);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  H2C: join_info — Linux fw.c:4953
+// ═══════════════════════════════════════════════════════════════════
+
+fn h2c_join_info(mmio: i32, macid: u8, port: u8, band: u8) {
+    // AX version: 1 × __le32. dis_conn=true, net_type=NO_LINK.
+    //   w0:
+    //     MACID    [7:0]
+    //     OP       [8]          — 1 = dis_conn
+    //     BAND     [9]
+    //     WMM      [11:10]
+    //     TGR      [12]
+    //     ISHESTA  [13]
+    //     DLBW     [15:14]
+    //     TF_MAC_PAD[17:16]
+    //     DL_T_PE  [20:18]
+    //     PORT_ID  [23:21]
+    //     NET_TYPE [25:24]
+    //     WIFI_ROLE[29:26]
+    //     SELF_ROLE[31:30]
+    let w0: u32 = (macid as u32) & 0xFF
+        | (1u32 << 8) // OP = dis_conn = true
+        | (((band as u32) & 0x1) << 9)
+        | (((port as u32) & 0x7) << 21)
+        | ((NET_TYPE_NO_LINK & 0x3) << 24)
+        | ((WIFI_ROLE_STATION & 0xF) << 26)
+        | ((SELF_ROLE_CLIENT & 0x3) << 30);
+    let payload: [u8; 4] = w0.to_le_bytes();
+    // CAT=1, CLASS=8 (MEDIA_RPT), FUNC=0x0, rack=0, dack=1
+    fw::h2c_send(mmio, 1, 8, 0x0, false, true, &payload);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  H2C: addr_cam_upd — Linux fw.c:2221
+// ═══════════════════════════════════════════════════════════════════
+
+fn h2c_cam(mmio: i32, macid: u8, port: u8) {
+    // struct rtw89_h2c_addr_cam_v0: 15 × __le32 = 60 bytes (AX)
+    let mut buf = [0u8; 60];
+
+    // Addr CAM state (rtw89_cam_init_addr_cam defaults):
+    //   addr_cam_idx = 0, offset = 0, len = 0x40 (ADDR_CAM_ENT_SIZE for 8852B),
+    //   valid = 1, addr_mask = 0, mask_sel = NO_MSK (0),
+    //   sec_ent_mode = NORMAL (2), sec_cam_map = 0
+    // BSSID CAM state (rtw89_cam_init_bssid_cam):
+    //   bssid_cam_idx = 0, phy_idx = 0, len = 0x08, offset = 0,
+    //   valid = 1, bssid = 00:00:00:00:00:00
+
+    let sma: [u8; 6] = STA_MAC;
+    let tma: [u8; 6] = [0; 6];
+    let sma_hash = sma.iter().fold(0u8, |a, b| a ^ b);
+    let tma_hash = tma.iter().fold(0u8, |a, b| a ^ b);
+
+    // w0 — unused for init
+    // w1: IDX=0 [7:0], OFFSET=0 [15:8], LEN=0x40 [23:16]
+    let w1: u32 = ADDR_CAM_ENT_SIZE << 16;
+    buf[4..8].copy_from_slice(&w1.to_le_bytes());
+
+    // w2:
+    //   VALID[0]=1 | NET_TYPE[2:1]=0 | BCN_HIT_COND[4:3]=0 | HIT_RULE[6:5]=0
+    //   BB_SEL[7]=0 (phy_idx) | ADDR_MASK[13:8]=0 | MASK_SEL[15:14]=0
+    //   SMA_HASH[23:16] | TMA_HASH[31:24]
+    let w2: u32 = 1u32
+        | ((NET_TYPE_NO_LINK & 0x3) << 1)
+        | ((sma_hash as u32) << 16)
+        | ((tma_hash as u32) << 24);
+    buf[8..12].copy_from_slice(&w2.to_le_bytes());
+
+    // w3: BSSID_CAM_IDX[5:0] = 0
+    // (zero, no write needed)
+
+    // w4: SMA[0..3]
+    let w4: u32 = (sma[0] as u32)
+        | ((sma[1] as u32) << 8)
+        | ((sma[2] as u32) << 16)
+        | ((sma[3] as u32) << 24);
+    buf[16..20].copy_from_slice(&w4.to_le_bytes());
+
+    // w5: SMA[4..5] | TMA[0..1]
+    let w5: u32 = (sma[4] as u32)
+        | ((sma[5] as u32) << 8)
+        | ((tma[0] as u32) << 16)
+        | ((tma[1] as u32) << 24);
+    buf[20..24].copy_from_slice(&w5.to_le_bytes());
+
+    // w6: TMA[2..5] — zero, skip
+
+    // w7 — unused
+
+    // w8 (v0 layout):
+    //   MACID[7:0] | PORT_INT[10:8] | TSF_SYNC[13:11]
+    //   TF_TRS[14] | LSIG_TXOP[15] | TGT_IND[26:24] | FRM_TGT_IND[29:27]
+    let w8: u32 = (macid as u32) & 0xFF
+        | (((port as u32) & 0x7) << 8)
+        | (((port as u32) & 0x7) << 11);
+    buf[32..36].copy_from_slice(&w8.to_le_bytes());
+
+    // w9:
+    //   AID12[11:0]=0 (not associated)
+    //   SEC_ENT_MODE[17:16] = ADDR_CAM_SEC_NORMAL (2)
+    let w9: u32 = (ADDR_CAM_SEC_NORMAL & 0x3) << 16;
+    buf[36..40].copy_from_slice(&w9.to_le_bytes());
+
+    // w10..w11 — sec entries, all 0
+
+    // w12: BSSID_IDX[7:0]=0 | BSSID_OFFSET[15:8]=0 | BSSID_LEN[23:16]=0x08
+    let w12: u32 = BSSID_CAM_ENT_SIZE << 16;
+    buf[48..52].copy_from_slice(&w12.to_le_bytes());
+
+    // w13:
+    //   BSSID_VALID[0]=1 | BB_SEL[1]=0 | BSSID_MASK[7:2]=0x3F
+    //   BSS_COLOR[13:8]=0 | BSSID[0][23:16]=0 | BSSID[1][31:24]=0
+    let w13: u32 = 1u32 | (BSSID_MATCH_ALL << 2);
+    buf[52..56].copy_from_slice(&w13.to_le_bytes());
+
+    // w14: BSSID[2..5] — zero, skip
+
+    // CAT=1, CLASS=6 (ADDR_CAM_UPDATE), FUNC=0x0, rack=0, dack=1
+    fw::h2c_send(mmio, 1, 6, 0x0, false, true, &buf);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  H2C: default_cmac_tbl — Linux fw.c:3521
+// ═══════════════════════════════════════════════════════════════════
+
+fn h2c_default_cmac_tbl(mmio: i32, macid: u8) {
+    // H2C_CMC_TBL_LEN = 68 bytes (17 × u32)
+    // Layout (from SET_* macros): dword 0 = MACID/OP,
+    //   dwords 1..7 = field values,
+    //   dwords 8..15 = masks for dwords 0..7,
+    //   dword 16 = extra
+    //
+    // Linux default_cmac_tbl for 8852b (h2c_cctl_func_id=UD) sets:
+    //   MACID=macid [6:0], OPERATION=1 [7]  → dword 0
+    //   TXPWR_MODE=0 [11:9] → dword 5 (value=0, mask=1 at dword 13)
+    //   tx_path via __rtw89_fw_h2c_set_tx_path → dword X + mask
+    //   ANTSEL_A/B/C/D=0 → dword 6+ + mask
+    //   MGQ_RPT_EN=0 (we assume tx_rpt_enabled=false) → dword 1 bit 21 + mask dword 9 bit 21
+    //   DOPPLER_CTRL=0 → dword 2 + mask
+    //   TXPWR_TOLERENCE=0 → dword X + mask
+    //
+    // Simplification: send all-zero payload except dword 0 (MACID|OP).
+    // Every un-masked field stays at FW default. FW treats mask=0 as "don't touch".
+    //
+    // If scan still fails we can add explicit masks + values per Linux.
+
+    let mut buf = [0u8; 68];
+
+    // dword 0: MACID[6:0] | OPERATION[7]
+    let w0: u32 = (macid as u32 & 0x7F) | (1u32 << 7);
+    buf[0..4].copy_from_slice(&w0.to_le_bytes());
+
+    // Leave all other words at 0 (masks=0 means FW ignores value fields).
+
+    // CAT=1, CLASS=5 (FR_EXCHG), FUNC=0x2 (CCTLINFO_UD for 8852b), rack=0, dack=1
+    fw::h2c_send(mmio, 1, 5, 0x2, false, true, &buf);
+}
