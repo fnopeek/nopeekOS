@@ -200,6 +200,72 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_clr32(mmio, cr_base + 0x0C3C, 1 << 9);           // PD_CTRL.PD_HIT_DIS = 0 (ENABLE packet detect)
     host::print("  BB: reset + bb_reset_en(2G, true) → PD + CCA enabled\n");
 
+    // ── 7.25. bb_sethw — Linux __rtw8852bx_bb_sethw (rtw8852b_common.c:1099)
+    //   Clear EN_SOUND_WO_NDP on both paths + zero MACID power limit table.
+    //   R_P0_EN_SOUND_WO_NDP + R_P1_EN_SOUND_WO_NDP cleared.
+    //   MACID pwr table @ R_AX_PWR_MACID_LMT_TABLE0..127 — 128 entries.
+    //   Addresses from reg.h grep:
+    //     R_P0_EN_SOUND_WO_NDP = 0x58F0 (B_P0_EN_SOUND_WO_NDP BIT(1))
+    //     R_P1_EN_SOUND_WO_NDP = 0x78F0
+    //     R_AX_PWR_MACID_LMT_TABLE0 = 0xD200, _127 = 0xD3FC (128×4 bytes)
+    //     (All PHY space for EN_SOUND; MACID table is MAC direct.)
+    //   Skip reads of RPL1 (gain calibration bases — used later for DIG).
+    host::mmio_clr32(mmio, cr_base + 0x58F0, 1 << 1);
+    host::mmio_clr32(mmio, cr_base + 0x78F0, 1 << 1);
+    for addr in (0xD200u32..=0xD3FCu32).step_by(4) {
+        // Linux uses rtw89_mac_txpwr_write32(phy_idx=0, addr, 0) which goes
+        // through TXPWR indirect access. Direct MAC-space write should work
+        // at power-on since the table is in local MAC memory.
+        host::mmio_w32(mmio, addr, 0);
+    }
+    host::print("  BB: sethw (EN_SOUND clr + MACID pwr table 0)\n");
+
+    // ── 7.27. physts_parsing_init — Linux phy.c:6683 for PHY_0
+    //   Configures how FW extracts PHY status info from received PPDUs.
+    //   Without this, RX frames reach the MAC but have invalid/missing
+    //   PHY status, and the scan-RX path drops them silently.
+    //
+    //   All writes PHY space (+CR_BASE).
+    //   setting_addr = R_PLCP_HISTOGRAM (0x0738)
+    //   dis_trigger_fail_mask = BIT(3), dis_trigger_brk_mask = BIT(2)
+    //   physt_bmp_start = 0x073C (page 0 base)
+    //
+    //   Step 1 — enable_fail_report(false) → SET both DIS bits
+    host::mmio_set32(mmio, cr_base + 0x0738, (1 << 3) | (1 << 2));
+    //   Step 2 — enable_hdr_2: skipped for RTW89_CHIP_AX.
+    //   Step 3 — loop bitmap pages 0..16 (skip RSVD_9 and EHT for AX).
+    //     i        ie_page (→ addr offset)   modify
+    //     0..5,8   page = i                   no change
+    //     6 (HE_MU), 7 (VHT_MU): val |= BIT(13)
+    //     9 (RSVD_9)                          SKIP
+    //     10 (TRIG_BASE_PPDU): page=9 → 0x0760, val |= BIT(13)|BIT(1)
+    //     11 (CCK_PKT):       page=10 → 0x0764, val &= ~(GENMASK(7,4)); val |= BIT(1)
+    //     12 (LEGACY_OFDM):   page=11 → 0x0768, val &= ~(GENMASK(7,4))
+    //     13 (HT_PKT):        page=12 → 0x076C, val &= ~(GENMASK(7,4)); val |= BIT(20)
+    //     14 (VHT_PKT):       page=13 → 0x0770, same as HT_PKT
+    //     15 (HE_PKT):        page=14 → 0x0774, same as HT_PKT
+    //     16 (EHT_PKT)                        SKIP for AX
+    for i in 0u32..=15 {
+        if i == 9 { continue; }
+        let page = if i <= 8 { i } else { i - 1 };
+        let addr = cr_base + 0x073C + (page << 2);
+        let mut val = host::mmio_r32(mmio, addr);
+        if i == 6 || i == 7 {
+            val |= 1 << 13;
+        } else if i == 10 {
+            val |= (1 << 13) | (1 << 1);
+        } else if i >= 11 {
+            val &= !(0xFu32 << 4);  // clear GENMASK(7,4)
+            if i == 11 {
+                val |= 1 << 1;
+            } else if i >= 13 {
+                val |= 1 << 20;
+            }
+        }
+        host::mmio_w32(mmio, addr, val);
+    }
+    host::print("  PHY: physts parsing init (15 pages configured)\n");
+
     // ── 7.3. cfg_txrx_path(RF_AB, 2G) — Linux rtw8852bx_bb_cfg_txrx_path
     //   (rtw8852b_common.c:1743) — enables RX antenna path. All writes are
     //   PHY-space, so each address gets + PHY_CR_BASE (0x10000).
