@@ -85,13 +85,13 @@ pub fn init(mmio: i32) {
     report("BB", &bb);
     dbg(mmio, "after-BB");
 
-    // bb_reset SKIPPED — our previous impl toggled SYS_FUNC_EN.BB_GLB_RSTN
-    // (hard BB global reset), which isn't what Linux rtw8852b_bb_reset does.
-    // Linux does ~13 specific PHY register writes (P0/P1_TXPW_RSTB, TSSI_TRK,
-    // S0/S1_HW_SI_DIS, RSTB_ASYNC). Our hard reset was pulling PCIe down.
-    // bb_reset is a refresh step after table load — safe to skip for now.
-    host::print("  PHY: bb_reset... SKIPPED (wrong Linux mapping, TODO)\n");
-    dbg(mmio, "after-bb_reset(skip)");
+    // bb_reset — NOW using the correct 1:1 Linux impl (P0/P1 TXPW_RSTB,
+    // TSSI_TRK, S0/S1 HW_SI_DIS, RSTB_ASYNC). Linux calls this at the end
+    // of phy_init_bb_reg, right after BB table + gain table. Commits the
+    // BB state; without it the BB subsystem destabilises PCIe.
+    host::print("  PHY: bb_reset...\n");
+    bb_reset(mmio);
+    dbg(mmio, "after-bb_reset");
 
     host::print("  PHY: BB gain... SKIPPED (needs config_bb_gain struct parser)\n");
 
@@ -423,7 +423,55 @@ fn write_rf_swsi(mmio: i32, path: u8, addr: u32, data: u32) {
     host::mmio_w32(mmio, R_SWSI_DATA_V1, val);
 }
 
+/// 1:1 Linux rtw8852b_bb_reset (rtw8852b.c:566) + rtw8852bx_bb_reset_all
+/// (rtw8852b_common.c:1077). Called at the end of phy_init_bb_reg to
+/// commit the BB state. Without this the BB subsystem drifts and kills
+/// the PCIe interface some milliseconds after the last BB write.
 fn bb_reset(mmio: i32) {
-    host::mmio_clr8(mmio, 0x0002, 1 << 1);
-    host::mmio_set8(mmio, 0x0002, 1 << 1);
+    // Addresses from Linux reg.h
+    const R_P0_TXPW_RSTB: u32 = 0x58DC;
+    const R_P0_TSSI_TRK:  u32 = 0x5818;
+    const R_P1_TXPW_RSTB: u32 = 0x78DC;
+    const R_P1_TSSI_TRK:  u32 = 0x7818;
+    const B_TXPW_RSTB_MANON: u32 = 1 << 30;
+    const B_TSSI_TRK_EN:     u32 = 1 << 30;
+
+    const R_S0_HW_SI_DIS: u32 = 0x1200;
+    const R_S1_HW_SI_DIS: u32 = 0x3200;
+    const B_HW_SI_DIS_W_R_TRIG_MASK: u32 = 0x7 << 28; // GENMASK(30,28)
+
+    const R_RSTB_ASYNC:   u32 = 0x0704;
+    const B_RSTB_ASYNC_ALL: u32 = 1 << 1;
+
+    // Pre-gate: hold TXPW reset + TSSI tracking
+    host::mmio_set32(mmio, R_P0_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_set32(mmio, R_P0_TSSI_TRK,  B_TSSI_TRK_EN);
+    host::mmio_set32(mmio, R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_set32(mmio, R_P1_TSSI_TRK,  B_TSSI_TRK_EN);
+
+    // rtw8852bx_bb_reset_all body
+    // Trigger HW_SI_DIS field [30:28] = 0x7 on both streams
+    let s0 = host::mmio_r32(mmio, R_S0_HW_SI_DIS);
+    host::mmio_w32(mmio, R_S0_HW_SI_DIS, (s0 & !B_HW_SI_DIS_W_R_TRIG_MASK) | (0x7 << 28));
+    let s1 = host::mmio_r32(mmio, R_S1_HW_SI_DIS);
+    host::mmio_w32(mmio, R_S1_HW_SI_DIS, (s1 & !B_HW_SI_DIS_W_R_TRIG_MASK) | (0x7 << 28));
+
+    host::sleep_ms(1); // Linux fsleep(1)
+
+    host::mmio_set32(mmio, R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
+    host::mmio_clr32(mmio, R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
+
+    // Clear HW_SI_DIS trigger
+    let s0 = host::mmio_r32(mmio, R_S0_HW_SI_DIS);
+    host::mmio_w32(mmio, R_S0_HW_SI_DIS, s0 & !B_HW_SI_DIS_W_R_TRIG_MASK);
+    let s1 = host::mmio_r32(mmio, R_S1_HW_SI_DIS);
+    host::mmio_w32(mmio, R_S1_HW_SI_DIS, s1 & !B_HW_SI_DIS_W_R_TRIG_MASK);
+
+    host::mmio_set32(mmio, R_RSTB_ASYNC, B_RSTB_ASYNC_ALL);
+
+    // Post-gate: release TXPW reset + TSSI tracking
+    host::mmio_clr32(mmio, R_P0_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_clr32(mmio, R_P0_TSSI_TRK,  B_TSSI_TRK_EN);
+    host::mmio_clr32(mmio, R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON);
+    host::mmio_clr32(mmio, R_P1_TSSI_TRK,  B_TSSI_TRK_EN);
 }
