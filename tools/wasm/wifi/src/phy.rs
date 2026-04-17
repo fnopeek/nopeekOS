@@ -256,14 +256,17 @@ fn run_table(mmio: i32, table: &[u8], kind: WriteKind) -> TableStats {
                     let target = get_phy_target(addr);
                     write_entry(mmio, kind, target, data);
                     stats.written += 1;
-                    // Periodic liveness check for RF tables — RF writes
-                    // can kill the chip mid-table, pinpoint the offender.
-                    if matches!(kind, WriteKind::Rf(_)) && stats.written % 32 == 0 {
+                    // Periodic liveness check — find exact killer entry.
+                    let check_freq = match kind {
+                        WriteKind::Rf(_) => 32,
+                        WriteKind::Bb    => 128,
+                    };
+                    if stats.written % check_freq == 0 {
                         let cfg1 = host::mmio_r32(mmio, 0x1000);
                         if cfg1 == 0xFFFF_FFFF {
-                            host::print("    [RF kill] after w=");
+                            host::print("    [kill] after w=");
                             fw::print_dec(stats.written as usize);
-                            host::print(" last addr=0x"); host::print_hex32(addr);
+                            host::print(" addr=0x"); host::print_hex32(addr);
                             host::print(" data=0x"); host::print_hex32(data);
                             host::print(" target=0x"); host::print_hex32(target);
                             host::print("\n");
