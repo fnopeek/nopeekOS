@@ -1035,8 +1035,10 @@ pub fn scan(mmio: i32) {
     let mut scan_cmd = [0u8; 28];
     // w0: MACID=0, NORM_CY=0, PORT_ID=0, BAND=0, OP=1(start)
     let w0: u32 = 1 << 20; // OP = 1 (enable scan)
-    // w1: NOTIFY_END=1, SCAN_TYPE=1(passive), START_MODE=0(immediate)
-    let w1: u32 = 1 | (1 << 3); // NOTIFY_END + SCAN_TYPE=passive
+    // w1: NOTIFY_END=1, SCAN_TYPE=0 (RTW89_SCAN_ONCE), START_MODE=0(immediate)
+    //     SCAN_TYPE is option->repeat — 0=ONCE, 1=NORMAL (looping). Our
+    //     previous value 1 would let FW restart the scan forever.
+    let w1: u32 = 1; // NOTIFY_END only
     // w2: NORM_PD=50 (50ms normal period)
     let w2: u32 = 50;
     scan_cmd[0..4].copy_from_slice(&w0.to_le_bytes());
