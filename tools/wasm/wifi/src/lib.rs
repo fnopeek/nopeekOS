@@ -10,6 +10,8 @@ mod regs;
 mod fw;
 mod mac;
 mod phy;
+mod rfk;
+mod rfk_tables;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
