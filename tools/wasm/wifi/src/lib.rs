@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.97.0 — H2CREG + stop_sch_tx/IQK (Audit E2/E6)\n");
+    host::print("[wifi] RTL8852BE driver v0.98.0 — hci_start / IRQ unmask (Audit A7)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -170,6 +170,14 @@ pub extern "C" fn _start() {
         host::print("[wifi] MAC init FAILED — press 'q' to exit\n");
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
+
+    // ── Phase 4b: hci_start — 1:1 Linux rtw89_hci_start (core.c:5970).
+    //   Unmask PCIe IRQs (HIMR0 + HIMR00 + HIMR10). On 8852BE this is
+    //   the last step of rtw89_core_start and enables the RX-DMA event
+    //   path. We poll instead of using IRQs, but the IMRs still gate
+    //   DMA progress on some AX chips — without them HW_IDX may stay
+    //   parked after the first C2H frame.
+    mac::hci_start(mmio);
 
     // ── Phase 5: Tune RF to channel 7 (user's home AP) + full RFK.
     //    SKIP VIF/scan_offload entirely. We just want to see if the RX
