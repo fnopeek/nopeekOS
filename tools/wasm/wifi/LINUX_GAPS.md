@@ -11,6 +11,14 @@ Builder.
 gesamte H2C-Pipe — wahrscheinlichste Ursache: fehlende Per-Block-IMR-Enables
 nach FWDL (17 IMR-Register die Linux setzt, wir nicht).
 
+**🎉 v1.5.0 DURCHBRUCH:** Hypothese bestätigt. Mit Phase 1 vollständig
+(17 per-block IMRs + sys_init_ax re-assert + korrekte ERR_IMR-Werte)
+laufen alle 8 VIF-Init-H2Cs mit `ret=0` durch, `SCANOFLD_START` kehrt
+`ret=0` statt `ret=4` zurück, FW iteriert alle 13 2G-Kanäle, und der
+NETGEAR88-AP wird live empfangen (82 Beacons / 305 Frames in 30s).
+IQK LOK fail bleibt — stellt sich heraus dass das ein Red-Herring ist,
+FW macht interne per-channel RFK sobald scan läuft.
+
 Legende: `[x]` erledigt · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig für 8852BE
 
 ---
