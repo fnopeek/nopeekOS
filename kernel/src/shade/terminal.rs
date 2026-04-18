@@ -4,6 +4,9 @@
 //! active (focused) terminal. Windows are completely independent.
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use spin::Mutex;
 
 /// Maximum lines and columns in each terminal buffer.
 const MAX_LINES: usize = 1000;
@@ -350,6 +353,7 @@ pub fn write(s: &str) {
         t.write_str(s);
         DIRTY.store(true, Ordering::Release);
     }
+    stream_push(idx, s);
 }
 
 /// Per-terminal dirty flags (set by worker-core WASM output, read by poll_render).
@@ -365,6 +369,7 @@ pub fn write_idx(idx: usize, s: &str) {
         TERM_DIRTY[idx].store(true, Ordering::Release);
         DIRTY.store(true, Ordering::Release);
     }
+    stream_push(idx, s);
 }
 
 /// Check if a specific terminal has new content.
@@ -726,4 +731,89 @@ pub fn write_prompt() {
     let prompt = alloc::format!("{}> ", path);
     set_prompt_len(prompt.len());
     write(&prompt);
+}
+
+// ── Stream Sinks for Remote Mirroring ──────────────────────────
+//
+// Each terminal slot may have a byte ringbuffer that captures all output
+// (from write() and write_idx()). Used by debug.wasm to mirror a terminal
+// over TCP. Drop-oldest when full. Allocated on first open, freed on close.
+
+const STREAM_CAPACITY: usize = 65536;
+
+struct StreamBuf {
+    data: Mutex<VecDeque<u8>>,
+}
+
+impl StreamBuf {
+    fn new() -> Self {
+        Self { data: Mutex::new(VecDeque::with_capacity(STREAM_CAPACITY)) }
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        let mut q = self.data.lock();
+        let overflow = (q.len() + bytes.len()).saturating_sub(STREAM_CAPACITY);
+        for _ in 0..overflow { q.pop_front(); }
+        q.extend(bytes.iter().copied());
+    }
+
+    fn pop_into(&self, dst: &mut [u8]) -> usize {
+        let mut q = self.data.lock();
+        let n = q.len().min(dst.len());
+        for i in 0..n { dst[i] = q.pop_front().unwrap(); }
+        n
+    }
+}
+
+static STREAM_SINKS: [AtomicPtr<StreamBuf>; MAX_SLOTS] = {
+    const NULL: AtomicPtr<StreamBuf> = AtomicPtr::new(core::ptr::null_mut());
+    [NULL; MAX_SLOTS]
+};
+
+/// Open a stream sink for a terminal. Idempotent — calling twice is a no-op.
+pub fn stream_open(idx: usize) -> bool {
+    if idx >= MAX_SLOTS { return false; }
+    if !STREAM_SINKS[idx].load(Ordering::Acquire).is_null() { return true; }
+    let ptr = Box::into_raw(Box::new(StreamBuf::new()));
+    match STREAM_SINKS[idx].compare_exchange(
+        core::ptr::null_mut(), ptr, Ordering::AcqRel, Ordering::Acquire
+    ) {
+        Ok(_) => true,
+        Err(_) => {
+            // SAFETY: lost race, reclaim our unused allocation
+            unsafe { drop(Box::from_raw(ptr)); }
+            true
+        }
+    }
+}
+
+/// Read buffered bytes into dst. Returns bytes read (0 if empty or not open).
+pub fn stream_read(idx: usize, dst: &mut [u8]) -> usize {
+    if idx >= MAX_SLOTS { return 0; }
+    let ptr = STREAM_SINKS[idx].load(Ordering::Acquire);
+    if ptr.is_null() { return 0; }
+    // SAFETY: ptr remains valid until stream_close swaps it out.
+    // stream_close must not be called concurrently with stream_read on the
+    // same idx (enforced by single-reader convention: one debug.wasm module).
+    unsafe { (*ptr).pop_into(dst) }
+}
+
+/// Close a stream sink, freeing its buffer.
+pub fn stream_close(idx: usize) {
+    if idx >= MAX_SLOTS { return; }
+    let ptr = STREAM_SINKS[idx].swap(core::ptr::null_mut(), Ordering::AcqRel);
+    if !ptr.is_null() {
+        // SAFETY: swap gave us exclusive ownership of ptr.
+        unsafe { drop(Box::from_raw(ptr)); }
+    }
+}
+
+/// Internal: push bytes to sink if active. Called from write() and write_idx().
+fn stream_push(idx: usize, s: &str) {
+    if idx >= MAX_SLOTS { return; }
+    let ptr = STREAM_SINKS[idx].load(Ordering::Acquire);
+    if !ptr.is_null() {
+        // SAFETY: ptr valid until stream_close. push uses internal Mutex.
+        unsafe { (*ptr).push(s.as_bytes()); }
+    }
 }

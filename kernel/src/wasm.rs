@@ -101,6 +101,21 @@ static APP_RUNNING: [AtomicBool; MAX_APP_BUFS] = {
     [FALSE; MAX_APP_BUFS]
 };
 
+/// Target IP/port for the debug reverse-mirror module. Packed as
+/// `(ip as u64) << 16 | port as u64`. Set by the `debug` intent dispatcher
+/// before spawning debug.wasm. 0 = unset.
+static DEBUG_TARGET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn set_debug_target(ip_packed: u32, port: u16) {
+    let v = ((ip_packed as u64) << 16) | (port as u64);
+    DEBUG_TARGET.store(v, AtOrd::Release);
+}
+
+pub fn get_debug_target() -> (u32, u16) {
+    let v = DEBUG_TARGET.load(AtOrd::Acquire);
+    ((v >> 16) as u32, (v & 0xFFFF) as u16)
+}
+
 /// Push a key to an app's input buffer. Called from Core 0.
 pub fn push_app_key(terminal_idx: u8, key: u8) {
     let idx = terminal_idx as usize;
@@ -147,6 +162,17 @@ pub fn has_wasm_app(terminal_idx: u8) -> bool {
 /// Spawn a WASM module on a worker core. Returns immediately.
 /// The app gets its own window and terminal.
 pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
+    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true)
+}
+
+/// Spawn a WASM module as a background task. Unlike spawn_on_worker, this does
+/// NOT set APP_RUNNING for the terminal — the intent shell keeps receiving keys
+/// and the window continues to function normally. Used by debug.wasm.
+pub fn spawn_on_worker_background(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
+    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, false)
+}
+
+fn spawn_on_worker_inner(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str, foreground: bool) -> bool {
     let mut jobs = WASM_JOBS.lock();
     let slot = match jobs.iter().position(|j| j.is_none()) {
         Some(i) => i,
@@ -161,10 +187,12 @@ pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, mod
     jobs[slot] = Some(WasmJob { bytes: wasm_bytes, cap_id, terminal_idx, name, name_len: nlen as u8 });
     drop(jobs);
 
-    // Clear per-app input buffer + mark terminal as having an app
-    clear_app_key_buf(terminal_idx);
-    if (terminal_idx as usize) < MAX_APP_BUFS {
-        APP_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
+    // Clear per-app input buffer + mark terminal as having an app (foreground only)
+    if foreground {
+        clear_app_key_buf(terminal_idx);
+        if (terminal_idx as usize) < MAX_APP_BUFS {
+            APP_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
+        }
     }
 
     crate::smp::scheduler::spawn(
@@ -673,6 +701,135 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             } else {
                 crate::shade::terminal::clear();
             }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // ── Terminal Stream Sink (for remote debug mirroring) ─────────
+
+    // npk_self_terminal() -> terminal_idx of this WASM task
+    linker.func_wrap("env", "npk_self_terminal",
+        |caller: Caller<'_, HostState>| -> i32 {
+            caller.data().terminal_idx as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_stream_open(idx) -> 0 ok, -1 error
+    linker.func_wrap("env", "npk_stream_open",
+        |_caller: Caller<'_, HostState>, idx: i32| -> i32 {
+            if idx < 0 { return -1; }
+            if crate::shade::terminal::stream_open(idx as usize) { 0 } else { -1 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_stream_read(idx, buf_ptr, buf_len) -> bytes read (>=0) or -1 on error
+    linker.func_wrap("env", "npk_stream_read",
+        |mut caller: Caller<'_, HostState>, idx: i32, buf_ptr: i32, buf_len: i32| -> i32 {
+            if idx < 0 || buf_len <= 0 { return 0; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m, None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start.saturating_add(buf_len as usize);
+            if end > data.len() { return -1; }
+            crate::shade::terminal::stream_read(idx as usize, &mut data[start..end]) as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_stream_close(idx) -> 0
+    linker.func_wrap("env", "npk_stream_close",
+        |_caller: Caller<'_, HostState>, idx: i32| -> i32 {
+            if idx >= 0 { crate::shade::terminal::stream_close(idx as usize); }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_key_inject(byte) -> 0
+    // Injects a raw byte into the global keyboard buffer. Routes to the
+    // currently-focused window's intent session. Used by debug.wasm.
+    linker.func_wrap("env", "npk_key_inject",
+        |_caller: Caller<'_, HostState>, byte: i32| -> i32 {
+            crate::keyboard::inject_byte((byte & 0xFF) as u8);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // ── TCP Socket Host Functions (debug shell + future apps) ────
+
+    // npk_tcp_connect(ip_packed, port) -> handle (>=0) or -1 on error.
+    // ip_packed = (a << 24) | (b << 16) | (c << 8) | d. Blocks until
+    // ESTABLISHED or 10s timeout. Runs on worker core only.
+    linker.func_wrap("env", "npk_tcp_connect",
+        |_caller: Caller<'_, HostState>, ip_packed: i32, port: i32| -> i32 {
+            let ip = [
+                ((ip_packed >> 24) & 0xFF) as u8,
+                ((ip_packed >> 16) & 0xFF) as u8,
+                ((ip_packed >> 8) & 0xFF) as u8,
+                (ip_packed & 0xFF) as u8,
+            ];
+            if port <= 0 || port > 65535 { return -1; }
+            match crate::net::tcp::connect(ip, port as u16) {
+                Ok(h) => h as i32,
+                Err(_) => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_tcp_send(handle, buf_ptr, buf_len) -> 0 on success, -1 on error
+    linker.func_wrap("env", "npk_tcp_send",
+        |caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_len: i32| -> i32 {
+            if handle < 0 || buf_len <= 0 { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m, None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = buf_ptr as usize;
+            let end = start.saturating_add(buf_len as usize);
+            if end > data.len() { return -1; }
+            match crate::net::tcp::send(handle as usize, &data[start..end]) {
+                Ok(_) => 0,
+                Err(_) => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_tcp_recv(handle, buf_ptr, buf_max) -> bytes read (0 = none available), -1 on error
+    linker.func_wrap("env", "npk_tcp_recv",
+        |mut caller: Caller<'_, HostState>, handle: i32, buf_ptr: i32, buf_max: i32| -> i32 {
+            if handle < 0 || buf_max <= 0 { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m, None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start.saturating_add(buf_max as usize);
+            if end > data.len() { return -1; }
+            match crate::net::tcp::recv(handle as usize, &mut data[start..end]) {
+                Ok(n) => n as i32,
+                Err(_) => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_tcp_close(handle) -> 0
+    linker.func_wrap("env", "npk_tcp_close",
+        |_caller: Caller<'_, HostState>, handle: i32| -> i32 {
+            if handle >= 0 { let _ = crate::net::tcp::close(handle as usize); }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_debug_target_ip() -> packed IP (0 if unset)
+    linker.func_wrap("env", "npk_debug_target_ip",
+        |_caller: Caller<'_, HostState>| -> i32 {
+            get_debug_target().0 as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_debug_target_port() -> port (0 if unset)
+    linker.func_wrap("env", "npk_debug_target_port",
+        |_caller: Caller<'_, HostState>| -> i32 {
+            get_debug_target().1 as i32
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
