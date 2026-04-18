@@ -382,6 +382,16 @@ pub fn init(mmio: i32) -> bool {
     fw::h2c_send(mmio, 1, 9, 0x14, false, true, &ofld_cfg);
     diag_wait_c2h(mmio, 200, "ofld_cfg");
 
+    // ── 9. H2C fw_log_cfg — Linux rtw89_fw_h2c_fw_log (fw.c:2787).
+    // Activates FW trace log routed over C2H with LEVEL=LOUD on components
+    // INIT/TASK/PS/ERROR/MLO/SCAN. Without this the FW is silent and our
+    // C2H_LOG decoder (handle_c2h cls=0 fn=2) sees nothing — meaning any
+    // init/scan/error condition on the FW side is invisible to us.
+    // Linux calls this at the end of rtw89_core_start (core.c:5985).
+    host::print("  H2C: fw_log_cfg (LEVEL=LOUD, PATH=C2H)...\n");
+    fw::h2c_fw_log(mmio, true);
+    diag_wait_c2h(mmio, 200, "fw_log");
+
     host::print("[wifi] MAC + PHY init complete\n");
     true
 }

@@ -1281,3 +1281,39 @@ pub fn print_dec(n: usize) {
     let s = [d];
     host::print(unsafe { core::str::from_utf8_unchecked(&s) });
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  h2c_fw_log — 1:1 Linux rtw89_fw_h2c_fw_log (fw.c:2787).
+//  Enables FW firmware log with level=LOUD routed to C2H, with
+//  INIT/TASK/PS/ERROR/MLO/SCAN components. Without this the FW is
+//  silent and we can't diagnose init failures from its side.
+// ═══════════════════════════════════════════════════════════════════
+
+const H2C_CL_FW_INFO:    u8 = 0x0;
+const H2C_FUNC_LOG_CFG:  u8 = 0x0;
+
+/// Send LOG_CFG H2C to enable FW trace log via C2H channel.
+/// `enable=false` → COMP=0 (effectively off), `enable=true` → default comp set.
+pub fn h2c_fw_log(mmio: i32, enable: bool) {
+    // Linux: RTW89_FW_LOG_COMP_{INIT=1, TASK=2, PS=11, ERROR=12, MLO=26, SCAN=28}
+    let comp: u32 = if enable {
+        (1 << 1) | (1 << 2) | (1 << 11) | (1 << 12) | (1 << 26) | (1 << 28)
+    } else { 0 };
+
+    // w0[7:0]  = LEVEL  = RTW89_FW_LOG_LEVEL_LOUD (4)
+    // w0[15:8] = PATH   = BIT(RTW89_FW_LOG_LEVEL_C2H=1) = 0x02
+    // w1[31:0] = COMP
+    // w2[31:0] = COMP_EXT = 0
+    let w0: u32 = 4u32 | (0x02u32 << 8);
+    let w1: u32 = comp;
+    let w2: u32 = 0;
+
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&w0.to_le_bytes());
+    payload[4..8].copy_from_slice(&w1.to_le_bytes());
+    payload[8..12].copy_from_slice(&w2.to_le_bytes());
+
+    // Linux: rtw89_h2c_pkt_set_hdr(..., rack=0, dack=0, ...)
+    h2c_send(mmio, H2C_CAT_MAC as u8, H2C_CL_FW_INFO, H2C_FUNC_LOG_CFG,
+             false, false, &payload);
+}
