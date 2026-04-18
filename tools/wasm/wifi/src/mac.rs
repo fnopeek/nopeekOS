@@ -106,6 +106,17 @@ pub fn init(mmio: i32) -> bool {
     host::print("  BB/RF: enabled\n");
     dbg_checkpoint(mmio, "after BB/RF");
 
+    // ── 0b. sys_init_ax — 1:1 Linux (mac.c:1696) re-assert after FWDL.
+    // Linux runs this in rtw89_mac_init AFTER partial_init (= FWDL).
+    // pwr_on_func already sets DMAC/CMAC func_en bits once, but FWDL
+    // can disturb them; sys_init_ax overwrites DMAC_FUNC_EN / CLK_EN
+    // with exact values (write32, not set32) and re-ORs CMAC. Without
+    // this the DMAC state after FWDL may contain extra bits our
+    // pwr_on OR'd in (DLE_WDE_EN, DLE_PLE_EN, BBRPT_EN, DMACREG_GCKEN)
+    // that Linux's canonical state does NOT set.
+    sys_init_ax(mmio);
+    dbg_checkpoint(mmio, "after sys_init");
+
     // ── 1. DLE re-init with SCC quotas ─────────────────────────────
     if !dle_init(mmio) { return false; }
 
@@ -122,13 +133,8 @@ pub fn init(mmio: i32) -> bool {
     cmac_init(mmio);
     dbg_checkpoint(mmio, "after CMAC");
 
-    // ── 4.5. chip_func_en_ax (Linux mac.c:1675) — MISSING until now ───
-    // For 8852B: write32_set(R_AX_SPS_DIG_ON_CTRL0, B_AX_OCP_L1_MASK).
-    // This sets the Over-Current Protection L1 threshold bits [15:13].
-    // Without this, the SPS digital regulator runs with default OCP,
-    // and heavy BB register writes can trip the overcurrent protection,
-    // which pulls PCIe power down → chip unreachable after BB table.
-    host::mmio_set32(mmio, regs::R_AX_SPS_DIG_ON_CTRL0, 0x7 << 13); // B_AX_OCP_L1_MASK
+    // ── 4.5. chip_func_en_ax — moved into sys_init_ax (Phase 1.3).
+    // Kept the checkpoint comment for log continuity.
     dbg_checkpoint(mmio, "after chip_func_en");
 
     // ── 5. Enable IMRs — 1:1 Linux trx_init_ax (mac.c:3929):
@@ -507,6 +513,84 @@ fn dbg_checkpoint(mmio: i32, tag: &str) {
     host::print(" OPT=0x"); host::print_hex32(opt);
     host::print(" SYS=0x"); host::print_hex32(sys);
     host::print("\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  sys_init_ax — 1:1 Linux mac.c:1696. Runs AFTER FWDL inside
+//  rtw89_mac_init. Re-asserts DMAC/CMAC func_en + clk_en + chip
+//  OCP_L1. pwr_on_func did this before FWDL, but FWDL can disturb
+//  bits and Linux re-canonicalises via write32 (DMAC) + set32 (CMAC).
+// ═══════════════════════════════════════════════════════════════════
+
+fn sys_init_ax(mmio: i32) {
+    // ── dmac_func_en_ax (mac.c:1651) — DIRECT write32, overwrites any
+    // extra bits from pwr_on. For non-8852C (= 8852B):
+    //   MAC_FUNC_EN | DMAC_FUNC_EN | MAC_SEC_EN | DISPATCHER_EN
+    // | DLE_CPUIO_EN | PKT_IN_EN | DMAC_TBL_EN | PKT_BUF_EN
+    // | STA_SCH_EN | TXPKT_CTRL_EN | WD_RLS_EN | MPDU_PROC_EN
+    // | DMAC_CRPRT
+    //   = 0xFB7D0000 (bits 30,29,28,27,25,24,22,21,20,19,18,16,31)
+    let dmac_func_en: u32 =
+          regs::B_AX_MAC_FUNC_EN
+        | regs::B_AX_DMAC_FUNC_EN
+        | regs::B_AX_MAC_SEC_EN
+        | regs::B_AX_DISPATCHER_EN
+        | regs::B_AX_DLE_CPUIO_EN
+        | regs::B_AX_PKT_IN_EN
+        | regs::B_AX_DMAC_TBL_EN
+        | regs::B_AX_PKT_BUF_EN
+        | regs::B_AX_STA_SCH_EN
+        | regs::B_AX_TXPKT_CTRL_EN
+        | regs::B_AX_WD_RLS_EN
+        | regs::B_AX_MPDU_PROC_EN
+        | regs::B_AX_DMAC_CRPRT;
+    host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, dmac_func_en);
+
+    // dmac_clk_en: MAC_SEC | DISPATCHER | DLE_CPUIO | PKT_IN
+    //            | STA_SCH | TXPKT_CTRL | WD_RLS | BBRPT CLK
+    let dmac_clk_en: u32 =
+          regs::B_AX_MAC_SEC_CLK_EN
+        | regs::B_AX_DISPATCHER_CLK_EN
+        | regs::B_AX_DLE_CPUIO_CLK_EN
+        | regs::B_AX_PKT_IN_CLK_EN
+        | regs::B_AX_STA_SCH_CLK_EN
+        | regs::B_AX_TXPKT_CTRL_CLK_EN
+        | regs::B_AX_WD_RLS_CLK_EN
+        | regs::B_AX_BBRPT_CLK_EN;
+    host::mmio_w32(mmio, regs::R_AX_DMAC_CLK_EN, dmac_clk_en);
+
+    // ── cmac_func_en_ax(mac_idx=0, en=true) (mac.c:1605) — SET (OR)
+    //   ck_en:   CMAC | PHYINTF | CMAC_DMA | PTCLTOP | SCHEDULER | TMAC | RMAC
+    //   func_en: CMAC_EN | CMAC_TXEN | CMAC_RXEN | PHYINTF_EN | CMAC_DMA_EN
+    //          | PTCLTOP_EN | SCHEDULER_EN | TMAC_EN | RMAC_EN | CMAC_CRPRT
+    let cmac_ck_en: u32 =
+          regs::B_AX_CMAC_CKEN
+        | regs::B_AX_PHYINTF_CKEN
+        | regs::B_AX_CMAC_DMA_CKEN
+        | regs::B_AX_PTCLTOP_CKEN
+        | regs::B_AX_SCHEDULER_CKEN
+        | regs::B_AX_TMAC_CKEN
+        | regs::B_AX_RMAC_CKEN;
+    host::mmio_set32(mmio, regs::R_AX_CK_EN, cmac_ck_en);
+
+    let cmac_func_en: u32 =
+          regs::B_AX_CMAC_EN
+        | regs::B_AX_CMAC_TXEN
+        | regs::B_AX_CMAC_RXEN
+        | regs::B_AX_PHYINTF_EN
+        | regs::B_AX_CMAC_DMA_EN
+        | regs::B_AX_PTCLTOP_EN
+        | regs::B_AX_SCHEDULER_EN
+        | regs::B_AX_TMAC_EN
+        | regs::B_AX_RMAC_EN
+        | regs::B_AX_CMAC_CRPRT;
+    host::mmio_set32(mmio, regs::R_AX_CMAC_FUNC_EN, cmac_func_en);
+
+    // ── chip_func_en_ax (mac.c:1685) — 8852B: set OCP_L1_MASK.
+    // B_AX_OCP_L1_MASK = GENMASK(15,13) = 0xE000
+    host::mmio_set32(mmio, regs::R_AX_SPS_DIG_ON_CTRL0, 0x7 << 13);
+
+    host::print("  SYS: dmac/cmac func_en + clk_en re-asserted\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════
