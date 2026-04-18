@@ -875,6 +875,58 @@ fn handle_c2h(dma: i32, off: u32) {
         host::print(")\n");
     } else if cat == 1 && class == 0 && func == 0 {
         host::print("  [c2h] REC_ACK\n");
+    } else if cat == 1 && class == 0 && func == 2 {
+        // C2H_LOG — FW trace log. Linux: rtw89_fw_log_dump.
+        // Payload starts right after the 8-byte C2H hdr. Content is either
+        // struct rtw89_fw_c2h_log_fmt (binary, signature 0xA5A5) or raw ASCII.
+        // Without the runtime-loaded fmt table we can't substitute %-args —
+        // print the 16-byte header fields + hex-dump the first 32 bytes so
+        // the FW error/progress cause can be recognised by hand.
+        let payload_off = off + 8;
+        let total_len = _len as u32;            // includes 8-byte hdr
+        let body_len = total_len.saturating_sub(8);
+        let hdr0 = host::dma_r32(dma, payload_off);
+        let sig = (hdr0 & 0xFFFF) as u16;
+        if sig == 0xA5A5 && body_len >= 11 {
+            // Linux struct rtw89_fw_c2h_log_fmt (fw.h:3845):
+            //   signature u16 | feature u8 | syntax u8 | fmt_id u32
+            //   | file_num u8 | line_num u16 | argc u8 | argv/raw[]
+            let hdr1    = host::dma_r32(dma, payload_off + 4);
+            let hdr2    = host::dma_r32(dma, payload_off + 8);
+            let feature = ((hdr0 >> 16) & 0xFF) as u8;
+            let syntax  = ((hdr0 >> 24) & 0xFF) as u8;
+            let fmt_id  = hdr1;
+            let file_nr = ( hdr2        & 0xFF) as u8;
+            let line_nr = ((hdr2 >>  8) & 0xFFFF) as u16;
+            let argc    = ((hdr2 >> 24) & 0xFF) as u8;
+            host::print("  [c2h LOG-FMT] feat=0x");
+            host::print_hex32(feature as u32);
+            host::print(" syn="); fw::print_dec(syntax as usize);
+            host::print(" fmt="); host::print_hex32(fmt_id);
+            host::print(" file="); fw::print_dec(file_nr as usize);
+            host::print(" line="); fw::print_dec(line_nr as usize);
+            host::print(" argc="); fw::print_dec(argc as usize);
+            host::print(" args[");
+            let max_args = core::cmp::min(argc as u32, 8);
+            for i in 0..max_args {
+                if i > 0 { host::print(" "); }
+                host::print_hex32(host::dma_r32(dma, payload_off + 12 + i * 4));
+            }
+            host::print("]\n");
+        } else {
+            // Plain ASCII log or missing signature — hex-dump up to 64 bytes.
+            host::print("  [c2h LOG] len=");
+            fw::print_dec(body_len as usize);
+            host::print(" hex=");
+            let max = core::cmp::min(body_len, 64);
+            let mut i = 0u32;
+            while i < max {
+                host::print_hex32(host::dma_r32(dma, payload_off + i));
+                host::print(" ");
+                i += 4;
+            }
+            host::print("\n");
+        }
     } else {
         host::print("  [c2h] cat=");
         fw::print_dec(cat as usize);

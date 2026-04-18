@@ -170,6 +170,15 @@ pub fn set_channel_2g(mmio: i32, ch: u8) {
         host::mmio_w32_mask(mmio, CR + addr, 0xFFFFFF, *val);
     }
 
+    //   2c.5 set_gain_error(2G, path A+B) — 1:1 Linux rtw8852bx_ctrl_ch.
+    //   Reads LNA/TIA gain values stored in phy::BB_GAIN during BB-gain
+    //   table parse and writes them into the per-path LNA/TIA gain
+    //   registers. Without this step the RX analog front-end has no gain
+    //   → zero frames reach the MAC. set_gain_offset/set_rxsc_rpl_comp
+    //   need efuse data (not parsed yet), so they stay out for now.
+    crate::phy::apply_gain_error_2g(mmio, 0);
+    crate::phy::apply_gain_error_2g(mmio, 1);
+
     //   2d. ctrl_bw (20MHz, pri_ch=0):
     //       FC0_BW_SET = 0, CHBW_MOD_SBW = 0, CHBW_MOD_PRICH = 0
     //       RFMODE_ORI_RX both paths = 0x333

@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.94.1 — LISTEN-ONLY + longer IQK timeout\n");
+    host::print("[wifi] RTL8852BE driver v0.95.0 — BB gain parser + set_gain_error + C2H_LOG\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
