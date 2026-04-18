@@ -62,26 +62,26 @@ Legende: `[x]` erledigt · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig 
   - [/] 2.3.2.10 `cmac_com_init_ax`
   - [/] 2.3.2.11 `ptcl_init_ax`
   - [/] 2.3.2.12 `cmac_dma_init_ax` — nur 1 Register `0xC804`. Linux-Werte prüfen.
-- [ ] **2.3.3** `enable_imr_ax(MAC_0, DMAC_SEL)` (mac.c:3836) — **kritischer Gap**: 11 Sub-IMR-Enables:
-  - [ ] `rtw89_wdrls_imr_enable`
-  - [ ] `rtw89_wsec_imr_enable`
-  - [ ] `rtw89_mpdu_trx_imr_enable`
-  - [ ] `rtw89_sta_sch_imr_enable`
-  - [ ] `rtw89_txpktctl_imr_enable`
-  - [ ] `rtw89_wde_imr_enable`
-  - [ ] `rtw89_ple_imr_enable`
-  - [ ] `rtw89_pktin_imr_enable`
-  - [ ] `rtw89_dispatcher_imr_enable`
-  - [ ] `rtw89_cpuio_imr_enable`
-  - [ ] `rtw89_bbrpt_imr_enable`
-- [ ] **2.3.4** `enable_imr_ax(MAC_0, CMAC_SEL)` — 6 Sub-IMR-Enables:
-  - [ ] `rtw89_scheduler_imr_enable`
-  - [ ] `rtw89_ptcl_imr_enable`
-  - [ ] `rtw89_cdma_imr_enable`
-  - [ ] `rtw89_phy_intf_imr_enable`
-  - [ ] `rtw89_rmac_imr_enable`
-  - [ ] `rtw89_tmac_imr_enable`
-- [/] **2.3.5** `err_imr_ctrl_ax(true)` (mac.c:3874) — wir setzen `DMAC_ERR_IMR=CMAC_ERR_IMR=0xFFFFFFFF`. Linux setzt spezifische Werte `DMAC_ERR_IMR_EN` / `CMAC0_ERR_IMR_EN`. **Werte falsch.**
+- [x] **2.3.3** `enable_imr_ax(MAC_0, DMAC_SEL)` (mac.c:3836) — v1.3.0: alle 11 Sub-IMR-Enables in `imr.rs`:
+  - [x] `wdrls_imr_enable`
+  - [x] `wsec_imr_enable`
+  - [x] `mpdu_trx_imr_enable`
+  - [x] `sta_sch_imr_enable`
+  - [x] `txpktctl_imr_enable`
+  - [x] `wde_imr_enable`
+  - [x] `ple_imr_enable`
+  - [x] `pktin_imr_enable`
+  - [x] `dispatcher_imr_enable`
+  - [x] `cpuio_imr_enable`
+  - [x] `bbrpt_imr_enable`
+- [x] **2.3.4** `enable_imr_ax(MAC_0, CMAC_SEL)` — v1.3.0: 6 Sub-IMR-Enables:
+  - [x] `scheduler_imr_enable`
+  - [x] `ptcl_imr_enable`
+  - [x] `cdma_imr_enable`
+  - [·] `phy_intf_imr_enable` (8852B imr_info: clr=set=0, effektiv NO-OP)
+  - [x] `rmac_imr_enable`
+  - [x] `tmac_imr_enable`
+- [x] **2.3.5** `err_imr_ctrl_ax(true)` (mac.c:3874) — `DMAC_ERR_IMR=CMAC_ERR_IMR=0xFFFFFFFF` entspricht `DMAC_ERR_IMR_EN = CMAC0_ERR_IMR_EN = GENMASK(31,0)` (reg.h:663). **Werte waren schon korrekt.**
 - [x] 2.3.6 `set_host_rpr_ax` (mac.c:3909) — haben wir als `RPR: POH mode` Block.
 
 ### 2.4 `rtw89_mac_feat_init` (mac.c:3982) — BA CAM init
