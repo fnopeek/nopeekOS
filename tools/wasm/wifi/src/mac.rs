@@ -396,6 +396,61 @@ pub fn init(mmio: i32) -> bool {
     true
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  hci_start — 1:1 Linux rtw89_hci_start → rtw89_pci_ops_start
+//  (pci.c:1922). Called at the very end of rtw89_core_start
+//  (core.c:5970). Arms the chip's IRQ mask registers so DMA-complete,
+//  RX-descriptor-unavailable and HALT-C2H events can be delivered to
+//  the host. Even though we poll instead of using IRQs, the unmask is
+//  load-bearing: on some AX chips the RX DMA is gated on the IMR
+//  being set, and on all of them the status bits only latch after
+//  unmask — so without this the HW can appear "stuck" even though
+//  the MAC is alive.
+//
+//  Linux build-time split: rtw89_pci_config_intr_mask picks the
+//  non-recovery non-low-power path for 8852BE. We inline those values
+//  directly since we never go into recovery/LPS.
+// ═══════════════════════════════════════════════════════════════════
+
+pub fn hci_start(mmio: i32) {
+    // halt_c2h_intrs (goes to R_AX_HIMR0 at 0x01A0)
+    let halt_c2h_intrs: u32 = regs::B_AX_HALT_C2H_INT_EN;
+
+    // intrs[0] → R_AX_PCIE_HIMR00 (0x10B0): the full default mask
+    //   from rtw89_pci_config_intr_mask (non-recovery branch).
+    let intrs0: u32 = regs::B_AX_TXDMA_STUCK_INT_EN
+                   | regs::B_AX_RXDMA_INT_EN
+                   | regs::B_AX_RXP1DMA_INT_EN
+                   | regs::B_AX_RPQDMA_INT_EN
+                   | regs::B_AX_RXDMA_STUCK_INT_EN
+                   | regs::B_AX_RDU_INT_EN
+                   | regs::B_AX_RPQBD_FULL_INT_EN
+                   | regs::B_AX_HS0ISR_IND_INT_EN;
+
+    // intrs[1] → R_AX_PCIE_HIMR10 (0x13B0)
+    let intrs1: u32 = regs::B_AX_HC10ISR_IND_INT_EN;
+
+    // Clear any pending ISR bits before unmasking (belt-and-braces —
+    // Linux doesn't do this explicitly in ops_start, but IRQs that
+    // latched before our IMR was known-good can confuse polling).
+    let _ = host::mmio_r32(mmio, regs::R_AX_HISR0);
+    let _ = host::mmio_r32(mmio, regs::R_AX_PCIE_HISR00);
+    let _ = host::mmio_r32(mmio, regs::R_AX_PCIE_HISR10);
+
+    // Unmask — 1:1 Linux rtw89_pci_enable_intr (pci.c:853):
+    host::mmio_w32(mmio, regs::R_AX_HIMR0,       halt_c2h_intrs);
+    host::mmio_w32(mmio, regs::R_AX_PCIE_HIMR00, intrs0);
+    host::mmio_w32(mmio, regs::R_AX_PCIE_HIMR10, intrs1);
+
+    host::print("  HCI: intr unmasked (HIMR0=0x");
+    host::print_hex32(halt_c2h_intrs);
+    host::print(" HIMR00=0x");
+    host::print_hex32(intrs0);
+    host::print(" HIMR10=0x");
+    host::print_hex32(intrs1);
+    host::print(")\n");
+}
+
 
 /// Diagnose: poll RXQ IDX for up to `max_ms` ms, report any HW_IDX advance.
 /// Used to verify H2C → C2H pipe bidirectionality.

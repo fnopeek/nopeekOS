@@ -57,6 +57,33 @@ pub const R_AX_C2HREG_CTRL:  u32      = 0x8164;
 // rtw89_mac_resume_sch_tx via H2CREG SCH_TX_EN when FW is ready.
 pub const R_AX_CTN_TXEN: u32          = 0xC348;
 pub const B_AX_CTN_TXEN_ALL_MASK: u16 = 0xFFFF;
+
+// PCIe interrupt mask registers — rtw89_pci_enable_intr (pci.c:853).
+// Writing the IMRs unmasks the matching IRQ sources; required as part of
+// rtw89_hci_start / rtw89_pci_ops_start (pci.c:1922) at the end of
+// rtw89_core_start. Without this, the RX side may remain gated.
+pub const R_AX_HIMR0:        u32 = 0x01A0;
+pub const R_AX_HISR0:        u32 = 0x01A4;
+pub const R_AX_PCIE_HIMR00:  u32 = 0x10B0;
+pub const R_AX_PCIE_HISR00:  u32 = 0x10B4;
+pub const R_AX_PCIE_HIMR10:  u32 = 0x13B0;
+pub const R_AX_PCIE_HISR10:  u32 = 0x13B4;
+
+// HIMR0 bits (pci.h:160)
+pub const B_AX_HALT_C2H_INT_EN:     u32 = 1 << 21;
+
+// PCIE_HIMR00 bits (pci.h:180)
+pub const B_AX_HS0ISR_IND_INT_EN:   u32 = 1 << 24;
+pub const B_AX_RPQBD_FULL_INT_EN:   u32 = 1 << 20;
+pub const B_AX_RDU_INT_EN:          u32 = 1 << 19;
+pub const B_AX_RXDMA_STUCK_INT_EN:  u32 = 1 << 18;
+pub const B_AX_TXDMA_STUCK_INT_EN:  u32 = 1 << 17;
+pub const B_AX_RPQDMA_INT_EN:       u32 = 1 << 2;
+pub const B_AX_RXP1DMA_INT_EN:      u32 = 1 << 1;
+pub const B_AX_RXDMA_INT_EN:        u32 = 1 << 0;
+
+// PCIE_HIMR10 bits
+pub const B_AX_HC10ISR_IND_INT_EN:  u32 = 1 << 28;
 pub const R_AX_SEC_CTRL: u32          = 0x0C00;
 pub const B_AX_SEC_IDMEM_MASK: u32    = 0x3 << 16;
 pub const B_AX_BOOT_REASON_MASK: u32  = 0x7; // bits [2:0] at offset 0x01E6

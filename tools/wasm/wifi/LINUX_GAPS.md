@@ -17,7 +17,7 @@ Legende: `[ ]` offen · `[x]` erledigt · `[·]` nicht nötig für unsere HW
 - [ ] **A4** `rtw89_mac_cfg_ppdu_status_bands` — nur PHY_0 statt pro MAC-Band
 - [ ] **A5** `rtw89_mac_cfg_phy_rpt_bands` — PHY report config pro Band
 - [ ] A6 `rtw89_mac_update_rts_threshold` (mac.c:6222) — TX-seitig, evtl. unkritisch
-- [ ] **A7** `rtw89_hci_start` / `rtw89_pci_ops_start` — IRQ enable + RX-DMA arm (sehr verdächtig!)
+- [x] **A7** `rtw89_hci_start` / `rtw89_pci_ops_start` — v0.98.0: `mac::hci_start` schreibt HIMR0/HIMR00/HIMR10
 
 ## B — `rtw89_phy_dm_init` (core.c:5963)
 
