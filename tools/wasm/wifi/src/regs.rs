@@ -36,6 +36,27 @@ pub const RTW89_FW_DLFW_RESUME: u32   = 3; // firmware download boot reason
 // Additional registers from rtw89_mac_enable_cpu_ax
 pub const R_AX_UDM1: u32              = 0x01F4;
 pub const R_AX_UDM2: u32              = 0x01F8;
+// H2C/C2H counter byte at R_AX_UDM1+1 (= 0x01F5):
+//   [3:0] = HALMAC_H2C_DEQ_CNT   (GENMASK(11,8) in the 32-bit UDM1 reg)
+//   [7:4] = HALMAC_C2H_ENQ_CNT   (GENMASK(15,12))
+// Linux updates the counter on every h2creg / c2hreg transaction (chip info
+// rtw8852b.c:1031 .h2c_counter_reg / .c2h_counter_reg).
+pub const R_AX_HALMAC_CNT_BYTE: u32   = 0x01F5;
+pub const B_HALMAC_H2C_DEQ_CNT: u8    = 0x0F;
+pub const B_HALMAC_C2H_ENQ_CNT: u8    = 0xF0;
+
+// H2CREG / C2HREG — fast register-based H2C channel to FW (used by
+// sch_tx_en, get_feature, etc.; not the CH12 DMA H2C).
+pub const R_AX_H2CREG_DATA0: u32      = 0x8140;
+pub const R_AX_H2CREG_CTRL:  u32      = 0x8160;
+pub const B_AX_H2CREG_TRIGGER: u8     = 1 << 0;
+pub const R_AX_C2HREG_DATA0: u32      = 0x8150;
+pub const R_AX_C2HREG_CTRL:  u32      = 0x8164;
+
+// CMAC TX enable register — written by rtw89_mac_stop_sch_tx /
+// rtw89_mac_resume_sch_tx via H2CREG SCH_TX_EN when FW is ready.
+pub const R_AX_CTN_TXEN: u32          = 0xC348;
+pub const B_AX_CTN_TXEN_ALL_MASK: u16 = 0xFFFF;
 pub const R_AX_SEC_CTRL: u32          = 0x0C00;
 pub const B_AX_SEC_IDMEM_MASK: u32    = 0x3 << 16;
 pub const B_AX_BOOT_REASON_MASK: u32  = 0x7; // bits [2:0] at offset 0x01E6
