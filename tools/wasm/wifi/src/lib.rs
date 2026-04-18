@@ -26,7 +26,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.6.0 — scan results table (BSSID/SSID/ch)\n");
+    host::print("[wifi] RTL8852BE driver v1.7.0 — 3x scan + quiet init log\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -207,14 +207,22 @@ pub extern "C" fn _start() {
     //   now complete without wedging the pipe?
     vif::init(mmio, 0);
 
-    // ── Phase 6: FW scan_offload (sweeps 2G ch 1..13) ──────────────
-    // Hardcoded single-channel listen-only was diagnostically weak
-    // (biased on ch 7 = user's home AP). Linux always drives the RX
-    // path via scan_offload — the FW itself iterates channels with
-    // correct per-channel setup. If the FW emits SCANOFLD_RSP with
-    // ret != 0 we now have a concrete error code to investigate
-    // instead of just "0 packets".
-    mac::scan(mmio);
+    // ── Phase 6: 3× FW scan_offload (2G ch 1..13) ─────────────────
+    // A single scan pass gets ~100 ms per channel — often only 1-2
+    // beacons per AP. Running three passes builds up a richer picture
+    // (more beacon counts per BSSID, better chance to catch distant
+    // APs whose beacons happen to land outside a single 100-ms window).
+    // The BSS table accumulates across all passes since it's static.
+    const SCAN_PASSES: u32 = 3;
+    for pass in 1..=SCAN_PASSES {
+        host::print("\n[wifi] Scan pass ");
+        fw::print_dec(pass as usize);
+        host::print("/");
+        fw::print_dec(SCAN_PASSES as usize);
+        host::print("\n");
+        mac::scan(mmio);
+    }
+    mac::scan_summary();
 
     // ── Done — wait for exit ───────────────────────────────────────
     host::print("\n[wifi] Press 'q' to exit\n");

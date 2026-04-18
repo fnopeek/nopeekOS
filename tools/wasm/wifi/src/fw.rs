@@ -219,7 +219,7 @@ pub fn download(mmio: i32) -> bool {
             h2c_ready = true;
             break;
         }
-        if i < 5 || i % 500 == 0 {
+        if VERBOSE && (i < 5 || i % 500 == 0) {
             host::print("  ["); print_dec(i as usize);
             host::print("] FW=0x"); host::print_hex32(val);
             host::print("\n");
@@ -239,8 +239,8 @@ pub fn download(mmio: i32) -> bool {
     send_fw_header(ring_dma, data_dma, mmio, hdr_send_len);
     host::sleep_ms(20);
 
-    // ── DMA diagnostic after header send ─────────────────────────
-    {
+    // ── DMA diagnostic after header send (verbose-only) ─────────
+    if VERBOSE {
         let stop = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_STOP1);
         let busy = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
         let cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
@@ -900,10 +900,12 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     host::print(" (32 bufs)\n");
 
     // DEBUG: readback DESA immediately after write (before any reset)
-    let d1 = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
-    let c1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-    host::print("  [dbg pre-BDRAM] DESA_L=0x"); host::print_hex32(d1);
-    host::print(" CFG1=0x"); host::print_hex32(c1); host::print("\n");
+    if VERBOSE {
+        let d1 = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
+        let c1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+        host::print("  [dbg pre-BDRAM] DESA_L=0x"); host::print_hex32(d1);
+        host::print(" CFG1=0x"); host::print_hex32(c1); host::print("\n");
+    }
 
     // Reset BD_IDX for CH12
     unsafe { BD_IDX = 0; }
@@ -918,10 +920,12 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     }
 
     // DEBUG: readback DESA after BDRAM reset
-    let d2 = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
-    let c2 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
-    host::print("  [dbg post-BDRAM] DESA_L=0x"); host::print_hex32(d2);
-    host::print(" CFG1=0x"); host::print_hex32(c2); host::print("\n");
+    if VERBOSE {
+        let d2 = host::mmio_r32(mmio, regs::R_AX_RXQ_RXBD_DESA_L);
+        let c2 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
+        host::print("  [dbg post-BDRAM] DESA_L=0x"); host::print_hex32(d2);
+        host::print(" CFG1=0x"); host::print_hex32(c2); host::print("\n");
+    }
 
     // NO RXQ IDX write here. 8852BE has rx_ring_eq_is_full=false in Linux,
     // meaning wp=0 and the IDX register is left alone after BDRAM reset.
@@ -982,13 +986,15 @@ fn send_fw_header(ring_dma: i32, data_dma: i32, mmio: i32, hdr_len: usize) {
     unsafe { H2C_SEQ = seq.wrapping_add(1); }
 
     // Debug: dump first 48 bytes of DMA buffer (WD + H2C + start of FW header)
-    host::print("  TX[");
-    for i in 0..12u32 {
-        if i > 0 && i % 8 == 0 { host::print("\n     "); }
-        if i > 0 { host::print(" "); }
-        host::print_hex32(host::dma_r32(data_dma, i * 4));
+    if VERBOSE {
+        host::print("  TX[");
+        for i in 0..12u32 {
+            if i > 0 && i % 8 == 0 { host::print("\n     "); }
+            if i > 0 { host::print(" "); }
+            host::print_hex32(host::dma_r32(data_dma, i * 4));
+        }
+        host::print("]\n");
     }
-    host::print("]\n");
 
     // BD length = total DMA buffer size (WD + H2C + data)
     submit_bd(ring_dma, data_dma, data_phys, mmio, dma_total);
@@ -1196,14 +1202,20 @@ fn wait_fw_ready(mmio: i32) -> bool {
             host::print("\n");
             return false;
         }
-        // Track BOOT_DBG progress
-        let dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
-        if dbg != last_dbg || i % 500 == 0 {
-            host::print("  ["); print_dec(i as usize);
-            host::print("] STS="); print_dec(fwdl_sts as usize);
-            host::print(" DBG=0x"); host::print_hex32(dbg);
-            host::print("\n");
-            last_dbg = dbg;
+        // Track BOOT_DBG progress — verbose-only. In steady-state the
+        // same 6 "STS=6 DBG=0x..." lines appear every boot and are
+        // uninteresting; keep for debugging boot regressions.
+        if VERBOSE {
+            let dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
+            if dbg != last_dbg || i % 500 == 0 {
+                host::print("  ["); print_dec(i as usize);
+                host::print("] STS="); print_dec(fwdl_sts as usize);
+                host::print(" DBG=0x"); host::print_hex32(dbg);
+                host::print("\n");
+                last_dbg = dbg;
+            }
+        } else {
+            let _ = last_dbg;
         }
         host::sleep_ms(1);
     }
@@ -1214,8 +1226,13 @@ fn wait_fw_ready(mmio: i32) -> bool {
 //  Debug helpers
 // ═══════════════════════════════════════════════════════════════════
 
-/// Dump key register state for debugging.
+/// Dump key register state for debugging. Gated by `VERBOSE` — these
+/// PW/FW/PLAT checkpoints were useful during the v0.85-era pwr_off/
+/// pwr_on bring-up; once the sequence is stable they are noise.
+const VERBOSE: bool = false;
+
 fn dump_state(mmio: i32, label: &str) {
+    if !VERBOSE { return; }
     host::print("  ["); host::print(label); host::print("] ");
     host::print("PW=0x");
     host::print_hex32(host::mmio_r32(mmio, regs::R_AX_SYS_PW_CTRL));
