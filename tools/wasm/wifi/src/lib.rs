@@ -26,7 +26,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.4.0 — Phase 1.3: sys_init_ax re-assert\n");
+    host::print("[wifi] RTL8852BE driver v1.5.0 — Phase 5: vif::init re-enabled\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -192,25 +192,20 @@ pub extern "C" fn _start() {
     chan::set_channel_help_exit(mmio);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
 
-    // ── Phase 5b: VIF registration — DISABLED in v1.2.0.
-    //   v1.0.0 (2 H2Cs) and v1.1.0 (full 8-step chain, strict Linux
-    //   order) both wedged the CH12 H2C pipe immediately: every H2C
-    //   after the first VIF H2C (role_maintain or macid_pause) got
-    //   NO C2H reply. Subsequent scan H2Cs also went silent — the FW
-    //   stops responding entirely. Not a sequence-number issue
-    //   (scan H2Cs at the same seq positions worked in v0.99.0),
-    //   not payload size, not class/func IDs (all verified 1:1
-    //   against Linux). Concluded the v0.93 vif helpers (role_maintain
-    //   / addr_cam / macid_pause / join_info / default_cmac_tbl)
-    //   have a subtle encoding bug we haven't found yet, so using any
-    //   of them leaves the FW in a broken state.
+    // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
+    //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
+    //   missing the 17 per-block DMAC/CMAC IMR enables (Phase 1.1)
+    //   and the post-FWDL sys_init_ax re-assert (Phase 1.3). Without
+    //   the per-block IMRs some FW error paths never propagate back
+    //   through the H2C ACK channel — the FW hangs waiting for an
+    //   ACK that never comes, and subsequent H2Cs stack up silently.
     //
-    //   Reverting to v0.99.0-style: skip vif::init and let scan hit
-    //   the FW with macid=0/port=0/band=0 defaults. The FW responds
-    //   with SCANOFLD_RSP ret=4 plus a LOG-FMT (fmt=0x370 file=2
-    //   line=512) — that concrete error code is a better starting
-    //   point for diagnosis than a wedged pipe.
-    // vif::init(mmio, 0);
+    //   Phase 1 closed those gaps in v1.3.0 and v1.4.0. This commit
+    //   tests the hypothesis: does the full 8-step rtw89_mac_vif_init
+    //   (port_update + dmac_tbl + cmac_tbl + macid_pause +
+    //   role_maintain + join_info + addr_cam + default_cmac_tbl)
+    //   now complete without wedging the pipe?
+    vif::init(mmio, 0);
 
     // ── Phase 6: FW scan_offload (sweeps 2G ch 1..13) ──────────────
     // Hardcoded single-channel listen-only was diagnostically weak

@@ -94,7 +94,7 @@ Legende: `[x]` erledigt · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig 
 
 ### 2.6 `rtw89_fw_send_all_early_h2c` (fw.c:7874)
 
-- [ ] **2.6** — **fehlt komplett**. Queue-basierte frühe H2Cs die Linux aus `rtwdev->early_h2c_list` abarbeitet. Normalerweise leer, aber Linux ruft die Funktion immer. Prüfen ob die Existenz des Calls relevant ist (z.B. wegen Sync-Punkt).
+- [·] **2.6** — **NO-OP für uns**. Linux iteriert `rtwdev->early_h2c_list` (debugfs.c:3536) — nur via `/sys/kernel/debug/.../early_h2c` manuell befüllt. In Produktion leer, daher effektiv No-Op. Kein Call-Punkt nötig.
 
 ### 2.7 `rtw89_fw_h2c_set_ofld_cfg`
 
@@ -131,18 +131,18 @@ Legende: `[x]` erledigt · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig 
 
 ### 3.7 `rtw89_phy_dm_init` (phy.c:7683) — **teilweise, viele fehlend**
 
-- [ ] 3.7.1 `rtw89_phy_stat_init`
+- [·] 3.7.1 `rtw89_phy_stat_init` (phy.c:5792) — nur EWMA-SW-State + thermal-cache, kein MMIO. Wir tracken diese SW-State nicht.
 - [x] 3.7.2 `rtw89_chip_bb_sethw` (common.c:1099) — haben wir inline
 - [x] 3.7.3 `rtw89_phy_env_monitor_init` (ccx_top) — haben wir
-- [ ] 3.7.4 `rtw89_phy_nhm_setting_init` (phy.c:6020)
+- [·] 3.7.4 `rtw89_phy_nhm_setting_init` (phy.c:6020) — `support_noise=false` für 8852B → Early-Return, NO-OP.
 - [x] 3.7.5 `rtw89_physts_parsing_init` — haben wir
 - [/] 3.7.6 `__rtw89_phy_dig_init` — Subset geportet (PD-Thresholds)
 - [/] 3.7.7 `rtw89_phy_cfo_init` — Subset (DCFO + hw comp)
-- [ ] 3.7.8 `rtw89_phy_bb_wrap_init`
+- [·] 3.7.8 `rtw89_phy_bb_wrap_init` — AX-Stub `static inline {}` in phy.h:898, NO-OP für 8852B.
 - [/] 3.7.9 `rtw89_phy_edcca_init` — nur 1 reg (TX_COLLISION_T2R_ST). Linux hat mehr.
-- [ ] 3.7.10 `rtw89_phy_ch_info_init`
-- [ ] 3.7.11 `rtw89_phy_ul_tb_info_init` (phy.c:5551)
-- [ ] 3.7.12 `rtw89_phy_antdiv_init` (phy.c:5670) + `set_ant`
+- [·] 3.7.10 `rtw89_phy_ch_info_init` — AX-Stub `static inline {}` in phy.h:912, NO-OP.
+- [·] 3.7.11 `rtw89_phy_ul_tb_info_init` (phy.c:5551) — setzt nur SW-Flag `dyn_tb_tri_en`, kein MMIO.
+- [·] 3.7.12 `rtw89_phy_antdiv_init` (phy.c:5670) — `hal.ant_diversity=false` default → Early-Return.
 - [·] 3.7.13 `rtw89_chip_rfe_gpio` — NULL für 8852B
 - [·] 3.7.14 `rtw89_chip_rfk_hw_init` — NULL für 8852B
 - [x] 3.7.15 `rtw89_phy_init_rf_nctl` (preinit + NCTL table, 1320 regs)
@@ -153,19 +153,19 @@ Legende: `[x]` erledigt · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig 
 
 ### 3.8 `rtw89_mac_set_edcca_mode_bands`
 
-- [ ] **3.8** — fehlt (EDCCA mode NORMAL pro Band).
+- [·] **3.8** — `.set_edcca_mode = NULL` in `rtw89_mac_gen_ax` (mac.c:7355). NO-OP für 8852B.
 
 ### 3.9 `rtw89_mac_cfg_ppdu_status_bands`
 
-- [/] **3.9** — wir machen einen Aufruf für PHY_0, nicht pro Band.
+- [x] **3.9** — MAC_0 schreibt `R_AX_PPDU_STAT (0xCE40)` mit PPDU_STAT_RPT_EN|APP_MAC_INFO_RPT|APP_PLCP_HDR_RPT|PPDU_STAT_RPT_CRC32 und `R_AX_HW_RPT_FWD (0x9C18) mask GENMASK(1,0)=1` (= RTW89_PRPT_DEST_HOST). dbcc_en=false für 8852B → MAC_1 nicht nötig.
 
 ### 3.10 `rtw89_mac_cfg_phy_rpt_bands`
 
-- [ ] **3.10** — fehlt.
+- [·] **3.10** — `.cfg_phy_rpt = NULL` für AX (mac.c:7354). NO-OP.
 
 ### 3.11 `rtw89_mac_update_rts_threshold`
 
-- [ ] 3.11 — fehlt (TX-seitig, evtl. unkritisch für Listen).
+- [~] 3.11 — TX-seitig (RTS time/len thresholds). Nicht kritisch für passive Listen. Erst wenn wir TX brauchen.
 
 ### 3.12 `rtw89_hci_start` (= `rtw89_pci_ops_start`)
 
