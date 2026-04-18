@@ -80,30 +80,64 @@ const TBTT_AGG_DEF: u32 = 1;
 // ═══════════════════════════════════════════════════════════════════
 
 pub fn init(mmio: i32, macid: u8) -> bool {
-    host::print("\n[wifi] Phase 5: VIF init — minimal (role_maintain + addr_cam) macid=");
+    host::print("\n[wifi] Phase 5: VIF init (full Linux rtw89_mac_vif_init) macid=");
     fw::print_dec(macid as usize);
     host::print("\n");
 
-    // v0.93 minimal path — skip everything except the two H2Cs that register
-    // MACID 0 with the FW so scan_offload stops returning ret=4.
+    // Strict 1:1 port of Linux rtw89_mac_vif_init (mac.c:4942). The earlier
+    // "minimal" two-H2C path was a v0.93 shortcut that left macid 0 with
+    // empty DMAC/CMAC tables, so role_maintain / addr_cam had no state to
+    // register against — the FW silently dropped both and wedged the H2C
+    // pipe (v1.0.0 log showed both H2Cs timed out with NO C2H, and every
+    // subsequent scan H2C also timed out).
     //
-    //   SKIPPED: port_update (pure MMIO CMAC-port poke — v0.90 showed this
-    //   wedged FW response times; FW itself doesn't need the port init
-    //   for passive scan)
-    //   SKIPPED: macid_pause     (MACID 0 is unpaused by default)
-    //   SKIPPED: join_info       (NO_LINK is default for fresh FW)
-    //   SKIPPED: default_cmac_tbl (68B CCTLINFO_UD — only needed for TX)
-    //   SKIPPED: dmac/cmac_tbl_init (secure_boot path)
+    // Linux order (all 8 steps for AX non-secure-boot; .h2c_default_dmac_tbl
+    // is NULL for 8852B so step 9 drops out):
+    //   1. mac_port_update         (MMIO, STA on port 0 NO_LINK)
+    //   2. mac_dmac_tbl_init(macid)(MMIO INDIR_ACCESS, 4 × 0)
+    //   3. mac_cmac_tbl_init(macid)(MMIO INDIR_ACCESS, 8 × defaults)
+    //   4. set_macid_pause(false)  (H2C MAC_FW_OFLD, rack=1 dack=0)
+    //   5. h2c_role_maintain       (H2C MEDIA_RPT, rack=0 dack=1)
+    //   6. h2c_join_info(dis_conn) (H2C MEDIA_RPT, rack=0 dack=1)
+    //   7. cam_init + h2c_cam      (SW + H2C ADDR_CAM_UPDATE, rack=0 dack=1)
+    //   8. h2c_default_cmac_tbl    (H2C FR_EXCHG, rack=0 dack=1)
 
-    host::print("  H2C: role_maintain(CREATE, STATION, port=0, band=0)...\n");
+    host::print("  VIF: 1. port_update(p0 NO_LINK)\n");
+    port_update_p0_nolink(mmio);
+
+    host::print("  VIF: 2. dmac_tbl_init\n");
+    dmac_tbl_init(mmio, macid);
+
+    host::print("  VIF: 3. cmac_tbl_init\n");
+    cmac_tbl_init(mmio, macid);
+
+    host::print("  VIF: 4. macid_pause(unpause)\n");
+    h2c_macid_pause(mmio, macid, false);
+    // Linux sends with rack=1, dack=0 — REC_ACK arrives asynchronously.
+    // Give the FW ~50 ms to process before the next H2C since the H2C
+    // queue depth is shallow; then drain anything that arrived.
+    wait_c2h(mmio, 100, "macid_pause");
+
+    host::print("  VIF: 5. role_maintain(CREATE, STATION)\n");
     h2c_role_maintain(mmio, macid, 0, 0);
-    wait_c2h(mmio, 2000, "role_maintain");
+    wait_c2h(mmio, 500, "role_maintain");
 
-    host::print("  H2C: addr_cam_upd(CREATE)...\n");
+    host::print("  VIF: 6. join_info(dis_conn, NO_LINK)\n");
+    h2c_join_info(mmio, macid, 0, 0);
+    wait_c2h(mmio, 500, "join_info");
+
+    host::print("  VIF: 7. addr_cam_upd(CREATE)\n");
     h2c_cam(mmio, macid, 0);
-    wait_c2h(mmio, 2000, "addr_cam");
+    wait_c2h(mmio, 500, "addr_cam");
 
-    host::print("[wifi] VIF minimal init complete\n");
+    host::print("  VIF: 8. default_cmac_tbl\n");
+    h2c_default_cmac_tbl(mmio, macid);
+    wait_c2h(mmio, 500, "default_cmac_tbl");
+
+    // Step 9 (h2c_default_dmac_tbl) — NULL for 8852B in rtw8852b.c:879,
+    // rtw89_chip_h2c_default_dmac_tbl is a no-op.
+
+    host::print("[wifi] VIF full init complete\n");
     true
 }
 
