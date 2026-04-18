@@ -25,6 +25,7 @@ See README.md for the full vision and phase planning.
 - All `unsafe` blocks MUST have a SAFETY comment
 - Serial is primary I/O, not VGA
 - Comments in English, minimal
+- Hardware drivers: follow Linux source 1:1 (see memory/feedback_linux_strict.md)
 
 ## Build & Run
 
@@ -32,25 +33,18 @@ See README.md for the full vision and phase planning.
 ./build.sh build        # Compile only
 ./build.sh qemu         # Build + QEMU (development)
 ./build.sh debug        # Build + QEMU with GDB stub
+./build.sh release      # Build + sign (ECDSA P-384) → release/ for OTA
 ./build.sh vbox         # Build + VirtualBox (demo)
 ./build.sh vbox-clean   # Remove VirtualBox VM
 ```
 
-## Current Phase: 9 (SMP & Event-Driven Architecture)
+## Current Status
 
-Focus: Event-driven microkernel, GPU compositing, unlimited windows.
-Completed: IDT+PIC, physical memory manager, heap allocator, SMP (4 cores),
-  xHCI (keyboard+mouse), NVMe, Intel Xe GPU (4K@60Hz native modesetting),
-  shade compositor (windows, drag, resize), WASM sandbox, npkFS, OTA updates,
-  network stack (TCP/TLS 1.3), login screen, double-buffer framebuffer,
-  BCS blitter engine (GPU blit via Gen 12 ExecList/ELSQ — zero-CPU compositing),
-  GPU-composited cursor (save-under), async worker intents (http/update non-blocking),
-  heap-allocated terminals (no window limit), KeyEvent abstraction (typed input),
-  WASM Driver ABI (PCI/MMIO/DMA host functions),
-  WiFi RTL8852BE firmware download (FWDL complete, FW running, STS=7).
-In progress: WiFi MAC init + scan, Widget API.
-Next: WiFi association, file manager app, VSync (PLANE_SURF flip).
-Known bug: `run wifi` (worker core) crashes, `driver wifi` (Core 0) works — MMIO map_page conflict with 1GB huge pages.
+- **Phase:** 9 (SMP & Event-Driven Architecture)
+- **Completed features + full roadmap:** see `README.md`
+- **Active work / blockers:** see `memory/project_wifi_current.md`
+- **Known bug:** `run wifi` on worker core crashes; `driver wifi` on Core 0 works
+  (MMIO `map_page` conflict with 1GB huge pages).
 
 ## Security Checkpoint
 
