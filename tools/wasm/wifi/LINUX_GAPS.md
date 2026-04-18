@@ -36,9 +36,9 @@ Legende: `[x]` erledigt · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig 
 
 ### 2.2 `sys_init_ax` (mac.c:1696) — **re-assert nach FWDL**
 
-- [/] **2.2.1** `dmac_func_en_ax` (mac.c:1651) — Linux schreibt `R_AX_DMAC_FUNC_EN` + `R_AX_DMAC_CLK_EN` **direkt** (nicht set). Wir setzen's einmal in `pwr_on_func` mit `set32`. FWDL kann Bits gestört haben → Linux re-asserts. **Fehlt bei uns.**
-- [/] **2.2.2** `cmac_func_en_ax(mac_idx=0, en=true)` (mac.c:1605) — Linux: `CK_EN`-set + `CMAC_FUNC_EN`-set. Wir setzen in `pwr_on`. **Nicht re-asserted nach FWDL.**
-- [/] **2.2.3** `chip_func_en_ax` (mac.c:1685) — 8852B: `set R_AX_SPS_DIG_ON_CTRL0 B_AX_OCP_L1_MASK`. Haben wir in `mac::init` (chip_func_en Block). Korrekt.
+- [x] **2.2.1** `dmac_func_en_ax` (mac.c:1651) — v1.4.0: `mac::sys_init_ax` schreibt `R_AX_DMAC_FUNC_EN`+`R_AX_DMAC_CLK_EN` direkt mit exakten Linux-Bits.
+- [x] **2.2.2** `cmac_func_en_ax(mac_idx=0, en=true)` (mac.c:1605) — v1.4.0: set32 auf `R_AX_CK_EN`+`R_AX_CMAC_FUNC_EN`.
+- [x] **2.2.3** `chip_func_en_ax` (mac.c:1685) — v1.4.0: in `sys_init_ax` integriert (B_AX_OCP_L1_MASK).
 
 ### 2.3 `trx_init_ax` (mac.c:3929)
 
