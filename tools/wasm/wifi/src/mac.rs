@@ -929,6 +929,111 @@ static mut RX_BY_TYPE: [u32; 16] = [0; 16];
 static mut WIFI_FRAME_COUNT: u32 = 0;
 static mut BEACON_COUNT: u32 = 0;
 
+// ── BSS discovery table ─────────────────────────────────────────
+// Fills during scan from each beacon's BSSID (addr3) + SSID IE +
+// DS Parameter Set IE (primary channel). Dedupe by BSSID so a
+// nearby AP that emits 80 beacons in 30 s shows as one row.
+const BSS_TABLE_MAX: usize = 32;
+
+#[derive(Copy, Clone)]
+struct BssEntry {
+    bssid: [u8; 6],
+    ssid: [u8; 32],
+    ssid_len: u8,
+    channel: u8,
+    count: u16,
+}
+
+static mut BSS_TABLE: [BssEntry; BSS_TABLE_MAX] = [BssEntry {
+    bssid: [0; 6], ssid: [0; 32], ssid_len: 0, channel: 0, count: 0,
+}; BSS_TABLE_MAX];
+static mut BSS_COUNT: usize = 0;
+
+/// Read one byte from DMA at unaligned address. Small wrapper so the
+/// parser stays readable (DMA only exposes 32-bit word access).
+fn dma_r8(dma: i32, addr: u32) -> u8 {
+    let word = host::dma_r32(dma, addr & !3);
+    let shift = (addr & 3) * 8;
+    ((word >> shift) & 0xFF) as u8
+}
+
+/// Insert or update a BSS entry. First call for a new BSSID allocates
+/// a new slot (up to BSS_TABLE_MAX). Later calls just bump `count`
+/// and refresh channel.
+fn bss_upsert(bssid: &[u8; 6], ssid: &[u8], ssid_len: u8, channel: u8) {
+    unsafe {
+        for i in 0..BSS_COUNT {
+            if BSS_TABLE[i].bssid == *bssid {
+                BSS_TABLE[i].count = BSS_TABLE[i].count.saturating_add(1);
+                if channel != 0 { BSS_TABLE[i].channel = channel; }
+                // Refresh SSID if we saw a non-broadcast one later.
+                if BSS_TABLE[i].ssid_len == 0 && ssid_len > 0 {
+                    let n = ssid_len.min(32) as usize;
+                    BSS_TABLE[i].ssid[..n].copy_from_slice(&ssid[..n]);
+                    BSS_TABLE[i].ssid_len = ssid_len.min(32);
+                }
+                return;
+            }
+        }
+        if BSS_COUNT < BSS_TABLE_MAX {
+            let slot = BSS_COUNT;
+            BSS_TABLE[slot].bssid = *bssid;
+            let n = ssid_len.min(32) as usize;
+            BSS_TABLE[slot].ssid[..n].copy_from_slice(&ssid[..n]);
+            BSS_TABLE[slot].ssid_len = ssid_len.min(32);
+            BSS_TABLE[slot].channel = channel;
+            BSS_TABLE[slot].count = 1;
+            BSS_COUNT += 1;
+        }
+        // If the table is full we just drop further BSSes silently.
+    }
+}
+
+fn print_hex_byte(b: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let s = [HEX[(b >> 4) as usize], HEX[(b & 0xF) as usize]];
+    host::print(unsafe { core::str::from_utf8_unchecked(&s) });
+}
+
+fn print_bss_table() {
+    let n = unsafe { BSS_COUNT };
+    host::print("\n[wifi] Discovered BSS: ");
+    fw::print_dec(n);
+    host::print(" unique AP(s)\n");
+    if n == 0 { return; }
+    host::print("  ch  bssid              beacons  ssid\n");
+    host::print("  ──  ─────────────────  ───────  ────\n");
+    unsafe {
+        for i in 0..n {
+            let e = &BSS_TABLE[i];
+            host::print("  ");
+            if e.channel < 10 { host::print(" "); }
+            fw::print_dec(e.channel as usize);
+            host::print("  ");
+            for j in 0..6 {
+                print_hex_byte(e.bssid[j]);
+                if j < 5 { host::print(":"); }
+            }
+            host::print("  ");
+            let c = e.count as usize;
+            if c < 10 { host::print("    "); }
+            else if c < 100 { host::print("   "); }
+            else if c < 1000 { host::print("  "); }
+            else { host::print(" "); }
+            fw::print_dec(c);
+            host::print("  ");
+            if e.ssid_len == 0 {
+                host::print("<hidden>");
+            } else {
+                let s = core::str::from_utf8(&e.ssid[..e.ssid_len as usize])
+                    .unwrap_or("<non-utf8>");
+                host::print(s);
+            }
+            host::print("\n");
+        }
+    }
+}
+
 /// Poll RXQ for new entries. Max 8 packets per call to avoid CPU hogging.
 fn rxq_poll(mmio: i32) -> u32 {
     let (bd_dma, data_dma, sw_idx) = unsafe { (fw::RXQ_DMA, fw::RXQ_DMA, RXQ_SW_IDX) };
@@ -1099,70 +1204,69 @@ fn handle_c2h(dma: i32, off: u32) {
     }
 }
 
-/// Handle a received WiFi frame — extract SSID from beacons/probe responses.
+/// Handle a received WiFi frame — extract BSSID + SSID + channel from
+/// beacons / probe responses and update BSS_TABLE.
 fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
     unsafe { WIFI_FRAME_COUNT += 1; }
 
-    // 802.11 header: FC(2) + Duration(2) + Addr1(6) + Addr2(6) + Addr3(6) + SeqCtrl(2) = 24 bytes
-    if len < 24 + 12 { return; } // too short for beacon
+    // 802.11 header: FC(2) + Duration(2) + Addr1(6) + Addr2(6) + Addr3(6) + SeqCtrl(2)
+    // = 24 bytes. Then beacon fixed body: Timestamp(8) + Interval(2) + Capability(2).
+    if len < 24 + 12 { return; }
 
-    // Read frame control (first 2 bytes of 802.11 header)
-    let fc_word = host::dma_r32(dma, off);
-    let fc = fc_word & 0xFFFF;
-    let frame_type = (fc >> 2) & 0x3;    // type field
-    let frame_subtype = (fc >> 4) & 0xF;  // subtype field
-
-    // Only process beacon (type=0/mgmt, subtype=8) or probe response (subtype=5)
+    let fc = host::dma_r32(dma, off) & 0xFFFF;
+    let frame_type    = (fc >> 2) & 0x3;
+    let frame_subtype = (fc >> 4) & 0xF;
     if frame_type != 0 { return; }
     if frame_subtype != 8 && frame_subtype != 5 { return; }
     unsafe { BEACON_COUNT += 1; }
 
-    // Beacon/Probe fixed fields after 802.11 header:
-    // Timestamp(8) + Interval(2) + Capability(2) = 12 bytes
-    // Then Information Elements follow
+    // BSSID = addr3, offset 16..21 from 802.11 header start.
+    let mut bssid = [0u8; 6];
+    for i in 0..6u32 {
+        bssid[i as usize] = dma_r8(dma, off + 16 + i);
+    }
+
+    // Walk IEs after the 12-byte fixed body. Collect SSID (tag=0) and
+    // DS Param Set (tag=3, 1 byte = primary channel).
     let ie_start = off + 24 + 12;
     let ie_end = off + len;
     if ie_start >= ie_end { return; }
 
-    // Find SSID IE (tag=0)
+    let mut ssid = [0u8; 32];
+    let mut ssid_len: u8 = 0;
+    let mut channel: u8 = 0;
+
     let mut pos = ie_start;
     while pos + 2 <= ie_end {
-        let tag_len = host::dma_r32(dma, pos & !3); // aligned read
-        let byte_off = (pos & 3) * 8;
-        let tag = ((tag_len >> byte_off) & 0xFF) as u8;
+        let tag = dma_r8(dma, pos);
+        let ie_len = dma_r8(dma, pos + 1) as u32;
 
-        // Read length byte
-        let len_pos = pos + 1;
-        let tag_len2 = host::dma_r32(dma, len_pos & !3);
-        let byte_off2 = (len_pos & 3) * 8;
-        let ie_len = ((tag_len2 >> byte_off2) & 0xFF) as u32;
+        // Sanity: bad length would run us off the buffer end.
+        if pos + 2 + ie_len > ie_end { break; }
 
-        if tag == 0 && ie_len > 0 && ie_len <= 32 {
-            // SSID found! Read SSID bytes
-            let mut ssid = [0u8; 33];
-            let ssid_start = pos + 2;
-            let mut buf = [0u8; 4];
-            for i in 0..ie_len {
-                let addr = ssid_start + i;
-                let w = host::dma_r32(dma, addr & !3);
-                let shift = (addr & 3) * 8;
-                ssid[i as usize] = ((w >> shift) & 0xFF) as u8;
+        match tag {
+            0 => {
+                // SSID — may be hidden (len=0) or a valid 1..32 byte name.
+                if ie_len > 0 && ie_len <= 32 {
+                    for i in 0..ie_len {
+                        ssid[i as usize] = dma_r8(dma, pos + 2 + i);
+                    }
+                    ssid_len = ie_len as u8;
+                }
             }
-
-            // Print SSID
-            host::print("  ");
-            let s = core::str::from_utf8(&ssid[..ie_len as usize]).unwrap_or("?");
-            host::print(s);
-            host::print("\n");
-            return;
-        }
-
-        if tag == 0 && ie_len == 0 {
-            return; // hidden SSID
+            3 => {
+                // DS Parameter Set — 1-byte primary channel.
+                if ie_len == 1 {
+                    channel = dma_r8(dma, pos + 2);
+                }
+            }
+            _ => {}
         }
 
         pos += 2 + ie_len;
     }
+
+    bss_upsert(&bssid, &ssid, ssid_len, channel);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1404,6 +1508,8 @@ pub fn scan(mmio: i32) {
     host::print("\n");
     host::print("  WiFi frames: "); fw::print_dec(wifi_frames as usize); host::print("\n");
     host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
+
+    print_bss_table();
 
     // Dump first buffer: rxbd_info + RXD for debugging (data at offset 4096)
     let data_dma = unsafe { fw::RXQ_DMA };
