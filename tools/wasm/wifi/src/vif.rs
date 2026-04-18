@@ -141,6 +141,13 @@ pub fn init(mmio: i32, macid: u8) -> bool {
     true
 }
 
+/// Silence VIF-init wait lines in production builds. These H2Cs are
+/// fire-and-forget per Linux (rack=1 only, dack=1 ack comes batched
+/// behind the next scan H2C), so our simple HW_IDX-advance poll nearly
+/// always logs "NO C2H after Xms" — misleading since the H2Cs did
+/// succeed. Flip to `true` to re-enable the per-step timing.
+const VERBOSE: bool = false;
+
 fn wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
     // R_AX_RXQ_RXBD_IDX = 0x1080 — use the same address as mac.rs
     const R_AX_RXQ_RXBD_IDX: u32 = 0x1080;
@@ -150,6 +157,7 @@ fn wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
         let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
         let hw = (idx >> 16) & 0xFFFF;
         if hw != hw0 {
+            if !VERBOSE { return; }
             host::print("    [diag "); host::print(tag);
             host::print("] C2H after "); fw::print_dec(ms as usize);
             host::print("ms (hw "); fw::print_dec(hw0 as usize);
@@ -158,6 +166,7 @@ fn wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
         }
         host::sleep_ms(1);
     }
+    if !VERBOSE { return; }
     host::print("    [diag "); host::print(tag);
     host::print("] NO C2H after "); fw::print_dec(max_ms as usize);
     host::print("ms\n");

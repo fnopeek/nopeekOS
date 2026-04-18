@@ -1166,7 +1166,9 @@ fn handle_c2h(dma: i32, off: u32) {
         if h2c_return != 0 { host::print(" !!FAIL!!"); }
         host::print(")\n");
     } else if cat == 1 && class == 0 && func == 0 {
-        host::print("  [c2h] REC_ACK\n");
+        if VERBOSE {
+            host::print("  [c2h] REC_ACK\n");
+        }
     } else if cat == 1 && class == 0 && func == 2 {
         // C2H_LOG — FW trace log. Linux: rtw89_fw_log_dump.
         // Payload starts right after the 8-byte C2H hdr. Content is either
@@ -1223,7 +1225,8 @@ fn handle_c2h(dma: i32, off: u32) {
             }
             host::print("\n");
         }
-    } else {
+    } else if VERBOSE {
+        // Unknown / uninteresting C2H — only in verbose builds.
         host::print("  [c2h] cat=");
         fw::print_dec(cat as usize);
         host::print(" cls=");
@@ -1380,9 +1383,19 @@ pub fn listen_only(mmio: i32, seconds: u32) {
 // ═══════════════════════════════════════════════════════════════════
 
 /// Start a passive scan on 2.4GHz channels 1-13.
+/// Called 3x from lib.rs to accumulate beacons across passes. The
+/// RX_FLTR / EDCCA / BSS-table state is kept in statics so only the
+/// first call prints the setup lines — subsequent calls go straight
+/// to the channel list + scan_start + END_SCAN poll.
+static mut SCAN_SETUP_DONE: bool = false;
+
 #[allow(dead_code)]
 pub fn scan(mmio: i32) {
-    host::print("\n[wifi] Phase 5: WiFi scan\n");
+    let first_pass = unsafe {
+        let was_done = SCAN_SETUP_DONE;
+        SCAN_SETUP_DONE = true;
+        !was_done
+    };
 
     // ── RX filter for scan — Linux fw.c:9103 rtw89_hw_scan_start
     // DEFAULT_AX_RX_FLTR drops everything not matching A1 (our MAC), so
@@ -1401,7 +1414,9 @@ pub fn scan(mmio: i32) {
     let cur = host::mmio_r32(mmio, 0xCE20);
     let cfg_mask: u32 = !(0x3F << 16); // preserve bits [21:16]
     host::mmio_w32(mmio, 0xCE20, (cur & !cfg_mask) | (0x03004438 & cfg_mask));
-    host::print("  RX_FLTR: scan mode (BCN_CHK/BC/A1 off, MPDU_MAX_LEN preserved)\n");
+    if first_pass {
+        host::print("  RX_FLTR: scan mode (BCN_CHK/BC/A1 off, MPDU_MAX_LEN preserved)\n");
+    }
 
     // ── config_edcca(scan=true) — Linux phy.c:8042 ────────────────────
     // Saves current EDCCA levels + sets them to EDCCA_MAX (249) so that
@@ -1421,7 +1436,9 @@ pub fn scan(mmio: i32) {
             | (EDCCA_MAX << 8)
             | (EDCCA_MAX << 24);
     host::mmio_w32(mmio, R_EDCCA_LVL, new);
-    host::print("  EDCCA: set to MAX for scan\n");
+    if first_pass {
+        host::print("  EDCCA: set to MAX for scan\n");
+    }
 
     // ── Send channel list ──────────────────────────────────────────
     // H2C: ADD_SCANOFLD_CH (CAT=1, CLASS=9, FUNC=0x16)
@@ -1465,9 +1482,11 @@ pub fn scan(mmio: i32) {
         // w2..w6 already zero (no pkt_ids for passive scan with num_pkt=0)
     }
 
-    host::print("  Sending channel list (");
-    fw::print_dec(N_CH as usize);
-    host::print(" channels)...\n");
+    if first_pass {
+        host::print("  Sending channel list (");
+        fw::print_dec(N_CH as usize);
+        host::print(" channels)...\n");
+    }
     // Linux: rack=1, dack=1 (fw.c:6393) — FW must send DONE_ACK + WAIT_COND_ADD_CH
     fw::h2c_send(mmio, 1, 9, 0x16, true, true, &buf[..hdr_len]);
     diag_wait_c2h(mmio, 200, "add_scanofld_ch");
@@ -1487,7 +1506,9 @@ pub fn scan(mmio: i32) {
     scan_cmd[4..8].copy_from_slice(&w1.to_le_bytes());
     scan_cmd[8..12].copy_from_slice(&w2.to_le_bytes());
 
-    host::print("  Starting passive scan...\n");
+    if first_pass {
+        host::print("  Starting passive scan...\n");
+    }
     // Linux: rack=1, dack=1 (fw.c:6585)
     fw::h2c_send(mmio, 1, 9, 0x17, true, true, &scan_cmd);
     diag_wait_c2h(mmio, 200, "scanofld_start");
@@ -1514,21 +1535,17 @@ pub fn scan(mmio: i32) {
 /// Print the aggregated scan results + BSS table.
 /// Called by `lib.rs` after running one or more scan passes.
 pub fn scan_summary() {
-    host::print("\n[wifi] Scan results:\n");
     let types = unsafe { RX_BY_TYPE };
     let wifi_frames = unsafe { WIFI_FRAME_COUNT };
     let beacons = unsafe { BEACON_COUNT };
-    host::print("  By type: ");
-    for i in 0..16u32 {
-        if types[i as usize] > 0 {
-            host::print("t"); fw::print_dec(i as usize);
-            host::print("="); fw::print_dec(types[i as usize] as usize);
-            host::print(" ");
-        }
-    }
-    host::print("\n");
-    host::print("  WiFi frames: "); fw::print_dec(wifi_frames as usize); host::print("\n");
-    host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
+    let ppdu = types[RX_TYPE_PPDU as usize];
+    let c2h  = types[RX_TYPE_C2H  as usize];
+
+    host::print("\n[wifi] Scan results:\n");
+    host::print("  WiFi frames:  "); fw::print_dec(wifi_frames as usize); host::print("\n");
+    host::print("  Beacons:      "); fw::print_dec(beacons as usize); host::print("\n");
+    host::print("  PPDU reports: "); fw::print_dec(ppdu as usize); host::print("\n");
+    host::print("  FW events:    "); fw::print_dec(c2h as usize); host::print("\n");
 
     print_bss_table();
 }
