@@ -52,6 +52,7 @@ npk> install debug                     # Install remote debug shell
 npk> uninstall wallpaper               # Remove module
 npk> modules                          # List installed modules
 npk> debug 192.168.1.50 22222         # Reverse mirror — laptop: `nc -l 22222`
+npk> driver wifi                       # RTL8852BE bring-up + 3× scan (BSSID/SSID/ch)
 npk> wallpaper demo                    # Generate 3 demo wallpapers + auto-theme
 npk> wallpaper set ocean              # Set wallpaper (extracts theme colors)
 npk> wallpaper random                  # Random wallpaper from collection
@@ -349,7 +350,15 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [x] WiFi driver: RTL8852BE probe, power-on, XTAL SI, DLE/HFC, DMA rings
 - [x] WiFi driver: firmware download (MFW cv-matching, WD+H2C, BDRAM, all sections)
 - [x] WiFi driver: MAC init + full PHY table load (4212 regs), RFK baseline, set_channel
-- [ ] WiFi driver: BB gain parser, IQK success, scan + association, data path
+- [x] WiFi driver: BB gain parser (config_bb_gain_ax, 66 entries, gain_error → HW)
+- [x] WiFi driver: 17 per-block DMAC/CMAC IMR enables + sys_init_ax re-assert
+- [x] WiFi driver: H2CREG transport (SCH_TX_EN async TX-pause), fw_log_cfg
+- [x] WiFi driver: full VIF init (port_update, dmac/cmac_tbl, macid_pause, role_maintain, join_info, addr_cam, default_cmac_tbl)
+- [x] WiFi driver: scan_offload (3× 13-channel sweep, BSSID/SSID/channel dedupe)
+- [x] WiFi driver: live beacon reception (Nachbar-APs + FritzBox im Scan sichtbar)
+- [ ] WiFi driver: RSSI per AP, OUI vendor lookup
+- [ ] WiFi driver: association (AUTH + ASSOC frames, 4-way WPA2 handshake, CCMP)
+- [ ] WiFi driver: data path (TX + encrypted RX)
 
 **Remote Debug (debug.wasm)**
 - [x] Terminal stream sink (64KB ringbuffer per terminal, `npk_stream_open/read`)
