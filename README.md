@@ -48,8 +48,10 @@ npk> passwd                          # Change passphrase
 npk> top                               # System monitor (WASM app: cores, memory, scheduler)
 npk> install wallpaper                 # Install WASM module (signed, verified)
 npk> install top                       # Install system monitor app
+npk> install debug                     # Install remote debug shell
 npk> uninstall wallpaper               # Remove module
 npk> modules                          # List installed modules
+npk> debug 192.168.1.50 22222         # Reverse mirror — laptop: `nc -l 22222`
 npk> wallpaper demo                    # Generate 3 demo wallpapers + auto-theme
 npk> wallpaper set ocean              # Set wallpaper (extracts theme colors)
 npk> wallpaper random                  # Random wallpaper from collection
@@ -346,7 +348,15 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [x] DMA buffer allocation below 4GB (32-bit TX BD constraint)
 - [x] WiFi driver: RTL8852BE probe, power-on, XTAL SI, DLE/HFC, DMA rings
 - [x] WiFi driver: firmware download (MFW cv-matching, WD+H2C, BDRAM, all sections)
-- [ ] WiFi driver: MAC init, RF calibration, scan, association, data path
+- [x] WiFi driver: MAC init + full PHY table load (4212 regs), RFK baseline, set_channel
+- [ ] WiFi driver: BB gain parser, IQK success, scan + association, data path
+
+**Remote Debug (debug.wasm)**
+- [x] Terminal stream sink (64KB ringbuffer per terminal, `npk_stream_open/read`)
+- [x] Keyboard input injection (`npk_key_inject` into global KEY_BUF)
+- [x] TCP user-API as host fns (`npk_tcp_connect/send/recv/close`)
+- [x] Background WASM spawn (doesn't set `APP_RUNNING` → shell stays active)
+- [x] `debug <ip> <port>` intent dials out to `nc -l` listener for live mirror
 
 **GPU Rendering**
 - [x] GPU HAL trait: init, set_mode, blit_rect_hw, flip, wait_vblank, supports_blit
@@ -552,19 +562,24 @@ nopeekOS/
 │       │   └── cursor.rs             #   Software mouse cursor
 │       │
 │       ├── intent/                   # Intent loop
-│       │   ├── mod.rs                #   Dispatch, CWD, tab-completion
+│       │   ├── mod.rs                #   Dispatch, CWD, tab-completion, key injection routing
 │       │   ├── fs.rs                 #   store, fetch, cat, grep, list
 │       │   ├── net.rs                #   ping, traceroute, resolve
-│       │   ├── http.rs               #   HTTP/HTTPS GET
-│       │   ├── wasm.rs               #   run, bootstrap
+│       │   ├── http.rs               #   HTTP/HTTPS GET (async on worker core)
+│       │   ├── wasm.rs               #   run (interactive), run_background (debug.wasm)
 │       │   ├── system.rs             #   status, help, halt, config
-│       │   ├── update.rs             #   OTA update
+│       │   ├── install.rs            #   install <mod> — GH download + ECDSA verify
+│       │   ├── update.rs             #   OTA kernel update — GH download + ECDSA + ESP write
 │       │   └── auth.rs               #   lock, passwd
 │       │
 │       ├── input.rs                   # KeyEvent abstraction (KeyCode, Modifiers)
-│       ├── wasm.rs                   # WASM runtime + host functions
+│       ├── wasm.rs                   # WASM runtime + host functions (stream, tcp, key_inject)
 │       └── setup.rs                  # First-boot setup wizard
 │
+├── tools/wasm/debug/                 # Reverse debug shell (WASM module, ~1.6KB)
+│   └── src/
+│       ├── lib.rs                    #   Relay loop: stream ↔ TCP ↔ key inject
+│       └── host.rs                   #   Host function bindings
 ├── tools/wasm/wifi/                  # WiFi driver (WASM module)
 │   └── src/
 │       ├── lib.rs                    #   Entry point, init + FW download sequence
@@ -592,10 +607,36 @@ sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
 ./build.sh release       # Build + sign kernel (ECDSA P-384) + generate manifest
 ```
 
+### Release + OTA Flow (bare metal testing)
+
+Each feature lands on the NUC through this loop:
+
+1. **Bump** `kernel/Cargo.toml` version (patch for fix, minor for feature).
+2. **Build WASM modules** if changed:
+   `cd tools/wasm/<name> && cargo build --release --target wasm32-unknown-unknown`
+   then copy `target/wasm32-unknown-unknown/release/<name>.wasm` to
+   `release/modules/<name>.wasm` and update `release/modules/<name>.version`.
+3. **`./build.sh release`** — compiles the kernel, signs `kernel.bin` +
+   all `release/modules/*.wasm` with `update.key` (ECDSA P-384), regenerates
+   `release/manifest` and `release/modules/manifest` (sha384 + size per entry).
+4. **Commit + push** — all release artifacts go to `main` so
+   `raw.githubusercontent.com/fnopeek/nopeekOS/main/release/` serves them.
+5. **On the NUC:**
+   - `update` — `kernel/src/intent/update.rs`: fetches `release/manifest`, verifies
+     ECDSA signature over the new kernel, writes to the ESP FAT32 partition via
+     `storage/fat32.rs`. Reboots into the new kernel.
+   - `install <name>` — `kernel/src/intent/install.rs`: fetches
+     `release/modules/manifest`, matches `<name>`, downloads `.wasm` + `.sig`,
+     verifies sha384 + ECDSA, stores under `sys/wasm/<name>` in npkFS.
+   - `run <name>` loads and executes the module in a sandboxed WASM worker.
+
+Both verification paths share the embedded root key in `kernel/src/crypto/update_key.rs`
+and reject any artifact whose signature doesn't match.
+
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.46.1
+[npk] AI-native Operating System v0.49.0
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] TSC: 691 MHz
