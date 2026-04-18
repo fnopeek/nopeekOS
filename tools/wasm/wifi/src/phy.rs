@@ -25,7 +25,7 @@ use crate::host;
 use crate::fw;
 
 static BB_TABLE: &[u8]      = include_bytes!("rtw8852b_bb.bin");
-static _BB_GAIN_TABLE: &[u8] = include_bytes!("rtw8852b_bb_gain.bin");
+static BB_GAIN_TABLE: &[u8] = include_bytes!("rtw8852b_bb_gain.bin");
 static RF_A_TABLE: &[u8]    = include_bytes!("rtw8852b_rf_a.bin");
 static RF_B_TABLE: &[u8]    = include_bytes!("rtw8852b_rf_b.bin");
 static NCTL_TABLE: &[u8]    = include_bytes!("rtw8852b_nctl.bin");
@@ -100,7 +100,10 @@ pub fn init(mmio: i32) {
     host::print("  PHY: bb_reset done\n");
     dbg(mmio, "after-BB+bb_reset");
 
-    host::print("  PHY: BB gain... SKIPPED (needs config_bb_gain struct parser)\n");
+    host::print("  PHY: BB gain...\n");
+    let gain = run_table(mmio, BB_GAIN_TABLE, WriteKind::BbGain);
+    report("GAIN", &gain);
+    dbg(mmio, "after-BB-gain");
 
     host::print("  PHY: RF path A...\n");
     let rfa = run_table(mmio, RF_A_TABLE, WriteKind::Rf(0));
@@ -190,6 +193,7 @@ fn preinit_rf_nctl_ax(mmio: i32) {
 enum WriteKind {
     Bb,
     Rf(u8),
+    BbGain,
 }
 
 struct TableStats {
@@ -418,6 +422,11 @@ fn write_entry(mmio: i32, kind: WriteKind, addr: u32, data: u32) {
                 write_rf_swsi(mmio, path, addr, data);
             }
         }
+        WriteKind::BbGain => {
+            // No MMIO. addr is a packed arg (type/path/gband/cfg_type);
+            // dispatch to cfg_bb_gain which stores into BB_GAIN software state.
+            cfg_bb_gain(addr, data);
+        }
     }
 }
 
@@ -628,4 +637,237 @@ fn bb_reset(mmio: i32) {
     host::mmio_clr32(mmio, PHY_CR_BASE + R_P0_TSSI_TRK,  B_TSSI_TRK_EN);
     host::mmio_clr32(mmio, PHY_CR_BASE + R_P1_TXPW_RSTB, B_TXPW_RSTB_MANON);
     host::mmio_clr32(mmio, PHY_CR_BASE + R_P1_TSSI_TRK,  B_TSSI_TRK_EN);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  BB gain parser + HW apply  — 1:1 Linux rtw89_phy_config_bb_gain_ax
+//  + rtw8852bx_set_gain_error (rtw8852b_common.c:577).
+//
+//  BB gain entries in the bb_gain table do NOT write to MMIO. Instead
+//  the table addr field is a packed `rtw89_phy_bb_gain_arg` union:
+//      [ 7: 0] type   (or rxsc_start[3:0] | bw[7:4] for rpl_ofst)
+//      [15: 8] path
+//      [23:16] gain_band  (0=2G, 1..3=5G, 4..7=6G)
+//      [31:24] cfg_type   (0=error, 1=rpl_ofst, 2=bypass, 3=op1db, 4=eFEM)
+//  The data field carries 4 s8 values packed LE — unpacked by cfg_*.
+//
+//  Linux stores results in rtwdev->bb_gain.ax and uses them in
+//  rtw8852bx_ctrl_ch → set_gain_error to write LNA/TIA gain registers
+//  per channel band. Skipping this leaves LNA/TIA gain = 0 on every
+//  channel switch → RX front-end has no gain → zero packets received.
+// ═══════════════════════════════════════════════════════════════════
+
+const GAIN_BAND_NR: usize = 8;   // 2G + 5G L/M/H + 6G L/M/H/UH
+const PATH_NR: usize      = 2;   // 8852B uses RF_PATH_A + RF_PATH_B
+const LNA_NUM: usize      = 7;
+const TIA_NUM: usize      = 2;
+const TIA_LNA_OP1DB_NUM: usize = 8;  // LNA_GAIN_NUM + 1 per Linux core.h
+const RXSC_NUM_40: usize  = 9;
+const RXSC_NUM_80: usize  = 13;
+const RXSC_NUM_160: usize = 15;
+
+struct BbGainInfo {
+    lna_gain:         [[[i8; LNA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    tia_gain:         [[[i8; TIA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    lna_gain_bypass:  [[[i8; LNA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    lna_op1db:        [[[i8; LNA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    tia_lna_op1db:    [[[i8; TIA_LNA_OP1DB_NUM]; PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_20:      [[i8; PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_40:      [[[i8; RXSC_NUM_40];  PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_80:      [[[i8; RXSC_NUM_80];  PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_160:     [[[i8; RXSC_NUM_160]; PATH_NR]; GAIN_BAND_NR],
+}
+
+static mut BB_GAIN: BbGainInfo = BbGainInfo {
+    lna_gain:        [[[0i8; LNA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    tia_gain:        [[[0i8; TIA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    lna_gain_bypass: [[[0i8; LNA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    lna_op1db:       [[[0i8; LNA_NUM]; PATH_NR]; GAIN_BAND_NR],
+    tia_lna_op1db:   [[[0i8; TIA_LNA_OP1DB_NUM]; PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_20:     [[0i8; PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_40:     [[[0i8; RXSC_NUM_40];  PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_80:     [[[0i8; RXSC_NUM_80];  PATH_NR]; GAIN_BAND_NR],
+    rpl_ofst_160:    [[[0i8; RXSC_NUM_160]; PATH_NR]; GAIN_BAND_NR],
+};
+
+// Linux enum rtw89_phy_bb_rxsc_start_idx
+const RXSC_IDX_FULL:    u8 = 0;
+const RXSC_IDX_20:      u8 = 1;
+const RXSC_IDX_20_1:    u8 = 5;
+const RXSC_IDX_40:      u8 = 9;
+const RXSC_IDX_80:      u8 = 13;
+
+// Linux enum rtw89_channel_width
+const BW_20:  u8 = 0;
+const BW_40:  u8 = 1;
+const BW_80:  u8 = 2;
+const BW_160: u8 = 3;
+
+fn cfg_bb_gain(addr: u32, data: u32) {
+    // Reject flow-ctrl/delay addrs — Linux: "bb gain table with flow ctrl".
+    let addr_lo = addr & 0xFF;
+    if addr_lo >= 0xF9 && addr_lo <= 0xFE { return; }
+
+    let typ       = (addr & 0xFF) as u8;                 // also rxsc_start[3:0]|bw[7:4]
+    let path      = ((addr >>  8) & 0xFF) as u8;
+    let gband     = ((addr >> 16) & 0xFF) as u8;
+    let cfg_type  = ((addr >> 24) & 0xFF) as u8;
+
+    if (gband as usize) >= GAIN_BAND_NR { return; }
+    if (path  as usize) >= PATH_NR      { return; }
+
+    match cfg_type {
+        0 => cfg_gain_error(typ, path, gband, data),
+        1 => cfg_rpl_ofst(typ, path, gband, data),
+        2 => cfg_gain_bypass(typ, path, gband, data),
+        3 => cfg_gain_op1db(typ, path, gband, data),
+        _ => { /* 4 = eFEM (needs efuse rfe_type>=50), ignore */ }
+    }
+}
+
+fn cfg_gain_error(typ: u8, path: u8, gband: u8, mut data: u32) {
+    let p = path as usize; let b = gband as usize;
+    unsafe {
+        match typ {
+            0 => for i in 0..4 { BB_GAIN.lna_gain[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            1 => for i in 4..7 { BB_GAIN.lna_gain[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            2 => for i in 0..2 { BB_GAIN.tia_gain[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            _ => {}
+        }
+    }
+}
+
+fn cfg_gain_bypass(typ: u8, path: u8, gband: u8, mut data: u32) {
+    let p = path as usize; let b = gband as usize;
+    unsafe {
+        match typ {
+            0 => for i in 0..4 { BB_GAIN.lna_gain_bypass[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            1 => for i in 4..7 { BB_GAIN.lna_gain_bypass[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            _ => {}
+        }
+    }
+}
+
+fn cfg_gain_op1db(typ: u8, path: u8, gband: u8, mut data: u32) {
+    let p = path as usize; let b = gband as usize;
+    unsafe {
+        match typ {
+            0 => for i in 0..4 { BB_GAIN.lna_op1db[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            1 => for i in 4..7 { BB_GAIN.lna_op1db[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            2 => for i in 0..4 { BB_GAIN.tia_lna_op1db[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            3 => for i in 4..8 { BB_GAIN.tia_lna_op1db[b][p][i] = (data & 0xFF) as i8; data >>= 8; },
+            _ => {}
+        }
+    }
+}
+
+fn cfg_rpl_ofst(typ: u8, path: u8, gband: u8, mut data: u32) {
+    // typ = rxsc_start[3:0] | bw[7:4]
+    let rxsc_start = typ & 0xF;
+    let bw         = typ >> 4;
+    let p = path as usize; let b = gband as usize;
+    unsafe {
+        match bw {
+            BW_20 => BB_GAIN.rpl_ofst_20[b][p] = data as i8,
+            BW_40 => {
+                if rxsc_start == RXSC_IDX_FULL {
+                    BB_GAIN.rpl_ofst_40[b][p][0] = data as i8;
+                } else if rxsc_start == RXSC_IDX_20 {
+                    for i in 0..2 {
+                        let rxsc = RXSC_IDX_20 + i;
+                        BB_GAIN.rpl_ofst_40[b][p][rxsc as usize] = (data & 0xFF) as i8;
+                        data >>= 8;
+                    }
+                }
+            }
+            BW_80 => {
+                if rxsc_start == RXSC_IDX_FULL {
+                    BB_GAIN.rpl_ofst_80[b][p][0] = data as i8;
+                } else if rxsc_start == RXSC_IDX_20 {
+                    for i in 0..4 {
+                        let rxsc = RXSC_IDX_20 + i;
+                        BB_GAIN.rpl_ofst_80[b][p][rxsc as usize] = (data & 0xFF) as i8;
+                        data >>= 8;
+                    }
+                } else if rxsc_start == RXSC_IDX_40 {
+                    for i in 0..2 {
+                        let rxsc = RXSC_IDX_40 + i;
+                        BB_GAIN.rpl_ofst_80[b][p][rxsc as usize] = (data & 0xFF) as i8;
+                        data >>= 8;
+                    }
+                }
+            }
+            BW_160 => {
+                if rxsc_start == RXSC_IDX_FULL {
+                    BB_GAIN.rpl_ofst_160[b][p][0] = data as i8;
+                } else if rxsc_start == RXSC_IDX_20 {
+                    for i in 0..4 {
+                        let rxsc = RXSC_IDX_20 + i;
+                        BB_GAIN.rpl_ofst_160[b][p][rxsc as usize] = (data & 0xFF) as i8;
+                        data >>= 8;
+                    }
+                } else if rxsc_start == RXSC_IDX_20_1 {
+                    for i in 0..4 {
+                        let rxsc = RXSC_IDX_20_1 + i;
+                        BB_GAIN.rpl_ofst_160[b][p][rxsc as usize] = (data & 0xFF) as i8;
+                        data >>= 8;
+                    }
+                } else if rxsc_start == RXSC_IDX_40 {
+                    for i in 0..4 {
+                        let rxsc = RXSC_IDX_40 + i;
+                        BB_GAIN.rpl_ofst_160[b][p][rxsc as usize] = (data & 0xFF) as i8;
+                        data >>= 8;
+                    }
+                } else if rxsc_start == RXSC_IDX_80 {
+                    for i in 0..2 {
+                        let rxsc = RXSC_IDX_80 + i;
+                        BB_GAIN.rpl_ofst_160[b][p][rxsc as usize] = (data & 0xFF) as i8;
+                        data >>= 8;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// 8852B bb_gain_lna/tia register tables — 1:1 Linux
+// rtw8852b_common.c:553 (bb_gain_lna, 2G only: .gain_g).
+// PHY-space, + PHY_CR_BASE when writing.
+const BB_GAIN_LNA_G: [(u32, u32, u32); LNA_NUM] = [
+    (0x4678, 0x475C, 0x00FF_0000),
+    (0x4678, 0x475C, 0xFF00_0000),
+    (0x467C, 0x4760, 0x0000_00FF),
+    (0x467C, 0x4760, 0x0000_FF00),
+    (0x467C, 0x4760, 0x00FF_0000),
+    (0x467C, 0x4760, 0xFF00_0000),
+    (0x4680, 0x4764, 0x0000_00FF),
+];
+
+const BB_GAIN_TIA_G: [(u32, u32, u32); TIA_NUM] = [
+    (0x4680, 0x4764, 0x00FF_0000),
+    (0x4680, 0x4764, 0xFF00_0000),
+];
+
+/// 1:1 Linux rtw8852bx_set_gain_error for subband == RTW89_CH_2G.
+/// Writes LNA + TIA gain values stored in BB_GAIN (populated by
+/// cfg_bb_gain during BB gain table load) into per-path HW registers.
+/// Must be called on each 2G channel change (Linux: inside rtw8852bx_ctrl_ch).
+pub fn apply_gain_error_2g(mmio: i32, path: u8) {
+    let p = path as usize;
+    let gband = 0usize; // RTW89_BB_GAIN_BAND_2G
+    unsafe {
+        for i in 0..LNA_NUM {
+            let (reg_a, reg_b, mask) = BB_GAIN_LNA_G[i];
+            let reg = if path == 0 { reg_a } else { reg_b };
+            let val = BB_GAIN.lna_gain[gband][p][i] as i32 as u32;
+            host::mmio_w32_mask(mmio, PHY_CR_BASE + reg, mask, val);
+        }
+        for i in 0..TIA_NUM {
+            let (reg_a, reg_b, mask) = BB_GAIN_TIA_G[i];
+            let reg = if path == 0 { reg_a } else { reg_b };
+            let val = BB_GAIN.tia_gain[gband][p][i] as i32 as u32;
+            host::mmio_w32_mask(mmio, PHY_CR_BASE + reg, mask, val);
+        }
+    }
 }
