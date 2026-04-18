@@ -4,4 +4,4 @@ version = 4
 
 [[package]]
 name = "wifi"
-version = "0.99.0"
+version = "1.0.0"

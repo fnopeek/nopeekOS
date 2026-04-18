@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.99.0 — scan_offload re-enabled (13 ch sweep)\n");
+    host::print("[wifi] RTL8852BE driver v1.0.0 — vif::init before scan (fix ret=4)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -190,6 +190,15 @@ pub extern "C" fn _start() {
     iqk::run(mmio);
     chan::set_channel_help_exit(mmio);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
+
+    // ── Phase 5b: VIF registration — 1:1 Linux rtw89_mac_vif_init
+    //   (mac.c:4933) for MACID 0, port 0, band 0, role STATION.
+    //   scan_offload_ax takes macid/port/band from the VIF; without a
+    //   registered VIF the FW rejects SCANOFLD_START with ret=4
+    //   (observed on v0.99.0). The minimal path is role_maintain +
+    //   addr_cam_upd — both already implemented in vif.rs but never
+    //   invoked. Enable them now that scan is back in the critical path.
+    vif::init(mmio, 0);
 
     // ── Phase 6: FW scan_offload (sweeps 2G ch 1..13) ──────────────
     // Hardcoded single-channel listen-only was diagnostically weak
