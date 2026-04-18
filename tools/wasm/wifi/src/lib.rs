@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v0.98.0 — hci_start / IRQ unmask (Audit A7)\n");
+    host::print("[wifi] RTL8852BE driver v0.99.0 — scan_offload re-enabled (13 ch sweep)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -179,21 +179,26 @@ pub extern "C" fn _start() {
     //   parked after the first C2H frame.
     mac::hci_start(mmio);
 
-    // ── Phase 5: Tune RF to channel 7 (user's home AP) + full RFK.
-    //    SKIP VIF/scan_offload entirely. We just want to see if the RX
-    //    pipe delivers any airborne WiFi frame when the radio is tuned.
+    // ── Phase 5: Baseline channel tune on ch 1 + RFK.
+    //   set_channel + rx_dck + iqk is needed before the FW will accept
+    //   SCANOFLD_START (Linux always programs a valid "baseline" chan
+    //   before scan). We pick ch 1 because that's the canonical 2G
+    //   scan entry point Linux uses in rtw89_hw_scan_prep.
     chan::set_channel_help_enter(mmio);
-    chan::set_channel_2g(mmio, 7);
+    chan::set_channel_2g(mmio, 1);
     rfk::rx_dck(mmio);
     iqk::run(mmio);
     chan::set_channel_help_exit(mmio);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
 
-    // ── Phase 6: listen-only (no scan_offload) ─────────────────────
-    // Diagnostic: if WiFi frames arrive here, the RX pipe is alive and
-    // the scan_offload ret=4 problem is isolated to FW/VIF state.
-    // If not, the whole receive pipeline is the real bug.
-    mac::listen_only(mmio, 60);
+    // ── Phase 6: FW scan_offload (sweeps 2G ch 1..13) ──────────────
+    // Hardcoded single-channel listen-only was diagnostically weak
+    // (biased on ch 7 = user's home AP). Linux always drives the RX
+    // path via scan_offload — the FW itself iterates channels with
+    // correct per-channel setup. If the FW emits SCANOFLD_RSP with
+    // ret != 0 we now have a concrete error code to investigate
+    // instead of just "0 packets".
+    mac::scan(mmio);
 
     // ── Done — wait for exit ───────────────────────────────────────
     host::print("\n[wifi] Press 'q' to exit\n");
