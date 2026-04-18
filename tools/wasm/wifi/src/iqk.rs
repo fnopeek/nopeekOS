@@ -760,6 +760,16 @@ fn iqk_by_path(mmio: i32, state: &mut IqkState, path: u8) {
 pub fn run(mmio: i32) {
     host::print("  IQK: start (full 1:1 Linux, backup/restore BB+RF)\n");
 
+    // ── TX scheduler pause — 1:1 Linux rtw8852b_iqk (rtw8852b_rfk.c:3764).
+    // IQK measures TX LO leakage / I-Q mismatch; if the CMAC scheduler is
+    // still firing TX slots (even NOP) the cal engine sees stale TX energy
+    // and LOK produces values outside [0x02..0x1D] → cor/fin fail.
+    // FW is running, so Linux routes this through H2CREG SCH_TX_EN.
+    let tx_en_saved = fw::stop_sch_tx(mmio, 0);
+    host::print("    [iqk] sch_tx stopped (saved tx_en=0x");
+    host::print_hex16(tx_en_saved);
+    host::print(")\n");
+
     // State — defaults match rtw89_iqk_info after _iqk_init.
     // Channel is 2G ch 7 @ 20 MHz (set by chan::set_channel_2g(mmio, 7)).
     let mut state = IqkState {
@@ -819,6 +829,10 @@ pub fn run(mmio: i32) {
         restore_rf(mmio, path, &rf_save);
     }
     host::print("  IQK: BB+RF restored\n");
+
+    // Resume TX scheduler — Linux rtw8852b_iqk line 3770.
+    fw::resume_sch_tx(mmio, 0, tx_en_saved);
+    host::print("    [iqk] sch_tx resumed\n");
 
     // Final status report
     host::print("  IQK: done | A: cor=");

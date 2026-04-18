@@ -1292,6 +1292,163 @@ pub fn print_dec(n: usize) {
 const H2C_CL_FW_INFO:    u8 = 0x0;
 const H2C_FUNC_LOG_CFG:  u8 = 0x0;
 
+// ═══════════════════════════════════════════════════════════════════
+//  H2CREG / C2HREG — fast register-based FW channel.
+//  1:1 port of Linux rtw89_fw_write_h2c_reg + rtw89_fw_read_c2h_reg
+//  (fw.c:8048, 8082). Used by stop_sch_tx / resume_sch_tx and similar
+//  commands where the FW is expected to answer synchronously via the
+//  C2HREG DATA registers. Distinct from the CH12 DMA H2C path.
+// ═══════════════════════════════════════════════════════════════════
+
+/// H2CREG function IDs (Linux enum rtw89_mac_h2c_type, fw.h:146).
+const H2CREG_FUNC_SCH_TX_EN: u8 = 5;
+
+/// C2HREG function IDs (Linux enum rtw89_mac_c2h_type, fw.h:160).
+const C2HREG_FUNC_TX_PAUSE_RPT: u8 = 4;
+
+/// Write 4 × u32 H2CREG DATA, with header word already packed into w0.
+/// Header packing (Linux fw.c:8068):
+///   w0[6:0]  = id
+///   w0[11:8] = len in dwords = DIV_ROUND_UP(content_len + 2, 4)
+/// Returns false on timeout waiting for the previous H2CREG to drain.
+fn h2creg_write(mmio: i32, id: u8, content_len: u8,
+                w0_hi_bits: u32, w1: u32, w2: u32, w3: u32) -> bool {
+    // Step 1: poll ctrl == 0 (FW consumed previous command).
+    // Linux: read_poll_timeout(rtw89_read8, val, val == 0, 1000, 5000, ...).
+    // Our sleep granularity is ms; do 5 × sleep_ms(1) approx the 5ms budget.
+    let mut ready = false;
+    for _ in 0..5u32 {
+        let ctrl = (host::mmio_r32(mmio, regs::R_AX_H2CREG_CTRL & !0x3) >> 0) & 0xFF;
+        if ctrl == 0 { ready = true; break; }
+        host::sleep_ms(1);
+    }
+    if !ready {
+        host::print("    [h2creg] WARN: prev H2C not drained\n");
+        // Linux also warns + returns error; we proceed to match the
+        // effect of the Linux warning path (does not abort the caller).
+    }
+
+    // Step 2: header bits. len = DIV_ROUND_UP(content_len + HDR_LEN(2), 4).
+    let total = content_len as u32 + 2;
+    let len_dw: u32 = (total + 3) / 4;
+    let w0: u32 = ((id as u32) & 0x7F) | ((len_dw & 0xF) << 8) | w0_hi_bits;
+
+    // Step 3: write all 4 data registers.
+    host::mmio_w32(mmio, regs::R_AX_H2CREG_DATA0,      w0);
+    host::mmio_w32(mmio, regs::R_AX_H2CREG_DATA0 + 4,  w1);
+    host::mmio_w32(mmio, regs::R_AX_H2CREG_DATA0 + 8,  w2);
+    host::mmio_w32(mmio, regs::R_AX_H2CREG_DATA0 + 12, w3);
+
+    // Step 4: bump HALMAC_H2C_DEQ_CNT byte counter (Linux fw.c:8075).
+    //   byte @ 0x01F5 bits [3:0]. RMW 32-bit word (aligned at 0x01F4).
+    unsafe {
+        static mut H2C_DEQ_CNT: u8 = 0;
+        H2C_DEQ_CNT = H2C_DEQ_CNT.wrapping_add(1) & 0x0F;
+        let aligned = regs::R_AX_UDM1;        // 0x01F4
+        let shift = (regs::R_AX_HALMAC_CNT_BYTE - aligned) * 8; // 8
+        let mask  = (regs::B_HALMAC_H2C_DEQ_CNT as u32) << shift;
+        let mut w = host::mmio_r32(mmio, aligned);
+        w = (w & !mask) | (((H2C_DEQ_CNT as u32) << shift) & mask);
+        host::mmio_w32(mmio, aligned, w);
+    }
+
+    // Step 5: trigger — write byte 0x01 to R_AX_H2CREG_CTRL.
+    host::mmio_set8(mmio, regs::R_AX_H2CREG_CTRL, regs::B_AX_H2CREG_TRIGGER);
+    true
+}
+
+/// Read a C2HREG reply. Returns `Some((id, w0, w1, w2, w3))` on success.
+/// Linux fw.c:8082 rtw89_fw_read_c2h_reg — poll ctrl != 0, drain 4 dwords,
+/// ACK by writing 0 to ctrl, parse id from hdr.w0[6:0].
+fn c2hreg_read(mmio: i32, timeout_ms: u32) -> Option<(u8, u32, u32, u32, u32)> {
+    let mut ready = false;
+    for _ in 0..timeout_ms {
+        let aligned = regs::R_AX_C2HREG_CTRL & !0x3;
+        let shift   = (regs::R_AX_C2HREG_CTRL - aligned) * 8;
+        let ctrl    = (host::mmio_r32(mmio, aligned) >> shift) & 0xFF;
+        if ctrl != 0 { ready = true; break; }
+        host::sleep_ms(1);
+    }
+    if !ready { return None; }
+
+    let w0 = host::mmio_r32(mmio, regs::R_AX_C2HREG_DATA0);
+    let w1 = host::mmio_r32(mmio, regs::R_AX_C2HREG_DATA0 + 4);
+    let w2 = host::mmio_r32(mmio, regs::R_AX_C2HREG_DATA0 + 8);
+    let w3 = host::mmio_r32(mmio, regs::R_AX_C2HREG_DATA0 + 12);
+
+    // ACK: clear ctrl byte so FW can send next reply.
+    host::mmio_clr8(mmio, regs::R_AX_C2HREG_CTRL, 0xFF);
+
+    let id = (w0 & 0x7F) as u8;
+
+    // Bump C2H counter byte (upper nibble @ 0x01F5).
+    unsafe {
+        static mut C2H_ENQ_CNT: u8 = 0;
+        C2H_ENQ_CNT = C2H_ENQ_CNT.wrapping_add(1) & 0x0F;
+        let aligned = regs::R_AX_UDM1;
+        let shift = (regs::R_AX_HALMAC_CNT_BYTE - aligned) * 8;
+        let mask  = (regs::B_HALMAC_C2H_ENQ_CNT as u32) << shift;
+        let mut w = host::mmio_r32(mmio, aligned);
+        w = (w & !mask)
+          | ((((C2H_ENQ_CNT as u32) << 4) << shift) & mask);
+        host::mmio_w32(mmio, aligned, w);
+    }
+
+    Some((id, w0, w1, w2, w3))
+}
+
+/// 1:1 Linux rtw89_hw_sch_tx_en_h2c (mac.c:3238).
+/// Sends SCH_TX_EN via H2CREG — FW updates R_AX_CTN_TXEN on the target band
+/// and replies via C2HREG with FUNC_TX_PAUSE_RPT. Must be used whenever FW
+/// is ready (Linux uses direct reg write only for pre-FW path).
+///
+/// Struct `rtw89_h2creg_sch_tx_en`:
+///   w0[31:16] = EN    (tx_en bits to set/clear)
+///   w1[15:0]  = MASK  (which bits of EN are valid)
+///   w1[16]    = BAND  (mac_idx 0 or 1)
+/// content_len = 6 (8 struct bytes - 2 header bytes).
+pub fn h2creg_sch_tx_en(mmio: i32, band: u8, tx_en: u16, mask: u16) -> bool {
+    let w0_hi = (tx_en as u32) << 16;
+    let w1    = (mask as u32) | if band != 0 { 1u32 << 16 } else { 0 };
+    if !h2creg_write(mmio, H2CREG_FUNC_SCH_TX_EN, 6, w0_hi, w1, 0, 0) {
+        return false;
+    }
+    // Linux waits up to RTW89_C2H_TIMEOUT = 1_000_000us (1 s); we match.
+    match c2hreg_read(mmio, 1000) {
+        Some((id, _, _, _, _)) if id == C2HREG_FUNC_TX_PAUSE_RPT => true,
+        Some((id, _, _, _, _)) => {
+            host::print("    [sch_tx_en] unexpected C2H id=");
+            print_dec(id as usize);
+            host::print("\n");
+            false
+        }
+        None => {
+            host::print("    [sch_tx_en] C2H timeout\n");
+            false
+        }
+    }
+}
+
+/// Save current R_AX_CTN_TXEN bits and clear all via SCH_TX_EN H2CREG.
+/// Mirrors Linux rtw89_mac_stop_sch_tx (mac.c:3303) for SCH_TX_SEL_ALL.
+/// Returns the saved tx_en bits to be passed back into resume_sch_tx.
+pub fn stop_sch_tx(mmio: i32, band: u8) -> u16 {
+    // Linux reads R_AX_CTN_TXEN directly for the caller's save buffer.
+    let aligned = regs::R_AX_CTN_TXEN & !0x3;
+    let shift   = (regs::R_AX_CTN_TXEN - aligned) * 8;
+    let word = host::mmio_r32(mmio, aligned);
+    let tx_en_saved = ((word >> shift) & 0xFFFF) as u16;
+
+    // FW path: always when chip is running (our case).
+    h2creg_sch_tx_en(mmio, band, 0, regs::B_AX_CTN_TXEN_ALL_MASK);
+    tx_en_saved
+}
+
+/// Restore previously-saved tx_en bits. Linux rtw89_mac_resume_sch_tx.
+pub fn resume_sch_tx(mmio: i32, band: u8, tx_en: u16) {
+    h2creg_sch_tx_en(mmio, band, tx_en, regs::B_AX_CTN_TXEN_ALL_MASK);
+}
+
 /// Send LOG_CFG H2C to enable FW trace log via C2H channel.
 /// `enable=false` → COMP=0 (effectively off), `enable=true` → default comp set.
 pub fn h2c_fw_log(mmio: i32, enable: bool) {

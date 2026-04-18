@@ -59,11 +59,11 @@ Legende: `[ ]` offen · `[x]` erledigt · `[·]` nicht nötig für unsere HW
 ## E — `rtw8852b_iqk` Entry (rtw8852b_rfk.c:3757)
 
 - [·] E1 `btc_ntfy_wl_rfk(START)` — NO-OP ohne BT
-- [ ] **E2** `chip_stop_sch_tx(ALL)` — **kritisch für LOK fail?**
+- [x] **E2** `chip_stop_sch_tx(ALL)` — v0.97.0: H2CREG transport + `fw::stop_sch_tx` vor IQK
 - [x] E3 `_wait_rx_mode`
 - [x] E4 `_iqk_init`
 - [x] E5 `_iqk` → `_doiqk` Kette
-- [ ] **E6** `chip_resume_sch_tx`
+- [x] **E6** `chip_resume_sch_tx` — v0.97.0: `fw::resume_sch_tx` am IQK-Ende
 - [·] E7 `btc_ntfy_wl_rfk(STOP)`
 
 ## F — RFK per-channel (rtw8852b.c:663 `rtw8852b_rfk_channel`)
