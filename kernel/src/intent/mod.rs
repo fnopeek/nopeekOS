@@ -1005,6 +1005,24 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "top" | "htop" => {
             wasm::intent_run_interactive("top");
         }
+        "debug" => {
+            // Parse "<ip> <port>" and set the target before spawning debug.wasm.
+            let mut it = args.split_whitespace();
+            let ip_s = it.next().unwrap_or("");
+            let port_s = it.next().unwrap_or("");
+            let ip = match parse_ip(ip_s) {
+                Some(a) => ((a[0] as u32) << 24) | ((a[1] as u32) << 16)
+                         | ((a[2] as u32) << 8)  |  (a[3] as u32),
+                None => { kprintln!("[npk] Usage: debug <ip> <port>   (e.g. debug 192.168.1.50 22222)"); 0 }
+            };
+            let port: u16 = port_s.parse().unwrap_or(0);
+            if ip != 0 && port != 0 {
+                crate::wasm::set_debug_target(ip, port);
+                wasm::intent_run_background("debug");
+            } else if ip != 0 {
+                kprintln!("[npk] Usage: debug <ip> <port>");
+            }
+        }
         "uname" | "version" | "kernel" => {
             system::intent_uname(args);
         }

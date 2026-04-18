@@ -156,6 +156,13 @@ fn push_key(key: u8) {
     // Drop key if buffer full
 }
 
+/// Inject a raw key byte into the keyboard buffer as if it came from hardware.
+/// Used by the remote debug shell to drive the focused window from outside.
+/// Clients should send ANSI escape sequences for arrow/nav keys (ESC [ A etc).
+pub fn inject_byte(byte: u8) {
+    push_key(byte);
+}
+
 /// Push an arrow key as ANSI escape sequence: ESC [ A/B/C/D
 fn push_arrow(code: u8) {
     let ch = match code {

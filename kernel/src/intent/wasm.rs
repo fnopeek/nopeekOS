@@ -92,6 +92,41 @@ pub fn intent_run(args: &str) {
     }
 }
 
+/// Run a WASM module as a background task in the current window.
+/// The intent shell stays active — the module runs in parallel, sharing the
+/// terminal (output visible) but NOT capturing input. Used by debug.wasm.
+pub fn intent_run_background(module_name: &str) {
+    use crate::{wasm, npkfs, capability};
+
+    let sys_path = alloc::format!("sys/wasm/{}", module_name);
+    let resolved = resolve_path(module_name);
+    let (wasm_bytes, hash) = match npkfs::fetch(&resolved) {
+        Ok(v) => v,
+        Err(_) => match npkfs::fetch(&sys_path) {
+            Ok(v) => v,
+            Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
+        }
+    };
+
+    let module_cap = match capability::create_module_cap(
+        capability::Rights::READ | capability::Rights::EXECUTE,
+        Some(600_000),
+    ) {
+        Ok(id) => id,
+        Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
+    };
+
+    let term_idx = crate::shade::terminal::active_idx();
+
+    kprint!("[npk] '{}' started background (hash: ", module_name);
+    for b in &hash[..4] { kprint!("{:02x}", b); }
+    kprintln!("...)");
+
+    if !wasm::spawn_on_worker_background(wasm_bytes.to_vec(), module_cap, term_idx, module_name) {
+        kprintln!("[npk] Failed to spawn '{}'", module_name);
+    }
+}
+
 /// Run a WASM module on a worker core in the current window.
 /// Returns immediately — intent loop routes keys when this window is focused.
 pub fn intent_run_interactive(module_name: &str) {
