@@ -25,7 +25,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.1.0 — full mac_vif_init (8 steps)\n");
+    host::print("[wifi] RTL8852BE driver v1.2.0 — revert vif::init (wedges FW)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -191,14 +191,25 @@ pub extern "C" fn _start() {
     chan::set_channel_help_exit(mmio);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
 
-    // ── Phase 5b: VIF registration — 1:1 Linux rtw89_mac_vif_init
-    //   (mac.c:4933) for MACID 0, port 0, band 0, role STATION.
-    //   scan_offload_ax takes macid/port/band from the VIF; without a
-    //   registered VIF the FW rejects SCANOFLD_START with ret=4
-    //   (observed on v0.99.0). The minimal path is role_maintain +
-    //   addr_cam_upd — both already implemented in vif.rs but never
-    //   invoked. Enable them now that scan is back in the critical path.
-    vif::init(mmio, 0);
+    // ── Phase 5b: VIF registration — DISABLED in v1.2.0.
+    //   v1.0.0 (2 H2Cs) and v1.1.0 (full 8-step chain, strict Linux
+    //   order) both wedged the CH12 H2C pipe immediately: every H2C
+    //   after the first VIF H2C (role_maintain or macid_pause) got
+    //   NO C2H reply. Subsequent scan H2Cs also went silent — the FW
+    //   stops responding entirely. Not a sequence-number issue
+    //   (scan H2Cs at the same seq positions worked in v0.99.0),
+    //   not payload size, not class/func IDs (all verified 1:1
+    //   against Linux). Concluded the v0.93 vif helpers (role_maintain
+    //   / addr_cam / macid_pause / join_info / default_cmac_tbl)
+    //   have a subtle encoding bug we haven't found yet, so using any
+    //   of them leaves the FW in a broken state.
+    //
+    //   Reverting to v0.99.0-style: skip vif::init and let scan hit
+    //   the FW with macid=0/port=0/band=0 defaults. The FW responds
+    //   with SCANOFLD_RSP ret=4 plus a LOG-FMT (fmt=0x370 file=2
+    //   line=512) — that concrete error code is a better starting
+    //   point for diagnosis than a wedged pipe.
+    // vif::init(mmio, 0);
 
     // ── Phase 6: FW scan_offload (sweeps 2G ch 1..13) ──────────────
     // Hardcoded single-channel listen-only was diagnostically weak
