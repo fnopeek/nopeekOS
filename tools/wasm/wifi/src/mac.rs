@@ -12,6 +12,7 @@
 use crate::host;
 use crate::regs;
 use crate::fw;
+use crate::imr;
 
 // ── Register addresses (mac.c / reg.h) ─────────────────────────────
 
@@ -130,9 +131,20 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_set32(mmio, regs::R_AX_SPS_DIG_ON_CTRL0, 0x7 << 13); // B_AX_OCP_L1_MASK
     dbg_checkpoint(mmio, "after chip_func_en");
 
-    // ── 5. Enable IMRs (simplified, matches Linux DMAC_ERR_IMR_EN=all) ──
-    host::mmio_w32(mmio, 0x8520, 0xFFFFFFFF); // DMAC_ERR_IMR
-    host::mmio_w32(mmio, 0xC160, 0xFFFFFFFF); // CMAC_ERR_IMR
+    // ── 5. Enable IMRs — 1:1 Linux trx_init_ax (mac.c:3929):
+    //   a) 11 DMAC per-block IMR enables (imr::enable_dmac)
+    //   b) 6 CMAC per-block IMR enables (imr::enable_cmac)
+    //   c) err_imr_ctrl_ax(true) — master ERR_IMR unmask
+    // Previously we only wrote (c) with 0xFFFFFFFF (which happens to
+    // equal DMAC_ERR_IMR_EN / CMAC0_ERR_IMR_EN). The (a)+(b) block
+    // IMRs were missing entirely — strongest hypothesis for the H2C
+    // pipe wedge after VIF H2Cs. Linux considers (a)+(b)+(c) a single
+    // "enable interrupt sources" package and all three are required.
+    imr::enable_dmac(mmio);
+    imr::enable_cmac(mmio, 0);
+    host::mmio_w32(mmio, 0x8520, 0xFFFFFFFF); // DMAC_ERR_IMR (EN = GENMASK(31,0))
+    host::mmio_w32(mmio, 0xC160, 0xFFFFFFFF); // CMAC0_ERR_IMR (EN = GENMASK(31,0))
+    host::print("  IMR: per-block DMAC+CMAC enabled, master ERR_IMR set\n");
 
     // ── 6. Host report mode (set_host_rpr_ax) ─────────────────────
     // Linux: mac.c set_host_rpr_ax — route TX release reports to RPQ.
