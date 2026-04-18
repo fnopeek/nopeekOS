@@ -150,7 +150,14 @@ pub fn init(mmio: i32) {
     host::print(" regs written)\n");
 }
 
+/// Gated by `VERBOSE` — dumps CFG1 at every PHY-init milestone. Was
+/// critical while tracking down "BB table kills PCIe" regressions in
+/// v0.80-era; now that init passes cleanly these 15+ lines are pure
+/// noise. Keep code to re-enable when a future chip change breaks CFG1.
+const VERBOSE: bool = false;
+
 fn dbg(mmio: i32, tag: &str) {
+    if !VERBOSE { return; }
     let cfg1 = host::mmio_r32(mmio, 0x1000);
     host::print("    [dbg "); host::print(tag);
     host::print("] CFG1=0x"); host::print_hex32(cfg1);

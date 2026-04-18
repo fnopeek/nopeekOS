@@ -14,6 +14,12 @@ use crate::regs;
 use crate::fw;
 use crate::imr;
 
+/// Global debug-verbosity flag. Flip to `true` for diagnostic runs —
+/// every `dbg_checkpoint`, `[c2h LOG-FMT ...]`, scan rsn=1/2/4, and
+/// post-scan listen dump will appear. `false` keeps the production log
+/// focused on errors + progress milestones.
+const VERBOSE: bool = false;
+
 // ── Register addresses (mac.c / reg.h) ─────────────────────────────
 
 // HFC
@@ -471,7 +477,12 @@ pub fn hci_start(mmio: i32) {
 
 
 /// Diagnose: poll RXQ IDX for up to `max_ms` ms, report any HW_IDX advance.
-/// Used to verify H2C → C2H pipe bidirectionality.
+/// Used to verify H2C → C2H pipe bidirectionality. The "NO C2H" branch
+/// fires for fire-and-forget H2Cs (macid_pause, fw_log_cfg, some VIF
+/// helpers whose DONE_ACK gets batched behind a later dack=1 H2C) — we
+/// keep it silent in non-verbose builds to avoid misleading "H2C pipe
+/// 1-way" spam that made earlier logs look like problems when the H2Cs
+/// were in fact accepted fine.
 fn diag_wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
     let idx0 = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
     let hw0 = (idx0 >> 16) & 0xFFFF;
@@ -493,6 +504,7 @@ fn diag_wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
         }
         host::sleep_ms(1);
     }
+    if !VERBOSE { return; }
     host::print("  [diag "); host::print(tag);
     host::print("] NO C2H after ");
     fw::print_dec(max_ms as usize);
@@ -504,7 +516,10 @@ fn diag_wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
 /// Debug helper: dump a few registers to find where the 0x1000 range dies.
 /// CFG1 (0x1000) vs HCI_OPT_CTRL (0x0074) vs SYS_CFG1 (0x00F0):
 /// if CFG1=0xFFFFFFFF but the others are sane, only PCIe DMA block is gated.
+/// Gated by `VERBOSE` — we leave it silent in production because once init
+/// passes cleanly this dump is pure noise; keep the code for re-enabling.
 fn dbg_checkpoint(mmio: i32, tag: &str) {
+    if !VERBOSE { return; }
     let cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
     let opt  = host::mmio_r32(mmio, 0x0074);
     let sys  = host::mmio_r32(mmio, regs::R_AX_SYS_CFG1);
@@ -929,6 +944,10 @@ static mut RX_BY_TYPE: [u32; 16] = [0; 16];
 static mut WIFI_FRAME_COUNT: u32 = 0;
 static mut BEACON_COUNT: u32 = 0;
 
+/// Set by handle_c2h when SCANOFLD_RSP arrives with rsn=5 (END_SCAN).
+/// scan() polls until either this flips to `true` or a timeout expires.
+static mut SCAN_COMPLETE: bool = false;
+
 // ── BSS discovery table ─────────────────────────────────────────
 // Fills during scan from each beacon's BSSID (addr3) + SSID IE +
 // DS Parameter Set IE (primary channel). Dedupe by BSSID so a
@@ -1104,22 +1123,29 @@ fn handle_c2h(dma: i32, off: u32) {
         let rsn = (w2 >> 16) & 0xF;
         let status = (w2 >> 20) & 0xF;
         match rsn {
-            3 => { // ENTER_CH
+            3 => { // ENTER_CH — interesting: shows scan progress per channel
                 host::print("  [scan] ch ");
                 fw::print_dec(pri_ch as usize);
                 host::print("\n");
             }
-            5 => { // END_SCAN
+            5 => { // END_SCAN — crucial: shows scan completed with status
                 host::print("  [scan] complete (status=");
                 fw::print_dec(status as usize);
                 host::print(")\n");
+                unsafe { SCAN_COMPLETE = true; }
             }
             _ => {
-                host::print("  [c2h] scan rsn=");
-                fw::print_dec(rsn as usize);
-                host::print(" ch=");
-                fw::print_dec(pri_ch as usize);
-                host::print("\n");
+                // rsn=1 (pre-enter), 2 (listen), 4 (leave) — verbose-only:
+                // they arrive 3× per channel × 13 channels = 39 lines of
+                // noise per scan pass. The ENTER (rsn=3) line already
+                // gives per-channel progress.
+                if VERBOSE {
+                    host::print("  [c2h] scan rsn=");
+                    fw::print_dec(rsn as usize);
+                    host::print(" ch=");
+                    fw::print_dec(pri_ch as usize);
+                    host::print("\n");
+                }
             }
         }
     } else if cat == 1 && class == 0 && func == 1 {
@@ -1145,9 +1171,13 @@ fn handle_c2h(dma: i32, off: u32) {
         // C2H_LOG — FW trace log. Linux: rtw89_fw_log_dump.
         // Payload starts right after the 8-byte C2H hdr. Content is either
         // struct rtw89_fw_c2h_log_fmt (binary, signature 0xA5A5) or raw ASCII.
-        // Without the runtime-loaded fmt table we can't substitute %-args —
-        // print the 16-byte header fields + hex-dump the first 32 bytes so
-        // the FW error/progress cause can be recognised by hand.
+        // Without the runtime-loaded fmt table we cannot substitute %-args.
+        // Per scan cycle we receive ~50 LOG-FMTs with fmt_id=0x371..0x374
+        // that just trace internal state transitions and give no useful
+        // hint in production. Keep the full parser under VERBOSE and skip
+        // silently otherwise so the normal scan log stays focused on
+        // [scan] ch N / [scan] complete / [c2h] DONE_ACK.
+        if !VERBOSE { return; }
         let payload_off = off + 8;
         let total_len = _len as u32;            // includes 8-byte hdr
         let body_len = total_len.saturating_sub(8);
@@ -1462,41 +1492,32 @@ pub fn scan(mmio: i32) {
     fw::h2c_send(mmio, 1, 9, 0x17, true, true, &scan_cmd);
     diag_wait_c2h(mmio, 200, "scanofld_start");
 
-    // ── Poll for results (15 seconds) ────────────────────────────
-    // Show initial RXQ state
-    let idx0 = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
-    host::print("  RXQ IDX=0x"); host::print_hex32(idx0);
-    host::print(" (host="); fw::print_dec((idx0 & 0xFFFF) as usize);
-    host::print(" hw="); fw::print_dec(((idx0 >> 16) & 0xFFFF) as usize);
-    host::print(")\n");
-    host::print("  Listening (30s)...\n");
-    let mut total_rx = 0u32;
-    // 300 ticks × 100ms = 30 seconds max (FW may be slow; scan ~585ms per pass)
-    for tick in 0..300u32 {
-        let n = rxq_poll(mmio);
-        total_rx += n;
-
-        // 100ms sleep (don't use input_wait — key routing may be broken)
+    // ── Poll for END_SCAN ─────────────────────────────────────────
+    // FW sweeps all 13 channels at ~100ms each = ~1.3 s per pass; give
+    // it 8 s headroom before giving up. Each loop iteration drains up
+    // to 8 C2H frames via rxq_poll — beacons flow through
+    // handle_wifi_frame → bss_upsert, scan END_SCAN flips
+    // SCAN_COMPLETE in handle_c2h.
+    unsafe { SCAN_COMPLETE = false; }
+    for _ in 0..80u32 {
+        rxq_poll(mmio);
+        if unsafe { SCAN_COMPLETE } { break; }
         host::sleep_ms(100);
-
-        // Progress every 5 seconds — also show RXQ IDX to see if HW is advancing.
-        if tick > 0 && tick % 50 == 0 {
-            let idx = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
-            host::print("  [");
-            fw::print_dec((tick / 10) as usize);
-            host::print("s] pkts="); fw::print_dec(total_rx as usize);
-            host::print(" RXQ=host:"); fw::print_dec((idx & 0xFFFF) as usize);
-            host::print(" hw:"); fw::print_dec(((idx >> 16) & 0xFFFF) as usize);
-            host::print("\n");
-        }
     }
+    // Drain any trailing beacons that came in while we were exiting.
+    for _ in 0..5u32 {
+        rxq_poll(mmio);
+        host::sleep_ms(20);
+    }
+}
 
-    // ── Diagnostik ─────────────────────────────────────────────────
+/// Print the aggregated scan results + BSS table.
+/// Called by `lib.rs` after running one or more scan passes.
+pub fn scan_summary() {
     host::print("\n[wifi] Scan results:\n");
     let types = unsafe { RX_BY_TYPE };
     let wifi_frames = unsafe { WIFI_FRAME_COUNT };
     let beacons = unsafe { BEACON_COUNT };
-    host::print("  RX total: "); fw::print_dec(total_rx as usize); host::print("\n");
     host::print("  By type: ");
     for i in 0..16u32 {
         if types[i as usize] > 0 {
@@ -1510,15 +1531,4 @@ pub fn scan(mmio: i32) {
     host::print("  Beacons: "); fw::print_dec(beacons as usize); host::print("\n");
 
     print_bss_table();
-
-    // Dump first buffer: rxbd_info + RXD for debugging (data at offset 4096)
-    let data_dma = unsafe { fw::RXQ_DMA };
-    if data_dma >= 0 {
-        host::print("  BUF[0]: ");
-        for i in 0..6u32 {
-            host::print_hex32(host::dma_r32(data_dma, 4096 + i * 4));
-            host::print(" ");
-        }
-        host::print("\n");
-    }
 }
