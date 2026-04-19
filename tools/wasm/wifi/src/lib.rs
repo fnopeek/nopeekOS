@@ -36,7 +36,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.25.0 — TSSI set_efuse_to_de + phycap trim\n");
+    host::print("[wifi] RTL8852BE driver v1.26.0 — IQK re-enabled\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -225,17 +225,18 @@ pub extern "C" fn _start() {
     let tx_en = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 1);
     rfk::rx_dck(mmio);
-    // IQK still skipped — will re-enable after TX-power gaps are fixed.
-    // iqk::run(mmio);
-    // TSSI re-enabled in v1.24 with real efuse thermal instead of the
-    // hardcoded 0xFF fallback. Real thermal lets HW build a proper
-    // delta-swing offset table instead of zeroing all 64 entries.
+    // IQK re-enabled in v1.26. It was disabled in v1.16 as a diagnostic
+    // to rule out iqk_restore state corruption. Now with TSSI properly
+    // set up (DE programmed), LOK fail stays (Linux also reports fail
+    // on this chip) but TXK/RXK at least give baseline I/Q balance.
+    iqk::run(mmio);
+    // TSSI with real efuse thermal + set_efuse_to_de.
     let efuse_copy = unsafe { EFUSE };
     tssi::run(mmio, 0 /* BAND_2G */, 1, &efuse_copy);
     // DPK force-bypass: explicit disable instead of uninitialized DPK state.
     dpk::force_bypass(mmio);
     chan::set_channel_help_exit(mmio, tx_en);
-    host::print("[wifi] RFK per-channel flow complete (rx_dck + TSSI[real-therm] + DPK-bypass; IQK SKIPPED)\n");
+    host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK + TSSI + DPK-bypass)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
     //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
