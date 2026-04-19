@@ -11,6 +11,7 @@
 //! default state (no frequency tuned) and the receiver is physically deaf.
 
 use crate::host;
+use crate::fw;
 
 const CR: u32 = 0x10000; // PHY_CR_BASE for rtw89_phy_gen_ax
 
@@ -201,6 +202,24 @@ pub fn set_channel_2g(mmio: i32, ch: u8) {
     //   2f. chan_idx encoding for 2G: BASE_IDX_2G(0)<<4 | ch = ch for 2G
     host::mmio_w32_mask(mmio, CR + R_MAC_PIN_SEL, B_CH_IDX_SEG0, ch as u32);
 
+    //   2g. rtw8852bx_5m_mask (common.c:1022) — for BW=20 MHz the function
+    //   sets mask_5m_en=false and clears three enable bits. Without these
+    //   clears stale 5M-detect state from a previous BW setting can bias
+    //   adjacent-channel interference detection.
+    //   R_PATH0_5MDET_V1 = 0x46F8 bit 12, R_PATH1_5MDET_V1 = 0x47B8 bit 12,
+    //   R_ASSIGN_SBD_OPT_V1 = 0x4440 bit 31.
+    const R_PATH0_5MDET_V1: u32 = 0x46F8;
+    const R_PATH1_5MDET_V1: u32 = 0x47B8;
+    const R_ASSIGN_SBD_OPT_V1: u32 = 0x4440;
+    const B_5MDET_EN: u32 = 1 << 12;
+    const B_ASSIGN_SBD_OPT_EN_V1: u32 = 1 << 31;
+    host::mmio_clr32(mmio, CR + R_PATH0_5MDET_V1, B_5MDET_EN);
+    host::mmio_clr32(mmio, CR + R_PATH1_5MDET_V1, B_5MDET_EN);
+    host::mmio_clr32(mmio, CR + R_ASSIGN_SBD_OPT_V1, B_ASSIGN_SBD_OPT_EN_V1);
+
+    //   2h. rtw8852bx_bb_set_pop (common.c:1115) — clears POP-EN only in
+    //   monitor mode. We're always STATION → NO-OP.
+
     // ── 3. set_channel_rf (rtw8852b_ctrl_bw_ch) ──────────────────
     //   3a. _ctrl_ch: _ch_setting for path A/B with dav=true and false
     //       8852b maps RR_CFGCH and RR_CFGCH_V1 to same RF reg 0x18
@@ -322,24 +341,36 @@ fn mac_cfg_ppdu_status(mmio: i32, enable: bool) {
 }
 
 /// 1:1 port of rtw8852b_set_channel_help(enter=true).
-/// Quiesces TX, TSSI, ADC, PPDU reporting and disables BB reset before
-/// set_channel runs. Matches Linux rtw8852b.c:633.
-pub fn set_channel_help_enter(mmio: i32) {
+/// Linux order (rtw8852b.c:633):
+///   1. stop_sch_tx(ALL) → saves tx_en bits
+///   2. cfg_ppdu_status(false)
+///   3. tssi_cont_en(false)
+///   4. adc_en(false)
+///   5. fsleep(40 µs)
+///   6. bb_reset_en(band, false)
+/// Returns the saved `tx_en` so set_channel_help_exit can restore it.
+/// Without the sch_tx stop, TX slots keep firing during the channel
+/// switch and the PHY sees stale energy — IQK/calibration fails and
+/// mgmt frames queued during the switch may go out on the wrong freq.
+pub fn set_channel_help_enter(mmio: i32) -> u16 {
+    let tx_en_saved = fw::stop_sch_tx(mmio, 0);
     mac_cfg_ppdu_status(mmio, false);
     tssi_cont_en(mmio, false);
     adc_en(mmio, false);
-    host::sleep_ms(1); // fsleep(40)
+    host::sleep_ms(1); // fsleep(40 µs)
     bb_reset_en(mmio, false);
+    tx_en_saved
 }
 
-/// 1:1 port of rtw8852b_set_channel_help(enter=false) — the EXIT path.
-/// Re-enables ADC, TSSI, PPDU reporting and kicks BB reset. Without
-/// this the chip stays in the quiesced state and RX is dead.
-pub fn set_channel_help_exit(mmio: i32) {
+/// 1:1 port of rtw8852b_set_channel_help(enter=false).
+/// Linux order: ppdu_status ON → adc ON → tssi ON → bb_reset ON →
+/// resume_sch_tx with the tx_en saved by the matching enter call.
+pub fn set_channel_help_exit(mmio: i32, tx_en: u16) {
     mac_cfg_ppdu_status(mmio, true);
     adc_en(mmio, true);
     tssi_cont_en(mmio, true);
     bb_reset_en(mmio, true);
+    fw::resume_sch_tx(mmio, 0, tx_en);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -357,6 +388,54 @@ pub fn set_channel_help_exit(mmio: i32) {
 //  0x50 = 80 → 20 dBm = 100 mW (2.4G legal maximum most regions).
 // ═══════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════
+//  apply_txpwr_ctrl — port of __rtw8852bx_set_txpwr_ctrl (common.c:1381)
+//
+//  Linux phy_dm_init calls chip->ops->set_txpwr_ctrl, which is
+//  __rtw8852bx_set_txpwr_ctrl → rtw8852bx_set_txpwr_ref(phy_idx=0,
+//  pwr_ofst=0). This sets the *PA reference level* for both OFDM and
+//  CCK, on both RF paths. Without it the per-rate txpwr table has no
+//  reference to anchor against — TX goes out at undefined power.
+//
+//  For pwr_ofst=0:
+//    ofst_dec[A] = 0, ofst_dec[B] = 0
+//    val_ofdm = val_cck = bb_cal_txpwr_ref(ref=0, dec=0)
+//
+//  bb_cal_txpwr_ref(ref=0, dec=0):
+//    pwr_s10_3   = (0<<1) + (0x27<<3) - 0 = 0x138 (312)
+//    bb_pwr_cw   = 0x138 & 0x7 = 0
+//    rf_pwr_cw   = (0x138>>3) & 0x3F = 0x27 = 39 (clamp 15..63 → 39)
+//    pwr_cw      = (39<<3) | 0 = 0x138
+//    tssi_ofst_cw = 0x12c + 0 - 128 = 0xAC (172)
+//    val = (0xAC<<18) | (0x138<<9) | 0 = 0x02B27000
+// ═══════════════════════════════════════════════════════════════════
+
+const R_AX_PWR_RATE_CTRL: u32 = 0xD200;
+const B_AX_PWR_REF: u32       = 0x0FFF_FC00; // GENMASK(27,10)
+
+// Path A DPD reg = 0x5800 + ofst; Path B = 0x7800 + ofst.
+// ofst_ofdm = 0x4, ofst_cck = 0x8.
+const R_DPD_A: u32 = 0x5800;
+const R_DPD_B: u32 = 0x7800;
+const DPD_MASK: u32 = (0x1FF << 18) | (0x1FF << 9) | 0x1FF; // = 0x07FFFFFF
+
+/// Pre-computed bb_cal_txpwr_ref(ref=0, dec=0) = 0x02B27000.
+/// Same value for OFDM and CCK when pwr_ofst=0.
+const DPD_VAL_REF0: u32 = 0x02B27000;
+
+pub fn apply_txpwr_ctrl(mmio: i32) {
+    // 1. Clear PWR_REF in R_AX_PWR_RATE_CTRL (leave FORCE_EN + FORCE_VALUE bits alone).
+    host::mmio_clr32(mmio, R_AX_PWR_RATE_CTRL, B_AX_PWR_REF);
+
+    // 2. Write OFDM + CCK ref values, both paths.
+    //    Path A OFDM at PHY 0x5804, CCK at PHY 0x5808
+    //    Path B OFDM at PHY 0x7804, CCK at PHY 0x7808
+    host::mmio_w32_mask(mmio, CR + R_DPD_A + 0x4, DPD_MASK, DPD_VAL_REF0); // A OFDM
+    host::mmio_w32_mask(mmio, CR + R_DPD_A + 0x8, DPD_MASK, DPD_VAL_REF0); // A CCK
+    host::mmio_w32_mask(mmio, CR + R_DPD_B + 0x4, DPD_MASK, DPD_VAL_REF0); // B OFDM
+    host::mmio_w32_mask(mmio, CR + R_DPD_B + 0x8, DPD_MASK, DPD_VAL_REF0); // B CCK
+}
+
 const R_AX_PWR_BY_RATE_TABLE0: u32 = 0xD2C0;
 const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
 
@@ -367,7 +446,6 @@ const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
 // When FORCE_PWR_BY_RATE_EN=1, HW ignores the per-rate table and
 // transmits every frame at VALUE. Useful smoke-test override until
 // we port the full rtw8852bx_set_txpwr_ref/offset/limit pipeline.
-const R_AX_PWR_RATE_CTRL: u32 = 0xD200;
 
 pub fn apply_default_txpwr(mmio: i32) {
     // Fill per-rate table uniformly with 0x50 = 20 dBm (0.25-dBm units).
