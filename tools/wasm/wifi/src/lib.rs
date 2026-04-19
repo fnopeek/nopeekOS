@@ -27,7 +27,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.16.0 — IQK skip experiment\n");
+    host::print("[wifi] RTL8852BE driver v1.17.0 — LINUX_GAPS batch 1 (sch_tx + 5m_mask + txpwr_ctrl)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -173,6 +173,13 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
+    // ── Gap 3.7.17: set_txpwr_ctrl — PA reference init.
+    // Linux phy_dm_init calls chip->ops->set_txpwr_ctrl once to set the
+    // OFDM/CCK power reference for both RF paths. Without this the
+    // per-rate power table has no anchor and TX power is undefined.
+    chan::apply_txpwr_ctrl(mmio);
+    host::print("  TXPWR_CTRL: PA reference (ref=0, ofst=0) applied\n");
+
     // ── Phase 4b: hci_start — 1:1 Linux rtw89_hci_start (core.c:5970).
     //   Unmask PCIe IRQs (HIMR0 + HIMR00 + HIMR10). On 8852BE this is
     //   the last step of rtw89_core_start and enables the RX-DMA event
@@ -186,15 +193,12 @@ pub extern "C" fn _start() {
     //   SCANOFLD_START (Linux always programs a valid "baseline" chan
     //   before scan). We pick ch 1 because that's the canonical 2G
     //   scan entry point Linux uses in rtw89_hw_scan_prep.
-    chan::set_channel_help_enter(mmio);
+    let tx_en = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 1);
     rfk::rx_dck(mmio);
-    // v1.16.0 experiment: skip IQK. All four calibrations (cor/fin/tx/rx)
-    // were reporting fail=1 anyway; if our iqk_restore leaves the chip
-    // in a bad post-IQK state, TX will silently misbehave. Skipping
-    // proves whether IQK-path or something else is the blocker.
+    // IQK still skipped — will re-enable after TX-power gaps are fixed.
     // iqk::run(mmio);
-    chan::set_channel_help_exit(mmio);
+    chan::set_channel_help_exit(mmio, tx_en);
     host::print("[wifi] RFK per-channel flow complete (rx_dck, IQK SKIPPED)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
@@ -329,21 +333,21 @@ pub extern "C" fn _start() {
     // Don't touch FW — assume it parked on ch 13. Host-side PHY retune
     // to 13 just in case. apply_default_txpwr fills R_AX_PWR_BY_RATE
     // with 20 dBm so the PA has a non-zero target to transmit at.
-    chan::set_channel_help_enter(mmio);
+    let tx_en_a = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 13);
     chan::apply_default_txpwr(mmio);
     rfk::rx_dck(mmio);
-    chan::set_channel_help_exit(mmio);
+    chan::set_channel_help_exit(mmio, tx_en_a);
     host::print("  tuned to ch 13 (+ default txpwr 20 dBm)\n");
     run_tx_test("A (ch 13)", 13, &mut ring, mmio);
 
     // ── Test B: switch to ch 7 via SCANOFLD-stop + target ─────────
     mac::scan_stop_to_channel(mmio, 7);
-    chan::set_channel_help_enter(mmio);
+    let tx_en_b = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 7);
     chan::apply_default_txpwr(mmio);
     rfk::rx_dck(mmio);
-    chan::set_channel_help_exit(mmio);
+    chan::set_channel_help_exit(mmio, tx_en_b);
     host::print("  tuned to ch 7 (+ default txpwr 20 dBm)\n");
     run_tx_test("B (ch 7)", 7, &mut ring, mmio);
 
