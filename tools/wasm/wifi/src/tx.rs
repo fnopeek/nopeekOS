@@ -181,8 +181,15 @@ pub fn send_mgmt(mmio: i32, ring: &mut TxRing, frame: &[u8]) -> bool {
     host::fence();
 
     // ── 6. TXBD (points at WD page) ───────────────────────────────
+    // Linux pci.c:1539: `txwd->len = txwd_len + txwp_len + txaddr_info_len`
+    // — 24 (body) + 24 (info) + 8 (wp) + 8 (one addr entry) = 64 bytes.
+    // The 802.11 frame lives in a SEPARATE DMA buffer referenced by the
+    // addr_info entry, so its length is NOT added here. Adding it caused
+    // HW to read 45 bytes of zero-padded slop past the real metadata and
+    // silently drop the frame — visible as TX_COUNTER=0 despite CH8_BUSY
+    // toggling and TXBD_IDX advancing (v1.30/v1.31 diagnostic).
     let bd_off        = ring.wp as u32 * 8;
-    let wd_total_len  = WD_HDR_TOTAL + frame.len() as u32;
+    let wd_total_len  = WD_HDR_TOTAL;
     let wd_dma_hi     = (wd_phys >> 32) as u32 & 0xFF;
     // BD word0: length[15:0] | opt[31:16] (LS | DMA_HI<<6)
     let bd_opt: u32   = (1u32 << 14) | (wd_dma_hi << 6);  // LS + DMA_HI
