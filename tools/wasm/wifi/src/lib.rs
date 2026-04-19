@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.30.0 — alimentk OFF + TX_COUNTER diagnostic\n");
+    host::print("[wifi] RTL8852BE driver v1.31.0 — ptcl_init_ax PCIe block (FSM_MON timeout)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
