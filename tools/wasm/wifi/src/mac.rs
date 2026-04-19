@@ -1418,12 +1418,17 @@ pub fn listen_only(mmio: i32, seconds: u32) {
 //  WiFi Scan
 // ═══════════════════════════════════════════════════════════════════
 
-/// Start a passive scan on 2.4GHz channels 1-13.
+/// Start an **active** scan on 2.4GHz channels 1-13.
 /// Called 3x from lib.rs to accumulate beacons across passes. The
-/// RX_FLTR / EDCCA / BSS-table state is kept in statics so only the
-/// first call prints the setup lines — subsequent calls go straight
-/// to the channel list + scan_start + END_SCAN poll.
+/// RX_FLTR / EDCCA / BSS-table / probe-pool state is kept in statics
+/// so only the first call prints the setup lines — subsequent calls
+/// go straight to the channel list + scan_start + END_SCAN poll.
 static mut SCAN_SETUP_DONE: bool = false;
+
+/// Probe-Req pkt_id in the FW offload pool, set by first-pass scan().
+/// 0xFF = unregistered. Once registered it stays in the pool across
+/// scan passes so we only pay the H2C cost once.
+static mut PROBE_PKT_ID: u8 = 0xFF;
 
 #[allow(dead_code)]
 pub fn scan(mmio: i32) {
@@ -1476,6 +1481,26 @@ pub fn scan(mmio: i32) {
         host::print("  EDCCA: set to MAX for scan\n");
     }
 
+    // ── Register probe request in FW offload pool (first pass only) ──
+    // Linux fw.c:8291 ieee80211_probereq_get → rtw89_fw_h2c_add_pkt_offload.
+    // The FW stores the probe req body keyed by pkt_id. On each active
+    // scan channel the FW transmits the stored frame on air from its own
+    // TX path — bypassing our CH8 DMA entirely. This is the path Linux
+    // uses for broadcast probes during scan; CH8 is reserved for AUTH/
+    // ASSOC/Data after association.
+    if first_pass && unsafe { PROBE_PKT_ID == 0xFF } {
+        let mut frame = [0u8; 64];
+        let sma = crate::vif::sta_mac();
+        // channel=0: FW fills DS Param per-channel automatically. The
+        // wildcard SSID (IE 0 len 0) asks every AP to respond.
+        let flen = crate::tx::build_probe_req(&sma, 0, &mut frame);
+        fw::h2c_add_pkt_offload(mmio, 0, &frame[..flen]);
+        unsafe { PROBE_PKT_ID = 0; }
+        host::print("  PKT_OFLD: probe req registered (id=0, ");
+        fw::print_dec(flen);
+        host::print(" B)\n");
+    }
+
     // ── Send channel list ──────────────────────────────────────────
     // H2C: ADD_SCANOFLD_CH (CAT=1, CLASS=9, FUNC=0x16)
     // Header: ch_num(u8), elem_size(u8=7), arg(u8=0), rsvd(u8=0)
@@ -1488,17 +1513,20 @@ pub fn scan(mmio: i32) {
     buf[1] = ELEM_SIZE;
     // buf[2] = arg = 0, buf[3] = rsvd = 0
 
-    // 2.4GHz channels: center = primary = channel number
-    // Linux prep_chan_list_ax (fw.c:8596) + add_chan_ax (fw.c:8314) values:
-    //   period      = RTW89_CHANNEL_TIME (45) for 2.4G non-P2P
-    //   dwell_time  = 0 (not set for non-DFS)
-    //   bw          = RTW89_SCAN_WIDTH (0) = 20MHz
-    //   ch_band     = RTW89_BAND_2G (0)
-    //   notify_action = RTW89_SCANOFLD_DEBUG_MASK (0x1F)  ← enables all notifs
-    //   tx_pkt      = true (bit 12)  — FW may not TX since num_pkt=0
-    //   probe_id    = RTW89_SCANOFLD_PKT_NONE (0xFF)  ← no probe request
-    //   pause_data  = true (ACTIVE chan_type in Linux 2G path)
-    //   num_pkt     = 0 (passive)
+    // 2.4GHz ACTIVE channels. Linux prep_chan_list_ax + add_chan_ax + the
+    // ACTIVE case in rtw89_hw_scan_add_chan_ax (fw.c:8430):
+    //   period        = RTW89_CHANNEL_TIME (45) for 2.4G non-P2P
+    //   dwell_time    = 0
+    //   bw            = RTW89_SCAN_WIDTH (0) = 20MHz
+    //   ch_band       = RTW89_BAND_2G (0)
+    //   notify_action = RTW89_SCANOFLD_DEBUG_MASK (0x1F) — all notifs
+    //   tx_pkt        = true                      — FW is allowed to TX
+    //   pause_data    = true (CHAN_ACTIVE path)   — data queues paused on-chan
+    //   num_pkt       = 1                         — one probe per channel
+    //   pkt_id[0]     = PROBE_PKT_ID              — FW-pool reference
+    //   probe_id      = RTW89_SCANOFLD_PKT_NONE (0xFF) — per-SSID probe slot unused
+    let pkt_id = unsafe { PROBE_PKT_ID };
+    let num_pkt: u32 = if pkt_id != 0xFF { 1 } else { 0 };
     let channels: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
     for (i, &ch) in channels.iter().enumerate() {
         let off = 4 + i * 28;
@@ -1506,16 +1534,19 @@ pub fn scan(mmio: i32) {
         let w0: u32 = 45u32
             | ((ch as u32) << 16)
             | ((ch as u32) << 24);
-        // w1: bw[2:0]=0 | action[7:3]=0x1F | num_pkt[11:8]=0 | tx[12]=1
+        // w1: bw[2:0]=0 | action[7:3]=0x1F | num_pkt[11:8] | tx[12]=1
         //     | pause_data[13]=1 | ch_band[15:14]=0 | probe_id[23:16]=0xFF
-        //     | dfs[24]=0 | tx_null[25]=0 | random[26]=0
         let w1: u32 = (0x1F << 3)
-            | (1 << 12)       // tx_pkt
-            | (1 << 13)       // pause_data
-            | (0xFF << 16);   // probe_id = PKT_NONE
+            | (num_pkt << 8)
+            | (1 << 12)
+            | (1 << 13)
+            | (0xFFu32 << 16);
+        // w2: pkt0[7:0] = probe pkt_id (0 when unregistered/inactive)
+        let w2: u32 = if num_pkt > 0 { pkt_id as u32 } else { 0 };
         buf[off..off + 4].copy_from_slice(&w0.to_le_bytes());
         buf[off + 4..off + 8].copy_from_slice(&w1.to_le_bytes());
-        // w2..w6 already zero (no pkt_ids for passive scan with num_pkt=0)
+        buf[off + 8..off + 12].copy_from_slice(&w2.to_le_bytes());
+        // w3..w6 stay zero (no further pkt slots used)
     }
 
     if first_pass {
