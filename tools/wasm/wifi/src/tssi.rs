@@ -24,6 +24,28 @@ use crate::tssi_tables::*;
 const BAND_2G: u8 = 0;
 const BAND_5G: u8 = 1;
 
+// DELTA_SWINGIDX tables for 2G path A/B (rtw8852b_table.c 14637-14651).
+// 30 entries each (DELTA_SWINGIDX_SIZE = 30). Used by set_tmeter_tbl to
+// build the 64-byte thermal offset table when efuse thermal is valid.
+const DELTA_SWINGIDX_SIZE: usize = 30;
+
+const DELTA_2GA_N: [i8; DELTA_SWINGIDX_SIZE] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const DELTA_2GA_P: [i8; DELTA_SWINGIDX_SIZE] = [
+    0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3,
+    3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 5, 5, 5,
+];
+const DELTA_2GB_N: [i8; DELTA_SWINGIDX_SIZE] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, -2,
+];
+const DELTA_2GB_P: [i8; DELTA_SWINGIDX_SIZE] = [
+    0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3,
+    3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6,
+];
+
 // ── Register addresses (reg.h) ──────────────────────────────────
 
 const RR_TXPOW: u32       = 0x7F;
@@ -141,34 +163,85 @@ fn set_dck(mmio: i32, path: u8) {
     }
 }
 
-/// _tssi_set_tmeter_tbl — rfk.c:2773. With thermal=0xff fallback:
-/// writes 32 to R_Px_TMETER + R_Px_RFCTM.VAL, fills 64-byte offset
-/// table at R_P0_TSSI_BASE / R_TSSI_THOF with zeroes. Efuse thermal
-/// would give a per-chip delta table; without efuse the defaults are
-/// sufficient for TSSI tracking to come up.
-fn set_tmeter_tbl(mmio: i32, path: u8) {
-    // thermal=0xff → fallback path in Linux
-    if path == 0 {
-        pwm(mmio, R_P0_TMETER, B_P0_TMETER_DIS, 0x0);
-        pwm(mmio, R_P0_TMETER, B_P0_TMETER_TRK, 0x1);
-        pwm(mmio, R_P0_TMETER, B_P0_TMETER, 32);
-        pwm(mmio, R_P0_RFCTM, B_P0_RFCTM_VAL, 32);
-        for off in (0..64u32).step_by(4) {
-            pw(mmio, R_P0_TSSI_BASE + off, 0);
-        }
-        pwm(mmio, R_P0_RFCTM, R_P0_RFCTM_RDY, 0x1);
-        pwm(mmio, R_P0_RFCTM, R_P0_RFCTM_RDY, 0x0);
-    } else {
-        pwm(mmio, R_P1_TMETER, B_P1_TMETER_DIS, 0x0);
-        pwm(mmio, R_P1_TMETER, B_P1_TMETER_TRK, 0x1);
-        pwm(mmio, R_P1_TMETER, B_P1_TMETER, 32);
-        pwm(mmio, R_P1_RFCTM, B_P1_RFCTM_VAL, 32);
-        for off in (0..64u32).step_by(4) {
-            pw(mmio, R_TSSI_THOF + off, 0);
-        }
-        pwm(mmio, R_P1_RFCTM, R_P1_RFCTM_RDY, 0x1);
-        pwm(mmio, R_P1_RFCTM, R_P1_RFCTM_RDY, 0x0);
+/// Build the 64-byte thermal offset table per Linux _tssi_set_tmeter_tbl:
+///   thm_ofst[0..32]  = -thm_down[i], clamped to last entry
+///   thm_ofst[32..64] =  thm_up[i],   in reverse from index 63 downwards
+/// (Linux rfk.c:2853-2863.)
+fn build_thm_ofst(up: &[i8; DELTA_SWINGIDX_SIZE], down: &[i8; DELTA_SWINGIDX_SIZE])
+    -> [i8; 64]
+{
+    let mut t = [0i8; 64];
+    let mut i = 0usize;
+    for j in 0..32 {
+        t[j] = if i < DELTA_SWINGIDX_SIZE {
+            let v = -down[i]; i += 1; v
+        } else {
+            -down[DELTA_SWINGIDX_SIZE - 1]
+        };
     }
+    i = 1;
+    for j in (32..64).rev() {
+        t[j] = if i < DELTA_SWINGIDX_SIZE {
+            let v = up[i]; i += 1; v
+        } else {
+            up[DELTA_SWINGIDX_SIZE - 1]
+        };
+    }
+    t
+}
+
+/// Pack 4 s8 bytes into a little-endian u32 (Linux RTW8852B_TSSI_GET_VAL).
+fn pack4(t: &[i8; 64], idx: usize) -> u32 {
+    (t[idx] as u8 as u32)
+        | ((t[idx + 1] as u8 as u32) << 8)
+        | ((t[idx + 2] as u8 as u32) << 16)
+        | ((t[idx + 3] as u8 as u32) << 24)
+}
+
+/// _tssi_set_tmeter_tbl — rfk.c:2773. Efuse thermal drives the delta
+/// tables. thermal=0xff → fallback (zero offsets, TMETER=32). With a
+/// real thermal value, writes the thermal into TMETER + RFCTM_VAL and
+/// fills the 64-byte offset table from the DELTA_SWINGIDX_2G{A,B}_{N,P}
+/// constants above.
+fn set_tmeter_tbl(mmio: i32, path: u8, thermal: u8) {
+    let (r_tmeter, b_tmeter_dis, b_tmeter_trk, b_tmeter,
+         r_rfctm, b_rfctm_val, r_rfctm_rdy, r_base)
+    = if path == 0 {
+        (R_P0_TMETER, B_P0_TMETER_DIS, B_P0_TMETER_TRK, B_P0_TMETER,
+         R_P0_RFCTM, B_P0_RFCTM_VAL, R_P0_RFCTM_RDY, R_P0_TSSI_BASE)
+    } else {
+        (R_P1_TMETER, B_P1_TMETER_DIS, B_P1_TMETER_TRK, B_P1_TMETER,
+         R_P1_RFCTM, B_P1_RFCTM_VAL, R_P1_RFCTM_RDY, R_TSSI_THOF)
+    };
+
+    pwm(mmio, r_tmeter, b_tmeter_dis, 0x0);
+    pwm(mmio, r_tmeter, b_tmeter_trk, 0x1);
+
+    if thermal == 0xFF {
+        // Fallback: TMETER = 32, all offsets = 0.
+        pwm(mmio, r_tmeter, b_tmeter,    32);
+        pwm(mmio, r_rfctm,  b_rfctm_val, 32);
+        for off in (0..64u32).step_by(4) {
+            pw(mmio, r_base + off, 0);
+        }
+    } else {
+        // Real thermal: program it + build delta table.
+        pwm(mmio, r_tmeter, b_tmeter,    thermal as u32);
+        pwm(mmio, r_rfctm,  b_rfctm_val, thermal as u32);
+
+        let (up, down) = if path == 0 {
+            (&DELTA_2GA_P, &DELTA_2GA_N)
+        } else {
+            (&DELTA_2GB_P, &DELTA_2GB_N)
+        };
+        let t = build_thm_ofst(up, down);
+        for off in 0..16u32 {
+            pw(mmio, r_base + off * 4, pack4(&t, (off * 4) as usize));
+        }
+    }
+
+    pwm(mmio, r_rfctm, r_rfctm_rdy, 0x1);
+    pwm(mmio, r_rfctm, r_rfctm_rdy, 0x0);
 }
 
 /// _tssi_set_dac_gain_tbl — rfk.c:2930.
@@ -290,8 +363,16 @@ fn disable(mmio: i32) {
 //  ignored (we never run the TX alignment loop).
 // ═══════════════════════════════════════════════════════════════════
 
-pub fn run(mmio: i32, band: u8, ch: u8) {
-    host::print("  TSSI: start (setup-only, no alimentk)\n");
+pub fn run(mmio: i32, band: u8, ch: u8, thermal: [u8; 2]) {
+    host::print("  TSSI: start (setup-only, thermal=[0x");
+    for i in 0..2 {
+        let v = thermal[i];
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let buf = [HEX[((v >> 4) & 0xF) as usize], HEX[(v & 0xF) as usize]];
+        host::print(unsafe { core::str::from_utf8_unchecked(&buf) });
+        if i == 0 { host::print(",0x"); }
+    }
+    host::print("])\n");
 
     disable(mmio);
 
@@ -301,7 +382,7 @@ pub fn run(mmio: i32, band: u8, ch: u8) {
         ini_txpwr_ctrl_bb(mmio, path);
         ini_txpwr_ctrl_bb_he_tb(mmio, path);
         set_dck(mmio, path);
-        set_tmeter_tbl(mmio, path);
+        set_tmeter_tbl(mmio, path, thermal[path as usize]);
         set_dac_gain_tbl(mmio, path);
         slope_cal_org(mmio, path, band);
         alignment_default(mmio, path, band, ch);
@@ -310,7 +391,7 @@ pub fn run(mmio: i32, band: u8, ch: u8) {
     }
 
     enable(mmio);
-    // _tssi_set_efuse_to_de skipped: needs efuse DE values
+    // _tssi_set_efuse_to_de skipped: needs efuse DE per-channel mapping
 
     host::print("  TSSI: enabled (both paths)\n");
 }

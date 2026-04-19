@@ -16,8 +16,15 @@
 use crate::host;
 use crate::fw;
 
-/// Our pseudo MAC address (will be used as scan_mac_addr — like Linux random scan mac).
-pub const STA_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+/// Station MAC address. Initially a pseudo value; lib.rs overrides this
+/// with the real chip MAC read from efuse as soon as efuse::read succeeds.
+/// Probe Requests and the VIF addr_cam use whatever is stored here at the
+/// point of the call.
+pub static mut STA_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+pub fn sta_mac() -> [u8; 6] {
+    unsafe { STA_MAC }
+}
 
 // ── rtw89 enum values (core.h) ────────────────────────────────────
 const NET_TYPE_NO_LINK: u32    = 0;
@@ -380,7 +387,7 @@ fn h2c_cam(mmio: i32, macid: u8, port: u8) {
     //   bssid_cam_idx = 0, phy_idx = 0, len = 0x08, offset = 0,
     //   valid = 1, bssid = 00:00:00:00:00:00
 
-    let sma: [u8; 6] = STA_MAC;
+    let sma: [u8; 6] = sta_mac();
     let tma: [u8; 6] = [0; 6];
     let sma_hash = sma.iter().fold(0u8, |a, b| a ^ b);
     let tma_hash = tma.iter().fold(0u8, |a, b| a ^ b);
