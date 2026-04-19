@@ -22,6 +22,8 @@ mod tx;
 mod tssi_tables;
 mod tssi;
 mod dpk;
+#[allow(dead_code)]
+mod dpk_tables;
 mod efuse;
 #[allow(dead_code)]
 mod bb_tables;
@@ -40,7 +42,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.43.0 — full Linux set_txpwr pipeline, FORCE off\n");
+    host::print("[wifi] RTL8852BE driver v1.44.0 — full DPK cal Linux 1:1 (replaces force_bypass)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -243,8 +245,9 @@ pub extern "C" fn _start() {
     iqk::run(mmio);
     let efuse_copy = unsafe { EFUSE };
     tssi::run(mmio, 0 /* BAND_2G */, 1, &efuse_copy);
-    dpk::force_bypass(mmio);
-    host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK + TSSI + DPK-bypass)\n");
+    // Full DPK cal (Linux 1:1). Replaces force_bypass.
+    dpk::run(mmio, 0 /* band 2G */, 1, 0 /* bw 20M */);
+    host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK + TSSI + DPK)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
     //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
@@ -318,7 +321,7 @@ pub extern "C" fn _start() {
     iqk::run(mmio);
     let efuse_copy7 = unsafe { EFUSE };
     tssi::run(mmio, 0, TARGET_CH, &efuse_copy7);
-    dpk::force_bypass(mmio);
+    dpk::run(mmio, 0 /* band 2G */, TARGET_CH, 0 /* bw 20M */);
     host::print("  tuned to ch "); fw::print_dec(TARGET_CH as usize);
     host::print(" + RFK complete\n");
 
