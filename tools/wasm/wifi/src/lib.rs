@@ -27,7 +27,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.9.0 — TX smoke test (Probe Req on CH8)\n");
+    host::print("[wifi] RTL8852BE driver v1.10.0 — Phase 7 with RX diagnostic\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -227,27 +227,47 @@ pub extern "C" fn _start() {
 
     // ── Phase 7: TX smoke test — Probe Request on CH8 ───────────────
     // Target: IvyPie_New FritzBox on ch 7 (BSSID b4:fc:7d:56:a2:e8).
-    // Tests the CH8 TXBD ring, TXWD descriptor layout, Addr-Info DMA,
-    // and tx-kick. Success = TXBD hw_idx advances + we see a new frame
-    // from the FritzBox within the dwell window.
+    // v1.10.0: diagnostic build — check whether RX survives the
+    // scan→channel-switch transition before testing TX itself.
     host::print("\n[wifi] Phase 7: TX smoke test on ch 7 (IvyPie)\n");
 
-    // Park on the target AP's channel. Follow the same enter/rfk/exit
-    // dance we use for the baseline tune so PHY/RF settle before TX.
+    // Park on target AP's channel.
     chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 7);
     rfk::rx_dck(mmio);
     chan::set_channel_help_exit(mmio);
     host::print("  tuned to ch 7\n");
 
-    // Give HW a moment after channel switch — RX should already be
-    // picking up ch-7 beacons before we TX so we can compare deltas.
-    mac::dwell(mmio, 200);
+    // ── Dump RX-path state after the channel switch ─────────────────
+    // Scan mode had set RX_FLTR = 0x03004438 (A_BC/A_A1_MATCH/BCN_CHK off,
+    // MPDU_MAX_LEN preserved). Linux restores DEFAULT_AX_RX_FLTR
+    // (0x030044BE) on scan_complete — we don't, so the filter stays in
+    // scan mode. EDCCA was bumped to MAX(249) for scan, also not restored.
+    // Print the raw state so we can see what HW is filtering on.
+    let rx_fltr = host::mmio_r32(mmio, 0xCE20);
+    let edcca   = host::mmio_r32(mmio, 0x0001_4884);
+    let busy    = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+    host::print("  RX_FLTR_OPT = 0x"); host::print_hex32(rx_fltr);
+    host::print("  EDCCA_LVL = 0x"); host::print_hex32(edcca);
+    host::print("\n  DMA_BUSY1 = 0x"); host::print_hex32(busy);
+    host::print("\n");
 
-    let frames_pre  = mac::wifi_frames_seen();
-    let beacons_pre = mac::beacons_seen();
+    // ── Control dwell — 2 s listening on ch 7, WITHOUT sending ──────
+    // If beacons arrive here, RX is healthy and the earlier 0-frame
+    // result was just a too-short dwell window. If still 0, the scan→
+    // post-scan transition has gated RX somehow (chanctx_pause, DIG
+    // suspend, port_cfg_rx_sync — Linux does these, we don't).
+    let f0 = mac::wifi_frames_seen();
+    let b0 = mac::beacons_seen();
+    host::print("  control dwell 2 s (no TX)...\n");
+    mac::dwell(mmio, 2000);
+    let f1 = mac::wifi_frames_seen();
+    let b1 = mac::beacons_seen();
+    host::print("  -> +"); fw::print_dec((f1 - f0) as usize);
+    host::print(" frames, +"); fw::print_dec((b1 - b0) as usize);
+    host::print(" beacons\n");
 
-    // CH8 TX ring: BD (32×8) + WD pool (16×128) + Frame pool (16×256)
+    // ── Allocate + init CH8 ring, send Probe Req ───────────────────
     let mut ring = match tx::alloc() {
         Some(r) => r,
         None => {
@@ -264,11 +284,8 @@ pub extern "C" fn _start() {
     host::print_hex32(ring.wd_phys as u32);
     host::print("\n");
 
-    let idx_before  = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
-    let busy_before = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1)
-                    & regs::B_AX_CH8_BUSY;
+    let idx_before = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
 
-    // Wildcard Probe Request → all APs on ch 7 should answer
     let mut frame = [0u8; 128];
     let len = tx::build_probe_req(&vif::STA_MAC, 7, &mut frame);
     host::print("  Probe Req (");
@@ -279,43 +296,34 @@ pub extern "C" fn _start() {
         host::print("  TX submit FAILED\n");
     }
 
-    // Dwell 500 ms: poll RX for Probe Responses while watching hw_idx.
+    // ── Post-TX dwell — 2 s ─────────────────────────────────────────
+    let f2 = mac::wifi_frames_seen();
+    let b2 = mac::beacons_seen();
     let mut saw_hw_move = false;
-    for _ in 0..5u32 {
+    for _ in 0..20u32 {
         mac::dwell(mmio, 100);
         let idx_now = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
-        if (idx_now >> 16) != (idx_before >> 16) {
-            saw_hw_move = true;
-        }
+        if (idx_now >> 16) != (idx_before >> 16) { saw_hw_move = true; }
     }
+    let f3 = mac::wifi_frames_seen();
+    let b3 = mac::beacons_seen();
+    let idx_after = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
 
-    let idx_after   = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
-    let busy_after  = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1)
-                    & regs::B_AX_CH8_BUSY;
-    let frames_post  = mac::wifi_frames_seen();
-    let beacons_post = mac::beacons_seen();
+    host::print("  TXBD_IDX: 0x");  host::print_hex32(idx_before);
+    host::print(" -> 0x"); host::print_hex32(idx_after);
+    if saw_hw_move { host::print(" (hw consumed)\n"); }
+    else           { host::print(" (stuck)\n"); }
 
-    host::print("  CH8 TXBD_IDX: 0x");
-    host::print_hex32(idx_before);
-    host::print(" -> 0x");
-    host::print_hex32(idx_after);
-    if saw_hw_move {
-        host::print(" (hw_idx moved — HW consumed the BD)\n");
-    } else {
-        host::print(" (hw_idx stuck — HW did not consume)\n");
-    }
-
-    host::print("  CH8 BUSY: before=");
-    host::print(if busy_before != 0 { "1" } else { "0" });
-    host::print(" after=");
-    host::print(if busy_after  != 0 { "1" } else { "0" });
-    host::print("\n");
-
-    host::print("  RX during dwell: +");
-    fw::print_dec((frames_post - frames_pre) as usize);
+    host::print("  post-TX RX: +");
+    fw::print_dec((f3 - f2) as usize);
     host::print(" frames, +");
-    fw::print_dec((beacons_post - beacons_pre) as usize);
+    fw::print_dec((b3 - b2) as usize);
     host::print(" beacons\n");
+
+    // Show the BSS table again — if we hit anything new (especially
+    // if IvyPie's count jumped), that's the TX proof we want.
+    host::print("\n[wifi] BSS table after Phase 7:\n");
+    mac::scan_summary();
 
     // ── Done — wait for exit ───────────────────────────────────────
     host::print("\n[wifi] Press 'q' to exit\n");
