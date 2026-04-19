@@ -195,9 +195,47 @@ fn init_cfg_8852b(mmio: i32) {
 /// the PTA is ready to let WiFi TX through by the time the first
 /// frame gets DMAed.
 pub fn init(mmio: i32) {
+    // Pre-state — baseline reads so we can see what changed.
+    let pre_btc_fn  = host::mmio_r32(mmio, R_AX_BTC_FUNC_EN);
+    let pre_gpio    = host::mmio_r32(mmio, R_AX_GPIO_MUXCFG);
+    let pre_cca     = host::mmio_r32(mmio, R_AX_CCA_CFG_0);
+
+    host::print("  BTC: pre  BTC_FUNC_EN=0x");
+    host::print_hex32(pre_btc_fn);
+    host::print(" GPIO_MUX=0x");
+    host::print_hex32(pre_gpio);
+    host::print(" CCA0=0x");
+    host::print_hex32(pre_cca);
+    host::print("\n");
+
     host::print("  BTC: mac_coex_init (PTA_WL_TX_EN)\n");
     mac_coex_init(mmio);
     host::print("  BTC: init_cfg_8852b (WL priorities + SHARED TRX masks)\n");
     init_cfg_8852b(mmio);
+
+    let post_btc_fn = host::mmio_r32(mmio, R_AX_BTC_FUNC_EN);
+    let post_gpio   = host::mmio_r32(mmio, R_AX_GPIO_MUXCFG);
+    let post_cca    = host::mmio_r32(mmio, R_AX_CCA_CFG_0);
+    let post_msk    = host::mmio_r32(mmio, R_BTC_BT_COEX_MSK_TABLE);
+    let post_wl_pri = host::mmio_r32(mmio, R_AX_WL_PRI_MSK);
+
+    host::print("  BTC: post BTC_FUNC_EN=0x");
+    host::print_hex32(post_btc_fn);
+    host::print(" GPIO_MUX=0x");
+    host::print_hex32(post_gpio);
+    host::print(" CCA0=0x");
+    host::print_hex32(post_cca);
+    host::print("\n  BTC: post COEX_MSK=0x");
+    host::print_hex32(post_msk);
+    host::print(" WL_PRI_MSK=0x");
+    host::print_hex32(post_wl_pri);
+    host::print("\n");
+
+    let ok_txen = post_btc_fn & B_AX_PTA_WL_TX_EN != 0;
+    host::print(if ok_txen {
+        "  BTC: PTA_WL_TX_EN = 1 (VERIFIED)\n"
+    } else {
+        "  BTC: PTA_WL_TX_EN = 0 !!! write did NOT stick\n"
+    });
     host::print("  BTC: init done\n");
 }
