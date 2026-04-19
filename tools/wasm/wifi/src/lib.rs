@@ -21,6 +21,7 @@ mod tx;
 #[allow(dead_code)]
 mod tssi_tables;
 mod tssi;
+mod dpk;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -30,7 +31,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.18.0 — TSSI setup (13 sub-funcs, no alimentk)\n");
+    host::print("[wifi] RTL8852BE driver v1.19.0 — TSSI + DPK bypass\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -196,6 +197,10 @@ pub extern "C" fn _start() {
     //   SCANOFLD_START (Linux always programs a valid "baseline" chan
     //   before scan). We pick ch 1 because that's the canonical 2G
     //   scan entry point Linux uses in rtw89_hw_scan_prep.
+    // DPK init (set_dpd_backoff) — runs once, not per-channel.
+    // Linux rtw8852b_dpk_init is called from phy_dm_init after BB is up.
+    dpk::init(mmio);
+
     let tx_en = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 1);
     rfk::rx_dck(mmio);
@@ -204,8 +209,11 @@ pub extern "C" fn _start() {
     // TSSI: PA feedback loop activation (Phase 1 setup-only, no alimentk).
     // Without this the PA is open-loop and output power is undefined.
     tssi::run(mmio, 0 /* BAND_2G */, 1);
+    // DPK force-bypass: explicit disable instead of uninitialized DPK state.
+    // Full DPK cal needs efuse + multi-ms loop; Phase 1 uses bypass.
+    dpk::force_bypass(mmio);
     chan::set_channel_help_exit(mmio, tx_en);
-    host::print("[wifi] RFK per-channel flow complete (rx_dck + TSSI, IQK SKIPPED)\n");
+    host::print("[wifi] RFK per-channel flow complete (rx_dck + TSSI + DPK-bypass, IQK SKIPPED)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
     //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
