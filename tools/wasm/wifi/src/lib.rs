@@ -31,7 +31,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.19.0 — TSSI + DPK bypass\n");
+    host::print("[wifi] RTL8852BE driver v1.20.0 — set_txpwr limits + offset (Gap 5.3)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
