@@ -642,11 +642,12 @@ pub fn alimentk(mmio: i32, path: u8, ch: u8) {
         Some(v) => v,
         None => {
             host::print("    alimentk: CW report timeout — skip\n");
-            // Restore
+            // Restore (incl. bb_tx_mode_switch to hand BB back to CMAC)
             for i in 0..8 {
                 host::mmio_w32(mmio, crate::phy::PHY_CR_BASE + regs[i], reg_bak[i]);
             }
             crate::bb::restore_tssi(mmio, &bak);
+            crate::bb::tx_mode_switch_off(mmio);
             return;
         }
     };
@@ -692,6 +693,7 @@ pub fn alimentk(mmio: i32, path: u8, ch: u8) {
         host::mmio_w32(mmio, crate::phy::PHY_CR_BASE + regs[i], reg_bak[i]);
     }
     crate::bb::restore_tssi(mmio, &bak);
+    crate::bb::tx_mode_switch_off(mmio);
 }
 
 pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
