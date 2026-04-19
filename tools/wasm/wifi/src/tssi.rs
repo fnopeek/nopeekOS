@@ -718,16 +718,16 @@ pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
         slope_cal_org(mmio, path, band);
         alignment_default(mmio, path, band, ch);
         set_tssi_slope(mmio, path);
-        // alimentk: the actual TX-loop auto-cal. Wrapped exactly like
-        // Linux rtw8852b_tssi does (rfk.c:3838-3843):
-        //   stop_sch_tx → _wait_rx_mode → alimentk → resume_sch_tx
-        // Without the sch_tx stop the scheduler gates our PMAC test-TX
-        // and CW_RPT never arrives. v1.28 timed out on both paths
-        // because of this.
-        let tx_en = crate::fw::stop_sch_tx(mmio, 0);
-        crate::iqk::wait_rx_mode_pub(mmio);
-        alimentk(mmio, path, ch);
-        crate::fw::resume_sch_tx(mmio, 0, tx_en);
+        // alimentk: DISABLED in v1.30. v1.28+v1.29 both timed out on
+        // CW_RPT (PMAC test-TX never produced a sample) AND spiked FW
+        // events by +473 — the FW is unhappy during our cal attempts.
+        // Since alimentk is fine-tuning (not a hard prerequisite for
+        // TX), skip it until we diagnose why PMAC test-TX doesn't run.
+        // let tx_en = crate::fw::stop_sch_tx(mmio, 0);
+        // crate::iqk::wait_rx_mode_pub(mmio);
+        // alimentk(mmio, path, ch);
+        // crate::fw::resume_sch_tx(mmio, 0, tx_en);
+        let _ = path; let _ = ch;
     }
 
     enable(mmio);
