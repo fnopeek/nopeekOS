@@ -605,33 +605,68 @@ fn h2c_cam_infra(mmio: i32, macid: u8, port: u8, bssid: [u8; 6]) {
 // ═══════════════════════════════════════════════════════════════════
 
 fn h2c_default_cmac_tbl(mmio: i32, macid: u8) {
-    // H2C_CMC_TBL_LEN = 68 bytes (17 × u32)
-    // Layout (from SET_* macros): dword 0 = MACID/OP,
-    //   dwords 1..7 = field values,
-    //   dwords 8..15 = masks for dwords 0..7,
-    //   dword 16 = extra
+    // H2C_CMC_TBL_LEN = 68 bytes (17 × u32). Linux fw.c:3549.
     //
-    // Linux default_cmac_tbl for 8852b (h2c_cctl_func_id=UD) sets:
-    //   MACID=macid [6:0], OPERATION=1 [7]  → dword 0
-    //   TXPWR_MODE=0 [11:9] → dword 5 (value=0, mask=1 at dword 13)
-    //   tx_path via __rtw89_fw_h2c_set_tx_path → dword X + mask
-    //   ANTSEL_A/B/C/D=0 → dword 6+ + mask
-    //   MGQ_RPT_EN=0 (we assume tx_rpt_enabled=false) → dword 1 bit 21 + mask dword 9 bit 21
-    //   DOPPLER_CTRL=0 → dword 2 + mask
-    //   TXPWR_TOLERENCE=0 → dword X + mask
+    // Layout is a value/mask pair split across the 68 bytes:
+    //   dwords 0..7  = field values (per-field bit positions)
+    //   dwords 8..15 = field masks at the SAME bit positions as 0..7
+    //   dword 16     = extra / pad
     //
-    // Simplification: send all-zero payload except dword 0 (MACID|OP).
-    // Every un-masked field stays at FW default. FW treats mask=0 as "don't touch".
+    // The FW ORs the masked value bits into the chip's CCTL entry, leaving
+    // unmasked bits at their previous value. A mask of 0 = "ignore value".
     //
-    // If scan still fails we can add explicit masks + values per Linux.
+    // Linux default for 8852B (rf_path_num=2, net_type!=AP) sets:
+    //   dword 0: MACID[6:0] | OP[7]=1
+    //   dword 5: TXPWR_MODE[11:9]=0                    → value 0
+    //            mask in dword 13 @ GENMASK(11,9)      = 0x0000_0E00
+    //   dword 6: NTX_PATH_EN[19:16]=RF_AB(3)           = 0x0003_0000
+    //            PATH_MAP_A[21:20]=0
+    //            PATH_MAP_B[23:22]=1 (RF_AB → 1)       = 0x0040_0000
+    //            PATH_MAP_C[25:24]=0 | PATH_MAP_D[27:26]=0
+    //            ANTSEL_A/B/C/D[28..31]=0
+    //            → dword 6 = 0x0043_0000
+    //            mask in dword 14 = bits [31:16] set   = 0xFFFF_0000
+    //   dword 1: MGQ_RPT_EN[21]=0 (tx_rpt_enabled=false)
+    //            mask in dword 9 @ BIT(21)             = 0x0020_0000
+    //   dword 7: DOPPLER_CTRL[19:18]=0 | TXPWR_TOLERENCE[27:24]=0
+    //            mask in dword 15 @ GENMASK(19,18) | GENMASK(27,24)
+    //                                                  = 0x0F0C_0000
+    //
+    // Without NTX_PATH_EN in the mask the FW leaves MACID 0 without a TX
+    // RF path assigned, and HW silently drops every CH8 direct TX
+    // attempt (TX_COUNTER stays 0 even though DMA consumes the BD) —
+    // that was the v1.30..v1.34 diagnostic pattern.
 
     let mut buf = [0u8; 68];
 
-    // dword 0: MACID[6:0] | OPERATION[7]
-    let w0: u32 = (macid as u32 & 0x7F) | (1u32 << 7);
-    buf[0..4].copy_from_slice(&w0.to_le_bytes());
+    // dword 0: MACID[6:0] | OP[7]=1
+    let dw0: u32 = (macid as u32 & 0x7F) | (1u32 << 7);
+    buf[0..4].copy_from_slice(&dw0.to_le_bytes());
 
-    // Leave all other words at 0 (masks=0 means FW ignores value fields).
+    // dword 5: TXPWR_MODE=0  (value stays 0 — mask below is what matters)
+    // buf[20..24] already zero
+
+    // dword 6: NTX_PATH_EN=RF_AB(3) | PATH_MAP_B=1  → 0x0043_0000
+    let dw6: u32 = (3u32 << 16) | (1u32 << 22);
+    buf[24..28].copy_from_slice(&dw6.to_le_bytes());
+
+    // dword 9: MGQ_RPT_EN mask @ BIT(21)
+    let dw9: u32 = 1u32 << 21;
+    buf[36..40].copy_from_slice(&dw9.to_le_bytes());
+
+    // dword 13: TXPWR_MODE mask @ GENMASK(11,9)
+    let dw13: u32 = 0x7u32 << 9;
+    buf[52..56].copy_from_slice(&dw13.to_le_bytes());
+
+    // dword 14: NTX_PATH_EN | PATH_MAP_A..D | ANTSEL_A..D masks @ [31:16]
+    let dw14: u32 = 0xFFFFu32 << 16;
+    buf[56..60].copy_from_slice(&dw14.to_le_bytes());
+
+    // dword 15: DOPPLER_CTRL mask [19:18] | TXPWR_TOLERENCE mask [27:24]
+    let dw15: u32 = (0x3u32 << 18) | (0xFu32 << 24);
+    buf[60..64].copy_from_slice(&dw15.to_le_bytes());
+
+    // dword 7, 16 remain zero.
 
     // CAT=1, CLASS=5 (FR_EXCHG), FUNC=0x2 (CCTLINFO_UD for 8852b), rack=0, dack=1
     fw::h2c_send(mmio, 1, 5, 0x2, false, true, &buf);
