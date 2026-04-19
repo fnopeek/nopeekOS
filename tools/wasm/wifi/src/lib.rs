@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.33.0 — active scan via FW pkt_offload pool\n");
+    host::print("[wifi] RTL8852BE driver v1.34.0 — INFRA switch + AUTH Open via CH8\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -274,22 +274,22 @@ pub extern "C" fn _start() {
     }
     mac::scan_summary();
 
-    // ── Phase 7: TX smoke test — Probe Request on CH8 ───────────────
-    // Target: IvyPie_New FritzBox on ch 7 (BSSID b4:fc:7d:56:a2:e8).
-    // v1.10.0: diagnostic build — check whether RX survives the
-    // scan→channel-switch transition before testing TX itself.
-    // ── Phase 7: dual-channel TX diagnostic ─────────────────────────
-    // Split the TX test into two isolated sub-tests so we can tell
-    // "TX path is broken" apart from "channel switch is broken":
-    //   7a: stay on ch 13 (where FW parks after last scan pass), TX
-    //       a Probe Req with DS=13. If NETGEAR88's beacon count jumps
-    //       above its natural ~100 ms rate → TX works on-air and
-    //       NETGEAR88 answered.
-    //   7b: SCANOFLD-stop to ch 7 + host-side set_channel(7), TX Probe
-    //       with DS=7. If IvyPie_New's beacon count jumps → channel
-    //       switch works too.
-    // Ring allocation is done once and reused across both sub-tests.
-    host::print("\n[wifi] Phase 7: dual-channel TX diagnostic\n");
+    // ── Phase 7: AUTH via CH8 to IvyPie_New ────────────────────────
+    // v1.34: v1.33 proved the chip TX via FW-pool (5 APs incl. Probe
+    // Responses from QL-132 / TP-Link). Now test the real Linux
+    // direct-TX use-case: a unicast Open-System AUTH request to a
+    // known AP. This exercises the CH8 BD path with:
+    //   - INFRA net_type + TSF_UDT_EN + BSSID_FIT_EN (port_cfg)
+    //   - addr_cam with target BSSID filled + NET_TYPE=INFRA
+    //   - h2c_join_info dis_conn=false
+    //   - unicast frame: RTS_EN=1 per Linux !is_bmc rule
+    // If we see AUTH Response (seq=2, status=0) in RX, the CH8 TX
+    // path works for its intended Linux-supported use case.
+    host::print("\n[wifi] Phase 7: AUTH via CH8 → IvyPie_New\n");
+
+    // IvyPie_New FritzBox main on ch 7. BSSID from scan logs.
+    const TARGET_BSSID: [u8; 6] = [0xb4, 0xfc, 0x7d, 0x56, 0xa2, 0xe8];
+    const TARGET_CH: u8 = 7;
 
     let mut ring = match tx::alloc() {
         Some(r) => r,
@@ -300,6 +300,79 @@ pub extern "C" fn _start() {
     };
     tx::init_ch8(mmio, &ring);
     host::print("  CH8 ring ready\n");
+
+    // Park FW on target channel, tune host PHY, switch VIF to INFRA.
+    mac::scan_stop_to_channel(mmio, TARGET_CH);
+    let tx_en_c = chan::set_channel_help_enter(mmio);
+    chan::set_channel_2g(mmio, TARGET_CH);
+    chan::apply_default_txpwr(mmio);
+    rfk::rx_dck(mmio);
+    chan::set_channel_help_exit(mmio, tx_en_c);
+    host::print("  tuned to ch "); fw::print_dec(TARGET_CH as usize);
+    host::print(" (+ default txpwr 20 dBm)\n");
+
+    // INFRA switch: port_cfg + addr_cam(BSSID) + join_info(dis_conn=0)
+    vif::switch_to_infra(mmio, 0, TARGET_BSSID);
+
+    // State dump BEFORE AUTH
+    let ctn_txen = host::mmio_r32(mmio, 0xC348);
+    let rx_fltr  = host::mmio_r32(mmio, 0xCE20);
+    let edcca    = host::mmio_r32(mmio, 0x0001_4884);
+    host::print("  CTN_TXEN=0x"); host::print_hex32(ctn_txen);
+    host::print(" RX_FLTR=0x"); host::print_hex32(rx_fltr);
+    host::print(" EDCCA=0x");   host::print_hex32(edcca);
+    host::print("\n");
+
+    // Build AUTH Open Request frame (30 bytes)
+    let mut frame = [0u8; 64];
+    let sma = vif::sta_mac();
+    let flen = tx::build_auth_open(&sma, &TARGET_BSSID, &mut frame);
+    host::print("  AUTH frame built (");
+    fw::print_dec(flen); host::print(" bytes)\n");
+
+    let f0 = mac::wifi_frames_seen();
+    let b0 = mac::beacons_seen();
+    let tx_cnt_before = host::mmio_r32(mmio, 0x0001_1A40) & 0xFFFF;
+    let idx_before    = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
+
+    if !tx::send_mgmt(mmio, &mut ring, &frame[..flen]) {
+        host::print("  AUTH submit FAILED\n");
+    } else {
+        // Poll CH8_BUSY 200 ms
+        let mut busy_seen = false;
+        for _ in 0..40u32 {
+            let b = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+            if b & regs::B_AX_CH8_BUSY != 0 { busy_seen = true; break; }
+            host::sleep_ms(5);
+        }
+        let tx_cnt_after = host::mmio_r32(mmio, 0x0001_1A40) & 0xFFFF;
+        let tx_delta = tx_cnt_after.wrapping_sub(tx_cnt_before) & 0xFFFF;
+        let idx_after = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
+
+        host::print("  CH8_BUSY: ");
+        host::print(if busy_seen { "toggled 1" } else { "never active" });
+        host::print(" | TXBD_IDX 0x");
+        host::print_hex32(idx_before);
+        host::print("→0x"); host::print_hex32(idx_after);
+        host::print(" | TX_COUNTER ");
+        fw::print_dec(tx_cnt_before as usize);
+        host::print("→"); fw::print_dec(tx_cnt_after as usize);
+        host::print(" (Δ"); fw::print_dec(tx_delta as usize);
+        host::print(if tx_delta > 0 { ")  ON AIR\n" } else { ")  silent drop\n" });
+
+        // Wait up to 2 s for AUTH Response or any RX from AP
+        mac::dwell(mmio, 2000);
+        host::print("  post-AUTH 2 s: +");
+        fw::print_dec((mac::wifi_frames_seen() - f0) as usize);
+        host::print(" frames, +");
+        fw::print_dec((mac::beacons_seen() - b0) as usize);
+        host::print(" beacons\n");
+    }
+
+    /*  legacy probe-req diagnostic (kept for reference, unreachable)
+    let _unused = f0;
+    */
+    /*
 
     // helper closure-style: run one TX sub-test on the given channel.
     let run_tx_test = |label: &str, ch: u8, ring: &mut tx::TxRing, mmio: i32| {
@@ -410,6 +483,7 @@ pub extern "C" fn _start() {
     chan::set_channel_help_exit(mmio, tx_en_b);
     host::print("  tuned to ch 7 (+ default txpwr 20 dBm)\n");
     run_tx_test("B (ch 7)", 7, &mut ring, mmio);
+    */
 
     // Final BSS table — delta tells the story
     host::print("\n[wifi] BSS table after Phase 7:\n");

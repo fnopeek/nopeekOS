@@ -28,6 +28,7 @@ pub fn sta_mac() -> [u8; 6] {
 
 // ── rtw89 enum values (core.h) ────────────────────────────────────
 const NET_TYPE_NO_LINK: u32    = 0;
+const NET_TYPE_INFRA: u32      = 2;
 const WIFI_ROLE_STATION: u32   = 1;
 const SELF_ROLE_CLIENT: u32    = 0;
 const UPD_MODE_CREATE: u32     = 0;
@@ -455,6 +456,145 @@ fn h2c_cam(mmio: i32, macid: u8, port: u8) {
     buf[52..56].copy_from_slice(&w13.to_le_bytes());
 
     // w14: BSSID[2..5] — zero, skip
+
+    // CAT=1, CLASS=6 (ADDR_CAM_UPDATE), FUNC=0x0, rack=0, dack=1
+    fw::h2c_send(mmio, 1, 6, 0x0, false, true, &buf);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Switch MACID 0 from NO_LINK → INFRA and lock onto a target BSSID.
+//
+//  Linux flow (mac80211.c:756 bss_info_changed BSSID path):
+//    1. Copy AP BSSID into rtwvif_link->bssid
+//    2. rtw89_cam_bssid_changed  (software state, refreshes hash + idx)
+//    3. rtw89_fw_h2c_cam(INFO_CHANGE) — re-send full addr_cam with new BSSID
+//    4. rtw89_fw_h2c_join_info(dis_conn=false) — FW marks macid as connecting
+//    5. port_cfg updates (NET_TYPE=INFRA, TBTT_PROHIB_EN, BSSID_FIT_EN, TSF_UDT_EN)
+//
+//  Call once before AUTH/ASSOC CH8 TX to the target AP.
+// ═══════════════════════════════════════════════════════════════════
+
+pub fn switch_to_infra(mmio: i32, macid: u8, bssid: [u8; 6]) {
+    host::print("\n[wifi] VIF → INFRA, BSSID ");
+    for i in 0..6 {
+        print_hex2(bssid[i]);
+        if i < 5 { host::print(":"); }
+    }
+    host::print("\n");
+
+    // 1. port_cfg: NET_TYPE=INFRA (2), enable TBTT_PROHIB_EN + BRK_SETUP
+    //    (bcn_prct for net_type != NO_LINK), BSSID_FIT_EN (rx_sw INFRA),
+    //    TSF_UDT_EN (rx_sync_by_nettype INFRA). BCNTX_EN stays clear (not AP).
+    host::mmio_w32_mask(mmio, R_AX_PORT_CFG_P0, B_AX_NET_TYPE_MASK, NET_TYPE_INFRA);
+    host::mmio_set32(mmio, R_AX_PORT_CFG_P0,
+        B_AX_TBTT_PROHIB_EN | B_AX_BRK_SETUP
+        | B_AX_RX_BSSID_FIT_EN | B_AX_TSF_UDT_EN);
+    host::print("  port_cfg: NET_TYPE=INFRA, BSSID_FIT+TSF_UDT set\n");
+
+    // 2. addr_cam update with target BSSID (UPD_MODE = INFO_CHANGE=3)
+    h2c_cam_infra(mmio, macid, 0, bssid);
+    wait_c2h(mmio, 500, "cam_infra");
+    host::print("  addr_cam: BSSID programmed, UPD_MODE=INFO_CHANGE\n");
+
+    // 3. join_info: dis_conn=false, NET_TYPE=INFRA
+    h2c_join_info_infra(mmio, macid, 0, 0);
+    wait_c2h(mmio, 500, "join_info_infra");
+    host::print("  join_info: dis_conn=0, NET_TYPE=INFRA\n");
+}
+
+fn print_hex2(b: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let a = [HEX[(b >> 4) as usize], HEX[(b & 0xF) as usize]];
+    host::print(core::str::from_utf8(&a).unwrap_or("??"));
+}
+
+fn h2c_join_info_infra(mmio: i32, macid: u8, port: u8, band: u8) {
+    // AX join_info: 1 × __le32. dis_conn=false, net_type=INFRA.
+    let w0: u32 = (macid as u32) & 0xFF
+        | (0u32 << 8)                         // OP = dis_conn = false
+        | (((band as u32) & 0x1) << 9)
+        | (((port as u32) & 0x7) << 21)
+        | ((NET_TYPE_INFRA & 0x3) << 24)
+        | ((WIFI_ROLE_STATION & 0xF) << 26)
+        | ((SELF_ROLE_CLIENT & 0x3) << 30);
+    let payload: [u8; 4] = w0.to_le_bytes();
+    fw::h2c_send(mmio, 1, 8, 0x0, false, true, &payload);
+}
+
+fn h2c_cam_infra(mmio: i32, macid: u8, port: u8, bssid: [u8; 6]) {
+    // Same 60-byte v0 layout as the CREATE path, but with target BSSID
+    // filled in, NET_TYPE=INFRA, TMA=BSSID, UPD_MODE=INFO_CHANGE.
+    let mut buf = [0u8; 60];
+
+    let sma: [u8; 6] = sta_mac();
+    let tma: [u8; 6] = bssid;       // for STA: TMA == target AP BSSID
+    let sma_hash = sma.iter().fold(0u8, |a, b| a ^ b);
+    let tma_hash = tma.iter().fold(0u8, |a, b| a ^ b);
+
+    // w1: IDX=0 | OFFSET=0 | LEN=0x40
+    let w1: u32 = ADDR_CAM_ENT_SIZE << 16;
+    buf[4..8].copy_from_slice(&w1.to_le_bytes());
+
+    // w2: VALID=1 | NET_TYPE=INFRA(2) | SMA_HASH | TMA_HASH
+    let w2: u32 = 1u32
+        | ((NET_TYPE_INFRA & 0x3) << 1)
+        | ((sma_hash as u32) << 16)
+        | ((tma_hash as u32) << 24);
+    buf[8..12].copy_from_slice(&w2.to_le_bytes());
+
+    // w4: SMA[0..3]
+    let w4: u32 = (sma[0] as u32)
+        | ((sma[1] as u32) << 8)
+        | ((sma[2] as u32) << 16)
+        | ((sma[3] as u32) << 24);
+    buf[16..20].copy_from_slice(&w4.to_le_bytes());
+
+    // w5: SMA[4..5] | TMA[0..1]
+    let w5: u32 = (sma[4] as u32)
+        | ((sma[5] as u32) << 8)
+        | ((tma[0] as u32) << 16)
+        | ((tma[1] as u32) << 24);
+    buf[20..24].copy_from_slice(&w5.to_le_bytes());
+
+    // w6: TMA[2..5]
+    let w6: u32 = (tma[2] as u32)
+        | ((tma[3] as u32) << 8)
+        | ((tma[4] as u32) << 16)
+        | ((tma[5] as u32) << 24);
+    buf[24..28].copy_from_slice(&w6.to_le_bytes());
+
+    // w8: MACID | PORT_INT | TSF_SYNC (same as CREATE)
+    let w8: u32 = (macid as u32) & 0xFF
+        | (((port as u32) & 0x7) << 8)
+        | (((port as u32) & 0x7) << 11);
+    buf[32..36].copy_from_slice(&w8.to_le_bytes());
+
+    // w9: AID12=0 | SEC_ENT_MODE=NORMAL(2). AID stays 0 until assoc.
+    let w9: u32 = (ADDR_CAM_SEC_NORMAL & 0x3) << 16;
+    buf[36..40].copy_from_slice(&w9.to_le_bytes());
+
+    // w12: BSSID_IDX=0 | BSSID_OFFSET=0 | BSSID_LEN=0x08
+    let w12: u32 = BSSID_CAM_ENT_SIZE << 16;
+    buf[48..52].copy_from_slice(&w12.to_le_bytes());
+
+    // w13: BSSID_VALID=1 | BSSID_MASK=0x3F | BSSID[0..1] @ [23:16], [31:24]
+    let w13: u32 = 1u32
+        | (BSSID_MATCH_ALL << 2)
+        | ((bssid[0] as u32) << 16)
+        | ((bssid[1] as u32) << 24);
+    buf[52..56].copy_from_slice(&w13.to_le_bytes());
+
+    // w14: BSSID[2..5]
+    let w14: u32 = (bssid[2] as u32)
+        | ((bssid[3] as u32) << 8)
+        | ((bssid[4] as u32) << 16)
+        | ((bssid[5] as u32) << 24);
+    buf[56..60].copy_from_slice(&w14.to_le_bytes());
+
+    // Buffer is exactly 60 bytes — the v0 layout used for AX chips. w15
+    // (UPD_MODE) only exists on the extended struct sent for v1+ chips
+    // (Linux fw.c:2279 skips w15 when chip_gen == AX). INFO_CHANGE vs
+    // CREATE is a Linux-side bookkeeping flag, not a wire field on AX.
 
     // CAT=1, CLASS=6 (ADDR_CAM_UPDATE), FUNC=0x0, rack=0, dack=1
     fw::h2c_send(mmio, 1, 6, 0x0, false, true, &buf);
