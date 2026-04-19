@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.35.0 — default_cmac_tbl: NTX_PATH_EN=RF_AB\n");
+    host::print("[wifi] RTL8852BE driver v1.36.0 — addr_info 8B mode selector\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
