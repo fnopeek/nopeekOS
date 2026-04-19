@@ -88,14 +88,19 @@ const TSSI_OFFSET_STRUCT_SIZE:  usize =
 
 // ── Parsed output struct ────────────────────────────────────────
 
+pub const TSSI_TRIM_CH_GROUP_NUM: usize = 8;
+
 #[derive(Copy, Clone)]
 pub struct EfuseData {
     pub autoload_valid: bool,
     pub mac_addr:       [u8; 6],
-    pub thermal:        [u8; 2],   // path A/B
-    pub tssi_cck:       [[u8; TSSI_CCK_CH_GROUP_NUM]; 2],    // [path][chan_group]
+    pub thermal:        [u8; 2],
+    pub tssi_cck:       [[u8; TSSI_CCK_CH_GROUP_NUM]; 2],
     pub tssi_mcs_2g:    [[u8; TSSI_MCS_2G_CH_GROUP_NUM]; 2],
     pub tssi_mcs_5g:    [[u8; TSSI_MCS_5G_CH_GROUP_NUM]; 2],
+    // From phycap (0x580 range, separate from logical efuse).
+    pub tssi_trim:      [[i8; TSSI_TRIM_CH_GROUP_NUM]; 2],
+    pub tssi_trim_valid: bool,
     pub rx_gain_2g_cck:  u8,
     pub rx_gain_2g_ofdm: u8,
     pub rx_gain_5g_low:  u8,
@@ -116,6 +121,8 @@ impl EfuseData {
             tssi_cck:     [[0xFF; TSSI_CCK_CH_GROUP_NUM]; 2],
             tssi_mcs_2g:  [[0xFF; TSSI_MCS_2G_CH_GROUP_NUM]; 2],
             tssi_mcs_5g:  [[0xFF; TSSI_MCS_5G_CH_GROUP_NUM]; 2],
+            tssi_trim:    [[0; TSSI_TRIM_CH_GROUP_NUM]; 2],
+            tssi_trim_valid: false,
             rx_gain_2g_cck: 0xFF,
             rx_gain_2g_ofdm: 0xFF,
             rx_gain_5g_low: 0xFF,
@@ -329,6 +336,38 @@ pub fn read(mmio: i32) -> EfuseData {
     // 4. Extract fields.
     let mut e = parse_fields(&log_map);
     e.autoload_valid = true;
+
+    // 4b. Dump the 128-byte phycap region at 0x580 (separate from the
+    //     logical efuse) and pull tssi_trim per path from it.
+    //     Port of rtw8852bx_phycap_parsing_tssi (common.c:281).
+    //     Trim addresses are in *descending* order:
+    //       path A: 0x5D6, 0x5D5, 0x5D4, ...
+    //       path B: 0x5AB, 0x5AA, 0x5A9, ...
+    enable_pwr_cut_ddv(mmio);
+    let mut phycap = [0u8; 128];
+    let pcap_ok = dump_physical(mmio, PHYCAP_ADDR, PHYCAP_SIZE as usize, &mut phycap);
+    disable_pwr_cut_ddv(mmio);
+
+    if pcap_ok {
+        let base = PHYCAP_ADDR as usize;
+        let trim_addr = [0x5D6usize, 0x5ABusize];
+        let mut pg = false;
+        for i in 0..2 {
+            for j in 0..TSSI_TRIM_CH_GROUP_NUM {
+                let off = trim_addr[i].wrapping_sub(base).wrapping_sub(j);
+                if off < phycap.len() {
+                    e.tssi_trim[i][j] = phycap[off] as i8;
+                    if phycap[off] != 0xFF { pg = true; }
+                }
+            }
+        }
+        if pg {
+            e.tssi_trim_valid = true;
+        } else {
+            // No valid trim programmed — Linux zeros the whole array.
+            e.tssi_trim = [[0; TSSI_TRIM_CH_GROUP_NUM]; 2];
+        }
+    }
 
     // 5. Log highlights (MAC as 6×u8, thermal/rfe as u8).
     host::print("  EFUSE: MAC=");
