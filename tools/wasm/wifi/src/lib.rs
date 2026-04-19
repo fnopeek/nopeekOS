@@ -27,7 +27,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.11.0 — SCANOFLD stop + target-ch\n");
+    host::print("[wifi] RTL8852BE driver v1.12.0 — dual-channel TX diagnostic\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -229,52 +229,19 @@ pub extern "C" fn _start() {
     // Target: IvyPie_New FritzBox on ch 7 (BSSID b4:fc:7d:56:a2:e8).
     // v1.10.0: diagnostic build — check whether RX survives the
     // scan→channel-switch transition before testing TX itself.
-    host::print("\n[wifi] Phase 7: TX smoke test on ch 7 (IvyPie)\n");
+    // ── Phase 7: dual-channel TX diagnostic ─────────────────────────
+    // Split the TX test into two isolated sub-tests so we can tell
+    // "TX path is broken" apart from "channel switch is broken":
+    //   7a: stay on ch 13 (where FW parks after last scan pass), TX
+    //       a Probe Req with DS=13. If NETGEAR88's beacon count jumps
+    //       above its natural ~100 ms rate → TX works on-air and
+    //       NETGEAR88 answered.
+    //   7b: SCANOFLD-stop to ch 7 + host-side set_channel(7), TX Probe
+    //       with DS=7. If IvyPie_New's beacon count jumps → channel
+    //       switch works too.
+    // Ring allocation is done once and reused across both sub-tests.
+    host::print("\n[wifi] Phase 7: dual-channel TX diagnostic\n");
 
-    // Hand channel control back from FW to host, parked on ch 7.
-    // Linux rtw89_hw_scan_complete calls rtw89_fw_h2c_scan_offload with
-    // OPERATION=0 + TARGET_CH_MODE=1 — without this, FW stays on the
-    // last scan channel (ch 13) and our host-side set_channel only
-    // updates PHY while the MAC keeps hearing ch 13.
-    mac::scan_stop_to_channel(mmio, 7);
-
-    // Now program PHY/RF for ch 7.
-    chan::set_channel_help_enter(mmio);
-    chan::set_channel_2g(mmio, 7);
-    rfk::rx_dck(mmio);
-    chan::set_channel_help_exit(mmio);
-    host::print("  tuned to ch 7\n");
-
-    // ── Dump RX-path state after the channel switch ─────────────────
-    // Scan mode had set RX_FLTR = 0x03004438 (A_BC/A_A1_MATCH/BCN_CHK off,
-    // MPDU_MAX_LEN preserved). Linux restores DEFAULT_AX_RX_FLTR
-    // (0x030044BE) on scan_complete — we don't, so the filter stays in
-    // scan mode. EDCCA was bumped to MAX(249) for scan, also not restored.
-    // Print the raw state so we can see what HW is filtering on.
-    let rx_fltr = host::mmio_r32(mmio, 0xCE20);
-    let edcca   = host::mmio_r32(mmio, 0x0001_4884);
-    let busy    = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
-    host::print("  RX_FLTR_OPT = 0x"); host::print_hex32(rx_fltr);
-    host::print("  EDCCA_LVL = 0x"); host::print_hex32(edcca);
-    host::print("\n  DMA_BUSY1 = 0x"); host::print_hex32(busy);
-    host::print("\n");
-
-    // ── Control dwell — 2 s listening on ch 7, WITHOUT sending ──────
-    // If beacons arrive here, RX is healthy and the earlier 0-frame
-    // result was just a too-short dwell window. If still 0, the scan→
-    // post-scan transition has gated RX somehow (chanctx_pause, DIG
-    // suspend, port_cfg_rx_sync — Linux does these, we don't).
-    let f0 = mac::wifi_frames_seen();
-    let b0 = mac::beacons_seen();
-    host::print("  control dwell 2 s (no TX)...\n");
-    mac::dwell(mmio, 2000);
-    let f1 = mac::wifi_frames_seen();
-    let b1 = mac::beacons_seen();
-    host::print("  -> +"); fw::print_dec((f1 - f0) as usize);
-    host::print(" frames, +"); fw::print_dec((b1 - b0) as usize);
-    host::print(" beacons\n");
-
-    // ── Allocate + init CH8 ring, send Probe Req ───────────────────
     let mut ring = match tx::alloc() {
         Some(r) => r,
         None => {
@@ -283,52 +250,72 @@ pub extern "C" fn _start() {
         }
     };
     tx::init_ch8(mmio, &ring);
-    host::print("  CH8 ring: BD@0x");
-    host::print_hex32((ring.bd_phys >> 32) as u32);
-    host::print_hex32(ring.bd_phys as u32);
-    host::print(" WD@0x");
-    host::print_hex32((ring.wd_phys >> 32) as u32);
-    host::print_hex32(ring.wd_phys as u32);
-    host::print("\n");
+    host::print("  CH8 ring ready\n");
 
-    let idx_before = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
+    // helper closure-style: run one TX sub-test on the given channel.
+    let run_tx_test = |label: &str, ch: u8, ring: &mut tx::TxRing, mmio: i32| {
+        host::print("\n  ── Test "); host::print(label);
+        host::print(": DS=ch "); fw::print_dec(ch as usize); host::print(" ──\n");
 
-    let mut frame = [0u8; 128];
-    let len = tx::build_probe_req(&vif::STA_MAC, 7, &mut frame);
-    host::print("  Probe Req (");
-    fw::print_dec(len);
-    host::print(" B) submitting...\n");
+        // Control dwell: listen 1 s without sending
+        let f0 = mac::wifi_frames_seen();
+        let b0 = mac::beacons_seen();
+        mac::dwell(mmio, 1000);
+        host::print("    pre-TX 1 s: +");
+        fw::print_dec((mac::wifi_frames_seen() - f0) as usize);
+        host::print(" frames, +");
+        fw::print_dec((mac::beacons_seen()    - b0) as usize);
+        host::print(" beacons\n");
 
-    if !tx::send_mgmt(mmio, &mut ring, &frame[..len]) {
-        host::print("  TX submit FAILED\n");
-    }
+        // Send Probe Req with matching DS IE
+        let mut frame = [0u8; 128];
+        let len = tx::build_probe_req(&vif::STA_MAC, ch, &mut frame);
+        let idx_before = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
+        let f1 = mac::wifi_frames_seen();
+        let b1 = mac::beacons_seen();
 
-    // ── Post-TX dwell — 2 s ─────────────────────────────────────────
-    let f2 = mac::wifi_frames_seen();
-    let b2 = mac::beacons_seen();
-    let mut saw_hw_move = false;
-    for _ in 0..20u32 {
-        mac::dwell(mmio, 100);
-        let idx_now = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
-        if (idx_now >> 16) != (idx_before >> 16) { saw_hw_move = true; }
-    }
-    let f3 = mac::wifi_frames_seen();
-    let b3 = mac::beacons_seen();
-    let idx_after = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
+        if !tx::send_mgmt(mmio, ring, &frame[..len]) {
+            host::print("    TX submit FAILED\n");
+            return;
+        }
 
-    host::print("  TXBD_IDX: 0x");  host::print_hex32(idx_before);
-    host::print(" -> 0x"); host::print_hex32(idx_after);
-    if saw_hw_move { host::print(" (hw consumed)\n"); }
-    else           { host::print(" (stuck)\n"); }
+        // Post-TX dwell 2 s
+        mac::dwell(mmio, 2000);
+        let idx_after = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
+        host::print("    TXBD_IDX: 0x"); host::print_hex32(idx_before);
+        host::print(" -> 0x"); host::print_hex32(idx_after);
+        if (idx_after >> 16) != (idx_before >> 16) {
+            host::print(" (hw consumed)\n");
+        } else {
+            host::print(" (stuck)\n");
+        }
+        host::print("    post-TX 2 s: +");
+        fw::print_dec((mac::wifi_frames_seen() - f1) as usize);
+        host::print(" frames, +");
+        fw::print_dec((mac::beacons_seen()    - b1) as usize);
+        host::print(" beacons\n");
+    };
 
-    host::print("  post-TX RX: +");
-    fw::print_dec((f3 - f2) as usize);
-    host::print(" frames, +");
-    fw::print_dec((b3 - b2) as usize);
-    host::print(" beacons\n");
+    // ── Test A: ch 13 (where FW was last scanning) ──────────────────
+    // Don't touch FW — assume it parked on ch 13. Host-side PHY retune
+    // to 13 just in case.
+    chan::set_channel_help_enter(mmio);
+    chan::set_channel_2g(mmio, 13);
+    rfk::rx_dck(mmio);
+    chan::set_channel_help_exit(mmio);
+    host::print("  tuned to ch 13\n");
+    run_tx_test("A (ch 13)", 13, &mut ring, mmio);
 
-    // Show the BSS table again — if we hit anything new (especially
-    // if IvyPie's count jumped), that's the TX proof we want.
+    // ── Test B: switch to ch 7 via SCANOFLD-stop + target ─────────
+    mac::scan_stop_to_channel(mmio, 7);
+    chan::set_channel_help_enter(mmio);
+    chan::set_channel_2g(mmio, 7);
+    rfk::rx_dck(mmio);
+    chan::set_channel_help_exit(mmio);
+    host::print("  tuned to ch 7\n");
+    run_tx_test("B (ch 7)", 7, &mut ring, mmio);
+
+    // Final BSS table — delta tells the story
     host::print("\n[wifi] BSS table after Phase 7:\n");
     mac::scan_summary();
 
