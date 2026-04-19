@@ -43,7 +43,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.45.0 — BT-Coex init (PTA_WL_TX_EN frees antenna)\n");
+    host::print("[wifi] RTL8852BE driver v1.46.0 — BTC register-readback diagnostic\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
