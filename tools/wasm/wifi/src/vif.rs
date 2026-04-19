@@ -28,7 +28,6 @@ pub fn sta_mac() -> [u8; 6] {
 
 // ── rtw89 enum values (core.h) ────────────────────────────────────
 const NET_TYPE_NO_LINK: u32    = 0;
-const NET_TYPE_INFRA: u32      = 2;
 const WIFI_ROLE_STATION: u32   = 1;
 const SELF_ROLE_CLIENT: u32    = 0;
 const UPD_MODE_CREATE: u32     = 0;
@@ -462,44 +461,31 @@ fn h2c_cam(mmio: i32, macid: u8, port: u8) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  Switch MACID 0 from NO_LINK → INFRA and lock onto a target BSSID.
+//  Lock onto a target BSSID for AUTH/ASSOC frame exchange.
 //
-//  Linux flow (mac80211.c:756 bss_info_changed BSSID path):
-//    1. Copy AP BSSID into rtwvif_link->bssid
-//    2. rtw89_cam_bssid_changed  (software state, refreshes hash + idx)
-//    3. rtw89_fw_h2c_cam(INFO_CHANGE) — re-send full addr_cam with new BSSID
-//    4. rtw89_fw_h2c_join_info(dis_conn=false) — FW marks macid as connecting
-//    5. port_cfg updates (NET_TYPE=INFRA, TBTT_PROHIB_EN, BSSID_FIT_EN, TSF_UDT_EN)
+//  Linux only writes BSSID + re-sends addr_cam on BSS_CHANGED_BSSID
+//  (mac80211.c:756). NET_TYPE stays NO_LINK until BSS_CHANGED_ASSOC fires
+//  after association completes. Setting NET_TYPE=INFRA prematurely (as
+//  an earlier version did) makes the FW consider the MACID "connected"
+//  before AUTH even starts — some FW paths guard TX behind the
+//  association state machine and silently drop pre-AUTH frames.
 //
-//  Call once before AUTH/ASSOC CH8 TX to the target AP.
+//  Here we only refresh the addr_cam entry with the target BSSID so that
+//  an incoming AUTH Response (addr1 = our MAC, addr3 = target BSSID)
+//  matches our BSSID CAM and gets delivered to host.
 // ═══════════════════════════════════════════════════════════════════
 
-pub fn switch_to_infra(mmio: i32, macid: u8, bssid: [u8; 6]) {
-    host::print("\n[wifi] VIF → INFRA, BSSID ");
+pub fn set_target_bssid(mmio: i32, macid: u8, bssid: [u8; 6]) {
+    host::print("\n[wifi] addr_cam BSSID → ");
     for i in 0..6 {
         print_hex2(bssid[i]);
         if i < 5 { host::print(":"); }
     }
     host::print("\n");
 
-    // 1. port_cfg: NET_TYPE=INFRA (2), enable TBTT_PROHIB_EN + BRK_SETUP
-    //    (bcn_prct for net_type != NO_LINK), BSSID_FIT_EN (rx_sw INFRA),
-    //    TSF_UDT_EN (rx_sync_by_nettype INFRA). BCNTX_EN stays clear (not AP).
-    host::mmio_w32_mask(mmio, R_AX_PORT_CFG_P0, B_AX_NET_TYPE_MASK, NET_TYPE_INFRA);
-    host::mmio_set32(mmio, R_AX_PORT_CFG_P0,
-        B_AX_TBTT_PROHIB_EN | B_AX_BRK_SETUP
-        | B_AX_RX_BSSID_FIT_EN | B_AX_TSF_UDT_EN);
-    host::print("  port_cfg: NET_TYPE=INFRA, BSSID_FIT+TSF_UDT set\n");
-
-    // 2. addr_cam update with target BSSID (UPD_MODE = INFO_CHANGE=3)
     h2c_cam_infra(mmio, macid, 0, bssid);
-    wait_c2h(mmio, 500, "cam_infra");
-    host::print("  addr_cam: BSSID programmed, UPD_MODE=INFO_CHANGE\n");
-
-    // 3. join_info: dis_conn=false, NET_TYPE=INFRA
-    h2c_join_info_infra(mmio, macid, 0, 0);
-    wait_c2h(mmio, 500, "join_info_infra");
-    host::print("  join_info: dis_conn=0, NET_TYPE=INFRA\n");
+    wait_c2h(mmio, 500, "cam_bssid");
+    host::print("  addr_cam: BSSID programmed (NET_TYPE stays NO_LINK)\n");
 }
 
 fn print_hex2(b: u8) {
@@ -508,22 +494,13 @@ fn print_hex2(b: u8) {
     host::print(core::str::from_utf8(&a).unwrap_or("??"));
 }
 
-fn h2c_join_info_infra(mmio: i32, macid: u8, port: u8, band: u8) {
-    // AX join_info: 1 × __le32. dis_conn=false, net_type=INFRA.
-    let w0: u32 = (macid as u32) & 0xFF
-        | (0u32 << 8)                         // OP = dis_conn = false
-        | (((band as u32) & 0x1) << 9)
-        | (((port as u32) & 0x7) << 21)
-        | ((NET_TYPE_INFRA & 0x3) << 24)
-        | ((WIFI_ROLE_STATION & 0xF) << 26)
-        | ((SELF_ROLE_CLIENT & 0x3) << 30);
-    let payload: [u8; 4] = w0.to_le_bytes();
-    fw::h2c_send(mmio, 1, 8, 0x0, false, true, &payload);
-}
-
 fn h2c_cam_infra(mmio: i32, macid: u8, port: u8, bssid: [u8; 6]) {
-    // Same 60-byte v0 layout as the CREATE path, but with target BSSID
-    // filled in, NET_TYPE=INFRA, TMA=BSSID, UPD_MODE=INFO_CHANGE.
+    // 60-byte v0 layout — Linux `rtw89_cam_fill_addr_cam_info` +
+    // `rtw89_cam_fill_bssid_cam_info`. For a STA about to AUTH but
+    // NOT yet associated, Linux keeps net_type = NO_LINK (see
+    // core.c:4992 rtw89_vif_type_mapping — only flips to INFRA when
+    // assoc=true). TMA becomes the target AP's BSSID so any response
+    // frame matches the CAM.
     let mut buf = [0u8; 60];
 
     let sma: [u8; 6] = sta_mac();
@@ -535,9 +512,10 @@ fn h2c_cam_infra(mmio: i32, macid: u8, port: u8, bssid: [u8; 6]) {
     let w1: u32 = ADDR_CAM_ENT_SIZE << 16;
     buf[4..8].copy_from_slice(&w1.to_le_bytes());
 
-    // w2: VALID=1 | NET_TYPE=INFRA(2) | SMA_HASH | TMA_HASH
+    // w2: VALID=1 | NET_TYPE=NO_LINK(0, stays NO_LINK until assoc)
+    //     | SMA_HASH | TMA_HASH
     let w2: u32 = 1u32
-        | ((NET_TYPE_INFRA & 0x3) << 1)
+        | ((NET_TYPE_NO_LINK & 0x3) << 1)
         | ((sma_hash as u32) << 16)
         | ((tma_hash as u32) << 24);
     buf[8..12].copy_from_slice(&w2.to_le_bytes());

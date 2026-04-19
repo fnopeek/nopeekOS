@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.38.0 — RFK outside set_channel_help bracket\n");
+    host::print("[wifi] RTL8852BE driver v1.39.0 — pre-AUTH stays NO_LINK, only addr_cam BSSID refresh\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -332,8 +332,11 @@ pub extern "C" fn _start() {
     fw::print_dec(tx_counter_post_scan as usize);
     host::print("\n");
 
-    // INFRA switch: port_cfg + addr_cam(BSSID) + join_info(dis_conn=0)
-    vif::switch_to_infra(mmio, 0, TARGET_BSSID);
+    // Just refresh addr_cam with target BSSID — NO NET_TYPE flip, no
+    // join_info. Linux stays NO_LINK until BSS_CHANGED_ASSOC fires
+    // after AUTH+ASSOC complete. Flipping to INFRA pre-AUTH makes FW
+    // see the macid as "already associated" and can gate pre-AUTH TX.
+    vif::set_target_bssid(mmio, 0, TARGET_BSSID);
 
     // State dump BEFORE AUTH
     let ctn_txen = host::mmio_r32(mmio, 0xC348);
