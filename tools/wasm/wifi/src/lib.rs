@@ -27,7 +27,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.12.0 — dual-channel TX diagnostic\n");
+    host::print("[wifi] RTL8852BE driver v1.13.0 — TX state observability\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -257,6 +257,18 @@ pub extern "C" fn _start() {
         host::print("\n  ── Test "); host::print(label);
         host::print(": DS=ch "); fw::print_dec(ch as usize); host::print(" ──\n");
 
+        // ── State dump BEFORE TX: are the TX gates open? ────────────
+        // R_AX_CTN_TXEN (0xC348) bit 8 = MGQ — if 0, mgmt TX is paused
+        // R_AX_RX_FLTR_OPT, EDCCA_LVL: leftover scan-mode state?
+        let ctn_txen = host::mmio_r32(mmio, 0xC348);
+        let rx_fltr  = host::mmio_r32(mmio, 0xCE20);
+        let edcca    = host::mmio_r32(mmio, 0x0001_4884);
+        host::print("    CTN_TXEN=0x"); host::print_hex32(ctn_txen);
+        host::print(" (MGQ="); host::print(if ctn_txen & (1 << 8) != 0 { "on" } else { "OFF" });
+        host::print(") RX_FLTR=0x"); host::print_hex32(rx_fltr);
+        host::print(" EDCCA=0x"); host::print_hex32(edcca);
+        host::print("\n");
+
         // Control dwell: listen 1 s without sending
         let f0 = mac::wifi_frames_seen();
         let b0 = mac::beacons_seen();
@@ -278,6 +290,19 @@ pub extern "C" fn _start() {
             host::print("    TX submit FAILED\n");
             return;
         }
+
+        // ── Poll CH8_BUSY for 200 ms right after TX submit ──────────
+        // If the frame really hits the air, DMA_BUSY1.CH8_BUSY will
+        // toggle to 1 for a brief moment. If it stays 0 the whole
+        // time, the BD was dequeued but nothing went out.
+        let mut busy_seen = false;
+        for _ in 0..40u32 {
+            let b = host::mmio_r32(mmio, regs::R_AX_PCIE_DMA_BUSY1);
+            if b & regs::B_AX_CH8_BUSY != 0 { busy_seen = true; break; }
+            host::sleep_ms(5);
+        }
+        host::print("    CH8_BUSY post-submit: ");
+        host::print(if busy_seen { "toggled 1\n" } else { "stayed 0 (never active)\n" });
 
         // Post-TX dwell 2 s
         mac::dwell(mmio, 2000);
