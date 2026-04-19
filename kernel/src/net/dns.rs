@@ -25,6 +25,7 @@ static CACHE: Mutex<[Option<DnsEntry>; CACHE_SIZE]> = Mutex::new(
 );
 
 pub fn set_server(ip: [u8; 4]) { *DNS_SERVER.lock() = ip; }
+pub fn server() -> [u8; 4] { *DNS_SERVER.lock() }
 
 /// Resolve a hostname to IPv4 address. Blocking (polls for reply).
 pub fn resolve(name: &str) -> Option<[u8; 4]> {
