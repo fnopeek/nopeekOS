@@ -331,6 +331,17 @@ pub const B_AX_TXHCI_EN: u32     = 1 << 11;
 pub const B_AX_RXHCI_EN: u32     = 1 << 13;
 pub const B_AX_RST_BDRAM: u32    = 1 << 3;
 
+// ── CH8 TX Ring (MGMT Band 0) — ring size/idx/dma-high ──────────
+//
+// pci.h rtw89_pci_ch_dma_addr_set (non-V1, for 8852BE single-band).
+// CH8 = RTW89_TXCH_CH8 = MGMT Band 0. QSEL = RTW89_TX_QSEL_B0_MGMT = 0x12.
+// BDRAM single-band layout: start=20 max=4 min=1 (pci.c:1716).
+// Base addrs (DESA_L, BDRAM_CTRL) are defined above with ACH0..3/CH9.
+pub const R_AX_CH8_TXBD_NUM: u32    = 0x1034; // 16-bit: ring size
+pub const R_AX_CH8_TXBD_IDX: u32    = 0x1078; // 16-bit: wp write / rp read
+pub const R_AX_CH8_TXBD_DESA_H: u32 = 0x1154;
+pub const B_AX_CH8_BUSY: u32        = 1 << 16; // R_AX_PCIE_DMA_BUSY1
+
 // ── Chip Constants ───────────────────────────────────────────────
 
 pub const RTL8852B_VENDOR: u16 = 0x10EC;
