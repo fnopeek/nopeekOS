@@ -20,6 +20,7 @@ mod imr;
 mod tx;
 #[allow(dead_code)]
 mod tssi_tables;
+mod tssi;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -29,7 +30,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.17.0 — LINUX_GAPS batch 1 (sch_tx + 5m_mask + txpwr_ctrl)\n");
+    host::print("[wifi] RTL8852BE driver v1.18.0 — TSSI setup (13 sub-funcs, no alimentk)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -200,8 +201,11 @@ pub extern "C" fn _start() {
     rfk::rx_dck(mmio);
     // IQK still skipped — will re-enable after TX-power gaps are fixed.
     // iqk::run(mmio);
+    // TSSI: PA feedback loop activation (Phase 1 setup-only, no alimentk).
+    // Without this the PA is open-loop and output power is undefined.
+    tssi::run(mmio, 0 /* BAND_2G */, 1);
     chan::set_channel_help_exit(mmio, tx_en);
-    host::print("[wifi] RFK per-channel flow complete (rx_dck, IQK SKIPPED)\n");
+    host::print("[wifi] RFK per-channel flow complete (rx_dck + TSSI, IQK SKIPPED)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
     //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
