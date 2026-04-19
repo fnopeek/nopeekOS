@@ -27,7 +27,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.15.0 — FORCE_PWR_BY_RATE override\n");
+    host::print("[wifi] RTL8852BE driver v1.16.0 — IQK skip experiment\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -189,9 +189,13 @@ pub extern "C" fn _start() {
     chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 1);
     rfk::rx_dck(mmio);
-    iqk::run(mmio);
+    // v1.16.0 experiment: skip IQK. All four calibrations (cor/fin/tx/rx)
+    // were reporting fail=1 anyway; if our iqk_restore leaves the chip
+    // in a bad post-IQK state, TX will silently misbehave. Skipping
+    // proves whether IQK-path or something else is the blocker.
+    // iqk::run(mmio);
     chan::set_channel_help_exit(mmio);
-    host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK)\n");
+    host::print("[wifi] RFK per-channel flow complete (rx_dck, IQK SKIPPED)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
     //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
