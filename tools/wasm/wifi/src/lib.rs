@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.36.0 — addr_info 8B mode selector\n");
+    host::print("[wifi] RTL8852BE driver v1.37.0 — PTCL/WMAC TX debug diagnostic\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -311,6 +311,16 @@ pub extern "C" fn _start() {
     host::print("  tuned to ch "); fw::print_dec(TARGET_CH as usize);
     host::print(" (+ default txpwr 20 dBm)\n");
 
+    // Diagnostic: sample TX_COUNTER after scan-finished. v1.33 proved
+    // the FW pool TX path works (5 APs incl. probe-responders). If
+    // TX_COUNTER increased across the 3 scan passes, our counter read
+    // is trustworthy and the "silent drop" diagnosis is real. If it
+    // stays 0 despite working FW TX, the counter isn't the right one.
+    let tx_counter_post_scan = host::mmio_r32(mmio, 0x0001_1A40) & 0xFFFF;
+    host::print("  TX_COUNTER after 3 scan passes: ");
+    fw::print_dec(tx_counter_post_scan as usize);
+    host::print("\n");
+
     // INFRA switch: port_cfg + addr_cam(BSSID) + join_info(dis_conn=0)
     vif::switch_to_infra(mmio, 0, TARGET_BSSID);
 
@@ -359,6 +369,21 @@ pub extern "C" fn _start() {
         host::print("→"); fw::print_dec(tx_cnt_after as usize);
         host::print(" (Δ"); fw::print_dec(tx_delta as usize);
         host::print(if tx_delta > 0 { ")  ON AIR\n" } else { ")  silent drop\n" });
+
+        // Where did the frame die? Dump PTCL + WMAC TX debug registers.
+        // R_AX_PTCL_DBG_INFO = 0xC6F0 — PTCL arbiter state bits
+        // R_AX_PTCL_DBG      = 0xC6F4 — PTCL last-seen queue + result
+        // R_AX_WMAC_TX_CTRL_DEBUG = 0xCAE4 — WMAC TX scheduler
+        // R_AX_WMAC_TX_INFO0_DEBUG = 0xCAE8 — pkt info parsed by WMAC
+        let ptcl_info = host::mmio_r32(mmio, 0xC6F0);
+        let ptcl_dbg  = host::mmio_r32(mmio, 0xC6F4);
+        let wmac_ctl  = host::mmio_r32(mmio, 0xCAE4);
+        let wmac_info = host::mmio_r32(mmio, 0xCAE8);
+        host::print("  PTCL_DBG_INFO=0x"); host::print_hex32(ptcl_info);
+        host::print(" PTCL_DBG=0x"); host::print_hex32(ptcl_dbg);
+        host::print(" WMAC_TX_CTL=0x"); host::print_hex32(wmac_ctl);
+        host::print(" WMAC_TX_INFO0=0x"); host::print_hex32(wmac_info);
+        host::print("\n");
 
         // Wait up to 2 s for AUTH Response or any RX from AP
         mac::dwell(mmio, 2000);
