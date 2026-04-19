@@ -511,6 +511,189 @@ fn disable(mmio: i32) {
 //  ignored (we never run the TX alignment loop).
 // ═══════════════════════════════════════════════════════════════════
 
+// ── alimentk (rfk.c:3559): the actual TX-loop auto-calibration ───
+//
+// Sends 4 test-TX bursts at decreasing power levels, reads the TSSI
+// feedback ADC CW value for each, and computes per-path alignment
+// offsets that get written into the TSSI_ALIM1/2/3/4 BB registers.
+// These offsets are what normal (non-PMAC) TX uses to know how to
+// drive the PA for a target output power.
+//
+// Without alimentk the TSSI loop tracks against defaults, so actual
+// output power for a given target dBm is unknown. Linux always runs
+// this per channel; it's why every AP replies to their Probe Reqs.
+
+const ALIM_REG_P0: [u32; 4] = [0x5630, 0x5634, 0x563C, 0x5640]; // ALIM1/3/2/4 (Linux order)
+const ALIM_REG_P1: [u32; 4] = [0x7630, 0x7634, 0x763C, 0x7640];
+
+// _tssi_cw_default_addr per path × 4 (rfk.c:85).
+const CW_DEFAULT_ADDR: [[u32; 4]; 2] = [
+    [0x5634, 0x5630, 0x5630, 0x5630],
+    [0x7634, 0x7630, 0x7630, 0x7630],
+];
+const CW_DEFAULT_MASK: [u32; 4] = [0x000003FF, 0x3FF00000, 0x000FFC00, 0x000003FF];
+
+// ALIM write fields (reg.h).
+const B_P0_TSSI_ALIM11: u32 = 0x3FF0_0000; // GENMASK(29,20)
+const B_P0_TSSI_ALIM12: u32 = 0x000F_FC00; // GENMASK(19,10)
+const B_P0_TSSI_ALIM13: u32 = 0x0000_03FF; // GENMASK(9,0)
+const B_P0_TSSI_ALIM1:  u32 = 0x3FFF_FFFF; // GENMASK(29,0)
+
+// TSSI trigger / CW report.
+const B_TSSI_CWRPT:     u32 = 0x0000_01FF;
+const B_TSSI_CWRPT_RDY: u32 = 1 << 16;
+const TSSI_TRIGGER: [u32; 2] = [0x5820, 0x7820];
+const TSSI_CW_RPT:  [u32; 2] = [0x1C18, 0x3C18];
+const B_P0_TSSI_AVG_F: u32 = 0x0000_F000; // GENMASK(15,12)
+const B_P0_TSSI_MV_AVG_F: u32 = 0x0000_3800; // GENMASK(13,11)
+
+const R_TX_COUNTER:  u32 = 0x1A40;
+const MASK_LWORD: u32 = 0x0000_FFFF;
+
+fn pr(mmio: i32, addr: u32) -> u32 {
+    host::mmio_r32(mmio, crate::phy::PHY_CR_BASE + addr)
+}
+
+/// Sign-extend a `bits`-bit value to i32.
+fn sext(v: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    ((v << shift) as i32) >> shift
+}
+
+/// _tssi_hw_tx wrapper — enable or disable PMAC test-TX for one path.
+fn hw_tx(mmio: i32, path: u8, pwr_dbm: i16, enable: bool) {
+    if enable {
+        crate::bb::set_plcp_tx(mmio);
+        crate::bb::cfg_tx_path(mmio, path);
+        // Simplified: always route RX to path AB during alimentk.
+        crate::bb::ctrl_rx_path(mmio, crate::bb::RF_PATH_AB);
+        crate::bb::set_power(mmio, pwr_dbm);
+    }
+    crate::bb::set_pmac_pkt_tx(mmio, enable, 100, 5000);
+}
+
+/// _tssi_get_cw_report — sweeps 2 power levels, waits for CW_RDY,
+/// records the CW report per slot. Returns Some([cw0, cw1]) or None
+/// on timeout.
+fn get_cw_report(mmio: i32, path: u8, power: &[i16]) -> Option<[u32; 2]> {
+    let mut rpt = [0u32; 2];
+    for j in 0..2 {
+        // Re-arm TSSI_EN
+        let (trig_reg, en_mask) = if path == 0 {
+            (TSSI_TRIGGER[0], B_P0_TSSI_EN)
+        } else {
+            (TSSI_TRIGGER[1], B_P1_TSSI_EN)
+        };
+        host::mmio_w32_mask(mmio, crate::phy::PHY_CR_BASE + trig_reg, en_mask, 0);
+        host::mmio_w32_mask(mmio, crate::phy::PHY_CR_BASE + trig_reg, en_mask, 1);
+
+        // Start test-TX at this power
+        hw_tx(mmio, path, power[j], true);
+
+        // Poll CW_RPT_RDY — Linux: 100 × 30µs = 3ms max
+        let rpt_addr = TSSI_CW_RPT[path as usize];
+        let mut ready = false;
+        for _ in 0..100u32 {
+            let v = pr(mmio, rpt_addr);
+            if v & B_TSSI_CWRPT_RDY != 0 {
+                rpt[j] = v & B_TSSI_CWRPT;
+                ready = true;
+                break;
+            }
+            // ~30 µs
+            for _ in 0..3000u32 { core::hint::spin_loop(); }
+        }
+
+        // Stop test-TX
+        hw_tx(mmio, path, power[j], false);
+
+        if !ready { return None; }
+    }
+    Some(rpt)
+}
+
+/// alimentk — per-path cal run. Writes alignment offsets into
+/// R_P0_TSSI_ALIM1..4 (or P1_*) so regular TX uses calibrated power.
+pub fn alimentk(mmio: i32, path: u8, ch: u8) {
+    host::print("  TSSI alimentk path=");
+    crate::fw::print_dec(path as usize);
+    host::print(" ch=");
+    crate::fw::print_dec(ch as usize);
+    host::print("\n");
+
+    let _ = ch; // channel is already tuned
+
+    // 4 test power levels for 2G (Linux rfk.c:3564).
+    let power: [i16; 4] = [48, 20, 4, 4];
+
+    // Save BB state so we can restore cleanly.
+    let bak = crate::bb::backup_tssi(mmio);
+    let regs: [u32; 8] = [0x5820, 0x7820, 0x4978, 0x58E4, 0x78E4, 0x49C0, 0x0D18, 0x0D80];
+    let mut reg_bak = [0u32; 8];
+    for i in 0..8 { reg_bak[i] = pr(mmio, regs[i]); }
+
+    // Configure TSSI averaging for the sweep.
+    pwm(mmio, R_P0_TSSI_AVG,    B_P0_TSSI_AVG_F,    0x8);
+    pwm(mmio, R_P1_TSSI_AVG,    B_P0_TSSI_AVG_F,    0x8);
+    pwm(mmio, R_P0_TSSI_MV_AVG, B_P0_TSSI_MV_AVG_F, 0x2);
+    pwm(mmio, R_P1_TSSI_MV_AVG, B_P0_TSSI_MV_AVG_F, 0x2);
+
+    let cw = match get_cw_report(mmio, path, &power) {
+        Some(v) => v,
+        None => {
+            host::print("    alimentk: CW report timeout — skip\n");
+            // Restore
+            for i in 0..8 {
+                host::mmio_w32(mmio, crate::phy::PHY_CR_BASE + regs[i], reg_bak[i]);
+            }
+            crate::bb::restore_tssi(mmio, &bak);
+            return;
+        }
+    };
+
+    // Compute offsets (rfk.c:3641).
+    let p = path as usize;
+    let raw1 = (pr(mmio, CW_DEFAULT_ADDR[p][1]) & CW_DEFAULT_MASK[1]) >> CW_DEFAULT_MASK[1].trailing_zeros();
+    let cw_def1 = sext(raw1, 8);
+    let offset_1 = (cw[0] as i32) - ((power[0] - power[1]) as i32) * 2 - (cw[1] as i32) + cw_def1;
+    let aliment_diff = offset_1 - cw_def1;
+
+    let raw2 = (pr(mmio, CW_DEFAULT_ADDR[p][2]) & CW_DEFAULT_MASK[2]) >> CW_DEFAULT_MASK[2].trailing_zeros();
+    let cw_def2 = sext(raw2, 8);
+    let offset_2 = cw_def2 + aliment_diff;
+
+    let raw3 = (pr(mmio, CW_DEFAULT_ADDR[p][3]) & CW_DEFAULT_MASK[3]) >> CW_DEFAULT_MASK[3].trailing_zeros();
+    let cw_def3 = sext(raw3, 8);
+    let offset_3 = cw_def3 + aliment_diff;
+
+    host::print("    cw=[");
+    crate::fw::print_dec(cw[0] as usize); host::print(",");
+    crate::fw::print_dec(cw[1] as usize);
+    host::print("] offsets=[");
+    crate::fw::print_dec((offset_1 & 0x3FF) as usize); host::print(",");
+    crate::fw::print_dec((offset_2 & 0x3FF) as usize); host::print(",");
+    crate::fw::print_dec((offset_3 & 0x3FF) as usize);
+    host::print("]\n");
+
+    // Pack into 30-bit ALIM value: offset_1 in bits 29..20, offset_2 in
+    // 19..10, offset_3 in 9..0 (all 10-bit signed).
+    let packed = (((offset_1 as u32) & 0x3FF) << 20)
+               | (((offset_2 as u32) & 0x3FF) << 10)
+               | ((offset_3 as u32) & 0x3FF);
+
+    // Write ALIM1 + ALIM2 per path.
+    let alim1 = if path == 0 { ALIM_REG_P0[0] } else { ALIM_REG_P1[0] };
+    let alim2 = if path == 0 { ALIM_REG_P0[2] } else { ALIM_REG_P1[2] };
+    pwm(mmio, alim1, B_P0_TSSI_ALIM1, packed);
+    pwm(mmio, alim2, B_P0_TSSI_ALIM1, packed);
+
+    // Restore BB state.
+    for i in 0..8 {
+        host::mmio_w32(mmio, crate::phy::PHY_CR_BASE + regs[i], reg_bak[i]);
+    }
+    crate::bb::restore_tssi(mmio, &bak);
+}
+
 pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
     host::print("  TSSI: start (setup-only, thermal=[0x");
     for i in 0..2 {
@@ -535,7 +718,11 @@ pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
         slope_cal_org(mmio, path, band);
         alignment_default(mmio, path, band, ch);
         set_tssi_slope(mmio, path);
-        // _tssi_alimentk skipped (hwtx_en=false semantics)
+        // alimentk: the actual TX-loop auto-cal. Runs a 2-level power
+        // sweep via PMAC test-TX, reads CW ADC feedback, computes per-
+        // path ALIM offsets. This is the step I've been avoiding since
+        // v1.18; now finally here.
+        alimentk(mmio, path, ch);
     }
 
     enable(mmio);
