@@ -43,7 +43,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.47.0 — bb_cfg_txrx_path: TX routing pattern 0x1233312\n");
+    host::print("[wifi] RTL8852BE driver v1.48.0 — bb_cfg_txrx_path+BTC readback (really rebuilt)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
