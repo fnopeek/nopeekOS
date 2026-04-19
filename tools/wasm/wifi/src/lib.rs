@@ -24,6 +24,7 @@ mod tssi;
 mod dpk;
 #[allow(dead_code)]
 mod dpk_tables;
+mod btc;
 mod efuse;
 #[allow(dead_code)]
 mod bb_tables;
@@ -42,7 +43,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.44.0 — full DPK cal Linux 1:1 (replaces force_bypass)\n");
+    host::print("[wifi] RTL8852BE driver v1.45.0 — BT-Coex init (PTA_WL_TX_EN frees antenna)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -210,6 +211,22 @@ pub extern "C" fn _start() {
         && efuse_data.mac_addr != [0xFF; 6] {
         unsafe { vif::STA_MAC = efuse_data.mac_addr; }
     }
+
+    // ── Phase 4a: BT-Coex init — CRITICAL for shared-antenna 8852BE.
+    //   Linux core.c:5961 calls rtw89_btc_ntfy_init(BTC_MODE_NORMAL)
+    //   right after phy_init_rf_reg. This runs rtw89_mac_coex_init +
+    //   __rtw8852bx_btc_init_cfg which sets:
+    //     R_AX_BTC_FUNC_EN.B_AX_PTA_WL_TX_EN = 1   ← THE bit that
+    //   lets the PTA (Packet Traffic Arbiter) route WiFi mgmt/data TX
+    //   to the shared WL+BT antenna. Out of reset it is 0, so TX dies
+    //   silently in the PTA before reaching the PA — which is exactly
+    //   what the v1.44 sniffer test showed (0 frames on-air despite
+    //   BUSY/IDX/TX_COUNTER all toggling).
+    //
+    //   Also programs WL priorities (TX_RESP+BEACON high-pri), RF GNT
+    //   debug off, SHARED-antenna TRX masks per path, PTA break table,
+    //   BT counter enable.
+    btc::init(mmio);
 
     // ── Phase 4b: hci_start — 1:1 Linux rtw89_hci_start (core.c:5970).
     //   Unmask PCIe IRQs (HIMR0 + HIMR00 + HIMR10). On 8852BE this is
