@@ -22,6 +22,7 @@ mod tx;
 mod tssi_tables;
 mod tssi;
 mod dpk;
+mod efuse;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -29,9 +30,13 @@ fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 /// MMIO handle for BAR0 (set during init, used everywhere)
 static mut MMIO: i32 = -1;
 
+/// Parsed efuse data — filled after efuse::read in init, consumed by
+/// TSSI, set_txpwr, and the station MAC for Probe Requests.
+static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.21.0 — TSSI isolation test\n");
+    host::print("[wifi] RTL8852BE driver v1.22.0 — Efuse parser (chip-specific calibration)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -183,6 +188,14 @@ pub extern "C" fn _start() {
     // per-rate power table has no anchor and TX power is undefined.
     chan::apply_txpwr_ctrl(mmio);
     host::print("  TXPWR_CTRL: PA reference (ref=0, ofst=0) applied\n");
+
+    // ── Efuse read — chip-specific calibration data.
+    // Done after FW is up and MAC/PHY init is complete so SYS_ISO_CTRL
+    // is in a known state. Data goes into EFUSE (static), consumed by
+    // TSSI (thermal, tssi_cck/mcs), set_txpwr (gain offsets), and for
+    // chip MAC address instead of our pseudo 00:11:22:33:44:55.
+    let efuse_data = efuse::read(mmio);
+    unsafe { EFUSE = efuse_data; }
 
     // ── Phase 4b: hci_start — 1:1 Linux rtw89_hci_start (core.c:5970).
     //   Unmask PCIe IRQs (HIMR0 + HIMR00 + HIMR10). On 8852BE this is
