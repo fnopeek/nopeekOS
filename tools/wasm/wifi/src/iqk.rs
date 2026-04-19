@@ -251,6 +251,8 @@ fn restore_rf(mmio: i32, path: u8, saved: &[u32; 11]) {
 
 /// _wait_rx_mode — poll RR_MOD.MOD_MASK until != 2 (TX). Linux rfk.c:1569.
 /// Aborts IQK if the chip is stuck in TX mode at IQK entry.
+pub fn wait_rx_mode_pub(mmio: i32) { wait_rx_mode(mmio); }
+
 fn wait_rx_mode(mmio: i32) {
     for path in 0u8..2 {
         for _ in 0..5000u32 {

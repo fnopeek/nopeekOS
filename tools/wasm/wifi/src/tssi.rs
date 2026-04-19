@@ -718,11 +718,16 @@ pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
         slope_cal_org(mmio, path, band);
         alignment_default(mmio, path, band, ch);
         set_tssi_slope(mmio, path);
-        // alimentk: the actual TX-loop auto-cal. Runs a 2-level power
-        // sweep via PMAC test-TX, reads CW ADC feedback, computes per-
-        // path ALIM offsets. This is the step I've been avoiding since
-        // v1.18; now finally here.
+        // alimentk: the actual TX-loop auto-cal. Wrapped exactly like
+        // Linux rtw8852b_tssi does (rfk.c:3838-3843):
+        //   stop_sch_tx → _wait_rx_mode → alimentk → resume_sch_tx
+        // Without the sch_tx stop the scheduler gates our PMAC test-TX
+        // and CW_RPT never arrives. v1.28 timed out on both paths
+        // because of this.
+        let tx_en = crate::fw::stop_sch_tx(mmio, 0);
+        crate::iqk::wait_rx_mode_pub(mmio);
         alimentk(mmio, path, ch);
+        crate::fw::resume_sch_tx(mmio, 0, tx_en);
     }
 
     enable(mmio);
