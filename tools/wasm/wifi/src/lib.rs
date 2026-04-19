@@ -18,6 +18,8 @@ mod iqk;
 mod iqk_tables;
 mod imr;
 mod tx;
+#[allow(dead_code)]
+mod tssi_tables;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
