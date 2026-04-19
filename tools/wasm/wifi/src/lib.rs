@@ -43,7 +43,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.46.0 — BTC register-readback diagnostic\n");
+    host::print("[wifi] RTL8852BE driver v1.47.0 — bb_cfg_txrx_path: TX routing pattern 0x1233312\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -211,6 +211,16 @@ pub extern "C" fn _start() {
         && efuse_data.mac_addr != [0xFF; 6] {
         unsafe { vif::STA_MAC = efuse_data.mac_addr; }
     }
+
+    // ── bb_cfg_txrx_path — 1:1 __rtw8852bx_bb_cfg_txrx_path.
+    //   Linux calls this as the LAST step of rtw89_phy_dm_init. It sets
+    //   the TX-routing pattern in R_P0_RFMODE / R_P1_RFMODE bits[31:4]
+    //   to 0x1233312 — without this the chip doesn't know which RF path
+    //   to send TX through, so every TX silently dies at the BB→PA step.
+    //   That matches our v1.44 sniffer result (0 frames on-air).
+    //   Our earlier inline setup only wrote 0x333 to the wrong mask
+    //   ([23:12] instead of [11:0]) and never touched bits [31:4].
+    chan::bb_cfg_txrx_path(mmio);
 
     // ── Phase 4a: BT-Coex init — CRITICAL for shared-antenna 8852BE.
     //   Linux core.c:5961 calls rtw89_btc_ntfy_init(BTC_MODE_NORMAL)

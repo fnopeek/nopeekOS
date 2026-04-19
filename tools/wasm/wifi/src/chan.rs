@@ -423,6 +423,86 @@ const DPD_MASK: u32 = (0x1FF << 18) | (0x1FF << 9) | 0x1FF; // = 0x07FFFFFF
 /// Same value for OFDM and CCK when pwr_ofst=0.
 const DPD_VAL_REF0: u32 = 0x02B27000;
 
+// ═══════════════════════════════════════════════════════════════════
+//  bb_cfg_txrx_path — 1:1 port of __rtw8852bx_bb_cfg_txrx_path
+//  (rtw8852b_common.c:1743). THE missing TX-routing setup.
+//
+//  Linux calls this once from rtw89_phy_dm_init. Without it,
+//  R_P0_RFMODE / R_P1_RFMODE (0x12AC / 0x32AC) bits [31:4] stay at
+//  reset default — TX routing pattern undefined, chip doesn't know
+//  which RF path to send TX through, frame dies silently.
+//
+//  For our 2G RF_AB case (both paths TX + both paths RX):
+//    R_P0_RFMODE[31:4]       = 0x1233312  (TX routing pattern)
+//    R_P0_RFMODE_FTM_RX[11:0]= 0x333
+//    R_P1_RFMODE[31:4]       = 0x1233312
+//    R_P1_RFMODE_FTM_RX[11:0]= 0x333
+//    R_CHBW_MOD_V1.ANT_RX_SEG0       = 3 (both paths receive)
+//    R_FC0_BW_V1.ANT_RX_1RCCA_SEG0/1 = 3 (both CCA segments)
+//    R_RXHT_MCS_LIMIT / R_RXVHT_MCS_LIMIT / R_RXHE flags for nss=2
+//    R_MAC_SEL.B_MAC_SEL_MOD = 0
+//    R_P0/1_TXPW_RSTB MANON+TSSI toggle 1→3 (release TX-power reset)
+// ═══════════════════════════════════════════════════════════════════
+
+pub fn bb_cfg_txrx_path(mmio: i32) {
+    const R_P0_RFMODE:         u32 = 0x12AC;
+    const R_P0_RFMODE_FTM_RX:  u32 = 0x12B0;
+    const R_P1_RFMODE:         u32 = 0x32AC;
+    const R_P1_RFMODE_FTM_RX:  u32 = 0x32B0;
+    const B_TXRX_FTM_TX:       u32 = 0xFFFF_FFF0; // GENMASK(31, 4)
+    const B_FTM_RX:            u32 = 0x0000_0FFF; // GENMASK(11, 0)
+
+    const R_CHBW_MOD_V1:       u32 = 0x49C4;
+    const B_ANT_RX_SEG0:       u32 = 0x0000_000F; // GENMASK(3, 0)
+    const R_FC0_BW_V1:         u32 = 0x49C0;
+    const B_ANT_RX_1RCCA_SEG0: u32 = 0x0003_C000; // GENMASK(17,14)
+    const B_ANT_RX_1RCCA_SEG1: u32 = 0x003C_0000; // GENMASK(21,18)
+
+    const R_RXHT_MCS_LIMIT:    u32 = 0x0D18;
+    const B_RXHT_MCS_LIMIT:    u32 = 0x3 << 8;    // GENMASK(9,8)
+    const R_RXVHT_MCS_LIMIT:   u32 = 0x0D18;
+    const B_RXVHT_MCS_LIMIT:   u32 = 0x3 << 21;   // GENMASK(22,21)
+    const R_RXHE:              u32 = 0x0D80;
+    const B_RXHE_USER_MAX:     u32 = 0xFF << 6;   // GENMASK(13,6)
+    const B_RXHE_MAX_NSS:      u32 = 0x7 << 14;   // GENMASK(16,14)
+    const B_RXHETB_MAX_NSS:    u32 = 0x7 << 23;   // GENMASK(25,23)
+
+    const R_P0_TXPW_RSTB:      u32 = 0x58DC;
+    const R_P1_TXPW_RSTB:      u32 = 0x78DC;
+    const B_TXPW_RSTB:         u32 = 0x3 << 30;   // MANON(30) | TSSI(31)
+
+    const R_MAC_SEL:           u32 = 0x09A4;
+    const B_MAC_SEL_MOD:       u32 = 0x7 << 2;
+
+    // Linux __rtw8852bx_bb_ctrl_rx_path(RF_AB, chan) — RX path side:
+    host::mmio_w32_mask(mmio, CR + R_CHBW_MOD_V1,       B_ANT_RX_SEG0,       3);
+    host::mmio_w32_mask(mmio, CR + R_FC0_BW_V1,         B_ANT_RX_1RCCA_SEG0, 3);
+    host::mmio_w32_mask(mmio, CR + R_FC0_BW_V1,         B_ANT_RX_1RCCA_SEG1, 3);
+    host::mmio_w32_mask(mmio, CR + R_RXHT_MCS_LIMIT,    B_RXHT_MCS_LIMIT,    1);
+    host::mmio_w32_mask(mmio, CR + R_RXVHT_MCS_LIMIT,   B_RXVHT_MCS_LIMIT,   1);
+    host::mmio_w32_mask(mmio, CR + R_RXHE,              B_RXHE_USER_MAX,     4);
+    host::mmio_w32_mask(mmio, CR + R_RXHE,              B_RXHE_MAX_NSS,      1);
+    host::mmio_w32_mask(mmio, CR + R_RXHE,              B_RXHETB_MAX_NSS,    1);
+
+    // TXPW_RSTB release — toggle 1 then 3 on both paths
+    host::mmio_w32_mask(mmio, CR + R_P0_TXPW_RSTB, B_TXPW_RSTB, 1);
+    host::mmio_w32_mask(mmio, CR + R_P0_TXPW_RSTB, B_TXPW_RSTB, 3);
+    host::mmio_w32_mask(mmio, CR + R_P1_TXPW_RSTB, B_TXPW_RSTB, 1);
+    host::mmio_w32_mask(mmio, CR + R_P1_TXPW_RSTB, B_TXPW_RSTB, 3);
+
+    // Linux __rtw8852bx_bb_ctrl_rf_mode_rx_path(RF_AB) — THE critical
+    // TX routing pattern. 0x1233312 encodes per-band-nibble routing.
+    host::mmio_w32_mask(mmio, CR + R_P0_RFMODE,        B_TXRX_FTM_TX, 0x1233312);
+    host::mmio_w32_mask(mmio, CR + R_P0_RFMODE_FTM_RX, B_FTM_RX,      0x333);
+    host::mmio_w32_mask(mmio, CR + R_P1_RFMODE,        B_TXRX_FTM_TX, 0x1233312);
+    host::mmio_w32_mask(mmio, CR + R_P1_RFMODE_FTM_RX, B_FTM_RX,      0x333);
+
+    // MAC_SEL.MOD = 0 (last write in Linux cfg_txrx_path)
+    host::mmio_w32_mask(mmio, CR + R_MAC_SEL, B_MAC_SEL_MOD, 0);
+
+    host::print("  TXRX: bb_cfg_txrx_path (RFMODE=0x1233312, RX_SEG=3, TXPW_RSTB released)\n");
+}
+
 pub fn apply_txpwr_ctrl(mmio: i32) {
     // 1. Clear PWR_REF in R_AX_PWR_RATE_CTRL (leave FORCE_EN + FORCE_VALUE bits alone).
     host::mmio_clr32(mmio, R_AX_PWR_RATE_CTRL, B_AX_PWR_REF);
