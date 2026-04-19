@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.39.0 — pre-AUTH stays NO_LINK, only addr_cam BSSID refresh\n");
+    host::print("[wifi] RTL8852BE driver v1.40.0 — CH8 ring init wraps STOP_CH8 disable/enable\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
