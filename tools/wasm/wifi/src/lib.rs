@@ -23,6 +23,10 @@ mod tssi_tables;
 mod tssi;
 mod dpk;
 mod efuse;
+#[allow(dead_code)]
+mod bb_tables;
+#[allow(dead_code)]
+mod bb;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
@@ -36,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.26.0 — IQK re-enabled\n");
+    host::print("[wifi] RTL8852BE driver v1.27.0 — BB helpers + PMAC table (alimentk prep)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
