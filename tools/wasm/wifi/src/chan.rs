@@ -448,7 +448,10 @@ const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
 // we port the full rtw8852bx_set_txpwr_ref/offset/limit pipeline.
 
 pub fn apply_default_txpwr(mmio: i32) {
-    // Fill per-rate table uniformly with 0x50 = 20 dBm (0.25-dBm units).
+    // 1. Per-rate table uniformly 0x50 = 20 dBm (0.25-dBm units).
+    //    Port of rtw89_phy_set_txpwr_byrate_ax (phy.c:3055) with efuse
+    //    value forced to 0x50 — real impl reads efuse-derived per-rate
+    //    dBm values (needs region/regd tables we don't parse yet).
     let v: u32 = 0x50505050;
     let mut off = R_AX_PWR_BY_RATE_TABLE0;
     while off <= R_AX_PWR_BY_RATE_TABLE10 {
@@ -456,10 +459,32 @@ pub fn apply_default_txpwr(mmio: i32) {
         off += 4;
     }
 
-    // Force all rates to 20 dBm regardless of what the per-rate table
-    // says, and set PWR_REF to 0 (neutral — no offset). This gives HW
-    // a clear target and stops the PA from idling at minimum output.
-    // bit 9 = FORCE_EN, bits 0..8 = FORCE_VALUE (0x50 = 20 dBm).
+    // 2. FORCE_PWR_BY_RATE + 20 dBm + clear PWR_REF in R_AX_PWR_RATE_CTRL.
+    //    Overrides per-rate table — HW transmits every frame at 20 dBm.
     let ctrl: u32 = (1 << 9) | 0x50;
     host::mmio_w32(mmio, R_AX_PWR_RATE_CTRL, ctrl);
+
+    // 3. set_txpwr_offset (phy.c:3112): 5×4-bit per-rate offsets in
+    //    R_AX_PWR_RATE_OFST_CTRL (0xD204) bits 0..19. All zero =
+    //    no per-rate adjustment vs the force value.
+    const R_AX_PWR_RATE_OFST_CTRL: u32 = 0xD204;
+    host::mmio_w32_mask(mmio, R_AX_PWR_RATE_OFST_CTRL, 0x000F_FFFF, 0);
+
+    // 4. set_txpwr_limit (phy.c:3140): R_AX_PWR_LMT (0xD2EC) is a
+    //    2-path × 40-byte (10 dwords) regulatory-limit page. HW caps
+    //    transmit power to this value — if the reset default is 0,
+    //    FORCE_PWR_BY_RATE=20 dBm gets clamped to 0 on the way out.
+    //    Fill uniformly with 0x50 (20 dBm) as a permissive ceiling.
+    //    Total: 20 dwords starting 0xD2EC.
+    const R_AX_PWR_LMT: u32 = 0xD2EC;
+    for i in 0u32..20 {
+        host::mmio_w32(mmio, R_AX_PWR_LMT + i * 4, 0x50505050);
+    }
+
+    // 5. set_txpwr_limit_ru (phy.c:3175): R_AX_PWR_RU_LMT (0xD33C).
+    //    Same pattern for RU (OFDMA) limits. Size: 12 dwords.
+    const R_AX_PWR_RU_LMT: u32 = 0xD33C;
+    for i in 0u32..12 {
+        host::mmio_w32(mmio, R_AX_PWR_RU_LMT + i * 4, 0x50505050);
+    }
 }
