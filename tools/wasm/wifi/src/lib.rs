@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.29.0 — alimentk with sch_tx wrapper\n");
+    host::print("[wifi] RTL8852BE driver v1.30.0 — alimentk OFF + TX_COUNTER diagnostic\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -336,6 +336,13 @@ pub extern "C" fn _start() {
         let f1 = mac::wifi_frames_seen();
         let b1 = mac::beacons_seen();
 
+        // TX_COUNTER (0x1A40 in PHY space) counts HW-transmitted frames
+        // at the PHY level. If our Probe Req actually reaches the PA,
+        // this increments by >=1. If it stays flat, HW silently dropped
+        // the frame somewhere between DMA and PA — no matter that
+        // CH8_BUSY toggled.
+        let tx_cnt_before = host::mmio_r32(mmio, 0x0001_1A40) & 0xFFFF;
+
         if !tx::send_mgmt(mmio, ring, &frame[..len]) {
             host::print("    TX submit FAILED\n");
             return;
@@ -353,6 +360,17 @@ pub extern "C" fn _start() {
         }
         host::print("    CH8_BUSY post-submit: ");
         host::print(if busy_seen { "toggled 1\n" } else { "stayed 0 (never active)\n" });
+
+        // TX_COUNTER delta — did HW actually transmit?
+        let tx_cnt_after = host::mmio_r32(mmio, 0x0001_1A40) & 0xFFFF;
+        let tx_delta = tx_cnt_after.wrapping_sub(tx_cnt_before) & 0xFFFF;
+        host::print("    TX_COUNTER: ");
+        fw::print_dec(tx_cnt_before as usize);
+        host::print(" -> ");
+        fw::print_dec(tx_cnt_after as usize);
+        host::print(" (delta=");
+        fw::print_dec(tx_delta as usize);
+        host::print(if tx_delta > 0 { ")  FRAME HIT THE AIR\n" } else { ")  NO TX (HW dropped silently)\n" });
 
         // Post-TX dwell 2 s
         mac::dwell(mmio, 2000);
