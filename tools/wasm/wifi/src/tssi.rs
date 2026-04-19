@@ -316,6 +316,154 @@ fn set_txagc_offset_mv_avg(mmio: i32, path: u8) {
     }
 }
 
+// ── _tssi_set_efuse_to_de (rfk.c:3296) ─────────────────────────
+//
+// Writes per-channel CCK and MCS DE values into the BB from the
+// efuse-derived tssi_cck / tssi_mcs / tssi_trim arrays.
+//
+// The BB target registers are per-path + per-bandwidth:
+//   CCK long:   path A 0x5858 / path B 0x7858
+//   CCK short:  path A 0x5860 / path B 0x7860
+//   MCS  5m:    path A 0x5828 / path B 0x7828
+//   MCS 10m:    path A 0x5830 / path B 0x7830
+//   MCS 20m:    path A 0x5838 / path B 0x7838
+//   MCS 40m:    path A 0x5840 / path B 0x7840
+//   MCS 80m:    path A 0x5848 / path B 0x7848
+//   MCS 80_80m: path A 0x5850 / path B 0x7850
+// Each register bit field: _TSSI_DE_MASK = GENMASK(21,12).
+
+const TSSI_DE_MASK: u32 = 0x003F_F000; // GENMASK(21,12)
+
+const DE_CCK_LONG:   [u32; 2] = [0x5858, 0x7858];
+const DE_CCK_SHORT:  [u32; 2] = [0x5860, 0x7860];
+const DE_MCS_5M:     [u32; 2] = [0x5828, 0x7828];
+const DE_MCS_10M:    [u32; 2] = [0x5830, 0x7830];
+const DE_MCS_20M:    [u32; 2] = [0x5838, 0x7838];
+const DE_MCS_40M:    [u32; 2] = [0x5840, 0x7840];
+const DE_MCS_80M:    [u32; 2] = [0x5848, 0x7848];
+const DE_MCS_80M80M: [u32; 2] = [0x5850, 0x7850];
+
+/// _tssi_get_cck_group — rfk.c:3106. 2G ch 1..14 → group 0..5.
+fn cck_group(ch: u8) -> usize {
+    match ch {
+        1..=2   => 0,
+        3..=5   => 1,
+        6..=8   => 2,
+        9..=11  => 3,
+        12..=13 => 4,
+        14      => 5,
+        _       => 0,
+    }
+}
+
+/// _tssi_get_ofdm_group — rfk.c:3132. Full table ported. High bit 31
+/// marks an "extra" group where the DE is averaged between two
+/// adjacent groups. Returns packed u32 exactly as Linux does.
+const EXTRA: u32 = 1 << 31;
+fn ofdm_group(ch: u8) -> u32 {
+    match ch {
+        1..=2     => 0,
+        3..=5     => 1,
+        6..=8     => 2,
+        9..=11    => 3,
+        12..=14   => 4,
+        36..=40   => 5,
+        41..=43   => EXTRA | 5,
+        44..=48   => 6,
+        49..=51   => EXTRA | 6,
+        52..=56   => 7,
+        57..=59   => EXTRA | 7,
+        60..=64   => 8,
+        100..=104 => 9,
+        105..=107 => EXTRA | 9,
+        108..=112 => 10,
+        113..=115 => EXTRA | 10,
+        116..=120 => 11,
+        121..=123 => EXTRA | 11,
+        124..=128 => 12,
+        129..=131 => EXTRA | 12,
+        132..=136 => 13,
+        137..=139 => EXTRA | 13,
+        140..=144 => 14,
+        149..=153 => 15,
+        154..=156 => EXTRA | 15,
+        157..=161 => 16,
+        162..=164 => EXTRA | 16,
+        165..=169 => 17,
+        170..=172 => EXTRA | 17,
+        173..=177 => 18,
+        _         => 0,
+    }
+}
+
+/// _tssi_get_trim_group — rfk.c:3200. 2G ch 1..14 → 0..1, 5G → 2..7.
+fn trim_group(ch: u8) -> usize {
+    match ch {
+        1..=8     => 0,
+        9..=14    => 1,
+        36..=48   => 2,
+        52..=64   => 3,
+        100..=112 => 4,
+        116..=128 => 5,
+        132..=144 => 6,
+        149..=177 => 7,
+        _         => 0,
+    }
+}
+
+/// Look up MCS DE from efuse tssi_mcs arrays (2G or 5G depending on
+/// group idx). Handles "EXTRA" averaged groups like Linux.
+fn get_mcs_de(e: &crate::efuse::EfuseData, path: usize, ch: u8) -> i8 {
+    let g = ofdm_group(ch);
+    let lookup = |idx: u32| -> i8 {
+        let i = idx as usize;
+        if i < 5 {
+            e.tssi_mcs_2g[path][i] as i8
+        } else {
+            let k = i - 5;
+            if k < 14 { e.tssi_mcs_5g[path][k] as i8 } else { 0 }
+        }
+    };
+    if g & EXTRA != 0 {
+        let a = lookup(g & !EXTRA);
+        let b = lookup((g & !EXTRA) + 1);
+        (((a as i16) + (b as i16)) / 2) as i8
+    } else {
+        lookup(g)
+    }
+}
+
+fn get_trim_de(e: &crate::efuse::EfuseData, path: usize, ch: u8) -> i8 {
+    let t = trim_group(ch);
+    e.tssi_trim[path][t]
+}
+
+/// _tssi_set_efuse_to_de — rfk.c:3296. Writes CCK + MCS DE values for
+/// the current channel into 8 BB registers per path (16 total).
+pub fn set_efuse_to_de(mmio: i32, e: &crate::efuse::EfuseData, ch: u8) {
+    host::print("  TSSI: set_efuse_to_de ch=");
+    crate::fw::print_dec(ch as usize);
+    host::print("\n");
+
+    for path in 0..2usize {
+        let trim = get_trim_de(e, path, ch);
+        let cck_base = e.tssi_cck[path][cck_group(ch)] as i8;
+        // Linux: val = (s32)cck_base + trim_de (_TSSI_DE_MASK keeps it in 10 bits).
+        let cck_val = ((cck_base as i32) + (trim as i32)) as u32 & 0x3FF;
+        pwm(mmio, DE_CCK_LONG[path],  TSSI_DE_MASK, cck_val);
+        pwm(mmio, DE_CCK_SHORT[path], TSSI_DE_MASK, cck_val);
+
+        let mcs_base = get_mcs_de(e, path, ch);
+        let mcs_val = ((mcs_base as i32) + (trim as i32)) as u32 & 0x3FF;
+        pwm(mmio, DE_MCS_5M[path],     TSSI_DE_MASK, mcs_val);
+        pwm(mmio, DE_MCS_10M[path],    TSSI_DE_MASK, mcs_val);
+        pwm(mmio, DE_MCS_20M[path],    TSSI_DE_MASK, mcs_val);
+        pwm(mmio, DE_MCS_40M[path],    TSSI_DE_MASK, mcs_val);
+        pwm(mmio, DE_MCS_80M[path],    TSSI_DE_MASK, mcs_val);
+        pwm(mmio, DE_MCS_80M80M[path], TSSI_DE_MASK, mcs_val);
+    }
+}
+
 /// _tssi_enable — rfk.c:3041. Turns on TSSI hardware tracking per path.
 /// This is the "TSSI mode ON" step.
 fn enable(mmio: i32) {
@@ -363,10 +511,10 @@ fn disable(mmio: i32) {
 //  ignored (we never run the TX alignment loop).
 // ═══════════════════════════════════════════════════════════════════
 
-pub fn run(mmio: i32, band: u8, ch: u8, thermal: [u8; 2]) {
+pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
     host::print("  TSSI: start (setup-only, thermal=[0x");
     for i in 0..2 {
-        let v = thermal[i];
+        let v = e.thermal[i];
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let buf = [HEX[((v >> 4) & 0xF) as usize], HEX[(v & 0xF) as usize]];
         host::print(unsafe { core::str::from_utf8_unchecked(&buf) });
@@ -382,7 +530,7 @@ pub fn run(mmio: i32, band: u8, ch: u8, thermal: [u8; 2]) {
         ini_txpwr_ctrl_bb(mmio, path);
         ini_txpwr_ctrl_bb_he_tb(mmio, path);
         set_dck(mmio, path);
-        set_tmeter_tbl(mmio, path, thermal[path as usize]);
+        set_tmeter_tbl(mmio, path, e.thermal[path as usize]);
         set_dac_gain_tbl(mmio, path);
         slope_cal_org(mmio, path, band);
         alignment_default(mmio, path, band, ch);
@@ -391,7 +539,11 @@ pub fn run(mmio: i32, band: u8, ch: u8, thermal: [u8; 2]) {
     }
 
     enable(mmio);
-    // _tssi_set_efuse_to_de skipped: needs efuse DE per-channel mapping
 
-    host::print("  TSSI: enabled (both paths)\n");
+    // Efuse→DE: per-channel CCK + MCS power correction. The reason TSSI
+    // runs at all: without this the thermal loop has nothing to correct
+    // *against*. 16 BB register writes.
+    set_efuse_to_de(mmio, e, ch);
+
+    host::print("  TSSI: enabled (both paths) + DE programmed\n");
 }

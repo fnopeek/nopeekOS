@@ -36,7 +36,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.24.0 — Efuse wiring: chip MAC + TSSI thermal\n");
+    host::print("[wifi] RTL8852BE driver v1.25.0 — TSSI set_efuse_to_de + phycap trim\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -230,8 +230,8 @@ pub extern "C" fn _start() {
     // TSSI re-enabled in v1.24 with real efuse thermal instead of the
     // hardcoded 0xFF fallback. Real thermal lets HW build a proper
     // delta-swing offset table instead of zeroing all 64 entries.
-    let therm = unsafe { EFUSE.thermal };
-    tssi::run(mmio, 0 /* BAND_2G */, 1, therm);
+    let efuse_copy = unsafe { EFUSE };
+    tssi::run(mmio, 0 /* BAND_2G */, 1, &efuse_copy);
     // DPK force-bypass: explicit disable instead of uninitialized DPK state.
     dpk::force_bypass(mmio);
     chan::set_channel_help_exit(mmio, tx_en);
