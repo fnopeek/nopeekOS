@@ -36,7 +36,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.23.0 — Efuse parser: sec_ctrl=4 fix\n");
+    host::print("[wifi] RTL8852BE driver v1.24.0 — Efuse wiring: chip MAC + TSSI thermal\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -197,6 +197,14 @@ pub extern "C" fn _start() {
     let efuse_data = efuse::read(mmio);
     unsafe { EFUSE = efuse_data; }
 
+    // Propagate efuse MAC into vif::STA_MAC so Probe Requests and the
+    // VIF addr_cam use the real chip MAC (not the pseudo 00:11:22:...).
+    // Only overwrite when autoload_valid — otherwise keep the pseudo.
+    if efuse_data.autoload_valid && efuse_data.mac_addr != [0; 6]
+        && efuse_data.mac_addr != [0xFF; 6] {
+        unsafe { vif::STA_MAC = efuse_data.mac_addr; }
+    }
+
     // ── Phase 4b: hci_start — 1:1 Linux rtw89_hci_start (core.c:5970).
     //   Unmask PCIe IRQs (HIMR0 + HIMR00 + HIMR10). On 8852BE this is
     //   the last step of rtw89_core_start and enables the RX-DMA event
@@ -219,13 +227,15 @@ pub extern "C" fn _start() {
     rfk::rx_dck(mmio);
     // IQK still skipped — will re-enable after TX-power gaps are fixed.
     // iqk::run(mmio);
-    // v1.21: TSSI DISABLED — v1.20 scan dropped from 53→4 frames; isolate
-    // whether TSSI's 382 register writes are corrupting the RX path.
-    // tssi::run(mmio, 0, 1);
+    // TSSI re-enabled in v1.24 with real efuse thermal instead of the
+    // hardcoded 0xFF fallback. Real thermal lets HW build a proper
+    // delta-swing offset table instead of zeroing all 64 entries.
+    let therm = unsafe { EFUSE.thermal };
+    tssi::run(mmio, 0 /* BAND_2G */, 1, therm);
     // DPK force-bypass: explicit disable instead of uninitialized DPK state.
     dpk::force_bypass(mmio);
     chan::set_channel_help_exit(mmio, tx_en);
-    host::print("[wifi] RFK per-channel flow complete (rx_dck + DPK-bypass; TSSI + IQK SKIPPED)\n");
+    host::print("[wifi] RFK per-channel flow complete (rx_dck + TSSI[real-therm] + DPK-bypass; IQK SKIPPED)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
     //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
@@ -315,7 +325,8 @@ pub extern "C" fn _start() {
 
         // Send Probe Req with matching DS IE
         let mut frame = [0u8; 128];
-        let len = tx::build_probe_req(&vif::STA_MAC, ch, &mut frame);
+        let sma = vif::sta_mac();
+        let len = tx::build_probe_req(&sma, ch, &mut frame);
         let idx_before = host::mmio_r32(mmio, regs::R_AX_CH8_TXBD_IDX);
         let f1 = mac::wifi_frames_seen();
         let b1 = mac::beacons_seen();
