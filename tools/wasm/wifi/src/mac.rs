@@ -1293,13 +1293,51 @@ fn handle_c2h(dma: i32, off: u32) {
 fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
     unsafe { WIFI_FRAME_COUNT += 1; }
 
-    // 802.11 header: FC(2) + Duration(2) + Addr1(6) + Addr2(6) + Addr3(6) + SeqCtrl(2)
-    // = 24 bytes. Then beacon fixed body: Timestamp(8) + Interval(2) + Capability(2).
-    if len < 24 + 12 { return; }
+    // 802.11 header min (for any type): 24 bytes (mgmt/data) or less (ctrl).
+    if len < 10 { return; }
 
     let fc = host::dma_r32(dma, off) & 0xFFFF;
     let frame_type    = (fc >> 2) & 0x3;
     let frame_subtype = (fc >> 4) & 0xF;
+
+    // Log non-beacon mgmt + any control frame — these carry the answers
+    // to AUTH/ASSOC TX. addr2 (SA) at offset 10..15 is who sent it.
+    if frame_type != 0 || (frame_subtype != 8 && frame_subtype != 5) {
+        let mut sa = [0u8; 6];
+        if len >= 16 {
+            for i in 0..6u32 { sa[i as usize] = dma_r8(dma, off + 10 + i); }
+        }
+        let tag = match (frame_type, frame_subtype) {
+            (0, 11) => "AUTH",
+            (0,  1) => "ASSOC_RESP",
+            (0,  3) => "REASSOC_RESP",
+            (0, 12) => "DEAUTH",
+            (0, 10) => "DISASSOC",
+            (0,  9) => "ATIM",
+            (0, 13) => "ACTION",
+            (1, _)  => "CTRL",
+            (2, _)  => "DATA",
+            _       => "MGMT-other",
+        };
+        host::print("    [rx] "); host::print(tag);
+        host::print(" sub=");
+        crate::fw::print_dec(frame_subtype as usize);
+        host::print(" len=");
+        crate::fw::print_dec(len as usize);
+        host::print(" from=");
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for i in 0..6 {
+            let b = sa[i];
+            let a = [HEX[(b >> 4) as usize], HEX[(b & 0xF) as usize]];
+            host::print(unsafe { core::str::from_utf8_unchecked(&a) });
+            if i < 5 { host::print(":"); }
+        }
+        host::print("\n");
+    }
+
+    // 802.11 header: FC(2) + Duration(2) + Addr1(6) + Addr2(6) + Addr3(6) + SeqCtrl(2)
+    // = 24 bytes. Then beacon fixed body: Timestamp(8) + Interval(2) + Capability(2).
+    if len < 24 + 12 { return; }
     if frame_type != 0 { return; }
     if frame_subtype != 8 && frame_subtype != 5 { return; }
     unsafe { BEACON_COUNT += 1; }
