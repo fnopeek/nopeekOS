@@ -1,129 +1,167 @@
 # WiFi TX — Multi-Session Port Roadmap
 
-Nach v1.17 haben wir **Batch 1 der LINUX_GAPS** geschlossen
-(sch_tx stop/resume, 5m_mask, bb_set_pop, txpwr_ctrl). RX läuft sauber,
-aber Probe Responses kommen nicht. Die grossen Kalibrierungs-Gaps
-(TSSI, DPK, set_txpwr, Efuse) sind noch offen. Dieser Plan teilt die
-Arbeit in portierbare Sessions auf.
+**Session-Stand: nach v1.44 (2026-04-19, Session-Ende).**
 
-## Status nach v1.17.0 (2026-04-19)
+Sessions A–F dieser Roadmap sind **alle abgearbeitet**. Was Linux an
+Kalibrier-Infrastruktur hat, haben wir jetzt auch — Efuse, TSSI
+(inkl. alimentk), set_txpwr, IQK (clean), DPK (full). Dazu kamen
+strukturelle Fixes die hier nicht geplant waren (CH8 STOP/ENABLE,
+addr_info 8B, default_cmac_tbl NTX_PATH, Pre-AUTH NO_LINK).
 
-- ✅ RX: Scan findet APs zuverlässig (+50 Beacons/5s auf ch 13)
-- ✅ TX descriptor: CH8 BD ring + WD pool + `hw_idx` advances
-- ✅ PA scheduler: CTN_TXEN=0xFFFF (MGQ open)
-- ✅ CH8_BUSY toggles post-TX — DMA → PHY-Engine läuft
-- ❌ **Kein Probe Response** — Frame geht raus aber AP empfängt nichts Verwertbares
-- ❌ Kanal-Switch nach Scan klemmt (FW parked auf ch 13 persistent)
-- ⏸️ IQK skipped (v1.16 diagnostic) — nicht der Blocker, wird später wieder enabled
+Trotzdem transmittet der Chip nicht auf die Antenne. Siehe "Post-Port
+Befund" unten — die Roadmap ist durchgearbeitet, der Bug liegt nicht
+mehr in diesen Session-Scopes.
 
-## Verdachtsursachen (priorisiert)
+## Post-Port Befund (2026-04-19, Sniffer-Test)
 
-1. **PA open-loop ohne TSSI** — kein Feedback auf tatsächliche Output-Power
-2. **Keine DPK** — PA-Nichtlinearität unkompensiert → Modulation korrupt
-3. **set_txpwr byrate/limit leer** — per-Rate-Tabelle hat nur Defaults
-4. **Efuse ungelesen** — chip-spezifische Kalibrier-Offsets fehlen
+Externer Sniffer (RTL8852CE in monitor mode auf ch 7, 70 s Capture
+während `driver wifi` Phase 7 AUTH-Versuch):
 
-## Session-Plan
+- 30 785 Frames total von Nachbar-APs empfangen
+- 20+ unique Source-MACs (alle anderen Clients + FritzBox-Virtuals)
+- **0 Frames mit NUC-MAC `bc:2b:02:45:7a:20`** — in irgendeiner Rolle
 
-### Session A — Efuse-Parser (Infrastructure)
+Das heisst: alles was bisher als "CH8_BUSY toggled + TXBD_IDX advanced
++ TX_COUNTER inc" aussah, war **rein interne DMA/CMAC-Aktivität**.
+Die Frames haben den PA / die Antenne nie erreicht.
 
-Efuse ist die OTP-Region auf dem Chip. Enthält:
-- `efuse_gain` (PA-Gain-Offsets pro path)
-- `tssi_offset` (Per-channel TSSI DE-values)
-- `xtal_cap` (Crystal capacitance tuning)
-- Chip-MAC (nutzen wir derzeit mit pseudo `00:11:22:33:44:55`)
-- RFE-Type (wir hardcoden `rfe=1` in `phy.rs`)
+IQK / TSSI-Setup / DPK liefen durch (ADC-Feedback funktioniert
+intern), aber der Sende-Pfad zur Antenne wird nicht aktiviert.
 
-**Linux-Entry**: `rtw89_fw_h2c_read_efuse` oder direkt `rtw89_parse_efuse_map`.
-8852BE: `rtw8852b_read_efuse` (common.c).
+## Status-Checkliste nach v1.44
 
-**Deliverable**: `tools/wasm/wifi/src/efuse.rs` mit:
-- `read_efuse(mmio) -> EfuseData`
-- Struct mit benötigten Feldern (pro path LNA/TIA gain, TSSI CCK/MCS DE[channel], chip MAC)
+### Hardware-Pfad (wie Linux)
+- ✅ FWDL: FW läuft stabil
+- ✅ MAC/PHY init komplett
+- ✅ PCIe post-init inkl. HOST_ADDR_INFO_8B_SEL + WD_ADDR_INFO_LENGTH
+- ✅ default_cmac_tbl mit NTX_PATH_EN=RF_AB + PATH_MAP_B=1
+- ✅ CH8 TXBD-Ring mit STOP/ENABLE-Wrap, 8-byte addr_info
+- ✅ PTCL init inkl. FSM_MON TX_ARB_TO_THR=2ms
+- ✅ Full VIF init (8 steps)
+- ✅ Pre-AUTH addr_cam + BSSID (NO_LINK korrekt gehalten)
 
-### Session B — TSSI Tables (gen_tssi.py)
+### Kalibrierung
+- ✅ Efuse: MAC + thermal + rfe + tssi cck/mcs/trim komplett gelesen
+- ✅ IQK: LOK coarse, LOK fine, TXK, RXK — alle 4 flags = 0 auf
+       beiden Paths nach v1.38 (RFK ausserhalb set_channel_help bracket)
+- ✅ TSSI: full setup + alimentk re-enabled in v1.42 (alimentk
+       CW-Rpt timet aber weiter — Details unten)
+- ✅ DPK: 989 LoC Linux-1:1-Port in v1.44, alle 34 Sub-Funktionen
+       + AGC FSM + drei Tabellen. Scheitert jedoch bei sync mit
+       txagc=0xFF (sync_check DC/CorrVal überschreitet Thresholds)
+- ✅ set_txpwr: full 6-Step-Pipeline (byrate + offset + shape + lmt +
+       lmt_ru + ref), FORCE_PWR_BY_RATE OFF
 
-TSSI hat 10 tables im Linux (rtw8852b_rfk_table.c):
-```
-rtw8852b_tssi_sys_defs              — set_sys  (~30 writes)
-rtw8852b_tssi_init_txpwr_defs_a/b   — ini_txpwr_ctrl_bb (~20 writes × 2)
-rtw8852b_tssi_init_txpwr_he_tb_defs — he_tb variant (~15 × 2)
-rtw8852b_tssi_dck_defs_a/b          — set_dck  (~10 × 2)
-rtw8852b_tssi_tracking_defs         — dynamic (tmeter_tbl)
-rtw8852b_tssi_slope_cal_org_defs    — slope_cal_org
-rtw8852b_tssi_enable_defs_a/b       — enable (~15 × 2)
-rtw8852b_tssi_disable_defs          — disable (~10 writes)
-```
+### Funkpfad
+- ❌ **TX on-air: 0 Frames** (Sniffer-Bestätigt)
 
-**Deliverable**: `gen_tssi.py` (analog `gen_rfk.py`) + `src/tssi_tables.rs`.
+## Noch offene Vermutungen (neue Richtung nach Sniffer-Befund)
 
-### Session C — TSSI Implementation (Phase 1: setup-only)
+Die bisherigen Fixes deckten das MAC-/BB-/Cal-Layer ab. Was verhindert
+dass CMAC-erzeugte Samples den PA und die Antenne erreichen?
 
-Port der 14 sub-functions (aus rtw8852b_rfk.c line 2700–3050):
-- `_tssi_disable` / `_tssi_enable`
-- `_tssi_rf_setting`
-- `_tssi_set_sys`, `_tssi_ini_txpwr_ctrl_bb`, `_tssi_set_dck`
-- `_tssi_set_tmeter_tbl` (braucht thermal-cache aus efuse)
-- `_tssi_set_dac_gain_tbl` (braucht efuse gain)
-- `_tssi_slope_cal_org`
-- `_tssi_alignment_default` (Per-channel alignment)
-- `_tssi_set_tssi_slope`, `_tssi_set_tssi_track`
-- `_tssi_set_efuse_to_de` (efuse → default-error table)
+1. **RFE / Antennen-Switch-Register** — Linux hat `cfg_rfe_gpio` das für
+   8852B auf NULL zeigt (`rtw89_mac_gen_ax.cfg_rfe_gpio=NULL`), aber in
+   `rtw8852b.c` gibt es RFE-bezogene Init-Sequenzen. Unser `rfe=1` ist
+   hardcodiert, die konkreten RFE-Write-Sequenzen haben wir aber nicht
+   geprüft.
 
-**Skipping für Phase 1**: `_tssi_alimentk` (alignment-cal). Das ist der
-fullblown TX-auto-kalibrierter Vorgang der mehrere ms braucht und
-zusätzliche HW-Pfade. Erst wenn Phase-1 TSSI läuft.
+2. **BT-Coex init** — `rtw89_btc_init_cfg` konfiguriert auf 8852B
+   (2-Antennen-shared-BT-WiFi) die PA-Enable-Bits für die gemeinsame
+   Antenne. Wir skippen BT-Coex komplett → möglich dass PA auf BT-Side
+   gepinnt bleibt und WiFi-TX nie rauskommt.
 
-### Session D — DPK (Digital Pre-Distortion)
+3. **`apply_txpwr_ctrl` / set_txpwr_ref Wert** — wir schreiben
+   `0x02B27000` in R_DPD_A/B. Berechnet aus `bb_cal_txpwr_ref(ref=0,
+   dec=0)`. Wenn die Formel für 8852B anders ist als geschätzt oder das
+   falsche Register trifft, bleibt der PA-Referenz-Level auf 0 und PA
+   sendet nichts.
 
-Größter Brocken. rtw8852b_rfk.c hat ~500 LoC `_dpk_*` functions.
-DPK misst PA-Nichtlinearität und programmiert BB-Vorverzerrung.
-Ohne DPK ist jede OFDM-Übertragung mit EVM weit vom Ziel.
+4. **alimentk CW-Rpt-Timeout + DPK-Sync-Fail** — beide nutzen den
+   gleichen PMAC-Feedback-Pfad (R_KIP_RPT1 / R_RPT_COM) und beide
+   schlagen fehl. Das heisst der chip misst PMAC TX intern nicht.
+   Kohärent mit "PA nicht aktiv" Hypothese.
 
-Tables: `rtw8852b_dpk_*_defs` (~15 tables).
+5. **`cfg_txrx_path`** — wir haben inline einen 2G-RF_AB-Setup. Linux
+   hat eine eigene Funktion die TX+RX Antenna-Enable-Bits schreibt.
+   Evtl. fehlt der letzte Switch dort.
 
-**Deliverable**: `gen_dpk.py` + `src/dpk_tables.rs` + `src/dpk.rs`.
+### Workflow von hier
 
-### Session E — set_txpwr Pipeline (Gap 5.3)
+Nicht mehr raten welcher Kalibrier-Schritt fehlt — die sind durch.
+Stattdessen systematisch Linux durchsuchen nach jedem Register-Write
+der zwischen MAC-Init und erstem erfolgreichen TX auf-schaltet:
+PA-Enable, Antennen-Switch, RF-Power-Pin. Keine davon ist in unserer
+bisherigen Arbeit garantiert abgedeckt.
 
-Per-channel TX-Power-Kette:
-- `set_txpwr_byrate` (R_AX_PWR_BY_RATE_TABLE0..10) — braucht efuse + regd
-- `set_txpwr_offset` (R_AX_PWR_RATE_OFST_CTRL) — 5-Wert lookup
-- `set_tx_shape` (DFIR table + OFDM triangular) — Per-channel pro Band
-- `set_txpwr_limit` (R_AX_PWR_LMT) — Regulatory (regional)
-- `set_txpwr_limit_ru` (R_AX_PWR_RU_LMT) — RU limits
-- `set_txpwr_diff` (A-vs-B differential) — braucht efuse + SAR
+---
 
-Für Phase 1 Hardcode: **regd=FCC, SAR=0, efuse-defaults aus Session A**.
+## Ursprüngliche Session-Roadmap (historisch, alle A-F erledigt)
 
-### Session F — IQK Re-enable + Integration Test
+### Session A — Efuse-Parser ✅
 
-Nach A–E: IQK-Aufruf wieder aktivieren, vollständiger Durchlauf testen.
-Erwarteter Durchbruch: Probe Response von ≥1 AP = TX funktioniert.
+Linux-Entry `rtw8852b_read_efuse` — `src/efuse.rs` implementiert.
+EfuseData mit MAC (bc:2b:02:45:7a:20 real), thermal[2], rfe_type,
+tssi_cck/mcs/trim — alle gelesen und im Init-Pfad verwendet.
 
-### Session G — Channel-Switch Fix (parallel)
+### Session B — TSSI Tables ✅
 
-`SCANOFLD(OP=0, TARGET_CH_MODE=1)` reicht aktuell nicht. Linux macht
-zusätzlich `rtw89_chanctx_proceed` + `rtw89_mac_port_cfg_rx_sync(true)`
-nach scan. Port das.
+`gen_tssi.py` + `src/tssi_tables.rs` mit 10 Linux-Tables generiert.
 
-## Zeitplan (realistisch)
+### Session C — TSSI Implementation ✅
 
-| Session | Inhalt | Größe |
-|---------|--------|-------|
-| A | Efuse-Parser | M |
-| B | TSSI Tables (Script + tables.rs) | M |
-| C | TSSI Implementation | L |
-| D | DPK (Tables + Implementation) | XL |
-| E | set_txpwr Pipeline | L |
-| F | IQK restore + Integration | S |
-| G | Channel-Switch Fix | S (parallel) |
+`src/tssi.rs` mit 14 Sub-Funktionen
+(`disable`, `rf_setting`, `set_sys`, `ini_txpwr_ctrl_bb(+he_tb)`,
+`set_dck`, `set_tmeter_tbl` mit real efuse-thermal, `set_dac_gain_tbl`,
+`slope_cal_org`, `alignment_default`, `set_tssi_slope`, `enable`,
+`set_efuse_to_de`) + alimentk.
 
-**Total**: ~6-7 Sessions. Nicht alle in einer Sitzung machbar.
+Alimentk re-enabled v1.42 nach IQK-Fix. CW-Rpt-Timeout bleibt (gleiche
+Ursache wie DPK-Sync-Fail — siehe Befund oben).
 
-## Nächste Aktion (diese Session)
+### Session D — DPK ✅
 
-1. Dieses Dokument commiten
-2. `gen_tssi.py` bauen (Script steht)
-3. `tssi_tables.rs` generieren
-4. **Nur das**. Nächste Session: Session A (Efuse) oder direkt C (TSSI setup) mit Efuse-Hardcodes.
+**v1.44**: `src/dpk.rs` (~800 LoC) + `src/dpk_tables.rs` (3 tables).
+Linux-1:1-Port aller 34 Sub-Funktionen inkl. AGC-FSM, fill_result,
+cal_select. Scheitert bei sync — siehe oben.
+
+### Session E — set_txpwr Pipeline ✅
+
+**v1.43**: `chan::set_txpwr()` mit 6 Sub-Steps. byrate-Werte
+1:1 aus Linux rtw8852b_table.c (rtw89_8852b_txpwr_byrate). Limit +
+Limit_RU mit FCC-Approximation 0x50 (nicht full regulatory table).
+Kritisch: `FORCE_PWR_BY_RATE_EN` wird OFF gelassen (Linux setzt das
+nie).
+
+### Session F — IQK Re-enable + Integration Test ✅
+
+**v1.38**: IQK outside set_channel_help bracket → alle 8 flags = 0.
+Full Linux-Audit in `iqk.rs` bestätigt: alle Register/Masken/Funktionen
+byte-identisch mit rtw8852b_rfk.c.
+
+### Session G — Channel-Switch Fix ✅
+
+`scan_stop_to_channel()` + SCANOFLD mit TARGET_CH_MODE portiert.
+Channel-Switch funktioniert (sniffer bestätigt: wir sind auf ch 7
+während Phase 7, empfangen IvyPie_New Beacons dort).
+
+---
+
+## Appendix — Commit-Verlauf dieser Session (v1.31..v1.44)
+
+| Version | Fix |
+|---------|-----|
+| v1.31 | ptcl_init_ax PCIe-Block (FSM_MON.TX_ARB_TO_THR=2ms) |
+| v1.32 | TXBD length = WD_HDR_TOTAL only (no frame_len) |
+| v1.33 | Active scan via H2C_ADD_PKT_OFFLOAD |
+| v1.34 | INFRA switch + AUTH Open via CH8 (später revertiert) |
+| v1.35 | default_cmac_tbl NTX_PATH_EN=RF_AB + PATH_MAP_B=1 |
+| v1.36 | addr_info 8B mode selector (HOST_ADDR_INFO_8B_SEL) |
+| v1.37 | PTCL/WMAC TX debug registers diagnostic |
+| v1.38 | **RFK outside set_channel_help bracket → IQK clean** |
+| v1.39 | Pre-AUTH stays NO_LINK (addr_cam only) |
+| v1.40 | CH8 ring init wraps STOP_CH8 disable/enable |
+| v1.41 | Non-beacon RX classifier (AUTH/ACK/DATA reveal) |
+| v1.42 | TSSI alimentk re-enabled (IQK now clean) |
+| v1.43 | Full Linux set_txpwr pipeline, FORCE off |
+| v1.44 | **Full DPK cal Linux 1:1 (989 LoC)** |

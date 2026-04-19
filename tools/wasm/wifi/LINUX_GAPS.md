@@ -261,8 +261,11 @@ jedem Builder: `chip_stop_sch_tx(ALL)` + `_wait_rx_mode` + … + `resume_sch_tx`
 - [ ] **6.1** `rtw8852b_mcc_get_ch_info` — MCC state (nicht relevant für uns)
 - [x] **6.2** `rtw8852b_rx_dck`
 - [x] **6.3** `rtw8852b_iqk` — inklusive `chip_stop_sch_tx`-Wrapper (v0.97.0). LOK fail bleibt — möglicherweise durch fehlendes PHY-Dm-Init (B4/B8/B10) verursacht.
-- [ ] 6.4 `rtw8852b_tssi(start=true)` — fehlt (TX-seitig)
-- [ ] 6.5 `rtw8852b_dpk` — fehlt (TX-seitig)
+- [x] **6.4** `rtw8852b_tssi(start=true)` — v1.42 port inkl. alimentk
+      (Sessions B+C). alimentk CW-Rpt timet aber aus; Feedback-Pfad-Issue.
+- [x] **6.5** `rtw8852b_dpk` — v1.44 full Linux-1:1-Port (989 LoC,
+      34 Sub-Funktionen + 3 Tabellen). Scheitert bei sync mit txagc=0xFF;
+      gleicher Feedback-Pfad-Issue wie alimentk.
 
 ---
 
@@ -319,6 +322,61 @@ Jeder Schritt = ein Commit + NUC-Test. Hypothese pro Schritt im Commit-Message.
 | 3 | ~28 | 10 | 4 | 9 | 5 |
 | 4 | 9 | 2 | 6 | 0 | 1 |
 | 5 | ~18 | 11 | 1 | 5 | 1 |
-| 6 | 6 | 2 | 0 | 3 | 1 |
+| 6 | 6 | 4 | 0 | 1 | 1 |
 
 Am meisten offen im Fundament (Kapitel 2). Besonders die **17 Per-Block-IMR-Enables** stechen heraus — das ist genau der Unterschied zwischen "FW verarbeitet H2C und antwortet" und "FW verarbeitet H2C aber Antwort kommt nie raus".
+
+---
+
+## Post-v1.44 Befund (Sniffer-Test, 2026-04-19)
+
+Externer Sniffer (RTL8852CE in monitor mode, ch 7, 70 s) während
+`driver wifi` Phase 7 AUTH an IvyPie_New:
+
+- 30 785 Frames gesamt empfangen von Nachbar-APs
+- **0 Frames mit NUC-MAC `bc:2b:02:45:7a:20`** in irgendeiner Rolle
+
+Das heisst: trotz aller Descriptor-/CMAC-/Cal-Linux-Ports erreicht
+kein Frame die Antenne. Die Kette stirbt zwischen CMAC und PA.
+
+Die in dieser Tabelle erfassten Gaps sind strukturell durchgearbeitet.
+Was unser TX verhindert ist **nicht** in diesem Audit drin — weil
+Linux' `rtw89`-Dokumentation das als implizites "das FW macht das"
+behandelt. Zwei konkrete Kandidaten für neue Arbeit:
+
+### Neue Gap-Klasse: Antennen-/PA-Enable (nicht im bisherigen Audit)
+
+- **RFE-Pin-Config** — `rtw89_mac_gen_ax.cfg_rfe_gpio = NULL` für 8852B,
+  aber `rtw8852b.c` hat RFE-Sequenzen die wir vermutlich übersehen haben
+- **BT-Coex init** (`rtw89_btc_init_cfg`) — auf 8852B mit Shared-Antenne
+  konfiguriert BT-Coex explizit welche Antenne WiFi-TX nutzen darf.
+  Skip-Effekt kann "BT hält die Antenne" sein
+- **set_txpwr_ref Wert-Validierung** — unser `0x02B27000` aus
+  `bb_cal_txpwr_ref(ref=0, dec=0)` könnte PA-Referenz auf 0 setzen
+  statt auf den erwarteten Level
+
+### Neue Klasse: PMAC-Feedback-Diagnose
+
+alimentk CW-Rpt und DPK sync fallen beide im gleichen Muster (PMAC
+TX fires intern — TX_COUNTER inkt — aber readback via
+R_KIP_RPT1/R_RPT_COM liefert keine Messwerte). Gleicher Root-Cause
+wie "TX erreicht Antenne nicht": PA ist physikalisch inaktiv, also
+kommt kein echtes Signal in den Feedback-ADC.
+
+### Session-Historie Abschlussrate
+
+14 Linux-1:1-Commits in einer Session (v1.31 → v1.44):
+
+| Area | Status |
+|------|--------|
+| MAC-init (Kapitel 2) | PCIe + DMAC + CMAC + IMRs + sys_init komplett |
+| PHY-init (Kapitel 3) | BB/RF/NCTL/DM-init wie Linux |
+| VIF-init (Kapitel 4) | 8 Steps komplett, Pre-AUTH Timing korrekt |
+| set_channel (Kap. 5) | help_enter/exit + set_channel + full set_txpwr |
+| Per-channel RFK (K. 6) | rx_dck + IQK(clean) + TSSI(+alimentk) + DPK(full) |
+| Scan | Active scan via FW-Pool funktioniert (5+ APs) |
+| TX descriptor | TXBD+TXWD+AddrInfo 1:1, CH8 STOP/ENABLE-Wrap |
+
+**Alle Linux-1:1-Arbeit in unserem Scope ist strukturell erledigt.
+Was fehlt, ist ausserhalb des mac/phy/rfk-Ports — vermutlich in der
+RFE/PA-Aktivierung die Linux implizit über FW+BTC delegiert.**

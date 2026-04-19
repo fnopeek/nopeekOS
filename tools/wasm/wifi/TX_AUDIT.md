@@ -3,7 +3,16 @@
 Strict Linux-Port-Referenz für Mgmt-TX (Probe Request, AUTH, ASSOC).
 Quelle: `/tmp/linux-rtw89/drivers/net/wireless/realtek/rtw89/` — mainline.
 
-Ziel Etappe 1: **Probe Request auf CH8 senden, Probe Response empfangen** — Proof-of-Concept für TX-Pfad.
+## Stand nach v1.44 (Session-Ende 2026-04-19)
+
+Descriptor-Pfad, Ring-Setup, Frame-Builder, Fill-TXDesc alle
+Linux-1:1 und sniffer-bestätigt: der Chip konsumiert BDs, CH8_BUSY
+toggelt, TXBD_IDX wandert. Aber **external sniffer auf ch 7 sieht 0
+Frames mit unserem NUC-MAC** in 70 s während AUTH-Versuch. Der Rest
+dieses Dokuments ist daher ab Kap. 10 als **historisch-erledigt** zu
+lesen; der ungelöste Rest liegt ausserhalb des Descriptor/Ring-Layers.
+
+Siehe `TX_TASKS.md` → "Post-Port Befund" für den aktuellen Stand.
 
 Legende: `[x]` da · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig für 8852BE
 
@@ -346,35 +355,52 @@ Total min ~ 24 + 2 + 10 + 6 + 3 = **45 Bytes** für eine Wildcard-Probe.
 
 ## 10 — Was aktuell im Code fehlt
 
-### TX-Ring-Setup (init-time)
+**Status-Update nach v1.44**: Descriptor-Layer komplett. Ring-Setup,
+Write-Path, Completion-Polling, Frame-Builder alle implementiert und
+sniffer-bestätigt funktional bis CMAC. Danach stoppt die Kette.
 
-- [ ] **TXBD-Ring** für CH8 in DMA-coherent alloc (256×8 = 2KB)
-  - Write `_TXBD_DESA_L/H` (0x1150/0x1154)
-  - Write `_TXBD_NUM` (Ringgrösse)
-  - Write `_BDRAM` (sidx=20, max=4, min=1)
-  - Reset `wp = rp = 0` via `TXBD_RWPTR_CLR1` bit `CLR_CH8_IDX`=bit8
-- [ ] **TXWD-Ring** für CH8 in DMA-coherent alloc (512×128 = 64KB)
-  - Liste `free_pages` aufbauen (alle 512 Pages initial frei)
+### TX-Ring-Setup (init-time) — alle ✅
 
-### TX-Write-Path
+- [x] **TXBD-Ring** für CH8 (v1.9) mit STOP/ENABLE-Wrap (v1.40)
+  - `_TXBD_DESA_L/H` (0x1150/0x1154) ✓
+  - `_TXBD_NUM` ✓
+  - `_BDRAM` (sidx=20 max=4 min=1) ✓
+  - `CLR_CH8_IDX` reset ✓
+- [x] **TXWD-Page-Pool** (16 pages × 128 B) ✓
+- [x] **Frame-Pool** (16 slots × 256 B) ✓
+- [x] **addr_info 8-byte mode selector** (v1.36) ✓
 
-- [ ] `tx_write_mgmt(frame_bytes)`:
-  - Page vom free-list nehmen
-  - Frame-DMA mappen
-  - TXWD-Body/Info + TXWP + Addr-Info in Page schreiben (siehe Kap 3-5)
-  - TXBD im BD-Ring schreiben
-  - `wp++`
-  - write16(0x1078, wp) — Kick-Off
+### TX-Write-Path — alle ✅
 
-### TX-Completion
+- [x] `tx::send_mgmt(frame)`:
+  - Round-robin slot pick ✓
+  - Frame-DMA copy ✓
+  - TXWD body/info/wp/addr in Page (v1.32 length fix) ✓
+  - TXBD im BD-Ring ✓
+  - `wp++` + kick-off via `R_AX_CH8_TXBD_IDX` ✓
+  - RTS_EN vom `is_bmc` aus addr1 group-bit (v1.34) ✓
 
-- [ ] Polling auf TX-Completion via BUSY-Register (0x101C bit 16 = CH8_BUSY)
-- [ ] oder IRQ-driven: TX-completion C2H-event
-- [ ] oder: einfach Timeout + auf RX warten (für Probe Req → Probe Resp)
+### TX-Completion — via PPDU + RX
 
-### Frame-Builder
+- [x] CH8_BUSY-Polling (0x101C bit 16) ✓ — nur Diagnose
+- [/] PPDU-report C2H-Parse — wir zählen sie aber interpretieren nicht
+- [x] RX-dwell-Fenster nach TX für Response-frames ✓
 
-- [ ] `build_probe_request(sa: [u8;6], channel: u8, buf: &mut [u8]) -> usize`
+### Frame-Builder — alle ✅
+
+- [x] `tx::build_probe_req(sa, channel, buf)` ✓
+- [x] `tx::build_auth_open(sa, bssid, buf)` (v1.34) ✓
+
+### **Was AB CMAC fehlt (neuer Fokus):**
+
+- [ ] **Antennen-Switch / RFE-Enable** — Sniffer beweist: Frames
+  erreichen PA/Antenne nicht. Kein Register im Descriptor-Layer fehlt,
+  also muss eine RFE/PA-Config-Sequenz fehlen die das Signal aus dem
+  Chip raus zur Antenne routet.
+- [ ] **set_txpwr_ref Wert-Verifikation** — unser `0x02B27000` in R_DPD_A/B
+  könnte falsch sein (PA-Referenz = 0 = PA stumm trotz CMAC-Aktivität).
+- [ ] **BT-Coex antenna sharing init** — auf 2T2R-shared-Antenne könnte
+  der Default-State "BT hat Antenne" sein.
 
 ### Integration in Init
 
