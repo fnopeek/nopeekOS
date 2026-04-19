@@ -40,7 +40,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.37.0 — PTCL/WMAC TX debug diagnostic\n");
+    host::print("[wifi] RTL8852BE driver v1.38.0 — RFK outside set_channel_help bracket\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -226,20 +226,24 @@ pub extern "C" fn _start() {
     // Linux rtw8852b_dpk_init is called from phy_dm_init after BB is up.
     dpk::init(mmio);
 
+    // Linux __rtw89_set_channel (core.c:529):
+    //   set_channel_prepare (help_enter) → set_channel → set_txpwr →
+    //   set_channel_done (help_exit) → rfk_channel (rx_dck + iqk + tssi + dpk)
+    // Critical: rfk_channel runs OUTSIDE the set_channel_help bracket
+    // because set_channel_help turns OFF the ADC (B_ADC_FIFO_RST=0xF) and
+    // BB reset, which IQK needs enabled to measure TX-LO-leakage via the
+    // RX path. Running IQK with ADC off = all 4 cal stages fail (cor/fin/
+    // tx/rx all fail) — exactly our v1.x "LOK fail" pattern from day 1.
     let tx_en = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 1);
+    chan::set_channel_help_exit(mmio, tx_en);
+
+    // RFK outside the help bracket — ADC and BB are ON here.
     rfk::rx_dck(mmio);
-    // IQK re-enabled in v1.26. It was disabled in v1.16 as a diagnostic
-    // to rule out iqk_restore state corruption. Now with TSSI properly
-    // set up (DE programmed), LOK fail stays (Linux also reports fail
-    // on this chip) but TXK/RXK at least give baseline I/Q balance.
     iqk::run(mmio);
-    // TSSI with real efuse thermal + set_efuse_to_de.
     let efuse_copy = unsafe { EFUSE };
     tssi::run(mmio, 0 /* BAND_2G */, 1, &efuse_copy);
-    // DPK force-bypass: explicit disable instead of uninitialized DPK state.
     dpk::force_bypass(mmio);
-    chan::set_channel_help_exit(mmio, tx_en);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK + TSSI + DPK-bypass)\n");
 
     // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
@@ -302,14 +306,21 @@ pub extern "C" fn _start() {
     host::print("  CH8 ring ready\n");
 
     // Park FW on target channel, tune host PHY, switch VIF to INFRA.
+    // Follow Linux __rtw89_set_channel order exactly: help_enter →
+    // set_channel → set_txpwr → help_exit → RFK (outside bracket).
     mac::scan_stop_to_channel(mmio, TARGET_CH);
     let tx_en_c = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, TARGET_CH);
     chan::apply_default_txpwr(mmio);
-    rfk::rx_dck(mmio);
     chan::set_channel_help_exit(mmio, tx_en_c);
+    // RFK outside help bracket (ADC must be ON for IQK to measure)
+    rfk::rx_dck(mmio);
+    iqk::run(mmio);
+    let efuse_copy7 = unsafe { EFUSE };
+    tssi::run(mmio, 0, TARGET_CH, &efuse_copy7);
+    dpk::force_bypass(mmio);
     host::print("  tuned to ch "); fw::print_dec(TARGET_CH as usize);
-    host::print(" (+ default txpwr 20 dBm)\n");
+    host::print(" + RFK complete\n");
 
     // Diagnostic: sample TX_COUNTER after scan-finished. v1.33 proved
     // the FW pool TX path works (5 APs incl. probe-responders). If

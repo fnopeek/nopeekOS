@@ -1,6 +1,6 @@
 # Phase 10 — Widget API & GUI Apps
 
-**Goal:** Apps describe **what** to render (declarative widget tree). The Shade compositor owns **how** (layout, rasterization, GPU compositing, animation, theming). Apps never touch pixels for normal UI; a single `Canvas` escape hatch exists for special cases.
+**Goal:** Apps describe **what** to render (declarative widget tree). The Shade compositor owns **how** (layout, rasterization, GPU compositing, animation, theming). Apps never touch pixels for normal UI; a single tightly-scoped `Canvas` escape hatch exists for image/chart use cases.
 
 **Sweet spot between immediate-mode (App calls `draw_rect`) and full retained-mode (App holds scene-graph handles):** App calls `render()` whenever its state changes, builds a fresh tree as plain data, commits in one host call. Compositor diffs against previous tree and only re-rasterizes changed sub-trees.
 
@@ -12,11 +12,12 @@ Inspired by SwiftUI / Slint / Compose — stripped down, capability-gated, WASM-
 
 | Principle | Fit |
 |---|---|
-| Capabilities, not Permissions | Tree commit is one cap-gated host call (`npk_scene_commit`) |
+| Capabilities, not Permissions | Tree commit + canvas commit are separate cap-gated host calls |
 | Intents, not Commands | App declares intent (`List{items, selected}`), compositor executes |
 | Sandboxed | App has zero access to GPU, framebuffer, fonts |
 | No legacy | No GDI handles, no X11 protocol, no CSS box model |
 | Greenfield | Layer-tree is data, not API-call stream — auditable, replayable, deterministic |
+| Content-addressed | Font files live in npkFS, BLAKE3-verified |
 
 ---
 
@@ -25,8 +26,9 @@ Inspired by SwiftUI / Slint / Compose — stripped down, capability-gated, WASM-
 - Shade compositor (tiling, swap-anim, mouse) — `kernel/src/shade/`
 - Window management, keybindings, shadebar
 - Loop / intent dispatcher (`kernel/src/intent/`)
-- Existing rendering primitives (`gui/render.rs`, `gui/font.rs`) — reused, target changes from shadow to layer texture
-- BCS blitter, GPU HAL, GGTT layout
+- Existing rendering primitives (`gui/render.rs`) — reused, target changes from shadow to layer texture
+- Spleen bitmap font (`gui/font.rs`) — kept for terminal contexts (`loop`, `top`, REPLs); bitmap mono looks correct in terminals
+- BCS blitter, GPU HAL, GGTT layout (extended, not replaced)
 - Wallpaper-driven theme extraction (`gui/color.rs`)
 
 The widget system is **additive** — only new code, no rewrites.
@@ -88,19 +90,20 @@ WASM App
    │
    │  Widget tree (Rust struct)
    ▼
-nopeek_widgets SDK (postcard serialize)
+nopeek_widgets SDK (postcard serialize, version-prefixed)
    │
    │  ~few KB bytes
    ▼
-npk_scene_commit(ptr, len, cap_id)   ◄─ host fn, capability-gated
+npk_scene_commit(ptr, len, render_cap)   ◄─ host fn, capability-gated
    │
    ▼
 Compositor
-   ├─ Deserialize tree
+   ├─ Read version byte → reject if unsupported
+   ├─ Deserialize tree (postcard)
    ├─ Layout pass (flexbox-lite) → assigns x/y/w/h to every node
-   ├─ Diff against previous tree (structural, by widget ID + content hash)
+   ├─ Diff against previous tree (structural ID + content hash)
    ├─ For each changed sub-tree:
-   │     └─ Rasterize into layer texture (CPU, reuses gui/render.rs)
+   │     └─ Rasterize into layer texture in GGTT slab (CPU; fontdue + gui/render.rs)
    │
    ▼
 GPU (BCS XY_FAST_COPY_BLT)
@@ -113,7 +116,7 @@ GPU (BCS XY_FAST_COPY_BLT)
 
 ## Widget set v1
 
-Minimal, composable, no leaf escape hatches except `Canvas`.
+Minimal, composable, no leaf escape hatches except the strictly-scoped `Canvas`.
 
 **Containers:**
 - `Column { children, spacing, align }`
@@ -130,11 +133,15 @@ Minimal, composable, no leaf escape hatches except `Canvas`.
 - `Spacer { flex: u8 }` — expands to fill
 - `Divider`
 
-**Compound (built from leaves, may stay in SDK):**
+**Compound (built from leaves, lives in SDK):**
 - `Toolbar`, `StatusBar`, `Sidebar`, `List`, `Breadcrumb`, `IconGrid`
 
-**Escape hatch:**
-- `Canvas { width, height, pixels: BGRA_buffer }` — for image viewer, chart, video. Used sparingly.
+**Escape hatch — `Canvas`:**
+- `Canvas { width, height, pixels: BGRA }` — only as a leaf inside a widget tree, never the whole window
+- App writes to its WASM heap; `npk_canvas_commit(ptr, w, h, canvas_cap)` copies into a layer texture (~3ms for 4K via `rep movsq`)
+- **Hard caps:** max 4096×4096 px, max 64 MB pixels total per app
+- No drawing API — App ships finished pixels or nothing
+- Requires a separate `CANVAS` capability (see below) — least privilege: file browser doesn't get one
 
 **Modifiers** (chained on any widget):
 - `.padding(n)`, `.margin(n)`
@@ -145,33 +152,81 @@ Minimal, composable, no leaf escape hatches except `Canvas`.
 
 ---
 
+## Typography
+
+Two font systems, used in different contexts.
+
+**System UI font — Inter (OFL):**
+- Loaded at boot from `sys/fonts/inter-regular.ttf` and `sys/fonts/inter-bold.ttf` in npkFS
+- BLAKE3-verified before use; updateable via OTA without kernel rebuild
+- Rasterized via `fontdue` crate (no_std, ~2k LOC, MIT/Apache)
+- Grayscale anti-aliasing (subpixel-AA not used — fine on HiDPI, irrelevant on 4K)
+- Glyph atlas in GGTT slab; LRU eviction per font/size combo
+- Fixed style tokens: `Title` (24px), `Body` (14px), `Caption` (11px), `Muted` (14px, dimmed). All scaled by HiDPI factor.
+
+**Terminal mono font — Spleen (BSD-2):**
+- Existing system: 8×16, 16×32, 32×64 bitmap (`gui/font.rs`)
+- Used by `loop`, `top`, REPLs — anywhere a terminal cell grid is correct
+- Apps that want the terminal aesthetic use `Text::mono(..)` modifier
+
+**Decision rationale:** Inter for chrome/UI gives modern look; Spleen for terminals stays correct and pixel-perfect.
+
+---
+
+## Icons
+
+**Source:** Phosphor (MIT) — curated subset compiled into atlas at build time.
+
+**Pipeline:**
+```
+icons/phosphor/*.svg  ─┐
+                       │  build.rs (rasterize via resvg, host-side only)
+                       ▼
+kernel/src/gui/icons.rs (generated)
+   ├─ pub enum IconId { Folder, File, ArrowLeft, ... }
+   └─ static ATLAS: &[u8] = &[ ... ];   // alpha-only, packed
+```
+
+**Sizes:** 16, 24, 32, 48, 64 px logical (so 32/48/64/96/128 actual at 2× HiDPI).
+
+**Format:** alpha channel only (1 byte/pixel). Color comes from theme token at composite time. ~64 KB for 60 curated icons × 5 sizes.
+
+**Adding an icon:** add SVG to `icons/phosphor/`, add variant to `IconId`, rebuild. No runtime SVG parsing — that path was rejected (subset parser is fragile, full parser is huge).
+
+---
+
 ## Theme tokens
 
 App **never** specifies hex colors. It uses tokens; compositor resolves against active palette (extracted from wallpaper).
 
 ```rust
+#[repr(u8)]
 enum Token {
     // Surfaces
-    Surface,           // window background
-    SurfaceElevated,   // cards, dialogs
-    SurfaceMuted,      // sidebar, secondary regions
+    Surface          = 0,    // window background
+    SurfaceElevated  = 1,    // cards, dialogs
+    SurfaceMuted     = 2,    // sidebar, secondary regions
 
     // Text
-    OnSurface,         // primary text on Surface
-    OnSurfaceMuted,    // secondary text
-    OnAccent,          // text on Accent button
+    OnSurface        = 3,    // primary text on Surface
+    OnSurfaceMuted   = 4,    // secondary text
+    OnAccent         = 5,    // text on Accent button
 
     // Accent
-    Accent,            // primary action color
-    AccentMuted,       // hover/inactive variants
+    Accent           = 6,    // primary action color
+    AccentMuted      = 7,    // hover/inactive variants
 
     // Semantic
-    Border,
-    Success, Warning, Danger,
+    Border           = 8,
+    Success          = 9,
+    Warning          = 10,
+    Danger           = 11,
 }
 ```
 
 Tokens map to indices into the existing 16-color `PALETTE` (`gui/color.rs`). Theme change = repaint all layer textures with new palette, no app involvement.
+
+**ABI rule:** token integer values are stable forever. New tokens may be appended; existing values must never be reassigned. Apps compiled against v1 must keep working under v2.
 
 ---
 
@@ -201,7 +256,9 @@ Diff:
 - ID only in new → allocate texture, rasterize
 - ID only in old → free texture
 
-Compositor maintains `HashMap<NodeId, LayerTexture>` — survives across commits.
+Compositor maintains `HashMap<NodeId, LayerTexture>` **per app** — survives across commits, freed on app exit.
+
+**Why per-app, not global:** sharing identical icon textures across apps would save ~100 KB but introduce side-channel risk (cache-timing reveals what other apps are rendering) and complicate eviction. Premature optimization rejected.
 
 **Result:** typing in an `Input` re-rasterizes one node, not the whole window. Scrolling a `List` blits cached row textures with a Y-offset, no rasterize.
 
@@ -219,41 +276,101 @@ Button::new("Open")
 
 When prop changes between two commits, compositor interpolates over N frames (spring physics or linear `ms`). App does **not** call render every frame; compositor self-schedules redraw while interpolating.
 
+**Determinism:** all interpolation uses **integer/tick-based math**, not floats. Same approach as the existing swap-animation (`shade/compositor.rs`). Reasoning: float behavior across cores + variable wakeup latency leads to visible non-determinism. Spring physics implemented as fixed-point (Q16.16).
+
 Animation tick = compositor runs at 60Hz **only while interpolations are active**. Otherwise dirty-driven (event → render → blit → idle).
+
+---
+
+## Capabilities
+
+Two distinct rights, delegated separately at app spawn:
+
+- **`RENDER`** — required to call `npk_scene_commit`. Granted to every windowed app.
+- **`CANVAS`** — required to call `npk_canvas_commit`. Granted only to apps that declare a Canvas need (image viewer, chart, video player). File browser, settings, text editor → no `CANVAS` cap. Least privilege.
+
+Both follow the existing capability model: 256-bit token, temporal scope, transitive revocation, audit logged.
 
 ---
 
 ## Host functions (new)
 
 ```c
-// Commit a widget tree. `bytes` is postcard-serialized.
-// Returns 0 on success, -1 on parse error or cap denied.
-i32 npk_scene_commit(const u8* bytes, u32 len, u32 cap_id);
+// Commit a widget tree. `bytes` is postcard-serialized, version-prefixed.
+// Returns 0 on success, -1 on parse error / version mismatch / cap denied.
+i32 npk_scene_commit(const u8* bytes, u32 len, u32 render_cap);
+
+// Commit pixel data for a Canvas leaf. width/height in pixels, BGRA32.
+// canvas_id matches the Canvas{ id } in the last scene_commit.
+// Returns 0 on success, -1 on size cap exceeded / cap denied.
+i32 npk_canvas_commit(u32 canvas_id, const u8* pixels, u32 width, u32 height, u32 canvas_cap);
 
 // Read input event for this app (key, mouse, focus).
-// Returns serialized event or -1 if no event pending.
 i32 npk_event_poll(u8* buf, u32 buf_max);
 i32 npk_event_wait(u8* buf, u32 buf_max, u32 timeout_ms);
 
 // Optional: query current theme tokens (so app can pick icon variant).
-i32 npk_theme_token(u32 token_id) -> u32 rgba;
+u32 npk_theme_token(u32 token_id);
 ```
 
-Cap requirement: app needs `RENDER` capability for its window (delegated by compositor at spawn).
-
 `npk_print` / `npk_clear` stay for terminal-style apps (`top`, REPLs).
+
+---
+
+## ABI stability & future-proofing
+
+**Lock these in before writing the first line of widget code.** Mistakes here are expensive later.
+
+### Wire format versioning
+
+First byte of every `npk_scene_commit` payload is `WIRE_VERSION: u8`. Compositor rejects unknown versions with `-1`. App SDK checks return value, can fall back or report.
+
+```
+[ version: u8 ][ postcard-serialized Widget tree ]
+```
+
+v1 = `0x01`. Future versions either bump the byte (breaking change) or add optional fields at end of structures (postcard handles forward compat for `Option<T>` at struct tail).
+
+### Token enum stability
+
+`Token` integer values frozen on v1 release. New tokens appended only. Removing or renumbering = ABI break = wire-version bump.
+
+### IconId stability
+
+Same rule: `IconId` is `#[repr(u16)]`, values frozen. Adding new icons appends.
+
+### GGTT partition map (lock before slab implementation)
+
+Decide and document numerical addresses **before** writing the allocator. Moving them later breaks every cached pointer.
+
+```
+0x0000_0000 - 0x0100_0000   GGTT scratch (unused, reserved)
+0x0100_0000 - 0x0400_0000   Framebuffer (existing, 48 MB)
+0x0400_0000 - 0x0500_0000   BCS infrastructure (existing: ring, LRC, HWSP, test)
+0x0500_0000 - 0x0600_0000   Glyph atlases (16 MB — Inter + variants)
+0x0600_0000 - 0x0700_0000   Icon atlas (16 MB — fixed, set at boot)
+0x0700_0000 - 0x4000_0000   Layer texture slab (~916 MB)
+```
+
+Slab buckets: 1 KB, 4 KB, 16 KB, 64 KB, 256 KB, 1 MB, 4 MB. Free-lists per bucket. LRU eviction across all buckets when slab > 80 % full.
+
+### Capability ABI
+
+`RENDER` and `CANVAS` are separate token kinds. New capabilities may be added (e.g. `MIC`, `CAMERA` later); existing ones never repurposed.
 
 ---
 
 ## What apps explicitly do NOT get
 
 - No `npk_draw_*` immediate-mode functions
-- No font loading (system font + 4 sizes only)
+- No font loading from app side (system fonts only, fixed style tokens)
 - No custom shaders
 - No GPU texture handles
 - No window-decoration control (compositor owns chrome)
 - No raw framebuffer access
 - No animation scripting (declarative only)
+- No Canvas without explicit `CANVAS` capability
+- No way to position Canvas as a "transparent overlay window" — it's a leaf, period
 
 Reduces attack surface, prevents per-app drift, makes 4K-scaling and theme-changes universal.
 
@@ -263,16 +380,23 @@ Reduces attack surface, prevents per-app drift, makes 4K-scaling and theme-chang
 
 Order matters — each phase produces something runnable.
 
+### P10.0 — ABI freeze (1 day, paper-only)
+- Document GGTT partition map (above) — committed to source as `gpu/ggtt_layout.rs` constants
+- Freeze `Token` enum values + `IconId` enum scaffolding (empty variants ok)
+- Define wire-version byte = `0x01`
+- Write down capability split (`RENDER` / `CANVAS`)
+- **Deliverable:** `kernel/src/shade/widgets/abi.rs` with the constants, no logic
+
 ### P10.1 — SDK + serialization (1 week, no kernel changes yet)
-- `tools/wasm/sdk/widgets/` — new shared crate
-- Define `Widget` enum, `Modifier`, `Event`, `Action`
-- Postcard serialization (already in scope, no_std)
-- Unit tests round-tripping trees
+- `tools/wasm/sdk/widgets/` — new shared crate, no_std + alloc
+- Define `Widget` enum, `Modifier`, `Event`, `Action`, `Token`, `IconId`
+- Postcard serialization with version-byte prefix
+- Unit tests round-tripping trees, including version-mismatch rejection
 - **Deliverable:** SDK compiles, tree can be serialized to bytes
 
 ### P10.2 — Compositor receiver + dummy renderer (3–5 days)
 - `kernel/src/shade/widgets/mod.rs` — new module
-- `npk_scene_commit` host fn — deserialize, log to serial, no render yet
+- `npk_scene_commit` host fn — version-check, deserialize, log to serial, no render yet
 - `tools/wasm/files-stub/` — dummy app, sends one tree on launch
 - **Deliverable:** see deserialized tree printed on serial when app runs
 
@@ -282,53 +406,62 @@ Order matters — each phase produces something runnable.
 - Tested standalone with snapshot tests against known trees
 - **Deliverable:** layout pass produces correct geometry, dumped to serial
 
-### P10.4 — Layer texture rasterization (1 week)
-- `kernel/src/shade/widgets/render.rs` — walks laid-out tree
-- Reuses `gui/render.rs` primitives, target = per-node layer buffer
-- Allocates layer textures in GGTT (need GGTT allocator beyond FB region)
-- BCS blits layer textures into window content region
-- **Deliverable:** static file-browser tree renders correctly in a window
+### P10.4 — GGTT slab allocator (4–5 days)
+- `kernel/src/gpu/ggtt_slab.rs` — fixed-bucket slab, LRU eviction
+- Uses partition from P10.0
+- Unit-tested for allocation/free patterns + fragmentation behavior
+- **Deliverable:** slab can serve thousands of alloc/free cycles without leak or fragmentation
 
-### P10.5 — Diff + cache (4–5 days)
+### P10.5 — Layer texture rasterization (1 week)
+- `kernel/src/shade/widgets/render.rs` — walks laid-out tree
+- Reuses `gui/render.rs` primitives, target = per-node layer buffer in slab
+- BCS blits layer textures into window content region
+- **Deliverable:** static file-browser tree (no font yet, placeholder rects for text) renders in a window
+
+### P10.6 — fontdue + Inter integration (4–5 days)
+- Add `fontdue` to kernel `Cargo.toml`
+- `kernel/src/gui/text.rs` — glyph rasterization, atlas in GGTT
+- Inter Regular + Bold loaded from npkFS at boot, BLAKE3-verified
+- `Text` widget renders real text
+- **Deliverable:** file-browser tree shows actual Inter text at correct size
+
+### P10.7 — Diff + cache (4–5 days)
 - Node ID + content hash
-- `HashMap<NodeId, LayerTexture>` survives across commits
+- Per-app `HashMap<NodeId, LayerTexture>` survives across commits
 - Skip rasterize when hash unchanged
 - **Deliverable:** typing in Input re-rasterizes only that node (verifiable via debug overlay)
 
-### P10.6 — Event routing (3 days)
+### P10.8 — Event routing (3 days)
 - Mouse: hit-test laid-out tree, find topmost `on_click` widget
 - Keyboard: focus stack, Tab navigation
 - `npk_event_poll` / `npk_event_wait` host fns
 - **Deliverable:** clicking a button fires the action in the app
 
-### P10.7 — Animation (1 week)
-- Spring physics + linear timing in compositor
+### P10.9 — Animation (1 week)
+- Spring physics + linear timing in compositor, fixed-point Q16.16
 - Self-scheduling 60Hz tick while active
 - Interpolate `background`, `opacity`, `padding`, position deltas
-- **Deliverable:** hover state on buttons fades smoothly
+- **Deliverable:** hover state on buttons fades smoothly, deterministic
 
-### P10.8 — Icon atlas (3 days)
-- Built-in SVG-subset → pre-rasterized at 16/24/32/48px
-- Phosphor-inspired open icon set, embedded as `.rs` constants
-- `Icon::Folder`, `Icon::File`, `Icon::ArrowLeft`, etc.
-- **Deliverable:** file-browser shows real icons
+### P10.10 — Icon atlas (3 days)
+- `build.rs` rasterizes curated Phosphor SVGs at compile time
+- 5 size variants (16/24/32/48/64), alpha-only, packed
+- `IconId` enum populated, atlas embedded as `static`
+- Atlas uploaded to GGTT at boot
+- **Deliverable:** file-browser shows real icons in correct theme color
 
-### P10.9 — File browser app (1 week)
+### P10.11 — Canvas (4–5 days)
+- `npk_canvas_commit` host fn
+- Size caps enforced (4K × 4K, 64 MB total per app)
+- `CANVAS` capability check
+- BGRA copy from WASM heap → layer texture in slab
+- **Deliverable:** image-viewer stub displays a PNG decoded in the app
+
+### P10.12 — File browser app (1 week)
 - `tools/wasm/files/` — real app, walks npkFS, opens via intent
-- **Deliverable:** working file browser, GNOME-feel
+- **Deliverable:** working file browser, GNOME-feel, no `CANVAS` cap needed
 
-**Total: ~5–6 weeks for a polished v1 incl. file browser.**
-
----
-
-## Open questions to decide before starting
-
-1. **System font:** stay with Spleen bitmap (3 sizes) or add a small TTF rasterizer (`fontdue` is no_std, ~2k LOC, supports Inter)? Affects "schön" achse heavily.
-2. **Icon source:** hand-coded paths, SVG subset parser, or pre-rasterized PNGs in atlas?
-3. **Postcard vs. CBOR vs. custom:** postcard is smallest (~half the size of CBOR), Rust-only. CBOR is wire-portable.
-4. **GGTT allocator:** today only framebuffer is in GGTT. Layer textures need a real allocator — small bump+free or full slab?
-5. **Canvas escape hatch:** ship in v1 or defer to v1.1? (Image viewer needs it.)
-6. **Per-app vs. global widget cache:** if two windows show the same icon, share texture or duplicate?
+**Total: ~6–7 weeks for a polished v1 incl. file browser + Canvas.**
 
 ---
 
@@ -353,4 +486,23 @@ Order matters — each phase produces something runnable.
 
 ---
 
-*This doc is exploratory. Discuss before commit.*
+## Decisions log (resolved)
+
+These were the open questions; closed with reasoning so we don't re-litigate later.
+
+| Question | Decision | Why |
+|---|---|---|
+| Font backend | `fontdue` + Inter (OFL) for UI; Spleen kept for terminals | Modern UI typography needs vector fonts; Spleen looks right in mono/terminal contexts. Inter is OFL, no Google branding. |
+| Font storage | npkFS, BLAKE3-verified | Matches content-addressing principle; OTA-updatable without kernel rebuild |
+| Icon source | Phosphor (MIT), pre-rasterized at build time, alpha-only | Runtime SVG parsing is fragile or huge; alpha + theme token gives free re-coloring |
+| Icon sizes | 16/24/32/48/64 px logical (5 variants) | Covers 1× and 2× HiDPI cleanly |
+| Serializer | Postcard with version byte | Smallest, no_std, Rust-native; version byte enables forward evolution |
+| GGTT allocator | Slab with fixed buckets (1KB–4MB), LRU eviction | Bump allocator fragments under churn; slab is bounded |
+| Canvas in v1 | Yes, but tightly scoped: leaf-only, size-capped, separate capability | Need it for image viewer demo; constraints prevent GDI-style drift |
+| Cache scope | Per-app, no cross-app sharing | Side-channel concerns + eviction complexity outweigh ~100KB savings |
+| Capability split | `RENDER` and `CANVAS` separate | Least privilege: file-browser doesn't need to draw pixels |
+| Animation math | Fixed-point Q16.16, tick-based | Float non-determinism across cores breaks visual consistency |
+
+---
+
+*Last updated after P10.0 design pass. Implementation starts at P10.0 (ABI freeze).*
