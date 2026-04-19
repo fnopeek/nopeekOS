@@ -25,8 +25,14 @@ pub const B_RSTB_ASYNC_ALL:   u32 = 1 << 1;
 
 pub const R_PMAC_GNT:         u32 = 0x0980;
 pub const B_PMAC_GNT_TXEN:    u32 = 1 << 0;
-pub const B_PMAC_GNT_RXEN:    u32 = 1 << 4;
+pub const B_PMAC_GNT_RXEN:    u32 = 1 << 16; // reg.h: BIT(16) — was wrongly 1<<4
 pub const B_PMAC_GNT_P1:      u32 = 0xF00;
+
+pub const R_PMAC_RXMOD:       u32 = 0x0984;
+pub const B_PMAC_RXMOD_MSK:   u32 = 0x0000_000F;
+
+// Extra field in R_MAC_SEL (0x09A4) used by tx_mode_switch.
+pub const B_MAC_SEL_DPD_EN:   u32 = 1 << 10; // reg.h:8841 BIT(10)
 
 pub const R_PMAC_RX_CFG1:     u32 = 0x0988;
 pub const B_PMAC_OPT1_MSK:    u32 = 0x0000_003F;
@@ -69,8 +75,8 @@ pub const R_TXNSS_MAP:        u32 = 0x45B4;
 pub const B_TXNSS_MAP_MSK:    u32 = 0x0000_0780;
 
 pub const R_MAC_SEL:          u32 = 0x09A4;
-pub const B_MAC_SEL_PWR_EN:   u32 = 1 << 7;
-pub const B_MAC_SEL_MOD:      u32 = 0x000000E0;
+pub const B_MAC_SEL_PWR_EN:   u32 = 1 << 16; // reg.h:8840 BIT(16) — was wrongly 1<<7
+pub const B_MAC_SEL_MOD:      u32 = 0x0000_001C; // reg.h:8842 GENMASK(4,2) — was wrongly 0xE0
 
 pub const R_PD_CTRL:          u32 = 0x0C3C;
 pub const B_PD_HIT_DIS:       u32 = 1 << 9;
@@ -191,6 +197,20 @@ pub fn set_pmac_pkt_tx(mmio: i32, enable: bool, cnt: u16, period: u16) {
     // Pulse TXEN_DIS to force packet gen start
     pwm(mmio, R_PMAC_TX_CTRL, B_PMAC_TXEN_DIS, 1);
     pwm(mmio, R_PMAC_TX_CTRL, B_PMAC_TXEN_DIS, 0);
+}
+
+/// __rtw8852bx_bb_tx_mode_switch(mode=0) — common.c:1552. Hands BB TX
+/// grant back from PMAC (test/cal) to CMAC (normal packets). Must be
+/// called at the end of alimentk, otherwise PMAC keeps the grant and
+/// every real frame silently dies before the BB TX counter.
+pub fn tx_mode_switch_off(mmio: i32) {
+    pwm(mmio, R_PMAC_GNT,     B_PMAC_GNT_TXEN,  0);
+    pwm(mmio, R_PMAC_GNT,     B_PMAC_GNT_RXEN,  0);
+    pwm(mmio, R_PMAC_RX_CFG1, B_PMAC_OPT1_MSK,  0);
+    pwm(mmio, R_PMAC_RXMOD,   B_PMAC_RXMOD_MSK, 0);
+    pwm(mmio, R_MAC_SEL,      B_MAC_SEL_DPD_EN, 0);
+    pwm(mmio, R_MAC_SEL,      B_MAC_SEL_MOD,    0);
+    pwm(mmio, R_MAC_SEL,      B_MAC_SEL_PWR_EN, 0);
 }
 
 /// Snapshot of BB registers touched by alimentk for save/restore.

@@ -44,7 +44,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.49.0 — power_trim (thermal + pa_bias)\n");
+    host::print("[wifi] RTL8852BE driver v1.50.0 — PMAC_GNT restore after alimentk + MAC_SEL bit fixes\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
