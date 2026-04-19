@@ -360,11 +360,28 @@ pub fn set_channel_help_exit(mmio: i32) {
 const R_AX_PWR_BY_RATE_TABLE0: u32 = 0xD2C0;
 const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
 
+// R_AX_PWR_RATE_CTRL (0xD200):
+//   bits 27..10 = B_AX_PWR_REF (signed s18, 0.25 dBm units)
+//   bit  9      = B_AX_FORCE_PWR_BY_RATE_EN
+//   bits 8..0   = B_AX_FORCE_PWR_BY_RATE_VALUE_MASK
+// When FORCE_PWR_BY_RATE_EN=1, HW ignores the per-rate table and
+// transmits every frame at VALUE. Useful smoke-test override until
+// we port the full rtw8852bx_set_txpwr_ref/offset/limit pipeline.
+const R_AX_PWR_RATE_CTRL: u32 = 0xD200;
+
 pub fn apply_default_txpwr(mmio: i32) {
-    let v: u32 = 0x50505050; // four bytes of 20 dBm
+    // Fill per-rate table uniformly with 0x50 = 20 dBm (0.25-dBm units).
+    let v: u32 = 0x50505050;
     let mut off = R_AX_PWR_BY_RATE_TABLE0;
     while off <= R_AX_PWR_BY_RATE_TABLE10 {
         host::mmio_w32(mmio, off, v);
         off += 4;
     }
+
+    // Force all rates to 20 dBm regardless of what the per-rate table
+    // says, and set PWR_REF to 0 (neutral — no offset). This gives HW
+    // a clear target and stops the PA from idling at minimum output.
+    // bit 9 = FORCE_EN, bits 0..8 = FORCE_VALUE (0x50 = 20 dBm).
+    let ctrl: u32 = (1 << 9) | 0x50;
+    host::mmio_w32(mmio, R_AX_PWR_RATE_CTRL, ctrl);
 }
