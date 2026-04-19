@@ -82,6 +82,8 @@ const R_AX_RCR: u32               = 0xCE00;
 const R_AX_SIFS_SETTING: u32      = 0xC624;
 const R_AX_PTCL_COMMON_SETTING_0: u32 = 0xC600;
 const R_AX_AGG_LEN_VHT_0: u32     = 0xC618;
+const R_AX_PTCLRPT_FULL_HDL: u32  = 0xC660;
+const R_AX_PTCL_FSM_MON: u32      = 0xC6E8;
 
 // CMAC com
 const R_AX_TX_SUB_CARRIER_VALUE: u32 = 0xC088;
@@ -870,9 +872,43 @@ fn cmac_init(mmio: i32) {
     // 10. CMAC com
     host::mmio_w32_mask(mmio, R_AX_PTCL_RRSR1, 0xF << 8, 3); // OFDM+CCK
 
-    // 11. PTCL
+    // 11. PTCL — 1:1 Linux ptcl_init_ax (mac.c:2925), PCIe block + MAC_0.
+    //
+    // PCIe block (mac.c:2936-2949): the SIFS + FSM timeout writes are the
+    // load-bearing piece. Without R_AX_PTCL_FSM_MON.TX_ARB_TO_THR=0x3F
+    // (~2 ms), the arbiter default is 0 → PTCL aborts every TX attempt the
+    // instant it enters arbitration and the frame is silently dropped
+    // between DMA and PHY (CH8_BUSY toggles, TXBD_IDX advances, but
+    // TX_COUNTER stays at 0). This was the v1.30 diagnostic finding.
+    //
+    // R_AX_SIFS_SETTING (0xC624):
+    //   [31:24] HW_CTS2SELF_PKT_LEN_TH     = S_AX_CTS2S_TH_1K      = 4
+    //   [23:18] HW_CTS2SELF_PKT_LEN_TH_TWW = S_AX_CTS2S_TH_SEC_256B= 1
+    //   [16]    HW_CTS2SELF_EN             = 1
+    {
+        let mut sifs = host::mmio_r32(mmio, R_AX_SIFS_SETTING);
+        sifs &= !(0xFFu32 << 24);
+        sifs |= 4u32 << 24;
+        sifs &= !(0x3Fu32 << 18);
+        sifs |= 1u32 << 18;
+        sifs |= 1u32 << 16;
+        host::mmio_w32(mmio, R_AX_SIFS_SETTING, sifs);
+    }
+    // R_AX_PTCL_FSM_MON (0xC6E8):
+    //   [5:0] PTCL_TX_ARB_TO_THR = 0x3F (~2 ms)
+    //   [6]   PTCL_TX_ARB_TO_MODE = 0
+    {
+        let mut fsm = host::mmio_r32(mmio, R_AX_PTCL_FSM_MON);
+        fsm &= !0x7Fu32;
+        fsm |= 0x3Fu32;
+        host::mmio_w32(mmio, R_AX_PTCL_FSM_MON, fsm);
+    }
+
+    // MAC_0 block (mac.c:2952-2960):
     host::mmio_set32(mmio, R_AX_PTCL_COMMON_SETTING_0, 0x3);  // TX_MODE_0/1
     host::mmio_clr32(mmio, R_AX_PTCL_COMMON_SETTING_0, 0x1C); // clr TRIGGER_SS
+    //   R_AX_PTCLRPT_FULL_HDL.SPE_RPT_PATH[5:4] = FWD_TO_WLCPU (1)
+    host::mmio_w32_mask(mmio, R_AX_PTCLRPT_FULL_HDL, 0x3 << 4, 1 << 4);
 
     // 12. CMAC DMA (8852B)
     host::mmio_clr32(mmio, 0xC804, 0x3); // clear RX full modes

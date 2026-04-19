@@ -68,7 +68,7 @@ Legende: `[x]` erledigt · `[/]` partiell · `[ ]` fehlt · `[·]` nicht nötig 
   - [/] 2.3.2.8 `trxptcl_init_ax` — partiell (SIFS, FCSCHK).
   - [/] 2.3.2.9 `rmac_init_ax` — partiell (SSN_SEL, CH_EN, MPDU_MAX_LEN).
   - [/] 2.3.2.10 `cmac_com_init_ax`
-  - [/] 2.3.2.11 `ptcl_init_ax`
+  - [x] 2.3.2.11 `ptcl_init_ax` — v1.31: PCIe-Block (SIFS_SETTING CTS2SELF, **PTCL_FSM_MON.TX_ARB_TO_THR=0x3F**) + MAC_0 PTCLRPT_FULL_HDL.SPE_RPT_PATH=FWD_TO_WLCPU eingefügt. Hypothese: Default-Timeout 0 liess PTCL-Arbiter TX sofort abbrechen → TX_COUNTER=0 trotz CH8_BUSY-toggle.
   - [/] 2.3.2.12 `cmac_dma_init_ax` — nur 1 Register `0xC804`. Linux-Werte prüfen.
 - [x] **2.3.3** `enable_imr_ax(MAC_0, DMAC_SEL)` (mac.c:3836) — v1.3.0: alle 11 Sub-IMR-Enables in `imr.rs`:
   - [x] `wdrls_imr_enable`
