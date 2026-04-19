@@ -1466,6 +1466,33 @@ pub fn resume_sch_tx(mmio: i32, band: u8, tx_en: u16) {
     h2creg_sch_tx_en(mmio, band, tx_en, regs::B_AX_CTN_TXEN_ALL_MASK);
 }
 
+/// Register a packet in the FW's offload pool. 1:1 Linux fw.c:6307
+/// rtw89_fw_h2c_add_pkt_offload.
+///
+/// The FW stores the packet body keyed by `pkt_id`. The scan channel-list
+/// H2C then references this ID in its `pkt_id[]` array — whenever the FW
+/// lands on that channel during an active scan, it transmits the stored
+/// frame on air (via its own TX path, bypassing our CH8 DMA entirely).
+///
+/// Payload layout (H2C_LEN_PKT_OFLD = 4 bytes + frame):
+///   w0[7:0]   = PKT_IDX  (caller-allocated slot, we use 0)
+///   w0[10:8]  = PKT_OP   = RTW89_PKT_OFLD_OP_ADD (1)
+///   w0[31:16] = PKT_LENGTH (frame.len())
+///   bytes 4..   = raw packet
+///
+/// CAT=1 (MAC), CLASS=9 (MAC_FW_OFLD), FUNC=1 (PACKET_OFLD), rack=1, dack=1.
+pub fn h2c_add_pkt_offload(mmio: i32, pkt_id: u8, frame: &[u8]) {
+    const MAX_FRAME: usize = 256;
+    let mut payload = [0u8; 4 + MAX_FRAME];
+    let n = frame.len().min(MAX_FRAME);
+    let w0: u32 = (pkt_id as u32)
+                | (1u32 << 8)                      // PKT_OP = OP_ADD
+                | ((n as u32) << 16);              // PKT_LENGTH
+    payload[0..4].copy_from_slice(&w0.to_le_bytes());
+    payload[4..4 + n].copy_from_slice(&frame[..n]);
+    h2c_send(mmio, 1, 9, 0x01, true, true, &payload[..4 + n]);
+}
+
 /// Send LOG_CFG H2C to enable FW trace log via C2H channel.
 /// `enable=false` → COMP=0 (effectively off), `enable=true` → default comp set.
 pub fn h2c_fw_log(mmio: i32, enable: bool) {
