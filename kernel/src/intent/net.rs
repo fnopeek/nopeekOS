@@ -134,18 +134,48 @@ pub fn intent_resolve(args: &str) {
 }
 
 pub fn intent_net_info() {
-    if let Some(mac) = crate::netdev::mac() {
-        let ip = crate::net::arp::our_ip();
-        kprintln!();
-        kprintln!("  Network (virtio-net)");
-        kprintln!("  ───────────────────");
-        kprintln!("  MAC:     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        kprintln!("  IPv4:    {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-        kprintln!("  Gateway: 10.0.2.2 (QEMU user-mode)");
-        kprintln!("  Status:  online");
-        kprintln!();
-    } else {
-        kprintln!("[npk] Network not available");
+    let ifaces = crate::netdev::list();
+    if ifaces.is_empty() {
+        kprintln!("[npk] No network interfaces available");
+        return;
     }
+
+    let ip = crate::net::arp::our_ip();
+    let prefix = crate::net::ipv4::prefix_len();
+
+    kprintln!();
+    kprintln!("  Interfaces");
+    kprintln!("  ──────────");
+    for iface in &ifaces {
+        kprintln!("  {}  {}", iface.name, iface.driver);
+        kprintln!("    MAC     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            iface.mac[0], iface.mac[1], iface.mac[2],
+            iface.mac[3], iface.mac[4], iface.mac[5]);
+        if iface.primary {
+            if ip == [0, 0, 0, 0] {
+                kprintln!("    IPv4    (no lease)");
+                kprintln!("    State   UP (no IP)");
+            } else {
+                kprintln!("    IPv4    {}.{}.{}.{}/{}", ip[0], ip[1], ip[2], ip[3], prefix);
+                kprintln!("    State   UP");
+            }
+        } else {
+            kprintln!("    State   DOWN");
+        }
+        kprintln!();
+    }
+
+    let gw = crate::net::ipv4::gateway();
+    let dns = crate::net::dns::server();
+    let primary_name = ifaces.iter().find(|i| i.primary).map(|i| i.name).unwrap_or("?");
+
+    kprintln!("  Routing");
+    kprintln!("  ───────");
+    if ip == [0, 0, 0, 0] {
+        kprintln!("  Default  (none)");
+    } else {
+        kprintln!("  Default  {}.{}.{}.{} via {}", gw[0], gw[1], gw[2], gw[3], primary_name);
+    }
+    kprintln!("  DNS      {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+    kprintln!();
 }

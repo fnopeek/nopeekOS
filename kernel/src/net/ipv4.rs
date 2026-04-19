@@ -13,8 +13,15 @@ static SUBNET:  Mutex<[u8; 4]> = Mutex::new([255, 255, 255, 0]);
 
 pub fn set_gateway(ip: [u8; 4]) { *GATEWAY.lock() = ip; }
 pub fn set_subnet(mask: [u8; 4]) { *SUBNET.lock() = mask; }
-#[allow(dead_code)]
 pub fn gateway() -> [u8; 4] { *GATEWAY.lock() }
+#[allow(dead_code)]
+pub fn subnet() -> [u8; 4] { *SUBNET.lock() }
+
+pub fn prefix_len() -> u8 {
+    let m = *SUBNET.lock();
+    let bits = ((m[0] as u32) << 24) | ((m[1] as u32) << 16) | ((m[2] as u32) << 8) | (m[3] as u32);
+    bits.count_ones() as u8
+}
 
 pub fn handle_ipv4(data: &[u8]) {
     if data.len() < HEADER_LEN { return; }

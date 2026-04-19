@@ -114,3 +114,39 @@ pub fn mac() -> Option<[u8; 6]> {
 pub fn is_available() -> bool {
     intel_nic::is_available() || wasm_nic_available() || virtio_net::is_available()
 }
+
+// ── Interface enumeration ──
+
+#[derive(Clone, Copy)]
+pub struct IfaceInfo {
+    pub name: &'static str,
+    pub driver: &'static str,
+    pub mac: [u8; 6],
+    /// True for the interface that carries the global IP/Gateway/DNS config.
+    pub primary: bool,
+}
+
+/// List all active network interfaces. The first UP interface (Intel → WASM → virtio)
+/// is marked primary and carries the global IPv4/Gateway/DNS config.
+pub fn list() -> alloc::vec::Vec<IfaceInfo> {
+    let mut v = alloc::vec::Vec::new();
+    let mut primary_taken = false;
+
+    if intel_nic::is_available() {
+        if let Some(mac) = intel_nic::mac() {
+            v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: !primary_taken });
+            primary_taken = true;
+        }
+    }
+    if wasm_nic_available() {
+        let mac = WASM_NIC.lock().mac_addr;
+        v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: !primary_taken });
+        primary_taken = true;
+    }
+    if virtio_net::is_available() {
+        if let Some(mac) = virtio_net::mac() {
+            v.push(IfaceInfo { name: "eth", driver: "virtio-net", mac, primary: !primary_taken });
+        }
+    }
+    v
+}
