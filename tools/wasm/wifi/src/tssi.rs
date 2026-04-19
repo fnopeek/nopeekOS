@@ -718,16 +718,15 @@ pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
         slope_cal_org(mmio, path, band);
         alignment_default(mmio, path, band, ch);
         set_tssi_slope(mmio, path);
-        // alimentk: DISABLED in v1.30. v1.28+v1.29 both timed out on
-        // CW_RPT (PMAC test-TX never produced a sample) AND spiked FW
-        // events by +473 — the FW is unhappy during our cal attempts.
-        // Since alimentk is fine-tuning (not a hard prerequisite for
-        // TX), skip it until we diagnose why PMAC test-TX doesn't run.
-        // let tx_en = crate::fw::stop_sch_tx(mmio, 0);
-        // crate::iqk::wait_rx_mode_pub(mmio);
-        // alimentk(mmio, path, ch);
-        // crate::fw::resume_sch_tx(mmio, 0, tx_en);
-        let _ = path; let _ = ch;
+        // alimentk re-enabled in v1.42 — v1.28/v1.29 timed out on CW_RPT
+        // because IQK was running with ADC disabled (v1.38 fixed that),
+        // so PMAC test-TX had no feedback path. With IQK now clean
+        // (cor=0 fin=0 tx=0 rx=0) the TSSI alignment loop should see
+        // real CW reports and calibrate PA output per channel.
+        let tx_en = crate::fw::stop_sch_tx(mmio, 0);
+        crate::iqk::wait_rx_mode_pub(mmio);
+        alimentk(mmio, path, ch);
+        crate::fw::resume_sch_tx(mmio, 0, tx_en);
     }
 
     enable(mmio);
