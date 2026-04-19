@@ -26,6 +26,7 @@ mod dpk;
 mod dpk_tables;
 mod btc;
 mod efuse;
+mod pwr_trim;
 #[allow(dead_code)]
 mod bb_tables;
 #[allow(dead_code)]
@@ -43,7 +44,7 @@ static mut EFUSE: efuse::EfuseData = efuse::EfuseData::empty();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.48.0 — bb_cfg_txrx_path+BTC readback (really rebuilt)\n");
+    host::print("[wifi] RTL8852BE driver v1.49.0 — power_trim (thermal + pa_bias)\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -211,6 +212,14 @@ pub extern "C" fn _start() {
         && efuse_data.mac_addr != [0xFF; 6] {
         unsafe { vif::STA_MAC = efuse_data.mac_addr; }
     }
+
+    // ── Gap 3.7.18: power_trim — applies per-chip thermal + PA bias.
+    // In rtw89_phy_dm_init Linux calls set_txpwr_ctrl then power_trim
+    // then cfg_txrx_path. Without PA-bias trim, RR_BIASA.TXG/TXA stay
+    // at HW defaults — on this NUC efuse has thermal=0xf1 programmed,
+    // which makes it very likely pa_bias_trim is also programmed and
+    // the chip ships expecting those values to be applied before TX.
+    pwr_trim::run(mmio, &efuse_data);
 
     // ── bb_cfg_txrx_path — 1:1 __rtw8852bx_bb_cfg_txrx_path.
     //   Linux calls this as the LAST step of rtw89_phy_dm_init. It sets

@@ -101,6 +101,15 @@ pub struct EfuseData {
     // From phycap (0x580 range, separate from logical efuse).
     pub tssi_trim:      [[i8; TSSI_TRIM_CH_GROUP_NUM]; 2],
     pub tssi_trim_valid: bool,
+    // PA bias trim (phycap 0x5DE path-A, 0x5DB path-B).
+    // Low nibble = 2G bias, high nibble = 5G bias. Applied to
+    // RR_BIASA.TXG/TXA per RF path by pwr_trim::run.
+    pub pa_bias_trim:   [u8; 2],
+    pub pg_pa_bias_trim: bool,
+    // Thermal trim (phycap 0x5DF path-A, 0x5DC path-B).
+    // Applied to RR_TM2.OFF per path by pwr_trim::run.
+    pub thermal_trim:   [u8; 2],
+    pub pg_thermal_trim: bool,
     pub rx_gain_2g_cck:  u8,
     pub rx_gain_2g_ofdm: u8,
     pub rx_gain_5g_low:  u8,
@@ -123,6 +132,10 @@ impl EfuseData {
             tssi_mcs_5g:  [[0xFF; TSSI_MCS_5G_CH_GROUP_NUM]; 2],
             tssi_trim:    [[0; TSSI_TRIM_CH_GROUP_NUM]; 2],
             tssi_trim_valid: false,
+            pa_bias_trim: [0xFF; 2],
+            pg_pa_bias_trim: false,
+            thermal_trim: [0xFF; 2],
+            pg_thermal_trim: false,
             rx_gain_2g_cck: 0xFF,
             rx_gain_2g_ofdm: 0xFF,
             rx_gain_5g_low: 0xFF,
@@ -367,6 +380,24 @@ pub fn read(mmio: i32) -> EfuseData {
             // No valid trim programmed — Linux zeros the whole array.
             e.tssi_trim = [[0; TSSI_TRIM_CH_GROUP_NUM]; 2];
         }
+
+        // Thermal trim (rtw8852bx_phycap_parsing_thermal_trim, common.c:315)
+        //   path A at 0x5DF, path B at 0x5DC. PG iff any byte != 0xFF.
+        let therm_addr = [0x5DFusize, 0x5DCusize];
+        for i in 0..2 {
+            let off = therm_addr[i] - base;
+            e.thermal_trim[i] = phycap[off];
+            if phycap[off] != 0xFF { e.pg_thermal_trim = true; }
+        }
+
+        // PA bias trim (rtw8852bx_phycap_parsing_pa_bias_trim, common.c:363)
+        //   path A at 0x5DE, path B at 0x5DB. PG iff any byte != 0xFF.
+        let pabias_addr = [0x5DEusize, 0x5DBusize];
+        for i in 0..2 {
+            let off = pabias_addr[i] - base;
+            e.pa_bias_trim[i] = phycap[off];
+            if phycap[off] != 0xFF { e.pg_pa_bias_trim = true; }
+        }
     }
 
     // 5. Log highlights (MAC as 6×u8, thermal/rfe as u8).
@@ -379,6 +410,13 @@ pub fn read(mmio: i32) -> EfuseData {
     host::print(" thermB=0x"); print_u8(e.thermal[1]);
     host::print(" rfe=0x");    print_u8(e.rfe_type);
     host::print(" cc=");       print_u8(e.country_code[0]); print_u8(e.country_code[1]);
+    host::print("\n");
+    host::print("  EFUSE: thermal_trim=["); print_u8(e.thermal_trim[0]);
+    host::print(","); print_u8(e.thermal_trim[1]); host::print("] pg=");
+    host::print(if e.pg_thermal_trim { "1" } else { "0" });
+    host::print(" pa_bias_trim=["); print_u8(e.pa_bias_trim[0]);
+    host::print(","); print_u8(e.pa_bias_trim[1]); host::print("] pg=");
+    host::print(if e.pg_pa_bias_trim { "1" } else { "0" });
     host::print("\n");
 
     e
