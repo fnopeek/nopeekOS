@@ -112,10 +112,16 @@ pub fn init_ch8(mmio: i32, ring: &TxRing) {
 }
 
 /// Send a management frame (Probe Request, AUTH, ASSOC) via CH8.
-/// `frame` is the raw 802.11 frame (MAC header + IEs), unencrypted.
+/// `frame` is the raw 802.11 frame (MAC header + body), unencrypted.
 /// Returns true on enqueue success (does NOT wait for TX completion).
+/// The multicast/broadcast decision is taken from bit 0 of addr1 (DA) —
+/// Linux core.c:1569 `rts_en = !is_bmc`: unicast frames do RTS, group
+/// frames skip RTS.
 pub fn send_mgmt(mmio: i32, ring: &mut TxRing, frame: &[u8]) -> bool {
     if frame.len() == 0 || frame.len() as u32 > FRAME_SLOT { return false; }
+    // addr1 (DA) is at offset 4..10. A group address has bit 0 of the
+    // first octet set.
+    let is_bmc = frame.len() >= 5 && (frame[4] & 0x01) != 0;
 
     // Round-robin WD page + frame slot (paired index).
     let slot = ring.next_slot;
@@ -159,8 +165,9 @@ pub fn send_mgmt(mmio: i32, ring: &mut TxRing, frame: &[u8]) -> bool {
     host::dma_w32(ring.wd_handle, wd_off + OFF_INFO + 4,  0);      // info1
     host::dma_w32(ring.wd_handle, wd_off + OFF_INFO + 8,  0);      // info2 (no SEC)
     host::dma_w32(ring.wd_handle, wd_off + OFF_INFO + 12, 0);      // info3 (no rpt)
-    // info4: HW_RTS_EN=1, RTS_EN=0 (broadcast frame → no RTS)
-    host::dma_w32(ring.wd_handle, wd_off + OFF_INFO + 16, 1u32 << 31);
+    // info4: HW_RTS_EN=BIT(31) always, RTS_EN=BIT(27) = !is_bmc.
+    let info4: u32 = (1u32 << 31) | if is_bmc { 0 } else { 1u32 << 27 };
+    host::dma_w32(ring.wd_handle, wd_off + OFF_INFO + 16, info4);
     host::dma_w32(ring.wd_handle, wd_off + OFF_INFO + 20, 0);      // info5
 
     // ── 4. TXWP Info (seq0 = slot | VALID; rest zero) ──────────────
@@ -207,6 +214,31 @@ pub fn send_mgmt(mmio: i32, ring: &mut TxRing, frame: &[u8]) -> bool {
 }
 
 // ── Frame builders ────────────────────────────────────────────────
+
+/// Build an 802.11 Open-System Authentication Request (IEEE 802.11-2020 §9.3.3.11).
+/// Unicast to `bssid`. The FW/HW fills the Sequence-Control field via
+/// HW_SSN_SEL in the TXWD body, so we leave it at zero here.
+///
+///   MAC hdr (24 B): FC=0xB0 0x00 (Mgmt subtype=11 AUTH) | Dur=0
+///                   DA=bssid | SA=sma | BSSID=bssid | SeqCtrl=0
+///   Body (6 B):     Auth Alg=0 (Open) | Auth Seq=1 | Status=0
+///
+/// Returns 30.
+pub fn build_auth_open(sa: &[u8; 6], bssid: &[u8; 6], buf: &mut [u8]) -> usize {
+    buf[0] = 0xB0; buf[1] = 0x00;      // FC: Mgmt, subtype=11 (AUTH)
+    buf[2] = 0x00; buf[3] = 0x00;      // Duration
+    for i in 0..6 { buf[4  + i] = bssid[i]; }   // DA = AP
+    for i in 0..6 { buf[10 + i] = sa[i];    }   // SA = us
+    for i in 0..6 { buf[16 + i] = bssid[i]; }   // BSSID = AP
+    buf[22] = 0x00; buf[23] = 0x00;    // SeqCtrl (HW fills)
+
+    // Authentication body
+    buf[24] = 0x00; buf[25] = 0x00;    // Auth Alg = 0 (Open System)
+    buf[26] = 0x01; buf[27] = 0x00;    // Auth Seq = 1 (request)
+    buf[28] = 0x00; buf[29] = 0x00;    // Status Code = 0
+
+    30
+}
 
 /// Build a wildcard Probe Request (no SSID, broadcast DA/BSSID).
 /// Returns the byte length (always 45 for this variant).
