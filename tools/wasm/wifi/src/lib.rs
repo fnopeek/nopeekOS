@@ -27,7 +27,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.13.0 — TX state observability\n");
+    host::print("[wifi] RTL8852BE driver v1.14.0 — default TX power table\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -323,21 +323,24 @@ pub extern "C" fn _start() {
 
     // ── Test A: ch 13 (where FW was last scanning) ──────────────────
     // Don't touch FW — assume it parked on ch 13. Host-side PHY retune
-    // to 13 just in case.
+    // to 13 just in case. apply_default_txpwr fills R_AX_PWR_BY_RATE
+    // with 20 dBm so the PA has a non-zero target to transmit at.
     chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 13);
+    chan::apply_default_txpwr(mmio);
     rfk::rx_dck(mmio);
     chan::set_channel_help_exit(mmio);
-    host::print("  tuned to ch 13\n");
+    host::print("  tuned to ch 13 (+ default txpwr 20 dBm)\n");
     run_tx_test("A (ch 13)", 13, &mut ring, mmio);
 
     // ── Test B: switch to ch 7 via SCANOFLD-stop + target ─────────
     mac::scan_stop_to_channel(mmio, 7);
     chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 7);
+    chan::apply_default_txpwr(mmio);
     rfk::rx_dck(mmio);
     chan::set_channel_help_exit(mmio);
-    host::print("  tuned to ch 7\n");
+    host::print("  tuned to ch 7 (+ default txpwr 20 dBm)\n");
     run_tx_test("B (ch 7)", 7, &mut ring, mmio);
 
     // Final BSS table — delta tells the story

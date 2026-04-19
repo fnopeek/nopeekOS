@@ -341,3 +341,30 @@ pub fn set_channel_help_exit(mmio: i32) {
     tssi_cont_en(mmio, true);
     bb_reset_en(mmio, true);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  apply_default_txpwr — smoke-test stand-in for rtw8852bx_set_txpwr
+//
+//  Linux's set_txpwr pipeline reads per-rate dBm values from efuse
+//  (set_txpwr_byrate + offset + limit + limit_ru + diff). We don't
+//  parse efuse, so for the Phase 7 smoke test we uniformly fill the
+//  per-rate table with a safe 20 dBm (= 0x50 in 0.25-dBm units) so
+//  HW has *something* to transmit at. Without this the table reads
+//  0 and the PA stays at minimum output — AP never sees our frame.
+//
+//  R_AX_PWR_BY_RATE_TABLE0..10 = 0xD2C0..0xD2E8, 11 dwords.
+//  Each byte = one rate's power setting in 0.25-dBm units.
+//  0x50 = 80 → 20 dBm = 100 mW (2.4G legal maximum most regions).
+// ═══════════════════════════════════════════════════════════════════
+
+const R_AX_PWR_BY_RATE_TABLE0: u32 = 0xD2C0;
+const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
+
+pub fn apply_default_txpwr(mmio: i32) {
+    let v: u32 = 0x50505050; // four bytes of 20 dBm
+    let mut off = R_AX_PWR_BY_RATE_TABLE0;
+    while off <= R_AX_PWR_BY_RATE_TABLE10 {
+        host::mmio_w32(mmio, off, v);
+        off += 4;
+    }
+}
