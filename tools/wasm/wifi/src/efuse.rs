@@ -54,9 +54,13 @@ pub const LOG_EFUSE_SIZE: u32  = 2048;
 pub const PHYCAP_ADDR: u32     = 0x580;
 pub const PHYCAP_SIZE: u32     = 128;
 
-// Sec-ctrl size: first + last 2 bytes are secure-control, not scanned.
-// Linux rtw89_dump_logical_efuse_map uses chip->sec_ctrl_efuse_size = 2.
-const SEC_CTRL_SIZE: u32 = 2;
+// Sec-ctrl size: first + last N bytes are secure-control, not scanned.
+// chip->sec_ctrl_efuse_size for RTL8852BE = 4 (rtw8852b.c:993).
+// My first version used 2 — the logical decode started 2 bytes too
+// early, read sec-ctrl bytes as headers, got 0xFFFF on the first one,
+// and aborted before decoding any actual block. Result: log_map stays
+// all-0xFF, every parsed field reads 0xFF.
+const SEC_CTRL_SIZE: u32 = 4;
 
 // Struct rtw8852bx_efuse field offsets (logical space).
 // Derived from rtw8852b_common.h struct layout with __packed semantics.
@@ -126,6 +130,13 @@ impl EfuseData {
 }
 
 // ── Power-cut sequence (enable_efuse_pwr_cut_ddv / disable_*) ───
+
+fn print_u8(v: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let buf = [HEX[((v >> 4) & 0xF) as usize], HEX[(v & 0xF) as usize]];
+    let s = unsafe { core::str::from_utf8_unchecked(&buf) };
+    host::print(s);
+}
 
 fn r16(mmio: i32, off: u32) -> u16 {
     host::mmio_r16(mmio, off)
@@ -319,15 +330,16 @@ pub fn read(mmio: i32) -> EfuseData {
     let mut e = parse_fields(&log_map);
     e.autoload_valid = true;
 
-    // 5. Log highlights.
+    // 5. Log highlights (MAC as 6×u8, thermal/rfe as u8).
     host::print("  EFUSE: MAC=");
     for i in 0..6 {
-        host::print_hex32(e.mac_addr[i] as u32 & 0xFF);
+        print_u8(e.mac_addr[i]);
         if i < 5 { host::print(":"); }
     }
-    host::print(" thermA=0x"); host::print_hex32(e.thermal[0] as u32);
-    host::print(" thermB=0x"); host::print_hex32(e.thermal[1] as u32);
-    host::print(" rfe=0x"); host::print_hex32(e.rfe_type as u32);
+    host::print(" thermA=0x"); print_u8(e.thermal[0]);
+    host::print(" thermB=0x"); print_u8(e.thermal[1]);
+    host::print(" rfe=0x");    print_u8(e.rfe_type);
+    host::print(" cc=");       print_u8(e.country_code[0]); print_u8(e.country_code[1]);
     host::print("\n");
 
     e
