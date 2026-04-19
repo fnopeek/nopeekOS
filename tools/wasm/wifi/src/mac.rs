@@ -1532,6 +1532,38 @@ pub fn scan(mmio: i32) {
     }
 }
 
+/// Send SCANOFLD H2C with OPERATION=0 (stop) and TARGET_CH_MODE=1, parking
+/// the FW on `ch` (2.4 GHz, 20 MHz). Linux calls this inside
+/// rtw89_hw_scan_complete → rtw89_fw_h2c_scan_offload so the FW hands
+/// channel control back to the host on the VIF's channel. Without it
+/// the FW stays parked on the last scan channel even after SCANOFLD_END.
+pub fn scan_stop_to_channel(mmio: i32, ch: u8) {
+    host::print("  SCANOFLD stop → target ch ");
+    fw::print_dec(ch as usize);
+    host::print("\n");
+
+    let mut cmd = [0u8; 28];
+    // w0: MACID=0, OPERATION=0 (stop), TARGET_CH_BAND=0 (2G)
+    let w0: u32 = 0;
+    // w1: NOTIFY_END=1 | TARGET_CH_MODE=1 | TARGET_CH_BW=0 (20MHz)
+    //     | TARGET_PRI_CH=ch | TARGET_CENTRAL_CH=ch (20MHz → same)
+    let w1: u32 = 1                       // NOTIFY_END
+                | (1 << 1)                // TARGET_CH_MODE
+                | ((ch as u32) << 8)      // TARGET_PRI_CH (bits 8..15)
+                | ((ch as u32) << 16);    // TARGET_CENTRAL_CH (bits 16..23)
+    cmd[0..4].copy_from_slice(&w0.to_le_bytes());
+    cmd[4..8].copy_from_slice(&w1.to_le_bytes());
+    // w2..w6 = 0 (default PDs, no TSF, no second MACID)
+
+    fw::h2c_send(mmio, 1, 9, 0x17, true, true, &cmd);
+
+    // Drain C2H until DONE_ACK for this H2C, up to 200 ms.
+    for _ in 0..20u32 {
+        rxq_poll(mmio);
+        host::sleep_ms(10);
+    }
+}
+
 /// Drain RX queue while sleeping for `ms` milliseconds. Used by callers
 /// that need to keep beacon/C2H parsing alive during an otherwise-idle
 /// wait (e.g., TX smoke test dwelling for a Probe Response).

@@ -27,7 +27,7 @@ static mut MMIO: i32 = -1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[wifi] RTL8852BE driver v1.10.0 — Phase 7 with RX diagnostic\n");
+    host::print("[wifi] RTL8852BE driver v1.11.0 — SCANOFLD stop + target-ch\n");
 
     // ── Step 1: Bind PCI device ──────────────────────────────────
     let rc = host::pci_bind(regs::RTL8852B_VENDOR, regs::RTL8852B_DEVICE);
@@ -231,7 +231,14 @@ pub extern "C" fn _start() {
     // scan→channel-switch transition before testing TX itself.
     host::print("\n[wifi] Phase 7: TX smoke test on ch 7 (IvyPie)\n");
 
-    // Park on target AP's channel.
+    // Hand channel control back from FW to host, parked on ch 7.
+    // Linux rtw89_hw_scan_complete calls rtw89_fw_h2c_scan_offload with
+    // OPERATION=0 + TARGET_CH_MODE=1 — without this, FW stays on the
+    // last scan channel (ch 13) and our host-side set_channel only
+    // updates PHY while the MAC keeps hearing ch 13.
+    mac::scan_stop_to_channel(mmio, 7);
+
+    // Now program PHY/RF for ch 7.
     chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 7);
     rfk::rx_dck(mmio);
