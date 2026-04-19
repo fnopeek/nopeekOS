@@ -1532,6 +1532,27 @@ pub fn scan(mmio: i32) {
     }
 }
 
+/// Drain RX queue while sleeping for `ms` milliseconds. Used by callers
+/// that need to keep beacon/C2H parsing alive during an otherwise-idle
+/// wait (e.g., TX smoke test dwelling for a Probe Response).
+pub fn dwell(mmio: i32, ms: u32) {
+    let step = 20u32;
+    let mut elapsed = 0u32;
+    while elapsed < ms {
+        rxq_poll(mmio);
+        host::sleep_ms(step);
+        elapsed += step;
+    }
+}
+
+pub fn beacons_seen() -> u32 {
+    unsafe { BEACON_COUNT }
+}
+
+pub fn wifi_frames_seen() -> u32 {
+    unsafe { WIFI_FRAME_COUNT }
+}
+
 /// Print the aggregated scan results + BSS table.
 /// Called by `lib.rs` after running one or more scan passes.
 pub fn scan_summary() {
