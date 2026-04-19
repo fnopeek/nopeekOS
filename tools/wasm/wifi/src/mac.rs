@@ -921,9 +921,9 @@ fn cmac_init(mmio: i32) {
 // ═══════════════════════════════════════════════════════════════════
 
 fn pcie_post_init(mmio: i32) {
-    // Linux: rtw89_pci_ops_mac_post_init_ax — simple DMA enable.
-    // NO BDRAM reset, NO ring reconfiguration.
-    // Rings were set up in fw.rs pre_init and persist across FWDL.
+    // Linux: rtw89_pci_ops_mac_post_init_ax (pci.c:3224) — LTR + addr-info
+    // format selector + DMA enable. Rings were set up in fw.rs pre_init
+    // and persist across FWDL.
 
     // LTR setup
     let mut ltr0 = host::mmio_r32(mmio, R_AX_LTR_CTRL_0);
@@ -931,6 +931,21 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_w32(mmio, R_AX_LTR_CTRL_0, ltr0);
     host::mmio_w32(mmio, R_AX_LTR_IDLE_LATENCY, 0x9003_9003);
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
+
+    // 8852B addr-info format = 8-byte (non-V1). Without these two writes
+    // the HW parses our 8-byte addr_info as something else (probably the
+    // 16-byte V1 layout), can't make sense of it, and silently drops
+    // every CH8 TX between DMA consumption and PHY transmit.
+    //   R_AX_TX_ADDRESS_INFO_MODE_SETTING = 0x8810
+    //     BIT(0) B_AX_HOST_ADDR_INFO_8B_SEL — set: 8-byte addr_info
+    //   R_AX_PKTIN_SETTING = 0x9A00
+    //     BIT(1) B_AX_WD_ADDR_INFO_LENGTH  — clear: 8-byte WD addr info
+    const R_AX_TX_ADDRESS_INFO_MODE_SETTING: u32 = 0x8810;
+    const B_AX_HOST_ADDR_INFO_8B_SEL: u32        = 1 << 0;
+    const R_AX_PKTIN_SETTING: u32                = 0x9A00;
+    const B_AX_WD_ADDR_INFO_LENGTH: u32          = 1 << 1;
+    host::mmio_set32(mmio, R_AX_TX_ADDRESS_INFO_MODE_SETTING, B_AX_HOST_ADDR_INFO_8B_SEL);
+    host::mmio_clr32(mmio, R_AX_PKTIN_SETTING, B_AX_WD_ADDR_INFO_LENGTH);
 
     // Ring addresses + wp were set in fw.rs pre_init and persist across FWDL.
     // Linux mac_post_init_ax does NOT touch RXBD_IDX — don't fight the firmware.
