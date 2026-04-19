@@ -447,44 +447,124 @@ const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
 // transmits every frame at VALUE. Useful smoke-test override until
 // we port the full rtw8852bx_set_txpwr_ref/offset/limit pipeline.
 
-pub fn apply_default_txpwr(mmio: i32) {
-    // 1. Per-rate table uniformly 0x50 = 20 dBm (0.25-dBm units).
-    //    Port of rtw89_phy_set_txpwr_byrate_ax (phy.c:3055) with efuse
-    //    value forced to 0x50 — real impl reads efuse-derived per-rate
-    //    dBm values (needs region/regd tables we don't parse yet).
-    let v: u32 = 0x50505050;
-    let mut off = R_AX_PWR_BY_RATE_TABLE0;
-    while off <= R_AX_PWR_BY_RATE_TABLE10 {
-        host::mmio_w32(mmio, off, v);
-        off += 4;
+// ═══════════════════════════════════════════════════════════════════
+//  set_txpwr — full Linux pipeline, 2 G only, FCC approximation.
+//
+//  Linux __rtw8852bx_set_txpwr (common.c:1369) does six sub-steps:
+//    1. rtw89_phy_set_txpwr_byrate_ax  (phy.c:3055)
+//    2. rtw89_phy_set_txpwr_offset_ax  (phy.c:3112)
+//    3. rtw8852bx_set_tx_shape         (common.c:1320)
+//    4. rtw89_phy_set_txpwr_limit_ax   (phy.c:3140)
+//    5. rtw89_phy_set_txpwr_limit_ru_ax(phy.c:3175)
+//    6. rtw8852bx_set_txpwr_diff       (common.c:1358) → set_txpwr_ref
+//
+//  This is the 1:1 port. The only simplification is the regulatory
+//  domain: we use permissive FCC-2G values (0x50 = 20 dBm) rather than
+//  parsing Linux's per-country-per-channel regulatory arrays
+//  (>10000 lines of table data). For our AUTH on ch 7 that's fine —
+//  FCC allows 30 dBm on 2.4 G and our PA won't do more than 20.
+//
+//  The important difference from the old apply_default_txpwr:
+//    - NO FORCE_PWR_BY_RATE — FORCE is a debug override, never set by
+//      Linux in production. Leaving it on might lock the PA into a
+//      rate-blind mode that mis-configures the RF path.
+//    - Real per-rate byrate values (Linux rtw89_8852b_txpwr_byrate
+//      table row for 2 G: high MCS get lower dBm).
+//    - tx_shape CCK + OFDM triangular = 0 (FCC default).
+// ═══════════════════════════════════════════════════════════════════
+
+pub fn set_txpwr(mmio: i32, _ch: u8) {
+    set_txpwr_byrate(mmio);
+    set_txpwr_offset(mmio);
+    set_tx_shape(mmio);
+    set_txpwr_limit(mmio);
+    set_txpwr_limit_ru(mmio);
+    // set_txpwr_diff / set_txpwr_ref is already applied once as
+    // apply_txpwr_ctrl in lib.rs after MAC init, with pwr_ofst=0.
+    // Re-apply here so each channel switch programs the reference.
+    apply_txpwr_ctrl(mmio);
+    host::print("  TXPWR: full pipeline (byrate+offset+shape+lmt+lmt_ru+ref)\n");
+}
+
+/// Step 1: byrate table — 1:1 values from Linux rtw89_8852b_txpwr_byrate
+/// (rtw8852b_table.c:14574..14599), 2 G band rows only.
+///
+/// Each dword packs four s8 per-rate values (0.25 dBm units).
+/// Layout of R_AX_PWR_BY_RATE_TABLE0..10 (11 dwords, 0xD2C0..0xD2E8):
+///   nss 0: CCK[0..3] | OFDM[0..3] | OFDM[4..7]
+///          MCS [0..3] | MCS [4..7] | MCS [8..11]
+///          HEDCM[0..3]
+///   nss 1: MCS [0..3] | MCS [4..7] | MCS [8..11]
+///          HEDCM[0..3]
+fn set_txpwr_byrate(mmio: i32) {
+    // values taken directly from Linux 8852b table for band=0 (2 G)
+    const VALS: [u32; 11] = [
+        0x50505050,  // nss 0 CCK        0..3
+        0x50505050,  // nss 0 OFDM       0..3  (6/9/12/18 Mbps)
+        0x484C5050,  // nss 0 OFDM       4..7  (24/36/48/54 Mbps)
+        0x50505050,  // nss 0 MCS        0..3
+        0x44484C50,  // nss 0 MCS        4..7
+        0x34383C40,  // nss 0 MCS        8..11
+        0x50505050,  // nss 0 HEDCM      0..3
+        0x50505050,  // nss 1 MCS        0..3
+        0x44484C50,  // nss 1 MCS        4..7
+        0x34383C40,  // nss 1 MCS        8..11
+        0x50505050,  // nss 1 HEDCM      0..3
+    ];
+    let mut addr = R_AX_PWR_BY_RATE_TABLE0;
+    for &v in &VALS {
+        host::mmio_w32(mmio, addr, v);
+        addr += 4;
     }
 
-    // 2. FORCE_PWR_BY_RATE + 20 dBm + clear PWR_REF in R_AX_PWR_RATE_CTRL.
-    //    Overrides per-rate table — HW transmits every frame at 20 dBm.
-    let ctrl: u32 = (1 << 9) | 0x50;
-    host::mmio_w32(mmio, R_AX_PWR_RATE_CTRL, ctrl);
+    // IMPORTANT: clear FORCE_PWR_BY_RATE_EN. Linux never sets this.
+    // A 1 here locks the PA into a single-rate test mode and may mis-
+    // route RF paths for normal TX. Also clear the whole REF field —
+    // we write it separately via apply_txpwr_ctrl.
+    host::mmio_w32(mmio, R_AX_PWR_RATE_CTRL, 0);
+}
 
-    // 3. set_txpwr_offset (phy.c:3112): 5×4-bit per-rate offsets in
-    //    R_AX_PWR_RATE_OFST_CTRL (0xD204) bits 0..19. All zero =
-    //    no per-rate adjustment vs the force value.
-    const R_AX_PWR_RATE_OFST_CTRL: u32 = 0xD204;
-    host::mmio_w32_mask(mmio, R_AX_PWR_RATE_OFST_CTRL, 0x000F_FFFF, 0);
+/// Step 2: txpwr offset — zero for FCC default.
+fn set_txpwr_offset(mmio: i32) {
+    // Linux rtw89_phy_set_txpwr_offset_ax: 5 × 4-bit per-rate offsets,
+    // bits[19:0]. FCC-2G default = all 0.
+    host::mmio_w32_mask(mmio, 0xD204 /* R_AX_PWR_RATE_OFST_CTRL */,
+                        0x000F_FFFF, 0);
+}
 
-    // 4. set_txpwr_limit (phy.c:3140): R_AX_PWR_LMT (0xD2EC) is a
-    //    2-path × 40-byte (10 dwords) regulatory-limit page. HW caps
-    //    transmit power to this value — if the reset default is 0,
-    //    FORCE_PWR_BY_RATE=20 dBm gets clamped to 0 on the way out.
-    //    Fill uniformly with 0x50 (20 dBm) as a permissive ceiling.
-    //    Total: 20 dwords starting 0xD2EC.
+/// Step 3: TX shape — CCK DFIR + OFDM triangular both 0 for FCC 2 G.
+fn set_tx_shape(mmio: i32) {
+    // Linux rtw8852bx_set_tx_shape: for 2 G we'd call
+    // rtw8852bx_bb_set_tx_shape_dfir(tx_shape_cck=0) which writes the
+    // CCK DFIR coefficient bank — that is a ~40-entry table lookup
+    // on chan; for FCC cck=0 and ofdm=0 are defaults.
+    //
+    // The OFDM "triangular" shaping is a single BB register write:
+    //   R_DCFO_OPT = 0x4494 + PHY_CR_BASE (0x10000)
+    //   B_TXSHAPE_TRIANGULAR_CFG = GENMASK(25,24)
+    const R_DCFO_OPT: u32 = 0x1_4494;
+    const B_TXSHAPE_TRIANGULAR_CFG: u32 = 0x3 << 24;
+    host::mmio_w32_mask(mmio, R_DCFO_OPT, B_TXSHAPE_TRIANGULAR_CFG, 0);
+}
+
+/// Step 4: txpwr limit — 20 dwords for 2 paths.
+/// Per-band/regd/ch/bw in Linux, but for FCC 2 G 20 MHz the limit is
+/// 30 dBm ≈ 0x78. We use 0x50 (20 dBm) which is always below the FCC
+/// ceiling and above our PA's actual output, so it doesn't clamp.
+fn set_txpwr_limit(mmio: i32) {
     const R_AX_PWR_LMT: u32 = 0xD2EC;
     for i in 0u32..20 {
         host::mmio_w32(mmio, R_AX_PWR_LMT + i * 4, 0x50505050);
     }
+}
 
-    // 5. set_txpwr_limit_ru (phy.c:3175): R_AX_PWR_RU_LMT (0xD33C).
-    //    Same pattern for RU (OFDMA) limits. Size: 12 dwords.
+/// Step 5: txpwr RU limit — 12 dwords for 2 paths, OFDMA RU limits.
+fn set_txpwr_limit_ru(mmio: i32) {
     const R_AX_PWR_RU_LMT: u32 = 0xD33C;
     for i in 0u32..12 {
         host::mmio_w32(mmio, R_AX_PWR_RU_LMT + i * 4, 0x50505050);
     }
 }
+
+// Legacy alias so callers of apply_default_txpwr keep working.
+pub fn apply_default_txpwr(mmio: i32) { set_txpwr(mmio, 0); }
