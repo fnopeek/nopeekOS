@@ -484,6 +484,42 @@ pub fn bb_cfg_txrx_path(mmio: i32) {
     host::mmio_w32_mask(mmio, CR + R_RXHE,              B_RXHE_MAX_NSS,      1);
     host::mmio_w32_mask(mmio, CR + R_RXHE,              B_RXHETB_MAX_NSS,    1);
 
+    // Linux __rtw8852bx_ctrl_btg_bt_rx(true, PHY_0) — called for 2G+RF_AB.
+    // On a shared-antenna chip the 2G RX/TX path MUST route via BT-share
+    // logic. Without these 11 BB writes the PA grant goes to the wrong
+    // antenna spur and every frame dies before air (matches our symptom:
+    // TX_COUNTER stuck at CW tones only, sniffer sees 0 frames).
+    // Register map from reg.h:8917+..9462+.
+    const R_PATH0_BT_SHARE_V1: u32       = 0x4738;
+    const B_PATH0_BT_SHARE_V1: u32       = 1 << 19;
+    const B_PATH0_BTG_PATH_V1: u32       = 1 << 22;
+    const R_PATH1_G_LNA6_OP1DB_V1: u32   = 0x476C;
+    const B_PATH1_G_LNA6_OP1DB_V1: u32   = 0xFF << 24;
+    const R_PATH1_G_TIA0_LNA6_OP1DB_V1: u32 = 0x4778;
+    const B_PATH1_G_TIA0_LNA6_OP1DB_V1: u32 = 0xFF;
+    const R_PATH1_BT_SHARE_V1: u32       = 0x4AA4;
+    const B_PATH1_BT_SHARE_V1: u32       = 1 << 19;
+    const B_PATH1_BTG_PATH_V1: u32       = 1 << 22;
+    const R_PMAC_GNT_CR: u32             = 0x0980;
+    const B_PMAC_GNT_P1: u32             = 0xF << 17;
+    const B_BT_SHARE: u32                = 1 << 14;
+    const B_ANT_RX_BT_SEG0: u32          = 0xF << 22;
+    const R_BT_DYN_DC_EST_EN_V1: u32     = 0x4420;
+    const B_BT_DYN_DC_EST_EN_MSK: u32    = 1 << 31;
+    const R_GNT_BT_WGT_EN: u32           = 0x0C6C;
+    const B_GNT_BT_WGT_EN: u32           = 1 << 21;
+    host::mmio_w32_mask(mmio, CR + R_PATH0_BT_SHARE_V1,         B_PATH0_BT_SHARE_V1,         1);
+    host::mmio_w32_mask(mmio, CR + R_PATH0_BT_SHARE_V1,         B_PATH0_BTG_PATH_V1,         0);
+    host::mmio_w32_mask(mmio, CR + R_PATH1_G_LNA6_OP1DB_V1,     B_PATH1_G_LNA6_OP1DB_V1,     0x20);
+    host::mmio_w32_mask(mmio, CR + R_PATH1_G_TIA0_LNA6_OP1DB_V1,B_PATH1_G_TIA0_LNA6_OP1DB_V1,0x30);
+    host::mmio_w32_mask(mmio, CR + R_PATH1_BT_SHARE_V1,         B_PATH1_BT_SHARE_V1,         1);
+    host::mmio_w32_mask(mmio, CR + R_PATH1_BT_SHARE_V1,         B_PATH1_BTG_PATH_V1,         1);
+    host::mmio_w32_mask(mmio, CR + R_PMAC_GNT_CR,               B_PMAC_GNT_P1,               0);
+    host::mmio_w32_mask(mmio, CR + R_CHBW_MOD_V1,               B_BT_SHARE,                  1);
+    host::mmio_w32_mask(mmio, CR + R_FC0_BW_V1,                 B_ANT_RX_BT_SEG0,            2);
+    host::mmio_w32_mask(mmio, CR + R_BT_DYN_DC_EST_EN_V1,       B_BT_DYN_DC_EST_EN_MSK,      1);
+    host::mmio_w32_mask(mmio, CR + R_GNT_BT_WGT_EN,             B_GNT_BT_WGT_EN,             1);
+
     // TXPW_RSTB release — toggle 1 then 3 on both paths
     host::mmio_w32_mask(mmio, CR + R_P0_TXPW_RSTB, B_TXPW_RSTB, 1);
     host::mmio_w32_mask(mmio, CR + R_P0_TXPW_RSTB, B_TXPW_RSTB, 3);
@@ -500,7 +536,7 @@ pub fn bb_cfg_txrx_path(mmio: i32) {
     // MAC_SEL.MOD = 0 (last write in Linux cfg_txrx_path)
     host::mmio_w32_mask(mmio, CR + R_MAC_SEL, B_MAC_SEL_MOD, 0);
 
-    host::print("  TXRX: bb_cfg_txrx_path (RFMODE=0x1233312, RX_SEG=3, TXPW_RSTB released)\n");
+    host::print("  TXRX: bb_cfg_txrx_path (RFMODE=0x1233312, BT-share ON, TXPW_RSTB released)\n");
 }
 
 pub fn apply_txpwr_ctrl(mmio: i32) {
