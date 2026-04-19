@@ -312,6 +312,8 @@ pub const R_AX_TXBD_RWPTR_CLR1: u32   = 0x1014;
 pub const R_AX_RXBD_RWPTR_CLR: u32    = 0x1018;
 pub const R_AX_PCIE_DMA_BUSY1: u32    = 0x101C;
 
+pub const B_AX_STOP_CH8: u32     = 1 << 16;
+pub const B_AX_STOP_CH9: u32     = 1 << 17;
 pub const B_AX_STOP_CH12: u32    = 1 << 18;
 pub const B_AX_STOP_WPDMA: u32   = 1 << 19;
 pub const B_AX_STOP_PCIEIO: u32  = 1 << 20;

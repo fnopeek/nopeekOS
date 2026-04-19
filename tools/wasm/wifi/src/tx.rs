@@ -90,24 +90,41 @@ pub fn alloc() -> Option<TxRing> {
 }
 
 /// Program the CH8 TXBD ring into HW. Call once after alloc(), before any
-/// send. Mirrors rtw89_pci_reset_trx_rings for CH8 (pci.c:1776).
+/// send. Mirrors rtw89_pci_reset_trx_rings for CH8 (pci.c:1776) plus the
+/// Linux disable→configure→enable sequence (pci.c:3105/3130).
+///
+/// Why the disable wrap: mac_init already enabled ALL TX DMA channels via
+/// mac::pcie_post_init (clearing STOP bits in R_AX_PCIE_DMA_STOP1) long
+/// before we configure the CH8 ring. A DMA channel that is enabled while
+/// its DESA/NUM/BDRAM registers are garbage sits in a partial-error
+/// state; later configuring the ring doesn't necessarily clear that
+/// state. Linux avoids the whole problem by doing
+/// `ctrl_dma_all(false) → reset_trx_rings() → ctrl_dma_all(true)`
+/// atomically. We mimic that for CH8 specifically.
 pub fn init_ch8(mmio: i32, ring: &TxRing) {
-    // 1. Reset wp/rp in HW
-    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, regs::B_AX_CLR_CH8_IDX);
+    // 1. STOP CH8 DMA while we rewrite the descriptors.
+    host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, regs::B_AX_STOP_CH8);
 
-    // 2. DMA base address (low + high)
-    host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_L, ring.bd_phys as u32);
-    host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_H, (ring.bd_phys >> 32) as u32);
-
-    // 3. Ring size (16-bit write, like Linux)
+    // 2. Ring size (16-bit write, like Linux order: NUM before DESA).
     host::mmio_w16(mmio, regs::R_AX_CH8_TXBD_NUM, BD_NUM as u16);
 
-    // 4. BDRAM config: start_idx[7:0] | max_num[15:8] | min_num[23:16]
+    // 3. BDRAM config: start_idx[7:0] | max_num[15:8] | min_num[23:16]
     let bdram = (BDRAM_SIDX & 0xFF)
               | ((BDRAM_MAX & 0xFF) << 8)
               | ((BDRAM_MIN & 0xFF) << 16);
     host::mmio_w32(mmio, regs::R_AX_CH8_BDRAM_CTRL, bdram);
 
+    // 4. DMA base address (low + high, matching Linux order).
+    host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_L, ring.bd_phys as u32);
+    host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_H, (ring.bd_phys >> 32) as u32);
+
+    // 5. Reset wp/rp pointers AFTER DESA/NUM/BDRAM are in place.
+    host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, regs::B_AX_CLR_CH8_IDX);
+
+    host::fence();
+
+    // 6. Re-enable CH8 DMA with valid ring state.
+    host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, regs::B_AX_STOP_CH8);
     host::fence();
 }
 
