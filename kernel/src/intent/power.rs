@@ -2,8 +2,12 @@
 //!
 //! Samples per-core effective frequency + hardware activity (from APERF/MPERF
 //! tracked in smp::per_core), package energy (RAPL MSR 0x611), HWP request
-//! (MSR 0x774 on Core 0), and package C-state residencies. Reports over a
-//! 1-second interval to expose whether cores actually idle.
+//! (MSR 0x774 on Core 0). Reports over a 1-second interval to expose whether
+//! cores actually idle.
+//!
+//! Package C-state residency MSRs (0x3F8/3F9/3FA/60D) are omitted — their
+//! presence varies across Intel families and we have no #GP recovery.
+//! Revisit when an IDT-level safe_rdmsr lands.
 
 use crate::kprintln;
 use crate::smp::per_core;
@@ -14,93 +18,82 @@ const MSR_RAPL_POWER_UNIT: u32 = 0x606;
 const MSR_PKG_ENERGY_STATUS: u32 = 0x611;
 /// MSR 0x774 IA32_HWP_REQUEST — per-core perf/EPP request
 const MSR_HWP_REQUEST: u32 = 0x774;
-/// Package C-state residency counters (tick at TSC rate in that state)
-const MSR_PKG_C2_RES: u32 = 0x60D;
-const MSR_PKG_C3_RES: u32 = 0x3F8;
-const MSR_PKG_C6_RES: u32 = 0x3F9;
-const MSR_PKG_C7_RES: u32 = 0x3FA;
 
 #[inline]
 fn rdmsr(msr: u32) -> u64 {
     let (lo, hi): (u32, u32);
-    // SAFETY: ring-0, rdmsr on advertised-supported MSRs.
-    // Caller must ensure MSR exists on this CPU (guarded at call sites).
+    // SAFETY: ring-0, caller guarantees MSR is supported on this CPU.
     unsafe { core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi); }
     ((hi as u64) << 32) | lo as u64
 }
 
-/// Try-read an MSR; returns None on #GP (not supported).
-/// We don't trap — instead require callers to verify via CPUID first.
-/// For the snapshot we read unconditionally; a missing MSR returns 0 on
-/// some models but panics on others. Alder Lake-N supports all used MSRs.
-fn rdmsr_safe(msr: u32) -> u64 { rdmsr(msr) }
+/// CPUID.06H:EAX bit 14 — RAPL Package thermal and power interface support.
+fn has_rapl() -> bool {
+    let eax: u32;
+    // SAFETY: CPUID leaf 6 exists on all x86_64.
+    unsafe {
+        core::arch::asm!(
+            "push rbx", "mov eax, 6", "cpuid", "mov {0:e}, eax", "pop rbx",
+            out(reg) eax, out("ecx") _, out("edx") _,
+        );
+    }
+    eax & (1 << 14) != 0
+}
 
 pub fn intent_power() {
     let tsc_hz = crate::interrupts::tsc_freq();
     let tsc_mhz = tsc_hz / 1_000_000;
+    let rapl_ok = has_rapl();
 
-    // RAPL energy unit — MSR 0x606, bits [12:8]
-    let unit_raw = rdmsr_safe(MSR_RAPL_POWER_UNIT);
-    let energy_bits = ((unit_raw >> 8) & 0x1F) as u32;
-    // 1 unit = 2^-energy_bits Joules. Common value: 14 → 1 unit = 61 µJ.
-
-    // Initial package energy + TSC
-    let e0 = rdmsr_safe(MSR_PKG_ENERGY_STATUS) & 0xFFFF_FFFF;
-    let c2_0 = rdmsr_safe(MSR_PKG_C2_RES);
-    let c3_0 = rdmsr_safe(MSR_PKG_C3_RES);
-    let c6_0 = rdmsr_safe(MSR_PKG_C6_RES);
-    let c7_0 = rdmsr_safe(MSR_PKG_C7_RES);
-    let tsc0 = crate::interrupts::rdtsc();
+    // RAPL energy unit + initial counter
+    let (energy_bits, e0) = if rapl_ok {
+        let u = rdmsr(MSR_RAPL_POWER_UNIT);
+        let e = rdmsr(MSR_PKG_ENERGY_STATUS) & 0xFFFF_FFFF;
+        (((u >> 8) & 0x1F) as u32, e)
+    } else {
+        (0, 0)
+    };
 
     // HWP state (Core 0)
-    let hwp = rdmsr_safe(MSR_HWP_REQUEST);
+    let hwp = rdmsr(MSR_HWP_REQUEST);
     let hwp_min = (hwp & 0xFF) as u32;
     let hwp_max = ((hwp >> 8) & 0xFF) as u32;
     let hwp_des = ((hwp >> 16) & 0xFF) as u32;
     let hwp_epp = ((hwp >> 24) & 0xFF) as u32;
 
-    // Sample period — ~1 second via TSC spin (but yields via hlt so we idle).
-    // We WANT the CPU to idle during this window so the measurement reflects reality.
+    let tsc0 = crate::interrupts::rdtsc();
+
+    // Sample period — ~1 second via hlt (timer IRQ wakes every 10ms).
+    // We WANT the CPU to idle during this window.
     let deadline = tsc0 + tsc_hz;
     while crate::interrupts::rdtsc() < deadline {
-        // SAFETY: ring-0, interrupts enabled, timer IRQ wakes every 10ms.
+        // SAFETY: ring-0, interrupts enabled, APIC timer will wake us.
         unsafe { core::arch::asm!("hlt"); }
     }
 
-    // End snapshot
-    let e1 = rdmsr_safe(MSR_PKG_ENERGY_STATUS) & 0xFFFF_FFFF;
-    let c2_1 = rdmsr_safe(MSR_PKG_C2_RES);
-    let c3_1 = rdmsr_safe(MSR_PKG_C3_RES);
-    let c6_1 = rdmsr_safe(MSR_PKG_C6_RES);
-    let c7_1 = rdmsr_safe(MSR_PKG_C7_RES);
     let tsc1 = crate::interrupts::rdtsc();
-
     let tsc_delta = tsc1.wrapping_sub(tsc0);
-    let e_delta = e1.wrapping_sub(e0) & 0xFFFF_FFFF;
-    // micro-joules per unit = 10^6 * 2^-energy_bits; multiply first to avoid fp.
-    // Energy in microjoules = e_delta * 1_000_000 >> energy_bits.
-    let uj = (e_delta as u128) * 1_000_000u128 >> energy_bits;
-    // Time in microseconds from TSC.
-    let us = (tsc_delta as u128) / (tsc_mhz as u128).max(1);
-    // Power in milliwatts = uj / us * 1000 (1µJ/1µs = 1W; *1000 for mW)
-    let mw = if us > 0 { (uj * 1000) / us } else { 0 };
 
-    // C-state residency as % of TSC delta
-    let pct = |x: u64| -> u32 {
-        if tsc_delta == 0 { 0 } else { ((x as u128 * 100 / tsc_delta as u128) as u32).min(100) }
+    let mw = if rapl_ok && tsc_delta > 0 {
+        let e1 = rdmsr(MSR_PKG_ENERGY_STATUS) & 0xFFFF_FFFF;
+        let e_delta = e1.wrapping_sub(e0) & 0xFFFF_FFFF;
+        // Energy in microjoules = e_delta * 1_000_000 / 2^energy_bits
+        let uj = (e_delta as u128) * 1_000_000u128 >> energy_bits;
+        let us = (tsc_delta as u128) / (tsc_mhz as u128).max(1);
+        if us > 0 { (uj * 1000) / us } else { 0 }
+    } else {
+        0
     };
-    let c2_pct = pct(c2_1.wrapping_sub(c2_0));
-    let c3_pct = pct(c3_1.wrapping_sub(c3_0));
-    let c6_pct = pct(c6_1.wrapping_sub(c6_0));
-    let c7_pct = pct(c7_1.wrapping_sub(c7_0));
 
     kprintln!();
     kprintln!("  power — 1s sample");
     kprintln!("  ────────────────────────────────────────");
-    kprintln!("  Package:       {}.{:03} W",
-        (mw / 1000) as u32, (mw % 1000) as u32);
-    kprintln!("  Pkg C2/C3/C6/C7 residency: {}% / {}% / {}% / {}%",
-        c2_pct, c3_pct, c6_pct, c7_pct);
+    if rapl_ok {
+        kprintln!("  Package:       {}.{:03} W",
+            (mw / 1000) as u32, (mw % 1000) as u32);
+    } else {
+        kprintln!("  Package:       RAPL unsupported on this CPU");
+    }
     kprintln!();
     kprintln!("  HWP (Core 0):  min={} max={} desired={} EPP={}",
         hwp_min, hwp_max, hwp_des, hwp_epp);
