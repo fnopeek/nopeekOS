@@ -59,6 +59,23 @@ static LAST_TSC_CORE: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
 };
+/// APERF/MPERF snapshots (MSR 0xE8 / 0xE7).
+/// APERF ticks at actual freq when active, MPERF at nominal TSC rate when active.
+/// Ratio APERF/MPERF gives effective running frequency; MPERF/TSC gives activity fraction.
+static LAST_APERF: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+static LAST_MPERF: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+/// Per-core activity fraction (MPERF/TSC * 100), 0-100.
+/// Independent of scheduler bookkeeping — measures hardware reality.
+static CORE_MPERF_PCT: [AtomicU32; 256] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; 256]
+};
 
 /// Per-core active flag: true while executing a scheduler task
 static CORE_ACTIVE: [AtomicBool; 256] = {
@@ -125,34 +142,69 @@ pub fn has_mwait() -> bool {
 
 /// Update per-core CPU usage and frequency.
 ///
-/// Usage: explicit busy-TSC tracking (task execution time / total time).
-///        Independent of MPERF behavior — works on all CPUs.
-/// Freq:  MSR 0x198 (IA32_PERF_STATUS) bits [15:8] = current ratio * 100 MHz
+/// Usage:     explicit busy-TSC tracking (task execution time / total time).
+/// Activity:  MPERF/TSC ratio — hardware-measured fraction of wall clock the
+///            core was not halted. Captures idle that scheduler tracking misses
+///            (e.g. Core 0 in HLT between events).
+/// Freq:      APERF/MPERF * nominal_MHz — effective frequency while running.
+///            Both MSRs stop ticking during C-states, so ratio is independent
+///            of idle; captures true average P-state when active.
+///
+/// Must be called ON the core being measured (rdmsr is core-local).
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
 
-    let busy = CORE_BUSY_TSC[core_id].load(Ordering::Relaxed);
+    // Read APERF (0xE8), MPERF (0xE7), TSC atomically (same instant as possible).
+    // SAFETY: MSRs 0xE7/0xE8 exist on all Intel since Nehalem (CPUID.06H:ECX[0]).
+    let (aperf, mperf): (u64, u64);
+    unsafe {
+        let (a_lo, a_hi, m_lo, m_hi): (u32, u32, u32, u32);
+        core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi);
+        core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi);
+        aperf = ((a_hi as u64) << 32) | a_lo as u64;
+        mperf = ((m_hi as u64) << 32) | m_lo as u64;
+    }
     let tsc = crate::interrupts::rdtsc();
 
+    let busy = CORE_BUSY_TSC[core_id].load(Ordering::Relaxed);
     let prev_busy = LAST_BUSY[core_id].swap(busy, Ordering::Relaxed);
     let prev_tsc = LAST_TSC_CORE[core_id].swap(tsc, Ordering::Relaxed);
+    let prev_aperf = LAST_APERF[core_id].swap(aperf, Ordering::Relaxed);
+    let prev_mperf = LAST_MPERF[core_id].swap(mperf, Ordering::Relaxed);
 
-    if prev_tsc == 0 { return; } // First call
+    if prev_tsc == 0 { return; } // First call — seed only
 
-    let delta_busy = busy.wrapping_sub(prev_busy);
     let delta_tsc = tsc.wrapping_sub(prev_tsc);
+    let delta_aperf = aperf.wrapping_sub(prev_aperf);
+    let delta_mperf = mperf.wrapping_sub(prev_mperf);
+    let delta_busy = busy.wrapping_sub(prev_busy);
 
-    if delta_tsc > 0 {
-        let usage = (delta_busy * 100).checked_div(delta_tsc).unwrap_or(0);
-        CORE_USAGE[core_id].store(usage.min(100) as u32, Ordering::Relaxed);
+    if delta_tsc == 0 { return; }
+
+    // Scheduler-tracked usage (task execution time / wall clock).
+    let sched_pct = (delta_busy * 100 / delta_tsc).min(100) as u32;
+    CORE_USAGE[core_id].store(sched_pct, Ordering::Relaxed);
+
+    // Hardware activity: MPERF delta / TSC delta. 100% = never halted.
+    let mperf_pct = (delta_mperf.saturating_mul(100) / delta_tsc).min(100) as u32;
+    CORE_MPERF_PCT[core_id].store(mperf_pct, Ordering::Relaxed);
+
+    // Effective running frequency: APERF/MPERF * nominal_TSC_freq.
+    // TSC is calibrated to nominal base; MPERF ticks at that same rate.
+    if delta_mperf > 0 {
+        let nominal_mhz = (crate::interrupts::tsc_freq() / 1_000_000) as u64;
+        // Guard against overflow: cap aperf delta ratio implicitly via u128.
+        let eff_mhz = ((delta_aperf as u128) * (nominal_mhz as u128)
+                       / (delta_mperf as u128)) as u64;
+        CORE_MHZ[core_id].store(eff_mhz.min(u32::MAX as u64) as u32, Ordering::Relaxed);
     }
+}
 
-    // Frequency from PERF_STATUS: bits [15:8] = current ratio * 100 MHz bus
-    let perf_lo: u32;
-    // SAFETY: MSR 0x198 readable on all x86_64 Intel in ring 0
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x198u32, out("eax") perf_lo, out("edx") _); }
-    let ratio = (perf_lo >> 8) & 0xFF;
-    CORE_MHZ[core_id].store(ratio * 100, Ordering::Relaxed);
+/// Hardware activity fraction for a core (MPERF/TSC), 0-100.
+/// Unlike core_usage(), this counts any non-halted time — not just scheduled tasks.
+pub fn core_mperf_pct(core_id: usize) -> u32 {
+    if core_id >= 256 { return 0; }
+    CORE_MPERF_PCT[core_id].load(Ordering::Relaxed)
 }
 
 /// Record task execution time on a core (called from AP work loop).

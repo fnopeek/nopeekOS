@@ -7,6 +7,7 @@ mod auth;
 mod fs;
 pub(crate) mod http;
 mod net;
+mod power;
 mod system;
 mod update;
 mod install;
@@ -485,7 +486,9 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             let serial = serial::SERIAL.lock();
             if !serial.has_data() {
                 drop(serial);
-                core::hint::spin_loop();
+                // SAFETY: ring-0 idle — 100Hz APIC timer IRQ wakes us reliably,
+                // and all input paths (keyboard, mouse, NIC) are IRQ-driven.
+                unsafe { core::arch::asm!("hlt"); }
                 continue;
             }
             let b = serial.read_byte();
@@ -795,7 +798,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
                 while let Some(_key) = crate::keyboard::read_key() {}
 
-                for _ in 0..10_000 { core::hint::spin_loop(); }
+                // SAFETY: ring-0, IRQ-driven input — APIC timer + device IRQs wake us.
+                unsafe { core::arch::asm!("hlt"); }
                 continue;
             }
 
@@ -860,7 +864,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::wasm::push_app_key(focused_term, key);
                 }
 
-                for _ in 0..10_000 { core::hint::spin_loop(); }
+                // SAFETY: ring-0, IRQ-driven input — APIC timer + device IRQs wake us.
+                unsafe { core::arch::asm!("hlt"); }
                 continue;
             }
         }
@@ -1283,6 +1288,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             for &b in b"\x1B[2J\x1B[H" {
                 serial.write_byte(b);
             }
+        }
+
+        "power" => {
+            power::intent_power();
         }
 
         // Unrestricted intents (informational)
