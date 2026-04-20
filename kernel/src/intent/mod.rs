@@ -7,7 +7,6 @@ mod auth;
 mod fs;
 pub(crate) mod http;
 mod net;
-mod power;
 mod system;
 mod update;
 mod install;
@@ -1288,10 +1287,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             for &b in b"\x1B[2J\x1B[H" {
                 serial.write_byte(b);
             }
-        }
-
-        "power" => {
-            power::intent_power();
         }
 
         // Unrestricted intents (informational)
