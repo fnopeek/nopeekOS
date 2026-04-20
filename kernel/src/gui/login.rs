@@ -346,7 +346,8 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             // Quick flash of welcome message (0.5s)
                             let start = crate::interrupts::ticks();
                             while crate::interrupts::ticks().wrapping_sub(start) < 50 {
-                                core::hint::spin_loop();
+                                // SAFETY: ring-0, IRQs enabled, APIC timer ticks us.
+                                unsafe { core::arch::asm!("hlt"); }
                             }
 
                             // Exit GUI mode, clear screen for loop
@@ -414,7 +415,8 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                                         0, layout.status_y,
                                         layout.screen_w, 24 * layout.scale);
                                 });
-                                core::hint::spin_loop();
+                                // SAFETY: ring-0, IRQs enabled; APIC timer ticks us each 10ms.
+                                unsafe { core::arch::asm!("hlt"); }
                             }
 
                             // Reset input field
@@ -477,8 +479,11 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                 _ => {}
             }
         } else {
-            // No key — spin (xHCI needs active polling, no IRQ on UEFI-only systems)
-            core::hint::spin_loop();
+            // No key — halt until next IRQ. APIC timer at 100Hz wakes us for
+            // cursor blink / clock updates; USB is IRQ-driven (APIC timer drains
+            // xHCI into SPSC ring), so keys wake us too.
+            // SAFETY: ring-0 idle with interrupts enabled.
+            unsafe { core::arch::asm!("hlt"); }
         }
     }
 }
