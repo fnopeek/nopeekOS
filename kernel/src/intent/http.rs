@@ -158,8 +158,16 @@ fn do_http_request(args: &str, use_tls: bool) {
             match crate::tls::tls_recv(sess, &mut buf) {
                 Ok(0) => {
                     empty_count += 1;
-                    if empty_count > 5 && response.is_empty() { break; }
-                    if empty_count > 2 && !response.is_empty() { break; }
+                    // Response can arrive across multiple TCP segments. Poll the
+                    // net stack and wait ~5ms between zero-reads instead of
+                    // tight-looping in microseconds (starves slow links like
+                    // QEMU user-mode NAT before the response arrives).
+                    if empty_count > 40 && response.is_empty() { break; } // 200ms
+                    if empty_count > 10 && !response.is_empty() { break; } // 50ms
+                    crate::net::poll();
+                    let end = crate::interrupts::rdtsc()
+                        + crate::interrupts::tsc_freq() / 200; // 5ms
+                    while crate::interrupts::rdtsc() < end { core::hint::spin_loop(); }
                 }
                 Ok(n) => { response.extend_from_slice(&buf[..n]); empty_count = 0; }
                 Err(_) => break,
