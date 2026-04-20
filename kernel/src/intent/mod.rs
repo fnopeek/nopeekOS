@@ -478,9 +478,16 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             continue;
         }
 
-        // Read keyboard input as KeyEvent (or serial fallback)
+        // Read keyboard input as KeyEvent (or serial fallback).
+        // When shade is active, USB keyboard is the only input — serial is
+        // skipped entirely to avoid cross-consumption races between sources.
         let event = if let Some(evt) = crate::keyboard::read_event() {
             evt
+        } else if crate::shade::is_active() {
+            // Shade mode — idle until next IRQ (keyboard / mouse / timer).
+            // SAFETY: ring-0, IRQs enabled.
+            unsafe { core::arch::asm!("hlt"); }
+            continue;
         } else {
             let serial = serial::SERIAL.lock();
             if !serial.has_data() {
@@ -490,7 +497,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 unsafe { core::arch::asm!("hlt"); }
                 continue;
             }
-            let b = serial.read_byte();
+            // Use raw serial read — read_byte() has a legacy loop that also
+            // polls the USB keyboard, which would race with read_event() above
+            // and cause the two input sources to steal each other's keys.
+            let b = serial.read_serial_raw();
             drop(serial);
             // Serial: basic byte-to-KeyEvent (no modifier capture)
             match b {
@@ -797,8 +807,15 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
                 while let Some(_key) = crate::keyboard::read_key() {}
 
-                // SAFETY: ring-0, IRQ-driven input — APIC timer + device IRQs wake us.
-                unsafe { core::arch::asm!("hlt"); }
+                // While a worker task is running we poll (pause) instead of hlt.
+                // Rationale: hlt + HWP EPP=192 can sink Core 0 deep enough that the
+                // LAPIC timer stalls on some platforms (observed on ADL-N); without
+                // a steady timer tick we'd miss the worker's completion signal.
+                // Net/mouse/key IRQs still wake us, but we can't rely on them
+                // during a silent HTTP stall. Pause keeps the core in C0 cheaply.
+                for _ in 0..5_000 {
+                    core::hint::spin_loop();
+                }
                 continue;
             }
 
@@ -863,8 +880,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::wasm::push_app_key(focused_term, key);
                 }
 
-                // SAFETY: ring-0, IRQ-driven input — APIC timer + device IRQs wake us.
-                unsafe { core::arch::asm!("hlt"); }
+                // Poll (pause) — same rationale as the intent-running branch:
+                // while a WASM app runs on a worker, Core 0 must keep ticking to
+                // forward keys and detect completion even if the LAPIC timer
+                // stalls in deep C-states.
+                for _ in 0..5_000 {
+                    core::hint::spin_loop();
+                }
                 continue;
             }
         }

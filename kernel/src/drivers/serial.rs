@@ -100,6 +100,15 @@ impl SerialPort {
         self.port_exists && unsafe { (inb(self.base + 5) & 0x01) != 0 }
     }
 
+    /// Read a single byte directly from the UART receive register.
+    /// Unlike read_byte(), this does NOT fall back to the USB keyboard.
+    /// Caller must check has_data() first. Use from paths that already
+    /// poll the USB keyboard separately (e.g. the intent loop) so the
+    /// two input sources don't steal each other's keystrokes.
+    pub fn read_serial_raw(&self) -> u8 {
+        unsafe { inb(self.base) }
+    }
+
     /// Read a line with masked echo (shows '*'), returns length.
     pub fn read_line_masked(&self, buf: &mut [u8]) -> usize {
         let mut pos = 0;
