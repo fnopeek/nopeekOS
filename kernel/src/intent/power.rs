@@ -41,64 +41,69 @@ fn has_rapl() -> bool {
 }
 
 pub fn intent_power() {
-    let tsc_hz = crate::interrupts::tsc_freq();
-    let tsc_mhz = tsc_hz / 1_000_000;
+    kprintln!();
+    kprintln!("  power — diagnostic snapshot");
+    kprintln!("  ────────────────────────────────────────");
+
+    // Step 1: CPUID — cannot trap
     let rapl_ok = has_rapl();
+    kprintln!("  [1] RAPL supported (CPUID.06H:EAX[14]): {}", rapl_ok);
 
-    // RAPL energy unit + initial counter
-    let (energy_bits, e0) = if rapl_ok {
-        let u = rdmsr(MSR_RAPL_POWER_UNIT);
-        let e = rdmsr(MSR_PKG_ENERGY_STATUS) & 0xFFFF_FFFF;
-        (((u >> 8) & 0x1F) as u32, e)
-    } else {
-        (0, 0)
-    };
-
-    // HWP state (Core 0)
+    // Step 2: HWP_REQUEST — HWP was enabled at boot, so MSR 0x774 must exist
     let hwp = rdmsr(MSR_HWP_REQUEST);
     let hwp_min = (hwp & 0xFF) as u32;
     let hwp_max = ((hwp >> 8) & 0xFF) as u32;
     let hwp_des = ((hwp >> 16) & 0xFF) as u32;
     let hwp_epp = ((hwp >> 24) & 0xFF) as u32;
+    kprintln!("  [2] HWP req    min={} max={} desired={} EPP={}",
+        hwp_min, hwp_max, hwp_des, hwp_epp);
+    kprintln!("      HWP caps   {}-{} MHz",
+        per_core::min_eff_mhz(), per_core::max_turbo_mhz());
 
-    let tsc0 = crate::interrupts::rdtsc();
+    // Step 3: RAPL — only if CPUID signalled support
+    let (energy_bits, e0) = if rapl_ok {
+        let u = rdmsr(MSR_RAPL_POWER_UNIT);
+        let e = rdmsr(MSR_PKG_ENERGY_STATUS) & 0xFFFF_FFFF;
+        let bits = ((u >> 8) & 0x1F) as u32;
+        kprintln!("  [3] RAPL unit  2^-{} J/unit, initial counter={:#x}", bits, e);
+        (bits, e)
+    } else {
+        kprintln!("  [3] RAPL skipped (not supported)");
+        (0, 0)
+    };
 
-    // Sample period — ~1 second via hlt (timer IRQ wakes every 10ms).
-    // We WANT the CPU to idle during this window.
-    let deadline = tsc0 + tsc_hz;
-    while crate::interrupts::rdtsc() < deadline {
-        // SAFETY: ring-0, interrupts enabled, APIC timer will wake us.
+    // Step 4: 1-second wait driven by the 100Hz tick counter (timer IRQ).
+    // Using ticks() instead of raw rdtsc spin avoids any issue where
+    // rdtsc returns a value that makes the deadline unreachable.
+    let t0_ticks = crate::interrupts::ticks();
+    kprintln!("  [4] sampling for 100 ticks (~1s) via hlt...");
+
+    while crate::interrupts::ticks().wrapping_sub(t0_ticks) < 100 {
+        // SAFETY: Core 0 event-dispatcher context — IF=1 (keyboard IRQ works).
+        // Timer IRQ increments ticks every 10ms, guaranteeing progress.
         unsafe { core::arch::asm!("hlt"); }
     }
 
-    let tsc1 = crate::interrupts::rdtsc();
-    let tsc_delta = tsc1.wrapping_sub(tsc0);
+    let elapsed_ticks = crate::interrupts::ticks().wrapping_sub(t0_ticks);
+    kprintln!("  [5] sample done ({} ticks elapsed)", elapsed_ticks);
 
-    let mw = if rapl_ok && tsc_delta > 0 {
+    // Step 6: final RAPL read + package power calculation
+    if rapl_ok {
         let e1 = rdmsr(MSR_PKG_ENERGY_STATUS) & 0xFFFF_FFFF;
         let e_delta = e1.wrapping_sub(e0) & 0xFFFF_FFFF;
-        // Energy in microjoules = e_delta * 1_000_000 / 2^energy_bits
-        let uj = (e_delta as u128) * 1_000_000u128 >> energy_bits;
-        let us = (tsc_delta as u128) / (tsc_mhz as u128).max(1);
-        if us > 0 { (uj * 1000) / us } else { 0 }
-    } else {
-        0
-    };
-
-    kprintln!();
-    kprintln!("  power — 1s sample");
-    kprintln!("  ────────────────────────────────────────");
-    if rapl_ok {
-        kprintln!("  Package:       {}.{:03} W",
-            (mw / 1000) as u32, (mw % 1000) as u32);
-    } else {
-        kprintln!("  Package:       RAPL unsupported on this CPU");
+        // ticks are 100Hz → elapsed_ticks/100 seconds
+        // Energy J = e_delta / 2^energy_bits
+        // Power W = Energy / seconds = (e_delta / 2^bits) * 100 / elapsed_ticks
+        // In milliwatts: (e_delta * 1000 * 100 / 2^bits) / elapsed_ticks
+        let mw = if elapsed_ticks > 0 {
+            let num = (e_delta as u128) * 100_000u128 >> energy_bits;
+            num / elapsed_ticks as u128
+        } else {
+            0
+        };
+        kprintln!("  [6] e_delta={}  ->  Package: {}.{:03} W",
+            e_delta, (mw / 1000) as u32, (mw % 1000) as u32);
     }
-    kprintln!();
-    kprintln!("  HWP (Core 0):  min={} max={} desired={} EPP={}",
-        hwp_min, hwp_max, hwp_des, hwp_epp);
-    kprintln!("  HWP caps:      {}-{} MHz (from CPUID/HWP_CAPABILITIES)",
-        per_core::min_eff_mhz(), per_core::max_turbo_mhz());
     kprintln!();
 
     // Per-core view. CORE_MHZ / CORE_MPERF_PCT updated by each core's own
