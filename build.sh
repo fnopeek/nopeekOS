@@ -21,6 +21,8 @@ TARGET="x86_64-unknown-none"
 KERNEL_BIN="$PROJECT_DIR/target/$TARGET/release/nopeekos-kernel"
 ISO_DIR="$PROJECT_DIR/target/iso"
 ISO_FILE="$PROJECT_DIR/target/nopeekos.iso"
+QEMU_ISO_DIR="$PROJECT_DIR/target/iso-qemu"
+QEMU_ISO_FILE="$PROJECT_DIR/target/nopeekos-qemu.iso"
 DISK_IMG="$PROJECT_DIR/target/disk.img"
 VM_NAME="nopeekOS"
 
@@ -87,6 +89,33 @@ GRUBCFG
         ok "Disk image: $DISK_IMG"
     fi
 
+    echo ""
+}
+
+# Build a QEMU-specific ISO with fixed FullHD gfxmode. Bare-metal ISO keeps
+# gfxpayload=auto so the native GPU driver owns resolution selection.
+build_qemu_iso() {
+    log "Creating QEMU ISO (FullHD)..."
+    mkdir -p "$QEMU_ISO_DIR/boot/grub"
+    cp "$KERNEL_BIN" "$QEMU_ISO_DIR/boot/kernel.bin"
+
+    cat > "$QEMU_ISO_DIR/boot/grub/grub.cfg" << 'GRUBCFG'
+set timeout=0
+set default=0
+
+insmod efi_gop
+insmod all_video
+set gfxmode=1920x1080x32,1280x720x32,auto
+set gfxpayload=keep
+
+menuentry "nopeekOS" {
+    multiboot2 /boot/kernel.bin
+    boot
+}
+GRUBCFG
+
+    grub-mkrescue -o "$QEMU_ISO_FILE" "$QEMU_ISO_DIR" 2>/dev/null
+    ok "QEMU ISO: $QEMU_ISO_FILE"
     echo ""
 }
 
@@ -160,58 +189,63 @@ GRUBCFG
 # ============================================================
 
 run_qemu() {
-    if [ ! -f "$ISO_FILE" ]; then
-        err "No ISO found. Run './build.sh build' first."
-        exit 1
-    fi
+    build_qemu_iso
 
     log "Launching QEMU..."
     log "Serial console on stdio. Ctrl-A X to quit QEMU."
     echo ""
 
     qemu-system-x86_64 \
-        -cdrom "$ISO_FILE" \
+        -enable-kvm \
+        -cpu Haswell,+invtsc \
+        -overcommit cpu-pm=on \
+        -cdrom "$QEMU_ISO_FILE" \
         -serial stdio \
         -display none \
-        -m 128M \
+        -m 256M \
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
+        -device qemu-xhci,id=xhci \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
         -no-reboot \
         -no-shutdown
 }
 
 run_qemu_gui() {
-    if [ ! -f "$ISO_FILE" ]; then
-        err "No ISO found. Run './build.sh build' first."
-        exit 1
-    fi
+    build_qemu_iso
 
-    log "Launching QEMU with GUI + serial on stdio..."
-    log "VGA window shows boot banner. Serial I/O in this terminal."
-    log "Ctrl-A X to quit."
+    log "Launching QEMU GUI @ 1920x1080 (SeaBIOS + std VGA)..."
+    log "Serial I/O in this terminal. Ctrl-A X to quit."
     echo ""
 
     qemu-system-x86_64 \
-        -cdrom "$ISO_FILE" \
+        -enable-kvm \
+        -cpu Haswell,+invtsc \
+        -overcommit cpu-pm=on \
+        -cdrom "$QEMU_ISO_FILE" \
         -serial stdio \
-        -m 128M \
+        -vga std \
+        -global driver=VGA,property=xres,value=1920 \
+        -global driver=VGA,property=yres,value=1080 \
+        -m 256M \
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
+        -device qemu-xhci,id=xhci \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
         -no-reboot \
         -no-shutdown
 }
 
 run_debug() {
-    if [ ! -f "$ISO_FILE" ]; then
-        err "No ISO found. Run './build.sh build' first."
-        exit 1
-    fi
+    build_qemu_iso
 
     log "Launching QEMU with GDB stub on :1234..."
     warn "Waiting for GDB connection. In another terminal:"
@@ -219,14 +253,20 @@ run_debug() {
     echo ""
 
     qemu-system-x86_64 \
-        -cdrom "$ISO_FILE" \
+        -enable-kvm \
+        -cpu Haswell,+invtsc \
+        -overcommit cpu-pm=on \
+        -cdrom "$QEMU_ISO_FILE" \
         -serial stdio \
         -display none \
-        -m 128M \
+        -m 256M \
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device virtio-blk-pci,drive=drive0 \
+        -device qemu-xhci,id=xhci \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
         -no-reboot \
         -no-shutdown \

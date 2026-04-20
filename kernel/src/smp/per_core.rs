@@ -32,6 +32,10 @@ static SCHEDULER_READY: AtomicBool = AtomicBool::new(false);
 /// True if CPU supports MONITOR/MWAIT (detected at boot)
 static HAS_MWAIT: AtomicBool = AtomicBool::new(false);
 
+/// True if CPU supports IA32_APERF/IA32_MPERF MSRs (CPUID.06H:ECX[0]).
+/// Intel since Nehalem; not present on AMD / qemu64. Guarded at every rdmsr.
+static HAS_APERFMPERF: AtomicBool = AtomicBool::new(false);
+
 /// Per-core average frequency in MHz (APERF/MPERF ratio)
 static CORE_MHZ: [AtomicU32; 256] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
@@ -111,6 +115,23 @@ pub fn register_bsp(apic_id: u32) {
         );
     }
     HAS_MWAIT.store(ecx & (1 << 3) != 0, Ordering::Release);
+
+    // Detect IA32_APERF/IA32_MPERF via CPUID.06H:ECX[0]
+    // Absent on AMD and on KVM guest w/ generic `-cpu qemu64`.
+    let ecx: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 6",
+            "cpuid",
+            "mov {0:e}, ecx",
+            "pop rbx",
+            out(reg) ecx,
+            out("eax") _,
+            out("edx") _,
+        );
+    }
+    HAS_APERFMPERF.store(ecx & 1 != 0, Ordering::Release);
 }
 
 pub fn register_ap(apic_id: u32, core_id: u32) {
@@ -154,16 +175,22 @@ pub fn has_mwait() -> bool {
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
 
-    // Read APERF (0xE8), MPERF (0xE7), TSC atomically (same instant as possible).
-    // SAFETY: MSRs 0xE7/0xE8 exist on all Intel since Nehalem (CPUID.06H:ECX[0]).
-    let (aperf, mperf): (u64, u64);
-    unsafe {
-        let (a_lo, a_hi, m_lo, m_hi): (u32, u32, u32, u32);
-        core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi);
-        core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi);
-        aperf = ((a_hi as u64) << 32) | a_lo as u64;
-        mperf = ((m_hi as u64) << 32) | m_lo as u64;
-    }
+    // APERF/MPERF are gated by CPUID.06H:ECX[0] — absent on AMD and on KVM
+    // guests with `-cpu qemu64`. Reading them unconditionally raises #GP.
+    let has_apmp = HAS_APERFMPERF.load(Ordering::Relaxed);
+
+    let (aperf, mperf): (u64, u64) = if has_apmp {
+        // SAFETY: MSRs 0xE7/0xE8 confirmed by CPUID gate above.
+        unsafe {
+            let (a_lo, a_hi, m_lo, m_hi): (u32, u32, u32, u32);
+            core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi);
+            core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi);
+            (((a_hi as u64) << 32) | a_lo as u64,
+             ((m_hi as u64) << 32) | m_lo as u64)
+        }
+    } else {
+        (0, 0)
+    };
     let tsc = crate::interrupts::rdtsc();
 
     let busy = CORE_BUSY_TSC[core_id].load(Ordering::Relaxed);
