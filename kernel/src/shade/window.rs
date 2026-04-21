@@ -21,6 +21,20 @@ pub enum WindowState {
     Fullscreen,
 }
 
+/// What kind of content the window renders.
+///
+/// - `Terminal`: classic `loop` window with a per-window terminal
+///   buffer (existing behaviour — keyboard input, text output,
+///   intent prompt). Uses `terminal_idx`.
+/// - `Widget`: Phase 10 declarative GUI app window. Content is a
+///   BGRA pixel buffer rendered by the widget pipeline from the
+///   last committed tree. Doesn't own a terminal buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowKind {
+    Terminal,
+    Widget,
+}
+
 /// A single window managed by the compositor.
 /// No pixel buffer — rendering goes directly to the shadow buffer.
 #[allow(dead_code)]
@@ -49,6 +63,8 @@ pub struct Window {
     pub resize_h: i32,
     /// Process ID in process table (0 = not registered).
     pub pid: u32,
+    /// Content kind — Terminal (classic loop) or Widget (Phase 10 GUI).
+    pub kind: WindowKind,
 }
 
 #[allow(dead_code)]
@@ -72,6 +88,7 @@ impl Window {
             resize_w: 0,
             resize_h: 0,
             pid: 0,
+            kind: WindowKind::Terminal,
         }
     }
 

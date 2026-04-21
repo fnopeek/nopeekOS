@@ -159,6 +159,7 @@ impl Compositor {
         let mut win = Window::new(id, title, x, y, w, h);
         win.workspace = self.active_workspace;
         win.terminal_idx = terminal_idx;
+        win.kind = crate::shade::window::WindowKind::Terminal;
         crate::intent::create_session(terminal_idx);
 
         // Register window as a process in the process table
@@ -174,13 +175,47 @@ impl Compositor {
         Some(id)
     }
 
+    /// Create a widget-kind window for a Phase 10 GUI app. Doesn't
+    /// allocate a terminal buffer (widget apps aren't text-driven).
+    /// Focus stays on the current window so the spawning shell keeps
+    /// receiving the user's input.
+    pub fn create_widget_window(&mut self, title: &str) -> WindowId {
+        let id = WindowId(self.next_id);
+        self.next_id += 1;
+
+        let mut win = Window::new(id, title, 0, 0, 100, 100);
+        win.workspace = self.active_workspace;
+        win.terminal_idx = 255; // sentinel — no terminal buffer owned
+        win.kind = crate::shade::window::WindowKind::Widget;
+        win.pid = 0;
+
+        self.windows.push(win);
+        self.z_order.insert(0, id);
+        // Deliberately NOT focus_window(id) — keep focus on the shell
+        // that spawned us, so the user's next keystroke lands there.
+        self.retile();
+        self.needs_full_redraw = true;
+
+        id
+    }
+
     /// Close a window by ID.
     pub fn close_window(&mut self, id: WindowId) {
         // Free session + terminal buffer + process before removing window
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
-            crate::intent::destroy_session(win.terminal_idx);
-            terminal::free(win.terminal_idx);
-            if win.pid != 0 { crate::process::exit(win.pid); }
+            match win.kind {
+                crate::shade::window::WindowKind::Terminal => {
+                    crate::intent::destroy_session(win.terminal_idx);
+                    terminal::free(win.terminal_idx);
+                    if win.pid != 0 { crate::process::exit(win.pid); }
+                }
+                crate::shade::window::WindowKind::Widget => {
+                    // No terminal buffer / session to free. Drop the
+                    // per-window widget scene; its backing pixel Vec
+                    // frees with the entry.
+                    crate::shade::widgets::remove_scene(id.0);
+                }
+            }
         }
         self.windows.retain(|w| w.id != id);
         self.z_order.retain(|&wid| wid != id);
@@ -403,7 +438,9 @@ impl Compositor {
         background::draw_background_region(shadow, info,
             win.x, win.y, win.width, win.height);
 
-        // 2. Border blend (gradient if theme active + window focused)
+        // 2. Border blend (gradient if theme active + window focused) —
+        // same chrome for Terminal and Widget so widget-apps look
+        // identical to loops from the outside (rounded corners etc.)
         if crate::theme::is_active() && win.focused {
             let (ga, gb) = crate::theme::border_gradient();
             render::fill_rounded_rect_gradient(shadow, info,
@@ -425,21 +462,56 @@ impl Compositor {
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
 
-        // 4. Cache the clean background for the input line (before text)
-        let pad = 6 * scale;
-        let text_x = cx + pad;
-        let text_y = cy + pad;
-        let text_w = cw.saturating_sub(pad * 2);
-        let text_h = ch.saturating_sub(pad * 2);
-        if win.focused {
-            terminal::cache_input_line_bg(shadow, info,
-                text_x, text_y, text_w, text_h, win.terminal_idx);
+        // 4. Content-kind specific draw.
+        match win.kind {
+            crate::shade::window::WindowKind::Terminal => {
+                // 4a. Cache the clean background for the input line
+                //     (before text)
+                let pad = 6 * scale;
+                let text_x = cx + pad;
+                let text_y = cy + pad;
+                let text_w = cw.saturating_sub(pad * 2);
+                let text_h = ch.saturating_sub(pad * 2);
+                if win.focused {
+                    terminal::cache_input_line_bg(shadow, info,
+                        text_x, text_y, text_w, text_h, win.terminal_idx);
+                }
+                // 4b. Text on clean background
+                terminal::render_to_window(shadow, info,
+                    text_x, text_y, text_w, text_h,
+                    scale, win.terminal_idx);
+            }
+            crate::shade::window::WindowKind::Widget => {
+                // 4a. If the content rect has moved or resized since
+                //     the last commit, re-layout from the cached tree
+                //     (the app itself may have exited — can't re-commit).
+                let _ = crate::shade::widgets::relayout_scene(
+                    win.id.0, cx as i32, cy as i32, cw, ch,
+                );
+                // 4b. Blit scene pixels into the content rect.
+                crate::shade::widgets::with_scene(win.id.0, |scene| {
+                    let pitch = info.pitch as usize;
+                    let fb_w = info.width;
+                    let fb_h = info.height;
+                    let x1 = (cx + scene.width).min(fb_w);
+                    let y1 = (cy + scene.height).min(fb_h);
+                    for dy in cy..y1 {
+                        let src_y = (dy - cy) as usize;
+                        let dst_off = dy as usize * pitch + cx as usize * 4;
+                        let span = (x1 - cx) as usize;
+                        unsafe {
+                            let dst = shadow.add(dst_off) as *mut u32;
+                            core::ptr::copy_nonoverlapping(
+                                scene.pixels.as_ptr().add(src_y * scene.width as usize),
+                                dst,
+                                span,
+                            );
+                        }
+                    }
+                    let _ = y1;
+                });
+            }
         }
-
-        // 5. Text on clean background
-        terminal::render_to_window(shadow, info,
-            text_x, text_y, text_w, text_h,
-            scale, win.terminal_idx);
     }
 
     /// Render only changed regions. Returns list of (x, y, w, h) to blit.
