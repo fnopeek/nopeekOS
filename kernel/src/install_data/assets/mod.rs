@@ -45,19 +45,19 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
     // ── First-party WASM modules ──────────────────────────────────
     // Keep in sync with release/modules/ output of build.sh release.
     BundledAsset {
-        fs_path: "sys/modules/top",
+        fs_path: "sys/wasm/top",
         bytes:   include_bytes!("top.wasm"),
     },
     BundledAsset {
-        fs_path: "sys/modules/debug",
+        fs_path: "sys/wasm/debug",
         bytes:   include_bytes!("debug.wasm"),
     },
     BundledAsset {
-        fs_path: "sys/modules/wallpaper",
+        fs_path: "sys/wasm/wallpaper",
         bytes:   include_bytes!("wallpaper.wasm"),
     },
     BundledAsset {
-        fs_path: "sys/modules/wifi",
+        fs_path: "sys/wasm/wifi",
         bytes:   include_bytes!("wifi.wasm"),
     },
 ];
