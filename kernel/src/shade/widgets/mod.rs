@@ -56,6 +56,11 @@ pub struct WidgetScene {
     /// allowed to exit after a single commit.
     pub tree:        abi::Widget,
     pub layout_tree: layout::LayoutNode,
+    /// blake3 hash of the postcard payload that produced this
+    /// scene. P10.6: lets scene_commit short-circuit when an app
+    /// resubmits the same tree (common with interactive apps that
+    /// re-commit on every event loop iteration).
+    pub payload_hash: [u8; 32],
 }
 
 static SCENES: Mutex<BTreeMap<u32, WidgetScene>> = Mutex::new(BTreeMap::new());
@@ -112,6 +117,24 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
         );
         return -1;
     }
+    // P10.6: hash the payload and short-circuit if it matches the
+    // cached scene. Fast path for apps that re-commit identical
+    // trees (happens on every event poll iteration in an idle app).
+    // Hash the full `bytes` (version byte + body) so any wire-level
+    // change (incl. version bump) invalidates the cache.
+    let incoming_hash: [u8; 32] = *blake3::hash(bytes).as_bytes();
+    if window_id != 0 {
+        if let Some(cached_hash) = SCENES.lock().get(&window_id).map(|s| s.payload_hash) {
+            if cached_hash == incoming_hash {
+                crate::kprintln!(
+                    "[npk] scene_commit: {} bytes → cache hit, skip re-render",
+                    bytes.len(),
+                );
+                return 0;
+            }
+        }
+    }
+
     let tree: abi::Widget = match postcard::from_bytes(body) {
         Ok(t) => t,
         Err(e) => {
@@ -182,6 +205,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
         origin_y:    win_y,
         tree:        tree.clone(),
         layout_tree,
+        payload_hash: incoming_hash,
     });
 
     // Mark the window dirty so shade paints it in the next render,
