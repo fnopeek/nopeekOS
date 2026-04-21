@@ -1319,8 +1319,20 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "philosophy" => system::intent_philosophy(),
 
         _ => {
-            kprintln!("[npk] Unknown intent: '{}'", input);
-            kprintln!("[npk] Try 'help' for available intents.");
+            // Implicit-run: if `<cmd>` matches a WASM module under
+            // sys/wasm/, execute it with `args`. Makes any installed
+            // app callable by name, same UX as built-in intents.
+            // Hardcoded dispatcher entries above (top/wallpaper/...)
+            // still win for apps that need special run semantics
+            // (interactive, background, etc.).
+            if crate::npkfs::exists(&alloc::format!("sys/wasm/{}", verb)) {
+                if require_cap(vault, &session, Rights::EXECUTE, verb) {
+                    wasm::intent_run(input);
+                }
+            } else {
+                kprintln!("[npk] Unknown intent: '{}'", input);
+                kprintln!("[npk] Try 'help' for available intents.");
+            }
         }
     }
 }
