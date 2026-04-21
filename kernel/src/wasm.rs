@@ -304,15 +304,27 @@ pub fn init() {
 
 /// Execute a WASM module with basic host functions (legacy API for built-in add/multiply)
 pub fn execute(wasm_bytes: &[u8], func_name: &str, args: &[Val]) -> Result<WasmResult, WasmError> {
-    execute_inner(wasm_bytes, func_name, args, capability::CAP_NULL)
+    execute_inner(wasm_bytes, func_name, args, capability::CAP_NULL, DEFAULT_FUEL)
 }
 
 /// Execute a WASM module loaded from npkFS with capability-gated host functions.
-/// The module receives a delegated capability token.
+/// The module receives a delegated capability token. Runs with the default
+/// fuel budget (DEFAULT_FUEL, ~10M instructions).
 pub fn execute_sandboxed(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
 ) -> Result<WasmResult, WasmError> {
-    execute_inner(wasm_bytes, func_name, args, cap_id)
+    execute_inner(wasm_bytes, func_name, args, cap_id, DEFAULT_FUEL)
+}
+
+/// Execute a WASM module with an explicit fuel budget. Use for trusted
+/// first-party modules whose work is deterministically bounded by input
+/// parameters (e.g. wallpaper generation sized by resolution). Do NOT
+/// use for unbundled / untrusted modules — that's what DEFAULT_FUEL
+/// guards against.
+pub fn execute_sandboxed_with_fuel(
+    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
+) -> Result<WasmResult, WasmError> {
+    execute_inner(wasm_bytes, func_name, args, cap_id, fuel)
 }
 
 /// Execute a WASM module in interactive mode (live display).
@@ -357,7 +369,7 @@ pub fn execute_interactive(
 }
 
 fn execute_inner(
-    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId,
+    wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
 ) -> Result<WasmResult, WasmError> {
     let engine_guard = ENGINE.lock();
     let engine = engine_guard.as_ref().ok_or(WasmError::NotInitialized)?;
@@ -374,7 +386,7 @@ fn execute_inner(
         pid: 0,
         hw: None,
     });
-    store.set_fuel(DEFAULT_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
+    store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
     let mut linker = <Linker<HostState>>::new(engine);
     register_host_functions(&mut linker)?;

@@ -282,8 +282,13 @@ fn generate_demo_wallpapers(res_arg: &str) {
         }
     };
 
-    kprintln!("[npk] Generating demo wallpapers at {}x{}...", w, h);
-    match crate::wasm::execute_sandboxed(&wasm_bytes, "_start", &[], module_cap) {
+    // Gradient generation is deterministically bounded by WxH:
+    // ~20 instructions per pixel × 4 themes × W*H pixels. At native 4K
+    // (3840x2160) that's ~665M instructions — well past DEFAULT_FUEL.
+    // Use a generous budget (first-party module, trusted, bounded).
+    let fuel = (w as u64) * (h as u64) * 4 * 40 + 50_000_000; // slack + const overhead
+    kprintln!("[npk] Generating demo wallpapers at {}x{} (fuel budget: {})...", w, h, fuel);
+    match crate::wasm::execute_sandboxed_with_fuel(&wasm_bytes, "_start", &[], module_cap, fuel) {
         Ok(_) => kprintln!("[npk] {} themes generated.", 4),
         Err(e) => kprintln!("[npk] generate failed: {}", e),
     }
