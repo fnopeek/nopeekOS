@@ -26,6 +26,82 @@ use alloc::string::String;
 use core::fmt::Write;
 
 use super::abi::{Modifier, Transition, Widget};
+use super::layout::LayoutNode;
+
+/// Print the layout tree to serial — each node on one line with its
+/// absolute rect and baseline. Lockstepped with `print_tree`: pass the
+/// same widget + layout pair and rows line up.
+pub fn print_layout(root_widget: &Widget, root_layout: &LayoutNode) {
+    let mut out = String::new();
+    let _ = writeln!(out, "[npk] ── layout ──────────────────────────────");
+    write_layout_node(&mut out, root_widget, root_layout, 0);
+    let _ = writeln!(out, "[npk] ─────────────────────────────────────────");
+    crate::kprint!("{}", out);
+}
+
+fn write_layout_node(out: &mut String, w: &Widget, n: &LayoutNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let r = n.rect;
+    let base = if n.baseline > 0 {
+        alloc::format!(" base={}", n.baseline)
+    } else {
+        String::new()
+    };
+    let label = widget_label(w);
+    let _ = writeln!(out, "[npk] {}{} @({},{}) {}x{}{}",
+        indent, label, r.x, r.y, r.w, r.h, base);
+
+    // Recurse into the children — both trees share the same structural
+    // shape (layout mirrors widget). Mismatch = bug in layout.rs.
+    for (cw, cl) in widget_children(w).iter().zip(n.children.iter()) {
+        write_layout_node(out, cw, cl, depth + 1);
+    }
+}
+
+/// Short, one-line label of a widget variant for the layout dump.
+fn widget_label(w: &Widget) -> String {
+    match w {
+        Widget::Column   { children, .. }  => alloc::format!("Column({} children)", children.len()),
+        Widget::Row      { children, .. }  => alloc::format!("Row({})", children.len()),
+        Widget::Stack    { children, .. }  => alloc::format!("Stack({})", children.len()),
+        Widget::Scroll   { .. }            => String::from("Scroll"),
+        Widget::Text     { content, style, .. } => {
+            let trimmed: String = content.chars().take(24).collect();
+            alloc::format!("Text {:?} {:?}", trimmed, style)
+        }
+        Widget::Icon     { id, size, .. } => alloc::format!("Icon {:?} {}px", id, size),
+        Widget::Button   { label, .. }    => alloc::format!("Button {:?}", label),
+        Widget::Input    { placeholder, .. } => alloc::format!("Input {:?}", placeholder),
+        Widget::Checkbox { value, .. }    => alloc::format!("Checkbox={}", value),
+        Widget::Spacer   { flex }         => alloc::format!("Spacer flex={}", flex),
+        Widget::Divider                   => String::from("Divider"),
+        Widget::Canvas   { width, height, .. } => alloc::format!("Canvas {}x{}", width, height),
+        Widget::Popover  { .. }           => String::from("Popover (RESERVED)"),
+        Widget::Tooltip  { .. }           => String::from("Tooltip (RESERVED)"),
+        Widget::Menu     { items, .. }    => alloc::format!("Menu({}) (RESERVED)", items.len()),
+        _                                 => String::from("<unknown>"),
+    }
+}
+
+/// Iterator-free peek at a widget's children — empty slice for leaves.
+/// Kept as a helper so `write_layout_node` doesn't duplicate variant
+/// matching logic against layout's `children`.
+fn widget_children(w: &Widget) -> alloc::vec::Vec<&Widget> {
+    let mut out = alloc::vec::Vec::new();
+    match w {
+        Widget::Column { children, .. } |
+        Widget::Row    { children, .. } |
+        Widget::Stack  { children, .. } |
+        Widget::Menu   { items: children, .. } => {
+            for c in children { out.push(c); }
+        }
+        Widget::Scroll { child, .. } | Widget::Popover { child, .. } => {
+            out.push(child.as_ref());
+        }
+        _ => {}
+    }
+    out
+}
 
 /// Print the tree to serial via `kprintln!`, one node per line.
 pub fn print_tree(root: &Widget) {
