@@ -137,14 +137,6 @@ pub fn render_frame() {
     } else {
         render_frame_legacy();
     }
-    overlay_widgets();
-}
-
-/// Post-render hook: overlay any persistent widget scene on top of
-/// whatever shade just rendered. Called at the tail of every
-/// render-frame path so the widget survives across redraws.
-fn overlay_widgets() {
-    widgets::overlay_active();
 }
 
 /// Layer-based render with double-buffer: render to back, swap, blit from front.
@@ -291,7 +283,6 @@ pub fn render_damaged() {
     } else {
         render_damaged_legacy();
     }
-    overlay_widgets();
 }
 
 fn render_damaged_layered() {
@@ -338,6 +329,13 @@ pub fn take_deferred_render() -> bool {
     DEFERRED_RENDER.swap(false, Ordering::Relaxed)
 }
 
+/// Request a full shade render on the next Core-0 poll cycle. Safe to
+/// call from any core (worker cores executing WASM etc.) — actual
+/// MMIO work still runs on Core 0.
+pub fn request_render() {
+    DEFERRED_RENDER.store(true, Ordering::Relaxed);
+}
+
 /// Process a shade action (called from intent loop).
 pub fn handle_action(action: input::ShadeAction) {
     use input::ShadeAction;
@@ -354,16 +352,13 @@ pub fn handle_action(action: input::ShadeAction) {
             // If not created: no free terminals, silently ignore
         }
         ShadeAction::CloseWindow => {
+            // compositor::close_window handles widget-scene cleanup
+            // via remove_scene when the closed window's kind is Widget.
             with_compositor(|comp| {
                 if let Some(id) = comp.focused {
                     comp.close_window(id);
                 }
             });
-            // Widget-scene overlay is tied to the window-rect it was
-            // rendered into; closing that window orphans the pixels.
-            // Drop the scene so we don't keep blitting dead pixels at
-            // an empty grid slot. Next scene_commit seeds a new one.
-            widgets::clear_active();
             render_frame();
         }
         ShadeAction::Workspace(ws) => {
@@ -601,9 +596,6 @@ pub fn poll_render() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
-    // Re-stamp widget scene on top of the partially-rendered frame
-    // (terminal text may have painted over it).
-    overlay_widgets();
     return;
 
     // Legacy partial render path (kept for reference)

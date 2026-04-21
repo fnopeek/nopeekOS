@@ -45,6 +45,11 @@ struct HostState {
     pid: u32,
     /// Hardware driver state (only set for driver modules)
     hw: Option<HwDriverState>,
+    /// Shade window id owned by this WASM app for widget rendering.
+    /// 0 = no widget window yet (first scene_commit allocates one).
+    /// Phase 10: set when the app calls npk_scene_commit, reused on
+    /// subsequent commits so the same window is updated in place.
+    widget_window_id: u32,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -243,6 +248,7 @@ fn wasm_worker_task(arg: u64) {
         core_id,
         pid,
         hw: None,
+        widget_window_id: 0,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -350,6 +356,7 @@ pub fn execute_interactive(
         core_id: 0, // runs on Core 0 (non-worker path)
         pid: 0,
         hw: None,
+        widget_window_id: 0,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -385,6 +392,7 @@ fn execute_inner(
         core_id: 0,
         pid: 0,
         hw: None,
+        widget_window_id: 0,
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -519,29 +527,60 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_scene_commit(ptr, len) -> 0 or -1
+    // npk_scene_commit(ptr, len) -> i32
     // Phase 10 widget pipeline: WASM app hands the kernel a version-
     // prefixed postcard-serialized Widget tree. Compositor does the
-    // rest (version check, deserialize, layout, raster). Requires
-    // RENDER right.
+    // rest (version check, deserialize, layout, raster, per-window
+    // scene store, shade render). Requires RENDER right.
+    //
+    // Return protocol mirrors shade::widgets::scene_commit:
+    //   >0 → new widget window created, id returned (caller should
+    //        treat return value as opaque)
+    //   0  → reused existing widget window
+    //   -1 → version mismatch / cap denied / bad payload
+    //   -2 → postcard decode failure
+    //   -3 → shade couldn't allocate a window
     linker.func_wrap("env", "npk_scene_commit",
-        |caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
+        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
             let cap_id = caller.data().cap_id;
             if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
                 kprintln!("[npk] WASM: npk_scene_commit DENIED (no RENDER)");
                 return -1;
             }
 
-            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return -1,
+            let (bytes_start, bytes_end) = {
+                let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let data = mem.data(&caller);
+                let start = ptr as usize;
+                let end = start.saturating_add(len as usize).min(data.len());
+                if start >= end { return -1; }
+                (start, end)
             };
-            let data = mem.data(&caller);
-            let start = ptr as usize;
-            let end = start.saturating_add(len as usize).min(data.len());
-            if start >= end { return -1; }
 
-            crate::shade::widgets::scene_commit(&data[start..end])
+            // Extract the payload into a heap copy before re-borrowing
+            // caller mutably. This is 200–600 bytes for typical trees.
+            let payload: alloc::vec::Vec<u8> = {
+                let mem = caller.get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export vanished mid-call");
+                mem.data(&caller)[bytes_start..bytes_end].to_vec()
+            };
+
+            let prev_window = caller.data().widget_window_id;
+            let result = crate::shade::widgets::scene_commit(&payload, prev_window);
+
+            // Positive return = newly allocated window id → store so
+            // subsequent commits from this app reuse the same slot.
+            if result > 0 && prev_window == 0 {
+                caller.data_mut().widget_window_id = result as u32;
+            }
+            // Collapse "new-window id" into success for the callee —
+            // the WASM ABI contract is that any non-negative return
+            // means "commit accepted". Negatives still propagate.
+            if result < 0 { result } else { 0 }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
