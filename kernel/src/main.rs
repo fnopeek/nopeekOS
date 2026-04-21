@@ -254,6 +254,13 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
             loop { unsafe { core::arch::asm!("cli; hlt"); } }
         }
         vga::show_status(b"Setup complete");
+
+        // Seed bundled assets into npkFS now that the master key is set,
+        // so font + WASM modules end up AEAD-encrypted like everything
+        // else. No-op on non-installer builds. If the user re-runs the
+        // installer on a dirty partition, we get a fresh seed with the
+        // new master key.
+        install::seed_bundled_assets();
     } else {
         // === Subsequent boot: Verify passphrase ===
         if framebuffer::is_available() {

@@ -81,16 +81,31 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     npkfs::mount().map_err(|_| "npkFS mount failed")?;
     kprintln!(" done.");
 
-    // Step 5: Seed bundled assets (font + first-party WASM modules) so
-    // the freshly-installed system has a full UI from the first boot.
-    // OTA-sync (intent::install) still handles later updates.
-    bundled_assets::bootstrap_into_npkfs();
+    // NOTE: Seeding of bundled assets happens LATER, after
+    // setup::run_fresh_install has derived + installed the master key
+    // (see main.rs). If we wrote them here, npkfs::store would take the
+    // "no master key" path and write plaintext; subsequent fetches on
+    // normal boots (with master key set) would then fail AEAD decrypt
+    // with "crypt key fail". See seed_bundled_assets() below.
 
     kprintln!("[npk] Installation complete.");
     kprintln!();
 
     Ok(())
 }
+
+/// Write the bundled font + WASM modules into npkFS, encrypting each
+/// with the active master key (ChaCha20-Poly1305 AEAD). Must be called
+/// after setup::run_fresh_install has called crypto::set_master_key.
+#[cfg(feature = "installer")]
+pub fn seed_bundled_assets() {
+    bundled_assets::bootstrap_into_npkfs();
+}
+
+/// Stub for non-installer builds — main.rs calls this unconditionally,
+/// but outside the installer there's nothing to seed.
+#[cfg(not(feature = "installer"))]
+pub fn seed_bundled_assets() {}
 
 /// Stub when installer feature is not enabled
 #[cfg(not(feature = "installer"))]
