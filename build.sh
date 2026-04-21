@@ -170,7 +170,38 @@ menuentry "nopeekOS" {
 GRUBCFG
     fi
 
-    # Pass 2: installer kernel (with embedded GRUB + kernel + config)
+    # Pre-Pass 2: stage bundled assets (font + WASM modules) into
+    # install_data/assets/ so the installer kernel's include_bytes!
+    # calls find them. Paths MUST match BUNDLED_ASSETS in
+    # kernel/src/install_data/assets/mod.rs — if you add a new asset
+    # there, add the copy below too.
+    log "Staging bundled assets for installer..."
+    ASSETS_DIR="$INSTALL_DATA/assets"
+    mkdir -p "$ASSETS_DIR"
+
+    # Font: fetch from sys/fonts/ (the canonical source tree).
+    if [ -f "$PROJECT_DIR/sys/fonts/inter-variable.ttf" ]; then
+        cp "$PROJECT_DIR/sys/fonts/inter-variable.ttf" "$ASSETS_DIR/inter-variable.ttf"
+        ok "  font: inter-variable.ttf ($(du -h "$ASSETS_DIR/inter-variable.ttf" | cut -f1))"
+    else
+        warn "  font missing: sys/fonts/inter-variable.ttf — installer will fail to compile"
+    fi
+
+    # WASM modules: fetch from release/modules/ (produced by prior
+    # release build). Expect all four first-party modules.
+    for mod in top debug wallpaper wifi; do
+        SRC="$PROJECT_DIR/release/modules/${mod}.wasm"
+        if [ -f "$SRC" ]; then
+            cp "$SRC" "$ASSETS_DIR/${mod}.wasm"
+            ok "  module: ${mod}.wasm ($(du -h "$ASSETS_DIR/${mod}.wasm" | cut -f1))"
+        else
+            warn "  module missing: release/modules/${mod}.wasm — run ./build.sh release first"
+            # Touch empty file so include_bytes! doesn't fail to compile
+            touch "$ASSETS_DIR/${mod}.wasm"
+        fi
+    done
+
+    # Pass 2: installer kernel (with embedded GRUB + kernel + config + assets)
     log "Pass 2: building installer kernel..."
     cargo build \
         --release \
@@ -524,6 +555,7 @@ usage() {
     echo "  build       Compile kernel + create bootable ISO"
     echo "  qemu        Build + run in QEMU (serial on stdio)"
     echo "  debug       Build + run in QEMU with GDB stub (:1234)"
+    echo "  installer     Build installer kernel (two-pass, with bundled assets)"
     echo "  usb /dev/sdX  Build + create EFI-bootable USB stick"
     echo "  vbox        Build + run in VirtualBox (GUI)"
     echo "  vbox-clean  Remove VirtualBox VM"
@@ -561,6 +593,10 @@ case "${1:-}" in
         check_deps
         build
         run_vbox
+        ;;
+    installer)
+        check_deps
+        build_installer
         ;;
     usb)
         check_deps
@@ -604,6 +640,38 @@ MANIFEST
             warn "No signing key found at $KEY_FILE"
             warn "Generate with: openssl ecparam -name secp384r1 -genkey -noout -out update.key"
             warn "Extract pubkey: openssl ec -in update.key -pubout -outform DER -out update.pub"
+        fi
+
+        # ── Sign system assets (fonts) ───────────────────────────────
+        # Copy tracked fonts from sys/fonts/ into release/assets/ and
+        # sign them the same way modules are signed. These ship with
+        # the installer for fresh-install seeding (see install.rs
+        # bundled_assets) and are OTA-updatable afterwards.
+        mkdir -p "$RELEASE_DIR/assets"
+        ASSET_MANIFEST=""
+        if [ -d "$PROJECT_DIR/sys/fonts" ]; then
+            for font_src in "$PROJECT_DIR/sys/fonts/"*.ttf; do
+                [ -f "$font_src" ] || continue
+                FONT_NAME=$(basename "$font_src")
+                cp "$font_src" "$RELEASE_DIR/assets/$FONT_NAME"
+                ASSET_SIZE=$(stat -c%s "$RELEASE_DIR/assets/$FONT_NAME")
+                ASSET_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/$FONT_NAME" 2>/dev/null | awk '{print $NF}')
+
+                ASSET_MANIFEST="${ASSET_MANIFEST}[font:${FONT_NAME%.ttf}]
+size=${ASSET_SIZE}
+sha384=${ASSET_SHA}
+
+"
+                if [ -f "$KEY_FILE" ]; then
+                    openssl dgst -sha384 -sign "$KEY_FILE" \
+                        -out "$RELEASE_DIR/assets/${FONT_NAME}.sig" "$RELEASE_DIR/assets/$FONT_NAME"
+                    ok "Signed font: $FONT_NAME ($ASSET_SIZE bytes)"
+                fi
+            done
+            if [ -n "$ASSET_MANIFEST" ]; then
+                echo "$ASSET_MANIFEST" > "$RELEASE_DIR/assets/manifest"
+                ok "Asset manifest written"
+            fi
         fi
 
         # Sign WASM modules in release/modules/ (if any)

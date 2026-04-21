@@ -100,10 +100,6 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     kprintln!("[npk] Initializing Virtual Memory Manager...");
     paging::init();
 
-    // Inter Variable UI font — BLAKE3-verified embedded TTF, fontdue-parsed.
-    // Needs heap; used by widget layout (Phase 10) + future compositor text.
-    gui::text::init();
-
     // Framebuffer init (needs memory + paging for MMIO mapping)
     framebuffer::init_from_multiboot2(multiboot_info);
     // Set [npk] tag color immediately (consistent throughout boot)
@@ -303,6 +299,11 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     // Bootstrap WASM modules (after identity — so they are encrypted at rest)
     intent::bootstrap_wasm();
+
+    // Inter Variable UI font — read from npkFS (seeded by installer), BLAKE3
+    // verified, parsed via fontdue. Login screen + terminals use Spleen
+    // bitmap; the UI font is only needed once widgets come up.
+    gui::text::init();
 
     // Create home directory and set as working directory
     intent::setup_home();

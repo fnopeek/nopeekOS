@@ -16,6 +16,12 @@ static INSTALL_KERNEL: &[u8] = include_bytes!("install_data/kernel.bin");
 #[cfg(feature = "installer")]
 static GRUB_CFG: &[u8] = include_bytes!("install_data/grub.cfg");
 
+/// Bundled assets embedded into the installer kernel — font + WASM
+/// modules written into npkFS on fresh install.
+#[cfg(feature = "installer")]
+#[path = "install_data/assets/mod.rs"]
+mod bundled_assets;
+
 /// Check if this build has installer capability
 pub fn has_installer() -> bool {
     cfg!(feature = "installer")
@@ -74,6 +80,11 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     npkfs::mkfs().map_err(|_| "npkFS format failed")?;
     npkfs::mount().map_err(|_| "npkFS mount failed")?;
     kprintln!(" done.");
+
+    // Step 5: Seed bundled assets (font + first-party WASM modules) so
+    // the freshly-installed system has a full UI from the first boot.
+    // OTA-sync (intent::install) still handles later updates.
+    bundled_assets::bootstrap_into_npkfs();
 
     kprintln!("[npk] Installation complete.");
     kprintln!();

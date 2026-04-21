@@ -30,18 +30,22 @@ use spin::Mutex;
 
 use crate::shade::widgets::abi::TextStyle;
 
-// ── Embedded font bytes ───────────────────────────────────────────────
+// ── Font source ───────────────────────────────────────────────────────
 
-/// Inter Variable v4.1 (OFL). Embedded at build time; swap to npkFS load
-/// when the system-fonts content-addressing path lands (not in Phase 10).
+/// npkFS path of the system UI font — Inter Variable v4.1 (OFL).
 ///
-/// Path resolves relative to this source file.
-const INTER_VARIABLE_TTF: &[u8] =
-    include_bytes!("../../../sys/fonts/inter-variable.ttf");
+/// Seeded on fresh install by `install::bundled_assets::bootstrap_into_npkfs`,
+/// thereafter updatable via the OTA path (`intent::install`). The kernel
+/// binary itself does **not** embed the font — this keeps normal kernel
+/// releases small and makes font updates free of kernel rebuilds.
+const FONT_FS_PATH: &str = "sys/fonts/inter-variable";
 
-/// Frozen BLAKE3 digest of `INTER_VARIABLE_TTF`. Boot-time verification
-/// panics on mismatch — catches corruption or an accidental font swap.
-/// Recompute with `b3sum sys/fonts/inter-variable.ttf` after updates.
+/// Frozen BLAKE3 digest of the expected font bytes. Checked at load time
+/// — a mismatch means the on-disk font was tampered or replaced with an
+/// unexpected version; loading refuses.
+///
+/// Recompute after a font update with `b3sum sys/fonts/inter-variable.ttf`
+/// and ship the new hash alongside the new font in a coordinated release.
 const INTER_VARIABLE_BLAKE3: &str =
     "273f86e03d009a0ba65d109cf6ed8931560e98289ce1da5bede6c27f36758bf9";
 
@@ -102,45 +106,64 @@ static GLYPH_CACHE: Mutex<Option<HashMap<GlyphKey, CachedGlyph>>> = Mutex::new(N
 
 // ── Init ──────────────────────────────────────────────────────────────
 
-/// Load Inter Variable at boot. Panics on hash mismatch or parse error
-/// — the font is not optional, and the embedded bytes are content-
-/// addressable. Call after heap init, before shade::init.
+/// Load Inter Variable from npkFS. Call after npkfs::mount has succeeded
+/// (post-login) and before shade widget pipeline starts raster passes.
+///
+/// Degrades gracefully — if the font is missing or hash mismatches, logs
+/// and returns without installing a font. Widget-side metrics fall back
+/// to conservative defaults and rasterization becomes a no-op. The rest
+/// of the system (login screen, terminals using Spleen) is unaffected.
 pub fn init() {
-    // 1. BLAKE3 verify the embedded bytes against the frozen digest.
-    let hash = blake3::hash(INTER_VARIABLE_TTF);
-    let hex = hash.to_hex();
-    if hex.as_str() != INTER_VARIABLE_BLAKE3 {
-        crate::kprintln!(
-            "[npk] FATAL: Inter Variable BLAKE3 mismatch: got {}, expected {}",
-            hex.as_str(), INTER_VARIABLE_BLAKE3,
-        );
-        panic!("inter-variable.ttf hash mismatch");
+    if !crate::npkfs::is_mounted() {
+        crate::kprintln!("[npk] text::init skipped — npkFS not mounted");
+        return;
     }
 
-    // 2. Parse via fontdue. Default settings; scale is per-call.
+    // 1. Fetch the font bytes from npkFS.
+    let bytes = match crate::npkfs::fetch(FONT_FS_PATH) {
+        Ok((data, _cap)) => data,
+        Err(e) => {
+            crate::kprintln!(
+                "[npk] text::init: font not found at {} ({:?}); UI will fall back",
+                FONT_FS_PATH, e,
+            );
+            return;
+        }
+    };
+
+    // 2. BLAKE3 verify against the frozen digest.
+    let hex = blake3::hash(&bytes).to_hex();
+    if hex.as_str() != INTER_VARIABLE_BLAKE3 {
+        crate::kprintln!(
+            "[npk] text::init: Inter Variable hash mismatch (got {}, want {}); refusing to load",
+            hex.as_str(), INTER_VARIABLE_BLAKE3,
+        );
+        return;
+    }
+
+    // 3. Parse via fontdue.
     let settings = FontSettings {
-        // collection_index: 0 for TTF (not TTC collection).
         collection_index: 0,
-        // Raster scale: 1.0 → metrics in px match the size_px argument.
         scale: 40.0,
         ..Default::default()
     };
 
-    let font = match Font::from_bytes(INTER_VARIABLE_TTF, settings) {
+    let font_len = bytes.len();
+    let font = match Font::from_bytes(bytes, settings) {
         Ok(f) => f,
         Err(e) => {
-            crate::kprintln!("[npk] FATAL: fontdue parse failed: {}", e);
-            panic!("inter-variable.ttf parse failed");
+            crate::kprintln!("[npk] text::init: fontdue parse failed: {}", e);
+            return;
         }
     };
 
-    // 3. Sanity-log a few metrics so we know the load worked end-to-end.
+    // 4. Sanity-log a few metrics so we know the load worked end-to-end.
     let body = style_desc(TextStyle::Body);
     if let Some(lm) = font.horizontal_line_metrics(body.size_px as f32) {
         crate::kprintln!(
             "[npk] Inter Variable loaded: {} glyphs, {} bytes, UPEM {}",
             font.glyph_count(),
-            INTER_VARIABLE_TTF.len(),
+            font_len,
             font.units_per_em() as u32,
         );
         crate::kprintln!(
