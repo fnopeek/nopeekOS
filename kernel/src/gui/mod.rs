@@ -11,3 +11,4 @@ pub mod render;
 pub mod login;
 pub mod theme;
 pub mod layers;
+pub mod text;

@@ -100,6 +100,9 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     kprintln!("[npk] Initializing Virtual Memory Manager...");
     paging::init();
 
+    // Inter Variable UI font — BLAKE3-verified embedded TTF, fontdue-parsed.
+    // Needs heap; used by widget layout (Phase 10) + future compositor text.
+    gui::text::init();
 
     // Framebuffer init (needs memory + paging for MMIO mapping)
     framebuffer::init_from_multiboot2(multiboot_info);
