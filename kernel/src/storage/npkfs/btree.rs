@@ -272,37 +272,49 @@ pub fn iter_all<F: FnMut(&ObjectEntry)>(
     cache: &mut BlockCache, root: u64, f: &mut F,
 ) -> Result<(), FsError> {
     if root == 0 { return Ok(()); }
+    iter_subtree(cache, root, f)
+}
 
-    // Find leftmost leaf
-    let mut block = root;
-    loop {
-        let mut buf = [0u8; BLOCK_SIZE];
-        read_node(cache, block, &mut buf)?;
-        let hdr = read_header(&buf);
-        if hdr.magic != BTREE_MAGIC { return Err(FsError::Corrupt); }
+/// Recursively walk every leaf reachable from `block`. Deliberately
+/// does NOT use the `next_leaf` sibling chain — that chain is known
+/// to break after a leaf split (the previous leaf's next_leaf pointer
+/// stays pointing at the freed pre-split block, so iter-via-chain
+/// silently drops entries). The tree structure (internal nodes +
+/// their children) is the source of truth; we walk that.
+///
+/// Depth is bounded by tree height — for 64-byte keys and BLOCK_SIZE
+/// leaves this stays <5 for any realistic npkFS, so recursion is safe.
+fn iter_subtree<F: FnMut(&ObjectEntry)>(
+    cache: &mut BlockCache, block: u64, f: &mut F,
+) -> Result<(), FsError> {
+    let mut buf = [0u8; BLOCK_SIZE];
+    read_node(cache, block, &mut buf)?;
+    let hdr = read_header(&buf);
+    if hdr.magic != BTREE_MAGIC { return Err(FsError::Corrupt); }
 
-        match hdr.node_type {
-            BTREE_LEAF => {
-                // Walk the leaf chain
-                let mut leaf = block;
-                loop {
-                    let mut lbuf = [0u8; BLOCK_SIZE];
-                    read_node(cache, leaf, &mut lbuf)?;
-                    let lhdr = read_header(&lbuf);
-                    for i in 0..lhdr.num_entries as usize {
-                        f(&leaf_entry(&lbuf, i));
-                    }
-                    if lhdr.next_leaf == 0 { break; }
-                    leaf = lhdr.next_leaf;
-                }
-                return Ok(());
+    match hdr.node_type {
+        BTREE_LEAF => {
+            for i in 0..hdr.num_entries as usize {
+                f(&leaf_entry(&buf, i));
             }
-            BTREE_INTERNAL => {
-                // Go to leftmost child
-                block = internal_child(&buf, 0);
-            }
-            _ => return Err(FsError::Corrupt),
+            Ok(())
         }
+        BTREE_INTERNAL => {
+            // Internal node layout: num_entries pairs of (key, child)
+            // plus the rightmost child in hdr.next_leaf. Total n+1
+            // children; visit them left-to-right.
+            for i in 0..hdr.num_entries as usize {
+                let child = internal_child(&buf, i);
+                if child != 0 {
+                    iter_subtree(cache, child, f)?;
+                }
+            }
+            if hdr.next_leaf != 0 {
+                iter_subtree(cache, hdr.next_leaf, f)?;
+            }
+            Ok(())
+        }
+        _ => Err(FsError::Corrupt),
     }
 }
 
@@ -383,9 +395,13 @@ fn split_leaf(
     let right_block = bitmap.alloc(1)?;
 
     let mut left_buf = [0u8; BLOCK_SIZE];
+    // next_leaf on leaf nodes is reserved (always 0). iter_all walks
+    // the tree structure, not a sibling chain, so we don't try to
+    // maintain one — maintaining it across splits would require a
+    // predecessor search on every insert without parent pointers.
     let left_hdr = BTreeNodeHeader {
         magic: BTREE_MAGIC, node_type: BTREE_LEAF,
-        _pad: 0, num_entries: mid as u16, next_leaf: right_block,
+        _pad: 0, num_entries: mid as u16, next_leaf: 0,
     };
     write_header(&mut left_buf, &left_hdr);
     for i in 0..mid {
@@ -398,7 +414,7 @@ fn split_leaf(
     let mut right_buf = [0u8; BLOCK_SIZE];
     let right_hdr = BTreeNodeHeader {
         magic: BTREE_MAGIC, node_type: BTREE_LEAF,
-        _pad: 0, num_entries: right_count as u16, next_leaf: hdr.next_leaf,
+        _pad: 0, num_entries: right_count as u16, next_leaf: 0,
     };
     write_header(&mut right_buf, &right_hdr);
     for i in 0..right_count {
