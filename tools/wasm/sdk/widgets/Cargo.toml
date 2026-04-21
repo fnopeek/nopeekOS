@@ -1,0 +1,29 @@
+[package]
+name = "nopeek_widgets"
+version = "0.1.0"
+edition = "2024"
+description = "nopeekOS widget SDK — declarative GUI types for WASM apps."
+license = "AGPL-3.0-or-later"
+
+[lib]
+# Library for WASM apps to depend on. Apps compile to cdylib; this crate
+# provides the types + postcard serialization shared by every GUI app.
+crate-type = ["rlib"]
+
+[dependencies.serde]
+version = "1.0"
+default-features = false
+features = ["alloc", "derive"]
+
+[dependencies.postcard]
+version = "1.0"
+default-features = false
+features = ["alloc"]
+
+[dev-dependencies]
+# Tests run on the host with std; the crate itself stays no_std.
+# No extra deps needed — std is picked up automatically under cfg(test).
+
+[profile.release]
+opt-level = "s"
+lto = true

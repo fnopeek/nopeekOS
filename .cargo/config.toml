@@ -1,12 +1,22 @@
-[build]
-target = "x86_64-unknown-none"
-
-[unstable]
-build-std = ["core", "alloc"]
-build-std-features = ["compiler-builtins-mem"]
+# Cargo config for the nopeekOS repo.
+#
+# The kernel target (+ build-std) is passed explicitly on the CLI by
+# build.sh — see the `cargo build` invocations there — so nothing in
+# this file forces a global default target.
+#
+# Keeping `[build]` + `[unstable]` empty here means tools and libraries
+# that live in this repo but run on the host (e.g. the widget SDK's
+# unit tests under tools/wasm/sdk/widgets/) can invoke `cargo test`
+# directly and get the host triple + precompiled std — fast, portable,
+# no local overrides needed.
+#
+# The `[target.x86_64-unknown-none]` block below is a conditional
+# table: it only applies when cargo is actually building for the
+# bare-metal kernel target (triggered by build.sh's `--target` flag).
+# Host-side invocations never see these rustflags.
 
 [target.x86_64-unknown-none]
 runner = "bash build.sh run"
 
-# Linker script
+# Linker script (path relative to the kernel build's CWD = repo root).
 rustflags = ["-C", "link-arg=-Tkernel/linker.ld", "-C", "relocation-model=static"]

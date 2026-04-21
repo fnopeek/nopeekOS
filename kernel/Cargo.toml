@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.50.7"
+version = "0.51.0"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
@@ -63,3 +63,29 @@ features = ["verifying"]
 version = "0.10"
 default-features = false
 features = ["aes", "alloc"]
+
+# Widget pipeline (Phase 10) ───────────────────────────────────────────
+
+# postcard: wire format for widget trees (WASM → kernel).
+# Version-prefixed, variant-order-stable, no_std + alloc.
+[dependencies.postcard]
+version = "1.0"
+default-features = false
+features = ["alloc"]
+
+[dependencies.serde]
+version = "1.0"
+default-features = false
+features = ["alloc", "derive"]
+
+# fontdue: TTF glyph rasterizer for Inter Variable UI font.
+# no_std compatible. Variable-axis via `OutlineBuilder` at metrics time.
+[dependencies.fontdue]
+version = "0.9"
+default-features = false
+features = ["hashbrown"]
+
+[dependencies.hashbrown]
+version = "0.14"
+default-features = false
+features = ["ahash"]
