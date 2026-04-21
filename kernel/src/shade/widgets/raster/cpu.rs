@@ -102,12 +102,29 @@ impl Rasterizer for CpuRasterizer {
         }
     }
 
-    fn icon(&mut self, t: &mut RasterTarget, _id: IconId, size: u16, color: Token, p: Point) {
-        // P10.9 ships the Phosphor atlas. Until then: draw a filled
-        // square in the requested token color. Keeps layout debuggable.
+    fn icon(&mut self, t: &mut RasterTarget, id: IconId, size: u16, color: Token, p: Point) {
+        // Skip None sentinel — caller asked for no icon.
+        if id as u16 == 0 { return; }
         let (x, y) = window_to_target(t, p.x, p.y);
         let bgra = t.palette.colors[color as usize];
-        fill_rect_target(t, x, y, size as i32, size as i32, bgra, 200);
+
+        // Phosphor atlas path — picks nearest-but-not-smaller size.
+        // Falls back to stub square if atlas isn't loaded yet.
+        match crate::gui::icons::alpha_for(id, size) {
+            Some((atlas_size, alpha)) => {
+                if atlas_size == size {
+                    composite_alpha_target(t, x, y, size as u32, size as u32, &alpha, bgra);
+                } else {
+                    // Nearest-neighbour scale atlas_size → size.
+                    composite_alpha_scaled(t, x, y, size as u32, atlas_size as u32, &alpha, bgra);
+                }
+            }
+            None => {
+                // Atlas not yet loaded or icon missing — stub square
+                // keeps layout debuggable.
+                fill_rect_target(t, x, y, size as i32, size as i32, bgra, 200);
+            }
+        }
     }
 
     fn canvas_copy(&mut self, t: &mut RasterTarget, src: &[u8], w: u16, h: u16) {
@@ -195,6 +212,37 @@ fn composite_alpha_target(
         for px in x0..x1 {
             let sx = (px - x) as usize;
             let a = alpha[sy * w as usize + sx];
+            if a == 0 { continue; }
+            let dst = t.pixels[dst_base + px as usize];
+            t.pixels[dst_base + px as usize] = blend_over(dst, color, a);
+        }
+    }
+}
+
+/// Nearest-neighbour scale an atlas alpha bitmap onto the target.
+/// `size` is the final edge length; `atlas_size` is the source edge.
+fn composite_alpha_scaled(
+    t: &mut RasterTarget,
+    x: i32, y: i32, size: u32, atlas_size: u32, alpha: &[u8], color: u32,
+) {
+    if size == 0 || atlas_size == 0 { return; }
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + size as i32).min(t.size.w as i32);
+    let y1 = (y + size as i32).min(t.size.h as i32);
+    if x0 >= x1 || y0 >= y1 { return; }
+
+    let stride = t.stride as usize;
+    for py in y0..y1 {
+        let ly = (py - y) as u32;
+        let sy = (ly * atlas_size / size) as usize;
+        let dst_base = py as usize * stride;
+        for px in x0..x1 {
+            let lx = (px - x) as u32;
+            let sx = (lx * atlas_size / size) as usize;
+            let a_idx = sy * atlas_size as usize + sx;
+            if a_idx >= alpha.len() { continue; }
+            let a = alpha[a_idx];
             if a == 0 { continue; }
             let dst = t.pixels[dst_base + px as usize];
             t.pixels[dst_base + px as usize] = blend_over(dst, color, a);

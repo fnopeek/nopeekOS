@@ -1,0 +1,17 @@
+[package]
+name = "regen-icons"
+version = "0.1.0"
+edition = "2024"
+description = "Rasterize Phosphor SVG icons into a packed alpha atlas for the nopeekOS kernel."
+
+[[bin]]
+name = "regen-icons"
+path = "src/main.rs"
+
+[dependencies]
+resvg = "0.44"
+usvg = "0.44"
+tiny-skia = "0.11"
+
+[profile.release]
+opt-level = 2

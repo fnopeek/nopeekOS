@@ -47,15 +47,25 @@ const _: () = {
     assert!(TextStyle::Mono    as u8 == 4);
 
     // IconId
-    assert!(IconId::None       as u16 == 0);
-    assert!(IconId::Folder     as u16 == 1);
-    assert!(IconId::File       as u16 == 2);
-    assert!(IconId::ArrowLeft  as u16 == 3);
-    assert!(IconId::ArrowRight as u16 == 4);
-    assert!(IconId::ArrowUp    as u16 == 5);
-    assert!(IconId::ArrowDown  as u16 == 6);
-    assert!(IconId::Home       as u16 == 7);
-    assert!(IconId::Download   as u16 == 8);
+    assert!(IconId::None              as u16 == 0);
+    assert!(IconId::Folder            as u16 == 1);
+    assert!(IconId::File              as u16 == 2);
+    assert!(IconId::ArrowLeft         as u16 == 3);
+    assert!(IconId::ArrowRight        as u16 == 4);
+    assert!(IconId::ArrowUp           as u16 == 5);
+    assert!(IconId::ArrowDown         as u16 == 6);
+    assert!(IconId::Home              as u16 == 7);
+    assert!(IconId::Download          as u16 == 8);
+    assert!(IconId::MagnifyingGlass   as u16 == 9);
+    assert!(IconId::X                 as u16 == 10);
+    assert!(IconId::Check             as u16 == 11);
+    assert!(IconId::Gear              as u16 == 12);
+    assert!(IconId::Power             as u16 == 13);
+    assert!(IconId::Lock              as u16 == 14);
+    assert!(IconId::Terminal          as u16 == 15);
+    assert!(IconId::Trash             as u16 == 16);
+    assert!(IconId::DotsThreeVertical as u16 == 17);
+    assert!(IconId::List              as u16 == 18);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);

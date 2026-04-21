@@ -1,5 +1,5 @@
 /target
-tools/wasm/**/target
+tools/**/target
 *.iso
 *.o
 *.bin

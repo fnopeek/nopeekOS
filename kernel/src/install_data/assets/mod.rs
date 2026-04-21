@@ -52,6 +52,13 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         version: None,
     },
 
+    // ── Phosphor icon atlas ───────────────────────────────────────
+    BundledAsset {
+        fs_path: "sys/icons/phosphor",
+        bytes:   include_bytes!("phosphor.atlas"),
+        version: None,
+    },
+
     // ── First-party WASM modules ──────────────────────────────────
     // Keep in sync with release/modules/ output of build.sh release.
     BundledAsset {

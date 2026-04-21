@@ -114,15 +114,26 @@ pub enum Token {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IconId {
-    None        = 0,
-    Folder      = 1,
-    File        = 2,
-    ArrowLeft   = 3,
-    ArrowRight  = 4,
-    ArrowUp     = 5,
-    ArrowDown   = 6,
-    Home        = 7,
-    Download    = 8,
+    None                = 0,
+    Folder              = 1,
+    File                = 2,
+    ArrowLeft           = 3,
+    ArrowRight          = 4,
+    ArrowUp             = 5,
+    ArrowDown           = 6,
+    Home                = 7,
+    Download            = 8,
+    // P10.9 additions — Phosphor Regular subset
+    MagnifyingGlass     = 9,
+    X                   = 10,
+    Check               = 11,
+    Gear                = 12,
+    Power               = 13,
+    Lock                = 14,
+    Terminal            = 15,
+    Trash               = 16,
+    DotsThreeVertical   = 17,
+    List                = 18,
     // Appended only.
 }
 
