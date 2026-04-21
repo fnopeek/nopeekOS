@@ -359,6 +359,11 @@ pub fn handle_action(action: input::ShadeAction) {
                     comp.close_window(id);
                 }
             });
+            // Widget-scene overlay is tied to the window-rect it was
+            // rendered into; closing that window orphans the pixels.
+            // Drop the scene so we don't keep blitting dead pixels at
+            // an empty grid slot. Next scene_commit seeds a new one.
+            widgets::clear_active();
             render_frame();
         }
         ShadeAction::Workspace(ws) => {
