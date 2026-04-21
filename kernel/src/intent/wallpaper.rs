@@ -6,7 +6,6 @@
 
 use crate::{kprintln, kprint};
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
 /// Set a wallpaper by name (relative to CWD or absolute).
@@ -20,18 +19,40 @@ pub fn intent_wallpaper(args: &str) {
         "clear" | "off" | "none" => clear_wallpaper(),
         "list" | "ls" => list_wallpapers(),
         "random" | "rand" => random_wallpaper(),
-        "demo" => generate_demo_wallpapers(),
+        "demo" => generate_demo_wallpapers(rest),
         "" => {
             kprintln!("[npk] Usage: wallpaper <set|clear|list|random|demo>");
             kprintln!("[npk]   wallpaper set <name>     Set wallpaper from npkFS");
             kprintln!("[npk]   wallpaper clear          Revert to aurora");
             kprintln!("[npk]   wallpaper list           List available wallpapers");
             kprintln!("[npk]   wallpaper random         Set random wallpaper");
+            kprintln!("[npk]   wallpaper demo [WxH]     Generate gradients (default: native res)");
         }
         other => {
             // Treat as `wallpaper set <name>` shortcut
             set_wallpaper(other);
         }
+    }
+}
+
+/// Parse an optional `WxH` resolution argument. Returns native
+/// framebuffer resolution when the string is empty or malformed.
+fn parse_resolution(arg: &str) -> (u32, u32) {
+    let (fb_w, fb_h) = crate::framebuffer::get_resolution();
+    if arg.is_empty() {
+        return (fb_w, fb_h);
+    }
+    let (w_s, h_s) = match arg.split_once('x') {
+        Some(p) => p,
+        None => return (fb_w, fb_h),
+    };
+    let w: u32 = w_s.trim().parse().unwrap_or(0);
+    let h: u32 = h_s.trim().parse().unwrap_or(0);
+    if w >= 16 && h >= 16 && w <= 7680 && h <= 4320 {
+        (w, h)
+    } else {
+        kprintln!("[npk] Invalid WxH; using native {}x{}", fb_w, fb_h);
+        (fb_w, fb_h)
     }
 }
 
@@ -218,154 +239,61 @@ pub fn random_wallpaper() {
     apply_wallpaper_data(chosen, &data);
 }
 
-/// Generate 3 demo wallpapers with different color schemes and set one randomly.
-fn generate_demo_wallpapers() {
-    let (fb_w, fb_h) = crate::framebuffer::get_resolution();
-    if fb_w == 0 || fb_h == 0 {
+/// Generate demo gradient wallpapers by delegating to the wallpaper
+/// WASM module. The kernel owns no pixel math here — it ensures the
+/// target directory, hands the module a `@demos:<W>x<H>:<wp_dir>`
+/// instruction via .npk-wallpaper-target, then picks a random result.
+///
+/// `res_arg` is the user-supplied argument after `wallpaper demo` —
+/// either empty (→ native framebuffer resolution) or `WxH`.
+fn generate_demo_wallpapers(res_arg: &str) {
+    let (w, h) = parse_resolution(res_arg);
+    if w == 0 || h == 0 {
         kprintln!("[npk] No framebuffer available");
         return;
     }
 
-    // Quarter resolution — gradients scale perfectly, 2MB vs 32MB per image
-    let w: u32 = fb_w / 4;
-    let h: u32 = fb_h / 4;
+    let (wasm_bytes, _) = match crate::npkfs::fetch("sys/wasm/wallpaper") {
+        Ok(v) => v,
+        Err(_) => {
+            kprintln!("[npk] wallpaper WASM module not installed");
+            return;
+        }
+    };
 
     ensure_wallpaper_dir();
     let wp_dir = wallpaper_dir();
 
-    struct DemoTheme {
-        name: &'static str,
-        // Corner colors: top-left, top-right, bottom-left, bottom-right (RGB)
-        tl: (u8, u8, u8),
-        tr: (u8, u8, u8),
-        bl: (u8, u8, u8),
-        br: (u8, u8, u8),
+    let target = alloc::format!("@demos:{}x{}:{}", w, h, wp_dir);
+    let _ = crate::npkfs::store(".npk-wallpaper-target", target.as_bytes(),
+        crate::capability::CAP_NULL);
+
+    let module_cap = match crate::capability::create_module_cap(
+        crate::capability::Rights::READ
+            | crate::capability::Rights::WRITE
+            | crate::capability::Rights::EXECUTE,
+        Some(60_000), // generate at 4K can take a few seconds
+    ) {
+        Ok(id) => id,
+        Err(_) => {
+            kprintln!("[npk] failed to create module capability");
+            let _ = crate::npkfs::delete(".npk-wallpaper-target");
+            return;
+        }
+    };
+
+    kprintln!("[npk] Generating demo wallpapers at {}x{}...", w, h);
+    match crate::wasm::execute_sandboxed(&wasm_bytes, "_start", &[], module_cap) {
+        Ok(_) => kprintln!("[npk] {} themes generated.", 4),
+        Err(e) => kprintln!("[npk] generate failed: {}", e),
     }
+    let _ = crate::npkfs::delete(".npk-wallpaper-target");
 
-    let themes = [
-        DemoTheme {
-            name: "ocean",
-            tl: (2, 3, 15),        // near black
-            tr: (5, 30, 60),       // dark navy
-            bl: (10, 60, 120),     // deep ocean
-            br: (60, 200, 240),    // bright cyan
-        },
-        DemoTheme {
-            name: "sunset",
-            tl: (10, 2, 15),       // near black
-            tr: (80, 10, 30),      // dark crimson
-            bl: (160, 40, 20),     // deep orange
-            br: (255, 160, 80),    // bright amber
-        },
-        DemoTheme {
-            name: "forest",
-            tl: (2, 8, 3),         // near black
-            tr: (8, 40, 15),       // dark forest
-            bl: (15, 80, 30),      // deep emerald
-            br: (80, 220, 100),    // bright green
-        },
-        DemoTheme {
-            name: "aurora",
-            tl: (5, 2, 18),        // near black
-            tr: (30, 10, 80),      // dark indigo
-            bl: (80, 20, 160),     // deep purple
-            br: (180, 100, 255),   // bright violet
-        },
-    ];
-
-    // Header: 8 bytes (width u32 LE + height u32 LE) + BGRA pixels
-    let pixel_count = (w * h) as usize;
-    let data_size = 8 + pixel_count * 4;
-
-    for theme in &themes {
-        kprint!("[npk] Generating {}... ", theme.name);
-
-        let mut data = vec![0u8; data_size];
-        // Write dimensions header
-        data[0..4].copy_from_slice(&w.to_le_bytes());
-        data[4..8].copy_from_slice(&h.to_le_bytes());
-
-        // Generate bilinear gradient with subtle noise
-        for y in 0..h {
-            // Keep USB input alive during generation (~32M pixels)
-            // Timer IRQ handles USB polling during generation
-            let fy = y as u32 * 1000 / h;
-            for x in 0..w {
-                let fx = x as u32 * 1000 / w;
-
-                // Bilinear interpolation of 4 corners
-                let r = bilinear(theme.tl.0, theme.tr.0, theme.bl.0, theme.br.0, fx, fy);
-                let g = bilinear(theme.tl.1, theme.tr.1, theme.bl.1, theme.br.1, fx, fy);
-                let b = bilinear(theme.tl.2, theme.tr.2, theme.bl.2, theme.br.2, fx, fy);
-
-                // Add subtle diagonal streaks (like aurora but simpler)
-                let diag = ((x as i32 * 600 + y as i32 * 800) / 1000) as u32;
-                let wave = sine_lut((diag * 5) % 1024);
-                let r = (r as i32 + wave * 8 / 256).clamp(0, 255) as u8;
-                let g = (g as i32 + wave * 6 / 256).clamp(0, 255) as u8;
-                let b = (b as i32 + wave * 10 / 256).clamp(0, 255) as u8;
-
-                // Radial glow toward bottom-right (reinforces dark→bright gradient)
-                let dx = (fx as i32 - 700).abs();
-                let dy = (fy as i32 - 650).abs();
-                let glow = 180i32.saturating_sub((dx * dx + dy * dy) / 600).max(0);
-                let r = (r as i32 + glow / 5).min(255) as u8;
-                let g = (g as i32 + glow / 4).min(255) as u8;
-                let b = (b as i32 + glow / 3).min(255) as u8;
-
-                let off = 8 + ((y * w + x) as usize) * 4;
-                data[off]     = b; // B
-                data[off + 1] = g; // G
-                data[off + 2] = r; // R
-                data[off + 3] = 255; // A
-            }
-        }
-
-        let store_name = alloc::format!("{}/{}", wp_dir, theme.name);
-        match crate::npkfs::store(&store_name, &data, crate::capability::CAP_NULL) {
-            Ok(_) => kprintln!("OK ({}x{})", w, h),
-            Err(e) => { kprintln!("failed: {:?}", e); continue; }
-        }
-        // Flush output to screen
-        if crate::shade::is_active() {
-            crate::shade::render_frame();
-        }
-    }
-
-    kprintln!("[npk] {} demo wallpapers generated.", themes.len());
     if crate::shade::is_active() {
         crate::shade::render_frame();
     }
     kprintln!("[npk] Setting random wallpaper...");
     random_wallpaper();
-}
-
-/// Bilinear interpolation of 4 corner values.
-fn bilinear(tl: u8, tr: u8, bl: u8, br: u8, fx: u32, fy: u32) -> u8 {
-    let top = (tl as u32 * (1000 - fx) + tr as u32 * fx) / 1000;
-    let bot = (bl as u32 * (1000 - fx) + br as u32 * fx) / 1000;
-    ((top * (1000 - fy) + bot * fy) / 1000) as u8
-}
-
-/// Simple sine lookup (0..1023 → -128..127).
-fn sine_lut(x: u32) -> i32 {
-    // Quarter-wave table (64 entries), mirrored + negated for full wave
-    const TABLE: [i8; 64] = [
-        0, 3, 6, 9, 12, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46,
-        49, 51, 54, 57, 60, 62, 65, 67, 70, 72, 75, 77, 79, 81, 83, 85,
-        87, 89, 91, 93, 94, 96, 97, 99, 100, 101, 102, 104, 105, 105, 106, 107,
-        108, 108, 109, 109, 110, 110, 110, 110, 111, 111, 111, 111, 111, 111, 111, 111,
-    ];
-    let idx = (x % 1024) as usize;
-    let quarter = idx / 256;
-    let pos = (idx % 256) * 64 / 256;
-    let val = match quarter {
-        0 => TABLE[pos] as i32,
-        1 => TABLE[63 - pos] as i32,
-        2 => -(TABLE[pos] as i32),
-        _ => -(TABLE[63 - pos] as i32),
-    };
-    val
 }
 
 /// Clear wallpaper, revert to aurora.

@@ -1,12 +1,18 @@
 //! Wallpaper WASM module for nopeekOS.
 //!
-//! Decodes PNG images and sets them as wallpaper via host functions.
-//! Runs inside the nopeekOS WASM sandbox (wasmi).
+//! Two modes, both via `_start`:
+//!   1. **Decode**: target file is a filename → fetch PNG → decode → set.
+//!   2. **Generate**: target starts with `@demos:<W>x<H>:<wp_dir>` →
+//!      write 4 gradient wallpapers into `<wp_dir>/<theme>`.
+//!
+//! The kernel picks the mode by writing `.npk-wallpaper-target`
+//! accordingly. Runs inside the nopeekOS WASM sandbox (wasmi).
 
 #![no_std]
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -14,6 +20,7 @@ use alloc::vec::Vec;
 
 unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_set_wallpaper(ptr: i32, len: i32, width: i32, height: i32) -> i32;
     fn npk_log(ptr: i32, len: i32);
 }
@@ -38,9 +45,21 @@ fn set_wallpaper(pixels: &[u8], w: u32, h: u32) -> bool {
     result == 0
 }
 
-// --- Simple bump allocator for WASM ---
+fn store(name: &str, data: &[u8]) -> bool {
+    let result = unsafe {
+        npk_store(name.as_ptr() as i32, name.len() as i32,
+                  data.as_ptr() as i32, data.len() as i32)
+    };
+    result == 0
+}
 
-const HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+// --- Simple bump allocator for WASM ---
+//
+// 64 MB heap covers worst-case native-resolution gradient generation:
+// one reusable BGRA buffer at 3840x2160 = 32 MB + ancillary allocs.
+// Bump allocator never frees — the module runs once per intent and
+// exits, so the WASM linear memory is discarded afterwards anyway.
+const HEAP_SIZE: usize = 64 * 1024 * 1024; // 64 MB
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -79,18 +98,28 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // 1. Read target filename from .npk-wallpaper-target
+    // Read target from .npk-wallpaper-target — either a PNG filename
+    // (decode mode) or a `@demos:<W>x<H>:<wp_dir>` string (generate mode).
     let mut name_buf = [0u8; 512];
     let name_len = match fetch(".npk-wallpaper-target", &mut name_buf) {
         Some(n) => n,
         None => { log("[wallpaper] no target file"); return; }
     };
-    let filename = match core::str::from_utf8(&name_buf[..name_len]) {
+    let target = match core::str::from_utf8(&name_buf[..name_len]) {
         Ok(s) => s,
-        Err(_) => { log("[wallpaper] invalid filename"); return; }
+        Err(_) => { log("[wallpaper] invalid target"); return; }
     };
 
-    // 2. Fetch the image file
+    if let Some(spec) = target.strip_prefix("@demos:") {
+        run_generate(spec);
+    } else {
+        run_decode(target);
+    }
+}
+
+// --- Decode mode (PNG → BGRA → set framebuffer) ---
+
+fn run_decode(filename: &str) {
     let max_size = 6 * 1024 * 1024; // 6 MB max
     let mut img_buf = vec![0u8; max_size];
     let img_len = match fetch(filename, &mut img_buf) {
@@ -98,17 +127,159 @@ pub extern "C" fn _start() {
         None => { log("[wallpaper] failed to fetch image"); return; }
     };
 
-    // 3. Decode PNG
     let (pixels, width, height) = match decode_png(&img_buf[..img_len]) {
         Some(v) => v,
         None => { log("[wallpaper] PNG decode failed"); return; }
     };
 
-    // 4. Set wallpaper
     if set_wallpaper(&pixels, width, height) {
         log("[wallpaper] OK");
     } else {
         log("[wallpaper] npk_set_wallpaper failed");
+    }
+}
+
+// --- Generate mode (4 gradient themes into wp_dir) ---
+
+/// Corner colors for one theme: top-left, top-right, bottom-left,
+/// bottom-right (R, G, B).
+struct Theme {
+    name: &'static str,
+    tl: (u8, u8, u8),
+    tr: (u8, u8, u8),
+    bl: (u8, u8, u8),
+    br: (u8, u8, u8),
+}
+
+const THEMES: &[Theme] = &[
+    Theme {
+        name: "ocean",
+        tl: (2, 3, 15),        // near black
+        tr: (5, 30, 60),       // dark navy
+        bl: (10, 60, 120),     // deep ocean
+        br: (60, 200, 240),    // bright cyan
+    },
+    Theme {
+        name: "sunset",
+        tl: (10, 2, 15),       // near black
+        tr: (80, 10, 30),      // dark crimson
+        bl: (160, 40, 20),     // deep orange
+        br: (255, 160, 80),    // bright amber
+    },
+    Theme {
+        name: "forest",
+        tl: (2, 8, 3),         // near black
+        tr: (8, 40, 15),       // dark forest
+        bl: (15, 80, 30),      // deep emerald
+        br: (80, 220, 100),    // bright green
+    },
+    Theme {
+        name: "aurora",
+        tl: (5, 2, 18),        // near black
+        tr: (30, 10, 80),      // dark indigo
+        bl: (80, 20, 160),     // deep purple
+        br: (180, 100, 255),   // bright violet
+    },
+];
+
+fn run_generate(spec: &str) {
+    // Parse "<W>x<H>:<wp_dir>"
+    let (dims, wp_dir) = match spec.split_once(':') {
+        Some(v) => v,
+        None => { log("[wallpaper] bad @demos spec (missing dir)"); return; }
+    };
+    let (w_s, h_s) = match dims.split_once('x') {
+        Some(v) => v,
+        None => { log("[wallpaper] bad @demos spec (missing WxH)"); return; }
+    };
+    let width: u32 = match w_s.parse() {
+        Ok(v) if v >= 16 && v <= 7680 => v,
+        _ => { log("[wallpaper] bad width"); return; }
+    };
+    let height: u32 = match h_s.parse() {
+        Ok(v) if v >= 16 && v <= 4320 => v,
+        _ => { log("[wallpaper] bad height"); return; }
+    };
+
+    // One reusable BGRA buffer with an 8-byte (W LE + H LE) header —
+    // kernel's background::set_wallpaper consumes this exact layout.
+    let pixel_count = (width as usize) * (height as usize);
+    let data_size = 8 + pixel_count * 4;
+    let mut data = vec![0u8; data_size];
+    data[0..4].copy_from_slice(&width.to_le_bytes());
+    data[4..8].copy_from_slice(&height.to_le_bytes());
+
+    for theme in THEMES {
+        fill_gradient(&mut data[8..], width, height, theme);
+        let path = format!("{}/{}", wp_dir, theme.name);
+        if store(&path, &data) {
+            log(&format!("[wallpaper] {} {}x{} OK", theme.name, width, height));
+        } else {
+            log(&format!("[wallpaper] {} npk_store failed", theme.name));
+        }
+    }
+}
+
+/// Fill a BGRA pixel slice with the bilinear-interpolated gradient of
+/// `theme`, plus a sine streak overlay and a bottom-right radial glow.
+/// The pixel math mirrors the original kernel implementation.
+fn fill_gradient(pixels: &mut [u8], w: u32, h: u32, t: &Theme) {
+    for y in 0..h {
+        let fy = y * 1000 / h;
+        for x in 0..w {
+            let fx = x * 1000 / w;
+
+            let r = bilinear(t.tl.0, t.tr.0, t.bl.0, t.br.0, fx, fy);
+            let g = bilinear(t.tl.1, t.tr.1, t.bl.1, t.br.1, fx, fy);
+            let b = bilinear(t.tl.2, t.tr.2, t.bl.2, t.br.2, fx, fy);
+
+            // Diagonal sine streaks (soft aurora-like bands)
+            let diag = ((x as i32 * 600 + y as i32 * 800) / 1000) as u32;
+            let wave = sine_lut((diag * 5) % 1024);
+            let r = (r as i32 + wave * 8 / 256).clamp(0, 255) as u8;
+            let g = (g as i32 + wave * 6 / 256).clamp(0, 255) as u8;
+            let b = (b as i32 + wave * 10 / 256).clamp(0, 255) as u8;
+
+            // Radial glow toward bottom-right
+            let dx = (fx as i32 - 700).abs();
+            let dy = (fy as i32 - 650).abs();
+            let glow = 180i32.saturating_sub((dx * dx + dy * dy) / 600).max(0);
+            let r = (r as i32 + glow / 5).min(255) as u8;
+            let g = (g as i32 + glow / 4).min(255) as u8;
+            let b = (b as i32 + glow / 3).min(255) as u8;
+
+            let off = ((y * w + x) as usize) * 4;
+            pixels[off]     = b;
+            pixels[off + 1] = g;
+            pixels[off + 2] = r;
+            pixels[off + 3] = 255;
+        }
+    }
+}
+
+/// Bilinear interpolation of 4 corner values.
+fn bilinear(tl: u8, tr: u8, bl: u8, br: u8, fx: u32, fy: u32) -> u8 {
+    let top = (tl as u32 * (1000 - fx) + tr as u32 * fx) / 1000;
+    let bot = (bl as u32 * (1000 - fx) + br as u32 * fx) / 1000;
+    ((top * (1000 - fy) + bot * fy) / 1000) as u8
+}
+
+/// Quarter-wave sine lookup (0..1023 → −128..127 via mirroring).
+fn sine_lut(x: u32) -> i32 {
+    const TABLE: [i8; 64] = [
+        0, 3, 6, 9, 12, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46,
+        49, 51, 54, 57, 60, 62, 65, 67, 70, 72, 75, 77, 79, 81, 83, 85,
+        87, 89, 91, 93, 94, 96, 97, 99, 100, 101, 102, 104, 105, 105, 106, 107,
+        108, 108, 109, 109, 110, 110, 110, 110, 111, 111, 111, 111, 111, 111, 111, 111,
+    ];
+    let idx = (x % 1024) as usize;
+    let quarter = idx / 256;
+    let pos = (idx % 256) * 64 / 256;
+    match quarter {
+        0 => TABLE[pos] as i32,
+        1 => TABLE[63 - pos] as i32,
+        2 => -(TABLE[pos] as i32),
+        _ => -(TABLE[63 - pos] as i32),
     }
 }
 
