@@ -6,4 +6,7 @@ tools/wasm/**/target
 !release/kernel.bin
 kernel/src/install_data/grub.efi
 kernel/src/install_data/kernel.bin
+# Bundled assets staged by build.sh installer; only mod.rs is tracked.
+kernel/src/install_data/assets/*
+!kernel/src/install_data/assets/mod.rs
 update.key
