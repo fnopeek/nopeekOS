@@ -91,15 +91,22 @@ pub struct GlyphKey {
     pub weight:  u16,
 }
 
-/// Rasterized glyph — alpha bitmap + metrics. P10.4 migrates storage
-/// into the GGTT glyph region; v1 keeps this heap-backed.
+/// Rasterized glyph — alpha bitmap + metrics.
+///
+/// P10.4: each cached glyph reserves a slot in the GGTT CompSmall4K
+/// bucket via the slab allocator. `ggtt_offset` is the slot's address;
+/// the alpha bitmap stays heap-resident for now (the CPU rasterizer in
+/// P10.5 reads from the heap copy). The GGTT slot is an address
+/// reservation so later phases can upload bytes there without
+/// re-keying the cache. LRU eviction happens on the slab side.
 pub struct CachedGlyph {
-    pub alpha:   Vec<u8>,
-    pub width:   u16,
-    pub height:  u16,
-    pub xmin:    i16,
-    pub ymin:    i16,
-    pub advance: f32,
+    pub alpha:       Vec<u8>,
+    pub width:       u16,
+    pub height:      u16,
+    pub xmin:        i16,
+    pub ymin:        i16,
+    pub advance:     f32,
+    pub ggtt_offset: u32,
 }
 
 static GLYPH_CACHE: Mutex<Option<HashMap<GlyphKey, CachedGlyph>>> = Mutex::new(None);
@@ -292,14 +299,42 @@ where
 
     if !cache.contains_key(&key) {
         let (m, alpha) = font.rasterize_indexed(glyph, d.size_px as f32);
+
+        // Reserve a GGTT slot for the alpha bitmap. CompSmall4K fits
+        // every glyph we care about (UI text at 11–24 px, max ~32×32
+        // = 1 KB). Slab handles LRU eviction if the bucket fills up.
+        let ggtt_offset = crate::gpu::ggtt_slab::alloc(
+            crate::gpu::ggtt_layout::BucketKind::CompSmall4K,
+        )
+        .map(|s| s.ggtt_offset())
+        .unwrap_or(0);
+
         cache.insert(key, CachedGlyph {
             alpha,
-            width:   m.width  as u16,
-            height:  m.height as u16,
-            xmin:    m.xmin   as i16,
-            ymin:    m.ymin   as i16,
-            advance: m.advance_width,
+            width:       m.width  as u16,
+            height:      m.height as u16,
+            xmin:        m.xmin   as i16,
+            ymin:        m.ymin   as i16,
+            advance:     m.advance_width,
+            ggtt_offset,
         });
+    } else {
+        // Keep warm glyphs alive in LRU. Cheap — linear on the
+        // bucket's VecDeque but hit rate is high on typical text.
+        if let Some(cg) = cache.get(&key) {
+            if cg.ggtt_offset != 0 {
+                // Rebuild a SlotId from the offset for the LRU touch.
+                let kind = crate::gpu::ggtt_layout::BucketKind::CompSmall4K;
+                let base = crate::gpu::ggtt_layout::BUCKET_BASES[kind as usize];
+                let size = crate::gpu::ggtt_layout::BUCKET_SIZES[kind as usize] as u32;
+                if cg.ggtt_offset >= base && size > 0 {
+                    let idx = (cg.ggtt_offset - base) / size;
+                    crate::gpu::ggtt_slab::touch(
+                        crate::gpu::ggtt_slab::SlotId { kind, idx },
+                    );
+                }
+            }
+        }
     }
     cache.get(&key).map(f)
 }
