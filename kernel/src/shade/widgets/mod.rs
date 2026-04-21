@@ -23,6 +23,7 @@
 pub mod abi;
 pub mod tile;
 pub mod debug;
+pub mod layout;
 
 // Compile-time ABI ordering guard. Module exists solely for its
 // const-asserts and exhaustive-match functions.
@@ -61,8 +62,18 @@ pub fn scene_commit(bytes: &[u8]) -> i32 {
     };
     crate::kprintln!("[npk] scene_commit: {} bytes → tree decoded", bytes.len());
     debug::print_tree(&tree);
-    // P10.3+ stores the tree into a per-app scene slot; P10.2 just logs
-    // and drops. Swallow unused-warning via explicit discard.
+
+    // P10.3: run layout over the whole framebuffer, then dump the
+    // computed geometry. Later phases install a per-app window rect;
+    // for now the tree spans the whole screen at 1× HiDPI.
+    let (fb_w, fb_h) = crate::framebuffer::get_resolution();
+    let window = abi::Rect { x: 0, y: 0, w: fb_w, h: fb_h };
+    let layout_tree = layout::layout(&tree, window);
+    debug::print_layout(&tree, &layout_tree);
+
+    // P10.5+ stores the tree + layout into a per-app scene slot for
+    // diff-based re-raster. P10.3 just logs and drops.
+    let _ = layout_tree;
     let _ = tree;
     let _: Vec<u8> = Vec::new();
     0
