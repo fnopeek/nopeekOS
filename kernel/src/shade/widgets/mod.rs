@@ -32,6 +32,75 @@ pub mod raster;
 // const-asserts and exhaustive-match functions.
 mod check_abi;
 
+use spin::Mutex;
+
+/// Persistent last-rendered widget scene. Re-blitted onto the
+/// framebuffer after every shade render cycle so the widget stays
+/// visible until explicitly cleared (e.g. window close, or the next
+/// `scene_commit`).
+///
+/// For P10.5b this is a single global slot — one committing app at a
+/// time. Per-window scenes come when Shade learns about widget-kind
+/// windows properly.
+pub struct ActiveScene {
+    pub pixels: alloc::vec::Vec<u32>,
+    pub x:      i32,
+    pub y:      i32,
+    pub w:      u32,
+    pub h:      u32,
+}
+
+static ACTIVE_SCENE: Mutex<Option<ActiveScene>> = Mutex::new(None);
+
+/// Call from shade's render pipeline AFTER normal windows have been
+/// painted. Blits the active widget scene on top of the framebuffer.
+/// No-op if no scene is active.
+pub fn overlay_active() {
+    let guard = ACTIVE_SCENE.lock();
+    let scene = match guard.as_ref() {
+        Some(s) => s,
+        None    => return,
+    };
+    crate::framebuffer::with_fb(|fb| {
+        let info = fb.info();
+        let (shadow, _) = fb.shadow_ptr();
+        let fb_pitch = info.pitch as usize;
+        let fb_w = info.width;
+        let fb_h = info.height;
+
+        let x0 = scene.x.max(0) as u32;
+        let y0 = scene.y.max(0) as u32;
+        let x1 = (scene.x + scene.w as i32).max(0) as u32;
+        let y1 = (scene.y + scene.h as i32).max(0) as u32;
+        let x1 = x1.min(fb_w);
+        let y1 = y1.min(fb_h);
+        if x0 >= x1 || y0 >= y1 { return; }
+
+        for dy in y0..y1 {
+            let src_y = (dy as i32 - scene.y) as usize;
+            let dst_off = dy as usize * fb_pitch + (x0 as usize) * 4;
+            let src_off = src_y * (scene.w as usize) + (x0 as i32 - scene.x) as usize;
+            let span = (x1 - x0) as usize;
+            // SAFETY: bounds clipped above; shadow + pixels both valid.
+            unsafe {
+                let dst = shadow.add(dst_off) as *mut u32;
+                core::ptr::copy_nonoverlapping(
+                    scene.pixels.as_ptr().add(src_off),
+                    dst,
+                    span,
+                );
+            }
+        }
+        crate::framebuffer::blit_rect(fb, x0, y0, x1 - x0, y1 - y0);
+    });
+}
+
+/// Remove the active widget scene — called when the hosting window
+/// closes. Idempotent.
+pub fn clear_active() {
+    *ACTIVE_SCENE.lock() = None;
+}
+
 // ── Scene commit (P10.2) ──────────────────────────────────────────────
 
 use alloc::vec::Vec;
@@ -66,16 +135,11 @@ pub fn scene_commit(bytes: &[u8]) -> i32 {
     crate::kprintln!("[npk] scene_commit: {} bytes → tree decoded", bytes.len());
     debug::print_tree(&tree);
 
-    // P10.3+: lay out into an 800×600 window centred on the screen.
-    // A full-framebuffer layout makes the first-pass UI disappear on
-    // a 4K display; a fixed-size window gives a compact, legible
-    // preview. Proper window management comes with shade integration
-    // in a follow-up.
-    let (fb_w, fb_h) = crate::framebuffer::get_resolution();
-    let win_w = 800u32.min(fb_w);
-    let win_h = 600u32.min(fb_h);
-    let win_x = ((fb_w.saturating_sub(win_w)) / 2) as i32;
-    let win_y = ((fb_h.saturating_sub(win_h)) / 2) as i32;
+    // P10.5b: lay out into the focused shade window's content rect so
+    // the widget takes whatever slot the tiling WM has given the
+    // hosting app. If no shade window is focused (early boot /
+    // headless test), fall back to a centred 800×600 preview.
+    let (win_x, win_y, win_w, win_h) = host_window_rect();
     let window = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
 
     let layout_tree = layout::layout(&tree, window);
@@ -84,13 +148,44 @@ pub fn scene_commit(bytes: &[u8]) -> i32 {
     // P10.5: rasterize the tree into a heap back buffer, then blit
     // the pixels to the framebuffer at the window origin. One
     // RasterTarget covering the whole window — tile subdivision +
-    // dirty-diff caching come in P10.6.
+    // dirty-diff caching come in P10.6. Pixels are also stashed in
+    // ACTIVE_SCENE so shade's render loop re-overlays them after any
+    // subsequent terminal redraw — that makes the widget persistent
+    // until the hosting window is closed.
     rasterize_and_blit(&tree, &layout_tree, win_x, win_y, win_w, win_h);
 
     let _ = tree;
     let _ = layout_tree;
     let _: Vec<u8> = Vec::new();
     0
+}
+
+/// Resolve the rect the widget should occupy — the focused shade
+/// window's content area if one exists, else a centred 800×600
+/// fallback for early-boot / QEMU-without-login testing.
+fn host_window_rect() -> (i32, i32, u32, u32) {
+    let from_shade = crate::shade::with_compositor(|comp| {
+        let fid = comp.focused?;
+        let win = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace)?;
+        let border = comp.border;
+        Some((
+            win.content_x(border) as i32,
+            win.content_y(border) as i32,
+            win.content_w(border),
+            win.content_h(border),
+        ))
+    }).flatten();
+
+    if let Some(rect) = from_shade {
+        return rect;
+    }
+
+    let (fb_w, fb_h) = crate::framebuffer::get_resolution();
+    let win_w = 800u32.min(fb_w);
+    let win_h = 600u32.min(fb_h);
+    let win_x = ((fb_w.saturating_sub(win_w)) / 2) as i32;
+    let win_y = ((fb_h.saturating_sub(win_h)) / 2) as i32;
+    (win_x, win_y, win_w, win_h)
 }
 
 /// Allocate a back buffer, rasterize the widget+layout tree into it,
@@ -168,4 +263,15 @@ fn rasterize_and_blit(
         "[npk] scene_commit: rendered + blit {}x{} @ ({}, {})",
         win_w, win_h, win_x, win_y,
     );
+
+    // Stash pixels for the persistent overlay hook. Shade's render
+    // loop will re-blit after any subsequent redraw. Move the Vec
+    // rather than clone — we're done with the local copy.
+    *ACTIVE_SCENE.lock() = Some(ActiveScene {
+        pixels,
+        x: win_x,
+        y: win_y,
+        w: win_w,
+        h: win_h,
+    });
 }

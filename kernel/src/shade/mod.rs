@@ -137,6 +137,14 @@ pub fn render_frame() {
     } else {
         render_frame_legacy();
     }
+    overlay_widgets();
+}
+
+/// Post-render hook: overlay any persistent widget scene on top of
+/// whatever shade just rendered. Called at the tail of every
+/// render-frame path so the widget survives across redraws.
+fn overlay_widgets() {
+    widgets::overlay_active();
 }
 
 /// Layer-based render with double-buffer: render to back, swap, blit from front.
@@ -283,6 +291,7 @@ pub fn render_damaged() {
     } else {
         render_damaged_legacy();
     }
+    overlay_widgets();
 }
 
 fn render_damaged_layered() {
@@ -587,6 +596,9 @@ pub fn poll_render() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
+    // Re-stamp widget scene on top of the partially-rendered frame
+    // (terminal text may have painted over it).
+    overlay_widgets();
     return;
 
     // Legacy partial render path (kept for reference)
