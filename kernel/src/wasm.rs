@@ -584,6 +584,44 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_event_poll(buf_ptr, buf_max) -> i32
+    // Non-blocking: pop one event from this app's widget-window
+    // queue, postcard-encode it into the supplied WASM buffer.
+    //   >0 → encoded byte count
+    //   0  → queue empty (app should sleep / yield)
+    //   -1 → no widget window, cap denied, or buffer too small
+    linker.func_wrap("env", "npk_event_poll",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let window_id = caller.data().widget_window_id;
+            if window_id == 0 { return -1; }
+
+            let event = match crate::shade::widgets::poll_event(window_id) {
+                Some(e) => e,
+                None => return 0,
+            };
+            let encoded = match postcard::to_allocvec(&event) {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+            if encoded.len() > buf_max as usize { return -1; }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + encoded.len();
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(&encoded);
+            encoded.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_get_fb_size() -> (width << 16) | height
     linker.func_wrap("env", "npk_get_fb_size",
         |_caller: Caller<'_, HostState>| -> i64 {

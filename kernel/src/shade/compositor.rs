@@ -211,9 +211,10 @@ impl Compositor {
                 }
                 crate::shade::window::WindowKind::Widget => {
                     // No terminal buffer / session to free. Drop the
-                    // per-window widget scene; its backing pixel Vec
-                    // frees with the entry.
+                    // per-window widget scene + event queue; their
+                    // backing allocations free with the entries.
                     crate::shade::widgets::remove_scene(id.0);
+                    crate::shade::widgets::remove_event_queue(id.0);
                 }
             }
         }
@@ -857,13 +858,39 @@ impl Compositor {
             }
         }
 
-        // Regular LMB click: focus window
+        // Regular LMB click: focus window + dispatch widget event
         if self.mouse.left_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
-                if self.focused != Some(wid) {
+                // Focus on first click into an unfocused window; later
+                // clicks on the same focused widget should dispatch.
+                let focus_changed = self.focused != Some(wid);
+                if focus_changed {
                     self.focus_window(wid);
-                    return true;
                 }
+
+                // Widget-kind click: hit-test against the scene's
+                // layout tree, push Event::Action(id) or
+                // Event::MouseButton into the window's queue.
+                let is_widget = self.windows.iter()
+                    .find(|w| w.id == wid)
+                    .map(|w| w.kind == crate::shade::window::WindowKind::Widget)
+                    .unwrap_or(false);
+                if is_widget {
+                    use crate::shade::widgets::abi::{Event, MouseButton};
+                    if let Some(action) = crate::shade::widgets::hit_test(wid.0, mx, my) {
+                        crate::shade::widgets::push_event(wid.0, Event::Action(action));
+                    }
+                    // Always queue the raw button too — apps that want
+                    // position-sensitive behaviour (canvas, drag) use
+                    // it directly.
+                    crate::shade::widgets::push_event(wid.0, Event::MouseButton {
+                        button: MouseButton::Left,
+                        down:   true,
+                        x:      mx,
+                        y:      my,
+                    });
+                }
+                if focus_changed { return true; }
             }
         }
 
