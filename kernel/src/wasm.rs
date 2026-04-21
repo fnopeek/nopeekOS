@@ -519,6 +519,32 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_scene_commit(ptr, len) -> 0 or -1
+    // Phase 10 widget pipeline: WASM app hands the kernel a version-
+    // prefixed postcard-serialized Widget tree. Compositor does the
+    // rest (version check, deserialize, layout, raster). Requires
+    // RENDER right.
+    linker.func_wrap("env", "npk_scene_commit",
+        |caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                kprintln!("[npk] WASM: npk_scene_commit DENIED (no RENDER)");
+                return -1;
+            }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = ptr as usize;
+            let end = start.saturating_add(len as usize).min(data.len());
+            if start >= end { return -1; }
+
+            crate::shade::widgets::scene_commit(&data[start..end])
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_get_fb_size() -> (width << 16) | height
     linker.func_wrap("env", "npk_get_fb_size",
         |_caller: Caller<'_, HostState>| -> i64 {

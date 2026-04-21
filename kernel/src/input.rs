@@ -14,7 +14,11 @@ pub struct KeyEvent {
 }
 
 /// Logical key codes — hardware-independent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Wire-stable: variant order and field shape are part of the widget ABI
+/// (Phase 10, `shade::widgets::abi::Event::Key`). Append-only; never
+/// reorder. Mirrored in the SDK at `nopeek_widgets::abi::KeyCode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KeyCode {
     /// Printable ASCII character (already layout-converted).
     Char(u8),

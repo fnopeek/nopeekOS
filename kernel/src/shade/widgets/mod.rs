@@ -22,7 +22,48 @@
 
 pub mod abi;
 pub mod tile;
+pub mod debug;
 
 // Compile-time ABI ordering guard. Module exists solely for its
 // const-asserts and exhaustive-match functions.
 mod check_abi;
+
+// ── Scene commit (P10.2) ──────────────────────────────────────────────
+
+use alloc::vec::Vec;
+
+/// Deserialize a wire-framed widget tree from an app's commit payload.
+///
+/// Expected layout: `[ version: u8 ][ postcard-serialized Widget ]`.
+/// Returns -1 on version mismatch, -2 on deserialize failure.
+/// Prints the decoded tree to serial on success (P10.2 deliverable).
+pub fn scene_commit(bytes: &[u8]) -> i32 {
+    let (&version, body) = match bytes.split_first() {
+        Some(v) => v,
+        None => {
+            crate::kprintln!("[npk] scene_commit: empty payload");
+            return -1;
+        }
+    };
+    if version != abi::WIRE_VERSION {
+        crate::kprintln!(
+            "[npk] scene_commit: wire version mismatch (got {:#x}, want {:#x})",
+            version, abi::WIRE_VERSION,
+        );
+        return -1;
+    }
+    let tree: abi::Widget = match postcard::from_bytes(body) {
+        Ok(t) => t,
+        Err(e) => {
+            crate::kprintln!("[npk] scene_commit: postcard decode failed: {:?}", e);
+            return -2;
+        }
+    };
+    crate::kprintln!("[npk] scene_commit: {} bytes → tree decoded", bytes.len());
+    debug::print_tree(&tree);
+    // P10.3+ stores the tree into a per-app scene slot; P10.2 just logs
+    // and drops. Swallow unused-warning via explicit discard.
+    let _ = tree;
+    let _: Vec<u8> = Vec::new();
+    0
+}

@@ -6,6 +6,7 @@ exclude = [
     "tools/wasm/wifi",
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
+    "tools/wasm/files-stub",
 ]
 resolver = "2"
 

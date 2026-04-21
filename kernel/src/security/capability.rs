@@ -29,7 +29,10 @@ bitflags! {
         const DELEGATE  = 0b0000_1000;
         const REVOKE    = 0b0001_0000;
         const AUDIT     = 0b0010_0000;
-        const ALL       = 0b0011_1111;
+        /// Phase 10: `npk_scene_commit` — widget-tree rendering.
+        /// CANVAS (pixel upload, P10.10) will land as a separate bit.
+        const RENDER    = 0b0100_0000;
+        const ALL       = 0b0111_1111;
     }
 }
 
