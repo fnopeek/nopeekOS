@@ -24,11 +24,60 @@ pub fn current() -> Palette {
     Palette { colors }
 }
 
-/// Resolve a single token to its BGRA color right now.
+/// Resolve a single token to its BGRA color right now. When the
+/// wallpaper-extracted theme is active, surface + accent tokens pull
+/// from the live palette so widgets follow the system look; otherwise
+/// falls back to the hardcoded v1 defaults.
 pub fn resolve(token: Token) -> u32 {
-    // Hardcoded v1 palette — dark, modern, good contrast. Every value
-    // stays stable under updates (token order is frozen ABI), so apps
-    // can rely on "Surface is dark, Accent is purple" semantics.
+    if crate::theme::is_active() {
+        if let Some(c) = from_live_theme(token) {
+            return c;
+        }
+    }
+    fallback(token)
+}
+
+/// Map a token to the live theme palette (16-color extracted from
+/// the current wallpaper). Returns None for tokens the theme doesn't
+/// drive — those fall back to hardcoded values.
+///
+/// Theme colors are stored as 0x00RRGGBB; we promote to 0xFFRRGGBB
+/// (opaque) here. Surface uses palette[0] (darkest), Accent uses
+/// `background::accent_color()` (the dominant dominant-hue slot),
+/// Border uses palette[8] (bright variant of bg). Lightness-adjusted
+/// muted / elevated variants are derived via lerp.
+fn from_live_theme(token: Token) -> Option<u32> {
+    let surface = crate::theme::bg_color() | 0xFF00_0000;
+    let accent  = crate::gui::background::accent_color() | 0xFF00_0000;
+    let border  = crate::theme::inactive_border() | 0xFF00_0000;
+
+    Some(match token {
+        Token::Surface         => surface,
+        Token::SurfaceElevated => lighten(surface, 0x10),
+        Token::SurfaceMuted    => lighten(surface, 0x06),
+
+        Token::Accent          => accent,
+        Token::AccentMuted     => darken(accent, 0x20),
+
+        Token::Border          => border,
+
+        // Text / semantic tokens keep their hardcoded values — the
+        // extracted palette doesn't reliably give readable contrast
+        // pairs for body text, so stay with the proven defaults.
+        Token::OnSurface       => 0xFFE0E0E8,
+        Token::OnSurfaceMuted  => 0xFF8A8A96,
+        Token::OnAccent        => 0xFFFFFFFF,
+        Token::Success         => 0xFF4CAF50,
+        Token::Warning         => 0xFFFFB300,
+        Token::Danger          => 0xFFE74C3C,
+
+        _ => return None,
+    })
+}
+
+/// Hardcoded fallback palette — applied when no theme is active
+/// (early boot, headless tests) or for tokens the theme doesn't drive.
+fn fallback(token: Token) -> u32 {
     match token {
         Token::Surface         => 0xFF1E1E24,
         Token::SurfaceElevated => 0xFF2A2A32,
@@ -38,7 +87,7 @@ pub fn resolve(token: Token) -> u32 {
         Token::OnSurfaceMuted  => 0xFF8A8A96,
         Token::OnAccent        => 0xFFFFFFFF,
 
-        Token::Accent          => 0xFF7B50A0,   // nopeekOS purple
+        Token::Accent          => 0xFF7B50A0,
         Token::AccentMuted     => 0xFF5A3780,
 
         Token::Border          => 0xFF3A3A45,
@@ -46,8 +95,27 @@ pub fn resolve(token: Token) -> u32 {
         Token::Warning         => 0xFFFFB300,
         Token::Danger          => 0xFFE74C3C,
 
-        _ => 0xFFFF00FF,  // loud magenta — new-token-not-in-resolver hint
+        _ => 0xFFFF00FF,
     }
+}
+
+/// Shift each RGB channel up by `delta` (saturating at 0xFF). Keeps
+/// alpha channel intact.
+fn lighten(color: u32, delta: u8) -> u32 {
+    let a =  color & 0xFF00_0000;
+    let r = ((color >> 16) & 0xFF).saturating_add(delta as u32).min(0xFF);
+    let g = ((color >> 8)  & 0xFF).saturating_add(delta as u32).min(0xFF);
+    let b = ( color        & 0xFF).saturating_add(delta as u32).min(0xFF);
+    a | (r << 16) | (g << 8) | b
+}
+
+/// Shift each RGB channel down by `delta` (saturating at 0).
+fn darken(color: u32, delta: u8) -> u32 {
+    let a =  color & 0xFF00_0000;
+    let r = ((color >> 16) & 0xFF).saturating_sub(delta as u32);
+    let g = ((color >> 8)  & 0xFF).saturating_sub(delta as u32);
+    let b = ( color        & 0xFF).saturating_sub(delta as u32);
+    a | (r << 16) | (g << 8) | b
 }
 
 /// Token at slot `idx` in the `Palette.colors` array. Mirrors the

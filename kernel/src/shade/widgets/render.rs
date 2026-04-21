@@ -35,6 +35,61 @@ pub fn render(
     for (cw, cl) in kids.iter().zip(layout.children.iter()) {
         render(rast, target, cw, cl);
     }
+
+    // Modifier::Opacity acts as a post-paint dampening over the node's
+    // rect — blend everything already painted there towards the
+    // Surface token, weighted by (255 - opacity). Lets the SDK
+    // express "show this at 70 % visibility" without the rasterizer
+    // trait needing a new parameter.
+    let op = find_opacity(widget);
+    if op < 255 {
+        apply_rect_opacity(target, layout.rect, op);
+    }
+}
+
+/// First Opacity modifier on the widget, or 255 if none.
+fn find_opacity(w: &Widget) -> u8 {
+    for m in modifiers_of(w) {
+        if let Modifier::Opacity(v) = m { return *v; }
+    }
+    255
+}
+
+/// Blend every pixel in `rect` towards the Surface token by
+/// `255 - opacity`. Rectangle is in window coordinates.
+fn apply_rect_opacity(target: &mut RasterTarget, rect: Rect, opacity: u8) {
+    if opacity == 255 { return; }
+    let bg = target.palette.colors[super::abi::Token::Surface as usize];
+    let x0 = (rect.x - target.origin.x).max(0);
+    let y0 = (rect.y - target.origin.y).max(0);
+    let x1 = (x0 + rect.w as i32).min(target.size.w as i32);
+    let y1 = (y0 + rect.h as i32).min(target.size.h as i32);
+    if x0 >= x1 || y0 >= y1 { return; }
+
+    let weight = 255u32 - opacity as u32;
+    let stride = target.stride as usize;
+    for py in y0..y1 {
+        let base = py as usize * stride;
+        for px in x0..x1 {
+            let cur = target.pixels[base + px as usize];
+            target.pixels[base + px as usize] = blend_towards(cur, bg, weight);
+        }
+    }
+}
+
+fn blend_towards(src: u32, dst: u32, weight: u32) -> u32 {
+    if weight == 0 { return src; }
+    let inv = 255u32.saturating_sub(weight);
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8)  & 0xFF;
+    let sb =  src        & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8)  & 0xFF;
+    let db =  dst        & 0xFF;
+    let r = (sr * inv + dr * weight) / 255;
+    let g = (sg * inv + dg * weight) / 255;
+    let b = (sb * inv + db * weight) / 255;
+    0xFF_00_00_00 | (r << 16) | (g << 8) | b
 }
 
 /// Paint any Background / Border modifiers attached to the node.
