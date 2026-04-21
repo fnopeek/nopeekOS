@@ -32,21 +32,21 @@ pub const WIRE_VERSION: u8 = 0x01;
 // ── Geometry ──────────────────────────────────────────────────────────
 
 /// Point in window coordinates (px).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
 }
 
 /// Size in pixels.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Size {
     pub w: u32,
     pub h: u32,
 }
 
 /// Rectangle in window coordinates (px).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -58,16 +58,16 @@ pub struct Rect {
 
 /// App-defined action identifier. Attached to `on_click`, `on_submit`,
 /// `on_toggle` modifiers. Echoed back via `Event::Action(ActionId)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ActionId(pub u32);
 
 /// Canvas leaf identifier. Matches the `canvas_id` passed to
 /// `npk_canvas_commit` for pixel delivery.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CanvasId(pub u32);
 
 /// Node identifier inside a tree (structural path hash, compositor-assigned).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NodeId(pub u32);
 
 // ── Theme tokens ──────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ pub struct NodeId(pub u32);
 /// existing values never reassigned.
 #[repr(u8)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Token {
     // Surfaces
     Surface         = 0,
@@ -112,7 +112,7 @@ pub enum Token {
 /// the file-browser example. Real atlas populated in P10.9.
 #[repr(u16)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IconId {
     None        = 0,
     Folder      = 1,
@@ -132,7 +132,7 @@ pub enum IconId {
 /// avoids a wire-version bump when screen readers / UI automation land.
 #[repr(u8)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     /// Decorative only — skip in traversal.
     None      = 0,
@@ -155,7 +155,7 @@ pub enum Role {
 /// raster time. `Mono` routes to the Spleen bitmap font (terminal look).
 #[repr(u8)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TextStyle {
     Body    = 0,
     Title   = 1,
@@ -170,7 +170,7 @@ pub enum TextStyle {
 /// Fill description passed to the rasterizer. Never appears in the wire
 /// tree directly — constructed from Modifier tokens during raster setup.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fill {
     Solid(Token),
     // Appended only (gradients etc. in future versions).
@@ -182,7 +182,7 @@ pub enum Fill {
 /// CPU rasterizer treats `.effect(_)` as no-op.
 #[repr(u16)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectId {
     /// Reserved placeholder — no effects registered in v1.
     None = 0,
@@ -194,7 +194,7 @@ pub enum EffectId {
 /// Row/Column alignment on the cross axis.
 #[repr(u8)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Align {
     Start   = 0,
     Center  = 1,
@@ -206,7 +206,7 @@ pub enum Align {
 /// Scroll container axis.
 #[repr(u8)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Axis {
     Vertical   = 0,
     Horizontal = 1,
@@ -219,7 +219,7 @@ pub enum Axis {
 /// Transition curve. Deterministic fixed-point math lives in the
 /// compositor; the wire form just carries the curve choice.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Transition {
     /// Spring physics with default stiffness/damping (compositor-owned).
     Spring,
@@ -229,7 +229,7 @@ pub enum Transition {
 }
 
 /// Drop-shadow parameters (reserved — Modifier::Shadow).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Shadow {
     pub offset: Point,
     pub blur:   u8,
@@ -245,7 +245,7 @@ pub struct Shadow {
 /// Variant order frozen at v1. Reserved slots below are declared so their
 /// wire indices do not shift when v2 implements them.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Modifier {
     // ── Active in v1 ──────────────────────────────────────────────────
     /// Inner padding (px at 1× scale, scaled at raster time).
@@ -297,7 +297,7 @@ pub enum Modifier {
 /// Struct-variant field order is also part of the ABI (postcard serializes
 /// fields in declaration order).
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Widget {
     // ── Containers ────────────────────────────────────────────────────
     Column {
@@ -392,7 +392,7 @@ pub enum Widget {
 /// Input event delivered to a WASM app via `npk_event_poll` /
 /// `npk_event_wait`.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     /// Keyboard input. Uses the existing Phase 8 KeyCode (already stable).
     Key(crate::input::KeyCode),
@@ -414,7 +414,7 @@ pub enum Event {
 
 #[repr(u8)]
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
     Left   = 0,
     Right  = 1,
@@ -428,7 +428,7 @@ pub enum MouseButton {
 /// to decide whether to re-render; it does not cross the wire verbatim.
 /// Declared here so the enum lives alongside its counterpart `Event`.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     /// No state change — do not re-render.
     Idle,

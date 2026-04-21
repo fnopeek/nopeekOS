@@ -1,0 +1,16 @@
+[package]
+name = "files-stub"
+version = "0.1.0"
+edition = "2024"
+description = "P10.2 dummy widget app — commits one tree, exits."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

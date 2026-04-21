@@ -62,7 +62,7 @@ pub fn intent_run(args: &str) {
 
     // Delegate a capability for this module: READ + EXECUTE, 60s TTL
     let module_cap = match capability::create_module_cap(
-        capability::Rights::READ | capability::Rights::EXECUTE,
+        capability::Rights::READ | capability::Rights::EXECUTE | capability::Rights::RENDER,
         Some(6000), // 60 seconds at 100Hz
     ) {
         Ok(id) => id,
@@ -109,7 +109,7 @@ pub fn intent_run_background(module_name: &str) {
     };
 
     let module_cap = match capability::create_module_cap(
-        capability::Rights::READ | capability::Rights::EXECUTE,
+        capability::Rights::READ | capability::Rights::EXECUTE | capability::Rights::RENDER,
         Some(600_000),
     ) {
         Ok(id) => id,
@@ -143,7 +143,7 @@ pub fn intent_run_interactive(module_name: &str) {
     };
 
     let module_cap = match capability::create_module_cap(
-        capability::Rights::READ | capability::Rights::EXECUTE,
+        capability::Rights::READ | capability::Rights::EXECUTE | capability::Rights::RENDER,
         Some(600_000),
     ) {
         Ok(id) => id,
