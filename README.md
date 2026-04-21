@@ -458,13 +458,16 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [x] P10.3 Layout engine with real font metrics (`v0.55.0`)
 - [x] P10.4 GGTT slab allocator (`v0.56.0`)
 - [x] P10.5 CPU rasterizer + first visible render (`v0.57.0`–`.2`)
-- [ ] Window-manager integration for widget-kind windows
-- [ ] P10.6 Diff + per-app cache
-- [ ] P10.7 Event routing
-- [ ] P10.8 Animation
-- [ ] P10.9 Icon atlas
-- [ ] P10.10 Canvas
-- [ ] P10.11 Real file browser
+- [x] P10.5b Widget-kind windows first-class in shade (`v0.58.0`)
+- [x] Widget polish — rounded corners, Opacity, theme integration (`v0.58.1`)
+- [x] P10.6 Diff+cache — payload-hash skip-render (`v0.59.0`, full diff pending)
+- [x] P10.7 Event routing — mouse hit-test + `npk_event_poll` (`v0.60.0`, keyboard/blocking pending)
+- [x] P10.8 Animation — Q16.16 math scaffold (`v0.61.0`, no active consumers yet)
+- [x] P10.9 Phosphor icon atlas (`v0.62.0`) — **last visual checkpoint, 18 icons shipped**
+- [ ] drun — first interactive widget app (Mod+D launcher)
+- [ ] Tile subdivision + full diff cache
+- [ ] P10.10 Canvas escape hatch
+- [ ] P10.11 Real file browser (Thunar-clone, capstone)
 
 ### Phase 11 -- AI Integration
 
