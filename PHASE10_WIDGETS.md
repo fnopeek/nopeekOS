@@ -678,7 +678,31 @@ Reduces attack surface, prevents per-app drift, makes 4K-scaling and theme-chang
 
 Order matters — each phase produces something runnable.
 
-### P10.0 — ABI freeze (2 days, paper-only)
+### Status snapshot
+
+| Phase | Status | Version | Notes |
+|---|---|---|---|
+| P10.0 ABI freeze | ✅ done | v0.50.7 | All ABI enums frozen, check_abi.rs lock |
+| P10.1 SDK + fonts | ✅ done | v0.51.0 | `nopeek_widgets` crate, Inter Variable via fontdue |
+| P10.2 scene_commit | ✅ done | v0.54.0 | First end-to-end wire round-trip |
+| P10.3 Layout | ✅ done | v0.55.0 | flexbox-lite with real Inter metrics |
+| P10.4 GGTT slab | ✅ done | v0.56.0 | 912 MB region, 7 buckets, LRU |
+| P10.5 Rasterizer | ✅ done | v0.57.0–.2 | CpuRasterizer, visible pixels, persistent overlay |
+| ⚠ Window-integration | 🔶 stopgap | v0.57.1–.2 | Overlay hook on focused rect; proper widget-kind windows pending |
+| P10.6 Diff + cache | ⏳ next | — | — |
+| P10.7 Events | ⏳ | — | — |
+| P10.8 Animation | ⏳ | — | — |
+| P10.9 Icons | ⏳ | — | checkpoint — visual polish |
+| P10.10 Canvas | ⏳ | — | — |
+| P10.11 File browser | ⏳ | — | — |
+
+Current stopgap on window integration: widget renders into the
+focused shade window's content rect and persists via an overlay hook
+in shade's render cycle. Proper widget-kind windows (own grid slot,
+draggable, resizable, rounded corners, focus-follow) land as a
+dedicated milestone between P10.5 and P10.6.
+
+### P10.0 — ABI freeze (2 days, paper-only)  ✅
 - Document GGTT partition map + slab bucket roles (above) — committed as `gpu/ggtt_layout.rs` constants
 - Fix tile size (512×512 actual px, 1 MB per tile) as compile-time constant in `shade/widgets/tile.rs`
 - Freeze `Token` enum values + `IconId` enum scaffolding (empty variants ok)
@@ -691,7 +715,7 @@ Order matters — each phase produces something runnable.
 - Enum-ordering rule captured in `check_abi.rs` compile-time test (variant-count assertions per enum)
 - **Deliverable:** `kernel/src/shade/widgets/abi.rs` with the constants + trait signatures, no logic
 
-### P10.1 — SDK + serialization + font metrics (1.5 weeks)
+### P10.1 — SDK + serialization + font metrics (1.5 weeks)  ✅
 - `tools/wasm/sdk/widgets/` — new shared crate, no_std + alloc
 - Define `Widget` enum, `Modifier`, `Event`, `Action`, `Token`, `IconId`, `Role`
 - Postcard serialization with version-byte prefix
@@ -705,13 +729,13 @@ Order matters — each phase produces something runnable.
   - `tnum` + `kern` OpenType features enabled at load
 - **Deliverable:** SDK compiles, trees serialize, font metrics queryable for layout
 
-### P10.2 — Compositor receiver + dummy renderer (3–5 days)
+### P10.2 — Compositor receiver + dummy renderer (3–5 days)  ✅
 - `kernel/src/shade/widgets/mod.rs` — new module
 - `npk_scene_commit` host fn — version-check, deserialize, log to serial, no render yet
 - `tools/wasm/files-stub/` — dummy app, sends one tree on launch
 - **Deliverable:** see deserialized tree printed on serial when app runs
 
-### P10.3 — Layout engine (1 week)
+### P10.3 — Layout engine (1 week)  ✅
 - `kernel/src/shade/widgets/layout.rs` — flexbox-lite
 - Assigns absolute x/y/w/h to every node
 - **Uses real font metrics from P10.1** — Text nodes measured via `advance_width`, not stubbed
@@ -719,7 +743,7 @@ Order matters — each phase produces something runnable.
 - Tested standalone with snapshot tests against known trees
 - **Deliverable:** layout pass produces correct geometry incl. real text measurements, dumped to serial
 
-### P10.4 — GGTT slab allocator (4–5 days)
+### P10.4 — GGTT slab allocator (4–5 days)  ✅
 - `kernel/src/gpu/ggtt_slab.rs` — fixed-bucket slab, LRU eviction
 - Uses partition + bucket sizes from P10.0
 - **Primary bucket is 1 MB** (tiles). Smaller buckets for composition layers.
@@ -728,7 +752,20 @@ Order matters — each phase produces something runnable.
 - Unit-tested for allocation/free patterns + fragmentation behavior with realistic tile-churn profile
 - **Deliverable:** slab serves thousands of alloc/free cycles without leak; glyph atlas lives in GGTT
 
-### P10.5 — Tile rasterization + composition layers (1.5 weeks)
+### P10.5 — Tile rasterization + composition layers (1.5 weeks)  🟡 first-pass shipped
+
+First-pass delivery (v0.57.0–.2): CpuRasterizer, render walker,
+full-window back buffer (not yet tile-subdivided), persistent
+overlay hook in shade, grid-aware placement on the focused window's
+content rect. Files-stub visibly renders with real Inter text.
+
+Deferred to a dedicated window-integration milestone + P10.6:
+- Tile subdivision (512×512 tiles instead of one W×H buffer)
+- Composition layers for opacity / transition / blur
+- BCS batched blit of dirty targets
+- `classify.rs` for composition-boundary detection
+
+Original P10.5 scope:
 - `kernel/src/shade/widgets/tile.rs` — tile grid per window, `TileId`, coord math
 - `kernel/src/shade/widgets/classify.rs` — detect composition boundaries (opacity<1, transition in-flight, `.blur`/`.shadow`/`.effect`, Canvas, Popover/Tooltip/Menu)
 - `kernel/src/shade/widgets/render.rs` — dirty-tile scheduler, per-tile raster task dispatch
@@ -738,6 +775,33 @@ Order matters — each phase produces something runnable.
 - BCS batched blit of all dirty targets in one ring submission
 - **Real Inter Variable text rendered from first run** (no placeholder-rect stage)
 - **Deliverable:** static file-browser tree renders in a window with actual Inter text + real rects/icons; serial debug can dump tile+layer list per commit
+
+### P10.5b — Widget windows first-class in shade (milestone, not in original spec)
+
+The P10.5 stopgap paints widget pixels as an overlay anchored to the
+focused terminal's content rect. That works for one-shot demos but
+breaks under real usage — focus-switch, workspace-switch, or two
+widget apps side by side all fail. The target behaviour:
+
+**Widget-apps behave like `loop` terminals** — they claim their own
+slot in the tiling grid, can be Mod+Arrow-moved, Mod+Shift-dragged,
+swapped, resized, focused, workspace-assigned, and close on
+`Mod+Shift+Q` like any other window. Rounded corners and borders
+come from the same shade chrome.
+
+Scope:
+- New `WindowKind` on shade::Window: `Terminal { idx }` vs `Widget { scene_id }`
+- `shade::create_widget_window(title)` — enters the tiling grid via `retile()` like terminal windows do today
+- Per-window scene storage (`BTreeMap<WindowId, WidgetScene>`) replacing the single global `ACTIVE_SCENE`
+- `scene_commit` looks up the caller's window via `HostState.widget_window_id` (set when the app launches) and renders into that window's content rect
+- `shade::compositor::render_window` gets a widget branch that blits from the per-window scene buffer
+- Focus, workspace switch, move, resize, close all handled by existing shade paths — widget windows look identical to terminals from shade's perspective, only the content source differs
+- Rounded corners + borders applied by shade chrome (already works, just need `WindowKind::Widget` to use the same border render)
+
+Deliverable: `files-stub` opens into its own tiling slot next to
+existing loops, can be moved/swapped/closed like a terminal, content
+stays rendered across all shade redraws without the current overlay
+hook.
 
 ### P10.6 — Diff + cache (4–5 days)
 - Node ID + content hash

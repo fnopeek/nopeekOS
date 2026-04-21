@@ -36,13 +36,27 @@ See README.md for the full vision and phase planning.
 ./build.sh release      # Build + sign (ECDSA P-384) → release/ for OTA
 ./build.sh vbox         # Build + VirtualBox (demo)
 ./build.sh vbox-clean   # Remove VirtualBox VM
+./build.sh installer    # Two-pass installer build (bundled assets)
+./build.sh usb /dev/sdX # Build installer + flash USB stick
 ```
 
 ## Current Status
 
-- **Phase:** 9 (SMP & Event-Driven Architecture)
+- **Phase:** 10 (Widget API & GUI Apps) — P10.0–P10.5 shipped, P10.5b (widget-kind windows) next, then P10.6 (diff + cache)
+- **Parallel track:** Phase 9 SMP/event-driven still evolving (WiFi driver, per-core timer)
 - **Completed features + full roadmap:** see `README.md`
+- **Phase 10 detail spec + progress:** see `PHASE10_WIDGETS.md`
 - **Active work / blockers:** see `memory/project_wifi_current.md`
+
+## Commit-Message Convention (since v0.54.x)
+
+First line encodes which OTA path the change needs, so users know
+whether a `update` is enough or modules must be `install`-ed too:
+
+- `kernel-only:` — `update` suffices, no module rebuild
+- `module <name>:` — only `install <name>` required
+- `abi+kernel:` — kernel + all SDK-using apps, coordinated release
+- `kernel+module <name>:` — both, because they belong together
 - **Known bug:** `run wifi` on worker core crashes; `driver wifi` on Core 0 works
   (MMIO `map_page` conflict with 1GB huge pages).
 

@@ -379,26 +379,92 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [ ] MicroVM (VT-x/VT-d, Mini-Linux kernel for Linux app compatibility)
 - [ ] virtio bridges for MicroVM (blk, net, gpu)
 
-### Phase 10 -- Widget API & GUI Apps
+### Phase 10 -- Widget API & GUI Apps (in progress)
 
-Reusable UI components for WASM applications. Every widget is a host function —
-apps describe layout, the compositor renders. No per-app framebuffers.
+Declarative GUI for WASM apps. Apps build a `Widget` tree via the
+`nopeek_widgets` SDK, serialize with postcard (version-prefixed), commit
+through **one** host function (`npk_scene_commit`). The Shade compositor
+owns layout, rasterization, GPU compositing, theming, animation. Apps
+never touch pixels, fonts, or the framebuffer.
 
-- [ ] `npk_widget_list(items, selected)` — scrollable list (file manager, settings)
-- [ ] `npk_widget_input(prompt, buf)` — text input field with cursor
-- [ ] `npk_widget_select(options, selected)` — dropdown / choice selector
-- [ ] `npk_widget_text(content, scroll)` — scrollable text view
-- [ ] `npk_widget_progress(value, max)` — progress bar
-- [ ] `npk_widget_layout(rows, cols)` — grid layout for combining widgets
-- [ ] Keyboard navigation (Tab between widgets, Enter to select)
-- [ ] Mouse interaction (click on widget, scroll list)
-- [ ] Theming (widgets inherit shade theme colors)
-- [ ] File manager app (Thunar-inspired: tree view, file list, preview)
-- [ ] Settings app (keyboard layout, shade config, theme)
+See `PHASE10_WIDGETS.md` for full architecture + ABI rules.
 
-Design principle: widgets are **data-driven** — the app passes data (list items,
-current selection), the host renders. The app never touches pixels directly.
-This allows the compositor to handle focus, theming, scaling, and accessibility.
+**SDK** (`tools/wasm/sdk/widgets/`)
+- [x] Crate `nopeek_widgets 0.1.0` — no_std + alloc
+- [x] `Widget` / `Modifier` / `Event` / `Action` / `Token` / `IconId` / `Role` / `TextStyle` — all `#[non_exhaustive]`, append-only, wire-version pinned
+- [x] postcard serialize with `WIRE_VERSION = 0x01` prefix byte
+- [x] Compile-time variant-order lock (`check_abi.rs`)
+- [x] 8 host-side round-trip tests (tree, modifiers, events, reserved slots)
+
+**Kernel — Compositor pipeline** (`kernel/src/shade/widgets/`)
+- [x] ABI mirror of SDK with serde derives, postcard deserialize
+- [x] `npk_scene_commit(ptr, len)` host fn — RENDER capability-gated
+- [x] Serial pretty-printer for decoded tree + computed layout geometry
+- [x] Flexbox-lite layout engine (Column/Row, Spacer flex, Align Start/Center/End/Stretch, Padding)
+- [x] Real Inter Variable metrics via fontdue (`advance_width` / `measure` / `line_height` / `ascent` / `descent` / `cap_height` / `x_height`, kerning via `horizontal_kern`)
+- [x] `CpuRasterizer` impl — clear / rect / text (alpha-composited glyphs) / icon-stub / canvas memcpy
+- [x] Render walker — Widget + LayoutNode trees in lockstep, Background/Border modifiers → filled rects, variants → paint ops
+- [x] Persistent scene overlay in shade's render cycle (widget survives terminal redraws)
+- [x] Grid-aware placement (renders into focused window's content rect; fallback to centred preview)
+- [x] Clear on window close (`Mod+Shift+Q`)
+- [ ] Tile subdivision (512×512 tiles instead of one big window buffer)
+- [ ] Diff + per-app cache (skip unchanged nodes between commits)
+- [ ] Composition layers for opacity / transition / blur / shadow
+- [ ] BCS batched blit of dirty tiles
+
+**Font system** (`kernel/src/gui/text.rs`)
+- [x] Inter Variable v4.1 (OFL) shipped via bundled assets + npkFS (`sys/fonts/inter-variable`)
+- [x] BLAKE3-verified at load, fontdue-parsed
+- [x] Glyph cache keyed by `(glyph, size, weight)`, LRU-managed via GGTT slab slots
+- [ ] `tnum` tabular numerals enabled at load
+- [ ] Shaping (`rustybuzz`, ligatures, BiDi — deferred to v2)
+
+**GGTT slab allocator** (`kernel/src/gpu/ggtt_slab.rs`)
+- [x] 7 fixed-bucket sizes (1K/4K/16K/64K/256K/**1M primary**/4M) over 912 MB GGTT region
+- [x] Per-bucket freelist + LRU queue, eviction on overflow
+- [x] Self-test intent: 1000+ alloc/free cycles, leak-free
+- [x] Glyph atlas migrated to slab slots (CompSmall4K bucket)
+
+**Icons**
+- [ ] Phosphor icon atlas (16/24/32/48/64 px logical, alpha-only) — build-time SVG rasterization
+- [ ] `IconId` enum fully populated
+
+**Events & interaction**
+- [ ] Mouse hit-test against layout tree → `Event::Action(ActionId)`
+- [ ] Focus stack + Tab navigation, keyboard → `Event::Key`
+- [ ] `npk_event_poll` / `npk_event_wait` host fns
+
+**Animation**
+- [ ] Spring physics + linear curves, fixed-point Q16.16 (determinism)
+- [ ] Self-scheduling 60Hz tick while interpolating, dirty-driven otherwise
+
+**Canvas (escape hatch)**
+- [ ] `npk_canvas_commit(canvas_id, pixels, w, h, canvas_cap)` — CANVAS cap separate from RENDER
+- [ ] Size caps: 4096×4096 px, 64 MB pixels total per app
+
+**First-party apps**
+- [x] `files-stub` — P10.2 dummy commit app, bundled + OTA (`install files-stub`)
+- [ ] `files` — real file browser (walks npkFS, opens via intent)
+
+**Window-manager integration** (milestone between current and P10.6)
+- [ ] Widget-kind windows first-class in shade (own grid slot, draggable, resizable, rounded corners, separate from terminal windows)
+- [ ] Per-window scene storage (currently one global `ACTIVE_SCENE`)
+- [ ] Widget follows focus / workspace switches correctly
+
+Progress milestones (per `PHASE10_WIDGETS.md`):
+- [x] P10.0 ABI freeze (`v0.50.7`)
+- [x] P10.1 SDK + fontdue + Inter Variable (`v0.51.0`)
+- [x] P10.2 `npk_scene_commit` + first end-to-end round-trip (`v0.54.0`)
+- [x] P10.3 Layout engine with real font metrics (`v0.55.0`)
+- [x] P10.4 GGTT slab allocator (`v0.56.0`)
+- [x] P10.5 CPU rasterizer + first visible render (`v0.57.0`–`.2`)
+- [ ] Window-manager integration for widget-kind windows
+- [ ] P10.6 Diff + per-app cache
+- [ ] P10.7 Event routing
+- [ ] P10.8 Animation
+- [ ] P10.9 Icon atlas
+- [ ] P10.10 Canvas
+- [ ] P10.11 Real file browser
 
 ### Phase 11 -- AI Integration
 
