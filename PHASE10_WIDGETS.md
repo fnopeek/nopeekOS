@@ -687,20 +687,39 @@ Order matters — each phase produces something runnable.
 | P10.2 scene_commit | ✅ done | v0.54.0 | First end-to-end wire round-trip |
 | P10.3 Layout | ✅ done | v0.55.0 | flexbox-lite with real Inter metrics |
 | P10.4 GGTT slab | ✅ done | v0.56.0 | 912 MB region, 7 buckets, LRU |
-| P10.5 Rasterizer | ✅ done | v0.57.0–.2 | CpuRasterizer, visible pixels, persistent overlay |
-| ⚠ Window-integration | 🔶 stopgap | v0.57.1–.2 | Overlay hook on focused rect; proper widget-kind windows pending |
-| P10.6 Diff + cache | ⏳ next | — | — |
-| P10.7 Events | ⏳ | — | — |
-| P10.8 Animation | ⏳ | — | — |
-| P10.9 Icons | ⏳ | — | checkpoint — visual polish |
-| P10.10 Canvas | ⏳ | — | — |
-| P10.11 File browser | ⏳ | — | — |
+| P10.5 Rasterizer | ✅ done | v0.57.0–.2 | CpuRasterizer, first visible pixels |
+| P10.5b Widget windows | ✅ done | v0.58.0 | WindowKind split, per-window scenes, grid-native |
+| — Widget polish | ✅ done | v0.58.1 | Rounded corners, Opacity modifier, theme integration |
+| P10.6 Diff + cache | 🟡 partial | v0.59.0 | payload-hash skip (full tile diff needs tile subdivision) |
+| P10.7 Events | 🟡 partial | v0.60.0 | Mouse hit-test + npk_event_poll; keyboard routing + blocking wait deferred |
+| P10.8 Animation | 🟡 scaffold | v0.61.0 | Q16.16 math + tick(); no active consumers until tree-diff lands |
+| P10.9 Icons | ✅ done | v0.62.0 | 18 Phosphor Regular, 149 KB atlas, OTA-updatable like font |
+| P10.10 Canvas | ⏳ later | — | `npk_canvas_commit` + CANVAS cap, size-capped |
+| P10.11 File browser | ⏳ later | — | Real Thunar-clone — the eventual capstone |
 
-Current stopgap on window integration: widget renders into the
-focused shade window's content rect and persists via an overlay hook
-in shade's render cycle. Proper widget-kind windows (own grid slot,
-draggable, resizable, rounded corners, focus-follow) land as a
-dedicated milestone between P10.5 and P10.6.
+**Partial phases** mean "infrastructure shipped, full impl waits on a
+prerequisite". None of them block the next phase's user-visible work.
+
+### Open follow-ups (not-in-spec, tracked)
+
+- **drun** (Mod+D app launcher) — first real interactive widget app.
+  Lists installed modules from `sys/wasm/`, keyboard nav, Enter
+  launches. Simpler than file browser → good tester for event infra.
+- **Tile subdivision + full diff cache** — second-pass P10.5 and
+  P10.6 together. Needs 512×512 tile grid per window, per-tile
+  content-hash, dirty-tile scheduler. Makes interactive apps cheap.
+- **Keyboard routing to widget windows** — P10.7 follow-up. Focused
+  widget-kind window should receive `Event::Key` instead of the
+  terminal's intent loop.
+- **`npk_event_wait` blocking poll** — P10.7 follow-up, needs
+  integration with idle/sleep path.
+- **Window resize triggers scene re-layout** — `relayout_scene`
+  exists, needs a `dirty` nudge from the resize handler so shade
+  picks it up before next redraw.
+- **Shade policy extraction to WASM** (post-Phase 10) — tiling
+  algo, keybinds, theme palette, animation curves each become
+  their own hot-reloadable module. ~750 LOC extractable. Explicit
+  non-goal during Phase 10.
 
 ### P10.0 — ABI freeze (2 days, paper-only)  ✅
 - Document GGTT partition map + slab bucket roles (above) — committed as `gpu/ggtt_layout.rs` constants

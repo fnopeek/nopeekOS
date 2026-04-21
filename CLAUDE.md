@@ -42,7 +42,7 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 10 (Widget API & GUI Apps) — P10.0–P10.5 shipped, P10.5b (widget-kind windows) next, then P10.6 (diff + cache)
+- **Phase:** 10 (Widget API & GUI Apps) — P10.0–P10.9 shipped (v0.62.0). Next: drun launcher (first interactive widget app), then tile-subdivision + full diff-cache, then Canvas + real file browser.
 - **Parallel track:** Phase 9 SMP/event-driven still evolving (WiFi driver, per-core timer)
 - **Completed features + full roadmap:** see `README.md`
 - **Phase 10 detail spec + progress:** see `PHASE10_WIDGETS.md`
