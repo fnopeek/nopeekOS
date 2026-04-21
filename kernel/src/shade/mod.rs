@@ -13,6 +13,7 @@ pub mod compositor;
 pub mod terminal;
 pub mod input;
 pub mod cursor;
+pub mod widgets;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;

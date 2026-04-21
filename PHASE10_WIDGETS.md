@@ -21,6 +21,79 @@ Inspired by SwiftUI / Slint / Compose — stripped down, capability-gated, WASM-
 
 ---
 
+## Architecture & Responsibilities
+
+Who owns what. The layering is strict — crossing it means a wire-version bump or a capability addition.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  WASM App (tools/wasm/<name>/)                                   │
+│    owns:    state, render() → Widget tree, Action handlers       │
+│    NEVER:   pixels, fonts, layout math, animation, theme colors, │
+│             input routing, focus, window chrome                  │
+├──────────────────────────────────────────────────────────────────┤
+│  SDK crate  nopeek_widgets  (in-app Rust, no_std + alloc)        │
+│    owns:    Widget/Modifier/Event/Action types,                  │
+│             postcard serialize + version byte prefix,            │
+│             compound widgets (List, Toolbar, Sidebar, …),        │
+│             App trait + event loop helper                        │
+│    NEVER:   kernel side, host fn internals                       │
+╞══════════════════════════════════════════════════════════════════╡  ← WASM sandbox boundary
+│  Host functions  (capability-gated, kernel/src/wasm.rs)          │
+│    npk_scene_commit    RENDER cap      → tree bytes into kernel  │
+│    npk_canvas_commit   CANVAS cap      → BGRA pixels into slab   │
+│    npk_event_poll/wait RENDER cap      → input events out        │
+│    npk_theme_token     RENDER cap      → current palette query   │
+├──────────────────────────────────────────────────────────────────┤
+│  Compositor  (kernel/src/shade/widgets/)                         │
+│    version-check → deserialize → layout (flexbox-lite) → classify │
+│    comp boundaries → diff → compute dirty tile + layer sets →    │
+│    schedule raster tasks → collect targets → submit blit list.   │
+│    Owns: animation interp, focus, hit-test, theme resolution,    │
+│    per-app tile+layer cache, Canvas size-cap enforcement.        │
+├──────────────────────────────────────────────────────────────────┤
+│  Rasterizer  trait  (kernel/src/shade/widgets/raster/)           │
+│    v1:  CpuRasterizer   — fontdue + gui/render.rs primitives     │
+│    v2:  XeRenderRasterizer — Gen 12 RCS + fragment shaders       │
+│    Draws into RasterTarget (tile or comp layer, same interface). │
+│    Swappable at boot; compositor holds Box<dyn Rasterizer>.      │
+├──────────────────────────────────────────────────────────────────┤
+│  GGTT slab  (kernel/src/gpu/ggtt_slab.rs)                        │
+│    owns:    tile + comp-layer allocation, LRU eviction           │
+│             (off-screen tiles evicted first)                     │
+│    fallback: system-RAM-backed GGTT pages when slab > 80% full   │
+├──────────────────────────────────────────────────────────────────┤
+│  BCS compositor  (existing, kernel/src/gpu/intel_xe.rs)          │
+│    owns:    dirty tiles + comp layers → framebuffer via          │
+│             XY_FAST_COPY_BLT, batched submission, vblank flip    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Who does what, per pipeline stage:**
+
+| Stage                          | App | SDK | Compositor | Rasterizer | GGTT | BCS |
+|--------------------------------|:---:|:---:|:----------:|:----------:|:----:|:---:|
+| Build tree                     |  ✓  |  ✓  |            |            |      |     |
+| Serialize + ver byte           |     |  ✓  |            |            |      |     |
+| Capability check               |     |     |     ✓      |            |      |     |
+| Deserialize                    |     |     |     ✓      |            |      |     |
+| Layout (x/y/w/h)               |     |     |     ✓      |            |      |     |
+| Classify comp boundaries       |     |     |     ✓      |            |      |     |
+| Diff (ID + hash)               |     |     |     ✓      |            |      |     |
+| Compute dirty tile + layer set |     |     |     ✓      |            |      |     |
+| Allocate tile / comp layer     |     |     |     ✓      |            |  ✓   |     |
+| Rasterize into target          |     |     |            |     ✓      |      |     |
+| Cache tile / layer             |     |     |     ✓      |            |  ✓   |     |
+| Animation interpolate          |     |     |     ✓      |            |      |     |
+| Theme → concrete color         |     |     |     ✓      |            |      |     |
+| Hit-test mouse / focus         |     |     |     ✓      |            |      |     |
+| Submit blit list               |     |     |            |            |      |  ✓  |
+| Evict tile / layer (LRU)       |     |     |     ✓      |            |  ✓   |     |
+
+**Key property:** every stage has a single owner. The App owns zero pixels; the Compositor owns zero rasterization; the Rasterizer is stateless per call; the GGTT slab owns zero layout. Adding a GPU backend means swapping **one** row (Rasterize into target) — nothing else changes.
+
+---
+
 ## What stays untouched
 
 - Shade compositor (tiling, swap-anim, mouse) — `kernel/src/shade/`
@@ -101,13 +174,18 @@ Compositor
    ├─ Read version byte → reject if unsupported
    ├─ Deserialize tree (postcard)
    ├─ Layout pass (flexbox-lite) → assigns x/y/w/h to every node
+   ├─ Classify nodes into composition boundaries (opacity<1, transition,
+   │     blur/shadow/effect, Canvas, Popover/Tooltip/Menu) → own layer.
+   │     All other nodes rasterize into the window's tile grid.
    ├─ Diff against previous tree (structural ID + content hash)
-   ├─ For each changed sub-tree:
-   │     └─ Rasterize into layer texture in GGTT slab (CPU; fontdue + gui/render.rs)
+   │     → dirty set of tiles (from node rects) + dirty composition layers
+   ├─ Schedule raster tasks onto worker cores (one tile = one task)
+   │     └─ Worker walks tree, rasterizes contained nodes into tile buffer
+   │        (CPU; fontdue + gui/render.rs) via Rasterizer trait
    │
    ▼
 GPU (BCS XY_FAST_COPY_BLT)
-   └─ Blit layer textures → window region in framebuffer
+   └─ Blit dirty tiles + composition layers → framebuffer (few large blits)
 ```
 
 **Key property:** App-side allocations free after `commit`. Compositor owns everything that survives the call.
@@ -143,33 +221,76 @@ Minimal, composable, no leaf escape hatches except the strictly-scoped `Canvas`.
 - No drawing API — App ships finished pixels or nothing
 - Requires a separate `CANVAS` capability (see below) — least privilege: file browser doesn't get one
 
+**Reserved for later (variant slot held in v1 enum, implementation TBD):**
+- `Popover { anchor, child }` — content that may escape window bounds (dropdowns, date pickers, color pickers)
+- `Tooltip { text, anchor }` — hover-triggered text overlay
+- `Menu { items }` — context menu, keyboard-navigable, escapes window
+
+These are declared in the v1 `Widget` enum with `#[allow(dead_code)]` placeholders. The compositor rejects them with a log message until implemented. **Reason:** overlay/out-of-bounds rendering cannot be retrofitted without breaking every serialized tree from v1. Holding the variant slot now costs nothing and avoids a wire-version bump later.
+
 **Modifiers** (chained on any widget):
 - `.padding(n)`, `.margin(n)`
 - `.background(Token)`, `.border(Token, width, radius)`
 - `.opacity(0.0..1.0)`
 - `.transition(Spring | Linear { ms })` — declares this widget should animate when its props change
 - `.on_click(ActionId)`, `.on_hover(ActionId)`
+- `.role(Role)` — accessibility override (see A11y section; held slot, compositor reads but v1 does not consume)
+
+**Reserved modifier slots (v2+, held in v1 enum):**
+- `.blur(radius: u8)` — Gaussian blur behind widget (acrylic/glass effect)
+- `.shadow(offset: Point, blur: u8, token: Token)` — drop shadow
+- `.effect(EffectId)` — named GPU effect, extensibility escape
+
+CPU rasterizer treats these as no-ops in v1. GPU rasterizer (Phase 12+) implements them. No wire-version bump required when they light up.
 
 ---
 
 ## Typography
 
-Two font systems, used in different contexts.
+Two font systems, used in different contexts. The UI font is **implemented in P10.1** — not deferred to a late phase. Layout, rasterization, and cache pipelines use real font metrics from day one; there are no placeholder-rect text stages.
 
-**System UI font — Inter (OFL):**
-- Loaded at boot from `sys/fonts/inter-regular.ttf` and `sys/fonts/inter-bold.ttf` in npkFS
-- BLAKE3-verified before use; updateable via OTA without kernel rebuild
-- Rasterized via `fontdue` crate (no_std, ~2k LOC, MIT/Apache)
-- Grayscale anti-aliasing (subpixel-AA not used — fine on HiDPI, irrelevant on 4K)
-- Glyph atlas in GGTT slab; LRU eviction per font/size combo
-- Fixed style tokens: `Title` (24px), `Body` (14px), `Caption` (11px), `Muted` (14px, dimmed). All scaled by HiDPI factor.
+**System UI font — Inter Variable (OFL):**
+- One file, `sys/fonts/inter-variable.ttf` (~800 KB) — contains the full weight axis (100–900) plus slant. Replaces separate Regular/Bold TTFs.
+- Loaded at boot, BLAKE3-verified, OTA-updateable without kernel rebuild.
+- Rasterized via `fontdue` crate (no_std, ~2k LOC, MIT/Apache). fontdue supports variable-axis natively — zero extra code to use weights.
+- Grayscale anti-aliasing (subpixel-AA not used — fine on HiDPI, irrelevant on 4K).
+- **Hinting enabled** — sharp small-size text on lower-DPI displays (e.g. VirtualBox dev window).
+- Glyph atlas in GGTT slab, keyed by `(glyph_id, size, weight)` tuple; LRU eviction per combo.
+
+**Style tokens — mapped to variable-font weights and real metrics:**
+
+| Token      | Size | Weight | Use                                 |
+|------------|-----:|-------:|-------------------------------------|
+| `Title`    | 24px |    600 | Window titles, dialog headers       |
+| `Body`     | 14px |    400 | Default UI text                     |
+| `Muted`    | 14px |    400 | Body + 60% alpha (secondary text)   |
+| `Caption`  | 11px |    500 | Labels, captions — slightly heavier to stay legible at small size |
+| `Mono`     |    — |      — | Routes to Spleen (terminal aesthetic) |
+
+All sizes multiplied by HiDPI scale factor at raster time.
+
+**Layout uses real font metrics, not hardcoded values:**
+- `ascent`, `descent`, `line_gap` read from Inter's `hhea` table → correct vertical rhythm per weight
+- `advance_width` per glyph from `hmtx` → text measurement without rasterizing
+- `cap_height`, `x_height` from `OS/2` table → baseline-aligned layout between `Title` and `Body`
+
+**OpenType features enabled by default:**
+- `tnum` (tabular numerals) — digits have equal advance width. Critical for lists, tables, clock, counters — numbers don't jitter.
+- `kern` (kerning) — Inter's pair-adjustment table respected.
+
+Future (v2, no ABI change required): `liga` (standard ligatures), `ss01–ss08` (stylistic sets).
 
 **Terminal mono font — Spleen (BSD-2):**
 - Existing system: 8×16, 16×32, 32×64 bitmap (`gui/font.rs`)
 - Used by `loop`, `top`, REPLs — anywhere a terminal cell grid is correct
 - Apps that want the terminal aesthetic use `Text::mono(..)` modifier
 
-**Decision rationale:** Inter for chrome/UI gives modern look; Spleen for terminals stays correct and pixel-perfect.
+**Decision rationale:** Inter Variable gives a 2025 premium look — one file covers all weights smoothly, tabular numerals remove UI jitter, real metrics give correct baseline rhythm. Zero extra dependencies beyond fontdue. Spleen stays for terminals where bitmap mono is correct.
+
+**What's explicitly deferred to v2 (no ABI impact, same `Text { content: String }` API):**
+- OpenType shaping via `rustybuzz` — ligatures (`fi`, `→`), Arabic/Devanagari/Thai, BiDi. ~2 weeks of work, not required for "modern Latin UI".
+- Color emoji (COLRv1) — needs RGBA atlas, ~1 week. Monochrome fallback via Inter's Unicode coverage suffices for v1.
+- Font fallback chain (CJK, symbols) — reserved via `FontId` in `TextStyle`.
 
 ---
 
@@ -244,23 +365,70 @@ Implementation: ~500 LOC, single-pass for trivial trees, two-pass when `Spacer`/
 
 ---
 
-## Diff + redraw strategy
+## Raster granularity — tiles + composition layers
+
+**Critical design decision.** The naive approach (one texture per widget node) dies under real workloads: thousands of 1-KB GGTT allocations, slab fragmentation, and hundreds of tiny BCS blits per frame. Browser engines (Blink, WebKit) learned this around 2013 and moved to tiled rasterization. We do the same from v1.
+
+**Two texture kinds, two purposes:**
+
+### 1. Tiles — the workhorse
+
+A window's content is rasterized into a **fixed grid of tiles** in the GGTT slab. Tiles are geometry-driven, not widget-driven — they're stable even when the widget tree is rebuilt.
+
+- **Tile size: 512×512 actual pixels** (256×256 logical at 2× HiDPI), BGRA32 → **1 MB per tile**, primary slab bucket
+- 4K window (3840×2160): 8×5 = 40 tiles × 1 MB = 40 MB per full window
+- Off-screen tiles (e.g. scroll content below fold) LRU-evicted individually — not the whole window
+
+A worker core walks the laid-out tree, collects all leaves whose rect intersects a given tile, and rasterizes them **directly into the tile's pixel buffer**. No per-leaf texture. No per-leaf allocation.
+
+### 2. Composition layers — the exceptions
+
+A node gets its **own** texture (not rasterized into tiles) only at a **composition boundary**:
+
+- `.transition(..)` in-flight — interpolate without retouching tiles every frame
+- `.opacity(x)` with `x < 1.0` — alpha-blend cleanly with underlying tiles
+- `.blur` / `.shadow` / `.effect` (v2) — GPU pass operates on own surface
+- `Canvas` widget — app-supplied pixels, already its own surface
+- `Popover` / `Tooltip` / `Menu` — must render outside window bounds
+
+Composition layers use the slab with appropriate bucket sizes (small for hover-buttons, large for Canvas up to the per-app 64 MB cap). Typical window: **40 tiles + 0–3 composition layers**. Not 500 leaf textures.
+
+### Diff is still at node granularity — but drives tile dirtying
 
 Each widget node has:
 - **Structural ID** = path from root (`Column[0].List.row[12]`)
 - **Content hash** = blake3 over serialized props (4 bytes is enough)
 
-Diff:
-- ID exists in old + new with same hash → reuse cached layer texture, skip rasterize
-- ID exists in both with different hash → re-rasterize this node only
-- ID only in new → allocate texture, rasterize
-- ID only in old → free texture
+Pipeline:
 
-Compositor maintains `HashMap<NodeId, LayerTexture>` **per app** — survives across commits, freed on app exit.
+| Diff result                         | Consequence                                                          |
+|-------------------------------------|----------------------------------------------------------------------|
+| ID exists old+new, same hash        | Node unchanged; skip                                                 |
+| ID exists both, hash changed        | Mark tiles intersecting node's rect as dirty                         |
+| ID only in new                      | Mark tiles intersecting rect as dirty (and allocate comp layer if boundary) |
+| ID only in old                      | Mark tiles intersecting old rect as dirty (free comp layer if was one) |
 
-**Why per-app, not global:** sharing identical icon textures across apps would save ~100 KB but introduce side-channel risk (cache-timing reveals what other apps are rendering) and complicate eviction. Premature optimization rejected.
+**Dirty set is a set of `TileId`, plus a set of `LayerId`.** Worker cores pick up dirty entries in parallel. A tile re-raster walks the tree once and writes all contained nodes into the tile buffer.
 
-**Result:** typing in an `Input` re-rasterizes one node, not the whole window. Scrolling a `List` blits cached row textures with a Y-offset, no rasterize.
+### Cache state (per app)
+
+```rust
+struct AppCache {
+    tiles:  HashMap<TileId, TileTexture>,   // keyed by (window_id, tile_x, tile_y)
+    layers: HashMap<NodeId, LayerTexture>,  // only composition-boundary nodes
+}
+```
+
+Per-app, not global. Sharing identical textures across apps would save ~100 KB but introduce side-channel risk (cache-timing reveals what other apps render) and complicate eviction. Rejected.
+
+### What this means in practice
+
+- **Typing in an `Input`:** Input's rect intersects 1 tile → re-raster that tile (~500 μs on modern CPU) → 1 blit. No other work.
+- **Scrolling a `List`:** tiles on-screen stay cached; newly-revealed tiles rasterize on demand (worker cores in parallel). Scrolling is effectively free once tiles are warm.
+- **Hovering a `Button` with `.transition`:** button is a composition layer (boundary detected on first render with `.transition`). Tiles underneath unchanged. Only the button's layer re-raster + alpha blend during interpolation.
+- **Theme change:** all tiles + layers invalidated at once (palette lookup happens at raster time, not ABI time) → worker cores re-raster in parallel; typically <50 ms for a full desktop.
+
+**BCS cost per frame:** ~40 tile blits + a few composition-layer blits per window, batched into a single ring submission. No tile-storm.
 
 ---
 
@@ -279,6 +447,111 @@ When prop changes between two commits, compositor interpolates over N frames (sp
 **Determinism:** all interpolation uses **integer/tick-based math**, not floats. Same approach as the existing swap-animation (`shade/compositor.rs`). Reasoning: float behavior across cores + variable wakeup latency leads to visible non-determinism. Spring physics implemented as fixed-point (Q16.16).
 
 Animation tick = compositor runs at 60Hz **only while interpolations are active**. Otherwise dirty-driven (event → render → blit → idle).
+
+---
+
+## Rasterizer abstraction
+
+The compositor never calls into `gui/render.rs` or `fontdue` directly. Every raster operation routes through a trait. The target is a **`RasterTarget`** — either a tile or a composition layer, both look the same to the rasterizer (a pixel buffer with an origin offset).
+
+```rust
+pub struct RasterTarget<'a> {
+    pub pixels: &'a mut [u32],      // BGRA32
+    pub stride: u32,                // pixels per row
+    pub size:   Size,               // width, height in pixels
+    pub origin: Point,              // this target's top-left in window coords
+                                    //   — rasterizer subtracts to get local coords
+                                    //   — tiles have origin = (tile_x*512, tile_y*512)
+                                    //   — comp layers have origin = node's layout rect top-left
+    pub scale:  u8,                 // HiDPI factor (1 or 2)
+    pub palette: &'a Palette,       // Token → concrete BGRA
+}
+
+pub trait Rasterizer: Send + Sync {
+    fn clear(&mut self, t: &mut RasterTarget, color: Token);
+    fn rect(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill);
+    fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, p: Point);
+    fn icon(&mut self, t: &mut RasterTarget, id: IconId, size: u16, color: Token, p: Point);
+    fn canvas_copy(&mut self, t: &mut RasterTarget, src: &[u8], w: u16, h: u16);
+
+    // v2+: default no-op on CPU backend, implemented by GPU backend
+    fn blur(&mut self, _t: &mut RasterTarget, _r: Rect, _radius: u8) {}
+    fn shadow(&mut self, _t: &mut RasterTarget, _r: Rect, _s: Shadow) {}
+    fn effect(&mut self, _t: &mut RasterTarget, _r: Rect, _id: EffectId) {}
+}
+```
+
+`Rect` and `Point` in the trait are in **window coordinates**. The rasterizer subtracts `origin` to get the target-local position, and clips draws to `size`. Drawing a node that overlaps a tile boundary Just Works — the left tile clips the right half away, the right tile clips the left half. No per-node coordinate gymnastics in the compositor.
+
+- **v1 — `CpuRasterizer`** — wraps `gui/render.rs` primitives + fontdue glyph cache. Clipping + origin-subtract in software.
+- **v2+ — `XeRenderRasterizer`** (Phase 12) — Intel Xe Gen 12.2 RCS (render engine, not BCS), fragment shaders for blur/shadow/gradients, GPU-side text via SDF atlas. Scissor rect set from target `size`, origin applied via transform matrix.
+
+Compositor holds `Box<dyn Rasterizer>`, selected at boot. Future: per-window backend selection (experimental GPU path with CPU fallback).
+
+**Non-negotiable:** no call site in the widget pipeline references CPU or GPU specifics. Switching rasterizer requires zero changes to layout, diff, event, or cache code. This is the single most important abstraction for future HW acceleration.
+
+---
+
+## Threading
+
+Widget pipeline maps onto the Phase 9 event-driven SMP model. The tile-based design is naturally parallel — **one tile = one independent raster task**.
+
+| Stage                                | Runs on            | Why                                            |
+|--------------------------------------|--------------------|------------------------------------------------|
+| `scene_commit` host call             | worker (WASM app)  | app already runs on its worker core            |
+| Deserialize + layout + diff          | worker (same)      | CPU-bound, bounded by tree size                |
+| Compute dirty tile set + layer set   | worker (same)      | O(nodes_changed); cheap                        |
+| Rasterize each dirty tile            | any worker (spawn) | embarrassingly parallel — tiles are independent|
+| Rasterize each dirty comp layer      | any worker (spawn) | same                                           |
+| Slab alloc/free                      | any core           | slab is Mutex-protected, contention rare       |
+| BCS blit list submit + doorbell      | Core 0             | Phase 9 constraint, Core 0 owns ring           |
+| Vblank wait + PLANE_SURF flip        | Core 0             | same                                           |
+
+**Parallelism:** 40 dirty tiles spread across 3 worker cores → each core does ~13 tiles × ~500 μs = 6.5 ms wall clock. Well within a 16.6 ms frame budget at 60 Hz. In the typical case (one tile dirty per keystroke), it's a single ~500 μs task.
+
+**Constraints:**
+- Core 0 never rasterizes. Never.
+- Workers complete → produce `BlitRequest { src: TileTexture|LayerTexture, dst: Rect }` list → Core 0 consumes via existing event queue.
+- Commit coalescing: if an app commits faster than raster completes, only the latest tree matters. Drop intermediates (same pattern as mouse-move events in Phase 9). Dirty sets from dropped commits merge into the live one — no visual inconsistency.
+
+**Backpressure:** `npk_scene_commit` returns 0 immediately after queuing. Render happens asynchronously. App does not wait for pixels — next `event_wait` may return before the previous commit has flipped. This is intentional: apps stay responsive, compositor self-paces.
+
+---
+
+## Accessibility (A11y) — role reservation
+
+Every widget node carries a `role: Role` tag from v1. v1 does not consume it — but freezing the enum now means screen readers, keyboard traversal, and UI automation can be added later without a wire-version bump.
+
+```rust
+#[repr(u8)]
+#[non_exhaustive]
+pub enum Role {
+    None        = 0,   // decorative only, skip in traversal
+    Button      = 1,
+    Link        = 2,
+    TextInput   = 3,
+    List        = 4,
+    ListItem    = 5,
+    Heading     = 6,
+    Image       = 7,
+    Separator   = 8,
+    Group       = 9,
+    Status      = 10,
+    // appended only — values frozen forever
+}
+```
+
+**Defaults** (inferred from widget kind):
+- `Button` → `Role::Button`
+- `Input` → `Role::TextInput`
+- `Text { style: Title }` → `Role::Heading`
+- `List` → `Role::List`, inner rows → `Role::ListItem`
+- `Divider` → `Role::Separator`
+- `Icon` standalone → `Role::Image`; inside `Button` → subsumed
+
+App may override via `.role(Role::X)` modifier — e.g. a custom clickable `Row` that behaves as a button.
+
+**Why now:** retrofit a11y later means either every app rebuilt or heuristic DOM-like guessing. AppKit learned this the hard way — ~15 years of VoiceOver edge cases caused by missing role hints in legacy controls. Cost to reserve the enum now: one `Role` byte per node in the wire format (~200 bytes per typical tree). Cost to retrofit: catastrophic.
 
 ---
 
@@ -321,6 +594,19 @@ u32 npk_theme_token(u32 token_id);
 
 **Lock these in before writing the first line of widget code.** Mistakes here are expensive later.
 
+### Enum variant ordering (postcard wire position)
+
+Postcard serializes enum variants by **position**, not by name. Inserting a variant in the middle of `Widget`, `Modifier`, `Event`, `Action`, or any other ABI-visible enum breaks every tree that was serialized before the change.
+
+Rules (enforced by code review + a `check_abi.rs` test):
+- All ABI-visible enums carry `#[non_exhaustive]`
+- New variants **appended only** — never inserted, never reordered
+- Removing a variant = wire-version bump
+- Reserved variants use `#[allow(dead_code)]` placeholders to hold the slot (see `Popover`, `Tooltip`, `Menu`, `.blur`, `.shadow`, `.effect`)
+- `#[repr(u8)]` or `#[repr(u16)]` where the variant index is part of a public ABI (`Token`, `IconId`, `Role`)
+
+Covered enums: `Widget`, `Modifier`, `Event`, `Action`, `Token`, `IconId`, `Role`, `Fill`, `TextStyle`, `EffectId`, `KeyCode` (already stable from Phase 8).
+
 ### Wire format versioning
 
 First byte of every `npk_scene_commit` payload is `WIRE_VERSION: u8`. Compositor rejects unknown versions with `-1`. App SDK checks return value, can fall back or report.
@@ -347,12 +633,24 @@ Decide and document numerical addresses **before** writing the allocator. Moving
 0x0000_0000 - 0x0100_0000   GGTT scratch (unused, reserved)
 0x0100_0000 - 0x0400_0000   Framebuffer (existing, 48 MB)
 0x0400_0000 - 0x0500_0000   BCS infrastructure (existing: ring, LRC, HWSP, test)
-0x0500_0000 - 0x0600_0000   Glyph atlases (16 MB — Inter + variants)
+0x0500_0000 - 0x0600_0000   Glyph atlases (16 MB — Inter Variable weight/size cells)
 0x0600_0000 - 0x0700_0000   Icon atlas (16 MB — fixed, set at boot)
-0x0700_0000 - 0x4000_0000   Layer texture slab (~916 MB)
+0x0700_0000 - 0x4000_0000   Tile + composition-layer slab (~916 MB)
 ```
 
-Slab buckets: 1 KB, 4 KB, 16 KB, 64 KB, 256 KB, 1 MB, 4 MB. Free-lists per bucket. LRU eviction across all buckets when slab > 80 % full.
+**Slab bucket sizes and roles:**
+
+| Bucket | Primary use                                          |
+|-------:|------------------------------------------------------|
+|   1 KB | (legacy reserved — not used in tile model)           |
+|   4 KB | Small composition layers (e.g. hover-pill button)    |
+|  16 KB | Mid composition layers (tooltip, small popover)      |
+|  64 KB | Larger composition layers (dropdown menu)            |
+| 256 KB | Small Canvas layers; large popover/menu              |
+|   1 MB | **Primary — tiles (512×512 BGRA) and small Canvas**  |
+|   4 MB | Large Canvas (up to 1024×1024 logical)               |
+
+Typical residency: ~40 tiles per active window in the 1-MB bucket, ~0–3 composition layers per app in 4 KB–64 KB buckets. Free-lists per bucket. LRU eviction across all buckets when slab > 80 % full. Eviction prefers off-screen tiles over in-flight composition layers.
 
 ### Capability ABI
 
@@ -380,19 +678,32 @@ Reduces attack surface, prevents per-app drift, makes 4K-scaling and theme-chang
 
 Order matters — each phase produces something runnable.
 
-### P10.0 — ABI freeze (1 day, paper-only)
-- Document GGTT partition map (above) — committed to source as `gpu/ggtt_layout.rs` constants
+### P10.0 — ABI freeze (2 days, paper-only)
+- Document GGTT partition map + slab bucket roles (above) — committed as `gpu/ggtt_layout.rs` constants
+- Fix tile size (512×512 actual px, 1 MB per tile) as compile-time constant in `shade/widgets/tile.rs`
 - Freeze `Token` enum values + `IconId` enum scaffolding (empty variants ok)
+- Freeze `Role` enum values (all defaults documented per widget kind)
+- Freeze `Widget` enum with reserved `Popover`/`Tooltip`/`Menu` slots (body types defined, impl path = `log + reject`)
+- Freeze `Modifier` enum with reserved `.blur`/`.shadow`/`.effect`/`.role` slots
+- Define `Rasterizer` trait signature + `RasterTarget` struct (header only, no impl)
 - Define wire-version byte = `0x01`
 - Write down capability split (`RENDER` / `CANVAS`)
-- **Deliverable:** `kernel/src/shade/widgets/abi.rs` with the constants, no logic
+- Enum-ordering rule captured in `check_abi.rs` compile-time test (variant-count assertions per enum)
+- **Deliverable:** `kernel/src/shade/widgets/abi.rs` with the constants + trait signatures, no logic
 
-### P10.1 — SDK + serialization (1 week, no kernel changes yet)
+### P10.1 — SDK + serialization + font metrics (1.5 weeks)
 - `tools/wasm/sdk/widgets/` — new shared crate, no_std + alloc
-- Define `Widget` enum, `Modifier`, `Event`, `Action`, `Token`, `IconId`
+- Define `Widget` enum, `Modifier`, `Event`, `Action`, `Token`, `IconId`, `Role`
 - Postcard serialization with version-byte prefix
 - Unit tests round-tripping trees, including version-mismatch rejection
-- **Deliverable:** SDK compiles, tree can be serialized to bytes
+- **Font system bootstrap (new):**
+  - Add `fontdue` to kernel `Cargo.toml`
+  - `kernel/src/gui/text.rs` — font loader, metrics API, weight-axis handling
+  - Inter Variable loaded at boot from `sys/fonts/inter-variable.ttf`, BLAKE3-verified
+  - Expose `advance_width(ch, style)`, `line_height(style)`, `ascent/descent/x_height/cap_height`
+  - Glyph atlas module — structure only, no GGTT slab yet (comes in P10.4)
+  - `tnum` + `kern` OpenType features enabled at load
+- **Deliverable:** SDK compiles, trees serialize, font metrics queryable for layout
 
 ### P10.2 — Compositor receiver + dummy renderer (3–5 days)
 - `kernel/src/shade/widgets/mod.rs` — new module
@@ -403,65 +714,69 @@ Order matters — each phase produces something runnable.
 ### P10.3 — Layout engine (1 week)
 - `kernel/src/shade/widgets/layout.rs` — flexbox-lite
 - Assigns absolute x/y/w/h to every node
+- **Uses real font metrics from P10.1** — Text nodes measured via `advance_width`, not stubbed
+- Baseline-aware row alignment (mix `Title` + `Body` in a row → correctly aligned)
 - Tested standalone with snapshot tests against known trees
-- **Deliverable:** layout pass produces correct geometry, dumped to serial
+- **Deliverable:** layout pass produces correct geometry incl. real text measurements, dumped to serial
 
 ### P10.4 — GGTT slab allocator (4–5 days)
 - `kernel/src/gpu/ggtt_slab.rs` — fixed-bucket slab, LRU eviction
-- Uses partition from P10.0
-- Unit-tested for allocation/free patterns + fragmentation behavior
-- **Deliverable:** slab can serve thousands of alloc/free cycles without leak or fragmentation
+- Uses partition + bucket sizes from P10.0
+- **Primary bucket is 1 MB** (tiles). Smaller buckets for composition layers.
+- Eviction priority: off-screen tiles first, composition layers last
+- Glyph atlas migrated from heap (P10.1) to GGTT glyph region
+- Unit-tested for allocation/free patterns + fragmentation behavior with realistic tile-churn profile
+- **Deliverable:** slab serves thousands of alloc/free cycles without leak; glyph atlas lives in GGTT
 
-### P10.5 — Layer texture rasterization (1 week)
-- `kernel/src/shade/widgets/render.rs` — walks laid-out tree
-- Reuses `gui/render.rs` primitives, target = per-node layer buffer in slab
-- BCS blits layer textures into window content region
-- **Deliverable:** static file-browser tree (no font yet, placeholder rects for text) renders in a window
+### P10.5 — Tile rasterization + composition layers (1.5 weeks)
+- `kernel/src/shade/widgets/tile.rs` — tile grid per window, `TileId`, coord math
+- `kernel/src/shade/widgets/classify.rs` — detect composition boundaries (opacity<1, transition in-flight, `.blur`/`.shadow`/`.effect`, Canvas, Popover/Tooltip/Menu)
+- `kernel/src/shade/widgets/render.rs` — dirty-tile scheduler, per-tile raster task dispatch
+- `CpuRasterizer` implements `Rasterizer` trait — wraps `gui/render.rs` primitives + fontdue glyph cache, writes into `RasterTarget` (tile or comp layer)
+- Tile raster task: enumerate nodes whose rect intersects tile bounds, call rasterizer for each
+- Composition-layer raster task: render single node's sub-tree into its own target
+- BCS batched blit of all dirty targets in one ring submission
+- **Real Inter Variable text rendered from first run** (no placeholder-rect stage)
+- **Deliverable:** static file-browser tree renders in a window with actual Inter text + real rects/icons; serial debug can dump tile+layer list per commit
 
-### P10.6 — fontdue + Inter integration (4–5 days)
-- Add `fontdue` to kernel `Cargo.toml`
-- `kernel/src/gui/text.rs` — glyph rasterization, atlas in GGTT
-- Inter Regular + Bold loaded from npkFS at boot, BLAKE3-verified
-- `Text` widget renders real text
-- **Deliverable:** file-browser tree shows actual Inter text at correct size
-
-### P10.7 — Diff + cache (4–5 days)
+### P10.6 — Diff + cache (4–5 days)
 - Node ID + content hash
-- Per-app `HashMap<NodeId, LayerTexture>` survives across commits
-- Skip rasterize when hash unchanged
-- **Deliverable:** typing in Input re-rasterizes only that node (verifiable via debug overlay)
+- Per-app `AppCache { tiles: HashMap<TileId, TileTexture>, layers: HashMap<NodeId, LayerTexture> }` survives across commits
+- Diff pass produces dirty tile set + dirty/new/evicted layer set
+- Skip tiles whose intersecting nodes all have unchanged hashes
+- **Deliverable:** typing in Input marks exactly 1 tile dirty; hover on a `.transition` button re-rasters only its composition layer (verifiable via debug overlay showing dirty regions per frame)
 
-### P10.8 — Event routing (3 days)
+### P10.7 — Event routing (3 days)
 - Mouse: hit-test laid-out tree, find topmost `on_click` widget
 - Keyboard: focus stack, Tab navigation
 - `npk_event_poll` / `npk_event_wait` host fns
 - **Deliverable:** clicking a button fires the action in the app
 
-### P10.9 — Animation (1 week)
+### P10.8 — Animation (1 week)
 - Spring physics + linear timing in compositor, fixed-point Q16.16
 - Self-scheduling 60Hz tick while active
 - Interpolate `background`, `opacity`, `padding`, position deltas
 - **Deliverable:** hover state on buttons fades smoothly, deterministic
 
-### P10.10 — Icon atlas (3 days)
+### P10.9 — Icon atlas (3 days)
 - `build.rs` rasterizes curated Phosphor SVGs at compile time
 - 5 size variants (16/24/32/48/64), alpha-only, packed
 - `IconId` enum populated, atlas embedded as `static`
 - Atlas uploaded to GGTT at boot
 - **Deliverable:** file-browser shows real icons in correct theme color
 
-### P10.11 — Canvas (4–5 days)
+### P10.10 — Canvas (4–5 days)
 - `npk_canvas_commit` host fn
 - Size caps enforced (4K × 4K, 64 MB total per app)
 - `CANVAS` capability check
 - BGRA copy from WASM heap → layer texture in slab
 - **Deliverable:** image-viewer stub displays a PNG decoded in the app
 
-### P10.12 — File browser app (1 week)
+### P10.11 — File browser app (1 week)
 - `tools/wasm/files/` — real app, walks npkFS, opens via intent
-- **Deliverable:** working file browser, GNOME-feel, no `CANVAS` cap needed
+- **Deliverable:** working file browser, premium feel, no `CANVAS` cap needed
 
-**Total: ~6–7 weeks for a polished v1 incl. file browser + Canvas.**
+**Total: ~6–7 weeks for a polished v1 incl. file browser + Canvas. Real Inter Variable typography from P10.5 onward — no "placeholder text" phase.**
 
 ---
 
@@ -492,7 +807,10 @@ These were the open questions; closed with reasoning so we don't re-litigate lat
 
 | Question | Decision | Why |
 |---|---|---|
-| Font backend | `fontdue` + Inter (OFL) for UI; Spleen kept for terminals | Modern UI typography needs vector fonts; Spleen looks right in mono/terminal contexts. Inter is OFL, no Google branding. |
+| Font backend | `fontdue` + **Inter Variable** (OFL) for UI; Spleen kept for terminals | Modern UI typography needs vector fonts. Variable font = one file, all weights via single axis, smoother interpolation, ~800KB vs ~600KB for Regular+Bold pair. Zero extra code in fontdue. |
+| Font phase | Bootstrap in **P10.1**, rasterize in P10.5 — not deferred | Layout needs real metrics; a "placeholder-rect" stage would require rework. Cost: +3 days in P10.1. |
+| OpenType features | `tnum` + `kern` enabled by default, `liga` deferred to v2 | Tabular numerals eliminate number jitter in lists/clocks — biggest "premium feel" upgrade for minimal effort. Ligatures and complex-script shaping require `rustybuzz`, defer to v2 (no ABI change). |
+| Font metrics | Read from Inter's tables (`hhea`, `hmtx`, `OS/2`) — no hardcoded line-height | Vertical rhythm correct per weight/size; mixed-style rows align on baseline. |
 | Font storage | npkFS, BLAKE3-verified | Matches content-addressing principle; OTA-updatable without kernel rebuild |
 | Icon source | Phosphor (MIT), pre-rasterized at build time, alpha-only | Runtime SVG parsing is fragile or huge; alpha + theme token gives free re-coloring |
 | Icon sizes | 16/24/32/48/64 px logical (5 variants) | Covers 1× and 2× HiDPI cleanly |
@@ -502,7 +820,15 @@ These were the open questions; closed with reasoning so we don't re-litigate lat
 | Cache scope | Per-app, no cross-app sharing | Side-channel concerns + eviction complexity outweigh ~100KB savings |
 | Capability split | `RENDER` and `CANVAS` separate | Least privilege: file-browser doesn't need to draw pixels |
 | Animation math | Fixed-point Q16.16, tick-based | Float non-determinism across cores breaks visual consistency |
+| Enum variant ordering | `#[non_exhaustive]` + append-only on every ABI enum | Postcard serializes by position — inserting breaks every persisted tree |
+| Reserved widget slots | `Popover`, `Tooltip`, `Menu` declared in v1 | Out-of-window rendering cannot be retrofitted without wire-version bump |
+| Reserved modifier slots | `.blur`, `.shadow`, `.effect`, `.role` in v1 | GPU-dependent effects and a11y added later with zero ABI churn |
+| Rasterizer abstraction | `trait Rasterizer`, CPU in v1, GPU in v2 | Single swap point for HW acceleration; no call site locked to CPU |
+| Threading split | Raster on worker cores, BCS submit on Core 0 | Phase 9 constraint: Core 0 dispatches events, never blocks >100 μs |
+| A11y role reservation | `Role` byte per node from v1, consumed later | AppKit precedent: retrofitting a11y is catastrophic; ~200 bytes/tree is nothing |
+| Raster granularity | **Tile-based (512×512 actual px, 1 MB) + composition layers at boundaries** — not per-leaf | Per-leaf textures die under real workloads: slab fragmentation from thousands of 1-KB allocations, per-blit BCS overhead. Tiles are geometry-driven (stable across tree rebuilds), map cleanly to the 1-MB slab bucket, enable parallel worker-core rasterization (one tile = one task). Composition layers handle animated / semi-transparent / overlay widgets without dirtying tiles every frame. Same model as Blink/WebKit post-~2013. |
+| Composition boundaries | opacity<1, transition in-flight, blur/shadow/effect, Canvas, Popover/Tooltip/Menu | Narrowly defined; everything else goes into tiles. Prevents boundary-inflation that wasted memory in early Chromium. |
 
 ---
 
-*Last updated after P10.0 design pass. Implementation starts at P10.0 (ABI freeze).*
+*Last updated after P10.0 design pass + critical review (enum ordering, reserved slots, Rasterizer trait, threading, A11y role, tile-based rasterization). Implementation starts at P10.0 (ABI freeze).*

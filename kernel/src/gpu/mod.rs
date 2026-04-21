@@ -12,6 +12,7 @@
 
 pub mod gop;
 pub mod intel_xe;
+pub mod ggtt_layout;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
