@@ -488,27 +488,47 @@ impl Compositor {
                 let _ = crate::shade::widgets::relayout_scene(
                     win.id.0, cx as i32, cy as i32, cw, ch,
                 );
-                // 4b. Blit scene pixels into the content rect.
+                // 4b. Blit scene pixels into the content rect, leaving
+                //     the pre-rounded chrome background visible in the
+                //     four corner regions. Without corner clipping our
+                //     rectangular blit would square-off the rounded
+                //     edges that step 3 just painted.
                 crate::shade::widgets::with_scene(win.id.0, |scene| {
                     let pitch = info.pitch as usize;
                     let fb_w = info.width;
                     let fb_h = info.height;
                     let x1 = (cx + scene.width).min(fb_w);
                     let y1 = (cy + scene.height).min(fb_h);
+
+                    let cw_local = x1.saturating_sub(cx);
+                    let ch_local = y1.saturating_sub(cy);
+                    let r = inner_r.min(cw_local / 2).min(ch_local / 2);
+
                     for dy in cy..y1 {
-                        let src_y = (dy - cy) as usize;
-                        let dst_off = dy as usize * pitch + cx as usize * 4;
-                        let span = (x1 - cx) as usize;
+                        let local_y = dy - cy;
+                        // Horizontal inset: how many pixels to leave
+                        // untouched at each side of this row so the
+                        // rounded chrome keeps showing through.
+                        let skip = corner_inset(local_y, ch_local, r);
+                        if skip * 2 >= cw_local { continue; }
+
+                        let px0 = cx + skip;
+                        let px1 = x1.saturating_sub(skip);
+                        if px0 >= px1 { continue; }
+
+                        let src_base = (local_y as usize) * (scene.width as usize);
+                        let src_x    = (px0 - cx) as usize;
+                        let dst_off  = dy as usize * pitch + px0 as usize * 4;
+                        let span     = (px1 - px0) as usize;
                         unsafe {
                             let dst = shadow.add(dst_off) as *mut u32;
                             core::ptr::copy_nonoverlapping(
-                                scene.pixels.as_ptr().add(src_y * scene.width as usize),
+                                scene.pixels.as_ptr().add(src_base + src_x),
                                 dst,
                                 span,
                             );
                         }
                     }
-                    let _ = y1;
                 });
             }
         }
@@ -1222,4 +1242,46 @@ fn parse_hex_color(s: &str) -> Option<u32> {
     let s = s.trim().trim_start_matches("0x").trim_start_matches('#');
     if s.len() != 6 { return None; }
     u32::from_str_radix(s, 16).ok()
+}
+
+/// Per-row horizontal inset for a content rect of height `h` with
+/// corner radius `r`. Returns 0 for rows outside the top/bottom
+/// corner regions. Used by the widget-blit to preserve the rounded
+/// chrome around the scene pixels.
+fn corner_inset(y: u32, h: u32, r: u32) -> u32 {
+    if r == 0 { return 0; }
+    let y = y as i32;
+    let h = h as i32;
+    let r = r as i32;
+    // Distance from the relevant edge (top or bottom) into the
+    // corner region. Non-corner rows return 0.
+    let edge_dist = if y < r {
+        r - 1 - y
+    } else if y >= h - r {
+        y - (h - r)
+    } else {
+        return 0;
+    };
+    if edge_dist < 0 { return 0; }
+    // Pixel (x, y) is inside when (r-1-x)² + edge_dist² ≤ (r-1)².
+    // → x ≥ (r - 1) - sqrt((r-1)² - edge_dist²).
+    let rm1 = r - 1;
+    let r2 = rm1 * rm1;
+    let d2 = edge_dist * edge_dist;
+    if d2 > r2 { return r as u32; }
+    let s = isqrt(r2 - d2);
+    let x_min = rm1 - s;
+    if x_min < 0 { 0 } else { x_min as u32 }
+}
+
+/// Integer square root via Newton-Raphson. no_std friendly.
+fn isqrt(n: i32) -> i32 {
+    if n < 2 { return n.max(0); }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
 }
