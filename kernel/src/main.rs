@@ -312,6 +312,10 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // bitmap; the UI font is only needed once widgets come up.
     gui::text::init();
 
+    // Phosphor icon atlas — alpha-only bitmaps from npkFS
+    // (sys/icons/phosphor), parsed + cached for the CPU rasterizer.
+    gui::icons::init();
+
     // GGTT slab allocator — bookkeeping for tile / comp-layer / glyph
     // slots in the GGTT slab region. Pure in-RAM tracker; actual GGTT
     // writes land once the rasterizer (P10.5) is wired up.

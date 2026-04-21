@@ -7,6 +7,7 @@ exclude = [
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
     "tools/wasm/files-stub",
+    "tools/regen-icons",
 ]
 resolver = "2"
 
