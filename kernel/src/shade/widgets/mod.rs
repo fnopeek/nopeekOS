@@ -27,6 +27,7 @@ pub mod layout;
 pub mod palette;
 pub mod render;
 pub mod raster;
+pub mod animation;
 
 mod check_abi;
 
