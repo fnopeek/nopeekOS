@@ -187,17 +187,28 @@ GRUBCFG
         warn "  font missing: sys/fonts/inter-variable.ttf — installer will fail to compile"
     fi
 
-    # WASM modules: fetch from release/modules/ (produced by prior
-    # release build). Expect all four first-party modules.
+    # WASM modules + their .version files: fetch from release/modules/
+    # (produced by prior release build). Expect all four first-party
+    # modules. The .version file is what lets `intent::install` and
+    # `intent::update::update_all_modules` tell that a bundled module
+    # is already up-to-date — without it they trigger redownloads.
     for mod in top debug wallpaper wifi; do
-        SRC="$PROJECT_DIR/release/modules/${mod}.wasm"
-        if [ -f "$SRC" ]; then
-            cp "$SRC" "$ASSETS_DIR/${mod}.wasm"
+        WASM_SRC="$PROJECT_DIR/release/modules/${mod}.wasm"
+        VER_SRC="$PROJECT_DIR/release/modules/${mod}.version"
+
+        if [ -f "$WASM_SRC" ]; then
+            cp "$WASM_SRC" "$ASSETS_DIR/${mod}.wasm"
             ok "  module: ${mod}.wasm ($(du -h "$ASSETS_DIR/${mod}.wasm" | cut -f1))"
         else
             warn "  module missing: release/modules/${mod}.wasm — run ./build.sh release first"
-            # Touch empty file so include_bytes! doesn't fail to compile
             touch "$ASSETS_DIR/${mod}.wasm"
+        fi
+
+        if [ -f "$VER_SRC" ]; then
+            cp "$VER_SRC" "$ASSETS_DIR/${mod}.version"
+        else
+            warn "  version missing: release/modules/${mod}.version — defaulting to 0.0.0"
+            echo "0.0.0" > "$ASSETS_DIR/${mod}.version"
         fi
     done
 
