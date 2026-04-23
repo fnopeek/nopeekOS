@@ -694,6 +694,7 @@ Order matters — each phase produces something runnable.
 | P10.7 Events | 🟡 partial | v0.60.0 | Mouse hit-test + npk_event_poll; keyboard routing + blocking wait deferred |
 | P10.8 Animation | 🟡 scaffold | v0.61.0 | Q16.16 math + tick(); no active consumers until tree-diff lands |
 | P10.9 Icons | ✅ done | v0.62.0 | 18 Phosphor Regular, 149 KB atlas, OTA-updatable like font |
+| drun launcher | ✅ done | v0.64.2 / drun 0.2.1 | Mod+D centred overlay, modal, keyboard nav — first real interactive widget app |
 | P10.10 Canvas | ⏳ later | — | `npk_canvas_commit` + CANVAS cap, size-capped |
 | P10.11 File browser | ⏳ later | — | Real Thunar-clone — the eventual capstone |
 
@@ -702,15 +703,31 @@ prerequisite". None of them block the next phase's user-visible work.
 
 ### Open follow-ups (not-in-spec, tracked)
 
-- **drun** (Mod+D app launcher) — first real interactive widget app.
-  Lists installed modules from `sys/wasm/`, keyboard nav, Enter
-  launches. Simpler than file browser → good tester for event infra.
+- ~~drun — first real interactive widget app~~ — ✅ shipped v0.64.2.
+  Lists installed `sys/wasm/*` modules, keyboard nav, Enter launches.
+  Uses `npk_window_set_overlay` + `npk_window_set_modal` to declare
+  its window kind — kernel stays launcher-agnostic.
+- ~~Keyboard routing to widget windows~~ — ✅ shipped v0.64.1.
+  Focused widget-kind window receives `Event::Key`; the intent
+  loop's `read_line_with_tab` bails out immediately via
+  `focused_widget_id()`.
+- **drun polish** — current rough edges: mouse-click selection
+  missing, no search input, visual style minimal. Cosmetic pass
+  planned next.
+- **Kind conversion (Terminal ↔ Widget)** — `npk_spawn_module`
+  currently always opens a terminal-kind window so `loop + <app>`
+  semantics match. Widget-only apps launched via drun end up with
+  an unused terminal chrome. `npk_window_set_overlay` should
+  convert the window cleanly (update kind field, free terminal
+  slot, install scene entry).
+- **Keybind configurability** — only the launcher target is
+  currently config-driven (`sys/config/launcher`). Full keybind
+  mapping (all Mod+X combos → action/module) lives in a future
+  `sys/config/keybinds`, replacing the hardcoded lookups in
+  `shade::input::try_keybind_event`.
 - **Tile subdivision + full diff cache** — second-pass P10.5 and
   P10.6 together. Needs 512×512 tile grid per window, per-tile
   content-hash, dirty-tile scheduler. Makes interactive apps cheap.
-- **Keyboard routing to widget windows** — P10.7 follow-up. Focused
-  widget-kind window should receive `Event::Key` instead of the
-  terminal's intent loop.
 - **`npk_event_wait` blocking poll** — P10.7 follow-up, needs
   integration with idle/sleep path.
 - **Window resize triggers scene re-layout** — `relayout_scene`
