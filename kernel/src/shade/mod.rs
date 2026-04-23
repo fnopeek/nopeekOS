@@ -109,6 +109,21 @@ pub fn focus_window(id: WindowId) {
     with_compositor(|comp| comp.focus_window(id));
 }
 
+/// If the currently focused window is a widget-kind window, return its id.
+/// The intent loop uses this to route key events to the widget's event queue
+/// instead of the terminal input path.
+pub fn focused_widget_id() -> Option<u32> {
+    with_compositor(|comp| {
+        let fid = comp.focused?;
+        let win = comp.windows.iter().find(|w| w.id == fid)?;
+        if win.kind == window::WindowKind::Widget {
+            Some(fid.0)
+        } else {
+            None
+        }
+    }).flatten()
+}
+
 /// Force a full redraw (e.g. after wallpaper change).
 pub fn force_redraw() {
     // Invalidate input line cache — will be rebuilt by render_window
@@ -471,7 +486,62 @@ pub fn handle_action(action: input::ShadeAction) {
         ShadeAction::Lock => {
             // Lock handled by intent loop
         }
+        ShadeAction::LaunchDrun => {
+            launch_drun();
+        }
     }
+}
+
+/// Load `sys/wasm/drun` from npkFS, create a widget window, and spawn
+/// the module as a widget-kind WASM app. Focus transfers to drun.
+///
+/// No-ops silently if the module isn't installed — a user has to
+/// `install drun` once before Mod+D works.
+fn launch_drun() {
+    // Already open? Focus it and return instead of spawning a second.
+    if let Some(existing) = with_compositor(|comp| {
+        comp.windows.iter()
+            .find(|w| w.kind == window::WindowKind::Widget && w.title == "drun")
+            .map(|w| w.id)
+    }).flatten() {
+        with_compositor(|comp| comp.focus_window(existing));
+        render_frame();
+        return;
+    }
+
+    let (bytes, _hash) = match crate::npkfs::fetch("sys/wasm/drun") {
+        Ok(v) => v,
+        Err(_) => {
+            crate::kprintln!("[npk] drun: not installed — run `install drun` first");
+            return;
+        }
+    };
+
+    let module_cap = match crate::capability::create_module_cap(
+        crate::capability::Rights::READ
+            | crate::capability::Rights::EXECUTE
+            | crate::capability::Rights::RENDER,
+        Some(600_000),
+    ) {
+        Ok(id) => id,
+        Err(e) => { crate::kprintln!("[npk] drun: cap delegation failed: {}", e); return; }
+    };
+
+    let widget_wid = match with_compositor(|comp| {
+        let id = comp.create_widget_window("drun");
+        comp.focus_window(id);
+        id.0
+    }) {
+        Some(v) => v,
+        None => { crate::kprintln!("[npk] drun: compositor unavailable"); return; }
+    };
+
+    if !crate::wasm::spawn_widget_app(bytes.to_vec(), module_cap, "drun", widget_wid) {
+        crate::kprintln!("[npk] drun: spawn failed");
+        // Clean up the orphan window we just created.
+        with_compositor(|comp| comp.close_window(window::WindowId(widget_wid)));
+    }
+    render_frame();
 }
 
 /// Fast re-render of just the current input line (for live typing feedback).

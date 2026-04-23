@@ -45,6 +45,8 @@ pub enum ShadeAction {
     ScrollDown,
     /// Mod+L: lock
     Lock,
+    /// Mod+D: open the drun app launcher (widget-kind window).
+    LaunchDrun,
 }
 
 /// Check if the configured mod key is currently held (public for ESC state capture).
@@ -98,6 +100,7 @@ pub fn try_keybind(key: u8) -> bool {
         b'f' | b'F' => { push_action(ShadeAction::ToggleFullscreen); true }
         b'v' | b'V' => { push_action(ShadeAction::ToggleFloating); true }
         b'l' | b'L' => { push_action(ShadeAction::Lock); true }
+        b'd' | b'D' => { push_action(ShadeAction::LaunchDrun); true }
         b'1'..=b'4' => {
             let ws = key - b'0';
             if shift { push_action(ShadeAction::MoveToWorkspace(ws - 1)); }
@@ -141,6 +144,7 @@ pub fn try_keybind_event(event: &crate::input::KeyEvent) -> bool {
         KeyCode::Char(b'f') | KeyCode::Char(b'F') => { push_action(ShadeAction::ToggleFullscreen); true }
         KeyCode::Char(b'v') | KeyCode::Char(b'V') => { push_action(ShadeAction::ToggleFloating); true }
         KeyCode::Char(b'l') | KeyCode::Char(b'L') => { push_action(ShadeAction::Lock); true }
+        KeyCode::Char(b'd') | KeyCode::Char(b'D') => { push_action(ShadeAction::LaunchDrun); true }
         KeyCode::Char(b'1'..=b'4') => {
             if let KeyCode::Char(c) = event.key {
                 let ws = c - b'0';

@@ -1,0 +1,21 @@
+[package]
+name = "drun"
+version = "0.1.0"
+edition = "2024"
+description = "Mod+D app launcher — first interactive widget app."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[dependencies.postcard]
+version = "1.0"
+default-features = false
+features = ["alloc"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
