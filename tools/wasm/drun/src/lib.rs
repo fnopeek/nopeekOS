@@ -31,11 +31,14 @@ unsafe extern "C" {
     fn npk_close_widget() -> i32;
     fn npk_window_set_overlay(w: i32, h: i32) -> i32;
     fn npk_window_set_modal(modal: i32) -> i32;
-    fn npk_log(ptr: i32, len: i32);
+    fn npk_log_serial(ptr: i32, len: i32);
 }
 
+/// Serial-only log. Uses `npk_log_serial` (not `npk_log`) so drun's
+/// diagnostic stream bypasses the shade-terminal write path — relevant
+/// when drun runs on an otherwise-empty desktop with no loop window.
 fn log(msg: &str) {
-    unsafe { npk_log(msg.as_ptr() as i32, msg.len() as i32); }
+    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
 }
 
 fn commit(bytes: &[u8]) -> i32 {

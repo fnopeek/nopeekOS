@@ -417,6 +417,16 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
     loop {
         // Detect focus change (mouse click, shade action, WASM switch)
         if crate::shade::is_active() {
+            // Phase 10: focus moved to a widget-kind window — return so
+            // run_loop enters the widget-focused input branch. Without
+            // this bailout we'd keep consuming keys as shell-line
+            // history/edit events and never forward them to the
+            // focused widget app (e.g. drun).
+            if crate::shade::focused_widget_id().is_some() {
+                sync_session_to_terminal(session);
+                return 0;
+            }
+
             let ft = crate::shade::terminal::active_idx();
 
             if crate::wasm::has_wasm_app(ft) {
