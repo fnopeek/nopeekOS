@@ -199,6 +199,51 @@ impl Compositor {
         id
     }
 
+    /// Create a widget-kind overlay window — floating, centred on screen,
+    /// fixed size, never part of the tiling grid. Used for modal
+    /// launchers (drun) and similar transient UI.
+    ///
+    /// Caller is expected to `focus_window(id)` afterwards so keys route
+    /// into the widget's event queue.
+    pub fn create_widget_overlay(&mut self, title: &str, w: u32, h: u32) -> WindowId {
+        let id = WindowId(self.next_id);
+        self.next_id += 1;
+
+        // Clamp requested size to a sensible fraction of the screen so
+        // tiny screens still get a legible overlay.
+        let ow = w.min(self.screen_w.saturating_sub(80)).max(120);
+        let oh = h.min(self.screen_h.saturating_sub(80)).max(80);
+        let ox = self.screen_w.saturating_sub(ow) / 2;
+        let oy = self.screen_h.saturating_sub(oh) / 2;
+
+        let mut win = Window::new(id, title, ox, oy, ow, oh);
+        win.workspace = self.active_workspace;
+        win.terminal_idx = 255;
+        win.kind = crate::shade::window::WindowKind::Widget;
+        win.state = crate::shade::window::WindowState::Floating;
+        win.pid = 0;
+
+        self.windows.push(win);
+        self.z_order.insert(0, id);
+        // No retile — floating overlays keep their own geometry. Other
+        // tiled windows stay where they are.
+        self.needs_full_redraw = true;
+
+        id
+    }
+
+    /// True if at least one widget-kind overlay window (Floating state)
+    /// exists on the active workspace. Used by focus/input paths to
+    /// suppress shortcuts that would otherwise steal focus while a
+    /// modal launcher is open.
+    pub fn has_widget_overlay(&self) -> bool {
+        self.windows.iter().any(|w|
+            w.kind == crate::shade::window::WindowKind::Widget
+            && w.state == crate::shade::window::WindowState::Floating
+            && w.workspace == self.active_workspace
+            && w.visible)
+    }
+
     /// Close a window by ID.
     pub fn close_window(&mut self, id: WindowId) {
         // Free session + terminal buffer + process before removing window
