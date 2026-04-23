@@ -481,6 +481,18 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     crate::shade::handle_action(action);
                     return 0; // run_loop creates session for new window
                 }
+                ShadeAction::CloseWindow | ShadeAction::SpawnLauncher => {
+                    // Both can destroy / invalidate the current session's
+                    // terminal OR move focus to a widget window while we
+                    // hold `&mut session` into the SESSIONS map. Sync
+                    // session state to the terminal buffer first, run
+                    // the action, then bail so run_loop re-acquires the
+                    // (possibly new / absent / widget-focused) session
+                    // cleanly — no dangling refs, no stale focus.
+                    sync_session_to_terminal(session);
+                    crate::shade::handle_action(action);
+                    return 0;
+                }
                 _ => {
                     crate::shade::handle_action(action);
                 }
