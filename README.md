@@ -57,6 +57,8 @@ npk> wallpaper demo                    # Generate 3 demo wallpapers + auto-theme
 npk> wallpaper set ocean              # Set wallpaper (extracts theme colors)
 npk> wallpaper random                  # Random wallpaper from collection
 npk> wallpaper clear                   # Revert to aurora background
+npk> install drun                      # Mod+D app launcher (widget-kind)
+[ Mod+D ]                               # Open drun overlay — ↑↓ select, Enter launch, Esc close
 npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
 npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
 npk> gpu 4k                           # Switch to 4K@30Hz
@@ -426,30 +428,42 @@ See `PHASE10_WIDGETS.md` for full architecture + ABI rules.
 - [x] Glyph atlas migrated to slab slots (CompSmall4K bucket)
 
 **Icons**
-- [ ] Phosphor icon atlas (16/24/32/48/64 px logical, alpha-only) — build-time SVG rasterization
-- [ ] `IconId` enum fully populated
+- [x] Phosphor icon atlas (16/24/32/48/64 px logical, alpha-only) — build-time SVG rasterization
+- [x] `IconId` enum populated (18 Regular variants, append-only)
 
 **Events & interaction**
-- [ ] Mouse hit-test against layout tree → `Event::Action(ActionId)`
-- [ ] Focus stack + Tab navigation, keyboard → `Event::Key`
-- [ ] `npk_event_poll` / `npk_event_wait` host fns
+- [x] Mouse hit-test against layout tree → `Event::Action(ActionId)`
+- [x] Keyboard → `Event::Key` routed to focused widget window (`read_line_with_tab` bailout, `npk_event_poll`)
+- [ ] Focus stack + Tab navigation (within-widget focus, not window focus)
+- [ ] `npk_event_wait` blocking host fn
 
 **Animation**
-- [ ] Spring physics + linear curves, fixed-point Q16.16 (determinism)
-- [ ] Self-scheduling 60Hz tick while interpolating, dirty-driven otherwise
+- [x] Spring physics + linear curves, fixed-point Q16.16 scaffolding (v0.61.0)
+- [ ] Self-scheduling 60Hz tick while interpolating, dirty-driven otherwise (no active consumers yet)
 
 **Canvas (escape hatch)**
 - [ ] `npk_canvas_commit(canvas_id, pixels, w, h, canvas_cap)` — CANVAS cap separate from RENDER
 - [ ] Size caps: 4096×4096 px, 64 MB pixels total per app
 
+**Window configuration (app-driven)**
+- [x] `npk_window_set_overlay(w, h)` — app declares itself a centred overlay (bypasses tiling grid)
+- [x] `npk_window_set_modal(modal)` — app declares itself modal, shade suppresses focus-shift shortcuts while visible
+- [x] `npk_spawn_module(name_ptr, name_len)` — launcher apps spawn another module in a fresh terminal window (`loop + <app>` semantics)
+- [x] `npk_close_widget()` — app tears down its own widget window
+- [x] `npk_log_serial(ptr, len)` — direct serial logging, bypasses shade-terminal (safe when no loop is open)
+- [x] `npk_list_modules(buf, max)` — enumerate installed `sys/wasm/*` modules (filters `.version` sidecars)
+
 **First-party apps**
 - [x] `files-stub` — P10.2 dummy commit app, bundled + OTA (`install files-stub`)
+- [x] `drun` — Mod+D app launcher (centred overlay, modal, keyboard nav, Enter launches)
 - [ ] `files` — real file browser (walks npkFS, opens via intent)
 
-**Window-manager integration** (milestone between current and P10.6)
-- [ ] Widget-kind windows first-class in shade (own grid slot, draggable, resizable, rounded corners, separate from terminal windows)
-- [ ] Per-window scene storage (currently one global `ACTIVE_SCENE`)
-- [ ] Widget follows focus / workspace switches correctly
+**Window-manager integration**
+- [x] Widget-kind windows first-class in shade (own grid slot, rounded corners, separate from terminal windows)
+- [x] Per-window scene storage (`SCENES: BTreeMap<WindowId, WidgetScene>`)
+- [x] Widget follows focus / workspace switches correctly
+- [x] `Window.is_overlay` + `Window.modal` flags (set by app, not by kernel)
+- [x] Configurable launcher binding — `sys/config/launcher` (defaults to "drun")
 
 Progress milestones (per `PHASE10_WIDGETS.md`):
 - [x] P10.0 ABI freeze (`v0.50.7`)
@@ -464,7 +478,8 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [x] P10.7 Event routing — mouse hit-test + `npk_event_poll` (`v0.60.0`, keyboard/blocking pending)
 - [x] P10.8 Animation — Q16.16 math scaffold (`v0.61.0`, no active consumers yet)
 - [x] P10.9 Phosphor icon atlas (`v0.62.0`) — **last visual checkpoint, 18 icons shipped**
-- [ ] drun — first interactive widget app (Mod+D launcher)
+- [x] drun — Mod+D app launcher (`v0.64.2` + drun `0.2.1`) — first interactive widget app on its own, keyboard nav, modal overlay
+- [ ] drun polish — mouse-click selection, search input, visual refinement
 - [ ] Tile subdivision + full diff cache
 - [ ] P10.10 Canvas escape hatch
 - [ ] P10.11 Real file browser (Thunar-clone, capstone)
