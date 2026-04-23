@@ -86,6 +86,11 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("files-stub.wasm"),
         version: Some(include_str!("files-stub.version")),
     },
+    BundledAsset {
+        fs_path: "sys/wasm/drun",
+        bytes:   include_bytes!("drun.wasm"),
+        version: Some(include_str!("drun.version")),
+    },
 ];
 
 /// Stub invoked by install.rs to avoid conditional compilation at the

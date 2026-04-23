@@ -246,9 +246,13 @@ impl Compositor {
 
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             self.bar.set_title(&win.title);
-            terminal::set_active_terminal(win.terminal_idx);
-            // Restore saved cursor position for the newly active terminal
-            terminal::restore_cursor();
+            // Widget windows don't own a terminal buffer — leave ACTIVE_IDX
+            // pointing at the previously-active terminal so kprintln output
+            // keeps a valid sink while the widget app is focused.
+            if win.kind == crate::shade::window::WindowKind::Terminal {
+                terminal::set_active_terminal(win.terminal_idx);
+                terminal::restore_cursor();
+            }
         }
         // Don't set needs_full_redraw — render_damaged handles 2 windows only
     }

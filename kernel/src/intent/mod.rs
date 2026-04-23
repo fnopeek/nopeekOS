@@ -787,6 +787,43 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
 
+            // Phase 10: widget-kind window focused — keys go into the
+            // per-window widget event queue, never the terminal / WASM
+            // app key buf. The widget app polls them via npk_event_poll.
+            if let Some(widget_wid) = crate::shade::focused_widget_id() {
+                crate::shade::poll_render();
+                crate::net::poll();
+
+                while let Some(evt) = crate::xhci::poll_mouse() {
+                    crate::shade::handle_mouse(&evt);
+                }
+
+                if crate::shade::take_deferred_render() {
+                    crate::shade::render_frame();
+                }
+
+                if let Some(action) = crate::shade::input::poll_action() {
+                    crate::shade::handle_action(action);
+                }
+
+                while let Some(event) = crate::keyboard::read_event() {
+                    // Mod+X keybinds still reach shade (Mod+D, Mod+Q, etc.).
+                    if crate::shade::input::try_keybind_event(&event) {
+                        continue;
+                    }
+                    crate::shade::widgets::push_event(
+                        widget_wid,
+                        crate::shade::widgets::abi::Event::Key(event.key),
+                    );
+                }
+
+                // Same polling cadence as the WASM-app branch.
+                for _ in 0..5_000 {
+                    core::hint::spin_loop();
+                }
+                continue;
+            }
+
             // Intent running on worker — event loop without input
             if has_running_intent(focused_term) {
                 from_intent = true;

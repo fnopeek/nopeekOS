@@ -118,6 +118,18 @@ pub fn poll_event(window_id: u32) -> Option<abi::Event> {
         .and_then(|q| q.pop_front())
 }
 
+/// True if a widget-kind window with this id still exists in the
+/// compositor. Host fn `npk_event_poll` uses this to distinguish
+/// "queue empty" from "window closed" — the app turns the latter
+/// into an exit signal rather than polling forever.
+pub fn widget_window_exists(window_id: u32) -> bool {
+    crate::shade::with_compositor(|comp| {
+        comp.windows.iter().any(|w|
+            w.id.0 == window_id
+            && w.kind == crate::shade::window::WindowKind::Widget)
+    }).unwrap_or(false)
+}
+
 /// Called by compositor::close_window alongside remove_scene to
 /// drop the now-orphaned queue.
 pub fn remove_event_queue(window_id: u32) {

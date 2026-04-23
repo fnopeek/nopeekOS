@@ -70,6 +70,9 @@ struct WasmJob {
     terminal_idx: u8,
     name: [u8; 32],
     name_len: u8,
+    /// Pre-allocated widget window id for widget-kind apps. 0 = app
+    /// will get a window on its first npk_scene_commit (classic path).
+    widget_window_id: u32,
 }
 
 static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> = Mutex::new([
@@ -167,17 +170,29 @@ pub fn has_wasm_app(terminal_idx: u8) -> bool {
 /// Spawn a WASM module on a worker core. Returns immediately.
 /// The app gets its own window and terminal.
 pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
-    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true)
+    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true, 0)
 }
 
 /// Spawn a WASM module as a background task. Unlike spawn_on_worker, this does
 /// NOT set APP_RUNNING for the terminal — the intent shell keeps receiving keys
 /// and the window continues to function normally. Used by debug.wasm.
 pub fn spawn_on_worker_background(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
-    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, false)
+    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, false, 0)
 }
 
-fn spawn_on_worker_inner(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str, foreground: bool) -> bool {
+/// Spawn a widget-kind WASM app (Phase 10). The caller pre-allocates a
+/// widget window and passes its id — the worker sets `widget_window_id`
+/// in HostState so the first `npk_scene_commit` targets it directly.
+/// Does NOT allocate a terminal or set APP_RUNNING — widget apps use
+/// `npk_event_poll` for input, not the per-terminal key buffer.
+pub fn spawn_widget_app(wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, widget_wid: u32) -> bool {
+    spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, widget_wid)
+}
+
+fn spawn_on_worker_inner(
+    wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
+    foreground: bool, widget_wid: u32,
+) -> bool {
     let mut jobs = WASM_JOBS.lock();
     let slot = match jobs.iter().position(|j| j.is_none()) {
         Some(i) => i,
@@ -189,7 +204,10 @@ fn spawn_on_worker_inner(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, m
     name[..nlen].copy_from_slice(&module_name.as_bytes()[..nlen]);
 
     JOB_DONE[slot].store(false, core::sync::atomic::Ordering::Relaxed);
-    jobs[slot] = Some(WasmJob { bytes: wasm_bytes, cap_id, terminal_idx, name, name_len: nlen as u8 });
+    jobs[slot] = Some(WasmJob {
+        bytes: wasm_bytes, cap_id, terminal_idx, name, name_len: nlen as u8,
+        widget_window_id: widget_wid,
+    });
     drop(jobs);
 
     // Clear per-app input buffer + mark terminal as having an app (foreground only)
@@ -248,7 +266,7 @@ fn wasm_worker_task(arg: u64) {
         core_id,
         pid,
         hw: None,
-        widget_window_id: 0,
+        widget_window_id: job.widget_window_id,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -598,6 +616,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             }
             let window_id = caller.data().widget_window_id;
             if window_id == 0 { return -1; }
+            // -1 also covers "window was closed by shade" (e.g. Mod+Shift+Q)
+            // so the app can fall out of its poll loop instead of spinning.
+            if !crate::shade::widgets::widget_window_exists(window_id) { return -1; }
 
             let event = match crate::shade::widgets::poll_event(window_id) {
                 Some(e) => e,
@@ -619,6 +640,149 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if end > data.len() { return -1; }
             data[start..end].copy_from_slice(&encoded);
             encoded.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_list_modules(buf_ptr, buf_max) -> i32
+    // Writes a NUL-separated list of module names from `sys/wasm/*` into
+    // the caller's buffer. Returns bytes written, or -1 on cap denied /
+    // buffer too small. The trailing entry is NOT terminated — caller
+    // splits on 0x00.
+    //
+    // RENDER-gated because only GUI apps (drun) need this today. Adjust
+    // if terminal utilities ever want the same API.
+    linker.func_wrap("env", "npk_list_modules",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+
+            let entries = match crate::npkfs::list() {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+
+            // Build the NUL-separated list. Strip the "sys/wasm/" prefix.
+            let prefix = "sys/wasm/";
+            let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            for (name, _size, _hash) in &entries {
+                if let Some(stripped) = name.strip_prefix(prefix) {
+                    // Skip sub-directory-like entries (shouldn't occur,
+                    // but defensive — names with '/' aren't valid modules).
+                    if stripped.contains('/') || stripped.is_empty() { continue; }
+                    if !out.is_empty() { out.push(0); }
+                    out.extend_from_slice(stripped.as_bytes());
+                }
+            }
+
+            if out.len() > buf_max as usize { return -1; }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + out.len();
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(&out);
+            out.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_spawn_module(name_ptr, name_len) -> i32
+    // Launch `sys/wasm/<name>` as a widget-kind WASM app. Creates and
+    // focuses a new widget window, spawns the module on a worker core.
+    // Caller stays alive — drun typically calls this then npk_close_widget.
+    //
+    //   0  → spawn accepted
+    //   -1 → cap denied / bad args / module not found / spawn failed
+    linker.func_wrap("env", "npk_spawn_module",
+        |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if name_len <= 0 || name_len > 64 { return -1; }
+
+            let name = {
+                let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let data = mem.data(&caller);
+                let start = name_ptr as usize;
+                let end = start + name_len as usize;
+                if end > data.len() { return -1; }
+                match core::str::from_utf8(&data[start..end]) {
+                    Ok(s) => alloc::string::String::from(s),
+                    Err(_) => return -1,
+                }
+            };
+
+            // Path validation — refuse absolute paths, traversal, prefix reuse.
+            if name.contains('/') || name.contains("..") || name.is_empty() {
+                return -1;
+            }
+
+            let path = alloc::format!("sys/wasm/{}", name);
+            let (bytes, _hash) = match crate::npkfs::fetch(&path) {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+
+            let module_cap = match capability::create_module_cap(
+                capability::Rights::READ
+                    | capability::Rights::EXECUTE
+                    | capability::Rights::RENDER,
+                Some(600_000),
+            ) {
+                Ok(id) => id,
+                Err(_) => return -1,
+            };
+
+            // Widget app: new window, focus it, spawn on worker with
+            // the window id pre-populated so its first scene_commit
+            // targets the right slot.
+            let widget_wid = match crate::shade::with_compositor(|comp| {
+                let id = comp.create_widget_window(&name);
+                comp.focus_window(id);
+                id.0
+            }) {
+                Some(v) => v,
+                None => return -1,
+            };
+
+            if !spawn_widget_app(bytes.to_vec(), module_cap, &name, widget_wid) {
+                crate::shade::with_compositor(|comp| {
+                    comp.close_window(crate::shade::WindowId(widget_wid));
+                });
+                return -1;
+            }
+            crate::shade::request_render();
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_close_widget() -> i32
+    // Close the calling app's own widget window. The worker then falls
+    // out of its `_start` loop by its own logic; this host fn only tears
+    // down the window + scene + event queue. Returns 0 on success,
+    // -1 if the app doesn't own a widget window.
+    linker.func_wrap("env", "npk_close_widget",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 { return -1; }
+            crate::shade::with_compositor(|comp| {
+                comp.close_window(crate::shade::WindowId(wid));
+            });
+            crate::shade::request_render();
+            0
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
