@@ -811,11 +811,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     if crate::shade::input::try_keybind_event(&event) {
                         continue;
                     }
-                    // TEMP: log every delivered key so we can confirm the
-                    // route on HW. Remove once drun's keyboard path is
-                    // verified.
-                    crate::kprintln!("[npk] widget key → wid={} key={:?}",
-                        widget_wid, event.key);
                     crate::shade::widgets::push_event(
                         widget_wid,
                         crate::shade::widgets::abi::Event::Key(event.key),

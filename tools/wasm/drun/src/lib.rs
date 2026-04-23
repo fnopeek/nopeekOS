@@ -29,6 +29,8 @@ unsafe extern "C" {
     fn npk_list_modules(ptr: i32, max: i32) -> i32;
     fn npk_spawn_module(ptr: i32, len: i32) -> i32;
     fn npk_close_widget() -> i32;
+    fn npk_window_set_overlay(w: i32, h: i32) -> i32;
+    fn npk_window_set_modal(modal: i32) -> i32;
     fn npk_log(ptr: i32, len: i32);
 }
 
@@ -59,8 +61,36 @@ fn poll_event() -> PollResult {
     if n == 0 { return PollResult::Empty; }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     match postcard::from_bytes::<Event>(slice) {
-        Ok(ev) => PollResult::Event(ev),
-        Err(_) => PollResult::Empty,
+        Ok(ev) => {
+            log("[drun] poll_event: decoded one Event");
+            PollResult::Event(ev)
+        }
+        Err(_) => {
+            // Decode failed — log the bytes so we can see what came through.
+            let mut buf = [0u8; 96];
+            let mut pos = 0usize;
+            let hdr = b"[drun] poll_event: decode FAIL, bytes:";
+            for &b in hdr.iter() { if pos < buf.len() { buf[pos] = b; pos += 1; } }
+            for (i, &b) in slice.iter().enumerate() {
+                if i >= 16 { break; }
+                // " XX" hex
+                if pos + 3 > buf.len() { break; }
+                buf[pos] = b' ';
+                buf[pos + 1] = hex_nibble(b >> 4);
+                buf[pos + 2] = hex_nibble(b & 0x0F);
+                pos += 3;
+            }
+            let msg = unsafe { core::str::from_utf8_unchecked(&buf[..pos]) };
+            log(msg);
+            PollResult::Empty
+        }
+    }
+}
+
+fn hex_nibble(n: u8) -> u8 {
+    match n {
+        0..=9 => b'0' + n,
+        _     => b'a' + (n - 10),
     }
 }
 
@@ -262,12 +292,23 @@ enum Outcome {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    // Ask shade to give us an overlay window (centred, floating) and
+    // make it modal. Both fns create the underlying widget window if
+    // we don't have one yet, so they must run before the first
+    // scene_commit.
+    unsafe {
+        let _ = npk_window_set_overlay(520, 420);
+        let _ = npk_window_set_modal(1);
+    }
+    log("[drun] overlay+modal configured");
+
     // Reserve the first 128 KB for persistent state (module list, etc.)
     // and rewind to this mark before every re-render so we don't leak.
     let mut drun = Drun::load();
     let persistent_mark = alloc_mark();
 
     drun.commit_tree();
+    log("[drun] first tree committed, entering poll loop");
 
     loop {
         match poll_event() {

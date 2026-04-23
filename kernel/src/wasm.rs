@@ -50,6 +50,10 @@ struct HostState {
     /// Phase 10: set when the app calls npk_scene_commit, reused on
     /// subsequent commits so the same window is updated in place.
     widget_window_id: u32,
+    /// Module name, used as the window title when the app's first
+    /// scene_commit (or npk_window_set_overlay) creates its widget
+    /// window. Cloned from the WASM job at worker entry.
+    module_name: String,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -267,6 +271,7 @@ fn wasm_worker_task(arg: u64) {
         pid,
         hw: None,
         widget_window_id: job.widget_window_id,
+        module_name: String::from(name_str),
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -375,6 +380,7 @@ pub fn execute_interactive(
         pid: 0,
         hw: None,
         widget_window_id: 0,
+        module_name: String::new(),
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -411,6 +417,7 @@ fn execute_inner(
         pid: 0,
         hw: None,
         widget_window_id: 0,
+        module_name: String::new(),
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -671,6 +678,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     // Skip sub-directory-like entries (shouldn't occur,
                     // but defensive — names with '/' aren't valid modules).
                     if stripped.contains('/') || stripped.is_empty() { continue; }
+                    // `.version` files are sidecars written by the
+                    // installer — not standalone modules.
+                    if stripped.ends_with(".version") { continue; }
                     if !out.is_empty() { out.push(0); }
                     out.extend_from_slice(stripped.as_bytes());
                 }
@@ -762,6 +772,78 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             }
             crate::shade::request_render();
             0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_window_set_overlay(w, h) -> i32
+    // Mark the calling app's widget window as a centred overlay of the
+    // requested size. Removes the window from the tiling grid (if it
+    // was part of it), re-centres it, and requests re-render.
+    //
+    // If the app hasn't created its widget window yet (widget_window_id
+    // == 0), this call also creates the window — title is the module
+    // name recorded at spawn time. First caller "wins" the window;
+    // subsequent calls just reconfigure.
+    //
+    // Returns 0 on success, -1 on cap denied / compositor unavailable.
+    linker.func_wrap("env", "npk_window_set_overlay",
+        |mut caller: Caller<'_, HostState>, w: i32, h: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if w <= 0 || h <= 0 { return -1; }
+
+            let mut wid = caller.data().widget_window_id;
+            if wid == 0 {
+                // Create a widget window up-front so the app can configure
+                // it before its first scene_commit.
+                let title = caller.data().module_name.clone();
+                let new_id = match crate::shade::with_compositor(|comp| {
+                    let id = comp.create_widget_window(
+                        if title.is_empty() { "widget" } else { title.as_str() });
+                    comp.focus_window(id);
+                    id.0
+                }) {
+                    Some(v) => v,
+                    None => return -1,
+                };
+                caller.data_mut().widget_window_id = new_id;
+                wid = new_id;
+            }
+
+            let ok = crate::shade::with_compositor(|comp|
+                comp.set_overlay(crate::shade::WindowId(wid), w as u32, h as u32)
+            ).unwrap_or(false);
+
+            if ok {
+                crate::shade::request_render();
+                0
+            } else {
+                -1
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_window_set_modal(modal: i32) -> i32
+    // Toggle the modal flag on the calling app's widget window. While
+    // any window is modal, shade-action dispatch suppresses focus-shift
+    // / tiling shortcuts (see handle_action in shade/mod.rs).
+    //
+    // Returns 0 on success, -1 if the app has no widget window yet /
+    // cap denied.
+    linker.func_wrap("env", "npk_window_set_modal",
+        |caller: Caller<'_, HostState>, modal: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 { return -1; }
+            let ok = crate::shade::with_compositor(|comp|
+                comp.set_modal(crate::shade::WindowId(wid), modal != 0)
+            ).unwrap_or(false);
+            if ok { 0 } else { -1 }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 

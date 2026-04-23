@@ -355,17 +355,17 @@ pub fn request_render() {
 pub fn handle_action(action: input::ShadeAction) {
     use input::ShadeAction;
 
-    // Modal gate: while a widget overlay (drun, future launchers) is
-    // open, suppress every action that would steal focus or reshape
-    // the grid underneath. CloseWindow and LaunchDrun stay allowed so
-    // the user can still dismiss / re-focus the overlay. Everything
-    // else is swallowed — the arrow key either stays with the widget
-    // app (via the widget-focused input branch) or does nothing.
-    let overlay_open = with_compositor(|c| c.has_widget_overlay()).unwrap_or(false);
-    if overlay_open {
+    // Modal gate: while ANY window is marked modal (set via
+    // `npk_window_set_modal` from the app), suppress every action that
+    // would steal focus or reshape the grid underneath. CloseWindow,
+    // SpawnLauncher, and Lock stay allowed so the user can still
+    // dismiss / relaunch the overlay. Kernel knows nothing about which
+    // app set itself modal — the flag is per-window.
+    let modal_open = with_compositor(|c| c.has_modal_window()).unwrap_or(false);
+    if modal_open {
         match action {
             ShadeAction::CloseWindow
-            | ShadeAction::LaunchDrun
+            | ShadeAction::SpawnLauncher
             | ShadeAction::Lock => {}
             _ => return,
         }
@@ -503,33 +503,61 @@ pub fn handle_action(action: input::ShadeAction) {
         ShadeAction::Lock => {
             // Lock handled by intent loop
         }
-        ShadeAction::LaunchDrun => {
-            launch_drun();
+        ShadeAction::SpawnLauncher => {
+            spawn_launcher();
         }
     }
 }
 
-/// Load `sys/wasm/drun` from npkFS, create a widget window, and spawn
-/// the module as a widget-kind WASM app. Focus transfers to drun.
+/// Spawn the configured launcher module as a widget app.
 ///
-/// No-ops silently if the module isn't installed — a user has to
-/// `install drun` once before Mod+D works.
-fn launch_drun() {
-    // Already open? Focus it and return instead of spawning a second.
-    if let Some(existing) = with_compositor(|comp| {
+/// Module name is read from `sys/config/launcher` (single line, e.g.
+/// `drun`). When the file is missing or unreadable we fall back to
+/// `drun` so a fresh install still has a working Mod+D out of the box.
+///
+/// The kernel knows nothing else about the module — overlay size,
+/// modal behaviour, and UI are entirely the module's responsibility
+/// (see `npk_window_set_overlay` / `npk_window_set_modal`).
+fn spawn_launcher() {
+    const DEFAULT_LAUNCHER: &str = "drun";
+
+    // Resolve the configured name. Limit to 64 bytes to prevent
+    // surprises from a giant config file.
+    let name: alloc::string::String = match crate::npkfs::fetch("sys/config/launcher") {
+        Ok((bytes, _)) => {
+            let raw = core::str::from_utf8(&bytes).unwrap_or("").trim();
+            let cleaned: alloc::string::String = raw
+                .chars()
+                .take_while(|c| !c.is_control())
+                .take(64)
+                .collect();
+            if cleaned.is_empty() || cleaned.contains('/') || cleaned.contains("..") {
+                alloc::string::String::from(DEFAULT_LAUNCHER)
+            } else {
+                cleaned
+            }
+        }
+        Err(_) => alloc::string::String::from(DEFAULT_LAUNCHER),
+    };
+
+    // Already running? Re-focus instead of spawning a second instance.
+    // Window title matches the module name, set by the spawn path.
+    let already_open = with_compositor(|comp| {
         comp.windows.iter()
-            .find(|w| w.kind == window::WindowKind::Widget && w.title == "drun")
+            .find(|w| w.kind == window::WindowKind::Widget && w.title == name)
             .map(|w| w.id)
-    }).flatten() {
-        with_compositor(|comp| comp.focus_window(existing));
+    }).flatten();
+    if let Some(id) = already_open {
+        with_compositor(|comp| comp.focus_window(id));
         render_frame();
         return;
     }
 
-    let (bytes, _hash) = match crate::npkfs::fetch("sys/wasm/drun") {
+    let path = alloc::format!("sys/wasm/{}", name);
+    let (bytes, _hash) = match crate::npkfs::fetch(&path) {
         Ok(v) => v,
         Err(_) => {
-            crate::kprintln!("[npk] drun: not installed — run `install drun` first");
+            crate::kprintln!("[npk] launcher: '{}' not installed", name);
             return;
         }
     };
@@ -541,27 +569,15 @@ fn launch_drun() {
         Some(600_000),
     ) {
         Ok(id) => id,
-        Err(e) => { crate::kprintln!("[npk] drun: cap delegation failed: {}", e); return; }
+        Err(e) => { crate::kprintln!("[npk] launcher: cap delegation failed: {}", e); return; }
     };
 
-    // Centred overlay — 520 × 420 logical px. Large enough for title +
-    // module list + footer on typical 1080p/4K displays, small enough
-    // to look like a launcher (rofi / dmenu style) rather than a tile.
-    let widget_wid = match with_compositor(|comp| {
-        let id = comp.create_widget_overlay("drun", 520, 420);
-        comp.focus_window(id);
-        id.0
-    }) {
-        Some(v) => v,
-        None => { crate::kprintln!("[npk] drun: compositor unavailable"); return; }
-    };
-
-    if !crate::wasm::spawn_widget_app(bytes.to_vec(), module_cap, "drun", widget_wid) {
-        crate::kprintln!("[npk] drun: spawn failed");
-        // Clean up the orphan window we just created.
-        with_compositor(|comp| comp.close_window(window::WindowId(widget_wid)));
+    // Spawn with widget_wid = 0 — the module itself decides whether
+    // to be an overlay and modal. Window is created on its first
+    // scene_commit (or npk_window_set_overlay call).
+    if !crate::wasm::spawn_widget_app(bytes.to_vec(), module_cap, &name, 0) {
+        crate::kprintln!("[npk] launcher: spawn failed for '{}'", name);
     }
-    render_frame();
 }
 
 /// Fast re-render of just the current input line (for live typing feedback).

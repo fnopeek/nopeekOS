@@ -65,6 +65,13 @@ pub struct Window {
     pub pid: u32,
     /// Content kind — Terminal (classic loop) or Widget (Phase 10 GUI).
     pub kind: WindowKind,
+    /// Overlay window: skipped by retile, keeps its own geometry,
+    /// rendered on top. Set by the app via `npk_window_set_overlay`.
+    pub is_overlay: bool,
+    /// Modal window: while this window is on the active workspace,
+    /// shade-actions that would shift focus or reshape the grid are
+    /// suppressed. Set by the app via `npk_window_set_modal`.
+    pub modal: bool,
 }
 
 #[allow(dead_code)]
@@ -89,6 +96,8 @@ impl Window {
             resize_h: 0,
             pid: 0,
             kind: WindowKind::Terminal,
+            is_overlay: false,
+            modal: false,
         }
     }
 

@@ -199,47 +199,59 @@ impl Compositor {
         id
     }
 
-    /// Create a widget-kind overlay window — floating, centred on screen,
-    /// fixed size, never part of the tiling grid. Used for modal
-    /// launchers (drun) and similar transient UI.
+    /// Reconfigure an existing window as a centred overlay: floating
+    /// state, caller-chosen size, clamped to screen bounds. Used by the
+    /// `npk_window_set_overlay` host fn — the compositor stays ignorant
+    /// of which app (drun, future launchers, …) requested the change.
     ///
-    /// Caller is expected to `focus_window(id)` afterwards so keys route
-    /// into the widget's event queue.
-    pub fn create_widget_overlay(&mut self, title: &str, w: u32, h: u32) -> WindowId {
-        let id = WindowId(self.next_id);
-        self.next_id += 1;
+    /// Does not touch focus. Caller decides whether to focus the window
+    /// afterwards.
+    pub fn set_overlay(&mut self, id: WindowId, w: u32, h: u32) -> bool {
+        let screen_w = self.screen_w;
+        let screen_h = self.screen_h;
+        let ow = w.min(screen_w.saturating_sub(80)).max(120);
+        let oh = h.min(screen_h.saturating_sub(80)).max(80);
+        let ox = screen_w.saturating_sub(ow) / 2;
+        let oy = screen_h.saturating_sub(oh) / 2;
 
-        // Clamp requested size to a sensible fraction of the screen so
-        // tiny screens still get a legible overlay.
-        let ow = w.min(self.screen_w.saturating_sub(80)).max(120);
-        let oh = h.min(self.screen_h.saturating_sub(80)).max(80);
-        let ox = self.screen_w.saturating_sub(ow) / 2;
-        let oy = self.screen_h.saturating_sub(oh) / 2;
+        let changed = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.state = crate::shade::window::WindowState::Floating;
+            win.is_overlay = true;
+            win.x = ox;
+            win.y = oy;
+            win.width = ow;
+            win.height = oh;
+            win.dirty = true;
+            true
+        } else {
+            false
+        };
 
-        let mut win = Window::new(id, title, ox, oy, ow, oh);
-        win.workspace = self.active_workspace;
-        win.terminal_idx = 255;
-        win.kind = crate::shade::window::WindowKind::Widget;
-        win.state = crate::shade::window::WindowState::Floating;
-        win.pid = 0;
-
-        self.windows.push(win);
-        self.z_order.insert(0, id);
-        // No retile — floating overlays keep their own geometry. Other
-        // tiled windows stay where they are.
-        self.needs_full_redraw = true;
-
-        id
+        if changed {
+            // Retile so tiled windows reclaim any space the window used
+            // to occupy (if it was previously tiled).
+            self.retile();
+            self.needs_full_redraw = true;
+        }
+        changed
     }
 
-    /// True if at least one widget-kind overlay window (Floating state)
-    /// exists on the active workspace. Used by focus/input paths to
-    /// suppress shortcuts that would otherwise steal focus while a
-    /// modal launcher is open.
-    pub fn has_widget_overlay(&self) -> bool {
+    /// Toggle the `modal` flag on a window.
+    pub fn set_modal(&mut self, id: WindowId, modal: bool) -> bool {
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.modal = modal;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// True iff any visible window on the active workspace is modal.
+    /// Used by shade-action dispatch to lock out focus-shift shortcuts
+    /// while modal UI is on-screen.
+    pub fn has_modal_window(&self) -> bool {
         self.windows.iter().any(|w|
-            w.kind == crate::shade::window::WindowKind::Widget
-            && w.state == crate::shade::window::WindowState::Floating
+            w.modal
             && w.workspace == self.active_workspace
             && w.visible)
     }
@@ -345,7 +357,8 @@ impl Compositor {
         let tiled: Vec<WindowId> = self.windows.iter()
             .filter(|w| w.workspace == self.active_workspace
                      && w.state == WindowState::Tiled
-                     && w.visible)
+                     && w.visible
+                     && !w.is_overlay)
             .map(|w| w.id)
             .collect();
 
