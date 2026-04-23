@@ -485,6 +485,30 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_log_serial(ptr, len) — write directly to the serial port,
+    // bypassing the shade-terminal write path used by kprintln.
+    //
+    // Needed by widget-only apps (drun) that run when no terminal
+    // window exists: kprintln locks SERIAL *and* routes a copy through
+    // `shade::terminal::write`, which can stall during early boot or
+    // when the active-terminal slot has no backing buffer. Direct
+    // serial lives inside the same SERIAL mutex but skips the
+    // terminal-side work, so it is safe to call from a worker core
+    // regardless of shade state.
+    linker.func_wrap("env", "npk_log_serial",
+        |caller: Caller<'_, HostState>, ptr: i32, len: i32| {
+            if let Some(s) = read_wasm_str(&caller, ptr, len) {
+                let serial = crate::drivers::serial::SERIAL.lock();
+                for byte in s.bytes() {
+                    if byte == b'\n' { serial.write_byte(b'\r'); }
+                    serial.write_byte(byte);
+                }
+                serial.write_byte(b'\r');
+                serial.write_byte(b'\n');
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_fetch(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1
     linker.func_wrap("env", "npk_fetch",
         |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
@@ -702,12 +726,16 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_spawn_module(name_ptr, name_len) -> i32
-    // Launch `sys/wasm/<name>` as a widget-kind WASM app. Creates and
-    // focuses a new widget window, spawns the module on a worker core.
-    // Caller stays alive — drun typically calls this then npk_close_widget.
+    // Launch `sys/wasm/<name>` in a fresh terminal window and focus it.
+    //
+    // Modelled on `Mod+Enter` + `run <name>` — the user-expected flow
+    // when drun picks a module. Terminal-kind apps (top, debug) print
+    // into the new loop's terminal; widget-kind apps can convert their
+    // window via `npk_window_set_overlay` from `_start`.
     //
     //   0  → spawn accepted
-    //   -1 → cap denied / bad args / module not found / spawn failed
+    //   -1 → cap denied / bad args / module not found / compositor
+    //        unavailable (no free terminal slot)
     linker.func_wrap("env", "npk_spawn_module",
         |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32| -> i32 {
             let cap_id = caller.data().cap_id;
@@ -752,22 +780,30 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Err(_) => return -1,
             };
 
-            // Widget app: new window, focus it, spawn on worker with
-            // the window id pre-populated so its first scene_commit
-            // targets the right slot.
-            let widget_wid = match crate::shade::with_compositor(|comp| {
-                let id = comp.create_widget_window(&name);
+            // Create a new terminal-kind window with its own terminal
+            // buffer and focus it. The widget-kind launcher that called
+            // us then closes itself (`npk_close_widget`), leaving the
+            // new loop + running app on screen.
+            let spawned = crate::shade::with_compositor(|comp| {
+                let id = comp.create_window(&name, 0, 0, 800, 600)?;
                 comp.focus_window(id);
-                id.0
-            }) {
+                let term_idx = comp.windows.iter()
+                    .find(|w| w.id == id)
+                    .map(|w| w.terminal_idx)?;
+                Some((id, term_idx))
+            }).flatten();
+
+            let (win_id, term_idx) = match spawned {
                 Some(v) => v,
                 None => return -1,
             };
 
-            if !spawn_widget_app(bytes.to_vec(), module_cap, &name, widget_wid) {
-                crate::shade::with_compositor(|comp| {
-                    comp.close_window(crate::shade::WindowId(widget_wid));
-                });
+            // Fresh session prompt so the terminal isn't stuck on the
+            // caller's old prompt state when the app exits.
+            crate::intent::reset_session_prompt(term_idx);
+
+            if !spawn_on_worker(bytes.to_vec(), module_cap, term_idx, &name) {
+                crate::shade::with_compositor(|comp| comp.close_window(win_id));
                 return -1;
             }
             crate::shade::request_render();
