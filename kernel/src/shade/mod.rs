@@ -354,6 +354,23 @@ pub fn request_render() {
 /// Process a shade action (called from intent loop).
 pub fn handle_action(action: input::ShadeAction) {
     use input::ShadeAction;
+
+    // Modal gate: while a widget overlay (drun, future launchers) is
+    // open, suppress every action that would steal focus or reshape
+    // the grid underneath. CloseWindow and LaunchDrun stay allowed so
+    // the user can still dismiss / re-focus the overlay. Everything
+    // else is swallowed — the arrow key either stays with the widget
+    // app (via the widget-focused input branch) or does nothing.
+    let overlay_open = with_compositor(|c| c.has_widget_overlay()).unwrap_or(false);
+    if overlay_open {
+        match action {
+            ShadeAction::CloseWindow
+            | ShadeAction::LaunchDrun
+            | ShadeAction::Lock => {}
+            _ => return,
+        }
+    }
+
     match action {
         ShadeAction::NewWindow => {
             let created = with_compositor(|comp| {
@@ -527,8 +544,11 @@ fn launch_drun() {
         Err(e) => { crate::kprintln!("[npk] drun: cap delegation failed: {}", e); return; }
     };
 
+    // Centred overlay — 520 × 420 logical px. Large enough for title +
+    // module list + footer on typical 1080p/4K displays, small enough
+    // to look like a launcher (rofi / dmenu style) rather than a tile.
     let widget_wid = match with_compositor(|comp| {
-        let id = comp.create_widget_window("drun");
+        let id = comp.create_widget_overlay("drun", 520, 420);
         comp.focus_window(id);
         id.0
     }) {
