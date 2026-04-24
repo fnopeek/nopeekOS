@@ -277,24 +277,26 @@ fn put_pixel_blended(t: &mut RasterTarget, x: i32, y: i32, color: u32, alpha: u8
     t.pixels[base] = blend_over(dst, color, alpha);
 }
 
-// Coverage of a pixel centered `(dx,dy)` away from the arc center, for a
-// circle of radius `r`. Integer-only via squared distance + 3-band
-// linear interp in dsq-space — visually indistinguishable from true
-// sqrt-based AA at the radii drun uses (≤ 16 px).
+// 4x4 subpixel coverage of a pixel centred `(dx,dy)` away from the arc
+// center, for a circle of radius `r`. Matches the Bresenham-free AA in
+// gui/render.rs::fill_rounded_rect_blend so chrome + widget rounded
+// rects sample identically at the same radius.
 fn corner_coverage(dx: i32, dy: i32, r: i32) -> u8 {
-    let adx = dx.unsigned_abs() as i32;
-    let ady = dy.unsigned_abs() as i32;
-    let dsq = adx * adx + ady * ady;
-    let r_in  = (r - 1).max(0);
-    let r_in_sq  = r_in * r_in;
-    let r_out_sq = (r + 1) * (r + 1);
-    if dsq <= r_in_sq { 255 }
-    else if dsq >= r_out_sq { 0 }
-    else {
-        let span = (r_out_sq - r_in_sq).max(1);
-        let t = 255 * (r_out_sq - dsq) / span;
-        t.clamp(0, 255) as u8
+    let base_dx = dx * 4;
+    let base_dy = dy * 4;
+    let r_scaled = r * 4;
+    let r2 = r_scaled * r_scaled;
+    let mut covered = 0u32;
+    for sy in 0..4 {
+        let sdy = base_dy + sy - 2;
+        for sx in 0..4 {
+            let sdx = base_dx + sx - 2;
+            if sdx * sdx + sdy * sdy <= r2 {
+                covered += 1;
+            }
+        }
     }
+    (covered * 255 / 16) as u8
 }
 
 fn fill_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) {

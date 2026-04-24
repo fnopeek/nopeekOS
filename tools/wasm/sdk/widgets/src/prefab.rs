@@ -16,7 +16,7 @@ use crate::style::{Padding, Radius, Spacing};
 pub fn panel(children: Vec<Widget>) -> Widget {
     Widget::Column {
         children,
-        spacing: Spacing::Sm.as_u16(),
+        spacing: Spacing::Md.as_u16(),
         align:   Align::Stretch,
         modifiers: vec![],
     }
@@ -47,6 +47,9 @@ pub fn searchbar(query: &str, placeholder: &str, trailing: Option<Widget>) -> Wi
     }
 }
 
+// Selected-row padding is generous so the accent fill has breathing
+// room around the text. list_row itself uses Md; the generous reading
+// means Lg for the row container overall.
 pub fn list_row(
     icon: IconId,
     title: &str,
@@ -56,7 +59,7 @@ pub fn list_row(
     on_hover: Option<ActionId>,
 ) -> Widget {
     let mut row_mods: Vec<Modifier> = Vec::with_capacity(5);
-    row_mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    row_mods.push(Modifier::Padding(Padding::Md.as_u16()));
     if let Some(id) = on_click { row_mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { row_mods.push(Modifier::OnHover(id)); }
     if selected {

@@ -49,33 +49,58 @@ pub fn resolve(token: Token) -> u32 {
 fn from_live_theme(token: Token) -> Option<u32> {
     let surface = crate::theme::bg_color() | 0xFF00_0000;
     let accent  = crate::gui::background::accent_color() | 0xFF00_0000;
-    // Shade's window chrome uses border_gradient() start when focused;
-    // matching Token::Border to that colour keeps in-widget dividers
-    // visually connected to the outer frame.
     let border  = (crate::theme::border_gradient().0) | 0xFF00_0000;
+
+    let surface_light = luminance(surface) > 128;
+    let accent_light  = luminance(accent) > 128;
+    let (on_surface, on_surface_muted) = if surface_light {
+        (0xFF1A1A20u32, 0xFF505060u32)
+    } else {
+        (0xFFE0E0E8, 0xFF8A8A96)
+    };
+    let on_accent = if accent_light { 0xFF1A1A20 } else { 0xFFFFFFFF };
 
     Some(match token {
         Token::Surface         => surface,
-        Token::SurfaceElevated => lighten(surface, 0x10),
-        Token::SurfaceMuted    => lighten(surface, 0x06),
+        Token::SurfaceElevated => if surface_light { darken(surface, 0x0A) } else { lighten(surface, 0x10) },
+        Token::SurfaceMuted    => if surface_light { darken(surface, 0x04) } else { lighten(surface, 0x06) },
 
         Token::Accent          => accent,
-        Token::AccentMuted     => darken(accent, 0x20),
+        Token::AccentMuted     => blend(surface, accent, 36),
 
         Token::Border          => border,
 
-        // Text / semantic tokens keep their hardcoded values — the
-        // extracted palette doesn't reliably give readable contrast
-        // pairs for body text, so stay with the proven defaults.
-        Token::OnSurface       => 0xFFE0E0E8,
-        Token::OnSurfaceMuted  => 0xFF8A8A96,
-        Token::OnAccent        => 0xFFFFFFFF,
+        Token::OnSurface       => on_surface,
+        Token::OnSurfaceMuted  => on_surface_muted,
+        Token::OnAccent        => on_accent,
         Token::Success         => 0xFF4CAF50,
         Token::Warning         => 0xFFFFB300,
         Token::Danger          => 0xFFE74C3C,
 
         _ => return None,
     })
+}
+
+fn luminance(c: u32) -> u32 {
+    let r = (c >> 16) & 0xFF;
+    let g = (c >> 8) & 0xFF;
+    let b = c & 0xFF;
+    (r * 299 + g * 587 + b * 114) / 1000
+}
+
+fn blend(base: u32, top: u32, weight: u32) -> u32 {
+    let w = weight.min(255);
+    let inv = 255 - w;
+    let br = (base >> 16) & 0xFF;
+    let bg = (base >> 8)  & 0xFF;
+    let bb =  base        & 0xFF;
+    let tr = (top  >> 16) & 0xFF;
+    let tg = (top  >> 8)  & 0xFF;
+    let tb =  top         & 0xFF;
+    let r = (br * inv + tr * w) / 255;
+    let g = (bg * inv + tg * w) / 255;
+    let b = (bb * inv + tb * w) / 255;
+    0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
 /// Hardcoded fallback palette — applied when no theme is active
