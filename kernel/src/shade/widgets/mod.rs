@@ -409,6 +409,33 @@ fn rasterize_to_buffer(
 /// widget-kind window's content rect changes (resize / retile).
 /// Uses the cached tree + re-runs layout so we don't need the app
 /// to commit again. Returns false if no scene exists for that id.
+/// Re-rasterize every live widget scene without changing its geometry.
+/// Called after theme-affecting events (wallpaper change → new accent /
+/// surface palette) so cached pixels pick up the fresh token colours.
+pub fn refresh_all_scenes() {
+    let keys: alloc::vec::Vec<u32> = SCENES.lock().keys().copied().collect();
+    for wid in keys {
+        let (tree, rect) = match SCENES.lock().get(&wid) {
+            Some(s) => (s.tree.clone(), abi::Rect {
+                x: s.origin_x, y: s.origin_y, w: s.width, h: s.height,
+            }),
+            None => continue,
+        };
+        let new_layout = layout::layout(&tree, rect);
+        let new_pixels = rasterize_to_buffer(&tree, &new_layout, rect.x, rect.y, rect.w, rect.h);
+        if let Some(scene) = SCENES.lock().get_mut(&wid) {
+            scene.pixels      = new_pixels;
+            scene.layout_tree = new_layout;
+        }
+        crate::shade::with_compositor(|c| {
+            if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
+                win.dirty = true;
+            }
+        });
+    }
+    crate::shade::request_render();
+}
+
 pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h: u32) -> bool {
     let mut guard = SCENES.lock();
     let scene = match guard.get_mut(&window_id) {

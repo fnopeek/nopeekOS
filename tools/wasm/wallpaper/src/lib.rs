@@ -116,9 +116,258 @@ pub extern "C" fn _start() {
     };
 
     if let Some(spec) = target.strip_prefix("@demos:") {
-        run_generate(spec);
+        run_demos(spec);
+    } else if let Some(spec) = target.strip_prefix("@solid:") {
+        run_solid(spec);
+    } else if let Some(spec) = target.strip_prefix("@gradient2:") {
+        run_gradient2(spec);
+    } else if let Some(spec) = target.strip_prefix("@gradient4:") {
+        run_gradient4(spec);
+    } else if let Some(spec) = target.strip_prefix("@pattern:") {
+        run_pattern(spec);
     } else {
         run_decode(target);
+    }
+}
+
+// --- Shared helpers -----------------------------------------------------
+
+/// Parse "<W>x<H>" from a slice.
+fn parse_wh(dims: &str) -> Option<(u32, u32)> {
+    let (w_s, h_s) = dims.split_once('x')?;
+    let w: u32 = w_s.parse().ok()?;
+    let h: u32 = h_s.parse().ok()?;
+    if w < 16 || w > 7680 || h < 16 || h > 4320 { return None; }
+    Some((w, h))
+}
+
+fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 { return None; }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Allocate a BGRA buffer with the 8-byte (W LE + H LE) header the
+/// kernel's npk_set_wallpaper consumes.
+fn alloc_bgra(w: u32, h: u32) -> Vec<u8> {
+    let pixel_count = (w as usize) * (h as usize);
+    let mut data = vec![0u8; 8 + pixel_count * 4];
+    data[0..4].copy_from_slice(&w.to_le_bytes());
+    data[4..8].copy_from_slice(&h.to_le_bytes());
+    data
+}
+
+fn store_and_apply(path: &str, data: &[u8], w: u32, h: u32) {
+    if !store(path, data) {
+        log("[wallpaper] store failed");
+        return;
+    }
+    if set_wallpaper(&data[8..], w, h) {
+        log("[wallpaper] applied");
+    } else {
+        log("[wallpaper] set_wallpaper failed");
+    }
+}
+
+// --- Solid color --------------------------------------------------------
+// @solid:<hex>:<W>x<H>:<dir>
+
+fn run_solid(spec: &str) {
+    let parts: Vec<&str> = spec.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        log("[wallpaper] solid: need <hex>:<W>x<H>:<dir>");
+        return;
+    }
+    let (r, g, b) = match parse_hex(parts[0]) {
+        Some(c) => c,
+        None => { log("[wallpaper] solid: bad hex"); return; }
+    };
+    let (w, h) = match parse_wh(parts[1]) {
+        Some(d) => d,
+        None => { log("[wallpaper] solid: bad WxH"); return; }
+    };
+    let dir = parts[2];
+
+    let mut data = alloc_bgra(w, h);
+    let pixels = &mut data[8..];
+    for i in 0..(w as usize * h as usize) {
+        pixels[i * 4]     = b;
+        pixels[i * 4 + 1] = g;
+        pixels[i * 4 + 2] = r;
+        pixels[i * 4 + 3] = 255;
+    }
+
+    let path = format!("{}/solid-{:02x}{:02x}{:02x}", dir, r, g, b);
+    store_and_apply(&path, &data, w, h);
+}
+
+// --- 2-color vertical gradient -----------------------------------------
+// @gradient2:<top>:<bot>:<W>x<H>:<dir>
+
+fn run_gradient2(spec: &str) {
+    let parts: Vec<&str> = spec.splitn(4, ':').collect();
+    if parts.len() != 4 {
+        log("[wallpaper] gradient2: need <top>:<bot>:<W>x<H>:<dir>");
+        return;
+    }
+    let top = match parse_hex(parts[0]) { Some(c) => c, None => { log("[wallpaper] bad top"); return; } };
+    let bot = match parse_hex(parts[1]) { Some(c) => c, None => { log("[wallpaper] bad bot"); return; } };
+    let (w, h) = match parse_wh(parts[2]) { Some(d) => d, None => { log("[wallpaper] bad WxH"); return; } };
+    let dir = parts[3];
+
+    let mut data = alloc_bgra(w, h);
+    fill_gradient4(&mut data[8..], w, h, top, top, bot, bot);
+    let path = format!("{}/grad2-{:02x}{:02x}{:02x}-{:02x}{:02x}{:02x}",
+        dir, top.0, top.1, top.2, bot.0, bot.1, bot.2);
+    store_and_apply(&path, &data, w, h);
+}
+
+// --- 4-corner bilinear gradient ----------------------------------------
+// @gradient4:<tl>:<tr>:<bl>:<br>:<W>x<H>:<dir>
+
+fn run_gradient4(spec: &str) {
+    let parts: Vec<&str> = spec.splitn(6, ':').collect();
+    if parts.len() != 6 {
+        log("[wallpaper] gradient4: need <tl>:<tr>:<bl>:<br>:<W>x<H>:<dir>");
+        return;
+    }
+    let tl = match parse_hex(parts[0]) { Some(c) => c, None => { log("[wallpaper] bad tl"); return; } };
+    let tr = match parse_hex(parts[1]) { Some(c) => c, None => { log("[wallpaper] bad tr"); return; } };
+    let bl = match parse_hex(parts[2]) { Some(c) => c, None => { log("[wallpaper] bad bl"); return; } };
+    let br = match parse_hex(parts[3]) { Some(c) => c, None => { log("[wallpaper] bad br"); return; } };
+    let (w, h) = match parse_wh(parts[4]) { Some(d) => d, None => { log("[wallpaper] bad WxH"); return; } };
+    let dir = parts[5];
+
+    let mut data = alloc_bgra(w, h);
+    fill_gradient4(&mut data[8..], w, h, tl, tr, bl, br);
+    let path = format!("{}/grad4-{:02x}{:02x}{:02x}-{:02x}{:02x}{:02x}",
+        dir, tl.0, tl.1, tl.2, br.0, br.1, br.2);
+    store_and_apply(&path, &data, w, h);
+}
+
+fn fill_gradient4(pixels: &mut [u8], w: u32, h: u32,
+                  tl: (u8,u8,u8), tr: (u8,u8,u8),
+                  bl: (u8,u8,u8), br: (u8,u8,u8)) {
+    for y in 0..h {
+        let fy = y * 1000 / h.max(1);
+        for x in 0..w {
+            let fx = x * 1000 / w.max(1);
+            let r = bilinear(tl.0, tr.0, bl.0, br.0, fx, fy);
+            let g = bilinear(tl.1, tr.1, bl.1, br.1, fx, fy);
+            let b = bilinear(tl.2, tr.2, bl.2, br.2, fx, fy);
+            let off = ((y * w + x) as usize) * 4;
+            pixels[off]     = b;
+            pixels[off + 1] = g;
+            pixels[off + 2] = r;
+            pixels[off + 3] = 255;
+        }
+    }
+}
+
+// --- Patterns ----------------------------------------------------------
+// @pattern:<name>:<fg>:<bg>:<W>x<H>:<dir>
+// names: dots, stripes, checker, grid, noise
+
+fn run_pattern(spec: &str) {
+    let parts: Vec<&str> = spec.splitn(5, ':').collect();
+    if parts.len() != 5 {
+        log("[wallpaper] pattern: need <name>:<fg>:<bg>:<W>x<H>:<dir>");
+        return;
+    }
+    let name = parts[0];
+    let fg = match parse_hex(parts[1]) { Some(c) => c, None => { log("[wallpaper] bad fg"); return; } };
+    let bg = match parse_hex(parts[2]) { Some(c) => c, None => { log("[wallpaper] bad bg"); return; } };
+    let (w, h) = match parse_wh(parts[3]) { Some(d) => d, None => { log("[wallpaper] bad WxH"); return; } };
+    let dir = parts[4];
+
+    let mut data = alloc_bgra(w, h);
+    let pixels = &mut data[8..];
+    match name {
+        "dots"    => fill_dots(pixels, w, h, fg, bg),
+        "stripes" => fill_stripes(pixels, w, h, fg, bg),
+        "checker" => fill_checker(pixels, w, h, fg, bg),
+        "grid"    => fill_grid(pixels, w, h, fg, bg),
+        "noise"   => fill_noise(pixels, w, h, fg, bg),
+        _ => { log("[wallpaper] unknown pattern"); return; }
+    }
+
+    let path = format!("{}/pat-{}-{:02x}{:02x}{:02x}", dir, name, fg.0, fg.1, fg.2);
+    store_and_apply(&path, &data, w, h);
+}
+
+fn put_bgra(pixels: &mut [u8], off: usize, c: (u8, u8, u8)) {
+    pixels[off]     = c.2;
+    pixels[off + 1] = c.1;
+    pixels[off + 2] = c.0;
+    pixels[off + 3] = 255;
+}
+
+fn fill_dots(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8)) {
+    // 32px lattice, 3px radius dots.
+    for y in 0..h {
+        for x in 0..w {
+            let off = ((y * w + x) as usize) * 4;
+            let dx = (x % 32) as i32 - 16;
+            let dy = (y % 32) as i32 - 16;
+            let dot = dx * dx + dy * dy <= 9;
+            put_bgra(pixels, off, if dot { fg } else { bg });
+        }
+    }
+}
+
+fn fill_stripes(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8)) {
+    // Diagonal 24px bands.
+    for y in 0..h {
+        for x in 0..w {
+            let off = ((y * w + x) as usize) * 4;
+            let on = ((x + y) / 24) % 2 == 0;
+            put_bgra(pixels, off, if on { fg } else { bg });
+        }
+    }
+}
+
+fn fill_checker(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8)) {
+    // 48px tiles.
+    for y in 0..h {
+        for x in 0..w {
+            let off = ((y * w + x) as usize) * 4;
+            let on = ((x / 48) + (y / 48)) % 2 == 0;
+            put_bgra(pixels, off, if on { fg } else { bg });
+        }
+    }
+}
+
+fn fill_grid(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8)) {
+    // 1px lines on a 32px grid.
+    for y in 0..h {
+        for x in 0..w {
+            let off = ((y * w + x) as usize) * 4;
+            let on = (x % 32 == 0) || (y % 32 == 0);
+            put_bgra(pixels, off, if on { fg } else { bg });
+        }
+    }
+}
+
+fn fill_noise(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8)) {
+    // Hash each pixel coord to a byte, mix fg/bg by that.
+    for y in 0..h {
+        for x in 0..w {
+            let off = ((y * w + x) as usize) * 4;
+            let mut n = x.wrapping_mul(374761393).wrapping_add(y.wrapping_mul(668265263));
+            n ^= n >> 13; n = n.wrapping_mul(1274126177); n ^= n >> 16;
+            let t = (n & 0xFF) as u32;
+            let inv = 255 - t;
+            let r = (fg.0 as u32 * t + bg.0 as u32 * inv) / 255;
+            let g = (fg.1 as u32 * t + bg.1 as u32 * inv) / 255;
+            let b = (fg.2 as u32 * t + bg.2 as u32 * inv) / 255;
+            pixels[off]     = b as u8;
+            pixels[off + 1] = g as u8;
+            pixels[off + 2] = r as u8;
+            pixels[off + 3] = 255;
+        }
     }
 }
 
@@ -144,7 +393,7 @@ fn run_decode(filename: &str) {
     }
 }
 
-// --- Generate mode (4 gradient themes into wp_dir) ---
+// --- Legacy demo mode (4 gradient themes into wp_dir) ---
 
 /// Corner colors for one theme: top-left, top-right, bottom-left,
 /// bottom-right (R, G, B).
@@ -187,7 +436,7 @@ const THEMES: &[Theme] = &[
     },
 ];
 
-fn run_generate(spec: &str) {
+fn run_demos(spec: &str) {
     // Parse "<W>x<H>:<wp_dir>"
     let (dims, wp_dir) = match spec.split_once(':') {
         Some(v) => v,
