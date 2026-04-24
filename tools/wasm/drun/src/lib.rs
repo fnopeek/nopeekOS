@@ -20,7 +20,7 @@ unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
     fn npk_list_modules(ptr: i32, max: i32) -> i32;
-    fn npk_app_meta(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_spawn_module(ptr: i32, len: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_window_set_overlay(w: i32, h: i32) -> i32;
@@ -277,33 +277,23 @@ impl Drun {
 
 enum Outcome { Idle, Rerender, Exit }
 
+// Shared fetch buffer for sys/wasm/<name>. 2 MB covers every first-party
+// module including wifi (~1.5 MB). A single buffer is reused per hydrate
+// call — we only need the meta bytes out of it, then the wasm can be
+// discarded before the next fetch.
+const WASM_FETCH_BUF_SIZE: usize = 2 * 1024 * 1024;
+static mut WASM_FETCH_BUF: [u8; WASM_FETCH_BUF_SIZE] = [0; WASM_FETCH_BUF_SIZE];
+
 impl Entry {
     fn hydrate(module_name: &str) -> Self {
-        const META_BUF_SIZE: usize = 512;
-        static mut META_BUF: [u8; META_BUF_SIZE] = [0; META_BUF_SIZE];
-        let buf_ptr = core::ptr::addr_of_mut!(META_BUF) as *mut u8;
-
-        let n = unsafe {
-            npk_app_meta(
-                module_name.as_ptr() as i32,
-                module_name.len() as i32,
-                buf_ptr as i32,
-                META_BUF_SIZE as i32,
-            )
-        };
-
-        if n > 0 {
-            let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-            if let Ok(meta) = app_meta::decode(slice) {
-                return Entry {
-                    module_name:  module_name.to_string(),
-                    display_name: meta.display_name,
-                    description:  meta.description,
-                    icon:         icon_ref_to_id(&meta.icon),
-                };
-            }
+        if let Some(meta) = read_meta_from_module(module_name) {
+            return Entry {
+                module_name:  module_name.to_string(),
+                display_name: meta.display_name,
+                description:  meta.description,
+                icon:         icon_ref_to_id(&meta.icon),
+            };
         }
-
         Entry {
             module_name:  module_name.to_string(),
             display_name: module_name.to_string(),
@@ -316,6 +306,66 @@ impl Entry {
         self.display_name.to_ascii_lowercase().contains(query_lower)
             || self.module_name.to_ascii_lowercase().contains(query_lower)
     }
+}
+
+fn read_meta_from_module(name: &str) -> Option<nopeek_widgets::app_meta::AppMeta> {
+    let path = alloc::format!("sys/wasm/{}", name);
+    let buf_ptr = core::ptr::addr_of_mut!(WASM_FETCH_BUF) as *mut u8;
+    let n = unsafe {
+        npk_fetch(
+            path.as_ptr() as i32,
+            path.len() as i32,
+            buf_ptr as i32,
+            WASM_FETCH_BUF_SIZE as i32,
+        )
+    };
+    if n <= 0 { return None; }
+    let wasm = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
+    let meta_bytes = extract_custom_section(wasm, ".npk.app_meta")?;
+    app_meta::decode(meta_bytes).ok()
+}
+
+fn extract_custom_section<'a>(wasm: &'a [u8], target: &str) -> Option<&'a [u8]> {
+    if wasm.len() < 8 { return None; }
+    if &wasm[0..4] != b"\0asm" { return None; }
+    if &wasm[4..8] != &[0x01, 0x00, 0x00, 0x00] { return None; }
+    let mut cur = &wasm[8..];
+    while !cur.is_empty() {
+        let section_id = cur[0];
+        cur = &cur[1..];
+        let (size, consumed) = read_leb128_u32(cur)?;
+        cur = &cur[consumed..];
+        if size as usize > cur.len() { return None; }
+        let (payload, rest) = cur.split_at(size as usize);
+        cur = rest;
+        if section_id != 0 { continue; }
+        let (name_len, consumed) = match read_leb128_u32(payload) {
+            Some(p) => p,
+            None => continue,
+        };
+        let name_end = consumed + name_len as usize;
+        if name_end > payload.len() { continue; }
+        if &payload[consumed..name_end] == target.as_bytes() {
+            return Some(&payload[name_end..]);
+        }
+    }
+    None
+}
+
+fn read_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
+    let mut result: u32 = 0;
+    let mut shift: u32 = 0;
+    for (i, &b) in buf.iter().enumerate() {
+        if shift >= 32 { return None; }
+        let payload = (b & 0x7F) as u32;
+        if shift == 28 && (payload & !0x0F) != 0 { return None; }
+        result |= payload << shift;
+        if (b & 0x80) == 0 {
+            return Some((result, i + 1));
+        }
+        shift += 7;
+    }
+    None
 }
 
 fn icon_ref_to_id(r: &IconRef) -> IconId {

@@ -39,7 +39,6 @@ mod intent;
 mod config;
 mod vga;
 mod wasm;
-mod wasm_meta;
 mod shell;
 mod setup;
 mod gpu;
@@ -307,11 +306,6 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     // Bootstrap WASM modules (after identity — so they are encrypted at rest)
     intent::bootstrap_wasm();
-
-    // Fill in missing sys/meta/<name> from each module's .npk.app_meta
-    // custom section. OTA upgrades seeded WASM bytes but not meta, so
-    // drun / other launchers need this to render icons + subtitles.
-    intent::install::refresh_app_metas();
 
     // Inter Variable UI font — read from npkFS (seeded by installer), BLAKE3
     // verified, parsed via fontdue. Login screen + terminals use Spleen
