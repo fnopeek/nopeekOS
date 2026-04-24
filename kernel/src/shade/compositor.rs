@@ -199,6 +199,32 @@ impl Compositor {
         id
     }
 
+    /// Convert the Terminal-kind window backing `terminal_idx` into a
+    /// Widget-kind window in place. Keeps id, geometry, z-order, and
+    /// focus, but releases the terminal buffer (255 sentinel) so key
+    /// events flow through the widget event queue instead of the
+    /// terminal session.
+    ///
+    /// Used by widget apps whose spawn path (`npk_spawn_module`) handed
+    /// them a terminal window they never meant to use — avoids the
+    /// "two windows for one app" seam.
+    ///
+    /// Returns the WindowId on success, None if no terminal window
+    /// owns that terminal_idx. Does not touch the session; the worker's
+    /// exit path still cleans it up.
+    pub fn promote_terminal_to_widget(&mut self, terminal_idx: u8) -> Option<WindowId> {
+        let win = self.windows.iter_mut().find(|w| {
+            w.terminal_idx == terminal_idx
+                && w.kind == crate::shade::window::WindowKind::Terminal
+        })?;
+        let id = win.id;
+        win.kind = crate::shade::window::WindowKind::Widget;
+        win.terminal_idx = 255;
+        win.dirty = true;
+        self.needs_full_redraw = true;
+        Some(id)
+    }
+
     /// Reconfigure an existing window as a centred overlay: floating
     /// state, caller-chosen size, clamped to screen bounds. Used by the
     /// `npk_window_set_overlay` host fn — the compositor stays ignorant

@@ -272,14 +272,15 @@ fn render(lf: &Loft) -> Widget {
         ],
     };
 
-    // Toolbar: back / forward / up + breadcrumb.
+    // Toolbar: back / forward / up + breadcrumb. Sizes match atlas
+    // natives (24 / 32) so there's no blurry scaling step at 4K.
     let toolbar = prefab::toolbar(alloc::vec![
-        prefab::icon_button(IconId::ArrowLeft,  18, Some(ActionId(ACT_TOOLBAR_BACK)),    None),
-        prefab::icon_button(IconId::ArrowRight, 18, Some(ActionId(ACT_TOOLBAR_FORWARD)), None),
-        prefab::icon_button(IconId::ArrowUp,    18, Some(ActionId(ACT_TOOLBAR_UP)),      None),
+        prefab::icon_button(IconId::ArrowLeft,  24, Some(ActionId(ACT_TOOLBAR_BACK)),    None),
+        prefab::icon_button(IconId::ArrowRight, 24, Some(ActionId(ACT_TOOLBAR_FORWARD)), None),
+        prefab::icon_button(IconId::ArrowUp,    24, Some(ActionId(ACT_TOOLBAR_UP)),      None),
         breadcrumb_for(&lf.current),
         Widget::Spacer { flex: 1 },
-        prefab::icon_button(IconId::ArrowClockwise, 16, Some(ActionId(ACT_TOOLBAR_REFRESH)), None),
+        prefab::icon_button(IconId::ArrowClockwise, 24, Some(ActionId(ACT_TOOLBAR_REFRESH)), None),
     ]);
 
     // Grid content area.
