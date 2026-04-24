@@ -14,21 +14,6 @@ const MAX_MODULE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_MANIFEST_SIZE: usize = 8192;
 const MAX_SIG_SIZE: usize = 512;
 
-pub const APP_META_SECTION: &str = ".npk.app_meta";
-
-pub fn cache_app_meta(name: &str, wasm_data: &[u8]) {
-    let meta_key = alloc::format!("sys/meta/{}", name);
-    let _ = crate::npkfs::delete(&meta_key);
-
-    let bytes = match crate::wasm_meta::extract_custom_section(wasm_data, APP_META_SECTION) {
-        Some(b) => b,
-        None    => return,
-    };
-
-    if let Err(e) = crate::npkfs::store(&meta_key, bytes, crate::capability::CAP_NULL) {
-        kprintln!("[npk] Warning: failed to cache app meta for {}: {:?}", name, e);
-    }
-}
 
 struct ModuleEntry {
     name: String,
@@ -199,9 +184,6 @@ pub fn intent_install(args: &str) {
     // Store version metadata
     let _ = crate::npkfs::store(&version_key, entry.version.as_bytes(), crate::capability::CAP_NULL);
 
-    // Cache app metadata (icon/display_name/description) from WASM custom section.
-    cache_app_meta(name, &wasm_data);
-
     kprintln!("[npk] ✓ {} v{} installed.", name, entry.version);
 }
 
@@ -291,7 +273,6 @@ pub fn update_all_modules() -> usize {
 
         if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
             let _ = crate::npkfs::store(&version_key, remote_ver.as_bytes(), crate::capability::CAP_NULL);
-            cache_app_meta(&remote.name, &wasm_data);
             kprintln!("OK");
             updated += 1;
         } else {
@@ -300,31 +281,6 @@ pub fn update_all_modules() -> usize {
     }
 
     updated
-}
-
-/// Walk every installed module and cache its `.npk.app_meta` section
-/// into `sys/meta/<name>` if not already present. Idempotent + cheap.
-/// Called once per boot after npkfs mount + master_key setup so users
-/// upgrading via OTA (not a USB fresh-install) still get launcher meta.
-pub fn refresh_app_metas() {
-    let entries = match crate::npkfs::list() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let prefix = "sys/wasm/";
-    for (name, _, _) in &entries {
-        let module_name = match name.strip_prefix(prefix) {
-            Some(s) if !s.is_empty() && !s.contains('/') && !s.ends_with(".version") => s,
-            _ => continue,
-        };
-        let meta_key = alloc::format!("sys/meta/{}", module_name);
-        if crate::npkfs::fetch(&meta_key).is_ok() { continue; }
-        let wasm_bytes = match crate::npkfs::fetch(name) {
-            Ok((b, _)) => b,
-            Err(_) => continue,
-        };
-        cache_app_meta(module_name, &wasm_bytes);
-    }
 }
 
 /// `uninstall <name>` — remove a WASM module.
@@ -337,12 +293,10 @@ pub fn intent_uninstall(args: &str) {
 
     let store_name = alloc::format!("sys/wasm/{}", name);
     let version_key = alloc::format!("sys/wasm/{}.version", name);
-    let meta_key = alloc::format!("sys/meta/{}", name);
 
     match crate::npkfs::delete(&store_name) {
         Ok(()) => {
             let _ = crate::npkfs::delete(&version_key);
-            let _ = crate::npkfs::delete(&meta_key);
             kprintln!("[npk] {} removed.", name);
         }
         Err(_) => kprintln!("[npk] Module '{}' not installed.", name),
