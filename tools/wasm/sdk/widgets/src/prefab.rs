@@ -256,7 +256,7 @@ pub fn nav_row(
 
     Widget::Row {
         children: vec![
-            Widget::Icon { id: icon, size: 18, modifiers: icon_mods },
+            Widget::Icon { id: icon, size: 24, modifiers: icon_mods },
             Widget::Text { content: label.to_string(), style: TextStyle::Body, modifiers: vec![] },
             Widget::Spacer { flex: 1 },
         ],
@@ -287,7 +287,7 @@ pub fn breadcrumb(segments: &[(String, ActionId)]) -> Widget {
         if i > 0 {
             children.push(Widget::Icon {
                 id:        IconId::CaretRight,
-                size:      14,
+                size:      16,
                 modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)],
             });
         }
@@ -334,7 +334,7 @@ pub fn grid_item(
 
     Widget::Column {
         children: vec![
-            Widget::Icon { id: icon, size: 48, modifiers: icon_mods },
+            Widget::Icon { id: icon, size: 64, modifiers: icon_mods },
             Widget::Text {
                 content: label.to_string(),
                 style:   TextStyle::Body,

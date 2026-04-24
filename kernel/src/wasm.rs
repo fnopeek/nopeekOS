@@ -618,12 +618,29 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 mem.data(&caller)[bytes_start..bytes_end].to_vec()
             };
 
-            let prev_window = caller.data().widget_window_id;
+            let mut prev_window = caller.data().widget_window_id;
+
+            // First commit from a module that was spawned as a terminal:
+            // promote that terminal to a widget in place so the app only
+            // owns one window (not a terminal + a widget side-by-side).
+            if prev_window == 0 {
+                let terminal_idx = caller.data().terminal_idx;
+                if terminal_idx != 255 {
+                    if let Some(promoted) = crate::shade::with_compositor(|c|
+                        c.promote_terminal_to_widget(terminal_idx)
+                    ).flatten() {
+                        caller.data_mut().widget_window_id = promoted.0;
+                        caller.data_mut().terminal_idx = 255;
+                        prev_window = promoted.0;
+                    }
+                }
+            }
+
             let result = crate::shade::widgets::scene_commit(&payload, prev_window);
 
             // Positive return = newly allocated window id → store so
             // subsequent commits from this app reuse the same slot.
-            if result > 0 && prev_window == 0 {
+            if result > 0 && caller.data().widget_window_id == 0 {
                 caller.data_mut().widget_window_id = result as u32;
             }
             // Collapse "new-window id" into success for the callee —
@@ -832,17 +849,38 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
             let mut wid = caller.data().widget_window_id;
             if wid == 0 {
-                // Create a widget window up-front so the app can configure
-                // it before its first scene_commit.
-                let title = caller.data().module_name.clone();
-                let new_id = match crate::shade::with_compositor(|comp| {
-                    let id = comp.create_widget_window(
-                        if title.is_empty() { "widget" } else { title.as_str() });
-                    comp.focus_window(id);
-                    id.0
-                }) {
-                    Some(v) => v,
-                    None => return -1,
+                // Prefer promoting the spawning terminal to a widget so
+                // the app owns a single window. Only create a fresh one
+                // if no terminal backed this worker (direct-launch path).
+                let terminal_idx = caller.data().terminal_idx;
+                let promoted = if terminal_idx != 255 {
+                    crate::shade::with_compositor(|c|
+                        c.promote_terminal_to_widget(terminal_idx)
+                    ).flatten()
+                } else {
+                    None
+                };
+
+                let new_id = match promoted {
+                    Some(id) => {
+                        caller.data_mut().terminal_idx = 255;
+                        // Overlay path wants focus on the new widget (drun
+                        // style); promotion does not focus, so fix up.
+                        crate::shade::with_compositor(|comp| comp.focus_window(id));
+                        id.0
+                    }
+                    None => {
+                        let title = caller.data().module_name.clone();
+                        match crate::shade::with_compositor(|comp| {
+                            let id = comp.create_widget_window(
+                                if title.is_empty() { "widget" } else { title.as_str() });
+                            comp.focus_window(id);
+                            id.0
+                        }) {
+                            Some(v) => v,
+                            None => return -1,
+                        }
+                    }
                 };
                 caller.data_mut().widget_window_id = new_id;
                 wid = new_id;
