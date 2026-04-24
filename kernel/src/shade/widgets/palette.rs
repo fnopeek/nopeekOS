@@ -47,18 +47,48 @@ pub fn resolve(token: Token) -> u32 {
 /// Border uses palette[8] (bright variant of bg). Lightness-adjusted
 /// muted / elevated variants are derived via lerp.
 fn from_live_theme(token: Token) -> Option<u32> {
-    let surface = crate::theme::bg_color() | 0xFF00_0000;
-    let accent  = crate::gui::background::accent_color() | 0xFF00_0000;
-    let border  = (crate::theme::border_gradient().0) | 0xFF00_0000;
+    let surface_raw = crate::theme::bg_color() | 0xFF00_0000;
+    let accent_raw  = crate::gui::background::accent_color() | 0xFF00_0000;
 
-    let surface_light = luminance(surface) > 128;
-    let accent_light  = luminance(accent) > 128;
+    let surface = surface_raw;
+    let surface_lum = luminance(surface);
+    let surface_light = surface_lum > 128;
+
+    // If accent luminance is within ~80 of surface, force more contrast
+    // so selected rows / tinted icons stay visible on the wallpaper.
+    let accent_lum = luminance(accent_raw);
+    let accent = if (accent_lum as i32 - surface_lum as i32).abs() < 80 {
+        if surface_light { darken(accent_raw, 0x50) } else { lighten(accent_raw, 0x50) }
+    } else {
+        accent_raw
+    };
+    let accent_adj_lum = luminance(accent);
+
+    // Border: always contrast against surface, regardless of wallpaper
+    // palette (border_gradient can go hell-on-hell otherwise).
+    let border = if surface_light {
+        darken(surface, 0x40)
+    } else {
+        lighten(surface, 0x40)
+    };
+
     let (on_surface, on_surface_muted) = if surface_light {
         (0xFF1A1A20u32, 0xFF505060u32)
     } else {
         (0xFFE0E0E8, 0xFF8A8A96)
     };
-    let on_accent = if accent_light { 0xFF1A1A20 } else { 0xFFFFFFFF };
+    let on_accent = if accent_adj_lum > 128 { 0xFF1A1A20 } else { 0xFFFFFFFF };
+
+    // AccentMuted (the selected-row fill): anchor on a shifted surface
+    // so contrast is guaranteed, then tint towards accent. 14 % over
+    // pure surface was invisible on light backgrounds; this hops the
+    // base in the opposite luminance direction first.
+    let accent_muted_base = if surface_light {
+        darken(surface, 0x1C)
+    } else {
+        lighten(surface, 0x1C)
+    };
+    let accent_muted = blend(accent_muted_base, accent, 64);
 
     Some(match token {
         Token::Surface         => surface,
@@ -66,7 +96,7 @@ fn from_live_theme(token: Token) -> Option<u32> {
         Token::SurfaceMuted    => if surface_light { darken(surface, 0x04) } else { lighten(surface, 0x06) },
 
         Token::Accent          => accent,
-        Token::AccentMuted     => blend(surface, accent, 36),
+        Token::AccentMuted     => accent_muted,
 
         Token::Border          => border,
 
