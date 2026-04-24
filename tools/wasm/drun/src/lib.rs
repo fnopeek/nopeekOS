@@ -363,7 +363,7 @@ fn push_usize(s: &mut String, mut n: usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     unsafe {
-        let _ = npk_window_set_overlay(560, 480);
+        let _ = npk_window_set_overlay(680, 480);
         let _ = npk_window_set_modal(1);
     }
 
