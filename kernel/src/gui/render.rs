@@ -229,11 +229,11 @@ pub fn fill_rounded_rect_blend(shadow: *mut u8, info: &FbInfo,
             if corner_dx > 0 && corner_dy > 0 {
                 // 8x8 subpixel AA — 64 coverage levels, smooth on bright bg.
                 let mut coverage = 0u32;
-                for sy in 0..8u32 {
-                    for sx in 0..8u32 {
-                        let sdx = corner_dx * 8 - sx as i32 - 4;
-                        let sdy = corner_dy * 8 - sy as i32 - 4;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
+                for sy in 0..8i32 {
+                    for sx in 0..8i32 {
+                        let sdx = corner_dx * 16 + 2 * sx - 7;
+                        let sdy = corner_dy * 16 + 2 * sy - 7;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 256 {
                             coverage += 1;
                         }
                     }
@@ -283,11 +283,11 @@ pub fn fill_rounded_rect_gradient(shadow: *mut u8, info: &FbInfo,
 
             if corner_dx > 0 && corner_dy > 0 {
                 let mut coverage = 0u32;
-                for sy in 0..8u32 {
-                    for sx in 0..8u32 {
-                        let sdx = corner_dx * 8 - sx as i32 - 4;
-                        let sdy = corner_dy * 8 - sy as i32 - 4;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
+                for sy in 0..8i32 {
+                    for sx in 0..8i32 {
+                        let sdx = corner_dx * 16 + 2 * sx - 7;
+                        let sdy = corner_dy * 16 + 2 * sy - 7;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 256 {
                             coverage += 1;
                         }
                     }
@@ -353,11 +353,11 @@ pub fn fill_rounded_rect_alpha(buf: *mut u8, info: &FbInfo,
 
             if corner_dx > 0 && corner_dy > 0 {
                 let mut coverage = 0u32;
-                for sy in 0..8u32 {
-                    for sx in 0..8u32 {
-                        let sdx = corner_dx * 8 - sx as i32 - 4;
-                        let sdy = corner_dy * 8 - sy as i32 - 4;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
+                for sy in 0..8i32 {
+                    for sx in 0..8i32 {
+                        let sdx = corner_dx * 16 + 2 * sx - 7;
+                        let sdy = corner_dy * 16 + 2 * sy - 7;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 256 {
                             coverage += 1;
                         }
                     }
@@ -399,11 +399,11 @@ pub fn fill_rounded_rect_gradient_alpha(buf: *mut u8, info: &FbInfo,
 
             if corner_dx > 0 && corner_dy > 0 {
                 let mut coverage = 0u32;
-                for sy in 0..8u32 {
-                    for sx in 0..8u32 {
-                        let sdx = corner_dx * 8 - sx as i32 - 4;
-                        let sdy = corner_dy * 8 - sy as i32 - 4;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
+                for sy in 0..8i32 {
+                    for sx in 0..8i32 {
+                        let sdx = corner_dx * 16 + 2 * sx - 7;
+                        let sdy = corner_dy * 16 + 2 * sy - 7;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 256 {
                             coverage += 1;
                         }
                     }
