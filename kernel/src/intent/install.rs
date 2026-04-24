@@ -14,6 +14,29 @@ const MAX_MODULE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_MANIFEST_SIZE: usize = 8192;
 const MAX_SIG_SIZE: usize = 512;
 
+/// Custom-section name apps embed their metadata under.
+const APP_META_SECTION: &str = ".npk.app_meta";
+
+/// After a verified module has been written to `sys/wasm/<name>`, pull
+/// the `.npk.app_meta` custom section out of the WASM bytes (if any)
+/// and cache it in npkFS at `sys/meta/<name>` so launchers can fetch it
+/// via the `npk_app_meta` host fn. Old modules without a section keep
+/// working — the meta cache is simply absent for them.
+fn cache_app_meta(name: &str, wasm_data: &[u8]) {
+    let meta_key = alloc::format!("sys/meta/{}", name);
+    // Drop any stale meta first (npkFS is append-only per key).
+    let _ = crate::npkfs::delete(&meta_key);
+
+    let bytes = match crate::wasm_meta::extract_custom_section(wasm_data, APP_META_SECTION) {
+        Some(b) => b,
+        None    => return,
+    };
+
+    if let Err(e) = crate::npkfs::store(&meta_key, bytes, crate::capability::CAP_NULL) {
+        kprintln!("[npk] Warning: failed to cache app meta for {}: {:?}", name, e);
+    }
+}
+
 struct ModuleEntry {
     name: String,
     version: String,
@@ -183,6 +206,9 @@ pub fn intent_install(args: &str) {
     // Store version metadata
     let _ = crate::npkfs::store(&version_key, entry.version.as_bytes(), crate::capability::CAP_NULL);
 
+    // Cache app metadata (icon/display_name/description) from WASM custom section.
+    cache_app_meta(name, &wasm_data);
+
     kprintln!("[npk] ✓ {} v{} installed.", name, entry.version);
 }
 
@@ -272,6 +298,7 @@ pub fn update_all_modules() -> usize {
 
         if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
             let _ = crate::npkfs::store(&version_key, remote_ver.as_bytes(), crate::capability::CAP_NULL);
+            cache_app_meta(&remote.name, &wasm_data);
             kprintln!("OK");
             updated += 1;
         } else {
@@ -292,10 +319,12 @@ pub fn intent_uninstall(args: &str) {
 
     let store_name = alloc::format!("sys/wasm/{}", name);
     let version_key = alloc::format!("sys/wasm/{}.version", name);
+    let meta_key = alloc::format!("sys/meta/{}", name);
 
     match crate::npkfs::delete(&store_name) {
         Ok(()) => {
             let _ = crate::npkfs::delete(&version_key);
+            let _ = crate::npkfs::delete(&meta_key);
             kprintln!("[npk] {} removed.", name);
         }
         Err(_) => kprintln!("[npk] Module '{}' not installed.", name),

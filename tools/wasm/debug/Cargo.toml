@@ -1,10 +1,13 @@
 [package]
 name = "debug"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
+
+[build-dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
 
 [profile.release]
 opt-level = "s"

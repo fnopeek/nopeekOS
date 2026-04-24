@@ -725,6 +725,63 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> i32
+    // Fetch the cached AppMeta bytes for `<name>` from npkFS
+    // (`sys/meta/<name>`, populated at install time from the WASM's
+    // `.npk.app_meta` custom section). Caller decodes with the
+    // `nopeek_widgets::app_meta::decode` helper.
+    //
+    //    > 0  → bytes written
+    //    == 0 → no meta available for this module (caller uses fallback)
+    //    < 0  → capability denied, name invalid, or buffer too small
+    linker.func_wrap("env", "npk_app_meta",
+        |mut caller: Caller<'_, HostState>,
+         name_ptr: i32, name_len: i32,
+         buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if name_len <= 0 || name_len > 128 { return -1; }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+
+            // Read the module name from caller memory.
+            let name = {
+                let data = mem.data(&caller);
+                let start = name_ptr as usize;
+                let end = start + name_len as usize;
+                if end > data.len() { return -1; }
+                match core::str::from_utf8(&data[start..end]) {
+                    Ok(s) => alloc::string::String::from(s),
+                    Err(_) => return -1,
+                }
+            };
+            // Reject anything that would escape `sys/meta/<name>`.
+            if name.contains('/') || name.contains('\0') || name.is_empty() {
+                return -1;
+            }
+
+            let meta_key = alloc::format!("sys/meta/{}", name);
+            let (bytes, _hash) = match crate::npkfs::fetch(&meta_key) {
+                Ok(x) => x,
+                // Missing key is a normal "no meta" answer, not an error.
+                Err(_) => return 0,
+            };
+            if bytes.len() > buf_max as usize { return -1; }
+
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + bytes.len();
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(&bytes);
+            bytes.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_spawn_module(name_ptr, name_len) -> i32
     // Launch `sys/wasm/<name>` in a fresh terminal window and focus it.
     //
