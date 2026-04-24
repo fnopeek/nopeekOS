@@ -124,6 +124,15 @@ pub fn bootstrap_into_npkfs() {
                 kprintln!("[npk]   FAILED (version): {} — {:?}", ver_path, e);
             }
         }
+
+        // Extract app meta from WASM custom section so launchers (drun)
+        // see icon + display_name + description on a fresh install —
+        // otherwise they fall back to the plain module name.
+        if let Some(name) = a.fs_path.strip_prefix("sys/wasm/") {
+            if !name.contains('/') {
+                crate::intent::install::cache_app_meta(name, a.bytes);
+            }
+        }
     }
     kprintln!("[npk] Seeded {} bytes total.", total_bytes);
 }
