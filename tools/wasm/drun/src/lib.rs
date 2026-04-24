@@ -26,6 +26,7 @@ unsafe extern "C" {
     fn npk_window_set_overlay(w: i32, h: i32) -> i32;
     fn npk_window_set_modal(modal: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
+    fn npk_sleep(ms: i32) -> i32;
 }
 
 fn log(msg: &str) {
@@ -385,7 +386,7 @@ pub extern "C" fn _start() {
                 }
             },
             PollResult::Empty => {
-                for _ in 0..5_000 { core::hint::spin_loop(); }
+                unsafe { let _ = npk_sleep(16); }
             }
             PollResult::WindowGone => return,
         }

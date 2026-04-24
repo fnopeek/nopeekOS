@@ -1068,7 +1068,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_sleep(ms) -> 0 — sleep for N milliseconds.
-    // Worker-core: just waits (Core 0 handles rendering via poll_render).
+    // Uses HLT so the core drops to C1 and waits for the next IRQ
+    // (APIC timer at 100 Hz, so ~10 ms granularity). That's the
+    // difference between a busy core at 100 % (old spin_loop) and
+    // a properly idle worker at <1 W draw.
     linker.func_wrap("env", "npk_sleep",
         |_caller: Caller<'_, HostState>, ms: i32| -> i32 {
             if ms <= 0 || ms > 60000 { return -1; }
@@ -1077,7 +1080,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let ticks_per_ms = freq / 1000;
             let target = crate::interrupts::rdtsc() + (ms as u64) * ticks_per_ms;
             while crate::interrupts::rdtsc() < target {
-                core::hint::spin_loop();
+                unsafe { core::arch::asm!("hlt"); }
             }
 
             0
