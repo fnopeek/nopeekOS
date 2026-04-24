@@ -459,6 +459,9 @@ fn text_mode_auth(salt: &[u8; 16]) {
         match npkfs::fetch(".npk-keycheck") {
             Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
                 config::load();
+                // OTA upgrades seeded sys/wasm/<name> but not sys/meta/<name>;
+                // fill in missing meta so launchers render icons + text.
+                intent::install::refresh_app_metas();
                 if let Some(name) = config::get("name") {
                     kprintln!("[npk] Welcome back, {}.", name);
                 } else {
