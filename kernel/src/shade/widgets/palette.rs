@@ -1,21 +1,53 @@
-//! Token → concrete BGRA color resolver.
+//! Token → concrete BGRA color.
 //!
-//! Widget trees declare colors as tokens (`Token::Accent` etc.); the
-//! rasterizer resolves them to the current palette at raster time. For
-//! P10.5 we ship hardcoded defaults that look like a modern dark UI —
-//! full theme integration (`gui/theme.rs` → palette slots, wallpaper-
-//! extracted accent) lands in a follow-up patch.
-//!
-//! Format: packed as 0xAARRGGBB (alpha in the high byte, BGRA bytes in
-//! memory on little-endian). Matches `framebuffer::blit_rect` and
-//! `gui/render.rs` pixel conventions.
+//! Two curated palettes (DARK + LIGHT) with fixed surface/border/text
+//! values. Only the Accent and AccentMuted tokens derive from the
+//! wallpaper's extracted theme. The mode is picked from the
+//! `theme` config key (`dark` | `light` | `auto`). `auto` uses the
+//! wallpaper's background luminance to decide.
 
 #![allow(dead_code)]
 
 use super::abi::{Palette, Token};
 
-/// Build a `Palette` struct populated with the active theme colors.
-/// Called once per frame — cheap (just 16 u32 copies).
+struct ThemePalette {
+    surface:          u32,
+    surface_elevated: u32,
+    surface_muted:    u32,
+    border:           u32,
+    on_surface:       u32,
+    on_surface_muted: u32,
+    success:          u32,
+    warning:          u32,
+    danger:           u32,
+}
+
+const DARK: ThemePalette = ThemePalette {
+    surface:          0xFF1E1E24,
+    surface_elevated: 0xFF2A2A32,
+    surface_muted:    0xFF252530,
+    border:           0xFF3A3A45,
+    on_surface:       0xFFE0E0E8,
+    on_surface_muted: 0xFF8A8A96,
+    success:          0xFF4CAF50,
+    warning:          0xFFFFB300,
+    danger:           0xFFE74C3C,
+};
+
+const LIGHT: ThemePalette = ThemePalette {
+    surface:          0xFFF5F5F7,
+    surface_elevated: 0xFFFFFFFF,
+    surface_muted:    0xFFEAEAEC,
+    border:           0xFFD0D0D5,
+    on_surface:       0xFF1A1A20,
+    on_surface_muted: 0xFF606068,
+    success:          0xFF2E7D32,
+    warning:          0xFFE68900,
+    danger:           0xFFD32F2F,
+};
+
+const DEFAULT_ACCENT: u32 = 0xFF7B50A0;
+
 pub fn current() -> Palette {
     let mut colors = [0u32; 16];
     for i in 0..16 {
@@ -24,91 +56,80 @@ pub fn current() -> Palette {
     Palette { colors }
 }
 
-/// Resolve a single token to its BGRA color right now. When the
-/// wallpaper-extracted theme is active, surface + accent tokens pull
-/// from the live palette so widgets follow the system look; otherwise
-/// falls back to the hardcoded v1 defaults.
 pub fn resolve(token: Token) -> u32 {
-    if crate::theme::is_active() {
-        if let Some(c) = from_live_theme(token) {
-            return c;
-        }
+    let is_light = is_light_theme();
+    let t = if is_light { &LIGHT } else { &DARK };
+
+    match token {
+        Token::Surface         => t.surface,
+        Token::SurfaceElevated => t.surface_elevated,
+        Token::SurfaceMuted    => t.surface_muted,
+        Token::Border          => t.border,
+        Token::OnSurface       => t.on_surface,
+        Token::OnSurfaceMuted  => t.on_surface_muted,
+        Token::Success         => t.success,
+        Token::Warning         => t.warning,
+        Token::Danger          => t.danger,
+
+        Token::Accent          => accent_adjusted(t.surface),
+        Token::AccentMuted     => accent_muted(t.surface),
+        Token::OnAccent        => on_accent(t.surface),
+
+        _ => 0xFFFF00FF,
     }
-    fallback(token)
 }
 
-/// Map a token to the live theme palette (16-color extracted from
-/// the current wallpaper). Returns None for tokens the theme doesn't
-/// drive — those fall back to hardcoded values.
-///
-/// Theme colors are stored as 0x00RRGGBB; we promote to 0xFFRRGGBB
-/// (opaque) here. Surface uses palette[0] (darkest), Accent uses
-/// `background::accent_color()` (the dominant dominant-hue slot),
-/// Border uses palette[8] (bright variant of bg). Lightness-adjusted
-/// muted / elevated variants are derived via lerp.
-fn from_live_theme(token: Token) -> Option<u32> {
-    let surface_raw = crate::theme::bg_color() | 0xFF00_0000;
-    let accent_raw  = crate::gui::background::accent_color() | 0xFF00_0000;
+fn is_light_theme() -> bool {
+    let setting = crate::config::get("theme").unwrap_or_default();
+    match setting.as_str() {
+        "light" => true,
+        "dark"  => false,
+        _ => {
+            // auto: wallpaper bg luminance decides. No wallpaper → dark.
+            if crate::theme::is_active() {
+                luminance(crate::theme::bg_color() | 0xFF00_0000) > 128
+            } else {
+                false
+            }
+        }
+    }
+}
 
-    let surface = surface_raw;
-    let surface_lum = luminance(surface);
-    let surface_light = surface_lum > 128;
-
-    // If accent luminance is within ~80 of surface, force more contrast
-    // so selected rows / tinted icons stay visible on the wallpaper.
-    let accent_lum = luminance(accent_raw);
-    let accent = if (accent_lum as i32 - surface_lum as i32).abs() < 80 {
-        if surface_light { darken(accent_raw, 0x50) } else { lighten(accent_raw, 0x50) }
+fn accent_raw() -> u32 {
+    if crate::theme::is_active() {
+        crate::gui::background::accent_color() | 0xFF00_0000
     } else {
-        accent_raw
-    };
-    let accent_adj_lum = luminance(accent);
+        DEFAULT_ACCENT
+    }
+}
 
-    // Border: always contrast against surface, regardless of wallpaper
-    // palette (border_gradient can go hell-on-hell otherwise).
-    let border = if surface_light {
-        darken(surface, 0x40)
+/// Accent adjusted for minimum contrast against the active surface.
+/// Extracted wallpaper accents can be close in luminance to the chosen
+/// theme surface (e.g. mid-grey wallpaper accent + LIGHT surface both
+/// bright) — we darken/lighten to keep Accent readable.
+fn accent_adjusted(surface: u32) -> u32 {
+    let raw = accent_raw();
+    let raw_lum = luminance(raw) as i32;
+    let surf_lum = luminance(surface) as i32;
+    if (raw_lum - surf_lum).abs() >= 80 { return raw; }
+    if surf_lum > 128 { darken(raw, 0x60) } else { lighten(raw, 0x60) }
+}
+
+/// Selected-row fill — anchored on a shifted surface so contrast is
+/// guaranteed, then tinted towards accent.
+fn accent_muted(surface: u32) -> u32 {
+    let accent = accent_adjusted(surface);
+    let base = if luminance(surface) > 128 {
+        darken(surface, 0x18)
     } else {
-        lighten(surface, 0x40)
+        lighten(surface, 0x18)
     };
+    blend(base, accent, 72)
+}
 
-    let (on_surface, on_surface_muted) = if surface_light {
-        (0xFF1A1A20u32, 0xFF505060u32)
-    } else {
-        (0xFFE0E0E8, 0xFF8A8A96)
-    };
-    let on_accent = if accent_adj_lum > 128 { 0xFF1A1A20 } else { 0xFFFFFFFF };
-
-    // AccentMuted (the selected-row fill): anchor on a shifted surface
-    // so contrast is guaranteed, then tint towards accent. 14 % over
-    // pure surface was invisible on light backgrounds; this hops the
-    // base in the opposite luminance direction first.
-    let accent_muted_base = if surface_light {
-        darken(surface, 0x1C)
-    } else {
-        lighten(surface, 0x1C)
-    };
-    let accent_muted = blend(accent_muted_base, accent, 64);
-
-    Some(match token {
-        Token::Surface         => surface,
-        Token::SurfaceElevated => if surface_light { darken(surface, 0x0A) } else { lighten(surface, 0x10) },
-        Token::SurfaceMuted    => if surface_light { darken(surface, 0x04) } else { lighten(surface, 0x06) },
-
-        Token::Accent          => accent,
-        Token::AccentMuted     => accent_muted,
-
-        Token::Border          => border,
-
-        Token::OnSurface       => on_surface,
-        Token::OnSurfaceMuted  => on_surface_muted,
-        Token::OnAccent        => on_accent,
-        Token::Success         => 0xFF4CAF50,
-        Token::Warning         => 0xFFFFB300,
-        Token::Danger          => 0xFFE74C3C,
-
-        _ => return None,
-    })
+fn on_accent(surface: u32) -> u32 {
+    let accent = accent_adjusted(surface);
+    if luminance(accent) > 128 { 0xFF1A1A20 } else { 0xFFFFFFFF }
 }
 
 fn luminance(c: u32) -> u32 {
@@ -133,32 +154,6 @@ fn blend(base: u32, top: u32, weight: u32) -> u32 {
     0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
-/// Hardcoded fallback palette — applied when no theme is active
-/// (early boot, headless tests) or for tokens the theme doesn't drive.
-fn fallback(token: Token) -> u32 {
-    match token {
-        Token::Surface         => 0xFF1E1E24,
-        Token::SurfaceElevated => 0xFF2A2A32,
-        Token::SurfaceMuted    => 0xFF252530,
-
-        Token::OnSurface       => 0xFFE0E0E8,
-        Token::OnSurfaceMuted  => 0xFF8A8A96,
-        Token::OnAccent        => 0xFFFFFFFF,
-
-        Token::Accent          => 0xFF7B50A0,
-        Token::AccentMuted     => 0xFF5A3780,
-
-        Token::Border          => 0xFF3A3A45,
-        Token::Success         => 0xFF4CAF50,
-        Token::Warning         => 0xFFFFB300,
-        Token::Danger          => 0xFFE74C3C,
-
-        _ => 0xFFFF00FF,
-    }
-}
-
-/// Shift each RGB channel up by `delta` (saturating at 0xFF). Keeps
-/// alpha channel intact.
 fn lighten(color: u32, delta: u8) -> u32 {
     let a =  color & 0xFF00_0000;
     let r = ((color >> 16) & 0xFF).saturating_add(delta as u32).min(0xFF);
@@ -167,7 +162,6 @@ fn lighten(color: u32, delta: u8) -> u32 {
     a | (r << 16) | (g << 8) | b
 }
 
-/// Shift each RGB channel down by `delta` (saturating at 0).
 fn darken(color: u32, delta: u8) -> u32 {
     let a =  color & 0xFF00_0000;
     let r = ((color >> 16) & 0xFF).saturating_sub(delta as u32);
@@ -176,8 +170,6 @@ fn darken(color: u32, delta: u8) -> u32 {
     a | (r << 16) | (g << 8) | b
 }
 
-/// Token at slot `idx` in the `Palette.colors` array. Mirrors the
-/// enum's discriminant order.
 fn token_at(idx: usize) -> Token {
     match idx {
         0  => Token::Surface,
@@ -192,16 +184,14 @@ fn token_at(idx: usize) -> Token {
         9  => Token::Success,
         10 => Token::Warning,
         11 => Token::Danger,
-        _  => Token::Surface,  // unused slots fall back to surface
+        _  => Token::Surface,
     }
 }
 
-/// Blend an 8-bit alpha with an opacity modifier (0..=255).
 pub fn scale_alpha(alpha: u8, opacity: u8) -> u8 {
     ((alpha as u16 * opacity as u16) / 255) as u8
 }
 
-/// Premultiply a BGRA color's alpha channel by `opacity` (0..=255).
 pub fn with_opacity(color: u32, opacity: u8) -> u32 {
     let a = (color >> 24) as u8;
     let new_a = scale_alpha(a, opacity);

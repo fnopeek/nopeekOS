@@ -1332,6 +1332,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             wallpaper::intent_wallpaper(args);
         }
 
+        "theme" => {
+            intent_theme(args);
+        }
+
         "passwd" | "password" | "passphrase" => {
             auth::intent_passwd();
         }
@@ -1415,6 +1419,26 @@ fn require_cap(vault: &Mutex<Vault>, cap_id: &CapId, rights: Rights, intent: &st
         Err(e) => {
             kprintln!("[npk] DENIED: '{}' requires {:?} — {}", intent, rights, e);
             false
+        }
+    }
+}
+
+fn intent_theme(args: &str) {
+    let mode = args.trim();
+    match mode {
+        "" | "show" | "status" => {
+            let cur = crate::config::get("theme").unwrap_or_else(|| alloc::string::String::from("auto"));
+            kprintln!("[npk] theme: {}", cur);
+            kprintln!("[npk] Usage: theme <dark|light|auto>");
+        }
+        "dark" | "light" | "auto" => {
+            crate::config::set("theme", mode);
+            crate::shade::widgets::refresh_all_scenes();
+            crate::shade::request_render();
+            kprintln!("[npk] theme: {}", mode);
+        }
+        _ => {
+            kprintln!("[npk] Usage: theme <dark|light|auto>");
         }
     }
 }
