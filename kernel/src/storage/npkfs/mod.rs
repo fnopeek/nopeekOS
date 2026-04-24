@@ -360,17 +360,20 @@ pub fn delete(name: &str) -> Result<(), FsError> {
     for i in 0..direct_count {
         fs.journal.record_free(entry.extents[i].start_block, entry.extents[i].block_count);
     }
-    // Indirect extents: read the chain + record each data extent for
-    // journaled free, but do NOT free the indirect chain blocks yet —
-    // that waits until after the journal commits in Phase 4, otherwise
-    // subsequent allocs could reuse blocks the btree still references.
-    let indirect_extents = if entry.indirect_block != 0 {
-        read_indirect_extents(&mut fs.cache, entry.indirect_block).unwrap_or_default()
+    // Indirect extents: read the chain + record every data extent AND
+    // every chain-block address in the journal, so a crash between
+    // Phase 3 (journal committed) and Phase 4 (bitmap free) doesn't
+    // leak the index blocks. The actual bitmap.free happens in Phase 4.
+    let (indirect_extents, indirect_chain_blocks) = if entry.indirect_block != 0 {
+        read_indirect_chain(&mut fs.cache, entry.indirect_block).unwrap_or_default()
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     for ext in &indirect_extents {
         fs.journal.record_free(ext.start_block, ext.block_count);
+    }
+    for &cb in &indirect_chain_blocks {
+        fs.journal.record_free(cb, 1);
     }
 
     // Commit
@@ -395,21 +398,31 @@ pub fn delete(name: &str) -> Result<(), FsError> {
     fs.cache.flush()?;
 
     // Phase 4: free old B-tree blocks + direct + indirect data +
-    // indirect chain itself (all deferred until commit is safe).
+    // indirect chain (all deferred until commit is safe). Invalidate
+    // EVERY cached block in each extent — not just start_block — so
+    // subsequent realloc-and-write doesn't hit stale valid entries for
+    // the inside of the extent.
     for b in &old_blocks {
         fs.bitmap.free(*b, 1);
+        fs.cache.invalidate(*b);
     }
     let del_direct = (entry.extent_count as usize).min(DIRECT_EXTENTS);
     for i in 0..del_direct {
-        fs.bitmap.free(entry.extents[i].start_block, entry.extents[i].block_count);
-        fs.cache.invalidate(entry.extents[i].start_block);
+        let ext = &entry.extents[i];
+        fs.bitmap.free(ext.start_block, ext.block_count);
+        for b in 0..ext.block_count {
+            fs.cache.invalidate(ext.start_block + b);
+        }
     }
     for ext in &indirect_extents {
         fs.bitmap.free(ext.start_block, ext.block_count);
-        fs.cache.invalidate(ext.start_block);
+        for b in 0..ext.block_count {
+            fs.cache.invalidate(ext.start_block + b);
+        }
     }
-    if entry.indirect_block != 0 {
-        free_indirect_chain(&mut fs.cache, &mut fs.bitmap, entry.indirect_block);
+    for &cb in &indirect_chain_blocks {
+        fs.bitmap.free(cb, 1);
+        fs.cache.invalidate(cb);
     }
     fs.bitmap.flush_trims();
 
@@ -510,10 +523,23 @@ fn write_indirect_extents(
 fn read_indirect_extents(
     cache: &mut cache::BlockCache, first_block: u64,
 ) -> Result<Vec<Extent>, FsError> {
+    let (extents, _) = read_indirect_chain(cache, first_block)?;
+    Ok(extents)
+}
+
+/// Walk an indirect block chain, returning both the extents it
+/// describes AND the addresses of the chain blocks themselves. Callers
+/// that need to free the whole chain want both so the chain blocks can
+/// be journaled + invalidated the same way data extents are.
+fn read_indirect_chain(
+    cache: &mut cache::BlockCache, first_block: u64,
+) -> Result<(Vec<Extent>, Vec<u64>), FsError> {
     let mut extents = Vec::new();
+    let mut chain_blocks = Vec::new();
     let mut block = first_block;
 
     while block != 0 {
+        chain_blocks.push(block);
         let mut buf = [0u8; BLOCK_SIZE];
         cache.read(block, &mut buf)?;
         let count = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
@@ -527,10 +553,12 @@ fn read_indirect_extents(
         }
         block = next;
     }
-    Ok(extents)
+    Ok((extents, chain_blocks))
 }
 
-/// Free all indirect blocks in a chain.
+/// Free all indirect blocks in a chain. Used by the store()'s
+/// allocation-rollback path where no journaling happened yet —
+/// delete() goes through the journaled path instead.
 fn free_indirect_chain(
     cache: &mut cache::BlockCache, bitmap: &mut bitmap::Bitmap, first_block: u64,
 ) {
@@ -540,6 +568,7 @@ fn free_indirect_chain(
         if cache.read(block, &mut buf).is_err() { break; }
         let next = u64::from_le_bytes(buf[4..12].try_into().unwrap());
         bitmap.free(block, 1);
+        cache.invalidate(block);
         block = next;
     }
 }
