@@ -14,9 +14,9 @@ const MAX_MODULE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_MANIFEST_SIZE: usize = 8192;
 const MAX_SIG_SIZE: usize = 512;
 
-const APP_META_SECTION: &str = ".npk.app_meta";
+pub const APP_META_SECTION: &str = ".npk.app_meta";
 
-fn cache_app_meta(name: &str, wasm_data: &[u8]) {
+pub fn cache_app_meta(name: &str, wasm_data: &[u8]) {
     let meta_key = alloc::format!("sys/meta/{}", name);
     let _ = crate::npkfs::delete(&meta_key);
 
