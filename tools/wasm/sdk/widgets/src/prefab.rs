@@ -64,7 +64,7 @@ pub fn list_row(
         row_mods.push(Modifier::Border {
             token:  Token::Accent,
             width:  0,
-            radius: Radius::Md.as_u8(),
+            radius: Radius::Sm.as_u8(),
         });
     }
 
