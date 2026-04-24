@@ -662,18 +662,23 @@ pub fn poll_render() {
                 if !win.dirty && Some(win.id) != focused_id { continue; }
                 win.dirty = false;
 
-                // Restore window region from BG layer
-                if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                    let pitch = info.pitch as usize;
-                    let y1 = (win.y + win.height).min(info.height);
-                    let x1 = (win.x + win.width).min(info.width);
-                    let bytes = x1.saturating_sub(win.x) as usize * 4;
-                    if bytes > 0 {
-                        for row in win.y..y1 {
-                            let off = row as usize * pitch + win.x as usize * 4;
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    bg_buf.add(off), shadow.add(off), bytes);
+                // Restore window region from BG layer. Overlays skip
+                // this — we want their rounded-out corners to keep
+                // whatever scene (terminal, another app, wallpaper)
+                // sits below in the current shadow state.
+                if !win.is_overlay {
+                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+                        let pitch = info.pitch as usize;
+                        let y1 = (win.y + win.height).min(info.height);
+                        let x1 = (win.x + win.width).min(info.width);
+                        let bytes = x1.saturating_sub(win.x) as usize * 4;
+                        if bytes > 0 {
+                            for row in win.y..y1 {
+                                let off = row as usize * pitch + win.x as usize * 4;
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        bg_buf.add(off), shadow.add(off), bytes);
+                                }
                             }
                         }
                     }
