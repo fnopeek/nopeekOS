@@ -9,7 +9,7 @@ pub(crate) mod http;
 mod net;
 mod system;
 mod update;
-mod install;
+pub mod install;
 mod wallpaper;
 mod wasm;
 
