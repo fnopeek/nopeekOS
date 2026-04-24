@@ -786,12 +786,22 @@ static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
 pub fn handle_mouse(_evt: &crate::xhci::MouseEvent) {
-    // Position + cursor draw already done by timer IRQ (immediate, lock-free).
-    // Main loop only needs to: redraw cursor (cleanup after blit_rect) + handle buttons.
     cursor::redraw_overlay_lockfree();
 
-    // SLOW PATH: take COMPOSITOR lock for focus/drag.
-    // Enter on button state change (click/release) OR during active drag (every move).
+    // Hover routing — deduplicated per window. Runs on every move so the
+    // app can react even when no buttons changed.
+    let (hx, hy) = cursor::atomic_pos();
+    let hover_target = with_compositor(|comp| {
+        if comp.drag.is_some() { return None; }
+        let wid = comp.window_at(hx, hy)?;
+        let is_widget = comp.windows.iter()
+            .any(|w| w.id == wid && w.kind == crate::shade::window::WindowKind::Widget);
+        if is_widget { Some(wid.0) } else { None }
+    }).flatten();
+    if let Some(wid) = hover_target {
+        widgets::update_hover(wid, hx, hy);
+    }
+
     let is_button_change = cursor::has_button_event();
     let is_drag = DRAG_ACTIVE.load(Ordering::Relaxed);
 

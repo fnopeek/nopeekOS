@@ -1106,7 +1106,7 @@ impl Compositor {
     }
 
     /// Find the topmost window at screen coordinates (x, y).
-    fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+    pub fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         // Z-order: front to back (first match = topmost)
         for &wid in &self.z_order {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid

@@ -5,10 +5,10 @@
 extern crate alloc;
 
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::{self, IconRef};
+use nopeek_widgets::prefab;
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -65,9 +65,9 @@ fn close_self() {
     unsafe { let _ = npk_close_widget(); }
 }
 
-// Bump allocator, reset to `persistent_mark` every rerender. Anything
-// stored across frames must be allocated before the mark with enough
-// capacity to survive push() without reallocating.
+// Bump allocator reset every rerender; state kept across frames must be
+// allocated before `persistent_mark` with enough capacity that push()
+// never reallocates past the mark.
 const HEAP_SIZE: usize = 256 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
@@ -109,6 +109,7 @@ fn alloc_mark() -> usize {
 // ActionId encoding: 0..HOVER_BASE = row click, HOVER_BASE.. = row hover.
 const HOVER_BASE: u32 = 10_000;
 const QUERY_CAP: usize = 63;
+const MAX_VISIBLE_ROWS: usize = 6;
 
 struct Entry {
     module_name:  String,
@@ -118,10 +119,11 @@ struct Entry {
 }
 
 struct Drun {
-    entries:  Vec<Entry>,
-    filtered: Vec<usize>,
-    selected: usize,
-    query:    String,
+    entries:    Vec<Entry>,
+    filtered:   Vec<usize>,
+    selected:   usize,
+    row_offset: usize,
+    query:      String,
 }
 
 impl Drun {
@@ -148,7 +150,7 @@ impl Drun {
         for i in 0..entries.len() { filtered.push(i); }
         let query = String::with_capacity(QUERY_CAP + 1);
 
-        Drun { entries, filtered, selected: 0, query }
+        Drun { entries, filtered, selected: 0, row_offset: 0, query }
     }
 
     fn refilter(&mut self) {
@@ -160,126 +162,47 @@ impl Drun {
             }
         }
         if self.selected >= self.filtered.len() { self.selected = 0; }
+        self.row_offset = 0;
+    }
+
+    fn ensure_visible(&mut self) {
+        if self.selected < self.row_offset {
+            self.row_offset = self.selected;
+        } else if self.selected >= self.row_offset + MAX_VISIBLE_ROWS {
+            self.row_offset = self.selected + 1 - MAX_VISIBLE_ROWS;
+        }
     }
 
     fn render(&self) -> Widget {
-        let mut root: Vec<Widget> = Vec::with_capacity(self.filtered.len() + 3);
+        let badge = prefab::badge("drun");
+        let search = prefab::searchbar(&self.query, "Type to search apps…", Some(badge));
 
-        let (query_text, query_style) = if self.query.is_empty() {
-            ("Type to search apps…".to_string(), TextStyle::Muted)
+        let rows: Vec<Widget> = if self.filtered.is_empty() {
+            alloc::vec![prefab::empty_state("no matches")]
         } else {
-            (self.query.clone(), TextStyle::Body)
+            let end = (self.row_offset + MAX_VISIBLE_ROWS).min(self.filtered.len());
+            (self.row_offset..end).map(|ui_idx| {
+                let entry_idx = self.filtered[ui_idx];
+                let entry = &self.entries[entry_idx];
+                prefab::list_row(
+                    entry.icon,
+                    &entry.display_name,
+                    &entry.description,
+                    ui_idx == self.selected,
+                    Some(ActionId(ui_idx as u32)),
+                    Some(ActionId(HOVER_BASE + ui_idx as u32)),
+                )
+            }).collect()
         };
-        root.push(Widget::Row {
-            children: vec![
-                Widget::Icon { id: IconId::MagnifyingGlass, size: 20, modifiers: vec![] },
-                Widget::Text { content: query_text, style: query_style, modifiers: vec![] },
-                Widget::Spacer { flex: 1 },
-                Widget::Text {
-                    content: "drun".to_string(),
-                    style:   TextStyle::Muted,
-                    modifiers: vec![
-                        Modifier::Padding(4),
-                        Modifier::Background(Token::SurfaceMuted),
-                        Modifier::Border { token: Token::Border, width: 1, radius: 4 },
-                    ],
-                },
-            ],
-            spacing: 10,
-            align:   Align::Center,
-            modifiers: vec![
-                Modifier::Padding(10),
-                Modifier::Background(Token::SurfaceElevated),
-                Modifier::Border { token: Token::Border, width: 1, radius: 8 },
-            ],
-        });
 
-        if self.filtered.is_empty() {
-            root.push(Widget::Text {
-                content: "no matches".to_string(),
-                style:   TextStyle::Muted,
-                modifiers: vec![Modifier::Padding(14)],
-            });
-        } else {
-            for (ui_idx, &entry_idx) in self.filtered.iter().enumerate() {
-                let is_sel = ui_idx == self.selected;
-                root.push(self.render_row(ui_idx, &self.entries[entry_idx], is_sel));
-            }
-        }
+        let result_text = format_count(self.filtered.len(), self.row_offset, MAX_VISIBLE_ROWS);
+        let foot = prefab::footer("↑↓ navigate   ↵ open   esc close", &result_text);
 
-        let result_text = if self.filtered.len() == 1 {
-            "1 result".to_string()
-        } else {
-            let mut s = String::with_capacity(12);
-            push_u32(&mut s, self.filtered.len() as u32);
-            s.push_str(" results");
-            s
-        };
-        root.push(Widget::Row {
-            children: vec![
-                Widget::Text {
-                    content: "↑↓ navigate   ↵ open   esc close".to_string(),
-                    style:   TextStyle::Muted,
-                    modifiers: vec![],
-                },
-                Widget::Spacer { flex: 1 },
-                Widget::Text { content: result_text, style: TextStyle::Muted, modifiers: vec![] },
-            ],
-            spacing: 0,
-            align:   Align::Center,
-            modifiers: vec![Modifier::Padding(8)],
-        });
-
-        Widget::Column {
-            children: root,
-            spacing: 4,
-            align:   Align::Stretch,
-            modifiers: vec![
-                Modifier::Background(Token::Surface),
-                Modifier::Padding(12),
-                Modifier::Border { token: Token::Border, width: 1, radius: 12 },
-            ],
-        }
-    }
-
-    fn render_row(&self, ui_idx: usize, entry: &Entry, is_sel: bool) -> Widget {
-        let mut row_mods: Vec<Modifier> = Vec::with_capacity(5);
-        row_mods.push(Modifier::Padding(10));
-        row_mods.push(Modifier::OnClick(ActionId(ui_idx as u32)));
-        row_mods.push(Modifier::OnHover(ActionId(HOVER_BASE + ui_idx as u32)));
-        if is_sel {
-            row_mods.push(Modifier::Background(Token::AccentMuted));
-            row_mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: 6 });
-        }
-
-        let mut title_col: Vec<Widget> = Vec::with_capacity(2);
-        title_col.push(Widget::Text {
-            content: entry.display_name.clone(),
-            style:   TextStyle::Body,
-            modifiers: vec![],
-        });
-        if !entry.description.is_empty() {
-            title_col.push(Widget::Text {
-                content: entry.description.clone(),
-                style:   TextStyle::Muted,
-                modifiers: vec![],
-            });
-        }
-
-        let mut children: Vec<Widget> = Vec::with_capacity(4);
-        children.push(Widget::Icon { id: entry.icon, size: 22, modifiers: vec![] });
-        children.push(Widget::Column {
-            children:  title_col,
-            spacing:   2,
-            align:     Align::Start,
-            modifiers: vec![],
-        });
-        children.push(Widget::Spacer { flex: 1 });
-        if is_sel {
-            children.push(Widget::Icon { id: IconId::ArrowRight, size: 14, modifiers: vec![] });
-        }
-
-        Widget::Row { children, spacing: 12, align: Align::Center, modifiers: row_mods }
+        let mut root: Vec<Widget> = Vec::with_capacity(rows.len() + 3);
+        root.push(search);
+        root.extend(rows);
+        root.push(foot);
+        prefab::panel(root)
     }
 
     fn commit_tree(&self) {
@@ -302,10 +225,12 @@ impl Drun {
         match ev {
             Event::Key(KeyCode::Up) => {
                 if self.selected > 0 { self.selected -= 1; }
+                self.ensure_visible();
                 Outcome::Rerender
             }
             Event::Key(KeyCode::Down) => {
                 if self.selected + 1 < self.filtered.len() { self.selected += 1; }
+                self.ensure_visible();
                 Outcome::Rerender
             }
             Event::Key(KeyCode::Enter) => { self.spawn_selected(); Outcome::Exit }
@@ -328,6 +253,7 @@ impl Drun {
                     let ui_idx = (id - HOVER_BASE) as usize;
                     if ui_idx < self.filtered.len() && ui_idx != self.selected {
                         self.selected = ui_idx;
+                        self.ensure_visible();
                         return Outcome::Rerender;
                     }
                     Outcome::Idle
@@ -395,9 +321,29 @@ fn icon_ref_to_id(r: &IconRef) -> IconId {
     }
 }
 
-fn push_u32(s: &mut String, mut n: u32) {
+fn format_count(total: usize, offset: usize, window: usize) -> String {
+    let mut s = String::with_capacity(24);
+    if total == 0 {
+        s.push_str("no results");
+        return s;
+    }
+    if total <= window {
+        push_usize(&mut s, total);
+        s.push_str(if total == 1 { " result" } else { " results" });
+    } else {
+        let end = (offset + window).min(total);
+        push_usize(&mut s, offset + 1);
+        s.push('–');
+        push_usize(&mut s, end);
+        s.push_str(" of ");
+        push_usize(&mut s, total);
+    }
+    s
+}
+
+fn push_usize(s: &mut String, mut n: usize) {
     if n == 0 { s.push('0'); return; }
-    let mut buf = [0u8; 10];
+    let mut buf = [0u8; 20];
     let mut i = 0;
     while n > 0 {
         buf[i] = b'0' + (n % 10) as u8;
@@ -413,7 +359,7 @@ fn push_u32(s: &mut String, mut n: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     unsafe {
-        let _ = npk_window_set_overlay(560, 500);
+        let _ = npk_window_set_overlay(560, 480);
         let _ = npk_window_set_modal(1);
     }
 

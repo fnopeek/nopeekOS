@@ -79,6 +79,7 @@ where F: FnOnce(&WidgetScene) -> R,
 /// widget-kind window is destroyed.
 pub fn remove_scene(window_id: u32) {
     SCENES.lock().remove(&window_id);
+    LAST_HOVER.lock().remove(&window_id);
 }
 
 /// True if any widget scenes are currently allocated.
@@ -150,6 +151,58 @@ pub fn hit_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
     let mut out = None;
     find_click_target(&scene.tree, &scene.layout_tree, x, y, &mut out);
     out
+}
+
+// Deduplicated OnHover target per window. Compositor calls update_hover
+// on every MouseMove; we push Event::Action only when the hit changes.
+static LAST_HOVER: Mutex<BTreeMap<u32, abi::ActionId>> = Mutex::new(BTreeMap::new());
+
+pub fn hover_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
+    let scenes = SCENES.lock();
+    let scene = scenes.get(&window_id)?;
+    let mut out = None;
+    find_hover_target(&scene.tree, &scene.layout_tree, x, y, &mut out);
+    out
+}
+
+fn find_hover_target(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+    out: &mut Option<abi::ActionId>,
+) {
+    if !rect_contains(layout.rect, x, y) { return; }
+    for (cw, cl) in widget_children_ref(widget).iter().zip(layout.children.iter()) {
+        find_hover_target(cw, cl, x, y, out);
+        if out.is_some() { return; }
+    }
+    for m in modifiers_of_ref(widget) {
+        if let abi::Modifier::OnHover(id) = m { *out = Some(*id); return; }
+    }
+}
+
+pub fn update_hover(window_id: u32, x: i32, y: i32) {
+    let new_id = hover_test(window_id, x, y);
+    let mut last = LAST_HOVER.lock();
+    let prev = last.get(&window_id).copied();
+    let changed = match (prev, new_id) {
+        (Some(a), Some(b)) => a != b,
+        (None, None)       => false,
+        _                  => true,
+    };
+    if !changed { return; }
+    match new_id {
+        Some(id) => { last.insert(window_id, id); }
+        None     => { last.remove(&window_id); }
+    }
+    drop(last);
+    if let Some(id) = new_id {
+        push_event(window_id, abi::Event::Action(id));
+    }
+}
+
+pub fn clear_hover(window_id: u32) {
+    LAST_HOVER.lock().remove(&window_id);
 }
 
 fn find_click_target(
