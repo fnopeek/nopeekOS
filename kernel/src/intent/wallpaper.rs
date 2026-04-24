@@ -21,14 +21,17 @@ pub fn intent_wallpaper(args: &str) {
         "random" | "rand" => random_wallpaper(),
         "demo" => generate_demo_wallpapers(rest),
         "solid" | "hex" | "color" => generate_solid_wallpaper(rest),
+        "gradient" | "grad" => generate_gradient_wallpaper(rest),
         "" => {
-            kprintln!("[npk] Usage: wallpaper <set|clear|list|random|demo|solid>");
-            kprintln!("[npk]   wallpaper set <name>     Set wallpaper from npkFS");
-            kprintln!("[npk]   wallpaper clear          Revert to aurora");
-            kprintln!("[npk]   wallpaper list           List available wallpapers");
-            kprintln!("[npk]   wallpaper random         Set random wallpaper");
-            kprintln!("[npk]   wallpaper demo [WxH]     Generate gradients (default: native res)");
-            kprintln!("[npk]   wallpaper solid <hex>    Store + set a solid-color wallpaper (e.g. 2a1840)");
+            kprintln!("[npk] Usage: wallpaper <set|clear|list|random|demo|solid|gradient>");
+            kprintln!("[npk]   wallpaper set <name>              Set wallpaper from npkFS");
+            kprintln!("[npk]   wallpaper clear                   Revert to aurora");
+            kprintln!("[npk]   wallpaper list                    List available wallpapers");
+            kprintln!("[npk]   wallpaper random                  Set random wallpaper");
+            kprintln!("[npk]   wallpaper demo [WxH]              Generate 4 gradient presets");
+            kprintln!("[npk]   wallpaper solid <hex>             e.g. 2a1840");
+            kprintln!("[npk]   wallpaper gradient <tl> <tr> <bl> <br>   4 corner hex colors, bilinear");
+            kprintln!("[npk]   wallpaper gradient <top> <bottom>        2 colors, top→bottom");
         }
         other => {
             // Treat as `wallpaper set <name>` shortcut
@@ -310,6 +313,89 @@ fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
     let g = u8::from_str_radix(&s[2..4], 16).ok()?;
     let b = u8::from_str_radix(&s[4..6], 16).ok()?;
     Some((r, g, b))
+}
+
+fn generate_gradient_wallpaper(arg: &str) {
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    let (tl, tr, bl, br) = match parts.len() {
+        2 => {
+            let a = match parse_hex_rgb(parts[0]) { Some(c) => c, None => { kprintln!("[npk] bad top color"); return; } };
+            let b = match parse_hex_rgb(parts[1]) { Some(c) => c, None => { kprintln!("[npk] bad bottom color"); return; } };
+            (a, a, b, b)
+        }
+        4 => {
+            let p: Option<[(u8,u8,u8); 4]> = {
+                let mut out = [(0u8,0u8,0u8); 4];
+                let mut ok = true;
+                for i in 0..4 {
+                    match parse_hex_rgb(parts[i]) {
+                        Some(c) => out[i] = c,
+                        None => { ok = false; break; }
+                    }
+                }
+                if ok { Some(out) } else { None }
+            };
+            match p {
+                Some([a, b, c, d]) => (a, b, c, d),
+                None => { kprintln!("[npk] all 4 corners must be 6-char hex"); return; }
+            }
+        }
+        _ => {
+            kprintln!("[npk] Usage: wallpaper gradient <tl> <tr> <bl> <br>   or   <top> <bottom>");
+            return;
+        }
+    };
+
+    let (w, h) = crate::framebuffer::get_resolution();
+    if w == 0 || h == 0 { kprintln!("[npk] No framebuffer available"); return; }
+
+    let mut buf: Vec<u8> = Vec::with_capacity(8 + (w * h * 4) as usize);
+    buf.extend_from_slice(&w.to_le_bytes());
+    buf.extend_from_slice(&h.to_le_bytes());
+
+    // Bilinear interpolation across 4 corners.
+    let wmax = (w.saturating_sub(1)).max(1) as u32;
+    let hmax = (h.saturating_sub(1)).max(1) as u32;
+    for y in 0..h {
+        let fy = (y * 1024) / hmax;
+        for x in 0..w {
+            let fx = (x * 1024) / wmax;
+            let r = lerp_2d(tl.0, tr.0, bl.0, br.0, fx, fy);
+            let g = lerp_2d(tl.1, tr.1, bl.1, br.1, fx, fy);
+            let b = lerp_2d(tl.2, tr.2, bl.2, br.2, fx, fy);
+            buf.push(b);
+            buf.push(g);
+            buf.push(r);
+            buf.push(0xFF);
+        }
+    }
+
+    ensure_wallpaper_dir();
+    let name = alloc::format!(
+        "grad-{:02x}{:02x}{:02x}-{:02x}{:02x}{:02x}",
+        tl.0, tl.1, tl.2, br.0, br.1, br.2,
+    );
+    let path = alloc::format!("{}/{}", wallpaper_dir(), name);
+    let _ = crate::npkfs::delete(&path);
+    if let Err(e) = crate::npkfs::store(&path, &buf, crate::capability::CAP_NULL) {
+        kprintln!("[npk] Failed to store {}: {:?}", path, e);
+        return;
+    }
+
+    kprintln!("[npk] Generated {} ({}x{})", name, w, h);
+    apply_wallpaper_data(&path, &buf);
+}
+
+// Bilinear interpolate 4 corner bytes. `fx` / `fy` are 0..=1024.
+fn lerp_2d(tl: u8, tr: u8, bl: u8, br: u8, fx: u32, fy: u32) -> u8 {
+    let fx = fx.min(1024);
+    let fy = fy.min(1024);
+    let inv_fx = 1024 - fx;
+    let inv_fy = 1024 - fy;
+    let top    = tl as u32 * inv_fx + tr as u32 * fx;        // /1024
+    let bottom = bl as u32 * inv_fx + br as u32 * fx;        // /1024
+    let v = top * inv_fy + bottom * fy;                      // /1024/1024
+    (v / (1024 * 1024)) as u8
 }
 
 fn generate_solid_wallpaper(arg: &str) {
