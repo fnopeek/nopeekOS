@@ -308,6 +308,11 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // Bootstrap WASM modules (after identity — so they are encrypted at rest)
     intent::bootstrap_wasm();
 
+    // Fill in missing sys/meta/<name> from each module's .npk.app_meta
+    // custom section. OTA upgrades seeded WASM bytes but not meta, so
+    // drun / other launchers need this to render icons + subtitles.
+    intent::install::refresh_app_metas();
+
     // Inter Variable UI font — read from npkFS (seeded by installer), BLAKE3
     // verified, parsed via fontdue. Login screen + terminals use Spleen
     // bitmap; the UI font is only needed once widgets come up.
@@ -459,9 +464,6 @@ fn text_mode_auth(salt: &[u8; 16]) {
         match npkfs::fetch(".npk-keycheck") {
             Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
                 config::load();
-                // OTA upgrades seeded sys/wasm/<name> but not sys/meta/<name>;
-                // fill in missing meta so launchers render icons + text.
-                intent::install::refresh_app_metas();
                 if let Some(name) = config::get("name") {
                     kprintln!("[npk] Welcome back, {}.", name);
                 } else {
