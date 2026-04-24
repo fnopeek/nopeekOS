@@ -277,18 +277,20 @@ fn put_pixel_blended(t: &mut RasterTarget, x: i32, y: i32, color: u32, alpha: u8
     t.pixels[base] = blend_over(dst, color, alpha);
 }
 
-// 8x8 subpixel coverage — 64 levels, much smoother on high-luminance
-// backgrounds where the old 16-level ramp showed a visible stairstep.
+// 8x8 subpixel coverage, centered on the pixel. Scale ×16 so the
+// sample positions land at odd half-steps (2*sx - 7) giving
+// [-7..+7], symmetric around 0. Earlier scale-×8 / (sx-4) was
+// off-center by 0.5 subpixel — visible stairstep at small radii.
 fn corner_coverage(dx: i32, dy: i32, r: i32) -> u8 {
-    let base_dx = dx * 8;
-    let base_dy = dy * 8;
-    let r_scaled = r * 8;
+    let base_dx = dx * 16;
+    let base_dy = dy * 16;
+    let r_scaled = r * 16;
     let r2 = r_scaled * r_scaled;
     let mut covered = 0u32;
     for sy in 0..8 {
-        let sdy = base_dy + sy - 4;
+        let sdy = base_dy + 2 * sy - 7;
         for sx in 0..8 {
-            let sdx = base_dx + sx - 4;
+            let sdx = base_dx + 2 * sx - 7;
             if sdx * sdx + sdy * sdy <= r2 {
                 covered += 1;
             }
