@@ -62,6 +62,15 @@ const ICONS: &[IconEntry] = &[
     IconEntry { id: 16, svg: "trash.svg",               name: "Trash" },
     IconEntry { id: 17, svg: "dots-three-vertical.svg", name: "DotsThreeVertical" },
     IconEntry { id: 18, svg: "list.svg",                name: "List" },
+    IconEntry { id: 19, svg: "monitor.svg",             name: "Monitor" },
+    IconEntry { id: 20, svg: "file-text.svg",           name: "FileText" },
+    IconEntry { id: 21, svg: "folder-open.svg",         name: "FolderOpen" },
+    IconEntry { id: 22, svg: "image.svg",               name: "Image" },
+    IconEntry { id: 23, svg: "hard-drives.svg",         name: "HardDrives" },
+    IconEntry { id: 24, svg: "code.svg",                name: "Code" },
+    IconEntry { id: 25, svg: "folders.svg",             name: "Folders" },
+    IconEntry { id: 26, svg: "caret-right.svg",         name: "CaretRight" },
+    IconEntry { id: 27, svg: "arrow-clockwise.svg",     name: "ArrowClockwise" },
 ];
 
 /// Rasterized sizes, in actual pixels (not HiDPI-scaled).

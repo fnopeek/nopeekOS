@@ -1,8 +1,8 @@
 [package]
-name = "drun"
-version = "0.5.2"
+name = "loft"
+version = "0.1.1"
 edition = "2024"
-description = "Mod+D app launcher — first interactive widget app."
+description = "File browser — Thunar-clone for nopeekOS."
 
 [lib]
 crate-type = ["cdylib"]

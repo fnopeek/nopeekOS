@@ -80,6 +80,15 @@ const _: () = {
     assert!(IconId::Trash             as u16 == 16);
     assert!(IconId::DotsThreeVertical as u16 == 17);
     assert!(IconId::List              as u16 == 18);
+    assert!(IconId::Monitor           as u16 == 19);
+    assert!(IconId::FileText          as u16 == 20);
+    assert!(IconId::FolderOpen        as u16 == 21);
+    assert!(IconId::Image             as u16 == 22);
+    assert!(IconId::HardDrives        as u16 == 23);
+    assert!(IconId::Code              as u16 == 24);
+    assert!(IconId::Folders           as u16 == 25);
+    assert!(IconId::CaretRight        as u16 == 26);
+    assert!(IconId::ArrowClockwise    as u16 == 27);
 
     // Align / Axis — used inside Widget struct variants, positions frozen.
     assert!(Align::Start   as u8 == 0);
