@@ -17,7 +17,7 @@ pub fn panel(children: Vec<Widget>) -> Widget {
         spacing: Spacing::Xs.as_u16(),
         align:   Align::Stretch,
         modifiers: vec![
-            Modifier::Padding(Padding::Md.as_u16()),
+            Modifier::Padding(Padding::Sm.as_u16()),
             Modifier::Background(Token::Surface),
             Modifier::Border {
                 token:  Token::Border,
@@ -38,7 +38,7 @@ pub fn searchbar(query: &str, placeholder: &str, trailing: Option<Widget>) -> Wi
     let mut children: Vec<Widget> = Vec::with_capacity(4);
     children.push(Widget::Icon {
         id:        IconId::MagnifyingGlass,
-        size:      20,
+        size:      24,
         modifiers: vec![],
     });
     children.push(Widget::Text { content: text, style, modifiers: vec![] });
@@ -49,15 +49,7 @@ pub fn searchbar(query: &str, placeholder: &str, trailing: Option<Widget>) -> Wi
         children,
         spacing: Spacing::Sm.as_u16(),
         align:   Align::Center,
-        modifiers: vec![
-            Modifier::Padding(Padding::Sm.as_u16()),
-            Modifier::Background(Token::SurfaceElevated),
-            Modifier::Border {
-                token:  Token::Border,
-                width:  0,
-                radius: Radius::Md.as_u8(),
-            },
-        ],
+        modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
     }
 }
 
@@ -97,7 +89,7 @@ pub fn list_row(
     }
 
     let mut children: Vec<Widget> = Vec::with_capacity(4);
-    children.push(Widget::Icon { id: icon, size: 20, modifiers: vec![] });
+    children.push(Widget::Icon { id: icon, size: 24, modifiers: vec![] });
     children.push(Widget::Column {
         children:  text_col,
         spacing:   Spacing::Xxs.as_u16(),
@@ -124,13 +116,13 @@ pub fn list_row(
 pub fn badge(text: &str) -> Widget {
     Widget::Text {
         content: text.to_string(),
-        style:   TextStyle::Muted,
+        style:   TextStyle::Caption,
         modifiers: vec![
             Modifier::Padding(Padding::Xs.as_u16()),
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Border {
                 token:  Token::Border,
-                width:  0,
+                width:  1,
                 radius: Radius::Sm.as_u8(),
             },
         ],
