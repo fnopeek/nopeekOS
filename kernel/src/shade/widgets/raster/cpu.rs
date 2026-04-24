@@ -277,26 +277,24 @@ fn put_pixel_blended(t: &mut RasterTarget, x: i32, y: i32, color: u32, alpha: u8
     t.pixels[base] = blend_over(dst, color, alpha);
 }
 
-// 4x4 subpixel coverage of a pixel centred `(dx,dy)` away from the arc
-// center, for a circle of radius `r`. Matches the Bresenham-free AA in
-// gui/render.rs::fill_rounded_rect_blend so chrome + widget rounded
-// rects sample identically at the same radius.
+// 8x8 subpixel coverage — 64 levels, much smoother on high-luminance
+// backgrounds where the old 16-level ramp showed a visible stairstep.
 fn corner_coverage(dx: i32, dy: i32, r: i32) -> u8 {
-    let base_dx = dx * 4;
-    let base_dy = dy * 4;
-    let r_scaled = r * 4;
+    let base_dx = dx * 8;
+    let base_dy = dy * 8;
+    let r_scaled = r * 8;
     let r2 = r_scaled * r_scaled;
     let mut covered = 0u32;
-    for sy in 0..4 {
-        let sdy = base_dy + sy - 2;
-        for sx in 0..4 {
-            let sdx = base_dx + sx - 2;
+    for sy in 0..8 {
+        let sdy = base_dy + sy - 4;
+        for sx in 0..8 {
+            let sdx = base_dx + sx - 4;
             if sdx * sdx + sdy * sdy <= r2 {
                 covered += 1;
             }
         }
     }
-    (covered * 255 / 16) as u8
+    (covered * 255 / 64) as u8
 }
 
 fn fill_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) {

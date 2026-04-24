@@ -227,23 +227,22 @@ pub fn fill_rounded_rect_blend(shadow: *mut u8, info: &FbInfo,
             };
 
             if corner_dx > 0 && corner_dy > 0 {
-                // In a corner region — check circle with 4x4 subpixel AA
+                // 8x8 subpixel AA — 64 coverage levels, smooth on bright bg.
                 let mut coverage = 0u32;
-                for sy in 0..4u32 {
-                    for sx in 0..4u32 {
-                        let sdx = corner_dx * 4 - sx as i32 - 2;
-                        let sdy = corner_dy * 4 - sy as i32 - 2;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 16 {
+                for sy in 0..8u32 {
+                    for sx in 0..8u32 {
+                        let sdx = corner_dx * 8 - sx as i32 - 4;
+                        let sdy = corner_dy * 8 - sy as i32 - 4;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
                             coverage += 1;
                         }
                     }
                 }
                 if coverage == 0 { continue; }
-                let alpha = opacity * coverage / 16;
+                let alpha = opacity * coverage / 64;
                 let bg = read_pixel(shadow, info, px, py);
                 put_pixel(shadow, info, px, py, blend(color, bg, alpha));
             } else {
-                // Inside straight edge — blend with opacity
                 let bg = read_pixel(shadow, info, px, py);
                 put_pixel(shadow, info, px, py, blend(color, bg, opacity));
             }
@@ -284,17 +283,17 @@ pub fn fill_rounded_rect_gradient(shadow: *mut u8, info: &FbInfo,
 
             if corner_dx > 0 && corner_dy > 0 {
                 let mut coverage = 0u32;
-                for sy in 0..4u32 {
-                    for sx in 0..4u32 {
-                        let sdx = corner_dx * 4 - sx as i32 - 2;
-                        let sdy = corner_dy * 4 - sy as i32 - 2;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 16 {
+                for sy in 0..8u32 {
+                    for sx in 0..8u32 {
+                        let sdx = corner_dx * 8 - sx as i32 - 4;
+                        let sdy = corner_dy * 8 - sy as i32 - 4;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
                             coverage += 1;
                         }
                     }
                 }
                 if coverage == 0 { continue; }
-                let alpha = opacity * coverage / 16;
+                let alpha = opacity * coverage / 64;
                 let bg = read_pixel(shadow, info, px, py);
                 put_pixel(shadow, info, px, py, blend(color, bg, alpha));
             } else {
@@ -354,17 +353,17 @@ pub fn fill_rounded_rect_alpha(buf: *mut u8, info: &FbInfo,
 
             if corner_dx > 0 && corner_dy > 0 {
                 let mut coverage = 0u32;
-                for sy in 0..4u32 {
-                    for sx in 0..4u32 {
-                        let sdx = corner_dx * 4 - sx as i32 - 2;
-                        let sdy = corner_dy * 4 - sy as i32 - 2;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 16 {
+                for sy in 0..8u32 {
+                    for sx in 0..8u32 {
+                        let sdx = corner_dx * 8 - sx as i32 - 4;
+                        let sdy = corner_dy * 8 - sy as i32 - 4;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
                             coverage += 1;
                         }
                     }
                 }
                 if coverage == 0 { continue; }
-                let a = (alpha * coverage / 16).min(255);
+                let a = (alpha * coverage / 64).min(255);
                 put_pixel(buf, info, px, py, (a << 24) | (color & 0x00FFFFFF));
             } else {
                 put_pixel(buf, info, px, py, base);
@@ -400,17 +399,17 @@ pub fn fill_rounded_rect_gradient_alpha(buf: *mut u8, info: &FbInfo,
 
             if corner_dx > 0 && corner_dy > 0 {
                 let mut coverage = 0u32;
-                for sy in 0..4u32 {
-                    for sx in 0..4u32 {
-                        let sdx = corner_dx * 4 - sx as i32 - 2;
-                        let sdy = corner_dy * 4 - sy as i32 - 2;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 16 {
+                for sy in 0..8u32 {
+                    for sx in 0..8u32 {
+                        let sdx = corner_dx * 8 - sx as i32 - 4;
+                        let sdy = corner_dy * 8 - sy as i32 - 4;
+                        if sdx * sdx + sdy * sdy <= r_f * r_f * 64 {
                             coverage += 1;
                         }
                     }
                 }
                 if coverage == 0 { continue; }
-                let a = (alpha * coverage / 16).min(255);
+                let a = (alpha * coverage / 64).min(255);
                 put_pixel(buf, info, px, py, (a << 24) | (color & 0x00FFFFFF));
             } else {
                 put_pixel(buf, info, px, py, (alpha.min(255) << 24) | (color & 0x00FFFFFF));
