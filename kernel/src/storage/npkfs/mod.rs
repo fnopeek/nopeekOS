@@ -221,9 +221,23 @@ pub fn store(name: &str, data: &[u8], cap_id: [u8; 32]) -> Result<[u8; 32], FsEr
         indirect_block,
     };
 
-    // Insert into B-tree (COW)
+    // Insert into B-tree (COW). If insert fails (duplicate key, disk
+    // full mid-operation, etc.), free every block we just allocated —
+    // otherwise large writes (4 K wallpapers ~33 MB) leak their entire
+    // extent + indirect chain on every failed attempt.
     let root = fs.sb.btree_root;
-    let (new_root, old_blocks) = btree::insert(&mut fs.cache, &mut fs.bitmap, root, &entry)?;
+    let (new_root, old_blocks) = match btree::insert(&mut fs.cache, &mut fs.bitmap, root, &entry) {
+        Ok(v) => v,
+        Err(e) => {
+            for ext in &all_extents {
+                fs.bitmap.free(ext.start_block, ext.block_count);
+            }
+            if indirect_block != 0 {
+                free_indirect_chain(&mut fs.cache, &mut fs.bitmap, indirect_block);
+            }
+            return Err(e);
+        }
+    };
 
     // Record old blocks for deferred free
     for b in &old_blocks {
@@ -346,15 +360,17 @@ pub fn delete(name: &str) -> Result<(), FsError> {
     for i in 0..direct_count {
         fs.journal.record_free(entry.extents[i].start_block, entry.extents[i].block_count);
     }
-    // Indirect extents
-    if entry.indirect_block != 0 {
-        if let Ok(indirect) = read_indirect_extents(&mut fs.cache, entry.indirect_block) {
-            for ext in &indirect {
-                fs.journal.record_free(ext.start_block, ext.block_count);
-            }
-        }
-        // Also free the indirect blocks themselves
-        free_indirect_chain(&mut fs.cache, &mut fs.bitmap, entry.indirect_block);
+    // Indirect extents: read the chain + record each data extent for
+    // journaled free, but do NOT free the indirect chain blocks yet —
+    // that waits until after the journal commits in Phase 4, otherwise
+    // subsequent allocs could reuse blocks the btree still references.
+    let indirect_extents = if entry.indirect_block != 0 {
+        read_indirect_extents(&mut fs.cache, entry.indirect_block).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    for ext in &indirect_extents {
+        fs.journal.record_free(ext.start_block, ext.block_count);
     }
 
     // Commit
@@ -378,7 +394,8 @@ pub fn delete(name: &str) -> Result<(), FsError> {
     fs.journal.finalize(&mut fs.cache)?;
     fs.cache.flush()?;
 
-    // Phase 4: free old B-tree blocks + data blocks + TRIM
+    // Phase 4: free old B-tree blocks + direct + indirect data +
+    // indirect chain itself (all deferred until commit is safe).
     for b in &old_blocks {
         fs.bitmap.free(*b, 1);
     }
@@ -387,7 +404,13 @@ pub fn delete(name: &str) -> Result<(), FsError> {
         fs.bitmap.free(entry.extents[i].start_block, entry.extents[i].block_count);
         fs.cache.invalidate(entry.extents[i].start_block);
     }
-    // Indirect extents already freed above via free_indirect_chain + journal
+    for ext in &indirect_extents {
+        fs.bitmap.free(ext.start_block, ext.block_count);
+        fs.cache.invalidate(ext.start_block);
+    }
+    if entry.indirect_block != 0 {
+        free_indirect_chain(&mut fs.cache, &mut fs.bitmap, entry.indirect_block);
+    }
     fs.bitmap.flush_trims();
 
     Ok(())
