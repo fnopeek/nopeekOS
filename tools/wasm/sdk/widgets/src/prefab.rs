@@ -11,14 +11,14 @@ use crate::abi::{
 };
 use crate::style::{Padding, Radius, Spacing};
 
-// Panel delegates surface + rounded border to the shade window chrome —
-// no own Background/Border, otherwise two rounded layers stack.
+// Panel has no padding so dividers reach the window chrome for a
+// closed ring; children set their own padding individually.
 pub fn panel(children: Vec<Widget>) -> Widget {
     Widget::Column {
         children,
         spacing: Spacing::Xs.as_u16(),
         align:   Align::Stretch,
-        modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
+        modifiers: vec![],
     }
 }
 
@@ -43,7 +43,7 @@ pub fn searchbar(query: &str, placeholder: &str, trailing: Option<Widget>) -> Wi
         children,
         spacing: Spacing::Sm.as_u16(),
         align:   Align::Center,
-        modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
+        modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
     }
 }
 
@@ -56,7 +56,7 @@ pub fn list_row(
     on_hover: Option<ActionId>,
 ) -> Widget {
     let mut row_mods: Vec<Modifier> = Vec::with_capacity(5);
-    row_mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    row_mods.push(Modifier::Padding(Padding::Md.as_u16()));
     if let Some(id) = on_click { row_mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { row_mods.push(Modifier::OnHover(id)); }
     if selected {
@@ -135,7 +135,7 @@ pub fn footer(left: &str, right: &str) -> Widget {
         ],
         spacing: 0,
         align:   Align::Center,
-        modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
+        modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
     }
 }
 
