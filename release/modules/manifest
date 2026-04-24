@@ -4,9 +4,9 @@ size=1676
 sha384=3a2fe912a910708ed8472a0cc4c57c50eb33d0c2b9eea9d6a81a1581d6c01c71e4a24cf9ac9b960a1f3842b79ad33d2e
 
 [drun]
-version=0.4.3
-size=28548
-sha384=a9c6bed3f6f0d75f8d05a15faa3676082659b6ed28f6e1df8d5d6deedd95edaebe14efbf32ca0e2d99eba2ce6325b3f0
+version=0.4.4
+size=28559
+sha384=c1f4df99abd9735bbccd9dc7f8efd54f22c51627d0cae98eab71ed211b21b71591bf06b6eaedc7db72d8a959ef3c17a6
 
 [files-stub]
 version=0.2.1
