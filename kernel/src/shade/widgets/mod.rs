@@ -289,31 +289,15 @@ fn widget_children_ref(w: &abi::Widget) -> alloc::vec::Vec<&abi::Widget> {
 pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
     let (&version, body) = match bytes.split_first() {
         Some(v) => v,
-        None => {
-            crate::kprintln!("[npk] scene_commit: empty payload");
-            return -1;
-        }
+        None => return -1,
     };
     if version != abi::WIRE_VERSION {
-        crate::kprintln!(
-            "[npk] scene_commit: wire version mismatch (got {:#x}, want {:#x})",
-            version, abi::WIRE_VERSION,
-        );
         return -1;
     }
-    // P10.6: hash the payload and short-circuit if it matches the
-    // cached scene. Fast path for apps that re-commit identical
-    // trees (happens on every event poll iteration in an idle app).
-    // Hash the full `bytes` (version byte + body) so any wire-level
-    // change (incl. version bump) invalidates the cache.
     let incoming_hash: [u8; 32] = *blake3::hash(bytes).as_bytes();
     if window_id != 0 {
         if let Some(cached_hash) = SCENES.lock().get(&window_id).map(|s| s.payload_hash) {
             if cached_hash == incoming_hash {
-                crate::kprintln!(
-                    "[npk] scene_commit: {} bytes → cache hit, skip re-render",
-                    bytes.len(),
-                );
                 return 0;
             }
         }
@@ -321,34 +305,25 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
 
     let tree: abi::Widget = match postcard::from_bytes(body) {
         Ok(t) => t,
-        Err(e) => {
-            crate::kprintln!("[npk] scene_commit: postcard decode failed: {:?}", e);
-            return -2;
-        }
+        Err(_) => return -2,
     };
-    crate::kprintln!("[npk] scene_commit: {} bytes → tree decoded", bytes.len());
-    debug::print_tree(&tree);
 
     // Obtain or create the widget window. `new_window` is Some iff we
     // just created one — return its id to the caller so the next
     // commit reuses the same slot.
     let (target_id, new_window) = match window_id {
         0 => {
-            let id = match crate::shade::with_compositor(|c| c.create_widget_window("widget")) {
-                Some(id) => id,
-                None => {
-                    crate::kprintln!("[npk] scene_commit: shade not available");
-                    return -3;
-                }
-            };
-            (id.0, Some(id.0))
+            let id = crate::shade::with_compositor(|c| c.create_widget_window("widget"))
+                .ok_or(-3i32);
+            match id {
+                Ok(id) => (id.0, Some(id.0)),
+                Err(_) => return -3,
+            }
         }
         id => (id, None),
     };
 
-    // Look up the window's current content rect. retile() may have
-    // moved it since the last commit, so always re-query.
-    let rect = match crate::shade::with_compositor(|c| {
+    let rect = crate::shade::with_compositor(|c| {
         let win = c.windows.iter().find(|w| w.id.0 == target_id)?;
         let border = c.border;
         Some((
@@ -357,25 +332,15 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
             win.content_w(border),
             win.content_h(border),
         ))
-    }).flatten() {
+    }).flatten();
+    let (win_x, win_y, win_w, win_h) = match rect {
         Some(r) => r,
-        None => {
-            crate::kprintln!("[npk] scene_commit: widget window {} not found", target_id);
-            return -3;
-        }
+        None    => return -3,
     };
-    let (win_x, win_y, win_w, win_h) = rect;
-    if win_w == 0 || win_h == 0 {
-        crate::kprintln!("[npk] scene_commit: window has zero-size content rect");
-        return -3;
-    }
+    if win_w == 0 || win_h == 0 { return -3; }
 
-    // Lay out the tree inside the resolved rect, then rasterize into a
-    // fresh back buffer. The per-window scene takes ownership of the
-    // buffer so shade can re-blit on every render pass.
     let layout_rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
     let layout_tree = layout::layout(&tree, layout_rect);
-    debug::print_layout(&tree, &layout_tree);
 
     let pixels = rasterize_to_buffer(&tree, &layout_tree, win_x, win_y, win_w, win_h);
 
@@ -402,13 +367,6 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
     });
     crate::shade::request_render();
 
-    crate::kprintln!(
-        "[npk] scene_commit: rendered {}x{} into widget window #{}",
-        win_w, win_h, target_id,
-    );
-
-    // On first commit, tell the caller its new window id so it can
-    // store it in HostState and reuse on the next commit.
     match new_window {
         Some(id) => id as i32,
         None     => 0,
