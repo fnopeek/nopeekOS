@@ -20,13 +20,15 @@ pub fn intent_wallpaper(args: &str) {
         "list" | "ls" => list_wallpapers(),
         "random" | "rand" => random_wallpaper(),
         "demo" => generate_demo_wallpapers(rest),
+        "solid" | "hex" | "color" => generate_solid_wallpaper(rest),
         "" => {
-            kprintln!("[npk] Usage: wallpaper <set|clear|list|random|demo>");
+            kprintln!("[npk] Usage: wallpaper <set|clear|list|random|demo|solid>");
             kprintln!("[npk]   wallpaper set <name>     Set wallpaper from npkFS");
             kprintln!("[npk]   wallpaper clear          Revert to aurora");
             kprintln!("[npk]   wallpaper list           List available wallpapers");
             kprintln!("[npk]   wallpaper random         Set random wallpaper");
             kprintln!("[npk]   wallpaper demo [WxH]     Generate gradients (default: native res)");
+            kprintln!("[npk]   wallpaper solid <hex>    Store + set a solid-color wallpaper (e.g. 2a1840)");
         }
         other => {
             // Treat as `wallpaper set <name>` shortcut
@@ -299,6 +301,54 @@ fn generate_demo_wallpapers(res_arg: &str) {
     }
     kprintln!("[npk] Setting random wallpaper...");
     random_wallpaper();
+}
+
+fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 { return None; }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+fn generate_solid_wallpaper(arg: &str) {
+    let (r, g, b) = match parse_hex_rgb(arg) {
+        Some(rgb) => rgb,
+        None => {
+            kprintln!("[npk] Usage: wallpaper solid <rrggbb>   (e.g. 2a1840)");
+            return;
+        }
+    };
+
+    let (w, h) = crate::framebuffer::get_resolution();
+    if w == 0 || h == 0 {
+        kprintln!("[npk] No framebuffer available");
+        return;
+    }
+
+    let pixels = (w as usize) * (h as usize);
+    let mut buf: Vec<u8> = Vec::with_capacity(8 + pixels * 4);
+    buf.extend_from_slice(&w.to_le_bytes());
+    buf.extend_from_slice(&h.to_le_bytes());
+    for _ in 0..pixels {
+        buf.push(b);
+        buf.push(g);
+        buf.push(r);
+        buf.push(0xFF);
+    }
+
+    ensure_wallpaper_dir();
+    let name = alloc::format!("solid-{:02x}{:02x}{:02x}", r, g, b);
+    let path = alloc::format!("{}/{}", wallpaper_dir(), name);
+    let _ = crate::npkfs::delete(&path);
+    if let Err(e) = crate::npkfs::store(&path, &buf, crate::capability::CAP_NULL) {
+        kprintln!("[npk] Failed to store {}: {:?}", path, e);
+        return;
+    }
+
+    kprintln!("[npk] Generated {} ({}x{})", name, w, h);
+    apply_wallpaper_data(&path, &buf);
 }
 
 /// Clear wallpaper, revert to aurora.
