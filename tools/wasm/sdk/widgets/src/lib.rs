@@ -46,6 +46,8 @@ extern crate alloc;
 
 pub mod abi;
 pub mod app_meta;
+pub mod prefab;
+pub mod style;
 pub mod wire;
 
 // Compile-time ABI ordering guard. Mirrors kernel/src/shade/widgets/check_abi.rs.
@@ -58,4 +60,5 @@ pub use abi::{
     Shadow, Size, TextStyle, Token, Transition, Widget,
 };
 pub use app_meta::{AppMeta, AppMetaError, IconRef, APP_META_WIRE};
+pub use style::{Elevation, Padding, Radius, Spacing};
 pub use wire::{decode, encode, WireError, WIRE_VERSION};
