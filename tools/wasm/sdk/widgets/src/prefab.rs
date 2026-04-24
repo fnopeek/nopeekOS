@@ -56,7 +56,7 @@ pub fn list_row(
     on_hover: Option<ActionId>,
 ) -> Widget {
     let mut row_mods: Vec<Modifier> = Vec::with_capacity(5);
-    row_mods.push(Modifier::Padding(Padding::Md.as_u16()));
+    row_mods.push(Modifier::Padding(Padding::Sm.as_u16()));
     if let Some(id) = on_click { row_mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { row_mods.push(Modifier::OnHover(id)); }
     if selected {
