@@ -198,10 +198,12 @@ impl Drun {
         let result_text = format_count(self.filtered.len(), self.row_offset, MAX_VISIBLE_ROWS);
         let foot = prefab::footer("↑↓ navigate   ↵ open   esc close", &result_text);
 
-        let mut root: Vec<Widget> = Vec::with_capacity(rows.len() + 4);
+        let mut root: Vec<Widget> = Vec::with_capacity(rows.len() + 6);
         root.push(search);
+        root.push(Widget::Divider);
         root.extend(rows);
         root.push(Widget::Spacer { flex: 1 });
+        root.push(Widget::Divider);
         root.push(foot);
         prefab::panel(root)
     }

@@ -11,20 +11,14 @@ use crate::abi::{
 };
 use crate::style::{Padding, Radius, Spacing};
 
+// Panel delegates surface + rounded border to the shade window chrome —
+// no own Background/Border, otherwise two rounded layers stack.
 pub fn panel(children: Vec<Widget>) -> Widget {
     Widget::Column {
         children,
         spacing: Spacing::Xs.as_u16(),
         align:   Align::Stretch,
-        modifiers: vec![
-            Modifier::Padding(Padding::Sm.as_u16()),
-            Modifier::Background(Token::Surface),
-            Modifier::Border {
-                token:  Token::Border,
-                width:  1,
-                radius: Radius::Lg.as_u8(),
-            },
-        ],
+        modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
     }
 }
 
@@ -120,11 +114,6 @@ pub fn badge(text: &str) -> Widget {
         modifiers: vec![
             Modifier::Padding(Padding::Xs.as_u16()),
             Modifier::Background(Token::SurfaceMuted),
-            Modifier::Border {
-                token:  Token::Border,
-                width:  1,
-                radius: Radius::Sm.as_u8(),
-            },
         ],
     }
 }
