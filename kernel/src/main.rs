@@ -39,6 +39,7 @@ mod intent;
 mod config;
 mod vga;
 mod wasm;
+mod wasm_meta;
 mod shell;
 mod setup;
 mod gpu;

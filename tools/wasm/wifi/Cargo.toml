@@ -1,10 +1,13 @@
 [package]
 name = "wifi"
-version = "1.52.0"
+version = "1.53.0"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
+
+[build-dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
 
 [profile.release]
 opt-level = "s"

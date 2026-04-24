@@ -1,6 +1,6 @@
 [package]
 name = "files-stub"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "P10.2 dummy widget app — commits one tree, exits."
 
@@ -8,6 +8,9 @@ description = "P10.2 dummy widget app — commits one tree, exits."
 crate-type = ["cdylib"]
 
 [dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[build-dependencies]
 nopeek_widgets = { path = "../sdk/widgets" }
 
 [profile.release]

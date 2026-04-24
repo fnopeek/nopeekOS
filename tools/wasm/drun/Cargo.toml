@@ -1,6 +1,6 @@
 [package]
 name = "drun"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Mod+D app launcher — first interactive widget app."
 
@@ -14,6 +14,9 @@ nopeek_widgets = { path = "../sdk/widgets" }
 version = "1.0"
 default-features = false
 features = ["alloc"]
+
+[build-dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
 
 [profile.release]
 opt-level = "s"

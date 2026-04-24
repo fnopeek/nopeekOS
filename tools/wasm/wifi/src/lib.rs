@@ -5,6 +5,11 @@
 
 #![no_std]
 
+#[unsafe(link_section = ".npk.app_meta")]
+#[used]
+static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
+    = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
+
 mod host;
 mod regs;
 mod fw;

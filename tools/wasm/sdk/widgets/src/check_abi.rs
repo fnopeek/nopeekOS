@@ -84,7 +84,16 @@ const _: () = {
 
     // Wire version
     assert!(WIRE_VERSION == 0x01);
+
+    // AppMeta wire version (tracked separately from widget wire).
+    assert!(crate::app_meta::APP_META_WIRE == 0x01);
 };
+
+fn _icon_ref_wire_position(r: &crate::app_meta::IconRef) -> usize {
+    match r {
+        crate::app_meta::IconRef::Builtin(_) => 0,
+    }
+}
 
 // ── Exhaustive-match locks (fieldful enums) ───────────────────────────
 
