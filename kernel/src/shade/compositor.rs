@@ -497,9 +497,13 @@ impl Compositor {
     pub(crate) fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
                      border_color: u32) {
-        // 1. FULL OVERWRITE: background kills all old pixels (fixes ghost text)
-        background::draw_background_region(shadow, info,
-            win.x, win.y, win.width, win.height);
+        // Overlay windows skip the wallpaper restore — rounded-out
+        // corners keep showing whatever app is underneath instead of
+        // punching a wallpaper-shaped hole into it.
+        if !win.is_overlay {
+            background::draw_background_region(shadow, info,
+                win.x, win.y, win.width, win.height);
+        }
 
         // 2. Border blend (gradient if theme active + window focused) —
         // same chrome for Terminal and Widget so widget-apps look
