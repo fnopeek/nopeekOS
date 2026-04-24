@@ -677,16 +677,27 @@ fn remove_from_parent(
 
     let new_parent = bitmap.alloc(1)?;
     let mut new_buf = buf;
+    let mut new_hdr = hdr;
 
-    // Remove the child_idx entry
+    // Remove the child_idx entry. child_idx == n means we're dropping
+    // the rightmost child (which lives in header.next_leaf, not in the
+    // indexed 0..n slots). In that case the child formerly at n-1
+    // becomes the new rightmost — copy it into next_leaf before we
+    // decrement num_entries. Forgetting this leaves next_leaf dangling
+    // on the freed leaf, and losing the child at n-1 entirely; the
+    // freed block is later handed out to data allocations, so the next
+    // iter_subtree walks into raw file bytes → BTREE_MAGIC mismatch →
+    // FsError::Corrupt. Exactly the decrypt-failed cascade we saw.
     if child_idx < n {
         for i in child_idx..n - 1 {
             let key = <[u8; 64]>::try_from(internal_key(&buf, i + 1)).unwrap();
             let child = internal_child(&buf, i + 1);
             set_internal_entry(&mut new_buf, i, &key, child);
         }
+    } else {
+        // child_idx == n: rightmost (next_leaf) gets removed.
+        new_hdr.next_leaf = internal_child(&buf, n - 1);
     }
-    let mut new_hdr = hdr;
     new_hdr.num_entries -= 1;
     write_header(&mut new_buf, &new_hdr);
 
