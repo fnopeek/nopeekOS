@@ -176,11 +176,12 @@ fn render_frame_layered() {
         }
 
         fb.swap_buffers();
+        // Commit before blit so the IRQ-side lock-free cursor path
+        // sees the new front buffer while MMIO is being updated —
+        // otherwise a restore-blit during the blit window copied
+        // old-scene pixels onto new MMIO (the 4-eck ghost artifacts).
+        fb.commit_front();
 
-        // Shadow stays cursor-free across the blit (save/draw/restore
-        // on shadow raced with scene_commit writes from worker cores,
-        // leaving stale 12×12 patches that looked like cursor ghosts
-        // on every drun hover). Cursor goes on top of MMIO after blit.
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
         } else {
@@ -192,8 +193,6 @@ fn render_frame_layered() {
             damage.mark_all();
             damage.flush(fb);
         }
-
-        fb.commit_front();
 
         if crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);
@@ -214,6 +213,7 @@ fn render_frame_legacy() {
         }
 
         fb.swap_buffers();
+        fb.commit_front();
 
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
@@ -226,8 +226,6 @@ fn render_frame_legacy() {
             damage.mark_all();
             damage.flush(fb);
         }
-
-        fb.commit_front();
 
         if crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);
@@ -613,11 +611,38 @@ pub fn poll_render() {
                 }
             }
 
-            let focused_id = comp.focused;
+            // Any overlay that sits on top of a dirty non-overlay must
+            // repaint too — otherwise the window below paints over it
+            // (classic top-refresh-punches-through-drun bug).
+            let dirty_rects: alloc::vec::Vec<(u32, u32, u32, u32)> = comp.windows.iter()
+                .filter(|w| w.dirty && !w.is_overlay
+                    && w.workspace == comp.active_workspace && w.visible)
+                .map(|w| (w.x, w.y, w.width, w.height))
+                .collect();
             for win in &mut comp.windows {
+                if !win.is_overlay || win.dirty { continue; }
+                for (rx, ry, rw, rh) in &dirty_rects {
+                    if win.x < rx + rw && *rx < win.x + win.width
+                        && win.y < ry + rh && *ry < win.y + win.height
+                    {
+                        win.dirty = true;
+                        break;
+                    }
+                }
+            }
+
+            let focused_id = comp.focused;
+            // Render back-to-front so overlays paint last (otherwise a
+            // terminal behind drun would overwrite drun's pixels).
+            let render_order: alloc::vec::Vec<crate::shade::window::WindowId> =
+                comp.z_order.iter().rev().copied().collect();
+            for wid in render_order {
+                let win = match comp.windows.iter_mut().find(|w| w.id == wid) {
+                    Some(w) => w,
+                    None => continue,
+                };
                 if win.workspace != comp.active_workspace { continue; }
                 if !win.visible { continue; }
-                // Only render windows that are dirty OR focused (active terminal output)
                 if !win.dirty && Some(win.id) != focused_id { continue; }
                 win.dirty = false;
 
