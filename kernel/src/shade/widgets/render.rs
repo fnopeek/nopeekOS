@@ -141,8 +141,11 @@ fn paint_node(
         }
 
         Widget::Icon { id, size, .. } => {
-            rast.icon(target, *id, *size, Token::OnSurface,
-                      Point { x: rect.x, y: rect.y });
+            let mut color = Token::OnSurface;
+            for m in modifiers_of(widget) {
+                if let Modifier::Tint(tok) = m { color = *tok; }
+            }
+            rast.icon(target, *id, *size, color, Point { x: rect.x, y: rect.y });
         }
 
         Widget::Button { label, icon, .. } => {

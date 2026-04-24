@@ -33,7 +33,7 @@ pub fn searchbar(query: &str, placeholder: &str, trailing: Option<Widget>) -> Wi
     children.push(Widget::Icon {
         id:        IconId::MagnifyingGlass,
         size:      24,
-        modifiers: vec![],
+        modifiers: vec![Modifier::Tint(Token::Accent)],
     });
     children.push(Widget::Text { content: text, style, modifiers: vec![] });
     children.push(Widget::Spacer { flex: 1 });
@@ -63,7 +63,7 @@ pub fn list_row(
         row_mods.push(Modifier::Background(Token::AccentMuted));
         row_mods.push(Modifier::Border {
             token:  Token::Accent,
-            width:  0,
+            width:  1,
             radius: Radius::Sm.as_u8(),
         });
     }
@@ -87,8 +87,13 @@ pub fn list_row(
         },
     ];
 
+    let icon_mods = if selected {
+        vec![Modifier::Tint(Token::Accent)]
+    } else {
+        vec![]
+    };
     let mut children: Vec<Widget> = Vec::with_capacity(4);
-    children.push(Widget::Icon { id: icon, size: 24, modifiers: vec![] });
+    children.push(Widget::Icon { id: icon, size: 24, modifiers: icon_mods });
     children.push(Widget::Column {
         children:  text_col,
         spacing:   Spacing::Xxs.as_u16(),
