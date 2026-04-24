@@ -22,21 +22,20 @@ pub fn intent_wallpaper(args: &str) {
         "demo" => generate_demo_wallpapers(rest),
         "solid" | "hex" | "color" => generate_solid_wallpaper(rest),
         "gradient" | "grad" => generate_gradient_wallpaper(rest),
+        "pattern" | "pat" => generate_pattern_wallpaper(rest),
         "" => {
-            kprintln!("[npk] Usage: wallpaper <set|clear|list|random|demo|solid|gradient>");
-            kprintln!("[npk]   wallpaper set <name>              Set wallpaper from npkFS");
-            kprintln!("[npk]   wallpaper clear                   Revert to aurora");
-            kprintln!("[npk]   wallpaper list                    List available wallpapers");
-            kprintln!("[npk]   wallpaper random                  Set random wallpaper");
-            kprintln!("[npk]   wallpaper demo [WxH]              Generate 4 gradient presets");
-            kprintln!("[npk]   wallpaper solid <hex>             e.g. 2a1840");
-            kprintln!("[npk]   wallpaper gradient <tl> <tr> <bl> <br>   4 corner hex colors, bilinear");
-            kprintln!("[npk]   wallpaper gradient <top> <bottom>        2 colors, top→bottom");
+            kprintln!("[npk] Usage: wallpaper <set|clear|list|random|demo|solid|gradient|pattern>");
+            kprintln!("[npk]   set <name>                          Set wallpaper from npkFS");
+            kprintln!("[npk]   clear                               Default background");
+            kprintln!("[npk]   list                                List wallpapers");
+            kprintln!("[npk]   random                              Pick a random one");
+            kprintln!("[npk]   demo [WxH]                          4 gradient presets");
+            kprintln!("[npk]   solid <hex>                         flat colour (e.g. 2a1840)");
+            kprintln!("[npk]   gradient <top> <bot>                two-colour vertical");
+            kprintln!("[npk]   gradient <tl> <tr> <bl> <br>        four-corner bilinear");
+            kprintln!("[npk]   pattern <kind> <fg> <bg>            kind = dots|stripes|checker|grid|noise");
         }
-        other => {
-            // Treat as `wallpaper set <name>` shortcut
-            set_wallpaper(other);
-        }
+        other => set_wallpaper(other),
     }
 }
 
@@ -244,20 +243,10 @@ pub fn random_wallpaper() {
     apply_wallpaper_data(chosen, &data);
 }
 
-/// Generate demo gradient wallpapers by delegating to the wallpaper
-/// WASM module. The kernel owns no pixel math here — it ensures the
-/// target directory, hands the module a `@demos:<W>x<H>:<wp_dir>`
-/// instruction via .npk-wallpaper-target, then picks a random result.
-///
-/// `res_arg` is the user-supplied argument after `wallpaper demo` —
-/// either empty (→ native framebuffer resolution) or `WxH`.
-fn generate_demo_wallpapers(res_arg: &str) {
-    let (w, h) = parse_resolution(res_arg);
-    if w == 0 || h == 0 {
-        kprintln!("[npk] No framebuffer available");
-        return;
-    }
-
+/// Run the wallpaper WASM module with an `@<mode>:…` target string.
+/// Module handles all pixel math + stores under wp_dir + calls
+/// npk_set_wallpaper itself for modes that apply immediately.
+fn delegate_to_wallpaper(target: String, w: u32, h: u32, label: &str) {
     let (wasm_bytes, _) = match crate::npkfs::fetch("sys/wasm/wallpaper") {
         Ok(v) => v,
         Err(_) => {
@@ -266,10 +255,6 @@ fn generate_demo_wallpapers(res_arg: &str) {
         }
     };
 
-    ensure_wallpaper_dir();
-    let wp_dir = wallpaper_dir();
-
-    let target = alloc::format!("@demos:{}x{}:{}", w, h, wp_dir);
     let _ = crate::npkfs::store(".npk-wallpaper-target", target.as_bytes(),
         crate::capability::CAP_NULL);
 
@@ -277,7 +262,7 @@ fn generate_demo_wallpapers(res_arg: &str) {
         crate::capability::Rights::READ
             | crate::capability::Rights::WRITE
             | crate::capability::Rights::EXECUTE,
-        Some(60_000), // generate at 4K can take a few seconds
+        Some(60_000),
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -287,157 +272,78 @@ fn generate_demo_wallpapers(res_arg: &str) {
         }
     };
 
-    // Gradient generation is deterministically bounded by WxH:
-    // ~20 instructions per pixel × 4 themes × W*H pixels. At native 4K
-    // (3840x2160) that's ~665M instructions — well past DEFAULT_FUEL.
-    // Use a generous budget (first-party module, trusted, bounded).
-    let fuel = (w as u64) * (h as u64) * 4 * 40 + 50_000_000; // slack + const overhead
-    kprintln!("[npk] Generating demo wallpapers at {}x{} (fuel budget: {})...", w, h, fuel);
+    // ~40 instructions per pixel × 4 themes worst case + constant overhead.
+    let fuel = (w as u64) * (h as u64) * 4 * 40 + 50_000_000;
+    kprintln!("[npk] {} at {}x{}...", label, w, h);
     match crate::wasm::execute_sandboxed_with_fuel(&wasm_bytes, "_start", &[], module_cap, fuel) {
-        Ok(_) => kprintln!("[npk] {} themes generated.", 4),
-        Err(e) => kprintln!("[npk] generate failed: {}", e),
+        Ok(_) => {}
+        Err(e) => kprintln!("[npk] wallpaper module failed: {}", e),
     }
     let _ = crate::npkfs::delete(".npk-wallpaper-target");
 
     if crate::shade::is_active() {
         crate::shade::render_frame();
     }
-    kprintln!("[npk] Setting random wallpaper...");
+}
+
+fn generate_demo_wallpapers(res_arg: &str) {
+    let (w, h) = parse_resolution(res_arg);
+    if w == 0 || h == 0 { kprintln!("[npk] No framebuffer available"); return; }
+    ensure_wallpaper_dir();
+    let target = alloc::format!("@demos:{}x{}:{}", w, h, wallpaper_dir());
+    delegate_to_wallpaper(target, w, h, "Generating demo wallpapers");
     random_wallpaper();
 }
 
-fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
-    let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 { return None; }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some((r, g, b))
+fn generate_solid_wallpaper(arg: &str) {
+    let hex = arg.trim();
+    if hex.is_empty() {
+        kprintln!("[npk] Usage: wallpaper solid <rrggbb>");
+        return;
+    }
+    let (w, h) = crate::framebuffer::get_resolution();
+    if w == 0 || h == 0 { kprintln!("[npk] No framebuffer available"); return; }
+    ensure_wallpaper_dir();
+    let target = alloc::format!("@solid:{}:{}x{}:{}", hex, w, h, wallpaper_dir());
+    delegate_to_wallpaper(target, w, h, "Generating solid wallpaper");
+}
+
+fn generate_pattern_wallpaper(arg: &str) {
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    if parts.len() != 3 {
+        kprintln!("[npk] Usage: wallpaper pattern <dots|stripes|checker|grid|noise> <fg> <bg>");
+        return;
+    }
+    let name = parts[0];
+    let fg = parts[1];
+    let bg = parts[2];
+    let (w, h) = crate::framebuffer::get_resolution();
+    if w == 0 || h == 0 { kprintln!("[npk] No framebuffer available"); return; }
+    ensure_wallpaper_dir();
+    let target = alloc::format!("@pattern:{}:{}:{}:{}x{}:{}", name, fg, bg, w, h, wallpaper_dir());
+    delegate_to_wallpaper(target, w, h, "Generating pattern wallpaper");
 }
 
 fn generate_gradient_wallpaper(arg: &str) {
     let parts: Vec<&str> = arg.split_whitespace().collect();
-    let (tl, tr, bl, br) = match parts.len() {
-        2 => {
-            let a = match parse_hex_rgb(parts[0]) { Some(c) => c, None => { kprintln!("[npk] bad top color"); return; } };
-            let b = match parse_hex_rgb(parts[1]) { Some(c) => c, None => { kprintln!("[npk] bad bottom color"); return; } };
-            (a, a, b, b)
-        }
-        4 => {
-            let p: Option<[(u8,u8,u8); 4]> = {
-                let mut out = [(0u8,0u8,0u8); 4];
-                let mut ok = true;
-                for i in 0..4 {
-                    match parse_hex_rgb(parts[i]) {
-                        Some(c) => out[i] = c,
-                        None => { ok = false; break; }
-                    }
-                }
-                if ok { Some(out) } else { None }
-            };
-            match p {
-                Some([a, b, c, d]) => (a, b, c, d),
-                None => { kprintln!("[npk] all 4 corners must be 6-char hex"); return; }
-            }
-        }
+    let (w, h) = crate::framebuffer::get_resolution();
+    if w == 0 || h == 0 { kprintln!("[npk] No framebuffer available"); return; }
+    ensure_wallpaper_dir();
+    let wp_dir = wallpaper_dir();
+
+    let target = match parts.len() {
+        2 => alloc::format!("@gradient2:{}:{}:{}x{}:{}", parts[0], parts[1], w, h, wp_dir),
+        4 => alloc::format!("@gradient4:{}:{}:{}:{}:{}x{}:{}",
+            parts[0], parts[1], parts[2], parts[3], w, h, wp_dir),
         _ => {
             kprintln!("[npk] Usage: wallpaper gradient <tl> <tr> <bl> <br>   or   <top> <bottom>");
             return;
         }
     };
-
-    let (w, h) = crate::framebuffer::get_resolution();
-    if w == 0 || h == 0 { kprintln!("[npk] No framebuffer available"); return; }
-
-    let mut buf: Vec<u8> = Vec::with_capacity(8 + (w * h * 4) as usize);
-    buf.extend_from_slice(&w.to_le_bytes());
-    buf.extend_from_slice(&h.to_le_bytes());
-
-    // Bilinear interpolation across 4 corners.
-    let wmax = (w.saturating_sub(1)).max(1) as u32;
-    let hmax = (h.saturating_sub(1)).max(1) as u32;
-    for y in 0..h {
-        let fy = (y * 1024) / hmax;
-        for x in 0..w {
-            let fx = (x * 1024) / wmax;
-            let r = lerp_2d(tl.0, tr.0, bl.0, br.0, fx, fy);
-            let g = lerp_2d(tl.1, tr.1, bl.1, br.1, fx, fy);
-            let b = lerp_2d(tl.2, tr.2, bl.2, br.2, fx, fy);
-            buf.push(b);
-            buf.push(g);
-            buf.push(r);
-            buf.push(0xFF);
-        }
-    }
-
-    ensure_wallpaper_dir();
-    let name = alloc::format!(
-        "grad-{:02x}{:02x}{:02x}-{:02x}{:02x}{:02x}",
-        tl.0, tl.1, tl.2, br.0, br.1, br.2,
-    );
-    let path = alloc::format!("{}/{}", wallpaper_dir(), name);
-    let _ = crate::npkfs::delete(&path);
-    if let Err(e) = crate::npkfs::store(&path, &buf, crate::capability::CAP_NULL) {
-        kprintln!("[npk] Failed to store {}: {:?}", path, e);
-        return;
-    }
-
-    kprintln!("[npk] Generated {} ({}x{})", name, w, h);
-    apply_wallpaper_data(&path, &buf);
+    delegate_to_wallpaper(target, w, h, "Generating gradient wallpaper");
 }
 
-// Bilinear interpolate 4 corner bytes. `fx` / `fy` are 0..=1024.
-fn lerp_2d(tl: u8, tr: u8, bl: u8, br: u8, fx: u32, fy: u32) -> u8 {
-    let fx = fx.min(1024);
-    let fy = fy.min(1024);
-    let inv_fx = 1024 - fx;
-    let inv_fy = 1024 - fy;
-    let top    = tl as u32 * inv_fx + tr as u32 * fx;        // /1024
-    let bottom = bl as u32 * inv_fx + br as u32 * fx;        // /1024
-    let v = top * inv_fy + bottom * fy;                      // /1024/1024
-    (v / (1024 * 1024)) as u8
-}
-
-fn generate_solid_wallpaper(arg: &str) {
-    let (r, g, b) = match parse_hex_rgb(arg) {
-        Some(rgb) => rgb,
-        None => {
-            kprintln!("[npk] Usage: wallpaper solid <rrggbb>   (e.g. 2a1840)");
-            return;
-        }
-    };
-
-    let (w, h) = crate::framebuffer::get_resolution();
-    if w == 0 || h == 0 {
-        kprintln!("[npk] No framebuffer available");
-        return;
-    }
-
-    let pixels = (w as usize) * (h as usize);
-    let mut buf: Vec<u8> = Vec::with_capacity(8 + pixels * 4);
-    buf.extend_from_slice(&w.to_le_bytes());
-    buf.extend_from_slice(&h.to_le_bytes());
-    for _ in 0..pixels {
-        buf.push(b);
-        buf.push(g);
-        buf.push(r);
-        buf.push(0xFF);
-    }
-
-    ensure_wallpaper_dir();
-    let name = alloc::format!("solid-{:02x}{:02x}{:02x}", r, g, b);
-    let path = alloc::format!("{}/{}", wallpaper_dir(), name);
-    let _ = crate::npkfs::delete(&path);
-    if let Err(e) = crate::npkfs::store(&path, &buf, crate::capability::CAP_NULL) {
-        kprintln!("[npk] Failed to store {}: {:?}", path, e);
-        return;
-    }
-
-    kprintln!("[npk] Generated {} ({}x{})", name, w, h);
-    apply_wallpaper_data(&path, &buf);
-}
-
-/// Clear wallpaper, revert to aurora.
+/// Clear wallpaper, revert to default background.
 fn clear_wallpaper() {
     crate::gui::background::clear_wallpaper();
     crate::shade::force_redraw();

@@ -204,6 +204,11 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
     let pixel_count = (w * h) as usize;
     let palette = crate::theme::extract_palette(pixels, pixel_count);
     crate::theme::set_palette(&palette);
+
+    // New palette → re-rasterize any live widget scenes so the cached
+    // pixels pick up the fresh accent / surface tokens. Without this
+    // drun sits on the OLD wallpaper's colours until a new commit fires.
+    crate::shade::widgets::refresh_all_scenes();
 }
 
 /// Check if a custom wallpaper is active.
@@ -215,6 +220,7 @@ pub fn has_wallpaper() -> bool {
 pub fn clear_wallpaper() {
     WALLPAPER_SET.store(false, Ordering::Release);
     crate::theme::clear();
+    crate::shade::widgets::refresh_all_scenes();
 }
 
 /// Draw background (wallpaper if set, otherwise aurora) — full screen.
