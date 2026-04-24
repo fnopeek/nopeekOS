@@ -131,6 +131,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::Shadow(_)       => 9,
         Modifier::Effect(_)       => 10,
         Modifier::RoleOverride(_) => 11,
+        Modifier::Tint(_)         => 12,
     }
 }
 

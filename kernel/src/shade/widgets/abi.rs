@@ -294,6 +294,8 @@ pub enum Modifier {
     /// A11y role override (v1 reads but does not consume).
     #[allow(dead_code)]
     RoleOverride(Role),
+    /// Paint an Icon in the given Token color instead of OnSurface.
+    Tint(Token),
     // Appended only.
 }
 

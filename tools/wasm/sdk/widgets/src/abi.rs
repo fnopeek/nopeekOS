@@ -213,6 +213,7 @@ pub enum Modifier {
     Shadow(Shadow),
     Effect(EffectId),
     RoleOverride(Role),
+    Tint(Token),
     // Appended only.
 }
 
