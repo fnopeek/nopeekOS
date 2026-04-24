@@ -94,9 +94,14 @@ pub fn has_discard() -> bool {
 }
 
 pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
+    // Same partition_offset correction as read_block / write_block —
+    // without it, TRIM commands land in the ESP / GPT area in front of
+    // our partition and slowly shred the bootloader + previously-
+    // written kernel.bin. Every delete's flush_trims() was doing this.
+    let actual = start + PARTITION_OFFSET.load(Ordering::Acquire);
     if nvme::is_available() {
-        nvme::discard_blocks(start, count)
+        nvme::discard_blocks(actual, count)
     } else {
-        virtio_blk::discard_blocks(start, count)
+        virtio_blk::discard_blocks(actual, count)
     }
 }
