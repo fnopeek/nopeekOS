@@ -302,6 +302,31 @@ pub fn update_all_modules() -> usize {
     updated
 }
 
+/// Walk every installed module and cache its `.npk.app_meta` section
+/// into `sys/meta/<name>` if not already present. Idempotent + cheap.
+/// Called once per boot after npkfs mount + master_key setup so users
+/// upgrading via OTA (not a USB fresh-install) still get launcher meta.
+pub fn refresh_app_metas() {
+    let entries = match crate::npkfs::list() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let prefix = "sys/wasm/";
+    for (name, _, _) in &entries {
+        let module_name = match name.strip_prefix(prefix) {
+            Some(s) if !s.is_empty() && !s.contains('/') && !s.ends_with(".version") => s,
+            _ => continue,
+        };
+        let meta_key = alloc::format!("sys/meta/{}", module_name);
+        if crate::npkfs::fetch(&meta_key).is_ok() { continue; }
+        let wasm_bytes = match crate::npkfs::fetch(name) {
+            Ok((b, _)) => b,
+            Err(_) => continue,
+        };
+        cache_app_meta(module_name, &wasm_bytes);
+    }
+}
+
 /// `uninstall <name>` — remove a WASM module.
 pub fn intent_uninstall(args: &str) {
     let name = args.trim();
