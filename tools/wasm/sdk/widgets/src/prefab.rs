@@ -16,7 +16,7 @@ use crate::style::{Padding, Radius, Spacing};
 pub fn panel(children: Vec<Widget>) -> Widget {
     Widget::Column {
         children,
-        spacing: Spacing::Xs.as_u16(),
+        spacing: Spacing::Sm.as_u16(),
         align:   Align::Stretch,
         modifiers: vec![],
     }
@@ -68,19 +68,24 @@ pub fn list_row(
         });
     }
 
-    let mut text_col: Vec<Widget> = Vec::with_capacity(2);
-    text_col.push(Widget::Text {
-        content: title.to_string(),
-        style:   TextStyle::Body,
-        modifiers: vec![],
-    });
-    if !subtitle.is_empty() {
-        text_col.push(Widget::Text {
-            content: subtitle.to_string(),
+    // Always render subtitle (even when empty) so every row gets the
+    // same Body+Muted line-height — keeps the hover bar, dividers and
+    // the footer on a stable grid regardless of which entries have
+    // descriptions. Empty string → fontdue emits zero glyphs but the
+    // layout still reserves the Muted line-height slot.
+    let subtitle_text = if subtitle.is_empty() { " ".to_string() } else { subtitle.to_string() };
+    let text_col: Vec<Widget> = vec![
+        Widget::Text {
+            content: title.to_string(),
+            style:   TextStyle::Body,
+            modifiers: vec![],
+        },
+        Widget::Text {
+            content: subtitle_text,
             style:   TextStyle::Muted,
             modifiers: vec![],
-        });
-    }
+        },
+    ];
 
     let mut children: Vec<Widget> = Vec::with_capacity(4);
     children.push(Widget::Icon { id: icon, size: 24, modifiers: vec![] });
