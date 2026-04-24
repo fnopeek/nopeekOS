@@ -134,6 +134,16 @@ pub enum IconId {
     Trash               = 16,
     DotsThreeVertical   = 17,
     List                = 18,
+    // P10.11 file-browser additions (loft)
+    Monitor             = 19,
+    FileText            = 20,
+    FolderOpen          = 21,
+    Image               = 22,
+    HardDrives          = 23,
+    Code                = 24,
+    Folders             = 25,
+    CaretRight          = 26,
+    ArrowClockwise      = 27,
     // Appended only.
 }
 

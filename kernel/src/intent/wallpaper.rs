@@ -62,7 +62,7 @@ fn parse_resolution(arg: &str) -> (u32, u32) {
 
 fn wallpaper_dir() -> String {
     let home = super::home_dir();
-    alloc::format!("{}/wallpapers", home)
+    alloc::format!("{}/pictures/wallpapers", home)
 }
 
 /// Ensure the wallpapers directory exists.

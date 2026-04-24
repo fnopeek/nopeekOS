@@ -91,6 +91,11 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("drun.wasm"),
         version: Some(include_str!("drun.version")),
     },
+    BundledAsset {
+        fs_path: "sys/wasm/loft",
+        bytes:   include_bytes!("loft.wasm"),
+        version: Some(include_str!("loft.version")),
+    },
 ];
 
 /// Stub invoked by install.rs to avoid conditional compilation at the

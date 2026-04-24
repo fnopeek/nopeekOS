@@ -883,6 +883,164 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_fs_list(prefix_ptr, prefix_len, out_ptr, out_cap, recursive) -> i32
+    // Enumerate npkFS keys under `prefix`. If recursive=0, only direct
+    // children are returned (keys that contain no '/' after the prefix,
+    // plus the unique directory bucket names that do). If recursive=1,
+    // every key under the prefix is emitted verbatim.
+    //
+    // Wire format of the output buffer — one entry per line, separated
+    // by '\n' (no trailing newline after the last):
+    //   <name>\0<size_le_u64:8>\0<is_dir_u8>
+    // - <name> is relative to `prefix` (prefix itself + trailing slash
+    //   stripped). For a synthetic directory entry (first path component
+    //   encountered in recursive scan), size=0 and is_dir=1.
+    // - Size is little-endian 8 bytes. is_dir is 0 or 1.
+    //
+    // Returns bytes written, 0 if prefix is empty, -1 on cap / args /
+    // truncation (buffer too small to fit the full listing).
+    linker.func_wrap("env", "npk_fs_list",
+        |mut caller: Caller<'_, HostState>, prefix_ptr: i32, prefix_len: i32,
+         out_ptr: i32, out_cap: i32, recursive: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+                return -1;
+            }
+            if prefix_len < 0 || out_cap <= 0 { return -1; }
+
+            let prefix = if prefix_len == 0 {
+                alloc::string::String::new()
+            } else {
+                match read_wasm_str(&caller, prefix_ptr, prefix_len) {
+                    Some(s) => s,
+                    None => return -1,
+                }
+            };
+
+            let entries = match crate::npkfs::list() {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+
+            // Build the output buffer. For non-recursive, synthesize
+            // directory entries from the first unique path segment.
+            let norm_prefix = if prefix.is_empty() || prefix.ends_with('/') {
+                prefix.clone()
+            } else {
+                alloc::format!("{}/", prefix)
+            };
+
+            let mut seen_dirs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+            let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+            for (name, size, _hash) in &entries {
+                if !norm_prefix.is_empty() && !name.starts_with(&norm_prefix) {
+                    continue;
+                }
+                // `.dir` markers are internal — surface them as directory
+                // entries using the parent component name instead.
+                let rel = &name[norm_prefix.len()..];
+                if rel.is_empty() { continue; }
+
+                if recursive != 0 {
+                    // Skip .dir markers entirely in recursive mode — they
+                    // are bookkeeping, not content.
+                    if rel.ends_with("/.dir") || rel == ".dir" { continue; }
+                    append_entry(&mut out, rel, *size, false);
+                    continue;
+                }
+
+                // Non-recursive: collapse sub-paths into directory entries.
+                match rel.find('/') {
+                    None => {
+                        if rel == ".dir" { continue; }
+                        append_entry(&mut out, rel, *size, false);
+                    }
+                    Some(i) => {
+                        let dir_name = &rel[..i];
+                        if !seen_dirs.iter().any(|d| d == dir_name) {
+                            seen_dirs.push(dir_name.into());
+                            append_entry(&mut out, dir_name, 0, true);
+                        }
+                    }
+                }
+            }
+
+            if out.len() > out_cap as usize { return -1; }
+
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = out_ptr as usize;
+            let end = start + out.len();
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(&out);
+            out.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_fs_stat(name_ptr, name_len, out_ptr) -> i32
+    // Write 9 bytes into out_ptr: size_le_u64 (8) + is_dir_u8 (1).
+    // Directory = a `.dir` marker exists at `<name>/.dir`.
+    // Returns 9 on success, 0 if neither key nor directory exists, -1 on cap / args.
+    linker.func_wrap("env", "npk_fs_stat",
+        |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
+         out_ptr: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+                return -1;
+            }
+            let name = match read_wasm_str(&caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+
+            let (size, is_dir) = if crate::npkfs::exists(&alloc::format!("{}/.dir", name)) {
+                (0u64, 1u8)
+            } else {
+                match crate::npkfs::fetch(&name) {
+                    Ok((data, _)) => (data.len() as u64, 0u8),
+                    Err(_) => return 0,
+                }
+            };
+
+            let mut buf = [0u8; 9];
+            buf[0..8].copy_from_slice(&size.to_le_bytes());
+            buf[8] = is_dir;
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = out_ptr as usize;
+            if start + 9 > data.len() { return -1; }
+            data[start..start + 9].copy_from_slice(&buf);
+            9
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_fs_delete(name_ptr, name_len) -> i32
+    // Delete a single npkFS key. WRITE-gated. Returns 0 on success,
+    // -1 on cap / not found / fs error.
+    linker.func_wrap("env", "npk_fs_delete",
+        |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+                return -1;
+            }
+            let name = match read_wasm_str(&caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            match crate::npkfs::delete(&name) {
+                Ok(_) => 0,
+                Err(_) => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_close_widget() -> i32
     // Close the calling app's own widget window. The worker then falls
     // out of its `_start` loop by its own logic; this host fn only tears
@@ -1740,6 +1898,17 @@ fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<S
 fn map_exec_error(e: wasmi::Error) -> WasmError {
     let msg = alloc::format!("{}", e);
     if msg.contains("fuel") { WasmError::FuelExhausted } else { WasmError::ExecutionFailed }
+}
+
+/// Serialize one npk_fs_list entry into `out`.
+/// Format: name\0size_le_u64\0is_dir_u8, entries separated by '\n'.
+fn append_entry(out: &mut alloc::vec::Vec<u8>, name: &str, size: u64, is_dir: bool) {
+    if !out.is_empty() { out.push(b'\n'); }
+    out.extend_from_slice(name.as_bytes());
+    out.push(0);
+    out.extend_from_slice(&size.to_le_bytes());
+    out.push(0);
+    out.push(if is_dir { 1 } else { 0 });
 }
 
 #[derive(Debug)]

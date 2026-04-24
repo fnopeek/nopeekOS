@@ -201,3 +201,214 @@ pub fn body(text: &str) -> Widget {
         modifiers: vec![],
     }
 }
+
+// ── File-browser / multi-pane prefabs (P10.11 loft) ───────────────────
+
+/// Square tap-target with a single centred icon. Used for toolbar chrome
+/// (back/forward/up, refresh) and in-row actions.
+pub fn icon_button(icon: IconId, size: u16, on_click: Option<ActionId>, on_hover: Option<ActionId>) -> Widget {
+    let mut mods: Vec<Modifier> = Vec::with_capacity(3);
+    mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
+    if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
+    Widget::Icon { id: icon, size, modifiers: mods }
+}
+
+/// Small uppercase section label shown above a group of `nav_row`s in a
+/// sidebar. Matches the "PLACES" / "DEVICES" look from the Thunar mockup.
+pub fn sidebar_section(label: &str, items: Vec<Widget>) -> Widget {
+    let mut children: Vec<Widget> = Vec::with_capacity(items.len() + 1);
+    children.push(Widget::Text {
+        content: label.to_string(),
+        style:   TextStyle::Caption,
+        modifiers: vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+        ],
+    });
+    children.extend(items);
+    Widget::Column {
+        children,
+        spacing:   Spacing::Xxs.as_u16(),
+        align:     Align::Stretch,
+        modifiers: vec![Modifier::Padding(Padding::Xs.as_u16())],
+    }
+}
+
+/// One entry inside a sidebar. Icon on the left, label to the right,
+/// full-width accent fill when selected.
+pub fn nav_row(
+    icon: IconId,
+    label: &str,
+    selected: bool,
+    on_click: Option<ActionId>,
+    on_hover: Option<ActionId>,
+) -> Widget {
+    let mut mods: Vec<Modifier> = Vec::with_capacity(5);
+    mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
+    if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
+    if selected {
+        mods.push(Modifier::Background(Token::AccentMuted));
+        mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Sm.as_u8() });
+    }
+
+    let icon_mods = if selected { vec![Modifier::Tint(Token::Accent)] } else { vec![] };
+
+    Widget::Row {
+        children: vec![
+            Widget::Icon { id: icon, size: 18, modifiers: icon_mods },
+            Widget::Text { content: label.to_string(), style: TextStyle::Body, modifiers: vec![] },
+            Widget::Spacer { flex: 1 },
+        ],
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: mods,
+    }
+}
+
+/// Horizontal toolbar with built-in padding. Children align centred.
+pub fn toolbar(children: Vec<Widget>) -> Widget {
+    Widget::Row {
+        children,
+        spacing: Spacing::Sm.as_u16(),
+        align:   Align::Center,
+        modifiers: vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+        ],
+    }
+}
+
+/// Horizontal row of path segments joined by caret separators.
+/// `segments` is a slice of (label, ActionId) — caller supplies a distinct
+/// ActionId per segment so clicking one jumps to that depth.
+pub fn breadcrumb(segments: &[(String, ActionId)]) -> Widget {
+    let mut children: Vec<Widget> = Vec::with_capacity(segments.len() * 2);
+    for (i, (label, action)) in segments.iter().enumerate() {
+        if i > 0 {
+            children.push(Widget::Icon {
+                id:        IconId::CaretRight,
+                size:      14,
+                modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)],
+            });
+        }
+        children.push(Widget::Text {
+            content: label.clone(),
+            style:   if i + 1 == segments.len() { TextStyle::Body } else { TextStyle::Muted },
+            modifiers: vec![
+                Modifier::Padding(Padding::Xs.as_u16()),
+                Modifier::OnClick(*action),
+            ],
+        });
+    }
+    Widget::Row {
+        children,
+        spacing: Spacing::Xxs.as_u16(),
+        align:   Align::Center,
+        modifiers: vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Sm.as_u8() },
+        ],
+    }
+}
+
+/// One cell in a grid. Centred large icon above a single-line label.
+/// Accent tint + filled background when selected.
+pub fn grid_item(
+    icon: IconId,
+    label: &str,
+    selected: bool,
+    on_click: Option<ActionId>,
+    on_hover: Option<ActionId>,
+) -> Widget {
+    let mut mods: Vec<Modifier> = Vec::with_capacity(5);
+    mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
+    if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
+    if selected {
+        mods.push(Modifier::Background(Token::AccentMuted));
+        mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() });
+    }
+
+    let icon_mods = if selected { vec![Modifier::Tint(Token::Accent)] } else { vec![] };
+
+    Widget::Column {
+        children: vec![
+            Widget::Icon { id: icon, size: 48, modifiers: icon_mods },
+            Widget::Text {
+                content: label.to_string(),
+                style:   TextStyle::Body,
+                modifiers: vec![],
+            },
+        ],
+        spacing:   Spacing::Xs.as_u16(),
+        align:     Align::Center,
+        modifiers: mods,
+    }
+}
+
+/// Wrap a flat list of `grid_item` widgets into fixed-width rows.
+/// `per_row` controls how many cells fit horizontally.
+pub fn grid(items: Vec<Widget>, per_row: usize) -> Widget {
+    if items.is_empty() || per_row == 0 {
+        return Widget::Column {
+            children:  items,
+            spacing:   Spacing::Md.as_u16(),
+            align:     Align::Stretch,
+            modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
+        };
+    }
+    let mut rows: Vec<Widget> = Vec::new();
+    let mut cursor = 0;
+    while cursor < items.len() {
+        let end = (cursor + per_row).min(items.len());
+        let mut row_children: Vec<Widget> = Vec::with_capacity(per_row);
+        for it in &items[cursor..end] {
+            row_children.push(it.clone());
+            row_children.push(Widget::Spacer { flex: 1 });
+        }
+        // Pad incomplete trailing rows with flex spacers so cells keep
+        // the same width as full rows.
+        for _ in end..(cursor + per_row) {
+            row_children.push(Widget::Spacer { flex: 2 });
+        }
+        rows.push(Widget::Row {
+            children:  row_children,
+            spacing:   Spacing::Sm.as_u16(),
+            align:     Align::Start,
+            modifiers: vec![],
+        });
+        cursor = end;
+    }
+    Widget::Column {
+        children:  rows,
+        spacing:   Spacing::Md.as_u16(),
+        align:     Align::Stretch,
+        modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
+    }
+}
+
+/// Top menu-bar — flat row of clickable labels.
+pub fn menu_bar(labels: &[(String, ActionId)]) -> Widget {
+    let mut children: Vec<Widget> = Vec::with_capacity(labels.len() + 1);
+    for (label, action) in labels {
+        children.push(Widget::Text {
+            content: label.clone(),
+            style:   TextStyle::Body,
+            modifiers: vec![
+                Modifier::Padding(Padding::Sm.as_u16()),
+                Modifier::OnClick(*action),
+            ],
+        });
+    }
+    children.push(Widget::Spacer { flex: 1 });
+    Widget::Row {
+        children,
+        spacing: Spacing::None.as_u16(),
+        align:   Align::Center,
+        modifiers: vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::Background(Token::SurfaceElevated),
+        ],
+    }
+}
