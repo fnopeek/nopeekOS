@@ -14,17 +14,10 @@ const MAX_MODULE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_MANIFEST_SIZE: usize = 8192;
 const MAX_SIG_SIZE: usize = 512;
 
-/// Custom-section name apps embed their metadata under.
 const APP_META_SECTION: &str = ".npk.app_meta";
 
-/// After a verified module has been written to `sys/wasm/<name>`, pull
-/// the `.npk.app_meta` custom section out of the WASM bytes (if any)
-/// and cache it in npkFS at `sys/meta/<name>` so launchers can fetch it
-/// via the `npk_app_meta` host fn. Old modules without a section keep
-/// working — the meta cache is simply absent for them.
 fn cache_app_meta(name: &str, wasm_data: &[u8]) {
     let meta_key = alloc::format!("sys/meta/{}", name);
-    // Drop any stale meta first (npkFS is append-only per key).
     let _ = crate::npkfs::delete(&meta_key);
 
     let bytes = match crate::wasm_meta::extract_custom_section(wasm_data, APP_META_SECTION) {

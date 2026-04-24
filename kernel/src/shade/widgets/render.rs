@@ -92,41 +92,35 @@ fn blend_towards(src: u32, dst: u32, weight: u32) -> u32 {
     0xFF_00_00_00 | (r << 16) | (g << 8) | b
 }
 
-/// Paint any Background / Border modifiers attached to the node.
 fn paint_modifiers(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
     widget: &Widget,
     rect: Rect,
 ) {
-    let mods = modifiers_of(widget);
-    for m in mods {
+    let mut bg: Option<Token> = None;
+    let mut border: Option<(Token, u8, u8)> = None;
+    for m in modifiers_of(widget) {
         match m {
-            Modifier::Background(tok) => {
-                rast.rect(target, rect, Fill::Solid(*tok));
-            }
-            Modifier::Border { token, width, radius: _ } => {
-                // Stroke as 4 thin rects (top/bottom/left/right).
-                // Radius is future work (needs per-pixel AA).
-                let w = *width as u32;
-                if w == 0 { continue; }
-                let tok = *token;
-                rast.rect(target, Rect {
-                    x: rect.x, y: rect.y, w: rect.w, h: w,
-                }, Fill::Solid(tok));
-                rast.rect(target, Rect {
-                    x: rect.x, y: rect.y + rect.h as i32 - w as i32,
-                    w: rect.w, h: w,
-                }, Fill::Solid(tok));
-                rast.rect(target, Rect {
-                    x: rect.x, y: rect.y, w: w, h: rect.h,
-                }, Fill::Solid(tok));
-                rast.rect(target, Rect {
-                    x: rect.x + rect.w as i32 - w as i32, y: rect.y,
-                    w: w, h: rect.h,
-                }, Fill::Solid(tok));
-            }
+            Modifier::Background(t) => bg = Some(*t),
+            Modifier::Border { token, width, radius } => border = Some((*token, *width, *radius)),
             _ => {}
+        }
+    }
+
+    let radius = border.map(|(_, _, r)| r).unwrap_or(0);
+
+    if let Some(tok) = bg {
+        if radius > 0 {
+            rast.rect_rounded(target, rect, Fill::Solid(tok), radius);
+        } else {
+            rast.rect(target, rect, Fill::Solid(tok));
+        }
+    }
+
+    if let Some((tok, width, r)) = border {
+        if width > 0 {
+            rast.stroke_rounded(target, rect, Fill::Solid(tok), width, r);
         }
     }
 }

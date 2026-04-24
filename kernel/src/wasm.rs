@@ -726,14 +726,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> i32
-    // Fetch the cached AppMeta bytes for `<name>` from npkFS
-    // (`sys/meta/<name>`, populated at install time from the WASM's
-    // `.npk.app_meta` custom section). Caller decodes with the
-    // `nopeek_widgets::app_meta::decode` helper.
-    //
-    //    > 0  → bytes written
-    //    == 0 → no meta available for this module (caller uses fallback)
-    //    < 0  → capability denied, name invalid, or buffer too small
+    //   > 0 : bytes written, 0 : no meta, < 0 : cap denied / bad name / buf small
     linker.func_wrap("env", "npk_app_meta",
         |mut caller: Caller<'_, HostState>,
          name_ptr: i32, name_len: i32,
@@ -749,7 +742,6 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 None => return -1,
             };
 
-            // Read the module name from caller memory.
             let name = {
                 let data = mem.data(&caller);
                 let start = name_ptr as usize;
@@ -760,7 +752,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     Err(_) => return -1,
                 }
             };
-            // Reject anything that would escape `sys/meta/<name>`.
+            // Reject name-traversal before building the npkFS key.
             if name.contains('/') || name.contains('\0') || name.is_empty() {
                 return -1;
             }
@@ -768,7 +760,6 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let meta_key = alloc::format!("sys/meta/{}", name);
             let (bytes, _hash) = match crate::npkfs::fetch(&meta_key) {
                 Ok(x) => x,
-                // Missing key is a normal "no meta" answer, not an error.
                 Err(_) => return 0,
             };
             if bytes.len() > buf_max as usize { return -1; }

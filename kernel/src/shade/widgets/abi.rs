@@ -500,6 +500,23 @@ pub trait Rasterizer: Send + Sync {
     /// Draw a filled rectangle. `r` is in window coordinates.
     fn rect(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill);
 
+    /// Fill a rounded rectangle. Default falls back to sharp rect.
+    fn rect_rounded(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill, _radius: u8) {
+        self.rect(t, r, fill);
+    }
+
+    /// Stroke a rounded-rect outline `width`-thick. Default draws 4 sharp
+    /// rects ignoring radius.
+    fn stroke_rounded(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill, width: u8, _radius: u8) {
+        let w = width as u32;
+        if w == 0 { return; }
+        let wi = w as i32;
+        self.rect(t, Rect { x: r.x, y: r.y, w: r.w, h: w }, fill);
+        self.rect(t, Rect { x: r.x, y: r.y + r.h as i32 - wi, w: r.w, h: w }, fill);
+        self.rect(t, Rect { x: r.x, y: r.y, w: w, h: r.h }, fill);
+        self.rect(t, Rect { x: r.x + r.w as i32 - wi, y: r.y, w: w, h: r.h }, fill);
+    }
+
     /// Draw text at baseline point `p` (window coordinates).
     fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, p: Point);
 
