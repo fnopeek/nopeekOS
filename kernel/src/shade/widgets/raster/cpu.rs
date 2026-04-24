@@ -277,26 +277,26 @@ fn put_pixel_blended(t: &mut RasterTarget, x: i32, y: i32, color: u32, alpha: u8
     t.pixels[base] = blend_over(dst, color, alpha);
 }
 
-// 8x8 subpixel coverage, centered on the pixel. Scale ×16 so the
-// sample positions land at odd half-steps (2*sx - 7) giving
-// [-7..+7], symmetric around 0. Earlier scale-×8 / (sx-4) was
-// off-center by 0.5 subpixel — visible stairstep at small radii.
+// 16x16 subpixel coverage, centered (256 levels). Solid fills at
+// small radii need this density — 64 levels produced visible alpha
+// plateaus on same-colour inner content where gradient strokes
+// could hide them in colour variance.
 fn corner_coverage(dx: i32, dy: i32, r: i32) -> u8 {
-    let base_dx = dx * 16;
-    let base_dy = dy * 16;
-    let r_scaled = r * 16;
+    let base_dx = dx * 32;
+    let base_dy = dy * 32;
+    let r_scaled = r * 32;
     let r2 = r_scaled * r_scaled;
     let mut covered = 0u32;
-    for sy in 0..8 {
-        let sdy = base_dy + 2 * sy - 7;
-        for sx in 0..8 {
-            let sdx = base_dx + 2 * sx - 7;
+    for sy in 0..16 {
+        let sdy = base_dy + 2 * sy - 15;
+        for sx in 0..16 {
+            let sdx = base_dx + 2 * sx - 15;
             if sdx * sdx + sdy * sdy <= r2 {
                 covered += 1;
             }
         }
     }
-    (covered * 255 / 64) as u8
+    (covered * 255 / 256) as u8
 }
 
 fn fill_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) {
