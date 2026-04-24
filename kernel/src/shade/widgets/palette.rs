@@ -49,7 +49,10 @@ pub fn resolve(token: Token) -> u32 {
 fn from_live_theme(token: Token) -> Option<u32> {
     let surface = crate::theme::bg_color() | 0xFF00_0000;
     let accent  = crate::gui::background::accent_color() | 0xFF00_0000;
-    let border  = crate::theme::inactive_border() | 0xFF00_0000;
+    // Shade's window chrome uses border_gradient() start when focused;
+    // matching Token::Border to that colour keeps in-widget dividers
+    // visually connected to the outer frame.
+    let border  = (crate::theme::border_gradient().0) | 0xFF00_0000;
 
     Some(match token {
         Token::Surface         => surface,
