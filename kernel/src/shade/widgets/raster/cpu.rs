@@ -42,6 +42,25 @@ impl Rasterizer for CpuRasterizer {
         fill_rect_target(t, x, y, r.w as i32, r.h as i32, color, 255);
     }
 
+    fn rect_rounded(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill, radius: u8) {
+        let (x, y) = window_to_target(t, r.x, r.y);
+        let color = match fill {
+            Fill::Solid(tok) => t.palette.colors[tok as usize],
+            _                => return,
+        };
+        fill_rounded_rect_target(t, x, y, r.w as i32, r.h as i32, radius as i32, color);
+    }
+
+    fn stroke_rounded(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill, width: u8, radius: u8) {
+        if width == 0 { return; }
+        let (x, y) = window_to_target(t, r.x, r.y);
+        let color = match fill {
+            Fill::Solid(tok) => t.palette.colors[tok as usize],
+            _                => return,
+        };
+        stroke_rounded_rect_target(t, x, y, r.w as i32, r.h as i32, radius as i32, width as i32, color);
+    }
+
     fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, p: Point) {
         // Resolve text color: Muted style uses OnSurfaceMuted,
         // everything else OnSurface. (Theme color is not yet exposed
@@ -248,6 +267,118 @@ fn composite_alpha_scaled(
             t.pixels[dst_base + px as usize] = blend_over(dst, color, a);
         }
     }
+}
+
+fn put_pixel_blended(t: &mut RasterTarget, x: i32, y: i32, color: u32, alpha: u8) {
+    if x < 0 || y < 0 { return; }
+    if x >= t.size.w as i32 || y >= t.size.h as i32 { return; }
+    let base = y as usize * t.stride as usize + x as usize;
+    let dst = t.pixels[base];
+    t.pixels[base] = blend_over(dst, color, alpha);
+}
+
+// Coverage of a pixel centered `(dx,dy)` away from the arc center, for a
+// circle of radius `r`. Integer-only via squared distance + 3-band
+// linear interp in dsq-space — visually indistinguishable from true
+// sqrt-based AA at the radii drun uses (≤ 16 px).
+fn corner_coverage(dx: i32, dy: i32, r: i32) -> u8 {
+    let adx = dx.unsigned_abs() as i32;
+    let ady = dy.unsigned_abs() as i32;
+    let dsq = adx * adx + ady * ady;
+    let r_in  = (r - 1).max(0);
+    let r_in_sq  = r_in * r_in;
+    let r_out_sq = (r + 1) * (r + 1);
+    if dsq <= r_in_sq { 255 }
+    else if dsq >= r_out_sq { 0 }
+    else {
+        let span = (r_out_sq - r_in_sq).max(1);
+        let t = 255 * (r_out_sq - dsq) / span;
+        t.clamp(0, 255) as u8
+    }
+}
+
+fn fill_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) {
+    if w <= 0 || h <= 0 { return; }
+    let r = radius.min(w / 2).min(h / 2).max(0);
+    if r == 0 {
+        fill_rect_target(t, x, y, w, h, color, 255);
+        return;
+    }
+
+    fill_rect_target(t, x, y + r, w, h - 2 * r, color, 255);
+
+    for row in 0..r {
+        let top_y = y + row;
+        let bot_y = y + h - 1 - row;
+        let dy_off = r - 1 - row;
+
+        let mid_x0 = x + r;
+        let mid_w  = w - 2 * r;
+        if mid_w > 0 {
+            fill_rect_target(t, mid_x0, top_y, mid_w, 1, color, 255);
+            if bot_y != top_y {
+                fill_rect_target(t, mid_x0, bot_y, mid_w, 1, color, 255);
+            }
+        }
+
+        for col in 0..r {
+            let left_x  = x + col;
+            let right_x = x + w - 1 - col;
+            let dx_off = r - 1 - col;
+            let a = corner_coverage(dx_off, dy_off, r);
+            if a == 0 { continue; }
+            put_pixel_blended(t, left_x, top_y, color, a);
+            put_pixel_blended(t, right_x, top_y, color, a);
+            if bot_y != top_y {
+                put_pixel_blended(t, left_x, bot_y, color, a);
+                put_pixel_blended(t, right_x, bot_y, color, a);
+            }
+        }
+    }
+}
+
+fn stroke_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32, radius: i32, width: i32, color: u32) {
+    if w <= 0 || h <= 0 || width <= 0 { return; }
+    let r_out = radius.min(w / 2).min(h / 2).max(0);
+    let r_in  = (r_out - width).max(0);
+    let inner_x = x + width;
+    let inner_y = y + width;
+    let inner_w = (w - 2 * width).max(0);
+    let inner_h = (h - 2 * width).max(0);
+
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(t.size.w as i32);
+    let y1 = (y + h).min(t.size.h as i32);
+    if x0 >= x1 || y0 >= y1 { return; }
+
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let a_out = rect_coverage(px, py, x, y, w, h, r_out);
+            let a_in  = if inner_w > 0 && inner_h > 0 {
+                rect_coverage(px, py, inner_x, inner_y, inner_w, inner_h, r_in)
+            } else { 0 };
+            let a = a_out.saturating_sub(a_in);
+            if a > 0 {
+                put_pixel_blended(t, px, py, color, a);
+            }
+        }
+    }
+}
+
+// Pixel coverage inside a rounded rectangle. Returns 255 for straight
+// edges / interior, 0 outside, AA for the four corner arcs.
+fn rect_coverage(px: i32, py: i32, rx: i32, ry: i32, rw: i32, rh: i32, r: i32) -> u8 {
+    if px < rx || py < ry || px >= rx + rw || py >= ry + rh { return 0; }
+    if r <= 0 { return 255; }
+
+    let in_x_core = px >= rx + r && px < rx + rw - r;
+    let in_y_core = py >= ry + r && py < ry + rh - r;
+    if in_x_core || in_y_core { return 255; }
+
+    let cx = if px < rx + r { rx + r } else { rx + rw - 1 - r };
+    let cy = if py < ry + r { ry + r } else { ry + rh - 1 - r };
+    corner_coverage(px - cx, py - cy, r)
 }
 
 /// Standard "over" alpha blend with 8-bit src alpha. Keeps dst alpha
