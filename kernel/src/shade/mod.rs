@@ -175,33 +175,13 @@ fn render_frame_layered() {
             comp.render(back, fb.info());
         }
 
-        // Swap front index (blit_rect now reads from new frame)
         fb.swap_buffers();
 
-        // Blit new front → MMIO (GPU path with composited cursor, else CPU + overlay)
-        let gpu_ok = if crate::gpu::supports_blit() && crate::xhci::mouse_available() {
-            // GPU path: composite cursor INTO shadow before blit
-            let (cx, cy) = cursor::atomic_pos();
-            let front = fb.front_ptr();
-            let p = pitch as usize;
-            let sw = screen_w as i32;
-            let sh = screen_h as i32;
-
-            // Save-under: preserve clean pixels, draw cursor, GPU blit, restore
-            cursor::save_cursor_region(front, p, sw, sh, cx, cy);
-            cursor::draw_cursor_on_shadow(front, p, sw, sh, cx, cy);
-
-            let ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
-
-            // Restore shadow to clean state (overlay + poll_render need it clean)
-            cursor::restore_cursor_region(front, p, sw, sh, cx, cy);
-
-            if ok {
-                cursor::set_drawn_state(cx, cy);
-            }
-            ok
-        } else if crate::gpu::supports_blit() {
-            // GPU without mouse — just blit
+        // Shadow stays cursor-free across the blit (save/draw/restore
+        // on shadow raced with scene_commit writes from worker cores,
+        // leaving stale 12×12 patches that looked like cursor ghosts
+        // on every drun hover). Cursor goes on top of MMIO after blit.
+        let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
         } else {
             false
@@ -213,11 +193,9 @@ fn render_frame_layered() {
             damage.flush(fb);
         }
 
-        // NOW update cached pointer — MMIO matches new front
         fb.commit_front();
 
-        // Cursor overlay only for CPU path (GPU path already has cursor in frame)
-        if !gpu_ok && crate::xhci::mouse_available() {
+        if crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
@@ -237,26 +215,7 @@ fn render_frame_legacy() {
 
         fb.swap_buffers();
 
-        // GPU blit with composited cursor, or CPU + overlay fallback
-        let gpu_ok = if crate::gpu::supports_blit() && crate::xhci::mouse_available() {
-            let (cx, cy) = cursor::atomic_pos();
-            let front = fb.front_ptr();
-            let p = pitch as usize;
-            let sw = screen_w as i32;
-            let sh = screen_h as i32;
-
-            cursor::save_cursor_region(front, p, sw, sh, cx, cy);
-            cursor::draw_cursor_on_shadow(front, p, sw, sh, cx, cy);
-
-            let ok = try_gpu_blit(fb, pitch, screen_w, screen_h);
-
-            cursor::restore_cursor_region(front, p, sw, sh, cx, cy);
-
-            if ok {
-                cursor::set_drawn_state(cx, cy);
-            }
-            ok
-        } else if crate::gpu::supports_blit() {
+        let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
         } else {
             false
@@ -270,7 +229,7 @@ fn render_frame_legacy() {
 
         fb.commit_front();
 
-        if !gpu_ok && crate::xhci::mouse_available() {
+        if crate::xhci::mouse_available() {
             cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
