@@ -14,26 +14,61 @@
 
 #![allow(dead_code)]
 
+use alloc::vec::Vec;
+
 use super::abi::{
-    Fill, Modifier, Point, RasterTarget, Rasterizer, Rect, Token, Widget,
+    Density, Fill, Modifier, Point, RasterTarget, Rasterizer, Rect, Token, Widget,
 };
 use super::layout::LayoutNode;
 
 /// Render `widget` + `layout` (trees in lockstep) into `target` using
-/// `rast`. Call at window-level; recurses into children.
+/// `rast`. Default-state entry — used by paths that don't track hover
+/// (e.g. one-shot debug renders).
 pub fn render(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
     widget: &Widget,
     layout: &LayoutNode,
 ) {
-    paint_modifiers(rast, target, widget, layout.rect);
-    paint_node(rast, target, widget, layout);
+    render_with_state(rast, target, widget, layout, None, Density::Regular);
+}
 
-    // Recurse.
+/// Render with explicit pseudo-state context.
+///
+/// `hover_path` interpretation:
+///   - `None`        → this subtree contains no hovered node
+///   - `Some([])`    → THIS node is the hover target; merge `Hover` mods
+///   - `Some([i,…])` → child `i` is on the hover path; recurse with tail
+///
+/// `density` is the compositor-classified container size bucket; widgets
+/// matching `WhenDensity(d, …)` apply their inner mods on match.
+pub fn render_with_state(
+    rast: &mut dyn Rasterizer,
+    target: &mut RasterTarget,
+    widget: &Widget,
+    layout: &LayoutNode,
+    hover_path: Option<&[u32]>,
+    density: Density,
+) {
+    // Hover-state matches CSS `:hover` semantics: the cursor is over
+    // this node *or any of its descendants*. Both cases are encoded as
+    // `Some(_)` (with `Some([])` = "this is the deepest", `Some([...])`
+    // = "in a child"). `None` = cursor is in a different subtree.
+    let is_hovered = hover_path.is_some();
+    let base = modifiers_of(widget);
+    let eff = effective_modifiers(base, is_hovered, density);
+
+    paint_modifiers_eff(rast, target, &eff, layout.rect);
+    paint_node_eff(rast, target, widget, layout, &eff);
+
+    // Recurse — at most one child sits on the hover path.
     let kids = widget_children(widget);
-    for (cw, cl) in kids.iter().zip(layout.children.iter()) {
-        render(rast, target, cw, cl);
+    for (i, (cw, cl)) in kids.iter().zip(layout.children.iter()).enumerate() {
+        let child_path: Option<&[u32]> = match hover_path {
+            Some(p) if !p.is_empty() && p[0] == i as u32 => Some(&p[1..]),
+            _ => None,
+        };
+        render_with_state(rast, target, cw, cl, child_path, density);
     }
 
     // Modifier::Opacity acts as a post-paint dampening over the node's
@@ -41,18 +76,86 @@ pub fn render(
     // Surface token, weighted by (255 - opacity). Lets the SDK
     // express "show this at 70 % visibility" without the rasterizer
     // trait needing a new parameter.
-    let op = find_opacity(widget);
+    let op = find_opacity_in(&eff);
     if op < 255 {
         apply_rect_opacity(target, layout.rect, op);
     }
 }
 
-/// First Opacity modifier on the widget, or 255 if none.
-fn find_opacity(w: &Widget) -> u8 {
-    for m in modifiers_of(w) {
+/// Build the modifier list that applies to `widget` after merging the
+/// active pseudo-states and density-conditional mods. Wrapper variants
+/// are stripped so downstream paint code never sees nested modifier
+/// lists.
+///
+/// Order matters: base modifiers first, then state mods (so a `.hover`
+/// background overrides the base background — `paint_modifiers_eff`
+/// reads the *last* matching modifier).
+fn effective_modifiers(
+    base: &[Modifier],
+    is_hovered: bool,
+    density: Density,
+) -> Vec<Modifier> {
+    let mut out: Vec<Modifier> = Vec::with_capacity(base.len());
+    // First pass: keep all non-pseudo-state modifiers verbatim.
+    for m in base {
+        match m {
+            Modifier::Hover(_)
+            | Modifier::Focus(_)
+            | Modifier::Active(_)
+            | Modifier::Disabled(_)
+            | Modifier::WhenDensity(_, _) => {}
+            _ => out.push(m.clone()),
+        }
+    }
+    // Second pass: append matching state mods. Hover wins over density
+    // because hover is the more specific signal at any given moment.
+    for m in base {
+        match m {
+            Modifier::WhenDensity(d, inner) if *d == density => {
+                for inner_m in inner { out.push(inner_m.clone()); }
+            }
+            _ => {}
+        }
+    }
+    if is_hovered {
+        for m in base {
+            if let Modifier::Hover(inner) = m {
+                for inner_m in inner { out.push(inner_m.clone()); }
+            }
+        }
+    }
+    out
+}
+
+/// First Opacity in an explicit modifier list. Used by the post-paint
+/// opacity dampening pass.
+fn find_opacity_in(mods: &[Modifier]) -> u8 {
+    for m in mods {
         if let Modifier::Opacity(v) = m { return *v; }
     }
     255
+}
+
+/// Recursively check whether `tree` contains any pseudo-state modifier
+/// or density-conditional modifier. Compositor uses this to skip
+/// re-renders on MouseMove when the result wouldn't change anyway.
+pub fn tree_has_pseudo_state(tree: &Widget) -> bool {
+    for m in modifiers_of(tree) {
+        if matches!(
+            m,
+            Modifier::Hover(_)
+                | Modifier::Focus(_)
+                | Modifier::Active(_)
+                | Modifier::Disabled(_)
+                | Modifier::WhenDensity(_, _)
+        ) {
+            return true;
+        }
+    }
+    for c in widget_children(tree) {
+        if tree_has_pseudo_state(c) { return true; }
+    }
+    false
 }
 
 /// Blend every pixel in `rect` towards the Surface token by
@@ -92,23 +195,30 @@ fn blend_towards(src: u32, dst: u32, weight: u32) -> u32 {
     0xFF_00_00_00 | (r << 16) | (g << 8) | b
 }
 
-fn paint_modifiers(
+fn paint_modifiers_eff(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
-    widget: &Widget,
+    mods: &[Modifier],
     rect: Rect,
 ) {
+    // Last write wins so state mods (hover, etc.) appended after the
+    // base list override base values cleanly.
     let mut bg: Option<Token> = None;
     let mut border: Option<(Token, u8, u8)> = None;
-    for m in modifiers_of(widget) {
+    let mut rounded: Option<u8> = None;
+    for m in mods {
         match m {
             Modifier::Background(t) => bg = Some(*t),
             Modifier::Border { token, width, radius } => border = Some((*token, *width, *radius)),
+            Modifier::Rounded(r) => rounded = Some(*r),
             _ => {}
         }
     }
 
-    let radius = border.map(|(_, _, r)| r).unwrap_or(0);
+    // Rounded modifier wins for the outer corner radius. Border's own
+    // radius applies only as a fallback so existing apps (which set the
+    // radius via Border) keep their look without code changes.
+    let radius = rounded.unwrap_or_else(|| border.map(|(_, _, r)| r).unwrap_or(0));
 
     if let Some(tok) = bg {
         if radius > 0 {
@@ -118,20 +228,23 @@ fn paint_modifiers(
         }
     }
 
-    if let Some((tok, width, r)) = border {
+    if let Some((tok, width, _)) = border {
         if width > 0 {
-            rast.stroke_rounded(target, rect, Fill::Solid(tok), width, r);
+            rast.stroke_rounded(target, rect, Fill::Solid(tok), width, radius);
         }
     }
 }
 
 /// Paint the node's own visible content (leaves only; containers are
-/// pure layout).
-fn paint_node(
+/// pure layout). Reads node-affecting modifiers (Tint, …) from the
+/// effective list so pseudo-state changes (hover-tinted icons, etc.)
+/// take effect.
+fn paint_node_eff(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
     widget: &Widget,
     layout: &LayoutNode,
+    eff: &[Modifier],
 ) {
     let rect = layout.rect;
 
@@ -142,16 +255,22 @@ fn paint_node(
 
         Widget::Icon { id, size, .. } => {
             let mut color = Token::OnSurface;
-            for m in modifiers_of(widget) {
+            for m in eff {
                 if let Modifier::Tint(tok) = m { color = *tok; }
             }
             rast.icon(target, *id, *size, color, Point { x: rect.x, y: rect.y });
         }
 
         Widget::Button { label, icon, .. } => {
-            // Soft accent background, white label. Icon first (if
-            // present), then label at a fixed x offset.
-            rast.rect(target, rect, Fill::Solid(Token::Accent));
+            // If `paint_modifiers_eff` already painted a Background or
+            // Border for this button, the chrome is done — skip the
+            // hardcoded Accent fill so prefab::button(Destructive) /
+            // (Ghost) styles render correctly. Fall back to Accent only
+            // when the button has no explicit background.
+            let has_bg = eff.iter().any(|m| matches!(m, Modifier::Background(_)));
+            if !has_bg {
+                rast.rect(target, rect, Fill::Solid(Token::Accent));
+            }
             let pad_x = 8i32;
             let pad_y = 4i32;
             let mut x = rect.x + pad_x;

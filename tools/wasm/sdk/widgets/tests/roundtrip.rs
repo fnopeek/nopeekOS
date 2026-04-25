@@ -140,3 +140,76 @@ fn token_discriminants_frozen() {
     assert_eq!(Token::Surface as u8, 0);
     assert_eq!(Token::Danger  as u8, 11);
 }
+
+#[test]
+fn density_discriminants_frozen() {
+    assert_eq!(Density::Compact  as u8, 0);
+    assert_eq!(Density::Regular  as u8, 1);
+    assert_eq!(Density::Spacious as u8, 2);
+}
+
+#[test]
+fn vocab_v2_modifiers_round_trip() {
+    // All vocab-v2 modifiers in a single tree — proves wire indices are
+    // stable and nested Vec<Modifier> serializes correctly.
+    let tree = Widget::Column {
+        children: vec![
+            Widget::Button {
+                label: "Save".to_string(),
+                icon: IconId::None,
+                on_click: ActionId(1),
+                modifiers: vec![
+                    Modifier::Padding(Padding::Md.as_u16()),
+                    Modifier::Rounded(Radius::Lg.as_u8()),
+                    Modifier::Background(Token::Accent),
+                    Modifier::Hover(vec![
+                        Modifier::Background(Token::AccentMuted),
+                        Modifier::Scale(264), // 1.03×
+                    ]),
+                    Modifier::Focus(vec![
+                        Modifier::Border { token: Token::Accent, width: 2, radius: 12 },
+                    ]),
+                    Modifier::Active(vec![Modifier::Scale(248)]),
+                    Modifier::Disabled(vec![Modifier::Opacity(128)]),
+                    Modifier::Transition(Motion::Quick.as_transition()),
+                ],
+            },
+            Widget::Row {
+                children: vec![Widget::Spacer { flex: 1 }],
+                spacing: 0,
+                align: Align::Start,
+                modifiers: vec![
+                    Modifier::MinWidth(320),
+                    Modifier::MaxWidth(960),
+                    Modifier::WhenDensity(
+                        Density::Compact,
+                        vec![Modifier::Padding(Padding::Sm.as_u16())],
+                    ),
+                    Modifier::WhenDensity(
+                        Density::Spacious,
+                        vec![Modifier::Padding(Padding::Xl.as_u16())],
+                    ),
+                ],
+            },
+        ],
+        spacing: 8,
+        align: Align::Stretch,
+        modifiers: vec![],
+    };
+    let bytes = encode(&tree).expect("encode");
+    let back = decode(&bytes).expect("decode");
+    assert_eq!(tree, back);
+}
+
+#[test]
+fn motion_helper_lowers_to_linear_transition() {
+    // Motion is SDK-only sugar — wire form must remain Transition::Linear.
+    assert_eq!(
+        Motion::Quick.as_transition(),
+        Transition::Linear { ms: 120 }
+    );
+    assert_eq!(
+        Motion::Normal.as_transition(),
+        Transition::Linear { ms: 200 }
+    );
+}

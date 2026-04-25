@@ -100,6 +100,11 @@ const _: () = {
     assert!(Axis::Horizontal as u8 == 1);
     assert!(Axis::Both       as u8 == 2);
 
+    // Density — vocab v2 container-query buckets.
+    assert!(Density::Compact  as u8 == 0);
+    assert!(Density::Regular  as u8 == 1);
+    assert!(Density::Spacious as u8 == 2);
+
     // MouseButton — Event payload, position frozen.
     assert!(MouseButton::Left   as u8 == 0);
     assert!(MouseButton::Right  as u8 == 1);
@@ -144,20 +149,30 @@ fn _widget_wire_position(w: &Widget) -> usize {
 fn _modifier_wire_position(m: &Modifier) -> usize {
     match m {
         // Active in v1
-        Modifier::Padding(_)      => 0,
-        Modifier::Margin(_)       => 1,
-        Modifier::Background(_)   => 2,
-        Modifier::Border { .. }   => 3,
-        Modifier::Opacity(_)      => 4,
-        Modifier::Transition(_)   => 5,
-        Modifier::OnClick(_)      => 6,
-        Modifier::OnHover(_)      => 7,
-        // Reserved (v2+)
-        Modifier::Blur(_)         => 8,
-        Modifier::Shadow(_)       => 9,
-        Modifier::Effect(_)       => 10,
-        Modifier::RoleOverride(_) => 11,
-        Modifier::Tint(_)         => 12,
+        Modifier::Padding(_)        => 0,
+        Modifier::Margin(_)         => 1,
+        Modifier::Background(_)     => 2,
+        Modifier::Border { .. }     => 3,
+        Modifier::Opacity(_)        => 4,
+        Modifier::Transition(_)     => 5,
+        Modifier::OnClick(_)        => 6,
+        Modifier::OnHover(_)        => 7,
+        // Reserved (v2+ effects, role)
+        Modifier::Blur(_)           => 8,
+        Modifier::Shadow(_)         => 9,
+        Modifier::Effect(_)         => 10,
+        Modifier::RoleOverride(_)   => 11,
+        Modifier::Tint(_)           => 12,
+        // Vocab v2 — Tailwind-style additions.
+        Modifier::Hover(_)          => 13,
+        Modifier::Focus(_)          => 14,
+        Modifier::Active(_)         => 15,
+        Modifier::Disabled(_)       => 16,
+        Modifier::WhenDensity(_, _) => 17,
+        Modifier::Scale(_)          => 18,
+        Modifier::MinWidth(_)       => 19,
+        Modifier::MaxWidth(_)       => 20,
+        Modifier::Rounded(_)        => 21,
     }
 }
 
