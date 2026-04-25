@@ -258,19 +258,10 @@ fn render(lf: &Loft) -> Widget {
         else { places_rows.push(row); }
     }
 
-    let sidebar = Widget::Column {
-        children: alloc::vec![
-            prefab::sidebar_section("PLACES",  places_rows),
-            prefab::sidebar_section("DEVICES", devices_rows),
-            Widget::Spacer { flex: 1 },
-        ],
-        spacing: 0,
-        align:   Align::Stretch,
-        modifiers: alloc::vec![
-            Modifier::Background(Token::SurfaceMuted),
-            Modifier::Padding(8),
-        ],
-    };
+    let sidebar = prefab::sidebar_pane(alloc::vec![
+        prefab::sidebar_section("PLACES",  places_rows),
+        prefab::sidebar_section("DEVICES", devices_rows),
+    ]);
 
     // Toolbar: back / forward / up + breadcrumb. Sizes match atlas
     // natives (24 / 32) so there's no blurry scaling step at 4K.
