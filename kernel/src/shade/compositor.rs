@@ -969,6 +969,10 @@ impl Compositor {
                     .unwrap_or(false);
                 if is_widget {
                     use crate::shade::widgets::abi::{Event, MouseButton};
+                    // Move focus + start active state on the deepest
+                    // focusable widget under the cursor. press_at
+                    // re-rasterizes if the tree has any pseudo state.
+                    crate::shade::widgets::press_at(wid.0, mx, my);
                     if let Some(action) = crate::shade::widgets::hit_test(wid.0, mx, my) {
                         crate::shade::widgets::push_event(wid.0, Event::Action(action));
                     }
@@ -983,6 +987,26 @@ impl Compositor {
                     });
                 }
                 if focus_changed { return true; }
+            }
+        }
+
+        // Mouse release: clear active state on every widget window
+        // (we don't track which window held the press). Cheap — only
+        // does work when the window's `active_path` was actually set.
+        if self.mouse.left_released() {
+            use crate::shade::widgets::abi::{Event, MouseButton};
+            let widget_ids: alloc::vec::Vec<u32> = self.windows.iter()
+                .filter(|w| w.kind == crate::shade::window::WindowKind::Widget)
+                .map(|w| w.id.0)
+                .collect();
+            for wid in widget_ids {
+                crate::shade::widgets::release_at(wid);
+                crate::shade::widgets::push_event(wid, Event::MouseButton {
+                    button: MouseButton::Left,
+                    down:   false,
+                    x:      mx,
+                    y:      my,
+                });
             }
         }
 
