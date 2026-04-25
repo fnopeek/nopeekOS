@@ -235,6 +235,22 @@ pub enum Axis {
     // Appended only.
 }
 
+// ── Container-query density ───────────────────────────────────────────
+
+/// Compositor-classified window size bucket. Apps reference these via
+/// `Modifier::WhenDensity(Density, ...)` to adapt layout to the available
+/// space without picking pixel breakpoints. Thresholds live once in the
+/// compositor (Compact <600 px, Regular 600–1200 px, Spacious >1200 px).
+#[repr(u8)]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Density {
+    Compact  = 0,
+    Regular  = 1,
+    Spacious = 2,
+    // Appended only.
+}
+
 // ── Animation ─────────────────────────────────────────────────────────
 
 /// Transition curve. Deterministic fixed-point math lives in the
@@ -306,6 +322,25 @@ pub enum Modifier {
     RoleOverride(Role),
     /// Paint an Icon in the given Token color instead of OnSurface.
     Tint(Token),
+
+    // ── Vocab v2 (Tailwind-style modifiers) ───────────────────────────
+    // Pseudo-state modifier lists — compositor merges the inner list onto
+    // the widget when the state matches; the tree itself stays static
+    // across hovers (no app round-trip).
+    Hover(Vec<Modifier>),
+    Focus(Vec<Modifier>),
+    Active(Vec<Modifier>),
+    Disabled(Vec<Modifier>),
+    /// Container query — apply inner modifiers only at the given density.
+    WhenDensity(Density, Vec<Modifier>),
+    /// Uniform scale, Q8.8 fixed-point. 256 = 1.0× (identity).
+    Scale(u16),
+    /// Layout minimum width (px at 1× scale).
+    MinWidth(u16),
+    /// Layout maximum width (px at 1× scale).
+    MaxWidth(u16),
+    /// Corner radius (px at 1× scale) without a Border.
+    Rounded(u8),
     // Appended only.
 }
 

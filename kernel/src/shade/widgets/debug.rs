@@ -212,6 +212,19 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::Shadow(_)     => s.push_str("Shadow(..)"),
             Modifier::Effect(id)    => { let _ = write!(s, "Effect({:?})", id); }
             Modifier::RoleOverride(r) => { let _ = write!(s, "Role({:?})", r); }
+            Modifier::Tint(t)       => { let _ = write!(s, "Tint({:?})", t); }
+            // Vocab v2 (Tailwind-style additions)
+            Modifier::Hover(inner)        => { let _ = write!(s, "Hover{}", fmt_mods(inner)); }
+            Modifier::Focus(inner)        => { let _ = write!(s, "Focus{}", fmt_mods(inner)); }
+            Modifier::Active(inner)       => { let _ = write!(s, "Active{}", fmt_mods(inner)); }
+            Modifier::Disabled(inner)     => { let _ = write!(s, "Disabled{}", fmt_mods(inner)); }
+            Modifier::WhenDensity(d, inner) => {
+                let _ = write!(s, "When({:?}){}", d, fmt_mods(inner));
+            }
+            Modifier::Scale(q88)    => { let _ = write!(s, "Scale({})", q88); }
+            Modifier::MinWidth(w)   => { let _ = write!(s, "MinWidth({})", w); }
+            Modifier::MaxWidth(w)   => { let _ = write!(s, "MaxWidth({})", w); }
+            Modifier::Rounded(r)    => { let _ = write!(s, "Rounded({})", r); }
             _                       => s.push_str("<unknown>"),
         }
     }

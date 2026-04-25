@@ -183,6 +183,23 @@ pub enum Axis {
     // Appended only.
 }
 
+// ── Container-query density ───────────────────────────────────────────
+
+/// Compositor-classified window size bucket. Apps reference these via
+/// `Modifier::WhenDensity(Density, ...)` to adapt layout to the available
+/// space without picking pixel breakpoints. The compositor owns the
+/// thresholds (Compact <600 px, Regular 600–1200 px, Spacious >1200 px)
+/// so apps never see raw pixel widths.
+#[repr(u8)]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Density {
+    Compact  = 0,
+    Regular  = 1,
+    Spacious = 2,
+    // Appended only.
+}
+
 // ── Animation ─────────────────────────────────────────────────────────
 
 #[non_exhaustive]
@@ -224,6 +241,26 @@ pub enum Modifier {
     Effect(EffectId),
     RoleOverride(Role),
     Tint(Token),
+    // ── Vocab v2 (Tailwind-style modifiers) ───────────────────────────
+    // Pseudo-state modifier lists. Compositor merges the inner list onto
+    // the widget when the state matches; tree stays static across hovers.
+    Hover(Vec<Modifier>),
+    Focus(Vec<Modifier>),
+    Active(Vec<Modifier>),
+    Disabled(Vec<Modifier>),
+    /// Container query — apply inner modifiers only at the given density.
+    WhenDensity(Density, Vec<Modifier>),
+    /// Uniform scale, Q8.8 fixed-point. 256 = 1.0× (identity).
+    Scale(u16),
+    /// Layout minimum width (px at 1× scale). Compositor honors as a hard
+    /// floor; if the parent allots less, the widget overflows visibly
+    /// rather than collapsing.
+    MinWidth(u16),
+    /// Layout maximum width (px at 1× scale).
+    MaxWidth(u16),
+    /// Corner radius (px at 1× scale) without a Border. Use this when
+    /// rounding is needed without a stroked outline.
+    Rounded(u8),
     // Appended only.
 }
 

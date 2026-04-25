@@ -75,7 +75,51 @@ pub fn layout(root: &Widget, container: Rect) -> LayoutNode {
 
 /// Compute the node's preferred size with no container constraints.
 /// `Spacer` reports (0, 0) here — flex distribution happens in `place`.
+///
+/// MinWidth/MaxWidth modifiers clamp the width *after* intrinsic
+/// measurement so containers see the constrained value during flex
+/// distribution.
 fn measure(w: &Widget) -> Size {
+    let intrinsic = measure_intrinsic(w);
+    apply_size_constraints(intrinsic, mods_of_widget(w))
+}
+
+fn apply_size_constraints(size: Size, mods: &[Modifier]) -> Size {
+    let mut min_w = 0u32;
+    let mut max_w = u32::MAX;
+    for m in mods {
+        match m {
+            Modifier::MinWidth(v) => { let v = *v as u32; if v > min_w { min_w = v; } }
+            Modifier::MaxWidth(v) => { let v = *v as u32; if v < max_w { max_w = v; } }
+            _ => {}
+        }
+    }
+    Size {
+        w: size.w.max(min_w).min(max_w),
+        h: size.h,
+    }
+}
+
+fn mods_of_widget(w: &Widget) -> &[Modifier] {
+    match w {
+        Widget::Column  { modifiers, .. } |
+        Widget::Row     { modifiers, .. } |
+        Widget::Stack   { modifiers, .. } |
+        Widget::Scroll  { modifiers, .. } |
+        Widget::Text    { modifiers, .. } |
+        Widget::Icon    { modifiers, .. } |
+        Widget::Button  { modifiers, .. } |
+        Widget::Input   { modifiers, .. } |
+        Widget::Checkbox{ modifiers, .. } |
+        Widget::Canvas  { modifiers, .. } |
+        Widget::Popover { modifiers, .. } |
+        Widget::Tooltip { modifiers, .. } |
+        Widget::Menu    { modifiers, .. } => modifiers,
+        _ => &[],
+    }
+}
+
+fn measure_intrinsic(w: &Widget) -> Size {
     match w {
         Widget::Column { children, spacing, modifiers, .. } => {
             let outer_pad = padding(modifiers);

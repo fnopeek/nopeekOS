@@ -59,3 +59,27 @@ impl Spacing {
 impl Padding {
     pub const fn as_u16(self) -> u16 { self as u16 }
 }
+
+/// Motion duration token — semantic timing for `Transition::Linear`.
+/// SDK-only convenience: mapped to milliseconds at modifier-construction
+/// time, so the wire form stays the existing `Transition::Linear { ms }`
+/// (no new variant, no wire-version bump).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum Motion {
+    Instant = 0,
+    Quick   = 120,
+    Normal  = 200,
+    Slow    = 400,
+}
+
+impl Motion {
+    pub const fn as_ms(self) -> u16 { self as u16 }
+
+    /// Lower this token to a wire-format `Transition`. Use as
+    /// `Modifier::Transition(Motion::Quick.as_transition())`.
+    pub const fn as_transition(self) -> crate::abi::Transition {
+        crate::abi::Transition::Linear { ms: self as u16 }
+    }
+}

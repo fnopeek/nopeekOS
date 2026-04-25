@@ -62,6 +62,20 @@ pub struct WidgetScene {
     /// resubmits the same tree (common with interactive apps that
     /// re-commit on every event loop iteration).
     pub payload_hash: [u8; 32],
+    /// Path of child indices from the root to the currently hovered
+    /// layout node — empty until the cursor enters the window. Used
+    /// by the render walker to merge `Modifier::Hover` inner mods on
+    /// the matching node.
+    pub hover_path:  Vec<u32>,
+    /// Compositor-classified container size bucket for this window —
+    /// drives `Modifier::WhenDensity(d, …)` matching. Recomputed on
+    /// commit and on resize.
+    pub density:     abi::Density,
+    /// Cached: tree contains at least one Hover/Focus/Active/Disabled/
+    /// WhenDensity modifier. Lets `update_hover` skip re-rasterization
+    /// for trees that have no state-driven visuals — avoids
+    /// re-rendering on every mouse move.
+    pub has_pseudo:  bool,
 }
 
 static SCENES: Mutex<BTreeMap<u32, WidgetScene>> = Mutex::new(BTreeMap::new());
@@ -165,6 +179,45 @@ pub fn hover_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
     out
 }
 
+/// Compositor-side density classifier. Thresholds live here once;
+/// apps reference them only via `Modifier::WhenDensity(Density, …)`.
+fn classify_density(window_w: u32) -> abi::Density {
+    if window_w < 600 { abi::Density::Compact }
+    else if window_w < 1200 { abi::Density::Regular }
+    else { abi::Density::Spacious }
+}
+
+/// Walk the layout tree and collect the chain of child indices that
+/// leads to the deepest node still containing (x, y). Returns the
+/// path; empty path = (x, y) is inside the root only. `None` means
+/// the point falls outside the root entirely.
+fn find_hover_path(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+) -> Option<Vec<u32>> {
+    if !rect_contains(layout.rect, x, y) { return None; }
+    let mut path: Vec<u32> = Vec::new();
+    descend_hover(widget, layout, x, y, &mut path);
+    Some(path)
+}
+
+fn descend_hover(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+    out: &mut Vec<u32>,
+) {
+    let kids = widget_children_ref(widget);
+    for (i, (cw, cl)) in kids.iter().zip(layout.children.iter()).enumerate() {
+        if rect_contains(cl.rect, x, y) {
+            out.push(i as u32);
+            descend_hover(cw, cl, x, y, out);
+            return;
+        }
+    }
+}
+
 fn find_hover_target(
     widget: &abi::Widget,
     layout: &layout::LayoutNode,
@@ -182,6 +235,47 @@ fn find_hover_target(
 }
 
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
+    // Step 1 — recompute the hover path against the cached layout tree.
+    // Cheap (one descent), avoids re-rendering on hover moves that
+    // don't actually cross node boundaries.
+    let new_path: Option<Vec<u32>> = {
+        let scenes = SCENES.lock();
+        match scenes.get(&window_id) {
+            Some(s) => find_hover_path(&s.tree, &s.layout_tree, x, y),
+            None    => None,
+        }
+    };
+    let new_path = new_path.unwrap_or_default();
+
+    // Step 2 — diff against the cached hover_path. If unchanged, skip.
+    // If changed AND the tree has any pseudo-state-aware modifier,
+    // re-rasterize using the new path; otherwise just update the path
+    // (hover events still fire below).
+    let path_changed = {
+        let scenes = SCENES.lock();
+        match scenes.get(&window_id) {
+            Some(s) => s.hover_path != new_path,
+            None    => false,
+        }
+    };
+
+    if path_changed {
+        let needs_rerender = {
+            let scenes = SCENES.lock();
+            scenes.get(&window_id).map(|s| s.has_pseudo).unwrap_or(false)
+        };
+        if needs_rerender {
+            rerender_with_state(window_id, &new_path);
+        } else {
+            // Just bump the cached path so the next move diffs cleanly.
+            if let Some(s) = SCENES.lock().get_mut(&window_id) {
+                s.hover_path = new_path.clone();
+            }
+        }
+    }
+
+    // Step 3 — fire the OnHover action event (existing semantics:
+    // dedup on ActionId, push only when target action changes).
     let new_id = hover_test(window_id, x, y);
     let mut last = LAST_HOVER.lock();
     let prev = last.get(&window_id).copied();
@@ -199,6 +293,36 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
     if let Some(id) = new_id {
         push_event(window_id, abi::Event::Action(id));
     }
+}
+
+/// Re-rasterize a scene with the given hover path. Caller must hold
+/// no lock on SCENES; we lock internally.
+fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
+    let (tree, rect, density) = {
+        let scenes = SCENES.lock();
+        match scenes.get(&window_id) {
+            Some(s) => (
+                s.tree.clone(),
+                abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
+                s.density,
+            ),
+            None => return,
+        }
+    };
+    let layout_tree = layout::layout(&tree, rect);
+    let pixels = rasterize_buffer(&tree, &layout_tree, rect, Some(hover_path), density);
+
+    if let Some(s) = SCENES.lock().get_mut(&window_id) {
+        s.pixels      = pixels;
+        s.layout_tree = layout_tree;
+        s.hover_path  = hover_path.to_vec();
+    }
+    crate::shade::with_compositor(|c| {
+        if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == window_id) {
+            win.dirty = true;
+        }
+    });
+    crate::shade::request_render();
 }
 
 pub fn clear_hover(window_id: u32) {
@@ -341,8 +465,22 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
 
     let layout_rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
     let layout_tree = layout::layout(&tree, layout_rect);
+    let density = classify_density(win_w);
+    let has_pseudo = render::tree_has_pseudo_state(&tree);
 
-    let pixels = rasterize_to_buffer(&tree, &layout_tree, win_x, win_y, win_w, win_h);
+    // Preserve the hover_path across re-commits so an interactive app
+    // re-rendering on every event doesn't lose its hover-merged
+    // pixels mid-frame. Falls back to empty for first commit.
+    let prev_hover_path = SCENES.lock().get(&target_id)
+        .map(|s| s.hover_path.clone())
+        .unwrap_or_default();
+    let hover_path_slice: Option<&[u32]> = if prev_hover_path.is_empty() {
+        None
+    } else {
+        Some(&prev_hover_path)
+    };
+
+    let pixels = rasterize_buffer(&tree, &layout_tree, layout_rect, hover_path_slice, density);
 
     // Store into the per-window scene map. Keep a clone of the tree
     // + layout for future resize re-renders (typical tree < 1 KB).
@@ -355,6 +493,9 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
         tree:        tree.clone(),
         layout_tree,
         payload_hash: incoming_hash,
+        hover_path:  prev_hover_path,
+        density,
+        has_pseudo,
     });
 
     // Mark the window dirty so shade paints it in the next render,
@@ -374,14 +515,20 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
 }
 
 /// Alloc a BGRA back buffer, clear to Surface, run the render walker,
-/// return the pixel vec. Used by both `scene_commit` (fresh) and the
-/// relayout path (resize / re-render from cached tree).
-fn rasterize_to_buffer(
+/// return the pixel vec. Used by `scene_commit`, the relayout path
+/// (resize / re-render from cached tree), and `update_hover`'s
+/// pseudo-state re-render.
+///
+/// `hover_path = Some(&[])` means the root is the hover target;
+/// `None` means no node is hovered.
+fn rasterize_buffer(
     tree: &abi::Widget,
     layout_tree: &layout::LayoutNode,
-    win_x: i32, win_y: i32, win_w: u32, win_h: u32,
+    rect: abi::Rect,
+    hover_path: Option<&[u32]>,
+    density: abi::Density,
 ) -> Vec<u32> {
-    let pixel_count = (win_w as usize) * (win_h as usize);
+    let pixel_count = (rect.w as usize) * (rect.h as usize);
     let mut pixels: Vec<u32> = alloc::vec![0u32; pixel_count];
 
     // Clear to Surface token — covers areas not painted by any widget.
@@ -391,18 +538,31 @@ fn rasterize_to_buffer(
     let pal = palette::current();
     let mut target = abi::RasterTarget {
         pixels:  &mut pixels,
-        stride:  win_w,
-        size:    abi::Size { w: win_w, h: win_h },
-        origin:  abi::Point { x: win_x, y: win_y },
+        stride:  rect.w,
+        size:    abi::Size { w: rect.w, h: rect.h },
+        origin:  abi::Point { x: rect.x, y: rect.y },
         scale:   1,
         palette: &pal,
     };
     let mut rast = raster::cpu::CpuRasterizer::new();
-    render::render(&mut rast, &mut target, tree, layout_tree);
+    render::render_with_state(&mut rast, &mut target, tree, layout_tree, hover_path, density);
 
     // `target` drops here, releasing the &mut on `pixels`.
     drop(target);
     pixels
+}
+
+/// Back-compat wrapper for legacy call sites (scene_commit, refresh,
+/// relayout). Defaults to "no hover" + `Regular` density unless the
+/// caller specifies state via `rasterize_buffer` directly.
+fn rasterize_to_buffer(
+    tree: &abi::Widget,
+    layout_tree: &layout::LayoutNode,
+    win_x: i32, win_y: i32, win_w: u32, win_h: u32,
+) -> Vec<u32> {
+    let rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
+    let density = classify_density(win_w);
+    rasterize_buffer(tree, layout_tree, rect, None, density)
 }
 
 /// Re-render a scene at new dimensions — called by shade when a
@@ -415,14 +575,18 @@ fn rasterize_to_buffer(
 pub fn refresh_all_scenes() {
     let keys: alloc::vec::Vec<u32> = SCENES.lock().keys().copied().collect();
     for wid in keys {
-        let (tree, rect) = match SCENES.lock().get(&wid) {
-            Some(s) => (s.tree.clone(), abi::Rect {
-                x: s.origin_x, y: s.origin_y, w: s.width, h: s.height,
-            }),
+        let (tree, rect, hover_path, density) = match SCENES.lock().get(&wid) {
+            Some(s) => (
+                s.tree.clone(),
+                abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
+                s.hover_path.clone(),
+                s.density,
+            ),
             None => continue,
         };
         let new_layout = layout::layout(&tree, rect);
-        let new_pixels = rasterize_to_buffer(&tree, &new_layout, rect.x, rect.y, rect.w, rect.h);
+        let hover_slice: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
+        let new_pixels = rasterize_buffer(&tree, &new_layout, rect, hover_slice, density);
         if let Some(scene) = SCENES.lock().get_mut(&wid) {
             scene.pixels      = new_pixels;
             scene.layout_tree = new_layout;
@@ -448,13 +612,19 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     }
     let new_rect = abi::Rect { x: new_x, y: new_y, w: new_w, h: new_h };
     let tree = scene.tree.clone();
+    let new_density = classify_density(new_w);
+    // Resize invalidates the cached hover_path — coordinates of the
+    // old layout no longer match the new one. Easier to clear it and
+    // wait for the next MouseMove than to remap path indices.
     let new_layout = layout::layout(&tree, new_rect);
-    let new_pixels = rasterize_to_buffer(&tree, &new_layout, new_x, new_y, new_w, new_h);
+    let new_pixels = rasterize_buffer(&tree, &new_layout, new_rect, None, new_density);
     scene.pixels      = new_pixels;
     scene.width       = new_w;
     scene.height      = new_h;
     scene.origin_x    = new_x;
     scene.origin_y    = new_y;
     scene.layout_tree = new_layout;
+    scene.density     = new_density;
+    scene.hover_path.clear();
     true
 }

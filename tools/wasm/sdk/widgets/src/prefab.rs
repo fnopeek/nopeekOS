@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use crate::abi::{
     ActionId, Align, Axis, IconId, Modifier, TextStyle, Token, Widget,
 };
-use crate::style::{Padding, Radius, Spacing};
+use crate::style::{Elevation, Padding, Radius, Spacing};
 
 // Panel has no padding so dividers reach the window chrome for a
 // closed ring; children set their own padding individually.
@@ -58,7 +58,7 @@ pub fn list_row(
     on_click: Option<ActionId>,
     on_hover: Option<ActionId>,
 ) -> Widget {
-    let mut row_mods: Vec<Modifier> = Vec::with_capacity(5);
+    let mut row_mods: Vec<Modifier> = Vec::with_capacity(6);
     row_mods.push(Modifier::Padding(Padding::Md.as_u16()));
     if let Some(id) = on_click { row_mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { row_mods.push(Modifier::OnHover(id)); }
@@ -69,6 +69,14 @@ pub fn list_row(
             width:  1,
             radius: Radius::Sm.as_u8(),
         });
+    } else {
+        // Non-selected rows get a subtle hover highlight. Selected rows
+        // skip this so hovering an already-selected row doesn't change
+        // its accent fill — keeps visual hierarchy stable.
+        row_mods.push(Modifier::Hover(vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ]));
     }
 
     // Always render subtitle (even when empty) so every row gets the
@@ -207,10 +215,14 @@ pub fn body(text: &str) -> Widget {
 /// Square tap-target with a single centred icon. Used for toolbar chrome
 /// (back/forward/up, refresh) and in-row actions.
 pub fn icon_button(icon: IconId, size: u16, on_click: Option<ActionId>, on_hover: Option<ActionId>) -> Widget {
-    let mut mods: Vec<Modifier> = Vec::with_capacity(3);
+    let mut mods: Vec<Modifier> = Vec::with_capacity(4);
     mods.push(Modifier::Padding(Padding::Sm.as_u16()));
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
+    mods.push(Modifier::Hover(vec![
+        Modifier::Background(Token::SurfaceMuted),
+        Modifier::Rounded(Radius::Sm.as_u8()),
+    ]));
     Widget::Icon { id: icon, size, modifiers: mods }
 }
 
@@ -243,13 +255,18 @@ pub fn nav_row(
     on_click: Option<ActionId>,
     on_hover: Option<ActionId>,
 ) -> Widget {
-    let mut mods: Vec<Modifier> = Vec::with_capacity(5);
+    let mut mods: Vec<Modifier> = Vec::with_capacity(6);
     mods.push(Modifier::Padding(Padding::Sm.as_u16()));
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
     if selected {
         mods.push(Modifier::Background(Token::AccentMuted));
         mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Sm.as_u8() });
+    } else {
+        mods.push(Modifier::Hover(vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ]));
     }
 
     let icon_mods = if selected { vec![Modifier::Tint(Token::Accent)] } else { vec![] };
@@ -321,13 +338,18 @@ pub fn grid_item(
     on_click: Option<ActionId>,
     on_hover: Option<ActionId>,
 ) -> Widget {
-    let mut mods: Vec<Modifier> = Vec::with_capacity(5);
+    let mut mods: Vec<Modifier> = Vec::with_capacity(6);
     mods.push(Modifier::Padding(Padding::Sm.as_u16()));
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
     if selected {
         mods.push(Modifier::Background(Token::AccentMuted));
         mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() });
+    } else {
+        mods.push(Modifier::Hover(vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Rounded(Radius::Md.as_u8()),
+        ]));
     }
 
     let icon_mods = if selected { vec![Modifier::Tint(Token::Accent)] } else { vec![] };
@@ -385,6 +407,198 @@ pub fn grid(items: Vec<Widget>, per_row: usize) -> Widget {
         spacing:   Spacing::Md.as_u16(),
         align:     Align::Stretch,
         modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
+    }
+}
+
+// ── Vocab v2 archetypes — modern Tailwind-style prefabs ─────────────
+//
+// These are the primary building blocks for new apps and AI-generated
+// UI. They use the v2 modifier set (Hover, Rounded, WhenDensity) so
+// callers get hover-feedback, responsive padding, and consistent
+// elevation by default. The earlier prefabs above (panel, list_row,
+// nav_row, ...) remain for backward compat with drun + loft and have
+// been polished with hover-state in place.
+
+/// Visual weight tier for `card`. Maps semantically to design tokens
+/// rather than concrete pixel values so a future theme can retune all
+/// cards in one place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardKind {
+    /// Flat surface with a border. Use for inline groupings.
+    Inset,
+    /// Elevated surface above the window background. Default.
+    Panel,
+    /// Strongly elevated, e.g. modal dialogs. Maps to Floating elevation.
+    Sheet,
+}
+
+/// Container with consistent padding, rounded corners, and surface
+/// background. The visual workhorse of the v2 vocabulary — every
+/// non-trivial app screen should contain at least one card.
+///
+/// Ignores `Elevation` for now (no shadow rendering yet); the kind
+/// still determines the surface token + border treatment so card
+/// hierarchy is visible even without shadows.
+pub fn card(content: Widget, kind: CardKind) -> Widget {
+    let (bg_tok, border) = match kind {
+        CardKind::Inset => (Token::Surface, Some((Token::Border, 1u8))),
+        CardKind::Panel => (Token::SurfaceElevated, None),
+        CardKind::Sheet => (Token::SurfaceElevated, None),
+    };
+    let _elevation = match kind {
+        CardKind::Inset => Elevation::Flat,
+        CardKind::Panel => Elevation::Subtle,
+        CardKind::Sheet => Elevation::Floating,
+    };
+    let mut mods: Vec<Modifier> = Vec::with_capacity(4);
+    mods.push(Modifier::Padding(Padding::Lg.as_u16()));
+    mods.push(Modifier::Background(bg_tok));
+    mods.push(Modifier::Rounded(Radius::Lg.as_u8()));
+    if let Some((tok, w)) = border {
+        mods.push(Modifier::Border { token: tok, width: w, radius: Radius::Lg.as_u8() });
+    }
+    Widget::Column {
+        children: vec![content],
+        spacing:  Spacing::Md.as_u16(),
+        align:    Align::Stretch,
+        modifiers: mods,
+    }
+}
+
+/// Visual variant for `button`. Defines the colour pair only; the
+/// rest of the chrome (rounded corners, padding, hover lift) is
+/// shared so all button styles feel like the same family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// Solid accent fill — primary action of the screen.
+    Primary,
+    /// Soft elevated surface — secondary action.
+    Secondary,
+    /// No background, just the label — tertiary action.
+    Ghost,
+    /// Danger-coloured fill — destructive action.
+    Destructive,
+}
+
+/// Themed button. Wraps `Widget::Button` with a coherent default
+/// chrome and a hover-state so every call site gets the same feel.
+pub fn button(label: &str, style: ButtonStyle, on_click: ActionId) -> Widget {
+    let (bg, hover_bg) = match style {
+        ButtonStyle::Primary     => (Token::Accent,           Token::AccentMuted),
+        ButtonStyle::Secondary   => (Token::SurfaceElevated,  Token::SurfaceMuted),
+        ButtonStyle::Ghost       => (Token::Surface,          Token::SurfaceMuted),
+        ButtonStyle::Destructive => (Token::Danger,           Token::Warning),
+    };
+    let mut mods: Vec<Modifier> = Vec::with_capacity(4);
+    mods.push(Modifier::Padding(Padding::Md.as_u16()));
+    mods.push(Modifier::Background(bg));
+    mods.push(Modifier::Rounded(Radius::Md.as_u8()));
+    mods.push(Modifier::Hover(vec![
+        Modifier::Background(hover_bg),
+    ]));
+    Widget::Button {
+        label:     label.to_string(),
+        icon:      IconId::None,
+        on_click,
+        modifiers: mods,
+    }
+}
+
+/// Semantic kind for `input`. Search adds a leading magnifier icon;
+/// Password is a placeholder for masked rendering once the rasterizer
+/// supports it (today renders as plain text).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKind {
+    Text,
+    Search,
+    Password,
+}
+
+/// Themed text input with consistent padding, rounded corners, and
+/// elevated surface. Search variant prepends a magnifier icon.
+pub fn input(value: &str, placeholder: &str, kind: InputKind, on_submit: ActionId) -> Widget {
+    let raw = Widget::Input {
+        value:       value.to_string(),
+        placeholder: placeholder.to_string(),
+        on_submit,
+        modifiers:   vec![],
+    };
+    let mut wrap_mods: Vec<Modifier> = Vec::with_capacity(4);
+    wrap_mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    wrap_mods.push(Modifier::Background(Token::SurfaceElevated));
+    wrap_mods.push(Modifier::Rounded(Radius::Md.as_u8()));
+    wrap_mods.push(Modifier::Focus(vec![
+        Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
+    ]));
+
+    match kind {
+        InputKind::Search => Widget::Row {
+            children: vec![
+                Widget::Icon {
+                    id:        IconId::MagnifyingGlass,
+                    size:      20,
+                    modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)],
+                },
+                raw,
+            ],
+            spacing:   Spacing::Sm.as_u16(),
+            align:     Align::Center,
+            modifiers: wrap_mods,
+        },
+        InputKind::Text | InputKind::Password => Widget::Row {
+            children:  vec![raw],
+            spacing:   Spacing::None.as_u16(),
+            align:     Align::Center,
+            modifiers: wrap_mods,
+        },
+    }
+}
+
+/// Modal dialog wrapper — title bar at the top, body in the middle,
+/// optional footer hint at the bottom. Uses Sheet card styling.
+///
+/// `min_size` becomes a hard layout constraint so the dialog doesn't
+/// collapse below readable dimensions even in a small tile.
+pub fn dialog(
+    title: &str,
+    body: Widget,
+    footer_hint: Option<&str>,
+    min_w: u16,
+) -> Widget {
+    let mut children: Vec<Widget> = Vec::with_capacity(4);
+    children.push(Widget::Text {
+        content: title.to_string(),
+        style:   TextStyle::Title,
+        modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
+    });
+    children.push(Widget::Divider);
+    children.push(body);
+    if let Some(hint) = footer_hint {
+        children.push(Widget::Divider);
+        children.push(Widget::Text {
+            content: hint.to_string(),
+            style:   TextStyle::Caption,
+            modifiers: vec![
+                Modifier::Padding(Padding::Sm.as_u16()),
+            ],
+        });
+    }
+
+    Widget::Column {
+        children,
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Stretch,
+        modifiers: vec![
+            Modifier::Padding(Padding::Lg.as_u16()),
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Rounded(Radius::Lg.as_u8()),
+            Modifier::MinWidth(min_w),
+            // Compact density: tighter padding so the dialog still fits
+            // in a narrow tile.
+            Modifier::WhenDensity(crate::abi::Density::Compact, vec![
+                Modifier::Padding(Padding::Md.as_u16()),
+            ]),
+        ],
     }
 }
 
