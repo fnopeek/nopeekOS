@@ -466,6 +466,81 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
     false
 }
 
+/// Move focus to the next focusable widget in document order
+/// (Tab semantics). Wraps around at the end. Returns `true` if a
+/// re-render happened.
+///
+/// Called from outside the compositor lock (intent loop key path),
+/// so this one is allowed to mark the window dirty itself.
+#[must_use]
+pub fn next_focus(window_id: u32) -> bool {
+    advance_focus(window_id, 1)
+}
+
+/// Move focus to the previous focusable widget (Shift+Tab).
+#[must_use]
+pub fn prev_focus(window_id: u32) -> bool {
+    advance_focus(window_id, -1)
+}
+
+fn advance_focus(window_id: u32, delta: isize) -> bool {
+    let (paths, current, has_pseudo) = {
+        let scenes = SCENES.lock();
+        let scene = match scenes.get(&window_id) {
+            Some(s) => s,
+            None    => return false,
+        };
+        let mut paths: Vec<Vec<u32>> = Vec::new();
+        let mut cursor: Vec<u32> = Vec::new();
+        collect_focusable_paths(&scene.tree, &scene.layout_tree, &mut cursor, &mut paths);
+        (paths, scene.focus_path.clone(), scene.has_pseudo)
+    };
+    if paths.is_empty() { return false; }
+
+    let cur_idx = paths.iter().position(|p| *p == current);
+    let next_idx = match cur_idx {
+        Some(i) => {
+            let n = paths.len() as isize;
+            ((i as isize + delta).rem_euclid(n)) as usize
+        }
+        None => if delta >= 0 { 0 } else { paths.len() - 1 },
+    };
+    let new_path = paths[next_idx].clone();
+    if new_path == current { return false; }
+
+    if let Some(s) = SCENES.lock().get_mut(&window_id) {
+        s.focus_path = new_path;
+    }
+    if has_pseudo {
+        rerender_state_only(window_id);
+        mark_dirty(window_id);
+        return true;
+    }
+    false
+}
+
+/// DFS-collect all focusable widget paths in document order. Used
+/// for Tab traversal. Disabled subtrees are pruned.
+fn collect_focusable_paths(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    cursor: &mut Vec<u32>,
+    out: &mut Vec<Vec<u32>>,
+) {
+    let _ = layout; // Same shape as the widget tree; kept for symmetry.
+    if is_disabled(widget) { return; }
+    if is_focusable(widget) {
+        out.push(cursor.clone());
+    }
+    let kids = widget_children_ref(widget);
+    for (i, cw) in kids.iter().enumerate() {
+        let cl = match layout.children.get(i) { Some(c) => c, None => continue };
+        cursor.push(i as u32);
+        collect_focusable_paths(cw, cl, cursor, out);
+        cursor.pop();
+    }
+}
+
 /// Mouse-button-up: clear active state. Focus persists. Returns
 /// `true` if a re-render happened — caller marks the window dirty.
 #[must_use]

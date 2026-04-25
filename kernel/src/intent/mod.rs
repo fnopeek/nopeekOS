@@ -833,6 +833,18 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     if crate::shade::input::try_keybind_event(&event) {
                         continue;
                     }
+                    // Tab / Shift+Tab move focus inside the widget
+                    // window when there's at least one focusable
+                    // widget. Falls through (key reaches the app) if
+                    // no focusable nodes exist (purely decorative tree).
+                    if matches!(event.key, crate::input::KeyCode::Tab) {
+                        let consumed = if event.modifiers.shift {
+                            crate::shade::widgets::prev_focus(widget_wid)
+                        } else {
+                            crate::shade::widgets::next_focus(widget_wid)
+                        };
+                        if consumed { continue; }
+                    }
                     crate::shade::widgets::push_event(
                         widget_wid,
                         crate::shade::widgets::abi::Event::Key(event.key),

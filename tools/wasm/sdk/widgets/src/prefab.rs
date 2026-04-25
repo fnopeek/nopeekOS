@@ -45,12 +45,16 @@ pub fn list_row(
             radius: Radius::Sm.as_u8(),
         });
     } else {
-        // Non-selected rows get a subtle hover highlight. Selected rows
-        // skip this so hovering an already-selected row doesn't change
-        // its accent fill — keeps visual hierarchy stable.
+        // Non-selected rows get a subtle hover highlight + a focus
+        // outline (Tab-nav). Selected rows skip both so hovering /
+        // focusing an already-selected row doesn't compete with its
+        // accent fill — keeps visual hierarchy stable.
         row_mods.push(Modifier::Hover(vec![
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Rounded(Radius::Sm.as_u8()),
+        ]));
+        row_mods.push(Modifier::Focus(vec![
+            Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Sm.as_u8() },
         ]));
     }
 
@@ -190,13 +194,16 @@ pub fn body(text: &str) -> Widget {
 /// Square tap-target with a single centred icon. Used for toolbar chrome
 /// (back/forward/up, refresh) and in-row actions.
 pub fn icon_button(icon: IconId, size: u16, on_click: Option<ActionId>, on_hover: Option<ActionId>) -> Widget {
-    let mut mods: Vec<Modifier> = Vec::with_capacity(4);
+    let mut mods: Vec<Modifier> = Vec::with_capacity(5);
     mods.push(Modifier::Padding(Padding::Sm.as_u16()));
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
     mods.push(Modifier::Hover(vec![
         Modifier::Background(Token::SurfaceMuted),
         Modifier::Rounded(Radius::Sm.as_u8()),
+    ]));
+    mods.push(Modifier::Focus(vec![
+        Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Sm.as_u8() },
     ]));
     Widget::Icon { id: icon, size, modifiers: mods }
 }
@@ -241,6 +248,9 @@ pub fn nav_row(
         mods.push(Modifier::Hover(vec![
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Rounded(Radius::Sm.as_u8()),
+        ]));
+        mods.push(Modifier::Focus(vec![
+            Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Sm.as_u8() },
         ]));
     }
 
@@ -324,6 +334,9 @@ pub fn grid_item(
         mods.push(Modifier::Hover(vec![
             Modifier::Background(Token::SurfaceMuted),
             Modifier::Rounded(Radius::Md.as_u8()),
+        ]));
+        mods.push(Modifier::Focus(vec![
+            Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Md.as_u8() },
         ]));
     }
 
