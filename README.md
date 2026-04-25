@@ -478,11 +478,28 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [x] P10.7 Event routing — mouse hit-test + `npk_event_poll` (`v0.60.0`, keyboard/blocking pending)
 - [x] P10.8 Animation — Q16.16 math scaffold (`v0.61.0`, no active consumers yet)
 - [x] P10.9 Phosphor icon atlas (`v0.62.0`) — **last visual checkpoint, 18 icons shipped**
-- [x] drun — Mod+D app launcher (`v0.64.2` + drun `0.2.1`) — first interactive widget app on its own, keyboard nav, modal overlay
-- [ ] drun polish — mouse-click selection, search input, visual refinement
+- [x] drun — Mod+D app launcher (`v0.64.2` + drun `0.2.1`) — first interactive widget app, keyboard nav, modal overlay
+- [x] drun v0.5.1 (`v0.75.x`) — live search / hover / click, icon + title + subtitle, AppMeta custom-section, reads own metadata from each wasm
+- [x] SDK `style` + `prefab` modules — design tokens (Radius/Spacing/Padding) + cookbook (panel, searchbar, list_row, footer, badge, scroll_list)
+- [x] `Modifier::Tint(Token)` — icons inherit accent color from theme
+- [x] Two-theme palette (dark/light/auto) — curated surface/border/text per mode, wallpaper-derived accent with contrast adjust (`theme` intent)
+- [x] Rounded-rect 16×16 centered subpixel AA across chrome + widget rasterizer
+- [x] npkFS hardening — 6 write-path bugs fixed (`v0.73.x`): btree rightmost-child leak, TRIM partition-offset, indirect free-before-journal, store-leak on insert-fail, unjournaled indirect chain, partial-extent cache invalidation
+- [x] Aurora procedural BG retired — kernel default is solid grey, all pixel generation lives in `wallpaper.wasm`
+- [x] Wallpaper generator set — `solid`, `gradient` (2 & 4-corner bilinear), `pattern` (dots/stripes/checker/grid/noise), all inside `wallpaper.wasm`
+- [x] **P10.11 file browser** — `loft` shipped (`kernel v0.76.0` + `loft 0.1.x`). Thunar-clone with sidebar (PLACES + DEVICES), toolbar (back/forward/up/refresh), breadcrumb, icon-grid, file-type icon heuristic. Hand-rolled `Modifier::Padding(8)` later replaced by `prefab::sidebar_pane` in v2.
+- [x] **Vocab v2 — Tailwind-style modifiers + pseudo-state engine** (`kernel v0.77–0.79`, `sdk 0.2.0–0.4.0`):
+  - 9 new `Modifier` variants append-only — `Hover` / `Focus` / `Active` / `Disabled` / `WhenDensity` (each `Vec<Modifier>`), `Scale(u16)` Q8.8, `MinWidth` / `MaxWidth` (u16), `Rounded(u8)`. Wire-version stays `0x01`.
+  - New `Density` enum (`Compact <600 px / Regular 600–1200 / Spacious >1200`) drives `WhenDensity(d, …)` matching; `Motion` SDK helper (`Quick=120 / Normal=200 / Slow=400 ms`) lowers to existing `Transition::Linear`.
+  - Compositor tracks per-window `hover_path` / `focus_path` / `active_path`; `effective_modifiers` merges state mods with CSS `:hover`-ancestor semantics; `Disabled` overrides interactive states + propagates through hit-testing.
+  - **Tab / Shift+Tab** navigate focusable widgets in document order (DFS, wraparound, disabled-skipped). Click-to-focus + mouse-press → active state with re-rasterize triggered only when the tree has any pseudo-state mod (`has_pseudo` cache → zero cost on plain trees).
+  - `prefab::card` / `button` / `input` / `dialog` / `sidebar_pane` added; `prefab::searchbar` removed (subsumed by `input(Search)` with optional trailing widget). All interactive prefabs now ship Hover + Focus + (where appropriate) Active states out of the box.
+  - **`WIDGET_VOCAB.md`** at the repo root: single-file Tailwind-style cheat sheet for app developers and AI code-generators.
+- [x] `Widget::Input` and `Widget::Button` respect `Modifier::Background` instead of hardcoding `SurfaceElevated` / `Accent` — lets prefabs own the chrome.
+- [ ] Static visual effects (`Shadow` / `Transition` / Scale outside pseudo-states) — needs compositing-layer pass (Phase 12 GPU or own layer cache)
 - [ ] Tile subdivision + full diff cache
 - [ ] P10.10 Canvas escape hatch
-- [ ] P10.11 Real file browser (Thunar-clone, capstone)
+- [ ] `Widget::Input` self-editing (cursor + submit) — apps still route Char/Backspace themselves
 
 ### Phase 11 -- AI Integration
 

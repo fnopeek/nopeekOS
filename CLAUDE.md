@@ -42,10 +42,31 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 10 (Widget API & GUI Apps) — P10.0–P10.9 shipped (v0.62.0). Next: drun launcher (first interactive widget app), then tile-subdivision + full diff-cache, then Canvas + real file browser.
-- **Parallel track:** Phase 9 SMP/event-driven still evolving (WiFi driver, per-core timer)
+- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.79.0`, sdk `0.4.0`,
+  drun `0.5.6`, loft `0.1.6`.
+  - **Vocab v2 shipped** (Tailwind-style modifier set + pseudo-state engine):
+    Hover / Focus / Active / Disabled / WhenDensity, Rounded, MinWidth /
+    MaxWidth, Scale (Q8.8 reserved), 9 new Modifier variants append-only
+    to the Wire ABI (still WIRE_VERSION 0x01).
+    Compositor tracks per-window hover_path / focus_path / active_path,
+    re-rasterizes only when has_pseudo + path actually changed.
+    Tab / Shift+Tab navigation walks focusable widgets in document order.
+    `WIDGET_VOCAB.md` at the repo root is the AI / app-dev reference.
+  - **Apps complete**: drun (Mod+D launcher, modal overlay), loft (file
+    browser — Thunar-clone, sidebar + breadcrumb + grid + toolbar). Both
+    use the v2 prefab cookbook (card, button, input, dialog, sidebar_pane,
+    list_row, nav_row, grid_item, icon_button, …). Hover/Focus borders
+    visible across all interactive widgets.
+  - **Two-theme palette** (dark/light/auto) with wallpaper-driven accent +
+    16×16 subpixel AA on rounded rects (kernel-side polish from 0.75.x).
+  - npkFS hardened — 6 write-path bugs fixed in 0.73.x.
+  - **Next:** static visual effects (Shadow / Transition / Scale via
+    compositing-layer pass), tile subdivision + full diff cache,
+    Widget::Input self-editing, Canvas (P10.10).
+- **Parallel track:** Phase 9 SMP/event-driven (WiFi driver, per-core timer)
 - **Completed features + full roadmap:** see `README.md`
 - **Phase 10 detail spec + progress:** see `PHASE10_WIDGETS.md`
+- **Vocab-v2 reference (for AI / app devs):** see `WIDGET_VOCAB.md`
 - **Active work / blockers:** see `memory/project_wifi_current.md`
 
 ## Commit-Message Convention (since v0.54.x)
