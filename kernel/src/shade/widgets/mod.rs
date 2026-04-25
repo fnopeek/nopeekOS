@@ -67,6 +67,14 @@ pub struct WidgetScene {
     /// by the render walker to merge `Modifier::Hover` inner mods on
     /// the matching node.
     pub hover_path:  Vec<u32>,
+    /// Path of the currently focused widget (Tab-stop, keyboard
+    /// destination). Empty = no focus. Set by click-to-focus and
+    /// future Tab navigation.
+    pub focus_path:  Vec<u32>,
+    /// Path of the widget under an active mouse-button press.
+    /// `None` = no button down. Cleared on button release. Drives
+    /// `Modifier::Active(…)` style.
+    pub active_path: Option<Vec<u32>>,
     /// Compositor-classified container size bucket for this window —
     /// drives `Modifier::WhenDensity(d, …)` matching. Recomputed on
     /// commit and on resize.
@@ -159,12 +167,32 @@ pub fn remove_event_queue(window_id: u32) {
 /// Button inside a Row's rect wins over the Row itself. Falls back
 /// to the variant's built-in click id (Widget::Button.on_click) if
 /// no OnClick modifier is present.
+///
+/// Disabled-propagation: if any ancestor (inclusive) has
+/// `Modifier::Disabled(_)`, the click is swallowed — disabled widgets
+/// eat events for themselves AND their descendants.
 pub fn hit_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
     let scenes = SCENES.lock();
     let scene = scenes.get(&window_id)?;
     let mut out = None;
-    find_click_target(&scene.tree, &scene.layout_tree, x, y, &mut out);
+    find_click_target(&scene.tree, &scene.layout_tree, x, y, false, &mut out);
     out
+}
+
+fn is_disabled(w: &abi::Widget) -> bool {
+    modifiers_of_ref(w).iter().any(|m| matches!(m, abi::Modifier::Disabled(_)))
+}
+
+fn is_focusable(w: &abi::Widget) -> bool {
+    if is_disabled(w) { return false; }
+    if matches!(w,
+        abi::Widget::Button { .. }
+        | abi::Widget::Input { .. }
+        | abi::Widget::Checkbox { .. }
+    ) {
+        return true;
+    }
+    modifiers_of_ref(w).iter().any(|m| matches!(m, abi::Modifier::OnClick(_)))
 }
 
 // Deduplicated OnHover target per window. Compositor calls update_hover
@@ -225,6 +253,7 @@ fn find_hover_target(
     out: &mut Option<abi::ActionId>,
 ) {
     if !rect_contains(layout.rect, x, y) { return; }
+    if is_disabled(widget) { return; }
     for (cw, cl) in widget_children_ref(widget).iter().zip(layout.children.iter()) {
         find_hover_target(cw, cl, x, y, out);
         if out.is_some() { return; }
@@ -232,6 +261,46 @@ fn find_hover_target(
     for m in modifiers_of_ref(widget) {
         if let abi::Modifier::OnHover(id) = m { *out = Some(*id); return; }
     }
+}
+
+/// Walk down to the deepest focusable widget under (x, y). Returns
+/// the path of child indices from root, or `None` if no focusable
+/// node lives there. Disabled widgets and their descendants are
+/// skipped.
+fn find_focusable_path(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+) -> Option<Vec<u32>> {
+    if !rect_contains(layout.rect, x, y) { return None; }
+    if is_disabled(widget) { return None; }
+    let mut path: Vec<u32> = Vec::new();
+    if descend_focusable(widget, layout, x, y, &mut path) {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn descend_focusable(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+    out: &mut Vec<u32>,
+) -> bool {
+    // Children first — deepest focusable wins.
+    let kids = widget_children_ref(widget);
+    for (i, (cw, cl)) in kids.iter().zip(layout.children.iter()).enumerate() {
+        if !rect_contains(cl.rect, x, y) { continue; }
+        if is_disabled(cw) { continue; }
+        out.push(i as u32);
+        if descend_focusable(cw, cl, x, y, out) {
+            return true;
+        }
+        out.pop();
+    }
+    // No child took it — am I focusable myself?
+    is_focusable(widget)
 }
 
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
@@ -295,34 +364,144 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
     }
 }
 
-/// Re-rasterize a scene with the given hover path. Caller must hold
-/// no lock on SCENES; we lock internally.
+/// Re-rasterize a scene with the given hover path. Other state paths
+/// (focus, active) come from the cached scene values. Caller must
+/// hold no lock on SCENES; we lock internally.
 fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
-    let (tree, rect, density) = {
+    let (tree, rect, density, focus_path, active_path) = {
         let scenes = SCENES.lock();
         match scenes.get(&window_id) {
             Some(s) => (
                 s.tree.clone(),
                 abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
                 s.density,
+                s.focus_path.clone(),
+                s.active_path.clone(),
             ),
             None => return,
         }
     };
     let layout_tree = layout::layout(&tree, rect);
-    let pixels = rasterize_buffer(&tree, &layout_tree, rect, Some(hover_path), density);
+    let h = if hover_path.is_empty() { None } else { Some(hover_path) };
+    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
+    let a: Option<&[u32]> = active_path.as_deref();
+    let pixels = rasterize_buffer(&tree, &layout_tree, rect, h, f, a, density);
 
     if let Some(s) = SCENES.lock().get_mut(&window_id) {
         s.pixels      = pixels;
         s.layout_tree = layout_tree;
         s.hover_path  = hover_path.to_vec();
     }
+    mark_dirty(window_id);
+}
+
+/// Helper: mark the window dirty + request a render. Used by every
+/// state-driven re-rasterize path.
+fn mark_dirty(window_id: u32) {
     crate::shade::with_compositor(|c| {
         if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == window_id) {
             win.dirty = true;
         }
     });
     crate::shade::request_render();
+}
+
+/// Mouse-button-down at (x, y) on a widget window: move focus to the
+/// deepest focusable widget at the cursor and start the active state.
+/// Re-rasterizes the scene if it has any pseudo-state visuals.
+///
+/// Doesn't push the click action — that's still hit_test's job at the
+/// existing call site (kept separate so apps that wire their own
+/// click-routing aren't affected by state mechanics).
+pub fn press_at(window_id: u32, x: i32, y: i32) {
+    let (new_focus, new_active, has_pseudo) = {
+        let scenes = SCENES.lock();
+        let scene = match scenes.get(&window_id) {
+            Some(s) => s,
+            None    => return,
+        };
+        let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
+        match press_path {
+            Some(p) => (Some(p.clone()), Some(p), scene.has_pseudo),
+            None    => (None, None, scene.has_pseudo),
+        }
+    };
+
+    let (focus_changed, active_changed) = {
+        let scenes = SCENES.lock();
+        let scene = match scenes.get(&window_id) {
+            Some(s) => s,
+            None    => return,
+        };
+        let f_changed = match (&new_focus, &scene.focus_path) {
+            (Some(p), cur) => p != cur,
+            (None, cur)    => !cur.is_empty(),
+        };
+        let a_changed = match (&new_active, &scene.active_path) {
+            (Some(p), Some(cur)) => p != cur,
+            (None, None)         => false,
+            _                    => true,
+        };
+        (f_changed, a_changed)
+    };
+
+    if focus_changed || active_changed {
+        if let Some(s) = SCENES.lock().get_mut(&window_id) {
+            if let Some(ref f) = new_focus { s.focus_path = f.clone(); }
+            else                            { s.focus_path.clear(); }
+            s.active_path = new_active;
+        }
+        if has_pseudo {
+            rerender_after_state_change(window_id);
+        }
+    }
+}
+
+/// Mouse-button-up: clear active state. Focus persists.
+pub fn release_at(window_id: u32) {
+    let (had_active, has_pseudo) = {
+        let scenes = SCENES.lock();
+        match scenes.get(&window_id) {
+            Some(s) => (s.active_path.is_some(), s.has_pseudo),
+            None    => return,
+        }
+    };
+    if !had_active { return; }
+    if let Some(s) = SCENES.lock().get_mut(&window_id) {
+        s.active_path = None;
+    }
+    if has_pseudo {
+        rerender_after_state_change(window_id);
+    }
+}
+
+/// Internal: re-rasterize using the cached focus/active/hover paths.
+/// Used after a non-hover state change (press, release, future Tab).
+fn rerender_after_state_change(window_id: u32) {
+    let (tree, rect, density, hover_path, focus_path, active_path) = {
+        let scenes = SCENES.lock();
+        match scenes.get(&window_id) {
+            Some(s) => (
+                s.tree.clone(),
+                abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
+                s.density,
+                s.hover_path.clone(),
+                s.focus_path.clone(),
+                s.active_path.clone(),
+            ),
+            None => return,
+        }
+    };
+    let layout_tree = layout::layout(&tree, rect);
+    let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
+    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
+    let a: Option<&[u32]> = active_path.as_deref();
+    let pixels = rasterize_buffer(&tree, &layout_tree, rect, h, f, a, density);
+    if let Some(s) = SCENES.lock().get_mut(&window_id) {
+        s.pixels      = pixels;
+        s.layout_tree = layout_tree;
+    }
+    mark_dirty(window_id);
 }
 
 pub fn clear_hover(window_id: u32) {
@@ -333,13 +512,19 @@ fn find_click_target(
     widget: &abi::Widget,
     layout: &layout::LayoutNode,
     x: i32, y: i32,
+    ancestor_disabled: bool,
     out: &mut Option<abi::ActionId>,
 ) {
     if !rect_contains(layout.rect, x, y) { return; }
+    let disabled = ancestor_disabled || is_disabled(widget);
+    // Disabled subtrees swallow clicks entirely — neither this node
+    // nor its children fire actions, even if a descendant has its own
+    // OnClick.
+    if disabled { return; }
 
     // Children first — deepest hit wins.
     for (cw, cl) in widget_children_ref(widget).iter().zip(layout.children.iter()) {
-        find_click_target(cw, cl, x, y, out);
+        find_click_target(cw, cl, x, y, disabled, out);
         if out.is_some() { return; }
     }
 
@@ -468,19 +653,21 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
     let density = classify_density(win_w);
     let has_pseudo = render::tree_has_pseudo_state(&tree);
 
-    // Preserve the hover_path across re-commits so an interactive app
-    // re-rendering on every event doesn't lose its hover-merged
+    // Preserve hover/focus/active across re-commits so an interactive
+    // app re-rendering on every event doesn't lose its state-merged
     // pixels mid-frame. Falls back to empty for first commit.
-    let prev_hover_path = SCENES.lock().get(&target_id)
-        .map(|s| s.hover_path.clone())
-        .unwrap_or_default();
-    let hover_path_slice: Option<&[u32]> = if prev_hover_path.is_empty() {
-        None
-    } else {
-        Some(&prev_hover_path)
+    let (prev_hover, prev_focus, prev_active) = {
+        let scenes = SCENES.lock();
+        match scenes.get(&target_id) {
+            Some(s) => (s.hover_path.clone(), s.focus_path.clone(), s.active_path.clone()),
+            None    => (Vec::new(), Vec::new(), None),
+        }
     };
+    let hover_slice:  Option<&[u32]> = if prev_hover.is_empty() { None } else { Some(&prev_hover) };
+    let focus_slice:  Option<&[u32]> = if prev_focus.is_empty() { None } else { Some(&prev_focus) };
+    let active_slice: Option<&[u32]> = prev_active.as_deref();
 
-    let pixels = rasterize_buffer(&tree, &layout_tree, layout_rect, hover_path_slice, density);
+    let pixels = rasterize_buffer(&tree, &layout_tree, layout_rect, hover_slice, focus_slice, active_slice, density);
 
     // Store into the per-window scene map. Keep a clone of the tree
     // + layout for future resize re-renders (typical tree < 1 KB).
@@ -493,7 +680,9 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
         tree:        tree.clone(),
         layout_tree,
         payload_hash: incoming_hash,
-        hover_path:  prev_hover_path,
+        hover_path:  prev_hover,
+        focus_path:  prev_focus,
+        active_path: prev_active,
         density,
         has_pseudo,
     });
@@ -516,16 +705,20 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
 
 /// Alloc a BGRA back buffer, clear to Surface, run the render walker,
 /// return the pixel vec. Used by `scene_commit`, the relayout path
-/// (resize / re-render from cached tree), and `update_hover`'s
-/// pseudo-state re-render.
+/// (resize / re-render from cached tree), and the pseudo-state
+/// re-renders (hover/focus/active).
 ///
-/// `hover_path = Some(&[])` means the root is the hover target;
-/// `None` means no node is hovered.
+/// Each `*_path: Option<&[u32]>` follows the protocol from
+/// `render::render_with_state`: `None` = state not in this subtree,
+/// `Some([])` = root IS the state target, `Some([i,…])` = descend
+/// into child `i`.
 fn rasterize_buffer(
     tree: &abi::Widget,
     layout_tree: &layout::LayoutNode,
     rect: abi::Rect,
     hover_path: Option<&[u32]>,
+    focus_path: Option<&[u32]>,
+    active_path: Option<&[u32]>,
     density: abi::Density,
 ) -> Vec<u32> {
     let pixel_count = (rect.w as usize) * (rect.h as usize);
@@ -545,16 +738,19 @@ fn rasterize_buffer(
         palette: &pal,
     };
     let mut rast = raster::cpu::CpuRasterizer::new();
-    render::render_with_state(&mut rast, &mut target, tree, layout_tree, hover_path, density);
+    render::render_with_state(
+        &mut rast, &mut target, tree, layout_tree,
+        hover_path, focus_path, active_path, density,
+    );
 
     // `target` drops here, releasing the &mut on `pixels`.
     drop(target);
     pixels
 }
 
-/// Back-compat wrapper for legacy call sites (scene_commit, refresh,
-/// relayout). Defaults to "no hover" + `Regular` density unless the
-/// caller specifies state via `rasterize_buffer` directly.
+/// Convenience wrapper: rasterize without any pseudo-state context.
+/// Used by scene_commit (first render) and refresh paths where the
+/// caller doesn't track per-window state.
 fn rasterize_to_buffer(
     tree: &abi::Widget,
     layout_tree: &layout::LayoutNode,
@@ -562,7 +758,7 @@ fn rasterize_to_buffer(
 ) -> Vec<u32> {
     let rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
     let density = classify_density(win_w);
-    rasterize_buffer(tree, layout_tree, rect, None, density)
+    rasterize_buffer(tree, layout_tree, rect, None, None, None, density)
 }
 
 /// Re-render a scene at new dimensions — called by shade when a
@@ -575,18 +771,22 @@ fn rasterize_to_buffer(
 pub fn refresh_all_scenes() {
     let keys: alloc::vec::Vec<u32> = SCENES.lock().keys().copied().collect();
     for wid in keys {
-        let (tree, rect, hover_path, density) = match SCENES.lock().get(&wid) {
+        let (tree, rect, hover_path, focus_path, active_path, density) = match SCENES.lock().get(&wid) {
             Some(s) => (
                 s.tree.clone(),
                 abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
                 s.hover_path.clone(),
+                s.focus_path.clone(),
+                s.active_path.clone(),
                 s.density,
             ),
             None => continue,
         };
         let new_layout = layout::layout(&tree, rect);
-        let hover_slice: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
-        let new_pixels = rasterize_buffer(&tree, &new_layout, rect, hover_slice, density);
+        let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
+        let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
+        let a: Option<&[u32]> = active_path.as_deref();
+        let new_pixels = rasterize_buffer(&tree, &new_layout, rect, h, f, a, density);
         if let Some(scene) = SCENES.lock().get_mut(&wid) {
             scene.pixels      = new_pixels;
             scene.layout_tree = new_layout;
@@ -613,11 +813,14 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     let new_rect = abi::Rect { x: new_x, y: new_y, w: new_w, h: new_h };
     let tree = scene.tree.clone();
     let new_density = classify_density(new_w);
-    // Resize invalidates the cached hover_path — coordinates of the
-    // old layout no longer match the new one. Easier to clear it and
-    // wait for the next MouseMove than to remap path indices.
+    // Resize invalidates the cached hover_path AND active_path —
+    // coordinates of the old layout no longer match. Focus survives
+    // (a focused input stays focused after resize). Active is
+    // mouse-tied so it gets cleared.
     let new_layout = layout::layout(&tree, new_rect);
-    let new_pixels = rasterize_buffer(&tree, &new_layout, new_rect, None, new_density);
+    let focus_path = scene.focus_path.clone();
+    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
+    let new_pixels = rasterize_buffer(&tree, &new_layout, new_rect, None, f, None, new_density);
     scene.pixels      = new_pixels;
     scene.width       = new_w;
     scene.height      = new_h;
@@ -626,5 +829,6 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     scene.layout_tree = new_layout;
     scene.density     = new_density;
     scene.hover_path.clear();
+    scene.active_path = None;
     true
 }

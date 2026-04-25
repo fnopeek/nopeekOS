@@ -456,20 +456,27 @@ pub enum ButtonStyle {
 }
 
 /// Themed button. Wraps `Widget::Button` with a coherent default
-/// chrome and a hover-state so every call site gets the same feel.
+/// chrome plus interactive states (hover, active, focus) so every
+/// call site feels like the same button family.
 pub fn button(label: &str, style: ButtonStyle, on_click: ActionId) -> Widget {
-    let (bg, hover_bg) = match style {
-        ButtonStyle::Primary     => (Token::Accent,           Token::AccentMuted),
-        ButtonStyle::Secondary   => (Token::SurfaceElevated,  Token::SurfaceMuted),
-        ButtonStyle::Ghost       => (Token::Surface,          Token::SurfaceMuted),
-        ButtonStyle::Destructive => (Token::Danger,           Token::Warning),
+    let (bg, hover_bg, active_bg) = match style {
+        ButtonStyle::Primary     => (Token::Accent,          Token::AccentMuted,   Token::AccentMuted),
+        ButtonStyle::Secondary   => (Token::SurfaceElevated, Token::SurfaceMuted,  Token::Border),
+        ButtonStyle::Ghost       => (Token::Surface,         Token::SurfaceMuted,  Token::Border),
+        ButtonStyle::Destructive => (Token::Danger,          Token::Warning,       Token::Warning),
     };
-    let mut mods: Vec<Modifier> = Vec::with_capacity(4);
+    let mut mods: Vec<Modifier> = Vec::with_capacity(6);
     mods.push(Modifier::Padding(Padding::Md.as_u16()));
     mods.push(Modifier::Background(bg));
     mods.push(Modifier::Rounded(Radius::Md.as_u8()));
     mods.push(Modifier::Hover(vec![
         Modifier::Background(hover_bg),
+    ]));
+    mods.push(Modifier::Active(vec![
+        Modifier::Background(active_bg),
+    ]));
+    mods.push(Modifier::Focus(vec![
+        Modifier::Border { token: Token::Accent, width: 2, radius: Radius::Md.as_u8() },
     ]));
     Widget::Button {
         label:     label.to_string(),
@@ -522,8 +529,11 @@ pub fn input(
     if matches!(kind, InputKind::Search) {
         children.push(Widget::Icon {
             id:        IconId::MagnifyingGlass,
-            size:      20,
-            modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)],
+            // 24 is the atlas-native size — picks the unscaled glyph
+            // for crisp 4K rendering (smaller sizes scale down from
+            // the 24 px atlas slot and look fuzzy).
+            size:      24,
+            modifiers: vec![Modifier::Tint(Token::Accent)],
         });
     }
     children.push(raw);

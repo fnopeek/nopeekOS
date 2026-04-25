@@ -22,53 +22,56 @@ use super::abi::{
 use super::layout::LayoutNode;
 
 /// Render `widget` + `layout` (trees in lockstep) into `target` using
-/// `rast`. Default-state entry — used by paths that don't track hover
-/// (e.g. one-shot debug renders).
+/// `rast`. Default-state entry — used by paths that don't track any
+/// pseudo state (e.g. one-shot debug renders).
 pub fn render(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
     widget: &Widget,
     layout: &LayoutNode,
 ) {
-    render_with_state(rast, target, widget, layout, None, Density::Regular);
+    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular);
 }
 
 /// Render with explicit pseudo-state context.
 ///
-/// `hover_path` interpretation:
-///   - `None`        → this subtree contains no hovered node
-///   - `Some([])`    → THIS node is the hover target; merge `Hover` mods
-///   - `Some([i,…])` → child `i` is on the hover path; recurse with tail
+/// Each `*_path: Option<&[u32]>` follows the same protocol:
+///   - `None`        → this subtree contains no node in this state
+///   - `Some([])`    → THIS node IS the state target — merge inner mods
+///   - `Some([i,…])` → child `i` is on the path; descend with tail
 ///
-/// `density` is the compositor-classified container size bucket; widgets
-/// matching `WhenDensity(d, …)` apply their inner mods on match.
+/// CSS `:hover` / `:focus` / `:active` ancestor semantics: any
+/// `Some(_)` value (empty path or deeper) marks the current node as
+/// matching, so a Hover-modifier on a Row triggers when the cursor is
+/// over a descendant Icon.
+///
+/// `density` drives `WhenDensity(d, …)` matching.
 pub fn render_with_state(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
     widget: &Widget,
     layout: &LayoutNode,
     hover_path: Option<&[u32]>,
+    focus_path: Option<&[u32]>,
+    active_path: Option<&[u32]>,
     density: Density,
 ) {
-    // Hover-state matches CSS `:hover` semantics: the cursor is over
-    // this node *or any of its descendants*. Both cases are encoded as
-    // `Some(_)` (with `Some([])` = "this is the deepest", `Some([...])`
-    // = "in a child"). `None` = cursor is in a different subtree.
     let is_hovered = hover_path.is_some();
+    let is_focused = focus_path.is_some();
+    let is_active  = active_path.is_some();
     let base = modifiers_of(widget);
-    let eff = effective_modifiers(base, is_hovered, density);
+    let eff = effective_modifiers(base, is_hovered, is_focused, is_active, density);
 
     paint_modifiers_eff(rast, target, &eff, layout.rect);
     paint_node_eff(rast, target, widget, layout, &eff);
 
-    // Recurse — at most one child sits on the hover path.
+    // Recurse — at most one child sits on each path.
     let kids = widget_children(widget);
     for (i, (cw, cl)) in kids.iter().zip(layout.children.iter()).enumerate() {
-        let child_path: Option<&[u32]> = match hover_path {
-            Some(p) if !p.is_empty() && p[0] == i as u32 => Some(&p[1..]),
-            _ => None,
-        };
-        render_with_state(rast, target, cw, cl, child_path, density);
+        let child_hover  = descend(hover_path,  i as u32);
+        let child_focus  = descend(focus_path,  i as u32);
+        let child_active = descend(active_path, i as u32);
+        render_with_state(rast, target, cw, cl, child_hover, child_focus, child_active, density);
     }
 
     // Modifier::Opacity acts as a post-paint dampening over the node's
@@ -82,21 +85,35 @@ pub fn render_with_state(
     }
 }
 
+/// Helper: peel one index off a state path to descend into child `i`.
+fn descend(path: Option<&[u32]>, i: u32) -> Option<&[u32]> {
+    match path {
+        Some(p) if !p.is_empty() && p[0] == i => Some(&p[1..]),
+        _ => None,
+    }
+}
+
 /// Build the modifier list that applies to `widget` after merging the
 /// active pseudo-states and density-conditional mods. Wrapper variants
 /// are stripped so downstream paint code never sees nested modifier
 /// lists.
 ///
-/// Order matters: base modifiers first, then state mods (so a `.hover`
-/// background overrides the base background — `paint_modifiers_eff`
-/// reads the *last* matching modifier).
+/// Application order (later wins for last-write-wins fields like
+/// Background): base → density → hover → focus → active → disabled.
+/// Disabled is presence-based (the *modifier itself* on the widget,
+/// not a compositor-tracked external state) and overrides interactive
+/// states because it represents an explicit app decision.
 fn effective_modifiers(
     base: &[Modifier],
     is_hovered: bool,
+    is_focused: bool,
+    is_active: bool,
     density: Density,
 ) -> Vec<Modifier> {
+    let is_disabled = base.iter().any(|m| matches!(m, Modifier::Disabled(_)));
+
     let mut out: Vec<Modifier> = Vec::with_capacity(base.len());
-    // First pass: keep all non-pseudo-state modifiers verbatim.
+    // Base: keep all non-pseudo-state modifiers verbatim.
     for m in base {
         match m {
             Modifier::Hover(_)
@@ -107,20 +124,42 @@ fn effective_modifiers(
             _ => out.push(m.clone()),
         }
     }
-    // Second pass: append matching state mods. Hover wins over density
-    // because hover is the more specific signal at any given moment.
+    // Density (always applies — orthogonal to interactive states).
     for m in base {
-        match m {
-            Modifier::WhenDensity(d, inner) if *d == density => {
+        if let Modifier::WhenDensity(d, inner) = m {
+            if *d == density {
                 for inner_m in inner { out.push(inner_m.clone()); }
             }
-            _ => {}
         }
     }
-    if is_hovered {
+    // Disabled wins over interactive states — when an app marks a
+    // widget disabled, the user-state visuals shouldn't show through.
+    if is_disabled {
         for m in base {
-            if let Modifier::Hover(inner) = m {
+            if let Modifier::Disabled(inner) = m {
                 for inner_m in inner { out.push(inner_m.clone()); }
+            }
+        }
+    } else {
+        if is_hovered {
+            for m in base {
+                if let Modifier::Hover(inner) = m {
+                    for inner_m in inner { out.push(inner_m.clone()); }
+                }
+            }
+        }
+        if is_focused {
+            for m in base {
+                if let Modifier::Focus(inner) = m {
+                    for inner_m in inner { out.push(inner_m.clone()); }
+                }
+            }
+        }
+        if is_active {
+            for m in base {
+                if let Modifier::Active(inner) = m {
+                    for inner_m in inner { out.push(inner_m.clone()); }
+                }
             }
         }
     }
