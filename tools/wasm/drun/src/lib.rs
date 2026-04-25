@@ -107,7 +107,11 @@ fn alloc_mark() -> usize {
     unsafe { core::ptr::addr_of!(HEAP_POS).read() }
 }
 
-// ActionId encoding: 0..HOVER_BASE = row click, HOVER_BASE.. = row hover.
+// ActionId encoding:
+//   0          → reserved sentinel (prefab::NO_ACTION-style; never fired)
+//   1..CLICK_BASE+N    = row click  (offset by CLICK_BASE so 0 stays free)
+//   HOVER_BASE+N       = row hover
+const CLICK_BASE: u32 = 1;
 const HOVER_BASE: u32 = 10_000;
 const QUERY_CAP: usize = 63;
 const MAX_VISIBLE_ROWS: usize = 6;
@@ -176,7 +180,13 @@ impl Drun {
 
     fn render(&self) -> Widget {
         let badge = prefab::badge("drun");
-        let search = prefab::searchbar(&self.query, "Type to search apps…", Some(badge));
+        let search = prefab::input(
+            &self.query,
+            "Type to search apps…",
+            prefab::InputKind::Search,
+            prefab::NO_ACTION,
+            Some(badge),
+        );
 
         let rows: Vec<Widget> = if self.filtered.is_empty() {
             alloc::vec![prefab::empty_state("no matches")]
@@ -190,7 +200,7 @@ impl Drun {
                     &entry.display_name,
                     &entry.description,
                     ui_idx == self.selected,
-                    Some(ActionId(ui_idx as u32)),
+                    Some(ActionId(CLICK_BASE + ui_idx as u32)),
                     Some(ActionId(HOVER_BASE + ui_idx as u32)),
                 )
             }).collect()
@@ -261,13 +271,16 @@ impl Drun {
                         return Outcome::Rerender;
                     }
                     Outcome::Idle
-                } else {
-                    let ui_idx = id as usize;
+                } else if id >= CLICK_BASE {
+                    let ui_idx = (id - CLICK_BASE) as usize;
                     if ui_idx < self.filtered.len() {
                         self.selected = ui_idx;
                         self.spawn_selected();
                         Outcome::Exit
                     } else { Outcome::Idle }
+                } else {
+                    // ActionId(0) — input on_submit sentinel; ignored.
+                    Outcome::Idle
                 }
             }
             _ => Outcome::Idle,

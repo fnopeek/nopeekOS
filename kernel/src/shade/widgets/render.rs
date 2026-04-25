@@ -287,7 +287,14 @@ fn paint_node_eff(
         }
 
         Widget::Input { value, placeholder, .. } => {
-            rast.rect(target, rect, Fill::Solid(Token::SurfaceElevated));
+            // Same pattern as Button: paint a SurfaceElevated background
+            // only if no Modifier::Background is on the eff list. Lets a
+            // wrapping prefab (e.g. prefab::input) own the chrome —
+            // background, rounded, focus border — without a double-fill.
+            let has_bg = eff.iter().any(|m| matches!(m, Modifier::Background(_)));
+            if !has_bg {
+                rast.rect(target, rect, Fill::Solid(Token::SurfaceElevated));
+            }
             let shown = if value.is_empty() { placeholder.as_str() } else { value.as_str() };
             let style = if value.is_empty() {
                 super::abi::TextStyle::Muted

@@ -22,31 +22,6 @@ pub fn panel(children: Vec<Widget>) -> Widget {
     }
 }
 
-pub fn searchbar(query: &str, placeholder: &str, trailing: Option<Widget>) -> Widget {
-    let (text, style) = if query.is_empty() {
-        (placeholder.to_string(), TextStyle::Muted)
-    } else {
-        (query.to_string(), TextStyle::Body)
-    };
-
-    let mut children: Vec<Widget> = Vec::with_capacity(4);
-    children.push(Widget::Icon {
-        id:        IconId::MagnifyingGlass,
-        size:      24,
-        modifiers: vec![Modifier::Tint(Token::Accent)],
-    });
-    children.push(Widget::Text { content: text, style, modifiers: vec![] });
-    children.push(Widget::Spacer { flex: 1 });
-    if let Some(w) = trailing { children.push(w); }
-
-    Widget::Row {
-        children,
-        spacing: Spacing::Sm.as_u16(),
-        align:   Align::Center,
-        modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
-    }
-}
-
 // Selected-row padding is generous so the accent fill has breathing
 // room around the text. list_row itself uses Md; the generous reading
 // means Lg for the row container overall.
@@ -515,8 +490,20 @@ pub enum InputKind {
 }
 
 /// Themed text input with consistent padding, rounded corners, and
-/// elevated surface. Search variant prepends a magnifier icon.
-pub fn input(value: &str, placeholder: &str, kind: InputKind, on_submit: ActionId) -> Widget {
+/// elevated surface. Search variant prepends a magnifier icon. An
+/// optional `trailing` widget is rendered right-aligned (typical
+/// uses: an app-name badge inside a search bar, a clear button).
+///
+/// `on_submit` is the ActionId fired when the user submits the input
+/// (Enter while focused). Pass [`NO_ACTION`] to opt out — apps that
+/// route Enter themselves (e.g. drun's launcher) typically do.
+pub fn input(
+    value: &str,
+    placeholder: &str,
+    kind: InputKind,
+    on_submit: ActionId,
+    trailing: Option<Widget>,
+) -> Widget {
     let raw = Widget::Input {
         value:       value.to_string(),
         placeholder: placeholder.to_string(),
@@ -524,35 +511,39 @@ pub fn input(value: &str, placeholder: &str, kind: InputKind, on_submit: ActionI
         modifiers:   vec![],
     };
     let mut wrap_mods: Vec<Modifier> = Vec::with_capacity(4);
-    wrap_mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+    wrap_mods.push(Modifier::Padding(Padding::Md.as_u16()));
     wrap_mods.push(Modifier::Background(Token::SurfaceElevated));
     wrap_mods.push(Modifier::Rounded(Radius::Md.as_u8()));
     wrap_mods.push(Modifier::Focus(vec![
         Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
     ]));
 
-    match kind {
-        InputKind::Search => Widget::Row {
-            children: vec![
-                Widget::Icon {
-                    id:        IconId::MagnifyingGlass,
-                    size:      20,
-                    modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)],
-                },
-                raw,
-            ],
-            spacing:   Spacing::Sm.as_u16(),
-            align:     Align::Center,
-            modifiers: wrap_mods,
-        },
-        InputKind::Text | InputKind::Password => Widget::Row {
-            children:  vec![raw],
-            spacing:   Spacing::None.as_u16(),
-            align:     Align::Center,
-            modifiers: wrap_mods,
-        },
+    let mut children: Vec<Widget> = Vec::with_capacity(4);
+    if matches!(kind, InputKind::Search) {
+        children.push(Widget::Icon {
+            id:        IconId::MagnifyingGlass,
+            size:      20,
+            modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)],
+        });
+    }
+    children.push(raw);
+    if let Some(w) = trailing {
+        children.push(Widget::Spacer { flex: 1 });
+        children.push(w);
+    }
+
+    Widget::Row {
+        children,
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: wrap_mods,
     }
 }
+
+/// Sentinel ActionId for "no action wired up" — useful as a default
+/// for `on_submit` etc. when the app routes the event itself. Apps
+/// must not use this id for their own actions.
+pub const NO_ACTION: ActionId = ActionId(u32::MAX);
 
 /// Modal dialog wrapper — title bar at the top, body in the middle,
 /// optional footer hint at the bottom. Uses Sheet card styling.
@@ -598,6 +589,24 @@ pub fn dialog(
             Modifier::WhenDensity(crate::abi::Density::Compact, vec![
                 Modifier::Padding(Padding::Md.as_u16()),
             ]),
+        ],
+    }
+}
+
+/// Vertical sidebar container — `SurfaceMuted` background with
+/// consistent padding. Children are typically `sidebar_section`s and
+/// `nav_row`s; a trailing flex-Spacer is appended automatically so the
+/// sections stack to the top and don't stretch.
+pub fn sidebar_pane(sections: Vec<Widget>) -> Widget {
+    let mut children: Vec<Widget> = sections;
+    children.push(Widget::Spacer { flex: 1 });
+    Widget::Column {
+        children,
+        spacing:   Spacing::None.as_u16(),
+        align:     Align::Stretch,
+        modifiers: vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Padding(Padding::Sm.as_u16()),
         ],
     }
 }
