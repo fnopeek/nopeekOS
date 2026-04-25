@@ -410,15 +410,21 @@ fn mark_dirty(window_id: u32) {
 /// deepest focusable widget at the cursor and start the active state.
 /// Re-rasterizes the scene if it has any pseudo-state visuals.
 ///
+/// Returns `true` if the scene was re-rasterized — caller MUST then
+/// mark the window dirty. We do NOT call `with_compositor` here
+/// because this function runs while the caller already holds the
+/// compositor lock (deadlock-prone).
+///
 /// Doesn't push the click action — that's still hit_test's job at the
 /// existing call site (kept separate so apps that wire their own
 /// click-routing aren't affected by state mechanics).
-pub fn press_at(window_id: u32, x: i32, y: i32) {
+#[must_use]
+pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
     let (new_focus, new_active, has_pseudo) = {
         let scenes = SCENES.lock();
         let scene = match scenes.get(&window_id) {
             Some(s) => s,
-            None    => return,
+            None    => return false,
         };
         let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
         match press_path {
@@ -431,7 +437,7 @@ pub fn press_at(window_id: u32, x: i32, y: i32) {
         let scenes = SCENES.lock();
         let scene = match scenes.get(&window_id) {
             Some(s) => s,
-            None    => return,
+            None    => return false,
         };
         let f_changed = match (&new_focus, &scene.focus_path) {
             (Some(p), cur) => p != cur,
@@ -445,39 +451,49 @@ pub fn press_at(window_id: u32, x: i32, y: i32) {
         (f_changed, a_changed)
     };
 
-    if focus_changed || active_changed {
-        if let Some(s) = SCENES.lock().get_mut(&window_id) {
-            if let Some(ref f) = new_focus { s.focus_path = f.clone(); }
-            else                            { s.focus_path.clear(); }
-            s.active_path = new_active;
-        }
-        if has_pseudo {
-            rerender_after_state_change(window_id);
-        }
+    if !(focus_changed || active_changed) { return false; }
+
+    if let Some(s) = SCENES.lock().get_mut(&window_id) {
+        if let Some(ref f) = new_focus { s.focus_path = f.clone(); }
+        else                            { s.focus_path.clear(); }
+        s.active_path = new_active;
     }
+    if has_pseudo {
+        rerender_state_only(window_id);
+        crate::shade::request_render();
+        return true;
+    }
+    false
 }
 
-/// Mouse-button-up: clear active state. Focus persists.
-pub fn release_at(window_id: u32) {
+/// Mouse-button-up: clear active state. Focus persists. Returns
+/// `true` if a re-render happened — caller marks the window dirty.
+#[must_use]
+pub fn release_at(window_id: u32) -> bool {
     let (had_active, has_pseudo) = {
         let scenes = SCENES.lock();
         match scenes.get(&window_id) {
             Some(s) => (s.active_path.is_some(), s.has_pseudo),
-            None    => return,
+            None    => return false,
         }
     };
-    if !had_active { return; }
+    if !had_active { return false; }
     if let Some(s) = SCENES.lock().get_mut(&window_id) {
         s.active_path = None;
     }
     if has_pseudo {
-        rerender_after_state_change(window_id);
+        rerender_state_only(window_id);
+        crate::shade::request_render();
+        return true;
     }
+    false
 }
 
-/// Internal: re-rasterize using the cached focus/active/hover paths.
-/// Used after a non-hover state change (press, release, future Tab).
-fn rerender_after_state_change(window_id: u32) {
+/// Re-rasterize using the cached focus/active/hover paths and update
+/// the scene's pixel buffer. Does NOT touch the compositor (caller is
+/// responsible for marking the window dirty). Pure scene-state work,
+/// safe to call while the compositor lock is held.
+fn rerender_state_only(window_id: u32) {
     let (tree, rect, density, hover_path, focus_path, active_path) = {
         let scenes = SCENES.lock();
         match scenes.get(&window_id) {
@@ -501,7 +517,6 @@ fn rerender_after_state_change(window_id: u32) {
         s.pixels      = pixels;
         s.layout_tree = layout_tree;
     }
-    mark_dirty(window_id);
 }
 
 pub fn clear_hover(window_id: u32) {

@@ -970,9 +970,16 @@ impl Compositor {
                 if is_widget {
                     use crate::shade::widgets::abi::{Event, MouseButton};
                     // Move focus + start active state on the deepest
-                    // focusable widget under the cursor. press_at
-                    // re-rasterizes if the tree has any pseudo state.
-                    crate::shade::widgets::press_at(wid.0, mx, my);
+                    // focusable widget under the cursor. press_at must
+                    // not touch the compositor (we're inside its lock)
+                    // — it returns `true` when it re-rasterized so we
+                    // can mark the window dirty here.
+                    let pressed_dirty = crate::shade::widgets::press_at(wid.0, mx, my);
+                    if pressed_dirty {
+                        if let Some(win) = self.windows.iter_mut().find(|w| w.id == wid) {
+                            win.dirty = true;
+                        }
+                    }
                     if let Some(action) = crate::shade::widgets::hit_test(wid.0, mx, my) {
                         crate::shade::widgets::push_event(wid.0, Event::Action(action));
                     }
@@ -995,13 +1002,18 @@ impl Compositor {
         // does work when the window's `active_path` was actually set.
         if self.mouse.left_released() {
             use crate::shade::widgets::abi::{Event, MouseButton};
-            let widget_ids: alloc::vec::Vec<u32> = self.windows.iter()
+            let widget_ids: alloc::vec::Vec<crate::shade::WindowId> = self.windows.iter()
                 .filter(|w| w.kind == crate::shade::window::WindowKind::Widget)
-                .map(|w| w.id.0)
+                .map(|w| w.id)
                 .collect();
             for wid in widget_ids {
-                crate::shade::widgets::release_at(wid);
-                crate::shade::widgets::push_event(wid, Event::MouseButton {
+                let released_dirty = crate::shade::widgets::release_at(wid.0);
+                if released_dirty {
+                    if let Some(win) = self.windows.iter_mut().find(|w| w.id == wid) {
+                        win.dirty = true;
+                    }
+                }
+                crate::shade::widgets::push_event(wid.0, Event::MouseButton {
                     button: MouseButton::Left,
                     down:   false,
                     x:      mx,
