@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::{self, IconRef};
 use nopeek_widgets::prefab;
+use nopeek_widgets::style::Spacing;
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -209,10 +210,19 @@ impl Drun {
         let result_text = format_count(self.filtered.len(), self.row_offset, MAX_VISIBLE_ROWS);
         let foot = prefab::footer("↑↓ navigate   ↵ open   esc close", &result_text);
 
-        let mut root: Vec<Widget> = Vec::with_capacity(rows.len() + 6);
+        // Stack the rows in their own tight Column so the inter-row gap
+        // doesn't follow the panel's top-level rhythm. Reads as a single
+        // grouped list instead of widely-spaced standalone items.
+        let list = Widget::Column {
+            children:  rows,
+            spacing:   Spacing::Xxs.as_u16(),
+            align:     Align::Stretch,
+            modifiers: alloc::vec![],
+        };
+
+        let mut root: Vec<Widget> = Vec::with_capacity(5);
         root.push(search);
-        root.push(Widget::Divider);
-        root.extend(rows);
+        root.push(list);
         root.push(Widget::Spacer { flex: 1 });
         root.push(Widget::Divider);
         root.push(foot);
