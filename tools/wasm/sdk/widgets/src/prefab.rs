@@ -22,9 +22,11 @@ pub fn panel(children: Vec<Widget>) -> Widget {
     }
 }
 
-// Selected-row padding is generous so the accent fill has breathing
-// room around the text. list_row itself uses Md; the generous reading
-// means Lg for the row container overall.
+// Selected rows are styled as a subtle elevated card with an accent
+// border — the colour cue lives in the border + the icon tint, not in
+// a strong fill that would clash with body text on top. Matches the
+// "card-style highlight" that AI-generated UIs and modern launchers
+// (Raycast, macOS Spotlight) reach for.
 pub fn list_row(
     icon: IconId,
     title: &str,
@@ -38,7 +40,7 @@ pub fn list_row(
     if let Some(id) = on_click { row_mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { row_mods.push(Modifier::OnHover(id)); }
     if selected {
-        row_mods.push(Modifier::Background(Token::AccentMuted));
+        row_mods.push(Modifier::Background(Token::SurfaceElevated));
         row_mods.push(Modifier::Border {
             token:  Token::Accent,
             width:  1,
@@ -242,7 +244,7 @@ pub fn nav_row(
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
     if selected {
-        mods.push(Modifier::Background(Token::AccentMuted));
+        mods.push(Modifier::Background(Token::SurfaceElevated));
         mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Sm.as_u8() });
     } else {
         mods.push(Modifier::Hover(vec![
@@ -328,7 +330,7 @@ pub fn grid_item(
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
     if selected {
-        mods.push(Modifier::Background(Token::AccentMuted));
+        mods.push(Modifier::Background(Token::SurfaceElevated));
         mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() });
     } else {
         mods.push(Modifier::Hover(vec![
