@@ -549,7 +549,11 @@ impl Compositor {
         let cy = win.content_y(border);
         let cw = win.content_w(border);
         let ch = win.content_h(border);
-        let inner_r = rounding.saturating_sub(border);
+        // Inner shape uses the same radius as the outer (translated
+        // copy, not concentric) — see `fill_rounded_chrome_aa`. The
+        // widget-blit inset must use the full `rounding` so it lands
+        // on the same curve the chrome AA-painted.
+        let inner_r = rounding;
 
         // 4. Content-kind specific draw.
         match win.kind {

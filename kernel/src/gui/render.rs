@@ -358,14 +358,13 @@ fn rect_coverage_blend(px: u32, py: u32,
     cov
 }
 
-/// Single-pass chrome painter: border ring with AA on its outer
-/// curve, content fill with AA on the inner curve, computed and
-/// composited per-pixel from one set of coverage values. Replaces
-/// the legacy two-pass paint (outer rounded rect with border, then
-/// inner rounded rect with bg) — that pattern double-counted the
-/// AA fringe on the inner curve, eating into the radial border
-/// space and making corner borders visibly thinner than straight
-/// edges.
+/// Single-pass chrome painter. Outer and inner shapes share the
+/// same corner radius — the inner shape is a translated copy of the
+/// outer (bounds inset by `border`, not a smaller concentric arc).
+/// Pixel-perfect AA alignment on all four curves and the radial
+/// border ends up slightly fatter at the corner diagonals
+/// (`border√2`) than along the straights (`border`), so the corner
+/// no longer reads as thinner than the rest of the frame.
 ///
 /// `border_a == border_b` paints a solid border; different values
 /// produce a 45° gradient (top-left → bottom-right).
@@ -379,11 +378,11 @@ pub fn fill_rounded_chrome_aa(
     if w < 2 || h < 2 { return; }
     let r_out = rounding.min(w / 2).min(h / 2);
     let border_px = border.min(r_out).min(w / 2).min(h / 2);
-    let r_in = r_out - border_px;
     let inner_x = x + border_px;
     let inner_y = y + border_px;
     let inner_w = w - 2 * border_px;
     let inner_h = h - 2 * border_px;
+    let r_in = r_out.min(inner_w / 2).min(inner_h / 2);
     let x_max = (x + w).min(info.width);
     let y_max = (y + h).min(info.height);
     let diag_max = (w + h).max(1) as u64;
