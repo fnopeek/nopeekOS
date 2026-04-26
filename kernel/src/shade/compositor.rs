@@ -531,19 +531,22 @@ impl Compositor {
                 win.x, win.y, win.width, win.height);
         }
 
-        // 2+3. Single-pass chrome (border ring + content fill) — see
-        // `gui::render::fill_rounded_chrome_aa`. Avoids the corner
-        // border thinning the legacy two-pass paint produced.
+        // 2+3. Single-pass chrome. Terminal windows get the full
+        // layered paint (border + bg_color content). Widget windows
+        // get border-only — the widget supplies its own content + AA
+        // at the inner edge, so the chrome must not bleed `bg_color`
+        // into the inner-fringe band.
         let (ba, bb, b_op) = if crate::theme::is_active() && win.focused {
             let (ga, gb) = crate::theme::border_gradient();
             (ga, gb, 200u32)
         } else {
             (border_color, border_color, 180u32)
         };
+        let paint_content = matches!(win.kind, crate::shade::window::WindowKind::Terminal);
         render::fill_rounded_chrome_aa(shadow, info,
             win.x, win.y, win.width, win.height,
             ba, bb, win.bg_color,
-            rounding, border, b_op, opacity);
+            rounding, border, b_op, opacity, paint_content);
 
         let cx = win.content_x(border);
         let cy = win.content_y(border);
@@ -551,15 +554,14 @@ impl Compositor {
         let ch = win.content_h(border);
         // Inner shape is concentric with the outer at radius
         // `rounding - border` — see `fill_rounded_chrome_aa`. The
-        // widget-blit inset is computed against this same inner curve
-        // so widget pixels never overwrite the chrome's inner-edge AA.
+        // widget-blit AA at the inner edge is computed against this
+        // same inner curve so widget pixels and chrome border meet
+        // pixel-perfectly along the rounded inner curve.
         let inner_r = rounding.saturating_sub(border);
 
         // 4. Content-kind specific draw.
         match win.kind {
             crate::shade::window::WindowKind::Terminal => {
-                // 4a. Cache the clean background for the input line
-                //     (before text)
                 let pad = 6 * scale;
                 let text_x = cx + pad;
                 let text_y = cy + pad;
@@ -569,57 +571,83 @@ impl Compositor {
                     terminal::cache_input_line_bg(shadow, info,
                         text_x, text_y, text_w, text_h, win.terminal_idx);
                 }
-                // 4b. Text on clean background
                 terminal::render_to_window(shadow, info,
                     text_x, text_y, text_w, text_h,
                     scale, win.terminal_idx);
             }
             crate::shade::window::WindowKind::Widget => {
-                // 4a. If the content rect has moved or resized since
-                //     the last commit, re-layout from the cached tree
-                //     (the app itself may have exited — can't re-commit).
                 let _ = crate::shade::widgets::relayout_scene(
                     win.id.0, cx as i32, cy as i32, cw, ch,
                 );
-                // 4b. Blit scene pixels into the content rect, leaving
-                //     the pre-rounded chrome background visible in the
-                //     four corner regions. Without corner clipping our
-                //     rectangular blit would square-off the rounded
-                //     edges that step 3 just painted.
+                // Widget pixels fill the inner rounded rect. Middle rows
+                // memcpy; rows that touch a corner curve fall through to
+                // a per-pixel SDF blend so widget content and chrome
+                // border meet with proper AA at the inner edge.
                 crate::shade::widgets::with_scene(win.id.0, |scene| {
                     let pitch = info.pitch as usize;
                     let fb_w = info.width;
                     let fb_h = info.height;
                     let x1 = (cx + scene.width).min(fb_w);
                     let y1 = (cy + scene.height).min(fb_h);
-
                     let cw_local = x1.saturating_sub(cx);
                     let ch_local = y1.saturating_sub(cy);
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);
 
                     for dy in cy..y1 {
                         let local_y = dy - cy;
-                        // Horizontal inset: how many pixels to leave
-                        // untouched at each side of this row so the
-                        // rounded chrome keeps showing through.
-                        let skip = corner_inset(local_y, ch_local, r);
-                        if skip * 2 >= cw_local { continue; }
+                        let in_top    = r > 0 && local_y < r;
+                        let in_bottom = r > 0 && local_y >= ch_local - r;
 
-                        let px0 = cx + skip;
-                        let px1 = x1.saturating_sub(skip);
-                        if px0 >= px1 { continue; }
+                        if !in_top && !in_bottom {
+                            // Straight middle: fast memcpy of the full row.
+                            let src_base = (local_y as usize) * (scene.width as usize);
+                            let dst_off  = dy as usize * pitch + cx as usize * 4;
+                            unsafe {
+                                let dst = shadow.add(dst_off) as *mut u32;
+                                core::ptr::copy_nonoverlapping(
+                                    scene.pixels.as_ptr().add(src_base),
+                                    dst,
+                                    cw_local as usize,
+                                );
+                            }
+                            continue;
+                        }
 
-                        let src_base = (local_y as usize) * (scene.width as usize);
-                        let src_x    = (px0 - cx) as usize;
-                        let dst_off  = dy as usize * pitch + px0 as usize * 4;
-                        let span     = (px1 - px0) as usize;
-                        unsafe {
-                            let dst = shadow.add(dst_off) as *mut u32;
-                            core::ptr::copy_nonoverlapping(
-                                scene.pixels.as_ptr().add(src_base + src_x),
-                                dst,
-                                span,
-                            );
+                        // Corner row: r pixels on each side go through
+                        // the SDF blend; the middle is still memcpy.
+                        let mid_lo = r.min(cw_local);
+                        let mid_hi = cw_local.saturating_sub(r).max(mid_lo);
+
+                        for dx in cx..(cx + mid_lo).min(x1) {
+                            let local_x = dx - cx;
+                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
+                            if cov == 0 { continue; }
+                            let src_idx = (local_y as usize) * (scene.width as usize) + local_x as usize;
+                            let widget_pixel = scene.pixels[src_idx];
+                            render::blend_pixel(shadow, info, dx, dy, widget_pixel, cov);
+                        }
+
+                        if mid_hi > mid_lo {
+                            let src_base = (local_y as usize) * (scene.width as usize) + mid_lo as usize;
+                            let dst_off  = dy as usize * pitch + (cx + mid_lo) as usize * 4;
+                            let span     = (mid_hi - mid_lo) as usize;
+                            unsafe {
+                                let dst = shadow.add(dst_off) as *mut u32;
+                                core::ptr::copy_nonoverlapping(
+                                    scene.pixels.as_ptr().add(src_base),
+                                    dst,
+                                    span,
+                                );
+                            }
+                        }
+
+                        for dx in (cx + mid_hi).min(x1)..x1 {
+                            let local_x = dx - cx;
+                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
+                            if cov == 0 { continue; }
+                            let src_idx = (local_y as usize) * (scene.width as usize) + local_x as usize;
+                            let widget_pixel = scene.pixels[src_idx];
+                            render::blend_pixel(shadow, info, dx, dy, widget_pixel, cov);
                         }
                     }
                 });
@@ -1399,25 +1427,3 @@ fn parse_hex_color(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
-/// Per-row inset for the widget blit. Returns the skip count from
-/// each side so widget pixels never overwrite the chrome's inner
-/// AA fringe. Uses `gui::render::rect_coverage_sdf` for pixel-perfect
-/// agreement with the chrome painter.
-fn corner_inset(y: u32, h: u32, r: u32) -> u32 {
-    if r == 0 { return 0; }
-    let y_i = y as i32;
-    let h_i = h as i32;
-    let r_i = r as i32;
-    if y_i < 0 || y_i >= h_i { return r; }
-    if y_i >= r_i && y_i < h_i - r_i { return 0; }
-    // Synthetic content rect of width `2*r + 1` so left and right
-    // corner-arc regions just touch in the middle column. The first
-    // pixel from the left where coverage == 256 is the skip count.
-    let synth_w = (2 * r).max(1);
-    for x in 0..r {
-        if render::rect_coverage_sdf(x, y, 0, 0, synth_w, h, r) == 256 {
-            return x;
-        }
-    }
-    r
-}
