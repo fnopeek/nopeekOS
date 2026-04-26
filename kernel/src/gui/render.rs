@@ -323,6 +323,106 @@ fn blend(fg: u32, bg: u32, alpha: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// 16x16 sub-pixel coverage of pixel (px, py) inside the rounded
+/// rect [rx..rx+rw] × [ry..ry+rh] at corner radius `r`. Returns
+/// 0..=256 with the same sample formula as `fill_rounded_rect_blend`,
+/// so the new chrome painter and the widget-blit inset agree on the
+/// boundary pixel-for-pixel.
+fn rect_coverage_blend(px: u32, py: u32,
+                       rx: u32, ry: u32, rw: u32, rh: u32, r: u32) -> u32 {
+    if px < rx || py < ry || px >= rx + rw || py >= ry + rh { return 0; }
+    if r == 0 { return 256; }
+    let in_x = px - rx;
+    let in_y = py - ry;
+    let cdx: u32 = if in_x < r { r - in_x }
+                   else if in_x >= rw - r { in_x - (rw - r) + 1 }
+                   else { 0 };
+    let cdy: u32 = if in_y < r { r - in_y }
+                   else if in_y >= rh - r { in_y - (rh - r) + 1 }
+                   else { 0 };
+    if cdx == 0 || cdy == 0 { return 256; }
+    let cdx = cdx as i32;
+    let cdy = cdy as i32;
+    let r_f = r as i32;
+    let r2 = r_f * r_f * 1024;
+    let mut cov = 0u32;
+    for sy in 0..16i32 {
+        let sdy = cdy * 32 + 2 * sy - 15;
+        let sdy2 = sdy * sdy;
+        if sdy2 > r2 { continue; }
+        for sx in 0..16i32 {
+            let sdx = cdx * 32 + 2 * sx - 15;
+            if sdx * sdx + sdy2 <= r2 { cov += 1; }
+        }
+    }
+    cov
+}
+
+/// Single-pass chrome painter: border ring with AA on its outer
+/// curve, content fill with AA on the inner curve, computed and
+/// composited per-pixel from one set of coverage values. Replaces
+/// the legacy two-pass paint (outer rounded rect with border, then
+/// inner rounded rect with bg) — that pattern double-counted the
+/// AA fringe on the inner curve, eating into the radial border
+/// space and making corner borders visibly thinner than straight
+/// edges.
+///
+/// `border_a == border_b` paints a solid border; different values
+/// produce a 45° gradient (top-left → bottom-right).
+pub fn fill_rounded_chrome_aa(
+    shadow: *mut u8, info: &FbInfo,
+    x: u32, y: u32, w: u32, h: u32,
+    border_a: u32, border_b: u32, bg_color: u32,
+    rounding: u32, border: u32,
+    border_opacity: u32, bg_opacity: u32,
+) {
+    if w < 2 || h < 2 { return; }
+    let r_out = rounding.min(w / 2).min(h / 2);
+    let border_px = border.min(r_out).min(w / 2).min(h / 2);
+    let r_in = r_out - border_px;
+    let inner_x = x + border_px;
+    let inner_y = y + border_px;
+    let inner_w = w - 2 * border_px;
+    let inner_h = h - 2 * border_px;
+    let x_max = (x + w).min(info.width);
+    let y_max = (y + h).min(info.height);
+    let diag_max = (w + h).max(1) as u64;
+    let solid = border_a == border_b;
+    let bo = border_opacity.min(255);
+    let go = bg_opacity.min(255);
+
+    for py in y..y_max {
+        for px in x..x_max {
+            let outer = rect_coverage_blend(px, py, x, y, w, h, r_out);
+            if outer == 0 { continue; }
+            let border_color = if solid {
+                border_a
+            } else {
+                let in_x = (px - x) as u64;
+                let in_y = (py - y) as u64;
+                let t = ((in_x + in_y) * 1000 / diag_max) as u32;
+                crate::theme::lerp_color(border_a, border_b, t.min(1000))
+            };
+            let bg_pixel = read_pixel(shadow, info, px, py);
+            // Outer fringe — only border vs wallpaper.
+            if outer < 256 {
+                let alpha = (outer * bo / 256).min(255);
+                put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, alpha));
+                continue;
+            }
+            // Inside outer body — composite border, then bg if any.
+            let inner = rect_coverage_blend(px, py, inner_x, inner_y, inner_w, inner_h, r_in);
+            let after_border = blend(border_color, bg_pixel, bo);
+            if inner == 0 {
+                put_pixel(shadow, info, px, py, after_border);
+            } else {
+                let bg_alpha = (go * inner / 256).min(255);
+                put_pixel(shadow, info, px, py, blend(bg_color, after_border, bg_alpha));
+            }
+        }
+    }
+}
+
 // ── Layer-aware rendering (writes alpha channel for compositing) ───────
 
 /// Fill a rounded rectangle with color + alpha byte for layer compositing.
