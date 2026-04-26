@@ -531,29 +531,25 @@ impl Compositor {
                 win.x, win.y, win.width, win.height);
         }
 
-        // 2. Border blend (gradient if theme active + window focused) —
-        // same chrome for Terminal and Widget so widget-apps look
-        // identical to loops from the outside (rounded corners etc.)
-        if crate::theme::is_active() && win.focused {
+        // 2+3. Single-pass chrome (border ring + content fill) — see
+        // `gui::render::fill_rounded_chrome_aa`. Avoids the corner
+        // border thinning the legacy two-pass paint produced.
+        let (ba, bb, b_op) = if crate::theme::is_active() && win.focused {
             let (ga, gb) = crate::theme::border_gradient();
-            render::fill_rounded_rect_gradient(shadow, info,
-                win.x, win.y, win.width, win.height,
-                ga, gb, rounding, 200);
+            (ga, gb, 200u32)
         } else {
-            render::fill_rounded_rect_blend(shadow, info,
-                win.x, win.y, win.width, win.height,
-                border_color, rounding, 180);
-        }
+            (border_color, border_color, 180u32)
+        };
+        render::fill_rounded_chrome_aa(shadow, info,
+            win.x, win.y, win.width, win.height,
+            ba, bb, win.bg_color,
+            rounding, border, b_op, opacity);
 
-        // 3. Content blend (on clean border blend)
         let cx = win.content_x(border);
         let cy = win.content_y(border);
         let cw = win.content_w(border);
         let ch = win.content_h(border);
         let inner_r = rounding.saturating_sub(border);
-        render::fill_rounded_rect_blend(shadow, info,
-            cx, cy, cw, ch,
-            win.bg_color, inner_r, opacity);
 
         // 4. Content-kind specific draw.
         match win.kind {
@@ -1399,55 +1395,47 @@ fn parse_hex_color(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
-/// Per-row inset for the widget blit, matching the chrome's 16x16
-/// subpixel AA. Returns the skip count from each side: pixels inside
-/// the inset belong to the chrome's AA fringe and must NOT be
-/// overwritten by the widget — otherwise the rounded edges square off.
+/// Per-row inset for the widget blit. Returns the skip count from
+/// each side so widget pixels never overwrite the chrome's AA fringe.
+/// Uses the same 16x16 sub-pixel formula as `rect_coverage_blend` —
+/// chrome and widget snap to the same boundary pixel-for-pixel.
 fn corner_inset(y: u32, h: u32, r: u32) -> u32 {
     if r == 0 { return 0; }
-    let y = y as i32;
-    let h = h as i32;
-    let r = r as i32;
-    let dy_off = if y < r {
-        r - 1 - y
-    } else if y >= h - r {
-        y - (h - r)
+    let y_i = y as i32;
+    let h_i = h as i32;
+    let r_i = r as i32;
+    let cdy = if y_i < r_i {
+        r_i - y_i
+    } else if y_i >= h_i - r_i {
+        y_i - (h_i - r_i) + 1
     } else {
         return 0;
     };
-    if dy_off < 0 || dy_off >= r { return r as u32; }
-    // Walk dx from the deepest column (0 = closest to body) outward.
-    // Coverage decreases monotonically along this walk, so the first
-    // dx without full coverage marks the AA fringe boundary.
-    let mut max_full_dx: i32 = -1;
-    for dx in 0..r {
-        if chrome_coverage_full(dx, dy_off, r) {
-            max_full_dx = dx;
+    if cdy <= 0 || cdy > r_i { return r as u32; }
+    // Walk corner_dx from 1 (deepest, closest to body) to r (edge).
+    // Coverage decreases monotonically; first non-full marks the fringe.
+    let mut last_full: i32 = 0;
+    for cdx in 1..=r_i {
+        if blend_full(cdx, cdy, r_i) {
+            last_full = cdx;
         } else {
             break;
         }
     }
-    if max_full_dx < 0 {
-        r as u32
-    } else {
-        (r - 1 - max_full_dx) as u32
-    }
+    if last_full == 0 { r as u32 } else { (r_i - last_full) as u32 }
 }
 
-/// True when all 256 sub-samples of pixel (dx, dy) are inside the
-/// arc of radius `r`. Mirrors `gui::render::fill_rounded_rect_aa`
-/// exactly so the inset boundary lines up with what chrome painted.
+/// All 256 sub-samples of corner pixel (cdx, cdy) inside arc of
+/// radius `r`. Same convention as `gui::render::rect_coverage_blend`.
 #[inline]
-fn chrome_coverage_full(dx: i32, dy: i32, r: i32) -> bool {
-    let base_dx = (dx + 1) * 32;
-    let base_dy = (dy + 1) * 32;
+fn blend_full(cdx: i32, cdy: i32, r: i32) -> bool {
     let r2 = r * r * 1024;
     for sy in 0..16i32 {
-        let sdy = base_dy - 2 * sy - 15;
+        let sdy = cdy * 32 + 2 * sy - 15;
         let sdy2 = sdy * sdy;
         if sdy2 > r2 { return false; }
         for sx in 0..16i32 {
-            let sdx = base_dx - 2 * sx - 15;
+            let sdx = cdx * 32 + 2 * sx - 15;
             if sdx * sdx + sdy2 > r2 { return false; }
         }
     }
