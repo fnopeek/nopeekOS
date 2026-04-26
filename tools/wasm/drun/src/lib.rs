@@ -220,8 +220,9 @@ impl Drun {
             modifiers: alloc::vec![],
         };
 
-        let mut root: Vec<Widget> = Vec::with_capacity(5);
+        let mut root: Vec<Widget> = Vec::with_capacity(6);
         root.push(search);
+        root.push(Widget::Divider);
         root.push(list);
         root.push(Widget::Spacer { flex: 1 });
         root.push(Widget::Divider);
