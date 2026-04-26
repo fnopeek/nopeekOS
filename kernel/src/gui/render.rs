@@ -2,6 +2,11 @@
 //!
 //! All drawing targets the shadow buffer. DamageTracker records dirty regions
 //! and flushes them to MMIO via blit_rect.
+//!
+//! Rounded-rect AA is signed-distance-field based (`arc_coverage_sdf`):
+//! one analytic distance per pixel + smoothstep over a fixed ~1.18 px
+//! band. No supersampling. Same approach as Hyprland's shaders, ported
+//! to integer Q24.8 fixed-point.
 
 use crate::framebuffer::{FbConsole, FbInfo};
 
@@ -123,182 +128,10 @@ pub fn fill_rect(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, w: u32, h: u32,
 #[allow(dead_code)]
 pub fn draw_border(shadow: *mut u8, info: &FbInfo,
                    x: u32, y: u32, w: u32, h: u32, color: u32, thickness: u32) {
-    // Top
     fill_rect(shadow, info, x, y, w, thickness, color);
-    // Bottom
     fill_rect(shadow, info, x, y + h - thickness, w, thickness, color);
-    // Left
     fill_rect(shadow, info, x, y + thickness, thickness, h - 2 * thickness, color);
-    // Right
     fill_rect(shadow, info, x + w - thickness, y + thickness, thickness, h - 2 * thickness, color);
-}
-
-/// Fill a rounded rectangle (filled body + quarter-circle corners).
-#[allow(dead_code)]
-pub fn fill_rounded_rect(shadow: *mut u8, info: &FbInfo,
-                         x: u32, y: u32, w: u32, h: u32,
-                         color: u32, radius: u32) {
-    fill_rounded_rect_aa(shadow, info, x, y, w, h, color, radius);
-}
-
-/// Fill a rounded rectangle with anti-aliased corners.
-/// Blends edge pixels with the background for smooth appearance.
-pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
-                            x: u32, y: u32, w: u32, h: u32,
-                            color: u32, radius: u32) {
-    if radius == 0 || w < 2 || h < 2 {
-        fill_rect(shadow, info, x, y, w, h, color);
-        return;
-    }
-    let r = radius.min(w / 2).min(h / 2);
-
-    // Center body (no corners needed)
-    fill_rect(shadow, info, x + r, y, w - 2 * r, h, color);
-    // Left strip (between corners)
-    fill_rect(shadow, info, x, y + r, r, h - 2 * r, color);
-    // Right strip
-    fill_rect(shadow, info, x + w - r, y + r, r, h - 2 * r, color);
-
-    // 16x16 centered subpixel sampling — 256 coverage levels, scale
-    // ×32 so sample offsets (2*sx - 15) land symmetric around 0.
-    let r_f = r as i32;
-    let corners: [(u32, u32, bool, bool); 4] = [
-        (x + r,     y + r,     true,  true),
-        (x + w - r, y + r,     false, true),
-        (x + r,     y + h - r, true,  false),
-        (x + w - r, y + h - r, false, false),
-    ];
-    for &(cx, cy, flip_x, flip_y) in &corners {
-        for dy in 0..r {
-            for dx in 0..r {
-                let mut coverage = 0u32;
-                let base_dx = (dx as i32 + 1) * 32;
-                let base_dy = (dy as i32 + 1) * 32;
-                for sy in 0..16i32 {
-                    for sx in 0..16i32 {
-                        let sdx = base_dx - 2 * sx - 15;
-                        let sdy = base_dy - 2 * sy - 15;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 1024 {
-                            coverage += 1;
-                        }
-                    }
-                }
-                if coverage == 0 { continue; }
-
-                let px = if flip_x { cx - 1 - dx } else { cx + dx };
-                let py = if flip_y { cy - 1 - dy } else { cy + dy };
-
-                if coverage == 256 {
-                    put_pixel(shadow, info, px, py, color);
-                } else {
-                    let bg = read_pixel(shadow, info, px, py);
-                    let blended = blend(color, bg, coverage);
-                    put_pixel(shadow, info, px, py, blended);
-                }
-            }
-        }
-    }
-}
-
-/// Fill a rounded rectangle blended over the existing background.
-/// opacity: 0 = fully transparent, 256 = fully opaque.
-pub fn fill_rounded_rect_blend(shadow: *mut u8, info: &FbInfo,
-                               x: u32, y: u32, w: u32, h: u32,
-                               color: u32, radius: u32, opacity: u32) {
-    if w < 2 || h < 2 { return; }
-    let r = radius.min(w / 2).min(h / 2);
-    let r_f = r as i32;
-
-    // For each pixel in the bounding box, determine if inside rounded rect
-    for py in y..(y + h).min(info.height) {
-        for px in x..(x + w).min(info.width) {
-            // Check if pixel is inside the rounded rect
-            let in_x = px.saturating_sub(x);
-            let in_y = py.saturating_sub(y);
-
-            // Determine corner distance
-            let (corner_dx, corner_dy) = {
-                let dx = if in_x < r { r - in_x } else if in_x >= w - r { in_x - (w - r) + 1 } else { 0 };
-                let dy = if in_y < r { r - in_y } else if in_y >= h - r { in_y - (h - r) + 1 } else { 0 };
-                (dx as i32, dy as i32)
-            };
-
-            if corner_dx > 0 && corner_dy > 0 {
-                // 8x8 subpixel AA — 64 coverage levels, smooth on bright bg.
-                let mut coverage = 0u32;
-                for sy in 0..16i32 {
-                    for sx in 0..16i32 {
-                        let sdx = corner_dx * 32 + 2 * sx - 15;
-                        let sdy = corner_dy * 32 + 2 * sy - 15;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 1024 {
-                            coverage += 1;
-                        }
-                    }
-                }
-                if coverage == 0 { continue; }
-                let alpha = opacity * coverage / 256;
-                let bg = read_pixel(shadow, info, px, py);
-                put_pixel(shadow, info, px, py, blend(color, bg, alpha));
-            } else {
-                let bg = read_pixel(shadow, info, px, py);
-                put_pixel(shadow, info, px, py, blend(color, bg, opacity));
-            }
-        }
-    }
-}
-
-/// Fill a rounded rectangle with a gradient border, blended over the background.
-/// The gradient goes from `color_a` to `color_b` at `angle_deg` degrees.
-/// Only the border ring (outer rect minus inner content rect) gets the gradient.
-pub fn fill_rounded_rect_gradient(shadow: *mut u8, info: &FbInfo,
-                                  x: u32, y: u32, w: u32, h: u32,
-                                  color_a: u32, color_b: u32,
-                                  radius: u32, opacity: u32) {
-    if w < 2 || h < 2 { return; }
-    let r = radius.min(w / 2).min(h / 2);
-    let r_f = r as i32;
-
-    // Precompute gradient direction (45° diagonal: top-left → bottom-right)
-    // t = 0 at top-left, t = 1000 at bottom-right
-    let diag_max = (w + h) as u64;
-
-    for py in y..(y + h).min(info.height) {
-        for px in x..(x + w).min(info.width) {
-            let in_x = px.saturating_sub(x);
-            let in_y = py.saturating_sub(y);
-
-            // Corner rounding check
-            let (corner_dx, corner_dy) = {
-                let dx = if in_x < r { r - in_x } else if in_x >= w - r { in_x - (w - r) + 1 } else { 0 };
-                let dy = if in_y < r { r - in_y } else if in_y >= h - r { in_y - (h - r) + 1 } else { 0 };
-                (dx as i32, dy as i32)
-            };
-
-            // Gradient: interpolate along 45° diagonal
-            let t = ((in_x as u64 + in_y as u64) * 1000 / diag_max) as u32;
-            let color = crate::theme::lerp_color(color_a, color_b, t);
-
-            if corner_dx > 0 && corner_dy > 0 {
-                let mut coverage = 0u32;
-                for sy in 0..16i32 {
-                    for sx in 0..16i32 {
-                        let sdx = corner_dx * 32 + 2 * sx - 15;
-                        let sdy = corner_dy * 32 + 2 * sy - 15;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 1024 {
-                            coverage += 1;
-                        }
-                    }
-                }
-                if coverage == 0 { continue; }
-                let alpha = opacity * coverage / 256;
-                let bg = read_pixel(shadow, info, px, py);
-                put_pixel(shadow, info, px, py, blend(color, bg, alpha));
-            } else {
-                let bg = read_pixel(shadow, info, px, py);
-                put_pixel(shadow, info, px, py, blend(color, bg, opacity));
-            }
-        }
-    }
 }
 
 /// Read a pixel from the shadow buffer.
@@ -323,51 +156,149 @@ fn blend(fg: u32, bg: u32, alpha: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// 16x16 sub-pixel coverage of pixel (px, py) inside the rounded
-/// rect [rx..rx+rw] × [ry..ry+rh] at corner radius `r`. Returns
-/// 0..=256 with the same sample formula as `fill_rounded_rect_blend`,
-/// so the new chrome painter and the widget-blit inset agree on the
-/// boundary pixel-for-pixel.
-fn rect_coverage_blend(px: u32, py: u32,
-                       rx: u32, ry: u32, rw: u32, rh: u32, r: u32) -> u32 {
-    if px < rx || py < ry || px >= rx + rw || py >= ry + rh { return 0; }
-    if r == 0 { return 256; }
-    let in_x = px - rx;
-    let in_y = py - ry;
-    let cdx: u32 = if in_x < r { r - in_x }
-                   else if in_x >= rw - r { in_x - (rw - r) + 1 }
-                   else { 0 };
-    let cdy: u32 = if in_y < r { r - in_y }
-                   else if in_y >= rh - r { in_y - (rh - r) + 1 }
-                   else { 0 };
-    if cdx == 0 || cdy == 0 { return 256; }
-    let cdx = cdx as i32;
-    let cdy = cdy as i32;
-    let r_f = r as i32;
-    let r2 = r_f * r_f * 1024;
-    let mut cov = 0u32;
-    for sy in 0..16i32 {
-        let sdy = cdy * 32 + 2 * sy - 15;
-        let sdy2 = sdy * sdy;
-        if sdy2 > r2 { continue; }
-        for sx in 0..16i32 {
-            let sdx = cdx * 32 + 2 * sx - 15;
-            if sdx * sdx + sdy2 <= r2 { cov += 1; }
-        }
+// ── Signed-distance-field rounded-corner AA (Hyprland-style) ──────────
+//
+// Q24.8 fixed-point. Pixel center at (px+0.5, py+0.5). Corner-arc-center
+// at (rx+r, ry+r). One sqrt + smoothstep per pixel, no supersampling.
+// AA half-band is `AA_S_Q8` ≈ 0.586 px (matches Hyprland's
+// `M_PI / 5.34666` smoothing constant).
+
+const AA_S_Q8: i32 = 150;       // 0.5876 px in Q24.8 (≈ M_PI / 5.34666)
+const AA_TWO_S_Q8: i32 = 300;   // 2 * AA_S_Q8
+
+/// Integer sqrt via Newton-Raphson. Converges in O(log n) iterations.
+fn isqrt_u64(n: u64) -> u32 {
+    if n < 2 { return n as u32; }
+    let mut x = n;
+    let mut y = (n + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
     }
-    cov
+    x as u32
 }
 
-/// Single-pass chrome painter. Outer and inner shapes share the
-/// same corner radius — the inner shape is a translated copy of the
-/// outer (bounds inset by `border`, not a smaller concentric arc).
-/// Pixel-perfect AA alignment on all four curves and the radial
-/// border ends up slightly fatter at the corner diagonals
-/// (`border√2`) than along the straights (`border`), so the corner
-/// no longer reads as thinner than the rest of the frame.
+/// SDF coverage 0..=256 of a sub-pixel position (`cdx_q8`, `cdy_q8`)
+/// from the corner-arc center, against an arc of radius `r_q8` (Q24.8).
+/// 256 = fully inside, 0 = fully outside, smoothstep ramp in between.
+#[inline]
+fn arc_coverage_sdf(cdx_q8: i32, cdy_q8: i32, r_q8: i32) -> u32 {
+    let dx = cdx_q8 as i64;
+    let dy = cdy_q8 as i64;
+    let d2 = (dx * dx + dy * dy) as u64;          // Q48.16
+    let d = isqrt_u64(d2) as i32;                 // Q24.8
+    let signed = d - r_q8;                        // Q24.8
+    if signed <= -AA_S_Q8 { return 256; }
+    if signed >=  AA_S_Q8 { return 0;   }
+    let t = ((signed + AA_S_Q8) as i64 * 256 / AA_TWO_S_Q8 as i64) as i32;
+    let three_minus_2t = 3 * 256 - 2 * t;
+    let smoothed = ((t as u64) * (t as u64) * (three_minus_2t as u64) / 65536) as u32;
+    256u32.saturating_sub(smoothed)
+}
+
+/// SDF coverage 0..=256 of pixel `(px, py)` inside a rounded rect at
+/// `(rx, ry, rw, rh)` with corner radius `r`. AA only at the four arcs;
+/// straight edges are 256 (inside) / 0 (outside).
+pub fn rect_coverage_sdf(px: u32, py: u32,
+                         rx: u32, ry: u32, rw: u32, rh: u32, r: u32) -> u32 {
+    if px < rx || py < ry || px >= rx + rw || py >= ry + rh { return 0; }
+    if r == 0 { return 256; }
+
+    let in_x = (px - rx) as i32;
+    let in_y = (py - ry) as i32;
+    let r_i = r as i32;
+    let rw_i = rw as i32;
+    let rh_i = rh as i32;
+
+    // Pixel offsets from the relevant corner-arc-center, with the
+    // arc-centers placed at (r, r), (rw-r, r), (r, rh-r), (rw-r, rh-r).
+    let cdx_int = if in_x < r_i {
+        r_i - 1 - in_x
+    } else if in_x >= rw_i - r_i {
+        in_x - (rw_i - r_i)
+    } else {
+        return 256;     // x is on a straight edge
+    };
+    let cdy_int = if in_y < r_i {
+        r_i - 1 - in_y
+    } else if in_y >= rh_i - r_i {
+        in_y - (rh_i - r_i)
+    } else {
+        return 256;     // y is on a straight edge
+    };
+
+    // Pixel center +0.5 → Q24.8 offset of 128 from the integer offset.
+    let cdx_q8 = cdx_int * 256 + 128;
+    let cdy_q8 = cdy_int * 256 + 128;
+    arc_coverage_sdf(cdx_q8, cdy_q8, r_i * 256)
+}
+
+// ── Public rounded-rect helpers ────────────────────────────────────────
+
+/// Fill a rounded rectangle (filled body + AA quarter-circle corners).
+#[allow(dead_code)]
+pub fn fill_rounded_rect(shadow: *mut u8, info: &FbInfo,
+                         x: u32, y: u32, w: u32, h: u32,
+                         color: u32, radius: u32) {
+    fill_rounded_rect_aa(shadow, info, x, y, w, h, color, radius);
+}
+
+/// Fill a rounded rectangle with anti-aliased corners (SDF).
+/// Body + side strips drawn with `fill_rect`; only the four corner
+/// squares (size r×r) iterate the SDF coverage helper.
+pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
+                            x: u32, y: u32, w: u32, h: u32,
+                            color: u32, radius: u32) {
+    if radius == 0 || w < 2 || h < 2 {
+        fill_rect(shadow, info, x, y, w, h, color);
+        return;
+    }
+    let r = radius.min(w / 2).min(h / 2);
+
+    fill_rect(shadow, info, x + r, y, w - 2 * r, h, color);
+    fill_rect(shadow, info, x, y + r, r, h - 2 * r, color);
+    fill_rect(shadow, info, x + w - r, y + r, r, h - 2 * r, color);
+
+    let r_q8 = r as i32 * 256;
+    let corners: [(u32, u32, bool, bool); 4] = [
+        (x + r,     y + r,     true,  true),
+        (x + w - r, y + r,     false, true),
+        (x + r,     y + h - r, true,  false),
+        (x + w - r, y + h - r, false, false),
+    ];
+    for &(cx, cy, flip_x, flip_y) in &corners {
+        for dy in 0..r {
+            let cdy_q8 = dy as i32 * 256 + 128;
+            for dx in 0..r {
+                let cdx_q8 = dx as i32 * 256 + 128;
+                let coverage = arc_coverage_sdf(cdx_q8, cdy_q8, r_q8);
+                if coverage == 0 { continue; }
+
+                let px = if flip_x { cx - 1 - dx } else { cx + dx };
+                let py = if flip_y { cy - 1 - dy } else { cy + dy };
+
+                if coverage == 256 {
+                    put_pixel(shadow, info, px, py, color);
+                } else {
+                    let bg = read_pixel(shadow, info, px, py);
+                    put_pixel(shadow, info, px, py, blend(color, bg, coverage));
+                }
+            }
+        }
+    }
+}
+
+/// Single-pass chrome painter: outer rounded rect over wallpaper, plus
+/// inner rounded rect (concentric, radius = `rounding - border`) for
+/// the content fill. Both arcs share the same center, so the radial
+/// border thickness is uniform `border` everywhere along the curve.
 ///
-/// `border_a == border_b` paints a solid border; different values
-/// produce a 45° gradient (top-left → bottom-right).
+/// One SDF coverage per curve, two smoothstep ramps. The outer fringe
+/// blends border ↔ wallpaper, the inner fringe blends content ↔ border.
+/// Browsers (Cairo, Skia) render CSS `border-radius` exactly this way.
+///
+/// `border_a == border_b` paints solid; different values give a 45°
+/// gradient (top-left → bottom-right).
 pub fn fill_rounded_chrome_aa(
     shadow: *mut u8, info: &FbInfo,
     x: u32, y: u32, w: u32, h: u32,
@@ -382,7 +313,7 @@ pub fn fill_rounded_chrome_aa(
     let inner_y = y + border_px;
     let inner_w = w - 2 * border_px;
     let inner_h = h - 2 * border_px;
-    let r_in = r_out.min(inner_w / 2).min(inner_h / 2);
+    let r_in = r_out.saturating_sub(border_px).min(inner_w / 2).min(inner_h / 2);
     let x_max = (x + w).min(info.width);
     let y_max = (y + h).min(info.height);
     let diag_max = (w + h).max(1) as u64;
@@ -392,8 +323,9 @@ pub fn fill_rounded_chrome_aa(
 
     for py in y..y_max {
         for px in x..x_max {
-            let outer = rect_coverage_blend(px, py, x, y, w, h, r_out);
+            let outer = rect_coverage_sdf(px, py, x, y, w, h, r_out);
             if outer == 0 { continue; }
+
             let border_color = if solid {
                 border_a
             } else {
@@ -403,15 +335,25 @@ pub fn fill_rounded_chrome_aa(
                 crate::theme::lerp_color(border_a, border_b, t.min(1000))
             };
             let bg_pixel = read_pixel(shadow, info, px, py);
-            // Outer fringe — only border vs wallpaper.
+
+            // Outer fringe: only border vs wallpaper; the inner curve's
+            // own fringe sits ≥ `border` pixels further in and never
+            // overlaps when `border ≥ AA_band` (≈ 1.18 px).
             if outer < 256 {
                 let alpha = (outer * bo / 256).min(255);
                 put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, alpha));
                 continue;
             }
-            // Inside outer body — composite border, then bg if any.
-            let inner = rect_coverage_blend(px, py, inner_x, inner_y, inner_w, inner_h, r_in);
+
+            // Deep inside outer: composite border under content. Keeps
+            // the legacy "content tinted by border when bg_opacity < 1"
+            // behaviour without an extra pass.
             let after_border = blend(border_color, bg_pixel, bo);
+            let inner = if border_px == 0 {
+                256
+            } else {
+                rect_coverage_sdf(px, py, inner_x, inner_y, inner_w, inner_h, r_in)
+            };
             if inner == 0 {
                 put_pixel(shadow, info, px, py, after_border);
             } else {
@@ -489,7 +431,6 @@ pub fn fill_rounded_rect_gradient_alpha(buf: *mut u8, info: &FbInfo,
                 (dx as i32, dy as i32)
             };
 
-            // Gradient interpolation
             let t = ((in_x as u64 + in_y as u64) * 1000 / diag_max.max(1)) as u32;
             let color = crate::theme::lerp_color(color_a, color_b, t.min(1000));
 
@@ -513,5 +454,3 @@ pub fn fill_rounded_rect_gradient_alpha(buf: *mut u8, info: &FbInfo,
         }
     }
 }
-
-
