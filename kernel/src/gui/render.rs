@@ -288,14 +288,22 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
     }
 }
 
-/// Single-pass chrome painter: outer rounded rect over wallpaper, plus
-/// inner rounded rect (concentric, radius = `rounding - border`) for
-/// the content fill. Both arcs share the same center, so the radial
-/// border thickness is uniform `border` everywhere along the curve.
+/// Single-pass chrome painter. Outer SDF curve at radius `rounding`,
+/// inner SDF curve at radius `rounding - border`, concentric — so the
+/// radial border is uniform `border` everywhere along the curve. One
+/// distance + smoothstep per curve, no supersampling.
 ///
-/// One SDF coverage per curve, two smoothstep ramps. The outer fringe
-/// blends border ↔ wallpaper, the inner fringe blends content ↔ border.
-/// Browsers (Cairo, Skia) render CSS `border-radius` exactly this way.
+/// `paint_content == true` (terminal windows): full layered chrome —
+/// border ring with outer-fringe AA, inner area filled with `bg_color`,
+/// inner-fringe blends content ↔ border. The terminal renderer paints
+/// text on top of the bg_color.
+///
+/// `paint_content == false` (widget windows): the chrome paints solid
+/// border in the entire (border-ring + inner-fringe) band and leaves
+/// the inner-full area untouched. The widget blit then fills the inner
+/// area with its own SDF AA against the border. This keeps the widget's
+/// own background (cards, panes) from being undercut by `bg_color`
+/// bleeding through the inner-fringe.
 ///
 /// `border_a == border_b` paints solid; different values give a 45°
 /// gradient (top-left → bottom-right).
@@ -305,6 +313,7 @@ pub fn fill_rounded_chrome_aa(
     border_a: u32, border_b: u32, bg_color: u32,
     rounding: u32, border: u32,
     border_opacity: u32, bg_opacity: u32,
+    paint_content: bool,
 ) {
     if w < 2 || h < 2 { return; }
     let r_out = rounding.min(w / 2).min(h / 2);
@@ -336,24 +345,30 @@ pub fn fill_rounded_chrome_aa(
             };
             let bg_pixel = read_pixel(shadow, info, px, py);
 
-            // Outer fringe: only border vs wallpaper; the inner curve's
-            // own fringe sits ≥ `border` pixels further in and never
-            // overlaps when `border ≥ AA_band` (≈ 1.18 px).
+            // Outer fringe (both modes): border vs wallpaper.
             if outer < 256 {
                 let alpha = (outer * bo / 256).min(255);
                 put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, alpha));
                 continue;
             }
 
-            // Deep inside outer: composite border under content. Keeps
-            // the legacy "content tinted by border when bg_opacity < 1"
-            // behaviour without an extra pass.
-            let after_border = blend(border_color, bg_pixel, bo);
             let inner = if border_px == 0 {
                 256
             } else {
                 rect_coverage_sdf(px, py, inner_x, inner_y, inner_w, inner_h, r_in)
             };
+
+            if !paint_content {
+                // Widget mode: solid border in (ring + inner-fringe);
+                // hand the inner-full area off to the widget blit.
+                if inner == 256 { continue; }
+                put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
+                continue;
+            }
+
+            // Terminal mode: layer content over border so a translucent
+            // bg picks up a slight border tint at the inner edge.
+            let after_border = blend(border_color, bg_pixel, bo);
             if inner == 0 {
                 put_pixel(shadow, info, px, py, after_border);
             } else {
@@ -362,6 +377,19 @@ pub fn fill_rounded_chrome_aa(
             }
         }
     }
+}
+
+/// Blend `src` over the existing shadow-buffer pixel at (x, y) with
+/// `alpha` ∈ 0..=256. Read-modify-write helper for paths that already
+/// know the coverage analytically (e.g. SDF-aware widget blits).
+pub fn blend_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, src: u32, alpha: u32) {
+    if alpha == 0 { return; }
+    if alpha >= 256 {
+        put_pixel(shadow, info, x, y, src);
+        return;
+    }
+    let dst = read_pixel(shadow, info, x, y);
+    put_pixel(shadow, info, x, y, blend(src, dst, alpha));
 }
 
 // ── Layer-aware rendering (writes alpha channel for compositing) ───────
