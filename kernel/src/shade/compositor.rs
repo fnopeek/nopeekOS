@@ -1399,44 +1399,57 @@ fn parse_hex_color(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
-/// Per-row horizontal inset for a content rect of height `h` with
-/// corner radius `r`. Returns 0 for rows outside the top/bottom
-/// corner regions. Used by the widget-blit to preserve the rounded
-/// chrome around the scene pixels.
+/// Per-row inset for the widget blit, matching the chrome's 16x16
+/// subpixel AA. Returns the skip count from each side: pixels inside
+/// the inset belong to the chrome's AA fringe and must NOT be
+/// overwritten by the widget — otherwise the rounded edges square off.
 fn corner_inset(y: u32, h: u32, r: u32) -> u32 {
     if r == 0 { return 0; }
     let y = y as i32;
     let h = h as i32;
     let r = r as i32;
-    // Distance from the relevant edge (top or bottom) into the
-    // corner region. Non-corner rows return 0.
-    let edge_dist = if y < r {
+    let dy_off = if y < r {
         r - 1 - y
     } else if y >= h - r {
         y - (h - r)
     } else {
         return 0;
     };
-    if edge_dist < 0 { return 0; }
-    // Pixel (x, y) is inside when (r-1-x)² + edge_dist² ≤ (r-1)².
-    // → x ≥ (r - 1) - sqrt((r-1)² - edge_dist²).
-    let rm1 = r - 1;
-    let r2 = rm1 * rm1;
-    let d2 = edge_dist * edge_dist;
-    if d2 > r2 { return r as u32; }
-    let s = isqrt(r2 - d2);
-    let x_min = rm1 - s;
-    if x_min < 0 { 0 } else { x_min as u32 }
+    if dy_off < 0 || dy_off >= r { return r as u32; }
+    // Walk dx from the deepest column (0 = closest to body) outward.
+    // Coverage decreases monotonically along this walk, so the first
+    // dx without full coverage marks the AA fringe boundary.
+    let mut max_full_dx: i32 = -1;
+    for dx in 0..r {
+        if chrome_coverage_full(dx, dy_off, r) {
+            max_full_dx = dx;
+        } else {
+            break;
+        }
+    }
+    if max_full_dx < 0 {
+        r as u32
+    } else {
+        (r - 1 - max_full_dx) as u32
+    }
 }
 
-/// Integer square root via Newton-Raphson. no_std friendly.
-fn isqrt(n: i32) -> i32 {
-    if n < 2 { return n.max(0); }
-    let mut x = n;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + n / x) / 2;
+/// True when all 256 sub-samples of pixel (dx, dy) are inside the
+/// arc of radius `r`. Mirrors `gui::render::fill_rounded_rect_aa`
+/// exactly so the inset boundary lines up with what chrome painted.
+#[inline]
+fn chrome_coverage_full(dx: i32, dy: i32, r: i32) -> bool {
+    let base_dx = (dx + 1) * 32;
+    let base_dy = (dy + 1) * 32;
+    let r2 = r * r * 1024;
+    for sy in 0..16i32 {
+        let sdy = base_dy - 2 * sy - 15;
+        let sdy2 = sdy * sdy;
+        if sdy2 > r2 { return false; }
+        for sx in 0..16i32 {
+            let sdx = base_dx - 2 * sx - 15;
+            if sdx * sdx + sdy2 > r2 { return false; }
+        }
     }
-    x
+    true
 }
