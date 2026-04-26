@@ -549,11 +549,11 @@ impl Compositor {
         let cy = win.content_y(border);
         let cw = win.content_w(border);
         let ch = win.content_h(border);
-        // Inner shape uses the same radius as the outer (translated
-        // copy, not concentric) — see `fill_rounded_chrome_aa`. The
-        // widget-blit inset must use the full `rounding` so it lands
-        // on the same curve the chrome AA-painted.
-        let inner_r = rounding;
+        // Inner shape is concentric with the outer at radius
+        // `rounding - border` — see `fill_rounded_chrome_aa`. The
+        // widget-blit inset is computed against this same inner curve
+        // so widget pixels never overwrite the chrome's inner-edge AA.
+        let inner_r = rounding.saturating_sub(border);
 
         // 4. Content-kind specific draw.
         match win.kind {
@@ -1400,48 +1400,24 @@ fn parse_hex_color(s: &str) -> Option<u32> {
 }
 
 /// Per-row inset for the widget blit. Returns the skip count from
-/// each side so widget pixels never overwrite the chrome's AA fringe.
-/// Uses the same 16x16 sub-pixel formula as `rect_coverage_blend` —
-/// chrome and widget snap to the same boundary pixel-for-pixel.
+/// each side so widget pixels never overwrite the chrome's inner
+/// AA fringe. Uses `gui::render::rect_coverage_sdf` for pixel-perfect
+/// agreement with the chrome painter.
 fn corner_inset(y: u32, h: u32, r: u32) -> u32 {
     if r == 0 { return 0; }
     let y_i = y as i32;
     let h_i = h as i32;
     let r_i = r as i32;
-    let cdy = if y_i < r_i {
-        r_i - y_i
-    } else if y_i >= h_i - r_i {
-        y_i - (h_i - r_i) + 1
-    } else {
-        return 0;
-    };
-    if cdy <= 0 || cdy > r_i { return r as u32; }
-    // Walk corner_dx from 1 (deepest, closest to body) to r (edge).
-    // Coverage decreases monotonically; first non-full marks the fringe.
-    let mut last_full: i32 = 0;
-    for cdx in 1..=r_i {
-        if blend_full(cdx, cdy, r_i) {
-            last_full = cdx;
-        } else {
-            break;
+    if y_i < 0 || y_i >= h_i { return r; }
+    if y_i >= r_i && y_i < h_i - r_i { return 0; }
+    // Synthetic content rect of width `2*r + 1` so left and right
+    // corner-arc regions just touch in the middle column. The first
+    // pixel from the left where coverage == 256 is the skip count.
+    let synth_w = (2 * r).max(1);
+    for x in 0..r {
+        if render::rect_coverage_sdf(x, y, 0, 0, synth_w, h, r) == 256 {
+            return x;
         }
     }
-    if last_full == 0 { r as u32 } else { (r_i - last_full) as u32 }
-}
-
-/// All 256 sub-samples of corner pixel (cdx, cdy) inside arc of
-/// radius `r`. Same convention as `gui::render::rect_coverage_blend`.
-#[inline]
-fn blend_full(cdx: i32, cdy: i32, r: i32) -> bool {
-    let r2 = r * r * 1024;
-    for sy in 0..16i32 {
-        let sdy = cdy * 32 + 2 * sy - 15;
-        let sdy2 = sdy * sdy;
-        if sdy2 > r2 { return false; }
-        for sx in 0..16i32 {
-            let sdx = cdx * 32 + 2 * sx - 15;
-            if sdx * sdx + sdy2 > r2 { return false; }
-        }
-    }
-    true
+    r
 }
