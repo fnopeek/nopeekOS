@@ -68,6 +68,7 @@ pub const fn style_desc(style: TextStyle) -> StyleDesc {
     match style {
         // Per the Typography table in PHASE10_WIDGETS.md.
         TextStyle::Title   => StyleDesc { size_px: 24, weight: 600 },
+        TextStyle::Heading => StyleDesc { size_px: 18, weight: 400 },
         TextStyle::Body    => StyleDesc { size_px: 14, weight: 400 },
         TextStyle::Muted   => StyleDesc { size_px: 14, weight: 400 }, // body + 60% alpha at raster
         TextStyle::Caption => StyleDesc { size_px: 11, weight: 500 },

@@ -59,6 +59,7 @@ const _: () = {
     assert!(TextStyle::Caption as u8 == 2);
     assert!(TextStyle::Muted   as u8 == 3);
     assert!(TextStyle::Mono    as u8 == 4);
+    assert!(TextStyle::Heading as u8 == 5);
 
     // IconId — u16, P10.9 Phosphor set frozen.
     assert!(IconId::None              as u16 == 0);
