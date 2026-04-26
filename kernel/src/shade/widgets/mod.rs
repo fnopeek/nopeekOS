@@ -594,7 +594,27 @@ fn rerender_state_only(window_id: u32) {
     }
 }
 
-pub fn clear_hover(window_id: u32) {
+/// Drop the cached hover_path and the OnHover-action dedup so the next
+/// render no longer applies Hover-state modifiers and the next mouse
+/// move re-fires the OnHover action even at the same position.
+///
+/// Called when keyboard navigation should take visual precedence over
+/// a stale mouse position — without this, moving the keyboard cursor
+/// to row N leaves the original mouse-hovered row M still highlighted
+/// and both states render at once.
+pub fn suppress_hover(window_id: u32) {
+    let needs_rerender = {
+        let scenes = SCENES.lock();
+        match scenes.get(&window_id) {
+            Some(s) => s.has_pseudo && !s.hover_path.is_empty(),
+            None    => false,
+        }
+    };
+    if needs_rerender {
+        rerender_with_state(window_id, &[]);
+    } else if let Some(s) = SCENES.lock().get_mut(&window_id) {
+        s.hover_path.clear();
+    }
     LAST_HOVER.lock().remove(&window_id);
 }
 

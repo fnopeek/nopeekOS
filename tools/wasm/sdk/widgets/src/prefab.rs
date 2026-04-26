@@ -11,14 +11,18 @@ use crate::abi::{
 };
 use crate::style::{Elevation, Padding, Radius, Spacing};
 
-// Panel has no padding so dividers reach the window chrome for a
-// closed ring; children set their own padding individually.
+// Small uniform inset (4 px) so children — including dividers — get
+// breathing room from the window chrome instead of butting against
+// the rounded border. The vertical inset combines with the leading /
+// trailing zero-size widgets that `prefab::input` and `prefab::footer`
+// install at their wrap-Column ends to keep the search row + footer
+// row vertically symmetric between chrome and divider.
 pub fn panel(children: Vec<Widget>) -> Widget {
     Widget::Column {
         children,
         spacing: Spacing::Md.as_u16(),
         align:   Align::Stretch,
-        modifiers: vec![],
+        modifiers: vec![Modifier::Padding(Padding::Xs.as_u16())],
     }
 }
 
@@ -141,12 +145,12 @@ pub fn footer(left: &str, right: &str) -> Widget {
         align:   Align::Center,
         modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
     };
-    // Wrap with a zero-size trailing widget so the panel's `Spacing::Md`
-    // gap acts as bottom-margin on the last row, mirroring the `Md` gap
-    // the divider above already gets. Without this the footer text reads
-    // as glued to the chrome — uniform `Modifier::Padding` can't add
-    // vertical-only space without also pushing the text inward
-    // horizontally, which doesn't match the divider's full-bleed line.
+    // Wrap with a trailing zero-size widget so the wrap-Column's
+    // internal `Sm` spacing acts as BOTTOM-margin on the last row.
+    // `row.Padding(Md=12) + this.spacing(Sm=8) + panel.Padding(Xs=4)
+    // = 24 px` matches the symmetric 24 px above the footer text
+    // (panel.spacing Md 12 + row top padding Md 12), keeping the
+    // footer text centred between divider and chrome bottom.
     Widget::Column {
         children: vec![
             row,
@@ -156,7 +160,7 @@ pub fn footer(left: &str, right: &str) -> Widget {
                 modifiers: vec![],
             },
         ],
-        spacing:   Spacing::Md.as_u16(),
+        spacing:   Spacing::Sm.as_u16(),
         align:     Align::Stretch,
         modifiers: vec![],
     }
@@ -587,17 +591,19 @@ pub fn input(
         align:     Align::Center,
         modifiers: wrap_mods,
     };
-    // Wrap with a leading zero-size widget so the parent panel's
-    // `Spacing::Md` gap acts as TOP-margin on the search row, mirroring
-    // the same trick `prefab::footer` uses for its bottom-margin. The
-    // search content ends up vertically centred between the chrome top
-    // and the divider underneath instead of glued to the chrome.
+    // Wrap with a leading zero-size widget so the wrap-Column's
+    // internal `Sm` spacing acts as TOP-margin on the search row.
+    // `panel.Padding(Xs=4) + this.spacing(Sm=8) + row.Padding(Md=12)
+    // = 24 px` matches the symmetric 24 px below the search text
+    // (row bottom padding 12 + panel.spacing Md 12), so the search
+    // row stays vertically centred between chrome top and the
+    // divider underneath. Mirror trick to `prefab::footer`.
     Widget::Column {
         children: vec![
             Widget::Icon { id: IconId::None, size: 0, modifiers: vec![] },
             row,
         ],
-        spacing:   Spacing::Md.as_u16(),
+        spacing:   Spacing::Sm.as_u16(),
         align:     Align::Stretch,
         modifiers: vec![],
     }
