@@ -138,6 +138,11 @@ pub enum TextStyle {
     Caption = 2,
     Muted   = 3,
     Mono    = 4,
+    /// 18 px regular weight — between `Body` (14) and `Title` (24, bold).
+    /// Used for non-bold display text such as input placeholders /
+    /// values where Body reads too small but Title's 600-weight bold
+    /// is too heavy. (Appended for vocab-v3.)
+    Heading = 5,
     // Appended only.
 }
 

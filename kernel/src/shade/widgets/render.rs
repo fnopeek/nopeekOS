@@ -326,21 +326,17 @@ fn paint_node_eff(
         }
 
         Widget::Input { value, placeholder, .. } => {
-            // Same pattern as Button: paint a SurfaceElevated background
-            // only if no Modifier::Background is on the eff list. Lets a
-            // wrapping prefab (e.g. prefab::input) own the chrome —
-            // background, rounded, focus border — without a double-fill.
-            let has_bg = eff.iter().any(|m| matches!(m, Modifier::Background(_)));
-            if !has_bg {
-                rast.rect(target, rect, Fill::Solid(Token::SurfaceElevated));
-            }
+            // No hardcoded fallback bg — the prefab or the app puts a
+            // `Modifier::Background` on a wrapping container if it wants
+            // chrome. Otherwise the input blends with the dialog
+            // (matches modern launcher / spotlight visuals).
+            //
+            // Both placeholder and typed value render at Heading metrics
+            // so the search bar reads at the same visual weight whether
+            // empty or filled. The font size doesn't jump on first
+            // keystroke.
             let shown = if value.is_empty() { placeholder.as_str() } else { value.as_str() };
-            let style = if value.is_empty() {
-                super::abi::TextStyle::Muted
-            } else {
-                super::abi::TextStyle::Body
-            };
-            rast.text(target, shown, style,
+            rast.text(target, shown, super::abi::TextStyle::Heading,
                       Point { x: rect.x + 4, y: rect.y + 4 });
         }
 

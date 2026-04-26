@@ -183,6 +183,8 @@ pub enum TextStyle {
     Caption = 2,
     Muted   = 3,
     Mono    = 4,
+    /// 18 px regular weight (vocab-v3 append).
+    Heading = 5,
     // Appended only.
 }
 

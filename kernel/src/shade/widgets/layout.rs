@@ -243,22 +243,26 @@ fn measure_intrinsic(w: &Widget) -> Size {
 fn place(w: &Widget, inner: Rect) -> LayoutNode {
     match w {
         Widget::Column { children, spacing, align, modifiers } => {
-            let (_, content) = unpack_modifiers_on(modifiers, inner);
-            place_axis(children, *spacing, *align, content, /* vertical = */ true)
+            let (container, content) = unpack_modifiers_on(modifiers, inner);
+            let mut node = place_axis(children, *spacing, *align, content, /* vertical = */ true);
+            node.rect = container;
+            node
         }
 
         Widget::Row { children, spacing, align, modifiers } => {
-            let (_, content) = unpack_modifiers_on(modifiers, inner);
-            place_axis(children, *spacing, *align, content, false)
+            let (container, content) = unpack_modifiers_on(modifiers, inner);
+            let mut node = place_axis(children, *spacing, *align, content, false);
+            node.rect = container;
+            node
         }
 
         Widget::Stack { children, modifiers } => {
-            let (_, content) = unpack_modifiers_on(modifiers, inner);
+            let (container, content) = unpack_modifiers_on(modifiers, inner);
             let mut kids = Vec::with_capacity(children.len());
             for c in children {
                 kids.push(place(c, content));
             }
-            LayoutNode { rect: content, baseline: 0, children: kids }
+            LayoutNode { rect: container, baseline: 0, children: kids }
         }
 
         Widget::Scroll { child, axis, .. } => {

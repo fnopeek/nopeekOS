@@ -581,11 +581,25 @@ pub fn input(
         children.push(w);
     }
 
-    Widget::Row {
+    let row = Widget::Row {
         children,
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
         modifiers: wrap_mods,
+    };
+    // Wrap with a leading zero-size widget so the parent panel's
+    // `Spacing::Md` gap acts as TOP-margin on the search row, mirroring
+    // the same trick `prefab::footer` uses for its bottom-margin. The
+    // search content ends up vertically centred between the chrome top
+    // and the divider underneath instead of glued to the chrome.
+    Widget::Column {
+        children: vec![
+            Widget::Icon { id: IconId::None, size: 0, modifiers: vec![] },
+            row,
+        ],
+        spacing:   Spacing::Md.as_u16(),
+        align:     Align::Stretch,
+        modifiers: vec![],
     }
 }
 
