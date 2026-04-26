@@ -26,7 +26,9 @@ pub fn panel(children: Vec<Widget>) -> Widget {
 // border — the colour cue lives in the border + the icon tint, not in
 // a strong fill that would clash with body text on top. Matches the
 // "card-style highlight" that AI-generated UIs and modern launchers
-// (Raycast, macOS Spotlight) reach for.
+// (Raycast, macOS Spotlight) reach for. Padding is Lg so the icon /
+// title / subtitle / arrow have visible breathing room inside the
+// border on a selected row instead of hugging the stroke.
 pub fn list_row(
     icon: IconId,
     title: &str,
@@ -36,7 +38,7 @@ pub fn list_row(
     on_hover: Option<ActionId>,
 ) -> Widget {
     let mut row_mods: Vec<Modifier> = Vec::with_capacity(6);
-    row_mods.push(Modifier::Padding(Padding::Md.as_u16()));
+    row_mods.push(Modifier::Padding(Padding::Lg.as_u16()));
     if let Some(id) = on_click { row_mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { row_mods.push(Modifier::OnHover(id)); }
     if selected {
@@ -88,7 +90,7 @@ pub fn list_row(
     children.push(Widget::Icon { id: icon, size: 24, modifiers: icon_mods });
     children.push(Widget::Column {
         children:  text_col,
-        spacing:   Spacing::Xxs.as_u16(),
+        spacing:   Spacing::Xs.as_u16(),
         align:     Align::Start,
         modifiers: vec![],
     });
@@ -121,7 +123,7 @@ pub fn badge(text: &str) -> Widget {
 }
 
 pub fn footer(left: &str, right: &str) -> Widget {
-    Widget::Row {
+    let row = Widget::Row {
         children: vec![
             Widget::Text {
                 content: left.to_string(),
@@ -138,6 +140,25 @@ pub fn footer(left: &str, right: &str) -> Widget {
         spacing: 0,
         align:   Align::Center,
         modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
+    };
+    // Wrap with a zero-size trailing widget so the panel's `Spacing::Md`
+    // gap acts as bottom-margin on the last row, mirroring the `Md` gap
+    // the divider above already gets. Without this the footer text reads
+    // as glued to the chrome — uniform `Modifier::Padding` can't add
+    // vertical-only space without also pushing the text inward
+    // horizontally, which doesn't match the divider's full-bleed line.
+    Widget::Column {
+        children: vec![
+            row,
+            Widget::Icon {
+                id:        IconId::None,
+                size:      0,
+                modifiers: vec![],
+            },
+        ],
+        spacing:   Spacing::Md.as_u16(),
+        align:     Align::Stretch,
+        modifiers: vec![],
     }
 }
 
@@ -532,9 +553,12 @@ pub fn input(
         on_submit,
         modifiers:   vec![],
     };
-    let mut wrap_mods: Vec<Modifier> = Vec::with_capacity(4);
+    // No background — the input blends with the dialog so the search bar
+    // reads as part of the panel rather than as a stacked card on top.
+    // Apps that want the elevated-card look can wrap the result in a
+    // `card(..., CardKind::Inset)` or add `Modifier::Background` themselves.
+    let mut wrap_mods: Vec<Modifier> = Vec::with_capacity(3);
     wrap_mods.push(Modifier::Padding(Padding::Md.as_u16()));
-    wrap_mods.push(Modifier::Background(Token::SurfaceElevated));
     wrap_mods.push(Modifier::Rounded(Radius::Md.as_u8()));
     wrap_mods.push(Modifier::Focus(vec![
         Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
