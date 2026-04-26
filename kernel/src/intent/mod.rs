@@ -845,6 +845,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                         };
                         if consumed { continue; }
                     }
+                    // Keyboard navigation takes visual precedence over
+                    // any stale mouse-hover state. Without this, moving
+                    // the selection with arrows while the cursor sits
+                    // on a different row leaves both rows highlighted.
+                    // Mouse-move re-establishes hover on the next motion.
+                    crate::shade::widgets::suppress_hover(widget_wid);
                     crate::shade::widgets::push_event(
                         widget_wid,
                         crate::shade::widgets::abi::Event::Key(event.key),
