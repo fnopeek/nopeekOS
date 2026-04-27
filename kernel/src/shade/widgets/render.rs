@@ -20,6 +20,7 @@ use super::abi::{
     Density, Fill, Modifier, Point, RasterTarget, Rasterizer, Rect, Token, Widget,
 };
 use super::layout::LayoutNode;
+use super::InputEditState;
 
 /// Render `widget` + `layout` (trees in lockstep) into `target` using
 /// `rast`. Default-state entry — used by paths that don't track any
@@ -30,7 +31,7 @@ pub fn render(
     widget: &Widget,
     layout: &LayoutNode,
 ) {
-    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular);
+    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular, None);
 }
 
 /// Render with explicit pseudo-state context.
@@ -55,6 +56,7 @@ pub fn render_with_state(
     focus_path: Option<&[u32]>,
     active_path: Option<&[u32]>,
     density: Density,
+    input_edit: Option<&InputEditState>,
 ) {
     let is_hovered = hover_path.is_some();
     let is_focused = focus_path.is_some();
@@ -63,7 +65,13 @@ pub fn render_with_state(
     let eff = effective_modifiers(base, is_hovered, is_focused, is_active, density);
 
     paint_modifiers_eff(rast, target, &eff, layout.rect);
-    paint_node_eff(rast, target, widget, layout, &eff);
+    // `is_focused && Some([])` (focus exactly here) is the only case
+    // where the editor caret is painted — descended-focus paths are
+    // ancestors, not the input itself. paint_node_eff applies that
+    // check.
+    let edit_for_node: Option<&InputEditState> =
+        if matches!(focus_path, Some(p) if p.is_empty()) { input_edit } else { None };
+    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node);
 
     // Recurse — at most one child sits on each path.
     let kids = widget_children(widget);
@@ -71,7 +79,10 @@ pub fn render_with_state(
         let child_hover  = descend(hover_path,  i as u32);
         let child_focus  = descend(focus_path,  i as u32);
         let child_active = descend(active_path, i as u32);
-        render_with_state(rast, target, cw, cl, child_hover, child_focus, child_active, density);
+        render_with_state(
+            rast, target, cw, cl,
+            child_hover, child_focus, child_active, density, input_edit,
+        );
     }
 
     // Modifier::Opacity acts as a post-paint dampening over the node's
@@ -91,6 +102,14 @@ fn descend(path: Option<&[u32]>, i: u32) -> Option<&[u32]> {
         Some(p) if !p.is_empty() && p[0] == i => Some(&p[1..]),
         _ => None,
     }
+}
+
+/// Local mirror of `layout::ceil_u32` — kept private so the caret-paint
+/// path doesn't import a layout-module helper.
+fn ceil_u32_local(x: f32) -> u32 {
+    if !x.is_finite() || x <= 0.0 { return 0; }
+    let i = x as u32;
+    if (i as f32) < x { i.saturating_add(1) } else { i }
 }
 
 /// Build the modifier list that applies to `widget` after merging the
@@ -278,12 +297,19 @@ fn paint_modifiers_eff(
 /// pure layout). Reads node-affecting modifiers (Tint, …) from the
 /// effective list so pseudo-state changes (hover-tinted icons, etc.)
 /// take effect.
+///
+/// `edit_state` is `Some` iff this node is the focused `Widget::Input`
+/// AND the compositor has a live editor for it — in which case the
+/// rendered text comes from the editor buffer (not the widget's
+/// `value`, which lags by one round-trip) and a caret is painted at
+/// the editor cursor's x-position.
 fn paint_node_eff(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
     widget: &Widget,
     layout: &LayoutNode,
     eff: &[Modifier],
+    edit_state: Option<&InputEditState>,
 ) {
     let rect = layout.rect;
 
@@ -335,9 +361,42 @@ fn paint_node_eff(
             // so the search bar reads at the same visual weight whether
             // empty or filled. The font size doesn't jump on first
             // keystroke.
-            let shown = if value.is_empty() { placeholder.as_str() } else { value.as_str() };
+            //
+            // When focused and the compositor's editor owns this Input,
+            // render `edit_state.value` instead of the tree's `value`
+            // — the editor buffer leads the tree by one round-trip
+            // until the app echoes the InputChange event back.
+            let live_value: &str = match edit_state {
+                Some(e) => e.value.as_str(),
+                None    => value.as_str(),
+            };
+            let shown = if live_value.is_empty() { placeholder.as_str() } else { live_value };
+            let text_x = rect.x + 4;
+            let text_y = rect.y + 4;
             rast.text(target, shown, super::abi::TextStyle::Heading,
-                      Point { x: rect.x + 4, y: rect.y + 4 });
+                      Point { x: text_x, y: text_y });
+
+            // Paint the caret. Only when an editor exists (focused) —
+            // unfocused inputs render flat text.
+            if let Some(e) = edit_state {
+                let style = super::abi::TextStyle::Heading;
+                let prefix = match e.value.get(..e.cursor) {
+                    Some(s) => s,
+                    // Cursor mis-aligned (defensive: shouldn't happen)
+                    // → drop to end of value.
+                    None    => e.value.as_str(),
+                };
+                let advance = ceil_u32_local(crate::gui::text::measure(prefix, style));
+                let line_h  = ceil_u32_local(crate::gui::text::line_height(style));
+                let caret_w = 2u32;
+                let caret_rect = Rect {
+                    x: text_x + advance as i32,
+                    y: text_y,
+                    w: caret_w,
+                    h: line_h,
+                };
+                rast.rect(target, caret_rect, Fill::Solid(Token::OnSurface));
+            }
         }
 
         Widget::Checkbox { value, .. } => {

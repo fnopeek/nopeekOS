@@ -167,6 +167,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::MouseMove { .. }   => 2,
         Event::MouseButton { .. } => 3,
         Event::Focus(_)           => 4,
+        Event::InputChange { .. } => 5,
     }
 }
 

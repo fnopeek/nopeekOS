@@ -180,11 +180,12 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
 /// Lock `Event` variant order.
 fn _event_wire_position(e: &Event) -> usize {
     match e {
-        Event::Key(_)            => 0,
-        Event::Action(_)         => 1,
-        Event::MouseMove { .. }  => 2,
-        Event::MouseButton { .. }=> 3,
-        Event::Focus(_)          => 4,
+        Event::Key(_)              => 0,
+        Event::Action(_)           => 1,
+        Event::MouseMove { .. }    => 2,
+        Event::MouseButton { .. }  => 3,
+        Event::Focus(_)            => 4,
+        Event::InputChange { .. }  => 5,
     }
 }
 

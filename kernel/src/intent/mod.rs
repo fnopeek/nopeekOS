@@ -851,6 +851,17 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     // on a different row leaves both rows highlighted.
                     // Mouse-move re-establishes hover on the next motion.
                     crate::shade::widgets::suppress_hover(widget_wid);
+                    // If a Widget::Input is focused, the compositor
+                    // owns text editing — printable / Backspace /
+                    // Delete / Left / Right / Home / End / Enter are
+                    // intercepted, mutate the editor buffer, and emit
+                    // either Event::InputChange (value changed) or
+                    // Event::Action(on_submit) (Enter). Apps see only
+                    // the events they declared interest in; cursor
+                    // moves never round-trip.
+                    if crate::shade::widgets::handle_input_key(widget_wid, event.key) {
+                        continue;
+                    }
                     crate::shade::widgets::push_event(
                         widget_wid,
                         crate::shade::widgets::abi::Event::Key(event.key),
