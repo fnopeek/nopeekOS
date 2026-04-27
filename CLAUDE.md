@@ -91,6 +91,12 @@ See README.md for the full vision and phase planning.
 - **Phase 10 detail spec + progress:** see `PHASE10_WIDGETS.md`
 - **Vocab-v2 reference (for AI / app devs):** see `WIDGET_VOCAB.md`
 - **Active work / blockers:** see `memory/project_wifi_current.md`
+- **Acknowledged tech debt:** `NPKFS_V2.md` — v1 npkFS uses path-
+  as-key + `.dir` markers; v2 redesigns to content-addressed tree
+  objects (Git-style). Targeted Phase 11.5. Until then, follow
+  the constraints in that doc's "Hooks for now" section: don't
+  add scan-the-world host fns, don't pile on `.dir`-marker logic,
+  apps treat paths as opaque strings.
 
 ## Commit-Message Convention (since v0.54.x)
 

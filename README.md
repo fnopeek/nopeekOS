@@ -512,6 +512,22 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [ ] Runtime WASM generation (AI writes modules)
 - [ ] Semantic search in content store
 
+### Phase 11.5 -- npkFS v2: Real Content-Addressed Directories
+
+Acknowledged tech debt. v1's path-as-key model leaks across the
+intent loop, the wallpaper subsystem, loft, and every `.dir`-marker
+write. List performance is `O(N_total)` per call; rename is
+structurally impossible. Will not scale to AI-generated content.
+
+- [ ] Tree-object format (Git-style `(name, hash, kind, size)` lists, encrypted)
+- [ ] Walk-by-hash path resolution (`O(depth × log N)` instead of `O(N)`)
+- [ ] `O(depth)` mutations + cheap rename
+- [ ] One-shot `migrate-fs` intent for v1 → v2 conversion
+- [ ] Mark-and-sweep GC, snapshots fall out for free
+- [ ] Host-fn surface unchanged — apps don't rebuild
+
+Spec + design rationale + migration sketch: see [`NPKFS_V2.md`](NPKFS_V2.md).
+
 ---
 
 ## Technical Decisions
