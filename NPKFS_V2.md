@@ -318,5 +318,164 @@ harder:
 
 ---
 
-*Last updated: 2026-04-27 — parked after the loft 0.2.x rewrite
-session. Nobody is working on this; the doc is the placeholder.*
+---
+
+## Implementation plan
+
+**Status (2026-04-27 evening):** unparked. Florian called it
+priority #1 starting tomorrow morning — foundational, must land
+ASAP so the FS can be battle-tested with realistic load (10k+
+files, large blobs, moves, copies). The Phase 10 follow-ups
+(`Widget::Input` self-editing follow-ons, tile subdivision,
+static effects, Canvas) all wait until this lands.
+
+The plan below is sequenced so each numbered step ends in a
+runnable kernel — never a half-rewrite that boots into a brick.
+Each step is its own commit (or small commit cluster).
+
+### Day 1 — foundation: format + hash-keyed storage
+
+**Step 1 — `Object` format (~half day)**
+- New module `kernel/src/storage/npkfs/v2/object.rs`.
+- Types: `Object::{Blob(Vec<u8>), Tree(Vec<TreeEntry>)}`,
+  `TreeEntry { name, hash:[u8;32], kind:EntryKind, size:u64, flags:u8 }`,
+  `EntryKind::{File, Dir}` (reserved slots for `Symlink`, …
+  append-only).
+- Encoding: postcard (consistent with the widget ABI). Hash =
+  BLAKE3 of the encoded bytes — deterministic + content-addressed
+  by construction.
+- Roundtrip + hash-stability tests in `npkfs/v2/object_tests.rs`.
+- **Deliverable:** can build and hash arbitrary trees in memory,
+  no on-disk yet.
+
+**Step 2 — Hash-keyed B-tree (~one day)**
+- Fork the existing `npkfs::btree` to v2 with **fixed 32-byte
+  keys** (no variable-length path strings).
+- Block allocator + journal + superblock plumbing reused (those
+  layers don't care what the keys mean).
+- Single-object level API: `put(hash, payload)`, `get(hash) ->
+  Option<payload>`, `has(hash) -> bool`, `remove(hash)`.
+- Encryption: per-object ChaCha20-Poly1305 under the master key,
+  same as v1 blobs.
+- Tests: write 10k random objects, read back, verify hash matches,
+  unmount + remount + reread.
+- **Deliverable:** content-addressed object store. No paths
+  anywhere yet.
+
+### Day 2 — paths return: walker + mutations
+
+**Step 3 — Path walker (~half day)**
+- `walk(root_hash, path) -> Result<WalkResult, FsError>` where
+  `WalkResult` carries the final hash + kind + remaining segments
+  (for "found a file mid-path" error reporting).
+- Edge cases: empty path → root tree; missing component →
+  `NotFound`; descend through file → `NotADirectory`.
+- Tests: walk to leaf, walk to missing, walk-through-file error.
+
+**Step 4 — Mutation primitives (~one day)**
+- `store(path, data) -> Hash` — hash + write blob, build parent
+  tree with new entry, propagate up to new root.
+- `delete(path)` — remove entry from parent tree, propagate up.
+- `mkdir(path)` — create empty Tree at path (parents must exist).
+- `rename(old, new)` — find common ancestor, rewrite both
+  affected subtree-paths. Same-parent rename is just one tree
+  edit.
+- All four end with a single atomic superblock-root update
+  (rotating-superblock guarantee carries over from v1).
+- Tests: store + fetch, delete + verify gone, mkdir + list,
+  rename within same parent, rename across parents.
+
+### Day 3 — listing + stat + host-fn surface
+
+**Step 5 — Listing + stat (~half day)**
+- `list(path) -> Vec<TreeEntry>` reads the Tree object directly.
+  No more scan-and-filter.
+- `stat(path) -> Option<(kind, size)>` reads the parent's
+  TreeEntry — no `.dir` markers special case.
+- Tests: list root, list nested, list non-existent (NotFound),
+  stat each kind.
+
+**Step 6 — Host fns (~half day)**
+- `npk_fetch`, `npk_store`, `npk_fs_list`, `npk_fs_stat`,
+  `npk_fs_delete` rewired against v2 internals — wire formats
+  stay identical.
+- New: `npk_fs_mkdir`, `npk_fs_rename`. Capability-gated
+  (RENDER → READ for stat/list, WRITE for the rest).
+- App-side smoke test: run drun + loft on the new FS, confirm
+  "looks identical from outside, faster from the inside".
+
+### Day 4 — installer + boot path
+
+**Step 7 — Installer lays down the locked tree (~half day)**
+- `setup_home` rewritten as `setup_fresh_v2_install` — builds
+  the canonical tree (`sys/config/*`, `sys/wasm/<bundled>`,
+  `sys/fonts/inter-variable`, `sys/icons/phosphor.atlas`,
+  `home/<name>/{documents,downloads,pictures,pictures/wallpapers,projects,.trash}`,
+  `.system/{config,keycheck}`) once, atomically.
+- Bundled-asset writer in `install_data/assets/mod.rs` reused
+  as-is — it just calls v2's `store()` instead of v1's.
+- Tests: fresh-install run inside QEMU, verify tree matches the
+  spec.
+
+**Step 8 — v1 detection + refusal (~half day)**
+- Kernel boot path: try v2 superblock magic. If it's v1's magic
+  instead → log "this disk is on npkFS v1; v2 requires reinstall.
+  Boot the installer USB." and halt.
+- Synthetic v1-disk test in QEMU to verify the refusal path.
+- v1 code (`kernel/src/storage/npkfs/v1/...`) deleted in this
+  same step. No parallel-format complexity.
+
+### Day 5 — GC + battle test
+
+**Step 9 — Mark-sweep GC (~half day)**
+- `npkfs::gc()` walks reachable tree from current root +
+  rotating-superblock predecessors (snapshot-safety), frees
+  blocks not visited.
+- New intent: `gc` (manual trigger). Compositor runs it on idle
+  every N minutes (configurable in `sys/config/gc-interval`).
+- Tests: store 1000 → delete 500 → gc → verify free blocks
+  increased.
+
+**Step 10 — Battle test (~half day to one day)**
+- Bench scenarios:
+  - 1k / 10k / 100k random-hash files in flat dir → list latency
+  - 100k files in 10-deep tree → walk + list latency
+  - One 100 MB blob → store + fetch latency, GGTT cache
+    interaction
+  - 1k files moved (rename) at once → mutation latency
+  - 1k files copied → store + read latency
+- Numbers go into a new `BENCHMARKS.md` at the repo root.
+- Compare against v1 numbers (need to capture those tomorrow
+  before we delete v1 — or compare against ext4 theoretical
+  per the README's existing table).
+
+### Optional (post-Day-5) — snapshots
+
+**Step 11 — Named snapshots**
+- Snapshots are content-addressed root hashes pinned by name in
+  `.system/snapshots/<name>`. Restore = atomic root swap.
+- Intents: `snapshot save <name>`, `snapshot list`,
+  `snapshot restore <name>`.
+- Free-by-design: rotating-superblock already keeps recent
+  generations alive.
+
+---
+
+## Pre-flight checklist (before starting Day 1)
+
+- [ ] Snapshot v1 perf numbers on the NUC for the bench comparison
+      table (`time wallpaper list`, `time list`, similar — capture
+      a few representative ops). Once v2 lands the v1 baseline is
+      gone forever.
+- [ ] Confirm the locked default-tree spec above is the final
+      shape. Adding directories later means another `setup_home`
+      tweak; getting them right now is free.
+- [ ] Decide on snapshot semantics: are they implicit
+      (every commit = a possible restore point) or explicit
+      (`snapshot save <name>` is the only entry)? Implicit costs
+      nothing extra and feels native to the COW design.
+
+---
+
+*Last updated: 2026-04-27 — implementation plan added, work
+starts Day 1 in the morning.*
