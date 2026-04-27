@@ -451,8 +451,12 @@ pub enum Widget {
 
 /// Input event delivered to a WASM app via `npk_event_poll` /
 /// `npk_event_wait`.
+///
+/// Note: `InputChange` carries an owned `String`, so this enum is
+/// `Clone`-only — not `Copy`. All call sites pass `Event` by value
+/// or clone explicitly; no fast-path lost.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     /// Keyboard input. Uses the existing Phase 8 KeyCode (already stable).
     Key(crate::input::KeyCode),
@@ -469,6 +473,13 @@ pub enum Event {
     },
     /// Window focus changed.
     Focus(bool),
+    /// The focused `Widget::Input` had its value mutated by the
+    /// compositor's editor (printable key, Backspace, Delete). Carries
+    /// the new buffer contents — the app typically mirrors `value` into
+    /// its own state and re-commits the tree with the matching `value`.
+    /// Cursor-only navigation (Left / Right / Home / End) does **not**
+    /// fire this event; the caret is purely compositor-side state.
+    InputChange { value: alloc::string::String },
     // Appended only.
 }
 

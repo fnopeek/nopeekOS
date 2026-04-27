@@ -380,8 +380,11 @@ pub enum KeyCode {
     // Appended only.
 }
 
+/// Note: `InputChange` carries an owned `String`, so this enum is
+/// `Clone`-only — not `Copy`. Apps match `Event` by value (move) or
+/// clone explicitly when keeping it across iterations.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     Key(KeyCode),
     Action(ActionId),
@@ -393,6 +396,13 @@ pub enum Event {
         y:      i32,
     },
     Focus(bool),
+    /// The focused `Widget::Input`'s value was mutated by the
+    /// compositor (printable key, Backspace, Delete). `value` is the
+    /// new buffer contents — apps typically mirror it into their state
+    /// and re-commit the tree with `Widget::Input { value, ... }`
+    /// matching. Cursor-only navigation (Left/Right/Home/End) does
+    /// not fire this event.
+    InputChange { value: String },
     // Appended only.
 }
 

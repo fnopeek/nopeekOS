@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec;
 
 use nopeek_widgets::*;
@@ -125,6 +125,8 @@ fn events_round_trip() {
             y: 20,
         },
         Event::Focus(true),
+        Event::InputChange { value: "hello".into() },
+        Event::InputChange { value: String::new() },
     ];
     for e in events {
         let bytes = postcard::to_allocvec(&e).expect("ser");

@@ -263,18 +263,17 @@ impl Drun {
             }
             Event::Key(KeyCode::Enter) => { self.spawn_selected(); Outcome::Exit }
             Event::Key(KeyCode::Escape) => Outcome::Exit,
-            Event::Key(KeyCode::Backspace) => {
-                if self.query.pop().is_some() {
-                    self.refilter();
-                    Outcome::Rerender
-                } else { Outcome::Idle }
-            }
-            Event::Key(KeyCode::Char(b)) => {
-                if b >= 0x20 && b < 0x7F && self.query.len() < QUERY_CAP {
-                    self.query.push(b as char);
-                    self.refilter();
-                    Outcome::Rerender
-                } else { Outcome::Idle }
+            // Search-buffer mutation lives in the compositor now —
+            // we just mirror the new value back into our pre-mark
+            // heap slot so it survives `alloc_reset(persistent_mark)`
+            // before the next commit. Past QUERY_CAP we hard-cap;
+            // the compositor will reconcile on the next round-trip.
+            Event::InputChange { value } => {
+                self.query.clear();
+                let max = QUERY_CAP.min(value.len());
+                self.query.push_str(&value[..max]);
+                self.refilter();
+                Outcome::Rerender
             }
             Event::Action(ActionId(id)) => {
                 if id >= HOVER_BASE {
