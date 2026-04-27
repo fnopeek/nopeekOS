@@ -1527,12 +1527,23 @@ pub use wasm::bootstrap_wasm;
 pub use wallpaper::random_wallpaper;
 
 /// Create initial directory structure and set cwd to home.
+///
+/// Lays down the canonical user-tree on first boot so loft's sidebar
+/// (`Home / Documents / Downloads / Pictures / Projects / Trash`) and
+/// the wallpaper subsystem land on real `.dir`-marker-backed
+/// directories instead of phantom paths. Each `ensure_parents` call
+/// is idempotent — re-running setup_home on an already-populated home
+/// is a no-op (no duplicate writes, no journal churn).
 pub fn setup_home() {
     let home = home_dir();
     ensure_parents(&home);
-    // Ensure wallpapers directory exists
-    let wp_dir = alloc::format!("{}/wallpapers", home);
-    ensure_parents(&wp_dir);
+    // Sidebar-aligned standard subdirs. The wallpapers dir lives
+    // under `pictures/` to match `wallpaper_dir()` in
+    // `intent::wallpaper`; the previous flat `wallpapers/` was a
+    // dead path nothing read or wrote.
+    for sub in &["documents", "downloads", "pictures", "pictures/wallpapers", "projects", ".trash"] {
+        ensure_parents(&alloc::format!("{}/{}", home, sub));
+    }
     set_cwd(&home);
 }
 

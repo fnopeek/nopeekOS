@@ -581,7 +581,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Package Manager");
             kprintln!("  ───────────────");
             kprintln!("  install <module>       Download + verify + install WASM module");
-            kprintln!("  uninstall <module>     Remove installed module");
+            kprintln!("  uninstall <module> [--force]  Remove module (--force for bundled)");
             kprintln!("  modules                List installed modules");
             kprintln!();
             kprintln!("  Modules are signed (ECDSA P-384) and verified.");
