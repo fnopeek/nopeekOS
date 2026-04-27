@@ -521,12 +521,13 @@ structurally impossible. Will not scale to AI-generated content.
 
 - [ ] Tree-object format (Git-style `(name, hash, kind, size)` lists, encrypted)
 - [ ] Walk-by-hash path resolution (`O(depth × log N)` instead of `O(N)`)
-- [ ] `O(depth)` mutations + cheap rename
-- [ ] One-shot `migrate-fs` intent for v1 → v2 conversion
+- [ ] `O(depth)` mutations + cheap rename + native `npk_fs_mkdir`
 - [ ] Mark-and-sweep GC, snapshots fall out for free
-- [ ] Host-fn surface unchanged — apps don't rebuild
+- [ ] Locked default directory tree (`sys/{config,wasm,fonts,icons}` + `home/<name>/{documents,downloads,pictures,projects,.trash}`) created by the installer, no `.dir` markers anywhere
+- [ ] **Clean break, no migration** — v2 ships as fresh-install only. Old v1 disks get a "reinstall to upgrade" message; v1 code deletes in the same release.
+- [ ] Host-fn path-string surface unchanged — apps don't rebuild
 
-Spec + design rationale + migration sketch: see [`NPKFS_V2.md`](NPKFS_V2.md).
+Spec + design rationale + default tree layout: see [`NPKFS_V2.md`](NPKFS_V2.md).
 
 ---
 
