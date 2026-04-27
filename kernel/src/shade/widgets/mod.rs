@@ -458,17 +458,41 @@ fn mark_dirty(window_id: u32) {
 /// click-routing aren't affected by state mechanics).
 #[must_use]
 pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
-    let (new_focus, new_active, has_pseudo) = {
+    // Decide focus + active for the press.
+    //
+    // Focus is *only* moved when the click lands on a `Widget::Input`.
+    // For every other focusable (Button, OnClick'd container, sidebar
+    // nav_row, menu-bar label, …) we fire the click action but leave
+    // focus where it was — keeps the keyboard caret on the search
+    // input across mouse navigation, which is exactly what loft /
+    // settings-style apps want. Tab/Shift+Tab still walk every
+    // focusable; click is just no longer a way to *land* keyboard
+    // focus on a non-Input.
+    //
+    // Active still tracks the press target so `:active` state on
+    // buttons works visually during mouse-down.
+    let (new_focus_opt, new_active, has_pseudo) = {
         let scenes = SCENES.lock();
         let scene = match scenes.get(&window_id) {
             Some(s) => s,
             None    => return false,
         };
         let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
-        match press_path {
-            Some(p) => (Some(p.clone()), Some(p), scene.has_pseudo),
-            None    => (None, None, scene.has_pseudo),
-        }
+        let new_focus_opt: Option<Option<Vec<u32>>> = match press_path.as_ref() {
+            // Input under cursor → focus moves to it.
+            Some(p) if matches!(widget_at_path(&scene.tree, p), Some(abi::Widget::Input { .. })) => {
+                Some(Some(p.clone()))
+            }
+            // Non-Input focusable under cursor → focus untouched.
+            // `None` means "no change to focus_path", distinct from
+            // `Some(None)` which would mean "clear focus".
+            Some(_) => None,
+            // Click into empty space → focus untouched too. Apps that
+            // want "click outside an input dismisses focus" can
+            // implement that explicitly later.
+            None    => None,
+        };
+        (new_focus_opt, press_path, scene.has_pseudo)
     };
 
     let (focus_changed, active_changed) = {
@@ -477,9 +501,10 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
             Some(s) => s,
             None    => return false,
         };
-        let f_changed = match (&new_focus, &scene.focus_path) {
-            (Some(p), cur) => p != cur,
-            (None, cur)    => !cur.is_empty(),
+        let f_changed = match &new_focus_opt {
+            Some(Some(p))  => *p != scene.focus_path,
+            Some(None)     => !scene.focus_path.is_empty(),
+            None           => false,
         };
         let a_changed = match (&new_active, &scene.active_path) {
             (Some(p), Some(cur)) => p != cur,
@@ -492,24 +517,25 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
     if !(focus_changed || active_changed) { return false; }
 
     let edit_present = if let Some(s) = SCENES.lock().get_mut(&window_id) {
-        if let Some(ref f) = new_focus { s.focus_path = f.clone(); }
-        else                            { s.focus_path.clear(); }
+        if let Some(new_focus) = new_focus_opt {
+            match new_focus {
+                Some(p) => s.focus_path = p,
+                None    => s.focus_path.clear(),
+            }
+            // Re-derive input_edit against the new focus target. We
+            // only ever reach this path when focus actually moved
+            // (onto an Input or back to none) — pure non-Input clicks
+            // leave both focus_path and input_edit untouched.
+            s.input_edit = if s.focus_path.is_empty() {
+                None
+            } else {
+                compute_input_edit(&s.tree, &s.focus_path, None)
+            };
+        }
         s.active_path = new_active;
-        // Re-derive input_edit against the new focus target. The prev
-        // state is dropped — a click that lands on a different Input
-        // (or a non-Input widget) shouldn't carry the previous Input's
-        // buffer/cursor with it.
-        s.input_edit = if s.focus_path.is_empty() {
-            None
-        } else {
-            compute_input_edit(&s.tree, &s.focus_path, None)
-        };
         s.input_edit.is_some()
     } else { false };
 
-    // has_pseudo gates the typical state-mod re-render. Independently,
-    // a focus change onto / off an Input toggles the cursor caret, so
-    // re-render in that case too even when no pseudo-state mods exist.
     if has_pseudo || edit_present {
         rerender_state_only(window_id);
         crate::shade::request_render();
