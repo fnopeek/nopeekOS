@@ -42,8 +42,8 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.79.0`, sdk `0.4.0`,
-  drun `0.5.6`, loft `0.1.6`.
+- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.80.1`, sdk `0.5.1`,
+  drun `0.5.10`, loft `0.1.10`.
   - **Vocab v2 shipped** (Tailwind-style modifier set + pseudo-state engine):
     Hover / Focus / Active / Disabled / WhenDensity, Rounded, MinWidth /
     MaxWidth, Scale (Q8.8 reserved), 9 new Modifier variants append-only
@@ -57,12 +57,35 @@ See README.md for the full vision and phase planning.
     use the v2 prefab cookbook (card, button, input, dialog, sidebar_pane,
     list_row, nav_row, grid_item, icon_button, …). Hover/Focus borders
     visible across all interactive widgets.
+  - **Mockup-grade polish round 1–3 shipped (0.79.4 → 0.80.1):** SDF
+    rounded corners (Hyprland-style concentric arc geometry), widget
+    chrome `paint_content=false` so the inner-fringe AA blends against
+    the widget background instead of `win.bg_color`,
+    `place_axis` layout-rect fix (Background/Border now paint on the
+    container rect — children sit inside padding, no chrome-on-content
+    bleed), `TextStyle::Heading` appended (18 px, ABI variant 5),
+    card-style selection (SurfaceElevated + Accent border instead of
+    AccentMuted fill), `prefab::panel` 4 px inset, footer + search
+    symmetric vertical breathing room, `suppress_hover()` on keyboard
+    dispatch so arrow-key nav owns the highlight until the mouse moves
+    again.
   - **Two-theme palette** (dark/light/auto) with wallpaper-driven accent +
     16×16 subpixel AA on rounded rects (kernel-side polish from 0.75.x).
   - npkFS hardened — 6 write-path bugs fixed in 0.73.x.
-  - **Next:** static visual effects (Shadow / Transition / Scale via
-    compositing-layer pass), tile subdivision + full diff cache,
-    Widget::Input self-editing, Canvas (P10.10).
+  - **Next (priority order):**
+    1. **`Widget::Input` self-editing** — compositor-side cursor +
+       key-routing-to-focused-input + Submit-on-Enter (~2 d). Unblocks
+       proper drun search UX, kills the per-app `read_line` plumbing.
+    2. **Tile subdivision + full diff cache** — 512×512 grid + per-tile
+       content-hash, so hover/key changes only re-rasterize the dirty
+       tiles instead of the whole window (~3–5 d).
+    3. **Static visual effects** (`Shadow` / `Transition` / `Scale`
+       outside pseudo-states) — needs a compositing-layer pass
+       (sub-tree → off-screen layer texture → blit with transform). ~1
+       Woche, größerer Brocken.
+    4. **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS`
+       cap, on hold until ein konkreter Consumer (image viewer, chart)
+       danach fragt.
 - **Parallel track:** Phase 9 SMP/event-driven (WiFi driver, per-core timer)
 - **Completed features + full roadmap:** see `README.md`
 - **Phase 10 detail spec + progress:** see `PHASE10_WIDGETS.md`
