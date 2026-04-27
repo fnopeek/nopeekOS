@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::{self, IconRef};
 use nopeek_widgets::prefab;
-use nopeek_widgets::style::Spacing;
+use nopeek_widgets::style::{Padding, Spacing};
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -213,11 +213,14 @@ impl Drun {
         // Stack the rows in their own tight Column so the inter-row gap
         // doesn't follow the panel's top-level rhythm. Reads as a single
         // grouped list instead of widely-spaced standalone items.
+        // Xs padding keeps the selected-row's accent border off the chrome
+        // edge — dividers above/below stay near-full-bleed (panel padding
+        // only), the list itself reads as an inset block.
         let list = Widget::Column {
             children:  rows,
             spacing:   Spacing::Xxs.as_u16(),
             align:     Align::Stretch,
-            modifiers: alloc::vec![],
+            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
         };
 
         let mut root: Vec<Widget> = Vec::with_capacity(6);
