@@ -5,7 +5,7 @@
 //! stores in npkFS under sys/wasm/<name>.
 
 use crate::{kprintln, kprint};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 const MODULE_HOST: &str = "raw.githubusercontent.com";
@@ -283,24 +283,113 @@ pub fn update_all_modules() -> usize {
     updated
 }
 
-/// `uninstall <name>` — remove a WASM module.
+/// `uninstall <name> [--force]` — remove a WASM module, with safety
+/// guards that prevent the user from bricking their system:
+///
+///  1. **Hard block:** the module configured as the active launcher
+///     (`sys/config/launcher`, default `drun`) cannot be uninstalled —
+///     without it, Mod+D / spawn flow has nothing to open. The user
+///     must point `sys/config/launcher` somewhere else first.
+///
+///  2. **--force gate for bundled modules:** every kernel-bundled
+///     module (drun, loft, wifi, wallpaper, top, debug, …) is on the
+///     OTA recovery path, so removing one is reversible — but easy
+///     to do by accident. Without `--force` we refuse and print the
+///     reinstall hint. User-installed third-party modules (none yet)
+///     skip this check.
+///
+/// The block + gate are deliberately implemented in the kernel rather
+/// than in a wrapper script: the intent loop is the only path that
+/// reaches `npkfs::delete` for `sys/wasm/*`, so this is the right
+/// place to keep the invariants honest.
 pub fn intent_uninstall(args: &str) {
-    let name = args.trim();
+    let mut name = "";
+    let mut force = false;
+    for tok in args.split_whitespace() {
+        if tok == "--force" || tok == "-f" {
+            force = true;
+        } else if name.is_empty() {
+            name = tok;
+        } else {
+            kprintln!("[npk] Usage: uninstall <module> [--force]");
+            return;
+        }
+    }
     if name.is_empty() {
-        kprintln!("[npk] Usage: uninstall <module>");
+        kprintln!("[npk] Usage: uninstall <module> [--force]");
         return;
     }
 
-    let store_name = alloc::format!("sys/wasm/{}", name);
-    let version_key = alloc::format!("sys/wasm/{}.version", name);
+    // Guard 1: never uninstall the configured launcher.
+    if is_active_launcher(name) {
+        kprintln!("[npk] Cannot uninstall '{}' — it is the active launcher.", name);
+        kprintln!("[npk] Point `sys/config/launcher` to a different module first,");
+        kprintln!("[npk] then re-run uninstall.");
+        return;
+    }
 
+    // Guard 2: bundled modules need --force.
+    let store_name = alloc::format!("sys/wasm/{}", name);
+    let bundled = is_bundled_module(name);
+    if bundled && !force {
+        kprintln!("[npk] '{}' is a system module bundled with the kernel.", name);
+        kprintln!("[npk] Removing it leaves the OTA path as the only recovery.");
+        kprintln!("[npk] Re-run with `--force` if you really want to remove it:");
+        kprintln!("[npk]   uninstall {} --force", name);
+        return;
+    }
+
+    let version_key = alloc::format!("sys/wasm/{}.version", name);
     match crate::npkfs::delete(&store_name) {
         Ok(()) => {
             let _ = crate::npkfs::delete(&version_key);
-            kprintln!("[npk] {} removed.", name);
+            if bundled {
+                kprintln!("[npk] {} removed (bundled — recover with `install {}`).",
+                          name, name);
+            } else {
+                kprintln!("[npk] {} removed.", name);
+            }
         }
         Err(_) => kprintln!("[npk] Module '{}' not installed.", name),
     }
+}
+
+/// True iff `name` matches the active launcher (`sys/config/launcher`).
+/// Empty / unset config falls back to `drun` to mirror the boot path.
+fn is_active_launcher(name: &str) -> bool {
+    let configured = match crate::npkfs::fetch("sys/config/launcher") {
+        Ok((data, _)) => match core::str::from_utf8(&data) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => alloc::string::String::from("drun"),
+        },
+        Err(_) => alloc::string::String::from("drun"),
+    };
+    let configured = if configured.is_empty() {
+        alloc::string::String::from("drun")
+    } else {
+        configured
+    };
+    configured == name
+}
+
+/// True iff `name` is shipped as a bundled asset by the kernel.
+///
+/// The canonical list lives in `install_data/assets/mod.rs` as
+/// `BUNDLED_ASSETS`, but that module is `#[cfg(feature = "installer")]`
+/// — only the installer build embeds the wasm bytes. The runtime
+/// kernel (this code path) needs the names but not the bytes, so we
+/// keep a parallel string list here. Keep both in sync when adding
+/// or removing a bundled module.
+fn is_bundled_module(name: &str) -> bool {
+    const BUNDLED_NAMES: &[&str] = &[
+        "wallpaper",
+        "top",
+        "debug",
+        "wifi",
+        "drun",
+        "loft",
+    ];
+    BUNDLED_NAMES.iter().any(|n| *n == name)
 }
 
 /// `modules` — list installed and available modules.
