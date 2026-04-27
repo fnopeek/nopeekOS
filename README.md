@@ -496,10 +496,14 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
   - `prefab::card` / `button` / `input` / `dialog` / `sidebar_pane` added; `prefab::searchbar` removed (subsumed by `input(Search)` with optional trailing widget). All interactive prefabs now ship Hover + Focus + (where appropriate) Active states out of the box.
   - **`WIDGET_VOCAB.md`** at the repo root: single-file Tailwind-style cheat sheet for app developers and AI code-generators.
 - [x] `Widget::Input` and `Widget::Button` respect `Modifier::Background` instead of hardcoding `SurfaceElevated` / `Accent` — lets prefabs own the chrome.
-- [ ] Static visual effects (`Shadow` / `Transition` / Scale outside pseudo-states) — needs compositing-layer pass (Phase 12 GPU or own layer cache)
-- [ ] Tile subdivision + full diff cache
-- [ ] P10.10 Canvas escape hatch
-- [ ] `Widget::Input` self-editing (cursor + submit) — apps still route Char/Backspace themselves
+- [x] **SDF rounded corners** (`v0.79.4–.5`, kernel-only) — `gui/render.rs` switches the rounded-rect AA from 16×16 supersampling to a signed-distance-field + smoothstep pass with concentric two-arc geometry (Hyprland-style); border width is uniform across straights and curves. `fill_rounded_chrome_aa` gains a `paint_content` flag so widget windows leave the inner-full area transparent and the widget blit AAs against the chrome border via `rect_coverage_sdf` instead of leaking `win.bg_color` through the inner fringe.
+- [x] **Layout-rect fix** (`v0.80.0`, abi+kernel) — `place_axis` for Row/Column/Stack now returns `rect: container` instead of `rect: content`, so `Modifier::Background` / `Modifier::Border` paint on the full allocated rect and children sit inside the padded inner. drun's selected list-row finally has 16 px breathing room around its accent border; hover backgrounds cover the full row including padding.
+- [x] **`TextStyle::Heading`** (`v0.80.0`, ABI append, variant 5) — 18 px regular weight, sized between `Body` (14) and `Title` (24+bold). Used by `Widget::Input` placeholder + value so search bars read at a sensible size next to a 24 px magnifier icon. Wire-version stays `0x01`.
+- [x] **Mockup-grade prefab polish round 1–3** (drun `0.5.7–0.5.10`, loft `0.1.7–0.1.10`, sdk `0.4.1–0.5.1`) — Raycast/Spotlight selection style (SurfaceElevated card + Accent border instead of AccentMuted fill), `prefab::input` no longer paints its own SurfaceElevated bg (blends into panel), tighter `Spacing::Xxs` between rows, `prefab::footer` wraps in a Column with a trailing zero-size widget so `Spacing::Md` acts as bottom-margin, `prefab::input` does the same for top-margin, `prefab::panel` gains a `Padding::Xs` inset so dividers and rows breathe vs the chrome, `widgets::suppress_hover(window_id)` on intent-loop keyboard dispatch so arrow-key nav owns the highlight until the next mouse motion.
+- [ ] **`Widget::Input` self-editing** (next, ~2 d) — compositor-side cursor + key-routing-to-focused-input + Submit-on-Enter. Unblocks drun search without per-app `read_line` plumbing; apps still route Char/Backspace themselves today.
+- [ ] **Tile subdivision + full diff cache** (~3–5 d) — 512×512 grid + per-tile content-hash, hover/key change → only dirty tiles re-rasterized instead of whole window.
+- [ ] **Static visual effects** (`Shadow` / `Transition` / `Scale` outside pseudo-states) — needs compositing-layer pass (sub-tree → off-screen layer texture → blit with transform/effect). ~1 Woche, größerer Brocken.
+- [ ] **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS` cap, on hold bis ein konkreter Consumer (image viewer, chart) danach fragt.
 
 ### Phase 11 -- AI Integration
 

@@ -691,29 +691,38 @@ Order matters — each phase produces something runnable.
 | P10.5b Widget windows | ✅ done | v0.58.0 | WindowKind split, per-window scenes, grid-native |
 | — Widget polish | ✅ done | v0.58.1 | Rounded corners, Opacity modifier, theme integration |
 | P10.6 Diff + cache | 🟡 partial | v0.59.0 | payload-hash skip (full tile diff needs tile subdivision) |
-| P10.7 Events | 🟡 partial | v0.60.0 | Mouse hit-test + npk_event_poll; keyboard routing + blocking wait deferred |
+| P10.7 Events | 🟡 partial | v0.60.0 | Mouse hit-test + `npk_event_poll`; Tab/Shift+Tab nav (v0.79.0); blocking wait + Input self-editing pending |
 | P10.8 Animation | 🟡 scaffold | v0.61.0 | Q16.16 math + tick(); no active consumers until tree-diff lands |
 | P10.9 Icons | ✅ done | v0.62.0 | 18 Phosphor Regular, 149 KB atlas, OTA-updatable like font |
-| drun launcher | ✅ done | v0.64.2 / drun 0.2.1 | Mod+D centred overlay, modal, keyboard nav — first real interactive widget app |
+| drun launcher | ✅ done | drun 0.5.10 / kernel 0.80.1 | Mod+D centred overlay, modal, keyboard nav, mockup-grade polish round 1–3 |
+| Vocab v2 (Tailwind-style) | ✅ done | v0.77.0 → v0.79.0 / sdk 0.4.0 | 9 new modifiers, pseudo-state engine, `WIDGET_VOCAB.md` |
+| Mockup polish round 1–3 | ✅ done | v0.79.4 → v0.80.1 / sdk 0.5.1 | SDF corners, layout-rect fix, `TextStyle::Heading`, panel inset, `suppress_hover()` |
+| loft file browser | ✅ done | loft 0.1.10 | Thunar-clone (sidebar / breadcrumb / grid / toolbar) on the v2 prefab cookbook |
+| `Widget::Input` self-editing | ⏳ next | — | Compositor-side cursor + key routing + Submit-on-Enter (~2 d) |
+| Tile subdivision + diff cache | ⏳ next | — | 512×512 tiles + per-tile content-hash (~3–5 d) — perf block |
+| Static visual effects | ⏳ later | — | Shadow / Transition / Scale via compositing-layer pass (~1 week) |
 | P10.10 Canvas | ⏳ later | — | `npk_canvas_commit` + CANVAS cap, size-capped |
-| P10.11 File browser | ⏳ later | — | Real Thunar-clone — the eventual capstone |
+| P10.11 `files` app | ⏳ later | — | Real `files` app replacing the loft prototype with intent-driven npkFS walk |
 
 **Partial phases** mean "infrastructure shipped, full impl waits on a
 prerequisite". None of them block the next phase's user-visible work.
 
 ### Open follow-ups (not-in-spec, tracked)
 
-- ~~drun — first real interactive widget app~~ — ✅ shipped v0.64.2.
-  Lists installed `sys/wasm/*` modules, keyboard nav, Enter launches.
-  Uses `npk_window_set_overlay` + `npk_window_set_modal` to declare
-  its window kind — kernel stays launcher-agnostic.
+- ~~drun — first real interactive widget app~~ — ✅ shipped v0.64.2,
+  polished through drun 0.5.10. Lists installed `sys/wasm/*` modules,
+  keyboard nav, mouse hover/click, Enter launches. Uses
+  `npk_window_set_overlay` + `npk_window_set_modal` to declare its
+  window kind — kernel stays launcher-agnostic.
 - ~~Keyboard routing to widget windows~~ — ✅ shipped v0.64.1.
   Focused widget-kind window receives `Event::Key`; the intent
   loop's `read_line_with_tab` bails out immediately via
-  `focused_widget_id()`.
-- **drun polish** — current rough edges: mouse-click selection
-  missing, no search input, visual style minimal. Cosmetic pass
-  planned next.
+  `focused_widget_id()`. Stale-hover suppression on key dispatch
+  added in v0.80.1.
+- ~~drun polish — mouse-click selection, search input, mockup-grade
+  visual style~~ — ✅ shipped through drun 0.5.x and the polish
+  round 1–3 (`v0.79.4`–`v0.80.1`). See "Shipped since `v0.79.0`"
+  below.
 - **Kind conversion (Terminal ↔ Widget)** — `npk_spawn_module`
   currently always opens a terminal-kind window so `loop + <app>`
   semantics match. Widget-only apps launched via drun end up with
@@ -728,6 +737,11 @@ prerequisite". None of them block the next phase's user-visible work.
 - **Tile subdivision + full diff cache** — second-pass P10.5 and
   P10.6 together. Needs 512×512 tile grid per window, per-tile
   content-hash, dirty-tile scheduler. Makes interactive apps cheap.
+  Currently slot **#2** in the priority queue (see "Next up").
+- **`Widget::Input` self-editing** — currently slot **#1**.
+  Compositor owns cursor + key routing into the focused Input
+  buffer + `Enter`-as-Submit. Apps stop carrying their own
+  read_line plumbing.
 - **`npk_event_wait` blocking poll** — P10.7 follow-up, needs
   integration with idle/sleep path.
 - **Window resize triggers scene re-layout** — `relayout_scene`
@@ -951,17 +965,115 @@ Feature work beyond the numbered phases above:
   `wasm_meta.rs`: all deleted. drun reads the WASM directly via
   `npk_fetch("sys/wasm/<name>")` + inline section parser.
 
-### Next up
+### Shipped since `v0.79.0` (mockup-grade polish round 1–3)
 
-- **P10.11 file browser** (Thunar-clone) — new session. Name TBD.
-  Depends on: `toolbar`, `sidebar` with sections, `grid_item` / grid
-  layout, `breadcrumb`, `icon_button`, `nav_row` prefabs (all
-  additive to the prefab cookbook).
-- **drun polish** — mouse-wheel scroll when MAX_VISIBLE exceeded,
-  visual fine-tuning after file browser clarifies the shared style
-  vocabulary.
-- **P10.10 Canvas** — on hold until a concrete consumer (image
-  viewer, chart, …) asks for it.
+- **SDF rounded corners** (`v0.79.4`, kernel-only) — `gui/render.rs`
+  ditches 16×16 supersampling for a signed-distance-field +
+  smoothstep pass with concentric two-arc geometry (Hyprland-style:
+  outer radius `r`, inner radius `r − border`, same centre). Border
+  width is uniform across straights and curves; AA band
+  `AA_S_Q8 = 150` ≈ 0.586 px. Q24.8 fixed point throughout, no float.
+  `corner_inset` walker in `compositor.rs` removed — SDF blit doesn't
+  need the per-row skip.
+- **Widget chrome `paint_content` flag** (`v0.79.5`, kernel-only) —
+  `fill_rounded_chrome_aa` gains a `paint_content: bool`. Terminal
+  windows pass `true` (current layered-bg behaviour); widget windows
+  pass `false` so the chrome paints the border ring + inner fringe in
+  the border colour and leaves the inner-full area for the widget to
+  fill. Widget blit becomes SDF-aware: middle rows = single memcpy
+  (fast path), corner-band rows = per-pixel `rect_coverage_sdf`
+  query + `blend_pixel`. Fixes the dark `bg_color` band between
+  widget content and the rounded border that was visible in drun /
+  loft. New pub `blend_pixel` helper in `gui/render.rs`.
+- **`place_axis` layout-rect fix** (`v0.80.0`, abi+kernel) — Row /
+  Column / Stack used to return `LayoutNode { rect: content }` (the
+  inner rect after `Modifier::Padding` was already subtracted), but
+  `paint_modifiers_eff` paints `Background` / `Border` at
+  `layout.rect`. Result: chrome drew on top of already-padded
+  content. Fix: return `rect: container`, children stay laid out in
+  `content`. drun's selected list-row finally has 16 px of inner
+  padding around its accent border; hover backgrounds cover the full
+  row including padding. Two visible knock-ons across drun + loft.
+- **`Widget::Input` no longer hardcodes `SurfaceElevated`** —
+  `Modifier::Background` is honoured fully; an empty modifier list
+  means a transparent input that blends with whatever is below.
+  Apps that want the elevated-card look reach for `card(...)` or add
+  their own `Modifier::Background`.
+- **`TextStyle::Heading`** (`v0.80.0`, ABI variant 5) — 18 px
+  regular weight, between `Body` (14) and `Title` (24+bold). Now
+  the default for `Widget::Input` placeholder + value, so search
+  bars read at a sensible size next to a 24 px magnifier icon.
+  `#[non_exhaustive]` + append-only, wire-version stays `0x01`,
+  `check_abi.rs` freeze assertion bumped on both sides.
+- **Card-style selection** (drun `0.5.7`, loft `0.1.7`, sdk `0.4.1`)
+  — `prefab::list_row` / `nav_row` / `grid_item` selected-state
+  Background swapped from `Token::AccentMuted` → `Token::SurfaceElevated`.
+  Border stays `Token::Accent`. Solid-fill that washed out body
+  text replaced by the Raycast/Spotlight feel from Florian's
+  mockup. No new variants, no wire-version bump.
+- **List-row inner spacing** (drun `0.5.8`, loft `0.1.8`, sdk
+  `0.4.2`) — `list_row` padding `Md (12)` → `Lg (16)`, title /
+  subtitle inner-Column spacing `Xxs (2)` → `Xs (4)`. Selected
+  card now has the airy feel of the mockup instead of the border
+  laser-cutting around the icon and text.
+- **Footer + search vertical breathing** — `prefab::footer` wraps
+  the footer Row in a Column with a **trailing** zero-size invisible
+  widget so the panel's `Spacing::Md` gap acts as bottom-margin on
+  the last child. `prefab::input` mirrors the trick with a
+  **leading** invisible widget for top-margin. ~24 px above and
+  below the band between chrome and divider — symmetric, matches
+  the mockup, no directional-padding ABI variant needed.
+- **`prefab::panel` 4 px inset** (`v0.80.1`, kernel-only follow-up)
+  — `prefab::panel` gains `Modifier::Padding(Padding::Xs)` so the
+  entire dialog content insets from the chrome by 4 px on all sides
+  (incl. dividers, near-full-bleed-but-not-quite). Vertical
+  asymmetry compensated in `prefab::input` + `prefab::footer`:
+  wrap-Column spacing drops `Md (12)` → `Sm (8)` so the distances
+  `panel.pad(4) + col.spacing(8) + row.pad(12) = 24` and
+  `row.pad(12) + panel.spacing(12) = 24` stay symmetric around the
+  search row at the top and the footer row at the bottom.
+- **`widgets::suppress_hover(window_id)`** (`v0.80.1`,
+  kernel-only) — hover state was sticking on the previously-mouse-
+  hovered row when the user moved selection with arrow keys (both
+  rows highlighted at once). New pub kernel fn drops the cached
+  `hover_path` + `OnHover`-action dedup; intent-loop keyboard
+  dispatch calls it right before forwarding the key event to the
+  widget. Next mouse motion re-establishes hover via
+  `update_hover`. Keyboard nav now visually owns the highlight
+  until the cursor moves again.
+
+### Next up (priority order)
+
+1. **`Widget::Input` self-editing** (~2 d, kernel-only) — apps
+   still route `Char` / `Backspace` themselves; that's per-app
+   plumbing nobody should be writing. Compositor owns: cursor
+   position state on focused Input, `KeyCode` dispatched into the
+   buffer, `Enter` → `Event::Action(Submit)` to the app.
+   Unblocks proper drun / loft search UX, kills the
+   `read_line_with_tab` bailout in the intent loop.
+2. **Tile subdivision + full diff cache** (~3–5 d, kernel-only) —
+   today every hover-path change re-rasterizes the whole window
+   buffer (one `W × H` shadow per widget window). Move to a
+   512×512 tile grid + per-tile content-hash, dirty-tile scheduler.
+   Performance block before any of the bigger animation work
+   becomes affordable. P10.5 + P10.6 second pass together.
+3. **Static visual effects** (`Modifier::Shadow` /
+   `Modifier::Transition` outside pseudo-states / `Modifier::Scale`)
+   — needs a compositing-layer pass: render a sub-tree into its
+   own off-screen layer texture, blit with transform / effect to
+   the main tile. ~1 week, larger phase. Depends on (2) so the
+   per-tile cache machinery exists.
+4. **P10.11 file browser** (real `files` app, Thunar-clone replacing
+   the loft prototype with intent-driven npkFS walk) — depends on
+   `toolbar`, `sidebar` with sections, `grid_item` / grid layout,
+   `breadcrumb`, `icon_button`, `nav_row` prefabs, all of which
+   exist today.
+5. **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS`
+   cap, on hold until a concrete consumer (image viewer, chart, …)
+   asks for it.
+6. **drun polish** — mouse-wheel scroll when `MAX_VISIBLE` exceeded,
+   small visual fine-tuning after the file browser clarifies the
+   shared style vocabulary further.
 
 ---
 
