@@ -112,6 +112,20 @@ fn ceil_u32_local(x: f32) -> u32 {
     if (i as f32) < x { i.saturating_add(1) } else { i }
 }
 
+/// Sum every `Modifier::Padding` in the effective list. Mirrors
+/// `layout::padding` so leaf glyph placement matches the layout-side
+/// outer-size growth — a single canonical source for "how much
+/// padding does this leaf carry".
+fn leaf_padding(mods: &[Modifier]) -> (u32, u32) {
+    let mut p: u32 = 0;
+    for m in mods {
+        if let Modifier::Padding(n) = m {
+            p = p.saturating_add(*n as u32);
+        }
+    }
+    (p, p)
+}
+
 /// Build the modifier list that applies to `widget` after merging the
 /// active pseudo-states and density-conditional mods. Wrapper variants
 /// are stripped so downstream paint code never sees nested modifier
@@ -312,10 +326,20 @@ fn paint_node_eff(
     edit_state: Option<&InputEditState>,
 ) {
     let rect = layout.rect;
+    // Inner-rect origin for leaf glyph placement. The OUTER rect is
+    // sized to include any `Modifier::Padding` (see layout.rs leaf
+    // measure paths); the actual text/icon must shift in by the
+    // padding amount so the glyphs sit centred inside the padded
+    // band — without this `prefab::menu_bar` and `prefab::badge`
+    // would render with their text glued to the left edge of their
+    // own padded background instead of inside it.
+    let leaf_pad = leaf_padding(eff);
+    let inner_x = rect.x + leaf_pad.0 as i32;
+    let inner_y = rect.y + leaf_pad.1 as i32;
 
     match widget {
         Widget::Text { content, style, .. } => {
-            rast.text(target, content, *style, Point { x: rect.x, y: rect.y });
+            rast.text(target, content, *style, Point { x: inner_x, y: inner_y });
         }
 
         Widget::Icon { id, size, .. } => {
@@ -323,7 +347,7 @@ fn paint_node_eff(
             for m in eff {
                 if let Modifier::Tint(tok) = m { color = *tok; }
             }
-            rast.icon(target, *id, *size, color, Point { x: rect.x, y: rect.y });
+            rast.icon(target, *id, *size, color, Point { x: inner_x, y: inner_y });
         }
 
         Widget::Button { label, icon, .. } => {
@@ -371,8 +395,9 @@ fn paint_node_eff(
                 None    => value.as_str(),
             };
             let shown = if live_value.is_empty() { placeholder.as_str() } else { live_value };
-            let text_x = rect.x + 4;
-            let text_y = rect.y + 4;
+            // Built-in 4 px chrome + the modifier's own padding.
+            let text_x = inner_x + 4;
+            let text_y = inner_y + 4;
             rast.text(target, shown, super::abi::TextStyle::Heading,
                       Point { x: text_x, y: text_y });
 

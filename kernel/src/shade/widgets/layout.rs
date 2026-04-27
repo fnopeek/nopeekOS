@@ -173,7 +173,7 @@ fn measure_intrinsic(w: &Widget) -> Size {
 
         Widget::Scroll { child, .. } => measure(child),
 
-        Widget::Text { content, style, .. } => {
+        Widget::Text { content, style, modifiers } => {
             let w = ceil_u32(crate::gui::text::measure(content, *style));
             let h = ceil_u32(crate::gui::text::line_height(*style));
             // Fallbacks for when font isn't loaded — line_height returns
@@ -181,11 +181,20 @@ fn measure_intrinsic(w: &Widget) -> Size {
             let w = if w == 0 {
                 content.chars().count() as u32 * 6
             } else { w };
-            Size { w, h }
+            // Honour a Padding modifier on the leaf so the OUTER rect
+            // grows to include the padding band — siblings then space
+            // out correctly. Render-side paints glyphs at the inner
+            // rect (post-padding) via paint_node_eff. Without this,
+            // `prefab::menu_bar` and `prefab::badge` (Text + Padding)
+            // were rendered with siblings touching their glyph edges.
+            let pad = padding(modifiers);
+            Size { w: w + pad.0 * 2, h: h + pad.1 * 2 }
         }
 
-        Widget::Icon { size, .. } => {
-            Size { w: *size as u32, h: *size as u32 }
+        Widget::Icon { size, modifiers, .. } => {
+            let s = *size as u32;
+            let pad = padding(modifiers);
+            Size { w: s + pad.0 * 2, h: s + pad.1 * 2 }
         }
 
         Widget::Button { label, icon, .. } => {
@@ -206,16 +215,19 @@ fn measure_intrinsic(w: &Widget) -> Size {
             }
         }
 
-        Widget::Input { value, placeholder, .. } => {
+        Widget::Input { value, placeholder, modifiers, .. } => {
             let sample = if value.is_empty() { placeholder } else { value };
             let w = ceil_u32(crate::gui::text::measure(sample, TextStyle::Body));
             let h = ceil_u32(crate::gui::text::line_height(TextStyle::Body));
-            // Minimum-width input so empty ones don't collapse.
-            Size { w: w.max(120) + 8, h: h + 8 }
+            // Built-in 4 px chrome + the modifier's own padding. Min-
+            // width keeps empty inputs from collapsing in flex rows.
+            let pad = padding(modifiers);
+            Size { w: w.max(120) + 8 + pad.0 * 2, h: h + 8 + pad.1 * 2 }
         }
 
-        Widget::Checkbox { .. } => {
-            Size { w: 16, h: 16 }
+        Widget::Checkbox { modifiers, .. } => {
+            let pad = padding(modifiers);
+            Size { w: 16 + pad.0 * 2, h: 16 + pad.1 * 2 }
         }
 
         Widget::Spacer { .. } => Size::default(),

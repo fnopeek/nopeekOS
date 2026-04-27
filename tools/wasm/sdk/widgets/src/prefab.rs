@@ -681,6 +681,11 @@ pub fn sidebar_pane(sections: Vec<Widget>) -> Widget {
 }
 
 /// Top menu-bar — flat row of clickable labels.
+///
+/// Each label gets its own `Padding(Sm)` so the click hit-rect is
+/// generous; the Row's `Spacing::Md` keeps a clear gap *between*
+/// labels so they don't read as one squished string. A trailing
+/// flex-Spacer absorbs any leftover width on the right edge.
 pub fn menu_bar(labels: &[(String, ActionId)]) -> Widget {
     let mut children: Vec<Widget> = Vec::with_capacity(labels.len() + 1);
     for (label, action) in labels {
@@ -690,13 +695,17 @@ pub fn menu_bar(labels: &[(String, ActionId)]) -> Widget {
             modifiers: vec![
                 Modifier::Padding(Padding::Sm.as_u16()),
                 Modifier::OnClick(*action),
+                Modifier::Hover(vec![
+                    Modifier::Background(Token::SurfaceMuted),
+                    Modifier::Rounded(Radius::Sm.as_u8()),
+                ]),
             ],
         });
     }
     children.push(Widget::Spacer { flex: 1 });
     Widget::Row {
         children,
-        spacing: Spacing::None.as_u16(),
+        spacing: Spacing::Md.as_u16(),
         align:   Align::Center,
         modifiers: vec![
             Modifier::Padding(Padding::Xs.as_u16()),

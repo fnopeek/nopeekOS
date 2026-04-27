@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::IconRef;
 use nopeek_widgets::prefab;
-use nopeek_widgets::style::Spacing;
+use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -35,6 +35,7 @@ unsafe extern "C" {
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
+    fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
@@ -140,43 +141,67 @@ struct Place {
 }
 
 struct Entry {
-    name:   String,
-    size:   u64,
-    is_dir: bool,
+    name:    String,
+    /// ASCII-lowercased mirror of `name`, computed once at parse
+    /// time so refilter() doesn't allocate a fresh lowercase string
+    /// on every keystroke. Critical for typing latency once the
+    /// directory is large.
+    name_lc: String,
+    size:    u64,
+    is_dir:  bool,
 }
 
 struct Loft {
-    current:     String,
-    history:     Vec<String>,
-    forward:     Vec<String>,
-    sidebar:     Vec<Place>,
-    entries:     Vec<Entry>,
-    /// Indices into `entries` matching the current search query.
-    /// Equal to 0..entries.len() when the query is empty.
-    filtered:    Vec<usize>,
-    grid_sel:    Option<usize>,
-    sidebar_sel: Option<usize>,
+    current:        String,
+    history:        Vec<String>,
+    forward:        Vec<String>,
+    sidebar:        Vec<Place>,
+    /// Direct children of `current`. Used when the search query is
+    /// empty (browse mode).
+    entries:        Vec<Entry>,
+    /// Recursive listing of `current` (every descendant). Loaded
+    /// lazily on first non-empty query, cached until we navigate to
+    /// a different directory. Search across the whole subtree —
+    /// matches a Nautilus / Spotlight / VS-Code Quick Open pattern.
+    recursive:      Vec<Entry>,
+    /// `Some(path)` when `recursive` has been filled for that path
+    /// in the current session; `None` after navigate() invalidates
+    /// the cache. Lets refilter() decide "do I need to call
+    /// `list_dir_recursive` again?".
+    recursive_dir:  Option<String>,
+    /// Indices into the active source list (entries / recursive)
+    /// matching the current search query. Equal to 0..source.len()
+    /// when the query is empty.
+    filtered:       Vec<usize>,
+    grid_sel:       Option<usize>,
+    sidebar_sel:    Option<usize>,
     /// Pre-allocated (`String::with_capacity(QUERY_CAP + 1)`) so that
     /// `clear` + `push_str` stays inside the same heap block — bump
     /// allocator hands out the storage before `persistent_mark`, and
     /// `alloc_reset` between frames must not invalidate it.
-    query:       String,
+    query:          String,
+    /// Pre-allocated mirror used to compute `query.to_ascii_lowercase()`
+    /// without an extra allocation per keystroke.
+    query_lc:       String,
 }
 
 impl Loft {
     fn new() -> Self {
         let home = read_home_dir();
-        let sidebar = default_sidebar(&home);
+        let sidebar = filter_sidebar_to_existing(default_sidebar(&home));
         let mut lf = Loft {
-            current:     home,
-            history:     Vec::new(),
-            forward:     Vec::new(),
+            current:       home,
+            history:       Vec::new(),
+            forward:       Vec::new(),
             sidebar,
-            entries:     Vec::new(),
-            filtered:    Vec::with_capacity(64),
-            grid_sel:    None,
-            sidebar_sel: Some(0),
-            query:       String::with_capacity(QUERY_CAP + 1),
+            entries:       Vec::new(),
+            recursive:     Vec::new(),
+            recursive_dir: None,
+            filtered:      Vec::with_capacity(64),
+            grid_sel:      None,
+            sidebar_sel:   Some(0),
+            query:         String::with_capacity(QUERY_CAP + 1),
+            query_lc:      String::with_capacity(QUERY_CAP + 1),
         };
         lf.refresh();
         lf
@@ -184,23 +209,60 @@ impl Loft {
 
     fn refresh(&mut self) {
         self.entries = list_dir(&self.current);
+        // Navigation invalidates any cached recursive listing — the
+        // next non-empty query for this directory triggers a fresh
+        // `list_dir_recursive` call.
+        self.recursive.clear();
+        self.recursive_dir = None;
         self.refilter();
         self.sync_sidebar_from_current();
     }
 
+    /// Pick the active source list for filtering — direct children
+    /// when the query is empty (browse mode), recursive descendants
+    /// otherwise (search mode). Lazy-loads the recursive listing on
+    /// first non-empty query for the current directory.
+    fn ensure_search_source(&mut self) -> bool {
+        if self.query.is_empty() { return false; }
+        if self.recursive_dir.as_deref() == Some(self.current.as_str()) {
+            return true;
+        }
+        log("[loft] loading recursive listing");
+        self.recursive = list_dir_recursive(&self.current);
+        self.recursive_dir = Some(self.current.clone());
+        true
+    }
+
     fn refilter(&mut self) {
+        let recursive_mode = self.ensure_search_source();
         self.filtered.clear();
         if self.query.is_empty() {
             for i in 0..self.entries.len() { self.filtered.push(i); }
         } else {
-            let q = self.query.to_ascii_lowercase();
-            for (i, e) in self.entries.iter().enumerate() {
-                if e.name.to_ascii_lowercase().contains(&q) {
+            // Reuse the pre-mark buffer for the lowercased query.
+            self.query_lc.clear();
+            for ch in self.query.chars() {
+                self.query_lc.push(ch.to_ascii_lowercase());
+            }
+            let source: &Vec<Entry> = if recursive_mode { &self.recursive } else { &self.entries };
+            for (i, e) in source.iter().enumerate() {
+                if e.name_lc.contains(self.query_lc.as_str()) {
                     self.filtered.push(i);
                 }
             }
         }
         self.grid_sel = if self.filtered.is_empty() { None } else { Some(0) };
+    }
+
+    /// Source list paired with `filtered` — entries when browsing,
+    /// recursive when searching. Renderer + open_selected use this
+    /// instead of always going through `entries`.
+    fn source(&self) -> &Vec<Entry> {
+        if self.query.is_empty() || self.recursive_dir.is_none() {
+            &self.entries
+        } else {
+            &self.recursive
+        }
     }
 
     fn sync_sidebar_from_current(&mut self) {
@@ -212,6 +274,10 @@ impl Loft {
 
     fn navigate(&mut self, new_path: String) {
         if new_path == self.current { return; }
+        // Defensive log for the .trash crash report — surfaces the
+        // exact path being entered on serial so any panic / freeze
+        // can be correlated with the trigger.
+        log("[loft] navigate");
         self.history.push(self.current.clone());
         self.forward.clear();
         self.current = new_path;
@@ -247,12 +313,18 @@ impl Loft {
     fn open_selected(&mut self) {
         let Some(i) = self.grid_sel else { return; };
         let Some(&entry_idx) = self.filtered.get(i) else { return; };
-        let Some(entry) = self.entries.get(entry_idx) else { return; };
-        if entry.is_dir {
+        // In search mode `source()` returns the recursive list, so
+        // `entry.name` is a relative path like "wallpapers/aurora"
+        // — the same join below gives the correct absolute target.
+        let (is_dir, name) = match self.source().get(entry_idx) {
+            Some(e) => (e.is_dir, e.name.clone()),
+            None => return,
+        };
+        if is_dir {
             let next = if self.current.is_empty() {
-                entry.name.clone()
+                name
             } else {
-                alloc::format!("{}/{}", self.current, entry.name)
+                alloc::format!("{}/{}", self.current, name)
             };
             self.navigate(next);
         }
@@ -314,13 +386,7 @@ fn render_menu_bar() -> Widget {
 
 fn render_toolbar(lf: &Loft) -> Widget {
     let crumbs = breadcrumb_for(&lf.current);
-    let search = prefab::input(
-        &lf.query,
-        "search",
-        prefab::InputKind::Search,
-        prefab::NO_ACTION,
-        None,
-    );
+    let search = search_input(&lf.query);
     Widget::Row {
         children: alloc::vec![
             prefab::icon_button(IconId::ArrowLeft,      24, Some(ActionId(ACT_TOOLBAR_BACK)),    None),
@@ -334,6 +400,42 @@ fn render_toolbar(lf: &Loft) -> Widget {
         spacing: Spacing::Sm.as_u16(),
         align:   Align::Center,
         modifiers: alloc::vec![],
+    }
+}
+
+/// Hand-rolled search input with always-visible chrome — `prefab::input`
+/// blends with the panel by design (drun's launcher look), but loft's
+/// toolbar wants the search bar to read as a discrete, framed widget
+/// matching the v3 mockup. Same magnifier prefix + Heading text +
+/// focus-accent border, plus a baseline `SurfaceMuted` fill and a
+/// `Border` stroke that's visible without focus too.
+fn search_input(query: &str) -> Widget {
+    let raw = Widget::Input {
+        value:       query.to_string(),
+        placeholder: "search".to_string(),
+        on_submit:   prefab::NO_ACTION,
+        modifiers:   alloc::vec![],
+    };
+    Widget::Row {
+        children: alloc::vec![
+            Widget::Icon {
+                id:        IconId::MagnifyingGlass,
+                size:      18,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
+            },
+            raw,
+        ],
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
+            Modifier::MinWidth(220),
+            Modifier::Focus(alloc::vec![
+                Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
+            ]),
+        ],
     }
 }
 
@@ -369,8 +471,15 @@ fn render_body(lf: &Loft) -> Widget {
         };
         prefab::empty_state(hint)
     } else {
+        // `source()` gives us either direct children (browse) or
+        // recursive descendants (search) — `filtered` indexes into
+        // whichever is active. Recursive entries already carry their
+        // sub-path in `name` so the grid label reads "wallpapers/aurora"
+        // for a search hit, which is the desired "show me where the
+        // match lives" UX.
+        let source = lf.source();
         let grid_children: Vec<Widget> = lf.filtered.iter().enumerate().map(|(ui_idx, &entry_idx)| {
-            let e = &lf.entries[entry_idx];
+            let e = &source[entry_idx];
             let icon = icon_for(e);
             prefab::grid_item(
                 icon, &e.name,
@@ -400,8 +509,9 @@ fn render_footer(lf: &Loft) -> Widget {
 
     let visible = lf.filtered.len();
     let mut total_bytes: u64 = 0;
+    let source = lf.source();
     for &i in &lf.filtered {
-        if let Some(e) = lf.entries.get(i) {
+        if let Some(e) = source.get(i) {
             if !e.is_dir { total_bytes = total_bytes.saturating_add(e.size); }
         }
     }
@@ -590,12 +700,25 @@ fn read_home_dir() -> String {
 }
 
 fn list_dir(prefix: &str) -> Vec<Entry> {
+    list_dir_internal(prefix, 0)
+}
+
+/// Recursive listing — `recursive=1` to the host fn — for search
+/// mode. Each entry's `name` is the full sub-path under `prefix`
+/// (e.g. "wallpapers/aurora" when listing under
+/// "home/florian/pictures"), so a search hit visually points at the
+/// match's location. Skips synthetic `.dir` markers.
+fn list_dir_recursive(prefix: &str) -> Vec<Entry> {
+    list_dir_internal(prefix, 1)
+}
+
+fn list_dir_internal(prefix: &str, recursive: i32) -> Vec<Entry> {
     let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
     let n = unsafe {
         npk_fs_list(
             prefix.as_ptr() as i32, prefix.len() as i32,
             buf_ptr as i32, LIST_BUF_SIZE as i32,
-            0,
+            recursive,
         )
     };
     if n <= 0 { return Vec::new(); }
@@ -612,6 +735,30 @@ fn list_dir(prefix: &str) -> Vec<Entry> {
     out
 }
 
+/// Drop sidebar entries whose path is not currently backed by a
+/// `.dir` marker. Keeps "Filesystem" (empty path = npkFS root) — it
+/// always exists by definition. Honest UI: if you can see it, you
+/// can navigate into it without hitting an empty phantom.
+fn filter_sidebar_to_existing(places: Vec<Place>) -> Vec<Place> {
+    places.into_iter().filter(|p| {
+        if p.path.is_empty() { return true; } // Filesystem root
+        dir_exists(&p.path)
+    }).collect()
+}
+
+fn dir_exists(path: &str) -> bool {
+    // npk_fs_stat checks for a `.dir` marker first — returns 9 with
+    // is_dir=1. We only care about the "is a directory" flag.
+    let mut out = [0u8; 9];
+    let n = unsafe {
+        npk_fs_stat(
+            path.as_ptr() as i32, path.len() as i32,
+            out.as_mut_ptr() as i32,
+        )
+    };
+    n == 9 && out[8] != 0
+}
+
 // Wire: name\0size_le_u64\0is_dir_u8 — see kernel/src/wasm.rs.
 fn parse_entry(line: &[u8]) -> Option<Entry> {
     let nul = line.iter().position(|&b| b == 0)?;
@@ -620,7 +767,8 @@ fn parse_entry(line: &[u8]) -> Option<Entry> {
     if rest.len() < 10 { return None; }
     let size = u64::from_le_bytes(rest[..8].try_into().ok()?);
     let is_dir = rest[9] != 0;
-    Some(Entry { name, size, is_dir })
+    let name_lc = name.to_ascii_lowercase();
+    Some(Entry { name, name_lc, size, is_dir })
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────
