@@ -42,8 +42,12 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.80.1`, sdk `0.5.1`,
-  drun `0.5.10`, loft `0.1.10`.
+- **Active priority (2026-04-28+):** **npkFS v2** — content-addressed
+  trees, real directories, no `.dir` markers. Clean break, no
+  migration. 5-day plan in `NPKFS_V2.md`. **All Phase 10 polish +
+  loft work is parked** while v2 lands; resume after.
+- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.82.1`, sdk `0.6.1`,
+  drun `0.6.0`, loft `0.2.1` (parked at this state).
   - **Vocab v2 shipped** (Tailwind-style modifier set + pseudo-state engine):
     Hover / Focus / Active / Disabled / WhenDensity, Rounded, MinWidth /
     MaxWidth, Scale (Q8.8 reserved), 9 new Modifier variants append-only

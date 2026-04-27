@@ -500,10 +500,17 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [x] **Layout-rect fix** (`v0.80.0`, abi+kernel) — `place_axis` for Row/Column/Stack now returns `rect: container` instead of `rect: content`, so `Modifier::Background` / `Modifier::Border` paint on the full allocated rect and children sit inside the padded inner. drun's selected list-row finally has 16 px breathing room around its accent border; hover backgrounds cover the full row including padding.
 - [x] **`TextStyle::Heading`** (`v0.80.0`, ABI append, variant 5) — 18 px regular weight, sized between `Body` (14) and `Title` (24+bold). Used by `Widget::Input` placeholder + value so search bars read at a sensible size next to a 24 px magnifier icon. Wire-version stays `0x01`.
 - [x] **Mockup-grade prefab polish round 1–3** (drun `0.5.7–0.5.10`, loft `0.1.7–0.1.10`, sdk `0.4.1–0.5.1`) — Raycast/Spotlight selection style (SurfaceElevated card + Accent border instead of AccentMuted fill), `prefab::input` no longer paints its own SurfaceElevated bg (blends into panel), tighter `Spacing::Xxs` between rows, `prefab::footer` wraps in a Column with a trailing zero-size widget so `Spacing::Md` acts as bottom-margin, `prefab::input` does the same for top-margin, `prefab::panel` gains a `Padding::Xs` inset so dividers and rows breathe vs the chrome, `widgets::suppress_hover(window_id)` on intent-loop keyboard dispatch so arrow-key nav owns the highlight until the next mouse motion.
-- [ ] **`Widget::Input` self-editing** (next, ~2 d) — compositor-side cursor + key-routing-to-focused-input + Submit-on-Enter. Unblocks drun search without per-app `read_line` plumbing; apps still route Char/Backspace themselves today.
+- [x] **`Widget::Input` self-editing** (`v0.81.x` + sdk 0.6.0 + drun 0.6.0) — compositor owns the editor (cursor + key routing + caret render), apps mirror via `Event::InputChange`. Auto-focus on first commit picks the first Input in the tree. Drun's search + loft's filter both type-immediately on open.
+- [x] **Layout leaf-padding** (`v0.82.1`) — Text/Icon/Input/Checkbox/Canvas honour their own `Modifier::Padding` so `prefab::menu_bar` and `prefab::badge` finally render with breathing room between siblings.
+- [x] **Click-to-focus only on Inputs** (`v0.82.1`) — clicks on buttons / nav rows / menu items no longer steal keyboard focus from the search bar. Tab/Shift+Tab still walks every focusable.
+
+> **Phase 10 polish is parked from 2026-04-28** so npkFS v2 can ship
+> as the foundation for Phase 11. Items below resume after v2 lands.
+
 - [ ] **Tile subdivision + full diff cache** (~3–5 d) — 512×512 grid + per-tile content-hash, hover/key change → only dirty tiles re-rasterized instead of whole window.
 - [ ] **Static visual effects** (`Shadow` / `Transition` / `Scale` outside pseudo-states) — needs compositing-layer pass (sub-tree → off-screen layer texture → blit with transform/effect). ~1 Woche, größerer Brocken.
 - [ ] **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS` cap, on hold bis ein konkreter Consumer (image viewer, chart) danach fragt.
+- [ ] **Loft polish round 4** — dropdown menus once `Widget::Popover` lands (Phase 11+), `.trash`-click crash investigation, mockup-grade refinements beyond 0.2.1.
 
 ### Phase 11 -- AI Integration
 
