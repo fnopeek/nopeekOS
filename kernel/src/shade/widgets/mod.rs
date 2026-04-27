@@ -1026,7 +1026,11 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
     // Preserve hover/focus/active across re-commits so an interactive
     // app re-rendering on every event doesn't lose its state-merged
     // pixels mid-frame. Falls back to empty for first commit.
-    let (prev_hover, prev_focus, prev_active, prev_input_edit) = {
+    // `is_first_commit` is "no scene yet for this window" — true even
+    // when the window itself was created earlier by
+    // `npk_window_set_overlay` (drun's path), which is exactly when we
+    // want to auto-focus.
+    let (prev_hover, prev_focus, prev_active, prev_input_edit, is_first_commit) = {
         let scenes = SCENES.lock();
         match scenes.get(&target_id) {
             Some(s) => (
@@ -1034,16 +1038,19 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
                 s.focus_path.clone(),
                 s.active_path.clone(),
                 s.input_edit.clone(),
+                false,
             ),
-            None    => (Vec::new(), Vec::new(), None, None),
+            None    => (Vec::new(), Vec::new(), None, None, true),
         }
     };
 
     // First commit auto-focuses the first focusable Widget::Input so
-    // search bars / dialogs Just Work without an explicit host fn.
-    // Re-commits keep whatever focus the user navigated to via Tab /
-    // click (we never auto-jump focus during a session).
-    let focus_path: Vec<u32> = if new_window.is_some() {
+    // search bars / launchers Just Work without the user having to
+    // click into the input first — keeps the "type as soon as it
+    // opens" UX every keyboard-driven dialog needs. Re-commits keep
+    // whatever focus the user navigated to via Tab / click; we never
+    // auto-jump focus during a session.
+    let focus_path: Vec<u32> = if is_first_commit {
         find_first_input_path(&tree).unwrap_or_default()
     } else {
         prev_focus
