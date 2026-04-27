@@ -171,32 +171,107 @@ exposes.
 
 ---
 
-## Migration
+## Rollout: clean break, no migration
 
-v1 → v2 is **disruptive** — different storage layout entirely.
+**Decision (2026-04-27, Florian):** we don't migrate. v1 and v2 are
+incompatible by design, and we're early enough in nopeekOS's life
+that the user-data we'd lose is a few wallpapers and config blobs
+on the NUC + notebook. Both can be re-set up in minutes. Trying
+to migrate would mean writing a v1-walker + v2-builder that we'd
+delete two releases later anyway.
 
-Path forward:
+So: **v2 ships as a fresh install only**. The path:
 
-1. Add v2 alongside v1: separate B-tree namespace under a different
-   superblock slot. New code paths target v2; v1 remains read-only.
-2. **One-shot migration intent** — `migrate-fs` walks every v1 key,
-   parses its slash-segmented path, builds the v2 tree structure,
-   writes blobs + trees, finalises a v2 root.
-3. Bump kernel ABI to indicate v2 mounts. Old kernel reading a v2
-   superblock refuses (rather than corrupting).
-4. Once migration is verified on real installs (NUC + notebook):
-   delete v1 code in a follow-up release.
+1. Kernel detects v1 superblock at boot → refuses to mount, prints
+   a clear "this disk is on npkFS v1; v2 requires reinstall"
+   message + serial guidance.
+2. User runs the installer (`./build.sh installer` → USB →
+   reinstall) which formats the disk to v2 from the first byte.
+3. v1 code is deleted in the same kernel release that ships v2 —
+   no parallel-format complexity.
 
-### Compatibility
+OTA `update` won't auto-handle this. The v2-upgrade kernel includes
+the v2 format only; users on v1 hit the refusal message and
+reinstall. Coordinated release (annoying-but-rare).
 
-- Host-fn surface stays the same: `npk_fetch(path)`, `npk_fs_list(prefix)`,
-  `npk_fs_stat(path)`, `npk_fs_delete(path)`. Apps don't rewrite —
-  they keep handing in path strings, the FS handles them faster /
-  better. **No app rebuild needed for v2 except possibly the FS
-  test suite.**
-- New host fns added as `npk_fs_rename(old, new)`,
-  `npk_fs_snapshot()`, `npk_fs_gc()` — purely additive.
-- Wire format / scene_commit ABI: untouched.
+### Compatibility (host fn / app surface)
+
+The **path-string API stays the same**:
+`npk_fetch(path)`, `npk_fs_list(prefix)`, `npk_fs_stat(path)`,
+`npk_fs_delete(path)`. Apps keep handing in path strings; the
+kernel walks them via tree-objects internally. **No app rebuild
+needed.** drun, loft, wallpaper, top, debug, wifi all just work.
+
+New host fns added in v2 (purely additive):
+- `npk_fs_rename(old, new)` — finally cheap.
+- `npk_fs_mkdir(path)` — explicit directory creation, no more
+  `.dir`-marker games.
+- `npk_fs_snapshot()` — create a named snapshot from the current
+  root.
+- `npk_fs_gc()` — manual GC trigger (compositor / scheduler runs
+  this on idle).
+
+Wire format / `npk_scene_commit` ABI: untouched.
+
+---
+
+## Default directory structure (locked at v2 install time)
+
+The fresh install lays down this canonical tree. Apps assume it
+exists; the installer is the only thing that creates it.
+
+```
+/                                 root tree
+├── sys/                          system-managed, read-mostly
+│   ├── config/                   key→value blobs, plain text
+│   │   ├── name                  user display name
+│   │   ├── launcher              module name for Mod+D (default: "drun")
+│   │   ├── theme                 "dark" | "light" | "auto"
+│   │   ├── wallpaper             current wallpaper hash or "@procedural:..."
+│   │   └── keybinds              future: Mod+X table
+│   ├── wasm/                     installed modules (encrypted blobs)
+│   │   ├── drun
+│   │   ├── drun.version          ASCII semver sidecar
+│   │   ├── loft
+│   │   ├── loft.version
+│   │   ├── wifi / wifi.version
+│   │   ├── wallpaper / wallpaper.version
+│   │   ├── top / top.version
+│   │   └── debug / debug.version
+│   ├── fonts/
+│   │   └── inter-variable        OpenType binary
+│   └── icons/
+│       └── phosphor.atlas        baked icon atlas
+│
+├── home/                         user namespace (multi-user-ready
+│   └── <name>/                   even though we have one user today)
+│       ├── documents/
+│       ├── downloads/
+│       ├── pictures/
+│       │   └── wallpapers/       wallpaper.wasm writes here
+│       ├── projects/
+│       └── .trash/               soft-delete destination (later)
+│
+└── .system/                      boot-time, opened pre-master-key
+    ├── config                    boot config (was .npk-config in v1)
+    └── keycheck                  passphrase-verify blob (was .npk-keycheck)
+```
+
+Notes:
+- Every directory above is a real Tree object — no `.dir` markers
+  anywhere. The Tree's *existence* is what marks a directory.
+- `.system/` is special: its blobs are encrypted under a fixed
+  derived key (boot-time accessible) so the kernel can read
+  `.system/config` + `.system/keycheck` before the user has typed
+  the passphrase. Everything else lives under the master-key root.
+- `home/<name>/` mirrors loft's sidebar verbatim. Apps that need
+  user-content paths (`wallpaper`, future settings, etc.) build
+  them from `sys/config/name` + the well-known subdir name.
+- `sys/wasm/<name>.version` lives as a separate blob beside the
+  module. v2 could fold version into the Tree-entry's `flags` /
+  metadata but the explicit sidecar file is cleaner — it stays
+  human-readable and the OTA path's manifest format already
+  expects it that way.
 
 ---
 
