@@ -15,6 +15,11 @@ pub struct Bitmap {
     total_blocks: u64,
     free_count: u64,
     dirty: bool,
+    /// Per-bitmap-block dirty flag. `sync()` only writes blocks marked
+    /// dirty here, instead of pushing all `bitmap_count` blocks
+    /// through the 64-slot block cache (which used to thrash every
+    /// commit, capping write IOPS at ~17 on a multi-GB partition).
+    dirty_blocks: Vec<bool>,
     trim_pending: Vec<(u64, u64)>,
     alloc_cursor: u64, // Next-fit: start searching here
 }
@@ -55,6 +60,7 @@ impl Bitmap {
             total_blocks,
             free_count,
             dirty: false,
+            dirty_blocks: alloc::vec![false; bitmap_count as usize],
             trim_pending: Vec::new(),
             alloc_cursor: data_start,
         })
@@ -72,9 +78,11 @@ impl Bitmap {
 
         let free_count = total_blocks.saturating_sub(data_start);
 
+        // Fresh format: every bitmap block is dirty (needs to land on disk).
         Bitmap {
             data, bitmap_start, bitmap_count, data_start,
             total_blocks, free_count, dirty: true,
+            dirty_blocks: alloc::vec![true; bitmap_count as usize],
             trim_pending: Vec::new(),
             alloc_cursor: data_start,
         }
@@ -110,7 +118,9 @@ impl Bitmap {
                 run_len += 1;
                 if run_len == count {
                     for i in 0..count {
-                        set_used(&mut self.data, run_start + i);
+                        let blk = run_start + i;
+                        set_used(&mut self.data, blk);
+                        self.mark_block_dirty(blk);
                     }
                     self.free_count -= count;
                     self.dirty = true;
@@ -133,6 +143,7 @@ impl Bitmap {
             let b = start + i;
             if b < self.total_blocks && !is_free(&self.data, b) {
                 set_free(&mut self.data, b);
+                self.mark_block_dirty(b);
                 self.free_count += 1;
             }
         }
@@ -142,15 +153,38 @@ impl Bitmap {
         }
     }
 
-    /// Write bitmap to disk via cache.
-    pub fn sync(&self, cache: &mut BlockCache) -> Result<(), FsError> {
+    /// Mark the bitmap-block that owns `block`'s allocation bit as
+    /// needing flush. With ~32K bits per 4 KB bitmap-block, a typical
+    /// fs::write (5-10 newly allocated blocks clustered together) only
+    /// dirties 1-2 bitmap-blocks — vs. the previous "rewrite all
+    /// `bitmap_count` blocks every commit" which thrashed the cache.
+    fn mark_block_dirty(&mut self, block: u64) {
+        let byte_idx = block as usize / 8;
+        let bitmap_block_idx = byte_idx / BLOCK_SIZE;
+        if bitmap_block_idx < self.dirty_blocks.len() {
+            self.dirty_blocks[bitmap_block_idx] = true;
+        }
+    }
+
+    /// Write bitmap blocks that have changed since the last sync to
+    /// the cache. `dirty_blocks` tracks per-block changes; only those
+    /// land in the cache, keeping the 64-slot LRU available for the
+    /// payload data + B-tree nodes that actually benefit from caching.
+    pub fn sync(&mut self, cache: &mut BlockCache) -> Result<(), FsError> {
         if !self.dirty { return Ok(()); }
         for i in 0..self.bitmap_count {
+            let i_us = i as usize;
+            if i_us < self.dirty_blocks.len() && !self.dirty_blocks[i_us] {
+                continue;
+            }
             let mut buf = [0u8; BLOCK_SIZE];
-            let offset = i as usize * BLOCK_SIZE;
+            let offset = i_us * BLOCK_SIZE;
             let copy_len = BLOCK_SIZE.min(self.data.len() - offset);
             buf[..copy_len].copy_from_slice(&self.data[offset..offset + copy_len]);
             cache.write(self.bitmap_start + i, &buf)?;
+            if i_us < self.dirty_blocks.len() {
+                self.dirty_blocks[i_us] = false;
+            }
         }
         Ok(())
     }
