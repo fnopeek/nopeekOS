@@ -6,7 +6,7 @@
 use crate::{kprintln, pci, paging, memory};
 use crate::paging::PageFlags;
 use crate::virtio_blk::BlkError;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -143,6 +143,22 @@ static DMA_BUF: Mutex<Option<u64>> = Mutex::new(None);
 /// empty slot (head == tail means empty).
 const DMA_POOL_SLOTS: usize = 128;
 static DMA_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
+
+/// PRP-list scratch pool. NVMe spec: a transfer covering ≥3 4 KB pages
+/// uses `prp1` for the first page and a "PRP List" — a 4 KB block
+/// holding up to 512 page-pointers — addressed by `prp2`. Each cmd we
+/// submit with PRP-List uses one slot; a 4-slot pool is enough for the
+/// current synchronous one-cmd-at-a-time pattern, with headroom for
+/// short pipelining bursts.
+const PRP_LIST_POOL_SLOTS: usize = 4;
+static PRP_LIST_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Max data blocks per single NVMe READ/WRITE command. Computed from
+/// Identify Controller's MDTS field (offset 77) at init time; capped to
+/// `DMA_POOL_SLOTS` so a single cmd fits in our DMA pool. Treated as a
+/// hard upper bound by `read_extent` / `write_extent`; larger transfers
+/// are split into multiple cmds.
+static MAX_BLOCKS_PER_CMD: AtomicU32 = AtomicU32::new(64);
 
 fn mmio_read32(base: u64, offset: usize) -> u32 {
     unsafe { core::ptr::read_volatile((base + offset as u64) as *const u32) }
@@ -393,11 +409,31 @@ pub fn init() -> bool {
         state.oncs = core::ptr::read_volatile(buf.add(256) as *const u16);
     }
 
+    // MDTS (Maximum Data Transfer Size) at offset 77, 1 byte. Units of
+    // 2^(12 + CAP.MPSMIN) bytes; for MPSMIN=0 (~all NVMe SSDs) that's
+    // pages of 4 KB. 0 means "no limit". Cap at DMA_POOL_SLOTS so a
+    // single cmd always fits in our staging pool.
+    let mdts: u8 = unsafe { core::ptr::read_volatile(buf.add(77) as *const u8) };
+    let mpsmin = ((cap >> 48) & 0xF) as u32;
+    let pool_cap = DMA_POOL_SLOTS as u32;
+    let hw_max_blocks = if mdts == 0 {
+        pool_cap
+    } else {
+        let pages = 1u32 << (mdts as u32);
+        let bytes_per_page = 1u32 << (12 + mpsmin);
+        let blocks = pages.saturating_mul(bytes_per_page) / BLOCK_SIZE as u32;
+        blocks.max(1)
+    };
+    let max_blocks_per_cmd = hw_max_blocks.min(pool_cap);
+    MAX_BLOCKS_PER_CMD.store(max_blocks_per_cmd, Ordering::Relaxed);
+
     let model_str = core::str::from_utf8(&state.model).unwrap_or("?").trim();
     let serial_str = core::str::from_utf8(&state.serial).unwrap_or("?").trim();
     let has_trim = state.oncs & (1 << 2) != 0;
-    kprintln!("[npk] nvme: {} (SN: {}), TRIM={}", model_str, serial_str,
-        if has_trim { "yes" } else { "no" });
+    kprintln!("[npk] nvme: {} (SN: {}), TRIM={}, MDTS={} ({} KB/cmd)",
+        model_str, serial_str,
+        if has_trim { "yes" } else { "no" },
+        mdts, max_blocks_per_cmd * 4);
 
     // Identify Namespace 1 (CNS=0, NSID=1)
     unsafe { core::ptr::write_bytes(identify_buf as *mut u8, 0, 4096); }
@@ -477,6 +513,17 @@ pub fn init() -> bool {
     } else {
         kprintln!("[npk] nvme: WARN — could not allocate {}-page DMA pool, batched flush disabled",
             DMA_POOL_SLOTS);
+    }
+
+    // Allocate the PRP-list scratch pool. Each multi-page extent cmd
+    // takes one slot. Without this we can still service single-block
+    // reads/writes via `read_block` / `write_block`, so failure is
+    // recoverable but disables the fast path.
+    if let Some(pool) = memory::allocate_contiguous(PRP_LIST_POOL_SLOTS) {
+        *PRP_LIST_POOL_BASE.lock() = Some(pool);
+    } else {
+        kprintln!("[npk] nvme: WARN — could not allocate {}-page PRP-list pool, extent path disabled",
+            PRP_LIST_POOL_SLOTS);
     }
 
     // Free identify buffer
@@ -781,6 +828,223 @@ fn read_blocks_batch_inner(blocks: &[u64], output: &mut [u8], pool_base: u64) ->
     }
 
     overall_err.map_or(Ok(()), Err)
+}
+
+// ── Single-command extent transfers (PRP list path) ───────────────────
+//
+// A naive `read_blocks_batch` issues one NVMe cmd per 4 KB page; a 1 MB
+// read becomes 256 round-trips through SQ/CQ. NVMe's PRP list mechanism
+// (spec 4.3) lets a single cmd address up to 512 pages via a "PRP List"
+// block — `prp1` is the first page, `prp2` points at the list, and the
+// list holds entries for the remaining pages. With our contiguous DMA
+// pool that costs one extra block-size scratch buffer per cmd in
+// flight; in exchange a 1 MB read drops to ~2 cmds (one per
+// `MAX_BLOCKS_PER_CMD` chunk) and the SSD's internal pipelining gets to
+// do its job instead of draining a SQ on every page.
+
+/// Build a PRP-list scratch block in `list_addr`. Page 0 of the
+/// transfer goes into `cmd.prp1` directly; this list addresses pages
+/// `1..count` (inclusive of the second page, exclusive of `count`).
+/// Caller must ensure `count >= 3` and `count - 1 <= 512`.
+fn build_prp_list(list_addr: u64, dma_base: u64, count: u64) {
+    debug_assert!(count >= 3 && count - 1 <= 512);
+    unsafe {
+        let entries = list_addr as *mut u64;
+        for j in 0..(count - 1) {
+            let page_addr = dma_base + (j + 1) * BLOCK_SIZE as u64;
+            core::ptr::write_volatile(entries.add(j as usize), page_addr);
+        }
+    }
+}
+
+/// Drain one I/O completion from the IO queue. Caller must have
+/// submitted a single cmd and rung the doorbell.
+fn drain_one_completion(state: &mut NvmeState) -> Result<(), BlkError> {
+    let mut budget = 50_000_000u32;
+    loop {
+        if budget == 0 { return Err(BlkError::Timeout); }
+        budget -= 1;
+
+        let cq_ptr = state.io_cq as *const CqEntry;
+        let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
+        let phase = (entry.status & 1) != 0;
+        if phase != state.io_phase {
+            core::hint::spin_loop();
+            continue;
+        }
+        state.io_cq_head = (state.io_cq_head + 1) % IO_QUEUE_SIZE;
+        if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
+        ring_cq_doorbell(state, 1, state.io_cq_head);
+
+        let status_code = (entry.status >> 1) & 0x7FF;
+        if status_code != 0 { return Err(BlkError::IoError); }
+        return Ok(());
+    }
+}
+
+/// Submit a single READ command spanning `chunk_blocks` consecutive
+/// 4 KB blocks starting at `start_sector`. `chunk_blocks` must be ≤
+/// `DMA_POOL_SLOTS` and ≤ `MAX_BLOCKS_PER_CMD`. Caller drains.
+fn submit_extent_cmd(
+    state: &mut NvmeState,
+    opcode: u8,
+    start_sector: u64,
+    chunk_blocks: u64,
+    dma_base: u64,
+    prp_list_addr: u64,
+) {
+    let prp1 = dma_base;
+    let prp2 = if chunk_blocks == 1 {
+        0
+    } else if chunk_blocks == 2 {
+        dma_base + BLOCK_SIZE as u64
+    } else {
+        build_prp_list(prp_list_addr, dma_base, chunk_blocks);
+        prp_list_addr
+    };
+
+    let mut cmd = SqEntry::zeroed();
+    cmd.opcode = opcode;
+    cmd.command_id = state.command_id;
+    cmd.nsid = 1;
+    cmd.prp1 = prp1;
+    cmd.prp2 = prp2;
+    cmd.cdw10 = start_sector as u32;
+    cmd.cdw11 = (start_sector >> 32) as u32;
+    cmd.cdw12 = (chunk_blocks as u32 * 8 - 1) & 0xFFFF;
+    state.command_id = state.command_id.wrapping_add(1);
+
+    let sq_ptr = state.io_sq as *mut SqEntry;
+    unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
+    state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    ring_sq_doorbell(state, 1, state.io_sq_tail);
+}
+
+/// Read `count` 4 KB blocks starting at `start_block` into `output`.
+/// Single NVMe cmd per `MAX_BLOCKS_PER_CMD` chunk via the PRP-list
+/// path, instead of one cmd per block. `output.len()` must equal
+/// `count * BLOCK_SIZE`. Falls back to per-block `read_block` when the
+/// DMA pool / PRP list pool aren't initialised.
+pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<(), BlkError> {
+    if count == 0 { return Ok(()); }
+    if output.len() != (count as usize) * BLOCK_SIZE {
+        return Err(BlkError::OutOfRange);
+    }
+
+    let pool_base = match *DMA_POOL_BASE.lock() {
+        Some(b) => b,
+        None => {
+            for i in 0..count {
+                let dst: &mut [u8; BLOCK_SIZE] = (&mut output
+                    [(i as usize) * BLOCK_SIZE..((i as usize) + 1) * BLOCK_SIZE])
+                    .try_into().unwrap();
+                read_block(start_block + i, dst)?;
+            }
+            return Ok(());
+        }
+    };
+    let prp_pool_base = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
+
+    let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
+        .min(DMA_POOL_SLOTS as u64);
+
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+
+    let mut offset = 0u64;
+    let mut prp_slot = 0usize;
+    while offset < count {
+        let chunk = (count - offset).min(max_per_cmd);
+        let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+        if start_sector + chunk * 8 > state.total_lbas {
+            return Err(BlkError::OutOfRange);
+        }
+
+        let prp_list_addr = prp_pool_base + (prp_slot as u64) * BLOCK_SIZE as u64;
+        prp_slot = (prp_slot + 1) % PRP_LIST_POOL_SLOTS;
+
+        submit_extent_cmd(state, NVM_READ, start_sector, chunk, pool_base, prp_list_addr);
+        drain_one_completion(state)?;
+
+        // DMA visibility — the SSD's writes to the pool must be flushed
+        // through the CPU's view before we copy out.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pool_base as *const u8,
+                output[(offset as usize) * BLOCK_SIZE..].as_mut_ptr(),
+                (chunk as usize) * BLOCK_SIZE,
+            );
+        }
+
+        offset += chunk;
+    }
+
+    Ok(())
+}
+
+/// Write `count` 4 KB blocks of `input` starting at `start_block`.
+/// Single NVMe cmd per `MAX_BLOCKS_PER_CMD` chunk via PRP-list.
+/// `input.len()` must equal `count * BLOCK_SIZE`. Falls back to
+/// per-block `write_block` when DMA / PRP pools aren't initialised.
+pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), BlkError> {
+    if count == 0 { return Ok(()); }
+    if input.len() != (count as usize) * BLOCK_SIZE {
+        return Err(BlkError::OutOfRange);
+    }
+
+    let pool_base = match *DMA_POOL_BASE.lock() {
+        Some(b) => b,
+        None => {
+            for i in 0..count {
+                let src: &[u8; BLOCK_SIZE] = input
+                    [(i as usize) * BLOCK_SIZE..((i as usize) + 1) * BLOCK_SIZE]
+                    .try_into().unwrap();
+                write_block(start_block + i, src)?;
+            }
+            return Ok(());
+        }
+    };
+    let prp_pool_base = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
+
+    let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
+        .min(DMA_POOL_SLOTS as u64);
+
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+
+    let mut offset = 0u64;
+    let mut prp_slot = 0usize;
+    while offset < count {
+        let chunk = (count - offset).min(max_per_cmd);
+        let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+        if start_sector + chunk * 8 > state.total_lbas {
+            return Err(BlkError::OutOfRange);
+        }
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                input[(offset as usize) * BLOCK_SIZE..].as_ptr(),
+                pool_base as *mut u8,
+                (chunk as usize) * BLOCK_SIZE,
+            );
+        }
+        // Make CPU stores to the pool visible before the SSD reads them.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        let prp_list_addr = prp_pool_base + (prp_slot as u64) * BLOCK_SIZE as u64;
+        prp_slot = (prp_slot + 1) % PRP_LIST_POOL_SLOTS;
+
+        submit_extent_cmd(state, NVM_WRITE, start_sector, chunk, pool_base, prp_list_addr);
+        drain_one_completion(state)?;
+
+        offset += chunk;
+    }
+
+    Ok(())
 }
 
 /// Write a 4KB block (8 sectors).

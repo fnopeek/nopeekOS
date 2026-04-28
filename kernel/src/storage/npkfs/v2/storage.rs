@@ -322,46 +322,45 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     }
 
     // Write payload bytes across the extents — direct to disk via the
-    // batched NVMe path, bypassing the 64-slot block cache. Pushing
-    // 4096 blocks of a 16 MB blob through that cache thrashes it
-    // completely (every block evicts a metadata block, syncronous
-    // writebacks one-at-a-time). Crash-safe because the data isn't
-    // referenced from any committed Tree until commit_root flips the
-    // SB; a crash mid-write just leaves orphan blocks in the bitmap
-    // (reclaimed at next gc / not visible to any walk).
-    let mut block_list: alloc::vec::Vec<u64> =
-        alloc::vec::Vec::with_capacity(blocks_needed as usize);
+    // single-cmd PRP-list extent path, bypassing the 64-slot block
+    // cache. Pushing 4096 blocks of a 16 MB blob through that cache
+    // thrashes it completely (every block evicts a metadata block,
+    // synchronous writebacks one-at-a-time). Crash-safe because the
+    // data isn't referenced from any committed Tree until commit_root
+    // flips the SB; a crash mid-write just leaves orphan blocks in the
+    // bitmap (reclaimed at next gc / not visible to any walk).
+    //
+    // One `write_extent` per FS extent → one NVMe cmd per extent (or
+    // per `MAX_BLOCKS_PER_CMD` chunk for very large extents). A 1 MB
+    // contiguous extent drops from 256 single-page cmds to ~2 cmds.
     for ext in &all_extents {
         for b in 0..ext.block_count {
-            block_list.push(ext.start_block + b);
+            fs.cache.invalidate(ext.start_block + b);
         }
     }
 
-    let full_blocks = write_data.len() / BLOCK_SIZE;
-    let partial_bytes = write_data.len() % BLOCK_SIZE;
+    let mut consumed = 0usize;
+    for ext in &all_extents {
+        let blocks = ext.block_count as usize;
+        let span = blocks * BLOCK_SIZE;
+        let raw_end = write_data.len().min(consumed + span);
+        let raw_len = raw_end.saturating_sub(consumed);
 
-    // Make sure stale cache entries for these blocks (e.g. a freed
-    // extent that the bitmap just re-handed-out) don't shadow our
-    // direct writes.
-    for &block in &block_list {
-        fs.cache.invalidate(block);
+        if raw_len == span {
+            crate::blkdev::write_extent(
+                ext.start_block, ext.block_count, &write_data[consumed..raw_end],
+            )?;
+        } else {
+            // Trailing extent contains a partial last block — pad with
+            // zeros so the extent writer always sees a block-aligned
+            // input. `disk_size` recorded in the entry below is the
+            // pre-padding length, so the read path strips the padding.
+            let mut padded = alloc::vec![0u8; span];
+            padded[..raw_len].copy_from_slice(&write_data[consumed..raw_end]);
+            crate::blkdev::write_extent(ext.start_block, ext.block_count, &padded)?;
+        }
+        consumed += span;
     }
-
-    let mut batch: alloc::vec::Vec<(u64, &[u8; BLOCK_SIZE])> =
-        alloc::vec::Vec::with_capacity(block_list.len());
-    for i in 0..full_blocks {
-        let chunk: &[u8; BLOCK_SIZE] =
-            write_data[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE].try_into().unwrap();
-        batch.push((block_list[i], chunk));
-    }
-    let mut padded_last = [0u8; BLOCK_SIZE];
-    if partial_bytes > 0 {
-        padded_last[..partial_bytes]
-            .copy_from_slice(&write_data[full_blocks * BLOCK_SIZE..]);
-        batch.push((block_list[full_blocks], &padded_last));
-    }
-
-    crate::blkdev::write_blocks_batch(&batch)?;
 
     // Pack into V2EntryRaw: first V2_DIRECT_EXTENTS inline, rest in
     // an indirect chain.
@@ -439,24 +438,19 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         all_extents.extend(read_indirect_extents(&mut fs.cache, entry.indirect_block)?);
     }
 
-    // Flatten extents into a list of block numbers, then issue one big
-    // batched read into a contiguous staging buffer. This bypasses the
-    // generic block cache for blob data — large blobs would just blow
-    // out the cache anyway, and the batch path runs at NVMe queue
-    // depth N instead of 1.
+    // Issue one PRP-list extent read per FS extent into a contiguous
+    // staging buffer. Bypasses the generic block cache (large blobs
+    // would blow it out anyway) and collapses 256 single-page cmds for
+    // a 1 MB read into ~2 cmds.
     let total_blocks: u64 = all_extents.iter().map(|e| e.block_count).sum();
-    let mut block_list: Vec<u64> = Vec::with_capacity(total_blocks as usize);
-    for ext in &all_extents {
-        for b in 0..ext.block_count {
-            block_list.push(ext.start_block + b);
-        }
-    }
-
     let mut staging = alloc::vec![0u8; (total_blocks as usize) * BLOCK_SIZE];
-    if !block_list.is_empty() {
-        // The batch primitive chunks itself when `blocks.len()` exceeds
-        // the DMA pool, so we don't need to chunk here.
-        crate::blkdev::read_blocks_batch(&block_list, &mut staging)?;
+
+    let mut buf_offset = 0usize;
+    for ext in &all_extents {
+        let bytes = (ext.block_count as usize) * BLOCK_SIZE;
+        let dst = &mut staging[buf_offset..buf_offset + bytes];
+        crate::blkdev::read_extent(ext.start_block, ext.block_count, dst)?;
+        buf_offset += bytes;
     }
 
     // Trim the staging buffer to the actual on-disk size (last block
