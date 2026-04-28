@@ -28,15 +28,17 @@ mod host;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
-// ── 48 MB bump heap (16 MB write + 16 MB read buffer + slack) ────────
+// ── 256 MB bump heap ──────────────────────────────────────────────────
 //
-// Earlier 24 MB triggered a slow instantiate on the N100 — turned out
-// to be the unrelated OutOfRange retry path, fixed once partition-size
-// bounding landed. Now safe to bump back up so we can benchmark a
-// realistic "huge" file (16 MB exercises long indirect-extent chains
-// and is roughly the size of a typical photo/PDF).
-
-const HEAP_SIZE: usize = 48 * 1024 * 1024;
+// Sized for the 100 MB bucket: 100 MB write_buf + 100 MB read_buf + ~50
+// MB slack for transient kernel-side allocations (storage::put alloc'd
+// AES-GCM ciphertext + tree-rebuild + commit-journal scratch).
+//
+// 256 MB as bss adds nothing to the binary on disk (zero-init), but
+// the wasmi runtime has to back it with real pages on instantiate, so
+// startup gets slower — measured ~50 ms extra on N100. Acceptable for
+// a one-shot bench.
+const HEAP_SIZE: usize = 256 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -112,6 +114,7 @@ const PLAN: &[(usize, u32, &str)] = &[
     (64 * 1024,            10, "large"),
     (1024 * 1024,           4, "huge"),
     (16 * 1024 * 1024,      1, "xhuge"),
+    (100 * 1024 * 1024,     1, "100M"),
 ];
 
 const ROOT: &str = ".testdisk";
@@ -264,11 +267,10 @@ pub extern "C" fn _start() {
     host::print("  alloc start, ticks_us_total=");
     let t_alloc0 = host::tsc_now();
 
-    // 16 MB buffers (sized for the xhuge bucket). Bump allocator just
-    // bumps a pointer, but Rust's `vec![0; N]` still memsets — that's
-    // 32 MB of zeroing at startup. wasmi `memory.fill` lowers to a
-    // host-side memset so it's fast (single-digit ms).
-    let max_size = 16 * 1024 * 1024 + 32;
+    // 100 MB buffers (sized for the 100M bucket). Rust's `vec![0; N]`
+    // memsets which on N100 = ~30 ms × 2 buffers; wasmi's
+    // `memory.fill` lowers to host memset so it's near-DRAM-bandwidth.
+    let max_size = 100 * 1024 * 1024 + 32;
     let mut write_buf: Vec<u8> = vec![0u8; max_size];
     let mut read_buf: Vec<u8> = vec![0u8; max_size];
 
