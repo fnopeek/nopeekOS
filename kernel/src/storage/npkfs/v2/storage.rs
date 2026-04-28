@@ -274,13 +274,16 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     // result's length (= payload.len() + 16 AEAD tag) is what the read
     // path uses to infer "this object was AEAD-wrapped".
     //
-    // FS uses AES-256-GCM (hardware-accelerated via AES-NI on the N100);
-    // TLS keeps ChaCha20-Poly1305 for cipher-suite compatibility.
+    // ChaCha20-Poly1305, software. AES-256-GCM was tested in v0.84.0
+    // and turned out slower because the target spec disables SSE,
+    // forcing aes-gcm onto its constant-time soft backend (block
+    // cipher with round-lookups loses to ARX). AES-NI needs SSE
+    // bring-up + XMM state management; that's Phase 12+ work.
     let encrypted = if encrypt {
         crypto::get_master_key().map(|master_key| {
             let obj_key = crypto::derive_object_key(&master_key, hash);
             let nonce = crypto::derive_nonce(hash);
-            crypto::aead_encrypt_aes(&obj_key, &nonce, payload)
+            crypto::aead_encrypt(&obj_key, &nonce, payload)
         })
     } else {
         None
@@ -453,7 +456,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         };
         let obj_key = crypto::derive_object_key(&master_key, hash);
         let nonce = crypto::derive_nonce(hash);
-        match crypto::aead_decrypt_aes(&obj_key, &nonce, &on_disk) {
+        match crypto::aead_decrypt(&obj_key, &nonce, &on_disk) {
             Some(pt) => pt,
             None => {
                 kprintln!("[npk] npkfs2: decrypt failed for hash {:02x}{:02x}…",
