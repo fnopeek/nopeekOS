@@ -322,9 +322,20 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
 
-    if payload.len() >= 256 * 1024 {
-        kprintln!("[put-enter] {}KB encrypt={}", payload.len() / 1024, encrypt);
+    // Cheap dedup-check FIRST. Content-addressing means equal payload
+    // ⇒ equal hash; if `hash` is already in the btree the rest of this
+    // function is wasted work — blake3-integrity (~0.6 ms / MB) and
+    // AES-GCM encrypt (~1.6 ms / MB) on the same MB we'd then throw
+    // away. Used to live AFTER encrypt, costing 2.2 ms per duplicate
+    // 1 MB write.
+    {
+        let mut lock = FS.lock();
+        let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+        if btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some() {
+            return Ok(());
+        }
     }
+    let t_dedup = rdtsc();
 
     let computed = *blake3::hash(payload).as_bytes();
     if computed != *hash {
@@ -355,11 +366,11 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
-    // Fast-path: hash already present → nothing to do.
+    // Race-check: someone else could have inserted the same hash while
+    // we did the encrypt without holding the lock. ROOT_MUTEX in
+    // v2::fs::write serialises all path-layer mutations, so this is
+    // defensive in single-threaded operation but cheap.
     if btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some() {
-        if payload.len() >= 256 * 1024 {
-            kprintln!("[put-fastpath] {}KB hash already present", payload.len() / 1024);
-        }
         return Ok(());
     }
 
@@ -490,9 +501,10 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
 
     if write_data.len() >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
-        kprintln!("[put] {}KB hash={} enc={} alloc={} dma={} btree={} (us)",
+        kprintln!("[put] {}KB dedup={} hash={} enc={} alloc={} dma={} btree={} (us)",
             write_data.len() / 1024,
-            (t_hash.saturating_sub(t0)) / mhz,
+            (t_dedup.saturating_sub(t0)) / mhz,
+            (t_hash.saturating_sub(t_dedup)) / mhz,
             (t_enc.saturating_sub(t_hash)) / mhz,
             (t_alloc.saturating_sub(t_enc)) / mhz,
             (t_dma.saturating_sub(t_alloc)) / mhz,
