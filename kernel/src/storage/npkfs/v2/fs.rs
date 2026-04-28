@@ -137,10 +137,27 @@ pub fn list(path: &str) -> Result<Option<Vec<TreeEntry>>, Error> {
 /// Write `data` to `path` (creating or overwriting a File). Parent must
 /// exist; if `path` exists as a Dir, errors with AlreadyExists.
 pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
+    use crate::interrupts::{rdtsc, tsc_freq};
+    let t0 = rdtsc();
     let _g = ROOT_MUTEX.lock();
+    let t_lock = rdtsc();
     let cur = current_root()?;
     let new = paths::store(&cur, path, data)?;
-    commit(new)
+    let t_store = rdtsc();
+    let result = commit(new);
+    let t_commit = rdtsc();
+
+    if data.len() >= 256 * 1024 {
+        let mhz = tsc_freq().max(1) / 1_000_000;
+        crate::kprintln!("[fs::write] {}KB lock={} store={} commit={} (us)",
+            data.len() / 1024,
+            (t_lock.saturating_sub(t0)) / mhz,
+            (t_store.saturating_sub(t_lock)) / mhz,
+            (t_commit.saturating_sub(t_store)) / mhz,
+        );
+    }
+
+    result
 }
 
 /// Create an empty directory at `path`. Parent must exist; `path` must
