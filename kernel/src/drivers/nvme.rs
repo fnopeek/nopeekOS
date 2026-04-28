@@ -553,11 +553,6 @@ pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
     Ok(())
 }
 
-/// Counts every batched call so we can correlate kprintln traces.
-/// Diagnostic-only — remove once the second-run lock is rooted out.
-static BATCH_CALL_COUNT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-
 /// Submit up to `DMA_POOL_SLOTS` write-block commands in parallel and
 /// wait for them all. Returns Ok only if every command completed
 /// without error. Falls back to per-block sequential writes when the
@@ -594,16 +589,6 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
 
-    let call_n = BATCH_CALL_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let entry_tail = state.io_sq_tail;
-    let entry_head = state.io_cq_head;
-    let entry_phase = state.io_phase;
-    crate::kprintln!(
-        "[npk] nvme batch #{}: N={}, sq_tail={}, cq_head={}, phase={}, cmd_id={}",
-        call_n, items.len(), entry_tail, entry_head,
-        if entry_phase { 1 } else { 0 }, state.command_id,
-    );
-
     // Stage every payload into its own DMA pool slot + push every SQ
     // entry, then ring the doorbell exactly once. The SQ has 64 slots;
     // `items.len() ≤ DMA_POOL_SLOTS = 32`, so we can't wrap into our
@@ -629,40 +614,21 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
         unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
         state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
     }
+
+    // Memory fence between SQ entry stores and the doorbell write.
+    // x86 stores are normally ordered, but during the deadlock chase
+    // adding kprintlns between submit + drain made the issue go away —
+    // those acted as MMIO-serializing barriers. An explicit SeqCst
+    // fence pins the ordering deterministically without the serial
+    // overhead, and matches what real NVMe drivers do.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     ring_sq_doorbell(state, 1, state.io_sq_tail);
 
-    // Drain `items.len()` completions. Polling matches the per-cmd
-    // path's structure; we just keep going until we've collected every
-    // expected completion.
     let mut completed = 0usize;
     let mut overall_err: Option<BlkError> = None;
     let mut spin_budget = 5_000_000u32 * items.len() as u32;
     while completed < items.len() {
         if spin_budget == 0 {
-            // Diagnostic dump on timeout. Tells us exactly which slot
-            // we're stuck on and what the hardware wrote there. If
-            // phase mismatches, we know the device hasn't posted yet
-            // (or our wrap logic is wrong). If phase matches, we wouldn't
-            // be here — so dump is for the "phase wrong" failure.
-            let cq_ptr = state.io_cq as *const CqEntry;
-            let stuck = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
-            crate::kprintln!(
-                "[npk] nvme batch #{} TIMEOUT: completed {}/{} | sq_tail={} cq_head={} phase={} | stuck.status=0x{:04x} stuck.cmd_id={}",
-                call_n, completed, items.len(),
-                state.io_sq_tail, state.io_cq_head,
-                if state.io_phase { 1 } else { 0 },
-                stuck.status, stuck.command_id,
-            );
-            // Dump 4 CQ entries around current head — show what's on
-            // disk so we can diagnose a phase desync.
-            for o in 0..4u16 {
-                let pos = (state.io_cq_head + o) % IO_QUEUE_SIZE;
-                let e = unsafe { core::ptr::read_volatile(cq_ptr.add(pos as usize)) };
-                crate::kprintln!(
-                    "[npk]   cq[{}]: status=0x{:04x} cmd_id={} sq_head={}",
-                    pos, e.status, e.command_id, e.sq_head,
-                );
-            }
             return Err(BlkError::Timeout);
         }
         spin_budget -= 1;
@@ -685,13 +651,6 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
         completed += 1;
     }
     ring_cq_doorbell(state, 1, state.io_cq_head);
-
-    crate::kprintln!(
-        "[npk] nvme batch #{}: ok, sq_tail={} cq_head={} phase={}",
-        call_n, state.io_sq_tail, state.io_cq_head,
-        if state.io_phase { 1 } else { 0 },
-    );
-
     overall_err.map_or(Ok(()), Err)
 }
 
