@@ -191,9 +191,9 @@ pub fn init() {
     *RNG.lock() = Some(ChaChaRng::new(&seed));
 
     if has_rdrand() {
-        kprintln!("[npk] CSPRNG: ChaCha20 (RDRAND-seeded)");
+        kprintln!("[npk] CSPRNG: ready (RDRAND-seeded)");
     } else {
-        kprintln!("[npk] CSPRNG: ChaCha20 (TSC-seeded, no RDRAND)");
+        kprintln!("[npk] CSPRNG: ready (TSC-seeded, no RDRAND)");
     }
 }
 
