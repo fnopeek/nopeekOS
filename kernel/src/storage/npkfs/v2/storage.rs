@@ -478,13 +478,18 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
 /// Fetch the payload for `hash`. Returns Ok(None) if not present.
 /// Verifies BLAKE3(plaintext) == hash before returning; mismatch = Corrupt.
 pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
+    use crate::interrupts::{rdtsc, tsc_freq};
+    let t0 = rdtsc();
+
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+    let t_lock = rdtsc();
 
     let entry = match btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)? {
         Some(e) => e,
         None => return Ok(None),
     };
+    let t_btree = rdtsc();
 
     let direct_count = (entry.extent_count as usize).min(V2_DIRECT_EXTENTS);
     let mut all_extents: Vec<Extent> = entry.extents[..direct_count].to_vec();
@@ -492,12 +497,17 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         all_extents.extend(read_indirect_extents(&mut fs.cache, entry.indirect_block)?);
     }
 
-    // Issue one PRP-list extent read per FS extent into a contiguous
-    // staging buffer. Bypasses the generic block cache (large blobs
-    // would blow it out anyway) and collapses 256 single-page cmds for
-    // a 1 MB read into ~2 cmds.
     let total_blocks: u64 = all_extents.iter().map(|e| e.block_count).sum();
-    let mut staging = alloc::vec![0u8; (total_blocks as usize) * BLOCK_SIZE];
+    let total_bytes = (total_blocks as usize) * BLOCK_SIZE;
+
+    // Avoid the zero-init that `vec![0u8; N]` does — the DMA path is
+    // about to overwrite every byte. `Vec::with_capacity + set_len` is
+    // safe because the immediately-following `read_extent` writes into
+    // [0..total_bytes]; if it errors we never expose the uninit Vec to
+    // the caller.
+    let mut staging: Vec<u8> = Vec::with_capacity(total_bytes);
+    unsafe { staging.set_len(total_bytes); }
+    let t_alloc = rdtsc();
 
     let mut buf_offset = 0usize;
     for ext in &all_extents {
@@ -506,17 +516,10 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         crate::blkdev::read_extent(ext.start_block, ext.block_count, dst)?;
         buf_offset += bytes;
     }
+    let t_dma = rdtsc();
 
-    // Trim the staging buffer to the actual on-disk size (last block
-    // may be partially used).
     staging.truncate(entry.disk_size as usize);
 
-    // The write path stored either the raw payload or the AEAD-wrapped
-    // form. Discriminate by length: AES-256-GCM ciphertext is exactly
-    // `plaintext_size + 16`, so any time disk_size exceeds the plaintext
-    // size we know there's a tag to peel off. Trees are stored
-    // unencrypted (so boot-time `exists` works pre-master-key); blobs
-    // get the AEAD treatment if a key was set at write time.
     let was_encrypted = entry.disk_size > entry.plaintext_size;
 
     if was_encrypted {
@@ -530,14 +533,13 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         };
         let obj_key = crypto::derive_object_key(&master_key, hash);
         let nonce = crypto::derive_nonce(hash);
-        // In-place decrypt: staging goes from (ct||tag) → plaintext, no
-        // 2nd allocation of plaintext-sized Vec, no extra memcpy.
         if crypto::aead_decrypt_aes_in_place(&obj_key, &nonce, &mut staging).is_none() {
             kprintln!("[npk] npkfs2: decrypt failed for hash {:02x}{:02x}…",
                 hash[0], hash[1]);
             return Err(FsError::Corrupt);
         }
     }
+    let t_dec = rdtsc();
     let plaintext = staging;
 
     let computed = *blake3::hash(&plaintext).as_bytes();
@@ -545,6 +547,23 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         kprintln!("[npk] npkfs2: integrity failure for hash {:02x}{:02x}…",
             hash[0], hash[1]);
         return Err(FsError::Corrupt);
+    }
+    let t_verify = rdtsc();
+
+    // Phase profile — only emitted for sizable reads so the small-file
+    // path doesn't spam the serial log. ≥ 256 KB covers the 1 MB and
+    // 16 MB testdisk buckets, where the per-stage breakdown matters.
+    if total_bytes >= 256 * 1024 {
+        let mhz = tsc_freq().max(1) / 1_000_000;
+        kprintln!("[get] {}KB lock={} btree={} alloc={} dma={} dec={} verify={} (us)",
+            total_bytes / 1024,
+            (t_lock.saturating_sub(t0)) / mhz,
+            (t_btree.saturating_sub(t_lock)) / mhz,
+            (t_alloc.saturating_sub(t_btree)) / mhz,
+            (t_dma.saturating_sub(t_alloc)) / mhz,
+            (t_dec.saturating_sub(t_dma)) / mhz,
+            (t_verify.saturating_sub(t_dec)) / mhz,
+        );
     }
 
     Ok(Some(plaintext))
