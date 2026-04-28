@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.87.7"
+version = "0.88.0"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
@@ -80,6 +80,25 @@ features = ["aes", "alloc"]
 # obvious in one glance.
 [dependencies.cpufeatures]
 version = "0.2"
+
+# `aes` + `ctr` + `ghash` direct deps for our custom AES-GCM
+# implementation in `crypto::aead_hw`. aes-gcm 0.10's combined
+# crate is mostly already optimal (AES-CTR via aes crate is ~1.5
+# GB/s on N100), but its `ghash` backend is single-block PCLMULQDQ
+# (~720 MB/s) which caps the whole AEAD. Step 1 (v0.88.0) builds
+# our own AEAD glue around the same primitives to validate the
+# framework. Step 2 swaps in a 4-way aggregated GHASH for the win.
+[dependencies.aes]
+version = "0.8"
+default-features = false
+
+[dependencies.ctr]
+version = "0.9"
+default-features = false
+
+[dependencies.ghash]
+version = "0.5"
+default-features = false
 
 # Widget pipeline (Phase 10) ───────────────────────────────────────────
 
