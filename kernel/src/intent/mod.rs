@@ -1108,15 +1108,26 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "debug" => {
             // Parse "<ip> <port>" and set the target before spawning debug.wasm.
+            // No-arg dev shortcut: dial Florian's laptop on the LAN
+            // (192.168.178.97:22222) so reboots don't need re-typing
+            // every time. Saves ~10 s per cycle. Remove or move to
+            // sys/config/debug-target once a config-file path lands.
             let mut it = args.split_whitespace();
             let ip_s = it.next().unwrap_or("");
             let port_s = it.next().unwrap_or("");
-            let ip = match parse_ip(ip_s) {
-                Some(a) => ((a[0] as u32) << 24) | ((a[1] as u32) << 16)
-                         | ((a[2] as u32) << 8)  |  (a[3] as u32),
-                None => { kprintln!("[npk] Usage: debug <ip> <port>   (e.g. debug 192.168.1.50 22222)"); 0 }
+            let (ip, port) = if ip_s.is_empty() && port_s.is_empty() {
+                let ip = ((192u32) << 24) | ((168u32) << 16) | ((178u32) << 8) | 97u32;
+                kprintln!("[npk] debug → 192.168.178.97:22222 (no args, using default)");
+                (ip, 22222u16)
+            } else {
+                let ip = match parse_ip(ip_s) {
+                    Some(a) => ((a[0] as u32) << 24) | ((a[1] as u32) << 16)
+                             | ((a[2] as u32) << 8)  |  (a[3] as u32),
+                    None => { kprintln!("[npk] Usage: debug <ip> <port>   (e.g. debug 192.168.1.50 22222)"); 0 }
+                };
+                let port: u16 = port_s.parse().unwrap_or(0);
+                (ip, port)
             };
-            let port: u16 = port_s.parse().unwrap_or(0);
             if ip != 0 && port != 0 {
                 crate::wasm::set_debug_target(ip, port);
                 wasm::intent_run_background("debug");
