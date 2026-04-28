@@ -64,7 +64,7 @@ pub fn mkfs() -> Result<(), FsError> {
     let bitmap_count = (total_blocks + BLOCK_SIZE as u64 * 8 - 1) / (BLOCK_SIZE as u64 * 8);
     let data_start = bitmap_start + bitmap_count;
 
-    let bmap = Bitmap::new_for_mkfs(total_blocks, bitmap_start, bitmap_count, data_start);
+    let mut bmap = Bitmap::new_for_mkfs(total_blocks, bitmap_start, bitmap_count, data_start);
 
     // Empty B-tree: btree_root = 0 means "no root yet"; first put()
     // allocates a leaf. Same convention as v1.
@@ -322,19 +322,47 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
         allocated += try_size;
     }
 
-    // Write payload bytes across the extents.
-    let mut data_offset = 0usize;
+    // Write payload bytes across the extents — direct to disk via the
+    // batched NVMe path, bypassing the 64-slot block cache. Pushing
+    // 4096 blocks of a 16 MB blob through that cache thrashes it
+    // completely (every block evicts a metadata block, syncronous
+    // writebacks one-at-a-time). Crash-safe because the data isn't
+    // referenced from any committed Tree until commit_root flips the
+    // SB; a crash mid-write just leaves orphan blocks in the bitmap
+    // (reclaimed at next gc / not visible to any walk).
+    let mut block_list: alloc::vec::Vec<u64> =
+        alloc::vec::Vec::with_capacity(blocks_needed as usize);
     for ext in &all_extents {
         for b in 0..ext.block_count {
-            let mut buf = [0u8; BLOCK_SIZE];
-            let end = (data_offset + BLOCK_SIZE).min(write_data.len());
-            if data_offset < write_data.len() {
-                buf[..end - data_offset].copy_from_slice(&write_data[data_offset..end]);
-            }
-            fs.cache.write(ext.start_block + b, &buf)?;
-            data_offset += BLOCK_SIZE;
+            block_list.push(ext.start_block + b);
         }
     }
+
+    let full_blocks = write_data.len() / BLOCK_SIZE;
+    let partial_bytes = write_data.len() % BLOCK_SIZE;
+
+    // Make sure stale cache entries for these blocks (e.g. a freed
+    // extent that the bitmap just re-handed-out) don't shadow our
+    // direct writes.
+    for &block in &block_list {
+        fs.cache.invalidate(block);
+    }
+
+    let mut batch: alloc::vec::Vec<(u64, &[u8; BLOCK_SIZE])> =
+        alloc::vec::Vec::with_capacity(block_list.len());
+    for i in 0..full_blocks {
+        let chunk: &[u8; BLOCK_SIZE] =
+            write_data[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE].try_into().unwrap();
+        batch.push((block_list[i], chunk));
+    }
+    let mut padded_last = [0u8; BLOCK_SIZE];
+    if partial_bytes > 0 {
+        padded_last[..partial_bytes]
+            .copy_from_slice(&write_data[full_blocks * BLOCK_SIZE..]);
+        batch.push((block_list[full_blocks], &padded_last));
+    }
+
+    crate::blkdev::write_blocks_batch(&batch)?;
 
     // Pack into V2EntryRaw: first V2_DIRECT_EXTENTS inline, rest in
     // an indirect chain.
