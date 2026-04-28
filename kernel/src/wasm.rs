@@ -514,8 +514,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
          buf_ptr: i32, buf_max: i32| -> i32 {
             let cap_id = caller.data().cap_id;
-            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
-                kprintln!("[npk] WASM: npk_fetch DENIED (no READ)");
+            if let Err(e) = capability::check_global(&cap_id, capability::Rights::READ) {
+                kprintln!("[npk] WASM: npk_fetch DENIED (cap_id={:08x}, err={:?})",
+                    capability::short_id(&cap_id), e);
                 return -1;
             }
 
@@ -550,8 +551,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
          data_ptr: i32, data_len: i32| -> i32 {
             let cap_id = caller.data().cap_id;
-            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
-                kprintln!("[npk] WASM: npk_store DENIED (no WRITE)");
+            if let Err(e) = capability::check_global(&cap_id, capability::Rights::WRITE) {
+                kprintln!("[npk] WASM: npk_store DENIED (cap_id={:08x}, err={:?})",
+                    capability::short_id(&cap_id), e);
                 return -1;
             }
 
