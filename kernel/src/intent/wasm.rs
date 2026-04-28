@@ -60,9 +60,16 @@ pub fn intent_run(args: &str) {
 
     // BLAKE3 integrity verified by npkfs::fetch
 
-    // Delegate a capability for this module: READ + EXECUTE, 60s TTL
+    // Delegate full standard caps (READ + WRITE + EXECUTE + RENDER) for
+    // 60 s. Trust comes from: (a) the module is ECDSA-P-384-signed and
+    // verified at install time, (b) the user explicitly typed `run`,
+    // (c) the wasmi sandbox bounds memory + fuel + host-fn surface.
+    // AUDIT stays off — apps should not introspect kernel state.
     let module_cap = match capability::create_module_cap(
-        capability::Rights::READ | capability::Rights::EXECUTE | capability::Rights::RENDER,
+        capability::Rights::READ
+            | capability::Rights::WRITE
+            | capability::Rights::EXECUTE
+            | capability::Rights::RENDER,
         Some(6000), // 60 seconds at 100Hz
     ) {
         Ok(id) => id,
@@ -109,7 +116,10 @@ pub fn intent_run_background(module_name: &str) {
     };
 
     let module_cap = match capability::create_module_cap(
-        capability::Rights::READ | capability::Rights::EXECUTE | capability::Rights::RENDER,
+        capability::Rights::READ
+            | capability::Rights::WRITE
+            | capability::Rights::EXECUTE
+            | capability::Rights::RENDER,
         Some(600_000),
     ) {
         Ok(id) => id,
@@ -143,7 +153,10 @@ pub fn intent_run_interactive(module_name: &str) {
     };
 
     let module_cap = match capability::create_module_cap(
-        capability::Rights::READ | capability::Rights::EXECUTE | capability::Rights::RENDER,
+        capability::Rights::READ
+            | capability::Rights::WRITE
+            | capability::Rights::EXECUTE
+            | capability::Rights::RENDER,
         Some(600_000),
     ) {
         Ok(id) => id,
