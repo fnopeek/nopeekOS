@@ -322,6 +322,10 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
 
+    if payload.len() >= 256 * 1024 {
+        kprintln!("[put-enter] {}KB encrypt={}", payload.len() / 1024, encrypt);
+    }
+
     let computed = *blake3::hash(payload).as_bytes();
     if computed != *hash {
         return Err(FsError::InvalidName);
@@ -353,6 +357,9 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
 
     // Fast-path: hash already present → nothing to do.
     if btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some() {
+        if payload.len() >= 256 * 1024 {
+            kprintln!("[put-fastpath] {}KB hash already present", payload.len() / 1024);
+        }
         return Ok(());
     }
 
