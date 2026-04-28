@@ -263,8 +263,8 @@ pub const TAG_SIZE: usize = 16;
 // File-system encryption uses AES-GCM; TLS keeps ChaCha20-Poly1305 for
 // cipher-suite compatibility with peers that negotiate it.
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce, Tag};
 
 /// Encrypt `plaintext` with AES-256-GCM. Returns ciphertext || 16-byte tag.
 /// Hardware-accelerated when AES-NI is present.
@@ -280,6 +280,28 @@ pub fn aead_decrypt_aes(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Nonce::from_slice(nonce);
     cipher.decrypt(nonce, ciphertext_and_tag).ok()
+}
+
+/// Decrypt `buf` (ciphertext || 16-byte tag) in place. On success `buf`
+/// is shrunk to plaintext-only and `Some(())` is returned; on tag
+/// mismatch / short input, the buffer's contents are undefined and
+/// `None` is returned. Saves one Vec alloc + one full-payload memcpy
+/// vs. [`aead_decrypt_aes`] — the win scales with payload size.
+pub fn aead_decrypt_aes_in_place(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    buf: &mut Vec<u8>,
+) -> Option<()> {
+    if buf.len() < TAG_SIZE { return None; }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Nonce::from_slice(nonce);
+
+    let ct_len = buf.len() - TAG_SIZE;
+    let tag_bytes: [u8; TAG_SIZE] = buf[ct_len..].try_into().ok()?;
+    buf.truncate(ct_len);
+    let tag = Tag::from(tag_bytes);
+
+    cipher.decrypt_in_place_detached(nonce, b"", buf.as_mut_slice(), &tag).ok()
 }
 
 /// Encrypt and authenticate with Additional Authenticated Data (AAD).

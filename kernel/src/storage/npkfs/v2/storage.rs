@@ -461,18 +461,17 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
 
     // Trim the staging buffer to the actual on-disk size (last block
     // may be partially used).
-    let mut on_disk = staging;
-    on_disk.truncate(entry.disk_size as usize);
+    staging.truncate(entry.disk_size as usize);
 
     // The write path stored either the raw payload or the AEAD-wrapped
-    // form. Discriminate by length: ChaCha20-Poly1305 ciphertext is
-    // exactly `plaintext_size + 16`, so any time disk_size exceeds the
-    // plaintext size we know there's a tag to peel off. Trees are stored
+    // form. Discriminate by length: AES-256-GCM ciphertext is exactly
+    // `plaintext_size + 16`, so any time disk_size exceeds the plaintext
+    // size we know there's a tag to peel off. Trees are stored
     // unencrypted (so boot-time `exists` works pre-master-key); blobs
     // get the AEAD treatment if a key was set at write time.
     let was_encrypted = entry.disk_size > entry.plaintext_size;
 
-    let plaintext = if was_encrypted {
+    if was_encrypted {
         let master_key = match crypto::get_master_key() {
             Some(k) => k,
             None => {
@@ -483,17 +482,15 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         };
         let obj_key = crypto::derive_object_key(&master_key, hash);
         let nonce = crypto::derive_nonce(hash);
-        match crypto::aead_decrypt_aes(&obj_key, &nonce, &on_disk) {
-            Some(pt) => pt,
-            None => {
-                kprintln!("[npk] npkfs2: decrypt failed for hash {:02x}{:02x}…",
-                    hash[0], hash[1]);
-                return Err(FsError::Corrupt);
-            }
+        // In-place decrypt: staging goes from (ct||tag) → plaintext, no
+        // 2nd allocation of plaintext-sized Vec, no extra memcpy.
+        if crypto::aead_decrypt_aes_in_place(&obj_key, &nonce, &mut staging).is_none() {
+            kprintln!("[npk] npkfs2: decrypt failed for hash {:02x}{:02x}…",
+                hash[0], hash[1]);
+            return Err(FsError::Corrupt);
         }
-    } else {
-        on_disk
-    };
+    }
+    let plaintext = staging;
 
     let computed = *blake3::hash(&plaintext).as_bytes();
     if computed != *hash {
