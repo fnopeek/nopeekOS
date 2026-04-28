@@ -135,9 +135,9 @@ enable_paging:
     mov $pml4, %eax
     mov %eax, %cr3
 
-    /* PAE (CR4.5) */
+    /* CR4: PAE | OSFXSR | OSXMMEXCPT (SSE/AES-NI bring-up) */
     mov %cr4, %eax
-    or $0x20, %eax
+    or $0x620, %eax
     mov %eax, %cr4
 
     /* Long Mode (EFER.8) */
@@ -146,9 +146,10 @@ enable_paging:
     or $0x100, %eax
     wrmsr
 
-    /* Paging (CR0.31) */
+    /* CR0: clear EM, set MP|NE (FPU/SSE), then PG (paging) */
     mov %cr0, %eax
-    or $0x80000000, %eax
+    and $~4, %eax
+    or $0x80000022, %eax
     mov %eax, %cr0
     ret
 
@@ -166,6 +167,12 @@ long_mode_start:
     mov %ax, %ss
 
     mov $__stack_top, %rsp
+
+    /* Initialize FPU/SSE state (CR0/CR4 already set by enable_paging) */
+    fninit
+    pushq $0x1F80
+    ldmxcsr (%rsp)
+    add $8, %rsp
 
     /* Argumente fuer kernel_main(magic, info) */
     xor %rdi, %rdi

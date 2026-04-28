@@ -282,13 +282,10 @@ pub fn aead_decrypt_aes(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[
     cipher.decrypt(nonce, ciphertext_and_tag).ok()
 }
 
-/// Encrypt and authenticate. Returns ciphertext || 16-byte tag.
-pub fn aead_encrypt(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Vec<u8> {
-    aead_encrypt_aad(key, nonce, &[], plaintext)
-}
-
 /// Encrypt and authenticate with Additional Authenticated Data (AAD).
-/// Used by TLS record layer. Returns ciphertext || 16-byte tag.
+/// ChaCha20-Poly1305. Used by TLS record layer when the negotiated
+/// cipher suite is `TLS_CHACHA20_POLY1305_SHA256`. File-system
+/// encryption uses AES-GCM via [`aead_encrypt_aes`] instead.
 pub fn aead_encrypt_aad(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let poly_block = chacha20_block(key, 0, nonce);
     let mut poly_key = [0u8; 32];
@@ -304,12 +301,8 @@ pub fn aead_encrypt_aad(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext:
     ciphertext
 }
 
-/// Decrypt and verify. Returns plaintext or None if authentication fails.
-pub fn aead_decrypt(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[u8]) -> Option<Vec<u8>> {
-    aead_decrypt_aad(key, nonce, &[], ciphertext_and_tag)
-}
-
-/// Decrypt and verify with AAD. Used by TLS record layer.
+/// Decrypt and verify with AAD. ChaCha20-Poly1305 — TLS counterpart
+/// to [`aead_encrypt_aad`]. Storage path uses [`aead_decrypt_aes`].
 pub fn aead_decrypt_aad(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ciphertext_and_tag: &[u8]) -> Option<Vec<u8>> {
     if ciphertext_and_tag.len() < TAG_SIZE {
         return None;

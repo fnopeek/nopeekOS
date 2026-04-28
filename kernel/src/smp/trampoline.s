@@ -55,9 +55,10 @@ smp_pm32:
     mov %ax, %es
     mov %ax, %ss
 
-    /* Enable PAE (CR4.5) */
+    /* CR4: PAE | OSFXSR | OSXMMEXCPT (SSE/AES-NI bring-up piggybacked
+     * on the existing 32-bit CR4 write — costs zero extra bytes). */
     mov %cr4, %eax
-    or $0x20, %eax
+    or $0x620, %eax         /* PAE | OSFXSR | OSXMMEXCPT */
     mov %eax, %cr4
 
     /* Load CR3 from data area */
@@ -70,9 +71,10 @@ smp_pm32:
     or $0x900, %eax         /* bit 8 = LME, bit 11 = NXE */
     wrmsr
 
-    /* Enable Paging (CR0.PG) */
+    /* CR0: clear EM, set MP|NE (FPU/SSE), then PG (paging). */
     mov %cr0, %eax
-    or $0x80000000, %eax
+    and $~4, %eax           /* clear EM */
+    or $0x80000022, %eax    /* PG | MP | NE */
     mov %eax, %cr0
 
     /* Load 64-bit GDT (written by BSP at BOOT+0xE0) */
@@ -102,6 +104,13 @@ smp_lm64:
 
     /* Per-AP state */
     mov 0xF8(%rbx), %rsp       /* stack top */
+
+    /* Initialize FPU/SSE state (CR0/CR4 already set in 32-bit mode). */
+    fninit
+    pushq $0x1F80
+    ldmxcsr (%rsp)
+    add $8, %rsp
+
     mov 0x100(%rbx), %rax      /* Rust entry point */
     mov 0x108(%rbx), %edi      /* core ID (arg 1, System V ABI) */
     movl $1, 0x10C(%rbx)       /* signal BSP: AP is alive */
