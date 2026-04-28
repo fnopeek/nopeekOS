@@ -400,23 +400,36 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         None => return Ok(None),
     };
 
-    let mut on_disk = Vec::with_capacity(entry.disk_size as usize);
-
     let direct_count = (entry.extent_count as usize).min(V2_DIRECT_EXTENTS);
     let mut all_extents: Vec<Extent> = entry.extents[..direct_count].to_vec();
     if entry.indirect_block != 0 {
         all_extents.extend(read_indirect_extents(&mut fs.cache, entry.indirect_block)?);
     }
 
+    // Flatten extents into a list of block numbers, then issue one big
+    // batched read into a contiguous staging buffer. This bypasses the
+    // generic block cache for blob data — large blobs would just blow
+    // out the cache anyway, and the batch path runs at NVMe queue
+    // depth N instead of 1.
+    let total_blocks: u64 = all_extents.iter().map(|e| e.block_count).sum();
+    let mut block_list: Vec<u64> = Vec::with_capacity(total_blocks as usize);
     for ext in &all_extents {
         for b in 0..ext.block_count {
-            let mut buf = [0u8; BLOCK_SIZE];
-            fs.cache.read(ext.start_block + b, &mut buf)?;
-            let remaining = entry.disk_size as usize - on_disk.len();
-            let copy_len = BLOCK_SIZE.min(remaining);
-            on_disk.extend_from_slice(&buf[..copy_len]);
+            block_list.push(ext.start_block + b);
         }
     }
+
+    let mut staging = alloc::vec![0u8; (total_blocks as usize) * BLOCK_SIZE];
+    if !block_list.is_empty() {
+        // The batch primitive chunks itself when `blocks.len()` exceeds
+        // the DMA pool, so we don't need to chunk here.
+        crate::blkdev::read_blocks_batch(&block_list, &mut staging)?;
+    }
+
+    // Trim the staging buffer to the actual on-disk size (last block
+    // may be partially used).
+    let mut on_disk = staging;
+    on_disk.truncate(entry.disk_size as usize);
 
     // The write path stored either the raw payload or the AEAD-wrapped
     // form. Discriminate by length: ChaCha20-Poly1305 ciphertext is
