@@ -70,6 +70,17 @@ pub fn exists(path: &str) -> Result<bool, Error> {
 /// `NotADirectory` when used on a directory (intentional asymmetry —
 /// directories aren't readable as Blobs; use `list`).
 pub fn read(path: &str) -> Result<Option<Vec<u8>>, Error> {
+    Ok(read_with_hash(path)?.map(|(b, _)| b))
+}
+
+/// Same as [`read`] but also returns the file's content-address (the
+/// walk hash from the tree, which is BLAKE3 of the encoded Blob). Used
+/// by the v1-compat bridge to avoid recomputing a fresh BLAKE3 over
+/// every read — `storage::get` already verifies integrity against the
+/// walk hash before handing the plaintext back, so re-hashing is pure
+/// overhead. On a 1 MB read with AVX2 BLAKE3, the redundant hash costs
+/// ~0.6 ms — measurable in the testdisk huge-file numbers.
+pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> {
     let root = current_root()?;
     let walk = match paths::walk(&root, path) {
         Ok(w) => w,
@@ -83,7 +94,7 @@ pub fn read(path: &str) -> Result<Option<Vec<u8>>, Error> {
         .map_err(Error::Storage)?
         .ok_or(PathError::Corrupt)?;
     match super::object::Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
-        super::object::Object::Blob(b) => Ok(Some(b)),
+        super::object::Object::Blob(b) => Ok(Some((b, walk.hash))),
         super::object::Object::Tree(_) => Err(PathError::Corrupt),
     }
 }
