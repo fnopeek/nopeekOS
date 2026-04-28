@@ -1513,6 +1513,7 @@ fn intent_cd(args: &str) {
 /// Re-export public API for main.rs
 pub use wasm::bootstrap_wasm;
 pub use wallpaper::random_wallpaper;
+pub use fs::crypto_bench;
 
 /// Create initial directory structure and set cwd to home.
 ///

@@ -24,6 +24,15 @@ unsafe extern "C" {
 pub fn tsc_now() -> u64 { unsafe { npk_sys_info(19) as u64 } }
 pub fn tsc_mhz() -> u64 { unsafe { npk_sys_info(10) as u64 } }
 
+/// Bench probes — kernel-side, AVX2/AES-NI/raw-NVMe pathway.
+/// Keys 30..34. First call triggers ~100 ms of measurement, results
+/// are cached in the kernel until reboot.
+pub fn bench_blake3_mbs() -> u64    { unsafe { npk_sys_info(30) as u64 } }
+pub fn bench_aes_enc_mbs() -> u64   { unsafe { npk_sys_info(31) as u64 } }
+pub fn bench_aes_dec_mbs() -> u64   { unsafe { npk_sys_info(32) as u64 } }
+pub fn bench_raw_write_mbs() -> u64 { unsafe { npk_sys_info(33) as u64 } }
+pub fn bench_raw_read_mbs() -> u64  { unsafe { npk_sys_info(34) as u64 } }
+
 pub fn print(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32); }
 }
