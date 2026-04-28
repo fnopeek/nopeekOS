@@ -117,37 +117,17 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Flush all dirty blocks to disk in a single batched submission.
-    /// Each writeback synchronously waited on completion before; with
-    /// the batch path NVMe processes them at queue-depth N → 1 disk
-    /// round-trip instead of N. virtio-blk falls back to sequential.
+    /// Flush all dirty blocks to disk.
+    ///
+    /// Reverted to per-block sequential submission. The batched-NVMe
+    /// path (`write_blocks_batch`) ships a regression we haven't
+    /// located yet — second run of testdisk locked the system. The
+    /// batch primitive stays available in `nvme::write_blocks_batch`
+    /// for future debugging; cache.flush sits on the proven path.
     pub fn flush(&mut self) -> Result<(), FsError> {
-        // Collect all dirty (block, &slot_buf) pairs. The slot pointers
-        // are stable while we hold &mut self.
-        let mut batch: alloc::vec::Vec<(u64, &[u8; BLOCK_SIZE])> =
-            alloc::vec::Vec::new();
         for i in 0..self.meta.len() {
             if self.meta[i].valid && self.meta[i].dirty {
-                let block = self.meta[i].block;
-                // SAFETY: each slot is BLOCK_SIZE bytes at slot_ptr(i),
-                // alive for the lifetime of `self`. We're forming a
-                // shared `&[u8; BLOCK_SIZE]` referencing it; the batch
-                // call only reads from these slices.
-                let buf: &[u8; BLOCK_SIZE] = unsafe {
-                    &*(self.slot_ptr(i) as *const [u8; BLOCK_SIZE])
-                };
-                batch.push((block, buf));
-            }
-        }
-        if batch.is_empty() { return Ok(()); }
-
-        crate::blkdev::write_blocks_batch(&batch)?;
-
-        // All accepted by the device → mark every flushed slot clean.
-        // We don't keep block→slot index, so iterate again — cheap.
-        for i in 0..self.meta.len() {
-            if self.meta[i].valid && self.meta[i].dirty {
-                self.meta[i].dirty = false;
+                self.writeback(i)?;
             }
         }
         Ok(())
