@@ -515,10 +515,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
          buf_ptr: i32, buf_max: i32| -> i32 {
             let cap_id = caller.data().cap_id;
             if let Err(e) = capability::check_global(&cap_id, capability::Rights::READ) {
-                kprintln!("[npk] WASM: npk_fetch DENIED (cap_id={:08x}, err={:?}, ticks_now={}, core={})",
-                    capability::short_id(&cap_id), e,
-                    crate::interrupts::ticks(),
-                    crate::smp::per_core::current_core_id());
+                kprintln!("[npk] WASM: npk_fetch DENIED (cap_id={:08x}, {:?})",
+                    capability::short_id(&cap_id), e);
                 return -1;
             }
 
@@ -554,10 +552,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
          data_ptr: i32, data_len: i32| -> i32 {
             let cap_id = caller.data().cap_id;
             if let Err(e) = capability::check_global(&cap_id, capability::Rights::WRITE) {
-                kprintln!("[npk] WASM: npk_store DENIED (cap_id={:08x}, err={:?}, ticks_now={}, core={})",
-                    capability::short_id(&cap_id), e,
-                    crate::interrupts::ticks(),
-                    crate::smp::per_core::current_core_id());
+                kprintln!("[npk] WASM: npk_store DENIED (cap_id={:08x}, {:?})",
+                    capability::short_id(&cap_id), e);
                 return -1;
             }
 
