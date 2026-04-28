@@ -131,6 +131,41 @@ impl Object {
     }
 }
 
+/// Compute the content-address (BLAKE3 hash) that `Object::Blob(data)`
+/// would produce, **without** allocating the encoded form. Streams
+/// the postcard wire bytes into a `blake3::Hasher`:
+///
+///   `update([variant_tag = 0])`
+///   `update(varint(data.len()))`
+///   `update(data)`
+///
+/// Used by the path layer to skip `data.to_vec() + encode_and_hash()`
+/// (~1 ms / MB on the test rig) when the blob already exists in
+/// storage. If the hash misses, callers fall back to the full encode
+/// path; if it hits, we go straight to tree-rebuild.
+pub fn blob_content_hash(data: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[0u8]); // postcard variant tag for `Object::Blob`
+    let mut varint = [0u8; 10];
+    let n = encode_varint_u64(data.len() as u64, &mut varint);
+    hasher.update(&varint[..n]);
+    hasher.update(data);
+    *hasher.finalize().as_bytes()
+}
+
+fn encode_varint_u64(mut x: u64, buf: &mut [u8; 10]) -> usize {
+    // postcard uses LEB128: 7 bits payload per byte, high bit set
+    // means "more bytes follow".
+    let mut i = 0;
+    while x >= 0x80 {
+        buf[i] = ((x & 0x7F) | 0x80) as u8;
+        x >>= 7;
+        i += 1;
+    }
+    buf[i] = x as u8;
+    i + 1
+}
+
 /// Zero-copy-ish Blob decoder. Takes ownership of the encoded `Object`
 /// bytes (typical: AES-GCM-decrypted plaintext from `storage::get`)
 /// and returns the inner blob `Vec<u8>` by shifting the postcard
