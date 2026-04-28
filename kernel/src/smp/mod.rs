@@ -18,14 +18,16 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 const TRAMPOLINE_BASE: usize = 0x8000;
 const AP_STACK_SIZE: usize = 64 * 1024; // 64KB per AP
 
-// Data area offsets within trampoline (must match trampoline.s)
-const OFF_GDT64: usize = 0xE0;
-const OFF_CR3: usize = 0xF0;
-const OFF_STACK: usize = 0xF8;
-const OFF_ENTRY: usize = 0x100;
-const OFF_CORE_ID: usize = 0x108;
-const OFF_RUNNING: usize = 0x10C;
-const OFF_IDTR: usize = 0x110;
+// Data area offsets within trampoline (must match trampoline.s).
+// All shifted up by 0x10 in v0.85.5 to give the AVX bring-up
+// (XSETBV) room before the GDT block.
+const OFF_GDT64: usize = 0xF0;
+const OFF_CR3: usize = 0x100;
+const OFF_STACK: usize = 0x108;
+const OFF_ENTRY: usize = 0x110;
+const OFF_CORE_ID: usize = 0x118;
+const OFF_RUNNING: usize = 0x11C;
+const OFF_IDTR: usize = 0x120;
 
 /// Counter incremented by each AP when it reaches Rust entry
 static AP_STARTED: AtomicUsize = AtomicUsize::new(0);

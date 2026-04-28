@@ -135,9 +135,10 @@ enable_paging:
     mov $pml4, %eax
     mov %eax, %cr3
 
-    /* CR4: PAE | OSFXSR | OSXMMEXCPT (SSE/AES-NI bring-up) */
+    /* CR4: PAE | OSFXSR | OSXMMEXCPT | OSXSAVE
+     * OSXSAVE (bit 18) is required for XSETBV / AVX state-save. */
     mov %cr4, %eax
-    or $0x620, %eax
+    or $0x40620, %eax
     mov %eax, %cr4
 
     /* Long Mode (EFER.8) */
@@ -173,6 +174,14 @@ long_mode_start:
     pushq $0x1F80
     ldmxcsr (%rsp)
     add $8, %rsp
+
+    /* XSETBV: enable x87 (bit 0) | SSE/XMM (bit 1) | AVX/YMM (bit 2)
+     * in XCR0. Needed for AVX2 codegen (blake3 SIMD backend). Requires
+     * CR4.OSXSAVE which enable_paging set above. */
+    xor %ecx, %ecx
+    xor %edx, %edx
+    mov $7, %eax
+    xsetbv
 
     /* Argumente fuer kernel_main(magic, info) */
     xor %rdi, %rdi
