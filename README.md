@@ -537,17 +537,28 @@ encryption with hardware AES-NI.
 - [x] Clean break, no migration — v2 ships as fresh-install only
 - [x] Host-fn path-string surface unchanged — apps didn't rebuild
 
-**Performance** (v0.85.5 testdisk on N100 NUC, cache-warm):
+**Performance** (v0.88.8 testdisk on AirDisk 512GB SSD):
 
-| op | scalar baseline (0.84.3) | v0.85.5 (HW AES-NI + AVX2 BLAKE3 + queue + in-place) |
+| op | v0.85.5 (HW crypto baseline) | v0.88.8 (FS-stack opt) |
 |---|---|---|
-| 256 B write | 1500 iops | 1736 iops |
-| 256 B read | 4000 iops | 4519 iops |
-| 1 MB write | 75 MB/s | **208 MB/s** |
-| 1 MB read | 87 MB/s | **216 MB/s** |
-| 16 MB write | 70 MB/s | 158 MB/s |
-| 16 MB read | 83 MB/s | **195 MB/s** |
-| energy / byte | 53 nJ | **11.5 nJ** (5× more efficient) |
+| 256 B write | 1736 iops | 1527 iops |
+| 256 B read | 4519 iops | 4583 iops |
+| 1 MB write (dedup hit) | 208 MB/s | **479 MB/s** |
+| 1 MB read | 216 MB/s | **411 MB/s** |
+| 16 MB write (dedup hit) | 158 MB/s | **759 MB/s** |
+| 16 MB read | 195 MB/s | **395 MB/s** |
+| 100 MB read | — | **406 MB/s** |
+| Raw NVMe read (1 MB extent, cache-warm) | — | 980–1175 MB/s |
+| Raw NVMe read (after sustained writes) | — | ~226 MB/s (SLC exhausted) |
+
+The v0.88.x stack of FS-level optimisations on top of v0.85's HW crypto:
+- NVMe PRP-list extent commands (1 cmd / extent vs 1 cmd / 4 KB block)
+- Up to 32 NVMe cmds in flight via `read_multi_extent` for fragmented blobs
+- `paths::store` stream-hashes the would-be Blob to dedup-skip encode + AES-GCM-encrypt
+- `storage::put` dedup fastpath before BLAKE3 + encrypt
+- `Object::decode` does in-place postcard prefix-shift (drain) instead of fresh-alloc + copy
+- `storage::get` drops redundant BLAKE3-verify (AES-GCM tag covers integrity)
+- Bridge layer no longer re-hashes plaintext after `v2::fs::read`
 
 Spec + design rationale: see [`NPKFS_V2.md`](NPKFS_V2.md).
 
@@ -601,25 +612,50 @@ Spec + design rationale: see [`NPKFS_V2.md`](NPKFS_V2.md).
 
 ## Performance
 
-**npkFS v2 on Intel N100 NUC (kernel v0.85.5, testdisk Run 2 / cache-warm):**
+**npkFS v2 on AirDisk 512GB SSD (kernel v0.88.8, testdisk):**
 
 | Op | Throughput | IOPS |
 |----|------------|------|
-| 256 B write (encrypt + hash + commit) | 444 KB/s | 1736 |
-| 256 B read (decrypt + verify) | 1156 KB/s | 4519 |
-| 1 MB write | 208 MB/s | 198 |
-| 1 MB read | 216 MB/s | 206 |
-| 16 MB read | 195 MB/s | 11 |
+| 256 B write | 194 KB/s | 760 |
+| 256 B read | 714 KB/s | 2791 |
+| 4 KB write | 4467 KB/s | 1090 |
+| 4 KB read | 10173 KB/s | 2483 |
+| 64 KB write | 69 MB/s | 1059 |
+| 64 KB read | 130 MB/s | 1986 |
+| 1 MB write (dedup hit) | 479 MB/s | 457 |
+| 1 MB read | 411 MB/s | 392 |
+| 16 MB write (dedup hit) | 759 MB/s | 45 |
+| 16 MB read | 395 MB/s | 23 |
+| 100 MB write (dedup hit) | 785 MB/s | 7 |
+| 100 MB read | 406 MB/s | 3 |
+| **Total (mixed sizes)** | **W 491 MB/s, R 370 MB/s** | — |
+
+Crypto throughput on the same N100:
+- BLAKE3 (AVX2): ~1670 MB/s
+- AES-256-GCM dec (AES-NI + PCLMULQDQ): ~715 MB/s
+- AES-256-GCM enc (AES-NI + PCLMULQDQ): ~622 MB/s
 
 Burst power draw on N100: **+2W over idle** (idle 11W → burst 13W).
 Energy efficiency: ~11.5 nJ/byte read — 5× better than scalar
-software crypto, hits 200 MB/s on a fanless 6W TDP CPU.
+software crypto, near-200 MB/s sustainable on a fanless 6W TDP CPU.
 
 These numbers include: BLAKE3 content addressing on every put,
 AES-256-GCM AEAD on every read/write, CoW B-tree with CAP.MQES-aware
-NVMe queue (256 entries), 128-slot DMA pool with batched submit,
-in-place AEAD decrypt (zero-copy from staging), 4-phase journal.
-That's at the level of unencrypted ext4 throughput on similar hardware.
+NVMe queue (256 entries) + 256-slot DMA pool, 32 cmds in flight via
+PRP-list multi-extent path, in-place AEAD decrypt (zero-copy from
+staging), 4-phase journal. Around the level of unencrypted ext4
+throughput on similar hardware.
+
+The v0.88.x stack ate the per-op overhead: dedup fastpath in
+`storage::put` skips encrypt when the content hash already exists,
+stream-hash in `paths::store` skips the encode pass on a dedup hit,
+`Object::decode` shifts the postcard prefix off in-place rather than
+allocating a fresh `Vec`, and `read_multi_extent` keeps 32 NVMe cmds
+in flight across fragmented extents. Reads scale up: 1 MB → 16 MB →
+100 MB all land between 330 and 410 MB/s, only ~25 % off the raw
+NVMe ceiling of 1175 MB/s. The remaining gap is AES-GCM at 715 MB/s
+— an aggregated-GHASH custom path could lift it but is deferred for
+its own session.
 
 ---
 
