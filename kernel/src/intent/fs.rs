@@ -428,10 +428,9 @@ pub fn intent_disk_info() {
 }
 
 /// Micro-bench BLAKE3 + AES-256-GCM on a 1 MB buffer to confirm the
-/// HW backends (AVX2 / AES-NI) actually fire at runtime. Throughput
-/// is the giveaway — portable BLAKE3 caps around 300 MB/s on N100,
-/// AVX2 hits 1.5+ GB/s. AES-NI vs soft-AES is even more dramatic.
-fn print_crypto_bench() {
+/// HW backends (AVX2 / AES-NI) fire at runtime. Returns
+/// `(blake3_mbs, aes_enc_mbs, aes_dec_mbs)`.
+pub fn crypto_bench() -> (u64, u64, u64) {
     use crate::interrupts::{rdtsc, tsc_freq};
 
     const SIZE: usize = 1024 * 1024;
@@ -439,9 +438,9 @@ fn print_crypto_bench() {
 
     let buf = alloc::vec![0xA5u8; SIZE];
     let hz = tsc_freq();
-    if hz == 0 { return; }
+    if hz == 0 { return (0, 0, 0); }
+    let bytes = (SIZE * ITERS) as u64;
 
-    // BLAKE3
     let t0 = rdtsc();
     let mut acc = [0u8; 32];
     for _ in 0..ITERS {
@@ -449,11 +448,9 @@ fn print_crypto_bench() {
         for i in 0..32 { acc[i] ^= h[i]; }
     }
     let dt = rdtsc().saturating_sub(t0).max(1);
-    let bytes = (SIZE * ITERS) as u64;
-    let mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
-    let _ = acc; // prevent the loop from being optimised away
+    let blake3_mbs = (bytes * hz) / (dt * 1024 * 1024);
+    let _ = acc;
 
-    // AES-256-GCM encrypt — wraps over a fresh Vec alloc + memcpy.
     let key = [0x42u8; 32];
     let nonce = [0x17u8; 12];
     let t0 = rdtsc();
@@ -463,10 +460,8 @@ fn print_crypto_bench() {
         total = total.wrapping_add(ct.len());
     }
     let dt = rdtsc().saturating_sub(t0).max(1);
-    let aes_enc_mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
+    let aes_enc_mbs = (bytes * hz) / (dt * 1024 * 1024);
 
-    // AES-256-GCM decrypt in place — the actual hot path in
-    // npkfs::v2::storage::get. No alloc, no memcpy in the timed region.
     let template = crate::crypto::aead_encrypt_aes(&key, &nonce, &buf);
     let mut clones: alloc::vec::Vec<alloc::vec::Vec<u8>> =
         alloc::vec::Vec::with_capacity(ITERS);
@@ -480,11 +475,16 @@ fn print_crypto_bench() {
         }
     }
     let dt = rdtsc().saturating_sub(t0).max(1);
-    let aes_dec_mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
+    let aes_dec_mbs = (bytes * hz) / (dt * 1024 * 1024);
     let _ = (total, ok);
 
+    (blake3_mbs, aes_enc_mbs, aes_dec_mbs)
+}
+
+fn print_crypto_bench() {
+    let (b, e, d) = crypto_bench();
     kprintln!("  Crypto:    BLAKE3 {} MB/s | AES-GCM enc {} dec(in-place) {} MB/s",
-        mb_per_s, aes_enc_mb_per_s, aes_dec_mb_per_s);
+        b, e, d);
 }
 
 pub fn intent_disk_read(args: &str) {

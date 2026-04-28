@@ -162,6 +162,60 @@ pub fn install_salt() -> Option<[u8; 16]> {
     Some(lock.as_ref()?.sb.install_salt)
 }
 
+/// Raw blkdev throughput measurement — write+read 1 MB through
+/// `blkdev::{write,read}_extent`, no AEAD, no BLAKE3, no B-tree.
+/// Allocates 256 contiguous blocks via the FS bitmap, runs the
+/// transfer N times, then frees the blocks. Used by `disk` /
+/// `testdisk` to find the HW ceiling beneath our crypto+FS stack.
+/// Returns `(write_mbs, read_mbs)` or `None` if the FS isn't mounted
+/// or the bench-region allocation fails.
+pub fn raw_blk_bench() -> Option<(u64, u64)> {
+    use crate::interrupts::{rdtsc, tsc_freq};
+    const BLOCKS: u64 = 256; // 1 MB
+    const ITERS: u64 = 4;
+
+    let hz = tsc_freq();
+    if hz == 0 { return None; }
+
+    let mut lock = FS.lock();
+    let fs = lock.as_mut()?;
+
+    let start = fs.bitmap.alloc(BLOCKS).ok()?;
+
+    let buf = alloc::vec![0xC3u8; (BLOCKS as usize) * BLOCK_SIZE];
+    let mut read_buf = alloc::vec![0u8; (BLOCKS as usize) * BLOCK_SIZE];
+
+    let bytes = BLOCKS * BLOCK_SIZE as u64 * ITERS;
+
+    let t0 = rdtsc();
+    let mut write_ok = true;
+    for _ in 0..ITERS {
+        if crate::blkdev::write_extent(start, BLOCKS, &buf).is_err() {
+            write_ok = false;
+            break;
+        }
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let write_mbs = if write_ok { (bytes * hz) / (dt * 1024 * 1024) } else { 0 };
+
+    let t0 = rdtsc();
+    let mut read_ok = true;
+    for _ in 0..ITERS {
+        if crate::blkdev::read_extent(start, BLOCKS, &mut read_buf).is_err() {
+            read_ok = false;
+            break;
+        }
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let read_mbs = if read_ok { (bytes * hz) / (dt * 1024 * 1024) } else { 0 };
+
+    // Free; TRIM is deferred (gc / idle drain) so the bench cost stays
+    // bounded.
+    fs.bitmap.free(start, BLOCKS);
+
+    Some((write_mbs, read_mbs))
+}
+
 /// Drain accumulated TRIM-pending ranges and issue them to the SSD.
 /// Each `bitmap.free` adds to an in-memory list; this drains it in
 /// one batch (merged + sorted ranges → fewer NVMe DEALLOCATE commands).

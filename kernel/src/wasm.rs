@@ -123,6 +123,44 @@ pub fn set_debug_target(ip_packed: u32, port: u16) {
     DEBUG_TARGET.store(v, AtOrd::Release);
 }
 
+#[derive(Clone, Copy)]
+struct BenchCache {
+    blake3_mbs: u64,
+    aes_enc_mbs: u64,
+    aes_dec_mbs: u64,
+    raw_write_mbs: u64,
+    raw_read_mbs: u64,
+}
+
+static BENCH_CACHE: Mutex<Option<BenchCache>> = Mutex::new(None);
+
+fn ensure_bench() -> BenchCache {
+    let mut lock = BENCH_CACHE.lock();
+    if let Some(b) = *lock { return b; }
+
+    let (blake3_mbs, aes_enc_mbs, aes_dec_mbs) = crate::intent::crypto_bench();
+    let (raw_write_mbs, raw_read_mbs) =
+        crate::storage::npkfs::v2::storage::raw_blk_bench().unwrap_or((0, 0));
+
+    let result = BenchCache {
+        blake3_mbs, aes_enc_mbs, aes_dec_mbs, raw_write_mbs, raw_read_mbs,
+    };
+    *lock = Some(result);
+    result
+}
+
+fn bench_sys_info(key: i32) -> i64 {
+    let b = ensure_bench();
+    match key & 0xFF {
+        30 => b.blake3_mbs as i64,
+        31 => b.aes_enc_mbs as i64,
+        32 => b.aes_dec_mbs as i64,
+        33 => b.raw_write_mbs as i64,
+        34 => b.raw_read_mbs as i64,
+        _ => -1,
+    }
+}
+
 pub fn get_debug_target() -> (u32, u16) {
     let v = DEBUG_TARGET.load(AtOrd::Acquire);
     ((v >> 16) as u32, (v & 0xFFFF) as u16)
@@ -1224,6 +1262,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 // ── Process tracking (keys 20-29) → process table ──
                 // 20: count, 21: pid_at_index, 22-29: query by PID
                 20..=29 => crate::process::sys_info(key),
+
+                // ── Bench probes (keys 30-34) → cached on first call ──
+                // 30: BLAKE3 MB/s, 31: AES-GCM enc MB/s,
+                // 32: AES-GCM dec(in-place) MB/s,
+                // 33: raw blkdev write MB/s, 34: raw blkdev read MB/s.
+                // First call across any of these triggers ~100 ms of
+                // measurement; results live in BENCH_CACHE until reboot.
+                30..=34 => bench_sys_info(key),
+
                 _ => -1,
             }
         },

@@ -311,6 +311,23 @@ pub extern "C" fn _start() {
     print_dec(total_bytes / (1024 * 1024));
     host::print(" MB)\n");
 
+    // Ceiling probes — what the HW + crypto can do in isolation, vs
+    // the FS-stack throughput above. First sys_info(30..) call
+    // triggers the bench; the kernel caches the result until reboot.
+    host::print("\n  Crypto:    BLAKE3 ");
+    print_dec(host::bench_blake3_mbs());
+    host::print(" MB/s | AES-GCM enc ");
+    print_dec(host::bench_aes_enc_mbs());
+    host::print(" dec ");
+    print_dec(host::bench_aes_dec_mbs());
+    host::print(" MB/s\n");
+
+    host::print("  Raw NVMe:  WRITE ");
+    print_dec(host::bench_raw_write_mbs());
+    host::print(" MB/s, READ ");
+    print_dec(host::bench_raw_read_mbs());
+    host::print(" MB/s  (1 MB extent, no FS, no crypto)\n");
+
     if total_fails == 0 {
         host::print("\n[testdisk] ALL OK\n");
     } else {
