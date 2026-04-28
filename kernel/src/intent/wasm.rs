@@ -65,6 +65,8 @@ pub fn intent_run(args: &str) {
     // verified at install time, (b) the user explicitly typed `run`,
     // (c) the wasmi sandbox bounds memory + fuel + host-fn surface.
     // AUDIT stays off — apps should not introspect kernel state.
+    let ticks_at_create = crate::interrupts::ticks();
+    let core_at_create = crate::smp::per_core::current_core_id();
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
             | capability::Rights::WRITE
@@ -75,6 +77,8 @@ pub fn intent_run(args: &str) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
+    kprintln!("[npk] cap-create: ticks={}, core={}, expires_at={}",
+        ticks_at_create, core_at_create, ticks_at_create + 6000);
 
     kprint!("[npk] Running '{}' (hash: ", module_name);
     for b in &hash[..4] { kprint!("{:02x}", b); }
