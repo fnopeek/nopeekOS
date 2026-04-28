@@ -36,7 +36,7 @@ npk> ping google.ch                  # ICMP ping (with DNS resolution)
 npk> traceroute 8.8.8.8              # Network path tracing
 npk> resolve google.com              # DNS resolution
 npk> http example.com /              # HTTP GET (full TCP/IP stack)
-npk> https sandbox.nopeek.ch /       # HTTPS GET (TLS 1.3, AES-256-GCM / ChaCha20)
+npk> https sandbox.nopeek.ch /       # HTTPS GET (TLS 1.3, AES-NI hardware crypto)
 npk> http example.com / > mypage     # Fetch and store in npkFS
 npk> update                          # OTA update (ECDSA P-384 signed, SHA-384 verified)
 npk> reboot                          # ACPI reset + PCI CF9 + triple-fault fallback
@@ -101,11 +101,11 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  Cores 1..N = Workers       │  Dirty-region compositing  │
  │  MONITOR/MWAIT wakeup       │  GPU BCS blit (ExecList)   │
  ├──────────────────────────────────────────────────────────┤
- │  npkFS                      │  Crypto Engine             │
- │  COW B-tree, BLAKE3 hashing │  ChaCha20-Poly1305 AEAD   │
- │  Rotating superblock        │  AES-128/256-GCM (TLS)    │
- │  LRU cache, WAL journal     │  TLS 1.3: X25519 + P-384  │
- │  Batch TRIM for SSD         │  ECDSA P-384 signatures   │
+ │  npkFS v2                   │  Crypto Engine             │
+ │  Content-addressed trees    │  AES-256-GCM (HW AES-NI)  │
+ │  CoW B-tree, BLAKE3 (AVX2) │  BLAKE3 hashing (AVX2)    │
+ │  NVMe queue depth 128       │  TLS 1.3: X25519 + P-384  │
+ │  In-place AEAD decrypt      │  ECDSA P-384 signatures   │
  ├──────────────────────────────────────────────────────────┤
  │  Capability Vault           │  OTA Updates               │
  │  256-bit tokens, deny-all   │  ECDSA P-384 signed        │
@@ -131,7 +131,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
 ### Capabilities, Not Permissions
 
 No `chmod`, no ACLs, no root, no sudo.
-Every resource requires a cryptographic token (256-bit, ChaCha20 CSPRNG, post-quantum safe).
+Every resource requires a cryptographic token (256-bit, CSPRNG, post-quantum safe).
 WASM modules receive delegated capabilities with limited rights and expiry.
 Everything is audited.
 
@@ -173,7 +173,7 @@ Every execution is a sandboxed WASM module:
 ### Phase 2 -- Capability System
 
 - [x] Capability Vault (256-bit random token IDs (post-quantum safe))
-- [x] ChaCha20 CSPRNG (RFC 7539, RDRAND-seeded, forward secrecy)
+- [x] CSPRNG (RFC 7539, RDRAND-seeded, forward secrecy)
 - [x] Token delegation with rights monotonicity
 - [x] Temporal scoping (tick-based expiry)
 - [x] Transitive revocation
@@ -224,9 +224,12 @@ Every execution is a sandboxed WASM module:
 
 ### Phase 6 -- Crypto & Identity
 
-- [x] ChaCha20-Poly1305 AEAD encryption (RFC 8439)
-- [x] Passphrase-based identity (BLAKE3-KDF -> 256-bit master key)
-- [x] Encryption at rest (all npkFS objects encrypted by default)
+- [x] **AES-256-GCM AEAD encryption** — primary at-rest cipher, hardware-accelerated (AES-NI + PCLMULQDQ on N100)
+- [x] **BLAKE3 hashing** — AVX2 backend on x86_64, integrity verify on every read
+- [x] **SSE/AVX2 kernel bring-up** (v0.85.x) — CR4.OSFXSR/OSXMMEXCPT/OSXSAVE + XSETBV before first Rust instruction
+- [x] ChaCha20-Poly1305 AEAD (TLS_CHACHA20_POLY1305_SHA256 cipher-suite for peer compat)
+- [x] Passphrase-based identity (BLAKE3-KDF -> 256-bit master key, 16-byte per-install salt)
+- [x] Encryption at rest (all npkFS blobs AES-256-GCM, integrity verify via BLAKE3)
 - [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
 - [x] TLS 1.3 (RFC 8446, X25519 + ECDH P-384 key exchange)
 - [x] TLS 1.3: AES-128-GCM-SHA256 + AES-256-GCM-SHA384 cipher suites (via RustCrypto aes-gcm crate)
@@ -504,8 +507,8 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [x] **Layout leaf-padding** (`v0.82.1`) — Text/Icon/Input/Checkbox/Canvas honour their own `Modifier::Padding` so `prefab::menu_bar` and `prefab::badge` finally render with breathing room between siblings.
 - [x] **Click-to-focus only on Inputs** (`v0.82.1`) — clicks on buttons / nav rows / menu items no longer steal keyboard focus from the search bar. Tab/Shift+Tab still walks every focusable.
 
-> **Phase 10 polish is parked from 2026-04-28** so npkFS v2 can ship
-> as the foundation for Phase 11. Items below resume after v2 lands.
+> **2026-04-28 — npkFS v2 + HW Crypto shipped (kernel v0.85.5).**
+> Phase 10 polish + loft work resumes from this point.
 
 - [ ] **Tile subdivision + full diff cache** (~3–5 d) — 512×512 grid + per-tile content-hash, hover/key change → only dirty tiles re-rasterized instead of whole window.
 - [ ] **Static visual effects** (`Shadow` / `Transition` / `Scale` outside pseudo-states) — needs compositing-layer pass (sub-tree → off-screen layer texture → blit with transform/effect). ~1 Woche, größerer Brocken.
@@ -519,22 +522,34 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [ ] Runtime WASM generation (AI writes modules)
 - [ ] Semantic search in content store
 
-### Phase 11.5 -- npkFS v2: Real Content-Addressed Directories
+### Phase 11.5 -- npkFS v2: Real Content-Addressed Directories ✅ DONE 2026-04-28
 
-Acknowledged tech debt. v1's path-as-key model leaks across the
-intent loop, the wallpaper subsystem, loft, and every `.dir`-marker
-write. List performance is `O(N_total)` per call; rename is
-structurally impossible. Will not scale to AI-generated content.
+Shipped in kernel v0.83.x..0.85.x. v1's path-as-key + `.dir` marker
+model is gone; v2 is Git-style trees with content-addressed directory
+objects, walk-by-hash path resolution, and AES-256-GCM at-rest
+encryption with hardware AES-NI.
 
-- [ ] Tree-object format (Git-style `(name, hash, kind, size)` lists, encrypted)
-- [ ] Walk-by-hash path resolution (`O(depth × log N)` instead of `O(N)`)
-- [ ] `O(depth)` mutations + cheap rename + native `npk_fs_mkdir`
-- [ ] Mark-and-sweep GC, snapshots fall out for free
-- [ ] Locked default directory tree (`sys/{config,wasm,fonts,icons}` + `home/<name>/{documents,downloads,pictures,projects,.trash}`) created by the installer, no `.dir` markers anywhere
-- [ ] **Clean break, no migration** — v2 ships as fresh-install only. Old v1 disks get a "reinstall to upgrade" message; v1 code deletes in the same release.
-- [ ] Host-fn path-string surface unchanged — apps don't rebuild
+- [x] Tree-object format (Git-style `(name, hash, kind, size)` lists, encrypted)
+- [x] Walk-by-hash path resolution (`O(depth × log N)` instead of `O(N)`)
+- [x] `O(depth)` mutations + cheap rename + native `npk_fs_mkdir`
+- [x] Mark-and-sweep GC, snapshots fall out for free
+- [x] Locked default directory tree (`sys/{config,wasm,fonts,icons}` + `home/<name>/{documents,downloads,pictures,projects,.trash}`) created by the installer, no `.dir` markers anywhere
+- [x] Clean break, no migration — v2 ships as fresh-install only
+- [x] Host-fn path-string surface unchanged — apps didn't rebuild
 
-Spec + design rationale + default tree layout: see [`NPKFS_V2.md`](NPKFS_V2.md).
+**Performance** (v0.85.5 testdisk on N100 NUC, cache-warm):
+
+| op | scalar baseline (0.84.3) | v0.85.5 (HW AES-NI + AVX2 BLAKE3 + queue + in-place) |
+|---|---|---|
+| 256 B write | 1500 iops | 1736 iops |
+| 256 B read | 4000 iops | 4519 iops |
+| 1 MB write | 75 MB/s | **208 MB/s** |
+| 1 MB read | 87 MB/s | **216 MB/s** |
+| 16 MB write | 70 MB/s | 158 MB/s |
+| 16 MB read | 83 MB/s | **195 MB/s** |
+| energy / byte | 53 nJ | **11.5 nJ** (5× more efficient) |
+
+Spec + design rationale: see [`NPKFS_V2.md`](NPKFS_V2.md).
 
 ---
 
@@ -548,9 +563,11 @@ Spec + design rationale + default tree layout: see [`NPKFS_V2.md`](NPKFS_V2.md).
 | WASM | wasmi v1.0 | no_std, fuel metering |
 | Filesystem | npkFS | COW, BLAKE3, SSD-native |
 | Hashing | BLAKE3 | Fast, secure, streaming |
-| CSPRNG | ChaCha20 (RFC 7539) | RDRAND seed, forward secrecy |
-| AEAD | ChaCha20-Poly1305 (RFC 8439) | Encryption at rest + TLS |
-| AES-GCM | aes-gcm crate (RustCrypto) | TLS 1.3 (128/256-bit) |
+| CSPRNG | RFC 7539 stream cipher | RDRAND seed, forward secrecy |
+| At-rest AEAD | **AES-256-GCM** (HW AES-NI + PCLMULQDQ) | npkFS blob encryption, ~200 MB/s sustained |
+| Hashing | **BLAKE3** (HW AVX2 backend) | Integrity verify on every read |
+| Kernel SIMD | SSE/AVX2 enabled (target-feature) | CR4 + XSETBV bring-up in boot.s/trampoline.s |
+| TLS AEAD | aes-gcm + ChaCha20-Poly1305 | All 3 TLS 1.3 cipher suites |
 | TLS | 1.3 (RFC 8446) | X25519 + P-384, 3 cipher suites |
 | Identity | Passphrase -> BLAKE3-KDF | No users, no accounts |
 | Key Exchange | X25519 + ECDH P-384 | Ephemeral, per-connection |
@@ -582,15 +599,27 @@ Spec + design rationale + default tree layout: see [`NPKFS_V2.md`](NPKFS_V2.md).
 
 ---
 
-## Performance: npkFS vs ext4
+## Performance
 
-| Operation | npkFS | ext4 (theoretical) |
-|-----------|-------|---------------------|
-| Store | 5.2 I/O per op | 8-10 I/O per op |
-| Fetch (cached) | 0 I/O | 2 I/O (cold) |
-| Delete | 4.4 I/O per op | 8-10 I/O per op |
+**npkFS v2 on Intel N100 NUC (kernel v0.85.5, testdisk Run 2 / cache-warm):**
 
-~50% fewer disk writes per operation = ~50% less SSD wear.
+| Op | Throughput | IOPS |
+|----|------------|------|
+| 256 B write (encrypt + hash + commit) | 444 KB/s | 1736 |
+| 256 B read (decrypt + verify) | 1156 KB/s | 4519 |
+| 1 MB write | 208 MB/s | 198 |
+| 1 MB read | 216 MB/s | 206 |
+| 16 MB read | 195 MB/s | 11 |
+
+Burst power draw on N100: **+2W over idle** (idle 11W → burst 13W).
+Energy efficiency: ~11.5 nJ/byte read — 5× better than scalar
+software crypto, hits 200 MB/s on a fanless 6W TDP CPU.
+
+These numbers include: BLAKE3 content addressing on every put,
+AES-256-GCM AEAD on every read/write, CoW B-tree with CAP.MQES-aware
+NVMe queue (256 entries), 128-slot DMA pool with batched submit,
+in-place AEAD decrypt (zero-copy from staging), 4-phase journal.
+That's at the level of unencrypted ext4 throughput on similar hardware.
 
 ---
 
@@ -632,10 +661,10 @@ nopeekOS/
 │       ├── security/                 # Security subsystem
 │       │   ├── capability.rs         #   Capability Vault (256-bit tokens)
 │       │   ├── audit.rs              #   Audit log ring buffer
-│       │   └── csprng.rs             #   ChaCha20 CSPRNG
+│       │   └── csprng.rs             #   CSPRNG (RFC 7539 stream cipher, RDRAND-seeded)
 │       │
 │       ├── crypto/                   # Cryptography engine
-│       │   ├── aead.rs               #   ChaCha20-Poly1305 AEAD, KDF
+│       │   ├── aead.rs               #   AES-256-GCM (HW AES-NI) + ChaCha20-Poly1305 (TLS only)
 │       │   ├── update_key.rs         #   ECDSA P-384 OTA signing key
 │       │   └── tls/                  #   TLS 1.3 stack
 │       │       ├── mod.rs            #     Handshake + record layer
@@ -774,29 +803,29 @@ and reject any artifact whose signature doesn't match.
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.49.0
+[npk] AI-native Operating System v0.85.5
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
-[npk] TSC: 691 MHz
+[npk] TSC: 806 MHz
 [npk] Physical memory: 15892 MB free (16 GB detected)
-[npk] Kernel footprint: 6340 KB
+[npk] Kernel footprint: 3104 KB
 [npk] Heap: 64 MB (grows on demand, max 2048 MB)
 [npk] Paging: 64 GB identity-mapped, NX enabled
 [npk] APIC timer: 100Hz (base=0xfee00000)
 [npk] smp: 4 cores detected (BSP + 3 APs)
 [npk] smp: 3/3 APs online
+[npk] HWP: 800-2700 MHz (auto-scaling, EPP=0)
 [npk] PCI: 8 devices
 [npk] nvme: KINGSTON SNV2S500G, TRIM=yes, 465 GB
-[npk] xhci: USB keyboard (HID boot protocol)
-[npk] xhci: USB mouse (HID boot protocol)
+[npk] nvme: version 1.4.0, max queue 1024
+[npk] xhci: USB keyboard + mouse (HID boot protocol)
 [npk] Intel Xe GPU: ADL-N (device 46d0), 4K@60Hz HDMI 2.0
 [npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
-[npk] BCS: blitter engine ready
 [npk] Intel I226-V: link UP, MAC 48:21:0b:...
 [npk] WiFi: RTL8852BE (10ec:b852) probed, BAR2 MMIO assigned
 [npk] DHCP: configured 192.168.1.100
-[npk] npkfs: mounted (gen=42, 15 objects)
-[npk] CSPRNG: ChaCha20 (RDRAND-seeded)
+[npk] npkfs: v2 mounted (root_tree=...)
+[npk] CSPRNG: ready (RDRAND-seeded)
 [npk] WASM runtime: wasmi v1.0 (fuel-metered)
 
 [npk] Welcome, Florian.
@@ -810,9 +839,9 @@ and reject any artifact whose signature doesn't match.
 ## Security Architecture
 
 1. **Deny by Default** -- Without a capability token, nothing happens
-2. **Encryption at Rest** -- All data encrypted with ChaCha20-Poly1305 AEAD
+2. **Encryption at Rest** -- All npkFS blobs encrypted with AES-256-GCM (hardware AES-NI), integrity-verified on read via BLAKE3
 3. **Passphrase Identity** -- No users, no accounts. Your passphrase IS your identity
-4. **256-bit Tokens** -- Post-quantum safe (Grover-resistant), ChaCha20 CSPRNG
+4. **256-bit Tokens** -- Post-quantum safe (Grover-resistant), CSPRNG
 5. **Least Privilege** -- WASM modules get only what they need (READ+EXECUTE, no WRITE)
 6. **Temporal Scoping** -- Module capabilities expire after 60 seconds
 7. **Audit Everything** -- Every token operation logged
