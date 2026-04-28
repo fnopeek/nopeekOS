@@ -97,16 +97,17 @@ pub fn upsert(name: &str, data: &[u8], _cap_id: [u8; 32]) -> Result<[u8; 32], Fs
     Ok(*blake3::hash(data).as_bytes())
 }
 
-/// Read an object. Returns `(plaintext, blake3_hash)`. Mirrors v1's tuple
-/// shape so callers don't need rewriting.
+/// Read an object. Returns `(plaintext, content_hash)`. The hash is
+/// the walk hash from the v2 tree (BLAKE3 of the encoded Blob); it
+/// has already been verified against the on-disk integrity by
+/// `storage::get` before the bytes were handed back. We don't
+/// re-hash the plaintext — that was a 0.6 ms tax per 1 MB read for
+/// no security gain.
 pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
     let path = clean_path(name);
     validate(path)?;
-    match v2::fs::read(path) {
-        Ok(Some(data)) => {
-            let h = *blake3::hash(&data).as_bytes();
-            Ok((data, h))
-        }
+    match v2::fs::read_with_hash(path) {
+        Ok(Some((data, hash))) => Ok((data, hash)),
         Ok(None) => Err(FsError::ObjectNotFound),
         Err(e) => Err(path_to_fs_err(e)),
     }
