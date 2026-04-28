@@ -284,9 +284,9 @@ pub fn aead_decrypt_aes(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[
 
 /// Decrypt `buf` (ciphertext || 16-byte tag) in place. On success `buf`
 /// is shrunk to plaintext-only and `Some(())` is returned; on tag
-/// mismatch / short input, the buffer's contents are undefined and
-/// `None` is returned. Saves one Vec alloc + one full-payload memcpy
-/// vs. [`aead_decrypt_aes`] — the win scales with payload size.
+/// mismatch / short input, `buf` is left untouched and `None` is
+/// returned. Saves one Vec alloc + one full-payload memcpy vs.
+/// [`aead_decrypt_aes`] — the win scales with payload size.
 pub fn aead_decrypt_aes_in_place(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -298,10 +298,16 @@ pub fn aead_decrypt_aes_in_place(
 
     let ct_len = buf.len() - TAG_SIZE;
     let tag_bytes: [u8; TAG_SIZE] = buf[ct_len..].try_into().ok()?;
-    buf.truncate(ct_len);
     let tag = Tag::from(tag_bytes);
 
-    cipher.decrypt_in_place_detached(nonce, b"", buf.as_mut_slice(), &tag).ok()
+    // Decrypt only the ciphertext portion in place; leave the trailing
+    // tag bytes alone until we know decrypt succeeded. Truncate after
+    // success so a failed decrypt leaves `buf` recoverable.
+    cipher
+        .decrypt_in_place_detached(nonce, b"", &mut buf[..ct_len], &tag)
+        .ok()?;
+    buf.truncate(ct_len);
+    Some(())
 }
 
 /// Encrypt and authenticate with Additional Authenticated Data (AAD).
