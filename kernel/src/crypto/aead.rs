@@ -255,6 +255,33 @@ fn poly1305_reduce(acc_lo: &mut u128, acc_hi: &mut u8) {
 
 pub const TAG_SIZE: usize = 16;
 
+// AES-256-GCM via the `aes-gcm` crate. The crate's `aes` backend
+// auto-detects AES-NI at runtime via `cpufeatures` and falls back to
+// constant-time soft AES on CPUs without it. N100 has AES-NI, so the
+// fast path is taken in practice.
+//
+// File-system encryption uses AES-GCM; TLS keeps ChaCha20-Poly1305 for
+// cipher-suite compatibility with peers that negotiate it.
+
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+
+/// Encrypt `plaintext` with AES-256-GCM. Returns ciphertext || 16-byte tag.
+/// Hardware-accelerated when AES-NI is present.
+pub fn aead_encrypt_aes(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Nonce::from_slice(nonce);
+    cipher.encrypt(nonce, plaintext).unwrap_or_default()
+}
+
+/// Decrypt `ciphertext_and_tag` with AES-256-GCM. Returns plaintext or
+/// `None` on tag mismatch / malformed input.
+pub fn aead_decrypt_aes(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[u8]) -> Option<Vec<u8>> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Nonce::from_slice(nonce);
+    cipher.decrypt(nonce, ciphertext_and_tag).ok()
+}
+
 /// Encrypt and authenticate. Returns ciphertext || 16-byte tag.
 pub fn aead_encrypt(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Vec<u8> {
     aead_encrypt_aad(key, nonce, &[], plaintext)
