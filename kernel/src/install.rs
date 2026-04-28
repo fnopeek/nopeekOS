@@ -69,11 +69,22 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     kprintln!(" done. (GRUB {} KB, kernel {} KB)",
         GRUB_EFI.len() / 1024, INSTALL_KERNEL.len() / 1024);
 
-    // Step 3: Set blkdev partition offset so npkFS uses the right partition
-    let npkfs_block_offset = npkfs_start_sector / 8; // sectors to 4KB blocks
+    // Step 3: Set blkdev partition offset + size so npkFS uses the right
+    // region. Re-detect via GPT so we get both ends consistently — the
+    // installer just wrote the table, so this round-trip can't disagree.
+    let (npkfs_block_offset, npkfs_block_count) = match gpt::detect_npkfs_partition() {
+        Some(v) => v,
+        None => {
+            // Fall back to manual offset; size unset means "whole disk minus offset",
+            // which is exactly the bug we're trying to avoid, so bail loudly.
+            return Err("partition detection failed after write");
+        }
+    };
     blkdev::set_partition_offset(npkfs_block_offset);
-    kprintln!("[npk] npkFS partition at sector {} (block offset {})",
-        npkfs_start_sector, npkfs_block_offset);
+    blkdev::set_partition_size(npkfs_block_count);
+    kprintln!("[npk] npkFS partition at sector {} ({} blocks, {} MB)",
+        npkfs_start_sector, npkfs_block_count,
+        npkfs_block_count * 4096 / (1024 * 1024));
 
     // Step 4: Format npkFS
     kprint!("[npk] Formatting npkFS...");

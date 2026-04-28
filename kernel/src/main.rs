@@ -209,10 +209,14 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
                 }
             }
         } else {
-            // Normal boot: detect GPT partition layout, mount existing npkFS
+            // Normal boot: detect GPT partition layout, mount existing npkFS.
+            // Set BOTH offset AND size — without the size, block_count()
+            // overshoots into the backup-GPT region and the bitmap can
+            // hand out blocks that fail to write with OutOfRange.
             if nvme::is_available() {
-                if let Some(offset) = gpt::detect_npkfs_offset() {
+                if let Some((offset, size)) = gpt::detect_npkfs_partition() {
                     blkdev::set_partition_offset(offset);
+                    blkdev::set_partition_size(size);
                 }
             }
 
