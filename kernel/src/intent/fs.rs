@@ -504,21 +504,27 @@ fn print_cpu_features() {
     let hw_osxsave= (ecx & (1 << 27)) != 0;
     let hw_avx    = (ecx & (1 << 28)) != 0;
 
-    // CPUID(7,0) EBX bit 5 = AVX2.
+    // CPUID(7,0) — extended features. EBX bit 5 = AVX2.
+    // ECX bit 10 = VPCLMULQDQ (VEX/EVEX-encoded carry-less multiply,
+    // 256/512-bit parallel — Ice Lake / Zen 3+. polyval 0.7+ requires
+    // this for its HW path; N100 (Atom-class) likely does NOT have it
+    // even though plain PCLMULQDQ works.)
     let cpuid7 = unsafe { __cpuid(7) };
     let hw_avx2 = (cpuid7.ebx & (1 << 5)) != 0;
+    let hw_vpclmul = (cpuid7.ecx & (1 << 10)) != 0;
 
     // What the cpufeatures crate's runtime detection actually says —
     // same primitives aes-gcm / blake3 see.
-    cpufeatures::new!(crate_aes,        "aes");
-    cpufeatures::new!(crate_pclmulqdq,  "pclmulqdq");
-    cpufeatures::new!(crate_avx2,       "avx2");
+    cpufeatures::new!(crate_aes,         "aes");
+    cpufeatures::new!(crate_pclmulqdq,   "pclmulqdq");
+    cpufeatures::new!(crate_avx2,        "avx2");
     let crate_aes_v       = crate_aes::get();
     let crate_pclmulqdq_v = crate_pclmulqdq::get();
     let crate_avx2_v      = crate_avx2::get();
 
-    kprintln!("  HW(cpuid): aes={} pclmul={} avx={} avx2={} xsave={} osxsave={}",
-        hw_aes as u8, hw_pclmul as u8, hw_avx as u8, hw_avx2 as u8,
+    kprintln!("  HW(cpuid): aes={} pclmul={} vpclmul={} avx={} avx2={} xsave={} osxsave={}",
+        hw_aes as u8, hw_pclmul as u8, hw_vpclmul as u8,
+        hw_avx as u8, hw_avx2 as u8,
         hw_xsave as u8, hw_osxsave as u8);
     kprintln!("  cpufeats:  aes={} pclmul={} avx2={}",
         crate_aes_v as u8, crate_pclmulqdq_v as u8, crate_avx2_v as u8);
