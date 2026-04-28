@@ -238,5 +238,11 @@ pub fn gc() -> Result<GcStats, Error> {
         }
     }
 
+    // Drain accumulated TRIM-pending ranges in one batch. Removed from
+    // the per-commit hot path for IOPS reasons; piggy-backing on `gc`
+    // means the SSD's FTL gets the free-space update at the same time
+    // we'd typically be running maintenance anyway.
+    storage::trim().map_err(Error::Storage)?;
+
     Ok(GcStats { kept: reachable.len(), removed })
 }

@@ -162,6 +162,19 @@ pub fn install_salt() -> Option<[u8; 16]> {
     Some(lock.as_ref()?.sb.install_salt)
 }
 
+/// Drain accumulated TRIM-pending ranges and issue them to the SSD.
+/// Each `bitmap.free` adds to an in-memory list; this drains it in
+/// one batch (merged + sorted ranges → fewer NVMe DEALLOCATE commands).
+/// Pulled out of the per-commit hot path because synchronous TRIMs
+/// were capping write IOPS; call this from `gc` or a periodic idle
+/// sweep so the SSD's FTL eventually learns which blocks are free.
+pub fn trim() -> Result<(), FsError> {
+    let mut lock = FS.lock();
+    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+    fs.bitmap.flush_trims();
+    Ok(())
+}
+
 /// Read every valid v2 superblock slot and return their `root_tree_hash`
 /// values. Used by GC for the snapshot guarantee — anything reachable
 /// from any of the 8 rotating slots stays alive.

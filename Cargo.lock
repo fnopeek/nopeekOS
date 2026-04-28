@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "nopeekos-kernel"
-version = "0.83.8"
+version = "0.83.9"
 dependencies = [
  "aes-gcm",
  "bitflags",

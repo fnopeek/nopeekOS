@@ -57,6 +57,33 @@ pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     }
 }
 
+/// Batched write — submits all payloads in parallel where the backend
+/// supports it (NVMe). Caller passes (block, buf) pairs; offsets are
+/// applied here. Falls back to sequential `write_block` for virtio-blk
+/// (QEMU testing) where queue-depth gains are negligible.
+pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkError> {
+    if items.is_empty() { return Ok(()); }
+    let offset = PARTITION_OFFSET.load(Ordering::Acquire);
+
+    if nvme::is_available() {
+        // Translate FS-relative blocks to disk-absolute and forward.
+        // Tiny stack-friendly buffer: cache flushes top out at ~16
+        // dirty slots in practice; up to 32 is supported (DMA pool
+        // size in nvme.rs).
+        let mut translated: alloc::vec::Vec<(u64, &[u8; BLOCK_SIZE])> =
+            alloc::vec::Vec::with_capacity(items.len());
+        for &(block, buf) in items {
+            translated.push((block + offset, buf));
+        }
+        nvme::write_blocks_batch(&translated)
+    } else {
+        for &(block, buf) in items {
+            virtio_blk::write_block(block + offset, buf)?;
+        }
+        Ok(())
+    }
+}
+
 pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlkError> {
     let offset_sectors = PARTITION_OFFSET.load(Ordering::Acquire) * 8;
     let actual = sector + offset_sectors;
