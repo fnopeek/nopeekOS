@@ -279,11 +279,21 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
     let segs = parse_path(path)?;
     if segs.is_empty() { return Err(PathError::InvalidPath); }
 
-    let blob = Object::Blob(data.to_vec());
-    let (blob_bytes, blob_hash) =
-        blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
-    // File content goes through AEAD if a master key is set.
-    storage::put(&blob_hash, &blob_bytes, /* encrypt */ true)?;
+    // Stream-hash the would-be Blob's content address (no alloc, no
+    // encode) so we can skip `data.to_vec() + encode_and_hash() +
+    // storage::put` entirely when the blob already exists. ~1 ms/MB
+    // saved on dedup hits.
+    let blob_hash = super::object::blob_content_hash(data);
+
+    if !storage::has(&blob_hash) {
+        // Cache-miss path: full encode + AEAD + put.
+        let blob = Object::Blob(data.to_vec());
+        let (blob_bytes, full_hash) =
+            blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+        debug_assert_eq!(blob_hash, full_hash,
+            "stream-hashed blob_content_hash diverged from encode_and_hash");
+        storage::put(&full_hash, &blob_bytes, /* encrypt */ true)?;
+    }
 
     let entry = TreeEntry {
         name: String::from(*segs.last().unwrap()),
