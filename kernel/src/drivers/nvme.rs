@@ -48,7 +48,11 @@ const NVM_DSM: u8 = 0x09;   // Dataset Management (TRIM/Deallocate)
 
 // Queue sizes (entries)
 const ADMIN_QUEUE_SIZE: u16 = 16;
-const IO_QUEUE_SIZE: u16 = 1024;
+// 256 entries is universally supported by NVMe controllers (CAP.MQES on
+// any modern SSD is well above this). 1024 worked on the test rig but
+// blocks at-rest decryption if an SSD reports a smaller MQES — keycheck
+// fails to read and the user sees "wrong passphrase" with no clue why.
+const IO_QUEUE_SIZE: u16 = 256;
 
 // Submission Queue Entry (64 bytes)
 #[repr(C)]
@@ -134,10 +138,10 @@ static DMA_BUF: Mutex<Option<u64>> = Mutex::new(None);
 /// up to `DMA_POOL_SLOTS` commands in flight, ring the doorbell once,
 /// then collect all completions in a single drain.
 ///
-/// 256 slots × 4 KB = 1 MB. A 1 MB blob lands in a single batch; a 16 MB
-/// blob in 16 batches. Going higher keeps the SSD's pipeline full at
-/// the cost of RAM — the SSD's max queue depth is in the thousands.
-const DMA_POOL_SLOTS: usize = 256;
+/// 128 slots × 4 KB = 512 KB. Must stay strictly below `IO_QUEUE_SIZE`
+/// since a full batch submits N commands and the SQ needs at least one
+/// empty slot (head == tail means empty).
+const DMA_POOL_SLOTS: usize = 128;
 static DMA_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
 
 fn mmio_read32(base: u64, offset: usize) -> u32 {
@@ -284,6 +288,12 @@ pub fn init() -> bool {
     kprintln!("[npk] nvme: version {}.{}.{}, max queue {}",
         version >> 16, (version >> 8) & 0xFF, version & 0xFF,
         max_queue_entries);
+
+    if (IO_QUEUE_SIZE as u16) > max_queue_entries {
+        kprintln!("[npk] nvme: IO_QUEUE_SIZE={} exceeds CAP.MQES+1={}, refusing init",
+            IO_QUEUE_SIZE, max_queue_entries);
+        return false;
+    }
 
     // Disable controller
     let cc = mmio_read32(bar0_virt, REG_CC);
