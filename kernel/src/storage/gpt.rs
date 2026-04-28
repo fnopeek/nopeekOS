@@ -73,34 +73,46 @@ fn put_u64(buf: &mut [u8], off: usize, val: u64) {
 /// Detect existing GPT and return npkFS partition block offset.
 /// Returns Some(block_offset) if GPT found with 2+ partitions, None otherwise.
 pub fn detect_npkfs_offset() -> Option<u64> {
+    Some(detect_npkfs_partition()?.0)
+}
+
+/// Detect existing GPT and return npkFS partition (block_offset, block_count).
+/// Both values are in 4 KB blocks. Used by the boot path so blkdev knows
+/// both the start and the size of our partition — without the size,
+/// allocations past the partition end land in the backup-GPT region
+/// at the disk tail and hit `BlkError::OutOfRange`.
+pub fn detect_npkfs_partition() -> Option<(u64, u64)> {
     if !nvme::is_available() { return None; }
 
     let mut hdr = [0u8; 512];
     nvme::read_sector(1, &mut hdr).ok()?;
 
-    // Check GPT signature
     if &hdr[0..8] != b"EFI PART" { return None; }
 
-    // Read first partition entry (sector 2, offset 128 = second entry)
     let mut entry_sec = [0u8; 512];
     nvme::read_sector(2, &mut entry_sec).ok()?;
 
-    // Second partition entry starts at offset 128
+    // Second partition entry starts at offset 128 within the sector.
     let off = 128;
-    // Check type GUID is not all zeros (partition exists)
     let type_guid = &entry_sec[off..off + 16];
     if type_guid == &[0u8; 16] { return None; }
 
-    // Read starting LBA (offset 32 within entry)
     let start_lba = u64::from_le_bytes([
         entry_sec[off + 32], entry_sec[off + 33], entry_sec[off + 34], entry_sec[off + 35],
         entry_sec[off + 36], entry_sec[off + 37], entry_sec[off + 38], entry_sec[off + 39],
     ]);
+    let end_lba = u64::from_le_bytes([
+        entry_sec[off + 40], entry_sec[off + 41], entry_sec[off + 42], entry_sec[off + 43],
+        entry_sec[off + 44], entry_sec[off + 45], entry_sec[off + 46], entry_sec[off + 47],
+    ]);
 
-    if start_lba == 0 { return None; }
+    if start_lba == 0 || end_lba <= start_lba { return None; }
 
-    // Convert sectors to 4KB block offset
-    Some(start_lba / 8)
+    let block_offset = start_lba / 8;
+    // end_lba is inclusive. Block count = floor of usable sector count / 8.
+    let usable_sectors = end_lba + 1 - start_lba;
+    let block_count = usable_sectors / 8;
+    Some((block_offset, block_count))
 }
 
 /// Detect existing GPT and return ESP (EFI System Partition) sector offset.

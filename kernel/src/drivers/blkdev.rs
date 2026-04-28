@@ -15,9 +15,22 @@ pub const BLOCK_SIZE: usize = 4096;
 /// Default 0 = whole disk (for virtio-blk / unpartitioned NVMe).
 static PARTITION_OFFSET: AtomicU64 = AtomicU64::new(0);
 
+/// Partition size in 4KB blocks. Bounds `block_count()` so we don't
+/// allocate past the partition end into the backup-GPT reserved area
+/// (final 34 sectors of the disk). Default 0 = "use whole disk minus
+/// offset" — fine for virtio-blk where there's no partition table at
+/// all.
+static PARTITION_SIZE: AtomicU64 = AtomicU64::new(0);
+
 /// Set partition offset (in 4KB blocks).
 pub fn set_partition_offset(blocks: u64) {
     PARTITION_OFFSET.store(blocks, Ordering::Release);
+}
+
+/// Set partition size (in 4KB blocks). Pair with `set_partition_offset`
+/// at install time so `block_count()` returns the right upper bound.
+pub fn set_partition_size(blocks: u64) {
+    PARTITION_SIZE.store(blocks, Ordering::Release);
 }
 
 #[allow(dead_code)]
@@ -70,7 +83,18 @@ pub fn block_count() -> Option<u64> {
     } else {
         virtio_blk::block_count()
     };
-    total.map(|t| t.saturating_sub(PARTITION_OFFSET.load(Ordering::Acquire)))
+    let after_offset = total.map(|t| t.saturating_sub(PARTITION_OFFSET.load(Ordering::Acquire)))?;
+    let part_size = PARTITION_SIZE.load(Ordering::Acquire);
+    // 0 = unset → fall back to the historical "whole disk minus offset"
+    // behaviour. With a real GPT partition the installer sets a positive
+    // size and we cap there so the bitmap can't allocate into the
+    // backup-GPT region at the end of the disk (writes would hit
+    // BlkError::OutOfRange).
+    if part_size == 0 {
+        Some(after_offset)
+    } else {
+        Some(after_offset.min(part_size))
+    }
 }
 
 pub fn capacity() -> Option<u64> {
