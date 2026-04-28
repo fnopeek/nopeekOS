@@ -48,7 +48,7 @@ const NVM_DSM: u8 = 0x09;   // Dataset Management (TRIM/Deallocate)
 
 // Queue sizes (entries)
 const ADMIN_QUEUE_SIZE: u16 = 16;
-const IO_QUEUE_SIZE: u16 = 64;
+const IO_QUEUE_SIZE: u16 = 1024;
 
 // Submission Queue Entry (64 bytes)
 #[repr(C)]
@@ -132,9 +132,12 @@ static DMA_BUF: Mutex<Option<u64>> = Mutex::new(None);
 /// shared `DMA_BUF`, every block transfer is necessarily synchronous —
 /// the source/dest pointer would race otherwise. The pool lets us submit
 /// up to `DMA_POOL_SLOTS` commands in flight, ring the doorbell once,
-/// then collect all completions in a single drain. Cache flushes that
-/// previously did N synchronous writes now do one parallel batch.
-const DMA_POOL_SLOTS: usize = 32;
+/// then collect all completions in a single drain.
+///
+/// 256 slots × 4 KB = 1 MB. A 1 MB blob lands in a single batch; a 16 MB
+/// blob in 16 batches. Going higher keeps the SSD's pipeline full at
+/// the cost of RAM — the SSD's max queue depth is in the thousands.
+const DMA_POOL_SLOTS: usize = 256;
 static DMA_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
 
 fn mmio_read32(base: u64, offset: usize) -> u32 {
