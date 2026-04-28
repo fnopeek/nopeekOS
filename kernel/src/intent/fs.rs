@@ -398,14 +398,27 @@ pub fn intent_disk_info() {
         Some(cap) => {
             let mb = (cap * 512) / (1024 * 1024);
             let blocks = blkdev::block_count().unwrap_or(0);
-            let dev = if crate::nvme::is_available() { "NVMe" } else { "virtio-blk" };
+            let is_nvme = crate::nvme::is_available();
+            let dev = if is_nvme { "NVMe" } else { "virtio-blk" };
             kprintln!();
             kprintln!("  Block Device ({})", dev);
             kprintln!("  ────────────────────────");
+            if is_nvme {
+                if let Some(model) = crate::nvme::model_name() {
+                    kprintln!("  Model:     {}", model);
+                }
+                if let Some(sn) = crate::nvme::serial_number() {
+                    kprintln!("  Serial:    {}", sn);
+                }
+            }
             kprintln!("  Capacity:  {} sectors / {} blocks ({} MB)", cap, blocks, mb);
             kprintln!("  Sector:    512 bytes");
             kprintln!("  Block:     4096 bytes");
             kprintln!("  TRIM:      {}", if blkdev::has_discard() { "supported" } else { "not available" });
+            if is_nvme {
+                let max_blocks = crate::nvme::max_blocks_per_cmd();
+                kprintln!("  Max/cmd:   {} blocks ({} KB)", max_blocks, max_blocks * 4);
+            }
             kprintln!("  Status:    online");
             kprintln!();
         }
