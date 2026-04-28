@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.86.4"
+version = "0.86.5"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
@@ -67,6 +67,14 @@ features = ["verifying"]
 version = "0.10"
 default-features = false
 features = ["aes", "alloc"]
+
+# cpufeatures — runtime CPU feature detection (cached after first
+# call). aes-gcm + blake3 use this to dispatch to HW or soft path.
+# We poll it directly from the `disk` intent to print which features
+# the userland actually sees, so a HW-vs-detection mismatch is
+# obvious in one glance.
+[dependencies.cpufeatures]
+version = "0.2"
 
 # Widget pipeline (Phase 10) ───────────────────────────────────────────
 
