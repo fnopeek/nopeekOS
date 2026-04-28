@@ -42,18 +42,53 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.85.5`, sdk `0.6.1`,
-  drun `0.6.0`, loft `0.2.1`.
-- **Just shipped (2026-04-28):**
+- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.88.8`, sdk `0.6.1`,
+  drun `0.6.0`, loft `0.2.1`, testdisk `0.5.2`.
+- **Just shipped (2026-04-28 evening — npkFS perf push v0.86 → v0.88.8):**
+  - **NVMe PRP-list extents** (v0.86.0): 1 cmd per FS extent (was 1
+    cmd per 4 KB block — 256× fewer SQ round-trips for 1 MB).
+  - **NVMe parallel cmds in flight** (v0.87.0): up to 4 cmds on a
+    single extent for SSD-channel parallelism.
+  - **Bridge: drop redundant BLAKE3 in `fetch`** (v0.86.7): walk hash
+    passed through instead of re-hashing plaintext (~0.6 ms/MB).
+  - **`Object::decode` in-place** (v0.87.3): `Vec::drain` shifts the
+    postcard prefix off — saves the fresh-Vec alloc + 1 MB memcpy
+    (~0.9 ms/MB on 1 MB reads, ~13 ms on 16 MB).
+  - **`storage::put` dedup-fastpath** (v0.87.6): btree::lookup BEFORE
+    BLAKE3-integrity + AES-GCM-encrypt — 2.2 ms/MB saved on
+    content-addressed rewrites.
+  - **`paths::store` stream-hash** (v0.87.7): blob_content_hash via
+    streaming BLAKE3 (no encode pass) → storage::has-skip on dedup
+    hit. 1 MB write 325 → 558 MB/s.
+  - **Skip BLAKE3-verify in `storage::get`** (v0.88.5): redundant
+    against the AES-GCM tag (key + nonce both derived from hash —
+    tampering anywhere fails the tag check). +27 % reads.
+  - **`read_multi_extent`** (v0.88.8): up to 32 NVMe cmds in flight
+    across multiple extents simultaneously — protects against bitmap
+    fragmentation (a 1 MB blob split into 257 single-block extents
+    used to take 8.5 ms; now ~1–2 ms).
+
+  Bench (testdisk on AirDisk SSD, mixed sizes):
+  - 1 MB read: 216 → 411 MB/s, 16 MB read: 195 → 395 MB/s, 100 MB
+    read: 406 MB/s
+  - 1 MB write (dedup): 208 → 479 MB/s, 16 MB write (dedup): 158 →
+    759 MB/s, 100 MB write (dedup): 785 MB/s
+  - Total throughput: read 251 → 370 MB/s (+47 %), write 217 → 491
+    MB/s (+126 %)
+- **Custom AES-GCM skeleton** (v0.88.0–v0.88.4): `crypto/aead_hw.rs`
+  + `crypto/aead_hw_ghash.rs` are in-tree but NOT wired into the hot
+  path — the custom 4-way-aggregated GHASH math didn't validate
+  (`match=false` against `ghash` crate). Storage path back on the
+  audited `aes-gcm 0.10`. See `memory/project_perf_session_apr28.md`.
+- **Earlier (2026-04-28 morning):**
   - **npkFS v2** — content-addressed Git-style tree objects, real
     directories, walk-by-hash path resolution. Clean break, no
     migration. v1 deleted. See `NPKFS_V2.md`.
-  - **HW Crypto + SSE/AVX2 bring-up** — npkFS storage on AES-256-GCM
-    (AES-NI + PCLMULQDQ), BLAKE3 on AVX2 backend, NVMe queue depth
-    256 + DMA pool 128, in-place AEAD decrypt. Measured: 1 MB write
-    75→208 MB/s, 1 MB read 87→216 MB/s, energy/byte 5× better. CR4
-    OSFXSR/OSXMMEXCPT/OSXSAVE + XSETBV in boot.s/trampoline.s before
-    first Rust instruction. See `memory/project_hw_crypto.md`.
+  - **HW Crypto + SSE/AVX2 bring-up** — AES-256-GCM (AES-NI +
+    PCLMULQDQ), BLAKE3 AVX2, NVMe queue 256 + DMA pool 128, in-place
+    AEAD decrypt. CR4 OSFXSR/OSXMMEXCPT/OSXSAVE + XSETBV in
+    boot.s/trampoline.s before first Rust instruction. See
+    `memory/project_hw_crypto.md`.
 - **Resuming next (Phase 10 polish queue):**
   1. **Tile subdivision + full diff cache** — 512×512 grid + per-tile
      content-hash, so hover/key changes only re-rasterize the dirty
