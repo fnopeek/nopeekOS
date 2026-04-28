@@ -30,6 +30,10 @@ struct State {
     bitmap: Bitmap,
     journal: Journal,
     generation: u64,
+    /// B-tree COW old blocks accumulated across uncommitted `put`s.
+    /// Drained, journaled, and freed in one shot by `commit_root` —
+    /// turns the per-write cost from 5× 4-phase commits into 1.
+    pending_old_blocks: Vec<u64>,
 }
 
 static FS: Mutex<Option<State>> = Mutex::new(None);
@@ -124,6 +128,7 @@ pub fn mount() -> Result<(), FsError> {
 
     *FS.lock() = Some(State {
         cache, sb, bitmap: bmap, journal: jrnl, generation,
+        pending_old_blocks: Vec::new(),
     });
 
     kprintln!(
@@ -200,22 +205,33 @@ pub fn current_root() -> Option<[u8; 32]> {
     Some(lock.as_ref()?.sb.root_tree_hash)
 }
 
-/// Atomically flip the superblock to a new root Tree hash. Same 4-phase
-/// commit as `put`/`remove` so a crash either lands the new root cleanly
-/// or leaves the old one intact.
+/// Atomically flip the superblock to a new root Tree hash AND commit
+/// every accumulated `put` from this batch. One 4-phase commit covers
+/// the SB-flip plus all the Tree/Blob writes, B-tree COW old blocks,
+/// and bitmap+journal updates from the batch. A crash before this
+/// returns leaves the SB on disk pointing at the previous root —
+/// the in-cache uncommitted changes vanish, FS is consistent.
 pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
-    if fs.sb.root_tree_hash == new_root {
+    let need_root_flip = fs.sb.root_tree_hash != new_root;
+    let pending = core::mem::take(&mut fs.pending_old_blocks);
+    if !need_root_flip && pending.is_empty() {
         return Ok(());
     }
-    fs.sb.root_tree_hash = new_root;
+
+    if need_root_flip {
+        fs.sb.root_tree_hash = new_root;
+    }
     fs.generation += 1;
     fs.sb.generation = fs.generation;
     fs.sb.free_blocks = fs.bitmap.free_count();
+    for &b in &pending {
+        fs.journal.record_free(b, 1);
+    }
     fs.sb.journal_head = fs.journal.head();
-    commit(fs, &[])
+    commit(fs, &pending)
 }
 
 // ── Object operations ─────────────────────────────────────────────────
@@ -344,18 +360,19 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
         return Ok(());
     }
 
-    for b in &old_blocks {
-        fs.journal.record_free(*b, 1);
-    }
-
-    fs.generation += 1;
+    // Defer commit. Path-layer mutations (`fs::write` etc.) call N puts
+    // — one per blob + one per rebuilt Tree up to the root — followed
+    // by exactly one `commit_root`. Running a 4-phase commit per put
+    // means N synchronous NVMe-flush cycles for what's logically one
+    // user-visible write; deferring lets `commit_root` cover the lot
+    // in a single 4-phase. The cache holds the dirty data + B-tree
+    // nodes, the bitmap reflects the new allocations, and the SB's
+    // in-memory mirror tracks the new btree_root so subsequent puts
+    // in the same batch see it.
     fs.sb.btree_root = new_root;
     fs.sb.object_count += 1;
     fs.sb.free_blocks = fs.bitmap.free_count();
-    fs.sb.generation = fs.generation;
-    fs.sb.journal_head = fs.journal.head();
-
-    commit(fs, &old_blocks)?;
+    fs.pending_old_blocks.extend(old_blocks);
     Ok(())
 }
 
