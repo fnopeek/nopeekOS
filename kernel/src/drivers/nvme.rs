@@ -654,6 +654,122 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     overall_err.map_or(Ok(()), Err)
 }
 
+/// Submit up to `DMA_POOL_SLOTS` read-block commands in parallel and
+/// wait for them all. `output` is the destination buffer, sized
+/// `blocks.len() * BLOCK_SIZE` — block i lands at `output[i*B..i*B+B]`.
+/// Falls back to sequential `read_block` when the batch exceeds the
+/// pool (or the pool isn't available).
+///
+/// Read-side analog of `write_blocks_batch`. Same SQ submit + drain
+/// pattern, with one key extra: a memory fence after the drain so the
+/// CPU's copy from pool slots doesn't observe stale data ahead of the
+/// DMA writes.
+pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkError> {
+    if blocks.is_empty() { return Ok(()); }
+    if output.len() != blocks.len() * BLOCK_SIZE {
+        return Err(BlkError::OutOfRange);
+    }
+
+    let pool_base = match *DMA_POOL_BASE.lock() {
+        Some(addr) => addr,
+        None => {
+            for (i, &block) in blocks.iter().enumerate() {
+                let dst = &mut output[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
+                let dst_arr: &mut [u8; BLOCK_SIZE] = dst.try_into().unwrap();
+                read_block(block, dst_arr)?;
+            }
+            return Ok(());
+        }
+    };
+
+    // Chunk into pool-sized groups so a 256-block fetch (1 MB blob)
+    // runs as 8 × 32-block parallel batches instead of 256 serial.
+    if blocks.len() > DMA_POOL_SLOTS {
+        let mut offset = 0;
+        while offset < blocks.len() {
+            let take = (blocks.len() - offset).min(DMA_POOL_SLOTS);
+            let chunk_blocks = &blocks[offset..offset + take];
+            let chunk_out = &mut output[offset * BLOCK_SIZE..(offset + take) * BLOCK_SIZE];
+            read_blocks_batch_inner(chunk_blocks, chunk_out, pool_base)?;
+            offset += take;
+        }
+        return Ok(());
+    }
+
+    read_blocks_batch_inner(blocks, output, pool_base)
+}
+
+/// Single ≤ DMA_POOL_SLOTS read batch. Pool-based, queue-depth ≈ N.
+fn read_blocks_batch_inner(blocks: &[u64], output: &mut [u8], pool_base: u64) -> Result<(), BlkError> {
+
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+
+    for (i, &block) in blocks.iter().enumerate() {
+        let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+        if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
+
+        let dma = pool_base + (i as u64) * BLOCK_SIZE as u64;
+
+        let mut cmd = SqEntry::zeroed();
+        cmd.opcode = NVM_READ;
+        cmd.command_id = state.command_id;
+        cmd.nsid = 1;
+        cmd.prp1 = dma;
+        cmd.cdw10 = sector as u32;
+        cmd.cdw11 = (sector >> 32) as u32;
+        cmd.cdw12 = 7;
+        state.command_id = state.command_id.wrapping_add(1);
+
+        let sq_ptr = state.io_sq as *mut SqEntry;
+        unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
+        state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    ring_sq_doorbell(state, 1, state.io_sq_tail);
+
+    let mut completed = 0usize;
+    let mut overall_err: Option<BlkError> = None;
+    let mut spin_budget = 5_000_000u32 * blocks.len() as u32;
+    while completed < blocks.len() {
+        if spin_budget == 0 { return Err(BlkError::Timeout); }
+        spin_budget -= 1;
+
+        let cq_ptr = state.io_cq as *const CqEntry;
+        let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
+        let phase = (entry.status & 1) != 0;
+        if phase != state.io_phase {
+            core::hint::spin_loop();
+            continue;
+        }
+
+        state.io_cq_head = (state.io_cq_head + 1) % IO_QUEUE_SIZE;
+        if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
+
+        let status_code = (entry.status >> 1) & 0x7FF;
+        if status_code != 0 && overall_err.is_none() {
+            overall_err = Some(BlkError::IoError);
+        }
+        completed += 1;
+    }
+    ring_cq_doorbell(state, 1, state.io_cq_head);
+
+    // Ensure DMA writes are visible before we read from the pool.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    if overall_err.is_none() {
+        for i in 0..blocks.len() {
+            let dma = pool_base + (i as u64) * BLOCK_SIZE as u64;
+            let dst = &mut output[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
+            unsafe {
+                core::ptr::copy_nonoverlapping(dma as *const u8, dst.as_mut_ptr(), BLOCK_SIZE);
+            }
+        }
+    }
+
+    overall_err.map_or(Ok(()), Err)
+}
+
 /// Write a 4KB block (8 sectors).
 pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     let mut nvme = NVME.lock();

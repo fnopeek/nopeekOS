@@ -57,6 +57,28 @@ pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     }
 }
 
+/// Batched read — fills `output` with blocks read from disk in parallel
+/// (NVMe). `output.len() == blocks.len() * BLOCK_SIZE`; block i lands at
+/// `output[i*B..(i+1)*B]`. virtio-blk falls back to sequential.
+pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkError> {
+    if blocks.is_empty() { return Ok(()); }
+    let offset = PARTITION_OFFSET.load(Ordering::Acquire);
+
+    if nvme::is_available() {
+        let mut translated: alloc::vec::Vec<u64> =
+            alloc::vec::Vec::with_capacity(blocks.len());
+        for &b in blocks { translated.push(b + offset); }
+        nvme::read_blocks_batch(&translated, output)
+    } else {
+        for (i, &block) in blocks.iter().enumerate() {
+            let dst = &mut output[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
+            let dst_arr: &mut [u8; BLOCK_SIZE] = dst.try_into().unwrap();
+            virtio_blk::read_block(block + offset, dst_arr)?;
+        }
+        Ok(())
+    }
+}
+
 /// Batched write — submits all payloads in parallel where the backend
 /// supports it (NVMe). Caller passes (block, buf) pairs; offsets are
 /// applied here. Falls back to sequential `write_block` for virtio-blk
