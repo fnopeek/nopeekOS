@@ -4,6 +4,7 @@
 
 pub mod aead;
 pub mod aead_hw;
+pub mod aead_hw_ghash;
 pub mod tls;
 pub mod update_key;
 

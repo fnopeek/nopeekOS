@@ -519,7 +519,72 @@ pub fn crypto_bench() -> (u64, u64, u64) {
             hw_enc_mbs, hw_dec_mbs, bytes_match);
     }
 
+    // GHash4 standalone correctness + performance probe.
+    // Compare custom 4-way aggregated GHASH against the `ghash` crate
+    // for byte-identical output across a 1 MB input, then measure
+    // throughput. We only wire it into aead_hw once a hands-free
+    // run shows match=true — until then the storage path stays on
+    // the validated single-block backend.
+    ghash4_probe(&buf, hz, bytes);
+
     (blake3_mbs, aes_enc_mbs, aes_dec_mbs)
+}
+
+/// Validate + bench `aead_hw_ghash::GHash4`. Output is one line:
+///   GHash4: ref=N MB/s mine=N MB/s | match=true|false
+/// `match=true` is the gate for wiring into `aead_hw`.
+fn ghash4_probe(buf: &alloc::vec::Vec<u8>, hz: u64, bytes: u64) {
+    use crate::interrupts::rdtsc;
+    use ghash::universal_hash::{KeyInit, UniversalHash};
+
+    const ITERS: usize = 4;
+
+    // Same H key for both — anything works, GHASH is just a universal hash.
+    let h: [u8; 16] = [
+        0x66, 0xe9, 0x4b, 0xd4, 0xef, 0x8a, 0x2c, 0x3b,
+        0x88, 0x4c, 0xfa, 0x59, 0xca, 0x34, 0x2b, 0x2e,
+    ];
+
+    // Reference: ghash crate (single-block PCLMULQDQ).
+    let nblocks = buf.len() / 16;
+    let blocks_view = unsafe {
+        core::slice::from_raw_parts(buf.as_ptr() as *const ghash::Block, nblocks)
+    };
+
+    let t0 = rdtsc();
+    let mut ref_tag = [0u8; 16];
+    for _ in 0..ITERS {
+        let mut g = ghash::GHash::new(&h.into());
+        g.update(blocks_view);
+        ref_tag = g.finalize().into();
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let ref_mbs = (bytes * hz) / (dt * 1024 * 1024);
+
+    // Custom: 4-way aggregated.
+    let blocks_arr = unsafe {
+        core::slice::from_raw_parts(buf.as_ptr() as *const [u8; 16], nblocks)
+    };
+
+    let t0 = rdtsc();
+    let mut mine_tag = [0u8; 16];
+    for _ in 0..ITERS {
+        unsafe {
+            let mut g = crate::crypto::aead_hw_ghash::GHash4::new(&h);
+            g.update(blocks_arr);
+            mine_tag = g.finalize();
+        }
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let mine_mbs = (bytes * hz) / (dt * 1024 * 1024);
+
+    let matches = ref_tag == mine_tag;
+    kprintln!("  GHash4:    ref={} mine={} MB/s | match={}",
+        ref_mbs, mine_mbs, matches);
+    if !matches {
+        kprintln!("  GHash4:    ref tag = {:02x?}", &ref_tag[..]);
+        kprintln!("  GHash4:    mine    = {:02x?}", &mine_tag[..]);
+    }
 }
 
 fn print_crypto_bench() {
