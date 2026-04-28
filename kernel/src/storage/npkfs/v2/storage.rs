@@ -497,7 +497,7 @@ pub fn remove(hash: &[u8; 32]) -> Result<(), FsError> {
         fs.bitmap.free(cb, 1);
         fs.cache.invalidate(cb);
     }
-    fs.bitmap.flush_trims();
+    // TRIM deferred — see commit() below for why.
 
     Ok(())
 }
@@ -519,7 +519,7 @@ fn rollback_alloc(fs: &mut State, extents: &[Extent], indirect_block: u64) {
     if indirect_block != 0 {
         free_indirect_chain(&mut fs.cache, &mut fs.bitmap, indirect_block);
     }
-    fs.bitmap.flush_trims();
+    // TRIM deferred — see commit() below for why.
 }
 
 // ── 4-phase commit (journal → bitmap+sb → finalize → free) ────────────
@@ -544,7 +544,11 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
         fs.bitmap.free(*b, 1);
         fs.cache.invalidate(*b);
     }
-    fs.bitmap.flush_trims();
+    // TRIM deferred. Each NVMe DEALLOCATE is synchronous (FTL flush)
+    // and a typical fs::write triggers ~5 commits with a few freed
+    // blocks each — running flush_trims here capped write IOPS at ~3.
+    // Freed blocks stay tracked in `trim_pending` (memory only) until
+    // a future idle-task drains them in big batches.
     Ok(())
 }
 
