@@ -453,7 +453,7 @@ fn print_crypto_bench() {
     let mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
     let _ = acc; // prevent the loop from being optimised away
 
-    // AES-256-GCM
+    // AES-256-GCM encrypt — wraps over a fresh Vec alloc + memcpy.
     let key = [0x42u8; 32];
     let nonce = [0x17u8; 12];
     let t0 = rdtsc();
@@ -463,10 +463,28 @@ fn print_crypto_bench() {
         total = total.wrapping_add(ct.len());
     }
     let dt = rdtsc().saturating_sub(t0).max(1);
-    let aes_mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
-    let _ = total;
+    let aes_enc_mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
 
-    kprintln!("  Crypto:    BLAKE3 {} MB/s, AES-256-GCM {} MB/s", mb_per_s, aes_mb_per_s);
+    // AES-256-GCM decrypt in place — the actual hot path in
+    // npkfs::v2::storage::get. No alloc, no memcpy in the timed region.
+    let template = crate::crypto::aead_encrypt_aes(&key, &nonce, &buf);
+    let mut clones: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+        alloc::vec::Vec::with_capacity(ITERS);
+    for _ in 0..ITERS { clones.push(template.clone()); }
+
+    let t0 = rdtsc();
+    let mut ok = 0usize;
+    for c in clones.iter_mut() {
+        if crate::crypto::aead_decrypt_aes_in_place(&key, &nonce, c).is_some() {
+            ok = ok.wrapping_add(1);
+        }
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let aes_dec_mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
+    let _ = (total, ok);
+
+    kprintln!("  Crypto:    BLAKE3 {} MB/s | AES-GCM enc {} dec(in-place) {} MB/s",
+        mb_per_s, aes_enc_mb_per_s, aes_dec_mb_per_s);
 }
 
 pub fn intent_disk_read(args: &str) {
