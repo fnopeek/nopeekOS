@@ -17,10 +17,12 @@
 #
 # target-feature overlays the built-in x86_64-unknown-none defaults
 # (which force +soft-float / -sse for "no FPU" kernels). We want SSE
-# + AES-NI + PCLMUL so the aes-gcm crate compiles in its hardware
-# backend (~50× faster than soft AES) and blake3 pulls in its SIMD
-# backend. CR0/CR4 are configured in boot.s + smp/trampoline.s before
-# the first Rust instruction runs.
+# + AVX2 + AES-NI + PCLMUL so the aes-gcm crate compiles in its
+# hardware backend (~50× faster than soft AES) and blake3 picks its
+# AVX2 backend (~2× faster than SSE4.1, the previous ceiling on read
+# throughput). CR0/CR4/XCR0 are configured in boot.s + smp/trampoline.s
+# before the first Rust instruction runs (CR4.OSXSAVE + XSETBV with
+# x87|SSE|AVX bits is what unlocks the YMM register file).
 
 [target.x86_64-unknown-none]
 runner = "bash build.sh run"
@@ -29,5 +31,5 @@ runner = "bash build.sh run"
 rustflags = [
     "-C", "link-arg=-Tkernel/linker.ld",
     "-C", "relocation-model=static",
-    "-C", "target-feature=+sse,+sse2,+ssse3,+sse4.1,+sse4.2,+aes,+pclmulqdq,-soft-float",
+    "-C", "target-feature=+sse,+sse2,+ssse3,+sse4.1,+sse4.2,+avx,+avx2,+aes,+pclmulqdq,-soft-float",
 ]
