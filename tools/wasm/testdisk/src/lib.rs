@@ -28,15 +28,15 @@ mod host;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
-// ── 4 MB bump heap (one 1 MB buffer reused for both write + read) ────
+// ── 48 MB bump heap (16 MB write + 16 MB read buffer + slack) ────────
 //
-// Earlier 24 MB caused wasmi instantiation to take ~60 s on the N100
-// (large memory zero-init in the interpreter), which expired the
-// caller's capability before the first host-fn call. Keeping the heap
-// just big enough for one 1 MB buffer + alloc churn keeps startup
-// snappy and the cap valid by the time WASM is calling host fns.
+// Earlier 24 MB triggered a slow instantiate on the N100 — turned out
+// to be the unrelated OutOfRange retry path, fixed once partition-size
+// bounding landed. Now safe to bump back up so we can benchmark a
+// realistic "huge" file (16 MB exercises long indirect-extent chains
+// and is roughly the size of a typical photo/PDF).
 
-const HEAP_SIZE: usize = 4 * 1024 * 1024;
+const HEAP_SIZE: usize = 48 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -101,11 +101,17 @@ fn fmt_size(bytes: usize) -> String {
 /// (size_bytes, count_per_phase, label_prefix) — kept small so a slow
 /// WASM interpreter doesn't spend forever on the unmeasured loop overhead.
 /// We're measuring kernel FS perf, not Rust→Wasm code-gen.
+///
+/// `xhuge` (16 MB × 1) probes the data-bandwidth ceiling: at this size
+/// the indirect-extent chain has thousands of entries, and AEAD +
+/// BLAKE3 are running over real bytes — what we measure here is the
+/// NVMe queue-depth-1 bottleneck, not the FS-layer commit overhead.
 const PLAN: &[(usize, u32, &str)] = &[
-    (256,           50, "small"),
-    (4 * 1024,      20, "medium"),
-    (64 * 1024,     10, "large"),
-    (1024 * 1024,    4, "huge"),
+    (256,                  50, "small"),
+    (4 * 1024,             20, "medium"),
+    (64 * 1024,            10, "large"),
+    (1024 * 1024,           4, "huge"),
+    (16 * 1024 * 1024,      1, "xhuge"),
 ];
 
 const ROOT: &str = ".testdisk";
@@ -258,10 +264,11 @@ pub extern "C" fn _start() {
     host::print("  alloc start, ticks_us_total=");
     let t_alloc0 = host::tsc_now();
 
-    // Single 1 MB buffer reused for every write; mirrored read buffer.
-    // Bump-allocator is just a pointer bump but Rust's `vec![0; N]`
-    // still memsets, so the allocation itself is two memory.fill calls.
-    let max_size = 1024 * 1024 + 32;
+    // 16 MB buffers (sized for the xhuge bucket). Bump allocator just
+    // bumps a pointer, but Rust's `vec![0; N]` still memsets — that's
+    // 32 MB of zeroing at startup. wasmi `memory.fill` lowers to a
+    // host-side memset so it's fast (single-digit ms).
+    let max_size = 16 * 1024 * 1024 + 32;
     let mut write_buf: Vec<u8> = vec![0u8; max_size];
     let mut read_buf: Vec<u8> = vec![0u8; max_size];
 
