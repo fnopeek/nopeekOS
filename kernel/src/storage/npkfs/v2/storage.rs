@@ -549,13 +549,15 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     unsafe { staging.set_len(total_bytes); }
     let t_alloc = rdtsc();
 
-    let mut buf_offset = 0usize;
-    for ext in &all_extents {
-        let bytes = (ext.block_count as usize) * BLOCK_SIZE;
-        let dst = &mut staging[buf_offset..buf_offset + bytes];
-        crate::blkdev::read_extent(ext.start_block, ext.block_count, dst)?;
-        buf_offset += bytes;
-    }
+    // Submit all extents through the multi-extent path so the SSD can
+    // pipeline them in parallel. For a contiguous blob (1 extent) this
+    // matches the old `read_extent` cost; for a fragmented blob (e.g.
+    // 1 MB split into 257 single-block extents after lots of churn)
+    // the parallelism saves seconds-per-MB at the worst.
+    let extent_list: Vec<(u64, u64)> = all_extents.iter()
+        .map(|e| (e.start_block, e.block_count))
+        .collect();
+    crate::blkdev::read_multi_extent(&extent_list, &mut staging[..total_bytes])?;
     let t_dma = rdtsc();
 
     staging.truncate(entry.disk_size as usize);
