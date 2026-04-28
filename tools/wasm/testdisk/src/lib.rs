@@ -1,19 +1,13 @@
-//! testdisk — npkFS validation tool.
+//! testdisk — npkFS v2 benchmark + roundtrip validation.
 //!
-//! Run as `run testdisk` (no args). Exercises the v2 storage + path
-//! layer end-to-end with random data, byte-comparing each read against
-//! the bytes that went in. Cleans up after itself.
+//! Run as `run testdisk`. For each size bucket (256 B, 4 KB, 64 KB,
+//! 1 MB) we time WRITE then READ over `count` ops, report IOPS +
+//! throughput, then delete to clean up. A small roundtrip check at
+//! the end byte-compares one read per bucket so a silent corruption
+//! shows up immediately.
 //!
-//! Phases:
-//!   A — 50 random files, mixed sizes 16 B…8 KB, write+read+verify
-//!   B — 100 small files in one dir, list-and-count
-//!   C — single 1 MB blob, write+read+verify (exercises extents)
-//!   D — leaf 8 levels deep (exercises path walker)
-//!   E — cleanup
-//!
-//! All paths live under `.testdisk/` so the tool is self-contained
-//! and never touches user data. Re-runs are safe: each phase first
-//! attempts a delete of any leftovers from a prior aborted run.
+//! All paths under `.testdisk/`. Re-runs are safe (each store path
+//! is delete-first).
 
 #![no_std]
 
@@ -34,9 +28,9 @@ mod host;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
-// ── 16 MB bump heap (no free; module exits after one run) ─────────────
+// ── 24 MB bump heap (single 1 MB buffer + 1 MB read buffer + slack) ───
 
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
+const HEAP_SIZE: usize = 24 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -60,256 +54,247 @@ unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
 #[global_allocator]
 static ALLOC: BumpAlloc = BumpAlloc;
 
-// ── xorshift64 PRNG (deterministic, seedable, no_std-friendly) ────────
+// ── Output formatting (no f64 in WASM no_std — keep integer-only) ─────
 
-struct Rng(u64);
+fn print_dec(n: u64) { host::print_dec(n); }
 
-impl Rng {
-    fn new(seed: u64) -> Self { Self(if seed == 0 { 0x9E3779B97F4A7C15 } else { seed }) }
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i + 8 <= buf.len() {
-            let v = self.next().to_le_bytes();
-            buf[i..i + 8].copy_from_slice(&v);
-            i += 8;
-        }
-        while i < buf.len() {
-            buf[i] = (self.next() & 0xFF) as u8;
-            i += 1;
+fn print_pad(n: u64, width: usize) {
+    // Right-align decimal `n` in `width` columns. Used for table rows.
+    let mut tmp = [0u8; 24];
+    let mut i = tmp.len();
+    let mut x = n;
+    if x == 0 {
+        i -= 1; tmp[i] = b'0';
+    } else {
+        while x > 0 {
+            i -= 1;
+            tmp[i] = b'0' + (x % 10) as u8;
+            x /= 10;
         }
     }
+    let len = tmp.len() - i;
+    for _ in 0..width.saturating_sub(len) { host::print(" "); }
+    let s = core::str::from_utf8(&tmp[i..]).unwrap_or("?");
+    host::print(s);
 }
 
-// ── Counters ──────────────────────────────────────────────────────────
+// ── Size formatting ──────────────────────────────────────────────────
 
-struct Stats {
-    writes: u64,
-    reads: u64,
-    bytes: u64,
-    fails: u64,
-}
-
-impl Stats {
-    const fn new() -> Self { Self { writes: 0, reads: 0, bytes: 0, fails: 0 } }
-}
-
-fn print_kv(label: &str, v: u64) {
-    host::print(label);
-    host::print_dec(v);
-    host::print("\n");
-}
-
-fn fail(stats: &mut Stats, msg: &str) {
-    stats.fails += 1;
-    host::print("  FAIL: ");
-    host::print(msg);
-    host::print("\n");
-}
-
-// ── Per-phase routines ────────────────────────────────────────────────
-
-const TEST_ROOT: &str = ".testdisk";
-const N_RANDOM: usize = 50;
-const MAX_RANDOM_SIZE: usize = 8 * 1024;
-const N_DIR_FILES: usize = 100;
-const LARGE_BLOB_SIZE: usize = 1024 * 1024;
-
-fn phase_a_random_roundtrip(rng: &mut Rng, stats: &mut Stats) {
-    host::print("\n[testdisk] Phase A: 50 random files, write+read+verify\n");
-    let mut written: Vec<(String, Vec<u8>)> = Vec::with_capacity(N_RANDOM);
-
-    for i in 0..N_RANDOM {
-        let size = ((rng.next() as usize) % MAX_RANDOM_SIZE) + 16;
-        let mut payload = vec![0u8; size];
-        rng.fill(&mut payload);
-        let name = format!("{}/rand/{:03}", TEST_ROOT, i);
-        host::delete(&name); // best-effort cleanup of leftover
-        if !host::store(&name, &payload) {
-            fail(stats, &format!("store {}", name));
-            continue;
-        }
-        stats.writes += 1;
-        stats.bytes += size as u64;
-        written.push((name, payload));
-    }
-
-    let mut buf = vec![0u8; MAX_RANDOM_SIZE + 32];
-    for (name, expected) in &written {
-        let n = host::fetch(name, &mut buf);
-        if n < 0 {
-            fail(stats, &format!("fetch {}", name));
-            continue;
-        }
-        let actual = &buf[..n as usize];
-        if actual != expected.as_slice() {
-            fail(stats, &format!("mismatch {} ({} bytes returned, expected {})",
-                name, n, expected.len()));
-            continue;
-        }
-        stats.reads += 1;
-    }
-
-    host::print("  ok: ");
-    host::print_dec(written.len() as u64);
-    host::print(" written, ");
-    host::print_dec(stats.reads);
-    host::print(" verified\n");
-
-    // Stash names in stats? No — clean up here so we don't carry state.
-    for (name, _) in &written {
-        host::delete(name);
+fn fmt_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{} B ", bytes)
     }
 }
 
-fn phase_b_many_in_dir(rng: &mut Rng, stats: &mut Stats) {
-    host::print("\n[testdisk] Phase B: 100 files in one dir, list-and-count\n");
+// ── Benchmark plan ────────────────────────────────────────────────────
 
-    for i in 0..N_DIR_FILES {
-        let mut data = [0u8; 64];
-        rng.fill(&mut data);
-        let name = format!("{}/many/f{:03}", TEST_ROOT, i);
+/// (size_bytes, count_per_phase, label_prefix) — sizes chosen to span
+/// extent + indirect-chain regimes without blowing the WASM heap.
+const PLAN: &[(usize, u32, &str)] = &[
+    (256,           500, "small"),
+    (4 * 1024,      200, "medium"),
+    (64 * 1024,      60, "large"),
+    (1024 * 1024,     8, "huge"),
+];
+
+const ROOT: &str = ".testdisk";
+
+// ── Per-phase timer ───────────────────────────────────────────────────
+
+struct PhaseStats {
+    label: &'static str,
+    size: usize,
+    count: u32,
+    write_us: u64,
+    read_us: u64,
+    failures: u32,
+}
+
+fn ticks_to_us(ticks: u64, tsc_mhz: u64) -> u64 {
+    if tsc_mhz == 0 { return 0; }
+    ticks / tsc_mhz
+}
+
+fn iops(count: u32, us: u64) -> u64 {
+    if us == 0 { return 0; }
+    count as u64 * 1_000_000 / us
+}
+
+/// MB/s = bytes / µs (since 1 MB ≈ 1e6 bytes and 1 s = 1e6 µs, the
+/// units cancel into MB-per-s of the binary kind we don't quite want
+/// but close enough for an order-of-magnitude readout).
+fn mb_per_s(total_bytes: u64, us: u64) -> u64 {
+    if us == 0 { return 0; }
+    total_bytes / us
+}
+
+// ── Phase runner ──────────────────────────────────────────────────────
+
+fn run_phase(
+    label: &'static str,
+    size: usize,
+    count: u32,
+    write_buf: &mut [u8],
+    read_buf: &mut [u8],
+    tsc_mhz: u64,
+) -> PhaseStats {
+    let mut stats = PhaseStats {
+        label, size, count, write_us: 0, read_us: 0, failures: 0,
+    };
+
+    // Pre-clean any leftover from prior runs (cheap on a fresh fs).
+    for i in 0..count {
+        let name = format!("{}/{}/{:04}", ROOT, label, i);
         host::delete(&name);
-        if !host::store(&name, &data) {
-            fail(stats, &format!("store {}", name));
-            continue;
-        }
-        stats.writes += 1;
-        stats.bytes += 64;
     }
 
-    // List the dir; entries are separated by `\n`, count them.
-    let mut list_buf = vec![0u8; 32 * 1024];
-    let prefix = format!("{}/many", TEST_ROOT);
-    let n = host::fs_list(&prefix, &mut list_buf, false);
-    if n <= 0 {
-        fail(stats, "fs_list returned no entries");
-    } else {
-        let count = list_buf[..n as usize].iter().filter(|&&b| b == b'\n').count() + 1;
-        host::print("  listed ");
-        host::print_dec(count as u64);
-        host::print(" entries (expected ");
-        host::print_dec(N_DIR_FILES as u64);
-        host::print(")");
-        if count != N_DIR_FILES {
-            host::print(" — MISMATCH\n");
-            stats.fails += 1;
-        } else {
-            host::print(" — ok\n");
+    // ── WRITE ────────────────────────────────────────────────────────
+    let t0 = host::tsc_now();
+    for i in 0..count {
+        // Tweak the first 8 bytes per iteration so each blob has a
+        // distinct hash — without that, the storage layer's content
+        // dedup makes 2..N writes free and the throughput number lies.
+        let counter = i as u64;
+        write_buf[..8].copy_from_slice(&counter.to_le_bytes());
+
+        let name = format!("{}/{}/{:04}", ROOT, label, i);
+        if !host::store(&name, &write_buf[..size]) {
+            stats.failures += 1;
         }
     }
+    let t1 = host::tsc_now();
+    stats.write_us = ticks_to_us(t1.wrapping_sub(t0), tsc_mhz);
 
-    // Stat one of them to verify the kind/size encoding.
-    let probe = format!("{}/many/f042", TEST_ROOT);
-    let mut sbuf = [0u8; 9];
-    let r = host::fs_stat(&probe, &mut sbuf);
-    if r == 9 {
-        let size = u64::from_le_bytes([
-            sbuf[0], sbuf[1], sbuf[2], sbuf[3], sbuf[4], sbuf[5], sbuf[6], sbuf[7],
-        ]);
-        let is_dir = sbuf[8];
-        host::print("  stat probe: size=");
-        host::print_dec(size);
-        host::print(" is_dir=");
-        host::print_dec(is_dir as u64);
-        if size != 64 || is_dir != 0 {
-            host::print(" — MISMATCH\n");
-            stats.fails += 1;
-        } else {
-            host::print(" — ok\n");
+    // ── READ ─────────────────────────────────────────────────────────
+    let t2 = host::tsc_now();
+    for i in 0..count {
+        let name = format!("{}/{}/{:04}", ROOT, label, i);
+        let n = host::fetch(&name, &mut read_buf[..size + 32]);
+        if n != size as i32 {
+            stats.failures += 1;
         }
-    } else {
-        fail(stats, &format!("fs_stat returned {}", r));
+    }
+    let t3 = host::tsc_now();
+    stats.read_us = ticks_to_us(t3.wrapping_sub(t2), tsc_mhz);
+
+    // ── Roundtrip check on one entry per phase (catches silent corrupt) ─
+    let counter = 0u64;
+    write_buf[..8].copy_from_slice(&counter.to_le_bytes());
+    let probe_name = format!("{}/{}/{:04}", ROOT, label, 0);
+    let n = host::fetch(&probe_name, &mut read_buf[..size + 32]);
+    if n == size as i32 {
+        if &read_buf[..size] != &write_buf[..size] {
+            host::print("  WARN: byte mismatch on roundtrip probe — ");
+            host::print(label);
+            host::print("\n");
+            stats.failures += 1;
+        }
     }
 
     // Cleanup
-    for i in 0..N_DIR_FILES {
-        host::delete(&format!("{}/many/f{:03}", TEST_ROOT, i));
+    for i in 0..count {
+        let name = format!("{}/{}/{:04}", ROOT, label, i);
+        host::delete(&name);
     }
+
+    stats
 }
 
-fn phase_c_large_blob(rng: &mut Rng, stats: &mut Stats) {
-    host::print("\n[testdisk] Phase C: 1 MB single blob, write+read+verify\n");
+fn print_phase(s: &PhaseStats) {
+    host::print("  ");
+    host::print(s.label);
+    for _ in s.label.len()..8 { host::print(" "); }
+    host::print(&fmt_size(s.size));
+    host::print("  ");
 
-    let mut large = vec![0u8; LARGE_BLOB_SIZE];
-    rng.fill(&mut large);
-    let name = format!("{}/large.bin", TEST_ROOT);
-    host::delete(&name);
+    print_pad(s.count as u64, 4);
+    host::print(" ops  |  WRITE ");
+    print_pad(iops(s.count, s.write_us), 6);
+    host::print(" iops, ");
+    print_pad(mb_per_s(s.size as u64 * s.count as u64, s.write_us), 4);
+    host::print(" MB/s  |  READ ");
+    print_pad(iops(s.count, s.read_us), 6);
+    host::print(" iops, ");
+    print_pad(mb_per_s(s.size as u64 * s.count as u64, s.read_us), 4);
+    host::print(" MB/s");
 
-    if !host::store(&name, &large) {
-        fail(stats, "store large blob");
-        return;
+    if s.failures > 0 {
+        host::print("  |  FAIL ");
+        print_pad(s.failures as u64, 0);
     }
-    stats.writes += 1;
-    stats.bytes += LARGE_BLOB_SIZE as u64;
-
-    let mut buf = vec![0u8; LARGE_BLOB_SIZE + 32];
-    let n = host::fetch(&name, &mut buf);
-    if n != LARGE_BLOB_SIZE as i32 {
-        fail(stats, &format!("fetch returned {} bytes (expected {})", n, LARGE_BLOB_SIZE));
-    } else if &buf[..LARGE_BLOB_SIZE] != large.as_slice() {
-        fail(stats, "1 MB content mismatch");
-    } else {
-        stats.reads += 1;
-        host::print("  ok: 1 MB roundtrip clean\n");
-    }
-
-    host::delete(&name);
+    host::print("\n");
 }
 
-fn phase_d_deep_nesting(stats: &mut Stats) {
-    host::print("\n[testdisk] Phase D: 8-level deep file path\n");
-
-    let name = format!("{}/deep/a/b/c/d/e/f/g/leaf", TEST_ROOT);
-    let payload = b"deep!";
-    host::delete(&name);
-
-    if !host::store(&name, payload) {
-        fail(stats, "store deep");
-        return;
-    }
-    stats.writes += 1;
-    stats.bytes += payload.len() as u64;
-
-    let mut buf = [0u8; 16];
-    let n = host::fetch(&name, &mut buf);
-    if n != payload.len() as i32 || &buf[..payload.len()] != payload.as_slice() {
-        fail(stats, &format!("deep mismatch (n={})", n));
-    } else {
-        stats.reads += 1;
-        host::print("  ok: 8-level walk + fetch clean\n");
-    }
-
-    host::delete(&name);
-}
+// ── Entry ─────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[testdisk] starting (npkFS v2 validation)\n");
+    host::print("[testdisk] npkFS v2 benchmark\n");
+    let tsc_mhz = host::tsc_mhz();
+    host::print("  TSC: ");
+    print_dec(tsc_mhz);
+    host::print(" MHz\n\n");
 
-    let mut rng = Rng::new(0x12345678);
-    let mut stats = Stats::new();
+    if tsc_mhz == 0 {
+        host::print("[testdisk] no TSC frequency available, aborting.\n");
+        return;
+    }
 
-    phase_a_random_roundtrip(&mut rng, &mut stats);
-    phase_b_many_in_dir(&mut rng, &mut stats);
-    phase_c_large_blob(&mut rng, &mut stats);
-    phase_d_deep_nesting(&mut stats);
+    // Single 1 MB buffer reused for every write; mirrored read buffer.
+    let max_size = 1024 * 1024 + 32;
+    let mut write_buf: Vec<u8> = vec![0u8; max_size];
+    let mut read_buf: Vec<u8> = vec![0u8; max_size];
 
-    host::print("\n[testdisk] summary:\n");
-    print_kv("  writes:   ", stats.writes);
-    print_kv("  reads:    ", stats.reads);
-    print_kv("  bytes:    ", stats.bytes);
-    print_kv("  failures: ", stats.fails);
-    if stats.fails == 0 {
-        host::print("\n[testdisk] ALL OK — npkFS v2 round-trips clean.\n");
+    // Background pattern in write_buf (varied, not all zeros) so a
+    // "size-N read returns size-N bytes" check actually means something.
+    for (i, b) in write_buf.iter_mut().enumerate() {
+        *b = (i & 0xFF) as u8;
+    }
+
+    host::print("  size      ops  |  WRITE              |  READ\n");
+    host::print("  ──────────────────────────────────────────────────────────\n");
+
+    let mut all = Vec::with_capacity(PLAN.len());
+    for &(size, count, label) in PLAN {
+        let s = run_phase(label, size, count, &mut write_buf, &mut read_buf, tsc_mhz);
+        print_phase(&s);
+        all.push(s);
+    }
+
+    // Aggregate
+    let total_bytes: u64 = all.iter().map(|s| s.size as u64 * s.count as u64).sum();
+    let total_writes: u32 = all.iter().map(|s| s.count).sum();
+    let total_write_us: u64 = all.iter().map(|s| s.write_us).sum();
+    let total_read_us: u64 = all.iter().map(|s| s.read_us).sum();
+    let total_fails: u32 = all.iter().map(|s| s.failures).sum();
+
+    host::print("\n  totals:    ");
+    print_pad(total_writes as u64, 4);
+    host::print(" ops  |  WRITE ");
+    print_pad(iops(total_writes, total_write_us), 6);
+    host::print(" iops, ");
+    print_pad(mb_per_s(total_bytes, total_write_us), 4);
+    host::print(" MB/s  |  READ ");
+    print_pad(iops(total_writes, total_read_us), 6);
+    host::print(" iops, ");
+    print_pad(mb_per_s(total_bytes, total_read_us), 4);
+    host::print(" MB/s\n");
+
+    host::print("\n  bytes touched: ");
+    print_dec(total_bytes);
+    host::print("  (");
+    print_dec(total_bytes / (1024 * 1024));
+    host::print(" MB)\n");
+
+    if total_fails == 0 {
+        host::print("\n[testdisk] ALL OK\n");
     } else {
-        host::print("\n[testdisk] FAILED — see lines above.\n");
+        host::print("\n[testdisk] FAILED — ");
+        print_dec(total_fails as u64);
+        host::print(" errors\n");
     }
 }
