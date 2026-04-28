@@ -20,31 +20,43 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
-    /// Load bitmap from disk
+    /// Load bitmap from disk (v1 entry — takes the SuperblockRaw shape).
     pub fn load(cache: &mut BlockCache, sb: &SuperblockRaw) -> Result<Self, FsError> {
-        let byte_count = (sb.total_blocks as usize + 7) / 8;
+        Self::load_args(cache, sb.total_blocks, sb.bitmap_start, sb.bitmap_count, sb.data_start)
+    }
+
+    /// Load bitmap from disk (primitive args — used by v2 which has its
+    /// own superblock shape but identical bitmap layout).
+    pub fn load_args(
+        cache: &mut BlockCache,
+        total_blocks: u64,
+        bitmap_start: u64,
+        bitmap_count: u64,
+        data_start: u64,
+    ) -> Result<Self, FsError> {
+        let byte_count = (total_blocks as usize + 7) / 8;
         let mut data = alloc::vec![0u8; byte_count];
 
-        for i in 0..sb.bitmap_count {
+        for i in 0..bitmap_count {
             let mut buf = [0u8; BLOCK_SIZE];
-            cache.read(sb.bitmap_start + i, &mut buf)?;
+            cache.read(bitmap_start + i, &mut buf)?;
             let offset = i as usize * BLOCK_SIZE;
             let copy_len = BLOCK_SIZE.min(byte_count - offset);
             data[offset..offset + copy_len].copy_from_slice(&buf[..copy_len]);
         }
 
-        let free_count = count_free(&data, sb.total_blocks);
+        let free_count = count_free(&data, total_blocks);
 
         Ok(Bitmap {
             data,
-            bitmap_start: sb.bitmap_start,
-            bitmap_count: sb.bitmap_count,
-            data_start: sb.data_start,
-            total_blocks: sb.total_blocks,
+            bitmap_start,
+            bitmap_count,
+            data_start,
+            total_blocks,
             free_count,
             dirty: false,
             trim_pending: Vec::new(),
-            alloc_cursor: sb.data_start,
+            alloc_cursor: data_start,
         })
     }
 

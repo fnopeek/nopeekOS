@@ -323,8 +323,8 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
 
                     crate::crypto::set_master_key(key);
 
-                    match crate::npkfs::fetch(".npk-keycheck") {
-                        Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
+                    match crate::npkfs::fetch(crate::config::KEYCHECK_PATH) {
+                        Ok((data, _)) if &data[..] == crate::config::KEYCHECK_VALUE => {
                             // Success!
                             crate::config::load();
                             let name = crate::config::get("name");

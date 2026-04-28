@@ -35,8 +35,8 @@ pub fn intent_lock() {
 
             crypto::set_master_key(key);
 
-            match crate::npkfs::fetch(".npk-keycheck") {
-                Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
+            match crate::npkfs::fetch(crate::config::KEYCHECK_PATH) {
+                Ok((data, _)) if &data[..] == crate::config::KEYCHECK_VALUE => {
                     crate::config::load();
                     if let Some(name) = crate::config::get("name") {
                         kprintln!("[npk] Welcome back, {}.", name);
@@ -78,8 +78,8 @@ pub fn intent_passwd() {
     let saved_key = crypto::get_master_key();
     crypto::set_master_key(old_key);
 
-    match crate::npkfs::fetch(".npk-keycheck") {
-        Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {}
+    match crate::npkfs::fetch(crate::config::KEYCHECK_PATH) {
+        Ok((data, _)) if &data[..] == crate::config::KEYCHECK_VALUE => {}
         _ => {
             // Restore original key
             if let Some(k) = saved_key { crypto::set_master_key(k); }
@@ -89,7 +89,7 @@ pub fn intent_passwd() {
     }
 
     // Delete old keycheck (still encrypted with old key)
-    let _ = crate::npkfs::delete(".npk-keycheck");
+    let _ = crate::npkfs::delete(crate::config::KEYCHECK_PATH);
 
     // Get new passphrase
     let new_key = loop {
@@ -120,7 +120,7 @@ pub fn intent_passwd() {
 
     // Set new key and re-encrypt keycheck
     crypto::set_master_key(new_key);
-    match crate::npkfs::store(".npk-keycheck", b"nopeekOS.keycheck.v1.valid", crate::capability::CAP_NULL) {
+    match crate::npkfs::store(crate::config::KEYCHECK_PATH, crate::config::KEYCHECK_VALUE, crate::capability::CAP_NULL) {
         Ok(_) => kprintln!("[npk] Passphrase changed successfully."),
         Err(e) => kprintln!("[npk] ERROR: Could not store new keycheck: {}", e),
     }

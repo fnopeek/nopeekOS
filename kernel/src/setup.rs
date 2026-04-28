@@ -107,17 +107,55 @@ pub fn run_first_boot(salt: &[u8; 16]) -> bool {
     setup_identity_and_settings(salt)
 }
 
+/// Create the npkFS v2 locked default tree. Idempotent.
+///
+/// `home/<name>/` mirrors loft's sidebar; `sys/` holds system-managed
+/// read-mostly content; `.system/` holds boot-time metadata that the
+/// kernel reads before `validate_user_name` filters it from listings.
+/// Falls back to "florian" if `name` is empty so the tree still has
+/// a usable home dir.
+fn setup_default_tree(name: &str) -> Result<(), npkfs::v2::fs::Error> {
+    let user = if name.is_empty() { "florian" } else { name };
+
+    let dirs: [alloc::string::String; 13] = [
+        alloc::string::String::from("sys"),
+        alloc::string::String::from("sys/config"),
+        alloc::string::String::from("sys/wasm"),
+        alloc::string::String::from("sys/fonts"),
+        alloc::string::String::from("sys/icons"),
+        alloc::string::String::from(".system"),
+        alloc::string::String::from("home"),
+        alloc::format!("home/{}", user),
+        alloc::format!("home/{}/documents", user),
+        alloc::format!("home/{}/downloads", user),
+        alloc::format!("home/{}/pictures", user),
+        alloc::format!("home/{}/pictures/wallpapers", user),
+        alloc::format!("home/{}/projects", user),
+    ];
+    for d in &dirs {
+        npkfs::v2::fs::ensure_dir(d)?;
+    }
+    // Trailing extras under the user dir (kept separate so the array
+    // above stays a fixed-length slice, easier to spot when reviewing
+    // the canonical layout).
+    npkfs::v2::fs::ensure_dir(&alloc::format!("home/{}/music", user))?;
+    npkfs::v2::fs::ensure_dir(&alloc::format!("home/{}/videos", user))?;
+    npkfs::v2::fs::ensure_dir(&alloc::format!("home/{}/.trash", user))?;
+    Ok(())
+}
+
 /// Common identity + settings setup (used by both fresh install and legacy first boot)
 fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
     // === Identity ===
     kprintln!("[npk] Identity:");
 
-    // Name
+    // Name — captured into a local but NOT persisted yet. Writing
+    // before the master key is set would land a plaintext config blob
+    // on disk; later config::set calls overwrite to encrypted but the
+    // plaintext blob lingers as an orphan in the v2 B-tree, and `gc`
+    // would crash trying to decrypt it during the mark phase.
     kprint!("[npk]   Your name: ");
     let name = read_line();
-    if !name.is_empty() {
-        config::set("name", &name);
-    }
 
     // Passphrase
     let master_key = loop {
@@ -144,10 +182,24 @@ fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
 
     crypto::set_master_key(master_key);
 
-    // Store keycheck
-    match npkfs::store(".npk-keycheck", b"nopeekOS.keycheck.v1.valid", capability::CAP_NULL) {
+    // From here on every FS write goes through the AEAD path, so it's
+    // safe to persist the name.
+    if !name.is_empty() {
+        config::set("name", &name);
+    }
+
+    // Store keycheck (encrypted with the new master key, lives at
+    // .system/keycheck per the v2 locked tree).
+    match npkfs::store(config::KEYCHECK_PATH, config::KEYCHECK_VALUE, capability::CAP_NULL) {
         Ok(_) => {}
         Err(e) => kprintln!("[npk]   WARNING: Could not store keycheck: {}", e),
+    }
+
+    // Lay down the locked default tree once. Idempotent — re-runs are
+    // a no-op. Apps assume these dirs exist; the installer is the only
+    // thing that creates them. See NPKFS_V2.md for the spec.
+    if let Err(e) = setup_default_tree(&name) {
+        kprintln!("[npk]   WARNING: Could not lay down default tree: {:?}", e);
     }
 
     kprintln!();
