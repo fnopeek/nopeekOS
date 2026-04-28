@@ -420,10 +420,53 @@ pub fn intent_disk_info() {
                 kprintln!("  Max/cmd:   {} blocks ({} KB)", max_blocks, max_blocks * 4);
             }
             kprintln!("  Status:    online");
+            print_crypto_bench();
             kprintln!();
         }
         None => kprintln!("[npk] No block device available"),
     }
+}
+
+/// Micro-bench BLAKE3 + AES-256-GCM on a 1 MB buffer to confirm the
+/// HW backends (AVX2 / AES-NI) actually fire at runtime. Throughput
+/// is the giveaway — portable BLAKE3 caps around 300 MB/s on N100,
+/// AVX2 hits 1.5+ GB/s. AES-NI vs soft-AES is even more dramatic.
+fn print_crypto_bench() {
+    use crate::interrupts::{rdtsc, tsc_freq};
+
+    const SIZE: usize = 1024 * 1024;
+    const ITERS: usize = 4;
+
+    let buf = alloc::vec![0xA5u8; SIZE];
+    let hz = tsc_freq();
+    if hz == 0 { return; }
+
+    // BLAKE3
+    let t0 = rdtsc();
+    let mut acc = [0u8; 32];
+    for _ in 0..ITERS {
+        let h = *blake3::hash(&buf).as_bytes();
+        for i in 0..32 { acc[i] ^= h[i]; }
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let bytes = (SIZE * ITERS) as u64;
+    let mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
+    let _ = acc; // prevent the loop from being optimised away
+
+    // AES-256-GCM
+    let key = [0x42u8; 32];
+    let nonce = [0x17u8; 12];
+    let t0 = rdtsc();
+    let mut total = 0usize;
+    for _ in 0..ITERS {
+        let ct = crate::crypto::aead_encrypt_aes(&key, &nonce, &buf);
+        total = total.wrapping_add(ct.len());
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let aes_mb_per_s = (bytes * hz) / (dt * 1024 * 1024);
+    let _ = total;
+
+    kprintln!("  Crypto:    BLAKE3 {} MB/s, AES-256-GCM {} MB/s", mb_per_s, aes_mb_per_s);
 }
 
 pub fn intent_disk_read(args: &str) {
