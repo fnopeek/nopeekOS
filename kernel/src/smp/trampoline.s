@@ -115,8 +115,18 @@ smp_lm64:
     mov 0x108(%rbx), %edi      /* core ID (arg 1, System V ABI) */
     movl $1, 0x10C(%rbx)       /* signal BSP: AP is alive */
 
-    /* Enter Rust — never returns */
-    jmp *%rax
+    /* Enter Rust via CALL (not JMP) so rsp ends up at the alignment
+     * the System V ABI expects at function entry: rsp % 16 == 8
+     * (i.e. an 8-byte return addr is pushed, the callee's first
+     * push %rbp brings rsp back to 16-byte aligned).
+     *
+     * With SSE enabled the compiler may emit MOVAPS / MOVDQA on
+     * stack-relative addresses; those #GP-fault if the frame is
+     * misaligned. Before SSE this bug was latent.
+     *
+     * smp_ap_entry returns ! so the dead ret-addr never actually
+     * returns. The hlt loop below catches it just in case. */
+    call *%rax
 
     cli
 1:  hlt
