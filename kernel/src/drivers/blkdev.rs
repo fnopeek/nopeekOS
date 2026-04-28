@@ -79,6 +79,43 @@ pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkErr
     }
 }
 
+/// Read a contiguous extent of `count` blocks starting at `start_block`
+/// into `output`. NVMe path uses a single PRP-list cmd per
+/// `MAX_BLOCKS_PER_CMD` chunk — a 256-block read drops from 256 cmds
+/// (one per page) to ~2 cmds. virtio-blk path falls back to per-block
+/// reads.
+pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<(), BlkError> {
+    if count == 0 { return Ok(()); }
+    let offset = PARTITION_OFFSET.load(Ordering::Acquire);
+    if nvme::is_available() {
+        nvme::read_extent(start_block + offset, count, output)
+    } else {
+        for i in 0..count {
+            let dst = &mut output[(i as usize) * BLOCK_SIZE..((i as usize) + 1) * BLOCK_SIZE];
+            let dst_arr: &mut [u8; BLOCK_SIZE] = dst.try_into().unwrap();
+            virtio_blk::read_block(start_block + i + offset, dst_arr)?;
+        }
+        Ok(())
+    }
+}
+
+/// Write a contiguous extent. Mirror of [`read_extent`].
+pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), BlkError> {
+    if count == 0 { return Ok(()); }
+    let offset = PARTITION_OFFSET.load(Ordering::Acquire);
+    if nvme::is_available() {
+        nvme::write_extent(start_block + offset, count, input)
+    } else {
+        for i in 0..count {
+            let src: &[u8; BLOCK_SIZE] = input
+                [(i as usize) * BLOCK_SIZE..((i as usize) + 1) * BLOCK_SIZE]
+                .try_into().unwrap();
+            virtio_blk::write_block(start_block + i + offset, src)?;
+        }
+        Ok(())
+    }
+}
+
 /// Batched write — submits all payloads in parallel where the backend
 /// supports it (NVMe). Caller passes (block, buf) pairs; offsets are
 /// applied here. Falls back to sequential `write_block` for virtio-blk
