@@ -81,22 +81,42 @@ pub fn read(path: &str) -> Result<Option<Vec<u8>>, Error> {
 /// overhead. On a 1 MB read with AVX2 BLAKE3, the redundant hash costs
 /// ~0.6 ms — measurable in the testdisk huge-file numbers.
 pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> {
+    use crate::interrupts::{rdtsc, tsc_freq};
+    let t0 = rdtsc();
+
     let root = current_root()?;
     let walk = match paths::walk(&root, path) {
         Ok(w) => w,
         Err(PathError::NotFound) => return Ok(None),
         Err(e) => return Err(e),
     };
+    let t_walk = rdtsc();
+
     if walk.kind != EntryKind::File {
         return Err(PathError::NotADirectory);
     }
     let bytes = storage::get(&walk.hash)
         .map_err(Error::Storage)?
         .ok_or(PathError::Corrupt)?;
-    match super::object::Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
+    let t_get = rdtsc();
+
+    let result = match super::object::Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
         super::object::Object::Blob(b) => Ok(Some((b, walk.hash))),
         super::object::Object::Tree(_) => Err(PathError::Corrupt),
+    };
+    let t_decode = rdtsc();
+
+    if bytes.len() >= 256 * 1024 {
+        let mhz = tsc_freq().max(1) / 1_000_000;
+        crate::kprintln!("[fs::read] {}KB walk={} get={} decode={} (us)",
+            bytes.len() / 1024,
+            (t_walk.saturating_sub(t0)) / mhz,
+            (t_get.saturating_sub(t_walk)) / mhz,
+            (t_decode.saturating_sub(t_get)) / mhz,
+        );
     }
+
+    result
 }
 
 /// List the entries directly under `path`. `path` must resolve to a Dir.

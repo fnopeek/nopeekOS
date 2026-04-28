@@ -551,6 +551,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     linker.func_wrap("env", "npk_fetch",
         |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
          buf_ptr: i32, buf_max: i32| -> i32 {
+            use crate::interrupts::{rdtsc, tsc_freq};
+            let t0 = rdtsc();
             let cap_id = caller.data().cap_id;
             if let Err(e) = capability::check_global(&cap_id, capability::Rights::READ) {
                 kprintln!("[npk] WASM: npk_fetch DENIED (cap_id={:08x}, {:?})",
@@ -562,11 +564,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Some(s) => s,
                 None => return -1,
             };
+            let t_name = rdtsc();
 
             let (content, _) = match crate::npkfs::fetch(&name) {
                 Ok(v) => v,
                 Err(_) => return -1,
             };
+            let t_fetch = rdtsc();
 
             let write_len = content.len().min(buf_max as usize);
             let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
@@ -575,12 +579,25 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             };
             let data = mem.data_mut(&mut caller);
             let start = buf_ptr as usize;
-            if start + write_len <= data.len() {
+            let result = if start + write_len <= data.len() {
                 data[start..start + write_len].copy_from_slice(&content[..write_len]);
                 write_len as i32
             } else {
                 -1
+            };
+            let t_copy = rdtsc();
+
+            if write_len >= 256 * 1024 {
+                let mhz = tsc_freq().max(1) / 1_000_000;
+                kprintln!("[fetch_hf] {}KB name={} fetch={} wasm_copy={} (us)",
+                    write_len / 1024,
+                    (t_name.saturating_sub(t0)) / mhz,
+                    (t_fetch.saturating_sub(t_name)) / mhz,
+                    (t_copy.saturating_sub(t_fetch)) / mhz,
+                );
             }
+
+            result
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
