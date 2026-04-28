@@ -1130,6 +1130,20 @@ pub fn model_name() -> Option<alloc::string::String> {
     Some(alloc::string::String::from(s))
 }
 
+/// Return serial number for display.
+pub fn serial_number() -> Option<alloc::string::String> {
+    let nvme = NVME.lock();
+    let state = nvme.as_ref()?;
+    let s = core::str::from_utf8(&state.serial).unwrap_or("?").trim();
+    Some(alloc::string::String::from(s))
+}
+
+/// Maximum data per single READ/WRITE cmd in 4 KB blocks (clamped to
+/// our DMA pool). Computed from MDTS at init.
+pub fn max_blocks_per_cmd() -> u32 {
+    MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed)
+}
+
 #[allow(dead_code)]
 /// Return capacity in GB.
 pub fn capacity_gb() -> Option<u64> {
