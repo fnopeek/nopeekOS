@@ -1213,6 +1213,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 17 => { let (_, ebx, _) = crate::interrupts::cpuid15(); ebx as i64 },
                 18 => { let (_, _, ecx) = crate::interrupts::cpuid15(); ecx as i64 },
 
+                // 19 → raw TSC reading (monotonic, high-resolution).
+                // Combine with key=10 (tsc_mhz) to convert ticks → time.
+                // 64-bit TSC fits in i64 (sign bit unused for ~150 years
+                // at 2 GHz), so the cast is safe.
+                19 => unsafe { core::arch::x86_64::_rdtsc() as i64 },
+
                 // ── Process tracking (keys 20-29) → process table ──
                 // 20: count, 21: pid_at_index, 22-29: query by PID
                 20..=29 => crate::process::sys_info(key),

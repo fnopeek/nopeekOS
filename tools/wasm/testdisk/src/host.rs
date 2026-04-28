@@ -1,5 +1,7 @@
 //! Host function bindings for testdisk.wasm.
 
+#![allow(dead_code)]
+
 unsafe extern "C" {
     fn npk_print(ptr: i32, len: i32);
 
@@ -9,7 +11,15 @@ unsafe extern "C" {
                    out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_fs_delete(name_ptr: i32, name_len: i32) -> i32;
+
+    /// Generic system-info accessor.
+    /// Key 10 → TSC frequency in MHz.
+    /// Key 19 → raw TSC ticks (monotonic).
+    fn npk_sys_info(key: i32) -> i64;
 }
+
+pub fn tsc_now() -> u64 { unsafe { npk_sys_info(19) as u64 } }
+pub fn tsc_mhz() -> u64 { unsafe { npk_sys_info(10) as u64 } }
 
 pub fn print(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32); }

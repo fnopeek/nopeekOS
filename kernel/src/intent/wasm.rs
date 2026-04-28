@@ -89,7 +89,14 @@ pub fn intent_run(args: &str) {
     // Determine function name: if no args, try _start; otherwise use module name
     let func_name = if args_vec.is_empty() { "_start" } else { module_name };
 
-    match wasm::execute_sandboxed(&wasm_bytes, func_name, &args_vec, module_cap) {
+    // 1 B fuel ≈ ~1 s of busy WASM on the N100 — enough headroom for
+    // benchmark-style modules (testdisk does ~10 M instr per phase) but
+    // still finite, so a buggy infinite loop bails instead of locking
+    // the worker. The default 10 M is too tight for any module that
+    // does real I/O in a loop.
+    match wasm::execute_sandboxed_with_fuel(
+        &wasm_bytes, func_name, &args_vec, module_cap, 1_000_000_000,
+    ) {
         Ok(result) => {
             if !result.output.is_empty() {
                 kprintln!("{}", result.output);
