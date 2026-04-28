@@ -4,6 +4,9 @@
 
 unsafe extern "C" {
     fn npk_print(ptr: i32, len: i32);
+    /// Direct-to-kernel-serial — bypasses the per-app output buffer
+    /// `npk_print` uses, so the message appears in real time.
+    fn npk_log(ptr: i32, len: i32);
 
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
@@ -23,6 +26,11 @@ pub fn tsc_mhz() -> u64 { unsafe { npk_sys_info(10) as u64 } }
 
 pub fn print(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32); }
+}
+
+/// Live-to-serial logging (used for "where did the time go" diagnostics).
+pub fn log(s: &str) {
+    unsafe { npk_log(s.as_ptr() as i32, s.len() as i32); }
 }
 
 /// Strict create — fails if `name` already exists. Caller is expected

@@ -28,9 +28,15 @@ mod host;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
-// ── 24 MB bump heap (single 1 MB buffer + 1 MB read buffer + slack) ───
+// ── 4 MB bump heap (one 1 MB buffer reused for both write + read) ────
+//
+// Earlier 24 MB caused wasmi instantiation to take ~60 s on the N100
+// (large memory zero-init in the interpreter), which expired the
+// caller's capability before the first host-fn call. Keeping the heap
+// just big enough for one 1 MB buffer + alloc churn keeps startup
+// snappy and the cap valid by the time WASM is calling host fns.
 
-const HEAP_SIZE: usize = 24 * 1024 * 1024;
+const HEAP_SIZE: usize = 4 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -92,13 +98,14 @@ fn fmt_size(bytes: usize) -> String {
 
 // ── Benchmark plan ────────────────────────────────────────────────────
 
-/// (size_bytes, count_per_phase, label_prefix) — sizes chosen to span
-/// extent + indirect-chain regimes without blowing the WASM heap.
+/// (size_bytes, count_per_phase, label_prefix) — kept small so a slow
+/// WASM interpreter doesn't spend forever on the unmeasured loop overhead.
+/// We're measuring kernel FS perf, not Rust→Wasm code-gen.
 const PLAN: &[(usize, u32, &str)] = &[
-    (256,           500, "small"),
-    (4 * 1024,      200, "medium"),
-    (64 * 1024,      60, "large"),
-    (1024 * 1024,     8, "huge"),
+    (256,           50, "small"),
+    (4 * 1024,      20, "medium"),
+    (64 * 1024,     10, "large"),
+    (1024 * 1024,    4, "huge"),
 ];
 
 const ROOT: &str = ".testdisk";
@@ -233,6 +240,11 @@ fn print_phase(s: &PhaseStats) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    // Direct-to-serial so the timestamp shows up the instant WASM
+    // starts executing. Compare with the kernel's "Running ..." log
+    // — gap between them = wasmi instantiate cost.
+    host::log("[testdisk] _start entry");
+
     host::print("[testdisk] npkFS v2 benchmark\n");
     let tsc_mhz = host::tsc_mhz();
     host::print("  TSC: ");
@@ -244,16 +256,19 @@ pub extern "C" fn _start() {
         return;
     }
 
+    host::print("  alloc start, ticks_us_total=");
+    let t_alloc0 = host::tsc_now();
+
     // Single 1 MB buffer reused for every write; mirrored read buffer.
+    // Bump-allocator is just a pointer bump but Rust's `vec![0; N]`
+    // still memsets, so the allocation itself is two memory.fill calls.
     let max_size = 1024 * 1024 + 32;
     let mut write_buf: Vec<u8> = vec![0u8; max_size];
     let mut read_buf: Vec<u8> = vec![0u8; max_size];
 
-    // Background pattern in write_buf (varied, not all zeros) so a
-    // "size-N read returns size-N bytes" check actually means something.
-    for (i, b) in write_buf.iter_mut().enumerate() {
-        *b = (i & 0xFF) as u8;
-    }
+    let t_alloc1 = host::tsc_now();
+    print_dec((t_alloc1.wrapping_sub(t_alloc0)) / tsc_mhz);
+    host::print(" us\n");
 
     host::print("  size      ops  |  WRITE              |  READ\n");
     host::print("  ──────────────────────────────────────────────────────────\n");

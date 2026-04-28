@@ -65,20 +65,21 @@ pub fn intent_run(args: &str) {
     // verified at install time, (b) the user explicitly typed `run`,
     // (c) the wasmi sandbox bounds memory + fuel + host-fn surface.
     // AUDIT stays off — apps should not introspect kernel state.
-    let ticks_at_create = crate::interrupts::ticks();
-    let core_at_create = crate::smp::per_core::current_core_id();
+    // 600_000 ticks ≈ 100 minutes at 100 Hz. wasmi's instantiate +
+    // first-touch of large bump heaps eats tens of seconds on the N100
+    // before the module's first host-fn call; the old 60 s TTL was
+    // expired by the time WASM actually started running. 100 min is
+    // generous + bounded so a hung worker still gets reaped.
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
             | capability::Rights::WRITE
             | capability::Rights::EXECUTE
             | capability::Rights::RENDER,
-        Some(6000), // 60 seconds at 100Hz
+        Some(600_000),
     ) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
-    kprintln!("[npk] cap-create: ticks={}, core={}, expires_at={}",
-        ticks_at_create, core_at_create, ticks_at_create + 6000);
 
     kprint!("[npk] Running '{}' (hash: ", module_name);
     for b in &hash[..4] { kprint!("{:02x}", b); }
