@@ -138,19 +138,23 @@ static DMA_BUF: Mutex<Option<u64>> = Mutex::new(None);
 /// up to `DMA_POOL_SLOTS` commands in flight, ring the doorbell once,
 /// then collect all completions in a single drain.
 ///
-/// 128 slots × 4 KB = 512 KB. Must stay strictly below `IO_QUEUE_SIZE`
-/// since a full batch submits N commands and the SQ needs at least one
-/// empty slot (head == tail means empty).
-const DMA_POOL_SLOTS: usize = 128;
+/// 256 slots × 4 KB = 1 MB. Sized to hold `MAX_INFLIGHT` cmds × 128
+/// blocks/cmd = 256 slots, so a 1 MB read can keep two cmds in flight
+/// simultaneously. Must stay strictly below `IO_QUEUE_SIZE` (256).
+const DMA_POOL_SLOTS: usize = 256;
 static DMA_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Number of NVMe commands `read_extent` / `write_extent` keep in
+/// flight before draining. Bounded by both the PRP-list pool and the
+/// DMA pool — each in-flight cmd consumes one PRP-list slot and up to
+/// `MAX_BLOCKS_PER_CMD` data slots. 4 = 1 MB at MDTS=128.
+const MAX_INFLIGHT: usize = 4;
 
 /// PRP-list scratch pool. NVMe spec: a transfer covering ≥3 4 KB pages
 /// uses `prp1` for the first page and a "PRP List" — a 4 KB block
-/// holding up to 512 page-pointers — addressed by `prp2`. Each cmd we
-/// submit with PRP-List uses one slot; a 4-slot pool is enough for the
-/// current synchronous one-cmd-at-a-time pattern, with headroom for
-/// short pipelining bursts.
-const PRP_LIST_POOL_SLOTS: usize = 4;
+/// holding up to 512 page-pointers — addressed by `prp2`. We keep
+/// `MAX_INFLIGHT` slots so all parallel cmds get their own list.
+const PRP_LIST_POOL_SLOTS: usize = MAX_INFLIGHT;
 static PRP_LIST_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Max data blocks per single NVMe READ/WRITE command. Computed from
@@ -923,10 +927,9 @@ fn submit_extent_cmd(
 }
 
 /// Read `count` 4 KB blocks starting at `start_block` into `output`.
-/// Single NVMe cmd per `MAX_BLOCKS_PER_CMD` chunk via the PRP-list
-/// path, instead of one cmd per block. `output.len()` must equal
-/// `count * BLOCK_SIZE`. Falls back to per-block `read_block` when the
-/// DMA pool / PRP list pool aren't initialised.
+/// Up to `MAX_INFLIGHT` PRP-list cmds are kept in flight at once: the
+/// SSD's internal channels stay busy while we drain + memcpy the
+/// completed batch. `output.len()` must equal `count * BLOCK_SIZE`.
 pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<(), BlkError> {
     if count == 0 { return Ok(()); }
     if output.len() != (count as usize) * BLOCK_SIZE {
@@ -946,50 +949,66 @@ pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<()
         }
     };
     let prp_pool_base = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
-
     let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
-        .min(DMA_POOL_SLOTS as u64);
+        .min(DMA_POOL_SLOTS as u64 / MAX_INFLIGHT as u64);
 
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
 
+    // Submit + drain in batches of MAX_INFLIGHT. Each in-flight cmd
+    // owns its own slice of the DMA pool + its own PRP-list slot, so
+    // they can complete out of order. We drain in submission order so
+    // the memcpy-out is straight-line.
     let mut offset = 0u64;
-    let mut prp_slot = 0usize;
     while offset < count {
-        let chunk = (count - offset).min(max_per_cmd);
-        let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-        if start_sector + chunk * 8 > state.total_lbas {
-            return Err(BlkError::OutOfRange);
+        let mut batch: [(u64, u64, u64); MAX_INFLIGHT] = [(0, 0, 0); MAX_INFLIGHT];
+        let mut batch_len = 0usize;
+
+        // Submit phase: queue up to MAX_INFLIGHT cmds.
+        for slot in 0..MAX_INFLIGHT {
+            if offset >= count { break; }
+            let chunk = (count - offset).min(max_per_cmd);
+            let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+            if start_sector + chunk * 8 > state.total_lbas {
+                return Err(BlkError::OutOfRange);
+            }
+
+            let dma_base = pool_base + (slot as u64) * max_per_cmd * BLOCK_SIZE as u64;
+            let prp_list_addr = prp_pool_base + (slot as u64) * BLOCK_SIZE as u64;
+            submit_extent_cmd(state, NVM_READ, start_sector, chunk, dma_base, prp_list_addr);
+            batch[batch_len] = (offset, chunk, dma_base);
+            batch_len += 1;
+            offset += chunk;
         }
 
-        let prp_list_addr = prp_pool_base + (prp_slot as u64) * BLOCK_SIZE as u64;
-        prp_slot = (prp_slot + 1) % PRP_LIST_POOL_SLOTS;
-
-        submit_extent_cmd(state, NVM_READ, start_sector, chunk, pool_base, prp_list_addr);
-        drain_one_completion(state)?;
-
-        // DMA visibility — the SSD's writes to the pool must be flushed
-        // through the CPU's view before we copy out.
+        // Drain phase: wait for every cmd in this batch to finish.
+        for _ in 0..batch_len {
+            drain_one_completion(state)?;
+        }
+        // Make all DMA writes visible before we copy out.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                pool_base as *const u8,
-                output[(offset as usize) * BLOCK_SIZE..].as_mut_ptr(),
-                (chunk as usize) * BLOCK_SIZE,
-            );
+        // Memcpy phase: pool slot → caller buffer for each cmd we just
+        // drained. Order matches submission order, so output is
+        // contiguous block-by-block.
+        for i in 0..batch_len {
+            let (out_off, chunk, dma_base) = batch[i];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    dma_base as *const u8,
+                    output[(out_off as usize) * BLOCK_SIZE..].as_mut_ptr(),
+                    (chunk as usize) * BLOCK_SIZE,
+                );
+            }
         }
-
-        offset += chunk;
     }
 
     Ok(())
 }
 
 /// Write `count` 4 KB blocks of `input` starting at `start_block`.
-/// Single NVMe cmd per `MAX_BLOCKS_PER_CMD` chunk via PRP-list.
-/// `input.len()` must equal `count * BLOCK_SIZE`. Falls back to
-/// per-block `write_block` when DMA / PRP pools aren't initialised.
+/// Up to `MAX_INFLIGHT` cmds in flight at once. Symmetric to
+/// `read_extent` — staged into the DMA pool first, then submitted.
 pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), BlkError> {
     if count == 0 { return Ok(()); }
     if input.len() != (count as usize) * BLOCK_SIZE {
@@ -1009,39 +1028,48 @@ pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), Bl
         }
     };
     let prp_pool_base = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
-
     let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
-        .min(DMA_POOL_SLOTS as u64);
+        .min(DMA_POOL_SLOTS as u64 / MAX_INFLIGHT as u64);
 
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
 
     let mut offset = 0u64;
-    let mut prp_slot = 0usize;
     while offset < count {
-        let chunk = (count - offset).min(max_per_cmd);
-        let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-        if start_sector + chunk * 8 > state.total_lbas {
-            return Err(BlkError::OutOfRange);
+        let mut batch_len = 0usize;
+
+        // Stage + submit phase.
+        for slot in 0..MAX_INFLIGHT {
+            if offset >= count { break; }
+            let chunk = (count - offset).min(max_per_cmd);
+            let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+            if start_sector + chunk * 8 > state.total_lbas {
+                return Err(BlkError::OutOfRange);
+            }
+
+            let dma_base = pool_base + (slot as u64) * max_per_cmd * BLOCK_SIZE as u64;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    input[(offset as usize) * BLOCK_SIZE..].as_ptr(),
+                    dma_base as *mut u8,
+                    (chunk as usize) * BLOCK_SIZE,
+                );
+            }
+            // Per-cmd fence: the SSD must see this slot's payload
+            // before reading it. Combined fence after the loop would
+            // also work but per-cmd is clearer.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+            let prp_list_addr = prp_pool_base + (slot as u64) * BLOCK_SIZE as u64;
+            submit_extent_cmd(state, NVM_WRITE, start_sector, chunk, dma_base, prp_list_addr);
+            batch_len += 1;
+            offset += chunk;
         }
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                input[(offset as usize) * BLOCK_SIZE..].as_ptr(),
-                pool_base as *mut u8,
-                (chunk as usize) * BLOCK_SIZE,
-            );
+        // Drain phase.
+        for _ in 0..batch_len {
+            drain_one_completion(state)?;
         }
-        // Make CPU stores to the pool visible before the SSD reads them.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        let prp_list_addr = prp_pool_base + (prp_slot as u64) * BLOCK_SIZE as u64;
-        prp_slot = (prp_slot + 1) % PRP_LIST_POOL_SLOTS;
-
-        submit_extent_cmd(state, NVM_WRITE, start_sector, chunk, pool_base, prp_list_addr);
-        drain_one_completion(state)?;
-
-        offset += chunk;
     }
 
     Ok(())
