@@ -29,6 +29,11 @@ use alloc::vec::Vec;
 
 const TAG_LEN: usize = 16;
 const BLOCK_LEN: usize = 16;
+/// Chunk size for the interleaved CTR + GHASH single-pass loop.
+/// Tuned to fit in L1d (Gracemont = 48 KB on N100) so both ops touch
+/// the same cache lines without spilling. 4 KB = 256 blocks.
+const CHUNK_BYTES: usize = 4096;
+const CHUNK_BLOCKS: usize = CHUNK_BYTES / BLOCK_LEN;
 
 type Aes256Ctr = Ctr32BE<Aes256>;
 
@@ -80,12 +85,16 @@ fn ghash_padded(ghash: &mut GHash, data: &[u8]) {
 
 /// Encrypt `plaintext` with AES-256-GCM. Returns `ciphertext || tag`,
 /// matching `aes_gcm::Aes256Gcm::encrypt(nonce, plaintext)` byte-for-byte.
+///
+/// Single-pass interleaved CTR + GHASH: each `CHUNK_BYTES` chunk gets
+/// encrypted in place then immediately GHASHed before moving on. Both
+/// ops touch the same cache lines so a 1 MB blob streams through L1
+/// rather than reading the whole buffer twice from DRAM.
 pub fn aead_encrypt_aes_hw(
     key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8],
 ) -> Vec<u8> {
     let (cipher, j0, mut ghash) = setup(key, nonce);
 
-    // CTR starts at J0+1 (counter increment for the data stream).
     let mut counter = j0;
     inc_counter(&mut counter);
 
@@ -93,16 +102,34 @@ pub fn aead_encrypt_aes_hw(
     buf.extend_from_slice(plaintext);
 
     let mut ctr = Aes256Ctr::new(key.into(), (&counter).into());
-    ctr.apply_keystream(&mut buf[..plaintext.len()]);
 
-    // GHASH of (no AAD here, but pad-to-block form is empty) || C ||
-    // pad || lengths.
-    ghash_padded(&mut ghash, &buf[..plaintext.len()]);
-    let lens = lengths_block(0, plaintext.len());
+    let pt_len = plaintext.len();
+    let nfull = pt_len / CHUNK_BYTES;
+
+    for i in 0..nfull {
+        let off = i * CHUNK_BYTES;
+        let chunk = &mut buf[off..off + CHUNK_BYTES];
+
+        // Encrypt first (in-place), then GHASH the resulting CT.
+        ctr.apply_keystream(chunk);
+        let blocks = unsafe {
+            core::slice::from_raw_parts(
+                chunk.as_ptr() as *const ghash::Block, CHUNK_BLOCKS)
+        };
+        ghash.update(blocks);
+    }
+
+    let tail_off = nfull * CHUNK_BYTES;
+    if tail_off < pt_len {
+        let tail = &mut buf[tail_off..pt_len];
+        ctr.apply_keystream(tail);
+        ghash_padded(&mut ghash, tail);
+    }
+
+    let lens = lengths_block(0, pt_len);
     ghash.update(&[lens.into()]);
     let s = ghash.finalize();
 
-    // Tag = E_K(J0) XOR S
     let mut t = j0;
     cipher.encrypt_block((&mut t).into());
     let mut tag = [0u8; TAG_LEN];
@@ -115,6 +142,10 @@ pub fn aead_encrypt_aes_hw(
 /// Decrypt `ciphertext_and_tag` in place. On success the buffer is
 /// truncated to plaintext length and `Some(())` returned; on tag
 /// mismatch the buffer is left untouched and `None` returned.
+///
+/// Single-pass interleaved GHASH + CTR: GHASH the CT chunk first
+/// (so we hash unmodified ciphertext), then decrypt in place. Same
+/// cache-line per chunk so the buffer streams through L1 once.
 pub fn aead_decrypt_aes_hw_in_place(
     key: &[u8; 32], nonce: &[u8; 12], buf: &mut Vec<u8>,
 ) -> Option<()> {
@@ -122,31 +153,58 @@ pub fn aead_decrypt_aes_hw_in_place(
     let ct_len = buf.len() - TAG_LEN;
 
     let (cipher, j0, mut ghash) = setup(key, nonce);
+    let mut counter = j0;
+    inc_counter(&mut counter);
+    let mut ctr = Aes256Ctr::new(key.into(), (&counter).into());
 
-    // GHASH the *ciphertext* before decrypt — same as aes-gcm crate.
-    ghash_padded(&mut ghash, &buf[..ct_len]);
+    let nfull = ct_len / CHUNK_BYTES;
+
+    for i in 0..nfull {
+        let off = i * CHUNK_BYTES;
+        let chunk = &mut buf[off..off + CHUNK_BYTES];
+
+        // GHASH the ciphertext (must come BEFORE decrypt — we
+        // authenticate the on-the-wire bytes, not the plaintext).
+        let blocks = unsafe {
+            core::slice::from_raw_parts(
+                chunk.as_ptr() as *const ghash::Block, CHUNK_BLOCKS)
+        };
+        ghash.update(blocks);
+
+        // Decrypt in place — flips CT to PT.
+        ctr.apply_keystream(chunk);
+    }
+
+    let tail_off = nfull * CHUNK_BYTES;
+    if tail_off < ct_len {
+        let tail = &mut buf[tail_off..ct_len];
+        ghash_padded(&mut ghash, tail);
+        ctr.apply_keystream(tail);
+    }
+
     let lens = lengths_block(0, ct_len);
     ghash.update(&[lens.into()]);
     let s = ghash.finalize();
 
-    // Compute expected tag = E_K(J0) XOR S
+    // Tag verify (constant-time).
     let mut t = j0;
     cipher.encrypt_block((&mut t).into());
-    let mut expected = [0u8; TAG_LEN];
-    for i in 0..TAG_LEN { expected[i] = t[i] ^ s[i]; }
-
-    // Constant-time compare against received tag.
     let mut diff = 0u8;
     for i in 0..TAG_LEN {
-        diff |= expected[i] ^ buf[ct_len + i];
+        diff |= (t[i] ^ s[i]) ^ buf[ct_len + i];
     }
-    if diff != 0 { return None; }
+    if diff != 0 {
+        // Tag mismatch — re-encrypt the buffer in place so we leave
+        // the input untouched on failure (same recovery promise as
+        // aes-gcm 0.10's decrypt_in_place_detached). Re-deriving the
+        // counter is cheap; we throw away the CTR state.
+        let mut counter2 = j0;
+        inc_counter(&mut counter2);
+        let mut ctr2 = Aes256Ctr::new(key.into(), (&counter2).into());
+        ctr2.apply_keystream(&mut buf[..ct_len]);
+        return None;
+    }
 
-    // Tag matched — decrypt in place and shrink to plaintext length.
-    let mut counter = j0;
-    inc_counter(&mut counter);
-    let mut ctr = Aes256Ctr::new(key.into(), (&counter).into());
-    ctr.apply_keystream(&mut buf[..ct_len]);
     buf.truncate(ct_len);
     Some(())
 }
