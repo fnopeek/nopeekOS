@@ -485,6 +485,43 @@ fn print_crypto_bench() {
     let (b, e, d) = crypto_bench();
     kprintln!("  Crypto:    BLAKE3 {} MB/s | AES-GCM enc {} dec(in-place) {} MB/s",
         b, e, d);
+    print_cpu_features();
+}
+
+/// Print HW feature bits (raw CPUID) alongside the cpufeatures crate's
+/// runtime view of the same features. A mismatch — HW reports
+/// pclmulqdq but the crate sees `false` — explains why aes-gcm /
+/// blake3 might pick a soft path in spite of `target-feature = +pclmulqdq`.
+fn print_cpu_features() {
+    use core::arch::x86_64::__cpuid;
+
+    // CPUID(1) ECX bits we care about for crypto + SIMD.
+    let cpuid1 = unsafe { __cpuid(1) };
+    let ecx = cpuid1.ecx;
+    let hw_pclmul = (ecx & (1 << 1)) != 0;
+    let hw_aes    = (ecx & (1 << 25)) != 0;
+    let hw_xsave  = (ecx & (1 << 26)) != 0;
+    let hw_osxsave= (ecx & (1 << 27)) != 0;
+    let hw_avx    = (ecx & (1 << 28)) != 0;
+
+    // CPUID(7,0) EBX bit 5 = AVX2.
+    let cpuid7 = unsafe { __cpuid(7) };
+    let hw_avx2 = (cpuid7.ebx & (1 << 5)) != 0;
+
+    // What the cpufeatures crate's runtime detection actually says —
+    // same primitives aes-gcm / blake3 see.
+    cpufeatures::new!(crate_aes,        "aes");
+    cpufeatures::new!(crate_pclmulqdq,  "pclmulqdq");
+    cpufeatures::new!(crate_avx2,       "avx2");
+    let crate_aes_v       = crate_aes::get();
+    let crate_pclmulqdq_v = crate_pclmulqdq::get();
+    let crate_avx2_v      = crate_avx2::get();
+
+    kprintln!("  HW(cpuid): aes={} pclmul={} avx={} avx2={} xsave={} osxsave={}",
+        hw_aes as u8, hw_pclmul as u8, hw_avx as u8, hw_avx2 as u8,
+        hw_xsave as u8, hw_osxsave as u8);
+    kprintln!("  cpufeats:  aes={} pclmul={} avx2={}",
+        crate_aes_v as u8, crate_pclmulqdq_v as u8, crate_avx2_v as u8);
 }
 
 pub fn intent_disk_read(args: &str) {
