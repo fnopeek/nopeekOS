@@ -335,11 +335,18 @@ pub fn enable_hwp() -> bool {
     // Configure HWP request: MSR 0x774 (IA32_HWP_REQUEST)
     // [7:0]=Min, [15:8]=Max, [23:16]=Desired(0=auto), [31:24]=EPP
     // EPP range: 0=perf, 128=balanced, 192=power_save, 255=max_power_save
-    // 192 biases the HWP controller against entering turbo for short bursts
-    // and toward lower P-states when load is intermittent.
+    //
+    // EPP=0 (max perf): CPU ramps to turbo on the first instruction of a
+    // burst. Right for desktop / mains-powered targets like the N100 NUC.
+    // Bursty workloads (crypto, I/O batches) live in the ~10-100 ms range
+    // — too short for the firmware's default heuristics with EPP=192 to
+    // notice and ramp; the CPU sat at base clock and software ChaCha20
+    // throughput was capped accordingly. Mobile targets that care about
+    // battery would set this to 128 or 192 — make it a `sys/config/hwp_epp`
+    // tunable when the notebook hardware lands.
     let hwp_req = (lowest as u32)
         | ((highest as u32) << 8)
-        | (192u32 << 24);
+        | (0u32 << 24);
     // SAFETY: MSR 0x774 exists when HWP is enabled
     unsafe { core::arch::asm!("wrmsr", in("ecx") 0x774u32, in("eax") hwp_req, in("edx") 0u32); }
 
