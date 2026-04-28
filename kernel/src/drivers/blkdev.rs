@@ -99,6 +99,36 @@ pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<()
     }
 }
 
+/// Read a list of (start_block, count) extents into `output`. Extents
+/// are concatenated in order (extent 0 → output[0..], etc.). NVMe path
+/// submits up to `MAX_INFLIGHT_MULTI` cmds across multiple extents in
+/// parallel — critical for fragmented blobs where `read_extent` would
+/// otherwise serialise. virtio-blk path falls back to sequential.
+pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<(), BlkError> {
+    if extents.is_empty() { return Ok(()); }
+    let offset = PARTITION_OFFSET.load(Ordering::Acquire);
+    if nvme::is_available() {
+        // Translate FS-relative blocks to disk-absolute.
+        let translated: alloc::vec::Vec<(u64, u64)> = extents.iter()
+            .map(|&(s, c)| (s + offset, c))
+            .collect();
+        nvme::read_multi_extent(&translated, output)
+    } else {
+        let mut out_off = 0usize;
+        for &(start, count) in extents {
+            let bytes = (count as usize) * BLOCK_SIZE;
+            for i in 0..count {
+                let dst = &mut output[out_off + (i as usize) * BLOCK_SIZE
+                    ..out_off + ((i as usize) + 1) * BLOCK_SIZE];
+                let dst_arr: &mut [u8; BLOCK_SIZE] = dst.try_into().unwrap();
+                virtio_blk::read_block(start + i + offset, dst_arr)?;
+            }
+            out_off += bytes;
+        }
+        Ok(())
+    }
+}
+
 /// Write a contiguous extent. Mirror of [`read_extent`].
 pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), BlkError> {
     if count == 0 { return Ok(()); }

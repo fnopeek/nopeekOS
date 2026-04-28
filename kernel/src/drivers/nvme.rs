@@ -150,11 +150,18 @@ static DMA_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
 /// `MAX_BLOCKS_PER_CMD` data slots. 4 = 1 MB at MDTS=128.
 const MAX_INFLIGHT: usize = 4;
 
+/// Max in-flight cmds for the multi-extent read path. Sized for the
+/// fragmented-blob case: a 1 MB blob split into 257 single-block
+/// extents wants as many concurrent cmds as the SSD can pipeline.
+/// 32 cmds × 1 block = 32 pool slots — plenty of headroom in the
+/// 256-slot pool.
+const MAX_INFLIGHT_MULTI: usize = 32;
+
 /// PRP-list scratch pool. NVMe spec: a transfer covering ≥3 4 KB pages
 /// uses `prp1` for the first page and a "PRP List" — a 4 KB block
-/// holding up to 512 page-pointers — addressed by `prp2`. We keep
-/// `MAX_INFLIGHT` slots so all parallel cmds get their own list.
-const PRP_LIST_POOL_SLOTS: usize = MAX_INFLIGHT;
+/// holding up to 512 page-pointers — addressed by `prp2`. Sized for
+/// `MAX_INFLIGHT_MULTI` so the multi-extent path can fully parallelise.
+const PRP_LIST_POOL_SLOTS: usize = MAX_INFLIGHT_MULTI;
 static PRP_LIST_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Max data blocks per single NVMe READ/WRITE command. Computed from
@@ -1069,6 +1076,120 @@ pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), Bl
         // Drain phase.
         for _ in 0..batch_len {
             drain_one_completion(state)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Read a list of (start_block, count_blocks) extents into `output`.
+/// All extents are concatenated in order: extent 0 → output[0..N₀ * 4096],
+/// extent 1 → output[N₀ * 4096 .. (N₀+N₁) * 4096], etc.
+///
+/// Submit-phase batches up to `MAX_INFLIGHT_MULTI` cmds at once so the
+/// SSD's internal channels can pipeline all of them. Critical for
+/// fragmented blobs — a 1 MB blob split into 257 single-block extents
+/// goes from 257 sequential round-trips (~8.5 ms) to ~9 batches × 32
+/// cmds parallel (~1.5 ms expected).
+pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<(), BlkError> {
+    if extents.is_empty() { return Ok(()); }
+    // Sanity-check size: total blocks must match output buffer.
+    let total_blocks: u64 = extents.iter().map(|&(_, c)| c).sum();
+    if output.len() != (total_blocks as usize) * BLOCK_SIZE {
+        return Err(BlkError::OutOfRange);
+    }
+
+    let pool_base = match *DMA_POOL_BASE.lock() {
+        Some(b) => b,
+        None => {
+            // Fallback: per-extent calls (will use the per-block path
+            // when the pool is gone too). Slow but correct.
+            let mut off = 0usize;
+            for &(start, count) in extents {
+                let bytes = (count as usize) * BLOCK_SIZE;
+                read_extent(start, count, &mut output[off..off + bytes])?;
+                off += bytes;
+            }
+            return Ok(());
+        }
+    };
+    let prp_pool_base = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
+    let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
+        .min(DMA_POOL_SLOTS as u64);
+
+    // Phase 1 — split any oversized extent into chunks ≤ max_per_cmd
+    // and compute the output offset for each chunk. Done up front so
+    // the submit loop is a single linear pass.
+    let mut work: alloc::vec::Vec<(u64, u64, usize)> =
+        alloc::vec::Vec::with_capacity(extents.len());
+    let mut output_off = 0usize;
+    for &(start, count) in extents {
+        let mut sub_start = start;
+        let mut remaining = count;
+        while remaining > 0 {
+            let take = remaining.min(max_per_cmd);
+            work.push((sub_start, take, output_off));
+            output_off += (take as usize) * BLOCK_SIZE;
+            sub_start += take;
+            remaining -= take;
+        }
+    }
+
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+
+    // Phase 2 — process work in batches of `MAX_INFLIGHT_MULTI` cmds.
+    // Each batch: greedy-fill until we hit the inflight cap or pool
+    // capacity, submit all, drain all, memcpy all into `output`.
+    let mut wi = 0;
+    while wi < work.len() {
+        // Per-batch state. We track each in-flight cmd's pool address
+        // and target output offset so the post-drain memcpy knows
+        // where each chunk lands.
+        let mut batch: [(u64, usize, u64); MAX_INFLIGHT_MULTI] =
+            [(0, 0, 0); MAX_INFLIGHT_MULTI]; // (dma_addr, output_off, blocks)
+        let mut batch_len = 0usize;
+        let mut pool_used = 0u64;
+
+        while wi < work.len() && batch_len < MAX_INFLIGHT_MULTI {
+            let (start, count, out_off) = work[wi];
+            // Pool capacity check — can't fit this chunk in the
+            // remaining slots; close the batch and process it.
+            if pool_used + count > DMA_POOL_SLOTS as u64 { break; }
+
+            let start_sector = start * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+            if start_sector + count * 8 > state.total_lbas {
+                return Err(BlkError::OutOfRange);
+            }
+
+            let dma_base = pool_base + pool_used * BLOCK_SIZE as u64;
+            let prp_list_addr = prp_pool_base + (batch_len as u64) * BLOCK_SIZE as u64;
+
+            submit_extent_cmd(state, NVM_READ, start_sector, count, dma_base, prp_list_addr);
+            batch[batch_len] = (dma_base, out_off, count);
+            batch_len += 1;
+            pool_used += count;
+            wi += 1;
+        }
+
+        // Drain all in submission order.
+        for _ in 0..batch_len {
+            drain_one_completion(state)?;
+        }
+        // Make all DMA writes visible before the memcpy-out.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        // Copy each completed chunk to its output offset.
+        for i in 0..batch_len {
+            let (dma_addr, out_off, blocks) = batch[i];
+            let bytes = (blocks as usize) * BLOCK_SIZE;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    dma_addr as *const u8,
+                    output[out_off..].as_mut_ptr(),
+                    bytes,
+                );
+            }
         }
     }
 
