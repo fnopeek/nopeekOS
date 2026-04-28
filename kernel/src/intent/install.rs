@@ -202,20 +202,25 @@ pub fn update_all_modules() -> usize {
         Err(e) => { kprintln!("[npk] Module manifest parse error: {}", e); return 0; }
     };
 
-    // Get list of installed modules
-    let entries = match crate::npkfs::list() {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
+    // List installed modules straight from `sys/wasm` instead of
+    // walking the entire FS.
+    let installed: alloc::vec::Vec<alloc::string::String> =
+        match crate::npkfs::v2::fs::list("sys/wasm") {
+            Ok(Some(v)) => v.iter()
+                .filter(|e| matches!(e.kind, crate::npkfs::v2::object::EntryKind::File))
+                .map(|e| e.name.clone())
+                .collect(),
+            Ok(None) => alloc::vec::Vec::new(),
+            Err(_) => return 0,
+        };
 
     let mut updated = 0;
 
     for remote in &modules {
+        // Only update modules that are already installed (skip
+        // `.version` sidecars; we want bare `<name>` to be present).
+        if !installed.iter().any(|n| n.as_str() == remote.name) { continue; }
         let store_name = alloc::format!("sys/wasm/{}", remote.name);
-
-        // Only update modules that are already installed
-        let is_installed = entries.iter().any(|(n, _, _)| n == &store_name);
-        if !is_installed { continue; }
 
         // Check version — skip if already up to date (trim for safety)
         let version_key = alloc::format!("sys/wasm/{}.version", remote.name);
@@ -396,23 +401,21 @@ fn is_bundled_module(name: &str) -> bool {
 pub fn intent_modules() {
     kprintln!("[npk] Installed modules:");
 
-    // List installed modules from npkFS
-    let entries = match crate::npkfs::list() {
-        Ok(e) => e,
-        Err(_) => { kprintln!("  (npkFS error)"); return; }
+    let entries = match crate::npkfs::v2::fs::list("sys/wasm") {
+        Ok(Some(v)) => v,
+        Ok(None) | Err(_) => { kprintln!("  (none)"); return; }
     };
 
     let mut found = false;
-    for (name, _, _) in &entries {
-        if name.starts_with("sys/wasm/") && !name.ends_with(".version") {
-            let module_name = &name[9..]; // strip "sys/wasm/"
-            let version_key = alloc::format!("{}.version", name);
-            let version = crate::npkfs::fetch(&version_key).ok()
-                .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(String::from))
-                .unwrap_or_else(|| String::from("builtin"));
-            kprintln!("  {} v{}", module_name, version);
-            found = true;
-        }
+    for e in &entries {
+        if !matches!(e.kind, crate::npkfs::v2::object::EntryKind::File) { continue; }
+        if e.name.ends_with(".version") { continue; }
+        let version_key = alloc::format!("sys/wasm/{}.version", e.name);
+        let version = crate::npkfs::fetch(&version_key).ok()
+            .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(String::from))
+            .unwrap_or_else(|| String::from("builtin"));
+        kprintln!("  {} v{}", e.name, version);
+        found = true;
     }
 
     if !found {

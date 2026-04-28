@@ -706,25 +706,20 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 return -1;
             }
 
-            let entries = match crate::npkfs::list() {
-                Ok(v) => v,
+            // v2: `sys/wasm` is a real directory. List immediate children
+            // directly instead of scanning + prefix-filtering the whole tree.
+            let entries = match crate::npkfs::v2::fs::list("sys/wasm") {
+                Ok(Some(v)) => v,
+                Ok(None) => alloc::vec::Vec::new(),
                 Err(_) => return -1,
             };
 
-            // Build the NUL-separated list. Strip the "sys/wasm/" prefix.
-            let prefix = "sys/wasm/";
             let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-            for (name, _size, _hash) in &entries {
-                if let Some(stripped) = name.strip_prefix(prefix) {
-                    // Skip sub-directory-like entries (shouldn't occur,
-                    // but defensive — names with '/' aren't valid modules).
-                    if stripped.contains('/') || stripped.is_empty() { continue; }
-                    // `.version` files are sidecars written by the
-                    // installer — not standalone modules.
-                    if stripped.ends_with(".version") { continue; }
-                    if !out.is_empty() { out.push(0); }
-                    out.extend_from_slice(stripped.as_bytes());
-                }
+            for e in &entries {
+                if !matches!(e.kind, crate::npkfs::v2::object::EntryKind::File) { continue; }
+                if e.name.ends_with(".version") { continue; }
+                if !out.is_empty() { out.push(0); }
+                out.extend_from_slice(e.name.as_bytes());
             }
 
             if out.len() > buf_max as usize { return -1; }
@@ -955,52 +950,60 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 }
             };
 
-            let entries = match crate::npkfs::list() {
-                Ok(v) => v,
-                Err(_) => return -1,
-            };
-
-            // Build the output buffer. For non-recursive, synthesize
-            // directory entries from the first unique path segment.
-            let norm_prefix = if prefix.is_empty() || prefix.ends_with('/') {
-                prefix.clone()
-            } else {
-                alloc::format!("{}/", prefix)
-            };
-
-            let mut seen_dirs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+            // v2: directories are real Tree objects, listings come straight
+            // from them — no scan + prefix-filter pass.
             let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let prefix_for_list = prefix.trim_matches('/');
 
-            for (name, size, _hash) in &entries {
-                if !norm_prefix.is_empty() && !name.starts_with(&norm_prefix) {
-                    continue;
+            if recursive == 0 {
+                // Non-recursive: one directory's immediate children.
+                let entries = match crate::npkfs::v2::fs::list(prefix_for_list) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => alloc::vec::Vec::new(),
+                    Err(_) => return -1,
+                };
+                for e in &entries {
+                    let is_dir = matches!(e.kind, crate::npkfs::v2::object::EntryKind::Dir);
+                    append_entry(&mut out, &e.name, e.size, is_dir);
                 }
-                // `.dir` markers are internal — surface them as directory
-                // entries using the parent component name instead.
-                let rel = &name[norm_prefix.len()..];
-                if rel.is_empty() { continue; }
-
-                if recursive != 0 {
-                    // Skip .dir markers entirely in recursive mode — they
-                    // are bookkeeping, not content.
-                    if rel.ends_with("/.dir") || rel == ".dir" { continue; }
-                    append_entry(&mut out, rel, *size, false);
-                    continue;
-                }
-
-                // Non-recursive: collapse sub-paths into directory entries.
-                match rel.find('/') {
-                    None => {
-                        if rel == ".dir" { continue; }
-                        append_entry(&mut out, rel, *size, false);
-                    }
-                    Some(i) => {
-                        let dir_name = &rel[..i];
-                        if !seen_dirs.iter().any(|d| d == dir_name) {
-                            seen_dirs.push(dir_name.into());
-                            append_entry(&mut out, dir_name, 0, true);
+            } else {
+                // Recursive: DFS the subtree, emit relative paths.
+                fn dfs(
+                    base: &str, rel: alloc::string::String,
+                    out: &mut alloc::vec::Vec<u8>,
+                ) -> Result<(), ()> {
+                    let abs = if rel.is_empty() {
+                        alloc::string::String::from(base)
+                    } else if base.is_empty() {
+                        rel.clone()
+                    } else {
+                        alloc::format!("{}/{}", base, rel)
+                    };
+                    let entries = match crate::npkfs::v2::fs::list(&abs) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => return Ok(()),
+                        Err(_) => return Err(()),
+                    };
+                    for e in &entries {
+                        let child_rel = if rel.is_empty() {
+                            e.name.clone()
+                        } else {
+                            alloc::format!("{}/{}", rel, e.name)
+                        };
+                        match e.kind {
+                            crate::npkfs::v2::object::EntryKind::File => {
+                                append_entry(out, &child_rel, e.size, false);
+                            }
+                            crate::npkfs::v2::object::EntryKind::Dir => {
+                                append_entry(out, &child_rel, 0, true);
+                                dfs(base, child_rel, out)?;
+                            }
                         }
                     }
+                    Ok(())
+                }
+                if dfs(prefix_for_list, alloc::string::String::new(), &mut out).is_err() {
+                    return -1;
                 }
             }
 
@@ -1035,13 +1038,16 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 None => return -1,
             };
 
-            let (size, is_dir) = if crate::npkfs::exists(&alloc::format!("{}/.dir", name)) {
-                (0u64, 1u8)
-            } else {
-                match crate::npkfs::fetch(&name) {
-                    Ok((data, _)) => (data.len() as u64, 0u8),
-                    Err(_) => return 0,
+            // v2 stat: one Tree-walk to the parent, return the entry's
+            // kind + size. No `.dir`-marker existence check, no fetch
+            // of the blob bytes.
+            let (size, is_dir) = match crate::npkfs::v2::fs::stat(&name) {
+                Ok(Some(s)) => {
+                    let is_dir = matches!(s.kind, crate::npkfs::v2::object::EntryKind::Dir);
+                    (s.size, if is_dir { 1u8 } else { 0u8 })
                 }
+                Ok(None) => return 0,
+                Err(_) => return -1,
             };
 
             let mut buf = [0u8; 9];

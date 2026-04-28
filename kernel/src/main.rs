@@ -245,7 +245,7 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
         s
     });
 
-    let is_first_boot = !mounted || !npkfs::exists(".npk-keycheck");
+    let is_first_boot = !mounted || !npkfs::exists(crate::config::KEYCHECK_PATH);
 
     if is_first_boot {
         // === First boot: Setup Wizard (identity, settings) ===
@@ -455,7 +455,7 @@ fn text_mode_auth(salt: &[u8; 16]) {
 
         crypto::set_master_key(key);
 
-        match npkfs::fetch(".npk-keycheck") {
+        match npkfs::fetch(crate::config::KEYCHECK_PATH) {
             Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
                 config::load();
                 if let Some(name) = config::get("name") {

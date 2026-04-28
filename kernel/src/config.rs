@@ -1,7 +1,7 @@
 //! System Configuration
 //!
-//! Key-value config stored as ".npk-config" in npkFS (encrypted at rest).
-//! Loaded into memory after unlock, persisted on every change.
+//! Key-value config stored at ".system/config" in npkFS (encrypted at
+//! rest). Loaded into memory after unlock, persisted on every change.
 //!
 //! Format: "key=value\n" lines, UTF-8.
 
@@ -10,7 +10,16 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 const MAX_ENTRIES: usize = 32;
-const CONFIG_OBJECT: &str = ".npk-config";
+
+/// Path of the encrypted config blob (was `.npk-config` in v1).
+pub const CONFIG_OBJECT: &str = ".system/config";
+
+/// Path of the passphrase verifier blob (was `.npk-keycheck` in v1).
+pub const KEYCHECK_PATH: &str = ".system/keycheck";
+
+/// Magic bytes written into KEYCHECK_PATH at install time. Decryption
+/// of the blob produces these bytes iff the master key is correct.
+pub const KEYCHECK_VALUE: &[u8] = b"nopeekOS.keycheck.v1.valid";
 
 struct ConfigEntry {
     key: String,

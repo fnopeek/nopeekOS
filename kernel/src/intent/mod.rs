@@ -13,7 +13,7 @@ pub mod install;
 mod wallpaper;
 mod wasm;
 
-use crate::capability::{self, CapId, Vault, Rights};
+use crate::capability::{CapId, Vault, Rights};
 use crate::{kprint, kprintln, serial};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -135,9 +135,11 @@ pub fn create_session(terminal_idx: u8) {
         if (*sessions_ptr()).contains_key(&terminal_idx) { return; }
         (*sessions_ptr()).insert(terminal_idx, Box::new(IntentSession::new(terminal_idx)));
     }
-    // Initialize CWD for the new session (inherit from focused terminal's CWD)
-    let cwd = get_cwd();
-    CWDS.lock().entry(terminal_idx).or_insert(cwd);
+    // New sessions always land in the user's home directory. Inheriting
+    // from the focused terminal's cwd was confusing — opening a fresh
+    // window from deep inside a project shouldn't drop you back into
+    // the same hole.
+    CWDS.lock().entry(terminal_idx).or_insert_with(home_dir);
 }
 
 /// Reset session prompt after terminal was freshly allocated (cleared).
@@ -380,17 +382,10 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     Some(ip)
 }
 
-/// Ensure all parent directories exist for a given path (create .dir markers).
+/// Ensure every directory along `path` exists. v2 has real Tree
+/// objects so this is just an `mkdir -p`; no `.dir` marker files.
 pub(crate) fn ensure_parents(path: &str) {
-    let mut current = String::new();
-    for part in path.split('/') {
-        if !current.is_empty() { current.push('/'); }
-        current.push_str(part);
-        let marker = alloc::format!("{}/.dir", current);
-        if !crate::npkfs::exists(&marker) {
-            let _ = crate::npkfs::store(&marker, b"", capability::CAP_NULL);
-        }
-    }
+    let _ = crate::npkfs::v2::fs::ensure_dirs(path);
 }
 
 /// Sync session state to terminal.rs saved input (for cursor restore on focus change).
@@ -676,59 +671,51 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
 }
 
 /// Tab-completion: find matching paths for the last word in the input.
+///
+/// v2: list immediate children of the implied parent directory and
+/// filter by the partial leaf name. No more recursive flat-walk.
 fn tab_complete(input: &str) -> Option<String> {
     let last_space = input.rfind(' ').map(|i| i + 1).unwrap_or(0);
     let partial = &input[last_space..];
 
-    // Resolve what's typed so far to an absolute prefix
-    // "" or ends with / → list contents of current dir
-    // "te" in home/florian → search for "home/florian/te"
-    let search = if partial.is_empty() || partial.ends_with('/') {
-        let base = if partial.is_empty() { get_cwd() } else { resolve_path(partial.trim_end_matches('/')) };
-        if base.is_empty() { String::new() } else { alloc::format!("{}/", base) }
+    // Split `partial` into (parent_dir_to_list, leaf_prefix_to_match).
+    //   ""        → cwd, no prefix
+    //   "te"      → cwd, prefix "te"
+    //   "docs/"   → docs/, no prefix
+    //   "docs/n"  → docs/, prefix "n"
+    let (parent_abs, leaf_prefix): (String, String) = if partial.is_empty() {
+        (get_cwd(), String::new())
+    } else if partial.ends_with('/') {
+        (resolve_path(partial.trim_end_matches('/')), String::new())
+    } else if let Some(idx) = partial.rfind('/') {
+        (resolve_path(&partial[..idx]), String::from(&partial[idx + 1..]))
     } else {
-        resolve_path(partial)
+        (get_cwd(), String::from(partial))
     };
 
-    let entries = match crate::npkfs::list() {
-        Ok(e) => e,
-        Err(_) => return None,
+    use crate::npkfs::v2::object::EntryKind;
+    let entries = match crate::npkfs::v2::fs::list(&parent_abs) {
+        Ok(Some(v)) => v,
+        Ok(None) | Err(_) => return None,
     };
 
-    // Find all names that start with our search prefix
-    // Collapse to immediate children (files or first dir component)
+    // Search prefix used by the legacy display logic below: the part
+    // of the partial path the user has already committed to.
+    let search = if parent_abs.is_empty() {
+        String::new()
+    } else {
+        alloc::format!("{}/", parent_abs)
+    };
+
     let mut matches: alloc::vec::Vec<String> = alloc::vec::Vec::new();
-    for (name, _, _) in &entries {
-        if name.starts_with(".npk-") { continue; }
-        if name.ends_with("/.dir") {
-            let dir = &name[..name.len() - 5];
-            if dir.starts_with(search.as_str()) {
-                let rest = &dir[search.len()..];
-                if rest.is_empty() {
-                    // Exact match: the dir itself (e.g. search="home/florian/test", dir="home/florian/test")
-                    let full = alloc::format!("{}/", dir);
-                    if !matches.contains(&full) { matches.push(full); }
-                } else {
-                    // Immediate child dir
-                    let child = if let Some(idx) = rest.find('/') { &rest[..idx] } else { rest };
-                    if !child.is_empty() {
-                        let full = alloc::format!("{}{}/", search, child);
-                        if !matches.contains(&full) { matches.push(full); }
-                    }
-                }
-            }
-            continue;
-        }
-        if name.starts_with(search.as_str()) {
-            let rest = &name[search.len()..];
-            if let Some(idx) = rest.find('/') {
-                let full = alloc::format!("{}{}/", search, &rest[..idx]);
-                if !matches.contains(&full) { matches.push(full); }
-            } else {
-                let full = String::from(name.as_str());
-                if !matches.contains(&full) { matches.push(full); }
-            }
-        }
+    for e in &entries {
+        if !e.name.starts_with(&leaf_prefix) { continue; }
+        if e.name.starts_with(".npk-") { continue; }
+        let full = match e.kind {
+            EntryKind::Dir => alloc::format!("{}{}/", search, e.name),
+            EntryKind::File => alloc::format!("{}{}", search, e.name),
+        };
+        if !matches.contains(&full) { matches.push(full); }
     }
 
     if matches.is_empty() { return None; }
@@ -1326,6 +1313,15 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        "gc" => {
+            if require_cap(vault, &session, Rights::AUDIT, "gc") {
+                match crate::storage::npkfs::v2::fs::gc() {
+                    Ok(s) => kprintln!("[npk] gc: kept {}, removed {}", s.kept, s.removed),
+                    Err(e) => kprintln!("[npk] gc error: {:?}", e),
+                }
+            }
+        }
+
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, &session, Rights::EXECUTE, "halt") {
                 system::intent_halt();
@@ -1505,20 +1501,12 @@ fn intent_cd(args: &str) {
         return;
     }
 
-    let dir_marker = alloc::format!("{}/.dir", resolved);
-
-    // Check: either .dir marker exists, or objects with this prefix exist
-    let exists = crate::npkfs::exists(&dir_marker) || {
-        let prefix = alloc::format!("{}/", resolved);
-        crate::npkfs::list().map(|entries| {
-            entries.iter().any(|(n, _, _)| n.starts_with(prefix.as_str()))
-        }).unwrap_or(false)
-    };
-
-    if exists {
-        set_cwd(&resolved);
-    } else {
-        kprintln!("[npk] '{}': not found", target);
+    use crate::npkfs::v2::object::EntryKind;
+    match crate::npkfs::v2::fs::stat(&resolved) {
+        Ok(Some(s)) if s.kind == EntryKind::Dir => set_cwd(&resolved),
+        Ok(Some(_)) => kprintln!("[npk] '{}': not a directory", target),
+        Ok(None)    => kprintln!("[npk] '{}': not found", target),
+        Err(e)      => kprintln!("[npk] cd error: {:?}", e),
     }
 }
 

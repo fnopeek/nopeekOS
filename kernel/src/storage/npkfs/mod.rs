@@ -1,603 +1,224 @@
-//! npkFS – Capability-native, content-addressed filesystem
+//! npkFS — content-addressed filesystem.
 //!
-//! SSD-optimized: COW, TRIM, rotating superblock, write coalescing.
-//! No paths, no tree. Objects identified by name + BLAKE3 hash.
+//! Public API surface preserved for the rest of the kernel
+//! (`crate::npkfs::fetch`, `npkfs::store`, …) but the v1 path-as-key
+//! backend is gone. All calls route to v2 (Git-style trees) underneath.
+//! Existing callers see the same shape; the on-disk reality is the
+//! new content-addressed format.
+//!
+//! Mount-time guard: if a v1 superblock is detected at boot, the
+//! kernel halts with a reinstall message rather than trying to use
+//! it (no in-place migration — clean break by design).
 
 mod types;
 mod cache;
 mod bitmap;
 mod superblock;
+#[allow(dead_code)]
 mod journal;
+#[allow(dead_code)]
 mod btree;
+pub mod v2;
 
-pub use types::{FsError, ObjectEntry, Extent, BLOCK_SIZE, MAX_NAME_LEN, DIRECT_EXTENTS, EXTENTS_PER_INDIRECT};
+pub use types::{FsError, BLOCK_SIZE};
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
-use cache::BlockCache;
-use bitmap::Bitmap;
-use journal::Journal;
-use types::*;
-use crate::{kprintln, blkdev, crypto};
 
-struct NpkFs {
-    cache: BlockCache,
-    sb: SuperblockRaw,
-    bitmap: Bitmap,
-    journal: Journal,
-    generation: u64,
+use crate::kprintln;
+
+// ── v1-detection guard at mount time ──────────────────────────────────
+
+/// First eight bytes of a v1 superblock. v2 uses `npkFS\x02\0\0`. The
+/// only place these can both appear is the 8-slot SB ring at block 1+.
+const V1_MAGIC: [u8; 8] = *b"npkFS\x01\0\0";
+
+/// Read the first SB slot and check for v1 magic. Used as a pre-mount
+/// guard so we never auto-mkfs over a user's existing v1 data.
+fn v1_disk_present() -> bool {
+    let mut buf = [0u8; BLOCK_SIZE];
+    if crate::blkdev::read_block(types::SUPERBLOCK_START, &mut buf).is_err() {
+        return false;
+    }
+    buf[..8] == V1_MAGIC
 }
 
-static FS: Mutex<Option<NpkFs>> = Mutex::new(None);
+fn halt_for_v1_disk() -> ! {
+    kprintln!("");
+    kprintln!("[npk] ┌──────────────────────────────────────────────────────────┐");
+    kprintln!("[npk] │ This disk is formatted as npkFS v1.                      │");
+    kprintln!("[npk] │                                                          │");
+    kprintln!("[npk] │ npkFS v2 is incompatible by design (clean break, no      │");
+    kprintln!("[npk] │ migration). Boot the installer USB and reinstall to      │");
+    kprintln!("[npk] │ continue. Your previous data is unrecoverable from this  │");
+    kprintln!("[npk] │ kernel — restore from backup if you have one.            │");
+    kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
+    kprintln!("");
+    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+}
 
-/// Format the disk with npkFS.
+// ── Bridge: v1 surface routed to v2 ───────────────────────────────────
+
+/// Format the disk to npkFS v2.
 pub fn mkfs() -> Result<(), FsError> {
-    let total_blocks = blkdev::block_count().ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
-    if total_blocks < META_END + 16 {
-        kprintln!("[npk] npkfs: disk too small ({} blocks)", total_blocks);
-        return Err(FsError::DiskFull);
-    }
-
-    let mut cache = BlockCache::new()?;
-
-    let bitmap_start = META_END;
-    let bitmap_count = (total_blocks + BLOCK_SIZE as u64 * 8 - 1) / (BLOCK_SIZE as u64 * 8);
-    let data_start = bitmap_start + bitmap_count;
-
-    // Create empty B-tree root leaf
-    let mut bmap = Bitmap::new_for_mkfs(total_blocks, bitmap_start, bitmap_count, data_start);
-    let root_block = bmap.alloc(1)?;
-
-    let root_buf = {
-        let mut buf = [0u8; BLOCK_SIZE];
-        let hdr = BTreeNodeHeader {
-            magic: BTREE_MAGIC, node_type: BTREE_LEAF,
-            _pad: 0, num_entries: 0, next_leaf: 0,
-        };
-        btree_write_header(&mut buf, &hdr);
-        buf
-    };
-    cache.write(root_block, &root_buf)?;
-
-    // Generate random installation salt (unique per format)
-    let install_salt = crate::csprng::random_256();
-    let mut salt_16 = [0u8; 16];
-    salt_16.copy_from_slice(&install_salt[..16]);
-
-    let mut sb = SuperblockRaw {
-        magic: MAGIC,
-        version: VERSION,
-        flags: 0,
-        generation: 1,
-        total_blocks,
-        free_blocks: bmap.free_count(),
-        bitmap_start,
-        bitmap_count,
-        data_start,
-        btree_root: root_block,
-        object_count: 0,
-        journal_head: 0,
-        journal_seq: 0,
-        install_salt: salt_16,
-        _reserved: [0u8; 3952],
-        checksum: [0u8; 32],
-    };
-
-    bmap.sync(&mut cache)?;
-    superblock::write_all(&mut cache, &mut sb)?;
-    cache.flush()?;
-
-    kprintln!("[npk] npkfs: formatted {} blocks ({} MB), data starts at block {}",
-        total_blocks, total_blocks * BLOCK_SIZE as u64 / (1024 * 1024), data_start);
-    Ok(())
+    v2::storage::mkfs()
 }
 
-/// Mount the filesystem. Reads superblock, loads bitmap, replays journal.
+/// Mount the disk. Halts with a reinstall message if v1 magic is found.
 pub fn mount() -> Result<(), FsError> {
-    let mut cache = BlockCache::new()?;
-
-    let sb = superblock::read_best(&mut cache)?.ok_or(FsError::NotFormatted)?;
-
-    // Replay journal for crash recovery
-    let frees = journal::Journal::replay(&mut cache, sb.journal_head, sb.journal_seq)?;
-    let mut bmap = Bitmap::load(&mut cache, &sb)?;
-
-    if !frees.is_empty() {
-        kprintln!("[npk] npkfs: journal replay: {} free ops", frees.len());
-        for (start, count) in &frees {
-            bmap.free(*start, *count);
-        }
-        bmap.sync(&mut cache)?;
-        cache.flush()?;
+    if v1_disk_present() {
+        halt_for_v1_disk();
     }
-
-    let generation = sb.generation;
-    let jrnl = Journal::new(sb.journal_head, sb.journal_seq);
-
-    *FS.lock() = Some(NpkFs { cache, sb, bitmap: bmap, journal: jrnl, generation });
-
-    kprintln!("[npk] npkfs: mounted (gen={}, {} objects, {} free blocks)",
-        generation, sb.object_count, sb.free_blocks);
-    Ok(())
+    v2::storage::mount()
 }
 
-/// Store or replace an object. Deletes existing object first if present.
-pub fn upsert(name: &str, data: &[u8], cap_id: [u8; 32]) -> Result<[u8; 32], FsError> {
-    if exists(name) {
-        delete(name)?;
-    }
-    store(name, data, cap_id)
+pub fn is_mounted() -> bool { v2::storage::is_mounted() }
+
+pub fn install_salt() -> Option<[u8; 16]> { v2::storage::install_salt() }
+
+pub fn stats() -> Option<(u64, u64, u64, u64)> { v2::storage::stats() }
+
+/// Strict create: errors with `ObjectExists` if `name` is already present.
+/// Mirrors v1's `store` semantics. `cap_id` is accepted for ABI compat
+/// and ignored by v2.
+pub fn store(name: &str, data: &[u8], _cap_id: [u8; 32]) -> Result<[u8; 32], FsError> {
+    let path = clean_path(name);
+    validate(path)?;
+    if v2_exists(path) { return Err(FsError::ObjectExists); }
+    write_with_parents(path, data)?;
+    Ok(*blake3::hash(data).as_bytes())
 }
 
-/// Store an object. Data is encrypted at rest with ChaCha20-Poly1305 AEAD.
-/// Returns BLAKE3 hash of the plaintext.
-pub fn store(name: &str, data: &[u8], cap_id: [u8; 32]) -> Result<[u8; 32], FsError> {
-    let name = clean_name(name);
-    validate_name(name)?;
-    let hash = *blake3::hash(data).as_bytes();
-    let tick = crate::interrupts::ticks();
-
-    // Encrypt data if master key is available
-    let encrypted = if let Some(master_key) = crypto::get_master_key() {
-        let obj_key = crypto::derive_object_key(&master_key, &hash);
-        let nonce = crypto::derive_nonce(&hash);
-        Some(crypto::aead_encrypt(&obj_key, &nonce, data))
-    } else {
-        None
-    };
-    let write_data = encrypted.as_deref().unwrap_or(data);
-
-    let mut lock = FS.lock();
-    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
-
-    // Allocate data blocks (contiguous first, halve on failure, indirect for overflow)
-    let blocks_needed = (write_data.len() as u64 + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
-    let blocks_needed = blocks_needed.max(1);
-
-    let mut all_extents = Vec::new();
-    let mut allocated = 0u64;
-
-    while allocated < blocks_needed {
-        let remaining = blocks_needed - allocated;
-        let mut try_size = remaining;
-        let start = loop {
-            match fs.bitmap.alloc(try_size) {
-                Ok(s) => break s,
-                Err(_) if try_size > 1 => { try_size = (try_size + 1) / 2; }
-                Err(_) => {
-                    for ext in &all_extents {
-                        let e: &Extent = ext;
-                        fs.bitmap.free(e.start_block, e.block_count);
-                    }
-                    return Err(FsError::DiskFull);
-                }
-            }
-        };
-        all_extents.push(Extent { start_block: start, block_count: try_size });
-        allocated += try_size;
-    }
-
-    // Write data blocks across all extents
-    let mut data_offset = 0usize;
-    for ext in &all_extents {
-        for b in 0..ext.block_count {
-            let mut buf = [0u8; BLOCK_SIZE];
-            let end = (data_offset + BLOCK_SIZE).min(write_data.len());
-            if data_offset < write_data.len() {
-                buf[..end - data_offset].copy_from_slice(&write_data[data_offset..end]);
-            }
-            fs.cache.write(ext.start_block + b, &buf)?;
-            data_offset += BLOCK_SIZE;
-        }
-    }
-
-    // Build direct extents + indirect blocks if needed
-    let mut direct = [Extent::ZERO; DIRECT_EXTENTS];
-    let direct_count = all_extents.len().min(DIRECT_EXTENTS);
-    for i in 0..direct_count {
-        direct[i] = all_extents[i];
-    }
-
-    let indirect_block = if all_extents.len() > DIRECT_EXTENTS {
-        write_indirect_extents(&mut fs.cache, &mut fs.bitmap, &all_extents[DIRECT_EXTENTS..])?
-    } else {
-        0
-    };
-
-    // Build entry
-    let mut entry_name = [0u8; 64];
-    let name_bytes = name.as_bytes();
-    entry_name[..name_bytes.len()].copy_from_slice(name_bytes);
-
-    let entry = ObjectEntry {
-        name: entry_name,
-        content_hash: hash,
-        size: write_data.len() as u64,
-        cap_id,
-        created_tick: tick,
-        extent_count: all_extents.len() as u32,
-        extents: direct,
-        indirect_block,
-    };
-
-    // Insert into B-tree (COW). If insert fails (duplicate key, disk
-    // full mid-operation, etc.), free every block we just allocated —
-    // otherwise large writes (4 K wallpapers ~33 MB) leak their entire
-    // extent + indirect chain on every failed attempt.
-    let root = fs.sb.btree_root;
-    let (new_root, old_blocks) = match btree::insert(&mut fs.cache, &mut fs.bitmap, root, &entry) {
-        Ok(v) => v,
-        Err(e) => {
-            for ext in &all_extents {
-                fs.bitmap.free(ext.start_block, ext.block_count);
-            }
-            if indirect_block != 0 {
-                free_indirect_chain(&mut fs.cache, &mut fs.bitmap, indirect_block);
-            }
-            return Err(e);
-        }
-    };
-
-    // Record old blocks for deferred free
-    for b in &old_blocks {
-        fs.journal.record_free(*b, 1);
-    }
-
-    // Commit
-    fs.generation += 1;
-    fs.sb.btree_root = new_root;
-    fs.sb.object_count += 1;
-    fs.sb.free_blocks = fs.bitmap.free_count();
-    fs.sb.generation = fs.generation;
-    fs.sb.journal_head = fs.journal.head();
-
-    // Phase 1: write journal entries (committed=0, safe on crash)
-    fs.journal.prepare(&mut fs.cache)?;
-    fs.sb.journal_seq = fs.journal.seq();
-
-    // Phase 2: persist bitmap + superblock
-    fs.bitmap.sync(&mut fs.cache)?;
-    superblock::write_next(&mut fs.cache, &mut fs.sb)?;
-    fs.cache.flush()?;
-
-    // Phase 3: mark journal committed (superblock is now safe)
-    fs.journal.finalize(&mut fs.cache)?;
-    fs.cache.flush()?;
-
-    // Phase 4: free old blocks + TRIM (deferred, safe)
-    for b in &old_blocks {
-        fs.bitmap.free(*b, 1);
-    }
-    fs.bitmap.flush_trims();
-
-    Ok(hash)
+/// Insert-or-replace. Mirrors v1's `upsert` semantics.
+pub fn upsert(name: &str, data: &[u8], _cap_id: [u8; 32]) -> Result<[u8; 32], FsError> {
+    let path = clean_path(name);
+    validate(path)?;
+    write_with_parents(path, data)?;
+    Ok(*blake3::hash(data).as_bytes())
 }
 
-/// Fetch an object by name. Returns (data, hash).
+/// Read an object. Returns `(plaintext, blake3_hash)`. Mirrors v1's tuple
+/// shape so callers don't need rewriting.
 pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
-    let name = clean_name(name);
-    validate_name(name)?;
-
-    let mut lock = FS.lock();
-    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
-
-    let mut key = [0u8; 64];
-    key[..name.len()].copy_from_slice(name.as_bytes());
-
-    let entry = btree::lookup(&mut fs.cache, fs.sb.btree_root, &key)?
-        .ok_or(FsError::ObjectNotFound)?;
-
-    let mut data = Vec::with_capacity(entry.size as usize);
-
-    // Collect all extents (direct + indirect)
-    let direct_count = (entry.extent_count as usize).min(DIRECT_EXTENTS);
-    let mut all_extents: Vec<Extent> = entry.extents[..direct_count].to_vec();
-    if entry.indirect_block != 0 {
-        all_extents.extend(read_indirect_extents(&mut fs.cache, entry.indirect_block)?);
-    }
-
-    for ext in &all_extents {
-        for b in 0..ext.block_count {
-            let mut buf = [0u8; BLOCK_SIZE];
-            fs.cache.read(ext.start_block + b, &mut buf)?;
-            let remaining = entry.size as usize - data.len();
-            let copy_len = BLOCK_SIZE.min(remaining);
-            data.extend_from_slice(&buf[..copy_len]);
+    let path = clean_path(name);
+    validate(path)?;
+    match v2::fs::read(path) {
+        Ok(Some(data)) => {
+            let h = *blake3::hash(&data).as_bytes();
+            Ok((data, h))
         }
+        Ok(None) => Err(FsError::ObjectNotFound),
+        Err(e) => Err(path_to_fs_err(e)),
     }
-
-    // Decrypt if master key is available (encrypted data includes 16-byte AEAD tag)
-    let plaintext = if let Some(master_key) = crypto::get_master_key() {
-        let obj_key = crypto::derive_object_key(&master_key, &entry.content_hash);
-        let nonce = crypto::derive_nonce(&entry.content_hash);
-        match crypto::aead_decrypt(&obj_key, &nonce, &data) {
-            Some(pt) => pt,
-            None => {
-                kprintln!("[npk] npkfs: DECRYPTION FAILED for '{}' (wrong key or corrupt)", name);
-                return Err(FsError::Corrupt);
-            }
-        }
-    } else {
-        data
-    };
-
-    // Verify integrity (BLAKE3 of plaintext)
-    let hash = *blake3::hash(&plaintext).as_bytes();
-    if hash != entry.content_hash {
-        kprintln!("[npk] npkfs: INTEGRITY FAILURE for '{}'", name);
-        return Err(FsError::Corrupt);
-    }
-
-    Ok((plaintext, hash))
 }
 
-/// Delete an object by name.
+/// Remove an object. Errors with `ObjectNotFound` if missing (v1 shape).
 pub fn delete(name: &str) -> Result<(), FsError> {
-    let name = clean_name(name);
-    validate_name(name)?;
+    let path = clean_path(name);
+    validate(path)?;
+    if !v2_exists(path) { return Err(FsError::ObjectNotFound); }
+    v2::fs::delete(path).map_err(path_to_fs_err)
+}
 
-    let mut lock = FS.lock();
-    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+/// Flat list of every File in the tree, recursively. Format:
+/// `(slash_path, byte_size, blake3_hash)`. Mirrors v1's `list()` shape.
+/// Cost: walks the entire root Tree subtree. Acceptable until callers
+/// migrate to per-directory `v2::fs::list(path)`.
+pub fn list() -> Result<Vec<(String, u64, [u8; 32])>, FsError> {
+    let mut out = Vec::new();
+    walk_recursive(String::new(), &mut out)?;
+    Ok(out)
+}
 
-    let mut key = [0u8; 64];
-    key[..name.len()].copy_from_slice(name.as_bytes());
+pub fn exists(name: &str) -> bool {
+    let path = clean_path(name);
+    if validate(path).is_err() { return false; }
+    v2_exists(path)
+}
 
-    // Find the entry first to get its data extents
-    let entry = btree::lookup(&mut fs.cache, fs.sb.btree_root, &key)?
-        .ok_or(FsError::ObjectNotFound)?;
-
-    // Delete from B-tree (COW)
-    let root = fs.sb.btree_root;
-    let (new_root, old_blocks) = btree::delete(&mut fs.cache, &mut fs.bitmap, root, &key)?;
-
-    // Record all old blocks + data extents for deferred free
-    for b in &old_blocks {
-        fs.journal.record_free(*b, 1);
+/// Reject reserved names that would clash with kernel-managed paths.
+/// v2 reserves `.system/` for boot config + keycheck. v1's `.npk-` and
+/// `/.dir` legacy patterns are also rejected so apps can't trip over
+/// transitional debris.
+pub fn validate_user_name(name: &str) -> Result<(), FsError> {
+    let path = clean_path(name);
+    validate(path)?;
+    if path.starts_with(".system/") || path == ".system" {
+        return Err(FsError::ReservedName);
     }
-    // Direct extents
-    let direct_count = (entry.extent_count as usize).min(DIRECT_EXTENTS);
-    for i in 0..direct_count {
-        fs.journal.record_free(entry.extents[i].start_block, entry.extents[i].block_count);
+    let last = path.rsplit('/').next().unwrap_or(path);
+    if last.starts_with(".npk-") {
+        return Err(FsError::ReservedName);
     }
-    // Indirect extents: read the chain + record every data extent AND
-    // every chain-block address in the journal, so a crash between
-    // Phase 3 (journal committed) and Phase 4 (bitmap free) doesn't
-    // leak the index blocks. The actual bitmap.free happens in Phase 4.
-    let (indirect_extents, indirect_chain_blocks) = if entry.indirect_block != 0 {
-        read_indirect_chain(&mut fs.cache, entry.indirect_block).unwrap_or_default()
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    for ext in &indirect_extents {
-        fs.journal.record_free(ext.start_block, ext.block_count);
+    if path.ends_with("/.dir") {
+        return Err(FsError::ReservedName);
     }
-    for &cb in &indirect_chain_blocks {
-        fs.journal.record_free(cb, 1);
-    }
-
-    // Commit
-    fs.generation += 1;
-    fs.sb.btree_root = new_root;
-    fs.sb.object_count = fs.sb.object_count.saturating_sub(1);
-    fs.sb.free_blocks = fs.bitmap.free_count();
-    fs.sb.generation = fs.generation;
-    fs.sb.journal_head = fs.journal.head();
-
-    // Phase 1: write journal entries (committed=0)
-    fs.journal.prepare(&mut fs.cache)?;
-    fs.sb.journal_seq = fs.journal.seq();
-
-    // Phase 2: persist bitmap + superblock
-    fs.bitmap.sync(&mut fs.cache)?;
-    superblock::write_next(&mut fs.cache, &mut fs.sb)?;
-    fs.cache.flush()?;
-
-    // Phase 3: mark journal committed
-    fs.journal.finalize(&mut fs.cache)?;
-    fs.cache.flush()?;
-
-    // Phase 4: free old B-tree blocks + direct + indirect data +
-    // indirect chain (all deferred until commit is safe). Invalidate
-    // EVERY cached block in each extent — not just start_block — so
-    // subsequent realloc-and-write doesn't hit stale valid entries for
-    // the inside of the extent.
-    for b in &old_blocks {
-        fs.bitmap.free(*b, 1);
-        fs.cache.invalidate(*b);
-    }
-    let del_direct = (entry.extent_count as usize).min(DIRECT_EXTENTS);
-    for i in 0..del_direct {
-        let ext = &entry.extents[i];
-        fs.bitmap.free(ext.start_block, ext.block_count);
-        for b in 0..ext.block_count {
-            fs.cache.invalidate(ext.start_block + b);
-        }
-    }
-    for ext in &indirect_extents {
-        fs.bitmap.free(ext.start_block, ext.block_count);
-        for b in 0..ext.block_count {
-            fs.cache.invalidate(ext.start_block + b);
-        }
-    }
-    for &cb in &indirect_chain_blocks {
-        fs.bitmap.free(cb, 1);
-        fs.cache.invalidate(cb);
-    }
-    fs.bitmap.flush_trims();
-
     Ok(())
 }
 
-/// List all objects. Returns Vec of (name, size, hash).
-pub fn list() -> Result<Vec<(String, u64, [u8; 32])>, FsError> {
-    let mut lock = FS.lock();
-    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+// ── Bridge helpers ────────────────────────────────────────────────────
 
-    let mut result = Vec::new();
-    btree::iter_all(&mut fs.cache, fs.sb.btree_root, &mut |entry| {
-        let name = String::from(entry.name_str());
-        result.push((name, entry.size, entry.content_hash));
-    })?;
-    Ok(result)
-}
-
-/// Get filesystem stats: (total_blocks, free_blocks, object_count, generation)
-pub fn stats() -> Option<(u64, u64, u64, u64)> {
-    let lock = FS.lock();
-    let fs = lock.as_ref()?;
-    Some((fs.sb.total_blocks, fs.sb.free_blocks, fs.sb.object_count, fs.generation))
-}
-
-/// Check if an object exists by name (B-tree lookup only, no data read).
-pub fn exists(name: &str) -> bool {
-    let name = clean_name(name);
-    if validate_name(name).is_err() { return false; }
-    let mut lock = FS.lock();
-    let fs = match lock.as_mut() {
-        Some(fs) => fs,
-        None => return false,
-    };
-    let mut key = [0u8; 64];
-    key[..name.len()].copy_from_slice(name.as_bytes());
-    btree::lookup(&mut fs.cache, fs.sb.btree_root, &key)
-        .ok().flatten().is_some()
-}
-
-/// Get the installation salt from the superblock.
-pub fn install_salt() -> Option<[u8; 16]> {
-    let lock = FS.lock();
-    let fs = lock.as_ref()?;
-    Some(fs.sb.install_salt)
-}
-
-pub fn is_mounted() -> bool {
-    FS.lock().is_some()
-}
-
-/// Strip leading/trailing slashes from a name.
-// ============================================================
-// Indirect Extent Blocks
-// ============================================================
-// Format per 4KB block:
-//   [0..4]   count: u32 (number of extents in this block)
-//   [4..12]  next: u64  (next indirect block, 0 = end)
-//   [12..]   extents: [Extent; count] (up to 255)
-
-/// Write overflow extents to indirect blocks. Returns first indirect block address.
-fn write_indirect_extents(
-    cache: &mut cache::BlockCache, bitmap: &mut bitmap::Bitmap, extents: &[Extent],
-) -> Result<u64, FsError> {
-    let mut blocks = Vec::new();
-    let mut offset = 0;
-
-    // Allocate all indirect blocks first
-    while offset < extents.len() {
-        let block = bitmap.alloc(1)?;
-        blocks.push(block);
-        offset += EXTENTS_PER_INDIRECT;
-    }
-
-    // Write each indirect block (backwards to set chain pointers)
-    offset = 0;
-    for (i, &block) in blocks.iter().enumerate() {
-        let count = (extents.len() - offset).min(EXTENTS_PER_INDIRECT);
-        let next = if i + 1 < blocks.len() { blocks[i + 1] } else { 0u64 };
-
-        let mut buf = [0u8; BLOCK_SIZE];
-        buf[0..4].copy_from_slice(&(count as u32).to_le_bytes());
-        buf[4..12].copy_from_slice(&next.to_le_bytes());
-        for j in 0..count {
-            let off = 12 + j * 16;
-            buf[off..off + 8].copy_from_slice(&extents[offset + j].start_block.to_le_bytes());
-            buf[off + 8..off + 16].copy_from_slice(&extents[offset + j].block_count.to_le_bytes());
-        }
-        cache.write(block, &buf)?;
-        offset += count;
-    }
-
-    Ok(blocks[0])
-}
-
-/// Read all extents from an indirect block chain.
-fn read_indirect_extents(
-    cache: &mut cache::BlockCache, first_block: u64,
-) -> Result<Vec<Extent>, FsError> {
-    let (extents, _) = read_indirect_chain(cache, first_block)?;
-    Ok(extents)
-}
-
-/// Walk an indirect block chain, returning both the extents it
-/// describes AND the addresses of the chain blocks themselves. Callers
-/// that need to free the whole chain want both so the chain blocks can
-/// be journaled + invalidated the same way data extents are.
-fn read_indirect_chain(
-    cache: &mut cache::BlockCache, first_block: u64,
-) -> Result<(Vec<Extent>, Vec<u64>), FsError> {
-    let mut extents = Vec::new();
-    let mut chain_blocks = Vec::new();
-    let mut block = first_block;
-
-    while block != 0 {
-        chain_blocks.push(block);
-        let mut buf = [0u8; BLOCK_SIZE];
-        cache.read(block, &mut buf)?;
-        let count = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
-        let next = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-
-        for j in 0..count.min(EXTENTS_PER_INDIRECT) {
-            let off = 12 + j * 16;
-            let start = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-            let cnt = u64::from_le_bytes(buf[off + 8..off + 16].try_into().unwrap());
-            extents.push(Extent { start_block: start, block_count: cnt });
-        }
-        block = next;
-    }
-    Ok((extents, chain_blocks))
-}
-
-/// Free all indirect blocks in a chain. Used by the store()'s
-/// allocation-rollback path where no journaling happened yet —
-/// delete() goes through the journaled path instead.
-fn free_indirect_chain(
-    cache: &mut cache::BlockCache, bitmap: &mut bitmap::Bitmap, first_block: u64,
-) {
-    let mut block = first_block;
-    while block != 0 {
-        let mut buf = [0u8; BLOCK_SIZE];
-        if cache.read(block, &mut buf).is_err() { break; }
-        let next = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-        bitmap.free(block, 1);
-        cache.invalidate(block);
-        block = next;
-    }
-}
-
-fn clean_name(name: &str) -> &str {
+fn clean_path(name: &str) -> &str {
     name.trim_matches('/')
 }
 
-fn validate_name(name: &str) -> Result<(), FsError> {
-    if name.is_empty() { return Err(FsError::InvalidName); }
-    if name.len() > MAX_NAME_LEN { return Err(FsError::NameTooLong); }
-    if name.bytes().any(|b| b == 0) { return Err(FsError::InvalidName); }
+fn validate(path: &str) -> Result<(), FsError> {
+    if path.is_empty() { return Err(FsError::InvalidName); }
+    if path.bytes().any(|b| b == 0) { return Err(FsError::InvalidName); }
     Ok(())
 }
 
-/// Validate a user-supplied name (rejects internal reserved names).
-pub fn validate_user_name(name: &str) -> Result<(), FsError> {
-    validate_name(name)?;
-    // Check the filename component (after last /)
-    let filename = name.rsplit('/').next().unwrap_or(name);
-    if filename.starts_with(".npk-") { return Err(FsError::ReservedName); }
-    if name.ends_with("/.dir") { return Err(FsError::ReservedName); }
-    Ok(())
+fn v2_exists(path: &str) -> bool {
+    matches!(v2::fs::exists(path), Ok(true))
 }
 
-fn btree_write_header(buf: &mut [u8; BLOCK_SIZE], hdr: &BTreeNodeHeader) {
-    buf[0..4].copy_from_slice(&hdr.magic.to_le_bytes());
-    buf[4] = hdr.node_type;
-    buf[5] = hdr._pad;
-    buf[6..8].copy_from_slice(&hdr.num_entries.to_le_bytes());
-    buf[8..16].copy_from_slice(&hdr.next_leaf.to_le_bytes());
+fn write_with_parents(path: &str, data: &[u8]) -> Result<(), FsError> {
+    if let Some(slash) = path.rfind('/') {
+        let parent = &path[..slash];
+        v2::fs::ensure_dirs(parent).map_err(path_to_fs_err)?;
+    }
+    v2::fs::write(path, data).map_err(path_to_fs_err)
+}
+
+fn path_to_fs_err(e: v2::paths::PathError) -> FsError {
+    use v2::paths::PathError as P;
+    match e {
+        P::InvalidPath    => FsError::InvalidName,
+        P::NotFound       => FsError::ObjectNotFound,
+        P::NotADirectory  => FsError::InvalidName,
+        P::AlreadyExists  => FsError::ObjectExists,
+        P::NotEmpty       => FsError::InvalidName,
+        P::Corrupt        => FsError::Corrupt,
+        P::Storage(inner) => inner,
+    }
+}
+
+/// DFS the v2 root Tree, appending every File entry as a flat
+/// `(slash_path, size, hash)` tuple. Skips `.system/` (kernel-internal).
+fn walk_recursive(prefix: String, out: &mut Vec<(String, u64, [u8; 32])>) -> Result<(), FsError> {
+    let listing = match v2::fs::list(&prefix) {
+        Ok(Some(v)) => v,
+        Ok(None)    => return Ok(()),
+        Err(e)      => return Err(path_to_fs_err(e)),
+    };
+    for entry in listing {
+        let mut path = prefix.clone();
+        if !path.is_empty() { path.push('/'); }
+        path.push_str(&entry.name);
+
+        // Don't surface kernel-internal storage to user-space listings.
+        if path == ".system" || path.starts_with(".system/") {
+            continue;
+        }
+
+        match entry.kind {
+            v2::object::EntryKind::File => {
+                out.push((path, entry.size, entry.hash));
+            }
+            v2::object::EntryKind::Dir => {
+                walk_recursive(path, out)?;
+            }
+        }
+    }
+    Ok(())
 }

@@ -288,13 +288,10 @@ pub fn intent_mkdir(args: &str) {
         return;
     }
     let resolved = resolve_path(dir);
-    let marker = alloc::format!("{}/.dir", resolved);
-    if crate::npkfs::exists(&marker) {
-        kprintln!("[npk] Directory '{}' already exists", resolved);
-        return;
+    match crate::npkfs::v2::fs::ensure_dirs(&resolved) {
+        Ok(()) => kprintln!("[npk] Created '{}'", resolved),
+        Err(e) => kprintln!("[npk] mkdir error: {:?}", e),
     }
-    super::ensure_parents(&resolved);
-    kprintln!("[npk] Created '{}'", resolved);
 }
 
 pub fn intent_rmdir(args: &str) {
@@ -310,147 +307,67 @@ pub fn intent_rmdir(args: &str) {
         return;
     }
 
-    let prefix = alloc::format!("{}/", resolved);
-    if let Ok(entries) = crate::npkfs::list() {
-        let has_content = entries.iter().any(|(n, _, _)| {
-            n.starts_with(prefix.as_str()) && !n.ends_with("/.dir")
-        });
-        if has_content {
-            kprintln!("[npk] Directory '{}' is not empty", resolved);
-            return;
-        }
-    }
-
-    let marker = alloc::format!("{}/.dir", resolved);
-    match crate::npkfs::delete(&marker) {
+    use crate::npkfs::v2::fs::Error as FsErr;
+    match crate::npkfs::v2::fs::delete(&resolved) {
         Ok(()) => kprintln!("[npk] Removed '{}'", resolved),
-        Err(_) => kprintln!("[npk] Directory '{}' not found", resolved),
+        Err(FsErr::NotEmpty) => kprintln!("[npk] Directory '{}' is not empty", resolved),
+        Err(FsErr::NotFound) => kprintln!("[npk] Directory '{}' not found", resolved),
+        Err(e) => kprintln!("[npk] rmdir error: {:?}", e),
     }
 }
 
 pub fn intent_list(args: &str) {
     let filter = args.trim();
-    // Use explicit arg, or cwd, or root
     let resolved = if !filter.is_empty() {
         resolve_path(filter)
     } else {
         super::get_cwd()
     };
-    let prefix = if !resolved.is_empty() {
-        let mut p = resolved;
-        if !p.ends_with('/') { p.push('/'); }
-        Some(p)
-    } else {
-        None
+
+    use crate::npkfs::v2::object::EntryKind;
+    let entries = match crate::npkfs::v2::fs::list(&resolved) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            kprintln!("[npk] '{}': not found", resolved);
+            return;
+        }
+        Err(e) => {
+            kprintln!("[npk] List error: {:?}", e);
+            return;
+        }
     };
 
-    match crate::npkfs::list() {
-        Ok(entries) => {
-            // Filter and collect visible entries (hide .npk-* and .dir markers)
-            let visible: alloc::vec::Vec<_> = entries.iter()
-                .filter(|(name, _, _)| {
-                    if name.starts_with(".npk-") { return false; }
-                    if name.ends_with("/.dir") { return false; }
-                    if let Some(ref pfx) = prefix {
-                        return name.starts_with(pfx.as_str());
-                    }
-                    true
-                })
-                .collect();
+    kprintln!();
 
-            // Collect known dirs (from .dir markers and from object prefixes)
-            let mut dirs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-            for (name, _, _) in &entries {
-                // .dir markers define empty dirs (register all levels)
-                if let Some(dir) = name.strip_suffix("/.dir") {
-                    let mut remaining = dir;
-                    loop {
-                        let d = alloc::string::String::from(remaining);
-                        if !dirs.contains(&d) { dirs.push(d); }
-                        match remaining.rfind('/') {
-                            Some(idx) => remaining = &remaining[..idx],
-                            None => break,
-                        }
-                    }
-                }
-                // Objects with / define implicit dirs (all levels)
-                let mut remaining = name.as_str();
-                while let Some(idx) = remaining.rfind('/') {
-                    remaining = &remaining[..idx];
-                    let d = alloc::string::String::from(remaining);
-                    if !dirs.contains(&d) { dirs.push(d); }
-                }
+    if entries.is_empty() {
+        kprintln!("  (empty)");
+    } else {
+        // Directories first, then files (entries arrive sorted by name).
+        for e in &entries {
+            if e.kind == EntryKind::Dir {
+                kprintln!("  {}/", e.name);
             }
-            dirs.sort();
-
-            kprintln!();
-
-            if visible.is_empty() && dirs.is_empty() {
-                kprintln!("  (empty)");
+        }
+        for e in &entries {
+            if e.kind != EntryKind::File { continue; }
+            // Hide kernel-internal entries from user listings.
+            if e.name.starts_with(".npk-") { continue; }
+            kprint!("  {:<24} ", e.name);
+            if e.size >= 1024 {
+                kprint!("{:>6} KB  ", e.size / 1024);
             } else {
-                // Determine the current "depth" we're listing
-                let prefix_str = prefix.as_deref().unwrap_or("");
-
-                // Show subdirectories at this level
-                let mut shown_dirs: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-                for dir in &dirs {
-                    let rel = if !prefix_str.is_empty() {
-                        match dir.strip_prefix(prefix_str) {
-                            Some(r) => r,
-                            None => continue,
-                        }
-                    } else {
-                        dir.as_str()
-                    };
-                    // Only show immediate children (no nested /, no self-reference)
-                    if rel.is_empty() || rel == "." || rel.contains('/') { continue; }
-                    if shown_dirs.contains(&rel) { continue; }
-                    shown_dirs.push(rel);
-
-                    // Count objects in this dir
-                    let dir_prefix = alloc::format!("{}/", dir);
-                    let count = entries.iter()
-                        .filter(|(n, _, _)| n.starts_with(dir_prefix.as_str()) && !n.ends_with("/.dir") && !n.starts_with(".npk-"))
-                        .count();
-                    if count == 0 {
-                        kprintln!("  {}/", rel);
-                    } else {
-                        kprintln!("  {}/  ({} objects)", rel, count);
-                    }
-                }
-
-                // Show files at this level (no / after prefix)
-                for (name, size, hash) in &visible {
-                    let rel = if !prefix_str.is_empty() {
-                        match name.strip_prefix(prefix_str) {
-                            Some(r) => r,
-                            None => continue,
-                        }
-                    } else {
-                        name.as_str()
-                    };
-                    // Only show files at this level (not in subdirs)
-                    if rel.contains('/') { continue; }
-
-                    kprint!("  {:<24} ", rel);
-                    if *size >= 1024 {
-                        kprint!("{:>6} KB  ", size / 1024);
-                    } else {
-                        kprint!("{:>6} B   ", size);
-                    }
-                    for b in &hash[..4] { kprint!("{:02x}", b); }
-                    kprintln!();
-                }
+                kprint!("{:>6} B   ", e.size);
             }
-
-            if let Some((_, free, count, _)) = crate::npkfs::stats() {
-                kprintln!();
-                kprintln!("  {} objects, {} free blocks", count, free);
-            }
+            for b in &e.hash[..4] { kprint!("{:02x}", b); }
             kprintln!();
         }
-        Err(e) => kprintln!("[npk] List error: {}", e),
     }
+
+    if let Some((_, free, count, _)) = crate::npkfs::stats() {
+        kprintln!();
+        kprintln!("  {} objects, {} free blocks", count, free);
+    }
+    kprintln!();
 }
 
 pub fn intent_fsinfo() {

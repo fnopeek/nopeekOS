@@ -73,49 +73,36 @@ fn ensure_wallpaper_dir() {
 
 /// List all wallpapers in the user's wallpapers/ directory.
 fn list_wallpapers() {
-    let prefix = alloc::format!("{}/", wallpaper_dir());
-    let entries = match crate::npkfs::list() {
-        Ok(e) => e,
-        Err(_) => { kprintln!("[npk] npkFS error"); return; }
+    let dir = wallpaper_dir();
+    use crate::npkfs::v2::object::EntryKind;
+    let entries = match crate::npkfs::v2::fs::list(&dir) {
+        Ok(Some(v)) => v,
+        Ok(None) => { kprintln!("[npk] No wallpapers found in {}/", dir); return; }
+        Err(_)    => { kprintln!("[npk] npkFS error"); return; }
     };
 
-    let mut count = 0;
-    for (name, _, _) in &entries {
-        if name.starts_with(&prefix) && !name.ends_with("/.dir") {
-            let short = &name[prefix.len()..];
-            if !short.contains('/') {
-                kprintln!("  {}", short);
-                count += 1;
-            }
-        }
-    }
-
-    if count == 0 {
-        kprintln!("[npk] No wallpapers found in {}/", wallpaper_dir());
+    let files: Vec<&_> = entries.iter().filter(|e| e.kind == EntryKind::File).collect();
+    if files.is_empty() {
+        kprintln!("[npk] No wallpapers found in {}/", dir);
         kprintln!("[npk] Download one: http <host> /image.png > wallpapers/name");
     } else {
-        kprintln!("[npk] {} wallpaper(s)", count);
+        for e in &files { kprintln!("  {}", e.name); }
+        kprintln!("[npk] {} wallpaper(s)", files.len());
     }
 }
 
-/// Get all wallpaper names.
+/// Get all wallpaper names (full paths) for random selection.
 fn get_wallpaper_names() -> Vec<String> {
-    let prefix = alloc::format!("{}/", wallpaper_dir());
-    let entries = match crate::npkfs::list() {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
+    let dir = wallpaper_dir();
+    use crate::npkfs::v2::object::EntryKind;
+    let entries = match crate::npkfs::v2::fs::list(&dir) {
+        Ok(Some(v)) => v,
+        _ => return Vec::new(),
     };
-
-    let mut names = Vec::new();
-    for (name, _, _) in &entries {
-        if name.starts_with(&prefix) && !name.ends_with("/.dir") {
-            let short = &name[prefix.len()..];
-            if !short.contains('/') {
-                names.push(name.clone());
-            }
-        }
-    }
-    names
+    entries.iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .map(|e| alloc::format!("{}/{}", dir, e.name))
+        .collect()
 }
 
 /// Set wallpaper from a specific file in npkFS.
