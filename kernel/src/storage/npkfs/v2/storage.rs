@@ -319,10 +319,14 @@ pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
 /// dedup). The first put owns the on-disk extents; subsequent ones see
 /// the entry already present and return Ok.
 pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError> {
+    use crate::interrupts::{rdtsc, tsc_freq};
+    let t0 = rdtsc();
+
     let computed = *blake3::hash(payload).as_bytes();
     if computed != *hash {
         return Err(FsError::InvalidName);
     }
+    let t_hash = rdtsc();
 
     // Encrypt only if the caller asked AND we have a master key. The
     // result's length (= payload.len() + 16 AEAD tag) is what the read
@@ -342,6 +346,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
         None
     };
     let write_data: &[u8] = encrypted.as_deref().unwrap_or(payload);
+    let t_enc = rdtsc();
 
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
@@ -392,6 +397,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
             fs.cache.invalidate(ext.start_block + b);
         }
     }
+    let t_alloc = rdtsc();
 
     let mut consumed = 0usize;
     for ext in &all_extents {
@@ -415,6 +421,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
         }
         consumed += span;
     }
+    let t_dma = rdtsc();
 
     // Pack into V2EntryRaw: first V2_DIRECT_EXTENTS inline, rest in
     // an indirect chain.
@@ -472,6 +479,20 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     fs.sb.object_count += 1;
     fs.sb.free_blocks = fs.bitmap.free_count();
     fs.pending_old_blocks.extend(old_blocks);
+    let t_btree = rdtsc();
+
+    if write_data.len() >= 256 * 1024 {
+        let mhz = tsc_freq().max(1) / 1_000_000;
+        kprintln!("[put] {}KB hash={} enc={} alloc={} dma={} btree={} (us)",
+            write_data.len() / 1024,
+            (t_hash.saturating_sub(t0)) / mhz,
+            (t_enc.saturating_sub(t_hash)) / mhz,
+            (t_alloc.saturating_sub(t_enc)) / mhz,
+            (t_dma.saturating_sub(t_alloc)) / mhz,
+            (t_btree.saturating_sub(t_dma)) / mhz,
+        );
+    }
+
     Ok(())
 }
 
