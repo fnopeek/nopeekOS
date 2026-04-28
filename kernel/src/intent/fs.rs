@@ -478,6 +478,47 @@ pub fn crypto_bench() -> (u64, u64, u64) {
     let aes_dec_mbs = (bytes * hz) / (dt * 1024 * 1024);
     let _ = (total, ok);
 
+    // ── Custom AES-GCM (aead_hw.rs) ────────────────────────────────
+    // Validate first: encrypt with both, compare ciphertext+tag.
+    let ct_ref = crate::crypto::aead_encrypt_aes(&key, &nonce, &buf);
+    let ct_hw  = crate::crypto::aead_encrypt_aes_hw(&key, &nonce, &buf);
+    let bytes_match = ct_ref == ct_hw;
+    if !bytes_match {
+        kprintln!("  Crypto[hw]: COMPAT FAIL — ct_hw differs from aes-gcm crate");
+    }
+
+    // HW encrypt bench
+    let t0 = rdtsc();
+    let mut total_hw = 0usize;
+    for _ in 0..ITERS {
+        let ct = crate::crypto::aead_encrypt_aes_hw(&key, &nonce, &buf);
+        total_hw = total_hw.wrapping_add(ct.len());
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let hw_enc_mbs = (bytes * hz) / (dt * 1024 * 1024);
+
+    // HW decrypt-in-place bench
+    let template_hw = crate::crypto::aead_encrypt_aes_hw(&key, &nonce, &buf);
+    let mut clones_hw: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+        alloc::vec::Vec::with_capacity(ITERS);
+    for _ in 0..ITERS { clones_hw.push(template_hw.clone()); }
+
+    let t0 = rdtsc();
+    let mut ok_hw = 0usize;
+    for c in clones_hw.iter_mut() {
+        if crate::crypto::aead_decrypt_aes_hw_in_place(&key, &nonce, c).is_some() {
+            ok_hw = ok_hw.wrapping_add(1);
+        }
+    }
+    let dt = rdtsc().saturating_sub(t0).max(1);
+    let hw_dec_mbs = (bytes * hz) / (dt * 1024 * 1024);
+    let _ = (total_hw, ok_hw);
+
+    if bytes_match {
+        kprintln!("  Crypto[hw]: enc {} dec(in-place) {} MB/s | bytes match={}",
+            hw_enc_mbs, hw_dec_mbs, bytes_match);
+    }
+
     (blake3_mbs, aes_enc_mbs, aes_dec_mbs)
 }
 
