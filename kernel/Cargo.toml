@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.86.5"
+version = "0.86.6"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
@@ -64,7 +64,7 @@ features = ["verifying"]
 # enabled in target-feature, runtime cpufeatures dispatch).
 # TLS 1.3: TLS_AES_128_GCM_SHA256 + TLS_AES_256_GCM_SHA384 cipher suites.
 [dependencies.aes-gcm]
-version = "0.10"
+version = "0.11.0-rc.3"
 default-features = false
 features = ["aes", "alloc"]
 
