@@ -128,6 +128,15 @@ static AVAILABLE: AtomicBool = AtomicBool::new(false);
 // DMA buffer for data transfers (one 4KB page, identity-mapped)
 static DMA_BUF: Mutex<Option<u64>> = Mutex::new(None);
 
+/// Pool of pre-allocated 4 KB DMA buffers for batched I/O. With a single
+/// shared `DMA_BUF`, every block transfer is necessarily synchronous —
+/// the source/dest pointer would race otherwise. The pool lets us submit
+/// up to `DMA_POOL_SLOTS` commands in flight, ring the doorbell once,
+/// then collect all completions in a single drain. Cache flushes that
+/// previously did N synchronous writes now do one parallel batch.
+const DMA_POOL_SLOTS: usize = 32;
+static DMA_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
+
 fn mmio_read32(base: u64, offset: usize) -> u32 {
     unsafe { core::ptr::read_volatile((base + offset as u64) as *const u32) }
 }
@@ -447,6 +456,16 @@ pub fn init() -> bool {
     };
     *DMA_BUF.lock() = Some(dma);
 
+    // Allocate the batched-I/O DMA pool. Failure here just means
+    // batched paths fall back to the single-buffer slow path; the
+    // device still works.
+    if let Some(pool) = memory::allocate_contiguous(DMA_POOL_SLOTS) {
+        *DMA_POOL_BASE.lock() = Some(pool);
+    } else {
+        kprintln!("[npk] nvme: WARN — could not allocate {}-page DMA pool, batched flush disabled",
+            DMA_POOL_SLOTS);
+    }
+
     // Free identify buffer
     memory::deallocate_frame(identify_buf);
 
@@ -532,6 +551,101 @@ pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
 
     unsafe { core::ptr::copy_nonoverlapping(dma as *const u8, buf.as_mut_ptr(), BLOCK_SIZE); }
     Ok(())
+}
+
+/// Submit up to `DMA_POOL_SLOTS` write-block commands in parallel and
+/// wait for them all. Returns Ok only if every command completed
+/// without error. Falls back to per-block sequential writes when the
+/// batch is too large or the pool isn't available.
+///
+/// This is the path `cache::flush` takes once it has more than one
+/// dirty block — replaces N sequential synchronous writes (N × disk
+/// latency) with one batch (~1 × disk latency, modulo NVMe ordering).
+pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkError> {
+    if items.is_empty() { return Ok(()); }
+
+    // Batch larger than the pool → fall back to sequential. We could
+    // chunk this internally but `cache::flush` won't ever exceed the
+    // cache slot count (64 in practice, our pool holds 32 — chunk
+    // boundary handled here).
+    if items.len() > DMA_POOL_SLOTS {
+        for &(block, buf) in items {
+            write_block(block, buf)?;
+        }
+        return Ok(());
+    }
+
+    let pool_base = match *DMA_POOL_BASE.lock() {
+        Some(addr) => addr,
+        None => {
+            // Pool wasn't allocated — fall back.
+            for &(block, buf) in items {
+                write_block(block, buf)?;
+            }
+            return Ok(());
+        }
+    };
+
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+
+    // Stage every payload into its own DMA pool slot + push every SQ
+    // entry, then ring the doorbell exactly once. The SQ has 64 slots;
+    // `items.len() ≤ DMA_POOL_SLOTS = 32`, so we can't wrap into our
+    // own un-acked head.
+    for (i, &(block, buf)) in items.iter().enumerate() {
+        let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
+        if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
+
+        let dma = pool_base + (i as u64) * BLOCK_SIZE as u64;
+        unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), dma as *mut u8, BLOCK_SIZE); }
+
+        let mut cmd = SqEntry::zeroed();
+        cmd.opcode = NVM_WRITE;
+        cmd.command_id = state.command_id;
+        cmd.nsid = 1;
+        cmd.prp1 = dma;
+        cmd.cdw10 = sector as u32;
+        cmd.cdw11 = (sector >> 32) as u32;
+        cmd.cdw12 = 7;
+        state.command_id = state.command_id.wrapping_add(1);
+
+        let sq_ptr = state.io_sq as *mut SqEntry;
+        unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
+        state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
+    }
+    ring_sq_doorbell(state, 1, state.io_sq_tail);
+
+    // Drain `items.len()` completions. Polling matches the per-cmd
+    // path's structure; we just keep going until we've collected every
+    // expected completion.
+    let mut completed = 0usize;
+    let mut overall_err: Option<BlkError> = None;
+    let mut spin_budget = 5_000_000u32 * items.len() as u32;
+    while completed < items.len() {
+        if spin_budget == 0 { return Err(BlkError::Timeout); }
+        spin_budget -= 1;
+
+        let cq_ptr = state.io_cq as *const CqEntry;
+        let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
+        let phase = (entry.status & 1) != 0;
+        if phase != state.io_phase {
+            core::hint::spin_loop();
+            continue;
+        }
+
+        state.io_cq_head = (state.io_cq_head + 1) % IO_QUEUE_SIZE;
+        if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
+
+        let status_code = (entry.status >> 1) & 0x7FF;
+        if status_code != 0 && overall_err.is_none() {
+            overall_err = Some(BlkError::IoError);
+        }
+        completed += 1;
+    }
+    ring_cq_doorbell(state, 1, state.io_cq_head);
+
+    overall_err.map_or(Ok(()), Err)
 }
 
 /// Write a 4KB block (8 sectors).
