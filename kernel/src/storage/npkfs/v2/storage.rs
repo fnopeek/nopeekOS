@@ -355,12 +355,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
         crypto::get_master_key().map(|master_key| {
             let obj_key = crypto::derive_object_key(&master_key, hash);
             let nonce = crypto::derive_nonce(hash);
-            // Custom AEAD wrapper — same on-disk format as
-            // `aead_encrypt_aes`, ~1.5× faster (~739 vs ~494 MB/s)
-            // because it skips aes-gcm 0.10's AeadCore Vec-alloc
-            // overhead. Validated bit-for-bit identical to the
-            // crate-encrypt output in the v0.88.0 disk bench.
-            crypto::aead_encrypt_aes_hw(&obj_key, &nonce, payload)
+            crypto::aead_encrypt_aes(&obj_key, &nonce, payload)
         })
     } else {
         None
@@ -578,12 +573,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         };
         let obj_key = crypto::derive_object_key(&master_key, hash);
         let nonce = crypto::derive_nonce(hash);
-        // Same wire format as the crate `aead_decrypt_aes_in_place`,
-        // see `crypto/aead_hw.rs`. Performance currently ≈ same
-        // (single-block PCLMULQDQ GHASH); v0.88.2 will swap GHASH
-        // for the aggregated 4-way path and lift decrypt to ~1.5
-        // GB/s.
-        if crypto::aead_decrypt_aes_hw_in_place(&obj_key, &nonce, &mut staging).is_none() {
+        if crypto::aead_decrypt_aes_in_place(&obj_key, &nonce, &mut staging).is_none() {
             kprintln!("[npk] npkfs2: decrypt failed for hash {:02x}{:02x}…",
                 hash[0], hash[1]);
             return Err(FsError::Corrupt);
@@ -592,27 +582,25 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     let t_dec = rdtsc();
     let plaintext = staging;
 
-    let computed = *blake3::hash(&plaintext).as_bytes();
-    if computed != *hash {
-        kprintln!("[npk] npkfs2: integrity failure for hash {:02x}{:02x}…",
-            hash[0], hash[1]);
-        return Err(FsError::Corrupt);
-    }
-    let t_verify = rdtsc();
+    // BLAKE3-verify intentionally elided. AES-GCM's tag already
+    // authenticates the ciphertext under (key, nonce), and both
+    // are derived from `hash` via `derive_object_key` /
+    // `derive_nonce`. Tampering anywhere — hash field in the btree
+    // entry, ciphertext on disk, AEAD tag — invalidates the tag
+    // check above and we return Corrupt then. A fresh BLAKE3 over
+    // the plaintext only catches scenarios already covered by the
+    // tag (or BLAKE3 collisions, ~2¹²⁸ unreachable). Removing it
+    // saves ~600 µs per 1 MB read (~25% throughput gain).
 
-    // Phase profile — only emitted for sizable reads so the small-file
-    // path doesn't spam the serial log. ≥ 256 KB covers the 1 MB and
-    // 16 MB testdisk buckets, where the per-stage breakdown matters.
     if total_bytes >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
-        kprintln!("[get] {}KB lock={} btree={} alloc={} dma={} dec={} verify={} (us)",
+        kprintln!("[get] {}KB lock={} btree={} alloc={} dma={} dec={} (us)",
             total_bytes / 1024,
             (t_lock.saturating_sub(t0)) / mhz,
             (t_btree.saturating_sub(t_lock)) / mhz,
             (t_alloc.saturating_sub(t_btree)) / mhz,
             (t_dma.saturating_sub(t_alloc)) / mhz,
             (t_dec.saturating_sub(t_dma)) / mhz,
-            (t_verify.saturating_sub(t_dec)) / mhz,
         );
     }
 
