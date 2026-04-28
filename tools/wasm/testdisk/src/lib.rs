@@ -131,12 +131,11 @@ fn iops(count: u32, us: u64) -> u64 {
     count as u64 * 1_000_000 / us
 }
 
-/// MB/s = bytes / µs (since 1 MB ≈ 1e6 bytes and 1 s = 1e6 µs, the
-/// units cancel into MB-per-s of the binary kind we don't quite want
-/// but close enough for an order-of-magnitude readout).
-fn mb_per_s(total_bytes: u64, us: u64) -> u64 {
+/// KB/s = bytes × 1000 / µs (decimal KB, close enough). KB rather
+/// than MB so small-write rows don't round to zero from integer math.
+fn kb_per_s(total_bytes: u64, us: u64) -> u64 {
     if us == 0 { return 0; }
-    total_bytes / us
+    total_bytes.saturating_mul(1000) / us
 }
 
 // ── Phase runner ──────────────────────────────────────────────────────
@@ -222,12 +221,12 @@ fn print_phase(s: &PhaseStats) {
     host::print(" ops  |  WRITE ");
     print_pad(iops(s.count, s.write_us), 6);
     host::print(" iops, ");
-    print_pad(mb_per_s(s.size as u64 * s.count as u64, s.write_us), 4);
-    host::print(" MB/s  |  READ ");
+    print_pad(kb_per_s(s.size as u64 * s.count as u64, s.write_us), 6);
+    host::print(" KB/s  |  READ ");
     print_pad(iops(s.count, s.read_us), 6);
     host::print(" iops, ");
-    print_pad(mb_per_s(s.size as u64 * s.count as u64, s.read_us), 4);
-    host::print(" MB/s");
+    print_pad(kb_per_s(s.size as u64 * s.count as u64, s.read_us), 6);
+    host::print(" KB/s");
 
     if s.failures > 0 {
         host::print("  |  FAIL ");
@@ -292,12 +291,12 @@ pub extern "C" fn _start() {
     host::print(" ops  |  WRITE ");
     print_pad(iops(total_writes, total_write_us), 6);
     host::print(" iops, ");
-    print_pad(mb_per_s(total_bytes, total_write_us), 4);
-    host::print(" MB/s  |  READ ");
+    print_pad(kb_per_s(total_bytes, total_write_us), 6);
+    host::print(" KB/s  |  READ ");
     print_pad(iops(total_writes, total_read_us), 6);
     host::print(" iops, ");
-    print_pad(mb_per_s(total_bytes, total_read_us), 4);
-    host::print(" MB/s\n");
+    print_pad(kb_per_s(total_bytes, total_read_us), 6);
+    host::print(" KB/s\n");
 
     host::print("\n  bytes touched: ");
     print_dec(total_bytes);
