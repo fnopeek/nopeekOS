@@ -236,9 +236,13 @@ Every execution is a sandboxed WASM module:
 - [x] HTTPS client (`https <host> [path]`)
 - [x] X.509 certificate chain validation
 - [x] Embedded root CAs (ISRG Root X1, DigiCert G2, AAA, GTS Root R1)
-- [x] SHA-256, HMAC-SHA256, HKDF, RSA PKCS#1 v1.5 verify
+- [x] SHA-256, HMAC-SHA256, HKDF, RSA PKCS#1 v1.5 verify (via RustCrypto `rsa` crate, v0.89.0)
 - [x] X.509 SAN (Subject Alternative Name) for TLS hostname verification
+- [x] **X.509 conformance** (v0.89.0) — KeyUsage, ExtendedKeyUsage, BasicConstraints `pathLenConstraint`, unknown-critical-extension reject
+- [x] **SHA-1 reject** (v0.89.0) — `sha1WithRSAEncryption` removed from accepted sig-algos
 - [x] ECDSA P-384 signature verification (OTA updates, PrehashVerifier)
+- [x] **TCP ISN — RFC 6528** (v0.89.0) — BLAKE3-keyed-hash of 4-tuple under per-boot CSPRNG secret + monotonic offset, replaces predictable tick-counter ISN
+- [x] **ARP active resolve** (v0.89.1) — `arp::resolve` helper + cache-miss `arp::request` so first SYN/UDP after cold boot uses real MAC, not L2 broadcast
 
 ### Phase 7 -- Bare Metal (target: Intel N100 NUC)
 
@@ -583,7 +587,7 @@ Spec + design rationale: see [`NPKFS_V2.md`](NPKFS_V2.md).
 | Identity | Passphrase -> BLAKE3-KDF | No users, no accounts |
 | Key Exchange | X25519 + ECDH P-384 | Ephemeral, per-connection |
 | Certificates | X.509, 4 embedded root CAs | ISRG X1, DigiCert G2, AAA, GTS R1 |
-| Crypto libs | sha2, hmac, hkdf, aes-gcm, p384 | RustCrypto, audited, no_std |
+| Crypto libs | sha2, hmac, hkdf, aes-gcm, p256, p384, rsa | RustCrypto, audited, no_std |
 | Bitmap Font | Spleen (8x16, 16x32, 32x64) | BSD 2-Clause, clean glyphs |
 | OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
 | TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
@@ -839,7 +843,7 @@ and reject any artifact whose signature doesn't match.
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.85.5
+[npk] AI-native Operating System v0.89.1
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] TSC: 806 MHz

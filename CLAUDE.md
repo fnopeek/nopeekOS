@@ -42,9 +42,50 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.88.8`, sdk `0.6.1`,
+- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.89.1`, sdk `0.6.1`,
   drun `0.6.0`, loft `0.2.1`, testdisk `0.5.2`.
-- **Just shipped (2026-04-28 evening — npkFS perf push v0.86 → v0.88.8):**
+- **Just shipped (2026-04-29 — crypto stack + network hardening v0.89.0–v0.89.1):**
+  - **X.509 conformance** (v0.89.0): full extension parser + chain
+    enforcement of KeyUsage (`digitalSignature` for leaf,
+    `keyCertSign` for CAs), ExtendedKeyUsage (`serverAuth` /
+    `anyExtendedKeyUsage`), BasicConstraints `pathLenConstraint`, and
+    rejection of unknown critical extensions. Closes the
+    Symantec/DigiNotar-class mis-issuance vectors where a
+    serverAuth-only cert could pass as a CA.
+  - **RSA verify swap** (v0.89.0): deleted 340 LoC of hand-rolled
+    BigInt math (schoolbook mul + long-division mod_reduce, lying
+    "Montgomery" doc-comment). Now a thin wrapper over RustCrypto
+    `rsa 0.9` + `crypto-bigint` (audited, constant-time). Net –300
+    LoC. SHA-1 sig algo dropped from accepted set in the same pass —
+    real chains since 2017 are SHA-256+ only and we never verify root
+    self-signatures (matched by subject DN against embedded set).
+  - **TCP ISN — RFC 6528** (v0.89.0): replaced
+    `interrupts::ticks() as u32` with BLAKE3-keyed-hash of
+    `(saddr, daddr, sport, dport)` under a per-boot CSPRNG secret,
+    plus a tick-derived monotonic offset (~250 kHz step). Defeats
+    off-path ISN prediction on listening sockets (debug reverse-mirror,
+    future SSH).
+  - **ARP cache-miss fix** (v0.89.1): `ipv4::send` used to fall back
+    to L2 broadcast on a cold cache → most gateways drop unicast IP
+    with broadcast MAC → first SYN dies, TCP-retry waits 1 s for
+    passive cache-learn. Symptom: `debug <ip> <port>` needed 2–3
+    attempts on fresh boot, fixed by a prior `ping`. Now: `ipv4::send`
+    fires `arp::request` on miss (additive, packet still attempted),
+    AND `tcp::connect` pre-resolves via new `arp::resolve(ip,
+    timeout)` helper before any `CONNECTIONS.lock()` (~500 ms cap).
+    First-try success on cold boot.
+- **Crypto-stack risks still on the table (audit, 2026-04-29):**
+  - TLS 1.3 handshake (`crypto/tls/mod.rs`, 967 LoC) — eigen, no
+    audit. Realistic swap target is `rustls` no_std + alloc with
+    `rustls-rustcrypto` provider. Eigene Session.
+  - TCP data-retransmit fehlt komplett (`send()` is fire-once); SACK
+    / window-scaling / timestamps fehlen. Verfügbarkeitsbug, kein
+    Security.
+  - Eigener kleiner ASN.1-Parser (`crypto/tls/asn1.rs`, 91 LoC) —
+    sieht ok aus, defensive Length-Limits, aber CVE-historisch
+    bug-empfindliche Ecke. RustCrypto `der` crate wäre der saubere
+    Swap zusammen mit `x509-cert`.
+- **Earlier (2026-04-28 evening — npkFS perf push v0.86 → v0.88.8):**
   - **NVMe PRP-list extents** (v0.86.0): 1 cmd per FS extent (was 1
     cmd per 4 KB block — 256× fewer SQ round-trips for 1 MB).
   - **NVMe parallel cmds in flight** (v0.87.0): up to 4 cmds on a
