@@ -9,8 +9,35 @@
 
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
-use spin::Mutex;
+use spin::{Mutex, Once};
 use super::{ipv4, arp};
+
+// RFC 6528 — Initial Sequence Number generation. Predictable ISNs (e.g. a
+// raw tick counter) let an off-path attacker forge in-window segments on a
+// listening socket. We mix a per-boot CSPRNG secret with the connection
+// 4-tuple via BLAKE3-keyed-hash, then add a tick-derived monotonic counter
+// so retried connections still grow forward.
+static ISN_SECRET: Once<[u8; 32]> = Once::new();
+
+fn isn_secret() -> &'static [u8; 32] {
+    ISN_SECRET.call_once(|| crate::csprng::random_256())
+}
+
+fn generate_isn(saddr: [u8; 4], daddr: [u8; 4], sport: u16, dport: u16) -> u32 {
+    let mut buf = [0u8; 12];
+    buf[0..4].copy_from_slice(&saddr);
+    buf[4..8].copy_from_slice(&daddr);
+    buf[8..10].copy_from_slice(&sport.to_be_bytes());
+    buf[10..12].copy_from_slice(&dport.to_be_bytes());
+    let h = blake3::keyed_hash(isn_secret(), &buf);
+    let b = h.as_bytes();
+    let hash_part = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+    // Monotonic component: 100 Hz tick × 2500 ≈ 4 µs ISN step (RFC 6528 §3
+    // suggests a ~250 kHz clock). Wrap is fine — the secret-keyed hash
+    // ensures the absolute value is unguessable per 4-tuple.
+    let timer = (crate::interrupts::ticks() as u32).wrapping_mul(2500);
+    hash_part.wrapping_add(timer)
+}
 
 const MAX_CONNECTIONS: usize = 16;
 const MSS: u16 = 1460; // standard Ethernet MSS
@@ -98,7 +125,7 @@ fn alloc_port() -> u16 {
 /// Open a TCP connection. Returns connection handle (index). Blocking until established.
 pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
     let local_port = alloc_port();
-    let iss = crate::interrupts::ticks() as u32; // simple ISN from tick counter
+    let iss = generate_isn(arp::our_ip(), remote_ip, local_port, remote_port);
 
     let conn = TcpConn {
         state: State::SynSent,
@@ -408,7 +435,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 });
                 if let Some(li) = listen_idx {
                     // Accept the SYN on the listening socket
-                    let iss = crate::interrupts::ticks() as u32;
+                    let iss = generate_isn(arp::our_ip(), src_ip, dst_port, src_port);
                     let conn = conns[li].as_mut().unwrap();
                     conn.state = State::SynReceived;
                     conn.remote_ip = src_ip;

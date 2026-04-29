@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.88.8"
+version = "0.89.0"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
@@ -34,6 +34,9 @@ default-features = false
 [dependencies.sha2]
 version = "0.10"
 default-features = false
+# `oid` feature exposes Sha256/Sha384 as `AssociatedOid`, required by
+# `rsa::Pkcs1v15Sign::new::<D>()` to build the DigestInfo prefix.
+features = ["oid"]
 
 [dependencies.hmac]
 version = "0.12"
@@ -58,6 +61,13 @@ features = ["ecdsa", "ecdh"]
 version = "0.16"
 default-features = false
 features = ["verifying"]
+
+# RSA PKCS#1 v1.5 signature verification for X.509 chains.
+# Replaces the hand-rolled BigInt math we used to ship in
+# `crypto/tls/rsa.rs`. Constant-time BigUint via `crypto-bigint`.
+[dependencies.rsa]
+version = "0.9"
+default-features = false
 
 # AES-256-GCM — primary symmetric cipher.
 # Storage: at-rest encryption of every npkFS blob (HW AES-NI + PCLMULQDQ

@@ -3,7 +3,7 @@
 //! Embedded trusted root CA certificates + chain validation.
 //! Root CAs are compiled into the kernel binary.
 
-use super::x509::{self, X509Cert, KeyType};
+use super::x509::{self, X509Cert, KeyType, KU_DIGITAL_SIGNATURE, KU_KEY_CERT_SIGN};
 use super::sha256;
 
 /// ISRG Root X1 (Let's Encrypt) — covers ~60% of the web
@@ -36,24 +36,58 @@ pub fn verify_chain(chain: &[&[u8]], hostname: &str) -> Result<(), CertError> {
     // Parse leaf certificate
     let leaf = x509::parse_x509(chain[0]).ok_or(CertError::ParseError)?;
 
-    // Verify hostname matches leaf CN
+    // Hostname → CN/SAN match
     if !cn_matches(&leaf, hostname) {
         return Err(CertError::HostnameMismatch);
     }
+    // Critical extension we don't understand → RFC 5280 §4.2 reject.
+    if leaf.unknown_critical_ext {
+        return Err(CertError::UnknownCriticalExt);
+    }
+    // KeyUsage: if present, must include digitalSignature (TLS 1.3 ECDHE_*).
+    if let Some(ku) = leaf.key_usage {
+        if ku & KU_DIGITAL_SIGNATURE == 0 {
+            return Err(CertError::KeyUsageInvalid);
+        }
+    }
+    // EKU: if present, must include serverAuth or anyExtendedKeyUsage.
+    if leaf.eku_present && !leaf.eku_server_auth && !leaf.eku_any {
+        return Err(CertError::EkuInvalid);
+    }
 
-    // Build chain: verify each cert is signed by the next
+    // Build chain: verify each cert is signed by the next.
+    // For each issuer (CA), enforce CA-bit, KU keyCertSign, pathLen, and the
+    // critical-extension rule. `inter_below` counts non-self CAs that the
+    // current issuer sits above in the chain (excluding the leaf).
     let mut current = leaf;
     for i in 1..chain.len() {
         let issuer = x509::parse_x509(chain[i]).ok_or(CertError::ParseError)?;
 
-        // Verify signature: current cert signed by issuer's public key
         if !verify_signature(&current, &issuer) {
             return Err(CertError::SignatureInvalid);
         }
 
-        // Issuer must be a CA
-        if !issuer.is_ca && i < chain.len() - 1 {
+        // Issuer must assert CA via BasicConstraints.
+        if !issuer.is_ca {
             return Err(CertError::NotCA);
+        }
+        // KeyUsage on a CA, if present, must include keyCertSign.
+        if let Some(ku) = issuer.key_usage {
+            if ku & KU_KEY_CERT_SIGN == 0 {
+                return Err(CertError::KeyUsageInvalid);
+            }
+        }
+        // pathLenConstraint applies to non-self-issued certs below this CA in
+        // the chain (RFC 5280 §4.2.1.9). `i - 1` is the count of intermediate
+        // CAs sitting between this issuer and the leaf.
+        if let Some(plc) = issuer.path_len_constraint {
+            let inter_below = (i as u32).saturating_sub(1);
+            if inter_below > plc {
+                return Err(CertError::PathLenExceeded);
+            }
+        }
+        if issuer.unknown_critical_ext {
+            return Err(CertError::UnknownCriticalExt);
         }
 
         current = issuer;
@@ -80,15 +114,17 @@ pub fn verify_chain(chain: &[&[u8]], hostname: &str) -> Result<(), CertError> {
     Err(CertError::UntrustedRoot)
 }
 
-// Signature algorithm OIDs
+// Signature algorithm OIDs — SHA-256 and SHA-384 only.
+// SHA-1 (`1.2.840.113549.1.1.5`) is rejected: collision-broken since 2017,
+// last accepted by mainstream CAs ~2016. We never verify root self-signatures
+// (roots are matched by subject DN against the embedded set), so SHA-1 only
+// matters for intermediate/leaf chain hops — and there it's a hard reject.
 // 1.2.840.10045.4.3.2 = ecdsa-with-SHA256
 const OID_ECDSA_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
 // 1.2.840.10045.4.3.3 = ecdsa-with-SHA384
 const OID_ECDSA_SHA384: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03];
 // 1.2.840.113549.1.1.11 = sha256WithRSAEncryption
 const OID_RSA_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B];
-// 1.2.840.113549.1.1.5 = sha1WithRSAEncryption
-const OID_RSA_SHA1: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
 // 1.2.840.113549.1.1.12 = sha384WithRSAEncryption
 const OID_RSA_SHA384: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C];
 
@@ -97,13 +133,6 @@ fn verify_signature(cert: &X509Cert<'_>, issuer: &X509Cert<'_>) -> bool {
 
     if algo == OID_RSA_SHA256 {
         super::rsa::rsa_verify_pkcs1_sha256(
-            issuer.public_key,
-            issuer.rsa_exponent,
-            cert.tbs_raw,
-            cert.signature,
-        )
-    } else if algo == OID_RSA_SHA1 {
-        super::rsa::rsa_verify_pkcs1_sha1(
             issuer.public_key,
             issuer.rsa_exponent,
             cert.tbs_raw,
@@ -342,6 +371,10 @@ pub enum CertError {
     SignatureInvalid,
     NotCA,
     UntrustedRoot,
+    KeyUsageInvalid,
+    EkuInvalid,
+    PathLenExceeded,
+    UnknownCriticalExt,
 }
 
 impl core::fmt::Display for CertError {
@@ -353,6 +386,10 @@ impl core::fmt::Display for CertError {
             CertError::SignatureInvalid => write!(f, "invalid signature"),
             CertError::NotCA => write!(f, "intermediate is not a CA"),
             CertError::UntrustedRoot => write!(f, "untrusted root CA"),
+            CertError::KeyUsageInvalid => write!(f, "keyUsage missing required bit"),
+            CertError::EkuInvalid => write!(f, "EKU missing serverAuth"),
+            CertError::PathLenExceeded => write!(f, "pathLenConstraint exceeded"),
+            CertError::UnknownCriticalExt => write!(f, "unknown critical extension"),
         }
     }
 }
