@@ -23,6 +23,19 @@ pub fn prefix_len() -> u8 {
     bits.count_ones() as u8
 }
 
+/// Pick the IP whose MAC the next-hop frame is addressed to: the destination
+/// itself if it's link-local (or broadcast), otherwise the configured gateway.
+/// Public so `tcp::connect` can pre-resolve the same hop ARP-wise before
+/// taking any network-stack lock.
+pub fn arp_target_for(dst_ip: [u8; 4]) -> [u8; 4] {
+    if dst_ip == [255, 255, 255, 255] { return dst_ip; }
+    let src = arp::our_ip();
+    let mask = *SUBNET.lock();
+    let src_masked = [src[0] & mask[0], src[1] & mask[1], src[2] & mask[2], src[3] & mask[3]];
+    let dst_masked = [dst_ip[0] & mask[0], dst_ip[1] & mask[1], dst_ip[2] & mask[2], dst_ip[3] & mask[3]];
+    if src_masked == dst_masked { dst_ip } else { *GATEWAY.lock() }
+}
+
 pub fn handle_ipv4(data: &[u8]) {
     if data.len() < HEADER_LEN { return; }
 
@@ -77,15 +90,21 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) {
     // Payload
     pkt[HEADER_LEN..].copy_from_slice(payload);
 
-    // Resolve MAC: local subnet → ARP direct, else → gateway
-    let mask = *SUBNET.lock();
-    let src_masked = [src_ip[0] & mask[0], src_ip[1] & mask[1],
-                      src_ip[2] & mask[2], src_ip[3] & mask[3]];
-    let dst_masked = [dst_ip[0] & mask[0], dst_ip[1] & mask[1],
-                      dst_ip[2] & mask[2], dst_ip[3] & mask[3]];
-    let is_local = dst_ip == [255, 255, 255, 255] || src_masked == dst_masked;
-    let arp_target = if is_local { dst_ip } else { *GATEWAY.lock() };
-    let dst_mac = arp::lookup(arp_target).unwrap_or(eth::BROADCAST);
+    // Resolve next-hop MAC. On cache miss we fire an ARP request so the
+    // gateway responds and `super::poll` populates the cache before the
+    // caller's next retry — without it, every fresh-boot first packet
+    // (TCP SYN, DNS query, etc.) gets sent to L2 broadcast and silently
+    // dropped by most gateways. Active resolution is left to callers
+    // that can poll without holding network locks (see `arp::resolve`,
+    // used by `tcp::connect`).
+    let arp_target = arp_target_for(dst_ip);
+    let dst_mac = match arp::lookup(arp_target) {
+        Some(mac) => mac,
+        None => {
+            arp::request(arp_target);
+            eth::BROADCAST
+        }
+    };
 
     let _ = eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt);
 }

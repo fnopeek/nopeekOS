@@ -85,6 +85,25 @@ pub fn lookup(ip: [u8; 4]) -> Option<[u8; 6]> {
     cache.iter().find(|e| e.valid && e.ip == ip).map(|e| e.mac)
 }
 
+/// Resolve IP → MAC. On cache hit, returns immediately. On miss, sends an
+/// ARP request and polls the network stack until the reply lands or the
+/// timeout (in 100 Hz ticks) elapses.
+///
+/// MUST NOT be called while holding any network-stack lock (CONNECTIONS,
+/// etc.) — `super::poll` dispatches through the same locks and would
+/// deadlock.
+pub fn resolve(ip: [u8; 4], timeout_ticks: u64) -> Option<[u8; 6]> {
+    if let Some(mac) = lookup(ip) { return Some(mac); }
+    request(ip);
+    let t0 = crate::interrupts::ticks();
+    while crate::interrupts::ticks().wrapping_sub(t0) < timeout_ticks {
+        super::poll();
+        if let Some(mac) = lookup(ip) { return Some(mac); }
+        core::hint::spin_loop();
+    }
+    None
+}
+
 fn cache_insert(ip: [u8; 4], mac: [u8; 6]) {
     let mut cache = CACHE.lock();
     // Update existing or find empty slot
