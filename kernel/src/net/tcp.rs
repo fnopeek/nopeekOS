@@ -127,6 +127,14 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
     let local_port = alloc_port();
     let iss = generate_isn(arp::our_ip(), remote_ip, local_port, remote_port);
 
+    // Pre-resolve the next-hop MAC before any CONNECTIONS lock. Without this
+    // the first SYN goes to L2 broadcast on a cold cache and is dropped by
+    // most gateways; TCP retransmit kicks in 1 s later and only succeeds
+    // once the cache passively learns the gateway MAC. Symptom in practice:
+    // `debug <ip> <port>` needs 2–3 attempts on fresh boot, fixed by a prior
+    // `ping`. ~500 ms cap; on timeout we still proceed and let TCP retry.
+    let _ = arp::resolve(super::ipv4::arp_target_for(remote_ip), 50);
+
     let conn = TcpConn {
         state: State::SynSent,
         local_port,
