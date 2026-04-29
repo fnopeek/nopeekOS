@@ -1,12 +1,14 @@
 //! Minimal X.509 Certificate Parser
 //!
-//! Extracts only what TLS 1.3 needs: subject, issuer, public key, validity.
-//! Supports both RSA and ECDSA (P-256/P-384) certificates.
+//! Extracts what TLS 1.3 chain validation needs: subject, issuer, public key,
+//! validity, BasicConstraints (CA + pathLen), KeyUsage, ExtendedKeyUsage,
+//! and a flag for unknown critical extensions.
 
 use super::asn1::{self, TAG_SEQUENCE, TAG_SET,
                    TAG_BIT_STRING, TAG_INTEGER,
                    TAG_OID, TAG_CONTEXT_0, TAG_UTC_TIME, TAG_GENERALIZED_TIME,
-                   TAG_PRINTABLE_STRING, TAG_UTF8_STRING, TAG_IA5_STRING};
+                   TAG_PRINTABLE_STRING, TAG_UTF8_STRING, TAG_IA5_STRING,
+                   TAG_OCTET_STRING};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KeyType {
@@ -15,6 +17,20 @@ pub enum KeyType {
     EcdsaP384,
     Unknown,
 }
+
+// RFC 5280 §4.2.1.3 — KeyUsage bit positions.
+pub const KU_DIGITAL_SIGNATURE: u16 = 1 << 0;
+#[allow(dead_code)]
+pub const KU_CONTENT_COMMITMENT: u16 = 1 << 1;
+#[allow(dead_code)]
+pub const KU_KEY_ENCIPHERMENT: u16 = 1 << 2;
+#[allow(dead_code)]
+pub const KU_DATA_ENCIPHERMENT: u16 = 1 << 3;
+#[allow(dead_code)]
+pub const KU_KEY_AGREEMENT: u16 = 1 << 4;
+pub const KU_KEY_CERT_SIGN: u16 = 1 << 5;
+#[allow(dead_code)]
+pub const KU_CRL_SIGN: u16 = 1 << 6;
 
 /// Parsed X.509 certificate (references into DER bytes)
 #[allow(dead_code)]
@@ -32,6 +48,19 @@ pub struct X509Cert<'a> {
     pub not_before: &'a [u8],
     pub not_after: &'a [u8],
     pub is_ca: bool,
+    /// BasicConstraints pathLenConstraint, if present. None = unconstrained.
+    pub path_len_constraint: Option<u32>,
+    /// KeyUsage bits (KU_*). None = extension absent (no KU constraint per RFC 5280).
+    pub key_usage: Option<u16>,
+    /// True if EKU extension is present.
+    pub eku_present: bool,
+    /// True if EKU contains id-kp-serverAuth (1.3.6.1.5.5.7.3.1).
+    pub eku_server_auth: bool,
+    /// True if EKU contains anyExtendedKeyUsage (2.5.29.37.0).
+    pub eku_any: bool,
+    /// True if a critical extension was found that we don't know how to process.
+    /// Per RFC 5280 §4.2: such certs MUST be rejected.
+    pub unknown_critical_ext: bool,
 }
 
 // OID: 2.5.4.3 (commonName)
@@ -44,8 +73,16 @@ const OID_EC: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
 const OID_P256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
 // OID: 1.3.132.0.34 (P-384 / secp384r1)
 const OID_P384: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x22];
-// OID: 2.5.29.19 (basicConstraints)
-const OID_BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1D, 0x13];
+
+// Extension OIDs we recognise.
+const OID_EXT_SAN:                &[u8] = &[0x55, 0x1D, 0x11]; // 2.5.29.17
+const OID_EXT_BASIC_CONSTRAINTS:  &[u8] = &[0x55, 0x1D, 0x13]; // 2.5.29.19
+const OID_EXT_KEY_USAGE:          &[u8] = &[0x55, 0x1D, 0x0F]; // 2.5.29.15
+const OID_EXT_EXT_KEY_USAGE:      &[u8] = &[0x55, 0x1D, 0x25]; // 2.5.29.37
+
+// EKU purpose OIDs.
+const OID_KP_SERVER_AUTH: &[u8] = &[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01]; // 1.3.6.1.5.5.7.3.1
+const OID_KP_ANY:         &[u8] = &[0x55, 0x1D, 0x25, 0x00];                          // 2.5.29.37.0
 
 /// Parse a DER-encoded X.509 certificate.
 pub fn parse_x509(der: &[u8]) -> Option<X509Cert<'_>> {
@@ -103,18 +140,37 @@ pub fn parse_x509(der: &[u8]) -> Option<X509Cert<'_>> {
     let spki_tlv = tbs_items.next()?;
     let (key_type, public_key, rsa_exponent) = parse_public_key(spki_tlv.value)?;
 
-    // Check for BasicConstraints
+    // Extensions (optional, context [3])
     let mut is_ca = false;
+    let mut path_len_constraint = None;
+    let mut key_usage = None;
+    let mut eku_present = false;
+    let mut eku_server_auth = false;
+    let mut eku_any = false;
+    let mut unknown_critical_ext = false;
+
     for tlv in tbs_items {
         if tlv.tag == asn1::TAG_CONTEXT_3 {
-            is_ca = check_basic_constraints_ca(tlv.value);
+            parse_extensions(
+                tlv.value,
+                &mut is_ca,
+                &mut path_len_constraint,
+                &mut key_usage,
+                &mut eku_present,
+                &mut eku_server_auth,
+                &mut eku_any,
+                &mut unknown_critical_ext,
+            );
         }
     }
 
     Some(X509Cert {
         tbs_raw, issuer_cn, subject_cn,
         key_type, public_key, rsa_exponent,
-        sig_algo_oid, signature, not_before, not_after, is_ca,
+        sig_algo_oid, signature, not_before, not_after,
+        is_ca, path_len_constraint,
+        key_usage, eku_present, eku_server_auth, eku_any,
+        unknown_critical_ext,
     })
 }
 
@@ -208,33 +264,120 @@ fn strip_leading_zero(data: &[u8]) -> &[u8] {
     if !data.is_empty() && data[0] == 0 { &data[1..] } else { data }
 }
 
-fn check_basic_constraints_ca(ext_data: &[u8]) -> bool {
-    // ext_data is the value of context [3], containing a SEQUENCE of extensions
+/// Walk the [3] EXPLICIT extensions wrapper. For each extension, dispatch on
+/// OID; record an unknown-critical hit when the extnID is unrecognised AND
+/// the critical flag is TRUE.
+fn parse_extensions(
+    ext_data: &[u8],
+    is_ca: &mut bool,
+    path_len: &mut Option<u32>,
+    key_usage: &mut Option<u16>,
+    eku_present: &mut bool,
+    eku_server_auth: &mut bool,
+    eku_any: &mut bool,
+    unknown_critical: &mut bool,
+) {
     let outer = match asn1::parse_tlv(ext_data) {
         Some((tlv, _)) if tlv.tag == TAG_SEQUENCE => tlv,
-        _ => return false,
+        _ => return,
     };
 
     for ext in asn1::parse_sequence_contents(outer.value) {
         if ext.tag != TAG_SEQUENCE { continue; }
         let mut parts = asn1::parse_sequence_contents(ext.value);
-        if let Some(oid) = parts.next() {
-            if asn1::oid_matches(&oid, OID_BASIC_CONSTRAINTS) {
-                for part in parts {
-                    if part.tag == asn1::TAG_OCTET_STRING {
-                        if let Some((seq, _)) = asn1::parse_tlv(part.value) {
-                            if seq.tag == TAG_SEQUENCE {
-                                for field in asn1::parse_sequence_contents(seq.value) {
-                                    if field.tag == 0x01 {
-                                        return field.value.first().copied() == Some(0xFF);
-                                    }
-                                }
-                            }
-                        }
-                    }
+
+        let oid_tlv = match parts.next() {
+            Some(t) if t.tag == TAG_OID => t,
+            _ => continue,
+        };
+
+        // Optional BOOLEAN (critical), then mandatory OCTET STRING (extnValue).
+        let mut critical = false;
+        let mut value: &[u8] = &[];
+        for p in parts {
+            match p.tag {
+                0x01 => critical = !p.value.is_empty() && p.value[0] != 0x00,
+                t if t == TAG_OCTET_STRING => value = p.value,
+                _ => {}
+            }
+        }
+
+        let oid = oid_tlv.value;
+        if oid == OID_EXT_BASIC_CONSTRAINTS {
+            parse_basic_constraints(value, is_ca, path_len);
+        } else if oid == OID_EXT_KEY_USAGE {
+            *key_usage = parse_key_usage(value);
+        } else if oid == OID_EXT_EXT_KEY_USAGE {
+            *eku_present = true;
+            parse_eku(value, eku_server_auth, eku_any);
+        } else if oid == OID_EXT_SAN {
+            // Recognised: handled separately by certstore via raw-TBS scan.
+        } else if critical {
+            *unknown_critical = true;
+        }
+    }
+}
+
+fn parse_basic_constraints(value: &[u8], is_ca: &mut bool, path_len: &mut Option<u32>) {
+    let (seq, _) = match asn1::parse_tlv(value) {
+        Some(t) => t,
+        None => return,
+    };
+    if seq.tag != TAG_SEQUENCE { return; }
+    for field in asn1::parse_sequence_contents(seq.value) {
+        match field.tag {
+            0x01 => {
+                *is_ca = field.value.first().copied() == Some(0xFF);
+            }
+            TAG_INTEGER => {
+                let mut n: u32 = 0;
+                for &b in field.value {
+                    n = (n << 8) | b as u32;
+                    if n > 0xFFFF { return; } // sanity cap
+                }
+                *path_len = Some(n);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Decode KeyUsage BIT STRING into a u16 with KU_* bit positions.
+fn parse_key_usage(value: &[u8]) -> Option<u16> {
+    let (bs, _) = asn1::parse_tlv(value)?;
+    if bs.tag != TAG_BIT_STRING || bs.value.len() < 2 { return None; }
+    let unused_bits = bs.value[0] as u32;
+    if unused_bits > 7 { return None; }
+    // RFC 5280: bits are numbered from the MSB. Bit 0 (digitalSignature) is
+    // the high bit of the first content byte.
+    let mut bits: u16 = 0;
+    for (byte_idx, &b) in bs.value[1..].iter().enumerate().take(2) {
+        for bit in 0..8 {
+            // Skip the unused trailing bits in the LAST byte.
+            if byte_idx == bs.value.len() - 2
+                && bit >= 8u32.saturating_sub(unused_bits) as usize {
+                break;
+            }
+            if b & (0x80 >> bit) != 0 {
+                let pos = byte_idx * 8 + bit;
+                if pos < 16 {
+                    bits |= 1 << pos;
                 }
             }
         }
     }
-    false
+    Some(bits)
+}
+
+fn parse_eku(value: &[u8], server_auth: &mut bool, any: &mut bool) {
+    let (seq, _) = match asn1::parse_tlv(value) {
+        Some(t) => t,
+        None => return,
+    };
+    if seq.tag != TAG_SEQUENCE { return; }
+    for purpose in asn1::parse_sequence_contents(seq.value) {
+        if purpose.tag != TAG_OID { continue; }
+        if purpose.value == OID_KP_SERVER_AUTH { *server_auth = true; }
+        else if purpose.value == OID_KP_ANY { *any = true; }
+    }
 }
