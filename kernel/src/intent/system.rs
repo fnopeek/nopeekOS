@@ -597,6 +597,27 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  disk write <s> <txt>  Write text to sector");
             kprintln!();
         }
+        "vmx" | "vt-x" | "microvm" => {
+            kprintln!();
+            kprintln!("  Virtualization (Phase 12 — MicroVM)");
+            kprintln!("  ───────────────────────────────────");
+            kprintln!("  vmx                    Probe Intel VT-x capability + report");
+            kprintln!();
+            kprintln!("  Phase 12 builds a per-app VT-x MicroVM for legacy Linux GUI");
+            kprintln!("  apps (Browser first). Today only the read-side probe is wired");
+            kprintln!("  up (12.1.0a). VMXON + Mini-Guest follow in 12.1.0b/c.");
+            kprintln!();
+            kprintln!("  Reported fields:");
+            kprintln!("    revision_id      VMCS revision (per CPU stepping)");
+            kprintln!("    vmxon_region_sz  VMXON / VMCS allocation size in bytes");
+            kprintln!("    ept_supported    Extended Page Tables for guest-phys → host-phys");
+            kprintln!("    unrestricted     Real-mode guest without trampolining");
+            kprintln!("    vpid             Tagged TLB across VM-entry/exit");
+            kprintln!();
+            kprintln!("  If 'NOT available': enable 'Intel Virtualization Technology'");
+            kprintln!("  in BIOS/UEFI firmware setup.");
+            kprintln!();
+        }
         _ => {
             // Main overview
             kprintln!();
@@ -613,8 +634,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Config:    set · get · config");
             kprintln!("  Display:   gpu · shade · wallpaper");
             kprintln!("  Disk:      disk read · disk write");
+            kprintln!("  Virt:      vmx");
             kprintln!();
-            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper)");
+            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper, vmx)");
             kprintln!();
         }
     }

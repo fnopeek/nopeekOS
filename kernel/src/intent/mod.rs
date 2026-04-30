@@ -1138,6 +1138,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "uname" | "version" | "kernel" => {
             system::intent_uname(args);
         }
+        "vmx" | "vt-x" | "microvm" => {
+            if require_cap(vault, &session, Rights::READ, "vmx") {
+                crate::vmx::report();
+            }
+        }
         "caps" | "capabilities" => {
             if require_cap(vault, &session, Rights::READ, "caps") {
                 system::intent_caps(&vault.lock());
