@@ -45,6 +45,7 @@ mod gpu;
 mod shade;
 mod smp;
 mod process;
+mod vmx;
 #[allow(dead_code, unused_imports)]
 mod install;
 
@@ -128,6 +129,10 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
 
     // SMP: discover cores via ACPI MADT, boot Application Processors
     smp::init();
+
+    // VMX (Phase 12 MicroVM): probe + report. No bring-up yet — that
+    // lands in 12.1.0b. This call is read-side only.
+    vmx::init();
 
     kprintln!("[npk] Probing block devices...");
     if virtio_blk::init() {

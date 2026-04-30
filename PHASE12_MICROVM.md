@@ -295,6 +295,28 @@ dokumentiert deferred sind.
 
 ---
 
+## Sequencing — Microkernel-Refactor zwischen 12.1 und 12.2
+
+`decided 2026-04-30`. Nach dem 12.1-PoC und vor 12.2 wird der
+Microkernel-Driver-Refactor gezogen (siehe `MICROKERNEL_REFACTOR.md`):
+Treiber raus aus dem Kernel, als WASM-Driver, Bootstrap-Set embedded.
+Reihenfolge: ABI-Lücken (MSI, PCI-Auto-Match, IRQ-Subscribe) → virtio-blk
+→ ps2-keyboard → intel-nic → virtio-net.
+
+**Why hier eingeschoben:** virtio-blk/net existieren nach Phase 12 in
+**zwei Rollen** — als Guest-WASM-Driver (Bootstrap-Set, für nopeekOS in
+QEMU/VBox/VMware) und als Host-Kernel-Backend (für Linux-MicroVM).
+Wenn der Host-Backend gebaut wird, *bevor* der Guest-Treiber als WASM
+migriert ist, entsteht Code-Drift. Refactor zuerst → 12.2-12.6 baut auf
+stabiler ABI auf.
+
+**Cost:** ~2-3 Wochen zwischen 12.1 und 12.2.
+
+NVMe / xhci / framebuffer / intel_xe (HW-Extension-Set) folgen **nach**
+12.6, weil sie für MicroVM nicht blockierend sind.
+
+---
+
 ## Decided  *(sortiert nach Hebel, neuer-zuerst)*
 
 ### `decided 2026-04-29` — Kernel-Strategie: Mainline LTS + `nopeek-tiny.config`
