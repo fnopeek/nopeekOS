@@ -1,20 +1,22 @@
-//! VMX root-mode entry/exit — 12.1.0b round-trip validation.
+//! VMX root-mode entry/exit + VMCS round-trip — 12.1.0b/c validation.
 //!
-//! This module does the full bring-up dance:
+//! Bring-up dance:
 //!   1. Allocate a 4-KB VMXON region, write the VMCS revision-id.
 //!   2. Unlock IA32_FEATURE_CONTROL if firmware left it open.
 //!   3. Apply IA32_VMX_CR0/CR4_FIXED0/1 constraints to CR0/CR4 and
 //!      set CR4.VMXE.
-//!   4. Execute VMXON; check VMfailInvalid via RFLAGS.CF.
-//!   5. Execute VMXOFF.
+//!   4. Execute VMXON; check VMfailInvalid via RFLAGS.CF/ZF.       (12.1.0b)
+//!   5. Allocate a 4-KB VMCS region, write the revision-id, run
+//!      VMCLEAR + VMPTRLD against it.                              (12.1.0c)
+//!   6. Execute VMXOFF.                                            (12.1.0b)
 //!
-//! The VMXON region is allocated and *kept* (never freed) so 12.1.0c
-//! can re-enter VMX root mode against the same region without
-//! re-allocating. CR4.VMXE is left set after the round-trip — harmless
-//! and saves a write next time.
+//! VMXON + VMCS regions are allocated and *kept* (never freed) so
+//! 12.1.0d re-uses them without re-allocating. CR4.VMXE is left set —
+//! harmless and saves a write next time.
 //!
 //! Reference: Intel SDM Vol. 3C §23.7 (Enabling and Entering VMX
-//! Operation), §A.7-A.8 (VMX-Fixed Bits in CR0/CR4).
+//! Operation), §24.11 (VMCS-Maintenance Instructions), §A.7-A.8
+//! (VMX-Fixed Bits in CR0/CR4).
 
 use super::{rdmsr, wrmsr};
 use crate::mm::memory;
@@ -129,11 +131,79 @@ pub fn enable_and_test() -> Result<(), &'static str> {
         return Err("VMXON returned VMfailValid (ZF=1) — unexpected on first call");
     }
 
-    // 6. VMXOFF. Cleanly leave VMX root mode. Only legal after a
-    //    successful VMXON, which we just verified.
-    // SAFETY: in VMX root mode (verified above).
+    // 6. Now in VMX root mode. Run the VMCS round-trip test (12.1.0c).
+    //    If it fails we MUST still execute VMXOFF before returning,
+    //    otherwise the CPU stays in VMX root mode forever.
+    let vmcs_result = vmcs_round_trip(revision_id);
+
+    // 7. VMXOFF. Cleanly leave VMX root mode regardless of the inner
+    //    test result. SAFETY: in VMX root mode (verified above).
     unsafe {
         core::arch::asm!("vmxoff", options(nostack, preserves_flags));
+    }
+
+    vmcs_result
+}
+
+/// 12.1.0c: VMCS region life cycle inside VMX root mode. Allocates
+/// a fresh 4-KB VMCS region, writes the revision-id, runs VMCLEAR
+/// (initialize → "clear" state) and VMPTRLD (make it the current
+/// VMCS). The region is leaked deliberately for re-use in 12.1.0d.
+///
+/// Reference: Intel SDM Vol. 3C §24.11.3 (Initializing a VMCS).
+fn vmcs_round_trip(revision_id: u32) -> Result<(), &'static str> {
+    let vmcs_phys = memory::allocate_frame().ok_or("OOM allocating VMCS region")?;
+
+    // SAFETY: identity-mapped, freshly-allocated, exclusive. Same
+    // initialization pattern as the VMXON region — the revision-id
+    // is the first dword, rest is zero.
+    unsafe {
+        let region = vmcs_phys as *mut u32;
+        core::ptr::write_bytes(region as *mut u8, 0, 4096);
+        region.write_volatile(revision_id);
+    }
+
+    let vmcs_addr_slot: u64 = vmcs_phys;
+
+    // VMCLEAR — initialize the launch-state of the VMCS. Required
+    // before the first VMPTRLD per SDM §24.11.3.
+    let rflags_clear: u64;
+    // SAFETY: in VMX root mode; argument is a valid 4-KB-aligned
+    // VMCS region with revision-id set.
+    unsafe {
+        core::arch::asm!(
+            "vmclear [{addr}]",
+            "pushfq",
+            "pop {flags}",
+            addr = in(reg) &vmcs_addr_slot,
+            flags = lateout(reg) rflags_clear,
+        );
+    }
+    if rflags_clear & RFLAGS_CF != 0 {
+        return Err("VMCLEAR returned VMfailInvalid (CF=1)");
+    }
+    if rflags_clear & RFLAGS_ZF != 0 {
+        return Err("VMCLEAR returned VMfailValid (ZF=1)");
+    }
+
+    // VMPTRLD — make this VMCS current. Subsequent VMREAD/VMWRITE
+    // operate on it.
+    let rflags_load: u64;
+    // SAFETY: in VMX root mode; VMCS just successfully VMCLEAR'd.
+    unsafe {
+        core::arch::asm!(
+            "vmptrld [{addr}]",
+            "pushfq",
+            "pop {flags}",
+            addr = in(reg) &vmcs_addr_slot,
+            flags = lateout(reg) rflags_load,
+        );
+    }
+    if rflags_load & RFLAGS_CF != 0 {
+        return Err("VMPTRLD returned VMfailInvalid (CF=1)");
+    }
+    if rflags_load & RFLAGS_ZF != 0 {
+        return Err("VMPTRLD returned VMfailValid (ZF=1)");
     }
 
     Ok(())

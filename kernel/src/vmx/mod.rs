@@ -7,8 +7,9 @@
 //!
 //! Phase 12.1 milestones:
 //!   12.1.0a  probe + report                           ✓ v0.90.0
-//!   12.1.0b  VMXON region + CR4.VMXE + round-trip     ← this file
-//!   12.1.0c  VMCS skeleton + Mini-Guest hlt; round-trip
+//!   12.1.0b  VMXON region + CR4.VMXE + round-trip     ✓ v0.91.0
+//!   12.1.0c  VMCS region + VMCLEAR + VMPTRLD          ← this file
+//!   12.1.0d  VMCS field setup + VMLAUNCH + HLT-exit
 //!   12.1.1   EPT + Linux 6.18 LTS bzImage to early-panic
 //!   12.1.2   virtio-console backend
 //!   12.1.3   initramfs + Rust-PID-1 + bash
@@ -67,7 +68,7 @@ pub fn report() {
                     kprintln!("[vmx]   bring-up        = skipped ({})", r);
                 }
                 BringupState::Ok => {
-                    kprintln!("[vmx]   bring-up        = OK (VMXON+VMXOFF round-trip, 12.1.0b)");
+                    kprintln!("[vmx]   bring-up        = OK (VMXON + VMCLEAR + VMPTRLD + VMXOFF, 12.1.0c)");
                 }
                 BringupState::Failed(r) => {
                     kprintln!("[vmx]   bring-up        = FAILED ({})", r);

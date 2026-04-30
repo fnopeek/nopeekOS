@@ -607,7 +607,8 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  apps (Browser first). Status:");
             kprintln!("    12.1.0a probe + report                          ✓");
             kprintln!("    12.1.0b VMXON region + CR4.VMXE round-trip      ✓");
-            kprintln!("    12.1.0c VMCS + Mini-Guest hlt; round-trip       — next");
+            kprintln!("    12.1.0c VMCS region + VMCLEAR + VMPTRLD         ✓");
+            kprintln!("    12.1.0d VMCS field setup + VMLAUNCH + HLT-exit  — next");
             kprintln!();
             kprintln!("  Reported fields:");
             kprintln!("    revision_id      VMCS revision (per CPU stepping)");
