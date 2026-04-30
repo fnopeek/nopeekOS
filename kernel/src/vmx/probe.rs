@@ -39,18 +39,15 @@ pub fn probe() -> Option<Capabilities> {
 
     // IA32_FEATURE_CONTROL gates VMXON. Bit 2 (VMX outside SMX) must
     // be set AND bit 0 (lock) decides whether we can still toggle it.
-    // We only *read* here — actual enable in 12.1.0b after this probe
-    // returns Ok.
-    let feat_ctrl = unsafe { rdmsr(IA32_FEATURE_CONTROL) };
+    let feat_ctrl = unsafe { super::rdmsr(IA32_FEATURE_CONTROL) };
     let locked = feat_ctrl & FEAT_CTRL_LOCK != 0;
     let vmx_outside_smx = feat_ctrl & FEAT_CTRL_VMX_OUTSIDE_SMX != 0;
     if locked && !vmx_outside_smx {
-        // Firmware locked us out of VMX — N100 BIOS occasionally
-        // ships this disabled. Surface it cleanly.
+        // Firmware locked us out of VMX. Surface cleanly.
         return None;
     }
 
-    let basic = unsafe { rdmsr(IA32_VMX_BASIC) };
+    let basic = unsafe { super::rdmsr(IA32_VMX_BASIC) };
     let revision_id = (basic & 0x7FFF_FFFF) as u32;
     let region_size = ((basic >> 32) & 0x1FFF) as u32;
 
@@ -78,9 +75,8 @@ const FEAT_CTRL_VMX_OUTSIDE_SMX: u64 = 1 << 2;
 /// CPUID.1:ECX[5] — VMX present.
 fn cpuid_vmx_bit() -> bool {
     let ecx: u32;
-    // SAFETY: CPUID is a non-privileged unprivileged-side-effect-free
-    // instruction. `eax` is clobbered for the leaf 0x1 input, ebx/edx
-    // are unused outputs we don't bind.
+    // SAFETY: CPUID has no privileged side-effects. ebx is preserved
+    // explicitly because Rust reserves it for LLVM internals.
     unsafe {
         core::arch::asm!(
             "push rbx",
@@ -95,25 +91,6 @@ fn cpuid_vmx_bit() -> bool {
     ecx & (1 << 5) != 0
 }
 
-/// Read MSR — undefined-instruction if MSR is unsupported, but every
-/// MSR we touch here is architectural since Nehalem. Caller must
-/// guard with `cpuid_vmx_bit()` before reading any IA32_VMX_* MSR.
-unsafe fn rdmsr(msr: u32) -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: caller guarantees MSR is implemented on this CPU.
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") lo,
-            out("edx") hi,
-            options(nostack, preserves_flags),
-        );
-    }
-    ((hi as u64) << 32) | (lo as u64)
-}
-
 /// Decode the secondary-controls-allowed bitmap to surface the three
 /// MicroVM-relevant feature flags. SDM §A.3.3 specifies the layout:
 /// each capability MSR has its allowed-1 bits in the upper dword.
@@ -121,14 +98,14 @@ fn secondary_caps() -> (bool, bool, bool) {
     // Step 1: confirm secondary controls themselves are exposed.
     // IA32_VMX_PROCBASED_CTLS[63] = "activate secondary controls"
     // allowed-1 (bit 63 of the 64-bit MSR = bit 31 of the upper dword).
-    let prim = unsafe { rdmsr(IA32_VMX_PROCBASED_CTLS) };
+    let prim = unsafe { super::rdmsr(IA32_VMX_PROCBASED_CTLS) };
     let secondary_allowed = (prim >> 63) & 1 != 0;
     if !secondary_allowed {
         return (false, false, false);
     }
 
     // Step 2: read secondary capabilities. Allowed-1 bits in upper 32.
-    let sec = unsafe { rdmsr(IA32_VMX_PROCBASED_CTLS2) };
+    let sec = unsafe { super::rdmsr(IA32_VMX_PROCBASED_CTLS2) };
     let allowed1 = (sec >> 32) as u32;
 
     let ept = allowed1 & (1 << 1) != 0;

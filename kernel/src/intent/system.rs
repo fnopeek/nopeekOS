@@ -604,8 +604,10 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  vmx                    Probe Intel VT-x capability + report");
             kprintln!();
             kprintln!("  Phase 12 builds a per-app VT-x MicroVM for legacy Linux GUI");
-            kprintln!("  apps (Browser first). Today only the read-side probe is wired");
-            kprintln!("  up (12.1.0a). VMXON + Mini-Guest follow in 12.1.0b/c.");
+            kprintln!("  apps (Browser first). Status:");
+            kprintln!("    12.1.0a probe + report                          ✓");
+            kprintln!("    12.1.0b VMXON region + CR4.VMXE round-trip      ✓");
+            kprintln!("    12.1.0c VMCS + Mini-Guest hlt; round-trip       — next");
             kprintln!();
             kprintln!("  Reported fields:");
             kprintln!("    revision_id      VMCS revision (per CPU stepping)");
@@ -613,6 +615,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    ept_supported    Extended Page Tables for guest-phys → host-phys");
             kprintln!("    unrestricted     Real-mode guest without trampolining");
             kprintln!("    vpid             Tagged TLB across VM-entry/exit");
+            kprintln!("    bring-up         Last result of VMXON+VMXOFF round-trip");
             kprintln!();
             kprintln!("  If 'NOT available': enable 'Intel Virtualization Technology'");
             kprintln!("  in BIOS/UEFI firmware setup.");
