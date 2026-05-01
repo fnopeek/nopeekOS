@@ -407,6 +407,20 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
                 last_outcome = Some(outcome);
                 break;
             }
+            10 => {
+                // CPUID — VMX always exits on CPUID. Pass through
+                // to host; guest sees real CPU features. Linux uses
+                // this for early feature detection.
+                let leaf = regs.rax as u32;
+                let subleaf = regs.rcx as u32;
+                let (eax, ebx, ecx, edx) = vmcs::host_cpuid(leaf, subleaf);
+                regs.rax = eax as u64;
+                regs.rbx = ebx as u64;
+                regs.rcx = ecx as u64;
+                regs.rdx = edx as u64;
+                vmcs::advance_guest_rip()?;
+                last_outcome = Some(outcome);
+            }
             30 => {
                 let (port, dir_in, size) =
                     vmcs::decode_io_exit_qualification(outcome.exit_qualification);

@@ -134,6 +134,7 @@ const SECONDARY_VM_EXEC_CONTROL: u64 = 0x401E;
 // 64-bit control.
 const IO_BITMAP_A_FULL: u64 = 0x2000;
 const IO_BITMAP_B_FULL: u64 = 0x2002;
+const MSR_BITMAPS_FULL: u64 = 0x2004;
 const EPT_POINTER: u64 = 0x201A;
 
 // Natural-width VM-exit info.
@@ -467,11 +468,58 @@ pub fn decode_io_exit_qualification(qual: u64) -> (u16, bool, u8) {
     (port, direction_in, size_bytes)
 }
 
+/// Allocate a 4-KB MSR bitmap, fill with zeros so RDMSR/WRMSR don't
+/// VM-exit at all. Native MSR access in the guest is fine for our
+/// 12.1.1c milestone — the MSRs that matter for guest correctness
+/// (EFER, FS_BASE, GS_BASE) have GUEST_IA32_* VMCS fields the CPU
+/// auto-manages on entry/exit. Returns the bitmap phys addr.
+///
+/// Why bother with a zero bitmap at all: with use-MSR-bitmaps=0,
+/// EVERY RDMSR/WRMSR exits — Linux's startup hits dozens of MSR
+/// reads in the first few microseconds and we'd drown in exit
+/// dispatch.
+fn allocate_zero_msr_bitmap() -> Result<u64, &'static str> {
+    use crate::mm::memory;
+    let bitmap = memory::allocate_frame().ok_or("OOM: MSR bitmap")?;
+    // SAFETY: identity-mapped, freshly allocated, exclusive.
+    unsafe { core::ptr::write_bytes(bitmap as *mut u8, 0, 4096); }
+    Ok(bitmap)
+}
+
+/// Run CPUID on the host with the guest's input leaf+subleaf,
+/// return (eax, ebx, ecx, edx). LLVM reserves rbx, so we save it
+/// across the cpuid instruction.
+pub fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let eax: u32;
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: CPUID has no privileged side effects beyond what the
+    // architectural docs spell out (returns CPU info in A/B/C/D).
+    // rbx is preserved via push/pop because LLVM forbids using it
+    // as a clobbered or output register directly.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov esi, ebx",
+            "pop rbx",
+            inout("eax") leaf => eax,
+            inout("ecx") subleaf => ecx,
+            lateout("esi") ebx,
+            lateout("edx") edx,
+            options(nostack, preserves_flags),
+        );
+    }
+    (eax, ebx, ecx, edx)
+}
+
 // ── Execution controls ─────────────────────────────────────────────
 
 // CPU-based control bits we care about.
 const CPU_HLT_EXITING: u32 = 1 << 7;
 const CPU_USE_IO_BITMAPS: u32 = 1 << 25;
+const CPU_USE_MSR_BITMAPS: u32 = 1 << 28;
 const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 
 // Secondary control bits.
@@ -512,10 +560,14 @@ fn fixed_ctrl(desired: u32, msr: u32) -> u32 {
 /// other ports pass through natively.
 pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let (io_bitmap_a, io_bitmap_b) = allocate_and_populate_io_bitmaps()?;
+    let msr_bitmap = allocate_zero_msr_bitmap()?;
 
     let pin = fixed_ctrl(0, IA32_VMX_PINBASED_CTLS);
     let cpu = fixed_ctrl(
-        CPU_HLT_EXITING | CPU_USE_IO_BITMAPS | CPU_ACTIVATE_SECONDARY,
+        CPU_HLT_EXITING
+            | CPU_USE_IO_BITMAPS
+            | CPU_USE_MSR_BITMAPS
+            | CPU_ACTIVATE_SECONDARY,
         IA32_VMX_PROCBASED_CTLS,
     );
     let secondary = fixed_ctrl(
@@ -530,6 +582,7 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     vmwrite(SECONDARY_VM_EXEC_CONTROL, secondary as u64)?;
     vmwrite(IO_BITMAP_A_FULL, io_bitmap_a)?;
     vmwrite(IO_BITMAP_B_FULL, io_bitmap_b)?;
+    vmwrite(MSR_BITMAPS_FULL, msr_bitmap)?;
     vmwrite(EPT_POINTER, eptp)?;
     vmwrite(VM_ENTRY_CONTROLS, entry as u64)?;
     vmwrite(VM_EXIT_CONTROLS, exit as u64)?;
