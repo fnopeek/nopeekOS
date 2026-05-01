@@ -42,10 +42,10 @@ const RFLAGS_CF: u64 = 1 << 0;
 const RFLAGS_ZF: u64 = 1 << 6;
 
 /// Round-trip the full VMX bring-up: enter VMX root mode, set up a
-/// minimal long-mode HLT-loop guest, VMLAUNCH, observe the VM-exit,
-/// VMXOFF. On success, returns the basic VM-exit reason (expected:
-/// 12 = HLT). On failure, a static string naming the step.
-pub fn enable_and_test() -> Result<u16, &'static str> {
+/// minimal real-mode I/O-loop guest, VMLAUNCH, observe the VM-exit,
+/// VMXOFF. On success, returns the full VM-exit outcome. On failure,
+/// a static string naming the step.
+pub fn enable_and_test() -> Result<vmcs::LaunchOutcome, &'static str> {
     // 1. Allocate a 4-KB frame for the VMXON region. Kernel memory
     //    is identity-mapped (virt == phys), so we can cast and write
     //    directly. The frame is leaked deliberately: 12.1.0c re-uses
@@ -153,13 +153,13 @@ pub fn enable_and_test() -> Result<u16, &'static str> {
 
 /// 12.1.0c…0d-2b: full VMCS life cycle inside VMX root mode.
 /// Allocates the VMCS region, runs VMCLEAR + VMPTRLD, writes host
-/// + guest + control state, runs VMLAUNCH, returns the basic exit
-/// reason from the resulting VM-exit. All regions leaked
-/// deliberately so subsequent invocations can reuse them.
+/// + guest + control state, runs VMLAUNCH, returns the full
+/// VM-exit outcome. All regions leaked deliberately so subsequent
+/// invocations can reuse them.
 ///
 /// Reference: Intel SDM Vol. 3C §24.11.3 (Initializing a VMCS),
 /// §27 (VM Exits).
-fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
+fn vmcs_round_trip(revision_id: u32) -> Result<vmcs::LaunchOutcome, &'static str> {
     let vmcs_phys = memory::allocate_frame().ok_or("OOM allocating VMCS region")?;
 
     // SAFETY: identity-mapped, freshly-allocated, exclusive. Same
@@ -263,6 +263,5 @@ fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
     vmcs::setup_guest_state(guest_phys)?;
     vmcs::setup_execution_controls(eptp)?;
 
-    let raw_reason = vmcs::launch_test()?;
-    Ok(vmcs::basic_exit_reason(raw_reason))
+    vmcs::launch_test()
 }

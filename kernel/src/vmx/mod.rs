@@ -87,18 +87,21 @@ pub fn report() {
     }
 }
 
-/// Run the real-mode HLT-loop substrate test on demand. Allocates a
-/// fresh VMXON region, VMCS, EPT, 16 MB guest RAM (all leaked — not
-/// suitable for repeated invocation; persistent state lands in 12.2).
-/// Returns the basic VM-exit reason, or an error string. Refuses if
-/// VT-x wasn't available at probe time.
-pub fn run_substrate_test() -> Result<u16, &'static str> {
+/// Run the real-mode I/O-loop substrate test on demand. Allocates a
+/// fresh VMXON region, VMCS, EPT, 64 MB guest RAM, I/O bitmaps (all
+/// leaked — not suitable for repeated invocation; persistent state
+/// lands in 12.2). Returns the full VM-exit outcome (basic reason +
+/// qualification + guest RAX), or an error string. Refuses if VT-x
+/// wasn't available at probe time.
+pub fn run_substrate_test() -> Result<vmcs::LaunchOutcome, &'static str> {
     match *PROBE.lock() {
         ProbeState::Available(_) => enable::enable_and_test(),
         ProbeState::Unavailable(reason) => Err(reason),
         ProbeState::NotProbed => Err("vmx::init() not called yet"),
     }
 }
+
+pub use vmcs::{decode_io_exit_qualification, LaunchOutcome};
 
 // ── shared CPU primitives for submodules ───────────────────────────
 
