@@ -224,24 +224,35 @@ fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
     }
     vmcs::setup_host_state(host_rsp)?;
 
-    // 12.1.1b: write guest-state + controls, allocate the real-mode
-    // guest code page, VMLAUNCH. The 3-byte stub `E6 80 F4` is
-    // `out 0x80, al; hlt`. Use-IO-bitmaps stays 0 in CPU-based
-    // controls so OUT exits unconditionally — expected first
-    // VM-exit reason: 30 (I/O instruction).
-    let guest_phys = memory::allocate_frame().ok_or("OOM allocating guest code page")?;
-    // SAFETY: identity-mapped, freshly allocated, exclusive.
+    // 12.1.1c-1: allocate a contiguous 16 MB host-physical region
+    // for guest RAM, build a non-identity EPT that maps guest-phys
+    // [0, 16 MB) → host-phys [host_base, host_base + 16 MB), copy
+    // the real-mode stub at guest-phys 0x10000 (= host host_base +
+    // 0x10000). The guest sees its code at guest-phys 0x10000;
+    // EPT translates each fetch onto the host-allocated region so
+    // the guest never touches kernel.bin's own load region (which
+    // sits at host-phys 0x100000 = Multiboot2 1 MB).
+    let host_base = memory::allocate_contiguous(ept::GUEST_RAM_FRAMES)
+        .ok_or("OOM allocating 16 MB guest RAM")?;
+    let eptp = ept::install_window_16mb(host_base)?;
+
+    let stub_host = host_base + 0x10000;
+    // SAFETY: host_base is 16-MB-aligned by `allocate_contiguous`'s
+    // top-down search; stub_host is freshly allocated, exclusive.
     unsafe {
-        let page = guest_phys as *mut u8;
+        let page = stub_host as *mut u8;
         core::ptr::write_bytes(page, 0, 4096);
         page.add(0).write_volatile(0xE6); // out imm8, al
         page.add(1).write_volatile(0x80); // port 0x80
-        page.add(2).write_volatile(0xF4); // hlt (only reached if we VMRESUME after the I/O exit)
+        page.add(2).write_volatile(0xF4); // hlt
     }
 
-    // 12.1.1a: install identity-mapped EPT (1 GB), get EPTP, wire
-    // it into the secondary controls before VMLAUNCH.
-    let eptp = ept::install_identity_1gb()?;
+    // Guest code lives at guest-phys 0x10000 (a Linux-Boot-Protocol-
+    // friendly setup-segment address — bzImage will land here in
+    // 12.1.1c-2). setup_guest_state sets GUEST_CS_BASE = guest_phys
+    // and GUEST_RIP = 0, so guest linear address 0x10000 + 0 =
+    // 0x10000 → EPT → host_base + 0x10000.
+    let guest_phys: u64 = 0x10000;
 
     vmcs::setup_guest_state(guest_phys)?;
     vmcs::setup_execution_controls(eptp)?;
