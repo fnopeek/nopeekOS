@@ -224,19 +224,19 @@ fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
     }
     vmcs::setup_host_state(host_rsp)?;
 
-    // 12.1.0d-2b: write guest-state + controls, allocate the guest
-    // code page (`hlt; jmp .` at offset 0), VMLAUNCH.
+    // 12.1.1b: write guest-state + controls, allocate the real-mode
+    // guest code page, VMLAUNCH. The 3-byte stub `E6 80 F4` is
+    // `out 0x80, al; hlt`. Use-IO-bitmaps stays 0 in CPU-based
+    // controls so OUT exits unconditionally — expected first
+    // VM-exit reason: 30 (I/O instruction).
     let guest_phys = memory::allocate_frame().ok_or("OOM allocating guest code page")?;
-    // SAFETY: identity-mapped, freshly allocated, exclusive. Layout
-    // is `0xF4 0xEB 0xFE` = `hlt; jmp $-0` so the guest immediately
-    // halts (HLT-exiting=1 in the proc-based controls fires a VM-exit
-    // before any subsequent instruction is fetched).
+    // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
         let page = guest_phys as *mut u8;
         core::ptr::write_bytes(page, 0, 4096);
-        page.add(0).write_volatile(0xF4); // hlt
-        page.add(1).write_volatile(0xEB); // jmp short
-        page.add(2).write_volatile(0xFE); // -2 (back to hlt)
+        page.add(0).write_volatile(0xE6); // out imm8, al
+        page.add(1).write_volatile(0x80); // port 0x80
+        page.add(2).write_volatile(0xF4); // hlt (only reached if we VMRESUME after the I/O exit)
     }
 
     // 12.1.1a: install identity-mapped EPT (1 GB), get EPTP, wire
