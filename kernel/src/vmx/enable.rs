@@ -257,9 +257,11 @@ fn vmcs_round_trip(revision_id: u32) -> Result<vmcs::LaunchOutcome, &'static str
         page.add(8).write_volatile(0xF4);                                    // hlt
     }
 
-    let guest_phys: u64 = 0x10000;
+    // 32-bit prot mode: CS_BASE=0, so linear addr = guest_phys.
+    // Stub is at guest_phys 0x10000, so GUEST_RIP = 0x10000.
+    let guest_rip: u64 = 0x10000;
 
-    vmcs::setup_guest_state(guest_phys)?;
+    vmcs::setup_guest_state(guest_rip)?;
     vmcs::setup_execution_controls(eptp)?;
 
     run_guest_loop()
