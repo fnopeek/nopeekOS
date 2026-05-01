@@ -11,13 +11,15 @@
 //!   12.1.0c   VMCS region + VMCLEAR + VMPTRLD         ✓ v0.92.0
 //!   12.1.0d-1 Host-state VMWRITE/VMREAD + trampoline  ✓ v0.93.0
 //!   12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ✓ v0.94.0
-//!   12.1.0d-2b Guest-state + controls + VMLAUNCH      ← this file
-//!   12.1.1    EPT + Linux 6.18 LTS bzImage to early-panic
+//!   12.1.0d-2b Guest-state + controls + VMLAUNCH      ✓ v0.95.0…0.96.0
+//!   12.1.1a   EPT identity-map (1 GB)                 ← this file
+//!   12.1.1b-d Linux 6.18 LTS bzImage to early-panic
 //!   12.1.2    virtio-console backend
 //!   12.1.3    initramfs + Rust-PID-1 + bash
 //!   12.1.4    inject_console round-trip
 
 mod enable;
+mod ept;
 mod probe;
 mod vmcs;
 
@@ -78,7 +80,7 @@ pub fn report() {
                         _ => "",
                     };
                     kprintln!(
-                        "[vmx]   bring-up        = OK (VMLAUNCH → exit_reason={}{}, 12.1.0d-2b)",
+                        "[vmx]   bring-up        = OK (EPT + VMLAUNCH → exit_reason={}{}, 12.1.1a)",
                         reason, label,
                     );
                 }

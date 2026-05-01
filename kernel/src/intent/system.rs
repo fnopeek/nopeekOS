@@ -611,7 +611,8 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    12.1.0d-1  host-state VMWRITE/VMREAD + trampoline ✓");
             kprintln!("    12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ✓");
             kprintln!("    12.1.0d-2b guest-state + controls + VMLAUNCH      ✓");
-            kprintln!("    12.1.1     EPT + Linux 6.18 LTS bzImage           — next");
+            kprintln!("    12.1.1a    EPT identity-map (1 GB)                ✓");
+            kprintln!("    12.1.1b-d  unrestricted guest + bzImage + panic   — next");
             kprintln!();
             kprintln!("  Reported fields:");
             kprintln!("    revision_id      VMCS revision (per CPU stepping)");
