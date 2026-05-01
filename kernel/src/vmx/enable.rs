@@ -467,6 +467,24 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
                     vector, mnemonic, intr_type, outcome.exit_qualification,
                     err_valid, err_code,
                 );
+                let rip   = vmcs::read_guest_rip().unwrap_or(0);
+                let cr0   = vmcs::read_guest_cr0().unwrap_or(0);
+                let cr4   = vmcs::read_guest_cr4().unwrap_or(0);
+                let efer  = vmcs::read_guest_efer().unwrap_or(0);
+                let cs    = vmcs::read_guest_cs_selector().unwrap_or(0);
+                let entry = vmcs::read_vm_entry_controls().unwrap_or(0);
+                kprintln!(
+                    "[microvm]   GUEST_RIP  = {:#018x}  GUEST_CS = {:#06x}",
+                    rip, cs,
+                );
+                kprintln!(
+                    "[microvm]   GUEST_CR0  = {:#018x}  GUEST_CR4 = {:#018x}",
+                    cr0, cr4,
+                );
+                kprintln!(
+                    "[microvm]   GUEST_EFER = {:#018x}  ENTRY_CTLS = {:#010x}",
+                    efer, entry,
+                );
                 trace.dump();
                 last_outcome = Some(outcome);
                 break;
