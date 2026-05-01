@@ -9,8 +9,9 @@
 //!   12.1.0a   probe + report                          ✓ v0.90.0
 //!   12.1.0b   VMXON region + CR4.VMXE + round-trip    ✓ v0.91.0
 //!   12.1.0c   VMCS region + VMCLEAR + VMPTRLD         ✓ v0.92.0
-//!   12.1.0d-1 Host-state VMWRITE/VMREAD + trampoline  ← this file
-//!   12.1.0d-2 Guest-state + controls + VMLAUNCH + HLT-exit
+//!   12.1.0d-1 Host-state VMWRITE/VMREAD + trampoline  ✓ v0.93.0
+//!   12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ← this file
+//!   12.1.0d-2b Guest-state + controls + VMLAUNCH + HLT-exit
 //!   12.1.1    EPT + Linux 6.18 LTS bzImage to early-panic
 //!   12.1.2    virtio-console backend
 //!   12.1.3    initramfs + Rust-PID-1 + bash
@@ -70,7 +71,7 @@ pub fn report() {
                     kprintln!("[vmx]   bring-up        = skipped ({})", r);
                 }
                 BringupState::Ok => {
-                    kprintln!("[vmx]   bring-up        = OK (host-state VMWRITE/VMREAD round-trip, 12.1.0d-1)");
+                    kprintln!("[vmx]   bring-up        = OK (host-state round-trip + TSS, 12.1.0d-2a)");
                 }
                 BringupState::Failed(r) => {
                     kprintln!("[vmx]   bring-up        = FAILED ({})", r);

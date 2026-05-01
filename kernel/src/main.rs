@@ -45,6 +45,7 @@ mod gpu;
 mod shade;
 mod smp;
 mod process;
+mod tss;
 mod vmx;
 #[allow(dead_code, unused_imports)]
 mod install;
@@ -130,8 +131,15 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     // SMP: discover cores via ACPI MADT, boot Application Processors
     smp::init();
 
-    // VMX (Phase 12 MicroVM): probe + report. No bring-up yet — that
-    // lands in 12.1.0b. This call is read-side only.
+    // TSS install (BSP). Replaces the boot GDT with a clone that has
+    // a real long-mode TSS descriptor in slot 3, then `ltr`s it.
+    // VMX host-state validation rejects HOST_TR_SELECTOR=0, so this
+    // must run before vmx::init.
+    tss::init();
+
+    // VMX (Phase 12 MicroVM): probe + bring-up. host-state setup
+    // reads TR via `str` and walks the GDT for the TSS base — both
+    // covered by tss::init() above.
     vmx::init();
 
     kprintln!("[npk] Probing block devices...");
