@@ -632,7 +632,8 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    12.1.1b    real-mode + unrestricted + I/O exit    ✓");
             kprintln!("    12.1.1c-1  16 MB non-identity EPT window          ✓");
             kprintln!("    12.1.1c-2  bring-up off the boot path             ✓");
-            kprintln!("    12.1.1c-3  Alpine bzImage loader + microvm linux  — next");
+            kprintln!("    12.1.1c-3a 64 MB EPT + bzImage in npkFS           ✓");
+            kprintln!("    12.1.1c-3b Alpine bzImage loader + microvm linux  — next");
             kprintln!("    12.1.2+    virtio-console, initramfs, Rust-PID-1");
             kprintln!();
             kprintln!("  This intent currently leaks ~16 MB of guest RAM per call.");

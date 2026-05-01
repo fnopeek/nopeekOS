@@ -197,6 +197,18 @@ GRUBCFG
         touch "$ASSETS_DIR/phosphor.atlas"
     fi
 
+    # Linux-virt bzImage: fetched manually once into release/assets/
+    # (Alpine v3.23 main/x86_64 linux-virt-*-r*.apk → boot/vmlinuz-virt).
+    # Phase 12.1.1c-3+ MicroVM substrate. Optional — installer compiles
+    # without it; runtime `microvm linux` will refuse if missing.
+    if [ -f "$PROJECT_DIR/release/assets/linux-virt.bzImage" ]; then
+        cp "$PROJECT_DIR/release/assets/linux-virt.bzImage" "$ASSETS_DIR/linux-virt.bzImage"
+        ok "  microvm: linux-virt.bzImage ($(du -h "$ASSETS_DIR/linux-virt.bzImage" | cut -f1))"
+    else
+        warn "  bzImage missing: release/assets/linux-virt.bzImage — microvm linux will be unavailable"
+        touch "$ASSETS_DIR/linux-virt.bzImage"
+    fi
+
     # WASM modules + their .version files: fetch from release/modules/
     # (produced by prior release build). Expect all four first-party
     # modules. The .version file is what lets `intent::install` and
@@ -706,6 +718,25 @@ sha384=${ATLAS_SHA}
                 openssl dgst -sha384 -sign "$KEY_FILE" \
                     -out "$RELEASE_DIR/assets/phosphor.atlas.sig" "$RELEASE_DIR/assets/phosphor.atlas"
                 ok "Signed icons: phosphor.atlas ($ATLAS_SIZE bytes)"
+            fi
+        fi
+
+        # Linux-virt bzImage — placed manually under release/assets/
+        # by the maintainer (Alpine v3.23 main/x86_64 linux-virt apk →
+        # boot/vmlinuz-virt). Phase 12.1.1c-3+ MicroVM payload.
+        if [ -f "$RELEASE_DIR/assets/linux-virt.bzImage" ]; then
+            BZIMG_SIZE=$(stat -c%s "$RELEASE_DIR/assets/linux-virt.bzImage")
+            BZIMG_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/linux-virt.bzImage" 2>/dev/null | awk '{print $NF}')
+
+            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:linux-virt]
+size=${BZIMG_SIZE}
+sha384=${BZIMG_SHA}
+
+"
+            if [ -f "$KEY_FILE" ]; then
+                openssl dgst -sha384 -sign "$KEY_FILE" \
+                    -out "$RELEASE_DIR/assets/linux-virt.bzImage.sig" "$RELEASE_DIR/assets/linux-virt.bzImage"
+                ok "Signed bzImage: linux-virt.bzImage ($BZIMG_SIZE bytes)"
             fi
         fi
 

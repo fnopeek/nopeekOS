@@ -224,27 +224,27 @@ fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
     }
     vmcs::setup_host_state(host_rsp)?;
 
-    // 12.1.1c-1: allocate a contiguous 16 MB host-physical region
+    // 12.1.1c-1+: allocate a contiguous 64 MB host-physical region
     // for guest RAM, build a non-identity EPT that maps guest-phys
-    // [0, 16 MB) → host-phys [host_base, host_base + 16 MB), copy
-    // the real-mode stub at guest-phys 0x10000 (= host host_base +
-    // 0x10000). The guest sees its code at guest-phys 0x10000;
-    // EPT translates each fetch onto the host-allocated region so
-    // the guest never touches kernel.bin's own load region (which
-    // sits at host-phys 0x100000 = Multiboot2 1 MB).
+    // [0, 64 MB) → host-phys [host_base, host_base + 64 MB), copy
+    // the real-mode stub at guest-phys 0x10000. The guest sees its
+    // code at guest-phys 0x10000; EPT translates each fetch onto
+    // the host-allocated region so the guest never touches
+    // kernel.bin's own load region (which sits at host-phys
+    // 0x100000 = Multiboot2 1 MB).
     // allocate_contiguous searches top-down and returns whatever it
     // finds — no 2-MB-alignment guarantee. Take 2 MB slack and round
     // up. Up to 2 MB at the front goes unused.
     let raw_base = memory::allocate_contiguous(
         ept::GUEST_RAM_FRAMES + ept::GUEST_RAM_ALIGN_SLACK,
     )
-    .ok_or("OOM allocating 16 MB guest RAM (+ slack)")?;
+    .ok_or("OOM allocating 64 MB guest RAM (+ slack)")?;
     let host_base = ept::round_up_to_2mb(raw_base);
-    let eptp = ept::install_window_16mb(host_base)?;
+    let eptp = ept::install_window(host_base)?;
 
     let stub_host = host_base + 0x10000;
-    // SAFETY: host_base is 16-MB-aligned by `allocate_contiguous`'s
-    // top-down search; stub_host is freshly allocated, exclusive.
+    // SAFETY: host_base is 2-MB-aligned by round_up_to_2mb;
+    // stub_host is freshly allocated, exclusive.
     unsafe {
         let page = stub_host as *mut u8;
         core::ptr::write_bytes(page, 0, 4096);

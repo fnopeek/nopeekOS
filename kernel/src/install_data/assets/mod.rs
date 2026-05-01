@@ -59,6 +59,16 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         version: None,
     },
 
+    // ── MicroVM Linux bzImage (Phase 12.1.1c+) ────────────────────
+    // Alpine v3.23 main/x86_64 linux-virt-6.18.x — extracted from
+    // the apk's boot/vmlinuz-virt and placed in release/assets/.
+    // Loaded on demand by `microvm linux` via npkfs::fetch.
+    BundledAsset {
+        fs_path: "sys/microvm/linux-virt.bzImage",
+        bytes:   include_bytes!("linux-virt.bzImage"),
+        version: None,
+    },
+
     // ── First-party WASM modules ──────────────────────────────────
     // Keep in sync with release/modules/ output of build.sh release.
     BundledAsset {
