@@ -227,14 +227,7 @@ fn vmcs_round_trip(revision_id: u32) -> Result<vmcs::LaunchOutcome, &'static str
     // 12.1.1c-1+: allocate a contiguous 64 MB host-physical region
     // for guest RAM, build a non-identity EPT that maps guest-phys
     // [0, 64 MB) → host-phys [host_base, host_base + 64 MB), copy
-    // the real-mode stub at guest-phys 0x10000. The guest sees its
-    // code at guest-phys 0x10000; EPT translates each fetch onto
-    // the host-allocated region so the guest never touches
-    // kernel.bin's own load region (which sits at host-phys
-    // 0x100000 = Multiboot2 1 MB).
-    // allocate_contiguous searches top-down and returns whatever it
-    // finds — no 2-MB-alignment guarantee. Take 2 MB slack and round
-    // up. Up to 2 MB at the front goes unused.
+    // the real-mode stub at guest-phys 0x10000.
     let raw_base = memory::allocate_contiguous(
         ept::GUEST_RAM_FRAMES + ept::GUEST_RAM_ALIGN_SLACK,
     )
@@ -243,25 +236,110 @@ fn vmcs_round_trip(revision_id: u32) -> Result<vmcs::LaunchOutcome, &'static str
     let eptp = ept::install_window(host_base)?;
 
     let stub_host = host_base + 0x10000;
+    // 12.1.1c-3b3a: 9-byte stub exercises the full VMRESUME loop:
+    //   B0 4F      mov al, 'O'   (0x4F)
+    //   E6 80      out 0x80, al
+    //   B0 4B      mov al, 'K'   (0x4B)
+    //   E6 80      out 0x80, al
+    //   F4         hlt
+    // Expected dispatch: 2 × I/O exit (port 0x80) → HLT exit. Each
+    // I/O exit must advance GUEST_RIP and VMRESUME, otherwise the
+    // OUT executes forever.
     // SAFETY: host_base is 2-MB-aligned by round_up_to_2mb;
     // stub_host is freshly allocated, exclusive.
     unsafe {
         let page = stub_host as *mut u8;
         core::ptr::write_bytes(page, 0, 4096);
-        page.add(0).write_volatile(0xE6); // out imm8, al
-        page.add(1).write_volatile(0x80); // port 0x80
-        page.add(2).write_volatile(0xF4); // hlt
+        page.add(0).write_volatile(0xB0); page.add(1).write_volatile(0x4F); // mov al, 'O'
+        page.add(2).write_volatile(0xE6); page.add(3).write_volatile(0x80); // out 0x80, al
+        page.add(4).write_volatile(0xB0); page.add(5).write_volatile(0x4B); // mov al, 'K'
+        page.add(6).write_volatile(0xE6); page.add(7).write_volatile(0x80); // out 0x80, al
+        page.add(8).write_volatile(0xF4);                                    // hlt
     }
 
-    // Guest code lives at guest-phys 0x10000 (a Linux-Boot-Protocol-
-    // friendly setup-segment address — bzImage will land here in
-    // 12.1.1c-2). setup_guest_state sets GUEST_CS_BASE = guest_phys
-    // and GUEST_RIP = 0, so guest linear address 0x10000 + 0 =
-    // 0x10000 → EPT → host_base + 0x10000.
     let guest_phys: u64 = 0x10000;
 
     vmcs::setup_guest_state(guest_phys)?;
     vmcs::setup_execution_controls(eptp)?;
 
-    vmcs::launch_test()
+    run_guest_loop()
+}
+
+/// Drive the guest with VMLAUNCH then VMRESUME-in-a-loop. Dispatches
+/// on exit reason: HLT → done (Ok), I/O → log + advance RIP +
+/// continue, anything else → log + done (Ok with whatever the last
+/// outcome was).
+fn run_guest_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
+    use crate::kprintln;
+
+    const MAX_ITERATIONS: u32 = 1024;
+
+    let mut regs = vmcs::GuestRegs::default();
+    let mut launched = false;
+    let mut last_outcome: Option<vmcs::LaunchOutcome> = None;
+    let mut io_count: u32 = 0;
+    let mut io_bytes: [u8; 32] = [0; 32];
+    let mut io_byte_n: usize = 0;
+
+    for _ in 0..MAX_ITERATIONS {
+        let outcome = vmcs::run_guest_once(&mut regs, launched)?;
+        launched = true;
+
+        let basic = vmcs::basic_exit_reason(outcome.exit_reason);
+        match basic {
+            12 => {
+                // HLT — the substrate stub's terminator.
+                kprintln!(
+                    "[microvm] guest HLT after {} I/O exit(s)", io_count,
+                );
+                if io_byte_n > 0 {
+                    let mut printable = [0u8; 32];
+                    for i in 0..io_byte_n {
+                        printable[i] = if io_bytes[i].is_ascii_graphic() || io_bytes[i] == b' ' {
+                            io_bytes[i]
+                        } else {
+                            b'.'
+                        };
+                    }
+                    let s = core::str::from_utf8(&printable[..io_byte_n]).unwrap_or("?");
+                    kprintln!("[microvm]   captured byte stream: \"{}\"", s);
+                }
+                last_outcome = Some(outcome);
+                break;
+            }
+            30 => {
+                // I/O instruction — capture, advance RIP, continue.
+                io_count += 1;
+                let (port, dir_in, size) =
+                    vmcs::decode_io_exit_qualification(outcome.exit_qualification);
+                let value = regs.rax & match size {
+                    1 => 0xFF,
+                    2 => 0xFFFF,
+                    4 => 0xFFFF_FFFF,
+                    _ => 0xFF,
+                };
+                let dir = if dir_in { "IN" } else { "OUT" };
+                kprintln!(
+                    "[microvm]   {} port {:#06x} size={} value={:#x}",
+                    dir, port, size, value,
+                );
+                if !dir_in && size == 1 && io_byte_n < io_bytes.len() {
+                    io_bytes[io_byte_n] = value as u8;
+                    io_byte_n += 1;
+                }
+                vmcs::advance_guest_rip()?;
+                last_outcome = Some(outcome);
+            }
+            _ => {
+                kprintln!(
+                    "[microvm] guest unhandled exit reason {} qual {:#x}",
+                    basic, outcome.exit_qualification,
+                );
+                last_outcome = Some(outcome);
+                break;
+            }
+        }
+    }
+
+    last_outcome.ok_or("guest exceeded max iterations without HLT")
 }
