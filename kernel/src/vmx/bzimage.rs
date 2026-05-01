@@ -115,3 +115,170 @@ pub fn setup_section_size(header: &SetupHeader) -> usize {
 pub fn protected_kernel_size(header: &SetupHeader) -> usize {
     (header.syssize as usize) * 16
 }
+
+// ── Loader (Phase 12.1.1c-3b3b2) ───────────────────────────────────
+
+/// Boot-params guest-physical layout (under our 64-MB EPT window):
+///   0x10000  setup-section (boot sector + setup_sects sectors,
+///            ~16 KB) — needed for legacy compatibility / EFI even
+///            when entry is 32-bit.
+///   0x20000  kernel command line (NUL-terminated, max ~256 B)
+///   0x90000  boot_params struct (4 KB zero-page, includes a copy
+///            of the setup-header at offset 0x1F1).
+///   0x100000 protected-mode kernel image (= bzImage[setup_section..])
+const SETUP_GUEST_PHYS: u64 = 0x10000;
+const CMDLINE_GUEST_PHYS: u64 = 0x20000;
+const BOOT_PARAMS_GUEST_PHYS: u64 = 0x90000;
+const KERNEL_GUEST_PHYS: u64 = 0x100000;
+
+/// Single e820 entry covering the whole 64 MB EPT window as RAM.
+/// Linux accepts a single contiguous RAM region without the
+/// 640K/BIOS-area split — early boot doesn't probe EBDA in 32-bit
+/// boot mode.
+const E820_TYPE_RAM: u32 = 1;
+const GUEST_RAM_TOTAL: u64 = 64 * 1024 * 1024;
+
+/// Linux loadflags bits we need.
+const LOADFLAG_LOADED_HIGH: u8 = 1 << 0;
+const LOADFLAG_KEEP_SEGMENTS: u8 = 1 << 6;
+
+/// Linux Boot Protocol bootloader-id we put in type_of_loader.
+/// 0xFF = "undefined / generic" (any third-party loader).
+const TYPE_OF_LOADER: u8 = 0xFF;
+
+/// Boot-params zero-page offsets (subset we touch).
+const OFF_E820_ENTRIES: usize = 0x1E8;
+const OFF_SENTINEL: usize     = 0x1EF; // must be 0
+const OFF_HDR: usize          = 0x1F1; // setup-header copy
+const OFF_E820_TABLE: usize   = 0x2D0;
+
+/// One e820_entry as Linux expects (struct boot_e820_entry).
+#[repr(C, packed)]
+struct E820Entry {
+    addr: u64,
+    size: u64,
+    typ:  u32,
+}
+
+/// Where we placed the kernel + boot_params, returned from
+/// `load_into_guest_ram`.
+pub struct LoadInfo {
+    /// Linear (= EPT-mapped guest-physical) entry point —
+    /// `header.code32_start`, typically 0x100000.
+    pub entry_rip: u64,
+    /// Guest-physical address of the boot_params zero-page —
+    /// must end up in ESI before VM-entry per Linux 32-bit boot
+    /// protocol.
+    pub boot_params_phys: u64,
+}
+
+/// Copy the bzImage parts into guest RAM and build a minimal
+/// boot_params zero-page so the kernel can boot via the 32-bit
+/// boot protocol.
+///
+/// `host_base` is the host-physical address of the EPT-mapped
+/// guest-RAM window (caller already allocated it). `bzimage` is
+/// the raw bzImage byte slice. `cmdline` is the kernel command
+/// line as ASCII bytes (no NUL — the loader appends one).
+pub fn load_into_guest_ram(
+    host_base: u64,
+    bzimage: &[u8],
+    cmdline: &[u8],
+) -> Result<LoadInfo, &'static str> {
+    let header = parse_header(bzimage)?;
+    let setup_size = setup_section_size(&header);
+    let prot_size  = protected_kernel_size(&header);
+
+    if cmdline.len() >= 4096 {
+        return Err("cmdline too large (max 4 KB)");
+    }
+    if setup_size + prot_size > bzimage.len() {
+        return Err("bzImage truncated (setup + kernel exceeds bytes)");
+    }
+    if KERNEL_GUEST_PHYS + (prot_size as u64) > GUEST_RAM_TOTAL {
+        return Err("kernel image overflows guest RAM window");
+    }
+
+    // Copy setup-section to guest-phys 0x10000.
+    // SAFETY: host_base is 2-MB-aligned and pre-allocated; the
+    // [host_base, host_base + 64 MB) window is exclusively ours.
+    unsafe {
+        copy_to_guest(host_base, SETUP_GUEST_PHYS, &bzimage[..setup_size]);
+        copy_to_guest(
+            host_base,
+            KERNEL_GUEST_PHYS,
+            &bzimage[setup_size..setup_size + prot_size],
+        );
+
+        // Cmdline at guest-phys 0x20000, NUL-terminated.
+        copy_to_guest(host_base, CMDLINE_GUEST_PHYS, cmdline);
+        write_byte_to_guest(host_base, CMDLINE_GUEST_PHYS + cmdline.len() as u64, 0);
+    }
+
+    // Build boot_params: zero 4 KB, copy setup-header from bzImage
+    // at offset 0x1F1 into boot_params at the same offset, override
+    // the fields we care about.
+    let mut bp: [u8; 4096] = [0; 4096];
+    let bp_hdr_end = OFF_HDR + core::mem::size_of::<SetupHeader>();
+    bp[OFF_HDR..bp_hdr_end].copy_from_slice(
+        &bzimage[OFF_HDR..bp_hdr_end],
+    );
+
+    // Sentinel byte must be 0 to allow boot.
+    bp[OFF_SENTINEL] = 0;
+
+    // Override setup-header fields per Boot Protocol.
+    // type_of_loader is at OFF_HDR + offsetof(SetupHeader, type_of_loader)
+    // = 0x1F1 + 0x1F = 0x210.
+    bp[0x210] = TYPE_OF_LOADER;
+    // loadflags is at 0x211.
+    bp[0x211] = LOADFLAG_LOADED_HIGH | LOADFLAG_KEEP_SEGMENTS;
+    // cmd_line_ptr (u32) is at 0x228.
+    let cmd_line_ptr = CMDLINE_GUEST_PHYS as u32;
+    bp[0x228..0x22C].copy_from_slice(&cmd_line_ptr.to_le_bytes());
+    // ramdisk_image (u32) at 0x218, ramdisk_size (u32) at 0x21C.
+    bp[0x218..0x21C].copy_from_slice(&0u32.to_le_bytes());
+    bp[0x21C..0x220].copy_from_slice(&0u32.to_le_bytes());
+
+    // Single e820 RAM entry covering the whole window.
+    bp[OFF_E820_ENTRIES] = 1;
+    let entry = E820Entry {
+        addr: 0,
+        size: GUEST_RAM_TOTAL,
+        typ:  E820_TYPE_RAM,
+    };
+    let entry_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            &entry as *const _ as *const u8,
+            core::mem::size_of::<E820Entry>(),
+        )
+    };
+    let table_end = OFF_E820_TABLE + entry_bytes.len();
+    bp[OFF_E820_TABLE..table_end].copy_from_slice(entry_bytes);
+
+    // Copy boot_params into guest RAM at 0x90000.
+    // SAFETY: as above, exclusive window.
+    unsafe { copy_to_guest(host_base, BOOT_PARAMS_GUEST_PHYS, &bp); }
+
+    Ok(LoadInfo {
+        entry_rip: header.code32_start as u64,
+        boot_params_phys: BOOT_PARAMS_GUEST_PHYS,
+    })
+}
+
+/// SAFETY: caller guarantees the [host_base + guest_phys,
+/// host_base + guest_phys + bytes.len()) range is exclusively ours
+/// and within the EPT window.
+unsafe fn copy_to_guest(host_base: u64, guest_phys: u64, bytes: &[u8]) {
+    let dst = (host_base + guest_phys) as *mut u8;
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+    }
+}
+
+/// SAFETY: caller guarantees the byte at host_base + guest_phys is
+/// exclusively ours.
+unsafe fn write_byte_to_guest(host_base: u64, guest_phys: u64, val: u8) {
+    let dst = (host_base + guest_phys) as *mut u8;
+    unsafe { dst.write_volatile(val); }
+}
