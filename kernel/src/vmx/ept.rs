@@ -47,6 +47,20 @@ const SIXTEEN_MB: u64 = 16 * 1024 * 1024;
 /// for the guest RAM backing.
 pub const GUEST_RAM_FRAMES: usize = (SIXTEEN_MB / 4096) as usize;
 
+/// Slack frames the caller adds to GUEST_RAM_FRAMES so the result of
+/// `memory::allocate_contiguous` can be rounded up to a 2-MB boundary
+/// for the EPT large-page leaf entries. Up to 511 frames (≈ 2 MB)
+/// at the front of the contiguous range may go unused. Cheap on
+/// 16 GB systems; alternative would be reworking the allocator to
+/// honour alignment.
+pub const GUEST_RAM_ALIGN_SLACK: usize = 511;
+
+/// Round a raw `allocate_contiguous` base up to the next 2-MB
+/// boundary so it can be passed to `install_window_16mb`.
+pub fn round_up_to_2mb(raw_base: u64) -> u64 {
+    (raw_base + (TWO_MB - 1)) & !(TWO_MB - 1)
+}
+
 /// Build the EPT, mapping guest-physical [0, 16 MB) → host-physical
 /// [host_base, host_base + 16 MB) via 8 × 2-MB leaf entries.
 /// Returns the EPTP value to be VMWRITE'd into VMCS::EPT_POINTER.

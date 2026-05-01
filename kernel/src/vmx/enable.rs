@@ -232,8 +232,14 @@ fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
     // EPT translates each fetch onto the host-allocated region so
     // the guest never touches kernel.bin's own load region (which
     // sits at host-phys 0x100000 = Multiboot2 1 MB).
-    let host_base = memory::allocate_contiguous(ept::GUEST_RAM_FRAMES)
-        .ok_or("OOM allocating 16 MB guest RAM")?;
+    // allocate_contiguous searches top-down and returns whatever it
+    // finds — no 2-MB-alignment guarantee. Take 2 MB slack and round
+    // up. Up to 2 MB at the front goes unused.
+    let raw_base = memory::allocate_contiguous(
+        ept::GUEST_RAM_FRAMES + ept::GUEST_RAM_ALIGN_SLACK,
+    )
+    .ok_or("OOM allocating 16 MB guest RAM (+ slack)")?;
+    let host_base = ept::round_up_to_2mb(raw_base);
     let eptp = ept::install_window_16mb(host_base)?;
 
     let stub_host = host_base + 0x10000;
