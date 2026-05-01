@@ -612,9 +612,25 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     vmwrite(VM_ENTRY_MSR_LOAD_COUNT, 0)?;
     vmwrite(VM_ENTRY_INTR_INFO_FIELD, 0)?;
 
-    // Don't trap any guest CR-bit writes.
+    // CR0/CR4 shadowing — hide VMXE from the guest so Linux's
+    // unconditional `mov cr4, rax` doesn't try to clear it (which
+    // would either #GP because IA32_VMX_CR4_FIXED0 has VMXE
+    // must-be-1, or break VMX operation).
+    //
+    // Mechanism (SDM §25.4): bits set in CR4_GUEST_HOST_MASK are
+    // "host-owned". Guest CR4 reads return SHADOW for those bits,
+    // real CR4 for others. Guest CR4 writes that don't change a
+    // masked bit relative to shadow → no exit, real-CR4-bit
+    // preserved. Writes that would change a masked bit → VM-exit
+    // (guest-CR-access reason 28).
+    //
+    // Setting mask = VMXE only, shadow.VMXE = 0: Linux reads CR4
+    // and sees VMXE=0. Linux's `mov cr4, value-with-VMXE=0` keeps
+    // shadow.VMXE = 0 = matches → no exit, real CR4.VMXE stays 1.
+    // Linux never tries to set VMXE=1 (it doesn't know about VMX),
+    // so the exit branch never fires.
     vmwrite(CR0_GUEST_HOST_MASK, 0)?;
-    vmwrite(CR4_GUEST_HOST_MASK, 0)?;
+    vmwrite(CR4_GUEST_HOST_MASK, 1 << 13)?; // VMXE
     vmwrite(CR0_READ_SHADOW, 0)?;
     vmwrite(CR4_READ_SHADOW, 0)?;
 
