@@ -1583,13 +1583,25 @@ fn microvm_linux_info() {
 /// reflect as `[guest] <line>` kprintln output. Phase 12.1.1c-3b3b2.
 fn microvm_linux() {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
-    // Linux 32-bit boot protocol cmdline. earlyprintk routes printk
-    // to ttyS0 immediately (before init_console). console=ttyS0
-    // makes it the primary console for normal printk too. panic=1
-    // immediately halts on error (no recovery attempt). nokaslr
-    // disables KASLR so our entry-point arithmetic is predictable.
+    // Linux 32-bit boot protocol cmdline.
+    //
+    // `earlycon=uart8250,io,0x3f8,115200n8`: activate a simple
+    // early-boot console that writes directly to legacy COM1 at
+    // port 0x3F8 — no UART detection, no driver init. We checked
+    // Alpine's vmlinuz-virt config: CONFIG_EARLY_PRINTK is NOT
+    // set (so `earlyprintk=` is silently ignored), but
+    // CONFIG_SERIAL_EARLYCON=y IS set. earlycon is what we
+    // want — it bypasses the 8250 detection probe (which fails
+    // against our minimal UART emulation) and just dumps bytes.
+    //
+    // `console=ttyS0,115200`: registers the regular 8250 driver as
+    // primary console once full kernel init runs. May or may not
+    // succeed depending on whether the 8250 detection passes.
+    //
+    // `panic=1`: halt immediately on any panic (no reboot loop).
+    // `nokaslr`: predictable load addresses for our hypervisor side.
     const CMDLINE: &[u8] =
-        b"earlyprintk=ttyS0,115200 console=ttyS0,115200 panic=1 nokaslr";
+        b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr";
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
     let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
