@@ -1024,6 +1024,38 @@ pub fn write_guest_rsp(value: u64) -> Result<(), &'static str> {
     vmwrite(GUEST_RSP, value)
 }
 
+/// Read VMCS GUEST_RIP — the linear address of the guest
+/// instruction that caused the most recent VM-exit.
+pub fn read_guest_rip() -> Result<u64, &'static str> {
+    vmread(GUEST_RIP)
+}
+
+/// Read VMCS GUEST_CR0.
+pub fn read_guest_cr0() -> Result<u64, &'static str> {
+    vmread(GUEST_CR0)
+}
+
+/// Read VMCS GUEST_CR4.
+pub fn read_guest_cr4() -> Result<u64, &'static str> {
+    vmread(GUEST_CR4)
+}
+
+/// Read VMCS GUEST_IA32_EFER.
+pub fn read_guest_efer() -> Result<u64, &'static str> {
+    vmread(GUEST_IA32_EFER)
+}
+
+/// Read VMCS GUEST_CS_SELECTOR.
+pub fn read_guest_cs_selector() -> Result<u64, &'static str> {
+    vmread(GUEST_CS_SELECTOR)
+}
+
+/// Read VMCS VM_ENTRY_CONTROLS — the live entry-control field
+/// after our last VMWRITE (or fixed_ctrl-applied initial value).
+pub fn read_vm_entry_controls() -> Result<u64, &'static str> {
+    vmread(VM_ENTRY_CONTROLS)
+}
+
 /// Read VM_EXIT_INTR_INFO. For exception VM-exits (basic reason 0),
 /// the relevant fields are:
 ///   bits 7:0  = vector (0..31)
