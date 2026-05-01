@@ -378,6 +378,67 @@ impl SerialState {
     }
 }
 
+/// Per-port I/O exit counter. Linux's boot touches dozens of unique
+/// ports (PCI config, PIC, PIT, RTC, serial, keyboard, etc.).
+/// Counting them tells us what the guest actually did when no
+/// `[guest]` lines appeared.
+struct IoStats {
+    counts: [(u16, u32); 64],
+    n: usize,
+    /// First N bytes written to UART THR (port 0x3F8 with DLAB=0).
+    serial_bytes: [u8; 256],
+    serial_n: usize,
+}
+
+impl IoStats {
+    fn new() -> Self {
+        Self {
+            counts: [(0, 0); 64],
+            n: 0,
+            serial_bytes: [0; 256],
+            serial_n: 0,
+        }
+    }
+    fn record(&mut self, port: u16, _dir_in: bool) {
+        for i in 0..self.n {
+            if self.counts[i].0 == port {
+                self.counts[i].1 += 1;
+                return;
+            }
+        }
+        if self.n < self.counts.len() {
+            self.counts[self.n] = (port, 1);
+            self.n += 1;
+        }
+    }
+    fn record_serial_byte(&mut self, byte: u8) {
+        if self.serial_n < self.serial_bytes.len() {
+            self.serial_bytes[self.serial_n] = byte;
+            self.serial_n += 1;
+        }
+    }
+    fn dump(&self) {
+        use crate::kprintln;
+        kprintln!("[microvm] I/O port summary ({} unique):", self.n);
+        for i in 0..self.n {
+            kprintln!("[microvm]   port {:#06x}: {:>5} accesses", self.counts[i].0, self.counts[i].1);
+        }
+        if self.serial_n > 0 {
+            kprintln!("[microvm] {} bytes written to 0x3F8 (DLAB=0):", self.serial_n);
+            // Print as ASCII-safe + hex-on-non-printable
+            let mut buf: [u8; 256] = [0; 256];
+            for i in 0..self.serial_n {
+                let b = self.serial_bytes[i];
+                buf[i] = if b.is_ascii_graphic() || b == b' ' || b == b'\n' { b } else { b'.' };
+            }
+            let s = core::str::from_utf8(&buf[..self.serial_n]).unwrap_or("?");
+            kprintln!("[microvm]   '{}'", s);
+        } else {
+            kprintln!("[microvm] zero bytes ever reached 0x3F8 (DLAB=0)");
+        }
+    }
+}
+
 /// Per-iteration exit trace recorded for post-mortem on unhandled
 /// exits. Keeps the last 32 (reason, qual_low32) tuples so we can
 /// see what Linux was doing in the run-up to a triple-fault.
@@ -484,6 +545,7 @@ fn run_linux_loop(
 
     let mut serial = SerialState::new();
     let mut trace = ExitTrace::new();
+    let mut io_stats = IoStats::new();
     let mut launched = false;
     let mut last_outcome: Option<vmcs::LaunchOutcome> = None;
     let mut iter: u32 = 0;
@@ -563,6 +625,7 @@ fn run_linux_loop(
             12 => {
                 serial.flush();
                 kprintln!("[microvm] guest HLT after {} VM-exits", iter);
+                io_stats.dump();
                 last_outcome = Some(outcome);
                 break;
             }
@@ -626,6 +689,10 @@ fn run_linux_loop(
             30 => {
                 let (port, dir_in, size) =
                     vmcs::decode_io_exit_qualification(outcome.exit_qualification);
+                io_stats.record(port, dir_in);
+                if port == 0x3F8 && !dir_in && !serial.dlab && size == 1 {
+                    io_stats.record_serial_byte((regs.rax & 0xFF) as u8);
+                }
                 handle_linux_io(&mut serial, &mut regs, port, dir_in, size, &mut io_dropped);
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
@@ -636,6 +703,7 @@ fn run_linux_loop(
                     "[microvm] unhandled exit reason {} qual {:#x} after {} iters",
                     basic, outcome.exit_qualification, iter,
                 );
+                io_stats.dump();
                 trace.dump();
                 last_outcome = Some(outcome);
                 break;
@@ -649,6 +717,7 @@ fn run_linux_loop(
             "[microvm] iteration cap ({}) reached — guest still running, ({} I/O drops)",
             MAX_ITERATIONS, io_dropped,
         );
+        io_stats.dump();
         trace.dump();
     }
 
