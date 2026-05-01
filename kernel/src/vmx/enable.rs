@@ -378,6 +378,35 @@ impl SerialState {
     }
 }
 
+/// Per-iteration exit trace recorded for post-mortem on unhandled
+/// exits. Keeps the last 32 (reason, qual_low32) tuples so we can
+/// see what Linux was doing in the run-up to a triple-fault.
+struct ExitTrace {
+    items: [(u16, u32); 32],
+    n: usize,
+}
+
+impl ExitTrace {
+    fn new() -> Self {
+        Self { items: [(0, 0); 32], n: 0 }
+    }
+    fn record(&mut self, reason: u16, qual: u64) {
+        let idx = self.n % 32;
+        self.items[idx] = (reason, qual as u32);
+        self.n += 1;
+    }
+    fn dump(&self) {
+        use crate::kprintln;
+        let count = self.n.min(32);
+        let start = if self.n > 32 { self.n - 32 } else { 0 };
+        kprintln!("[microvm-trace] last {} exits:", count);
+        for i in 0..count {
+            let (r, q) = self.items[(start + i) % 32];
+            kprintln!("[microvm-trace]   #{}: reason {:>3} qual {:#010x}", start + i, r, q);
+        }
+    }
+}
+
 /// Linux run-loop. Initial guest GPR ESI = boot_params_phys per
 /// 32-bit boot protocol; other GPRs zero. Caps at 100k iterations.
 fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static str> {
@@ -389,6 +418,7 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
     regs.rsi = boot_params_phys;
 
     let mut serial = SerialState::new();
+    let mut trace = ExitTrace::new();
     let mut launched = false;
     let mut last_outcome: Option<vmcs::LaunchOutcome> = None;
     let mut iter: u32 = 0;
@@ -406,8 +436,41 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
         let outcome = vmcs::run_guest_once(&mut regs, launched)?;
         launched = true;
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
+        trace.record(basic, outcome.exit_qualification);
 
         match basic {
+            0 => {
+                // Exception/NMI — diagnostic mode, EXCEPTION_BITMAP
+                // is set to trap every guest exception so we see
+                // the FIRST one that fires before it kaskades into
+                // a triple-fault.
+                serial.flush();
+                let info = vmcs::read_exit_intr_info().unwrap_or(0);
+                let vector = info & 0xFF;
+                let intr_type = (info >> 8) & 0x7;
+                let err_valid = (info >> 11) & 0x1 != 0;
+                let err_code = if err_valid {
+                    vmcs::read_exit_intr_error_code().unwrap_or(0)
+                } else {
+                    0
+                };
+                let mnemonic = match vector {
+                    0 => "DE", 1 => "DB", 2 => "NMI", 3 => "BP",
+                    4 => "OF", 5 => "BR", 6 => "UD", 7 => "NM",
+                    8 => "DF", 10 => "TS", 11 => "NP", 12 => "SS",
+                    13 => "GP", 14 => "PF", 16 => "MF", 17 => "AC",
+                    18 => "MC", 19 => "XM", 20 => "VE", 21 => "CP",
+                    _ => "??",
+                };
+                kprintln!(
+                    "[microvm] guest exception #{} ({}) type={} qual={:#x} err_valid={} err_code={:#x}",
+                    vector, mnemonic, intr_type, outcome.exit_qualification,
+                    err_valid, err_code,
+                );
+                trace.dump();
+                last_outcome = Some(outcome);
+                break;
+            }
             12 => {
                 serial.flush();
                 kprintln!("[microvm] guest HLT after {} VM-exits", iter);
@@ -484,6 +547,7 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
                     "[microvm] unhandled exit reason {} qual {:#x} after {} iters",
                     basic, outcome.exit_qualification, iter,
                 );
+                trace.dump();
                 last_outcome = Some(outcome);
                 break;
             }
@@ -496,6 +560,7 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
             "[microvm] iteration cap ({}) reached — guest still running, ({} I/O drops)",
             MAX_ITERATIONS, io_dropped,
         );
+        trace.dump();
     }
 
     last_outcome.ok_or("Linux guest exceeded max iterations without first VM-exit")

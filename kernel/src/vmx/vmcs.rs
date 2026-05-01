@@ -148,6 +148,8 @@ const CR4_READ_SHADOW: u64 = 0x6006;
 
 // VM-exit information (read-only).
 const VM_INSTRUCTION_ERROR: u64 = 0x4400;
+const VM_EXIT_INTR_INFO: u64 = 0x4404;
+const VM_EXIT_INTR_ERROR_CODE: u64 = 0x4406;
 const VM_EXIT_INSTRUCTION_LEN: u64 = 0x440C;
 // VM_EXIT_REASON encoding 0x4402 is referenced as a literal inside
 // the run_guest_once asm! block (Intel-syntax `mov rcx, 0x4402`).
@@ -598,7 +600,12 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
 
     // Inert ancillary controls — clear bitmaps + counts so VMX
     // doesn't dereference them.
-    vmwrite(EXCEPTION_BITMAP, 0)?;
+    // 12.1.1c-3b3b6: trap ALL guest exceptions (every bit set) so
+    // we see the FIRST exception that fires instead of just an
+    // opaque triple-fault. Linux normally handles its own
+    // exceptions via its IDT — but we're in diagnostic mode until
+    // Linux earlyprintk runs.
+    vmwrite(EXCEPTION_BITMAP, 0xFFFF_FFFF)?;
     vmwrite(CR3_TARGET_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_STORE_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0)?;
@@ -1015,6 +1022,23 @@ pub fn read_guest_rsp() -> Result<u64, &'static str> {
 /// Write GUEST_RSP to the current VMCS.
 pub fn write_guest_rsp(value: u64) -> Result<(), &'static str> {
     vmwrite(GUEST_RSP, value)
+}
+
+/// Read VM_EXIT_INTR_INFO. For exception VM-exits (basic reason 0),
+/// the relevant fields are:
+///   bits 7:0  = vector (0..31)
+///   bits 10:8 = interruption type (3 = HW exception, 6 = SW exception)
+///   bit  11   = error code valid
+///   bit  31   = valid (always set on exit info)
+pub fn read_exit_intr_info() -> Result<u64, &'static str> {
+    vmread(VM_EXIT_INTR_INFO)
+}
+
+/// Read VM_EXIT_INTR_ERROR_CODE — the error code architecturally
+/// pushed by certain exceptions (#PF, #GP, #SS, #DF, etc.). Only
+/// meaningful when bit 11 of VM_EXIT_INTR_INFO is set.
+pub fn read_exit_intr_error_code() -> Result<u64, &'static str> {
+    vmread(VM_EXIT_INTR_ERROR_CODE)
 }
 
 /// Sync VM_ENTRY_CONTROLS' IA-32e-mode-guest bit to GUEST_IA32_EFER.LMA.
