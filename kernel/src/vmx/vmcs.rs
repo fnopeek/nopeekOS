@@ -9,7 +9,7 @@
 //!   - All HOST_* fields written + read back to validate the
 //!     VMWRITE / VMREAD pipe and the host-state math.
 //!
-//! 12.1.0d-2b (this file):
+//! 12.1.0d-2b (this file, post-NUC fix v0.96.0):
 //!   - Long-mode flat-segment guest with shared CR3 (no EPT). All
 //!     GUEST_* fields written.
 //!   - Pin/Proc/Entry/Exit execution controls computed via the
@@ -486,9 +486,14 @@ pub(super) fn setup_execution_controls() -> Result<(), &'static str> {
 //   bit  14   = D/B
 //   bit  15   = G
 
-// 64-bit code: type=0xA (non-conforming, readable), S=1, DPL=0, P=1,
-// L=1, G=1. Matches the boot.s gdt64_code descriptor.
-const AR_CODE64: u32 = 0xA | 0x10 | 0x80 | (1 << 13) | (1 << 15);
+// 64-bit code: type=0xB (non-conforming, readable, accessed), S=1,
+// DPL=0, P=1, L=1, G=1. The accessed bit must be set for guest
+// CS/SS/DS/ES/FS/GS when the unrestricted-guest control is 0
+// (SDM §26.3.1.2 — guest segment access-rights checks). The boot
+// GDT entry has type=0xA on disk; the CPU sets the accessed bit in
+// the in-memory descriptor on selector load, but our hand-written
+// VMCS AR-byte must encode the post-load value explicitly.
+const AR_CODE64: u32 = 0xB | 0x10 | 0x80 | (1 << 13) | (1 << 15);
 // Data: type=0x3 (RW, accessed), S=1, DPL=0, P=1, G=1.
 const AR_DATA: u32 = 0x3 | 0x10 | 0x80 | (1 << 15);
 // Busy 64-bit TSS: type=0xB, S=0, DPL=0, P=1.
@@ -663,6 +668,14 @@ pub(super) fn launch_test() -> Result<u64, &'static str> {
             "pop r12",
             "pop rbx",
             "pop rbp",
+
+            // VM-exit unconditionally clears RFLAGS to 0x00000002
+            // (SDM §27.5.3) — IF=0, no interrupts. The kernel ran
+            // with IF=1 before vmx::init, so anything IRQ-driven
+            // after this point (DHCP, NTP, USB) would hang. Re-
+            // enable. (Failure path didn't change RFLAGS but `sti`
+            // is harmless if IF was already set.)
+            "sti",
 
             lateout("rax") exit_reason,
             lateout("rdx") launch_failed,
