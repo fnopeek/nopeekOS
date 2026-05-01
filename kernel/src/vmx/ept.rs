@@ -70,11 +70,15 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
 /// Build the EPT. Maps:
 ///   - guest-physical [0, 64 MB) → host-physical [host_base, +64 MB)
 ///     via 32 × 2-MB leaf entries (PD)
-///   - guest-physical [0xFEE00000, 0xFEE00000 + 2 MB) → host-physical
-///     scratch frame, so LAPIC accesses (Linux reads APIC_ID etc.
-///     after TSC-deadline detection) don't EPT-violate. Reads return
-///     scratch contents, writes go to scratch — not real LAPIC
-///     semantics, but enough to keep early Linux init from faulting.
+///   - guest-physical [0xFEC00000, 0xFF000000) → 4 KB dummy scratch
+///     page (aliased): 4 MB of guest-phys → same single host page
+///     via PT-level mapping. Covers IOAPIC (0xFEC00000), HPET
+///     (0xFED00000), and LAPIC (0xFEE00000). Reads return scratch
+///     contents (initially zero), writes land in scratch — not real
+///     MMIO semantics, but enough to absorb Linux's early MMIO
+///     probes without EPT-violating. With `nolapic noapic acpi=off
+///     pci=off` cmdline, Linux barely touches this anyway; mapping
+///     it is just defence in depth.
 /// Returns the EPTP value to be VMWRITE'd into VMCS::EPT_POINTER.
 pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
     if host_base & (TWO_MB - 1) != 0 {
@@ -85,12 +89,8 @@ pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
     let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
     let pd_phys = memory::allocate_frame().ok_or("OOM: EPT PD")?;
     let pd_high_phys = memory::allocate_frame().ok_or("OOM: EPT PD_HIGH")?;
-
-    // 2 MB scratch frame for LAPIC region. Top-down + 2 MB alignment
-    // slack, same pattern as the main guest-RAM allocation.
-    let lapic_scratch_raw = memory::allocate_contiguous(512 + 511)
-        .ok_or("OOM: LAPIC scratch")?;
-    let lapic_scratch = round_up_to_2mb(lapic_scratch_raw);
+    let pt_dummy_phys = memory::allocate_frame().ok_or("OOM: EPT PT_DUMMY")?;
+    let dummy_page_phys = memory::allocate_frame().ok_or("OOM: EPT dummy page")?;
 
     // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
@@ -103,7 +103,7 @@ pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
         let pdpt = pdpt_phys as *mut u64;
         core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
         pdpt.add(0).write_volatile(pd_phys | EPT_RWX);
-        // PDPT[3] → PD_HIGH (covers [3 GB, 4 GB), where LAPIC lives).
+        // PDPT[3] → PD_HIGH (covers [3 GB, 4 GB), MMIO range lives here).
         pdpt.add(3).write_volatile(pd_high_phys | EPT_RWX);
 
         // PD[0..PD_LEAVES] = 2-MB leaf entries covering 64 MB.
@@ -115,13 +115,26 @@ pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
                 .write_volatile(host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
         }
 
-        // PD_HIGH[503] = 2-MB leaf at 0xFEE00000 (LAPIC) → scratch.
-        // L2 index 503 = (0xFEE00000 >> 21) & 0x1FF.
+        // PD_HIGH[502] + [503] → same PT_DUMMY (covers [0xFEC00000,
+        // 0xFF000000) = IOAPIC + HPET + LAPIC). Two PD entries
+        // aliased to one PT, so 4 MB of guest-phys all walk through
+        // the same 512-entry PT.
         let pd_high = pd_high_phys as *mut u64;
         core::ptr::write_bytes(pd_high as *mut u8, 0, 4096);
-        pd_high.add(503).write_volatile(
-            lapic_scratch | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF,
-        );
+        pd_high.add(502).write_volatile(pt_dummy_phys | EPT_RWX);
+        pd_high.add(503).write_volatile(pt_dummy_phys | EPT_RWX);
+
+        // PT_DUMMY[0..512] all → dummy_page (4 KB). 4 MB of guest-phys
+        // → 4 KB host scratch. PT entries are always 4-KB leaves;
+        // no leaf-bit needed (bit 7 must be 0 in EPT PTEs).
+        let pt_dummy = pt_dummy_phys as *mut u64;
+        core::ptr::write_bytes(pt_dummy as *mut u8, 0, 4096);
+        core::ptr::write_bytes(dummy_page_phys as *mut u8, 0, 4096);
+        for i in 0..512usize {
+            pt_dummy
+                .add(i)
+                .write_volatile(dummy_page_phys | EPT_RWX | EPT_MEM_TYPE_WB);
+        }
     }
 
     Ok(pml4_phys | EPTP_WALK_LENGTH_4 | EPTP_MEM_TYPE_WB)

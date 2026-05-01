@@ -1600,8 +1600,16 @@ fn microvm_linux() {
     //
     // `panic=1`: halt immediately on any panic (no reboot loop).
     // `nokaslr`: predictable load addresses for our hypervisor side.
+    // `nolapic noapic acpi=off pci=off tsc=reliable`: tell Linux to
+    // skip hardware probing it would otherwise crash on. We're not
+    // a real PC — no ACPI tables, no PCI bus, no functioning APIC
+    // (just an EPT-mapped scratch page absorbing the MMIO accesses).
+    // Without these, Linux times out / panics on probes that don't
+    // behave like real silicon. With them, it boots minimally to
+    // the rootfs-mount panic — the 12.1.1d milestone target.
     const CMDLINE: &[u8] =
-        b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr";
+        b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr \
+          nolapic noapic acpi=off pci=off tsc=reliable";
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
     let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
