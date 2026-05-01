@@ -697,6 +697,15 @@ fn run_linux_loop(
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
+            55 => {
+                // XSETBV — VMX always exits on this. Linux uses it
+                // during FPU/AVX init to set XCR0. Host's XCR0
+                // already has x87/SSE/AVX enabled (set in boot.s),
+                // so Linux's intended write is effectively a no-op
+                // for the bits it cares about. Just advance RIP.
+                vmcs::advance_guest_rip()?;
+                last_outcome = Some(outcome);
+            }
             48 => {
                 // EPT violation — guest tried to access a guest-phys
                 // address outside our 64 MB window (or with insufficient
