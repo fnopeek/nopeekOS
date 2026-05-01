@@ -1,10 +1,11 @@
-//! Extended Page Tables (EPT) — Phase 12.1.1a/c-1.
+//! Extended Page Tables (EPT) — Phase 12.1.1a/c-1/c-3.
 //!
-//! Maps a 16-MB guest-physical window [0, 16 MB) onto a contiguous
-//! 16-MB host-physical region using 2-MB EPT large pages (8 leaf
+//! Maps a 64-MB guest-physical window [0, 64 MB) onto a contiguous
+//! 64-MB host-physical region using 2-MB EPT large pages (32 leaf
 //! entries in a single PD). The host backing region is allocated
-//! once via `memory::allocate_contiguous(4096)`; the caller passes
-//! that host base in.
+//! once via `memory::allocate_contiguous(GUEST_RAM_FRAMES + slack)`;
+//! the caller rounds the result up to a 2-MB boundary and passes
+//! that base in.
 //!
 //! Why non-identity (12.1.1c-1 vs the v0.97 1-GB identity map):
 //! the guest will copy Linux's bzImage into its address space at
@@ -13,10 +14,14 @@
 //! (Multiboot2 puts us at 1 MB). A non-identity EPT separates the
 //! two so the guest can write freely without corrupting host code.
 //!
-//! 16 MB is enough for: setup (~8 KB), boot_params (~4 KB), cmdline
-//! (~256 B), the Alpine vmlinuz-virt protected-mode kernel
-//! (~5-7 MB). A larger window can be plumbed in later by stretching
-//! the PD entries; the current 8-entry layout caps at 16 MB.
+//! Why 64 MB: Alpine 6.18 linux-virt's `init_size` field reports
+//! 0x25ff000 ≈ 38 MB — that's how much memory Linux's early boot
+//! needs for decompression buffers + brk + page tables before
+//! it sees its own memory map. 16 MB (12.1.1c-1) was enough for
+//! the real-mode HLT-test substrate but cannot host real Linux.
+//! 64 MB rounded up gives Linux some headroom and stays in a
+//! single PD's range (32 × 2-MB leaves; one PML4 + one PDPT + one
+//! PD covers everything). Larger windows would need a second PD.
 //!
 //! Tables are leaked (same lifecycle as VMXON / VMCS regions in
 //! `vmx/enable.rs`).
@@ -41,11 +46,12 @@ const EPTP_MEM_TYPE_WB: u64 = 6;
 const EPTP_WALK_LENGTH_4: u64 = 3 << 3; // 4 levels = walk length 3
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
-const SIXTEEN_MB: u64 = 16 * 1024 * 1024;
+const GUEST_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
+const PD_LEAVES: u64 = GUEST_WINDOW_BYTES / TWO_MB; // 32 entries
 
 /// Number of 4 KB host frames the caller must allocate contiguously
 /// for the guest RAM backing.
-pub const GUEST_RAM_FRAMES: usize = (SIXTEEN_MB / 4096) as usize;
+pub const GUEST_RAM_FRAMES: usize = (GUEST_WINDOW_BYTES / 4096) as usize;
 
 /// Slack frames the caller adds to GUEST_RAM_FRAMES so the result of
 /// `memory::allocate_contiguous` can be rounded up to a 2-MB boundary
@@ -61,10 +67,10 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
     (raw_base + (TWO_MB - 1)) & !(TWO_MB - 1)
 }
 
-/// Build the EPT, mapping guest-physical [0, 16 MB) → host-physical
-/// [host_base, host_base + 16 MB) via 8 × 2-MB leaf entries.
+/// Build the EPT, mapping guest-physical [0, 64 MB) → host-physical
+/// [host_base, host_base + 64 MB) via 32 × 2-MB leaf entries.
 /// Returns the EPTP value to be VMWRITE'd into VMCS::EPT_POINTER.
-pub fn install_window_16mb(host_base: u64) -> Result<u64, &'static str> {
+pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
     if host_base & (TWO_MB - 1) != 0 {
         return Err("EPT: host_base must be 2-MB aligned for 2-MB EPT pages");
     }
@@ -85,10 +91,10 @@ pub fn install_window_16mb(host_base: u64) -> Result<u64, &'static str> {
         core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
         pdpt.add(0).write_volatile(pd_phys | EPT_RWX);
 
-        // PD[0..8] = 8 × 2-MB leaf entries covering 16 MB.
+        // PD[0..PD_LEAVES] = 2-MB leaf entries covering the window.
         let pd = pd_phys as *mut u64;
         core::ptr::write_bytes(pd as *mut u8, 0, 4096);
-        for i in 0..8u64 {
+        for i in 0..PD_LEAVES {
             let host_target = host_base + i * TWO_MB;
             pd.add(i as usize)
                 .write_volatile(host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
