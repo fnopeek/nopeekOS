@@ -1,4 +1,4 @@
-//! VMX root-mode entry/exit + VMCS round-trip — 12.1.0b/c/d-1 validation.
+//! VMX root-mode entry/exit + VMCS round-trip + VMLAUNCH — 12.1.0b…0d-2b.
 //!
 //! Bring-up dance:
 //!   1. Allocate a 4-KB VMXON region, write the VMCS revision-id.
@@ -9,11 +9,14 @@
 //!   5. Allocate a 4-KB VMCS region, write the revision-id, run
 //!      VMCLEAR + VMPTRLD against it.                              (12.1.0c)
 //!   6. VMWRITE the host-state subset, VMREAD it back.             (12.1.0d-1)
-//!   7. Execute VMXOFF.                                            (12.1.0b)
+//!   7. VMWRITE guest-state + execution controls; allocate a guest-
+//!      code page with `hlt; jmp .`; VMLAUNCH; on the resulting
+//!      VM-exit read VM_EXIT_REASON.                               (12.1.0d-2b)
+//!   8. Execute VMXOFF.                                            (12.1.0b)
 //!
-//! VMXON + VMCS regions are allocated and *kept* (never freed) so
-//! 12.1.0d-2 re-uses them without re-allocating. CR4.VMXE is left set —
-//! harmless and saves a write next time.
+//! VMXON + VMCS regions are allocated and *kept* (never freed). The
+//! guest code page is allocated once and reused. CR4.VMXE is left
+//! set — harmless and saves a write next time.
 //!
 //! Reference: Intel SDM Vol. 3C §23.7 (Enabling and Entering VMX
 //! Operation), §24.11 (VMCS-Maintenance Instructions), §26.2
@@ -38,10 +41,11 @@ const CR4_VMXE: u64 = 1 << 13;
 const RFLAGS_CF: u64 = 1 << 0;
 const RFLAGS_ZF: u64 = 1 << 6;
 
-/// Round-trip the full VMX bring-up: enter VMX root mode, exit it.
-/// On success, `Ok(())`. On failure, a static string naming the step
-/// that failed.
-pub fn enable_and_test() -> Result<(), &'static str> {
+/// Round-trip the full VMX bring-up: enter VMX root mode, set up a
+/// minimal long-mode HLT-loop guest, VMLAUNCH, observe the VM-exit,
+/// VMXOFF. On success, returns the basic VM-exit reason (expected:
+/// 12 = HLT). On failure, a static string naming the step.
+pub fn enable_and_test() -> Result<u16, &'static str> {
     // 1. Allocate a 4-KB frame for the VMXON region. Kernel memory
     //    is identity-mapped (virt == phys), so we can cast and write
     //    directly. The frame is leaked deliberately: 12.1.0c re-uses
@@ -133,10 +137,10 @@ pub fn enable_and_test() -> Result<(), &'static str> {
         return Err("VMXON returned VMfailValid (ZF=1) — unexpected on first call");
     }
 
-    // 6. Now in VMX root mode. Run the VMCS round-trip test (12.1.0c).
-    //    If it fails we MUST still execute VMXOFF before returning,
+    // 6. Now in VMX root mode. Run the VMCS + VMLAUNCH path. If any
+    //    step fails we MUST still execute VMXOFF before returning,
     //    otherwise the CPU stays in VMX root mode forever.
-    let vmcs_result = vmcs_round_trip(revision_id);
+    let result = vmcs_round_trip(revision_id);
 
     // 7. VMXOFF. Cleanly leave VMX root mode regardless of the inner
     //    test result. SAFETY: in VMX root mode (verified above).
@@ -144,16 +148,18 @@ pub fn enable_and_test() -> Result<(), &'static str> {
         core::arch::asm!("vmxoff", options(nostack, preserves_flags));
     }
 
-    vmcs_result
+    result
 }
 
-/// 12.1.0c: VMCS region life cycle inside VMX root mode. Allocates
-/// a fresh 4-KB VMCS region, writes the revision-id, runs VMCLEAR
-/// (initialize → "clear" state) and VMPTRLD (make it the current
-/// VMCS). The region is leaked deliberately for re-use in 12.1.0d.
+/// 12.1.0c…0d-2b: full VMCS life cycle inside VMX root mode.
+/// Allocates the VMCS region, runs VMCLEAR + VMPTRLD, writes host
+/// + guest + control state, runs VMLAUNCH, returns the basic exit
+/// reason from the resulting VM-exit. All regions leaked
+/// deliberately so subsequent invocations can reuse them.
 ///
-/// Reference: Intel SDM Vol. 3C §24.11.3 (Initializing a VMCS).
-fn vmcs_round_trip(revision_id: u32) -> Result<(), &'static str> {
+/// Reference: Intel SDM Vol. 3C §24.11.3 (Initializing a VMCS),
+/// §27 (VM Exits).
+fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
     let vmcs_phys = memory::allocate_frame().ok_or("OOM allocating VMCS region")?;
 
     // SAFETY: identity-mapped, freshly-allocated, exclusive. Same
@@ -209,13 +215,33 @@ fn vmcs_round_trip(revision_id: u32) -> Result<(), &'static str> {
     }
 
     // 12.1.0d-1: write the host-state subset and read every field
-    // back. host_rsp is sampled here, one frame above the VMWRITE
-    // storm — close enough to "the kernel state at exit" that the
-    // value is canonical even though no exit can fire yet.
+    // back. host_rsp is a placeholder — the launch path overrides
+    // HOST_RSP just-in-time with its own stack pointer.
     let host_rsp: u64;
     // SAFETY: pure register read.
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) host_rsp, options(nostack, preserves_flags));
     }
-    vmcs::setup_host_state(host_rsp)
+    vmcs::setup_host_state(host_rsp)?;
+
+    // 12.1.0d-2b: write guest-state + controls, allocate the guest
+    // code page (`hlt; jmp .` at offset 0), VMLAUNCH.
+    let guest_phys = memory::allocate_frame().ok_or("OOM allocating guest code page")?;
+    // SAFETY: identity-mapped, freshly allocated, exclusive. Layout
+    // is `0xF4 0xEB 0xFE` = `hlt; jmp $-0` so the guest immediately
+    // halts (HLT-exiting=1 in the proc-based controls fires a VM-exit
+    // before any subsequent instruction is fetched).
+    unsafe {
+        let page = guest_phys as *mut u8;
+        core::ptr::write_bytes(page, 0, 4096);
+        page.add(0).write_volatile(0xF4); // hlt
+        page.add(1).write_volatile(0xEB); // jmp short
+        page.add(2).write_volatile(0xFE); // -2 (back to hlt)
+    }
+
+    vmcs::setup_guest_state(guest_phys)?;
+    vmcs::setup_execution_controls()?;
+
+    let raw_reason = vmcs::launch_test()?;
+    Ok(vmcs::basic_exit_reason(raw_reason))
 }
