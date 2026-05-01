@@ -139,6 +139,10 @@ const EPT_POINTER: u64 = 0x201A;
 
 // Natural-width VM-exit info.
 const VM_EXIT_QUALIFICATION: u64 = 0x6400;
+const VM_EXIT_GUEST_LINEAR_ADDR: u64 = 0x640A;
+
+// 64-bit VM-exit info.
+const VM_EXIT_GUEST_PHYS_ADDR: u64 = 0x2400;
 
 // Natural-width controls.
 const CR0_GUEST_HOST_MASK: u64 = 0x6000;
@@ -1085,6 +1089,20 @@ pub fn read_guest_cs_selector() -> Result<u64, &'static str> {
 /// after our last VMWRITE (or fixed_ctrl-applied initial value).
 pub fn read_vm_entry_controls() -> Result<u64, &'static str> {
     vmread(VM_ENTRY_CONTROLS)
+}
+
+/// Read VMCS GUEST_PHYSICAL_ADDRESS — set by the CPU on EPT
+/// violations and EPT misconfigurations. Tells us what guest-phys
+/// address the guest tried to access when EPT translation failed.
+pub fn read_guest_phys_addr() -> Result<u64, &'static str> {
+    vmread(VM_EXIT_GUEST_PHYS_ADDR)
+}
+
+/// Read VMCS GUEST_LINEAR_ADDRESS — set by the CPU when bit 7 of
+/// the EPT-violation qualification is set. The linear address that
+/// triggered the violation (vs the qual which is the guest-phys).
+pub fn read_guest_linear_addr() -> Result<u64, &'static str> {
+    vmread(VM_EXIT_GUEST_LINEAR_ADDR)
 }
 
 /// Read VM_EXIT_INTR_INFO. For exception VM-exits (basic reason 0),
