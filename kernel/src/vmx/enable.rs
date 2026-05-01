@@ -23,7 +23,7 @@
 //! (VM-Entry Checks on Host State), §A.7-A.8 (VMX-Fixed Bits in
 //! CR0/CR4).
 
-use super::{rdmsr, wrmsr, vmcs};
+use super::{ept, rdmsr, vmcs, wrmsr};
 use crate::mm::memory;
 
 const IA32_FEATURE_CONTROL: u32 = 0x3A;
@@ -239,8 +239,12 @@ fn vmcs_round_trip(revision_id: u32) -> Result<u16, &'static str> {
         page.add(2).write_volatile(0xFE); // -2 (back to hlt)
     }
 
+    // 12.1.1a: install identity-mapped EPT (1 GB), get EPTP, wire
+    // it into the secondary controls before VMLAUNCH.
+    let eptp = ept::install_identity_1gb()?;
+
     vmcs::setup_guest_state(guest_phys)?;
-    vmcs::setup_execution_controls()?;
+    vmcs::setup_execution_controls(eptp)?;
 
     let raw_reason = vmcs::launch_test()?;
     Ok(vmcs::basic_exit_reason(raw_reason))

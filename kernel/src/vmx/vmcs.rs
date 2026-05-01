@@ -129,6 +129,10 @@ const VM_EXIT_MSR_LOAD_COUNT: u64 = 0x4010;
 const VM_ENTRY_CONTROLS: u64 = 0x4012;
 const VM_ENTRY_MSR_LOAD_COUNT: u64 = 0x4014;
 const VM_ENTRY_INTR_INFO_FIELD: u64 = 0x4016;
+const SECONDARY_VM_EXEC_CONTROL: u64 = 0x401E;
+
+// 64-bit control.
+const EPT_POINTER: u64 = 0x201A;
 
 // Natural-width controls.
 const CR0_GUEST_HOST_MASK: u64 = 0x6000;
@@ -146,6 +150,7 @@ const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
 const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
 const IA32_VMX_EXIT_CTLS: u32 = 0x483;
 const IA32_VMX_ENTRY_CTLS: u32 = 0x484;
+const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B;
 
 // Architectural MSRs we mirror into host-state.
 const IA32_EFER: u32 = 0xC000_0080;
@@ -419,6 +424,10 @@ fn exit_trampoline_addr() -> u64 {
 
 // CPU-based control bits we care about.
 const CPU_HLT_EXITING: u32 = 1 << 7;
+const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
+
+// Secondary control bits.
+const SEC_ENABLE_EPT: u32 = 1 << 1;
 
 // VM-entry control bits.
 const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
@@ -443,16 +452,23 @@ fn fixed_ctrl(desired: u32, msr: u32) -> u32 {
 /// Write the execution-control fields. Pin-based and CPU-based
 /// minimums plus HLT-exiting (so the guest's `hlt` triggers our
 /// VM-exit), VM-entry IA-32e-mode-guest, VM-exit host-address-space-
-/// size. Secondary controls left at 0 (Option A: no EPT, no
-/// unrestricted guest — the long-mode guest doesn't need either).
-pub(super) fn setup_execution_controls() -> Result<(), &'static str> {
+/// size, secondary controls with enable-EPT, and the EPT_POINTER
+/// itself. CPU-based bit 31 (activate-secondary-controls) is set so
+/// the secondary field is consulted at all.
+pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let pin = fixed_ctrl(0, IA32_VMX_PINBASED_CTLS);
-    let cpu = fixed_ctrl(CPU_HLT_EXITING, IA32_VMX_PROCBASED_CTLS);
+    let cpu = fixed_ctrl(
+        CPU_HLT_EXITING | CPU_ACTIVATE_SECONDARY,
+        IA32_VMX_PROCBASED_CTLS,
+    );
+    let secondary = fixed_ctrl(SEC_ENABLE_EPT, IA32_VMX_PROCBASED_CTLS2);
     let entry = fixed_ctrl(ENTRY_IA32E_MODE_GUEST, IA32_VMX_ENTRY_CTLS);
     let exit = fixed_ctrl(EXIT_HOST_ADDR_SPACE_SIZE, IA32_VMX_EXIT_CTLS);
 
     vmwrite(PIN_BASED_VM_EXEC_CONTROL, pin as u64)?;
     vmwrite(CPU_BASED_VM_EXEC_CONTROL, cpu as u64)?;
+    vmwrite(SECONDARY_VM_EXEC_CONTROL, secondary as u64)?;
+    vmwrite(EPT_POINTER, eptp)?;
     vmwrite(VM_ENTRY_CONTROLS, entry as u64)?;
     vmwrite(VM_EXIT_CONTROLS, exit as u64)?;
 
