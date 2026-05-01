@@ -328,7 +328,7 @@ pub fn run_linux(bzimage: &[u8], cmdline: &[u8]) -> Result<vmcs::LaunchOutcome, 
         vmcs::setup_guest_state(load.entry_rip)?;
         vmcs::setup_execution_controls(eptp)?;
 
-        run_linux_loop(load.boot_params_phys)
+        run_linux_loop(load.boot_params_phys, host_base)
     })
 }
 
@@ -407,9 +407,74 @@ impl ExitTrace {
     }
 }
 
+/// Walk guest's 4-level page tables for `virt`, print each level's
+/// entry. EPT identity-shifts guest-phys X → host-phys host_base+X
+/// within the 64 MB window, so we just offset.
+fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
+    use crate::kprintln;
+    const WINDOW: u64 = 64 * 1024 * 1024;
+    const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    let l4 = ((virt >> 39) & 0x1FF) as usize;
+    let l3 = ((virt >> 30) & 0x1FF) as usize;
+    let l2 = ((virt >> 21) & 0x1FF) as usize;
+    let l1 = ((virt >> 12) & 0x1FF) as usize;
+    kprintln!("[microvm-walk] CR3 = {:#018x}, virt = {:#018x}", cr3, virt);
+    kprintln!("[microvm-walk] indices: L4={} L3={} L2={} L1={}", l4, l3, l2, l1);
+
+    let pml4_phys = cr3 & PHYS_MASK;
+    if pml4_phys >= WINDOW {
+        kprintln!("[microvm-walk] PML4 phys {:#x} outside 64 MB window", pml4_phys);
+        return;
+    }
+    let pml4_e = unsafe {
+        ((host_base + pml4_phys) as *const u64).add(l4).read_volatile()
+    };
+    kprintln!("[microvm-walk]   PML4[{}] = {:#018x}", l4, pml4_e);
+    if pml4_e & 1 == 0 { kprintln!("[microvm-walk]     L4 not present"); return; }
+
+    let pdpt_phys = pml4_e & PHYS_MASK;
+    if pdpt_phys >= WINDOW {
+        kprintln!("[microvm-walk]   PDPT phys {:#x} outside window", pdpt_phys);
+        return;
+    }
+    let pdpt_e = unsafe {
+        ((host_base + pdpt_phys) as *const u64).add(l3).read_volatile()
+    };
+    kprintln!("[microvm-walk]   PDPT[{}] = {:#018x}", l3, pdpt_e);
+    if pdpt_e & 1 == 0 { kprintln!("[microvm-walk]     L3 not present"); return; }
+    if pdpt_e & (1 << 7) != 0 { kprintln!("[microvm-walk]     1 GB leaf"); return; }
+
+    let pd_phys = pdpt_e & PHYS_MASK;
+    if pd_phys >= WINDOW {
+        kprintln!("[microvm-walk]   PD phys {:#x} outside window", pd_phys);
+        return;
+    }
+    let pd_e = unsafe {
+        ((host_base + pd_phys) as *const u64).add(l2).read_volatile()
+    };
+    kprintln!("[microvm-walk]   PD[{}] = {:#018x}", l2, pd_e);
+    if pd_e & 1 == 0 { kprintln!("[microvm-walk]     L2 not present"); return; }
+    if pd_e & (1 << 7) != 0 { kprintln!("[microvm-walk]     2 MB leaf"); return; }
+
+    let pt_phys = pd_e & PHYS_MASK;
+    if pt_phys >= WINDOW {
+        kprintln!("[microvm-walk]   PT phys {:#x} outside window", pt_phys);
+        return;
+    }
+    let pt_e = unsafe {
+        ((host_base + pt_phys) as *const u64).add(l1).read_volatile()
+    };
+    kprintln!("[microvm-walk]   PT[{}] = {:#018x}", l1, pt_e);
+    if pt_e & 1 == 0 { kprintln!("[microvm-walk]     L1 not present"); }
+}
+
 /// Linux run-loop. Initial guest GPR ESI = boot_params_phys per
 /// 32-bit boot protocol; other GPRs zero. Caps at 100k iterations.
-fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static str> {
+fn run_linux_loop(
+    boot_params_phys: u64,
+    host_base: u64,
+) -> Result<vmcs::LaunchOutcome, &'static str> {
     use crate::kprintln;
 
     const MAX_ITERATIONS: u32 = 100_000;
@@ -485,6 +550,10 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
                     "[microvm]   GUEST_EFER = {:#018x}  ENTRY_CTLS = {:#010x}",
                     efer, entry,
                 );
+                if vector == 14 {
+                    let cr3 = vmcs::read_guest_cr3().unwrap_or(0);
+                    dump_page_walk(host_base, cr3, outcome.exit_qualification);
+                }
                 trace.dump();
                 last_outcome = Some(outcome);
                 break;
