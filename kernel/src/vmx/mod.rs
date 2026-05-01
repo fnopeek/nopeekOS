@@ -10,8 +10,8 @@
 //!   12.1.0b   VMXON region + CR4.VMXE + round-trip    ✓ v0.91.0
 //!   12.1.0c   VMCS region + VMCLEAR + VMPTRLD         ✓ v0.92.0
 //!   12.1.0d-1 Host-state VMWRITE/VMREAD + trampoline  ✓ v0.93.0
-//!   12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ← this file
-//!   12.1.0d-2b Guest-state + controls + VMLAUNCH + HLT-exit
+//!   12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ✓ v0.94.0
+//!   12.1.0d-2b Guest-state + controls + VMLAUNCH      ← this file
 //!   12.1.1    EPT + Linux 6.18 LTS bzImage to early-panic
 //!   12.1.2    virtio-console backend
 //!   12.1.3    initramfs + Rust-PID-1 + bash
@@ -29,7 +29,9 @@ use spin::Mutex;
 pub enum BringupState {
     NotRun,
     Skipped(&'static str),
-    Ok,
+    /// VMLAUNCH succeeded; payload is the basic VM-exit reason
+    /// (expected: 12 = HLT-exit) per SDM Appendix C.
+    Launched(u16),
     Failed(&'static str),
 }
 
@@ -41,7 +43,7 @@ static BRINGUP: Mutex<BringupState> = Mutex::new(BringupState::NotRun);
 pub fn init() {
     let state = match probe() {
         Some(_caps) => match enable::enable_and_test() {
-            Ok(()) => BringupState::Ok,
+            Ok(reason) => BringupState::Launched(reason),
             Err(reason) => BringupState::Failed(reason),
         },
         None => BringupState::Skipped("VT-x not supported or BIOS-locked"),
@@ -70,8 +72,15 @@ pub fn report() {
                 BringupState::Skipped(r) => {
                     kprintln!("[vmx]   bring-up        = skipped ({})", r);
                 }
-                BringupState::Ok => {
-                    kprintln!("[vmx]   bring-up        = OK (host-state round-trip + TSS, 12.1.0d-2a)");
+                BringupState::Launched(reason) => {
+                    let label = match reason {
+                        12 => " (HLT)",
+                        _ => "",
+                    };
+                    kprintln!(
+                        "[vmx]   bring-up        = OK (VMLAUNCH → exit_reason={}{}, 12.1.0d-2b)",
+                        reason, label,
+                    );
                 }
                 BringupState::Failed(r) => {
                     kprintln!("[vmx]   bring-up        = FAILED ({})", r);
