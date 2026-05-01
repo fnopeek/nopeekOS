@@ -636,8 +636,8 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    12.1.1c-2  bring-up off the boot path             ✓");
             kprintln!("    12.1.1c-3a 64 MB EPT + bzImage in npkFS           ✓");
             kprintln!("    12.1.1c-3b1 bzImage parser + linux-info           ✓");
-            kprintln!("    12.1.1c-3b2 Serial 0x3F8 capture                  — next");
-            kprintln!("    12.1.1c-3b3 Loader + 32-bit boot + VMLAUNCH       — after");
+            kprintln!("    12.1.1c-3b2 I/O-bitmap capture (0x80, 0x3F8-3FF)  ✓");
+            kprintln!("    12.1.1c-3b3 VMRESUME loop + Linux launch          — next");
             kprintln!("    12.1.2+    virtio-console, initramfs, Rust-PID-1");
             kprintln!();
             kprintln!("  This intent currently leaks ~16 MB of guest RAM per call.");

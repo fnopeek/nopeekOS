@@ -132,7 +132,12 @@ const VM_ENTRY_INTR_INFO_FIELD: u64 = 0x4016;
 const SECONDARY_VM_EXEC_CONTROL: u64 = 0x401E;
 
 // 64-bit control.
+const IO_BITMAP_A_FULL: u64 = 0x2000;
+const IO_BITMAP_B_FULL: u64 = 0x2002;
 const EPT_POINTER: u64 = 0x201A;
+
+// Natural-width VM-exit info.
+const VM_EXIT_QUALIFICATION: u64 = 0x6400;
 
 // Natural-width controls.
 const CR0_GUEST_HOST_MASK: u64 = 0x6000;
@@ -420,10 +425,60 @@ fn exit_trampoline_addr() -> u64 {
     setup_host_state as *const () as usize as u64
 }
 
+// ── I/O bitmaps ────────────────────────────────────────────────────
+
+/// Allocate two 4-KB pages for IO_BITMAP_A (ports 0x0000-0x7FFF) and
+/// IO_BITMAP_B (ports 0x8000-0xFFFF), zero them, set bits for the
+/// ports we want to trap. Bit `n` of bitmap A means "exit on port n
+/// access". B is left zero (ports above 0x8000 pass through).
+///
+/// Trapped ports:
+///   - 0x80          — substrate-test stub (`out 0x80, al`)
+///   - 0x3F8-0x3FF   — UART COM1 (Linux earlyprintk + 8250 register
+///                     range; Linux probes the whole 8-port window)
+///
+/// Returns (io_bitmap_a_phys, io_bitmap_b_phys). Frames are leaked
+/// so future entries reuse them; same lifecycle as VMXON / VMCS /
+/// EPT regions.
+fn allocate_and_populate_io_bitmaps() -> Result<(u64, u64), &'static str> {
+    use crate::mm::memory;
+
+    let bitmap_a = memory::allocate_frame().ok_or("OOM: IO_BITMAP_A")?;
+    let bitmap_b = memory::allocate_frame().ok_or("OOM: IO_BITMAP_B")?;
+
+    // SAFETY: identity-mapped, freshly allocated, exclusive. Each
+    // bit covers one port: byte index = port / 8, bit-in-byte =
+    // port % 8.
+    unsafe {
+        core::ptr::write_bytes(bitmap_a as *mut u8, 0, 4096);
+        core::ptr::write_bytes(bitmap_b as *mut u8, 0, 4096);
+
+        // Port 0x80 → byte 0x10, bit 0.
+        let a = bitmap_a as *mut u8;
+        a.add(0x80 / 8).write_volatile(1 << (0x80 % 8));
+
+        // Ports 0x3F8..0x3FF → byte 0x7F, all 8 bits.
+        a.add(0x3F8 / 8).write_volatile(0xFF);
+    }
+
+    Ok((bitmap_a, bitmap_b))
+}
+
+/// Decode a VM-exit-qualification value from an I/O instruction
+/// VM-exit (basic reason 30) per SDM §27.2.1 Table 27-5. Returns
+/// (port, direction_in, size_bytes).
+pub fn decode_io_exit_qualification(qual: u64) -> (u16, bool, u8) {
+    let port = ((qual >> 16) & 0xFFFF) as u16;
+    let direction_in = (qual >> 3) & 1 != 0;
+    let size_bytes = ((qual & 7) + 1) as u8;
+    (port, direction_in, size_bytes)
+}
+
 // ── Execution controls ─────────────────────────────────────────────
 
 // CPU-based control bits we care about.
 const CPU_HLT_EXITING: u32 = 1 << 7;
+const CPU_USE_IO_BITMAPS: u32 = 1 << 25;
 const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 
 // Secondary control bits.
@@ -454,15 +509,20 @@ fn fixed_ctrl(desired: u32, msr: u32) -> u32 {
 }
 
 /// Write the execution-control fields for an unrestricted real-mode
-/// guest with EPT. CPU-based: HLT-exiting + activate-secondary.
-/// Secondary: enable-EPT + unrestricted-guest. VM-exit:
-/// host-address-space-size (= host returns to 64-bit). VM-entry:
-/// IA-32e-mode-guest stays 0 (real mode is not 64-bit). All I/O
-/// instructions exit unconditionally because use-IO-bitmaps stays 0.
+/// guest with EPT + selective I/O exiting. CPU-based: HLT-exiting +
+/// use-IO-bitmaps + activate-secondary. Secondary: enable-EPT +
+/// unrestricted-guest. VM-exit: host-address-space-size. VM-entry:
+/// IA-32e-mode-guest stays 0.
+///
+/// I/O bitmaps trap accesses to port 0x80 (substrate-test stub) and
+/// ports 0x3F8-0x3FF (UART COM1 — Linux's earlyprintk target). All
+/// other ports pass through natively.
 pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
+    let (io_bitmap_a, io_bitmap_b) = allocate_and_populate_io_bitmaps()?;
+
     let pin = fixed_ctrl(0, IA32_VMX_PINBASED_CTLS);
     let cpu = fixed_ctrl(
-        CPU_HLT_EXITING | CPU_ACTIVATE_SECONDARY,
+        CPU_HLT_EXITING | CPU_USE_IO_BITMAPS | CPU_ACTIVATE_SECONDARY,
         IA32_VMX_PROCBASED_CTLS,
     );
     let secondary = fixed_ctrl(
@@ -475,6 +535,8 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     vmwrite(PIN_BASED_VM_EXEC_CONTROL, pin as u64)?;
     vmwrite(CPU_BASED_VM_EXEC_CONTROL, cpu as u64)?;
     vmwrite(SECONDARY_VM_EXEC_CONTROL, secondary as u64)?;
+    vmwrite(IO_BITMAP_A_FULL, io_bitmap_a)?;
+    vmwrite(IO_BITMAP_B_FULL, io_bitmap_b)?;
     vmwrite(EPT_POINTER, eptp)?;
     vmwrite(VM_ENTRY_CONTROLS, entry as u64)?;
     vmwrite(VM_EXIT_CONTROLS, exit as u64)?;
@@ -626,34 +688,50 @@ pub(super) fn setup_guest_state(guest_phys: u64) -> Result<(), &'static str> {
 
 // ── VMLAUNCH + in-line resume ──────────────────────────────────────
 
+/// Outcome of one VMLAUNCH invocation: basic exit reason + the
+/// natural-width exit-qualification field (interpretation depends
+/// on `exit_reason`) + guest RAX captured at the moment of VM-exit
+/// (before host code clobbers it).
+pub struct LaunchOutcome {
+    pub exit_reason: u64,
+    pub exit_qualification: u64,
+    pub guest_rax: u64,
+}
+
 /// Run VMLAUNCH against the current VMCS, return the guest's first
-/// VM-exit reason. Caller must already have written host-state,
+/// VM-exit details. Caller must already have written host-state,
 /// guest-state and execution-controls.
 ///
 /// The asm! block has two control-flow paths that converge at
 /// label 3:
 ///   1. VMLAUNCH succeeds: control transfers to the guest. Guest
-///      executes `hlt`, HLT-exiting fires a VM-exit, the CPU loads
-///      host state from VMCS — including HOST_RIP set to label 2
-///      and HOST_RSP set to our current stack pointer — so we
-///      land at label 2 with our pushed callee-saved regs intact.
-///      Read VM_EXIT_REASON into rax, set `failed`=0.
+///      executes its first trapping instruction (HLT or an I/O on
+///      a port set in the I/O bitmap), the CPU loads host state
+///      from VMCS — including HOST_RIP set to label 2 and HOST_RSP
+///      set to our current stack pointer — and we land at label 2
+///      with the guest's RAX still in rax. We push it onto the
+///      stack first thing, then VMREAD the exit qualification
+///      and reason fields.
 ///   2. VMLAUNCH fails (VMfail{Invalid,Valid}): no transition,
-///      execution falls through to the next instruction. Set
-///      `failed`=1, rax=0, jump to convergence.
+///      execution falls through. We push placeholders (0,0) for
+///      qualification + guest_rax, set `failed`=1, jump to
+///      convergence.
 ///
-/// At label 3 both paths pop the same callee-saved regs and exit
-/// the asm block. Rust then either returns Ok(reason) or reads
-/// VM_INSTRUCTION_ERROR via VMREAD and returns Err.
-pub(super) fn launch_test() -> Result<u64, &'static str> {
+/// At label 3 both paths pop the same items in reverse order
+/// (qualification, guest_rax, then the 6 callee-saved we pushed
+/// up front). Rust unpacks the outputs.
+pub(super) fn launch_test() -> Result<LaunchOutcome, &'static str> {
     let exit_reason: u64;
     let launch_failed: u64;
+    let exit_qualification: u64;
+    let guest_rax: u64;
     // SAFETY: caller guarantees VMX root mode + valid host/guest/
-    // controls. The asm pushes 6 regs to the stack (no `nostack`).
-    // Both control-flow paths write to rax (exit_reason) and rdx
-    // (launch_failed), satisfying Rust's lateout invariants on
-    // every exit. Outputs are in explicit registers so they
-    // coexist with `clobber_abi("C")`.
+    // controls. The asm pushes 6 regs + 2 outcome slots to the
+    // stack (no `nostack`). Both control-flow paths write to rax,
+    // rdx, and the two output regs, satisfying Rust's lateout
+    // invariants on every exit. Outputs in explicit registers
+    // (rax, rdx) coexist with the lateout(reg) named operands and
+    // `clobber_abi("C")`.
     unsafe {
         core::arch::asm!(
             // Save callee-saved regs across the guest boundary.
@@ -674,19 +752,33 @@ pub(super) fn launch_test() -> Result<u64, &'static str> {
 
             "vmlaunch",
 
-            // VMLAUNCH fall-through path: failed.
+            // VMLAUNCH fall-through path: failed. Push placeholder
+            // outcome slots (guest_rax = 0, qual = 0) so the pop
+            // sequence at label 3 finds the same stack shape both
+            // paths converge on.
             "mov rdx, 1",
             "xor rax, rax",
+            "push rax",     // guest_rax = 0
+            "push rax",     // exit_qualification = 0
             "jmp 3f",
 
-            // Post-VM-exit landing pad.
+            // Post-VM-exit landing pad. rax still holds the guest's
+            // RAX at this exact instant; preserve it before any
+            // VMREAD clobbers rax.
             "2:",
-            "mov rcx, 0x4402", // VM_EXIT_REASON
+            "push rax",                 // save guest_rax
+            "mov rcx, 0x6400",          // VM_EXIT_QUALIFICATION
             "vmread rax, rcx",
-            "xor rdx, rdx",
+            "push rax",                 // save exit_qualification
+            "mov rcx, 0x4402",          // VM_EXIT_REASON
+            "vmread rax, rcx",          // rax = exit_reason
+            "xor rdx, rdx",             // launch_failed = 0
 
-            // Convergence.
+            // Convergence — both paths land here with stack shape
+            // [exit_qual, guest_rax, r15, r14, r13, r12, rbx, rbp].
             "3:",
+            "pop rsi",          // exit_qualification
+            "pop rdi",          // guest_rax
             "pop r15",
             "pop r14",
             "pop r13",
@@ -696,30 +788,30 @@ pub(super) fn launch_test() -> Result<u64, &'static str> {
 
             // VM-exit unconditionally clears RFLAGS to 0x00000002
             // (SDM §27.5.3) — IF=0, no interrupts. The kernel ran
-            // with IF=1 before vmx::init, so anything IRQ-driven
-            // after this point (DHCP, NTP, USB) would hang. Re-
-            // enable. (Failure path didn't change RFLAGS but `sti`
-            // is harmless if IF was already set.)
+            // with IF=1 before; re-enable.
             "sti",
 
             lateout("rax") exit_reason,
             lateout("rdx") launch_failed,
+            lateout("rsi") exit_qualification,
+            lateout("rdi") guest_rax,
             out("rcx") _,
             clobber_abi("C"),
         );
     }
 
     if launch_failed != 0 {
-        // VMfailValid → VM_INSTRUCTION_ERROR has the code; SDM §30.4
-        // table maps it. VMfailInvalid (no current VMCS) shouldn't
-        // happen here because we VMPTRLD'd above.
         let err = vmread(VM_INSTRUCTION_ERROR).unwrap_or(0);
         use crate::kprintln;
         kprintln!("[vmx] VMLAUNCH failed: VM_INSTRUCTION_ERROR = {}", err);
         return Err("VMLAUNCH failed (see kernel log for VM_INSTRUCTION_ERROR)");
     }
 
-    Ok(exit_reason)
+    Ok(LaunchOutcome {
+        exit_reason,
+        exit_qualification,
+        guest_rax,
+    })
 }
 
 /// Read VM_EXIT_REASON's basic-reason field (bits 15:0). Convenience

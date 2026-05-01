@@ -1157,8 +1157,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             } else if sub == "test" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm test") {
                     match crate::vmx::run_substrate_test() {
-                        Ok(reason) => {
-                            let label = match reason {
+                        Ok(outcome) => {
+                            let basic = (outcome.exit_reason & 0xFFFF) as u16;
+                            let label = match basic {
                                 12 => " (HLT)",
                                 30 => " (I/O instruction)",
                                 33 => " (VM-entry: invalid guest state)",
@@ -1168,8 +1169,25 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                             };
                             kprintln!(
                                 "[microvm] substrate-test OK — VM-exit reason {}{}",
-                                reason, label,
+                                basic, label,
                             );
+                            if basic == 30 {
+                                let (port, dir_in, size) =
+                                    crate::vmx::decode_io_exit_qualification(
+                                        outcome.exit_qualification,
+                                    );
+                                let dir = if dir_in { "IN" } else { "OUT" };
+                                let value = outcome.guest_rax & match size {
+                                    1 => 0xFF,
+                                    2 => 0xFFFF,
+                                    4 => 0xFFFF_FFFF,
+                                    _ => 0xFF,
+                                };
+                                kprintln!(
+                                    "[microvm]   {} port {:#06x} size={} value={:#x}",
+                                    dir, port, size, value,
+                                );
+                            }
                         }
                         Err(e) => kprintln!("[microvm] substrate-test FAILED: {}", e),
                     }
