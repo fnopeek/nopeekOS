@@ -12,8 +12,9 @@
 //!   12.1.0d-1 Host-state VMWRITE/VMREAD + trampoline  ✓ v0.93.0
 //!   12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ✓ v0.94.0
 //!   12.1.0d-2b Guest-state + controls + VMLAUNCH      ✓ v0.95.0…0.96.0
-//!   12.1.1a   EPT identity-map (1 GB)                 ← this file
-//!   12.1.1b-d Linux 6.18 LTS bzImage to early-panic
+//!   12.1.1a   EPT identity-map (1 GB)                 ✓ v0.97.0
+//!   12.1.1b   Real-mode unrestricted guest + I/O exit ← this file
+//!   12.1.1c-d Linux 6.18 LTS bzImage to early-panic
 //!   12.1.2    virtio-console backend
 //!   12.1.3    initramfs + Rust-PID-1 + bash
 //!   12.1.4    inject_console round-trip
@@ -77,10 +78,11 @@ pub fn report() {
                 BringupState::Launched(reason) => {
                     let label = match reason {
                         12 => " (HLT)",
+                         30 => " (I/O instruction)",
                         _ => "",
                     };
                     kprintln!(
-                        "[vmx]   bring-up        = OK (EPT + VMLAUNCH → exit_reason={}{}, 12.1.1a)",
+                        "[vmx]   bring-up        = OK (EPT + real-mode + VMLAUNCH → exit_reason={}{}, 12.1.1b)",
                         reason, label,
                     );
                 }

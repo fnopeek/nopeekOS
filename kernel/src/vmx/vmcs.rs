@@ -428,9 +428,13 @@ const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 
 // Secondary control bits.
 const SEC_ENABLE_EPT: u32 = 1 << 1;
+const SEC_UNRESTRICTED_GUEST: u32 = 1 << 7;
 
-// VM-entry control bits.
-const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
+// VM-entry control bits. Long-mode-guest bit dropped — 12.1.1b boots
+// the guest in real mode (CR0.PE=0) which requires IA-32e-mode-
+// guest=0 (LMA=0 is implied).
+//
+// const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
 
 // VM-exit control bits.
 const EXIT_HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
@@ -449,20 +453,23 @@ fn fixed_ctrl(desired: u32, msr: u32) -> u32 {
     (desired | allowed_0) & allowed_1
 }
 
-/// Write the execution-control fields. Pin-based and CPU-based
-/// minimums plus HLT-exiting (so the guest's `hlt` triggers our
-/// VM-exit), VM-entry IA-32e-mode-guest, VM-exit host-address-space-
-/// size, secondary controls with enable-EPT, and the EPT_POINTER
-/// itself. CPU-based bit 31 (activate-secondary-controls) is set so
-/// the secondary field is consulted at all.
+/// Write the execution-control fields for an unrestricted real-mode
+/// guest with EPT. CPU-based: HLT-exiting + activate-secondary.
+/// Secondary: enable-EPT + unrestricted-guest. VM-exit:
+/// host-address-space-size (= host returns to 64-bit). VM-entry:
+/// IA-32e-mode-guest stays 0 (real mode is not 64-bit). All I/O
+/// instructions exit unconditionally because use-IO-bitmaps stays 0.
 pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let pin = fixed_ctrl(0, IA32_VMX_PINBASED_CTLS);
     let cpu = fixed_ctrl(
         CPU_HLT_EXITING | CPU_ACTIVATE_SECONDARY,
         IA32_VMX_PROCBASED_CTLS,
     );
-    let secondary = fixed_ctrl(SEC_ENABLE_EPT, IA32_VMX_PROCBASED_CTLS2);
-    let entry = fixed_ctrl(ENTRY_IA32E_MODE_GUEST, IA32_VMX_ENTRY_CTLS);
+    let secondary = fixed_ctrl(
+        SEC_ENABLE_EPT | SEC_UNRESTRICTED_GUEST,
+        IA32_VMX_PROCBASED_CTLS2,
+    );
+    let entry = fixed_ctrl(0, IA32_VMX_ENTRY_CTLS);
     let exit = fixed_ctrl(EXIT_HOST_ADDR_SPACE_SIZE, IA32_VMX_EXIT_CTLS);
 
     vmwrite(PIN_BASED_VM_EXEC_CONTROL, pin as u64)?;
@@ -502,114 +509,116 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
 //   bit  14   = D/B
 //   bit  15   = G
 
-// 64-bit code: type=0xB (non-conforming, readable, accessed), S=1,
-// DPL=0, P=1, L=1, G=1. The accessed bit must be set for guest
-// CS/SS/DS/ES/FS/GS when the unrestricted-guest control is 0
-// (SDM §26.3.1.2 — guest segment access-rights checks). The boot
-// GDT entry has type=0xA on disk; the CPU sets the accessed bit in
-// the in-memory descriptor on selector load, but our hand-written
-// VMCS AR-byte must encode the post-load value explicitly.
-const AR_CODE64: u32 = 0xB | 0x10 | 0x80 | (1 << 13) | (1 << 15);
-// Data: type=0x3 (RW, accessed), S=1, DPL=0, P=1, G=1.
-const AR_DATA: u32 = 0x3 | 0x10 | 0x80 | (1 << 15);
-// Busy 64-bit TSS: type=0xB, S=0, DPL=0, P=1.
+// 16-bit real-mode code: type=0xB (executable, readable, accessed),
+// S=1, DPL=0, P=1, L=0 (not 64-bit), D/B=0 (16-bit operand size),
+// G=0 (byte-granular). The accessed bit (type bit 0) is required
+// even with unrestricted-guest=1 — the CPU's segment register
+// loading would set it on a real selector load, but we write VMCS
+// directly so we must encode the post-load value.
+const AR_CODE16: u32 = 0xB | 0x10 | 0x80;
+// 16-bit real-mode data: type=0x3 (RW, accessed), S=1, DPL=0, P=1.
+const AR_DATA16: u32 = 0x3 | 0x10 | 0x80;
+// Busy 64-bit TSS: type=0xB, S=0, DPL=0, P=1. Real mode doesn't
+// actually use TR, but VMX still validates the AR encoding.
 const AR_TSS_BUSY: u32 = 0xB | 0x80;
 // Unusable segment marker (bit 16). Used for guest LDTR (no LDT).
 const AR_UNUSABLE: u32 = 1 << 16;
 
-/// Fill GUEST_* fields for a long-mode flat-segment guest that
-/// shares the host's CR3 (no EPT). All segments are based at 0
-/// with limit 0xFFFF_FFFF; selectors mirror the host so the guest
-/// resolves through the same GDT we just installed in `tss::init`.
+/// Fill GUEST_* fields for an unrestricted real-mode guest. CR0
+/// is computed by applying IA32_VMX_CR0_FIXED0/1 to a base of 0,
+/// then forcibly clearing PE and PG (unrestricted-guest=1 relaxes
+/// CR0_FIXED for those two bits per SDM §26.3.1.1). All six
+/// segment-base fields use a configurable `code_base` for CS so
+/// that real-mode 16-bit IP can index a high-physical guest page —
+/// real-mode IP is 16-bit but the VMCS GUEST_CS_BASE is 64-bit and
+/// not constrained to (CS << 4).
 ///
-/// `guest_rip` is the linear (== physical, identity-mapped) address
-/// of the guest code page.
-pub(super) fn setup_guest_state(guest_rip: u64) -> Result<(), &'static str> {
-    // Mirror host control regs and TR base (from str + GDT walk).
-    let snap = snapshot_host();
-    let tr_base = resolve_tr_base(snap.tr, snap.gdtr_base);
+/// `guest_phys` is the host-physical address of the guest code
+/// page (also the EPT-identity-mapped guest-physical address). RIP
+/// is set to 0 (relative to CS_BASE = guest_phys), so the first
+/// instruction fetched by the CPU is at host address `guest_phys`.
+pub(super) fn setup_guest_state(guest_phys: u64) -> Result<(), &'static str> {
+    // Compute a real-mode CR0: must satisfy CR0_FIXED0/1 except for
+    // PE (bit 0) and PG (bit 31), which unrestricted-guest=1 lets
+    // us clear regardless. Typical FIXED0 forces NE (bit 5) and ET
+    // (bit 4) on; we keep those.
+    let cr0_f0 = unsafe { rdmsr(0x486) };
+    let cr0_f1 = unsafe { rdmsr(0x487) };
+    let cr0_real = ((0u64 | cr0_f0) & cr0_f1) & !((1u64 << 0) | (1u64 << 31));
 
-    // SAFETY: architectural MSR.
-    let efer = unsafe { rdmsr(IA32_EFER) };
+    // CR4: take host CR4 with VMXE etc. — real mode ignores most
+    // CR4 bits but VMX still requires CR4_FIXED conformance. Host
+    // CR4 already satisfies that.
+    let host_cr4: u64;
+    // SAFETY: pure register read.
+    unsafe { core::arch::asm!("mov {}, cr4", out(reg) host_cr4, options(nostack, preserves_flags)); }
 
-    // CR0/CR3/CR4: shared with host. Apply VMX-fixed bits — the
-    // guest must satisfy the same constraints we already applied
-    // to the host's CR0/CR4 in enable.rs.
-    vmwrite(GUEST_CR0, snap.cr0)?;
-    vmwrite(GUEST_CR3, snap.cr3)?;
-    vmwrite(GUEST_CR4, snap.cr4)?;
+    vmwrite(GUEST_CR0, cr0_real)?;
+    vmwrite(GUEST_CR3, 0)?;
+    vmwrite(GUEST_CR4, host_cr4)?;
 
-    // Selectors (RPL/TI already 0 in our GDT layout).
-    vmwrite(GUEST_CS_SELECTOR, snap.cs as u64 & 0xFFF8)?;
-    vmwrite(GUEST_SS_SELECTOR, snap.ss as u64 & 0xFFF8)?;
-    vmwrite(GUEST_DS_SELECTOR, snap.ds as u64 & 0xFFF8)?;
-    vmwrite(GUEST_ES_SELECTOR, snap.es as u64 & 0xFFF8)?;
-    vmwrite(GUEST_FS_SELECTOR, snap.fs as u64 & 0xFFF8)?;
-    vmwrite(GUEST_GS_SELECTOR, snap.gs as u64 & 0xFFF8)?;
+    // Real-mode selectors. Set CS=0 so the selector "matches" CS_BASE
+    // = guest_phys — VMX with unrestricted-guest accepts any base
+    // even when the selector encoding wouldn't normally produce it.
+    vmwrite(GUEST_CS_SELECTOR, 0)?;
+    vmwrite(GUEST_SS_SELECTOR, 0)?;
+    vmwrite(GUEST_DS_SELECTOR, 0)?;
+    vmwrite(GUEST_ES_SELECTOR, 0)?;
+    vmwrite(GUEST_FS_SELECTOR, 0)?;
+    vmwrite(GUEST_GS_SELECTOR, 0)?;
     vmwrite(GUEST_LDTR_SELECTOR, 0)?;
-    vmwrite(GUEST_TR_SELECTOR, snap.tr as u64 & 0xFFF8)?;
+    vmwrite(GUEST_TR_SELECTOR, 0)?;
 
-    // Bases — flat 0 except FS/GS/TR which mirror MSR / GDT walk.
-    vmwrite(GUEST_CS_BASE, 0)?;
+    // Bases. CS_BASE = guest_phys puts the 3-byte stub at IP=0.
+    // Other segments base at 0 — the stub doesn't touch DS/SS/etc.
+    vmwrite(GUEST_CS_BASE, guest_phys)?;
     vmwrite(GUEST_SS_BASE, 0)?;
     vmwrite(GUEST_DS_BASE, 0)?;
     vmwrite(GUEST_ES_BASE, 0)?;
-    // SAFETY: architectural MSRs.
-    vmwrite(GUEST_FS_BASE, unsafe { rdmsr(IA32_FS_BASE) })?;
-    vmwrite(GUEST_GS_BASE, unsafe { rdmsr(IA32_GS_BASE) })?;
+    vmwrite(GUEST_FS_BASE, 0)?;
+    vmwrite(GUEST_GS_BASE, 0)?;
     vmwrite(GUEST_LDTR_BASE, 0)?;
-    vmwrite(GUEST_TR_BASE, tr_base)?;
-    vmwrite(GUEST_GDTR_BASE, snap.gdtr_base)?;
-    vmwrite(GUEST_IDTR_BASE, snap.idtr_base)?;
+    vmwrite(GUEST_TR_BASE, 0)?;
+    vmwrite(GUEST_GDTR_BASE, 0)?;
+    vmwrite(GUEST_IDTR_BASE, 0)?;
 
-    // Limits — flat segments.
-    vmwrite(GUEST_CS_LIMIT, 0xFFFF_FFFF)?;
-    vmwrite(GUEST_SS_LIMIT, 0xFFFF_FFFF)?;
-    vmwrite(GUEST_DS_LIMIT, 0xFFFF_FFFF)?;
-    vmwrite(GUEST_ES_LIMIT, 0xFFFF_FFFF)?;
-    vmwrite(GUEST_FS_LIMIT, 0xFFFF_FFFF)?;
-    vmwrite(GUEST_GS_LIMIT, 0xFFFF_FFFF)?;
+    // Limits — real-mode segments default to 0xFFFF (16-bit).
+    vmwrite(GUEST_CS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_SS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_DS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_ES_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_FS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_GS_LIMIT, 0xFFFF)?;
     vmwrite(GUEST_LDTR_LIMIT, 0xFFFF)?;
-    vmwrite(GUEST_TR_LIMIT, 103)?; // sizeof(TSS)-1
+    vmwrite(GUEST_TR_LIMIT, 0xFFFF)?;
+    // Real-mode IDT: 256 entries × 4 bytes − 1 = 0x3FF.
+    vmwrite(GUEST_GDTR_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_IDTR_LIMIT, 0x3FF)?;
 
-    // GDTR/IDTR limits — read from the host's pseudo-descriptors
-    // (bytes 0..2 of the buffers `snapshot_host` filled).
-    let mut gdtr_buf: [u8; 10] = [0; 10];
-    let mut idtr_buf: [u8; 10] = [0; 10];
-    // SAFETY: pure register reads.
-    unsafe {
-        core::arch::asm!("sgdt [{}]", in(reg) &mut gdtr_buf, options(nostack, preserves_flags));
-        core::arch::asm!("sidt [{}]", in(reg) &mut idtr_buf, options(nostack, preserves_flags));
-    }
-    let gdtr_limit = u16::from_le_bytes([gdtr_buf[0], gdtr_buf[1]]) as u64;
-    let idtr_limit = u16::from_le_bytes([idtr_buf[0], idtr_buf[1]]) as u64;
-    vmwrite(GUEST_GDTR_LIMIT, gdtr_limit)?;
-    vmwrite(GUEST_IDTR_LIMIT, idtr_limit)?;
-
-    // AR bytes.
-    vmwrite(GUEST_CS_AR_BYTES, AR_CODE64 as u64)?;
-    vmwrite(GUEST_SS_AR_BYTES, AR_DATA as u64)?;
-    vmwrite(GUEST_DS_AR_BYTES, AR_DATA as u64)?;
-    vmwrite(GUEST_ES_AR_BYTES, AR_DATA as u64)?;
-    vmwrite(GUEST_FS_AR_BYTES, AR_DATA as u64)?;
-    vmwrite(GUEST_GS_AR_BYTES, AR_DATA as u64)?;
+    // AR bytes. Real-mode 16-bit code/data, busy TSS, unusable LDTR.
+    vmwrite(GUEST_CS_AR_BYTES, AR_CODE16 as u64)?;
+    vmwrite(GUEST_SS_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_DS_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_ES_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_FS_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_GS_AR_BYTES, AR_DATA16 as u64)?;
     vmwrite(GUEST_LDTR_AR_BYTES, AR_UNUSABLE as u64)?;
     vmwrite(GUEST_TR_AR_BYTES, AR_TSS_BUSY as u64)?;
 
-    // Misc guest state.
-    vmwrite(GUEST_DR7, 0x400)?; // architectural reset value
-    vmwrite(GUEST_RFLAGS, 0x2)?; // reserved bit 1 always set
-    vmwrite(GUEST_RSP, 0)?; // hlt doesn't use RSP
-    vmwrite(GUEST_RIP, guest_rip)?;
+    // Misc guest state. EFER cleared (LME=LMA=0 — real mode,
+    // long-mode disabled).
+    vmwrite(GUEST_DR7, 0x400)?;
+    vmwrite(GUEST_RFLAGS, 0x2)?;
+    vmwrite(GUEST_RSP, 0)?;
+    vmwrite(GUEST_RIP, 0)?; // CS_BASE = guest_phys, so IP=0 → host_phys = guest_phys
     vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0)?;
-    vmwrite(GUEST_ACTIVITY_STATE, 0)?; // active
+    vmwrite(GUEST_ACTIVITY_STATE, 0)?;
     vmwrite(GUEST_PENDING_DBG_EXCEPTIONS, 0)?;
     vmwrite(GUEST_SYSENTER_CS, 0)?;
     vmwrite(GUEST_SYSENTER_ESP, 0)?;
     vmwrite(GUEST_SYSENTER_EIP, 0)?;
-    vmwrite(GUEST_IA32_EFER, efer)?; // LME+LMA inherited from host
+    vmwrite(GUEST_IA32_EFER, 0)?;
 
-    // No shadow VMCS.
     vmwrite(VMCS_LINK_POINTER, !0u64)?;
 
     Ok(())
