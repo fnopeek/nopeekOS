@@ -1196,9 +1196,13 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 if require_cap(vault, &session, Rights::READ, "microvm linux-info") {
                     microvm_linux_info();
                 }
+            } else if sub == "linux" {
+                if require_cap(vault, &session, Rights::EXECUTE, "microvm linux") {
+                    microvm_linux();
+                }
             } else {
                 kprintln!("[microvm] unknown subcommand: '{}'", sub);
-                kprintln!("[microvm] available: test, linux-info");
+                kprintln!("[microvm] available: test, linux-info, linux");
             }
         }
         "caps" | "capabilities" => {
@@ -1570,6 +1574,44 @@ fn microvm_linux_info() {
     if (init_size as u64) > 64 * 1024 * 1024 {
         kprintln!("[microvm]   WARNING: init_size > 64 MB EPT window —");
         kprintln!("[microvm]   the launcher (12.1.1c-3b2) will need a bigger window.");
+    }
+}
+
+/// `microvm linux` handler — fetch the bundled bzImage from npkFS,
+/// hand it + a cmdline to vmx::run_linux. The kernel writes its
+/// earlyprintk to serial 0x3F8, which we trap via I/O bitmap and
+/// reflect as `[guest] <line>` kprintln output. Phase 12.1.1c-3b3b2.
+fn microvm_linux() {
+    const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
+    // Linux 32-bit boot protocol cmdline. earlyprintk routes printk
+    // to ttyS0 immediately (before init_console). console=ttyS0
+    // makes it the primary console for normal printk too. panic=1
+    // immediately halts on error (no recovery attempt). nokaslr
+    // disables KASLR so our entry-point arithmetic is predictable.
+    const CMDLINE: &[u8] =
+        b"earlyprintk=ttyS0,115200 console=ttyS0,115200 panic=1 nokaslr";
+
+    kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
+    let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
+        Ok((b, _hash)) => b,
+        Err(e) => {
+            kprintln!("[microvm] cannot read {}: {:?}", BZIMAGE_PATH, e);
+            kprintln!("[microvm] reinstall from USB to seed bundled assets");
+            return;
+        }
+    };
+
+    kprintln!("[microvm] launching Linux ({} bytes, cmdline: {:?})",
+              bytes.len(),
+              core::str::from_utf8(CMDLINE).unwrap_or("?"));
+
+    match crate::vmx::run_linux(&bytes, CMDLINE) {
+        Ok(outcome) => {
+            let basic = (outcome.exit_reason & 0xFFFF) as u16;
+            kprintln!("[microvm] guest exited — final reason {} qual {:#x}",
+                      basic, outcome.exit_qualification);
+        }
+        Err(e) => kprintln!("[microvm] launch FAILED: {}", e),
     }
 }
 

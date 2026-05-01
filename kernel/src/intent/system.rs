@@ -626,6 +626,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("                        → VMXOFF. Prints the basic exit reason.");
             kprintln!("  microvm linux-info    Parse bundled Alpine bzImage from");
             kprintln!("                        npkFS, print Linux Boot Protocol stats.");
+            kprintln!("  microvm linux         Boot Linux 6.18 LTS (Alpine virt) in");
+            kprintln!("                        the MicroVM. Trap serial 0x3F8 →");
+            kprintln!("                        [guest] earlyprintk lines on console.");
             kprintln!();
             kprintln!("  Phase 12 status:");
             kprintln!("    12.1.0a-c  VMXON / VMCS / VMPTRLD                 ✓");
@@ -639,7 +642,8 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    12.1.1c-3b2 I/O-bitmap capture (0x80, 0x3F8-3FF)  ✓");
             kprintln!("    12.1.1c-3b3a VMRESUME loop + GPR save/restore     ✓");
             kprintln!("    12.1.1c-3b3b1 32-bit prot mode guest               ✓");
-            kprintln!("    12.1.1c-3b3b2 bzImage loader + microvm linux       — next");
+            kprintln!("    12.1.1c-3b3b2 bzImage loader + microvm linux       ✓");
+            kprintln!("    12.1.1d       early-panic detection                — next");
             kprintln!("    12.1.2+    virtio-console, initramfs, Rust-PID-1");
             kprintln!();
             kprintln!("  This intent currently leaks ~16 MB of guest RAM per call.");

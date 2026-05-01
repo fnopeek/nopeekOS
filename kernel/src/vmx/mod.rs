@@ -87,15 +87,22 @@ pub fn report() {
     }
 }
 
-/// Run the real-mode I/O-loop substrate test on demand. Allocates a
-/// fresh VMXON region, VMCS, EPT, 64 MB guest RAM, I/O bitmaps (all
-/// leaked — not suitable for repeated invocation; persistent state
-/// lands in 12.2). Returns the full VM-exit outcome (basic reason +
-/// qualification + guest RAX), or an error string. Refuses if VT-x
-/// wasn't available at probe time.
+/// Run the substrate test (32-bit prot mode HLT-loop OK-stub).
+/// Allocates a fresh VMXON region, VMCS, EPT, 64 MB guest RAM,
+/// I/O bitmaps (all leaked). Returns the final VM-exit outcome.
 pub fn run_substrate_test() -> Result<vmcs::LaunchOutcome, &'static str> {
     match *PROBE.lock() {
         ProbeState::Available(_) => enable::enable_and_test(),
+        ProbeState::Unavailable(reason) => Err(reason),
+        ProbeState::NotProbed => Err("vmx::init() not called yet"),
+    }
+}
+
+/// Boot a Linux bzImage in our MicroVM substrate. Same per-call
+/// resource leaks as `run_substrate_test`.
+pub fn run_linux(bzimage: &[u8], cmdline: &[u8]) -> Result<vmcs::LaunchOutcome, &'static str> {
+    match *PROBE.lock() {
+        ProbeState::Available(_) => enable::run_linux(bzimage, cmdline),
         ProbeState::Unavailable(reason) => Err(reason),
         ProbeState::NotProbed => Err("vmx::init() not called yet"),
     }

@@ -429,37 +429,29 @@ fn exit_trampoline_addr() -> u64 {
 // ── I/O bitmaps ────────────────────────────────────────────────────
 
 /// Allocate two 4-KB pages for IO_BITMAP_A (ports 0x0000-0x7FFF) and
-/// IO_BITMAP_B (ports 0x8000-0xFFFF), zero them, set bits for the
-/// ports we want to trap. Bit `n` of bitmap A means "exit on port n
-/// access". B is left zero (ports above 0x8000 pass through).
+/// IO_BITMAP_B (ports 0x8000-0xFFFF), fill them with 0xFF so every
+/// I/O instruction the guest executes triggers a VM-exit.
 ///
-/// Trapped ports:
-///   - 0x80          — substrate-test stub (`out 0x80, al`)
-///   - 0x3F8-0x3FF   — UART COM1 (Linux earlyprintk + 8250 register
-///                     range; Linux probes the whole 8-port window)
+/// Why trap-everything: a real-mode/prot-mode guest like Linux
+/// will probe PCI config (0xCF8/0xCFC), keyboard (0x60/0x64), CMOS
+/// (0x70/0x71), PIC (0x20/0xA0), PIT (0x40-0x43) and so on. Without
+/// trapping, those I/O instructions execute natively against the
+/// host's real hardware on the NUC — quietly corrupting host
+/// state. We trap everything and ignore (return 0 for IN, no-op
+/// for OUT) anything our handler doesn't explicitly understand.
 ///
-/// Returns (io_bitmap_a_phys, io_bitmap_b_phys). Frames are leaked
-/// so future entries reuse them; same lifecycle as VMXON / VMCS /
-/// EPT regions.
+/// Returns (io_bitmap_a_phys, io_bitmap_b_phys). Frames leaked
+/// (same lifecycle as VMXON / VMCS / EPT regions).
 fn allocate_and_populate_io_bitmaps() -> Result<(u64, u64), &'static str> {
     use crate::mm::memory;
 
     let bitmap_a = memory::allocate_frame().ok_or("OOM: IO_BITMAP_A")?;
     let bitmap_b = memory::allocate_frame().ok_or("OOM: IO_BITMAP_B")?;
 
-    // SAFETY: identity-mapped, freshly allocated, exclusive. Each
-    // bit covers one port: byte index = port / 8, bit-in-byte =
-    // port % 8.
+    // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
-        core::ptr::write_bytes(bitmap_a as *mut u8, 0, 4096);
-        core::ptr::write_bytes(bitmap_b as *mut u8, 0, 4096);
-
-        // Port 0x80 → byte 0x10, bit 0.
-        let a = bitmap_a as *mut u8;
-        a.add(0x80 / 8).write_volatile(1 << (0x80 % 8));
-
-        // Ports 0x3F8..0x3FF → byte 0x7F, all 8 bits.
-        a.add(0x3F8 / 8).write_volatile(0xFF);
+        core::ptr::write_bytes(bitmap_a as *mut u8, 0xFF, 4096);
+        core::ptr::write_bytes(bitmap_b as *mut u8, 0xFF, 4096);
     }
 
     Ok((bitmap_a, bitmap_b))
