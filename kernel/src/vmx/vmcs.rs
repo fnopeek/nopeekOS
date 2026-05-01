@@ -147,8 +147,9 @@ const CR4_READ_SHADOW: u64 = 0x6006;
 
 // VM-exit information (read-only).
 const VM_INSTRUCTION_ERROR: u64 = 0x4400;
+const VM_EXIT_INSTRUCTION_LEN: u64 = 0x440C;
 // VM_EXIT_REASON encoding 0x4402 is referenced as a literal inside
-// the launch_test asm! block (Intel-syntax `mov rcx, 0x4402`).
+// the run_guest_once asm! block (Intel-syntax `mov rcx, 0x4402`).
 
 // VMX capability MSRs for control allowed-0 / allowed-1 masking.
 const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
@@ -686,131 +687,240 @@ pub(super) fn setup_guest_state(guest_phys: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-// ── VMLAUNCH + in-line resume ──────────────────────────────────────
+// ── VMRESUME loop with full GPR save/restore ───────────────────────
 
-/// Outcome of one VMLAUNCH invocation: basic exit reason + the
-/// natural-width exit-qualification field (interpretation depends
-/// on `exit_reason`) + guest RAX captured at the moment of VM-exit
-/// (before host code clobbers it).
+/// Guest general-purpose registers preserved across VMLAUNCH /
+/// VMRESUME boundaries. Layout is `#[repr(C)]` with a fixed offset
+/// per field so the asm! block can address them via `[rdi + N]`.
+/// rsp lives in VMCS::GUEST_RSP; the corresponding slot here is
+/// unused (kept so offsets stay sequential / canonical).
+///
+/// All-zero default = "fresh guest state on first launch". Updated
+/// by every VM-exit so subsequent VMRESUME enters with the values
+/// the guest had at exit (modulo Rust-side handler edits).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct GuestRegs {
+    pub rax: u64,    // offset   0
+    pub rcx: u64,    //          8
+    pub rdx: u64,    //         16
+    pub rbx: u64,    //         24
+    pub _rsp: u64,   //         32 — unused (VMCS::GUEST_RSP holds it)
+    pub rbp: u64,    //         40
+    pub rsi: u64,    //         48
+    pub rdi: u64,    //         56
+    pub r8:  u64,    //         64
+    pub r9:  u64,    //         72
+    pub r10: u64,    //         80
+    pub r11: u64,    //         88
+    pub r12: u64,    //         96
+    pub r13: u64,    //        104
+    pub r14: u64,    //        112
+    pub r15: u64,    //        120
+}
+
+/// Outcome of one VM-entry/exit cycle.
 pub struct LaunchOutcome {
     pub exit_reason: u64,
     pub exit_qualification: u64,
+    /// Guest RAX captured at VM-exit. Convenience mirror of
+    /// `regs.rax` after `run_guest_once`; redundant but kept for
+    /// callers that don't have a regs reference handy.
     pub guest_rax: u64,
 }
 
-/// Run VMLAUNCH against the current VMCS, return the guest's first
-/// VM-exit details. Caller must already have written host-state,
-/// guest-state and execution-controls.
+/// Run one VM-entry/exit cycle. Loads guest GPRs from `regs`,
+/// VMLAUNCHes (if `launched=false`) or VMRESUMEs (if true), saves
+/// guest GPRs back to `regs` on the resulting VM-exit, returns the
+/// exit info.
+///
+/// Caller must already have written host-state, guest-state and
+/// execution-controls into the current VMCS, and must be in VMX
+/// root mode.
 ///
 /// The asm! block has two control-flow paths that converge at
 /// label 3:
-///   1. VMLAUNCH succeeds: control transfers to the guest. Guest
-///      executes its first trapping instruction (HLT or an I/O on
-///      a port set in the I/O bitmap), the CPU loads host state
-///      from VMCS — including HOST_RIP set to label 2 and HOST_RSP
-///      set to our current stack pointer — and we land at label 2
-///      with the guest's RAX still in rax. We push it onto the
-///      stack first thing, then VMREAD the exit qualification
-///      and reason fields.
-///   2. VMLAUNCH fails (VMfail{Invalid,Valid}): no transition,
-///      execution falls through. We push placeholders (0,0) for
-///      qualification + guest_rax, set `failed`=1, jump to
-///      convergence.
+///   1. VMLAUNCH/VMRESUME succeeds: control transfers to the guest.
+///      Guest executes its first trapping instruction. The CPU
+///      loads host state from VMCS — including HOST_RIP set to
+///      label 2 and HOST_RSP set to our current stack pointer —
+///      and we land at label 2 with the guest's GPRs still in
+///      CPU registers. We push all 15 (rax..r15, skipping rsp) to
+///      stack, then pop one-by-one storing into `regs` via the
+///      saved struct pointer. Then VMREAD exit info.
+///   2. VMLAUNCH/VMRESUME fails (VMfail{Invalid,Valid}): no
+///      transition, execution falls through. Set vmfail=1 and
+///      converge.
 ///
-/// At label 3 both paths pop the same items in reverse order
-/// (qualification, guest_rax, then the 6 callee-saved we pushed
-/// up front). Rust unpacks the outputs.
-pub(super) fn launch_test() -> Result<LaunchOutcome, &'static str> {
+/// SAFETY: caller guarantees VMX root mode + current VMCS +
+/// validated host/guest/control state. The asm pushes a variable
+/// amount onto the stack across the boundary; HOST_RSP is set to
+/// the post-prologue rsp so the post-exit landing finds the right
+/// stack shape.
+pub(super) fn run_guest_once(
+    regs: &mut GuestRegs,
+    launched: bool,
+) -> Result<LaunchOutcome, &'static str> {
     let exit_reason: u64;
-    let launch_failed: u64;
     let exit_qualification: u64;
-    let guest_rax: u64;
-    // SAFETY: caller guarantees VMX root mode + valid host/guest/
-    // controls. The asm pushes 6 regs + 2 outcome slots to the
-    // stack (no `nostack`). Both control-flow paths write to rax,
-    // rdx, and the two output regs, satisfying Rust's lateout
-    // invariants on every exit. Outputs in explicit registers
-    // (rax, rdx) coexist with the lateout(reg) named operands and
-    // `clobber_abi("C")`.
+    let vmfail: u64;
+    let regs_ptr: *mut GuestRegs = regs;
+
+    // SAFETY: see fn-level docs. The asm respects every register
+    // dependency by ordering: launched-flag check sets ZF before
+    // r10 is overwritten with the guest's r10; rdi (struct ptr) is
+    // overwritten LAST; post-exit save spills all guest GPRs to
+    // stack first (so rdi stays guest's value), then reloads struct
+    // ptr from the saved slot before storing.
     unsafe {
         core::arch::asm!(
-            // Save callee-saved regs across the guest boundary.
+            // ── PROLOGUE: save host callee-saved + struct ptr ─────
             "push rbp",
             "push rbx",
             "push r12",
             "push r13",
             "push r14",
             "push r15",
+            "push rdi",                     // struct ptr at [rsp]
 
-            // VMWRITE HOST_RSP, rsp.
-            "mov rcx, 0x6C14",
+            // VMCS host pointer fields, set every entry so we never
+            // depend on stale VMCS state across calls.
+            "mov rcx, 0x6C14",              // HOST_RSP
             "vmwrite rcx, rsp",
-            // VMWRITE HOST_RIP, label 2 (post-exit landing).
-            "mov rcx, 0x6C16",
+            "mov rcx, 0x6C16",              // HOST_RIP
             "lea rax, [rip + 2f]",
             "vmwrite rcx, rax",
 
+            // ── ENTRY: load guest GPRs from struct ───────────────
+            // r10 is caller-saved per System V ABI, so we use it as
+            // a scratch for the launched flag without preservation.
+            "mov r10, rsi",                 // r10 = launched
+            "test r10, r10",                // ZF = !launched
+
+            "mov rax, [rdi +   0]",
+            "mov rcx, [rdi +   8]",
+            "mov rdx, [rdi +  16]",
+            "mov rbx, [rdi +  24]",
+            // rsp at offset 32 is unused (VMCS::GUEST_RSP holds it).
+            "mov rbp, [rdi +  40]",
+            "mov rsi, [rdi +  48]",
+            "mov r8,  [rdi +  64]",
+            "mov r9,  [rdi +  72]",
+            "mov r10, [rdi +  80]",         // overwrites flag — but
+                                            // ZF was set by `test`
+                                            // above and `mov`
+                                            // doesn't touch flags
+            "mov r11, [rdi +  88]",
+            "mov r12, [rdi +  96]",
+            "mov r13, [rdi + 104]",
+            "mov r14, [rdi + 112]",
+            "mov r15, [rdi + 120]",
+            "mov rdi, [rdi +  56]",         // rdi LAST (overwrites
+                                            // struct ptr)
+            "jz 9f",                        // ZF set → !launched →
+                                            // VMLAUNCH path
+            "vmresume",
+            "jmp 4f",                       // fall-through =
+                                            // VMfail{Invalid,Valid}
+
+            "9:",                           // VMLAUNCH path
             "vmlaunch",
+            // fall-through to fail handler
 
-            // VMLAUNCH fall-through path: failed. Push placeholder
-            // outcome slots (guest_rax = 0, qual = 0) so the pop
-            // sequence at label 3 finds the same stack shape both
-            // paths converge on.
-            "mov rdx, 1",
-            "xor rax, rax",
-            "push rax",     // guest_rax = 0
-            "push rax",     // exit_qualification = 0
-            "jmp 3f",
-
-            // Post-VM-exit landing pad. rax still holds the guest's
-            // RAX at this exact instant; preserve it before any
-            // VMREAD clobbers rax.
-            "2:",
-            "push rax",                 // save guest_rax
-            "mov rcx, 0x6400",          // VM_EXIT_QUALIFICATION
-            "vmread rax, rcx",
-            "push rax",                 // save exit_qualification
-            "mov rcx, 0x4402",          // VM_EXIT_REASON
-            "vmread rax, rcx",          // rax = exit_reason
-            "xor rdx, rdx",             // launch_failed = 0
-
-            // Convergence — both paths land here with stack shape
-            // [exit_qual, guest_rax, r15, r14, r13, r12, rbx, rbp].
-            "3:",
-            "pop rsi",          // exit_qualification
-            "pop rdi",          // guest_rax
+            // ── FAIL HANDLER ─────────────────────────────────────
+            "4:",
+            "mov rcx, 1",                   // vmfail = 1
+            "xor rax, rax",                 // exit_reason = 0
+            "xor rdx, rdx",                 // exit_qual = 0
+            "pop rdi",                      // discard struct ptr
             "pop r15",
             "pop r14",
             "pop r13",
             "pop r12",
             "pop rbx",
             "pop rbp",
-
-            // VM-exit unconditionally clears RFLAGS to 0x00000002
-            // (SDM §27.5.3) — IF=0, no interrupts. The kernel ran
-            // with IF=1 before; re-enable.
             "sti",
+            "jmp 5f",
 
+            // ── POST-VM-EXIT: save guest GPRs ────────────────────
+            "2:",
+            // Push all 15 guest GPRs onto stack so we can reuse rdi
+            // (currently guest's rdi) without losing it. Order is
+            // canonical: lowest-offset (rax) pushed first, so it
+            // ends up deepest on stack.
+            "push rax",
+            "push rcx",
+            "push rdx",
+            "push rbx",
+            "push rbp",
+            "push rsi",
+            "push rdi",
+            "push r8",
+            "push r9",
+            "push r10",
+            "push r11",
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+            // Stack now: r15, r14, ..., rax, struct_ptr,
+            //             host_callee_saved (6).
+            "mov rdi, [rsp + 120]",         // 15 × 8 = 120, struct
+                                            // ptr position
+            // Pop in reverse-push order, store at the right offset.
+            "pop rax", "mov [rdi + 120], rax",      // r15
+            "pop rax", "mov [rdi + 112], rax",      // r14
+            "pop rax", "mov [rdi + 104], rax",      // r13
+            "pop rax", "mov [rdi +  96], rax",      // r12
+            "pop rax", "mov [rdi +  88], rax",      // r11
+            "pop rax", "mov [rdi +  80], rax",      // r10
+            "pop rax", "mov [rdi +  72], rax",      // r9
+            "pop rax", "mov [rdi +  64], rax",      // r8
+            "pop rax", "mov [rdi +  56], rax",      // rdi (guest's)
+            "pop rax", "mov [rdi +  48], rax",      // rsi
+            "pop rax", "mov [rdi +  40], rax",      // rbp
+            "pop rax", "mov [rdi +  24], rax",      // rbx
+            "pop rax", "mov [rdi +  16], rax",      // rdx
+            "pop rax", "mov [rdi +   8], rax",      // rcx
+            "pop rax", "mov [rdi +   0], rax",      // rax
+            "pop rdi",                      // discard struct ptr
+
+            // Read VM-exit info now that GPRs are safe.
+            "mov rcx, 0x4402",              // VM_EXIT_REASON
+            "vmread rax, rcx",
+            "mov rcx, 0x6400",              // VM_EXIT_QUALIFICATION
+            "vmread rdx, rcx",
+            "xor rcx, rcx",                 // vmfail = 0
+
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop rbx",
+            "pop rbp",
+            "sti",                          // VM-exit cleared IF; re-enable
+
+            "5:",
+            in("rdi") regs_ptr,
+            in("rsi") launched as u64,
             lateout("rax") exit_reason,
-            lateout("rdx") launch_failed,
-            lateout("rsi") exit_qualification,
-            lateout("rdi") guest_rax,
-            out("rcx") _,
+            lateout("rcx") vmfail,
+            lateout("rdx") exit_qualification,
             clobber_abi("C"),
         );
     }
 
-    if launch_failed != 0 {
+    if vmfail != 0 {
         let err = vmread(VM_INSTRUCTION_ERROR).unwrap_or(0);
         use crate::kprintln;
-        kprintln!("[vmx] VMLAUNCH failed: VM_INSTRUCTION_ERROR = {}", err);
-        return Err("VMLAUNCH failed (see kernel log for VM_INSTRUCTION_ERROR)");
+        kprintln!("[vmx] VM-entry failed: VM_INSTRUCTION_ERROR = {}", err);
+        return Err("VM-entry failed (see kernel log for VM_INSTRUCTION_ERROR)");
     }
 
     Ok(LaunchOutcome {
         exit_reason,
         exit_qualification,
-        guest_rax,
+        guest_rax: regs.rax,
     })
 }
 
@@ -818,4 +928,14 @@ pub(super) fn launch_test() -> Result<LaunchOutcome, &'static str> {
 /// for callers that already have the raw 32-bit value.
 pub fn basic_exit_reason(raw: u64) -> u16 {
     (raw & 0xFFFF) as u16
+}
+
+/// Advance GUEST_RIP past the just-exited instruction. The CPU
+/// records the instruction length in VM_EXIT_INSTRUCTION_LEN; we
+/// add it to the current GUEST_RIP. Required after I/O exits
+/// (otherwise VMRESUME re-executes the trapping OUT/IN forever).
+pub(super) fn advance_guest_rip() -> Result<(), &'static str> {
+    let len = vmread(VM_EXIT_INSTRUCTION_LEN)?;
+    let rip = vmread(GUEST_RIP)?;
+    vmwrite(GUEST_RIP, rip.wrapping_add(len))
 }
