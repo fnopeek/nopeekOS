@@ -396,6 +396,13 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
 
     while iter < MAX_ITERATIONS {
         iter += 1;
+        // Before each entry, sync the IA-32e-mode-guest control to
+        // the current GUEST_IA32_EFER.LMA — once Linux flips into
+        // long mode (after CR0.PG=1 with EFER.LME=1), the entry
+        // control must match or VMX rejects the entry.
+        if launched {
+            vmcs::sync_entry_ia32e_with_efer()?;
+        }
         let outcome = vmcs::run_guest_once(&mut regs, launched)?;
         launched = true;
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);

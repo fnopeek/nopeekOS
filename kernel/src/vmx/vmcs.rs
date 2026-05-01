@@ -526,14 +526,14 @@ const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 const SEC_ENABLE_EPT: u32 = 1 << 1;
 const SEC_UNRESTRICTED_GUEST: u32 = 1 << 7;
 
-// VM-entry control bits. Long-mode-guest bit dropped — 12.1.1b boots
-// the guest in real mode (CR0.PE=0) which requires IA-32e-mode-
-// guest=0 (LMA=0 is implied).
-//
-// const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
+// VM-entry control bits.
+const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
+const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
 
 // VM-exit control bits.
 const EXIT_HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
+const EXIT_SAVE_IA32_EFER: u32 = 1 << 20;
+const EXIT_LOAD_IA32_EFER: u32 = 1 << 21;
 
 /// Compute a control field's value from the desired-set, applying
 /// the must-be-0 / must-be-1 mask MSR per SDM §A.3.1: low 32 bits
@@ -574,8 +574,17 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
         SEC_ENABLE_EPT | SEC_UNRESTRICTED_GUEST,
         IA32_VMX_PROCBASED_CTLS2,
     );
-    let entry = fixed_ctrl(0, IA32_VMX_ENTRY_CTLS);
-    let exit = fixed_ctrl(EXIT_HOST_ADDR_SPACE_SIZE, IA32_VMX_EXIT_CTLS);
+    // EFER state management: CPU saves/loads guest EFER via VMCS
+    // GUEST_IA32_EFER on each entry/exit. Without these, guest's
+    // WRMSR EFER (LME=1) updates the real MSR but is lost on the
+    // next entry (uncertain behaviour) and the host's EFER stays
+    // unchanged across exit (also dangerous on transitioning the
+    // host back to long mode).
+    let entry = fixed_ctrl(ENTRY_LOAD_IA32_EFER, IA32_VMX_ENTRY_CTLS);
+    let exit = fixed_ctrl(
+        EXIT_HOST_ADDR_SPACE_SIZE | EXIT_SAVE_IA32_EFER | EXIT_LOAD_IA32_EFER,
+        IA32_VMX_EXIT_CTLS,
+    );
 
     vmwrite(PIN_BASED_VM_EXEC_CONTROL, pin as u64)?;
     vmwrite(CPU_BASED_VM_EXEC_CONTROL, cpu as u64)?;
@@ -1006,4 +1015,28 @@ pub fn read_guest_rsp() -> Result<u64, &'static str> {
 /// Write GUEST_RSP to the current VMCS.
 pub fn write_guest_rsp(value: u64) -> Result<(), &'static str> {
     vmwrite(GUEST_RSP, value)
+}
+
+/// Sync VM_ENTRY_CONTROLS' IA-32e-mode-guest bit to GUEST_IA32_EFER.LMA.
+/// VMX requires the two to match at entry: if the guest is currently
+/// in long mode (LMA=1, set automatically by the CPU when CR0.PG=1
+/// and EFER.LME=1), entry control bit 9 must be 1. If guest is in
+/// 32-bit mode, bit 9 must be 0. Callers invoke this between
+/// VM-exits and the next VMRESUME so the control tracks the live
+/// guest mode across long-mode transitions.
+pub fn sync_entry_ia32e_with_efer() -> Result<(), &'static str> {
+    const LMA_BIT: u64 = 1 << 10;
+    let efer = vmread(GUEST_IA32_EFER)?;
+    let entry = vmread(VM_ENTRY_CONTROLS)?;
+    let want_ia32e = (efer & LMA_BIT) != 0;
+    let has_ia32e = (entry & ENTRY_IA32E_MODE_GUEST as u64) != 0;
+    if want_ia32e != has_ia32e {
+        let new = if want_ia32e {
+            entry | ENTRY_IA32E_MODE_GUEST as u64
+        } else {
+            entry & !(ENTRY_IA32E_MODE_GUEST as u64)
+        };
+        vmwrite(VM_ENTRY_CONTROLS, new)?;
+    }
+    Ok(())
 }
