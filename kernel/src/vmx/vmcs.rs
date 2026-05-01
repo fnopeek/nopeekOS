@@ -600,12 +600,22 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
 
     // Inert ancillary controls — clear bitmaps + counts so VMX
     // doesn't dereference them.
-    // 12.1.1c-3b3b6: trap ALL guest exceptions (every bit set) so
-    // we see the FIRST exception that fires instead of just an
-    // opaque triple-fault. Linux normally handles its own
-    // exceptions via its IDT — but we're in diagnostic mode until
-    // Linux earlyprintk runs.
-    vmwrite(EXCEPTION_BITMAP, 0xFFFF_FFFF)?;
+    //
+    // EXCEPTION_BITMAP=0: don't trap guest exceptions. Linux's
+    // early boot specifically RELIES on its own #PF handler
+    // (`early_idt_handler_array` → `early_make_pgtable`) to build
+    // the direct-map page tables lazily. The kernel deliberately
+    // leaves PML4[273] (= PAGE_OFFSET) empty during startup_64 and
+    // expects the very first __va(boot_params_phys) access to
+    // fault, walk into early_make_pgtable, allocate a page from
+    // `early_dynamic_pgts`, populate L4/L3/L2/L1 entries for the
+    // faulting address, then re-execute. Trapping the #PF in the
+    // hypervisor breaks this lazy-PT mechanism — that was an
+    // earlier mistake (12.1.1c-3b3b6 diagnostic mode) which made
+    // it look like the kernel was unable to map its own memory.
+    // Triple faults (basic reason 2) still surface independently
+    // of EXCEPTION_BITMAP if Linux truly fails.
+    vmwrite(EXCEPTION_BITMAP, 0)?;
     vmwrite(CR3_TARGET_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_STORE_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0)?;
