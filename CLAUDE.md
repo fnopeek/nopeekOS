@@ -42,9 +42,46 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 10 (Widget API & GUI Apps) — kernel `v0.89.1`, sdk `0.6.1`,
-  drun `0.6.0`, loft `0.2.1`, testdisk `0.5.2`.
-- **Just shipped (2026-04-29 — crypto stack + network hardening v0.89.0–v0.89.1):**
+- **Phase:** 12.1.1c — Linux MicroVM substrate. Kernel `v0.119.0`,
+  sdk `0.6.1`, drun `0.6.0`, loft `0.2.1`, testdisk `0.5.2`.
+- **Today (2026-05-01 — Phase 12.1.0 + 12.1.1 in one push, v0.90 → v0.119):**
+  - **Linux 6.18 LTS bootet im VT-x MicroVM.** Alpine vmlinuz-virt
+    (12 MB bzImage), via 32-bit Boot Protocol, 64 MB EPT window,
+    earlycon auf Port 0x3F8 → live `[guest]` printk-stream auf der
+    nopeekOS-console. Aktueller Zustand: ~6000 VM-exits, Linux
+    durch setup_arch / e820 / NUMA-fake / TSC-deadline-detection,
+    EPT-violation auf MMIO-Region (vermutlich LAPIC 0xFEE00000) —
+    nächster Step ist EPT um eine LAPIC-Page zu erweitern.
+  - **VMX-Substrate komplett**: VMXON/VMCS/VMCLEAR/VMPTRLD,
+    host-state full round-trip, 64 MB EPT mit 2 MB Pages, real-
+    mode + 32-bit prot mode unrestricted-guest, VMRESUME-Loop mit
+    full GPR save/restore, EFER load/save + dynamic IA-32e sync,
+    CR4 VMXE-shadow, I/O-bitmap (alle Ports trapped), MSR-bitmap
+    (zero = no MSR exits), CPUID pass-through, CR3-load handler,
+    serial 0x3F8 OUT-capture + IN-handler-stubs für UART regs.
+  - **`microvm` Shell-Intent** mit Subcommands `test` (HLT-loop
+    substrate), `linux-info` (parse + dump bzImage header),
+    `linux` (Linux launch).
+  - **TSS-install** (3-Slot GDT-clone in BSS + ltr) wegen VMX
+    HOST_TR_SELECTOR≠0 requirement. BSP-only — `microvm` ist
+    `is_core0_intent`.
+  - **bzImage als bundled installer-asset** in `release/assets/`,
+    landet auf fresh-install in npkFS bei `sys/microvm/linux-virt
+    .bzImage`. Installer-kernel.bin 22 MB (regular OTA-kernel
+    bleibt 3.3 MB, nur installer hat den include_bytes!).
+  - **Phase 12.1.0** (12 vorherige Patches): VT-x probe → VMXON
+    round-trip → VMCS round-trip → host-state-VMWRITE/VMREAD →
+    TSS-install → VMLAUNCH gegen long-mode HLT-loop → VMXOFF.
+  - **Vollständige Iterations-Historie** + Lessons in
+    `memory/project_microvm.md`. Memory-File ist die Source of
+    Truth für die nächsten Sessions, keine Wiederholung hier.
+- **Pausiert für 12.1.1c-Komplettierung**: TLS-Hardening
+  (eigener TLS-1.3-Handshake `crypto/tls/mod.rs` 967 LoC, Plan
+  `rustls` no_std + `rustls-rustcrypto`), TCP-data-retransmit,
+  ASN.1-Parser-Swap zu RustCrypto `der`+`x509-cert`. Phase 10
+  Polish-Queue (tile-subdivision, static visual effects, canvas
+  escape hatch, loft round 4) auch parked.
+- **Earlier (2026-04-29 — v0.89 crypto stack + network hardening):**
   - **X.509 conformance** (v0.89.0): full extension parser + chain
     enforcement of KeyUsage (`digitalSignature` for leaf,
     `keyCertSign` for CAs), ExtendedKeyUsage (`serverAuth` /

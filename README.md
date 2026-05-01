@@ -63,6 +63,10 @@ npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
 npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
 npk> gpu 4k                           # Switch to 4K@30Hz
 npk> disk read 0                     # Raw sector hex dump
+npk> vmx                              # Probe Intel VT-x capability + report
+npk> microvm test                     # VMX substrate self-test (real-mode I/O loop)
+npk> microvm linux                    # Boot Linux 6.18 LTS in MicroVM (VT-x + EPT)
+                                      # → live `[guest]` earlyprintk on console
 ```
 
 Every operation is capability-gated. No ambient authority. No root. No sudo.
@@ -519,12 +523,54 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [ ] **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS` cap, on hold bis ein konkreter Consumer (image viewer, chart) danach fragt.
 - [ ] **Loft polish round 4** — dropdown menus once `Widget::Popover` lands (Phase 11+), `.trash`-click crash investigation, mockup-grade refinements beyond 0.2.1.
 
-### Phase 11 -- AI Integration
+### Phase 11 -- AI Integration (deferred → Phase 13+)
 
-- [ ] External AI service via network
-- [ ] Intent resolution through LLM
-- [ ] Runtime WASM generation (AI writes modules)
-- [ ] Semantic search in content store
+Originally planned next, deprioritised in favour of Phase 12. Returns
+as a frontend feature once the MicroVM subsystem is mature enough to
+host AI services as their own apps.
+
+### Phase 12 -- MicroVM (VT-x for Linux apps) — in progress, 12.1.1c
+
+Per-app x86_64 KVM-style hypervisor inside the kernel so legacy Linux
+GUI apps (Browser first, Phase 12.6) can run sandboxed alongside
+WASM modules. Spec lives in `PHASE12_MICROVM.md`. Progress kernel
+v0.90 → v0.119:
+
+- [x] **VT-x bring-up** — VMXON / VMCS / VMCLEAR / VMPTRLD round-trip,
+      host-state setup with full VMREAD readback, TSS install (BSP).
+- [x] **VMLAUNCH against long-mode HLT-loop** — first VM-entry/exit.
+- [x] **EPT** — 64 MB non-identity window via 2 MB pages, lifted from
+      the kernel's contiguous frame allocator.
+- [x] **Real-mode + 32-bit prot mode unrestricted-guest** with
+      `unrestricted-guest` + `enable-EPT` secondary controls.
+- [x] **VMRESUME loop** with full guest GPR save/restore (asm), Rust-
+      side dispatch on exit reason: CPUID pass-through, CR3-load
+      handler, I/O-bitmap captures (port 0x80 + 0x3F8-0x3FF), MSR-
+      bitmap zero (no MSR exits), EFER load/save + dynamic IA-32e
+      sync, CR4 VMXE-shadow, EXCEPTION_BITMAP=0 (Linux's lazy-PT
+      mechanism via `early_make_pgtable` works).
+- [x] **bzImage loader** — Alpine v3.23 vmlinuz-virt 6.18.26
+      (12 MB), shipped as bundled installer-asset, lands in npkFS at
+      `sys/microvm/linux-virt.bzImage` on fresh install. 32-bit boot
+      protocol entry: setup-section at guest 0x10000, kernel at
+      0x100000, boot_params at 0x90000 (3-entry e820), cmdline at
+      0x20000, %rsi = boot_params_phys.
+- [x] **Linux earlycon stream live** — `microvm linux` prints
+      `[guest] [    0.000000] Linux version 6.18.26-0-virt …` and
+      every subsequent printk byte from port 0x3F8 directly onto the
+      nopeekOS console. e820 parsed correctly, ACPI gracefully
+      skipped, NUMA fake-node + zone setup, TSC deadline timer
+      detected, ~6000 VM-exits handled.
+- [ ] **EPT extension for LAPIC region** (next, v0.120) — Linux
+      currently EPT-violates around 0xFEE00000 right after TSC
+      deadline detection.
+- [ ] 12.1.2  virtio-console backend (replace earlycon when full
+      console driver gives up post-init).
+- [ ] 12.1.3  initramfs + Rust-PID-1 + bash → "Hello bash" PoC.
+- [ ] 12.1.4  bidirectional `inject_console` round-trip.
+- [ ] 12.2-12.5 Plumbing: container format, profile-images,
+      virtio-blk/net backends, picker bridge.
+- [ ] 12.6     **Firefox in MicroVM** (the actual end-goal).
 
 ### Phase 11.5 -- npkFS v2: Real Content-Addressed Directories ✅ DONE 2026-04-28
 
@@ -843,7 +889,7 @@ and reject any artifact whose signature doesn't match.
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.119.0
+[npk] AI-native Operating System v0.120.0
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] TSC: 806 MHz

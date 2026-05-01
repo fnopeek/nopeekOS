@@ -67,8 +67,14 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
     (raw_base + (TWO_MB - 1)) & !(TWO_MB - 1)
 }
 
-/// Build the EPT, mapping guest-physical [0, 64 MB) → host-physical
-/// [host_base, host_base + 64 MB) via 32 × 2-MB leaf entries.
+/// Build the EPT. Maps:
+///   - guest-physical [0, 64 MB) → host-physical [host_base, +64 MB)
+///     via 32 × 2-MB leaf entries (PD)
+///   - guest-physical [0xFEE00000, 0xFEE00000 + 2 MB) → host-physical
+///     scratch frame, so LAPIC accesses (Linux reads APIC_ID etc.
+///     after TSC-deadline detection) don't EPT-violate. Reads return
+///     scratch contents, writes go to scratch — not real LAPIC
+///     semantics, but enough to keep early Linux init from faulting.
 /// Returns the EPTP value to be VMWRITE'd into VMCS::EPT_POINTER.
 pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
     if host_base & (TWO_MB - 1) != 0 {
@@ -78,6 +84,13 @@ pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
     let pml4_phys = memory::allocate_frame().ok_or("OOM: EPT PML4")?;
     let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
     let pd_phys = memory::allocate_frame().ok_or("OOM: EPT PD")?;
+    let pd_high_phys = memory::allocate_frame().ok_or("OOM: EPT PD_HIGH")?;
+
+    // 2 MB scratch frame for LAPIC region. Top-down + 2 MB alignment
+    // slack, same pattern as the main guest-RAM allocation.
+    let lapic_scratch_raw = memory::allocate_contiguous(512 + 511)
+        .ok_or("OOM: LAPIC scratch")?;
+    let lapic_scratch = round_up_to_2mb(lapic_scratch_raw);
 
     // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
@@ -86,12 +99,14 @@ pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
         core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
         pml4.add(0).write_volatile(pdpt_phys | EPT_RWX);
 
-        // PDPT[0] → PD, R/W/X for sub-tree.
+        // PDPT[0] → PD (covers [0, 1 GB), of which we use 64 MB).
         let pdpt = pdpt_phys as *mut u64;
         core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
         pdpt.add(0).write_volatile(pd_phys | EPT_RWX);
+        // PDPT[3] → PD_HIGH (covers [3 GB, 4 GB), where LAPIC lives).
+        pdpt.add(3).write_volatile(pd_high_phys | EPT_RWX);
 
-        // PD[0..PD_LEAVES] = 2-MB leaf entries covering the window.
+        // PD[0..PD_LEAVES] = 2-MB leaf entries covering 64 MB.
         let pd = pd_phys as *mut u64;
         core::ptr::write_bytes(pd as *mut u8, 0, 4096);
         for i in 0..PD_LEAVES {
@@ -99,6 +114,14 @@ pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
             pd.add(i as usize)
                 .write_volatile(host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
         }
+
+        // PD_HIGH[503] = 2-MB leaf at 0xFEE00000 (LAPIC) → scratch.
+        // L2 index 503 = (0xFEE00000 >> 21) & 0x1FF.
+        let pd_high = pd_high_phys as *mut u64;
+        core::ptr::write_bytes(pd_high as *mut u8, 0, 4096);
+        pd_high.add(503).write_volatile(
+            lapic_scratch | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF,
+        );
     }
 
     Ok(pml4_phys | EPTP_WALK_LENGTH_4 | EPTP_MEM_TYPE_WB)
