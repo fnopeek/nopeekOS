@@ -29,6 +29,7 @@
 //!   12.1.3    initramfs + Rust-PID-1 + bash
 //!   12.1.4    inject_console round-trip
 
+pub mod bzimage;
 mod enable;
 mod ept;
 mod probe;

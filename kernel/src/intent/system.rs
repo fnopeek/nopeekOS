@@ -621,9 +621,11 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  MicroVM (Phase 12 — VT-x sandbox for Linux apps)");
             kprintln!("  ────────────────────────────────────────────────");
             kprintln!("  microvm test          Run the real-mode HLT-loop substrate");
-            kprintln!("                        test: VMXON → 16 MB EPT → unrestricted");
+            kprintln!("                        test: VMXON → 64 MB EPT → unrestricted");
             kprintln!("                        real-mode guest → VMLAUNCH → VM-exit");
             kprintln!("                        → VMXOFF. Prints the basic exit reason.");
+            kprintln!("  microvm linux-info    Parse bundled Alpine bzImage from");
+            kprintln!("                        npkFS, print Linux Boot Protocol stats.");
             kprintln!();
             kprintln!("  Phase 12 status:");
             kprintln!("    12.1.0a-c  VMXON / VMCS / VMPTRLD                 ✓");
@@ -633,7 +635,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    12.1.1c-1  16 MB non-identity EPT window          ✓");
             kprintln!("    12.1.1c-2  bring-up off the boot path             ✓");
             kprintln!("    12.1.1c-3a 64 MB EPT + bzImage in npkFS           ✓");
-            kprintln!("    12.1.1c-3b Alpine bzImage loader + microvm linux  — next");
+            kprintln!("    12.1.1c-3b1 bzImage parser + linux-info           ✓");
+            kprintln!("    12.1.1c-3b2 Serial 0x3F8 capture                  — next");
+            kprintln!("    12.1.1c-3b3 Loader + 32-bit boot + VMLAUNCH       — after");
             kprintln!("    12.1.2+    virtio-console, initramfs, Rust-PID-1");
             kprintln!();
             kprintln!("  This intent currently leaks ~16 MB of guest RAM per call.");
