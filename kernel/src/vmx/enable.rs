@@ -697,6 +697,34 @@ fn run_linux_loop(
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
+            48 => {
+                // EPT violation — guest tried to access a guest-phys
+                // address outside our 64 MB window (or with insufficient
+                // EPT permissions). The qual decodes which permission
+                // was missing; GUEST_PHYSICAL_ADDRESS is the actual
+                // address.
+                serial.flush();
+                let gpa  = vmcs::read_guest_phys_addr().unwrap_or(0);
+                let gla  = vmcs::read_guest_linear_addr().unwrap_or(0);
+                let q    = outcome.exit_qualification;
+                let read = q & 1 != 0;
+                let write = q & 2 != 0;
+                let fetch = q & 4 != 0;
+                kprintln!(
+                    "[microvm] EPT violation: gpa={:#018x} gla={:#018x} qual={:#x}",
+                    gpa, gla, q,
+                );
+                kprintln!(
+                    "[microvm]   access: {}{}{}",
+                    if read { "R" } else { "" },
+                    if write { "W" } else { "" },
+                    if fetch { "X" } else { "" },
+                );
+                io_stats.dump();
+                trace.dump();
+                last_outcome = Some(outcome);
+                break;
+            }
             _ => {
                 serial.flush();
                 kprintln!(
