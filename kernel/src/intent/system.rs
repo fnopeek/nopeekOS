@@ -613,7 +613,8 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    12.1.0d-2b guest-state + controls + VMLAUNCH      ✓");
             kprintln!("    12.1.1a    EPT identity-map (1 GB)                ✓");
             kprintln!("    12.1.1b    real-mode + unrestricted + I/O exit    ✓");
-            kprintln!("    12.1.1c-d  bzImage + early-panic detection        — next");
+            kprintln!("    12.1.1c-1  16 MB non-identity EPT window          ✓");
+            kprintln!("    12.1.1c-2  Alpine bzImage + VMLAUNCH              — next");
             kprintln!();
             kprintln!("  Reported fields:");
             kprintln!("    revision_id      VMCS revision (per CPU stepping)");

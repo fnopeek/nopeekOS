@@ -1,84 +1,83 @@
-//! Extended Page Tables (EPT) — Phase 12.1.1a.
+//! Extended Page Tables (EPT) — Phase 12.1.1a/c-1.
 //!
-//! Identity-maps the first 1 GB of guest-physical → host-physical
-//! address space using a single 1 GB EPT large page if the CPU
-//! supports it (IA32_VMX_EPT_VPID_CAP bit 17), otherwise falls back
-//! to 512 × 2 MB pages via a third-level PD.
+//! Maps a 16-MB guest-physical window [0, 16 MB) onto a contiguous
+//! 16-MB host-physical region using 2-MB EPT large pages (8 leaf
+//! entries in a single PD). The host backing region is allocated
+//! once via `memory::allocate_contiguous(4096)`; the caller passes
+//! that host base in.
 //!
-//! With EPT enabled, the CPU does a two-stage translation on every
-//! guest memory access: guest CR3 walk yields guest-physical, then
-//! the EPT walk yields host-physical. Identity-mapping both stages
-//! (guest CR3 = host CR3 for our HLT-loop guest, EPT identity map
-//! here) means every guest virtual address ultimately resolves to
-//! the same host-physical numerical value — simple and sufficient
-//! for the HLT-exit demonstration.
+//! Why non-identity (12.1.1c-1 vs the v0.97 1-GB identity map):
+//! the guest will copy Linux's bzImage into its address space at
+//! guest-phys 0x10000 (setup) and 0x100000 (protected-mode kernel)
+//! — but host_phys 0x100000 is the kernel.bin's own load address
+//! (Multiboot2 puts us at 1 MB). A non-identity EPT separates the
+//! two so the guest can write freely without corrupting host code.
 //!
-//! Tables are leaked deliberately, same lifecycle as VMXON / VMCS
-//! regions in `vmx/enable.rs`.
+//! 16 MB is enough for: setup (~8 KB), boot_params (~4 KB), cmdline
+//! (~256 B), the Alpine vmlinuz-virt protected-mode kernel
+//! (~5-7 MB). A larger window can be plumbed in later by stretching
+//! the PD entries; the current 8-entry layout caps at 16 MB.
 //!
-//! Reference: Intel SDM Vol. 3C §28.2 (The Extended Page Table
-//! Mechanism), §28.3.3.2 (EPT Misconfigurations), Vol. 3D
+//! Tables are leaked (same lifecycle as VMXON / VMCS regions in
+//! `vmx/enable.rs`).
+//!
+//! Reference: Intel SDM Vol. 3C §28.2 (EPT Mechanism), Vol. 3D
 //! Appendix A.10 (VPID and EPT Capabilities).
 
-use super::rdmsr;
 use crate::mm::memory;
-
-const IA32_VMX_EPT_VPID_CAP: u32 = 0x48C;
-const EPT_VPID_CAP_1GB_PAGE: u64 = 1 << 17;
 
 // EPT entry permission + attribute bits.
 const EPT_R: u64 = 1 << 0;
 const EPT_W: u64 = 1 << 1;
 const EPT_X: u64 = 1 << 2;
 const EPT_RWX: u64 = EPT_R | EPT_W | EPT_X;
-// Memory type for leaf entries: 6 = WB (write-back). Matches the
-// MTRR setting our kernel uses for normal RAM.
+// Memory type for leaf entries: 6 = WB (write-back).
 const EPT_MEM_TYPE_WB: u64 = 6 << 3;
 // Bit 7: leaf entry (page) vs pointer to next-level table.
 const EPT_LEAF: u64 = 1 << 7;
 
-// EPTP fields (the value VMWRITE'd into VMCS::EPT_POINTER).
+// EPTP fields VMWRITE'd into VMCS::EPT_POINTER.
 const EPTP_MEM_TYPE_WB: u64 = 6;
-// Walk-length minus 1: 4-level table → value 3.
-const EPTP_WALK_LENGTH_4: u64 = 3 << 3;
+const EPTP_WALK_LENGTH_4: u64 = 3 << 3; // 4 levels = walk length 3
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
+const SIXTEEN_MB: u64 = 16 * 1024 * 1024;
 
-/// Allocate + initialise the EPT, identity-mapping the first 1 GB.
+/// Number of 4 KB host frames the caller must allocate contiguously
+/// for the guest RAM backing.
+pub const GUEST_RAM_FRAMES: usize = (SIXTEEN_MB / 4096) as usize;
+
+/// Build the EPT, mapping guest-physical [0, 16 MB) → host-physical
+/// [host_base, host_base + 16 MB) via 8 × 2-MB leaf entries.
 /// Returns the EPTP value to be VMWRITE'd into VMCS::EPT_POINTER.
-pub fn install_identity_1gb() -> Result<u64, &'static str> {
-    // SAFETY: IA32_VMX_EPT_VPID_CAP is architectural when VMX is
-    // present (gated by `vmx::probe()` upstream).
-    let supports_1gb = unsafe { rdmsr(IA32_VMX_EPT_VPID_CAP) } & EPT_VPID_CAP_1GB_PAGE != 0;
+pub fn install_window_16mb(host_base: u64) -> Result<u64, &'static str> {
+    if host_base & (TWO_MB - 1) != 0 {
+        return Err("EPT: host_base must be 2-MB aligned for 2-MB EPT pages");
+    }
 
     let pml4_phys = memory::allocate_frame().ok_or("OOM: EPT PML4")?;
     let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
+    let pd_phys = memory::allocate_frame().ok_or("OOM: EPT PD")?;
 
     // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
+        // PML4[0] → PDPT, R/W/X for sub-tree.
         let pml4 = pml4_phys as *mut u64;
         core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
-        // PML4[0] points to PDPT, with R/W/X permissions for the
-        // sub-tree. Non-leaf entries don't carry a memory type.
         pml4.add(0).write_volatile(pdpt_phys | EPT_RWX);
 
+        // PDPT[0] → PD, R/W/X for sub-tree.
         let pdpt = pdpt_phys as *mut u64;
         core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
+        pdpt.add(0).write_volatile(pd_phys | EPT_RWX);
 
-        if supports_1gb {
-            // PDPT[0] = leaf 1-GB EPT page covering [0, 1 GB).
-            pdpt.add(0).write_volatile(EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
-        } else {
-            // Fall back to 2-MB leaves: one PD with 512 entries.
-            let pd_phys = memory::allocate_frame().ok_or("OOM: EPT PD")?;
-            pdpt.add(0).write_volatile(pd_phys | EPT_RWX);
-            let pd = pd_phys as *mut u64;
-            core::ptr::write_bytes(pd as *mut u8, 0, 4096);
-            for i in 0..512u64 {
-                let base = i * TWO_MB;
-                pd.add(i as usize)
-                    .write_volatile(base | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
-            }
+        // PD[0..8] = 8 × 2-MB leaf entries covering 16 MB.
+        let pd = pd_phys as *mut u64;
+        core::ptr::write_bytes(pd as *mut u8, 0, 4096);
+        for i in 0..8u64 {
+            let host_target = host_base + i * TWO_MB;
+            pd.add(i as usize)
+                .write_volatile(host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
         }
     }
 
