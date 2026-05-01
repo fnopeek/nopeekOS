@@ -597,24 +597,11 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  disk write <s> <txt>  Write text to sector");
             kprintln!();
         }
-        "vmx" | "vt-x" | "microvm" => {
+        "vmx" | "vt-x" => {
             kprintln!();
-            kprintln!("  Virtualization (Phase 12 — MicroVM)");
-            kprintln!("  ───────────────────────────────────");
+            kprintln!("  Virtualization probe (Phase 12 — MicroVM)");
+            kprintln!("  ─────────────────────────────────────────");
             kprintln!("  vmx                    Probe Intel VT-x capability + report");
-            kprintln!();
-            kprintln!("  Phase 12 builds a per-app VT-x MicroVM for legacy Linux GUI");
-            kprintln!("  apps (Browser first). Status:");
-            kprintln!("    12.1.0a   probe + report                          ✓");
-            kprintln!("    12.1.0b   VMXON region + CR4.VMXE round-trip      ✓");
-            kprintln!("    12.1.0c   VMCS region + VMCLEAR + VMPTRLD         ✓");
-            kprintln!("    12.1.0d-1  host-state VMWRITE/VMREAD + trampoline ✓");
-            kprintln!("    12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ✓");
-            kprintln!("    12.1.0d-2b guest-state + controls + VMLAUNCH      ✓");
-            kprintln!("    12.1.1a    EPT identity-map (1 GB)                ✓");
-            kprintln!("    12.1.1b    real-mode + unrestricted + I/O exit    ✓");
-            kprintln!("    12.1.1c-1  16 MB non-identity EPT window          ✓");
-            kprintln!("    12.1.1c-2  Alpine bzImage + VMLAUNCH              — next");
             kprintln!();
             kprintln!("  Reported fields:");
             kprintln!("    revision_id      VMCS revision (per CPU stepping)");
@@ -622,10 +609,34 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("    ept_supported    Extended Page Tables for guest-phys → host-phys");
             kprintln!("    unrestricted     Real-mode guest without trampolining");
             kprintln!("    vpid             Tagged TLB across VM-entry/exit");
-            kprintln!("    bring-up         Last result of VMXON+VMXOFF round-trip");
             kprintln!();
             kprintln!("  If 'NOT available': enable 'Intel Virtualization Technology'");
             kprintln!("  in BIOS/UEFI firmware setup.");
+            kprintln!();
+            kprintln!("  See 'microvm' for the substrate test (VMXON / VMLAUNCH).");
+            kprintln!();
+        }
+        "microvm" => {
+            kprintln!();
+            kprintln!("  MicroVM (Phase 12 — VT-x sandbox for Linux apps)");
+            kprintln!("  ────────────────────────────────────────────────");
+            kprintln!("  microvm test          Run the real-mode HLT-loop substrate");
+            kprintln!("                        test: VMXON → 16 MB EPT → unrestricted");
+            kprintln!("                        real-mode guest → VMLAUNCH → VM-exit");
+            kprintln!("                        → VMXOFF. Prints the basic exit reason.");
+            kprintln!();
+            kprintln!("  Phase 12 status:");
+            kprintln!("    12.1.0a-c  VMXON / VMCS / VMPTRLD                 ✓");
+            kprintln!("    12.1.0d    host-state + TSS + VMLAUNCH (long-mode) ✓");
+            kprintln!("    12.1.1a    EPT identity-map (1 GB)                ✓");
+            kprintln!("    12.1.1b    real-mode + unrestricted + I/O exit    ✓");
+            kprintln!("    12.1.1c-1  16 MB non-identity EPT window          ✓");
+            kprintln!("    12.1.1c-2  bring-up off the boot path             ✓");
+            kprintln!("    12.1.1c-3  Alpine bzImage loader + microvm linux  — next");
+            kprintln!("    12.1.2+    virtio-console, initramfs, Rust-PID-1");
+            kprintln!();
+            kprintln!("  This intent currently leaks ~16 MB of guest RAM per call.");
+            kprintln!("  Persistent VM lifecycle lands in Phase 12.2.");
             kprintln!();
         }
         _ => {
@@ -644,9 +655,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Config:    set · get · config");
             kprintln!("  Display:   gpu · shade · wallpaper");
             kprintln!("  Disk:      disk read · disk write");
-            kprintln!("  Virt:      vmx");
+            kprintln!("  Virt:      vmx · microvm");
             kprintln!();
-            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper, vmx)");
+            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper, vmx, microvm)");
             kprintln!();
         }
     }
