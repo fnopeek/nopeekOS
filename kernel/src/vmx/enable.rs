@@ -1,4 +1,4 @@
-//! VMX root-mode entry/exit + VMCS round-trip — 12.1.0b/c validation.
+//! VMX root-mode entry/exit + VMCS round-trip — 12.1.0b/c/d-1 validation.
 //!
 //! Bring-up dance:
 //!   1. Allocate a 4-KB VMXON region, write the VMCS revision-id.
@@ -8,17 +8,19 @@
 //!   4. Execute VMXON; check VMfailInvalid via RFLAGS.CF/ZF.       (12.1.0b)
 //!   5. Allocate a 4-KB VMCS region, write the revision-id, run
 //!      VMCLEAR + VMPTRLD against it.                              (12.1.0c)
-//!   6. Execute VMXOFF.                                            (12.1.0b)
+//!   6. VMWRITE the host-state subset, VMREAD it back.             (12.1.0d-1)
+//!   7. Execute VMXOFF.                                            (12.1.0b)
 //!
 //! VMXON + VMCS regions are allocated and *kept* (never freed) so
-//! 12.1.0d re-uses them without re-allocating. CR4.VMXE is left set —
+//! 12.1.0d-2 re-uses them without re-allocating. CR4.VMXE is left set —
 //! harmless and saves a write next time.
 //!
 //! Reference: Intel SDM Vol. 3C §23.7 (Enabling and Entering VMX
-//! Operation), §24.11 (VMCS-Maintenance Instructions), §A.7-A.8
-//! (VMX-Fixed Bits in CR0/CR4).
+//! Operation), §24.11 (VMCS-Maintenance Instructions), §26.2
+//! (VM-Entry Checks on Host State), §A.7-A.8 (VMX-Fixed Bits in
+//! CR0/CR4).
 
-use super::{rdmsr, wrmsr};
+use super::{rdmsr, wrmsr, vmcs};
 use crate::mm::memory;
 
 const IA32_FEATURE_CONTROL: u32 = 0x3A;
@@ -206,5 +208,14 @@ fn vmcs_round_trip(revision_id: u32) -> Result<(), &'static str> {
         return Err("VMPTRLD returned VMfailValid (ZF=1)");
     }
 
-    Ok(())
+    // 12.1.0d-1: write the host-state subset and read every field
+    // back. host_rsp is sampled here, one frame above the VMWRITE
+    // storm — close enough to "the kernel state at exit" that the
+    // value is canonical even though no exit can fire yet.
+    let host_rsp: u64;
+    // SAFETY: pure register read.
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) host_rsp, options(nostack, preserves_flags));
+    }
+    vmcs::setup_host_state(host_rsp)
 }
