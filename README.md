@@ -843,7 +843,7 @@ and reject any artifact whose signature doesn't match.
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.115.0
+[npk] AI-native Operating System v0.116.0
 [npk] Multiboot2: verified
 [npk] Interrupts enabled.
 [npk] TSC: 806 MHz
