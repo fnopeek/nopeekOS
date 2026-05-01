@@ -131,11 +131,21 @@ const CMDLINE_GUEST_PHYS: u64 = 0x20000;
 const BOOT_PARAMS_GUEST_PHYS: u64 = 0x90000;
 const KERNEL_GUEST_PHYS: u64 = 0x100000;
 
-/// Single e820 entry covering the whole 64 MB EPT window as RAM.
-/// Linux accepts a single contiguous RAM region without the
-/// 640K/BIOS-area split — early boot doesn't probe EBDA in 32-bit
-/// boot mode.
+/// e820 memory map types.
 const E820_TYPE_RAM: u32 = 1;
+const E820_TYPE_RESERVED: u32 = 2;
+
+/// Standard PC layout for the e820 we present to Linux:
+///   [0x000000, 0x09F000) RAM (640 KB lower memory)
+///   [0x09F000, 0x100000) RESERVED (BIOS area + EBDA)
+///   [0x100000, 0x4000000) RAM (1 MB → 64 MB, "extended memory")
+///
+/// Linux's early-boot direct-map setup walks the e820 and builds
+/// the kernel's identity/direct mappings. A single contiguous
+/// `[0, 64 MB) RAM` entry omits the BIOS hole, which on some
+/// kernel paths trips memory-layout assumptions and leaves the
+/// direct-map L4 entry empty for low-RAM regions. Splitting per
+/// PC convention works around it.
 const GUEST_RAM_TOTAL: u64 = 64 * 1024 * 1024;
 
 /// Linux loadflags bits we need.
@@ -240,21 +250,24 @@ pub fn load_into_guest_ram(
     bp[0x218..0x21C].copy_from_slice(&0u32.to_le_bytes());
     bp[0x21C..0x220].copy_from_slice(&0u32.to_le_bytes());
 
-    // Single e820 RAM entry covering the whole window.
-    bp[OFF_E820_ENTRIES] = 1;
-    let entry = E820Entry {
-        addr: 0,
-        size: GUEST_RAM_TOTAL,
-        typ:  E820_TYPE_RAM,
-    };
-    let entry_bytes: &[u8] = unsafe {
-        core::slice::from_raw_parts(
-            &entry as *const _ as *const u8,
-            core::mem::size_of::<E820Entry>(),
-        )
-    };
-    let table_end = OFF_E820_TABLE + entry_bytes.len();
-    bp[OFF_E820_TABLE..table_end].copy_from_slice(entry_bytes);
+    // Three e820 entries — standard PC layout.
+    bp[OFF_E820_ENTRIES] = 3;
+    let entries = [
+        E820Entry { addr: 0,         size: 0x09_F000,                 typ: E820_TYPE_RAM },
+        E820Entry { addr: 0x09_F000, size: 0x10_0000 - 0x09_F000,     typ: E820_TYPE_RESERVED },
+        E820Entry { addr: 0x10_0000, size: GUEST_RAM_TOTAL - 0x10_0000, typ: E820_TYPE_RAM },
+    ];
+    let entry_size = core::mem::size_of::<E820Entry>();
+    for (i, entry) in entries.iter().enumerate() {
+        let start = OFF_E820_TABLE + i * entry_size;
+        let entry_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(
+                entry as *const _ as *const u8,
+                entry_size,
+            )
+        };
+        bp[start..start + entry_size].copy_from_slice(entry_bytes);
+    }
 
     // Copy boot_params into guest RAM at 0x90000.
     // SAFETY: as above, exclusive window.
