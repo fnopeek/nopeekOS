@@ -330,7 +330,12 @@ fn intent_worker_task(arg: u64) {
 fn is_core0_intent(verb: &str) -> bool {
     matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
                    "clear" | "cls" | "shade" | "shell" | "npk-shell" |
-                   "cd" | "pwd" | "top" | "htop" | "history" | "gpu")
+                   "cd" | "pwd" | "top" | "htop" | "history" | "gpu" |
+                   // microvm: VMX state (CR4.VMXE, IA32_FEATURE_CONTROL
+                   // lock-bit, TSS, GDT-with-TR-slot) is BSP-only —
+                   // worker cores would VMfail with error 8 (invalid
+                   // host-state) because their TR is null.
+                   "microvm")
 }
 
 
