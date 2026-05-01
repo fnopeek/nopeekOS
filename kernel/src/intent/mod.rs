@@ -1138,9 +1138,39 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "uname" | "version" | "kernel" => {
             system::intent_uname(args);
         }
-        "vmx" | "vt-x" | "microvm" => {
+        "vmx" | "vt-x" => {
             if require_cap(vault, &session, Rights::READ, "vmx") {
                 crate::vmx::report();
+            }
+        }
+        "microvm" => {
+            let sub = args.trim();
+            if sub.is_empty() {
+                kprintln!("[microvm] Usage: microvm test");
+                kprintln!("[microvm]   test — run real-mode HLT-loop substrate test");
+            } else if sub == "test" {
+                if require_cap(vault, &session, Rights::EXECUTE, "microvm test") {
+                    match crate::vmx::run_substrate_test() {
+                        Ok(reason) => {
+                            let label = match reason {
+                                12 => " (HLT)",
+                                30 => " (I/O instruction)",
+                                33 => " (VM-entry: invalid guest state)",
+                                48 => " (EPT violation)",
+                                49 => " (EPT misconfiguration)",
+                                _ => "",
+                            };
+                            kprintln!(
+                                "[microvm] substrate-test OK — VM-exit reason {}{}",
+                                reason, label,
+                            );
+                        }
+                        Err(e) => kprintln!("[microvm] substrate-test FAILED: {}", e),
+                    }
+                }
+            } else {
+                kprintln!("[microvm] unknown subcommand: '{}'", sub);
+                kprintln!("[microvm] available: test");
             }
         }
         "caps" | "capabilities" => {
