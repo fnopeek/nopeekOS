@@ -984,3 +984,26 @@ pub(super) fn advance_guest_rip() -> Result<(), &'static str> {
     let rip = vmread(GUEST_RIP)?;
     vmwrite(GUEST_RIP, rip.wrapping_add(len))
 }
+
+/// Read GUEST_CR3 from the current VMCS. Used by the CR-access
+/// exit handler when the guest does `MOV reg, CR3`.
+pub fn read_guest_cr3() -> Result<u64, &'static str> {
+    vmread(GUEST_CR3)
+}
+
+/// Write GUEST_CR3 to the current VMCS. Used by the CR-access
+/// exit handler when the guest does `MOV CR3, reg`.
+pub fn write_guest_cr3(value: u64) -> Result<(), &'static str> {
+    vmwrite(GUEST_CR3, value)
+}
+
+/// Read GUEST_RSP from the current VMCS. RSP is not in `GuestRegs`
+/// (the CPU loads/saves it from VMCS GUEST_RSP across entry/exit).
+pub fn read_guest_rsp() -> Result<u64, &'static str> {
+    vmread(GUEST_RSP)
+}
+
+/// Write GUEST_RSP to the current VMCS.
+pub fn write_guest_rsp(value: u64) -> Result<(), &'static str> {
+    vmwrite(GUEST_RSP, value)
+}

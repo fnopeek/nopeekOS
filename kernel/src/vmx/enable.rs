@@ -421,6 +421,49 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
+            28 => {
+                // Control-register access. Most commonly Linux's
+                // startup_32 doing MOV CR3, reg to load its own
+                // page tables — IA32_VMX_PROCBASED_CTLS may force
+                // CR3-load/store-exiting on this CPU even with EPT.
+                let qual = outcome.exit_qualification;
+                let cr_num = (qual & 0xF) as u8;
+                let access_type = ((qual >> 4) & 0x3) as u8;
+                let gp_reg = ((qual >> 8) & 0xF) as u8;
+
+                if cr_num != 3 {
+                    serial.flush();
+                    kprintln!(
+                        "[microvm] unhandled CR{} access (type {}, reg {}, qual {:#x})",
+                        cr_num, access_type, gp_reg, qual,
+                    );
+                    last_outcome = Some(outcome);
+                    break;
+                }
+                match access_type {
+                    0 => {
+                        // MOV to CR3 (set page-table base).
+                        let val = read_gpr(&regs, gp_reg)?;
+                        vmcs::write_guest_cr3(val)?;
+                    }
+                    1 => {
+                        // MOV from CR3.
+                        let val = vmcs::read_guest_cr3()?;
+                        write_gpr(&mut regs, gp_reg, val)?;
+                    }
+                    _ => {
+                        serial.flush();
+                        kprintln!(
+                            "[microvm] CR3 unusual access type {} (qual {:#x})",
+                            access_type, qual,
+                        );
+                        last_outcome = Some(outcome);
+                        break;
+                    }
+                }
+                vmcs::advance_guest_rip()?;
+                last_outcome = Some(outcome);
+            }
             30 => {
                 let (port, dir_in, size) =
                     vmcs::decode_io_exit_qualification(outcome.exit_qualification);
@@ -449,6 +492,57 @@ fn run_linux_loop(boot_params_phys: u64) -> Result<vmcs::LaunchOutcome, &'static
     }
 
     last_outcome.ok_or("Linux guest exceeded max iterations without first VM-exit")
+}
+
+/// Read a guest GPR by ABI register index (0=rax, 1=rcx, 2=rdx,
+/// 3=rbx, 4=rsp, 5=rbp, 6=rsi, 7=rdi, 8..15=r8..r15) for CR-access
+/// VM-exit decoding. RSP comes from VMCS, the rest from the saved
+/// GuestRegs struct.
+fn read_gpr(regs: &vmcs::GuestRegs, idx: u8) -> Result<u64, &'static str> {
+    Ok(match idx {
+        0 => regs.rax,
+        1 => regs.rcx,
+        2 => regs.rdx,
+        3 => regs.rbx,
+        4 => vmcs::read_guest_rsp()?,
+        5 => regs.rbp,
+        6 => regs.rsi,
+        7 => regs.rdi,
+        8 => regs.r8,
+        9 => regs.r9,
+        10 => regs.r10,
+        11 => regs.r11,
+        12 => regs.r12,
+        13 => regs.r13,
+        14 => regs.r14,
+        15 => regs.r15,
+        _ => return Err("invalid GPR index"),
+    })
+}
+
+/// Write a guest GPR by ABI register index. RSP goes to VMCS, the
+/// rest to the saved GuestRegs struct.
+fn write_gpr(regs: &mut vmcs::GuestRegs, idx: u8, value: u64) -> Result<(), &'static str> {
+    match idx {
+        0 => regs.rax = value,
+        1 => regs.rcx = value,
+        2 => regs.rdx = value,
+        3 => regs.rbx = value,
+        4 => vmcs::write_guest_rsp(value)?,
+        5 => regs.rbp = value,
+        6 => regs.rsi = value,
+        7 => regs.rdi = value,
+        8 => regs.r8 = value,
+        9 => regs.r9 = value,
+        10 => regs.r10 = value,
+        11 => regs.r11 = value,
+        12 => regs.r12 = value,
+        13 => regs.r13 = value,
+        14 => regs.r14 = value,
+        15 => regs.r15 = value,
+        _ => return Err("invalid GPR index"),
+    }
+    Ok(())
 }
 
 /// Dispatch a single I/O VM-exit. UART COM1 (0x3F8-0x3FF) gets
