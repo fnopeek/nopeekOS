@@ -505,10 +505,12 @@ fn run_linux_loop(
 
         match basic {
             0 => {
-                // Exception/NMI — diagnostic mode, EXCEPTION_BITMAP
-                // is set to trap every guest exception so we see
-                // the FIRST one that fires before it kaskades into
-                // a triple-fault.
+                // Exception/NMI. EXCEPTION_BITMAP=0 in production —
+                // exceptions go to Linux's IDT directly. This arm
+                // only fires for NMIs (which we don't generate
+                // intentionally) or if Linux somehow re-enables
+                // exception trapping. Kept as a safety net + the
+                // dump remains useful if it ever fires.
                 serial.flush();
                 let info = vmcs::read_exit_intr_info().unwrap_or(0);
                 let vector = info & 0xFF;
