@@ -1151,8 +1151,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "microvm" => {
             let sub = args.trim();
             if sub.is_empty() {
-                kprintln!("[microvm] Usage: microvm test");
-                kprintln!("[microvm]   test — run real-mode HLT-loop substrate test");
+                kprintln!("[microvm] Usage: microvm <test|linux-info>");
+                kprintln!("[microvm]   test       — real-mode HLT-loop substrate test");
+                kprintln!("[microvm]   linux-info — parse bundled bzImage, print stats");
             } else if sub == "test" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm test") {
                     match crate::vmx::run_substrate_test() {
@@ -1173,9 +1174,13 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                         Err(e) => kprintln!("[microvm] substrate-test FAILED: {}", e),
                     }
                 }
+            } else if sub == "linux-info" {
+                if require_cap(vault, &session, Rights::READ, "microvm linux-info") {
+                    microvm_linux_info();
+                }
             } else {
                 kprintln!("[microvm] unknown subcommand: '{}'", sub);
-                kprintln!("[microvm] available: test");
+                kprintln!("[microvm] available: test, linux-info");
             }
         }
         "caps" | "capabilities" => {
@@ -1488,6 +1493,68 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
 }
 
 /// Check capability before executing an intent. Returns true if allowed.
+/// `microvm linux-info` handler — fetch the bundled bzImage from
+/// npkFS, parse the Linux Boot Protocol setup-header, print stats.
+/// Read-only; no VM activity. The asset lands in npkFS at
+/// `sys/microvm/linux-virt.bzImage` on fresh install (see
+/// install_data/assets).
+fn microvm_linux_info() {
+    const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
+
+    let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
+        Ok((b, _hash)) => b,
+        Err(e) => {
+            kprintln!("[microvm] cannot read {}: {:?}", BZIMAGE_PATH, e);
+            kprintln!("[microvm] reinstall from USB to seed bundled assets");
+            return;
+        }
+    };
+
+    let header = match crate::vmx::bzimage::parse_header(&bytes) {
+        Ok(h) => h,
+        Err(e) => {
+            kprintln!("[microvm] parse failed: {}", e);
+            return;
+        }
+    };
+
+    let setup_size = crate::vmx::bzimage::setup_section_size(&header);
+    let prot_size  = crate::vmx::bzimage::protected_kernel_size(&header);
+    // Reads of #[repr(packed)] fields go via local copies to avoid
+    // unaligned-reference UB.
+    let version = header.version;
+    let setup_sects = header.setup_sects;
+    let syssize = header.syssize;
+    let code32_start = header.code32_start;
+    let init_size = header.init_size;
+    let kernel_alignment = header.kernel_alignment;
+    let relocatable = header.relocatable_kernel;
+    let xloadflags = header.xloadflags;
+    let pref_address = header.pref_address;
+
+    kprintln!("[microvm] Linux bzImage at {}:", BZIMAGE_PATH);
+    kprintln!("[microvm]   bzImage size       {} bytes ({} KB)",
+              bytes.len(), bytes.len() / 1024);
+    kprintln!("[microvm]   protocol           {}.{:02}",
+              version >> 8, version & 0xFF);
+    kprintln!("[microvm]   setup_sects        {} (= {} bytes incl. bootsector)",
+              setup_sects, setup_size);
+    kprintln!("[microvm]   syssize            {:#x} paragraphs (= {} KB)",
+              syssize, prot_size / 1024);
+    kprintln!("[microvm]   code32_start       {:#010x}", code32_start);
+    kprintln!("[microvm]   init_size          {:#x} bytes ({} MB)",
+              init_size, init_size / (1024 * 1024));
+    kprintln!("[microvm]   kernel_alignment   {:#x}", kernel_alignment);
+    kprintln!("[microvm]   relocatable        {}", relocatable);
+    kprintln!("[microvm]   xloadflags         {:#06x}", xloadflags);
+    kprintln!("[microvm]   pref_address       {:#018x}", pref_address);
+
+    if (init_size as u64) > 64 * 1024 * 1024 {
+        kprintln!("[microvm]   WARNING: init_size > 64 MB EPT window —");
+        kprintln!("[microvm]   the launcher (12.1.1c-3b2) will need a bigger window.");
+    }
+}
+
 fn require_cap(vault: &Mutex<Vault>, cap_id: &CapId, rights: Rights, intent: &str) -> bool {
     let v = vault.lock();
     match v.check(cap_id, rights) {
