@@ -44,10 +44,42 @@ err()  { echo -e "${RED}[npk]${NC} $1"; }
 
 INSTALL_DATA="$PROJECT_DIR/kernel/src/install_data"
 
+build_microvm_initramfs() {
+    # Build the Rust PID-1 + cpio.gz initramfs that the kernel
+    # embeds via include_bytes! Skip silently if bsdtar is missing
+    # so a partial environment can still build the kernel against the
+    # last-committed initramfs.
+    INIT_DIR="$PROJECT_DIR/microvm/linux/init"
+    INIT_OUT="$PROJECT_DIR/release/assets/microvm-initramfs.cpio.gz"
+    if [ ! -d "$INIT_DIR" ]; then return; fi
+    if ! command -v bsdtar >/dev/null 2>&1; then
+        warn "bsdtar missing — skipping microvm-init rebuild (using committed cpio.gz)"
+        return
+    fi
+    log "Building microvm-init (Rust PID-1)..."
+    (cd "$INIT_DIR" && cargo build --release 2>&1 | tail -3)
+    INIT_BIN="$INIT_DIR/target/x86_64-unknown-linux-gnu/release/microvm-init"
+    if [ ! -f "$INIT_BIN" ]; then
+        warn "microvm-init build failed — using committed cpio.gz"
+        return
+    fi
+    mkdir -p "$PROJECT_DIR/release/assets"
+    INITRAMFS_TMP=$(mktemp -d)
+    cp "$INIT_BIN" "$INITRAMFS_TMP/init"
+    chmod +x "$INITRAMFS_TMP/init"
+    (cd "$INITRAMFS_TMP" && bsdtar --format newc -cf - init | gzip -9 > "$INIT_OUT")
+    rm -rf "$INITRAMFS_TMP"
+    ok "microvm-initramfs.cpio.gz ($(stat -c%s "$INIT_OUT") bytes)"
+}
+
 build() {
     log "Building kernel..."
 
     cd "$PROJECT_DIR"
+
+    # Refresh the embedded initramfs before cargo so include_bytes!
+    # picks up any microvm/linux/init/ source change.
+    build_microvm_initramfs
 
     # Rust bare-metal build (nightly features via rust-toolchain.toml)
     cargo build \
@@ -732,37 +764,22 @@ sha384=${ATLAS_SHA}
             fi
         fi
 
-        # MicroVM initramfs — built from microvm/linux/init/ (Rust
-        # PID-1, ~1.3 KB statically linked Linux ELF) and packed as
-        # newc-cpio + gzip. Phase 12.1.3.
-        INIT_DIR="$PROJECT_DIR/microvm/linux/init"
-        INIT_BIN="$INIT_DIR/target/x86_64-unknown-linux-gnu/release/microvm-init"
-        if [ -d "$INIT_DIR" ]; then
-            log "Building microvm-init (Rust PID-1)..."
-            (cd "$INIT_DIR" && cargo build --release 2>&1 | tail -3)
-            if [ -f "$INIT_BIN" ]; then
-                INITRAMFS_TMP=$(mktemp -d)
-                cp "$INIT_BIN" "$INITRAMFS_TMP/init"
-                chmod +x "$INITRAMFS_TMP/init"
-                (cd "$INITRAMFS_TMP" && bsdtar --format newc -cf - init | gzip -9 \
-                    > "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz")
-                rm -rf "$INITRAMFS_TMP"
-                INITRAMFS_SIZE=$(stat -c%s "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz")
-                INITRAMFS_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz" 2>/dev/null | awk '{print $NF}')
+        # MicroVM initramfs — already built by build_microvm_initramfs()
+        # called from build(); just sign + manifest it here. Phase 12.1.3.
+        INITRAMFS_FILE="$RELEASE_DIR/assets/microvm-initramfs.cpio.gz"
+        if [ -f "$INITRAMFS_FILE" ]; then
+            INITRAMFS_SIZE=$(stat -c%s "$INITRAMFS_FILE")
+            INITRAMFS_SHA=$(openssl dgst -sha384 -hex "$INITRAMFS_FILE" 2>/dev/null | awk '{print $NF}')
 
-                ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:initramfs]
+            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:initramfs]
 size=${INITRAMFS_SIZE}
 sha384=${INITRAMFS_SHA}
 
 "
-                if [ -f "$KEY_FILE" ]; then
-                    openssl dgst -sha384 -sign "$KEY_FILE" \
-                        -out "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz.sig" \
-                        "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz"
-                    ok "Signed initramfs: microvm-initramfs.cpio.gz ($INITRAMFS_SIZE bytes)"
-                fi
-            else
-                warn "microvm-init build failed — initramfs not bundled"
+            if [ -f "$KEY_FILE" ]; then
+                openssl dgst -sha384 -sign "$KEY_FILE" \
+                    -out "${INITRAMFS_FILE}.sig" "$INITRAMFS_FILE"
+                ok "Signed initramfs: microvm-initramfs.cpio.gz ($INITRAMFS_SIZE bytes)"
             fi
         fi
 
