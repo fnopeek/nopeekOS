@@ -732,16 +732,21 @@ pub(super) fn setup_guest_state(guest_rip: u64) -> Result<(), &'static str> {
     let cr0_f1 = unsafe { rdmsr(0x487) };
     let cr0_prot = (((1u64 << 0) | cr0_f0) & cr0_f1) & !(1u64 << 31);
 
-    // CR4: take host CR4 with VMXE etc. Most CR4 bits don't apply
-    // when paging is off, but VMX still requires CR4_FIXED
-    // conformance, which host CR4 already satisfies.
+    // CR4: take host CR4 with VMXE etc., but clear CET (bit 23).
+    // Host nopeekOS has CR4.CET=1 for IBT defense — inheriting
+    // that into the guest enables CET-IBT enforcement against
+    // Alpine vmlinuz's hand-written asm stubs that lack ENDBR64,
+    // raising #CP with err_code=3 (ENDBRANCH violation) early in
+    // boot. CPUID Leaf 7 is also filtered (see enable.rs CPUID
+    // handler) so Linux never tries to re-enable CET via cr4_init.
     let host_cr4: u64;
     // SAFETY: pure register read.
     unsafe { core::arch::asm!("mov {}, cr4", out(reg) host_cr4, options(nostack, preserves_flags)); }
+    let guest_cr4 = host_cr4 & !(1u64 << 23);
 
     vmwrite(GUEST_CR0, cr0_prot)?;
     vmwrite(GUEST_CR3, 0)?;
-    vmwrite(GUEST_CR4, host_cr4)?;
+    vmwrite(GUEST_CR4, guest_cr4)?;
 
     // Selectors. Standard kernel-style values; with unrestricted-
     // guest the AR-byte determines validity, not the selector itself.
