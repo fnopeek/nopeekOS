@@ -634,10 +634,23 @@ fn run_linux_loop(
             10 => {
                 // CPUID — VMX always exits on CPUID. Pass through
                 // to host; guest sees real CPU features. Linux uses
-                // this for early feature detection.
+                // this for early feature detection. Filtered for
+                // features we can't safely expose to the guest.
                 let leaf = regs.rax as u32;
                 let subleaf = regs.rcx as u32;
-                let (eax, ebx, ecx, edx) = vmcs::host_cpuid(leaf, subleaf);
+                let (eax, ebx, mut ecx, mut edx) =
+                    vmcs::host_cpuid(leaf, subleaf);
+                if leaf == 7 && subleaf == 0 {
+                    // Hide CET from the guest. Host nopeekOS has
+                    // CR4.CET=1 for IBT, but Alpine vmlinuz has
+                    // hand-written asm stubs without ENDBR64 — once
+                    // CR4.CET is on, indirect calls to those stubs
+                    // raise #CP and Linux BUG()s. Clearing both bits
+                    // here + masking CR4.CET in initial GUEST_CR4
+                    // (vmcs.rs) keeps CET fully off in the guest.
+                    ecx &= !(1u32 << 7);   // CET_SS  (Shadow Stack)
+                    edx &= !(1u32 << 20);  // CET_IBT (Indirect Branch Tracking)
+                }
                 regs.rax = eax as u64;
                 regs.rbx = ebx as u64;
                 regs.rcx = ecx as u64;
