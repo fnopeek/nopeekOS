@@ -531,6 +531,11 @@ const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 // Secondary control bits.
 const SEC_ENABLE_EPT: u32 = 1 << 1;
 const SEC_UNRESTRICTED_GUEST: u32 = 1 << 7;
+/// Bit 3: enable native RDTSCP/RDPID execution in guest. Without
+/// this, RDTSCP raises #UD even when CPUID indicates support —
+/// Linux's `read_tsc` (clocksource switch) uses RDTSCP and faults
+/// during clocksource init otherwise.
+const SEC_ENABLE_RDTSCP: u32 = 1 << 3;
 /// Bit 12: enable native INVPCID execution in guest. Without this,
 /// INVPCID raises #UD even when CPUID indicates support — Linux's
 /// `native_flush_tlb_global` uses INVPCID and faults during
@@ -582,7 +587,7 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
         IA32_VMX_PROCBASED_CTLS,
     );
     let secondary = fixed_ctrl(
-        SEC_ENABLE_EPT | SEC_UNRESTRICTED_GUEST | SEC_ENABLE_INVPCID,
+        SEC_ENABLE_EPT | SEC_UNRESTRICTED_GUEST | SEC_ENABLE_RDTSCP | SEC_ENABLE_INVPCID,
         IA32_VMX_PROCBASED_CTLS2,
     );
     // EFER state management: CPU saves/loads guest EFER via VMCS
