@@ -20,6 +20,8 @@ const SYS_OPEN: u64 = 2;
 const SYS_DUP2: u64 = 33;
 const SYS_PAUSE: u64 = 34;
 const SYS_EXIT: u64 = 60;
+const SYS_MKDIR: u64 = 83;
+const SYS_MOUNT: u64 = 165;
 const SYS_REBOOT: u64 = 169;
 
 // open(2) flags.
@@ -40,12 +42,24 @@ fn on_panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
-    // Linux kernel exec's PID-1 with whatever fds it set up via
-    // `console_on_rootfs()` — but only if /dev/console exists at the
-    // time. With cpio initramfs, /dev is empty unless cmdline has
-    // `devtmpfs.mount=1` (which we now set). Defensive fallback:
-    // explicitly open /dev/console O_RDWR and dup2 it over 0/1/2 so
-    // print works regardless of how the kernel set us up.
+    // With a cpio initramfs Linux skips `prepare_namespace()` entirely
+    // and exec's /init directly out of the unpacked rootfs — so the
+    // `devtmpfs.mount=1` cmdline parameter is never honored, /dev is
+    // empty, and `console_on_rootfs()` already failed before we got
+    // here. We have to mount devtmpfs ourselves before any open() on
+    // /dev/* will work.
+    unsafe {
+        let _ = syscall2(SYS_MKDIR, b"/dev\0".as_ptr() as u64, 0o755);
+        let _ = syscall5(
+            SYS_MOUNT,
+            b"devtmpfs\0".as_ptr() as u64,
+            b"/dev\0".as_ptr() as u64,
+            b"devtmpfs\0".as_ptr() as u64,
+            0,
+            0,
+        );
+    }
+
     let console_fd = unsafe {
         syscall2(SYS_OPEN, b"/dev/console\0".as_ptr() as u64, O_RDWR)
     };
@@ -185,6 +199,25 @@ unsafe fn syscall4(nr: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
             in("rsi") b,
             in("rdx") c,
             in("r10") d,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    r
+}
+
+unsafe fn syscall5(nr: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> i64 {
+    let r: i64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => r,
+            in("rdi") a,
+            in("rsi") b,
+            in("rdx") c,
+            in("r10") d,
+            in("r8") e,
             out("rcx") _,
             out("r11") _,
             options(nostack),
