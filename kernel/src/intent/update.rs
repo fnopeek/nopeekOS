@@ -5,12 +5,37 @@
 
 use crate::{kprintln, kprint};
 use alloc::string::String;
+use alloc::vec::Vec;
 
 const UPDATE_HOST: &str = "raw.githubusercontent.com";
 const UPDATE_BASE: &str = "/fnopeek/nopeekOS/main/release";
 const MAX_KERNEL_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 const MAX_MANIFEST_SIZE: usize = 4096;
+const MAX_ASSET_MANIFEST_SIZE: usize = 16 * 1024;
+const MAX_ASSET_SIZE: usize = 32 * 1024 * 1024; // bzImage is ~12 MB today
 const MAX_SIG_SIZE: usize = 512;
+
+/// Mapping from asset-manifest section header to (remote filename,
+/// npkFS path). Keep in sync with `build.sh` ASSET_MANIFEST writer
+/// and `kernel/src/install_data/assets/mod.rs` BUNDLED entries.
+struct AssetSpec {
+    section: &'static str,
+    remote_filename: &'static str,
+    npkfs_path: &'static str,
+}
+
+const ASSETS: &[AssetSpec] = &[
+    AssetSpec { section: "font:inter-variable", remote_filename: "inter-variable.ttf",        npkfs_path: "sys/fonts/inter-variable" },
+    AssetSpec { section: "icons:phosphor",      remote_filename: "phosphor.atlas",            npkfs_path: "sys/icons/phosphor" },
+    AssetSpec { section: "microvm:initramfs",   remote_filename: "microvm-initramfs.cpio.gz", npkfs_path: "sys/microvm/initramfs.cpio.gz" },
+    AssetSpec { section: "microvm:linux-virt",  remote_filename: "linux-virt.bzImage",        npkfs_path: "sys/microvm/linux-virt.bzImage" },
+];
+
+struct AssetEntry {
+    section: String,
+    size: usize,
+    sha384: [u8; 48],
+}
 
 struct Manifest {
     version: String,
@@ -151,9 +176,136 @@ pub fn intent_update(_args: &str) {
         kprintln!("[npk] Modules up to date.");
     }
 
+    // 9. Update bundled assets (fonts, icons, microvm payloads)
+    kprintln!("[npk] Checking assets...");
+    let asset_count = update_all_assets();
+    if asset_count > 0 {
+        kprintln!("[npk] {} asset(s) updated.", asset_count);
+    } else {
+        kprintln!("[npk] Assets up to date.");
+    }
+
     if kernel_updated {
         kprintln!("[npk] ====================================");
         kprintln!("[npk]  Type 'reboot' to apply.");
         kprintln!("[npk] ====================================");
     }
+}
+
+fn parse_asset_manifest(data: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
+    let text = core::str::from_utf8(data).map_err(|_| "asset manifest: invalid UTF-8")?;
+    let mut entries = Vec::new();
+    let mut section: Option<String> = None;
+    let mut size: Option<usize> = None;
+    let mut sha384: Option<[u8; 48]> = None;
+
+    let mut flush = |section: &mut Option<String>, size: &mut Option<usize>, sha: &mut Option<[u8; 48]>, out: &mut Vec<AssetEntry>| {
+        if let (Some(s), Some(sz), Some(sh)) = (section.take(), size.take(), sha.take()) {
+            out.push(AssetEntry { section: s, size: sz, sha384: sh });
+        }
+    };
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if line.starts_with('[') && line.ends_with(']') {
+            flush(&mut section, &mut size, &mut sha384, &mut entries);
+            section = Some(String::from(&line[1..line.len() - 1]));
+            continue;
+        }
+        if let Some((key, val)) = line.split_once('=') {
+            match key.trim() {
+                "size" => size = val.trim().parse::<usize>().ok(),
+                "sha384" => sha384 = hex_to_bytes48(val.trim()).ok(),
+                _ => {}
+            }
+        }
+    }
+    flush(&mut section, &mut size, &mut sha384, &mut entries);
+    Ok(entries)
+}
+
+/// Diff release/assets/manifest against npkFS-resident assets and
+/// re-fetch any whose sha384 differs (or that aren't present yet).
+/// Each asset is verified against its detached ECDSA P-384 signature
+/// using the same update key as kernel/modules. Returns the count of
+/// assets actually written.
+pub fn update_all_assets() -> usize {
+    let manifest_path = alloc::format!("{}/assets/manifest", UPDATE_BASE);
+    let manifest_data = match super::http::https_get(UPDATE_HOST, &manifest_path, MAX_ASSET_MANIFEST_SIZE) {
+        Ok(d) => d,
+        Err(e) => { kprintln!("[npk] Asset manifest fetch failed: {}", e); return 0; }
+    };
+
+    let entries = match parse_asset_manifest(&manifest_data) {
+        Ok(e) => e,
+        Err(e) => { kprintln!("[npk] Asset manifest parse error: {}", e); return 0; }
+    };
+
+    let mut updated = 0usize;
+
+    for entry in &entries {
+        let spec = match ASSETS.iter().find(|s| s.section == entry.section) {
+            Some(s) => s,
+            None => {
+                kprintln!("[npk]   unknown asset [{}] (skipping)", entry.section);
+                continue;
+            }
+        };
+
+        let local_hash = crate::npkfs::fetch(spec.npkfs_path).ok()
+            .map(|(data, _)| crate::tls::sha256::sha384(&data));
+
+        if local_hash.as_ref() == Some(&entry.sha384) {
+            kprintln!("[npk]   {} (up to date)", spec.npkfs_path);
+            continue;
+        }
+
+        if local_hash.is_none() {
+            kprintln!("[npk]   {} (not in npkFS — installing)", spec.npkfs_path);
+        } else {
+            kprintln!("[npk]   {} (out of date — refreshing)", spec.npkfs_path);
+        }
+
+        kprint!("[npk]   downloading {} ({} KB)... ", spec.remote_filename, entry.size / 1024);
+        let asset_path = alloc::format!("{}/assets/{}", UPDATE_BASE, spec.remote_filename);
+        let asset_data = match super::http::https_get(UPDATE_HOST, &asset_path, MAX_ASSET_SIZE) {
+            Ok(d) => d,
+            Err(e) => { kprintln!("failed: {}", e); continue; }
+        };
+
+        if asset_data.len() != entry.size {
+            kprintln!("size mismatch (got {} expected {})", asset_data.len(), entry.size);
+            continue;
+        }
+
+        let hash = crate::tls::sha256::sha384(&asset_data);
+        if hash != entry.sha384 {
+            kprintln!("checksum failed");
+            continue;
+        }
+
+        let sig_path = alloc::format!("{}/assets/{}.sig", UPDATE_BASE, spec.remote_filename);
+        let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
+            Ok(d) => d,
+            Err(e) => { kprintln!("sig failed: {}", e); continue; }
+        };
+
+        let pubkey = &crate::update_key::UPDATE_PUB_KEY;
+        if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
+            kprintln!("signature invalid");
+            continue;
+        }
+
+        let _ = crate::npkfs::delete(spec.npkfs_path);
+        if let Err(e) = crate::npkfs::store(spec.npkfs_path, &asset_data, crate::capability::CAP_NULL) {
+            kprintln!("store failed: {:?}", e);
+            continue;
+        }
+
+        kprintln!("OK");
+        updated += 1;
+    }
+
+    updated
 }
