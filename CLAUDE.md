@@ -42,40 +42,48 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 12.1.1c — Linux MicroVM substrate. Kernel `v0.119.0`,
-  sdk `0.6.1`, drun `0.6.0`, loft `0.2.1`, testdisk `0.5.2`.
-- **Today (2026-05-01 — Phase 12.1.0 + 12.1.1 in one push, v0.90 → v0.119):**
-  - **Linux 6.18 LTS bootet im VT-x MicroVM.** Alpine vmlinuz-virt
-    (12 MB bzImage), via 32-bit Boot Protocol, 64 MB EPT window,
-    earlycon auf Port 0x3F8 → live `[guest]` printk-stream auf der
-    nopeekOS-console. Aktueller Zustand: ~6000 VM-exits, Linux
-    durch setup_arch / e820 / NUMA-fake / TSC-deadline-detection,
-    EPT-violation auf MMIO-Region (vermutlich LAPIC 0xFEE00000) —
-    nächster Step ist EPT um eine LAPIC-Page zu erweitern.
-  - **VMX-Substrate komplett**: VMXON/VMCS/VMCLEAR/VMPTRLD,
-    host-state full round-trip, 64 MB EPT mit 2 MB Pages, real-
-    mode + 32-bit prot mode unrestricted-guest, VMRESUME-Loop mit
-    full GPR save/restore, EFER load/save + dynamic IA-32e sync,
-    CR4 VMXE-shadow, I/O-bitmap (alle Ports trapped), MSR-bitmap
-    (zero = no MSR exits), CPUID pass-through, CR3-load handler,
-    serial 0x3F8 OUT-capture + IN-handler-stubs für UART regs.
-  - **`microvm` Shell-Intent** mit Subcommands `test` (HLT-loop
-    substrate), `linux-info` (parse + dump bzImage header),
-    `linux` (Linux launch).
-  - **TSS-install** (3-Slot GDT-clone in BSS + ltr) wegen VMX
-    HOST_TR_SELECTOR≠0 requirement. BSP-only — `microvm` ist
-    `is_core0_intent`.
-  - **bzImage als bundled installer-asset** in `release/assets/`,
-    landet auf fresh-install in npkFS bei `sys/microvm/linux-virt
-    .bzImage`. Installer-kernel.bin 22 MB (regular OTA-kernel
-    bleibt 3.3 MB, nur installer hat den include_bytes!).
-  - **Phase 12.1.0** (12 vorherige Patches): VT-x probe → VMXON
-    round-trip → VMCS round-trip → host-state-VMWRITE/VMREAD →
-    TSS-install → VMLAUNCH gegen long-mode HLT-loop → VMXOFF.
+- **Phase:** 12.1.1c-3 ✅ — Linux MicroVM substrate, milestone done.
+  Kernel `v0.127.0`, sdk `0.6.1`, drun `0.6.0`, loft `0.2.1`,
+  testdisk `0.5.2`.
+- **Today (2026-05-02 — late MSR/CPUID stragglers, Linux booted to rootfs-panic, v0.122 → v0.127):**
+  - **Linux 6.18.26 bootet komplett durch subsys-init.** Final state
+    auf NUC: `Kernel panic - not syncing: VFS: Unable to mount root
+    fs on "" or unknown-block(0,0)` → `Rebooting in 1 seconds..` →
+    triple-fault (exit reason 2). = geplanter v0.121-Endstate, jetzt
+    erreicht. 12.1.1c-Serie (3b3b1 → 3b3b23) komplett abgehakt.
+  - **6 heutige Patches** räumten late CPU-Feature-Stolperer:
+    v0.122 XSETBV-ack, v0.123 RDTSCP secondary-bit, v0.124
+    USER_WAIT_PAUSE secondary-bit (für MWAIT-idle), v0.125 XSAVES
+    + RDMSR/WRMSR-Handler (AMD-MSRs return 0, others ignore), v0.126
+    256 MB Guest-RAM (von 64 → 256, SLAB-init OOM'd vorher) +
+    #CP-Trap im EXCEPTION_BITMAP, v0.127 CET-Bits aus Guest-CPUID
+    maskiert (CET vom Host, ohne Shadow-Stack-Setup im Guest = #CP).
+  - **Pattern für CPUID/MSR-Stragglers etabliert**: enable wenn
+    Linux's Code-Pfad's Capability spiegelbar ist (RDTSCP, MWAIT,
+    XSAVES), hide wenn Guest dann Setup machen müsste den wir nicht
+    spiegeln (CET), stub-return wenn AMD-spezifisch und Linux's
+    fallback eh greift (RDMSR 0xc0011029).
   - **Vollständige Iterations-Historie** + Lessons in
-    `memory/project_microvm.md`. Memory-File ist die Source of
-    Truth für die nächsten Sessions, keine Wiederholung hier.
-- **Pausiert für 12.1.1c-Komplettierung**: TLS-Hardening
+    `memory/project_microvm.md`.
+- **Yesterday (2026-05-01 — Phase 12.1.0 + 12.1.1 in one push, v0.90 → v0.121):**
+  - **VT-x MicroVM substrate from scratch to live earlycon-Stream**:
+    VMXON/VMCS/VMCLEAR/VMPTRLD round-trip, host-state full round-
+    trip mit GDT-walk-resolved TR-Base, TSS-install, VMLAUNCH gegen
+    long-mode HLT-loop, EPT (1 GB identity → 16 MB non-identity →
+    extension für IOAPIC/HPET/LAPIC-region), real-mode +
+    unrestricted-guest, full VMRESUME-Loop mit GPR save/restore,
+    CR3-load + I/O-bitmap (alle Ports trapped) + MSR-bitmap (zero)
+    + CPUID pass-through + EFER load/save + dynamic IA-32e sync.
+  - **bzImage-Loader**: Alpine `vmlinuz-virt` 6.18.26 (12 MB) als
+    bundled installer-asset, landet in npkFS bei
+    `sys/microvm/linux-virt.bzImage`. 32-bit boot protocol entry,
+    boot_params + e820 + cmdline gefügt.
+  - **`microvm` Shell-Intent** mit `test` / `linux-info` / `linux`.
+    BSP-only (`is_core0_intent`) wegen TR/VMXE-state.
+  - **Cmdline-Workaround**: `nolapic noapic acpi=off pci=off
+    tsc=reliable` → Linux skipped Hardware-Probing, bootet als
+    minimal-PC. Wird zurückgenommen sobald virtio-Backends da sind.
+- **Pausiert für 12.1-Komplettierung**: TLS-Hardening
   (eigener TLS-1.3-Handshake `crypto/tls/mod.rs` 967 LoC, Plan
   `rustls` no_std + `rustls-rustcrypto`), TCP-data-retransmit,
   ASN.1-Parser-Swap zu RustCrypto `der`+`x509-cert`. Phase 10
