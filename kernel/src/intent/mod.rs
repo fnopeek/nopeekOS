@@ -1610,7 +1610,7 @@ fn microvm_linux() {
     // the rootfs-mount panic — the 12.1.1d milestone target.
     const CMDLINE: &[u8] =
         b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr \
-          nolapic noapic acpi=off pci=off tsc=reliable";
+          nolapic noapic acpi=off pci=off tsc=reliable devtmpfs.mount=1";
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
     let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {

@@ -16,9 +16,14 @@ use core::arch::asm;
 
 // x86_64 Linux syscall numbers — copy of asm-generic/unistd.h.
 const SYS_WRITE: u64 = 1;
-const SYS_EXIT: u64 = 60;
+const SYS_OPEN: u64 = 2;
+const SYS_DUP2: u64 = 33;
 const SYS_PAUSE: u64 = 34;
+const SYS_EXIT: u64 = 60;
 const SYS_REBOOT: u64 = 169;
+
+// open(2) flags.
+const O_RDWR: u64 = 2;
 
 // reboot(2) magic — see linux/reboot.h. POWER_OFF cleanly halts the
 // VM via Linux's machine_power_off path; matches the `panic=1` flow.
@@ -34,6 +39,24 @@ fn on_panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
+    // Linux kernel exec's PID-1 with whatever fds it set up via
+    // `console_on_rootfs()` — but only if /dev/console exists at the
+    // time. With cpio initramfs, /dev is empty unless cmdline has
+    // `devtmpfs.mount=1` (which we now set). Defensive fallback:
+    // explicitly open /dev/console O_RDWR and dup2 it over 0/1/2 so
+    // print works regardless of how the kernel set us up.
+    let console_fd = unsafe {
+        syscall2(SYS_OPEN, b"/dev/console\0".as_ptr() as u64, O_RDWR)
+    };
+    if console_fd >= 0 {
+        let cfd = console_fd as u64;
+        unsafe {
+            let _ = syscall2(SYS_DUP2, cfd, 0);
+            let _ = syscall2(SYS_DUP2, cfd, 1);
+            let _ = syscall2(SYS_DUP2, cfd, 2);
+        }
+    }
+
     let _ = sys_write(1, b"\n[microvm-init] Hello from nopeekOS PID-1.\n");
     let _ = sys_write(1, b"[microvm-init] kernel boot reached userspace.\n");
     let _ = sys_write(1, b"[microvm-init] entering idle loop (12.1.3a milestone).\n");
@@ -72,6 +95,22 @@ unsafe fn syscall0(nr: u64) -> i64 {
         asm!(
             "syscall",
             inlateout("rax") nr as i64 => r,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    r
+}
+
+unsafe fn syscall2(nr: u64, a: u64, b: u64) -> i64 {
+    let r: i64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => r,
+            in("rdi") a,
+            in("rsi") b,
             out("rcx") _,
             out("r11") _,
             options(nostack),
