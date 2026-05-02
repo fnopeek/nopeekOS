@@ -1583,6 +1583,7 @@ fn microvm_linux_info() {
 /// reflect as `[guest] <line>` kprintln output. Phase 12.1.1c-3b3b2.
 fn microvm_linux() {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
+    const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
     // Linux 32-bit boot protocol cmdline.
     //
     // `earlycon=uart8250,io,0x3f8,115200n8`: activate a simple
@@ -1621,11 +1622,25 @@ fn microvm_linux() {
         }
     };
 
+    let initramfs = match crate::npkfs::fetch(INITRAMFS_PATH) {
+        Ok((b, _hash)) => {
+            kprintln!("[microvm] loaded initramfs from {} ({} bytes)",
+                      INITRAMFS_PATH, b.len());
+            Some(b)
+        }
+        Err(_) => {
+            kprintln!("[microvm] no initramfs at {} — Linux will rootfs-panic",
+                      INITRAMFS_PATH);
+            None
+        }
+    };
+
     kprintln!("[microvm] launching Linux ({} bytes, cmdline: {:?})",
               bytes.len(),
               core::str::from_utf8(CMDLINE).unwrap_or("?"));
 
-    match crate::vmx::run_linux(&bytes, CMDLINE) {
+    let initramfs_slice = initramfs.as_deref();
+    match crate::vmx::run_linux(&bytes, CMDLINE, initramfs_slice) {
         Ok(outcome) => {
             let basic = (outcome.exit_reason & 0xFFFF) as u16;
             kprintln!("[microvm] guest exited — final reason {} qual {:#x}",

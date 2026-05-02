@@ -1,0 +1,20 @@
+# Standalone — keep this crate out of the kernel workspace; it's
+# built for Linux x86_64, not x86_64-unknown-none.
+[workspace]
+
+[package]
+name = "microvm-init"
+version = "0.1.0"
+edition = "2024"
+description = "nopeekOS Linux MicroVM PID-1 — minimal Rust init for the Hello-Bash milestone"
+
+[[bin]]
+name = "microvm-init"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

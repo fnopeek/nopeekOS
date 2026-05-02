@@ -324,11 +324,15 @@ fn run_substrate_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
 ///
 /// `bzimage` is the raw bzImage bytes. `cmdline` is the kernel
 /// command line (no NUL — loader appends one).
-pub fn run_linux(bzimage: &[u8], cmdline: &[u8]) -> Result<vmcs::LaunchOutcome, &'static str> {
+pub fn run_linux(
+    bzimage: &[u8],
+    cmdline: &[u8],
+    initramfs: Option<&[u8]>,
+) -> Result<vmcs::LaunchOutcome, &'static str> {
     with_vmx_root_and_vmcs(|| {
         let (host_base, eptp) = alloc_guest_ram_and_ept()?;
 
-        let load = bzimage::load_into_guest_ram(host_base, bzimage, cmdline)?;
+        let load = bzimage::load_into_guest_ram(host_base, bzimage, cmdline, initramfs)?;
 
         write_host_state_with_current_rsp()?;
         vmcs::setup_guest_state(load.entry_rip)?;

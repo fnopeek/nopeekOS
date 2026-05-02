@@ -1,5 +1,6 @@
 /target
 tools/**/target
+microvm/**/target
 *.iso
 *.o
 *.bin

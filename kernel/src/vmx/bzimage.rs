@@ -118,18 +118,22 @@ pub fn protected_kernel_size(header: &SetupHeader) -> usize {
 
 // ── Loader (Phase 12.1.1c-3b3b2) ───────────────────────────────────
 
-/// Boot-params guest-physical layout (under our 64-MB EPT window):
-///   0x10000  setup-section (boot sector + setup_sects sectors,
-///            ~16 KB) — needed for legacy compatibility / EFI even
-///            when entry is 32-bit.
-///   0x20000  kernel command line (NUL-terminated, max ~256 B)
-///   0x90000  boot_params struct (4 KB zero-page, includes a copy
-///            of the setup-header at offset 0x1F1).
-///   0x100000 protected-mode kernel image (= bzImage[setup_section..])
+/// Boot-params guest-physical layout (under our 256-MB EPT window):
+///   0x10000   setup-section (boot sector + setup_sects sectors,
+///             ~16 KB) — needed for legacy compatibility / EFI even
+///             when entry is 32-bit.
+///   0x20000   kernel command line (NUL-terminated, max ~256 B)
+///   0x90000   boot_params struct (4 KB zero-page, includes a copy
+///             of the setup-header at offset 0x1F1).
+///   0x100000  protected-mode kernel image (= bzImage[setup_section..])
+///   0xC000000 initramfs (= 192 MB, well above kernel's `init_size`
+///             which is ~38 MB for Alpine virt 6.18). Linux frees
+///             this region after unpacking the cpio into rootfs.
 const SETUP_GUEST_PHYS: u64 = 0x10000;
 const CMDLINE_GUEST_PHYS: u64 = 0x20000;
 const BOOT_PARAMS_GUEST_PHYS: u64 = 0x90000;
 const KERNEL_GUEST_PHYS: u64 = 0x100000;
+const INITRAMFS_GUEST_PHYS: u64 = 0xC000000;
 
 /// e820 memory map types.
 const E820_TYPE_RAM: u32 = 1;
@@ -195,10 +199,13 @@ pub struct LoadInfo {
 /// guest-RAM window (caller already allocated it). `bzimage` is
 /// the raw bzImage byte slice. `cmdline` is the kernel command
 /// line as ASCII bytes (no NUL — the loader appends one).
+/// `initramfs` is an optional cpio.gz that becomes the rootfs at
+/// /; Linux's standard logic execs `/init` from it as PID-1.
 pub fn load_into_guest_ram(
     host_base: u64,
     bzimage: &[u8],
     cmdline: &[u8],
+    initramfs: Option<&[u8]>,
 ) -> Result<LoadInfo, &'static str> {
     let header = parse_header(bzimage)?;
     let setup_size = setup_section_size(&header);
@@ -213,10 +220,15 @@ pub fn load_into_guest_ram(
     if KERNEL_GUEST_PHYS + (prot_size as u64) > GUEST_RAM_TOTAL {
         return Err("kernel image overflows guest RAM window");
     }
+    if let Some(ir) = initramfs {
+        if INITRAMFS_GUEST_PHYS + ir.len() as u64 > GUEST_RAM_TOTAL {
+            return Err("initramfs overflows guest RAM window");
+        }
+    }
 
     // Copy setup-section to guest-phys 0x10000.
     // SAFETY: host_base is 2-MB-aligned and pre-allocated; the
-    // [host_base, host_base + 64 MB) window is exclusively ours.
+    // [host_base, host_base + 256 MB) window is exclusively ours.
     unsafe {
         copy_to_guest(host_base, SETUP_GUEST_PHYS, &bzimage[..setup_size]);
         copy_to_guest(
@@ -228,6 +240,10 @@ pub fn load_into_guest_ram(
         // Cmdline at guest-phys 0x20000, NUL-terminated.
         copy_to_guest(host_base, CMDLINE_GUEST_PHYS, cmdline);
         write_byte_to_guest(host_base, CMDLINE_GUEST_PHYS + cmdline.len() as u64, 0);
+
+        if let Some(ir) = initramfs {
+            copy_to_guest(host_base, INITRAMFS_GUEST_PHYS, ir);
+        }
     }
 
     // Build boot_params: zero 4 KB, copy setup-header from bzImage
@@ -252,8 +268,12 @@ pub fn load_into_guest_ram(
     let cmd_line_ptr = CMDLINE_GUEST_PHYS as u32;
     bp[0x228..0x22C].copy_from_slice(&cmd_line_ptr.to_le_bytes());
     // ramdisk_image (u32) at 0x218, ramdisk_size (u32) at 0x21C.
-    bp[0x218..0x21C].copy_from_slice(&0u32.to_le_bytes());
-    bp[0x21C..0x220].copy_from_slice(&0u32.to_le_bytes());
+    let (ramdisk_image, ramdisk_size) = match initramfs {
+        Some(ir) => (INITRAMFS_GUEST_PHYS as u32, ir.len() as u32),
+        None => (0, 0),
+    };
+    bp[0x218..0x21C].copy_from_slice(&ramdisk_image.to_le_bytes());
+    bp[0x21C..0x220].copy_from_slice(&ramdisk_size.to_le_bytes());
 
     // Three e820 entries — standard PC layout.
     bp[OFF_E820_ENTRIES] = 3;
