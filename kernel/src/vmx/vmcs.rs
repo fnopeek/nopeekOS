@@ -554,6 +554,18 @@ const SEC_ENABLE_XSAVES: u32 = 1 << 20;
 /// short kernel-mode delays (e.g. i8042 probe) and faults otherwise.
 const SEC_ENABLE_USER_WAIT_PAUSE: u32 = 1 << 26;
 
+// Pin-based control bits.
+/// Bit 0: External-interrupt exiting. When 1, host-targeted external
+/// interrupts cause VM-exits (basic reason 1) instead of being
+/// delivered to the guest's IDT. Without this, host LAPIC/PIC IRQs
+/// arriving during guest run get acknowledged by the real APIC into
+/// the guest's IDT — but the guest's EOI write to the LAPIC MMIO
+/// goes through EPT into our scratch page (not the real LAPIC), so
+/// real-LAPIC ISR stays set forever and the host stops receiving
+/// interrupts after VMXOFF (= post-`microvm linux` keyboard freeze
+/// observed on N100, 2026-05-02).
+const PIN_EXT_INTR_EXITING: u32 = 1 << 0;
+
 // VM-entry control bits.
 const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
 const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
@@ -590,7 +602,7 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let (io_bitmap_a, io_bitmap_b) = allocate_and_populate_io_bitmaps()?;
     let msr_bitmap = allocate_zero_msr_bitmap()?;
 
-    let pin = fixed_ctrl(0, IA32_VMX_PINBASED_CTLS);
+    let pin = fixed_ctrl(PIN_EXT_INTR_EXITING, IA32_VMX_PINBASED_CTLS);
     let cpu = fixed_ctrl(
         CPU_HLT_EXITING
             | CPU_USE_IO_BITMAPS
