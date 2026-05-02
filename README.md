@@ -529,41 +529,46 @@ Originally planned next, deprioritised in favour of Phase 12. Returns
 as a frontend feature once the MicroVM subsystem is mature enough to
 host AI services as their own apps.
 
-### Phase 12 -- MicroVM (VT-x for Linux apps) — in progress, 12.1.1c
+### Phase 12 -- MicroVM (VT-x for Linux apps) — in progress, 12.1.1c-3 ✅
 
 Per-app x86_64 KVM-style hypervisor inside the kernel so legacy Linux
 GUI apps (Browser first, Phase 12.6) can run sandboxed alongside
 WASM modules. Spec lives in `PHASE12_MICROVM.md`. Progress kernel
-v0.90 → v0.119:
+v0.90 → v0.127:
 
 - [x] **VT-x bring-up** — VMXON / VMCS / VMCLEAR / VMPTRLD round-trip,
       host-state setup with full VMREAD readback, TSS install (BSP).
 - [x] **VMLAUNCH against long-mode HLT-loop** — first VM-entry/exit.
-- [x] **EPT** — 64 MB non-identity window via 2 MB pages, lifted from
-      the kernel's contiguous frame allocator.
+- [x] **EPT** — 256 MB non-identity guest window via 2 MB pages,
+      plus an MMIO scratch slot covering IOAPIC / HPET / LAPIC
+      (0xFEC00000–0xFF000000), lifted from the kernel's contiguous
+      frame allocator.
 - [x] **Real-mode + 32-bit prot mode unrestricted-guest** with
-      `unrestricted-guest` + `enable-EPT` secondary controls.
+      `unrestricted-guest` + `enable-EPT` + `INVPCID` + `RDTSCP` +
+      `USER_WAIT_PAUSE` + `XSAVES` secondary controls.
 - [x] **VMRESUME loop** with full guest GPR save/restore (asm), Rust-
-      side dispatch on exit reason: CPUID pass-through, CR3-load
-      handler, I/O-bitmap captures (port 0x80 + 0x3F8-0x3FF), MSR-
-      bitmap zero (no MSR exits), EFER load/save + dynamic IA-32e
-      sync, CR4 VMXE-shadow, EXCEPTION_BITMAP=0 (Linux's lazy-PT
-      mechanism via `early_make_pgtable` works).
+      side dispatch on exit reason: CPUID pass-through (with CET
+      bits masked), CR3-load handler, I/O-bitmap captures (port
+      0x80 + 0x3F8-0x3FF + i8042 0x60/0x64 + RTC 0x70/0x71),
+      RDMSR/WRMSR stub (AMD MSRs return 0, others ignore),
+      XSETBV-ack, EFER load/save + dynamic IA-32e sync, CR4
+      VMXE-shadow, EXCEPTION_BITMAP including #CP for CET-debug.
 - [x] **bzImage loader** — Alpine v3.23 vmlinuz-virt 6.18.26
       (12 MB), shipped as bundled installer-asset, lands in npkFS at
       `sys/microvm/linux-virt.bzImage` on fresh install. 32-bit boot
       protocol entry: setup-section at guest 0x10000, kernel at
       0x100000, boot_params at 0x90000 (3-entry e820), cmdline at
-      0x20000, %rsi = boot_params_phys.
-- [x] **Linux earlycon stream live** — `microvm linux` prints
-      `[guest] [    0.000000] Linux version 6.18.26-0-virt …` and
-      every subsequent printk byte from port 0x3F8 directly onto the
-      nopeekOS console. e820 parsed correctly, ACPI gracefully
-      skipped, NUMA fake-node + zone setup, TSC deadline timer
-      detected, ~6000 VM-exits handled.
-- [ ] **EPT extension for LAPIC region** (next, v0.120) — Linux
-      currently EPT-violates around 0xFEE00000 right after TSC
-      deadline detection.
+      0x20000, %rsi = boot_params_phys, 256 MB guest RAM.
+- [x] **Linux booted to rootfs panic** — `microvm linux` runs the
+      Alpine 6.18.26 kernel through `setup_arch`, `e820`, NUMA-fake,
+      TSC, RCU, kfence, percpu init, fpu init (XSAVES), SLUB, RCU
+      Tasks, FPU XSAVE features 0x7, devtmpfs, PCI/ACPI gracefully
+      skipped, scheduler clock stable, then panics on the expected
+      `VFS: Unable to mount root fs on "" or unknown-block(0,0)`
+      (no rootfs supplied yet) and triple-faults to reset.
+      ~62 800 VM-exits handled. = 12.1.1c-3 milestone done.
+- [ ] 12.1.1d formal panic-detection (regex on captured serial
+      stream → `LaunchOutcome::GuestPanic` instead of "exit reason 2").
 - [ ] 12.1.2  virtio-console backend (replace earlycon when full
       console driver gives up post-init).
 - [ ] 12.1.3  initramfs + Rust-PID-1 + bash → "Hello bash" PoC.

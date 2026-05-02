@@ -22,9 +22,10 @@
 //!   12.1.1a   EPT identity-map (1 GB)                 ✓ v0.97.0
 //!   12.1.1b   Real-mode unrestricted guest + I/O exit ✓ v0.98.0
 //!   12.1.1c-1 Non-identity 16 MB EPT window           ✓ v0.99.0…0.99.1
-//!   12.1.1c-2 VMX bring-up off the boot path          ← this file
-//!   12.1.1c-3 Alpine bzImage loader + microvm linux
-//!   12.1.1d   Early-panic detection (I/O-bitmap)
+//!   12.1.1c-2 VMX bring-up off the boot path          ✓ v0.100.x
+//!   12.1.1c-3 Alpine bzImage loader + microvm linux   ✓ v0.101…0.127
+//!             (Linux booted to rootfs-panic = expected)
+//!   12.1.1d   Formal panic detection                  ← next
 //!   12.1.2    virtio-console backend
 //!   12.1.3    initramfs + Rust-PID-1 + bash
 //!   12.1.4    inject_console round-trip
