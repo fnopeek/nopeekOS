@@ -632,21 +632,25 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     // Inert ancillary controls — clear bitmaps + counts so VMX
     // doesn't dereference them.
     //
-    // EXCEPTION_BITMAP=0: don't trap guest exceptions. Linux's
-    // early boot specifically RELIES on its own #PF handler
-    // (`early_idt_handler_array` → `early_make_pgtable`) to build
-    // the direct-map page tables lazily. The kernel deliberately
-    // leaves PML4[273] (= PAGE_OFFSET) empty during startup_64 and
-    // expects the very first __va(boot_params_phys) access to
-    // fault, walk into early_make_pgtable, allocate a page from
-    // `early_dynamic_pgts`, populate L4/L3/L2/L1 entries for the
-    // faulting address, then re-execute. Trapping the #PF in the
-    // hypervisor breaks this lazy-PT mechanism — that was an
-    // earlier mistake (12.1.1c-3b3b6 diagnostic mode) which made
-    // it look like the kernel was unable to map its own memory.
-    // Triple faults (basic reason 2) still surface independently
-    // of EXCEPTION_BITMAP if Linux truly fails.
-    vmwrite(EXCEPTION_BITMAP, 0)?;
+    // EXCEPTION_BITMAP: trap only #CP (vector 21, CET control-flow
+    // protection). Linux's early boot specifically RELIES on its
+    // own #PF handler (`early_idt_handler_array` → `early_make_pgtable`)
+    // to build the direct-map page tables lazily — trapping #PF
+    // breaks that lazy-PT mechanism (12.1.1c-3b3b6 lesson).
+    //
+    // #CP is different: when CR4.CET=1 inherits from host into the
+    // guest and Linux hits an indirect call to a non-ENDBR target
+    // (e.g. asm reboot stubs after panic), Linux's exc_control_protection
+    // BUG()s and recursively re-faults. Without us trapping it, the
+    // recursion runs entirely in non-root mode with no exits — host
+    // CPU is stuck in VMRESUME-loop forever (no I/O, no HLT, our
+    // MAX_ITERATIONS cap never fires). Trapping #CP surfaces it as
+    // exit reason 0 and lets the loop terminate cleanly.
+    //
+    // Triple faults (basic reason 2) still surface independently of
+    // EXCEPTION_BITMAP if Linux truly fails.
+    const TRAP_CP: u64 = 1 << 21;
+    vmwrite(EXCEPTION_BITMAP, TRAP_CP)?;
     vmwrite(CR3_TARGET_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_STORE_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0)?;

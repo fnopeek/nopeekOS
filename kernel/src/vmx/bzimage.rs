@@ -138,15 +138,20 @@ const E820_TYPE_RESERVED: u32 = 2;
 /// Standard PC layout for the e820 we present to Linux:
 ///   [0x000000, 0x09F000) RAM (640 KB lower memory)
 ///   [0x09F000, 0x100000) RESERVED (BIOS area + EBDA)
-///   [0x100000, 0x4000000) RAM (1 MB → 64 MB, "extended memory")
+///   [0x100000, GUEST_RAM_TOTAL) RAM ("extended memory")
 ///
 /// Linux's early-boot direct-map setup walks the e820 and builds
 /// the kernel's identity/direct mappings. A single contiguous
-/// `[0, 64 MB) RAM` entry omits the BIOS hole, which on some
+/// `[0, RAM_TOTAL) RAM` entry omits the BIOS hole, which on some
 /// kernel paths trips memory-layout assumptions and leaves the
 /// direct-map L4 entry empty for low-RAM regions. Splitting per
 /// PC convention works around it.
-const GUEST_RAM_TOTAL: u64 = 64 * 1024 * 1024;
+///
+/// Must equal `ept::GUEST_WINDOW_BYTES` — the EPT window backs the
+/// e820 RAM. 64 MB OOM-panicked Alpine virt during first kthread
+/// fork ("Memory: 20420K available"); 256 MB gives Linux ~230 MB
+/// usable, enough for initcalls + initramfs + a small distro.
+const GUEST_RAM_TOTAL: u64 = 256 * 1024 * 1024;
 
 /// Linux loadflags bits we need.
 const LOADFLAG_LOADED_HIGH: u8 = 1 << 0;
