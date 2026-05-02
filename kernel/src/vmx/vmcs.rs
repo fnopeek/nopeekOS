@@ -541,6 +541,11 @@ const SEC_ENABLE_RDTSCP: u32 = 1 << 3;
 /// `native_flush_tlb_global` uses INVPCID and faults during
 /// setup_arch otherwise.
 const SEC_ENABLE_INVPCID: u32 = 1 << 12;
+/// Bit 26: enable native UMONITOR/UMWAIT/TPAUSE (WAITPKG) in guest.
+/// Without this, TPAUSE raises #UD even when CPUID Leaf 7:ECX[5]
+/// indicates support — Linux's `delay_halt_tpause` uses TPAUSE for
+/// short kernel-mode delays (e.g. i8042 probe) and faults otherwise.
+const SEC_ENABLE_USER_WAIT_PAUSE: u32 = 1 << 26;
 
 // VM-entry control bits.
 const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
@@ -587,7 +592,11 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
         IA32_VMX_PROCBASED_CTLS,
     );
     let secondary = fixed_ctrl(
-        SEC_ENABLE_EPT | SEC_UNRESTRICTED_GUEST | SEC_ENABLE_RDTSCP | SEC_ENABLE_INVPCID,
+        SEC_ENABLE_EPT
+            | SEC_UNRESTRICTED_GUEST
+            | SEC_ENABLE_RDTSCP
+            | SEC_ENABLE_INVPCID
+            | SEC_ENABLE_USER_WAIT_PAUSE,
         IA32_VMX_PROCBASED_CTLS2,
     );
     // EFER state management: CPU saves/loads guest EFER via VMCS
