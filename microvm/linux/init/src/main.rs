@@ -23,6 +23,7 @@ const SYS_EXIT: u64 = 60;
 const SYS_REBOOT: u64 = 169;
 
 // open(2) flags.
+const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
 
 // reboot(2) magic — see linux/reboot.h. POWER_OFF cleanly halts the
@@ -57,9 +58,21 @@ pub unsafe extern "C" fn _start() -> ! {
         }
     }
 
-    let _ = sys_write(1, b"\n[microvm-init] Hello from nopeekOS PID-1.\n");
-    let _ = sys_write(1, b"[microvm-init] kernel boot reached userspace.\n");
-    let _ = sys_write(1, b"[microvm-init] entering idle loop (12.1.3a milestone).\n");
+    // /dev/kmsg always works regardless of tty buffering / IRQ state:
+    // writes to it go through Linux's `printk` subsystem, which uses
+    // the same polled-write path as kernel log. With our `noapic
+    // nolapic` cmdline the tty layer can't drain because there's no
+    // IRQ4 — but printk doesn't need one. So even if /dev/console
+    // writes get stuck in the tty TX buffer, /dev/kmsg writes always
+    // reach our [guest] capture. Best-effort fallback channel; -1
+    // here is non-fatal, we still try /dev/console.
+    let kmsg_fd = unsafe {
+        syscall2(SYS_OPEN, b"/dev/kmsg\0".as_ptr() as u64, O_WRONLY)
+    };
+
+    say(kmsg_fd, b"\n[microvm-init] Hello from nopeekOS PID-1.\n");
+    say(kmsg_fd, b"[microvm-init] kernel boot reached userspace.\n");
+    say(kmsg_fd, b"[microvm-init] entering idle loop (12.1.3a milestone).\n");
 
     // PID-1 must never return — the kernel panics on
     // "Attempted to kill init!" otherwise. Park in pause(2) so we
@@ -68,6 +81,17 @@ pub unsafe extern "C" fn _start() -> ! {
     loop {
         let _ = unsafe { syscall0(SYS_PAUSE) };
     }
+}
+
+/// Write a message to both /dev/kmsg (printk-direct, polled, always
+/// reaches the host capture) and stdout (/dev/console via tty layer,
+/// may be buffered behind IRQ4 which doesn't fire on our hypervisor).
+/// Either reaching the host is enough.
+fn say(kmsg_fd: i64, msg: &[u8]) {
+    if kmsg_fd >= 0 {
+        let _ = unsafe { syscall3(SYS_WRITE, kmsg_fd as u64, msg.as_ptr() as u64, msg.len() as u64) };
+    }
+    let _ = sys_write(1, msg);
 }
 
 fn sys_write(fd: u64, buf: &[u8]) -> i64 {
