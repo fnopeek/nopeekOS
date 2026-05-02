@@ -259,6 +259,12 @@ fn run_substrate_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
 
         match basic {
+            1 => {
+                // External interrupt — host IRQ that arrived during
+                // guest run. The `sti` at the tail of run_guest_once
+                // already let the host IDT dispatch it; just resume.
+                last_outcome = Some(outcome);
+            }
             12 => {
                 kprintln!("[microvm] guest HLT after {} I/O exit(s)", io_count);
                 if io_byte_n > 0 {
@@ -623,6 +629,12 @@ fn run_linux_loop(
                 trace.dump();
                 last_outcome = Some(outcome);
                 break;
+            }
+            1 => {
+                // External interrupt — host IRQ that arrived during
+                // guest run. The `sti` at the tail of run_guest_once
+                // already let the host IDT dispatch it; just resume.
+                last_outcome = Some(outcome);
             }
             12 => {
                 serial.flush();
