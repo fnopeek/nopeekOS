@@ -541,6 +541,13 @@ const SEC_ENABLE_RDTSCP: u32 = 1 << 3;
 /// `native_flush_tlb_global` uses INVPCID and faults during
 /// setup_arch otherwise.
 const SEC_ENABLE_INVPCID: u32 = 1 << 12;
+/// Bit 20: enable native XSAVES/XRSTORS in guest. Without this,
+/// XSAVES raises #UD even when CPUID Leaf 0xD subleaf 1:EAX[3]
+/// indicates support — Linux uses XSAVES for context switch when
+/// supervisor xstates are present (CET_S = XFEATURE bit 12, which
+/// Alpine virt has in the active set 0x1807). First userspace
+/// context switch would fault otherwise.
+const SEC_ENABLE_XSAVES: u32 = 1 << 20;
 /// Bit 26: enable native UMONITOR/UMWAIT/TPAUSE (WAITPKG) in guest.
 /// Without this, TPAUSE raises #UD even when CPUID Leaf 7:ECX[5]
 /// indicates support — Linux's `delay_halt_tpause` uses TPAUSE for
@@ -596,6 +603,7 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
             | SEC_UNRESTRICTED_GUEST
             | SEC_ENABLE_RDTSCP
             | SEC_ENABLE_INVPCID
+            | SEC_ENABLE_XSAVES
             | SEC_ENABLE_USER_WAIT_PAUSE,
         IA32_VMX_PROCBASED_CTLS2,
     );

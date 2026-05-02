@@ -550,6 +550,8 @@ fn run_linux_loop(
     let mut last_outcome: Option<vmcs::LaunchOutcome> = None;
     let mut iter: u32 = 0;
     let mut io_dropped: u32 = 0;
+    let mut msr_log_count: u32 = 0;
+    const MSR_LOG_CAP: u32 = 32;
 
     while iter < MAX_ITERATIONS {
         iter += 1;
@@ -703,6 +705,36 @@ fn run_linux_loop(
                 // already has x87/SSE/AVX enabled (set in boot.s),
                 // so Linux's intended write is effectively a no-op
                 // for the bits it cares about. Just advance RIP.
+                vmcs::advance_guest_rip()?;
+                last_outcome = Some(outcome);
+            }
+            31 => {
+                // RDMSR — exits when ECX is outside MSR-bitmap ranges
+                // (0-0x1FFF and 0xC0000000-0xC0001FFF) or when the
+                // bitmap bit is set. Our bitmap is zero, so this is
+                // an out-of-range MSR. Synthesize a zero return — the
+                // safest answer for unknown info MSRs (Linux's
+                // safe_rdmsr-style code copes with bogus values).
+                let msr = regs.rcx as u32;
+                if msr_log_count < MSR_LOG_CAP {
+                    kprintln!("[microvm] RDMSR {:#010x} → 0 (unhandled)", msr);
+                    msr_log_count += 1;
+                }
+                regs.rax = 0;
+                regs.rdx = 0;
+                vmcs::advance_guest_rip()?;
+                last_outcome = Some(outcome);
+            }
+            32 => {
+                // WRMSR — same gating as RDMSR. Silently absorb
+                // (don't propagate to host — writing arbitrary MSRs
+                // would break the host's pstate/PMU/etc).
+                let msr = regs.rcx as u32;
+                if msr_log_count < MSR_LOG_CAP {
+                    let val = (regs.rdx << 32) | (regs.rax & 0xFFFF_FFFF);
+                    kprintln!("[microvm] WRMSR {:#010x} = {:#018x} (absorbed)", msr, val);
+                    msr_log_count += 1;
+                }
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
