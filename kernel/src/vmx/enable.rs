@@ -785,7 +785,7 @@ fn run_linux_loop(
                 // safest answer for unknown info MSRs (Linux's
                 // safe_rdmsr-style code copes with bogus values).
                 let msr = regs.rcx as u32;
-                if msr_log_count < MSR_LOG_CAP {
+                if !msr_is_known_noise(msr) && msr_log_count < MSR_LOG_CAP {
                     kprintln!("[microvm] RDMSR {:#010x} → 0 (unhandled)", msr);
                     msr_log_count += 1;
                 }
@@ -888,6 +888,23 @@ fn run_linux_loop(
     }
 
     last_outcome.ok_or("Linux guest exceeded max iterations without first VM-exit")
+}
+
+/// MSRs that Linux probes via `safe_rdmsr` (catches #GP) but we
+/// know are vendor-specific noise on a typical Intel host. Suppress
+/// the per-exit log line so the kernel's actual unhandled-MSR list
+/// stays readable. Linux behaves correctly on the synthesized 0 — its
+/// safe_rdmsr_on_cpu callers all check the return value.
+fn msr_is_known_noise(msr: u32) -> bool {
+    match msr {
+        // AMD K8/K10/Family-17h architectural MSRs that Linux probes
+        // for power/temperature features (HWP, smbus, LS_CFG). Always
+        // absent on Intel.
+        0xC001_1029 |  // AMD LS_CFG
+        0xC001_0015 |  // AMD HWCR
+        0xC001_001F => true, // AMD NB_CFG
+        _ => false,
+    }
 }
 
 /// Read a guest GPR by ABI register index (0=rax, 1=rcx, 2=rdx,
