@@ -607,6 +607,17 @@ fn run_linux_loop(
     let mut msr_log_count: u32 = 0;
     const MSR_LOG_CAP: u32 = 32;
 
+    // Idle-detection. Once init enters its pause(2)/wait-loop, the
+    // only exits we see are reason 1 (external interrupt, mostly
+    // host timer ticks) at ~100 Hz. After IDLE_THRESHOLD consecutive
+    // reason-1 exits with no other activity, declare the guest
+    // idle-in-userspace and bail. Without this the shell is blocked
+    // in run_linux_loop until MAX_ITERATIONS cap (~17 min at 100 Hz),
+    // perceived as a host freeze. Real cancellation comes with
+    // 12.1.4 inject_console.
+    let mut consecutive_idle: u32 = 0;
+    const IDLE_THRESHOLD: u32 = 200;
+
     while iter < MAX_ITERATIONS {
         iter += 1;
         // Before each entry, sync the IA-32e-mode-guest control to
@@ -620,6 +631,13 @@ fn run_linux_loop(
         launched = true;
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
         trace.record(basic, outcome.exit_qualification);
+
+        // Reset idle-counter on any non-timer-tick activity. The
+        // counter only progresses on a clean run of pure reason-1
+        // exits (= guest sitting in pause(2)).
+        if basic != 1 {
+            consecutive_idle = 0;
+        }
 
         match basic {
             0 => {
@@ -682,6 +700,16 @@ fn run_linux_loop(
                 // External interrupt — host IRQ that arrived during
                 // guest run. The `sti` at the tail of run_guest_once
                 // already let the host IDT dispatch it; just resume.
+                consecutive_idle = consecutive_idle.saturating_add(1);
+                if consecutive_idle >= IDLE_THRESHOLD {
+                    serial.flush();
+                    kprintln!(
+                        "[microvm] guest idle in userspace ({} consecutive timer ticks after {} iters) — exiting cleanly",
+                        consecutive_idle, iter,
+                    );
+                    last_outcome = Some(outcome);
+                    break;
+                }
                 last_outcome = Some(outcome);
             }
             12 => {
