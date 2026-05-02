@@ -1581,17 +1581,9 @@ fn microvm_linux_info() {
 /// hand it + a cmdline to vmx::run_linux. The kernel writes its
 /// earlyprintk to serial 0x3F8, which we trap via I/O bitmap and
 /// reflect as `[guest] <line>` kprintln output. Phase 12.1.1c-3b3b2.
-/// MicroVM PID-1 initramfs, embedded in the kernel binary. The same
-/// file also gets seeded into npkFS at fresh-install time (see
-/// `install_data/assets/mod.rs`), but embedding here means OTA
-/// `update` ships a new init alongside a new kernel without needing
-/// USB reinstall to refresh the npkFS asset. Built by
-/// `./build.sh release` from `microvm/linux/init/`. ~700 bytes.
-static EMBEDDED_INITRAMFS: &[u8] =
-    include_bytes!("../../../release/assets/microvm-initramfs.cpio.gz");
-
 fn microvm_linux() {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
+    const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
     // Linux 32-bit boot protocol cmdline.
     //
     // `earlycon=uart8250,io,0x3f8,115200n8`: activate a simple
@@ -1630,13 +1622,24 @@ fn microvm_linux() {
         }
     };
 
-    kprintln!("[microvm] using embedded initramfs ({} bytes)", EMBEDDED_INITRAMFS.len());
+    let initramfs = match crate::npkfs::fetch(INITRAMFS_PATH) {
+        Ok((b, _hash)) => {
+            kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());
+            Some(b)
+        }
+        Err(e) => {
+            kprintln!("[microvm] no initramfs at {}: {:?} — booting without",
+                      INITRAMFS_PATH, e);
+            kprintln!("[microvm] reinstall from USB to seed bundled assets");
+            None
+        }
+    };
 
     kprintln!("[microvm] launching Linux ({} bytes, cmdline: {:?})",
               bytes.len(),
               core::str::from_utf8(CMDLINE).unwrap_or("?"));
 
-    match crate::vmx::run_linux(&bytes, CMDLINE, Some(EMBEDDED_INITRAMFS)) {
+    match crate::vmx::run_linux(&bytes, CMDLINE, initramfs.as_deref()) {
         Ok(outcome) => {
             let basic = (outcome.exit_reason & 0xFFFF) as u16;
             kprintln!("[microvm] guest exited — final reason {} qual {:#x}",
