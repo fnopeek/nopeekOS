@@ -349,19 +349,37 @@ struct SerialState {
     /// a time so this rarely fills.
     line: [u8; 256],
     line_n: usize,
+    /// Set on first observed `Kernel panic - not syncing:` line.
+    /// Used by the loop's exit summary so the post-panic triple-fault
+    /// is reported as the expected reboot path rather than an
+    /// "unhandled exit reason 2".
+    panic_observed: bool,
+    /// Captured trailing text of the panic line (after the
+    /// `Kernel panic - not syncing: ` prefix), e.g. the VFS
+    /// `Unable to mount root fs` reason.
+    panic_msg: [u8; 192],
+    panic_msg_n: usize,
 }
+
+const PANIC_PREFIX: &[u8] = b"Kernel panic - not syncing: ";
 
 impl SerialState {
     fn new() -> Self {
-        Self { dlab: false, line: [0; 256], line_n: 0 }
+        Self {
+            dlab: false,
+            line: [0; 256],
+            line_n: 0,
+            panic_observed: false,
+            panic_msg: [0; 192],
+            panic_msg_n: 0,
+        }
     }
-}
 
-impl SerialState {
     fn put_char(&mut self, byte: u8) {
         use crate::kprintln;
         if byte == b'\n' || self.line_n == self.line.len() {
             let n = self.line_n;
+            self.scan_for_panic(n);
             let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
             kprintln!("[guest] {}", s);
             self.line_n = 0;
@@ -377,10 +395,36 @@ impl SerialState {
         use crate::kprintln;
         if self.line_n > 0 {
             let n = self.line_n;
+            self.scan_for_panic(n);
             let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
             kprintln!("[guest] {}", s);
             self.line_n = 0;
         }
+    }
+
+    /// Search the just-completed `self.line[..n]` for the kernel-
+    /// panic marker. Linux's printk frame is `<level>timestamp> body`,
+    /// so the marker can sit anywhere on the line — substring match.
+    fn scan_for_panic(&mut self, n: usize) {
+        if self.panic_observed { return; }
+        let line = &self.line[..n];
+        let prefix = PANIC_PREFIX;
+        if line.len() < prefix.len() { return; }
+        for start in 0..=(line.len() - prefix.len()) {
+            if &line[start..start + prefix.len()] == prefix {
+                self.panic_observed = true;
+                let body_start = start + prefix.len();
+                let body = &line[body_start..];
+                let copy_n = body.len().min(self.panic_msg.len());
+                self.panic_msg[..copy_n].copy_from_slice(&body[..copy_n]);
+                self.panic_msg_n = copy_n;
+                return;
+            }
+        }
+    }
+
+    fn panic_msg_str(&self) -> &str {
+        core::str::from_utf8(&self.panic_msg[..self.panic_msg_n]).unwrap_or("?")
     }
 }
 
@@ -791,12 +835,40 @@ fn run_linux_loop(
                 last_outcome = Some(outcome);
                 break;
             }
+            2 => {
+                // Triple fault. Linux uses this as `emergency_restart`
+                // when ACPI/PIIX/EFI reset paths are unavailable —
+                // i.e. the standard exit path on `panic=1` here.
+                serial.flush();
+                if serial.panic_observed {
+                    kprintln!(
+                        "[microvm] linux kernel panicked (after {} iters): {}",
+                        iter, serial.panic_msg_str(),
+                    );
+                    kprintln!("[microvm] guest then triple-faulted via emergency_restart (= expected reboot path)");
+                } else {
+                    kprintln!(
+                        "[microvm] guest triple-faulted after {} iters (no kernel-panic seen on console)",
+                        iter,
+                    );
+                }
+                io_stats.dump();
+                trace.dump();
+                last_outcome = Some(outcome);
+                break;
+            }
             _ => {
                 serial.flush();
                 kprintln!(
                     "[microvm] unhandled exit reason {} qual {:#x} after {} iters",
                     basic, outcome.exit_qualification, iter,
                 );
+                if serial.panic_observed {
+                    kprintln!(
+                        "[microvm]   note: kernel panic was observed: {}",
+                        serial.panic_msg_str(),
+                    );
+                }
                 io_stats.dump();
                 trace.dump();
                 last_outcome = Some(outcome);
