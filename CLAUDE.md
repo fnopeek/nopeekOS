@@ -42,10 +42,38 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 12.1.1c-3 ✅ — Linux MicroVM substrate, milestone done.
-  Kernel `v0.127.0`, sdk `0.6.1`, drun `0.6.0`, loft `0.2.1`,
-  testdisk `0.5.2`.
-- **Today (2026-05-02 — late MSR/CPUID stragglers, Linux booted to rootfs-panic, v0.122 → v0.127):**
+- **Phase:** 12.1.3 ✅ — Linux MicroVM mit eigenem PID-1, trust-
+  boundary validated. Kernel `v0.130.0`, sdk `0.6.1`, drun `0.6.0`,
+  loft `0.2.1`, testdisk `0.5.2`.
+- **Today (2026-05-02 — late stragglers, freeze fix, panic detection, initramfs+pid1, v0.122 → v0.130):**
+  - **v0.130 — initramfs + Rust-PID-1 (12.1.3).** Eigene `microvm-init`
+    Crate (`microvm/linux/init/`, ~1.3 KB statisch gelinktes Linux ELF),
+    no_std, no_main, raw syscalls (write/pause/reboot). Wird bei
+    `./build.sh release` via `bsdtar --format newc + gzip` zu
+    `release/assets/microvm-initramfs.cpio.gz` (694 Bytes), per ECDSA
+    P-384 signiert, im Installer als `sys/microvm/initramfs.cpio.gz`
+    in npkFS gepflanzt. `intent::microvm_linux` lädt's via npkfs::fetch,
+    übergibt an `vmx::run_linux(bzimage, cmdline, initramfs)`. Loader
+    in `bzimage::load_into_guest_ram` legt's bei Guest-Phys 0xC000000
+    ab, setzt boot_params.hdr.ramdisk_image + ramdisk_size. Linux
+    unpackt cpio → rootfs, exec'd /init. Erstes Userspace-Banner
+    erwartet: "[microvm-init] Hello from nopeekOS PID-1".
+  - **v0.129 — formal panic-detection (12.1.1d).** SerialState scant
+    auf "Kernel panic - not syncing: ", erkennt Panic-Reason, klassifiziert
+    den nachfolgenden triple-fault als erwartet. AMD-MSR-Spam-Filter
+    daneben (LS_CFG/HWCR/NB_CFG werden auf Intel always-absent → kein
+    Log).
+  - **v0.128 — Pin-based external-interrupt-exiting fix.** Erster
+    `microvm linux` froze NUC komplett (hard-reset nötig), weil
+    Pin-based bit 0 = 0 → Host-LAPIC-IRQs gingen während Guest-Run
+    direkt in Guest-IDT, mit echtem LAPIC-Acknowledge → ISR-stuck
+    → Host-Tastatur/Timer tot nach VMXOFF. Fix: bit gesetzt, IRQs
+    causen jetzt VM-exit reason 1, der `sti` am Ende von
+    `run_guest_once` lässt den pending IRQ durch Host-IDT laufen.
+    Architekturell wichtig: das war ein Host-Config-Bug, kein
+    Guest-Escape — VMX-Hardware-Boundary hat gehalten. **Erster
+    echter Trust-Boundary-Test bestanden**: Linux gepanict, Host
+    bleibt responsiv.
   - **Linux 6.18.26 bootet komplett durch subsys-init.** Final state
     auf NUC: `Kernel panic - not syncing: VFS: Unable to mount root
     fs on "" or unknown-block(0,0)` → `Rebooting in 1 seconds..` →

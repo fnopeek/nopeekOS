@@ -26,8 +26,8 @@
 //!   12.1.1c-3 Alpine bzImage loader + microvm linux   ✓ v0.101…0.127
 //!             (Linux booted to rootfs-panic = expected)
 //!   12.1.1d   Formal panic detection                  ✓ v0.129.0
-//!   12.1.2    virtio-console backend
-//!   12.1.3    initramfs + Rust-PID-1 + bash
+//!   12.1.3    initramfs + Rust-PID-1                  ✓ v0.130.0
+//!   12.1.2    virtio-console backend                  ← next
 //!   12.1.4    inject_console round-trip
 
 pub mod bzimage;
@@ -100,10 +100,15 @@ pub fn run_substrate_test() -> Result<vmcs::LaunchOutcome, &'static str> {
 }
 
 /// Boot a Linux bzImage in our MicroVM substrate. Same per-call
-/// resource leaks as `run_substrate_test`.
-pub fn run_linux(bzimage: &[u8], cmdline: &[u8]) -> Result<vmcs::LaunchOutcome, &'static str> {
+/// resource leaks as `run_substrate_test`. `initramfs` is optional;
+/// when `Some`, Linux unpacks it as cpio rootfs and execs `/init`.
+pub fn run_linux(
+    bzimage: &[u8],
+    cmdline: &[u8],
+    initramfs: Option<&[u8]>,
+) -> Result<vmcs::LaunchOutcome, &'static str> {
     match *PROBE.lock() {
-        ProbeState::Available(_) => enable::run_linux(bzimage, cmdline),
+        ProbeState::Available(_) => enable::run_linux(bzimage, cmdline, initramfs),
         ProbeState::Unavailable(reason) => Err(reason),
         ProbeState::NotProbed => Err("vmx::init() not called yet"),
     }

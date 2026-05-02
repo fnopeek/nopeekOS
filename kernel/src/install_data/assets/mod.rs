@@ -69,6 +69,16 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         version: None,
     },
 
+    // ── MicroVM initramfs (Phase 12.1.3+) ─────────────────────────
+    // Rust PID-1 from microvm/linux/init/ packed as newc-cpio + gzip.
+    // Loaded by `microvm linux` alongside the bzImage; Linux mounts
+    // it at /, exec's /init.
+    BundledAsset {
+        fs_path: "sys/microvm/initramfs.cpio.gz",
+        bytes:   include_bytes!("microvm-initramfs.cpio.gz"),
+        version: None,
+    },
+
     // ── First-party WASM modules ──────────────────────────────────
     // Keep in sync with release/modules/ output of build.sh release.
     BundledAsset {

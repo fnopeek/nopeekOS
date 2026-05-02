@@ -209,6 +209,17 @@ GRUBCFG
         touch "$ASSETS_DIR/linux-virt.bzImage"
     fi
 
+    # MicroVM initramfs: built by `./build.sh release` from
+    # microvm/linux/init/. Phase 12.1.3+. Optional — installer compiles
+    # without it; runtime `microvm linux` falls back to no-initramfs.
+    if [ -f "$PROJECT_DIR/release/assets/microvm-initramfs.cpio.gz" ]; then
+        cp "$PROJECT_DIR/release/assets/microvm-initramfs.cpio.gz" "$ASSETS_DIR/microvm-initramfs.cpio.gz"
+        ok "  microvm: initramfs ($(du -h "$ASSETS_DIR/microvm-initramfs.cpio.gz" | cut -f1))"
+    else
+        warn "  initramfs missing: release/assets/microvm-initramfs.cpio.gz — run ./build.sh release first"
+        touch "$ASSETS_DIR/microvm-initramfs.cpio.gz"
+    fi
+
     # WASM modules + their .version files: fetch from release/modules/
     # (produced by prior release build). Expect all four first-party
     # modules. The .version file is what lets `intent::install` and
@@ -718,6 +729,40 @@ sha384=${ATLAS_SHA}
                 openssl dgst -sha384 -sign "$KEY_FILE" \
                     -out "$RELEASE_DIR/assets/phosphor.atlas.sig" "$RELEASE_DIR/assets/phosphor.atlas"
                 ok "Signed icons: phosphor.atlas ($ATLAS_SIZE bytes)"
+            fi
+        fi
+
+        # MicroVM initramfs — built from microvm/linux/init/ (Rust
+        # PID-1, ~1.3 KB statically linked Linux ELF) and packed as
+        # newc-cpio + gzip. Phase 12.1.3.
+        INIT_DIR="$PROJECT_DIR/microvm/linux/init"
+        INIT_BIN="$INIT_DIR/target/x86_64-unknown-linux-gnu/release/microvm-init"
+        if [ -d "$INIT_DIR" ]; then
+            log "Building microvm-init (Rust PID-1)..."
+            (cd "$INIT_DIR" && cargo build --release 2>&1 | tail -3)
+            if [ -f "$INIT_BIN" ]; then
+                INITRAMFS_TMP=$(mktemp -d)
+                cp "$INIT_BIN" "$INITRAMFS_TMP/init"
+                chmod +x "$INITRAMFS_TMP/init"
+                (cd "$INITRAMFS_TMP" && bsdtar --format newc -cf - init | gzip -9 \
+                    > "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz")
+                rm -rf "$INITRAMFS_TMP"
+                INITRAMFS_SIZE=$(stat -c%s "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz")
+                INITRAMFS_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz" 2>/dev/null | awk '{print $NF}')
+
+                ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:initramfs]
+size=${INITRAMFS_SIZE}
+sha384=${INITRAMFS_SHA}
+
+"
+                if [ -f "$KEY_FILE" ]; then
+                    openssl dgst -sha384 -sign "$KEY_FILE" \
+                        -out "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz.sig" \
+                        "$RELEASE_DIR/assets/microvm-initramfs.cpio.gz"
+                    ok "Signed initramfs: microvm-initramfs.cpio.gz ($INITRAMFS_SIZE bytes)"
+                fi
+            else
+                warn "microvm-init build failed — initramfs not bundled"
             fi
         fi
 

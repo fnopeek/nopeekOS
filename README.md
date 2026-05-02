@@ -529,12 +529,12 @@ Originally planned next, deprioritised in favour of Phase 12. Returns
 as a frontend feature once the MicroVM subsystem is mature enough to
 host AI services as their own apps.
 
-### Phase 12 -- MicroVM (VT-x for Linux apps) — in progress, 12.1.1c-3 ✅
+### Phase 12 -- MicroVM (VT-x for Linux apps) — in progress, 12.1.3 ✅
 
 Per-app x86_64 KVM-style hypervisor inside the kernel so legacy Linux
 GUI apps (Browser first, Phase 12.6) can run sandboxed alongside
 WASM modules. Spec lives in `PHASE12_MICROVM.md`. Progress kernel
-v0.90 → v0.127:
+v0.90 → v0.130:
 
 - [x] **VT-x bring-up** — VMXON / VMCS / VMCLEAR / VMPTRLD round-trip,
       host-state setup with full VMREAD readback, TSS install (BSP).
@@ -567,11 +567,29 @@ v0.90 → v0.127:
       `VFS: Unable to mount root fs on "" or unknown-block(0,0)`
       (no rootfs supplied yet) and triple-faults to reset.
       ~62 800 VM-exits handled. = 12.1.1c-3 milestone done.
-- [ ] 12.1.1d formal panic-detection (regex on captured serial
-      stream → `LaunchOutcome::GuestPanic` instead of "exit reason 2").
+- [x] **Trust boundary validated (v0.128)** — first `microvm linux`
+      froze the host because pin-based external-interrupt-exiting was 0;
+      host LAPIC IRQs leaked into the guest IDT and the real-LAPIC ISR
+      stayed stuck across VMXOFF. Fix: route external interrupts as VM
+      exits (reason 1), let the post-exit `sti` deliver the still-
+      pending IRQ through the host IDT. Architecturally a host-side
+      config bug, **not a guest escape**: VMX hardware boundary held
+      throughout, host stayed up after Linux's panic + triple-fault.
+- [x] **Formal panic detection (v0.129)** — SerialState scans for
+      `Kernel panic - not syncing:`, captures the reason, classifies
+      the subsequent triple-fault as Linux's expected
+      `emergency_restart` path rather than an unhandled exit.
+- [x] **initramfs + Rust-PID-1 (v0.130)** — own `microvm-init` crate
+      under `microvm/linux/init/`: 1.3 KB statically-linked Linux
+      ELF, no_std + no_main, raw syscalls (write/pause/reboot).
+      Build pipeline: `bsdtar newc + gzip` → 694 B
+      `release/assets/microvm-initramfs.cpio.gz`, ECDSA P-384 signed,
+      shipped as bundled installer asset to `sys/microvm/
+      initramfs.cpio.gz` in npkFS. Loader places it at guest-phys
+      0xC000000, sets `boot_params.hdr.ramdisk_image/size`. Linux
+      unpacks it as rootfs, execs `/init`.
 - [ ] 12.1.2  virtio-console backend (replace earlycon when full
       console driver gives up post-init).
-- [ ] 12.1.3  initramfs + Rust-PID-1 + bash → "Hello bash" PoC.
 - [ ] 12.1.4  bidirectional `inject_console` round-trip.
 - [ ] 12.2-12.5 Plumbing: container format, profile-images,
       virtio-blk/net backends, picker bridge.
