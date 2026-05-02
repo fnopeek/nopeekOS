@@ -46,8 +46,8 @@ const EPTP_MEM_TYPE_WB: u64 = 6;
 const EPTP_WALK_LENGTH_4: u64 = 3 << 3; // 4 levels = walk length 3
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
-const GUEST_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
-const PD_LEAVES: u64 = GUEST_WINDOW_BYTES / TWO_MB; // 32 entries
+const GUEST_WINDOW_BYTES: u64 = 256 * 1024 * 1024;
+const PD_LEAVES: u64 = GUEST_WINDOW_BYTES / TWO_MB; // 128 entries (max 512 = 1 GB)
 
 /// Number of 4 KB host frames the caller must allocate contiguously
 /// for the guest RAM backing.
