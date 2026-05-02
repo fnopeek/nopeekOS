@@ -1645,7 +1645,7 @@ fn microvm_linux() {
             kprintln!("[microvm] guest exited — final reason {} qual {:#x}",
                       basic, outcome.exit_qualification);
         }
-        Err(e) => kprintln!("[microvm] launch FAILED: {}", e),
+        Err(e) => kprintln!("[microvm] launch FAILED: {:?} (len={}, empty={})", e, e.len(), e.is_empty()),
     }
 }
 
