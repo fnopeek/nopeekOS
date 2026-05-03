@@ -22,8 +22,8 @@ const SYS_PAUSE: u64 = 34;
 const SYS_EXIT: u64 = 60;
 const SYS_MKDIR: u64 = 83;
 const SYS_MOUNT: u64 = 165;
-const SYS_IOPL: u64 = 172;
 const SYS_REBOOT: u64 = 169;
+const SYS_IOPERM: u64 = 173;
 
 // open(2) flags.
 const O_WRONLY: u64 = 1;
@@ -88,16 +88,24 @@ pub unsafe extern "C" fn _start() -> ! {
     say(kmsg_fd, b"\n[microvm-init] Hello from nopeekOS PID-1.\n");
     say(kmsg_fd, b"[microvm-init] kernel boot reached userspace.\n");
 
-    // Phase 12.1.4 — inject_console round-trip. Grant ourselves
-    // IOPL=3 so we can do raw inb/outb on COM1 (port 0x3F8). With
-    // `nolapic noapic` on the cmdline the regular 8250 driver gets
-    // no IRQ4 and reads from /dev/console block forever, so we
-    // bypass the tty layer entirely. Echo mode triggers when the
-    // host pre-injected bytes (LSR.DR=1 at this point); otherwise
-    // we fall through to the idle pause loop (12.1.3a behavior).
-    let iopl_rc = unsafe { syscall1(SYS_IOPL, 3) };
-    if iopl_rc < 0 {
-        say(kmsg_fd, b"[microvm-init] iopl(3) failed; skipping echo loop.\n");
+    // Phase 12.1.4 — inject_console round-trip. Grant ourselves I/O
+    // port access on COM1 (0x3F8-0x3FF) via ioperm(2). Modern Linux
+    // (≥5.5) made iopl(3) into an emulated stub: the syscall succeeds
+    // and even sets EFLAGS.IOPL=3 in the saved frame, but the kernel
+    // no longer maps that to ring-0 port access for arbitrary ports —
+    // each port range still has to be enabled through the per-task
+    // ioperm bitmap. Calling iopl alone passes silently and then the
+    // first real `inb` #GPs (verified on NUC v0.137.0). ioperm both
+    // checks CAP_SYS_RAWIO and sets up the bitmap; a 0 return
+    // actually grants the access. With `nolapic noapic` on the
+    // cmdline the regular 8250 driver gets no IRQ4 and reads from
+    // /dev/console block forever, so we bypass the tty layer.
+    // Echo mode triggers when the host pre-injected bytes
+    // (LSR.DR=1 at this point); otherwise we fall through to the
+    // idle pause loop (12.1.3a behavior).
+    let ioperm_rc = unsafe { syscall3(SYS_IOPERM, 0x3F8, 8, 1) };
+    if ioperm_rc < 0 {
+        say(kmsg_fd, b"[microvm-init] ioperm(0x3F8, 8, 1) failed; skipping echo loop.\n");
     } else if (unsafe { inb(0x3FD) } & 0x01) != 0 {
         say(kmsg_fd, b"[microvm-init] echo round-trip (12.1.4 milestone).\n");
         echo_round_trip();
