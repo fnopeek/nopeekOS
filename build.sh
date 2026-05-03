@@ -114,12 +114,7 @@ GRUBCFG
 
     ok "ISO created: $ISO_FILE"
 
-    # Create persistent disk image for virtio-blk (once)
-    if [ ! -f "$DISK_IMG" ]; then
-        log "Creating 16MB disk image..."
-        dd if=/dev/zero of="$DISK_IMG" bs=1M count=16 2>/dev/null
-        ok "Disk image: $DISK_IMG"
-    fi
+    ensure_disk_img
 
     echo ""
 }
@@ -295,7 +290,31 @@ GRUBCFG
 # QEMU
 # ============================================================
 
+# Persistent QEMU disk image (256 MB floor: installer alone plants
+# ~14 MB of bundled assets — 12 MB Alpine bzImage + 1.6 MB modules
+# + 879 KB font + icons — plus npkFS metadata + headroom for blobs).
+# Created once on demand and kept between runs so npkFS state survives.
+ensure_disk_img() {
+    if [ ! -f "$DISK_IMG" ]; then
+        log "Creating 256MB disk image..."
+        dd if=/dev/zero of="$DISK_IMG" bs=1M count=256 2>/dev/null
+        ok "Disk image: $DISK_IMG"
+    fi
+}
+
+# qemu-installer modes wipe the disk first — the installer's job is
+# to lay down a fresh npkFS, and a stale disk would just trigger the
+# "already set up, log in" path on second boot.
+wipe_disk_img() {
+    if [ -f "$DISK_IMG" ]; then
+        log "Wiping disk image for fresh install..."
+        rm -f "$DISK_IMG"
+    fi
+    ensure_disk_img
+}
+
 run_qemu() {
+    ensure_disk_img
     build_qemu_iso
 
     log "Launching QEMU..."
@@ -313,7 +332,7 @@ run_qemu() {
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
-        -device virtio-blk-pci,drive=drive0 \
+        -device nvme,drive=drive0,serial=nopeekos-test \
         -device qemu-xhci,id=xhci \
         -device usb-kbd,bus=xhci.0 \
         -device usb-mouse,bus=xhci.0 \
@@ -323,6 +342,7 @@ run_qemu() {
 }
 
 run_qemu_gui() {
+    ensure_disk_img
     build_qemu_iso
 
     log "Launching QEMU GUI @ 1920x1080 (SeaBIOS + std VGA)..."
@@ -342,7 +362,7 @@ run_qemu_gui() {
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
-        -device virtio-blk-pci,drive=drive0 \
+        -device nvme,drive=drive0,serial=nopeekos-test \
         -device qemu-xhci,id=xhci \
         -device usb-kbd,bus=xhci.0 \
         -device usb-mouse,bus=xhci.0 \
@@ -352,6 +372,7 @@ run_qemu_gui() {
 }
 
 run_debug() {
+    ensure_disk_img
     build_qemu_iso
 
     log "Launching QEMU with GDB stub on :1234..."
@@ -370,7 +391,7 @@ run_debug() {
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
-        -device virtio-blk-pci,drive=drive0 \
+        -device nvme,drive=drive0,serial=nopeekos-test \
         -device qemu-xhci,id=xhci \
         -device usb-kbd,bus=xhci.0 \
         -device usb-mouse,bus=xhci.0 \
@@ -629,10 +650,13 @@ usage() {
     echo ""
     echo "Commands:"
     echo "  build       Compile kernel + create bootable ISO"
-    echo "  qemu        Build + run in QEMU (serial on stdio)"
-    echo "  debug       Build + run in QEMU with GDB stub (:1234)"
-    echo "  installer     Build installer kernel (two-pass, with bundled assets)"
-    echo "  usb /dev/sdX  Build + create EFI-bootable USB stick"
+    echo "  qemu                Build + run in QEMU (serial on stdio)"
+    echo "  qemu-gui|gui        Build + run in QEMU with framebuffer GUI"
+    echo "  qemu-installer      Build installer kernel + run in QEMU (serial)"
+    echo "  qemu-installer-gui  Build installer kernel + run in QEMU (GUI)"
+    echo "  debug               Build + run in QEMU with GDB stub (:1234)"
+    echo "  installer           Build installer kernel (two-pass, with bundled assets)"
+    echo "  usb /dev/sdX        Build + create EFI-bootable USB stick"
     echo "  vbox        Build + run in VirtualBox (GUI)"
     echo "  vbox-clean  Remove VirtualBox VM"
     echo "  all         Build + show run options"
@@ -658,6 +682,24 @@ case "${1:-}" in
     qemu-gui|gui)
         check_deps
         build
+        run_qemu_gui
+        ;;
+    qemu-installer)
+        # Build the installer-flavored kernel (with all bundled assets
+        # baked in via include_bytes!) and boot it in QEMU on serial.
+        # Wipes the disk first — the installer formats a fresh npkFS,
+        # and a leftover disk from a previous session would trigger the
+        # "already set up, log in" path instead.
+        check_deps
+        build_installer
+        wipe_disk_img
+        run_qemu
+        ;;
+    qemu-installer-gui)
+        # Same as qemu-installer but with GUI framebuffer (1920x1080).
+        check_deps
+        build_installer
+        wipe_disk_img
         run_qemu_gui
         ;;
     debug)
