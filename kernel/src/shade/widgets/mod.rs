@@ -138,11 +138,6 @@ pub fn remove_scene(window_id: u32) {
     LAST_HOVER.lock().remove(&window_id);
 }
 
-/// True if any widget scenes are currently allocated.
-pub fn any_scenes() -> bool {
-    !SCENES.lock().is_empty()
-}
-
 // ── Per-window event queues (P10.7) ───────────────────────────────────
 //
 // Widget apps poll events via `npk_event_poll`. Shade pushes Events
@@ -1185,19 +1180,6 @@ fn rasterize_buffer(
     // `target` drops here, releasing the &mut on `pixels`.
     drop(target);
     pixels
-}
-
-/// Convenience wrapper: rasterize without any pseudo-state context.
-/// Used by scene_commit (first render) and refresh paths where the
-/// caller doesn't track per-window state.
-fn rasterize_to_buffer(
-    tree: &abi::Widget,
-    layout_tree: &layout::LayoutNode,
-    win_x: i32, win_y: i32, win_w: u32, win_h: u32,
-) -> Vec<u32> {
-    let rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
-    let density = classify_density(win_w);
-    rasterize_buffer(tree, layout_tree, rect, None, None, None, density, None)
 }
 
 /// Re-render a scene at new dimensions — called by shade when a

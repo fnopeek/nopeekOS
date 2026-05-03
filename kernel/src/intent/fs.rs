@@ -537,7 +537,7 @@ fn print_cpu_features() {
     use core::arch::x86_64::__cpuid;
 
     // CPUID(1) ECX bits we care about for crypto + SIMD.
-    let cpuid1 = unsafe { __cpuid(1) };
+    let cpuid1 = __cpuid(1);
     let ecx = cpuid1.ecx;
     let hw_pclmul = (ecx & (1 << 1)) != 0;
     let hw_aes    = (ecx & (1 << 25)) != 0;
@@ -550,7 +550,7 @@ fn print_cpu_features() {
     // 256/512-bit parallel — Ice Lake / Zen 3+. polyval 0.7+ requires
     // this for its HW path; N100 (Atom-class) likely does NOT have it
     // even though plain PCLMULQDQ works.)
-    let cpuid7 = unsafe { __cpuid(7) };
+    let cpuid7 = __cpuid(7);
     let hw_avx2 = (cpuid7.ebx & (1 << 5)) != 0;
     let hw_vpclmul = (cpuid7.ecx & (1 << 10)) != 0;
 

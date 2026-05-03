@@ -114,7 +114,7 @@ pub fn run_linux(
     }
 }
 
-pub use vmcs::{decode_io_exit_qualification, LaunchOutcome};
+pub use vmcs::decode_io_exit_qualification;
 
 // ── shared CPU primitives for submodules ───────────────────────────
 

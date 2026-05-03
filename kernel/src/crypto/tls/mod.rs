@@ -136,14 +136,14 @@ fn tls_aead_encrypt(cs: CipherSuite, key: &[u8], nonce: &[u8; 12], aad: &[u8], p
             use aes_gcm::{Aes128Gcm, Nonce};
             use aes_gcm::aead::{Aead, KeyInit, Payload};
             let cipher = Aes128Gcm::new_from_slice(key).expect("AES-128 key");
-            cipher.encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+            cipher.encrypt(&Nonce::from(*nonce), Payload { msg: plaintext, aad })
                 .expect("AES-128-GCM encrypt")
         }
         CipherSuite::Aes256Gcm => {
             use aes_gcm::{Aes256Gcm, Nonce};
             use aes_gcm::aead::{Aead, KeyInit, Payload};
             let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key");
-            cipher.encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+            cipher.encrypt(&Nonce::from(*nonce), Payload { msg: plaintext, aad })
                 .expect("AES-256-GCM encrypt")
         }
     }
@@ -160,13 +160,13 @@ fn tls_aead_decrypt(cs: CipherSuite, key: &[u8], nonce: &[u8; 12], aad: &[u8], c
             use aes_gcm::{Aes128Gcm, Nonce};
             use aes_gcm::aead::{Aead, KeyInit, Payload};
             let cipher = Aes128Gcm::new_from_slice(key).ok()?;
-            cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad }).ok()
+            cipher.decrypt(&Nonce::from(*nonce), Payload { msg: ciphertext, aad }).ok()
         }
         CipherSuite::Aes256Gcm => {
             use aes_gcm::{Aes256Gcm, Nonce};
             use aes_gcm::aead::{Aead, KeyInit, Payload};
             let cipher = Aes256Gcm::new_from_slice(key).ok()?;
-            cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad }).ok()
+            cipher.decrypt(&Nonce::from(*nonce), Payload { msg: ciphertext, aad }).ok()
         }
     }
 }

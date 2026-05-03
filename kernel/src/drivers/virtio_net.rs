@@ -430,13 +430,13 @@ unsafe fn setup_queue(io: u16, qs: u16) -> Option<(u64, u64, u64, u64)> {
     let pages = (part1 + part2 + 4095) / 4096;
 
     let qmem = memory::allocate_contiguous(pages)?;
-    core::ptr::write_bytes(qmem as *mut u8, 0, pages * 4096);
+    unsafe { core::ptr::write_bytes(qmem as *mut u8, 0, pages * 4096); }
 
     let desc_base = qmem;
     let avail_base = qmem + (16 * q) as u64;
     let used_base = qmem + part1 as u64;
 
-    outl(io + REG_QUEUE_PFN, (qmem >> 12) as u32);
+    unsafe { outl(io + REG_QUEUE_PFN, (qmem >> 12) as u32); }
 
     Some((desc_base, avail_base, used_base, qmem))
 }

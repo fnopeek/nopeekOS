@@ -23,7 +23,7 @@ use aes::Aes256;
 use aes::cipher::{KeyInit, BlockEncrypt, KeyIvInit, StreamCipher};
 use ctr::Ctr32BE;
 use ghash::GHash;
-use ghash::universal_hash::{KeyInit as UhKeyInit, UniversalHash};
+use ghash::universal_hash::UniversalHash;
 
 use alloc::vec::Vec;
 

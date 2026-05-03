@@ -79,7 +79,6 @@ fn widget_label(w: &Widget) -> String {
         Widget::Popover  { .. }           => String::from("Popover (RESERVED)"),
         Widget::Tooltip  { .. }           => String::from("Tooltip (RESERVED)"),
         Widget::Menu     { items, .. }    => alloc::format!("Menu({}) (RESERVED)", items.len()),
-        _                                 => String::from("<unknown>"),
     }
 }
 
@@ -178,9 +177,6 @@ fn write_node(out: &mut String, w: &Widget, depth: usize) {
                 indent, fmt_mods(modifiers));
             for c in items { write_node(out, c, depth + 1); }
         }
-        _ => {
-            let _ = writeln!(out, "[npk] {}<unknown variant>", indent);
-        }
     }
 }
 
@@ -203,7 +199,6 @@ fn fmt_mods(mods: &[Modifier]) -> String {
                 match t {
                     Transition::Spring        => s.push_str("Transition(Spring)"),
                     Transition::Linear { ms } => { let _ = write!(s, "Transition(Linear {}ms)", ms); }
-                    _                         => s.push_str("Transition(?)"),
                 }
             }
             Modifier::OnClick(a)    => { let _ = write!(s, "OnClick({})", a.0); }
@@ -225,7 +220,6 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::MinWidth(w)   => { let _ = write!(s, "MinWidth({})", w); }
             Modifier::MaxWidth(w)   => { let _ = write!(s, "MaxWidth({})", w); }
             Modifier::Rounded(r)    => { let _ = write!(s, "Rounded({})", r); }
-            _                       => s.push_str("<unknown>"),
         }
     }
     s.push(']');

@@ -138,6 +138,7 @@ const MSR_BITMAPS_FULL: u64 = 0x2004;
 const EPT_POINTER: u64 = 0x201A;
 
 // Natural-width VM-exit info.
+#[allow(dead_code)] // SDM Vol3 §28.3 field; reserved for fault-path decoding
 const VM_EXIT_QUALIFICATION: u64 = 0x6400;
 const VM_EXIT_GUEST_LINEAR_ADDR: u64 = 0x640A;
 

@@ -264,47 +264,35 @@ pub const TAG_SIZE: usize = 16;
 // cipher-suite compatibility with peers that negotiate it.
 
 use aes_gcm::aead::{Aead, AeadInPlace, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce, Tag};
+use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
 /// Encrypt `plaintext` with AES-256-GCM. Returns ciphertext || 16-byte tag.
 /// Hardware-accelerated when AES-NI is present.
 pub fn aead_encrypt_aes(key: &[u8; 32], nonce: &[u8; 12], plaintext: &[u8]) -> Vec<u8> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce);
-    cipher.encrypt(nonce, plaintext).unwrap_or_default()
-}
-
-/// Decrypt `ciphertext_and_tag` with AES-256-GCM. Returns plaintext or
-/// `None` on tag mismatch / malformed input.
-pub fn aead_decrypt_aes(key: &[u8; 32], nonce: &[u8; 12], ciphertext_and_tag: &[u8]) -> Option<Vec<u8>> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce);
-    cipher.decrypt(nonce, ciphertext_and_tag).ok()
+    let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key");
+    let nonce = Nonce::from(*nonce);
+    cipher.encrypt(&nonce, plaintext).unwrap_or_default()
 }
 
 /// Decrypt `buf` (ciphertext || 16-byte tag) in place. On success `buf`
 /// is shrunk to plaintext-only and `Some(())` is returned; on tag
 /// mismatch / short input, `buf` is left untouched and `None` is
-/// returned. Saves one Vec alloc + one full-payload memcpy vs.
-/// [`aead_decrypt_aes`] — the win scales with payload size.
+/// returned. Saves one Vec alloc + one full-payload memcpy.
 pub fn aead_decrypt_aes_in_place(
     key: &[u8; 32],
     nonce: &[u8; 12],
     buf: &mut Vec<u8>,
 ) -> Option<()> {
     if buf.len() < TAG_SIZE { return None; }
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce);
+    let cipher = Aes256Gcm::new_from_slice(key).ok()?;
+    let nonce = Nonce::from(*nonce);
 
     let ct_len = buf.len() - TAG_SIZE;
     let tag_bytes: [u8; TAG_SIZE] = buf[ct_len..].try_into().ok()?;
     let tag = Tag::from(tag_bytes);
 
-    // Decrypt only the ciphertext portion in place; leave the trailing
-    // tag bytes alone until we know decrypt succeeded. Truncate after
-    // success so a failed decrypt leaves `buf` recoverable.
     cipher
-        .decrypt_in_place_detached(nonce, b"", &mut buf[..ct_len], &tag)
+        .decrypt_in_place_detached(&nonce, b"", &mut buf[..ct_len], &tag)
         .ok()?;
     buf.truncate(ct_len);
     Some(())

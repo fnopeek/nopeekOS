@@ -35,29 +35,23 @@ impl Rasterizer for CpuRasterizer {
 
     fn rect(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill) {
         let (x, y) = window_to_target(t, r.x, r.y);
-        let color = match fill {
-            Fill::Solid(tok) => t.palette.colors[tok as usize],
-            _                => return,
-        };
+        let Fill::Solid(tok) = fill;
+        let color = t.palette.colors[tok as usize];
         fill_rect_target(t, x, y, r.w as i32, r.h as i32, color, 255);
     }
 
     fn rect_rounded(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill, radius: u8) {
         let (x, y) = window_to_target(t, r.x, r.y);
-        let color = match fill {
-            Fill::Solid(tok) => t.palette.colors[tok as usize],
-            _                => return,
-        };
+        let Fill::Solid(tok) = fill;
+        let color = t.palette.colors[tok as usize];
         fill_rounded_rect_target(t, x, y, r.w as i32, r.h as i32, radius as i32, color);
     }
 
     fn stroke_rounded(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill, width: u8, radius: u8) {
         if width == 0 { return; }
         let (x, y) = window_to_target(t, r.x, r.y);
-        let color = match fill {
-            Fill::Solid(tok) => t.palette.colors[tok as usize],
-            _                => return,
-        };
+        let Fill::Solid(tok) = fill;
+        let color = t.palette.colors[tok as usize];
         stroke_rounded_rect_target(t, x, y, r.w as i32, r.h as i32, radius as i32, width as i32, color);
     }
 

@@ -20,7 +20,9 @@ pub struct WasmResult {
 /// Hardware driver state for WASM modules that access PCI devices.
 struct HwDriverState {
     pci_addr: pci::PciAddr,
+    #[allow(dead_code)] // populated for future audit/debug, not yet read
     vendor_id: u16,
+    #[allow(dead_code)]
     device_id: u16,
     mmio_maps: Vec<(u64, usize)>,   // handle -> (base_virt, page_count)
     dma_allocs: Vec<(u64, usize)>,  // handle -> (phys_addr, page_count)
