@@ -97,25 +97,24 @@ fn flush_tlb_all() {
 /// Returns the physical address of the new PDT.
 /// SAFETY: pdpt must be valid, index must point to a 1GB huge page entry.
 unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> {
-    let entry = read_entry(pdpt, index);
-    let huge_base = entry_addr(entry); // 1GB-aligned physical base
-    // Preserve original flags (Present, Writable, etc.) but keep HUGE for 2MB entries
-    let base_flags = (entry & 0xFF) | PageFlags::HUGE.bits(); // keep bits [7:0], ensure HUGE
+    unsafe {
+        let entry = read_entry(pdpt, index);
+        let huge_base = entry_addr(entry); // 1GB-aligned physical base
+        let base_flags = (entry & 0xFF) | PageFlags::HUGE.bits();
 
-    let pdt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
-    zero_frame(pdt);
+        let pdt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
+        zero_frame(pdt);
 
-    // Fill 512 entries: each maps 2MB, all with HUGE bit
-    for i in 0..ENTRY_COUNT {
-        let phys = huge_base + (i as u64) * (2 * 1024 * 1024);
-        write_entry(pdt, i, phys | base_flags);
+        for i in 0..ENTRY_COUNT {
+            let phys = huge_base + (i as u64) * (2 * 1024 * 1024);
+            write_entry(pdt, i, phys | base_flags);
+        }
+
+        let new_entry = pdt | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits();
+        write_entry(pdpt, index, new_entry);
+
+        Ok(pdt)
     }
-
-    // Replace PDPT entry: point to PDT, remove HUGE bit
-    let new_entry = pdt | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits();
-    write_entry(pdpt, index, new_entry);
-
-    Ok(pdt)
 }
 
 /// Split a 2MB huge page (PDT entry) into 512 × 4KB pages (PT).
@@ -123,25 +122,25 @@ unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> 
 /// Returns the physical address of the new PT.
 /// SAFETY: pdt must be valid, index must point to a 2MB huge page entry.
 unsafe fn split_2mb_to_4kb(pdt: u64, index: usize) -> Result<u64, PagingError> {
-    let entry = read_entry(pdt, index);
-    let huge_base = entry_addr(entry); // 2MB-aligned physical base
-    // Preserve flags but remove HUGE (bit 7 is PAT at PT level, not HUGE)
-    let base_flags = entry & 0x67; // Present, Writable, User, Accessed, Dirty — no HUGE
+    unsafe {
+        let entry = read_entry(pdt, index);
+        let huge_base = entry_addr(entry);
+        // bit 7 at PT level is PAT, not HUGE — strip it from base flags
+        let base_flags = entry & 0x67;
 
-    let pt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
-    zero_frame(pt);
+        let pt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
+        zero_frame(pt);
 
-    // Fill 512 entries: each maps 4KB
-    for i in 0..ENTRY_COUNT {
-        let phys = huge_base + (i as u64) * 4096;
-        write_entry(pt, i, phys | base_flags);
+        for i in 0..ENTRY_COUNT {
+            let phys = huge_base + (i as u64) * 4096;
+            write_entry(pt, i, phys | base_flags);
+        }
+
+        let new_entry = pt | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits();
+        write_entry(pdt, index, new_entry);
+
+        Ok(pt)
     }
-
-    // Replace PDT entry: point to PT, remove HUGE bit
-    let new_entry = pt | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits();
-    write_entry(pdt, index, new_entry);
-
-    Ok(pt)
 }
 
 // === Table access (identity-mapped) ===
@@ -149,34 +148,34 @@ unsafe fn split_2mb_to_4kb(pdt: u64, index: usize) -> Result<u64, PagingError> {
 /// Read a page table entry. SAFETY: table_phys must be in identity-mapped range.
 unsafe fn read_entry(table_phys: u64, index: usize) -> u64 {
     let ptr = table_phys as *const u64;
-    *ptr.add(index)
+    unsafe { *ptr.add(index) }
 }
 
 /// Write a page table entry. SAFETY: table_phys must be in identity-mapped range.
 unsafe fn write_entry(table_phys: u64, index: usize, value: u64) {
     let ptr = table_phys as *mut u64;
-    *ptr.add(index) = value;
+    unsafe { *ptr.add(index) = value; }
 }
 
 /// Zero a freshly allocated 4KB frame for use as a page table.
 unsafe fn zero_frame(addr: u64) {
-    // SAFETY: Frame is within identity-mapped range, exclusively owned
-    core::ptr::write_bytes(addr as *mut u8, 0, memory::PAGE_SIZE);
+    unsafe { core::ptr::write_bytes(addr as *mut u8, 0, memory::PAGE_SIZE); }
 }
 
 /// Walk to the next table level. If not present, allocate a new table.
 unsafe fn get_or_create(table_phys: u64, index: usize) -> Result<u64, PagingError> {
-    let entry = read_entry(table_phys, index);
+    unsafe {
+        let entry = read_entry(table_phys, index);
 
-    if entry & PageFlags::PRESENT.bits() != 0 {
-        Ok(entry_addr(entry))
-    } else {
-        let frame = memory::allocate_frame()
-            .ok_or(PagingError::FrameAllocationFailed)?;
-        zero_frame(frame);
-        // Intermediate entries: PRESENT | WRITABLE (permissions enforced at PT level)
-        write_entry(table_phys, index, frame | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits());
-        Ok(frame)
+        if entry & PageFlags::PRESENT.bits() != 0 {
+            Ok(entry_addr(entry))
+        } else {
+            let frame = memory::allocate_frame()
+                .ok_or(PagingError::FrameAllocationFailed)?;
+            zero_frame(frame);
+            write_entry(table_phys, index, frame | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits());
+            Ok(frame)
+        }
     }
 }
 

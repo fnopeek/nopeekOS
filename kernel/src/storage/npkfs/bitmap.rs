@@ -25,13 +25,8 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
-    /// Load bitmap from disk (v1 entry — takes the SuperblockRaw shape).
-    pub fn load(cache: &mut BlockCache, sb: &SuperblockRaw) -> Result<Self, FsError> {
-        Self::load_args(cache, sb.total_blocks, sb.bitmap_start, sb.bitmap_count, sb.data_start)
-    }
-
-    /// Load bitmap from disk (primitive args — used by v2 which has its
-    /// own superblock shape but identical bitmap layout).
+    /// Load bitmap from disk. v2 superblock passes layout primitives
+    /// directly; bitmap layout is identical between v1 and v2.
     pub fn load_args(
         cache: &mut BlockCache,
         total_blocks: u64,

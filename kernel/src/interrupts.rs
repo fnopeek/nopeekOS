@@ -227,31 +227,35 @@ pub fn init() {
 /// Remap PIC: IRQ0-7 → 32-39, IRQ8-15 → 40-47
 /// Without remapping, hardware IRQs collide with CPU exception vectors
 unsafe fn pic_remap() {
-    let mask1 = inb(PIC1_DATA);
-    let mask2 = inb(PIC2_DATA);
+    unsafe {
+        let mask1 = inb(PIC1_DATA);
+        let mask2 = inb(PIC2_DATA);
 
-    outb(PIC1_CMD, 0x11); io_wait();
-    outb(PIC2_CMD, 0x11); io_wait();
-    outb(PIC1_DATA, PIC_OFFSET_MASTER); io_wait();
-    outb(PIC2_DATA, PIC_OFFSET_SLAVE); io_wait();
-    outb(PIC1_DATA, 0x04); io_wait(); // Slave on IRQ2
-    outb(PIC2_DATA, 0x02); io_wait();
-    outb(PIC1_DATA, 0x01); io_wait(); // 8086 mode
-    outb(PIC2_DATA, 0x01); io_wait();
+        outb(PIC1_CMD, 0x11); io_wait();
+        outb(PIC2_CMD, 0x11); io_wait();
+        outb(PIC1_DATA, PIC_OFFSET_MASTER); io_wait();
+        outb(PIC2_DATA, PIC_OFFSET_SLAVE); io_wait();
+        outb(PIC1_DATA, 0x04); io_wait(); // Slave on IRQ2
+        outb(PIC2_DATA, 0x02); io_wait();
+        outb(PIC1_DATA, 0x01); io_wait(); // 8086 mode
+        outb(PIC2_DATA, 0x01); io_wait();
 
-    outb(PIC1_DATA, mask1);
-    outb(PIC2_DATA, mask2);
+        outb(PIC1_DATA, mask1);
+        outb(PIC2_DATA, mask2);
+    }
 }
 
 unsafe fn pic_eoi(irq: u8) {
-    if irq >= 8 { outb(PIC2_CMD, PIC_EOI); }
-    outb(PIC1_CMD, PIC_EOI);
+    unsafe {
+        if irq >= 8 { outb(PIC2_CMD, PIC_EOI); }
+        outb(PIC1_CMD, PIC_EOI);
+    }
 }
 
 /// Port 0x80 write provides ~1µs bus delay for PIC timing
 #[inline(always)]
 unsafe fn io_wait() {
-    outb(0x80, 0x00);
+    unsafe { outb(0x80, 0x00); }
 }
 
 // === Exception Handlers ===

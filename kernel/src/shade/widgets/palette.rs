@@ -74,8 +74,6 @@ pub fn resolve(token: Token) -> u32 {
         Token::Accent          => accent_adjusted(t.surface),
         Token::AccentMuted     => accent_muted(t.surface),
         Token::OnAccent        => on_accent(t.surface),
-
-        _ => 0xFFFF00FF,
     }
 }
 

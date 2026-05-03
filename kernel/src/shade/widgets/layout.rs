@@ -243,8 +243,6 @@ fn measure_intrinsic(w: &Widget) -> Size {
         Widget::Popover { .. } | Widget::Tooltip { .. } | Widget::Menu { .. } => {
             Size::default()
         }
-
-        _ => Size::default(),
     }
 }
 
@@ -285,7 +283,6 @@ fn place(w: &Widget, inner: Rect) -> LayoutNode {
                 Axis::Vertical   => Rect { x: inner.x, y: inner.y, w: inner.w, h: csize.h.max(inner.h) },
                 Axis::Horizontal => Rect { x: inner.x, y: inner.y, w: csize.w.max(inner.w), h: inner.h },
                 Axis::Both       => Rect { x: inner.x, y: inner.y, w: csize.w.max(inner.w), h: csize.h.max(inner.h) },
-                _                => inner,
             };
             let inner_layout = place(child, child_rect);
             LayoutNode {
@@ -295,7 +292,7 @@ fn place(w: &Widget, inner: Rect) -> LayoutNode {
             }
         }
 
-        Widget::Text { content, style, .. } => {
+        Widget::Text { style, .. } => {
             let measured = measure(w);
             let baseline = ceil_u32(crate::gui::text::ascent(*style));
             LayoutNode {
@@ -328,8 +325,6 @@ fn place(w: &Widget, inner: Rect) -> LayoutNode {
             // zero rect at the container origin so dumps stay legible.
             LayoutNode::leaf(Rect { x: inner.x, y: inner.y, w: 0, h: 0 })
         }
-
-        _ => LayoutNode::empty(),
     }
 }
 
@@ -392,7 +387,6 @@ fn place_axis(
             Align::Center  => (cross_sz_intrinsic, (cross_avail.saturating_sub(cross_sz_intrinsic)) / 2),
             Align::End     => (cross_sz_intrinsic, cross_avail.saturating_sub(cross_sz_intrinsic)),
             Align::Stretch => (cross_avail, 0),
-            _              => (cross_sz_intrinsic, 0),
         };
 
         // Compose child's allotted rect in absolute window coords.

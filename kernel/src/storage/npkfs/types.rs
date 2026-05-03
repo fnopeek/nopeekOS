@@ -20,13 +20,9 @@ pub const JOURNAL_START: u64 = SUPERBLOCK_START + SUPERBLOCK_SLOTS; // 9
 pub const JOURNAL_BLOCKS: u64 = 256;
 pub const META_END: u64 = JOURNAL_START + JOURNAL_BLOCKS; // 265
 
-pub const MAX_NAME_LEN: usize = 63;
 pub const DIRECT_EXTENTS: usize = 3;
 pub const BTREE_INTERNAL: u8 = 1;
 pub const BTREE_LEAF: u8 = 2;
-
-// Indirect extent block: 255 extents + chain pointer
-pub const EXTENTS_PER_INDIRECT: usize = 255;
 
 // Per-node capacities
 pub const NODE_HEADER_SIZE: usize = 16;
@@ -82,10 +78,6 @@ impl SuperblockRaw {
     pub fn is_valid(&self) -> bool {
         self.magic == MAGIC && self.version == VERSION && self.checksum == self.compute_checksum()
     }
-
-    pub fn set_checksum(&mut self) {
-        self.checksum = self.compute_checksum();
-    }
 }
 
 /// B-tree leaf entry (216 bytes)
@@ -103,13 +95,6 @@ pub struct ObjectEntry {
 }
 
 const _OE_SIZE_CHECK: () = assert!(core::mem::size_of::<ObjectEntry>() == LEAF_ENTRY_SIZE);
-
-impl ObjectEntry {
-    pub fn name_str(&self) -> &str {
-        let len = self.name.iter().position(|&b| b == 0).unwrap_or(64);
-        core::str::from_utf8(&self.name[..len]).unwrap_or("<invalid>")
-    }
-}
 
 /// B-tree node header (16 bytes, start of every node block)
 #[derive(Clone, Copy)]

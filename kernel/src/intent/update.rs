@@ -199,7 +199,7 @@ fn parse_asset_manifest(data: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
     let mut size: Option<usize> = None;
     let mut sha384: Option<[u8; 48]> = None;
 
-    let mut flush = |section: &mut Option<String>, size: &mut Option<usize>, sha: &mut Option<[u8; 48]>, out: &mut Vec<AssetEntry>| {
+    let flush = |section: &mut Option<String>, size: &mut Option<usize>, sha: &mut Option<[u8; 48]>, out: &mut Vec<AssetEntry>| {
         if let (Some(s), Some(sz), Some(sh)) = (section.take(), size.take(), sha.take()) {
             out.push(AssetEntry { section: s, size: sz, sha384: sh });
         }

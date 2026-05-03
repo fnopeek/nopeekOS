@@ -74,13 +74,6 @@ static LAST_MPERF: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
 };
-/// Per-core activity fraction (MPERF/TSC * 100), 0-100.
-/// Independent of scheduler bookkeeping — measures hardware reality.
-static CORE_MPERF_PCT: [AtomicU32; 256] = {
-    const ZERO: AtomicU32 = AtomicU32::new(0);
-    [ZERO; 256]
-};
-
 /// Per-core active flag: true while executing a scheduler task
 static CORE_ACTIVE: [AtomicBool; 256] = {
     const FALSE: AtomicBool = AtomicBool::new(false);
@@ -212,10 +205,6 @@ pub fn update_core_freq(core_id: usize) {
     let sched_pct = (delta_busy * 100 / delta_tsc).min(100) as u32;
     CORE_USAGE[core_id].store(sched_pct, Ordering::Relaxed);
 
-    // Hardware activity: MPERF delta / TSC delta. 100% = never halted.
-    let mperf_pct = (delta_mperf.saturating_mul(100) / delta_tsc).min(100) as u32;
-    CORE_MPERF_PCT[core_id].store(mperf_pct, Ordering::Relaxed);
-
     // Effective running frequency: APERF/MPERF * nominal_TSC_freq.
     // TSC is calibrated to nominal base; MPERF ticks at that same rate.
     if delta_mperf > 0 {
@@ -225,13 +214,6 @@ pub fn update_core_freq(core_id: usize) {
                        / (delta_mperf as u128)) as u64;
         CORE_MHZ[core_id].store(eff_mhz.min(u32::MAX as u64) as u32, Ordering::Relaxed);
     }
-}
-
-/// Hardware activity fraction for a core (MPERF/TSC), 0-100.
-/// Unlike core_usage(), this counts any non-halted time — not just scheduled tasks.
-pub fn core_mperf_pct(core_id: usize) -> u32 {
-    if core_id >= 256 { return 0; }
-    CORE_MPERF_PCT[core_id].load(Ordering::Relaxed)
 }
 
 /// Record task execution time on a core (called from AP work loop).

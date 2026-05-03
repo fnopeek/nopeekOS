@@ -273,7 +273,6 @@ pub fn dump_stats() {
             BucketKind::Small256K    => "256K     ",
             BucketKind::Tile1M       => "1M (tile)",
             BucketKind::Canvas4M     => "4M       ",
-            _                        => "?        ",
         };
         crate::kprintln!(
             "[npk]   {} {:5}  {:3}%  {:6}  {:6}  {:6}",

@@ -23,7 +23,11 @@
 //! byte-reverse via `pshufb` at the I/O boundary — exactly what Linux
 //! `arch/x86/crypto/ghash-clmulni-intel_asm.S` does.
 
+// Skeleton for a 4-way aggregated GHASH path. Not wired into the AEAD
+// hot path: per-block bytes-match against the `ghash` crate failed in
+// v0.88.4, deferred for its own session. Kept as starting point.
 #![allow(unsafe_op_in_unsafe_fn)]
+#![allow(dead_code)]
 
 use core::arch::x86_64::*;
 

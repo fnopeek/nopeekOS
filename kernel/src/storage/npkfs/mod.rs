@@ -13,7 +13,6 @@
 mod types;
 mod cache;
 mod bitmap;
-mod superblock;
 #[allow(dead_code)]
 mod journal;
 #[allow(dead_code)]
