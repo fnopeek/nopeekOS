@@ -4,7 +4,7 @@
 
 [package]
 name = "microvm-init"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "nopeekOS Linux MicroVM PID-1 — minimal Rust init for the Hello-Bash milestone"
 
