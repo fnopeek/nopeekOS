@@ -41,8 +41,34 @@ fn on_panic(_info: &core::panic::PanicInfo) -> ! {
     halt();
 }
 
+// _start is the ELF entry point. Linux's process-load ABI sets RSP to
+// a 16-byte-aligned value pointing at argc, with no return address —
+// different from the System V function-call ABI, which expects RSP to
+// be 8-misaligned at function entry (because the caller's CALL has
+// pushed an 8-byte return address). If we declare _start as a normal
+// Rust function the compiler's prologue assumes the function-entry
+// alignment, all subsequent stack math is off by 8, and any later
+// MOVAPS-on-stack (e.g. compiler-emitted SIMD zero-init of a [u8; 64]
+// local) #GPs on misalignment. Verified on NUC v0.137.0/.1: the trap
+// fired in echo_round_trip's prologue at `movaps [rsp+0x30], xmm0`,
+// not at any inb — both ioperm and inb were red herrings.
+//
+// Workaround: write _start in pure asm and have it CALL into a normal
+// Rust function. The CALL pushes 8 bytes, which exactly establishes
+// the alignment Rust's prologue expects. The `and rsp, -16` first is
+// defensive — Linux's ABI guarantees 16-aligned at entry, but if a
+// future kernel or auxv-extension shifted that we'd silently corrupt.
+core::arch::global_asm!(
+    ".global _start",
+    "_start:",
+    "    xor rbp, rbp",       // clear frame pointer (unwinder convention)
+    "    and rsp, -16",        // belt-and-braces 16-byte align
+    "    call rust_main",      // pushes 8-byte return → 8-misaligned RSP per ABI
+    "    ud2",                 // rust_main is `-> !`; if it returns, fault
+);
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start() -> ! {
+unsafe extern "C" fn rust_main() -> ! {
     // With a cpio initramfs Linux skips `prepare_namespace()` entirely
     // and exec's /init directly out of the unpacked rootfs — so the
     // `devtmpfs.mount=1` cmdline parameter is never honored, /dev is
