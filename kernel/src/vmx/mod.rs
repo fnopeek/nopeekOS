@@ -27,8 +27,8 @@
 //!             (Linux booted to rootfs-panic = expected)
 //!   12.1.1d   Formal panic detection                  ✓ v0.129.0
 //!   12.1.3    initramfs + Rust-PID-1                  ✓ v0.130.0
+//!   12.1.4    inject_console round-trip               ✓ v0.137.0
 //!   12.1.2    virtio-console backend                  ← next
-//!   12.1.4    inject_console round-trip
 
 pub mod bzimage;
 mod enable;
@@ -102,13 +102,16 @@ pub fn run_substrate_test() -> Result<vmcs::LaunchOutcome, &'static str> {
 /// Boot a Linux bzImage in our MicroVM substrate. Same per-call
 /// resource leaks as `run_substrate_test`. `initramfs` is optional;
 /// when `Some`, Linux unpacks it as cpio rootfs and execs `/init`.
+/// `inject` pre-loads the UART RX FIFO before VMLAUNCH — the guest
+/// sees these bytes when it polls LSR.DR / reads RBR (Phase 12.1.4).
 pub fn run_linux(
     bzimage: &[u8],
     cmdline: &[u8],
     initramfs: Option<&[u8]>,
+    inject: &[u8],
 ) -> Result<vmcs::LaunchOutcome, &'static str> {
     match *PROBE.lock() {
-        ProbeState::Available(_) => enable::run_linux(bzimage, cmdline, initramfs),
+        ProbeState::Available(_) => enable::run_linux(bzimage, cmdline, initramfs, inject),
         ProbeState::Unavailable(reason) => Err(reason),
         ProbeState::NotProbed => Err("vmx::init() not called yet"),
     }
