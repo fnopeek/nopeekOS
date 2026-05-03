@@ -1198,11 +1198,26 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 }
             } else if sub == "linux" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm linux") {
-                    microvm_linux();
+                    microvm_linux(b"");
+                }
+            } else if let Some(rest) = sub.strip_prefix("shell") {
+                // `microvm shell [<line>]` — pre-injects <line> + '\n'
+                // into the UART RX FIFO before VMLAUNCH. PID-1 in the
+                // guest detects the pending byte via LSR.DR, drains
+                // RBR through iopl(3), echoes the line back through
+                // the same UART, then powers off. End-to-end inject-
+                // console round-trip (Phase 12.1.4).
+                if require_cap(vault, &session, Rights::EXECUTE, "microvm shell") {
+                    let line = rest.trim();
+                    let line = if line.is_empty() { "hi" } else { line };
+                    let mut buf = alloc::vec::Vec::with_capacity(line.len() + 1);
+                    buf.extend_from_slice(line.as_bytes());
+                    buf.push(b'\n');
+                    microvm_linux(&buf);
                 }
             } else {
                 kprintln!("[microvm] unknown subcommand: '{}'", sub);
-                kprintln!("[microvm] available: test, linux-info, linux");
+                kprintln!("[microvm] available: test, linux-info, linux, shell");
             }
         }
         "caps" | "capabilities" => {
@@ -1577,11 +1592,15 @@ fn microvm_linux_info() {
     }
 }
 
-/// `microvm linux` handler — fetch the bundled bzImage from npkFS,
-/// hand it + a cmdline to vmx::run_linux. The kernel writes its
-/// earlyprintk to serial 0x3F8, which we trap via I/O bitmap and
-/// reflect as `[guest] <line>` kprintln output. Phase 12.1.1c-3b3b2.
-fn microvm_linux() {
+/// `microvm linux` / `microvm shell` handler — fetch the bundled
+/// bzImage from npkFS, hand it + a cmdline + `inject` bytes to
+/// vmx::run_linux. The kernel writes its earlyprintk to serial 0x3F8,
+/// which we trap via I/O bitmap and reflect as `[guest] <line>`
+/// kprintln output. `inject` is empty for the plain `linux`
+/// subcommand (idle-pause behavior); for `shell <line>` it's the
+/// line + '\n' pre-loaded into the UART RX FIFO so PID-1 can echo
+/// it back (Phase 12.1.4).
+fn microvm_linux(inject: &[u8]) {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
     const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
     // Linux 32-bit boot protocol cmdline.
@@ -1639,7 +1658,7 @@ fn microvm_linux() {
               bytes.len(),
               core::str::from_utf8(CMDLINE).unwrap_or("?"));
 
-    match crate::vmx::run_linux(&bytes, CMDLINE, initramfs.as_deref()) {
+    match crate::vmx::run_linux(&bytes, CMDLINE, initramfs.as_deref(), inject) {
         Ok(outcome) => {
             let basic = (outcome.exit_reason & 0xFFFF) as u16;
             kprintln!("[microvm] guest exited — final reason {} qual {:#x}",

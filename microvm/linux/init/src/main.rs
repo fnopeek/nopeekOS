@@ -22,6 +22,7 @@ const SYS_PAUSE: u64 = 34;
 const SYS_EXIT: u64 = 60;
 const SYS_MKDIR: u64 = 83;
 const SYS_MOUNT: u64 = 165;
+const SYS_IOPL: u64 = 172;
 const SYS_REBOOT: u64 = 169;
 
 // open(2) flags.
@@ -86,7 +87,25 @@ pub unsafe extern "C" fn _start() -> ! {
 
     say(kmsg_fd, b"\n[microvm-init] Hello from nopeekOS PID-1.\n");
     say(kmsg_fd, b"[microvm-init] kernel boot reached userspace.\n");
-    say(kmsg_fd, b"[microvm-init] entering idle loop (12.1.3a milestone).\n");
+
+    // Phase 12.1.4 — inject_console round-trip. Grant ourselves
+    // IOPL=3 so we can do raw inb/outb on COM1 (port 0x3F8). With
+    // `nolapic noapic` on the cmdline the regular 8250 driver gets
+    // no IRQ4 and reads from /dev/console block forever, so we
+    // bypass the tty layer entirely. Echo mode triggers when the
+    // host pre-injected bytes (LSR.DR=1 at this point); otherwise
+    // we fall through to the idle pause loop (12.1.3a behavior).
+    let iopl_rc = unsafe { syscall1(SYS_IOPL, 3) };
+    if iopl_rc < 0 {
+        say(kmsg_fd, b"[microvm-init] iopl(3) failed; skipping echo loop.\n");
+    } else if (unsafe { inb(0x3FD) } & 0x01) != 0 {
+        say(kmsg_fd, b"[microvm-init] echo round-trip (12.1.4 milestone).\n");
+        echo_round_trip();
+        say(kmsg_fd, b"[microvm-init] echo done -- powering off.\n");
+        halt();
+    } else {
+        say(kmsg_fd, b"[microvm-init] no input pending; entering idle loop.\n");
+    }
 
     // PID-1 must never return — the kernel panics on
     // "Attempted to kill init!" otherwise. Park in pause(2) so we
@@ -94,6 +113,75 @@ pub unsafe extern "C" fn _start() -> ! {
     // pause again.
     loop {
         let _ = unsafe { syscall0(SYS_PAUSE) };
+    }
+}
+
+/// Drain bytes from COM1 RBR until a newline (or buffer cap), then
+/// echo the captured line back through COM1 THR prefixed with
+/// `[init] echo: `. Both sides go through port 0x3F8, which is
+/// trapped by the host hypervisor — input drains the RX FIFO
+/// pre-loaded by `microvm shell`, output flows out as standard
+/// `[guest] <line>` capture.
+fn echo_round_trip() {
+    let mut line: [u8; 64] = [0; 64];
+    let mut n: usize = 0;
+
+    loop {
+        // Spin on LSR.DR. Each inb is a VM-exit; if the host stops
+        // injecting we'd spin forever, so cap at a generous count
+        // and bail. In practice the host pre-loads a complete line
+        // so we drain it without ever waiting.
+        let mut spins: u32 = 0;
+        while unsafe { inb(0x3FD) } & 0x01 == 0 {
+            spins += 1;
+            if spins > 1_000_000 { return; }
+        }
+        let c = unsafe { inb(0x3F8) };
+        if c == b'\n' || c == b'\r' || n == line.len() {
+            tx_str(b"[init] echo: ");
+            for i in 0..n { tx_putc(line[i]); }
+            tx_putc(b'\n');
+            return;
+        }
+        line[n] = c;
+        n += 1;
+    }
+}
+
+fn tx_str(s: &[u8]) {
+    for &b in s { tx_putc(b); }
+}
+
+fn tx_putc(b: u8) {
+    // Wait for THRE before writing. Host's emulated LSR has
+    // bit 5 always set so this never spins, but we follow the
+    // 8250 protocol so the loop stays correct against any future
+    // host backend (real virtio-console, hardware passthrough).
+    while unsafe { inb(0x3FD) } & 0x20 == 0 {}
+    unsafe { outb(0x3F8, b) };
+}
+
+unsafe fn inb(port: u16) -> u8 {
+    let v: u8;
+    unsafe {
+        asm!(
+            "in al, dx",
+            out("al") v,
+            in("dx") port,
+            options(nostack, preserves_flags),
+        );
+    }
+    v
+}
+
+unsafe fn outb(port: u16, val: u8) {
+    unsafe {
+        asm!(
+            "out dx, al",
+            in("al") val,
+            in("dx") port,
+            options(nostack, preserves_flags),
+        );
     }
 }
 

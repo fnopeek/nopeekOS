@@ -338,6 +338,7 @@ pub fn run_linux(
     bzimage: &[u8],
     cmdline: &[u8],
     initramfs: Option<&[u8]>,
+    inject: &[u8],
 ) -> Result<vmcs::LaunchOutcome, &'static str> {
     with_vmx_root_and_vmcs(|| {
         let (host_base, eptp) = alloc_guest_ram_and_ept()?;
@@ -348,7 +349,7 @@ pub fn run_linux(
         vmcs::setup_guest_state(load.entry_rip)?;
         vmcs::setup_execution_controls(eptp)?;
 
-        run_linux_loop(load.boot_params_phys, host_base)
+        run_linux_loop(load.boot_params_phys, host_base, inject)
     })
 }
 
@@ -373,6 +374,14 @@ struct SerialState {
     /// `Unable to mount root fs` reason.
     panic_msg: [u8; 192],
     panic_msg_n: usize,
+    /// Phase 12.1.4 — RX FIFO. Bytes pre-injected by the host before
+    /// VMLAUNCH; drained one at a time when the guest reads RBR
+    /// (0x3F8 IN with DLAB=0). LSR.DR (bit 0) on 0x3FD IN reflects
+    /// `rx_pos < rx_n`. The guest-side counterpart in microvm-init
+    /// busy-polls 0x3FD via iopl(3) + inb.
+    rx: [u8; 128],
+    rx_pos: usize,
+    rx_n: usize,
 }
 
 const PANIC_PREFIX: &[u8] = b"Kernel panic - not syncing: ";
@@ -386,6 +395,33 @@ impl SerialState {
             panic_observed: false,
             panic_msg: [0; 192],
             panic_msg_n: 0,
+            rx: [0; 128],
+            rx_pos: 0,
+            rx_n: 0,
+        }
+    }
+
+    /// Pre-load the RX FIFO with bytes the host wants the guest to
+    /// receive on its next 0x3F8 reads. Truncates silently to capacity.
+    fn inject(&mut self, bytes: &[u8]) {
+        let cap = self.rx.len();
+        let n = bytes.len().min(cap);
+        self.rx[..n].copy_from_slice(&bytes[..n]);
+        self.rx_pos = 0;
+        self.rx_n = n;
+    }
+
+    fn rx_has_data(&self) -> bool {
+        self.rx_pos < self.rx_n
+    }
+
+    fn rx_take(&mut self) -> u8 {
+        if self.rx_pos < self.rx_n {
+            let b = self.rx[self.rx_pos];
+            self.rx_pos += 1;
+            b
+        } else {
+            0
         }
     }
 
@@ -599,6 +635,7 @@ fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
 fn run_linux_loop(
     boot_params_phys: u64,
     host_base: u64,
+    inject: &[u8],
 ) -> Result<vmcs::LaunchOutcome, &'static str> {
     use crate::kprintln;
 
@@ -608,6 +645,10 @@ fn run_linux_loop(
     regs.rsi = boot_params_phys;
 
     let mut serial = SerialState::new();
+    if !inject.is_empty() {
+        serial.inject(inject);
+        kprintln!("[microvm] pre-injected {} bytes into UART RX FIFO", inject.len());
+    }
     let mut trace = ExitTrace::new();
     let mut io_stats = IoStats::new();
     let mut launched = false;
@@ -1040,8 +1081,13 @@ fn handle_linux_io(
         }
         // COM1 IN — synthetic responses.
         (0x3F8, true) => {
-            // RBR (no incoming data) or DLL — return 0.
-            regs.rax = (regs.rax & !mask) | (0u64 & mask);
+            // RBR (DLAB=0): pop one byte from the host-injected RX
+            // FIFO. DLL (DLAB=1): we don't model divisor latches —
+            // return 0. With an empty FIFO this also returns 0,
+            // matching real hardware where reading RBR with DR=0 is
+            // undefined-but-typically-zero.
+            let v = if !serial.dlab { serial.rx_take() as u64 } else { 0 };
+            regs.rax = (regs.rax & !mask) | (v & mask);
         }
         (0x3FA, true) => {
             // IIR: bit 0 = "no interrupt pending" (which on read
@@ -1049,9 +1095,12 @@ fn handle_linux_io(
             regs.rax = (regs.rax & !mask) | (0x01u64 & mask);
         }
         (0x3FD, true) => {
-            // LSR: bit 5 = THR empty, bit 6 = TSR empty.
-            // Always ready → polling loops never spin.
-            regs.rax = (regs.rax & !mask) | (0x60u64 & mask);
+            // LSR: bit 5 (THR empty) | bit 6 (TSR empty) always set,
+            // plus bit 0 (DR — data ready) reflects the RX FIFO.
+            // Polling loops in the guest see DR=1 the moment the
+            // host has injected, and read RBR until the FIFO drains.
+            let dr = if serial.rx_has_data() { 0x01u64 } else { 0 };
+            regs.rax = (regs.rax & !mask) | ((0x60u64 | dr) & mask);
         }
         (0x3FE, true) => {
             // MSR: CTS asserted (bit 4) + DSR (bit 5) + DCD (bit 7).
