@@ -117,9 +117,14 @@ pub const OFF_SAVE_G_PAT: usize = 0x400 + 0x268;
 // (which span access-byte + flags-nibble) into 12 contiguous bits.
 
 /// Real-mode 16-bit code segment: P=1, S=1, type=Code/Read/Accessed (1011).
-pub const ATTR_CODE_RM: u16 = 0x9B;
+#[allow(dead_code)] pub const ATTR_CODE_RM: u16 = 0x9B;
 /// Real-mode 16-bit data segment: P=1, S=1, type=Data/Write/Accessed (0011).
-pub const ATTR_DATA_RM: u16 = 0x93;
+#[allow(dead_code)] pub const ATTR_DATA_RM: u16 = 0x93;
+/// 32-bit prot-mode code segment: ATTR_CODE_RM + D=1 (32-bit) + G=1
+/// (4 KB granularity). Used by 12.1.1b-svm "OK" port-0x80 stub.
+pub const ATTR_CODE_PM32: u16 = 0xC9B;
+/// 32-bit prot-mode data segment: ATTR_DATA_RM + D=1 + G=1.
+pub const ATTR_DATA_PM32: u16 = 0xC93;
 
 // ── VMCB wrapper ────────────────────────────────────────────────────
 
