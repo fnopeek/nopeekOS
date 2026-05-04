@@ -18,7 +18,8 @@
 //! (Initializing a VMCS), §26.2-§26.4 (Host/Guest State), §27
 //! (VM Exits).
 
-use super::{ept, rdmsr, vmcs, wrmsr, bzimage};
+use super::{ept, rdmsr, vmcs, wrmsr};
+use crate::microvm::linux::bzimage;
 use crate::mm::memory;
 
 const IA32_FEATURE_CONTROL: u32 = 0x3A;

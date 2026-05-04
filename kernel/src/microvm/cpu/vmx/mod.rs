@@ -30,7 +30,6 @@
 //!   12.1.4    inject_console round-trip               ✓ v0.137.0
 //!   12.1.2    virtio-console backend                  ← next
 
-pub mod bzimage;
 mod enable;
 mod ept;
 mod probe;
@@ -117,7 +116,7 @@ pub fn run_linux(
     }
 }
 
-pub use vmcs::decode_io_exit_qualification;
+pub use vmcs::{decode_io_exit_qualification, host_cpuid, LaunchOutcome};
 
 // ── shared CPU primitives for submodules ───────────────────────────
 

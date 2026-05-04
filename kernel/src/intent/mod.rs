@@ -1145,7 +1145,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "vmx" | "vt-x" => {
             if require_cap(vault, &session, Rights::READ, "vmx") {
-                crate::vmx::report();
+                crate::microvm::report();
             }
         }
         "microvm" => {
@@ -1156,7 +1156,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 kprintln!("[microvm]   linux-info — parse bundled bzImage, print stats");
             } else if sub == "test" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm test") {
-                    match crate::vmx::run_substrate_test() {
+                    match crate::microvm::run_substrate_test() {
                         Ok(outcome) => {
                             let basic = (outcome.exit_reason & 0xFFFF) as u16;
                             let label = match basic {
@@ -1173,7 +1173,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                             );
                             if basic == 30 {
                                 let (port, dir_in, size) =
-                                    crate::vmx::decode_io_exit_qualification(
+                                    crate::microvm::decode_io_exit_qualification(
                                         outcome.exit_qualification,
                                     );
                                 let dir = if dir_in { "IN" } else { "OUT" };
@@ -1547,7 +1547,7 @@ fn microvm_linux_info() {
         }
     };
 
-    let header = match crate::vmx::bzimage::parse_header(&bytes) {
+    let header = match crate::microvm::linux::bzimage::parse_header(&bytes) {
         Ok(h) => h,
         Err(e) => {
             kprintln!("[microvm] parse failed: {}", e);
@@ -1555,8 +1555,8 @@ fn microvm_linux_info() {
         }
     };
 
-    let setup_size = crate::vmx::bzimage::setup_section_size(&header);
-    let prot_size  = crate::vmx::bzimage::protected_kernel_size(&header);
+    let setup_size = crate::microvm::linux::bzimage::setup_section_size(&header);
+    let prot_size  = crate::microvm::linux::bzimage::protected_kernel_size(&header);
     // Reads of #[repr(packed)] fields go via local copies to avoid
     // unaligned-reference UB.
     let version = header.version;
@@ -1658,7 +1658,7 @@ fn microvm_linux(inject: &[u8]) {
               bytes.len(),
               core::str::from_utf8(CMDLINE).unwrap_or("?"));
 
-    match crate::vmx::run_linux(&bytes, CMDLINE, initramfs.as_deref(), inject) {
+    match crate::microvm::run_linux(&bytes, CMDLINE, initramfs.as_deref(), inject) {
         Ok(outcome) => {
             let basic = (outcome.exit_reason & 0xFFFF) as u16;
             kprintln!("[microvm] guest exited — final reason {} qual {:#x}",
