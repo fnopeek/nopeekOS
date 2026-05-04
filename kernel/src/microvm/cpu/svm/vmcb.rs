@@ -197,12 +197,11 @@ pub use super::super::LaunchOutcome;
 
 /// Guest GPRs — the asm shim spills these on every VMEXIT and
 /// reloads them on VMRUN. RAX is special because the CPU itself
-/// saves/restores it in VMCB.SAVE.RAX during VMRUN; for the other
-/// GPRs we shadow them through this struct. Plumbed through in
-/// 12.1.0c-svm when the substrate guest grows past a single HLT.
+/// saves/restores it in VMCB.SAVE.RAX during VMRUN; the 14 other
+/// GPRs are shadowed through this struct. Layout matches the asm
+/// offsets in `enable::run_guest_once`.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
-#[allow(dead_code)]
 pub struct GuestRegs {
     pub rbx: u64,    //   0
     pub rcx: u64,    //   8
