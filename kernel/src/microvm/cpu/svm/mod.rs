@@ -1,8 +1,7 @@
 //! SVM (AMD-V) — Phase 12 MicroVM substrate, AMD backend.
 //!
-//! Status: SKELETON. Probes capabilities and reports them, but
-//! `run_substrate_test` and `run_linux` return `Err` until the
-//! real backend lands.
+//! Status: 12.1.0a-svm — probe + report. Bring-up
+//! (EFER.SVME, host-save, VMCB, VMRUN) lands in 12.1.0b-svm.
 //!
 //! The AMD equivalent of Intel VMX is documented in *AMD64
 //! Architecture Programmer's Manual, Volume 2: System Programming*
@@ -19,52 +18,79 @@
 //! | I/O intercept        | I/O bitmap (2×4 KB) | IOPM (12 KB, ports 0..0xFFFF) |
 //! | MSR intercept        | MSR bitmap (4 KB) | MSRPM (8 KB) |
 //!
-//! ## Implementation roadmap
-//!
-//! 1. Probe (CPUID 0x8000_0001 ECX bit 2 = SVM, plus 0x8000_000A
-//!    leaves for SVM revision + features incl. NPT bit 0).
-//! 2. Enable: set EFER.SVME, allocate host-save area, write its
-//!    physical address to VM_HSAVE_PA MSR.
-//! 3. VMCB allocation + state-load semantics; VMCB.CONTROL fields
-//!    for intercepts, nested paging CR3 (NPT root), IOPM/MSRPM PA.
-//! 4. VMRUN loop: save host GPRs, load guest GPRs, `vmrun rax`
-//!    (where rax = VMCB phys), on exit save guest GPRs and dispatch
-//!    on VMCB.EXITCODE.
-//! 5. NPT page-table set-up — same 4-level format as EPT but different
-//!    enable bit + CR3 plumbing.
-//! 6. Linux loader integration — `microvm::linux::bzimage` is already
-//!    platform-agnostic and writes into a host-mapped guest-RAM
-//!    window; the SVM backend just needs to provide the host-base
-//!    pointer + NPT mapping.
-//!
-//! All entry points here mirror the Intel `vmx::*` shape so the
-//! dispatch in `microvm::cpu::mod.rs` is symmetric.
+//! Phase 12.1 milestones (mirroring VMX bring-up):
+//!   12.1.0a-svm  probe + report                          ← this
+//!   12.1.0b-svm  EFER.SVME + host-save + trivial VMRUN
+//!   12.1.0c/d-svm  VMCB save-area complete, host VMSAVE/VMLOAD
+//!   12.1.1a-svm  NPT identity-map (256 MB)
+//!   12.1.1b-svm  Real-mode unrestricted guest + I/O bitmap
+//!   12.1.1c-svm  Linux bzImage 32-bit boot protocol entry
+//!   12.1.1d-svm  Panic detection (shared SerialState scanner)
+//!   12.1.3-svm   initramfs + Rust-PID-1 (init crate already exists)
+//!   12.1.4-svm   inject_console echo round-trip
 
-use crate::kprintln;
+mod enable;
+mod probe;
+mod vmcb;
 
-/// Boot-time entry. Probes for SVM, prints a one-shot status, but
-/// does NOT enable SVM root mode — that happens lazily on the first
-/// `microvm` shell-intent invocation, mirroring `vmx::init`.
+pub use probe::Capabilities;
+use probe::probe;
+use spin::Mutex;
+
+/// SVM availability as observed at boot. Set by `init()`, never
+/// changes afterwards (capabilities are CPUID-fixed).
+#[derive(Debug, Clone, Copy)]
+pub enum ProbeState {
+    NotProbed,
+    Available(Capabilities),
+    Unavailable(&'static str),
+}
+
+static PROBE: Mutex<ProbeState> = Mutex::new(ProbeState::NotProbed);
+
+/// Boot-time probe — no MSR writes, no SVME. Stores the capability
+/// snapshot for later `microvm`-intent invocations and prints a one-
+/// shot status line.
 pub fn init() {
-    if probe_svm() {
-        kprintln!("[svm] AMD-V detected — backend is a STUB, MicroVM disabled");
-        kprintln!("[svm]   real implementation: AMD APM Vol 2 Ch. 15");
-    } else {
-        kprintln!("[svm] AMD-V not available — MicroVM disabled");
-        kprintln!("[svm]   check BIOS: 'SVM Mode' / 'Virtualization' must be enabled");
-    }
+    let state = match probe() {
+        Some(c) => ProbeState::Available(c),
+        None => ProbeState::Unavailable("AMD-V not supported or BIOS-locked"),
+    };
+    *PROBE.lock() = state;
+    report();
 }
 
 pub fn report() {
-    if probe_svm() {
-        kprintln!("[svm] AMD-V available (backend not yet implemented)");
-    } else {
-        kprintln!("[svm] AMD-V NOT available");
+    use crate::kprintln;
+    match *PROBE.lock() {
+        ProbeState::Available(c) => {
+            kprintln!("[svm] AMD-V available");
+            kprintln!("[svm]   revision        = {}", c.revision);
+            kprintln!("[svm]   asid_count      = {}", c.asid_count);
+            kprintln!("[svm]   nested_paging   = {}", c.nested_paging);
+            kprintln!("[svm]   nrip_save       = {}", c.nrip_save);
+            kprintln!("[svm]   decode_assists  = {}", c.decode_assists);
+            kprintln!("[svm]   vmsave_vmload   = {}", c.vmsave_vmload);
+            kprintln!("[svm]   substrate-test  = run 'microvm test' to exercise (12.1.0b)");
+        }
+        ProbeState::Unavailable(reason) => {
+            kprintln!("[svm] AMD-V NOT available — MicroVM disabled");
+            kprintln!("[svm]   {}", reason);
+            kprintln!("[svm]   check BIOS: 'SVM Mode' / 'Virtualization' must be enabled");
+        }
+        ProbeState::NotProbed => {
+            use crate::kprintln;
+            kprintln!("[svm] probe not run yet");
+        }
     }
 }
 
 pub fn run_substrate_test() -> Result<super::LaunchOutcome, &'static str> {
-    Err("SVM substrate-test not yet implemented")
+    match *PROBE.lock() {
+        ProbeState::Available(_) => enable::enable_and_test(),
+        ProbeState::Unavailable(reason) => Err(reason),
+        ProbeState::NotProbed => Err("svm::init() not called yet"),
+    }
 }
 
 pub fn run_linux(
@@ -73,13 +99,70 @@ pub fn run_linux(
     _initramfs: Option<&[u8]>,
     _inject: &[u8],
 ) -> Result<super::LaunchOutcome, &'static str> {
-    Err("SVM run_linux not yet implemented")
+    Err("SVM run_linux pending 12.1.1c — Linux bzImage path")
 }
 
-/// CPUID-based SVM detection. CPUID 0x8000_0001 ECX bit 2 = SVM
-/// (AMD APM Vol 3, "CPUID Fn8000_0001_ECX"). Mirrors the Intel
-/// `vmx::probe` style — pure CPUID, no MSR writes.
-fn probe_svm() -> bool {
-    let (_, _, ecx, _) = super::vmx::host_cpuid(0x8000_0001, 0);
-    (ecx & (1 << 2)) != 0
+// ── shared CPU primitives for SVM submodules ───────────────────────
+
+/// Read MSR. Caller must guarantee the MSR exists on this CPU,
+/// otherwise #GP. Mirrors `vmx::rdmsr` — both backends need the
+/// same primitive but vendor isolation keeps each tree self-
+/// contained.
+pub(super) unsafe fn rdmsr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    // SAFETY: caller-guaranteed MSR validity.
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, preserves_flags),
+        );
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Write MSR. Same caveat as `rdmsr`. WRMSR can fail with #GP if
+/// the value violates reserved bits — caller handles that case.
+#[allow(dead_code)] // 12.1.0b will call this for VM_HSAVE_PA + EFER
+pub(super) unsafe fn wrmsr(msr: u32, val: u64) {
+    let lo = val as u32;
+    let hi = (val >> 32) as u32;
+    // SAFETY: caller-guaranteed MSR + value validity.
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") lo,
+            in("edx") hi,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// CPUID with explicit subleaf. Returns (eax, ebx, ecx, edx).
+/// Rust reserves rbx for LLVM internals so we save/restore it
+/// manually. CPUID has no privileged side-effects.
+pub(super) fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let eax: u32;
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: CPUID is unprivileged.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {ebx_save:e}, ebx",
+            "pop rbx",
+            ebx_save = out(reg) ebx,
+            inout("eax") leaf => eax,
+            inout("ecx") subleaf => ecx,
+            out("edx") edx,
+            options(nostack, preserves_flags),
+        );
+    }
+    (eax, ebx, ecx, edx)
 }
