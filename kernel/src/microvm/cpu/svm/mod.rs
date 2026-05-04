@@ -30,6 +30,7 @@
 //!   12.1.4-svm   inject_console echo round-trip
 
 mod enable;
+mod npt;
 mod probe;
 mod vmcb;
 

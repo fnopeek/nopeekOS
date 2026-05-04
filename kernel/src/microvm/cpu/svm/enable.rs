@@ -18,7 +18,7 @@
 //! dance: VMRUN takes the VMCB physical address as an operand
 //! (loaded into RAX), so multiple VMCBs can coexist trivially.
 
-use super::{rdmsr, vmcb, wrmsr};
+use super::{npt, rdmsr, vmcb, wrmsr};
 use crate::mm::memory;
 
 // ── MSRs (APM Vol 2 §15.4) ─────────────────────────────────────────
@@ -71,20 +71,34 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
         (stub_phys as *mut u8).write_volatile(0xF4); // hlt
     }
 
-    // 6. VMCB — 4 KB, allocated as Vmcb on the kernel heap. Since
+    // 6. NPT — identity-map 64 GB of guest physical to host physical
+    //    via 1 GB pages at the PDPT level. NCR3 points at the PML4.
+    let npt_root = npt::allocate_identity_npt()?;
+
+    // 7. VMCB — 4 KB, allocated as Vmcb on the kernel heap. Since
     //    the kernel heap lies inside the identity-mapped region,
     //    the host-virtual address equals the host-physical address.
     let vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
     let vmcb_ptr = alloc::boxed::Box::leak(vmcb);
     let vmcb_phys = vmcb_ptr.phys_addr();
 
-    setup_vmcb(vmcb_ptr, iopm_phys, msrpm_phys, stub_phys);
+    setup_vmcb(vmcb_ptr, iopm_phys, msrpm_phys, stub_phys, npt_root);
 
-    // 7. CLGI + VMRUN + STGI. VMRUN takes the VMCB phys in RAX.
+    // 8. GuestRegs slot for the asm shim. HLT stub doesn't touch
+    //    any GPRs but the shim still spills/reloads through it.
+    let mut regs = vmcb::GuestRegs::default();
+
+    // 9. CLGI + VMRUN + STGI. VMRUN takes the VMCB phys in RAX.
     //    APM §15.17: VMRUN requires GIF=0 (else #UD). The CPU sets
     //    GIF=1 inside the guest, then clears it again on VMEXIT,
     //    so we explicitly STGI on return.
-    let outcome = run_guest_once(vmcb_ptr, vmcb_phys);
+    // Memory fence: setup_vmcb wrote 200+ scattered bytes into VMCB;
+    // ensure they're visible to the CPU's VMRUN consistency-check
+    // path before we hand off. Empirically without this on KVM
+    // nested SVM the VMCB read-side races into stale zeros.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    let outcome = run_guest_once(&mut regs, vmcb_ptr, vmcb_phys);
 
     Ok(outcome)
 }
@@ -132,6 +146,7 @@ fn setup_vmcb(
     iopm_phys: u64,
     msrpm_phys: u64,
     stub_phys: u64,
+    npt_root: u64,
 ) {
     // ── Control area ──────────────────────────────────────────────
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::INTERCEPT_HLT);
@@ -140,8 +155,8 @@ fn setup_vmcb(
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
     vmcb.write_u32(vmcb::OFF_ASID, 1);
     vmcb.write_u8(vmcb::OFF_TLB_CTL, 1); // flush this guest's TLB
-    vmcb.write_u64(vmcb::OFF_NESTED_CTL, 0); // NPT off (12.1.1a-svm)
-    vmcb.write_u64(vmcb::OFF_NCR3, 0);
+    vmcb.write_u64(vmcb::OFF_NESTED_CTL, 1); // NP_ENABLE — NPT on
+    vmcb.write_u64(vmcb::OFF_NCR3, npt_root);
 
     // ── State save area: real-mode, all segments at stub_phys ─────
     // CS.base = stub_phys; IP = 0 → fetch begins at stub_phys + 0,
@@ -195,29 +210,126 @@ fn setup_vmcb(
 /// Execute one VMRUN against the supplied VMCB and return the
 /// resulting exit-info. CLGI/STGI bracketing per APM §15.17.
 ///
-/// For 12.1.0b-svm the guest is a 1-byte HLT stub — no GPR exchange
-/// needed beyond what the CPU does automatically (RAX, RSP via
-/// VMCB.SAVE). When 12.1.0c lands we'll add full GPR save/restore
-/// here, mirroring `vmx::vmcs::run_guest_once`.
+/// Loads guest GPRs from `regs` before VMRUN, saves them back on
+/// VMEXIT. RAX/RSP are auto-handled by the CPU via VMCB.SAVE.{RAX,
+/// RSP} + the host-save area, so they're not in `regs`.
+///
+/// The struct pointer survives across VMRUN by being pushed onto
+/// the stack: VMRUN restores host RSP from the host-save area on
+/// VMEXIT, returning RSP to its post-push value. The pushed
+/// struct pointer is then recovered after we spill all 14 guest
+/// GPRs.
 fn run_guest_once(
+    regs: &mut vmcb::GuestRegs,
     vmcb: &mut vmcb::Vmcb,
     vmcb_phys: u64,
 ) -> vmcb::LaunchOutcome {
+    let regs_ptr: *mut vmcb::GuestRegs = regs;
+
     // SAFETY: EFER.SVME is set (caller guarantee), VM_HSAVE_PA
     // points at a valid host-save frame, the VMCB has been
     // initialized to a state that passes APM §15.5.1 consistency
     // checks. CLGI/STGI bracket the call so no host interrupts
     // fire between save+VMRUN and post-VMEXIT state read.
+    //
+    // Register dance:
+    //   in: rdi = struct ptr, rsi = vmcb_phys
+    //   1. push rdi (struct ptr) — survives VMRUN via host-save RSP
+    //   2. mov rax, rsi (vmcb_phys into VMRUN operand reg)
+    //   3. load guest GPRs from struct, rdi LAST
+    //   4. CLGI; vmrun rax; STGI
+    //   5. spill all 14 guest GPRs to stack
+    //   6. recover struct ptr from stack[14*8 = 112]
+    //   7. pop guest GPRs (LIFO) into struct
+    //   8. discard struct ptr
     unsafe {
         core::arch::asm!(
+            // ── PROLOGUE: save host callee-saved (clobber_abi("C")
+            //              expects them preserved across the asm).
+            "push rbp",
+            "push rbx",
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+
+            // Save struct ptr below callee-saved.
+            "push rdi",
+            "mov rax, rsi",                 // rax = vmcb_phys
+
+            // ── ENTRY: load guest GPRs from struct ────────────────
+            "mov rbx, [rdi +   0]",
+            "mov rcx, [rdi +   8]",
+            "mov rdx, [rdi +  16]",
+            "mov rbp, [rdi +  40]",
+            "mov r8,  [rdi +  48]",
+            "mov r9,  [rdi +  56]",
+            "mov r10, [rdi +  64]",
+            "mov r11, [rdi +  72]",
+            "mov r12, [rdi +  80]",
+            "mov r13, [rdi +  88]",
+            "mov r14, [rdi +  96]",
+            "mov r15, [rdi + 104]",
+            "mov rsi, [rdi +  24]",         // rsi (was vmcb_phys input)
+            "mov rdi, [rdi +  32]",         // rdi LAST
+
+            // ── VMRUN ─────────────────────────────────────────────
             "clgi",
             "vmrun rax",
             "stgi",
-            in("rax") vmcb_phys,
-            // VMRUN clobbers nothing in the host (host state is
-            // saved/restored via host-save area). But we mark all
-            // GPRs as clobbered to be safe — the Rust ABI spills
-            // them around the asm! block.
+            // After VMEXIT: rsp restored by CPU, rax=vmcb_phys (host
+            // value via host-save area), all other GPRs hold guest
+            // clobbers.
+
+            // ── EXIT: spill 14 guest GPRs to stack ────────────────
+            "push rbx",
+            "push rcx",
+            "push rdx",
+            "push rsi",
+            "push rdi",
+            "push rbp",
+            "push r8",
+            "push r9",
+            "push r10",
+            "push r11",
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+            // Stack now: r15, r14, ..., rbx, struct_ptr,
+            //             host_callee_saved (6).
+            // struct_ptr is at [rsp + 14*8 = 112].
+
+            // Recover struct ptr (rax = vmcb_phys, free to clobber).
+            "mov rax, [rsp + 112]",
+
+            // Pop in reverse-push order, store at the right offset.
+            "pop rcx", "mov [rax + 104], rcx",      // r15
+            "pop rcx", "mov [rax +  96], rcx",      // r14
+            "pop rcx", "mov [rax +  88], rcx",      // r13
+            "pop rcx", "mov [rax +  80], rcx",      // r12
+            "pop rcx", "mov [rax +  72], rcx",      // r11
+            "pop rcx", "mov [rax +  64], rcx",      // r10
+            "pop rcx", "mov [rax +  56], rcx",      // r9
+            "pop rcx", "mov [rax +  48], rcx",      // r8
+            "pop rcx", "mov [rax +  40], rcx",      // rbp
+            "pop rcx", "mov [rax +  32], rcx",      // rdi (guest's)
+            "pop rcx", "mov [rax +  24], rcx",      // rsi
+            "pop rcx", "mov [rax +  16], rcx",      // rdx
+            "pop rcx", "mov [rax +   8], rcx",      // rcx
+            "pop rcx", "mov [rax +   0], rcx",      // rbx
+            "add rsp, 8",                           // discard struct ptr
+
+            // Restore host callee-saved.
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop rbx",
+            "pop rbp",
+
+            in("rdi") regs_ptr,
+            in("rsi") vmcb_phys,
             clobber_abi("C"),
         );
     }
