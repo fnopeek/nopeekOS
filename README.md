@@ -63,9 +63,10 @@ npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
 npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
 npk> gpu 4k                           # Switch to 4K@30Hz
 npk> disk read 0                     # Raw sector hex dump
-npk> vmx                              # Probe Intel VT-x capability + report
-npk> microvm test                     # VMX substrate self-test (real-mode I/O loop)
-npk> microvm linux                    # Boot Linux 6.18 LTS in MicroVM (VT-x + EPT)
+npk> vmx                              # Probe virt extensions (VT-x or AMD-V)
+npk> microvm test                     # MicroVM substrate self-test (vendor-dispatched)
+npk> microvm linux                    # Boot Linux 6.18 LTS in MicroVM (Intel: live;
+                                      # AMD: 12.1.1b done, Linux entry pending)
                                       # → live `[guest]` earlyprintk on console
 ```
 
@@ -79,7 +80,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
 ```
  ┌──────────────────────────────────────────────────────────┐
  │  Linux Apps (Firefox, etc.)                              │
- │  MicroVM (VT-x/VT-d, Mini-Linux, virtio bridges)        │
+ │  MicroVM (VT-x or AMD-V, Mini-Linux, virtio bridges)    │
  ├──────────────────────────────────────────────────────────┤
  │  WASM Modules (sandboxed, capability-gated)              │
  │  shade.wasm — Compositor (tiling, borders, bar, theme)   │
@@ -389,7 +390,7 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [ ] VirtIO GPU backend (QEMU/VBox support)
 
 **Virtualization**
-- [ ] MicroVM (VT-x/VT-d, Mini-Linux kernel for Linux app compatibility)
+- [ ] MicroVM (VT-x / AMD-V, Mini-Linux kernel for Linux app compatibility)
 - [ ] virtio bridges for MicroVM (blk, net, gpu)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
@@ -529,13 +530,24 @@ Originally planned next, deprioritised in favour of Phase 12. Returns
 as a frontend feature once the MicroVM subsystem is mature enough to
 host AI services as their own apps.
 
-### Phase 12 -- MicroVM (VT-x for Linux apps) — in progress, 12.1.3 ✅
+### Phase 12 -- MicroVM — Intel 12.1.4 ✅, AMD 12.1.1b ✅
 
 Per-app x86_64 KVM-style hypervisor inside the kernel so legacy Linux
 GUI apps (Browser first, Phase 12.6) can run sandboxed alongside
-WASM modules. Spec lives in `PHASE12_MICROVM.md`. Progress kernel
-v0.90 → v0.130:
+WASM modules. Spec lives in `PHASE12_MICROVM.md`. Vendor-agnostic
+public API at `microvm::*` dispatches to either Intel VT-x (VMX)
+or AMD-V (SVM) based on CPUID-detected vendor.
 
+**Vendor HAL** (`v0.138.0`, kernel `microvm/cpu/`):
+- [x] CPUID leaf-0 vendor-string detect at boot → `Vendor::Intel /
+      Amd / Unknown`. `microvm::run_substrate_test` /
+      `microvm::run_linux` route to the matching backend; AMD-V on
+      Intel hosts and vice-versa cleanly return `NotSupported`.
+- [x] Linux loader (`microvm/linux/bzimage.rs`) is platform-agnostic
+      — writes into a host-mapped guest-RAM window without caring
+      whether EPT or NPT backs it.
+
+**Intel VT-x backend** (`microvm/cpu/vmx/`, v0.90 → v0.137.2):
 - [x] **VT-x bring-up** — VMXON / VMCS / VMCLEAR / VMPTRLD round-trip,
       host-state setup with full VMREAD readback, TSS install (BSP).
 - [x] **VMLAUNCH against long-mode HLT-loop** — first VM-entry/exit.
@@ -559,41 +571,61 @@ v0.90 → v0.130:
       protocol entry: setup-section at guest 0x10000, kernel at
       0x100000, boot_params at 0x90000 (3-entry e820), cmdline at
       0x20000, %rsi = boot_params_phys, 256 MB guest RAM.
-- [x] **Linux booted to rootfs panic** — `microvm linux` runs the
-      Alpine 6.18.26 kernel through `setup_arch`, `e820`, NUMA-fake,
-      TSC, RCU, kfence, percpu init, fpu init (XSAVES), SLUB, RCU
-      Tasks, FPU XSAVE features 0x7, devtmpfs, PCI/ACPI gracefully
-      skipped, scheduler clock stable, then panics on the expected
-      `VFS: Unable to mount root fs on "" or unknown-block(0,0)`
-      (no rootfs supplied yet) and triple-faults to reset.
-      ~62 800 VM-exits handled. = 12.1.1c-3 milestone done.
+- [x] **initramfs + Rust-PID-1 (v0.130)** — own `microvm-init`
+      crate under `microvm/linux/init/`: ~1.3 KB statically-linked
+      Linux ELF, no_std + no_main, raw syscalls. Bundled cpio.gz
+      shipped at `sys/microvm/initramfs.cpio.gz`.
+- [x] **12.1.4 echo round-trip (v0.137.2)** — `microvm shell <bytes>`
+      injects bytes into the 8250 RX FIFO before VMLAUNCH; PID-1
+      `ioperm(0x3F8, 8, 1)` + raw inb/outb echoes them back via
+      port-0x3F8 OUTs which trap as I/O VM-exits and the host
+      reassembles. Validated NUC bare-metal: `microvm shell hi`
+      → `[guest] [init] echo: hi`.
 - [x] **Trust boundary validated (v0.128)** — first `microvm linux`
-      froze the host because pin-based external-interrupt-exiting was 0;
-      host LAPIC IRQs leaked into the guest IDT and the real-LAPIC ISR
-      stayed stuck across VMXOFF. Fix: route external interrupts as VM
-      exits (reason 1), let the post-exit `sti` deliver the still-
-      pending IRQ through the host IDT. Architecturally a host-side
-      config bug, **not a guest escape**: VMX hardware boundary held
-      throughout, host stayed up after Linux's panic + triple-fault.
-- [x] **Formal panic detection (v0.129)** — SerialState scans for
-      `Kernel panic - not syncing:`, captures the reason, classifies
-      the subsequent triple-fault as Linux's expected
-      `emergency_restart` path rather than an unhandled exit.
-- [x] **initramfs + Rust-PID-1 (v0.130)** — own `microvm-init` crate
-      under `microvm/linux/init/`: 1.3 KB statically-linked Linux
-      ELF, no_std + no_main, raw syscalls (write/pause/reboot).
-      Build pipeline: `bsdtar newc + gzip` → 694 B
-      `release/assets/microvm-initramfs.cpio.gz`, ECDSA P-384 signed,
-      shipped as bundled installer asset to `sys/microvm/
-      initramfs.cpio.gz` in npkFS. Loader places it at guest-phys
-      0xC000000, sets `boot_params.hdr.ramdisk_image/size`. Linux
-      unpacks it as rootfs, execs `/init`.
-- [ ] 12.1.2  virtio-console backend (replace earlycon when full
-      console driver gives up post-init).
-- [ ] 12.1.4  bidirectional `inject_console` round-trip.
-- [ ] 12.2-12.5 Plumbing: container format, profile-images,
+      froze the host because pin-based external-interrupt-exiting
+      was 0; fix routes external interrupts as VM exits. **VMX
+      hardware boundary held**, host recovered after Linux panic.
+
+**AMD-V (SVM) backend** (`microvm/cpu/svm/`, v0.139 → v0.141):
+- [x] **12.1.0a-svm** (v0.139.0) — CPUID 8000_0001 ECX[2] presence,
+      8000_000A revision + ASID count + feature bits (NPT, NRIPS,
+      decode-assists, VMSAVE/VMLOAD virtualization), VM_CR MSR
+      check for SVMDIS+SVMLOCK firmware seal.
+- [x] **12.1.0b-svm** (v0.139.0) — EFER.SVME enable, 4 KB host-save
+      area + VM_HSAVE_PA MSR, minimal VMCB (control + state-save),
+      real-mode HLT stub, CLGI/VMRUN/STGI bracketing per
+      APM §15.17. First `exit_reason=0x78` (HLT) on AMD nested SVM.
+- [x] **12.1.0c-svm** (v0.140.0) — full GuestRegs save/restore
+      around VMRUN. 14 GPRs (RAX/RSP excluded — CPU auto-handles),
+      callee-saved push/pop to honor `clobber_abi("C")`, struct-ptr
+      survives via host-save RSP. Mirrors `vmx::vmcs::run_guest_once`.
+- [x] **12.1.1a-svm** (v0.140.0) — Nested Page Tables: 3-page
+      footprint (PML4 + PDPT + PD), identity-map 256 MB via 2 MB
+      pages. `VMCB.NESTED_CTL.NP_ENABLE = 1`, `VMCB.NCR3 = NPT root`.
+      1 GB pages were tried first but KVM nested SVM has a quirk
+      with 1 GB-leaf NPT entries; 2 MB stays in the well-tested path.
+      Required a `core::sync::atomic::fence(SeqCst)` before VMRUN
+      to serialize VMCB writes against the consistency-check read
+      path on KVM nested SVM.
+- [x] **12.1.1b-svm** (v0.141.0) — 32-bit protected mode + I/O
+      VMEXIT. Stub `mov al, 0x4F; out 0x80, al; hlt` traps via
+      IOPM bit for port 0x80, returns `exit=0x7B (IOIO)`,
+      `qual=0x800110` (port 0x80, OUT, 8-bit, A32), `rax=0x4F`.
+      Validates the I/O-bitmap path used by Linux serial console.
+- [ ] **12.1.1c-svm** — Linux bzImage entry + VMRUN/VMEXIT loop
+      with handlers for CPUID, RDMSR/WRMSR, IOIO (port 0x3F8 UART),
+      HLT, NPT faults. ~700 LoC budget mirroring `vmx::run_linux`.
+- [ ] **12.1.1d-svm** — panic detection (shared SerialState scanner
+      with VMX side).
+- [ ] **12.1.3-svm** — initramfs + Rust-PID-1 reuse (init crate
+      already exists, just needs the SVM loader to plumb it).
+- [ ] **12.1.4-svm** — `microvm shell <bytes>` echo round-trip on
+      AMD, parity with the Intel NUC milestone.
+
+**Phase 12.2-12.6** (after both vendor backends complete 12.1.4):
+- [ ] 12.2-12.5  Plumbing: container format, profile-images,
       virtio-blk/net backends, picker bridge.
-- [ ] 12.6     **Firefox in MicroVM** (the actual end-goal).
+- [ ] 12.6       **Firefox in MicroVM** (the actual end-goal).
 
 ### Phase 11.5 -- npkFS v2: Real Content-Addressed Directories ✅ DONE 2026-04-28
 
@@ -672,7 +704,7 @@ Spec + design rationale: see [`NPKFS_V2.md`](NPKFS_V2.md).
 | Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
 | Intent Model | Event-driven, heap state | Fire-and-forget tasks, no Core blocked when idle |
 | Core 0 | Event dispatcher only | IRQ + input + blit, never blocks >100μs |
-| Linux apps (future) | MicroVM (VT-x/VT-d) | Mini-Linux kernel, virtio bridges |
+| Linux apps (future) | MicroVM (VT-x / AMD-V) | Vendor HAL with Intel + AMD backends, Mini-Linux + virtio bridges |
 | Modules | npk install | ECDSA P-384 signed, SHA-384 verified, OTA from GitHub |
 | WiFi | RTL8852BE (WASM driver) | PCIe MMIO, DMA, MFW firmware download, capability-gated |
 | Driver ABI | Host functions (npk_pci_*, npk_mmio_*, npk_dma_*) | Stable ABI, device-bound, sandboxed |
