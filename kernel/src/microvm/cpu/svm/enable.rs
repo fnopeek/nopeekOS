@@ -62,20 +62,37 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     // SAFETY: as above.
     unsafe { core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096); }
 
-    // 5. Guest stub page — 4 KB, write `hlt` (0xF4) at offset 0.
+    // 5. IOPM bit for port 0x80 — substrate-test guest writes there.
+    //    APM §15.10.1: bit `port % 8` of byte `port / 8`. Port 0x80
+    //    → byte 16, bit 0 → IOPM[16] |= 0x01.
+    // SAFETY: IOPM was just allocated + zeroed; exclusive ours.
+    unsafe { (iopm_phys as *mut u8).add(0x10).write_volatile(0x01); }
+
+    // 6. Guest stub page — 4 KB, write 32-bit prot-mode "OK" stub:
+    //    B0 4F      mov al, 0x4F  ('O')
+    //    E6 80      out 0x80, al
+    //    F4         hlt
+    //    Five bytes total. With IOIO_PROT + IOPM bit set, the OUT
+    //    triggers VMEXIT_IOIO (0x7B). Without IOIO intercept (the
+    //    earlier 12.1.0b path), it would fall through to HLT.
     let stub_phys = memory::allocate_frame()
         .ok_or("OOM allocating guest stub")?;
     // SAFETY: exclusive, identity-mapped.
     unsafe {
         core::ptr::write_bytes(stub_phys as *mut u8, 0, 4096);
-        (stub_phys as *mut u8).write_volatile(0xF4); // hlt
+        let p = stub_phys as *mut u8;
+        p.add(0).write_volatile(0xB0); // mov al, imm8
+        p.add(1).write_volatile(0x4F); // 'O'
+        p.add(2).write_volatile(0xE6); // out imm8, al
+        p.add(3).write_volatile(0x80); // port 0x80
+        p.add(4).write_volatile(0xF4); // hlt
     }
 
-    // 6. NPT — identity-map 64 GB of guest physical to host physical
-    //    via 1 GB pages at the PDPT level. NCR3 points at the PML4.
+    // 7. NPT — identity-map 256 MB of guest physical to host physical
+    //    via 2 MB pages. NCR3 points at the PML4.
     let npt_root = npt::allocate_identity_npt()?;
 
-    // 7. VMCB — 4 KB, allocated as Vmcb on the kernel heap. Since
+    // 8. VMCB — 4 KB, allocated as Vmcb on the kernel heap. Since
     //    the kernel heap lies inside the identity-mapped region,
     //    the host-virtual address equals the host-physical address.
     let vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
@@ -84,11 +101,12 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
 
     setup_vmcb(vmcb_ptr, iopm_phys, msrpm_phys, stub_phys, npt_root);
 
-    // 8. GuestRegs slot for the asm shim. HLT stub doesn't touch
-    //    any GPRs but the shim still spills/reloads through it.
+    // 9. GuestRegs slot for the asm shim. The "OK" stub uses RAX
+    //    only (CPU saves/loads via VMCB.SAVE.RAX); the other 14
+    //    GPRs stay zero.
     let mut regs = vmcb::GuestRegs::default();
 
-    // 9. CLGI + VMRUN + STGI. VMRUN takes the VMCB phys in RAX.
+    // 10. CLGI + VMRUN + STGI. VMRUN takes the VMCB phys in RAX.
     //    APM §15.17: VMRUN requires GIF=0 (else #UD). The CPU sets
     //    GIF=1 inside the guest, then clears it again on VMEXIT,
     //    so we explicitly STGI on return.
@@ -134,13 +152,14 @@ fn setup_host_save() -> Result<(), &'static str> {
 }
 
 /// Initialize a VMCB for the substrate-test guest:
-///   * Real-mode 16-bit, all segments based at the stub page,
-///     CS:IP = 0:0 → executes the `hlt` byte at offset 0.
-///   * Intercept HLT (so VMEXIT fires when the guest halts).
+///   * 32-bit protected mode (CR0.PE=1, paging off — segmentation
+///     only). CS.base = stub_phys, RIP = 0 → execution starts at
+///     the 5-byte "OK" stub: mov al,0x4F; out 0x80,al; hlt.
+///   * Intercept HLT + I/O (so VMEXIT fires on `out 0x80, al`).
 ///   * Intercept VMRUN (mandatory — guest can't run nested SVM
 ///     because we don't support nested-nested in 12.1).
-///   * NPT off, paging off, GDTR/IDTR null (real mode doesn't use
-///     them).
+///   * NPT on (12.1.1a-svm), guest paging off so guest physical =
+///     guest linear and NPT translates straight through.
 fn setup_vmcb(
     vmcb: &mut vmcb::Vmcb,
     iopm_phys: u64,
@@ -149,7 +168,10 @@ fn setup_vmcb(
     npt_root: u64,
 ) {
     // ── Control area ──────────────────────────────────────────────
-    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::INTERCEPT_HLT);
+    vmcb.write_u32(
+        vmcb::OFF_INTERCEPT_MISC1,
+        vmcb::INTERCEPT_HLT | vmcb::INTERCEPT_IOIO_PROT,
+    );
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::INTERCEPT_VMRUN);
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
@@ -158,34 +180,35 @@ fn setup_vmcb(
     vmcb.write_u64(vmcb::OFF_NESTED_CTL, 1); // NP_ENABLE — NPT on
     vmcb.write_u64(vmcb::OFF_NCR3, npt_root);
 
-    // ── State save area: real-mode, all segments at stub_phys ─────
-    // CS.base = stub_phys; IP = 0 → fetch begins at stub_phys + 0,
-    // which is our `hlt` instruction.
+    // ── State save area: 32-bit prot mode, CS at stub_phys ────────
+    // CS.base = stub_phys; RIP = 0 → fetch starts at stub_phys + 0
+    // = the `mov al, 0x4F` byte. CS limit=4 GB (G=1, limit=0xFFFFFFFF).
     vmcb.write_segment(
         vmcb::OFF_SAVE_CS,
-        /* selector */ 0,
-        /* attrib   */ vmcb::ATTR_CODE_RM,
-        /* limit    */ 0xFFFF,
+        /* selector */ 0x08,
+        /* attrib   */ vmcb::ATTR_CODE_PM32,
+        /* limit    */ 0xFFFF_FFFF,
         /* base     */ stub_phys,
     );
-    // SS/DS/ES/FS/GS: zero base, zero limit — guest doesn't touch them.
+    // SS/DS/ES: 32-bit data, base=0, limit=4 GB — flat data segments.
     for off in [
         vmcb::OFF_SAVE_SS,
         vmcb::OFF_SAVE_DS,
         vmcb::OFF_SAVE_ES,
     ] {
-        vmcb.write_segment(off, 0, vmcb::ATTR_DATA_RM, 0xFFFF, 0);
+        vmcb.write_segment(off, 0x10, vmcb::ATTR_DATA_PM32, 0xFFFF_FFFF, 0);
     }
 
-    // GDTR / IDTR: real mode doesn't consult them, but VMRUN's
-    // consistency check still inspects limit/base. Leave zero.
-    vmcb.write_u32(vmcb::OFF_SAVE_GDTR + 4, 0); // limit
-    vmcb.write_u64(vmcb::OFF_SAVE_GDTR + 8, 0); // base
+    // GDTR / IDTR: 32-bit prot mode normally consults GDTR for
+    // segment descriptor reloads, but our segments don't reload —
+    // we set everything in the VMCB once. Leave zero.
+    vmcb.write_u32(vmcb::OFF_SAVE_GDTR + 4, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_GDTR + 8, 0);
     vmcb.write_u32(vmcb::OFF_SAVE_IDTR + 4, 0);
     vmcb.write_u64(vmcb::OFF_SAVE_IDTR + 8, 0);
 
-    // CR registers: real mode = paging off, protection off.
-    vmcb.write_u64(vmcb::OFF_SAVE_CR0, 0x10); // ET=1 only
+    // CR registers: 32-bit prot mode, paging off.
+    vmcb.write_u64(vmcb::OFF_SAVE_CR0, 0x11); // PE=1, ET=1
     vmcb.write_u64(vmcb::OFF_SAVE_CR3, 0);
     vmcb.write_u64(vmcb::OFF_SAVE_CR4, 0);
 
