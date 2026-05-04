@@ -3,16 +3,26 @@
 # nopeekOS – Build & Run Script
 # ============================================================
 #
-# Usage:
-#   ./build.sh build        Kompiliert Kernel + erstellt ISO
-#   ./build.sh qemu         Build + Run in QEMU (Serial auf stdio)
-#   ./build.sh debug        Build + Run in QEMU mit GDB-Stub
-#   ./build.sh usb /dev/sdX  Build + EFI-bootbaren USB-Stick erstellen
-#   ./build.sh vbox         Build + Run in VirtualBox
-#   ./build.sh vbox-clean   VirtualBox VM entfernen
-#   ./build.sh all          Build + QEMU + VirtualBox
+# Usage: ./build.sh <command> [args]
 #
-# Ohne Argument: build + qemu
+# Common:
+#   build                Compile kernel + create bootable ISO
+#   qemu                 Build + run in QEMU (KVM, host CPU, serial)
+#   qemu-gui             Build + run in QEMU with framebuffer GUI
+#   debug                Build + run in QEMU with GDB stub on :1234
+#
+# Cross-vendor testing (TCG, slow but vendor-correct):
+#   qemu-intel           Force Intel CPU emulation regardless of host
+#   qemu-amd             Force AMD CPU emulation regardless of host
+#
+# Installer / release:
+#   installer            Two-pass installer build (bundled assets)
+#   qemu-installer       Installer + run (wipes disk, fresh install)
+#   qemu-installer-gui   Same with framebuffer
+#   usb /dev/sdX         Build installer + flash USB stick
+#   release              Sign kernel + modules + assets (ECDSA P-384)
+#
+# Without argument: build + qemu
 
 set -euo pipefail
 
@@ -24,7 +34,6 @@ ISO_FILE="$PROJECT_DIR/target/nopeekos.iso"
 QEMU_ISO_DIR="$PROJECT_DIR/target/iso-qemu"
 QEMU_ISO_FILE="$PROJECT_DIR/target/nopeekos-qemu.iso"
 DISK_IMG="$PROJECT_DIR/target/disk.img"
-VM_NAME="nopeekOS"
 
 # Farben
 RED='\033[0;31m'
@@ -91,7 +100,7 @@ build() {
 
     ok "Kernel built: $KERNEL_BIN"
 
-    # ISO erstellen mit GRUB (bootbar in QEMU + VirtualBox)
+    # ISO erstellen mit GRUB (bootbar in QEMU, USB, jede HW)
     log "Creating bootable ISO..."
 
     mkdir -p "$ISO_DIR/boot/grub"
@@ -313,80 +322,59 @@ wipe_disk_img() {
     ensure_disk_img
 }
 
-run_qemu() {
+# Single QEMU launcher. Args:
+#   $1: display      "serial" | "gui"
+#   $2: accel        "kvm" | "tcg-intel" | "tcg-amd"
+#   $3..: extra qemu args (optional, e.g. -s -S for GDB stub)
+#
+# kvm uses -cpu host so the guest sees the host vendor's virt extensions
+# (VMX on Intel, SVM on AMD). tcg-intel/tcg-amd force a specific vendor
+# CPU model regardless of host — slow, but the only way to test the VMX
+# backend on AMD or the SVM backend on Intel.
+run_qemu_generic() {
+    local display="$1"
+    local accel="$2"
+    shift 2
+
     ensure_disk_img
     build_qemu_iso
 
-    log "Launching QEMU..."
-    log "Serial console on stdio. Ctrl-A X to quit QEMU."
+    local -a accel_args
+    case "$accel" in
+        kvm)
+            accel_args=(-enable-kvm -overcommit cpu-pm=on -cpu host,+invtsc)
+            ;;
+        tcg-intel)
+            accel_args=(-accel tcg -cpu Skylake-Server)
+            warn "TCG mode (slow). Forcing Intel CPU emulation — VMX path."
+            ;;
+        tcg-amd)
+            accel_args=(-accel tcg -cpu EPYC)
+            warn "TCG mode (slow). Forcing AMD CPU emulation — SVM path."
+            ;;
+        *)
+            err "Unknown accel mode: $accel"
+            exit 1
+            ;;
+    esac
+
+    local -a display_args
+    if [ "$display" = "gui" ]; then
+        display_args=(-vga std \
+            -global driver=VGA,property=xres,value=1920 \
+            -global driver=VGA,property=yres,value=1080)
+        log "Launching QEMU GUI @ 1920x1080. Serial in this terminal. Ctrl-A X to quit."
+    else
+        display_args=(-display none)
+        log "Launching QEMU. Serial on stdio. Ctrl-A X to quit."
+    fi
     echo ""
 
     qemu-system-x86_64 \
-        -enable-kvm \
-        -cpu Haswell,+invtsc \
-        -overcommit cpu-pm=on \
+        "${accel_args[@]}" \
         -cdrom "$QEMU_ISO_FILE" \
         -serial stdio \
-        -display none \
-        -m 256M \
-        -smp 4 \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
-        -device nvme,drive=drive0,serial=nopeekos-test \
-        -device qemu-xhci,id=xhci \
-        -device usb-kbd,bus=xhci.0 \
-        -device usb-mouse,bus=xhci.0 \
-        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
-        -no-reboot \
-        -no-shutdown
-}
-
-run_qemu_gui() {
-    ensure_disk_img
-    build_qemu_iso
-
-    log "Launching QEMU GUI @ 1920x1080 (SeaBIOS + std VGA)..."
-    log "Serial I/O in this terminal. Ctrl-A X to quit."
-    echo ""
-
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -cpu Haswell,+invtsc \
-        -overcommit cpu-pm=on \
-        -cdrom "$QEMU_ISO_FILE" \
-        -serial stdio \
-        -vga std \
-        -global driver=VGA,property=xres,value=1920 \
-        -global driver=VGA,property=yres,value=1080 \
-        -m 256M \
-        -smp 4 \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
-        -device nvme,drive=drive0,serial=nopeekos-test \
-        -device qemu-xhci,id=xhci \
-        -device usb-kbd,bus=xhci.0 \
-        -device usb-mouse,bus=xhci.0 \
-        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
-        -no-reboot \
-        -no-shutdown
-}
-
-run_debug() {
-    ensure_disk_img
-    build_qemu_iso
-
-    log "Launching QEMU with GDB stub on :1234..."
-    warn "Waiting for GDB connection. In another terminal:"
-    warn "  gdb $KERNEL_BIN -ex 'target remote :1234'"
-    echo ""
-
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -cpu Haswell,+invtsc \
-        -overcommit cpu-pm=on \
-        -cdrom "$QEMU_ISO_FILE" \
-        -serial stdio \
-        -display none \
+        "${display_args[@]}" \
         -m 256M \
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -398,93 +386,7 @@ run_debug() {
         -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
         -no-reboot \
         -no-shutdown \
-        -s -S
-}
-
-# ============================================================
-# VirtualBox
-# ============================================================
-
-run_vbox() {
-    if [ ! -f "$ISO_FILE" ]; then
-        err "No ISO found. Run './build.sh build' first."
-        exit 1
-    fi
-
-    # Prüfen ob VBoxManage verfügbar
-    if ! command -v VBoxManage &> /dev/null; then
-        err "VBoxManage not found. Is VirtualBox installed?"
-        exit 1
-    fi
-
-    # VM erstellen falls nötig
-    if ! VBoxManage showvminfo "$VM_NAME" &> /dev/null; then
-        log "Creating VirtualBox VM '$VM_NAME'..."
-
-        VBoxManage createvm \
-            --name "$VM_NAME" \
-            --ostype "Other_64" \
-            --register
-
-        # Grundkonfiguration
-        VBoxManage modifyvm "$VM_NAME" \
-            --memory 128 \
-            --cpus 1 \
-            --vram 16 \
-            --graphicscontroller vmsvga \
-            --audio-enabled off \
-            --usb off \
-            --uart1 0x3F8 4 \
-            --uartmode1 server "/tmp/nopeekos-serial.sock"
-
-        # IDE Controller für ISO
-        VBoxManage storagectl "$VM_NAME" \
-            --name "IDE" \
-            --add ide
-
-        ok "VM '$VM_NAME' created."
-    else
-        log "VM '$VM_NAME' already exists, updating..."
-    fi
-
-    # Sicherstellen dass VM gestoppt ist
-    VBoxManage controlvm "$VM_NAME" poweroff 2>/dev/null || true
-    sleep 1
-
-    # ISO einlegen (aktualisieren)
-    VBoxManage storageattach "$VM_NAME" \
-        --storagectl "IDE" \
-        --port 0 \
-        --device 0 \
-        --type dvddrive \
-        --medium "$ISO_FILE" \
-        2>/dev/null || \
-    VBoxManage storageattach "$VM_NAME" \
-        --storagectl "IDE" \
-        --port 0 \
-        --device 0 \
-        --type dvddrive \
-        --medium "$ISO_FILE" \
-        --forceunmount
-
-    # Serial Port Pipe Setup
-    # Auf Linux: socat oder minicom zum Verbinden
-    VBoxManage modifyvm "$VM_NAME" \
-        --uart1 0x3F8 4 \
-        --uartmode1 server "/tmp/nopeekos-serial.sock"
-
-    log "Starting VirtualBox VM..."
-    warn "Serial console via: socat - UNIX-CONNECT:/tmp/nopeekos-serial.sock"
-    warn "Oder im VirtualBox GUI-Fenster den VGA-Output sehen."
-    echo ""
-
-    # VM starten (GUI-Modus für visuelles Testing)
-    VBoxManage startvm "$VM_NAME" --type gui
-
-    ok "VM gestartet. VGA zeigt Boot-Banner."
-    log "Für Serial Console in neuem Terminal:"
-    log "  socat - UNIX-CONNECT:/tmp/nopeekos-serial.sock"
-    echo ""
+        "$@"
 }
 
 # ============================================================
@@ -593,25 +495,6 @@ GRUBCFG
     log "Plug into NUC, select USB in boot menu."
 }
 
-clean_vbox() {
-    if ! command -v VBoxManage &> /dev/null; then
-        err "VBoxManage not found."
-        exit 1
-    fi
-
-    log "Stopping VM '$VM_NAME'..."
-    VBoxManage controlvm "$VM_NAME" poweroff 2>/dev/null || true
-    sleep 1
-
-    log "Removing VM '$VM_NAME'..."
-    VBoxManage unregistervm "$VM_NAME" --delete 2>/dev/null || true
-
-    # Socket aufräumen
-    rm -f /tmp/nopeekos-serial.sock
-
-    ok "VM '$VM_NAME' removed."
-}
-
 # ============================================================
 # Hilfsfunktionen
 # ============================================================
@@ -619,17 +502,12 @@ clean_vbox() {
 check_deps() {
     local missing=()
 
-    # Rust
     if ! command -v cargo &> /dev/null; then
         missing+=("cargo (rustup install)")
     fi
-
-    # GRUB
     if ! command -v grub-mkrescue &> /dev/null; then
         missing+=("grub-mkrescue (apt install grub-pc-bin)")
     fi
-
-    # xorriso
     if ! command -v xorriso &> /dev/null; then
         missing+=("xorriso (apt install xorriso)")
     fi
@@ -644,25 +522,30 @@ check_deps() {
 }
 
 usage() {
-    echo "nopeekOS Build System"
-    echo ""
-    echo "Usage: ./build.sh [command]"
-    echo ""
-    echo "Commands:"
-    echo "  build       Compile kernel + create bootable ISO"
-    echo "  qemu                Build + run in QEMU (serial on stdio)"
-    echo "  qemu-gui|gui        Build + run in QEMU with framebuffer GUI"
-    echo "  qemu-installer      Build installer kernel + run in QEMU (serial)"
-    echo "  qemu-installer-gui  Build installer kernel + run in QEMU (GUI)"
-    echo "  debug               Build + run in QEMU with GDB stub (:1234)"
-    echo "  installer           Build installer kernel (two-pass, with bundled assets)"
-    echo "  usb /dev/sdX        Build + create EFI-bootable USB stick"
-    echo "  vbox        Build + run in VirtualBox (GUI)"
-    echo "  vbox-clean  Remove VirtualBox VM"
-    echo "  all         Build + show run options"
-    echo "  help        Show this help"
-    echo ""
-    echo "Without argument: build + qemu"
+    cat <<'EOF'
+nopeekOS Build System
+
+Usage: ./build.sh <command> [args]
+
+Common:
+  build                Compile kernel + create bootable ISO
+  qemu                 Build + run in QEMU (KVM, host CPU, serial)
+  qemu-gui             Build + run in QEMU with framebuffer GUI
+  debug                Build + run in QEMU with GDB stub on :1234
+
+Cross-vendor testing (TCG, slow but vendor-correct):
+  qemu-intel           Force Intel CPU emulation regardless of host
+  qemu-amd             Force AMD CPU emulation regardless of host
+
+Installer / release:
+  installer            Two-pass installer build (bundled assets)
+  qemu-installer       Installer + run (wipes disk, fresh install)
+  qemu-installer-gui   Same with framebuffer
+  usb /dev/sdX         Build installer + flash USB stick
+  release              Sign kernel + modules + assets (ECDSA P-384)
+
+Without argument: build + qemu
+EOF
 }
 
 # ============================================================
@@ -677,12 +560,22 @@ case "${1:-}" in
     qemu)
         check_deps
         build
-        run_qemu
+        run_qemu_generic serial kvm
         ;;
-    qemu-gui|gui)
+    qemu-gui)
         check_deps
         build
-        run_qemu_gui
+        run_qemu_generic gui kvm
+        ;;
+    qemu-intel)
+        check_deps
+        build
+        run_qemu_generic serial tcg-intel
+        ;;
+    qemu-amd)
+        check_deps
+        build
+        run_qemu_generic serial tcg-amd
         ;;
     qemu-installer)
         # Build the installer-flavored kernel (with all bundled assets
@@ -693,24 +586,21 @@ case "${1:-}" in
         check_deps
         build_installer
         wipe_disk_img
-        run_qemu
+        run_qemu_generic serial kvm
         ;;
     qemu-installer-gui)
         # Same as qemu-installer but with GUI framebuffer (1920x1080).
         check_deps
         build_installer
         wipe_disk_img
-        run_qemu_gui
+        run_qemu_generic gui kvm
         ;;
     debug)
         check_deps
         build
-        run_debug
-        ;;
-    vbox)
-        check_deps
-        build
-        run_vbox
+        log "Launching QEMU with GDB stub on :1234..."
+        warn "In another terminal: gdb $KERNEL_BIN -ex 'target remote :1234'"
+        run_qemu_generic serial kvm -s -S
         ;;
     installer)
         check_deps
@@ -720,9 +610,6 @@ case "${1:-}" in
         check_deps
         build_installer
         write_usb "${2:-}"
-        ;;
-    vbox-clean)
-        clean_vbox
         ;;
     release)
         check_deps
@@ -866,7 +753,6 @@ size=${MOD_SIZE}
 sha384=${MOD_SHA}
 
 "
-                # Sign module
                 if [ -f "$KEY_FILE" ]; then
                     openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/modules/${MOD_NAME}.sig" "$wasm_file"
                     ok "Signed module: $MOD_NAME ($MOD_SIZE bytes)"
@@ -882,22 +768,12 @@ sha384=${MOD_SHA}
         ok "Release artifacts in $RELEASE_DIR/"
         ls -la "$RELEASE_DIR/"
         ;;
-    all)
-        check_deps
-        build
-        echo ""
-        ok "Build complete. Run with:"
-        log "  ./build.sh qemu       # QEMU (Entwicklung)"
-        log "  ./build.sh debug      # QEMU + GDB"
-        log "  ./build.sh vbox       # VirtualBox (Demo)"
-        echo ""
-        ;;
     help|-h|--help)
         usage
         ;;
     *)
         check_deps
         build
-        run_qemu
+        run_qemu_generic serial kvm
         ;;
 esac
