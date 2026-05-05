@@ -718,6 +718,13 @@ fn run_linux_loop(
                         // and BUG().
                         ecx &= !(1u32 << 7);   // CET_SS
                         edx &= !(1u32 << 20);  // CET_IBT
+                        // Hide PKU — CPUID 0xD includes PKRU (+8 byte)
+                        // in xsave state size; if Linux supports PK it
+                        // expects to find it, mismatched calc → WARN
+                        // + xsave-disable + fpstate_reset NULL-deref.
+                        // Simpler to hide PK from the guest entirely.
+                        ecx &= !(1u32 << 3);   // PKU
+                        ecx &= !(1u32 << 4);   // OSPKE
                     }
                 }
                 vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);

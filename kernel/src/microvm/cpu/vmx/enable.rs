@@ -791,6 +791,16 @@ fn run_linux_loop(
                     // (vmcs.rs) keeps CET fully off in the guest.
                     ecx &= !(1u32 << 7);   // CET_SS  (Shadow Stack)
                     edx &= !(1u32 << 20);  // CET_IBT (Indirect Branch Tracking)
+                    // Hide PKU (Memory Protection Keys for Userspace).
+                    // Host CPU reports PKRU as part of XSAVE state in
+                    // CPUID 0xD (size 840 incl. 8 byte PKRU). Linux's
+                    // own xstate calculation comes to 832 (no PKRU
+                    // support gated by this PKU bit) → consistency-
+                    // check WARN, XSAVE disabled, fpstate_reset NULL-
+                    // deref panic. Easiest fix: hide PKU from the
+                    // guest entirely. Our microvm doesn't need PK.
+                    ecx &= !(1u32 << 3);   // PKU
+                    ecx &= !(1u32 << 4);   // OSPKE (driven by PKU)
                 }
                 regs.rax = eax as u64;
                 regs.rbx = ebx as u64;
