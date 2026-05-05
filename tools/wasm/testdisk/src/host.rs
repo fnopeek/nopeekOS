@@ -69,8 +69,9 @@ pub fn fs_list(prefix: &str, buf: &mut [u8], recursive: bool) -> i32 {
     }
 }
 
-/// 9 → wrote (size_u64 + is_dir_u8); 0 → not found; -1 → error.
-pub fn fs_stat(name: &str, out: &mut [u8; 9]) -> i32 {
+/// 17 → wrote (size_u64 + is_dir_u8 + mtime_u64); 0 → not found;
+/// -1 → error. Kernel ≥ v0.146 returns 17; older kernels returned 9.
+pub fn fs_stat(name: &str, out: &mut [u8; 17]) -> i32 {
     unsafe {
         npk_fs_stat(name.as_ptr() as i32, name.len() as i32, out.as_mut_ptr() as i32)
     }

@@ -107,7 +107,7 @@ pub fn run_first_boot(salt: &[u8; 16]) -> bool {
     setup_identity_and_settings(salt)
 }
 
-/// Create the npkFS v2 locked default tree. Idempotent.
+/// Create the npkFS v3 locked default tree. Idempotent.
 ///
 /// `home/<name>/` mirrors loft's sidebar; `sys/` holds system-managed
 /// read-mostly content; `.system/` holds boot-time metadata that the
