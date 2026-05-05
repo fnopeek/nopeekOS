@@ -112,18 +112,37 @@ fn set_wallpaper(name: &str) {
         return;
     }
 
+    // Search order: exact CWD path, exact wallpaper-dir path, then
+    // wallpaper-dir + common image extensions. The extension fallback
+    // lets users type `wallpaper set npk01` without remembering whether
+    // it's `.png` or `.jpg` — file managers + terminals universally
+    // tolerate the bare-name form.
     let resolved = super::resolve_path(name);
+    let dir = wallpaper_dir();
 
-    // Try resolved path first, then wallpapers/ directory as fallback
-    let wp_path = alloc::format!("{}/{}", wallpaper_dir(), name);
-    let (final_path, data) = match crate::npkfs::fetch(&resolved) {
-        Ok((d, _h)) => (resolved, d),
-        Err(_) => match crate::npkfs::fetch(&wp_path) {
-            Ok((d, _h)) => (wp_path, d),
-            Err(_) => {
-                kprintln!("[npk] Wallpaper '{}' not found.", name);
-                return;
-            }
+    let mut candidates: Vec<String> = alloc::vec![
+        resolved.clone(),
+        alloc::format!("{}/{}", dir, name),
+    ];
+    if !name.contains('.') {
+        for ext in &["png", "jpg", "jpeg", "bmp", "webp"] {
+            candidates.push(alloc::format!("{}/{}.{}", dir, name, ext));
+        }
+    }
+
+    let mut found: Option<(String, alloc::vec::Vec<u8>)> = None;
+    for cand in &candidates {
+        if let Ok((d, _h)) = crate::npkfs::fetch(cand) {
+            found = Some((cand.clone(), d));
+            break;
+        }
+    }
+
+    let (final_path, data) = match found {
+        Some(x) => x,
+        None    => {
+            kprintln!("[npk] Wallpaper '{}' not found.", name);
+            return;
         }
     };
 
@@ -143,8 +162,9 @@ fn apply_wallpaper_data(name: &str, data: &[u8]) {
         if decode_with_wasm(name, data) {
             return;
         }
-        kprintln!("[npk] PNG decoder not installed. Use: install wallpaper");
-        kprintln!("[npk] Or store raw BGRA pixel data.");
+        // decode_with_wasm prints its own diagnostic on the WASM
+        // error path (fuel exhaustion, missing module, …) — no
+        // generic follow-up needed.
         return;
     }
 
@@ -176,7 +196,7 @@ fn apply_wallpaper_data(name: &str, data: &[u8]) {
 }
 
 /// Decode PNG via WASM module and set as wallpaper.
-fn decode_with_wasm(name: &str, _data: &[u8]) -> bool {
+fn decode_with_wasm(name: &str, data: &[u8]) -> bool {
     // Check if wallpaper WASM module is installed
     let (wasm_bytes, _) = match crate::npkfs::fetch("sys/wasm/wallpaper") {
         Ok(v) => v,
@@ -196,8 +216,17 @@ fn decode_with_wasm(name: &str, _data: &[u8]) -> bool {
         Err(_) => return false,
     };
 
+    // Fuel budget scaled to the PNG payload. The default 10M-instruction
+    // cap suffices for tiny test images but a real 4K wallpaper (9 MB
+    // compressed → ~30 MB BGRA) blows past it during DEFLATE
+    // decompression. Empirically: ~200 instructions per compressed
+    // byte for PNG decode (DEFLATE inner loop + filter pass + RGBA→BGRA
+    // swizzle) is enough headroom; clamp the floor at 100M so even
+    // small images get a comfortable budget.
+    let fuel: u64 = ((data.len() as u64) * 200).max(100_000_000);
+
     // Run the WASM module (_start reads .npk-wallpaper-target, decodes, calls npk_set_wallpaper)
-    match crate::wasm::execute_sandboxed(&wasm_bytes, "_start", &[], module_cap) {
+    match crate::wasm::execute_sandboxed_with_fuel(&wasm_bytes, "_start", &[], module_cap, fuel) {
         Ok(_) => {
             crate::config::set("wallpaper", name);
             // Clean up temp file
