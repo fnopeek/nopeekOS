@@ -34,10 +34,11 @@
 #![allow(dead_code)]
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::abi::{
-    Align, Axis, Modifier, Point, Rect, Size, TextStyle, Widget,
+    ActionId, Align, Axis, Modifier, Point, Rect, Size, TextStyle, Widget,
 };
 
 /// Geometry result for one widget node. Mirrors the widget tree shape
@@ -63,12 +64,127 @@ impl LayoutNode {
     }
 }
 
-/// Lay out `root` inside `container` (absolute px). Returns a layout
-/// tree with absolute rects and baselines.
-pub fn layout(root: &Widget, container: Rect) -> LayoutNode {
-    // Apply root modifiers (Padding) to shrink the effective rect.
+/// Floating overlay laid out at the end of the main pass.
+/// `anchor_rect` is captured at lookup time so the hit-tester knows
+/// which screen region to treat as "still inside the popover" for
+/// dismissal purposes (clicks on the anchor should NOT dismiss —
+/// the anchor's own OnClick handles toggle). `child` holds a clone
+/// of the popover's content widget so the rasterizer + click router
+/// can walk it without re-finding the source `Widget::Popover` in
+/// the main tree.
+#[derive(Debug, Clone)]
+pub struct PopoverLayout {
+    pub on_dismiss:  ActionId,
+    pub anchor_rect: Rect,
+    pub child:       Box<Widget>,
+    pub layout:      LayoutNode,
+}
+
+/// Output of a full layout pass — main tree plus floating overlays
+/// plus the NodeId→Rect lookup table the popovers used.
+#[derive(Debug, Clone)]
+pub struct LayoutOutput {
+    pub tree:     LayoutNode,
+    pub anchors:  BTreeMap<u32, Rect>,
+    pub popovers: Vec<PopoverLayout>,
+}
+
+/// Lay out `root` inside `container` (absolute px). Returns the
+/// main layout tree, a NodeId→Rect lookup, and any floating popover
+/// overlays positioned via anchor lookups.
+pub fn layout(root: &Widget, container: Rect) -> LayoutOutput {
+    // Pass 1: main tree.
     let (_, inner) = unpack_modifiers(root, container);
-    place(root, inner)
+    let tree = place(root, inner);
+
+    // Pass 2: walk widget+layout in lockstep, record NodeId-tagged
+    // rects so popovers (which always come after their anchor in
+    // tree order — apps' contract) can look them up.
+    let mut anchors: BTreeMap<u32, Rect> = BTreeMap::new();
+    record_anchors(root, &tree, &mut anchors);
+
+    // Pass 3: place every popover in the tree as a floating overlay.
+    // A popover whose anchor isn't in the table is silently dropped
+    // (nothing to attach to).
+    let mut popovers: Vec<PopoverLayout> = Vec::new();
+    collect_popovers(root, container, &anchors, &mut popovers);
+
+    LayoutOutput { tree, anchors, popovers }
+}
+
+/// Walk widget+layout trees in lockstep, recording (NodeId, rect)
+/// pairs for any widget carrying `Modifier::NodeId`.
+fn record_anchors(
+    w: &Widget,
+    n: &LayoutNode,
+    out: &mut BTreeMap<u32, Rect>,
+) {
+    for m in mods_of_widget(w) {
+        if let Modifier::NodeId(id) = m {
+            out.insert(id.0, n.rect);
+        }
+    }
+    let kids = widget_children(w);
+    for (cw, cl) in kids.iter().zip(n.children.iter()) {
+        record_anchors(cw, cl, out);
+    }
+}
+
+/// Walk the widget tree, find every Widget::Popover, look up its
+/// anchor rect, and lay out its child as a floating overlay below
+/// the anchor. Apps' contract: declare a Popover only AFTER its
+/// anchor in tree order so the lookup succeeds.
+fn collect_popovers(
+    w: &Widget,
+    window: Rect,
+    anchors: &BTreeMap<u32, Rect>,
+    out: &mut Vec<PopoverLayout>,
+) {
+    if let Widget::Popover { anchor, child, on_dismiss, modifiers: _ } = w {
+        if let Some(&anchor_rect) = anchors.get(&anchor.0) {
+            // Measure child's intrinsic size, then position it just
+            // below the anchor. Flip above when there's no room.
+            let csize = measure(child);
+            let below_y = anchor_rect.y + anchor_rect.h as i32;
+            let fits_below = below_y + csize.h as i32 <= window.y + window.h as i32;
+            let y = if fits_below {
+                below_y
+            } else {
+                (anchor_rect.y - csize.h as i32).max(window.y)
+            };
+            // Horizontally, anchor-left clamped to window-right.
+            let max_x = window.x + window.w as i32 - csize.w as i32;
+            let x = anchor_rect.x.min(max_x.max(window.x));
+            let frect = Rect { x, y, w: csize.w, h: csize.h };
+            let layout = place(child, frect);
+            out.push(PopoverLayout {
+                on_dismiss:  *on_dismiss,
+                anchor_rect,
+                child:       child.clone(),
+                layout,
+            });
+        }
+        // Popover's own children stop here — the child is placed via
+        // floating layout above; recursion below skips the wrapped
+        // tree to avoid double-placing.
+        return;
+    }
+    for c in widget_children(w) {
+        collect_popovers(c, window, anchors, out);
+    }
+}
+
+/// Children of a widget — used by anchor + popover walkers.
+fn widget_children(w: &Widget) -> &[Widget] {
+    match w {
+        Widget::Column { children, .. }
+        | Widget::Row    { children, .. }
+        | Widget::Stack  { children, .. }
+        | Widget::Menu   { items: children, .. } => children,
+        Widget::Scroll  { child, .. } => core::slice::from_ref(&**child),
+        Widget::Popover { child, .. } => core::slice::from_ref(&**child),
+        _ => &[],
+    }
 }
 
 // ── Pass 1: intrinsic measurement ─────────────────────────────────────

@@ -163,9 +163,9 @@ fn write_node(out: &mut String, w: &Widget, depth: usize) {
             let _ = writeln!(out, "[npk] {}Canvas id={} {}x{}{}",
                 indent, id.0, width, height, fmt_mods(modifiers));
         }
-        Widget::Popover { anchor, child, modifiers } => {
-            let _ = writeln!(out, "[npk] {}Popover anchor={} (RESERVED){}",
-                indent, anchor.0, fmt_mods(modifiers));
+        Widget::Popover { anchor, child, on_dismiss, modifiers } => {
+            let _ = writeln!(out, "[npk] {}Popover anchor={} on_dismiss={}{}",
+                indent, anchor.0, on_dismiss.0, fmt_mods(modifiers));
             write_node(out, child, depth + 1);
         }
         Widget::Tooltip { text, anchor, modifiers } => {
@@ -221,6 +221,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::MaxWidth(w)   => { let _ = write!(s, "MaxWidth({})", w); }
             Modifier::Rounded(r)    => { let _ = write!(s, "Rounded({})", r); }
             Modifier::Flex(f)       => { let _ = write!(s, "Flex({})", f); }
+            Modifier::NodeId(n)     => { let _ = write!(s, "NodeId({})", n.0); }
         }
     }
     s.push(']');

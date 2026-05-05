@@ -275,6 +275,14 @@ pub enum Modifier {
     /// reaches the footer divider, even when the grid content is
     /// short. `Flex(0)` is identical to no Flex at all (intrinsic only).
     Flex(u8),
+    /// Tag a widget with an app-chosen `NodeId`. The compositor's
+    /// layout pass records the laid-out rect of every NodeId-tagged
+    /// widget into a side table; `Widget::Popover { anchor }` then
+    /// looks the rect up to position itself relative to the anchor.
+    /// IDs are app-private — the compositor only echoes them back
+    /// internally for anchor lookups, never to other apps. Multiple
+    /// widgets with the same id is undefined behavior (last wins).
+    NodeId(NodeId),
     // Appended only.
 }
 
@@ -345,11 +353,19 @@ pub enum Widget {
         modifiers: Vec<Modifier>,
     },
 
-    // Reserved (v2+) — compositor logs + rejects in v1.
+    /// Floating overlay anchored to a `Modifier::NodeId`-tagged
+    /// widget elsewhere in the tree. Renders on top of everything
+    /// (z-order) at `(anchor.x, anchor.y + anchor.h)` — flips above
+    /// the anchor when there is no room below. Apps emit a Popover
+    /// only while the overlay should be visible; toggle by adding /
+    /// removing it from the tree. `on_dismiss` fires whenever the
+    /// user clicks outside both the popover content AND the anchor
+    /// rect — apps route this to their "close" state transition.
     Popover {
-        anchor:    NodeId,
-        child:     Box<Widget>,
-        modifiers: Vec<Modifier>,
+        anchor:     NodeId,
+        child:      Box<Widget>,
+        on_dismiss: ActionId,
+        modifiers:  Vec<Modifier>,
     },
     Tooltip {
         text:      String,

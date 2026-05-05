@@ -86,6 +86,17 @@ pub struct WidgetScene {
     /// allowed to exit after a single commit.
     pub tree:        abi::Widget,
     pub layout_tree: layout::LayoutNode,
+    /// NodeId → screen rect, populated for any widget tagged with
+    /// `Modifier::NodeId`. Used by `Widget::Popover`'s anchor lookup
+    /// at layout time and by the click-outside-dismiss test in
+    /// hit_test (clicks on an anchor must NOT fire on_dismiss —
+    /// the anchor's own OnClick handles toggle).
+    pub anchors:     alloc::collections::BTreeMap<u32, abi::Rect>,
+    /// Floating popover overlays in declaration order. Painted
+    /// last (top z-order); hit-tested before the main tree so a
+    /// click on a popover never falls through to whatever's
+    /// underneath it.
+    pub popovers:    Vec<layout::PopoverLayout>,
     /// blake3 hash of the postcard payload that produced this
     /// scene. P10.6: lets scene_commit short-circuit when an app
     /// resubmits the same tree (common with interactive apps that
@@ -203,6 +214,38 @@ pub fn remove_event_queue(window_id: u32) {
 pub fn hit_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
     let scenes = SCENES.lock();
     let scene = scenes.get(&window_id)?;
+
+    // Popovers (declared overlays) hit-test FIRST so a click inside
+    // an open menu dropdown lands on the menu item, not on whatever
+    // was rendered underneath. Iterate in reverse-declaration order
+    // so a popover declared later (= painted on top) wins. We don't
+    // recurse with `find_click_target` here because the popover's
+    // child tree is rooted at its own LayoutNode — same shape as the
+    // main pass, just an isolated subtree.
+    for p in scene.popovers.iter().rev() {
+        if rect_contains(p.layout.rect, x, y) {
+            let mut out = None;
+            find_click_target(&p.child, &p.layout, x, y, false, &mut out);
+            return out;
+        }
+    }
+
+    // Click outside every popover BUT one or more popovers are open
+    // → fire the topmost popover's `on_dismiss`, unless the click
+    // landed on its anchor (the anchor's own OnClick handles toggle
+    // and we don't want the dismiss action to also fire and race).
+    if !scene.popovers.is_empty() {
+        let on_anchor = scene.popovers.iter()
+            .any(|p| rect_contains(p.anchor_rect, x, y));
+        if !on_anchor {
+            // Last-declared popover is the most-recently-opened —
+            // its on_dismiss matches what the app's state expects.
+            return Some(scene.popovers.last().unwrap().on_dismiss);
+        }
+        // Click landed on an anchor — fall through to normal routing
+        // so the anchor's OnClick fires.
+    }
+
     let mut out = None;
     find_click_target(&scene.tree, &scene.layout_tree, x, y, false, &mut out);
     out
@@ -411,18 +454,23 @@ fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
             None => return,
         }
     };
-    let layout_tree = layout::layout(&tree, rect);
+    let lo = layout::layout(&tree, rect);
+    let layout_tree = lo.tree;
+    let anchors = lo.anchors;
+    let popovers = lo.popovers;
     let h = if hover_path.is_empty() { None } else { Some(hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
-    let pixels = rasterize_buffer(
-        &tree, &layout_tree, rect, h, f, a, density,
+    let pixels = rasterize_buffer_with_overlays(
+        &tree, &layout_tree, &popovers, rect, h, f, a, density,
         input_edit.as_ref(),
     );
 
     if let Some(s) = SCENES.lock().get_mut(&window_id) {
         s.pixels      = pixels;
         s.layout_tree = layout_tree;
+        s.anchors     = anchors;
+        s.popovers    = popovers;
         s.hover_path  = hover_path.to_vec();
     }
     mark_dirty(window_id);
@@ -668,17 +716,22 @@ fn rerender_state_only(window_id: u32) {
             None => return,
         }
     };
-    let layout_tree = layout::layout(&tree, rect);
+    let lo = layout::layout(&tree, rect);
+    let layout_tree = lo.tree;
+    let anchors = lo.anchors;
+    let popovers = lo.popovers;
     let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
-    let pixels = rasterize_buffer(
-        &tree, &layout_tree, rect, h, f, a, density,
+    let pixels = rasterize_buffer_with_overlays(
+        &tree, &layout_tree, &popovers, rect, h, f, a, density,
         input_edit.as_ref(),
     );
     if let Some(s) = SCENES.lock().get_mut(&window_id) {
         s.pixels      = pixels;
         s.layout_tree = layout_tree;
+        s.anchors     = anchors;
+        s.popovers    = popovers;
     }
 }
 
@@ -1040,7 +1093,10 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
     if win_w == 0 || win_h == 0 { return -3; }
 
     let layout_rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
-    let layout_tree = layout::layout(&tree, layout_rect);
+    let lo = layout::layout(&tree, layout_rect);
+    let layout_tree = lo.tree;
+    let anchors = lo.anchors;
+    let popovers = lo.popovers;
     let density = classify_density(win_w);
     let has_pseudo = render::tree_has_pseudo_state(&tree);
 
@@ -1094,8 +1150,8 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
     let focus_slice:  Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let active_slice: Option<&[u32]> = prev_active.as_deref();
 
-    let pixels = rasterize_buffer(
-        &tree, &layout_tree, layout_rect,
+    let pixels = rasterize_buffer_with_overlays(
+        &tree, &layout_tree, &popovers, layout_rect,
         hover_slice, focus_slice, active_slice,
         density, input_edit.as_ref(),
     );
@@ -1110,6 +1166,8 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
         origin_y:    win_y,
         tree:        tree.clone(),
         layout_tree,
+        anchors,
+        popovers,
         payload_hash: incoming_hash,
         hover_path:  prev_hover,
         focus_path,
@@ -1154,6 +1212,26 @@ fn rasterize_buffer(
     density: abi::Density,
     input_edit: Option<&InputEditState>,
 ) -> Vec<u32> {
+    rasterize_buffer_with_overlays(
+        tree, layout_tree, &[], rect, hover_path, focus_path, active_path, density, input_edit,
+    )
+}
+
+/// Rasterize the main tree, then paint each popover overlay on top
+/// in declaration order. Popovers are rendered without state-paths
+/// (no hover/focus carry-through to their content) — overlay state
+/// is short-lived and the next commit rebuilds the popover anyway.
+fn rasterize_buffer_with_overlays(
+    tree: &abi::Widget,
+    layout_tree: &layout::LayoutNode,
+    popovers: &[layout::PopoverLayout],
+    rect: abi::Rect,
+    hover_path: Option<&[u32]>,
+    focus_path: Option<&[u32]>,
+    active_path: Option<&[u32]>,
+    density: abi::Density,
+    input_edit: Option<&InputEditState>,
+) -> Vec<u32> {
     let pixel_count = (rect.w as usize) * (rect.h as usize);
     let mut pixels: Vec<u32> = alloc::vec![0u32; pixel_count];
 
@@ -1176,6 +1254,16 @@ fn rasterize_buffer(
         hover_path, focus_path, active_path, density,
         input_edit,
     );
+
+    // Overlays — paint after the main tree so they sit on top of any
+    // pixels the main pass wrote into the same screen region. No
+    // pseudo-state paths — popovers are transient by definition.
+    for p in popovers {
+        render::render_with_state(
+            &mut rast, &mut target, &p.child, &p.layout,
+            None, None, None, density, None,
+        );
+    }
 
     // `target` drops here, releasing the &mut on `pixels`.
     drop(target);
@@ -1204,14 +1292,16 @@ pub fn refresh_all_scenes() {
             ),
             None => continue,
         };
-        let new_layout = layout::layout(&tree, rect);
+        let new_lo = layout::layout(&tree, rect);
         let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
         let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
         let a: Option<&[u32]> = active_path.as_deref();
-        let new_pixels = rasterize_buffer(&tree, &new_layout, rect, h, f, a, density, input_edit.as_ref());
+        let new_pixels = rasterize_buffer_with_overlays(&tree, &new_lo.tree, &new_lo.popovers, rect, h, f, a, density, input_edit.as_ref());
         if let Some(scene) = SCENES.lock().get_mut(&wid) {
             scene.pixels      = new_pixels;
-            scene.layout_tree = new_layout;
+            scene.layout_tree = new_lo.tree;
+            scene.anchors     = new_lo.anchors;
+            scene.popovers    = new_lo.popovers;
         }
         crate::shade::with_compositor(|c| {
             if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
@@ -1239,12 +1329,12 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     // coordinates of the old layout no longer match. Focus survives
     // (a focused input stays focused after resize). Active is
     // mouse-tied so it gets cleared.
-    let new_layout = layout::layout(&tree, new_rect);
+    let new_lo = layout::layout(&tree, new_rect);
     let focus_path = scene.focus_path.clone();
     let input_edit = scene.input_edit.clone();
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
-    let new_pixels = rasterize_buffer(
-        &tree, &new_layout, new_rect, None, f, None, new_density,
+    let new_pixels = rasterize_buffer_with_overlays(
+        &tree, &new_lo.tree, &new_lo.popovers, new_rect, None, f, None, new_density,
         input_edit.as_ref(),
     );
     scene.pixels      = new_pixels;
@@ -1252,7 +1342,9 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     scene.height      = new_h;
     scene.origin_x    = new_x;
     scene.origin_y    = new_y;
-    scene.layout_tree = new_layout;
+    scene.layout_tree = new_lo.tree;
+    scene.anchors     = new_lo.anchors;
+    scene.popovers    = new_lo.popovers;
     scene.density     = new_density;
     scene.hover_path.clear();
     scene.active_path = None;

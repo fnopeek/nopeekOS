@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::abi::{
-    ActionId, Align, Axis, IconId, Modifier, TextStyle, Token, Widget,
+    ActionId, Align, Axis, IconId, Modifier, NodeId, TextStyle, Token, Widget,
 };
 use crate::style::{Elevation, Padding, Radius, Spacing};
 
@@ -687,19 +687,33 @@ pub fn sidebar_pane(sections: Vec<Widget>) -> Widget {
 /// labels so they don't read as one squished string. A trailing
 /// flex-Spacer absorbs any leftover width on the right edge.
 pub fn menu_bar(labels: &[(String, ActionId)]) -> Widget {
+    menu_bar_with_anchors(labels, &[])
+}
+
+/// Menu bar variant that tags each label with a `NodeId` from
+/// `anchors[i]`, so the app can attach a `Widget::Popover` to it
+/// for the dropdown. `anchors` is matched positionally; pass `&[]`
+/// for the no-NodeId case.
+pub fn menu_bar_with_anchors(
+    labels: &[(String, ActionId)],
+    anchors: &[NodeId],
+) -> Widget {
     let mut children: Vec<Widget> = Vec::with_capacity(labels.len() + 1);
-    for (label, action) in labels {
+    for (i, (label, action)) in labels.iter().enumerate() {
+        let mut mods: Vec<Modifier> = Vec::with_capacity(4);
+        mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+        mods.push(Modifier::OnClick(*action));
+        mods.push(Modifier::Hover(vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ]));
+        if let Some(id) = anchors.get(i) {
+            mods.push(Modifier::NodeId(*id));
+        }
         children.push(Widget::Text {
-            content: label.clone(),
-            style:   TextStyle::Body,
-            modifiers: vec![
-                Modifier::Padding(Padding::Sm.as_u16()),
-                Modifier::OnClick(*action),
-                Modifier::Hover(vec![
-                    Modifier::Background(Token::SurfaceMuted),
-                    Modifier::Rounded(Radius::Sm.as_u8()),
-                ]),
-            ],
+            content:   label.clone(),
+            style:     TextStyle::Body,
+            modifiers: mods,
         });
     }
     children.push(Widget::Spacer { flex: 1 });
@@ -710,6 +724,69 @@ pub fn menu_bar(labels: &[(String, ActionId)]) -> Widget {
         modifiers: vec![
             Modifier::Padding(Padding::Xs.as_u16()),
             Modifier::Background(Token::SurfaceElevated),
+        ],
+    }
+}
+
+/// Build a popover-content surface from a list of menu items.
+/// Each item is `(label, action_id)`. The wrapper is a SurfaceElevated
+/// card with a 1 px Border and Md radius — same visual language as
+/// `card(.., CardKind::Sheet)` but tighter padding for menu density.
+/// `selected_index` flags the currently-active option (e.g. View →
+/// Grid is the active mode) with an Accent tint.
+pub fn popover_menu(
+    items: &[(String, ActionId)],
+    selected_index: Option<usize>,
+) -> Widget {
+    let mut rows: Vec<Widget> = Vec::with_capacity(items.len());
+    for (i, (label, action)) in items.iter().enumerate() {
+        let is_selected = selected_index == Some(i);
+        let mut text_mods: Vec<Modifier> = Vec::with_capacity(2);
+        text_mods.push(Modifier::Padding(Padding::Sm.as_u16()));
+        if is_selected {
+            // No background highlight — the leading Check icon is the
+            // selection cue, matching macOS-style menu checkmarks.
+        }
+        let icon = if is_selected { IconId::Check } else { IconId::None };
+        let row = Widget::Row {
+            children: vec![
+                Widget::Icon {
+                    id: icon,
+                    size: 16,
+                    modifiers: vec![Modifier::Tint(Token::Accent)],
+                },
+                Widget::Text {
+                    content:   label.clone(),
+                    style:     TextStyle::Body,
+                    modifiers: vec![],
+                },
+            ],
+            spacing: Spacing::Sm.as_u16(),
+            align:   Align::Center,
+            modifiers: vec![
+                Modifier::Padding(Padding::Sm.as_u16()),
+                Modifier::OnClick(*action),
+                Modifier::Hover(vec![
+                    Modifier::Background(Token::SurfaceMuted),
+                    Modifier::Rounded(Radius::Sm.as_u8()),
+                ]),
+            ],
+        };
+        rows.push(row);
+    }
+    Widget::Column {
+        children: rows,
+        spacing: Spacing::Xxs.as_u16(),
+        align:   Align::Stretch,
+        modifiers: vec![
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Border {
+                token:  Token::Border,
+                width:  1,
+                radius: Radius::Md.as_u8(),
+            },
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::MinWidth(180),
         ],
     }
 }
