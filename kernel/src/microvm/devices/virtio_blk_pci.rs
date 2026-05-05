@@ -197,7 +197,10 @@ impl VirtioBlk {
     /// without re-encrypting the whole image. For 12.2.4 the whole-blob
     /// approach gives us crash-loss-bounded persistence (last save wins).
     pub fn save(&self) {
-        match crate::npkfs::store(
+        // upsert = insert-or-replace; npkfs::store is strict-create and
+        // refuses to overwrite an existing profile-image on the second
+        // run.
+        match crate::npkfs::upsert(
             PROFILE_PATH,
             &self.backing,
             crate::capability::CAP_NULL,
