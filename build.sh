@@ -626,6 +626,13 @@ case "${1:-}" in
         build_installer
         write_usb "${2:-}"
         ;;
+    build-linux)
+        # Build the custom MicroVM Linux kernel — see microvm-linux/.
+        # Output: release/assets/linux-virt.bzImage. Idempotent (skips
+        # configure if config fragment unchanged + bzImage already up
+        # to date in the source dir).
+        bash "$PROJECT_DIR/microvm-linux/build.sh"
+        ;;
     release)
         check_deps
         build
