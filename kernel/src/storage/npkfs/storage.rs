@@ -15,9 +15,9 @@ use super::journal::Journal;
 use super::types::{BLOCK_SIZE, Extent, FsError};
 use super::btree;
 use super::format::{
-    V2EntryRaw, V2SuperblockRaw,
+    BTreeEntryRaw, SuperblockRaw,
     JOURNAL_BLOCKS, JOURNAL_START, META_END,
-    V2_DIRECT_EXTENTS, V2_EXTENTS_PER_INDIRECT, V2_MAGIC, V2_VERSION,
+    DIRECT_EXTENTS, EXTENTS_PER_INDIRECT, DISK_MAGIC, DISK_VERSION,
 };
 #[allow(dead_code)]
 const AEAD_TAG_LEN_DOC: usize = 16; // tag size appended by aead_encrypt; documented for future readers
@@ -26,7 +26,7 @@ use crate::{blkdev, crypto, kprintln};
 
 struct State {
     cache: BlockCache,
-    sb: V2SuperblockRaw,
+    sb: SuperblockRaw,
     bitmap: Bitmap,
     journal: Journal,
     generation: u64,
@@ -43,6 +43,24 @@ static FS: Mutex<Option<State>> = Mutex::new(None);
 /// Format the entire disk to npkFS v2. **Destructive**: any v1 data is
 /// gone after this call. Step 8 will add the boot-time refusal so this
 /// only runs deliberately (installer / explicit intent).
+/// Halt with an explicit reinstall message when a legacy npkFS magic
+/// is detected on disk. Mirrors the v1 → v2 break (no in-place
+/// migration was the design then; same story now for v2 → v3).
+fn halt_for_legacy_disk(version: u8) -> ! {
+    kprintln!("");
+    kprintln!("[npk] ┌──────────────────────────────────────────────────────────┐");
+    kprintln!("[npk] │ This disk is formatted as npkFS v{}.                      │", version);
+    kprintln!("[npk] │                                                          │");
+    kprintln!("[npk] │ npkFS v3 is incompatible by design (clean break — TreeEntry │");
+    kprintln!("[npk] │ now carries an `mtime` field, on-disk wire shape changed).  │");
+    kprintln!("[npk] │ Boot the installer USB and reinstall to continue.          │");
+    kprintln!("[npk] │ Previous data is unrecoverable from this kernel — restore  │");
+    kprintln!("[npk] │ from backup if you have one.                               │");
+    kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
+    kprintln!("");
+    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+}
+
 pub fn mkfs() -> Result<(), FsError> {
     let total_blocks = blkdev::block_count()
         .ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
@@ -72,9 +90,9 @@ pub fn mkfs() -> Result<(), FsError> {
     let mut salt_16 = [0u8; 16];
     salt_16.copy_from_slice(&install_salt[..16]);
 
-    let mut sb = V2SuperblockRaw {
-        magic: V2_MAGIC,
-        version: V2_VERSION,
+    let mut sb = SuperblockRaw {
+        magic: DISK_MAGIC,
+        version: DISK_VERSION,
         flags: 0,
         generation: 1,
         total_blocks,
@@ -103,11 +121,19 @@ pub fn mkfs() -> Result<(), FsError> {
     Ok(())
 }
 
-/// Mount an existing v2 disk. Errors with `NotFormatted` if no v2
-/// superblock validates (the disk may be unformatted, v1, or corrupt).
+/// Mount an existing v3 disk. Errors with `NotFormatted` if no v3
+/// superblock validates AND no recognized legacy version is present.
+/// If a legacy (v2) magic is detected the kernel halts with an
+/// explicit reinstall message — there is no in-place migration.
 pub fn mount() -> Result<(), FsError> {
     let mut cache = BlockCache::new()?;
-    let sb = sb_io::read_best(&mut cache)?.ok_or(FsError::NotFormatted)?;
+    let sb = match sb_io::read_best(&mut cache)? {
+        Some(s) => s,
+        None => match sb_io::read_legacy_magic(&mut cache) {
+            Some(version) => halt_for_legacy_disk(version),
+            None => return Err(FsError::NotFormatted),
+        },
+    };
 
     let frees = Journal::replay(&mut cache, sb.journal_head, sb.journal_seq)?;
     let mut bmap = Bitmap::load_args(
@@ -243,9 +269,9 @@ pub fn all_root_hashes() -> Result<Vec<[u8; 32]>, FsError> {
             continue;
         }
         // SAFETY: AlignedBlock is BLOCK_SIZE-bytes + 16-aligned, and
-        // V2SuperblockRaw is repr(C) BLOCK_SIZE.
-        let sb = unsafe { &*(buf.0.as_ptr() as *const V2SuperblockRaw) };
-        if sb.magic != V2_MAGIC || sb.version != V2_VERSION { continue; }
+        // SuperblockRaw is repr(C) BLOCK_SIZE.
+        let sb = unsafe { &*(buf.0.as_ptr() as *const SuperblockRaw) };
+        if sb.magic != DISK_MAGIC || sb.version != DISK_VERSION { continue; }
         if sb.checksum != sb.compute_checksum() { continue; }
         if sb.root_tree_hash != [0u8; 32] {
             out.push(sb.root_tree_hash);
@@ -441,20 +467,20 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     }
     let t_dma = rdtsc();
 
-    // Pack into V2EntryRaw: first V2_DIRECT_EXTENTS inline, rest in
+    // Pack into BTreeEntryRaw: first DIRECT_EXTENTS inline, rest in
     // an indirect chain.
-    let mut direct = [Extent::ZERO; V2_DIRECT_EXTENTS];
-    let direct_count = all_extents.len().min(V2_DIRECT_EXTENTS);
+    let mut direct = [Extent::ZERO; DIRECT_EXTENTS];
+    let direct_count = all_extents.len().min(DIRECT_EXTENTS);
     for i in 0..direct_count {
         direct[i] = all_extents[i];
     }
-    let indirect_block = if all_extents.len() > V2_DIRECT_EXTENTS {
-        write_indirect_extents(&mut fs.cache, &mut fs.bitmap, &all_extents[V2_DIRECT_EXTENTS..])?
+    let indirect_block = if all_extents.len() > DIRECT_EXTENTS {
+        write_indirect_extents(&mut fs.cache, &mut fs.bitmap, &all_extents[DIRECT_EXTENTS..])?
     } else {
         0
     };
 
-    let entry = V2EntryRaw {
+    let entry = BTreeEntryRaw {
         hash: *hash,
         plaintext_size: payload.len() as u64,
         disk_size: write_data.len() as u64,
@@ -531,7 +557,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     };
     let t_btree = rdtsc();
 
-    let direct_count = (entry.extent_count as usize).min(V2_DIRECT_EXTENTS);
+    let direct_count = (entry.extent_count as usize).min(DIRECT_EXTENTS);
     let mut all_extents: Vec<Extent> = entry.extents[..direct_count].to_vec();
     if entry.indirect_block != 0 {
         all_extents.extend(read_indirect_extents(&mut fs.cache, entry.indirect_block)?);
@@ -633,7 +659,7 @@ pub fn remove(hash: &[u8; 32]) -> Result<(), FsError> {
     for b in &old_blocks {
         fs.journal.record_free(*b, 1);
     }
-    let direct_count = (entry.extent_count as usize).min(V2_DIRECT_EXTENTS);
+    let direct_count = (entry.extent_count as usize).min(DIRECT_EXTENTS);
     for i in 0..direct_count {
         fs.journal.record_free(entry.extents[i].start_block, entry.extents[i].block_count);
     }
@@ -737,7 +763,7 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
 // Per 4 KB block:
 //   [0..4]   count: u32 (extents in this block)
 //   [4..12]  next:  u64 (next chain block, 0 = end)
-//   [12..]   extents: [Extent; count] (up to V2_EXTENTS_PER_INDIRECT)
+//   [12..]   extents: [Extent; count] (up to EXTENTS_PER_INDIRECT)
 
 fn write_indirect_extents(
     cache: &mut BlockCache, bitmap: &mut Bitmap, extents: &[Extent],
@@ -746,12 +772,12 @@ fn write_indirect_extents(
     let mut offset = 0;
     while offset < extents.len() {
         blocks.push(bitmap.alloc(1)?);
-        offset += V2_EXTENTS_PER_INDIRECT;
+        offset += EXTENTS_PER_INDIRECT;
     }
 
     offset = 0;
     for (i, &block) in blocks.iter().enumerate() {
-        let count = (extents.len() - offset).min(V2_EXTENTS_PER_INDIRECT);
+        let count = (extents.len() - offset).min(EXTENTS_PER_INDIRECT);
         let next = if i + 1 < blocks.len() { blocks[i + 1] } else { 0u64 };
 
         let mut buf = [0u8; BLOCK_SIZE];
@@ -789,7 +815,7 @@ fn read_indirect_chain(
         let count = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
         let next = u64::from_le_bytes(buf[4..12].try_into().unwrap());
 
-        for j in 0..count.min(V2_EXTENTS_PER_INDIRECT) {
+        for j in 0..count.min(EXTENTS_PER_INDIRECT) {
             let off = 12 + j * 16;
             let start = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
             let cnt = u64::from_le_bytes(buf[off + 8..off + 16].try_into().unwrap());

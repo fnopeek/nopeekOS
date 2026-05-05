@@ -42,14 +42,21 @@ pub enum EntryKind {
 ///   - `File`: byte size of the referenced Blob
 ///   - `Dir` : recursive size of the subtree (sum of File sizes)
 ///
-/// `flags` is reserved for future per-entry metadata (timestamps,
-/// permission bits). Zero in v2.0.
+/// `mtime` is UTC seconds since the Unix epoch, captured at write
+/// time from the host RTC. Zero means "unknown" — the RTC was not
+/// readable when this entry was created (early boot, hardware
+/// quirk, …). Field added in npkfs v3; old v2 trees are not
+/// readable by this kernel (mount halts with a reinstall message).
+///
+/// `flags` is a u8 bitmap reserved for future per-entry metadata
+/// (xattrs, hidden, lock, …). Zero in v3.0.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TreeEntry {
     pub name:  String,
     pub hash:  [u8; 32],
     pub kind:  EntryKind,
     pub size:  u64,
+    pub mtime: u64,
     pub flags: u8,
 }
 

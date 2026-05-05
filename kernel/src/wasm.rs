@@ -983,11 +983,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     //
     // Wire format of the output buffer — one entry per line, separated
     // by '\n' (no trailing newline after the last):
-    //   <name>\0<size_le_u64:8>\0<is_dir_u8>
+    //   <name>\0<size_le_u64:8>\0<is_dir_u8>\0<mtime_le_u64:8>
     // - <name> is relative to `prefix` (prefix itself + trailing slash
     //   stripped). For a synthetic directory entry (first path component
     //   encountered in recursive scan), size=0 and is_dir=1.
     // - Size is little-endian 8 bytes. is_dir is 0 or 1.
+    // - mtime is UTC seconds since the Unix epoch (LE u64). Zero means
+    //   "unknown" (RTC was unreadable when this entry was created).
+    //   Synthetic directory entries from recursive descent inherit
+    //   mtime=0; only stored TreeEntry instances carry real values.
     //
     // Returns bytes written, 0 if prefix is empty, -1 on cap / args /
     // truncation (buffer too small to fit the full listing).
@@ -1023,7 +1027,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 };
                 for e in &entries {
                     let is_dir = matches!(e.kind, crate::npkfs::object::EntryKind::Dir);
-                    append_entry(&mut out, &e.name, e.size, is_dir);
+                    append_entry(&mut out, &e.name, e.size, is_dir, e.mtime);
                 }
             } else {
                 // Recursive: DFS the subtree, emit relative paths.
@@ -1051,10 +1055,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                         };
                         match e.kind {
                             crate::npkfs::object::EntryKind::File => {
-                                append_entry(out, &child_rel, e.size, false);
+                                append_entry(out, &child_rel, e.size, false, e.mtime);
                             }
                             crate::npkfs::object::EntryKind::Dir => {
-                                append_entry(out, &child_rel, 0, true);
+                                append_entry(out, &child_rel, 0, true, e.mtime);
                                 dfs(base, child_rel, out)?;
                             }
                         }
@@ -1082,9 +1086,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_fs_stat(name_ptr, name_len, out_ptr) -> i32
-    // Write 9 bytes into out_ptr: size_le_u64 (8) + is_dir_u8 (1).
-    // Directory = a `.dir` marker exists at `<name>/.dir`.
-    // Returns 9 on success, 0 if neither key nor directory exists, -1 on cap / args.
+    // Write 17 bytes into out_ptr:
+    //   size_le_u64 (8) + is_dir_u8 (1) + mtime_le_u64 (8).
+    // Returns 17 on success, 0 if no entry, -1 on cap / args.
+    // mtime is UTC seconds since the Unix epoch — zero means unknown.
     linker.func_wrap("env", "npk_fs_stat",
         |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
          out_ptr: i32| -> i32 {
@@ -1097,30 +1102,28 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 None => return -1,
             };
 
-            // v2 stat: one Tree-walk to the parent, return the entry's
-            // kind + size. No `.dir`-marker existence check, no fetch
-            // of the blob bytes.
-            let (size, is_dir) = match crate::npkfs::fs::stat(&name) {
+            let (size, is_dir, mtime) = match crate::npkfs::fs::stat(&name) {
                 Ok(Some(s)) => {
                     let is_dir = matches!(s.kind, crate::npkfs::object::EntryKind::Dir);
-                    (s.size, if is_dir { 1u8 } else { 0u8 })
+                    (s.size, if is_dir { 1u8 } else { 0u8 }, s.mtime)
                 }
                 Ok(None) => return 0,
                 Err(_) => return -1,
             };
 
-            let mut buf = [0u8; 9];
+            let mut buf = [0u8; 17];
             buf[0..8].copy_from_slice(&size.to_le_bytes());
             buf[8] = is_dir;
+            buf[9..17].copy_from_slice(&mtime.to_le_bytes());
             let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => return -1,
             };
             let data = mem.data_mut(&mut caller);
             let start = out_ptr as usize;
-            if start + 9 > data.len() { return -1; }
-            data[start..start + 9].copy_from_slice(&buf);
-            9
+            if start + 17 > data.len() { return -1; }
+            data[start..start + 17].copy_from_slice(&buf);
+            17
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
@@ -2019,14 +2022,17 @@ fn map_exec_error(e: wasmi::Error) -> WasmError {
 }
 
 /// Serialize one npk_fs_list entry into `out`.
-/// Format: name\0size_le_u64\0is_dir_u8, entries separated by '\n'.
-fn append_entry(out: &mut alloc::vec::Vec<u8>, name: &str, size: u64, is_dir: bool) {
+/// Format: name\0size_le_u64\0is_dir_u8\0mtime_le_u64, entries separated by '\n'.
+/// `mtime` is UTC seconds since the Unix epoch — zero means unknown.
+fn append_entry(out: &mut alloc::vec::Vec<u8>, name: &str, size: u64, is_dir: bool, mtime: u64) {
     if !out.is_empty() { out.push(b'\n'); }
     out.extend_from_slice(name.as_bytes());
     out.push(0);
     out.extend_from_slice(&size.to_le_bytes());
     out.push(0);
     out.push(if is_dir { 1 } else { 0 });
+    out.push(0);
+    out.extend_from_slice(&mtime.to_le_bytes());
 }
 
 #[derive(Debug)]

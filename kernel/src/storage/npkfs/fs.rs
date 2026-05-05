@@ -34,8 +34,12 @@ static ROOT_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatResult {
-    pub kind: EntryKind,
-    pub size: u64,
+    pub kind:  EntryKind,
+    pub size:  u64,
+    /// UTC seconds since the Unix epoch, captured at write time.
+    /// Zero means "unknown" (RTC was unreadable when the entry was
+    /// created). Always zero for the root tree.
+    pub mtime: u64,
 }
 
 fn current_root() -> Result<[u8; 32], Error> {
@@ -54,7 +58,9 @@ fn commit(new_root: [u8; 32]) -> Result<(), Error> {
 pub fn stat(path: &str) -> Result<Option<StatResult>, Error> {
     let root = current_root()?;
     match paths::walk(&root, path) {
-        Ok(WalkOk { kind, size, .. }) => Ok(Some(StatResult { kind, size })),
+        Ok(WalkOk { kind, size, mtime, .. }) => {
+            Ok(Some(StatResult { kind, size, mtime }))
+        }
         Err(PathError::NotFound) => Ok(None),
         Err(e) => Err(e),
     }
