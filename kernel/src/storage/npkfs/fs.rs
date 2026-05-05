@@ -20,7 +20,7 @@ use spin::Mutex;
 use super::object::{EntryKind, TreeEntry};
 use super::paths::{self, PathError, WalkOk};
 use super::storage;
-use super::super::types::FsError;
+use super::types::FsError;
 
 /// Public error: a path-layer error or a storage-layer error.
 /// Wire-shape choice — most callers care about "is the file there?"
@@ -283,7 +283,7 @@ pub fn gc() -> Result<GcStats, Error> {
         // ROOT_MUTEX, but tolerate it defensively.
         match storage::remove(&h) {
             Ok(()) => removed += 1,
-            Err(super::super::types::FsError::ObjectNotFound) => {}
+            Err(super::types::FsError::ObjectNotFound) => {}
             Err(e) => return Err(Error::Storage(e)),
         }
     }

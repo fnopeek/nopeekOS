@@ -288,7 +288,7 @@ pub fn intent_mkdir(args: &str) {
         return;
     }
     let resolved = resolve_path(dir);
-    match crate::npkfs::v2::fs::ensure_dirs(&resolved) {
+    match crate::npkfs::fs::ensure_dirs(&resolved) {
         Ok(()) => kprintln!("[npk] Created '{}'", resolved),
         Err(e) => kprintln!("[npk] mkdir error: {:?}", e),
     }
@@ -307,8 +307,8 @@ pub fn intent_rmdir(args: &str) {
         return;
     }
 
-    use crate::npkfs::v2::fs::Error as FsErr;
-    match crate::npkfs::v2::fs::delete(&resolved) {
+    use crate::npkfs::fs::Error as FsErr;
+    match crate::npkfs::fs::delete(&resolved) {
         Ok(()) => kprintln!("[npk] Removed '{}'", resolved),
         Err(FsErr::NotEmpty) => kprintln!("[npk] Directory '{}' is not empty", resolved),
         Err(FsErr::NotFound) => kprintln!("[npk] Directory '{}' not found", resolved),
@@ -324,8 +324,8 @@ pub fn intent_list(args: &str) {
         super::get_cwd()
     };
 
-    use crate::npkfs::v2::object::EntryKind;
-    let entries = match crate::npkfs::v2::fs::list(&resolved) {
+    use crate::npkfs::object::EntryKind;
+    let entries = match crate::npkfs::fs::list(&resolved) {
         Ok(Some(v)) => v,
         Ok(None) => {
             kprintln!("[npk] '{}': not found", resolved);

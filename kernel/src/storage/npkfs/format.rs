@@ -7,10 +7,10 @@
 
 #![allow(dead_code)]
 
-use super::super::types::{Extent, BLOCK_SIZE};
+use super::types::{Extent, BLOCK_SIZE};
 
 // ── Layout shared with v1 (same physical regions) ─────────────────────
-pub use super::super::types::{
+pub use super::types::{
     SUPERBLOCK_SLOTS,
     SUPERBLOCK_START,
     JOURNAL_START,

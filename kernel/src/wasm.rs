@@ -142,7 +142,7 @@ fn ensure_bench() -> BenchCache {
 
     let (blake3_mbs, aes_enc_mbs, aes_dec_mbs) = crate::intent::crypto_bench();
     let (raw_write_mbs, raw_read_mbs) =
-        crate::storage::npkfs::v2::storage::raw_blk_bench().unwrap_or((0, 0));
+        crate::storage::npkfs::storage::raw_blk_bench().unwrap_or((0, 0));
 
     let result = BenchCache {
         blake3_mbs, aes_enc_mbs, aes_dec_mbs, raw_write_mbs, raw_read_mbs,
@@ -767,7 +767,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
             // v2: `sys/wasm` is a real directory. List immediate children
             // directly instead of scanning + prefix-filtering the whole tree.
-            let entries = match crate::npkfs::v2::fs::list("sys/wasm") {
+            let entries = match crate::npkfs::fs::list("sys/wasm") {
                 Ok(Some(v)) => v,
                 Ok(None) => alloc::vec::Vec::new(),
                 Err(_) => return -1,
@@ -775,7 +775,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
             let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
             for e in &entries {
-                if !matches!(e.kind, crate::npkfs::v2::object::EntryKind::File) { continue; }
+                if !matches!(e.kind, crate::npkfs::object::EntryKind::File) { continue; }
                 if e.name.ends_with(".version") { continue; }
                 if !out.is_empty() { out.push(0); }
                 out.extend_from_slice(e.name.as_bytes());
@@ -1016,13 +1016,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
             if recursive == 0 {
                 // Non-recursive: one directory's immediate children.
-                let entries = match crate::npkfs::v2::fs::list(prefix_for_list) {
+                let entries = match crate::npkfs::fs::list(prefix_for_list) {
                     Ok(Some(v)) => v,
                     Ok(None) => alloc::vec::Vec::new(),
                     Err(_) => return -1,
                 };
                 for e in &entries {
-                    let is_dir = matches!(e.kind, crate::npkfs::v2::object::EntryKind::Dir);
+                    let is_dir = matches!(e.kind, crate::npkfs::object::EntryKind::Dir);
                     append_entry(&mut out, &e.name, e.size, is_dir);
                 }
             } else {
@@ -1038,7 +1038,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     } else {
                         alloc::format!("{}/{}", base, rel)
                     };
-                    let entries = match crate::npkfs::v2::fs::list(&abs) {
+                    let entries = match crate::npkfs::fs::list(&abs) {
                         Ok(Some(v)) => v,
                         Ok(None) => return Ok(()),
                         Err(_) => return Err(()),
@@ -1050,10 +1050,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                             alloc::format!("{}/{}", rel, e.name)
                         };
                         match e.kind {
-                            crate::npkfs::v2::object::EntryKind::File => {
+                            crate::npkfs::object::EntryKind::File => {
                                 append_entry(out, &child_rel, e.size, false);
                             }
-                            crate::npkfs::v2::object::EntryKind::Dir => {
+                            crate::npkfs::object::EntryKind::Dir => {
                                 append_entry(out, &child_rel, 0, true);
                                 dfs(base, child_rel, out)?;
                             }
@@ -1100,9 +1100,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             // v2 stat: one Tree-walk to the parent, return the entry's
             // kind + size. No `.dir`-marker existence check, no fetch
             // of the blob bytes.
-            let (size, is_dir) = match crate::npkfs::v2::fs::stat(&name) {
+            let (size, is_dir) = match crate::npkfs::fs::stat(&name) {
                 Ok(Some(s)) => {
-                    let is_dir = matches!(s.kind, crate::npkfs::v2::object::EntryKind::Dir);
+                    let is_dir = matches!(s.kind, crate::npkfs::object::EntryKind::Dir);
                     (s.size, if is_dir { 1u8 } else { 0u8 })
                 }
                 Ok(None) => return 0,
