@@ -126,19 +126,57 @@ fn tx_log(payload: &[u8]) {
     if n >= 5 { return; }
 
     if payload.len() < 12 + 14 {
-        kprintln!("[virtio-net] tx undersized ({} bytes)", payload.len());
+        kprintln!("[virtio-net] tx#{} undersized ({} bytes)", n + 1, payload.len());
         return;
     }
     let frame = &payload[12..];
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+
+    // ARP — print target IP for sanity check.
+    if ethertype == 0x0806 && frame.len() >= 14 + 28 {
+        let arp = &frame[14..];
+        let oper = u16::from_be_bytes([arp[6], arp[7]]);
+        let op = if oper == 1 { "REQ" } else if oper == 2 { "REP" } else { "?" };
+        kprintln!(
+            "[virtio-net] tx#{} ARP-{} target={}.{}.{}.{}",
+            n + 1, op, arp[24], arp[25], arp[26], arp[27],
+        );
+        return;
+    }
+
+    // IPv4 — show src/dst IP and L4 proto.
+    if ethertype == 0x0800 && frame.len() >= 14 + 20 {
+        let ip = &frame[14..];
+        let proto = ip[9];
+        let src_ip = (ip[12], ip[13], ip[14], ip[15]);
+        let dst_ip = (ip[16], ip[17], ip[18], ip[19]);
+        let ihl = (ip[0] & 0x0F) as usize * 4;
+        let l4 = if frame.len() >= 14 + ihl { &ip[ihl..] } else { &[][..] };
+        let proto_name = match proto { 1 => "ICMP", 6 => "TCP", 17 => "UDP", _ => "?" };
+        let mut ports = (0u16, 0u16);
+        if (proto == 6 || proto == 17) && l4.len() >= 4 {
+            ports = (
+                u16::from_be_bytes([l4[0], l4[1]]),
+                u16::from_be_bytes([l4[2], l4[3]]),
+            );
+        }
+        kprintln!(
+            "[virtio-net] tx#{} IPv4 {}.{}.{}.{}:{} → {}.{}.{}.{}:{} {} ({} bytes)",
+            n + 1,
+            src_ip.0, src_ip.1, src_ip.2, src_ip.3, ports.0,
+            dst_ip.0, dst_ip.1, dst_ip.2, dst_ip.3, ports.1,
+            proto_name, frame.len(),
+        );
+        return;
+    }
+
     let dst = &frame[0..6];
     let src = &frame[6..12];
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
     kprintln!(
-        "[virtio-net] tx#{} {} bytes (frame={}): dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ethertype=0x{:04x}",
-        n + 1, payload.len(), frame.len(),
+        "[virtio-net] tx#{} {} bytes ethertype=0x{:04x} dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        n + 1, payload.len(), ethertype,
         dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
         src[0], src[1], src[2], src[3], src[4], src[5],
-        ethertype,
     );
 }
 
