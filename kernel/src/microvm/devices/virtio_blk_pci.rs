@@ -143,6 +143,10 @@ pub struct VirtioBlk {
     /// `service_queues` (which can do guest-memory reads/writes that
     /// require host_base — not available inside mmio_write).
     pending_kick_queue: Option<u16>,
+
+    /// Diagnostic counters (limited, to avoid log spam).
+    notify_log_count: u32,
+    serviced_log_count: u32,
 }
 
 const CAPACITY_SECTORS: u64 = 8192; // 4 MB
@@ -173,6 +177,8 @@ impl VirtioBlk {
             isr: 0,
             backing: alloc::vec![0u8; (CAPACITY_SECTORS * 512) as usize],
             pending_kick_queue: None,
+            notify_log_count: 0,
+            serviced_log_count: 0,
         }
     }
 
@@ -186,27 +192,36 @@ impl VirtioBlk {
     /// in-RAM backing store. Returns true if the used-ring advanced
     /// (caller should set ISR + inject IRQ).
     pub fn service_queues(&mut self, queue_idx: u16, host_base: u64) -> bool {
-        let q = match self.queues.get_mut(queue_idx as usize) {
-            Some(q) if q.enable != 0 => q,
-            _ => return false,
-        };
-        if q.size == 0 {
-            return false;
+        let advanced;
+        let new_used_idx;
+        {
+            let q = match self.queues.get_mut(queue_idx as usize) {
+                Some(q) if q.enable != 0 => q,
+                _ => return false,
+            };
+            if q.size == 0 {
+                return false;
+            }
+            advanced = super::virtqueue::service_blk_queue(
+                host_base,
+                q.desc_gpa(),
+                q.driver_gpa(),
+                q.device_gpa(),
+                q.size,
+                &mut q.last_avail_idx,
+                &mut q.used_idx,
+                &mut self.backing,
+            );
+            new_used_idx = q.used_idx;
         }
-
-        let advanced = super::virtqueue::service_blk_queue(
-            host_base,
-            q.desc_gpa(),
-            q.driver_gpa(),
-            q.device_gpa(),
-            q.size,
-            &mut q.last_avail_idx,
-            &mut q.used_idx,
-            &mut self.backing,
-        );
 
         if advanced {
             self.isr |= 1;
+            if self.serviced_log_count < 5 {
+                kprintln!("[virtio-blk] serviced q={} used_idx={}",
+                          queue_idx, new_used_idx);
+                self.serviced_log_count += 1;
+            }
         }
         advanced
     }
@@ -359,6 +374,12 @@ impl VirtioBlk {
             // to pick up after the MMIO trap unwinds.
             let queue = ((off - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER) as u16;
             let _ = value; let _ = width;
+            // Diagnostic: log first ~5 notifies, then go silent.
+            if self.notify_log_count < 5 {
+                kprintln!("[virtio-blk] notify q={} (count={})",
+                          queue, self.notify_log_count + 1);
+                self.notify_log_count += 1;
+            }
             self.pending_kick_queue = Some(queue);
         } else if off >= ISR_OFF && off < ISR_OFF + ISR_LEN {
             // ISR is read-to-clear; writes ignored.
