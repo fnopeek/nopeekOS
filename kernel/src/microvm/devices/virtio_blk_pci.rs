@@ -175,7 +175,17 @@ impl VirtioBlk {
             }; NUM_QUEUES as usize],
             capacity_sectors: CAPACITY_SECTORS,
             isr: 0,
-            backing: alloc::vec![0u8; (CAPACITY_SECTORS * 512) as usize],
+            backing: {
+                let mut v = alloc::vec![0u8; (CAPACITY_SECTORS * 512) as usize];
+                // Magic pattern at sector 0 so a guest read can prove
+                // the round-trip end-to-end. ASCII "nopeekOS-microvm-blk\0"
+                // at offset 0, then 32-bit LE counter 0..3 for further
+                // validation. Cleared/overwritten as soon as we have a
+                // real backing store (12.2.4 AEAD profile-image).
+                let magic = b"nopeekOS-microvm-blk\0\x00\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00";
+                v[..magic.len()].copy_from_slice(magic);
+                v
+            },
             pending_kick_queue: None,
             notify_log_count: 0,
             serviced_log_count: 0,
