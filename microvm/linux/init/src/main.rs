@@ -19,13 +19,26 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_IOCTL: u64 = 16;
 const SYS_DUP2: u64 = 33;
+const SYS_SOCKET: u64 = 41;
 const SYS_PAUSE: u64 = 34;
 const SYS_EXIT: u64 = 60;
 const SYS_MKDIR: u64 = 83;
 const SYS_MOUNT: u64 = 165;
 const SYS_REBOOT: u64 = 169;
 const SYS_IOPERM: u64 = 173;
+
+// AF_INET socket
+const AF_INET: u64 = 2;
+const SOCK_DGRAM: u64 = 2;
+
+// ioctl(2) commands for net interface
+const SIOCSIFADDR:  u64 = 0x8916;
+const SIOCSIFFLAGS: u64 = 0x8914;
+
+// IFF flags
+const IFF_UP: u16 = 0x0001;
 
 // open(2) flags.
 const O_RDONLY: u64 = 0;
@@ -122,6 +135,11 @@ unsafe extern "C" fn rust_main() -> ! {
     // virtio-blk emulator — round-trip proof from host backing →
     // virtqueue READ → DMA into our buffer → kmsg log.
     blk_read_test(kmsg_fd);
+
+    // Phase 12.3.1: bring eth0 up with the static IP that the host's
+    // virtio-net is set up to bridge for. Triggers ARP-Request on the
+    // wire which our hypervisor's TX-path will log.
+    eth0_up(kmsg_fd);
 
     // Phase 12.1.4 — inject_console round-trip. Grant ourselves I/O
     // port access on COM1 (0x3F8-0x3FF) via ioperm(2). Modern Linux
@@ -230,6 +248,47 @@ fn push_dec(out: &mut [u8; 256], mut p: usize, mut n: u32) -> usize {
 
 fn hex_nib(n: u8) -> u8 {
     if n < 10 { b'0' + n } else { b'a' + (n - 10) }
+}
+
+/// Bring eth0 up with hardcoded IP 10.99.0.2/24 via SIOCSIFADDR +
+/// SIOCSIFFLAGS. Builds an ifreq buffer (40 bytes) by hand.
+///   off  0..16 = ifr_name "eth0\0..."
+///   off 16..40 = ifr_ifru union — for SIOCSIFADDR a sockaddr_in
+///                (family u16, port u16, ip[4], pad[8]); for
+///                SIOCSIFFLAGS just ifr_flags (i16) at off 16.
+fn eth0_up(kmsg_fd: i64) {
+    let fd = unsafe { syscall3(SYS_SOCKET, AF_INET, SOCK_DGRAM, 0) };
+    if fd < 0 {
+        say(kmsg_fd, b"[microvm-init] socket() failed\n");
+        return;
+    }
+
+    let mut ifr = [0u8; 40];
+    ifr[0..4].copy_from_slice(b"eth0");
+    // SIOCSIFADDR — sockaddr_in at off 16
+    ifr[16..18].copy_from_slice(&(AF_INET as u16).to_le_bytes());
+    // ip 10.99.0.2 in network byte order — high byte first in memory
+    ifr[20] = 10; ifr[21] = 99; ifr[22] = 0; ifr[23] = 2;
+
+    let r = unsafe { syscall3(SYS_IOCTL, fd as u64, SIOCSIFADDR, ifr.as_ptr() as u64) };
+    if r < 0 {
+        say(kmsg_fd, b"[microvm-init] SIOCSIFADDR failed\n");
+        let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+        return;
+    }
+
+    // SIOCSIFFLAGS — set IFF_UP at off 16 (i16 LE)
+    let mut ifr_flags = [0u8; 40];
+    ifr_flags[0..4].copy_from_slice(b"eth0");
+    ifr_flags[16..18].copy_from_slice(&IFF_UP.to_le_bytes());
+
+    let r = unsafe { syscall3(SYS_IOCTL, fd as u64, SIOCSIFFLAGS, ifr_flags.as_ptr() as u64) };
+    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+    if r < 0 {
+        say(kmsg_fd, b"[microvm-init] SIOCSIFFLAGS failed\n");
+        return;
+    }
+    say(kmsg_fd, b"[microvm-init] eth0 up @ 10.99.0.2/24\n");
 }
 
 /// Drain bytes from COM1 RBR until a newline (or buffer cap), then
