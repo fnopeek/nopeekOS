@@ -343,6 +343,11 @@ pub enum Modifier {
     MaxWidth(u16),
     /// Corner radius (px at 1× scale) without a Border.
     Rounded(u8),
+    /// CSS-style flex-grow on the main axis of the parent Row/Column.
+    /// Adds the widget's intrinsic main size as a basis and absorbs a
+    /// proportional share of the leftover alongside any
+    /// `Spacer { flex }` siblings. `Flex(0)` = no flex.
+    Flex(u8),
     // Appended only.
 }
 

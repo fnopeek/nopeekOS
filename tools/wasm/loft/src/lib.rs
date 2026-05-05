@@ -357,16 +357,27 @@ fn render(lf: &Loft) -> Widget {
     let body = render_body(lf);
     let footer = render_footer(lf);
 
-    prefab::panel(alloc::vec![
-        menu,
-        Widget::Divider,
-        toolbar,
-        Widget::Divider,
-        body,
-        Widget::Spacer { flex: 1 },
-        Widget::Divider,
-        footer,
-    ])
+    // Custom outer column instead of `prefab::panel`: panel's
+    // Padding-Xs + Spacing-Md kept the menu-bar bg from reaching
+    // the window edges + put a 12 px gap between menu and divider.
+    // Loft wants the menu strip + sidebar fill to be flush —
+    // file-manager idiom (Thunar / Files / Finder all do this).
+    // Spacing/padding on individual rows (toolbar / footer / body
+    // content) handle their own breathing room.
+    Widget::Column {
+        children: alloc::vec![
+            menu,
+            Widget::Divider,
+            toolbar,
+            Widget::Divider,
+            body,                           // Modifier::Flex(1) — fills
+            Widget::Divider,
+            footer,
+        ],
+        spacing:   Spacing::None.as_u16(),
+        align:     Align::Stretch,
+        modifiers: alloc::vec![],
+    }
 }
 
 fn render_menu_bar() -> Widget {
@@ -399,7 +410,9 @@ fn render_toolbar(lf: &Loft) -> Widget {
         ],
         spacing: Spacing::Sm.as_u16(),
         align:   Align::Center,
-        modifiers: alloc::vec![],
+        // Own padding now that the outer Column is flush — keeps
+        // back/forward/breadcrumbs + search bar off the chrome.
+        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
     }
 }
 
@@ -420,7 +433,9 @@ fn search_input(query: &str) -> Widget {
         children: alloc::vec![
             Widget::Icon {
                 id:        IconId::MagnifyingGlass,
-                size:      18,
+                // 24 = atlas-native size; 18 scaled down from the 24 px
+                // slot looked visibly fuzzy. Same fix as `prefab::input`.
+                size:      24,
                 modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
             },
             raw,
@@ -495,7 +510,12 @@ fn render_body(lf: &Loft) -> Widget {
         children: alloc::vec![sidebar, content],
         spacing: 0,
         align:   Align::Stretch,
-        modifiers: alloc::vec![],
+        // Flex(1) makes the body absorb all leftover vertical space in
+        // the parent Column. Sidebar inherits via Stretch align so its
+        // SurfaceMuted bg now reaches the footer divider regardless of
+        // grid content height. Without this the body is intrinsic-sized
+        // and the bg ends where its tallest child does.
+        modifiers: alloc::vec![Modifier::Flex(1)],
     }
 }
 

@@ -266,6 +266,15 @@ pub enum Modifier {
     /// Corner radius (px at 1× scale) without a Border. Use this when
     /// rounding is needed without a stroked outline.
     Rounded(u8),
+    /// CSS-style flex-grow on the main axis of the parent Row/Column.
+    /// The widget keeps its intrinsic main size as a basis and absorbs
+    /// a proportional share of the leftover space alongside any
+    /// `Spacer { flex }` siblings (Spacer = Flex with intrinsic 0 in
+    /// this scheme). Use case: a body Row that should fill the
+    /// remaining vertical space below the toolbar so its sidebar bg
+    /// reaches the footer divider, even when the grid content is
+    /// short. `Flex(0)` is identical to no Flex at all (intrinsic only).
+    Flex(u8),
     // Appended only.
 }
 

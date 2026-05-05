@@ -93,6 +93,7 @@ tree with the new string.
 |-----------------|---------------------------------------------------------|
 | `MinWidth(u16)` | Clamp intrinsic width up.                               |
 | `MaxWidth(u16)` | Clamp intrinsic width down.                             |
+| `Flex(u8)`      | CSS-style flex-grow on the parent Row/Column main axis. Widget keeps its intrinsic size as a basis and absorbs a proportional share of leftover space alongside any `Spacer { flex }` siblings. `Flex(0)` = no flex. |
 
 ### Interactive states
 
