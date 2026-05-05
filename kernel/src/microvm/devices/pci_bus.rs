@@ -31,7 +31,7 @@ pub struct PciBus {
 }
 
 impl PciBus {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             config_addr: 0,
             virtio_blk: VirtioBlk::new(),

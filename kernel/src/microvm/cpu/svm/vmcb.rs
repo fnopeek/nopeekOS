@@ -46,7 +46,7 @@ pub const OFF_EXIT_INFO_1: usize = 0x078;
 #[allow(dead_code)] pub const OFF_EXIT_INFO_2: usize = 0x080;
 #[allow(dead_code)] pub const OFF_EXIT_INT_INFO: usize = 0x088;
 pub const OFF_NESTED_CTL: usize = 0x090;
-#[allow(dead_code)] pub const OFF_EVENT_INJ: usize = 0x0A8;
+pub const OFF_EVENT_INJ: usize = 0x0A8;
 pub const OFF_NCR3: usize = 0x0B0;
 #[allow(dead_code)] pub const OFF_VMCB_CLEAN: usize = 0x0C0;
 /// Next-instruction RIP — populated by CPU on most non-fault VMEXITs

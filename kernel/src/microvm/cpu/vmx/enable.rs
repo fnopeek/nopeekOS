@@ -910,7 +910,7 @@ fn run_linux_loop(
                 // BAR0 range we emulate; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
                 if pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_ept(&mut regs, &mut pci.virtio_blk, gpa, host_base) {
+                    if handle_mmio_ept(&mut regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1172,6 +1172,7 @@ fn handle_linux_io(
 fn handle_mmio_ept(
     regs: &mut vmcs::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     host_base: u64,
 ) -> bool {
@@ -1218,6 +1219,17 @@ fn handle_mmio_ept(
     } else {
         let value = blk.mmio_read(off, dec.width);
         write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+
+    // If the write was a queue-notify, service the queue and inject
+    // IRQ 11 (virtio-blk's INTx line, mapped through our 8259 stub
+    // to the vector Linux programmed via ICW2).
+    if let Some(qidx) = blk.take_pending_kick() {
+        let advanced = blk.service_queues(qidx, host_base);
+        if advanced {
+            let vector = pic.vector_for_irq(11);
+            let _ = vmcs::inject_external_irq(vector);
+        }
     }
 
     if vmcs::advance_guest_rip().is_err() {
