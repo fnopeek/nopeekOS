@@ -55,6 +55,14 @@ pub const OFF_NCR3: usize = 0x0B0;
 /// instruction. APM Vol 2 §15.7.1.
 pub const OFF_NRIP: usize = 0x0C8;
 
+/// Decode-assists: number of valid bytes in `OFF_INST_BYTES`. Populated
+/// by the CPU on #NPF when CPUID 8000_000A EDX[7] is set. APM §15.20.
+pub const OFF_NUM_INST_BYTES: usize = 0x0D0;
+/// Decode-assists: 15-byte instruction stream beginning at the faulting
+/// guest RIP. Lets us emulate the access without fetching from guest
+/// memory.
+pub const OFF_INST_BYTES: usize = 0x0D1;
+
 // ── Misc-1 intercept bits (APM Vol 2 §15.9) ────────────────────────
 
 pub const INTERCEPT_INTR: u32 = 1 << 0;
@@ -170,6 +178,11 @@ impl Vmcb {
     /// Write a little-endian u64 at offset.
     pub fn write_u64(&mut self, off: usize, val: u64) {
         self.bytes[off..off + 8].copy_from_slice(&val.to_le_bytes());
+    }
+
+    /// Read a u8 at offset.
+    pub fn read_u8(&self, off: usize) -> u8 {
+        self.bytes[off]
     }
 
     /// Read a little-endian u32 at offset.

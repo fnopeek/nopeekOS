@@ -4,10 +4,12 @@
 //! Vendor-neutral — both VMX and SVM exit handlers thread the same
 //! state through.
 //!
-//! Phase 12.2 starts here with PCI config-space + virtio-blk discovery.
-//! Real I/O paths (virtqueue parsing, MMIO BAR traps, IRQ injection)
-//! land in follow-up commits.
+//! Phase 12.2 starts here with PCI config-space + virtio-blk emulation.
+//! 12.2.2 adds BAR sizing, the modern virtio cap chain, MMIO BAR0
+//! emulation and a minimal x86 MOV decoder for SVM-side MMIO traps.
+//! Real I/O paths (virtqueue parsing, IRQ injection) land in 12.2.3.
 
+pub mod insn_decoder;
 pub mod pci_bus;
 pub mod virtio_blk_pci;
 

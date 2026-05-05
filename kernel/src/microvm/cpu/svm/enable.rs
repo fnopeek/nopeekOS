@@ -780,8 +780,14 @@ fn run_linux_loop(
                 break;
             }
             EXIT_NPF => {
-                serial.flush();
                 let gpa = vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
+                if pci.virtio_blk.bar0_in_range(gpa) {
+                    if handle_mmio_npf(vmcb, regs, &mut pci.virtio_blk, gpa) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                }
+                serial.flush();
                 kprintln!(
                     "[svm] NPF: gpa={:#018x} info1={:#x} after {} iters",
                     gpa, outcome.exit_qualification, iter,
@@ -901,5 +907,116 @@ fn handle_linux_io(
     if let Some(v) = in_value {
         let new_rax = (rax & !mask) | (v & mask);
         vmcb.write_u64(vmcb::OFF_SAVE_RAX, new_rax);
+    }
+}
+
+/// Handle a #NPF on virtio-blk's BAR0 MMIO range. Uses SVM
+/// decode-assists (CPUID 8000_000A EDX[7], probed at init) to read the
+/// faulting instruction bytes from the VMCB, decodes the MOV form,
+/// emulates the access against the device's MMIO model and advances
+/// RIP via NRIP_SAVE.
+///
+/// Returns `true` if the fault was handled. `false` falls through to
+/// the generic NPF dump path (decode failure, unsupported opcode).
+fn handle_mmio_npf(
+    vmcb: &mut vmcb::Vmcb,
+    regs: &mut vmcb::GuestRegs,
+    blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
+    gpa: u64,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    // Decode-assists: number of fetched bytes at OFF_NUM_INST_BYTES,
+    // then the bytes themselves. APM §15.20.
+    let num = vmcb.read_u8(vmcb::OFF_NUM_INST_BYTES) as usize;
+    if num == 0 || num > 15 {
+        kprintln!("[svm] mmio: decode-assists gave {} bytes — bail", num);
+        return false;
+    }
+    let mut buf = [0u8; 15];
+    for k in 0..num {
+        buf[k] = vmcb.read_u8(vmcb::OFF_INST_BYTES + k);
+    }
+
+    let dec = match decode_mov(&buf[..num]) {
+        Some(d) => d,
+        None => {
+            kprintln!(
+                "[svm] mmio: unsupported insn @ gpa={:#x}, bytes={:02x?}",
+                gpa, &buf[..num.min(8)],
+            );
+            return false;
+        }
+    };
+
+    let off = (gpa - blk.bar0_base()) as u32;
+    let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+
+    if dec.is_write {
+        let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
+        blk.mmio_write(off, dec.width, value);
+    } else {
+        let value = blk.mmio_read(off, dec.width);
+        write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
+    }
+
+    advance_rip(vmcb);
+    true
+}
+
+/// Read a guest GPR by ModR/M index 0..15. RAX comes from VMCB.SAVE.RAX
+/// (SVM auto-saves it); the rest from the GuestRegs struct we maintain.
+fn read_guest_gpr(regs: &vmcb::GuestRegs, rax: u64, idx: u8) -> u64 {
+    match idx {
+        0  => rax,
+        1  => regs.rcx,
+        2  => regs.rdx,
+        3  => regs.rbx,
+        4  => 0, // RSP — never an MMIO source on Linux's path
+        5  => regs.rbp,
+        6  => regs.rsi,
+        7  => regs.rdi,
+        8  => regs.r8,
+        9  => regs.r9,
+        10 => regs.r10,
+        11 => regs.r11,
+        12 => regs.r12,
+        13 => regs.r13,
+        14 => regs.r14,
+        15 => regs.r15,
+        _  => 0,
+    }
+}
+
+/// Write a value into a guest GPR by ModR/M index, honouring x86 width
+/// rules. RAX writes go to VMCB.SAVE.RAX directly.
+fn write_guest_gpr(
+    regs: &mut vmcb::GuestRegs,
+    vmcb: &mut vmcb::Vmcb,
+    rax: u64,
+    idx: u8,
+    width: u8,
+    value: u64,
+) {
+    use crate::microvm::devices::insn_decoder::merge_reg;
+    match idx {
+        0  => vmcb.write_u64(vmcb::OFF_SAVE_RAX, merge_reg(rax, value, width)),
+        1  => regs.rcx = merge_reg(regs.rcx, value, width),
+        2  => regs.rdx = merge_reg(regs.rdx, value, width),
+        3  => regs.rbx = merge_reg(regs.rbx, value, width),
+        4  => {} // RSP — silently drop
+        5  => regs.rbp = merge_reg(regs.rbp, value, width),
+        6  => regs.rsi = merge_reg(regs.rsi, value, width),
+        7  => regs.rdi = merge_reg(regs.rdi, value, width),
+        8  => regs.r8  = merge_reg(regs.r8,  value, width),
+        9  => regs.r9  = merge_reg(regs.r9,  value, width),
+        10 => regs.r10 = merge_reg(regs.r10, value, width),
+        11 => regs.r11 = merge_reg(regs.r11, value, width),
+        12 => regs.r12 = merge_reg(regs.r12, value, width),
+        13 => regs.r13 = merge_reg(regs.r13, value, width),
+        14 => regs.r14 = merge_reg(regs.r14, value, width),
+        15 => regs.r15 = merge_reg(regs.r15, value, width),
+        _  => {}
     }
 }
