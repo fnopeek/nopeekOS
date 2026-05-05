@@ -118,11 +118,28 @@ const ACT_TOOLBAR_BACK:       u32 = 4_000;
 const ACT_TOOLBAR_FORWARD:    u32 = 4_001;
 const ACT_TOOLBAR_UP:         u32 = 4_002;
 const ACT_TOOLBAR_REFRESH:    u32 = 4_003;
+// Menu-bar label clicks toggle the corresponding dropdown.
 const ACT_MENU_FILE:          u32 = 5_000;
 const ACT_MENU_EDIT:          u32 = 5_001;
 const ACT_MENU_VIEW:          u32 = 5_002;
 const ACT_MENU_GO:            u32 = 5_003;
 const ACT_MENU_HELP:          u32 = 5_004;
+// Click-outside-popover dismiss action.
+const ACT_MENU_DISMISS:       u32 = 5_500;
+// Dropdown items.
+const ACT_FILE_QUIT:          u32 = 6_000;
+const ACT_VIEW_GRID:          u32 = 6_100;
+const ACT_VIEW_LIST:          u32 = 6_101;
+const ACT_GO_HOME:            u32 = 6_200;
+const ACT_GO_FILESYSTEM:      u32 = 6_201;
+const ACT_HELP_ABOUT:         u32 = 6_300;
+
+// NodeIds for menu-bar labels — used as Popover anchors.
+const NODE_MENU_FILE: u32 = 100;
+const NODE_MENU_EDIT: u32 = 101;
+const NODE_MENU_VIEW: u32 = 102;
+const NODE_MENU_GO:   u32 = 103;
+const NODE_MENU_HELP: u32 = 104;
 
 const GRID_COLS: usize = 4;
 const QUERY_CAP: usize = 127;
@@ -149,6 +166,25 @@ struct Entry {
     name_lc: String,
     size:    u64,
     is_dir:  bool,
+    /// UTC seconds since the Unix epoch, captured at write time by
+    /// the kernel. Zero = unknown (RTC was unreadable when the entry
+    /// was created). Filled in from the v3 `npk_fs_list` ABI tail.
+    mtime:   u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Grid,
+    List,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenMenu {
+    File,
+    Edit,
+    View,
+    Go,
+    Help,
 }
 
 struct Loft {
@@ -183,6 +219,11 @@ struct Loft {
     /// Pre-allocated mirror used to compute `query.to_ascii_lowercase()`
     /// without an extra allocation per keystroke.
     query_lc:       String,
+    /// Grid (Pictures-style icons) vs List (table with name + size +
+    /// type + modified). Switched via the View menu dropdown.
+    view_mode:      ViewMode,
+    /// Which menu's dropdown is currently visible. None = no menu open.
+    open_menu:      Option<OpenMenu>,
 }
 
 impl Loft {
@@ -202,6 +243,8 @@ impl Loft {
             sidebar_sel:   Some(0),
             query:         String::with_capacity(QUERY_CAP + 1),
             query_lc:      String::with_capacity(QUERY_CAP + 1),
+            view_mode:     ViewMode::Grid,
+            open_menu:     None,
         };
         lf.refresh();
         lf
@@ -364,16 +407,33 @@ fn render(lf: &Loft) -> Widget {
     // file-manager idiom (Thunar / Files / Finder all do this).
     // Spacing/padding on individual rows (toolbar / footer / body
     // content) handle their own breathing room.
+    let mut children: Vec<Widget> = alloc::vec![
+        menu,
+        Widget::Divider,
+        toolbar,
+        Widget::Divider,
+        body,                           // Modifier::Flex(1) — fills
+        Widget::Divider,
+        footer,
+    ];
+
+    // Append the open menu's dropdown as a Popover. The compositor
+    // resolves `anchor` against the matching menu-label NodeId
+    // (recorded during layout) and floats the dropdown directly
+    // below it. Click outside fires `on_dismiss = ACT_MENU_DISMISS`
+    // which we route to clearing `open_menu`.
+    if let Some(kind) = lf.open_menu {
+        let (anchor_id, content) = render_dropdown(lf, kind);
+        children.push(Widget::Popover {
+            anchor:     NodeId(anchor_id),
+            child:      alloc::boxed::Box::new(content),
+            on_dismiss: ActionId(ACT_MENU_DISMISS),
+            modifiers:  alloc::vec![],
+        });
+    }
+
     Widget::Column {
-        children: alloc::vec![
-            menu,
-            Widget::Divider,
-            toolbar,
-            Widget::Divider,
-            body,                           // Modifier::Flex(1) — fills
-            Widget::Divider,
-            footer,
-        ],
+        children,
         spacing:   Spacing::None.as_u16(),
         align:     Align::Stretch,
         modifiers: alloc::vec![],
@@ -381,10 +441,6 @@ fn render(lf: &Loft) -> Widget {
 }
 
 fn render_menu_bar() -> Widget {
-    // v0.2 ships the visual menu bar but dropdowns are deferred —
-    // each label fires a no-op action (logged, not actioned).
-    // Keyboard shortcuts stay reachable directly: Ctrl+W closes,
-    // typing is captured by the autofocused search.
     let labels: Vec<(String, ActionId)> = alloc::vec![
         ("Datei".to_string(),      ActionId(ACT_MENU_FILE)),
         ("Bearbeiten".to_string(), ActionId(ACT_MENU_EDIT)),
@@ -392,7 +448,59 @@ fn render_menu_bar() -> Widget {
         ("Gehe zu".to_string(),    ActionId(ACT_MENU_GO)),
         ("Hilfe".to_string(),      ActionId(ACT_MENU_HELP)),
     ];
-    prefab::menu_bar(&labels)
+    let anchors: Vec<NodeId> = alloc::vec![
+        NodeId(NODE_MENU_FILE),
+        NodeId(NODE_MENU_EDIT),
+        NodeId(NODE_MENU_VIEW),
+        NodeId(NODE_MENU_GO),
+        NodeId(NODE_MENU_HELP),
+    ];
+    prefab::menu_bar_with_anchors(&labels, &anchors)
+}
+
+/// Build the dropdown for the currently-open menu. Returns
+/// `(anchor_node_id, content_widget)` so the caller can wrap the
+/// content in a `Widget::Popover` against the matching menu label.
+fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
+    match kind {
+        OpenMenu::File => (
+            NODE_MENU_FILE,
+            prefab::popover_menu(&[
+                ("Quit".to_string(), ActionId(ACT_FILE_QUIT)),
+            ], None),
+        ),
+        OpenMenu::Edit => (
+            NODE_MENU_EDIT,
+            // Empty for now — kept so the dropdown surface still
+            // appears (visual feedback that the click registered).
+            prefab::popover_menu(&[
+                ("(no actions yet)".to_string(), ActionId(ACT_MENU_DISMISS)),
+            ], None),
+        ),
+        OpenMenu::View => (
+            NODE_MENU_VIEW,
+            prefab::popover_menu(&[
+                ("Grid".to_string(), ActionId(ACT_VIEW_GRID)),
+                ("List".to_string(), ActionId(ACT_VIEW_LIST)),
+            ], Some(match lf.view_mode {
+                ViewMode::Grid => 0,
+                ViewMode::List => 1,
+            })),
+        ),
+        OpenMenu::Go => (
+            NODE_MENU_GO,
+            prefab::popover_menu(&[
+                ("Home".to_string(),        ActionId(ACT_GO_HOME)),
+                ("Filesystem".to_string(),  ActionId(ACT_GO_FILESYSTEM)),
+            ], None),
+        ),
+        OpenMenu::Help => (
+            NODE_MENU_HELP,
+            prefab::popover_menu(&[
+                ("About loft".to_string(), ActionId(ACT_HELP_ABOUT)),
+            ], None),
+        ),
+    }
 }
 
 fn render_toolbar(lf: &Loft) -> Widget {
@@ -476,8 +584,8 @@ fn render_body(lf: &Loft) -> Widget {
         prefab::sidebar_section("DEVICES", devices_rows),
     ]);
 
-    // Content — filtered grid, or one of two empty states (genuinely
-    // empty directory vs. nothing matched the search query).
+    // Content — filtered grid OR list, plus two empty states
+    // (genuinely empty directory vs. nothing matched the search).
     let content: Widget = if lf.filtered.is_empty() {
         let hint = if lf.query.is_empty() {
             "Empty directory"
@@ -486,24 +594,10 @@ fn render_body(lf: &Loft) -> Widget {
         };
         prefab::empty_state(hint)
     } else {
-        // `source()` gives us either direct children (browse) or
-        // recursive descendants (search) — `filtered` indexes into
-        // whichever is active. Recursive entries already carry their
-        // sub-path in `name` so the grid label reads "wallpapers/aurora"
-        // for a search hit, which is the desired "show me where the
-        // match lives" UX.
-        let source = lf.source();
-        let grid_children: Vec<Widget> = lf.filtered.iter().enumerate().map(|(ui_idx, &entry_idx)| {
-            let e = &source[entry_idx];
-            let icon = icon_for(e);
-            prefab::grid_item(
-                icon, &e.name,
-                lf.grid_sel == Some(ui_idx),
-                Some(ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32)),
-                Some(ActionId(ACT_GRID_HOVER_BASE + ui_idx as u32)),
-            )
-        }).collect();
-        prefab::grid(grid_children, GRID_COLS)
+        match lf.view_mode {
+            ViewMode::Grid => render_grid(lf),
+            ViewMode::List => render_list(lf),
+        }
     };
 
     Widget::Row {
@@ -518,6 +612,128 @@ fn render_body(lf: &Loft) -> Widget {
         modifiers: alloc::vec![Modifier::Flex(1)],
     }
 }
+
+fn render_grid(lf: &Loft) -> Widget {
+    // `source()` gives us either direct children (browse) or
+    // recursive descendants (search) — `filtered` indexes into
+    // whichever is active. Recursive entries already carry their
+    // sub-path in `name` so the grid label reads "wallpapers/aurora"
+    // for a search hit, which is the desired "show me where the
+    // match lives" UX.
+    let source = lf.source();
+    let grid_children: Vec<Widget> = lf.filtered.iter().enumerate().map(|(ui_idx, &entry_idx)| {
+        let e = &source[entry_idx];
+        let icon = icon_for(e);
+        prefab::grid_item(
+            icon, &e.name,
+            lf.grid_sel == Some(ui_idx),
+            Some(ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32)),
+            Some(ActionId(ACT_GRID_HOVER_BASE + ui_idx as u32)),
+        )
+    }).collect();
+    prefab::grid(grid_children, GRID_COLS)
+}
+
+/// Detail-list view: one row per entry, columns Name | Size | Type
+/// | Modified. English headers (Florian's request — international
+/// FS UX, less ambiguity than the German labels in the menu bar).
+fn render_list(lf: &Loft) -> Widget {
+    let source = lf.source();
+    let mut rows: Vec<Widget> = Vec::with_capacity(lf.filtered.len() + 1);
+    rows.push(list_header_row());
+    rows.push(Widget::Divider);
+    for (ui_idx, &entry_idx) in lf.filtered.iter().enumerate() {
+        let e = &source[entry_idx];
+        let selected = lf.grid_sel == Some(ui_idx);
+        rows.push(list_data_row(
+            e, selected,
+            ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32),
+            ActionId(ACT_GRID_HOVER_BASE + ui_idx as u32),
+        ));
+    }
+    Widget::Column {
+        children: rows,
+        spacing: 0,
+        align:   Align::Stretch,
+        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+    }
+}
+
+fn list_header_row() -> Widget {
+    Widget::Row {
+        children: alloc::vec![
+            list_cell_text("Name",     true,  COL_NAME_W),
+            list_cell_text("Size",     false, COL_SIZE_W),
+            list_cell_text("Type",     false, COL_TYPE_W),
+            list_cell_text("Modified", false, COL_MTIME_W),
+        ],
+        spacing: Spacing::Md.as_u16(),
+        align:   Align::Center,
+        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+    }
+}
+
+fn list_data_row(e: &Entry, selected: bool, on_click: ActionId, on_hover: ActionId) -> Widget {
+    let icon = icon_for(e);
+    // Name cell with icon + label.
+    let name_cell = Widget::Row {
+        children: alloc::vec![
+            Widget::Icon { id: icon, size: 24, modifiers: alloc::vec![] },
+            Widget::Text {
+                content:   e.name.clone(),
+                style:     TextStyle::Body,
+                modifiers: alloc::vec![],
+            },
+        ],
+        spacing: Spacing::Sm.as_u16(),
+        align:   Align::Center,
+        modifiers: alloc::vec![Modifier::MinWidth(COL_NAME_W)],
+    };
+    let size_str   = if e.is_dir { "—".to_string() } else { format_size(e.size) };
+    let type_str   = type_for(e);
+    let mtime_str  = format_mtime(e.mtime);
+    let mut row_mods: Vec<Modifier> = alloc::vec![
+        Modifier::Padding(Padding::Sm.as_u16()),
+        Modifier::OnClick(on_click),
+        Modifier::OnHover(on_hover),
+        Modifier::Hover(alloc::vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ]),
+    ];
+    if selected {
+        row_mods.push(Modifier::Background(Token::SurfaceElevated));
+        row_mods.push(Modifier::Border {
+            token:  Token::Accent,
+            width:  1,
+            radius: Radius::Sm.as_u8(),
+        });
+    }
+    Widget::Row {
+        children: alloc::vec![
+            name_cell,
+            list_cell_text(&size_str,  false, COL_SIZE_W),
+            list_cell_text(&type_str,  false, COL_TYPE_W),
+            list_cell_text(&mtime_str, false, COL_MTIME_W),
+        ],
+        spacing: Spacing::Md.as_u16(),
+        align:   Align::Center,
+        modifiers: row_mods,
+    }
+}
+
+fn list_cell_text(text: &str, header: bool, min_w: u16) -> Widget {
+    Widget::Text {
+        content: text.to_string(),
+        style:   if header { TextStyle::Caption } else { TextStyle::Body },
+        modifiers: alloc::vec![Modifier::MinWidth(min_w)],
+    }
+}
+
+const COL_NAME_W:  u16 = 320;
+const COL_SIZE_W:  u16 = 100;
+const COL_TYPE_W:  u16 = 120;
+const COL_MTIME_W: u16 = 180;
 
 fn render_footer(lf: &Loft) -> Widget {
     // Mockup-aligned: hints on the left, count + selection + size on
@@ -628,12 +844,51 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
         ACT_TOOLBAR_FORWARD => { lf.go_forward(); Outcome::Rerender }
         ACT_TOOLBAR_UP      => { lf.go_up();      Outcome::Rerender }
         ACT_TOOLBAR_REFRESH => { lf.refresh();    Outcome::Rerender }
-        ACT_MENU_FILE | ACT_MENU_EDIT | ACT_MENU_VIEW | ACT_MENU_GO | ACT_MENU_HELP => {
-            // Dropdowns deferred — log and re-render so the user sees
-            // visual feedback (the OnClick fired) without the menu
-            // actually opening.
-            log("[loft] menu dropdowns not yet implemented (Phase 11 / Popover)");
-            Outcome::Idle
+        // Menu-bar labels: toggle the matching dropdown. Clicking the
+        // already-open menu's label re-fires this and closes it
+        // (matches macOS / Files behavior). Clicking a different menu
+        // switches dropdowns directly.
+        ACT_MENU_FILE => { lf.open_menu = toggle_menu(lf.open_menu, OpenMenu::File); Outcome::Rerender }
+        ACT_MENU_EDIT => { lf.open_menu = toggle_menu(lf.open_menu, OpenMenu::Edit); Outcome::Rerender }
+        ACT_MENU_VIEW => { lf.open_menu = toggle_menu(lf.open_menu, OpenMenu::View); Outcome::Rerender }
+        ACT_MENU_GO   => { lf.open_menu = toggle_menu(lf.open_menu, OpenMenu::Go);   Outcome::Rerender }
+        ACT_MENU_HELP => { lf.open_menu = toggle_menu(lf.open_menu, OpenMenu::Help); Outcome::Rerender }
+        // Click-outside-popover dismiss — close the open menu.
+        ACT_MENU_DISMISS => {
+            if lf.open_menu.is_some() {
+                lf.open_menu = None;
+                Outcome::Rerender
+            } else {
+                Outcome::Idle
+            }
+        }
+        // Dropdown items.
+        ACT_FILE_QUIT => Outcome::Exit,
+        ACT_VIEW_GRID => {
+            lf.view_mode = ViewMode::Grid;
+            lf.open_menu = None;
+            Outcome::Rerender
+        }
+        ACT_VIEW_LIST => {
+            lf.view_mode = ViewMode::List;
+            lf.open_menu = None;
+            Outcome::Rerender
+        }
+        ACT_GO_HOME => {
+            lf.open_menu = None;
+            let home = read_home_dir();
+            lf.navigate(home);
+            Outcome::Rerender
+        }
+        ACT_GO_FILESYSTEM => {
+            lf.open_menu = None;
+            lf.navigate(String::new());
+            Outcome::Rerender
+        }
+        ACT_HELP_ABOUT => {
+            log("[loft] About: nopeekOS file browser, v0.2.x");
+            lf.open_menu = None;
+            Outcome::Rerender
         }
         _ => {
             if id >= ACT_BREADCRUMB_BASE && id < ACT_TOOLBAR_BACK {
@@ -695,6 +950,15 @@ fn default_sidebar(home: &str) -> Vec<Place> {
 }
 
 fn is_device(label: &str) -> bool { label == "Filesystem" || label == "Trash" }
+
+/// Click on a menu-bar label: open it if no menu was open or a
+/// different one was, close it if the same one was already open.
+fn toggle_menu(current: Option<OpenMenu>, target: OpenMenu) -> Option<OpenMenu> {
+    match current {
+        Some(c) if c == target => None,
+        _                       => Some(target),
+    }
+}
 
 // ── Kernel-side calls ─────────────────────────────────────────────────
 
@@ -782,7 +1046,10 @@ fn dir_exists(path: &str) -> bool {
     n > 0 && out[8] != 0
 }
 
-// Wire: name\0size_le_u64\0is_dir_u8 — see kernel/src/wasm.rs.
+// Wire: name\0size_le_u64(8)\0is_dir_u8(1)\0mtime_le_u64(8) on
+// kernel ≥ v0.146; older kernels stop after is_dir (10 trailing
+// bytes). Parse defensively — accept either shape so the loft
+// .wasm boots on a stale-kernel disk during dev cycles.
 fn parse_entry(line: &[u8]) -> Option<Entry> {
     let nul = line.iter().position(|&b| b == 0)?;
     let name = core::str::from_utf8(&line[..nul]).ok()?.to_string();
@@ -790,8 +1057,15 @@ fn parse_entry(line: &[u8]) -> Option<Entry> {
     if rest.len() < 10 { return None; }
     let size = u64::from_le_bytes(rest[..8].try_into().ok()?);
     let is_dir = rest[9] != 0;
+    // mtime tail (offset 10..19): 1 sep byte + 8 LE bytes. Absent on
+    // pre-v3 kernels → mtime stays 0 ("unknown").
+    let mtime = if rest.len() >= 19 {
+        u64::from_le_bytes(rest[11..19].try_into().ok()?)
+    } else {
+        0
+    };
     let name_lc = name.to_ascii_lowercase();
-    Some(Entry { name, name_lc, size, is_dir })
+    Some(Entry { name, name_lc, size, is_dir, mtime })
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────
@@ -816,7 +1090,81 @@ fn take_first_segments(path: &str, n: usize) -> String {
     out
 }
 
-// ── Icon heuristic ────────────────────────────────────────────────────
+// ── Icon + type label ─────────────────────────────────────────────────
+
+/// Human-readable type column for the list view. Mirrors the
+/// `icon_for` taxonomy so the icon and the label always agree.
+fn type_for(e: &Entry) -> String {
+    if e.is_dir { return "Folder".to_string(); }
+    let ext = e.name.rsplit('.').next().unwrap_or("");
+    match ext {
+        "md" | "txt" | "log" | "cfg" | "toml" | "json" | "yaml" | "yml" => "Text".to_string(),
+        "rs" | "wasm" | "sh" | "py" | "c" | "h" | "hpp" | "cpp" | "go"  => "Code".to_string(),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg"          => "Image".to_string(),
+        ""    => "File".to_string(),
+        other => alloc::format!("{} File", other.to_uppercase()),
+    }
+}
+
+/// Render a Unix-second timestamp as "YYYY-MM-DD HH:MM" UTC. Zero
+/// → "—" (mtime unknown — RTC was unreadable when the entry was
+/// created, or the entry was written by a pre-v3 kernel that
+/// didn't have the field). No std::time, no chrono — pure integer
+/// math against the proleptic Gregorian calendar, matching what
+/// `kernel/src/drivers/rtc.rs::datetime_to_unix` reverses.
+fn format_mtime(secs: u64) -> String {
+    if secs == 0 { return "—".to_string(); }
+    let (y, mo, d, h, mi, _s) = unix_to_civil(secs);
+    let mut s = String::with_capacity(16);
+    push_zpad(&mut s, y as u64, 4); s.push('-');
+    push_zpad(&mut s, mo as u64, 2); s.push('-');
+    push_zpad(&mut s, d as u64, 2); s.push(' ');
+    push_zpad(&mut s, h as u64, 2); s.push(':');
+    push_zpad(&mut s, mi as u64, 2);
+    s
+}
+
+/// `Howard Hinnant`-style civil_from_days. Converts Unix seconds to
+/// (year, month [1..=12], day [1..=31], hour, minute, second) in UTC
+/// without leap-second awareness (good enough for "modified" UI).
+fn unix_to_civil(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let rem  = (secs % 86_400) as u32;
+    let h    = rem / 3600;
+    let mi   = (rem % 3600) / 60;
+    let s    = rem % 60;
+
+    // Shift epoch to 0000-03-01 to make leap math simple.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y_int = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp  = (5 * doy + 2) / 153;
+    let d   = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let mo  = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y   = (y_int + if mo <= 2 { 1 } else { 0 }) as i32;
+    (y, mo, d, h, mi, s)
+}
+
+fn push_zpad(s: &mut String, mut n: u64, width: usize) {
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+    if n == 0 { buf[0] = b'0'; i = 1; }
+    while n > 0 { buf[i] = b'0' + (n % 10) as u8; n /= 10; i += 1; }
+    while i < width { s.push('0'); i += 1; }
+    let written: Vec<u8> = buf.iter().take_while(|&&b| b != 0).copied().collect();
+    for &b in written.iter().rev() { s.push(b as char); }
+}
+
+/// Wrapper around the in-place `push_size` helper used by the
+/// footer — returns an owned String for the list view's Size cell.
+fn format_size(n: u64) -> String {
+    let mut s = String::with_capacity(12);
+    push_size(&mut s, n);
+    s
+}
 
 fn icon_for(e: &Entry) -> IconId {
     if e.is_dir { return IconId::Folder; }

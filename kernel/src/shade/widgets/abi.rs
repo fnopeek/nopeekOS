@@ -348,6 +348,10 @@ pub enum Modifier {
     /// proportional share of the leftover alongside any
     /// `Spacer { flex }` siblings. `Flex(0)` = no flex.
     Flex(u8),
+    /// Tag a widget with an app-chosen `NodeId`. Layout records the
+    /// tagged widget's rect into a side table; `Widget::Popover`'s
+    /// `anchor` field looks rects up there at render time.
+    NodeId(NodeId),
     // Appended only.
 }
 
@@ -428,15 +432,22 @@ pub enum Widget {
         modifiers: Vec<Modifier>,
     },
 
-    // ── Reserved slots (v2+) ──────────────────────────────────────────
-    // Out-of-window overlay widgets. Cannot be retrofitted without
-    // breaking every serialized tree. Compositor logs + rejects in v1.
-    // Do not insert before these.
-    #[allow(dead_code)]
+    // ── Overlay widgets ───────────────────────────────────────────────
+    // Out-of-flow rendering on top of the main tree. Cannot be
+    // retrofitted without breaking every serialized tree. Do not
+    // insert before these.
+
+    /// Floating overlay anchored to a `Modifier::NodeId`-tagged widget
+    /// elsewhere in the tree. Renders on top of everything (z-order)
+    /// at `(anchor.x, anchor.y + anchor.h)`, flipping above the anchor
+    /// when there is no room below. `on_dismiss` fires whenever a
+    /// click lands outside both the popover content and the anchor
+    /// rect.
     Popover {
-        anchor:    NodeId,
-        child:     alloc::boxed::Box<Widget>,
-        modifiers: Vec<Modifier>,
+        anchor:     NodeId,
+        child:      alloc::boxed::Box<Widget>,
+        on_dismiss: ActionId,
+        modifiers:  Vec<Modifier>,
     },
     #[allow(dead_code)]
     Tooltip {
