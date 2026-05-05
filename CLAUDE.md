@@ -42,12 +42,74 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 12.1.4 ✅ **vendor-symmetrisch** — Linux MicroVM mit
-  eigenem Rust-PID-1, host-injected echo round-trip, **Intel + AMD
-  parity**. Intel NUC bare-metal-validated (v0.137.2), AMD-V via
-  KVM nested SVM (v0.143.0). Kernel `v0.143.0`, sdk `0.6.1`, drun
-  `0.6.0`, loft `0.2.1`, testdisk `0.5.2`.
-- **Today (2026-05-05 — SVM end-to-end in einer Session, v0.142 → v0.143):**
+- **Phase:** 12.1.4 ✅ **vendor-symmetrisch** + **npkFS v3** + **echte
+  Popovers** (Phase 11 vorgezogen) + erste bundled wallpapers. Kernel
+  `v0.148.3`, sdk `0.6.3`, drun `0.6.0`, **loft `0.2.5`** (List-View
+  + Modified-Spalte + Menu-Dropdowns), wallpaper `0.4.2`, testdisk
+  `0.5.2`. Phase 12.2-12.6 plus Microkernel-Refactor weiter offen.
+- **Today (2026-05-05 — long session: SVM end-to-end + npkfs v3 +
+  Popover + wallpapers, v0.142 → v0.148.3):**
+  - **Phase 12.1 SVM end-to-end** (v0.142 → v0.143). Linux 6.18 bootet
+    auf KVM nested SVM, PID-1 echo-roundtrip funktioniert. Drei Fixes
+    auf dem Weg: MSRPM trap-all → pass-through (EFER LME muss durch),
+    hypervisor-CPUID-leaf hide (kvm-clock divide-by-zero), 
+    `tsc_early_khz=2000000` cmdline (AMD kein CPUID 0x15). Details
+    in `memory/project_svm_bringup.md`.
+  - **build.sh resource bump** (b2fd120) — qemu-RAM 256 MB → 1024 MB
+    + disk.img 256 MB → 1024 MB (microvm linux brauchte mehr).
+  - **Loft polish round 5** (v0.2.2 → v0.2.5): bump-allocator-state-
+    mutation panic gefixt (alloc_reset BEFORE handle, mark recapture
+    AFTER), neuer **`Modifier::Flex(u8)`** in SDK + kernel layout
+    (CSS-style flex-grow für non-Spacer Children), magnifier 18 → 24
+    px atlas-native, panel-padding raus für edge-to-edge sidebar +
+    menu fill.
+  - **npkFS Konsolidierung + v3 schema** (v0.145 + v0.146):
+    - v0.145 — v1-leftover gelöscht (`btree.rs`, dead code), `v2/`
+      subdir flach in `npkfs/` integriert, alle externen `npkfs::v2::*`
+      → `npkfs::*` umbenannt (34 refs). Net –838 LoC.
+    - v0.146 — schema-bump v2 → v3: `TreeEntry.mtime: u64` (UTC sec
+      seit epoch, captured via `rtc::read_unix_time()`), magic
+      `npkFS\x02\0\0` → `npkFS\x03\0\0`, mount-time guard für legacy.
+      WASM ABIs erweitert: `npk_fs_list` 10 → 19 byte tail per record
+      (mtime appended), `npk_fs_stat` 9 → 17 byte. Loft v0.2.4 nutzt
+      mtime in der Modified-Spalte.
+    - v0.146.1 — followup: loft's `dir_exists` checkte strikt `n == 9`,
+      neue ABI gibt 17 → fix auf `n > 0`, npkfs2: → npkfs:
+      log-strings.
+  - **Echte Popovers** (Phase 11 vorgezogen, v0.147 + loft v0.2.5):
+    - **`Modifier::NodeId(NodeId)`** — Widget-Tagging für Anchor-Lookup.
+    - **`Widget::Popover { anchor, child, on_dismiss, modifiers }`** —
+      finalised, floating layout an anchor-rect (auto-flip oben/unten).
+    - Layout returnt jetzt `LayoutOutput { tree, anchors, popovers }`.
+      Render: popovers drawn last (top z-order). Hit-test: popovers
+      first (reverse-decl), click outside fires on_dismiss (außer auf
+      anchor selbst — der toggled).
+    - Loft v0.2.5: OpenMenu enum, **Ansicht** dropdown switched
+      Grid/List view, **List view** mit Spalten Name/Size/Type/Modified
+      (Modified via Howard-Hinnant civil_from_days, "YYYY-MM-DD HH:MM"
+      UTC oder "—" bei mtime=0). Datei→Quit, Hilfe→About, Gehe zu
+      →Home/Filesystem.
+  - **Bundled wallpapers** (v0.148.0 → v0.148.3 + wallpaper v0.4.2):
+    - `release/assets/wallpapers/<name>.png` ist die kanonische
+      Source-of-Truth. build.sh Pass 2 staged jeden file in
+      `install_data/assets/wallpapers/`. BUNDLED_ASSETS-Eintrag
+      schreibt nach `sys/wallpapers/<name>` bei seed-time. setup.rs'
+      `copy_system_wallpapers_to_user` kopiert nach
+      `home/<user>/pictures/wallpapers/<name>` (idempotent — re-run
+      clobbert keine umbenannten files).
+    - Erstes wallpaper: `npk01.png` (downsized 4K → 1080p, 8.9 MB →
+      1.3 MB; 4K-source dropte ~3-5 sec WASM-decode-time).
+    - **Wallpaper module v0.4.2**: heap 64 MB → 256 MB (4K-decode
+      OOM'd), max-fetch-buf 6 MB → 32 MB (truncierte 9 MB inputs →
+      panic), idat-Vec mit `with_capacity(data.len())` pre-sized
+      (verhindert ~16 MB doubling-leak im bump-alloc).
+    - **`decode_with_wasm`** nutzt jetzt `INTERACTIVE_FUEL`
+      (`u64::MAX/2`) statt heuristic — bundled+signed module hat
+      keine DoS-surface, fuel-cap dort sinnlos.
+  - **Vollständige Iterations-Historie** in
+    `memory/project_microvm.md` + neuer `memory/project_npkfs_v3.md`
+    + `memory/project_popover.md` + `memory/project_wallpapers.md`.
+- **Earlier (2026-05-05 morning — SVM bring-up first push, v0.142 → v0.143):**
   - **v0.142.0 — 12.1.1c-svm Linux-Entry-Pfad** (+628 LoC):
     `enable::run_linux` + `run_linux_loop` + `setup_vmcb_linux` +
     `handle_linux_io` + `SerialState`, `npt::allocate_window_npt`
