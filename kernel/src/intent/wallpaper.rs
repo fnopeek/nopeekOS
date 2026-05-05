@@ -216,14 +216,15 @@ fn decode_with_wasm(name: &str, data: &[u8]) -> bool {
         Err(_) => return false,
     };
 
-    // Fuel budget scaled to the PNG payload. The default 10M-instruction
-    // cap suffices for tiny test images but a real 4K wallpaper (9 MB
-    // compressed → ~30 MB BGRA) blows past it during DEFLATE
-    // decompression. Empirically: ~200 instructions per compressed
-    // byte for PNG decode (DEFLATE inner loop + filter pass + RGBA→BGRA
-    // swizzle) is enough headroom; clamp the floor at 100M so even
-    // small images get a comfortable budget.
-    let fuel: u64 = ((data.len() as u64) * 200).max(100_000_000);
+    // PNG decode is one of the few WASM call sites where fuel-metering
+    // bites: a 4K image (3840×2400 → ~37 MB BGRA) can take many
+    // billions of wasmi instructions to DEFLATE-decompress + filter +
+    // swizzle. Earlier scaling heuristics (`data.len() * 200`) under-
+    // estimated the cost. Wallpaper is a bundled / signature-trusted
+    // module that runs once per intent and exits, so there's no DoS
+    // surface to defend against here — bypass fuel-metering with the
+    // interactive cap (= u64::MAX / 2, effectively unlimited).
+    let fuel: u64 = u64::MAX / 2;
 
     // Run the WASM module (_start reads .npk-wallpaper-target, decodes, calls npk_set_wallpaper)
     match crate::wasm::execute_sandboxed_with_fuel(&wasm_bytes, "_start", &[], module_cap, fuel) {
