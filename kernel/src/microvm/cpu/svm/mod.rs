@@ -95,12 +95,16 @@ pub fn run_substrate_test() -> Result<super::LaunchOutcome, &'static str> {
 }
 
 pub fn run_linux(
-    _bzimage: &[u8],
-    _cmdline: &[u8],
-    _initramfs: Option<&[u8]>,
-    _inject: &[u8],
+    bzimage: &[u8],
+    cmdline: &[u8],
+    initramfs: Option<&[u8]>,
+    inject: &[u8],
 ) -> Result<super::LaunchOutcome, &'static str> {
-    Err("SVM run_linux pending 12.1.1c — Linux bzImage path")
+    match *PROBE.lock() {
+        ProbeState::Available(_) => enable::run_linux(bzimage, cmdline, initramfs, inject),
+        ProbeState::Unavailable(reason) => Err(reason),
+        ProbeState::NotProbed => Err("svm::init() not called yet"),
+    }
 }
 
 // ── shared CPU primitives for SVM submodules ───────────────────────
