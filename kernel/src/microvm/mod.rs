@@ -23,6 +23,7 @@
 //! ```
 
 pub mod cpu;
+pub mod devices;
 pub mod linux;
 
 #[allow(unused_imports)] // LaunchOutcome is part of the public surface

@@ -1609,13 +1609,19 @@ fn microvm_linux(inject: &[u8]) {
     //
     // `panic=1`: halt immediately on any panic (no reboot loop).
     // `nokaslr`: predictable load addresses for our hypervisor side.
-    // `nolapic noapic acpi=off pci=off tsc=reliable`: tell Linux to
-    // skip hardware probing it would otherwise crash on. We're not
-    // a real PC — no ACPI tables, no PCI bus, no functioning APIC
-    // (just an EPT-mapped scratch page absorbing the MMIO accesses).
-    // Without these, Linux times out / panics on probes that don't
-    // behave like real silicon. With them, it boots minimally to
-    // the rootfs-mount panic — the 12.1.1d milestone target.
+    // `nolapic noapic acpi=off tsc=reliable`: tell Linux to skip
+    // hardware probing it would otherwise crash on. We're not a real
+    // PC — no ACPI tables, no functioning APIC (just an EPT-mapped
+    // scratch page absorbing the MMIO accesses). Without these,
+    // Linux times out / panics on probes that don't behave like real
+    // silicon.
+    //
+    // PCI is now ON (12.2 step 1) — the legacy 0xCF8/0xCFC config-
+    // space path is emulated in `microvm::devices::pci_bus`. Linux
+    // enumerates bus 0 and finds an i440FX-style host bridge plus a
+    // virtio-blk-pci device at slot 1. BAR MMIO + IRQ delivery come
+    // in 12.2.2 — for now Linux probes, finds the device, can't talk
+    // to its BAR yet, and shelves it.
     // `tsc_early_khz=2000000` skips Linux's PIT-based TSC calibration,
     // which deadlocks on the AMD-V backend (host CPUID 0x15 absent
     // on AMD → Linux falls back to PIT calibration → our PIT IO
@@ -1624,7 +1630,7 @@ fn microvm_linux(inject: &[u8]) {
     // Linux uses it directly, ignoring the cmdline hint.
     const CMDLINE: &[u8] =
         b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr \
-          nolapic noapic acpi=off pci=off tsc=reliable tsc_early_khz=2000000 \
+          nolapic noapic acpi=off tsc=reliable tsc_early_khz=2000000 \
           devtmpfs.mount=1";
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
