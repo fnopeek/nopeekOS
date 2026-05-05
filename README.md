@@ -106,7 +106,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  Cores 1..N = Workers       │  Dirty-region compositing  │
  │  MONITOR/MWAIT wakeup       │  GPU BCS blit (ExecList)   │
  ├──────────────────────────────────────────────────────────┤
- │  npkFS v2                   │  Crypto Engine             │
+ │  npkFS v3                   │  Crypto Engine             │
  │  Content-addressed trees    │  AES-256-GCM (HW AES-NI)  │
  │  CoW B-tree, BLAKE3 (AVX2) │  BLAKE3 hashing (AVX2)    │
  │  NVMe queue depth 128       │  TLS 1.3: X25519 + P-384  │
@@ -525,13 +525,19 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [ ] **Tile subdivision + full diff cache** (~3–5 d) — 512×512 grid + per-tile content-hash, hover/key change → only dirty tiles re-rasterized instead of whole window.
 - [ ] **Static visual effects** (`Shadow` / `Transition` / `Scale` outside pseudo-states) — needs compositing-layer pass (sub-tree → off-screen layer texture → blit with transform/effect). ~1 Woche, größerer Brocken.
 - [ ] **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS` cap, on hold bis ein konkreter Consumer (image viewer, chart) danach fragt.
-- [ ] **Loft polish round 4** — dropdown menus once `Widget::Popover` lands (Phase 11+), `.trash`-click crash investigation, mockup-grade refinements beyond 0.2.1.
+- [x] **Loft polish round 5** (kernel `v0.147.0`, loft `v0.2.5`, sdk `0.6.3`) — bump-allocator state-mutation panic fixed, `Modifier::Flex(u8)` flex-grow primitive added, `Modifier::NodeId` + `Widget::Popover` finalised, real menu dropdowns shipped (Datei / Bearbeiten / **Ansicht** / Gehe zu / Hilfe), View → Grid/List view toggle, **List view** with Name/Size/Type/Modified columns. Modified column reads npkFS v3 mtime via the extended `npk_fs_list` ABI.
 
 ### Phase 11 -- AI Integration (deferred → Phase 13+)
 
 Originally planned next, deprioritised in favour of Phase 12. Returns
 as a frontend feature once the MicroVM subsystem is mature enough to
 host AI services as their own apps.
+
+> **Phase 11 partial pull-forward (2026-05-05):** the reserved
+> `Widget::Popover` slot was implemented in the compositor as a real
+> overlay primitive (NodeId-anchored, click-outside-dismiss, layout
+> two-pass) so loft could ship menu dropdowns + a working View
+> mode-switcher. Tooltip / Menu still reserved-slot-only.
 
 ### Phase 12 -- MicroVM — Intel 12.1.4 ✅, AMD 12.1.4 ✅ (vendor-symmetric)
 
@@ -659,20 +665,28 @@ to full userspace boot:
       virtio-blk/net backends, picker bridge.
 - [ ] 12.6       **Firefox in MicroVM** (the actual end-goal).
 
-### Phase 11.5 -- npkFS v2: Real Content-Addressed Directories ✅ DONE 2026-04-28
+### Phase 11.5 -- npkFS v3: Content-Addressed Directories + mtime ✅ DONE 2026-05-05
 
-Shipped in kernel v0.83.x..0.85.x. v1's path-as-key + `.dir` marker
-model is gone; v2 is Git-style trees with content-addressed directory
-objects, walk-by-hash path resolution, and AES-256-GCM at-rest
-encryption with hardware AES-NI.
+Shipped in kernel v0.83.x (v2 first cut), bumped to v3 on 2026-05-05
+(kernel v0.146.0 + consolidation in v0.145.0). v1's path-as-key model
+is gone; v2 was Git-style trees with content-addressed directory
+objects + AES-256-GCM at-rest encryption; v3 added per-entry mtime so
+file managers can show modification timestamps + sort by change time.
 
-- [x] Tree-object format (Git-style `(name, hash, kind, size)` lists, encrypted)
+The `v2/` namespacing collapsed during the v3 bump — the storage
+layer is now a single flat tree under `kernel/src/storage/npkfs/`,
+with type names like `SuperblockRaw` / `BTreeEntryRaw` /
+`BTreeNodeHeader` instead of the old `V2*Raw` prefixes.
+
+- [x] Tree-object format (Git-style `(name, hash, kind, size, mtime, flags)` lists, encrypted)
 - [x] Walk-by-hash path resolution (`O(depth × log N)` instead of `O(N)`)
 - [x] `O(depth)` mutations + cheap rename + native `npk_fs_mkdir`
 - [x] Mark-and-sweep GC, snapshots fall out for free
-- [x] Locked default directory tree (`sys/{config,wasm,fonts,icons}` + `home/<name>/{documents,downloads,pictures,projects,.trash}`) created by the installer, no `.dir` markers anywhere
-- [x] Clean break, no migration — v2 ships as fresh-install only
+- [x] **mtime per TreeEntry** — UTC seconds since epoch, captured from RTC at write time. `npk_fs_list` ABI: 19-byte tail (was 10), `npk_fs_stat`: 17 bytes (was 9). Loft v0.2.5 surfaces it in the Modified column.
+- [x] Locked default directory tree (`sys/{config,wasm,fonts,icons,wallpapers}` + `home/<name>/{documents,downloads,pictures,projects,.trash}`) created by the installer
+- [x] Clean break v2 → v3 — mount-time guard halts with reinstall message on v2 disks (no in-place migration, by design)
 - [x] Host-fn path-string surface unchanged — apps didn't rebuild
+- [x] **Bundled wallpaper system** (kernel `v0.148.x`) — `release/assets/wallpapers/<name>.png` → `BUNDLED_ASSETS` → seed at install time to `sys/wallpapers/` + per-user copy to `home/<user>/pictures/wallpapers/`. First wallpaper: `npk01.png` (1920×1080).
 
 **Performance** (v0.88.8 testdisk on AirDisk 512GB SSD):
 
