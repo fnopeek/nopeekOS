@@ -299,25 +299,31 @@ dokumentiert deferred sind.
 
 ---
 
-## Sequencing — Microkernel-Refactor zwischen 12.1 und 12.2
+## Sequencing — Microkernel-Refactor NACH 12.6 (revised 2026-05-05)
 
-`decided 2026-04-30`. Nach dem 12.1-PoC und vor 12.2 wird der
-Microkernel-Driver-Refactor gezogen (siehe `MICROKERNEL_REFACTOR.md`):
-Treiber raus aus dem Kernel, als WASM-Driver, Bootstrap-Set embedded.
-Reihenfolge: ABI-Lücken (MSI, PCI-Auto-Match, IRQ-Subscribe) → virtio-blk
-→ ps2-keyboard → intel-nic → virtio-net.
+`decided 2026-04-30, revised 2026-05-05`. Ursprüngliche Reihenfolge
+war Refactor zwischen 12.1 und 12.2 (Code-Drift-Argument: virtio-blk/net
+in zwei Rollen — Guest-WASM-Driver vs. Host-Kernel-Backend). Beim
+zweiten Hinsehen halten die zwei Rollen aber **unterschiedlichen Code**:
+Host-Backend = Trap-and-Emulate im `microvm/`-Subtree (handle IOIO/MMIO,
+fill descriptor used-ring, inject virtual IRQ); Guest-WASM-Driver =
+Linux-spec virtio-Client (read available-ring, process IRQs). Sie
+teilen nur die Wire-spec, nicht den Code.
 
-**Why hier eingeschoben:** virtio-blk/net existieren nach Phase 12 in
-**zwei Rollen** — als Guest-WASM-Driver (Bootstrap-Set, für nopeekOS in
-QEMU/VBox/VMware) und als Host-Kernel-Backend (für Linux-MicroVM).
-Wenn der Host-Backend gebaut wird, *bevor* der Guest-Treiber als WASM
-migriert ist, entsteht Code-Drift. Refactor zuerst → 12.2-12.6 baut auf
-stabiler ABI auf.
+Die einzige reale Berührungsfläche: wo der Host-Backend "gib Paket an
+Host-NIC" sagt. Das geht heute direkt an `intel_nic::send_frame()`,
+post-Refactor an `npk_net_*`-host-fn — ein Call-Site-Swap, keine
+Re-Implementation. Die `net::eth`-Abstraktion fängt das.
 
-**Cost:** ~2-3 Wochen zwischen 12.1 und 12.2.
+**Neue Reihenfolge (2026-05-05):** 12.1.4 ✓ → **12.2-12.6 (Firefox)** →
+**Microkernel-Refactor** → HW-Extension-Set (NVMe/xhci/framebuffer/
+intel_xe).
 
-NVMe / xhci / framebuffer / intel_xe (HW-Extension-Set) folgen **nach**
-12.6, weil sie für MicroVM nicht blockierend sind.
+**Why neu:** Firefox-in-MicroVM ist der eigentliche Demo-Win der ganzen
+Vision. Refactor verkürzt 12.2-12.6 nicht und macht es nicht günstiger.
+Time-to-Firefox: 4-6 Wochen direkt vs. 6-9 Wochen mit Refactor-Vorlauf.
+
+**Refactor-Cost bleibt:** ~2-3 Wochen, wird hinter 12.6 gehängt.
 
 ---
 
