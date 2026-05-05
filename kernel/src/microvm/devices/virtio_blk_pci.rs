@@ -139,7 +139,9 @@ impl VirtioBlk {
             config_generation: 0,
             queue_select: 0,
             queues: [VirtQueue {
-                size: 0, msix_vec: 0xFFFF, enable: 0,
+                // queue_size at reset = max supported. Driver reads,
+                // optionally writes a smaller power-of-2.
+                size: MAX_QUEUE_SIZE, msix_vec: 0xFFFF, enable: 0,
                 desc_lo: 0, desc_hi: 0,
                 driver_lo: 0, driver_hi: 0,
                 device_lo: 0, device_hi: 0,
@@ -311,11 +313,15 @@ impl VirtioBlk {
         let v: u64 = match off {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select as u64,
             CC_DEVICE_FEATURE => {
-                // Phase 12.2.2 advertises NO features. Driver gets a
-                // bare virtio-blk with capacity-only readable. We add
-                // VIRTIO_F_VERSION_1 (bit 32) once we've validated the
-                // basic path — for now zero is the safest baseline.
-                0
+                // VIRTIO_F_VERSION_1 (bit 32) is REQUIRED for the
+                // Linux modern virtio-pci driver to claim the device —
+                // `vp_modern_probe` bails with -ENODEV if it's missing.
+                // Selector 0 = bits 0..31, selector 1 = bits 32..63.
+                if self.device_feature_select == 1 {
+                    1 // bit 32 = VIRTIO_F_VERSION_1
+                } else {
+                    0
+                }
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
             CC_DRIVER_FEATURE => {
@@ -360,15 +366,22 @@ impl VirtioBlk {
                     prev, self.device_status,
                 );
                 if self.device_status == 0 {
-                    // Reset — clear all queues + config gen bump.
+                    // Reset — clear queues, restore queue_size = MAX,
+                    // bump config generation.
                     for q in self.queues.iter_mut() {
                         *q = VirtQueue {
-                            size: 0, msix_vec: 0xFFFF, enable: 0,
+                            size: MAX_QUEUE_SIZE,
+                            msix_vec: 0xFFFF,
+                            enable: 0,
                             desc_lo: 0, desc_hi: 0,
                             driver_lo: 0, driver_hi: 0,
                             device_lo: 0, device_hi: 0,
                         };
                     }
+                    self.driver_features = [0; 2];
+                    self.driver_feature_select = 0;
+                    self.device_feature_select = 0;
+                    self.queue_select = 0;
                     self.config_generation = self.config_generation.wrapping_add(1);
                 }
             }
