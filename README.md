@@ -389,10 +389,25 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 
 **Virtualization**
 - [x] MicroVM substrate (Intel VT-x + EPT, AMD-V + NPT — both live)
-- [x] Mini-Linux 6.18 boot via bzImage 32-bit boot protocol
-- [x] Rust PID-1 (`microvm-init`) reaches userspace, host-injected
-      bytes echo back through 8250 RX FIFO (12.1.4 milestone)
-- [ ] virtio bridges for MicroVM (console, blk, net, gpu)
+- [x] Custom Linux 6.18.26-nopeek build (`microvm-linux/`, defconfig
+      + nopeek-virt overlay, VIRTIO_BLK/_NET/_PCI built-in, USB/Sound/
+      DRM/HID/ACPI/SMP raus → 9.5 MB bzImage)
+- [x] Rust PID-1 (`microvm-init` v0.3.x) reaches userspace, echoes
+      back, reads /dev/vda, brings eth0 up, sends UDP poke
+- [x] virtio-blk-pci end-to-end (12.2): PCI-bus emu, BAR sizing,
+      modern cap list, MMIO BAR-trap with guest page-walker, virtqueue
+      service, IRQ injection via VMCS/VMCB event-injection
+- [x] **profile-image persistence** (12.2.4): `sys/microvm/profile.img`
+      via npkFS auto-AES-256-GCM-encrypted, upsert API, 4 MB save
+      ~26 ms, load ~9 ms
+- [x] virtio-net-pci discovery + TX/RX (12.3.0–12.3.2): synthetic
+      gateway 10.99.0.1 mit MAC 52:54:00:6E:70:01, ARP-Reply mechanism,
+      first real IPv4 UDP frame from guest
+- [ ] 12.3.3 NAT zum Host-Stack + Cap-Filter (~300 LoC)
+- [ ] 12.3.4 curl/HTTPS-test from inside guest
+- [ ] 12.4 virtio-gpu cross-domain + Shade bridge
+- [ ] 12.5 Picker bridge + B-mini virtiofs (per-app downloads folder)
+- [ ] 12.6 Firefox (the actual end-goal)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
