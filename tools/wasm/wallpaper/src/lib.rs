@@ -60,11 +60,14 @@ fn store(name: &str, data: &[u8]) -> bool {
 
 // --- Simple bump allocator for WASM ---
 //
-// 64 MB heap covers worst-case native-resolution gradient generation:
-// one reusable BGRA buffer at 3840x2160 = 32 MB + ancillary allocs.
+// 128 MB heap covers worst-case 4K-PNG decode AND gradient generation:
+//   - input PNG buffer  (decode mode):  up to ~32 MB
+//   - decoded BGRA      (4K @ 32 bpp):  ~32 MB
+//   - DEFLATE state + temp scanlines:   ~10 MB
+//   - reusable gradient BGRA buffer:    ~32 MB
 // Bump allocator never frees — the module runs once per intent and
 // exits, so the WASM linear memory is discarded afterwards anyway.
-const HEAP_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+const HEAP_SIZE: usize = 128 * 1024 * 1024; // 128 MB
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -374,12 +377,21 @@ fn fill_noise(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8))
 // --- Decode mode (PNG → BGRA → set framebuffer) ---
 
 fn run_decode(filename: &str) {
-    let max_size = 6 * 1024 * 1024; // 6 MB max
+    // 32 MB cap — covers a high-quality 4K JPEG-equivalent PNG (the
+    // shipped npk01.png is 9 MB at native 1080p; high-detail 4K
+    // wallpapers can hit 20-25 MB). Anything larger would need
+    // streaming decode, which `npk_fetch` doesn't support today.
+    // Was 6 MB before v0.4.1: truncated 9 MB inputs → decode panic
+    // on missing IEND chunk.
+    let max_size = 32 * 1024 * 1024;
     let mut img_buf = vec![0u8; max_size];
     let img_len = match fetch(filename, &mut img_buf) {
         Some(n) => n,
         None => { log("[wallpaper] failed to fetch image"); return; }
     };
+    if img_len == max_size {
+        log("[wallpaper] WARN: image hit 32 MB buffer cap — may be truncated");
+    }
 
     let (pixels, width, height) = match decode_png(&img_buf[..img_len]) {
         Some(v) => v,
