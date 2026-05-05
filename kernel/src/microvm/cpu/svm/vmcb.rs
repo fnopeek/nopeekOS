@@ -49,18 +49,30 @@ pub const OFF_NESTED_CTL: usize = 0x090;
 #[allow(dead_code)] pub const OFF_EVENT_INJ: usize = 0x0A8;
 pub const OFF_NCR3: usize = 0x0B0;
 #[allow(dead_code)] pub const OFF_VMCB_CLEAN: usize = 0x0C0;
-#[allow(dead_code)] pub const OFF_NRIP: usize = 0x0C8;
+/// Next-instruction RIP — populated by CPU on most non-fault VMEXITs
+/// when CPUID 8000_000A EDX[3] (NRIP_SAVE) is set. Lets us advance
+/// guest RIP across a CPUID/IOIO/MSR/HLT exit without re-decoding the
+/// instruction. APM Vol 2 §15.7.1.
+pub const OFF_NRIP: usize = 0x0C8;
 
 // ── Misc-1 intercept bits (APM Vol 2 §15.9) ────────────────────────
 
-#[allow(dead_code)] pub const INTERCEPT_INTR: u32 = 1 << 0;
+pub const INTERCEPT_INTR: u32 = 1 << 0;
 #[allow(dead_code)] pub const INTERCEPT_NMI: u32 = 1 << 1;
+/// CPUID — Linux uses this for early feature detection (CPU vendor,
+/// CET, AVX, MWAIT, ...). Required so we can hide CET from the guest
+/// the same way the VMX backend does.
+pub const INTERCEPT_CPUID: u32 = 1 << 18;
 pub const INTERCEPT_HLT: u32 = 1 << 24;
 #[allow(dead_code)] pub const INTERCEPT_INVLPG: u32 = 1 << 25;
 #[allow(dead_code)] pub const INTERCEPT_INVLPGA: u32 = 1 << 26;
-#[allow(dead_code)] pub const INTERCEPT_IOIO_PROT: u32 = 1 << 27;
-#[allow(dead_code)] pub const INTERCEPT_MSR_PROT: u32 = 1 << 28;
+pub const INTERCEPT_IOIO_PROT: u32 = 1 << 27;
+pub const INTERCEPT_MSR_PROT: u32 = 1 << 28;
 #[allow(dead_code)] pub const INTERCEPT_TASK_SW: u32 = 1 << 29;
+/// Shutdown — guest triple-fault path. Without this, a triple-fault
+/// reboots the host. Linux uses triple-fault as `emergency_restart`
+/// when ACPI/PIIX/EFI reset paths are unavailable.
+pub const INTERCEPT_SHUTDOWN: u32 = 1 << 31;
 
 // ── Misc-2 intercept bits ──────────────────────────────────────────
 

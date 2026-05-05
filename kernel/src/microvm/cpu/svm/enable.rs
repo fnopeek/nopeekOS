@@ -1,16 +1,22 @@
-//! SVM root-mode entry + minimal VMRUN — 12.1.0b-svm.
+//! SVM root-mode entry + VMRUN loops — 12.1.0b-svm through 12.1.1c-svm.
 //!
-//! One consumer-facing entry point at this milestone:
-//!   - `enable_and_test()` — real-mode HLT-loop substrate test.
-//!     Allocates a fresh VMCB, host-save area, IOPM, MSRPM, and a
-//!     1-byte guest stub page (single `hlt`), enables EFER.SVME,
-//!     VMRUNs, and returns the resulting exit-code.
+//! Two consumer-facing entry points:
+//!   - `enable_and_test()` — real-mode HLT/IOIO substrate test.
+//!     Allocates a VMCB, host-save area, IOPM, MSRPM, NPT (identity)
+//!     and a 5-byte stub `mov al,'O'; out 0x80,al; hlt`, enables
+//!     EFER.SVME, VMRUNs, returns the resulting exit-code.
+//!   - `run_linux()` — Linux Boot Protocol 32-bit entry. Allocates
+//!     256 MB guest RAM, builds a non-identity NPT window, copies
+//!     bzImage parts in via `microvm::linux::bzimage`, and dispatches
+//!     a VMRUN/VMEXIT loop with handlers for HLT / IOIO / CPUID /
+//!     MSR / INTR / SHUTDOWN / NPF.
 //!
 //! All allocations are *kept* (never freed) per call. EFER.SVME is
 //! left set across calls (harmless — just enables SVM instructions).
 //!
 //! Reference: AMD64 APM Vol. 2 §15.4 (Enabling SVM), §15.5 (VMRUN
-//! Instruction), §15.17 (Global Interrupt Flag).
+//! Instruction), §15.17 (Global Interrupt Flag), §15.10 (I/O
+//! Intercepts), §15.11 (MSR Intercepts), §15.25 (Nested Paging).
 //!
 //! Compared to VMX 12.1.0b: SVM has no separate VMXON region — the
 //! host-save area is conceptually similar, but selected by an MSR
@@ -18,7 +24,8 @@
 //! dance: VMRUN takes the VMCB physical address as an operand
 //! (loaded into RAX), so multiple VMCBs can coexist trivially.
 
-use super::{npt, rdmsr, vmcb, wrmsr};
+use super::{cpuid as host_cpuid, npt, rdmsr, vmcb, wrmsr};
+use crate::microvm::linux::bzimage;
 use crate::mm::memory;
 
 // ── MSRs (APM Vol 2 §15.4) ─────────────────────────────────────────
@@ -365,5 +372,494 @@ fn run_guest_once(
         exit_reason: exit_code,
         exit_qualification: exit_info_1,
         guest_rax,
+    }
+}
+
+// ── Linux launcher (12.1.1c-svm) ───────────────────────────────────
+
+// AMD VMEXIT codes used by the Linux loop. APM Vol 2 Appendix C lists
+// the full set; we match against the ones we expect Linux to trigger.
+const EXIT_INTR: u64 = 0x060;
+const EXIT_CPUID: u64 = 0x072;
+const EXIT_HLT: u64 = 0x078;
+const EXIT_IOIO: u64 = 0x07B;
+const EXIT_MSR: u64 = 0x07C;
+const EXIT_SHUTDOWN: u64 = 0x07F;
+const EXIT_NPF: u64 = 0x400;
+const EXIT_INVALID: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+
+/// Boot a Linux bzImage in our SVM substrate. Mirrors
+/// `vmx::enable::run_linux` shape: alloc 256 MB guest RAM, build
+/// non-identity NPT, copy bzImage via shared bzimage loader,
+/// configure VMCB for 32-bit prot-mode entry at `code32_start` with
+/// RSI = boot_params_phys, then run a serial-aware exit loop.
+pub fn run_linux(
+    bzimage_bytes: &[u8],
+    cmdline: &[u8],
+    initramfs: Option<&[u8]>,
+    inject: &[u8],
+) -> Result<vmcb::LaunchOutcome, &'static str> {
+    enable_efer_svme()?;
+    setup_host_save()?;
+
+    let (host_base, npt_root) = alloc_guest_ram_and_npt()?;
+
+    let load = bzimage::load_into_guest_ram(host_base, bzimage_bytes, cmdline, initramfs)?;
+
+    // IOPM: 12 KB all-ones = trap every port. Linux touches dozens of
+    // unique ports during boot (UART, PIC, PIT, RTC, …). Cheaper to
+    // trap-all + handle the boring ones in the loop than to bitmap-
+    // tune which ports matter.
+    let iopm_phys = memory::allocate_contiguous(3)
+        .ok_or("OOM allocating IOPM (12 KB)")?;
+    // SAFETY: freshly allocated, identity-mapped, exclusive.
+    unsafe { core::ptr::write_bytes(iopm_phys as *mut u8, 0xFF, 3 * 4096); }
+
+    // MSRPM: 8 KB. We set the first 0x1800 bytes (= covers the three
+    // architected MSR ranges) to 0xFF = trap all reads + writes; the
+    // last 0x800 are reserved per APM §15.11 and stay zero.
+    let msrpm_phys = memory::allocate_contiguous(2)
+        .ok_or("OOM allocating MSRPM (8 KB)")?;
+    // SAFETY: as above.
+    unsafe {
+        core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096);
+        core::ptr::write_bytes(msrpm_phys as *mut u8, 0xFF, 0x1800);
+    }
+
+    let vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
+    let vmcb_ptr = alloc::boxed::Box::leak(vmcb);
+    let vmcb_phys = vmcb_ptr.phys_addr();
+
+    setup_vmcb_linux(vmcb_ptr, iopm_phys, msrpm_phys, npt_root, load.entry_rip);
+
+    // Initial GPRs: ESI = boot_params_phys per Linux 32-bit boot
+    // protocol; the rest zero. (RAX/RSP go through VMCB SAVE area
+    // and are already 0 from setup_vmcb_linux.)
+    let mut regs = vmcb::GuestRegs::default();
+    regs.rsi = load.boot_params_phys;
+
+    // Memory fence — see lesson 2 in project_svm_bringup.md. The
+    // VMCB writes above must be visible to the CPU's VMRUN
+    // consistency-check path.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    run_linux_loop(&mut regs, vmcb_ptr, vmcb_phys, host_base, inject)
+}
+
+/// Allocate 256 MB contiguous + slack for 2 MB alignment, install the
+/// non-identity NPT window. Returns (host_base, NCR3).
+fn alloc_guest_ram_and_npt() -> Result<(u64, u64), &'static str> {
+    let raw_base = memory::allocate_contiguous(
+        npt::GUEST_RAM_FRAMES + npt::GUEST_RAM_ALIGN_SLACK,
+    )
+    .ok_or("OOM allocating 256 MB guest RAM (+ slack)")?;
+    let host_base = npt::round_up_to_2mb(raw_base);
+    let npt_root = npt::allocate_window_npt(host_base)?;
+    Ok((host_base, npt_root))
+}
+
+/// Configure a VMCB for Linux 32-bit boot protocol entry.
+/// Differs from `setup_vmcb` (substrate test) in that:
+///   * CS.base = 0 (Linux is at GPA `entry_rip`, not relative to CS).
+///   * RIP = entry_rip (typically 0x100000 = code32_start).
+///   * Wider intercept set: HLT + IOIO + MSR + CPUID + INTR + SHUTDOWN.
+fn setup_vmcb_linux(
+    vmcb: &mut vmcb::Vmcb,
+    iopm_phys: u64,
+    msrpm_phys: u64,
+    npt_root: u64,
+    entry_rip: u64,
+) {
+    // ── Control area ──────────────────────────────────────────────
+    let misc1 = vmcb::INTERCEPT_INTR
+        | vmcb::INTERCEPT_CPUID
+        | vmcb::INTERCEPT_HLT
+        | vmcb::INTERCEPT_IOIO_PROT
+        | vmcb::INTERCEPT_MSR_PROT
+        | vmcb::INTERCEPT_SHUTDOWN;
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, misc1);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::INTERCEPT_VMRUN);
+
+    vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
+    vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
+    vmcb.write_u32(vmcb::OFF_ASID, 1);
+    vmcb.write_u8(vmcb::OFF_TLB_CTL, 1); // flush this guest's TLB
+    vmcb.write_u64(vmcb::OFF_NESTED_CTL, 1); // NP_ENABLE
+    vmcb.write_u64(vmcb::OFF_NCR3, npt_root);
+
+    // ── State save area: 32-bit prot mode flat segments ─────────────
+    // CS.base = 0; RIP = entry_rip → fetch starts at GPA entry_rip,
+    // which our NPT window maps to host_base + entry_rip = the
+    // protected-mode kernel image copied by bzimage::load_into_guest_ram.
+    vmcb.write_segment(
+        vmcb::OFF_SAVE_CS,
+        /* selector */ 0x08,
+        /* attrib   */ vmcb::ATTR_CODE_PM32,
+        /* limit    */ 0xFFFF_FFFF,
+        /* base     */ 0,
+    );
+    for off in [vmcb::OFF_SAVE_SS, vmcb::OFF_SAVE_DS, vmcb::OFF_SAVE_ES] {
+        vmcb.write_segment(off, 0x10, vmcb::ATTR_DATA_PM32, 0xFFFF_FFFF, 0);
+    }
+    // GDTR/IDTR limits — leave zero, Linux startup_32 reloads its own.
+    vmcb.write_u32(vmcb::OFF_SAVE_GDTR + 4, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_GDTR + 8, 0);
+    vmcb.write_u32(vmcb::OFF_SAVE_IDTR + 4, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_IDTR + 8, 0);
+
+    // CR registers: 32-bit prot mode, paging off.
+    vmcb.write_u64(vmcb::OFF_SAVE_CR0, 0x11); // PE=1, ET=1
+    vmcb.write_u64(vmcb::OFF_SAVE_CR3, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_CR4, 0);
+
+    // EFER: APM §15.5.1 mandates SVME=1 in guest VMCB even when the
+    // guest itself doesn't run SVM instructions.
+    vmcb.write_u64(vmcb::OFF_SAVE_EFER, EFER_SVME);
+
+    vmcb.write_u64(vmcb::OFF_SAVE_RFLAGS, 0x0000_0002); // bit 1 reserved-1
+    vmcb.write_u64(vmcb::OFF_SAVE_RIP, entry_rip);
+    vmcb.write_u64(vmcb::OFF_SAVE_RSP, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
+    vmcb.write_u8(vmcb::OFF_SAVE_CPL, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_G_PAT, 0x0007_0406_0007_0406);
+}
+
+/// Per-guest serial UART state across exits. Mirrors `vmx::enable
+/// ::SerialState` but lives in the SVM tree to keep the two backends
+/// independently evolvable.
+struct SerialState {
+    dlab: bool,
+    line: [u8; 256],
+    line_n: usize,
+    panic_observed: bool,
+    panic_msg: [u8; 192],
+    panic_msg_n: usize,
+    /// Phase 12.1.4-svm — RX FIFO. Pre-injected by the host before
+    /// VMRUN; drained when the guest reads RBR (0x3F8 IN). LSR.DR
+    /// (bit 0) on 0x3FD IN reflects `rx_pos < rx_n`.
+    rx: [u8; 128],
+    rx_pos: usize,
+    rx_n: usize,
+}
+
+const PANIC_PREFIX: &[u8] = b"Kernel panic - not syncing: ";
+
+impl SerialState {
+    fn new() -> Self {
+        Self {
+            dlab: false,
+            line: [0; 256],
+            line_n: 0,
+            panic_observed: false,
+            panic_msg: [0; 192],
+            panic_msg_n: 0,
+            rx: [0; 128],
+            rx_pos: 0,
+            rx_n: 0,
+        }
+    }
+
+    fn inject(&mut self, bytes: &[u8]) {
+        let n = bytes.len().min(self.rx.len());
+        self.rx[..n].copy_from_slice(&bytes[..n]);
+        self.rx_pos = 0;
+        self.rx_n = n;
+    }
+
+    fn rx_has_data(&self) -> bool { self.rx_pos < self.rx_n }
+
+    fn rx_take(&mut self) -> u8 {
+        if self.rx_pos < self.rx_n {
+            let b = self.rx[self.rx_pos];
+            self.rx_pos += 1;
+            b
+        } else { 0 }
+    }
+
+    fn put_char(&mut self, byte: u8) {
+        use crate::kprintln;
+        if byte == b'\n' || self.line_n == self.line.len() {
+            let n = self.line_n;
+            self.scan_for_panic(n);
+            let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
+            kprintln!("[guest] {}", s);
+            self.line_n = 0;
+            return;
+        }
+        if byte != b'\r' {
+            self.line[self.line_n] = byte;
+            self.line_n += 1;
+        }
+    }
+
+    fn flush(&mut self) {
+        use crate::kprintln;
+        if self.line_n > 0 {
+            let n = self.line_n;
+            self.scan_for_panic(n);
+            let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
+            kprintln!("[guest] {}", s);
+            self.line_n = 0;
+        }
+    }
+
+    fn scan_for_panic(&mut self, n: usize) {
+        if self.panic_observed { return; }
+        let line = &self.line[..n];
+        let prefix = PANIC_PREFIX;
+        if line.len() < prefix.len() { return; }
+        for start in 0..=(line.len() - prefix.len()) {
+            if &line[start..start + prefix.len()] == prefix {
+                self.panic_observed = true;
+                let body = &line[start + prefix.len()..];
+                let copy_n = body.len().min(self.panic_msg.len());
+                self.panic_msg[..copy_n].copy_from_slice(&body[..copy_n]);
+                self.panic_msg_n = copy_n;
+                return;
+            }
+        }
+    }
+
+    fn panic_msg_str(&self) -> &str {
+        core::str::from_utf8(&self.panic_msg[..self.panic_msg_n]).unwrap_or("?")
+    }
+}
+
+/// Linux VMRUN/VMEXIT loop. Caps at MAX_ITERATIONS to bound the
+/// shell's response time when the guest never makes progress.
+fn run_linux_loop(
+    regs: &mut vmcb::GuestRegs,
+    vmcb: &mut vmcb::Vmcb,
+    vmcb_phys: u64,
+    _host_base: u64,
+    inject: &[u8],
+) -> Result<vmcb::LaunchOutcome, &'static str> {
+    use crate::kprintln;
+
+    const MAX_ITERATIONS: u32 = 100_000;
+
+    let mut serial = SerialState::new();
+    if !inject.is_empty() {
+        serial.inject(inject);
+        kprintln!("[svm] pre-injected {} bytes into UART RX FIFO", inject.len());
+    }
+
+    let mut iter: u32 = 0;
+    let mut last_outcome: Option<vmcb::LaunchOutcome> = None;
+    let mut io_dropped: u32 = 0;
+    let mut msr_log_count: u32 = 0;
+    const MSR_LOG_CAP: u32 = 32;
+
+    // Idle detection — once init enters its pause(2)/wait-loop, the
+    // only exits are external interrupts (= host timer). After
+    // IDLE_THRESHOLD consecutive INTRs declare guest idle and bail.
+    let mut consecutive_idle: u32 = 0;
+    const IDLE_THRESHOLD: u32 = 200;
+
+    while iter < MAX_ITERATIONS {
+        iter += 1;
+        let outcome = run_guest_once(regs, vmcb, vmcb_phys);
+        let exit = outcome.exit_reason;
+
+        if exit != EXIT_INTR { consecutive_idle = 0; }
+
+        match exit {
+            EXIT_INTR => {
+                consecutive_idle = consecutive_idle.saturating_add(1);
+                if consecutive_idle >= IDLE_THRESHOLD {
+                    serial.flush();
+                    kprintln!(
+                        "[svm] guest idle in userspace ({} consecutive INTRs after {} iters) — exiting cleanly",
+                        consecutive_idle, iter,
+                    );
+                    last_outcome = Some(outcome);
+                    break;
+                }
+                last_outcome = Some(outcome);
+            }
+            EXIT_HLT => {
+                serial.flush();
+                kprintln!("[svm] guest HLT after {} VM-exits", iter);
+                last_outcome = Some(outcome);
+                break;
+            }
+            EXIT_CPUID => {
+                let leaf = vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
+                let subleaf = regs.rcx as u32;
+                let (eax, ebx, mut ecx, mut edx) = host_cpuid(leaf, subleaf);
+                if leaf == 7 && subleaf == 0 {
+                    // Hide CET — host has CR4.CET=1 for IBT but Linux's
+                    // hand-asm stubs lack ENDBR64, so once CET is on
+                    // in the guest, indirect calls #CP and BUG().
+                    ecx &= !(1u32 << 7);   // CET_SS
+                    edx &= !(1u32 << 20);  // CET_IBT
+                }
+                vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);
+                regs.rbx = ebx as u64;
+                regs.rcx = ecx as u64;
+                regs.rdx = edx as u64;
+                advance_rip(vmcb);
+                last_outcome = Some(outcome);
+            }
+            EXIT_IOIO => {
+                let info = outcome.exit_qualification;
+                let port = ((info >> 16) & 0xFFFF) as u16;
+                let dir_in = info & 1 != 0;
+                let size: u8 =
+                    if info & 0x10 != 0 { 1 }
+                    else if info & 0x20 != 0 { 2 }
+                    else if info & 0x40 != 0 { 4 }
+                    else { 1 };
+                handle_linux_io(vmcb, &mut serial, regs, port, dir_in, size, &mut io_dropped);
+                advance_rip(vmcb);
+                last_outcome = Some(outcome);
+            }
+            EXIT_MSR => {
+                // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR
+                let is_write = outcome.exit_qualification & 1 != 0;
+                let msr = regs.rcx as u32;
+                if is_write {
+                    if msr_log_count < MSR_LOG_CAP {
+                        let val = (regs.rdx << 32)
+                            | (vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                        kprintln!("[svm] WRMSR {:#010x} = {:#018x} (absorbed)", msr, val);
+                        msr_log_count += 1;
+                    }
+                } else {
+                    if !msr_is_known_noise(msr) && msr_log_count < MSR_LOG_CAP {
+                        kprintln!("[svm] RDMSR {:#010x} → 0 (unhandled)", msr);
+                        msr_log_count += 1;
+                    }
+                    regs.rdx = 0;
+                    vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
+                }
+                advance_rip(vmcb);
+                last_outcome = Some(outcome);
+            }
+            EXIT_SHUTDOWN => {
+                serial.flush();
+                if serial.panic_observed {
+                    kprintln!(
+                        "[svm] linux kernel panicked (after {} iters): {}",
+                        iter, serial.panic_msg_str(),
+                    );
+                    kprintln!("[svm] guest then triple-faulted via emergency_restart (= expected reboot path)");
+                } else {
+                    kprintln!(
+                        "[svm] guest triple-faulted/shutdown after {} iters (no kernel-panic on console)",
+                        iter,
+                    );
+                }
+                last_outcome = Some(outcome);
+                break;
+            }
+            EXIT_NPF => {
+                serial.flush();
+                let gpa = vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
+                kprintln!(
+                    "[svm] NPF: gpa={:#018x} info1={:#x} after {} iters",
+                    gpa, outcome.exit_qualification, iter,
+                );
+                last_outcome = Some(outcome);
+                break;
+            }
+            EXIT_INVALID => {
+                serial.flush();
+                kprintln!(
+                    "[svm] VMEXIT_INVALID — VMCB consistency check failed (info1={:#x})",
+                    outcome.exit_qualification,
+                );
+                last_outcome = Some(outcome);
+                break;
+            }
+            _ => {
+                serial.flush();
+                kprintln!(
+                    "[svm] unhandled exit {:#x} info1={:#x} after {} iters",
+                    exit, outcome.exit_qualification, iter,
+                );
+                last_outcome = Some(outcome);
+                break;
+            }
+        }
+    }
+
+    if iter >= MAX_ITERATIONS {
+        serial.flush();
+        kprintln!(
+            "[svm] iteration cap ({}) reached — guest still running ({} I/O drops)",
+            MAX_ITERATIONS, io_dropped,
+        );
+    }
+
+    last_outcome.ok_or("SVM Linux guest exceeded max iterations without first VMEXIT")
+}
+
+/// Advance guest RIP across a non-fault exit. Requires NRIP_SAVE
+/// (probed via CPUID 8000_000A EDX[3]) — every modern AMD CPU since
+/// K10 has it. APM §15.7.1.
+fn advance_rip(vmcb: &mut vmcb::Vmcb) {
+    let nrip = vmcb.read_u64(vmcb::OFF_NRIP);
+    vmcb.write_u64(vmcb::OFF_SAVE_RIP, nrip);
+}
+
+/// MSRs Linux probes via `safe_rdmsr` (catches #GP) — known noise on
+/// nopeekOS, suppress the per-exit log line.
+fn msr_is_known_noise(msr: u32) -> bool {
+    matches!(msr,
+        0xC001_1029 | 0xC001_0015 | 0xC001_001F | // AMD LS_CFG/HWCR/NB_CFG
+        0x0000_001B | // IA32_APIC_BASE — Linux probes early
+        0x0000_003A   // IA32_FEAT_CTL — VMX-only, absent on AMD
+    )
+}
+
+/// Dispatch one I/O VMEXIT. UART COM1 (0x3F8-0x3FF) gets proper
+/// synthetic responses; everything else absorbed (return 0 for IN,
+/// no-op for OUT). Mirror of `vmx::handle_linux_io` shape, but
+/// reads/writes RAX through VMCB instead of the GPR struct (SVM
+/// auto-saves RAX in VMCB.SAVE.RAX on every VMEXIT).
+fn handle_linux_io(
+    vmcb: &mut vmcb::Vmcb,
+    serial: &mut SerialState,
+    _regs: &mut vmcb::GuestRegs,
+    port: u16,
+    dir_in: bool,
+    size: u8,
+    io_dropped: &mut u32,
+) {
+    let mask: u64 = match size { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFF_FFFF, _ => 0xFF };
+    let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+    let val_out = (rax & mask) as u32;
+
+    let in_value: Option<u64> = match (port, dir_in) {
+        (0x3F8, false) => {
+            if !serial.dlab { serial.put_char(val_out as u8); }
+            None
+        }
+        (0x3F9, false) => None, // IER / DLM — ignore
+        (0x3FB, false) => {
+            serial.dlab = (val_out & 0x80) != 0;
+            None
+        }
+        (0x3F8, true) => {
+            // RBR (DLAB=0): pop one byte from injected RX FIFO.
+            // DLL (DLAB=1): unmodelled, return 0.
+            Some(if !serial.dlab { serial.rx_take() as u64 } else { 0 })
+        }
+        (0x3FA, true) => Some(0x01), // IIR: bit 0 = no IRQ pending
+        (0x3FD, true) => {
+            // LSR: THR-empty + TSR-empty always set, DR reflects FIFO.
+            let dr = if serial.rx_has_data() { 0x01u64 } else { 0 };
+            Some(0x60 | dr)
+        }
+        (0x3FE, true) => Some(0xB0), // MSR: CTS+DSR+DCD
+        (0x3FA..=0x3FF, true) => Some(0),
+        (_, true) => { *io_dropped += 1; Some(0) }
+        (_, false) => { *io_dropped += 1; None }
+    };
+
+    if let Some(v) = in_value {
+        let new_rax = (rax & !mask) | (v & mask);
+        vmcb.write_u64(vmcb::OFF_SAVE_RAX, new_rax);
     }
 }
