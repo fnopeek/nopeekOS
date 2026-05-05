@@ -42,12 +42,74 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 12.1.4 ✅ **vendor-symmetrisch** + **npkFS v3** + **echte
-  Popovers** (Phase 11 vorgezogen) + erste bundled wallpapers. Kernel
-  `v0.148.3`, sdk `0.6.3`, drun `0.6.0`, **loft `0.2.5`** (List-View
-  + Modified-Spalte + Menu-Dropdowns), wallpaper `0.4.2`, testdisk
-  `0.5.2`. Phase 12.2-12.6 plus Microkernel-Refactor weiter offen.
-- **Today (2026-05-05 — long session: SVM end-to-end + npkfs v3 +
+- **Phase:** **12.2 ✅ + 12.3.0–12.3.2 ✅** — virtio-blk
+  end-to-end mit npkFS-persistierter encrypted profile-image, virtio-net
+  TX/RX-Pfade mit ARP-Loop. Kernel `v0.154.5`, microvm-init `0.3.2`,
+  Linux `6.18.26-nopeek` (eigener Build, VIRTIO_BLK=y built-in). Phase
+  12.3.3 (NAT zum Host-Stack + Cap-Filter), 12.3.4 (curl/HTTPS-test),
+  12.4–12.6 (virtio-gpu, picker, Firefox) plus Microkernel-Refactor
+  weiter offen.
+- **2026-05-05 (sehr lange session, ~25 commits, v0.148.3 → v0.154.5):**
+  - **Cleanup v0.148.4** — bootstrap WASM-Modules add/multiply/hello/fib
+    raus (~140 LoC weg).
+  - **Sequencing-Decision** — Microkernel-Refactor wandert von
+    "zwischen 12.1 und 12.2" zu **nach 12.6 Firefox**. Code-Drift-Argument
+    hielt nicht (Host-Backend ist Trap-and-Emulate, Guest-WASM-Driver ist
+    Linux-spec-Client — teilen nur die Wire-spec). Time-to-Firefox: 4-6
+    statt 6-9 Wochen.
+  - **Spec-Update** — at-rest-AEAD ist AES-256-GCM (war ChaCha20 in der
+    Spec, falsch — ChaCha lebt nur noch in TLS). Pattern B-mini
+    (per-app-downloads-Subtree) vorgezogen in 12.5.
+  - **Phase 12.2 (virtio-blk end-to-end), v0.149 → v0.153.1, ~10 commits:**
+    - PCI-bus emu (slot 0 host-bridge, slot 1 virtio-blk)
+    - BAR-sizing-Handshake (write 0xFFFFFFFF → size mask)
+    - Modern virtio cap list (Common/Notify/ISR/Device cfg)
+    - MMIO-BAR-trap mit Guest-Page-Walker für Inst-Fetch
+      (decode-assists war auf KVM-nested-SVM nicht zuverlässig).
+      Vendor-neutral, funktioniert auf VMX und SVM identisch.
+    - VIRTIO_F_VERSION_1 + queue_size = MAX_QUEUE_SIZE
+    - **Eigener Linux-Build** in `microvm-linux/` — defconfig + overlay
+      nopeek-virt.config, VIRTIO_BLK=y/_NET=y/_PCI=y built-in, USB/Sound/
+      DRM/HID raus. 9.5 MB bzImage statt Alpine's 12 MB. `bash
+      microvm-linux/build.sh` lädt linux-6.18.26.tar.xz von kernel.org.
+    - PKU+OSPKE in CPUID 7 ECX maskieren (XSAVE-consistency-check fix —
+      sonst panic in `fpstate_reset`).
+    - 8259 PIC stub (master/slave IMR readback, ICW1/2/3/4 sequence
+      tracking) damit Linux's `request_irq` für virtio-pci INTx-fallback
+      nicht -EINVAL zurückbekommt.
+    - virtqueue-walker in `devices/virtqueue.rs`: split-virtqueue-Spec,
+      avail-ring lesen, descriptor-chains folgen, used-ring schreiben mit
+      release-fence. virtio-blk-spezifischer Service: 4 MB
+      in-RAM-backing, IN/OUT/GET_ID/FLUSH-handler, status-byte writeback.
+    - IRQ-Injection: VMX VM_ENTRY_INTR_INFO_FIELD, SVM VMCB.EVENT_INJ.
+      8259-Stub ICW2 trackt Vector-Base damit IRQ 11 auf den richtigen
+      Linux-Vector landet.
+    - **Profile-Image-Persistenz**: `sys/microvm/profile.img` via npkFS
+      auto-AES-256-GCM-encrypted (master_key), upsert-API (insert-or-
+      replace). 4 MB save: enc 5.9 ms + BLAKE3 2.4 ms + NVMe-DMA 4 ms =
+      ~26 ms. 4 MB load: ~9 ms.
+    - PID-1 v0.3.0 erweitert: open(/dev/vda) + read(32 bytes) + hex+ASCII
+      log. Magic-pattern "nopeekOS-microvm-blk\0+counter" überlebt zwei
+      VM-runs (Run 1 = fresh, Run 2 = loaded → identical bytes).
+  - **Phase 12.3 virtio-net (12.3.0–12.3.2), v0.154.0 → v0.154.5:**
+    - virtio-net-pci device auf slot 2, VIRTIO_NET_F_MAC + _STATUS
+      advertised, MAC `52:54:00:6E:70:6B`, GATEWAY_MAC
+      `52:54:00:6E:70:01`, GATEWAY_IP `10.99.0.1`.
+    - virtqueue.rs Helpers public (avail_idx/avail_ring/read_desc/used_push)
+      damit virtio-net + virtio-blk dieselbe Mechanik teilen.
+    - TX-Path: q1-notify → walk avail-ring → concat descriptor chunks →
+      log eth+IP+L4-ports.
+    - RX-Path: synth ARP-Reply für Gateway-IP — wenn TX ein ARP-Request
+      für 10.99.0.1 ist, baue Reply mit GATEWAY_MAC, walke RX-q0-avail,
+      schreibe in driver-buffer, used-ring update, IRQ inject.
+    - PID-1 v0.3.2: SIOCSIFADDR + SIOCSIFFLAGS via ifreq[40] manuell
+      (kein copy_from_slice → kein memcpy-link-error). UDP-poke an
+      10.99.0.1:53 triggert ARP. Eth0 Bringup ohne Linux IP_PNP
+      (das hängt in unserer microvm-env, late_initcall blockiert PID-1).
+    - **End-to-End validated**: PID-1 sendto → Linux ARP-Request → wir
+      antworten synthetisch → Linux's ARP-cache populated → echte UDP/IP-
+      Frame mit GATEWAY_MAC als dst raus. Voll auf NUC-Hardware bestätigt.
+- **Earlier (2026-05-05 — long session: SVM end-to-end + npkfs v3 +
   Popover + wallpapers, v0.142 → v0.148.3):**
   - **Phase 12.1 SVM end-to-end** (v0.142 → v0.143). Linux 6.18 bootet
     auf KVM nested SVM, PID-1 echo-roundtrip funktioniert. Drei Fixes
