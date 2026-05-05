@@ -515,8 +515,6 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Execution");
             kprintln!("  ─────────");
             kprintln!("  run <module> [args]   Execute WASM module from store");
-            kprintln!("  add <a> <b>           Add two numbers [WASM]");
-            kprintln!("  multiply <a> <b>      Multiply two numbers [WASM]");
             kprintln!();
         }
         "security" | "lock" | "caps" => {
@@ -660,7 +658,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Storage:   store · fetch · delete · list · fsinfo");
             kprintln!("  Content:   cat · grep · head · wc · hexdump");
             kprintln!("  Network:   ping · resolve · http · https · traceroute · netstat");
-            kprintln!("  Exec:      run · add · multiply");
+            kprintln!("  Exec:      run · driver");
             kprintln!("  Packages:  install · uninstall · modules");
             kprintln!("  Security:  lock · passwd · caps · audit · shell");
             kprintln!("  Config:    set · get · config");

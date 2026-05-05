@@ -30,8 +30,7 @@ npk> status                          # Full system overview (cores, RAM, disk, n
 npk> store config version=1.0        # Store object (BLAKE3-hashed, encrypted at rest)
 npk> fetch config                    # Retrieve + decrypt + integrity check
 npk> list                            # All objects with hashes
-npk> run hello                       # Execute WASM from npkFS (sandboxed, cap-gated)
-npk> run fib 20                      # Compute fibonacci(20) = 6765 in WASM sandbox
+npk> run <module>                    # Execute WASM from npkFS (sandboxed, cap-gated)
 npk> ping google.ch                  # ICMP ping (with DNS resolution)
 npk> traceroute 8.8.8.8              # Network path tracing
 npk> resolve google.com              # DNS resolution
@@ -192,7 +191,6 @@ Every execution is a sandboxed WASM module:
 - [x] Module loading from npkFS (BLAKE3 integrity check)
 - [x] Per-module delegated capabilities (READ+EXECUTE, 60s TTL)
 - [x] Host functions: `npk_log`, `npk_print`, `npk_fetch`, `npk_store`
-- [x] Bootstrap modules: hello, fib, add, multiply (auto-stored on first boot)
 
 ### Phase 4 -- Block I/O + npkFS
 

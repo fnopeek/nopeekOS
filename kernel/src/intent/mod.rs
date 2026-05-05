@@ -1231,17 +1231,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
-        // Intents requiring EXECUTE (WASM sandbox)
-        "add" => {
-            if require_cap(vault, &session, Rights::EXECUTE, "add") {
-                wasm::intent_wasm_add(args);
-            }
-        }
-        "multiply" => {
-            if require_cap(vault, &session, Rights::EXECUTE, "multiply") {
-                wasm::intent_wasm_multiply(args);
-            }
-        }
         "disk" | "blk" => {
             let sub = args.trim();
             if sub.is_empty() || sub == "info" {
@@ -1749,7 +1738,6 @@ fn intent_cd(args: &str) {
 }
 
 /// Re-export public API for main.rs
-pub use wasm::bootstrap_wasm;
 pub use wallpaper::random_wallpaper;
 pub use fs::crypto_bench;
 
