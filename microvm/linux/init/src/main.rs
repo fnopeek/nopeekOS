@@ -21,8 +21,9 @@ const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_IOCTL: u64 = 16;
 const SYS_DUP2: u64 = 33;
-const SYS_SOCKET: u64 = 41;
 const SYS_PAUSE: u64 = 34;
+const SYS_SOCKET: u64 = 41;
+const SYS_SENDTO: u64 = 44;
 const SYS_EXIT: u64 = 60;
 const SYS_MKDIR: u64 = 83;
 const SYS_MOUNT: u64 = 165;
@@ -137,9 +138,11 @@ unsafe extern "C" fn rust_main() -> ! {
     blk_read_test(kmsg_fd);
 
     // Phase 12.3.1: bring eth0 up with the static IP that the host's
-    // virtio-net is set up to bridge for. Triggers ARP-Request on the
-    // wire which our hypervisor's TX-path will log.
+    // virtio-net is set up to bridge for, then send one UDP datagram
+    // toward the gateway — that forces Linux to ARP-resolve 10.99.0.1
+    // and the resulting ARP-Request hits our virtio-net TX path.
     eth0_up(kmsg_fd);
+    udp_poke(kmsg_fd);
 
     // Phase 12.1.4 — inject_console round-trip. Grant ourselves I/O
     // port access on COM1 (0x3F8-0x3FF) via ioperm(2). Modern Linux
@@ -263,11 +266,12 @@ fn eth0_up(kmsg_fd: i64) {
         return;
     }
 
+    // ifreq for SIOCSIFADDR: name "eth0\0" + sockaddr_in @ off 16
     let mut ifr = [0u8; 40];
-    ifr[0..4].copy_from_slice(b"eth0");
-    // SIOCSIFADDR — sockaddr_in at off 16
-    ifr[16..18].copy_from_slice(&(AF_INET as u16).to_le_bytes());
-    // ip 10.99.0.2 in network byte order — high byte first in memory
+    ifr[0] = b'e'; ifr[1] = b't'; ifr[2] = b'h'; ifr[3] = b'0';
+    ifr[16] = AF_INET as u8;          // family LE: low byte
+    ifr[17] = (AF_INET >> 8) as u8;   // high byte (=0)
+    // ip 10.99.0.2 in network byte order — high byte first
     ifr[20] = 10; ifr[21] = 99; ifr[22] = 0; ifr[23] = 2;
 
     let r = unsafe { syscall3(SYS_IOCTL, fd as u64, SIOCSIFADDR, ifr.as_ptr() as u64) };
@@ -277,10 +281,11 @@ fn eth0_up(kmsg_fd: i64) {
         return;
     }
 
-    // SIOCSIFFLAGS — set IFF_UP at off 16 (i16 LE)
+    // ifreq for SIOCSIFFLAGS: name + ifr_flags (i16 LE) @ off 16
     let mut ifr_flags = [0u8; 40];
-    ifr_flags[0..4].copy_from_slice(b"eth0");
-    ifr_flags[16..18].copy_from_slice(&IFF_UP.to_le_bytes());
+    ifr_flags[0] = b'e'; ifr_flags[1] = b't'; ifr_flags[2] = b'h'; ifr_flags[3] = b'0';
+    ifr_flags[16] = IFF_UP as u8;
+    ifr_flags[17] = (IFF_UP >> 8) as u8;
 
     let r = unsafe { syscall3(SYS_IOCTL, fd as u64, SIOCSIFFLAGS, ifr_flags.as_ptr() as u64) };
     let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
@@ -289,6 +294,45 @@ fn eth0_up(kmsg_fd: i64) {
         return;
     }
     say(kmsg_fd, b"[microvm-init] eth0 up @ 10.99.0.2/24\n");
+}
+
+/// Send one UDP datagram to the gateway. Linux's IP stack does
+/// route lookup → on-link → ARP-resolve 10.99.0.1 → ARP-Request on
+/// the wire. The send itself probably fails (no answer), but the
+/// ARP-Request fires our virtio-net TX path so we see it logged.
+fn udp_poke(kmsg_fd: i64) {
+    let fd = unsafe { syscall3(SYS_SOCKET, AF_INET, SOCK_DGRAM, 0) };
+    if fd < 0 {
+        say(kmsg_fd, b"[microvm-init] udp socket failed\n");
+        return;
+    }
+
+    // sockaddr_in for 10.99.0.1:53
+    let mut sa = [0u8; 16];
+    sa[0] = AF_INET as u8;
+    sa[1] = (AF_INET >> 8) as u8;
+    sa[2] = 0; sa[3] = 53;                            // port 53 (NBO: hi,lo)
+    sa[4] = 10; sa[5] = 99; sa[6] = 0; sa[7] = 1;     // ip (NBO)
+
+    let payload = b"npk-poke";
+    let n = unsafe {
+        syscall6(
+            SYS_SENDTO,
+            fd as u64,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+            0,
+            sa.as_ptr() as u64,
+            sa.len() as u64,
+        )
+    };
+    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+
+    if n < 0 {
+        say(kmsg_fd, b"[microvm-init] udp poke sent (errno; ARP queued)\n");
+    } else {
+        say(kmsg_fd, b"[microvm-init] udp poke sent\n");
+    }
 }
 
 /// Drain bytes from COM1 RBR until a newline (or buffer cap), then
@@ -481,6 +525,26 @@ unsafe fn syscall5(nr: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> i64 {
             in("rdx") c,
             in("r10") d,
             in("r8") e,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    r
+}
+
+unsafe fn syscall6(nr: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> i64 {
+    let r: i64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => r,
+            in("rdi") a,
+            in("rsi") b,
+            in("rdx") c,
+            in("r10") d,
+            in("r8") e,
+            in("r9") f,
             out("rcx") _,
             out("r11") _,
             options(nostack),
