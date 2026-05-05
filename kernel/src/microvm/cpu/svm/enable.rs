@@ -832,6 +832,9 @@ fn run_linux_loop(
         );
     }
 
+    // Persist the virtio-blk profile-image to npkFS (encrypted at rest).
+    pci.virtio_blk.save();
+
     last_outcome.ok_or("SVM Linux guest exceeded max iterations without first VMEXIT")
 }
 

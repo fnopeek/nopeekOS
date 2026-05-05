@@ -996,6 +996,9 @@ fn run_linux_loop(
         None => kprintln!("[microvm] run_linux_loop returning Err (no outcome captured)"),
     }
 
+    // Persist the virtio-blk profile-image to npkFS (encrypted at rest).
+    pci.virtio_blk.save();
+
     last_outcome.ok_or("Linux guest exceeded max iterations without first VM-exit")
 }
 
