@@ -9,6 +9,7 @@
 //! emulation and a minimal x86 MOV decoder for SVM-side MMIO traps.
 //! Real I/O paths (virtqueue parsing, IRQ injection) land in 12.2.3.
 
+pub mod guest_fetch;
 pub mod insn_decoder;
 pub mod pci_bus;
 pub mod virtio_blk_pci;

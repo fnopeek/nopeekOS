@@ -57,11 +57,10 @@ pub const OFF_NRIP: usize = 0x0C8;
 
 /// Decode-assists: number of valid bytes in `OFF_INST_BYTES`. Populated
 /// by the CPU on #NPF when CPUID 8000_000A EDX[7] is set. APM §15.20.
-pub const OFF_NUM_INST_BYTES: usize = 0x0D0;
-/// Decode-assists: 15-byte instruction stream beginning at the faulting
-/// guest RIP. Lets us emulate the access without fetching from guest
-/// memory.
-pub const OFF_INST_BYTES: usize = 0x0D1;
+/// Currently unused — KVM nested SVM doesn't populate these for nested
+/// NPF. We walk guest page tables instead (`devices::guest_fetch`).
+#[allow(dead_code)] pub const OFF_NUM_INST_BYTES: usize = 0x0D0;
+#[allow(dead_code)] pub const OFF_INST_BYTES: usize = 0x0D1;
 
 // ── Misc-1 intercept bits (APM Vol 2 §15.9) ────────────────────────
 
@@ -181,6 +180,7 @@ impl Vmcb {
     }
 
     /// Read a u8 at offset.
+    #[allow(dead_code)]
     pub fn read_u8(&self, off: usize) -> u8 {
         self.bytes[off]
     }
