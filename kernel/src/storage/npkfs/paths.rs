@@ -56,11 +56,15 @@ impl From<FsError> for PathError {
 
 #[derive(Clone, Copy, Debug)]
 pub struct WalkOk {
-    pub hash: [u8; 32],
-    pub kind: EntryKind,
+    pub hash:  [u8; 32],
+    pub kind:  EntryKind,
     /// File: byte size of the referenced Blob.
     /// Dir : recursive sum of File sizes underneath.
-    pub size: u64,
+    pub size:  u64,
+    /// File / Dir: UTC seconds since the Unix epoch, captured at write
+    /// time. Zero for the root tree (no parent TreeEntry to read it
+    /// from) and for entries created when the RTC was unreadable.
+    pub mtime: u64,
 }
 
 // ── Path parsing ──────────────────────────────────────────────────────
@@ -133,7 +137,7 @@ pub fn walk(root: &[u8; 32], path: &str) -> Result<WalkOk, PathError> {
         let entries = fetch_tree(root)?;
         let size: u64 = entries.iter()
             .fold(0u64, |acc, e| acc.saturating_add(e.size));
-        return Ok(WalkOk { hash: *root, kind: EntryKind::Dir, size });
+        return Ok(WalkOk { hash: *root, kind: EntryKind::Dir, size, mtime: 0 });
     }
 
     let mut cur_hash = *root;
@@ -146,7 +150,12 @@ pub fn walk(root: &[u8; 32], path: &str) -> Result<WalkOk, PathError> {
             .ok_or(PathError::NotFound)?;
 
         if i == last {
-            return Ok(WalkOk { hash: entry.hash, kind: entry.kind, size: entry.size });
+            return Ok(WalkOk {
+                hash:  entry.hash,
+                kind:  entry.kind,
+                size:  entry.size,
+                mtime: entry.mtime,
+            });
         }
         if entry.kind != EntryKind::Dir {
             return Err(PathError::NotADirectory);
@@ -300,6 +309,7 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
         hash: blob_hash,
         kind: EntryKind::File,
         size: data.len() as u64,
+        mtime: now_unix(),
         flags: 0,
     };
     insert_entry_at(root, &segs, entry, /* allow_replace */ true)
@@ -321,9 +331,17 @@ pub fn mkdir(root: &[u8; 32], path: &str) -> Result<[u8; 32], PathError> {
         hash,
         kind: EntryKind::Dir,
         size: 0,
+        mtime: now_unix(),
         flags: 0,
     };
     insert_entry_at(root, &segs, entry, /* allow_replace */ false)
+}
+
+/// Capture current Unix time from the host RTC. Returns 0 ("unknown")
+/// if the RTC isn't readable yet — safe default that the loft listing
+/// renders as "—" rather than "1970-01-01".
+fn now_unix() -> u64 {
+    crate::drivers::rtc::read_unix_time().unwrap_or(0)
 }
 
 /// Remove `path`. Files are dropped unconditionally; directories must
