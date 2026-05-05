@@ -15,6 +15,7 @@ pub mod insn_decoder;
 pub mod pci_bus;
 pub mod pic8259;
 pub mod virtio_blk_pci;
+pub mod virtio_net_pci;
 pub mod virtqueue;
 
 pub use pci_bus::{handle_pci_io, PciBus, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};

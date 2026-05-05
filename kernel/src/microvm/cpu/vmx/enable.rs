@@ -910,7 +910,12 @@ fn run_linux_loop(
                 // BAR0 range we emulate; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
                 if pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_ept(&mut regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
+                    if handle_mmio_ept_blk(&mut regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                } else if pci.virtio_net.bar0_in_range(gpa) {
+                    if handle_mmio_ept_net(&mut regs, &mut pci.virtio_net, &pic, gpa, host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1172,7 +1177,7 @@ fn handle_linux_io(
 ///
 /// Returns `true` if the fault was handled, `false` otherwise (page
 /// walk failed, opcode unsupported).
-fn handle_mmio_ept(
+fn handle_mmio_ept_blk(
     regs: &mut vmcs::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
     pic: &crate::microvm::devices::pic8259::Pic8259,
@@ -1284,4 +1289,57 @@ fn write_gpr_vmx(regs: &mut vmcs::GuestRegs, idx: u8, width: u8, value: u64) {
         15 => regs.r15 = merge_reg(regs.r15, value, width),
         _  => {}
     }
+}
+
+/// Handle an EPT violation that targets virtio-net's BAR0. Identical
+/// pattern to `handle_mmio_ept_blk` — only the device + IRQ line
+/// differ. We'll de-duplicate via a trait once virtio-gpu joins (12.4).
+fn handle_mmio_ept_net(
+    regs: &mut vmcs::GuestRegs,
+    net: &mut crate::microvm::devices::virtio_net_pci::VirtioNet,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    host_base: u64,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
+    let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
+    let buf = match fetch_inst(rip, cr3, host_base) {
+        Some(b) => b,
+        None => {
+            kprintln!("[microvm] mmio-net: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[microvm] mmio-net: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - net.bar0_base()) as u32;
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        net.mmio_write(off, dec.width, value);
+    } else {
+        let value = net.mmio_read(off, dec.width);
+        write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = net.take_pending_kick() {
+        let advanced = net.service_queues(qidx, host_base);
+        if advanced {
+            // virtio-net IRQ line = 10 (per pci config 0x3C).
+            let vector = pic.vector_for_irq(10);
+            let _ = vmcs::inject_external_irq(vector);
+        }
+    }
+
+    if vmcs::advance_guest_rip().is_err() { return false; }
+    true
 }

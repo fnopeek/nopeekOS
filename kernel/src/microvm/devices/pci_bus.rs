@@ -17,6 +17,7 @@
 //! routes config-space dwords to/from there.
 
 use super::virtio_blk_pci::VirtioBlk;
+use super::virtio_net_pci::VirtioNet;
 
 pub const PCI_CONFIG_ADDR: u16 = 0xCF8;
 pub const PCI_CONFIG_DATA_START: u16 = 0xCFC;
@@ -28,6 +29,7 @@ const NO_DEVICE: u32 = 0xFFFF_FFFF;
 pub struct PciBus {
     config_addr: u32,
     pub virtio_blk: VirtioBlk,
+    pub virtio_net: VirtioNet,
 }
 
 impl PciBus {
@@ -35,6 +37,7 @@ impl PciBus {
         Self {
             config_addr: 0,
             virtio_blk: VirtioBlk::new(),
+            virtio_net: VirtioNet::new(),
         }
     }
 }
@@ -102,6 +105,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
     match slot {
         0 => host_bridge_config(reg),
         1 => bus.virtio_blk.pci_read_dword(reg),
+        2 => bus.virtio_net.pci_read_dword(reg),
         _ => NO_DEVICE,
     }
 }
@@ -110,8 +114,10 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
     if bus_num != 0 || func != 0 {
         return;
     }
-    if slot == 1 {
-        bus.virtio_blk.pci_write_dword(reg, val);
+    match slot {
+        1 => bus.virtio_blk.pci_write_dword(reg, val),
+        2 => bus.virtio_net.pci_write_dword(reg, val),
+        _ => {}
     }
 }
 
