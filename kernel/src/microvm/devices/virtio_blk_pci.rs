@@ -353,7 +353,12 @@ impl VirtioBlk {
             }
             CC_MSIX_CONFIG => self.msix_config = val as u16,
             CC_DEVICE_STATUS => {
+                let prev = self.device_status;
                 self.device_status = val as u8;
+                kprintln!(
+                    "[virtio-blk] device_status {:#04x} -> {:#04x}",
+                    prev, self.device_status,
+                );
                 if self.device_status == 0 {
                     // Reset — clear all queues + config gen bump.
                     for q in self.queues.iter_mut() {
