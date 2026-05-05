@@ -102,6 +102,38 @@ struct VirtQueue {
     used_idx: u16,
 }
 
+impl VirtQueue {
+    fn desc_gpa(&self)   -> u64 { ((self.desc_hi   as u64) << 32) | self.desc_lo   as u64 }
+    fn driver_gpa(&self) -> u64 { ((self.driver_hi as u64) << 32) | self.driver_lo as u64 }
+    fn device_gpa(&self) -> u64 { ((self.device_hi as u64) << 32) | self.device_lo as u64 }
+}
+
+/// Light parser + log for outbound ethernet frames. virtio-net header
+/// is 12 bytes (modern, no F_MRG_RXBUF / F_HASH_REPORT). After that
+/// comes an ethernet frame. Logs first ~5 packets per VM run.
+fn tx_log(payload: &[u8]) {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+    let n = COUNT.fetch_add(1, Ordering::Relaxed);
+    if n >= 5 { return; }
+
+    if payload.len() < 12 + 14 {
+        kprintln!("[virtio-net] tx undersized ({} bytes)", payload.len());
+        return;
+    }
+    let frame = &payload[12..];
+    let dst = &frame[0..6];
+    let src = &frame[6..12];
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    kprintln!(
+        "[virtio-net] tx#{} {} bytes (frame={}): dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ethertype=0x{:04x}",
+        n + 1, payload.len(), frame.len(),
+        dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+        src[0], src[1], src[2], src[3], src[4], src[5],
+        ethertype,
+    );
+}
+
 pub struct VirtioNet {
     bar0_lo: u32,
     bar0_hi: u32,
@@ -164,23 +196,82 @@ impl VirtioNet {
         self.pending_kick_queue.take()
     }
 
-    /// Process queue notify. 12.3.0 just logs. 12.3.1 will walk the
-    /// avail-ring of the TX queue (q1), extract packet bytes, hand to
-    /// host net stack; q0 (RX) is filled by the host when packets
-    /// arrive for the guest's IP.
-    pub fn service_queues(&mut self, queue_idx: u16, _host_base: u64) -> bool {
-        let q = match self.queues.get(queue_idx as usize) {
-            Some(q) => q,
-            None => return false,
-        };
-        if self.notify_log_count < 5 {
-            kprintln!(
-                "[virtio-net] notify q={} (size={} enable={})",
-                queue_idx, q.size, q.enable,
-            );
-            self.notify_log_count += 1;
+    /// Process queue notify. q0 = RX (driver buffers, device fills,
+    /// 12.3.2). q1 = TX (driver sends, device drains).
+    pub fn service_queues(&mut self, queue_idx: u16, host_base: u64) -> bool {
+        if queue_idx == 1 {
+            self.service_tx(host_base)
+        } else {
+            // RX notify — driver added more empty buffers to receive
+            // into. We don't have any pending RX packets yet.
+            false
         }
-        false // no used-ring advance yet, no IRQ to inject
+    }
+
+    /// Drain TX queue: walk avail-ring, parse each frame, log + (later)
+    /// hand to the host network stack. For 12.3.1 we just decode the
+    /// ethernet header so the parsing path is exercised end-to-end.
+    fn service_tx(&mut self, host_base: u64) -> bool {
+        use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT};
+
+        let advanced;
+        let new_used_idx;
+        {
+            let q_idx = 1usize;
+            let q = match self.queues.get_mut(q_idx) {
+                Some(q) if q.enable != 0 => q,
+                _ => return false,
+            };
+            if q.size == 0 { return false; }
+
+            let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+                Some(v) => v, None => return false,
+            };
+            if avail_top == q.last_avail_idx {
+                return false;
+            }
+
+            let mut any = false;
+            while q.last_avail_idx != avail_top {
+                let head = match avail_ring(host_base, q.driver_gpa(), q.size, q.last_avail_idx) {
+                    Some(v) => v, None => break,
+                };
+
+                // Walk the descriptor chain. virtio-net frame layout
+                // (modern, no merged buffers): one or more driver-readable
+                // descriptors. The first 12 bytes of the chain are the
+                // virtio_net_hdr; the rest is the ethernet frame.
+                let mut total_len: u32 = 0;
+                let mut payload = alloc::vec::Vec::with_capacity(2048);
+                let mut idx = head;
+                loop {
+                    let d = match read_desc(host_base, q.desc_gpa(), idx, q.size) {
+                        Some(d) => d, None => break,
+                    };
+                    let n = d.len as usize;
+                    let mut chunk = alloc::vec![0u8; n];
+                    super::guest_mem::read_bytes(host_base, d.addr, &mut chunk);
+                    payload.extend_from_slice(&chunk);
+                    total_len = total_len.saturating_add(n as u32);
+                    if d.flags & VRING_DESC_F_NEXT == 0 { break; }
+                    idx = d.next;
+                }
+
+                tx_log(&payload);
+
+                used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, total_len);
+                q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
+                any = true;
+            }
+            advanced = any;
+            new_used_idx = q.used_idx;
+        }
+
+        if advanced {
+            self.isr |= 1;
+            kprintln!("[virtio-net] tx serviced (used_idx={})", new_used_idx);
+        }
+        advanced
     }
 
     pub fn pci_read_dword(&self, reg: u8) -> u32 {

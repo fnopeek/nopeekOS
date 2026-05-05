@@ -1631,7 +1631,8 @@ fn microvm_linux(inject: &[u8]) {
     const CMDLINE: &[u8] =
         b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr \
           nolapic noapic acpi=off tsc=reliable tsc_early_khz=2000000 \
-          devtmpfs.mount=1";
+          devtmpfs.mount=1 \
+          ip=10.99.0.2::10.99.0.1:255.255.255.0::eth0:none";
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
     let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
