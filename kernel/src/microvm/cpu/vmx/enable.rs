@@ -651,6 +651,7 @@ fn run_linux_loop(
         kprintln!("[microvm] pre-injected {} bytes into UART RX FIFO", inject.len());
     }
     let mut pci = crate::microvm::devices::PciBus::new();
+    let mut pic = crate::microvm::devices::pic8259::Pic8259::new();
     let mut trace = ExitTrace::new();
     let mut io_stats = IoStats::new();
     let mut launched = false;
@@ -859,7 +860,7 @@ fn run_linux_loop(
                 if port == 0x3F8 && !dir_in && !serial.dlab && size == 1 {
                     io_stats.record_serial_byte((regs.rax & 0xFF) as u8);
                 }
-                handle_linux_io(&mut serial, &mut pci, &mut regs, port, dir_in, size, &mut io_dropped);
+                handle_linux_io(&mut serial, &mut pci, &mut pic, &mut regs, port, dir_in, size, &mut io_dropped);
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
@@ -1073,6 +1074,7 @@ fn write_gpr(regs: &mut vmcs::GuestRegs, idx: u8, value: u64) -> Result<(), &'st
 fn handle_linux_io(
     serial: &mut SerialState,
     pci: &mut crate::microvm::devices::PciBus,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     regs: &mut vmcs::GuestRegs,
     port: u16,
     dir_in: bool,
@@ -1080,6 +1082,7 @@ fn handle_linux_io(
     io_dropped: &mut u32,
 ) {
     use crate::microvm::devices::{handle_pci_io, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};
+    use crate::microvm::devices::pic8259::{handle_pic_io, PIC_MASTER_CMD, PIC_MASTER_IMR, PIC_SLAVE_CMD, PIC_SLAVE_IMR};
 
     let mask: u64 = match size { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFF_FFFF, _ => 0xFF };
     let val_out = (regs.rax & mask) as u32;
@@ -1089,6 +1092,14 @@ fn handle_linux_io(
         || (PCI_CONFIG_DATA_START..=PCI_CONFIG_DATA_END).contains(&port)
     {
         if let Some(v) = handle_pci_io(pci, port, dir_in, size, val_out) {
+            regs.rax = (regs.rax & !mask) | (v & mask);
+        }
+        return;
+    }
+
+    // 8259 PIC stub — see microvm::devices::pic8259.
+    if matches!(port, PIC_MASTER_CMD | PIC_MASTER_IMR | PIC_SLAVE_CMD | PIC_SLAVE_IMR) {
+        if let Some(v) = handle_pic_io(pic, port, dir_in, val_out as u8) {
             regs.rax = (regs.rax & !mask) | (v & mask);
         }
         return;
