@@ -140,7 +140,7 @@ Drei Bridge-Typen. Jede ist eine eigene Capability, default-deny.
 
 ```
 Host npkFS-Objekt: firefox-profile-{user-hash}
-  └─ ChaCha20-Poly1305 verschlüsselt mit User-derived Key
+  └─ AES-256-GCM verschlüsselt mit User-derived Key (HW AES-NI, ~700 MB/s)
   └─ Inhalt: rohes ext4-Image, sparse, ~512 MB initial
 
 VM-Boot:
@@ -177,10 +177,30 @@ Vorteile: App sieht nichts vom Filesystem ausser dem einen explizit
 gewählten File. Default-deny ist trivial. Kein POSIX-on-npkFS
 Adapter nötig.
 
-### Pattern B — virtiofs Subtree-Mount (opt-in, später)
+### Pattern B — virtiofs Subtree-Mount
 
-Pro-App-Manifest definiert npkFS-Pfade die als virtio-fs sichtbar
-sind. Für IDE / File-Manager / Editor.
+Zwei Varianten, dieselbe Mechanik (single npkFS-Subtree → virtio-fs in
+Guest), unterschiedlicher Scope:
+
+**B-mini — Per-App-Downloads** (Phase 12.5, gebraucht für Firefox).
+Genau ein read-write-Subtree pro App, default unter
+`home/<user>/downloads/<app-name>/`. Deckt den Auto-Download-Fall ab,
+den der Picker nicht trifft (Firefox: Right-Click "Save Image", Bulk-
+Downloads, Direct-Save aus dem Browser). User sieht die Files **direkt
+in loft**, weil sie im npkFS-Home liegen. Kein POSIX-on-npkFS-Adapter
+nötig — flacher Subtree mit File-CRUD reicht. npkFS v3 liefert
+`mtime`/`size`/`kind` schon, deckt `stat()` + `readdir()`.
+
+```toml
+[caps.files]
+picker    = true                       # Pattern A
+downloads = "~/Downloads"              # B-mini, default-Mapping zu home/<user>/downloads/<app>/
+```
+
+**B-full — Subtree-Mount mit Manifest-Pfaden** (post-12.6, später).
+Mehrere Pfade, ro/rw-Mix. Für IDE / File-Manager / Editor. Braucht
+echten POSIX-on-npkFS-Adapter (Permissions, Symlinks, Hardlinks,
+xattr).
 
 ```toml
 [caps.files]
@@ -190,9 +210,8 @@ mount = [
 ]
 ```
 
-Implementation requires a POSIX-on-npkFS adapter — siehe Open
-Question. Wird **nicht** für die ersten 5 Apps gebraucht (Browser,
-Mail, Terminal, Mediaplayer, Messenger leben gut mit Picker).
+Wird für die ersten 5 Apps (Browser, Mail, Terminal, Mediaplayer,
+Messenger) **nicht** gebraucht — die leben gut mit Picker + B-mini.
 
 ### Pattern Y — Cross-VM Channels (sehr später, off by default)
 
@@ -226,7 +245,7 @@ display      = { protocol = "virtio-gpu", mode = "cross-domain" }
 audio        = { playback = true, capture = false }
 storage      = { profile = true, size_mb = 512 }
 clipboard    = { read = true, write = true, types = ["text", "image"] }
-files        = { picker = true, mount = [] }
+files        = { picker = true, downloads = "~/Downloads", mount = [] }
 ```
 
 Schema is **frozen per Wire-Version**. Adding a new cap = bump to
@@ -287,10 +306,10 @@ inject_console / stop`. virtio-blk, virtio-net, virtio-gpu come in
 |---|---|---|---|
 | 12.0 | **Spec freeze** | This document agreed; manifest schema + host-fn signatures frozen at Wire-Version 0x01 | Kein Code. Open-Questions abgearbeitet bis sie `decided` sind |
 | 12.1 | **Hello Bash** | Mainline Linux LTS bootet in VT-x, BusyBox-bash auf virtio-console, `echo hi` round-trip durch Shade-Terminal | Kein Disk, kein Net, kein GPU. ~256 MB Guest-RAM, 1 VCPU. Validiert: VMX bring-up, EPT, VCPU-Thread, virtio-console, Manager-WASM-Loop |
-| 12.2 | **virtio-blk + Profile-Image** | Verschlüsseltes ext4-Block-Image als npkFS-Objekt, Guest mountet als `/dev/vdb`. Erste persistente Daten | ChaCha20-Poly1305 Block-AEAD, Block-Nummer im AAD. Recyclet bestehende `crypto/aead.rs` |
+| 12.2 | **virtio-blk + Profile-Image** | Verschlüsseltes ext4-Block-Image als npkFS-Objekt, Guest mountet als `/dev/vdb`. Erste persistente Daten | AES-256-GCM Block-AEAD (HW AES-NI), Block-Nummer im AAD. Recyclet bestehende `crypto/aead.rs` |
 | 12.3 | **virtio-net mit Cap-Filter** | Guest hat IP, kann HTTPS, Cap-Liste enforced am Host (kein iptables im Guest) | Erste Internet-fähige App möglich (z.B. `curl`) |
 | 12.4 | **virtio-gpu cross-domain + Shade-Bridge** | Wayland-Forwarding aus Guest in Shade-Surface, Maus/Tastatur rein, Pixel raus | virtio-gpu cross-domain context (Mainline ≥ 5.16, vollständig in 6.18). Erste GUI-App möglich. DRM native context als späteres Performance-Upgrade pro App |
-| 12.5 | **Picker-Bridge** | Open/Save-Dialog im Host (Shade-overlay), 1-File-Reachthrough in tmpfs | Blocking call from Guest, Wayland-DnD später |
+| 12.5 | **Picker + Mini-virtiofs** | Open/Save-Dialog im Host (Shade-overlay, Pattern A) **+** ein read-write Subtree pro App unter `home/<user>/downloads/<app>/` als virtio-fs (Pattern B-mini, deckt Auto-Downloads die der Picker nicht trifft — Files in loft sichtbar) | Blocking call from Guest für Picker, Wayland-DnD später. B-mini braucht keinen POSIX-Adapter, flacher Subtree reicht |
 | 12.6 | **Firefox** | Erste echte App. Multi-VCPU, GPU-Sharing, Audio, Picker, Profile-Image, virtio-net | Endboss von Phase 12. Daily-driver-Test |
 
 12.0 ist explizit ein Diskussions-Meilenstein. Kein Code bevor das
@@ -443,12 +462,17 @@ zum Guest. Crypto bleibt Host-side. **Why:** Linux braucht keine
 npkFS-Awareness, sieht normales ext4. Backup ist Kopie eines
 npkFS-Objekts. Kein POSIX-on-npkFS-Adapter nötig.
 
-### `decided 2026-04-29` — Picker-Bridge als Default für User-Files
-Pattern A (PowerBox-Style) ist Default für GUI-Apps. Pattern B
-(virtiofs-Subtree-Mount) ist opt-in pro App, kommt erst mit Phase
-12.5+ wenn IDE/File-Manager-Use-Cases aufschlagen. **Why:**
-Maximale Trennung mit minimalem Aufwand. Ein File rein/raus ist ein
-einfacher Bridge-Vertrag.
+### `decided 2026-04-29, refined 2026-05-05` — Picker + B-mini default, B-full opt-in
+Pattern A (Picker, PowerBox-Style) ist Default für **explizite**
+File-Flows (Save As, Drag-and-Drop). Pattern B-mini (single read-write
+Subtree pro App, default `home/<user>/downloads/<app>/`) deckt **Auto-
+Downloads** die der Picker nicht trifft — kommt **mit 12.5**, nicht
+später. Pattern B-full (Multi-Pfad-Manifest-Mounts mit ro/rw-Mix) ist
+opt-in pro App, kommt erst mit IDE/File-Manager-Use-Cases nach 12.6.
+**Why refined:** Firefox-Auto-Downloads sind kein Picker-Flow, müssen
+aber für den User in loft sichtbar sein. B-mini braucht keinen
+POSIX-on-npkFS-Adapter (flacher Subtree, npkFS v3 liefert mtime/size/
+kind), ist also kein 12.5-Cost-Treiber.
 
 ### `decided 2026-04-29` — GitHub Releases als Distribution
 Containers werden auf GitHub Releases gehostet, identisch zu
@@ -470,21 +494,16 @@ Frontend-Feature, nicht als Trust-Komponente.
 Each block: status, options with trade-offs, default-if-stuck.
 Document gets updated when these collapse.
 
-### `open` — POSIX-on-npkFS für Pattern B (Subtree-Mount)
+### `decided 2026-05-05` — POSIX-on-npkFS für Pattern B-full
 
-Wenn Pattern B kommt, braucht virtiofs eine Pfad-zu-Hash-Indirektion.
+War offen, ist mit npkFS v3 effektiv beantwortet: npkFS hat schon
+Git-style Tree-Objects (`paths::store` + `TreeEntry { name, hash, kind,
+size, mtime, flags }`). Pattern B-full bekommt also einen virtiofs-
+Adapter der direkt gegen die npkFS-Tree-API geht. Permissions/Symlinks/
+Hardlinks/xattr sind die offene Mehrarbeit — kein neues Daten-Modell.
 
-- **A. Sidecar Path-Index.** Pro App ein Sidecar-npkFS-Objekt mit
-  Tree von Pfaden auf BLAKE3-Hashes. Atomic update bei Mutationen.
-- **B. Tree-Object-Layer wie Git.** Spezieller Objekttyp "directory"
-  mit Children-Liste, Tree-Objects zeigen auf Blob-Objects.
-
-Praktisch: solange Pattern B nicht gebraucht wird (Phase 12.5+ ist
-realistisch frühstens), ist diese Frage deferred. Pattern A
-(Picker) braucht das nicht.
-
-**Default-if-stuck:** B (Tree-Object-Layer). Sauberer, Git-bewährt,
-und npkFS hat schon Tree-Strukturen via `paths::store`.
+Pattern B-mini (12.5) braucht das **nicht** — flacher Subtree, npkFS-
+list/stat reicht, kein Permissions-Mapping.
 
 ### `open` — Display-Path für GUI-Apps
 
