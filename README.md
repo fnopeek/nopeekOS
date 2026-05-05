@@ -65,8 +65,8 @@ npk> gpu 4k                           # Switch to 4K@30Hz
 npk> disk read 0                     # Raw sector hex dump
 npk> vmx                              # Probe virt extensions (VT-x or AMD-V)
 npk> microvm test                     # MicroVM substrate self-test (vendor-dispatched)
-npk> microvm linux                    # Boot Linux 6.18 LTS in MicroVM (Intel: live;
-                                      # AMD: 12.1.1b done, Linux entry pending)
+npk> microvm linux                    # Boot Linux 6.18 LTS in MicroVM (Intel + AMD)
+npk> microvm shell hi                 # Inject "hi" into PID-1, capture echo
                                       # → live `[guest]` earlyprintk on console
 ```
 
@@ -390,8 +390,11 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [ ] VirtIO GPU backend (QEMU/VBox support)
 
 **Virtualization**
-- [ ] MicroVM (VT-x / AMD-V, Mini-Linux kernel for Linux app compatibility)
-- [ ] virtio bridges for MicroVM (blk, net, gpu)
+- [x] MicroVM substrate (Intel VT-x + EPT, AMD-V + NPT — both live)
+- [x] Mini-Linux 6.18 boot via bzImage 32-bit boot protocol
+- [x] Rust PID-1 (`microvm-init`) reaches userspace, host-injected
+      bytes echo back through 8250 RX FIFO (12.1.4 milestone)
+- [ ] virtio bridges for MicroVM (console, blk, net, gpu)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
@@ -530,7 +533,7 @@ Originally planned next, deprioritised in favour of Phase 12. Returns
 as a frontend feature once the MicroVM subsystem is mature enough to
 host AI services as their own apps.
 
-### Phase 12 -- MicroVM — Intel 12.1.4 ✅, AMD 12.1.1b ✅
+### Phase 12 -- MicroVM — Intel 12.1.4 ✅, AMD 12.1.4 ✅ (vendor-symmetric)
 
 Per-app x86_64 KVM-style hypervisor inside the kernel so legacy Linux
 GUI apps (Browser first, Phase 12.6) can run sandboxed alongside
@@ -586,7 +589,7 @@ or AMD-V (SVM) based on CPUID-detected vendor.
       was 0; fix routes external interrupts as VM exits. **VMX
       hardware boundary held**, host recovered after Linux panic.
 
-**AMD-V (SVM) backend** (`microvm/cpu/svm/`, v0.139 → v0.141):
+**AMD-V (SVM) backend** (`microvm/cpu/svm/`, v0.139 → v0.143):
 - [x] **12.1.0a-svm** (v0.139.0) — CPUID 8000_0001 ECX[2] presence,
       8000_000A revision + ASID count + feature bits (NPT, NRIPS,
       decode-assists, VMSAVE/VMLOAD virtualization), VM_CR MSR
@@ -612,15 +615,44 @@ or AMD-V (SVM) based on CPUID-detected vendor.
       IOPM bit for port 0x80, returns `exit=0x7B (IOIO)`,
       `qual=0x800110` (port 0x80, OUT, 8-bit, A32), `rax=0x4F`.
       Validates the I/O-bitmap path used by Linux serial console.
-- [ ] **12.1.1c-svm** — Linux bzImage entry + VMRUN/VMEXIT loop
-      with handlers for CPUID, RDMSR/WRMSR, IOIO (port 0x3F8 UART),
-      HLT, NPT faults. ~700 LoC budget mirroring `vmx::run_linux`.
-- [ ] **12.1.1d-svm** — panic detection (shared SerialState scanner
-      with VMX side).
-- [ ] **12.1.3-svm** — initramfs + Rust-PID-1 reuse (init crate
-      already exists, just needs the SVM loader to plumb it).
-- [ ] **12.1.4-svm** — `microvm shell <bytes>` echo round-trip on
-      AMD, parity with the Intel NUC milestone.
+- [x] **12.1.1c-svm** (v0.142–v0.143) — Linux bzImage entry +
+      VMRUN/VMEXIT loop. `npt::allocate_window_npt` (non-identity
+      256 MB + MMIO scratch alias for IOAPIC/HPET/LAPIC),
+      `setup_vmcb_linux` (CS.base=0, RIP=code32_start, RSI=
+      boot_params_phys, 32-bit prot mode flat segments), exit
+      dispatcher for CPUID / IOIO / MSR / HLT / INTR / SHUTDOWN /
+      NPF. NRIP_SAVE used for RIP advancement.
+- [x] **12.1.1d-svm** (v0.143.0) — shared `SerialState` panic
+      scanner ports cleanly (matches `Kernel panic - not syncing:`,
+      tags subsequent triple-fault as expected reboot path).
+- [x] **12.1.3-svm** (v0.143.0) — initramfs + Rust-PID-1 reuse.
+      `bzimage::load_into_guest_ram` is platform-agnostic, plumbs
+      the same `microvm-init` ELF + cpio.gz used by VMX.
+- [x] **12.1.4-svm** (v0.143.0) — `microvm shell <bytes>` echo
+      round-trip on AMD. Validated against KVM nested SVM:
+      `microvm shell hi-svm` → `[guest] [init] echo: hi-svm` →
+      HLT after 41355 VM-exits — same shape as the Intel NUC
+      milestone.
+
+Three iterative fixes drove the SVM Linux entry from "compiles"
+to full userspace boot:
+- **MSRPM trap-all → pass-through** (8 KB zeroed, INTERCEPT_MSR_PROT
+  set so we can selectively trap later without re-plumbing). Lets
+  the CPU auto-load/save architectural state MSRs (EFER, FS/GS_BASE,
+  STAR/LSTAR, …) via the VMCB.SAVE area on every VMRUN/VMEXIT
+  (APM §15.11.1). Trap-all absorbed Linux's `WRMSR EFER=LME`
+  → CR0.PG dropped guest into legacy 32-bit paging instead of
+  long mode → triple-fault after 8 iters.
+- **Hide hypervisor CPUID** — leaf 1 ECX[31] cleared, leafs
+  0x4000_0000–0x4000_FFFF return zero. Without this, Linux saw
+  L1 KVM's signature through pass-through CPUID, enabled
+  kvm-clock, then divided by zero in `pvclock_tsc_khz` because
+  the corresponding WRMSR was absorbed and the pvclock struct
+  stayed zeroed.
+- **`tsc_early_khz=2000000`** in cmdline — AMD doesn't expose
+  CPUID 0x15 (TSC freq) so Linux falls back to PIT calibration,
+  which deadlocks against our zero-returning PIT IO emulation.
+  Hint short-circuits the calibration. Harmless on Intel.
 
 **Phase 12.2-12.6** (after both vendor backends complete 12.1.4):
 - [ ] 12.2-12.5  Plumbing: container format, profile-images,

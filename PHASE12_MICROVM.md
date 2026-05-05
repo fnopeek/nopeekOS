@@ -11,9 +11,13 @@ Docker, nicht Flatpak, nicht POSIX-on-nopeek. Eine einzige
 Capability ("ich darf eine signierte App-VM starten"), kein
 gemeinsames Filesystem mit npkFS-Wurzel, kein ambient Linux.
 
-> **Status:** design-spec phase, **kein Code**. Living document. Jeder
-> Open-Question-Block trägt explizit `open` / `decided <date>` plus
-> Begründung.
+> **Status:** **Phase 12.1 vendor-symmetrisch grün** (2026-05-05).
+> Intel VT-x bis 12.1.4 NUC-bare-metal-validated (v0.137.2);
+> AMD-V (SVM) bis 12.1.4 KVM-nested-validated (v0.143.0). Living
+> document — jeder Open-Question-Block trägt `open` / `decided
+> <date>` + Begründung. 12.2-12.5 Plumbing (virtio-blk/net,
+> container-format, picker-bridge) ist als nächstes dran, dann
+> 12.6 Firefox.
 
 ---
 
@@ -66,15 +70,15 @@ des ganzen Subsystems und muss vor jedem anderen Detail klar sein.
 │    npk_vm_stop       VM cap  → tear down, free EPT + VCPU threads   │
 │    npk_vm_inject     VM cap  → bytes into virtio-console RX         │
 ├─────────────────────────────────────────────────────────────────────┤
-│  Kernel VMX subsystem  (kernel/src/vmx/, NEW)                       │
-│    owns:  CPUID/MSR-Probing, VMXON region, VMCS layout, Host-       │
-│           State save/restore, EPT page-table builder, VT-d          │
-│           IOMMU domains, VCPU thread (one Rust task per VCPU),      │
-│           VM-Exit dispatcher.                                       │
+│  Kernel MicroVM subsystem  (kernel/src/microvm/cpu/{vmx,svm}/)      │
+│    owns:  CPUID-vendor-dispatch, VMXON/VMCS+EPT (Intel) or          │
+│           EFER.SVME/VMCB+NPT (AMD), host-state save/restore,        │
+│           VT-d / IOMMU domains, VCPU thread (one Rust task per      │
+│           VCPU), VM-Exit dispatcher per backend.                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│  Hardware  (Intel VT-x + EPT + VT-d on Intel N100, AMD-V später)    │
-│    enforces: Guest cannot see Host-Phys outside its EPT mapping,    │
-│              Guest DMA blocked outside its IOMMU domain.            │
+│  Hardware  (Intel VT-x + EPT + VT-d  /  AMD-V + NPT — both live)    │
+│    enforces: Guest cannot see Host-Phys outside its EPT/NPT        │
+│              mapping, Guest DMA blocked outside its IOMMU domain.   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

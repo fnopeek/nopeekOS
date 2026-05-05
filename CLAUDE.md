@@ -42,10 +42,40 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** 12.1.3 ✅ — Linux MicroVM mit eigenem PID-1, trust-
-  boundary validated. Kernel `v0.130.0`, sdk `0.6.1`, drun `0.6.0`,
-  loft `0.2.1`, testdisk `0.5.2`.
-- **Today (2026-05-02 — late stragglers, freeze fix, panic detection, initramfs+pid1, v0.122 → v0.130):**
+- **Phase:** 12.1.4 ✅ **vendor-symmetrisch** — Linux MicroVM mit
+  eigenem Rust-PID-1, host-injected echo round-trip, **Intel + AMD
+  parity**. Intel NUC bare-metal-validated (v0.137.2), AMD-V via
+  KVM nested SVM (v0.143.0). Kernel `v0.143.0`, sdk `0.6.1`, drun
+  `0.6.0`, loft `0.2.1`, testdisk `0.5.2`.
+- **Today (2026-05-05 — SVM end-to-end in einer Session, v0.142 → v0.143):**
+  - **v0.142.0 — 12.1.1c-svm Linux-Entry-Pfad** (+628 LoC):
+    `enable::run_linux` + `run_linux_loop` + `setup_vmcb_linux` +
+    `handle_linux_io` + `SerialState`, `npt::allocate_window_npt`
+    (non-identity 256 MB + MMIO-scratch-Alias), VMCB-Konstanten
+    (NRIP/CPUID/SHUTDOWN/MSR_PROT/IOIO_PROT/INTR). Substrate-Test
+    smoke-validated post-refactor (exit=0x7B byte-identical zu v0.141).
+  - **v0.143.0 — 3 Iterationen vom Compile zum echten Linux-Boot:**
+    1. **MSRPM trap-all → pass-through** — trap-all absorbed Linux's
+       `WRMSR EFER=LME` → CR0.PG ohne LME → legacy 32-bit paging →
+       triple-fault nach 8 iters. Pass-through lässt CPU arch-state
+       MSRs auto-via VMCB.SAVE handhaben (APM §15.11.1).
+    2. **Hide hypervisor CPUID** — Leaf 1 ECX[31] cleared, Leafs
+       0x4000_00xx zero. L2 Linux sah L1 KVMs Signature, aktivierte
+       kvm-clock, divide-by-zero in `pvclock_tsc_khz` weil unser
+       MSR-Handler die KVM_SYSTEM_TIME-Schreibe absorbierte.
+    3. **`tsc_early_khz=2000000`** in Cmdline — AMD exposed kein
+       CPUID 0x15, Linux fällt auf PIT-Calibration zurück, deadlocks
+       gegen unsere Zero-Returning-IO-Emulation. Hint
+       short-circuited das. Idle-threshold auch 200 → 5000 INTRs.
+  - **End-to-end auf KVM nested SVM**:
+    `[guest] [microvm-init] Hello from nopeekOS PID-1` →
+    `[guest] [init] echo: hi-svm` → HLT nach 41355 VM-exits.
+    Self-bestätigt durch User-Test auf AMD-Box.
+  - **build.sh-Bump**: 256 MB → 1024 MB qemu-RAM + disk.img
+    (256 MB-RAM OOM'd `microvm linux` weil 256 MB Guest-Window
+    + Kernel + Heap nicht reinpasste).
+  - **Vollständige Lessons** in `memory/project_svm_bringup.md`.
+- **Earlier (2026-05-02 — late stragglers, freeze fix, panic detection, initramfs+pid1, v0.122 → v0.130):**
   - **v0.130 — initramfs + Rust-PID-1 (12.1.3).** Eigene `microvm-init`
     Crate (`microvm/linux/init/`, ~1.3 KB statisch gelinktes Linux ELF),
     no_std, no_main, raw syscalls (write/pause/reboot). Wird bei
@@ -93,7 +123,7 @@ See README.md for the full vision and phase planning.
     fallback eh greift (RDMSR 0xc0011029).
   - **Vollständige Iterations-Historie** + Lessons in
     `memory/project_microvm.md`.
-- **Yesterday (2026-05-01 — Phase 12.1.0 + 12.1.1 in one push, v0.90 → v0.121):**
+- **Earlier (2026-05-01 — Phase 12.1.0 + 12.1.1 in one push, v0.90 → v0.121):**
   - **VT-x MicroVM substrate from scratch to live earlycon-Stream**:
     VMXON/VMCS/VMCLEAR/VMPTRLD round-trip, host-state full round-
     trip mit GDT-walk-resolved TR-Base, TSS-install, VMLAUNCH gegen
