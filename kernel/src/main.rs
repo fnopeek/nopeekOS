@@ -321,9 +321,6 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     config::load();
     xhci::cache_keyboard_layout();
 
-    // Bootstrap WASM modules (after identity — so they are encrypted at rest)
-    intent::bootstrap_wasm();
-
     // Inter Variable UI font — read from npkFS (seeded by installer), BLAKE3
     // verified, parsed via fontdue. Login screen + terminals use Spleen
     // bitmap; the UI font is only needed once widgets come up.
