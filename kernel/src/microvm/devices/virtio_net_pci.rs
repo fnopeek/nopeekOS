@@ -90,6 +90,14 @@ const MAX_QUEUE_SIZE: u16 = 256;
 /// Will become per-VM-derived once we have multi-app VMs.
 const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x6E, 0x70, 0x6B];
 
+/// MAC the host pretends to be on the synthetic gateway 10.99.0.1.
+/// Different last byte from `GUEST_MAC` so packets aren't loopback'd.
+const GATEWAY_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x6E, 0x70, 0x01];
+
+/// Synthetic gateway IP. The host responds to ARP for this and
+/// (12.3.3) NATs IP traffic destined for it.
+const GATEWAY_IP: [u8; 4] = [10, 99, 0, 1];
+
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
     size: u16,
@@ -216,6 +224,7 @@ impl VirtioNet {
 
         let advanced;
         let new_used_idx;
+        let mut pending_rx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
         {
             let q_idx = 1usize;
             let q = match self.queues.get_mut(q_idx) {
@@ -262,16 +271,36 @@ impl VirtioNet {
                 used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, total_len);
                 q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
                 any = true;
+
+                // Stash any reply we want to inject back via RX. We
+                // can't inject inline here — q is borrowed mutably as
+                // queue 1; injecting needs queue 0. Defer until after
+                // the TX-walk loop ends.
+                if let Some(rep) = maybe_arp_reply(&payload) {
+                    pending_rx.push(rep);
+                }
             }
             advanced = any;
             new_used_idx = q.used_idx;
+        }
+
+        // Inject any pending RX replies (ARP-Replies for the gateway).
+        let mut rx_advanced = false;
+        for reply in &pending_rx {
+            if self.inject_rx(host_base, reply) {
+                rx_advanced = true;
+            }
         }
 
         if advanced {
             self.isr |= 1;
             kprintln!("[virtio-net] tx serviced (used_idx={})", new_used_idx);
         }
-        advanced
+        if rx_advanced {
+            self.isr |= 1;
+            kprintln!("[virtio-net] rx injected (n={})", pending_rx.len());
+        }
+        advanced || rx_advanced
     }
 
     pub fn pci_read_dword(&self, reg: u8) -> u32 {
@@ -477,6 +506,110 @@ impl VirtioNet {
         let idx = self.queue_select as usize % self.queues.len();
         &mut self.queues[idx]
     }
+
+    /// Push one packet (full payload incl. 12-byte virtio-net header)
+    /// into the RX queue. Walks the next driver-provided buffer chain,
+    /// writes the payload across descriptors honouring NEXT/WRITE
+    /// flags, marks one used-ring entry, advances last_avail_idx.
+    /// Returns false if the driver hasn't provided a buffer (RX queue
+    /// drained) — caller can drop or retry.
+    fn inject_rx(&mut self, host_base: u64, payload: &[u8]) -> bool {
+        use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+
+        let q = match self.queues.get_mut(0) {  // RX = q0
+            Some(q) if q.enable != 0 => q,
+            _ => return false,
+        };
+        if q.size == 0 { return false; }
+
+        let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+            Some(v) => v, None => return false,
+        };
+        if avail_top == q.last_avail_idx {
+            return false;  // no buffers
+        }
+
+        let head = match avail_ring(host_base, q.driver_gpa(), q.size, q.last_avail_idx) {
+            Some(v) => v, None => return false,
+        };
+
+        // Walk the chain, write payload byte-by-byte across descriptors.
+        let mut idx = head;
+        let mut written: u32 = 0;
+        let mut off: usize = 0;
+        loop {
+            let d = match read_desc(host_base, q.desc_gpa(), idx, q.size) {
+                Some(v) => v, None => return false,
+            };
+            if d.flags & VRING_DESC_F_WRITE == 0 {
+                // Driver gave us a non-writable buffer — malformed.
+                return false;
+            }
+            if off < payload.len() {
+                let n = (d.len as usize).min(payload.len() - off);
+                if n > 0 {
+                    super::guest_mem::write_bytes(host_base, d.addr, &payload[off..off + n]);
+                    off += n;
+                    written = written.saturating_add(n as u32);
+                }
+            }
+            if off >= payload.len() || d.flags & VRING_DESC_F_NEXT == 0 {
+                break;
+            }
+            idx = d.next;
+        }
+
+        used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, written);
+        q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
+        true
+    }
+}
+
+/// If `payload` (12-byte virtio-net header + 14-byte ethernet header +
+/// 28-byte ARP body, minimum 54 bytes) is an ARP-Request asking for
+/// the synthetic gateway IP, build the matching ARP-Reply. Returns
+/// `None` for any non-ARP, non-Request, or non-gateway-target.
+fn maybe_arp_reply(payload: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    const VNET_HDR_LEN: usize = 12;
+    const ETH_HDR_LEN:  usize = 14;
+    const ARP_LEN:      usize = 28;
+    if payload.len() < VNET_HDR_LEN + ETH_HDR_LEN + ARP_LEN { return None; }
+
+    let frame = &payload[VNET_HDR_LEN..];
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    if ethertype != 0x0806 { return None; }
+
+    let arp = &frame[ETH_HDR_LEN..];
+    let oper = u16::from_be_bytes([arp[6], arp[7]]);
+    if oper != 1 { return None; }                   // not a request
+    if &arp[24..28] != GATEWAY_IP { return None; }  // not for our gateway
+
+    // Sender (= guest) info — used as target in the reply.
+    let mut sender_mac = [0u8; 6];
+    sender_mac.copy_from_slice(&arp[8..14]);
+    let mut sender_ip = [0u8; 4];
+    sender_ip.copy_from_slice(&arp[14..18]);
+
+    let mut reply = alloc::vec![0u8; VNET_HDR_LEN + ETH_HDR_LEN + ARP_LEN];
+    // virtio-net header: zeros = no offload features used.
+    // Ethernet header
+    reply[VNET_HDR_LEN..VNET_HDR_LEN + 6].copy_from_slice(&sender_mac);     // dst = guest
+    reply[VNET_HDR_LEN + 6..VNET_HDR_LEN + 12].copy_from_slice(&GATEWAY_MAC); // src = synth gateway
+    reply[VNET_HDR_LEN + 12] = 0x08;
+    reply[VNET_HDR_LEN + 13] = 0x06; // ethertype ARP
+    // ARP body
+    let arp_off = VNET_HDR_LEN + ETH_HDR_LEN;
+    reply[arp_off + 0] = 0x00; reply[arp_off + 1] = 0x01; // htype = Ethernet
+    reply[arp_off + 2] = 0x08; reply[arp_off + 3] = 0x00; // ptype = IPv4
+    reply[arp_off + 4] = 6;                                // hwlen
+    reply[arp_off + 5] = 4;                                // protolen
+    reply[arp_off + 6] = 0x00; reply[arp_off + 7] = 0x02; // oper = REPLY
+    reply[arp_off +  8..arp_off + 14].copy_from_slice(&GATEWAY_MAC);    // sender = us
+    reply[arp_off + 14..arp_off + 18].copy_from_slice(&GATEWAY_IP);
+    reply[arp_off + 18..arp_off + 24].copy_from_slice(&sender_mac);     // target = guest
+    reply[arp_off + 24..arp_off + 28].copy_from_slice(&sender_ip);
+
+    Some(reply)
 }
 
 const fn width_mask(width: u8) -> u64 {
