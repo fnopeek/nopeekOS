@@ -1,22 +1,16 @@
 //! Minimal 8259 PIC stub.
 //!
-//! Linux probes the 8259 by writing a value to the master IMR (port
-//! 0x21) and reading it back. If the readback differs, it falls back
-//! to `null_legacy_pic` — leaving IRQs 0..15 with `dummy_irq_chip`
-//! handlers. `request_irq` on those then fails with -EINVAL, which
-//! breaks `virtio-pci`'s INTx fallback path.
+//! Linux probes the 8259 by writing to the master IMR (port 0x21) and
+//! reading it back. With a NULL PIC, IRQs 0..15 get `dummy_irq_chip`
+//! handlers, breaking `request_irq` / virtio-pci's INTx fallback.
 //!
-//! We don't emulate the 8259's interrupt delivery logic (IRR/ISR,
-//! cascade). For Phase 12.2 IRQs land in the guest via direct
-//! VMCS/VMCB event-injection; the 8259 stub only exists so Linux's
-//! probe + irq-chip-init succeeds and `request_irq` returns 0.
+//! We don't emulate interrupt delivery — IRQs land in the guest via
+//! direct VMCS/VMCB event-injection. The stub exists so probe + irq-
+//! chip-init pass and `request_irq` returns 0.
 //!
-//! Surface:
-//!   * 0x20  (master command) — write: accept ICW1/OCW2/OCW3 silently.
-//!                              read:  return 0 (no IRQs pending).
-//!   * 0x21  (master IMR/ICW)  — write: store. read: return stored.
-//!   * 0xA0  (slave  command) — write: accept silently. read: 0.
-//!   * 0xA1  (slave  IMR/ICW)  — write: store. read: return stored.
+//! Plus we track ICW2 (vector base) for both master and slave so
+//! callers can map an IRQ line to the actual interrupt vector Linux
+//! programmed.
 
 #![allow(dead_code)]
 
@@ -25,14 +19,16 @@ pub const PIC_MASTER_IMR: u16 = 0x21;
 pub const PIC_SLAVE_CMD:  u16 = 0xA0;
 pub const PIC_SLAVE_IMR:  u16 = 0xA1;
 
+const ICW1_INIT: u8 = 0x10;
+
+#[derive(Default)]
 pub struct Pic8259 {
-    /// Master IMR (last value written to port 0x21 in non-ICW state).
-    /// On reset Linux writes 0xFF (mask everything), then ICW1..ICW4
-    /// during init, then OCW1 (final IMR). Tracking the latest write
-    /// gives correct readback for both the boot-time probe and the
-    /// per-IRQ unmask path.
     master_imr: u8,
     slave_imr: u8,
+    master_icw2: u8, // vector base for master IRQs 0..7
+    slave_icw2: u8,  // vector base for slave  IRQs 8..15
+    master_init_step: u8,
+    slave_init_step: u8,
 }
 
 impl Pic8259 {
@@ -40,23 +36,63 @@ impl Pic8259 {
         Self {
             master_imr: 0xFF,
             slave_imr: 0xFF,
+            // Reasonable BIOS-style defaults until ICW2 is observed.
+            // Linux will overwrite with 0x20 / 0x28 during 8259 init.
+            master_icw2: 0x20,
+            slave_icw2: 0x28,
+            master_init_step: 0,
+            slave_init_step: 0,
+        }
+    }
+
+    /// Return the interrupt vector that an IRQ line maps to.
+    /// IRQ 0..7 = master, IRQ 8..15 = slave.
+    pub fn vector_for_irq(&self, irq: u8) -> u8 {
+        if irq < 8 {
+            self.master_icw2 + irq
+        } else {
+            self.slave_icw2 + (irq - 8)
         }
     }
 }
 
 /// Dispatch an 8259-port PIO access. Returns `Some(value)` for IN
-/// reads, `None` for OUT writes. Caller already restricted the port
-/// to 0x20 / 0x21 / 0xA0 / 0xA1.
+/// reads, `None` for OUT writes.
 pub fn handle_pic_io(pic: &mut Pic8259, port: u16, dir_in: bool, val_out: u8) -> Option<u64> {
     match (port, dir_in) {
-        (PIC_MASTER_IMR, false) => { pic.master_imr = val_out; None }
-        (PIC_SLAVE_IMR,  false) => { pic.slave_imr  = val_out; None }
-        (PIC_MASTER_IMR, true)  => Some(pic.master_imr as u64),
-        (PIC_SLAVE_IMR,  true)  => Some(pic.slave_imr  as u64),
-        // Command-port writes (ICW1, OCW2 EOI, OCW3) — accept silently.
-        (PIC_MASTER_CMD, false) | (PIC_SLAVE_CMD, false) => None,
-        // Command-port reads (default selector in OCW3 returns IRR).
-        // Return zero — no IRQs pending in our pretend PIC.
+        // Command-port writes — ICW1 starts a 3- or 4-write init sequence.
+        (PIC_MASTER_CMD, false) => {
+            if val_out & ICW1_INIT != 0 { pic.master_init_step = 1; }
+            None
+        }
+        (PIC_SLAVE_CMD, false) => {
+            if val_out & ICW1_INIT != 0 { pic.slave_init_step = 1; }
+            None
+        }
+        // Data-port writes during init = ICW2/3/4; otherwise OCW1 (mask).
+        (PIC_MASTER_IMR, false) => {
+            match pic.master_init_step {
+                1 => { pic.master_icw2 = val_out & 0xF8; pic.master_init_step = 2; }
+                2 => { pic.master_init_step = 3; }            // ICW3
+                3 => { pic.master_init_step = 0; }            // ICW4
+                _ => { pic.master_imr = val_out; }            // OCW1
+            }
+            None
+        }
+        (PIC_SLAVE_IMR, false) => {
+            match pic.slave_init_step {
+                1 => { pic.slave_icw2 = val_out & 0xF8; pic.slave_init_step = 2; }
+                2 => { pic.slave_init_step = 3; }
+                3 => { pic.slave_init_step = 0; }
+                _ => { pic.slave_imr = val_out; }
+            }
+            None
+        }
+        // IMR readback — Linux's probe + each per-IRQ unmask reads back.
+        (PIC_MASTER_IMR, true) => Some(pic.master_imr as u64),
+        (PIC_SLAVE_IMR,  true) => Some(pic.slave_imr  as u64),
+        // Command-port reads (default OCW3 selector) → IRR. We have no
+        // pending IRQs in the PIC (we deliver via direct event-inject).
         (PIC_MASTER_CMD, true) | (PIC_SLAVE_CMD, true) => Some(0),
         _ => None,
     }

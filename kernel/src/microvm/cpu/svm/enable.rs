@@ -790,7 +790,7 @@ fn run_linux_loop(
             EXIT_NPF => {
                 let gpa = vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
                 if pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf(vmcb, regs, &mut pci.virtio_blk, gpa, host_base) {
+                    if handle_mmio_npf(vmcb, regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -941,6 +941,7 @@ fn handle_mmio_npf(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     host_base: u64,
 ) -> bool {
@@ -984,6 +985,17 @@ fn handle_mmio_npf(
     } else {
         let value = blk.mmio_read(off, dec.width);
         write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = blk.take_pending_kick() {
+        let advanced = blk.service_queues(qidx, host_base);
+        if advanced {
+            let vector = pic.vector_for_irq(11);
+            // VMCB.EVENT_INJ — vector | type<<8 | valid<<31. Type 0 =
+            // external interrupt. APM Vol 2 §15.20.
+            let info: u64 = (vector as u64) | (1u64 << 31);
+            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+        }
     }
 
     advance_rip(vmcb);

@@ -21,6 +21,7 @@
 
 #![allow(dead_code)]
 
+extern crate alloc;
 use crate::kprintln;
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
@@ -87,8 +88,7 @@ const DC_CAPACITY_HI:    u32 = 0x04; // u32
 const NUM_QUEUES: u16 = 1;
 const MAX_QUEUE_SIZE: u16 = 256;
 
-/// Per-queue state. We track everything Linux configures so we can
-/// activate the queue once 12.2.3 ships.
+/// Per-queue state.
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
     size: u16,
@@ -97,6 +97,16 @@ struct VirtQueue {
     desc_lo: u32, desc_hi: u32,
     driver_lo: u32, driver_hi: u32,
     device_lo: u32, device_hi: u32,
+    /// Last avail-ring index we've seen — increments as we service.
+    last_avail_idx: u16,
+    /// Next slot we'll write in the used ring.
+    used_idx: u16,
+}
+
+impl VirtQueue {
+    fn desc_gpa(&self)   -> u64 { ((self.desc_hi   as u64) << 32) | self.desc_lo   as u64 }
+    fn driver_gpa(&self) -> u64 { ((self.driver_hi as u64) << 32) | self.driver_lo as u64 }
+    fn device_gpa(&self) -> u64 { ((self.device_hi as u64) << 32) | self.device_lo as u64 }
 }
 
 pub struct VirtioBlk {
@@ -120,12 +130,25 @@ pub struct VirtioBlk {
     // Device config (virtio-blk specifics)
     capacity_sectors: u64, // 512-byte sectors
 
-    // ISR latch
+    // ISR latch — bit 0 = vq notification, read-to-clear.
     isr: u8,
+
+    /// Backing store for the virtual disk. Sized to capacity.
+    /// In-RAM for 12.2.3; will be replaced by an npkFS-backed,
+    /// AES-GCM-encrypted profile-image in 12.2.4+.
+    backing: alloc::vec::Vec<u8>,
+
+    /// Set by mmio_write when the driver kicks a queue. The hypervisor
+    /// run-loop picks this up after the MMIO trap returns and calls
+    /// `service_queues` (which can do guest-memory reads/writes that
+    /// require host_base — not available inside mmio_write).
+    pending_kick_queue: Option<u16>,
 }
 
+const CAPACITY_SECTORS: u64 = 8192; // 4 MB
+
 impl VirtioBlk {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bar0_lo: BAR0_BASE as u32,
             bar0_hi: (BAR0_BASE >> 32) as u32,
@@ -139,17 +162,53 @@ impl VirtioBlk {
             config_generation: 0,
             queue_select: 0,
             queues: [VirtQueue {
-                // queue_size at reset = max supported. Driver reads,
-                // optionally writes a smaller power-of-2.
                 size: MAX_QUEUE_SIZE, msix_vec: 0xFFFF, enable: 0,
                 desc_lo: 0, desc_hi: 0,
                 driver_lo: 0, driver_hi: 0,
                 device_lo: 0, device_hi: 0,
+                last_avail_idx: 0,
+                used_idx: 0,
             }; NUM_QUEUES as usize],
-            capacity_sectors: 8192, // 4 MB stub. Will be backed by a
-                                    // host buffer in 12.2.3.
+            capacity_sectors: CAPACITY_SECTORS,
             isr: 0,
+            backing: alloc::vec![0u8; (CAPACITY_SECTORS * 512) as usize],
+            pending_kick_queue: None,
         }
+    }
+
+    /// Take the pending-kick flag, if any. Caller services the queue
+    /// and (if used-ring advanced) injects an IRQ.
+    pub fn take_pending_kick(&mut self) -> Option<u16> {
+        self.pending_kick_queue.take()
+    }
+
+    /// Process all available requests on `queue_idx` against the
+    /// in-RAM backing store. Returns true if the used-ring advanced
+    /// (caller should set ISR + inject IRQ).
+    pub fn service_queues(&mut self, queue_idx: u16, host_base: u64) -> bool {
+        let q = match self.queues.get_mut(queue_idx as usize) {
+            Some(q) if q.enable != 0 => q,
+            _ => return false,
+        };
+        if q.size == 0 {
+            return false;
+        }
+
+        let advanced = super::virtqueue::service_blk_queue(
+            host_base,
+            q.desc_gpa(),
+            q.driver_gpa(),
+            q.device_gpa(),
+            q.size,
+            &mut q.last_avail_idx,
+            &mut q.used_idx,
+            &mut self.backing,
+        );
+
+        if advanced {
+            self.isr |= 1;
+        }
+        advanced
     }
 
     /// Current MMIO base. Once Linux has assigned a BAR address (by
@@ -295,11 +354,12 @@ impl VirtioBlk {
         if off >= COMMON_OFF && off < COMMON_OFF + COMMON_LEN {
             self.common_write(off - COMMON_OFF, width, value);
         } else if off >= NOTIFY_OFF && off < NOTIFY_OFF + NOTIFY_LEN {
-            // Queue notify — driver kicks a queue. 12.2.2 just logs.
-            // 12.2.3 will dispatch to virtqueue processing here.
-            let queue = (off - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER;
-            kprintln!("[virtio-blk] notify queue {} (val={:#x}, w={})",
-                      queue, value, width);
+            // Queue notify — driver kicked a queue. We can't service
+            // here (no host_base / VMCS access); flag for the run-loop
+            // to pick up after the MMIO trap unwinds.
+            let queue = ((off - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER) as u16;
+            let _ = value; let _ = width;
+            self.pending_kick_queue = Some(queue);
         } else if off >= ISR_OFF && off < ISR_OFF + ISR_LEN {
             // ISR is read-to-clear; writes ignored.
         } else if off >= DEVICE_OFF && off < DEVICE_OFF + DEVICE_LEN {
@@ -376,6 +436,8 @@ impl VirtioBlk {
                             desc_lo: 0, desc_hi: 0,
                             driver_lo: 0, driver_hi: 0,
                             device_lo: 0, device_hi: 0,
+                            last_avail_idx: 0,
+                            used_idx: 0,
                         };
                     }
                     self.driver_features = [0; 2];

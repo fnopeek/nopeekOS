@@ -1103,6 +1103,18 @@ pub fn write_guest_rsp(value: u64) -> Result<(), &'static str> {
     vmwrite(GUEST_RSP, value)
 }
 
+/// Inject an external interrupt on the next VM-entry. `vector` is the
+/// IDT vector to deliver. The CPU honours the guest's RFLAGS.IF / NMI
+/// blocking state — if interrupts are disabled the entry will fail
+/// (caller must check), but in practice we inject from MMIO-trap exits
+/// where the guest had IF=1 already.
+pub fn inject_external_irq(vector: u8) -> Result<(), &'static str> {
+    // Bit 31 = valid, bits 10:8 = type (0 = external interrupt),
+    // bits 7:0 = vector.
+    let info: u64 = (vector as u64) | (1u64 << 31);
+    vmwrite(VM_ENTRY_INTR_INFO_FIELD, info)
+}
+
 /// Read VMCS GUEST_RIP — the linear address of the guest
 /// instruction that caused the most recent VM-exit.
 pub fn read_guest_rip() -> Result<u64, &'static str> {
