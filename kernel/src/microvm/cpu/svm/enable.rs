@@ -415,16 +415,18 @@ pub fn run_linux(
     // SAFETY: freshly allocated, identity-mapped, exclusive.
     unsafe { core::ptr::write_bytes(iopm_phys as *mut u8, 0xFF, 3 * 4096); }
 
-    // MSRPM: 8 KB. We set the first 0x1800 bytes (= covers the three
-    // architected MSR ranges) to 0xFF = trap all reads + writes; the
-    // last 0x800 are reserved per APM §15.11 and stay zero.
+    // MSRPM: 8 KB all-zero = pass-through every MSR. Architectural
+    // CPU-state MSRs (EFER, FS_BASE, GS_BASE, KERNEL_GS_BASE, STAR/
+    // LSTAR/CSTAR/SFMASK, …) are auto-saved/loaded by the CPU via
+    // the VMCB.SAVE area on VMRUN/VMEXIT (APM §15.11.1) — pass-
+    // through is the natural way to let Linux mutate them during
+    // boot. Other MSR writes hit hardware; in our nested-SVM smoke
+    // setup KVM virtualizes those, on real silicon we'll selectively
+    // trap a few (PMU, perf-ctl, …) by setting MSRPM bits.
     let msrpm_phys = memory::allocate_contiguous(2)
         .ok_or("OOM allocating MSRPM (8 KB)")?;
     // SAFETY: as above.
-    unsafe {
-        core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096);
-        core::ptr::write_bytes(msrpm_phys as *mut u8, 0xFF, 0x1800);
-    }
+    unsafe { core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096); }
 
     let vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
     let vmcb_ptr = alloc::boxed::Box::leak(vmcb);
@@ -653,8 +655,12 @@ fn run_linux_loop(
     // Idle detection — once init enters its pause(2)/wait-loop, the
     // only exits are external interrupts (= host timer). After
     // IDLE_THRESHOLD consecutive INTRs declare guest idle and bail.
+    // Threshold: Linux's TSC-calibration path can spin for thousands
+    // of host timer ticks before giving up + moving on, so we keep
+    // this generous. Phase 12.1.4-svm replaces this with a real
+    // cancel signal.
     let mut consecutive_idle: u32 = 0;
-    const IDLE_THRESHOLD: u32 = 200;
+    const IDLE_THRESHOLD: u32 = 5_000;
 
     while iter < MAX_ITERATIONS {
         iter += 1;
@@ -686,13 +692,32 @@ fn run_linux_loop(
             EXIT_CPUID => {
                 let leaf = vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
                 let subleaf = regs.rcx as u32;
-                let (eax, ebx, mut ecx, mut edx) = host_cpuid(leaf, subleaf);
-                if leaf == 7 && subleaf == 0 {
-                    // Hide CET — host has CR4.CET=1 for IBT but Linux's
-                    // hand-asm stubs lack ENDBR64, so once CET is on
-                    // in the guest, indirect calls #CP and BUG().
-                    ecx &= !(1u32 << 7);   // CET_SS
-                    edx &= !(1u32 << 20);  // CET_IBT
+                let (eax, ebx, mut ecx, mut edx);
+                // Hide hypervisor presence + KVM paravirt leafs entirely.
+                // Without this, Linux sees the L1 KVM signature through
+                // pass-through CPUID, enables kvm-clock, then divides
+                // by zero in pvclock_tsc_khz because the WRMSR to
+                // KVM_SYSTEM_TIME_NEW is absorbed (never reaches L1 KVM)
+                // so the pvclock_vcpu_time_info struct stays zeroed.
+                if (0x4000_0000..=0x4000_FFFF).contains(&leaf) {
+                    eax = 0; ebx = 0; ecx = 0; edx = 0;
+                } else {
+                    let (a, b, c, d) = host_cpuid(leaf, subleaf);
+                    eax = a; ebx = b; ecx = c; edx = d;
+                    if leaf == 1 {
+                        // ECX bit 31: hypervisor present. Clearing it
+                        // tells Linux we're "bare metal" — no probe of
+                        // 0x40000000+ leafs, no kvm-clock activation.
+                        ecx &= !(1u32 << 31);
+                    }
+                    if leaf == 7 && subleaf == 0 {
+                        // Hide CET — host has CR4.CET=1 for IBT but
+                        // Linux's hand-asm stubs lack ENDBR64, so once
+                        // CET is on in the guest, indirect calls #CP
+                        // and BUG().
+                        ecx &= !(1u32 << 7);   // CET_SS
+                        edx &= !(1u32 << 20);  // CET_IBT
+                    }
                 }
                 vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);
                 regs.rbx = ebx as u64;

@@ -1627,9 +1627,16 @@ fn microvm_linux(inject: &[u8]) {
     // Without these, Linux times out / panics on probes that don't
     // behave like real silicon. With them, it boots minimally to
     // the rootfs-mount panic — the 12.1.1d milestone target.
+    // `tsc_early_khz=2000000` skips Linux's PIT-based TSC calibration,
+    // which deadlocks on the AMD-V backend (host CPUID 0x15 absent
+    // on AMD → Linux falls back to PIT calibration → our PIT IO
+    // emulation returns 0 → Linux loops forever waiting for ticks).
+    // Harmless on Intel: there CPUID 0x15 advertises the freq and
+    // Linux uses it directly, ignoring the cmdline hint.
     const CMDLINE: &[u8] =
         b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr \
-          nolapic noapic acpi=off pci=off tsc=reliable devtmpfs.mount=1";
+          nolapic noapic acpi=off pci=off tsc=reliable tsc_early_khz=2000000 \
+          devtmpfs.mount=1";
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
     let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
