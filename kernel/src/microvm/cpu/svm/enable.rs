@@ -646,6 +646,7 @@ fn run_linux_loop(
         kprintln!("[svm] pre-injected {} bytes into UART RX FIFO", inject.len());
     }
     let mut pci = crate::microvm::devices::PciBus::new();
+    let mut pic = crate::microvm::devices::pic8259::Pic8259::new();
 
     let mut iter: u32 = 0;
     let mut last_outcome: Option<vmcb::LaunchOutcome> = None;
@@ -743,7 +744,7 @@ fn run_linux_loop(
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
-                handle_linux_io(vmcb, &mut serial, &mut pci, regs, port, dir_in, size, &mut io_dropped);
+                handle_linux_io(vmcb, &mut serial, &mut pci, &mut pic, regs, port, dir_in, size, &mut io_dropped);
                 advance_rip(vmcb);
                 last_outcome = Some(outcome);
             }
@@ -861,6 +862,7 @@ fn handle_linux_io(
     vmcb: &mut vmcb::Vmcb,
     serial: &mut SerialState,
     pci: &mut crate::microvm::devices::PciBus,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     _regs: &mut vmcb::GuestRegs,
     port: u16,
     dir_in: bool,
@@ -868,6 +870,7 @@ fn handle_linux_io(
     io_dropped: &mut u32,
 ) {
     use crate::microvm::devices::{handle_pci_io, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};
+    use crate::microvm::devices::pic8259::{handle_pic_io, PIC_MASTER_CMD, PIC_MASTER_IMR, PIC_SLAVE_CMD, PIC_SLAVE_IMR};
 
     let mask: u64 = match size { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFF_FFFF, _ => 0xFF };
     let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
@@ -878,6 +881,15 @@ fn handle_linux_io(
         || (PCI_CONFIG_DATA_START..=PCI_CONFIG_DATA_END).contains(&port)
     {
         if let Some(v) = handle_pci_io(pci, port, dir_in, size, val_out) {
+            let new_rax = (rax & !mask) | (v & mask);
+            vmcb.write_u64(vmcb::OFF_SAVE_RAX, new_rax);
+        }
+        return;
+    }
+
+    // 8259 PIC stub — see microvm::devices::pic8259.
+    if matches!(port, PIC_MASTER_CMD | PIC_MASTER_IMR | PIC_SLAVE_CMD | PIC_SLAVE_IMR) {
+        if let Some(v) = handle_pic_io(pic, port, dir_in, val_out as u8) {
             let new_rax = (rax & !mask) | (v & mask);
             vmcb.write_u64(vmcb::OFF_SAVE_RAX, new_rax);
         }
