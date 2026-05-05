@@ -256,6 +256,21 @@ GRUBCFG
         touch "$ASSETS_DIR/microvm-initramfs.cpio.gz"
     fi
 
+    # System wallpapers: every .png / .jpg in release/assets/wallpapers/
+    # gets staged + bundled. Apps see them at sys/wallpapers/<file>;
+    # setup.rs additionally copies them into the user's
+    # home/<user>/pictures/wallpapers/ on first install. Adding a new
+    # wallpaper = drop file + add a `BundledAsset` line in
+    # install_data/assets/mod.rs (include_bytes! needs a literal name).
+    if [ -d "$PROJECT_DIR/release/assets/wallpapers" ]; then
+        mkdir -p "$ASSETS_DIR/wallpapers"
+        for wp in "$PROJECT_DIR/release/assets/wallpapers/"*; do
+            [ -f "$wp" ] || continue
+            cp "$wp" "$ASSETS_DIR/wallpapers/$(basename "$wp")"
+            ok "  wallpaper: $(basename "$wp") ($(du -h "$wp" | cut -f1))"
+        done
+    fi
+
     # WASM modules + their .version files: fetch from release/modules/
     # (produced by prior release build). Expect all four first-party
     # modules. The .version file is what lets `intent::install` and

@@ -79,6 +79,21 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         version: None,
     },
 
+    // ── System wallpapers ─────────────────────────────────────────
+    // Bundled at `sys/wallpapers/<name>`; setup.rs additionally
+    // copies them to `home/<user>/pictures/wallpapers/<name>` so
+    // each user has their own writable copy (delete + replace
+    // without affecting the system default). Add a new wallpaper:
+    //   1) drop the file in `release/assets/wallpapers/`
+    //   2) append a `BundledAsset` line below
+    //   3) optionally add to `WALLPAPERS_DEFAULT_LIST` in setup.rs
+    //      so the install-time copy picks it up
+    BundledAsset {
+        fs_path: "sys/wallpapers/npk01.png",
+        bytes:   include_bytes!("wallpapers/npk01.png"),
+        version: None,
+    },
+
     // ── First-party WASM modules ──────────────────────────────────
     // Keep in sync with release/modules/ output of build.sh release.
     BundledAsset {
@@ -152,4 +167,42 @@ pub fn bootstrap_into_npkfs() {
 
     }
     kprintln!("[npk] Seeded {} bytes total.", total_bytes);
+
+    // System wallpapers also seed into the user's writable
+    // wallpapers/ folder so they show up in `wallpaper list` and
+    // get picked up by the random-on-boot selector. The bundled
+    // copy at `sys/wallpapers/<name>` stays as the read-only
+    // template; the user's copy is theirs to delete or replace.
+    copy_system_wallpapers_to_user();
+}
+
+/// Iterate the just-seeded `sys/wallpapers/<name>` set and copy
+/// each into `home/<user>/pictures/wallpapers/<name>`. Reads the
+/// user name from `sys/config/name` (written moments earlier by
+/// `setup::setup_identity_and_settings`). Idempotent: existing
+/// user-side files are skipped (the user might have already
+/// renamed / replaced them).
+fn copy_system_wallpapers_to_user() {
+    use crate::kprintln;
+    use crate::security::capability::CAP_NULL;
+
+    // Read user name; fall back silently if missing — we can't
+    // copy without it but the system bundles still ship as-is.
+    let user = match crate::config::get("name") {
+        Some(n) if !n.is_empty() => n,
+        _ => return,
+    };
+    let target_dir = alloc::format!("home/{}/pictures/wallpapers", user);
+
+    for a in BUNDLED_ASSETS {
+        let Some(name) = a.fs_path.strip_prefix("sys/wallpapers/") else { continue };
+        let target = alloc::format!("{}/{}", target_dir, name);
+        // Skip if a user-side copy already exists (re-run install
+        // shouldn't clobber a renamed wallpaper).
+        if crate::npkfs::exists(&target) { continue; }
+        match crate::npkfs::store(&target, a.bytes, CAP_NULL) {
+            Ok(_)  => kprintln!("[npk]   {} (user copy)", target),
+            Err(e) => kprintln!("[npk]   FAILED user-copy: {} — {:?}", target, e),
+        }
+    }
 }

@@ -1202,21 +1202,6 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
 /// `render::render_with_state`: `None` = state not in this subtree,
 /// `Some([])` = root IS the state target, `Some([i,…])` = descend
 /// into child `i`.
-fn rasterize_buffer(
-    tree: &abi::Widget,
-    layout_tree: &layout::LayoutNode,
-    rect: abi::Rect,
-    hover_path: Option<&[u32]>,
-    focus_path: Option<&[u32]>,
-    active_path: Option<&[u32]>,
-    density: abi::Density,
-    input_edit: Option<&InputEditState>,
-) -> Vec<u32> {
-    rasterize_buffer_with_overlays(
-        tree, layout_tree, &[], rect, hover_path, focus_path, active_path, density, input_edit,
-    )
-}
-
 /// Rasterize the main tree, then paint each popover overlay on top
 /// in declaration order. Popovers are rendered without state-paths
 /// (no hover/focus carry-through to their content) — overlay state
