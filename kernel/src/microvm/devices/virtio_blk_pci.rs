@@ -175,17 +175,7 @@ impl VirtioBlk {
             }; NUM_QUEUES as usize],
             capacity_sectors: CAPACITY_SECTORS,
             isr: 0,
-            backing: {
-                let mut v = alloc::vec![0u8; (CAPACITY_SECTORS * 512) as usize];
-                // Magic pattern at sector 0 so a guest read can prove
-                // the round-trip end-to-end. ASCII "nopeekOS-microvm-blk\0"
-                // at offset 0, then 32-bit LE counter 0..3 for further
-                // validation. Cleared/overwritten as soon as we have a
-                // real backing store (12.2.4 AEAD profile-image).
-                let magic = b"nopeekOS-microvm-blk\0\x00\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00";
-                v[..magic.len()].copy_from_slice(magic);
-                v
-            },
+            backing: load_or_init_backing(),
             pending_kick_queue: None,
             notify_log_count: 0,
             serviced_log_count: 0,
@@ -196,6 +186,25 @@ impl VirtioBlk {
     /// and (if used-ring advanced) injects an IRQ.
     pub fn take_pending_kick(&mut self) -> Option<u16> {
         self.pending_kick_queue.take()
+    }
+
+    /// Persist the current backing buffer to npkFS. Called when the
+    /// VM exits the run loop. npkFS encrypts every blob with AES-256-GCM
+    /// at rest using the user's master key, so storing the plaintext
+    /// here yields an encrypted-at-rest profile image automatically.
+    /// Per-sector AEAD with sector-in-AAD (per spec) is a future
+    /// optimization — only matters once we want partial random-access
+    /// without re-encrypting the whole image. For 12.2.4 the whole-blob
+    /// approach gives us crash-loss-bounded persistence (last save wins).
+    pub fn save(&self) {
+        match crate::npkfs::store(
+            PROFILE_PATH,
+            &self.backing,
+            crate::capability::CAP_NULL,
+        ) {
+            Ok(_) => kprintln!("[virtio-blk] saved profile-image ({} bytes encrypted)", self.backing.len()),
+            Err(e) => kprintln!("[virtio-blk] save failed: {}", e),
+        }
     }
 
     /// Process all available requests on `queue_idx` against the
@@ -519,4 +528,36 @@ const fn width_mask(width: u8) -> u64 {
         4 => 0xFFFF_FFFF,
         _ => 0xFFFF_FFFF_FFFF_FFFF,
     }
+}
+
+/// Where the encrypted profile-image lives in npkFS. Single shared
+/// image for now — once Phase 12.6 ships per-app VMs, this becomes
+/// `home/<user>/microvm/<app>/profile.img`.
+const PROFILE_PATH: &str = "sys/microvm/profile.img";
+
+/// Build the initial backing buffer. Tries to load the saved profile
+/// from npkFS (npkFS auto-decrypts at-rest); on miss falls back to a
+/// fresh image with a magic pattern so the round-trip test keeps
+/// working on first boot.
+fn load_or_init_backing() -> alloc::vec::Vec<u8> {
+    let cap = (CAPACITY_SECTORS * 512) as usize;
+
+    if let Ok((data, _hash)) = crate::npkfs::fetch(PROFILE_PATH) {
+        if data.len() == cap {
+            kprintln!("[virtio-blk] loaded profile-image ({} bytes)", data.len());
+            return data;
+        }
+        kprintln!(
+            "[virtio-blk] profile-image size mismatch ({} != {}), reinit",
+            data.len(), cap,
+        );
+    }
+
+    let mut v = alloc::vec![0u8; cap];
+    // Magic pattern at sector 0 — round-trip canary, persists into the
+    // first save() so subsequent boots find it.
+    let magic = b"nopeekOS-microvm-blk\0\x00\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00";
+    v[..magic.len()].copy_from_slice(magic);
+    kprintln!("[virtio-blk] fresh profile-image ({} bytes)", cap);
+    v
 }
