@@ -157,6 +157,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::MinWidth(_)       => 19,
         Modifier::MaxWidth(_)       => 20,
         Modifier::Rounded(_)        => 21,
+        Modifier::Flex(_)           => 22,
     }
 }
 

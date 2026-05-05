@@ -220,6 +220,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::MinWidth(w)   => { let _ = write!(s, "MinWidth({})", w); }
             Modifier::MaxWidth(w)   => { let _ = write!(s, "MaxWidth({})", w); }
             Modifier::Rounded(r)    => { let _ = write!(s, "Rounded({})", r); }
+            Modifier::Flex(f)       => { let _ = write!(s, "Flex({})", f); }
         }
     }
     s.push(']');

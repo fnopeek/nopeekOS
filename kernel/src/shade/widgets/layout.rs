@@ -100,6 +100,20 @@ fn apply_size_constraints(size: Size, mods: &[Modifier]) -> Size {
     }
 }
 
+/// Return the highest `Modifier::Flex(n)` weight on `mods`, or `None`
+/// if no Flex modifier is present. `Flex(0)` is treated as "no flex"
+/// (matches the SDK doc and avoids zero-weight bookkeeping).
+fn flex_modifier(mods: &[Modifier]) -> Option<u8> {
+    let mut max: u8 = 0;
+    let mut found = false;
+    for m in mods {
+        if let Modifier::Flex(n) = m {
+            if *n > 0 { found = true; if *n > max { max = *n; } }
+        }
+    }
+    if found { Some(max) } else { None }
+}
+
 fn mods_of_widget(w: &Widget) -> &[Modifier] {
     match w {
         Widget::Column  { modifiers, .. } |
@@ -339,7 +353,12 @@ fn place_axis(
     let main_avail: u32 = if vertical { content.h } else { content.w };
     let cross_avail: u32 = if vertical { content.w } else { content.h };
 
-    // Pass 1: measure non-Spacer children on the main axis, tally flex.
+    // Pass 1: measure children on the main axis, tally total intrinsic
+    // and total flex weight. Both `Spacer { flex }` and any non-Spacer
+    // child carrying `Modifier::Flex(n)` contribute weight; the
+    // difference is that Spacer's intrinsic is zero (so it's pure
+    // flex space) while Modifier::Flex children keep their intrinsic
+    // as a basis and only get the extra distributed share.
     let mut measured: Vec<Size> = Vec::with_capacity(children.len());
     let mut total_main: u32 = 0;
     let mut flex_sum: u32 = 0;
@@ -348,12 +367,16 @@ fn place_axis(
     for c in children {
         let m = measure(c);
         measured.push(m);
+        let intrinsic_main = if vertical { m.h } else { m.w };
         match c {
             Widget::Spacer { flex } => {
                 flex_sum += (*flex).max(1) as u32;
             }
             _ => {
-                total_main = total_main.saturating_add(if vertical { m.h } else { m.w });
+                total_main = total_main.saturating_add(intrinsic_main);
+                if let Some(weight) = flex_modifier(mods_of_widget(c)) {
+                    flex_sum += weight as u32;
+                }
             }
         }
         count += 1;
@@ -363,12 +386,14 @@ fn place_axis(
     let remaining = main_avail.saturating_sub(total_main).saturating_sub(gaps);
 
     // Pass 2: walk children, place them along the main axis. Spacers
-    // absorb `remaining` proportionally to their flex weight.
+    // and Modifier::Flex children absorb `remaining` proportionally
+    // to their flex weight; everyone else sticks to intrinsic.
     let mut kids = Vec::with_capacity(children.len());
     let mut cursor: u32 = 0;
 
     for (idx, c) in children.iter().enumerate() {
         let m = &measured[idx];
+        let intrinsic_main = if vertical { m.h } else { m.w };
 
         // Main-axis size for this child.
         let main_sz = match c {
@@ -377,7 +402,12 @@ fn place_axis(
                     (remaining * (*flex).max(1) as u32) / flex_sum
                 }
             }
-            _ => if vertical { m.h } else { m.w },
+            _ => match flex_modifier(mods_of_widget(c)) {
+                Some(weight) if flex_sum > 0 => {
+                    intrinsic_main + (remaining * weight as u32) / flex_sum
+                }
+                _ => intrinsic_main,
+            },
         };
 
         // Cross-axis size + offset based on align.
