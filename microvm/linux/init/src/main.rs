@@ -15,8 +15,10 @@
 use core::arch::asm;
 
 // x86_64 Linux syscall numbers — copy of asm-generic/unistd.h.
+const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
+const SYS_CLOSE: u64 = 3;
 const SYS_DUP2: u64 = 33;
 const SYS_PAUSE: u64 = 34;
 const SYS_EXIT: u64 = 60;
@@ -26,6 +28,7 @@ const SYS_REBOOT: u64 = 169;
 const SYS_IOPERM: u64 = 173;
 
 // open(2) flags.
+const O_RDONLY: u64 = 0;
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
 
@@ -114,6 +117,12 @@ unsafe extern "C" fn rust_main() -> ! {
     say(kmsg_fd, b"\n[microvm-init] Hello from nopeekOS PID-1.\n");
     say(kmsg_fd, b"[microvm-init] kernel boot reached userspace.\n");
 
+    // Phase 12.2 capstone: read first 32 bytes of /dev/vda (virtio-blk
+    // backed by host's 4 MB in-RAM buffer). Magic pattern set by host
+    // virtio-blk emulator — round-trip proof from host backing →
+    // virtqueue READ → DMA into our buffer → kmsg log.
+    blk_read_test(kmsg_fd);
+
     // Phase 12.1.4 — inject_console round-trip. Grant ourselves I/O
     // port access on COM1 (0x3F8-0x3FF) via ioperm(2). Modern Linux
     // (≥5.5) made iopl(3) into an emulated stub: the syscall succeeds
@@ -148,6 +157,79 @@ unsafe extern "C" fn rust_main() -> ! {
     loop {
         let _ = unsafe { syscall0(SYS_PAUSE) };
     }
+}
+
+/// Open /dev/vda, read 32 bytes from sector 0, dump as ASCII + hex
+/// through kmsg. Validates the full virtio-blk path:
+///   guest open → blk-mq request → virtqueue notify → host service →
+///   used-ring update → IRQ inject → guest read returns.
+fn blk_read_test(kmsg_fd: i64) {
+    let fd = unsafe { syscall2(SYS_OPEN, b"/dev/vda\0".as_ptr() as u64, O_RDONLY) };
+    if fd < 0 {
+        say(kmsg_fd, b"[microvm-init] /dev/vda open failed\n");
+        return;
+    }
+
+    let mut buf = [0u8; 32];
+    let n = unsafe { syscall3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+
+    if n < 0 {
+        say(kmsg_fd, b"[microvm-init] /dev/vda read failed\n");
+        return;
+    }
+    if n == 0 {
+        say(kmsg_fd, b"[microvm-init] /dev/vda EOF on first read\n");
+        return;
+    }
+
+    // Format "  vda[0..N]: <ascii> | <hex hex hex ...>"
+    let mut out: [u8; 256] = [0; 256];
+    let mut p: usize = 0;
+    let prefix = b"[microvm-init] vda[0..";
+    for &b in prefix { if p < out.len() { out[p] = b; p += 1; } }
+    p = push_dec(&mut out, p, n as u32);
+    let tail1 = b"] ascii=\"";
+    for &b in tail1 { if p < out.len() { out[p] = b; p += 1; } }
+    let nu = (n as usize).min(buf.len());
+    for i in 0..nu {
+        let c = buf[i];
+        let printable = c >= 0x20 && c < 0x7F;
+        if p < out.len() { out[p] = if printable { c } else { b'.' }; p += 1; }
+    }
+    let tail2 = b"\" hex=";
+    for &b in tail2 { if p < out.len() { out[p] = b; p += 1; } }
+    for i in 0..nu {
+        if p + 3 > out.len() { break; }
+        out[p] = hex_nib(buf[i] >> 4); p += 1;
+        out[p] = hex_nib(buf[i] & 0xF); p += 1;
+        out[p] = b' '; p += 1;
+    }
+    if p < out.len() { out[p] = b'\n'; p += 1; }
+    say(kmsg_fd, &out[..p]);
+}
+
+fn push_dec(out: &mut [u8; 256], mut p: usize, mut n: u32) -> usize {
+    if n == 0 {
+        if p < out.len() { out[p] = b'0'; p += 1; }
+        return p;
+    }
+    let mut tmp = [0u8; 10];
+    let mut i = 0;
+    while n > 0 {
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        if p < out.len() { out[p] = tmp[i]; p += 1; }
+    }
+    p
+}
+
+fn hex_nib(n: u8) -> u8 {
+    if n < 10 { b'0' + n } else { b'a' + (n - 10) }
 }
 
 /// Drain bytes from COM1 RBR until a newline (or buffer cap), then
