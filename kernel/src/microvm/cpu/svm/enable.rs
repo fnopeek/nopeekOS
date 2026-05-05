@@ -790,7 +790,12 @@ fn run_linux_loop(
             EXIT_NPF => {
                 let gpa = vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
                 if pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf(vmcb, regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
+                    if handle_mmio_npf_blk(vmcb, regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                } else if pci.virtio_net.bar0_in_range(gpa) {
+                    if handle_mmio_npf_net(vmcb, regs, &mut pci.virtio_net, &pic, gpa, host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -940,7 +945,7 @@ fn handle_linux_io(
 ///
 /// Returns `true` if the fault was handled. `false` falls through to
 /// the generic NPF dump path (decode failure, unsupported opcode).
-fn handle_mmio_npf(
+fn handle_mmio_npf_blk(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
@@ -1059,4 +1064,60 @@ fn write_guest_gpr(
         15 => regs.r15 = merge_reg(regs.r15, value, width),
         _  => {}
     }
+}
+
+/// Handle a #NPF on virtio-net's BAR0. Mirror of `handle_mmio_npf_blk`
+/// for the second device. To be de-duplicated alongside the VMX twin
+/// when virtio-gpu lands.
+fn handle_mmio_npf_net(
+    vmcb: &mut vmcb::Vmcb,
+    regs: &mut vmcb::GuestRegs,
+    net: &mut crate::microvm::devices::virtio_net_pci::VirtioNet,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    host_base: u64,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+    let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
+    let buf = match fetch_inst(rip, cr3, host_base) {
+        Some(b) => b,
+        None => {
+            kprintln!("[svm] mmio-net: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[svm] mmio-net: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - net.bar0_base()) as u32;
+    let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+
+    if dec.is_write {
+        let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
+        net.mmio_write(off, dec.width, value);
+    } else {
+        let value = net.mmio_read(off, dec.width);
+        write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = net.take_pending_kick() {
+        let advanced = net.service_queues(qidx, host_base);
+        if advanced {
+            let vector = pic.vector_for_irq(10);
+            let info: u64 = (vector as u64) | (1u64 << 31);
+            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+        }
+    }
+
+    advance_rip(vmcb);
+    true
 }
