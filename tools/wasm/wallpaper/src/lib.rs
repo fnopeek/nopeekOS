@@ -60,14 +60,21 @@ fn store(name: &str, data: &[u8]) -> bool {
 
 // --- Simple bump allocator for WASM ---
 //
-// 128 MB heap covers worst-case 4K-PNG decode AND gradient generation:
-//   - input PNG buffer  (decode mode):  up to ~32 MB
-//   - decoded BGRA      (4K @ 32 bpp):  ~32 MB
-//   - DEFLATE state + temp scanlines:   ~10 MB
-//   - reusable gradient BGRA buffer:    ~32 MB
-// Bump allocator never frees — the module runs once per intent and
-// exits, so the WASM linear memory is discarded afterwards anyway.
-const HEAP_SIZE: usize = 128 * 1024 * 1024; // 128 MB
+// 256 MB heap covers worst-case 4K-PNG decode. The bump allocator
+// never frees, so every intermediate buffer the decoder holds onto
+// stacks up:
+//   - input PNG buffer (decode mode):    up to 32 MB
+//   - IDAT concatenation Vec:            ~9 MB (pre-sized)
+//   - miniz_oxide decompressed output:   ~38 MB (4K, 1 byte filter
+//                                                + 4 channels per
+//                                                pixel @ 3840×2400)
+//   - per-row unfilter buffer:           ~37 MB
+//   - final BGRA buffer:                 ~37 MB
+//   - miniz_oxide internal state:        ~5 MB
+// Total: ~158 MB worst-case at 4K. 128 MB blew up at v0.4.1.
+// 256 MB linear memory is fine — wasmi grows on demand and the
+// module's lifetime is one intent invocation.
+const HEAP_SIZE: usize = 256 * 1024 * 1024; // 256 MB
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
 
@@ -562,7 +569,12 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut height: u32 = 0;
     let mut bit_depth: u8 = 0;
     let mut color_type: u8 = 0;
-    let mut idat_data: Vec<u8> = Vec::new();
+    // IDAT concatenation: pre-size to the *whole* PNG payload so the
+    // chunk-by-chunk `extend_from_slice` doesn't re-allocate (and,
+    // because the bump allocator never frees, leak each previous
+    // buffer in the geometric doubling cascade — that's a multi-
+    // MB leak on a 4K wallpaper).
+    let mut idat_data: Vec<u8> = Vec::with_capacity(data.len());
 
     // Parse chunks
     while pos + 12 <= data.len() {
