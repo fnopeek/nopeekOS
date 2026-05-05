@@ -633,7 +633,7 @@ fn run_linux_loop(
     regs: &mut vmcb::GuestRegs,
     vmcb: &mut vmcb::Vmcb,
     vmcb_phys: u64,
-    _host_base: u64,
+    host_base: u64,
     inject: &[u8],
 ) -> Result<vmcb::LaunchOutcome, &'static str> {
     use crate::kprintln;
@@ -782,7 +782,7 @@ fn run_linux_loop(
             EXIT_NPF => {
                 let gpa = vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
                 if pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf(vmcb, regs, &mut pci.virtio_blk, gpa) {
+                    if handle_mmio_npf(vmcb, regs, &mut pci.virtio_blk, gpa, host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -923,28 +923,34 @@ fn handle_mmio_npf(
     regs: &mut vmcb::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
     gpa: u64,
+    host_base: u64,
 ) -> bool {
     use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
     use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
 
-    // Decode-assists: number of fetched bytes at OFF_NUM_INST_BYTES,
-    // then the bytes themselves. APM §15.20.
-    let num = vmcb.read_u8(vmcb::OFF_NUM_INST_BYTES) as usize;
-    if num == 0 || num > 15 {
-        kprintln!("[svm] mmio: decode-assists gave {} bytes — bail", num);
-        return false;
-    }
-    let mut buf = [0u8; 15];
-    for k in 0..num {
-        buf[k] = vmcb.read_u8(vmcb::OFF_INST_BYTES + k);
-    }
+    // Walk the guest's page tables to fetch the faulting instruction.
+    // KVM nested SVM doesn't populate decode-assists for #NPF, so we
+    // can't rely on VMCB.GUEST_INST_BYTES.
+    let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+    let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
+    let buf = match fetch_inst(rip, cr3, host_base) {
+        Some(b) => b,
+        None => {
+            kprintln!(
+                "[svm] mmio: insn fetch failed (rip={:#x} cr3={:#x} gpa={:#x})",
+                rip, cr3, gpa,
+            );
+            return false;
+        }
+    };
 
-    let dec = match decode_mov(&buf[..num]) {
+    let dec = match decode_mov(&buf) {
         Some(d) => d,
         None => {
             kprintln!(
                 "[svm] mmio: unsupported insn @ gpa={:#x}, bytes={:02x?}",
-                gpa, &buf[..num.min(8)],
+                gpa, &buf[..8],
             );
             return false;
         }
