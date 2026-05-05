@@ -767,16 +767,19 @@ fn filter_sidebar_to_existing(places: Vec<Place>) -> Vec<Place> {
 }
 
 fn dir_exists(path: &str) -> bool {
-    // npk_fs_stat checks for a `.dir` marker first — returns 9 with
-    // is_dir=1. We only care about the "is a directory" flag.
-    let mut out = [0u8; 9];
+    // npk_fs_stat returns 17 bytes since kernel v0.146 (size + is_dir
+    // + mtime). Kept buffer-sized to the wider shape; the is_dir byte
+    // sits at offset 8 in both v2 and v3 ABI so the check stays
+    // forward-compat against future appends. `n > 0` distinguishes a
+    // valid stat from "not found" (0) or "error" (-1).
+    let mut out = [0u8; 17];
     let n = unsafe {
         npk_fs_stat(
             path.as_ptr() as i32, path.len() as i32,
             out.as_mut_ptr() as i32,
         )
     };
-    n == 9 && out[8] != 0
+    n > 0 && out[8] != 0
 }
 
 // Wire: name\0size_le_u64\0is_dir_u8 — see kernel/src/wasm.rs.

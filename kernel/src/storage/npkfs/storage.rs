@@ -40,32 +40,34 @@ static FS: Mutex<Option<State>> = Mutex::new(None);
 
 // ── Lifecycle ─────────────────────────────────────────────────────────
 
-/// Format the entire disk to npkFS v2. **Destructive**: any v1 data is
-/// gone after this call. Step 8 will add the boot-time refusal so this
-/// only runs deliberately (installer / explicit intent).
 /// Halt with an explicit reinstall message when a legacy npkFS magic
-/// is detected on disk. Mirrors the v1 → v2 break (no in-place
-/// migration was the design then; same story now for v2 → v3).
+/// is detected on disk. Mirrors the v1 → v2 break that landed at
+/// v0.83 — no in-place migration was the design then, same story
+/// now for v2 → v3.
 fn halt_for_legacy_disk(version: u8) -> ! {
     kprintln!("");
     kprintln!("[npk] ┌──────────────────────────────────────────────────────────┐");
     kprintln!("[npk] │ This disk is formatted as npkFS v{}.                      │", version);
     kprintln!("[npk] │                                                          │");
-    kprintln!("[npk] │ npkFS v3 is incompatible by design (clean break — TreeEntry │");
-    kprintln!("[npk] │ now carries an `mtime` field, on-disk wire shape changed).  │");
-    kprintln!("[npk] │ Boot the installer USB and reinstall to continue.          │");
-    kprintln!("[npk] │ Previous data is unrecoverable from this kernel — restore  │");
-    kprintln!("[npk] │ from backup if you have one.                               │");
+    kprintln!("[npk] │ npkFS v3 is incompatible by design (clean break —        │");
+    kprintln!("[npk] │ TreeEntry now carries an mtime field, the on-disk wire   │");
+    kprintln!("[npk] │ shape changed). Boot the installer USB and reinstall to  │");
+    kprintln!("[npk] │ continue. Previous data is unrecoverable from this       │");
+    kprintln!("[npk] │ kernel — restore from backup if you have one.            │");
     kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
     kprintln!("");
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
 }
 
+/// Format the entire disk to npkFS v3. **Destructive**: any pre-v3
+/// data is gone after this call. The boot-time mount guard refuses
+/// older formats with a reinstall message, so this only runs
+/// deliberately (installer / explicit intent).
 pub fn mkfs() -> Result<(), FsError> {
     let total_blocks = blkdev::block_count()
         .ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
     if total_blocks < META_END + 16 {
-        kprintln!("[npk] npkfs2: disk too small ({} blocks)", total_blocks);
+        kprintln!("[npk] npkfs: disk too small ({} blocks)", total_blocks);
         return Err(FsError::DiskFull);
     }
 
@@ -115,7 +117,7 @@ pub fn mkfs() -> Result<(), FsError> {
     cache.flush()?;
 
     kprintln!(
-        "[npk] npkfs2: formatted {} blocks ({} MB), data starts at block {}",
+        "[npk] npkfs: formatted {} blocks ({} MB), data starts at block {}",
         total_blocks, total_blocks * BLOCK_SIZE as u64 / (1024 * 1024), data_start,
     );
     Ok(())
@@ -141,7 +143,7 @@ pub fn mount() -> Result<(), FsError> {
     )?;
 
     if !frees.is_empty() {
-        kprintln!("[npk] npkfs2: journal replay: {} free ops", frees.len());
+        kprintln!("[npk] npkfs: journal replay: {} free ops", frees.len());
         for (start, count) in &frees {
             bmap.free(*start, *count);
         }
@@ -158,7 +160,7 @@ pub fn mount() -> Result<(), FsError> {
     });
 
     kprintln!(
-        "[npk] npkfs2: mounted (gen={}, {} objects, {} free blocks)",
+        "[npk] npkfs: mounted (gen={}, {} objects, {} free blocks)",
         generation, sb.object_count, sb.free_blocks,
     );
     Ok(())
@@ -594,7 +596,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         let master_key = match crypto::get_master_key() {
             Some(k) => k,
             None => {
-                kprintln!("[npk] npkfs2: encrypted blob {:02x}{:02x}… requested but no master key",
+                kprintln!("[npk] npkfs: encrypted blob {:02x}{:02x}… requested but no master key",
                     hash[0], hash[1]);
                 return Err(FsError::Corrupt);
             }
@@ -602,7 +604,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         let obj_key = crypto::derive_object_key(&master_key, hash);
         let nonce = crypto::derive_nonce(hash);
         if crypto::aead_decrypt_aes_in_place(&obj_key, &nonce, &mut staging).is_none() {
-            kprintln!("[npk] npkfs2: decrypt failed for hash {:02x}{:02x}…",
+            kprintln!("[npk] npkfs: decrypt failed for hash {:02x}{:02x}…",
                 hash[0], hash[1]);
             return Err(FsError::Corrupt);
         }

@@ -1,4 +1,4 @@
-//! npkFS v2 object format — content-addressed Blob/Tree objects.
+//! npkFS v3 object format — content-addressed Blob/Tree objects.
 //!
 //! Every object is encoded with postcard, hashed with BLAKE3 over the
 //! encoded bytes, and stored under that 32-byte hash in the v2 B-tree.
