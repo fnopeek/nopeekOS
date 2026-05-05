@@ -895,11 +895,16 @@ fn run_linux_loop(
             48 => {
                 // EPT violation — guest tried to access a guest-phys
                 // address outside our 64 MB window (or with insufficient
-                // EPT permissions). The qual decodes which permission
-                // was missing; GUEST_PHYSICAL_ADDRESS is the actual
-                // address.
+                // EPT permissions). For accesses landing in virtio-blk's
+                // BAR0 range we emulate; everything else dumps + bails.
+                let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
+                if pci.virtio_blk.bar0_in_range(gpa) {
+                    if handle_mmio_ept(&mut regs, &mut pci.virtio_blk, gpa, host_base) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                }
                 serial.flush();
-                let gpa  = vmcs::read_guest_phys_addr().unwrap_or(0);
                 let gla  = vmcs::read_guest_linear_addr().unwrap_or(0);
                 let q    = outcome.exit_qualification;
                 let read = q & 1 != 0;
@@ -1133,5 +1138,114 @@ fn handle_linux_io(
         (_, false) => {
             *io_dropped += 1;
         }
+    }
+}
+
+/// Handle an EPT violation that targets virtio-blk's BAR0 MMIO range.
+/// Walks the guest's page tables to fetch the faulting instruction
+/// (VMX has no decode-assists), decodes the MOV form, emulates against
+/// the device, advances RIP via `VM_EXIT_INSTRUCTION_LEN`.
+///
+/// Returns `true` if the fault was handled, `false` otherwise (page
+/// walk failed, opcode unsupported).
+fn handle_mmio_ept(
+    regs: &mut vmcs::GuestRegs,
+    blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
+    gpa: u64,
+    host_base: u64,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let cr3 = match vmcs::read_guest_cr3() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let buf = match fetch_inst(rip, cr3, host_base) {
+        Some(b) => b,
+        None => {
+            kprintln!(
+                "[microvm] mmio: insn fetch failed (rip={:#x} cr3={:#x} gpa={:#x})",
+                rip, cr3, gpa,
+            );
+            return false;
+        }
+    };
+
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!(
+                "[microvm] mmio: unsupported insn @ gpa={:#x}, bytes={:02x?}",
+                gpa, &buf[..8],
+            );
+            return false;
+        }
+    };
+
+    let off = (gpa - blk.bar0_base()) as u32;
+
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        blk.mmio_write(off, dec.width, value);
+    } else {
+        let value = blk.mmio_read(off, dec.width);
+        write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+
+    if vmcs::advance_guest_rip().is_err() {
+        return false;
+    }
+    true
+}
+
+fn read_gpr_vmx(regs: &vmcs::GuestRegs, idx: u8) -> u64 {
+    match idx {
+        0  => regs.rax,
+        1  => regs.rcx,
+        2  => regs.rdx,
+        3  => regs.rbx,
+        4  => 0, // RSP — VMCS holds it; never an MMIO source on Linux
+        5  => regs.rbp,
+        6  => regs.rsi,
+        7  => regs.rdi,
+        8  => regs.r8,
+        9  => regs.r9,
+        10 => regs.r10,
+        11 => regs.r11,
+        12 => regs.r12,
+        13 => regs.r13,
+        14 => regs.r14,
+        15 => regs.r15,
+        _  => 0,
+    }
+}
+
+fn write_gpr_vmx(regs: &mut vmcs::GuestRegs, idx: u8, width: u8, value: u64) {
+    use crate::microvm::devices::insn_decoder::merge_reg;
+    match idx {
+        0  => regs.rax = merge_reg(regs.rax, value, width),
+        1  => regs.rcx = merge_reg(regs.rcx, value, width),
+        2  => regs.rdx = merge_reg(regs.rdx, value, width),
+        3  => regs.rbx = merge_reg(regs.rbx, value, width),
+        4  => {} // RSP — silently drop
+        5  => regs.rbp = merge_reg(regs.rbp, value, width),
+        6  => regs.rsi = merge_reg(regs.rsi, value, width),
+        7  => regs.rdi = merge_reg(regs.rdi, value, width),
+        8  => regs.r8  = merge_reg(regs.r8,  value, width),
+        9  => regs.r9  = merge_reg(regs.r9,  value, width),
+        10 => regs.r10 = merge_reg(regs.r10, value, width),
+        11 => regs.r11 = merge_reg(regs.r11, value, width),
+        12 => regs.r12 = merge_reg(regs.r12, value, width),
+        13 => regs.r13 = merge_reg(regs.r13, value, width),
+        14 => regs.r14 = merge_reg(regs.r14, value, width),
+        15 => regs.r15 = merge_reg(regs.r15, value, width),
+        _  => {}
     }
 }
