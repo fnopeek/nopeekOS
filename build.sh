@@ -305,8 +305,8 @@ GRUBCFG
 # Created once on demand and kept between runs so npkFS state survives.
 ensure_disk_img() {
     if [ ! -f "$DISK_IMG" ]; then
-        log "Creating 256MB disk image..."
-        dd if=/dev/zero of="$DISK_IMG" bs=1M count=256 2>/dev/null
+        log "Creating 1GB disk image..."
+        dd if=/dev/zero of="$DISK_IMG" bs=1M count=1024 2>/dev/null
         ok "Disk image: $DISK_IMG"
     fi
 }
@@ -375,7 +375,7 @@ run_qemu_generic() {
         -cdrom "$QEMU_ISO_FILE" \
         -serial stdio \
         "${display_args[@]}" \
-        -m 256M \
+        -m 1024M \
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
