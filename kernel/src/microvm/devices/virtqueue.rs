@@ -18,9 +18,9 @@
 use super::guest_mem;
 
 // vring_desc flags
-const VRING_DESC_F_NEXT:     u16 = 1;
-const VRING_DESC_F_WRITE:    u16 = 2;
-const VRING_DESC_F_INDIRECT: u16 = 4;
+pub const VRING_DESC_F_NEXT:     u16 = 1;
+pub const VRING_DESC_F_WRITE:    u16 = 2;
+pub const VRING_DESC_F_INDIRECT: u16 = 4;
 
 // virtio-blk request types
 const VIRTIO_BLK_T_IN:     u32 = 0;
@@ -36,14 +36,14 @@ const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 const SECTOR_SIZE: u64 = 512;
 
 #[derive(Clone, Copy)]
-struct Desc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
+pub struct Desc {
+    pub addr: u64,
+    pub len: u32,
+    pub flags: u16,
+    pub next: u16,
 }
 
-fn read_desc(host_base: u64, table: u64, idx: u16, queue_size: u16) -> Option<Desc> {
+pub fn read_desc(host_base: u64, table: u64, idx: u16, queue_size: u16) -> Option<Desc> {
     if idx >= queue_size { return None; }
     let off = table + (idx as u64) * 16;
     Some(Desc {
@@ -52,6 +52,29 @@ fn read_desc(host_base: u64, table: u64, idx: u16, queue_size: u16) -> Option<De
         flags: guest_mem::read_u16(host_base, off + 12)?,
         next: guest_mem::read_u16(host_base, off + 14)?,
     })
+}
+
+/// Read the current driver-side avail-ring head index.
+pub fn avail_idx(host_base: u64, avail_gpa: u64) -> Option<u16> {
+    guest_mem::read_u16(host_base, avail_gpa + 2)
+}
+
+/// Read the descriptor head index for a given slot in the avail-ring.
+pub fn avail_ring(host_base: u64, avail_gpa: u64, queue_size: u16, slot: u16) -> Option<u16> {
+    let i = (slot % queue_size) as u64;
+    guest_mem::read_u16(host_base, avail_gpa + 4 + i * 2)
+}
+
+/// Push a (head, len) pair to the used ring and bump used.idx with a
+/// release-fence so the descriptor writes settle first.
+pub fn used_push(host_base: u64, used_gpa: u64, queue_size: u16, used_idx: &mut u16, head: u16, len: u32) {
+    let slot = (*used_idx % queue_size) as u64;
+    let elem = used_gpa + 4 + slot * 8;
+    guest_mem::write_u32(host_base, elem,     head as u32);
+    guest_mem::write_u32(host_base, elem + 4, len);
+    *used_idx = used_idx.wrapping_add(1);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    guest_mem::write_u16(host_base, used_gpa + 2, *used_idx);
 }
 
 /// Walk the available ring from `last_avail_idx` to the current head
