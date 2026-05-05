@@ -3,8 +3,8 @@
 //! 8-slot rotating layout shared with v1, but the structs and magic
 //! bytes are v2-specific so the two cannot be confused at boot.
 
-use super::super::cache::BlockCache;
-use super::super::types::{AlignedBlock, BLOCK_SIZE, FsError};
+use super::cache::BlockCache;
+use super::types::{AlignedBlock, BLOCK_SIZE, FsError};
 use super::format::{V2SuperblockRaw, SUPERBLOCK_SLOTS, SUPERBLOCK_START, V2_MAGIC, V2_VERSION};
 
 /// Read the highest-generation valid v2 superblock from the 8-slot ring.

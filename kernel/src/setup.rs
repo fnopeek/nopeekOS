@@ -114,7 +114,7 @@ pub fn run_first_boot(salt: &[u8; 16]) -> bool {
 /// kernel reads before `validate_user_name` filters it from listings.
 /// Falls back to "florian" if `name` is empty so the tree still has
 /// a usable home dir.
-fn setup_default_tree(name: &str) -> Result<(), npkfs::v2::fs::Error> {
+fn setup_default_tree(name: &str) -> Result<(), npkfs::fs::Error> {
     let user = if name.is_empty() { "florian" } else { name };
 
     let dirs: [alloc::string::String; 13] = [
@@ -133,14 +133,14 @@ fn setup_default_tree(name: &str) -> Result<(), npkfs::v2::fs::Error> {
         alloc::format!("home/{}/projects", user),
     ];
     for d in &dirs {
-        npkfs::v2::fs::ensure_dir(d)?;
+        npkfs::fs::ensure_dir(d)?;
     }
     // Trailing extras under the user dir (kept separate so the array
     // above stays a fixed-length slice, easier to spot when reviewing
     // the canonical layout).
-    npkfs::v2::fs::ensure_dir(&alloc::format!("home/{}/music", user))?;
-    npkfs::v2::fs::ensure_dir(&alloc::format!("home/{}/videos", user))?;
-    npkfs::v2::fs::ensure_dir(&alloc::format!("home/{}/.trash", user))?;
+    npkfs::fs::ensure_dir(&alloc::format!("home/{}/music", user))?;
+    npkfs::fs::ensure_dir(&alloc::format!("home/{}/videos", user))?;
+    npkfs::fs::ensure_dir(&alloc::format!("home/{}/.trash", user))?;
     Ok(())
 }
 

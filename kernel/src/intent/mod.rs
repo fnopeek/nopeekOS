@@ -390,7 +390,7 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
 /// Ensure every directory along `path` exists. v2 has real Tree
 /// objects so this is just an `mkdir -p`; no `.dir` marker files.
 pub(crate) fn ensure_parents(path: &str) {
-    let _ = crate::npkfs::v2::fs::ensure_dirs(path);
+    let _ = crate::npkfs::fs::ensure_dirs(path);
 }
 
 /// Sync session state to terminal.rs saved input (for cursor restore on focus change).
@@ -698,8 +698,8 @@ fn tab_complete(input: &str) -> Option<String> {
         (get_cwd(), String::from(partial))
     };
 
-    use crate::npkfs::v2::object::EntryKind;
-    let entries = match crate::npkfs::v2::fs::list(&parent_abs) {
+    use crate::npkfs::object::EntryKind;
+    let entries = match crate::npkfs::fs::list(&parent_abs) {
         Ok(Some(v)) => v,
         Ok(None) | Err(_) => return None,
     };
@@ -1408,7 +1408,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
 
         "gc" => {
             if require_cap(vault, &session, Rights::AUDIT, "gc") {
-                match crate::storage::npkfs::v2::fs::gc() {
+                match crate::storage::npkfs::fs::gc() {
                     Ok(s) => kprintln!("[npk] gc: kept {}, removed {}", s.kept, s.removed),
                     Err(e) => kprintln!("[npk] gc error: {:?}", e),
                 }
@@ -1739,8 +1739,8 @@ fn intent_cd(args: &str) {
         return;
     }
 
-    use crate::npkfs::v2::object::EntryKind;
-    match crate::npkfs::v2::fs::stat(&resolved) {
+    use crate::npkfs::object::EntryKind;
+    match crate::npkfs::fs::stat(&resolved) {
         Ok(Some(s)) if s.kind == EntryKind::Dir => set_cwd(&resolved),
         Ok(Some(_)) => kprintln!("[npk] '{}': not a directory", target),
         Ok(None)    => kprintln!("[npk] '{}': not found", target),

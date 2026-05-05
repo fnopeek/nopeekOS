@@ -9,10 +9,10 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::super::bitmap::Bitmap;
-use super::super::cache::BlockCache;
-use super::super::journal::Journal;
-use super::super::types::{BLOCK_SIZE, Extent, FsError};
+use super::bitmap::Bitmap;
+use super::cache::BlockCache;
+use super::journal::Journal;
+use super::types::{BLOCK_SIZE, Extent, FsError};
 use super::btree;
 use super::format::{
     V2EntryRaw, V2SuperblockRaw,
@@ -238,7 +238,7 @@ pub fn all_root_hashes() -> Result<Vec<[u8; 32]>, FsError> {
 
     let mut out = Vec::new();
     for slot in 0..super::format::SUPERBLOCK_SLOTS {
-        let mut buf = super::super::types::AlignedBlock::zeroed();
+        let mut buf = super::types::AlignedBlock::zeroed();
         if fs.cache.read(super::format::SUPERBLOCK_START + slot, &mut buf.0).is_err() {
             continue;
         }

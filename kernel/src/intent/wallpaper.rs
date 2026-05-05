@@ -74,8 +74,8 @@ fn ensure_wallpaper_dir() {
 /// List all wallpapers in the user's wallpapers/ directory.
 fn list_wallpapers() {
     let dir = wallpaper_dir();
-    use crate::npkfs::v2::object::EntryKind;
-    let entries = match crate::npkfs::v2::fs::list(&dir) {
+    use crate::npkfs::object::EntryKind;
+    let entries = match crate::npkfs::fs::list(&dir) {
         Ok(Some(v)) => v,
         Ok(None) => { kprintln!("[npk] No wallpapers found in {}/", dir); return; }
         Err(_)    => { kprintln!("[npk] npkFS error"); return; }
@@ -94,8 +94,8 @@ fn list_wallpapers() {
 /// Get all wallpaper names (full paths) for random selection.
 fn get_wallpaper_names() -> Vec<String> {
     let dir = wallpaper_dir();
-    use crate::npkfs::v2::object::EntryKind;
-    let entries = match crate::npkfs::v2::fs::list(&dir) {
+    use crate::npkfs::object::EntryKind;
+    let entries = match crate::npkfs::fs::list(&dir) {
         Ok(Some(v)) => v,
         _ => return Vec::new(),
     };

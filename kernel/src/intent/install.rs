@@ -205,9 +205,9 @@ pub fn update_all_modules() -> usize {
     // List installed modules straight from `sys/wasm` instead of
     // walking the entire FS.
     let installed: alloc::vec::Vec<alloc::string::String> =
-        match crate::npkfs::v2::fs::list("sys/wasm") {
+        match crate::npkfs::fs::list("sys/wasm") {
             Ok(Some(v)) => v.iter()
-                .filter(|e| matches!(e.kind, crate::npkfs::v2::object::EntryKind::File))
+                .filter(|e| matches!(e.kind, crate::npkfs::object::EntryKind::File))
                 .map(|e| e.name.clone())
                 .collect(),
             Ok(None) => alloc::vec::Vec::new(),
@@ -401,14 +401,14 @@ fn is_bundled_module(name: &str) -> bool {
 pub fn intent_modules() {
     kprintln!("[npk] Installed modules:");
 
-    let entries = match crate::npkfs::v2::fs::list("sys/wasm") {
+    let entries = match crate::npkfs::fs::list("sys/wasm") {
         Ok(Some(v)) => v,
         Ok(None) | Err(_) => { kprintln!("  (none)"); return; }
     };
 
     let mut found = false;
     for e in &entries {
-        if !matches!(e.kind, crate::npkfs::v2::object::EntryKind::File) { continue; }
+        if !matches!(e.kind, crate::npkfs::object::EntryKind::File) { continue; }
         if e.name.ends_with(".version") { continue; }
         let version_key = alloc::format!("sys/wasm/{}.version", e.name);
         let version = crate::npkfs::fetch(&version_key).ok()

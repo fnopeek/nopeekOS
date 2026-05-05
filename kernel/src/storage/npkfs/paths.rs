@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 
 use super::object::{EntryKind, Object, TreeEntry, MAX_NAME_LEN};
 use super::storage;
-use super::super::types::FsError;
+use super::types::FsError;
 
 /// Sentinel for "the root Tree doesn't exist yet". `walk` of any path
 /// against this returns NotFound; mutations create the real Tree.
