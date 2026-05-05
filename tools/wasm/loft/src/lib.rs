@@ -861,18 +861,39 @@ fn commit_tree(lf: &Loft) {
 pub extern "C" fn _start() {
     // No `npk_window_set_overlay` — loft is a regular tiled app, the
     // first commit creates its window via shade::create_widget_window.
+    //
+    // Bump-allocator lifecycle:
+    //   * `persistent_mark` is the heap top *after* the last state
+    //     mutation. Anything below it is live `Loft` state (entries,
+    //     history, sidebar Strings, …) that next frame still needs.
+    //     Anything above it is the previous frame's Widget tree —
+    //     transient, safe to wipe.
+    //   * Reset goes *before* `handle()`, not before render.
+    //     Otherwise `navigate()`'s freshly-loaded entries land above
+    //     the old mark and get clobbered by the very Widget allocs
+    //     that follow — the Vec metadata in `loft.entries` survives
+    //     but its String contents are overwritten mid-render →
+    //     UTF-8 / bounds panic on the next navigate.
+    //   * `persistent_mark` is re-captured after `handle()` so the
+    //     new state allocs (if any) become part of the persistent
+    //     region for next frame.
     let mut loft = Loft::new();
-    let persistent_mark = alloc_mark();
+    let mut persistent_mark = alloc_mark();
 
     commit_tree(&loft);
 
     loop {
         match poll_event() {
-            PollResult::Event(ev) => match handle(&mut loft, ev) {
-                Outcome::Idle => {}
-                Outcome::Rerender => { alloc_reset(persistent_mark); commit_tree(&loft); }
-                Outcome::Exit => { close_self(); return; }
-            },
+            PollResult::Event(ev) => {
+                alloc_reset(persistent_mark);
+                let outcome = handle(&mut loft, ev);
+                persistent_mark = alloc_mark();
+                match outcome {
+                    Outcome::Idle => {}
+                    Outcome::Rerender => commit_tree(&loft),
+                    Outcome::Exit => { close_self(); return; }
+                }
+            }
             PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
             PollResult::WindowGone => return,
         }
