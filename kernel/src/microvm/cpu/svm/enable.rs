@@ -645,6 +645,7 @@ fn run_linux_loop(
         serial.inject(inject);
         kprintln!("[svm] pre-injected {} bytes into UART RX FIFO", inject.len());
     }
+    let mut pci = crate::microvm::devices::PciBus::new();
 
     let mut iter: u32 = 0;
     let mut last_outcome: Option<vmcb::LaunchOutcome> = None;
@@ -735,7 +736,7 @@ fn run_linux_loop(
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
-                handle_linux_io(vmcb, &mut serial, regs, port, dir_in, size, &mut io_dropped);
+                handle_linux_io(vmcb, &mut serial, &mut pci, regs, port, dir_in, size, &mut io_dropped);
                 advance_rip(vmcb);
                 last_outcome = Some(outcome);
             }
@@ -846,15 +847,29 @@ fn msr_is_known_noise(msr: u32) -> bool {
 fn handle_linux_io(
     vmcb: &mut vmcb::Vmcb,
     serial: &mut SerialState,
+    pci: &mut crate::microvm::devices::PciBus,
     _regs: &mut vmcb::GuestRegs,
     port: u16,
     dir_in: bool,
     size: u8,
     io_dropped: &mut u32,
 ) {
+    use crate::microvm::devices::{handle_pci_io, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};
+
     let mask: u64 = match size { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFF_FFFF, _ => 0xFF };
     let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
     let val_out = (rax & mask) as u32;
+
+    // PCI config-space ports — dispatch to the bus emulator.
+    if port == PCI_CONFIG_ADDR
+        || (PCI_CONFIG_DATA_START..=PCI_CONFIG_DATA_END).contains(&port)
+    {
+        if let Some(v) = handle_pci_io(pci, port, dir_in, size, val_out) {
+            let new_rax = (rax & !mask) | (v & mask);
+            vmcb.write_u64(vmcb::OFF_SAVE_RAX, new_rax);
+        }
+        return;
+    }
 
     let in_value: Option<u64> = match (port, dir_in) {
         (0x3F8, false) => {

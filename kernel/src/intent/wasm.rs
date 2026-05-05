@@ -1,6 +1,6 @@
 //! WASM intents: run, driver
 
-use crate::{kprint, kprintln, capability};
+use crate::{kprint, kprintln};
 use super::resolve_path;
 
 pub fn intent_run(args: &str) {
