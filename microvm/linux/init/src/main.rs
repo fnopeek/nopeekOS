@@ -47,6 +47,10 @@ const SIOCSIFADDR:  u64 = 0x8916;
 const SIOCSIFFLAGS: u64 = 0x8914;
 const SIOCADDRT:    u64 = 0x890B;
 
+// ioctl(2) commands for framebuffer device
+const FBIOGET_VSCREENINFO: u64 = 0x4600;
+const FBIOPUT_VSCREENINFO: u64 = 0x4601;
+
 // rtentry flags
 const RTF_UP:      u16 = 0x0001;
 const RTF_GATEWAY: u16 = 0x0002;
@@ -595,9 +599,26 @@ fn fb_write_pattern(kmsg_fd: i64) {
     }
     say(kmsg_fd, b"[microvm-init] fb: /dev/fb0 open OK\n");
 
+    // Force a modeset commit. Without this drm_fb_helper never calls
+    // set_par → no atomic commit → no SET_SCANOUT → host never gets
+    // TRANSFER+FLUSH events. struct fb_var_screeninfo is 160 bytes;
+    // we read it and write it back unchanged. The PUT triggers
+    // drm_fb_helper_set_par which atomically commits the crtc.
+    let mut vinfo = [0u8; 160];
+    let r = unsafe { syscall3(SYS_IOCTL, fd as u64, FBIOGET_VSCREENINFO, vinfo.as_mut_ptr() as u64) };
+    if r < 0 {
+        say(kmsg_fd, b"[microvm-init] fb: FBIOGET_VSCREENINFO failed\n");
+    } else {
+        let r = unsafe { syscall3(SYS_IOCTL, fd as u64, FBIOPUT_VSCREENINFO, vinfo.as_ptr() as u64) };
+        if r < 0 {
+            say(kmsg_fd, b"[microvm-init] fb: FBIOPUT_VSCREENINFO failed\n");
+        } else {
+            say(kmsg_fd, b"[microvm-init] fb: modeset committed (PUT_VSCREENINFO OK)\n");
+        }
+    }
+
     // 64 KB of BGRA pixels = 16384 pixels = 128×128 of red
     let mut buf = [0u8; 4096];
-    // BGRA: opaque red = 0x00 0x00 0xFF 0xFF
     for i in (0..buf.len()).step_by(4) {
         buf[i + 0] = 0x00; // B
         buf[i + 1] = 0x00; // G
