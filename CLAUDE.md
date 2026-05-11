@@ -42,13 +42,35 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.2 ✅ + 12.3.0–12.3.2 ✅** — virtio-blk
+- **Phase:** **12.2 ✅ + 12.3.0–12.3.3 ✅** — virtio-blk
   end-to-end mit npkFS-persistierter encrypted profile-image, virtio-net
-  TX/RX-Pfade mit ARP-Loop. Kernel `v0.154.5`, microvm-init `0.3.2`,
-  Linux `6.18.26-nopeek` (eigener Build, VIRTIO_BLK=y built-in). Phase
-  12.3.3 (NAT zum Host-Stack + Cap-Filter), 12.3.4 (curl/HTTPS-test),
-  12.4–12.6 (virtio-gpu, picker, Firefox) plus Microkernel-Refactor
-  weiter offen.
+  TX/RX-Pfade mit ARP-Loop, DNS-Shortcut + Cap-Filter zum Host-Stack.
+  Kernel `v0.155.0`, microvm-init `0.3.3`, Linux `6.18.26-nopeek`
+  (eigener Build, VIRTIO_BLK=y built-in). Phase 12.3.4 (curl/HTTPS-test
+  — braucht TCP-NAT), 12.4–12.6 (virtio-gpu, picker, Firefox) plus
+  Microkernel-Refactor weiter offen.
+- **2026-05-11 — Phase 12.3.3 (NAT + Cap-Filter), v0.155.0:**
+  - Neuer `microvm/devices/nat.rs` (~310 LoC) — synthetic gateway-Logik
+    raus aus `virtio_net_pci.rs`. ARP-Reply + IPv4-Dispatch + DNS-
+    Shortcut + Builder für `build_ipv4_udp_reply` + IPv4-Checksum.
+    Konstanten `GUEST_MAC/GATEWAY_MAC/GATEWAY_IP/GUEST_IP` zentralisiert.
+  - `NetCaps { allow_dns/icmp/udp/tcp }` mit `dns_only()` default.
+    Cap-rejects loggen erste 8 dropped flows pro VM-run, dann silent.
+  - **DNS-Shortcut** — guest UDP→10.99.0.1:53 → `parse_dns_query` →
+    `crate::net::dns::resolve(qname)` (cache + real upstream) →
+    `build_dns_reply` (A-record + compression pointer + TTL 60) →
+    `build_ipv4_udp_reply` → RX-inject. NXDOMAIN-Fallback (rcode=3)
+    falls qtype != A oder resolve None.
+  - **PID-1 v0.3.3** — `udp_poke` raus, `dns_query("nopeek.ch")` rein:
+    baut handgemachte DNS-A-Query (header + QNAME labels + qtype/qclass),
+    setsockopt SO_RCVTIMEO 2s, sendto + recvfrom, parst erste A-Record
+    aus dem Reply (compression-pointer-aware skip_dns_name) und kmsg-
+    logged `DNS nopeek.ch -> a.b.c.d`. Drei neue Syscall-Nummern
+    (SYS_RECVFROM=45, SYS_SETSOCKOPT=54) + SOL_SOCKET/SO_RCVTIMEO.
+  - `push_dec` Signatur erweitert von `&mut [u8; 256]` zu `&mut [u8]`
+    damit der 128-Byte-Output-Buffer in `log_dns_result` passt.
+  - **TODO 12.3.4**: TCP-NAT-Sessiontable für curl/HTTPS — der jetzige
+    Cap-reject droppt SYN-Pakete, also blockt curl wie erwartet.
 - **2026-05-05 (sehr lange session, ~25 commits, v0.148.3 → v0.154.5):**
   - **Cleanup v0.148.4** — bootstrap WASM-Modules add/multiply/hello/fib
     raus (~140 LoC weg).

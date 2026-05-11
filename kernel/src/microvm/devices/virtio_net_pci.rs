@@ -1,13 +1,15 @@
-//! virtio-net-pci device emulation (Phase 12.3 step 0 — discovery).
+//! virtio-net-pci device emulation.
 //!
 //! Modern virtio (1.0+) network device — vendor 0x1AF4, device 0x1041,
 //! class 02_00_00 (Network controller / Ethernet). Two virtqueues:
 //!   q0 = receive (driver fills with empty buffers, device writes packets)
 //!   q1 = transmit (driver fills with packets, device reads + sends)
 //!
-//! 12.3.0 just stands the device up so Linux's `virtio_net` driver
-//! attaches and configures the queues. Notify-handling logs but doesn't
-//! yet bridge to the host network stack — that lands in 12.3.1.
+//! Responsibility split: this file owns the wire-level virtio device
+//! (PCI cap chain, Common Cfg, virtqueue walking, RX injection). The
+//! synthetic gateway logic — ARP replies, DNS short-circuit, future
+//! NAT — lives in `super::nat`. We hand each TX'd frame to
+//! `nat::process_tx` and inject whatever replies it produces.
 //!
 //! Lots of code overlaps with virtio_blk_pci. When we add the third
 //! modern-virtio device (virtio-gpu in 12.4) we'll factor the common
@@ -86,17 +88,7 @@ const VIRTIO_NET_S_LINK_UP: u16 = 1;
 const NUM_QUEUES: u16 = 2;
 const MAX_QUEUE_SIZE: u16 = 256;
 
-/// Virtual MAC. Locally-administered (bit 1 of first byte set), unicast.
-/// Will become per-VM-derived once we have multi-app VMs.
-const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x6E, 0x70, 0x6B];
-
-/// MAC the host pretends to be on the synthetic gateway 10.99.0.1.
-/// Different last byte from `GUEST_MAC` so packets aren't loopback'd.
-const GATEWAY_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x6E, 0x70, 0x01];
-
-/// Synthetic gateway IP. The host responds to ARP for this and
-/// (12.3.3) NATs IP traffic destined for it.
-const GATEWAY_IP: [u8; 4] = [10, 99, 0, 1];
+use super::nat::{GUEST_MAC, NetCaps};
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
@@ -200,6 +192,11 @@ pub struct VirtioNet {
     pending_kick_queue: Option<u16>,
 
     notify_log_count: u32,
+
+    /// Per-VM net policy. Set by the microvm session when the device is
+    /// brought up; defaults to DNS-only so a misconfigured caller can't
+    /// accidentally exfiltrate anything.
+    caps: NetCaps,
 }
 
 impl VirtioNet {
@@ -226,8 +223,13 @@ impl VirtioNet {
             isr: 0,
             pending_kick_queue: None,
             notify_log_count: 0,
+            caps: NetCaps::dns_only(),
         }
     }
+
+    /// Replace the per-VM net policy. Called by microvm session setup
+    /// (currently only used by tests / future per-app caps).
+    pub fn set_caps(&mut self, caps: NetCaps) { self.caps = caps; }
 
     pub fn bar0_base(&self) -> u64 {
         ((self.bar0_hi as u64) << 32) | (self.bar0_lo as u64 & !0x0Fu64)
@@ -260,6 +262,7 @@ impl VirtioNet {
     fn service_tx(&mut self, host_base: u64) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT};
 
+        let self_caps = self.caps;
         let advanced;
         let new_used_idx;
         let mut pending_rx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
@@ -310,11 +313,11 @@ impl VirtioNet {
                 q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
                 any = true;
 
-                // Stash any reply we want to inject back via RX. We
-                // can't inject inline here — q is borrowed mutably as
-                // queue 1; injecting needs queue 0. Defer until after
-                // the TX-walk loop ends.
-                if let Some(rep) = maybe_arp_reply(&payload) {
+                // Stash any replies (ARP, DNS, …) we want to inject
+                // back via RX. We can't inject inline here — q is
+                // borrowed mutably as queue 1; injecting needs queue 0.
+                // Defer until after the TX-walk loop ends.
+                for rep in super::nat::process_tx(&payload, &self_caps) {
                     pending_rx.push(rep);
                 }
             }
@@ -601,53 +604,6 @@ impl VirtioNet {
         q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
         true
     }
-}
-
-/// If `payload` (12-byte virtio-net header + 14-byte ethernet header +
-/// 28-byte ARP body, minimum 54 bytes) is an ARP-Request asking for
-/// the synthetic gateway IP, build the matching ARP-Reply. Returns
-/// `None` for any non-ARP, non-Request, or non-gateway-target.
-fn maybe_arp_reply(payload: &[u8]) -> Option<alloc::vec::Vec<u8>> {
-    const VNET_HDR_LEN: usize = 12;
-    const ETH_HDR_LEN:  usize = 14;
-    const ARP_LEN:      usize = 28;
-    if payload.len() < VNET_HDR_LEN + ETH_HDR_LEN + ARP_LEN { return None; }
-
-    let frame = &payload[VNET_HDR_LEN..];
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-    if ethertype != 0x0806 { return None; }
-
-    let arp = &frame[ETH_HDR_LEN..];
-    let oper = u16::from_be_bytes([arp[6], arp[7]]);
-    if oper != 1 { return None; }                   // not a request
-    if &arp[24..28] != GATEWAY_IP { return None; }  // not for our gateway
-
-    // Sender (= guest) info — used as target in the reply.
-    let mut sender_mac = [0u8; 6];
-    sender_mac.copy_from_slice(&arp[8..14]);
-    let mut sender_ip = [0u8; 4];
-    sender_ip.copy_from_slice(&arp[14..18]);
-
-    let mut reply = alloc::vec![0u8; VNET_HDR_LEN + ETH_HDR_LEN + ARP_LEN];
-    // virtio-net header: zeros = no offload features used.
-    // Ethernet header
-    reply[VNET_HDR_LEN..VNET_HDR_LEN + 6].copy_from_slice(&sender_mac);     // dst = guest
-    reply[VNET_HDR_LEN + 6..VNET_HDR_LEN + 12].copy_from_slice(&GATEWAY_MAC); // src = synth gateway
-    reply[VNET_HDR_LEN + 12] = 0x08;
-    reply[VNET_HDR_LEN + 13] = 0x06; // ethertype ARP
-    // ARP body
-    let arp_off = VNET_HDR_LEN + ETH_HDR_LEN;
-    reply[arp_off + 0] = 0x00; reply[arp_off + 1] = 0x01; // htype = Ethernet
-    reply[arp_off + 2] = 0x08; reply[arp_off + 3] = 0x00; // ptype = IPv4
-    reply[arp_off + 4] = 6;                                // hwlen
-    reply[arp_off + 5] = 4;                                // protolen
-    reply[arp_off + 6] = 0x00; reply[arp_off + 7] = 0x02; // oper = REPLY
-    reply[arp_off +  8..arp_off + 14].copy_from_slice(&GATEWAY_MAC);    // sender = us
-    reply[arp_off + 14..arp_off + 18].copy_from_slice(&GATEWAY_IP);
-    reply[arp_off + 18..arp_off + 24].copy_from_slice(&sender_mac);     // target = guest
-    reply[arp_off + 24..arp_off + 28].copy_from_slice(&sender_ip);
-
-    Some(reply)
 }
 
 const fn width_mask(width: u8) -> u64 {
