@@ -329,6 +329,13 @@ fn build_ipv4_udp_reply(
 }
 
 fn write_eth(buf: &mut [u8], dst: &[u8; 6], src: &[u8; 6], ethertype: u16) {
+    // virtio_net_hdr at offset 0..12. Per virtio 1.2 §5.1.6.4.1, with
+    // VIRTIO_F_VERSION_1 negotiated and VIRTIO_NET_F_MRG_RXBUF NOT
+    // negotiated, num_buffers (bytes 10..12, LE) MUST be 1 or Linux's
+    // virtio_net driver drops the packet silently in receive_buf().
+    // Everything else stays zero (no offloads, no GSO).
+    buf[10] = 1;
+    buf[11] = 0;
     let off = VNET_HDR_LEN;
     buf[off..off + 6].copy_from_slice(dst);
     buf[off + 6..off + 12].copy_from_slice(src);
@@ -785,6 +792,8 @@ pub fn pump(
                 let seg = build_tcp_segment(sess, &buf[..n], TCP_PSH | TCP_ACK);
                 drop(sessions);
                 if net.inject_rx(host_base, &seg) {
+                    kprintln!("[nat] pump: rx injected ({} bytes, total frame {})",
+                              n, seg.len());
                     let mut s = SESSIONS.lock();
                     if let Some(sess) = s[snap.slot].as_mut() {
                         sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
