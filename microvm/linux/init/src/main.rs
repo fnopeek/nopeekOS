@@ -24,6 +24,8 @@ const SYS_DUP2: u64 = 33;
 const SYS_PAUSE: u64 = 34;
 const SYS_SOCKET: u64 = 41;
 const SYS_SENDTO: u64 = 44;
+const SYS_RECVFROM: u64 = 45;
+const SYS_SETSOCKOPT: u64 = 54;
 const SYS_EXIT: u64 = 60;
 const SYS_MKDIR: u64 = 83;
 const SYS_MOUNT: u64 = 165;
@@ -33,6 +35,10 @@ const SYS_IOPERM: u64 = 173;
 // AF_INET socket
 const AF_INET: u64 = 2;
 const SOCK_DGRAM: u64 = 2;
+
+// setsockopt levels / options
+const SOL_SOCKET: u64 = 1;
+const SO_RCVTIMEO: u64 = 20;
 
 // ioctl(2) commands for net interface
 const SIOCSIFADDR:  u64 = 0x8916;
@@ -138,11 +144,12 @@ unsafe extern "C" fn rust_main() -> ! {
     blk_read_test(kmsg_fd);
 
     // Phase 12.3.1: bring eth0 up with the static IP that the host's
-    // virtio-net is set up to bridge for, then send one UDP datagram
-    // toward the gateway — that forces Linux to ARP-resolve 10.99.0.1
-    // and the resulting ARP-Request hits our virtio-net TX path.
+    // virtio-net is set up to bridge for.
     eth0_up(kmsg_fd);
-    udp_poke(kmsg_fd);
+    // Phase 12.3.3: send a real DNS A-record query for `nopeek.ch` to
+    // the synthetic gateway. Host's NAT handler resolves via the real
+    // resolver and injects an A-record reply back on the RX queue.
+    dns_query(kmsg_fd, b"nopeek.ch");
 
     // Phase 12.1.4 — inject_console round-trip. Grant ourselves I/O
     // port access on COM1 (0x3F8-0x3FF) via ioperm(2). Modern Linux
@@ -230,7 +237,7 @@ fn blk_read_test(kmsg_fd: i64) {
     say(kmsg_fd, &out[..p]);
 }
 
-fn push_dec(out: &mut [u8; 256], mut p: usize, mut n: u32) -> usize {
+fn push_dec(out: &mut [u8], mut p: usize, mut n: u32) -> usize {
     if n == 0 {
         if p < out.len() { out[p] = b'0'; p += 1; }
         return p;
@@ -296,42 +303,166 @@ fn eth0_up(kmsg_fd: i64) {
     say(kmsg_fd, b"[microvm-init] eth0 up @ 10.99.0.2/24\n");
 }
 
-/// Send one UDP datagram to the gateway. Linux's IP stack does
-/// route lookup → on-link → ARP-resolve 10.99.0.1 → ARP-Request on
-/// the wire. The send itself probably fails (no answer), but the
-/// ARP-Request fires our virtio-net TX path so we see it logged.
-fn udp_poke(kmsg_fd: i64) {
+/// Build a DNS A-record query for `name`, send it to 10.99.0.1:53, and
+/// wait up to 2 s for a reply. On success log the resolved IP via
+/// kmsg; on timeout / NXDOMAIN log the failure mode.
+fn dns_query(kmsg_fd: i64, name: &[u8]) {
     let fd = unsafe { syscall3(SYS_SOCKET, AF_INET, SOCK_DGRAM, 0) };
     if fd < 0 {
-        say(kmsg_fd, b"[microvm-init] udp socket failed\n");
+        say(kmsg_fd, b"[microvm-init] dns socket failed\n");
         return;
     }
+
+    // 2 second SO_RCVTIMEO so recvfrom can't hang the boot forever.
+    // struct timeval { tv_sec: i64, tv_usec: i64 } = 16 bytes
+    let mut tv = [0u8; 16];
+    tv[0] = 2;
+    let _ = unsafe {
+        syscall5(SYS_SETSOCKOPT, fd as u64, SOL_SOCKET, SO_RCVTIMEO,
+                 tv.as_ptr() as u64, tv.len() as u64)
+    };
 
     // sockaddr_in for 10.99.0.1:53
     let mut sa = [0u8; 16];
     sa[0] = AF_INET as u8;
     sa[1] = (AF_INET >> 8) as u8;
-    sa[2] = 0; sa[3] = 53;                            // port 53 (NBO: hi,lo)
-    sa[4] = 10; sa[5] = 99; sa[6] = 0; sa[7] = 1;     // ip (NBO)
+    sa[2] = 0; sa[3] = 53;
+    sa[4] = 10; sa[5] = 99; sa[6] = 0; sa[7] = 1;
 
-    let payload = b"npk-poke";
-    let n = unsafe {
+    // Build DNS query — 12-byte header + QNAME labels + 4-byte qtype/qclass.
+    let mut query = [0u8; 128];
+    let mut qlen: usize = 0;
+    // Header: id=0x1234, flags=0x0100 (std query, RD), qd=1
+    query[qlen] = 0x12; qlen += 1;
+    query[qlen] = 0x34; qlen += 1;
+    query[qlen] = 0x01; qlen += 1;
+    query[qlen] = 0x00; qlen += 1;
+    query[qlen] = 0x00; qlen += 1;
+    query[qlen] = 0x01; qlen += 1;
+    qlen += 6; // ANCOUNT/NSCOUNT/ARCOUNT = 0 (already zeroed)
+    // QNAME — labels separated by '.', each prefixed with its length
+    let mut label_start = qlen;
+    query[qlen] = 0; qlen += 1; // placeholder for first label length
+    for &b in name {
+        if qlen >= query.len() - 5 { break; }
+        if b == b'.' {
+            query[label_start] = (qlen - label_start - 1) as u8;
+            label_start = qlen;
+            query[qlen] = 0; qlen += 1;
+        } else {
+            query[qlen] = b; qlen += 1;
+        }
+    }
+    query[label_start] = (qlen - label_start - 1) as u8;
+    query[qlen] = 0; qlen += 1; // root label
+    // QTYPE=A(1), QCLASS=IN(1)
+    query[qlen] = 0; qlen += 1;
+    query[qlen] = 1; qlen += 1;
+    query[qlen] = 0; qlen += 1;
+    query[qlen] = 1; qlen += 1;
+
+    let sent = unsafe {
         syscall6(
             SYS_SENDTO,
             fd as u64,
-            payload.as_ptr() as u64,
-            payload.len() as u64,
+            query.as_ptr() as u64,
+            qlen as u64,
             0,
             sa.as_ptr() as u64,
             sa.len() as u64,
         )
     };
+    if sent < 0 {
+        say(kmsg_fd, b"[microvm-init] dns sendto failed\n");
+        let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+        return;
+    }
+
+    let mut reply = [0u8; 512];
+    let n = unsafe {
+        syscall6(
+            SYS_RECVFROM,
+            fd as u64,
+            reply.as_mut_ptr() as u64,
+            reply.len() as u64,
+            0, 0, 0,
+        )
+    };
     let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
 
     if n < 0 {
-        say(kmsg_fd, b"[microvm-init] udp poke sent (errno; ARP queued)\n");
-    } else {
-        say(kmsg_fd, b"[microvm-init] udp poke sent\n");
+        say(kmsg_fd, b"[microvm-init] dns recvfrom timeout\n");
+        return;
+    }
+    let rlen = n as usize;
+    log_dns_result(kmsg_fd, name, &reply[..rlen]);
+}
+
+/// Parse the first A record out of a DNS reply (or detect NXDOMAIN /
+/// malformed) and emit a `[microvm-init] DNS <name> → a.b.c.d` line.
+fn log_dns_result(kmsg_fd: i64, name: &[u8], reply: &[u8]) {
+    let mut out: [u8; 128] = [0; 128];
+    let mut p: usize = 0;
+    let prefix = b"[microvm-init] DNS ";
+    for &b in prefix { if p < out.len() { out[p] = b; p += 1; } }
+    for &b in name { if p < out.len() { out[p] = b; p += 1; } }
+    let arrow = b" -> ";
+    for &b in arrow { if p < out.len() { out[p] = b; p += 1; } }
+
+    if reply.len() < 12 {
+        let tail = b"malformed\n";
+        for &b in tail { if p < out.len() { out[p] = b; p += 1; } }
+        say(kmsg_fd, &out[..p]);
+        return;
+    }
+    let flags = (reply[2] as u16) << 8 | reply[3] as u16;
+    let rcode = flags & 0x0F;
+    let ancount = (reply[6] as u16) << 8 | reply[7] as u16;
+    if rcode != 0 || ancount == 0 {
+        let tail = b"NXDOMAIN\n";
+        for &b in tail { if p < out.len() { out[p] = b; p += 1; } }
+        say(kmsg_fd, &out[..p]);
+        return;
+    }
+
+    // Walk past question section (skip name + 4 bytes type/class).
+    let qd = (reply[4] as u16) << 8 | reply[5] as u16;
+    let mut pos = 12;
+    for _ in 0..qd {
+        match skip_dns_name(reply, pos) { Some(np) => pos = np, None => return };
+        pos += 4;
+        if pos > reply.len() { return; }
+    }
+    // Walk answers, find the first A record.
+    for _ in 0..ancount {
+        match skip_dns_name(reply, pos) { Some(np) => pos = np, None => return };
+        if pos + 10 > reply.len() { return; }
+        let rtype = (reply[pos] as u16) << 8 | reply[pos + 1] as u16;
+        let rdlength = (reply[pos + 8] as u16) << 8 | reply[pos + 9] as u16;
+        pos += 10;
+        if rtype == 1 && rdlength == 4 && pos + 4 <= reply.len() {
+            p = push_dec(&mut out, p, reply[pos    ] as u32); if p < out.len() { out[p] = b'.'; p += 1; }
+            p = push_dec(&mut out, p, reply[pos + 1] as u32); if p < out.len() { out[p] = b'.'; p += 1; }
+            p = push_dec(&mut out, p, reply[pos + 2] as u32); if p < out.len() { out[p] = b'.'; p += 1; }
+            p = push_dec(&mut out, p, reply[pos + 3] as u32);
+            if p < out.len() { out[p] = b'\n'; p += 1; }
+            say(kmsg_fd, &out[..p]);
+            return;
+        }
+        pos += rdlength as usize;
+    }
+    let tail = b"no A record\n";
+    for &b in tail { if p < out.len() { out[p] = b; p += 1; } }
+    say(kmsg_fd, &out[..p]);
+}
+
+fn skip_dns_name(data: &[u8], mut pos: usize) -> Option<usize> {
+    loop {
+        if pos >= data.len() { return None; }
+        let len = data[pos];
+        if len == 0 { return Some(pos + 1); }
+        if len & 0xC0 == 0xC0 { return Some(pos + 2); }   // pointer
+        pos += 1 + len as usize;
     }
 }
 

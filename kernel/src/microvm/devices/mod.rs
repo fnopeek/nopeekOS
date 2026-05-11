@@ -12,6 +12,7 @@
 pub mod guest_fetch;
 pub mod guest_mem;
 pub mod insn_decoder;
+pub mod nat;
 pub mod pci_bus;
 pub mod pic8259;
 pub mod virtio_blk_pci;
