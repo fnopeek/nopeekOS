@@ -45,6 +45,11 @@ const SO_RCVTIMEO: u64 = 20;
 // ioctl(2) commands for net interface
 const SIOCSIFADDR:  u64 = 0x8916;
 const SIOCSIFFLAGS: u64 = 0x8914;
+const SIOCADDRT:    u64 = 0x890B;
+
+// rtentry flags
+const RTF_UP:      u16 = 0x0001;
+const RTF_GATEWAY: u16 = 0x0002;
 
 // IFF flags
 const IFF_UP: u16 = 0x0001;
@@ -303,12 +308,44 @@ fn eth0_up(kmsg_fd: i64) {
     ifr_flags[17] = (IFF_UP >> 8) as u8;
 
     let r = unsafe { syscall3(SYS_IOCTL, fd as u64, SIOCSIFFLAGS, ifr_flags.as_ptr() as u64) };
-    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
     if r < 0 {
         say(kmsg_fd, b"[microvm-init] SIOCSIFFLAGS failed\n");
+        let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
         return;
     }
-    say(kmsg_fd, b"[microvm-init] eth0 up @ 10.99.0.2/24\n");
+
+    // Default route: 0.0.0.0/0 via 10.99.0.1. Without this, connect()
+    // to non-10.99.0.0/24 IPs fails with ENETUNREACH before any SYN
+    // hits our virtio-net. struct rtentry on x86_64 is ~120 bytes with
+    // alignment — we use a 128-byte zero buffer and set:
+    //   off  8..24 = rt_dst       (sockaddr_in, family AF_INET, 0.0.0.0)
+    //   off 24..40 = rt_gateway   (sockaddr_in, AF_INET, 10.99.0.1)
+    //   off 40..56 = rt_genmask   (sockaddr_in, AF_INET, 0.0.0.0)
+    //   off 56..58 = rt_flags     (RTF_UP | RTF_GATEWAY)
+    // Everything else (pad/dev/mtu/window) stays zero — Linux picks
+    // the device via the gateway's connected route.
+    let mut rt = [0u8; 128];
+    // rt_dst @ 8 — AF_INET, 0.0.0.0
+    rt[8]  = AF_INET as u8;
+    rt[9]  = (AF_INET >> 8) as u8;
+    // rt_gateway @ 24 — AF_INET, 10.99.0.1
+    rt[24] = AF_INET as u8;
+    rt[25] = (AF_INET >> 8) as u8;
+    rt[28] = 10; rt[29] = 99; rt[30] = 0; rt[31] = 1;
+    // rt_genmask @ 40 — AF_INET, 0.0.0.0
+    rt[40] = AF_INET as u8;
+    rt[41] = (AF_INET >> 8) as u8;
+    // rt_flags @ 56
+    rt[56] = (RTF_UP | RTF_GATEWAY) as u8;
+    rt[57] = ((RTF_UP | RTF_GATEWAY) >> 8) as u8;
+
+    let r = unsafe { syscall3(SYS_IOCTL, fd as u64, SIOCADDRT, rt.as_ptr() as u64) };
+    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+    if r < 0 {
+        say(kmsg_fd, b"[microvm-init] default route add failed\n");
+        return;
+    }
+    say(kmsg_fd, b"[microvm-init] eth0 up @ 10.99.0.2/24 gw 10.99.0.1\n");
 }
 
 /// Build a DNS A-record query for `name`, send it to 10.99.0.1:53, and
