@@ -594,13 +594,16 @@ fn tcp_handle_syn(
 
 /// Build any TCP segment (ACK / FIN+ACK / PSH+ACK / etc.) for this
 /// session, optionally carrying `payload`. Sequence numbers come from
-/// the current session state.
+/// the current session state. The packet is constructed to look like
+/// it came FROM `target_ip:target_port` (the NAT-impersonated remote
+/// server) TO `GUEST_IP:guest_port`, so the guest's TCP stack accepts
+/// it as a continuation of its connection.
 fn build_tcp_segment(sess: &TcpSession, payload: &[u8], flags: u8) -> Vec<u8> {
     let total_ip = IPV4_HDR_LEN + TCP_HDR_LEN + payload.len();
     let total = VNET_HDR_LEN + ETH_HDR_LEN + total_ip;
     let mut buf = alloc::vec![0u8; total];
     write_eth(&mut buf, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
-    fill_ipv4(&mut buf, sess.target_ip, total_ip, PROTO_TCP);
+    fill_ipv4_full(&mut buf, sess.target_ip, GUEST_IP, total_ip, PROTO_TCP);
 
     let tcp_off = VNET_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN;
     buf[tcp_off + 0..tcp_off + 2].copy_from_slice(&sess.target_port.to_be_bytes());
@@ -610,13 +613,12 @@ fn build_tcp_segment(sess: &TcpSession, payload: &[u8], flags: u8) -> Vec<u8> {
     buf[tcp_off + 12] = ((TCP_HDR_LEN / 4) as u8) << 4;
     buf[tcp_off + 13] = flags;
     buf[tcp_off + 14..tcp_off + 16].copy_from_slice(&65535u16.to_be_bytes());
-    // checksum (later)
-    // urgent (zero)
     if !payload.is_empty() {
         buf[tcp_off + TCP_HDR_LEN..tcp_off + TCP_HDR_LEN + payload.len()]
             .copy_from_slice(payload);
     }
-    let cksum = tcp_checksum(sess.target_ip, &buf[tcp_off..tcp_off + TCP_HDR_LEN + payload.len()]);
+    let cksum = tcp_checksum(sess.target_ip, GUEST_IP,
+                             &buf[tcp_off..tcp_off + TCP_HDR_LEN + payload.len()]);
     buf[tcp_off + 16..tcp_off + 18].copy_from_slice(&cksum.to_be_bytes());
     buf
 }
@@ -629,7 +631,7 @@ fn build_tcp_synack_with_mss(sess: &TcpSession) -> Vec<u8> {
     let total = VNET_HDR_LEN + ETH_HDR_LEN + total_ip;
     let mut buf = alloc::vec![0u8; total];
     write_eth(&mut buf, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
-    fill_ipv4(&mut buf, sess.target_ip, total_ip, PROTO_TCP);
+    fill_ipv4_full(&mut buf, sess.target_ip, GUEST_IP, total_ip, PROTO_TCP);
 
     let tcp_off = VNET_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN;
     buf[tcp_off + 0..tcp_off + 2].copy_from_slice(&sess.target_port.to_be_bytes());
@@ -640,11 +642,11 @@ fn build_tcp_synack_with_mss(sess: &TcpSession) -> Vec<u8> {
     buf[tcp_off + 12] = ((HDR_WITH_MSS / 4) as u8) << 4;
     buf[tcp_off + 13] = TCP_SYN | TCP_ACK;
     buf[tcp_off + 14..tcp_off + 16].copy_from_slice(&65535u16.to_be_bytes());
-    // MSS option: kind=2, len=4, value=1400
     buf[tcp_off + 20] = 2;
     buf[tcp_off + 21] = 4;
     buf[tcp_off + 22..tcp_off + 24].copy_from_slice(&(MAX_SEG_PAYLOAD as u16).to_be_bytes());
-    let cksum = tcp_checksum(sess.target_ip, &buf[tcp_off..tcp_off + HDR_WITH_MSS]);
+    let cksum = tcp_checksum(sess.target_ip, GUEST_IP,
+                             &buf[tcp_off..tcp_off + HDR_WITH_MSS]);
     buf[tcp_off + 16..tcp_off + 18].copy_from_slice(&cksum.to_be_bytes());
     buf
 }
@@ -661,7 +663,7 @@ fn build_tcp_rst(
     let total = VNET_HDR_LEN + ETH_HDR_LEN + total_ip;
     let mut buf = alloc::vec![0u8; total];
     write_eth(&mut buf, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
-    fill_ipv4(&mut buf, target_ip, total_ip, PROTO_TCP);
+    fill_ipv4_full(&mut buf, target_ip, GUEST_IP, total_ip, PROTO_TCP);
     let tcp_off = VNET_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN;
     buf[tcp_off + 0..tcp_off + 2].copy_from_slice(&target_port.to_be_bytes());
     buf[tcp_off + 2..tcp_off + 4].copy_from_slice(&guest_port.to_be_bytes());
@@ -669,14 +671,15 @@ fn build_tcp_rst(
     buf[tcp_off + 8..tcp_off + 12].copy_from_slice(&ack.to_be_bytes());
     buf[tcp_off + 12] = ((TCP_HDR_LEN / 4) as u8) << 4;
     buf[tcp_off + 13] = TCP_RST | TCP_ACK;
-    let cksum = tcp_checksum(target_ip, &buf[tcp_off..tcp_off + TCP_HDR_LEN]);
+    let cksum = tcp_checksum(target_ip, GUEST_IP, &buf[tcp_off..tcp_off + TCP_HDR_LEN]);
     buf[tcp_off + 16..tcp_off + 18].copy_from_slice(&cksum.to_be_bytes());
     buf
 }
 
-/// Fill the IPv4 header at the standard offset. Source is always
-/// GATEWAY_IP (the synth gateway). `total_ip` is IP-header + payload.
-fn fill_ipv4(buf: &mut [u8], dst_ip: [u8; 4], total_ip: usize, proto: u8) {
+/// Fill the IPv4 header with explicit src + dst. Used by TCP NAT
+/// where src is the impersonated remote server, not our gateway.
+fn fill_ipv4_full(buf: &mut [u8], src_ip: [u8; 4], dst_ip: [u8; 4],
+                  total_ip: usize, proto: u8) {
     let off = VNET_HDR_LEN + ETH_HDR_LEN;
     buf[off + 0]  = 0x45;
     buf[off + 1]  = 0;
@@ -685,24 +688,24 @@ fn fill_ipv4(buf: &mut [u8], dst_ip: [u8; 4], total_ip: usize, proto: u8) {
     buf[off + 6..off + 8].copy_from_slice(&0x4000u16.to_be_bytes());
     buf[off + 8]  = 64;
     buf[off + 9]  = proto;
-    buf[off + 12..off + 16].copy_from_slice(&GATEWAY_IP);
+    buf[off + 12..off + 16].copy_from_slice(&src_ip);
     buf[off + 16..off + 20].copy_from_slice(&dst_ip);
     let csum = ipv4_checksum(&buf[off..off + IPV4_HDR_LEN]);
     buf[off + 10..off + 12].copy_from_slice(&csum.to_be_bytes());
 }
 
 /// TCP checksum: pseudo-header (src_ip, dst_ip, zero, proto, tcp_len) +
-/// the segment itself. src_ip = GATEWAY_IP for outbound replies.
-fn tcp_checksum(dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
+/// the segment itself. Caller passes the same src/dst IPs that go in
+/// the IPv4 header.
+fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     // pseudo-header
-    sum += u16::from_be_bytes([GATEWAY_IP[0], GATEWAY_IP[1]]) as u32;
-    sum += u16::from_be_bytes([GATEWAY_IP[2], GATEWAY_IP[3]]) as u32;
+    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
+    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
     sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
     sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
     sum += PROTO_TCP as u32;
     sum += tcp_segment.len() as u32;
-    // segment
     let mut i = 0;
     while i + 1 < tcp_segment.len() {
         sum += u16::from_be_bytes([tcp_segment[i], tcp_segment[i + 1]]) as u32;
