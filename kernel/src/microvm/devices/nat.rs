@@ -803,9 +803,12 @@ pub fn pump(
                                   snap.host_handle);
                     }
                 } else if t % 200 == 0 {
+                    let (in_flight, buffered) =
+                        crate::net::tcp::debug_progress(snap.host_handle)
+                        .unwrap_or((u32::MAX, usize::MAX));
                     kprintln!(
-                        "[nat] pump heartbeat: slot={} state={:?} host_established={}",
-                        snap.slot, snap.state, host_alive,
+                        "[nat] pump heartbeat: slot={} state={:?} host_est={} in_flight={} buffered={}",
+                        snap.slot, snap.state, host_alive, in_flight, buffered,
                     );
                 }
             }
