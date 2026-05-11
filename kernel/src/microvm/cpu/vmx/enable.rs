@@ -754,7 +754,27 @@ fn run_linux_loop(
                 // External interrupt — host IRQ that arrived during
                 // guest run. The `sti` at the tail of run_guest_once
                 // already let the host IDT dispatch it; just resume.
-                consecutive_idle = consecutive_idle.saturating_add(1);
+                //
+                // While here, run the NAT pump: drains any host-side
+                // TCP recv data into the guest's RX queue + injects
+                // an IRQ if anything moved. Without this, response
+                // data sits in host buffers forever while the guest
+                // waits in recv().
+                let pumped = crate::microvm::devices::nat::pump(
+                    &mut pci.virtio_net, host_base);
+                if pumped {
+                    let vector = pic.vector_for_irq(10);
+                    let _ = vmcs::inject_external_irq(vector);
+                    consecutive_idle = 0;
+                }
+                // Pure timer-tick → idle counter advances. Reset when
+                // there are active NAT sessions (guest is blocked on
+                // I/O, not actually idle).
+                if pumped || crate::microvm::devices::nat::active_session_count() > 0 {
+                    consecutive_idle = 0;
+                } else {
+                    consecutive_idle = consecutive_idle.saturating_add(1);
+                }
                 if consecutive_idle >= IDLE_THRESHOLD {
                     serial.flush();
                     kprintln!(

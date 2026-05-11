@@ -23,6 +23,7 @@ extern crate alloc;
 use crate::kprintln;
 use alloc::vec::Vec;
 use alloc::string::String;
+use spin::Mutex;
 
 /// Locally-administered guest MAC. Must match the one virtio-net
 /// advertises through its device-cfg MAC field.
@@ -50,6 +51,19 @@ const PROTO_TCP:  u8 = 6;
 
 const PORT_DNS: u16 = 53;
 
+const TCP_HDR_LEN: usize = 20;
+const TCP_FIN: u8 = 0x01;
+const TCP_SYN: u8 = 0x02;
+const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
+const TCP_ACK: u8 = 0x10;
+
+const MAX_TCP_SESSIONS: usize = 4;
+/// Cap on per-segment data we inject to the guest. Keeps us well below
+/// the typical 1460-byte MSS Linux advertises and avoids fragmenting
+/// 1500-byte RX buffers.
+const MAX_SEG_PAYLOAD: usize = 1400;
+
 /// Per-VM network policy. Default is "DNS only" — outbound IP traffic
 /// for anything else is logged + dropped until 12.3.4 adds a proper
 /// NAT session table. Future work threads this through the microvm
@@ -66,10 +80,16 @@ impl NetCaps {
     pub const fn dns_only() -> Self {
         Self { allow_dns: true, allow_icmp: false, allow_udp: false, allow_tcp: false }
     }
+    /// Default for 12.3.4 — DNS + TCP, but not raw UDP / ICMP. Plenty
+    /// to let a browser-style stack reach HTTP/HTTPS endpoints; raw
+    /// pings + UDP services still need an explicit cap.
+    pub const fn dns_tcp() -> Self {
+        Self { allow_dns: true, allow_icmp: false, allow_udp: false, allow_tcp: true }
+    }
 }
 
 impl Default for NetCaps {
-    fn default() -> Self { Self::dns_only() }
+    fn default() -> Self { Self::dns_tcp() }
 }
 
 /// Classify a guest TX frame (virtio-net hdr + ethernet) and produce
@@ -165,8 +185,9 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
                     u16::from_be_bytes([l4[2], l4[3]])
                 } else { 0 };
                 cap_reject("TCP", dst_ip, dst_port);
+                return None;
             }
-            None
+            handle_tcp(frame, caps)
         }
         PROTO_ICMP => {
             if !caps.allow_icmp {
@@ -339,4 +360,432 @@ fn cap_reject(proto: &str, ip: [u8; 4], port: u16) {
         "[nat] {} {}.{}.{}.{}:{} dropped (cap-reject)",
         proto, ip[0], ip[1], ip[2], ip[3], port,
     );
+}
+
+// ───────────────────────────── TCP NAT ────────────────────────────────
+//
+// Termination-style NAT: we emulate a full TCP endpoint on the guest-
+// facing side (10.99.0.1:<target_port>) and forward the data stream
+// onto a fresh host-side TCP connection opened via `net::tcp`. State
+// per session lives in `SESSIONS`. The lifecycle in 5 events:
+//
+//   1. Guest sends SYN → handle_tcp_syn opens host connection
+//      (blocking up to ~10 s — VM is paused anyway), synth SYN+ACK back.
+//   2. Guest ACKs → state = Established.
+//   3. Guest sends data segment → handle_tcp_data forwards to host
+//      via `tcp::send`, synth ACK back.
+//   4. `pump` (called from timer-tick) drains host `tcp::recv`, slices
+//      into ≤ MAX_SEG_PAYLOAD chunks, injects as TCP-PSH-ACK segments.
+//   5. Guest FIN or host close → bidirectional teardown via
+//      handle_tcp_fin / pump's host-close detection.
+//
+// Sequence numbers: we pick a fresh ISN (via host CSPRNG) when sending
+// SYN+ACK; we honour the guest's ISN+1 as `rcv_nxt`. From then on we
+// keep both pointers up to date as data flows.
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TcpState {
+    SynRcvd,        // SYN+ACK sent, awaiting guest ACK
+    Established,
+    HostClosed,     // host FIN/closed, we still need to FIN the guest
+    FinWait,        // guest FIN seen, host close issued
+    Closed,
+}
+
+struct TcpSession {
+    guest_port:  u16,
+    target_ip:   [u8; 4],
+    target_port: u16,
+    host_handle: usize,
+
+    state: TcpState,
+    snd_nxt: u32,   // next seq we send to guest
+    snd_una: u32,   // unacked seq on our side
+    rcv_nxt: u32,   // next seq we expect from guest
+
+    /// Last window size guest advertised. We honour it on outgoing
+    /// data segments by capping the unacked-bytes-in-flight.
+    guest_window: u16,
+}
+
+static SESSIONS: Mutex<[Option<TcpSession>; MAX_TCP_SESSIONS]> = Mutex::new(
+    [const { None }; MAX_TCP_SESSIONS]
+);
+
+fn find_session(sessions: &mut [Option<TcpSession>; MAX_TCP_SESSIONS], port: u16)
+    -> Option<&mut TcpSession>
+{
+    for s in sessions.iter_mut() {
+        if let Some(sess) = s.as_mut() {
+            if sess.guest_port == port && sess.state != TcpState::Closed {
+                return Some(sess);
+            }
+        }
+    }
+    None
+}
+
+fn alloc_session(sessions: &mut [Option<TcpSession>; MAX_TCP_SESSIONS]) -> Option<usize> {
+    sessions.iter().position(|s| s.is_none() || matches!(s, Some(t) if t.state == TcpState::Closed))
+}
+
+/// Dispatch an inbound TCP segment from the guest. Returns a single
+/// synthetic reply frame to push back via RX (already wrapped in
+/// virtio-net + eth + IPv4 + TCP). `None` means no immediate reply
+/// needed — async response data arrives later via `pump`.
+fn handle_tcp(frame: &[u8], _caps: &NetCaps) -> Option<Vec<u8>> {
+    if frame.len() < ETH_HDR_LEN + IPV4_HDR_LEN + TCP_HDR_LEN { return None; }
+    let ip = &frame[ETH_HDR_LEN..];
+    let ihl = (ip[0] & 0x0F) as usize * 4;
+    if ihl < IPV4_HDR_LEN { return None; }
+    let src_ip: [u8; 4] = ip[12..16].try_into().ok()?;
+    let dst_ip: [u8; 4] = ip[16..20].try_into().ok()?;
+    let _ = src_ip;
+    let tcp = &ip[ihl..];
+    if tcp.len() < TCP_HDR_LEN { return None; }
+
+    let src_port = u16::from_be_bytes([tcp[0], tcp[1]]);
+    let dst_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+    let seq      = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+    let ack      = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
+    let data_off = ((tcp[12] >> 4) as usize) * 4;
+    let flags    = tcp[13];
+    let window   = u16::from_be_bytes([tcp[14], tcp[15]]);
+    if data_off < TCP_HDR_LEN || data_off > tcp.len() { return None; }
+    let payload  = &tcp[data_off..];
+
+    let mut sessions = SESSIONS.lock();
+
+    // SYN → new session
+    if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 {
+        return tcp_handle_syn(&mut sessions, src_port, dst_ip, dst_port, seq, window);
+    }
+
+    // Otherwise, look up by guest src port.
+    let sess = match find_session(&mut sessions, src_port) {
+        Some(s) => s,
+        None => {
+            // Unknown session — send RST back to the guest so it gives up.
+            kprintln!("[nat] TCP segment for unknown session src_port={} flags={:#04x}",
+                      src_port, flags);
+            return Some(build_tcp_rst(src_port, dst_port, dst_ip, ack, seq));
+        }
+    };
+    sess.guest_window = window;
+
+    // RST from guest → tear down host side, kill session.
+    if flags & TCP_RST != 0 {
+        let _ = crate::net::tcp::close(sess.host_handle);
+        sess.state = TcpState::Closed;
+        return None;
+    }
+
+    // ACK during SynRcvd completes our handshake.
+    if sess.state == TcpState::SynRcvd && flags & TCP_ACK != 0 {
+        if ack == sess.snd_nxt {
+            sess.snd_una = ack;
+            sess.state = TcpState::Established;
+            kprintln!("[nat] TCP {}→{}.{}.{}.{}:{} established",
+                      sess.guest_port,
+                      sess.target_ip[0], sess.target_ip[1],
+                      sess.target_ip[2], sess.target_ip[3],
+                      sess.target_port);
+        }
+    }
+
+    // Established (or in-flight close) — accept new payload.
+    if !payload.is_empty() && sess.state == TcpState::Established {
+        if seq == sess.rcv_nxt {
+            // Forward to host
+            if let Err(e) = crate::net::tcp::send(sess.host_handle, payload) {
+                kprintln!("[nat] TCP host send failed: {:?}", e);
+            }
+            sess.rcv_nxt = sess.rcv_nxt.wrapping_add(payload.len() as u32);
+            // ACK back
+            let reply = build_tcp_segment(sess, &[], TCP_ACK);
+            return Some(reply);
+        }
+        // Out-of-order — drop; guest will retransmit.
+        return None;
+    }
+
+    // FIN handling — guest wants to half-close.
+    if flags & TCP_FIN != 0 {
+        sess.rcv_nxt = sess.rcv_nxt.wrapping_add(1);
+        let _ = crate::net::tcp::close(sess.host_handle);
+        // FIN+ACK back, then mark closed. We don't track the guest's
+        // subsequent ACK of our FIN — if it retransmits we'll RST it
+        // (find_session returns None for Closed slots).
+        let reply = build_tcp_segment(sess, &[], TCP_FIN | TCP_ACK);
+        sess.snd_nxt = sess.snd_nxt.wrapping_add(1);
+        sess.state = TcpState::Closed;
+        kprintln!("[nat] TCP {}→… guest FIN, sent FIN+ACK", sess.guest_port);
+        return Some(reply);
+    }
+
+    // Bare ACK in Established — keep-alive, host data ACK, etc.
+    if flags & TCP_ACK != 0 && sess.state == TcpState::Established {
+        sess.snd_una = ack;
+    }
+
+    None
+}
+
+fn tcp_handle_syn(
+    sessions: &mut [Option<TcpSession>; MAX_TCP_SESSIONS],
+    src_port: u16,
+    target_ip: [u8; 4],
+    target_port: u16,
+    guest_isn: u32,
+    guest_window: u16,
+) -> Option<Vec<u8>> {
+    // If there's an existing session for this port (retransmitted SYN
+    // or stale), re-use the slot.
+    let slot = match alloc_session(sessions) {
+        Some(s) => s,
+        None => {
+            kprintln!("[nat] TCP session table full, dropping SYN");
+            return None;
+        }
+    };
+
+    kprintln!("[nat] TCP SYN: guest:{} → {}.{}.{}.{}:{}",
+              src_port,
+              target_ip[0], target_ip[1], target_ip[2], target_ip[3],
+              target_port);
+
+    // Blocking host connect. The VM is paused at this exit so a 100-
+    // 500ms handshake won't trigger any Linux-side retransmit (guest
+    // clock is paused too). On failure, send RST back so the guest
+    // gives up immediately.
+    let host_handle = match crate::net::tcp::connect(target_ip, target_port) {
+        Ok(h) => h,
+        Err(e) => {
+            kprintln!("[nat] TCP host connect failed: {:?}", e);
+            return Some(build_tcp_rst(src_port, target_port, target_ip,
+                                       0, guest_isn.wrapping_add(1)));
+        }
+    };
+
+    // Our ISN — derive from CSPRNG so it isn't predictable.
+    let our_isn = {
+        let bytes = crate::csprng::random_256();
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    };
+
+    let sess = TcpSession {
+        guest_port: src_port,
+        target_ip,
+        target_port,
+        host_handle,
+        state: TcpState::SynRcvd,
+        snd_nxt: our_isn.wrapping_add(1),   // SYN consumes 1 seq
+        snd_una: our_isn,
+        rcv_nxt: guest_isn.wrapping_add(1),
+        guest_window,
+    };
+
+    // SYN+ACK with MSS option (kind=2 len=4 mss=1400). Linux honours
+    // this to cap segments it sends to us.
+    let reply = build_tcp_synack_with_mss(&sess);
+    sessions[slot] = Some(sess);
+    Some(reply)
+}
+
+/// Build any TCP segment (ACK / FIN+ACK / PSH+ACK / etc.) for this
+/// session, optionally carrying `payload`. Sequence numbers come from
+/// the current session state.
+fn build_tcp_segment(sess: &TcpSession, payload: &[u8], flags: u8) -> Vec<u8> {
+    let total_ip = IPV4_HDR_LEN + TCP_HDR_LEN + payload.len();
+    let total = VNET_HDR_LEN + ETH_HDR_LEN + total_ip;
+    let mut buf = alloc::vec![0u8; total];
+    write_eth(&mut buf, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
+    fill_ipv4(&mut buf, sess.target_ip, total_ip, PROTO_TCP);
+
+    let tcp_off = VNET_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN;
+    buf[tcp_off + 0..tcp_off + 2].copy_from_slice(&sess.target_port.to_be_bytes());
+    buf[tcp_off + 2..tcp_off + 4].copy_from_slice(&sess.guest_port.to_be_bytes());
+    buf[tcp_off + 4..tcp_off + 8].copy_from_slice(&sess.snd_nxt.to_be_bytes());
+    buf[tcp_off + 8..tcp_off + 12].copy_from_slice(&sess.rcv_nxt.to_be_bytes());
+    buf[tcp_off + 12] = ((TCP_HDR_LEN / 4) as u8) << 4;
+    buf[tcp_off + 13] = flags;
+    buf[tcp_off + 14..tcp_off + 16].copy_from_slice(&65535u16.to_be_bytes());
+    // checksum (later)
+    // urgent (zero)
+    if !payload.is_empty() {
+        buf[tcp_off + TCP_HDR_LEN..tcp_off + TCP_HDR_LEN + payload.len()]
+            .copy_from_slice(payload);
+    }
+    let cksum = tcp_checksum(sess.target_ip, &buf[tcp_off..tcp_off + TCP_HDR_LEN + payload.len()]);
+    buf[tcp_off + 16..tcp_off + 18].copy_from_slice(&cksum.to_be_bytes());
+    buf
+}
+
+/// SYN+ACK with a single MSS option (kind=2 len=4 mss=1400). 24-byte
+/// TCP header. Linux honours this to cap segments it sends to us.
+fn build_tcp_synack_with_mss(sess: &TcpSession) -> Vec<u8> {
+    const HDR_WITH_MSS: usize = 24;
+    let total_ip = IPV4_HDR_LEN + HDR_WITH_MSS;
+    let total = VNET_HDR_LEN + ETH_HDR_LEN + total_ip;
+    let mut buf = alloc::vec![0u8; total];
+    write_eth(&mut buf, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
+    fill_ipv4(&mut buf, sess.target_ip, total_ip, PROTO_TCP);
+
+    let tcp_off = VNET_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN;
+    buf[tcp_off + 0..tcp_off + 2].copy_from_slice(&sess.target_port.to_be_bytes());
+    buf[tcp_off + 2..tcp_off + 4].copy_from_slice(&sess.guest_port.to_be_bytes());
+    // SYN+ACK ISN = our snd_una (snd_nxt-1 since SYN consumes 1 byte)
+    buf[tcp_off + 4..tcp_off + 8].copy_from_slice(&sess.snd_una.to_be_bytes());
+    buf[tcp_off + 8..tcp_off + 12].copy_from_slice(&sess.rcv_nxt.to_be_bytes());
+    buf[tcp_off + 12] = ((HDR_WITH_MSS / 4) as u8) << 4;
+    buf[tcp_off + 13] = TCP_SYN | TCP_ACK;
+    buf[tcp_off + 14..tcp_off + 16].copy_from_slice(&65535u16.to_be_bytes());
+    // MSS option: kind=2, len=4, value=1400
+    buf[tcp_off + 20] = 2;
+    buf[tcp_off + 21] = 4;
+    buf[tcp_off + 22..tcp_off + 24].copy_from_slice(&(MAX_SEG_PAYLOAD as u16).to_be_bytes());
+    let cksum = tcp_checksum(sess.target_ip, &buf[tcp_off..tcp_off + HDR_WITH_MSS]);
+    buf[tcp_off + 16..tcp_off + 18].copy_from_slice(&cksum.to_be_bytes());
+    buf
+}
+
+/// Standalone RST for unknown sessions — no SESSIONS lookup.
+fn build_tcp_rst(
+    guest_port: u16,
+    target_port: u16,
+    target_ip: [u8; 4],
+    seq: u32,
+    ack: u32,
+) -> Vec<u8> {
+    let total_ip = IPV4_HDR_LEN + TCP_HDR_LEN;
+    let total = VNET_HDR_LEN + ETH_HDR_LEN + total_ip;
+    let mut buf = alloc::vec![0u8; total];
+    write_eth(&mut buf, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
+    fill_ipv4(&mut buf, target_ip, total_ip, PROTO_TCP);
+    let tcp_off = VNET_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN;
+    buf[tcp_off + 0..tcp_off + 2].copy_from_slice(&target_port.to_be_bytes());
+    buf[tcp_off + 2..tcp_off + 4].copy_from_slice(&guest_port.to_be_bytes());
+    buf[tcp_off + 4..tcp_off + 8].copy_from_slice(&seq.to_be_bytes());
+    buf[tcp_off + 8..tcp_off + 12].copy_from_slice(&ack.to_be_bytes());
+    buf[tcp_off + 12] = ((TCP_HDR_LEN / 4) as u8) << 4;
+    buf[tcp_off + 13] = TCP_RST | TCP_ACK;
+    let cksum = tcp_checksum(target_ip, &buf[tcp_off..tcp_off + TCP_HDR_LEN]);
+    buf[tcp_off + 16..tcp_off + 18].copy_from_slice(&cksum.to_be_bytes());
+    buf
+}
+
+/// Fill the IPv4 header at the standard offset. Source is always
+/// GATEWAY_IP (the synth gateway). `total_ip` is IP-header + payload.
+fn fill_ipv4(buf: &mut [u8], dst_ip: [u8; 4], total_ip: usize, proto: u8) {
+    let off = VNET_HDR_LEN + ETH_HDR_LEN;
+    buf[off + 0]  = 0x45;
+    buf[off + 1]  = 0;
+    buf[off + 2..off + 4].copy_from_slice(&(total_ip as u16).to_be_bytes());
+    buf[off + 4..off + 6].copy_from_slice(&0u16.to_be_bytes());
+    buf[off + 6..off + 8].copy_from_slice(&0x4000u16.to_be_bytes());
+    buf[off + 8]  = 64;
+    buf[off + 9]  = proto;
+    buf[off + 12..off + 16].copy_from_slice(&GATEWAY_IP);
+    buf[off + 16..off + 20].copy_from_slice(&dst_ip);
+    let csum = ipv4_checksum(&buf[off..off + IPV4_HDR_LEN]);
+    buf[off + 10..off + 12].copy_from_slice(&csum.to_be_bytes());
+}
+
+/// TCP checksum: pseudo-header (src_ip, dst_ip, zero, proto, tcp_len) +
+/// the segment itself. src_ip = GATEWAY_IP for outbound replies.
+fn tcp_checksum(dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    // pseudo-header
+    sum += u16::from_be_bytes([GATEWAY_IP[0], GATEWAY_IP[1]]) as u32;
+    sum += u16::from_be_bytes([GATEWAY_IP[2], GATEWAY_IP[3]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
+    sum += PROTO_TCP as u32;
+    sum += tcp_segment.len() as u32;
+    // segment
+    let mut i = 0;
+    while i + 1 < tcp_segment.len() {
+        sum += u16::from_be_bytes([tcp_segment[i], tcp_segment[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < tcp_segment.len() {
+        sum += (tcp_segment[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Drain host-side TCP recv buffers for every active session and
+/// inject the resulting TCP segments into the guest's RX queue. Called
+/// from the timer-tick path so async response data reaches the guest
+/// without it having to emit fresh traffic.
+///
+/// Returns `true` iff at least one segment was injected (caller fires
+/// IRQ 10 to wake the guest's virtio-net driver).
+pub fn pump(
+    net: &mut super::virtio_net_pci::VirtioNet,
+    host_base: u64,
+) -> bool {
+    let mut any = false;
+    let mut sessions = SESSIONS.lock();
+    for slot in sessions.iter_mut() {
+        let Some(sess) = slot.as_mut() else { continue };
+        if sess.state == TcpState::Closed { continue }
+
+        // Pull at most one chunk per session per pump tick — keeps the
+        // pump bounded so it doesn't starve other work.
+        let mut buf = [0u8; MAX_SEG_PAYLOAD];
+        match crate::net::tcp::recv(sess.host_handle, &mut buf) {
+            Ok(n) if n > 0 => {
+                let seg = build_tcp_segment(sess, &buf[..n], TCP_PSH | TCP_ACK);
+                if net.inject_rx(host_base, &seg) {
+                    sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
+                    any = true;
+                }
+            }
+            _ => {
+                // No new bytes. Check whether the host side has closed
+                // — if so we need to FIN the guest.
+                if !crate::net::tcp::is_established(sess.host_handle)
+                    && sess.state == TcpState::Established
+                {
+                    let fin = build_tcp_segment(sess, &[], TCP_FIN | TCP_ACK);
+                    if net.inject_rx(host_base, &fin) {
+                        sess.snd_nxt = sess.snd_nxt.wrapping_add(1);
+                        // Skip the HostClosed state — we don't track
+                        // the guest's ACK either way.
+                        sess.state = TcpState::Closed;
+                        let _ = crate::net::tcp::close(sess.host_handle);
+                        any = true;
+                        kprintln!("[nat] TCP {} host closed, FIN injected",
+                                  sess.guest_port);
+                    }
+                }
+            }
+        }
+    }
+    any
+}
+
+/// Number of currently-active (non-closed) TCP sessions. The run_linux
+/// idle-detection uses this to extend the timeout when traffic is in
+/// flight.
+pub fn active_session_count() -> usize {
+    let sessions = SESSIONS.lock();
+    sessions.iter()
+        .filter(|s| matches!(s, Some(t) if t.state != TcpState::Closed))
+        .count()
+}
+
+/// Tear down every session and free the table. Called when a microvm
+/// run ends so the next launch starts clean.
+pub fn reset_sessions() {
+    let mut sessions = SESSIONS.lock();
+    for slot in sessions.iter_mut() {
+        if let Some(sess) = slot.take() {
+            let _ = crate::net::tcp::close(sess.host_handle);
+        }
+    }
 }

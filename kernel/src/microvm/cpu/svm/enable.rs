@@ -673,7 +673,23 @@ fn run_linux_loop(
 
         match exit {
             EXIT_INTR => {
-                consecutive_idle = consecutive_idle.saturating_add(1);
+                // NAT pump — drain host TCP recv buffers, inject as
+                // RX segments + IRQ 10 if any data moved. Same pattern
+                // as the VMX side; without it, async response data sits
+                // in host buffers forever while the guest waits in
+                // recv(). See `kernel/src/microvm/devices/nat.rs::pump`.
+                let pumped = crate::microvm::devices::nat::pump(
+                    &mut pci.virtio_net, host_base);
+                if pumped {
+                    let vector = pic.vector_for_irq(10);
+                    let info: u64 = (vector as u64) | (1u64 << 31);
+                    vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                }
+                if pumped || crate::microvm::devices::nat::active_session_count() > 0 {
+                    consecutive_idle = 0;
+                } else {
+                    consecutive_idle = consecutive_idle.saturating_add(1);
+                }
                 if consecutive_idle >= IDLE_THRESHOLD {
                     serial.flush();
                     kprintln!(

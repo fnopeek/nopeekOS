@@ -223,7 +223,7 @@ impl VirtioNet {
             isr: 0,
             pending_kick_queue: None,
             notify_log_count: 0,
-            caps: NetCaps::dns_only(),
+            caps: NetCaps::dns_tcp(),
         }
     }
 
@@ -554,7 +554,10 @@ impl VirtioNet {
     /// flags, marks one used-ring entry, advances last_avail_idx.
     /// Returns false if the driver hasn't provided a buffer (RX queue
     /// drained) — caller can drop or retry.
-    fn inject_rx(&mut self, host_base: u64, payload: &[u8]) -> bool {
+    ///
+    /// `pub(super)` so `nat::pump` can inject host-bound TCP response
+    /// segments from the timer-tick path.
+    pub(super) fn inject_rx(&mut self, host_base: u64, payload: &[u8]) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
         let q = match self.queues.get_mut(0) {  // RX = q0

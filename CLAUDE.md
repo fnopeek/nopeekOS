@@ -42,13 +42,43 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.2 ✅ + 12.3.0–12.3.3 ✅** — virtio-blk
+- **Phase:** **12.2 ✅ + 12.3.0–12.3.4 ✅** — virtio-blk
   end-to-end mit npkFS-persistierter encrypted profile-image, virtio-net
-  TX/RX-Pfade mit ARP-Loop, DNS-Shortcut + Cap-Filter zum Host-Stack.
-  Kernel `v0.155.0`, microvm-init `0.3.3`, Linux `6.18.26-nopeek`
-  (eigener Build, VIRTIO_BLK=y built-in). Phase 12.3.4 (curl/HTTPS-test
-  — braucht TCP-NAT), 12.4–12.6 (virtio-gpu, picker, Firefox) plus
-  Microkernel-Refactor weiter offen.
+  TX/RX-Pfade mit ARP-Loop, DNS-Shortcut + TCP-NAT (Termination-Style)
+  zum Host-Stack. Kernel `v0.156.0`, microvm-init `0.3.4`, Linux
+  `6.18.26-nopeek`. Phase 12.4 (virtio-gpu), 12.5 (picker/B-mini), 12.6
+  (Firefox-Userspace-Bundle), Microkernel-Refactor offen.
+- **2026-05-11 — Phase 12.3.4 (TCP-NAT + HTTP GET), v0.156.0:**
+  - **TCP-NAT in nat.rs** (~430 LoC neu) — Termination-Style:
+    Guest-side virtuelles TCP-Endpoint auf 10.99.0.1:<dst>, gegenüber
+    eine frische host-`net::tcp::connect`. State pro Session
+    {guest_port, target_ip, target_port, host_handle, snd_nxt, snd_una,
+    rcv_nxt}. Table mit 4 Slots (Mutex array).
+    Lifecycle: SYN → blocking host connect (~100-500ms, VM eh paused)
+    → synth SYN+ACK mit MSS-Option (1400) → guest ACK → Established.
+    Daten guest→host via `tcp::send`. FIN guest→host close + synth
+    FIN+ACK + Closed.
+  - **Pump aus Timer-Tick** — `nat::pump(net, host_base)` called bei
+    jedem `EXIT_INTR` / reason-1 in vmx + svm enable.rs. Drains
+    `tcp::recv` für jede aktive Session, baut TCP-PSH-ACK-Segmente,
+    inject via `virtio_net.inject_rx` (jetzt `pub(super)`). Bei
+    Erfolg IRQ 10 inject. Erkennt host-side close → synth FIN+ACK +
+    Closed. Idle-Counter resetted wenn `active_session_count() > 0`
+    — sonst würden Sessions in der Idle-Timeout-Falle landen.
+  - **NetCaps default** dns_only() → dns_tcp() — DNS + TCP an,
+    ICMP + raw UDP weiterhin cap-reject.
+  - **PID-1 v0.3.4** — `http_get("example.com")` macht: dns_query
+    (jetzt mit `Option<[u8;4]>` return), SYS_SOCKET SOCK_STREAM,
+    SO_RCVTIMEO 5s, SYS_CONNECT zu ip:80, SYS_WRITE der minimal
+    HTTP/1.0-GET-Zeile, SYS_READ erste 256 bytes, kmsg-log erste
+    Zeile ASCII-sanitized. Refactor: `parse_dns_a` (pure) +
+    `log_dns_result` (formatting only).
+  - **TODO / Limitationen v1**: TCP-Checksum-Calc unsegmentierte
+    Pakete only (PSH+ACK segments mit Payload &lt; MAX_SEG_PAYLOAD).
+    Keine Retransmission. Out-of-order Daten gedroppt. RST-Pfade
+    pessimistisch (jeder unbekannte 4-Tuple → RST). 4 Sessions max.
+    Reicht für HTTP-Smoke-Test; Browser-Multi-Connect kommt in
+    12.3.4b wenn Firefox da ist.
 - **2026-05-11 — Phase 12.3.3 (NAT + Cap-Filter), v0.155.0:**
   - Neuer `microvm/devices/nat.rs` (~310 LoC) — synthetic gateway-Logik
     raus aus `virtio_net_pci.rs`. ARP-Reply + IPv4-Dispatch + DNS-
