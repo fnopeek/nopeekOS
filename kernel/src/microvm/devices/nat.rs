@@ -735,6 +735,13 @@ pub fn pump(
     static TICKS: AtomicU32 = AtomicU32::new(0);
     let t = TICKS.fetch_add(1, Ordering::Relaxed);
 
+    // CRITICAL: drain the host NIC's RX ring. Intel I226-V is a
+    // polling driver — no IRQ path calls handle_frame for us. Without
+    // this, response packets from the remote server pile up in the
+    // NIC's DMA ring while the VM exits keep ticking. Symptom would be
+    // `buffered=0` heartbeats forever even though the server replied.
+    crate::net::poll();
+
     // Step 1: snapshot lightweight per-session info under the SESSIONS
     // lock, then drop it. This avoids holding two locks (SESSIONS +
     // host-tcp CONNECTIONS) at the same time — a NIC IRQ that takes
