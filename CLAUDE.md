@@ -42,12 +42,48 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.2 ✅ + 12.3.0–12.3.4 ✅** — virtio-blk
+- **Phase:** **12.2 ✅ + 12.3.0–12.3.4 ✅ NUC-VALIDATED** — virtio-blk
   end-to-end mit npkFS-persistierter encrypted profile-image, virtio-net
   TX/RX-Pfade mit ARP-Loop, DNS-Shortcut + TCP-NAT (Termination-Style)
-  zum Host-Stack. Kernel `v0.156.0`, microvm-init `0.3.4`, Linux
-  `6.18.26-nopeek`. Phase 12.4 (virtio-gpu), 12.5 (picker/B-mini), 12.6
-  (Firefox-Userspace-Bundle), Microkernel-Refactor offen.
+  zum Host-Stack. Kernel `v0.156.6`, microvm-init `0.3.6`, Linux
+  `6.18.26-nopeek`. **End-to-end HTTP GET an 1.1.1.1:80 funktioniert** —
+  PID-1 sieht `HTTP/1.1 301 Moved Permanently` von Cloudflare. Phase 12.4
+  (virtio-gpu), 12.5 (picker/B-mini), 12.6 (Firefox-Userspace-Bundle),
+  Microkernel-Refactor offen.
+- **2026-05-11 spät — 12.3.4 NUC end-to-end (v0.156.0 → v0.156.6), 6 iter:**
+  - **v0.156.1** IPv4-src/dst-Direction-Fix: TCP-Replies hatten IPv4
+    src=GATEWAY_IP statt target_ip und dst=target_ip statt GUEST_IP.
+    Linux filterte sie weil dst != eigene IP.
+  - **v0.156.2** Pump deadlock-safe via snapshot-pattern: SESSIONS-lock
+    droppen vor `tcp::recv`-call (das CONNECTIONS lockt), sonst potentieller
+    Lock-Order-Deadlock mit NIC-IRQ-Pfad. Plus pump-heartbeat-Logs alle 2s.
+  - **v0.156.3** Target umgezogen auf 1.1.1.1:80 (Cloudflare DNS-Portal,
+    zuverlässiger als example.com). Heartbeat erweitert um
+    `in_flight`/`buffered` via neuer `net::tcp::debug_progress()`.
+  - **v0.156.4** **`net::poll()` als erste Zeile im pump**. Intel I226-V
+    ist polling-driver (keine IRQ → handle_frame Verbindung). Während
+    VM läuft ruft niemand poll(), Response-Pakete stapeln sich im NIC-Ring.
+    Heartbeat zeigte `in_flight=52 buffered=0` permanent → smoking gun.
+  - **v0.156.5** virtio-net `num_buffers=1` im virtio_net_hdr (per virtio
+    1.2 §5.1.6.4.1 bei VERSION_1 ohne MRG_RXBUF). Spec-compliant, half
+    nicht alleine, aber notwendig.
+  - **v0.156.6** **`inject_rx` setzt `self.isr |= 1`** nach erfolgreichem
+    write. **Das war's**. Bisher nur `service_tx` setzte ISR; Pump
+    bypassed das. Linux's IRQ-Handler liest ISR (W1C), sieht 0 → "spurious"
+    → kehrt zurück ohne RX-Queue zu drainen. ARP/SYN-ACK/bare-ACK kamen
+    durch weil sie über service_tx liefen. Pump bypassed service_tx → ISR
+    blieb 0 → Linux ignorierte den IRQ.
+  - **Resultat**: 381-byte Cloudflare-Response geht durch, Linux ACKed
+    (tx#6), Linux FINed (tx#7), PID-1 read returnt mit 381 bytes, kmsg
+    loggt `HTTP/1.1 301 Moved Permanently`. Voller HTTP-Roundtrip in
+    ~5 ms guest-time nach connect.
+  - PID-1 v0.3.5: SIOCADDRT default route 0.0.0.0/0 via 10.99.0.1
+    (sonst connect()→ENETUNREACH zu non-on-link IPs).
+  - PID-1 v0.3.6: http_get_ip(host, [1,1,1,1]) statt http_get(host) +
+    DNS, isoliert TCP-NAT vom DNS-Pfad.
+  - TODO 12.3.5+: TLS-Termination (für Firefox HTTPS), Multi-Session
+    Concurrency-Test, Retransmission. Genauer Plan via picker → 12.6
+    Firefox-Userspace-Bundle Strategie.
 - **2026-05-11 — Phase 12.3.4 (TCP-NAT + HTTP GET), v0.156.0:**
   - **TCP-NAT in nat.rs** (~430 LoC neu) — Termination-Style:
     Guest-side virtuelles TCP-Endpoint auf 10.99.0.1:<dst>, gegenüber
