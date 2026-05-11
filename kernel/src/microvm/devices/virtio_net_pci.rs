@@ -605,6 +605,11 @@ impl VirtioNet {
 
         used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, written);
         q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
+        // Set ISR bit 0 so Linux's IRQ handler, when it reads the ISR
+        // register (write-1-to-clear), sees there's queue work to do.
+        // Without this the pump's IRQ-10 inject looks spurious and
+        // Linux returns from the handler without draining the queue.
+        self.isr |= 1;
         true
     }
 }
