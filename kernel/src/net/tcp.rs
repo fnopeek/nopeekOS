@@ -731,6 +731,15 @@ fn close_cleanup(handle: usize) {
 }
 
 /// List active connections for netstat display
+/// Returns (snd_nxt - snd_una, recv_buf.len()) for a given connection
+/// — "bytes in flight" + "bytes buffered ready for us to read".
+/// Diagnostic-only.
+pub fn debug_progress(handle: usize) -> Option<(u32, usize)> {
+    let conns = CONNECTIONS.lock();
+    let c = conns[handle].as_ref()?;
+    Some((c.snd_nxt.wrapping_sub(c.snd_una), c.recv_buf.len()))
+}
+
 pub fn list_connections() -> alloc::vec::Vec<(u16, [u8; 4], u16, &'static str)> {
     let conns = CONNECTIONS.lock();
     let mut result = alloc::vec::Vec::new();

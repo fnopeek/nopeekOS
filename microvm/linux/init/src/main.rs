@@ -158,11 +158,11 @@ unsafe extern "C" fn rust_main() -> ! {
     // resolver and injects an A-record reply back on the RX queue.
     dns_query(kmsg_fd, b"nopeek.ch");
 
-    // Phase 12.3.4: full TCP roundtrip. DNS-resolve the target,
-    // open a TCP socket, send a tiny HTTP/1.0 GET, log the first
-    // ~80 bytes of the response. Validates SYN → SYN+ACK → ACK →
-    // data forward both ways → FIN.
-    http_get(kmsg_fd, b"example.com");
+    // Phase 12.3.4: full TCP roundtrip. Hardcoded target 1.1.1.1:80
+    // (Cloudflare DNS portal, always responds with HTTP/1.1 301 to
+    // HTTPS). Skips DNS to isolate the TCP-NAT path from any
+    // CDN-specific weirdness.
+    http_get_ip(kmsg_fd, b"1.1.1.1", [1, 1, 1, 1]);
 
     // Phase 12.1.4 — inject_console round-trip. Grant ourselves I/O
     // port access on COM1 (0x3F8-0x3FF) via ioperm(2). Modern Linux
@@ -496,18 +496,9 @@ fn log_dns_result(kmsg_fd: i64, name: &[u8], ip: Option<[u8; 4]>) {
     say(kmsg_fd, &out[..p]);
 }
 
-/// DNS-resolve `host` via 10.99.0.1, open TCP socket, send a minimal
-/// HTTP/1.0 GET, read response, log first ~96 bytes. End-to-end smoke
-/// test of TCP-NAT.
-fn http_get(kmsg_fd: i64, host: &[u8]) {
-    let ip = match dns_query(kmsg_fd, host) {
-        Some(ip) => ip,
-        None => {
-            say(kmsg_fd, b"[microvm-init] http: dns failed\n");
-            return;
-        }
-    };
-
+/// Open TCP socket to a fixed `ip:80`, send a minimal HTTP/1.0 GET,
+/// log first response chunk. `host` is used only as the Host: header.
+fn http_get_ip(kmsg_fd: i64, host: &[u8], ip: [u8; 4]) {
     let fd = unsafe { syscall3(SYS_SOCKET, AF_INET, SOCK_STREAM, 0) };
     if fd < 0 {
         say(kmsg_fd, b"[microvm-init] http: socket failed\n");
