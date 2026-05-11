@@ -731,40 +731,82 @@ pub fn pump(
     net: &mut super::virtio_net_pci::VirtioNet,
     host_base: u64,
 ) -> bool {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static TICKS: AtomicU32 = AtomicU32::new(0);
+    let t = TICKS.fetch_add(1, Ordering::Relaxed);
+
+    // Step 1: snapshot lightweight per-session info under the SESSIONS
+    // lock, then drop it. This avoids holding two locks (SESSIONS +
+    // host-tcp CONNECTIONS) at the same time — a NIC IRQ that takes
+    // CONNECTIONS for incoming-packet dispatch would otherwise deadlock
+    // against pump.
+    struct Snapshot {
+        slot: usize,
+        host_handle: usize,
+        state: TcpState,
+    }
+    let snapshots: alloc::vec::Vec<Snapshot> = {
+        let sessions = SESSIONS.lock();
+        sessions.iter().enumerate().filter_map(|(i, s)| {
+            s.as_ref().filter(|sess| sess.state != TcpState::Closed)
+                .map(|sess| Snapshot {
+                    slot: i,
+                    host_handle: sess.host_handle,
+                    state: sess.state,
+                })
+        }).collect()
+    };
+    if snapshots.is_empty() { return false; }
+
     let mut any = false;
-    let mut sessions = SESSIONS.lock();
-    for slot in sessions.iter_mut() {
-        let Some(sess) = slot.as_mut() else { continue };
+    for snap in &snapshots {
+        // Step 2: do the host-side work WITHOUT holding SESSIONS.
+        let mut buf = alloc::vec![0u8; MAX_SEG_PAYLOAD];
+        let recv_n = crate::net::tcp::recv(snap.host_handle, &mut buf).ok();
+        let host_alive = crate::net::tcp::is_established(snap.host_handle);
+
+        // Step 3: re-lock SESSIONS to build the segment with current
+        // snd_nxt/rcv_nxt and inject. Quick critical section.
+        let mut sessions = SESSIONS.lock();
+        let Some(sess) = sessions[snap.slot].as_mut() else { continue };
         if sess.state == TcpState::Closed { continue }
 
-        // Pull at most one chunk per session per pump tick — keeps the
-        // pump bounded so it doesn't starve other work.
-        let mut buf = [0u8; MAX_SEG_PAYLOAD];
-        match crate::net::tcp::recv(sess.host_handle, &mut buf) {
-            Ok(n) if n > 0 => {
+        match recv_n {
+            Some(n) if n > 0 => {
+                kprintln!("[nat] pump: host->guest {} bytes (seq={} ack={})",
+                          n, sess.snd_nxt, sess.rcv_nxt);
                 let seg = build_tcp_segment(sess, &buf[..n], TCP_PSH | TCP_ACK);
+                drop(sessions);
                 if net.inject_rx(host_base, &seg) {
-                    sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
+                    let mut s = SESSIONS.lock();
+                    if let Some(sess) = s[snap.slot].as_mut() {
+                        sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
+                    }
                     any = true;
+                } else {
+                    kprintln!("[nat] pump: inject_rx FAILED (rx queue empty?)");
                 }
             }
             _ => {
-                // No new bytes. Check whether the host side has closed
-                // — if so we need to FIN the guest.
-                if !crate::net::tcp::is_established(sess.host_handle)
-                    && sess.state == TcpState::Established
-                {
+                if !host_alive && sess.state == TcpState::Established {
                     let fin = build_tcp_segment(sess, &[], TCP_FIN | TCP_ACK);
+                    drop(sessions);
                     if net.inject_rx(host_base, &fin) {
-                        sess.snd_nxt = sess.snd_nxt.wrapping_add(1);
-                        // Skip the HostClosed state — we don't track
-                        // the guest's ACK either way.
-                        sess.state = TcpState::Closed;
-                        let _ = crate::net::tcp::close(sess.host_handle);
+                        let mut s = SESSIONS.lock();
+                        if let Some(sess) = s[snap.slot].as_mut() {
+                            sess.snd_nxt = sess.snd_nxt.wrapping_add(1);
+                            sess.state = TcpState::Closed;
+                            let _ = crate::net::tcp::close(sess.host_handle);
+                        }
                         any = true;
                         kprintln!("[nat] TCP {} host closed, FIN injected",
-                                  sess.guest_port);
+                                  snap.host_handle);
                     }
+                } else if t % 200 == 0 {
+                    kprintln!(
+                        "[nat] pump heartbeat: slot={} state={:?} host_established={}",
+                        snap.slot, snap.state, host_alive,
+                    );
                 }
             }
         }
