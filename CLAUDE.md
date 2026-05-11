@@ -42,14 +42,48 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.2 ✅ + 12.3.0–12.3.4 ✅ NUC-VALIDATED** — virtio-blk
-  end-to-end mit npkFS-persistierter encrypted profile-image, virtio-net
-  TX/RX-Pfade mit ARP-Loop, DNS-Shortcut + TCP-NAT (Termination-Style)
-  zum Host-Stack. Kernel `v0.156.6`, microvm-init `0.3.6`, Linux
-  `6.18.26-nopeek`. **End-to-end HTTP GET an 1.1.1.1:80 funktioniert** —
-  PID-1 sieht `HTTP/1.1 301 Moved Permanently` von Cloudflare. Phase 12.4
-  (virtio-gpu), 12.5 (picker/B-mini), 12.6 (Firefox-Userspace-Bundle),
+- **Phase:** **12.2 ✅ + 12.3.0–12.3.4 ✅ + 12.4 ✅ NUC-VALIDATED** —
+  virtio-blk end-to-end mit npkFS-persistierter encrypted profile-image,
+  virtio-net TX/RX-Pfade mit ARP-Loop, DNS-Shortcut + TCP-NAT, virtio-gpu
+  mit 2D scanout. Kernel `v0.157.0`, microvm-init `0.3.8`, Linux
+  `6.18.26-nopeek` mit DRM_VIRTIO_GPU_KMS + FRAMEBUFFER_CONSOLE.
+  **End-to-end HTTP GET an 1.1.1.1:80 + fbcon-Boot-Rendering auf 1280x720**.
+  Phase 12.5 (picker/B-mini), 12.6 (Firefox-Userspace-Bundle),
   Microkernel-Refactor offen.
+- **2026-05-11 spätestens — 12.4 (virtio-gpu 2D scanout) NUC-validated:**
+  - Neuer `microvm/devices/virtio_gpu_pci.rs` (~650 LoC): PCI slot 3,
+    vendor 0x1AF4 device 0x1050 class 0x03_80_00, IRQ 9, BAR0 @
+    0xFE00_8000, modern cap chain. 1 scanout @ 1280x720, 0 capsets.
+    Zwei virtqueues (controlq + cursorq).
+  - Control queue commands: GET_DISPLAY_INFO, RESOURCE_CREATE_2D /
+    UNREF, RESOURCE_ATTACH_BACKING / DETACH_BACKING, SET_SCANOUT,
+    TRANSFER_TO_HOST_2D (page-list walk → host_pixels buffer),
+    RESOURCE_FLUSH (hex-preview log throttled nach 5). Cursor queue
+    → OK_NODATA stub.
+  - vmx/svm enable.rs: handle_mmio_{ept,npf}_gpu mirror.
+  - **Zwei kritische Linux-Config-Flags** die wir erst durch trial-
+    and-error gefunden haben:
+    1. `CONFIG_DRM_VIRTIO_GPU_KMS=y` — sonst compiliert virtio-gpu
+       ohne 2D-scanout-Code. `virtgpu_kms.c:228` forciert dann
+       num_scanouts=0 + loggt "KMS disabled". Ich hatte den Flag
+       initial fälschlich für virgl/3D gehalten und disabled.
+    2. `CONFIG_FRAMEBUFFER_CONSOLE=y` — sonst hängt die crtc im
+       disabled state. fbcon's vt-init triggert den initial atomic
+       commit der SET_SCANOUT auslöst. Ohne fbcon bleibt /dev/fb0
+       ein In-RAM-Buffer ohne dass die Pixel je zu uns gepusht
+       werden.
+  - PID-1 v0.3.8: `fb_write_pattern()` macht FBIOGET +
+    FBIOPUT_VSCREENINFO (belt+suspenders falls fbcon's auto-modeset
+    nicht greift), dann 64 KB BGRA rot zu /dev/fb0. Default-route fix
+    in 0.3.5, http_get_ip mit direkter IP in 0.3.6.
+  - **Resultat NUC-validated**: fbcon rendert Linux-Boot-Messages live
+    auf 1280x720 Framebuffer (160×45 chars @ 8×16 font). Mehrere
+    TRANSFER + FLUSH cycles während fbcon den Text-Modus aufbaut. PID-1
+    schreibt zusätzlich 64KB rot, durchläuft komplett. Wire-Protocol
+    end-to-end validiert.
+  - **TODO Polish**: Shade-Window-Integration (FLUSH → tatsächliches
+    Rendering in shade-Compositor-Surface statt nur Hex-Log), cursor
+    queue rendering, virgl/3D für später (12.6+).
 - **2026-05-11 spät — 12.3.4 NUC end-to-end (v0.156.0 → v0.156.6), 6 iter:**
   - **v0.156.1** IPv4-src/dst-Direction-Fix: TCP-Replies hatten IPv4
     src=GATEWAY_IP statt target_ip und dst=target_ip statt GUEST_IP.

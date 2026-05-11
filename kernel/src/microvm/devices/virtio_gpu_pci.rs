@@ -590,8 +590,6 @@ impl VirtioGpu {
         let n = self.flush_log_count;
         self.flush_log_count = n.saturating_add(1);
         if n < 5 {
-            // Log first ~16 pixels worth of data so the user can
-            // verify PID-1's pattern actually arrived.
             let preview_bytes = pix.len().min(64);
             let mut hex = alloc::string::String::with_capacity(preview_bytes * 3);
             for &b in &pix[..preview_bytes] {
@@ -605,6 +603,13 @@ impl VirtioGpu {
         } else if n.is_multiple_of(60) {
             kprintln!("[gpu] FLUSH#{} res={} (logging throttled)", n + 1, resource_id);
         }
+
+        // Bridge to host framebuffer — blit the just-flushed resource
+        // into the top-left of shade's display surface so the operator
+        // sees what the guest is drawing. Each FLUSH = one frame, so
+        // fbcon's animation falls out naturally. shade may overdraw
+        // later (no z-ordering yet) but the next FLUSH refreshes.
+        blit_to_host_fb(pix, r.width, r.height);
     }
 
     pub fn pci_read_dword(&self, reg: u8) -> u32 {
@@ -877,5 +882,40 @@ const fn width_mask(width: u8) -> u64 {
         2 => 0xFFFF,
         4 => 0xFFFF_FFFF,
         _ => 0xFFFF_FFFF_FFFF_FFFF,
+    }
+}
+
+/// Blit `src_pixels` (BGRX 32bpp, stride = src_w * 4) into the host
+/// framebuffer's front shadow buffer at (0, 0). Clipped to the host
+/// fb's geometry. Caller's pixel format must match host fb's pixel
+/// format — virtio-gpu uses B8G8R8X8_UNORM (format=2) which matches
+/// UEFI GOP's typical BGRX layout, so a byte-for-byte row-copy works.
+///
+/// SAFETY: writes through `framebuffer::cached_shadow_front()`. The
+/// pointer is valid as long as the FbConsole is initialized. We bound
+/// every write to the host fb's declared dimensions.
+fn blit_to_host_fb(src_pixels: &[u8], src_w: u32, src_h: u32) {
+    let fb_ptr = crate::framebuffer::cached_shadow_front();
+    if fb_ptr.is_null() { return; }
+    let info = crate::framebuffer::get_info();
+    if info.bpp != 32 || info.width == 0 || info.height == 0 { return; }
+
+    let w = (src_w as usize).min(info.width as usize);
+    let h = (src_h as usize).min(info.height as usize);
+    let src_stride = (src_w as usize) * 4;
+    let dst_pitch = info.pitch as usize;
+    let row_bytes = w * 4;
+
+    for row in 0..h {
+        let src_off = row * src_stride;
+        let dst_off = row * dst_pitch;
+        if src_off + row_bytes > src_pixels.len() { break; }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src_pixels.as_ptr().add(src_off),
+                fb_ptr.add(dst_off),
+                row_bytes,
+            );
+        }
     }
 }
