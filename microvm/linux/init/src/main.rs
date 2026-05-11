@@ -164,6 +164,12 @@ unsafe extern "C" fn rust_main() -> ! {
     // CDN-specific weirdness.
     http_get_ip(kmsg_fd, b"1.1.1.1", [1, 1, 1, 1]);
 
+    // Phase 12.4: framebuffer write. Open /dev/fb0 (created by DRM's
+    // fbdev emulation once virtio-gpu binds), fill with a known pattern
+    // so the host can verify pixels arrived. We use BGRA-32 (the
+    // virtio-gpu default fbdev format) — first byte is B, last is A.
+    fb_write_pattern(kmsg_fd);
+
     // Phase 12.1.4 — inject_console round-trip. Grant ourselves I/O
     // port access on COM1 (0x3F8-0x3FF) via ioperm(2). Modern Linux
     // (≥5.5) made iopl(3) into an emulated stub: the syscall succeeds
@@ -574,6 +580,48 @@ fn http_get_ip(kmsg_fd: i64, host: &[u8], ip: [u8; 4]) {
         }
     }
     if p < out.len() { out[p] = b'\n'; p += 1; }
+    say(kmsg_fd, &out[..p]);
+}
+
+/// Open /dev/fb0 (DRM fbdev emulation for the virtio-gpu scanout),
+/// write a predictable BGRA pattern across the first ~64 KB so the host
+/// can confirm a clean transfer + flush cycle. Pattern: solid red for
+/// the first 16×16 block, then gradient bytes after.
+fn fb_write_pattern(kmsg_fd: i64) {
+    let fd = unsafe { syscall2(SYS_OPEN, b"/dev/fb0\0".as_ptr() as u64, O_RDWR) };
+    if fd < 0 {
+        say(kmsg_fd, b"[microvm-init] fb: /dev/fb0 open failed (no DRM fbdev?)\n");
+        return;
+    }
+    say(kmsg_fd, b"[microvm-init] fb: /dev/fb0 open OK\n");
+
+    // 64 KB of BGRA pixels = 16384 pixels = 128×128 of red
+    let mut buf = [0u8; 4096];
+    // BGRA: opaque red = 0x00 0x00 0xFF 0xFF
+    for i in (0..buf.len()).step_by(4) {
+        buf[i + 0] = 0x00; // B
+        buf[i + 1] = 0x00; // G
+        buf[i + 2] = 0xFF; // R
+        buf[i + 3] = 0xFF; // A
+    }
+
+    let mut total: i64 = 0;
+    for _ in 0..16 {
+        let n = unsafe {
+            syscall3(SYS_WRITE, fd as u64, buf.as_ptr() as u64, buf.len() as u64)
+        };
+        if n <= 0 { break; }
+        total += n;
+    }
+
+    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+
+    let mut out = [0u8; 80];
+    let mut p: usize = 0;
+    let prefix = b"[microvm-init] fb: wrote ";
+    for &b in prefix { if p < out.len() { out[p] = b; p += 1; } }
+    p = push_dec(&mut out, p, total as u32);
+    for &b in b" bytes red BGRA\n" { if p < out.len() { out[p] = b; p += 1; } }
     say(kmsg_fd, &out[..p]);
 }
 
