@@ -1,0 +1,6 @@
+name      = "alpine-wayland"
+version   = "3.23.4"
+format    = "cpio.gz"
+size      = 16006783
+sha256    = "25b699ad50256a263d56a8ec0c76c5fe6b3b84952aa105c0719f7ea752b400a5"
+alpine    = "3.23.4"

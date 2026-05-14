@@ -33,10 +33,20 @@ ALPINE_BRANCH="${ALPINE_BRANCH:-v3.23}"
 ALPINE_VERSION="${ALPINE_VERSION:-3.23.4}"
 ALPINE_MINIROOTFS_SHA256="${ALPINE_MINIROOTFS_SHA256:-85498865362aa7ebececa0d725a2f2e4db7ac4e4b2850b8df21645afa0d03ee3}"
 
-# Output naming. `alpine-base` for iteration 1 (no apks added).
-# Iteration 3 will rename to `librewolf` once LibreWolf is on top.
-BUNDLE_NAME="${BUNDLE_NAME:-alpine-base}"
+# Output naming. `alpine-base` for iter 1 (no apks). `alpine-wayland`
+# for iter 2 (Mesa + Wayland + libxkbcommon — display-runtime smoke).
+# Iter 3 will rename to `librewolf` with the browser on top.
+BUNDLE_NAME="${BUNDLE_NAME:-alpine-wayland}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
+
+# Apks to add on top of minirootfs. Pinning to package _names_ here;
+# the version comes from the pinned Alpine snapshot (`v3.23` branch
+# tracks 3.23.x, the rolling patch level — bumps via ALPINE_VERSION).
+# Phase 12.6: this list will balloon for LibreWolf (mesa-dri-gallium,
+# gtk+3.0, libnss, freetype, fontconfig, icu-libs, pulseaudio-libs,
+# librewolf-bin, …). For iter 2 we just need the display-stack libs
+# so we can verify they at least LOAD inside our microvm.
+APK_PACKAGES="${APK_PACKAGES:-wayland-libs-client libxkbcommon}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -55,7 +65,7 @@ red()   { printf '\033[0;31m[npk]\033[0m %s\n' "$1" >&2; }
 
 # ── Sanity ───────────────────────────────────────────────────────
 
-for t in curl sha256sum tar bsdtar gzip cargo; do
+for t in curl sha256sum tar bsdtar gzip cargo unshare chroot; do
     command -v "$t" >/dev/null 2>&1 || { red "missing: $t"; exit 1; }
 done
 
@@ -91,6 +101,45 @@ trap 'rm -rf "$STAGE"' EXIT
 
 cyan "staging Alpine minirootfs"
 tar -xzf "$CACHE/$TARBALL" -C "$STAGE"
+
+# Resolv.conf for apk's CDN lookups inside the chroot. Without this
+# `apk add` fails at DNS resolution (no resolver inside the bare
+# rootfs).
+echo "nameserver 1.1.1.1" > "$STAGE/etc/resolv.conf"
+
+# ── Add apks via unshared-namespace chroot ───────────────────────
+#
+# Run Alpine's own apk binary inside a chroot via `unshare -r` so
+# we don't need real root on the host. apk handles trust-chain
+# verification (signed indexes + signed apks against /etc/apk/keys
+# which the minirootfs already populated).
+#
+# `--pid --fork --mount-proc` gives apk a fresh /proc inside the
+# chroot (some post-install scripts need it). `--mount` isolates
+# mount changes from the host namespace.
+if [ -n "$APK_PACKAGES" ]; then
+    cyan "apk add: $APK_PACKAGES"
+    APK_CACHE_DIR="$CACHE/apks"
+    mkdir -p "$APK_CACHE_DIR"
+    # Bind the host cache dir into the chroot so apk reuses
+    # downloaded .apks across builds — speeds up re-runs.
+    mkdir -p "$STAGE/var/cache/apk"
+
+    unshare --user --map-root-user --mount --pid --fork --mount-proc \
+        sh -c "
+            set -e
+            mount --bind '$APK_CACHE_DIR' '$STAGE/var/cache/apk'
+            chroot '$STAGE' /sbin/apk update 2>&1 | tail -3
+            chroot '$STAGE' /sbin/apk add --no-progress $APK_PACKAGES 2>&1 | tail -20
+        "
+
+    # Apk leaves /var/cache/apk populated with symlinks/copies — wipe
+    # it so the cpio doesn't carry duplicate-of-host-cache bytes.
+    rm -rf "$STAGE/var/cache/apk"/*
+
+    # Drop the temporary resolver — guest will set its own.
+    : > "$STAGE/etc/resolv.conf"
+fi
 
 # Drop our PID-1 as /init — Linux execs /init as PID-1 when an
 # initramfs is in use. Overrides anything Alpine ships (Alpine's
