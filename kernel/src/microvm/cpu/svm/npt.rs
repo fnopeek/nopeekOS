@@ -44,13 +44,12 @@ pub const GUEST_RAM_FRAMES: usize = (GUEST_WINDOW_BYTES / 4096) as usize;
 /// unused. Mirrors `vmx::ept::GUEST_RAM_ALIGN_SLACK`.
 pub const GUEST_RAM_ALIGN_SLACK: usize = 511;
 
-/// Number of 2 MB pages to identity-map. 128 × 2 MB = 256 MB,
-/// matching VMX `ept::GUEST_WINDOW_BYTES`. Enough for the substrate
-/// stub + a Linux guest in 12.1.1c-svm.
-const NPT_2MB_COUNT: usize = 128;
+/// Number of 2 MB pages to identity-map. 512 × 2 MB = 1 GB,
+/// matching VMX `ept::GUEST_WINDOW_BYTES`. Firefox-manifest target.
+const NPT_2MB_COUNT: usize = 512;
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
-const GUEST_WINDOW_BYTES: u64 = 256 * 1024 * 1024;
+const GUEST_WINDOW_BYTES: u64 = 1024 * 1024 * 1024;
 
 // ── NPT page-table flags ───────────────────────────────────────────
 
