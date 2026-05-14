@@ -78,7 +78,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
 
 ```
  ┌──────────────────────────────────────────────────────────┐
- │  Linux Apps (Firefox, etc.)                              │
+ │  Linux Apps (LibreWolf, etc.)                            │
  │  MicroVM (VT-x or AMD-V, Mini-Linux, virtio bridges)    │
  ├──────────────────────────────────────────────────────────┤
  │  WASM Modules (sandboxed, capability-gated)              │
@@ -407,7 +407,7 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [ ] 12.3.4 curl/HTTPS-test from inside guest
 - [ ] 12.4 virtio-gpu cross-domain + Shade bridge
 - [ ] 12.5 Picker bridge + B-mini virtiofs (per-app downloads folder)
-- [ ] 12.6 Firefox (the actual end-goal)
+- [ ] 12.6 LibreWolf (the actual end-goal — Firefox-fork: privacy-first, no telemetry)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
@@ -676,7 +676,7 @@ to full userspace boot:
 **Phase 12.2-12.6** (after both vendor backends complete 12.1.4):
 - [ ] 12.2-12.5  Plumbing: container format, profile-images,
       virtio-blk/net backends, picker bridge.
-- [ ] 12.6       **Firefox in MicroVM** (the actual end-goal).
+- [ ] 12.6       **LibreWolf in MicroVM** (the actual end-goal).
 
 ### Phase 11.5 -- npkFS v3: Content-Addressed Directories + mtime ✅ DONE 2026-05-05
 
