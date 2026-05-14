@@ -65,7 +65,11 @@ unsafe extern "C" fn rust_main() -> ! {
     let (kmsg_fd, _console_fd) = open_console_kmsg();
     say(kmsg_fd, b"\n[microvm-init] PID-1 up.\n");
 
-    input_event_smoke(kmsg_fd);
+    // input_event_smoke removed from the boot path — open(/dev/input/event0)
+    // exhibited inconsistent blocking behaviour between v0.162.0 (with
+    // O_NONBLOCK) and v0.162.1 (without). 12.4c is already validated
+    // on NUC; real event consumption is poll(2)-based in 12.4d.
+    let _ = kmsg_fd;
 
     // If the bundled rootfs has /bin/sh (Alpine userspace, future
     // LibreWolf container), exec it. Otherwise fall through to the
@@ -204,6 +208,7 @@ fn open_console_kmsg() -> (i64, i64) {
 /// the real event-injection path (Shade compositor → eventq) is
 /// future work (12.4d), the test devolved to "does the device node
 /// exist". Open success is enough for 12.4c.
+#[allow(dead_code)]
 fn input_event_smoke(kmsg_fd: i64) {
     let fd = unsafe {
         syscall3(SYS_OPEN, b"/dev/input/event0\0".as_ptr() as u64, O_RDONLY, 0)
