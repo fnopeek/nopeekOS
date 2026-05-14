@@ -20,10 +20,15 @@ const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_DUP2: u64 = 33;
 const SYS_PAUSE: u64 = 34;
+const SYS_ACCESS: u64 = 21;
+const SYS_EXECVE: u64 = 59;
 const SYS_EXIT: u64 = 60;
 const SYS_MKDIR: u64 = 83;
 const SYS_MOUNT: u64 = 165;
 const SYS_REBOOT: u64 = 169;
+
+// access(2) modes
+const F_OK: u64 = 0;
 
 const O_RDONLY: u64 = 0;
 const O_RDWR: u64 = 2;
@@ -62,13 +67,67 @@ unsafe extern "C" fn rust_main() -> ! {
 
     input_event_smoke(kmsg_fd);
 
+    // If the bundled rootfs has /bin/sh (Alpine userspace, future
+    // LibreWolf container), exec it. Otherwise fall through to the
+    // pause loop — same PID-1 binary works for the minimal substrate
+    // initramfs AND for a real userspace bundle.
+    try_exec_userspace(kmsg_fd);
+
     // PID-1 must never return — Linux panics on "Attempted to kill
     // init!". Park in pause(2); signal-delivery wakes us, then we
-    // pause again. Future: exec the container manifest's init from
-    // /usr/bin/<app>.
+    // pause again.
     loop {
         let _ = unsafe { syscall0(SYS_PAUSE) };
     }
+}
+
+/// If `/bin/sh` exists, exec a small smoke command through it. This
+/// proves the userspace bundle is loadable end-to-end: dynamic linker
+/// (`/lib/ld-musl-x86_64.so.1`) resolves, busybox runs, console output
+/// makes it back through our virtio + serial pipes, then `poweroff`
+/// shuts the VM down cleanly.
+///
+/// On execve success this function never returns — PID-1 IS now the
+/// shell. If anything fails (no /bin/sh, missing ld-musl, exec
+/// returns ENOENT) we silently fall through; caller goes to pause loop.
+fn try_exec_userspace(kmsg_fd: i64) {
+    // Probe for /bin/sh — access(F_OK). Cheaper than open+close, and
+    // doesn't pollute the fd table on the success path (execve
+    // inherits all fds).
+    let probe = unsafe { syscall3(SYS_ACCESS, b"/bin/sh\0".as_ptr() as u64, F_OK, 0) };
+    if probe != 0 {
+        say(kmsg_fd, b"[microvm-init] no /bin/sh -- staying minimal\n");
+        return;
+    }
+
+    say(kmsg_fd, b"[microvm-init] /bin/sh present, exec'ing userspace smoke\n");
+
+    // Build argv = ["/bin/sh", "-c", "<command>", NULL]
+    // and envp = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "TERM=linux", NULL]
+    // execve takes *const *const u8 — we hand-build the pointer tables.
+    let prog = b"/bin/sh\0".as_ptr();
+    let arg0 = b"/bin/sh\0".as_ptr();
+    let arg1 = b"-c\0".as_ptr();
+    // Smoke command: identify guest, list /, sleep, clean shutdown.
+    // `poweroff` is a busybox symlink to /bin/busybox poweroff which
+    // calls reboot(POWER_OFF) — same path our PID-1's halt() uses.
+    let arg2 = b"echo '[shell] hello from Alpine in nopeekOS microvm'; uname -a; ls / | head -20; echo '[shell] done -- powering off'; sleep 1; poweroff -f\0".as_ptr();
+    let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
+    let env1 = b"TERM=linux\0".as_ptr();
+
+    let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
+    let envp = [env0, env1, core::ptr::null::<u8>()];
+
+    unsafe {
+        syscall3(
+            SYS_EXECVE,
+            prog as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        );
+    }
+    // Only reached on execve failure (ENOENT / EACCES / ENOEXEC).
+    say(kmsg_fd, b"[microvm-init] execve failed -- falling back to pause\n");
 }
 
 /// Mount /proc, /sys, /dev (devtmpfs), /tmp (tmpfs). Required for any

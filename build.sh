@@ -767,6 +767,28 @@ sha384=${BZIMG_SHA}
             fi
         fi
 
+        # MicroVM userspace bundle — produced by
+        # microvm-userspace/build.sh. Optional. Currently the
+        # `alpine-base` iteration; future iterations add LibreWolf
+        # via Alpine APKBUILD on top. NOT bundled into the kernel
+        # binary (BUNDLED_ASSETS) — pure OTA asset.
+        ROOTFS_FILE="$RELEASE_DIR/assets/microvm-rootfs.cpio.gz"
+        if [ -f "$ROOTFS_FILE" ]; then
+            ROOTFS_SIZE=$(stat -c%s "$ROOTFS_FILE")
+            ROOTFS_SHA=$(openssl dgst -sha384 -hex "$ROOTFS_FILE" 2>/dev/null | awk '{print $NF}')
+
+            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:rootfs]
+size=${ROOTFS_SIZE}
+sha384=${ROOTFS_SHA}
+
+"
+            if [ -f "$KEY_FILE" ]; then
+                openssl dgst -sha384 -sign "$KEY_FILE" \
+                    -out "${ROOTFS_FILE}.sig" "$ROOTFS_FILE"
+                ok "Signed rootfs: microvm-rootfs.cpio.gz ($ROOTFS_SIZE bytes)"
+            fi
+        fi
+
         if [ -n "$ASSET_MANIFEST" ]; then
             echo "$ASSET_MANIFEST" > "$RELEASE_DIR/assets/manifest"
             ok "Asset manifest written"

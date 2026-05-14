@@ -1,0 +1,6 @@
+name      = "alpine-base"
+version   = "3.23.4"
+format    = "cpio.gz"
+size      = 10316151
+sha256    = "90ae40f0ae90d642676245029cb0f145ebf1952046e87c4b3bc623c6d9b98b93"
+alpine    = "3.23.4"
