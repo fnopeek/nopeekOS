@@ -184,6 +184,10 @@ pub struct VirtioGpu {
     /// First N flush events get a verbose log; afterwards we silently
     /// keep updating to avoid swamping the serial console.
     flush_log_count: u32,
+    /// Same throttling for TRANSFER_TO_HOST_2D — fbcon issues one per
+    /// console-line update which is a full 3.6 MB blit; logging each
+    /// via kprintln stalls the guest for tens of seconds.
+    transfer_log_count: u32,
 }
 
 impl VirtioGpu {
@@ -212,6 +216,7 @@ impl VirtioGpu {
             resources: Vec::new(),
             scanouts: [Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 } }; MAX_SCANOUTS],
             flush_log_count: 0,
+            transfer_log_count: 0,
         }
     }
 
@@ -564,14 +569,16 @@ impl VirtioGpu {
             copy_from_backing(host_base, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
         }
 
-        if r.host_pixels.as_ref().map(|p| !p.is_empty()).unwrap_or(false) {
-            // Log only the FIRST transfer per resource at INFO level to
-            // avoid spam.
+        let n = self.transfer_log_count;
+        self.transfer_log_count = n.saturating_add(1);
+        if n < 5 {
+            kprintln!(
+                "[gpu] TRANSFER_TO_HOST_2D res={} rect={}x{}+{}+{} offset={}",
+                resource_id, w, h, x, y, offset,
+            );
+        } else if n.is_multiple_of(60) {
+            kprintln!("[gpu] TRANSFER_TO_HOST_2D#{} res={} (logging throttled)", n + 1, resource_id);
         }
-        kprintln!(
-            "[gpu] TRANSFER_TO_HOST_2D res={} rect={}x{}+{}+{} offset={}",
-            resource_id, w, h, x, y, offset,
-        );
     }
 
     fn handle_flush(&mut self, body: &[u8]) {
