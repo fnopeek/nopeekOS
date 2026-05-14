@@ -662,7 +662,12 @@ fn run_linux_loop(
     // this generous. Phase 12.1.4-svm replaces this with a real
     // cancel signal.
     let mut consecutive_idle: u32 = 0;
-    const IDLE_THRESHOLD: u32 = 5_000;
+    // Match the VMX side (200). The original 5000 was a wall-of-spin
+    // safety pad from the early AMD bring-up when TSC calibration was
+    // still suspect; with `tsc_early_khz=2000000` short-circuiting
+    // Linux's calib loop, 200 INTRs ≈ 2 s wait — short enough for
+    // fast iterate-on-qemu test cycles.
+    const IDLE_THRESHOLD: u32 = 200;
 
     while iter < MAX_ITERATIONS {
         iter += 1;
