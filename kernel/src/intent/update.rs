@@ -29,6 +29,13 @@ const ASSETS: &[AssetSpec] = &[
     AssetSpec { section: "icons:phosphor",      remote_filename: "phosphor.atlas",            npkfs_path: "sys/icons/phosphor" },
     AssetSpec { section: "microvm:initramfs",   remote_filename: "microvm-initramfs.cpio.gz", npkfs_path: "sys/microvm/initramfs.cpio.gz" },
     AssetSpec { section: "microvm:linux-virt",  remote_filename: "linux-virt.bzImage",        npkfs_path: "sys/microvm/linux-virt.bzImage" },
+    // Optional userspace bundle — Alpine + busybox + (future) LibreWolf.
+    // Built by `microvm-userspace/build.sh`. Distinct from
+    // `microvm:initramfs` (which is just our PID-1, always present).
+    // If a release ships this asset, OTA pulls it; if not, the entry
+    // is absent in the asset manifest and we keep whatever's already
+    // installed (or nothing).
+    AssetSpec { section: "microvm:rootfs",      remote_filename: "microvm-rootfs.cpio.gz",    npkfs_path: "sys/microvm/rootfs.cpio.gz" },
 ];
 
 struct AssetEntry {
