@@ -123,7 +123,7 @@ fn try_exec_userspace(kmsg_fd: i64) {
     //
     // `poweroff` is a busybox symlink to /bin/busybox poweroff which
     // calls reboot(POWER_OFF) — same path our PID-1's halt() uses.
-    let arg2 = b"exec >/dev/kmsg 2>&1; echo '[shell] hello from Alpine in nopeekOS microvm'; uname -a; ls / | head -20; echo '[shell] done -- powering off'; sleep 1; poweroff -f\0".as_ptr();
+    let arg2 = b"exec >/dev/kmsg 2>&1; echo '[shell] hello from Alpine in nopeekOS microvm'; uname -a; echo '[shell] --- wayland-libs check ---'; ls -la /usr/lib/libwayland* 2>&1 | head -5; ldd /usr/lib/libwayland-client.so.0 2>&1 | head -10; echo '[shell] done -- powering off'; sleep 1; poweroff -f\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
 
