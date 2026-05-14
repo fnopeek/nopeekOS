@@ -17,7 +17,7 @@ gemeinsames Filesystem mit npkFS-Wurzel, kein ambient Linux.
 > document — jeder Open-Question-Block trägt `open` / `decided
 > <date>` + Begründung. 12.2-12.5 Plumbing (virtio-blk/net,
 > container-format, picker-bridge) ist als nächstes dran, dann
-> 12.6 Firefox.
+> 12.6 LibreWolf.
 
 ---
 
@@ -36,7 +36,7 @@ Jede hat eine eigene Trust-Boundary.
 │  Layer B — MicroVM (this document)                                  │
 │    Legacy Linux GUI apps. VT-x non-root + EPT + VT-d.               │
 │    Trust-Boundary: VMX hardware isolation.                          │
-│    Beispiele (geplant): Firefox, Thunderbird, VSCode, Signal, ...   │
+│    Beispiele (geplant): LibreWolf, Thunderbird, VSCode, Signal, ...   │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Layer C — Servo embedded (Phase 13+, langfristig)                  │
 │    Native Rust browser engine als WASM-app (eventually).            │
@@ -56,7 +56,7 @@ des ganzen Subsystems und muss vor jedem anderen Detail klar sein.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  WASM Container-Manager  (e.g. tools/wasm/microvm-firefox/)         │
+│  WASM Container-Manager  (e.g. tools/wasm/microvm-librewolf/)         │
 │    owns:  Manifest laden + verifizieren, VM-Lifecycle (create/run/  │
 │           stop), Bridge-Endpoints (Picker, Clipboard), IO-Event-    │
 │           pumping zwischen Guest und Shade-Terminal.                │
@@ -104,16 +104,16 @@ Same trust pipeline as kernel + WASM-module updates. Triple per app
 version, atomically replaceable in npkFS:
 
 ```
-release/apps/firefox/
-├── firefox-138.0.1.sqfs        (~70 MB, read-only rootfs, BLAKE3-hashed)
-├── firefox-138.0.1.manifest    (TOML, caps + runtime)
-├── firefox-138.0.1.sig         (ECDSA P-384 over manifest+sqfs hash)
-└── current → 138.0.1
+release/apps/librewolf/
+├── librewolf-150.0.sqfs        (~70 MB, read-only rootfs, BLAKE3-hashed)
+├── librewolf-150.0.manifest    (TOML, caps + runtime)
+├── librewolf-150.0.sig         (ECDSA P-384 over manifest+sqfs hash)
+└── current → 150.0
 ```
 
-`install firefox` zieht das Triple, verifiziert ECDSA-Signatur,
+`install librewolf` zieht das Triple, verifiziert ECDSA-Signatur,
 schreibt das `.sqfs` als content-addressed npkFS-Objekt. `update
-firefox` ersetzt atomar. Rollback = pointer-switch, vorheriges sqfs
+librewolf` ersetzt atomar. Rollback = pointer-switch, vorheriges sqfs
 ist noch im store. **Identische Logik zu WASM-Modul-Updates**, nur
 grössere Files. Keine neue Trust-Hierarchie.
 
@@ -139,7 +139,7 @@ Drei Bridge-Typen. Jede ist eine eigene Capability, default-deny.
 ### Pattern X — Block-Image Bridge (App-Profile, immer aktiv)
 
 ```
-Host npkFS-Objekt: firefox-profile-{user-hash}
+Host npkFS-Objekt: librewolf-profile-{user-hash}
   └─ AES-256-GCM verschlüsselt mit User-derived Key (HW AES-NI, ~700 MB/s)
   └─ Inhalt: rohes ext4-Image, sparse, ~512 MB initial
 
@@ -164,11 +164,11 @@ drag-and-drop), Host zeigt nopeek-Picker in Shade, User wählt aus
 npkFS, Host reicht **genau dieses File** in einen tmpfs-Pfad in der VM.
 
 ```
-Firefox: <input type="file"> klick
+LibreWolf: <input type="file"> klick
   └─ Linux-Side: virtio-fs request "open file dialog"
   └─ Host: zeigt nopeek-Picker (Shade-overlay), User wählt /docs/CV.pdf
   └─ Host: schreibt CV.pdf nach /upload/CV.pdf (tmpfs in der VM)
-  └─ Firefox: bekommt einen Dateipfad, lädt hoch
+  └─ LibreWolf: bekommt einen Dateipfad, lädt hoch
 ```
 
 Save-Dialog reverse. Drag-and-Drop mappt natürlich darauf.
@@ -182,10 +182,10 @@ Adapter nötig.
 Zwei Varianten, dieselbe Mechanik (single npkFS-Subtree → virtio-fs in
 Guest), unterschiedlicher Scope:
 
-**B-mini — Per-App-Downloads** (Phase 12.5, gebraucht für Firefox).
+**B-mini — Per-App-Downloads** (Phase 12.5, gebraucht für LibreWolf).
 Genau ein read-write-Subtree pro App, default unter
 `home/<user>/downloads/<app-name>/`. Deckt den Auto-Download-Fall ab,
-den der Picker nicht trifft (Firefox: Right-Click "Save Image", Bulk-
+den der Picker nicht trifft (LibreWolf: Right-Click "Save Image", Bulk-
 Downloads, Direct-Save aus dem Browser). User sieht die Files **direkt
 in loft**, weil sie im npkFS-Home liegen. Kein POSIX-on-npkFS-Adapter
 nötig — flacher Subtree mit File-CRUD reicht. npkFS v3 liefert
@@ -227,15 +227,15 @@ Wire-Version `0x01`, append-only Cap-Enum (analog Widget-ABI).
 
 ```toml
 [meta]
-name         = "firefox"
-version      = "138.0.1"
+name         = "librewolf"
+version      = "150.0"
 sqfs_blake3  = "0x..."
 sqfs_size    = 73891840
 ecdsa_sig    = "0x..."
 
 [runtime]
 kernel_min   = "6.18.0"
-init         = "/usr/bin/firefox"
+init         = "/usr/bin/librewolf"
 memory_mb    = 1024
 vcpus        = 2
 
@@ -256,7 +256,7 @@ sub-field, you cannot rename or remove). Same discipline as
 **`display.mode` values** (append-only):
 - `"cross-domain"` — virtio-gpu cross-domain context (kernel ≥ 5.16,
   voll im 6.18 LTS). Wayland-Passthrough auf virgl-Protocol-Level.
-  Default für Phase 12.6 (Firefox).
+  Default für Phase 12.6 (LibreWolf).
 - `"drm-native"` — virtio-gpu DRM native context (Patch-Reife
   6.17/6.18, bessere Performance, lightweight contexts). Opt-in pro
   App wenn die Patch-Level-Reife stimmt; in Phase 12 wahrscheinlich
@@ -310,11 +310,94 @@ inject_console / stop`. virtio-blk, virtio-net, virtio-gpu come in
 | 12.3 | **virtio-net mit Cap-Filter** | Guest hat IP, kann HTTPS, Cap-Liste enforced am Host (kein iptables im Guest) | Erste Internet-fähige App möglich (z.B. `curl`) |
 | 12.4 | **virtio-gpu cross-domain + Shade-Bridge** | Wayland-Forwarding aus Guest in Shade-Surface, Maus/Tastatur rein, Pixel raus | virtio-gpu cross-domain context (Mainline ≥ 5.16, vollständig in 6.18). Erste GUI-App möglich. DRM native context als späteres Performance-Upgrade pro App |
 | 12.5 | **Picker + Mini-virtiofs** | Open/Save-Dialog im Host (Shade-overlay, Pattern A) **+** ein read-write Subtree pro App unter `home/<user>/downloads/<app>/` als virtio-fs (Pattern B-mini, deckt Auto-Downloads die der Picker nicht trifft — Files in loft sichtbar) | Blocking call from Guest für Picker, Wayland-DnD später. B-mini braucht keinen POSIX-Adapter, flacher Subtree reicht |
-| 12.6 | **Firefox** | Erste echte App. Multi-VCPU, GPU-Sharing, Audio, Picker, Profile-Image, virtio-net | Endboss von Phase 12. Daily-driver-Test |
+| 12.6 | **LibreWolf** | Erste echte App. Multi-VCPU, GPU-Sharing, Audio, Picker, Profile-Image, virtio-net | Endboss von Phase 12. Daily-driver-Test |
 
 12.0 ist explizit ein Diskussions-Meilenstein. Kein Code bevor das
 Spec-File so steht, dass die Open Questions entweder beantwortet oder
 dokumentiert deferred sind.
+
+---
+
+## Critical path to first browser launch  *(identified 2026-05-14)*
+
+Substrate-Status nach v0.161.1: VT-x + SVM grün, virtio-blk/net/gpu/input
+end-to-end, 1 GB Guest-RAM, TCP-NAT bringt HTTPS raus. Was strikt zwischen
+hier und "LibreWolf-Fenster geht auf" liegt — und was nur Nice-to-have ist.
+
+**MUST.** Ohne diese vier startet kein Browser:
+
+1. **Userspace-Bundle.** LibreWolf-Binary + musl + Mesa + Wayland-libs +
+   GTK + Cairo + freetype + ICU + alle transitiven Deps. ~80-200 MB
+   compressed. Ohne das gibt's keinen Prozess der "browser" heißt.
+   Build-Pipeline: Alpine-apk-snapshot + minimal-package-list + mksquashfs
+   (oder cpio.gz für Tactical-First-Launch). **Größter Brocken**, ~1 Woche.
+
+2. **Loading-Pfad ins Guest.** Zwei Optionen:
+   - **Initramfs-Hack** (tactical) — Bundle in cpio.gz, Linux entpackt
+     in tmpfs. Schnell, RAM-teuer (200 MB unpacked = 200 MB weg von
+     unseren 1 GB).
+   - **sqfs via virtio-blk slot 5** (strategisch) — Bundle als
+     second blk-device read-only, PID-1 mountet + pivot_root.
+     RAM-effizient (kompressed auf Disk, dekompressed on-read).
+     ~2 Tage.
+   
+   Für First-Launch: initramfs. Für daily-driver: sqfs.
+
+3. **virtio-gpu cross-domain context.** Aktuell haben wir 2D scanout
+   (Linux schreibt fbcon-Pixel rein, wir blitten zu Host-Framebuffer).
+   LibreWolf rendert über Wayland → braucht virgl-Protocol-Forwarding,
+   nicht einfacher Framebuffer-Schreibpfad. Linux-Side ist drin
+   (`CONFIG_DRM_VIRTIO_GPU_KMS=y`), Host-Backend macht aber nur Scanout.
+   ~1-2 Wochen.
+
+4. **virtio-input event injection.** Device-Skeleton existiert seit
+   12.4c (v0.160.0), eventq bleibt aber leer. Wayland braucht echte
+   key/pointer-Events. Host-Side: Shade-Compositor pumpt KeyDown /
+   PointerMove → eventq. ~3-4 Tage.
+
+**NICHT auf dem kritischen Pfad** (= nicht jetzt anfassen):
+
+- **SMP / Multi-vCPU.** LibreWolf bootet single-thread. Performance,
+  nicht Funktionalität. Phase 12.6.1+.
+- **exec-Validation als isolierter Smoke-Test.** Fällt aus der
+  Userspace-Bundle-Arbeit automatisch raus — kein separater Proof
+  nötig.
+- **Audio (virtio-snd).** Browser startet mute. Audio in 12.7+.
+- **Picker + B-mini virtiofs (Phase 12.5).** Browser kann ohne
+  laufen (kein Upload/Download nötig für First-Launch). Wird vor
+  daily-driver-Use gebraucht.
+
+**Reihenfolge (2026-05-14):**
+
+```
+A. Userspace-Bundle (Alpine + LibreWolf + Deps, mksquashfs)
+B. Loading via initramfs (Tactical, schnellster Weg zu "Prozess startet")
+C. Wenn Wayland-init failed (vermutlich → no display) → cross-domain
+D. Wenn Browser läuft aber tot/black → input injection
+```
+
+A ist der eine Block, der gemacht werden muss — egal welche Display- oder
+Input-Lösung. Also: A zuerst, dann C+D parallel zu B-zu-sqfs-Migration.
+
+---
+
+## Deferred performance optimisations
+
+### Boot-state snapshot/restore
+
+`open, deferred → Phase 12.6.1+`. Nach jedem `microvm linux` rebooted
+Linux komplett (~2.45 s). Wenn Boot-Pfad stabil ist, snapshot machen:
+- VMCB / VMCS + alle Guest-CPU-State
+- 1 GB Guest-RAM-Window (EPT/NPT mapping)
+- virtio device states (q-pointer, last_avail_idx, used_idx pro Queue)
+- "Snapshot-Point" = nach kernel-init, vor `exec(LibreWolf)`
+
+Restore: VMCB schreiben, EPT/NPT identity-mapping rebuild, RAM-Window
+zurück. Erwartete Restore-Zeit: <100 ms (statt 2.45 s Boot).
+
+Warum erst später: Boot-Pfad ändert sich noch (SMP, neue virtio-Devices,
+container-loading). Snapshots würden stale. Sobald Phase 12.6 stabil ist
+und das Substrate sich nicht mehr ändert, lohnt sich die Snapshot-Pipeline.
 
 ---
 
@@ -334,13 +417,13 @@ Host-NIC" sagt. Das geht heute direkt an `intel_nic::send_frame()`,
 post-Refactor an `npk_net_*`-host-fn — ein Call-Site-Swap, keine
 Re-Implementation. Die `net::eth`-Abstraktion fängt das.
 
-**Neue Reihenfolge (2026-05-05):** 12.1.4 ✓ → **12.2-12.6 (Firefox)** →
+**Neue Reihenfolge (2026-05-05):** 12.1.4 ✓ → **12.2-12.6 (LibreWolf)** →
 **Microkernel-Refactor** → HW-Extension-Set (NVMe/xhci/framebuffer/
 intel_xe).
 
-**Why neu:** Firefox-in-MicroVM ist der eigentliche Demo-Win der ganzen
+**Why neu:** LibreWolf-in-MicroVM ist der eigentliche Demo-Win der ganzen
 Vision. Refactor verkürzt 12.2-12.6 nicht und macht es nicht günstiger.
-Time-to-Firefox: 4-6 Wochen direkt vs. 6-9 Wochen mit Refactor-Vorlauf.
+Time-to-LibreWolf: 4-6 Wochen direkt vs. 6-9 Wochen mit Refactor-Vorlauf.
 
 **Refactor-Cost bleibt:** ~2-3 Wochen, wird hinter 12.6 gehängt.
 
@@ -356,7 +439,7 @@ Custom-Fork.
 **Branch: Linux 6.18 LTS.** Begründung:
 - 6.12 LTS ist unter der Schwelle für `virtio-gpu` DRM native
   context (braucht 6.13+, properly stabil 6.17/6.18) — kostet uns
-  den Performance-Pfad bei 12.6 (Firefox) und später Steam.
+  den Performance-Pfad bei 12.6 (LibreWolf) und später Steam.
 - 6.18 hat den vollen modernen `virtio-gpu` Stack inkl.
   cross-domain context (für Wayland-Passthrough) und DRM native
   context (für Performance-Vulkan).
@@ -394,7 +477,7 @@ Statisch gelinkt, ~50 KB. Mountet `/proc /sys /dev`, exec'd das
 Binary aus `manifest.init`, fertig. Keine sysvinit-Skripte, keine
 service-units, kein systemd.
 **Why:** Wir reden über VMs mit einem einzigen Anwendungsprozess
-(Firefox / Foot / mpv) — das ist kein Server-OS-Init. BusyBox-init
+(LibreWolf / Foot / mpv) — das ist kein Server-OS-Init. BusyBox-init
 wäre Overkill, systemd-shrink ein No-Go (riesige Codebase). Eigener
 Rust-Init passt zur nopeekOS-Linie ("alles selbst, scharf umrissen,
 auditable"), ist trivial zu reviewen, hat kein Drift-Risiko gegen
@@ -403,9 +486,9 @@ Rust-Module statt Fremdcode für Trust-kritische Schichten).
 
 ### `decided 2026-04-29` — Userspace-Quelle: Alpine-apk aus gepinntem Snapshot
 App-Runtime (libc, ICU, freetype, Mesa, Wayland-libs, …) und Apps
-selbst (Firefox, Thunderbird, …) kommen aus Alpine-apk im
+selbst (LibreWolf, Thunderbird, …) kommen aus Alpine-apk im
 CI-Build, nicht from-source.
-**Why:** Mesa+Firefox from-source wäre Wartungs-Selbstmord (200+
+**Why:** Mesa+LibreWolf from-source wäre Wartungs-Selbstmord (200+
 transitive Deps, stundenlange Build-Times). Alpine macht den
 Compile-Job, wir prüfen Hashes pro Paket im Recipe und signieren das
 fertige Image. Trust-Chain: Alpine signiert apk → wir verifizieren
@@ -444,11 +527,21 @@ konstruieren wäre eine riesige Angriffsfläche. Kleine scharf
 umrissene Kernel-Primitive + großer WASM-Glue folgt dem bestehenden
 Driver-ABI-Muster (PCI/MMIO/DMA-Hostfns mit Capability-Check).
 
-### `decided 2026-04-29` — Browser als erste produktive App
-Phase 12.6 ist Firefox. Vorher (12.1–12.5) sind Infrastruktur-
-Meilensteine. **Why:** Browser ist der primäre Use-Case, der
-überhaupt zur MicroVM-Entscheidung geführt hat. Alles davor ist
-Plumbing.
+### `decided 2026-04-29, refined 2026-05-14` — Browser als erste produktive App: LibreWolf
+Phase 12.6 ist LibreWolf (Firefox-Fork: no telemetry, hardened defaults,
+privacy-by-default). Vorher (12.1–12.5) sind Infrastruktur-Meilensteine.
+**Why:** Browser ist der primäre Use-Case, der überhaupt zur MicroVM-
+Entscheidung geführt hat. Alles davor ist Plumbing.
+**Why LibreWolf statt vanilla Firefox (2026-05-14):** Brand-Fit mit
+nopeekOS-Philosophie (no peek). Technisch nahezu identisch — gleiches
+XPCOM-Runtime, gleiche Wayland/Mesa/musl/GTK-Deps, gleiche RAM/Display/
+Input-Anforderungen, gleiche Build-Pipeline (Alpine apk recipe). Nur
+hardened defaults + entfernte Telemetry-Komponenten. Kritischer Pfad
+ändert sich kein Stück.
+**Version pinning:** LibreWolf tracked Firefox-stable, aktuell **150.x**
+(NICHT eine alte ESR). Recipe pinnt exakte Patch-Version (z.B. `150.0.1`)
++ BLAKE3-hash pro tarball, Bump = Recipe-PR. Re-evaluation alle ~6
+Wochen wenn neue LibreWolf-Release-Notes auftauchen.
 
 ### `decided 2026-04-29` — Container = signiertes Squashfs-Triple
 Read-only sqfs + manifest.toml + ECDSA P-384 sig. Identische
@@ -469,7 +562,7 @@ Subtree pro App, default `home/<user>/downloads/<app>/`) deckt **Auto-
 Downloads** die der Picker nicht trifft — kommt **mit 12.5**, nicht
 später. Pattern B-full (Multi-Pfad-Manifest-Mounts mit ro/rw-Mix) ist
 opt-in pro App, kommt erst mit IDE/File-Manager-Use-Cases nach 12.6.
-**Why refined:** Firefox-Auto-Downloads sind kein Picker-Flow, müssen
+**Why refined:** LibreWolf-Auto-Downloads sind kein Picker-Flow, müssen
 aber für den User in loft sichtbar sein. B-mini braucht keinen
 POSIX-on-npkFS-Adapter (flacher Subtree, npkFS v3 liefert mtime/size/
 kind), ist also kein 12.5-Cost-Treiber.
@@ -556,7 +649,7 @@ sind glibc-only.
   meistens, manchmal nicht.
 - **B. Pro-App-Auswahl der libc.** App-Manifest sagt `libc = "glibc"`,
   Builder zieht glibc-Userspace.
-- **C. Erstmal nur musl-kompatible Apps.** Firefox läuft mit musl.
+- **C. Erstmal nur musl-kompatible Apps.** LibreWolf läuft mit musl.
   Steam später mit Spezial-Recipe.
 
 **Default-if-stuck:** C. Steam ist Phase 13.
@@ -600,7 +693,7 @@ Browser braucht Hardware-Compositing, Steam braucht Vulkan.
 - **C. SR-IOV.** Echte GPU-Partitionierung. Hardware-spezifisch (kein
   N100-Support). Verwerfen.
 
-**Default-if-stuck:** A für Phase 12.6 (Firefox), B wenn Steam in
+**Default-if-stuck:** A für Phase 12.6 (LibreWolf), B wenn Steam in
 Phase 13 dran ist.
 
 ### `open` — Phase-Nummer
