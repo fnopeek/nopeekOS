@@ -46,8 +46,11 @@ const EPTP_MEM_TYPE_WB: u64 = 6;
 const EPTP_WALK_LENGTH_4: u64 = 3 << 3; // 4 levels = walk length 3
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
-const GUEST_WINDOW_BYTES: u64 = 256 * 1024 * 1024;
-const PD_LEAVES: u64 = GUEST_WINDOW_BYTES / TWO_MB; // 128 entries (max 512 = 1 GB)
+// 1 GB guest RAM — Firefox manifest spec target. Exactly fills one
+// PDPT entry's worth of 2 MB pages (512 leaves). Bumping past 1 GB
+// needs multi-PD support (split across PDPT entries).
+const GUEST_WINDOW_BYTES: u64 = 1024 * 1024 * 1024;
+const PD_LEAVES: u64 = GUEST_WINDOW_BYTES / TWO_MB; // 512 entries (= 1 GB, max for single PD)
 
 /// Number of 4 KB host frames the caller must allocate contiguously
 /// for the guest RAM backing.
