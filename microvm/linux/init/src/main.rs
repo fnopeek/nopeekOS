@@ -113,9 +113,17 @@ fn try_exec_userspace(kmsg_fd: i64) {
     let arg0 = b"/bin/sh\0".as_ptr();
     let arg1 = b"-c\0".as_ptr();
     // Smoke command: identify guest, list /, sleep, clean shutdown.
+    //
+    // First line redirects stdout+stderr to /dev/kmsg — the tty
+    // 8250 driver buffers writes against IRQ4, which never fires
+    // because our cmdline has `noapic nolapic`. /dev/kmsg writes
+    // go through printk which uses a polled path → always reach
+    // the host. Without this redirect, the shell's output piles
+    // up in the 8250 TX buffer and the host never sees it.
+    //
     // `poweroff` is a busybox symlink to /bin/busybox poweroff which
     // calls reboot(POWER_OFF) — same path our PID-1's halt() uses.
-    let arg2 = b"echo '[shell] hello from Alpine in nopeekOS microvm'; uname -a; ls / | head -20; echo '[shell] done -- powering off'; sleep 1; poweroff -f\0".as_ptr();
+    let arg2 = b"exec >/dev/kmsg 2>&1; echo '[shell] hello from Alpine in nopeekOS microvm'; uname -a; ls / | head -20; echo '[shell] done -- powering off'; sleep 1; poweroff -f\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
 
