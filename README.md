@@ -405,9 +405,16 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
       first real IPv4 UDP frame from guest
 - [ ] 12.3.3 NAT zum Host-Stack + Cap-Filter (~300 LoC)
 - [ ] 12.3.4 curl/HTTPS-test from inside guest
-- [ ] 12.4 virtio-gpu cross-domain + Shade bridge
-- [ ] 12.5 Picker bridge + B-mini virtiofs (per-app downloads folder)
-- [ ] 12.6 LibreWolf (the actual end-goal — Firefox-fork: privacy-first, no telemetry)
+- [x] 12.4 virtio-gpu 2D scanout (kernel-only v0.158.0, blits to host framebuffer)
+- [x] 12.4c virtio-input device skeleton (slot 4, IRQ 12, evdev /dev/input/event0)
+- [x] **Linux userspace inside microvm** (v0.162.x — Alpine minirootfs + busybox shell
+      exec'd by our PID-1; `uname -a`, `ls /` output captured via /dev/kmsg)
+- [x] **Userspace bundle build pipeline** (v0.163.0 — `microvm-userspace/build.sh`
+      with `apk add` via unshare-chroot, distributed as OTA asset)
+- [ ] 12.4d virtio-gpu cross-domain context (Wayland-forwarding via virgl protocol)
+- [ ] 12.4e virtio-input event injection (Shade-compositor → eventq)
+- [ ] 12.5  Picker bridge + B-mini virtiofs (per-app downloads folder)
+- [ ] 12.6  LibreWolf (the actual end-goal — Firefox-fork: privacy-first, no telemetry)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
