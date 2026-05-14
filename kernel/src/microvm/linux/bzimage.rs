@@ -152,10 +152,9 @@ const E820_TYPE_RESERVED: u32 = 2;
 /// PC convention works around it.
 ///
 /// Must equal `ept::GUEST_WINDOW_BYTES` — the EPT window backs the
-/// e820 RAM. 64 MB OOM-panicked Alpine virt during first kthread
-/// fork ("Memory: 20420K available"); 256 MB gives Linux ~230 MB
-/// usable, enough for initcalls + initramfs + a small distro.
-const GUEST_RAM_TOTAL: u64 = 256 * 1024 * 1024;
+/// e820 RAM. Phase 12.6 spec target is 1 GB for Firefox; 256 MB was
+/// fine for the 12.1-12.4 substrate but tight for any real userspace.
+const GUEST_RAM_TOTAL: u64 = 1024 * 1024 * 1024;
 
 /// Linux loadflags bits we need.
 const LOADFLAG_LOADED_HIGH: u8 = 1 << 0;
