@@ -820,6 +820,11 @@ fn run_linux_loop(
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if pci.virtio_input.bar0_in_range(gpa) {
+                    if handle_mmio_npf_input(vmcb, regs, &mut pci.virtio_input, &pic, gpa, host_base) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 }
                 serial.flush();
                 kprintln!(
@@ -1200,6 +1205,62 @@ fn handle_mmio_npf_gpu(
         if advanced {
             // virtio-gpu IRQ line = 9.
             let vector = pic.vector_for_irq(9);
+            let info: u64 = (vector as u64) | (1u64 << 31);
+            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+        }
+    }
+
+    advance_rip_by_length(vmcb, dec.length);
+    true
+}
+
+/// Handle a #NPF on virtio-input BAR0. Mirror of `handle_mmio_npf_gpu`
+/// — only the device and IRQ line differ.
+fn handle_mmio_npf_input(
+    vmcb: &mut vmcb::Vmcb,
+    regs: &mut vmcb::GuestRegs,
+    input: &mut crate::microvm::devices::virtio_input_pci::VirtioInput,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    host_base: u64,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+    let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
+    let buf = match fetch_inst(rip, cr3, host_base) {
+        Some(b) => b,
+        None => {
+            kprintln!("[svm] mmio-input: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[svm] mmio-input: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - input.bar0_base()) as u32;
+    let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+
+    if dec.is_write {
+        let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
+        input.mmio_write(off, dec.width, value);
+    } else {
+        let value = input.mmio_read(off, dec.width);
+        write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = input.take_pending_kick() {
+        let advanced = input.service_queues(qidx, host_base);
+        if advanced {
+            // virtio-input IRQ line = 12.
+            let vector = pic.vector_for_irq(12);
             let info: u64 = (vector as u64) | (1u64 << 31);
             vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
         }

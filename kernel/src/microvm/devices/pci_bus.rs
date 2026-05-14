@@ -18,6 +18,7 @@
 
 use super::virtio_blk_pci::VirtioBlk;
 use super::virtio_gpu_pci::VirtioGpu;
+use super::virtio_input_pci::VirtioInput;
 use super::virtio_net_pci::VirtioNet;
 
 pub const PCI_CONFIG_ADDR: u16 = 0xCF8;
@@ -32,6 +33,7 @@ pub struct PciBus {
     pub virtio_blk: VirtioBlk,
     pub virtio_net: VirtioNet,
     pub virtio_gpu: VirtioGpu,
+    pub virtio_input: VirtioInput,
 }
 
 impl PciBus {
@@ -41,6 +43,7 @@ impl PciBus {
             virtio_blk: VirtioBlk::new(),
             virtio_net: VirtioNet::new(),
             virtio_gpu: VirtioGpu::new(),
+            virtio_input: VirtioInput::new(),
         }
     }
 }
@@ -110,6 +113,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
         1 => bus.virtio_blk.pci_read_dword(reg),
         2 => bus.virtio_net.pci_read_dword(reg),
         3 => bus.virtio_gpu.pci_read_dword(reg),
+        4 => bus.virtio_input.pci_read_dword(reg),
         _ => NO_DEVICE,
     }
 }
@@ -122,6 +126,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
         1 => bus.virtio_blk.pci_write_dword(reg, val),
         2 => bus.virtio_net.pci_write_dword(reg, val),
         3 => bus.virtio_gpu.pci_write_dword(reg, val),
+        4 => bus.virtio_input.pci_write_dword(reg, val),
         _ => {}
     }
 }

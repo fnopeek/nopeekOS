@@ -944,6 +944,11 @@ fn run_linux_loop(
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if pci.virtio_input.bar0_in_range(gpa) {
+                    if handle_mmio_ept_input(&mut regs, &mut pci.virtio_input, &pic, gpa, host_base) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 }
                 serial.flush();
                 let gla  = vmcs::read_guest_linear_addr().unwrap_or(0);
@@ -1414,6 +1419,58 @@ fn handle_mmio_ept_gpu(
         if advanced {
             // virtio-gpu IRQ line = 9.
             let vector = pic.vector_for_irq(9);
+            let _ = vmcs::inject_external_irq(vector);
+        }
+    }
+
+    if vmcs::advance_guest_rip().is_err() { return false; }
+    true
+}
+
+/// Handle EPT-trap on virtio-input BAR0. Mirror of `handle_mmio_ept_gpu`
+/// — only the device + IRQ line differ.
+fn handle_mmio_ept_input(
+    regs: &mut vmcs::GuestRegs,
+    input: &mut crate::microvm::devices::virtio_input_pci::VirtioInput,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    host_base: u64,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
+    let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
+    let buf = match fetch_inst(rip, cr3, host_base) {
+        Some(b) => b,
+        None => {
+            kprintln!("[microvm] mmio-input: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[microvm] mmio-input: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - input.bar0_base()) as u32;
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        input.mmio_write(off, dec.width, value);
+    } else {
+        let value = input.mmio_read(off, dec.width);
+        write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = input.take_pending_kick() {
+        let advanced = input.service_queues(qidx, host_base);
+        if advanced {
+            // virtio-input IRQ line = 12.
+            let vector = pic.vector_for_irq(12);
             let _ = vmcs::inject_external_irq(vector);
         }
     }

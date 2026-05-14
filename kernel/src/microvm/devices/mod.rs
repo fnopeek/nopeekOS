@@ -17,6 +17,7 @@ pub mod pci_bus;
 pub mod pic8259;
 pub mod virtio_blk_pci;
 pub mod virtio_gpu_pci;
+pub mod virtio_input_pci;
 pub mod virtio_net_pci;
 pub mod virtqueue;
 
