@@ -381,6 +381,81 @@ Input-Lösung. Also: A zuerst, dann C+D parallel zu B-zu-sqfs-Migration.
 
 ---
 
+## Userspace bundle build pipeline  *(active 2026-05-14, iter 2 done)*
+
+Lives in `microvm-userspace/build.sh`. Reproduces a Linux userspace tree
+from a pinned Alpine snapshot, packs as deterministic cpio.gz.
+
+```
+1. curl alpine-minirootfs-3.23.4-x86_64.tar.gz   (cached, sha256-pinned)
+2. extract → staging dir
+3. unshare --user --map-root-user --mount --pid --fork --mount-proc
+   chroot $STAGE /sbin/apk add $APK_PACKAGES
+     (Alpine's apk runs as fake-root inside chroot, no sudo needed.
+      Pulls .apks from dl-cdn.alpinelinux.org, verifies signed indexes
+      + signed apks against /etc/apk/keys the minirootfs already
+      shipped. Cache at ~/.cache/nopeekos/alpine/apks/.)
+4. copy our PID-1 binary → /init (overrides anything Alpine ships)
+5. bsdtar --format newc --uid 0 --gid 0 --mtime epoch → cpio
+6. gzip -9n  (deterministic — same input, same output bytes)
+7. output: release/apps/<name>/<name>-<ver>.cpio.gz + .manifest
+```
+
+Iteration ladder:
+
+| Iter | Bundle | Adds on top | Compressed | Distribution |
+|---|---|---|---|---|
+| 1 | `alpine-base` | (none — just minirootfs + PID-1) | 10 MB | OTA via release/assets/ |
+| 2 | `alpine-wayland` | wayland-libs-client, libxkbcommon (+ transitive: libffi, libxml2) | 16 MB | OTA via release/assets/ |
+| 2.5 | `alpine-mesa` (BLOCKED) | + mesa, mesa-dri-gallium, mesa-egl, mesa-gl | 267 MB | **needs releases-pipeline** |
+| 3 | `librewolf` | + GTK3, ICU, harfbuzz, librewolf-bin | ~500-700 MB est. | releases-pipeline |
+
+Bundle is **NOT** in `kernel/src/install_data/assets/` BUNDLED_ASSETS — kernel.efi
+stays ~3 MB. Bundle lives entirely in OTA payload, fetched at runtime to
+`sys/microvm/rootfs.cpio.gz` in npkFS.
+
+---
+
+## Distribution — git/raw vs GitHub Releases
+
+`decided 2026-04-29 — GitHub Releases als Distribution` — implementation
+threshold-driven, not all-at-once:
+
+**Below ~50 MB compressed** (iter 1 + 2): stays in `release/assets/`, fetched via
+`raw.githubusercontent.com`, signed + manifest-listed alongside kernel-coupled
+assets. Existing OTA `update` pipeline picks it up.
+
+**Above ~50 MB compressed** (iter 2.5 onward, including final LibreWolf): switch
+to GitHub Releases.
+
+```
+build.sh release
+  ├── bundle ≤ 50 MB → release/assets/<name>.cpio.gz + .sig + manifest entry
+  │                    (in git, fetched via raw)
+  └── bundle > 50 MB → gh release upload v<X.Y.Z> <name>-<ver>.cpio.gz
+                        URL goes into release/apps/<name>/<name>-<ver>.manifest
+                        Git only carries the manifest + .sig (small)
+```
+
+OTA path (new `install <name>`):
+```
+1. Fetch release/apps/<name>/current.manifest via raw  (small, in git)
+2. Parse manifest: contains URL to release-asset + size + sha384
+3. Fetch the bundle from github.com/.../releases/download/v<X.Y.Z>/<name>-<ver>.cpio.gz
+4. Verify sha384 + ECDSA-sig (sig also in release/apps/<name>/, in git)
+5. Store in npkFS at sys/apps/<name>/rootfs.cpio.gz
+6. `microvm <name>` loads from that path
+```
+
+Trust chain unchanged — we still sign locally with the same ECDSA P-384 key,
+detached .sig stays in git, raw-fetchable. The binary blob moves to Releases (free
+CDN, 2 GB/file limit, unlimited count, designed for this).
+
+**Implementation cost**: ~1-2 hours extending `build.sh release` + a new install
+intent path. Deferred until iter 2.5 actually needs Mesa (next session, 2026-05-15).
+
+---
+
 ## Deferred performance optimisations
 
 ### Boot-state snapshot/restore
