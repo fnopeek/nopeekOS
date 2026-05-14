@@ -223,55 +223,52 @@ fn make_name(name: &[u8], ext: &[u8]) -> [u8; 11] {
     n
 }
 
-/// Create FAT32 ESP and write GRUB + kernel + config.
+/// Create FAT32 ESP and write the UEFI bootloader.
 /// `part_start`: absolute sector on NVMe where ESP begins
 /// `part_sectors`: size of ESP in sectors
+/// `kernel_efi`: the kernel as a UEFI PE+ application (built by
+///     `objcopy -O pei-x86-64 --subsystem=efi-app`). UEFI firmware
+///     auto-discovers `/EFI/BOOT/BOOTX64.EFI` — no GRUB needed since
+///     our kernel IS the EFI application.
+///
+/// Layout written:
+/// ```text
+/// ESP/
+/// └── EFI/
+///     └── BOOT/
+///         └── BOOTX64.EFI   ← kernel_efi
+/// ```
 pub fn create_esp(
     part_start: u64,
     part_sectors: u32,
-    grub_efi: &[u8],
-    kernel: &[u8],
-    grub_cfg: &[u8],
+    kernel_efi: &[u8],
 ) -> Result<(), &'static str> {
     let mut fs = Fat32Writer::new(part_start, part_sectors);
 
-    // Initialize filesystem structures
     fs.init_fat()?;
     fs.write_boot_sector()?;
 
-    // Allocate directory clusters
-    let root_cl = fs.alloc_clusters(1);   // cluster 2: root dir
+    // Directory clusters
+    let root_cl = fs.alloc_clusters(1);   // cluster 2: root
     let efi_cl = fs.alloc_clusters(1);    // cluster 3: /EFI
     let efiboot_cl = fs.alloc_clusters(1); // cluster 4: /EFI/BOOT
-    let boot_cl = fs.alloc_clusters(1);    // cluster 5: /boot
-    let grubdir_cl = fs.alloc_clusters(1); // cluster 6: /boot/grub
 
-    // Allocate file clusters
-    let grub_sectors = ((grub_efi.len() + 511) / 512) as u32;
-    let grub_cl = fs.alloc_clusters(grub_sectors);
-
-    // Reserve 8192 clusters (4MB) for kernel — room for OTA growth
+    // Reserve 8192 clusters (4 MB at 512 B/cluster) for the kernel
+    // image — covers OTA growth without re-laying-out the FAT. The
+    // initial file may be smaller, but the reservation lets `update`
+    // overwrite without needing to find new clusters.
     const KERNEL_RESERVED: u32 = 8192;
-    let _kernel_sectors = ((kernel.len() + 511) / 512) as u32;
     let kernel_cl = fs.alloc_clusters(KERNEL_RESERVED);
 
-    let cfg_cl = fs.alloc_clusters(1);
-
-    // Write FAT chains
+    // FAT chains
     fs.write_fat_chain(root_cl, 1)?;
     fs.write_fat_chain(efi_cl, 1)?;
     fs.write_fat_chain(efiboot_cl, 1)?;
-    fs.write_fat_chain(boot_cl, 1)?;
-    fs.write_fat_chain(grubdir_cl, 1)?;
-    fs.write_fat_chain(grub_cl, grub_sectors)?;
     fs.write_fat_chain(kernel_cl, KERNEL_RESERVED)?;
-    fs.write_fat_chain(cfg_cl, 1)?;
 
-    // Write directories
-    // Root: /EFI, /boot, marker
+    // Root: /EFI, marker file
     fs.write_directory(root_cl, &[
         Fat32Writer::make_dir_entry(&make_name(b"EFI", b""), 0x10, efi_cl, 0),
-        Fat32Writer::make_dir_entry(&make_name(b"BOOT", b""), 0x10, boot_cl, 0),
         Fat32Writer::make_dir_entry(&make_name(b"NPKBOOT", b""), 0x20, 0, 0),
     ])?;
 
@@ -287,33 +284,11 @@ pub fn create_esp(
         Fat32Writer::make_dir_entry(b".          ", 0x10, efiboot_cl, 0),
         Fat32Writer::make_dir_entry(b"..         ", 0x10, efi_cl, 0),
         Fat32Writer::make_dir_entry(
-            &make_name(b"BOOTX64", b"EFI"), 0x20, grub_cl, grub_efi.len() as u32,
+            &make_name(b"BOOTX64", b"EFI"), 0x20, kernel_cl, kernel_efi.len() as u32,
         ),
     ])?;
 
-    // /boot: ., .., grub/, kernel.bin
-    fs.write_directory(boot_cl, &[
-        Fat32Writer::make_dir_entry(b".          ", 0x10, boot_cl, 0),
-        Fat32Writer::make_dir_entry(b"..         ", 0x10, 0, 0),
-        Fat32Writer::make_dir_entry(&make_name(b"GRUB", b""), 0x10, grubdir_cl, 0),
-        Fat32Writer::make_dir_entry(
-            &make_name(b"KERNEL", b"BIN"), 0x20, kernel_cl, kernel.len() as u32,
-        ),
-    ])?;
-
-    // /boot/grub: ., .., grub.cfg
-    fs.write_directory(grubdir_cl, &[
-        Fat32Writer::make_dir_entry(b".          ", 0x10, grubdir_cl, 0),
-        Fat32Writer::make_dir_entry(b"..         ", 0x10, boot_cl, 0),
-        Fat32Writer::make_dir_entry(
-            &make_name(b"GRUB", b"CFG"), 0x20, cfg_cl, grub_cfg.len() as u32,
-        ),
-    ])?;
-
-    // Write file data
-    fs.write_file_data(grub_cl, grub_efi)?;
-    fs.write_file_data(kernel_cl, kernel)?;
-    fs.write_file_data(cfg_cl, grub_cfg)?;
+    fs.write_file_data(kernel_cl, kernel_efi)?;
 
     Ok(())
 }
@@ -456,23 +431,28 @@ impl Fat32Reader {
     }
 }
 
-/// Update kernel.bin on the ESP partition.
-/// Finds the existing file, overwrites its data, extends FAT chain if needed.
+/// Overwrite the UEFI boot kernel on the ESP partition.
+/// The kernel lives at `/EFI/BOOT/BOOTX64.EFI` — UEFI firmware
+/// auto-discovers that path, no menu / GRUB indirection. OTA `update`
+/// calls this with the verified new kernel.efi.
 pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
     let fs = Fat32Reader::from_esp(esp_start)?;
 
-    // Navigate: root (cluster 2) → /boot → KERNEL.BIN
-    let boot_name = make_name(b"BOOT", b"");
-    let (boot_cl, _, _, _) = fs.find_entry(ROOT_CLUSTER, &boot_name)?;
+    // Navigate: root → /EFI → /EFI/BOOT → BOOTX64.EFI
+    let efi_name = make_name(b"EFI", b"");
+    let (efi_cl, _, _, _) = fs.find_entry(ROOT_CLUSTER, &efi_name)?;
 
-    let kernel_name = make_name(b"KERNEL", b"BIN");
+    let boot_name = make_name(b"BOOT", b"");
+    let (boot_cl, _, _, _) = fs.find_entry(efi_cl, &boot_name)?;
+
+    let kernel_name = make_name(b"BOOTX64", b"EFI");
     let (kernel_cl, old_size, dir_sec, dir_off) = fs.find_entry(boot_cl, &kernel_name)?;
 
     let new_sectors = ((data.len() + 511) / 512) as u32;
     let old_clusters = fs.chain_len(kernel_cl)?;
     let new_clusters = (new_sectors + fs.spc - 1) / fs.spc;
 
-    crate::kprintln!("[npk] ESP: kernel.bin at cluster {}, {} -> {} bytes ({}/{} clusters)",
+    crate::kprintln!("[npk] ESP: BOOTX64.EFI at cluster {}, {} -> {} bytes ({}/{} clusters)",
         kernel_cl, old_size, data.len(), new_clusters, old_clusters);
 
     // Safety check: kernel must stay within 4MB (8192 sectors)

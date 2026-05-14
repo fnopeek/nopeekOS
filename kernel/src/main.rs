@@ -11,6 +11,12 @@ extern crate alloc;
 
 core::arch::global_asm!(include_str!("boot.s"), options(att_syntax));
 
+// Boot info handed off from the UEFI stub to kernel_main.
+// `mod boot_uefi` does the UEFI-side collection; `kernel_main` reads
+// the populated struct without any UEFI ABI knowledge.
+pub mod boot_info;
+mod boot_uefi;
+
 // ── Module groups ──────────────────────────────────────────────
 mod drivers;
 pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic};
@@ -54,7 +60,7 @@ use core::panic::PanicInfo;
 
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) -> ! {
+pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) -> ! {
     vga::show_boot_banner();
 
     {
@@ -70,15 +76,8 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     kprintln!("           /_/");
     kprintln!();
     kprintln!("[npk] AI-native Operating System v0.1.0");
-    kprintln!("[npk] Booting...");
+    kprintln!("[npk] Booting (UEFI)...");
     kprintln!();
-
-    if multiboot_magic == 0x36d76289 {
-        kprintln!("[npk] Multiboot2: verified");
-    } else {
-        kprintln!("[npk] WARNING: Multiboot2 magic mismatch: {:#x}", multiboot_magic);
-    }
-
 
     kprintln!("[npk] Initializing IDT + PIC...");
     interrupts::init();
@@ -90,7 +89,7 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     keyboard::init();
 
     kprintln!("[npk] Initializing Physical Memory Manager...");
-    memory::init(multiboot_info);
+    memory::init(boot_info);
 
 
     kprintln!("[npk] Initializing Heap Allocator...");
@@ -103,12 +102,13 @@ pub unsafe extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info: u32) 
     paging::init();
 
     // Framebuffer init (needs memory + paging for MMIO mapping)
-    framebuffer::init_from_multiboot2(multiboot_info);
+    framebuffer::init_from_boot_info(boot_info);
     // Set [npk] tag color immediately (consistent throughout boot)
-    framebuffer::set_npk_color(0x007B50A0); // nopeekOS purple
+    framebuffer::set_npk_color(0x00FFB000); // nopeekOS amber
 
-    // ACPI init: parse Multiboot2 RSDP tag (UEFI), then find FADT for power-off
-    acpi::parse_multiboot2_rsdp(multiboot_info);
+    // ACPI: cache the RSDP the UEFI stub picked up via the
+    // EFI Configuration Table, then walk RSDT/XSDT for the FADT.
+    acpi::set_rsdp(boot_info.acpi_rsdp);
     acpi::init();
 
     kprintln!("[npk] Scanning PCI bus...");

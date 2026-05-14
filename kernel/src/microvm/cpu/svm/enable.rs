@@ -864,12 +864,23 @@ fn run_linux_loop(
     last_outcome.ok_or("SVM Linux guest exceeded max iterations without first VMEXIT")
 }
 
-/// Advance guest RIP across a non-fault exit. Requires NRIP_SAVE
-/// (probed via CPUID 8000_000A EDX[3]) — every modern AMD CPU since
-/// K10 has it. APM §15.7.1.
+/// Advance guest RIP across an *intercept* exit (CPUID / IOIO / MSR /
+/// HLT etc.) via NRIP_SAVE. Requires CPUID 8000_000A EDX[3].
+///
+/// NRIP_SAVE is **undefined for #NPF and other hardware exceptions**
+/// (APM Vol 2 §15.7.1) — KVM nested SVM zeroes it, which would land
+/// the next VMRUN at RIP=0 and panic the guest. MMIO emulation must
+/// use `advance_rip_by_length` instead.
 fn advance_rip(vmcb: &mut vmcb::Vmcb) {
     let nrip = vmcb.read_u64(vmcb::OFF_NRIP);
     vmcb.write_u64(vmcb::OFF_SAVE_RIP, nrip);
+}
+
+/// Advance guest RIP by the decoded instruction length. Used after
+/// emulating an #NPF MMIO access (NRIP_SAVE is unreliable there).
+fn advance_rip_by_length(vmcb: &mut vmcb::Vmcb, length: u8) {
+    let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+    vmcb.write_u64(vmcb::OFF_SAVE_RIP, rip.wrapping_add(length as u64));
 }
 
 /// MSRs Linux probes via `safe_rdmsr` (catches #GP) — known noise on
@@ -1027,7 +1038,7 @@ fn handle_mmio_npf_blk(
         }
     }
 
-    advance_rip(vmcb);
+    advance_rip_by_length(vmcb, dec.length);
     true
 }
 
@@ -1139,7 +1150,7 @@ fn handle_mmio_npf_net(
         }
     }
 
-    advance_rip(vmcb);
+    advance_rip_by_length(vmcb, dec.length);
     true
 }
 
@@ -1194,6 +1205,6 @@ fn handle_mmio_npf_gpu(
         }
     }
 
-    advance_rip(vmcb);
+    advance_rip_by_length(vmcb, dec.length);
     true
 }

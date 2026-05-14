@@ -159,8 +159,8 @@ const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
 const FG_COLOR: u32 = 0x00E8E8E8; // Near-white (was light gray)
 const BG_COLOR: u32 = 0x00000000; // Black
-/// Dynamic accent color for [npk] tag (set by GUI scheme, default purple)
-static NPK_TAG_COLOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x007B50A0);
+/// Dynamic accent color for [npk] tag (set by GUI scheme, default amber)
+static NPK_TAG_COLOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x00FFB000);
 
 pub fn set_npk_color(color: u32) {
     NPK_TAG_COLOR.store(color, core::sync::atomic::Ordering::Release);
@@ -253,10 +253,11 @@ pub fn init_from_gpu() {
     });
 }
 
-/// Legacy init: parse Multiboot2 directly (used before gpu module exists).
-/// Delegates to gpu::init() + init_from_gpu().
-pub fn init_from_multiboot2(mb_info_addr: u32) {
-    crate::gpu::init(mb_info_addr);
+/// Initialize the framebuffer from BootInfo. Delegates to `gpu::init`
+/// (which wraps the GOP-via-UEFI framebuffer driver) then sets up our
+/// shadow + scaling state.
+pub fn init_from_boot_info(boot_info: &crate::boot_info::BootInfo) {
+    crate::gpu::init(boot_info);
     init_from_gpu();
 }
 

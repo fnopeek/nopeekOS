@@ -12,38 +12,20 @@ static SLP_TYP_S5: AtomicU16 = AtomicU16::new(5);
 static RESET_PORT: AtomicU16 = AtomicU16::new(0);
 static RESET_VAL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
-/// Cached RSDP address from Multiboot2 (set before init)
+/// Cached RSDP physical address (set by UEFI stub via `set_rsdp`).
 static RSDP_ADDR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Parse Multiboot2 tags for ACPI RSDP (call early, before init).
-pub fn parse_multiboot2_rsdp(mb_info_addr: u32) {
-    let base = mb_info_addr as usize;
-    let total_size = unsafe { *(base as *const u32) } as usize;
-
-    let mut offset = 8;
-    while offset + 8 <= total_size {
-        let tag_type = unsafe { *((base + offset) as *const u32) };
-        let tag_size = unsafe { *((base + offset + 4) as *const u32) } as usize;
-        if tag_size == 0 { break; }
-
-        // Type 15 = ACPI new RSDP (XSDP, 36 bytes), Type 14 = ACPI old RSDP (20 bytes)
-        if tag_type == 15 || tag_type == 14 {
-            let rsdp_addr = base + offset + 8; // RSDP data starts after tag header
-            RSDP_ADDR.store(rsdp_addr, core::sync::atomic::Ordering::Release);
-            break;
-        }
-
-        if tag_type == 0 { break; }
-        offset += (tag_size + 7) & !7;
-    }
+/// Stash the ACPI RSDP address handed to us by the UEFI stub. Called
+/// from `kernel_main` before `init`.
+pub fn set_rsdp(rsdp_phys: u64) {
+    RSDP_ADDR.store(rsdp_phys as usize, core::sync::atomic::Ordering::Release);
 }
 
 /// Initialize ACPI: find FADT and cache PM1a_CNT_BLK port.
 pub fn init() {
-    // Disable on bare metal for now if RSDP not found via Multiboot2
     let mb_rsdp = RSDP_ADDR.load(core::sync::atomic::Ordering::Acquire);
     if mb_rsdp == 0 {
-        crate::kprintln!("[npk] ACPI: no RSDP in Multiboot2 tags");
+        crate::kprintln!("[npk] ACPI: no RSDP from firmware");
         return;
     }
 
