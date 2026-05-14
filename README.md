@@ -124,7 +124,7 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  Kernel Core (Rust, no_std, Microkernel)                 │
  │  SMP (N cores), 64GB Paging, Heap, IDT, ACPI, Serial    │
  ├──────────────────────────────────────────────────────────┤
- │  Hardware: x86_64, Multiboot2                            │
+ │  Hardware: x86_64, UEFI                                  │
  └──────────────────────────────────────────────────────────┘
 ```
 
@@ -166,7 +166,7 @@ Every execution is a sandboxed WASM module:
 
 ### Phase 1 -- Bare Metal Boot
 
-- [x] Multiboot2 boot (32-bit Protected Mode -> 64-bit Long Mode)
+- [x] UEFI boot (PE32+ Application via OVMF / firmware, long mode in)
 - [x] Physical Memory Manager (bitmap allocator, contiguous allocation for DMA)
 - [x] Heap Allocator (linked-list, first-fit, coalescing)
 - [x] Virtual Memory (4-level paging, NX bit, 64GB identity-mapped via 1GB huge pages)
@@ -733,7 +733,7 @@ Spec + design rationale: see [`NPKFS_V2.md`](NPKFS_V2.md).
 | Area | Choice | Rationale |
 |------|--------|-----------|
 | Language | Rust (no_std, nightly, edition 2024) | Memory safety without GC |
-| Boot | Multiboot2 | QEMU/GRUB compatible |
+| Boot | UEFI (PE32+ direct) | OVMF + modern firmware, no GRUB |
 | Target | x86_64 | Later aarch64 |
 | WASM | wasmi v1.0 | no_std, fuel metering |
 | Filesystem | npkFS | COW, BLAKE3, SSD-native |
@@ -830,9 +830,11 @@ nopeekOS/
 ├── build.sh                          # Build + QEMU/VirtualBox launch
 ├── kernel/
 │   ├── Cargo.toml
-│   ├── linker.ld                     # Memory layout (256KB stack, heap)
+│   ├── linker.ld                     # Memory layout (2MB stack, ImageBase 0x10000000)
 │   └── src/
-│       ├── boot.s                    # Multiboot2 -> Long Mode
+│       ├── boot.s                    # UEFI _start (XSETBV, BSS, stack, call efi_main)
+│       ├── boot_uefi.rs              # UEFI Boot Services + ExitBootServices + install GDT
+│       ├── boot_info.rs              # Firmware-agnostic handoff (BootInfo, MemoryRegion)
 │       ├── main.rs                   # Kernel entry, boot sequence, module re-exports
 │       ├── interrupts.rs             # IDT + PIC + APIC timer
 │       ├── vga.rs                    # VGA text mode (boot banner)
@@ -963,8 +965,8 @@ nopeekOS/
 # Prerequisites
 rustup toolchain install nightly
 rustup component add rust-src --toolchain nightly
-sudo pacman -S grub xorriso mtools qemu-system-x86   # Arch
-# or: sudo apt install grub-pc-bin xorriso mtools qemu-system-x86
+sudo pacman -S edk2-ovmf mtools gdisk qemu-system-x86   # Arch
+# or: sudo apt install ovmf mtools gdisk qemu-system-x86
 
 # Build + Run
 ./build.sh qemu          # Serial console in terminal (4 cores)
@@ -983,7 +985,7 @@ Each feature lands on the NUC through this loop:
    `cd tools/wasm/<name> && cargo build --release --target wasm32-unknown-unknown`
    then copy `target/wasm32-unknown-unknown/release/<name>.wasm` to
    `release/modules/<name>.wasm` and update `release/modules/<name>.version`.
-3. **`./build.sh release`** — compiles the kernel, signs `kernel.bin` +
+3. **`./build.sh release`** — compiles the kernel, signs `kernel.efi` +
    all `release/modules/*.wasm` with `update.key` (ECDSA P-384), regenerates
    `release/manifest` and `release/modules/manifest` (sha384 + size per entry).
 4. **Commit + push** — all release artifacts go to `main` so
@@ -1003,8 +1005,8 @@ and reject any artifact whose signature doesn't match.
 ### First Boot (Intel N100 NUC)
 
 ```
-[npk] AI-native Operating System v0.122.0
-[npk] Multiboot2: verified
+[npk] AI-native Operating System v0.159.0
+[npk] Booting (UEFI)...
 [npk] Interrupts enabled.
 [npk] TSC: 806 MHz
 [npk] Physical memory: 15892 MB free (16 GB detected)

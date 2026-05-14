@@ -417,7 +417,7 @@ run_qemu_generic() {
         -serial mon:stdio \
         -serial file:"$serial_log" \
         "${display_args[@]}" \
-        -m 1024M \
+        -m 2048M \
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
@@ -428,7 +428,6 @@ run_qemu_generic() {
         "${installer_args[@]}" \
         -nic user,model=virtio-net-pci \
         -no-reboot \
-        -no-shutdown \
         "$@"
 }
 
