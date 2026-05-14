@@ -183,8 +183,6 @@ unsafe fn get_or_create(table_phys: u64, index: usize) -> Result<u64, PagingErro
 
 pub fn init() {
     // Enable NXE (bit 11) in EFER MSR so NO_EXECUTE flag works in page tables.
-    // SAFETY: Existing entries have bit 63 = 0, so enabling NXE changes nothing
-    // for current mappings. Required for future NO_EXECUTE support.
     unsafe {
         let lo: u32;
         let hi: u32;
@@ -198,31 +196,51 @@ pub fn init() {
     }
 
     // Program PAT MSR (0x277) to add Write-Combining on index 5.
-    // Default PAT: 0=WB, 1=WT, 2=UC-, 3=UC, 4=WB, 5=WT, 6=UC-, 7=UC
-    // We change: index 5 from WT(0x04) to WC(0x01)
-    // PAT MSR layout: each index is 8 bits, indices 0-3 in low dword, 4-7 in high dword.
-    // SAFETY: Only changes PAT entry 5 which is unused (no existing page uses PWT+PAT).
     unsafe {
-        let pat_lo: u32 = 0x00070406; // [3]=UC(0x00) [2]=UC-(0x07) [1]=WT(0x04) [0]=WB(0x06)
-        let pat_hi: u32 = 0x00070106; // [7]=UC(0x00) [6]=UC-(0x07) [5]=WC(0x01) [4]=WB(0x06)
+        let pat_lo: u32 = 0x00070406;
+        let pat_hi: u32 = 0x00070106;
         core::arch::asm!("wrmsr",
             in("ecx") 0x277u32,
             in("eax") pat_lo,
             in("edx") pat_hi);
     }
 
-    let pml4 = read_cr3();
-    PML4_PHYS.store(pml4, Ordering::Relaxed);
+    // Build our own page tables. UEFI handed us long mode running on
+    // its own PML4 — those tables are in firmware-owned memory marked
+    // read-only, so we can't add new entries to them later (e.g. for
+    // MMIO MMIO regions or WASM module memory). We allocate fresh
+    // tables from our frame allocator and identity-map 64 GB via
+    // 1 GB huge pages (matching what the old multiboot2 boot.s did).
+    let pml4_phys = memory::allocate_frame()
+        .expect("paging::init: failed to allocate PML4 frame");
+    let pdpt_phys = memory::allocate_frame()
+        .expect("paging::init: failed to allocate PDPT frame");
+    unsafe {
+        // Zero both tables.
+        core::ptr::write_bytes(pml4_phys as *mut u8, 0, 4096);
+        core::ptr::write_bytes(pdpt_phys as *mut u8, 0, 4096);
 
-    let (huge_pages, small_pages) = count_mappings(pml4);
-    let mapped_mb = huge_pages * 2 + (small_pages * 4) / 1024;
+        // PML4[0] → PDPT, Present + Writable.
+        let pml4 = pml4_phys as *mut u64;
+        *pml4 = pdpt_phys | 0x03;
 
-    let mapped_gb = mapped_mb / 1024;
-    if mapped_gb > 0 {
-        kprintln!("[npk] Paging: {} GB identity-mapped, NX enabled", mapped_gb);
-    } else {
-        kprintln!("[npk] Paging: {} MB mapped, NX enabled", mapped_mb);
+        // PDPT: 64 entries, each a 1 GB huge page identity mapping.
+        // 0x83 = Present (bit 0) + Writable (bit 1) + Huge (bit 7).
+        let pdpt = pdpt_phys as *mut u64;
+        for i in 0..64u64 {
+            *pdpt.add(i as usize) = (i << 30) | 0x83;
+        }
     }
+    PML4_PHYS.store(pml4_phys, Ordering::Relaxed);
+
+    // Switch CR3 to our new tables. Any TLB entries from UEFI's
+    // mapping get flushed. From here on, MMIO mappings can be added
+    // freely (map_page will modify our own tables, which are writable).
+    unsafe {
+        core::arch::asm!("mov cr3, {}", in(reg) pml4_phys);
+    }
+
+    kprintln!("[npk] Paging: 64 GB identity-mapped, NX enabled (own PML4 @ {:#x})", pml4_phys);
 }
 
 /// Map a 4KB virtual page to a physical frame.

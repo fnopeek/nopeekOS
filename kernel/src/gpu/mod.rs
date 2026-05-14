@@ -128,9 +128,9 @@ pub trait GpuHal: Send {
 static GPU: Mutex<Option<Box<dyn GpuHal>>> = Mutex::new(None);
 
 /// Initialize GPU subsystem. Uses GOP, detects native GPU for later activation.
-pub fn init(multiboot_info: u32) {
-    // Always start with GOP (safe, bootloader-provided framebuffer)
-    match gop::GopDriver::from_multiboot2(multiboot_info) {
+pub fn init(boot_info: &crate::boot_info::BootInfo) {
+    // Always start with GOP (safe, UEFI-provided framebuffer)
+    match gop::GopDriver::from_boot_info(boot_info) {
         Some(drv) => {
             crate::kprintln!("[npk] GPU: GOP {}x{} (bootloader)",
                 drv.framebuffer().width, drv.framebuffer().height);

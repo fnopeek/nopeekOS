@@ -97,36 +97,42 @@ unsafe extern "C" {
     static __heap_start: u8;
 }
 
-pub fn init(multiboot_info_addr: u32) {
+pub fn init(boot_info: &crate::boot_info::BootInfo) {
     let mut alloc = ALLOCATOR.lock();
-
     alloc.mark_all_used();
 
-    if multiboot_info_addr == 0 {
-        kprintln!("[npk] WARNING: No Multiboot2 info, memory manager disabled");
-        return;
+    // Walk the UEFI memory map. Conventional + BootServices Code/Data
+    // are usable RAM (BootServices regions become ours after
+    // ExitBootServices). LoaderCode/Data is our PE image and the
+    // stack/heap UEFI allocated for us — leave those marked used so
+    // we don't overwrite running code.
+    for region in boot_info.usable_regions() {
+        let length = region.page_count * PAGE_SIZE as u64;
+        if length == 0 { continue; }
+        alloc.mark_region_free(region.physical_start, length);
     }
 
-    parse_memory_map(multiboot_info_addr as usize, &mut alloc);
+    // First 1 MB on x86 is special — BIOS-compat MMIO holes (VGA at
+    // 0xA0000, ROM at 0xC0000) live there even under UEFI. Carve it
+    // out as a defence-in-depth guard; UEFI's map usually already
+    // omits this range but firmware quirks happen.
+    alloc.mark_region_used(0, 0x100000);
 
-    // Reserve regions that must not be allocated
-    alloc.mark_region_used(0, 0x100000); // First 1MB: BIOS, VGA, ROM
-
-    let kernel_end = unsafe { &__heap_start as *const u8 as u64 };
-    let kernel_size = kernel_end - 0x100000;
-    alloc.mark_region_used(0x100000, kernel_size);
-
-    // SAFETY: first u32 of Multiboot2 info is total size
-    let mb_size = unsafe { *(multiboot_info_addr as *const u32) } as u64;
-    alloc.mark_region_used(multiboot_info_addr as u64, mb_size);
+    // The kernel image itself is the EfiLoaderCode/EfiLoaderData
+    // region in the UEFI map — already left as "used" by the loop
+    // above. The boot_info struct lives in BSS (= part of the kernel
+    // image), so no separate reservation needed.
 
     let free = alloc.free_count;
     let free_mb = free * PAGE_SIZE / (1024 * 1024);
     let total_mb = alloc.memory_top * PAGE_SIZE / (1024 * 1024);
 
+    let _kernel_end_marker = unsafe { &__heap_start as *const u8 as u64 };
+
     kprintln!("[npk] Physical memory: {} MB free ({} frames), {} MB detected",
         free_mb, free, total_mb);
-    kprintln!("[npk] Kernel footprint: {} KB", kernel_size / 1024);
+    kprintln!("[npk] UEFI regions: {} ({} usable)",
+        boot_info.region_count, boot_info.usable_regions().count());
 }
 
 pub fn allocate_frame() -> Option<u64> {
@@ -237,43 +243,3 @@ pub fn stats() -> (usize, usize) {
     (alloc.free_count, alloc.free_count * PAGE_SIZE / (1024 * 1024))
 }
 
-/// Parse Multiboot2 memory map tag (type 6) and mark available regions
-fn parse_memory_map(info_addr: usize, alloc: &mut FrameAllocator) {
-    // SAFETY: info_addr is the GRUB-provided Multiboot2 info address,
-    // identity-mapped and readable. We validate bounds before each read.
-    let total_size = unsafe { *(info_addr as *const u32) } as usize;
-    if total_size == 0 || total_size > 1024 * 1024 { return; }
-
-    let mut offset = 8;
-
-    while offset + 8 <= total_size {
-        let tag_addr = info_addr + offset;
-        let tag_type = unsafe { *(tag_addr as *const u32) };
-        let tag_size = unsafe { *((tag_addr + 4) as *const u32) } as usize;
-
-        if tag_type == 0 || tag_size < 8 { break; }
-
-        if tag_type == 6 && tag_size >= 16 {
-            let entry_size = unsafe { *((tag_addr + 8) as *const u32) } as usize;
-
-            if entry_size >= 24 {
-                let entries_start = tag_addr + 16;
-                let entries_end = tag_addr + tag_size;
-                let mut entry_addr = entries_start;
-
-                while entry_addr + entry_size <= entries_end {
-                    let base = unsafe { *(entry_addr as *const u64) };
-                    let length = unsafe { *((entry_addr + 8) as *const u64) };
-                    let mem_type = unsafe { *((entry_addr + 16) as *const u32) };
-
-                    if mem_type == 1 && length > 0 {
-                        alloc.mark_region_free(base, length);
-                    }
-                    entry_addr += entry_size;
-                }
-            }
-        }
-
-        offset += (tag_size + 7) & !7; // Tags are 8-byte aligned
-    }
-}

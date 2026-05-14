@@ -82,6 +82,14 @@ struct VirtioNet {
     tx_num_free: u16,
     tx_free_head: u16,
     tx_hdrs: u64,   // pre-allocated net headers for TX
+    /// Pre-allocated DMA-stable TX data pool — one MTU-sized slot per
+    /// descriptor. `send` copies the caller's frame here so the device
+    /// reads from memory that outlives the caller's stack-local `Vec`
+    /// (which otherwise would be dropped + heap-recycled before QEMU's
+    /// slirp main loop wakes up to do the DMA, on real HW this race
+    /// happens to lose less often because the NIC engine reads
+    /// synchronously). Modelled on `intel_nic::send`'s `tx_bufs`.
+    tx_data: u64,
 }
 
 static DEVICE: Mutex<Option<VirtioNet>> = Mutex::new(None);
@@ -176,6 +184,22 @@ pub fn init() -> bool {
         core::ptr::write_bytes(tx_hdrs as *mut u8, 0,
             (tx_qs as usize * NET_HDR_SIZE + 4095) / 4096 * 4096);
 
+        // Allocate TX data pool — one MTU slot per descriptor. The
+        // sender copies the frame here so the descriptor points at
+        // memory that outlives the caller's stack frame. Without this
+        // QEMU + slirp races the heap allocator and DMA-reads recycled
+        // garbage (intermittent under real HW, deterministic under
+        // QEMU on AMD-host where slirp's event loop wakes up later).
+        let tx_data_pages = (tx_qs as usize * MTU + 4095) / 4096;
+        let tx_data = match memory::allocate_contiguous(tx_data_pages) {
+            Some(a) => a,
+            None => {
+                outb(io + REG_STATUS, S_FAILED);
+                return false;
+            }
+        };
+        core::ptr::write_bytes(tx_data as *mut u8, 0, tx_data_pages * 4096);
+
         // Allocate RX buffers (contiguous, one per RX descriptor)
         let rx_buf_count = RX_BUFFERS.min(rx_qs as usize);
         let rx_buf_pages = (rx_buf_count * RX_BUF_SIZE + 4095) / 4096;
@@ -242,6 +266,7 @@ pub fn init() -> bool {
             tx_num_free: tx_qs,
             tx_free_head: 0,
             tx_hdrs,
+            tx_data,
         });
     }
 
@@ -278,9 +303,15 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
         (*desc0).flags = DESC_F_NEXT;
         (*desc0).next = d1;
 
-        // Descriptor 1: frame data
+        // Descriptor 1: frame data. Copy into the DMA-stable pool
+        // before publishing the descriptor — the caller's `frame: &[u8]`
+        // is a stack-local Vec that gets dropped before QEMU/slirp's
+        // event loop wakes up to walk our virtqueue.
+        let data_addr = dev.tx_data + d1 as u64 * MTU as u64;
+        core::ptr::copy_nonoverlapping(frame.as_ptr(), data_addr as *mut u8, frame.len());
+
         let desc1 = (dev.tx_desc_base + d1 as u64 * 16) as *mut VringDesc;
-        (*desc1).addr = frame.as_ptr() as u64;
+        (*desc1).addr = data_addr;
         (*desc1).len = frame.len() as u32;
         (*desc1).flags = 0;
         (*desc1).next = 0;

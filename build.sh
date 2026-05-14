@@ -29,11 +29,17 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET="x86_64-unknown-none"
 KERNEL_BIN="$PROJECT_DIR/target/$TARGET/release/nopeekos-kernel"
-ISO_DIR="$PROJECT_DIR/target/iso"
-ISO_FILE="$PROJECT_DIR/target/nopeekos.iso"
-QEMU_ISO_DIR="$PROJECT_DIR/target/iso-qemu"
-QEMU_ISO_FILE="$PROJECT_DIR/target/nopeekos-qemu.iso"
+KERNEL_EFI="$PROJECT_DIR/target/kernel.efi"
+INSTALLER_DISK="$PROJECT_DIR/target/installer.img"
 DISK_IMG="$PROJECT_DIR/target/disk.img"
+
+# OVMF firmware (UEFI) — read-only CODE + writable per-VM VARS.
+# Arch: /usr/share/edk2-ovmf/x64/  Debian/Ubuntu: /usr/share/OVMF/
+OVMF_CODE_SRC="/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd"
+OVMF_VARS_SRC="/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd"
+[ -f "$OVMF_CODE_SRC" ] || OVMF_CODE_SRC="/usr/share/OVMF/OVMF_CODE_4M.fd"
+[ -f "$OVMF_VARS_SRC" ] || OVMF_VARS_SRC="/usr/share/OVMF/OVMF_VARS_4M.fd"
+OVMF_VARS_LOCAL="$PROJECT_DIR/target/OVMF_VARS.fd"
 
 # Farben
 RED='\033[0;31m'
@@ -100,58 +106,37 @@ build() {
 
     ok "Kernel built: $KERNEL_BIN"
 
-    # ISO erstellen mit GRUB (bootbar in QEMU, USB, jede HW)
-    log "Creating bootable ISO..."
-
-    mkdir -p "$ISO_DIR/boot/grub"
-    cp "$KERNEL_BIN" "$ISO_DIR/boot/kernel.bin"
-
-    cat > "$ISO_DIR/boot/grub/grub.cfg" << 'GRUBCFG'
-set timeout=0
-set default=0
-
-insmod efi_gop
-set gfxpayload=auto
-
-menuentry "nopeekOS" {
-    multiboot2 /boot/kernel.bin
-    boot
-}
-GRUBCFG
-
-    grub-mkrescue -o "$ISO_FILE" "$ISO_DIR" 2>/dev/null
-
-    ok "ISO created: $ISO_FILE"
+    # Convert ELF to PE32+ UEFI Application. UEFI firmware finds the
+    # resulting kernel.efi as /EFI/BOOT/BOOTX64.EFI on the ESP and
+    # runs it directly — no GRUB, no multiboot. See tools/pe-fixup.py
+    # for why objcopy alone produces a PE that OVMF rejects.
+    log "Converting to UEFI PE+ binary..."
+    objcopy -O pei-x86-64 --subsystem=efi-app --image-base=0x10000000 \
+        "$KERNEL_BIN" "$KERNEL_EFI"
+    python3 "$PROJECT_DIR/tools/pe-fixup.py" "$KERNEL_EFI" >/dev/null
+    ok "UEFI binary: $KERNEL_EFI ($(du -h "$KERNEL_EFI" | cut -f1))"
 
     ensure_disk_img
 
     echo ""
 }
 
-# Build a QEMU-specific ISO with fixed FullHD gfxmode. Bare-metal ISO keeps
-# gfxpayload=auto so the native GPU driver owns resolution selection.
-build_qemu_iso() {
-    log "Creating QEMU ISO (FullHD)..."
-    mkdir -p "$QEMU_ISO_DIR/boot/grub"
-    cp "$KERNEL_BIN" "$QEMU_ISO_DIR/boot/kernel.bin"
-
-    cat > "$QEMU_ISO_DIR/boot/grub/grub.cfg" << 'GRUBCFG'
-set timeout=0
-set default=0
-
-insmod efi_gop
-insmod all_video
-set gfxmode=1920x1080x32,1280x720x32,auto
-set gfxpayload=keep
-
-menuentry "nopeekOS" {
-    multiboot2 /boot/kernel.bin
-    boot
-}
-GRUBCFG
-
-    grub-mkrescue -o "$QEMU_ISO_FILE" "$QEMU_ISO_DIR" 2>/dev/null
-    ok "QEMU ISO: $QEMU_ISO_FILE"
+# Build a minimal UEFI-bootable disk image with a FAT32 ESP that
+# contains $KERNEL_EFI as /EFI/BOOT/BOOTX64.EFI. Used as the
+# "installer USB stick" the installer-kernel boots from inside QEMU.
+build_installer_disk() {
+    log "Building installer boot disk..."
+    rm -f "$INSTALLER_DISK"
+    # 96 MB: ESP needs to hold kernel.efi (~3 MB) with plenty of room
+    # for the FAT metadata + a future second slot.
+    dd if=/dev/zero of="$INSTALLER_DISK" bs=1M count=96 2>/dev/null
+    sgdisk --clear "$INSTALLER_DISK" >/dev/null
+    sgdisk --new=1:2048:0 --typecode=1:EF00 --change-name=1:"ESP" "$INSTALLER_DISK" >/dev/null
+    local part_offset=$((2048 * 512))
+    mformat -i "$INSTALLER_DISK@@${part_offset}" -F -v NPKINSTALL
+    mmd -i "$INSTALLER_DISK@@${part_offset}" ::/EFI ::/EFI/BOOT
+    mcopy -i "$INSTALLER_DISK@@${part_offset}" "$KERNEL_EFI" ::/EFI/BOOT/BOOTX64.EFI
+    ok "Installer disk: $INSTALLER_DISK ($(du -h "$INSTALLER_DISK" | cut -f1))"
     echo ""
 }
 
@@ -162,10 +147,13 @@ build_installer() {
     cd "$PROJECT_DIR"
     mkdir -p "$INSTALL_DATA"
 
-    # Pass 1: normal kernel (without embedded install data)
+    # Pass 1: regular kernel (no embedded data). Produces the kernel.efi
+    # that the installer copies onto the NVMe ESP — that file is what
+    # the installed system runs from on every subsequent UEFI boot.
     log "Pass 1: building base kernel..."
-    # Create empty placeholder so include_bytes! doesn't fail
-    [ -f "$INSTALL_DATA/kernel.bin" ] || touch "$INSTALL_DATA/kernel.bin"
+    # Placeholder so include_bytes!("install_data/kernel.efi") in
+    # install.rs compiles before Pass 1 finishes.
+    [ -f "$INSTALL_DATA/kernel.efi" ] || touch "$INSTALL_DATA/kernel.efi"
 
     cargo build \
         --release \
@@ -174,37 +162,13 @@ build_installer() {
         -Zbuild-std-features=compiler-builtins-mem \
         2>&1
 
-    # Copy pass 1 kernel (this is what gets installed on NVMe)
-    cp "$KERNEL_BIN" "$INSTALL_DATA/kernel.bin"
-    ok "Pass 1: base kernel $(du -h "$INSTALL_DATA/kernel.bin" | cut -f1)"
-
-    # Create GRUB EFI binary (if not exists or kernel is newer)
-    if [ ! -f "$INSTALL_DATA/grub.efi" ] || [ "$INSTALL_DATA/grub.efi" -ot "$INSTALL_DATA/kernel.bin" ]; then
-        log "Building GRUB EFI binary..."
-        grub-mkimage \
-            --format=x86_64-efi \
-            --output="$INSTALL_DATA/grub.efi" \
-            --prefix=/boot/grub \
-            part_gpt fat multiboot2 efi_gop search search_fs_file normal boot
-        ok "GRUB EFI: $(du -h "$INSTALL_DATA/grub.efi" | cut -f1)"
-    fi
-
-    # NVMe grub.cfg (already exists in install_data/)
-    if [ ! -f "$INSTALL_DATA/grub.cfg" ]; then
-        cat > "$INSTALL_DATA/grub.cfg" << 'GRUBCFG'
-set timeout=0
-set default=0
-
-insmod efi_gop
-set gfxmode=1920x1080x32,1280x720x32,auto
-set gfxpayload=keep
-
-menuentry "nopeekOS" {
-    multiboot2 /boot/kernel.bin
-    boot
-}
-GRUBCFG
-    fi
+    # Pass 1: convert ELF to UEFI PE and stash for Pass 2's
+    # include_bytes!. The installer kernel will plant this exact
+    # binary at /EFI/BOOT/BOOTX64.EFI on the target ESP.
+    objcopy -O pei-x86-64 --subsystem=efi-app --image-base=0x10000000 \
+        "$KERNEL_BIN" "$INSTALL_DATA/kernel.efi"
+    python3 "$PROJECT_DIR/tools/pe-fixup.py" "$INSTALL_DATA/kernel.efi" >/dev/null
+    ok "Pass 1: base kernel.efi $(du -h "$INSTALL_DATA/kernel.efi" | cut -f1)"
 
     # Pre-Pass 2: stage bundled assets (font + WASM modules) into
     # install_data/assets/ so the installer kernel's include_bytes!
@@ -296,7 +260,8 @@ GRUBCFG
         fi
     done
 
-    # Pass 2: installer kernel (with embedded GRUB + kernel + config + assets)
+    # Pass 2: installer kernel (embeds the Pass-1 kernel.efi + assets
+    # via the `installer` Cargo feature → include_bytes!).
     log "Pass 2: building installer kernel..."
     cargo build \
         --release \
@@ -306,7 +271,15 @@ GRUBCFG
         --features installer \
         2>&1
 
-    ok "Pass 2: installer kernel $(du -h "$KERNEL_BIN" | cut -f1)"
+    ok "Pass 2: installer ELF $(du -h "$KERNEL_BIN" | cut -f1)"
+
+    # The installer kernel itself is also UEFI-bootable — that's how
+    # it runs from the USB stick / installer-disk image.
+    log "Pass 2: converting installer to UEFI PE+..."
+    objcopy -O pei-x86-64 --subsystem=efi-app --image-base=0x10000000 \
+        "$KERNEL_BIN" "$KERNEL_EFI"
+    python3 "$PROJECT_DIR/tools/pe-fixup.py" "$KERNEL_EFI" >/dev/null
+    ok "Installer .efi: $KERNEL_EFI ($(du -h "$KERNEL_EFI" | cut -f1))"
     echo ""
 }
 
@@ -346,13 +319,29 @@ wipe_disk_img() {
 # (VMX on Intel, SVM on AMD). tcg-intel/tcg-amd force a specific vendor
 # CPU model regardless of host — slow, but the only way to test the VMX
 # backend on AMD or the SVM backend on Intel.
+ensure_uefi_vars() {
+    if [ ! -f "$OVMF_CODE_SRC" ]; then
+        err "OVMF firmware not found. Install: pacman -S edk2-ovmf  (Arch)  /  apt install ovmf  (Debian)"
+        exit 1
+    fi
+    if [ ! -f "$OVMF_VARS_LOCAL" ]; then
+        log "Initializing UEFI NVRAM: $OVMF_VARS_LOCAL"
+        cp "$OVMF_VARS_SRC" "$OVMF_VARS_LOCAL"
+    fi
+}
+
+# run_qemu_generic <display> <accel> <mode> [extra qemu args...]
+#   display:  serial | gui
+#   accel:    kvm | tcg-intel | tcg-amd
+#   mode:     normal     — OVMF + NVMe disk only (boots installed system)
+#             installer  — OVMF + NVMe (wiped) + installer USB image
 run_qemu_generic() {
     local display="$1"
     local accel="$2"
-    shift 2
+    local firmware="$3"
+    shift 3
 
     ensure_disk_img
-    build_qemu_iso
 
     local -a accel_args
     case "$accel" in
@@ -383,12 +372,50 @@ run_qemu_generic() {
         display_args=(-display none)
         log "Launching QEMU. Serial on stdio. Ctrl-A X to quit."
     fi
+
+    # Installer mode forces fresh UEFI NVRAM so stale boot entries
+    # (e.g. a "UEFI QEMU NVMe" pointing at the now-wiped disk) don't
+    # block discovery of the new installer USB stick.
+    if [ "$firmware" = "installer" ]; then
+        log "Resetting UEFI NVRAM for fresh installer boot..."
+        rm -f "$OVMF_VARS_LOCAL"
+    fi
+    ensure_uefi_vars
+
+    local -a fw_args=(
+        -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE_SRC"
+        -drive if=pflash,format=raw,file="$OVMF_VARS_LOCAL"
+    )
+
+    # The installer drive is only attached on `installer` mode. With
+    # a fresh NVRAM + wiped NVMe disk, OVMF auto-discovers any disk
+    # whose ESP contains /EFI/BOOT/BOOTX64.EFI — the only such disk
+    # is our installer USB, so it boots that.
+    local -a installer_args=()
+    if [ "$firmware" = "installer" ] && [ -f "$INSTALLER_DISK" ]; then
+        installer_args=(
+            -drive file="$INSTALLER_DISK",format=raw,if=none,id=instdisk
+            -device usb-storage,bus=xhci.0,drive=instdisk
+        )
+    fi
     echo ""
+
+    # Serial output: COM1 → live file unbuffered AND mirrored to stdio
+    # for interactive typing (installer prompt etc.). Two QEMU `-serial`
+    # arms give two COM ports — COM1 (interactive stdio) + COM2 (file
+    # log). Kernel mirrors every byte from COM1 (0x3F8) to COM2 (0x2F8)
+    # so a `pkill -9 qemu` can't lose buffered stdio output — every
+    # byte hit COM2's file backend synchronously already.
+    # After QEMU exits inspect with:  cat target/serial.log
+    local serial_log="$PROJECT_DIR/target/serial.log"
+    rm -f "$serial_log"
+    log "Serial log: $serial_log"
 
     qemu-system-x86_64 \
         "${accel_args[@]}" \
-        -cdrom "$QEMU_ISO_FILE" \
-        -serial stdio \
+        "${fw_args[@]}" \
+        -serial mon:stdio \
+        -serial file:"$serial_log" \
         "${display_args[@]}" \
         -m 1024M \
         -smp 4 \
@@ -398,7 +425,8 @@ run_qemu_generic() {
         -device qemu-xhci,id=xhci \
         -device usb-kbd,bus=xhci.0 \
         -device usb-mouse,bus=xhci.0 \
-        -nic user,model=virtio-net-pci,hostfwd=tcp::4444-:4444,hostfwd=tcp::4445-:4445 \
+        "${installer_args[@]}" \
+        -nic user,model=virtio-net-pci \
         -no-reboot \
         -no-shutdown \
         "$@"
@@ -418,7 +446,7 @@ write_usb() {
     fi
 
     [ ! -b "$device" ] && { err "'$device' is not a block device."; exit 1; }
-    [ ! -f "$KERNEL_BIN" ] && { err "Kernel not found. Run build first."; exit 1; }
+    [ ! -f "$KERNEL_EFI" ] && { err "kernel.efi not found. Run ./build.sh installer first."; exit 1; }
 
     # Safety: never write to NVMe
     if [[ "$device" == *"nvme"* ]]; then
@@ -427,7 +455,7 @@ write_usb() {
     fi
 
     # Check tools
-    for cmd in sgdisk mkfs.fat grub-install; do
+    for cmd in sgdisk mkfs.fat; do
         command -v "$cmd" &>/dev/null || { err "Missing: $cmd"; exit 1; }
     done
 
@@ -470,44 +498,21 @@ write_usb() {
     mnt=$(mktemp -d)
     sudo mount "$esp_part" "$mnt"
 
-    log "Installing GRUB EFI bootloader..."
-    sudo grub-install \
-        --target=x86_64-efi \
-        --efi-directory="$mnt" \
-        --boot-directory="$mnt/boot" \
-        --removable \
-        --no-nvram \
-        2>/dev/null
+    log "Installing kernel.efi as /EFI/BOOT/BOOTX64.EFI..."
+    sudo mkdir -p "$mnt/EFI/BOOT"
+    sudo cp "$KERNEL_EFI" "$mnt/EFI/BOOT/BOOTX64.EFI"
 
-    log "Copying kernel..."
-    sudo cp "$KERNEL_BIN" "$mnt/boot/kernel.bin"
-
-    # Unique marker file so GRUB finds THIS partition, not NVMe
+    # Marker so the installer kernel knows this is a USB install medium
+    # (vs being booted from the target NVMe ESP that it itself wrote).
     sudo touch "$mnt/.npk-usb-boot"
-
-    log "Writing GRUB config..."
-    sudo mkdir -p "$mnt/boot/grub"
-    sudo tee "$mnt/boot/grub/grub.cfg" > /dev/null << 'GRUBCFG'
-set timeout=0
-set default=0
-
-insmod efi_gop
-set gfxmode=1920x1080x32,1280x720x32,auto
-set gfxpayload=keep
-
-menuentry "nopeekOS" {
-    multiboot2 /boot/kernel.bin
-    boot
-}
-GRUBCFG
 
     sync
     sudo umount "$mnt"
     rmdir "$mnt"
 
     ok "USB stick ready: $device"
-    log "ESP: $esp_part (FAT32, GRUB EFI + kernel)"
-    log "Plug into NUC, select USB in boot menu."
+    log "ESP: $esp_part (FAT32, /EFI/BOOT/BOOTX64.EFI = kernel.efi)"
+    log "Plug into NUC, select USB in boot menu (UEFI)."
 }
 
 # ============================================================
@@ -520,11 +525,17 @@ check_deps() {
     if ! command -v cargo &> /dev/null; then
         missing+=("cargo (rustup install)")
     fi
-    if ! command -v grub-mkrescue &> /dev/null; then
-        missing+=("grub-mkrescue (apt install grub-pc-bin)")
+    if ! command -v objcopy &> /dev/null; then
+        missing+=("objcopy (apt install binutils / pacman -S binutils)")
     fi
-    if ! command -v xorriso &> /dev/null; then
-        missing+=("xorriso (apt install xorriso)")
+    if ! command -v mformat &> /dev/null; then
+        missing+=("mtools (apt install mtools)")
+    fi
+    if ! command -v sgdisk &> /dev/null; then
+        missing+=("sgdisk (apt install gdisk)")
+    fi
+    if ! command -v python3 &> /dev/null; then
+        missing+=("python3 (apt install python3)")
     fi
 
     if [ ${#missing[@]} -gt 0 ]; then
@@ -542,8 +553,10 @@ nopeekOS Build System
 
 Usage: ./build.sh <command> [args]
 
+UEFI-only. All QEMU runs use OVMF; no SeaBIOS / multiboot path.
+
 Common:
-  build                Compile kernel + create bootable ISO
+  build                Compile kernel.efi (PE32+ UEFI Application)
   qemu                 Build + run in QEMU (KVM, host CPU, serial)
   qemu-gui             Build + run in QEMU with framebuffer GUI
   debug                Build + run in QEMU with GDB stub on :1234
@@ -553,9 +566,9 @@ Cross-vendor testing (TCG, slow but vendor-correct):
   qemu-amd             Force AMD CPU emulation regardless of host
 
 Installer / release:
-  installer            Two-pass installer build (bundled assets)
-  qemu-installer       Installer + run (wipes disk, fresh install)
-  qemu-installer-gui   Same with framebuffer
+  installer            Two-pass installer build (kernel.efi + bundled assets)
+  qemu-installer       Installer + run (wipes NVMe, attaches installer USB)
+  qemu-installer-gui   Same with framebuffer (1920x1080)
   usb /dev/sdX         Build installer + flash USB stick
   release              Sign kernel + modules + assets (ECDSA P-384)
 
@@ -575,47 +588,48 @@ case "${1:-}" in
     qemu)
         check_deps
         build
-        run_qemu_generic serial kvm
+        run_qemu_generic serial kvm normal
         ;;
     qemu-gui)
         check_deps
         build
-        run_qemu_generic gui kvm
+        run_qemu_generic gui kvm normal
         ;;
     qemu-intel)
         check_deps
         build
-        run_qemu_generic serial tcg-intel
+        run_qemu_generic serial tcg-intel normal
         ;;
     qemu-amd)
         check_deps
         build
-        run_qemu_generic serial tcg-amd
+        run_qemu_generic serial tcg-amd normal
         ;;
     qemu-installer)
-        # Build the installer-flavored kernel (with all bundled assets
-        # baked in via include_bytes!) and boot it in QEMU on serial.
-        # Wipes the disk first — the installer formats a fresh npkFS,
-        # and a leftover disk from a previous session would trigger the
-        # "already set up, log in" path instead.
+        # Two-pass installer build: produces $KERNEL_EFI containing the
+        # installer logic, then wraps it in an ESP-formatted disk image
+        # ($INSTALLER_DISK) that QEMU attaches as a USB stick. NVMe is
+        # wiped so OVMF can't boot from it and must fall through to
+        # the installer USB.
         check_deps
         build_installer
+        build_installer_disk
         wipe_disk_img
-        run_qemu_generic serial kvm
+        run_qemu_generic serial kvm installer
         ;;
     qemu-installer-gui)
-        # Same as qemu-installer but with GUI framebuffer (1920x1080).
         check_deps
         build_installer
+        build_installer_disk
         wipe_disk_img
-        run_qemu_generic gui kvm
+        run_qemu_generic gui kvm installer
         ;;
     debug)
         check_deps
         build
         log "Launching QEMU with GDB stub on :1234..."
         warn "In another terminal: gdb $KERNEL_BIN -ex 'target remote :1234'"
-        run_qemu_generic serial kvm -s -S
+        run_qemu_generic serial kvm normal -s -S
         ;;
     installer)
         check_deps
@@ -640,13 +654,14 @@ case "${1:-}" in
         RELEASE_DIR="$PROJECT_DIR/release"
         mkdir -p "$RELEASE_DIR"
 
-        # Copy kernel binary
-        cp "$KERNEL_BIN" "$RELEASE_DIR/kernel.bin"
+        # Copy kernel.efi (the PE+ UEFI app — what OTA `update` fetches
+        # and writes to /EFI/BOOT/BOOTX64.EFI).
+        cp "$KERNEL_EFI" "$RELEASE_DIR/kernel.efi"
 
         # Read version from Cargo.toml
         VERSION=$(grep '^version' "$PROJECT_DIR/kernel/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-        SIZE=$(stat -c%s "$RELEASE_DIR/kernel.bin")
-        SHA384=$(openssl dgst -sha384 -hex "$RELEASE_DIR/kernel.bin" 2>/dev/null | awk '{print $NF}')
+        SIZE=$(stat -c%s "$RELEASE_DIR/kernel.efi")
+        SHA384=$(openssl dgst -sha384 -hex "$RELEASE_DIR/kernel.efi" 2>/dev/null | awk '{print $NF}')
 
         # Write manifest
         cat > "$RELEASE_DIR/manifest" <<MANIFEST
@@ -661,7 +676,7 @@ MANIFEST
         # Sign with ECDSA P-384 if key exists
         KEY_FILE="$PROJECT_DIR/update.key"
         if [ -f "$KEY_FILE" ]; then
-            openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/kernel.sig" "$RELEASE_DIR/kernel.bin"
+            openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/kernel.sig" "$RELEASE_DIR/kernel.efi"
             ok "Signed with $KEY_FILE"
         else
             warn "No signing key found at $KEY_FILE"
@@ -796,6 +811,6 @@ sha384=${MOD_SHA}
     *)
         check_deps
         build
-        run_qemu_generic serial kvm
+        run_qemu_generic serial kvm normal
         ;;
 esac

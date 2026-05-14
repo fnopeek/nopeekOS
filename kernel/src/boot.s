@@ -1,228 +1,108 @@
-/* nopeekOS – Boot Entry Point
+/* nopeekOS – UEFI Boot Entry
  *
- * Multiboot2 startet in 32-bit Protected Mode.
- * Wir muessen manuell nach Long Mode (64-bit) wechseln:
- *   1. Page Tables aufsetzen (Identity Mapping)
- *   2. PAE + Long Mode aktivieren
- *   3. Paging einschalten
- *   4. GDT mit 64-bit Code Segment laden
- *   5. Far Jump nach 64-bit Code
- *   6. Rust kernel_main aufrufen
+ * UEFI hands off in long mode with paging on, using its own GDT, IDT
+ * and page tables:
+ *   rcx = EFI_HANDLE         (image handle)
+ *   rdx = EFI_SYSTEM_TABLE*  (system table pointer)
  *
- * Das ist das unvermeidbare Hardware-Ritual.
- * Alles danach ist nopeekOS.
+ * Calling convention at entry is Microsoft x64 (UEFI spec). Our Rust
+ * efi_main is declared `extern "efiapi"` so Rust handles that ABI.
+ *
+ * We deliberately do NOT change CS/SS/DS or load our own GDT here.
+ * Boot Services (especially ExitBootServices) run code inside the
+ * firmware that assumes UEFI's own GDT layout — replacing selectors
+ * mid-flight hangs the firmware. The GDT swap is deferred to
+ * boot_uefi::install_kernel_gdt(), called AFTER ExitBootServices.
+ *
+ * Steps here:
+ *   1. Save the UEFI args in callee-saved regs across CPU-setup.
+ *   2. Enable OSXSAVE + XCR0 bits for x87/SSE/AVX — Rust codegen with
+ *      `+avx2` emits VEX-encoded instructions starting from the first
+ *      stack frame.
+ *   3. Switch to our own (2 MB) stack — UEFI's is too small for Rust
+ *      frames.
+ *   4. Reserve MS-x64 shadow space and call efi_main(handle, table).
+ *
+ * efi_main does the UEFI service work, calls ExitBootServices, then
+ * installs our own GDT, IDT-stub-stack-state and jumps to kernel_main
+ * with a synthesized BootInfo. It never returns.
  */
 
-.section .multiboot2, "a"
-.align 8
-
-/* Multiboot2 Header */
-multiboot2_header:
-    .long 0xE85250D6
-    .long 0
-    .long multiboot2_header_end - multiboot2_header
-    .long -(0xE85250D6 + 0 + (multiboot2_header_end - multiboot2_header))
-
-    /* Framebuffer tag: request linear framebuffer from GRUB */
-    .align 8
-    .short 5        /* type = framebuffer */
-    .short 0        /* flags = required */
-    .long 20        /* size */
-    .long 1920      /* preferred width */
-    .long 1080      /* preferred height */
-    .long 32        /* preferred bpp */
-
-    /* End tag */
-    .align 8
-    .short 0
-    .short 0
-    .long 8
-multiboot2_header_end:
-
-/* ============================================================
- * 32-bit Entry Point
- * ============================================================ */
 .section .text
-.code32
 .global _start
-
-_start:
-    /* Multiboot-Werte in callee-saved Registern sichern */
-    mov %eax, %esi
-    mov %ebx, %edi
-
-    /* BSS nullen (BEVOR wir Werte in BSS schreiben!) */
-    push %esi
-    push %edi
-    mov $__bss_start, %edi
-    mov $__bss_end, %ecx
-    sub %edi, %ecx
-    shr $2, %ecx
-    xor %eax, %eax
-    rep stosl
-    pop %edi
-    pop %esi
-
-    /* Jetzt Multiboot-Werte in BSS speichern */
-    mov %esi, (multiboot_magic)
-    mov %edi, (multiboot_info)
-    mov $__stack_top, %esp
-
-    call check_cpuid
-    call check_long_mode
-    call setup_page_tables
-    call enable_paging
-
-    lgdt (gdt64_pointer)
-    ljmp $0x08, $long_mode_start
-
-check_cpuid:
-    pushfl
-    pop %eax
-    mov %eax, %ecx
-    xor $0x200000, %eax
-    push %eax
-    popfl
-    pushfl
-    pop %eax
-    push %ecx
-    popfl
-    cmp %ecx, %eax
-    je .no_cpuid
-    ret
-.no_cpuid:
-    hlt
-
-check_long_mode:
-    mov $0x80000000, %eax
-    cpuid
-    cmp $0x80000001, %eax
-    jb .no_long_mode
-    mov $0x80000001, %eax
-    cpuid
-    test $0x20000000, %edx
-    jz .no_long_mode
-    ret
-.no_long_mode:
-    hlt
-
-setup_page_tables:
-    /* PML4[0] -> PDPT */
-    mov $pdpt, %eax
-    or $0x03, %eax
-    mov %eax, (pml4)
-
-    /* PDPT: 64 x 1GB Huge Pages = 64GB Identity Map */
-    /* Bit 0=Present, Bit 1=Writable, Bit 7=Huge (1GB page) */
-    mov $pdpt, %edi
-    movl $0x83, %eax        /* 0x83 = Present + Writable + Huge */
-    mov $0, %edx            /* high 32 bits of address (starts at 0) */
-    mov $0, %ecx
-.fill_pdpt:
-    mov %eax, (%edi)        /* low 32 bits */
-    mov %edx, 4(%edi)       /* high 32 bits */
-    add $0x40000000, %eax   /* +1GB */
-    jnc .no_carry
-    inc %edx                /* carry into high 32 bits for addresses > 4GB */
-.no_carry:
-    add $8, %edi
-    inc %ecx
-    cmp $64, %ecx           /* 64 entries = 64GB */
-    jne .fill_pdpt
-    ret
-
-enable_paging:
-    mov $pml4, %eax
-    mov %eax, %cr3
-
-    /* CR4: PAE | OSFXSR | OSXMMEXCPT | OSXSAVE
-     * OSXSAVE (bit 18) is required for XSETBV / AVX state-save. */
-    mov %cr4, %eax
-    or $0x40620, %eax
-    mov %eax, %cr4
-
-    /* Long Mode (EFER.8) */
-    mov $0xC0000080, %ecx
-    rdmsr
-    or $0x100, %eax
-    wrmsr
-
-    /* CR0: clear EM, set MP|NE (FPU/SSE), then PG (paging) */
-    mov %cr0, %eax
-    and $~4, %eax
-    or $0x80000022, %eax
-    mov %eax, %cr0
-    ret
-
-/* ============================================================
- * 64-bit Entry Point
- * ============================================================ */
 .code64
 
-long_mode_start:
-    mov $0x10, %ax
-    mov %ax, %ds
-    mov %ax, %es
-    mov %ax, %fs
-    mov %ax, %gs
-    mov %ax, %ss
+_start:
+    /* Do NOT cli — UEFI Boot Services internally rely on the
+     * firmware's timer IRQ. efi_main does cli AFTER ExitBootServices. */
+    mov %rcx, %r12
+    mov %rdx, %r13
 
-    mov $__stack_top, %rsp
-
-    /* Initialize FPU/SSE state (CR0/CR4 already set by enable_paging) */
-    fninit
-    pushq $0x1F80
-    ldmxcsr (%rsp)
-    add $8, %rsp
+    /* Enable AVX state save (CR4.OSXSAVE = bit 18). UEFI's default
+     * CR4 has SSE bits on but not OSXSAVE — and Rust codegen with
+     * +avx2 (set in .cargo/config.toml) emits VEX-encoded AVX
+     * instructions, so without this the first push into a Rust
+     * function #UDs. CR4 is already valid (UEFI set it for itself);
+     * OR-in just the new bit so UEFI's other CR4 state is preserved. */
+    mov %cr4, %rax
+    or $0x40000, %rax       /* bit 18 = OSXSAVE */
+    mov %rax, %cr4
 
     /* XSETBV: enable x87 (bit 0) | SSE/XMM (bit 1) | AVX/YMM (bit 2)
-     * in XCR0. Needed for AVX2 codegen (blake3 SIMD backend). Requires
-     * CR4.OSXSAVE which enable_paging set above. */
+     * in XCR0. Required by AVX2 codegen (and the blake3 SIMD path
+     * later in the kernel). XSETBV needs OSXSAVE set above. */
     xor %ecx, %ecx
     xor %edx, %edx
     mov $7, %eax
     xsetbv
 
-    /* Argumente fuer kernel_main(magic, info) */
-    xor %rdi, %rdi
-    mov (multiboot_magic), %edi
-    xor %rsi, %rsi
-    mov (multiboot_info), %esi
+    /* Zero BSS. lea (%rip)-relative because UEFI may load the image
+     * at any address — but we set RELOCS_STRIPPED in the PE, so UEFI
+     * must honor ImageBase exactly; absolute symbol addresses also
+     * work. RIP-relative is safer regardless. */
+    lea __bss_start(%rip), %rdi
+    lea __bss_end(%rip), %rcx
+    sub %rdi, %rcx
+    shr $3, %rcx
+    xor %rax, %rax
+    rep stosq
 
-    call kernel_main
+    /* Our own stack — 2 MB reserved in linker.ld, beyond what UEFI's
+     * boot-services pool gave us. Aligned to 16 by linker.ld. */
+    lea __stack_top(%rip), %rsp
 
-.halt64:
+    /* MS x64 ABI requires 32-byte "shadow space" on stack for
+     * register-arg spills. RSP must be 16-byte aligned at call site. */
+    sub $32, %rsp
+
+    /* Restore args and call efi_main(image_handle, system_table) */
+    mov %r12, %rcx
+    mov %r13, %rdx
+    call efi_main
+
+    /* efi_main is `-> !` but if it ever returns, park here. */
+.hang:
     cli
     hlt
-    jmp .halt64
+    jmp .hang
 
 /* ============================================================
- * Read-Only Data
+ * Kernel GDT — installed by install_kernel_gdt() in boot_uefi.rs
+ * AFTER ExitBootServices completes. Until then, UEFI's GDT stays.
+ *
+ * Slot 1 = code (0x08), slot 2 = data (0x10). AR.access (bit 0) is
+ * set so VMX host-state validation accepts the descriptors without
+ * re-loading them.
  * ============================================================ */
 .section .rodata
 .align 16
+.global gdt64
+.global gdt64_end
 
 gdt64:
     .quad 0
 gdt64_code:
-    .quad 0x00AF9A000000FFFF
+    .quad 0x00AF9B000000FFFF      /* 64-bit code, accessed=1 */
 gdt64_data:
-    .quad 0x00CF92000000FFFF
+    .quad 0x00CF93000000FFFF      /* 32-bit data, accessed=1 */
 gdt64_end:
-
-gdt64_pointer:
-    .short gdt64_end - gdt64 - 1
-    .long gdt64
-
-/* ============================================================
- * BSS (zeroed)
- * ============================================================ */
-.section .bss
-.align 4096
-
-pml4:   .space 4096
-pdpt:   .space 4096
-
-.align 4
-multiboot_magic: .space 4
-multiboot_info:  .space 4

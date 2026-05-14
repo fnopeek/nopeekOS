@@ -1,20 +1,18 @@
 //! NVMe installation: GPT + FAT32 ESP + npkFS partitioning
 //!
-//! Embedded data (GRUB EFI binary + kernel) is included at build time
+//! UEFI-only. The kernel is itself a PE+ UEFI Application — firmware
+//! finds `/EFI/BOOT/BOOTX64.EFI` on the ESP and runs it directly, no
+//! GRUB indirection.
+//!
+//! Embedded data (the kernel.efi binary) is included at build time
 //! via the `installer` Cargo feature. The two-pass build ensures:
-//!   Pass 1: kernel without embedded data (installed to NVMe)
-//!   Pass 2: kernel with embedded data (USB installation medium)
+//!   Pass 1: kernel without embedded data (the one we install to NVMe)
+//!   Pass 2: kernel with embedded data (the USB / installer ISO image)
 
 use crate::{kprintln, kprint, serial, blkdev, nvme, gpt, fat32, npkfs};
 
 #[cfg(feature = "installer")]
-static GRUB_EFI: &[u8] = include_bytes!("install_data/grub.efi");
-
-#[cfg(feature = "installer")]
-static INSTALL_KERNEL: &[u8] = include_bytes!("install_data/kernel.bin");
-
-#[cfg(feature = "installer")]
-static GRUB_CFG: &[u8] = include_bytes!("install_data/grub.cfg");
+static INSTALL_KERNEL_EFI: &[u8] = include_bytes!("install_data/kernel.efi");
 
 /// Bundled assets embedded into the installer kernel — font + WASM
 /// modules written into npkFS on fresh install.
@@ -41,7 +39,7 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     let model = nvme::model_name().unwrap_or_default();
     kprintln!("[npk] Install target: {} ({} GB)", model, total_gb);
     kprintln!("[npk] Partition layout:");
-    kprintln!("[npk]   ESP:   64 MB  (FAT32, GRUB + kernel)");
+    kprintln!("[npk]   ESP:   64 MB  (FAT32, UEFI BOOTX64.EFI = kernel)");
     kprintln!("[npk]   npkFS: {} GB  (encrypted storage)", total_gb.saturating_sub(1));
     kprintln!();
 
@@ -57,17 +55,16 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     let npkfs_start_sector = gpt::write_gpt()?;
     kprintln!(" done.");
 
-    // Step 2: Create FAT32 ESP
+    // Step 2: Create FAT32 ESP. The kernel.efi *is* the UEFI Boot
+    // Application — firmware loads /EFI/BOOT/BOOTX64.EFI directly,
+    // no GRUB needed.
     kprint!("[npk] Creating EFI boot partition...");
     fat32::create_esp(
         gpt::ESP_START,
         gpt::ESP_SECTORS as u32,
-        GRUB_EFI,
-        INSTALL_KERNEL,
-        GRUB_CFG,
+        INSTALL_KERNEL_EFI,
     )?;
-    kprintln!(" done. (GRUB {} KB, kernel {} KB)",
-        GRUB_EFI.len() / 1024, INSTALL_KERNEL.len() / 1024);
+    kprintln!(" done. (BOOTX64.EFI {} KB)", INSTALL_KERNEL_EFI.len() / 1024);
 
     // Step 3: Set blkdev partition offset + size so npkFS uses the right
     // region. Re-detect via GPT so we get both ends consistently — the

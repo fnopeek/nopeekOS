@@ -105,9 +105,9 @@ pub fn intent_update(_args: &str) {
     } else {
         kprintln!("[npk] Size: {} bytes", manifest.size);
 
-        // 2. Download kernel
-        kprintln!("[npk] Downloading kernel.bin ({} KB)...", manifest.size / 1024);
-        let kernel_path = alloc::format!("{}/kernel.bin", UPDATE_BASE);
+        // 2. Download kernel (UEFI PE+ binary)
+        kprintln!("[npk] Downloading kernel.efi ({} KB)...", manifest.size / 1024);
+        let kernel_path = alloc::format!("{}/kernel.efi", UPDATE_BASE);
         let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, MAX_KERNEL_SIZE) {
             Ok(d) => d,
             Err(e) => { kprintln!("[npk] Download failed: {}", e); return; }

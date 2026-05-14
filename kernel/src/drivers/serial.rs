@@ -70,6 +70,12 @@ impl SerialPort {
     pub fn write_byte(&self, byte: u8) {
         if !self.port_exists { return; }
         unsafe {
+            // Mirror to COM2 (0x2F8) — host pipes this to
+            // target/serial.log via -serial file: in build.sh. Write
+            // first/unconditionally so the log captures every byte
+            // even if COM1's THR-empty poll stalls. Real HW just
+            // discards writes to an absent COM2 port.
+            outb(0x2F8, byte);
             while (inb(self.base + 5) & 0x20) == 0 {}
             outb(self.base, byte);
         }

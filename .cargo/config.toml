@@ -30,6 +30,17 @@ runner = "bash build.sh run"
 # Linker script (path relative to the kernel build's CWD = repo root).
 rustflags = [
     "-C", "link-arg=-Tkernel/linker.ld",
+    # Static relocation model — every static ref uses a 32-bit absolute
+    # address baked at link time. UEFI must load us at our preferred
+    # ImageBase exactly (RELOCS_STRIPPED is set in the PE) so those
+    # addresses resolve correctly. We pick a high ImageBase (set in
+    # build.sh's objcopy --image-base) that's guaranteed to be
+    # conventional RAM on every UEFI machine we target.
+    #
+    # The PIC alternative would need PE-style .reloc entries; objcopy
+    # ELF→PE doesn't synthesize them, and the ELF's R_X86_64_RELATIVE
+    # dynamic relocations stay unapplied → .got full of NULL → crash
+    # on first static deref. Solved by static + ImageBase that fits.
     "-C", "relocation-model=static",
     "-C", "target-feature=+sse,+sse2,+ssse3,+sse4.1,+sse4.2,+avx,+avx2,+aes,+pclmulqdq,-soft-float",
 ]
