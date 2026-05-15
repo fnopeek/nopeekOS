@@ -453,7 +453,12 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         crate::net::poll();
         crate::microvm::vm_poll_slice();
         crate::shell::check_and_serve(vault, session_id);
-        if crate::serial::write_gen() != console_gen {
+        // Only redraw when the user has actually typed something:
+        // async output then split their in-progress command (the
+        // reported bug). With an empty input there is nothing to
+        // protect — redrawing an empty `path> ` between every
+        // streamed line is pure noise (observed during guest boot).
+        if session.pos > 0 && crate::serial::write_gen() != console_gen {
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
             let inp = core::str::from_utf8(&session.input_buf[..session.pos]).unwrap_or("");
