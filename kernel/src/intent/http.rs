@@ -588,17 +588,27 @@ fn https_get_once(
             }
         }
     } else if chunked {
-        // Transfer-Encoding: chunked — buffered decode, then drain
-        // through the sink in one shot. In practice OTA-class
-        // servers always set Content-Length (static files behind a
-        // CDN); chunked is mostly for dynamic responses (manifests,
-        // index pages) that are small, so buffering them is fine.
-        // If we ever see a huge chunked download we'd need a true
-        // streaming chunked decoder, but that's a separate effort.
-        let decoded = decode_chunked(leading, &mut tls, &mut buf, max_size);
-        if !decoded.is_empty() {
-            on_chunk(&decoded)?;
-            delivered += decoded.len();
+        // Transfer-Encoding: chunked — true streaming decoder.
+        // GitHub's codeload serves dynamically-generated tarballs
+        // (git archive on the fly) chunked + binary, so the body
+        // is both huge and impossible to buffer-then-scan: a gzip
+        // stream contains the byte sequence "0\r\n" by chance
+        // almost immediately, which would false-trip any
+        // end-of-body heuristic. A proper chunk-size state machine
+        // is the only correct option.
+        match stream_chunked_body(leading, &mut tls, &mut buf, max_size, on_chunk) {
+            Ok(n) => delivered += n,
+            Err(e) => {
+                // A chunked stream that ends before the 0-size chunk
+                // is a genuine truncation (dropped connection, sink
+                // write failure). Propagate so the caller does NOT
+                // commit a partial file — for OTA the SHA-384 check
+                // would catch it anyway, but `https <url> > path`
+                // has no hash and would otherwise silently store
+                // corrupt data.
+                let _ = crate::tls::tls_close(&mut tls);
+                return Err(e);
+            }
         }
     } else {
         // Connection: close — push all bytes until peer closes.
@@ -689,59 +699,95 @@ fn parse_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
-/// Decode chunked transfer encoding (RFC 7230 §4.1).
-fn decode_chunked(
-    initial: &[u8],
+/// True streaming chunked-transfer decoder (RFC 7230 §4.1).
+///
+/// Parses the chunk-size framing exactly and pushes only decoded
+/// payload bytes through `on_chunk` as they arrive — never buffering
+/// the whole body and never scanning for an end-of-body magic
+/// sequence (which is unsound on binary payloads, where
+/// `30 0D 0A` = "0\r\n" occurs by chance). A small `carry` buffer
+/// holds bytes received but not yet consumed; it stays around one
+/// TLS-record in size because payload is drained to the sink and
+/// chunk-size lines are tiny.
+///
+/// Returns the number of payload bytes delivered.
+fn stream_chunked_body(
+    leading: &[u8],
     tls: &mut crate::tls::TlsSession,
     buf: &mut [u8],
     max_size: usize,
-) -> alloc::vec::Vec<u8> {
-    // Accumulate all chunked data, then decode
-    let mut raw = initial.to_vec();
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<usize, &'static str> {
+    // Decoder state: reading a chunk-size line, copying N data
+    // bytes, swallowing the CRLF after a chunk's data, or done.
+    enum St { Size, Data(usize), AfterData, Done }
 
-    // Read until we see "0\r\n" (final chunk)
-    let mut attempts = 0;
-    while !has_final_chunk(&raw) && raw.len() < max_size {
+    let mut carry: alloc::vec::Vec<u8> = leading.to_vec();
+    let mut state = St::Size;
+    let mut delivered: usize = 0;
+
+    loop {
+        // Drain as much as possible from `carry` before asking the
+        // network for more.
+        let progressed = match state {
+            St::Size => {
+                if let Some(p) = carry.windows(2).position(|w| w == b"\r\n") {
+                    let line = &carry[..p];
+                    // Chunk extensions (";name=val") are ignored.
+                    let hex_end = line.iter().position(|&b| b == b';').unwrap_or(line.len());
+                    let hex = core::str::from_utf8(&line[..hex_end])
+                        .map_err(|_| "chunk: bad size line")?
+                        .trim();
+                    let sz = usize::from_str_radix(hex, 16)
+                        .map_err(|_| "chunk: bad size hex")?;
+                    carry.drain(..p + 2);
+                    state = if sz == 0 { St::Done } else { St::Data(sz) };
+                    true
+                } else {
+                    false
+                }
+            }
+            St::Data(remaining) => {
+                if carry.is_empty() {
+                    false
+                } else {
+                    let take = remaining.min(carry.len());
+                    on_chunk(&carry[..take])?;
+                    delivered = delivered.saturating_add(take);
+                    if delivered > max_size {
+                        return Err("chunk: body exceeds max_size");
+                    }
+                    carry.drain(..take);
+                    state = if remaining - take == 0 {
+                        St::AfterData
+                    } else {
+                        St::Data(remaining - take)
+                    };
+                    true
+                }
+            }
+            St::AfterData => {
+                // Consume the CRLF that terminates a chunk's data.
+                if carry.len() >= 2 {
+                    carry.drain(..2);
+                    state = St::Size;
+                    true
+                } else {
+                    false
+                }
+            }
+            St::Done => return Ok(delivered),
+        };
+
+        if progressed {
+            continue;
+        }
+
+        // Need more bytes from the wire.
         match tls_recv_poll(tls, buf) {
-            Ok(0) => { attempts += 1; if attempts > 50 { break; } }
-            Ok(n) => { raw.extend_from_slice(&buf[..n]); attempts = 0; }
-            Err(_) => break,
+            Ok(0) => continue, // transient; tls_recv_poll caps the wait
+            Ok(n) => carry.extend_from_slice(&buf[..n]),
+            Err(_) => return Err("chunk: recv error before final chunk"),
         }
     }
-
-    // Decode: each chunk is "SIZE\r\n DATA \r\n", final "0\r\n\r\n"
-    let mut body = alloc::vec::Vec::new();
-    let mut pos = 0;
-    loop {
-        // Find chunk size line
-        let line_end = match raw[pos..].windows(2).position(|w| w == b"\r\n") {
-            Some(p) => pos + p,
-            None => break,
-        };
-        let size_str = match core::str::from_utf8(&raw[pos..line_end]) {
-            Ok(s) => s.trim(),
-            Err(_) => break,
-        };
-        // Chunk size may have extensions after ';' — ignore them
-        let size_hex = size_str.split(';').next().unwrap_or("").trim();
-        let chunk_size = match usize::from_str_radix(size_hex, 16) {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        if chunk_size == 0 { break; } // final chunk
-
-        let data_start = line_end + 2;
-        let data_end = data_start + chunk_size;
-        if data_end > raw.len() { break; } // incomplete
-        body.extend_from_slice(&raw[data_start..data_end]);
-        pos = data_end + 2; // skip trailing \r\n
-        if body.len() > max_size { break; }
-    }
-    body
-}
-
-fn has_final_chunk(data: &[u8]) -> bool {
-    // Look for "0\r\n\r\n" anywhere (final chunk marker)
-    data.windows(5).any(|w| w == b"0\r\n\r\n")
-        || data.windows(3).any(|w| w == b"0\r\n") // might not have trailing \r\n yet
 }
