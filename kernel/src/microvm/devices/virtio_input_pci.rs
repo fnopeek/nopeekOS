@@ -586,16 +586,20 @@ impl VirtioInput {
                 self.set_bit(SYN_REPORT as usize);
                 1
             }
-            // EV_KEY — bits for KEY_ESC + KEY_A so evdev recognises us
-            // as a keyboard. The actual code set will grow when real
-            // Wayland-input injection lands; one printable key is enough
-            // for /dev/input/event0 to register.
+            // EV_KEY — advertise the full 0..=255 keycode range (32
+            // bytes). Linux's input core drops any EV_KEY whose code
+            // isn't set in dev->keybit (test_bit in input_handle_event)
+            // — so declaring only KEY_ESC/KEY_A meant every other
+            // injected key (e.g. KEY_SPACE=57) was silently filtered
+            // before evdev, even though the eventq/IRQ path worked.
+            // Covering the standard keyboard range fixes injection now
+            // and is what Phase B's real per-scancode mapping needs.
             x if x == EV_KEY => {
-                self.set_bit(KEY_ESC as usize);
-                self.set_bit(KEY_A as usize);
-                // Linux's evdev rounds size up to nearest 8 bytes; KEY_A
-                // = bit 30 lives in byte 3, so report 4 bytes.
-                4
+                let _ = (KEY_ESC, KEY_A); // (kept as named refs)
+                for code in 0..=255usize {
+                    self.set_bit(code);
+                }
+                32
             }
             // EV_MSC / EV_REP — declare unsupported (size=0).
             x if x == EV_MSC => 0,
