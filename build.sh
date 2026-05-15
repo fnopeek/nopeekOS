@@ -809,6 +809,26 @@ sha384=${US_SHA}
             fi
         fi
 
+        # Squashfs form of the userspace bundle — read-only, PID-1
+        # mounts it from /dev/vdb. Same provenance as the cpio above
+        # but RAM-efficient. Optional; ship whichever form exists.
+        USERSPACE_SQFS="$RELEASE_DIR/assets/microvm-userspace.sqfs"
+        if [ -f "$USERSPACE_SQFS" ]; then
+            USQ_SIZE=$(stat -c%s "$USERSPACE_SQFS")
+            USQ_SHA=$(openssl dgst -sha384 -hex "$USERSPACE_SQFS" 2>/dev/null | awk '{print $NF}')
+
+            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:userspace-sqfs]
+size=${USQ_SIZE}
+sha384=${USQ_SHA}
+
+"
+            if [ -f "$KEY_FILE" ]; then
+                openssl dgst -sha384 -sign "$KEY_FILE" \
+                    -out "${USERSPACE_SQFS}.sig" "$USERSPACE_SQFS"
+                ok "Signed userspace bundle: microvm-userspace.sqfs ($USQ_SIZE bytes)"
+            fi
+        fi
+
         # Pick up any pre-existing url= overrides from a previous
         # `release-large` invocation. The large-asset manifest is
         # written to release/assets/manifest.large by `release-large`

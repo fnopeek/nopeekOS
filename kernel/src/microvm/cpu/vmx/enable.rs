@@ -949,6 +949,12 @@ fn run_linux_loop(
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if pci.virtio_blk_sqfs.bar0_in_range(gpa) {
+                    // Same handler — VirtioBlk carries its own IRQ line.
+                    if handle_mmio_ept_blk(&mut regs, &mut pci.virtio_blk_sqfs, &pic, gpa, host_base) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 }
                 serial.flush();
                 let gla  = vmcs::read_guest_linear_addr().unwrap_or(0);
@@ -1265,7 +1271,7 @@ fn handle_mmio_ept_blk(
     if let Some(qidx) = blk.take_pending_kick() {
         let advanced = blk.service_queues(qidx, host_base);
         if advanced {
-            let vector = pic.vector_for_irq(11);
+            let vector = pic.vector_for_irq(blk.irq_line());
             let _ = vmcs::inject_external_irq(vector);
         }
     }

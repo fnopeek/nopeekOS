@@ -47,6 +47,11 @@ const ASSETS: &[AssetSpec] = &[
     // manifest carries a `url=` override per entry and `https_get`
     // follows the 302 redirect chain to objects.githubusercontent.com.
     AssetSpec { section: "microvm:userspace",   remote_filename: "microvm-userspace.cpio.gz", npkfs_path: "sys/microvm/userspace.cpio.gz" },
+    // Squashfs form of the userspace bundle — read-only, mounted by
+    // PID-1 from /dev/vdb (slot-5 virtio-blk) instead of unpacked into
+    // a tmpfs initramfs. The RAM-efficient daily-driver path; supersedes
+    // the cpio entry above once it's the only shipped form.
+    AssetSpec { section: "microvm:userspace-sqfs", remote_filename: "microvm-userspace.sqfs",  npkfs_path: "sys/microvm/userspace.sqfs" },
 ];
 
 struct AssetEntry {

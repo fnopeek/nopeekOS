@@ -8,7 +8,11 @@
 //!
 //! ```text
 //!   bus 0, slot 0, func 0  →  Intel i440FX-style host bridge (8086:1237)
-//!   bus 0, slot 1, func 0  →  virtio-blk-pci device (1AF4:1042)
+//!   bus 0, slot 1, func 0  →  virtio-blk-pci  (1AF4:1042, rw profile.img → /dev/vda)
+//!   bus 0, slot 2, func 0  →  virtio-net-pci  (1AF4:1041)
+//!   bus 0, slot 3, func 0  →  virtio-gpu-pci  (1AF4:1050)
+//!   bus 0, slot 4, func 0  →  virtio-input-pci (1AF4:1052)
+//!   bus 0, slot 5, func 0  →  virtio-blk-pci  (1AF4:1042, ro sqfs → /dev/vdb)
 //!   everything else        →  vendor=0xFFFF (no device)
 //! ```
 //!
@@ -34,6 +38,8 @@ pub struct PciBus {
     pub virtio_net: VirtioNet,
     pub virtio_gpu: VirtioGpu,
     pub virtio_input: VirtioInput,
+    /// Slot 5 — read-only squashfs userspace bundle (/dev/vdb).
+    pub virtio_blk_sqfs: VirtioBlk,
 }
 
 impl PciBus {
@@ -44,6 +50,7 @@ impl PciBus {
             virtio_net: VirtioNet::new(),
             virtio_gpu: VirtioGpu::new(),
             virtio_input: VirtioInput::new(),
+            virtio_blk_sqfs: VirtioBlk::new_sqfs(),
         }
     }
 }
@@ -114,6 +121,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
         2 => bus.virtio_net.pci_read_dword(reg),
         3 => bus.virtio_gpu.pci_read_dword(reg),
         4 => bus.virtio_input.pci_read_dword(reg),
+        5 => bus.virtio_blk_sqfs.pci_read_dword(reg),
         _ => NO_DEVICE,
     }
 }
@@ -127,6 +135,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
         2 => bus.virtio_net.pci_write_dword(reg, val),
         3 => bus.virtio_gpu.pci_write_dword(reg, val),
         4 => bus.virtio_input.pci_write_dword(reg, val),
+        5 => bus.virtio_blk_sqfs.pci_write_dword(reg, val),
         _ => {}
     }
 }

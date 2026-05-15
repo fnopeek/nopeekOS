@@ -24,8 +24,13 @@ const SYS_ACCESS: u64 = 21;
 const SYS_EXECVE: u64 = 59;
 const SYS_EXIT: u64 = 60;
 const SYS_MKDIR: u64 = 83;
+const SYS_CHDIR: u64 = 80;
+const SYS_CHROOT: u64 = 161;
 const SYS_MOUNT: u64 = 165;
 const SYS_REBOOT: u64 = 169;
+
+// mount(2) flags
+const MS_RDONLY: u64 = 1;
 
 // access(2) modes
 const F_OK: u64 = 0;
@@ -64,6 +69,20 @@ unsafe extern "C" fn rust_main() -> ! {
 
     let (kmsg_fd, _console_fd) = open_console_kmsg();
     say(kmsg_fd, b"\n[microvm-init] PID-1 up.\n");
+
+    // If the read-only userspace bundle is present on /dev/vdb
+    // (second virtio-blk, slot 5), switch into it. The big bundle
+    // (Mesa/cage/LibreWolf) lives compressed on squashfs, decompressed
+    // on read — RAM-efficient vs. an unpacked cpio initramfs. On
+    // absence/failure we stay in the minimal initramfs (the device
+    // comes up empty until the OTA bundle lands).
+    if try_switch_to_sqfs(kmsg_fd) {
+        // Re-establish /proc /sys /dev /tmp inside the new root. The
+        // mountpoints exist in the Alpine image; squashfs is RO so the
+        // mkdirs no-op harmlessly.
+        mount_essentials();
+        say(kmsg_fd, b"[microvm-init] switched to squashfs bundle root\n");
+    }
 
     // input_event_smoke removed from the boot path — open(/dev/input/event0)
     // exhibited inconsistent blocking behaviour between v0.162.0 (with
@@ -140,6 +159,50 @@ fn try_exec_userspace(kmsg_fd: i64) {
     }
     // Only reached on execve failure (ENOENT / EACCES / ENOEXEC).
     say(kmsg_fd, b"[microvm-init] execve failed -- falling back to pause\n");
+}
+
+/// Mount the read-only squashfs userspace bundle from `/dev/vdb` and
+/// chroot into it. Returns `true` if we are now running inside the
+/// bundle root, `false` if the device is absent or not a valid
+/// squashfs (→ caller stays in the minimal initramfs).
+///
+/// chroot (not pivot_root/MS_MOVE): with squashfs the initramfs holds
+/// only our ~1 KB PID-1, so there is no initramfs RAM worth reclaiming
+/// — chroot is the lower-risk switch. Open fds (kmsg/console) survive
+/// it, so logging keeps working across the boundary.
+fn try_switch_to_sqfs(kmsg_fd: i64) -> bool {
+    // /dev/vdb only exists once devtmpfs is mounted (done by the
+    // initramfs-side mount_essentials before we get here).
+    let probe = unsafe { syscall3(SYS_ACCESS, b"/dev/vdb\0".as_ptr() as u64, F_OK, 0) };
+    if probe != 0 {
+        say(kmsg_fd, b"[microvm-init] no /dev/vdb -- minimal initramfs\n");
+        return false;
+    }
+
+    unsafe { let _ = syscall2(SYS_MKDIR, b"/newroot\0".as_ptr() as u64, 0o755); }
+
+    let m = unsafe {
+        syscall5(
+            SYS_MOUNT,
+            b"/dev/vdb\0".as_ptr() as u64,
+            b"/newroot\0".as_ptr() as u64,
+            b"squashfs\0".as_ptr() as u64,
+            MS_RDONLY,
+            0,
+        )
+    };
+    if m != 0 {
+        say(kmsg_fd, b"[microvm-init] /dev/vdb not squashfs -- minimal initramfs\n");
+        return false;
+    }
+
+    let cr = unsafe { syscall1(SYS_CHROOT, b"/newroot\0".as_ptr() as u64) };
+    if cr != 0 {
+        say(kmsg_fd, b"[microvm-init] chroot(/newroot) failed\n");
+        return false;
+    }
+    let _ = unsafe { syscall1(SYS_CHDIR, b"/\0".as_ptr() as u64) };
+    true
 }
 
 /// Mount /proc, /sys, /dev (devtmpfs), /tmp (tmpfs). Required for any

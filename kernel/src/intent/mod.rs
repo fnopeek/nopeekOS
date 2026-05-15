@@ -1653,16 +1653,27 @@ fn microvm_linux(inject: &[u8]) {
         }
     };
 
-    // Prefer the userspace bundle if installed — it embeds our PID-1
-    // at /init too, so swapping wholesale is fine. Falls back to the
-    // minimal PID-1-only initramfs if no bundle was installed yet.
-    let initramfs = match crate::npkfs::fetch(USERSPACE_PATH) {
-        Ok((b, _hash)) => {
-            kprintln!("[microvm] loaded userspace bundle ({} bytes) from {}",
-                      b.len(), USERSPACE_PATH);
-            Some(b)
-        }
-        Err(_) => match crate::npkfs::fetch(INITRAMFS_PATH) {
+    // Userspace-bundle delivery, newest path first:
+    //
+    //  1. squashfs bundle present → boot the TINY PID-1-only
+    //     initramfs. That PID-1 mounts the .sqfs from /dev/vdb (the
+    //     slot-5 read-only virtio-blk device loads it straight from
+    //     `sys/microvm/userspace.sqfs` — never unpacked into RAM) and
+    //     chroots into it. RAM-efficient: the bundle stays compressed
+    //     on the virtual disk, decompressed on read.
+    //
+    //  2. legacy cpio bundle present (no sqfs) → use it AS the
+    //     initramfs (embeds our PID-1 at /init). RAM-heavy: the whole
+    //     tree is unpacked into tmpfs. Kept for back-compat until the
+    //     sqfs bundle is the only shipped form.
+    //
+    //  3. neither → minimal PID-1-only substrate.
+    const USERSPACE_SQFS_PATH: &str = "sys/microvm/userspace.sqfs";
+    let have_sqfs = crate::npkfs::exists(USERSPACE_SQFS_PATH);
+    let initramfs = if have_sqfs {
+        kprintln!("[microvm] sqfs bundle at {} — booting tiny PID-1 (mounts /dev/vdb)",
+                  USERSPACE_SQFS_PATH);
+        match crate::npkfs::fetch(INITRAMFS_PATH) {
             Ok((b, _hash)) => {
                 kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());
                 Some(b)
@@ -1670,8 +1681,27 @@ fn microvm_linux(inject: &[u8]) {
             Err(e) => {
                 kprintln!("[microvm] no initramfs at {}: {:?} — booting without",
                           INITRAMFS_PATH, e);
-                kprintln!("[microvm] reinstall from USB to seed bundled assets");
                 None
+            }
+        }
+    } else {
+        match crate::npkfs::fetch(USERSPACE_PATH) {
+            Ok((b, _hash)) => {
+                kprintln!("[microvm] loaded legacy cpio userspace bundle ({} bytes) from {}",
+                          b.len(), USERSPACE_PATH);
+                Some(b)
+            }
+            Err(_) => match crate::npkfs::fetch(INITRAMFS_PATH) {
+                Ok((b, _hash)) => {
+                    kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());
+                    Some(b)
+                }
+                Err(e) => {
+                    kprintln!("[microvm] no initramfs at {}: {:?} — booting without",
+                              INITRAMFS_PATH, e);
+                    kprintln!("[microvm] reinstall from USB to seed bundled assets");
+                    None
+                }
             }
         }
     };
