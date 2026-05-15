@@ -388,64 +388,140 @@ const EXIT_SHUTDOWN: u64 = 0x07F;
 const EXIT_NPF: u64 = 0x400;
 const EXIT_INVALID: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
-/// Boot a Linux bzImage in our SVM substrate. Mirrors
-/// `vmx::enable::run_linux` shape: alloc 256 MB guest RAM, build
-/// non-identity NPT, copy bzImage via shared bzimage loader,
-/// configure VMCB for 32-bit prot-mode entry at `code32_start` with
-/// RSI = boot_params_phys, then run a serial-aware exit loop.
+// ── Re-entrant VM context (Phase 12.4 step 1c — SVM mirror of 1a) ──
+//
+// Same decomposition as vmx::enable: open() / run_slice(budget) /
+// close() so the Core-0 event loop can interleave Shade rendering
+// between bounded slices (PHASE12_DISPLAY_BRIDGE.md R1). SVM is
+// simpler than VMX: no VMXON/VMCS bracket — EFER.SVME stays on for
+// the life of the kernel (by design, see module header) and the VMCB
+// is a leaked Box, so close() is a no-op. Step 1c is
+// behaviour-preserving: run_linux calls run_slice(u32::MAX) once,
+// identical to the old run_linux_loop.
+
+/// Outcome of one bounded slice of guest execution (SVM).
+pub enum SliceOutcome {
+    /// Budget exhausted, guest still running — caller may re-enter.
+    StillRunning,
+    /// Guest exited (HLT / shutdown / NPF / idle / cap).
+    Exited(vmcb::LaunchOutcome),
+}
+
+/// Persistent state of one Linux microvm across cooperative slices
+/// (SVM backend). Core-agnostic (forward-compat contract #1).
+pub struct VmContext {
+    vmcb: &'static mut vmcb::Vmcb,
+    vmcb_phys: u64,
+    host_base: u64,
+    regs: vmcb::GuestRegs,
+    serial: SerialState,
+    pci: crate::microvm::devices::PciBus,
+    pic: crate::microvm::devices::pic8259::Pic8259,
+    iter: u32,
+    io_dropped: u32,
+    msr_log_count: u32,
+    consecutive_idle: u32,
+}
+
+impl VmContext {
+    /// Enable SVM, set up the host-save area, build NPT, place the
+    /// guest image, configure the VMCB, pre-inject the UART RX FIFO.
+    /// Mirrors the old `run_linux` setup. No teardown-on-error needed:
+    /// SVM has no VMXOFF analogue; EFER.SVME staying on is intended.
+    pub fn open(
+        bzimage_bytes: &[u8],
+        cmdline: &[u8],
+        initramfs: Option<&[u8]>,
+        inject: &[u8],
+    ) -> Result<VmContext, &'static str> {
+        use crate::kprintln;
+
+        enable_efer_svme()?;
+        setup_host_save()?;
+
+        let (host_base, npt_root) = alloc_guest_ram_and_npt()?;
+        let load = bzimage::load_into_guest_ram(host_base, bzimage_bytes, cmdline, initramfs)?;
+
+        // IOPM: 12 KB all-ones = trap every port. Linux touches dozens
+        // of unique ports during boot (UART, PIC, PIT, RTC, …).
+        // Cheaper to trap-all + handle the boring ones in the loop.
+        let iopm_phys = memory::allocate_contiguous(3)
+            .ok_or("OOM allocating IOPM (12 KB)")?;
+        // SAFETY: freshly allocated, identity-mapped, exclusive.
+        unsafe { core::ptr::write_bytes(iopm_phys as *mut u8, 0xFF, 3 * 4096); }
+
+        // MSRPM: 8 KB all-zero = pass-through every MSR. Architectural
+        // CPU-state MSRs are auto-saved/loaded by the CPU via the
+        // VMCB.SAVE area on VMRUN/VMEXIT (APM §15.11.1).
+        let msrpm_phys = memory::allocate_contiguous(2)
+            .ok_or("OOM allocating MSRPM (8 KB)")?;
+        // SAFETY: as above.
+        unsafe { core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096); }
+
+        let vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
+        let vmcb_ptr = alloc::boxed::Box::leak(vmcb);
+        let vmcb_phys = vmcb_ptr.phys_addr();
+
+        setup_vmcb_linux(vmcb_ptr, iopm_phys, msrpm_phys, npt_root, load.entry_rip);
+
+        // Initial GPRs: ESI = boot_params_phys per Linux 32-bit boot
+        // protocol; the rest zero.
+        let mut regs = vmcb::GuestRegs::default();
+        regs.rsi = load.boot_params_phys;
+
+        let mut serial = SerialState::new();
+        if !inject.is_empty() {
+            serial.inject(inject);
+            kprintln!("[svm] pre-injected {} bytes into UART RX FIFO", inject.len());
+        }
+
+        // Memory fence — see lesson 2 in project_svm_bringup.md. The
+        // VMCB writes above must be visible to the CPU's VMRUN
+        // consistency-check path.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        Ok(VmContext {
+            vmcb: vmcb_ptr,
+            vmcb_phys,
+            host_base,
+            regs,
+            serial,
+            pci: crate::microvm::devices::PciBus::new(),
+            pic: crate::microvm::devices::pic8259::Pic8259::new(),
+            iter: 0,
+            io_dropped: 0,
+            msr_log_count: 0,
+            consecutive_idle: 0,
+        })
+    }
+
+    /// No-op: SVM has no VMXOFF analogue, EFER.SVME stays on for the
+    /// life of the kernel by design, and the VMCB is intentionally
+    /// leaked. Present for lifecycle symmetry with the VMX backend
+    /// (forward-compat contract — backend-agnostic shape).
+    pub fn close(&mut self) {
+        let _ = self.vmcb_phys;
+    }
+}
+
+/// Boot a Linux bzImage in our SVM substrate. Step 1c: open() then a
+/// single unbounded run_slice — byte-for-byte the old run_linux_loop.
 pub fn run_linux(
     bzimage_bytes: &[u8],
     cmdline: &[u8],
     initramfs: Option<&[u8]>,
     inject: &[u8],
 ) -> Result<vmcb::LaunchOutcome, &'static str> {
-    enable_efer_svme()?;
-    setup_host_save()?;
-
-    let (host_base, npt_root) = alloc_guest_ram_and_npt()?;
-
-    let load = bzimage::load_into_guest_ram(host_base, bzimage_bytes, cmdline, initramfs)?;
-
-    // IOPM: 12 KB all-ones = trap every port. Linux touches dozens of
-    // unique ports during boot (UART, PIC, PIT, RTC, …). Cheaper to
-    // trap-all + handle the boring ones in the loop than to bitmap-
-    // tune which ports matter.
-    let iopm_phys = memory::allocate_contiguous(3)
-        .ok_or("OOM allocating IOPM (12 KB)")?;
-    // SAFETY: freshly allocated, identity-mapped, exclusive.
-    unsafe { core::ptr::write_bytes(iopm_phys as *mut u8, 0xFF, 3 * 4096); }
-
-    // MSRPM: 8 KB all-zero = pass-through every MSR. Architectural
-    // CPU-state MSRs (EFER, FS_BASE, GS_BASE, KERNEL_GS_BASE, STAR/
-    // LSTAR/CSTAR/SFMASK, …) are auto-saved/loaded by the CPU via
-    // the VMCB.SAVE area on VMRUN/VMEXIT (APM §15.11.1) — pass-
-    // through is the natural way to let Linux mutate them during
-    // boot. Other MSR writes hit hardware; in our nested-SVM smoke
-    // setup KVM virtualizes those, on real silicon we'll selectively
-    // trap a few (PMU, perf-ctl, …) by setting MSRPM bits.
-    let msrpm_phys = memory::allocate_contiguous(2)
-        .ok_or("OOM allocating MSRPM (8 KB)")?;
-    // SAFETY: as above.
-    unsafe { core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096); }
-
-    let vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
-    let vmcb_ptr = alloc::boxed::Box::leak(vmcb);
-    let vmcb_phys = vmcb_ptr.phys_addr();
-
-    setup_vmcb_linux(vmcb_ptr, iopm_phys, msrpm_phys, npt_root, load.entry_rip);
-
-    // Initial GPRs: ESI = boot_params_phys per Linux 32-bit boot
-    // protocol; the rest zero. (RAX/RSP go through VMCB SAVE area
-    // and are already 0 from setup_vmcb_linux.)
-    let mut regs = vmcb::GuestRegs::default();
-    regs.rsi = load.boot_params_phys;
-
-    // Memory fence — see lesson 2 in project_svm_bringup.md. The
-    // VMCB writes above must be visible to the CPU's VMRUN
-    // consistency-check path.
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-    run_linux_loop(&mut regs, vmcb_ptr, vmcb_phys, host_base, inject)
+    let mut ctx = VmContext::open(bzimage_bytes, cmdline, initramfs, inject)?;
+    let result = loop {
+        match ctx.run_slice(u32::MAX) {
+            Ok(SliceOutcome::Exited(o)) => break Ok(o),
+            Ok(SliceOutcome::StillRunning) => continue,
+            Err(e) => break Err(e),
+        }
+    };
+    ctx.close();
+    result
 }
 
 /// Allocate 256 MB contiguous + slack for 2 MB alignment, install the
@@ -629,29 +705,18 @@ impl SerialState {
 
 /// Linux VMRUN/VMEXIT loop. Caps at MAX_ITERATIONS to bound the
 /// shell's response time when the guest never makes progress.
-fn run_linux_loop(
-    regs: &mut vmcb::GuestRegs,
-    vmcb: &mut vmcb::Vmcb,
-    vmcb_phys: u64,
-    host_base: u64,
-    inject: &[u8],
-) -> Result<vmcb::LaunchOutcome, &'static str> {
+impl VmContext {
+    /// Run the guest for up to `budget` VMEXITs, or until it exits.
+    /// `Ok(StillRunning)` = budget hit, re-enterable (step 1b);
+    /// `Ok(Exited(o))` = guest left; `Err` = fault. Body is the old
+    /// `run_linux_loop` verbatim, `self.`-scoped.
+    pub fn run_slice(&mut self, budget: u32) -> Result<SliceOutcome, &'static str> {
     use crate::kprintln;
 
     const MAX_ITERATIONS: u32 = 100_000;
 
-    let mut serial = SerialState::new();
-    if !inject.is_empty() {
-        serial.inject(inject);
-        kprintln!("[svm] pre-injected {} bytes into UART RX FIFO", inject.len());
-    }
-    let mut pci = crate::microvm::devices::PciBus::new();
-    let mut pic = crate::microvm::devices::pic8259::Pic8259::new();
-
-    let mut iter: u32 = 0;
     let mut last_outcome: Option<vmcb::LaunchOutcome> = None;
-    let mut io_dropped: u32 = 0;
-    let mut msr_log_count: u32 = 0;
+    let mut slice_n: u32 = 0;
     const MSR_LOG_CAP: u32 = 32;
 
     // Idle detection — once init enters its pause(2)/wait-loop, the
@@ -661,7 +726,6 @@ fn run_linux_loop(
     // of host timer ticks before giving up + moving on, so we keep
     // this generous. Phase 12.1.4-svm replaces this with a real
     // cancel signal.
-    let mut consecutive_idle: u32 = 0;
     // Match the VMX side (200). The original 5000 was a wall-of-spin
     // safety pad from the early AMD bring-up when TSC calibration was
     // still suspect; with `tsc_early_khz=2000000` short-circuiting
@@ -669,12 +733,16 @@ fn run_linux_loop(
     // fast iterate-on-qemu test cycles.
     const IDLE_THRESHOLD: u32 = 200;
 
-    while iter < MAX_ITERATIONS {
-        iter += 1;
-        let outcome = run_guest_once(regs, vmcb, vmcb_phys);
+    while self.iter < MAX_ITERATIONS {
+        if slice_n >= budget {
+            return Ok(SliceOutcome::StillRunning);
+        }
+        self.iter += 1;
+        slice_n += 1;
+        let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
         let exit = outcome.exit_reason;
 
-        if exit != EXIT_INTR { consecutive_idle = 0; }
+        if exit != EXIT_INTR { self.consecutive_idle = 0; }
 
         match exit {
             EXIT_INTR => {
@@ -684,22 +752,22 @@ fn run_linux_loop(
                 // in host buffers forever while the guest waits in
                 // recv(). See `kernel/src/microvm/devices/nat.rs::pump`.
                 let pumped = crate::microvm::devices::nat::pump(
-                    &mut pci.virtio_net, host_base);
+                    &mut self.pci.virtio_net, self.host_base);
                 if pumped {
-                    let vector = pic.vector_for_irq(10);
+                    let vector = self.pic.vector_for_irq(10);
                     let info: u64 = (vector as u64) | (1u64 << 31);
-                    vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                 }
                 if pumped || crate::microvm::devices::nat::active_session_count() > 0 {
-                    consecutive_idle = 0;
+                    self.consecutive_idle = 0;
                 } else {
-                    consecutive_idle = consecutive_idle.saturating_add(1);
+                    self.consecutive_idle = self.consecutive_idle.saturating_add(1);
                 }
-                if consecutive_idle >= IDLE_THRESHOLD {
-                    serial.flush();
+                if self.consecutive_idle >= IDLE_THRESHOLD {
+                    self.serial.flush();
                     kprintln!(
                         "[svm] guest idle in userspace ({} consecutive INTRs after {} iters) — exiting cleanly",
-                        consecutive_idle, iter,
+                        self.consecutive_idle, self.iter,
                     );
                     last_outcome = Some(outcome);
                     break;
@@ -707,14 +775,14 @@ fn run_linux_loop(
                 last_outcome = Some(outcome);
             }
             EXIT_HLT => {
-                serial.flush();
-                kprintln!("[svm] guest HLT after {} VM-exits", iter);
+                self.serial.flush();
+                kprintln!("[svm] guest HLT after {} VM-exits", self.iter);
                 last_outcome = Some(outcome);
                 break;
             }
             EXIT_CPUID => {
-                let leaf = vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
-                let subleaf = regs.rcx as u32;
+                let leaf = self.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
+                let subleaf = self.regs.rcx as u32;
                 let (eax, ebx, mut ecx, mut edx);
                 // Hide hypervisor presence + KVM paravirt leafs entirely.
                 // Without this, Linux sees the L1 KVM signature through
@@ -749,11 +817,11 @@ fn run_linux_loop(
                         ecx &= !(1u32 << 4);   // OSPKE
                     }
                 }
-                vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);
-                regs.rbx = ebx as u64;
-                regs.rcx = ecx as u64;
-                regs.rdx = edx as u64;
-                advance_rip(vmcb);
+                self.vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);
+                self.regs.rbx = ebx as u64;
+                self.regs.rcx = ecx as u64;
+                self.regs.rdx = edx as u64;
+                advance_rip(&mut *self.vmcb);
                 last_outcome = Some(outcome);
             }
             EXIT_IOIO => {
@@ -765,88 +833,88 @@ fn run_linux_loop(
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
-                handle_linux_io(vmcb, &mut serial, &mut pci, &mut pic, regs, port, dir_in, size, &mut io_dropped);
-                advance_rip(vmcb);
+                handle_linux_io(&mut *self.vmcb, &mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped);
+                advance_rip(&mut *self.vmcb);
                 last_outcome = Some(outcome);
             }
             EXIT_MSR => {
                 // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR
                 let is_write = outcome.exit_qualification & 1 != 0;
-                let msr = regs.rcx as u32;
+                let msr = self.regs.rcx as u32;
                 if is_write {
-                    if msr_log_count < MSR_LOG_CAP {
-                        let val = (regs.rdx << 32)
-                            | (vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                    if self.msr_log_count < MSR_LOG_CAP {
+                        let val = (self.regs.rdx << 32)
+                            | (self.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
                         kprintln!("[svm] WRMSR {:#010x} = {:#018x} (absorbed)", msr, val);
-                        msr_log_count += 1;
+                        self.msr_log_count += 1;
                     }
                 } else {
-                    if !msr_is_known_noise(msr) && msr_log_count < MSR_LOG_CAP {
+                    if !msr_is_known_noise(msr) && self.msr_log_count < MSR_LOG_CAP {
                         kprintln!("[svm] RDMSR {:#010x} → 0 (unhandled)", msr);
-                        msr_log_count += 1;
+                        self.msr_log_count += 1;
                     }
-                    regs.rdx = 0;
-                    vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
+                    self.regs.rdx = 0;
+                    self.vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
                 }
-                advance_rip(vmcb);
+                advance_rip(&mut *self.vmcb);
                 last_outcome = Some(outcome);
             }
             EXIT_SHUTDOWN => {
-                serial.flush();
-                if serial.panic_observed {
+                self.serial.flush();
+                if self.serial.panic_observed {
                     kprintln!(
                         "[svm] linux kernel panicked (after {} iters): {}",
-                        iter, serial.panic_msg_str(),
+                        self.iter, self.serial.panic_msg_str(),
                     );
                     kprintln!("[svm] guest then triple-faulted via emergency_restart (= expected reboot path)");
                 } else {
                     kprintln!(
                         "[svm] guest triple-faulted/shutdown after {} iters (no kernel-panic on console)",
-                        iter,
+                        self.iter,
                     );
                 }
                 last_outcome = Some(outcome);
                 break;
             }
             EXIT_NPF => {
-                let gpa = vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
-                if pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf_blk(vmcb, regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
+                let gpa = self.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
+                if self.pci.virtio_blk.bar0_in_range(gpa) {
+                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_npf_net(vmcb, regs, &mut pci.virtio_net, &pic, gpa, host_base) {
+                } else if self.pci.virtio_net.bar0_in_range(gpa) {
+                    if handle_mmio_npf_net(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_npf_gpu(vmcb, regs, &mut pci.virtio_gpu, &pic, gpa, host_base) {
+                } else if self.pci.virtio_gpu.bar0_in_range(gpa) {
+                    if handle_mmio_npf_gpu(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_npf_input(vmcb, regs, &mut pci.virtio_input, &pic, gpa, host_base) {
+                } else if self.pci.virtio_input.bar0_in_range(gpa) {
+                    if handle_mmio_npf_input(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_blk_sqfs.bar0_in_range(gpa) {
+                } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_npf_blk(vmcb, regs, &mut pci.virtio_blk_sqfs, &pic, gpa, host_base) {
+                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 }
-                serial.flush();
+                self.serial.flush();
                 kprintln!(
                     "[svm] NPF: gpa={:#018x} info1={:#x} after {} iters",
-                    gpa, outcome.exit_qualification, iter,
+                    gpa, outcome.exit_qualification, self.iter,
                 );
                 last_outcome = Some(outcome);
                 break;
             }
             EXIT_INVALID => {
-                serial.flush();
+                self.serial.flush();
                 kprintln!(
                     "[svm] VMEXIT_INVALID — VMCB consistency check failed (info1={:#x})",
                     outcome.exit_qualification,
@@ -855,10 +923,10 @@ fn run_linux_loop(
                 break;
             }
             _ => {
-                serial.flush();
+                self.serial.flush();
                 kprintln!(
                     "[svm] unhandled exit {:#x} info1={:#x} after {} iters",
-                    exit, outcome.exit_qualification, iter,
+                    exit, outcome.exit_qualification, self.iter,
                 );
                 last_outcome = Some(outcome);
                 break;
@@ -866,18 +934,24 @@ fn run_linux_loop(
         }
     }
 
-    if iter >= MAX_ITERATIONS {
-        serial.flush();
+    if self.iter >= MAX_ITERATIONS {
+        self.serial.flush();
         kprintln!(
             "[svm] iteration cap ({}) reached — guest still running ({} I/O drops)",
-            MAX_ITERATIONS, io_dropped,
+            MAX_ITERATIONS, self.io_dropped,
         );
     }
 
-    // Persist the virtio-blk profile-image to npkFS (encrypted at rest).
-    pci.virtio_blk.save();
+    // Persist the virtio-blk profile-image to npkFS (encrypted at
+    // rest). Reached only when the loop ended (guest exit / cap), not
+    // on a StillRunning yield — identical to the old run_linux_loop.
+    self.pci.virtio_blk.save();
 
-    last_outcome.ok_or("SVM Linux guest exceeded max iterations without first VMEXIT")
+    match last_outcome {
+        Some(o) => Ok(SliceOutcome::Exited(o)),
+        None => Err("SVM Linux guest exceeded max iterations without first VMEXIT"),
+    }
+    }
 }
 
 /// Advance guest RIP across an *intercept* exit (CPUID / IOIO / MSR /
