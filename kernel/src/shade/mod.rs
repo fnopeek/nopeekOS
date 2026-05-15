@@ -131,6 +131,24 @@ pub fn focused_widget_id() -> Option<u32> {
     }).flatten()
 }
 
+/// If the focused window is a Surface-kind (microvm) window, return
+/// its id. run_loop uses this to route input correctly: shade
+/// keybinds (Mod+Q etc.) still work so the window is manageable;
+/// other keys are swallowed for now (Phase B forwards them to the
+/// guest's virtio-input). Without this a focused Surface window
+/// wedges the terminal input path (terminal_idx 255, no session).
+pub fn focused_surface_id() -> Option<u32> {
+    with_compositor(|comp| {
+        let fid = comp.focused?;
+        let win = comp.windows.iter().find(|w| w.id == fid)?;
+        if win.kind == window::WindowKind::Surface {
+            Some(fid.0)
+        } else {
+            None
+        }
+    }).flatten()
+}
+
 /// Force a full redraw (e.g. after wallpaper change).
 pub fn force_redraw() {
     // Invalidate input line cache — will be rebuilt by render_window
