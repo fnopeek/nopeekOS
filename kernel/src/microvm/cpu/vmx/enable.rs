@@ -208,14 +208,16 @@ fn write_host_state_with_current_rsp() -> Result<(), &'static str> {
 /// Allocate a fresh 64 MB contiguous host-physical region for the
 /// guest, install the EPT mapping it onto guest-phys [0, 64 MB),
 /// return (host_base, eptp).
-fn alloc_guest_ram_and_ept() -> Result<(u64, u64), &'static str> {
-    let raw_base = memory::allocate_contiguous(
-        ept::GUEST_RAM_FRAMES + ept::GUEST_RAM_ALIGN_SLACK,
-    )
-    .ok_or("OOM allocating 64 MB guest RAM (+ slack)")?;
+/// Total frames of the guest-RAM contiguous allocation (window +
+/// alignment slack). `close()` frees exactly this from `raw_base`.
+const GUEST_RAM_TOTAL_FRAMES: usize = ept::GUEST_RAM_FRAMES + ept::GUEST_RAM_ALIGN_SLACK;
+
+fn alloc_guest_ram_and_ept() -> Result<(u64, u64, u64), &'static str> {
+    let raw_base = memory::allocate_contiguous(GUEST_RAM_TOTAL_FRAMES)
+        .ok_or("OOM allocating guest RAM (+ slack)")?;
     let host_base = ept::round_up_to_2mb(raw_base);
     let eptp = ept::install_window(host_base)?;
-    Ok((host_base, eptp))
+    Ok((host_base, eptp, raw_base))
 }
 
 // ── Substrate test (12.1.1c-3b3a / 3b3b1) ──────────────────────────
@@ -225,7 +227,7 @@ fn alloc_guest_ram_and_ept() -> Result<(u64, u64), &'static str> {
 /// returns the final VM-exit outcome. Used by `microvm test`.
 pub fn enable_and_test() -> Result<vmcs::LaunchOutcome, &'static str> {
     with_vmx_root_and_vmcs(|| {
-        let (host_base, eptp) = alloc_guest_ram_and_ept()?;
+        let (host_base, eptp, _raw_base) = alloc_guest_ram_and_ept()?;
 
         // 9-byte substrate stub at guest-phys 0x10000.
         let stub_host = host_base + 0x10000;
@@ -492,6 +494,11 @@ pub struct VmContext {
     vmxon_phys: u64,
     vmcs_phys: u64,
     host_base: u64,
+    /// Base of the guest-RAM contiguous allocation (pre-2 MB-align).
+    /// `close()` frees `GUEST_RAM_TOTAL_FRAMES` from here — without
+    /// this the 1 GB window leaks and a second `microvm linux` in the
+    /// same boot OOMs.
+    guest_raw_base: u64,
     regs: vmcs::GuestRegs,
     serial: SerialState,
     pci: crate::microvm::devices::PciBus,
@@ -522,7 +529,7 @@ impl VmContext {
 
         // Everything past here is in VMX root: VMXOFF on any error.
         let build = || -> Result<VmContext, &'static str> {
-            let (host_base, eptp) = alloc_guest_ram_and_ept()?;
+            let (host_base, eptp, guest_raw_base) = alloc_guest_ram_and_ept()?;
             let load = bzimage::load_into_guest_ram(host_base, bzimage, cmdline, initramfs)?;
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state(load.entry_rip)?;
@@ -541,6 +548,7 @@ impl VmContext {
                 vmxon_phys,
                 vmcs_phys,
                 host_base,
+                guest_raw_base,
                 regs,
                 serial,
                 pci: crate::microvm::devices::PciBus::new(),
@@ -565,14 +573,23 @@ impl VmContext {
         }
     }
 
-    /// Persist the profile image (already done inside run_slice on the
-    /// guest-exit path, matching the old behaviour) and leave VMX root.
-    /// Always call exactly once when finished with the context.
+    /// Leave VMX root and free the per-VM allocations so the VM can be
+    /// relaunched in the same boot. Order matters: VMXOFF first (the
+    /// VMCS must not be current/in-use when its frame is freed), then
+    /// reclaim frames. The profile image was already persisted inside
+    /// run_slice on the guest-exit path.
+    ///
+    /// TODO(12.x): the EPT page-table frames from `ept::install_window`
+    /// still leak (~tens of KB per run — negligible vs. the 1 GB guest
+    /// RAM this now reclaims). Tracked; needs an EPT teardown walker.
     pub fn close(&mut self) {
-        let _ = (self.vmxon_phys, self.vmcs_phys); // kept, never freed (per design)
         // SAFETY: a VmContext only exists after a successful
-        // vmx_enter_root, so the CPU is in VMX root.
+        // vmx_enter_root, so the CPU is in VMX root. After VMXOFF the
+        // VMCS is no longer current and its frame is safe to free.
         unsafe { vmx_exit_root(); }
+        memory::deallocate_contiguous(self.guest_raw_base, GUEST_RAM_TOTAL_FRAMES);
+        memory::deallocate_frame(self.vmcs_phys);
+        memory::deallocate_frame(self.vmxon_phys);
     }
 }
 
