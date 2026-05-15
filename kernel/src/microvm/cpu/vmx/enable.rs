@@ -1022,7 +1022,17 @@ impl VmContext {
                 } else {
                     self.consecutive_idle = self.consecutive_idle.saturating_add(1);
                 }
-                if self.consecutive_idle >= IDLE_THRESHOLD {
+                // Idle-auto-exit only for an UNWINDOWED VM (legacy
+                // blocking-smoke model: "guest done, stop wasting Core
+                // 0"). A window-bound VM is an app — idle is normal
+                // (a parked guest, an idle browser) and must NOT be
+                // killed. It ends only on real guest exit (HLT /
+                // shutdown) or window close (VM_CLOSE_REQUESTED, handled
+                // in vm_poll_slice). Cheap to keep slicing: idle =
+                // timer-tick exits, near-free.
+                if self.consecutive_idle >= IDLE_THRESHOLD
+                    && crate::microvm::vm_window() == 0
+                {
                     self.serial.flush();
                     kprintln!(
                         "[microvm] guest idle in userspace ({} consecutive timer ticks after {} iters) — exiting cleanly",

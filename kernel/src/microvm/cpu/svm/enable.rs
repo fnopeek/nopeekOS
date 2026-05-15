@@ -783,7 +783,14 @@ impl VmContext {
                 } else {
                     self.consecutive_idle = self.consecutive_idle.saturating_add(1);
                 }
-                if self.consecutive_idle >= IDLE_THRESHOLD {
+                // Idle-auto-exit only for an UNWINDOWED VM. A
+                // window-bound VM is an app — idle is normal, never
+                // kill it; it ends on real guest exit or window close
+                // (VM_CLOSE_REQUESTED in vm_poll_slice). See the vmx
+                // mirror for the full rationale.
+                if self.consecutive_idle >= IDLE_THRESHOLD
+                    && crate::microvm::vm_window() == 0
+                {
                     self.serial.flush();
                     kprintln!(
                         "[svm] guest idle in userspace ({} consecutive INTRs after {} iters) — exiting cleanly",
