@@ -116,6 +116,23 @@ pub fn run_linux(
     }
 }
 
+pub use enable::{SliceOutcome, VmContext};
+
+/// Open a re-entrant VM context (12.4 step 1b). Probe-gated like
+/// `run_linux`. The caller drives `run_slice` + `close`.
+pub fn vm_open(
+    bzimage: &[u8],
+    cmdline: &[u8],
+    initramfs: Option<&[u8]>,
+    inject: &[u8],
+) -> Result<VmContext, &'static str> {
+    match *PROBE.lock() {
+        ProbeState::Available(_) => VmContext::open(bzimage, cmdline, initramfs, inject),
+        ProbeState::Unavailable(reason) => Err(reason),
+        ProbeState::NotProbed => Err("vmx::init() not called yet"),
+    }
+}
+
 pub use vmcs::{decode_io_exit_qualification, host_cpuid, LaunchOutcome};
 
 // ── shared CPU primitives for submodules ───────────────────────────
