@@ -18,11 +18,24 @@ const AAA_CERT_SERVICES_DER: &[u8] = include_bytes!("../../../certs/aaa_certific
 /// Google Trust Services Root R1 — covers Google services
 const GTS_ROOT_R1_DER: &[u8] = include_bytes!("../../../certs/gts_root_r1.der");
 
+/// USERTrust ECC Certification Authority — Sectigo's modern ECC root.
+/// Sectigo cross-signs newer roots (Public Server Authentication Root
+/// E46) under USERTrust ECC, so adding the cross-anchor here covers
+/// github.com + most Sectigo-issued ECDSA certs in 2025+.
+const USERTRUST_ECC_DER: &[u8] = include_bytes!("../../../certs/usertrust_ecc.der");
+
+/// USERTrust RSA Certification Authority — Sectigo's modern RSA root.
+/// Counterpart to USERTrust ECC for RSA chains. Covers Sectigo
+/// Public Server Authentication Root R46 + a wide RSA customer base.
+const USERTRUST_RSA_DER: &[u8] = include_bytes!("../../../certs/usertrust_rsa.der");
+
 const ROOT_CERTS: &[&[u8]] = &[
     ISRG_ROOT_X1_DER,
     DIGICERT_GLOBAL_G2_DER,
     AAA_CERT_SERVICES_DER,
     GTS_ROOT_R1_DER,
+    USERTRUST_ECC_DER,
+    USERTRUST_RSA_DER,
 ];
 
 /// Verify a certificate chain.
