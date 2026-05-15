@@ -410,9 +410,15 @@ pub enum SliceOutcome {
 /// Persistent state of one Linux microvm across cooperative slices
 /// (SVM backend). Core-agnostic (forward-compat contract #1).
 pub struct VmContext {
-    vmcb: &'static mut vmcb::Vmcb,
+    /// Owned (not leaked) so it's reclaimed on drop — relaunch fix.
+    vmcb: alloc::boxed::Box<vmcb::Vmcb>,
     vmcb_phys: u64,
     host_base: u64,
+    /// Base of the guest-RAM contiguous allocation (pre-2 MB-align),
+    /// + the IOPM/MSRPM frame allocations — all freed in close().
+    guest_raw_base: u64,
+    iopm_phys: u64,
+    msrpm_phys: u64,
     regs: vmcb::GuestRegs,
     serial: SerialState,
     pci: crate::microvm::devices::PciBus,
@@ -439,7 +445,7 @@ impl VmContext {
         enable_efer_svme()?;
         setup_host_save()?;
 
-        let (host_base, npt_root) = alloc_guest_ram_and_npt()?;
+        let (host_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt()?;
         let load = bzimage::load_into_guest_ram(host_base, bzimage_bytes, cmdline, initramfs)?;
 
         // IOPM: 12 KB all-ones = trap every port. Linux touches dozens
@@ -458,11 +464,10 @@ impl VmContext {
         // SAFETY: as above.
         unsafe { core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096); }
 
-        let vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
-        let vmcb_ptr = alloc::boxed::Box::leak(vmcb);
-        let vmcb_phys = vmcb_ptr.phys_addr();
+        let mut vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
+        let vmcb_phys = vmcb.phys_addr();
 
-        setup_vmcb_linux(vmcb_ptr, iopm_phys, msrpm_phys, npt_root, load.entry_rip);
+        setup_vmcb_linux(&mut vmcb, iopm_phys, msrpm_phys, npt_root, load.entry_rip);
 
         // Initial GPRs: ESI = boot_params_phys per Linux 32-bit boot
         // protocol; the rest zero.
@@ -481,9 +486,12 @@ impl VmContext {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         Ok(VmContext {
-            vmcb: vmcb_ptr,
+            vmcb,
             vmcb_phys,
             host_base,
+            guest_raw_base,
+            iopm_phys,
+            msrpm_phys,
             regs,
             serial,
             pci: crate::microvm::devices::PciBus::new(),
@@ -495,12 +503,20 @@ impl VmContext {
         })
     }
 
-    /// No-op: SVM has no VMXOFF analogue, EFER.SVME stays on for the
-    /// life of the kernel by design, and the VMCB is intentionally
-    /// leaked. Present for lifecycle symmetry with the VMX backend
-    /// (forward-compat contract — backend-agnostic shape).
+    /// Free the per-VM frame allocations so the VM can be relaunched
+    /// in the same boot. The VMCB is an owned `Box` and is reclaimed
+    /// when the VmContext drops (no explicit free here). EFER.SVME
+    /// stays on for the life of the kernel by design (no analogue to
+    /// VMXOFF).
+    ///
+    /// TODO(12.x): the NPT page-table frames from
+    /// `npt::allocate_window_npt` still leak (~tens of KB per run —
+    /// negligible vs. the guest RAM this reclaims). Tracked; needs an
+    /// NPT teardown walker.
     pub fn close(&mut self) {
-        let _ = self.vmcb_phys;
+        memory::deallocate_contiguous(self.guest_raw_base, GUEST_RAM_TOTAL_FRAMES);
+        memory::deallocate_contiguous(self.iopm_phys, 3);
+        memory::deallocate_contiguous(self.msrpm_phys, 2);
     }
 }
 
@@ -526,14 +542,18 @@ pub fn run_linux(
 
 /// Allocate 256 MB contiguous + slack for 2 MB alignment, install the
 /// non-identity NPT window. Returns (host_base, NCR3).
-fn alloc_guest_ram_and_npt() -> Result<(u64, u64), &'static str> {
-    let raw_base = memory::allocate_contiguous(
-        npt::GUEST_RAM_FRAMES + npt::GUEST_RAM_ALIGN_SLACK,
-    )
-    .ok_or("OOM allocating 256 MB guest RAM (+ slack)")?;
+/// Total frames of the guest-RAM contiguous allocation (window +
+/// alignment slack). `close()` frees exactly this from `raw_base` —
+/// without it the guest RAM leaks and a second `microvm linux` in
+/// the same boot OOMs.
+const GUEST_RAM_TOTAL_FRAMES: usize = npt::GUEST_RAM_FRAMES + npt::GUEST_RAM_ALIGN_SLACK;
+
+fn alloc_guest_ram_and_npt() -> Result<(u64, u64, u64), &'static str> {
+    let raw_base = memory::allocate_contiguous(GUEST_RAM_TOTAL_FRAMES)
+        .ok_or("OOM allocating guest RAM (+ slack)")?;
     let host_base = npt::round_up_to_2mb(raw_base);
     let npt_root = npt::allocate_window_npt(host_base)?;
-    Ok((host_base, npt_root))
+    Ok((host_base, npt_root, raw_base))
 }
 
 /// Configure a VMCB for Linux 32-bit boot protocol entry.
