@@ -859,21 +859,23 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     if crate::shade::input::try_keybind_event(&event) {
                         continue;
                     }
-                    // Placeholder evdev mapping: any key → one
-                    // KEY_SPACE press + SYN_REPORT, enough to prove the
-                    // host→guest input pipe (PID-1 mini-test reacts to
-                    // *any* event). Real per-key scancode→evdev mapping
-                    // is Phase B (with a real Wayland client).
+                    // Placeholder evdev mapping: any key → a full
+                    // KEY_SPACE press+release, each followed by
+                    // SYN_REPORT. The RELEASE is essential: Linux's
+                    // input core filters a second press (value=1) of
+                    // an already-"down" key as a duplicate, so
+                    // press-only made just the first keystroke land.
+                    // Real per-scancode mapping (and tracking real
+                    // up/down) is Phase B.
                     const EV_KEY: u16 = 0x01;
                     const EV_SYN: u16 = 0x00;
                     const KEY_SPACE: u16 = 57;
                     const SYN_REPORT: u16 = 0;
-                    crate::microvm::devices::virtio_input_pci::push_input_event(
-                        EV_KEY, KEY_SPACE, 1,
-                    );
-                    crate::microvm::devices::virtio_input_pci::push_input_event(
-                        EV_SYN, SYN_REPORT, 0,
-                    );
+                    use crate::microvm::devices::virtio_input_pci::push_input_event;
+                    push_input_event(EV_KEY, KEY_SPACE, 1); // press
+                    push_input_event(EV_SYN, SYN_REPORT, 0);
+                    push_input_event(EV_KEY, KEY_SPACE, 0); // release
+                    push_input_event(EV_SYN, SYN_REPORT, 0);
                 }
 
                 for _ in 0..5_000 {
