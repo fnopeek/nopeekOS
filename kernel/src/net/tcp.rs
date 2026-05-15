@@ -323,21 +323,35 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
 
-    let before = conn.recv_buf.len();
-    let available = before.min(buf.len());
+    let available = conn.recv_buf.len().min(buf.len());
     for i in 0..available {
         buf[i] = conn.recv_buf.pop_front().unwrap();
     }
 
-    // Send window update if we freed significant space (>25% of buffer)
+    // Window-update ACK on every drain.
+    //
+    // The old code only ACKed when a SINGLE recv() freed >25 % of
+    // the buffer (>16 KiB). But `recv_exact` (TLS) drains in small
+    // increments, so that threshold was almost never met on a
+    // sender that trickles (codeload generates tarballs on the
+    // fly). The receive window then collapsed to 0 and only the
+    // peer's exponentially-backing-off zero-window probe reopened
+    // it → a fixed, host-independent ~31 KiB/s sawtooth. Static
+    // CDNs (raw.githubusercontent) happened to deliver clean
+    // ≥16 KiB bursts so the threshold fired and they ran ~100×
+    // faster on the very same code path — that asymmetry was the
+    // tell.
+    //
+    // Acknowledging as we consume is exactly what TCP is supposed
+    // to do. recv() is called at ~TLS-record granularity (~16 KiB),
+    // so this is one bare ACK per record — normal ACK density, not
+    // a flood.
     if available > 0 && conn.state == State::Established {
-        let freed = available;
-        if freed > RECV_BUF_SIZE / 4 || (before >= RECV_BUF_SIZE * 3 / 4 && conn.recv_buf.len() < RECV_BUF_SIZE / 2) {
-            send_segment(
-                conn.remote_ip, conn.local_port, conn.remote_port,
-                conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-            );
-        }
+        send_segment(
+            conn.remote_ip, conn.local_port, conn.remote_port,
+            conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
+        );
+        conn.ack_pending = false;
     }
 
     Ok(available)
