@@ -411,10 +411,26 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
       exec'd by our PID-1; `uname -a`, `ls /` output captured via /dev/kmsg)
 - [x] **Userspace bundle build pipeline** (v0.163.0 — `microvm-userspace/build.sh`
       with `apk add` via unshare-chroot, distributed as OTA asset)
-- [ ] 12.4d virtio-gpu cross-domain context (Wayland-forwarding via virgl protocol)
-- [ ] 12.4e virtio-input event injection (Shade-compositor → eventq)
+- [x] **Cooperative microvm on Core 0** (v0.166–168 — R1: `VmContext`
+      open/run_slice/close, vmx+svm; non-blocking `microvm linux`,
+      bounded slices interleaved with Shade; relaunchable; idle guest
+      yields Core 0). Resolved without a dedicated core — see
+      `PHASE12_DISPLAY_BRIDGE.md`.
+- [x] **Shade↔microvm display bridge** (v0.167–168 — `WindowKind::
+      Surface`, per-window `GuestSurface`, virtio-gpu FLUSH → tiled
+      window scaled into its content rect; tiling invariant, never
+      fullscreen; render-on-FLUSH). Guest framebuffer composited as a
+      normal tile, HW-validated with a no-bundle PID-1 fb pattern.
+- [x] 12.4e virtio-input event injection (v0.169.0 — Shade Surface
+      branch → `INPUT_Q` → eventq + IRQ; PID-1 react-test toggles
+      colour on key). Real per-scancode evdev mapping = Phase B.
+- [ ] 12.4d virtio-gpu native reflow (D4 — guest renders at the tile
+      size via GET_DISPLAY_INFO instead of host-side scaling) +
+      cross-domain context (later perf path)
 - [ ] 12.5  Picker bridge + B-mini virtiofs (per-app downloads folder)
-- [ ] 12.6  LibreWolf (the actual end-goal — Firefox-fork: privacy-first, no telemetry)
+- [ ] 12.6  **Phase B → LibreWolf** (real software-Wayland client
+      bundle: cage/weston + client; then the Firefox-fork itself —
+      privacy-first, no telemetry. The actual end-goal.)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
