@@ -157,6 +157,8 @@ static HID_TO_ASCII_SHIFT: [u8; 57] = [
 
 // Swiss German layout: remap HID usage codes
 // Key differences: z↔y swap, number row shifted chars, special chars
+// (HID 0x64 = non-US `<`/`>` lives OUTSIDE this 57-entry range and is
+//  special-cased in `hid_to_char` so plain `<` and shift `>` work.)
 static HID_TO_ASCII_DE: [u8; 57] = [
     0, 0, 0, 0,
     b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h',
@@ -166,7 +168,9 @@ static HID_TO_ASCII_DE: [u8; 57] = [
     b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0',
     b'\n', 0x1B, 0x08, b'\t', b' ',
     b'\'', b'^', b'[', b']', b'$',
-    0, b';', b'\'', b'<', b',', b'.', b'-',
+    // 0x32-0x38: # ; ' §/° , . -    (§/° at 0x35 is a dead key on
+    // Swiss German → 0, NOT < > as it was previously mis-mapped)
+    0, b';', b'\'', 0, b',', b'.', b'-',
 ];
 
 static HID_TO_ASCII_DE_SHIFT: [u8; 57] = [
@@ -178,7 +182,8 @@ static HID_TO_ASCII_DE_SHIFT: [u8; 57] = [
     b'+', b'"', b'*', 0,    b'%', b'&', b'/', b'(', b')', b'=',  // Shift+4=ç→0, Shift+7=/
     b'\n', 0x1B, 0x08, b'\t', b' ',
     b'?', b'`', b'{', b'}', b'!',
-    0, b':', b'"', b'>', b';', b':', b'_',
+    // 0x32-0x38 shifted: same key positions as DE_NORMAL.
+    0, b':', b'"', 0, b';', b':', b'_',
 ];
 
 // Key buffer — IRQ-safe SPSC ring (producer: IRQ/poll, consumer: main thread)
@@ -1827,6 +1832,21 @@ fn hid_to_char(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> u8 {
         if let Some(ch) = altgr_char_de_hid(key) {
             return ch;
         }
+    }
+
+    // ISO-Extra key (102-key layout, left of Z): HID 0x64. Plain →
+    // `<`, Shift → `>`, AltGr → `\` (latter via altgr_char_de_hid
+    // above). The key is outside the 57-entry layout arrays so it
+    // gets handled here before the index check.
+    if is_de && key == 0x64 {
+        return if shift { b'>' } else { b'<' };
+    }
+    // US layout 102-key keyboards also have a non-US `\` key at
+    // HID 0x64 — map plain to `\` (no shift). Most US users won't
+    // hit this but it stops the key from being silent if they have
+    // an EU-shape keyboard plugged in.
+    if !is_de && key == 0x64 {
+        return if shift { b'|' } else { b'\\' };
     }
 
     if (key as usize) < HID_TO_ASCII.len() {

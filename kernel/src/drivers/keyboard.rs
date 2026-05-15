@@ -334,6 +334,15 @@ fn altgr_char_de(code: u8) -> Option<u8> {
 
 /// Scancode Set 1 → ASCII (Swiss German / DE_CH layout)
 fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<u8> {
+    // ISO-Extra key (102-key layout, left of Z): scancode 0x56.
+    // Plain → `<`, Shift → `>`, AltGr → `\` (latter handled by
+    // altgr_char_de above). The key is OUT OF RANGE of the layout
+    // arrays below (which only cover 0x00–0x39), so it needs to
+    // be special-cased before the array index.
+    if code == 0x56 {
+        return Some(if shift { b'>' } else { b'<' });
+    }
+
     #[rustfmt::skip]
     const NORMAL: [u8; 58] = [
         0,   0x1B, b'1', b'2', b'3', b'4', b'5', b'6',  // 0x00-0x07
@@ -341,7 +350,7 @@ fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<u8> {
         b'q', b'w', b'e', b'r', b't', b'z', b'u', b'i',  // 0x10-0x17  (z/y swapped)
         b'o', b'p', b'[', b']', b'\n', 0,   b'a', b's',  // 0x18-0x1F
         b'd', b'f', b'g', b'h', b'j', b'k', b'l', b';',  // 0x20-0x27
-        b'\'',b'<', 0,   b'$', b'y', b'x', b'c', b'v',   // 0x28-0x2F  (z/y swapped)
+        b'\'',0,   0,   b'$', b'y', b'x', b'c', b'v',   // 0x28-0x2F  (z/y swapped; 0x29 = §/° → 0)
         b'b', b'n', b'm', b',', b'.', b'-', 0,   b'*',   // 0x30-0x37
         0,   b' ',                                         // 0x38-0x39
     ];
@@ -353,7 +362,7 @@ fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<u8> {
         b'Q', b'W', b'E', b'R', b'T', b'Z', b'U', b'I',
         b'O', b'P', b'{', b'}', b'\n', 0,   b'A', b'S',
         b'D', b'F', b'G', b'H', b'J', b'K', b'L', b':',
-        b'"', b'>', 0,   b'!', b'Y', b'X', b'C', b'V',
+        b'"', 0,   0,   b'!', b'Y', b'X', b'C', b'V',  // Shift+§/° → 0
         b'B', b'N', b'M', b';', b':', b'_', 0,   b'*',
         0,   b' ',
     ];
