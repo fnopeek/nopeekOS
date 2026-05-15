@@ -98,6 +98,28 @@ const SYN_REPORT: u16 = 0;
 const NUM_QUEUES: u16 = 2;
 const MAX_QUEUE_SIZE: u16 = 256;
 
+/// Pending host→guest input events (type, code, value), pushed by the
+/// Shade Surface-window branch (Core 0) and drained into the eventq
+/// by `drain_injected` on the timer tick. Bounded — drop oldest on
+/// overflow (a wedged guest must not OOM the host). Single global:
+/// one focused Surface VM at a time (forward-compat #2 — keyed
+/// generalisation later, with the registry).
+static INPUT_Q: spin::Mutex<alloc::collections::VecDeque<(u16, u16, u32)>> =
+    spin::Mutex::new(alloc::collections::VecDeque::new());
+
+const INPUT_Q_CAP: usize = 256;
+
+/// Queue one evdev event for delivery to the guest's virtio-input
+/// eventq. Caller (Shade) pushes EV_KEY then EV_SYN(SYN_REPORT) so
+/// the guest's evdev dispatches it.
+pub fn push_input_event(etype: u16, code: u16, value: u32) {
+    let mut q = INPUT_Q.lock();
+    if q.len() >= INPUT_Q_CAP {
+        q.pop_front();
+    }
+    q.push_back((etype, code, value));
+}
+
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
     size: u16,
@@ -198,6 +220,57 @@ impl VirtioInput {
             1 => self.service_statusq(host_base),
             _ => false,
         }
+    }
+
+    /// Drain pending host events into the eventq (q0). The guest's
+    /// virtio-input driver keeps the eventq stocked with empty
+    /// writable buffers; we write one `virtio_input_event`
+    /// {u16 type; u16 code; u32 value} (8 bytes, LE) per buffer and
+    /// publish it on the used-ring. Returns true if anything was
+    /// delivered (caller injects the input IRQ). Called on the timer
+    /// tick (mirrors the NAT pump).
+    pub fn drain_injected(&mut self, host_base: u64) -> bool {
+        use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push};
+
+        let mut pending = INPUT_Q.lock();
+        if pending.is_empty() {
+            return false;
+        }
+        let q = match self.queues.get_mut(0) {
+            Some(q) if q.enable != 0 && q.size != 0 => q,
+            _ => return false,
+        };
+        let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+            Some(v) => v,
+            None => return false,
+        };
+
+        let mut any = false;
+        while q.last_avail_idx != avail_top {
+            let (etype, code, value) = match pending.pop_front() {
+                Some(e) => e,
+                None => break, // no more events; leave buffers queued
+            };
+            let head = match avail_ring(host_base, q.driver_gpa(), q.size, q.last_avail_idx) {
+                Some(v) => v,
+                None => break,
+            };
+            if let Some(d) = read_desc(host_base, q.desc_gpa(), head, q.size) {
+                if d.len >= 8 {
+                    super::guest_mem::write_u16(host_base, d.addr, etype);
+                    super::guest_mem::write_u16(host_base, d.addr + 2, code);
+                    super::guest_mem::write_u32(host_base, d.addr + 4, value);
+                }
+            }
+            used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, 8);
+            q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
+            any = true;
+        }
+
+        if any {
+            self.isr |= 1;
+        }
+        any
     }
 
     /// Drain the statusq: every buffer the driver wrote (LED state,
