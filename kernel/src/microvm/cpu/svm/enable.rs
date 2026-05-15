@@ -752,6 +752,10 @@ impl VmContext {
     // Linux's calib loop, 200 INTRs ≈ 2 s wait — short enough for
     // fast iterate-on-qemu test cycles.
     const IDLE_THRESHOLD: u32 = 200;
+    // Yield Core 0 after this few consecutive idle INTRs — see the
+    // vmx mirror. A parked guest must not freeze Core 0 for a whole
+    // SLICE_BUDGET of timer-tick-rate VMRUNs.
+    const IDLE_YIELD: u32 = 4;
 
     while self.iter < MAX_ITERATIONS {
         if slice_n >= budget {
@@ -798,6 +802,11 @@ impl VmContext {
                     );
                     last_outcome = Some(outcome);
                     break;
+                }
+                // Guest idle → return Core 0 immediately (StillRunning;
+                // guest stays alive). See vmx mirror.
+                if self.consecutive_idle >= IDLE_YIELD {
+                    return Ok(SliceOutcome::StillRunning);
                 }
                 last_outcome = Some(outcome);
             }

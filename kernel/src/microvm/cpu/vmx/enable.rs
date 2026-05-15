@@ -914,6 +914,13 @@ impl VmContext {
     // perceived as a host freeze. Real cancellation comes with
     // 12.1.4 inject_console.
     const IDLE_THRESHOLD: u32 = 200;
+    // Yield Core 0 after this few consecutive idle (timer-tick) exits.
+    // A parked/HLTed guest makes run_guest_once block until the next
+    // timer tick, so spinning the full SLICE_BUDGET against it would
+    // freeze Core 0 for tens of seconds (observed: VM window
+    // unclosable, no shell, no keybinds, until it self-cleared).
+    // Busy guests keep consecutive_idle at 0 → full budget, fast boot.
+    const IDLE_YIELD: u32 = 4;
 
     while self.iter < MAX_ITERATIONS {
         if slice_n >= budget {
@@ -1040,6 +1047,14 @@ impl VmContext {
                     );
                     last_outcome = Some(outcome);
                     break;
+                }
+                // Guest idle → give Core 0 back NOW (StillRunning, not
+                // Exited — the guest stays alive). consecutive_idle
+                // persists in the VmContext across yields, so the
+                // unwindowed idle-exit above still triggers once it
+                // reaches IDLE_THRESHOLD over many yield cycles.
+                if self.consecutive_idle >= IDLE_YIELD {
+                    return Ok(SliceOutcome::StillRunning);
                 }
                 last_outcome = Some(outcome);
             }
