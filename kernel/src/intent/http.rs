@@ -74,6 +74,55 @@ fn do_http_request(args: &str, use_tls: bool) {
     let path = if let Some(idx) = path.find('>') { path[..idx].trim() } else { path };
     let path = if path.is_empty() { "/" } else { path };
 
+    // Streaming fast-path: HTTPS + `> name` writes the body straight
+    // into npkFS via the ChunkedWriter so a multi-GB ISO / movie
+    // download doesn't fill the heap. Peak RAM = one 16 MiB chunk
+    // regardless of total size. Plain-HTTP storing stays on the
+    // legacy buffered path (capped at HTTP_MAX_RESPONSE = 128 KB)
+    // because we never want to encourage cleartext downloads of
+    // anything large enough to need streaming.
+    if use_tls {
+        if let Some(name) = &store_as {
+            let store_path = resolve_path(name);
+            if !flags.silent {
+                kprintln!("[npk] Streaming to npkFS: {}", store_path);
+            }
+            let mut writer = match crate::npkfs::open_streaming_write(&store_path) {
+                Ok(w) => w,
+                Err(e) => { kprintln!("[npk] npkfs open failed: {:?}", e); return; }
+            };
+            let mut total: usize = 0;
+            // No max_size cap for user-initiated downloads — the
+            // ceiling is whatever fits on disk. We still defend the
+            // kernel via the per-chunk allocator (each 16 MiB chunk
+            // is freed after flush) so a 1 TB download just uses
+            // 16 MiB of heap throughout.
+            let max_size = usize::MAX;
+            let stream_result = https_get_streaming(
+                host, path, max_size,
+                &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                    if writer.write(chunk).is_err() {
+                        return Err("npkfs write failed");
+                    }
+                    total = total.saturating_add(chunk.len());
+                    Ok(())
+                },
+            );
+            match stream_result {
+                Ok(_) => {}
+                Err(e) => { kprintln!("[npk] download failed: {}", e); return; }
+            }
+            match writer.finish() {
+                Ok(written) => {
+                    kprintln!("[npk] Stored '{}' ({} bytes)", store_path, written);
+                }
+                Err(e) => kprintln!("[npk] publish failed: {:?}", e),
+            }
+            let _ = total;
+            return;
+        }
+    }
+
     // Resolve hostname
     let ip = if let Some(ip) = parse_ip(host) {
         ip
@@ -236,13 +285,131 @@ fn print_response_data(data: &[u8]) {
     }
 }
 
+/// Status + Location of a single HTTPS round-trip. Body bytes are
+/// not carried in this struct — `https_get_once` always pushes them
+/// through the caller's sink closure as they arrive (`https_get`
+/// installs a Vec-collecting sink, `https_get_streaming` passes the
+/// caller's sink through directly).
+struct HttpResponse {
+    status: u16,
+    location: Option<String>,
+}
+
 /// Reusable HTTPS GET — returns the response body as Vec<u8>.
 ///
-/// Proper HTTP/1.1 implementation (RFC 7230):
-///   Phase 1: Receive headers (read until \r\n\r\n)
-///   Phase 2: Parse status + Content-Length / Transfer-Encoding
-///   Phase 3: Receive body (exactly Content-Length bytes, or read-until-close)
+/// Suitable for small responses (manifests, signatures, JSON, < ~32 MB
+/// configs). For large downloads use [`https_get_streaming`] instead —
+/// this function buffers the entire body in heap and will OOM the
+/// kernel on multi-GB inputs.
+///
+/// Follows up to 3 redirects (301/302/303/307/308). Absolute and
+/// relative Location values are both honored; absolute redirects to
+/// a different host re-handshake TLS against that host (this is how
+/// GitHub Releases work — `github.com/.../releases/download/...`
+/// always 302s to a signed `objects.githubusercontent.com` URL).
 pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let mut cur_host = String::from(host);
+    let mut cur_path = String::from(path);
+    for _ in 0..4 {
+        // Vec-mode: accumulate into out, sink just extends it.
+        let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let resp = https_get_once(
+            &cur_host,
+            &cur_path,
+            max_size,
+            &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                if out.len().saturating_add(chunk.len()) > max_size {
+                    out.extend_from_slice(&chunk[..max_size.saturating_sub(out.len())]);
+                    Ok(())
+                } else {
+                    out.extend_from_slice(chunk);
+                    Ok(())
+                }
+            },
+        )?;
+        match resp.status {
+            200..=299 => {
+                if out.is_empty() {
+                    return Err("empty body");
+                }
+                return Ok(out);
+            }
+            301 | 302 | 303 | 307 | 308 => {
+                let loc = resp.location.ok_or("redirect without Location")?;
+                let (next_host, next_path) = parse_https_url(&loc, &cur_host)?;
+                cur_host = next_host;
+                cur_path = next_path;
+            }
+            _ => return Err("HTTP non-2xx response"),
+        }
+    }
+    Err("too many redirects")
+}
+
+/// Streaming HTTPS GET — drives body bytes through `on_chunk` as they
+/// arrive, never buffering the full payload in memory. The caller
+/// chooses where the bytes go (typical: `npkfs::open_streaming_write`
+/// then `writer.write(chunk)`).
+///
+/// Returns the total number of body bytes pushed to the sink. Follows
+/// up to 3 redirects, same rules as [`https_get`].
+///
+/// On non-2xx (other than a 3xx that's followed), the sink is NOT
+/// called and an error is returned — so a half-failed download
+/// never feeds garbage into the consumer.
+pub fn https_get_streaming(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<usize, &'static str> {
+    let mut cur_host = String::from(host);
+    let mut cur_path = String::from(path);
+    for _ in 0..4 {
+        let mut total: usize = 0;
+        let resp = https_get_once(
+            &cur_host,
+            &cur_path,
+            max_size,
+            &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                on_chunk(chunk)?;
+                total = total.saturating_add(chunk.len());
+                Ok(())
+            },
+        )?;
+        match resp.status {
+            200..=299 => {
+                if total == 0 {
+                    return Err("empty body");
+                }
+                return Ok(total);
+            }
+            301 | 302 | 303 | 307 | 308 => {
+                // On 3xx the inner once-fn returns early without
+                // calling the sink, so the consumer never sees any
+                // bytes from the redirect response. Safe to retry
+                // against the Location target with a fresh TLS
+                // session.
+                let loc = resp.location.ok_or("redirect without Location")?;
+                let (next_host, next_path) = parse_https_url(&loc, &cur_host)?;
+                cur_host = next_host;
+                cur_path = next_path;
+            }
+            _ => return Err("HTTP non-2xx response"),
+        }
+    }
+    Err("too many redirects")
+}
+
+/// One HTTPS round-trip — no redirect following. Body bytes are
+/// pushed through `on_chunk` as they arrive; the returned
+/// `HttpResponse.body` is always empty (the sink owns the bytes).
+fn https_get_once(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<HttpResponse, &'static str> {
     // Resolve hostname
     let ip = if let Some(ip) = parse_ip(host) {
         ip
@@ -293,23 +460,32 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
             }
             Err(_) => break,
         }
-        if raw.len() > 32_768 { return close_err(&mut tls, "headers too large"); }
+        if raw.len() > 32_768 {
+            let _ = crate::tls::tls_close(&mut tls);
+            return Err("headers too large");
+        }
     }
 
     let hdr_end = match header_end {
         Some(pos) => pos,
-        None => return close_err(&mut tls, "no HTTP headers received"),
+        None => {
+            let _ = crate::tls::tls_close(&mut tls);
+            return Err("no HTTP headers received");
+        }
     };
     let body_start = hdr_end + 4;
 
     // ── Phase 2: Parse HTTP status + headers ───────────────────
     let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
 
-    // Status code (first line: "HTTP/1.1 200 OK")
     let status = parse_status_code(hdr_str).unwrap_or(0);
-    if status < 200 || status >= 300 {
+    let location = parse_header_value(hdr_str, "location").map(String::from);
+
+    // On redirect we still drain the body (some servers send a short HTML
+    // courtesy page) but skip the work of streaming a multi-MB asset.
+    if (300..400).contains(&status) {
         let _ = crate::tls::tls_close(&mut tls);
-        return Err("HTTP non-2xx response");
+        return Ok(HttpResponse { status, location });
     }
 
     let content_length = parse_header_value(hdr_str, "content-length")
@@ -318,41 +494,93 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
         .map(|v| v.contains("chunked"))
         .unwrap_or(false);
 
-    // ── Phase 3: Receive body ──────────────────────────────────
-    // Body bytes we already have from phase 1 (may be partial or complete).
-    let mut body = raw[body_start..].to_vec();
+    // ── Phase 3: Receive body, push through sink ───────────────
+    // Bytes after the header terminator (`\r\n\r\n`) that arrived in
+    // the same TLS record are the first body bytes.
+    let leading = &raw[body_start..];
+    let mut delivered: usize = 0;
 
     if let Some(cl) = content_length {
-        // Content-Length: read exactly `cl` bytes
-        while body.len() < cl && body.len() < max_size {
+        // Content-Length path: deliver exactly `cl` bytes (clipped to
+        // `max_size`), then close.
+        let cap = core::cmp::min(cl, max_size);
+        let n_leading = core::cmp::min(leading.len(), cap);
+        if n_leading > 0 {
+            on_chunk(&leading[..n_leading])?;
+            delivered += n_leading;
+        }
+        while delivered < cap {
             match tls_recv_poll(&mut tls, &mut buf) {
                 Ok(0) => continue,
-                Ok(n) => body.extend_from_slice(&buf[..n]),
+                Ok(n) => {
+                    let take = core::cmp::min(n, cap - delivered);
+                    on_chunk(&buf[..take])?;
+                    delivered += take;
+                }
                 Err(_) => break,
             }
         }
-        body.truncate(cl); // trim any excess (shouldn't happen with well-behaved servers)
     } else if chunked {
-        // Transfer-Encoding: chunked — decode chunks
-        let chunked_raw = body;
-        body = decode_chunked(&chunked_raw, &mut tls, &mut buf, max_size);
+        // Transfer-Encoding: chunked — buffered decode, then drain
+        // through the sink in one shot. In practice OTA-class
+        // servers always set Content-Length (static files behind a
+        // CDN); chunked is mostly for dynamic responses (manifests,
+        // index pages) that are small, so buffering them is fine.
+        // If we ever see a huge chunked download we'd need a true
+        // streaming chunked decoder, but that's a separate effort.
+        let decoded = decode_chunked(leading, &mut tls, &mut buf, max_size);
+        if !decoded.is_empty() {
+            on_chunk(&decoded)?;
+            delivered += decoded.len();
+        }
     } else {
-        // Connection: close — read until server closes (fallback per RFC 7230 §3.3.3)
-        loop {
+        // Connection: close — push all bytes until peer closes.
+        if !leading.is_empty() {
+            let take = core::cmp::min(leading.len(), max_size);
+            on_chunk(&leading[..take])?;
+            delivered += take;
+        }
+        while delivered < max_size {
             match tls_recv_poll(&mut tls, &mut buf) {
                 Ok(0) => continue,
-                Ok(n) => body.extend_from_slice(&buf[..n]),
+                Ok(n) => {
+                    let take = core::cmp::min(n, max_size - delivered);
+                    on_chunk(&buf[..take])?;
+                    delivered += take;
+                }
                 Err(_) => break,
             }
-            if body.len() > max_size { break; }
         }
     }
 
     let _ = crate::tls::tls_close(&mut tls);
-    if body.is_empty() && content_length != Some(0) {
-        return Err("empty body");
+    Ok(HttpResponse { status, location })
+}
+
+/// Parse a Location header value into (host, path-with-query).
+///
+/// Accepts:
+///   * absolute `https://host/path?query` → (host, "/path?query")
+///   * absolute `https://host` → (host, "/")
+///   * absolute-path `/path?query` → (current_host, "/path?query")
+///
+/// Rejects `http://...` (we never downgrade) and any other scheme.
+fn parse_https_url(loc: &str, current_host: &str) -> Result<(String, String), &'static str> {
+    let loc = loc.trim();
+    if let Some(rest) = loc.strip_prefix("https://") {
+        let (h, p) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        if h.is_empty() { return Err("redirect: empty host"); }
+        Ok((String::from(h), String::from(p)))
+    } else if loc.starts_with('/') {
+        Ok((String::from(current_host), String::from(loc)))
+    } else if loc.starts_with("http://") {
+        Err("redirect: refusing http downgrade")
+    } else {
+        Err("redirect: unsupported Location")
     }
-    Ok(body)
 }
 
 /// TLS recv with network polling. Retries on Ok(0) up to a hard timeout.
@@ -371,11 +599,6 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
             Err(_) => return Err("recv error"),
         }
     }
-}
-
-fn close_err(tls: &mut crate::tls::TlsSession, msg: &'static str) -> Result<alloc::vec::Vec<u8>, &'static str> {
-    let _ = crate::tls::tls_close(tls);
-    Err(msg)
 }
 
 /// Parse HTTP status code from first header line.

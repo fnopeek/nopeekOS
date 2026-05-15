@@ -12,7 +12,12 @@ const UPDATE_BASE: &str = "/fnopeek/nopeekOS/main/release";
 const MAX_KERNEL_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 const MAX_MANIFEST_SIZE: usize = 4096;
 const MAX_ASSET_MANIFEST_SIZE: usize = 16 * 1024;
-const MAX_ASSET_SIZE: usize = 32 * 1024 * 1024; // bzImage is ~12 MB today
+/// 512 MB ceiling for OTA assets. The userspace bundle with Mesa/Wayland
+/// runs ~270 MB; raw-githubusercontent caps at ~50–100 MB per file, so
+/// anything above ~32 MB ships via GitHub Releases (asset manifest carries
+/// an explicit `url=` line for those; redirect-following lives in
+/// `https_get`).
+const MAX_ASSET_SIZE: usize = 512 * 1024 * 1024;
 const MAX_SIG_SIZE: usize = 512;
 
 /// Mapping from asset-manifest section header to (remote filename,
@@ -29,19 +34,29 @@ const ASSETS: &[AssetSpec] = &[
     AssetSpec { section: "icons:phosphor",      remote_filename: "phosphor.atlas",            npkfs_path: "sys/icons/phosphor" },
     AssetSpec { section: "microvm:initramfs",   remote_filename: "microvm-initramfs.cpio.gz", npkfs_path: "sys/microvm/initramfs.cpio.gz" },
     AssetSpec { section: "microvm:linux-virt",  remote_filename: "linux-virt.bzImage",        npkfs_path: "sys/microvm/linux-virt.bzImage" },
-    // Optional userspace bundle — Alpine + busybox + (future) LibreWolf.
-    // Built by `microvm-userspace/build.sh`. Distinct from
-    // `microvm:initramfs` (which is just our PID-1, always present).
-    // If a release ships this asset, OTA pulls it; if not, the entry
-    // is absent in the asset manifest and we keep whatever's already
-    // installed (or nothing).
-    AssetSpec { section: "microvm:rootfs",      remote_filename: "microvm-rootfs.cpio.gz",    npkfs_path: "sys/microvm/rootfs.cpio.gz" },
+    // Optional userspace bundle — Alpine minirootfs + busybox + (future)
+    // Wayland/Mesa/LibreWolf. Built by `microvm-userspace/build.sh`.
+    // Distinct from `microvm:initramfs` (which is just our PID-1, always
+    // present). If a release ships this asset, OTA pulls it; if not, the
+    // entry is absent in the asset manifest and we keep whatever's
+    // already installed (or nothing).
+    //
+    // Small bundles (<~30 MB) live in `release/assets/` on the `main`
+    // branch and ship via raw.githubusercontent.com. Larger bundles
+    // (Mesa+Wayland is ~270 MB) live on GitHub Releases — the asset
+    // manifest carries a `url=` override per entry and `https_get`
+    // follows the 302 redirect chain to objects.githubusercontent.com.
+    AssetSpec { section: "microvm:userspace",   remote_filename: "microvm-userspace.cpio.gz", npkfs_path: "sys/microvm/userspace.cpio.gz" },
 ];
 
 struct AssetEntry {
     section: String,
     size: usize,
     sha384: [u8; 48],
+    /// Optional explicit URL — when present, fetched verbatim instead of
+    /// `https://{UPDATE_HOST}{UPDATE_BASE}/assets/<remote_filename>`. The
+    /// `.sig` sidecar URL is derived by appending `.sig` to this URL.
+    url: Option<String>,
 }
 
 struct Manifest {
@@ -205,10 +220,19 @@ fn parse_asset_manifest(data: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
     let mut section: Option<String> = None;
     let mut size: Option<usize> = None;
     let mut sha384: Option<[u8; 48]> = None;
+    let mut url: Option<String> = None;
 
-    let flush = |section: &mut Option<String>, size: &mut Option<usize>, sha: &mut Option<[u8; 48]>, out: &mut Vec<AssetEntry>| {
+    let flush = |section: &mut Option<String>,
+                 size: &mut Option<usize>,
+                 sha: &mut Option<[u8; 48]>,
+                 url: &mut Option<String>,
+                 out: &mut Vec<AssetEntry>| {
         if let (Some(s), Some(sz), Some(sh)) = (section.take(), size.take(), sha.take()) {
-            out.push(AssetEntry { section: s, size: sz, sha384: sh });
+            out.push(AssetEntry { section: s, size: sz, sha384: sh, url: url.take() });
+        } else {
+            // Section header without all fields — discard whatever partial
+            // state we collected so it doesn't leak into the next entry.
+            *url = None;
         }
     };
 
@@ -216,7 +240,7 @@ fn parse_asset_manifest(data: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
         let line = line.trim();
         if line.is_empty() { continue; }
         if line.starts_with('[') && line.ends_with(']') {
-            flush(&mut section, &mut size, &mut sha384, &mut entries);
+            flush(&mut section, &mut size, &mut sha384, &mut url, &mut entries);
             section = Some(String::from(&line[1..line.len() - 1]));
             continue;
         }
@@ -224,12 +248,23 @@ fn parse_asset_manifest(data: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
             match key.trim() {
                 "size" => size = val.trim().parse::<usize>().ok(),
                 "sha384" => sha384 = hex_to_bytes48(val.trim()).ok(),
+                "url" => url = Some(String::from(val.trim())),
                 _ => {}
             }
         }
     }
-    flush(&mut section, &mut size, &mut sha384, &mut entries);
+    flush(&mut section, &mut size, &mut sha384, &mut url, &mut entries);
     Ok(entries)
+}
+
+/// Split a full `https://host/path` URL into (host, path). Used to feed
+/// `https_get` (which expects them separate) from a manifest `url=` line.
+fn split_url(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("https://")?;
+    match rest.find('/') {
+        Some(i) => Some((&rest[..i], &rest[i..])),
+        None => Some((rest, "/")),
+    }
 }
 
 /// Diff release/assets/manifest against npkFS-resident assets and
@@ -275,25 +310,94 @@ pub fn update_all_assets() -> usize {
         }
 
         kprint!("[npk]   downloading {} ({} KB)... ", spec.remote_filename, entry.size / 1024);
-        let asset_path = alloc::format!("{}/assets/{}", UPDATE_BASE, spec.remote_filename);
-        let asset_data = match super::http::https_get(UPDATE_HOST, &asset_path, MAX_ASSET_SIZE) {
-            Ok(d) => d,
-            Err(e) => { kprintln!("failed: {}", e); continue; }
+
+        // Two URL paths:
+        //   (a) entry.url == Some(url)  → fetch verbatim (GitHub Releases).
+        //       `https_get_streaming` follows 302 redirects so
+        //       `github.com/.../releases/download/...` → the signed
+        //       `objects.githubusercontent.com` CDN URL works transparently.
+        //   (b) entry.url == None       → fall back to raw.githubusercontent
+        //       on main (the existing flow for <30 MB assets).
+        let (asset_host, asset_path_owned);
+        let (asset_host_str, asset_path_str): (&str, &str) = if let Some(url) = &entry.url {
+            match split_url(url) {
+                Some((h, p)) => (h, p),
+                None => { kprintln!("bad url"); continue; }
+            }
+        } else {
+            asset_host = String::from(UPDATE_HOST);
+            asset_path_owned = alloc::format!("{}/assets/{}", UPDATE_BASE, spec.remote_filename);
+            (asset_host.as_str(), asset_path_owned.as_str())
         };
 
-        if asset_data.len() != entry.size {
-            kprintln!("size mismatch (got {} expected {})", asset_data.len(), entry.size);
+        // Streaming download: drive bytes straight into npkFS via the
+        // ChunkedWriter, hashing SHA-384 incrementally as they pass.
+        // Peak RAM = one 16 MiB chunk regardless of asset size — a
+        // 1 GB userspace bundle no longer needs a 1 GB heap spike.
+        let mut writer = match crate::npkfs::open_streaming_write(spec.npkfs_path) {
+            Ok(w) => w,
+            Err(e) => { kprintln!("npkfs open failed: {:?}", e); continue; }
+        };
+        let mut hasher = crate::tls::sha256::Sha384::new();
+        let mut total_bytes: usize = 0;
+        let mut write_err: Option<&'static str> = None;
+        let stream_result = super::http::https_get_streaming(
+            asset_host_str,
+            asset_path_str,
+            MAX_ASSET_SIZE,
+            &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                hasher.update(chunk);
+                total_bytes = total_bytes.saturating_add(chunk.len());
+                if let Err(_) = writer.write(chunk) {
+                    write_err = Some("npkfs write failed");
+                    return Err("npkfs write failed");
+                }
+                Ok(())
+            },
+        );
+        match stream_result {
+            Ok(_) => {}
+            Err(e) => {
+                kprintln!("failed: {}{}",
+                    e,
+                    write_err.map(|w| alloc::format!(" ({})", w)).unwrap_or_default());
+                continue;
+            }
+        }
+        if total_bytes != entry.size {
+            kprintln!("size mismatch (got {} expected {})", total_bytes, entry.size);
             continue;
         }
 
-        let hash = crate::tls::sha256::sha384(&asset_data);
+        let hash = hasher.finalize();
         if hash != entry.sha384 {
             kprintln!("checksum failed");
+            // Drop the writer without finishing — flushed chunks
+            // remain in storage but are unreachable from the path
+            // tree, so the next `gc()` cycle reclaims them.
             continue;
         }
 
-        let sig_path = alloc::format!("{}/assets/{}.sig", UPDATE_BASE, spec.remote_filename);
-        let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
+        // Sig URL: `<asset_url>.sig` if url= override, else default path.
+        let sig_host_owned;
+        let sig_path_owned;
+        let (sig_host_str, sig_path_str): (&str, &str) = if let Some(url) = &entry.url {
+            let sig_full = alloc::format!("{}.sig", url);
+            match split_url(&sig_full) {
+                Some((h, p)) => {
+                    sig_host_owned = String::from(h);
+                    sig_path_owned = String::from(p);
+                    (sig_host_owned.as_str(), sig_path_owned.as_str())
+                }
+                None => { kprintln!("bad sig url"); continue; }
+            }
+        } else {
+            sig_host_owned = String::from(UPDATE_HOST);
+            sig_path_owned = alloc::format!("{}/assets/{}.sig", UPDATE_BASE, spec.remote_filename);
+            (sig_host_owned.as_str(), sig_path_owned.as_str())
+        };
+
+        let sig_data = match super::http::https_get(sig_host_str, sig_path_str, MAX_SIG_SIZE) {
             Ok(d) => d,
             Err(e) => { kprintln!("sig failed: {}", e); continue; }
         };
@@ -301,13 +405,16 @@ pub fn update_all_assets() -> usize {
         let pubkey = &crate::update_key::UPDATE_PUB_KEY;
         if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
             kprintln!("signature invalid");
+            // Writer is dropped without finish; chunks become
+            // unreachable, gc reclaims them on next pass.
             continue;
         }
 
-        let _ = crate::npkfs::delete(spec.npkfs_path);
-        if let Err(e) = crate::npkfs::store(spec.npkfs_path, &asset_data, crate::capability::CAP_NULL) {
-            kprintln!("store failed: {:?}", e);
-            continue;
+        // Commit: writer.finish() publishes the chunked file
+        // atomically. Replaces any existing entry at the same path.
+        match writer.finish() {
+            Ok(_) => {}
+            Err(e) => { kprintln!("publish failed: {:?}", e); continue; }
         }
 
         kprintln!("OK");

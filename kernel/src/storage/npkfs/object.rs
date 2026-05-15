@@ -65,10 +65,28 @@ pub struct TreeEntry {
 /// Postcard-encodes as a u32 varint discriminant followed by the
 /// variant payload, so `Blob(b"")` and `Tree(vec![])` hash to
 /// different values even though both are "empty".
+///
+/// Variant order is **append-only**. The postcard tag is the
+/// variant index, so reordering or removing variants breaks every
+/// on-disk object.
+///
+/// `Chunked` references a sequence of regular `Blob` chunk objects
+/// by their content addresses. Used when a file is too large to
+/// materialize in a single `Vec<u8>` during write — the path layer
+/// can stream the source into N fixed-size chunks (default 16 MB),
+/// store each as its own `Blob`, then emit a `Chunked` manifest
+/// pointing at all of them. On read, `fs::read` stitches the
+/// chunks back into one `Vec<u8>` for consumer transparency; for
+/// the multi-GB case a future streaming reader can iterate
+/// chunk-by-chunk against the same on-disk layout.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Object {
     Blob(Vec<u8>),
     Tree(Vec<TreeEntry>),
+    Chunked {
+        total_size: u64,
+        chunks: Vec<[u8; 32]>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

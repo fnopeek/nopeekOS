@@ -12,3 +12,10 @@ kernel/src/install_data/kernel.efi
 kernel/src/install_data/assets/*
 !kernel/src/install_data/assets/mod.rs
 update.key
+
+# Large OTA assets — distributed via GitHub Releases, NOT main branch.
+# `./build.sh release-large <tag>` uploads them and writes the
+# resulting URL into release/assets/manifest.large for `release` to
+# merge into the canonical asset manifest.
+release/assets/large/
+release/assets/manifest.large

@@ -91,6 +91,31 @@ pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
     }
 }
 
+/// Open a streaming writer for `name`. Use this for inputs that don't
+/// fit comfortably in a single `Vec<u8>` (downloads, ISO images, media
+/// blobs). The writer accumulates 16 MiB chunks, encrypt-stores each
+/// as its own content-addressed `Blob`, and on `finish` emits an
+/// `Object::Chunked` manifest pointing at every chunk. Peak heap
+/// during a multi-GB write stays at one chunk + manifest overhead.
+///
+/// Read-side is transparent: `fetch(name)` stitches the chunks back
+/// into a single `Vec<u8>` for consumers that expect the legacy
+/// shape.
+///
+/// Drop-without-finish leaks already-flushed chunks into storage;
+/// the next `gc()` reclaims them. The path tree is only updated
+/// atomically at `finish`, so partial downloads never appear as
+/// half-written files.
+pub fn open_streaming_write(name: &str) -> Result<fs::StreamingWriter, FsError> {
+    let path = clean_path(name);
+    validate(path)?;
+    if let Some(slash) = path.rfind('/') {
+        let parent = &path[..slash];
+        fs::ensure_dirs(parent).map_err(path_to_fs_err)?;
+    }
+    Ok(fs::open_streaming_write(path))
+}
+
 /// Remove an object. Errors with `ObjectNotFound` if missing.
 pub fn delete(name: &str) -> Result<(), FsError> {
     let path = clean_path(name);
