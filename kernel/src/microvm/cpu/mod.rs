@@ -113,6 +113,92 @@ pub fn run_linux(
     }
 }
 
+// ── Re-entrant active VM (12.4 step 1b — Core-0 cooperative) ───────
+//
+// One backend-agnostic active VM, driven by the Core-0 event loop
+// via `vm_poll_slice()` instead of a blocking `run_linux`. Holds the
+// VmContext so Shade keeps rendering between bounded slices. Single
+// global (one VM for now); keyed-registry generalisation deferred per
+// the forward-compat contract (consumer side never assumes count).
+// Core-0-only access in practice; the Mutex guards against misuse.
+
+enum ActiveVm {
+    Vmx(vmx::VmContext),
+    Svm(svm::VmContext),
+}
+
+static ACTIVE_VM: Mutex<Option<ActiveVm>> = Mutex::new(None);
+
+/// VM-exits processed per Core-0 poll. Cheap (~µs each); ~4 k keeps a
+/// slice sub-ms-to-low-ms so Shade still renders smoothly between
+/// slices, while the guest boots in ≈ the same wall time as before
+/// (idle counter persists across slices in VmContext).
+const SLICE_BUDGET: u32 = 4096;
+
+/// True if a microvm is currently open (running across slices).
+pub fn vm_active() -> bool {
+    ACTIVE_VM.lock().is_some()
+}
+
+/// Open a microvm and register it as the active VM. Non-blocking:
+/// does the (synchronous, one-time) substrate + guest-image setup,
+/// then returns — slices run later via `vm_poll_slice`. Errors if a
+/// VM is already active.
+pub fn vm_open(
+    bzimage: &[u8],
+    cmdline: &[u8],
+    initramfs: Option<&[u8]>,
+    inject: &[u8],
+) -> Result<(), &'static str> {
+    let mut slot = ACTIVE_VM.lock();
+    if slot.is_some() {
+        return Err("a microvm is already running");
+    }
+    let vm = match *VENDOR.lock() {
+        Vendor::Intel => ActiveVm::Vmx(vmx::vm_open(bzimage, cmdline, initramfs, inject)?),
+        Vendor::Amd => ActiveVm::Svm(svm::vm_open(bzimage, cmdline, initramfs, inject)?),
+        Vendor::Unknown(reason) => return Err(reason),
+    };
+    *slot = Some(vm);
+    Ok(())
+}
+
+/// Run one bounded slice of the active VM, if any. Called from the
+/// Core-0 poll cadence (next to `net::poll`). Cheap no-op when no VM.
+/// On guest exit / fault: log, free resources, clear the slot so a
+/// new VM can be opened (relaunch).
+pub fn vm_poll_slice() {
+    let mut slot = ACTIVE_VM.lock();
+    let finished: Option<Result<LaunchOutcome, &'static str>> = match slot.as_mut() {
+        None => return,
+        Some(ActiveVm::Vmx(ctx)) => match ctx.run_slice(SLICE_BUDGET) {
+            Ok(vmx::SliceOutcome::StillRunning) => None,
+            Ok(vmx::SliceOutcome::Exited(o)) => Some(Ok(o)),
+            Err(e) => Some(Err(e)),
+        },
+        Some(ActiveVm::Svm(ctx)) => match ctx.run_slice(SLICE_BUDGET) {
+            Ok(svm::SliceOutcome::StillRunning) => None,
+            Ok(svm::SliceOutcome::Exited(o)) => Some(Ok(o)),
+            Err(e) => Some(Err(e)),
+        },
+    };
+    let Some(result) = finished else { return };
+    match slot.as_mut() {
+        Some(ActiveVm::Vmx(ctx)) => ctx.close(),
+        Some(ActiveVm::Svm(ctx)) => ctx.close(),
+        None => {}
+    }
+    *slot = None;
+    drop(slot);
+    match result {
+        Ok(o) => crate::kprintln!(
+            "[microvm] guest exited — final reason {} qual {:#x}",
+            (o.exit_reason & 0xFFFF) as u16, o.exit_qualification,
+        ),
+        Err(e) => crate::kprintln!("[microvm] launch FAILED: {:?}", e),
+    }
+}
+
 /// Decode the I/O VM-exit qualification field from a substrate-test
 /// `LaunchOutcome.exit_qualification`. Currently vendor-agnostic by
 /// dispatch — only Intel populates I/O exits today; the AMD VMCB

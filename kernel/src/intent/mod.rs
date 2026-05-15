@@ -443,6 +443,7 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
 
         // Poll network while waiting
         crate::net::poll();
+        crate::microvm::vm_poll_slice();
         crate::shell::check_and_serve(vault, session_id);
 
         // Tick swap animation
@@ -807,6 +808,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             if let Some(widget_wid) = crate::shade::focused_widget_id() {
                 crate::shade::poll_render();
                 crate::net::poll();
+                crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);
@@ -872,6 +874,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 from_intent = true;
                 crate::shade::poll_render();
                 crate::net::poll();
+                crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);
@@ -905,6 +908,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 wasm_term = focused_term;
                 crate::shade::poll_render();
                 crate::net::poll();
+                crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);
@@ -1710,12 +1714,15 @@ fn microvm_linux(inject: &[u8]) {
               bytes.len(),
               core::str::from_utf8(CMDLINE).unwrap_or("?"));
 
-    match crate::microvm::run_linux(&bytes, CMDLINE, initramfs.as_deref(), inject) {
-        Ok(outcome) => {
-            let basic = (outcome.exit_reason & 0xFFFF) as u16;
-            kprintln!("[microvm] guest exited — final reason {} qual {:#x}",
-                      basic, outcome.exit_qualification);
-        }
+    // 12.4 step 1b: non-blocking. Open the VM (synchronous one-time
+    // substrate + guest-image setup, copies the bzImage into guest
+    // RAM so `bytes` can drop here), register it, return. The Core-0
+    // event loop then drives bounded slices via `vm_poll_slice`,
+    // rendering Shade between them — instead of this call blocking
+    // Core 0 until guest exit. Guest-exit logging happens in
+    // vm_poll_slice when the slice that observes the exit completes.
+    match crate::microvm::vm_open(&bytes, CMDLINE, initramfs.as_deref(), inject) {
+        Ok(()) => kprintln!("[microvm] guest running (Core-0 cooperative; shell stays responsive)"),
         Err(e) => kprintln!("[microvm] launch FAILED: {:?} (len={}, empty={})", e, e.len(), e.is_empty()),
     }
 }
