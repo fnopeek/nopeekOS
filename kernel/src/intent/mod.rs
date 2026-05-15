@@ -411,7 +411,7 @@ fn sync_session_to_terminal(session: &IntentSession) {
 /// All input state lives in the session (input_buf, pos, cursor, esc, history).
 /// Returns number of bytes read, or 0 if focus changed / mode switched.
 fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
-                      session_id: CapId) -> usize {
+                      session_id: CapId) -> Option<usize> {
     session.history.reset_cursor();
 
     loop {
@@ -424,20 +424,20 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             // focused widget app (e.g. drun).
             if crate::shade::focused_widget_id().is_some() {
                 sync_session_to_terminal(session);
-                return 0;
+                return None;
             }
 
             let ft = crate::shade::terminal::active_idx();
 
             if crate::wasm::has_wasm_app(ft) {
                 sync_session_to_terminal(session);
-                return 0;
+                return None;
             }
 
             // Focus changed to a different terminal — return so run_loop can switch sessions
             if ft != session.terminal_idx {
                 sync_session_to_terminal(session);
-                return 0;
+                return None;
             }
         }
 
@@ -493,13 +493,13 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     crate::shade::handle_action(action);
                     let new_term = crate::shade::terminal::active_idx();
                     if new_term != session.terminal_idx || crate::wasm::has_wasm_app(new_term) {
-                        return 0;
+                        return None;
                     }
                 }
                 ShadeAction::NewWindow => {
                     sync_session_to_terminal(session);
                     crate::shade::handle_action(action);
-                    return 0; // run_loop creates session for new window
+                    return None; // run_loop creates session for new window
                 }
                 ShadeAction::CloseWindow | ShadeAction::SpawnLauncher => {
                     // Both can destroy / invalidate the current session's
@@ -511,7 +511,7 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     // cleanly — no dangling refs, no stale focus.
                     sync_session_to_terminal(session);
                     crate::shade::handle_action(action);
-                    return 0;
+                    return None;
                 }
                 _ => {
                     crate::shade::handle_action(action);
@@ -623,7 +623,7 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 session.cursor = session.pos;
                 kprint!("\n");
                 session.history.push(&session.input_buf[..session.pos]);
-                return session.pos;
+                return Some(session.pos);
             }
             KeyCode::Backspace => {
                 if session.cursor > 0 {
@@ -1070,13 +1070,23 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         }
 
         // Read input into session
-        let len = read_line_with_tab(session, vault, session_id);
+        let line = read_line_with_tab(session, vault, session_id);
 
         if crate::shade::is_active() {
             crate::shade::render_frame();
         }
 
-        if len == 0 { continue; } // focus change — don't set need_prompt
+        let len = match line {
+            // Focus / window change: run_loop re-acquires the session;
+            // keep prompt state, do NOT reprint.
+            None => continue,
+            // Empty Enter: a (blank) line WAS entered. Treat like any
+            // completed command → fresh prompt next iteration. Without
+            // this, spamming Enter scrolled the prompt away (the
+            // focus-change `len==0` path swallowed it).
+            Some(0) => { need_prompt = true; continue; }
+            Some(n) => n,
+        };
 
         let input = match core::str::from_utf8(&session.input_buf[..len]) {
             Ok(s) => s.trim(),
