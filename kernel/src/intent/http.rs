@@ -695,13 +695,26 @@ fn parse_https_url(loc: &str, current_host: &str) -> Result<(String, String), &'
 fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usize, &'static str> {
     let start = crate::interrupts::ticks();
     loop {
-        for _ in 0..2000 { crate::net::poll(); core::hint::spin_loop(); }
+        // ONE poll per attempt. `net::poll()` already drains the
+        // entire NIC ring (`while let Some = netdev::recv`), ticks
+        // TCP, and runs a shade render pass — so a single call
+        // pulls everything currently available. The old code did
+        // this 2000× before every `tls_recv`, which on emulated
+        // NICs (each MMIO read traps to the hypervisor) cost ~0.5 s
+        // of pure overhead per 16 KiB TLS record → ~31 KiB/s
+        // ceiling regardless of link speed. Polling once and
+        // returning the instant a record is ready makes throughput
+        // bound by the actual network, not a fixed busy-wait tax.
+        crate::net::poll();
         match crate::tls::tls_recv(tls, buf) {
             Ok(0) => {
-                // TLS returned no app data (NewSessionTicket, CCS, etc.) — retry
+                // No app data yet (partial record, or a control
+                // message like NewSessionTicket/CCS). Keep polling
+                // until the hard timeout.
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout"); // 15 seconds hard timeout
                 }
+                core::hint::spin_loop();
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
