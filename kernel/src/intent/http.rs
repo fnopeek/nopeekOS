@@ -110,7 +110,12 @@ fn do_http_request(args: &str, use_tls: bool) {
                 Err(e) => { kprintln!("[npk] npkfs open failed: {:?}", e); return; }
             };
             let mut total: usize = 0;
-            let mut next_report: usize = PROGRESS_STEP;
+            let mut first = true;
+            // Time-based heartbeat (~2 s @ 100 Hz ticks). Distinguishes
+            // "stuck" (byte count frozen) from "slow" (count creeps up)
+            // regardless of throughput — a byte-threshold heartbeat
+            // can't tell those apart on a slow link.
+            let mut last_tick = crate::interrupts::ticks();
             // No max_size cap for user-initiated downloads — the
             // ceiling is whatever fits on disk. We still defend the
             // kernel via the per-chunk allocator (each 16 MiB chunk
@@ -120,13 +125,18 @@ fn do_http_request(args: &str, use_tls: bool) {
             let stream_result = https_get_streaming(
                 host, path, max_size,
                 &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                    if first {
+                        kprintln!("[npk]   first body bytes ({} B)", chunk.len());
+                        first = false;
+                    }
                     if writer.write(chunk).is_err() {
                         return Err("npkfs write failed");
                     }
                     total = total.saturating_add(chunk.len());
-                    if total >= next_report {
-                        kprintln!("[npk]   … {} MiB", total / (1024 * 1024));
-                        next_report = total + PROGRESS_STEP;
+                    let now = crate::interrupts::ticks();
+                    if now.wrapping_sub(last_tick) >= 200 {
+                        kprintln!("[npk]   rx {} KiB", total / 1024);
+                        last_tick = now;
                     }
                     Ok(())
                 },
@@ -746,6 +756,11 @@ fn stream_chunked_body(
     let mut carry: alloc::vec::Vec<u8> = leading.to_vec();
     let mut state = St::Size;
     let mut delivered: usize = 0;
+    // One-shot diagnostics: did the decoder ever parse a chunk-size
+    // line, and did the wire ever yield body bytes?
+    let mut logged_first_size = false;
+    let mut logged_first_recv = false;
+    crate::kprintln!("[npk]   chunked decoder: leading {} B", carry.len());
 
     loop {
         // Drain as much as possible from `carry` before asking the
@@ -761,6 +776,10 @@ fn stream_chunked_body(
                         .trim();
                     let sz = usize::from_str_radix(hex, 16)
                         .map_err(|_| "chunk: bad size hex")?;
+                    if !logged_first_size {
+                        crate::kprintln!("[npk]   first chunk size = {} (0x{})", sz, hex);
+                        logged_first_size = true;
+                    }
                     carry.drain(..p + 2);
                     state = if sz == 0 { St::Done } else { St::Data(sz) };
                     true
@@ -807,8 +826,17 @@ fn stream_chunked_body(
         // Need more bytes from the wire.
         match tls_recv_poll(tls, buf) {
             Ok(0) => continue, // transient; tls_recv_poll caps the wait
-            Ok(n) => carry.extend_from_slice(&buf[..n]),
-            Err(_) => return Err("chunk: recv error before final chunk"),
+            Ok(n) => {
+                if !logged_first_recv {
+                    crate::kprintln!("[npk]   first wire recv = {} B", n);
+                    logged_first_recv = true;
+                }
+                carry.extend_from_slice(&buf[..n]);
+            }
+            Err(e) => {
+                crate::kprintln!("[npk]   chunked recv error (delivered {} B)", delivered);
+                return Err(e);
+            }
         }
     }
 }
