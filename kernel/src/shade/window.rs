@@ -33,6 +33,12 @@ pub enum WindowState {
 pub enum WindowKind {
     Terminal,
     Widget,
+    /// Raw-bitmap window fed by an external pixel source (a microvm's
+    /// virtio-gpu framebuffer; later any Canvas-escape-hatch app).
+    /// No terminal buffer, no widget tree — its content is a
+    /// `GuestSurface` double-buffer keyed by WindowId. Composited as a
+    /// tile like any other window (tiling invariant; never fullscreen).
+    Surface,
 }
 
 /// A single window managed by the compositor.

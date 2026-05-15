@@ -199,6 +199,28 @@ impl Compositor {
         id
     }
 
+    /// Create a Surface-kind window for an external pixel source (a
+    /// microvm's virtio-gpu framebuffer). No terminal buffer, no
+    /// widget tree — content is a `GuestSurface` keyed by this id.
+    /// Like `create_widget_window`, focus stays on the spawning shell.
+    pub fn create_surface_window(&mut self, title: &str) -> WindowId {
+        let id = WindowId(self.next_id);
+        self.next_id += 1;
+
+        let mut win = Window::new(id, title, 0, 0, 100, 100);
+        win.workspace = self.active_workspace;
+        win.terminal_idx = 255; // sentinel — no terminal buffer owned
+        win.kind = crate::shade::window::WindowKind::Surface;
+        win.pid = 0;
+
+        self.windows.push(win);
+        self.z_order.insert(0, id);
+        self.retile();
+        self.needs_full_redraw = true;
+
+        id
+    }
+
     /// Convert the Terminal-kind window backing `terminal_idx` into a
     /// Widget-kind window in place. Keeps id, geometry, z-order, and
     /// focus, but releases the terminal buffer (255 sentinel) so key
@@ -298,6 +320,13 @@ impl Compositor {
                     // backing allocations free with the entries.
                     crate::shade::widgets::remove_scene(id.0);
                     crate::shade::widgets::remove_event_queue(id.0);
+                }
+                crate::shade::window::WindowKind::Surface => {
+                    // Drop the bitmap surface; ask the bound microvm
+                    // to power off (best-effort — it may already have
+                    // exited, which is what closed this window).
+                    crate::shade::surface::remove_surface(id.0);
+                    crate::microvm::vm_close_for_window(id.0);
                 }
             }
         }
@@ -648,6 +677,32 @@ impl Compositor {
                             let src_idx = (local_y as usize) * (scene.width as usize) + local_x as usize;
                             let widget_pixel = scene.pixels[src_idx];
                             render::blend_pixel(shadow, info, dx, dy, widget_pixel, cov);
+                        }
+                    }
+                });
+            }
+            crate::shade::window::WindowKind::Surface => {
+                // Raw guest framebuffer → tile. Clip (no scale) into
+                // the content rect, top-left aligned. Rounded-corner
+                // AA is widget-only polish; a bitmap surface just
+                // clips. One memcpy per row.
+                crate::shade::surface::with_front(win.id.0, |px, sw, sh| {
+                    if px.is_empty() || sw == 0 { return; }
+                    let pitch = info.pitch as usize;
+                    let x1 = (cx + cw).min(cx + sw).min(info.width);
+                    let y1 = (cy + ch).min(cy + sh).min(info.height);
+                    let span = x1.saturating_sub(cx) as usize;
+                    if span == 0 { return; }
+                    for dy in cy..y1 {
+                        let src_base = (dy - cy) as usize * sw as usize;
+                        let dst_off = dy as usize * pitch + cx as usize * 4;
+                        // SAFETY: span ≤ sw and ≤ fb_w-cx; src_base+span
+                        // ≤ sw*sh = px.len(); dst within framebuffer.
+                        unsafe {
+                            let dst = shadow.add(dst_off) as *mut u32;
+                            core::ptr::copy_nonoverlapping(
+                                px.as_ptr().add(src_base), dst, span,
+                            );
                         }
                     }
                 });

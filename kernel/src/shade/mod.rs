@@ -14,6 +14,7 @@ pub mod terminal;
 pub mod input;
 pub mod cursor;
 pub mod widgets;
+pub mod surface;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -101,6 +102,12 @@ pub fn create_window(title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<Wind
 #[allow(dead_code)]
 pub fn close_window(id: WindowId) {
     with_compositor(|comp| comp.close_window(id));
+}
+
+/// Create a Surface-kind window (microvm framebuffer tile). Returns
+/// its id, or None if the compositor isn't up yet.
+pub fn create_surface_window(title: &str) -> Option<WindowId> {
+    with_compositor(|comp| comp.create_surface_window(title))
 }
 
 /// Set focus to a window.

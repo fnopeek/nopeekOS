@@ -27,6 +27,7 @@ pub mod svm;
 pub mod vmx;
 
 use spin::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Host CPU vendor identified at boot from CPUID leaf 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,47 @@ enum ActiveVm {
 
 static ACTIVE_VM: Mutex<Option<ActiveVm>> = Mutex::new(None);
 
+/// Shade window the active VM's framebuffer is bound to (0 = none).
+/// virtio-gpu FLUSH reads this to know which surface to write; the
+/// teardown path closes it. One VM ↔ one window for now; keyed by id
+/// so it generalises (forward-compat #2).
+static ACTIVE_VM_WINDOW: AtomicU32 = AtomicU32::new(0);
+
+/// Set when the user closes the VM's window so the next slice tears
+/// the guest down instead of running it headless.
+static VM_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Bind the active VM to a Shade Surface window (called by the
+/// microvm intent right after a successful `vm_open`).
+pub fn vm_bind_window(window_id: u32) {
+    ACTIVE_VM_WINDOW.store(window_id, Ordering::Release);
+}
+
+/// The Shade window the active VM renders into (0 = none/unbound).
+pub fn vm_window() -> u32 {
+    ACTIVE_VM_WINDOW.load(Ordering::Acquire)
+}
+
+/// Window closed by the user → ask the bound VM to power off on the
+/// next slice. No-op if it isn't the active VM's window.
+pub fn vm_close_for_window(window_id: u32) {
+    if window_id != 0 && window_id == ACTIVE_VM_WINDOW.load(Ordering::Acquire) {
+        VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+    }
+}
+
+/// Drop the VM↔window binding + its surface and close the Shade
+/// window. MUST be called with the ACTIVE_VM lock NOT held (it locks
+/// the compositor, whose close path re-enters microvm). Idempotent.
+fn teardown_vm_window() {
+    let wid = ACTIVE_VM_WINDOW.swap(0, Ordering::AcqRel);
+    VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+    if wid != 0 {
+        crate::shade::surface::remove_surface(wid);
+        crate::shade::close_window(crate::shade::window::WindowId(wid));
+    }
+}
+
 /// VM-exits processed per Core-0 poll. Cheap (~µs each); ~4 k keeps a
 /// slice sub-ms-to-low-ms so Shade still renders smoothly between
 /// slices, while the guest boots in ≈ the same wall time as before
@@ -160,6 +202,7 @@ pub fn vm_open(
         Vendor::Unknown(reason) => return Err(reason),
     };
     *slot = Some(vm);
+    VM_CLOSE_REQUESTED.store(false, Ordering::Release);
     Ok(())
 }
 
@@ -169,6 +212,25 @@ pub fn vm_open(
 /// new VM can be opened (relaunch).
 pub fn vm_poll_slice() {
     let mut slot = ACTIVE_VM.lock();
+    if slot.is_none() {
+        return;
+    }
+
+    // User closed the VM's window → force the guest down this tick
+    // instead of running it headless until idle.
+    if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+        match slot.as_mut() {
+            Some(ActiveVm::Vmx(ctx)) => ctx.close(),
+            Some(ActiveVm::Svm(ctx)) => ctx.close(),
+            None => {}
+        }
+        *slot = None;
+        drop(slot); // release before teardown — it locks the compositor
+        teardown_vm_window();
+        crate::kprintln!("[microvm] guest stopped (window closed)");
+        return;
+    }
+
     let finished: Option<Result<LaunchOutcome, &'static str>> = match slot.as_mut() {
         None => return,
         Some(ActiveVm::Vmx(ctx)) => match ctx.run_slice(SLICE_BUDGET) {
@@ -189,7 +251,8 @@ pub fn vm_poll_slice() {
         None => {}
     }
     *slot = None;
-    drop(slot);
+    drop(slot); // release before teardown — it locks the compositor
+    teardown_vm_window();
     match result {
         Ok(o) => crate::kprintln!(
             "[microvm] guest exited — final reason {} qual {:#x}",
