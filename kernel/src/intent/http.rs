@@ -54,24 +54,30 @@ fn do_http_request(args: &str, use_tls: bool) {
         return;
     }
 
-    // Parse "host path" or "host/path"
-    let (host, path) = if let Some(idx) = url.find(' ') {
-        (&url[..idx], url[idx + 1..].trim())
-    } else if let Some(idx) = url.find('/') {
-        (&url[..idx], &url[idx..])
+    // Step 1: peel off `> store-redirect` first. Has to happen
+    // BEFORE the host/path split because for inputs like
+    // `host/long/url/path > tmp/file` the first whitespace lives
+    // before the `>`, so a naive whitespace split would assign
+    // `host/long/url/path` to the host and break DNS.
+    let (url_no_redirect, store_as) = if let Some(idx) = url.find('>') {
+        let name = url[idx + 1..].trim();
+        let left = url[..idx].trim_end();
+        let redirect = if name.is_empty() { None } else { Some(String::from(name)) };
+        (left, redirect)
     } else {
-        (url, "/")
+        (url, None)
+    };
+
+    // Step 2: split host from URL path on the first whitespace OR
+    // first slash, on the redirect-free remainder.
+    let (host, path) = if let Some(idx) = url_no_redirect.find(' ') {
+        (&url_no_redirect[..idx], url_no_redirect[idx + 1..].trim())
+    } else if let Some(idx) = url_no_redirect.find('/') {
+        (&url_no_redirect[..idx], &url_no_redirect[idx..])
+    } else {
+        (url_no_redirect, "/")
     };
     let host = host.trim();
-
-    // Check for "> name" store redirect
-    let store_as = if let Some(idx) = path.find('>') {
-        let name = path[idx + 1..].trim();
-        if name.is_empty() { None } else { Some(String::from(name)) }
-    } else {
-        None
-    };
-    let path = if let Some(idx) = path.find('>') { path[..idx].trim() } else { path };
     let path = if path.is_empty() { "/" } else { path };
 
     // Streaming fast-path: HTTPS + `> name` writes the body straight
