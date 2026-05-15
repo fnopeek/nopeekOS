@@ -84,6 +84,21 @@ unsafe extern "C" fn rust_main() -> ! {
         say(kmsg_fd, b"[microvm-init] switched to squashfs bundle root\n");
     }
 
+    // 12.4 A4 — Surface-bridge validation WITHOUT a Wayland bundle.
+    // Paint /dev/fb0 a solid colour so the host gets non-zero
+    // virtio-gpu TRANSFER+FLUSH frames, then DON'T power off — park
+    // in the pause loop so the guest stays alive and its window
+    // persists (the bound VM no longer idle-exits — kernel side).
+    // This is throwaway de-risk: proves clip/stride/pixel-format of
+    // the render arm before the expensive LibreWolf bundle. Phase B
+    // replaces it with cage + a real Wayland client.
+    fb_test_pattern(kmsg_fd);
+    say(kmsg_fd, b"[microvm-init] fb test pattern written; parking (window stays open)\n");
+    loop {
+        let _ = unsafe { syscall0(SYS_PAUSE) };
+    }
+
+    #[allow(unreachable_code)]
     // input_event_smoke removed from the boot path — open(/dev/input/event0)
     // exhibited inconsistent blocking behaviour between v0.162.0 (with
     // O_NONBLOCK) and v0.162.1 (without). 12.4c is already validated
@@ -159,6 +174,46 @@ fn try_exec_userspace(kmsg_fd: i64) {
     }
     // Only reached on execve failure (ENOENT / EACCES / ENOEXEC).
     say(kmsg_fd, b"[microvm-init] execve failed -- falling back to pause\n");
+}
+
+/// 12.4 A4: paint /dev/fb0 a solid colour so the host's virtio-gpu
+/// gets non-zero TRANSFER+FLUSH frames — proves the Shade Surface
+/// bridge (clip / stride / pixel format) without any Wayland bundle.
+/// Throwaway de-risk; Phase B replaces it with a real client.
+///
+/// Scanout is 1280x720 BGRX (virtio-gpu fmt=2) = 3 686 400 bytes =
+/// exactly 900 * 4096. Writes a small stack buffer 900× rather than
+/// allocating 3.6 MB (PID-1 is no_std, no heap). DRM fbdev
+/// deferred-io flushes the dirtied region → our RESOURCE_FLUSH.
+fn fb_test_pattern(kmsg_fd: i64) {
+    let fd = unsafe { syscall3(SYS_OPEN, b"/dev/fb0\0".as_ptr() as u64, O_RDWR, 0) };
+    if fd < 0 {
+        say(kmsg_fd, b"[microvm-init] /dev/fb0 absent -- no fb test pattern\n");
+        return;
+    }
+    // BGRX little-endian: [B, G, R, X]. Cyan = B=0xFF, G=0xFF, R=0.
+    // If it shows up red/blue-swapped we learn the host format here
+    // (cheap) instead of through the LibreWolf bundle (expensive).
+    let mut buf = [0u8; 4096];
+    let mut i = 0;
+    while i < 4096 {
+        buf[i] = 0xFF;     // B
+        buf[i + 1] = 0xFF; // G
+        buf[i + 2] = 0x00; // R
+        buf[i + 3] = 0x00; // X
+        i += 4;
+    }
+    let mut chunks = 0;
+    while chunks < 900 {
+        let n = unsafe {
+            syscall3(SYS_WRITE, fd as u64, buf.as_ptr() as u64, 4096)
+        };
+        if n <= 0 {
+            break;
+        }
+        chunks += 1;
+    }
+    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
 }
 
 /// Mount the read-only squashfs userspace bundle from `/dev/vdb` and
