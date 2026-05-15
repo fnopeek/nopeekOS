@@ -335,23 +335,266 @@ fn run_substrate_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
 ///
 /// `bzimage` is the raw bzImage bytes. `cmdline` is the kernel
 /// command line (no NUL — loader appends one).
+// ── Re-entrant VM context (Phase 12.4 step 1a) ─────────────────────
+//
+// The Linux run-loop is split into open() / run_slice() / close() so
+// the Core-0 event loop can interleave Shade rendering between bounded
+// slices instead of blocking until guest exit (see
+// PHASE12_DISPLAY_BRIDGE.md, R1). Step 1a is behaviour-preserving:
+// `run_linux` calls run_slice(u32::MAX) once, identical to the old
+// `run_linux_loop`. Slicing + interleave is step 1b.
+//
+// vmx_enter_root/vmx_exit_root duplicate the VMXON + VMCS asm from
+// `with_vmx_root_and_vmcs` (which the substrate-test path still uses
+// unchanged — zero risk to proven code). TODO(cleanup): dedupe once
+// the VmContext path is NUC-validated. Tracked.
+
+/// Outcome of one bounded slice of guest execution.
+pub enum SliceOutcome {
+    /// Budget exhausted, guest still running — caller may re-enter.
+    StillRunning,
+    /// Guest exited (HLT / panic / triple-fault / idle / cap).
+    Exited(vmcs::LaunchOutcome),
+}
+
+/// Enter VMX root mode and load a fresh current VMCS. Returns the
+/// (kept, never-freed) VMXON + VMCS region phys addrs. Faithful copy
+/// of `with_vmx_root_and_vmcs` steps 1-5 + `vmcs_setup_then_inner`.
+fn vmx_enter_root() -> Result<(u64, u64), &'static str> {
+    // 1. VMXON region.
+    let region_phys = memory::allocate_frame().ok_or("OOM allocating VMXON region")?;
+    let basic = unsafe { rdmsr(IA32_VMX_BASIC) };
+    let revision_id = (basic & 0x7FFF_FFFF) as u32;
+    // SAFETY: identity-mapped, freshly-allocated, exclusive.
+    unsafe {
+        let region = region_phys as *mut u32;
+        core::ptr::write_bytes(region as *mut u8, 0, 4096);
+        region.write_volatile(revision_id);
+    }
+
+    // 2. FEATURE_CONTROL.
+    let feat = unsafe { rdmsr(IA32_FEATURE_CONTROL) };
+    if feat & FEAT_CTRL_LOCK == 0 {
+        let new = feat | FEAT_CTRL_LOCK | FEAT_CTRL_VMX_OUTSIDE_SMX;
+        // SAFETY: writing lock + outside-SMX bits to architectural MSR.
+        unsafe { wrmsr(IA32_FEATURE_CONTROL, new); }
+    } else if feat & FEAT_CTRL_VMX_OUTSIDE_SMX == 0 {
+        return Err("IA32_FEATURE_CONTROL locked with VMX disabled (BIOS lock)");
+    }
+
+    // 3. CR0/CR4 fixed bits + CR4.VMXE.
+    let cr0_f0 = unsafe { rdmsr(IA32_VMX_CR0_FIXED0) };
+    let cr0_f1 = unsafe { rdmsr(IA32_VMX_CR0_FIXED1) };
+    let cr4_f0 = unsafe { rdmsr(IA32_VMX_CR4_FIXED0) };
+    let cr4_f1 = unsafe { rdmsr(IA32_VMX_CR4_FIXED1) };
+    let mut cr0: u64;
+    let mut cr4: u64;
+    // SAFETY: CR reads cannot fault.
+    unsafe {
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nostack, preserves_flags));
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+    }
+    cr0 = (cr0 | cr0_f0) & cr0_f1;
+    cr4 = ((cr4 | cr4_f0) & cr4_f1) | CR4_VMXE;
+    // SAFETY: values satisfy fixed-bit constraints; VMXE is allowed.
+    unsafe {
+        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+    }
+
+    // 4. VMXON.
+    let region_addr_slot: u64 = region_phys;
+    let rflags: u64;
+    // SAFETY: VMXON requires CR4.VMXE (set above) + valid 4-KB region.
+    unsafe {
+        core::arch::asm!(
+            "vmxon [{addr}]",
+            "pushfq",
+            "pop {flags}",
+            addr = in(reg) &region_addr_slot,
+            flags = lateout(reg) rflags,
+        );
+    }
+    if rflags & RFLAGS_CF != 0 {
+        return Err("VMXON returned VMfailInvalid (CF=1)");
+    }
+    if rflags & RFLAGS_ZF != 0 {
+        return Err("VMXON returned VMfailValid (ZF=1) — unexpected on first call");
+    }
+
+    // 5. VMCS region + VMCLEAR + VMPTRLD.
+    let vmcs_phys = match memory::allocate_frame() {
+        Some(p) => p,
+        None => {
+            // Back out of VMX root so the CPU isn't stranded.
+            unsafe { vmx_exit_root(); }
+            return Err("OOM allocating VMCS region");
+        }
+    };
+    // SAFETY: identity-mapped, freshly-allocated, exclusive.
+    unsafe {
+        let region = vmcs_phys as *mut u32;
+        core::ptr::write_bytes(region as *mut u8, 0, 4096);
+        region.write_volatile(revision_id);
+    }
+    let vmcs_addr_slot: u64 = vmcs_phys;
+    let rflags_clear: u64;
+    // SAFETY: in VMX root mode; valid VMCS region.
+    unsafe {
+        core::arch::asm!(
+            "vmclear [{addr}]",
+            "pushfq",
+            "pop {flags}",
+            addr = in(reg) &vmcs_addr_slot,
+            flags = lateout(reg) rflags_clear,
+        );
+    }
+    if rflags_clear & (RFLAGS_CF | RFLAGS_ZF) != 0 {
+        unsafe { vmx_exit_root(); }
+        return Err("VMCLEAR failed (VMfail)");
+    }
+    let rflags_load: u64;
+    // SAFETY: in VMX root mode; VMCS just successfully VMCLEAR'd.
+    unsafe {
+        core::arch::asm!(
+            "vmptrld [{addr}]",
+            "pushfq",
+            "pop {flags}",
+            addr = in(reg) &vmcs_addr_slot,
+            flags = lateout(reg) rflags_load,
+        );
+    }
+    if rflags_load & (RFLAGS_CF | RFLAGS_ZF) != 0 {
+        unsafe { vmx_exit_root(); }
+        return Err("VMPTRLD failed (VMfail)");
+    }
+
+    Ok((region_phys, vmcs_phys))
+}
+
+/// Leave VMX root mode. Safe to call exactly once per successful
+/// `vmx_enter_root`.
+///
+/// # Safety
+/// Caller must be in VMX root mode (a prior `vmx_enter_root` Ok).
+unsafe fn vmx_exit_root() {
+    // SAFETY: precondition documented; VMXOFF in VMX root is defined.
+    unsafe {
+        core::arch::asm!("vmxoff", options(nostack, preserves_flags));
+    }
+}
+
+/// Persistent state of one Linux microvm across cooperative slices.
+/// Owns the VMX-root resources and all run-loop state that must
+/// survive between `run_slice` calls. Core-agnostic: nothing here
+/// assumes which core it runs on (forward-compat contract #1).
+pub struct VmContext {
+    vmxon_phys: u64,
+    vmcs_phys: u64,
+    host_base: u64,
+    regs: vmcs::GuestRegs,
+    serial: SerialState,
+    pci: crate::microvm::devices::PciBus,
+    pic: crate::microvm::devices::pic8259::Pic8259,
+    trace: ExitTrace,
+    io_stats: IoStats,
+    launched: bool,
+    iter: u32,
+    io_dropped: u32,
+    msr_log_count: u32,
+    consecutive_idle: u32,
+}
+
+impl VmContext {
+    /// Enter VMX root, load the VMCS, place the guest image, set up
+    /// guest/host state + execution controls, pre-inject the UART RX
+    /// FIFO. On any post-VMXON failure, VMXOFF before returning Err so
+    /// the CPU never strands in VMX root.
+    pub fn open(
+        bzimage: &[u8],
+        cmdline: &[u8],
+        initramfs: Option<&[u8]>,
+        inject: &[u8],
+    ) -> Result<VmContext, &'static str> {
+        use crate::kprintln;
+
+        let (vmxon_phys, vmcs_phys) = vmx_enter_root()?;
+
+        // Everything past here is in VMX root: VMXOFF on any error.
+        let build = || -> Result<VmContext, &'static str> {
+            let (host_base, eptp) = alloc_guest_ram_and_ept()?;
+            let load = bzimage::load_into_guest_ram(host_base, bzimage, cmdline, initramfs)?;
+            write_host_state_with_current_rsp()?;
+            vmcs::setup_guest_state(load.entry_rip)?;
+            vmcs::setup_execution_controls(eptp)?;
+
+            let mut regs = vmcs::GuestRegs::default();
+            regs.rsi = load.boot_params_phys;
+
+            let mut serial = SerialState::new();
+            if !inject.is_empty() {
+                serial.inject(inject);
+                kprintln!("[microvm] pre-injected {} bytes into UART RX FIFO", inject.len());
+            }
+
+            Ok(VmContext {
+                vmxon_phys,
+                vmcs_phys,
+                host_base,
+                regs,
+                serial,
+                pci: crate::microvm::devices::PciBus::new(),
+                pic: crate::microvm::devices::pic8259::Pic8259::new(),
+                trace: ExitTrace::new(),
+                io_stats: IoStats::new(),
+                launched: false,
+                iter: 0,
+                io_dropped: 0,
+                msr_log_count: 0,
+                consecutive_idle: 0,
+            })
+        };
+
+        match build() {
+            Ok(ctx) => Ok(ctx),
+            Err(e) => {
+                // SAFETY: vmx_enter_root succeeded → we are in VMX root.
+                unsafe { vmx_exit_root(); }
+                Err(e)
+            }
+        }
+    }
+
+    /// Persist the profile image (already done inside run_slice on the
+    /// guest-exit path, matching the old behaviour) and leave VMX root.
+    /// Always call exactly once when finished with the context.
+    pub fn close(&mut self) {
+        let _ = (self.vmxon_phys, self.vmcs_phys); // kept, never freed (per design)
+        // SAFETY: a VmContext only exists after a successful
+        // vmx_enter_root, so the CPU is in VMX root.
+        unsafe { vmx_exit_root(); }
+    }
+}
+
 pub fn run_linux(
     bzimage: &[u8],
     cmdline: &[u8],
     initramfs: Option<&[u8]>,
     inject: &[u8],
 ) -> Result<vmcs::LaunchOutcome, &'static str> {
-    with_vmx_root_and_vmcs(|| {
-        let (host_base, eptp) = alloc_guest_ram_and_ept()?;
-
-        let load = bzimage::load_into_guest_ram(host_base, bzimage, cmdline, initramfs)?;
-
-        write_host_state_with_current_rsp()?;
-        vmcs::setup_guest_state(load.entry_rip)?;
-        vmcs::setup_execution_controls(eptp)?;
-
-        run_linux_loop(load.boot_params_phys, host_base, inject)
-    })
+    let mut ctx = VmContext::open(bzimage, cmdline, initramfs, inject)?;
+    // Step 1a: single unbounded slice — identical to the old
+    // run_linux_loop. Step 1b bounds the budget and interleaves with
+    // Shade on the Core-0 event loop.
+    let result = loop {
+        match ctx.run_slice(u32::MAX) {
+            Ok(SliceOutcome::Exited(o)) => break Ok(o),
+            Ok(SliceOutcome::StillRunning) => continue,
+            Err(e) => break Err(e),
+        }
+    };
+    ctx.close();
+    result
 }
 
 /// Per-guest serial UART state across exits.
@@ -631,34 +874,18 @@ fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
     if pt_e & 1 == 0 { kprintln!("[microvm-walk]     L1 not present"); }
 }
 
-/// Linux run-loop. Initial guest GPR ESI = boot_params_phys per
-/// 32-bit boot protocol; other GPRs zero. Caps at 100k iterations.
-fn run_linux_loop(
-    boot_params_phys: u64,
-    host_base: u64,
-    inject: &[u8],
-) -> Result<vmcs::LaunchOutcome, &'static str> {
+impl VmContext {
+    /// Run the guest for up to `budget` VM-exits, or until it exits.
+    /// `Ok(StillRunning)` = budget hit, re-enterable (step 1b);
+    /// `Ok(Exited(o))` = guest left; `Err` = setup/VM fault. Body is
+    /// the old `run_linux_loop` verbatim, `self.`-scoped.
+    pub fn run_slice(&mut self, budget: u32) -> Result<SliceOutcome, &'static str> {
     use crate::kprintln;
 
     const MAX_ITERATIONS: u32 = 100_000;
 
-    let mut regs = vmcs::GuestRegs::default();
-    regs.rsi = boot_params_phys;
-
-    let mut serial = SerialState::new();
-    if !inject.is_empty() {
-        serial.inject(inject);
-        kprintln!("[microvm] pre-injected {} bytes into UART RX FIFO", inject.len());
-    }
-    let mut pci = crate::microvm::devices::PciBus::new();
-    let mut pic = crate::microvm::devices::pic8259::Pic8259::new();
-    let mut trace = ExitTrace::new();
-    let mut io_stats = IoStats::new();
-    let mut launched = false;
     let mut last_outcome: Option<vmcs::LaunchOutcome> = None;
-    let mut iter: u32 = 0;
-    let mut io_dropped: u32 = 0;
-    let mut msr_log_count: u32 = 0;
+    let mut slice_n: u32 = 0;
     const MSR_LOG_CAP: u32 = 32;
 
     // Idle-detection. Once init enters its pause(2)/wait-loop, the
@@ -669,28 +896,31 @@ fn run_linux_loop(
     // in run_linux_loop until MAX_ITERATIONS cap (~17 min at 100 Hz),
     // perceived as a host freeze. Real cancellation comes with
     // 12.1.4 inject_console.
-    let mut consecutive_idle: u32 = 0;
     const IDLE_THRESHOLD: u32 = 200;
 
-    while iter < MAX_ITERATIONS {
-        iter += 1;
+    while self.iter < MAX_ITERATIONS {
+        if slice_n >= budget {
+            return Ok(SliceOutcome::StillRunning);
+        }
+        self.iter += 1;
+        slice_n += 1;
         // Before each entry, sync the IA-32e-mode-guest control to
         // the current GUEST_IA32_EFER.LMA — once Linux flips into
         // long mode (after CR0.PG=1 with EFER.LME=1), the entry
         // control must match or VMX rejects the entry.
-        if launched {
+        if self.launched {
             vmcs::sync_entry_ia32e_with_efer()?;
         }
-        let outcome = vmcs::run_guest_once(&mut regs, launched)?;
-        launched = true;
+        let outcome = vmcs::run_guest_once(&mut self.regs, self.launched)?;
+        self.launched = true;
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
-        trace.record(basic, outcome.exit_qualification);
+        self.trace.record(basic, outcome.exit_qualification);
 
         // Reset idle-counter on any non-timer-tick activity. The
         // counter only progresses on a clean run of pure reason-1
         // exits (= guest sitting in pause(2)).
         if basic != 1 {
-            consecutive_idle = 0;
+            self.consecutive_idle = 0;
         }
 
         match basic {
@@ -701,7 +931,7 @@ fn run_linux_loop(
                 // intentionally) or if Linux somehow re-enables
                 // exception trapping. Kept as a safety net + the
                 // dump remains useful if it ever fires.
-                serial.flush();
+                self.serial.flush();
                 let info = vmcs::read_exit_intr_info().unwrap_or(0);
                 let vector = info & 0xFF;
                 let intr_type = (info >> 8) & 0x7;
@@ -744,9 +974,9 @@ fn run_linux_loop(
                 );
                 if vector == 14 {
                     let cr3 = vmcs::read_guest_cr3().unwrap_or(0);
-                    dump_page_walk(host_base, cr3, outcome.exit_qualification);
+                    dump_page_walk(self.host_base, cr3, outcome.exit_qualification);
                 }
-                trace.dump();
+                self.trace.dump();
                 last_outcome = Some(outcome);
                 break;
             }
@@ -761,25 +991,25 @@ fn run_linux_loop(
                 // data sits in host buffers forever while the guest
                 // waits in recv().
                 let pumped = crate::microvm::devices::nat::pump(
-                    &mut pci.virtio_net, host_base);
+                    &mut self.pci.virtio_net, self.host_base);
                 if pumped {
-                    let vector = pic.vector_for_irq(10);
+                    let vector = self.pic.vector_for_irq(10);
                     let _ = vmcs::inject_external_irq(vector);
-                    consecutive_idle = 0;
+                    self.consecutive_idle = 0;
                 }
                 // Pure timer-tick → idle counter advances. Reset when
                 // there are active NAT sessions (guest is blocked on
                 // I/O, not actually idle).
                 if pumped || crate::microvm::devices::nat::active_session_count() > 0 {
-                    consecutive_idle = 0;
+                    self.consecutive_idle = 0;
                 } else {
-                    consecutive_idle = consecutive_idle.saturating_add(1);
+                    self.consecutive_idle = self.consecutive_idle.saturating_add(1);
                 }
-                if consecutive_idle >= IDLE_THRESHOLD {
-                    serial.flush();
+                if self.consecutive_idle >= IDLE_THRESHOLD {
+                    self.serial.flush();
                     kprintln!(
                         "[microvm] guest idle in userspace ({} consecutive timer ticks after {} iters) — exiting cleanly",
-                        consecutive_idle, iter,
+                        self.consecutive_idle, self.iter,
                     );
                     last_outcome = Some(outcome);
                     break;
@@ -787,9 +1017,9 @@ fn run_linux_loop(
                 last_outcome = Some(outcome);
             }
             12 => {
-                serial.flush();
-                kprintln!("[microvm] guest HLT after {} VM-exits", iter);
-                io_stats.dump();
+                self.serial.flush();
+                kprintln!("[microvm] guest HLT after {} VM-exits", self.iter);
+                self.io_stats.dump();
                 last_outcome = Some(outcome);
                 break;
             }
@@ -798,8 +1028,8 @@ fn run_linux_loop(
                 // to host; guest sees real CPU features. Linux uses
                 // this for early feature detection. Filtered for
                 // features we can't safely expose to the guest.
-                let leaf = regs.rax as u32;
-                let subleaf = regs.rcx as u32;
+                let leaf = self.regs.rax as u32;
+                let subleaf = self.regs.rcx as u32;
                 let (eax, ebx, mut ecx, mut edx) =
                     vmcs::host_cpuid(leaf, subleaf);
                 if leaf == 7 && subleaf == 0 {
@@ -823,10 +1053,10 @@ fn run_linux_loop(
                     ecx &= !(1u32 << 3);   // PKU
                     ecx &= !(1u32 << 4);   // OSPKE (driven by PKU)
                 }
-                regs.rax = eax as u64;
-                regs.rbx = ebx as u64;
-                regs.rcx = ecx as u64;
-                regs.rdx = edx as u64;
+                self.regs.rax = eax as u64;
+                self.regs.rbx = ebx as u64;
+                self.regs.rcx = ecx as u64;
+                self.regs.rdx = edx as u64;
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
@@ -841,7 +1071,7 @@ fn run_linux_loop(
                 let gp_reg = ((qual >> 8) & 0xF) as u8;
 
                 if cr_num != 3 {
-                    serial.flush();
+                    self.serial.flush();
                     kprintln!(
                         "[microvm] unhandled CR{} access (type {}, reg {}, qual {:#x})",
                         cr_num, access_type, gp_reg, qual,
@@ -852,16 +1082,16 @@ fn run_linux_loop(
                 match access_type {
                     0 => {
                         // MOV to CR3 (set page-table base).
-                        let val = read_gpr(&regs, gp_reg)?;
+                        let val = read_gpr(&self.regs, gp_reg)?;
                         vmcs::write_guest_cr3(val)?;
                     }
                     1 => {
                         // MOV from CR3.
                         let val = vmcs::read_guest_cr3()?;
-                        write_gpr(&mut regs, gp_reg, val)?;
+                        write_gpr(&mut self.regs, gp_reg, val)?;
                     }
                     _ => {
-                        serial.flush();
+                        self.serial.flush();
                         kprintln!(
                             "[microvm] CR3 unusual access type {} (qual {:#x})",
                             access_type, qual,
@@ -876,11 +1106,11 @@ fn run_linux_loop(
             30 => {
                 let (port, dir_in, size) =
                     vmcs::decode_io_exit_qualification(outcome.exit_qualification);
-                io_stats.record(port, dir_in);
-                if port == 0x3F8 && !dir_in && !serial.dlab && size == 1 {
-                    io_stats.record_serial_byte((regs.rax & 0xFF) as u8);
+                self.io_stats.record(port, dir_in);
+                if port == 0x3F8 && !dir_in && !self.serial.dlab && size == 1 {
+                    self.io_stats.record_serial_byte((self.regs.rax & 0xFF) as u8);
                 }
-                handle_linux_io(&mut serial, &mut pci, &mut pic, &mut regs, port, dir_in, size, &mut io_dropped);
+                handle_linux_io(&mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped);
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
@@ -900,13 +1130,13 @@ fn run_linux_loop(
                 // an out-of-range MSR. Synthesize a zero return — the
                 // safest answer for unknown info MSRs (Linux's
                 // safe_rdmsr-style code copes with bogus values).
-                let msr = regs.rcx as u32;
-                if !msr_is_known_noise(msr) && msr_log_count < MSR_LOG_CAP {
+                let msr = self.regs.rcx as u32;
+                if !msr_is_known_noise(msr) && self.msr_log_count < MSR_LOG_CAP {
                     kprintln!("[microvm] RDMSR {:#010x} → 0 (unhandled)", msr);
-                    msr_log_count += 1;
+                    self.msr_log_count += 1;
                 }
-                regs.rax = 0;
-                regs.rdx = 0;
+                self.regs.rax = 0;
+                self.regs.rdx = 0;
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
@@ -914,11 +1144,11 @@ fn run_linux_loop(
                 // WRMSR — same gating as RDMSR. Silently absorb
                 // (don't propagate to host — writing arbitrary MSRs
                 // would break the host's pstate/PMU/etc).
-                let msr = regs.rcx as u32;
-                if msr_log_count < MSR_LOG_CAP {
-                    let val = (regs.rdx << 32) | (regs.rax & 0xFFFF_FFFF);
+                let msr = self.regs.rcx as u32;
+                if self.msr_log_count < MSR_LOG_CAP {
+                    let val = (self.regs.rdx << 32) | (self.regs.rax & 0xFFFF_FFFF);
                     kprintln!("[microvm] WRMSR {:#010x} = {:#018x} (absorbed)", msr, val);
-                    msr_log_count += 1;
+                    self.msr_log_count += 1;
                 }
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
@@ -929,34 +1159,34 @@ fn run_linux_loop(
                 // EPT permissions). For accesses landing in virtio-blk's
                 // BAR0 range we emulate; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
-                if pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_ept_blk(&mut regs, &mut pci.virtio_blk, &pic, gpa, host_base) {
+                if self.pci.virtio_blk.bar0_in_range(gpa) {
+                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_ept_net(&mut regs, &mut pci.virtio_net, &pic, gpa, host_base) {
+                } else if self.pci.virtio_net.bar0_in_range(gpa) {
+                    if handle_mmio_ept_net(&mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_ept_gpu(&mut regs, &mut pci.virtio_gpu, &pic, gpa, host_base) {
+                } else if self.pci.virtio_gpu.bar0_in_range(gpa) {
+                    if handle_mmio_ept_gpu(&mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_ept_input(&mut regs, &mut pci.virtio_input, &pic, gpa, host_base) {
+                } else if self.pci.virtio_input.bar0_in_range(gpa) {
+                    if handle_mmio_ept_input(&mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if pci.virtio_blk_sqfs.bar0_in_range(gpa) {
+                } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_ept_blk(&mut regs, &mut pci.virtio_blk_sqfs, &pic, gpa, host_base) {
+                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, self.host_base) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 }
-                serial.flush();
+                self.serial.flush();
                 let gla  = vmcs::read_guest_linear_addr().unwrap_or(0);
                 let q    = outcome.exit_qualification;
                 let read = q & 1 != 0;
@@ -972,8 +1202,8 @@ fn run_linux_loop(
                     if write { "W" } else { "" },
                     if fetch { "X" } else { "" },
                 );
-                io_stats.dump();
-                trace.dump();
+                self.io_stats.dump();
+                self.trace.dump();
                 last_outcome = Some(outcome);
                 break;
             }
@@ -981,66 +1211,73 @@ fn run_linux_loop(
                 // Triple fault. Linux uses this as `emergency_restart`
                 // when ACPI/PIIX/EFI reset paths are unavailable —
                 // i.e. the standard exit path on `panic=1` here.
-                serial.flush();
-                if serial.panic_observed {
+                self.serial.flush();
+                if self.serial.panic_observed {
                     kprintln!(
                         "[microvm] linux kernel panicked (after {} iters): {}",
-                        iter, serial.panic_msg_str(),
+                        self.iter, self.serial.panic_msg_str(),
                     );
                     kprintln!("[microvm] guest then triple-faulted via emergency_restart (= expected reboot path)");
                 } else {
                     kprintln!(
                         "[microvm] guest triple-faulted after {} iters (no kernel-panic seen on console)",
-                        iter,
+                        self.iter,
                     );
                 }
-                io_stats.dump();
-                trace.dump();
+                self.io_stats.dump();
+                self.trace.dump();
                 last_outcome = Some(outcome);
                 break;
             }
             _ => {
-                serial.flush();
+                self.serial.flush();
                 kprintln!(
                     "[microvm] unhandled exit reason {} qual {:#x} after {} iters",
-                    basic, outcome.exit_qualification, iter,
+                    basic, outcome.exit_qualification, self.iter,
                 );
-                if serial.panic_observed {
+                if self.serial.panic_observed {
                     kprintln!(
                         "[microvm]   note: kernel panic was observed: {}",
-                        serial.panic_msg_str(),
+                        self.serial.panic_msg_str(),
                     );
                 }
-                io_stats.dump();
-                trace.dump();
+                self.io_stats.dump();
+                self.trace.dump();
                 last_outcome = Some(outcome);
                 break;
             }
         }
     }
 
-    if iter >= MAX_ITERATIONS {
-        serial.flush();
+    if self.iter >= MAX_ITERATIONS {
+        self.serial.flush();
         kprintln!(
             "[microvm] iteration cap ({}) reached — guest still running, ({} I/O drops)",
-            MAX_ITERATIONS, io_dropped,
+            MAX_ITERATIONS, self.io_dropped,
         );
-        io_stats.dump();
-        trace.dump();
+        self.io_stats.dump();
+        self.trace.dump();
     }
 
     match &last_outcome {
         Some(o) => kprintln!(
-            "[microvm] run_linux_loop returning Ok(reason={} qual={:#x})",
+            "[microvm] run_slice returning Ok(reason={} qual={:#x})",
             vmcs::basic_exit_reason(o.exit_reason), o.exit_qualification,
         ),
-        None => kprintln!("[microvm] run_linux_loop returning Err (no outcome captured)"),
+        None => kprintln!("[microvm] run_slice returning Err (no outcome captured)"),
     }
 
     // Persist the virtio-blk profile-image to npkFS (encrypted at rest).
-    pci.virtio_blk.save();
+    // Reached only when the loop ended (guest exit / cap), not on a
+    // StillRunning yield or a `?` early-return — identical to the old
+    // run_linux_loop.
+    self.pci.virtio_blk.save();
 
-    last_outcome.ok_or("Linux guest exceeded max iterations without first VM-exit")
+    match last_outcome {
+        Some(o) => Ok(SliceOutcome::Exited(o)),
+        None => Err("Linux guest exceeded max iterations without first VM-exit"),
+    }
+    }
 }
 
 /// MSRs that Linux probes via `safe_rdmsr` (catches #GP) but we
