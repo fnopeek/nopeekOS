@@ -205,12 +205,33 @@ ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.manifest"     "$OUT_DIR/current.manife
 green "built ${BUNDLE_NAME} ${BUNDLE_VERSION}: ${SIZE} bytes → ${OUT}"
 cyan  "       sha256: ${SHA}"
 
-# Stage as OTA asset — `microvm:rootfs` is what `intent::update` picks
-# up and writes to `sys/microvm/rootfs.cpio.gz` in npkFS. Then
-# `microvm linux` finds it on next launch. Cleaner architecture
-# (per-app `install <name>` flow into release/apps/) comes later;
-# release/assets/ piggybacks the existing OTA pipeline for iter-1.
-OTA_SLOT="$REPO_ROOT/release/assets/microvm-rootfs.cpio.gz"
-cp "$OUT" "$OTA_SLOT"
-cyan  "       staged to OTA: ${OTA_SLOT}"
-cyan  "       sign with: ./build.sh release"
+# Stage as OTA asset. The AssetSpec section `microvm:userspace`
+# (kernel/src/intent/update.rs) maps to `sys/microvm/userspace.cpio.gz`
+# in npkFS. `microvm linux` picks it up on next launch.
+#
+# Two distribution lanes, depending on size:
+#   * < ~30 MB → release/assets/microvm-userspace.cpio.gz
+#                (raw.githubusercontent.com via main, signed by `./build.sh release`).
+#   * ≥ ~30 MB → release/assets/large/microvm-userspace.cpio.gz
+#                (GitHub Releases via `./build.sh release-large <tag>`).
+#
+# The kernel asset manifest carries a `url=` line for the large
+# lane; `https_get_streaming` follows the 302 redirect chain to
+# objects.githubusercontent.com transparently. We default to the
+# small-lane path here — if the bundle has grown beyond what raw
+# can serve, `./build.sh release` will fail uploads to raw and the
+# operator moves the file into `large/` and uses `release-large`.
+SIZE_BYTES=$(stat -c%s "$OUT")
+if [ "$SIZE_BYTES" -lt $((30 * 1024 * 1024)) ]; then
+    OTA_SLOT="$REPO_ROOT/release/assets/microvm-userspace.cpio.gz"
+    cp "$OUT" "$OTA_SLOT"
+    cyan  "       staged to OTA (small lane): ${OTA_SLOT}"
+    cyan  "       sign with: ./build.sh release"
+else
+    LARGE_DIR="$REPO_ROOT/release/assets/large"
+    mkdir -p "$LARGE_DIR"
+    OTA_SLOT="$LARGE_DIR/microvm-userspace.cpio.gz"
+    cp "$OUT" "$OTA_SLOT"
+    cyan  "       staged to OTA (large lane, ${SIZE_BYTES} bytes): ${OTA_SLOT}"
+    cyan  "       upload with: ./build.sh release-large assets/<your-tag>"
+fi

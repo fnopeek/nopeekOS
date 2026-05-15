@@ -107,11 +107,22 @@ pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> 
     let encoded_len = bytes.len();
     let t_get = rdtsc();
 
-    // In-place blob decoder — shifts the postcard prefix off the
-    // staging Vec instead of allocating a fresh one. Saves ~0.9 ms /
-    // MB measured in the testdisk profile.
-    let blob = super::object::decode_blob_inplace(bytes)
-        .map_err(|_| PathError::Corrupt)?;
+    // Fast path: in-place blob decoder (saves ~0.9 ms / MB vs full
+    // postcard decode). Falls back to a full decode if the variant
+    // tag isn't `Blob(0)` — typically `Chunked(2)` for files written
+    // via the streaming writer.
+    let blob = if bytes.first() == Some(&0) {
+        super::object::decode_blob_inplace(bytes)
+            .map_err(|_| PathError::Corrupt)?
+    } else {
+        match super::object::Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
+            super::object::Object::Blob(b) => b,
+            super::object::Object::Chunked { total_size, chunks } => {
+                stitch_chunked(total_size, &chunks)?
+            }
+            super::object::Object::Tree(_) => return Err(PathError::Corrupt),
+        }
+    };
     let t_decode = rdtsc();
 
     if encoded_len >= 256 * 1024 {
@@ -270,13 +281,21 @@ pub fn gc() -> Result<GcStats, Error> {
             // into it. Skip and keep going.
             None => continue,
         };
-        // Tree objects expand the work-list; Blobs are leaves.
-        if let Ok(super::object::Object::Tree(entries)) = super::object::Object::decode(&bytes) {
-            for e in entries {
-                if e.hash != paths::EMPTY_ROOT {
-                    work.push(e.hash);
+        // Tree + Chunked objects expand the work-list; Blobs are leaves.
+        match super::object::Object::decode(&bytes) {
+            Ok(super::object::Object::Tree(entries)) => {
+                for e in entries {
+                    if e.hash != paths::EMPTY_ROOT {
+                        work.push(e.hash);
+                    }
                 }
             }
+            Ok(super::object::Object::Chunked { chunks, .. }) => {
+                for h in chunks {
+                    if h != paths::EMPTY_ROOT { work.push(h); }
+                }
+            }
+            Ok(super::object::Object::Blob(_)) | Err(_) => {}
         }
     }
 
@@ -301,4 +320,147 @@ pub fn gc() -> Result<GcStats, Error> {
     storage::trim().map_err(Error::Storage)?;
 
     Ok(GcStats { kept: reachable.len(), removed })
+}
+
+// ── Streaming writer (chunked blobs) ─────────────────────────────────
+//
+// For huge inputs (a multi-GB download, a movie, an ISO) buffering
+// the whole payload in a single `Vec<u8>` would blow the kernel heap
+// budget — and AES-GCM is one-shot in the audited `aes-gcm` crate, so
+// the encrypt step doubles the residency on top. The streaming writer
+// avoids that: it accumulates an in-RAM chunk buffer (default 16 MiB),
+// flushes it as a regular content-addressed `Blob` once full, and at
+// `finish` emits an `Object::Chunked` manifest pointing at all the
+// chunk hashes. Peak download RAM is therefore one chunk + manifest
+// overhead, independent of total size.
+//
+// Reads are transparent: `fs::read` detects `Object::Chunked` and
+// stitches the chunks back into one `Vec<u8>` for consumers. A future
+// streaming-reader variant can iterate the manifest without
+// materializing the full payload, but is out of scope here — the
+// write-side fix is what unblocks `http <huge-url> > path` and
+// >100 MB OTA bundles today.
+
+/// Default streaming-write chunk size. 16 MiB balances:
+///  - NVMe efficiency (single extent typically covers a 16 MiB chunk)
+///  - Heap peak (16 MiB plaintext + ~16 B AES-GCM tag during encrypt)
+///  - Manifest overhead (1 chunk hash per 16 MiB → 32 bytes / 16 MiB
+///    ≈ 2 ppm of disk overhead on top of the data itself)
+pub const STREAMING_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Stitch a `Chunked` manifest back into a single `Vec<u8>`. Used by
+/// `read_with_hash` so callers see a transparent file regardless of
+/// whether it was stored as a single `Blob` or as a chunked blob.
+fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathError> {
+    let total = total_size as usize;
+    let mut out = Vec::with_capacity(total);
+    for h in chunks {
+        let bytes = storage::get(h)
+            .map_err(Error::Storage)?
+            .ok_or(PathError::Corrupt)?;
+        let chunk = super::object::decode_blob_inplace(bytes)
+            .map_err(|_| PathError::Corrupt)?;
+        out.extend_from_slice(&chunk);
+        if out.len() > total {
+            return Err(PathError::Corrupt);
+        }
+    }
+    if out.len() != total {
+        return Err(PathError::Corrupt);
+    }
+    Ok(out)
+}
+
+/// Append-only streaming writer for a single file. Created via
+/// [`open_streaming_write`]; feed it with [`StreamingWriter::write`]
+/// chunks (any size) and call [`StreamingWriter::finish`] when done.
+///
+/// On drop without `finish`, any already-flushed chunk blobs leak
+/// into storage and get reclaimed by the next `gc()` cycle — the
+/// path tree is only updated atomically at `finish`. This is the
+/// failure mode we want: a partial download never appears as a
+/// half-written file.
+pub struct StreamingWriter {
+    path: alloc::string::String,
+    chunk_size: usize,
+    buf: Vec<u8>,
+    chunk_hashes: Vec<[u8; 32]>,
+    written: u64,
+}
+
+impl StreamingWriter {
+    /// Bytes already written across all flushed chunks.
+    pub fn written(&self) -> u64 { self.written + self.buf.len() as u64 }
+
+    /// Append data. May flush one or more chunks synchronously when
+    /// the buffer fills.
+    pub fn write(&mut self, data: &[u8]) -> Result<(), Error> {
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let take = core::cmp::min(self.chunk_size - self.buf.len(), remaining.len());
+            self.buf.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+            if self.buf.len() >= self.chunk_size {
+                self.flush_chunk()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_chunk(&mut self) -> Result<(), Error> {
+        if self.buf.is_empty() { return Ok(()); }
+        let chunk_len = self.buf.len();
+        // Move the chunk into an `Object::Blob`, encode + store. We
+        // take(buf) so the next chunk reuses the same allocation
+        // (Vec::take + Vec::with_capacity).
+        let bytes = core::mem::replace(&mut self.buf, Vec::with_capacity(self.chunk_size));
+        let blob = super::object::Object::Blob(bytes);
+        let (encoded, hash) = blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+        if !storage::has(&hash) {
+            storage::put(&hash, &encoded, /* encrypt */ true)?;
+        }
+        self.chunk_hashes.push(hash);
+        self.written += chunk_len as u64;
+        Ok(())
+    }
+
+    /// Flush the final chunk, write the manifest, and atomically
+    /// publish the file at the configured path. Returns the total
+    /// number of bytes written.
+    pub fn finish(mut self) -> Result<u64, Error> {
+        self.flush_chunk()?;
+        let total_size = self.written;
+        let manifest = super::object::Object::Chunked {
+            total_size,
+            chunks: self.chunk_hashes,
+        };
+        let (encoded, manifest_hash) =
+            manifest.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+        // Manifest carries the chunk hashes in cleartext — it doesn't
+        // hurt to encrypt it for uniformity with regular blobs, and
+        // dedup still works because the manifest itself is
+        // content-addressed.
+        if !storage::has(&manifest_hash) {
+            storage::put(&manifest_hash, &encoded, /* encrypt */ true)?;
+        }
+
+        let _g = ROOT_MUTEX.lock();
+        let cur = current_root()?;
+        let new_root = paths::install_chunked_file(&cur, &self.path, manifest_hash, total_size)?;
+        commit(new_root)?;
+        Ok(total_size)
+    }
+}
+
+/// Open a streaming write to `path`. Parent dir must exist. If `path`
+/// already names a File it's replaced atomically at `finish`; if it
+/// names a Dir, `finish` errors with `AlreadyExists`.
+pub fn open_streaming_write(path: &str) -> StreamingWriter {
+    StreamingWriter {
+        path: alloc::string::String::from(path),
+        chunk_size: STREAMING_CHUNK_SIZE,
+        buf: Vec::with_capacity(STREAMING_CHUNK_SIZE),
+        chunk_hashes: Vec::new(),
+        written: 0,
+    }
 }

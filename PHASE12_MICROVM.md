@@ -412,7 +412,8 @@ Iteration ladder:
 
 Bundle is **NOT** in `kernel/src/install_data/assets/` BUNDLED_ASSETS — kernel.efi
 stays ~3 MB. Bundle lives entirely in OTA payload, fetched at runtime to
-`sys/microvm/rootfs.cpio.gz` in npkFS.
+`sys/microvm/userspace.cpio.gz` in npkFS (renamed from `rootfs.cpio.gz` when
+the slot moved from `microvm:rootfs` to `microvm:userspace` in kernel v0.164.x).
 
 ---
 

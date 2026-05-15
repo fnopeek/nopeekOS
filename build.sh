@@ -570,6 +570,12 @@ Installer / release:
   qemu-installer-gui   Same with framebuffer (1920x1080)
   usb /dev/sdX         Build installer + flash USB stick
   release              Sign kernel + modules + assets (ECDSA P-384)
+  release-large <tag>  Upload release/assets/large/* to GitHub Releases
+                       under <tag>, sign with update.key, write
+                       manifest.large with url= overrides. The next
+                       `release` merges those into the canonical asset
+                       manifest. Use for files too big for raw-content
+                       (Alpine+Mesa userspace bundles, >30 MB).
 
 Without argument: build + qemu
 EOF
@@ -768,25 +774,46 @@ sha384=${BZIMG_SHA}
         fi
 
         # MicroVM userspace bundle — produced by
-        # microvm-userspace/build.sh. Optional. Currently the
-        # `alpine-base` iteration; future iterations add LibreWolf
-        # via Alpine APKBUILD on top. NOT bundled into the kernel
+        # microvm-userspace/build.sh. Optional. Currently
+        # alpine-wayland; future iterations add Mesa/LibreWolf on
+        # top via Alpine APKBUILD. NOT bundled into the kernel
         # binary (BUNDLED_ASSETS) — pure OTA asset.
-        ROOTFS_FILE="$RELEASE_DIR/assets/microvm-rootfs.cpio.gz"
-        if [ -f "$ROOTFS_FILE" ]; then
-            ROOTFS_SIZE=$(stat -c%s "$ROOTFS_FILE")
-            ROOTFS_SHA=$(openssl dgst -sha384 -hex "$ROOTFS_FILE" 2>/dev/null | awk '{print $NF}')
+        #
+        # Small enough to live on raw.githubusercontent? Treat as a
+        # regular release asset (path under release/assets/). When
+        # the bundle grows past raw-content limits (~50 MB warning,
+        # 100 MB hard cap) move it to release/assets/large/ and ship
+        # via `./build.sh release-large <tag>` — that path adds a
+        # `url=` line pointing at GitHub Releases and the kernel
+        # follows the 302 redirect chain transparently.
+        USERSPACE_FILE="$RELEASE_DIR/assets/microvm-userspace.cpio.gz"
+        if [ -f "$USERSPACE_FILE" ]; then
+            US_SIZE=$(stat -c%s "$USERSPACE_FILE")
+            US_SHA=$(openssl dgst -sha384 -hex "$USERSPACE_FILE" 2>/dev/null | awk '{print $NF}')
 
-            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:rootfs]
-size=${ROOTFS_SIZE}
-sha384=${ROOTFS_SHA}
+            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:userspace]
+size=${US_SIZE}
+sha384=${US_SHA}
 
 "
             if [ -f "$KEY_FILE" ]; then
                 openssl dgst -sha384 -sign "$KEY_FILE" \
-                    -out "${ROOTFS_FILE}.sig" "$ROOTFS_FILE"
-                ok "Signed rootfs: microvm-rootfs.cpio.gz ($ROOTFS_SIZE bytes)"
+                    -out "${USERSPACE_FILE}.sig" "$USERSPACE_FILE"
+                ok "Signed userspace bundle: microvm-userspace.cpio.gz ($US_SIZE bytes)"
             fi
+        fi
+
+        # Pick up any pre-existing url= overrides from a previous
+        # `release-large` invocation. The large-asset manifest is
+        # written to release/assets/manifest.large by `release-large`
+        # and merged in here so a regular `./build.sh release` after
+        # an upload doesn't clobber the url= entries.
+        LARGE_MANIFEST="$RELEASE_DIR/assets/manifest.large"
+        if [ -f "$LARGE_MANIFEST" ]; then
+            ASSET_MANIFEST="${ASSET_MANIFEST}$(cat "$LARGE_MANIFEST")
+
+"
+            ok "Merged large-asset overrides from manifest.large"
         fi
 
         if [ -n "$ASSET_MANIFEST" ]; then
@@ -825,6 +852,119 @@ sha384=${MOD_SHA}
 
         ok "Release artifacts in $RELEASE_DIR/"
         ls -la "$RELEASE_DIR/"
+        ;;
+    release-large)
+        # Upload large OTA assets to GitHub Releases and emit a
+        # `manifest.large` snippet that the next `release` merges
+        # into the canonical `release/assets/manifest`.
+        #
+        # Anything bigger than ~50 MB cannot ship via
+        # raw.githubusercontent.com reliably (warnings start there,
+        # hard cap ~100 MB). Drop those into release/assets/large/
+        # (gitignored) and run `./build.sh release-large <tag>`. We:
+        #
+        #   1. sha384 + sign each file with update.key (same key
+        #      as kernel + module OTA).
+        #   2. `gh release create <tag>` (idempotent — if it exists
+        #      we just upload more assets).
+        #   3. `gh release upload <tag> <file> <file>.sig`.
+        #   4. write `release/assets/manifest.large` with each
+        #      asset's INI section including a `url=` line that
+        #      points at the github.com/.../releases/download URL.
+        #      The kernel follows the 302 redirect chain via the
+        #      `https_get_streaming` path.
+        TAG="${2:-}"
+        if [ -z "$TAG" ]; then
+            err "usage: ./build.sh release-large <tag>"
+            err "example: ./build.sh release-large assets/alpine-wayland-mesa-0.1.0"
+            exit 1
+        fi
+        LARGE_DIR="$RELEASE_DIR/assets/large"
+        if [ ! -d "$LARGE_DIR" ]; then
+            err "no $LARGE_DIR directory found"
+            err "drop large assets there (gitignored), then re-run"
+            exit 1
+        fi
+        if ! command -v gh >/dev/null 2>&1; then
+            err "gh (GitHub CLI) not found — install via 'pacman -S github-cli'"
+            exit 1
+        fi
+        if [ ! -f "$KEY_FILE" ]; then
+            err "$KEY_FILE missing — cannot sign assets"
+            exit 1
+        fi
+
+        # Determine GitHub repo from origin remote.
+        REPO_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+        REPO=$(echo "$REPO_URL" | sed -E 's,^(https://github\.com/|git@github\.com:),,; s/\.git$//')
+        if [ -z "$REPO" ] || ! echo "$REPO" | grep -q '/'; then
+            err "could not parse origin remote: $REPO_URL"
+            exit 1
+        fi
+        log "Repo: $REPO  Tag: $TAG"
+
+        # Create the release if missing. `gh release view` returns
+        # non-zero when it doesn't exist; suppress so we can branch.
+        if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            log "Creating release $TAG..."
+            gh release create "$TAG" --repo "$REPO" \
+                --title "$TAG" \
+                --notes "Large OTA assets. Signed with the same ECDSA P-384 update key as kernel + modules. Fetched by the kernel via \`update\` with redirect-following \`https_get\`." \
+                --target main
+        else
+            log "Release $TAG exists, uploading additional assets"
+        fi
+
+        LARGE_MANIFEST=""
+        UPLOADED=0
+        for asset in "$LARGE_DIR"/*; do
+            [ -f "$asset" ] || continue
+            # Skip any pre-existing .sig — we regenerate fresh.
+            case "$asset" in *.sig) continue;; esac
+
+            NAME=$(basename "$asset")
+            SIZE=$(stat -c%s "$asset")
+            SHA=$(openssl dgst -sha384 -hex "$asset" 2>/dev/null | awk '{print $NF}')
+
+            openssl dgst -sha384 -sign "$KEY_FILE" \
+                -out "${asset}.sig" "$asset"
+
+            # Section name follows the AssetSpec table convention:
+            # microvm-userspace.cpio.gz → [microvm:userspace]
+            case "$NAME" in
+                microvm-userspace.cpio.gz) SECTION="microvm:userspace" ;;
+                *)
+                    err "unknown large asset filename: $NAME"
+                    err "add an AssetSpec entry in kernel/src/intent/update.rs and a case here"
+                    continue
+                    ;;
+            esac
+
+            URL="https://github.com/${REPO}/releases/download/${TAG}/${NAME}"
+
+            LARGE_MANIFEST="${LARGE_MANIFEST}[${SECTION}]
+size=${SIZE}
+sha384=${SHA}
+url=${URL}
+
+"
+
+            log "Uploading $NAME ($SIZE bytes) + .sig..."
+            gh release upload "$TAG" --repo "$REPO" --clobber "$asset" "${asset}.sig"
+            ok "Uploaded $NAME"
+            UPLOADED=$((UPLOADED + 1))
+        done
+
+        if [ "$UPLOADED" = 0 ]; then
+            err "no assets uploaded — $LARGE_DIR is empty or contains only .sig files"
+            exit 1
+        fi
+
+        # Make sure the assets dir exists before writing manifest.large
+        mkdir -p "$RELEASE_DIR/assets"
+        printf '%s' "$LARGE_MANIFEST" > "$RELEASE_DIR/assets/manifest.large"
+        ok "Wrote $RELEASE_DIR/assets/manifest.large ($UPLOADED entries)"
+        log "Run ./build.sh release to merge into the canonical asset manifest, then commit + push."
         ;;
     help|-h|--help)
         usage

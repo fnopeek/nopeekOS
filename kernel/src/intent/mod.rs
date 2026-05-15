@@ -1593,13 +1593,15 @@ fn microvm_linux(inject: &[u8]) {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
     const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
     /// Optional userspace bundle — Alpine minirootfs + busybox + (future)
-    /// LibreWolf. Built by `microvm-userspace/build.sh`, distributed via
-    /// OTA `update` (release/assets/microvm-rootfs.cpio.gz). If present,
-    /// we use it INSTEAD of the minimal PID-1-only initramfs — the
-    /// bundle contains our PID-1 at /init too, so all the existing
-    /// substrate tests still run, and PID-1 then exec's /bin/sh from
-    /// the bundle's busybox.
-    const ROOTFS_PATH: &str = "sys/microvm/rootfs.cpio.gz";
+    /// Wayland/Mesa/LibreWolf. Built by `microvm-userspace/build.sh`,
+    /// distributed via OTA (`release/assets/microvm-userspace.cpio.gz`
+    /// for small bundles on raw.githubusercontent, or a GitHub Releases
+    /// asset with `url=` override in the asset manifest for the
+    /// Mesa-class >100 MB bundles). If present, we use it INSTEAD of
+    /// the minimal PID-1-only initramfs — the bundle contains our PID-1
+    /// at /init too, so all the existing substrate tests still run,
+    /// and PID-1 then exec's /bin/sh from the bundle's busybox.
+    const USERSPACE_PATH: &str = "sys/microvm/userspace.cpio.gz";
     // Linux 32-bit boot protocol cmdline.
     //
     // `earlycon=uart8250,io,0x3f8,115200n8`: activate a simple
@@ -1654,10 +1656,10 @@ fn microvm_linux(inject: &[u8]) {
     // Prefer the userspace bundle if installed — it embeds our PID-1
     // at /init too, so swapping wholesale is fine. Falls back to the
     // minimal PID-1-only initramfs if no bundle was installed yet.
-    let initramfs = match crate::npkfs::fetch(ROOTFS_PATH) {
+    let initramfs = match crate::npkfs::fetch(USERSPACE_PATH) {
         Ok((b, _hash)) => {
-            kprintln!("[microvm] loaded rootfs bundle ({} bytes) from {}",
-                      b.len(), ROOTFS_PATH);
+            kprintln!("[microvm] loaded userspace bundle ({} bytes) from {}",
+                      b.len(), USERSPACE_PATH);
             Some(b)
         }
         Err(_) => match crate::npkfs::fetch(INITRAMFS_PATH) {

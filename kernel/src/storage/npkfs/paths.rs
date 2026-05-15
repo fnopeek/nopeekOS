@@ -97,7 +97,7 @@ fn fetch_tree(hash: &[u8; 32]) -> Result<Vec<TreeEntry>, PathError> {
     let bytes = storage::get(hash)?.ok_or(PathError::Corrupt)?;
     match Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
         Object::Tree(entries) => Ok(entries),
-        Object::Blob(_) => Err(PathError::NotADirectory),
+        Object::Blob(_) | Object::Chunked { .. } => Err(PathError::NotADirectory),
     }
 }
 
@@ -309,6 +309,31 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
         hash: blob_hash,
         kind: EntryKind::File,
         size: data.len() as u64,
+        mtime: now_unix(),
+        flags: 0,
+    };
+    insert_entry_at(root, &segs, entry, /* allow_replace */ true)
+}
+
+/// Publish a pre-built `Object::Chunked` manifest as a File at
+/// `path`. Used by `fs::StreamingWriter::finish` after it has
+/// `storage::put`'d every chunk and the manifest itself. Parent must
+/// exist; if `path` already names a File it's replaced, if it names a
+/// Dir errors with `AlreadyExists`.
+pub fn install_chunked_file(
+    root: &[u8; 32],
+    path: &str,
+    manifest_hash: [u8; 32],
+    total_size: u64,
+) -> Result<[u8; 32], PathError> {
+    let segs = parse_path(path)?;
+    if segs.is_empty() { return Err(PathError::InvalidPath); }
+
+    let entry = TreeEntry {
+        name: String::from(*segs.last().unwrap()),
+        hash: manifest_hash,
+        kind: EntryKind::File,
+        size: total_size,
         mtime: now_unix(),
         flags: 0,
     };
