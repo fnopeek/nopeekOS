@@ -782,7 +782,23 @@ impl VmContext {
                     let info: u64 = (vector as u64) | (1u64 << 31);
                     self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                 }
-                if pumped || crate::microvm::devices::nat::active_session_count() > 0 {
+                // Host→guest input. VMCB.EVENT_INJ holds ONE event per
+                // VMRUN. Only drain when we can also raise the IRQ
+                // (else events would sit in the ring with no IRQ and
+                // be lost) — so skip this tick entirely if net already
+                // claimed EVENT_INJ; the queue waits for the next.
+                let mut input_pending = false;
+                if !pumped
+                    && self.pci.virtio_input.drain_injected(self.host_base)
+                {
+                    let vector = self.pic.vector_for_irq(12);
+                    let info: u64 = (vector as u64) | (1u64 << 31);
+                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.consecutive_idle = 0;
+                    input_pending = true;
+                }
+                if pumped || input_pending
+                    || crate::microvm::devices::nat::active_session_count() > 0 {
                     self.consecutive_idle = 0;
                 } else {
                     self.consecutive_idle = self.consecutive_idle.saturating_add(1);

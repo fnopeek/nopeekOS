@@ -23,6 +23,7 @@ const SYS_PAUSE: u64 = 34;
 const SYS_ACCESS: u64 = 21;
 const SYS_EXECVE: u64 = 59;
 const SYS_EXIT: u64 = 60;
+const SYS_LSEEK: u64 = 8;
 const SYS_MKDIR: u64 = 83;
 const SYS_CHDIR: u64 = 80;
 const SYS_CHROOT: u64 = 161;
@@ -92,8 +93,13 @@ unsafe extern "C" fn rust_main() -> ! {
     // This is throwaway de-risk: proves clip/stride/pixel-format of
     // the render arm before the expensive LibreWolf bundle. Phase B
     // replaces it with cage + a real Wayland client.
-    fb_test_pattern(kmsg_fd);
-    say(kmsg_fd, b"[microvm-init] fb test pattern written; parking (window stays open)\n");
+    // Paints /dev/fb0, then reads /dev/input/event0 and toggles the
+    // colour on each key press — visibly proves the host→guest
+    // virtio-input pipe (Shade Surface branch → eventq). Returns only
+    // if fb/event device is absent; then we park so the window still
+    // persists.
+    fb_react_loop(kmsg_fd);
+    say(kmsg_fd, b"[microvm-init] fb/input unavailable; parking (window stays open)\n");
     loop {
         let _ = unsafe { syscall0(SYS_PAUSE) };
     }
@@ -176,44 +182,85 @@ fn try_exec_userspace(kmsg_fd: i64) {
     say(kmsg_fd, b"[microvm-init] execve failed -- falling back to pause\n");
 }
 
-/// 12.4 A4: paint /dev/fb0 a solid colour so the host's virtio-gpu
-/// gets non-zero TRANSFER+FLUSH frames — proves the Shade Surface
-/// bridge (clip / stride / pixel format) without any Wayland bundle.
-/// Throwaway de-risk; Phase B replaces it with a real client.
-///
-/// Scanout is 1280x720 BGRX (virtio-gpu fmt=2) = 3 686 400 bytes =
-/// exactly 900 * 4096. Writes a small stack buffer 900× rather than
-/// allocating 3.6 MB (PID-1 is no_std, no heap). DRM fbdev
-/// deferred-io flushes the dirtied region → our RESOURCE_FLUSH.
-fn fb_test_pattern(kmsg_fd: i64) {
-    let fd = unsafe { syscall3(SYS_OPEN, b"/dev/fb0\0".as_ptr() as u64, O_RDWR, 0) };
-    if fd < 0 {
-        say(kmsg_fd, b"[microvm-init] /dev/fb0 absent -- no fb test pattern\n");
-        return;
-    }
-    // BGRX little-endian: [B, G, R, X]. Cyan = B=0xFF, G=0xFF, R=0.
-    // If it shows up red/blue-swapped we learn the host format here
-    // (cheap) instead of through the LibreWolf bundle (expensive).
+/// Fill the whole 1280x720 BGRX scanout (= 3 686 400 B = 900 * 4096)
+/// with one colour. Seeks to 0 first so it can repaint in place.
+/// Small stack buffer written 900× — PID-1 is no_std, no 3.6 MB heap.
+/// DRM fbdev deferred-io flushes the dirtied region → RESOURCE_FLUSH.
+fn fb_paint(fd: i64, b: u8, g: u8, r: u8) {
     let mut buf = [0u8; 4096];
     let mut i = 0;
     while i < 4096 {
-        buf[i] = 0xFF;     // B
-        buf[i + 1] = 0xFF; // G
-        buf[i + 2] = 0x00; // R
+        buf[i] = b;
+        buf[i + 1] = g;
+        buf[i + 2] = r;
         buf[i + 3] = 0x00; // X
         i += 4;
     }
+    let _ = unsafe { syscall3(SYS_LSEEK, fd as u64, 0, 0 /* SEEK_SET */) };
     let mut chunks = 0;
     while chunks < 900 {
-        let n = unsafe {
-            syscall3(SYS_WRITE, fd as u64, buf.as_ptr() as u64, 4096)
-        };
+        let n = unsafe { syscall3(SYS_WRITE, fd as u64, buf.as_ptr() as u64, 4096) };
         if n <= 0 {
             break;
         }
         chunks += 1;
     }
-    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
+}
+
+/// 12.4 A4 + virtio-input mini-test. Paint the framebuffer cyan, then
+/// block on /dev/input/event0 and toggle cyan↔magenta on every key
+/// press. This visibly proves BOTH halves of the bridge without a
+/// Wayland bundle: guest→host pixels (Surface tile) AND host→guest
+/// input (Shade Surface branch → virtio-input eventq → evdev).
+/// Throwaway de-risk; Phase B replaces it with cage + a real client.
+///
+/// input_event on x86_64: { u64 sec; u64 usec; u16 type; u16 code;
+/// u32 value } = 24 bytes. type@16, value@20. EV_KEY=1, press=1.
+fn fb_react_loop(kmsg_fd: i64) {
+    let fb = unsafe { syscall3(SYS_OPEN, b"/dev/fb0\0".as_ptr() as u64, O_RDWR, 0) };
+    if fb < 0 {
+        say(kmsg_fd, b"[microvm-init] /dev/fb0 absent -- no fb test pattern\n");
+        return;
+    }
+    // Cyan = B=0xFF G=0xFF R=0 (BGRX LE). If it shows red/blue-swapped
+    // we learn the host pixel format cheaply here.
+    fb_paint(fb, 0xFF, 0xFF, 0x00);
+    say(kmsg_fd, b"[microvm-init] fb painted cyan; reading /dev/input/event0\n");
+
+    let ev = unsafe { syscall3(SYS_OPEN, b"/dev/input/event0\0".as_ptr() as u64, O_RDONLY, 0) };
+    if ev < 0 {
+        say(kmsg_fd, b"[microvm-init] /dev/input/event0 absent -- static cyan\n");
+        let _ = unsafe { syscall1(SYS_CLOSE, fb as u64) };
+        return;
+    }
+    say(kmsg_fd, b"[microvm-init] press any key in the window: colour toggles\n");
+
+    let mut magenta = false;
+    let mut rec = [0u8; 24];
+    loop {
+        // Blocking read — wakes on a delivered virtio-input event.
+        let n = unsafe { syscall3(SYS_READ, ev as u64, rec.as_mut_ptr() as u64, 24) };
+        if n != 24 {
+            // Short/again/error: keep the window alive, retry.
+            continue;
+        }
+        let etype = (rec[16] as u16) | ((rec[17] as u16) << 8);
+        let value = (rec[20] as u32)
+            | ((rec[21] as u32) << 8)
+            | ((rec[22] as u32) << 16)
+            | ((rec[23] as u32) << 24);
+        // EV_KEY (1), key-press (value == 1).
+        if etype == 1 && value == 1 {
+            magenta = !magenta;
+            if magenta {
+                fb_paint(fb, 0xFF, 0x00, 0xFF); // magenta
+                say(kmsg_fd, b"[microvm-init] key -> magenta\n");
+            } else {
+                fb_paint(fb, 0xFF, 0xFF, 0x00); // cyan
+                say(kmsg_fd, b"[microvm-init] key -> cyan\n");
+            }
+        }
+    }
 }
 
 /// Mount the read-only squashfs userspace bundle from `/dev/vdb` and

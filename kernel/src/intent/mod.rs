@@ -854,9 +854,26 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 while let Some(event) = crate::keyboard::read_event() {
                     // Mod+X keybinds (Mod+Q close, focus moves, …)
                     // still reach shade so the window stays
-                    // manageable. Everything else is dropped until
-                    // Phase B routes it into the guest.
-                    let _ = crate::shade::input::try_keybind_event(&event);
+                    // manageable. Non-keybind keys are forwarded into
+                    // the guest's virtio-input eventq.
+                    if crate::shade::input::try_keybind_event(&event) {
+                        continue;
+                    }
+                    // Placeholder evdev mapping: any key → one
+                    // KEY_SPACE press + SYN_REPORT, enough to prove the
+                    // host→guest input pipe (PID-1 mini-test reacts to
+                    // *any* event). Real per-key scancode→evdev mapping
+                    // is Phase B (with a real Wayland client).
+                    const EV_KEY: u16 = 0x01;
+                    const EV_SYN: u16 = 0x00;
+                    const KEY_SPACE: u16 = 57;
+                    const SYN_REPORT: u16 = 0;
+                    crate::microvm::devices::virtio_input_pci::push_input_event(
+                        EV_KEY, KEY_SPACE, 1,
+                    );
+                    crate::microvm::devices::virtio_input_pci::push_input_event(
+                        EV_SYN, SYN_REPORT, 0,
+                    );
                 }
 
                 for _ in 0..5_000 {

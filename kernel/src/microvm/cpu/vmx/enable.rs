@@ -1021,6 +1021,18 @@ impl VmContext {
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                 }
+                // Host→guest input: deliver queued keystrokes + IRQ the
+                // guest's virtio-input. VM-entry injects ONE IRQ, so
+                // only drain when net didn't claim it (events stay
+                // queued for the next tick — never drained without an
+                // IRQ, else they'd be lost in the ring).
+                if !pumped
+                    && self.pci.virtio_input.drain_injected(self.host_base)
+                {
+                    let vector = self.pic.vector_for_irq(12);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.consecutive_idle = 0;
+                }
                 // Pure timer-tick → idle counter advances. Reset when
                 // there are active NAT sessions (guest is blocked on
                 // I/O, not actually idle).
