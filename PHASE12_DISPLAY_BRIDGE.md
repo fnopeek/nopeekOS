@@ -80,7 +80,21 @@ widget `Mutex<BTreeMap>` scene/event pattern
 
 ## Component decisions
 
-### D1 — VM lifecycle: long-lived task on a dedicated core
+### D1' — Launch model: a windowed app, not a terminal intent
+
+Today `microvm linux` is an intent typed into a loop (loop = the
+shell); guest output spews as `[guest]` text into *that* terminal.
+That is the dev/debug path only. **Productised: launching the
+browser creates its own `WindowKind::Surface` window and binds the
+`VmContext` to that window**, exactly like drun/loft are their own
+windows via the app-spawn machinery (`npk_spawn_module`, launcher
+binding `sys/config/launcher`). The launching loop stays free. The
+launcher (drun entry / a `browser` verb / config) is **orthogonal**
+to the execution model — per invariant #2 the consumer side never
+depends on how or from where it was launched. The old terminal-intent
+path may remain as a debug affordance.
+
+### D1 — VM lifecycle: cooperative slice on Core 0 (see R1)
 
 The microvm stops being a blocking foreground intent. Launching the
 browser **spawns a long-lived VM task bound to a Shade window**, on a
@@ -149,16 +163,44 @@ stub from 12.4c). Defining the seam now (`WindowId → VmHandle →
 virtio-input queue`) keeps D1/D2 honest; the eventq fill is a
 separate task gated on this design.
 
-## Risks / open questions (ranked)
+## R1 — RESOLVED by research (2026-05-15): cooperative time-slice, NOT a dedicated core
 
-- **R1 (biggest) — substrate on a non-Core-0 dedicated core.** VMX
-  root + VMCS + host-state are per-CPU; prior art says microvm is
-  Core-0-bound (`is_core0_intent`; "run wifi on worker core crashes —
-  MMIO map_page conflict with 1 GB huge pages"). Bringing the
-  substrate up on a dedicated core, with its own page-table/MMIO
-  story, is a real substrate change and the foundational enabler.
-  **Everything else is straightforward once R1 is solved; nothing
-  works until it is.** Spike R1 in isolation first.
+The original spike proposed a dedicated non-Core-0 core. Deep code
+research **disproved that as the right first step**: `mm/paging.rs`
+`map_page` mutates a shared PML4 with no lock and `flush_tlb_all()`
+only reloads the calling core's CR3 → running the VM on core N
+concurrently with Core 0 is a TLB-incoherence / data-race **hard
+blocker**. The clean multi-core fix (global map_page lock + IPI TLB
+shootdown + per-core TSS + scheduler core-reservation) is real but
+large new SMP-correctness surface.
+
+**The clean fix is cooperative time-slicing on Core 0**, which the
+substrate already enables: `vmcs::run_guest_once` re-establishes
+`HOST_RSP`/`HOST_RIP` to its *own* stack frame just-in-time per call
+(`enable.rs:195`, `vmcs.rs:830`). So the run loop can return to its
+caller between any two `run_guest_once` calls and re-enter from a
+different frame transparently. The **only** invariant: VMX-root
+(VMXON) + the loaded VMCS + heap state must persist across slices —
+i.e. VMXOFF must not happen between slices. Normal kernel/Shade code
+running in VMX-root between slices is exactly what the hypervisor
+already does between VMRESUMEs, just longer.
+
+This eliminates ALL four SMP blockers (per-core TSS, paging race, TLB
+shootdown, scheduler reservation). The dedicated-core + SMP-correct
+paging is now a **later pure-performance optimisation**, not a
+correctness prerequisite.
+
+Design: a persistent `VmContext` (heap, single global `Option`) owns
+the VMXON region, VMCS, EPT, `host_base`, `PciBus`, `SerialState`,
+`GuestRegs`, `launched`, exit history. `vmx_open()` does VMXON + VMCS
+setup once; `run_slice(ctx, budget) -> {StillRunning | Exited}` runs
+the existing loop body bounded to N iters / a TSC deadline;
+`vmx_close()` does VMXOFF + free at teardown. The Core-0 event loop
+interleaves: render Shade → `run_slice` → render Shade → … The
+`is_core0_intent` gate stays (VM still on Core 0) — it just no longer
+*blocks* Core 0.
+
+Remaining risks (smaller):
 - **R2 — resize round-trip latency.** Dragging a tile split would
   spam config-change IRQs → guest mode reconfigures. Needs debounce;
   acceptable to pin size in the first slice.
@@ -171,10 +213,13 @@ separate task gated on this design.
 Goal: prove R1 + the handoff + tiling integration with **no Mesa, no
 big bundle**.
 
-1. **R1 spike**: microvm as a long-lived task on a dedicated core,
-   substrate brought up there, Core 0 stays free (Shade keeps
-   rendering a terminal while the VM runs a trivial guest). This is
-   the gate — if R1 is intractable the whole approach changes.
+1. **R1 (resolved approach)**: split the VMXON bracket into
+   `vmx_open`/`vmx_close`, hoist run-loop locals into a persistent
+   heap `VmContext`, add `run_slice(budget)`. Step 1a:
+   behaviour-preserving (open → slice-loop-to-exit → close, identical
+   to today). Step 1b: bound the slice + interleave with Shade render
+   on Core 0 so a terminal keeps redrawing while the guest runs.
+   Mirror vmx → svm. This is the gate.
 2. `WindowKind::Surface` + `SURFACES` registry + double-buffer (D2).
 3. virtio-gpu `RESOURCE_FLUSH` → back buffer + dirty (D3); Shade
    `render_window()` Surface arm composites the tile.
@@ -185,6 +230,36 @@ big bundle**.
    tiling — the architecture-defining risks — end to end.
 5. Then: input injection (D5), resize round-trip (D4), and only
    afterwards the real Mesa/cage/LibreWolf bundle.
+
+## Forward-compatibility contract (binding — guards against a future rewrite)
+
+The cooperative-slice choice is a **strict prefix** of the eventual
+multi-core design, not a throwaway. To keep it that way, these
+invariants are binding for ALL code written from here on. Violating
+one is the only thing that turns "later optimisation" into a rewrite:
+
+1. **`VmContext` owns all VM state**; the hypervisor hot path
+   (`run_guest_once`, exit handlers) stays core-agnostic — it already
+   self-establishes HOST_RSP/RIP per call. The time-slice→dedicated
+   -core migration must be: call the *same* `run_slice` from a
+   different scheduler context + add the *additive* SMP-paging fixes
+   (per-core TSS, global `map_page` lock, IPI TLB shootdown). Nothing
+   in `VmContext`/`run_slice`/exit-handlers may change for that move.
+2. **The consumer side never knows which core the VM runs on.** Shade,
+   the Window/`GuestSurface` model, input routing communicate with
+   the VM ONLY through the handle-keyed, Mutex-guarded surface
+   double-buffer + input queues. No code may assume "one VM", "VM is
+   inline on Core 0", or call into the VM synchronously. Registry is
+   `WindowId → VmContext handle`, N-VM-shaped from day one even though
+   only one exists now.
+3. **The `is_core0_intent` gate is a *scheduling* fact, not an API.**
+   Nothing outside the substrate may branch on "VM is on Core 0".
+
+If these hold, multi-core is additive + localized. If any is broken,
+single-core assumptions leak into the consumer side and the cost
+becomes unbounded. This section is the explicit answer to "are we
+saving LoC now and paying with a massive rewrite later" — no, *iff*
+these three hold.
 
 ## Explicitly de-scoped here
 
