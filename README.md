@@ -421,9 +421,14 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
       window scaled into its content rect; tiling invariant, never
       fullscreen; render-on-FLUSH). Guest framebuffer composited as a
       normal tile, HW-validated with a no-bundle PID-1 fb pattern.
-- [x] 12.4e virtio-input event injection (v0.169.0 — Shade Surface
-      branch → `INPUT_Q` → eventq + IRQ; PID-1 react-test toggles
-      colour on key). Real per-scancode evdev mapping = Phase B.
+- [x] 12.4e virtio-input **keyboard** injection (v0.169.3, HW-validated
+      — Shade Surface branch → `INPUT_Q` → eventq + IRQ; every key
+      toggles the PID-1 react-test. Earned: advertise full 0..=255
+      EV_KEY bitmap; send press+SYN+**release**+SYN or the input core
+      de-dupes). Real per-scancode mapping = Phase B.
+- [ ] 12.4e' virtio-input **mouse/pointer** injection (EV_REL/ABS +
+      BTN_*; Shade `xhci::poll_mouse` → eventq) — next
+- [ ] strip throttled virtio-input diagnostics once mouse lands
 - [ ] 12.4d virtio-gpu native reflow (D4 — guest renders at the tile
       size via GET_DISPLAY_INFO instead of host-side scaling) +
       cross-domain context (later perf path)
