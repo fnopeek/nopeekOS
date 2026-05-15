@@ -281,6 +281,27 @@ fn do_http_request(args: &str, use_tls: bool) {
     let body_start = if header_end < response.len() { header_end + 4 } else { response.len() };
 
     if let Some(name) = store_as {
+        // Guard: don't write a "successful" file from a redirect or
+        // error response. The legacy non-TLS path doesn't follow
+        // 3xx, so `http github.com/...` (which 301s to https) would
+        // otherwise store a 0-byte file and print "Stored". Point
+        // the user at `https` instead of silently succeeding.
+        let status = core::str::from_utf8(&response[..header_end])
+            .ok()
+            .and_then(parse_status_code)
+            .unwrap_or(0);
+        let body = &response[body_start..];
+        if !(200..300).contains(&status) {
+            kprintln!("[npk] HTTP {} — not storing.", status);
+            if (300..400).contains(&status) && !use_tls {
+                kprintln!("[npk] (plain http doesn't follow redirects — use `https`)");
+            }
+            return;
+        }
+        if body.is_empty() {
+            kprintln!("[npk] Empty body — not storing.");
+            return;
+        }
         let store_path = match resolve_store_target(&name, path) {
             Some(p) => p,
             None => {
@@ -288,7 +309,6 @@ fn do_http_request(args: &str, use_tls: bool) {
                 return;
             }
         };
-        let body = &response[body_start..];
         match crate::npkfs::upsert(&store_path, body, capability::CAP_NULL) {
             Ok(hash) => {
                 kprint!("[npk] Stored '{}' ({} bytes, hash: ", store_path, body.len());
@@ -743,16 +763,126 @@ fn parse_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+/// Chunked-decoder state, carried across TLS-record boundaries.
+enum ChunkSt {
+    /// Accumulating the `<hex>[;ext]\r\n` size line.
+    Size,
+    /// Inside a chunk's payload; `usize` bytes still to copy.
+    Data(usize),
+    /// Expecting the `\r` of the CRLF that follows chunk data.
+    AfterCr,
+    /// Expecting the `\n` of that CRLF.
+    AfterLf,
+    /// Saw the 0-size chunk — body complete.
+    Done,
+}
+
+/// Consume one input slice (header `leading` bytes, then each TLS
+/// record), advancing the decoder and pushing payload slices to
+/// `on_chunk`. Zero-copy: payload is handed out as sub-slices of
+/// `input` — no intermediate buffer, no `Vec::drain`. Returns
+/// `Ok(true)` once the terminal 0-chunk is seen.
+fn chunked_feed(
+    input: &[u8],
+    state: &mut ChunkSt,
+    size_line: &mut alloc::vec::Vec<u8>,
+    delivered: &mut usize,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<bool, &'static str> {
+    let mut i = 0;
+    while i < input.len() {
+        match *state {
+            ChunkSt::Size => {
+                // Accumulate up to (not including) the next '\n'.
+                let mut j = i;
+                while j < input.len() && input[j] != b'\n' {
+                    j += 1;
+                }
+                if size_line.len() + (j - i) > 64 {
+                    return Err("chunk: size line too long");
+                }
+                size_line.extend_from_slice(&input[i..j]);
+                if j < input.len() {
+                    // input[j] == '\n' — the size line is complete.
+                    i = j + 1;
+                    if size_line.last() == Some(&b'\r') {
+                        size_line.pop();
+                    }
+                    // Chunk extensions (";name=val") are ignored.
+                    let hex_end = size_line
+                        .iter()
+                        .position(|&b| b == b';')
+                        .unwrap_or(size_line.len());
+                    let hex = core::str::from_utf8(&size_line[..hex_end])
+                        .map_err(|_| "chunk: bad size line")?
+                        .trim();
+                    let sz = usize::from_str_radix(hex, 16)
+                        .map_err(|_| "chunk: bad size hex")?;
+                    size_line.clear();
+                    if sz == 0 {
+                        *state = ChunkSt::Done;
+                        return Ok(true);
+                    }
+                    *state = ChunkSt::Data(sz);
+                } else {
+                    // Ran out of input mid-line; resume next record.
+                    i = j;
+                }
+            }
+            ChunkSt::Data(remaining) => {
+                let avail = input.len() - i;
+                let take = remaining.min(avail);
+                on_chunk(&input[i..i + take])?;
+                *delivered = delivered.saturating_add(take);
+                if *delivered > max_size {
+                    return Err("chunk: body exceeds max_size");
+                }
+                i += take;
+                let left = remaining - take;
+                *state = if left == 0 {
+                    ChunkSt::AfterCr
+                } else {
+                    ChunkSt::Data(left)
+                };
+            }
+            ChunkSt::AfterCr => {
+                // The byte should be '\r'; consume it if so. Either
+                // way move on — a non-CR here on valid chunked never
+                // happens, and tolerating it can't desync because
+                // the size-line parser re-validates.
+                if input[i] == b'\r' {
+                    i += 1;
+                }
+                *state = ChunkSt::AfterLf;
+            }
+            ChunkSt::AfterLf => {
+                if input[i] == b'\n' {
+                    i += 1;
+                }
+                *state = ChunkSt::Size;
+            }
+            ChunkSt::Done => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
 /// True streaming chunked-transfer decoder (RFC 7230 §4.1).
 ///
 /// Parses the chunk-size framing exactly and pushes only decoded
-/// payload bytes through `on_chunk` as they arrive — never buffering
-/// the whole body and never scanning for an end-of-body magic
-/// sequence (which is unsound on binary payloads, where
-/// `30 0D 0A` = "0\r\n" occurs by chance). A small `carry` buffer
-/// holds bytes received but not yet consumed; it stays around one
-/// TLS-record in size because payload is drained to the sink and
-/// chunk-size lines are tiny.
+/// payload bytes through `on_chunk` as they arrive. Linear and
+/// zero-copy: each TLS record is walked in place and payload is
+/// handed out as sub-slices — there is NO growing carry buffer and
+/// NO `Vec::drain`. (The previous implementation drained from the
+/// front of a `Vec` that it also extended at the back, which is
+/// O(n²) over a transfer: fine for a 13 KB repo, ~31 KiB/s by
+/// 500 KB, effectively dead at 250 MB. The Content-Length path was
+/// always ~100× faster purely because it never did this.)
+///
+/// The only state kept across records is the decoder enum plus a
+/// small `size_line` accumulator (a chunk-size line that straddles
+/// a record boundary — capped at 64 bytes).
 ///
 /// Returns the number of payload bytes delivered.
 fn stream_chunked_body(
@@ -762,94 +892,32 @@ fn stream_chunked_body(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<usize, &'static str> {
-    // Decoder state: reading a chunk-size line, copying N data
-    // bytes, swallowing the CRLF after a chunk's data, or done.
-    enum St { Size, Data(usize), AfterData, Done }
-
-    let mut carry: alloc::vec::Vec<u8> = leading.to_vec();
-    let mut state = St::Size;
+    let mut state = ChunkSt::Size;
+    let mut size_line: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(32);
     let mut delivered: usize = 0;
-    // One-shot diagnostics: did the decoder ever parse a chunk-size
-    // line, and did the wire ever yield body bytes?
-    let mut logged_first_size = false;
-    let mut logged_first_recv = false;
-    crate::kprintln!("[npk]   chunked decoder: leading {} B", carry.len());
+
+    if !leading.is_empty()
+        && chunked_feed(leading, &mut state, &mut size_line, &mut delivered, max_size, on_chunk)?
+    {
+        return Ok(delivered);
+    }
 
     loop {
-        // Drain as much as possible from `carry` before asking the
-        // network for more.
-        let progressed = match state {
-            St::Size => {
-                if let Some(p) = carry.windows(2).position(|w| w == b"\r\n") {
-                    let line = &carry[..p];
-                    // Chunk extensions (";name=val") are ignored.
-                    let hex_end = line.iter().position(|&b| b == b';').unwrap_or(line.len());
-                    let hex = core::str::from_utf8(&line[..hex_end])
-                        .map_err(|_| "chunk: bad size line")?
-                        .trim();
-                    let sz = usize::from_str_radix(hex, 16)
-                        .map_err(|_| "chunk: bad size hex")?;
-                    if !logged_first_size {
-                        crate::kprintln!("[npk]   first chunk size = {} (0x{})", sz, hex);
-                        logged_first_size = true;
-                    }
-                    carry.drain(..p + 2);
-                    state = if sz == 0 { St::Done } else { St::Data(sz) };
-                    true
-                } else {
-                    false
-                }
-            }
-            St::Data(remaining) => {
-                if carry.is_empty() {
-                    false
-                } else {
-                    let take = remaining.min(carry.len());
-                    on_chunk(&carry[..take])?;
-                    delivered = delivered.saturating_add(take);
-                    if delivered > max_size {
-                        return Err("chunk: body exceeds max_size");
-                    }
-                    carry.drain(..take);
-                    state = if remaining - take == 0 {
-                        St::AfterData
-                    } else {
-                        St::Data(remaining - take)
-                    };
-                    true
-                }
-            }
-            St::AfterData => {
-                // Consume the CRLF that terminates a chunk's data.
-                if carry.len() >= 2 {
-                    carry.drain(..2);
-                    state = St::Size;
-                    true
-                } else {
-                    false
-                }
-            }
-            St::Done => return Ok(delivered),
-        };
-
-        if progressed {
-            continue;
-        }
-
-        // Need more bytes from the wire.
         match tls_recv_poll(tls, buf) {
             Ok(0) => continue, // transient; tls_recv_poll caps the wait
             Ok(n) => {
-                if !logged_first_recv {
-                    crate::kprintln!("[npk]   first wire recv = {} B", n);
-                    logged_first_recv = true;
+                if chunked_feed(
+                    &buf[..n],
+                    &mut state,
+                    &mut size_line,
+                    &mut delivered,
+                    max_size,
+                    on_chunk,
+                )? {
+                    return Ok(delivered);
                 }
-                carry.extend_from_slice(&buf[..n]);
             }
-            Err(e) => {
-                crate::kprintln!("[npk]   chunked recv error (delivered {} B)", delivered);
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
     }
 }
