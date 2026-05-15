@@ -6,6 +6,12 @@ use super::{parse_ip, resolve_path};
 
 const HTTP_MAX_RESPONSE: usize = 128 * 1024; // 128 KB
 
+/// Streaming-download progress heartbeat interval. A large download
+/// on the synchronous path blocks the shell until it finishes; a
+/// line every 8 MiB is the "still alive, not crashed" signal so the
+/// freeze is legible rather than alarming.
+const PROGRESS_STEP: usize = 8 * 1024 * 1024;
+
 /// Flags parsed from HTTP/HTTPS arguments.
 struct HttpFlags {
     headers_only: bool,  // -h: show only headers
@@ -104,6 +110,7 @@ fn do_http_request(args: &str, use_tls: bool) {
                 Err(e) => { kprintln!("[npk] npkfs open failed: {:?}", e); return; }
             };
             let mut total: usize = 0;
+            let mut next_report: usize = PROGRESS_STEP;
             // No max_size cap for user-initiated downloads — the
             // ceiling is whatever fits on disk. We still defend the
             // kernel via the per-chunk allocator (each 16 MiB chunk
@@ -117,6 +124,10 @@ fn do_http_request(args: &str, use_tls: bool) {
                         return Err("npkfs write failed");
                     }
                     total = total.saturating_add(chunk.len());
+                    if total >= next_report {
+                        kprintln!("[npk]   … {} MiB", total / (1024 * 1024));
+                        next_report = total + PROGRESS_STEP;
+                    }
                     Ok(())
                 },
             );

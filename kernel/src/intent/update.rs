@@ -341,6 +341,12 @@ pub fn update_all_assets() -> usize {
         let mut hasher = crate::tls::sha256::Sha384::new();
         let mut total_bytes: usize = 0;
         let mut write_err: Option<&'static str> = None;
+        // Progress heartbeat every 8 MiB. The asset size is known
+        // from the manifest so we can show a percentage — the
+        // download blocks the shell, the line proves it's alive.
+        const STEP: usize = 8 * 1024 * 1024;
+        let expected = entry.size;
+        let mut next_report: usize = STEP;
         let stream_result = super::http::https_get_streaming(
             asset_host_str,
             asset_path_str,
@@ -351,6 +357,16 @@ pub fn update_all_assets() -> usize {
                 if let Err(_) = writer.write(chunk) {
                     write_err = Some("npkfs write failed");
                     return Err("npkfs write failed");
+                }
+                if total_bytes >= next_report {
+                    let pct = if expected > 0 {
+                        (total_bytes as u64 * 100 / expected as u64) as usize
+                    } else { 0 };
+                    kprintln!("[npk]     {} / {} MiB ({}%)",
+                        total_bytes / (1024 * 1024),
+                        expected / (1024 * 1024),
+                        pct);
+                    next_report = total_bytes + STEP;
                 }
                 Ok(())
             },

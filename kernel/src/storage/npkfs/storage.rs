@@ -527,7 +527,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     fs.pending_old_blocks.extend(old_blocks);
     let t_btree = rdtsc();
 
-    if write_data.len() >= 256 * 1024 {
+    if super::FS_PERF_LOG && write_data.len() >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
         kprintln!("[put] {}KB dedup={} hash={} enc={} alloc={} dma={} btree={} (us)",
             write_data.len() / 1024,
@@ -622,7 +622,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     // tag (or BLAKE3 collisions, ~2¹²⁸ unreachable). Removing it
     // saves ~600 µs per 1 MB read (~25% throughput gain).
 
-    if total_bytes >= 256 * 1024 {
+    if super::FS_PERF_LOG && total_bytes >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
         kprintln!("[get] {}KB lock={} btree={} alloc={} dma={} dec={} (us)",
             total_bytes / 1024,
