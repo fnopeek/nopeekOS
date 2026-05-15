@@ -293,9 +293,15 @@ build_installer() {
 # Created once on demand and kept between runs so npkFS state survives.
 ensure_disk_img() {
     if [ ! -f "$DISK_IMG" ]; then
-        log "Creating 1GB disk image..."
-        dd if=/dev/zero of="$DISK_IMG" bs=1M count=1024 2>/dev/null
-        ok "Disk image: $DISK_IMG"
+        # 16 GiB sparse — only host blocks for data actually written.
+        # 1 GiB was too small once streaming downloads + the Mesa
+        # (267 MB) / LibreWolf (~300-500 MB) userspace bundles landed,
+        # and failed/aborted streaming writes leak orphan chunk blobs
+        # until the next gc(), so headroom matters. Sparse keeps the
+        # host cost == actual npkFS usage.
+        log "Creating 16GB sparse disk image..."
+        truncate -s 16G "$DISK_IMG"
+        ok "Disk image: $DISK_IMG (16G sparse)"
     fi
 }
 
