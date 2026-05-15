@@ -682,27 +682,38 @@ impl Compositor {
                 });
             }
             crate::shade::window::WindowKind::Surface => {
-                // Raw guest framebuffer → tile. Clip (no scale) into
-                // the content rect, top-left aligned. Rounded-corner
-                // AA is widget-only polish; a bitmap surface just
-                // clips. One memcpy per row.
+                // Raw guest framebuffer → tile. The guest renders a
+                // fixed size (1280x720); the tile is whatever dwindle
+                // gave us. Nearest-neighbour SCALE to fill the content
+                // rect exactly, strictly bounded to it (clamped to the
+                // framebuffer) so it never overdraws the border or a
+                // neighbour tile. (D4 later: tell the guest the tile
+                // size via virtio-gpu GET_DISPLAY_INFO so it reflows
+                // natively instead of us scaling.)
                 crate::shade::surface::with_front(win.id.0, |px, sw, sh| {
-                    if px.is_empty() || sw == 0 { return; }
+                    if px.is_empty() || sw == 0 || sh == 0 || cw == 0 || ch == 0 {
+                        return;
+                    }
                     let pitch = info.pitch as usize;
-                    let x1 = (cx + cw).min(cx + sw).min(info.width);
-                    let y1 = (cy + ch).min(cy + sh).min(info.height);
-                    let span = x1.saturating_sub(cx) as usize;
-                    if span == 0 { return; }
-                    for dy in cy..y1 {
-                        let src_base = (dy - cy) as usize * sw as usize;
-                        let dst_off = dy as usize * pitch + cx as usize * 4;
-                        // SAFETY: span ≤ sw and ≤ fb_w-cx; src_base+span
-                        // ≤ sw*sh = px.len(); dst within framebuffer.
-                        unsafe {
-                            let dst = shadow.add(dst_off) as *mut u32;
-                            core::ptr::copy_nonoverlapping(
-                                px.as_ptr().add(src_base), dst, span,
-                            );
+                    let dw = cw.min(info.width.saturating_sub(cx));
+                    let dh = ch.min(info.height.saturating_sub(cy));
+                    for ry in 0..dh {
+                        let sy = (ry as u64 * sh as u64 / ch as u64) as u32;
+                        if sy >= sh { continue; }
+                        let src_row = sy as usize * sw as usize;
+                        let dst_off = (cy + ry) as usize * pitch + cx as usize * 4;
+                        // SAFETY: dst row is dw u32s starting at the
+                        // content rect, clamped within the framebuffer.
+                        let dst = unsafe {
+                            core::slice::from_raw_parts_mut(
+                                shadow.add(dst_off) as *mut u32, dw as usize,
+                            )
+                        };
+                        for rx in 0..dw {
+                            let sx = (rx as u64 * sw as u64 / cw as u64) as u32;
+                            if (sx as usize) < sw as usize {
+                                dst[rx as usize] = px[src_row + sx as usize];
+                            }
                         }
                     }
                 });

@@ -426,6 +426,13 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 sync_session_to_terminal(session);
                 return None;
             }
+            // Same for a Surface (microvm) window — bail so run_loop
+            // enters the Surface-focused branch instead of leaving us
+            // wedged reading input for a window with no session.
+            if crate::shade::focused_surface_id().is_some() {
+                sync_session_to_terminal(session);
+                return None;
+            }
 
             let ft = crate::shade::terminal::active_idx();
 
@@ -820,6 +827,43 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // If focused window has a running WASM app or intent, route keys / wait.
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
+
+            // 12.4: Surface-kind (microvm) window focused. It has no
+            // terminal session (idx 255) — without this branch the
+            // terminal path below wedges and shade keybinds never run,
+            // so the window can't be closed (observed: focus the VM
+            // window → everything frozen). Here: keep Core 0 polling
+            // (so the guest keeps slicing + the surface keeps
+            // compositing), let shade keybinds through (Mod+Q closes
+            // it → VM torn down), swallow other keys for now (Phase B
+            // forwards them to the guest's virtio-input eventq).
+            if crate::shade::focused_surface_id().is_some() {
+                crate::shade::poll_render();
+                crate::net::poll();
+                crate::microvm::vm_poll_slice();
+
+                while let Some(evt) = crate::xhci::poll_mouse() {
+                    crate::shade::handle_mouse(&evt);
+                }
+                if crate::shade::take_deferred_render() {
+                    crate::shade::render_frame();
+                }
+                if let Some(action) = crate::shade::input::poll_action() {
+                    crate::shade::handle_action(action);
+                }
+                while let Some(event) = crate::keyboard::read_event() {
+                    // Mod+X keybinds (Mod+Q close, focus moves, …)
+                    // still reach shade so the window stays
+                    // manageable. Everything else is dropped until
+                    // Phase B routes it into the guest.
+                    let _ = crate::shade::input::try_keybind_event(&event);
+                }
+
+                for _ in 0..5_000 {
+                    core::hint::spin_loop();
+                }
+                continue;
+            }
 
             // Phase 10: widget-kind window focused — keys go into the
             // per-window widget event queue, never the terminal / WASM
