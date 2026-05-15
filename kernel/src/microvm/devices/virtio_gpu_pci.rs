@@ -611,12 +611,17 @@ impl VirtioGpu {
             kprintln!("[gpu] FLUSH#{} res={} (logging throttled)", n + 1, resource_id);
         }
 
-        // Bridge to host framebuffer — blit the just-flushed resource
-        // into the top-left of shade's display surface so the operator
-        // sees what the guest is drawing. Each FLUSH = one frame, so
-        // fbcon's animation falls out naturally. shade may overdraw
-        // later (no z-ordering yet) but the next FLUSH refreshes.
-        blit_to_host_fb(pix, r.width, r.height);
+        // Bridge to Shade. If the VM is bound to a Surface window
+        // (normal case), the just-flushed frame becomes that window's
+        // tile content — composited with z-order, the tiling
+        // invariant holds (never fullscreen). Fallback to the legacy
+        // fullscreen blit only if unbound (e.g. compositor not up).
+        let wid = crate::microvm::vm_window();
+        if wid != 0 {
+            crate::shade::surface::write_frame(wid, pix, r.width, r.height);
+        } else {
+            blit_to_host_fb(pix, r.width, r.height);
+        }
     }
 
     pub fn pci_read_dword(&self, reg: u8) -> u32 {
