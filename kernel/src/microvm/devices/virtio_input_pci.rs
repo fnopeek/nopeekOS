@@ -118,7 +118,15 @@ pub fn push_input_event(etype: u16, code: u16, value: u32) {
         q.pop_front();
     }
     q.push_back((etype, code, value));
+    let n = PUSH_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n < 8 {
+        kprintln!("[virtio-input] push #{} type={} code={} val={} (qlen={})",
+                  n + 1, etype, code, value, q.len());
+    }
 }
+
+static PUSH_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static DRAIN_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
@@ -236,14 +244,33 @@ impl VirtioInput {
         if pending.is_empty() {
             return false;
         }
+        let dn = DRAIN_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let q0_en = self.queues.first().map(|q| q.enable).unwrap_or(0);
+        let q0_sz = self.queues.first().map(|q| q.size).unwrap_or(0);
         let q = match self.queues.get_mut(0) {
             Some(q) if q.enable != 0 && q.size != 0 => q,
-            _ => return false,
+            _ => {
+                if dn < 8 {
+                    kprintln!("[virtio-input] drain#{}: q0 not ready (enable={} size={}, {} pending)",
+                              dn + 1, q0_en, q0_sz, pending.len());
+                }
+                return false;
+            }
         };
         let avail_top = match avail_idx(host_base, q.driver_gpa()) {
             Some(v) => v,
-            None => return false,
+            None => {
+                if dn < 8 {
+                    kprintln!("[virtio-input] drain#{}: avail_idx read failed (driver_gpa={:#x})",
+                              dn + 1, q.driver_gpa());
+                }
+                return false;
+            }
         };
+        if dn < 8 {
+            kprintln!("[virtio-input] drain#{}: pending={} avail_top={} last_avail={} size={}",
+                      dn + 1, pending.len(), avail_top, q.last_avail_idx, q.size);
+        }
 
         let mut any = false;
         while q.last_avail_idx != avail_top {
@@ -269,6 +296,10 @@ impl VirtioInput {
 
         if any {
             self.isr |= 1;
+        }
+        if dn < 8 {
+            kprintln!("[virtio-input] drain#{}: delivered={} new_last_avail={} used_idx={}",
+                      dn + 1, any, self.queues[0].last_avail_idx, self.queues[0].used_idx);
         }
         any
     }
