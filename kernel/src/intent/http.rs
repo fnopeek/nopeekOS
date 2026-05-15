@@ -89,7 +89,13 @@ fn do_http_request(args: &str, use_tls: bool) {
     // anything large enough to need streaming.
     if use_tls {
         if let Some(name) = &store_as {
-            let store_path = resolve_path(name);
+            let store_path = match resolve_store_target(name, path) {
+                Some(p) => p,
+                None => {
+                    kprintln!("[npk] '{}' is a directory and the URL has no filename — give an explicit name (> dir/name)", name);
+                    return;
+                }
+            };
             if !flags.silent {
                 kprintln!("[npk] Streaming to npkFS: {}", store_path);
             }
@@ -254,7 +260,13 @@ fn do_http_request(args: &str, use_tls: bool) {
     let body_start = if header_end < response.len() { header_end + 4 } else { response.len() };
 
     if let Some(name) = store_as {
-        let store_path = resolve_path(&name);
+        let store_path = match resolve_store_target(&name, path) {
+            Some(p) => p,
+            None => {
+                kprintln!("[npk] '{}' is a directory and the URL has no filename — give an explicit name (> dir/name)", name);
+                return;
+            }
+        };
         let body = &response[body_start..];
         match crate::npkfs::upsert(&store_path, body, capability::CAP_NULL) {
             Ok(hash) => {
@@ -288,6 +300,55 @@ fn print_response_data(data: &[u8]) {
     match core::str::from_utf8(data) {
         Ok(text) => kprintln!("{}", text),
         Err(_) => kprintln!("[npk] ({} bytes, binary)", data.len()),
+    }
+}
+
+/// Resolve a `> dest` store target, wget-style. `url_path` is the
+/// HTTP path of the request (everything after the host) and is used
+/// to infer a filename when `dest` names a directory rather than a
+/// file:
+///   `.`        → URL basename, in CWD
+///   `dir/`     → URL basename, in `dir`
+///   `dir/.`    → URL basename, in `dir`
+///   `dir/name` → exact (unchanged behavior)
+///
+/// Returns the CWD-resolved npkFS path, or `None` if a basename was
+/// required but the URL has none (path ends in `/`, or is just `/`).
+fn resolve_store_target(dest: &str, url_path: &str) -> Option<String> {
+    let dest = dest.trim();
+    let wants_basename =
+        dest.is_empty() || dest == "." || dest.ends_with('/') || dest.ends_with("/.");
+
+    if !wants_basename {
+        return Some(resolve_path(dest));
+    }
+
+    let base = url_basename(url_path)?;
+    // Strip the trailing dir markers ("." / "/") and join the
+    // inferred basename onto whatever directory prefix remains.
+    let dir = dest.trim_end_matches('.').trim_end_matches('/');
+    let joined = if dir.is_empty() {
+        base
+    } else {
+        alloc::format!("{}/{}", dir, base)
+    };
+    Some(resolve_path(&joined))
+}
+
+/// Last path segment of an HTTP URL path, minus any `?query` or
+/// `#fragment`. `None` when there is no segment (e.g. `/` or
+/// `/dir/`).
+fn url_basename(url_path: &str) -> Option<String> {
+    let p = url_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url_path)
+        .trim_end_matches('/');
+    let base = p.rsplit('/').next().unwrap_or("");
+    if base.is_empty() {
+        None
+    } else {
+        Some(String::from(base))
     }
 }
 
