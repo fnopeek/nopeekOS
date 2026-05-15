@@ -830,6 +830,12 @@ fn run_linux_loop(
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if pci.virtio_blk_sqfs.bar0_in_range(gpa) {
+                    // Same handler — VirtioBlk carries its own IRQ line.
+                    if handle_mmio_npf_blk(vmcb, regs, &mut pci.virtio_blk_sqfs, &pic, gpa, host_base) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 }
                 serial.flush();
                 kprintln!(
@@ -1040,7 +1046,7 @@ fn handle_mmio_npf_blk(
     if let Some(qidx) = blk.take_pending_kick() {
         let advanced = blk.service_queues(qidx, host_base);
         if advanced {
-            let vector = pic.vector_for_irq(11);
+            let vector = pic.vector_for_irq(blk.irq_line());
             // VMCB.EVENT_INJ — vector | type<<8 | valid<<31. Type 0 =
             // external interrupt. APM Vol 2 §15.20.
             let info: u64 = (vector as u64) | (1u64 << 31);

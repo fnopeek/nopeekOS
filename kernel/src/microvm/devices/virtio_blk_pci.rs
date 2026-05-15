@@ -88,6 +88,20 @@ const DC_CAPACITY_HI:    u32 = 0x04; // u32
 const NUM_QUEUES: u16 = 1;
 const MAX_QUEUE_SIZE: u16 = 256;
 
+/// virtio-blk feature bits (§5.2.3). We only ever advertise RO.
+const VIRTIO_BLK_F_RO: u32 = 1 << 5;
+
+/// Second blk device (slot 5) — read-only squashfs userspace bundle.
+/// Distinct BAR window above virtio-input's (0xFE00_C000 + 0x4000).
+pub const SQFS_BAR0_BASE: u64 = 0xFE01_0000;
+/// IRQ line for the sqfs device. 9/10/11/12 are taken by
+/// gpu/net/blk/input; 5 is a free master-PIC line.
+const SQFS_IRQ_LINE: u8 = 5;
+/// npkFS object holding the userspace `.sqfs`. Populated by the OTA
+/// asset pipeline (Bundle milestone); absent until then → empty
+/// backing → guest squashfs mount fails → PID-1 falls back.
+const SQFS_PATH: &str = "sys/microvm/userspace.sqfs";
+
 /// Per-queue state.
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
@@ -133,6 +147,19 @@ pub struct VirtioBlk {
     // ISR latch — bit 0 = vq notification, read-to-clear.
     isr: u8,
 
+    /// Power-on default BAR0 base (Linux reassigns during PCI
+    /// enumeration; this only matters pre-enumeration + as a sane
+    /// default). Distinct per instance so two blk devices never
+    /// collide before Linux allocates their windows.
+    bar0_base_init: u64,
+    /// PCI interrupt line (config 0x3C) + the 8259 line we inject on.
+    irq_line: u8,
+    /// Advertise VIRTIO_BLK_F_RO and refuse writes.
+    read_only: bool,
+    /// Whether `save()` persists the backing to npkFS. The sqfs
+    /// bundle is immutable, distributed via OTA — never persisted.
+    persist: bool,
+
     /// Backing store for the virtual disk. Sized to capacity.
     /// In-RAM for 12.2.3; will be replaced by an npkFS-backed,
     /// AES-GCM-encrypted profile-image in 12.2.4+.
@@ -152,10 +179,31 @@ pub struct VirtioBlk {
 const CAPACITY_SECTORS: u64 = 8192; // 4 MB
 
 impl VirtioBlk {
+    /// Slot 1 — the read-write, npkFS-persisted profile image.
     pub fn new() -> Self {
+        Self::with(BAR0_BASE, 11, false, true, load_or_init_backing(), CAPACITY_SECTORS)
+    }
+
+    /// Slot 5 — the read-only squashfs userspace bundle. Backing is
+    /// loaded from npkFS; if the object is absent the device comes up
+    /// with a tiny zero buffer so the guest's squashfs mount cleanly
+    /// fails and PID-1 falls back to the smoke path.
+    pub fn new_sqfs() -> Self {
+        let (backing, sectors) = load_sqfs_backing();
+        Self::with(SQFS_BAR0_BASE, SQFS_IRQ_LINE, true, false, backing, sectors)
+    }
+
+    fn with(
+        bar0_base: u64,
+        irq_line: u8,
+        read_only: bool,
+        persist: bool,
+        backing: alloc::vec::Vec<u8>,
+        capacity_sectors: u64,
+    ) -> Self {
         Self {
-            bar0_lo: BAR0_BASE as u32,
-            bar0_hi: (BAR0_BASE >> 32) as u32,
+            bar0_lo: bar0_base as u32,
+            bar0_hi: (bar0_base >> 32) as u32,
             bar0_lo_sized: false,
             bar0_hi_sized: false,
             device_feature_select: 0,
@@ -173,13 +221,22 @@ impl VirtioBlk {
                 last_avail_idx: 0,
                 used_idx: 0,
             }; NUM_QUEUES as usize],
-            capacity_sectors: CAPACITY_SECTORS,
+            capacity_sectors,
             isr: 0,
-            backing: load_or_init_backing(),
+            bar0_base_init: bar0_base,
+            irq_line,
+            read_only,
+            persist,
+            backing,
             pending_kick_queue: None,
             notify_log_count: 0,
             serviced_log_count: 0,
         }
+    }
+
+    /// PCI interrupt line — the 8259 IRQ the MMIO handler injects on.
+    pub fn irq_line(&self) -> u8 {
+        self.irq_line
     }
 
     /// Take the pending-kick flag, if any. Caller services the queue
@@ -197,6 +254,9 @@ impl VirtioBlk {
     /// without re-encrypting the whole image. For 12.2.4 the whole-blob
     /// approach gives us crash-loss-bounded persistence (last save wins).
     pub fn save(&self) {
+        if !self.persist {
+            return; // read-only sqfs bundle — nothing to write back.
+        }
         // upsert = insert-or-replace; npkfs::store is strict-create and
         // refuses to overwrite an existing profile-image on the second
         // run.
@@ -296,8 +356,9 @@ impl VirtioBlk {
             // capabilities pointer — anchor of the modern virtio cap chain
             0x34 => CAP_COMMON_OFF as u32,
             0x38 => 0,
-            // Interrupt: line=11, pin=INTA. IRQ delivery wired in 12.2.3.
-            0x3C => 0x0000_010B,
+            // Interrupt: pin=INTA, line per-instance (acpi=off → Linux
+            // trusts this register directly, no ACPI IRQ routing).
+            0x3C => (0x01 << 8) | self.irq_line as u32,
 
             // Modern virtio capability list — four caps chained.
             // Layout: cap_vndr=09 | cap_next | cap_len | cfg_type at +0,
@@ -422,6 +483,8 @@ impl VirtioBlk {
                 // Selector 0 = bits 0..31, selector 1 = bits 32..63.
                 if self.device_feature_select == 1 {
                     1 // bit 32 = VIRTIO_F_VERSION_1
+                } else if self.read_only {
+                    VIRTIO_BLK_F_RO as u64 // bit 5
                 } else {
                     0
                 }
@@ -563,4 +626,27 @@ fn load_or_init_backing() -> alloc::vec::Vec<u8> {
     v[..magic.len()].copy_from_slice(magic);
     kprintln!("[virtio-blk] fresh profile-image ({} bytes)", cap);
     v
+}
+
+/// Load the read-only squashfs userspace bundle from npkFS. Returns
+/// `(backing, capacity_512_sectors)`. On miss, a one-sector zero
+/// buffer — the guest's `mount -t squashfs /dev/vdb` then fails its
+/// superblock-magic check and PID-1 falls back to the smoke path.
+fn load_sqfs_backing() -> (alloc::vec::Vec<u8>, u64) {
+    match crate::npkfs::fetch(SQFS_PATH) {
+        Ok((data, _hash)) if !data.is_empty() => {
+            // mksquashfs pads to 4 KiB, so len is already 512-aligned;
+            // round up defensively regardless.
+            let sectors = ((data.len() as u64) + 511) / 512;
+            kprintln!(
+                "[virtio-blk] sqfs bundle loaded ({} bytes, {} sectors) /dev/vdb",
+                data.len(), sectors,
+            );
+            (data, sectors)
+        }
+        _ => {
+            kprintln!("[virtio-blk] no sqfs bundle at {} — /dev/vdb empty", SQFS_PATH);
+            (alloc::vec![0u8; 512], 1)
+        }
+    }
 }
