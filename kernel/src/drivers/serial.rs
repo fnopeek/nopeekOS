@@ -4,8 +4,22 @@
 //! QEMU: -serial stdio
 
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use alloc::string::String;
+
+/// Bumped once per console `write_str`. The line editor snapshots
+/// this before its async poll batch and reprints the prompt + input
+/// if it changed — so background output (guest logs, net, worker
+/// intents) never leaves a corrupted, prompt-less input line.
+/// Edge-triggered + general (any output source), not microvm-specific.
+static WRITE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the console-write generation. A change between two
+/// reads means something wrote to the console in between.
+pub fn write_gen() -> u64 {
+    WRITE_GEN.load(Ordering::Relaxed)
+}
 
 const COM1: u16 = 0x3F8;
 
@@ -186,6 +200,7 @@ impl fmt::Write for SerialPort {
             }
             self.write_byte(byte);
         }
+        WRITE_GEN.fetch_add(1, Ordering::Relaxed);
         capture_bytes(s);
         crate::framebuffer::write_str(s);
         crate::shade::terminal::write(s);

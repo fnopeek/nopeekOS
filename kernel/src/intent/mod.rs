@@ -441,10 +441,24 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             }
         }
 
-        // Poll network while waiting
+        // Poll network while waiting. Snapshot the console-write
+        // generation around the async pumps: if any of them emitted
+        // output (guest logs, net, debug-mirror) the user's input
+        // line is now corrupted/prompt-less, so redraw `path> input`.
+        // Edge-triggered (only on actual output) and general — not
+        // microvm-specific. Keyboard echo isn't counted: it happens
+        // later in this loop, after this check, and the snapshot is
+        // re-taken at the next iteration's top.
+        let console_gen = crate::serial::write_gen();
         crate::net::poll();
         crate::microvm::vm_poll_slice();
         crate::shell::check_and_serve(vault, session_id);
+        if crate::serial::write_gen() != console_gen {
+            let cwd = get_cwd();
+            let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
+            let inp = core::str::from_utf8(&session.input_buf[..session.pos]).unwrap_or("");
+            kprint!("{}> {}", path, inp);
+        }
 
         // Tick swap animation
         if crate::shade::with_compositor(|comp| comp.tick_animation()).unwrap_or(false) {
