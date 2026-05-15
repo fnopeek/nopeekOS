@@ -125,7 +125,7 @@ pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> 
     };
     let t_decode = rdtsc();
 
-    if encoded_len >= 256 * 1024 {
+    if super::FS_PERF_LOG && encoded_len >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
         crate::kprintln!("[fs::read] {}KB walk={} get={} decode={} (us)",
             encoded_len / 1024,
@@ -164,7 +164,7 @@ pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
     let result = commit(new);
     let t_commit = rdtsc();
 
-    if data.len() >= 256 * 1024 {
+    if super::FS_PERF_LOG && data.len() >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
         crate::kprintln!("[fs::write] {}KB lock={} store={} commit={} (us)",
             data.len() / 1024,

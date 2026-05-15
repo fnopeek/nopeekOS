@@ -36,6 +36,14 @@ pub mod fs;
 
 pub use types::{FsError, BLOCK_SIZE};
 
+/// Per-operation perf-timing logs (`[put]`/`[get]`/`[fs::read]`/
+/// `[fs::write]` with µs breakdowns). Profiling instrumentation for
+/// npkFS throughput-tuning sessions — off by default because a large
+/// streaming download flushes one 16 MiB chunk after another and
+/// each would emit a `[put]` line, drowning the console. Flip to
+/// `true` when actively profiling the FS.
+pub(crate) const FS_PERF_LOG: bool = false;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
