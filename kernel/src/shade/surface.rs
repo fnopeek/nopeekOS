@@ -61,6 +61,13 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32) {
         *dst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     surf.dirty = true;
+    drop(map);
+    // A new guest frame must trigger a recomposite — otherwise the
+    // tile only updates when some *other* event (a click, a key)
+    // happens to call render_frame (observed: cyan appeared only
+    // after clicking the window). request_render just sets an atomic;
+    // run_loop's poll_render/take_deferred_render picks it up.
+    crate::shade::request_render();
 }
 
 /// Read the current surface pixels for compositing. `f` gets
