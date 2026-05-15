@@ -489,19 +489,23 @@ fn https_get_once(
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, &'static str> {
     // Resolve hostname
+    kprintln!("[npk]   resolving {} ...", host);
     let ip = if let Some(ip) = parse_ip(host) {
         ip
     } else {
         crate::net::dns::resolve(host).ok_or("DNS resolution failed")?
     };
+    kprintln!("[npk]   {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
 
     // ARP resolve gateway (use actual gateway from DHCP, not hardcoded)
     let gw = crate::net::ipv4::gateway();
     crate::net::arp::request(gw);
     for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
 
+    kprintln!("[npk]   TCP connect {}:443 ...", host);
     let handle = crate::net::tcp::connect(ip, 443).map_err(|_| "TCP connect failed")?;
 
+    kprintln!("[npk]   TLS handshake ...");
     let mut tls = match crate::tls::tls_connect(handle, host) {
         Ok(s) => s,
         Err(_) => {
@@ -509,6 +513,7 @@ fn https_get_once(
             return Err("TLS handshake failed");
         }
     };
+    kprintln!("[npk]   TLS up, GET {}", path);
 
     // Send HTTP/1.1 GET
     let request = alloc::format!(
@@ -562,9 +567,14 @@ fn https_get_once(
     // On redirect we still drain the body (some servers send a short HTML
     // courtesy page) but skip the work of streaming a multi-MB asset.
     if (300..400).contains(&status) {
+        match &location {
+            Some(l) => kprintln!("[npk]   HTTP {} → {}", status, l),
+            None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
+        }
         let _ = crate::tls::tls_close(&mut tls);
         return Ok(HttpResponse { status, location });
     }
+    kprintln!("[npk]   HTTP {} — receiving body", status);
 
     let content_length = parse_header_value(hdr_str, "content-length")
         .and_then(|v| v.trim().parse::<usize>().ok());
