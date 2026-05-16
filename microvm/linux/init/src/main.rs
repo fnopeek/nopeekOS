@@ -230,12 +230,25 @@ fn launch_wayland(kmsg_fd: i64) {
     // after the chroot — put the runtime dir there. HOME too (cage/
     // wlroots/xkb may touch ~), and XDG_CONFIG_HOME so no config
     // write lands on the RO root.
+    // libseat's `builtin` backend isn't compiled into Alpine's
+    // libseat ("No backend matched name 'builtin'"), so wlroots
+    // can't create a session running bare as root. Run the seatd
+    // daemon instead (the `seatd` package is in the bundle) and
+    // point both seatd and libseat at a tmpfs socket (default
+    // /run/seatd.sock is on the RO squashfs). -g root: own the
+    // socket by a group that exists in the minimal Alpine.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
-                 LIBSEAT_BACKEND=builtin XDG_CONFIG_HOME=/tmp HOME=/tmp; \
+                 SEATD_SOCK=/tmp/seatd.sock LIBSEAT_BACKEND=seatd \
+                 XDG_CONFIG_HOME=/tmp HOME=/tmp; \
                  echo '[wl] devices:'; ls -l /dev/dri /dev/input 2>&1 | head; \
+                 echo '[wl] starting seatd'; \
+                 seatd -g root 2>&1 | \
+                   while IFS= read -r L; do echo \"[seatd] $L\"; done & \
+                 sleep 1; \
+                 echo \"[wl] seatd sock: $(ls -l /tmp/seatd.sock 2>&1)\"; \
                  echo '[wl] launching cage -d -- weston-simple-shm'; \
                  cage -d -- weston-simple-shm 2>&1 | \
                    while IFS= read -r L; do echo \"[cage] $L\"; done; \
