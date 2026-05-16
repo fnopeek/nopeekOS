@@ -843,7 +843,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
-                    crate::shade::handle_mouse(&evt);
+                    crate::shade::handle_mouse(&evt);          // host cursor
+                    crate::shade::forward_pointer_to_guest(&evt); // → guest
                 }
                 if crate::shade::take_deferred_render() {
                     crate::shade::render_frame();

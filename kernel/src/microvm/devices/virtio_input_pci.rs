@@ -86,14 +86,29 @@ const VIRTIO_INPUT_CFG_ABS_INFO:  u8 = 0x12;
 // Linux input event-type codes we care about (linux/input-event-codes.h)
 const EV_SYN: u8 = 0x00;
 const EV_KEY: u8 = 0x01;
-// const EV_REL: u8 = 0x02;  // mouse: future
-// const EV_ABS: u8 = 0x03;
+const EV_REL: u8 = 0x02;
+const EV_ABS: u8 = 0x03;
 const EV_MSC: u8 = 0x04;
 const EV_REP: u8 = 0x14;
 
 const KEY_ESC: u16 = 1;
 const KEY_A:   u16 = 30;
 const SYN_REPORT: u16 = 0;
+
+// Absolute-pointer model (qemu usb-tablet shape): the host already
+// owns the cursor inside the tile, so we feed an absolute position
+// normalised to a fixed logical range and let the guest's input
+// stack scale it onto its display. Decouples the device from the
+// live tile size (no resize round-trip on the input path).
+const BTN_LEFT:   u16 = 0x110;
+const BTN_RIGHT:  u16 = 0x111;
+const BTN_MIDDLE: u16 = 0x112;
+const ABS_X: u16 = 0x00;
+const ABS_Y: u16 = 0x01;
+const REL_WHEEL:  u16 = 0x08;
+const REL_HWHEEL: u16 = 0x06;
+/// Logical range reported for ABS_X/ABS_Y (matches qemu usb-tablet).
+pub const ABS_MAX: u32 = 32767;
 
 const NUM_QUEUES: u16 = 2;
 const MAX_QUEUE_SIZE: u16 = 256;
@@ -571,7 +586,20 @@ impl VirtioInput {
             }
             VIRTIO_INPUT_CFG_PROP_BITS => 0, // no input device properties
             VIRTIO_INPUT_CFG_EV_BITS => self.fill_ev_bits(),
-            VIRTIO_INPUT_CFG_ABS_INFO => 0,  // no ABS axes
+            VIRTIO_INPUT_CFG_ABS_INFO => {
+                // virtio_input_absinfo { min, max, fuzz, flat, res }
+                // LE u32 × 5. Same range for both axes; the guest
+                // scales 0..ABS_MAX onto its display.
+                match self.cfg_subsel as u16 {
+                    c if c == ABS_X || c == ABS_Y => {
+                        self.cfg_data[0..4].copy_from_slice(&0u32.to_le_bytes());
+                        self.cfg_data[4..8].copy_from_slice(&ABS_MAX.to_le_bytes());
+                        // fuzz / flat / res stay zero (8..20).
+                        20
+                    }
+                    _ => 0,
+                }
+            }
             _ => 0,
         };
     }
@@ -599,7 +627,29 @@ impl VirtioInput {
                 for code in 0..=255usize {
                     self.set_bit(code);
                 }
-                32
+                // Pointer buttons live above the keyboard range
+                // (BTN_LEFT = 0x110). Set exactly the three we inject —
+                // NOT a blanket 0x100..0x2ff — so the guest input stack
+                // classifies this as a plain pointer, not a tablet
+                // (BTN_TOOL_*/BTN_TOUCH would flip libinput to tablet
+                // semantics later in Phase B).
+                self.set_bit(BTN_LEFT as usize);
+                self.set_bit(BTN_RIGHT as usize);
+                self.set_bit(BTN_MIDDLE as usize);
+                (BTN_MIDDLE as u8 / 8) + 1 // 35: covers up to BTN_MIDDLE
+            }
+            // EV_REL — wheel only (absolute model handles motion via
+            // EV_ABS; no REL_X/REL_Y). Browsers need vertical scroll.
+            x if x == EV_REL => {
+                self.set_bit(REL_HWHEEL as usize);
+                self.set_bit(REL_WHEEL as usize);
+                (REL_WHEEL as u8 / 8) + 1 // 2 bytes
+            }
+            // EV_ABS — ABS_X / ABS_Y (0..ABS_MAX), see ABS_INFO below.
+            x if x == EV_ABS => {
+                self.set_bit(ABS_X as usize);
+                self.set_bit(ABS_Y as usize);
+                1
             }
             // EV_MSC / EV_REP — declare unsupported (size=0).
             x if x == EV_MSC => 0,
