@@ -19,3 +19,7 @@ update.key
 # merge into the canonical asset manifest.
 release/assets/large/
 release/assets/manifest.large
+# microvm-userspace/build.sh staging dir — multi-100 MB bundle
+# artifacts (cpio.gz + sqfs per version). Distributed via the
+# large lane (GitHub Releases), never committed to the repo.
+release/apps/
