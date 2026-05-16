@@ -576,8 +576,6 @@ impl VirtioGpu {
                 "[gpu] TRANSFER_TO_HOST_2D res={} rect={}x{}+{}+{} offset={}",
                 resource_id, w, h, x, y, offset,
             );
-        } else if n.is_multiple_of(60) {
-            kprintln!("[gpu] TRANSFER_TO_HOST_2D#{} res={} (logging throttled)", n + 1, resource_id);
         }
     }
 
@@ -607,8 +605,6 @@ impl VirtioGpu {
                 n + 1, resource_id, w, h, x, y, r.width, r.height, pix.len(),
                 preview_bytes, hex,
             );
-        } else if n.is_multiple_of(60) {
-            kprintln!("[gpu] FLUSH#{} res={} (logging throttled)", n + 1, resource_id);
         }
 
         // Bridge to Shade. If the VM is bound to a Surface window
