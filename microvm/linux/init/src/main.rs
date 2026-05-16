@@ -202,11 +202,12 @@ fn try_exec_userspace(kmsg_fd: i64) {
 ///     — the canonical "a real Wayland client renders" proof.
 /// Renderer = pixman (software, no GL/Mesa driver). Backend = wlroots
 /// DRM on /dev/dri/card0 (virtio-gpu KMS) → our Surface tile. Seat =
-/// libseat builtin (we are root PID-1, so no seatd daemon needed).
-/// Output → /dev/kmsg (8250 TX is never flushed: cmdline is
-/// `noapic nolapic`, no IRQ4). On success PID-1 becomes the
-/// supervising shell and never returns; on absence we return so the
-/// caller falls back to the fb_react_loop bring-up test.
+/// the seatd daemon (Alpine's libseat has no builtin backend), its
+/// socket on a tmpfs over /run (RO sqfs root). XDG_RUNTIME_DIR on
+/// tmpfs for the same reason. Output → /dev/kmsg (8250 TX is never
+/// flushed: cmdline is `noapic nolapic`, no IRQ4). On success PID-1
+/// becomes the supervising shell and never returns; on absence we
+/// return so the caller falls back to the fb_react_loop test.
 fn launch_wayland(kmsg_fd: i64) {
     let probe = unsafe { syscall3(SYS_ACCESS, b"/usr/bin/cage\0".as_ptr() as u64, F_OK, 0) };
     if probe != 0 {
@@ -218,33 +219,16 @@ fn launch_wayland(kmsg_fd: i64) {
     let prog = b"/bin/sh\0".as_ptr();
     let arg0 = b"/bin/sh\0".as_ptr();
     let arg1 = b"-c\0".as_ptr();
-    // One script: redirect to kmsg, make XDG_RUNTIME_DIR, export the
-    // wlroots software-path env, log the device nodes (so a missing
-    // /dev/dri/card0 or /dev/input is obvious), run cage. If cage
-    // exits, park (keep the VM + its Surface window alive for
-    // diagnosis instead of powering off).
-    // XDG_RUNTIME_DIR must be writable + 0700. The bundle root is a
-    // RO squashfs, so /run can't be chmod'd (observed: "chmod: /run:
-    // Read-only file system" → wlroots can't bind the Wayland socket
-    // → cage dies). /tmp is the tmpfs that mount_essentials mounts
-    // after the chroot — put the runtime dir there. HOME too (cage/
-    // wlroots/xkb may touch ~), and XDG_CONFIG_HOME so no config
-    // write lands on the RO root.
-    // Bring-up is being debugged blind over a serial console with
-    // limited scrollback, so the script can't rely on streamed logs.
-    // It writes seatd + cage output to tmpfs files and then loops a
-    // self-contained SNAPSHOT to /dev/kmsg every few seconds (procs,
-    // wayland socket, log tails). The operator just copies the LAST
-    // "[diag] snapshot" block — always at the bottom of the serial,
-    // survives hangs and lost scrollback.
-    //
-    // Layered fixes earned so far (all confirmed via this loop):
-    //  - XDG_RUNTIME_DIR on tmpfs (sqfs root is RO).
-    //  - libseat has no `builtin` backend in Alpine → run seatd.
-    //  - seatd has no -s flag + ignores SEATD_SOCK server-side and
-    //    hardcodes /run/seatd.sock → mount tmpfs over /run.
+    // Clean launch (Phase B validated — colored circles rendered).
+    // Earned fixes, all kept: XDG_RUNTIME_DIR + seatd socket on
+    // tmpfs (sqfs root is RO); seatd daemon because Alpine libseat
+    // has no builtin backend; pixman renderer (no GL); WLR DRM
+    // backend on virtio-gpu KMS. seatd.log kept (cheap, the one
+    // thing worth seeing if seat ever breaks); per-frame cage debug
+    // and the bring-up snapshot loop removed — they cost real guest
+    // CPU. cage runs in the foreground; PID-1 parks if it exits so
+    // the window/VM stay alive.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
-                 echo '[wl] STEP setup'; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run \
                    || echo '[wl] WARN: /run tmpfs mount failed'; \
@@ -252,25 +236,11 @@ fn launch_wayland(kmsg_fd: i64) {
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp; \
-                 echo \"[wl] devices: $(ls /dev/dri /dev/input 2>&1)\"; \
-                 echo '[wl] STEP seatd'; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo \"[wl] sock=$(ls -l /run/seatd.sock 2>&1)\"; \
-                 echo '[wl] STEP cage'; \
-                 cage -d -- weston-simple-shm > /tmp/cage.log 2>&1 & \
-                 CAGE=$!; \
-                 n=0; \
-                 while [ $n -lt 15 ]; do \
-                   sleep 3; n=$((n+1)); \
-                   echo \"[diag] ===== snapshot $n (cagepid $CAGE) =====\"; \
-                   echo \"[diag] procs: $(ps 2>/dev/null | grep -E 'cage|weston|seatd' | grep -v grep)\"; \
-                   echo \"[diag] xrt: $(ls -a /tmp/xrt 2>&1)\"; \
-                   echo '[diag] seatd.log:'; tail -n 4 /tmp/seatd.log 2>&1; \
-                   echo '[diag] cage.log:'; tail -n 25 /tmp/cage.log 2>&1; \
-                   echo \"[diag] ===== end snapshot $n =====\"; \
-                 done; \
-                 echo '[wl] diag loop done; parking'; \
+                 echo '[wl] launching cage -- weston-simple-shm'; \
+                 cage -- weston-simple-shm; \
+                 echo \"[wl] cage exited rc=$? (seatd: $(tail -n 2 /tmp/seatd.log 2>&1))\"; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
