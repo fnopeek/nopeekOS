@@ -42,14 +42,62 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.2 ✅ + 12.3.0–12.3.4 ✅ + 12.4 ✅ NUC-VALIDATED** —
-  virtio-blk end-to-end mit npkFS-persistierter encrypted profile-image,
-  virtio-net TX/RX-Pfade mit ARP-Loop, DNS-Shortcut + TCP-NAT, virtio-gpu
-  mit 2D scanout. Kernel `v0.157.0`, microvm-init `0.3.8`, Linux
-  `6.18.26-nopeek` mit DRM_VIRTIO_GPU_KMS + FRAMEBUFFER_CONSOLE.
-  **End-to-end HTTP GET an 1.1.1.1:80 + fbcon-Boot-Rendering auf 1280x720**.
-  Phase 12.5 (picker/B-mini), 12.6 (Firefox-Userspace-Bundle),
-  Microkernel-Refactor offen.
+- **Phase:** **12.6 ✅ — LibreWolf rendert in einem gekachelten
+  nopeekOS-Fenster (das Phase-12-Endziel erreicht, 2026-05-16,
+  QEMU/AMD).** Echter GUI-Browser in einer hardware-isolierten
+  microvm, von Shade als Tile neben nativem Terminal komponiert,
+  mit lesbarer Schrift. Kernel `v0.171.4`, microvm-init `0.4.0`,
+  Bundle `librewolf-0.1.1` (cage-Kiosk + LibreWolf 144 + seatd +
+  Fonts, 261 MB gzip-sqfs, GitHub-Releases-Large-Lane). Stack:
+  Display-Bridge (`WindowKind::Surface`, virtio-gpu-FLUSH → Tile,
+  kooperativer Time-Slice Core 0), virtio-input (Tastatur+Maus),
+  Gast-Timer-IRQ0, sqfs-Loading via /dev/vdb, seatd/libseat/
+  wlroots/pixman. **Offen (Polish, kein Architektur-Risiko):**
+  Input erreicht den Browser noch nicht (udev/eudev fehlt + Keyboard-
+  Platzhalter), Host-Scaling statt Gast-nativem Reflow (D4),
+  Core-0-Slice-Tuning (busy Browser → zähes Mod+Q). Picker/B-mini
+  (12.5), Microkernel-Refactor weiter offen.
+- **2026-05-16 (sehr lange Session — 12.4e' → Phase B → LibreWolf,
+  kernel v0.170.0 → v0.171.4):**
+  - **12.4e' Maus**: absoluter Pointer (qemu-usb-tablet-Modell,
+    EV_ABS 0..32767 + EV_REL-Wheel + BTN_* in `virtio_input_pci::
+    fill_ev_bits`, ABS_INFO), `shade::forward_pointer_to_guest`.
+    5 Bugs: `as u8`-Bitmap-Overflow, poll_render-drain-Order,
+    unfokussiertes Fenster, **Core-0 poll_mouse Multi-Consumer-
+    Race** (Kern-Fix: forward aus `handle_mouse` — jeder Consumer
+    ruft das), Diags gestrippt. HW-validiert.
+  - **Phase B**: cage-Kiosk-Compositor + Bundle-Pipeline. weston→
+    cage-Pivot (Alpine-weston zog mesa/gstreamer/pipewire = 339 MB;
+    cage = wlroots, schlank + Ziel-Topologie ein-Surface-pro-Tile).
+    `microvm-userspace/build.sh`: apk → gzip-sqfs, **mksquashfs-
+    Schritt neu** (PID-1 lädt sqfs via /dev/vdb, nicht cpio; gzip
+    Pflicht — zstd #PFt auf Stack-Canary), `release-large` Repo-
+    Parse host-agnostisch + RELEASE_DIR/KEY_FILE/.sqfs-Case
+    gefixt (Branch nie zuvor gelaufen).
+  - **Schicht-Kette userspace** (jede via Log iteriert): RO-/run-
+    chmod → XDG_RUNTIME_DIR=/tmp/xrt; Alpine-libseat ohne builtin
+    → seatd-Daemon; seatd-Socket-RO + kein -s-Flag → tmpfs über
+    /run; PID-1 auto-fokussiert das Surface-Fenster beim Launch.
+  - **Drei Keystone-Kernel-Fixes**: `v0.171.0` Gast-Timer-IRQ0
+    (~100 Hz aus EXIT_INTR/reason-1, svm+vmx; ohne Timer hängt
+    *jedes* zeitbasierte Userspace — die Wurzel); `v0.171.1`
+    keine VMRUN-Lifetime-Cap für fenstergebundene VMs (60-fps-
+    Compositor sprengte 100 000 Iters → Teardown); `v0.171.3`+
+    `v0.171.4` **zwei stale-256MB-Zwillinge** (`guest_mem` +
+    `guest_fetch` `GUEST_RAM_BYTES`) vom 256MB→1GB-Bump übersehen
+    → virtio-DMA/MMIO-insn-fetch ≥256 MB still verworfen → sqfs-
+    Korruption / NPF. **Gast-RAM-Größe ist an 5 Stellen kodiert**
+    (ept/npt/bzimage/guest_mem/guest_fetch) — alle synchron halten.
+  - **Bundle `librewolf-0.1.1`**: + `font-dejavu`/`font-noto`,
+    `mksquashfs -all-time 0` (Gast hat keine RTC → Jahr-2000-Uhr;
+    2026-mtimes „in der Zukunft" → fontconfig scannte nicht →
+    Tofu), `fc-cache -f` im chroot vorberechnet.
+  - **Resultat**: LibreWolf rendert lesbar im Tile. Display-
+    Bridge (`WindowKind::Surface`, `forward_pointer_to_guest` aus
+    `handle_mouse`, render-on-FLUSH) + virtio-input-Keyboard
+    (v0.169.3) bleiben gültig. Vollständige Iterations-Historie:
+    `memory/project_phase_b_wayland.md` +
+    `memory/project_microvm_pointer_race.md`.
 - **2026-05-11 spätestens — 12.4 (virtio-gpu 2D scanout) NUC-validated:**
   - Neuer `microvm/devices/virtio_gpu_pci.rs` (~650 LoC): PCI slot 3,
     vendor 0x1AF4 device 0x1050 class 0x03_80_00, IRQ 9, BAR0 @

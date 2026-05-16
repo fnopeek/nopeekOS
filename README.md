@@ -67,6 +67,9 @@ npk> microvm test                     # MicroVM substrate self-test (vendor-disp
 npk> microvm linux                    # Boot Linux 6.18 LTS in MicroVM (Intel + AMD)
 npk> microvm shell hi                 # Inject "hi" into PID-1, capture echo
                                       # → live `[guest]` earlyprintk on console
+npk> microvm linux                    # …also boots cage + LibreWolf (OTA
+                                      # bundle): a real GUI browser renders
+                                      # as a tiled window beside the terminal
 ```
 
 Every operation is capability-gated. No ambient authority. No root. No sudo.
@@ -426,16 +429,41 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
       toggles the PID-1 react-test. Earned: advertise full 0..=255
       EV_KEY bitmap; send press+SYN+**release**+SYN or the input core
       de-dupes). Real per-scancode mapping = Phase B.
-- [ ] 12.4e' virtio-input **mouse/pointer** injection (EV_REL/ABS +
-      BTN_*; Shade `xhci::poll_mouse` → eventq) — next
-- [ ] strip throttled virtio-input diagnostics once mouse lands
-- [ ] 12.4d virtio-gpu native reflow (D4 — guest renders at the tile
-      size via GET_DISPLAY_INFO instead of host-side scaling) +
-      cross-domain context (later perf path)
+- [x] 12.4e' virtio-input **absolute mouse/pointer** injection
+      (v0.170.5 — EV_ABS 0..32767 + EV_REL wheel + BTN_* in
+      `fill_ev_bits`; `forward_pointer_to_guest` called from
+      `handle_mouse` so it's race-free across every Core-0
+      poll_mouse consumer; HW-validated)
+- [x] strip throttled virtio-input diagnostics (v0.170.5)
+- [x] **guest timer IRQ0** (v0.171.0 — ~100 Hz from EXIT_INTR/
+      reason-1, svm+vmx; the microvm had no PIT/LAPIC timer so
+      every guest nanosleep/timerfd/poll-timeout hung. Unblocks
+      ALL real Linux userspace)
+- [x] **no VMRUN lifetime cap for window-bound VMs** (v0.171.1 —
+      a 60 fps compositor blew the cumulative 100 000-iter cap)
+- [x] **guest_mem + guest_fetch 256MB→1GB** (v0.171.3/.4 — two
+      stale `GUEST_RAM_BYTES` twins the RAM bump missed; bounded
+      virtio DMA / MMIO insn-fetch ≥ 256 MB → sqfs corruption /
+      NPF. Guest-RAM size lives in **5** synced places now)
+- [x] 12.6  **Phase B → LibreWolf — THE PHASE-12 END GOAL,
+      ACHIEVED (2026-05-16, QEMU/AMD).** A real privacy-first
+      GUI browser renders with readable text in a tiled
+      nopeekOS window beside a native terminal. Stack: cage
+      kiosk compositor + LibreWolf 144 + seatd + fonts, 261 MB
+      gzip-sqfs bundle (`librewolf-0.1.1`, GitHub-Releases large
+      lane), wlroots/pixman software render → virtio-gpu →
+      `WindowKind::Surface` tile. weston→cage pivot (lean,
+      one-surface-per-tile topology); userspace layer chain
+      (tmpfs `/run`, seatd daemon — Alpine libseat has no
+      builtin backend, XDG_RUNTIME_DIR on tmpfs); font/RTC fix
+      (no guest clock → epoch sqfs mtimes + prebuilt fc-cache)
+- [ ] 12.6 polish (not architectural — substrate proven): real
+      input into the browser (eudev for wlroots libinput +
+      real scancode→evdev, replacing the keyboard placeholder);
+      D4 guest-native reflow (GET_DISPLAY_INFO = tile size, no
+      host scaling); cooperative-slice tuning (busy browser
+      starves Core 0 → sluggish Mod+Q)
 - [ ] 12.5  Picker bridge + B-mini virtiofs (per-app downloads folder)
-- [ ] 12.6  **Phase B → LibreWolf** (real software-Wayland client
-      bundle: cage/weston + client; then the Firefox-fork itself —
-      privacy-first, no telemetry. The actual end-goal.)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
@@ -702,9 +730,14 @@ to full userspace boot:
   Hint short-circuits the calibration. Harmless on Intel.
 
 **Phase 12.2-12.6** (after both vendor backends complete 12.1.4):
-- [ ] 12.2-12.5  Plumbing: container format, profile-images,
-      virtio-blk/net backends, picker bridge.
-- [ ] 12.6       **LibreWolf in MicroVM** (the actual end-goal).
+- [x] 12.2-12.4  Plumbing: virtio-blk/net/gpu/input backends,
+      profile-images, sqfs bundle loading, Display Bridge.
+- [x] 12.6       **LibreWolf in MicroVM — ACHIEVED (2026-05-16):**
+      a real privacy-first GUI browser renders with readable
+      text in a tiled nopeekOS window. Polish remaining (input
+      into the browser, D4 reflow, slice tuning) — not
+      architectural. See the Phase 9 Virtualization list above.
+- [ ] 12.5       Picker bridge + B-mini virtiofs (deferred).
 
 ### Phase 11.5 -- npkFS v3: Content-Addressed Directories + mtime ✅ DONE 2026-05-05
 
