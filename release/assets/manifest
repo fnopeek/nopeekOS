@@ -7,16 +7,16 @@ size=223586
 sha384=5175abb4dfb4a181bd83764ba2d5b5dadb525fe63d14a020ffd83e3136f5484396dcc202808da7df2147f16bbc790feb
 
 [microvm:initramfs]
-size=2524
-sha384=1144a8497fc0994bb4845cd81fc70672452b21d361ab141f4c18386942664dbde44b7037ef6cfcc3a2ef8465c96516f8
+size=2562
+sha384=85259816c10311b68065d01086dfba736e45f0e3811630a4926e147a25b911b3dd43022aea18364ee369f7dc7fb27457
 
 [microvm:linux-virt]
 size=11629568
 sha384=611cb907cb10f0cc1e39f7dad4e0366fdc5bd43129da1584c20fdd5001f118364693d7e2351cadeac218f476db84cfa7
 
 [microvm:userspace-sqfs]
-size=97607680
-sha384=29e23436d8b2c96963529eec9b5ca9628d839dbe5fa317f494d6236b9d8f80f06543fca3f6e1983f25805ec7934e456c
-url=https://github.com/fnopeek/nopeekOS/releases/download/assets/cage-shm-0.1.0/microvm-userspace.sqfs
+size=248238080
+sha384=24bd9b0bc2eb6ed4d95e889d46ac247609d5125d1634939cfc429312f11a22f1e082a3eba9e96791e3141b48a1fd4c97
+url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.1.0/microvm-userspace.sqfs
 
 
