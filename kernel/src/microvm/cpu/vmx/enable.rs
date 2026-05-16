@@ -928,11 +928,17 @@ impl VmContext {
     // Busy guests keep consecutive_idle at 0 → full budget, fast boot.
     const IDLE_YIELD: u32 = 4;
 
-    while self.iter < MAX_ITERATIONS {
+    // No lifetime cap for a window-bound app VM — see the SVM
+    // mirror. MAX_ITERATIONS is cumulative across slices; a Wayland
+    // compositor blows past it in seconds and a perfectly-running
+    // guest gets torn down. Per-slice `slice_n >= budget` still
+    // bounds each call cooperatively. saturating_add: no overflow on
+    // a long-lived windowed VM.
+    while self.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget {
             return Ok(SliceOutcome::StillRunning);
         }
-        self.iter += 1;
+        self.iter = self.iter.saturating_add(1);
         slice_n += 1;
         // Before each entry, sync the IA-32e-mode-guest control to
         // the current GUEST_IA32_EFER.LMA — once Linux flips into
@@ -1327,7 +1333,7 @@ impl VmContext {
         }
     }
 
-    if self.iter >= MAX_ITERATIONS {
+    if self.iter >= MAX_ITERATIONS && crate::microvm::vm_window() == 0 {
         self.serial.flush();
         kprintln!(
             "[microvm] iteration cap ({}) reached — guest still running, ({} I/O drops)",

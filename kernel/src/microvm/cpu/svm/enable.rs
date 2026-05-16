@@ -764,11 +764,21 @@ impl VmContext {
     // SLICE_BUDGET of timer-tick-rate VMRUNs.
     const IDLE_YIELD: u32 = 4;
 
-    while self.iter < MAX_ITERATIONS {
+    // MAX_ITERATIONS is a *lifetime* cap on cumulative VMRUNs (never
+    // reset across slices) — a safety pad for short headless test
+    // guests. A window-bound app VM (cage/Wayland, ~60 fps × many
+    // exits/frame) blows past 100 000 in seconds; capping it kills a
+    // perfectly-running compositor (observed: colored circles, then
+    // teardown at the cap). So: no lifetime cap for a windowed VM —
+    // it runs until the window closes or the guest really exits. The
+    // per-slice `slice_n >= budget` bound below still keeps each call
+    // cooperative. saturating_add so a long-lived windowed VM's iter
+    // counter can't overflow once past the (now-irrelevant) cap.
+    while self.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget {
             return Ok(SliceOutcome::StillRunning);
         }
-        self.iter += 1;
+        self.iter = self.iter.saturating_add(1);
         slice_n += 1;
         let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
         let exit = outcome.exit_reason;
@@ -1013,7 +1023,7 @@ impl VmContext {
         }
     }
 
-    if self.iter >= MAX_ITERATIONS {
+    if self.iter >= MAX_ITERATIONS && crate::microvm::vm_window() == 0 {
         self.serial.flush();
         kprintln!(
             "[svm] iteration cap ({}) reached — guest still running ({} I/O drops)",
