@@ -921,10 +921,25 @@ sha384=${MOD_SHA}
         fi
 
         # Determine GitHub repo from origin remote.
+        # Host-agnostic owner/repo extraction. Handles github.com as
+        # well as custom SSH host aliases (e.g. this repo's
+        # `git@github-nopeekOS:fnopeek/nopeekOS.git`) and ssh:// URLs:
+        # strip any scheme + `user@host:` / `host/` prefix, drop the
+        # trailing `.git`, keep the last `owner/repo` pair. Overridable
+        # via `GH_REPO` for non-standard setups.
         REPO_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
-        REPO=$(echo "$REPO_URL" | sed -E 's,^(https://github\.com/|git@github\.com:),,; s/\.git$//')
+        REPO="${GH_REPO:-}"
+        if [ -z "$REPO" ]; then
+            REPO=$(echo "$REPO_URL" | sed -E '
+                s,^[a-z]+://,,;            # strip scheme://
+                s,^[^@]+@,,;               # strip user@
+                s,^[^/:]+[:/],,;           # strip host: or host/
+                s,\.git$,,;                # strip trailing .git
+            ' | grep -oE '[^/]+/[^/]+$' || echo "")
+        fi
         if [ -z "$REPO" ] || ! echo "$REPO" | grep -q '/'; then
             err "could not parse origin remote: $REPO_URL"
+            err "override with: GH_REPO=owner/repo ./build.sh release-large <tag>"
             exit 1
         fi
         log "Repo: $REPO  Tag: $TAG"
