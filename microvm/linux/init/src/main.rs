@@ -230,20 +230,21 @@ fn launch_wayland(kmsg_fd: i64) {
     // after the chroot — put the runtime dir there. HOME too (cage/
     // wlroots/xkb may touch ~), and XDG_CONFIG_HOME so no config
     // write lands on the RO root.
-    // libseat's `builtin` backend isn't compiled into Alpine's
-    // libseat ("No backend matched name 'builtin'"), so wlroots
-    // can't create a session running bare as root. Run the seatd
-    // daemon instead (the `seatd` package is in the bundle) and
-    // point both seatd and libseat at a tmpfs socket (default
-    // /run/seatd.sock is on the RO squashfs). -g root: own the
-    // socket by a group that exists in the minimal Alpine.
-    // This seatd build has no -s flag and ignores SEATD_SOCK on the
-    // server side — its socket path is the compile-time default
-    // /run/seatd.sock, and /run is on the RO squashfs ("Could not
-    // bind socket: Read-only file system"). Mount a tmpfs over /run
-    // so the default path works for both seatd and libseat; then no
-    // socket flag/env is needed at all.
+    // Bring-up is being debugged blind over a serial console with
+    // limited scrollback, so the script can't rely on streamed logs.
+    // It writes seatd + cage output to tmpfs files and then loops a
+    // self-contained SNAPSHOT to /dev/kmsg every few seconds (procs,
+    // wayland socket, log tails). The operator just copies the LAST
+    // "[diag] snapshot" block — always at the bottom of the serial,
+    // survives hangs and lost scrollback.
+    //
+    // Layered fixes earned so far (all confirmed via this loop):
+    //  - XDG_RUNTIME_DIR on tmpfs (sqfs root is RO).
+    //  - libseat has no `builtin` backend in Alpine → run seatd.
+    //  - seatd has no -s flag + ignores SEATD_SOCK server-side and
+    //    hardcodes /run/seatd.sock → mount tmpfs over /run.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 echo '[wl] STEP setup'; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run \
                    || echo '[wl] WARN: /run tmpfs mount failed'; \
@@ -251,16 +252,25 @@ fn launch_wayland(kmsg_fd: i64) {
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp; \
-                 echo '[wl] devices:'; ls -l /dev/dri /dev/input 2>&1 | head; \
-                 echo '[wl] starting seatd'; \
-                 seatd -g root 2>&1 | \
-                   while IFS= read -r L; do echo \"[seatd] $L\"; done & \
+                 echo \"[wl] devices: $(ls /dev/dri /dev/input 2>&1)\"; \
+                 echo '[wl] STEP seatd'; \
+                 seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo \"[wl] seatd sock: $(ls -l /run/seatd.sock 2>&1)\"; \
-                 echo '[wl] launching cage -d -- weston-simple-shm'; \
-                 cage -d -- weston-simple-shm 2>&1 | \
-                   while IFS= read -r L; do echo \"[cage] $L\"; done; \
-                 echo '[wl] cage pipe ended'; \
+                 echo \"[wl] sock=$(ls -l /run/seatd.sock 2>&1)\"; \
+                 echo '[wl] STEP cage'; \
+                 cage -d -- weston-simple-shm > /tmp/cage.log 2>&1 & \
+                 CAGE=$!; \
+                 n=0; \
+                 while [ $n -lt 15 ]; do \
+                   sleep 3; n=$((n+1)); \
+                   echo \"[diag] ===== snapshot $n (cagepid $CAGE) =====\"; \
+                   echo \"[diag] procs: $(ps 2>/dev/null | grep -E 'cage|weston|seatd' | grep -v grep)\"; \
+                   echo \"[diag] xrt: $(ls -a /tmp/xrt 2>&1)\"; \
+                   echo '[diag] seatd.log:'; tail -n 4 /tmp/seatd.log 2>&1; \
+                   echo '[diag] cage.log:'; tail -n 25 /tmp/cage.log 2>&1; \
+                   echo \"[diag] ===== end snapshot $n =====\"; \
+                 done; \
+                 echo '[wl] diag loop done; parking'; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
