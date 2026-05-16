@@ -98,6 +98,17 @@ unsafe extern "C" fn rust_main() -> ! {
     // virtio-input pipe (Shade Surface branch → eventq). Returns only
     // if fb/event device is absent; then we park so the window still
     // persists.
+    // Phase B: if the bundle ships cage (kiosk Wayland compositor),
+    // hand the display over to a real Wayland stack — cage runs one
+    // fullscreen client (weston-simple-shm: the canonical moving-
+    // rectangle SHM proof) which renders via the pixman software
+    // renderer through wlroots' DRM backend → /dev/dri/card0 →
+    // virtio-gpu → our Surface tile, with libinput → /dev/input →
+    // virtio-input. Never returns on success (PID-1 becomes the
+    // shell that supervises cage). Falls through only if cage is
+    // absent (minimal initramfs) → the fb_react_loop bring-up test.
+    launch_wayland(kmsg_fd);
+
     fb_react_loop(kmsg_fd);
     say(kmsg_fd, b"[microvm-init] fb/input unavailable; parking (window stays open)\n");
     loop {
@@ -180,6 +191,63 @@ fn try_exec_userspace(kmsg_fd: i64) {
     }
     // Only reached on execve failure (ENOENT / EACCES / ENOEXEC).
     say(kmsg_fd, b"[microvm-init] execve failed -- falling back to pause\n");
+}
+
+/// Phase B — hand the framebuffer to a real Wayland stack. If the
+/// bundle ships `/usr/bin/cage`, exec a shell that sets up the
+/// runtime env and runs `cage -- weston-simple-shm`:
+///   - cage: wlroots kiosk compositor, one fullscreen client. Same
+///     one-surface-one-framebuffer topology we need for LibreWolf.
+///   - weston-simple-shm: trivial wl_shm client (animated rectangle)
+///     — the canonical "a real Wayland client renders" proof.
+/// Renderer = pixman (software, no GL/Mesa driver). Backend = wlroots
+/// DRM on /dev/dri/card0 (virtio-gpu KMS) → our Surface tile. Seat =
+/// libseat builtin (we are root PID-1, so no seatd daemon needed).
+/// Output → /dev/kmsg (8250 TX is never flushed: cmdline is
+/// `noapic nolapic`, no IRQ4). On success PID-1 becomes the
+/// supervising shell and never returns; on absence we return so the
+/// caller falls back to the fb_react_loop bring-up test.
+fn launch_wayland(kmsg_fd: i64) {
+    let probe = unsafe { syscall3(SYS_ACCESS, b"/usr/bin/cage\0".as_ptr() as u64, F_OK, 0) };
+    if probe != 0 {
+        say(kmsg_fd, b"[microvm-init] no /usr/bin/cage -- not a Wayland bundle\n");
+        return;
+    }
+    say(kmsg_fd, b"[microvm-init] cage present, starting Wayland session\n");
+
+    let prog = b"/bin/sh\0".as_ptr();
+    let arg0 = b"/bin/sh\0".as_ptr();
+    let arg1 = b"-c\0".as_ptr();
+    // One script: redirect to kmsg, make XDG_RUNTIME_DIR, export the
+    // wlroots software-path env, log the device nodes (so a missing
+    // /dev/dri/card0 or /dev/input is obvious), run cage. If cage
+    // exits, park (keep the VM + its Surface window alive for
+    // diagnosis instead of powering off).
+    let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 mkdir -p /run /tmp; chmod 0700 /run; \
+                 export XDG_RUNTIME_DIR=/run XDG_SEAT=seat0 \
+                 WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
+                 LIBSEAT_BACKEND=builtin XDG_CONFIG_HOME=/tmp HOME=/root; \
+                 echo '[wl] devices:'; ls -l /dev/dri /dev/input 2>&1 | head; \
+                 echo '[wl] launching cage -- weston-simple-shm'; \
+                 cage -- weston-simple-shm; \
+                 echo \"[wl] cage exited rc=$?\"; \
+                 while true; do sleep 3600; done\0".as_ptr();
+    let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
+    let env1 = b"TERM=linux\0".as_ptr();
+
+    let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
+    let envp = [env0, env1, core::ptr::null::<u8>()];
+
+    unsafe {
+        syscall3(
+            SYS_EXECVE,
+            prog as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        );
+    }
+    say(kmsg_fd, b"[microvm-init] cage execve failed -- falling back\n");
 }
 
 /// Fill the whole 1280x720 BGRX scanout (= 3 686 400 B = 900 * 4096)
