@@ -905,6 +905,10 @@ sha384=${MOD_SHA}
             err "example: ./build.sh release-large assets/alpine-wayland-mesa-0.1.0"
             exit 1
         fi
+        # These are set in the `release)` arm but not here — this arm
+        # ran with `set -u` against unset vars (never exercised before).
+        RELEASE_DIR="$PROJECT_DIR/release"
+        KEY_FILE="$PROJECT_DIR/update.key"
         LARGE_DIR="$RELEASE_DIR/assets/large"
         if [ ! -d "$LARGE_DIR" ]; then
             err "no $LARGE_DIR directory found"
@@ -974,6 +978,7 @@ sha384=${MOD_SHA}
             # microvm-userspace.cpio.gz → [microvm:userspace]
             case "$NAME" in
                 microvm-userspace.cpio.gz) SECTION="microvm:userspace" ;;
+                microvm-userspace.sqfs)    SECTION="microvm:userspace-sqfs" ;;
                 *)
                     err "unknown large asset filename: $NAME"
                     err "add an AssetSpec entry in kernel/src/intent/update.rs and a case here"
