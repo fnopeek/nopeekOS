@@ -223,11 +223,18 @@ fn launch_wayland(kmsg_fd: i64) {
     // /dev/dri/card0 or /dev/input is obvious), run cage. If cage
     // exits, park (keep the VM + its Surface window alive for
     // diagnosis instead of powering off).
+    // XDG_RUNTIME_DIR must be writable + 0700. The bundle root is a
+    // RO squashfs, so /run can't be chmod'd (observed: "chmod: /run:
+    // Read-only file system" → wlroots can't bind the Wayland socket
+    // → cage dies). /tmp is the tmpfs that mount_essentials mounts
+    // after the chroot — put the runtime dir there. HOME too (cage/
+    // wlroots/xkb may touch ~), and XDG_CONFIG_HOME so no config
+    // write lands on the RO root.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
-                 mkdir -p /run /tmp; chmod 0700 /run; \
-                 export XDG_RUNTIME_DIR=/run XDG_SEAT=seat0 \
+                 mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
+                 export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
-                 LIBSEAT_BACKEND=builtin XDG_CONFIG_HOME=/tmp HOME=/root; \
+                 LIBSEAT_BACKEND=builtin XDG_CONFIG_HOME=/tmp HOME=/tmp; \
                  echo '[wl] devices:'; ls -l /dev/dri /dev/input 2>&1 | head; \
                  echo '[wl] launching cage -- weston-simple-shm'; \
                  cage -- weston-simple-shm; \
