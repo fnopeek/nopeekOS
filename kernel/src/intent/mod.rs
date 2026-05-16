@@ -1834,7 +1834,17 @@ fn microvm_linux(inject: &[u8]) {
             match crate::shade::create_surface_window("microvm") {
                 Some(wid) => {
                     crate::microvm::vm_bind_window(wid.0);
-                    kprintln!("[microvm] guest running — window {} (shell stays responsive)", wid.0);
+                    // Focus the guest window on launch. forward_pointer
+                    // _to_guest and the keyboard path only run in the
+                    // Surface-focused branch, so without this the guest
+                    // gets no input until the user manually focuses the
+                    // tile (the "only works after I touch the keyboard"
+                    // symptom). This is the productised D1' behaviour:
+                    // launching the guest gives it focus, like any app
+                    // window. The spawning shell is reachable again via
+                    // Mod-focus / Mod+number.
+                    crate::shade::focus_window(wid);
+                    kprintln!("[microvm] guest running — window {} (focused)", wid.0);
                 }
                 None => kprintln!("[microvm] guest running (no compositor; serial only)"),
             }
