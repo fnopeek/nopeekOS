@@ -237,6 +237,9 @@ fn fb_react_loop(kmsg_fd: i64) {
 
     let mut magenta = false;
     let mut rec = [0u8; 24];
+    // Throttle EV_ABS motion logs — without this a moving pointer
+    // floods /dev/kmsg. First few are enough to prove motion on HW.
+    let mut abs_logs: u32 = 0;
     loop {
         // Blocking read — wakes on a delivered virtio-input event.
         let n = unsafe { syscall3(SYS_READ, ev as u64, rec.as_mut_ptr() as u64, 24) };
@@ -244,20 +247,43 @@ fn fb_react_loop(kmsg_fd: i64) {
             // Short/again/error: keep the window alive, retry.
             continue;
         }
+        // input_event x86_64: type@16, code@18, value@20.
         let etype = (rec[16] as u16) | ((rec[17] as u16) << 8);
+        let code  = (rec[18] as u16) | ((rec[19] as u16) << 8);
         let value = (rec[20] as u32)
             | ((rec[21] as u32) << 8)
             | ((rec[22] as u32) << 16)
             | ((rec[23] as u32) << 24);
-        // EV_KEY (1), key-press (value == 1).
+        // EV_ABS (3): throttled motion proof.
+        if etype == 3 && abs_logs < 6 {
+            abs_logs += 1;
+            // ABS_X = 0, ABS_Y = 1.
+            say(kmsg_fd, if code == 0 {
+                b"[microvm-init] pointer abs X moved\n" as &[u8]
+            } else {
+                b"[microvm-init] pointer abs Y moved\n"
+            });
+        }
+        // EV_KEY (1), press (value == 1). BTN_LEFT (0x110) is the
+        // mouse — distinguish it in the log so a click vs a keystroke
+        // is unambiguous on HW. Both toggle the colour.
         if etype == 1 && value == 1 {
+            let is_click = code == 0x110;
             magenta = !magenta;
             if magenta {
                 fb_paint(fb, 0xFF, 0x00, 0xFF); // magenta
-                say(kmsg_fd, b"[microvm-init] key -> magenta\n");
+                say(kmsg_fd, if is_click {
+                    b"[microvm-init] click -> magenta\n" as &[u8]
+                } else {
+                    b"[microvm-init] key -> magenta\n"
+                });
             } else {
                 fb_paint(fb, 0xFF, 0xFF, 0x00); // cyan
-                say(kmsg_fd, b"[microvm-init] key -> cyan\n");
+                say(kmsg_fd, if is_click {
+                    b"[microvm-init] click -> cyan\n" as &[u8]
+                } else {
+                    b"[microvm-init] key -> cyan\n"
+                });
             }
         }
     }

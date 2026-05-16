@@ -149,6 +149,86 @@ pub fn focused_surface_id() -> Option<u32> {
     }).flatten()
 }
 
+/// Forward a host pointer event into the focused Surface window's
+/// guest virtio-input eventq as an **absolute** pointer (qemu
+/// usb-tablet model): cursor position relative to the tile content
+/// rect, scaled to `0..ABS_MAX`, plus button transitions and wheel.
+/// Resolution-independent — the guest scales `ABS_MAX` onto its own
+/// display, so host-side tile scaling never desyncs the guest cursor.
+/// Additive to `handle_mouse` (which still draws the host cursor).
+pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
+    use crate::microvm::devices::virtio_input_pci::{push_input_event, ABS_MAX};
+    const EV_SYN: u16 = 0x00;
+    const EV_KEY: u16 = 0x01;
+    const EV_REL: u16 = 0x02;
+    const EV_ABS: u16 = 0x03;
+    const SYN_REPORT: u16 = 0;
+    const ABS_X: u16 = 0x00;
+    const ABS_Y: u16 = 0x01;
+    const REL_WHEEL: u16 = 0x08;
+    const BTN_LEFT: u16 = 0x110;
+    const BTN_RIGHT: u16 = 0x111;
+    const BTN_MIDDLE: u16 = 0x112;
+
+    // Content rect of the focused Surface window.
+    let rect = with_compositor(|comp| {
+        let fid = comp.focused?;
+        let win = comp.windows.iter().find(|w| w.id == fid)?;
+        if win.kind != window::WindowKind::Surface { return None; }
+        Some((win.content_x(comp.border), win.content_y(comp.border),
+              win.content_w(comp.border), win.content_h(comp.border)))
+    }).flatten();
+    let (cx, cy, cw, ch) = match rect {
+        Some(r) if r.2 > 0 && r.3 > 0 => r,
+        _ => return,
+    };
+
+    let (mx, my) = cursor::atomic_pos();
+    let rx = (mx - cx as i32).clamp(0, cw as i32 - 1) as u32;
+    let ry = (my - cy as i32).clamp(0, ch as i32 - 1) as u32;
+    let ax = rx * ABS_MAX / (cw - 1).max(1);
+    let ay = ry * ABS_MAX / (ch - 1).max(1);
+
+    let mut any = false;
+
+    // Position — emit only on change. Absolute semantics mean a
+    // dropped intermediate sample only coarsens tracking; the final
+    // position is always exact (this also bounds INPUT_Q pressure).
+    let packed = ((ax as u64) << 32) | ay as u64;
+    if LAST_ABS.swap(packed, Ordering::Relaxed) != packed {
+        push_input_event(EV_ABS, ABS_X, ax);
+        push_input_event(EV_ABS, ABS_Y, ay);
+        any = true;
+    }
+
+    // Buttons — emit only on transition (bit 0=L 1=R 2=M).
+    let prev = LAST_BTN.swap(evt.buttons, Ordering::Relaxed);
+    if (prev ^ evt.buttons) != 0 {
+        for (bit, code) in [(0u8, BTN_LEFT), (1, BTN_RIGHT), (2, BTN_MIDDLE)] {
+            let now = (evt.buttons >> bit) & 1;
+            if now != ((prev >> bit) & 1) {
+                push_input_event(EV_KEY, code, now as u32);
+                any = true;
+            }
+        }
+    }
+
+    // Wheel — Linux reads `value` as __s32; pass the signed delta.
+    if evt.scroll != 0 {
+        push_input_event(EV_REL, REL_WHEEL, evt.scroll as i32 as u32);
+        any = true;
+    }
+
+    if any {
+        push_input_event(EV_SYN, SYN_REPORT, 0);
+    }
+}
+
+static LAST_ABS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+static LAST_BTN: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
 /// Force a full redraw (e.g. after wallpaper change).
 pub fn force_redraw() {
     // Invalidate input line cache — will be rebuilt by render_window
