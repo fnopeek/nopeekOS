@@ -236,9 +236,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
                  LIBSEAT_BACKEND=builtin XDG_CONFIG_HOME=/tmp HOME=/tmp; \
                  echo '[wl] devices:'; ls -l /dev/dri /dev/input 2>&1 | head; \
-                 echo '[wl] launching cage -- weston-simple-shm'; \
-                 cage -- weston-simple-shm; \
-                 echo \"[wl] cage exited rc=$?\"; \
+                 echo '[wl] launching cage -d -- weston-simple-shm'; \
+                 cage -d -- weston-simple-shm 2>&1 | \
+                   while IFS= read -r L; do echo \"[cage] $L\"; done; \
+                 echo '[wl] cage pipe ended'; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
