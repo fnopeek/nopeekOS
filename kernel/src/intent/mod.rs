@@ -848,8 +848,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 // logic still runs; poll_render's own loop then finds
                 // an empty ring (harmless).
                 while let Some(evt) = crate::xhci::poll_mouse() {
-                    crate::shade::handle_mouse(&evt);          // host cursor
-                    crate::shade::forward_pointer_to_guest(&evt); // → guest
+                    // handle_mouse forwards to the guest internally
+                    // (race-free across all poll_mouse consumers) and
+                    // drives the host cursor/drag/focus.
+                    crate::shade::handle_mouse(&evt);
                 }
                 crate::shade::poll_render();
                 crate::net::poll();
