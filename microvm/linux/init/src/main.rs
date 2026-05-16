@@ -245,7 +245,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  XDG_CONFIG_HOME=/tmp HOME=/tmp; \
                  echo '[wl] devices:'; ls -l /dev/dri /dev/input 2>&1 | head; \
                  echo '[wl] starting seatd'; \
-                 seatd -g root 2>&1 | \
+                 seatd -g root -s /tmp/seatd.sock 2>&1 | \
                    while IFS= read -r L; do echo \"[seatd] $L\"; done & \
                  sleep 1; \
                  echo \"[wl] seatd sock: $(ls -l /tmp/seatd.sock 2>&1)\"; \
