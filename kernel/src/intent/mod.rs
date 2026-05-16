@@ -838,14 +838,22 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             // it → VM torn down), swallow other keys for now (Phase B
             // forwards them to the guest's virtio-input eventq).
             if crate::shade::focused_surface_id().is_some() {
-                crate::shade::poll_render();
-                crate::net::poll();
-                crate::microvm::vm_poll_slice();
-
+                // Drain the mouse ring HERE, before poll_render() —
+                // poll_render has its own poll_mouse() loop for the
+                // host cursor and poll_mouse is a consuming SPSC ring,
+                // so if poll_render runs first it eats every event and
+                // the guest never sees a click (host cursor still
+                // works, which is why the mouse "felt fine"). We call
+                // handle_mouse ourselves so the host cursor/drag/focus
+                // logic still runs; poll_render's own loop then finds
+                // an empty ring (harmless).
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     crate::shade::handle_mouse(&evt);          // host cursor
                     crate::shade::forward_pointer_to_guest(&evt); // → guest
                 }
+                crate::shade::poll_render();
+                crate::net::poll();
+                crate::microvm::vm_poll_slice();
                 if crate::shade::take_deferred_render() {
                     crate::shade::render_frame();
                 }
