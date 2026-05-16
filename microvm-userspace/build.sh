@@ -57,7 +57,11 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 #   mesa-gbm  — wlroots DRM backend buffer alloc (pixman SW renderer,
 #               no GL driver)
 # weston-clients dropped — the SHM test client is no longer needed.
-APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput mesa-gbm}"
+# font-dejavu + font-noto: Alpine minirootfs ships ZERO fonts, so
+# fontconfig (pulled by librewolf) has nothing → all GTK + web text
+# renders as tofu boxes. dejavu covers Latin UI/body; noto adds
+# broad Unicode + a sane sans default so real pages look right.
+APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput mesa-gbm font-dejavu font-noto}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -142,6 +146,12 @@ if [ -n "$APK_PACKAGES" ]; then
             mount --bind '$APK_CACHE_DIR' '$STAGE/var/cache/apk'
             chroot '$STAGE' /sbin/apk update 2>&1 | tail -3
             chroot '$STAGE' /sbin/apk add --no-progress $APK_PACKAGES 2>&1 | tail -20
+            # Pre-build the fontconfig cache inside the image. The
+            # guest has no RTC (clock = year 2000) so it can't trust
+            # 2026-dated font dirs at runtime ('mtime in the future'
+            # → fonts not scanned → tofu). A prebuilt cache means
+            # fontconfig serves fonts without a runtime scan.
+            chroot '$STAGE' /usr/bin/fc-cache -f 2>&1 | tail -3 || true
         "
 
     # Apk leaves /var/cache/apk populated with symlinks/copies — wipe
@@ -263,8 +273,15 @@ SQFS_OUT="$OUT_DIR/${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs"
 cyan "building squashfs (gzip) — PID-1's load path"
 # -all-root: everything root-owned inside the guest. -noappend:
 # fresh image. -no-xattrs: our minimal guest doesn't carry them.
+# -all-time/-mkfs-time 0: epoch (1970) timestamps. The guest has
+# no RTC (clock = year 2000); real 2026 mtimes look "in the future"
+# to it, which makes fontconfig refuse to scan the font dirs
+# ("mtime in the future. New fonts may not be detected" → tofu).
+# Epoch is in the past for any guest clock. Also makes the image
+# reproducible (the .sig is over the bytes).
 mksquashfs "$STAGE" "$SQFS_OUT.tmp" \
-    -comp gzip -all-root -noappend -no-xattrs -quiet \
+    -comp gzip -all-root -noappend -no-xattrs \
+    -all-time 0 -mkfs-time 0 -quiet \
     >/dev/null
 mv "$SQFS_OUT.tmp" "$SQFS_OUT"
 
