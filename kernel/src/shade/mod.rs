@@ -178,22 +178,21 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
         Some((win.content_x(comp.border), win.content_y(comp.border),
               win.content_w(comp.border), win.content_h(comp.border)))
     }).flatten();
-    // Throttled diagnostic: proves whether this is even reached
-    // (i.e. xhci::poll_mouse yields in the Surface branch) and
-    // whether the focused-Surface rect resolves. Stripped with the
-    // other virtio-input diagnostics once the pointer is validated.
+    let (cx, cy, cw, ch) = match rect {
+        Some(r) if r.2 > 0 && r.3 > 0 => r,
+        _ => return, // no Surface focused → no-op (called on every move)
+    };
+    // Throttled diagnostic — only past the rect gate, so it logs
+    // actual guest-forwarding, not every desktop mouse move. Stripped
+    // with the other virtio-input diagnostics once validated.
     {
         let n = PTR_LOG.fetch_add(1, Ordering::Relaxed);
         if n < 12 {
             crate::kprintln!(
-                "[ptr] fwd#{} btn={:#x} scroll={} rect={:?}",
-                n + 1, evt.buttons, evt.scroll, rect);
+                "[ptr] fwd#{} btn={:#x} scroll={} rect=({},{},{},{})",
+                n + 1, evt.buttons, evt.scroll, cx, cy, cw, ch);
         }
     }
-    let (cx, cy, cw, ch) = match rect {
-        Some(r) if r.2 > 0 && r.3 > 0 => r,
-        _ => return,
-    };
 
     let (mx, my) = cursor::atomic_pos();
     let rx = (mx - cx as i32).clamp(0, cw as i32 - 1) as u32;
@@ -893,7 +892,18 @@ static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
-pub fn handle_mouse(_evt: &crate::xhci::MouseEvent) {
+pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
+    // Forward to a focused microvm guest HERE, not at the call sites:
+    // poll_mouse is a single consuming ring with several Core-0
+    // consumers (this via poll_render:612, and the run_loop Surface
+    // branch). Whichever drains first must still forward, else the
+    // guest only gets events when the timing happens to favour the
+    // forwarding path (was: "only with Mod held" — Mod+drag shifted
+    // the race). handle_mouse is on every consumer's path, so this is
+    // race-free. forward_pointer_to_guest no-ops unless a Surface
+    // window is focused, so this is free in normal desktop use.
+    forward_pointer_to_guest(evt);
+
     cursor::redraw_overlay_lockfree();
 
     // Hover routing — deduplicated per window. Runs on every move so the
