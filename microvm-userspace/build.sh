@@ -36,7 +36,7 @@ ALPINE_MINIROOTFS_SHA256="${ALPINE_MINIROOTFS_SHA256:-85498865362aa7ebececa0d725
 # Output naming. `alpine-base` for iter 1 (no apks). `alpine-wayland`
 # for iter 2 (Mesa + Wayland + libxkbcommon — display-runtime smoke).
 # Iter 3 will rename to `librewolf` with the browser on top.
-BUNDLE_NAME="${BUNDLE_NAME:-cage-shm}"
+BUNDLE_NAME="${BUNDLE_NAME:-librewolf}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 
 # Apks to add on top of minirootfs. Pinning to package _names_ here;
@@ -46,20 +46,18 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # gtk+3.0, libnss, freetype, fontconfig, icu-libs, pulseaudio-libs,
 # librewolf-bin, …). For iter 2 we just need the display-stack libs
 # so we can verify they at least LOAD inside our microvm.
-# Phase B: software-Wayland proof. cage = kiosk Wayland compositor
-# (one client, fullscreen — exactly our one-tile target topology,
-# the path to LibreWolf-in-a-tile). Far leaner than weston: only
-# wlroots, no gstreamer/pipewire/webrtc/cairo-stack hard deps.
-#   cage          — the compositor
-#   weston-clients— provides weston-simple-shm, the canonical SHM
-#                   moving-rectangle test client (no weston server)
-#   seatd         — provides libseat; wlroots links it. We run as
-#                   root PID-1 so LIBSEAT_BACKEND=builtin needs no
-#                   daemon, but the .so must be present.
-#   libinput      — wlroots evdev input
-#   mesa-gbm      — wlroots DRM backend allocates via libgbm even
-#                   with the pixman software renderer (no GL driver)
-APK_PACKAGES="${APK_PACKAGES:-cage weston-clients seatd libinput mesa-gbm}"
+# Phase 12.6: LibreWolf in a cage kiosk, the actual end goal. The
+# Phase-B substrate (timer, seat, sqfs, input, display bridge) is
+# proven with weston-simple-shm; now the real client.
+#   cage      — kiosk Wayland compositor (one client = the browser)
+#   librewolf — the browser (Alpine community, Firefox fork, pulls
+#               gtk/nss/fontconfig/freetype/… via apk deps)
+#   seatd     — libseat daemon (Alpine libseat has no builtin backend)
+#   libinput  — wlroots evdev input
+#   mesa-gbm  — wlroots DRM backend buffer alloc (pixman SW renderer,
+#               no GL driver)
+# weston-clients dropped — the SHM test client is no longer needed.
+APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput mesa-gbm}"
 
 # ── Paths ────────────────────────────────────────────────────────
 

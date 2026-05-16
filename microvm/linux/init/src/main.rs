@@ -195,11 +195,12 @@ fn try_exec_userspace(kmsg_fd: i64) {
 
 /// Phase B — hand the framebuffer to a real Wayland stack. If the
 /// bundle ships `/usr/bin/cage`, exec a shell that sets up the
-/// runtime env and runs `cage -- weston-simple-shm`:
-///   - cage: wlroots kiosk compositor, one fullscreen client. Same
-///     one-surface-one-framebuffer topology we need for LibreWolf.
-///   - weston-simple-shm: trivial wl_shm client (animated rectangle)
-///     — the canonical "a real Wayland client renders" proof.
+/// runtime env and runs `cage -- librewolf`:
+///   - cage: wlroots kiosk compositor, one fullscreen client — the
+///     browser, exactly the one-surface-one-tile target topology.
+///   - librewolf: the actual end-goal client (Firefox fork). Needs
+///     MOZ_ENABLE_WAYLAND=1 or it tries X11 (there is no X).
+///     weston-simple-shm proved the path; this is the real thing.
 /// Renderer = pixman (software, no GL/Mesa driver). Backend = wlroots
 /// DRM on /dev/dri/card0 (virtio-gpu KMS) → our Surface tile. Seat =
 /// the seatd daemon (Alpine's libseat has no builtin backend), its
@@ -235,11 +236,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
                  LIBSEAT_BACKEND=seatd \
-                 XDG_CONFIG_HOME=/tmp HOME=/tmp; \
+                 XDG_CONFIG_HOME=/tmp HOME=/tmp \
+                 MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo '[wl] launching cage -- weston-simple-shm'; \
-                 cage -- weston-simple-shm; \
+                 echo '[wl] launching cage -- librewolf'; \
+                 cage -- librewolf --no-remote about:blank; \
                  echo \"[wl] cage exited rc=$? (seatd: $(tail -n 2 /tmp/seatd.log 2>&1))\"; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
