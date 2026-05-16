@@ -253,12 +253,22 @@ pub fn vm_poll_slice() {
     *slot = None;
     drop(slot); // release before teardown — it locks the compositor
     teardown_vm_window();
-    match result {
-        Ok(o) => crate::kprintln!(
-            "[microvm] guest exited — final reason {} qual {:#x}",
-            (o.exit_reason & 0xFFFF) as u16, o.exit_qualification,
-        ),
-        Err(e) => crate::kprintln!("[microvm] launch FAILED: {:?}", e),
+    // Loud, repeated banner — Phase B is being debugged over a
+    // serial console with tiny scrollback and this single line kept
+    // getting lost under the guest's own output. Repeat it so it
+    // dominates the screen right before the loop prompt returns.
+    // Revert to a one-liner once Phase B's guest stops exiting.
+    for _ in 0..6 {
+        match &result {
+            Ok(o) => crate::kprintln!(
+                "[microvm] ##### GUEST EXITED reason={:#x} ({}) qual={:#x} #####",
+                (o.exit_reason & 0xFFFF) as u16,
+                (o.exit_reason & 0xFFFF) as u16,
+                o.exit_qualification,
+            ),
+            Err(e) => crate::kprintln!(
+                "[microvm] ##### LAUNCH FAILED: {} #####", e),
+        }
     }
 }
 
