@@ -237,18 +237,26 @@ fn launch_wayland(kmsg_fd: i64) {
     // point both seatd and libseat at a tmpfs socket (default
     // /run/seatd.sock is on the RO squashfs). -g root: own the
     // socket by a group that exists in the minimal Alpine.
+    // This seatd build has no -s flag and ignores SEATD_SOCK on the
+    // server side — its socket path is the compile-time default
+    // /run/seatd.sock, and /run is on the RO squashfs ("Could not
+    // bind socket: Read-only file system"). Mount a tmpfs over /run
+    // so the default path works for both seatd and libseat; then no
+    // socket flag/env is needed at all.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
+                 mount -t tmpfs -o mode=0755 tmpfs /run \
+                   || echo '[wl] WARN: /run tmpfs mount failed'; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
-                 SEATD_SOCK=/tmp/seatd.sock LIBSEAT_BACKEND=seatd \
+                 LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp; \
                  echo '[wl] devices:'; ls -l /dev/dri /dev/input 2>&1 | head; \
                  echo '[wl] starting seatd'; \
-                 seatd -g root -s /tmp/seatd.sock 2>&1 | \
+                 seatd -g root 2>&1 | \
                    while IFS= read -r L; do echo \"[seatd] $L\"; done & \
                  sleep 1; \
-                 echo \"[wl] seatd sock: $(ls -l /tmp/seatd.sock 2>&1)\"; \
+                 echo \"[wl] seatd sock: $(ls -l /run/seatd.sock 2>&1)\"; \
                  echo '[wl] launching cage -d -- weston-simple-shm'; \
                  cage -d -- weston-simple-shm 2>&1 | \
                    while IFS= read -r L; do echo \"[cage] $L\"; done; \
