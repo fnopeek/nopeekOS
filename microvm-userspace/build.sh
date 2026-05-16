@@ -36,7 +36,7 @@ ALPINE_MINIROOTFS_SHA256="${ALPINE_MINIROOTFS_SHA256:-85498865362aa7ebececa0d725
 # Output naming. `alpine-base` for iter 1 (no apks). `alpine-wayland`
 # for iter 2 (Mesa + Wayland + libxkbcommon — display-runtime smoke).
 # Iter 3 will rename to `librewolf` with the browser on top.
-BUNDLE_NAME="${BUNDLE_NAME:-alpine-wayland}"
+BUNDLE_NAME="${BUNDLE_NAME:-cage-shm}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 
 # Apks to add on top of minirootfs. Pinning to package _names_ here;
@@ -46,7 +46,20 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # gtk+3.0, libnss, freetype, fontconfig, icu-libs, pulseaudio-libs,
 # librewolf-bin, …). For iter 2 we just need the display-stack libs
 # so we can verify they at least LOAD inside our microvm.
-APK_PACKAGES="${APK_PACKAGES:-wayland-libs-client libxkbcommon}"
+# Phase B: software-Wayland proof. cage = kiosk Wayland compositor
+# (one client, fullscreen — exactly our one-tile target topology,
+# the path to LibreWolf-in-a-tile). Far leaner than weston: only
+# wlroots, no gstreamer/pipewire/webrtc/cairo-stack hard deps.
+#   cage          — the compositor
+#   weston-clients— provides weston-simple-shm, the canonical SHM
+#                   moving-rectangle test client (no weston server)
+#   seatd         — provides libseat; wlroots links it. We run as
+#                   root PID-1 so LIBSEAT_BACKEND=builtin needs no
+#                   daemon, but the .so must be present.
+#   libinput      — wlroots evdev input
+#   mesa-gbm      — wlroots DRM backend allocates via libgbm even
+#                   with the pixman software renderer (no GL driver)
+APK_PACKAGES="${APK_PACKAGES:-cage weston-clients seatd libinput mesa-gbm}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -233,5 +246,48 @@ else
     OTA_SLOT="$LARGE_DIR/microvm-userspace.cpio.gz"
     cp "$OUT" "$OTA_SLOT"
     cyan  "       staged to OTA (large lane, ${SIZE_BYTES} bytes): ${OTA_SLOT}"
+    cyan  "       upload with: ./build.sh release-large assets/<your-tag>"
+fi
+
+# ── Squashfs form — the path PID-1 actually loads ────────────────
+#
+# PID-1's `try_switch_to_sqfs` mounts the bundle read-only from
+# /dev/vdb (slot-5 RO virtio-blk) and chroots into it — RAM-cheap
+# (decompress-on-read) vs unpacking a 290 MB cpio into a tmpfs.
+#
+# **gzip compression is mandatory, not a preference.** zstd's FSE
+# decompressor faults on the stack canary (`gs:[0x28]`) in our
+# minimal guest env — the first `-fstack-protector-strong` function
+# on the squashfs read path #PFs. gzip's inflate path has no such
+# canary dependency. (Lesson from the Alpine sqfs bring-up; applies
+# to every future bundle incl. LibreWolf.)
+SQFS_OUT="$OUT_DIR/${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs"
+cyan "building squashfs (gzip) — PID-1's load path"
+# -all-root: everything root-owned inside the guest. -noappend:
+# fresh image. -no-xattrs: our minimal guest doesn't carry them.
+mksquashfs "$STAGE" "$SQFS_OUT.tmp" \
+    -comp gzip -all-root -noappend -no-xattrs -quiet \
+    >/dev/null
+mv "$SQFS_OUT.tmp" "$SQFS_OUT"
+
+SQFS_SIZE=$(stat -c%s "$SQFS_OUT")
+SQFS_SHA=$(sha256sum "$SQFS_OUT" | awk '{print $1}')
+ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs" "$OUT_DIR/current.sqfs"
+green "built squashfs: ${SQFS_SIZE} bytes → ${SQFS_OUT}"
+cyan  "       sha256: ${SQFS_SHA}"
+
+# Same two-lane staging as the cpio. `microvm-userspace.sqfs` →
+# AssetSpec [microvm:userspace-sqfs] (build.sh release signs it).
+if [ "$SQFS_SIZE" -lt $((30 * 1024 * 1024)) ]; then
+    SQFS_SLOT="$REPO_ROOT/release/assets/microvm-userspace.sqfs"
+    cp "$SQFS_OUT" "$SQFS_SLOT"
+    cyan  "       staged to OTA (small lane): ${SQFS_SLOT}"
+    cyan  "       sign with: ./build.sh release"
+else
+    LARGE_DIR="$REPO_ROOT/release/assets/large"
+    mkdir -p "$LARGE_DIR"
+    SQFS_SLOT="$LARGE_DIR/microvm-userspace.sqfs"
+    cp "$SQFS_OUT" "$SQFS_SLOT"
+    cyan  "       staged to OTA (large lane, ${SQFS_SIZE} bytes): ${SQFS_SLOT}"
     cyan  "       upload with: ./build.sh release-large assets/<your-tag>"
 fi
