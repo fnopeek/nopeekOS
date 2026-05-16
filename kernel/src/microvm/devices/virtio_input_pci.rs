@@ -636,14 +636,18 @@ impl VirtioInput {
                 self.set_bit(BTN_LEFT as usize);
                 self.set_bit(BTN_RIGHT as usize);
                 self.set_bit(BTN_MIDDLE as usize);
-                (BTN_MIDDLE as u8 / 8) + 1 // 35: covers up to BTN_MIDDLE
+                // u16 math: BTN_MIDDLE=0x112 → 35. Must NOT cast to u8
+                // before the divide (0x112 as u8 = 18 → size 3, which
+                // truncates the bitmap below KEY_SPACE=57 and Linux's
+                // input core then filters every real key).
+                (BTN_MIDDLE / 8 + 1) as u8 // 35: covers up to BTN_MIDDLE
             }
             // EV_REL — wheel only (absolute model handles motion via
             // EV_ABS; no REL_X/REL_Y). Browsers need vertical scroll.
             x if x == EV_REL => {
                 self.set_bit(REL_HWHEEL as usize);
                 self.set_bit(REL_WHEEL as usize);
-                (REL_WHEEL as u8 / 8) + 1 // 2 bytes
+                (REL_WHEEL / 8 + 1) as u8 // 2 bytes
             }
             // EV_ABS — ABS_X / ABS_Y (0..ABS_MAX), see ABS_INFO below.
             x if x == EV_ABS => {

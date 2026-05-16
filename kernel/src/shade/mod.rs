@@ -178,6 +178,18 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
         Some((win.content_x(comp.border), win.content_y(comp.border),
               win.content_w(comp.border), win.content_h(comp.border)))
     }).flatten();
+    // Throttled diagnostic: proves whether this is even reached
+    // (i.e. xhci::poll_mouse yields in the Surface branch) and
+    // whether the focused-Surface rect resolves. Stripped with the
+    // other virtio-input diagnostics once the pointer is validated.
+    {
+        let n = PTR_LOG.fetch_add(1, Ordering::Relaxed);
+        if n < 12 {
+            crate::kprintln!(
+                "[ptr] fwd#{} btn={:#x} scroll={} rect={:?}",
+                n + 1, evt.buttons, evt.scroll, rect);
+        }
+    }
     let (cx, cy, cw, ch) = match rect {
         Some(r) if r.2 > 0 && r.3 > 0 => r,
         _ => return,
@@ -228,6 +240,8 @@ static LAST_ABS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(u64::MAX);
 static LAST_BTN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
+static PTR_LOG: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
 
 /// Force a full redraw (e.g. after wallpaper change).
 pub fn force_redraw() {
