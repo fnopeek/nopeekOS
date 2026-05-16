@@ -1,6 +1,6 @@
 //! Guest physical memory accessors.
 //!
-//! The 256 MB guest window is identity-mapped through EPT/NPT to a
+//! The guest RAM window is identity-mapped through EPT/NPT to a
 //! contiguous host range starting at `host_base`. Within the kernel's
 //! 64 GB identity-mapped region (set up at boot), `host_virt =
 //! host_phys = host_base + gpa` for any guest physical address inside
@@ -8,10 +8,22 @@
 //!
 //! All accessors bounds-check against the window so a buggy/malicious
 //! guest descriptor can't drag us into kernel memory.
+//!
+//! `GUEST_RAM_BYTES` MUST equal the EPT/NPT-mapped window. This is
+//! the 4th of four places the guest-RAM size is encoded and the one
+//! the 256 MB→1 GB bump missed: a stale 256 MB here silently made
+//! every virtio DMA whose target gpa ≥ 256 MB a no-op (`check()`
+//! false → `write_bytes` returns false), so a memory-hungry guest
+//! (LibreWolf filling 1 GB of page cache) read back stale/zero
+//! pages → "SQUASHFS zlib decompression failed" / EIO. Keep in sync
+//! with: `vmx::ept::GUEST_WINDOW_BYTES`, `svm::npt` window,
+//! `bzimage::GUEST_RAM_TOTAL`.
 
 #![allow(dead_code)]
 
-const GUEST_RAM_BYTES: u64 = 256 * 1024 * 1024;
+/// 1 GiB — must match `vmx::ept::GUEST_WINDOW_BYTES` / svm npt /
+/// `bzimage::GUEST_RAM_TOTAL`.
+const GUEST_RAM_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[inline]
 fn check(gpa: u64, len: u64) -> bool {
