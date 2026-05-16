@@ -510,6 +510,11 @@ pub struct VmContext {
     io_dropped: u32,
     msr_log_count: u32,
     consecutive_idle: u32,
+    /// Host tick of the last injected guest timer IRQ0. No PIT/LAPIC
+    /// timer source exists in the microvm, so this is the only thing
+    /// that wakes a time-blocked guest task (nanosleep/timerfd/poll).
+    /// One IRQ0 per host tick (≈100 Hz). Mirrors the SVM side.
+    last_timer_tick: u64,
 }
 
 impl VmContext {
@@ -560,6 +565,7 @@ impl VmContext {
                 io_dropped: 0,
                 msr_log_count: 0,
                 consecutive_idle: 0,
+                last_timer_tick: 0,
             })
         };
 
@@ -1008,6 +1014,24 @@ impl VmContext {
                 // External interrupt — host IRQ that arrived during
                 // guest run. The `sti` at the tail of run_guest_once
                 // already let the host IDT dispatch it; just resume.
+                //
+                // Guest timer tick first: the microvm has no PIT/
+                // LAPIC timer source, so this injected IRQ0 is the
+                // only thing that wakes a time-blocked guest task
+                // (nanosleep/timerfd/poll-timeout — all of seatd/
+                // cage/wlroots/libwayland). Pace to the host 100 Hz
+                // tick; gate on Linux having unmasked IRQ0. One
+                // VM-entry injects one IRQ → claim it and `continue`
+                // (reason-1 recurs immediately, net/input lose
+                // nothing). Mirrors the SVM side.
+                let now = crate::interrupts::ticks();
+                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
+                    self.last_timer_tick = now;
+                    let vector = self.pic.vector_for_irq(0);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
                 //
                 // While here, run the NAT pump: drains any host-side
                 // TCP recv data into the guest's RX queue + injects

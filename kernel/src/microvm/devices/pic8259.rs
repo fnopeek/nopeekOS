@@ -45,6 +45,18 @@ impl Pic8259 {
         }
     }
 
+    /// True if the guest has unmasked this IRQ line (IMR bit clear).
+    /// Gates timer-IRQ0 injection: don't fire IRQ0 until Linux has
+    /// set up its 8259 + PIT handler and unmasked it, else the early
+    /// guest takes spurious/unhandled interrupts.
+    pub fn irq_unmasked(&self, irq: u8) -> bool {
+        if irq < 8 {
+            self.master_imr & (1 << irq) == 0
+        } else {
+            self.slave_imr & (1 << (irq - 8)) == 0
+        }
+    }
+
     /// Return the interrupt vector that an IRQ line maps to.
     /// IRQ 0..7 = master, IRQ 8..15 = slave.
     pub fn vector_for_irq(&self, irq: u8) -> u8 {

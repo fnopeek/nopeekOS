@@ -427,6 +427,12 @@ pub struct VmContext {
     io_dropped: u32,
     msr_log_count: u32,
     consecutive_idle: u32,
+    /// Host tick at which we last injected guest timer IRQ0. The
+    /// microvm provides no PIT/LAPIC timer event source, so without
+    /// this the guest's nanosleep/timerfd/poll-timeout never wake
+    /// (input read() wakes via virtio-input IRQ; time does not).
+    /// One IRQ0 per host tick (≈100 Hz) drives jiffies + wakeups.
+    last_timer_tick: u64,
 }
 
 impl VmContext {
@@ -500,6 +506,7 @@ impl VmContext {
             io_dropped: 0,
             msr_log_count: 0,
             consecutive_idle: 0,
+            last_timer_tick: 0,
         })
     }
 
@@ -770,6 +777,26 @@ impl VmContext {
 
         match exit {
             EXIT_INTR => {
+                // Guest timer tick. The microvm has no PIT/LAPIC
+                // timer event source, so the only thing that ever
+                // wakes a time-blocked task (nanosleep/timerfd/poll
+                // timeout — the entire seatd/cage/wlroots/libwayland
+                // event-loop machinery) is this injected IRQ0. Pace
+                // to the host 100 Hz tick: one IRQ0 per host tick.
+                // Gate on Linux having unmasked IRQ0 (8259 + PIT
+                // handler installed) so the early guest doesn't take
+                // a spurious vector. Claims the single EVENT_INJ slot
+                // for this VMRUN → `continue`; EXIT_INTR fires again
+                // immediately so net/input lose nothing.
+                let now = crate::interrupts::ticks();
+                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
+                    self.last_timer_tick = now;
+                    let vector = self.pic.vector_for_irq(0);
+                    let info: u64 = (vector as u64) | (1u64 << 31);
+                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
                 // NAT pump — drain host TCP recv buffers, inject as
                 // RX segments + IRQ 10 if any data moved. Same pattern
                 // as the VMX side; without it, async response data sits
