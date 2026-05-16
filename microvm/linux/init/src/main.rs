@@ -207,23 +207,66 @@ fn fb_paint(fd: i64, b: u8, g: u8, r: u8) {
     }
 }
 
-/// 12.4 A4 + virtio-input mini-test. Paint the framebuffer cyan, then
-/// block on /dev/input/event0 and toggle cyan↔magenta on every key
-/// press. This visibly proves BOTH halves of the bridge without a
-/// Wayland bundle: guest→host pixels (Surface tile) AND host→guest
-/// input (Shade Surface branch → virtio-input eventq → evdev).
-/// Throwaway de-risk; Phase B replaces it with cage + a real client.
+/// Width of one BGRX scanline in bytes (1280 px).
+const FB_W: i64 = 1280;
+const FB_H: i64 = 720;
+const FB_PITCH: i64 = FB_W * 4;
+/// Pointer marker size (square side in px).
+const SQ: i64 = 28;
+
+/// Paint an `SQ×SQ` block at framebuffer pixel `(x, y)` with one
+/// colour. Cheap: `SQ` short `lseek`+`write`s (~3 KB total) instead
+/// of `fb_paint`'s 3.6 MB — fast enough to track the pointer live
+/// under the host's cooperative VM slicing. fbdev deferred-io flushes
+/// just the dirtied rows → a small virtio-gpu RESOURCE_FLUSH.
+fn fb_block(fd: i64, x: i64, y: i64, b: u8, g: u8, r: u8) {
+    let mut row = [0u8; (SQ * 4) as usize];
+    let mut i = 0;
+    while i < row.len() {
+        row[i] = b;
+        row[i + 1] = g;
+        row[i + 2] = r;
+        row[i + 3] = 0x00;
+        i += 4;
+    }
+    let mut ry = 0;
+    while ry < SQ {
+        let off = ((y + ry) * FB_PITCH + x * 4) as u64;
+        let _ = unsafe { syscall3(SYS_LSEEK, fd as u64, off, 0 /* SEEK_SET */) };
+        let _ = unsafe { syscall3(SYS_WRITE, fd as u64, row.as_ptr() as u64, (SQ * 4) as u64) };
+        ry += 1;
+    }
+}
+
+/// Map an absolute axis value (0..=32767, the range virtio-input
+/// advertises) onto `0..=(span - SQ)` so the marker stays on-screen.
+fn abs_to_px(v: u32, span: i64) -> i64 {
+    let v = if v > 32767 { 32767 } else { v } as i64;
+    let p = v * (span - SQ) / 32767;
+    if p < 0 { 0 } else if p > span - SQ { span - SQ } else { p }
+}
+
+/// 12.4 virtio-input mini-test. Paint the framebuffer cyan, then read
+/// /dev/input/event0 and draw a small square that *follows the
+/// pointer*, coloured by the held button (none=white, left=magenta,
+/// right=green). This visibly proves BOTH halves of the bridge
+/// without a Wayland bundle: guest→host pixels (Surface tile) AND
+/// host→guest input (absolute position + buttons). The marker is
+/// drawn with tiny per-row writes (not a 3.6 MB full repaint), so it
+/// keeps up with motion under cooperative slicing — the old
+/// toggle-on-press test blocked PID-1 in a full repaint after the
+/// first event. Throwaway de-risk; Phase B replaces it with cage + a
+/// real client.
 ///
 /// input_event on x86_64: { u64 sec; u64 usec; u16 type; u16 code;
-/// u32 value } = 24 bytes. type@16, value@20. EV_KEY=1, press=1.
+/// u32 value } = 24 bytes. type@16, code@18, value@20.
 fn fb_react_loop(kmsg_fd: i64) {
     let fb = unsafe { syscall3(SYS_OPEN, b"/dev/fb0\0".as_ptr() as u64, O_RDWR, 0) };
     if fb < 0 {
         say(kmsg_fd, b"[microvm-init] /dev/fb0 absent -- no fb test pattern\n");
         return;
     }
-    // Cyan = B=0xFF G=0xFF R=0 (BGRX LE). If it shows red/blue-swapped
-    // we learn the host pixel format cheaply here.
+    // Cyan = B=0xFF G=0xFF R=0 (BGRX LE). Background, painted once.
     fb_paint(fb, 0xFF, 0xFF, 0x00);
     say(kmsg_fd, b"[microvm-init] fb painted cyan; reading /dev/input/event0\n");
 
@@ -233,58 +276,66 @@ fn fb_react_loop(kmsg_fd: i64) {
         let _ = unsafe { syscall1(SYS_CLOSE, fb as u64) };
         return;
     }
-    say(kmsg_fd, b"[microvm-init] press any key in the window: colour toggles\n");
+    say(kmsg_fd, b"[microvm-init] move/click in the window: a square follows the pointer\n");
 
-    let mut magenta = false;
     let mut rec = [0u8; 24];
-    // Throttle EV_ABS motion logs — without this a moving pointer
-    // floods /dev/kmsg. First few are enough to prove motion on HW.
+    let mut px: i64 = FB_W / 2;
+    let mut py: i64 = FB_H / 2;
+    let mut lx: i64 = -1; // last drawn marker (−1 = none yet)
+    let mut ly: i64 = 0;
+    let mut btn: u8 = 0; // bit0 = left, bit1 = right
+    // Throttle EV_ABS serial logs — a moving pointer would flood kmsg.
     let mut abs_logs: u32 = 0;
     loop {
-        // Blocking read — wakes on a delivered virtio-input event.
         let n = unsafe { syscall3(SYS_READ, ev as u64, rec.as_mut_ptr() as u64, 24) };
         if n != 24 {
-            // Short/again/error: keep the window alive, retry.
             continue;
         }
-        // input_event x86_64: type@16, code@18, value@20.
         let etype = (rec[16] as u16) | ((rec[17] as u16) << 8);
-        let code  = (rec[18] as u16) | ((rec[19] as u16) << 8);
+        let code = (rec[18] as u16) | ((rec[19] as u16) << 8);
         let value = (rec[20] as u32)
             | ((rec[21] as u32) << 8)
             | ((rec[22] as u32) << 16)
             | ((rec[23] as u32) << 24);
-        // EV_ABS (3): throttled motion proof.
-        if etype == 3 && abs_logs < 6 {
-            abs_logs += 1;
-            // ABS_X = 0, ABS_Y = 1.
-            say(kmsg_fd, if code == 0 {
-                b"[microvm-init] pointer abs X moved\n" as &[u8]
-            } else {
-                b"[microvm-init] pointer abs Y moved\n"
-            });
-        }
-        // EV_KEY (1), press (value == 1). BTN_LEFT (0x110) is the
-        // mouse — distinguish it in the log so a click vs a keystroke
-        // is unambiguous on HW. Both toggle the colour.
-        if etype == 1 && value == 1 {
-            let is_click = code == 0x110;
-            magenta = !magenta;
-            if magenta {
-                fb_paint(fb, 0xFF, 0x00, 0xFF); // magenta
-                say(kmsg_fd, if is_click {
-                    b"[microvm-init] click -> magenta\n" as &[u8]
-                } else {
-                    b"[microvm-init] key -> magenta\n"
-                });
-            } else {
-                fb_paint(fb, 0xFF, 0xFF, 0x00); // cyan
-                say(kmsg_fd, if is_click {
-                    b"[microvm-init] click -> cyan\n" as &[u8]
-                } else {
-                    b"[microvm-init] key -> cyan\n"
-                });
+        match etype {
+            // EV_ABS — ABS_X = 0, ABS_Y = 1.
+            3 => {
+                if code == 0 {
+                    px = abs_to_px(value, FB_W);
+                } else if code == 1 {
+                    py = abs_to_px(value, FB_H);
+                }
+                if abs_logs < 6 {
+                    abs_logs += 1;
+                    say(kmsg_fd, b"[microvm-init] pointer abs event\n");
+                }
             }
+            // EV_KEY — BTN_LEFT = 0x110, BTN_RIGHT = 0x111.
+            1 => {
+                let down = value != 0;
+                if code == 0x110 {
+                    if down { btn |= 1; } else { btn &= !1; }
+                } else if code == 0x111 {
+                    if down { btn |= 2; } else { btn &= !2; }
+                }
+            }
+            // EV_SYN — frame boundary: redraw the marker.
+            0 => {
+                let (b, g, r) = if btn & 1 != 0 {
+                    (0xFF, 0x00, 0xFF) // left → magenta
+                } else if btn & 2 != 0 {
+                    (0x00, 0xFF, 0x00) // right → green
+                } else {
+                    (0xFF, 0xFF, 0xFF) // none → white
+                };
+                if lx >= 0 {
+                    fb_block(fb, lx, ly, 0xFF, 0xFF, 0x00); // erase → cyan bg
+                }
+                fb_block(fb, px, py, b, g, r);
+                lx = px;
+                ly = py;
+            }
+            _ => {}
         }
     }
 }
