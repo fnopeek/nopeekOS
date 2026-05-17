@@ -1033,22 +1033,17 @@ impl VmContext {
                 // VM-entry injects one IRQ → claim it and `continue`
                 // (reason-1 recurs immediately, net/input lose
                 // nothing). Mirrors the SVM side.
-                let now = crate::interrupts::ticks();
-                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
-                    self.last_timer_tick = now;
-                    let vector = self.pic.vector_for_irq(0);
-                    let _ = vmcs::inject_external_irq(vector);
-                    self.consecutive_idle = 0;
-                    continue;
-                }
-                // D4 live-resize has priority over net/input. It's rare
-                // (only when Shade resizes the tile) and one-shot, while
-                // nat::pump fires on most ticks of a network-active
-                // guest (LibreWolf probes connectivity/OCSP even on
-                // about:blank) — the old `!pumped` gate starved it
-                // forever, so the resize IRQ never fired. Net pump is
-                // idempotent and recovers on the next tick; spending one
-                // VM-entry on the config-change here costs it nothing.
+                // D4 live-resize config-change MUST be checked before
+                // the timer-tick block. An idle guest (LibreWolf on
+                // about:blank) HLTs between ticks, so its only reason-1
+                // exits are fresh 100 Hz host-timer ticks (host USB is
+                // drained ON that timer, not as extra IRQs) — the
+                // timer block then `continue`s on EVERY exit and
+                // nothing past it (net/input/config-change) ever runs.
+                // This is rare (only on a Shade tile resize) and
+                // one-shot; firing it here costs the timer at most one
+                // tick (Linux tolerates the jitter) and is the only
+                // place an idle guest will ever see it.
                 {
                     let wid = crate::microvm::vm_window();
                     if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
@@ -1072,6 +1067,21 @@ impl VmContext {
                         }
                         continue;
                     }
+                }
+                // Guest timer tick: the microvm has no PIT/LAPIC timer
+                // source, so this injected IRQ0 is the only thing that
+                // wakes a time-blocked guest task (nanosleep/timerfd/
+                // poll-timeout — all of seatd/cage/wlroots). Pace to
+                // the host 100 Hz tick; gate on Linux having unmasked
+                // IRQ0. One VM-entry injects one IRQ → claim it and
+                // `continue`. Mirrors the SVM side.
+                let now = crate::interrupts::ticks();
+                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
+                    self.last_timer_tick = now;
+                    let vector = self.pic.vector_for_irq(0);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.consecutive_idle = 0;
+                    continue;
                 }
                 //
                 // While here, run the NAT pump: drains any host-side
