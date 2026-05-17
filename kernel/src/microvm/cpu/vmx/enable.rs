@@ -934,8 +934,21 @@ impl VmContext {
     // guest gets torn down. Per-slice `slice_n >= budget` still
     // bounds each call cooperatively. saturating_add: no overflow on
     // a long-lived windowed VM.
+    // Wall-clock slice cap. A busy guest (Wayland/LibreWolf
+    // compositor) never reaches IDLE_YIELD — every non-timer exit
+    // resets the idle counter — so the exit-count budget alone lets
+    // one slice run for tens of ms, starving Shade (laggy UI,
+    // sluggish Mod+Q: see intent::run_loop, the keybind read sits
+    // after vm_poll_slice). Bound each slice to a few ms of wall
+    // time so Core 0 returns to render Shade + read keybinds at a
+    // steady cadence regardless of guest load. Boot (cheap exits)
+    // still hits the exit budget first → same boot wall-time.
+    const SLICE_MS: u64 = 3;
+    let slice_deadline = crate::interrupts::rdtsc()
+        + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
+
     while self.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
-        if slice_n >= budget {
+        if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
             return Ok(SliceOutcome::StillRunning);
         }
         self.iter = self.iter.saturating_add(1);
@@ -1056,12 +1069,28 @@ impl VmContext {
                 // only drain when net didn't claim it (events stay
                 // queued for the next tick — never drained without an
                 // IRQ, else they'd be lost in the ring).
-                if !pumped
-                    && self.pci.virtio_input.drain_injected(self.host_base)
-                {
+                let input_injected = !pumped
+                    && self.pci.virtio_input.drain_injected(self.host_base);
+                if input_injected {
                     let vector = self.pic.vector_for_irq(12);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
+                }
+                // D4 live-resize: Shade resized the tile → raise a
+                // virtio-gpu config-change IRQ (line 9) so the guest
+                // re-queries GET_DISPLAY_INFO and wlroots/cage reflows.
+                // Same one-inject-slot-per-VM-entry discipline as
+                // net/input: only when neither claimed it. The flag is
+                // consumed ONLY here (slot guaranteed free), so a
+                // missed tick keeps it for the next entry.
+                if !pumped && !input_injected {
+                    let wid = crate::microvm::vm_window();
+                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
+                        self.pci.virtio_gpu.signal_display_change();
+                        let vector = self.pic.vector_for_irq(9);
+                        let _ = vmcs::inject_external_irq(vector);
+                        self.consecutive_idle = 0;
+                    }
                 }
                 // Pure timer-tick → idle counter advances. Reset when
                 // there are active NAT sessions (guest is blocked on

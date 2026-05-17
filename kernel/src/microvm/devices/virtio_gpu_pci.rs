@@ -78,6 +78,11 @@ const DC_EVENTS_CLEAR:  u32 = 0x04;
 const DC_NUM_SCANOUTS:  u32 = 0x08;
 const DC_NUM_CAPSETS:   u32 = 0x0C;
 
+/// `events_read` bit: the display configuration changed → the guest
+/// must re-issue GET_DISPLAY_INFO. Raised by `signal_display_change`
+/// when Shade resizes the tile (D4 live-resize round-trip).
+const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
+
 // virtio-gpu protocol command/response types
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO:        u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D:      u32 = 0x0101;
@@ -171,6 +176,9 @@ pub struct VirtioGpu {
     queues: [VirtQueue; NUM_QUEUES as usize],
 
     isr: u8,
+    /// virtio-gpu device-cfg `events_read`. Sticky until the guest
+    /// clears the bits via `events_clear`. See `VIRTIO_GPU_EVENT_*`.
+    events_read: u32,
     pending_kick_queue: Option<u16>,
 
     /// Resource table. Keyed by resource_id linearly — virtio-gpu
@@ -188,6 +196,11 @@ pub struct VirtioGpu {
     /// console-line update which is a full 3.6 MB blit; logging each
     /// via kprintln stalls the guest for tens of seconds.
     transfer_log_count: u32,
+    /// Same for SET_SCANOUT — a wlroots/cage compositor double-buffers
+    /// by flipping the scanout between two resources every frame
+    /// (res 3 ↔ 4 at the guest's refresh rate). Logging each floods
+    /// the loop terminal forever; first 5 are enough to confirm setup.
+    set_scanout_log_count: u32,
 }
 
 impl VirtioGpu {
@@ -212,11 +225,13 @@ impl VirtioGpu {
                 last_avail_idx: 0, used_idx: 0,
             }; NUM_QUEUES as usize],
             isr: 0,
+            events_read: 0,
             pending_kick_queue: None,
             resources: Vec::new(),
             scanouts: [Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 } }; MAX_SCANOUTS],
             flush_log_count: 0,
             transfer_log_count: 0,
+            set_scanout_log_count: 0,
         }
     }
 
@@ -231,6 +246,19 @@ impl VirtioGpu {
 
     pub fn take_pending_kick(&mut self) -> Option<u16> {
         self.pending_kick_queue.take()
+    }
+
+    /// Shade resized the tile → tell the guest the display config
+    /// changed so it re-queries GET_DISPLAY_INFO and wlroots/cage
+    /// reflows the output to the new size (D4 live-resize). Sets the
+    /// device-cfg event + the config-change ISR bit + bumps the
+    /// config generation. The caller injects IRQ 9 right after (the
+    /// guest's virtio IRQ handler reads ISR, sees bit 1, runs the
+    /// config-changed work that reads `events_read`).
+    pub fn signal_display_change(&mut self) {
+        self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
+        self.isr |= 0b10; // bit 1 = device configuration changed
+        self.config_generation = self.config_generation.wrapping_add(1);
     }
 
     /// Process queue notify. q0 = controlq, q1 = cursorq.
@@ -403,8 +431,16 @@ impl VirtioGpu {
 
         match cmd_type {
             VIRTIO_GPU_CMD_GET_DISPLAY_INFO => {
-                kprintln!("[gpu] GET_DISPLAY_INFO");
-                build_display_info_resp(flags, fence_id, ctx_id)
+                let _ = ctx_id;
+                // D4: report the bound window's content rect so the
+                // guest renders to the tile size (no host scaling).
+                // Falls back to the default if Shade hasn't placed the
+                // window yet / VM unbound (dev fullscreen path).
+                let (dw, dh) = crate::shade::surface::tile_size(
+                    crate::microvm::vm_window())
+                    .unwrap_or((DISPLAY_W, DISPLAY_H));
+                kprintln!("[gpu] GET_DISPLAY_INFO -> {}x{}", dw, dh);
+                build_display_info_resp(flags, fence_id, dw, dh)
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_2D => {
                 self.handle_resource_create_2d(&request[24..]);
@@ -511,10 +547,14 @@ impl VirtioGpu {
         let h = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
         let scanout_id  = u32::from_le_bytes([body[16], body[17], body[18], body[19]]);
         let resource_id = u32::from_le_bytes([body[20], body[21], body[22], body[23]]);
-        kprintln!(
-            "[gpu] SET_SCANOUT id={} res={} {}x{}+{}+{}",
-            scanout_id, resource_id, w, h, x, y,
-        );
+        let n = self.set_scanout_log_count;
+        self.set_scanout_log_count = n.saturating_add(1);
+        if n < 5 {
+            kprintln!(
+                "[gpu] SET_SCANOUT id={} res={} {}x{}+{}+{}",
+                scanout_id, resource_id, w, h, x, y,
+            );
+        }
         let idx = scanout_id as usize;
         if idx >= MAX_SCANOUTS { return; }
         if resource_id == 0 {
@@ -706,6 +746,17 @@ impl VirtioGpu {
             let queue = ((off - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER) as u16;
             let _ = value; let _ = width;
             self.pending_kick_queue = Some(queue);
+        } else if off >= DEVICE_OFF && off < DEVICE_OFF + DEVICE_LEN {
+            self.device_write(off - DEVICE_OFF, value);
+        }
+    }
+
+    /// virtio-gpu device-cfg writes. Only `events_clear` is writable:
+    /// the guest's config-changed handler writes the bits it observed
+    /// in `events_read` to acknowledge them (write-1-to-clear).
+    fn device_write(&mut self, off: u32, value: u64) {
+        if off == DC_EVENTS_CLEAR {
+            self.events_read &= !(value as u32);
         }
     }
 
@@ -775,6 +826,7 @@ impl VirtioGpu {
                     self.driver_feature_select = 0;
                     self.device_feature_select = 0;
                     self.queue_select = 0;
+                    self.events_read = 0;
                     self.config_generation = self.config_generation.wrapping_add(1);
                 }
             }
@@ -796,6 +848,9 @@ impl VirtioGpu {
         let mask = width_mask(width);
         let buf: [u8; 16] = {
             let mut b = [0u8; 16];
+            b[DC_EVENTS_READ as usize..DC_EVENTS_READ as usize + 4]
+                .copy_from_slice(&self.events_read.to_le_bytes());
+            // events_clear reads back 0 (write-1-to-clear).
             b[DC_NUM_SCANOUTS as usize..DC_NUM_SCANOUTS as usize + 4]
                 .copy_from_slice(&1u32.to_le_bytes());
             b[DC_NUM_CAPSETS as usize..DC_NUM_CAPSETS as usize + 4]
@@ -833,7 +888,7 @@ fn build_ctrl_hdr(resp_type: u32, flags: u32, fence_id: u64) -> Vec<u8> {
 
 /// Build a GET_DISPLAY_INFO response: ctrl_hdr + array of 16
 /// virtio_gpu_display_one. Only scanout 0 is enabled.
-fn build_display_info_resp(flags: u32, fence_id: u64, _ctx_id: u32) -> Vec<u8> {
+fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32) -> Vec<u8> {
     // Per virtio-gpu spec: VIRTIO_GPU_MAX_SCANOUTS = 16.
     // struct virtio_gpu_resp_display_info:
     //   hdr (24)
@@ -844,12 +899,12 @@ fn build_display_info_resp(flags: u32, fence_id: u64, _ctx_id: u32) -> Vec<u8> {
     buf[4..8].copy_from_slice(&flags.to_le_bytes());
     buf[8..16].copy_from_slice(&fence_id.to_le_bytes());
 
-    // pmodes[0]: 1280×720 at origin, enabled, flags=0
+    // pmodes[0]: tile-sized display at origin, enabled, flags=0
     let p0 = 24;
     buf[p0 +  0..p0 +  4].copy_from_slice(&0u32.to_le_bytes()); // x
     buf[p0 +  4..p0 +  8].copy_from_slice(&0u32.to_le_bytes()); // y
-    buf[p0 +  8..p0 + 12].copy_from_slice(&DISPLAY_W.to_le_bytes());
-    buf[p0 + 12..p0 + 16].copy_from_slice(&DISPLAY_H.to_le_bytes());
+    buf[p0 +  8..p0 + 12].copy_from_slice(&disp_w.to_le_bytes());
+    buf[p0 + 12..p0 + 16].copy_from_slice(&disp_h.to_le_bytes());
     buf[p0 + 16..p0 + 20].copy_from_slice(&1u32.to_le_bytes()); // enabled
     buf[p0 + 20..p0 + 24].copy_from_slice(&0u32.to_le_bytes()); // flags
 

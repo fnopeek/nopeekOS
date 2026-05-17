@@ -171,10 +171,11 @@ fn teardown_vm_window() {
     }
 }
 
-/// VM-exits processed per Core-0 poll. Cheap (~µs each); ~4 k keeps a
-/// slice sub-ms-to-low-ms so Shade still renders smoothly between
-/// slices, while the guest boots in ≈ the same wall time as before
-/// (idle counter persists across slices in VmContext).
+/// Exit-count cap per Core-0 poll, a secondary bound: `run_slice`
+/// also enforces a ~3 ms wall-clock deadline (see vmx/svm
+/// `SLICE_MS`), which is what actually keeps a busy guest from
+/// starving Shade. Cheap boot exits hit this count first → same
+/// boot wall-time; a busy compositor hits the deadline first.
 const SLICE_BUDGET: u32 = 4096;
 
 /// True if a microvm is currently open (running across slices).
