@@ -117,20 +117,10 @@ where
     // 5. VMCS region + VMCLEAR + VMPTRLD.
     let inner_result = vmcs_setup_then_inner(revision_id, inner);
 
-    let inner_was_ok = inner_result.is_ok();
-    let inner_err_len: Option<usize> = inner_result.as_ref().err().map(|s| s.len());
-
     // 6. VMXOFF — always runs.
     // SAFETY: in VMX root mode (verified above).
     unsafe {
         core::arch::asm!("vmxoff", options(nostack, preserves_flags));
-    }
-
-    use crate::kprintln;
-    match inner_err_len {
-        None if inner_was_ok => kprintln!("[microvm] with_vmx_root_and_vmcs: inner=Ok, returning Ok"),
-        Some(n) => kprintln!("[microvm] with_vmx_root_and_vmcs: inner=Err (str len={}), returning Err", n),
-        None => kprintln!("[microvm] with_vmx_root_and_vmcs: inner=Err (no len?), returning Err"),
     }
 
     inner_result
