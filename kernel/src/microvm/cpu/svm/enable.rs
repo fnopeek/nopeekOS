@@ -816,6 +816,31 @@ impl VmContext {
                     self.consecutive_idle = 0;
                     continue;
                 }
+                // D4 live-resize has priority over net/input — rare
+                // (only on a tile resize), one-shot, while nat::pump
+                // fires on most ticks of a network-active guest
+                // (LibreWolf probes connectivity even on about:blank)
+                // and the old `!pumped` gate starved it forever. Net
+                // pump is idempotent and recovers next tick.
+                {
+                    let wid = crate::microvm::vm_window();
+                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
+                        self.pci.virtio_gpu.signal_display_change();
+                        let vector = self.pic.vector_for_irq(9);
+                        let info: u64 = (vector as u64) | (1u64 << 31);
+                        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.consecutive_idle = 0;
+                        if let Some((tw, th)) =
+                            crate::shade::surface::tile_size(wid)
+                        {
+                            kprintln!(
+                                "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
+                                tw, th,
+                            );
+                        }
+                        continue;
+                    }
+                }
                 // NAT pump — drain host TCP recv buffers, inject as
                 // RX segments + IRQ 10 if any data moved. Same pattern
                 // as the VMX side; without it, async response data sits
@@ -842,34 +867,6 @@ impl VmContext {
                     self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.consecutive_idle = 0;
                     input_pending = true;
-                }
-                // D4 live-resize: Shade resized the tile → raise a
-                // virtio-gpu config-change IRQ (line 9) so the guest
-                // re-queries GET_DISPLAY_INFO and wlroots/cage reflows.
-                // Same one-EVENT_INJ-slot discipline as net/input;
-                // take_display_dirty consumed ONLY here (slot free), so
-                // a missed tick keeps the flag for the next VMRUN.
-                if !pumped && !input_pending {
-                    let wid = crate::microvm::vm_window();
-                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
-                        self.pci.virtio_gpu.signal_display_change();
-                        let vector = self.pic.vector_for_irq(9);
-                        let info: u64 = (vector as u64) | (1u64 << 31);
-                        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.consecutive_idle = 0;
-                        // Live-resize round-trip diagnostic — see the
-                        // vmx mirror. A `[gpu] GET_DISPLAY_INFO -> ...`
-                        // should follow; if not, the guest virtio-gpu
-                        // driver isn't reacting to the config-change.
-                        if let Some((tw, th)) =
-                            crate::shade::surface::tile_size(wid)
-                        {
-                            kprintln!(
-                                "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
-                                tw, th,
-                            );
-                        }
-                    }
                 }
                 if pumped || input_pending
                     || crate::microvm::devices::nat::active_session_count() > 0 {
