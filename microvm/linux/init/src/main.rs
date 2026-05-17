@@ -159,7 +159,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  udevadm settle --timeout=10 2>/dev/null; \
                  echo \"[wl] udev up; input: $(ls /dev/input 2>/dev/null | tr '\\n' ' ')\"; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
-                 WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
+                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm WLR_DRM_NO_ATOMIC=1 \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1; \
