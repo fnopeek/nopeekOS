@@ -172,6 +172,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
+                 ( while :; do \
+                     if dd if=/dev/input/event0 bs=24 count=1 >/dev/null 2>&1; \
+                       then echo '[evtap] guest evdev event arrived'; \
+                       else sleep 1; fi; \
+                   done > /dev/kmsg 2>&1 ) & \
+                 echo '[wl] evtap armed on /dev/input/event0 (passive, no grab)'; \
                  echo '[wl] launching cage -- librewolf (WLR_LOG=debug, direct to kmsg)'; \
                  cage -- librewolf --no-remote about:blank; \
                  echo \"[wl] cage exited rc=$? (seatd: $(tail -n 10 /tmp/seatd.log 2>&1))\"; \
