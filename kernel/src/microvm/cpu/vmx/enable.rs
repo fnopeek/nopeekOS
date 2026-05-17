@@ -1080,6 +1080,21 @@ impl VmContext {
                         let vector = self.pic.vector_for_irq(9);
                         let _ = vmcs::inject_external_irq(vector);
                         self.consecutive_idle = 0;
+                        // Diagnostic for the live-resize round-trip:
+                        // if a `[gpu] GET_DISPLAY_INFO -> ...` does NOT
+                        // follow this line, the guest virtio-gpu driver
+                        // isn't reacting to our config-change IRQ
+                        // (kernel/virtio side). If it does but the
+                        // browser still doesn't reflow, it's wlroots
+                        // not getting the DRM hotplug (needs udev).
+                        if let Some((tw, th)) =
+                            crate::shade::surface::tile_size(wid)
+                        {
+                            kprintln!(
+                                "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
+                                tw, th,
+                            );
+                        }
                     }
                 }
                 // Pure timer-tick → idle counter advances. Reset when

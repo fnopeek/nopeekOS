@@ -547,11 +547,13 @@ impl VirtioGpu {
         let h = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
         let scanout_id  = u32::from_le_bytes([body[16], body[17], body[18], body[19]]);
         let resource_id = u32::from_le_bytes([body[20], body[21], body[22], body[23]]);
+        // First 2 only (initial scanout binding); a wlroots compositor
+        // page-flips the scanout every frame — pure noise after setup.
         let n = self.set_scanout_log_count;
         self.set_scanout_log_count = n.saturating_add(1);
-        if n < 5 {
+        if n < 2 {
             kprintln!(
-                "[gpu] SET_SCANOUT id={} res={} {}x{}+{}+{}",
+                "[gpu] SET_SCANOUT id={} res={} {}x{}+{}+{} (further silenced)",
                 scanout_id, resource_id, w, h, x, y,
             );
         }
@@ -609,11 +611,13 @@ impl VirtioGpu {
             copy_from_backing(host_base, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
         }
 
+        // One-time bring-up confirmation; the pixel pipeline is proven
+        // (LibreWolf renders) so the per-frame churn is just noise.
         let n = self.transfer_log_count;
         self.transfer_log_count = n.saturating_add(1);
-        if n < 5 {
+        if n < 1 {
             kprintln!(
-                "[gpu] TRANSFER_TO_HOST_2D res={} rect={}x{}+{}+{} offset={}",
+                "[gpu] TRANSFER_TO_HOST_2D res={} rect={}x{}+{}+{} offset={} (further silenced)",
                 resource_id, w, h, x, y, offset,
             );
         }
@@ -632,18 +636,16 @@ impl VirtioGpu {
         };
         let pix = match &r.host_pixels { Some(p) => p, None => return };
 
+        // One-time "first guest frame reached the host" confirmation,
+        // no hex preview (it was always-zero bring-up debug + an
+        // expensive per-flush String build). The pixel pipeline is
+        // proven end-to-end; further flushes are silent.
         let n = self.flush_log_count;
         self.flush_log_count = n.saturating_add(1);
-        if n < 5 {
-            let preview_bytes = pix.len().min(64);
-            let mut hex = alloc::string::String::with_capacity(preview_bytes * 3);
-            for &b in &pix[..preview_bytes] {
-                let _ = core::fmt::write(&mut hex, format_args!("{:02x} ", b));
-            }
+        if n < 1 {
             kprintln!(
-                "[gpu] FLUSH#{} res={} rect={}x{}+{}+{} (resource {}x{}, {} bytes), first {} bytes: {}",
-                n + 1, resource_id, w, h, x, y, r.width, r.height, pix.len(),
-                preview_bytes, hex,
+                "[gpu] FLUSH res={} rect={}x{}+{}+{} (resource {}x{}) — pixel pipeline up, further silenced",
+                resource_id, w, h, x, y, r.width, r.height,
             );
         }
 
