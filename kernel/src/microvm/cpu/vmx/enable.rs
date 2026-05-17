@@ -1084,6 +1084,34 @@ impl VmContext {
                         }
                     }
                 }
+                // NAT pump + host→guest input MUST run before the
+                // timer-tick block. An idle guest (LibreWolf on
+                // about:blank) HLTs between ticks, so its only reason-1
+                // exits are fresh 100 Hz host-timer ticks — the timer
+                // block then `continue`s on EVERY exit and anything
+                // after it never runs. The old post-timer placement
+                // therefore NEVER delivered queued keystrokes to an
+                // idle browser (proven by the evdev tap: zero events
+                // reached the guest). Same starvation + same fix as
+                // the config-change block above. nat::pump is called
+                // every entry (drains host TCP regardless); each path
+                // claims the single inject slot + `continue` only when
+                // it has work, so net keeps priority over input (its
+                // RX IRQ is never missed) and both stay reachable.
+                let pumped = crate::microvm::devices::nat::pump(
+                    &mut self.pci.virtio_net, self.host_base);
+                if pumped {
+                    let vector = self.pic.vector_for_irq(10);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
+                if self.pci.virtio_input.drain_injected(self.host_base) {
+                    let vector = self.pic.vector_for_irq(12);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
                 // Guest timer tick: the microvm has no PIT/LAPIC timer
                 // source, so this injected IRQ0 is the only thing that
                 // wakes a time-blocked guest task (nanosleep/timerfd/
@@ -1098,31 +1126,6 @@ impl VmContext {
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                     continue;
-                }
-                //
-                // While here, run the NAT pump: drains any host-side
-                // TCP recv data into the guest's RX queue + injects
-                // an IRQ if anything moved. Without this, response
-                // data sits in host buffers forever while the guest
-                // waits in recv().
-                let pumped = crate::microvm::devices::nat::pump(
-                    &mut self.pci.virtio_net, self.host_base);
-                if pumped {
-                    let vector = self.pic.vector_for_irq(10);
-                    let _ = vmcs::inject_external_irq(vector);
-                    self.consecutive_idle = 0;
-                }
-                // Host→guest input: deliver queued keystrokes + IRQ the
-                // guest's virtio-input. VM-entry injects ONE IRQ, so
-                // only drain when net didn't claim it (events stay
-                // queued for the next tick — never drained without an
-                // IRQ, else they'd be lost in the ring).
-                if !pumped
-                    && self.pci.virtio_input.drain_injected(self.host_base)
-                {
-                    let vector = self.pic.vector_for_irq(12);
-                    let _ = vmcs::inject_external_irq(vector);
-                    self.consecutive_idle = 0;
                 }
                 // Pure timer-tick → idle counter advances. Reset when
                 // there are active NAT sessions (guest is blocked on

@@ -849,6 +849,30 @@ impl VmContext {
                         }
                     }
                 }
+                // NAT pump + host→guest input before the timer block —
+                // see the vmx mirror for the full rationale (idle guest
+                // = only fresh timer-tick exits, timer `continue`s on
+                // every one, so post-timer code never runs; the evdev
+                // tap proved zero host input reached an idle browser).
+                // nat::pump runs every entry (drains host TCP); each
+                // path claims the single EVENT_INJ slot + `continue`
+                // only when it has work, net keeping priority.
+                let pumped = crate::microvm::devices::nat::pump(
+                    &mut self.pci.virtio_net, self.host_base);
+                if pumped {
+                    let vector = self.pic.vector_for_irq(10);
+                    let info: u64 = (vector as u64) | (1u64 << 31);
+                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
+                if self.pci.virtio_input.drain_injected(self.host_base) {
+                    let vector = self.pic.vector_for_irq(12);
+                    let info: u64 = (vector as u64) | (1u64 << 31);
+                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
                 let now = crate::interrupts::ticks();
                 if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
                     self.last_timer_tick = now;
@@ -858,35 +882,7 @@ impl VmContext {
                     self.consecutive_idle = 0;
                     continue;
                 }
-                // NAT pump — drain host TCP recv buffers, inject as
-                // RX segments + IRQ 10 if any data moved. Same pattern
-                // as the VMX side; without it, async response data sits
-                // in host buffers forever while the guest waits in
-                // recv(). See `kernel/src/microvm/devices/nat.rs::pump`.
-                let pumped = crate::microvm::devices::nat::pump(
-                    &mut self.pci.virtio_net, self.host_base);
-                if pumped {
-                    let vector = self.pic.vector_for_irq(10);
-                    let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                }
-                // Host→guest input. VMCB.EVENT_INJ holds ONE event per
-                // VMRUN. Only drain when we can also raise the IRQ
-                // (else events would sit in the ring with no IRQ and
-                // be lost) — so skip this tick entirely if net already
-                // claimed EVENT_INJ; the queue waits for the next.
-                let mut input_pending = false;
-                if !pumped
-                    && self.pci.virtio_input.drain_injected(self.host_base)
-                {
-                    let vector = self.pic.vector_for_irq(12);
-                    let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.consecutive_idle = 0;
-                    input_pending = true;
-                }
-                if pumped || input_pending
-                    || crate::microvm::devices::nat::active_session_count() > 0 {
+                if pumped || crate::microvm::devices::nat::active_session_count() > 0 {
                     self.consecutive_idle = 0;
                 } else {
                     self.consecutive_idle = self.consecutive_idle.saturating_add(1);
