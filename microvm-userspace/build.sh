@@ -54,6 +54,14 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 #               gtk/nss/fontconfig/freetype/… via apk deps)
 #   seatd     — libseat daemon (Alpine libseat has no builtin backend)
 #   libinput  — wlroots evdev input
+#   eudev     — udevd + udevadm + libudev. wlroots' libinput backend
+#               AND its DRM/session backend discover devices via the
+#               udev MONITOR; with no udev they find ZERO input
+#               devices (keyboard/mouse never reach the browser) and
+#               never see the DRM connector hotplug we raise on a
+#               tile resize (no live reflow). One package unblocks
+#               both. udevd is run + `udevadm trigger`+`settle`'d in
+#               launch_wayland before cage.
 #   mesa-gbm  — wlroots DRM backend buffer alloc (pixman SW renderer,
 #               no GL driver)
 # weston-clients dropped — the SHM test client is no longer needed.
@@ -61,7 +69,7 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # fontconfig (pulled by librewolf) has nothing → all GTK + web text
 # renders as tofu boxes. dejavu covers Latin UI/body; noto adds
 # broad Unicode + a sane sans default so real pages look right.
-APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput mesa-gbm font-dejavu font-noto}"
+APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput eudev mesa-gbm font-dejavu font-noto}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -179,6 +187,19 @@ cat > "$STAGE/etc/motd" <<'MOTD'
    Substrate: VMX/SVM + EPT/NPT, 1 GB RAM, virtio-blk/net/gpu/input.
 
 MOTD
+
+# /etc/machine-id — LibreWolf's a11y stack spawns a DBus session bus
+# which refuses to start without one ("Cannot spawn a message bus
+# without a machine-id"), costing a multi-second startup timeout
+# (visible 2× in the boot log). dbus also checks
+# /var/lib/dbus/machine-id. A FIXED 32-hex value (not dbus-uuidgen):
+# the squashfs is signed over its bytes, so the image must be
+# byte-reproducible across rebuilds — a random id would break the sig
+# and there is one VM, no fleet, so a constant id is correct here.
+MACHINE_ID="2d8b9f1c4e6a7d0b3f5c8e1a9d4b7c0e"
+printf '%s\n' "$MACHINE_ID" > "$STAGE/etc/machine-id"
+mkdir -p "$STAGE/var/lib/dbus"
+ln -sfn /etc/machine-id "$STAGE/var/lib/dbus/machine-id"
 
 # ── Pack as cpio.gz (newc format = what Linux's initramfs unpacker
 #    expects). Strip uid/gid noise to keep the cpio reproducible

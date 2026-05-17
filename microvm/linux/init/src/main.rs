@@ -137,10 +137,27 @@ fn launch_wayland(kmsg_fd: i64) {
     // and the bring-up snapshot loop removed — they cost real guest
     // CPU. cage runs in the foreground; PID-1 parks if it exits so
     // the window/VM stay alive.
+    // udevd + `udevadm trigger`/`settle` MUST run before cage:
+    // wlroots' libinput backend discovers input devices, and its
+    // DRM/session backend discovers the GPU + receives connector
+    // HOTPLUG, exclusively through the udev monitor. With no udev
+    // wlroots finds zero input devices (keyboard/mouse never reach
+    // the browser) and never reacts to the DRM hotplug we raise on a
+    // tile resize (no live reflow). `trigger` replays uevents for
+    // already-present devices (event0, card0); `settle` waits for
+    // /run/udev/data to be populated before cage enumerates. Degrades
+    // with a WARN if eudev is absent (older bundle) — cage still
+    // starts, just input/hotplug-blind.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run \
                    || echo '[wl] WARN: /run tmpfs mount failed'; \
+                 mkdir -p /run/udev; \
+                 udevd --daemon 2>/dev/null \
+                   || echo '[wl] WARN: udevd failed (input + resize-hotplug degraded)'; \
+                 udevadm trigger --type=devices --action=add 2>/dev/null; \
+                 udevadm settle --timeout=10 2>/dev/null; \
+                 echo \"[wl] udev up; input: $(ls /dev/input 2>/dev/null | tr '\\n' ' ')\"; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=drm WLR_DRM_NO_ATOMIC=1 \
                  LIBSEAT_BACKEND=seatd \
