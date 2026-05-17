@@ -58,7 +58,15 @@ const TCP_RST: u8 = 0x04;
 const TCP_PSH: u8 = 0x08;
 const TCP_ACK: u8 = 0x10;
 
-const MAX_TCP_SESSIONS: usize = 4;
+// A real web page opens dozens of concurrent TCP connections (6+
+// per origin × many origins: CDNs, fonts, analytics) plus HTTP
+// keep-alive holds slots open. 4 was a bring-up smoke value — a
+// browser instantly hit "session table full, dropping SYN" on
+// anything past example.com. Each Option<TcpSession> is ~48 B →
+// 128 slots ≈ 6 KB static, trivial. alloc_session already recycles
+// None/Closed slots; idle-keep-alive reaping (LRU) is a later
+// refinement if 128 ever saturates.
+const MAX_TCP_SESSIONS: usize = 128;
 /// Cap on per-segment data we inject to the guest. Keeps us well below
 /// the typical 1460-byte MSS Linux advertises and avoids fragmenting
 /// 1500-byte RX buffers.
