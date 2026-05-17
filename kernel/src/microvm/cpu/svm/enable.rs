@@ -774,8 +774,17 @@ impl VmContext {
     // per-slice `slice_n >= budget` bound below still keeps each call
     // cooperative. saturating_add so a long-lived windowed VM's iter
     // counter can't overflow once past the (now-irrelevant) cap.
+    // Wall-clock slice cap — see the vmx mirror for the rationale.
+    // A busy guest never reaches IDLE_YIELD, so the exit-count
+    // budget alone lets one slice run tens of ms and starves Shade
+    // (laggy UI, sluggish Mod+Q). Bound each slice to a few ms of
+    // wall time; boot still hits the exit budget first.
+    const SLICE_MS: u64 = 3;
+    let slice_deadline = crate::interrupts::rdtsc()
+        + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
+
     while self.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
-        if slice_n >= budget {
+        if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
             return Ok(SliceOutcome::StillRunning);
         }
         self.iter = self.iter.saturating_add(1);
@@ -833,6 +842,22 @@ impl VmContext {
                     self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.consecutive_idle = 0;
                     input_pending = true;
+                }
+                // D4 live-resize: Shade resized the tile → raise a
+                // virtio-gpu config-change IRQ (line 9) so the guest
+                // re-queries GET_DISPLAY_INFO and wlroots/cage reflows.
+                // Same one-EVENT_INJ-slot discipline as net/input;
+                // take_display_dirty consumed ONLY here (slot free), so
+                // a missed tick keeps the flag for the next VMRUN.
+                if !pumped && !input_pending {
+                    let wid = crate::microvm::vm_window();
+                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
+                        self.pci.virtio_gpu.signal_display_change();
+                        let vector = self.pic.vector_for_irq(9);
+                        let info: u64 = (vector as u64) | (1u64 << 31);
+                        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.consecutive_idle = 0;
+                    }
                 }
                 if pumped || input_pending
                     || crate::microvm::devices::nat::active_session_count() > 0 {

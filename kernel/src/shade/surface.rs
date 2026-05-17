@@ -32,6 +32,18 @@ pub struct GuestSurface {
     /// Set on `write_frame`, cleared by `take_dirty`. Lets the
     /// compositor skip recompositing an unchanged surface tile.
     dirty: bool,
+    /// Desired output size = the window's content rect, written by
+    /// Shade on create + every retile (`set_tile_size`). virtio-gpu
+    /// `GET_DISPLAY_INFO` reports this so the guest (wlroots/cage)
+    /// reflows to the tile natively — D4, no host-side scaling.
+    /// 0 until Shade has placed the window.
+    tile_w: u32,
+    tile_h: u32,
+    /// Set by `set_tile_size` when the tile size changed, taken by the
+    /// VM core (`take_display_dirty`) to raise a virtio-gpu
+    /// config-change IRQ so the guest re-queries GET_DISPLAY_INFO.
+    /// Coalescing is free: many resizes before one take = one IRQ.
+    display_dirty: bool,
 }
 
 static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new());
@@ -51,6 +63,9 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32) {
         width,
         height,
         dirty: false,
+        tile_w: 0,
+        tile_h: 0,
+        display_dirty: false,
     });
     if surf.width != width || surf.height != height || surf.pixels.len() != px_count {
         surf.width = width;
@@ -87,6 +102,63 @@ pub fn take_dirty(window_id: u32) -> bool {
         Some(s) => {
             let d = s.dirty;
             s.dirty = false;
+            d
+        }
+        None => false,
+    }
+}
+
+/// Shade tells the guest how big to render: the window's content
+/// rect. Called on window create + every retile. Creates the surface
+/// entry if absent so the size is known before the guest's first
+/// `GET_DISPLAY_INFO` (wlroots queries it before rendering a pixel).
+/// On a real change, flags `display_dirty` so the VM core raises a
+/// virtio-gpu config-change IRQ and asks the guest to reflow.
+pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mut map = SURFACES.lock();
+    let surf = map.entry(window_id).or_insert_with(|| GuestSurface {
+        pixels: Vec::new(),
+        width: 0,
+        height: 0,
+        dirty: false,
+        tile_w: 0,
+        tile_h: 0,
+        display_dirty: false,
+    });
+    if surf.tile_w != w || surf.tile_h != h {
+        surf.tile_w = w;
+        surf.tile_h = h;
+        surf.display_dirty = true;
+    }
+}
+
+/// The size the guest should render at (window content rect), for
+/// virtio-gpu `GET_DISPLAY_INFO`. `None` if Shade hasn't placed the
+/// window yet → caller falls back to a default.
+pub fn tile_size(window_id: u32) -> Option<(u32, u32)> {
+    let map = SURFACES.lock();
+    map.get(&window_id).and_then(|s| {
+        if s.tile_w != 0 && s.tile_h != 0 {
+            Some((s.tile_w, s.tile_h))
+        } else {
+            None
+        }
+    })
+}
+
+/// True (and clears the flag) if the tile size changed since the last
+/// call → the VM core must raise a virtio-gpu config-change IRQ so the
+/// guest re-queries `GET_DISPLAY_INFO`. Only consumed on a tick where
+/// the IRQ can actually be injected, so a missed slot keeps the flag.
+pub fn take_display_dirty(window_id: u32) -> bool {
+    let mut map = SURFACES.lock();
+    match map.get_mut(&window_id) {
+        Some(s) => {
+            let d = s.display_dirty;
+            s.display_dirty = false;
             d
         }
         None => false,

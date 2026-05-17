@@ -421,6 +421,27 @@ impl Compositor {
 
         let gap = self.gaps;
         self.dwindle_layout(&tiled, area_x, area_y, area_w, area_h, gap, true);
+        self.sync_surface_tile_sizes();
+    }
+
+    /// Push every Surface window's content rect into the surface
+    /// registry so virtio-gpu can advertise it via GET_DISPLAY_INFO
+    /// (D4 — guest renders to the tile size, no host scaling). Called
+    /// at the end of every retile; `set_tile_size` is idempotent and
+    /// only flags a config-change on a real size change. The `border`
+    /// must match render_window's content-rect inset exactly or the
+    /// guest would render a few px off.
+    fn sync_surface_tile_sizes(&self) {
+        let border = self.border;
+        for win in &self.windows {
+            if win.kind == crate::shade::window::WindowKind::Surface {
+                crate::shade::surface::set_tile_size(
+                    win.id.0,
+                    win.content_w(border),
+                    win.content_h(border),
+                );
+            }
+        }
     }
 
     /// Recursive dwindle: assign position to first window, recurse for rest.
@@ -682,38 +703,85 @@ impl Compositor {
                 });
             }
             crate::shade::window::WindowKind::Surface => {
-                // Raw guest framebuffer → tile. The guest renders a
-                // fixed size (1280x720); the tile is whatever dwindle
-                // gave us. Nearest-neighbour SCALE to fill the content
-                // rect exactly, strictly bounded to it (clamped to the
-                // framebuffer) so it never overdraws the border or a
-                // neighbour tile. (D4 later: tell the guest the tile
-                // size via virtio-gpu GET_DISPLAY_INFO so it reflows
-                // natively instead of us scaling.)
+                // Raw guest framebuffer → tile, 1:1 (no scaling). D4:
+                // virtio-gpu GET_DISPLAY_INFO advertises this content
+                // rect, so the guest (wlroots/cage) reflows to the
+                // tile size natively — guest `sw×sh` == `cw×ch` in
+                // steady state; a brief mismatch during a resize
+                // round-trip just clips (never stretches). Same
+                // memcpy-middle + SDF-corner-blend shape as the Widget
+                // arm above so the browser tile gets the identical
+                // concentric rounded corners as every other window
+                // and sits flush in the dwindle layout.
                 crate::shade::surface::with_front(win.id.0, |px, sw, sh| {
                     if px.is_empty() || sw == 0 || sh == 0 || cw == 0 || ch == 0 {
                         return;
                     }
                     let pitch = info.pitch as usize;
-                    let dw = cw.min(info.width.saturating_sub(cx));
-                    let dh = ch.min(info.height.saturating_sub(cy));
-                    for ry in 0..dh {
-                        let sy = (ry as u64 * sh as u64 / ch as u64) as u32;
-                        if sy >= sh { continue; }
-                        let src_row = sy as usize * sw as usize;
-                        let dst_off = (cy + ry) as usize * pitch + cx as usize * 4;
-                        // SAFETY: dst row is dw u32s starting at the
-                        // content rect, clamped within the framebuffer.
-                        let dst = unsafe {
-                            core::slice::from_raw_parts_mut(
-                                shadow.add(dst_off) as *mut u32, dw as usize,
-                            )
-                        };
-                        for rx in 0..dw {
-                            let sx = (rx as u64 * sw as u64 / cw as u64) as u32;
-                            if (sx as usize) < sw as usize {
-                                dst[rx as usize] = px[src_row + sx as usize];
+                    let fb_w = info.width;
+                    let fb_h = info.height;
+                    // Clip the 1:1 blit to the guest buffer, the
+                    // content rect, and the framebuffer — never
+                    // overdraw the border or a neighbour tile.
+                    let x1 = (cx + sw).min(cx + cw).min(fb_w);
+                    let y1 = (cy + sh).min(cy + ch).min(fb_h);
+                    let cw_local = x1.saturating_sub(cx);
+                    let ch_local = y1.saturating_sub(cy);
+                    let r = inner_r.min(cw_local / 2).min(ch_local / 2);
+
+                    for dy in cy..y1 {
+                        let local_y = dy - cy;
+                        let in_top    = r > 0 && local_y < r;
+                        let in_bottom = r > 0 && local_y >= ch_local - r;
+
+                        if !in_top && !in_bottom {
+                            // Straight middle: fast memcpy of the row.
+                            let src_base = (local_y as usize) * (sw as usize);
+                            let dst_off  = dy as usize * pitch + cx as usize * 4;
+                            unsafe {
+                                let dst = shadow.add(dst_off) as *mut u32;
+                                core::ptr::copy_nonoverlapping(
+                                    px.as_ptr().add(src_base),
+                                    dst,
+                                    cw_local as usize,
+                                );
                             }
+                            continue;
+                        }
+
+                        // Corner row: r pixels on each side go through
+                        // the SDF blend; the middle is still memcpy.
+                        let mid_lo = r.min(cw_local);
+                        let mid_hi = cw_local.saturating_sub(r).max(mid_lo);
+
+                        for dx in cx..(cx + mid_lo).min(x1) {
+                            let local_x = dx - cx;
+                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
+                            if cov == 0 { continue; }
+                            let src_idx = (local_y as usize) * (sw as usize) + local_x as usize;
+                            render::blend_pixel(shadow, info, dx, dy, px[src_idx], cov);
+                        }
+
+                        if mid_hi > mid_lo {
+                            let src_base = (local_y as usize) * (sw as usize) + mid_lo as usize;
+                            let dst_off  = dy as usize * pitch + (cx + mid_lo) as usize * 4;
+                            let span     = (mid_hi - mid_lo) as usize;
+                            unsafe {
+                                let dst = shadow.add(dst_off) as *mut u32;
+                                core::ptr::copy_nonoverlapping(
+                                    px.as_ptr().add(src_base),
+                                    dst,
+                                    span,
+                                );
+                            }
+                        }
+
+                        for dx in (cx + mid_hi).min(x1)..x1 {
+                            let local_x = dx - cx;
+                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
+                            if cov == 0 { continue; }
+                            let src_idx = (local_y as usize) * (sw as usize) + local_x as usize;
+                            render::blend_pixel(shadow, info, dx, dy, px[src_idx], cov);
                         }
                     }
                 });
