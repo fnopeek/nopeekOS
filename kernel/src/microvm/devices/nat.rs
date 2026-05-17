@@ -740,6 +740,12 @@ pub fn pump(
 ) -> bool {
     use core::sync::atomic::{AtomicU32, Ordering};
     static TICKS: AtomicU32 = AtomicU32::new(0);
+    // Per-chunk pump logging is bring-up diagnostics. With real
+    // traffic (a LibreWolf page load = hundreds of 1400-byte chunks)
+    // it floods the serial/loop terminal and the kmsg VM-exit cost
+    // slows the guest. Log the first few to confirm connectivity,
+    // then go silent — same throttle idiom as the virtio-gpu logs.
+    static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
     let t = TICKS.fetch_add(1, Ordering::Relaxed);
 
     // CRITICAL: drain the host NIC's RX ring. Intel I226-V is a
@@ -787,13 +793,18 @@ pub fn pump(
 
         match recv_n {
             Some(n) if n > 0 => {
-                kprintln!("[nat] pump: host->guest {} bytes (seq={} ack={})",
-                          n, sess.snd_nxt, sess.rcv_nxt);
+                let lg = PUMP_LOG.fetch_add(1, Ordering::Relaxed);
+                if lg < 8 {
+                    kprintln!("[nat] pump: host->guest {} bytes (seq={} ack={})",
+                              n, sess.snd_nxt, sess.rcv_nxt);
+                }
                 let seg = build_tcp_segment(sess, &buf[..n], TCP_PSH | TCP_ACK);
                 drop(sessions);
                 if net.inject_rx(host_base, &seg) {
-                    kprintln!("[nat] pump: rx injected ({} bytes, total frame {})",
-                              n, seg.len());
+                    if lg < 8 {
+                        kprintln!("[nat] pump: rx injected ({} bytes, total frame {})",
+                                  n, seg.len());
+                    }
                     let mut s = SESSIONS.lock();
                     if let Some(sess) = s[snap.slot].as_mut() {
                         sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);

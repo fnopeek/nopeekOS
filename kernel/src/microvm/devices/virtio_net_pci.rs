@@ -333,13 +333,25 @@ impl VirtioNet {
             }
         }
 
+        // Per-service tx/rx logging is bring-up diagnostics; with a
+        // real page load it floods the loop terminal + serial (the
+        // kmsg VM-exit cost slows the guest). First few then silent.
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static NET_LOG: AtomicU32 = AtomicU32::new(0);
+        let nl = NET_LOG.load(Ordering::Relaxed);
         if advanced {
             self.isr |= 1;
-            kprintln!("[virtio-net] tx serviced (used_idx={})", new_used_idx);
+            if nl < 8 {
+                NET_LOG.store(nl + 1, Ordering::Relaxed);
+                kprintln!("[virtio-net] tx serviced (used_idx={})", new_used_idx);
+            }
         }
         if rx_advanced {
             self.isr |= 1;
-            kprintln!("[virtio-net] rx injected (n={})", pending_rx.len());
+            if nl < 8 {
+                NET_LOG.store(nl + 1, Ordering::Relaxed);
+                kprintln!("[virtio-net] rx injected (n={})", pending_rx.len());
+            }
         }
         advanced || rx_advanced
     }
