@@ -171,10 +171,15 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug, input-filtered)'; \
-                 cage -- librewolf --no-remote about:blank 2>&1 \
-                   | grep --line-buffered -iE 'libinput|seat|/dev/input|event[0-9]|udev|no input|backend|keyboard|pointer|cursor'; \
-                 echo \"[wl] cage exited (seatd: $(tail -n 10 /tmp/seatd.log 2>&1))\"; \
+                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug → /tmp/cage.log, filtered to kmsg)'; \
+                 : > /tmp/cage.log; \
+                 ( tail -f /tmp/cage.log 2>/dev/null \
+                     | grep -iE 'libinput|seat|/dev/input|event[0-9]|udev|backend|keyboard|pointer|cursor|error|fail' \
+                     > /dev/kmsg 2>/dev/null ) & \
+                 cage -- librewolf --no-remote about:blank > /tmp/cage.log 2>&1; \
+                 echo \"[wl] cage exited rc=$?\"; \
+                 echo \"[wl] cage.log tail: $(tail -n 25 /tmp/cage.log 2>&1)\"; \
+                 echo \"[wl] seatd: $(tail -n 10 /tmp/seatd.log 2>&1)\"; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
