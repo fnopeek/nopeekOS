@@ -171,7 +171,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug → /tmp/cage.log, filtered to kmsg)'; \
+                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug -> /tmp/cage.log, filtered to kmsg)'; \
                  : > /tmp/cage.log; \
                  ( tail -f /tmp/cage.log 2>/dev/null \
                      | grep -iE 'libinput|seat|/dev/input|event[0-9]|udev|backend|keyboard|pointer|cursor|error|fail' \
