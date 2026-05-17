@@ -168,18 +168,13 @@ fn launch_wayland(kmsg_fd: i64) {
                  WLR_LOG=debug \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
-                 MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1; \
+                 MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1 \
+                 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug -> /tmp/cage.log, filtered to kmsg)'; \
-                 : > /tmp/cage.log; \
-                 ( tail -f /tmp/cage.log 2>/dev/null \
-                     | grep -iE 'libinput|seat|/dev/input|event[0-9]|udev|backend|keyboard|pointer|cursor|error|fail' \
-                     > /dev/kmsg 2>/dev/null ) & \
-                 cage -- librewolf --no-remote about:blank > /tmp/cage.log 2>&1; \
-                 echo \"[wl] cage exited rc=$?\"; \
-                 echo \"[wl] cage.log tail: $(tail -n 25 /tmp/cage.log 2>&1)\"; \
-                 echo \"[wl] seatd: $(tail -n 10 /tmp/seatd.log 2>&1)\"; \
+                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug, direct to kmsg)'; \
+                 cage -- librewolf --no-remote about:blank; \
+                 echo \"[wl] cage exited rc=$? (seatd: $(tail -n 10 /tmp/seatd.log 2>&1))\"; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
@@ -242,8 +237,9 @@ fn try_switch_to_sqfs(kmsg_fd: i64) -> bool {
     true
 }
 
-/// Mount /proc, /sys, /dev (devtmpfs), /tmp (tmpfs). Required for any
-/// real Linux userspace to function. With a cpio initramfs Linux skips
+/// Mount /proc, /sys, /dev (devtmpfs), /tmp + /dev/shm (tmpfs).
+/// Required for any real Linux userspace to function (and Firefox
+/// hard-requires /dev/shm). With a cpio initramfs Linux skips
 /// `prepare_namespace()` and never honors `devtmpfs.mount=1`, so the
 /// init has to do it itself.
 fn mount_essentials() {
@@ -279,6 +275,20 @@ fn mount_essentials() {
             b"/tmp\0".as_ptr() as u64,
             b"tmpfs\0".as_ptr() as u64,
             0, 0,
+        );
+        // /dev/shm — Firefox/Gecko hard-requires POSIX shared memory
+        // for content-process IPC. Without it shm_open() fails and a
+        // content process null-derefs in libxul (observed: "Privileged
+        // Cont segfault at 0 in libxul.so"). /dev is devtmpfs; mount a
+        // tmpfs on the /dev/shm subdir, mode 1777 like a real system.
+        let _ = syscall2(SYS_MKDIR, b"/dev/shm\0".as_ptr() as u64, 0o1777);
+        let _ = syscall5(
+            SYS_MOUNT,
+            b"tmpfs\0".as_ptr() as u64,
+            b"/dev/shm\0".as_ptr() as u64,
+            b"tmpfs\0".as_ptr() as u64,
+            0,
+            b"mode=1777\0".as_ptr() as u64,
         );
     }
 }
