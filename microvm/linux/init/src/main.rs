@@ -158,8 +158,13 @@ fn launch_wayland(kmsg_fd: i64) {
                  udevadm trigger --type=devices --action=add 2>/dev/null; \
                  udevadm settle --timeout=10 2>/dev/null; \
                  echo \"[wl] udev up; input: $(ls /dev/input 2>/dev/null | tr '\\n' ' ')\"; \
+                 echo \"[wl] evdev name: $(cat /sys/class/input/event0/device/name 2>/dev/null)\"; \
+                 echo \"[wl] udev id: $(udevadm info --query=property --name=/dev/input/event0 2>/dev/null | grep -E '^ID_INPUT|^ID_SEAT' | tr '\\n' ' ')\"; \
+                 echo '[wl] --- libinput list-devices ---'; \
+                 libinput list-devices 2>&1 | grep -E 'Device|Kernel|Capabilities|Seat' | head -20; \
+                 echo '[wl] --- end libinput ---'; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
-                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm WLR_DRM_NO_ATOMIC=1 \
+                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1; \
