@@ -1094,20 +1094,26 @@ impl VmContext {
                 // idle browser (proven by the evdev tap: zero events
                 // reached the guest). Same starvation + same fix as
                 // the config-change block above. nat::pump is called
-                // every entry (drains host TCP regardless); each path
-                // claims the single inject slot + `continue` only when
-                // it has work, so net keeps priority over input (its
-                // RX IRQ is never missed) and both stay reachable.
+                // every entry (drains host TCP for its side effect),
+                // but INPUT has priority for the single inject slot:
+                // a network-active browser makes nat::pump return
+                // `true` on almost every exit, so giving net the slot
+                // first starved input again under page-load traffic
+                // (input only worked on near-idle about:blank). Input
+                // is rare + latency-critical; net is throughput and
+                // tolerates a 1-tick delay (its RX data stays in the
+                // ring and gets IRQ'd on the next input-free exit).
+                // Order: config-change > input > net > timer.
                 let pumped = crate::microvm::devices::nat::pump(
                     &mut self.pci.virtio_net, self.host_base);
-                if pumped {
-                    let vector = self.pic.vector_for_irq(10);
+                if self.pci.virtio_input.drain_injected(self.host_base) {
+                    let vector = self.pic.vector_for_irq(12);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                     continue;
                 }
-                if self.pci.virtio_input.drain_injected(self.host_base) {
-                    let vector = self.pic.vector_for_irq(12);
+                if pumped {
+                    let vector = self.pic.vector_for_irq(10);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                     continue;

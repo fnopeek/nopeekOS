@@ -854,20 +854,23 @@ impl VmContext {
                 // = only fresh timer-tick exits, timer `continue`s on
                 // every one, so post-timer code never runs; the evdev
                 // tap proved zero host input reached an idle browser).
-                // nat::pump runs every entry (drains host TCP); each
-                // path claims the single EVENT_INJ slot + `continue`
-                // only when it has work, net keeping priority.
+                // nat::pump runs every entry (drains host TCP for its
+                // side effect) but INPUT has priority for the single
+                // EVENT_INJ slot — see the vmx mirror: a network-
+                // active browser makes pump true on almost every exit,
+                // so net-first starved input under page-load traffic.
+                // Order: config-change > input > net > timer.
                 let pumped = crate::microvm::devices::nat::pump(
                     &mut self.pci.virtio_net, self.host_base);
-                if pumped {
-                    let vector = self.pic.vector_for_irq(10);
+                if self.pci.virtio_input.drain_injected(self.host_base) {
+                    let vector = self.pic.vector_for_irq(12);
                     let info: u64 = (vector as u64) | (1u64 << 31);
                     self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.consecutive_idle = 0;
                     continue;
                 }
-                if self.pci.virtio_input.drain_injected(self.host_base) {
-                    let vector = self.pic.vector_for_irq(12);
+                if pumped {
+                    let vector = self.pic.vector_for_irq(10);
                     let info: u64 = (vector as u64) | (1u64 << 31);
                     self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.consecutive_idle = 0;
