@@ -747,14 +747,12 @@ pub fn pump(
     host_base: u64,
 ) -> bool {
     use core::sync::atomic::{AtomicU32, Ordering};
-    static TICKS: AtomicU32 = AtomicU32::new(0);
     // Per-chunk pump logging is bring-up diagnostics. With real
     // traffic (a LibreWolf page load = hundreds of 1400-byte chunks)
     // it floods the serial/loop terminal and the kmsg VM-exit cost
     // slows the guest. Log the first few to confirm connectivity,
     // then go silent — same throttle idiom as the virtio-gpu logs.
     static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
-    let t = TICKS.fetch_add(1, Ordering::Relaxed);
 
     // CRITICAL: drain the host NIC's RX ring. Intel I226-V is a
     // polling driver — no IRQ path calls handle_frame for us. Without
@@ -837,14 +835,6 @@ pub fn pump(
                         kprintln!("[nat] TCP {} host closed, FIN injected",
                                   snap.host_handle);
                     }
-                } else if t % 200 == 0 {
-                    let (in_flight, buffered) =
-                        crate::net::tcp::debug_progress(snap.host_handle)
-                        .unwrap_or((u32::MAX, usize::MAX));
-                    kprintln!(
-                        "[nat] pump heartbeat: slot={} state={:?} host_est={} in_flight={} buffered={}",
-                        snap.slot, snap.state, host_alive, in_flight, buffered,
-                    );
                 }
             }
         }
