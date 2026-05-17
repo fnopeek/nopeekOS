@@ -149,6 +149,11 @@ fn launch_wayland(kmsg_fd: i64) {
     // with a WARN if eudev is absent (older bundle) — cage still
     // starts, just input/hotplug-blind.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
+                 if [ -n \"$NPT\" ]; then date -s @\"$NPT\" >/dev/null 2>&1 \
+                   && echo \"[wl] clock set from host: $(date -u)\" \
+                   || echo '[wl] WARN: date -s failed'; \
+                 else echo '[wl] WARN: no nopeektime= on cmdline (TLS will fail)'; fi; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run \
                    || echo '[wl] WARN: /run tmpfs mount failed'; \

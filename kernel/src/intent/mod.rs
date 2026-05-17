@@ -1731,10 +1731,26 @@ fn microvm_linux(inject: &[u8]) {
     // emulation returns 0 → Linux loops forever waiting for ticks).
     // Harmless on Intel: there CPUID 0x15 advertises the freq and
     // Linux uses it directly, ignoring the cmdline hint.
-    const CMDLINE: &[u8] =
+    // The guest has no RTC — its clock boots at the year 2000. Every
+    // HTTPS site's cert is then "not yet valid" → Firefox shows "your
+    // computer clock is wrong" and the load fails/crashes. Pass the
+    // host's real wall-clock epoch on the cmdline; PID-1's
+    // launch_wayland reads `nopeektime=` from /proc/cmdline and
+    // `date -s @<epoch>` before cage so TLS cert validation passes.
+    let mut cmdline: alloc::vec::Vec<u8> =
         b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr \
           nolapic noapic acpi=off tsc=reliable tsc_early_khz=2000000 \
-          devtmpfs.mount=1";
+          devtmpfs.mount=1"
+            .to_vec();
+    if let Some(epoch) =
+        crate::rtc::read_unix_time().or_else(crate::net::ntp::unix_time)
+    {
+        use core::fmt::Write;
+        let mut s = String::new();
+        let _ = write!(s, " nopeektime={}", epoch);
+        cmdline.extend_from_slice(s.as_bytes());
+    }
+    let cmdline: &[u8] = &cmdline;
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
     let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
@@ -1801,7 +1817,7 @@ fn microvm_linux(inject: &[u8]) {
 
     kprintln!("[microvm] launching Linux ({} bytes, cmdline: {:?})",
               bytes.len(),
-              core::str::from_utf8(CMDLINE).unwrap_or("?"));
+              core::str::from_utf8(cmdline).unwrap_or("?"));
 
     // 12.4 step 1b: non-blocking. Open the VM (synchronous one-time
     // substrate + guest-image setup, copies the bzImage into guest
@@ -1810,7 +1826,7 @@ fn microvm_linux(inject: &[u8]) {
     // rendering Shade between them — instead of this call blocking
     // Core 0 until guest exit. Guest-exit logging happens in
     // vm_poll_slice when the slice that observes the exit completes.
-    match crate::microvm::vm_open(&bytes, CMDLINE, initramfs.as_deref(), inject) {
+    match crate::microvm::vm_open(&bytes, cmdline, initramfs.as_deref(), inject) {
         Ok(()) => {
             // 12.4 step A3: give the guest its own tiled Surface
             // window (tiling invariant — never fullscreen). virtio-gpu
