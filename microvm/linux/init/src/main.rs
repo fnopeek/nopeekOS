@@ -154,6 +154,9 @@ fn launch_wayland(kmsg_fd: i64) {
                    && echo \"[wl] clock set from host: $(date -u)\" \
                    || echo '[wl] WARN: date -s failed'; \
                  else echo '[wl] WARN: no nopeektime= on cmdline (TLS will fail)'; fi; \
+                 echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null \
+                   && echo '[wl] print-fatal-signals=1 (crash module will be named)' \
+                   || echo '[wl] WARN: could not enable print-fatal-signals'; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run \
                    || echo '[wl] WARN: /run tmpfs mount failed'; \
