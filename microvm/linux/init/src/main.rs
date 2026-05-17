@@ -169,6 +169,22 @@ fn launch_wayland(kmsg_fd: i64) {
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null \
                    || echo '[wl] WARN: resolv.conf bind failed'; \
                  echo \"[wl] net: iface=$IFACE; $(ip route 2>/dev/null | tr '\\n' ';')\"; \
+                 mkdir -p /tmp/moz; : > /tmp/moz/user.js; \
+                 for p in \
+                   'browser.tabs.remote.autostart|false' \
+                   'fission.autostart|false' \
+                   'network.process.enabled|false' \
+                   'layers.gpu-process.enabled|false' \
+                   'gfx.webrender.software|true' \
+                   'security.sandbox.content.level|0' \
+                   'extensions.autoDisableScopes|15' \
+                   'extensions.startupScanScopes|0' \
+                   'toolkit.startup.max_resumed_crashes|-1' \
+                   'browser.shell.checkDefaultBrowser|false' \
+                   'browser.sessionstore.resume_from_crash|false'; \
+                 do k=${p%|*}; v=${p#*|}; \
+                   echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
+                 done; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
@@ -177,8 +193,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo '[wl] launching cage -- librewolf https://example.com'; \
-                 cage -- librewolf --no-remote https://example.com; \
+                 echo '[wl] launching cage -- librewolf (single-proc profile) https://example.com'; \
+                 cage -- librewolf --no-remote --profile /tmp/moz https://example.com; \
                  echo \"[wl] cage exited rc=$? (seatd: $(tail -n 5 /tmp/seatd.log 2>&1))\"; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
