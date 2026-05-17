@@ -165,14 +165,16 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo '[wl] --- end libinput ---'; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
+                 WLR_LOG=debug \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo '[wl] launching cage -- librewolf'; \
-                 cage -- librewolf --no-remote about:blank; \
-                 echo \"[wl] cage exited rc=$? (seatd: $(tail -n 2 /tmp/seatd.log 2>&1))\"; \
+                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug, input-filtered)'; \
+                 cage -- librewolf --no-remote about:blank 2>&1 \
+                   | grep --line-buffered -iE 'libinput|seat|/dev/input|event[0-9]|udev|no input|backend|keyboard|pointer|cursor'; \
+                 echo \"[wl] cage exited (seatd: $(tail -n 10 /tmp/seatd.log 2>&1))\"; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
