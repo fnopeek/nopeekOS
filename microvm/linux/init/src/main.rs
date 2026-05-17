@@ -158,29 +158,28 @@ fn launch_wayland(kmsg_fd: i64) {
                  udevadm trigger --type=devices --action=add 2>/dev/null; \
                  udevadm settle --timeout=10 2>/dev/null; \
                  echo \"[wl] udev up; input: $(ls /dev/input 2>/dev/null | tr '\\n' ' ')\"; \
-                 echo \"[wl] evdev name: $(cat /sys/class/input/event0/device/name 2>/dev/null)\"; \
-                 echo \"[wl] udev id: $(udevadm info --query=property --name=/dev/input/event0 2>/dev/null | grep -E '^ID_INPUT|^ID_SEAT' | tr '\\n' ' ')\"; \
-                 echo '[wl] --- libinput list-devices ---'; \
-                 libinput list-devices 2>&1 | grep -E 'Device|Kernel|Capabilities|Seat' | head -20; \
-                 echo '[wl] --- end libinput ---'; \
+                 IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
+                 ip link set \"$IFACE\" up 2>/dev/null \
+                   || ifconfig \"$IFACE\" up 2>/dev/null; \
+                 ip addr add 10.99.0.2/24 dev \"$IFACE\" 2>/dev/null \
+                   || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
+                 ip route add default via 10.99.0.1 2>/dev/null \
+                   || route add default gw 10.99.0.1 2>/dev/null; \
+                 echo 'nameserver 10.99.0.1' > /tmp/resolv.conf; \
+                 mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null \
+                   || echo '[wl] WARN: resolv.conf bind failed'; \
+                 echo \"[wl] net: iface=$IFACE; $(ip route 2>/dev/null | tr '\\n' ';')\"; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
-                 WLR_LOG=debug \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1 \
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 ( while :; do \
-                     if dd if=/dev/input/event0 bs=24 count=1 >/dev/null 2>&1; \
-                       then echo '[evtap] guest evdev event arrived'; \
-                       else sleep 1; fi; \
-                   done > /dev/kmsg 2>&1 ) & \
-                 echo '[wl] evtap armed on /dev/input/event0 (passive, no grab)'; \
-                 echo '[wl] launching cage -- librewolf (WLR_LOG=debug, direct to kmsg)'; \
-                 cage -- librewolf --no-remote about:blank; \
-                 echo \"[wl] cage exited rc=$? (seatd: $(tail -n 10 /tmp/seatd.log 2>&1))\"; \
+                 echo '[wl] launching cage -- librewolf https://example.com'; \
+                 cage -- librewolf --no-remote https://example.com; \
+                 echo \"[wl] cage exited rc=$? (seatd: $(tail -n 5 /tmp/seatd.log 2>&1))\"; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
