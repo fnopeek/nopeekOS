@@ -1041,6 +1041,38 @@ impl VmContext {
                     self.consecutive_idle = 0;
                     continue;
                 }
+                // D4 live-resize has priority over net/input. It's rare
+                // (only when Shade resizes the tile) and one-shot, while
+                // nat::pump fires on most ticks of a network-active
+                // guest (LibreWolf probes connectivity/OCSP even on
+                // about:blank) — the old `!pumped` gate starved it
+                // forever, so the resize IRQ never fired. Net pump is
+                // idempotent and recovers on the next tick; spending one
+                // VM-entry on the config-change here costs it nothing.
+                {
+                    let wid = crate::microvm::vm_window();
+                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
+                        self.pci.virtio_gpu.signal_display_change();
+                        let vector = self.pic.vector_for_irq(9);
+                        let _ = vmcs::inject_external_irq(vector);
+                        self.consecutive_idle = 0;
+                        // If no `[gpu] GET_DISPLAY_INFO -> ...` follows
+                        // this line, the guest virtio-gpu driver isn't
+                        // reacting to the config-change (kernel/virtio
+                        // side). If it does but the browser still
+                        // doesn't reflow, wlroots isn't getting the DRM
+                        // hotplug (needs udev — #5).
+                        if let Some((tw, th)) =
+                            crate::shade::surface::tile_size(wid)
+                        {
+                            kprintln!(
+                                "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
+                                tw, th,
+                            );
+                        }
+                        continue;
+                    }
+                }
                 //
                 // While here, run the NAT pump: drains any host-side
                 // TCP recv data into the guest's RX queue + injects
@@ -1059,43 +1091,12 @@ impl VmContext {
                 // only drain when net didn't claim it (events stay
                 // queued for the next tick — never drained without an
                 // IRQ, else they'd be lost in the ring).
-                let input_injected = !pumped
-                    && self.pci.virtio_input.drain_injected(self.host_base);
-                if input_injected {
+                if !pumped
+                    && self.pci.virtio_input.drain_injected(self.host_base)
+                {
                     let vector = self.pic.vector_for_irq(12);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
-                }
-                // D4 live-resize: Shade resized the tile → raise a
-                // virtio-gpu config-change IRQ (line 9) so the guest
-                // re-queries GET_DISPLAY_INFO and wlroots/cage reflows.
-                // Same one-inject-slot-per-VM-entry discipline as
-                // net/input: only when neither claimed it. The flag is
-                // consumed ONLY here (slot guaranteed free), so a
-                // missed tick keeps it for the next entry.
-                if !pumped && !input_injected {
-                    let wid = crate::microvm::vm_window();
-                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
-                        self.pci.virtio_gpu.signal_display_change();
-                        let vector = self.pic.vector_for_irq(9);
-                        let _ = vmcs::inject_external_irq(vector);
-                        self.consecutive_idle = 0;
-                        // Diagnostic for the live-resize round-trip:
-                        // if a `[gpu] GET_DISPLAY_INFO -> ...` does NOT
-                        // follow this line, the guest virtio-gpu driver
-                        // isn't reacting to our config-change IRQ
-                        // (kernel/virtio side). If it does but the
-                        // browser still doesn't reflow, it's wlroots
-                        // not getting the DRM hotplug (needs udev).
-                        if let Some((tw, th)) =
-                            crate::shade::surface::tile_size(wid)
-                        {
-                            kprintln!(
-                                "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
-                                tw, th,
-                            );
-                        }
-                    }
                 }
                 // Pure timer-tick → idle counter advances. Reset when
                 // there are active NAT sessions (guest is blocked on
