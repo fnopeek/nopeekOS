@@ -849,17 +849,28 @@ impl VmContext {
                         }
                     }
                 }
-                // NAT pump + host→guest input before the timer block —
-                // see the vmx mirror for the full rationale (idle guest
-                // = only fresh timer-tick exits, timer `continue`s on
-                // every one, so post-timer code never runs; the evdev
-                // tap proved zero host input reached an idle browser).
-                // nat::pump runs every entry (drains host TCP for its
-                // side effect) but INPUT has priority for the single
-                // EVENT_INJ slot — see the vmx mirror: a network-
-                // active browser makes pump true on almost every exit,
-                // so net-first starved input under page-load traffic.
-                // Order: config-change > input > net > timer.
+                // Bounded-skip timer floor — see the vmx mirror for
+                // the full rationale. A strict priority always starves
+                // the loser (timer-first → input dead when idle;
+                // input/net-first → TIMER dead under page-load net →
+                // RCU stall "timer wakeup didn't happen" → guest hang
+                // → libwayland 4096 overflow → cage rc=139). The timer
+                // is sacred but only needs ~100 Hz: if overdue by
+                // ≥ TIMER_MAX_SKIP host ticks it FORCES the slot
+                // (≤ ~30 ms jitter, far under any RCU threshold);
+                // otherwise input > net, then the normal timer.
+                const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
+                let now = crate::interrupts::ticks();
+                if self.pic.irq_unmasked(0)
+                    && now.wrapping_sub(self.last_timer_tick) >= TIMER_MAX_SKIP
+                {
+                    self.last_timer_tick = now;
+                    let vector = self.pic.vector_for_irq(0);
+                    let info: u64 = (vector as u64) | (1u64 << 31);
+                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
                 let pumped = crate::microvm::devices::nat::pump(
                     &mut self.pci.virtio_net, self.host_base);
                 if self.pci.virtio_input.drain_injected(self.host_base) {
@@ -876,7 +887,6 @@ impl VmContext {
                     self.consecutive_idle = 0;
                     continue;
                 }
-                let now = crate::interrupts::ticks();
                 if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
                     self.last_timer_tick = now;
                     let vector = self.pic.vector_for_irq(0);

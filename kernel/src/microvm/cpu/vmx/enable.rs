@@ -1084,26 +1084,37 @@ impl VmContext {
                         }
                     }
                 }
-                // NAT pump + host→guest input MUST run before the
-                // timer-tick block. An idle guest (LibreWolf on
-                // about:blank) HLTs between ticks, so its only reason-1
-                // exits are fresh 100 Hz host-timer ticks — the timer
-                // block then `continue`s on EVERY exit and anything
-                // after it never runs. The old post-timer placement
-                // therefore NEVER delivered queued keystrokes to an
-                // idle browser (proven by the evdev tap: zero events
-                // reached the guest). Same starvation + same fix as
-                // the config-change block above. nat::pump is called
-                // every entry (drains host TCP for its side effect),
-                // but INPUT has priority for the single inject slot:
-                // a network-active browser makes nat::pump return
-                // `true` on almost every exit, so giving net the slot
-                // first starved input again under page-load traffic
-                // (input only worked on near-idle about:blank). Input
-                // is rare + latency-critical; net is throughput and
-                // tolerates a 1-tick delay (its RX data stays in the
-                // ring and gets IRQ'd on the next input-free exit).
-                // Order: config-change > input > net > timer.
+                // Single inject slot per VM-entry → a strict priority
+                // order ALWAYS starves the loser: timer-first starves
+                // input/net for an idle guest (every exit is a fresh
+                // timer tick → continue); input/net-first starves the
+                // TIMER for a busy guest (a page load makes nat::pump
+                // true on almost every exit → continue → no IRQ0 →
+                // guest jiffies freeze → "rcu_preempt kthread timer
+                // wakeup didn't happen" RCU stall → guest hangs →
+                // cage unscheduled → libwayland 4096 buffer overflow
+                // → channel error → cage rc=139). Both observed.
+                //
+                // The timer is sacred (guest liveness/RCU/scheduler)
+                // and must be NON-STARVABLE, but only needs ~100 Hz.
+                // Fix: a bounded-skip floor — if the timer is overdue
+                // by ≥ TIMER_MAX_SKIP host ticks it FORCES the slot
+                // (caps timer jitter at ~30 ms even under saturating
+                // net — far under any RCU-stall threshold). Otherwise
+                // config-change > input > net, then the normal timer.
+                // nat::pump still runs every entry for its drain side
+                // effect; only the inject+`continue` is prioritized.
+                const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
+                let now = crate::interrupts::ticks();
+                if self.pic.irq_unmasked(0)
+                    && now.wrapping_sub(self.last_timer_tick) >= TIMER_MAX_SKIP
+                {
+                    self.last_timer_tick = now;
+                    let vector = self.pic.vector_for_irq(0);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
                 let pumped = crate::microvm::devices::nat::pump(
                     &mut self.pci.virtio_net, self.host_base);
                 if self.pci.virtio_input.drain_injected(self.host_base) {
@@ -1118,14 +1129,6 @@ impl VmContext {
                     self.consecutive_idle = 0;
                     continue;
                 }
-                // Guest timer tick: the microvm has no PIT/LAPIC timer
-                // source, so this injected IRQ0 is the only thing that
-                // wakes a time-blocked guest task (nanosleep/timerfd/
-                // poll-timeout — all of seatd/cage/wlroots). Pace to
-                // the host 100 Hz tick; gate on Linux having unmasked
-                // IRQ0. One VM-entry injects one IRQ → claim it and
-                // `continue`. Mirrors the SVM side.
-                let now = crate::interrupts::ticks();
                 if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
                     self.last_timer_tick = now;
                     let vector = self.pic.vector_for_irq(0);
