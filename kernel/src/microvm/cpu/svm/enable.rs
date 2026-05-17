@@ -433,6 +433,10 @@ pub struct VmContext {
     /// (input read() wakes via virtio-input IRQ; time does not).
     /// One IRQ0 per host tick (≈100 Hz) drives jiffies + wakeups.
     last_timer_tick: u64,
+    /// `ticks()` of the last virtio-gpu display config-change IRQ —
+    /// rate-limits the resize round-trip against a drag storm. See
+    /// the vmx mirror.
+    last_cfg_tick: u64,
 }
 
 impl VmContext {
@@ -507,6 +511,7 @@ impl VmContext {
             msr_log_count: 0,
             consecutive_idle: 0,
             last_timer_tick: 0,
+            last_cfg_tick: 0,
         })
     }
 
@@ -819,21 +824,29 @@ impl VmContext {
                 // it. See the vmx mirror.
                 {
                     let wid = crate::microvm::vm_window();
-                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
-                        self.pci.virtio_gpu.signal_display_change();
-                        let vector = self.pic.vector_for_irq(9);
-                        let info: u64 = (vector as u64) | (1u64 << 31);
-                        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.consecutive_idle = 0;
-                        if let Some((tw, th)) =
-                            crate::shade::surface::tile_size(wid)
-                        {
-                            kprintln!(
-                                "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
-                                tw, th,
-                            );
+                    if wid != 0 && crate::shade::surface::display_dirty_peek(wid) {
+                        // R2 debounce — see the vmx mirror. One
+                        // config-change per ~250 ms; flag stays dirty
+                        // during a drag so the final size lands.
+                        let now = crate::interrupts::ticks();
+                        if now.wrapping_sub(self.last_cfg_tick) >= 25 {
+                            let _ = crate::shade::surface::take_display_dirty(wid);
+                            self.last_cfg_tick = now;
+                            self.pci.virtio_gpu.signal_display_change();
+                            let vector = self.pic.vector_for_irq(9);
+                            let info: u64 = (vector as u64) | (1u64 << 31);
+                            self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                            self.consecutive_idle = 0;
+                            if let Some((tw, th)) =
+                                crate::shade::surface::tile_size(wid)
+                            {
+                                kprintln!(
+                                    "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
+                                    tw, th,
+                                );
+                            }
+                            continue;
                         }
-                        continue;
                     }
                 }
                 let now = crate::interrupts::ticks();

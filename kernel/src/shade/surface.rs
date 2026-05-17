@@ -149,6 +149,15 @@ pub fn tile_size(window_id: u32) -> Option<(u32, u32)> {
     })
 }
 
+/// Non-consuming peek of the display-dirty flag. The VM core checks
+/// this first so it can rate-limit the config-change IRQ (R2 debounce)
+/// WITHOUT clearing the flag when it decides to skip — the dirty state
+/// (and the latest tile size) then survives to the next allowed
+/// window, so the final resize size is always delivered.
+pub fn display_dirty_peek(window_id: u32) -> bool {
+    SURFACES.lock().get(&window_id).is_some_and(|s| s.display_dirty)
+}
+
 /// True (and clears the flag) if the tile size changed since the last
 /// call → the VM core must raise a virtio-gpu config-change IRQ so the
 /// guest re-queries `GET_DISPLAY_INFO`. Only consumed on a tick where

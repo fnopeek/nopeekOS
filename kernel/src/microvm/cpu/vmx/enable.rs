@@ -505,6 +505,13 @@ pub struct VmContext {
     /// that wakes a time-blocked guest task (nanosleep/timerfd/poll).
     /// One IRQ0 per host tick (≈100 Hz). Mirrors the SVM side.
     last_timer_tick: u64,
+    /// `ticks()` of the last virtio-gpu display config-change IRQ.
+    /// Rate-limits the resize round-trip: a tile drag retiles every
+    /// frame → without this the guest gets a config-change storm and
+    /// wlroots rescans connectors in a tight loop, never settling on
+    /// the final size (R2 debounce). The dirty flag persists, so the
+    /// final size is still delivered once the window reopens.
+    last_cfg_tick: u64,
 }
 
 impl VmContext {
@@ -556,6 +563,7 @@ impl VmContext {
                 msr_log_count: 0,
                 consecutive_idle: 0,
                 last_timer_tick: 0,
+                last_cfg_tick: 0,
             })
         };
 
@@ -1046,26 +1054,34 @@ impl VmContext {
                 // place an idle guest will ever see it.
                 {
                     let wid = crate::microvm::vm_window();
-                    if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
-                        self.pci.virtio_gpu.signal_display_change();
-                        let vector = self.pic.vector_for_irq(9);
-                        let _ = vmcs::inject_external_irq(vector);
-                        self.consecutive_idle = 0;
-                        // If no `[gpu] GET_DISPLAY_INFO -> ...` follows
-                        // this line, the guest virtio-gpu driver isn't
-                        // reacting to the config-change (kernel/virtio
-                        // side). If it does but the browser still
-                        // doesn't reflow, wlroots isn't getting the DRM
-                        // hotplug (needs udev — #5).
-                        if let Some((tw, th)) =
-                            crate::shade::surface::tile_size(wid)
-                        {
-                            kprintln!(
-                                "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
-                                tw, th,
-                            );
+                    if wid != 0 && crate::shade::surface::display_dirty_peek(wid) {
+                        // R2 debounce: at most one config-change per
+                        // ~250 ms (25 host ticks). A tile drag retiles
+                        // every frame; firing each one made wlroots
+                        // rescan DRM connectors in a tight loop and
+                        // never settle on the final size. We only
+                        // `take_` (clear) the flag when we actually
+                        // fire, so a drag in progress keeps it dirty
+                        // and the FINAL size is delivered ≤250 ms
+                        // after the drag ends.
+                        let now = crate::interrupts::ticks();
+                        if now.wrapping_sub(self.last_cfg_tick) >= 25 {
+                            let _ = crate::shade::surface::take_display_dirty(wid);
+                            self.last_cfg_tick = now;
+                            self.pci.virtio_gpu.signal_display_change();
+                            let vector = self.pic.vector_for_irq(9);
+                            let _ = vmcs::inject_external_irq(vector);
+                            self.consecutive_idle = 0;
+                            if let Some((tw, th)) =
+                                crate::shade::surface::tile_size(wid)
+                            {
+                                kprintln!(
+                                    "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
+                                    tw, th,
+                                );
+                            }
+                            continue;
                         }
-                        continue;
                     }
                 }
                 // Guest timer tick: the microvm has no PIT/LAPIC timer
