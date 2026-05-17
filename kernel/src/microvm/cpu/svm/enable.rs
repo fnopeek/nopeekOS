@@ -807,21 +807,16 @@ impl VmContext {
                 // a spurious vector. Claims the single EVENT_INJ slot
                 // for this VMRUN → `continue`; EXIT_INTR fires again
                 // immediately so net/input lose nothing.
-                let now = crate::interrupts::ticks();
-                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
-                    self.last_timer_tick = now;
-                    let vector = self.pic.vector_for_irq(0);
-                    let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.consecutive_idle = 0;
-                    continue;
-                }
-                // D4 live-resize has priority over net/input — rare
-                // (only on a tile resize), one-shot, while nat::pump
-                // fires on most ticks of a network-active guest
-                // (LibreWolf probes connectivity even on about:blank)
-                // and the old `!pumped` gate starved it forever. Net
-                // pump is idempotent and recovers next tick.
+                // D4 live-resize config-change MUST precede the
+                // timer-tick block. An idle guest (LibreWolf on
+                // about:blank) HLTs between ticks, so its only
+                // EXIT_INTR exits are fresh 100 Hz host-timer ticks
+                // (host USB is drained ON that timer, not as extra
+                // IRQs) — the timer block then `continue`s on EVERY
+                // exit and nothing past it ever runs. Rare + one-shot;
+                // costs the timer at most one tick (Linux tolerates
+                // the jitter) and is the only place an idle guest sees
+                // it. See the vmx mirror.
                 {
                     let wid = crate::microvm::vm_window();
                     if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
@@ -840,6 +835,15 @@ impl VmContext {
                         }
                         continue;
                     }
+                }
+                let now = crate::interrupts::ticks();
+                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
+                    self.last_timer_tick = now;
+                    let vector = self.pic.vector_for_irq(0);
+                    let info: u64 = (vector as u64) | (1u64 << 31);
+                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.consecutive_idle = 0;
+                    continue;
                 }
                 // NAT pump — drain host TCP recv buffers, inject as
                 // RX segments + IRQ 10 if any data moved. Same pattern
