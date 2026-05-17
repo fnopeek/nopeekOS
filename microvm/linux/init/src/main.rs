@@ -186,7 +186,24 @@ fn launch_wayland(kmsg_fd: i64) {
                    'extensions.startupScanScopes|0' \
                    'toolkit.startup.max_resumed_crashes|-1' \
                    'browser.shell.checkDefaultBrowser|false' \
-                   'browser.sessionstore.resume_from_crash|false'; \
+                   'browser.sessionstore.resume_from_crash|false' \
+                   'network.http.http3.enable|false' \
+                   'network.http.altsvc.enabled|false' \
+                   'network.dns.disablePrefetch|true' \
+                   'network.prefetch-next|false' \
+                   'network.predictor.enabled|false' \
+                   'network.http.speculative-parallel-limit|0' \
+                   'browser.urlbar.speculativeConnect.enabled|false' \
+                   'network.http.max-connections|48' \
+                   'network.http.max-persistent-connections-per-server|3' \
+                   'media.peerconnection.enabled|false' \
+                   'app.update.enabled|false' \
+                   'toolkit.telemetry.enabled|false' \
+                   'datareporting.healthreport.uploadEnabled|false' \
+                   'browser.safebrowsing.malware.enabled|false' \
+                   'browser.safebrowsing.phishing.enabled|false' \
+                   'browser.safebrowsing.downloads.enabled|false' \
+                   'browser.newtabpage.activity-stream.feeds.telemetry|false'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
