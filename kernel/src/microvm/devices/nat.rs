@@ -354,7 +354,14 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
     let proto = ip[9];
     let src_ip: [u8; 4] = ip[12..16].try_into().ok()?;
     let dst_ip: [u8; 4] = ip[16..20].try_into().ok()?;
-    let l4 = &ip[ihl..];
+    // Clamp L4 to the IP total-length. The guest TX buffer is bigger
+    // than the packet (min-frame / driver padding); &ip[ihl..] would
+    // append that garbage to every outbound segment → the server
+    // misframes the response → Firefox reads a wild length → ~4 GiB
+    // alloc → crash. Inbound is already clamped in net/ipv4.rs.
+    let ip_total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+    if ip_total < ihl || ip_total > ip.len() { return None; }
+    let l4 = &ip[ihl..ip_total];
 
     match proto {
         PROTO_UDP => {
