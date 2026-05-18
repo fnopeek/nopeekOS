@@ -102,16 +102,193 @@ impl NetCaps {
     pub const fn dns_only() -> Self {
         Self { allow_dns: true, allow_icmp: false, allow_udp: false, allow_tcp: false }
     }
-    /// Default for 12.3.4 — DNS + TCP, but not raw UDP / ICMP. Plenty
-    /// to let a browser-style stack reach HTTP/HTTPS endpoints; raw
-    /// pings + UDP services still need an explicit cap.
+    /// Browser default: DNS + TCP + UDP (QUIC/HTTP-3) via L3
+    /// masquerade. ICMP still needs an explicit cap.
     pub const fn dns_tcp() -> Self {
-        Self { allow_dns: true, allow_icmp: false, allow_udp: false, allow_tcp: true }
+        Self { allow_dns: true, allow_icmp: false, allow_udp: true, allow_tcp: true }
     }
 }
 
 impl Default for NetCaps {
     fn default() -> Self { Self::dns_tcp() }
+}
+
+// ===========================================================================
+// L3 masquerade NAT
+//
+// We do NOT terminate TCP. The guest's real Linux TCP/UDP/QUIC talks
+// end-to-end with the real server; we only rewrite IP packets:
+//   outbound  guest(10.99.0.2:p → R:q)  →  send from our_ip:HP → R:q
+//   inbound   R:q → our_ip:HP           →  inject  R:q → 10.99.0.2:p
+// Reliability, ordering, SACK, window-scaling, QUIC: all owned by Linux
+// and the server. We are a stateless-ish packet rewriter + a 4-tuple
+// table — no rtx/ack/RTO logic, none of the termination brittleness.
+// ===========================================================================
+
+use core::sync::atomic::{AtomicBool, Ordering as AtOrd};
+use alloc::collections::VecDeque;
+
+const L3_MAX: usize = 256;
+/// Masquerade host-port pool. Strictly below the host TCP stack's own
+/// ephemeral range (49152..=65534, net/tcp.rs) so a guest flow can
+/// never alias a host-originated connection (OTA `update`, `https`).
+const L3_PORT_LO: u16 = 20000;
+const L3_PORT_HI: u16 = 40000;
+const L3_TCP_IDLE_TICKS: u64 = 12_000; // ~2 min  (~100 ticks/s)
+const L3_UDP_IDLE_TICKS: u64 = 3_000;  // ~30 s
+
+#[derive(Clone, Copy)]
+struct L3Map {
+    proto: u8,
+    guest_port: u16,
+    remote_ip: [u8; 4],
+    remote_port: u16,
+    host_port: u16,
+    last_tick: u64,
+}
+
+static L3: Mutex<[Option<L3Map>; L3_MAX]> = Mutex::new([const { None }; L3_MAX]);
+/// Gates the host-RX inbound intercept. Off ⇒ `l3_inbound` is a cheap
+/// `false` so a guest-less host (plain OTA/https) is never touched.
+static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Rewritten guest-bound frames produced from the host-RX context,
+/// drained + injected by `pump` on the VM thread (same split the old
+/// termination pump used, to keep virtio access on one thread).
+static INBOUND_Q: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+
+/// Find an existing mapping for this guest flow or allocate one.
+/// Returns the masquerade host port.
+fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Option<u16> {
+    let mut tbl = L3.lock();
+    // Existing?
+    for m in tbl.iter_mut().flatten() {
+        if m.proto == proto && m.guest_port == gport
+            && m.remote_ip == rip && m.remote_port == rport
+        {
+            m.last_tick = now;
+            return Some(m.host_port);
+        }
+    }
+    // Allocate a host port not currently in the table.
+    let mut hp = L3_PORT_LO;
+    'scan: while hp < L3_PORT_HI {
+        if !tbl.iter().flatten().any(|m| m.host_port == hp) { break 'scan; }
+        hp += 1;
+    }
+    if hp >= L3_PORT_HI { return None; }
+    let slot = tbl.iter_mut().find(|s| s.is_none())?;
+    *slot = Some(L3Map { proto, guest_port: gport, remote_ip: rip,
+                          remote_port: rport, host_port: hp, last_tick: now });
+    Some(hp)
+}
+
+/// Reverse lookup for an inbound reply: (proto, host_port) + remote
+/// must match. Returns the guest port to deliver to.
+fn l3_map_in(proto: u8, hport: u16, rip: [u8; 4], rport: u16, now: u64) -> Option<u16> {
+    let mut tbl = L3.lock();
+    for m in tbl.iter_mut().flatten() {
+        if m.proto == proto && m.host_port == hport
+            && m.remote_ip == rip && m.remote_port == rport
+        {
+            m.last_tick = now;
+            return Some(m.guest_port);
+        }
+    }
+    None
+}
+
+/// Recompute the TCP/UDP checksum after an address/port rewrite.
+/// TCP checksum is mandatory; UDP-over-IPv4 may be zero, which we use
+/// (cheaper, always valid) so QUIC payload size isn't a concern.
+fn fix_l4_checksum(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], l4: &mut [u8]) {
+    if proto == PROTO_TCP {
+        if l4.len() < TCP_HDR_LEN { return; }
+        l4[16] = 0; l4[17] = 0;
+        let c = tcp_checksum(src_ip, dst_ip, l4);
+        l4[16..18].copy_from_slice(&c.to_be_bytes());
+    } else if proto == PROTO_UDP {
+        if l4.len() < UDP_HDR_LEN { return; }
+        l4[6] = 0; l4[7] = 0; // 0 = checksum disabled (valid for IPv4)
+    }
+}
+
+/// Outbound SNAT: rewrite the guest's L4 source port to a masquerade
+/// host port and send from our host IP. The guest's TCP/UDP semantics
+/// (seq/ack/window/options/QUIC) pass through untouched.
+fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
+                dst_port: u16, l4: &[u8]) -> Option<Vec<u8>> {
+    let now = crate::interrupts::ticks();
+    let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, now) {
+        Some(p) => p,
+        None => { kprintln!("[nat] L3 table full, dropping flow"); return None; }
+    };
+    let mut seg = l4.to_vec();
+    seg[0..2].copy_from_slice(&hp.to_be_bytes());          // src port → host port
+    let our_ip = crate::net::arp::our_ip();
+    fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
+    crate::net::ipv4::send(dst_ip, proto, &seg);
+    L3_ACTIVE.store(true, AtOrd::Release);
+    None
+}
+
+/// Host-RX intercept. `ip` is a full IPv4 packet already filtered to
+/// our IP. If it matches a masquerade mapping, rewrite it back to the
+/// guest, enqueue for `pump`, and return true (consume — the host
+/// stack must NOT also process it). Cheap `false` when no VM is up.
+pub fn l3_inbound(ip: &[u8]) -> bool {
+    if !L3_ACTIVE.load(AtOrd::Acquire) { return false; }
+    if ip.len() < IPV4_HDR_LEN { return false; }
+    let ihl = (ip[0] & 0x0F) as usize * 4;
+    if ihl < IPV4_HDR_LEN || ip.len() < ihl { return false; }
+    let proto = ip[9];
+    if proto != PROTO_TCP && proto != PROTO_UDP { return false; }
+    let src_ip: [u8; 4] = ip[12..16].try_into().unwrap();
+    let l4 = &ip[ihl..];
+    if l4.len() < 4 { return false; }
+    let remote_port = u16::from_be_bytes([l4[0], l4[1]]);
+    let host_port   = u16::from_be_bytes([l4[2], l4[3]]);
+    let now = crate::interrupts::ticks();
+    let gport = match l3_map_in(proto, host_port, src_ip, remote_port, now) {
+        Some(g) => g,
+        None => return false,
+    };
+
+    // Rewrite: dst IP → guest, L4 dst port → guest port; recompute
+    // both checksums. Wrap in vnet + eth (gateway → guest).
+    let mut frame = alloc::vec![0u8; VNET_HDR_LEN + ETH_HDR_LEN + ip.len()];
+    write_eth(&mut frame, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
+    let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
+    frame[ip_off..].copy_from_slice(ip);
+    frame[ip_off + 16..ip_off + 20].copy_from_slice(&GUEST_IP);
+    frame[ip_off + 10] = 0; frame[ip_off + 11] = 0;
+    let ipc = ipv4_checksum(&frame[ip_off..ip_off + ihl]);
+    frame[ip_off + 10..ip_off + 12].copy_from_slice(&ipc.to_be_bytes());
+    let l4_off = ip_off + ihl;
+    frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
+    fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
+
+    INBOUND_Q.lock().push_back(frame);
+    true
+}
+
+/// Drop idle mappings so the table can't fill over a long session.
+fn l3_reap(now: u64) {
+    let mut tbl = L3.lock();
+    for slot in tbl.iter_mut() {
+        if let Some(m) = slot.as_ref() {
+            let idle = now.wrapping_sub(m.last_tick);
+            let max = if m.proto == PROTO_TCP { L3_TCP_IDLE_TICKS }
+                      else { L3_UDP_IDLE_TICKS };
+            if idle > max { *slot = None; }
+        }
+    }
+}
+
+/// Tear down all L3 state (VM stopped). Idempotent.
+pub fn l3_reset() {
+    L3_ACTIVE.store(false, AtOrd::Release);
+    *L3.lock() = [const { None }; L3_MAX];
+    INBOUND_Q.lock().clear();
 }
 
 /// Classify a guest TX frame (virtio-net hdr + ethernet) and produce
@@ -194,22 +371,25 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
                     return None;
                 }
                 handle_dns(src_ip, src_port, dgram)
+            } else if dst_ip == GATEWAY_IP {
+                None    // other gateway-directed UDP: nothing here
             } else {
                 if !caps.allow_udp {
                     cap_reject("UDP", dst_ip, dst_port);
+                    return None;
                 }
-                None
+                l3_outbound(PROTO_UDP, src_port, dst_ip, dst_port, l4)
             }
         }
         PROTO_TCP => {
+            if l4.len() < 4 { return None; }
+            let src_port = u16::from_be_bytes([l4[0], l4[1]]);
+            let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
             if !caps.allow_tcp {
-                let dst_port = if l4.len() >= 4 {
-                    u16::from_be_bytes([l4[2], l4[3]])
-                } else { 0 };
                 cap_reject("TCP", dst_ip, dst_port);
                 return None;
             }
-            handle_tcp(frame, caps)
+            l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4)
         }
         PROTO_ICMP => {
             if !caps.allow_icmp {
@@ -828,178 +1008,31 @@ pub fn pump(
     host_base: u64,
 ) -> bool {
     use core::sync::atomic::{AtomicU32, Ordering};
-    // Per-chunk pump logging is bring-up diagnostics. With real
-    // traffic (a LibreWolf page load = hundreds of 1400-byte chunks)
-    // it floods the serial/loop terminal and the kmsg VM-exit cost
-    // slows the guest. Log the first few to confirm connectivity,
-    // then go silent — same throttle idiom as the virtio-gpu logs.
     static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
 
-    // CRITICAL: drain the host NIC's RX ring. Intel I226-V is a
-    // polling driver — no IRQ path calls handle_frame for us. Without
-    // this, response packets from the remote server pile up in the
-    // NIC's DMA ring while the VM exits keep ticking. Symptom would be
-    // `buffered=0` heartbeats forever even though the server replied.
+    // CRITICAL: drain the host NIC RX ring. Intel I226-V is a polling
+    // driver — nothing else calls handle_frame, so server replies (and
+    // our l3_inbound intercept) only run because of this poll.
     crate::net::poll();
 
-    // Step 1: snapshot lightweight per-session info under the SESSIONS
-    // lock, then drop it. This avoids holding two locks (SESSIONS +
-    // host-tcp CONNECTIONS) at the same time — a NIC IRQ that takes
-    // CONNECTIONS for incoming-packet dispatch would otherwise deadlock
-    // against pump.
-    struct Snapshot {
-        slot: usize,
-        host_handle: usize,
-        state: TcpState,
-        rtx_len: usize,
-    }
-    // Reap sweep: a session the guest abandoned before ACKing our
-    // SYN+ACK sticks in SynRcvd forever, pinning a NAT slot AND a host
-    // TCP slot. Free both after a grace period. Closed sessions also
-    // get their host handle closed so the host's 128 slots churn
-    // cleanly. ~100 ticks/s (see tcp.rs TimeWait), 5 s grace.
-    {
-        const SYN_REAP_TICKS: u64 = 500;
-        let now = crate::interrupts::ticks();
-        let mut sessions = SESSIONS.lock();
-        for s in sessions.iter_mut() {
-            let drop_it = match s.as_ref() {
-                Some(sess) if sess.state == TcpState::SynRcvd
-                    && now.wrapping_sub(sess.last_tick) > SYN_REAP_TICKS => true,
-                Some(sess) if sess.state == TcpState::Closed => true,
-                _ => false,
-            };
-            if drop_it {
-                if let Some(sess) = s.as_ref() {
-                    let _ = crate::net::tcp::close(sess.host_handle);
-                }
-                *s = None;
-            }
-        }
-    }
+    let now = crate::interrupts::ticks();
+    l3_reap(now);
 
-    let snapshots: alloc::vec::Vec<Snapshot> = {
-        let sessions = SESSIONS.lock();
-        sessions.iter().enumerate().filter_map(|(i, s)| {
-            s.as_ref().filter(|sess| sess.state != TcpState::Closed)
-                .map(|sess| Snapshot {
-                    slot: i,
-                    host_handle: sess.host_handle,
-                    state: sess.state,
-                    rtx_len: sess.rtx.len(),
-                })
-        }).collect()
-    };
-    if snapshots.is_empty() { return false; }
-
+    // Deliver every rewritten reply the host-RX intercept queued.
     let mut any = false;
-    for snap in &snapshots {
-        let now = crate::interrupts::ticks();
-
-        // --- Retransmit pass (first). A guest-bound segment the guest
-        // never ACKed (dropped in its virtio RX queue / by Linux) must
-        // be resent or the stream wedges. One action per session per
-        // pump; new host data waits until the backlog clears. ---
-        if snap.rtx_len > 0 {
-            let mut sessions = SESSIONS.lock();
-            let Some(sess) = sessions[snap.slot].as_mut() else { continue };
-            if sess.state == TcpState::Closed { continue }
-            if !sess.rtx.is_empty() && sess.rtx_tick != 0
-                && now.wrapping_sub(sess.rtx_tick) > RTO_TICKS
-            {
-                if sess.rtx_retries >= RTX_MAX_RETRIES {
-                    // Peer (guest) unreachable for the data — give up.
-                    let fin = build_tcp_segment_at(sess, sess.snd_una, &[],
-                                                   TCP_FIN | TCP_ACK);
-                    let _ = crate::net::tcp::close(sess.host_handle);
-                    sess.state = TcpState::Closed;
-                    drop(sessions);
-                    if net.inject_rx(host_base, &fin) { any = true; }
-                    kprintln!("[nat] TCP {} rtx gave up after {} retries",
-                              snap.host_handle, RTX_MAX_RETRIES);
-                    continue;
-                }
-                let clen = sess.rtx.len().min(MAX_SEG_PAYLOAD);
-                let seg = build_tcp_segment_at(sess, sess.snd_una,
-                                               &sess.rtx[..clen],
-                                               TCP_PSH | TCP_ACK);
-                sess.rtx_retries += 1;
-                sess.rtx_tick = now;
-                drop(sessions);
-                if net.inject_rx(host_base, &seg) { any = true; }
-                continue;   // one action per session per pump
+    loop {
+        let frame = { INBOUND_Q.lock().pop_front() };
+        let Some(frame) = frame else { break };
+        if net.inject_rx(host_base, &frame) {
+            any = true;
+            let lg = PUMP_LOG.fetch_add(1, Ordering::Relaxed);
+            if lg < 32 {
+                kprintln!("[nat] L3 in: {} bytes -> guest", frame.len());
             }
-        }
-
-        // --- New host data. Only drain the host conn if the unacked
-        // window has room — otherwise leave it in the host recv buffer
-        // so the host TCP window backpressures the server (no loss). ---
-        let want_recv = snap.rtx_len < RTX_WINDOW;
-        let mut buf = alloc::vec![0u8; MAX_SEG_PAYLOAD];
-        let recv_n = if want_recv {
-            crate::net::tcp::recv(snap.host_handle, &mut buf).ok()
         } else {
-            None
-        };
-        let host_alive = crate::net::tcp::is_established(snap.host_handle);
-
-        let mut sessions = SESSIONS.lock();
-        let Some(sess) = sessions[snap.slot].as_mut() else { continue };
-        if sess.state == TcpState::Closed { continue }
-
-        match recv_n {
-            Some(n) if n > 0 => {
-                let lg = PUMP_LOG.fetch_add(1, Ordering::Relaxed);
-                if lg < 64 {
-                    kprintln!("[nat] pump: host->guest {} bytes (seq={} ack={})",
-                              n, sess.snd_nxt, sess.rcv_nxt);
-                }
-                let seg = build_tcp_segment(sess, &buf[..n], TCP_PSH | TCP_ACK);
-                // Buffer for retransmit BEFORE injecting — if inject
-                // fails the bytes are still recoverable via the rtx
-                // path (old code dropped them on a full RX queue).
-                let was_idle = sess.rtx.is_empty();
-                sess.rtx.extend_from_slice(&buf[..n]);
-                sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
-                drop(sessions);
-                let injected = net.inject_rx(host_base, &seg);
-                // Set the RTO clock by outcome: delivered → measure
-                // the 15 s ACK wait from now; NOT delivered (RX queue
-                // full) → make it immediately due so the next pump
-                // resends fast instead of waiting a full RTO.
-                if let Some(sess) = SESSIONS.lock()[snap.slot].as_mut() {
-                    if injected {
-                        if was_idle { sess.rtx_tick = now; }
-                    } else {
-                        sess.rtx_tick = now.wrapping_sub(RTO_TICKS + 1);
-                    }
-                }
-                if injected {
-                    if lg < 64 {
-                        kprintln!("[nat] pump: rx injected ({} bytes, total frame {})",
-                                  n, seg.len());
-                    }
-                    any = true;
-                } else {
-                    kprintln!("[nat] pump: inject_rx FAILED — rtx resends next pump");
-                }
-            }
-            _ => {
-                // Host closed: only FIN the guest once we've delivered
-                // (and it ACKed) everything — don't truncate the body.
-                if !host_alive && sess.state == TcpState::Established
-                    && sess.rtx.is_empty()
-                {
-                    let fin = build_tcp_segment(sess, &[], TCP_FIN | TCP_ACK);
-                    sess.snd_nxt = sess.snd_nxt.wrapping_add(1);
-                    sess.state = TcpState::Closed;
-                    let _ = crate::net::tcp::close(sess.host_handle);
-                    drop(sessions);
-                    if net.inject_rx(host_base, &fin) { any = true; }
-                    kprintln!("[nat] TCP {} host closed, FIN injected",
-                              snap.host_handle);
-                }
-            }
+            // Guest RX queue full — requeue and retry next pump.
+            INBOUND_Q.lock().push_front(frame);
+            break;
         }
     }
     any
@@ -1009,19 +1042,13 @@ pub fn pump(
 /// idle-detection uses this to extend the timeout when traffic is in
 /// flight.
 pub fn active_session_count() -> usize {
-    let sessions = SESSIONS.lock();
-    sessions.iter()
-        .filter(|s| matches!(s, Some(t) if t.state != TcpState::Closed))
-        .count()
+    // Drives VM idle-detection: keep the guest scheduled while any
+    // masquerade flow is live or a reply is still queued.
+    L3.lock().iter().flatten().count() + INBOUND_Q.lock().len()
 }
 
-/// Tear down every session and free the table. Called when a microvm
-/// run ends so the next launch starts clean.
+/// Tear down NAT state when a microvm run ends so the next launch —
+/// and the host's own networking — start clean.
 pub fn reset_sessions() {
-    let mut sessions = SESSIONS.lock();
-    for slot in sessions.iter_mut() {
-        if let Some(sess) = slot.take() {
-            let _ = crate::net::tcp::close(sess.host_handle);
-        }
-    }
+    l3_reset();
 }
