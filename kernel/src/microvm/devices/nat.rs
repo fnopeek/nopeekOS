@@ -72,6 +72,13 @@ const MAX_TCP_SESSIONS: usize = 128;
 /// 1500-byte RX buffers.
 const MAX_SEG_PAYLOAD: usize = 1400;
 
+/// Max unacked guest-bound bytes per session (flow-control + rtx-buffer
+/// cap). When full, pump stops draining the host conn so the host TCP
+/// recv window backpressures the server. ~100 ticks/s (see tcp.rs).
+const RTX_WINDOW: usize = 64 * 1024;
+const RTO_TICKS: u64 = 50;        // ~500 ms retransmit timeout
+const RTX_MAX_RETRIES: u8 = 8;    // ~4 s of no progress → reap
+
 /// Per-VM network policy. Default is "DNS only" — outbound IP traffic
 /// for anything else is logged + dropped until 12.3.4 adds a proper
 /// NAT session table. Future work threads this through the microvm
@@ -446,6 +453,19 @@ struct TcpSession {
     /// Drives reaping of sessions the guest abandoned before ACKing
     /// our SYN+ACK — otherwise they pin a slot + host handle forever.
     last_tick: u64,
+
+    /// Unacked bytes already injected to the guest, covering seq range
+    /// [snd_una, snd_nxt). We are the TCP sender toward the guest;
+    /// without this a single dropped RX segment (guest virtio queue
+    /// pressure / Linux drop) is never resent → the stream wedges →
+    /// PR_IO_TIMEOUT_ERROR. Bounded by RTX_WINDOW.
+    rtx: alloc::vec::Vec<u8>,
+    /// Tick the oldest unacked byte was last (re)sent. RTO measured
+    /// from here.
+    rtx_tick: u64,
+    /// Consecutive RTO retransmits with no progress; session is reaped
+    /// past RTX_MAX_RETRIES.
+    rtx_retries: u8,
 }
 
 static SESSIONS: Mutex<[Option<TcpSession>; MAX_TCP_SESSIONS]> = Mutex::new(
@@ -473,6 +493,20 @@ fn alloc_session(sessions: &mut [Option<TcpSession>; MAX_TCP_SESSIONS]) -> Optio
 /// synthetic reply frame to push back via RX (already wrapped in
 /// virtio-net + eth + IPv4 + TCP). `None` means no immediate reply
 /// needed — async response data arrives later via `pump`.
+/// Process a guest cumulative ACK: drop the acked prefix from the
+/// retransmit buffer and advance `snd_una`. Ignores dup / stale /
+/// out-of-window acks so a spurious number can't rewind the sender.
+fn ack_progress(sess: &mut TcpSession, ack: u32) {
+    let outstanding = sess.snd_nxt.wrapping_sub(sess.snd_una);
+    let acked = ack.wrapping_sub(sess.snd_una);
+    if acked == 0 || acked > outstanding { return; }
+    let drain = (acked as usize).min(sess.rtx.len());
+    sess.rtx.drain(..drain);
+    sess.snd_una = ack;
+    sess.rtx_retries = 0;
+    sess.rtx_tick = if sess.rtx.is_empty() { 0 } else { crate::interrupts::ticks() };
+}
+
 fn handle_tcp(frame: &[u8], _caps: &NetCaps) -> Option<Vec<u8>> {
     if frame.len() < ETH_HDR_LEN + IPV4_HDR_LEN + TCP_HDR_LEN { return None; }
     let ip = &frame[ETH_HDR_LEN..];
@@ -534,6 +568,12 @@ fn handle_tcp(frame: &[u8], _caps: &NetCaps) -> Option<Vec<u8>> {
         }
     }
 
+    // Any ACK in Established (data-piggybacked or bare) advances our
+    // retransmit buffer. Must run before the data branch returns.
+    if sess.state == TcpState::Established && flags & TCP_ACK != 0 {
+        ack_progress(sess, ack);
+    }
+
     // Established (or in-flight close) — accept new payload.
     if !payload.is_empty() && sess.state == TcpState::Established {
         if seq == sess.rcv_nxt {
@@ -564,11 +604,7 @@ fn handle_tcp(frame: &[u8], _caps: &NetCaps) -> Option<Vec<u8>> {
         return Some(reply);
     }
 
-    // Bare ACK in Established — keep-alive, host data ACK, etc.
-    if flags & TCP_ACK != 0 && sess.state == TcpState::Established {
-        sess.snd_una = ack;
-    }
-
+    // Bare ACK already handled by ack_progress() above.
     None
 }
 
@@ -625,6 +661,9 @@ fn tcp_handle_syn(
         rcv_nxt: guest_isn.wrapping_add(1),
         guest_window,
         last_tick: crate::interrupts::ticks(),
+        rtx: alloc::vec::Vec::new(),
+        rtx_tick: 0,
+        rtx_retries: 0,
     };
 
     // SYN+ACK with MSS option (kind=2 len=4 mss=1400). Linux honours
@@ -641,6 +680,12 @@ fn tcp_handle_syn(
 /// server) TO `GUEST_IP:guest_port`, so the guest's TCP stack accepts
 /// it as a continuation of its connection.
 fn build_tcp_segment(sess: &TcpSession, payload: &[u8], flags: u8) -> Vec<u8> {
+    build_tcp_segment_at(sess, sess.snd_nxt, payload, flags)
+}
+
+/// As `build_tcp_segment` but with an explicit sequence number — used
+/// by the retransmit path, which resends from `snd_una`, not `snd_nxt`.
+fn build_tcp_segment_at(sess: &TcpSession, seq: u32, payload: &[u8], flags: u8) -> Vec<u8> {
     let total_ip = IPV4_HDR_LEN + TCP_HDR_LEN + payload.len();
     let total = VNET_HDR_LEN + ETH_HDR_LEN + total_ip;
     let mut buf = alloc::vec![0u8; total];
@@ -650,7 +695,7 @@ fn build_tcp_segment(sess: &TcpSession, payload: &[u8], flags: u8) -> Vec<u8> {
     let tcp_off = VNET_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN;
     buf[tcp_off + 0..tcp_off + 2].copy_from_slice(&sess.target_port.to_be_bytes());
     buf[tcp_off + 2..tcp_off + 4].copy_from_slice(&sess.guest_port.to_be_bytes());
-    buf[tcp_off + 4..tcp_off + 8].copy_from_slice(&sess.snd_nxt.to_be_bytes());
+    buf[tcp_off + 4..tcp_off + 8].copy_from_slice(&seq.to_be_bytes());
     buf[tcp_off + 8..tcp_off + 12].copy_from_slice(&sess.rcv_nxt.to_be_bytes());
     buf[tcp_off + 12] = ((TCP_HDR_LEN / 4) as u8) << 4;
     buf[tcp_off + 13] = flags;
@@ -797,6 +842,7 @@ pub fn pump(
         slot: usize,
         host_handle: usize,
         state: TcpState,
+        rtx_len: usize,
     }
     // Reap sweep: a session the guest abandoned before ACKing our
     // SYN+ACK sticks in SynRcvd forever, pinning a NAT slot AND a host
@@ -831,6 +877,7 @@ pub fn pump(
                     slot: i,
                     host_handle: sess.host_handle,
                     state: sess.state,
+                    rtx_len: sess.rtx.len(),
                 })
         }).collect()
     };
@@ -838,13 +885,55 @@ pub fn pump(
 
     let mut any = false;
     for snap in &snapshots {
-        // Step 2: do the host-side work WITHOUT holding SESSIONS.
+        let now = crate::interrupts::ticks();
+
+        // --- Retransmit pass (first). A guest-bound segment the guest
+        // never ACKed (dropped in its virtio RX queue / by Linux) must
+        // be resent or the stream wedges. One action per session per
+        // pump; new host data waits until the backlog clears. ---
+        if snap.rtx_len > 0 {
+            let mut sessions = SESSIONS.lock();
+            let Some(sess) = sessions[snap.slot].as_mut() else { continue };
+            if sess.state == TcpState::Closed { continue }
+            if !sess.rtx.is_empty() && sess.rtx_tick != 0
+                && now.wrapping_sub(sess.rtx_tick) > RTO_TICKS
+            {
+                if sess.rtx_retries >= RTX_MAX_RETRIES {
+                    // Peer (guest) unreachable for the data — give up.
+                    let fin = build_tcp_segment_at(sess, sess.snd_una, &[],
+                                                   TCP_FIN | TCP_ACK);
+                    let _ = crate::net::tcp::close(sess.host_handle);
+                    sess.state = TcpState::Closed;
+                    drop(sessions);
+                    if net.inject_rx(host_base, &fin) { any = true; }
+                    kprintln!("[nat] TCP {} rtx gave up after {} retries",
+                              snap.host_handle, RTX_MAX_RETRIES);
+                    continue;
+                }
+                let clen = sess.rtx.len().min(MAX_SEG_PAYLOAD);
+                let seg = build_tcp_segment_at(sess, sess.snd_una,
+                                               &sess.rtx[..clen],
+                                               TCP_PSH | TCP_ACK);
+                sess.rtx_retries += 1;
+                sess.rtx_tick = now;
+                drop(sessions);
+                if net.inject_rx(host_base, &seg) { any = true; }
+                continue;   // one action per session per pump
+            }
+        }
+
+        // --- New host data. Only drain the host conn if the unacked
+        // window has room — otherwise leave it in the host recv buffer
+        // so the host TCP window backpressures the server (no loss). ---
+        let want_recv = snap.rtx_len < RTX_WINDOW;
         let mut buf = alloc::vec![0u8; MAX_SEG_PAYLOAD];
-        let recv_n = crate::net::tcp::recv(snap.host_handle, &mut buf).ok();
+        let recv_n = if want_recv {
+            crate::net::tcp::recv(snap.host_handle, &mut buf).ok()
+        } else {
+            None
+        };
         let host_alive = crate::net::tcp::is_established(snap.host_handle);
 
-        // Step 3: re-lock SESSIONS to build the segment with current
-        // snd_nxt/rcv_nxt and inject. Quick critical section.
         let mut sessions = SESSIONS.lock();
         let Some(sess) = sessions[snap.slot].as_mut() else { continue };
         if sess.state == TcpState::Closed { continue }
@@ -857,36 +946,37 @@ pub fn pump(
                               n, sess.snd_nxt, sess.rcv_nxt);
                 }
                 let seg = build_tcp_segment(sess, &buf[..n], TCP_PSH | TCP_ACK);
+                // Buffer for retransmit BEFORE injecting — if inject
+                // fails the bytes are still recoverable via the rtx
+                // path (old code dropped them on a full RX queue).
+                sess.rtx.extend_from_slice(&buf[..n]);
+                if sess.rtx_tick == 0 { sess.rtx_tick = now; }
+                sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
                 drop(sessions);
                 if net.inject_rx(host_base, &seg) {
                     if lg < 8 {
                         kprintln!("[nat] pump: rx injected ({} bytes, total frame {})",
                                   n, seg.len());
                     }
-                    let mut s = SESSIONS.lock();
-                    if let Some(sess) = s[snap.slot].as_mut() {
-                        sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
-                    }
                     any = true;
                 } else {
-                    kprintln!("[nat] pump: inject_rx FAILED (rx queue empty?)");
+                    kprintln!("[nat] pump: inject_rx FAILED — rtx will resend");
                 }
             }
             _ => {
-                if !host_alive && sess.state == TcpState::Established {
+                // Host closed: only FIN the guest once we've delivered
+                // (and it ACKed) everything — don't truncate the body.
+                if !host_alive && sess.state == TcpState::Established
+                    && sess.rtx.is_empty()
+                {
                     let fin = build_tcp_segment(sess, &[], TCP_FIN | TCP_ACK);
+                    sess.snd_nxt = sess.snd_nxt.wrapping_add(1);
+                    sess.state = TcpState::Closed;
+                    let _ = crate::net::tcp::close(sess.host_handle);
                     drop(sessions);
-                    if net.inject_rx(host_base, &fin) {
-                        let mut s = SESSIONS.lock();
-                        if let Some(sess) = s[snap.slot].as_mut() {
-                            sess.snd_nxt = sess.snd_nxt.wrapping_add(1);
-                            sess.state = TcpState::Closed;
-                            let _ = crate::net::tcp::close(sess.host_handle);
-                        }
-                        any = true;
-                        kprintln!("[nat] TCP {} host closed, FIN injected",
-                                  snap.host_handle);
-                    }
+                    if net.inject_rx(host_base, &fin) { any = true; }
+                    kprintln!("[nat] TCP {} host closed, FIN injected",
+                              snap.host_handle);
                 }
             }
         }
