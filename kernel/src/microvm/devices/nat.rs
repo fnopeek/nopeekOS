@@ -76,8 +76,15 @@ const MAX_SEG_PAYLOAD: usize = 1400;
 /// cap). When full, pump stops draining the host conn so the host TCP
 /// recv window backpressures the server. ~100 ticks/s (see tcp.rs).
 const RTX_WINDOW: usize = 64 * 1024;
-const RTO_TICKS: u64 = 50;        // ~500 ms retransmit timeout
-const RTX_MAX_RETRIES: u8 = 8;    // ~4 s of no progress → reap
+// The guest runs in ~5 s cooperative slices (Core-0 time-slice +
+// frame cadence), so its ACK latency is dominated by scheduling, NOT
+// network RTT. RTO MUST sit well above that or every connection gets
+// retransmitted-then-FIN'd before the guest is ever scheduled to ACK
+// (Phase-2 regression: 0.5 s RTO tore down every session). There is
+// no real packet loss on the local inject path — retransmit is a
+// last-resort safety net, not an active participant. ~100 ticks/s.
+const RTO_TICKS: u64 = 1500;       // ~15 s — safely above the slice
+const RTX_MAX_RETRIES: u8 = 20;    // give up only after ~5 min (dead peer)
 
 /// Per-VM network policy. Default is "DNS only" — outbound IP traffic
 /// for anything else is logged + dropped until 12.3.4 adds a proper
@@ -586,8 +593,10 @@ fn handle_tcp(frame: &[u8], _caps: &NetCaps) -> Option<Vec<u8>> {
             let reply = build_tcp_segment(sess, &[], TCP_ACK);
             return Some(reply);
         }
-        // Out-of-order — drop; guest will retransmit.
-        return None;
+        // Out-of-order: drop the payload but send a dup-ACK for the
+        // seq we still expect. This triggers the guest's fast
+        // retransmit immediately instead of stalling a full RTO.
+        return Some(build_tcp_segment(sess, &[], TCP_ACK));
     }
 
     // FIN handling — guest wants to half-close.
@@ -941,7 +950,7 @@ pub fn pump(
         match recv_n {
             Some(n) if n > 0 => {
                 let lg = PUMP_LOG.fetch_add(1, Ordering::Relaxed);
-                if lg < 8 {
+                if lg < 64 {
                     kprintln!("[nat] pump: host->guest {} bytes (seq={} ack={})",
                               n, sess.snd_nxt, sess.rcv_nxt);
                 }
@@ -949,18 +958,30 @@ pub fn pump(
                 // Buffer for retransmit BEFORE injecting — if inject
                 // fails the bytes are still recoverable via the rtx
                 // path (old code dropped them on a full RX queue).
+                let was_idle = sess.rtx.is_empty();
                 sess.rtx.extend_from_slice(&buf[..n]);
-                if sess.rtx_tick == 0 { sess.rtx_tick = now; }
                 sess.snd_nxt = sess.snd_nxt.wrapping_add(n as u32);
                 drop(sessions);
-                if net.inject_rx(host_base, &seg) {
-                    if lg < 8 {
+                let injected = net.inject_rx(host_base, &seg);
+                // Set the RTO clock by outcome: delivered → measure
+                // the 15 s ACK wait from now; NOT delivered (RX queue
+                // full) → make it immediately due so the next pump
+                // resends fast instead of waiting a full RTO.
+                if let Some(sess) = SESSIONS.lock()[snap.slot].as_mut() {
+                    if injected {
+                        if was_idle { sess.rtx_tick = now; }
+                    } else {
+                        sess.rtx_tick = now.wrapping_sub(RTO_TICKS + 1);
+                    }
+                }
+                if injected {
+                    if lg < 64 {
                         kprintln!("[nat] pump: rx injected ({} bytes, total frame {})",
                                   n, seg.len());
                     }
                     any = true;
                 } else {
-                    kprintln!("[nat] pump: inject_rx FAILED — rtx will resend");
+                    kprintln!("[nat] pump: inject_rx FAILED — rtx resends next pump");
                 }
             }
             _ => {
