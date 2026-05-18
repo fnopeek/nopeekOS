@@ -192,8 +192,6 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.sessionstore.resume_from_crash|false' \
                    'security.OCSP.enabled|0' \
                    'security.OCSP.require|false' \
-                   'network.http.http3.enable|false' \
-                   'network.http.altsvc.enabled|false' \
                    'network.dns.echconfig.enabled|false' \
                    'gfx.webrender.partial|false' \
                    'gfx.webrender.compositor.force-enabled|false' \
