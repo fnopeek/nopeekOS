@@ -871,7 +871,14 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 }
                 crate::shade::poll_render();
                 crate::net::poll();
-                crate::microvm::vm_poll_slice();
+                // This is the loop that actually runs while a microvm
+                // tile is focused (read_line_with_tab does NOT). It
+                // gave the guest a single 3 ms slice, then a composite,
+                // then a pointless 5000-iter busy spin → the ~5 s frame
+                // cadence. Give it a real budget instead: 8 slices
+                // (~24 ms guest) per composite cycle. net::poll runs
+                // inside each slice's pump, so L3 stays responsive.
+                for _ in 0..8 { crate::microvm::vm_poll_slice(); }
                 if crate::shade::take_deferred_render() {
                     crate::shade::render_frame();
                 }
@@ -889,10 +896,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                         continue;
                     }
                     crate::microvm::devices::virtio_input_keymap::forward_key(&event);
-                }
-
-                for _ in 0..5_000 {
-                    core::hint::spin_loop();
                 }
                 continue;
             }
