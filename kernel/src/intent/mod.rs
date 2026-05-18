@@ -458,7 +458,17 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // re-taken at the next iteration's top.
         let console_gen = crate::serial::write_gen();
         crate::net::poll();
-        crate::microvm::vm_poll_slice();
+        // A running microvm is the foreground task — give it a real
+        // time budget per outer iteration. One 3 ms slice amortised
+        // against net::poll + the Shade composite + a 10 ms hlt was
+        // ~3 ms guest per tens-of-ms host → the ~5 s frame cadence
+        // (with multi-tens-of-second freezes) that destabilised the
+        // browser. 8 slices ≈ 24 ms guest, then input/render/spin.
+        if crate::microvm::vm_active() {
+            for _ in 0..8 { crate::microvm::vm_poll_slice(); }
+        } else {
+            crate::microvm::vm_poll_slice();
+        }
         crate::shell::check_and_serve(vault, session_id);
         // Only redraw when the user has actually typed something:
         // async output then split their in-progress command (the
@@ -533,9 +543,15 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         let event = if let Some(evt) = crate::keyboard::read_event() {
             evt
         } else if crate::shade::is_active() {
-            // Shade mode — idle until next IRQ (keyboard / mouse / timer).
-            // SAFETY: ring-0, IRQs enabled.
-            unsafe { core::arch::asm!("hlt"); }
+            // Shade mode — normally idle until the next IRQ. But a
+            // running microvm is the foreground task: do NOT sleep,
+            // spin straight back to feed it more slices. hlt here was
+            // ~one 3 ms slice per timer tick → the ~5 s cadence that
+            // starved + crashed the browser. Idle (no VM) still hlts.
+            if !crate::microvm::vm_active() {
+                // SAFETY: ring-0, IRQs enabled.
+                unsafe { core::arch::asm!("hlt"); }
+            }
             continue;
         } else {
             let serial = serial::SERIAL.lock();
