@@ -202,7 +202,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1 \
-                 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
+                 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
+                 MOZ_LOG=WebRender:5,Compositor:5,WidgetWayland:5; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
                  echo '[wl] launching cage -- librewolf (single-proc profile) https://example.com'; \
