@@ -54,6 +54,13 @@ pub fn handle_ipv4(data: &[u8]) {
     let our_ip = arp::our_ip();
     if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
 
+    // L3 masquerade: if this reply belongs to a running microvm's NAT
+    // flow it is rewritten back to the guest and consumed here — the
+    // host stack must NOT also process it. Cheap no-op when no VM up.
+    if crate::microvm::devices::nat::l3_inbound(&data[..total_len.min(data.len())]) {
+        return;
+    }
+
     let payload = &data[ihl..total_len.min(data.len())];
 
     match protocol {

@@ -227,6 +227,7 @@ pub fn vm_poll_slice() {
         }
         *slot = None;
         drop(slot); // release before teardown — it locks the compositor
+        crate::microvm::devices::nat::reset_sessions();
         teardown_vm_window();
         crate::kprintln!("[microvm] guest stopped (window closed)");
         return;
@@ -253,6 +254,7 @@ pub fn vm_poll_slice() {
     }
     *slot = None;
     drop(slot); // release before teardown — it locks the compositor
+    crate::microvm::devices::nat::reset_sessions();
     teardown_vm_window();
     match result {
         Ok(o) => crate::kprintln!(
