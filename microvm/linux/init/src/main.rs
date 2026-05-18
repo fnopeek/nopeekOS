@@ -190,6 +190,9 @@ fn launch_wayland(kmsg_fd: i64) {
                    'toolkit.startup.max_resumed_crashes|-1' \
                    'browser.shell.checkDefaultBrowser|false' \
                    'browser.sessionstore.resume_from_crash|false' \
+                   'network.http.http3.enable|false' \
+                   'network.http.altsvc.enabled|false' \
+                   'network.dns.echconfig.enabled|false' \
                    'gfx.webrender.partial|false' \
                    'gfx.webrender.compositor.force-enabled|false' \
                    'widget.dmabuf.force-enabled|false' \
