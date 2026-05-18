@@ -39,7 +39,11 @@ fn generate_isn(saddr: [u8; 4], daddr: [u8; 4], sport: u16, dport: u16) -> u32 {
     hash_part.wrapping_add(timer)
 }
 
-const MAX_CONNECTIONS: usize = 16;
+// A single LibreWolf page load opens ~20+ parallel TLS connections
+// (CDNs, telemetry, OCSP, …). 16 was a single-`https`-intent ceiling;
+// the browser exhausts it instantly → connects fail / stall →
+// PR_IO_TIMEOUT_ERROR. 128 matches the NAT session table.
+const MAX_CONNECTIONS: usize = 128;
 const MSS: u16 = 1460; // standard Ethernet MSS
 const INITIAL_WINDOW: u16 = 65535; // Maximum TCP window (no window scaling)
 
@@ -159,7 +163,14 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
     // Find free slot
     let handle = {
         let mut conns = CONNECTIONS.lock();
-        let slot = conns.iter().position(|c| c.is_none())
+        // Reclaim free OR fully-Closed slots. Without the Closed clause
+        // a Closed conn pins its slot forever (tick_connections only
+        // moves TimeWait→Closed, never frees it) — under browser churn
+        // every slot ends up a Closed corpse and connect() starves.
+        let slot = conns.iter()
+            .position(|c| c.is_none())
+            .or_else(|| conns.iter()
+                .position(|c| matches!(c, Some(x) if x.state == State::Closed)))
             .ok_or(TcpError::TooManyConnections)?;
         conns[slot] = Some(conn);
         slot

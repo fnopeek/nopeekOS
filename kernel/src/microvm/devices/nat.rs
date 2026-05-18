@@ -441,6 +441,11 @@ struct TcpSession {
     /// Last window size guest advertised. We honour it on outgoing
     /// data segments by capping the unacked-bytes-in-flight.
     guest_window: u16,
+
+    /// Tick of last activity (creation / guest segment / pump data).
+    /// Drives reaping of sessions the guest abandoned before ACKing
+    /// our SYN+ACK — otherwise they pin a slot + host handle forever.
+    last_tick: u64,
 }
 
 static SESSIONS: Mutex<[Option<TcpSession>; MAX_TCP_SESSIONS]> = Mutex::new(
@@ -507,6 +512,7 @@ fn handle_tcp(frame: &[u8], _caps: &NetCaps) -> Option<Vec<u8>> {
         }
     };
     sess.guest_window = window;
+    sess.last_tick = crate::interrupts::ticks();
 
     // RST from guest → tear down host side, kill session.
     if flags & TCP_RST != 0 {
@@ -618,6 +624,7 @@ fn tcp_handle_syn(
         snd_una: our_isn,
         rcv_nxt: guest_isn.wrapping_add(1),
         guest_window,
+        last_tick: crate::interrupts::ticks(),
     };
 
     // SYN+ACK with MSS option (kind=2 len=4 mss=1400). Linux honours
@@ -791,6 +798,31 @@ pub fn pump(
         host_handle: usize,
         state: TcpState,
     }
+    // Reap sweep: a session the guest abandoned before ACKing our
+    // SYN+ACK sticks in SynRcvd forever, pinning a NAT slot AND a host
+    // TCP slot. Free both after a grace period. Closed sessions also
+    // get their host handle closed so the host's 128 slots churn
+    // cleanly. ~100 ticks/s (see tcp.rs TimeWait), 5 s grace.
+    {
+        const SYN_REAP_TICKS: u64 = 500;
+        let now = crate::interrupts::ticks();
+        let mut sessions = SESSIONS.lock();
+        for s in sessions.iter_mut() {
+            let drop_it = match s.as_ref() {
+                Some(sess) if sess.state == TcpState::SynRcvd
+                    && now.wrapping_sub(sess.last_tick) > SYN_REAP_TICKS => true,
+                Some(sess) if sess.state == TcpState::Closed => true,
+                _ => false,
+            };
+            if drop_it {
+                if let Some(sess) = s.as_ref() {
+                    let _ = crate::net::tcp::close(sess.host_handle);
+                }
+                *s = None;
+            }
+        }
+    }
+
     let snapshots: alloc::vec::Vec<Snapshot> = {
         let sessions = SESSIONS.lock();
         sessions.iter().enumerate().filter_map(|(i, s)| {
