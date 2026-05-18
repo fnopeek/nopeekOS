@@ -207,27 +207,42 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
     }
 }
 
-/// Parse a DNS query from `dgram`, hand the QNAME to the host resolver,
-/// and synthesize a reply with one A record. Falls back to NXDOMAIN
-/// (rcode=3) if resolution fails so the guest doesn't hang on retry.
+/// rcode-relevant outcome of a lookup. The NoData vs NxDomain split is
+/// load-bearing: a non-A query (AAAA / HTTPS-SVCB type 65) on a name
+/// that exists MUST be NOERROR/NODATA, not NXDOMAIN. Firefox queries
+/// the HTTPS RR before every connection and reads NXDOMAIN as "host
+/// does not exist" → "secure site not available".
+enum DnsOutcome {
+    Answer([u8; 4]),  // A record
+    NoData,           // NOERROR, no answer — name exists, no such RR type
+    NxDomain,         // name does not exist
+}
+
+/// Parse a DNS query, resolve A records via the host resolver, and
+/// synthesize the reply with the correct rcode.
 fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
     let q = parse_dns_query(dgram)?;
 
     kprintln!("[nat] DNS query: \"{}\" (type={} id={:#06x})", q.name, q.qtype, q.id);
 
-    // Only A records (qtype=1) get resolved. AAAA, MX, etc. → NXDOMAIN.
-    let answer_ip = if q.qtype == 1 {
-        crate::net::dns::resolve(q.name.as_str())
+    let outcome = if q.qtype == 1 {
+        match crate::net::dns::resolve(q.name.as_str()) {
+            Some(ip) => DnsOutcome::Answer(ip),
+            None     => DnsOutcome::NxDomain,
+        }
     } else {
-        None
+        // AAAA / HTTPS-SVCB / etc.: we don't serve the record, but the
+        // name exists. NODATA — NXDOMAIN here poisons the whole host.
+        DnsOutcome::NoData
     };
 
-    let dns_payload = build_dns_reply(&q, answer_ip);
+    let dns_payload = build_dns_reply(&q, &outcome);
     let frame = build_ipv4_udp_reply(src_ip, src_port, PORT_DNS, &dns_payload);
 
-    match answer_ip {
-        Some(ip) => kprintln!("[nat] DNS reply: {} → {}.{}.{}.{}", q.name, ip[0], ip[1], ip[2], ip[3]),
-        None     => kprintln!("[nat] DNS reply: {} → NXDOMAIN", q.name),
+    match &outcome {
+        DnsOutcome::Answer(ip) => kprintln!("[nat] DNS reply: {} → {}.{}.{}.{}", q.name, ip[0], ip[1], ip[2], ip[3]),
+        DnsOutcome::NoData     => kprintln!("[nat] DNS reply: {} → NODATA (type={})", q.name, q.qtype),
+        DnsOutcome::NxDomain   => kprintln!("[nat] DNS reply: {} → NXDOMAIN", q.name),
     }
     Some(frame)
 }
@@ -270,29 +285,34 @@ fn parse_dns_query(dgram: &[u8]) -> Option<DnsQuery> {
     Some(DnsQuery { id, name, name_bytes, qtype, qclass })
 }
 
-fn build_dns_reply(q: &DnsQuery, ip: Option<[u8; 4]>) -> Vec<u8> {
+fn build_dns_reply(q: &DnsQuery, out: &DnsOutcome) -> Vec<u8> {
+    let (rcode, ancount): (u16, u16) = match out {
+        DnsOutcome::Answer(_) => (0, 1),
+        DnsOutcome::NoData    => (0, 0),
+        DnsOutcome::NxDomain  => (3, 0),
+    };
     let mut p = Vec::with_capacity(64);
     // Header
     p.extend_from_slice(&q.id.to_be_bytes());
-    let flags: u16 = 0x8180 | if ip.is_some() { 0 } else { 3 }; // QR | RD | RA | rcode
+    let flags: u16 = 0x8180 | rcode;                                // QR | RD | RA | rcode
     p.extend_from_slice(&flags.to_be_bytes());
     p.extend_from_slice(&1u16.to_be_bytes());                       // QDCOUNT
-    p.extend_from_slice(&(if ip.is_some() { 1u16 } else { 0u16 }).to_be_bytes()); // ANCOUNT
+    p.extend_from_slice(&ancount.to_be_bytes());                    // ANCOUNT
     p.extend_from_slice(&0u16.to_be_bytes());                       // NSCOUNT
     p.extend_from_slice(&0u16.to_be_bytes());                       // ARCOUNT
     // Question (echo)
     p.extend_from_slice(&q.name_bytes);
     p.extend_from_slice(&q.qtype.to_be_bytes());
     p.extend_from_slice(&q.qclass.to_be_bytes());
-    // Answer (only on success)
-    if let Some(ip) = ip {
+    // Answer (only for an A hit)
+    if let DnsOutcome::Answer(ip) = out {
         // NAME — compression pointer back to question (offset 12).
         p.push(0xC0); p.push(0x0C);
         p.extend_from_slice(&1u16.to_be_bytes());   // TYPE = A
         p.extend_from_slice(&1u16.to_be_bytes());   // CLASS = IN
         p.extend_from_slice(&60u32.to_be_bytes());  // TTL = 60s
         p.extend_from_slice(&4u16.to_be_bytes());   // RDLENGTH
-        p.extend_from_slice(&ip);
+        p.extend_from_slice(ip);
     }
     p
 }
