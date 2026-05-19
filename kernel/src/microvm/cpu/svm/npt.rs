@@ -33,20 +33,11 @@
 
 use crate::mm::memory;
 
-/// Number of 4 KB host frames the caller must allocate contiguously
-/// for the guest RAM backing of `allocate_window_npt`. 256 MB = 65536
-/// frames. Matches `vmx::ept::GUEST_RAM_FRAMES`.
-pub const GUEST_RAM_FRAMES: usize = (GUEST_WINDOW_BYTES / 4096) as usize;
-
-/// Slack frames added so `memory::allocate_contiguous` can be rounded
-/// up to a 2 MB boundary for the NPT large-page leaf entries. Up to
-/// 511 frames (≈ 2 MB) at the front of the contiguous range may go
-/// unused. Mirrors `vmx::ept::GUEST_RAM_ALIGN_SLACK`.
-pub const GUEST_RAM_ALIGN_SLACK: usize = 511;
-
-/// Number of 2 MB pages to identity-map. 512 × 2 MB = 1 GB,
-/// matching VMX `ept::GUEST_WINDOW_BYTES`. Firefox-manifest target.
-const NPT_2MB_COUNT: usize = 512;
+/// Slack frames `total_frames_for` adds so `allocate_contiguous` can
+/// be rounded up to a 2 MB boundary for the NPT large-page leaf
+/// entries. Up to 511 frames (≈ 2 MB) at the front of the contiguous
+/// range may go unused. Mirrors `vmx::ept::GUEST_RAM_ALIGN_SLACK`.
+const GUEST_RAM_ALIGN_SLACK: usize = 511;
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
 // Canonical size lives in `guest_mem`; this is its NPT-window twin.
@@ -72,6 +63,12 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
     (raw_base + (TWO_MB - 1)) & !(TWO_MB - 1)
 }
 
+/// 4 KB host frames to allocate contiguously to back `guest_bytes`
+/// of guest RAM (+ 2-MB-align slack). Mirrors `ept::total_frames_for`.
+pub fn total_frames_for(guest_bytes: u64) -> usize {
+    (guest_bytes / 4096) as usize + GUEST_RAM_ALIGN_SLACK
+}
+
 /// Build a fresh NPT root that identity-maps `0..256 MB` of guest
 /// physical to host physical via 2 MB pages. Returns the physical
 /// address of the PML4 page, suitable for VMCB.NCR3.
@@ -79,7 +76,8 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
 /// Allocates 3 frames per call (PML4 + PDPT + PD). Frames are leaked
 /// alongside the rest of the per-call substrate-test allocations.
 pub fn allocate_identity_npt() -> Result<u64, &'static str> {
-    build_npt(0, /* with_mmio_scratch */ false)
+    // Substrate test: fixed 1 GiB, behaviour unchanged by B2.
+    build_npt(0, GUEST_WINDOW_BYTES, /* with_mmio_scratch */ false)
 }
 
 /// Build a fresh NPT root that maps `0..256 MB` of guest physical to
@@ -89,16 +87,24 @@ pub fn allocate_identity_npt() -> Result<u64, &'static str> {
 ///
 /// `host_base` must be 2 MB aligned. Allocates 6 frames (PML4 + PDPT
 /// + PD + PD_HIGH + PT_DUMMY + dummy_page). Frames are leaked.
-pub fn allocate_window_npt(host_base: u64) -> Result<u64, &'static str> {
+pub fn allocate_window_npt(host_base: u64, guest_bytes: u64) -> Result<u64, &'static str> {
     if host_base & (TWO_MB - 1) != 0 {
         return Err("NPT: host_base must be 2 MB aligned");
     }
-    build_npt(host_base, /* with_mmio_scratch */ true)
+    build_npt(host_base, guest_bytes, /* with_mmio_scratch */ true)
 }
 
 /// Inner builder. `host_base = 0` gives identity mapping; non-zero
-/// shifts the leaf addresses by `host_base`.
-fn build_npt(host_base: u64, with_mmio_scratch: bool) -> Result<u64, &'static str> {
+/// shifts the leaf addresses by `host_base`. Maps exactly
+/// `guest_bytes` (single PD, ≤ 1 GiB; B4 adds multi-PD).
+fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Result<u64, &'static str> {
+    if guest_bytes == 0 || guest_bytes & (TWO_MB - 1) != 0 {
+        return Err("NPT: guest_bytes must be a non-zero multiple of 2 MB");
+    }
+    if guest_bytes > GUEST_WINDOW_BYTES {
+        return Err("NPT: guest_bytes exceeds single-PD window (B4: multi-PD)");
+    }
+    let pd_leaves = (guest_bytes / TWO_MB) as usize;
     let pml4_phys = memory::allocate_frame()
         .ok_or("OOM allocating NPT PML4")?;
     let pdpt_phys = memory::allocate_frame()
@@ -122,9 +128,10 @@ fn build_npt(host_base: u64, with_mmio_scratch: bool) -> Result<u64, &'static st
         let pdpt = pdpt_phys as *mut u64;
         pdpt.write_volatile(pd_phys | NPT_P | NPT_RW | NPT_US);
 
-        // PD[i] = (host_base + i × 2 MB) | leaf flags for i in 0..128.
+        // PD[i] = (host_base + i × 2 MB) | leaf flags, covering the
+        // backed window (= guest_bytes; ≤ 512 = 1 GiB single-PD max).
         let pd = pd_phys as *mut u64;
-        for i in 0..NPT_2MB_COUNT {
+        for i in 0..pd_leaves {
             let host_target = host_base + (i as u64) * TWO_MB;
             let entry = host_target | NPT_P | NPT_RW | NPT_US | NPT_PS;
             pd.add(i).write_volatile(entry);
