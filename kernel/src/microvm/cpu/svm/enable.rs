@@ -480,6 +480,15 @@ pub struct VmContext {
     /// rate-limits the resize round-trip against a drag storm. See
     /// the vmx mirror.
     last_cfg_tick: u64,
+    /// Event that was mid-delivery when the last #VMEXIT hit (raw
+    /// VMCB.EXITINTINFO, identical encoding to EVENTINJ). Must be
+    /// re-injected on the next VMRUN or the guest loses an interrupt
+    /// mid-vectoring → corrupt guest state (AMD APM §15.20; KVM
+    /// `svm_complete_interrupts`). 0 = nothing pending. Only bites
+    /// the dedicated core in practice: a busy near-native guest
+    /// #VMEXITs mid-delivery far more than the HLT-idle cooperative
+    /// one, so the loss was invisible until A2.
+    reinject: u64,
 }
 
 impl VmContext {
@@ -564,6 +573,7 @@ impl VmContext {
             consecutive_idle: 0,
             last_timer_tick: 0,
             last_cfg_tick: 0,
+            reinject: 0,
         })
     }
 
@@ -845,8 +855,26 @@ impl VmContext {
         }
         self.iter = self.iter.saturating_add(1);
         slice_n += 1;
+
+        // Re-inject an event that #VMEXITed mid-delivery on the
+        // previous run (AMD APM §15.20; KVM svm_complete_interrupts).
+        // Highest priority for the single EVENTINJ slot: a lost
+        // in-flight interrupt corrupts the guest far worse than a
+        // skipped fresh tick (which the next EXIT_INTR regenerates).
+        if self.reinject != 0 {
+            self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, self.reinject);
+            self.reinject = 0;
+        }
+
         let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
         let exit = outcome.exit_reason;
+
+        // Did an event abort mid-vectoring? EXITINTINFO has the same
+        // encoding as EVENTINJ; stash it verbatim for re-injection.
+        let eii = self.vmcb.read_u64(vmcb::OFF_EXIT_INT_INFO);
+        if eii & (1u64 << 31) != 0 {
+            self.reinject = eii;
+        }
 
         if exit != EXIT_INTR { self.consecutive_idle = 0; }
 
