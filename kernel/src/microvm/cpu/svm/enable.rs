@@ -1162,6 +1162,12 @@ impl VmContext {
                         "[A2-DIAG] IOIO SPIN x{} port={:#06x} in={} sz={} ax={:#x} rip={:#x}",
                         self.io_consec, port, dir_in, size, ax, rip,
                     );
+                    // Trigger the VMEXIT-ring dump (reuses the crash
+                    // path): the ring records port per entry → shows
+                    // the REAL device polled, interleaved with 0x80.
+                    if self.io_consec == 20000 {
+                        self.serial.crash_seen = true;
+                    }
                 }
                 handle_linux_io(&mut *self.vmcb, &mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped);
                 advance_rip(&mut *self.vmcb);
