@@ -124,7 +124,12 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     // nested SVM the VMCB read-side races into stale zeros.
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-    let outcome = run_guest_once(&mut regs, vmcb_ptr, vmcb_phys);
+    // FPU areas for the in-asm save/restore (the stub doesn't touch
+    // FPU, but run_guest_once unconditionally brackets vmrun).
+    let mut hf = crate::microvm::cpu::FpuArea::boxed();
+    let mut gf = crate::microvm::cpu::FpuArea::boxed();
+    let outcome = run_guest_once(
+        &mut regs, vmcb_ptr, vmcb_phys, &mut *hf, &mut *gf);
 
     Ok(outcome)
 }
@@ -280,6 +285,8 @@ fn run_guest_once(
     regs: &mut vmcb::GuestRegs,
     vmcb: &mut vmcb::Vmcb,
     vmcb_phys: u64,
+    host_fpu: *mut crate::microvm::cpu::FpuArea,
+    guest_fpu: *mut crate::microvm::cpu::FpuArea,
 ) -> vmcb::LaunchOutcome {
     let regs_ptr: *mut vmcb::GuestRegs = regs;
     let host_extra = host_extra_save_phys();
@@ -313,9 +320,30 @@ fn run_guest_once(
 
             // Save struct ptr, vmcb_phys, host-extra-save phys below
             // the callee-saved (push order = struct, vmcb, host).
-            "push rdi",                     // [rsp+16 after next 2]
+            "push rdi",                     // struct ptr
             "push rsi",                     // vmcb_phys
             "push rdx",                     // host_extra_save phys
+            "push r8",                      // host_fpu  ptr
+            "push r9",                      // guest_fpu ptr
+            // Stack now: [rsp+0]=guest_fpu [+8]=host_fpu
+            //   [+16]=host_extra [+24]=vmcb_phys [+32]=struct_ptr
+
+            // ── FPU SAVE/RESTORE (KVM kvm_load_guest_fpu): vmrun
+            // preserves no x87/SSE/AVX/AVX-512. Must be in-asm,
+            // adjacent to vmrun — a +avx2-built kernel spills `ymm`
+            // anywhere between a Rust helper and the asm, clobbering
+            // the just-restored guest state. Mask = -1 (all
+            // XCR0-enabled components; guest owns XCR0 via XSETBV).
+            // Only GPR/vm* instructions sit between this xrstor and
+            // vmrun, and between vmrun and the paired xsave below.
+            "mov rcx, [rsp + 8]",           // host_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xsave64 [rcx]",                // save host FPU
+            "mov rcx, [rsp + 0]",           // guest_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xrstor64 [rcx]",               // restore guest FPU
 
             // ── ENTRY: load guest GPRs from struct ────────────────
             "mov rbx, [rdi +   0]",
@@ -337,14 +365,14 @@ fn run_guest_once(
             // vmsave host FS/GS/KernelGS/TR/LDTR/SYSCALL MSRs (vmrun
             // does NOT preserve them); vmload them back on THIS core
             // right after #VMEXIT, before any GS-relative host access.
-            "mov rax, [rsp + 0]",           // host_extra_save phys
+            "mov rax, [rsp + 16]",          // host_extra_save phys
             "vmsave rax",                   // save host FS/GS/TR/LDTR/MSRs
-            "mov rax, [rsp + 8]",           // guest vmcb_phys
+            "mov rax, [rsp + 24]",          // guest vmcb_phys
             "clgi",
             "vmload rax",                   // load guest FS/GS/KernelGS/STAR/LSTAR/SFMASK/SYSENTER
             "vmrun rax",
             "vmsave rax",                   // save guest's back into the guest VMCB
-            "mov rax, [rsp + 0]",           // host_extra_save phys
+            "mov rax, [rsp + 16]",          // host_extra_save phys
             "vmload rax",                   // restore host FS/GS/... while GIF=0 (atomic vs IRQs)
             "stgi",                         // only NOW open the IRQ window — host state already correct
             // After VMEXIT: rsp restored by CPU, all GPRs hold guest
@@ -365,12 +393,25 @@ fn run_guest_once(
             "push r13",
             "push r14",
             "push r15",
-            // Stack now: r15..rbx (14), host_extra, vmcb, struct_ptr,
-            //             host_callee_saved (6).
-            // struct_ptr is at [rsp + 14*8 + 16 = 128].
+            // Stack now: r15..rbx (14=112B), guest_fpu[+112],
+            //   host_fpu[+120], host_extra[+128], vmcb[+136],
+            //   struct_ptr[+144], host_callee_saved(6).
+
+            // ── FPU SAVE/RESTORE (paired exit half): no FP since
+            // vmexit (only vm*/push above). Save guest FPU, restore
+            // host's. Guest GPRs are on the stack now → rax/rcx/rdx
+            // free to clobber.
+            "mov rcx, [rsp + 112]",         // guest_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xsave64 [rcx]",                // save guest FPU
+            "mov rcx, [rsp + 120]",         // host_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xrstor64 [rcx]",               // restore host FPU
 
             // Recover struct ptr (rax free to clobber).
-            "mov rax, [rsp + 128]",
+            "mov rax, [rsp + 144]",
 
             // Pop in reverse-push order, store at the right offset.
             "pop rcx", "mov [rax + 104], rcx",      // r15
@@ -387,7 +428,7 @@ fn run_guest_once(
             "pop rcx", "mov [rax +  16], rcx",      // rdx
             "pop rcx", "mov [rax +   8], rcx",      // rcx
             "pop rcx", "mov [rax +   0], rcx",      // rbx
-            "add rsp, 24",                          // discard host, vmcb, struct
+            "add rsp, 40",                          // discard guest_fpu,host_fpu,host_extra,vmcb,struct
 
             // Restore host callee-saved.
             "pop r15",
@@ -400,6 +441,8 @@ fn run_guest_once(
             in("rdi") regs_ptr,
             in("rsi") vmcb_phys,
             in("rdx") host_extra,
+            in("r8") host_fpu,
+            in("r9") guest_fpu,
             clobber_abi("C"),
         );
     }
@@ -874,20 +917,14 @@ impl VmContext {
             self.reinject = 0;
         }
 
-        // FPU swap (KVM kvm_load/put_guest_fpu): vmrun preserves no
-        // x87/SSE/AVX/AVX-512. Keep the swap adjacent to the VMRUN
-        // (integer/pointer code only; helpers #[inline(never)]).
-        // SAFETY: CR4.OSXSAVE=1 on every core; areas valid + aligned.
-        unsafe {
-            crate::microvm::cpu::fpu_xsave(&mut *self.host_fpu);
-            crate::microvm::cpu::fpu_xrstor(&*self.guest_fpu);
-        }
-        let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
-        // SAFETY: as above; save guest FPU, restore host's.
-        unsafe {
-            crate::microvm::cpu::fpu_xsave(&mut *self.guest_fpu);
-            crate::microvm::cpu::fpu_xrstor(&*self.host_fpu);
-        }
+        // Host↔guest FPU save/restore is embedded in run_guest_once's
+        // asm, bracketing vmrun with zero compiler-emittable code (a
+        // +avx2 kernel spills ymm between any Rust helper and the asm
+        // → clobbers the restored guest FPU). Pass the areas in.
+        let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.host_fpu;
+        let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.guest_fpu;
+        let outcome =
+            run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys, hf, gf);
         let exit = outcome.exit_reason;
 
         // Consume the injection slot. Proven by the v0.172.41 probe:
