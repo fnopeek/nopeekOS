@@ -86,17 +86,6 @@ const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
 
 // virtio-gpu protocol command/response types
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO:        u32 = 0x0100;
-/// [GPU-DIAG] SWGL/#11 workstream: un-throttled control-command trace
-/// so the exact virtio-gpu sequence is visible interleaved with the
-/// guest serial log right up to the crash. Partitions "is the
-/// GPU/display path even reached before cage/glxtest dies" vs "host
-/// buffer-release anomaly". Diagnostic only — removed once the root is
-/// confirmed. Capped so a running compositor can't flood the log.
-const GPU_DIAG: bool = true;
-const GPU_DIAG_CAP: u32 = 4000;
-static GPU_DIAG_N: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D:      u32 = 0x0101;
 const VIRTIO_GPU_CMD_RESOURCE_UNREF:          u32 = 0x0102;
 const VIRTIO_GPU_CMD_SET_SCANOUT:             u32 = 0x0103;
@@ -441,19 +430,6 @@ impl VirtioGpu {
         ]);
         let ctx_id   = u32::from_le_bytes([request[16], request[17], request[18], request[19]]);
 
-        if GPU_DIAG {
-            let n = GPU_DIAG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < GPU_DIAG_CAP {
-                // First body dword is the resource/scanout id for every
-                // command we care about (CREATE/UNREF/ATTACH/DETACH/
-                // SET_SCANOUT/TRANSFER/FLUSH); harmless for the rest.
-                let rid = if request.len() >= 28 {
-                    u32::from_le_bytes([request[24], request[25], request[26], request[27]])
-                } else { 0 };
-                kprintln!("[GPU-DIAG #{}] cmd={:#06x} arg0={}", n, cmd_type, rid);
-            }
-        }
-
         match cmd_type {
             VIRTIO_GPU_CMD_GET_DISPLAY_INFO => {
                 let _ = ctx_id;
@@ -657,23 +633,9 @@ impl VirtioGpu {
         let resource_id = u32::from_le_bytes([body[16], body[17], body[18], body[19]]);
 
         let r = match self.resources.iter().find(|r| r.id == resource_id) {
-            Some(r) => r,
-            None => {
-                if GPU_DIAG {
-                    kprintln!("[GPU-DIAG] FLUSH res={} — NO SUCH RESOURCE (released?)", resource_id);
-                }
-                return;
-            }
+            Some(r) => r, None => return,
         };
-        let pix = match &r.host_pixels {
-            Some(p) => p,
-            None => {
-                if GPU_DIAG {
-                    kprintln!("[GPU-DIAG] FLUSH res={} — host_pixels NONE (no TRANSFER yet / detached)", resource_id);
-                }
-                return;
-            }
-        };
+        let pix = match &r.host_pixels { Some(p) => p, None => return };
 
         // One-time "first guest frame reached the host" confirmation,
         // no hex preview (it was always-zero bring-up debug + an
