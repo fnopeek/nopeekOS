@@ -253,9 +253,6 @@ fn setup_vmcb(
 static HOST_EXTRA_SAVE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-/// [A2-DIAG] throttle for the EVENTINJ-stale probe. Diagnostic only.
-static A2_DIAG_N: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
 
 fn host_extra_save_phys() -> u64 {
     use core::sync::atomic::Ordering;
@@ -860,26 +857,6 @@ impl VmContext {
         self.iter = self.iter.saturating_add(1);
         slice_n += 1;
 
-        // [A2-DIAG] EVENTINJ lifecycle probe. We write EVENTINJ at
-        // ~10 sites and never clear it ourselves — we assume the CPU
-        // clears EVENTINJ.V after a successful injection. If under
-        // KVM-nested it does NOT (reliably), the next VMRUN re-injects
-        // a stale event → phantom guest IRQ → the cumulative
-        // corruption. If valid is still set here and we did NOT arm
-        // it via reinject, the CPU did not clear it = the bug.
-        {
-            let pre = self.vmcb.read_u64(vmcb::OFF_EVENT_INJ);
-            if pre & (1u64 << 31) != 0 && self.reinject == 0 {
-                let n = A2_DIAG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if n < 40 {
-                    crate::kprintln!(
-                        "[A2-DIAG] STALE EVENTINJ pre-vmrun: val={:#x} vec={} type={} iter={}",
-                        pre, pre & 0xFF, (pre >> 8) & 7, self.iter,
-                    );
-                }
-            }
-        }
-
         // Re-inject an event that #VMEXITed mid-delivery on the
         // previous run (AMD APM §15.20; KVM svm_complete_interrupts).
         // Highest priority for the single EVENTINJ slot: a lost
@@ -892,6 +869,18 @@ impl VmContext {
 
         let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
         let exit = outcome.exit_reason;
+
+        // Consume the injection slot. Proven by the v0.172.41 probe:
+        // under KVM-nested SVM the CPU does NOT clear EVENTINJ.V after
+        // a successful injection (val=0x800000xx stayed valid before
+        // the next VMRUN we never re-armed). Left set, the next VMRUN
+        // re-injects the SAME IRQ → phantom duplicate interrupts →
+        // cumulative guest corruption (rate ∝ VMRUN/s — fast on the
+        // dedicated core, ~74 s cooperative). KVM clears
+        // control.event_inj after every run for exactly this; do the
+        // same. The reinject/EXIT_INTR/MMIO sites re-arm it for the
+        // next VMRUN as needed.
+        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, 0);
 
         // Did an event abort mid-vectoring? EXITINTINFO has the same
         // encoding as EVENTINJ. Re-inject ONLY external interrupts
