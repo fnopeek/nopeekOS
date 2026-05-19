@@ -154,9 +154,9 @@ fn launch_wayland(kmsg_fd: i64) {
                    && echo \"[wl] clock set from host: $(date -u)\" \
                    || echo '[wl] WARN: date -s failed'; \
                  else echo '[wl] WARN: no nopeektime= on cmdline (TLS will fail)'; fi; \
-                 echo 0 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
+                 echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
                  echo 1 > /proc/sys/kernel/printk 2>/dev/null; \
-                 echo '[wl] print-fatal-signals=0, printk=1 (serial flood was the wedge)'; \
+                 echo '[wl] print-fatal-signals=1, printk=1 (crash visible, no bulk spam)'; \
                  (hostname nopeek 2>/dev/null \
                    || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null) \
                    && echo '[wl] hostname=nopeek (silences (none) self-lookup)' \
@@ -215,7 +215,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo '[wl] launching cage -- librewolf https://example.com'; \
                  cage -- librewolf --no-remote --profile /tmp/moz https://example.com \
                    >/dev/null 2>&1; \
-                 echo \"[wl] cage exited rc=$?\"; \
+                 rc=$?; echo \"[wl] cage exited rc=$rc\"; \
+                 dmesg 2>/dev/null \
+                   | grep -iE 'segfault|fatal signal|Comm:|RIP:|RSP:|Code:|libgallium|glxtest|librewolf|cage' \
+                   | tail -40 | while read L; do echo \"<0>[crash] $L\" > /dev/kmsg; done; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
