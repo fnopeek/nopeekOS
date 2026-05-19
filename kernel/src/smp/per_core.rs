@@ -164,6 +164,23 @@ pub const NO_DEDICATED_CORE: u32 = u32::MAX;
 /// + the shell for Core 0.
 pub static DEDICATED_VM_CORE: AtomicU32 = AtomicU32::new(NO_DEDICATED_CORE);
 
+/// A2 master switch (mirrors `guest_mem::DEMAND_ENABLED` for B3).
+/// `false` → the microvm ALWAYS stays cooperatively time-sliced on
+/// Core 0, regardless of core count; the A1/A2 dedicated-core code
+/// stays in-tree but dormant. `true` → the core-count gate below
+/// decides.
+///
+/// Gated OFF after the 2026-05-19 QEMU_SMP bisection: with A2 the
+/// guest dies in process-agnostic musl/near-null corruption at ≈6 s
+/// before any page loads; with the cooperative Core-0 path the
+/// browser surfs real multi-site traffic (DuckDuckGo/Google,
+/// ~74 s+). So A2 (dedicated core + per-core LAPIC timer + the new
+/// inject path) is a correctness REGRESSION, not the validated step
+/// the plan assumed. The cooperative path is the working baseline;
+/// A2's cadence benefit is deferred until its guest-corruption root
+/// cause is found and fixed. Flip to `true` only for A2 debugging.
+pub const A2_DEDICATED_CORE_ENABLED: bool = false;
+
 /// Minimum logical cores (incl. BSP) before dedicating one to the
 /// microvm — below this, dedicating would starve the rest, so keep
 /// cooperative Core-0 slicing. TODO: make a `sys/config/
@@ -178,7 +195,7 @@ const MIN_CORES_FOR_DEDICATED: usize = 3;
 /// stealing; Core 0 stays the IRQ/compositor/intent core regardless.
 pub fn init_dedicated_vm_core(worker_count: usize) {
     let total = worker_count + 1; // + BSP
-    if worker_count >= 1 && total >= MIN_CORES_FOR_DEDICATED {
+    if A2_DEDICATED_CORE_ENABLED && worker_count >= 1 && total >= MIN_CORES_FOR_DEDICATED {
         DEDICATED_VM_CORE.store(worker_count as u32, Ordering::Release);
         crate::kprintln!(
             "[npk] smp: core {} dedicated to microvm ({} cores, carved out of work-stealing)",
