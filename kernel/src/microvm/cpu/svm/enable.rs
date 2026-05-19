@@ -870,9 +870,20 @@ impl VmContext {
         let exit = outcome.exit_reason;
 
         // Did an event abort mid-vectoring? EXITINTINFO has the same
-        // encoding as EVENTINJ; stash it verbatim for re-injection.
+        // encoding as EVENTINJ. Re-inject ONLY external interrupts
+        // (type 0) / NMI (type 2): their source is transient, so a
+        // lost one is gone forever (the udevd corruption v0.172.36
+        // fixed). Exceptions (type 3, e.g. #PF — librewolf/cage spew
+        // COW faults) and software ints (type 4) MUST NOT be
+        // re-injected: the faulting instruction was not retired (we
+        // don't advance RIP on #NPF), so the guest re-executes it and
+        // the exception re-occurs naturally — re-injecting too =
+        // double delivery → the recurring rt_sigprocmask `<ret>`
+        // corruption. Mirrors KVM svm_complete_interrupts' type
+        // discrimination.
         let eii = self.vmcb.read_u64(vmcb::OFF_EXIT_INT_INFO);
-        if eii & (1u64 << 31) != 0 {
+        let eii_type = (eii >> 8) & 0x7;
+        if eii & (1u64 << 31) != 0 && (eii_type == 0 || eii_type == 2) {
             self.reinject = eii;
         }
 
