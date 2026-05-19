@@ -423,7 +423,7 @@ run_qemu_generic() {
         -serial mon:stdio \
         -serial file:"$serial_log" \
         "${display_args[@]}" \
-        -m 2048M \
+        -m 4096M \
         -smp 4 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
