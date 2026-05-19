@@ -496,6 +496,10 @@ pub struct VmContext {
     /// hypervisor sequence in the ~corruption window.
     exit_log: alloc::collections::VecDeque<(u64, u32, u64, u8, u64)>,
     crash_dumped: bool,
+    /// [A2-DIAG] consecutive EXIT_IOIO count — a pure run = the guest
+    /// kernel is wedged in a PIO poll our handle_linux_io never
+    /// satisfies. Names the offending port.
+    io_consec: u32,
 }
 
 impl VmContext {
@@ -583,6 +587,7 @@ impl VmContext {
             reinject: 0,
             exit_log: alloc::collections::VecDeque::with_capacity(513),
             crash_dumped: false,
+            io_consec: 0,
         })
     }
 
@@ -955,6 +960,7 @@ impl VmContext {
         }
 
         if exit != EXIT_INTR { self.consecutive_idle = 0; }
+        if exit != EXIT_IOIO { self.io_consec = 0; } // [A2-DIAG] spin reset
 
         match exit {
             EXIT_INTR => {
@@ -1139,6 +1145,17 @@ impl VmContext {
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
+                // [A2-DIAG] pure-IOIO run = wedged PIO poll. Name the
+                // port (a few samples as it spins).
+                self.io_consec = self.io_consec.saturating_add(1);
+                if matches!(self.io_consec, 20000 | 100000 | 500000) {
+                    let rip = self.vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+                    let ax = self.vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+                    crate::kprintln!(
+                        "[A2-DIAG] IOIO SPIN x{} port={:#06x} in={} sz={} ax={:#x} rip={:#x}",
+                        self.io_consec, port, dir_in, size, ax, rip,
+                    );
+                }
                 handle_linux_io(&mut *self.vmcb, &mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped);
                 advance_rip(&mut *self.vmcb);
                 last_outcome = Some(outcome);
