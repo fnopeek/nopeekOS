@@ -424,7 +424,7 @@ run_qemu_generic() {
         -serial file:"$serial_log" \
         "${display_args[@]}" \
         -m 4096M \
-        -smp 4 \
+        -smp "${QEMU_SMP:-4}" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device nvme,drive=drive0,serial=nopeekos-test \
