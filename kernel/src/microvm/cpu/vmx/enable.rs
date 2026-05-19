@@ -524,6 +524,13 @@ pub struct VmContext {
     /// the final size (R2 debounce). The dirty flag persists, so the
     /// final size is still delivered once the window reopens.
     last_cfg_tick: u64,
+    /// Host/guest FPU (XSAVE) save areas — VMRESUME preserves neither.
+    /// See `cpu::FpuArea`. guest_fpu starts zeroed = FPU init state.
+    host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
+    guest_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
+    /// Guest XCR0, tracked across exits (guest XSETBV not intercepted;
+    /// observed post-exit). Seeded with host XCR0.
+    guest_xcr0: u64,
 }
 
 impl VmContext {
@@ -586,6 +593,9 @@ impl VmContext {
                 consecutive_idle: 0,
                 last_timer_tick: 0,
                 last_cfg_tick: 0,
+                host_fpu: crate::microvm::cpu::FpuArea::boxed(),
+                guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
+                guest_xcr0: crate::microvm::cpu::host_xcr0(),
             })
         };
 
@@ -978,7 +988,21 @@ impl VmContext {
         if self.launched {
             vmcs::sync_entry_ia32e_with_efer()?;
         }
-        let outcome = vmcs::run_guest_once(&mut self.regs, self.launched)?;
+        // FPU/XCR0 swap (KVM kvm_load/put_guest_fpu+xcr0): VMRESUME
+        // preserves neither. Keep adjacent; restore host FPU before
+        // `?` so an entry error can't strand the host on guest FPU.
+        // SAFETY: CR4.OSXSAVE=1 on every core; areas valid + aligned.
+        let host_xcr0 = unsafe {
+            crate::microvm::cpu::fpu_swap_to_guest(
+                &mut *self.host_fpu, &*self.guest_fpu, self.guest_xcr0)
+        };
+        let result = vmcs::run_guest_once(&mut self.regs, self.launched);
+        // SAFETY: as above; persist any guest XSETBV for next entry.
+        self.guest_xcr0 = unsafe {
+            crate::microvm::cpu::fpu_swap_to_host(
+                &*self.host_fpu, &mut *self.guest_fpu, host_xcr0)
+        };
+        let outcome = result?;
         self.launched = true;
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
         self.trace.record(basic, outcome.exit_qualification);

@@ -29,6 +29,118 @@ pub mod vmx;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
+// ── Guest/host FPU (XSAVE) swap ────────────────────────────────────
+//
+// `vmrun`/VMRESUME do NOT save or restore x87/SSE/AVX/AVX-512 — host
+// and guest share the one physical vector-register file. Any host FPU
+// use between two guest entries (nat::pump memcpy/checksum, virtio
+// buffer copies, kprintln, the cooperative Shade/fontdue pass)
+// silently corrupts the guest's live vector state. musl + librewolf
+// use AVX-512 pervasively (memcpy/strlen); corruption mid signal
+// restore → the `ret` after rt_sigprocmask faults → SIGSEGV. Rate ∝
+// VMRUN/s, so it bites the busy dedicated core hard and the mostly-
+// HLT-idle cooperative one rarely. KVM swaps unconditionally
+// (kvm_load_guest_fpu / kvm_put_guest_fpu); we do the same.
+
+/// 64-byte-aligned XSAVE area. 4 KiB ≫ the ~2.4 KiB the host XCR0
+/// (incl AVX-512) needs (CPUID.0xD.0:EBX). Zeroed = XSTATE_BV/XCOMP_BV
+/// 0 → `xrstor64` loads the architectural FPU *init* state (x87 init,
+/// MXCSR 0x1F80, vectors zeroed) — the correct fresh-guest FPU.
+#[repr(C, align(64))]
+pub(crate) struct FpuArea(pub(crate) [u8; 4096]);
+
+impl FpuArea {
+    pub(crate) fn boxed() -> alloc::boxed::Box<FpuArea> {
+        alloc::boxed::Box::new(FpuArea([0u8; 4096]))
+    }
+}
+
+/// Read XCR0 (XGETBV ecx=0). SAFETY: CR4.OSXSAVE=1 on every core
+/// (trampoline.s — blake3 AVX2 runs AP-side).
+#[inline(always)]
+unsafe fn xcr0_read() -> u64 {
+    let (eax, edx): (u32, u32);
+    unsafe {
+        core::arch::asm!("xgetbv", in("ecx") 0u32,
+            out("eax") eax, out("edx") edx, options(nomem, nostack));
+    }
+    (edx as u64) << 32 | eax as u64
+}
+
+/// Write XCR0 (XSETBV ecx=0). `v` must be a CPUID-legal mask (the
+/// host's, or one the guest already validated via its own XSETBV).
+#[inline(always)]
+unsafe fn xcr0_write(v: u64) {
+    unsafe {
+        core::arch::asm!("xsetbv",
+            in("ecx") 0u32, in("eax") v as u32, in("edx") (v >> 32) as u32,
+            options(nomem, nostack));
+    }
+}
+
+#[inline(always)]
+unsafe fn xsave_mask(area: *mut FpuArea, mask: u64) {
+    unsafe {
+        core::arch::asm!("xsave64 [{p}]", p = in(reg) area,
+            in("eax") mask as u32, in("edx") (mask >> 32) as u32,
+            options(nostack));
+    }
+}
+
+#[inline(always)]
+unsafe fn xrstor_mask(area: *const FpuArea, mask: u64) {
+    unsafe {
+        core::arch::asm!("xrstor64 [{p}]", p = in(reg) area,
+            in("eax") mask as u32, in("edx") (mask >> 32) as u32,
+            options(nostack, readonly));
+    }
+}
+
+/// Live XCR0 — VmContext seeds `guest_xcr0` with this so the guest's
+/// first entry restores against the host (= CPUID-visible) feature set
+/// before it has run its own XSETBV.
+pub(crate) fn host_xcr0() -> u64 {
+    // SAFETY: see xcr0_read.
+    unsafe { xcr0_read() }
+}
+
+/// Enter-guest FPU swap (KVM `kvm_load_guest_fpu` + `kvm_load_guest_xcr0`):
+/// save the host FPU under the host XCR0, switch XCR0 to the guest's,
+/// restore the guest FPU. Returns the host XCR0 to hand to the paired
+/// exit swap. No host FP use may occur until `fpu_swap_to_host`.
+#[inline(never)]
+pub(crate) unsafe fn fpu_swap_to_guest(
+    host: *mut FpuArea, guest: *const FpuArea, guest_xcr0: u64,
+) -> u64 {
+    // SAFETY: OSXSAVE=1; areas valid + 64-aligned; guest_xcr0 is the
+    // host mask (seed) or a value the guest's own XSETBV accepted.
+    unsafe {
+        let host_xcr0 = xcr0_read();
+        xsave_mask(host, host_xcr0);
+        if guest_xcr0 != host_xcr0 { xcr0_write(guest_xcr0); }
+        xrstor_mask(guest, guest_xcr0);
+        host_xcr0
+    }
+}
+
+/// Exit-guest FPU swap (KVM `kvm_put_guest_fpu` + `kvm_put_guest_xcr0`):
+/// re-read XCR0 (the guest may have changed it via a non-intercepted
+/// XSETBV), save the guest FPU under *that*, restore host XCR0 + FPU.
+/// Returns the guest's current XCR0 to persist for its next entry.
+#[inline(never)]
+pub(crate) unsafe fn fpu_swap_to_host(
+    host: *const FpuArea, guest: *mut FpuArea, host_xcr0: u64,
+) -> u64 {
+    // SAFETY: see fpu_swap_to_guest.
+    unsafe {
+        let guest_xcr0 = xcr0_read();
+        xsave_mask(guest, guest_xcr0);
+        if guest_xcr0 != host_xcr0 { xcr0_write(host_xcr0); }
+        xrstor_mask(host, host_xcr0);
+        guest_xcr0
+    }
+}
+
 /// Guest-RAM size for the next VM, chosen at `vm_open` from live host
 /// free memory instead of a fixed 1 GiB constant.
 ///
