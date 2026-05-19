@@ -337,13 +337,15 @@ fn run_guest_once(
             // does NOT preserve them); vmload them back on THIS core
             // right after #VMEXIT, before any GS-relative host access.
             "mov rax, [rsp + 0]",           // host_extra_save phys
-            "vmsave rax",
-            "mov rax, [rsp + 8]",           // vmcb_phys
+            "vmsave rax",                   // save host FS/GS/TR/LDTR/MSRs
+            "mov rax, [rsp + 8]",           // guest vmcb_phys
             "clgi",
+            "vmload rax",                   // load guest FS/GS/KernelGS/STAR/LSTAR/SFMASK/SYSENTER
             "vmrun rax",
+            "vmsave rax",                   // save guest's back into the guest VMCB
             "stgi",
             "mov rax, [rsp + 0]",           // host_extra_save phys
-            "vmload rax",
+            "vmload rax",                   // restore host FS/GS/...
             // After VMEXIT: rsp restored by CPU, all GPRs hold guest
             // clobbers; host FS/GS restored by the vmload above.
 
