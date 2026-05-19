@@ -16,7 +16,16 @@ pub fn intent_status(vault: &Vault) {
     kprintln!("  Phase:         2 (Capability Enforcement)");
     let cores = crate::smp::per_core::core_count();
     let wakeup = if crate::smp::per_core::has_mwait() { "MWAIT" } else { "HLT" };
-    kprintln!("  CPU:           x86_64, {} cores (work-stealing, {})", cores, wakeup);
+    match crate::smp::per_core::dedicated_vm_core() {
+        Some(c) => kprintln!(
+            "  CPU:           x86_64, {} cores (work-stealing, {}; core {} → microvm)",
+            cores, wakeup, c
+        ),
+        None => kprintln!(
+            "  CPU:           x86_64, {} cores (work-stealing, {})",
+            cores, wakeup
+        ),
+    }
     let (heap_used, heap_total) = crate::heap::stats();
     let (huge_pages, small_pages) = crate::paging::stats();
     kprintln!("  Memory:        {} MB free ({} frames)", free_mb, free_frames);
