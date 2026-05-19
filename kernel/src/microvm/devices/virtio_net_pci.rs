@@ -88,6 +88,7 @@ const VIRTIO_NET_S_LINK_UP: u16 = 1;
 const NUM_QUEUES: u16 = 2;
 const MAX_QUEUE_SIZE: u16 = 256;
 
+use super::guest_mem::GuestMem;
 use super::nat::{GUEST_MAC, NetCaps};
 
 #[derive(Default, Clone, Copy)]
@@ -246,9 +247,9 @@ impl VirtioNet {
 
     /// Process queue notify. q0 = RX (driver buffers, device fills,
     /// 12.3.2). q1 = TX (driver sends, device drains).
-    pub fn service_queues(&mut self, queue_idx: u16, host_base: u64) -> bool {
+    pub fn service_queues(&mut self, queue_idx: u16, mem: &GuestMem) -> bool {
         if queue_idx == 1 {
-            self.service_tx(host_base)
+            self.service_tx(mem)
         } else {
             // RX notify — driver added more empty buffers to receive
             // into. We don't have any pending RX packets yet.
@@ -259,7 +260,7 @@ impl VirtioNet {
     /// Drain TX queue: walk avail-ring, parse each frame, log + (later)
     /// hand to the host network stack. For 12.3.1 we just decode the
     /// ethernet header so the parsing path is exercised end-to-end.
-    fn service_tx(&mut self, host_base: u64) -> bool {
+    fn service_tx(&mut self, mem: &GuestMem) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT};
 
         let self_caps = self.caps;
@@ -274,7 +275,7 @@ impl VirtioNet {
             };
             if q.size == 0 { return false; }
 
-            let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+            let avail_top = match avail_idx(mem, q.driver_gpa()) {
                 Some(v) => v, None => return false,
             };
             if avail_top == q.last_avail_idx {
@@ -283,7 +284,7 @@ impl VirtioNet {
 
             let mut any = false;
             while q.last_avail_idx != avail_top {
-                let head = match avail_ring(host_base, q.driver_gpa(), q.size, q.last_avail_idx) {
+                let head = match avail_ring(mem, q.driver_gpa(), q.size, q.last_avail_idx) {
                     Some(v) => v, None => break,
                 };
 
@@ -295,12 +296,12 @@ impl VirtioNet {
                 let mut payload = alloc::vec::Vec::with_capacity(2048);
                 let mut idx = head;
                 loop {
-                    let d = match read_desc(host_base, q.desc_gpa(), idx, q.size) {
+                    let d = match read_desc(mem, q.desc_gpa(), idx, q.size) {
                         Some(d) => d, None => break,
                     };
                     let n = d.len as usize;
                     let mut chunk = alloc::vec![0u8; n];
-                    super::guest_mem::read_bytes(host_base, d.addr, &mut chunk);
+                    mem.read_bytes(d.addr, &mut chunk);
                     payload.extend_from_slice(&chunk);
                     total_len = total_len.saturating_add(n as u32);
                     if d.flags & VRING_DESC_F_NEXT == 0 { break; }
@@ -309,7 +310,7 @@ impl VirtioNet {
 
                 tx_log(&payload);
 
-                used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, total_len);
+                used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, total_len);
                 q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
                 any = true;
 
@@ -328,7 +329,7 @@ impl VirtioNet {
         // Inject any pending RX replies (ARP-Replies for the gateway).
         let mut rx_advanced = false;
         for reply in &pending_rx {
-            if self.inject_rx(host_base, reply) {
+            if self.inject_rx(mem, reply) {
                 rx_advanced = true;
             }
         }
@@ -569,7 +570,7 @@ impl VirtioNet {
     ///
     /// `pub(super)` so `nat::pump` can inject host-bound TCP response
     /// segments from the timer-tick path.
-    pub(super) fn inject_rx(&mut self, host_base: u64, payload: &[u8]) -> bool {
+    pub(super) fn inject_rx(&mut self, mem: &GuestMem, payload: &[u8]) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
         let q = match self.queues.get_mut(0) {  // RX = q0
@@ -578,14 +579,14 @@ impl VirtioNet {
         };
         if q.size == 0 { return false; }
 
-        let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+        let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v, None => return false,
         };
         if avail_top == q.last_avail_idx {
             return false;  // no buffers
         }
 
-        let head = match avail_ring(host_base, q.driver_gpa(), q.size, q.last_avail_idx) {
+        let head = match avail_ring(mem, q.driver_gpa(), q.size, q.last_avail_idx) {
             Some(v) => v, None => return false,
         };
 
@@ -594,7 +595,7 @@ impl VirtioNet {
         let mut written: u32 = 0;
         let mut off: usize = 0;
         loop {
-            let d = match read_desc(host_base, q.desc_gpa(), idx, q.size) {
+            let d = match read_desc(mem, q.desc_gpa(), idx, q.size) {
                 Some(v) => v, None => return false,
             };
             if d.flags & VRING_DESC_F_WRITE == 0 {
@@ -604,7 +605,7 @@ impl VirtioNet {
             if off < payload.len() {
                 let n = (d.len as usize).min(payload.len() - off);
                 if n > 0 {
-                    super::guest_mem::write_bytes(host_base, d.addr, &payload[off..off + n]);
+                    mem.write_bytes(d.addr, &payload[off..off + n]);
                     off += n;
                     written = written.saturating_add(n as u32);
                 }
@@ -615,7 +616,7 @@ impl VirtioNet {
             idx = d.next;
         }
 
-        used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, written);
+        used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, written);
         q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
         // Set ISR bit 0 so Linux's IRQ handler, when it reads the ISR
         // register (write-1-to-clear), sees there's queue work to do.

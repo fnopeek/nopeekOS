@@ -23,6 +23,8 @@
 
 extern crate alloc;
 
+use super::guest_mem::GuestMem;
+
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_INPUT_DEVICE: u32 = 0x1052;
 
@@ -229,9 +231,9 @@ impl VirtioInput {
     /// buffers, host will populate when events arrive — for 12.4c we
     /// have no events to inject, just leave buffers queued).
     /// q1 = statusq (driver writes LED state, we ack via used-ring).
-    pub fn service_queues(&mut self, queue_idx: u16, host_base: u64) -> bool {
+    pub fn service_queues(&mut self, queue_idx: u16, mem: &GuestMem) -> bool {
         match queue_idx {
-            1 => self.service_statusq(host_base),
+            1 => self.service_statusq(mem),
             _ => false,
         }
     }
@@ -243,7 +245,7 @@ impl VirtioInput {
     /// publish it on the used-ring. Returns true if anything was
     /// delivered (caller injects the input IRQ). Called on the timer
     /// tick (mirrors the NAT pump).
-    pub fn drain_injected(&mut self, host_base: u64) -> bool {
+    pub fn drain_injected(&mut self, mem: &GuestMem) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push};
 
         let mut pending = INPUT_Q.lock();
@@ -254,7 +256,7 @@ impl VirtioInput {
             Some(q) if q.enable != 0 && q.size != 0 => q,
             _ => return false,
         };
-        let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+        let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v,
             None => return false,
         };
@@ -265,18 +267,18 @@ impl VirtioInput {
                 Some(e) => e,
                 None => break, // no more events; leave buffers queued
             };
-            let head = match avail_ring(host_base, q.driver_gpa(), q.size, q.last_avail_idx) {
+            let head = match avail_ring(mem, q.driver_gpa(), q.size, q.last_avail_idx) {
                 Some(v) => v,
                 None => break,
             };
-            if let Some(d) = read_desc(host_base, q.desc_gpa(), head, q.size) {
+            if let Some(d) = read_desc(mem, q.desc_gpa(), head, q.size) {
                 if d.len >= 8 {
-                    super::guest_mem::write_u16(host_base, d.addr, etype);
-                    super::guest_mem::write_u16(host_base, d.addr + 2, code);
-                    super::guest_mem::write_u32(host_base, d.addr + 4, value);
+                    mem.write_u16(d.addr, etype);
+                    mem.write_u16(d.addr + 2, code);
+                    mem.write_u32(d.addr + 4, value);
                 }
             }
-            used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, 8);
+            used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, 8);
             q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
             any = true;
         }
@@ -290,7 +292,7 @@ impl VirtioInput {
     /// Drain the statusq: every buffer the driver wrote (LED state,
     /// repeat-rate, etc.) gets immediately pushed onto the used-ring.
     /// We don't actually do anything with the state.
-    fn service_statusq(&mut self, host_base: u64) -> bool {
+    fn service_statusq(&mut self, mem: &GuestMem) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, used_push};
 
         let q = match self.queues.get_mut(1) {
@@ -299,17 +301,17 @@ impl VirtioInput {
         };
         if q.size == 0 { return false; }
 
-        let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+        let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v, None => return false,
         };
         if avail_top == q.last_avail_idx { return false; }
 
         let mut any = false;
         while q.last_avail_idx != avail_top {
-            let head = match avail_ring(host_base, q.driver_gpa(), q.size, q.last_avail_idx) {
+            let head = match avail_ring(mem, q.driver_gpa(), q.size, q.last_avail_idx) {
                 Some(v) => v, None => break,
             };
-            used_push(host_base, q.device_gpa(), q.size, &mut q.used_idx, head, 0);
+            used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, 0);
             q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
             any = true;
         }

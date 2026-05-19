@@ -23,6 +23,7 @@
 
 extern crate alloc;
 use crate::kprintln;
+use super::guest_mem::GuestMem;
 use alloc::vec::Vec;
 use alloc::string::String;
 use spin::Mutex;
@@ -604,7 +605,7 @@ fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
 /// IRQ 10 to wake the guest's virtio-net driver).
 pub fn pump(
     net: &mut super::virtio_net_pci::VirtioNet,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use core::sync::atomic::{AtomicU32, Ordering};
     static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
@@ -622,7 +623,7 @@ pub fn pump(
     loop {
         let frame = { INBOUND_Q.lock().pop_front() };
         let Some(frame) = frame else { break };
-        if net.inject_rx(host_base, &frame) {
+        if net.inject_rx(mem, &frame) {
             any = true;
             let lg = PUMP_LOG.fetch_add(1, Ordering::Relaxed);
             if lg < 32 {

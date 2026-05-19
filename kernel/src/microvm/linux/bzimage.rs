@@ -139,22 +139,20 @@ const INITRAMFS_GUEST_PHYS: u64 = 0xC000000;
 const E820_TYPE_RAM: u32 = 1;
 const E820_TYPE_RESERVED: u32 = 2;
 
-/// Standard PC layout for the e820 we present to Linux:
-///   [0x000000, 0x09F000) RAM (640 KB lower memory)
-///   [0x09F000, 0x100000) RESERVED (BIOS area + EBDA)
-///   [0x100000, GUEST_RAM_TOTAL) RAM ("extended memory")
-///
-/// Linux's early-boot direct-map setup walks the e820 and builds
-/// the kernel's identity/direct mappings. A single contiguous
-/// `[0, RAM_TOTAL) RAM` entry omits the BIOS hole, which on some
-/// kernel paths trips memory-layout assumptions and leaves the
-/// direct-map L4 entry empty for low-RAM regions. Splitting per
-/// PC convention works around it.
-///
-/// Must equal `ept::GUEST_WINDOW_BYTES` — the EPT window backs the
-/// e820 RAM. Phase 12.6 spec target is 1 GB for Firefox; 256 MB was
-/// fine for the 12.1-12.4 substrate but tight for any real userspace.
-const GUEST_RAM_TOTAL: u64 = 1024 * 1024 * 1024;
+use crate::microvm::devices::guest_mem::GuestMem;
+
+// Standard PC layout for the e820 we present to Linux:
+//   [0x000000, 0x09F000) RAM (640 KB lower memory)
+//   [0x09F000, 0x100000) RESERVED (BIOS area + EBDA)
+//   [0x100000, mem.len()) RAM ("extended memory")
+//
+// Linux's early-boot direct-map setup walks the e820 and builds the
+// kernel's identity/direct mappings. A single contiguous
+// `[0, RAM_TOTAL) RAM` entry omits the BIOS hole, which on some kernel
+// paths trips memory-layout assumptions and leaves the direct-map L4
+// entry empty for low-RAM regions. Splitting per PC convention works
+// around it. The extended-memory size is `mem.len()` — the canonical
+// guest-RAM size (`guest_mem::GUEST_RAM_BYTES`, B2: runtime).
 
 /// Linux loadflags bits we need.
 const LOADFLAG_LOADED_HIGH: u8 = 1 << 0;
@@ -194,14 +192,14 @@ pub struct LoadInfo {
 /// boot_params zero-page so the kernel can boot via the 32-bit
 /// boot protocol.
 ///
-/// `host_base` is the host-physical address of the EPT-mapped
-/// guest-RAM window (caller already allocated it). `bzimage` is
-/// the raw bzImage byte slice. `cmdline` is the kernel command
-/// line as ASCII bytes (no NUL — the loader appends one).
-/// `initramfs` is an optional cpio.gz that becomes the rootfs at
-/// /; Linux's standard logic execs `/init` from it as PID-1.
+/// `mem` translates guest-physical addresses into the (caller-
+/// allocated) guest-RAM window. `bzimage` is the raw bzImage byte
+/// slice. `cmdline` is the kernel command line as ASCII bytes (no
+/// NUL — the loader appends one). `initramfs` is an optional cpio.gz
+/// that becomes the rootfs at /; Linux's standard logic execs
+/// `/init` from it as PID-1.
 pub fn load_into_guest_ram(
-    host_base: u64,
+    mem: &GuestMem,
     bzimage: &[u8],
     cmdline: &[u8],
     initramfs: Option<&[u8]>,
@@ -216,33 +214,31 @@ pub fn load_into_guest_ram(
     if setup_size + prot_size > bzimage.len() {
         return Err("bzImage truncated (setup + kernel exceeds bytes)");
     }
-    if KERNEL_GUEST_PHYS + (prot_size as u64) > GUEST_RAM_TOTAL {
+    if KERNEL_GUEST_PHYS + (prot_size as u64) > mem.len() {
         return Err("kernel image overflows guest RAM window");
     }
     if let Some(ir) = initramfs {
-        if INITRAMFS_GUEST_PHYS + ir.len() as u64 > GUEST_RAM_TOTAL {
+        if INITRAMFS_GUEST_PHYS + ir.len() as u64 > mem.len() {
             return Err("initramfs overflows guest RAM window");
         }
     }
 
-    // Copy setup-section to guest-phys 0x10000.
-    // SAFETY: host_base is 2-MB-aligned and pre-allocated; the
-    // [host_base, host_base + 256 MB) window is exclusively ours.
-    unsafe {
-        copy_to_guest(host_base, SETUP_GUEST_PHYS, &bzimage[..setup_size]);
-        copy_to_guest(
-            host_base,
-            KERNEL_GUEST_PHYS,
-            &bzimage[setup_size..setup_size + prot_size],
-        );
+    // Place the guest image. `GuestMem` bounds-checks every write
+    // against the window; the explicit checks above give a precise
+    // error before we start. B1: window is contiguous, so these are
+    // plain copies; B3: `GuestMem` faults pages in / splits per page.
+    mem.write_bytes(SETUP_GUEST_PHYS, &bzimage[..setup_size]);
+    mem.write_bytes(
+        KERNEL_GUEST_PHYS,
+        &bzimage[setup_size..setup_size + prot_size],
+    );
 
-        // Cmdline at guest-phys 0x20000, NUL-terminated.
-        copy_to_guest(host_base, CMDLINE_GUEST_PHYS, cmdline);
-        write_byte_to_guest(host_base, CMDLINE_GUEST_PHYS + cmdline.len() as u64, 0);
+    // Cmdline at guest-phys 0x20000, NUL-terminated.
+    mem.write_bytes(CMDLINE_GUEST_PHYS, cmdline);
+    mem.write_u8(CMDLINE_GUEST_PHYS + cmdline.len() as u64, 0);
 
-        if let Some(ir) = initramfs {
-            copy_to_guest(host_base, INITRAMFS_GUEST_PHYS, ir);
-        }
+    if let Some(ir) = initramfs {
+        mem.write_bytes(INITRAMFS_GUEST_PHYS, ir);
     }
 
     // Build boot_params: zero 4 KB, copy setup-header from bzImage
@@ -279,7 +275,7 @@ pub fn load_into_guest_ram(
     let entries = [
         E820Entry { addr: 0,         size: 0x09_F000,                 typ: E820_TYPE_RAM },
         E820Entry { addr: 0x09_F000, size: 0x10_0000 - 0x09_F000,     typ: E820_TYPE_RESERVED },
-        E820Entry { addr: 0x10_0000, size: GUEST_RAM_TOTAL - 0x10_0000, typ: E820_TYPE_RAM },
+        E820Entry { addr: 0x10_0000, size: mem.len() - 0x10_0000, typ: E820_TYPE_RAM },
     ];
     let entry_size = core::mem::size_of::<E820Entry>();
     for (i, entry) in entries.iter().enumerate() {
@@ -294,28 +290,10 @@ pub fn load_into_guest_ram(
     }
 
     // Copy boot_params into guest RAM at 0x90000.
-    // SAFETY: as above, exclusive window.
-    unsafe { copy_to_guest(host_base, BOOT_PARAMS_GUEST_PHYS, &bp); }
+    mem.write_bytes(BOOT_PARAMS_GUEST_PHYS, &bp);
 
     Ok(LoadInfo {
         entry_rip: header.code32_start as u64,
         boot_params_phys: BOOT_PARAMS_GUEST_PHYS,
     })
-}
-
-/// SAFETY: caller guarantees the [host_base + guest_phys,
-/// host_base + guest_phys + bytes.len()) range is exclusively ours
-/// and within the EPT window.
-unsafe fn copy_to_guest(host_base: u64, guest_phys: u64, bytes: &[u8]) {
-    let dst = (host_base + guest_phys) as *mut u8;
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
-    }
-}
-
-/// SAFETY: caller guarantees the byte at host_base + guest_phys is
-/// exclusively ours.
-unsafe fn write_byte_to_guest(host_base: u64, guest_phys: u64, val: u8) {
-    let dst = (host_base + guest_phys) as *mut u8;
-    unsafe { dst.write_volatile(val); }
 }

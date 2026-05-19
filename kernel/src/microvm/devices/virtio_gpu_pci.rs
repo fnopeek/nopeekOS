@@ -23,6 +23,7 @@
 extern crate alloc;
 use crate::kprintln;
 use alloc::vec::Vec;
+use super::guest_mem::GuestMem;
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_GPU_DEVICE: u32 = 0x1050;
@@ -262,10 +263,10 @@ impl VirtioGpu {
     }
 
     /// Process queue notify. q0 = controlq, q1 = cursorq.
-    pub fn service_queues(&mut self, queue_idx: u16, host_base: u64) -> bool {
+    pub fn service_queues(&mut self, queue_idx: u16, mem: &GuestMem) -> bool {
         match queue_idx {
-            0 => self.service_controlq(host_base),
-            1 => self.service_cursorq(host_base),
+            0 => self.service_controlq(mem),
+            1 => self.service_cursorq(mem),
             _ => false,
         }
     }
@@ -274,7 +275,7 @@ impl VirtioGpu {
     /// driver-readable bytes into a command buffer, dispatch on the
     /// command type, and write the response into the driver-writable
     /// descriptor(s).
-    fn service_controlq(&mut self, host_base: u64) -> bool {
+    fn service_controlq(&mut self, mem: &GuestMem) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
         let q_idx = 0usize;
@@ -284,7 +285,7 @@ impl VirtioGpu {
         };
         if q.size == 0 { return false; }
 
-        let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+        let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v, None => return false,
         };
         if avail_top == q.last_avail_idx { return false; }
@@ -298,7 +299,7 @@ impl VirtioGpu {
 
         let mut any = false;
         while last_avail != avail_top {
-            let head = match avail_ring(host_base, driver_gpa, qsize, last_avail) {
+            let head = match avail_ring(mem, driver_gpa, qsize, last_avail) {
                 Some(v) => v, None => break,
             };
 
@@ -308,14 +309,14 @@ impl VirtioGpu {
             let mut resp_descs: Vec<(u64, u32)> = Vec::new(); // (addr, len)
             let mut idx = head;
             loop {
-                let d = match read_desc(host_base, desc_gpa, idx, qsize) {
+                let d = match read_desc(mem, desc_gpa, idx, qsize) {
                     Some(d) => d, None => break,
                 };
                 if d.flags & VRING_DESC_F_WRITE != 0 {
                     resp_descs.push((d.addr, d.len));
                 } else {
                     let mut chunk = alloc::vec![0u8; d.len as usize];
-                    super::guest_mem::read_bytes(host_base, d.addr, &mut chunk);
+                    mem.read_bytes(d.addr, &mut chunk);
                     request.extend_from_slice(&chunk);
                 }
                 if d.flags & VRING_DESC_F_NEXT == 0 { break; }
@@ -324,7 +325,7 @@ impl VirtioGpu {
 
             // Dispatch the command + build the response payload (incl.
             // the 24-byte virtio_gpu_ctrl_hdr).
-            let response = self.dispatch_control(&request, host_base);
+            let response = self.dispatch_control(&request, mem);
 
             // Write response across the writable descriptors in order.
             let mut written: u32 = 0;
@@ -333,13 +334,13 @@ impl VirtioGpu {
                 if roff >= response.len() { break; }
                 let n = ((*len) as usize).min(response.len() - roff);
                 if n > 0 {
-                    super::guest_mem::write_bytes(host_base, *addr, &response[roff..roff + n]);
+                    mem.write_bytes(*addr, &response[roff..roff + n]);
                     roff += n;
                     written = written.saturating_add(n as u32);
                 }
             }
 
-            used_push(host_base, device_gpa, qsize, &mut used_idx, head, written);
+            used_push(mem, device_gpa, qsize, &mut used_idx, head, written);
             last_avail = last_avail.wrapping_add(1);
             any = true;
         }
@@ -355,7 +356,7 @@ impl VirtioGpu {
 
     /// cursorq drain: acknowledge UPDATE_CURSOR / MOVE_CURSOR without
     /// rendering anything. Same chain shape as controlq.
-    fn service_cursorq(&mut self, host_base: u64) -> bool {
+    fn service_cursorq(&mut self, mem: &GuestMem) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
         let q_idx = 1usize;
@@ -365,7 +366,7 @@ impl VirtioGpu {
         };
         if q.size == 0 { return false; }
 
-        let avail_top = match avail_idx(host_base, q.driver_gpa()) {
+        let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v, None => return false,
         };
         if avail_top == q.last_avail_idx { return false; }
@@ -379,7 +380,7 @@ impl VirtioGpu {
 
         let mut any = false;
         while last_avail != avail_top {
-            let head = match avail_ring(host_base, driver_gpa, qsize, last_avail) {
+            let head = match avail_ring(mem, driver_gpa, qsize, last_avail) {
                 Some(v) => v, None => break,
             };
 
@@ -387,7 +388,7 @@ impl VirtioGpu {
             let mut resp_descs: Vec<(u64, u32)> = Vec::new();
             let mut idx = head;
             loop {
-                let d = match read_desc(host_base, desc_gpa, idx, qsize) {
+                let d = match read_desc(mem, desc_gpa, idx, qsize) {
                     Some(d) => d, None => break,
                 };
                 if d.flags & VRING_DESC_F_WRITE != 0 {
@@ -400,10 +401,10 @@ impl VirtioGpu {
             let mut written: u32 = 0;
             if let Some((addr, len)) = resp_descs.first() {
                 let n = ((*len) as usize).min(resp.len());
-                super::guest_mem::write_bytes(host_base, *addr, &resp[..n]);
+                mem.write_bytes(*addr, &resp[..n]);
                 written = n as u32;
             }
-            used_push(host_base, device_gpa, qsize, &mut used_idx, head, written);
+            used_push(mem, device_gpa, qsize, &mut used_idx, head, written);
             last_avail = last_avail.wrapping_add(1);
             any = true;
         }
@@ -417,7 +418,7 @@ impl VirtioGpu {
     /// Dispatch one virtio-gpu command. `request` is the concatenated
     /// read-only descriptor data — starts with a 24-byte ctrl_hdr,
     /// followed by command-specific payload.
-    fn dispatch_control(&mut self, request: &[u8], host_base: u64) -> Vec<u8> {
+    fn dispatch_control(&mut self, request: &[u8], mem: &GuestMem) -> Vec<u8> {
         if request.len() < 24 {
             return build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_UNSPEC, 0, 0);
         }
@@ -473,7 +474,7 @@ impl VirtioGpu {
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D => {
-                self.handle_transfer_to_host_2d(&request[24..], host_base);
+                self.handle_transfer_to_host_2d(&request[24..], mem);
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_RESOURCE_FLUSH => {
@@ -570,7 +571,7 @@ impl VirtioGpu {
         }
     }
 
-    fn handle_transfer_to_host_2d(&mut self, body: &[u8], host_base: u64) {
+    fn handle_transfer_to_host_2d(&mut self, body: &[u8], mem: &GuestMem) {
         if body.len() < 32 { return; }
         let x = u32::from_le_bytes([body[0],  body[1],  body[2],  body[3]]);
         let y = u32::from_le_bytes([body[4],  body[5],  body[6],  body[7]]);
@@ -608,7 +609,7 @@ impl VirtioGpu {
             let src_lin = offset as usize + (y as usize + row) * stride + x as usize * bpp;
             let dst_lin = (y as usize + row) * stride + x as usize * bpp;
             if dst_lin + row_bytes > host_buf.len() { break; }
-            copy_from_backing(host_base, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
+            copy_from_backing(mem, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
         }
 
         // One-time bring-up confirmation; the pixel pipeline is proven
@@ -917,7 +918,7 @@ fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32) 
 /// Copy `dst.len()` bytes from a guest backing-page list, starting at
 /// linear offset `src_lin` into the conceptual resource buffer. The
 /// backing pages are an ordered list of (guest_phys_addr, len).
-fn copy_from_backing(host_base: u64, backing: &[(u64, u32)], src_lin: usize, dst: &mut [u8]) {
+fn copy_from_backing(mem: &GuestMem, backing: &[(u64, u32)], src_lin: usize, dst: &mut [u8]) {
     let mut remaining = dst.len();
     let mut dst_off = 0;
     let mut walked: usize = 0;
@@ -933,7 +934,7 @@ fn copy_from_backing(host_base: u64, backing: &[(u64, u32)], src_lin: usize, dst
             continue;
         }
         let take = (len - local_off).min(remaining);
-        super::guest_mem::read_bytes(host_base, addr + local_off as u64, &mut dst[dst_off..dst_off + take]);
+        mem.read_bytes(addr + local_off as u64, &mut dst[dst_off..dst_off + take]);
         dst_off += take;
         remaining -= take;
         walked += len;

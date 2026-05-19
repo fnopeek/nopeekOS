@@ -23,6 +23,7 @@
 
 extern crate alloc;
 use crate::kprintln;
+use super::guest_mem::GuestMem;
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_BLK_DEVICE: u32 = 0x1042;
@@ -273,7 +274,7 @@ impl VirtioBlk {
     /// Process all available requests on `queue_idx` against the
     /// in-RAM backing store. Returns true if the used-ring advanced
     /// (caller should set ISR + inject IRQ).
-    pub fn service_queues(&mut self, queue_idx: u16, host_base: u64) -> bool {
+    pub fn service_queues(&mut self, queue_idx: u16, mem: &GuestMem) -> bool {
         let advanced;
         let new_used_idx;
         {
@@ -285,7 +286,7 @@ impl VirtioBlk {
                 return false;
             }
             advanced = super::virtqueue::service_blk_queue(
-                host_base,
+                mem,
                 q.desc_gpa(),
                 q.driver_gpa(),
                 q.device_gpa(),
