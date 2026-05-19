@@ -490,16 +490,6 @@ pub struct VmContext {
     /// #VMEXITs mid-delivery far more than the HLT-idle cooperative
     /// one, so the loss was invisible until A2.
     reinject: u64,
-    /// [A2-DIAG] ring of the last VMEXITs: (exit_reason, iter, guest
-    /// RIP, CPL, EVENTINJ-pre). Dumped once on the guest's first
-    /// userspace fatal-signal console line — shows the exact
-    /// hypervisor sequence in the ~corruption window.
-    exit_log: alloc::collections::VecDeque<(u64, u32, u64, u8, u64, u16)>,
-    crash_dumped: bool,
-    /// [A2-DIAG] consecutive EXIT_IOIO count — a pure run = the guest
-    /// kernel is wedged in a PIO poll our handle_linux_io never
-    /// satisfies. Names the offending port.
-    io_consec: u32,
 }
 
 impl VmContext {
@@ -585,9 +575,6 @@ impl VmContext {
             last_timer_tick: 0,
             last_cfg_tick: 0,
             reinject: 0,
-            exit_log: alloc::collections::VecDeque::with_capacity(513),
-            crash_dumped: false,
-            io_consec: 0,
         })
     }
 
@@ -725,10 +712,6 @@ struct SerialState {
     rx: [u8; 128],
     rx_pos: usize,
     rx_n: usize,
-    /// [A2-DIAG] set when a guest console line reports a userspace
-    /// fatal signal — triggers the VMEXIT-ring dump (the corruption
-    /// window is the ~2 syscalls right before this print).
-    crash_seen: bool,
 }
 
 const PANIC_PREFIX: &[u8] = b"Kernel panic - not syncing: ";
@@ -745,7 +728,6 @@ impl SerialState {
             rx: [0; 128],
             rx_pos: 0,
             rx_n: 0,
-            crash_seen: false,
         }
     }
 
@@ -794,17 +776,6 @@ impl SerialState {
     }
 
     fn scan_for_panic(&mut self, n: usize) {
-        // [A2-DIAG] userspace fatal-signal trigger for the VMEXIT-ring
-        // dump. Substring match anywhere in the line.
-        if !self.crash_seen {
-            const SIG: &[u8] = b"unexpected fatal signal";
-            let l = &self.line[..n];
-            if l.len() >= SIG.len() {
-                for s in 0..=(l.len() - SIG.len()) {
-                    if &l[s..s + SIG.len()] == SIG { self.crash_seen = true; break; }
-                }
-            }
-        }
         if self.panic_observed { return; }
         let line = &self.line[..n];
         let prefix = PANIC_PREFIX;
@@ -884,23 +855,6 @@ impl VmContext {
             return Ok(SliceOutcome::StillRunning);
         }
 
-        // [A2-DIAG] guest reported a userspace fatal signal → dump the
-        // VMEXIT ring once: the exact hypervisor sequence in the
-        // ~corruption window (last entries) right before the crash.
-        if self.serial.crash_seen && !self.crash_dumped {
-            self.crash_dumped = true;
-            self.serial.flush();
-            crate::kprintln!("[A2-DIAG] === VMEXIT ring before crash ({} entries) ===",
-                             self.exit_log.len());
-            for (e, it, rip, cpl, ev, port) in self.exit_log.iter() {
-                crate::kprintln!(
-                    "[A2-DIAG] iter={} exit={:#06x} rip={:#x} cpl={} evinj={:#x} port={:#06x}",
-                    it, e, rip, cpl, ev, port,
-                );
-            }
-            crate::kprintln!("[A2-DIAG] === end ring ===");
-        }
-
         self.iter = self.iter.saturating_add(1);
         slice_n += 1;
 
@@ -914,24 +868,8 @@ impl VmContext {
             self.reinject = 0;
         }
 
-        // [A2-DIAG] EVENTINJ armed for THIS VMRUN (what we're about
-        // to inject, if anything).
-        let evinj_pre = self.vmcb.read_u64(vmcb::OFF_EVENT_INJ);
-
         let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
         let exit = outcome.exit_reason;
-
-        // [A2-DIAG] record this exit in the ring (cap 512). For IOIO,
-        // capture the port so the crash dump names the wedged poll.
-        if !self.crash_dumped {
-            let rip = self.vmcb.read_u64(vmcb::OFF_SAVE_RIP);
-            let cpl = self.vmcb.read_u64(vmcb::OFF_SAVE_CPL) as u8;
-            let port = if exit == EXIT_IOIO {
-                ((outcome.exit_qualification >> 16) & 0xFFFF) as u16
-            } else { 0 };
-            if self.exit_log.len() >= 512 { self.exit_log.pop_front(); }
-            self.exit_log.push_back((exit, self.iter, rip, cpl, evinj_pre, port));
-        }
 
         // Consume the injection slot. Proven by the v0.172.41 probe:
         // under KVM-nested SVM the CPU does NOT clear EVENTINJ.V after
@@ -964,10 +902,6 @@ impl VmContext {
         }
 
         if exit != EXIT_INTR { self.consecutive_idle = 0; }
-        // [A2-DIAG] spin reset — but NOT on EXIT_INTR: the ~1 kHz
-        // per-core timer interleaves benign EXIT_INTR into the wedged
-        // PIO poll; only a real progress exit clears the counter.
-        if exit != EXIT_IOIO && exit != EXIT_INTR { self.io_consec = 0; }
 
         match exit {
             EXIT_INTR => {
@@ -1152,23 +1086,6 @@ impl VmContext {
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
-                // [A2-DIAG] pure-IOIO run = wedged PIO poll. Name the
-                // port (a few samples as it spins).
-                self.io_consec = self.io_consec.saturating_add(1);
-                if matches!(self.io_consec, 20000 | 100000 | 500000) {
-                    let rip = self.vmcb.read_u64(vmcb::OFF_SAVE_RIP);
-                    let ax = self.vmcb.read_u64(vmcb::OFF_SAVE_RAX);
-                    crate::kprintln!(
-                        "[A2-DIAG] IOIO SPIN x{} port={:#06x} in={} sz={} ax={:#x} rip={:#x}",
-                        self.io_consec, port, dir_in, size, ax, rip,
-                    );
-                    // Trigger the VMEXIT-ring dump (reuses the crash
-                    // path): the ring records port per entry → shows
-                    // the REAL device polled, interleaved with 0x80.
-                    if self.io_consec == 20000 {
-                        self.serial.crash_seen = true;
-                    }
-                }
                 handle_linux_io(&mut *self.vmcb, &mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped);
                 advance_rip(&mut *self.vmcb);
                 last_outcome = Some(outcome);
