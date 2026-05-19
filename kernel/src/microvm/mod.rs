@@ -29,5 +29,6 @@ pub mod linux;
 #[allow(unused_imports)] // LaunchOutcome is part of the public surface
 pub use cpu::{
     decode_io_exit_qualification, init, report, run_linux, run_substrate_test, vm_active,
-    vm_bind_window, vm_close_for_window, vm_open, vm_poll_slice, vm_window, LaunchOutcome,
+    vm_bind_window, vm_close_for_window, vm_core_serve, vm_open, vm_poll_slice, vm_window,
+    LaunchOutcome,
 };

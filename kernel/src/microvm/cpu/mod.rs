@@ -27,7 +27,7 @@ pub mod svm;
 pub mod vmx;
 
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 /// Guest-RAM size for the next VM, chosen at `vm_open` from live host
 /// free memory instead of a fixed 1 GiB constant.
@@ -172,6 +172,40 @@ static ACTIVE_VM_WINDOW: AtomicU32 = AtomicU32::new(0);
 /// the guest down instead of running it headless.
 static VM_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+// ── Dedicated-core path (substrate rework A2) ──────────────────────
+//
+// When `per_core::dedicated_vm_core()` is Some, the guest runs in a
+// continuous loop on that worker core instead of cooperative Core-0
+// slicing. VMXON / host-state capture / the run loop / VMXOFF must
+// ALL execute on that one core — a cross-core open would restore
+// Core 0's GDT/TR/RSP onto the VM core on the first VM-exit. So
+// Core 0 only stashes a request (`PENDING_VM`); the dedicated core
+// (`vm_core_serve`, driven from `smp_ap_entry`) owns the VmContext on
+// its own stack for the VM's whole lifetime. Core 0 coordinates only
+// via these atomics + the existing `ACTIVE_VM_WINDOW` /
+// `VM_CLOSE_REQUESTED` — never the `ACTIVE_VM` mutex (cooperative
+// path only), so it can't deadlock against the unbounded run loop.
+// The cooperative path (≤2 cores) is byte-for-byte unchanged.
+
+const VM_IDLE: u8 = 0;
+const VM_REQUESTED: u8 = 1;
+const VM_RUNNING: u8 = 2;
+const VM_EXITED: u8 = 3;
+
+/// Dedicated-core VM lifecycle. Only meaningful when a core is
+/// dedicated (cooperative path uses `ACTIVE_VM` instead).
+static VM_RUN_STATE: AtomicU8 = AtomicU8::new(VM_IDLE);
+
+/// One pending launch request, owned copies so the caller's npkFS
+/// buffers can drop while the dedicated core consumes them.
+struct PendingVm {
+    bzimage: alloc::vec::Vec<u8>,
+    cmdline: alloc::vec::Vec<u8>,
+    initramfs: Option<alloc::vec::Vec<u8>>,
+    inject: alloc::vec::Vec<u8>,
+}
+static PENDING_VM: Mutex<Option<PendingVm>> = Mutex::new(None);
+
 /// Bind the active VM to a Shade Surface window (called by the
 /// microvm intent right after a successful `vm_open`).
 pub fn vm_bind_window(window_id: u32) {
@@ -210,8 +244,15 @@ fn teardown_vm_window() {
 /// boot wall-time; a busy compositor hits the deadline first.
 const SLICE_BUDGET: u32 = 4096;
 
-/// True if a microvm is currently open (running across slices).
+/// True if Core 0 should spin-feed a cooperative microvm. On the
+/// dedicated path the guest runs on its own core, so Core 0 does NOT
+/// spin — it idles/composites normally and reaps via `vm_poll_slice`.
+/// Hence: false on the dedicated path (the guest is still composited
+/// through the `focused_surface_id` branch, independent of this).
 pub fn vm_active() -> bool {
+    if crate::smp::per_core::dedicated_vm_core().is_some() {
+        return false;
+    }
     ACTIVE_VM.lock().is_some()
 }
 
@@ -225,6 +266,23 @@ pub fn vm_open(
     initramfs: Option<&[u8]>,
     inject: &[u8],
 ) -> Result<(), &'static str> {
+    // Dedicated path: hand the request to the VM core (which opens it
+    // on itself). Owned copies so the caller's npkFS Vecs can drop.
+    if crate::smp::per_core::dedicated_vm_core().is_some() {
+        if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
+            return Err("a microvm is already running");
+        }
+        *PENDING_VM.lock() = Some(PendingVm {
+            bzimage: bzimage.to_vec(),
+            cmdline: cmdline.to_vec(),
+            initramfs: initramfs.map(<[u8]>::to_vec),
+            inject: inject.to_vec(),
+        });
+        VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+        VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
+        return Ok(());
+    }
+
     let mut slot = ACTIVE_VM.lock();
     if slot.is_some() {
         return Err("a microvm is already running");
@@ -244,6 +302,22 @@ pub fn vm_open(
 /// On guest exit / fault: log, free resources, clear the slot so a
 /// new VM can be opened (relaunch).
 pub fn vm_poll_slice() {
+    // Dedicated path: Core 0 is only the reaper. The VM core owns the
+    // VmContext for its whole lifetime and does its own VMXOFF; Core 0
+    // just runs the compositor-locking teardown once it has exited
+    // (teardown_vm_window must run on Core 0). Cheap atomic load on
+    // the hot poll path when nothing has exited.
+    if crate::smp::per_core::dedicated_vm_core().is_some() {
+        if VM_RUN_STATE.load(Ordering::Acquire) == VM_EXITED {
+            crate::microvm::devices::nat::reset_sessions();
+            teardown_vm_window();
+            VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+            VM_RUN_STATE.store(VM_IDLE, Ordering::Release);
+            crate::kprintln!("[microvm] guest exited (dedicated core)");
+        }
+        return;
+    }
+
     let mut slot = ACTIVE_VM.lock();
     if slot.is_none() {
         return;
@@ -295,6 +369,128 @@ pub fn vm_poll_slice() {
         ),
         Err(e) => crate::kprintln!("[microvm] launch FAILED: {}", e),
     }
+}
+
+/// Dedicated-core entry point — called every iteration of the
+/// dedicated worker core's `smp_ap_entry` loop. Cheap no-op unless a
+/// launch is pending. When one is, this opens the VM **on this core**
+/// (so VMXON / `write_host_state` / VMPTRLD / VMRESUME / VMXOFF all
+/// bind here, never Core 0), runs it to exit / window-close in a
+/// continuous loop, closes it, and signals Core 0 to reap. Blocks the
+/// dedicated core for the guest's whole lifetime — that is the point:
+/// the guest no longer fights Shade + the shell for Core 0. Never
+/// touches `ACTIVE_VM` (cooperative-path only).
+pub fn vm_core_serve() {
+    if VM_RUN_STATE.load(Ordering::Acquire) != VM_REQUESTED {
+        return;
+    }
+    let pending = match PENDING_VM.lock().take() {
+        Some(p) => p,
+        None => {
+            VM_RUN_STATE.store(VM_IDLE, Ordering::Release);
+            return;
+        }
+    };
+    VM_RUN_STATE.store(VM_RUNNING, Ordering::Release);
+
+    // Per-core periodic VMEXIT source + host interrupts ON, so a
+    // pending tick is delivered to the EOI handler between VMRUNs —
+    // exactly how Core 0 runs the cooperative path. Without IF=1 the
+    // first tick would never EOI and the guest would freeze one
+    // iteration later; without the timer there is no tick at all.
+    crate::interrupts::arm_dedicated_vm_timer();
+    // SAFETY: ring-0; CLGI/STGI still brackets the VMRUN-critical
+    // region inside run_guest_once. This mirrors Core 0's IF=1.
+    unsafe { core::arch::asm!("sti") };
+
+    // Continuous run: identical primitive to `vmx::run_linux` step 1a
+    // (open + `loop run_slice` + close) plus a window-close check so
+    // the user can `Mod+Q` the tile. `run_slice` returns periodically
+    // on its wall-clock deadline; we loop straight back (no Shade
+    // composite, no hlt on this core) → near-native guest. The two
+    // backends have distinct `SliceOutcome` enums, so match each
+    // concretely.
+    match *VENDOR.lock() {
+        Vendor::Intel => {
+            match vmx::vm_open(
+                &pending.bzimage,
+                &pending.cmdline,
+                pending.initramfs.as_deref(),
+                &pending.inject,
+            ) {
+                Ok(mut ctx) => {
+                    loop {
+                        if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                            crate::kprintln!("[microvm] window closed — stopping guest");
+                            break;
+                        }
+                        match ctx.run_slice(SLICE_BUDGET) {
+                            Ok(vmx::SliceOutcome::StillRunning) => continue,
+                            Ok(vmx::SliceOutcome::Exited(o)) => {
+                                crate::kprintln!(
+                                    "[microvm] guest exited — reason {:#x} qual {:#x}",
+                                    (o.exit_reason & 0xFFFF) as u16,
+                                    o.exit_qualification
+                                );
+                                break;
+                            }
+                            Err(e) => {
+                                crate::kprintln!("[microvm] run FAILED: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    ctx.close();
+                }
+                Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
+            }
+        }
+        Vendor::Amd => {
+            match svm::vm_open(
+                &pending.bzimage,
+                &pending.cmdline,
+                pending.initramfs.as_deref(),
+                &pending.inject,
+            ) {
+                Ok(mut ctx) => {
+                    loop {
+                        if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                            crate::kprintln!("[microvm] window closed — stopping guest");
+                            break;
+                        }
+                        match ctx.run_slice(SLICE_BUDGET) {
+                            Ok(svm::SliceOutcome::StillRunning) => continue,
+                            Ok(svm::SliceOutcome::Exited(o)) => {
+                                crate::kprintln!(
+                                    "[microvm] guest exited — reason {:#x} qual {:#x}",
+                                    (o.exit_reason & 0xFFFF) as u16,
+                                    o.exit_qualification
+                                );
+                                break;
+                            }
+                            Err(e) => {
+                                crate::kprintln!("[microvm] run FAILED: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    ctx.close();
+                }
+                Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
+            }
+        }
+        Vendor::Unknown(reason) => crate::kprintln!("[microvm] {}", reason),
+    }
+
+    // VM done — stop the per-core timer and restore the IF=0 state
+    // `smp_ap_entry`'s park loop expects (it does its own sti;hlt;cli).
+    crate::interrupts::disarm_dedicated_vm_timer();
+    // SAFETY: ring-0; return the core to the parked-loop invariant.
+    unsafe { core::arch::asm!("cli") };
+
+    drop(pending); // owned guest-image buffers freed
+    // Hand off to Core 0's reaper (compositor-locking teardown).
+    VM_RUN_STATE.store(VM_EXITED, Ordering::Release);
 }
 
 /// Decode the I/O VM-exit qualification field from a substrate-test
