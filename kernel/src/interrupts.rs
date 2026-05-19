@@ -99,9 +99,80 @@ pub fn calibrate_tsc() {
             return;
         }
     }
-    // Fallback: 2 GHz default
+    // CPUID 0x15 absent (always on AMD — Intel-only leaf). Calibrate
+    // against PIT channel 2 (vendor-independent; Linux's
+    // quick_pit_calibrate approach). MUST work or every TSC-derived
+    // time is wrong: host `top` per-app time, delay_ms, run_slice's
+    // SLICE_MS, AND the guest's `tsc_early_khz=` cmdline (→ guest
+    // clock 2-2.3× fast → librewolf timed-wait crash). The old
+    // hardcoded 2 GHz was that bug.
+    if let Some(freq) = pit_calibrate_tsc() {
+        TSC_FREQ.store(freq, Ordering::Relaxed);
+        kprintln!("[npk] TSC: {} MHz (PIT ch2 calibration)", freq / 1_000_000);
+        return;
+    }
+
+    // Last resort: 2 GHz default (PIT also unavailable).
     TSC_FREQ.store(2_000_000_000, Ordering::Relaxed);
-    kprintln!("[npk] TSC: 2000 MHz (default, CPUID 0x15 not available)");
+    kprintln!("[npk] TSC: 2000 MHz (default — CPUID 0x15 + PIT both unavailable)");
+}
+
+#[inline]
+unsafe fn cal_inb(port: u16) -> u8 {
+    let v: u8;
+    core::arch::asm!("in al, dx", out("al") v, in("dx") port,
+                     options(nomem, nostack, preserves_flags));
+    v
+}
+
+#[inline]
+unsafe fn cal_outb(port: u16, val: u8) {
+    core::arch::asm!("out dx, al", in("al") val, in("dx") port,
+                     options(nomem, nostack, preserves_flags));
+}
+
+/// Measure TSC over a fixed PIT channel-2 window (no IRQs needed —
+/// polled via the timer-2 output bit in port 0x61). Channel 2 is the
+/// "speaker" timer; gating it via 0x61 starts a one-shot countdown we
+/// can poll, so this works before any IRQ/timer setup and on both
+/// bare-metal AMD and QEMU/KVM. Returns the TSC frequency in Hz, or
+/// None if the PIT isn't counting / the result is implausible.
+fn pit_calibrate_tsc() -> Option<u64> {
+    // SAFETY: legacy PIT/0x61 ports, single-threaded boot context.
+    unsafe {
+        // Gate2 on, speaker off (preserve the other bits to restore).
+        let p61 = cal_inb(0x61);
+        cal_outb(0x61, (p61 & 0xFC) | 0x01);
+        // Channel 2, access lobyte+hibyte, mode 0 (terminal count),
+        // binary. Mode 0: OUT (0x61 bit 5) is low while counting,
+        // goes high at terminal count.
+        cal_outb(0x43, 0xB0);
+        // Initial count 0xFFFF → 0x10000 input clocks @ 1.193182 MHz
+        // ≈ 54.9 ms calibration window.
+        cal_outb(0x42, 0xFF);
+        cal_outb(0x42, 0xFF);
+
+        let t0 = rdtsc();
+        let mut spins: u64 = 0;
+        while cal_inb(0x61) & 0x20 == 0 {
+            spins += 1;
+            if spins > 2_000_000_000 {
+                cal_outb(0x61, p61 & 0xFC); // gate off, restore
+                return None; // PIT not advancing
+            }
+        }
+        let t1 = rdtsc();
+        cal_outb(0x61, p61 & 0xFC); // gate off, restore original bits
+
+        let cycles = t1.wrapping_sub(t0);
+        // 0x10000 PIT clocks at PIT_BASE_FREQ Hz.
+        let freq = cycles.saturating_mul(PIT_BASE_FREQ as u64) / 0x10000;
+        if (500_000_000..=10_000_000_000).contains(&freq) {
+            Some(freq)
+        } else {
+            None
+        }
+    }
 }
 
 /// Get TSC frequency in Hz.
