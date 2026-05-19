@@ -25,6 +25,7 @@
 //! (loaded into RAX), so multiple VMCBs can coexist trivially.
 
 use super::{cpuid as host_cpuid, npt, rdmsr, vmcb, wrmsr};
+use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
 
@@ -413,7 +414,7 @@ pub struct VmContext {
     /// Owned (not leaked) so it's reclaimed on drop — relaunch fix.
     vmcb: alloc::boxed::Box<vmcb::Vmcb>,
     vmcb_phys: u64,
-    host_base: u64,
+    guest_mem: GuestMem,
     /// Base of the guest-RAM contiguous allocation (pre-2 MB-align),
     /// + the IOPM/MSRPM frame allocations — all freed in close().
     guest_raw_base: u64,
@@ -456,7 +457,11 @@ impl VmContext {
         setup_host_save()?;
 
         let (host_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt()?;
-        let load = bzimage::load_into_guest_ram(host_base, bzimage_bytes, cmdline, initramfs)?;
+        let gm = GuestMem::new(
+            host_base,
+            crate::microvm::devices::guest_mem::GUEST_RAM_BYTES,
+        );
+        let load = bzimage::load_into_guest_ram(&gm, bzimage_bytes, cmdline, initramfs)?;
 
         // IOPM: 12 KB all-ones = trap every port. Linux touches dozens
         // of unique ports during boot (UART, PIC, PIT, RTC, …).
@@ -498,7 +503,7 @@ impl VmContext {
         Ok(VmContext {
             vmcb,
             vmcb_phys,
-            host_base,
+            guest_mem: gm,
             guest_raw_base,
             iopm_phys,
             msrpm_phys,
@@ -872,8 +877,8 @@ impl VmContext {
                     continue;
                 }
                 let pumped = crate::microvm::devices::nat::pump(
-                    &mut self.pci.virtio_net, self.host_base);
-                if self.pci.virtio_input.drain_injected(self.host_base) {
+                    &mut self.pci.virtio_net, &self.guest_mem);
+                if self.pci.virtio_input.drain_injected(&self.guest_mem) {
                     let vector = self.pic.vector_for_irq(12);
                     let info: u64 = (vector as u64) | (1u64 << 31);
                     self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
@@ -1028,28 +1033,28 @@ impl VmContext {
             EXIT_NPF => {
                 let gpa = self.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
                 if self.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_npf_net(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_npf_net(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_npf_gpu(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_npf_gpu(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_npf_input(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_npf_input(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1222,7 +1227,7 @@ fn handle_mmio_npf_blk(
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1233,7 +1238,7 @@ fn handle_mmio_npf_blk(
     // can't rely on VMCB.GUEST_INST_BYTES.
     let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
     let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!(
@@ -1267,7 +1272,7 @@ fn handle_mmio_npf_blk(
     }
 
     if let Some(qidx) = blk.take_pending_kick() {
-        let advanced = blk.service_queues(qidx, host_base);
+        let advanced = blk.service_queues(qidx, mem);
         if advanced {
             let vector = pic.vector_for_irq(blk.irq_line());
             // VMCB.EVENT_INJ — vector | type<<8 | valid<<31. Type 0 =
@@ -1346,7 +1351,7 @@ fn handle_mmio_npf_net(
     net: &mut crate::microvm::devices::virtio_net_pci::VirtioNet,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1354,7 +1359,7 @@ fn handle_mmio_npf_net(
 
     let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
     let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!("[svm] mmio-net: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
@@ -1381,7 +1386,7 @@ fn handle_mmio_npf_net(
     }
 
     if let Some(qidx) = net.take_pending_kick() {
-        let advanced = net.service_queues(qidx, host_base);
+        let advanced = net.service_queues(qidx, mem);
         if advanced {
             let vector = pic.vector_for_irq(10);
             let info: u64 = (vector as u64) | (1u64 << 31);
@@ -1400,7 +1405,7 @@ fn handle_mmio_npf_gpu(
     gpu: &mut crate::microvm::devices::virtio_gpu_pci::VirtioGpu,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1408,7 +1413,7 @@ fn handle_mmio_npf_gpu(
 
     let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
     let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!("[svm] mmio-gpu: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
@@ -1435,7 +1440,7 @@ fn handle_mmio_npf_gpu(
     }
 
     if let Some(qidx) = gpu.take_pending_kick() {
-        let advanced = gpu.service_queues(qidx, host_base);
+        let advanced = gpu.service_queues(qidx, mem);
         if advanced {
             // virtio-gpu IRQ line = 9.
             let vector = pic.vector_for_irq(9);
@@ -1456,7 +1461,7 @@ fn handle_mmio_npf_input(
     input: &mut crate::microvm::devices::virtio_input_pci::VirtioInput,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1464,7 +1469,7 @@ fn handle_mmio_npf_input(
 
     let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
     let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!("[svm] mmio-input: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
@@ -1491,7 +1496,7 @@ fn handle_mmio_npf_input(
     }
 
     if let Some(qidx) = input.take_pending_kick() {
-        let advanced = input.service_queues(qidx, host_base);
+        let advanced = input.service_queues(qidx, mem);
         if advanced {
             // virtio-input IRQ line = 12.
             let vector = pic.vector_for_irq(12);

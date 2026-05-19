@@ -19,6 +19,7 @@
 //! (VM Exits).
 
 use super::{ept, rdmsr, vmcs, wrmsr};
+use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
 
@@ -483,7 +484,7 @@ unsafe fn vmx_exit_root() {
 pub struct VmContext {
     vmxon_phys: u64,
     vmcs_phys: u64,
-    host_base: u64,
+    guest_mem: GuestMem,
     /// Base of the guest-RAM contiguous allocation (pre-2 MB-align).
     /// `close()` frees `GUEST_RAM_TOTAL_FRAMES` from here — without
     /// this the 1 GB window leaks and a second `microvm linux` in the
@@ -532,7 +533,11 @@ impl VmContext {
         // Everything past here is in VMX root: VMXOFF on any error.
         let build = || -> Result<VmContext, &'static str> {
             let (host_base, eptp, guest_raw_base) = alloc_guest_ram_and_ept()?;
-            let load = bzimage::load_into_guest_ram(host_base, bzimage, cmdline, initramfs)?;
+            let gm = GuestMem::new(
+                host_base,
+                crate::microvm::devices::guest_mem::GUEST_RAM_BYTES,
+            );
+            let load = bzimage::load_into_guest_ram(&gm, bzimage, cmdline, initramfs)?;
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state(load.entry_rip)?;
             vmcs::setup_execution_controls(eptp)?;
@@ -549,7 +554,7 @@ impl VmContext {
             Ok(VmContext {
                 vmxon_phys,
                 vmcs_phys,
-                host_base,
+                guest_mem: gm,
                 guest_raw_base,
                 regs,
                 serial,
@@ -836,7 +841,7 @@ impl ExitTrace {
 /// Walk guest's 4-level page tables for `virt`, print each level's
 /// entry. EPT identity-shifts guest-phys X → host-phys host_base+X
 /// within the 64 MB window, so we just offset.
-fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
+fn dump_page_walk(mem: &GuestMem, cr3: u64, virt: u64) {
     use crate::kprintln;
     const WINDOW: u64 = 64 * 1024 * 1024;
     const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -853,9 +858,7 @@ fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
         kprintln!("[microvm-walk] PML4 phys {:#x} outside 64 MB window", pml4_phys);
         return;
     }
-    let pml4_e = unsafe {
-        ((host_base + pml4_phys) as *const u64).add(l4).read_volatile()
-    };
+    let pml4_e = mem.read_u64(pml4_phys + (l4 as u64) * 8).unwrap_or(0);
     kprintln!("[microvm-walk]   PML4[{}] = {:#018x}", l4, pml4_e);
     if pml4_e & 1 == 0 { kprintln!("[microvm-walk]     L4 not present"); return; }
 
@@ -864,9 +867,7 @@ fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
         kprintln!("[microvm-walk]   PDPT phys {:#x} outside window", pdpt_phys);
         return;
     }
-    let pdpt_e = unsafe {
-        ((host_base + pdpt_phys) as *const u64).add(l3).read_volatile()
-    };
+    let pdpt_e = mem.read_u64(pdpt_phys + (l3 as u64) * 8).unwrap_or(0);
     kprintln!("[microvm-walk]   PDPT[{}] = {:#018x}", l3, pdpt_e);
     if pdpt_e & 1 == 0 { kprintln!("[microvm-walk]     L3 not present"); return; }
     if pdpt_e & (1 << 7) != 0 { kprintln!("[microvm-walk]     1 GB leaf"); return; }
@@ -876,9 +877,7 @@ fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
         kprintln!("[microvm-walk]   PD phys {:#x} outside window", pd_phys);
         return;
     }
-    let pd_e = unsafe {
-        ((host_base + pd_phys) as *const u64).add(l2).read_volatile()
-    };
+    let pd_e = mem.read_u64(pd_phys + (l2 as u64) * 8).unwrap_or(0);
     kprintln!("[microvm-walk]   PD[{}] = {:#018x}", l2, pd_e);
     if pd_e & 1 == 0 { kprintln!("[microvm-walk]     L2 not present"); return; }
     if pd_e & (1 << 7) != 0 { kprintln!("[microvm-walk]     2 MB leaf"); return; }
@@ -888,9 +887,7 @@ fn dump_page_walk(host_base: u64, cr3: u64, virt: u64) {
         kprintln!("[microvm-walk]   PT phys {:#x} outside window", pt_phys);
         return;
     }
-    let pt_e = unsafe {
-        ((host_base + pt_phys) as *const u64).add(l1).read_volatile()
-    };
+    let pt_e = mem.read_u64(pt_phys + (l1 as u64) * 8).unwrap_or(0);
     kprintln!("[microvm-walk]   PT[{}] = {:#018x}", l1, pt_e);
     if pt_e & 1 == 0 { kprintln!("[microvm-walk]     L1 not present"); }
 }
@@ -1021,7 +1018,7 @@ impl VmContext {
                 );
                 if vector == 14 {
                     let cr3 = vmcs::read_guest_cr3().unwrap_or(0);
-                    dump_page_walk(self.host_base, cr3, outcome.exit_qualification);
+                    dump_page_walk(&self.guest_mem, cr3, outcome.exit_qualification);
                 }
                 self.trace.dump();
                 last_outcome = Some(outcome);
@@ -1116,8 +1113,8 @@ impl VmContext {
                     continue;
                 }
                 let pumped = crate::microvm::devices::nat::pump(
-                    &mut self.pci.virtio_net, self.host_base);
-                if self.pci.virtio_input.drain_injected(self.host_base) {
+                    &mut self.pci.virtio_net, &self.guest_mem);
+                if self.pci.virtio_input.drain_injected(&self.guest_mem) {
                     let vector = self.pic.vector_for_irq(12);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
@@ -1317,28 +1314,28 @@ impl VmContext {
                 // BAR0 range we emulate; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
                 if self.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_ept_net(&mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_ept_net(&mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_ept_gpu(&mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_ept_gpu(&mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_ept_input(&mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_ept_input(&mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, self.host_base) {
+                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1612,7 +1609,7 @@ fn handle_mmio_ept_blk(
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1627,7 +1624,7 @@ fn handle_mmio_ept_blk(
         Err(_) => return false,
     };
 
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!(
@@ -1663,7 +1660,7 @@ fn handle_mmio_ept_blk(
     // IRQ 11 (virtio-blk's INTx line, mapped through our 8259 stub
     // to the vector Linux programmed via ICW2).
     if let Some(qidx) = blk.take_pending_kick() {
-        let advanced = blk.service_queues(qidx, host_base);
+        let advanced = blk.service_queues(qidx, mem);
         if advanced {
             let vector = pic.vector_for_irq(blk.irq_line());
             let _ = vmcs::inject_external_irq(vector);
@@ -1729,7 +1726,7 @@ fn handle_mmio_ept_net(
     net: &mut crate::microvm::devices::virtio_net_pci::VirtioNet,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1737,7 +1734,7 @@ fn handle_mmio_ept_net(
 
     let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
     let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!("[microvm] mmio-net: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
@@ -1762,7 +1759,7 @@ fn handle_mmio_ept_net(
     }
 
     if let Some(qidx) = net.take_pending_kick() {
-        let advanced = net.service_queues(qidx, host_base);
+        let advanced = net.service_queues(qidx, mem);
         if advanced {
             // virtio-net IRQ line = 10 (per pci config 0x3C).
             let vector = pic.vector_for_irq(10);
@@ -1782,7 +1779,7 @@ fn handle_mmio_ept_gpu(
     gpu: &mut crate::microvm::devices::virtio_gpu_pci::VirtioGpu,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1790,7 +1787,7 @@ fn handle_mmio_ept_gpu(
 
     let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
     let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!("[microvm] mmio-gpu: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
@@ -1815,7 +1812,7 @@ fn handle_mmio_ept_gpu(
     }
 
     if let Some(qidx) = gpu.take_pending_kick() {
-        let advanced = gpu.service_queues(qidx, host_base);
+        let advanced = gpu.service_queues(qidx, mem);
         if advanced {
             // virtio-gpu IRQ line = 9.
             let vector = pic.vector_for_irq(9);
@@ -1834,7 +1831,7 @@ fn handle_mmio_ept_input(
     input: &mut crate::microvm::devices::virtio_input_pci::VirtioInput,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
-    host_base: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1842,7 +1839,7 @@ fn handle_mmio_ept_input(
 
     let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
     let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
-    let buf = match fetch_inst(rip, cr3, host_base) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!("[microvm] mmio-input: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
@@ -1867,7 +1864,7 @@ fn handle_mmio_ept_input(
     }
 
     if let Some(qidx) = input.take_pending_kick() {
-        let advanced = input.service_queues(qidx, host_base);
+        let advanced = input.service_queues(qidx, mem);
         if advanced {
             // virtio-input IRQ line = 12.
             let vector = pic.vector_for_irq(12);

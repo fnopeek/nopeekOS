@@ -49,7 +49,8 @@ pub const GUEST_RAM_ALIGN_SLACK: usize = 511;
 const NPT_2MB_COUNT: usize = 512;
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
-const GUEST_WINDOW_BYTES: u64 = 1024 * 1024 * 1024;
+// Canonical size lives in `guest_mem`; this is its NPT-window twin.
+const GUEST_WINDOW_BYTES: u64 = crate::microvm::devices::guest_mem::GUEST_RAM_BYTES;
 
 // ── NPT page-table flags ───────────────────────────────────────────
 

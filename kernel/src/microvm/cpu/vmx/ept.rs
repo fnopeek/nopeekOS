@@ -48,8 +48,9 @@ const EPTP_WALK_LENGTH_4: u64 = 3 << 3; // 4 levels = walk length 3
 const TWO_MB: u64 = 2 * 1024 * 1024;
 // 1 GB guest RAM — Firefox manifest spec target. Exactly fills one
 // PDPT entry's worth of 2 MB pages (512 leaves). Bumping past 1 GB
-// needs multi-PD support (split across PDPT entries).
-const GUEST_WINDOW_BYTES: u64 = 1024 * 1024 * 1024;
+// needs multi-PD support (split across PDPT entries). Canonical size
+// lives in `guest_mem`; this is its EPT-window twin.
+const GUEST_WINDOW_BYTES: u64 = crate::microvm::devices::guest_mem::GUEST_RAM_BYTES;
 const PD_LEAVES: u64 = GUEST_WINDOW_BYTES / TWO_MB; // 512 entries (= 1 GB, max for single PD)
 
 /// Number of 4 KB host frames the caller must allocate contiguously
