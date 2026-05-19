@@ -494,7 +494,7 @@ pub struct VmContext {
     /// RIP, CPL, EVENTINJ-pre). Dumped once on the guest's first
     /// userspace fatal-signal console line — shows the exact
     /// hypervisor sequence in the ~corruption window.
-    exit_log: alloc::collections::VecDeque<(u64, u32, u64, u8, u64)>,
+    exit_log: alloc::collections::VecDeque<(u64, u32, u64, u8, u64, u16)>,
     crash_dumped: bool,
     /// [A2-DIAG] consecutive EXIT_IOIO count — a pure run = the guest
     /// kernel is wedged in a PIO poll our handle_linux_io never
@@ -892,10 +892,10 @@ impl VmContext {
             self.serial.flush();
             crate::kprintln!("[A2-DIAG] === VMEXIT ring before crash ({} entries) ===",
                              self.exit_log.len());
-            for (e, it, rip, cpl, ev) in self.exit_log.iter() {
+            for (e, it, rip, cpl, ev, port) in self.exit_log.iter() {
                 crate::kprintln!(
-                    "[A2-DIAG] iter={} exit={:#06x} rip={:#x} cpl={} evinj={:#x}",
-                    it, e, rip, cpl, ev,
+                    "[A2-DIAG] iter={} exit={:#06x} rip={:#x} cpl={} evinj={:#x} port={:#06x}",
+                    it, e, rip, cpl, ev, port,
                 );
             }
             crate::kprintln!("[A2-DIAG] === end ring ===");
@@ -921,12 +921,16 @@ impl VmContext {
         let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
         let exit = outcome.exit_reason;
 
-        // [A2-DIAG] record this exit in the ring (cap 512).
+        // [A2-DIAG] record this exit in the ring (cap 512). For IOIO,
+        // capture the port so the crash dump names the wedged poll.
         if !self.crash_dumped {
             let rip = self.vmcb.read_u64(vmcb::OFF_SAVE_RIP);
             let cpl = self.vmcb.read_u64(vmcb::OFF_SAVE_CPL) as u8;
+            let port = if exit == EXIT_IOIO {
+                ((outcome.exit_qualification >> 16) & 0xFFFF) as u16
+            } else { 0 };
             if self.exit_log.len() >= 512 { self.exit_log.pop_front(); }
-            self.exit_log.push_back((exit, self.iter, rip, cpl, evinj_pre));
+            self.exit_log.push_back((exit, self.iter, rip, cpl, evinj_pre, port));
         }
 
         // Consume the injection slot. Proven by the v0.172.41 probe:
@@ -960,7 +964,10 @@ impl VmContext {
         }
 
         if exit != EXIT_INTR { self.consecutive_idle = 0; }
-        if exit != EXIT_IOIO { self.io_consec = 0; } // [A2-DIAG] spin reset
+        // [A2-DIAG] spin reset — but NOT on EXIT_INTR: the ~1 kHz
+        // per-core timer interleaves benign EXIT_INTR into the wedged
+        // PIO poll; only a real progress exit clears the counter.
+        if exit != EXIT_IOIO && exit != EXIT_INTR { self.io_consec = 0; }
 
         match exit {
             EXIT_INTR => {
