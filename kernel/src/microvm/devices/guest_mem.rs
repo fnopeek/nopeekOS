@@ -38,7 +38,18 @@ pub const GUEST_RAM_BYTES: u64 = 1024 * 1024 * 1024;
 /// fixed — the entire B3 architecture stays in the tree; only this
 /// flag gates it, so HEAD is never broken while we debug. Flip to
 /// `true` for a demand test run.
-pub const DEMAND_ENABLED: bool = false;
+pub const DEMAND_ENABLED: bool = true; // [B3-DIAG] uncommitted — revert before any commit
+
+/// [B3-DIAG] A scatter copy hit an unbacked page → it returns `false`
+/// and **the caller ignores it** (virtqueue/nat), so the DMA is
+/// silently dropped = guest RAM corruption. This makes that loud.
+/// Diagnostic only — removed once the root cause is confirmed.
+fn diag_drop(op: &str, gpa: u64, page: u64) {
+    crate::kprintln!(
+        "[B3-DIAG] SILENT DROP: {} gpa={:#x} unbacked page={:#x}",
+        op, gpa, page,
+    );
+}
 
 /// Which second-level paging format backs the demand region, so
 /// `GuestMem` can fault a page in without pulling in `cpu::Vendor`.
@@ -197,7 +208,10 @@ impl GuestMem {
             let off = (cur & 0xFFF) as usize;
             let host = match self.page_host(page) {
                 Some(h) => h,
-                None => return false,
+                None => {
+                    diag_drop("read", gpa, page);
+                    return false;
+                }
             };
             let take = core::cmp::min(total as usize - done, 4096 - off);
             unsafe {
@@ -228,7 +242,10 @@ impl GuestMem {
             let off = (cur & 0xFFF) as usize;
             let host = match self.page_host(page) {
                 Some(h) => h,
-                None => return false,
+                None => {
+                    diag_drop("write", gpa, page);
+                    return false;
+                }
             };
             let take = core::cmp::min(total as usize - done, 4096 - off);
             unsafe {
