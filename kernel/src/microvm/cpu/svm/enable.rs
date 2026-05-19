@@ -253,6 +253,10 @@ fn setup_vmcb(
 static HOST_EXTRA_SAVE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
+/// [A2-DIAG] throttle for the EVENTINJ-stale probe. Diagnostic only.
+static A2_DIAG_N: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 fn host_extra_save_phys() -> u64 {
     use core::sync::atomic::Ordering;
     let cur = HOST_EXTRA_SAVE.load(Ordering::Acquire);
@@ -855,6 +859,26 @@ impl VmContext {
         }
         self.iter = self.iter.saturating_add(1);
         slice_n += 1;
+
+        // [A2-DIAG] EVENTINJ lifecycle probe. We write EVENTINJ at
+        // ~10 sites and never clear it ourselves — we assume the CPU
+        // clears EVENTINJ.V after a successful injection. If under
+        // KVM-nested it does NOT (reliably), the next VMRUN re-injects
+        // a stale event → phantom guest IRQ → the cumulative
+        // corruption. If valid is still set here and we did NOT arm
+        // it via reinject, the CPU did not clear it = the bug.
+        {
+            let pre = self.vmcb.read_u64(vmcb::OFF_EVENT_INJ);
+            if pre & (1u64 << 31) != 0 && self.reinject == 0 {
+                let n = A2_DIAG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 40 {
+                    crate::kprintln!(
+                        "[A2-DIAG] STALE EVENTINJ pre-vmrun: val={:#x} vec={} type={} iter={}",
+                        pre, pre & 0xFF, (pre >> 8) & 7, self.iter,
+                    );
+                }
+            }
+        }
 
         // Re-inject an event that #VMEXITed mid-delivery on the
         // previous run (AMD APM §15.20; KVM svm_complete_interrupts).
