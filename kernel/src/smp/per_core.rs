@@ -179,7 +179,7 @@ pub static DEDICATED_VM_CORE: AtomicU32 = AtomicU32::new(NO_DEDICATED_CORE);
 /// the plan assumed. The cooperative path is the working baseline;
 /// A2's cadence benefit is deferred until its guest-corruption root
 /// cause is found and fixed. Flip to `true` only for A2 debugging.
-pub const A2_DEDICATED_CORE_ENABLED: bool = false;
+pub const A2_DEDICATED_CORE_ENABLED: bool = true;
 
 /// Minimum logical cores (incl. BSP) before dedicating one to the
 /// microvm — below this, dedicating would starve the rest, so keep

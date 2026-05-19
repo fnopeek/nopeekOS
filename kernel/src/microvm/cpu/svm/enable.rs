@@ -241,6 +241,31 @@ fn setup_vmcb(
 /// Execute one VMRUN against the supplied VMCB and return the
 /// resulting exit-info. CLGI/STGI bracketing per APM §15.17.
 ///
+/// Host extra-state save area for `vmsave`/`vmload` (VMCB-format
+/// page). AMD `vmrun`/#VMEXIT do NOT preserve host FS.base, GS.base,
+/// KernelGSBase, TR, LDTR or the SYSCALL/SYSENTER MSRs — only
+/// `vmsave`/`vmload` do (APM Vol 2 §15.5.2). Without this the host
+/// resumes after #VMEXIT with the guest's GS.base; harmless-ish on
+/// Core 0 but on a dedicated worker core every per-core (GS-relative)
+/// access then hits the wrong memory → process-agnostic guest
+/// corruption (the A2 regression). One global frame is safe: only one
+/// VM runs at a time and never concurrently across cores.
+static HOST_EXTRA_SAVE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+fn host_extra_save_phys() -> u64 {
+    use core::sync::atomic::Ordering;
+    let cur = HOST_EXTRA_SAVE.load(Ordering::Acquire);
+    if cur != 0 {
+        return cur;
+    }
+    let p = memory::allocate_contiguous(1).expect("OOM host extra-save frame");
+    // SAFETY: freshly allocated, identity-mapped, exclusive.
+    unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096); }
+    HOST_EXTRA_SAVE.store(p, Ordering::Release);
+    p
+}
+
 /// Loads guest GPRs from `regs` before VMRUN, saves them back on
 /// VMEXIT. RAX/RSP are auto-handled by the CPU via VMCB.SAVE.{RAX,
 /// RSP} + the host-save area, so they're not in `regs`.
@@ -256,6 +281,7 @@ fn run_guest_once(
     vmcb_phys: u64,
 ) -> vmcb::LaunchOutcome {
     let regs_ptr: *mut vmcb::GuestRegs = regs;
+    let host_extra = host_extra_save_phys();
 
     // SAFETY: EFER.SVME is set (caller guarantee), VM_HSAVE_PA
     // points at a valid host-save frame, the VMCB has been
@@ -284,9 +310,11 @@ fn run_guest_once(
             "push r14",
             "push r15",
 
-            // Save struct ptr below callee-saved.
-            "push rdi",
-            "mov rax, rsi",                 // rax = vmcb_phys
+            // Save struct ptr, vmcb_phys, host-extra-save phys below
+            // the callee-saved (push order = struct, vmcb, host).
+            "push rdi",                     // [rsp+16 after next 2]
+            "push rsi",                     // vmcb_phys
+            "push rdx",                     // host_extra_save phys
 
             // ── ENTRY: load guest GPRs from struct ────────────────
             "mov rbx, [rdi +   0]",
@@ -304,13 +332,20 @@ fn run_guest_once(
             "mov rsi, [rdi +  24]",         // rsi (was vmcb_phys input)
             "mov rdi, [rdi +  32]",         // rdi LAST
 
-            // ── VMRUN ─────────────────────────────────────────────
+            // ── HOST EXTRA-STATE SAVE + VMRUN + RESTORE ───────────
+            // vmsave host FS/GS/KernelGS/TR/LDTR/SYSCALL MSRs (vmrun
+            // does NOT preserve them); vmload them back on THIS core
+            // right after #VMEXIT, before any GS-relative host access.
+            "mov rax, [rsp + 0]",           // host_extra_save phys
+            "vmsave rax",
+            "mov rax, [rsp + 8]",           // vmcb_phys
             "clgi",
             "vmrun rax",
             "stgi",
-            // After VMEXIT: rsp restored by CPU, rax=vmcb_phys (host
-            // value via host-save area), all other GPRs hold guest
-            // clobbers.
+            "mov rax, [rsp + 0]",           // host_extra_save phys
+            "vmload rax",
+            // After VMEXIT: rsp restored by CPU, all GPRs hold guest
+            // clobbers; host FS/GS restored by the vmload above.
 
             // ── EXIT: spill 14 guest GPRs to stack ────────────────
             "push rbx",
@@ -327,12 +362,12 @@ fn run_guest_once(
             "push r13",
             "push r14",
             "push r15",
-            // Stack now: r15, r14, ..., rbx, struct_ptr,
+            // Stack now: r15..rbx (14), host_extra, vmcb, struct_ptr,
             //             host_callee_saved (6).
-            // struct_ptr is at [rsp + 14*8 = 112].
+            // struct_ptr is at [rsp + 14*8 + 16 = 128].
 
-            // Recover struct ptr (rax = vmcb_phys, free to clobber).
-            "mov rax, [rsp + 112]",
+            // Recover struct ptr (rax free to clobber).
+            "mov rax, [rsp + 128]",
 
             // Pop in reverse-push order, store at the right offset.
             "pop rcx", "mov [rax + 104], rcx",      // r15
@@ -349,7 +384,7 @@ fn run_guest_once(
             "pop rcx", "mov [rax +  16], rcx",      // rdx
             "pop rcx", "mov [rax +   8], rcx",      // rcx
             "pop rcx", "mov [rax +   0], rcx",      // rbx
-            "add rsp, 8",                           // discard struct ptr
+            "add rsp, 24",                          // discard host, vmcb, struct
 
             // Restore host callee-saved.
             "pop r15",
@@ -361,6 +396,7 @@ fn run_guest_once(
 
             in("rdi") regs_ptr,
             in("rsi") vmcb_phys,
+            in("rdx") host_extra,
             clobber_abi("C"),
         );
     }
