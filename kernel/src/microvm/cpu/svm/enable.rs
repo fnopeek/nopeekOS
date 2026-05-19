@@ -1220,6 +1220,18 @@ impl VmContext {
     }
 }
 
+/// Guest is interruptible iff RFLAGS.IF=1 and it is not inside an
+/// STI / MOV-SS interrupt shadow. EVENTINJ bypasses these CPU
+/// checks, so force-injecting a maskable IRQ when this is false
+/// delivers the handler inside a guest-kernel critical section /
+/// syscall entry-exit → corrupt return (the rt_sigprocmask `<ret>`
+/// crash). Mirrors KVM gating maskable-IRQ injection (APM §15.21).
+fn guest_interruptible(vmcb: &vmcb::Vmcb) -> bool {
+    let rflags = vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS);
+    let shadow = vmcb.read_u64(vmcb::OFF_INT_STATE) & 1;
+    rflags & (1u64 << 9) != 0 && shadow == 0
+}
+
 /// Advance guest RIP across an *intercept* exit (CPUID / IOIO / MSR /
 /// HLT etc.) via NRIP_SAVE. Requires CPUID 8000_000A EDX[3].
 ///
@@ -1385,7 +1397,7 @@ fn handle_mmio_npf_blk(
 
     if let Some(qidx) = blk.take_pending_kick() {
         let advanced = blk.service_queues(qidx, mem);
-        if advanced {
+        if advanced && guest_interruptible(vmcb) {
             let vector = pic.vector_for_irq(blk.irq_line());
             // VMCB.EVENT_INJ — vector | type<<8 | valid<<31. Type 0 =
             // external interrupt. APM Vol 2 §15.20.
@@ -1499,7 +1511,7 @@ fn handle_mmio_npf_net(
 
     if let Some(qidx) = net.take_pending_kick() {
         let advanced = net.service_queues(qidx, mem);
-        if advanced {
+        if advanced && guest_interruptible(vmcb) {
             let vector = pic.vector_for_irq(10);
             let info: u64 = (vector as u64) | (1u64 << 31);
             vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
@@ -1553,7 +1565,7 @@ fn handle_mmio_npf_gpu(
 
     if let Some(qidx) = gpu.take_pending_kick() {
         let advanced = gpu.service_queues(qidx, mem);
-        if advanced {
+        if advanced && guest_interruptible(vmcb) {
             // virtio-gpu IRQ line = 9.
             let vector = pic.vector_for_irq(9);
             let info: u64 = (vector as u64) | (1u64 << 31);
@@ -1609,7 +1621,7 @@ fn handle_mmio_npf_input(
 
     if let Some(qidx) = input.take_pending_kick() {
         let advanced = input.service_queues(qidx, mem);
-        if advanced {
+        if advanced && guest_interruptible(vmcb) {
             // virtio-input IRQ line = 12.
             let vector = pic.vector_for_irq(12);
             let info: u64 = (vector as u64) | (1u64 << 31);
