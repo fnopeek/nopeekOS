@@ -343,9 +343,9 @@ fn run_guest_once(
             "vmload rax",                   // load guest FS/GS/KernelGS/STAR/LSTAR/SFMASK/SYSENTER
             "vmrun rax",
             "vmsave rax",                   // save guest's back into the guest VMCB
-            "stgi",
             "mov rax, [rsp + 0]",           // host_extra_save phys
-            "vmload rax",                   // restore host FS/GS/...
+            "vmload rax",                   // restore host FS/GS/... while GIF=0 (atomic vs IRQs)
+            "stgi",                         // only NOW open the IRQ window — host state already correct
             // After VMEXIT: rsp restored by CPU, all GPRs hold guest
             // clobbers; host FS/GS restored by the vmload above.
 
