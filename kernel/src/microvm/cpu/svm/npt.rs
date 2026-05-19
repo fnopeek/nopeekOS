@@ -33,12 +33,6 @@
 
 use crate::mm::memory;
 
-/// [B3-DIAG] count of 4-KB demand pages faulted in this boot. Used to
-/// throttle the trace and to size-check OOM. Diagnostic only — removed
-/// once the demand-corruption root cause is confirmed.
-static DEMAND_FRAMES: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-
 /// Slack frames `boot_frames_for` adds so `allocate_contiguous` can be
 /// rounded up to a 2 MB boundary. Mirrors `ept`.
 const GUEST_RAM_ALIGN_SLACK: usize = 511;
@@ -228,30 +222,10 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
         if pte & NPT_P != 0 {
             return Some(pte & NPT_ADDR_MASK); // already faulted in
         }
-        let frame = match memory::allocate_frame() {
-            Some(f) => f,
-            None => {
-                // [B3-DIAG] smoking gun: a demand page could not be
-                // backed → page_host None → read/write_bytes silently
-                // drops the DMA → guest RAM corruption. Un-throttled.
-                crate::kprintln!(
-                    "[B3-DIAG] demand_fault_in OOM gpa={:#x} (total faulted={})",
-                    gpa,
-                    DEMAND_FRAMES.load(core::sync::atomic::Ordering::Relaxed),
-                );
-                return None;
-            }
-        };
+        let frame = memory::allocate_frame()?;
         core::ptr::write_bytes(frame as *mut u8, 0, 4096);
         pt.add(pt_idx)
             .write_volatile(frame | NPT_P | NPT_RW | NPT_US);
-        let n = DEMAND_FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 8 || n % 4096 == 0 {
-            crate::kprintln!(
-                "[B3-DIAG] demand fault #{} gpa={:#x} -> frame={:#x}",
-                n, gpa, frame,
-            );
-        }
         Some(frame)
     }
 }

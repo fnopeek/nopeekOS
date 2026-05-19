@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.172.28"
+version = "0.172.29"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS – AI-native Operating System Kernel"
