@@ -584,7 +584,7 @@ impl VmContext {
             reinject: 0,
             host_fpu: crate::microvm::cpu::FpuArea::boxed(),
             guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
-            guest_xcr0: crate::microvm::cpu::host_xcr0(),
+            guest_xcr0: crate::microvm::cpu::XCR0_RESET,
         })
     }
 

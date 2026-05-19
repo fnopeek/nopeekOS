@@ -96,13 +96,14 @@ unsafe fn xrstor_mask(area: *const FpuArea, mask: u64) {
     }
 }
 
-/// Live XCR0 — VmContext seeds `guest_xcr0` with this so the guest's
-/// first entry restores against the host (= CPUID-visible) feature set
-/// before it has run its own XSETBV.
-pub(crate) fn host_xcr0() -> u64 {
-    // SAFETY: see xcr0_read.
-    unsafe { xcr0_read() }
-}
+/// Architectural XCR0 reset value (x87 only; bit 0 is hardwired 1).
+/// VmContext seeds `guest_xcr0` with this — exactly KVM
+/// (`vcpu->arch.xcr0 = XFEATURE_MASK_FP` at reset). The guest's Linux
+/// then sets its own XCR0 via XSETBV to match its (CPUID-masked)
+/// feature set; we capture that post-exit. Seeding with the *host*
+/// XCR0 instead force-enables a feature set inconsistent with the
+/// guest's masked CPUID 0xD → fpu__init_system_xstate panic.
+pub(crate) const XCR0_RESET: u64 = 1;
 
 /// Enter-guest FPU swap (KVM `kvm_load_guest_fpu` + `kvm_load_guest_xcr0`):
 /// save the host FPU under the host XCR0, switch XCR0 to the guest's,
