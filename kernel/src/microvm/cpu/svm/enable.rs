@@ -415,8 +415,12 @@ pub struct VmContext {
     vmcb: alloc::boxed::Box<vmcb::Vmcb>,
     vmcb_phys: u64,
     guest_mem: GuestMem,
-    /// Base of the guest-RAM contiguous allocation (pre-2 MB-align),
-    /// + the IOPM/MSRPM frame allocations — all freed in close().
+    /// NPT PML4 (= NCR3) phys — `close()` passes it to `npt::release`
+    /// to free demand-faulted frames + demand PTs + NPT tables.
+    npt_pml4: u64,
+    /// Base of the **contiguous boot-window** allocation (pre-2 MB-
+    /// align), + the IOPM/MSRPM frames — all freed in close(). The
+    /// demand region is freed via `npt::release`.
     guest_raw_base: u64,
     iopm_phys: u64,
     msrpm_phys: u64,
@@ -457,8 +461,14 @@ impl VmContext {
         setup_host_save()?;
 
         let guest_bytes = crate::microvm::cpu::choose_guest_ram_bytes();
-        let (host_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt(guest_bytes)?;
-        let gm = GuestMem::new(host_base, guest_bytes);
+        let (boot_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt(guest_bytes)?;
+        let gm = GuestMem::new(
+            boot_base,
+            npt::boot_window_bytes(guest_bytes),
+            guest_bytes,
+            npt_root,
+            crate::microvm::devices::guest_mem::SecondLevel::Npt,
+        );
         let load = bzimage::load_into_guest_ram(&gm, bzimage_bytes, cmdline, initramfs)?;
 
         // IOPM: 12 KB all-ones = trap every port. Linux touches dozens
@@ -502,6 +512,7 @@ impl VmContext {
             vmcb,
             vmcb_phys,
             guest_mem: gm,
+            npt_pml4: npt_root,
             guest_raw_base,
             iopm_phys,
             msrpm_phys,
@@ -524,14 +535,15 @@ impl VmContext {
     /// stays on for the life of the kernel by design (no analogue to
     /// VMXOFF).
     ///
-    /// TODO(12.x): the NPT page-table frames from
-    /// `npt::allocate_window_npt` still leak (~tens of KB per run —
-    /// negligible vs. the guest RAM this reclaims). Tracked; needs an
-    /// NPT teardown walker.
+    /// B3: `npt::release` now walks + frees the demand frames, demand
+    /// PTs, and NPT tables (no longer leaked).
     pub fn close(&mut self) {
+        // Demand-faulted frames + demand PTs + NPT tables.
+        npt::release(self.npt_pml4, self.guest_mem.len());
+        // Contiguous boot window.
         memory::deallocate_contiguous(
             self.guest_raw_base,
-            npt::total_frames_for(self.guest_mem.len()),
+            npt::boot_frames_for(self.guest_mem.len()),
         );
         memory::deallocate_contiguous(self.iopm_phys, 3);
         memory::deallocate_contiguous(self.msrpm_phys, 2);
@@ -558,19 +570,15 @@ pub fn run_linux(
     result
 }
 
-/// Allocate 256 MB contiguous + slack for 2 MB alignment, install the
-/// non-identity NPT window. Returns (host_base, NCR3).
-/// Allocate `guest_bytes` of contiguous guest RAM (+ 2-MB-align
-/// slack) and install the NPT window over it. `close()` frees exactly
-/// `npt::total_frames_for(guest_bytes)` from `raw_base` — without it
-/// the guest RAM leaks and a second `microvm linux` in the same boot
-/// OOMs.
+/// B3: allocate only the **contiguous boot window** (256 MiB or the
+/// whole guest if smaller); `[boot, guest_bytes)` is demand-paged
+/// 4 KB. Returns `(boot_base, npt_root=ncr3=pml4, boot_raw_base)`.
 fn alloc_guest_ram_and_npt(guest_bytes: u64) -> Result<(u64, u64, u64), &'static str> {
-    let raw_base = memory::allocate_contiguous(npt::total_frames_for(guest_bytes))
-        .ok_or("OOM allocating guest RAM (+ slack)")?;
-    let host_base = npt::round_up_to_2mb(raw_base);
-    let npt_root = npt::allocate_window_npt(host_base, guest_bytes)?;
-    Ok((host_base, npt_root, raw_base))
+    let raw_base = memory::allocate_contiguous(npt::boot_frames_for(guest_bytes))
+        .ok_or("OOM allocating guest boot window (+ slack)")?;
+    let boot_base = npt::round_up_to_2mb(raw_base);
+    let npt_root = npt::allocate_window_npt(boot_base, guest_bytes)?;
+    Ok((boot_base, npt_root, raw_base))
 }
 
 /// Configure a VMCB for Linux 32-bit boot protocol entry.
@@ -1058,6 +1066,15 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
+                }
+                // B3: demand-paged guest RAM. #NPF on a gpa inside the
+                // advertised window but above the contiguous boot
+                // block = first touch of a 4-KB demand page → fault it
+                // in + re-enter. Order: MMIO BAR ranges first (above),
+                // RAM-demand here, fatal dump last.
+                if self.guest_mem.ensure(gpa) {
+                    last_outcome = Some(outcome);
+                    continue;
                 }
                 self.serial.flush();
                 kprintln!(
