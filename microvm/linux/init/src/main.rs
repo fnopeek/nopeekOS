@@ -210,8 +210,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1 \
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
-                 MOZ_LOG='timestamp,sync,Init:5,Widget:5,WidgetWayland:5,WebRender:5,Compositor:5,Gfx:5' \
-                 MOZ_LOG_FILE=/tmp/moz/log; \
+                 MOZ_LOG='timestamp,sync,Init:5,Widget:5,WidgetWayland:5,IPC:5,Process:5,SubprocessLauncher:5,SandboxBroker:5,nsThread:5,WebRender:5,Compositor:5,Gfx:5' \
+                 MOZ_LOG_FILE=/tmp/moz/log \
+                 MOZ_GLXTEST_LOG=/tmp/moz/glxtest.log; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
                  echo '[wl] librewolf --version smoke (isolates loader/musl vs GUI):'; \
@@ -220,9 +221,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo '[wl] launching cage -- librewolf (single-proc profile) https://example.com'; \
                  cage -- librewolf --no-remote --profile /tmp/moz https://example.com; \
                  echo \"[wl] cage exited rc=$? (seatd: $(tail -n 5 /tmp/seatd.log 2>&1))\"; \
-                 for f in /tmp/moz/log*; do [ -e \"$f\" ] \
-                   && { echo \"[wl] === MOZ_LOG $f (tail 120) ===\"; \
-                        tail -n 120 \"$f\"; echo '[wl] === end MOZ_LOG ==='; }; \
+                 for f in /tmp/moz/glxtest.log /tmp/moz/log*; do [ -e \"$f\" ] \
+                   && { echo \"[wl] === $f (tail 160) ===\"; \
+                        tail -n 160 \"$f\"; echo \"[wl] === end $f ===\"; }; \
                  done; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
