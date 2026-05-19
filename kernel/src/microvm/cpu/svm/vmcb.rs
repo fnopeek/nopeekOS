@@ -41,9 +41,6 @@ pub const OFF_MSRPM_BASE_PA: usize = 0x048;
 pub const OFF_ASID: usize = 0x058;
 pub const OFF_TLB_CTL: usize = 0x05C;
 #[allow(dead_code)] pub const OFF_INT_CTL: usize = 0x060;
-/// Guest interrupt state. Bit 0 = INTERRUPT_SHADOW (guest is in an
-/// STI/MOV-SS shadow → not interruptible). APM Vol 2 §15.21.
-pub const OFF_INT_STATE: usize = 0x068;
 pub const OFF_EXIT_CODE: usize = 0x070;
 pub const OFF_EXIT_INFO_1: usize = 0x078;
 #[allow(dead_code)] pub const OFF_EXIT_INFO_2: usize = 0x080;

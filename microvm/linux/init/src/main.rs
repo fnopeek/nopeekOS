@@ -212,6 +212,11 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
+                 cp -r /tmp/moz /tmp/mozhl 2>/dev/null; \
+                 echo '[wl] HEADLESS bisection: librewolf --headless (no cage/Wayland/SWGL)'; \
+                 timeout 30 librewolf --headless --no-remote --profile /tmp/mozhl \
+                   --screenshot /tmp/shot.png https://example.com >/dev/kmsg 2>&1; \
+                 echo \"[wl] headless rc=$? shot=$(wc -c < /tmp/shot.png 2>/dev/null || echo none)\"; \
                  echo '[wl] launching cage -- librewolf https://example.com'; \
                  cage -- librewolf --no-remote --profile /tmp/moz https://example.com; \
                  echo \"[wl] cage exited rc=$?\"; \
