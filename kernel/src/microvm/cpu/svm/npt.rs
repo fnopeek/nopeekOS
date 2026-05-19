@@ -69,7 +69,12 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
 
 /// Contiguous boot window size for `guest_bytes`; mirrors `ept`.
 pub fn boot_window_bytes(guest_bytes: u64) -> u64 {
-    guest_bytes.min(BOOT_WINDOW_BYTES)
+    if crate::microvm::devices::guest_mem::DEMAND_ENABLED {
+        guest_bytes.min(BOOT_WINDOW_BYTES)
+    } else {
+        // Demand off → whole guest contiguous: exactly B2/A2.
+        guest_bytes
+    }
 }
 
 /// 4 KB host frames to allocate **contiguously** for the boot window
