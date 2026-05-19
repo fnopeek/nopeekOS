@@ -154,9 +154,9 @@ fn launch_wayland(kmsg_fd: i64) {
                    && echo \"[wl] clock set from host: $(date -u)\" \
                    || echo '[wl] WARN: date -s failed'; \
                  else echo '[wl] WARN: no nopeektime= on cmdline (TLS will fail)'; fi; \
-                 echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null \
-                   && echo '[wl] print-fatal-signals=1 (crash module will be named)' \
-                   || echo '[wl] WARN: could not enable print-fatal-signals'; \
+                 echo 0 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
+                 echo 1 > /proc/sys/kernel/printk 2>/dev/null; \
+                 echo '[wl] print-fatal-signals=0, printk=1 (serial flood was the wedge)'; \
                  (hostname nopeek 2>/dev/null \
                    || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null) \
                    && echo '[wl] hostname=nopeek (silences (none) self-lookup)' \
