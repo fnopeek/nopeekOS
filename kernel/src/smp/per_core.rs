@@ -415,16 +415,21 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
 
     loop {
         // Carved out of the work-stealing pool for the microvm
-        // (substrate rework A1). A1 just parks here (efficient idle)
-        // so the carve-out + per-core stats can be validated with no
-        // behaviour change elsewhere; A2 replaces this body with the
-        // guest VMRESUME/VMRUN loop. Default sentinel never matches a
-        // real cid, so ≤2-core / no-AP hosts keep the exact old loop.
+        // (substrate rework A2). `vm_core_serve` opens the guest ON
+        // THIS CORE when a launch is pending and runs it continuously
+        // to exit (blocking the core for the guest's whole lifetime —
+        // that is the point: it no longer fights Shade + the shell for
+        // Core 0). Cheap no-op when nothing is pending → we idle on
+        // the 100 Hz timer and re-check within ~10 ms. Default
+        // sentinel never matches a real cid, so ≤2-core / no-AP hosts
+        // keep the exact old work-stealing loop.
         if DEDICATED_VM_CORE.load(Ordering::Acquire) == cid as u32 {
+            CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
+            crate::microvm::vm_core_serve();
             CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             update_core_freq(cid);
-            // Wake on any IRQ, then re-check the flag (so A2's
-            // takeover / a future un-dedicate is observed promptly).
+            // SAFETY: ring-0 idle; the 100 Hz timer IRQ (≥) wakes us
+            // to re-check for a pending launch.
             unsafe { core::arch::asm!("sti; hlt; cli"); }
             continue;
         }
