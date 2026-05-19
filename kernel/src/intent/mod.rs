@@ -1744,31 +1744,46 @@ fn microvm_linux(inject: &[u8]) {
     // virtio-blk-pci device at slot 1. BAR MMIO + IRQ delivery come
     // in 12.2.2 — for now Linux probes, finds the device, can't talk
     // to its BAR yet, and shelves it.
-    // `tsc_early_khz=2000000` skips Linux's PIT-based TSC calibration,
-    // which deadlocks on the AMD-V backend (host CPUID 0x15 absent
-    // on AMD → Linux falls back to PIT calibration → our PIT IO
-    // emulation returns 0 → Linux loops forever waiting for ticks).
-    // Harmless on Intel: there CPUID 0x15 advertises the freq and
-    // Linux uses it directly, ignoring the cmdline hint.
+    // `tsc_early_khz=<host TSC kHz>` skips Linux's PIT-based TSC
+    // calibration, which deadlocks on the AMD-V backend (host CPUID
+    // 0x15 absent on AMD → Linux falls back to PIT calibration → our
+    // PIT IO emulation returns 0 → Linux loops forever waiting for
+    // ticks). Harmless on Intel: there CPUID 0x15 advertises the freq
+    // and Linux uses it directly, ignoring the cmdline hint.
+    // It MUST be the REAL host TSC frequency, not a hardcoded 2 GHz:
+    // the guest's TSC is the pass-through host TSC (~4.7 GHz on the
+    // 9600X). With a wrong (too-low) hint Linux computes elapsed
+    // time = cycles / freq with too-small freq → the guest clock
+    // (clocksource=tsc, sched_clock, hrtimers, clock_gettime) runs
+    // ~2.3× too fast while jiffies (IRQ0) stays real-time. Benign
+    // for a slow/short cooperative guest; FATAL on the dedicated
+    // core where the guest runs continuously near-native — the
+    // TSC↔jiffies skew accumulates fast and breaks librewolf's
+    // pthread/futex/cond-timedwait startup → deterministic crash in
+    // musl __restore_sigs at ~6 s. `tsc_freq()` is the real
+    // calibrated value (its 2 GHz default is itself a safe fallback).
     // The guest has no RTC — its clock boots at the year 2000. Every
     // HTTPS site's cert is then "not yet valid" → Firefox shows "your
     // computer clock is wrong" and the load fails/crashes. Pass the
     // host's real wall-clock epoch on the cmdline; PID-1's
     // launch_wayland reads `nopeektime=` from /proc/cmdline and
     // `date -s @<epoch>` before cage so TLS cert validation passes.
-    let mut cmdline: alloc::vec::Vec<u8> =
-        b"earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr \
-          nolapic noapic acpi=off tsc=reliable tsc_early_khz=2000000 \
-          devtmpfs.mount=1"
-            .to_vec();
+    use core::fmt::Write;
+    let tsc_khz = crate::interrupts::tsc_freq() / 1000;
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
+panic=1 nokaslr nolapic noapic acpi=off tsc=reliable \
+tsc_early_khz={} devtmpfs.mount=1",
+        tsc_khz,
+    );
     if let Some(epoch) =
         crate::rtc::read_unix_time().or_else(crate::net::ntp::unix_time)
     {
-        use core::fmt::Write;
-        let mut s = String::new();
         let _ = write!(s, " nopeektime={}", epoch);
-        cmdline.extend_from_slice(s.as_bytes());
     }
+    let cmdline: alloc::vec::Vec<u8> = s.into_bytes();
     let cmdline: &[u8] = &cmdline;
 
     kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
