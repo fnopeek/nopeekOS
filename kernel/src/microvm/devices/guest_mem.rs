@@ -123,6 +123,92 @@ impl GuestMem {
         self.page_host(gpa & !0xFFF).is_some()
     }
 
+    /// [B3-DIAG] Host-side demand-path self-test. Runs in `vm_open`
+    /// before the guest executes — exercises exactly the scatter
+    /// cases devices hit (single demand page, multi-page demand
+    /// straddle, boot↔demand boundary straddle, near-top, unaligned
+    /// `read_u32`/`write_u32` across both boundaries) entirely
+    /// host-side, independent of KVM/guest. PASS ⇒ our demand
+    /// read/write/mapping is provably correct (the cage crash is then
+    /// the parked Heisenbug, not B3). FAIL ⇒ concrete scatter bug at
+    /// the logged gpa. Restores tested bytes to 0 after. Diagnostic
+    /// only — removed once B3 root cause is settled.
+    pub fn selftest(&self) {
+        if !DEMAND_ENABLED || self.len <= self.boot_bytes {
+            crate::kprintln!("[B3-DIAG] selftest SKIP (demand off / no demand region)");
+            return;
+        }
+        let pat = |g: u64| -> u8 { (((g >> 5) ^ g ^ 0xA5) & 0xFF) as u8 };
+        let mut fails: u32 = 0;
+        let bb = self.boot_bytes;
+        let top = self.len;
+
+        // (gpa, len) cases. Sizes kept modest; spans cross pages and
+        // the boot/demand boundary on purpose.
+        let cases: [(u64, usize); 5] = [
+            (bb + 0x1000, 0x1000),          // 1: single demand page
+            (bb + 0x800, 0x2800),           // 2: 4 demand pages, unaligned
+            (bb - 0x400, 0x800),            // 3: boot↔demand straddle
+            (top - 0x1000, 0x1000),         // 4: top-of-RAM page
+            (bb + 0x1FF000 + 0x800, 0x1000),// 5: across a 2-MB demand-PT boundary
+        ];
+        for (ci, &(gpa, len)) in cases.iter().enumerate() {
+            if gpa.checked_add(len as u64).map_or(true, |e| e > top) {
+                continue;
+            }
+            let mut buf = alloc::vec![0u8; len];
+            for (i, b) in buf.iter_mut().enumerate() { *b = pat(gpa + i as u64); }
+            let w = self.write_bytes(gpa, &buf);
+            for b in buf.iter_mut() { *b = 0; }
+            let r = self.read_bytes(gpa, &mut buf);
+            let mut bad = !w || !r;
+            let mut first_bad = 0u64;
+            if w && r {
+                for (i, b) in buf.iter().enumerate() {
+                    if *b != pat(gpa + i as u64) {
+                        bad = true;
+                        first_bad = gpa + i as u64;
+                        break;
+                    }
+                }
+            }
+            if bad {
+                fails += 1;
+                crate::kprintln!(
+                    "[B3-DIAG] selftest case {} FAIL gpa={:#x} len={:#x} w={} r={} first_bad={:#x}",
+                    ci + 1, gpa, len, w, r, first_bad,
+                );
+            }
+            // Restore to 0 (fresh-demand semantics; Linux owns these
+            // as plain RAM).
+            for b in buf.iter_mut() { *b = 0; }
+            self.write_bytes(gpa, &buf);
+        }
+
+        // Unaligned u32 across a demand page boundary and across the
+        // boot↔demand boundary.
+        for &g in &[bb + 0xFFE, bb - 2] {
+            if g + 4 > top { continue; }
+            let v = 0xDEAD_BEEFu32;
+            let wok = self.write_u32(g, v);
+            let rv = self.read_u32(g);
+            if !wok || rv != Some(v) {
+                fails += 1;
+                crate::kprintln!(
+                    "[B3-DIAG] selftest u32 FAIL gpa={:#x} w={} got={:?} want={:#x}",
+                    g, wok, rv, v,
+                );
+            }
+            self.write_u32(g, 0);
+        }
+
+        if fails == 0 {
+            crate::kprintln!("[B3-DIAG] selftest PASS (demand path host-side correct)");
+        } else {
+            crate::kprintln!("[B3-DIAG] selftest {} FAILURE(S) — concrete scatter bug", fails);
+        }
+    }
+
     /// Fast path: host addr of `[gpa, gpa+n)` iff it lies wholly in
     /// the physically-contiguous boot window (one span, no per-page
     /// walk). The common case for early boot + low virtqueue rings.
