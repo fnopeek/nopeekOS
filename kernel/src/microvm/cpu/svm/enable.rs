@@ -469,7 +469,6 @@ impl VmContext {
             npt_root,
             crate::microvm::devices::guest_mem::SecondLevel::Npt,
         );
-        gm.selftest(); // [B3-DIAG] host-side demand path, before guest runs
         let load = bzimage::load_into_guest_ram(&gm, bzimage_bytes, cmdline, initramfs)?;
 
         // IOPM: 12 KB all-ones = trap every port. Linux touches dozens
