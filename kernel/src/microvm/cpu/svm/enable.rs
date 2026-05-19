@@ -494,9 +494,6 @@ pub struct VmContext {
     /// See `cpu::FpuArea`. guest_fpu starts zeroed = FPU init state.
     host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
     guest_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
-    /// Guest XCR0, tracked across exits (the guest's own XSETBV is not
-    /// intercepted; we observe it post-exit). Seeded with host XCR0.
-    guest_xcr0: u64,
 }
 
 impl VmContext {
@@ -584,7 +581,6 @@ impl VmContext {
             reinject: 0,
             host_fpu: crate::microvm::cpu::FpuArea::boxed(),
             guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
-            guest_xcr0: crate::microvm::cpu::XCR0_RESET,
         })
     }
 
@@ -878,21 +874,20 @@ impl VmContext {
             self.reinject = 0;
         }
 
-        // FPU/XCR0 swap (KVM kvm_load/put_guest_fpu+xcr0): vmrun saves
-        // neither. No host FP use may occur between the swap-in and
-        // VMRUN or VMRUN and swap-out — keep adjacent (integer/pointer
-        // only; helpers are #[inline(never)]).
+        // FPU swap (KVM kvm_load/put_guest_fpu): vmrun preserves no
+        // x87/SSE/AVX/AVX-512. Keep the swap adjacent to the VMRUN
+        // (integer/pointer code only; helpers #[inline(never)]).
         // SAFETY: CR4.OSXSAVE=1 on every core; areas valid + aligned.
-        let host_xcr0 = unsafe {
-            crate::microvm::cpu::fpu_swap_to_guest(
-                &mut *self.host_fpu, &*self.guest_fpu, self.guest_xcr0)
-        };
+        unsafe {
+            crate::microvm::cpu::fpu_xsave(&mut *self.host_fpu);
+            crate::microvm::cpu::fpu_xrstor(&*self.guest_fpu);
+        }
         let outcome = run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys);
-        // SAFETY: as above; persist any guest XSETBV for next entry.
-        self.guest_xcr0 = unsafe {
-            crate::microvm::cpu::fpu_swap_to_host(
-                &*self.host_fpu, &mut *self.guest_fpu, host_xcr0)
-        };
+        // SAFETY: as above; save guest FPU, restore host's.
+        unsafe {
+            crate::microvm::cpu::fpu_xsave(&mut *self.guest_fpu);
+            crate::microvm::cpu::fpu_xrstor(&*self.host_fpu);
+        }
         let exit = outcome.exit_reason;
 
         // Consume the injection slot. Proven by the v0.172.41 probe:

@@ -55,90 +55,40 @@ impl FpuArea {
     }
 }
 
-/// Read XCR0 (XGETBV ecx=0). SAFETY: CR4.OSXSAVE=1 on every core
-/// (trampoline.s — blake3 AVX2 runs AP-side).
-#[inline(always)]
-unsafe fn xcr0_read() -> u64 {
-    let (eax, edx): (u32, u32);
-    unsafe {
-        core::arch::asm!("xgetbv", in("ecx") 0u32,
-            out("eax") eax, out("edx") edx, options(nomem, nostack));
-    }
-    (edx as u64) << 32 | eax as u64
-}
+// We do NOT touch the XCR0 register. XSETBV is not intercepted, so the
+// guest's Linux owns XCR0 exactly as it did before this swap existed
+// (it boots fine that way — managing XCR0 ourselves only ever caused
+// regressions: a forced host-mask vs the guest's CPUID-0xD-masked set
+// → fpu__init_system_xstate panic; a forced reset-mask while our
+// +avx2-built host code runs → #UD on `vmovups ymm` → KVM emulation
+// failure). Mask = -1: xsave64/xrstor64 then operate on every
+// component enabled in the *current* XCR0. Guest XCR0 ⊇ host XCR0
+// (guest Linux enables ≥ x87+SSE+AVX = our host's set; any extra
+// AVX-512 bits it adds are still covered by -1), so host save/restore
+// under the guest's XCR0 preserves the host's subset, and guest
+// save/restore under it covers all guest state.
 
-/// Write XCR0 (XSETBV ecx=0). `v` must be a CPUID-legal mask (the
-/// host's, or one the guest already validated via its own XSETBV).
-#[inline(always)]
-unsafe fn xcr0_write(v: u64) {
-    unsafe {
-        core::arch::asm!("xsetbv",
-            in("ecx") 0u32, in("eax") v as u32, in("edx") (v >> 32) as u32,
-            options(nomem, nostack));
-    }
-}
-
-#[inline(always)]
-unsafe fn xsave_mask(area: *mut FpuArea, mask: u64) {
+/// `xsave64 [area]`, all XCR0-enabled components (EDX:EAX = -1).
+#[inline(never)]
+pub(crate) unsafe fn fpu_xsave(area: *mut FpuArea) {
+    // SAFETY: CR4.OSXSAVE=1 on every core (trampoline.s — blake3 AVX2
+    // runs AP-side); area is valid + 64-aligned.
     unsafe {
         core::arch::asm!("xsave64 [{p}]", p = in(reg) area,
-            in("eax") mask as u32, in("edx") (mask >> 32) as u32,
+            in("eax") 0xffff_ffffu32, in("edx") 0xffff_ffffu32,
             options(nostack));
     }
 }
 
-#[inline(always)]
-unsafe fn xrstor_mask(area: *const FpuArea, mask: u64) {
+/// `xrstor64 [area]`, all XCR0-enabled components. Zeroed area =
+/// XSTATE_BV/XCOMP_BV 0 → architectural FPU init state (fresh guest).
+#[inline(never)]
+pub(crate) unsafe fn fpu_xrstor(area: *const FpuArea) {
+    // SAFETY: see fpu_xsave; area is a valid XSAVE image or zeroed.
     unsafe {
         core::arch::asm!("xrstor64 [{p}]", p = in(reg) area,
-            in("eax") mask as u32, in("edx") (mask >> 32) as u32,
+            in("eax") 0xffff_ffffu32, in("edx") 0xffff_ffffu32,
             options(nostack, readonly));
-    }
-}
-
-/// Architectural XCR0 reset value (x87 only; bit 0 is hardwired 1).
-/// VmContext seeds `guest_xcr0` with this — exactly KVM
-/// (`vcpu->arch.xcr0 = XFEATURE_MASK_FP` at reset). The guest's Linux
-/// then sets its own XCR0 via XSETBV to match its (CPUID-masked)
-/// feature set; we capture that post-exit. Seeding with the *host*
-/// XCR0 instead force-enables a feature set inconsistent with the
-/// guest's masked CPUID 0xD → fpu__init_system_xstate panic.
-pub(crate) const XCR0_RESET: u64 = 1;
-
-/// Enter-guest FPU swap (KVM `kvm_load_guest_fpu` + `kvm_load_guest_xcr0`):
-/// save the host FPU under the host XCR0, switch XCR0 to the guest's,
-/// restore the guest FPU. Returns the host XCR0 to hand to the paired
-/// exit swap. No host FP use may occur until `fpu_swap_to_host`.
-#[inline(never)]
-pub(crate) unsafe fn fpu_swap_to_guest(
-    host: *mut FpuArea, guest: *const FpuArea, guest_xcr0: u64,
-) -> u64 {
-    // SAFETY: OSXSAVE=1; areas valid + 64-aligned; guest_xcr0 is the
-    // host mask (seed) or a value the guest's own XSETBV accepted.
-    unsafe {
-        let host_xcr0 = xcr0_read();
-        xsave_mask(host, host_xcr0);
-        if guest_xcr0 != host_xcr0 { xcr0_write(guest_xcr0); }
-        xrstor_mask(guest, guest_xcr0);
-        host_xcr0
-    }
-}
-
-/// Exit-guest FPU swap (KVM `kvm_put_guest_fpu` + `kvm_put_guest_xcr0`):
-/// re-read XCR0 (the guest may have changed it via a non-intercepted
-/// XSETBV), save the guest FPU under *that*, restore host XCR0 + FPU.
-/// Returns the guest's current XCR0 to persist for its next entry.
-#[inline(never)]
-pub(crate) unsafe fn fpu_swap_to_host(
-    host: *const FpuArea, guest: *mut FpuArea, host_xcr0: u64,
-) -> u64 {
-    // SAFETY: see fpu_swap_to_guest.
-    unsafe {
-        let guest_xcr0 = xcr0_read();
-        xsave_mask(guest, guest_xcr0);
-        if guest_xcr0 != host_xcr0 { xcr0_write(host_xcr0); }
-        xrstor_mask(host, host_xcr0);
-        guest_xcr0
     }
 }
 
