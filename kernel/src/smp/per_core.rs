@@ -149,6 +149,57 @@ pub fn start_scheduler() {
     SCHEDULER_READY.store(true, Ordering::Release);
 }
 
+// ── Dedicated microvm core (substrate rework A1) ───────────────────
+
+/// Sentinel: no core is dedicated → microvm stays cooperatively
+/// time-sliced on Core 0 (the validated path on ≤2-core hosts).
+pub const NO_DEDICATED_CORE: u32 = u32::MAX;
+
+/// Worker core exclusively reserved for the microvm. It is carved out
+/// of the work-stealing pool: it never calls `next_task`, so no task
+/// is ever assigned to it (`spawn` only pushes to BSP's deque; nobody
+/// `spawn_local`s onto it) and the scheduler needs no other change.
+/// A1 just parks this core (proves the carve-out + stats); A2 runs the
+/// guest VMRESUME/VMRUN loop here so the guest no longer fights Shade
+/// + the shell for Core 0.
+pub static DEDICATED_VM_CORE: AtomicU32 = AtomicU32::new(NO_DEDICATED_CORE);
+
+/// Minimum logical cores (incl. BSP) before dedicating one to the
+/// microvm — below this, dedicating would starve the rest, so keep
+/// cooperative Core-0 slicing. TODO: make a `sys/config/
+/// microvm_dedicated_core` tunable (same pattern as the planned
+/// `hwp_epp` knob in `enable_hwp`).
+const MIN_CORES_FOR_DEDICATED: usize = 3;
+
+/// Decide the dedicated VM core from the live core count. Called once
+/// right after `scheduler::init` (so WORKER_COUNT is known). Picks the
+/// highest worker id (= `worker_count`, since worker ids are
+/// `1..=worker_count`) so the latency-sensitive low cores keep
+/// stealing; Core 0 stays the IRQ/compositor/intent core regardless.
+pub fn init_dedicated_vm_core(worker_count: usize) {
+    let total = worker_count + 1; // + BSP
+    if worker_count >= 1 && total >= MIN_CORES_FOR_DEDICATED {
+        DEDICATED_VM_CORE.store(worker_count as u32, Ordering::Release);
+        crate::kprintln!(
+            "[npk] smp: core {} dedicated to microvm ({} cores, carved out of work-stealing)",
+            worker_count, total
+        );
+    } else {
+        crate::kprintln!(
+            "[npk] smp: {} core(s) → microvm stays cooperative on Core 0",
+            total
+        );
+    }
+}
+
+/// The dedicated microvm core id, or `None` if cooperative Core-0.
+pub fn dedicated_vm_core() -> Option<usize> {
+    match DEDICATED_VM_CORE.load(Ordering::Acquire) {
+        NO_DEDICATED_CORE => None,
+        c => Some(c as usize),
+    }
+}
+
 /// Check if MONITOR/MWAIT is available
 pub fn has_mwait() -> bool {
     HAS_MWAIT.load(Ordering::Relaxed)
@@ -363,6 +414,21 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     let use_mwait = HAS_MWAIT.load(Ordering::Relaxed);
 
     loop {
+        // Carved out of the work-stealing pool for the microvm
+        // (substrate rework A1). A1 just parks here (efficient idle)
+        // so the carve-out + per-core stats can be validated with no
+        // behaviour change elsewhere; A2 replaces this body with the
+        // guest VMRESUME/VMRUN loop. Default sentinel never matches a
+        // real cid, so ≤2-core / no-AP hosts keep the exact old loop.
+        if DEDICATED_VM_CORE.load(Ordering::Acquire) == cid as u32 {
+            CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
+            update_core_freq(cid);
+            // Wake on any IRQ, then re-check the flag (so A2's
+            // takeover / a future un-dedicate is observed promptly).
+            unsafe { core::arch::asm!("sti; hlt; cli"); }
+            continue;
+        }
+
         // Try to get work (own deque first, then steal)
         if let Some(task) = super::scheduler::next_task(cid) {
             CORE_ACTIVE[cid].store(true, Ordering::Relaxed);

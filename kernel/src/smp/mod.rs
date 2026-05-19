@@ -94,6 +94,9 @@ pub fn init() {
     if online > 0 {
         // Initialize scheduler and wake APs into their work loops
         scheduler::init(online as usize);
+        // Decide the dedicated microvm core before APs enter their
+        // loops (carve-out observed on first iteration).
+        per_core::init_dedicated_vm_core(online as usize);
         per_core::start_scheduler();
 
         let wakeup = if per_core::has_mwait() { "MONITOR/MWAIT" } else { "HLT" };
