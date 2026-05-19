@@ -31,7 +31,7 @@
 //!   12.1.2    virtio-console backend                  ← next
 
 mod enable;
-mod ept;
+pub mod ept; // demand_fault_in / boot_window_bytes used by guest_mem (B3)
 mod probe;
 mod vmcs;
 

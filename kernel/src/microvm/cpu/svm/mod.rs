@@ -30,7 +30,7 @@
 //!   12.1.4-svm   inject_console echo round-trip
 
 mod enable;
-mod npt;
+pub mod npt; // demand_fault_in / boot_window_bytes used by guest_mem (B3)
 mod probe;
 mod vmcb;
 

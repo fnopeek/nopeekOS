@@ -30,21 +30,41 @@
 /// the default/cap.
 pub const GUEST_RAM_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Which second-level paging format backs the demand region, so
+/// `GuestMem` can fault a page in without pulling in `cpu::Vendor`.
+#[derive(Clone, Copy)]
+pub enum SecondLevel {
+    Ept,
+    Npt,
+}
+
 /// Translates guest-physical addresses to host memory for one VM.
 ///
-/// B1: `{ base, len }`, linear. B3: gains a scattered gpa→hpa map; the
-/// public accessor surface does not change. Not `Copy` — B3 makes it
-/// own per-VM mapping state, and a stale base must never be silently
-/// duplicated. Threaded as `&GuestMem` everywhere `host_base: u64`
-/// used to flow.
+/// B3 hybrid: `[0, boot_bytes)` is one contiguous host block
+/// (`boot_base`, 2-MB EPT/NPT leaves — fast, fault-free early boot);
+/// `[boot_bytes, len)` is demand-paged 4 KB on first touch. The
+/// page-table tree IS the gpa→host map — `page_host` walks/faults via
+/// `ept`/`npt::demand_fault_in`, so a host DMA to a page the guest
+/// hasn't touched yet still works (and a guest PT the insn-fetch
+/// walker reads simply faults in — no recursion: fault-in is a flat
+/// alloc+map). Not `Copy`. Threaded as `&GuestMem`.
 pub struct GuestMem {
-    base: u64,
+    boot_base: u64,
+    boot_bytes: u64,
     len: u64,
+    table_root: u64,
+    sl: SecondLevel,
 }
 
 impl GuestMem {
-    pub fn new(base: u64, len: u64) -> Self {
-        Self { base, len }
+    pub fn new(
+        boot_base: u64,
+        boot_bytes: u64,
+        len: u64,
+        table_root: u64,
+        sl: SecondLevel,
+    ) -> Self {
+        Self { boot_base, boot_bytes, len, table_root, sl }
     }
 
     /// Advertised guest RAM size in bytes.
@@ -53,100 +73,163 @@ impl GuestMem {
         self.len
     }
 
-    /// Raw contiguous window base. B1-only escape hatch for window
-    /// construction and the substrate self-tests, which write the
-    /// guest image before any VM-exit. B3 reworks those few callers;
-    /// no device/DMA path may use this.
+    /// Host phys of the 4 KB page containing `page` (must be
+    /// page-aligned). Boot window → linear; demand region → walk +
+    /// fault-in. `None` only if `page` is outside the window.
     #[inline]
-    pub fn base(&self) -> u64 {
-        self.base
+    fn page_host(&self, page: u64) -> Option<u64> {
+        if page >= self.len {
+            return None;
+        }
+        if page < self.boot_bytes {
+            return Some(self.boot_base + page);
+        }
+        match self.sl {
+            SecondLevel::Ept => {
+                crate::microvm::cpu::vmx::ept::demand_fault_in(self.table_root, page)
+            }
+            SecondLevel::Npt => {
+                crate::microvm::cpu::svm::npt::demand_fault_in(self.table_root, page)
+            }
+        }
     }
 
-    /// gpa→host translation + bounds check. The single point B3
-    /// changes from `base + gpa` to a scattered lookup. Returns the
-    /// host address of `gpa`, or `None` if `[gpa, gpa+len)` leaves the
-    /// window. In B1 a non-`None` result spans `len` contiguous host
-    /// bytes; B3 callers handling >1 page must split per page.
+    /// Fault the 4 KB page containing `gpa` into the demand region
+    /// (no-op for the boot window). Called from the EPT-violation /
+    /// #NPF handler: `true` → mapped, re-enter the guest; `false` →
+    /// `gpa` is outside the window (a real fault → fatal dump).
+    pub fn ensure(&self, gpa: u64) -> bool {
+        self.page_host(gpa & !0xFFF).is_some()
+    }
+
+    /// Fast path: host addr of `[gpa, gpa+n)` iff it lies wholly in
+    /// the physically-contiguous boot window (one span, no per-page
+    /// walk). The common case for early boot + low virtqueue rings.
     #[inline]
-    fn xlate(&self, gpa: u64, len: u64) -> Option<u64> {
-        if gpa.checked_add(len).is_some_and(|end| end <= self.len) {
-            Some(self.base + gpa)
+    fn contig(&self, gpa: u64, n: u64) -> Option<u64> {
+        if gpa.checked_add(n).is_some_and(|end| end <= self.boot_bytes) {
+            Some(self.boot_base + gpa)
         } else {
             None
         }
     }
 
     pub fn read_u8(&self, gpa: u64) -> Option<u8> {
-        let h = self.xlate(gpa, 1)?;
-        Some(unsafe { core::ptr::read_volatile(h as *const u8) })
+        let mut b = [0u8; 1];
+        if !self.read_bytes(gpa, &mut b) { return None; }
+        Some(b[0])
     }
 
     pub fn read_u16(&self, gpa: u64) -> Option<u16> {
-        let h = self.xlate(gpa, 2)?;
-        Some(unsafe { core::ptr::read_volatile(h as *const u16) })
+        if let Some(h) = self.contig(gpa, 2) {
+            return Some(unsafe { core::ptr::read_volatile(h as *const u16) });
+        }
+        let mut b = [0u8; 2];
+        if !self.read_bytes(gpa, &mut b) { return None; }
+        Some(u16::from_le_bytes(b))
     }
 
     pub fn read_u32(&self, gpa: u64) -> Option<u32> {
-        let h = self.xlate(gpa, 4)?;
-        Some(unsafe { core::ptr::read_volatile(h as *const u32) })
+        if let Some(h) = self.contig(gpa, 4) {
+            return Some(unsafe { core::ptr::read_volatile(h as *const u32) });
+        }
+        let mut b = [0u8; 4];
+        if !self.read_bytes(gpa, &mut b) { return None; }
+        Some(u32::from_le_bytes(b))
     }
 
     pub fn read_u64(&self, gpa: u64) -> Option<u64> {
-        let h = self.xlate(gpa, 8)?;
-        Some(unsafe { core::ptr::read_volatile(h as *const u64) })
+        if let Some(h) = self.contig(gpa, 8) {
+            return Some(unsafe { core::ptr::read_volatile(h as *const u64) });
+        }
+        let mut b = [0u8; 8];
+        if !self.read_bytes(gpa, &mut b) { return None; }
+        Some(u64::from_le_bytes(b))
     }
 
     pub fn write_u8(&self, gpa: u64, val: u8) -> bool {
-        match self.xlate(gpa, 1) {
-            Some(h) => {
-                unsafe { core::ptr::write_volatile(h as *mut u8, val) };
-                true
-            }
-            None => false,
-        }
+        self.write_bytes(gpa, &[val])
     }
 
     pub fn write_u16(&self, gpa: u64, val: u16) -> bool {
-        match self.xlate(gpa, 2) {
-            Some(h) => {
-                unsafe { core::ptr::write_volatile(h as *mut u16, val) };
-                true
-            }
-            None => false,
+        if let Some(h) = self.contig(gpa, 2) {
+            unsafe { core::ptr::write_volatile(h as *mut u16, val) };
+            return true;
         }
+        self.write_bytes(gpa, &val.to_le_bytes())
     }
 
     pub fn write_u32(&self, gpa: u64, val: u32) -> bool {
-        match self.xlate(gpa, 4) {
-            Some(h) => {
-                unsafe { core::ptr::write_volatile(h as *mut u32, val) };
-                true
-            }
-            None => false,
+        if let Some(h) = self.contig(gpa, 4) {
+            unsafe { core::ptr::write_volatile(h as *mut u32, val) };
+            return true;
         }
+        self.write_bytes(gpa, &val.to_le_bytes())
     }
 
+    /// Per-page scatter copy. The boot window is one contiguous span
+    /// (fast memcpy); the demand region is walked page-by-page (each
+    /// 4 KB may be a different scattered host frame, faulted in on
+    /// first touch). `false` iff `[gpa, gpa+len)` leaves the window.
     pub fn read_bytes(&self, gpa: u64, dst: &mut [u8]) -> bool {
-        match self.xlate(gpa, dst.len() as u64) {
-            Some(h) => {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(h as *const u8, dst.as_mut_ptr(), dst.len());
-                }
-                true
-            }
-            None => false,
+        let total = dst.len() as u64;
+        if let Some(h) = self.contig(gpa, total) {
+            unsafe { core::ptr::copy_nonoverlapping(h as *const u8, dst.as_mut_ptr(), dst.len()) };
+            return true;
         }
+        if !gpa.checked_add(total).is_some_and(|end| end <= self.len) {
+            return false;
+        }
+        let mut done: usize = 0;
+        while (done as u64) < total {
+            let cur = gpa + done as u64;
+            let page = cur & !0xFFF;
+            let off = (cur & 0xFFF) as usize;
+            let host = match self.page_host(page) {
+                Some(h) => h,
+                None => return false,
+            };
+            let take = core::cmp::min(total as usize - done, 4096 - off);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (host + off as u64) as *const u8,
+                    dst.as_mut_ptr().add(done),
+                    take,
+                );
+            }
+            done += take;
+        }
+        true
     }
 
     pub fn write_bytes(&self, gpa: u64, src: &[u8]) -> bool {
-        match self.xlate(gpa, src.len() as u64) {
-            Some(h) => {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src.as_ptr(), h as *mut u8, src.len());
-                }
-                true
-            }
-            None => false,
+        let total = src.len() as u64;
+        if let Some(h) = self.contig(gpa, total) {
+            unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), h as *mut u8, src.len()) };
+            return true;
         }
+        if !gpa.checked_add(total).is_some_and(|end| end <= self.len) {
+            return false;
+        }
+        let mut done: usize = 0;
+        while (done as u64) < total {
+            let cur = gpa + done as u64;
+            let page = cur & !0xFFF;
+            let off = (cur & 0xFFF) as usize;
+            let host = match self.page_host(page) {
+                Some(h) => h,
+                None => return false,
+            };
+            let take = core::cmp::min(total as usize - done, 4096 - off);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(done),
+                    (host + off as u64) as *mut u8,
+                    take,
+                );
+            }
+            done += take;
+        }
+        true
     }
 }

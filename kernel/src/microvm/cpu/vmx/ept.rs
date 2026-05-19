@@ -52,13 +52,21 @@ const TWO_MB: u64 = 2 * 1024 * 1024;
 // lives in `guest_mem`; this is its EPT-window twin.
 const GUEST_WINDOW_BYTES: u64 = crate::microvm::devices::guest_mem::GUEST_RAM_BYTES;
 
-/// Slack frames `total_frames_for` adds so the result of
-/// `memory::allocate_contiguous` can be rounded up to a 2-MB boundary
-/// for the EPT large-page leaf entries. Up to 511 frames (≈ 2 MB)
-/// at the front of the contiguous range may go unused. Cheap on
-/// 16 GB systems; alternative would be reworking the allocator to
-/// honour alignment.
+/// Slack frames `boot_frames_for` adds so `allocate_contiguous` can be
+/// rounded up to a 2-MB boundary for the boot-window 2-MB leaves.
 const GUEST_RAM_ALIGN_SLACK: usize = 511;
+
+/// Bits [51:12] of an EPT entry hold the next-level / page phys addr.
+const EPT_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+/// B3 hybrid split: `[0, BOOT_WINDOW_BYTES)` is one contiguous 2-MB-
+/// leaf block (fast boot, no faults on the early path, covers the
+/// kernel image + initramfs @ 0x0C00_0000 + boot_params); everything
+/// above is demand-paged 4 KB on EPT-violation. 256 MiB is reliably
+/// allocatable even on a fragmented host (the 1 GiB contiguous alloc
+/// was the fragmentation problem); the lazy region is the page cache
+/// / browser heap, the bulk on a ≥1 GiB guest.
+pub const BOOT_WINDOW_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Round a raw `allocate_contiguous` base up to the next 2-MB
 /// boundary so it can be passed to `install_window`.
@@ -66,12 +74,19 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
     (raw_base + (TWO_MB - 1)) & !(TWO_MB - 1)
 }
 
-/// 4 KB host frames to allocate contiguously to back `guest_bytes`
-/// of guest RAM (+ the 2-MB-alignment slack). B2: `guest_bytes` is a
-/// runtime value from `choose_guest_ram_bytes`. `close()` frees
-/// exactly this count.
-pub fn total_frames_for(guest_bytes: u64) -> usize {
-    (guest_bytes / 4096) as usize + GUEST_RAM_ALIGN_SLACK
+/// Contiguous boot window size for a guest of `guest_bytes`
+/// (= `min(BOOT_WINDOW_BYTES, guest_bytes)`, 2-MB-aligned). A guest
+/// ≤ 256 MiB (small-host B2 policy) is fully contiguous → no demand
+/// region, behaviour identical to B2.
+pub fn boot_window_bytes(guest_bytes: u64) -> u64 {
+    guest_bytes.min(BOOT_WINDOW_BYTES)
+}
+
+/// 4 KB host frames to allocate **contiguously** for the boot window
+/// (+ 2-MB-align slack). The demand region needs NO upfront
+/// allocation — only touched 4 KB pages are committed on fault.
+pub fn boot_frames_for(guest_bytes: u64) -> usize {
+    (boot_window_bytes(guest_bytes) / 4096) as usize + GUEST_RAM_ALIGN_SLACK
 }
 
 /// Build the EPT. Maps:
@@ -86,21 +101,24 @@ pub fn total_frames_for(guest_bytes: u64) -> usize {
 ///     probes without EPT-violating. With `nolapic noapic acpi=off
 ///     pci=off` cmdline, Linux barely touches this anyway; mapping
 ///     it is just defence in depth.
-/// Returns the EPTP value to be VMWRITE'd into VMCS::EPT_POINTER.
-pub fn install_window(host_base: u64, guest_bytes: u64) -> Result<u64, &'static str> {
-    if host_base & (TWO_MB - 1) != 0 {
-        return Err("EPT: host_base must be 2-MB aligned for 2-MB EPT pages");
+/// Returns `(eptp, pml4_phys)` — the EPTP to VMWRITE into
+/// VMCS::EPT_POINTER, and the PML4 phys for `demand_fault_in` /
+/// `release`. `boot_base` backs `[0, boot_window_bytes(guest_bytes))`
+/// contiguously (2-MB leaves); `[boot, guest_bytes)` gets PD→PT
+/// sub-tables with all-absent 4-KB PTEs, faulted in on demand.
+pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'static str> {
+    if boot_base & (TWO_MB - 1) != 0 {
+        return Err("EPT: boot_base must be 2-MB aligned for 2-MB EPT pages");
     }
     if guest_bytes == 0 || guest_bytes & (TWO_MB - 1) != 0 {
         return Err("EPT: guest_bytes must be a non-zero multiple of 2 MB");
     }
-    // Single PD covers ≤ 1 GiB (512 × 2-MB leaves). B4 adds multi-PD.
+    // Single PD covers ≤ 1 GiB (512 × 2-MB region). B4 adds multi-PD.
     if guest_bytes > GUEST_WINDOW_BYTES {
         return Err("EPT: guest_bytes exceeds single-PD window (B4: multi-PD)");
     }
-    // Map exactly the backed window: leaves beyond it would point at
-    // host frames we never allocated → guest could reach other memory.
-    let pd_leaves = guest_bytes / TWO_MB;
+    let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
+    let guest_leaves = guest_bytes / TWO_MB;
 
     let pml4_phys = memory::allocate_frame().ok_or("OOM: EPT PML4")?;
     let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
@@ -116,21 +134,28 @@ pub fn install_window(host_base: u64, guest_bytes: u64) -> Result<u64, &'static 
         core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
         pml4.add(0).write_volatile(pdpt_phys | EPT_RWX);
 
-        // PDPT[0] → PD (covers [0, 1 GB), of which we use 64 MB).
+        // PDPT[0] → PD (covers [0, 1 GB)).
         let pdpt = pdpt_phys as *mut u64;
         core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
         pdpt.add(0).write_volatile(pd_phys | EPT_RWX);
         // PDPT[3] → PD_HIGH (covers [3 GB, 4 GB), MMIO range lives here).
         pdpt.add(3).write_volatile(pd_high_phys | EPT_RWX);
 
-        // PD[0..pd_leaves] = 2-MB leaf entries covering the backed
-        // window (= guest_bytes; ≤ 512 = 1 GiB single-PD max).
         let pd = pd_phys as *mut u64;
         core::ptr::write_bytes(pd as *mut u8, 0, 4096);
-        for i in 0..pd_leaves {
-            let host_target = host_base + i * TWO_MB;
+        // PD[0..boot_leaves] = 2-MB leaves → contiguous boot block.
+        for i in 0..boot_leaves {
+            let host_target = boot_base + i * TWO_MB;
             pd.add(i as usize)
                 .write_volatile(host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
+        }
+        // PD[boot_leaves..guest_leaves] → fresh PT sub-tables, all 512
+        // 4-KB PTEs absent. `demand_fault_in` populates one PTE per
+        // EPT-violation; `release` walks these to free on teardown.
+        for i in boot_leaves..guest_leaves {
+            let pt = memory::allocate_frame().ok_or("OOM: EPT demand PT")?;
+            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+            pd.add(i as usize).write_volatile(pt | EPT_RWX);
         }
 
         // PD_HIGH[502] + [503] → same PT_DUMMY (covers [0xFEC00000,
@@ -155,5 +180,87 @@ pub fn install_window(host_base: u64, guest_bytes: u64) -> Result<u64, &'static 
         }
     }
 
-    Ok(pml4_phys | EPTP_WALK_LENGTH_4 | EPTP_MEM_TYPE_WB)
+    Ok((pml4_phys | EPTP_WALK_LENGTH_4 | EPTP_MEM_TYPE_WB, pml4_phys))
+}
+
+/// Walk PML4[0]→PDPT[0]→PD→PT for a demand-region `gpa` and return
+/// the host phys of its 4 KB page, allocating + mapping a zeroed
+/// frame on first touch. Called from the EPT-violation handler
+/// (guest fault) AND `GuestMem` (host DMA to an untouched page) —
+/// idempotent: an already-present PTE returns its existing frame.
+/// `gpa` MUST be ≥ the boot window (caller guarantees; the boot
+/// region is 2-MB leaves, never PT-walked). No INVEPT needed: the
+/// entry was not-present so there is no stale TLB for it.
+pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
+    // SAFETY: our own freshly-built EPT, identity-mapped tables.
+    unsafe {
+        let pml4 = pml4_phys as *const u64;
+        let pdpt = (pml4.read_volatile() & EPT_ADDR_MASK) as *const u64;
+        let pd = (pdpt.read_volatile() & EPT_ADDR_MASK) as *mut u64;
+        let pd_idx = (gpa / TWO_MB) as usize;
+        let pde = pd.add(pd_idx).read_volatile();
+        if pde == 0 || pde & EPT_LEAF != 0 {
+            return None; // outside demand region / unexpected 2-MB leaf
+        }
+        let pt = (pde & EPT_ADDR_MASK) as *mut u64;
+        let pt_idx = ((gpa % TWO_MB) / 4096) as usize;
+        let pte = pt.add(pt_idx).read_volatile();
+        if pte & EPT_R != 0 {
+            return Some(pte & EPT_ADDR_MASK); // already faulted in
+        }
+        let frame = memory::allocate_frame()?;
+        core::ptr::write_bytes(frame as *mut u8, 0, 4096);
+        pt.add(pt_idx)
+            .write_volatile(frame | EPT_RWX | EPT_MEM_TYPE_WB);
+        Some(frame)
+    }
+}
+
+/// Free everything `install_window` allocated for `guest_bytes`: every
+/// demand-faulted 4 KB frame, the demand PT pages, and the four fixed
+/// tables (PML4/PDPT/PD/PD_HIGH/PT_DUMMY/dummy). The contiguous boot
+/// block is freed separately by the caller (it owns `boot_raw_base`).
+pub fn release(pml4_phys: u64, guest_bytes: u64) {
+    let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
+    let guest_leaves = guest_bytes / TWO_MB;
+    // SAFETY: our own EPT; nothing else references these frames after
+    // VMXOFF + window teardown.
+    unsafe {
+        let pml4 = pml4_phys as *const u64;
+        let pdpt_phys = pml4.read_volatile() & EPT_ADDR_MASK;
+        let pdpt = pdpt_phys as *const u64;
+        let pd_phys = pdpt.read_volatile() & EPT_ADDR_MASK;
+        let pd = pd_phys as *const u64;
+        for i in boot_leaves..guest_leaves {
+            let pde = pd.add(i as usize).read_volatile();
+            if pde == 0 || pde & EPT_LEAF != 0 {
+                continue;
+            }
+            let pt_phys = pde & EPT_ADDR_MASK;
+            let pt = pt_phys as *const u64;
+            for j in 0..512usize {
+                let pte = pt.add(j).read_volatile();
+                if pte & EPT_R != 0 {
+                    memory::deallocate_frame(pte & EPT_ADDR_MASK);
+                }
+            }
+            memory::deallocate_frame(pt_phys);
+        }
+        let pd_high_phys = pdpt.add(3).read_volatile() & EPT_ADDR_MASK;
+        if pd_high_phys != 0 {
+            let pd_high = pd_high_phys as *const u64;
+            let pt_dummy_phys = pd_high.add(502).read_volatile() & EPT_ADDR_MASK;
+            if pt_dummy_phys != 0 {
+                let dummy = (pt_dummy_phys as *const u64).read_volatile() & EPT_ADDR_MASK;
+                if dummy != 0 {
+                    memory::deallocate_frame(dummy);
+                }
+                memory::deallocate_frame(pt_dummy_phys);
+            }
+            memory::deallocate_frame(pd_high_phys);
+        }
+        memory::deallocate_frame(pd_phys);
+        memory::deallocate_frame(pdpt_phys);
+        memory::deallocate_frame(pml4_phys);
+    }
 }
