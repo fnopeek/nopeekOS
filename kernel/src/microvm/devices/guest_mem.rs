@@ -30,6 +30,16 @@
 /// the default/cap.
 pub const GUEST_RAM_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// B3 demand-paging master switch. `false` → the whole guest is one
+/// contiguous block (boot window = full guest, no demand PTs, no
+/// scatter walk): behaviour bit-identical to the validated B2/A2
+/// (contiguous). `true` → the 256 MiB hybrid (contiguous boot + 4 KB
+/// demand). Default `false` until the demand-path corruption is
+/// fixed — the entire B3 architecture stays in the tree; only this
+/// flag gates it, so HEAD is never broken while we debug. Flip to
+/// `true` for a demand test run.
+pub const DEMAND_ENABLED: bool = false;
+
 /// Which second-level paging format backs the demand region, so
 /// `GuestMem` can fault a page in without pulling in `cpu::Vendor`.
 #[derive(Clone, Copy)]
