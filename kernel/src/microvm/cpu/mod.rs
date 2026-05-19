@@ -29,6 +29,38 @@ pub mod vmx;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+/// Guest-RAM size for the next VM, chosen at `vm_open` from live host
+/// free memory instead of a fixed 1 GiB constant.
+///
+/// B2: the window is still one contiguous, single-PD ≤ 1 GiB block,
+/// so advertised == committed == this value. B3 decouples them — the
+/// guest will be *advertised* a generous size (demand-paged, scattered)
+/// while only touched pages are *committed*, bounded by host free RAM.
+///
+/// Policy: take host free RAM minus a host reserve, clamp to
+/// [`MIN`, cap], floor to the 2-MB EPT/NPT leaf granularity. On a fat
+/// host (≥ ~1.3 GB free) this yields exactly the cap (= the validated
+/// 1 GiB), so behaviour is unchanged where it was validated; it only
+/// shrinks on a genuinely RAM-starved host instead of OOM-failing
+/// `allocate_contiguous`.
+pub fn choose_guest_ram_bytes() -> u64 {
+    const RESERVE_MB: usize = 256;
+    const MIN_MB: usize = 256;
+    let cap_mb =
+        (crate::microvm::devices::guest_mem::GUEST_RAM_BYTES / (1024 * 1024)) as usize;
+
+    let (_free_frames, free_mb) = crate::mm::memory::stats();
+    let mb = free_mb
+        .saturating_sub(RESERVE_MB)
+        .max(MIN_MB)
+        .min(cap_mb);
+
+    // Floor to 2 MB so it maps as whole EPT/NPT 2-MB leaves and the
+    // frame count is a clean multiple of 512.
+    const TWO_MB: u64 = 2 * 1024 * 1024;
+    ((mb as u64) * 1024 * 1024) & !(TWO_MB - 1)
+}
+
 /// Host CPU vendor identified at boot from CPUID leaf 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vendor {

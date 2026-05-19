@@ -456,11 +456,9 @@ impl VmContext {
         enable_efer_svme()?;
         setup_host_save()?;
 
-        let (host_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt()?;
-        let gm = GuestMem::new(
-            host_base,
-            crate::microvm::devices::guest_mem::GUEST_RAM_BYTES,
-        );
+        let guest_bytes = crate::microvm::cpu::choose_guest_ram_bytes();
+        let (host_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt(guest_bytes)?;
+        let gm = GuestMem::new(host_base, guest_bytes);
         let load = bzimage::load_into_guest_ram(&gm, bzimage_bytes, cmdline, initramfs)?;
 
         // IOPM: 12 KB all-ones = trap every port. Linux touches dozens
@@ -531,7 +529,10 @@ impl VmContext {
     /// negligible vs. the guest RAM this reclaims). Tracked; needs an
     /// NPT teardown walker.
     pub fn close(&mut self) {
-        memory::deallocate_contiguous(self.guest_raw_base, GUEST_RAM_TOTAL_FRAMES);
+        memory::deallocate_contiguous(
+            self.guest_raw_base,
+            npt::total_frames_for(self.guest_mem.len()),
+        );
         memory::deallocate_contiguous(self.iopm_phys, 3);
         memory::deallocate_contiguous(self.msrpm_phys, 2);
     }
@@ -559,17 +560,16 @@ pub fn run_linux(
 
 /// Allocate 256 MB contiguous + slack for 2 MB alignment, install the
 /// non-identity NPT window. Returns (host_base, NCR3).
-/// Total frames of the guest-RAM contiguous allocation (window +
-/// alignment slack). `close()` frees exactly this from `raw_base` —
-/// without it the guest RAM leaks and a second `microvm linux` in
-/// the same boot OOMs.
-const GUEST_RAM_TOTAL_FRAMES: usize = npt::GUEST_RAM_FRAMES + npt::GUEST_RAM_ALIGN_SLACK;
-
-fn alloc_guest_ram_and_npt() -> Result<(u64, u64, u64), &'static str> {
-    let raw_base = memory::allocate_contiguous(GUEST_RAM_TOTAL_FRAMES)
+/// Allocate `guest_bytes` of contiguous guest RAM (+ 2-MB-align
+/// slack) and install the NPT window over it. `close()` frees exactly
+/// `npt::total_frames_for(guest_bytes)` from `raw_base` — without it
+/// the guest RAM leaks and a second `microvm linux` in the same boot
+/// OOMs.
+fn alloc_guest_ram_and_npt(guest_bytes: u64) -> Result<(u64, u64, u64), &'static str> {
+    let raw_base = memory::allocate_contiguous(npt::total_frames_for(guest_bytes))
         .ok_or("OOM allocating guest RAM (+ slack)")?;
     let host_base = npt::round_up_to_2mb(raw_base);
-    let npt_root = npt::allocate_window_npt(host_base)?;
+    let npt_root = npt::allocate_window_npt(host_base, guest_bytes)?;
     Ok((host_base, npt_root, raw_base))
 }
 

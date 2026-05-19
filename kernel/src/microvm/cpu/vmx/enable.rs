@@ -199,15 +199,14 @@ fn write_host_state_with_current_rsp() -> Result<(), &'static str> {
 /// Allocate a fresh 64 MB contiguous host-physical region for the
 /// guest, install the EPT mapping it onto guest-phys [0, 64 MB),
 /// return (host_base, eptp).
-/// Total frames of the guest-RAM contiguous allocation (window +
-/// alignment slack). `close()` frees exactly this from `raw_base`.
-const GUEST_RAM_TOTAL_FRAMES: usize = ept::GUEST_RAM_FRAMES + ept::GUEST_RAM_ALIGN_SLACK;
-
-fn alloc_guest_ram_and_ept() -> Result<(u64, u64, u64), &'static str> {
-    let raw_base = memory::allocate_contiguous(GUEST_RAM_TOTAL_FRAMES)
+/// Allocate `guest_bytes` of contiguous guest RAM (+ 2-MB-align
+/// slack) and install the EPT window over it. `close()` frees exactly
+/// `ept::total_frames_for(guest_bytes)` from `raw_base`.
+fn alloc_guest_ram_and_ept(guest_bytes: u64) -> Result<(u64, u64, u64), &'static str> {
+    let raw_base = memory::allocate_contiguous(ept::total_frames_for(guest_bytes))
         .ok_or("OOM allocating guest RAM (+ slack)")?;
     let host_base = ept::round_up_to_2mb(raw_base);
-    let eptp = ept::install_window(host_base)?;
+    let eptp = ept::install_window(host_base, guest_bytes)?;
     Ok((host_base, eptp, raw_base))
 }
 
@@ -218,7 +217,10 @@ fn alloc_guest_ram_and_ept() -> Result<(u64, u64, u64), &'static str> {
 /// returns the final VM-exit outcome. Used by `microvm test`.
 pub fn enable_and_test() -> Result<vmcs::LaunchOutcome, &'static str> {
     with_vmx_root_and_vmcs(|| {
-        let (host_base, eptp, _raw_base) = alloc_guest_ram_and_ept()?;
+        // Substrate test is size-insensitive; keep the fixed 1 GiB
+        // window so its behaviour is unchanged by B2.
+        let (host_base, eptp, _raw_base) =
+            alloc_guest_ram_and_ept(crate::microvm::devices::guest_mem::GUEST_RAM_BYTES)?;
 
         // 9-byte substrate stub at guest-phys 0x10000.
         let stub_host = host_base + 0x10000;
@@ -486,9 +488,9 @@ pub struct VmContext {
     vmcs_phys: u64,
     guest_mem: GuestMem,
     /// Base of the guest-RAM contiguous allocation (pre-2 MB-align).
-    /// `close()` frees `GUEST_RAM_TOTAL_FRAMES` from here — without
-    /// this the 1 GB window leaks and a second `microvm linux` in the
-    /// same boot OOMs.
+    /// `close()` frees `ept::total_frames_for(guest_mem.len())` from
+    /// here — without this the window leaks and a second
+    /// `microvm linux` in the same boot OOMs.
     guest_raw_base: u64,
     regs: vmcs::GuestRegs,
     serial: SerialState,
@@ -532,11 +534,9 @@ impl VmContext {
 
         // Everything past here is in VMX root: VMXOFF on any error.
         let build = || -> Result<VmContext, &'static str> {
-            let (host_base, eptp, guest_raw_base) = alloc_guest_ram_and_ept()?;
-            let gm = GuestMem::new(
-                host_base,
-                crate::microvm::devices::guest_mem::GUEST_RAM_BYTES,
-            );
+            let guest_bytes = crate::microvm::cpu::choose_guest_ram_bytes();
+            let (host_base, eptp, guest_raw_base) = alloc_guest_ram_and_ept(guest_bytes)?;
+            let gm = GuestMem::new(host_base, guest_bytes);
             let load = bzimage::load_into_guest_ram(&gm, bzimage, cmdline, initramfs)?;
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state(load.entry_rip)?;
@@ -596,7 +596,10 @@ impl VmContext {
         // vmx_enter_root, so the CPU is in VMX root. After VMXOFF the
         // VMCS is no longer current and its frame is safe to free.
         unsafe { vmx_exit_root(); }
-        memory::deallocate_contiguous(self.guest_raw_base, GUEST_RAM_TOTAL_FRAMES);
+        memory::deallocate_contiguous(
+            self.guest_raw_base,
+            ept::total_frames_for(self.guest_mem.len()),
+        );
         memory::deallocate_frame(self.vmcs_phys);
         memory::deallocate_frame(self.vmxon_phys);
     }

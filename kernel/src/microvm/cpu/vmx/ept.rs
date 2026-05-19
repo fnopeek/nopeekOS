@@ -51,24 +51,27 @@ const TWO_MB: u64 = 2 * 1024 * 1024;
 // needs multi-PD support (split across PDPT entries). Canonical size
 // lives in `guest_mem`; this is its EPT-window twin.
 const GUEST_WINDOW_BYTES: u64 = crate::microvm::devices::guest_mem::GUEST_RAM_BYTES;
-const PD_LEAVES: u64 = GUEST_WINDOW_BYTES / TWO_MB; // 512 entries (= 1 GB, max for single PD)
 
-/// Number of 4 KB host frames the caller must allocate contiguously
-/// for the guest RAM backing.
-pub const GUEST_RAM_FRAMES: usize = (GUEST_WINDOW_BYTES / 4096) as usize;
-
-/// Slack frames the caller adds to GUEST_RAM_FRAMES so the result of
+/// Slack frames `total_frames_for` adds so the result of
 /// `memory::allocate_contiguous` can be rounded up to a 2-MB boundary
 /// for the EPT large-page leaf entries. Up to 511 frames (≈ 2 MB)
 /// at the front of the contiguous range may go unused. Cheap on
 /// 16 GB systems; alternative would be reworking the allocator to
 /// honour alignment.
-pub const GUEST_RAM_ALIGN_SLACK: usize = 511;
+const GUEST_RAM_ALIGN_SLACK: usize = 511;
 
 /// Round a raw `allocate_contiguous` base up to the next 2-MB
-/// boundary so it can be passed to `install_window_16mb`.
+/// boundary so it can be passed to `install_window`.
 pub fn round_up_to_2mb(raw_base: u64) -> u64 {
     (raw_base + (TWO_MB - 1)) & !(TWO_MB - 1)
+}
+
+/// 4 KB host frames to allocate contiguously to back `guest_bytes`
+/// of guest RAM (+ the 2-MB-alignment slack). B2: `guest_bytes` is a
+/// runtime value from `choose_guest_ram_bytes`. `close()` frees
+/// exactly this count.
+pub fn total_frames_for(guest_bytes: u64) -> usize {
+    (guest_bytes / 4096) as usize + GUEST_RAM_ALIGN_SLACK
 }
 
 /// Build the EPT. Maps:
@@ -84,10 +87,20 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
 ///     pci=off` cmdline, Linux barely touches this anyway; mapping
 ///     it is just defence in depth.
 /// Returns the EPTP value to be VMWRITE'd into VMCS::EPT_POINTER.
-pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
+pub fn install_window(host_base: u64, guest_bytes: u64) -> Result<u64, &'static str> {
     if host_base & (TWO_MB - 1) != 0 {
         return Err("EPT: host_base must be 2-MB aligned for 2-MB EPT pages");
     }
+    if guest_bytes == 0 || guest_bytes & (TWO_MB - 1) != 0 {
+        return Err("EPT: guest_bytes must be a non-zero multiple of 2 MB");
+    }
+    // Single PD covers ≤ 1 GiB (512 × 2-MB leaves). B4 adds multi-PD.
+    if guest_bytes > GUEST_WINDOW_BYTES {
+        return Err("EPT: guest_bytes exceeds single-PD window (B4: multi-PD)");
+    }
+    // Map exactly the backed window: leaves beyond it would point at
+    // host frames we never allocated → guest could reach other memory.
+    let pd_leaves = guest_bytes / TWO_MB;
 
     let pml4_phys = memory::allocate_frame().ok_or("OOM: EPT PML4")?;
     let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
@@ -110,10 +123,11 @@ pub fn install_window(host_base: u64) -> Result<u64, &'static str> {
         // PDPT[3] → PD_HIGH (covers [3 GB, 4 GB), MMIO range lives here).
         pdpt.add(3).write_volatile(pd_high_phys | EPT_RWX);
 
-        // PD[0..PD_LEAVES] = 2-MB leaf entries covering 64 MB.
+        // PD[0..pd_leaves] = 2-MB leaf entries covering the backed
+        // window (= guest_bytes; ≤ 512 = 1 GiB single-PD max).
         let pd = pd_phys as *mut u64;
         core::ptr::write_bytes(pd as *mut u8, 0, 4096);
-        for i in 0..PD_LEAVES {
+        for i in 0..pd_leaves {
             let host_target = host_base + i * TWO_MB;
             pd.add(i as usize)
                 .write_volatile(host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
