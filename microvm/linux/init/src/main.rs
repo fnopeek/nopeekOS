@@ -157,6 +157,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null \
                    && echo '[wl] print-fatal-signals=1 (crash module will be named)' \
                    || echo '[wl] WARN: could not enable print-fatal-signals'; \
+                 (hostname nopeek 2>/dev/null \
+                   || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null) \
+                   && echo '[wl] hostname=nopeek (silences (none) self-lookup)' \
+                   || echo '[wl] WARN: could not set hostname'; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run \
                    || echo '[wl] WARN: /run tmpfs mount failed'; \
@@ -206,12 +210,20 @@ fn launch_wayland(kmsg_fd: i64) {
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1 \
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
-                 MOZ_LOG=WebRender:5,Compositor:5,WidgetWayland:5; \
+                 MOZ_LOG='timestamp,sync,Init:5,Widget:5,WidgetWayland:5,WebRender:5,Compositor:5,Gfx:5' \
+                 MOZ_LOG_FILE=/tmp/moz/log; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
+                 echo '[wl] librewolf --version smoke (isolates loader/musl vs GUI):'; \
+                 librewolf --version 2>&1 | sed 's/^/[wl][ver] /'; \
+                 echo \"[wl] librewolf --version rc=$?\"; \
                  echo '[wl] launching cage -- librewolf (single-proc profile) https://example.com'; \
                  cage -- librewolf --no-remote --profile /tmp/moz https://example.com; \
                  echo \"[wl] cage exited rc=$? (seatd: $(tail -n 5 /tmp/seatd.log 2>&1))\"; \
+                 for f in /tmp/moz/log*; do [ -e \"$f\" ] \
+                   && { echo \"[wl] === MOZ_LOG $f (tail 120) ===\"; \
+                        tail -n 120 \"$f\"; echo '[wl] === end MOZ_LOG ==='; }; \
+                 done; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
