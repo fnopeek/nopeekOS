@@ -880,6 +880,24 @@ impl VmContext {
 
         match exit {
             EXIT_INTR => {
+                // Never force-inject a maskable IRQ into a
+                // non-interruptible guest. EVENTINJ bypasses the
+                // CPU's IF / STI-MOV-SS-shadow checks, so injecting
+                // while the guest kernel runs IF=0 (critical section
+                // / syscall entry-exit) delivers the handler where
+                // Linux assumed atomicity → corrupt stack/return:
+                // the recurring rt_sigprocmask `<ret>` fault, on
+                // both core paths (worse on the busy dedicated
+                // core). Defer to a later EXIT_INTR — the per-core
+                // timer guarantees frequent retries and we consume
+                // no event state here, so nothing is lost. Mirrors
+                // KVM gating maskable-IRQ injection on guest
+                // interruptibility (APM Vol 2 §15.21).
+                let rflags = self.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS);
+                let shadow = self.vmcb.read_u64(vmcb::OFF_INT_STATE) & 1;
+                if rflags & (1u64 << 9) == 0 || shadow != 0 {
+                    continue;
+                }
                 // Guest timer tick. The microvm has no PIT/LAPIC
                 // timer event source, so the only thing that ever
                 // wakes a time-blocked task (nanosleep/timerfd/poll
