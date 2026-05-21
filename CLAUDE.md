@@ -38,25 +38,77 @@ See README.md for the full vision and phase planning.
 ./build.sh vbox-clean   # Remove VirtualBox VM
 ./build.sh installer    # Two-pass installer build (bundled assets)
 ./build.sh usb /dev/sdX # Build installer + flash USB stick
+./build.sh usb-full /dev/sdX  # USB stick + LibreWolf bundle (~290 MB,
+                              # browser ready on first boot, no OTA needed)
+./build.sh qemu-installer-full  # QEMU installer test with bundle
 ```
 
 ## Current Status
 
-- **Phase:** **12.6 ✅ — LibreWolf rendert in einem gekachelten
-  nopeekOS-Fenster (das Phase-12-Endziel erreicht, 2026-05-16,
-  QEMU/AMD).** Echter GUI-Browser in einer hardware-isolierten
-  microvm, von Shade als Tile neben nativem Terminal komponiert,
-  mit lesbarer Schrift. Kernel `v0.171.4`, microvm-init `0.4.0`,
-  Bundle `librewolf-0.1.1` (cage-Kiosk + LibreWolf 144 + seatd +
-  Fonts, 261 MB gzip-sqfs, GitHub-Releases-Large-Lane). Stack:
-  Display-Bridge (`WindowKind::Surface`, virtio-gpu-FLUSH → Tile,
-  kooperativer Time-Slice Core 0), virtio-input (Tastatur+Maus),
-  Gast-Timer-IRQ0, sqfs-Loading via /dev/vdb, seatd/libseat/
-  wlroots/pixman. **Offen (Polish, kein Architektur-Risiko):**
-  Input erreicht den Browser noch nicht (udev/eudev fehlt + Keyboard-
-  Platzhalter), Host-Scaling statt Gast-nativem Reflow (D4),
-  Core-0-Slice-Tuning (busy Browser → zähes Mod+Q). Picker/B-mini
-  (12.5), Microkernel-Refactor weiter offen.
+- **Phase:** **12.6 + polish ✅ — Browser ist daily-driver-capable
+  auf QEMU/AMD (2026-05-21, kernel v0.172.63, microvm-init 0.4.14,
+  drun v0.6.1).** Standard LibreWolf-Config (e10s + fission +
+  Sandboxes alle wieder default), 2 GiB Guest-RAM (B3 demand-paging
+  + B4 multi-PD in main), `browser` Top-Level-Intent + Drun-Eintrag
+  "Browser" (via `npk_run_intent` Host-Fn), D4 live-resize (EDID-
+  Emulation + Disconnect/Reconnect-Cycle), Cursor-in-Shadow (kein
+  Flicker mehr über Tile), `./build.sh usb-full /dev/sdX` Modus
+  bundelt 261 MB LibreWolf-sqfs in Installer (USB ~290 MB, kein OTA
+  nötig für ersten Boot). YouTube AV1 + Audio + Multi-Site live
+  bestätigt.
+- **Bare-metal NUC (Intel-VMX) noch broken** — A2 vendor-gated
+  (v0.172.62), aber selbst der VMX-cooperative-Pfad failt mit
+  exit reason 33 (VM-entry invalid guest state) bei Linux's
+  CR3 long-mode trampoline. v0.172.63 hat VMCS-Entry-Fail-Dump
+  für nächste Session. Audit-Strategie: VMX-Equivalente der
+  vier validierten SVM-Fixes (vmsave/vmload+STGI, EXITINTINFO
+  type-gate, EVENTINJ-clear, host-state lifecycle) portieren.
+- **2026-05-21 (sehr lange Session, kernel v0.172.54 → v0.172.63,
+  microvm-init 0.4.8 → 0.4.14):**
+  - **D4 live-resize end-to-end**: virtio-gpu EDID-Emulation
+    (v0.172.54) + Disconnect/Reconnect-Cycle (v0.172.55). Linux's
+    virtio_gpu_cmd_get_edid_cb ruft drm_kms_helper_hotplug_event
+    UNCONDITIONAL → wlroots/cage reagiert. Erfordert echte
+    Disconnect→Reconnect-Sequenz weil wlroots mode-set nur bei
+    connector-up macht. 100 ms-Gap, R2 debounce 25 ticks.
+  - **RAM bump 1 → 2 GiB** (v0.172.56): B3 demand-paging ON
+    (`DEMAND_ENABLED=true`) + B4 multi-PD (PDPT[0..num_pds], Cap
+    3 GiB, PDPT[3] reserved für MMIO). Vendor-symmetric. Browser-
+    Freeze auf example.com war 1-GiB-Cap + #11-Cripples, nicht
+    Netzwerk.
+  - **user.js auf wirklich standard** (microvm-init 0.4.13): alle
+    #11-Cripples raus (e10s, fission, network-process, content-
+    sandbox, OCSP, SW-render-robustness-Prefs, MOZ_DISABLE_*_
+    SANDBOX env vars). Behalten nur env-required (no-GPU-process,
+    software-webrender) + dark-mode + userChrome.css enabler.
+  - **App-Surface**: `browser` Intent (v0.172.57) + `npk_run_intent`
+    Host-Fn (v0.172.58) + Drun EntryKind::Module/Intent dispatch
+    (drun 0.6.1). Drun listet Browser, click → microvm startet.
+    Zukünftige Apps plug in via Match-Arm + Drun-Eintrag.
+  - **Cursor-in-Shadow** (v0.172.60): Cursor wird Teil des
+    shadow→MMIO-Blits statt separater Post-Blit-MMIO-Write.
+    Eliminiert Race über 60-Hz-Surface-Tile, Flicker weg. xhci
+    IRQ macht nur noch `update_atomic` + `request_render()`.
+  - **Quiet boot + Log-Strip** (v0.172.59): `quiet loglevel=3`
+    in Cmdline + `[gpu]`/`[nat]`/`[virtio-blk]`/`[virtio-net]`
+    Per-Event-Spam raus. ~150 → ~15 Lines pro Launch. (Temporär
+    in v0.172.61 reverted für bare-metal-Diag.)
+  - **USB-full Modus**: `./build.sh usb-full` + Cargo-Feature
+    `bundle-userspace` + cfg-gated BundledAsset → 261 MB
+    LibreWolf-sqfs im Installer. USB ~290 MB.
+  - **A2 vendor-gated** (v0.172.62): AMD bleibt dedicated VM-core
+    (validiert), Intel cooperative-Core-0-Fallback. VMX-A2 audit
+    pending.
+  - **VMCS-Entry-Fail-Dump** (v0.172.63): Diag-Hook für reason
+    33/34/41 dumpt CR/EFER/ENTRY_CTLS/CS/RIP/RSP/VM_INSTR_ERR.
+    Next-session-Tool.
+  - **Wichtige Erkenntnis**: SWGL `RenderCompositorSWGL failed
+    mapping default framebuffer` Warning IST NICHT der historische
+    Crash. War durch `cage … >/dev/null` versteckt, microvm-init
+    0.4.14's Diag-Tap (cage.log + Watchdog) hat ihn erstmals
+    sichtbar gemacht. Browser läuft visuell trotz Spam.
+  - Vollständige Iterations-Historie + Lessons:
+    `memory/project_browser_v1.md`.
 - **2026-05-16 (sehr lange Session — 12.4e' → Phase B → LibreWolf,
   kernel v0.170.0 → v0.171.4):**
   - **12.4e' Maus**: absoluter Pointer (qemu-usb-tablet-Modell,

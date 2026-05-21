@@ -457,13 +457,46 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
       (tmpfs `/run`, seatd daemon — Alpine libseat has no
       builtin backend, XDG_RUNTIME_DIR on tmpfs); font/RTC fix
       (no guest clock → epoch sqfs mtimes + prebuilt fc-cache)
-- [ ] 12.6 polish (not architectural — substrate proven): real
-      input into the browser (eudev for wlroots libinput +
-      real scancode→evdev, replacing the keyboard placeholder);
-      D4 guest-native reflow (GET_DISPLAY_INFO = tile size, no
-      host scaling); cooperative-slice tuning (busy browser
-      starves Core 0 → sluggish Mod+Q)
+- [x] 12.6 polish (2026-05-21, kernel v0.172.54..63) — Browser is
+      daily-driver-capable on QEMU/AMD: D4 live-resize via virtio-
+      gpu EDID emulation + disconnect/reconnect cycle (every
+      Wayland compositor honors a real connector cycle the way it
+      ignores a mode-changed-while-connected hotplug); RAM bumped
+      1→2 GiB with B3 demand-paging (`DEMAND_ENABLED=true`) +
+      B4 multi-PD EPT/NPT (cap 3 GiB, PDPT[3] reserved for MMIO);
+      `wirklich standard` user.js — all the #11 cripples
+      removed (e10s/fission/sandbox/OCSP back to LibreWolf
+      defaults), only env-required + dark-mode prefs left;
+      `browser` top-level intent + `npk_run_intent` host fn +
+      drun "Browser" entry (drun 0.6.1 EntryKind::Module/Intent
+      dispatch); cursor composed INTO the back-shadow as the
+      final layer (eliminates the 60 Hz blit-vs-cursor-redraw
+      race, no more flicker over the browser tile); quiet guest
+      boot (`quiet loglevel=3` in cmdline) + stripped per-frame
+      device spam (~150 → ~15 launch trace lines).
+- [x] `./build.sh usb-full /dev/sdX` (+ `qemu-installer-full`) —
+      bakes the 261 MB LibreWolf userspace sqfs into the installer
+      kernel via include_bytes! (gated by `bundle-userspace` cargo
+      feature). USB grows ~30→290 MB but a fresh install has the
+      browser ready on first boot, no OTA round-trip. OTA keeps
+      working for later browser updates via manifest.large url=
+      override. Future microvm-backed apps plug in next to it.
+- [ ] Bare-metal NUC (Intel-VMX) — A2 vendor-gated v0.172.62
+      (AMD keeps dedicated VM core, Intel falls back to cooperative
+      Core-0), but VMX-cooperative path ALSO hits exit reason 33
+      (VM-entry invalid guest state) at Linux's CR3 long-mode
+      trampoline. v0.172.63 adds VMCS-entry-fail dump for the next
+      session's diag. Audit strategy: port the four validated SVM
+      correctness fixes (vmsave/vmload+STGI v34/35, EXITINTINFO
+      type-gate v38, EVENTINJ-clear v42, host-state lifecycle v36)
+      to their VMX equivalents (VMCS-managed host-state vs vmsave/
+      vmload pair, VM_ENTRY_INTR_INFO vs SVM EVENT_INJ).
 - [ ] 12.5  Picker bridge + B-mini virtiofs (per-app downloads folder)
+- [ ] Profile persistence — every microvm boot is currently a fresh
+      tmpfs `/tmp/moz`. Extend the substrate-test `profile.img`
+      pattern: per-app writable virtio-blk image (~200 MB ext4),
+      PID-1 mounts at `/home/nopeek`, persisted to npkFS at
+      suspend/shutdown. (~1-2 h, eigene Session.)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
@@ -734,9 +767,17 @@ to full userspace boot:
       profile-images, sqfs bundle loading, Display Bridge.
 - [x] 12.6       **LibreWolf in MicroVM — ACHIEVED (2026-05-16):**
       a real privacy-first GUI browser renders with readable
-      text in a tiled nopeekOS window. Polish remaining (input
-      into the browser, D4 reflow, slice tuning) — not
-      architectural. See the Phase 9 Virtualization list above.
+      text in a tiled nopeekOS window.
+- [x] 12.6 polish (2026-05-21, kernel v0.172.54..63) — Browser
+      daily-driver-capable: D4 live-resize, 2 GiB RAM (B3+B4),
+      `wirklich standard` user.js, `browser` intent + drun
+      integration, cursor-in-shadow flicker fix, `usb-full`
+      installer mode. See the Phase 9 Virtualization list above
+      for the detailed change list.
+- [ ] Bare-metal Intel-VMX validation — A2 vendor-gated v0.172.62,
+      VMX-cooperative entry-fail diag in flight (v0.172.63 VMCS
+      dump). Audit pending: port the SVM correctness fixes
+      (v34/35/36/38/42) to VMX equivalents.
 - [ ] 12.5       Picker bridge + B-mini virtiofs (deferred).
 
 ### Phase 11.5 -- npkFS v3: Content-Addressed Directories + mtime ✅ DONE 2026-05-05
@@ -1035,6 +1076,10 @@ sudo pacman -S edk2-ovmf mtools gdisk qemu-system-x86   # Arch
 ./build.sh debug         # With GDB stub on :1234
 ./build.sh build         # Compile only
 ./build.sh release       # Build + sign kernel (ECDSA P-384) + generate manifest
+./build.sh usb /dev/sdX        # USB installer (~30 MB, browser via OTA)
+./build.sh usb-full /dev/sdX   # USB installer + LibreWolf bundle (~290 MB,
+                               # browser ready on first boot, no OTA needed)
+./build.sh qemu-installer-full # QEMU installer test with bundle baked in
 ```
 
 ### Release + OTA Flow (bare metal testing)
