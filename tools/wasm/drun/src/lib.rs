@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn npk_list_modules(ptr: i32, max: i32) -> i32;
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_spawn_module(ptr: i32, len: i32) -> i32;
+    fn npk_run_intent(verb_ptr: i32, verb_len: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_window_set_overlay(w: i32, h: i32) -> i32;
     fn npk_window_set_modal(modal: i32) -> i32;
@@ -61,6 +62,10 @@ fn poll_event() -> PollResult {
 
 fn spawn(name: &str) -> bool {
     unsafe { npk_spawn_module(name.as_ptr() as i32, name.len() as i32) == 0 }
+}
+
+fn run_intent(verb: &str) -> bool {
+    unsafe { npk_run_intent(verb.as_ptr() as i32, verb.len() as i32) == 0 }
 }
 
 fn close_self() {
@@ -117,11 +122,22 @@ const HOVER_BASE: u32 = 10_000;
 const QUERY_CAP: usize = 63;
 const MAX_VISIBLE_ROWS: usize = 6;
 
+/// What kind of thing a drun entry launches.
+/// - `Module`: a WASM module (`sys/wasm/<name>`) — spawned in a fresh
+///   terminal window via `npk_spawn_module`. The historical case.
+/// - `Intent`: a built-in system intent (e.g. "browser") — invoked via
+///   `npk_run_intent`. The microvm/Surface-window apps live here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryKind { Module, Intent }
+
 struct Entry {
+    /// `Module`: name of the wasm under `sys/wasm/`.
+    /// `Intent`: verb passed to `npk_run_intent`.
     module_name:  String,
     display_name: String,
     description:  String,
     icon:         IconId,
+    kind:         EntryKind,
 }
 
 struct Drun {
@@ -149,8 +165,21 @@ impl Drun {
                     entries.push(Entry::hydrate(s));
                 }
             }
-            entries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
         }
+        // Built-in system intents — apps that live as microvm bundles
+        // / Surface windows rather than WASM modules. Future apps
+        // (office, ide, …) join this list; the launch path is the same
+        // npk_run_intent host-fn.
+        entries.push(Entry {
+            module_name:  String::from("browser"),
+            display_name: String::from("Browser"),
+            description:  String::from("LibreWolf in a sandboxed MicroVM"),
+            // TODO: add a proper Globe glyph to the phosphor atlas;
+            // Monitor is the closest existing icon for now.
+            icon:         IconId::Monitor,
+            kind:         EntryKind::Intent,
+        });
+        entries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
 
         let mut filtered: Vec<usize> = Vec::with_capacity(entries.len().max(1));
         for i in 0..entries.len() { filtered.push(i); }
@@ -244,7 +273,11 @@ impl Drun {
     fn spawn_selected(&self) {
         if let Some(&entry_idx) = self.filtered.get(self.selected) {
             if let Some(entry) = self.entries.get(entry_idx) {
-                if !spawn(&entry.module_name) { log("[drun] spawn failed"); }
+                let ok = match entry.kind {
+                    EntryKind::Module => spawn(&entry.module_name),
+                    EntryKind::Intent => run_intent(&entry.module_name),
+                };
+                if !ok { log("[drun] launch failed"); }
             }
         }
     }
@@ -318,6 +351,7 @@ impl Entry {
                 display_name: meta.display_name,
                 description:  meta.description,
                 icon:         icon_ref_to_id(&meta.icon),
+                kind:         EntryKind::Module,
             };
         }
         Entry {
@@ -325,6 +359,7 @@ impl Entry {
             display_name: module_name.to_string(),
             description:  String::new(),
             icon:         IconId::List,
+            kind:         EntryKind::Module,
         }
     }
 
