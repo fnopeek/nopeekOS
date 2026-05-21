@@ -212,6 +212,17 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
+                 ( prev_mode=''; prev_stat=''; \
+                   while true; do \
+                     cur_mode=$(cat /sys/class/drm/card0-*/modes 2>/dev/null | head -1); \
+                     cur_stat=$(cat /sys/class/drm/card0-*/status 2>/dev/null); \
+                     if [ \"$cur_mode\" != \"$prev_mode\" ] || [ \"$cur_stat\" != \"$prev_stat\" ]; then \
+                       echo \"[drm-probe] mode_head=$cur_mode status=$cur_stat\"; \
+                       prev_mode=\"$cur_mode\"; prev_stat=\"$cur_stat\"; \
+                     fi; \
+                     sleep 1; \
+                   done \
+                 ) & \
                  echo '[wl] launching cage -- librewolf https://example.com'; \
                  cage -- librewolf --no-remote --profile /tmp/moz https://example.com \
                    >/dev/null 2>&1; \
