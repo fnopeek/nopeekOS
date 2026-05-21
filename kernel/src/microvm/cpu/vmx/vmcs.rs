@@ -162,11 +162,48 @@ const VM_EXIT_INSTRUCTION_LEN: u64 = 0x440C;
 // the run_guest_once asm! block (Intel-syntax `mov rcx, 0x4402`).
 
 // VMX capability MSRs for control allowed-0 / allowed-1 masking.
+const IA32_VMX_BASIC: u32 = 0x480;
 const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
 const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
 const IA32_VMX_EXIT_CTLS: u32 = 0x483;
 const IA32_VMX_ENTRY_CTLS: u32 = 0x484;
 const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B;
+// "TRUE" variants exist when IA32_VMX_BASIC bit 55 = 1 (Alder Lake-N
+// definitely has them). The TRUE MSRs relax "default-1" bits in the
+// classic MSRs to "may-be-0", letting us actually clear bits like
+// CR3-load-exiting (no point with EPT) and ACK_INTR_ON_EXIT. KVM uses
+// these universally; we did not, which forced our control fields into
+// a state that diverges from a minimal-VMX setup and from SVM
+// semantics. Discovered while chasing the bare-metal-NUC reason-33
+// VM-entry failure (v0.172.61+).
+const IA32_VMX_TRUE_PINBASED_CTLS: u32 = 0x48D;
+const IA32_VMX_TRUE_PROCBASED_CTLS: u32 = 0x48E;
+const IA32_VMX_TRUE_EXIT_CTLS: u32 = 0x48F;
+const IA32_VMX_TRUE_ENTRY_CTLS: u32 = 0x490;
+
+/// True if IA32_VMX_BASIC bit 55 reports TRUE-controls support.
+/// Cached after first call to avoid repeated rdmsr.
+fn vmx_has_true_controls() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static CACHED: AtomicU8 = AtomicU8::new(0xFF); // 0xFF = uncomputed
+    let v = CACHED.load(Ordering::Relaxed);
+    if v != 0xFF {
+        return v != 0;
+    }
+    // SAFETY: IA32_VMX_BASIC is architectural once CR4.VMXE supported.
+    let basic = unsafe { rdmsr(IA32_VMX_BASIC) };
+    let has = (basic >> 55) & 1 != 0;
+    CACHED.store(has as u8, Ordering::Relaxed);
+    has
+}
+
+/// Pick the right control MSR — TRUE variant when supported, classic
+/// when not. The TRUE variants relax default-1 bits so we can choose
+/// to clear them (e.g. CR3-load-exiting with EPT enabled).
+fn pinbased_ctls_msr()   -> u32 { if vmx_has_true_controls() { IA32_VMX_TRUE_PINBASED_CTLS }   else { IA32_VMX_PINBASED_CTLS } }
+fn procbased_ctls_msr()  -> u32 { if vmx_has_true_controls() { IA32_VMX_TRUE_PROCBASED_CTLS }  else { IA32_VMX_PROCBASED_CTLS } }
+fn exit_ctls_msr()       -> u32 { if vmx_has_true_controls() { IA32_VMX_TRUE_EXIT_CTLS }       else { IA32_VMX_EXIT_CTLS } }
+fn entry_ctls_msr()      -> u32 { if vmx_has_true_controls() { IA32_VMX_TRUE_ENTRY_CTLS }      else { IA32_VMX_ENTRY_CTLS } }
 
 // Architectural MSRs we mirror into host-state.
 const IA32_EFER: u32 = 0xC000_0080;
@@ -605,14 +642,29 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let (io_bitmap_a, io_bitmap_b) = allocate_and_populate_io_bitmaps()?;
     let msr_bitmap = allocate_zero_msr_bitmap()?;
 
-    let pin = fixed_ctrl(PIN_EXT_INTR_EXITING, IA32_VMX_PINBASED_CTLS);
+    // Use IA32_VMX_TRUE_*_CTLS when the CPU supports them (Alder
+    // Lake-N does). The TRUE variants relax classic "default-1"
+    // bits — most notably CR3-load/store-exiting (bits 15/16 of
+    // PROCBASED) which the classic MSR forces on but with EPT
+    // active provides no benefit (the guest's CR3 is opaque to
+    // the host; EPT walks it without our help). Forcing CR3-exit
+    // also produces a guest-trap sequence that does NOT exist on
+    // SVM (where we never trap CR3) and our trap-handler's
+    // write_guest_cr3 + advance_rip leaves the GUEST_CR3 / RIP /
+    // VPID-TLB combo in a state that the next VMRESUME's
+    // consistency check rejects (reason 33 on bare-metal-NUC).
+    // Match KVM's universal use of TRUE_*_CTLS to get a minimal
+    // control set close to SVM's.
+    let pin = fixed_ctrl(PIN_EXT_INTR_EXITING, pinbased_ctls_msr());
     let cpu = fixed_ctrl(
         CPU_HLT_EXITING
             | CPU_USE_IO_BITMAPS
             | CPU_USE_MSR_BITMAPS
             | CPU_ACTIVATE_SECONDARY,
-        IA32_VMX_PROCBASED_CTLS,
+        procbased_ctls_msr(),
     );
+    // Secondary controls don't have a TRUE variant — IA32_VMX_PROCBASED_
+    // CTLS2 is used directly. SDM Appendix A.3.3 / A.3.4.
     let secondary = fixed_ctrl(
         SEC_ENABLE_EPT
             | SEC_UNRESTRICTED_GUEST
@@ -628,10 +680,10 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     // next entry (uncertain behaviour) and the host's EFER stays
     // unchanged across exit (also dangerous on transitioning the
     // host back to long mode).
-    let entry = fixed_ctrl(ENTRY_LOAD_IA32_EFER, IA32_VMX_ENTRY_CTLS);
+    let entry = fixed_ctrl(ENTRY_LOAD_IA32_EFER, entry_ctls_msr());
     let exit = fixed_ctrl(
         EXIT_HOST_ADDR_SPACE_SIZE | EXIT_SAVE_IA32_EFER | EXIT_LOAD_IA32_EFER,
-        IA32_VMX_EXIT_CTLS,
+        exit_ctls_msr(),
     );
 
     vmwrite(PIN_BASED_VM_EXEC_CONTROL, pin as u64)?;
