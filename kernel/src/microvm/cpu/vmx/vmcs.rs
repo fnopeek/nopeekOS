@@ -1178,6 +1178,49 @@ pub fn read_exit_intr_error_code() -> Result<u64, &'static str> {
     vmread(VM_EXIT_INTR_ERROR_CODE)
 }
 
+/// Diagnostic dump after a VM-entry-fail exit (reason 33/34/41).
+/// Pulls the fields the CPU consistency-checks at entry so we can tell
+/// which one tripped. SDM Vol 3 §26.3.1 enumerates the rules. Common
+/// failures: IA-32e/CR/EFER mismatch (long-mode triad not coherent),
+/// CS access rights vs CS selector RPL, segment limits, etc.
+pub fn dump_entry_fail_state() {
+    use crate::kprintln;
+    let cr0     = vmread(GUEST_CR0).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let cr3     = vmread(GUEST_CR3).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let cr4     = vmread(GUEST_CR4).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let efer    = vmread(GUEST_IA32_EFER).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let rip     = vmread(GUEST_RIP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let rflags  = vmread(GUEST_RFLAGS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let rsp     = vmread(GUEST_RSP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let entry   = vmread(VM_ENTRY_CONTROLS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let cs_sel  = vmread(GUEST_CS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let cs_base = vmread(GUEST_CS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let cs_lim  = vmread(GUEST_CS_LIMIT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let cs_ar   = vmread(GUEST_CS_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let act     = vmread(GUEST_ACTIVITY_STATE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let vminst  = vmread(VM_INSTRUCTION_ERROR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let lma     = (efer >> 10) & 1;
+    let lme     = (efer >> 8) & 1;
+    let pg      = (cr0 >> 31) & 1;
+    let pe      = cr0 & 1;
+    let pae     = (cr4 >> 5) & 1;
+    let ia32e   = (entry >> 9) & 1;
+    kprintln!("[vmx-fail] VM_INSTRUCTION_ERROR = {}", vminst);
+    kprintln!("[vmx-fail] CR0={:#018x} (PE={} PG={})  CR4={:#018x} (PAE={})",
+        cr0, pe, pg, cr4, pae);
+    kprintln!("[vmx-fail] CR3={:#018x}", cr3);
+    kprintln!("[vmx-fail] EFER={:#018x} (LME={} LMA={})  ENTRY_CTLS={:#x} (IA32E={})",
+        efer, lme, lma, entry, ia32e);
+    kprintln!("[vmx-fail] consistency: want IA32E == LMA: {} (have IA32E={}, LMA={}) → {}",
+        if ia32e == lma { "OK" } else { "MISMATCH ←" },
+        ia32e, lma,
+        if ia32e == lma { "rule passes" } else { "would fail SDM §26.3.1.1" });
+    kprintln!("[vmx-fail] RIP={:#018x} RSP={:#018x} RFLAGS={:#x}", rip, rsp, rflags);
+    kprintln!("[vmx-fail] CS  sel={:#x} base={:#018x} lim={:#x} ar={:#x}",
+        cs_sel, cs_base, cs_lim, cs_ar);
+    kprintln!("[vmx-fail] activity_state={}", act);
+}
+
 /// Sync VM_ENTRY_CONTROLS' IA-32e-mode-guest bit to GUEST_IA32_EFER.LMA.
 /// VMX requires the two to match at entry: if the guest is currently
 /// in long mode (LMA=1, set automatically by the CPU when CR0.PG=1

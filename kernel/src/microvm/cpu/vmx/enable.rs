@@ -1446,6 +1446,15 @@ impl VmContext {
                         self.serial.panic_msg_str(),
                     );
                 }
+                // VM-entry failure (33/34/41): dump guest state so we can
+                // tell *which* consistency check the CPU rejected.
+                // Bare-metal NUC reports 33 right after Linux's CR3
+                // long-mode trampoline — likely the IA-32e/CR/EFER
+                // triad is inconsistent and we need to see exactly
+                // which field. SDM Vol 3 §26.3.1 enumerates the checks.
+                if basic == 33 || basic == 34 || basic == 41 {
+                    vmcs::dump_entry_fail_state();
+                }
                 self.io_stats.dump();
                 self.trace.dump();
                 last_outcome = Some(outcome);
