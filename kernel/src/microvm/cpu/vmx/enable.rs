@@ -264,8 +264,15 @@ fn run_substrate_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
     let mut io_bytes: [u8; 32] = [0; 32];
     let mut io_byte_n: usize = 0;
 
+    // FPU areas required by run_guest_once's in-asm xsave/xrstor.
+    // The substrate stub doesn't touch FPU but the asm unconditionally
+    // brackets vmresume with host/guest FPU swap; pass valid areas.
+    let mut host_fpu = crate::microvm::cpu::FpuArea::boxed();
+    let mut guest_fpu = crate::microvm::cpu::FpuArea::boxed();
+
     for _ in 0..MAX_ITERATIONS {
-        let outcome = vmcs::run_guest_once(&mut regs, launched)?;
+        let outcome = vmcs::run_guest_once(
+            &mut regs, launched, &mut *host_fpu, &mut *guest_fpu)?;
         launched = true;
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
 
@@ -1011,20 +1018,18 @@ impl VmContext {
             let _ = vmcs::write_entry_intr_info(self.reinject);
             self.reinject = 0;
         }
-        // FPU swap (KVM kvm_load/put_guest_fpu): VMRESUME preserves no
-        // x87/SSE/AVX/AVX-512. Restore host FPU before `?` so an entry
-        // error can't strand the host on guest FPU.
-        // SAFETY: CR4.OSXSAVE=1 on every core; areas valid + aligned.
-        unsafe {
-            crate::microvm::cpu::fpu_xsave(&mut *self.host_fpu);
-            crate::microvm::cpu::fpu_xrstor(&*self.guest_fpu);
-        }
-        let result = vmcs::run_guest_once(&mut self.regs, self.launched);
-        // SAFETY: as above; save guest FPU, restore host's.
-        unsafe {
-            crate::microvm::cpu::fpu_xsave(&mut *self.guest_fpu);
-            crate::microvm::cpu::fpu_xrstor(&*self.host_fpu);
-        }
+        // FPU host↔guest swap is now embedded inside run_guest_once's
+        // asm (mirror of SVM v0.172.53), bracketing VMRESUME with zero
+        // compiler-emittable code between xrstor and vmresume. A +avx2
+        // kernel can spill `vmovups ymm` anywhere between a Rust
+        // helper and the asm, clobbering the just-restored guest FPU
+        // — putting xsave/xrstor in-asm closes that window. Pass the
+        // host/guest FPU pointers in; the asm save/restore mask=-1
+        // (current-XCR0 components; guest XCR0 ⊇ host's via XSETBV
+        // pass-through).
+        let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.host_fpu;
+        let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.guest_fpu;
+        let result = vmcs::run_guest_once(&mut self.regs, self.launched, hf, gf);
         let outcome = result?;
         self.launched = true;
         // Consume the VM_ENTRY_INTR_INFO slot. On bare-metal VMX the
