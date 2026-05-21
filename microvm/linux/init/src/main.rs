@@ -148,28 +148,27 @@ fn launch_wayland(kmsg_fd: i64) {
     // /run/udev/data to be populated before cage enumerates. Degrades
     // with a WARN if eudev is absent (older bundle) — cage still
     // starts, just input/hotplug-blind.
+    // Standard LibreWolf config — only the prefs our env actually
+    // demands (no GPU / GL → software webrender; userChrome.css must
+    // load to hide the titlebar buttons that crash the browser when
+    // clicked under cage; dark mode the user asked for). Everything
+    // else stays default: e10s, fission, content/RDD/GMP sandboxes,
+    // OCSP, telemetry, addons — like a fresh install. The previous
+    // crippled set masked real bugs; we'd rather debug LibreWolf with
+    // a real LibreWolf.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
-                 if [ -n \"$NPT\" ]; then date -s @\"$NPT\" >/dev/null 2>&1 \
-                   && echo \"[wl] clock set from host: $(date -u)\" \
-                   || echo '[wl] WARN: date -s failed'; \
-                 else echo '[wl] WARN: no nopeektime= on cmdline (TLS will fail)'; fi; \
+                 [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
                  echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
                  echo 1 > /proc/sys/kernel/printk 2>/dev/null; \
-                 echo '[wl] print-fatal-signals=1, printk=1 (crash visible, no bulk spam)'; \
-                 (hostname nopeek 2>/dev/null \
-                   || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null) \
-                   && echo '[wl] hostname=nopeek (silences (none) self-lookup)' \
-                   || echo '[wl] WARN: could not set hostname'; \
+                 hostname nopeek 2>/dev/null \
+                   || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
-                 mount -t tmpfs -o mode=0755 tmpfs /run \
-                   || echo '[wl] WARN: /run tmpfs mount failed'; \
+                 mount -t tmpfs -o mode=0755 tmpfs /run 2>/dev/null; \
                  mkdir -p /run/udev; \
-                 udevd --daemon 2>/dev/null \
-                   || echo '[wl] WARN: udevd failed (input + resize-hotplug degraded)'; \
+                 udevd --daemon 2>/dev/null; \
                  udevadm trigger --type=devices --action=add 2>/dev/null; \
                  udevadm settle --timeout=10 2>/dev/null; \
-                 echo \"[wl] udev up; input: $(ls /dev/input 2>/dev/null | tr '\\n' ' ')\"; \
                  IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
                  ip link set \"$IFACE\" up 2>/dev/null \
                    || ifconfig \"$IFACE\" up 2>/dev/null; \
@@ -178,29 +177,14 @@ fn launch_wayland(kmsg_fd: i64) {
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
                  echo 'nameserver 10.99.0.1' > /tmp/resolv.conf; \
-                 mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null \
-                   || echo '[wl] WARN: resolv.conf bind failed'; \
-                 echo \"[wl] net: iface=$IFACE; $(ip route 2>/dev/null | tr '\\n' ';')\"; \
+                 mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
                  mkdir -p /tmp/moz; : > /tmp/moz/user.js; \
                  for p in \
-                   'browser.tabs.remote.autostart|false' \
-                   'fission.autostart|false' \
-                   'network.process.enabled|false' \
                    'layers.gpu-process.enabled|false' \
                    'gfx.webrender.software|true' \
-                   'security.sandbox.content.level|0' \
-                   'extensions.autoDisableScopes|15' \
-                   'extensions.startupScanScopes|0' \
-                   'toolkit.startup.max_resumed_crashes|-1' \
-                   'browser.shell.checkDefaultBrowser|false' \
-                   'browser.sessionstore.resume_from_crash|false' \
-                   'security.OCSP.enabled|0' \
-                   'security.OCSP.require|false' \
-                   'network.dns.echconfig.enabled|false' \
-                   'gfx.webrender.partial|false' \
-                   'gfx.webrender.compositor.force-enabled|false' \
-                   'widget.dmabuf.force-enabled|false' \
                    'gfx.canvas.accelerated|false' \
+                   'widget.dmabuf.force-enabled|false' \
+                   'browser.shell.checkDefaultBrowser|false' \
                    'ui.systemUsesDarkTheme|1' \
                    'browser.theme.toolbar-theme|0' \
                    'browser.theme.content-theme|0' \
@@ -215,40 +199,14 @@ fn launch_wayland(kmsg_fd: i64) {
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
-                 MOZ_ENABLE_WAYLAND=1 MOZ_DISABLE_RDD_SANDBOX=1 \
-                 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
+                 MOZ_ENABLE_WAYLAND=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo \"<0>[drm-probe] sysfs topology: $(ls -d /sys/class/drm/* 2>/dev/null | tr '\\n' ' ')\" > /dev/kmsg; \
-                 ( prev='__init__'; \
-                   while true; do \
-                     cur=''; \
-                     for c in /sys/class/drm/card*-*; do \
-                       [ -d \"$c\" ] || continue; \
-                       n=${c##*/}; \
-                       s=$(cat \"$c/status\" 2>/dev/null); \
-                       m=$(cat \"$c/modes\" 2>/dev/null | head -1); \
-                       cur=\"$cur [$n status=$s preferred=$m]\"; \
-                     done; \
-                     if [ \"$cur\" != \"$prev\" ]; then \
-                       echo \"<0>[drm-probe]$cur\" > /dev/kmsg; \
-                       for c in /sys/class/drm/card*-*; do \
-                         [ -d \"$c\" ] || continue; \
-                         if echo change > \"$c/uevent\" 2>/dev/null; then \
-                           echo \"<0>[drm-probe] hpd-poke ${c##*/}\" > /dev/kmsg; \
-                         fi; \
-                       done; \
-                       prev=\"$cur\"; \
-                     fi; \
-                     sleep 1; \
-                   done \
-                 ) & \
-                 echo '[wl] launching cage -- librewolf https://example.com'; \
                  cage -- librewolf --no-remote --profile /tmp/moz https://example.com \
                    >/dev/null 2>&1; \
                  rc=$?; echo \"[wl] cage exited rc=$rc\"; \
                  dmesg 2>/dev/null \
-                   | grep -iE 'segfault|fatal signal|Comm:|RIP:|RSP:|Code:|libgallium|glxtest|librewolf|cage' \
+                   | grep -iE 'segfault|fatal signal|Comm:|RIP:|RSP:|Code:' \
                    | tail -40 | while read L; do echo \"<0>[crash] $L\" > /dev/kmsg; done; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
