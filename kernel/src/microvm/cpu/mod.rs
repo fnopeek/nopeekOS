@@ -139,7 +139,13 @@ static VENDOR: Mutex<Vendor> = Mutex::new(Vendor::Unknown("not detected yet"));
 /// Identify the CPU via CPUID leaf 0 vendor string. Three known
 /// strings: `GenuineIntel` (Intel), `AuthenticAMD` (AMD), anything
 /// else returns `Unknown` with the raw bytes lost.
-fn detect_vendor() -> Vendor {
+///
+/// Standalone (no kernel state needed): safe to call from boot
+/// init paths that run BEFORE `microvm::cpu::init()` has set the
+/// cached `VENDOR` static. `smp::per_core::init_dedicated_vm_core`
+/// uses this to vendor-gate A2 without writing its own CPUID
+/// inline asm (the v0.172.62 attempt hung AMD QEMU).
+pub fn detect_vendor() -> Vendor {
     let (_, ebx, ecx, edx) = vmx::host_cpuid(0, 0);
     // Vendor string is ebx, edx, ecx (yes, that order — Intel SDM
     // Vol. 2A §3.3 "CPUID Vendor String").

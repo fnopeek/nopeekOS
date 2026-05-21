@@ -195,11 +195,43 @@ const MIN_CORES_FOR_DEDICATED: usize = 3;
 /// stealing; Core 0 stays the IRQ/compositor/intent core regardless.
 pub fn init_dedicated_vm_core(worker_count: usize) {
     let total = worker_count + 1; // + BSP
-    if A2_DEDICATED_CORE_ENABLED && worker_count >= 1 && total >= MIN_CORES_FOR_DEDICATED {
+
+    // A2 dedicated-core path was hardened on QEMU/AMD-SVM through four
+    // SVM-specific correctness fixes (v0.172.34/35/36/38 + v0.172.42).
+    // The Intel-VMX equivalents (VMCS host-state lifecycle, IDT
+    // vectoring info, MSR auto-save/load) are still pending audit —
+    // bare-metal NUC reports `[microvm] guest running` but Linux
+    // never produces an earlycon byte. Until VMX-A2 has its own
+    // correctness pass, gate by vendor: AMD keeps the dedicated path
+    // (validated), Intel falls back to cooperative Core-0 slicing
+    // (the byte-identical pre-A2 model).
+    //
+    // Vendor-detect via the existing `microvm::cpu::detect_vendor`
+    // helper. It uses the well-tested `vmx::host_cpuid` wrapper
+    // (lateout("esi") binding + nostack + preserves_flags), unlike
+    // v0.172.62's hand-rolled inline asm which hung QEMU/AMD on the
+    // first OTA-deploy. `detect_vendor` is stateless — safe to call
+    // before `microvm::cpu::init` has populated the static VENDOR.
+    let is_amd = matches!(
+        crate::microvm::cpu::detect_vendor(),
+        crate::microvm::cpu::Vendor::Amd,
+    );
+
+    let dedicate = A2_DEDICATED_CORE_ENABLED
+        && is_amd
+        && worker_count >= 1
+        && total >= MIN_CORES_FOR_DEDICATED;
+
+    if dedicate {
         DEDICATED_VM_CORE.store(worker_count as u32, Ordering::Release);
         crate::kprintln!(
             "[npk] smp: core {} dedicated to microvm ({} cores, carved out of work-stealing)",
             worker_count, total
+        );
+    } else if !is_amd && total >= MIN_CORES_FOR_DEDICATED {
+        crate::kprintln!(
+            "[npk] smp: {} core(s) — A2 disabled (vendor-gated, unvalidated on this CPU) → microvm cooperative on Core 0",
+            total
         );
     } else {
         crate::kprintln!(
