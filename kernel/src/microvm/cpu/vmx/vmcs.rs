@@ -155,8 +155,6 @@ const CR4_READ_SHADOW: u64 = 0x6006;
 const VM_INSTRUCTION_ERROR: u64 = 0x4400;
 const VM_EXIT_INTR_INFO: u64 = 0x4404;
 const VM_EXIT_INTR_ERROR_CODE: u64 = 0x4406;
-const IDT_VECTORING_INFO_FIELD: u64 = 0x4408;
-const IDT_VECTORING_ERROR_CODE: u64 = 0x440A;
 const VM_EXIT_INSTRUCTION_LEN: u64 = 0x440C;
 // VM_EXIT_REASON encoding 0x4402 is referenced as a literal inside
 // the run_guest_once asm! block (Intel-syntax `mov rcx, 0x4402`).
@@ -1178,47 +1176,6 @@ pub fn read_exit_intr_info() -> Result<u64, &'static str> {
 /// meaningful when bit 11 of VM_EXIT_INTR_INFO is set.
 pub fn read_exit_intr_error_code() -> Result<u64, &'static str> {
     vmread(VM_EXIT_INTR_ERROR_CODE)
-}
-
-/// Read IDT_VECTORING_INFORMATION_FIELD (SDM Vol 3 §27.2.4). The CPU
-/// sets this when a VM-exit interrupted the guest in the middle of
-/// vectoring an event through its IDT (i.e. the host IRQ landed
-/// between the CPU's "decided to deliver vector V" and "actually
-/// pushed it onto the guest stack"). Encoding mirrors VM_ENTRY_
-/// INTR_INFO exactly so the value can be re-injected verbatim:
-///   bits 7:0  = vector,  bits 10:8 = type (0=ext IRQ, 2=NMI,
-///   3=hw exc, 4=sw int, 5=privsw, 6=sw exc), bit 11 = error-code
-///   valid, bit 31 = valid.
-/// Must be re-injected on the next entry or the guest loses an
-/// interrupt mid-vectoring → corrupt state (the VMX equivalent of
-/// the SVM EXITINTINFO/`svm_complete_interrupts` path; see svm
-/// enable.rs v0.172.36+).
-pub fn read_idt_vectoring_info() -> Result<u64, &'static str> {
-    vmread(IDT_VECTORING_INFO_FIELD)
-}
-
-/// Read IDT_VECTORING_ERROR_CODE — companion to IDT_VECTORING_INFO_
-/// FIELD when bit 11 is set. We currently only re-inject external
-/// IRQs (type 0) and NMIs (type 2), neither of which carry an error
-/// code, so this is unused but kept for symmetry with the exit-info
-/// readers and future use if exception re-injection lands.
-#[allow(dead_code)]
-pub fn read_idt_vectoring_error_code() -> Result<u64, &'static str> {
-    vmread(IDT_VECTORING_ERROR_CODE)
-}
-
-/// Raw write to VM_ENTRY_INTR_INFO_FIELD. Used to (a) inject a
-/// freshly-decided event with a full info word (e.g. when the value
-/// comes from `IDT_VECTORING_INFO_FIELD` and must be replayed
-/// verbatim), and (b) defensively clear the slot to 0 after every
-/// VMRESUME. On bare-metal VMX the CPU auto-clears the valid bit
-/// after a successful injection (SDM §27.6), but under nested VMX
-/// (KVM emulating VMX on AMD) it MAY leave the bit set — left there,
-/// the next VMRESUME re-injects the same event = phantom duplicate
-/// interrupt → cumulative guest corruption. This is the VMX
-/// equivalent of the SVM EVENTINJ-stale bug fixed in v0.172.42.
-pub fn write_entry_intr_info(info: u64) -> Result<(), &'static str> {
-    vmwrite(VM_ENTRY_INTR_INFO_FIELD, info)
 }
 
 /// Diagnostic dump after a VM-entry-fail exit (reason 33/34/41).
