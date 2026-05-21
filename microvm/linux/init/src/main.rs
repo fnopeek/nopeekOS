@@ -205,7 +205,46 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.theme.toolbar-theme|0' \
                    'browser.theme.content-theme|0' \
                    'layout.css.prefers-color-scheme.content-override|0' \
-                   'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
+                   'toolkit.legacyUserProfileCustomizations.stylesheets|true' \
+                   'app.update.enabled|false' \
+                   'app.update.auto|false' \
+                   'app.update.checkInstallTime|false' \
+                   'app.update.background.scheduling.enabled|false' \
+                   'extensions.update.enabled|false' \
+                   'extensions.update.autoUpdateDefault|false' \
+                   'extensions.getAddons.cache.enabled|false' \
+                   'extensions.systemAddon.update.enabled|false' \
+                   'extensions.htmlaboutaddons.recommendations.enabled|false' \
+                   'extensions.webservice.discoverURL|""' \
+                   'services.settings.poll_interval|0' \
+                   'services.settings.server|""' \
+                   'browser.safebrowsing.malware.enabled|false' \
+                   'browser.safebrowsing.phishing.enabled|false' \
+                   'browser.safebrowsing.downloads.enabled|false' \
+                   'browser.safebrowsing.update.enabled|false' \
+                   'browser.search.update|false' \
+                   'browser.search.suggest.enabled|false' \
+                   'browser.startup.homepage_override.mstone|"ignore"' \
+                   'browser.contentblocking.report.lockwise.enabled|false' \
+                   'datareporting.healthreport.uploadEnabled|false' \
+                   'datareporting.policy.dataSubmissionEnabled|false' \
+                   'toolkit.telemetry.enabled|false' \
+                   'toolkit.telemetry.unified|false' \
+                   'toolkit.telemetry.archive.enabled|false' \
+                   'toolkit.telemetry.newProfilePing.enabled|false' \
+                   'toolkit.telemetry.shutdownPingSender.enabled|false' \
+                   'toolkit.telemetry.updatePing.enabled|false' \
+                   'toolkit.telemetry.bhrPing.enabled|false' \
+                   'toolkit.telemetry.firstShutdownPing.enabled|false' \
+                   'network.captive-portal-service.enabled|false' \
+                   'network.connectivity-service.enabled|false' \
+                   'browser.crashReports.unsubmittedCheck.enabled|false' \
+                   'browser.crashReports.unsubmittedCheck.autoSubmit2|false' \
+                   'browser.region.update.enabled|false' \
+                   'browser.discovery.enabled|false' \
+                   'identity.fxaccounts.enabled|false' \
+                   'browser.urlbar.suggest.searches|false' \
+                   'browser.urlbar.suggest.engines|false'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
