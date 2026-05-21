@@ -23,22 +23,25 @@
 
 #![allow(dead_code)]
 
-/// Canonical guest-RAM size: 1 GiB. Referenced by
-/// `vmx::ept::GUEST_WINDOW_BYTES`, `svm::npt::GUEST_WINDOW_BYTES`,
-/// `guest_fetch`, and `bzimage` so the size lives in exactly one
-/// place. B2 turns the per-VM size into a runtime value; this stays as
-/// the default/cap.
-pub const GUEST_RAM_BYTES: u64 = 1024 * 1024 * 1024;
+/// Canonical guest-RAM size: 2 GiB. Real-world browsers (Firefox/
+/// LibreWolf with e10s + content sandboxing on) routinely hit 1 GiB
+/// resident with a couple of moderate tabs — 1 GiB is below the
+/// floor of "browser actually works". Bumped from 1 GiB once B4
+/// multi-PD landed (the single-PD path capped us at 1 GiB).
+///
+/// Cap (host has 4 GiB QEMU / NUC bare metal has 16 GiB). With B3
+/// demand-paging on, only the 256 MiB boot window is committed
+/// contiguous at vm_open; the rest is faulted in 4 KiB at a time as
+/// the guest touches it.
+pub const GUEST_RAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// B3 demand-paging master switch. `false` → the whole guest is one
 /// contiguous block (boot window = full guest, no demand PTs, no
-/// scatter walk): behaviour bit-identical to the validated B2/A2
-/// (contiguous). `true` → the 256 MiB hybrid (contiguous boot + 4 KB
-/// demand). Default `false` until the demand-path corruption is
-/// fixed — the entire B3 architecture stays in the tree; only this
-/// flag gates it, so HEAD is never broken while we debug. Flip to
-/// `true` for a demand test run.
-pub const DEMAND_ENABLED: bool = false;
+/// scatter walk). `true` → the 256 MiB hybrid (contiguous boot
+/// window + 4 KiB demand region). Re-enabled to back the 2 GiB bump:
+/// a contiguous 2 GiB block on a 4 GiB host is fragile, demand-paging
+/// commits only touched pages and lets the host stay responsive.
+pub const DEMAND_ENABLED: bool = true;
 
 /// Which second-level paging format backs the demand region, so
 /// `GuestMem` can fault a page in without pulling in `cpu::Vendor`.

@@ -41,6 +41,11 @@ const GUEST_RAM_ALIGN_SLACK: usize = 511;
 const NPT_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
+const ONE_GB: u64 = 1024 * 1024 * 1024;
+/// Maximum guest RAM we can map: PDPT slots [0, 1, 2] hold guest-RAM
+/// PDs (1 GiB each), PDPT[3] is reserved for the MMIO scratch range.
+/// Mirrors `ept::MAX_GUEST_BYTES`.
+const MAX_GUEST_BYTES: u64 = 3 * ONE_GB;
 // Canonical size lives in `guest_mem`; this is its NPT-window twin.
 const GUEST_WINDOW_BYTES: u64 = crate::microvm::devices::guest_mem::GUEST_RAM_BYTES;
 
@@ -116,23 +121,25 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
     if guest_bytes == 0 || guest_bytes & (TWO_MB - 1) != 0 {
         return Err("NPT: guest_bytes must be a non-zero multiple of 2 MB");
     }
-    if guest_bytes > GUEST_WINDOW_BYTES {
-        return Err("NPT: guest_bytes exceeds single-PD window (B4: multi-PD)");
+    if guest_bytes > MAX_GUEST_BYTES {
+        return Err("NPT: guest_bytes > 3 GiB (PDPT[3] reserved for MMIO)");
     }
-    let guest_leaves = (guest_bytes / TWO_MB) as usize;
+    let guest_leaves = (guest_bytes / TWO_MB) as u64;
     // Identity substrate test (host_base = 0) stays all-2-MB; the real
     // window path is hybrid (contiguous boot + 4-KB demand region).
     let boot_leaves = if host_base == 0 {
         guest_leaves
     } else {
-        (boot_window_bytes(guest_bytes) / TWO_MB) as usize
+        boot_window_bytes(guest_bytes) / TWO_MB
     };
-    let pml4_phys = memory::allocate_frame()
-        .ok_or("OOM allocating NPT PML4")?;
-    let pdpt_phys = memory::allocate_frame()
-        .ok_or("OOM allocating NPT PDPT")?;
-    let pd_phys = memory::allocate_frame()
-        .ok_or("OOM allocating NPT PD")?;
+    let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
+
+    let pml4_phys = memory::allocate_frame().ok_or("OOM allocating NPT PML4")?;
+    let pdpt_phys = memory::allocate_frame().ok_or("OOM allocating NPT PDPT")?;
+    let mut pd_physs = [0u64; 3];
+    for p in 0..num_pds {
+        pd_physs[p] = memory::allocate_frame().ok_or("OOM allocating NPT PD")?;
+    }
 
     // SAFETY: freshly allocated, identity-mapped (host paging),
     // exclusive. All pages are 4 KB aligned (frame allocator
@@ -140,30 +147,39 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
     unsafe {
         core::ptr::write_bytes(pml4_phys as *mut u8, 0, 4096);
         core::ptr::write_bytes(pdpt_phys as *mut u8, 0, 4096);
-        core::ptr::write_bytes(pd_phys as *mut u8, 0, 4096);
+        for p in 0..num_pds {
+            core::ptr::write_bytes(pd_physs[p] as *mut u8, 0, 4096);
+        }
 
         // PML4[0] → PDPT (non-leaf, no PS bit).
         let pml4 = pml4_phys as *mut u64;
         pml4.write_volatile(pdpt_phys | NPT_P | NPT_RW | NPT_US);
 
-        // PDPT[0] → PD (non-leaf, covers [0, 1 GB)).
+        // PDPT[0..num_pds] → guest-RAM PDs (each covers 1 GiB).
         let pdpt = pdpt_phys as *mut u64;
-        pdpt.write_volatile(pd_phys | NPT_P | NPT_RW | NPT_US);
-
-        let pd = pd_phys as *mut u64;
-        // PD[0..boot_leaves] = 2-MB leaves → contiguous boot block
-        // (or the whole window for the identity substrate test).
-        for i in 0..boot_leaves {
-            let host_target = host_base + (i as u64) * TWO_MB;
-            let entry = host_target | NPT_P | NPT_RW | NPT_US | NPT_PS;
-            pd.add(i).write_volatile(entry);
+        for p in 0..num_pds {
+            pdpt.add(p).write_volatile(pd_physs[p] | NPT_P | NPT_RW | NPT_US);
         }
-        // PD[boot_leaves..guest_leaves] → fresh PT sub-tables, all 512
-        // 4-KB PTEs absent; faulted in by `demand_fault_in`.
-        for i in boot_leaves..guest_leaves {
-            let pt = memory::allocate_frame().ok_or("OOM allocating NPT demand PT")?;
-            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
-            pd.add(i).write_volatile(pt | NPT_P | NPT_RW | NPT_US);
+
+        // Populate each PD: [base_leaf, end_leaf) in this PD's window.
+        const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
+        for p in 0..num_pds {
+            let pd = pd_physs[p] as *mut u64;
+            let base_leaf = (p as u64) * LEAVES_PER_PD;
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            for leaf in base_leaf..end_leaf {
+                let local = (leaf - base_leaf) as usize;
+                if leaf < boot_leaves {
+                    let host_target = host_base + leaf * TWO_MB;
+                    let entry = host_target | NPT_P | NPT_RW | NPT_US | NPT_PS;
+                    pd.add(local).write_volatile(entry);
+                } else {
+                    let pt = memory::allocate_frame()
+                        .ok_or("OOM allocating NPT demand PT")?;
+                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+                    pd.add(local).write_volatile(pt | NPT_P | NPT_RW | NPT_US);
+                }
+            }
         }
 
         if with_mmio_scratch {
@@ -211,8 +227,18 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt = (pml4.read_volatile() & NPT_ADDR_MASK) as *const u64;
-        let pd = (pdpt.read_volatile() & NPT_ADDR_MASK) as *mut u64;
-        let pde = pd.add((gpa / TWO_MB) as usize).read_volatile();
+        // B4: pick the right guest-RAM PD from PDPT[0..3] by gpa.
+        let pdpt_idx = (gpa / ONE_GB) as usize;
+        if pdpt_idx >= 3 {
+            return None; // PDPT[3] is MMIO, never demand-faulted
+        }
+        let pdpt_entry = pdpt.add(pdpt_idx).read_volatile();
+        if pdpt_entry == 0 {
+            return None; // PD not present (gpa beyond advertised guest_bytes)
+        }
+        let pd = (pdpt_entry & NPT_ADDR_MASK) as *mut u64;
+        let pd_idx = ((gpa % ONE_GB) / TWO_MB) as usize;
+        let pde = pd.add(pd_idx).read_volatile();
         if pde == 0 || pde & NPT_PS != 0 {
             return None; // outside demand region / unexpected 2-MB leaf
         }
@@ -234,29 +260,38 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
 /// fixed tables. The contiguous boot block is freed by the caller.
 /// Mirrors `ept::release`.
 pub fn release(pml4_phys: u64, guest_bytes: u64) {
-    let boot_leaves = (boot_window_bytes(guest_bytes) / TWO_MB) as usize;
-    let guest_leaves = (guest_bytes / TWO_MB) as usize;
+    let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
+    let guest_leaves = guest_bytes / TWO_MB;
+    let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
+    const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
     // SAFETY: our own NPT; nothing references these after teardown.
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt_phys = pml4.read_volatile() & NPT_ADDR_MASK;
         let pdpt = pdpt_phys as *const u64;
-        let pd_phys = pdpt.read_volatile() & NPT_ADDR_MASK;
-        let pd = pd_phys as *const u64;
-        for i in boot_leaves..guest_leaves {
-            let pde = pd.add(i).read_volatile();
-            if pde == 0 || pde & NPT_PS != 0 {
-                continue;
-            }
-            let pt_phys = pde & NPT_ADDR_MASK;
-            let pt = pt_phys as *const u64;
-            for j in 0..512usize {
-                let pte = pt.add(j).read_volatile();
-                if pte & NPT_P != 0 {
-                    memory::deallocate_frame(pte & NPT_ADDR_MASK);
+        for p in 0..num_pds {
+            let pdpt_entry = pdpt.add(p).read_volatile();
+            if pdpt_entry == 0 { continue; }
+            let pd_phys = pdpt_entry & NPT_ADDR_MASK;
+            let pd = pd_phys as *const u64;
+            let base_leaf = (p as u64) * LEAVES_PER_PD;
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            for leaf in base_leaf..end_leaf {
+                if leaf < boot_leaves { continue; }
+                let local = (leaf - base_leaf) as usize;
+                let pde = pd.add(local).read_volatile();
+                if pde == 0 || pde & NPT_PS != 0 { continue; }
+                let pt_phys = pde & NPT_ADDR_MASK;
+                let pt = pt_phys as *const u64;
+                for j in 0..512usize {
+                    let pte = pt.add(j).read_volatile();
+                    if pte & NPT_P != 0 {
+                        memory::deallocate_frame(pte & NPT_ADDR_MASK);
+                    }
                 }
+                memory::deallocate_frame(pt_phys);
             }
-            memory::deallocate_frame(pt_phys);
+            memory::deallocate_frame(pd_phys);
         }
         let pd_high_phys = pdpt.add(3).read_volatile() & NPT_ADDR_MASK;
         if pd_high_phys != 0 {
@@ -271,7 +306,6 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
             }
             memory::deallocate_frame(pd_high_phys);
         }
-        memory::deallocate_frame(pd_phys);
         memory::deallocate_frame(pdpt_phys);
         memory::deallocate_frame(pml4_phys);
     }

@@ -508,7 +508,6 @@ impl VirtioGpu {
                 // the guest connector goes status_disconnected → the
                 // compositor tears down the output.
                 let enabled = !self.d4_disconnecting();
-                kprintln!("[gpu] GET_DISPLAY_INFO -> {}x{} enabled={}", dw, dh, enabled as u32);
                 build_display_info_resp(flags, fence_id, dw, dh, enabled)
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_2D => {
@@ -519,7 +518,6 @@ impl VirtioGpu {
                 if request.len() >= 24 + 8 {
                     let rid = u32::from_le_bytes([request[24], request[25], request[26], request[27]]);
                     self.resources.retain(|r| r.id != rid);
-                    kprintln!("[gpu] RESOURCE_UNREF id={}", rid);
                 }
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
@@ -532,7 +530,6 @@ impl VirtioGpu {
                     let rid = u32::from_le_bytes([request[24], request[25], request[26], request[27]]);
                     if let Some(r) = self.resources.iter_mut().find(|r| r.id == rid) {
                         r.backing.clear();
-                        kprintln!("[gpu] DETACH_BACKING id={}", rid);
                     }
                 }
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
@@ -566,7 +563,7 @@ impl VirtioGpu {
                 let (dw, dh) = crate::shade::surface::tile_size(crate::microvm::vm_window())
                     .unwrap_or((DISPLAY_W, DISPLAY_H));
                 let edid = build_edid(dw, dh);
-                kprintln!("[gpu] GET_EDID scanout={} -> 128 bytes ({}x{})", scanout, dw, dh);
+                let _ = scanout;
                 build_edid_resp(flags, fence_id, &edid)
             }
             _ => {
@@ -582,7 +579,6 @@ impl VirtioGpu {
         let format = u32::from_le_bytes([body[4],  body[5],  body[6],  body[7]]);
         let width  = u32::from_le_bytes([body[8],  body[9],  body[10], body[11]]);
         let height = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
-        kprintln!("[gpu] RESOURCE_CREATE_2D id={} fmt={} {}x{}", id, format, width, height);
         // Replace if id exists, else push.
         if let Some(r) = self.resources.iter_mut().find(|r| r.id == id) {
             r.format = format; r.width = width; r.height = height;
@@ -617,7 +613,7 @@ impl VirtioGpu {
             r.backing.push((addr, len));
             total_len += len as u64;
         }
-        kprintln!("[gpu] ATTACH_BACKING id={} {} entries, {} bytes", id, nr, total_len);
+        let _ = (id, nr, total_len);
     }
 
     fn handle_set_scanout(&mut self, body: &[u8]) {
@@ -892,7 +888,7 @@ impl VirtioGpu {
             CC_DEVICE_STATUS => {
                 let prev = self.device_status;
                 self.device_status = val as u8;
-                kprintln!("[gpu] device_status {:#04x} -> {:#04x}", prev, self.device_status);
+                let _ = prev;
                 if self.device_status == 0 {
                     for q in self.queues.iter_mut() {
                         *q = VirtQueue {

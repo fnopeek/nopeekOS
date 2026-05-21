@@ -992,13 +992,7 @@ impl VmContext {
                         let info: u64 = (vector as u64) | (1u64 << 31);
                         self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.consecutive_idle = 0;
-                        if let Some((tw, th)) =
-                            crate::shade::surface::tile_size(wid)
-                        {
-                            kprintln!(
-                                "[gpu] D4 reconnect IRQ (tile {}x{})", tw, th,
-                            );
-                        }
+                        let _ = wid;
                         continue;
                     }
                     // Phase 1: a fresh dirty from Shade and no cycle
@@ -1017,14 +1011,6 @@ impl VmContext {
                             let info: u64 = (vector as u64) | (1u64 << 31);
                             self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                             self.consecutive_idle = 0;
-                            if let Some((tw, th)) =
-                                crate::shade::surface::tile_size(wid)
-                            {
-                                kprintln!(
-                                    "[gpu] D4 disconnect IRQ (tile {}x{}, reconnect in 100ms)",
-                                    tw, th,
-                                );
-                            }
                             continue;
                         }
                     }
