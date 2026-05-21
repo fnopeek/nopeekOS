@@ -1290,10 +1290,14 @@ pub fn dump_entry_fail_state() {
     // VMX-fixed MSRs: tell us which CR0/CR4 bits the CPU rejects. If
     // guest CR0/CR4 has a bit cleared that FIXED0 says must-be-1, or
     // a bit set that FIXED1 says must-be-0, entry fails reason 33.
-    let cr0_f0  = unsafe { rdmsr(IA32_VMX_CR0_FIXED0) };
-    let cr0_f1  = unsafe { rdmsr(IA32_VMX_CR0_FIXED1) };
-    let cr4_f0  = unsafe { rdmsr(IA32_VMX_CR4_FIXED0) };
-    let cr4_f1  = unsafe { rdmsr(IA32_VMX_CR4_FIXED1) };
+    const IA32_VMX_CR0_FIXED0_MSR: u32 = 0x486;
+    const IA32_VMX_CR0_FIXED1_MSR: u32 = 0x487;
+    const IA32_VMX_CR4_FIXED0_MSR: u32 = 0x488;
+    const IA32_VMX_CR4_FIXED1_MSR: u32 = 0x489;
+    let cr0_f0  = unsafe { rdmsr(IA32_VMX_CR0_FIXED0_MSR) };
+    let cr0_f1  = unsafe { rdmsr(IA32_VMX_CR0_FIXED1_MSR) };
+    let cr4_f0  = unsafe { rdmsr(IA32_VMX_CR4_FIXED0_MSR) };
+    let cr4_f1  = unsafe { rdmsr(IA32_VMX_CR4_FIXED1_MSR) };
     let cr0_violation_0 = (cr0_f0 & !cr0) & 0xFFFF_FFFF;
     let cr0_violation_1 = (cr0 & !cr0_f1) & 0xFFFF_FFFF;
     let cr4_violation_0 = (cr4_f0 & !cr4) & 0xFFFF_FFFF;
