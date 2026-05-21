@@ -524,6 +524,19 @@ pub struct VmContext {
     /// the final size (R2 debounce). The dirty flag persists, so the
     /// final size is still delivered once the window reopens.
     last_cfg_tick: u64,
+    /// Event that was mid-delivery (vectoring through the guest IDT)
+    /// when the last VM-exit interrupted it (raw IDT_VECTORING_INFO_
+    /// FIELD, identical encoding to VM_ENTRY_INTR_INFO). Must be
+    /// re-injected on the next VMRESUME or the guest loses an
+    /// interrupt mid-vectoring → corrupt guest state (likely root
+    /// cause of bare-metal-NUC's exit reason 33 after the CR3 long-
+    /// mode trampoline; SDM §27.2.4). Mirror of SVM v0.172.36's
+    /// `reinject` field. Only type 0 (external IRQ) and type 2 (NMI)
+    /// are stashed — exceptions (type 3) and software ints (type 4)
+    /// re-occur naturally on the next entry because the faulting
+    /// RIP wasn't advanced (re-injecting would double-deliver; same
+    /// type-gate as SVM v0.172.38).
+    reinject: u64,
     /// Host/guest FPU (XSAVE) save areas — VMRESUME preserves neither.
     /// See `cpu::FpuArea`. guest_fpu starts zeroed = FPU init state.
     host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
@@ -590,6 +603,7 @@ impl VmContext {
                 consecutive_idle: 0,
                 last_timer_tick: 0,
                 last_cfg_tick: 0,
+                reinject: 0,
                 host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
             })
@@ -984,6 +998,19 @@ impl VmContext {
         if self.launched {
             vmcs::sync_entry_ia32e_with_efer()?;
         }
+        // Re-inject an event that was mid-delivery on the previous
+        // exit (SDM §27.2.4; mirrors SVM `svm_complete_interrupts` and
+        // our v0.172.36 fix). The single VM_ENTRY_INTR_INFO slot is
+        // claimed by re-inject with priority: a lost in-flight
+        // interrupt corrupts the guest far worse than a skipped fresh
+        // tick — fresh injects (timer / virtio IRQ) regenerate on the
+        // next EXTERNAL_INTERRUPT exit, but a mid-vectored event is
+        // gone forever if dropped. Overwrites any fresh inject a
+        // handler wrote on the previous iteration; that is intended.
+        if self.reinject != 0 {
+            let _ = vmcs::write_entry_intr_info(self.reinject);
+            self.reinject = 0;
+        }
         // FPU swap (KVM kvm_load/put_guest_fpu): VMRESUME preserves no
         // x87/SSE/AVX/AVX-512. Restore host FPU before `?` so an entry
         // error can't strand the host on guest FPU.
@@ -1000,6 +1027,34 @@ impl VmContext {
         }
         let outcome = result?;
         self.launched = true;
+        // Consume the VM_ENTRY_INTR_INFO slot. On bare-metal VMX the
+        // CPU auto-clears the valid bit after a successful injection
+        // (SDM §27.6), but under nested VMX (KVM emulating VMX) it
+        // MAY leave the bit set — the next VMRESUME would then
+        // re-inject the same event = phantom duplicate interrupt →
+        // cumulative guest corruption. KVM clears the field on every
+        // exit for exactly this; do the same. The reinject/handler
+        // sites re-arm the slot for the next VMRESUME as needed.
+        // This is the VMX equivalent of SVM v0.172.42's EVENTINJ
+        // clear.
+        let _ = vmcs::write_entry_intr_info(0);
+        // Did an event abort mid-vectoring through the guest IDT?
+        // IDT_VECTORING_INFO has the same encoding as VM_ENTRY_INTR_
+        // INFO; stash it verbatim for re-injection on the next entry.
+        // Type-gate to external IRQ (0) and NMI (2) only — exceptions
+        // (type 3, e.g. #PF / #GP) and software ints (type 4) MUST
+        // NOT be re-injected: the faulting RIP was not advanced
+        // (e.g. EPT-violation doesn't retire the access), so the
+        // guest re-executes the instruction and the exception
+        // re-occurs naturally; re-injecting too = double delivery.
+        // Mirrors SVM v0.172.38's type-gate.
+        let idtv = vmcs::read_idt_vectoring_info().unwrap_or(0);
+        if idtv & (1u64 << 31) != 0 {
+            let idtv_type = (idtv >> 8) & 0x7;
+            if idtv_type == 0 || idtv_type == 2 {
+                self.reinject = idtv;
+            }
+        }
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
         self.trace.record(basic, outcome.exit_qualification);
 
