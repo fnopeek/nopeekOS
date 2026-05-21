@@ -1094,21 +1094,33 @@ impl VmContext {
                 // place an idle guest will ever see it.
                 {
                     let wid = crate::microvm::vm_window();
-                    if wid != 0 && crate::shade::surface::display_dirty_peek(wid) {
-                        // R2 debounce: at most one config-change per
-                        // ~250 ms (25 host ticks). A tile drag retiles
-                        // every frame; firing each one made wlroots
-                        // rescan DRM connectors in a tight loop and
-                        // never settle on the final size. We only
-                        // `take_` (clear) the flag when we actually
-                        // fire, so a drag in progress keeps it dirty
-                        // and the FINAL size is delivered ≤250 ms
-                        // after the drag ends.
-                        let now = crate::interrupts::ticks();
-                        if now.wrapping_sub(self.last_cfg_tick) >= 25 {
+                    let now_d4 = crate::interrupts::ticks();
+                    // Phase 2 of any in-flight D4 cycle: reconnect IRQ.
+                    if self.pci.virtio_gpu.tick_d4(now_d4) {
+                        let vector = self.pic.vector_for_irq(9);
+                        let _ = vmcs::inject_external_irq(vector);
+                        self.consecutive_idle = 0;
+                        if let Some((tw, th)) =
+                            crate::shade::surface::tile_size(wid)
+                        {
+                            kprintln!(
+                                "[gpu] D4 reconnect IRQ (tile {}x{})", tw, th,
+                            );
+                        }
+                        continue;
+                    }
+                    // Phase 1: fresh dirty, no cycle in flight, debounce
+                    // ok → disconnect IRQ; tick_d4 fires reconnect 100 ms
+                    // later. R2 debounce ensures ≤4 cycles/sec during a
+                    // drag — only the final size sticks.
+                    if wid != 0
+                        && !self.pci.virtio_gpu.d4_disconnecting()
+                        && crate::shade::surface::display_dirty_peek(wid)
+                    {
+                        if now_d4.wrapping_sub(self.last_cfg_tick) >= 25 {
                             let _ = crate::shade::surface::take_display_dirty(wid);
-                            self.last_cfg_tick = now;
-                            self.pci.virtio_gpu.signal_display_change();
+                            self.last_cfg_tick = now_d4;
+                            self.pci.virtio_gpu.signal_display_change(now_d4);
                             let vector = self.pic.vector_for_irq(9);
                             let _ = vmcs::inject_external_irq(vector);
                             self.consecutive_idle = 0;
@@ -1116,7 +1128,7 @@ impl VmContext {
                                 crate::shade::surface::tile_size(wid)
                             {
                                 kprintln!(
-                                    "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
+                                    "[gpu] D4 disconnect IRQ (tile {}x{}, reconnect in 100ms)",
                                     tw, th,
                                 );
                             }
