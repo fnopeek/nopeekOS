@@ -1228,6 +1228,17 @@ pub fn write_entry_intr_info(info: u64) -> Result<(), &'static str> {
 /// CS access rights vs CS selector RPL, segment limits, etc.
 pub fn dump_entry_fail_state() {
     use crate::kprintln;
+    // Encodings of fields not declared at file top (kept local so the
+    // module's public surface doesn't grow for diagnostic-only use).
+    const GUEST_IA32_DEBUGCTL:  u64 = 0x2802;
+    const GUEST_IA32_PAT:       u64 = 0x2804;
+    const GUEST_IA32_PERF_GCTL: u64 = 0x2808;
+    const GUEST_SYSENTER_CS_F:  u64 = 0x482A;
+    const GUEST_SYSENTER_ESP_F: u64 = 0x6824;
+    const GUEST_SYSENTER_EIP_F: u64 = 0x6826;
+    const GUEST_FS_BASE_F:      u64 = 0x680E;
+    const GUEST_GS_BASE_F:      u64 = 0x6810;
+    const VM_EXIT_REASON_F:     u64 = 0x4402;
     let cr0     = vmread(GUEST_CR0).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cr3     = vmread(GUEST_CR3).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cr4     = vmread(GUEST_CR4).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
@@ -1237,6 +1248,22 @@ pub fn dump_entry_fail_state() {
     let rsp     = vmread(GUEST_RSP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let entry   = vmread(VM_ENTRY_CONTROLS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let exitc   = vmread(VM_EXIT_CONTROLS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let dbgctl  = vmread(GUEST_IA32_DEBUGCTL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gpat    = vmread(GUEST_IA32_PAT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gperf   = vmread(GUEST_IA32_PERF_GCTL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let sysencs = vmread(GUEST_SYSENTER_CS_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let sysenes = vmread(GUEST_SYSENTER_ESP_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let sysenei = vmread(GUEST_SYSENTER_EIP_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let fs_base = vmread(GUEST_FS_BASE_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gs_base = vmread(GUEST_GS_BASE_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_cr0   = vmread(HOST_CR0).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_cr3   = vmread(HOST_CR3).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_cr4   = vmread(HOST_CR4).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_efer  = vmread(HOST_IA32_EFER).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_rsp   = vmread(HOST_RSP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_rip   = vmread(HOST_RIP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_cs    = vmread(HOST_CS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let raw_rsn = vmread(VM_EXIT_REASON_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_sel  = vmread(GUEST_CS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_base = vmread(GUEST_CS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_lim  = vmread(GUEST_CS_LIMIT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
@@ -1313,6 +1340,26 @@ pub fn dump_entry_fail_state() {
     kprintln!("[vmx-fail] DR7={:#x}  PENDING_DBG={:#x}  VMCS_LINK={:#018x}",
         dr7, pdb, vlink);
     kprintln!("[vmx-fail] activity_state={}", act);
+    // MSR-like guest fields. Reserved-bit issues here trip §26.3.1.1
+    // even when the visible CR/EFER triad is consistent.
+    kprintln!("[vmx-fail] IA32_DEBUGCTL={:#018x}  IA32_PAT={:#018x}",
+        dbgctl, gpat);
+    kprintln!("[vmx-fail] IA32_PERF_GLOBAL_CTRL={:#018x}", gperf);
+    kprintln!("[vmx-fail] SYSENTER cs={:#x} esp={:#018x} eip={:#018x}",
+        sysencs, sysenes, sysenei);
+    kprintln!("[vmx-fail] FS.base={:#018x}  GS.base={:#018x}",
+        fs_base, gs_base);
+    // Host state — a HOST_* canonicity/coherency issue can also fail
+    // entry (basic reason stays 33 because guest is loaded first).
+    kprintln!("[vmx-fail] HOST CR0={:#018x} CR3={:#018x} CR4={:#018x}",
+        h_cr0, h_cr3, h_cr4);
+    kprintln!("[vmx-fail] HOST EFER={:#018x} CS={:#x} RIP={:#018x} RSP={:#018x}",
+        h_efer, h_cs, h_rip, h_rsp);
+    // Raw VM_EXIT_REASON. Bit 31 = VM-entry-failure indication; bit 12
+    // = pending MTF. Confirms this really is an entry-fail (vs an exit
+    // we misclassified).
+    kprintln!("[vmx-fail] VM_EXIT_REASON raw={:#x} (bit31={} = entry-fail flag)",
+        raw_rsn, (raw_rsn >> 31) & 1);
 }
 
 /// Sync VM_ENTRY_CONTROLS' IA-32e-mode-guest bit to GUEST_IA32_EFER.LMA.
