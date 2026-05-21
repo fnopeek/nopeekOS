@@ -212,13 +212,20 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 ( prev_mode=''; prev_stat=''; \
+                 echo \"[drm-probe] sysfs topology: $(ls -d /sys/class/drm/* 2>/dev/null | tr '\\n' ' ')\"; \
+                 ( prev='__init__'; \
                    while true; do \
-                     cur_mode=$(cat /sys/class/drm/card0-*/modes 2>/dev/null | head -1); \
-                     cur_stat=$(cat /sys/class/drm/card0-*/status 2>/dev/null); \
-                     if [ \"$cur_mode\" != \"$prev_mode\" ] || [ \"$cur_stat\" != \"$prev_stat\" ]; then \
-                       echo \"[drm-probe] mode_head=$cur_mode status=$cur_stat\"; \
-                       prev_mode=\"$cur_mode\"; prev_stat=\"$cur_stat\"; \
+                     cur=''; \
+                     for c in /sys/class/drm/card*-*; do \
+                       [ -d \"$c\" ] || continue; \
+                       n=${c##*/}; \
+                       s=$(cat \"$c/status\" 2>/dev/null); \
+                       m=$(cat \"$c/modes\" 2>/dev/null | tr '\\n' ',' | sed 's/,$//'); \
+                       cur=\"$cur [$n status=$s modes=$m]\"; \
+                     done; \
+                     if [ \"$cur\" != \"$prev\" ]; then \
+                       echo \"[drm-probe]$cur\"; \
+                       prev=\"$cur\"; \
                      fi; \
                      sleep 1; \
                    done \
