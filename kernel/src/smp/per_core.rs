@@ -195,11 +195,66 @@ const MIN_CORES_FOR_DEDICATED: usize = 3;
 /// stealing; Core 0 stays the IRQ/compositor/intent core regardless.
 pub fn init_dedicated_vm_core(worker_count: usize) {
     let total = worker_count + 1; // + BSP
-    if A2_DEDICATED_CORE_ENABLED && worker_count >= 1 && total >= MIN_CORES_FOR_DEDICATED {
+
+    // A2 dedicated-core path was hardened on QEMU/AMD-SVM through four
+    // SVM-specific correctness fixes (v0.172.34/35/36/38: complete
+    // host+guest vmsave/vmload bracket, host-restore before STGI,
+    // EXITINTINFO type-gate, EVENTINJ-clear post-VMRUN). The Intel
+    // VMX equivalents (VMCS-managed host-state, MSR-bitmap save/load,
+    // VM-entry/exit interrupt info handling) were never audited under
+    // the dedicated-core lifecycle. Bare-metal NUC reports the guest
+    // VMLAUNCH succeeds (`[microvm] guest running` lands) but Linux
+    // never produces an earlycon byte — classic symptom of the
+    // dedicated-core VMX state lifecycle being subtly wrong (host
+    // state corrupted on first VM-exit, etc.). Until VMX-A2 has its
+    // own correctness pass, gate by vendor: AMD keeps the dedicated
+    // path (validated), Intel falls back to cooperative Core-0
+    // slicing (the byte-identical pre-A2 model). Browser still works,
+    // just shares Core 0's cadence — that's the v0.172.11..v0.172.20
+    // path we already know surfs google.ch + multi-site for ~74 s.
+    // Vendor-detect inline via CPUID — runs BEFORE microvm::cpu::init
+    // sets the static VENDOR (smp::init → tss::init → microvm::init
+    // ordering in main.rs is fixed), so we can't use current_vendor()
+    // here yet. CPUID leaf 0 vendor string (EBX/EDX/ECX in that order
+    // per SDM Vol 2A §3.3) gives "AuthenticAMD" or "GenuineIntel".
+    let a2_for_vendor = unsafe {
+        let ebx: u32; let ecx: u32; let edx: u32;
+        let ebx_out: u64; let ecx_out: u64;
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0",
+            "cpuid",
+            "mov {0}, rbx",
+            "mov {1}, rcx",
+            "pop rbx",
+            out(reg) ebx_out,
+            out(reg) ecx_out,
+            out("eax") _,
+            out("edx") edx,
+        );
+        ebx = ebx_out as u32;
+        ecx = ecx_out as u32;
+        let v = [
+            (ebx & 0xFF) as u8, ((ebx >> 8) & 0xFF) as u8, ((ebx >> 16) & 0xFF) as u8, ((ebx >> 24) & 0xFF) as u8,
+            (edx & 0xFF) as u8, ((edx >> 8) & 0xFF) as u8, ((edx >> 16) & 0xFF) as u8, ((edx >> 24) & 0xFF) as u8,
+            (ecx & 0xFF) as u8, ((ecx >> 8) & 0xFF) as u8, ((ecx >> 16) & 0xFF) as u8, ((ecx >> 24) & 0xFF) as u8,
+        ];
+        match &v {
+            b"AuthenticAMD" => A2_DEDICATED_CORE_ENABLED,
+            _               => false,  // Intel & unknown: cooperative until VMX-A2 audited
+        }
+    };
+
+    if a2_for_vendor && worker_count >= 1 && total >= MIN_CORES_FOR_DEDICATED {
         DEDICATED_VM_CORE.store(worker_count as u32, Ordering::Release);
         crate::kprintln!(
             "[npk] smp: core {} dedicated to microvm ({} cores, carved out of work-stealing)",
             worker_count, total
+        );
+    } else if !a2_for_vendor && total >= MIN_CORES_FOR_DEDICATED {
+        crate::kprintln!(
+            "[npk] smp: {} core(s) — A2 disabled (vendor-gated, unvalidated on this CPU) → microvm cooperative on Core 0",
+            total
         );
     } else {
         crate::kprintln!(
