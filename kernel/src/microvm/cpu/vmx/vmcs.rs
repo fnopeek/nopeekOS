@@ -1236,10 +1236,37 @@ pub fn dump_entry_fail_state() {
     let rflags  = vmread(GUEST_RFLAGS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let rsp     = vmread(GUEST_RSP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let entry   = vmread(VM_ENTRY_CONTROLS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let exitc   = vmread(VM_EXIT_CONTROLS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_sel  = vmread(GUEST_CS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_base = vmread(GUEST_CS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_lim  = vmread(GUEST_CS_LIMIT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_ar   = vmread(GUEST_CS_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let ss_sel  = vmread(GUEST_SS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let ss_ar   = vmread(GUEST_SS_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let ds_sel  = vmread(GUEST_DS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let ds_ar   = vmread(GUEST_DS_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let es_sel  = vmread(GUEST_ES_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let es_ar   = vmread(GUEST_ES_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let fs_sel  = vmread(GUEST_FS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let fs_ar   = vmread(GUEST_FS_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let fs_base = vmread(GUEST_FS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gs_sel  = vmread(GUEST_GS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gs_ar   = vmread(GUEST_GS_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gs_base = vmread(GUEST_GS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let tr_sel  = vmread(GUEST_TR_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let tr_base = vmread(GUEST_TR_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let tr_lim  = vmread(GUEST_TR_LIMIT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let tr_ar   = vmread(GUEST_TR_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let ldtr_s  = vmread(GUEST_LDTR_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let ldtr_ar = vmread(GUEST_LDTR_AR_BYTES).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gdtr_b  = vmread(GUEST_GDTR_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let gdtr_l  = vmread(GUEST_GDTR_LIMIT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let idtr_b  = vmread(GUEST_IDTR_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let idtr_l  = vmread(GUEST_IDTR_LIMIT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let intr    = vmread(GUEST_INTERRUPTIBILITY_INFO).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let dr7     = vmread(GUEST_DR7).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let pdb     = vmread(GUEST_PENDING_DBG_EXCEPTIONS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let vlink   = vmread(VMCS_LINK_POINTER).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let act     = vmread(GUEST_ACTIVITY_STATE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let vminst  = vmread(VM_INSTRUCTION_ERROR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let lma     = (efer >> 10) & 1;
@@ -1252,15 +1279,39 @@ pub fn dump_entry_fail_state() {
     kprintln!("[vmx-fail] CR0={:#018x} (PE={} PG={})  CR4={:#018x} (PAE={})",
         cr0, pe, pg, cr4, pae);
     kprintln!("[vmx-fail] CR3={:#018x}", cr3);
-    kprintln!("[vmx-fail] EFER={:#018x} (LME={} LMA={})  ENTRY_CTLS={:#x} (IA32E={})",
-        efer, lme, lma, entry, ia32e);
+    kprintln!("[vmx-fail] EFER={:#018x} (LME={} LMA={})  ENTRY_CTLS={:#x} (IA32E={})  EXIT_CTLS={:#x}",
+        efer, lme, lma, entry, ia32e, exitc);
     kprintln!("[vmx-fail] consistency: want IA32E == LMA: {} (have IA32E={}, LMA={}) → {}",
         if ia32e == lma { "OK" } else { "MISMATCH ←" },
         ia32e, lma,
         if ia32e == lma { "rule passes" } else { "would fail SDM §26.3.1.1" });
     kprintln!("[vmx-fail] RIP={:#018x} RSP={:#018x} RFLAGS={:#x}", rip, rsp, rflags);
-    kprintln!("[vmx-fail] CS  sel={:#x} base={:#018x} lim={:#x} ar={:#x}",
-        cs_sel, cs_base, cs_lim, cs_ar);
+    // Segment-by-segment dump. AR bit 16 = unusable (segment skipped
+    // by VMX consistency checks). For IA-32e mode the load-bearing
+    // checks are: CS.L vs CS.D mutex; SS.RPL == CS.RPL even when SS
+    // null; TR type = 11 (busy 64-bit TSS); LDTR S=0 if usable;
+    // DS/ES/FS/GS S=1 + P=1 if usable. SDM Vol 3 §26.3.1.4.
+    kprintln!("[vmx-fail] CS   sel={:#06x} base={:#018x} lim={:#x} ar={:#x} (L={} D={} unusable={})",
+        cs_sel, cs_base, cs_lim, cs_ar,
+        (cs_ar >> 13) & 1, (cs_ar >> 14) & 1, (cs_ar >> 16) & 1);
+    kprintln!("[vmx-fail] SS   sel={:#06x} ar={:#x} (DPL={} unusable={})  CS.RPL={}",
+        ss_sel, ss_ar, (ss_ar >> 5) & 3, (ss_ar >> 16) & 1, cs_sel & 3);
+    kprintln!("[vmx-fail] DS   sel={:#06x} ar={:#x} (unusable={})", ds_sel, ds_ar, (ds_ar >> 16) & 1);
+    kprintln!("[vmx-fail] ES   sel={:#06x} ar={:#x} (unusable={})", es_sel, es_ar, (es_ar >> 16) & 1);
+    kprintln!("[vmx-fail] FS   sel={:#06x} base={:#018x} ar={:#x} (unusable={})",
+        fs_sel, fs_base, fs_ar, (fs_ar >> 16) & 1);
+    kprintln!("[vmx-fail] GS   sel={:#06x} base={:#018x} ar={:#x} (unusable={})",
+        gs_sel, gs_base, gs_ar, (gs_ar >> 16) & 1);
+    kprintln!("[vmx-fail] TR   sel={:#06x} base={:#018x} lim={:#x} ar={:#x} (type={} unusable={})",
+        tr_sel, tr_base, tr_lim, tr_ar, tr_ar & 0xF, (tr_ar >> 16) & 1);
+    kprintln!("[vmx-fail] LDTR sel={:#06x} ar={:#x} (S={} unusable={})",
+        ldtr_s, ldtr_ar, (ldtr_ar >> 4) & 1, (ldtr_ar >> 16) & 1);
+    kprintln!("[vmx-fail] GDTR base={:#018x} limit={:#x}", gdtr_b, gdtr_l);
+    kprintln!("[vmx-fail] IDTR base={:#018x} limit={:#x}", idtr_b, idtr_l);
+    kprintln!("[vmx-fail] INTERRUPTIBILITY={:#x} (STI={} MOV_SS={} SMI={} NMI={})",
+        intr, intr & 1, (intr >> 1) & 1, (intr >> 2) & 1, (intr >> 3) & 1);
+    kprintln!("[vmx-fail] DR7={:#x}  PENDING_DBG={:#x}  VMCS_LINK={:#018x}",
+        dr7, pdb, vlink);
     kprintln!("[vmx-fail] activity_state={}", act);
 }
 
