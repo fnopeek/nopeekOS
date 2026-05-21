@@ -300,12 +300,8 @@ impl VirtioBlk {
 
         if advanced {
             self.isr |= 1;
-            if self.serviced_log_count < 5 {
-                kprintln!("[virtio-blk] serviced q={} used_idx={}",
-                          queue_idx, new_used_idx);
-                self.serviced_log_count += 1;
-            }
         }
+        let _ = (queue_idx, new_used_idx);
         advanced
     }
 
@@ -458,12 +454,6 @@ impl VirtioBlk {
             // to pick up after the MMIO trap unwinds.
             let queue = ((off - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER) as u16;
             let _ = value; let _ = width;
-            // Diagnostic: log first ~5 notifies, then go silent.
-            if self.notify_log_count < 5 {
-                kprintln!("[virtio-blk] notify q={} (count={})",
-                          queue, self.notify_log_count + 1);
-                self.notify_log_count += 1;
-            }
             self.pending_kick_queue = Some(queue);
         } else if off >= ISR_OFF && off < ISR_OFF + ISR_LEN {
             // ISR is read-to-clear; writes ignored.
@@ -528,10 +518,7 @@ impl VirtioBlk {
             CC_DEVICE_STATUS => {
                 let prev = self.device_status;
                 self.device_status = val as u8;
-                kprintln!(
-                    "[virtio-blk] device_status {:#04x} -> {:#04x}",
-                    prev, self.device_status,
-                );
+                let _ = prev;
                 if self.device_status == 0 {
                     // Reset — clear queues, restore queue_size = MAX,
                     // bump config generation.
