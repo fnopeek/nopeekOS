@@ -1264,6 +1264,40 @@ pub fn dump_entry_fail_state() {
     let h_rip   = vmread(HOST_RIP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let h_cs    = vmread(HOST_CS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let raw_rsn = vmread(VM_EXIT_REASON_F).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    // Additional host fields: any HOST_* canonicity/coherency failure
+    // also fires reason 33 (host-state checked together with guest).
+    const HOST_SS_SEL:   u64 = 0x0C04;
+    const HOST_DS_SEL:   u64 = 0x0C06;
+    const HOST_FS_SEL:   u64 = 0x0C08;
+    const HOST_GS_SEL:   u64 = 0x0C0A;
+    const HOST_TR_SEL:   u64 = 0x0C0C;
+    const HOST_SYS_CS:   u64 = 0x4C00;
+    const HOST_SYS_ESP:  u64 = 0x6C10;
+    const HOST_SYS_EIP:  u64 = 0x6C12;
+    let h_ss    = vmread(HOST_SS_SEL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_ds    = vmread(HOST_DS_SEL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_fs    = vmread(HOST_FS_SEL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_gs    = vmread(HOST_GS_SEL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_tr    = vmread(HOST_TR_SEL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_fsb   = vmread(HOST_FS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_gsb   = vmread(HOST_GS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_trb   = vmread(HOST_TR_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_gdtr  = vmread(HOST_GDTR_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_idtr  = vmread(HOST_IDTR_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_syscs = vmread(HOST_SYS_CS).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_syses = vmread(HOST_SYS_ESP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let h_sysei = vmread(HOST_SYS_EIP).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    // VMX-fixed MSRs: tell us which CR0/CR4 bits the CPU rejects. If
+    // guest CR0/CR4 has a bit cleared that FIXED0 says must-be-1, or
+    // a bit set that FIXED1 says must-be-0, entry fails reason 33.
+    let cr0_f0  = unsafe { rdmsr(IA32_VMX_CR0_FIXED0) };
+    let cr0_f1  = unsafe { rdmsr(IA32_VMX_CR0_FIXED1) };
+    let cr4_f0  = unsafe { rdmsr(IA32_VMX_CR4_FIXED0) };
+    let cr4_f1  = unsafe { rdmsr(IA32_VMX_CR4_FIXED1) };
+    let cr0_violation_0 = (cr0_f0 & !cr0) & 0xFFFF_FFFF;
+    let cr0_violation_1 = (cr0 & !cr0_f1) & 0xFFFF_FFFF;
+    let cr4_violation_0 = (cr4_f0 & !cr4) & 0xFFFF_FFFF;
+    let cr4_violation_1 = (cr4 & !cr4_f1) & 0xFFFF_FFFF;
     let cs_sel  = vmread(GUEST_CS_SELECTOR).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_base = vmread(GUEST_CS_BASE).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cs_lim  = vmread(GUEST_CS_LIMIT).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
@@ -1360,6 +1394,26 @@ pub fn dump_entry_fail_state() {
     // we misclassified).
     kprintln!("[vmx-fail] VM_EXIT_REASON raw={:#x} (bit31={} = entry-fail flag)",
         raw_rsn, (raw_rsn >> 31) & 1);
+    kprintln!("[vmx-fail] HOST sel: CS={:#x} SS={:#x} DS={:#x} FS={:#x} GS={:#x} TR={:#x}",
+        h_cs, h_ss, h_ds, h_fs, h_gs, h_tr);
+    kprintln!("[vmx-fail] HOST FS.base={:#018x} GS.base={:#018x} TR.base={:#018x}",
+        h_fsb, h_gsb, h_trb);
+    kprintln!("[vmx-fail] HOST GDTR.base={:#018x} IDTR.base={:#018x}",
+        h_gdtr, h_idtr);
+    kprintln!("[vmx-fail] HOST SYSENTER cs={:#x} esp={:#018x} eip={:#018x}",
+        h_syscs, h_syses, h_sysei);
+    kprintln!("[vmx-fail] CR0_FIXED0={:#018x} CR0_FIXED1={:#018x}",
+        cr0_f0, cr0_f1);
+    kprintln!("[vmx-fail] CR4_FIXED0={:#018x} CR4_FIXED1={:#018x}",
+        cr4_f0, cr4_f1);
+    if cr0_violation_0 != 0 || cr0_violation_1 != 0 {
+        kprintln!("[vmx-fail] ← CR0 VIOLATION: missing-must-be-1={:#x}, set-must-be-0={:#x}",
+            cr0_violation_0, cr0_violation_1);
+    }
+    if cr4_violation_0 != 0 || cr4_violation_1 != 0 {
+        kprintln!("[vmx-fail] ← CR4 VIOLATION: missing-must-be-1={:#x}, set-must-be-0={:#x}",
+            cr4_violation_0, cr4_violation_1);
+    }
 }
 
 /// Sync VM_ENTRY_CONTROLS' IA-32e-mode-guest bit to GUEST_IA32_EFER.LMA.
