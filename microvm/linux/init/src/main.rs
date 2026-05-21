@@ -200,7 +200,11 @@ fn launch_wayland(kmsg_fd: i64) {
                    'gfx.webrender.partial|false' \
                    'gfx.webrender.compositor.force-enabled|false' \
                    'widget.dmabuf.force-enabled|false' \
-                   'gfx.canvas.accelerated|false'; \
+                   'gfx.canvas.accelerated|false' \
+                   'ui.systemUsesDarkTheme|1' \
+                   'browser.theme.toolbar-theme|0' \
+                   'browser.theme.content-theme|0' \
+                   'layout.css.prefers-color-scheme.content-override|0'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
@@ -220,11 +224,17 @@ fn launch_wayland(kmsg_fd: i64) {
                        [ -d \"$c\" ] || continue; \
                        n=${c##*/}; \
                        s=$(cat \"$c/status\" 2>/dev/null); \
-                       m=$(cat \"$c/modes\" 2>/dev/null | tr '\\n' ',' | sed 's/,$//'); \
-                       cur=\"$cur [$n status=$s modes=$m]\"; \
+                       m=$(cat \"$c/modes\" 2>/dev/null | head -1); \
+                       cur=\"$cur [$n status=$s preferred=$m]\"; \
                      done; \
                      if [ \"$cur\" != \"$prev\" ]; then \
                        echo \"<0>[drm-probe]$cur\" > /dev/kmsg; \
+                       for c in /sys/class/drm/card*-*; do \
+                         [ -d \"$c\" ] || continue; \
+                         if echo change > \"$c/uevent\" 2>/dev/null; then \
+                           echo \"<0>[drm-probe] hpd-poke ${c##*/}\" > /dev/kmsg; \
+                         fi; \
+                       done; \
                        prev=\"$cur\"; \
                      fi; \
                      sleep 1; \
