@@ -396,8 +396,6 @@ enum DnsOutcome {
 fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
     let q = parse_dns_query(dgram)?;
 
-    kprintln!("[nat] DNS query: \"{}\" (type={} id={:#06x})", q.name, q.qtype, q.id);
-
     let outcome = if q.qtype == 1 {
         match crate::net::dns::resolve(q.name.as_str()) {
             Some(ip) => DnsOutcome::Answer(ip),
@@ -411,12 +409,7 @@ fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
 
     let dns_payload = build_dns_reply(&q, &outcome);
     let frame = build_ipv4_udp_reply(src_ip, src_port, PORT_DNS, &dns_payload);
-
-    match &outcome {
-        DnsOutcome::Answer(ip) => kprintln!("[nat] DNS reply: {} → {}.{}.{}.{}", q.name, ip[0], ip[1], ip[2], ip[3]),
-        DnsOutcome::NoData     => kprintln!("[nat] DNS reply: {} → NODATA (type={})", q.name, q.qtype),
-        DnsOutcome::NxDomain   => kprintln!("[nat] DNS reply: {} → NXDOMAIN", q.name),
-    }
+    let _ = outcome;
     Some(frame)
 }
 
@@ -625,16 +618,13 @@ pub fn pump(
         let Some(frame) = frame else { break };
         if net.inject_rx(mem, &frame) {
             any = true;
-            let lg = PUMP_LOG.fetch_add(1, Ordering::Relaxed);
-            if lg < 32 {
-                kprintln!("[nat] L3 in: {} bytes -> guest", frame.len());
-            }
         } else {
             // Guest RX queue full — requeue and retry next pump.
             INBOUND_Q.lock().push_front(frame);
             break;
         }
     }
+    let _ = PUMP_LOG;
     any
 }
 

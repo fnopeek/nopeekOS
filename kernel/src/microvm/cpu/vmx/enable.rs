@@ -1100,13 +1100,7 @@ impl VmContext {
                         let vector = self.pic.vector_for_irq(9);
                         let _ = vmcs::inject_external_irq(vector);
                         self.consecutive_idle = 0;
-                        if let Some((tw, th)) =
-                            crate::shade::surface::tile_size(wid)
-                        {
-                            kprintln!(
-                                "[gpu] D4 reconnect IRQ (tile {}x{})", tw, th,
-                            );
-                        }
+                        let _ = wid;
                         continue;
                     }
                     // Phase 1: fresh dirty, no cycle in flight, debounce
@@ -1124,14 +1118,6 @@ impl VmContext {
                             let vector = self.pic.vector_for_irq(9);
                             let _ = vmcs::inject_external_irq(vector);
                             self.consecutive_idle = 0;
-                            if let Some((tw, th)) =
-                                crate::shade::surface::tile_size(wid)
-                            {
-                                kprintln!(
-                                    "[gpu] D4 disconnect IRQ (tile {}x{}, reconnect in 100ms)",
-                                    tw, th,
-                                );
-                            }
                             continue;
                         }
                     }

@@ -46,10 +46,13 @@ const EPTP_MEM_TYPE_WB: u64 = 6;
 const EPTP_WALK_LENGTH_4: u64 = 3 << 3; // 4 levels = walk length 3
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
-// 1 GB guest RAM — Firefox manifest spec target. Exactly fills one
-// PDPT entry's worth of 2 MB pages (512 leaves). Bumping past 1 GB
-// needs multi-PD support (split across PDPT entries). Canonical size
-// lives in `guest_mem`; this is its EPT-window twin.
+const ONE_GB: u64 = 1024 * 1024 * 1024;
+/// Maximum guest RAM we can map: PDPT slots [0, 1, 2] each cover 1 GiB
+/// of guest physical, PDPT[3] is reserved for the MMIO scratch range
+/// (IOAPIC/HPET/LAPIC). 3 GiB hard cap; bumping past that needs either
+/// rearranging the MMIO hole or growing the EPT to a second PDPT.
+const MAX_GUEST_BYTES: u64 = 3 * ONE_GB;
+// Canonical size lives in `guest_mem`; this is its EPT-window twin.
 const GUEST_WINDOW_BYTES: u64 = crate::microvm::devices::guest_mem::GUEST_RAM_BYTES;
 
 /// Slack frames `boot_frames_for` adds so `allocate_contiguous` can be
@@ -119,63 +122,70 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
     if guest_bytes == 0 || guest_bytes & (TWO_MB - 1) != 0 {
         return Err("EPT: guest_bytes must be a non-zero multiple of 2 MB");
     }
-    // Single PD covers ≤ 1 GiB (512 × 2-MB region). B4 adds multi-PD.
-    if guest_bytes > GUEST_WINDOW_BYTES {
-        return Err("EPT: guest_bytes exceeds single-PD window (B4: multi-PD)");
+    if guest_bytes > MAX_GUEST_BYTES {
+        return Err("EPT: guest_bytes > 3 GiB (PDPT[3] reserved for MMIO)");
     }
     let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
     let guest_leaves = guest_bytes / TWO_MB;
+    // One PD covers 1 GiB (512 × 2-MB leaves). Allocate as many PDs
+    // as the guest needs, chained off PDPT[0..num_pds).
+    let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
 
     let pml4_phys = memory::allocate_frame().ok_or("OOM: EPT PML4")?;
     let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
-    let pd_phys = memory::allocate_frame().ok_or("OOM: EPT PD")?;
     let pd_high_phys = memory::allocate_frame().ok_or("OOM: EPT PD_HIGH")?;
     let pt_dummy_phys = memory::allocate_frame().ok_or("OOM: EPT PT_DUMMY")?;
     let dummy_page_phys = memory::allocate_frame().ok_or("OOM: EPT dummy page")?;
+    let mut pd_physs = [0u64; 3];
+    for p in 0..num_pds {
+        pd_physs[p] = memory::allocate_frame().ok_or("OOM: EPT PD")?;
+    }
 
     // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
-        // PML4[0] → PDPT, R/W/X for sub-tree.
         let pml4 = pml4_phys as *mut u64;
         core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
         pml4.add(0).write_volatile(pdpt_phys | EPT_RWX);
 
-        // PDPT[0] → PD (covers [0, 1 GB)).
         let pdpt = pdpt_phys as *mut u64;
         core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
-        pdpt.add(0).write_volatile(pd_phys | EPT_RWX);
-        // PDPT[3] → PD_HIGH (covers [3 GB, 4 GB), MMIO range lives here).
+        // PDPT[0..num_pds] → guest-RAM PDs (each covers 1 GiB).
+        for p in 0..num_pds {
+            pdpt.add(p).write_volatile(pd_physs[p] | EPT_RWX);
+        }
+        // PDPT[3] → PD_HIGH (MMIO scratch lives in [3 GiB, 4 GiB)).
         pdpt.add(3).write_volatile(pd_high_phys | EPT_RWX);
 
-        let pd = pd_phys as *mut u64;
-        core::ptr::write_bytes(pd as *mut u8, 0, 4096);
-        // PD[0..boot_leaves] = 2-MB leaves → contiguous boot block.
-        for i in 0..boot_leaves {
-            let host_target = boot_base + i * TWO_MB;
-            pd.add(i as usize)
-                .write_volatile(host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
-        }
-        // PD[boot_leaves..guest_leaves] → fresh PT sub-tables, all 512
-        // 4-KB PTEs absent. `demand_fault_in` populates one PTE per
-        // EPT-violation; `release` walks these to free on teardown.
-        for i in boot_leaves..guest_leaves {
-            let pt = memory::allocate_frame().ok_or("OOM: EPT demand PT")?;
-            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
-            pd.add(i as usize).write_volatile(pt | EPT_RWX);
+        // Populate each PD: entries [0..512) cover [p*1GiB, (p+1)*1GiB).
+        const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
+        for p in 0..num_pds {
+            let pd = pd_physs[p] as *mut u64;
+            core::ptr::write_bytes(pd as *mut u8, 0, 4096);
+            let base_leaf = (p as u64) * LEAVES_PER_PD;
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            for leaf in base_leaf..end_leaf {
+                let local = (leaf - base_leaf) as usize;
+                if leaf < boot_leaves {
+                    let host_target = boot_base + leaf * TWO_MB;
+                    pd.add(local).write_volatile(
+                        host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
+                } else {
+                    let pt = memory::allocate_frame().ok_or("OOM: EPT demand PT")?;
+                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+                    pd.add(local).write_volatile(pt | EPT_RWX);
+                }
+            }
         }
 
         // PD_HIGH[502] + [503] → same PT_DUMMY (covers [0xFEC00000,
-        // 0xFF000000) = IOAPIC + HPET + LAPIC). Two PD entries
-        // aliased to one PT, so 4 MB of guest-phys all walk through
-        // the same 512-entry PT.
+        // 0xFF000000) = IOAPIC + HPET + LAPIC). Two PD entries aliased
+        // to one PT, so 4 MB of guest-phys all walk through the same
+        // 512-entry PT.
         let pd_high = pd_high_phys as *mut u64;
         core::ptr::write_bytes(pd_high as *mut u8, 0, 4096);
         pd_high.add(502).write_volatile(pt_dummy_phys | EPT_RWX);
         pd_high.add(503).write_volatile(pt_dummy_phys | EPT_RWX);
 
-        // PT_DUMMY[0..512] all → dummy_page (4 KB). 4 MB of guest-phys
-        // → 4 KB host scratch. PT entries are always 4-KB leaves;
-        // no leaf-bit needed (bit 7 must be 0 in EPT PTEs).
         let pt_dummy = pt_dummy_phys as *mut u64;
         core::ptr::write_bytes(pt_dummy as *mut u8, 0, 4096);
         core::ptr::write_bytes(dummy_page_phys as *mut u8, 0, 4096);
@@ -202,8 +212,17 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt = (pml4.read_volatile() & EPT_ADDR_MASK) as *const u64;
-        let pd = (pdpt.read_volatile() & EPT_ADDR_MASK) as *mut u64;
-        let pd_idx = (gpa / TWO_MB) as usize;
+        // B4: PDPT[0..3] holds the guest-RAM PDs (1 GiB each); pick by gpa.
+        let pdpt_idx = (gpa / ONE_GB) as usize;
+        if pdpt_idx >= 3 {
+            return None; // PDPT[3] is the MMIO hole, never demand-faulted
+        }
+        let pdpt_entry = pdpt.add(pdpt_idx).read_volatile();
+        if pdpt_entry == 0 {
+            return None; // PD not present (gpa beyond advertised guest_bytes)
+        }
+        let pd = (pdpt_entry & EPT_ADDR_MASK) as *mut u64;
+        let pd_idx = ((gpa % ONE_GB) / TWO_MB) as usize;
         let pde = pd.add(pd_idx).read_volatile();
         if pde == 0 || pde & EPT_LEAF != 0 {
             return None; // outside demand region / unexpected 2-MB leaf
@@ -229,28 +248,39 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
 pub fn release(pml4_phys: u64, guest_bytes: u64) {
     let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
     let guest_leaves = guest_bytes / TWO_MB;
+    let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
+    const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
     // SAFETY: our own EPT; nothing else references these frames after
     // VMXOFF + window teardown.
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt_phys = pml4.read_volatile() & EPT_ADDR_MASK;
         let pdpt = pdpt_phys as *const u64;
-        let pd_phys = pdpt.read_volatile() & EPT_ADDR_MASK;
-        let pd = pd_phys as *const u64;
-        for i in boot_leaves..guest_leaves {
-            let pde = pd.add(i as usize).read_volatile();
-            if pde == 0 || pde & EPT_LEAF != 0 {
-                continue;
-            }
-            let pt_phys = pde & EPT_ADDR_MASK;
-            let pt = pt_phys as *const u64;
-            for j in 0..512usize {
-                let pte = pt.add(j).read_volatile();
-                if pte & EPT_R != 0 {
-                    memory::deallocate_frame(pte & EPT_ADDR_MASK);
+        // Walk PDPT[0..num_pds] and free each guest-RAM PD + its demand
+        // PTs + demand frames.
+        for p in 0..num_pds {
+            let pdpt_entry = pdpt.add(p).read_volatile();
+            if pdpt_entry == 0 { continue; }
+            let pd_phys = pdpt_entry & EPT_ADDR_MASK;
+            let pd = pd_phys as *const u64;
+            let base_leaf = (p as u64) * LEAVES_PER_PD;
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            for leaf in base_leaf..end_leaf {
+                if leaf < boot_leaves { continue; }
+                let local = (leaf - base_leaf) as usize;
+                let pde = pd.add(local).read_volatile();
+                if pde == 0 || pde & EPT_LEAF != 0 { continue; }
+                let pt_phys = pde & EPT_ADDR_MASK;
+                let pt = pt_phys as *const u64;
+                for j in 0..512usize {
+                    let pte = pt.add(j).read_volatile();
+                    if pte & EPT_R != 0 {
+                        memory::deallocate_frame(pte & EPT_ADDR_MASK);
+                    }
                 }
+                memory::deallocate_frame(pt_phys);
             }
-            memory::deallocate_frame(pt_phys);
+            memory::deallocate_frame(pd_phys);
         }
         let pd_high_phys = pdpt.add(3).read_volatile() & EPT_ADDR_MASK;
         if pd_high_phys != 0 {
@@ -265,7 +295,6 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
             }
             memory::deallocate_frame(pd_high_phys);
         }
-        memory::deallocate_frame(pd_phys);
         memory::deallocate_frame(pdpt_phys);
         memory::deallocate_frame(pml4_phys);
     }
