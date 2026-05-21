@@ -984,15 +984,35 @@ impl VmContext {
                 // it. See the vmx mirror.
                 {
                     let wid = crate::microvm::vm_window();
-                    if wid != 0 && crate::shade::surface::display_dirty_peek(wid) {
-                        // R2 debounce — see the vmx mirror. One
-                        // config-change per ~250 ms; flag stays dirty
-                        // during a drag so the final size lands.
-                        let now = crate::interrupts::ticks();
-                        if now.wrapping_sub(self.last_cfg_tick) >= 25 {
+                    let now_d4 = crate::interrupts::ticks();
+                    // Phase 2 of any in-flight D4 cycle: fire reconnect
+                    // once the 100 ms disconnect window expired.
+                    if self.pci.virtio_gpu.tick_d4(now_d4) {
+                        let vector = self.pic.vector_for_irq(9);
+                        let info: u64 = (vector as u64) | (1u64 << 31);
+                        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.consecutive_idle = 0;
+                        if let Some((tw, th)) =
+                            crate::shade::surface::tile_size(wid)
+                        {
+                            kprintln!(
+                                "[gpu] D4 reconnect IRQ (tile {}x{})", tw, th,
+                            );
+                        }
+                        continue;
+                    }
+                    // Phase 1: a fresh dirty from Shade and no cycle
+                    // in flight → kick off disconnect.
+                    if wid != 0
+                        && !self.pci.virtio_gpu.d4_disconnecting()
+                        && crate::shade::surface::display_dirty_peek(wid)
+                    {
+                        // R2 debounce — one cycle per ~250 ms; flag stays
+                        // dirty during a drag so the final size lands.
+                        if now_d4.wrapping_sub(self.last_cfg_tick) >= 25 {
                             let _ = crate::shade::surface::take_display_dirty(wid);
-                            self.last_cfg_tick = now;
-                            self.pci.virtio_gpu.signal_display_change();
+                            self.last_cfg_tick = now_d4;
+                            self.pci.virtio_gpu.signal_display_change(now_d4);
                             let vector = self.pic.vector_for_irq(9);
                             let info: u64 = (vector as u64) | (1u64 << 31);
                             self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
@@ -1001,7 +1021,7 @@ impl VmContext {
                                 crate::shade::surface::tile_size(wid)
                             {
                                 kprintln!(
-                                    "[gpu] display-change IRQ fired (tile {}x{}, guest should re-query)",
+                                    "[gpu] D4 disconnect IRQ (tile {}x{}, reconnect in 100ms)",
                                     tw, th,
                                 );
                             }

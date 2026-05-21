@@ -201,6 +201,20 @@ pub struct VirtioGpu {
     /// Per-scanout bindings.
     scanouts: [Scanout; MAX_SCANOUTS],
 
+    /// D4 disconnect/reconnect state. wlroots/cage only ever picks an
+    /// output mode at connector-up time — a "preferred mode changed
+    /// while still connected" hotplug uevent is silently ignored. To
+    /// force a real mode-set on tile resize we synthesize a connector
+    /// disconnect (GET_DISPLAY_INFO reports enabled=0) immediately,
+    /// then a reconnect ~100 ms later with the new geometry + fresh
+    /// EDID. The compositor tears down the output on disconnect,
+    /// brings it back up on reconnect, and picks our new preferred
+    /// mode by spec.
+    ///
+    /// `Some(tick)` means we're in the disconnect window; reconnect
+    /// fires once `interrupts::ticks() >= tick`.
+    d4_disconnect_until: Option<u64>,
+
     /// First N flush events get a verbose log; afterwards we silently
     /// keep updating to avoid swamping the serial console.
     flush_log_count: u32,
@@ -244,6 +258,7 @@ impl VirtioGpu {
             flush_log_count: 0,
             transfer_log_count: 0,
             set_scanout_log_count: 0,
+            d4_disconnect_until: None,
         }
     }
 
@@ -260,17 +275,55 @@ impl VirtioGpu {
         self.pending_kick_queue.take()
     }
 
-    /// Shade resized the tile → tell the guest the display config
-    /// changed so it re-queries GET_DISPLAY_INFO and wlroots/cage
-    /// reflows the output to the new size (D4 live-resize). Sets the
-    /// device-cfg event + the config-change ISR bit + bumps the
-    /// config generation. The caller injects IRQ 9 right after (the
-    /// guest's virtio IRQ handler reads ISR, sees bit 1, runs the
-    /// config-changed work that reads `events_read`).
-    pub fn signal_display_change(&mut self) {
+    /// Shade resized the tile → start a D4 disconnect/reconnect cycle.
+    /// Phase 1 (this call): GET_DISPLAY_INFO will report the connector
+    /// as `enabled=0`, the guest sees `connector_status_disconnected`,
+    /// wlroots/cage tears down the output. Phase 2 (`tick_d4`, ~100 ms
+    /// later): GET_DISPLAY_INFO flips back to `enabled=1` with the new
+    /// W×H, the guest re-detects the connector, picks the preferred
+    /// mode from our fresh EDID, the compositor rebuilds the output
+    /// with the new size and propagates `xdg_surface.configure` to
+    /// the client.
+    ///
+    /// Why two phases: wlroots only mode-sets at connector-up time.
+    /// A "preferred mode changed while still connected" hotplug uevent
+    /// (which our prior signal_display_change emitted) is silently
+    /// dropped. The disconnect/reconnect round-trip is the one path
+    /// every Wayland compositor honors because it's what real HW does.
+    ///
+    /// Caller injects IRQ 9 right after this returns. Pass the current
+    /// host tick from `interrupts::ticks()`.
+    pub fn signal_display_change(&mut self, now: u64) {
+        const DISCONNECT_TICKS: u64 = 10; // ~100 ms at 100 Hz host-timer
+        self.d4_disconnect_until = Some(now.wrapping_add(DISCONNECT_TICKS));
         self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
         self.isr |= 0b10; // bit 1 = device configuration changed
         self.config_generation = self.config_generation.wrapping_add(1);
+    }
+
+    /// Phase 2 of the D4 cycle: if a disconnect window is pending and
+    /// the reconnect tick has been reached, flip the connector back to
+    /// `enabled=1` and raise a fresh DISPLAY event. Returns `true` iff
+    /// the reconnect fired (caller injects IRQ 9 then).
+    pub fn tick_d4(&mut self, now: u64) -> bool {
+        match self.d4_disconnect_until {
+            Some(until) if now.wrapping_sub(until) as i64 >= 0 => {
+                self.d4_disconnect_until = None;
+                self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
+                self.isr |= 0b10;
+                self.config_generation = self.config_generation.wrapping_add(1);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// True while we're in the disconnect half of a D4 cycle. Used by
+    /// the vmx/svm run-loop to suppress fresh DISPLAY events until the
+    /// reconnect has fired (otherwise back-to-back resizes would queue
+    /// disconnects without the matching reconnect).
+    pub fn d4_disconnecting(&self) -> bool {
+        self.d4_disconnect_until.is_some()
     }
 
     /// Process queue notify. q0 = controlq, q1 = cursorq.
@@ -451,8 +504,12 @@ impl VirtioGpu {
                 let (dw, dh) = crate::shade::surface::tile_size(
                     crate::microvm::vm_window())
                     .unwrap_or((DISPLAY_W, DISPLAY_H));
-                kprintln!("[gpu] GET_DISPLAY_INFO -> {}x{}", dw, dh);
-                build_display_info_resp(flags, fence_id, dw, dh)
+                // Disconnect half of a D4 cycle: report enabled=0 so
+                // the guest connector goes status_disconnected → the
+                // compositor tears down the output.
+                let enabled = !self.d4_disconnecting();
+                kprintln!("[gpu] GET_DISPLAY_INFO -> {}x{} enabled={}", dw, dh, enabled as u32);
+                build_display_info_resp(flags, fence_id, dw, dh, enabled)
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_2D => {
                 self.handle_resource_create_2d(&request[24..]);
@@ -1070,8 +1127,10 @@ fn write_cvt_dtd(dtd: &mut [u8], w: u32, h: u32) {
 }
 
 /// Build a GET_DISPLAY_INFO response: ctrl_hdr + array of 16
-/// virtio_gpu_display_one. Only scanout 0 is enabled.
-fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32) -> Vec<u8> {
+/// virtio_gpu_display_one. Only scanout 0 is reported; `enabled` is
+/// driven by the D4 disconnect/reconnect state (false during the
+/// disconnect half of a tile-resize round-trip).
+fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32, enabled: bool) -> Vec<u8> {
     // Per virtio-gpu spec: VIRTIO_GPU_MAX_SCANOUTS = 16.
     // struct virtio_gpu_resp_display_info:
     //   hdr (24)
@@ -1082,13 +1141,12 @@ fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32) 
     buf[4..8].copy_from_slice(&flags.to_le_bytes());
     buf[8..16].copy_from_slice(&fence_id.to_le_bytes());
 
-    // pmodes[0]: tile-sized display at origin, enabled, flags=0
     let p0 = 24;
     buf[p0 +  0..p0 +  4].copy_from_slice(&0u32.to_le_bytes()); // x
     buf[p0 +  4..p0 +  8].copy_from_slice(&0u32.to_le_bytes()); // y
     buf[p0 +  8..p0 + 12].copy_from_slice(&disp_w.to_le_bytes());
     buf[p0 + 12..p0 + 16].copy_from_slice(&disp_h.to_le_bytes());
-    buf[p0 + 16..p0 + 20].copy_from_slice(&1u32.to_le_bytes()); // enabled
+    buf[p0 + 16..p0 + 20].copy_from_slice(&(enabled as u32).to_le_bytes());
     buf[p0 + 20..p0 + 24].copy_from_slice(&0u32.to_le_bytes()); // flags
 
     // pmodes[1..16] stay zero (disabled)
