@@ -623,19 +623,30 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  See 'microvm' for the substrate test (VMXON / VMLAUNCH).");
             kprintln!();
         }
+        "browser" => {
+            kprintln!();
+            kprintln!("  Browser (LibreWolf in a MicroVM)");
+            kprintln!("  ────────────────────────────────");
+            kprintln!("  browser               Launch LibreWolf in a tiled MicroVM");
+            kprintln!("                        window. Boots Linux 6.18 → cage kiosk");
+            kprintln!("                        compositor → LibreWolf. Standard config,");
+            kprintln!("                        2 GiB RAM, e10s + fission + sandbox on.");
+            kprintln!();
+            kprintln!("  See also: 'microvm' for the VT-x / AMD-V substrate.");
+            kprintln!();
+        }
         "microvm" => {
             kprintln!();
-            kprintln!("  MicroVM (Phase 12 — VT-x sandbox for Linux apps)");
-            kprintln!("  ────────────────────────────────────────────────");
+            kprintln!("  MicroVM (Phase 12 — VT-x / AMD-V sandbox for Linux apps)");
+            kprintln!("  ────────────────────────────────────────────────────────");
             kprintln!("  microvm test          Run the real-mode HLT-loop substrate");
-            kprintln!("                        test: VMXON → 64 MB EPT → unrestricted");
+            kprintln!("                        test: VMXON → EPT/NPT → unrestricted");
             kprintln!("                        real-mode guest → VMLAUNCH → VM-exit");
             kprintln!("                        → VMXOFF. Prints the basic exit reason.");
-            kprintln!("  microvm linux-info    Parse bundled Alpine bzImage from");
-            kprintln!("                        npkFS, print Linux Boot Protocol stats.");
-            kprintln!("  microvm linux         Boot Linux 6.18 LTS (Alpine virt) in");
-            kprintln!("                        the MicroVM. Trap serial 0x3F8 →");
-            kprintln!("                        [guest] earlyprintk lines on console.");
+            kprintln!("  microvm linux-info    Parse bundled bzImage from npkFS, print");
+            kprintln!("                        Linux Boot Protocol stats.");
+            kprintln!("  microvm linux         Same as 'browser' — boot the LibreWolf");
+            kprintln!("                        bundle (dev/test alias).");
             kprintln!();
             kprintln!("  Phase 12 status:");
             kprintln!("    12.1.0a-c  VMXON / VMCS / VMPTRLD                 ✓");
@@ -673,9 +684,10 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  Config:    set · get · config");
             kprintln!("  Display:   gpu · shade · wallpaper");
             kprintln!("  Disk:      disk read · disk write");
+            kprintln!("  Apps:      browser");
             kprintln!("  Virt:      vmx · microvm");
             kprintln!();
-            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper, vmx, microvm)");
+            kprintln!("  help <topic>  for details (storage, content, network, exec, security, config, disk, shade, wallpaper, browser, vmx, microvm)");
             kprintln!();
         }
     }

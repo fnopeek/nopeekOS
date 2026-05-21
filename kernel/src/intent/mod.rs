@@ -331,11 +331,13 @@ fn is_core0_intent(verb: &str) -> bool {
     matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
                    "clear" | "cls" | "shade" | "shell" | "npk-shell" |
                    "cd" | "pwd" | "top" | "htop" | "history" | "gpu" |
-                   // microvm: VMX state (CR4.VMXE, IA32_FEATURE_CONTROL
-                   // lock-bit, TSS, GDT-with-TR-slot) is BSP-only —
-                   // worker cores would VMfail with error 8 (invalid
-                   // host-state) because their TR is null.
-                   "microvm")
+                   // microvm + browser: VMX state (CR4.VMXE,
+                   // IA32_FEATURE_CONTROL lock-bit, TSS, GDT-with-TR-
+                   // slot) is BSP-only — worker cores would VMfail
+                   // with error 8 (invalid host-state) because their
+                   // TR is null. `browser` is just `microvm linux`
+                   // under a user-friendly name, same constraint.
+                   "microvm" | "browser")
 }
 
 
@@ -1330,6 +1332,15 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             } else {
                 kprintln!("[microvm] unknown subcommand: '{}'", sub);
                 kprintln!("[microvm] available: test, linux-info, linux, shell");
+            }
+        }
+        "browser" => {
+            // User-facing alias for `microvm linux` — launches the
+            // LibreWolf bundle. `microvm` stays as the dev/test surface
+            // (substrate self-test + bare-boot diag); `browser` is what
+            // the user types or what drun spawns.
+            if require_cap(vault, &session, Rights::EXECUTE, "browser") {
+                microvm_linux(b"");
             }
         }
         "caps" | "capabilities" => {
