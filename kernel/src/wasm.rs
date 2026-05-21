@@ -863,6 +863,54 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_run_intent(verb_ptr, verb_len) -> i32
+    // Trigger a built-in system intent that isn't a WASM module — the
+    // launcher path for microvm-backed apps. Currently `browser` is
+    // the only verb; future apps (office, ide, …) just add a match
+    // arm. Returns 0 on accepted, -1 on cap denied / unknown verb /
+    // unsupported on the cooperative path.
+    //
+    // Safety from a worker core: vm_open under A2 (dedicated VM core)
+    // is pure atomic + mutex (stash PENDING_VM → return; the
+    // dedicated core picks it up via vm_core_serve and runs the
+    // entire VM lifecycle on itself). Cooperative path (≤2 cores)
+    // needs Core-0 BSP state for VMXON, so this rejects there.
+    linker.func_wrap("env", "npk_run_intent",
+        |caller: Caller<'_, HostState>, verb_ptr: i32, verb_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+                return -1;
+            }
+            if verb_len <= 0 || verb_len > 64 { return -1; }
+            let verb = {
+                let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let data = mem.data(&caller);
+                let start = verb_ptr as usize;
+                let end = start + verb_len as usize;
+                if end > data.len() { return -1; }
+                match core::str::from_utf8(&data[start..end]) {
+                    Ok(s) => alloc::string::String::from(s),
+                    Err(_) => return -1,
+                }
+            };
+            // Cooperative path = BSP-only; reject early so the caller
+            // knows to fall back to typing the intent at the prompt.
+            if crate::smp::per_core::dedicated_vm_core().is_none() {
+                return -1;
+            }
+            match verb.as_str() {
+                "browser" => {
+                    crate::intent::launch_browser();
+                    0
+                }
+                _ => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_window_set_overlay(w, h) -> i32
     // Mark the calling app's widget window as a centred overlay of the
     // requested size. Removes the window from the tiling grid (if it

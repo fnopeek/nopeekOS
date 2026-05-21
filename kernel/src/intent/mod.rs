@@ -1712,6 +1712,19 @@ fn microvm_linux_info() {
 /// subcommand (idle-pause behavior); for `shell <line>` it's the
 /// line + '\n' pre-loaded into the UART RX FIFO so PID-1 can echo
 /// it back (Phase 12.1.4).
+/// Public entry the WASM host-fn `npk_run_intent("browser")` calls so
+/// drun (or any future launcher) can spawn the LibreWolf microvm
+/// without going through the Core-0 shell prompt. Safe from a worker
+/// core when the dedicated-VM-core path is active — `vm_open` just
+/// stashes a PENDING_VM request (pure atomic + mutex); the actual
+/// VMXON / VMRUN happens later on the dedicated core via
+/// `vm_core_serve`. On the cooperative path (≤ 2 cores), `vm_open`
+/// requires BSP state and will fail from a worker → host-fn returns
+/// -1; caller must type `browser` at a Core-0 prompt instead.
+pub fn launch_browser() {
+    microvm_linux(b"");
+}
+
 fn microvm_linux(inject: &[u8]) {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
     const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
