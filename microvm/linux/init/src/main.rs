@@ -202,9 +202,23 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_ENABLE_WAYLAND=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
+                 echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
+                 ( while sleep 2; do \
+                     [ -f /tmp/cage.log ] && tail -10 /tmp/cage.log 2>/dev/null \
+                       | grep -iE 'fatal|panic|signal|abort|error|wlroots|cage|libxul|moz|launching|exiting|nss_init|gtk|wayland' \
+                       | tail -5 | while read L; do \
+                           [ -n \"$L\" ] && echo \"<0>[diag-tail] $L\" > /dev/kmsg; \
+                         done; \
+                   done ) & \
+                 MOZ_LOG_FILE=/tmp/moz.log \
+                 MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3' \
                  cage -- librewolf --no-remote --profile /tmp/moz https://example.com \
-                   >/dev/null 2>&1; \
-                 rc=$?; echo \"[wl] cage exited rc=$rc\"; \
+                   > /tmp/cage.log 2>&1; \
+                 rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
+                 echo '<0>[diag] === /tmp/cage.log tail 60 ===' > /dev/kmsg; \
+                 tail -60 /tmp/cage.log 2>/dev/null | while read L; do echo \"<0>[cage] $L\" > /dev/kmsg; done; \
+                 echo '<0>[diag] === /tmp/moz.log tail 80 ===' > /dev/kmsg; \
+                 tail -80 /tmp/moz.log 2>/dev/null | while read L; do echo \"<0>[moz] $L\" > /dev/kmsg; done; \
                  dmesg 2>/dev/null \
                    | grep -iE 'segfault|fatal signal|Comm:|RIP:|RSP:|Code:' \
                    | tail -40 | while read L; do echo \"<0>[crash] $L\" > /dev/kmsg; done; \
