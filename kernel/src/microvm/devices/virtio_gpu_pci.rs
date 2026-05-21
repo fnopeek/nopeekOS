@@ -84,6 +84,16 @@ const DC_NUM_CAPSETS:   u32 = 0x0C;
 /// when Shade resizes the tile (D4 live-resize round-trip).
 const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
 
+/// virtio-gpu feature bit. We advertise EDID so the guest's
+/// virtio_gpu_config_changed_work_func also calls
+/// virtio_gpu_cmd_get_edids on every DISPLAY event. The EDID callback
+/// in turn calls drm_kms_helper_hotplug_event() **unconditionally** —
+/// where drm_helper_hpd_irq_event would NOT, because the connector
+/// stays "connected" across a tile resize. That's the only path that
+/// makes wlroots/cage actually rescan the output and propagate a new
+/// xdg_surface.configure to the client (LibreWolf etc.).
+const VIRTIO_GPU_F_EDID: u32 = 1 << 1;
+
 // virtio-gpu protocol command/response types
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO:        u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D:      u32 = 0x0101;
@@ -102,6 +112,7 @@ const VIRTIO_GPU_CMD_MOVE_CURSOR:             u32 = 0x0301;
 
 const VIRTIO_GPU_RESP_OK_NODATA:           u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO:     u32 = 0x1101;
+const VIRTIO_GPU_RESP_OK_EDID:             u32 = 0x1104;
 const VIRTIO_GPU_RESP_ERR_UNSPEC:          u32 = 0x1200;
 const VIRTIO_GPU_RESP_ERR_INVALID_RES_ID:  u32 = 0x1203;
 const VIRTIO_GPU_RESP_ERR_INVALID_PARAM:   u32 = 0x1205;
@@ -487,7 +498,19 @@ impl VirtioGpu {
                 build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id)
             }
             VIRTIO_GPU_CMD_GET_EDID => {
-                build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id)
+                // request body: scanout (u32) + padding (u32)
+                if request.len() < 24 + 8 {
+                    return build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id);
+                }
+                let scanout = u32::from_le_bytes([request[24], request[25], request[26], request[27]]);
+                if scanout as usize >= MAX_SCANOUTS {
+                    return build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id);
+                }
+                let (dw, dh) = crate::shade::surface::tile_size(crate::microvm::vm_window())
+                    .unwrap_or((DISPLAY_W, DISPLAY_H));
+                let edid = build_edid(dw, dh);
+                kprintln!("[gpu] GET_EDID scanout={} -> 128 bytes ({}x{})", scanout, dw, dh);
+                build_edid_resp(flags, fence_id, &edid)
             }
             _ => {
                 kprintln!("[gpu] unhandled cmd type {:#06x}", cmd_type);
@@ -769,9 +792,9 @@ impl VirtioGpu {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select as u64,
             CC_DEVICE_FEATURE => {
                 if self.device_feature_select == 1 {
-                    1 // VIRTIO_F_VERSION_1
+                    1 // VIRTIO_F_VERSION_1 (bit 32 → bit 0 of upper half)
                 } else {
-                    0 // no virtio-gpu-specific features advertised
+                    VIRTIO_GPU_F_EDID as u64
                 }
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
@@ -887,6 +910,163 @@ fn build_ctrl_hdr(resp_type: u32, flags: u32, fence_id: u64) -> Vec<u8> {
     h[8..16].copy_from_slice(&fence_id.to_le_bytes());
     // ctx_id, ring_idx, padding all 0
     h
+}
+
+/// Build a GET_EDID response: ctrl_hdr + size (le32) + padding (le32)
+/// + edid bytes. Linux's `virtio_gpu_resp_edid` has a 1024-byte EDID
+/// array; we only ship the 128 bytes we synthesize (size field tells
+/// the guest how much is valid).
+fn build_edid_resp(flags: u32, fence_id: u64, edid: &[u8]) -> Vec<u8> {
+    let mut h = alloc::vec![0u8; 24 + 8 + edid.len()];
+    h[0..4].copy_from_slice(&VIRTIO_GPU_RESP_OK_EDID.to_le_bytes());
+    h[4..8].copy_from_slice(&flags.to_le_bytes());
+    h[8..16].copy_from_slice(&fence_id.to_le_bytes());
+    h[24..28].copy_from_slice(&(edid.len() as u32).to_le_bytes());
+    // padding bytes 28..32 are zero
+    h[32..32 + edid.len()].copy_from_slice(edid);
+    h
+}
+
+/// Synthesize a minimal 128-byte EDID 1.4 block advertising exactly
+/// one preferred display mode at `width × height @ 60 Hz`. This is the
+/// "current tile size" Shade has placed the microvm window into.
+///
+/// Linux's virtio-gpu EDID callback calls drm_kms_helper_hotplug_event()
+/// unconditionally after parsing — that's the uevent path wlroots
+/// needs to rescan the output. Without EDID (or with a stale EDID
+/// whose preferred-mode never changes), wlroots ignores the resize.
+fn build_edid(width: u32, height: u32) -> [u8; 128] {
+    let mut e = [0u8; 128];
+
+    // Header (8 bytes)
+    e[0..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
+
+    // Manufacturer ID "NPK" — 5 bits each, big-endian, MSB=0.
+    // N=14, P=16, K=11 → (14<<10) | (16<<5) | 11 = 0x3A0B
+    e[8] = 0x3A;
+    e[9] = 0x0B;
+    // Product code (LE)
+    e[10] = 0x01;
+    e[11] = 0x00;
+    // Serial number (LE) — leave zero
+    // Manufacturing week / year (year offset from 1990)
+    e[16] = 0;
+    e[17] = 36; // 2026
+
+    // EDID version 1.4
+    e[18] = 1;
+    e[19] = 4;
+
+    // Video input: digital (0x80) | 8 bpc (0x20) | DisplayPort (0x05)
+    e[20] = 0xA5;
+    // Max H/V image size (cm) — 0 = variable / projector style
+    e[21] = 0;
+    e[22] = 0;
+    // Gamma 2.2 → (gamma*100)-100 = 120 = 0x78
+    e[23] = 0x78;
+    // Features: standby/suspend/off off; RGB; sRGB defaults; preferred
+    // timing has native pixel format + refresh; continuous frequency.
+    e[24] = 0x06; // 0b00000110: sRGB default colorspace + preferred is native
+
+    // Color characteristics (10 bytes 25..35): standard sRGB primaries
+    e[25..35].copy_from_slice(
+        &[0xee, 0x95, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54]);
+
+    // Established timings 1/2/Manufacturer (3 bytes): none — we don't
+    // want the guest to pick any of them, only our DTD.
+    // Standard timings (16 bytes 38..54): unused (each 0x0101)
+    for i in 0..8 {
+        e[38 + i * 2] = 0x01;
+        e[39 + i * 2] = 0x01;
+    }
+
+    // First DTD (54..72) — the one mode we want the compositor to use.
+    write_cvt_dtd(&mut e[54..72], width, height);
+
+    // Second DTD (72..90) — monitor name "nopeekOS"
+    e[75] = 0xFC;
+    let name = b"nopeekOS";
+    for (i, &c) in name.iter().enumerate().take(13) {
+        e[77 + i] = c;
+    }
+    e[77 + name.len()] = 0x0a; // terminator per VESA
+    for i in (name.len() + 1)..13 {
+        e[77 + i] = 0x20; // pad with spaces
+    }
+
+    // Third DTD (90..108) — display range limits descriptor (helps
+    // wlroots/Xorg decide the connector accepts arbitrary refresh).
+    // type=0xFD; min/max V Hz = 50/75; min/max H kHz = 30/120; max
+    // pixel clock = 300 MHz / 10 = 30 → 0x1E
+    e[93] = 0xFD;
+    e[95] = 50;   // V min
+    e[96] = 75;   // V max
+    e[97] = 30;   // H min kHz
+    e[98] = 120;  // H max kHz
+    e[99] = 30;   // max pixel clock / 10 MHz
+    e[100] = 0x01; // GTF standard (closest legacy default)
+
+    // Fourth DTD (108..126) — unused descriptor (type 0x10 dummy)
+    e[111] = 0x10;
+
+    // Number of extensions
+    e[126] = 0;
+
+    // Checksum: makes the byte sum 0 mod 256
+    let sum: u32 = e[..127].iter().map(|&b| b as u32).sum();
+    e[127] = ((256u32 - (sum % 256)) & 0xFF) as u8;
+
+    e
+}
+
+/// Write a CVT-Reduced-Blanking-style 18-byte Detailed Timing
+/// Descriptor for `width × height @ 60 Hz`. Reduced blanking means
+/// H blanking = 160 px total (rather than the legacy ~25 % overhead),
+/// so the pixel clock stays sane for arbitrary modes our compositor
+/// might pick. Linux's connector helpers parse this into a
+/// drm_display_mode and `drm_set_preferred_mode` flag.
+fn write_cvt_dtd(dtd: &mut [u8], w: u32, h: u32) {
+    // CVT-RB constants
+    let h_blank = 160u32;
+    let h_sync_off = 48u32;
+    let h_sync_w = 32u32;
+    let v_blank = 14u32;       // 4 front porch + 6 sync + 4 back porch
+    let v_sync_off = 3u32;
+    let v_sync_w = 6u32;
+
+    let h_total = w + h_blank;
+    let v_total = h + v_blank;
+
+    // Pixel clock in units of 10 kHz: H_total * V_total * 60 Hz / 10_000
+    let pclk_10khz = ((h_total as u64) * (v_total as u64) * 60 / 10_000) as u32;
+
+    dtd[0] = (pclk_10khz & 0xFF) as u8;
+    dtd[1] = ((pclk_10khz >> 8) & 0xFF) as u8;
+
+    dtd[2] = (w & 0xFF) as u8;
+    dtd[3] = (h_blank & 0xFF) as u8;
+    dtd[4] = ((((w >> 8) & 0x0F) << 4) | ((h_blank >> 8) & 0x0F)) as u8;
+
+    dtd[5] = (h & 0xFF) as u8;
+    dtd[6] = (v_blank & 0xFF) as u8;
+    dtd[7] = ((((h >> 8) & 0x0F) << 4) | ((v_blank >> 8) & 0x0F)) as u8;
+
+    dtd[8]  = (h_sync_off & 0xFF) as u8;
+    dtd[9]  = (h_sync_w  & 0xFF) as u8;
+    dtd[10] = (((v_sync_off & 0x0F) << 4) | (v_sync_w & 0x0F)) as u8;
+    // Upper-bits byte (sync offsets/widths above 255): all zero for
+    // our small numbers.
+    dtd[11] = 0;
+
+    // H/V image size in mm — leave zero (display size unknown).
+    dtd[12] = 0;
+    dtd[13] = 0;
+    dtd[14] = 0;
+    // H/V border
+    dtd[15] = 0;
+    dtd[16] = 0;
+    // Flags: digital separate sync, vsync polarity +, hsync polarity +
+    dtd[17] = 0x1E;
 }
 
 /// Build a GET_DISPLAY_INFO response: ctrl_hdr + array of 16
