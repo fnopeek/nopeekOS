@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use spin::Mutex;
 
 /// Framebuffer info parsed from Multiboot2.
+#[derive(Clone, Copy)]
 pub struct FbInfo {
     pub addr: u64,
     pub pitch: u32,

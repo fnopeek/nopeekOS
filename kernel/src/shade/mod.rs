@@ -260,12 +260,16 @@ pub fn render_frame() {
 }
 
 /// Layer-based render with double-buffer: render to back, swap, blit from front.
-/// Cursor reads from front via cached atomic — never blocked by this render.
+/// Cursor is composed INTO the back shadow as the final layer so the
+/// shadow→MMIO blit carries it atomically (no post-blit redraw,
+/// no blit-vs-cursor race → no flicker over high-frequency surfaces
+/// like the microvm browser tile).
 fn render_frame_layered() {
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
         let pitch = fb.info().pitch;
+        let info = *fb.info();
         let back = fb.shadow_back();
 
         // Render scene to BACK buffer (front stays stable for cursor)
@@ -280,11 +284,10 @@ fn render_frame_layered() {
             comp.render(back, fb.info());
         }
 
+        // Cursor as the final shadow layer — included in the blit.
+        cursor::draw_cursor_on_shadow(back, &info);
+
         fb.swap_buffers();
-        // Commit before blit so the IRQ-side lock-free cursor path
-        // sees the new front buffer while MMIO is being updated —
-        // otherwise a restore-blit during the blit window copied
-        // old-scene pixels onto new MMIO (the 4-eck ghost artifacts).
         fb.commit_front();
 
         let gpu_ok = if crate::gpu::supports_blit() {
@@ -297,10 +300,6 @@ fn render_frame_layered() {
             let mut damage = render::DamageTracker::new(screen_w, screen_h);
             damage.mark_all();
             damage.flush(fb);
-        }
-
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -311,11 +310,14 @@ fn render_frame_legacy() {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
         let pitch = fb.info().pitch;
+        let info = *fb.info();
         let back = fb.shadow_back();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.render(back, fb.info());
         }
+
+        cursor::draw_cursor_on_shadow(back, &info);
 
         fb.swap_buffers();
         fb.commit_front();
@@ -330,10 +332,6 @@ fn render_frame_legacy() {
             let mut damage = render::DamageTracker::new(screen_w, screen_h);
             damage.mark_all();
             damage.flush(fb);
-        }
-
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -364,34 +362,30 @@ pub fn render_damaged() {
 
 fn render_damaged_layered() {
     framebuffer::with_fb(|fb| {
-        let info = fb.info();
+        let info = *fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            let regions = comp.render_damaged(shadow, info);
+            let regions = comp.render_damaged(shadow, &info);
+            cursor::draw_cursor_on_shadow(shadow, &info);
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
-        }
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
 
 fn render_damaged_legacy() {
     framebuffer::with_fb(|fb| {
-        let info = fb.info();
+        let info = *fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            let regions = comp.render_damaged(shadow, info);
+            let regions = comp.render_damaged(shadow, &info);
+            cursor::draw_cursor_on_shadow(shadow, &info);
             for (x, y, w, h) in regions {
                 framebuffer::blit_rect(fb, x, y, w, h);
             }
-        }
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -663,14 +657,11 @@ pub fn render_input_line() {
                     if let Some((x, y, w, h)) = terminal::render_input_line(
                         shadow, &info, cx, cy, cw, ch, win.terminal_idx,
                     ) {
+                        cursor::draw_cursor_on_shadow(shadow, &info);
                         framebuffer::blit_rect(fb, x, y, w, h);
                     }
                 }
             }
-        }
-        // Redraw cursor overlay after blit (lock-free, reads atomic position)
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -787,13 +778,9 @@ pub fn poll_render() {
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
                     comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                cursor::draw_cursor_on_shadow(shadow, info);
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
             }
-        }
-
-        // Redraw cursor overlay (erase old + draw new)
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
     return;
@@ -837,13 +824,10 @@ fn poll_render_layered() {
                     let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
                     compositor::Compositor::render_window(shadow, info, win,
                         comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                    cursor::draw_cursor_on_shadow(shadow, info);
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
                 }
             }
-        }
-        // Redraw cursor overlay after blit (was overwritten by window render)
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -859,12 +843,10 @@ fn poll_render_legacy() {
                     let border_color = if win.focused { comp.border_active } else { comp.border_inactive };
                     compositor::Compositor::render_window(shadow, info, win,
                         comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
+                    cursor::draw_cursor_on_shadow(shadow, info);
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
                 }
             }
-        }
-        if crate::xhci::mouse_available() {
-            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
 }
@@ -891,7 +873,13 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // window is focused, so this is free in normal desktop use.
     forward_pointer_to_guest(evt);
 
-    cursor::redraw_overlay_lockfree();
+    // The cursor used to be re-drawn directly on MMIO here. Now it is
+    // composed into the shadow buffer as the final compose layer, so a
+    // mouse move just needs to schedule a render — the next render_frame
+    // will pick up the new atomic position and the blit will carry the
+    // cursor at the right spot. Eliminates the blit-vs-cursor race that
+    // showed as cursor flicker over the microvm browser tile.
+    request_render();
 
     // Hover routing — deduplicated per window. Runs on every move so the
     // app can react even when no buttons changed.

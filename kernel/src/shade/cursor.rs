@@ -347,6 +347,45 @@ fn draw_cursor_on_mmio(mmio: *mut u8, pitch: usize, sw: i32, sh: i32, x: i32, y:
     }
 }
 
+/// Paint cursor bitmap into the back-shadow buffer at the current
+/// atomic position. Called at the very end of compose so the cursor
+/// becomes part of the same shadow that gets blitted to MMIO — no
+/// separate post-blit cursor write, no race between blit and cursor.
+///
+/// Critical for high-frequency surface tiles (microvm browser at 60Hz
+/// FLUSH): the previous design re-blitted the entire shadow on every
+/// frame, then re-drew the cursor over MMIO. Display refresh could
+/// catch the brief window where the blit had landed but the cursor
+/// re-write hadn't yet — visible as cursor flicker right after
+/// stopping mouse movement (the moving case masked the flicker with
+/// the moving cursor's blur).
+///
+/// Shadow is the single source of truth now: blit copies cursor along
+/// with the rest of the scene atomically (from the display's view).
+pub fn draw_cursor_on_shadow(shadow: *mut u8, info: &crate::framebuffer::FbInfo) {
+    if shadow.is_null() { return; }
+    if !crate::xhci::mouse_available() { return; }
+    let pitch = info.pitch as usize;
+    let sw = info.width as i32;
+    let sh = info.height as i32;
+    let (cx, cy) = atomic_pos();
+    for row in 0..CURSOR_H as i32 {
+        let py = cy + row;
+        if py < 0 || py >= sh { continue; }
+        for col in 0..CURSOR_W as i32 {
+            let px = cx + col;
+            if px < 0 || px >= sw { continue; }
+            let bmp = CURSOR_BITMAP[(row as usize) * CURSOR_W as usize + col as usize];
+            if bmp == 0 { continue; }
+            let off = py as usize * pitch + px as usize * 4;
+            let color: u32 = if bmp == 1 { 0x00FFFFFF } else { 0x00000000 };
+            // SAFETY: writing to back-shadow buffer within bounds. Shadow
+            // is a kernel-owned allocation, not MMIO — plain store fine.
+            unsafe { *(shadow.add(off) as *mut u32) = color; }
+        }
+    }
+}
+
 /// Copy a small rectangle from shadow buffer to MMIO framebuffer (restore clean pixels).
 fn blit_shadow_to_mmio(shadow: *mut u8, mmio: *mut u8, pitch: usize,
                        sw: i32, sh: i32, x: i32, y: i32, w: u32, h: u32) {

@@ -1106,10 +1106,15 @@ fn process_mouse_report(state: &mut XhciState) {
         push_mouse(MouseEvent { buttons, dx, dy, scroll });
         state.mouse_prev_buttons = buttons;
 
-        // Update cursor position + draw IMMEDIATELY from IRQ context.
-        // This makes the cursor responsive even when Core 0 is in blit_rect.
+        // Update the atomic cursor position and ask shade to render. The
+        // cursor is composed INTO the shadow as the final layer (see
+        // shade::render_frame_*), so the next compose picks up this new
+        // position and the shadow→MMIO blit carries it atomically — no
+        // separate IRQ-side MMIO write that could race against an
+        // in-flight blit and produce flicker over high-frequency
+        // surfaces (microvm browser tile @ 60 Hz).
         crate::shade::cursor::update_atomic(dx, dy, buttons);
-        crate::shade::cursor::redraw_overlay_lockfree();
+        crate::shade::request_render();
     }
 }
 
