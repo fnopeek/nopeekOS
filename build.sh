@@ -220,6 +220,25 @@ build_installer() {
         touch "$ASSETS_DIR/microvm-initramfs.cpio.gz"
     fi
 
+    # MicroVM userspace bundle (LibreWolf, ~261 MB squashfs). Only
+    # staged when BUNDLE_USERSPACE=1 → the `bundle-userspace` cargo
+    # feature includes the file via include_bytes!. The resulting
+    # installer kernel is ~260 MB larger but the USB is fully
+    # self-contained: first boot has the browser without any OTA.
+    # Without BUNDLE_USERSPACE the asset arrives via the next
+    # `update` from GitHub Releases (manifest.large url= override).
+    if [ "${BUNDLE_USERSPACE:-0}" = "1" ]; then
+        SQFS_SRC="$PROJECT_DIR/release/assets/large/microvm-userspace.sqfs"
+        if [ -f "$SQFS_SRC" ]; then
+            cp "$SQFS_SRC" "$ASSETS_DIR/microvm-userspace.sqfs"
+            ok "  microvm: userspace.sqfs ($(du -h "$ASSETS_DIR/microvm-userspace.sqfs" | cut -f1)) [BUNDLED]"
+        else
+            warn "  userspace.sqfs missing: $SQFS_SRC — run ./build.sh release-large first"
+            warn "  BUNDLE_USERSPACE=1 was requested but the source is absent; falling back to OTA"
+            export BUNDLE_USERSPACE=0
+        fi
+    fi
+
     # System wallpapers: every .png / .jpg in release/assets/wallpapers/
     # gets staged + bundled. Apps see them at sys/wallpapers/<file>;
     # setup.rs additionally copies them into the user's
@@ -262,13 +281,20 @@ build_installer() {
 
     # Pass 2: installer kernel (embeds the Pass-1 kernel.efi + assets
     # via the `installer` Cargo feature → include_bytes!).
+    # BUNDLE_USERSPACE=1 → also bakes in the 261 MB LibreWolf sqfs
+    # via the `bundle-userspace` feature.
     log "Pass 2: building installer kernel..."
+    PASS2_FEATURES="installer"
+    if [ "${BUNDLE_USERSPACE:-0}" = "1" ]; then
+        PASS2_FEATURES="installer,bundle-userspace"
+        log "  with bundle-userspace (browser ready on first boot)"
+    fi
     cargo build \
         --release \
         --target "$TARGET" \
         -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem \
-        --features installer \
+        --features "$PASS2_FEATURES" \
         2>&1
 
     ok "Pass 2: installer ELF $(du -h "$KERNEL_BIN" | cut -f1)"
@@ -574,7 +600,16 @@ Installer / release:
   installer            Two-pass installer build (kernel.efi + bundled assets)
   qemu-installer       Installer + run (wipes NVMe, attaches installer USB)
   qemu-installer-gui   Same with framebuffer (1920x1080)
+  qemu-installer-full  Same as qemu-installer-gui but bundles the
+                       LibreWolf userspace sqfs (~261 MB) so the
+                       fresh install has the browser ready on first
+                       boot without any OTA round-trip
   usb /dev/sdX         Build installer + flash USB stick
+  usb-full /dev/sdX    Same as usb but bundles the LibreWolf userspace
+                       sqfs (~261 MB) → USB grows to ~290 MB but the
+                       browser is ready on first boot, no network
+                       needed post-install. OTA still works for later
+                       browser updates via manifest.large url= flow.
   release              Sign kernel + modules + assets (ECDSA P-384)
   release-large <tag>  Upload release/assets/large/* to GitHub Releases
                        under <tag>, sign with update.key, write
@@ -635,6 +670,18 @@ case "${1:-}" in
         wipe_disk_img
         run_qemu_generic gui kvm installer
         ;;
+    qemu-installer-full)
+        # Same as qemu-installer but bakes the LibreWolf userspace sqfs
+        # (~261 MB) into the installer kernel so the QEMU NVMe is fully
+        # seeded with the browser bundle — no `update` needed before
+        # `browser` works post-install. Use for testing the bundled-
+        # browser flow end-to-end.
+        check_deps
+        BUNDLE_USERSPACE=1 build_installer
+        build_installer_disk
+        wipe_disk_img
+        run_qemu_generic gui kvm installer
+        ;;
     debug)
         check_deps
         build
@@ -649,6 +696,18 @@ case "${1:-}" in
     usb)
         check_deps
         build_installer
+        write_usb "${2:-}"
+        ;;
+    usb-full)
+        # Same as usb but bakes the LibreWolf userspace sqfs (~261 MB)
+        # into the installer kernel. USB stick swells to ~290 MB but
+        # the freshly-installed system has the browser ready on first
+        # boot without any OTA round-trip. Use for offline / fresh-
+        # install scenarios. The OTA `update` path keeps working —
+        # whenever a newer bundle ships, it'll replace this one via
+        # the existing manifest.large `url=` flow.
+        check_deps
+        BUNDLE_USERSPACE=1 build_installer
         write_usb "${2:-}"
         ;;
     build-linux)

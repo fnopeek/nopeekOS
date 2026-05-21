@@ -131,6 +131,25 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("testdisk.wasm"),
         version: Some(include_str!("testdisk.version")),
     },
+
+    // ── MicroVM userspace bundle (LibreWolf, ~261 MB) ─────────────
+    // Optional: only baked in when built with the `bundle-userspace`
+    // cargo feature (set by `./build.sh usb-full` /
+    // `qemu-installer-full`). Otherwise the bundle is fetched via
+    // OTA from GitHub Releases on the first `update` post-install.
+    //
+    // Path lines up with what PID-1 looks for at boot (sys/microvm/
+    // userspace.sqfs); npkFS-store on install seeds it directly, no
+    // network round-trip needed → browser ready on first login.
+    //
+    // Future bundles (office, ide, …) plug in next to this one with
+    // their own feature flag.
+    #[cfg(feature = "bundle-userspace")]
+    BundledAsset {
+        fs_path: "sys/microvm/userspace.sqfs",
+        bytes:   include_bytes!("microvm-userspace.sqfs"),
+        version: None,
+    },
 ];
 
 /// Stub invoked by install.rs to avoid conditional compilation at the

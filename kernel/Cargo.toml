@@ -7,6 +7,12 @@ description = "nopeekOS – AI-native Operating System Kernel"
 
 [features]
 installer = []
+# Bundle the ~261 MB LibreWolf userspace sqfs into the installer
+# kernel binary so a fresh USB-stick install has the browser ready
+# without an OTA round-trip. Off by default (keeps the regular
+# kernel.efi small); flipped on by `./build.sh usb-full` /
+# `./build.sh qemu-installer-full`.
+bundle-userspace = []
 
 [dependencies]
 spin = "0.10"         # Spinlock (no_std mutex)
