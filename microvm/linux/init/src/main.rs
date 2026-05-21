@@ -204,10 +204,13 @@ fn launch_wayland(kmsg_fd: i64) {
                    'ui.systemUsesDarkTheme|1' \
                    'browser.theme.toolbar-theme|0' \
                    'browser.theme.content-theme|0' \
-                   'layout.css.prefers-color-scheme.content-override|0'; \
+                   'layout.css.prefers-color-scheme.content-override|0' \
+                   'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
+                 mkdir -p /tmp/moz/chrome; \
+                 echo '.titlebar-buttonbox-container, #titlebar-buttonbox, .titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore, .titlebar-close { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
