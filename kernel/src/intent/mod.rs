@@ -1795,16 +1795,18 @@ fn microvm_linux(inject: &[u8]) {
     use core::fmt::Write;
     let tsc_khz = crate::interrupts::tsc_freq() / 1000;
     let mut s = String::new();
-    // `quiet loglevel=3` collapses Linux's boot kmsg to errors+. Each
-    // 8250 byte is multiple VM-exits (port 0x3F8 IN/OUT trapped); the
-    // verbose default boot dump was costing real guest CPU + flooding
-    // the host console with one-time-noise on every Browser launch.
-    // Crashes still come through (level 0/1/2 always shown).
+    // DIAG: `quiet loglevel=3` temporarily removed — bare-metal NUC
+    // reports the browser hanging and we can't tell whether it's the
+    // guest kernel failing to boot or something later. Putting boot
+    // verbose back so any `[guest]` panic / wedge during early Linux
+    // init surfaces on the host console. Re-add the gating once
+    // bare-metal is validated. Performance regression on launch is
+    // ~150 8250-IO VM-exits, one-shot, acceptable for diag.
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
 panic=1 nokaslr nolapic noapic acpi=off tsc=reliable \
-tsc_early_khz={} devtmpfs.mount=1 quiet loglevel=3",
+tsc_early_khz={} devtmpfs.mount=1",
         tsc_khz,
     );
     if let Some(epoch) =
