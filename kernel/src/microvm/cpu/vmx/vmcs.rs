@@ -1462,6 +1462,39 @@ pub fn dump_entry_fail_state() {
         cr0_f0, cr0_f1);
     kprintln!("[vmx-fail] CR4_FIXED0={:#018x} CR4_FIXED1={:#018x}",
         cr4_f0, cr4_f1);
+    // Live execution-control fields + their fixed-bit MSRs. Reveals
+    // forced-on bits we don't expect (e.g. VPID, NMI-exiting, virtual-
+    // NMIs). For VMX-entry-fail with all guest-state checks passing,
+    // a control-field rule like "VPID enabled + VPID field = 0" is
+    // the remaining culprit-class.
+    let pin_live   = vmread(PIN_BASED_VM_EXEC_CONTROL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let cpu_live   = vmread(CPU_BASED_VM_EXEC_CONTROL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let sec_live   = vmread(SECONDARY_VM_EXEC_CONTROL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    const VMX_PIN_TRUE:  u32 = 0x48D;
+    const VMX_PROC_TRUE: u32 = 0x48E;
+    const VMX_BASIC_MSR: u32 = 0x480;
+    const VMX_PROC2_MSR: u32 = 0x48B;
+    let basic_msr  = unsafe { rdmsr(VMX_BASIC_MSR) };
+    let pin_msr    = unsafe { rdmsr(VMX_PIN_TRUE) };
+    let proc_msr   = unsafe { rdmsr(VMX_PROC_TRUE) };
+    let proc2_msr  = unsafe { rdmsr(VMX_PROC2_MSR) };
+    kprintln!("[vmx-fail] PIN={:#x} CPU={:#x} SEC={:#x}", pin_live, cpu_live, sec_live);
+    kprintln!("[vmx-fail] BASIC={:#018x} (true-ctls={})", basic_msr, (basic_msr >> 55) & 1);
+    kprintln!("[vmx-fail] PIN-MSR (TRUE)={:#018x} → allowed-0={:#x} allowed-1={:#x}",
+        pin_msr, pin_msr & 0xFFFF_FFFF, pin_msr >> 32);
+    kprintln!("[vmx-fail] PROC-MSR (TRUE)={:#018x} → allowed-0={:#x} allowed-1={:#x}",
+        proc_msr, proc_msr & 0xFFFF_FFFF, proc_msr >> 32);
+    kprintln!("[vmx-fail] PROC2-MSR={:#018x} → allowed-0={:#x} allowed-1={:#x}",
+        proc2_msr, proc2_msr & 0xFFFF_FFFF, proc2_msr >> 32);
+    // EPT/IO/MSR pointer fields. If any of these are corrupt/zero
+    // while their enable bit is on, entry fails reason 33.
+    let eptp_f      = vmread(EPT_POINTER).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let iob_a       = vmread(IO_BITMAP_A_FULL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let iob_b       = vmread(IO_BITMAP_B_FULL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    let msrb        = vmread(MSR_BITMAPS_FULL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
+    kprintln!("[vmx-fail] EPTP={:#018x}", eptp_f);
+    kprintln!("[vmx-fail] IO_BITMAP_A={:#018x} IO_BITMAP_B={:#018x} MSR_BITMAP={:#018x}",
+        iob_a, iob_b, msrb);
     if cr0_violation_0 != 0 || cr0_violation_1 != 0 {
         kprintln!("[vmx-fail] ← CR0 VIOLATION: missing-must-be-1={:#x}, set-must-be-0={:#x}",
             cr0_violation_0, cr0_violation_1);
