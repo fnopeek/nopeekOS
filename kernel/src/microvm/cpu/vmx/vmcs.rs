@@ -954,6 +954,8 @@ pub struct LaunchOutcome {
 pub(super) fn run_guest_once(
     regs: &mut GuestRegs,
     launched: bool,
+    host_fpu: *mut crate::microvm::cpu::FpuArea,
+    guest_fpu: *mut crate::microvm::cpu::FpuArea,
 ) -> Result<LaunchOutcome, &'static str> {
     let exit_reason: u64;
     let exit_qualification: u64;
@@ -966,16 +968,30 @@ pub(super) fn run_guest_once(
     // overwritten LAST; post-exit save spills all guest GPRs to
     // stack first (so rdi stays guest's value), then reloads struct
     // ptr from the saved slot before storing.
+    //
+    // FPU xsave/xrstor lives INSIDE this asm block (mirror of SVM
+    // v0.172.53 fix). Rust-helper FPU swap around the call left a
+    // window where the +avx2 compiler could spill `vmovups ymm`
+    // between the helper and the asm, clobbering the just-restored
+    // guest FPU. Putting xsave64/xrstor64 inside the asm — with
+    // only GPR/vm* instructions between xrstor and vmresume —
+    // eliminates the window. v53 was applied to SVM only at the
+    // time ("VMX keeps the helper form (untested path)"); now that
+    // VMX is the path under test on bare-metal NUC, port it.
     unsafe {
         core::arch::asm!(
-            // ── PROLOGUE: save host callee-saved + struct ptr ─────
+            // ── PROLOGUE: save host callee-saved + 3 pointers ─────
             "push rbp",
             "push rbx",
             "push r12",
             "push r13",
             "push r14",
             "push r15",
-            "push rdi",                     // struct ptr at [rsp]
+            "push rdi",                     // struct ptr
+            "push r8",                      // host_fpu  ptr
+            "push r9",                      // guest_fpu ptr
+            // Stack now: [rsp+0]=guest_fpu [+8]=host_fpu
+            //   [+16]=struct_ptr [+24..71]=host_callee_saved
 
             // VMCS host pointer fields, set every entry so we never
             // depend on stale VMCS state across calls.
@@ -984,6 +1000,24 @@ pub(super) fn run_guest_once(
             "mov rcx, 0x6C16",              // HOST_RIP
             "lea rax, [rip + 2f]",
             "vmwrite rcx, rax",
+
+            // ── FPU SAVE/RESTORE (KVM kvm_load_guest_fpu): VMRESUME
+            // preserves no x87/SSE/AVX/AVX-512. Must be in-asm,
+            // adjacent to vmresume — a +avx2-built kernel spills
+            // `ymm` anywhere between a Rust helper and the asm,
+            // clobbering the just-restored guest state. Mask = -1
+            // (all XCR0-enabled components; guest owns XCR0 via
+            // XSETBV). Only GPR/vm* instructions sit between this
+            // xrstor and vmresume, and between vmresume and the
+            // paired xsave below.
+            "mov rcx, [rsp + 8]",           // host_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xsave64 [rcx]",                // save host FPU
+            "mov rcx, [rsp + 0]",           // guest_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xrstor64 [rcx]",               // restore guest FPU
 
             // ── ENTRY: load guest GPRs from struct ───────────────
             // r10 is caller-saved per System V ABI, so we use it as
@@ -1022,11 +1056,24 @@ pub(super) fn run_guest_once(
             // fall-through to fail handler
 
             // ── FAIL HANDLER ─────────────────────────────────────
+            // VMRESUME/VMLAUNCH failed — no transition happened.
+            // GPRs still hold the guest values we loaded. FPU still
+            // has the guest state we xrestored. Restore host FPU
+            // before returning to Rust so the host doesn't run on
+            // guest FPU.
             "4:",
+            "mov rcx, [rsp + 0]",           // guest_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xsave64 [rcx]",                // save guest FPU
+            "mov rcx, [rsp + 8]",           // host_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xrstor64 [rcx]",               // restore host FPU
             "mov rcx, 1",                   // vmfail = 1
             "xor rax, rax",                 // exit_reason = 0
             "xor rdx, rdx",                 // exit_qual = 0
-            "pop rdi",                      // discard struct ptr
+            "add rsp, 24",                  // discard guest_fpu, host_fpu, struct_ptr
             "pop r15",
             "pop r14",
             "pop r13",
@@ -1057,10 +1104,22 @@ pub(super) fn run_guest_once(
             "push r13",
             "push r14",
             "push r15",
-            // Stack now: r15, r14, ..., rax, struct_ptr,
-            //             host_callee_saved (6).
-            "mov rdi, [rsp + 120]",         // 15 × 8 = 120, struct
-                                            // ptr position
+            // Stack now: 15 GPRs [rsp+0..119], guest_fpu [+120],
+            //   host_fpu [+128], struct_ptr [+136], callee_saved [+144..]
+
+            // ── FPU SAVE/RESTORE (paired exit half) ──────────────
+            // Guest GPRs are on the stack now → rax/rcx/rdx free to
+            // clobber. Save guest FPU, restore host's.
+            "mov rcx, [rsp + 120]",         // guest_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xsave64 [rcx]",                // save guest FPU
+            "mov rcx, [rsp + 128]",         // host_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xrstor64 [rcx]",               // restore host FPU
+
+            "mov rdi, [rsp + 136]",         // struct ptr
             // Pop in reverse-push order, store at the right offset.
             "pop rax", "mov [rdi + 120], rax",      // r15
             "pop rax", "mov [rdi + 112], rax",      // r14
@@ -1077,7 +1136,6 @@ pub(super) fn run_guest_once(
             "pop rax", "mov [rdi +  16], rax",      // rdx
             "pop rax", "mov [rdi +   8], rax",      // rcx
             "pop rax", "mov [rdi +   0], rax",      // rax
-            "pop rdi",                      // discard struct ptr
 
             // Read VM-exit info now that GPRs are safe.
             "mov rcx, 0x4402",              // VM_EXIT_REASON
@@ -1086,6 +1144,7 @@ pub(super) fn run_guest_once(
             "vmread rdx, rcx",
             "xor rcx, rcx",                 // vmfail = 0
 
+            "add rsp, 24",                  // discard guest_fpu, host_fpu, struct_ptr
             "pop r15",
             "pop r14",
             "pop r13",
@@ -1097,6 +1156,8 @@ pub(super) fn run_guest_once(
             "5:",
             in("rdi") regs_ptr,
             in("rsi") launched as u64,
+            in("r8") host_fpu,
+            in("r9") guest_fpu,
             lateout("rax") exit_reason,
             lateout("rcx") vmfail,
             lateout("rdx") exit_qualification,
