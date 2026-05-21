@@ -212,7 +212,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
-                 echo \"[drm-probe] sysfs topology: $(ls -d /sys/class/drm/* 2>/dev/null | tr '\\n' ' ')\"; \
+                 echo \"<0>[drm-probe] sysfs topology: $(ls -d /sys/class/drm/* 2>/dev/null | tr '\\n' ' ')\" > /dev/kmsg; \
                  ( prev='__init__'; \
                    while true; do \
                      cur=''; \
@@ -224,7 +224,7 @@ fn launch_wayland(kmsg_fd: i64) {
                        cur=\"$cur [$n status=$s modes=$m]\"; \
                      done; \
                      if [ \"$cur\" != \"$prev\" ]; then \
-                       echo \"[drm-probe]$cur\"; \
+                       echo \"<0>[drm-probe]$cur\" > /dev/kmsg; \
                        prev=\"$cur\"; \
                      fi; \
                      sleep 1; \
