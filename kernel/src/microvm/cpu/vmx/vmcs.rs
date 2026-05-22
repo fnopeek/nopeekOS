@@ -1272,6 +1272,23 @@ pub fn read_entry_intr_info() -> Result<u64, &'static str> {
     vmread(VM_ENTRY_INTR_INFO_FIELD)
 }
 
+/// True if the guest can accept a maskable external interrupt right
+/// now: RFLAGS.IF=1 and no interruptibility blocking (bit 0 blocking-
+/// by-STI, bit 1 blocking-by-MOV-SS). This is the gate KVM applies in
+/// `vmx_interrupt_allowed()` before injecting an external interrupt.
+/// Injecting one while the guest is NOT interruptible (e.g. IF=0 in a
+/// CLI'd critical section — observed mid i8042 status poll) makes the
+/// VM-entry fail with reason 33 on bare-metal Intel; AMD's VMRUN
+/// tolerates it (delivers a guest #GP), which is why QEMU/AMD never
+/// tripped on it. NMI-blocking (bit 3) is irrelevant to maskable
+/// external interrupts and is not checked.
+pub fn guest_interruptible() -> bool {
+    const IF: u64 = 1 << 9;
+    let rflags = vmread(GUEST_RFLAGS).unwrap_or(0);
+    let intr = vmread(GUEST_INTERRUPTIBILITY_INFO).unwrap_or(0);
+    (rflags & IF) != 0 && (intr & 0b11) == 0
+}
+
 /// Read VMCS VM_ENTRY_CONTROLS — the live entry-control field
 /// after our last VMWRITE (or fixed_ctrl-applied initial value).
 pub fn read_vm_entry_controls() -> Result<u64, &'static str> {
