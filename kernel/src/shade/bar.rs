@@ -1,9 +1,11 @@
 //! ShadeBar — status bar for shade compositor.
 //!
 //! Waybar-inspired floating bar: three rounded, detached pill segments
-//! (left = workspaces, center = window title, right = clock + power)
-//! with the wallpaper showing through the gaps. Rendered natively in
-//! the kernel.
+//! with the wallpaper showing through the gaps. Rendered natively.
+//!
+//!   left   = workspaces │ focused window title
+//!   center = clock
+//!   right  = status widgets (placeholders for now) + power button
 //!
 //! Pill backgrounds are a fixed dark tone (theme-independent) so the
 //! light text on top stays readable regardless of wallpaper/palette.
@@ -15,16 +17,21 @@ use crate::gui::{background, font, render};
 use crate::shade::widgets::abi::IconId;
 
 // ── Fixed palette (contrast-guaranteed, theme-independent) ────────────
-/// Pill background — dark, opaque. Readable text on any wallpaper.
 const PILL_BG: u32 = 0x0014_141C;
 const WS_INACTIVE_BG: u32 = 0x002A_2A38;
 const WS_INACTIVE_FG: u32 = 0x00C2_C7D2;
 const WS_ACTIVE_FG: u32 = 0x00FF_FFFF;
 const TITLE_FG: u32 = 0x00DC_E0EA;
 const CLOCK_FG: u32 = 0x00FF_FFFF;
+const SEP_FG: u32 = 0x003C_3C4A;
+const WIDGET_FG: u32 = 0x008A_8F9C;
 const POWER_FG: u32 = 0x00E2_6A72;
-/// Band fallback fill when the BG layer is unavailable (legacy path).
 const BAND_FALLBACK: u32 = 0x000A_0A0E;
+
+/// Right-side status widgets. Placeholders until wired to real data /
+/// dedicated atlas icons (LAN, volume, screenshot don't exist yet —
+/// these reuse generic glyphs to show the layout).
+const WIDGETS: &[IconId] = &[IconId::HardDrives, IconId::Monitor, IconId::Image];
 
 /// Bar position on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,16 +66,13 @@ pub struct ShadeBar {
 impl ShadeBar {
     pub fn new(scale: u32) -> Self {
         let scale = scale.max(1);
-        // Pill height: floor at 36px (1x) so the larger 16x32 bar font
-        // fits with breathing room — a stale small config can't shrink
-        // the redesigned bar below readable.
         let base = crate::config::get("shade.bar_height")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(36)
-            .max(36);
+            .unwrap_or(26)
+            .max(22); // floor so the 8x16 bar font fits with padding
         let margin = crate::config::get("shade.bar_margin")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(8);
+            .unwrap_or(6);
         let position = match crate::config::get("shade.bar_position").as_deref() {
             Some("bottom") => BarPosition::Bottom,
             _ => BarPosition::Top,
@@ -90,10 +94,9 @@ impl ShadeBar {
         }
     }
 
-    /// Bar text font scale — one step above the UI scale so FullHD
-    /// (scale 1) uses the 16x32 font instead of the tiny 8x16.
+    /// Bar text font scale. 1x → 8x16, 2x → 16x32 (font caps there).
     fn text_scale(&self) -> u32 {
-        self.scale + 1
+        self.scale
     }
 
     /// Y of the reserved band on screen.
@@ -125,7 +128,6 @@ impl ShadeBar {
         screen_h.saturating_sub(self.height)
     }
 
-    /// Set active workspace.
     pub fn set_workspace(&mut self, ws: u8) {
         if ws != self.active_workspace {
             self.active_workspace = ws;
@@ -133,7 +135,6 @@ impl ShadeBar {
         }
     }
 
-    /// Set focused window title.
     pub fn set_title(&mut self, title: &str) {
         if self.focused_title != title {
             self.focused_title = String::from(title);
@@ -143,88 +144,93 @@ impl ShadeBar {
 
     /// Render the bar onto the shadow buffer.
     pub fn render(&mut self, shadow: *mut u8, info: &FbInfo, screen_w: u32, screen_h: u32) {
-        // Restore the wallpaper across the whole band first, so the gaps
-        // around the floating pills show through and stale text clears
-        // (the partial-render path doesn't pre-restore this region).
+        // Wallpaper shows through the gaps around the floating pills.
         self.restore_band(shadow, info, screen_w, screen_h);
 
         let pill_top = self.pill_top(screen_h);
-        let radius = 14 * self.scale;
-        let hpad = 10 * self.scale;
+        let radius = 10 * self.scale;
+        let hpad = 8 * self.scale;
         let accent = background::accent_color();
         let tf = self.text_scale();
         let (cw, ch) = font::char_size(tf);
         let text_y = pill_top + (self.pill_h.saturating_sub(ch)) / 2;
+        let icon_box = self.pill_h.saturating_sub(8 * self.scale);
 
-        // ── Left pill: workspace indicators ──────────────────────────
+        // ── Center pill: clock (anchored first — left/right clamp to it)
+        let time_str = self.format_time();
+        let clock_w = font::measure_str(&time_str, tf);
+        let center_w = clock_w + 2 * hpad;
+        let center_x = (screen_w.saturating_sub(center_w)) / 2;
+        render::fill_rounded_rect_aa(shadow, info, center_x, pill_top, center_w, self.pill_h, PILL_BG, radius);
+        font::draw_str(shadow, info, &time_str, center_x + hpad, text_y, CLOCK_FG, None, tf);
+
+        // ── Left pill: workspaces │ title ────────────────────────────
         let btn_h = self.pill_h.saturating_sub(8 * self.scale);
-        let btn_w = btn_h.max(cw + 14 * self.scale);
-        let ws_gap = 6 * self.scale;
+        let btn_w = btn_h.max(cw + 10 * self.scale);
+        let ws_gap = 4 * self.scale;
         let n = self.workspace_count as u32;
-        let left_w = 2 * hpad
-            + n * btn_w
-            + n.saturating_sub(1) * ws_gap;
+        let ws_total = n * btn_w + n.saturating_sub(1) * ws_gap;
+        let sep_pad = 8 * self.scale;
+        let sep_w = self.scale.max(1);
         let left_x = self.margin;
+
+        // Title space = up to the center pill's left edge.
+        let has_title = !self.focused_title.is_empty();
+        let left_fixed = hpad + ws_total
+            + if has_title { sep_pad + sep_w + sep_pad } else { 0 };
+        let title_avail = center_x
+            .saturating_sub(self.margin)
+            .saturating_sub(left_x + left_fixed + hpad);
+        let title = if has_title && title_avail >= cw * 3 {
+            truncate_to(&self.focused_title, (title_avail / cw.max(1)) as usize)
+        } else {
+            String::new()
+        };
+        let title_w = if title.is_empty() { 0 } else { font::measure_str(&title, tf) };
+        let left_w = if title.is_empty() {
+            hpad + ws_total + hpad
+        } else {
+            left_fixed + title_w + hpad
+        };
+
         render::fill_rounded_rect_aa(shadow, info, left_x, pill_top, left_w, self.pill_h, PILL_BG, radius);
 
         let btn_y = pill_top + (self.pill_h.saturating_sub(btn_h)) / 2;
-        let mut bx = left_x + hpad;
+        let mut x = left_x + hpad;
         for i in 0..self.workspace_count {
             let active = i == self.active_workspace;
-            let (bg, fg) = if active {
-                (accent, WS_ACTIVE_FG)
-            } else {
-                (WS_INACTIVE_BG, WS_INACTIVE_FG)
-            };
-            render::fill_rounded_rect_aa(shadow, info, bx, btn_y, btn_w, btn_h, bg, 8 * self.scale);
+            let (bg, fg) = if active { (accent, WS_ACTIVE_FG) } else { (WS_INACTIVE_BG, WS_INACTIVE_FG) };
+            render::fill_rounded_rect_aa(shadow, info, x, btn_y, btn_w, btn_h, bg, 6 * self.scale);
             let num = format!("{}", i + 1);
-            let tx = bx + (btn_w.saturating_sub(cw)) / 2;
-            font::draw_str(shadow, info, &num, tx, text_y, fg, None, tf);
-            bx += btn_w + ws_gap;
+            font::draw_str(shadow, info, &num, x + (btn_w.saturating_sub(cw)) / 2, text_y, fg, None, tf);
+            x += btn_w + ws_gap;
+        }
+        if !title.is_empty() {
+            x = x - ws_gap + sep_pad;
+            render::fill_rect(shadow, info, x, btn_y, sep_w, btn_h, SEP_FG);
+            x += sep_w + sep_pad;
+            font::draw_str(shadow, info, &title, x, text_y, TITLE_FG, None, tf);
         }
 
-        // ── Right pill: clock + power button ─────────────────────────
-        let time_str = self.format_time();
-        let clock_w = font::measure_str(&time_str, tf);
-        let icon_sz = (self.pill_h * 11 / 20).max(16); // ~55% of pill height
-        let cp_gap = 12 * self.scale;
-        let right_w = 2 * hpad + clock_w + cp_gap + icon_sz;
+        // ── Right pill: status widgets (placeholder) + power ─────────
+        let mod_gap = 8 * self.scale;
+        let slots = WIDGETS.len() as u32 + 1; // + power
+        let right_w = 2 * hpad + slots * icon_box + (slots - 1) * mod_gap;
         let right_x = screen_w.saturating_sub(self.margin + right_w);
         render::fill_rounded_rect_aa(shadow, info, right_x, pill_top, right_w, self.pill_h, PILL_BG, radius);
 
-        let clock_x = right_x + hpad;
-        font::draw_str(shadow, info, &time_str, clock_x, text_y, CLOCK_FG, None, tf);
-        let icon_x = clock_x + clock_w + cp_gap;
-        let icon_y = pill_top + (self.pill_h.saturating_sub(icon_sz)) / 2;
-        self.draw_icon(shadow, info, IconId::Power, icon_sz, icon_x, icon_y, POWER_FG);
-
-        // ── Center pill: focused window title (clamped, truncated) ────
-        if !self.focused_title.is_empty() {
-            let left_edge = left_x + left_w + 2 * self.margin;
-            let right_edge = right_x.saturating_sub(2 * self.margin);
-            let avail = right_edge.saturating_sub(left_edge);
-            let inner_max = avail.saturating_sub(2 * hpad);
-            if inner_max >= cw * 4 {
-                let max_chars = (inner_max / cw.max(1)) as usize;
-                let title = truncate_to(&self.focused_title, max_chars);
-                let title_w = font::measure_str(&title, tf);
-                let center_w = title_w + 2 * hpad;
-                // Centre on screen, then clamp inside the available band.
-                let mut center_x = (screen_w.saturating_sub(center_w)) / 2;
-                if center_x < left_edge { center_x = left_edge; }
-                if center_x + center_w > right_edge {
-                    center_x = right_edge.saturating_sub(center_w);
-                }
-                render::fill_rounded_rect_aa(shadow, info, center_x, pill_top, center_w, self.pill_h, PILL_BG, radius);
-                font::draw_str(shadow, info, &title, center_x + hpad, text_y, TITLE_FG, None, tf);
-            }
+        let icon_y = pill_top + (self.pill_h.saturating_sub(icon_box)) / 2;
+        let mut ix = right_x + hpad;
+        for &id in WIDGETS {
+            self.draw_icon(shadow, info, id, ix, icon_y, icon_box, WIDGET_FG);
+            ix += icon_box + mod_gap;
         }
+        self.draw_icon(shadow, info, IconId::Power, ix, icon_y, icon_box, POWER_FG);
 
         self.dirty = false;
     }
 
-    /// Restore the bar band from the background (wallpaper) layer so the
-    /// gaps around the floating pills are transparent to the wallpaper.
+    /// Restore the bar band from the background (wallpaper) layer.
     fn restore_band(&self, shadow: *mut u8, info: &FbInfo, screen_w: u32, screen_h: u32) {
         let bar_y = self.y(screen_h);
         if let Some((bg, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
@@ -244,24 +250,27 @@ impl ShadeBar {
         }
     }
 
-    /// Blit an alpha-only atlas icon onto the shadow, tinted `color`.
-    /// Nearest-neighbour scales the atlas glyph to `size` when needed.
+    /// Blit an alpha-only atlas icon, centered in a `box`×`box` cell,
+    /// tinted `color`. Renders at the icon's native atlas size (no
+    /// rescale — nearest-neighbour mangles thin strokes), so the cell
+    /// must be at least the requested 16px·scale.
     fn draw_icon(&self, shadow: *mut u8, info: &FbInfo, id: IconId,
-                 size: u32, x: u32, y: u32, color: u32) {
-        let (asz, alpha) = match crate::gui::icons::alpha_for(id, size as u16) {
+                 x: u32, y: u32, cell: u32, color: u32) {
+        let req = 16 * self.scale;
+        let (asz, alpha) = match crate::gui::icons::alpha_for(id, req as u16) {
             Some(v) => v,
             None => return,
         };
         let asz = asz as u32;
-        if asz == 0 { return; }
-        for row in 0..size {
-            let sy = (row * asz / size).min(asz - 1);
-            for col in 0..size {
-                let sx = (col * asz / size).min(asz - 1);
-                let a = alpha[(sy * asz + sx) as usize] as u32;
+        if asz == 0 || alpha.len() < (asz * asz) as usize { return; }
+        let ox = x + cell.saturating_sub(asz) / 2;
+        let oy = y + cell.saturating_sub(asz) / 2;
+        for row in 0..asz {
+            for col in 0..asz {
+                let a = alpha[(row * asz + col) as usize] as u32;
                 if a > 0 {
-                    // 255 → 256 so a fully-opaque texel writes the pure color.
-                    render::blend_pixel(shadow, info, x + col, y + row, color, a + (a >> 7));
+                    // 255 → 256 so a fully-opaque texel writes pure color.
+                    render::blend_pixel(shadow, info, ox + col, oy + row, color, a + (a >> 7));
                 }
             }
         }
