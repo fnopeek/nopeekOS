@@ -180,6 +180,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache; \
                  mount -t ext4 /dev/vda /tmp/moz 2>/dev/null; \
+                 mkdir -p /tmp/npkhome; \
+                 mount -t 9p -o trans=virtio,version=9p2000.L,access=any npkhome /tmp/npkhome 2>/dev/null \
+                   && echo '<0>[9p] npkhome mounted at /tmp/npkhome' > /dev/kmsg \
+                   || echo '<0>[9p] mount FAILED (read path)' > /dev/kmsg; \
                  : > /tmp/moz/user.js; \
                  for p in \
                    'layers.gpu-process.enabled|false' \
