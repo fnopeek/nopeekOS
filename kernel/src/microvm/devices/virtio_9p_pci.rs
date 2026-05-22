@@ -157,8 +157,12 @@ struct Fid {
     /// Full npkFS path (always starts with `root`).
     path: String,
     is_dir: bool,
-    /// File contents cached at Tlopen (None until opened / for dirs).
+    /// Working buffer: a regular file's bytes, cached at Tlopen/Tlcreate.
+    /// Tread slices it; Twrite/Tsetattr mutate it. None for dirs / not
+    /// yet opened.
     data: Option<Vec<u8>>,
+    /// `data` has unflushed writes — persisted to npkFS on Tfsync/Tclunk.
+    dirty: bool,
 }
 
 impl Virtio9p {
@@ -468,6 +472,15 @@ impl Virtio9p {
             TREAD    => self.t_read(tag, body),
             TCLUNK   => self.t_clunk(tag, body),
             TSTATFS  => self.t_statfs(tag, body),
+            TLCREATE => self.t_lcreate(tag, body),
+            TWRITE   => self.t_write(tag, body),
+            TFSYNC   => self.t_fsync(tag, body),
+            TSETATTR => self.t_setattr(tag, body),
+            TMKDIR   => self.t_mkdir(tag, body),
+            TUNLINKAT => self.t_unlinkat(tag, body),
+            TRENAMEAT => self.t_renameat(tag, body),
+            // No xattrs → report "attribute not found" so v9fs proceeds.
+            TXATTRWALK => rlerror(tag, ENODATA),
             _ => {
                 if self.log_count < 32 {
                     kprintln!("[9p] unhandled T-type {} (tag {}) → Rlerror(ENOSYS)", mtype, tag);
@@ -506,7 +519,7 @@ impl Virtio9p {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         let root = self.root.clone();
-        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None });
+        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, dirty: false });
         if self.log_count < 32 {
             kprintln!("[9p] Tattach fid={} → root '{}'", fid, root);
             self.log_count += 1;
@@ -539,7 +552,7 @@ impl Virtio9p {
         let walked = (qids.len() / 13) as u16;
         if walked as usize == nw {
             let is_dir = npkfs_stat(&cur).map(|s| s.0).unwrap_or(true);
-            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None });
+            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, dirty: false });
         }
         let mut b = Vec::with_capacity(2 + qids.len());
         b.extend_from_slice(&walked.to_le_bytes());
@@ -648,10 +661,16 @@ impl Virtio9p {
         msg(RREAD, tag, &b)
     }
 
-    /// Tclunk: fid[4]. Drop the fid (+ its cached file bytes).
+    /// Tclunk: fid[4]. Flush any unwritten bytes, then drop the fid.
     fn t_clunk(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
-        self.fids.remove(&rd_u32(body, 0));
+        let fid = rd_u32(body, 0);
+        if let Some(f) = self.fids.get(&fid) {
+            if f.dirty {
+                if let Some(d) = &f.data { let _ = npkfs_write(&f.path, d); }
+            }
+        }
+        self.fids.remove(&fid);
         msg(RCLUNK, tag, &[])
     }
 
@@ -669,19 +688,154 @@ impl Virtio9p {
         b.extend_from_slice(&255u32.to_le_bytes());         // namelen
         msg(RSTATFS, tag, &b)
     }
+
+    /// Tlcreate: fid[4] name[s] flags[4] mode[4] gid[4]. Creates a file
+    /// in the dir `fid` points to; `fid` is then RE-BOUND to the new
+    /// open file (9P2000.L semantics).
+    fn t_lcreate(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 6 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let nlen = rd_u16(body, 4) as usize;
+        if 6 + nlen > body.len() { return rlerror(tag, EINVAL); }
+        let name = core::str::from_utf8(&body[6..6 + nlen]).unwrap_or("");
+        let dir = match self.fids.get(&fid) { Some(f) if f.is_dir => f.path.clone(), _ => return rlerror(tag, ENOTDIR) };
+        let path = join_confined(&self.root, &dir, name);
+        if path.len() <= dir.len() { return rlerror(tag, EINVAL); } // rejected name
+        if npkfs_write(&path, &[]).is_err() { return rlerror(tag, EIO); }
+        // Re-bind fid to the new open file with an empty write buffer.
+        self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), dirty: false });
+        let mut b = Vec::with_capacity(17);
+        b.extend_from_slice(&qid(&path, false));
+        b.extend_from_slice(&0u32.to_le_bytes()); // iounit
+        msg(RLCREATE, tag, &b)
+    }
+
+    /// Twrite: fid[4] offset[8] count[4] data[count]. Buffers into the
+    /// fid's working copy (persisted on Tfsync/Tclunk).
+    fn t_write(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 16 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let offset = u64::from_le_bytes(body[4..12].try_into().unwrap()) as usize;
+        let count = rd_u32(body, 12) as usize;
+        let data = &body[16..body.len().min(16 + count)];
+        let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
+        let buf = f.data.get_or_insert_with(Vec::new);
+        let end = offset + data.len();
+        if buf.len() < end { buf.resize(end, 0); }
+        buf[offset..end].copy_from_slice(data);
+        f.dirty = true;
+        msg(RWRITE, tag, &(data.len() as u32).to_le_bytes())
+    }
+
+    /// Tfsync: fid[4] datasync[4]. Flush the working buffer to npkFS.
+    fn t_fsync(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 4 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        if let Some(f) = self.fids.get(&fid) {
+            if f.dirty {
+                if let Some(d) = &f.data {
+                    if npkfs_write(&f.path, d).is_err() { return rlerror(tag, EIO); }
+                }
+            }
+        }
+        if let Some(f) = self.fids.get_mut(&fid) { f.dirty = false; }
+        msg(RFSYNC, tag, &[])
+    }
+
+    /// Tsetattr: fid[4] valid[4] mode[4] uid[4] gid[4] size[8] ...times.
+    /// We honour size (truncate/extend the buffer); mode/uid/gid/times
+    /// are ack'd but ignored (npkFS tracks none of them).
+    fn t_setattr(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 8 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let valid = rd_u32(body, 4);
+        const P9_SETATTR_SIZE: u32 = 0x0000_0008;
+        if valid & P9_SETATTR_SIZE != 0 && body.len() >= 32 {
+            let size = u64::from_le_bytes(body[24..32].try_into().unwrap()) as usize;
+            if let Some(f) = self.fids.get_mut(&fid) {
+                if !f.is_dir {
+                    let buf = f.data.get_or_insert_with(Vec::new);
+                    buf.resize(size, 0);
+                    f.dirty = true;
+                }
+            }
+        }
+        msg(RSETATTR, tag, &[])
+    }
+
+    /// Tmkdir: dfid[4] name[s] mode[4] gid[4] → Rmkdir qid.
+    fn t_mkdir(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 6 { return rlerror(tag, EINVAL); }
+        let dfid = rd_u32(body, 0);
+        let nlen = rd_u16(body, 4) as usize;
+        if 6 + nlen > body.len() { return rlerror(tag, EINVAL); }
+        let name = core::str::from_utf8(&body[6..6 + nlen]).unwrap_or("");
+        let dir = match self.fids.get(&dfid) { Some(f) if f.is_dir => f.path.clone(), _ => return rlerror(tag, ENOTDIR) };
+        let path = join_confined(&self.root, &dir, name);
+        if path.len() <= dir.len() { return rlerror(tag, EINVAL); }
+        if npkfs_mkdir(&path).is_err() { return rlerror(tag, EIO); }
+        msg(RMKDIR, tag, &qid(&path, true))
+    }
+
+    /// Tunlinkat: dfid[4] name[s] flags[4] → delete the entry.
+    fn t_unlinkat(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 6 { return rlerror(tag, EINVAL); }
+        let dfid = rd_u32(body, 0);
+        let nlen = rd_u16(body, 4) as usize;
+        if 6 + nlen > body.len() { return rlerror(tag, EINVAL); }
+        let name = core::str::from_utf8(&body[6..6 + nlen]).unwrap_or("");
+        let dir = match self.fids.get(&dfid) { Some(f) if f.is_dir => f.path.clone(), _ => return rlerror(tag, ENOTDIR) };
+        let path = join_confined(&self.root, &dir, name);
+        if path.len() <= dir.len() { return rlerror(tag, EINVAL); }
+        if npkfs_delete(&path).is_err() { return rlerror(tag, ENOENT); }
+        msg(RUNLINKAT, tag, &[])
+    }
+
+    /// Trenameat: olddfid[4] oldname[s] newdfid[4] newname[s]. Used by
+    /// the browser's download .part → final rename.
+    fn t_renameat(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 6 { return rlerror(tag, EINVAL); }
+        let olddfid = rd_u32(body, 0);
+        let onlen = rd_u16(body, 4) as usize;
+        let mut off = 6;
+        if off + onlen > body.len() { return rlerror(tag, EINVAL); }
+        let oldname = String::from(core::str::from_utf8(&body[off..off + onlen]).unwrap_or(""));
+        off += onlen;
+        if off + 4 > body.len() { return rlerror(tag, EINVAL); }
+        let newdfid = rd_u32(body, off); off += 4;
+        if off + 2 > body.len() { return rlerror(tag, EINVAL); }
+        let nnlen = rd_u16(body, off) as usize; off += 2;
+        if off + nnlen > body.len() { return rlerror(tag, EINVAL); }
+        let newname = core::str::from_utf8(&body[off..off + nnlen]).unwrap_or("");
+        let olddir = match self.fids.get(&olddfid) { Some(f) if f.is_dir => f.path.clone(), _ => return rlerror(tag, ENOTDIR) };
+        let newdir = match self.fids.get(&newdfid) { Some(f) if f.is_dir => f.path.clone(), _ => return rlerror(tag, ENOTDIR) };
+        let oldp = join_confined(&self.root, &olddir, &oldname);
+        let newp = join_confined(&self.root, &newdir, newname);
+        if oldp.len() <= olddir.len() || newp.len() <= newdir.len() { return rlerror(tag, EINVAL); }
+        if npkfs_rename(&oldp, &newp).is_err() { return rlerror(tag, EIO); }
+        msg(RRENAMEAT, tag, &[])
+    }
 }
 
-// ── 9P2000.L message type codes (subset; write ops land next) ──
-const RLERROR:  u8 = 7;
-const TSTATFS:  u8 = 8;  const RSTATFS:  u8 = 9;
-const TLOPEN:   u8 = 12; const RLOPEN:   u8 = 13;
-const TGETATTR: u8 = 24; const RGETATTR: u8 = 25;
-const TREADDIR: u8 = 40; const RREADDIR: u8 = 41;
-const TVERSION: u8 = 100; const RVERSION: u8 = 101;
-const TATTACH:  u8 = 104; const RATTACH:  u8 = 105;
-const TWALK:    u8 = 110; const RWALK:    u8 = 111;
-const TREAD:    u8 = 116; const RREAD:    u8 = 117;
-const TCLUNK:   u8 = 120; const RCLUNK:   u8 = 121;
+// ── 9P2000.L message type codes ──
+const RLERROR:   u8 = 7;
+const TSTATFS:   u8 = 8;  const RSTATFS:   u8 = 9;
+const TLOPEN:    u8 = 12; const RLOPEN:    u8 = 13;
+const TLCREATE:  u8 = 14; const RLCREATE:  u8 = 15;
+const TGETATTR:  u8 = 24; const RGETATTR:  u8 = 25;
+const TSETATTR:  u8 = 26; const RSETATTR:  u8 = 27;
+const TXATTRWALK:u8 = 30;
+const TREADDIR:  u8 = 40; const RREADDIR:  u8 = 41;
+const TFSYNC:    u8 = 50; const RFSYNC:    u8 = 51;
+const TMKDIR:    u8 = 72; const RMKDIR:    u8 = 73;
+const TRENAMEAT: u8 = 74; const RRENAMEAT: u8 = 75;
+const TUNLINKAT: u8 = 76; const RUNLINKAT: u8 = 77;
+const TVERSION:  u8 = 100; const RVERSION: u8 = 101;
+const TATTACH:   u8 = 104; const RATTACH:  u8 = 105;
+const TWALK:     u8 = 110; const RWALK:    u8 = 111;
+const TREAD:     u8 = 116; const RREAD:    u8 = 117;
+const TWRITE:    u8 = 118; const RWRITE:   u8 = 119;
+const TCLUNK:    u8 = 120; const RCLUNK:   u8 = 121;
 
 // 9P qid.type bits + dirent d_type values.
 const QTDIR: u8 = 0x80;
@@ -689,10 +843,12 @@ const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
 // Linux errno values used in Rlerror.
+const EIO:     u32 = 5;
 const ENOENT:  u32 = 2;
 const ENOTDIR: u32 = 20;
 const EINVAL:  u32 = 22;
 const ENOSYS:  u32 = 38;
+const ENODATA: u32 = 61;
 
 #[inline] fn rd_u32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
@@ -760,6 +916,21 @@ fn npkfs_read(path: &str) -> Option<Vec<u8>> {
         Ok(Some(d)) => Some(d),
         _ => None,
     }
+}
+
+/// Write (create-or-replace) a whole file. Parent dir must exist (9P
+/// always walks to it first). `Err(())` on any storage error.
+fn npkfs_write(path: &str, data: &[u8]) -> Result<(), ()> {
+    crate::npkfs::fs::write(path, data).map_err(|_| ())
+}
+fn npkfs_mkdir(path: &str) -> Result<(), ()> {
+    crate::npkfs::fs::mkdir(path).map_err(|_| ())
+}
+fn npkfs_delete(path: &str) -> Result<(), ()> {
+    crate::npkfs::fs::delete(path).map_err(|_| ())
+}
+fn npkfs_rename(old: &str, new: &str) -> Result<(), ()> {
+    crate::npkfs::fs::rename(old, new).map_err(|_| ())
 }
 
 /// Build a 9P message: size[4] (incl. header) | type[1] | tag[2] | body.
