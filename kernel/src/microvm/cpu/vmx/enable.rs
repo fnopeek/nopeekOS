@@ -1187,7 +1187,18 @@ impl VmContext {
                 // never tripped on this. Mirrors the timer's irq_unmasked(0)
                 // gate. The dirty flag is left set, so the resize lands the
                 // moment the guest is ready to receive it.
-                if self.pic.irq_unmasked(9) {
+                // KVM-style interruptibility gate (vmx_interrupt_allowed):
+                // only inject an external interrupt when the guest can
+                // actually take one (RFLAGS.IF=1, no STI / MOV-SS shadow).
+                // Injecting into an IF=0 guest (e.g. mid i8042 status poll
+                // in a CLI'd critical section) makes the VM-entry fail with
+                // reason 33 on bare-metal Intel; AMD's VMRUN tolerates it.
+                // The skipped IRQ re-fires on the next ~100 Hz external-
+                // interrupt exit once the guest sets IF=1, so an IF=0 window
+                // (µs–ms) costs at most a tick of jitter — far under any
+                // RCU-stall threshold.
+                let can_irq = vmcs::guest_interruptible();
+                if can_irq && self.pic.irq_unmasked(9) {
                     let wid = crate::microvm::vm_window();
                     let now_d4 = crate::interrupts::ticks();
                     // Phase 2 of any in-flight D4 cycle: reconnect IRQ.
@@ -1239,7 +1250,8 @@ impl VmContext {
                 // effect; only the inject+`continue` is prioritized.
                 const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
                 let now = crate::interrupts::ticks();
-                if self.pic.irq_unmasked(0)
+                if can_irq
+                    && self.pic.irq_unmasked(0)
                     && now.wrapping_sub(self.last_timer_tick) >= TIMER_MAX_SKIP
                 {
                     self.last_timer_tick = now;
@@ -1250,19 +1262,19 @@ impl VmContext {
                 }
                 let pumped = crate::microvm::devices::nat::pump(
                     &mut self.pci.virtio_net, &self.guest_mem);
-                if self.pci.virtio_input.drain_injected(&self.guest_mem) {
+                if can_irq && self.pci.virtio_input.drain_injected(&self.guest_mem) {
                     let vector = self.pic.vector_for_irq(12);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                     continue;
                 }
-                if pumped {
+                if pumped && can_irq {
                     let vector = self.pic.vector_for_irq(10);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                     continue;
                 }
-                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
+                if can_irq && now != self.last_timer_tick && self.pic.irq_unmasked(0) {
                     self.last_timer_tick = now;
                     let vector = self.pic.vector_for_irq(0);
                     let _ = vmcs::inject_external_irq(vector);
@@ -1548,6 +1560,7 @@ impl VmContext {
                 // triad is inconsistent and we need to see exactly
                 // which field. SDM Vol 3 §26.3.1 enumerates the checks.
                 if basic == 33 || basic == 34 || basic == 41 {
+                    kprintln!("[vmx] entry_intr at fail = {:#x}", entry_intr_used);
                     vmcs::dump_entry_fail_state();
                 }
                 self.io_stats.dump();
