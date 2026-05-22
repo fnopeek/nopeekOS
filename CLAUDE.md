@@ -45,9 +45,11 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.6 + polish ✅ — Browser ist daily-driver-capable
-  auf QEMU/AMD (2026-05-21, kernel v0.172.63, microvm-init 0.4.14,
-  drun v0.6.1).** Standard LibreWolf-Config (e10s + fission +
+- **Phase:** **12.6 + polish ✅ — Browser daily-driver auf QEMU/AMD
+  UND bare-metal Intel-NUC (2026-05-22, kernel v0.172.83, microvm-init
+  0.4.21, drun v0.6.1). Profil-Persistenz + 9p-npkFS-Brücke (Downloads
+  → npkFS → loft) live.** (Details im 2026-05-22-Eintrag unten.)
+  Standard LibreWolf-Config (e10s + fission +
   Sandboxes alle wieder default), 2 GiB Guest-RAM (B3 demand-paging
   + B4 multi-PD in main), `browser` Top-Level-Intent + Drun-Eintrag
   "Browser" (via `npk_run_intent` Host-Fn), D4 live-resize (EDID-
@@ -56,13 +58,50 @@ See README.md for the full vision and phase planning.
   bundelt 261 MB LibreWolf-sqfs in Installer (USB ~290 MB, kein OTA
   nötig für ersten Boot). YouTube AV1 + Audio + Multi-Site live
   bestätigt.
-- **Bare-metal NUC (Intel-VMX) noch broken** — A2 vendor-gated
-  (v0.172.62), aber selbst der VMX-cooperative-Pfad failt mit
-  exit reason 33 (VM-entry invalid guest state) bei Linux's
-  CR3 long-mode trampoline. v0.172.63 hat VMCS-Entry-Fail-Dump
-  für nächste Session. Audit-Strategie: VMX-Equivalente der
-  vier validierten SVM-Fixes (vmsave/vmload+STGI, EXITINTINFO
-  type-gate, EVENTINJ-clear, host-state lifecycle) portieren.
+- **2026-05-22 (Monster-Session, kernel v0.172.63 → v0.172.83,
+  microvm-init 0.4.14 → 0.4.21): Bare-Metal-Intel-Browser + Profil-
+  Persistenz + komplette 9p-npkFS-Brücke.**
+  - **Bare-Metal NUC (Intel-VMX) BOOTET JETZT** — LibreWolf läuft auf
+    echter Hardware. Die exit-reason-33-Wände waren NICHT die
+    IA32E/CR/EFER-Triade (Dump bewies: konsistent) sondern
+    **ungegatete Interrupt-Injection** (datengetrieben gefunden via
+    per-exit CS.L/LMA-Diag + Match gegen echte KVM-Quelle in
+    `~/.cache/nopeekos/linux-src/`): (1) v0.172.76 — D4-virtio-gpu-IRQ9
+    in die winzige Boot-IDT (32 Gates) → Gate auf `pic.irq_unmasked(9)`;
+    (2) v0.172.77 — Timer-IRQ0 in Guest mit IF=0 (mid i8042-poll) →
+    alle 5 reason-1-Injects auf neues `vmcs::guest_interruptible()`
+    gegated (= KVM `vmx_interrupt_allowed`). **Durable Lektion: jede
+    VMX-vs-SVM-Divergenz war „AMD-VMRUN nachsichtig, Intel strikt" → bei
+    reason-33 nach reason-1/48 zuerst ungegatete Injection verdächtigen.**
+    Intel-Perf noch suboptimal (kooperativer Core-0-Pfad, A2-dedicated-
+    core für Intel un-gaten ist geparkt — „bearmetal später").
+  - **Profil-Persistenz (Deliverable 1, QEMU/AMD validiert)** — die
+    profile.img-virtio-blk-Mechanik vergrößert auf **64 MiB ext4
+    Home-Image** (`sys/microvm/apps/browser/home.img`), auf npkFS-Miss
+    aus einem **eingebetteten sparse-ext4-Template** geseedet
+    (`home_template.bin`, kein mke2fs im Guest, kein inflate im Kernel).
+    PID-1 mountet `/dev/vda` ext4 RW an `/tmp/moz` (NICHT `/home/...` —
+    squashfs-Root ist RO → EROFS-Panik). **`save()` in `close()`**
+    (war nur am run_slice-Loop-Ende → Mod+Q persistierte nie). Cache →
+    tmpfs (Image bleibt klein), glean-Telemetrie → tmpfs-Symlink (sonst
+    StorageFull). Close-Button via `halt` (NICHT `reboot` — reboot riss
+    den ganzen Host runter). Session-Restore statt CLI-Start-URL.
+  - **9p-npkFS-Brücke (Deliverable 2, Read+Write validiert)** — neuer
+    host-seitiger **virtio-9p (slot 6, `devices/virtio_9p_pci.rs`)** +
+    9P2000.L-Server, gewurzelt + CONFINED auf `home/<user>/`. Kein
+    Guest-Rebuild (CONFIG_NET_9P_VIRTIO=y). Read: attach/walk/getattr/
+    readdir/lopen/read (Browser zeigt npkFS-Dateien via
+    `file:///tmp/npkhome/`). Write: Tlcreate/Twrite/Tfsync/Tsetattr/
+    Tmkdir/Tunlinkat/Trenameat — **Downloads landen in npkFS
+    `home/<user>/downloads`, sichtbar in loft** (`browser.download.dir`).
+    Trenameat musste POSIX-overwrite (Firefox `.part`→final). **Capstone
+    (v0.172.83):** `file:///tmp/npkhome/.open-in-loft` (synthetische
+    Magic-Datei) → Host spawnt loft (`shade::launch_app` via Core-0-
+    Atomic-Handoff). `.ssh`/`documents` sind jetzt nur weitere Mounts.
+  - **Offen:** File-Open/Save-Dialog (GTK-Chooser rendert evtl. nicht im
+    cage-Kiosk → evtl. XDG-Portal nötig), „open in folder" Cross-
+    Boundary, loft-Start-Pfad für exakten Ordner, Intel-Perf (A2),
+    p9diag-Logs strippen. Voll in `memory/project_browser_v1.md`.
 - **2026-05-21 (sehr lange Session, kernel v0.172.54 → v0.172.63,
   microvm-init 0.4.8 → 0.4.14):**
   - **D4 live-resize end-to-end**: virtio-gpu EDID-Emulation
