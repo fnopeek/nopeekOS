@@ -1256,6 +1256,22 @@ pub fn read_guest_cs_selector() -> Result<u64, &'static str> {
     vmread(GUEST_CS_SELECTOR)
 }
 
+/// Read VMCS GUEST_CS_AR_BYTES — bit 13 = L (64-bit code), bit 14 =
+/// D/B. Diagnostic: lets the run loop log when the guest enters long
+/// mode and whether re-entry into that mode succeeds.
+pub fn read_guest_cs_ar() -> Result<u64, &'static str> {
+    vmread(GUEST_CS_AR_BYTES)
+}
+
+/// Read VM_ENTRY_INTR_INFO_FIELD — the event (if any) we asked the CPU
+/// to inject on the entry that just ran. Diagnostic for the bare-metal
+/// reason-33 path: confirms whether an injection was pending at a
+/// failing VM-entry (a failed entry never delivers, so the field still
+/// holds what we wrote).
+pub fn read_entry_intr_info() -> Result<u64, &'static str> {
+    vmread(VM_ENTRY_INTR_INFO_FIELD)
+}
+
 /// Read VMCS VM_ENTRY_CONTROLS — the live entry-control field
 /// after our last VMWRITE (or fixed_ctrl-applied initial value).
 pub fn read_vm_entry_controls() -> Result<u64, &'static str> {
