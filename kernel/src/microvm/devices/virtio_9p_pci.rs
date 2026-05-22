@@ -556,6 +556,12 @@ impl Virtio9p {
             if off + len > body.len() { break; }
             let name = core::str::from_utf8(&body[off..off + len]).unwrap_or(""); off += len;
             let next = join_confined(&self.root, &cur, name);
+            if is_magic(&next) {
+                // Synthetic trigger file — exists for walk/getattr/open.
+                qids.extend_from_slice(&qid(&next, false));
+                cur = next;
+                continue;
+            }
             match npkfs_stat(&next) {
                 Some((is_dir, _, _)) => { qids.extend_from_slice(&qid(&next, is_dir)); cur = next; }
                 None => { if qids.is_empty() { return rlerror(tag, ENOENT); } break; }
@@ -577,7 +583,11 @@ impl Virtio9p {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         let path = match self.fids.get(&fid) { Some(f) => f.path.clone(), None => return rlerror(tag, EINVAL) };
-        let (is_dir, size, mtime) = match npkfs_stat(&path) { Some(s) => s, None => return rlerror(tag, ENOENT) };
+        let (is_dir, size, mtime) = if is_magic(&path) {
+            (false, MAGIC_OPEN_CONTENT.len() as u64, 0)
+        } else {
+            match npkfs_stat(&path) { Some(s) => s, None => return rlerror(tag, ENOENT) }
+        };
         let mode: u32 = if is_dir { 0o040000 | 0o755 } else { 0o100000 | 0o644 };
         let mut b = Vec::with_capacity(160);
         b.extend_from_slice(&0x0000_07ffu64.to_le_bytes());      // valid = P9_GETATTR_BASIC
@@ -645,7 +655,14 @@ impl Virtio9p {
         let fid = rd_u32(body, 0);
         let (path, is_dir) = match self.fids.get(&fid) { Some(f) => (f.path.clone(), f.is_dir), None => return rlerror(tag, EINVAL) };
         if !is_dir {
-            let data = npkfs_read(&path).unwrap_or_default();
+            let data = if is_magic(&path) {
+                // Capstone: opening the magic file pops loft on the host.
+                crate::microvm::cpu::request_open_loft();
+                p9diag!("[9p] .open-in-loft opened → spawning loft on host");
+                MAGIC_OPEN_CONTENT.to_vec()
+            } else {
+                npkfs_read(&path).unwrap_or_default()
+            };
             if let Some(f) = self.fids.get_mut(&fid) { f.data = Some(data); }
         }
         let mut b = Vec::with_capacity(17);
@@ -868,6 +885,14 @@ const TCLUNK:    u8 = 120; const RCLUNK:   u8 = 121;
 const QTDIR: u8 = 0x80;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
+
+/// Magic synthetic file: opening `file:///tmp/npkhome/.open-in-loft` in
+/// the guest browser triggers the host to spawn loft (the cross-boundary
+/// "open my files" capstone). Synthesised by the server — not a real
+/// npkFS object, never listed by readdir.
+const MAGIC_OPEN_SUFFIX: &str = "/.open-in-loft";
+static MAGIC_OPEN_CONTENT: &[u8] = b"Opening your files in loft on nopeekOS...\n";
+fn is_magic(path: &str) -> bool { path.ends_with(MAGIC_OPEN_SUFFIX) }
 
 // Linux errno values used in Rlerror.
 const EIO:     u32 = 5;
