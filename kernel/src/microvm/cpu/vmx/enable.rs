@@ -1032,6 +1032,11 @@ impl VmContext {
         let result = vmcs::run_guest_once(&mut self.regs, self.launched, hf, gf);
         let outcome = result?;
         self.launched = true;
+        // DIAG (bare-metal reason-33): snapshot the injection field that
+        // was live for the entry we just ran, BEFORE the clear below. On
+        // a VM-entry failure (reason 33) the event is never delivered, so
+        // this still holds what we wrote — confirms inject-vs-no-inject.
+        let entry_intr_used = vmcs::read_entry_intr_info().unwrap_or(0xDEAD);
         // Consume the VM_ENTRY_INTR_INFO slot. On bare-metal VMX the
         // CPU auto-clears the valid bit after a successful injection
         // (SDM §27.6), but under nested VMX (KVM emulating VMX) it
@@ -1062,6 +1067,22 @@ impl VmContext {
         }
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
         self.trace.record(basic, outcome.exit_qualification);
+
+        // DIAG (bare-metal reason-33): per-exit mode trace for the first
+        // ~14 exits. Shows EXACTLY when the guest enters long mode (CS.L
+        // / EFER.LMA flip 0→1) and whether re-entry into long mode
+        // succeeds — so we can tell "first long-mode entry fails" from
+        // "only the post-external-interrupt re-entry fails". Bounded to
+        // early boot so it doesn't spam a running browser. VMX-only.
+        if self.iter <= 14 {
+            let efer = vmcs::read_guest_efer().unwrap_or(0);
+            let cs_ar = vmcs::read_guest_cs_ar().unwrap_or(0);
+            kprintln!(
+                "[vmx-iter] #{} reason {} CS.L={} LMA={} entry_intr={:#x}",
+                self.iter, basic, (cs_ar >> 13) & 1, (efer >> 10) & 1,
+                entry_intr_used,
+            );
+        }
 
         // Reset idle-counter on any non-timer-tick activity. The
         // counter only progresses on a clean run of pure reason-1
