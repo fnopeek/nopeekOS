@@ -178,8 +178,10 @@ fn launch_wayland(kmsg_fd: i64) {
                    || route add default gw 10.99.0.1 2>/dev/null; \
                  echo 'nameserver 10.99.0.1' > /tmp/resolv.conf; \
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
-                 mkdir -p /tmp/moz /tmp/bcache; \
+                 mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
                  mount -t ext4 /dev/vda /tmp/moz 2>/dev/null; \
+                 rm -rf /tmp/moz/datareporting 2>/dev/null; \
+                 ln -s /tmp/gleandb /tmp/moz/datareporting 2>/dev/null; \
                  mkdir -p /tmp/npkhome; \
                  mount -t 9p -o trans=virtio,version=9p2000.L,access=any npkhome /tmp/npkhome 2>/dev/null \
                    && echo '<0>[9p] npkhome mounted at /tmp/npkhome' > /dev/kmsg \
@@ -204,11 +206,14 @@ fn launch_wayland(kmsg_fd: i64) {
                    'toolkit.telemetry.enabled|false' \
                    'toolkit.telemetry.unified|false' \
                    'toolkit.telemetry.archive.enabled|false' \
+                   'browser.download.folderList|2' \
+                   'browser.download.useDownloadDir|true' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
