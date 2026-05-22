@@ -636,6 +636,41 @@ fn spawn_launcher() {
     }
 }
 
+/// Launch an installed widget module by name (e.g. "loft") from kernel
+/// code — the spawn half of `spawn_launcher`, exposed for cross-boundary
+/// actions (the 9p "open in loft" trigger from the microvm browser).
+/// MUST run on Core 0 (touches the compositor). Re-focuses an existing
+/// window of that name instead of spawning a duplicate.
+pub fn launch_app(name: &str) {
+    let already_open = with_compositor(|comp| {
+        comp.windows.iter()
+            .find(|w| w.kind == window::WindowKind::Widget && w.title == name)
+            .map(|w| w.id)
+    }).flatten();
+    if let Some(id) = already_open {
+        with_compositor(|comp| comp.focus_window(id));
+        render_frame();
+        return;
+    }
+    let path = alloc::format!("sys/wasm/{}", name);
+    let (bytes, _hash) = match crate::npkfs::fetch(&path) {
+        Ok(v) => v,
+        Err(_) => { crate::kprintln!("[npk] launch_app: '{}' not installed", name); return; }
+    };
+    let module_cap = match crate::capability::create_module_cap(
+        crate::capability::Rights::READ
+            | crate::capability::Rights::EXECUTE
+            | crate::capability::Rights::RENDER,
+        Some(600_000),
+    ) {
+        Ok(id) => id,
+        Err(e) => { crate::kprintln!("[npk] launch_app: cap failed: {}", e); return; }
+    };
+    if !crate::wasm::spawn_widget_app(bytes.to_vec(), module_cap, name, 0) {
+        crate::kprintln!("[npk] launch_app: spawn failed for '{}'", name);
+    }
+}
+
 /// Fast re-render of just the current input line (for live typing feedback).
 /// Uses INPUT_LINE_CACHE from render_window for pixel-perfect background match.
 pub fn render_input_line() {

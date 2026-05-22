@@ -241,6 +241,19 @@ static ACTIVE_VM_WINDOW: AtomicU32 = AtomicU32::new(0);
 /// the guest down instead of running it headless.
 static VM_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Cross-boundary "open my files in loft" trigger: the guest's browser
+/// opens the magic 9p file `<root>/.open-in-loft`, the 9p server (on the
+/// VM core) sets this, and Core 0 reaps it in `vm_poll_slice` to spawn
+/// loft (a compositor op that MUST run on Core 0). Mirrors the
+/// VM_CLOSE_REQUESTED cross-core handoff.
+static OPEN_LOFT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Request that the host open loft. Safe to call from the VM core; the
+/// spawn itself happens on Core 0 (`vm_poll_slice`).
+pub fn request_open_loft() {
+    OPEN_LOFT_REQUESTED.store(true, Ordering::Release);
+}
+
 // ── Dedicated-core path (substrate rework A2) ──────────────────────
 //
 // When `per_core::dedicated_vm_core()` is Some, the guest runs in a
@@ -371,6 +384,13 @@ pub fn vm_open(
 /// On guest exit / fault: log, free resources, clear the slot so a
 /// new VM can be opened (relaunch).
 pub fn vm_poll_slice() {
+    // Cross-boundary trigger: the microvm browser asked (via 9p) to open
+    // loft. Spawn it here on Core 0 (compositor op). Runs on both the
+    // cooperative and dedicated paths since it's before the early return.
+    if OPEN_LOFT_REQUESTED.swap(false, Ordering::AcqRel) {
+        crate::shade::launch_app("loft");
+    }
+
     // Dedicated path: Core 0 is only the reaper. The VM core owns the
     // VmContext for its whole lifetime and does its own VMXOFF; Core 0
     // just runs the compositor-locking teardown once it has exited
