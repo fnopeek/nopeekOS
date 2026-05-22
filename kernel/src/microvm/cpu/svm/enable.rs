@@ -636,6 +636,12 @@ impl VmContext {
     /// B3: `npt::release` now walks + frees the demand frames, demand
     /// PTs, and NPT tables (no longer leaked).
     pub fn close(&mut self) {
+        // Persist the home image to npkFS BEFORE freeing. close() is
+        // reached on EVERY teardown — crucially the Mod+Q window-close
+        // path (VM_CLOSE_REQUESTED → break → close), where run_slice's
+        // own loop-end save() never runs (it returned StillRunning).
+        // Without this the browser profile is lost on every Mod+Q.
+        self.pci.virtio_blk.save();
         // Demand-faulted frames + demand PTs + NPT tables.
         npt::release(self.npt_pml4, self.guest_mem.len());
         // Contiguous boot window.
