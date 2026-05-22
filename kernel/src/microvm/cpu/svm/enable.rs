@@ -1219,6 +1219,11 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if self.pci.virtio_9p.bar0_in_range(gpa) {
+                    if handle_mmio_npf_p9(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_9p, &self.pic, gpa, &self.guest_mem) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
                     if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, &self.guest_mem) {
@@ -1676,6 +1681,61 @@ fn handle_mmio_npf_input(
         if advanced {
             // virtio-input IRQ line = 12.
             let vector = pic.vector_for_irq(12);
+            let info: u64 = (vector as u64) | (1u64 << 31);
+            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+        }
+    }
+
+    advance_rip_by_length(vmcb, dec.length);
+    true
+}
+
+/// Handle a #NPF on virtio-9p BAR0. Mirror of `handle_mmio_npf_input`
+/// — only the device and IRQ line differ (9p = line 6).
+fn handle_mmio_npf_p9(
+    vmcb: &mut vmcb::Vmcb,
+    regs: &mut vmcb::GuestRegs,
+    p9: &mut crate::microvm::devices::virtio_9p_pci::Virtio9p,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    mem: &GuestMem,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+    let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
+    let buf = match fetch_inst(rip, cr3, mem) {
+        Some(b) => b,
+        None => {
+            kprintln!("[svm] mmio-9p: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[svm] mmio-9p: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - p9.bar0_base()) as u32;
+    let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+
+    if dec.is_write {
+        let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
+        p9.mmio_write(off, dec.width, value);
+    } else {
+        let value = p9.mmio_read(off, dec.width);
+        write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = p9.take_pending_kick() {
+        let advanced = p9.service_queues(qidx, mem);
+        if advanced {
+            let vector = pic.vector_for_irq(p9.irq_line());
             let info: u64 = (vector as u64) | (1u64 << 31);
             vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
         }
