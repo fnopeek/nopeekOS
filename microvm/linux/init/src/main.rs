@@ -191,19 +191,21 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.theme.toolbar-theme|0' \
                    'browser.theme.content-theme|0' \
                    'layout.css.prefers-color-scheme.content-override|0' \
+                   'security.sandbox.warn_unprivileged_namespaces|false' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  mkdir -p /tmp/moz/chrome; \
-                 echo '.titlebar-buttonbox-container, #titlebar-buttonbox, .titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore, .titlebar-close { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
+                 echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
+                 ( while true; do sync 2>/dev/null; sleep 3; done ) & \
                  sleep 1; \
                  echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
                  ( while sleep 2; do \
@@ -225,6 +227,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  dmesg 2>/dev/null \
                    | grep -iE 'segfault|fatal signal|Comm:|RIP:|RSP:|Code:' \
                    | tail -40 | while read L; do echo \"<0>[crash] $L\" > /dev/kmsg; done; \
+                 sync 2>/dev/null; reboot -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();

@@ -636,6 +636,12 @@ impl VmContext {
     /// still leak (~tens of KB per run — negligible vs. the 1 GB guest
     /// RAM this now reclaims). Tracked; needs an EPT teardown walker.
     pub fn close(&mut self) {
+        // Persist the home image BEFORE teardown — see the svm mirror:
+        // the Mod+Q window-close path reaches close() without run_slice's
+        // loop-end save(), so without this the profile is lost on close.
+        // (save() is pure host RAM + npkFS — no guest/VMX interaction —
+        // so it's fine before VMXOFF.)
+        self.pci.virtio_blk.save();
         // SAFETY: a VmContext only exists after a successful
         // vmx_enter_root, so the CPU is in VMX root. After VMXOFF the
         // VMCS is no longer current and its frame is safe to free.
