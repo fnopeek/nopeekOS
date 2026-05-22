@@ -981,7 +981,7 @@ pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)]
         ("shade.border", "1", "Window border width (px at 1x)"),
         ("shade.border_active", "", "Active window border color (hex, default: accent)"),
         ("shade.border_inactive", "3a2555", "Inactive window border color (hex)"),
-        ("shade.bar_height", "36", "Shadebar pill height (px at 1x)"),
+        ("shade.bar_height", "26", "Shadebar pill height (px at 1x)"),
         ("shade.bar_margin", "8", "Shadebar gap to screen edge (px at 1x)"),
         ("shade.bar_position", "top", "Shadebar position (top/bottom)"),
         ("shade.rounding", "10", "Window corner radius (px at 1x)"),
