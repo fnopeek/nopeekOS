@@ -192,6 +192,8 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.theme.content-theme|0' \
                    'layout.css.prefers-color-scheme.content-override|0' \
                    'security.sandbox.warn_unprivileged_namespaces|false' \
+                   'browser.startup.page|3' \
+                   'browser.sessionstore.interval|5000' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
@@ -217,7 +219,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    done ) & \
                  MOZ_LOG_FILE=/tmp/moz.log \
                  MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3' \
-                 cage -- librewolf --no-remote --profile /tmp/moz https://example.com \
+                 cage -- librewolf --no-remote --profile /tmp/moz \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
                  echo '<0>[diag] === /tmp/cage.log tail 60 ===' > /dev/kmsg; \
@@ -227,7 +229,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  dmesg 2>/dev/null \
                    | grep -iE 'segfault|fatal signal|Comm:|RIP:|RSP:|Code:' \
                    | tail -40 | while read L; do echo \"<0>[crash] $L\" > /dev/kmsg; done; \
-                 sync 2>/dev/null; reboot -f 2>/dev/null; \
+                 sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
