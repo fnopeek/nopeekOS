@@ -481,22 +481,40 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
       browser ready on first boot, no OTA round-trip. OTA keeps
       working for later browser updates via manifest.large url=
       override. Future microvm-backed apps plug in next to it.
-- [ ] Bare-metal NUC (Intel-VMX) — A2 vendor-gated v0.172.62
-      (AMD keeps dedicated VM core, Intel falls back to cooperative
-      Core-0), but VMX-cooperative path ALSO hits exit reason 33
-      (VM-entry invalid guest state) at Linux's CR3 long-mode
-      trampoline. v0.172.63 adds VMCS-entry-fail dump for the next
-      session's diag. Audit strategy: port the four validated SVM
-      correctness fixes (vmsave/vmload+STGI v34/35, EXITINTINFO
-      type-gate v38, EVENTINJ-clear v42, host-state lifecycle v36)
-      to their VMX equivalents (VMCS-managed host-state vs vmsave/
-      vmload pair, VM_ENTRY_INTR_INFO vs SVM EVENT_INJ).
+- [x] **Bare-metal NUC (Intel-VMX) — LibreWolf BOOTS on real hardware
+      (2026-05-22, v0.172.76/77).** The exit-reason-33 walls were NOT
+      the IA32E/CR/EFER triad (the dump proved it consistent) but
+      **ungated interrupt injection** (found data-driven, matched
+      against the real KVM source): gate the virtio-gpu D4 IRQ on
+      `pic.irq_unmasked(9)` (was injecting vector 0x29 into the tiny
+      32-gate boot IDT), and gate ALL reason-1 external-IRQ injects on
+      `vmcs::guest_interruptible()` (RFLAGS.IF=1, no shadow — Linux was
+      polling i8042 with IF=0 when the timer IRQ0 was injected). Durable
+      lesson: every VMX-vs-SVM divergence is "AMD VMRUN is lenient,
+      bare-metal Intel is strict." Intel perf still cooperative-Core-0
+      (un-gating A2 dedicated core for Intel is parked).
+- [x] **Profile persistence (2026-05-22)** — the profile.img virtio-blk
+      grown to a **64 MiB ext4 home image** (`sys/microvm/apps/browser/
+      home.img`), seeded from an embedded sparse-ext4 template (no
+      mke2fs in the guest, no inflate in the kernel). PID-1 mounts
+      `/dev/vda` ext4 at `/tmp/moz`; `save()` moved into `close()` so
+      Mod+Q AND the close button persist. Cache + glean telemetry
+      redirected to tmpfs so the image stays small.
+- [x] **virtio-9p host↔npkFS bridge (2026-05-22)** — new
+      `devices/virtio_9p_pci.rs` (slot 6) + a 9P2000.L server rooted +
+      CONFINED at `home/<user>/` (guest already has CONFIG_NET_9P_VIRTIO).
+      Read (attach/walk/getattr/readdir/lopen/read) + write (lcreate/
+      write/fsync/setattr/mkdir/unlinkat/renameat). **Browser downloads
+      land in npkFS `home/<user>/downloads`, live-visible + editable in
+      loft.** Capstone: opening `file:///tmp/npkhome/.open-in-loft`
+      (a synthetic magic file) pops loft on the host
+      (`shade::launch_app` via a Core-0 atomic handoff). `.ssh` /
+      `documents` are now just additional mounts.
+- [ ] File Open/Save dialog in the browser (the GTK file chooser may
+      not render in the cage kiosk → likely needs an XDG portal),
+      "open containing folder" cross-boundary action, loft start-path
+      for the exact folder. (Open polish, not blocking.)
 - [ ] 12.5  Picker bridge + B-mini virtiofs (per-app downloads folder)
-- [ ] Profile persistence — every microvm boot is currently a fresh
-      tmpfs `/tmp/moz`. Extend the substrate-test `profile.img`
-      pattern: per-app writable virtio-blk image (~200 MB ext4),
-      PID-1 mounts at `/home/nopeek`, persisted to npkFS at
-      suspend/shutdown. (~1-2 h, eigene Session.)
 
 ### Phase 10 -- Widget API & GUI Apps (in progress)
 
