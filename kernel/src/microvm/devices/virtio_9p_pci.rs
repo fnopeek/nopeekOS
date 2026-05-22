@@ -29,6 +29,8 @@
 
 extern crate alloc;
 use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::collections::BTreeMap;
 use crate::kprintln;
 use super::guest_mem::GuestMem;
 use super::virtqueue::{read_desc, avail_idx, avail_ring, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
@@ -139,6 +141,24 @@ pub struct Virtio9p {
     /// Negotiated msize (after Tversion).
     msize: u32,
     log_count: u32,
+
+    /// npkFS path the 9P root attaches to (e.g. "home/nopeek"). Every
+    /// fid lives UNDER this prefix — walks cannot escape it (the
+    /// confinement invariant). Resolved once at device creation.
+    root: String,
+    /// Active fids: fid number → resolved npkFS path + open-file cache.
+    fids: BTreeMap<u32, Fid>,
+}
+
+/// One open 9P fid: a resolved npkFS path plus, for an opened regular
+/// file, a cached copy of its bytes (npkFS reads whole blobs, so we
+/// cache on Tlopen to avoid re-reading on every msize-sized Tread).
+struct Fid {
+    /// Full npkFS path (always starts with `root`).
+    path: String,
+    is_dir: bool,
+    /// File contents cached at Tlopen (None until opened / for dirs).
+    data: Option<Vec<u8>>,
 }
 
 impl Virtio9p {
@@ -165,6 +185,8 @@ impl Virtio9p {
             pending_kick_queue: None,
             msize: 8192,
             log_count: 0,
+            root: crate::intent::home_dir(),
+            fids: BTreeMap::new(),
         }
     }
 
@@ -312,6 +334,7 @@ impl Virtio9p {
                     self.device_feature_select = 0;
                     self.queue_select = 0;
                     self.msize = 8192;
+                    self.fids.clear();
                     self.config_generation = self.config_generation.wrapping_add(1);
                 }
             }
@@ -437,8 +460,16 @@ impl Virtio9p {
         let body = &req[7..];
         match mtype {
             TVERSION => self.t_version(tag, body),
+            TATTACH  => self.t_attach(tag, body),
+            TWALK    => self.t_walk(tag, body),
+            TGETATTR => self.t_getattr(tag, body),
+            TREADDIR => self.t_readdir(tag, body),
+            TLOPEN   => self.t_lopen(tag, body),
+            TREAD    => self.t_read(tag, body),
+            TCLUNK   => self.t_clunk(tag, body),
+            TSTATFS  => self.t_statfs(tag, body),
             _ => {
-                if self.log_count < 16 {
+                if self.log_count < 32 {
                     kprintln!("[9p] unhandled T-type {} (tag {}) → Rlerror(ENOSYS)", mtype, tag);
                     self.log_count += 1;
                 }
@@ -468,16 +499,268 @@ impl Virtio9p {
         }
         msg(RVERSION, tag, &b)
     }
+
+    /// Tattach: fid[4] afid[4] uname[s] aname[s] n_uname[4]. The fid
+    /// becomes the filesystem root — confined to `self.root`.
+    fn t_attach(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 4 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let root = self.root.clone();
+        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None });
+        if self.log_count < 32 {
+            kprintln!("[9p] Tattach fid={} → root '{}'", fid, root);
+            self.log_count += 1;
+        }
+        msg(RATTACH, tag, &qid(&root, true))
+    }
+
+    /// Twalk: fid[4] newfid[4] nwname[2] (wname[s])*. Navigate from the
+    /// fid's path, one component at a time (confined). Sets newfid only
+    /// on a full walk; returns the qids actually walked.
+    fn t_walk(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 10 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let newfid = rd_u32(body, 4);
+        let nw = rd_u16(body, 8) as usize;
+        let mut cur = match self.fids.get(&fid) { Some(f) => f.path.clone(), None => return rlerror(tag, EINVAL) };
+        let mut off = 10usize;
+        let mut qids: Vec<u8> = Vec::new();
+        for _ in 0..nw {
+            if off + 2 > body.len() { break; }
+            let len = rd_u16(body, off) as usize; off += 2;
+            if off + len > body.len() { break; }
+            let name = core::str::from_utf8(&body[off..off + len]).unwrap_or(""); off += len;
+            let next = join_confined(&self.root, &cur, name);
+            match npkfs_stat(&next) {
+                Some((is_dir, _, _)) => { qids.extend_from_slice(&qid(&next, is_dir)); cur = next; }
+                None => { if qids.is_empty() { return rlerror(tag, ENOENT); } break; }
+            }
+        }
+        let walked = (qids.len() / 13) as u16;
+        if walked as usize == nw {
+            let is_dir = npkfs_stat(&cur).map(|s| s.0).unwrap_or(true);
+            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None });
+        }
+        let mut b = Vec::with_capacity(2 + qids.len());
+        b.extend_from_slice(&walked.to_le_bytes());
+        b.extend_from_slice(&qids);
+        msg(RWALK, tag, &b)
+    }
+
+    /// Tgetattr: fid[4] request_mask[8] → Rgetattr (9P2000.L stat).
+    fn t_getattr(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 4 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let path = match self.fids.get(&fid) { Some(f) => f.path.clone(), None => return rlerror(tag, EINVAL) };
+        let (is_dir, size, mtime) = match npkfs_stat(&path) { Some(s) => s, None => return rlerror(tag, ENOENT) };
+        let mode: u32 = if is_dir { 0o040000 | 0o755 } else { 0o100000 | 0o644 };
+        let mut b = Vec::with_capacity(160);
+        b.extend_from_slice(&0x0000_07ffu64.to_le_bytes());      // valid = P9_GETATTR_BASIC
+        b.extend_from_slice(&qid(&path, is_dir));                // qid[13]
+        b.extend_from_slice(&mode.to_le_bytes());                // mode
+        b.extend_from_slice(&0u32.to_le_bytes());                // uid
+        b.extend_from_slice(&0u32.to_le_bytes());                // gid
+        b.extend_from_slice(&1u64.to_le_bytes());                // nlink
+        b.extend_from_slice(&0u64.to_le_bytes());                // rdev
+        b.extend_from_slice(&size.to_le_bytes());                // size
+        b.extend_from_slice(&512u64.to_le_bytes());              // blksize
+        b.extend_from_slice(&((size + 511) / 512).to_le_bytes());// blocks
+        for _t in 0..3 { // atime, mtime, ctime (sec, nsec)
+            b.extend_from_slice(&mtime.to_le_bytes());
+            b.extend_from_slice(&0u64.to_le_bytes());
+        }
+        b.extend_from_slice(&0u64.to_le_bytes()); b.extend_from_slice(&0u64.to_le_bytes()); // btime
+        b.extend_from_slice(&0u64.to_le_bytes()); // gen
+        b.extend_from_slice(&0u64.to_le_bytes()); // data_version
+        msg(RGETATTR, tag, &b)
+    }
+
+    /// Treaddir: fid[4] offset[8] count[4]. Streams `. .. <entries>` as
+    /// 9P2000.L dirents, honouring the resume offset + byte count.
+    fn t_readdir(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 16 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let offset = u64::from_le_bytes(body[4..12].try_into().unwrap());
+        let count = rd_u32(body, 12) as usize;
+        let dir = match self.fids.get(&fid) { Some(f) if f.is_dir => f.path.clone(), _ => return rlerror(tag, ENOTDIR) };
+
+        let mut dirents: Vec<(String, [u8; 13], u8)> = Vec::new();
+        dirents.push((String::from("."), qid(&dir, true), DT_DIR));
+        let parent = join_confined(&self.root, &dir, "..");
+        dirents.push((String::from(".."), qid(&parent, true), DT_DIR));
+        if let Some(list) = npkfs_list(&dir) {
+            for (name, is_dir) in list {
+                let p = alloc::format!("{}/{}", dir, name);
+                dirents.push((name, qid(&p, is_dir), if is_dir { DT_DIR } else { DT_REG }));
+            }
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut i = offset as usize;
+        while i < dirents.len() {
+            let (name, q, dtype) = &dirents[i];
+            let entry_len = 13 + 8 + 1 + 2 + name.len();
+            if out.len() + entry_len > count { break; }
+            out.extend_from_slice(q);
+            out.extend_from_slice(&((i as u64) + 1).to_le_bytes()); // next offset
+            out.push(*dtype);
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            i += 1;
+        }
+        let mut b = Vec::with_capacity(4 + out.len());
+        b.extend_from_slice(&(out.len() as u32).to_le_bytes());
+        b.extend_from_slice(&out);
+        msg(RREADDIR, tag, &b)
+    }
+
+    /// Tlopen: fid[4] flags[4]. Caches a regular file's bytes for Tread.
+    fn t_lopen(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 8 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let (path, is_dir) = match self.fids.get(&fid) { Some(f) => (f.path.clone(), f.is_dir), None => return rlerror(tag, EINVAL) };
+        if !is_dir {
+            let data = npkfs_read(&path).unwrap_or_default();
+            if let Some(f) = self.fids.get_mut(&fid) { f.data = Some(data); }
+        }
+        let mut b = Vec::with_capacity(17);
+        b.extend_from_slice(&qid(&path, is_dir));
+        b.extend_from_slice(&0u32.to_le_bytes()); // iounit = 0 → client uses msize
+        msg(RLOPEN, tag, &b)
+    }
+
+    /// Tread: fid[4] offset[8] count[4]. Slices the cached file bytes.
+    fn t_read(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 16 { return rlerror(tag, EINVAL); }
+        let fid = rd_u32(body, 0);
+        let offset = u64::from_le_bytes(body[4..12].try_into().unwrap()) as usize;
+        let count = rd_u32(body, 12) as usize;
+        let data = match self.fids.get(&fid).and_then(|f| f.data.as_ref()) {
+            Some(d) => d,
+            None => return rlerror(tag, EINVAL),
+        };
+        let start = offset.min(data.len());
+        let end = offset.saturating_add(count).min(data.len());
+        let slice = &data[start..end];
+        let mut b = Vec::with_capacity(4 + slice.len());
+        b.extend_from_slice(&(slice.len() as u32).to_le_bytes());
+        b.extend_from_slice(slice);
+        msg(RREAD, tag, &b)
+    }
+
+    /// Tclunk: fid[4]. Drop the fid (+ its cached file bytes).
+    fn t_clunk(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        if body.len() < 4 { return rlerror(tag, EINVAL); }
+        self.fids.remove(&rd_u32(body, 0));
+        msg(RCLUNK, tag, &[])
+    }
+
+    /// Tstatfs: fid[4] → Rstatfs (synthetic; enough for `df`).
+    fn t_statfs(&mut self, tag: u16, _body: &[u8]) -> Vec<u8> {
+        let mut b = Vec::with_capacity(64);
+        b.extend_from_slice(&0x0102_1994u32.to_le_bytes()); // type = V9FS_MAGIC
+        b.extend_from_slice(&4096u32.to_le_bytes());        // bsize
+        b.extend_from_slice(&262144u64.to_le_bytes());      // blocks
+        b.extend_from_slice(&131072u64.to_le_bytes());      // bfree
+        b.extend_from_slice(&131072u64.to_le_bytes());      // bavail
+        b.extend_from_slice(&1000u64.to_le_bytes());        // files
+        b.extend_from_slice(&1000u64.to_le_bytes());        // ffree
+        b.extend_from_slice(&0u64.to_le_bytes());           // fsid
+        b.extend_from_slice(&255u32.to_le_bytes());         // namelen
+        msg(RSTATFS, tag, &b)
+    }
 }
 
-// ── 9P2000.L message type codes (subset; full set lands incrementally) ──
+// ── 9P2000.L message type codes (subset; write ops land next) ──
 const RLERROR:  u8 = 7;
-const TVERSION: u8 = 100;
-const RVERSION: u8 = 101;
+const TSTATFS:  u8 = 8;  const RSTATFS:  u8 = 9;
+const TLOPEN:   u8 = 12; const RLOPEN:   u8 = 13;
+const TGETATTR: u8 = 24; const RGETATTR: u8 = 25;
+const TREADDIR: u8 = 40; const RREADDIR: u8 = 41;
+const TVERSION: u8 = 100; const RVERSION: u8 = 101;
+const TATTACH:  u8 = 104; const RATTACH:  u8 = 105;
+const TWALK:    u8 = 110; const RWALK:    u8 = 111;
+const TREAD:    u8 = 116; const RREAD:    u8 = 117;
+const TCLUNK:   u8 = 120; const RCLUNK:   u8 = 121;
+
+// 9P qid.type bits + dirent d_type values.
+const QTDIR: u8 = 0x80;
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
 
 // Linux errno values used in Rlerror.
-const EINVAL: u32 = 22;
-const ENOSYS: u32 = 38;
+const ENOENT:  u32 = 2;
+const ENOTDIR: u32 = 20;
+const EINVAL:  u32 = 22;
+const ENOSYS:  u32 = 38;
+
+#[inline] fn rd_u32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+#[inline] fn rd_u16(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+
+/// Build a 9P qid: type[1] version[4] path[8]. `path` is a stable
+/// FNV-1a hash of the npkFS path (serves as the inode number v9fs keys
+/// its dcache on — must be stable + ~unique per path).
+fn qid(path: &str, is_dir: bool) -> [u8; 13] {
+    let mut q = [0u8; 13];
+    q[0] = if is_dir { QTDIR } else { 0x00 };
+    q[5..13].copy_from_slice(&path_hash(path).to_le_bytes());
+    q
+}
+
+fn path_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() { h ^= b as u64; h = h.wrapping_mul(0x0000_0100_0000_01b3); }
+    h
+}
+
+/// Join one path component onto `cur`, CONFINED to `root`: `.` is a
+/// no-op, `..` pops a component but never above `root`, and embedded
+/// slashes / unknown forms are rejected. This is the guest's only lever
+/// on which npkFS paths it can reach — it can never escape home/<user>/.
+fn join_confined(root: &str, cur: &str, name: &str) -> String {
+    if name.is_empty() || name == "." { return String::from(cur); }
+    if name == ".." {
+        if cur.len() <= root.len() { return String::from(root); }
+        match cur.rfind('/') {
+            Some(i) if i >= root.len() => String::from(&cur[..i]),
+            _ => String::from(root),
+        }
+    } else if name.contains('/') || name.contains('\0') {
+        String::from(cur) // reject — stay put
+    } else {
+        alloc::format!("{}/{}", cur, name)
+    }
+}
+
+// ── npkFS glue (EntryKind::Dir == 1) ────────────────────────────────
+
+/// Stat a path → `(is_dir, size, mtime)`, or None if it doesn't exist.
+fn npkfs_stat(path: &str) -> Option<(bool, u64, u64)> {
+    match crate::npkfs::fs::stat(path) {
+        Ok(Some(s)) => Some((s.kind as u8 == 1, s.size, s.mtime)),
+        _ => None,
+    }
+}
+
+/// List a directory → `(name, is_dir)` per entry, or None.
+fn npkfs_list(path: &str) -> Option<Vec<(String, bool)>> {
+    match crate::npkfs::fs::list(path) {
+        Ok(Some(es)) => Some(es.into_iter().map(|e| (e.name, e.kind as u8 == 1)).collect()),
+        _ => None,
+    }
+}
+
+/// Read a whole file's bytes, or None.
+fn npkfs_read(path: &str) -> Option<Vec<u8>> {
+    match crate::npkfs::fs::read(path) {
+        Ok(Some(d)) => Some(d),
+        _ => None,
+    }
+}
 
 /// Build a 9P message: size[4] (incl. header) | type[1] | tag[2] | body.
 fn msg(mtype: u8, tag: u16, body: &[u8]) -> Vec<u8> {
