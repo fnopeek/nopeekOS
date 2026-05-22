@@ -194,6 +194,12 @@ fn launch_wayland(kmsg_fd: i64) {
                    'security.sandbox.warn_unprivileged_namespaces|false' \
                    'browser.startup.page|3' \
                    'browser.sessionstore.interval|5000' \
+                   'browser.cache.disk.enable|false' \
+                   'datareporting.healthreport.uploadEnabled|false' \
+                   'datareporting.policy.dataSubmissionEnabled|false' \
+                   'toolkit.telemetry.enabled|false' \
+                   'toolkit.telemetry.unified|false' \
+                   'toolkit.telemetry.archive.enabled|false' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
