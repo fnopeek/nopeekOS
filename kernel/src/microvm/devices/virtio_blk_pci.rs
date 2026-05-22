@@ -177,10 +177,13 @@ pub struct VirtioBlk {
     serviced_log_count: u32,
 }
 
-const CAPACITY_SECTORS: u64 = 8192; // 4 MB
+const CAPACITY_SECTORS: u64 = 131072; // 64 MiB — ext4 home image (/dev/vda)
 
 impl VirtioBlk {
-    /// Slot 1 — the read-write, npkFS-persisted profile image.
+    /// Slot 1 — the read-write, npkFS-persisted per-app home image.
+    /// PID-1 mounts it ext4 at `/home/nopeek` so the app's profile
+    /// (LibreWolf cookies/history/bookmarks/prefs/extensions) survives
+    /// reboots. Cache stays in tmpfs to keep the image small.
     pub fn new() -> Self {
         Self::with(BAR0_BASE, 11, false, true, load_or_init_backing(), CAPACITY_SECTORS)
     }
@@ -266,7 +269,7 @@ impl VirtioBlk {
             &self.backing,
             crate::capability::CAP_NULL,
         ) {
-            Ok(_) => kprintln!("[virtio-blk] saved profile-image ({} bytes encrypted)", self.backing.len()),
+            Ok(_) => kprintln!("[virtio-blk] saved home image ({} bytes encrypted)", self.backing.len()),
             Err(e) => kprintln!("[virtio-blk] save failed: {}", e),
         }
     }
@@ -584,35 +587,67 @@ const fn width_mask(width: u8) -> u64 {
     }
 }
 
-/// Where the encrypted profile-image lives in npkFS. Single shared
-/// image for now — once Phase 12.6 ships per-app VMs, this becomes
-/// `home/<user>/microvm/<app>/profile.img`.
-const PROFILE_PATH: &str = "sys/microvm/profile.img";
+/// Where the encrypted per-app home image lives in npkFS. Keyed per app
+/// (hardcoded "browser" for now; parameterised when the app framework
+/// lands so codium/office get their own `apps/<app>/home.img`).
+const PROFILE_PATH: &str = "sys/microvm/apps/browser/home.img";
 
-/// Build the initial backing buffer. Tries to load the saved profile
-/// from npkFS (npkFS auto-decrypts at-rest); on miss falls back to a
-/// fresh image with a magic pattern so the round-trip test keeps
-/// working on first boot.
+/// Embedded sparse template of a freshly-mke2fs'd empty 64 MiB ext4.
+/// Format: `"NHT1" | image_size:u32 | num_entries:u32 | (sector_idx:u32,
+/// data:[u8;512])*` — only the non-zero sectors of the fresh fs (348 of
+/// them). Lets the host seed a valid empty ext4 with NO inflate/gzip
+/// crate in the kernel: alloc zeros, patch the listed sectors in.
+/// Regenerate with tools (see commit) if the size/layout ever changes.
+static HOME_TEMPLATE: &[u8] = include_bytes!("home_template.bin");
+
+/// Build the initial backing buffer. Tries to load the saved home image
+/// from npkFS (auto-decrypts at-rest); on miss (or size change) seeds a
+/// fresh empty ext4 from `HOME_TEMPLATE` so PID-1's first
+/// `mount -t ext4 /dev/vda` succeeds.
 fn load_or_init_backing() -> alloc::vec::Vec<u8> {
     let cap = (CAPACITY_SECTORS * 512) as usize;
 
     if let Ok((data, _hash)) = crate::npkfs::fetch(PROFILE_PATH) {
         if data.len() == cap {
-            kprintln!("[virtio-blk] loaded profile-image ({} bytes)", data.len());
+            kprintln!("[virtio-blk] loaded home image ({} bytes) /dev/vda", data.len());
             return data;
         }
         kprintln!(
-            "[virtio-blk] profile-image size mismatch ({} != {}), reinit",
+            "[virtio-blk] home image size mismatch ({} != {}), reseeding",
             data.len(), cap,
         );
     }
 
+    seed_home_image(cap)
+}
+
+/// Expand `HOME_TEMPLATE` into a fresh `cap`-byte empty ext4 image.
+fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
     let mut v = alloc::vec![0u8; cap];
-    // Magic pattern at sector 0 — round-trip canary, persists into the
-    // first save() so subsequent boots find it.
-    let magic = b"nopeekOS-microvm-blk\0\x00\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00";
-    v[..magic.len()].copy_from_slice(magic);
-    kprintln!("[virtio-blk] fresh profile-image ({} bytes)", cap);
+    let t = HOME_TEMPLATE;
+    if t.len() >= 12 && &t[0..4] == b"NHT1" {
+        let img = u32::from_le_bytes([t[4], t[5], t[6], t[7]]) as usize;
+        let n = u32::from_le_bytes([t[8], t[9], t[10], t[11]]) as usize;
+        if img == cap {
+            let mut off = 12;
+            for _ in 0..n {
+                if off + 4 + 512 > t.len() {
+                    break;
+                }
+                let idx = u32::from_le_bytes([t[off], t[off + 1], t[off + 2], t[off + 3]]) as usize;
+                off += 4;
+                let dst = idx * 512;
+                if dst + 512 <= cap {
+                    v[dst..dst + 512].copy_from_slice(&t[off..off + 512]);
+                }
+                off += 512;
+            }
+            kprintln!("[virtio-blk] seeded fresh ext4 home image ({} bytes) /dev/vda", cap);
+            return v;
+        }
+    }
+    kprintln!("[virtio-blk] WARN: home template invalid (size {} != {}), zero image",
+        HOME_TEMPLATE.len(), cap);
     v
 }
 

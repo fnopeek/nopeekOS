@@ -178,7 +178,9 @@ fn launch_wayland(kmsg_fd: i64) {
                    || route add default gw 10.99.0.1 2>/dev/null; \
                  echo 'nameserver 10.99.0.1' > /tmp/resolv.conf; \
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
-                 mkdir -p /tmp/moz; : > /tmp/moz/user.js; \
+                 mkdir -p /home/nopeek /tmp/bcache; \
+                 mount -t ext4 /dev/vda /home/nopeek 2>/dev/null; \
+                 mkdir -p /home/nopeek/.librewolf; : > /home/nopeek/.librewolf/user.js; \
                  for p in \
                    'layers.gpu-process.enabled|false' \
                    'gfx.webrender.software|true' \
@@ -191,14 +193,15 @@ fn launch_wayland(kmsg_fd: i64) {
                    'layout.css.prefers-color-scheme.content-override|0' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
-                   echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
+                   echo \"user_pref(\\\"$k\\\", $v);\" >> /home/nopeek/.librewolf/user.js; \
                  done; \
-                 mkdir -p /tmp/moz/chrome; \
-                 echo '.titlebar-buttonbox-container, #titlebar-buttonbox, .titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore, .titlebar-close { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
+                 echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /home/nopeek/.librewolf/user.js; \
+                 mkdir -p /home/nopeek/.librewolf/chrome; \
+                 echo '.titlebar-buttonbox-container, #titlebar-buttonbox, .titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore, .titlebar-close { display: none !important; }' > /home/nopeek/.librewolf/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
-                 XDG_CONFIG_HOME=/tmp HOME=/tmp \
+                 XDG_CONFIG_HOME=/home/nopeek/.config HOME=/home/nopeek \
                  MOZ_ENABLE_WAYLAND=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  sleep 1; \
@@ -212,7 +215,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    done ) & \
                  MOZ_LOG_FILE=/tmp/moz.log \
                  MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3' \
-                 cage -- librewolf --no-remote --profile /tmp/moz https://example.com \
+                 cage -- librewolf --no-remote --profile /home/nopeek/.librewolf https://example.com \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
                  echo '<0>[diag] === /tmp/cage.log tail 60 ===' > /dev/kmsg; \
