@@ -1173,7 +1173,21 @@ impl VmContext {
                 // one-shot; firing it here costs the timer at most one
                 // tick (Linux tolerates the jitter) and is the only
                 // place an idle guest will ever see it.
-                {
+                //
+                // GATE on irq_unmasked(9): never inject the virtio-gpu
+                // config-change IRQ before the guest has unmasked line 9.
+                // Early boot (Shade marks the fresh tile display-dirty on
+                // its first layout) would otherwise inject vector 0x29 into
+                // a guest whose initial IDT has only 32 gates (IDTR
+                // limit=0x1ff) and whose PIC isn't initialised yet — the
+                // injected vector exceeds the IDT limit, delivery faults
+                // during VM-entry, and bare-metal Intel reports it as a
+                // VM-entry failure (reason 33). AMD's VMRUN tolerates it
+                // (delivers a guest #GP instead), which is why QEMU/AMD
+                // never tripped on this. Mirrors the timer's irq_unmasked(0)
+                // gate. The dirty flag is left set, so the resize lands the
+                // moment the guest is ready to receive it.
+                if self.pic.irq_unmasked(9) {
                     let wid = crate::microvm::vm_window();
                     let now_d4 = crate::interrupts::ticks();
                     // Phase 2 of any in-flight D4 cycle: reconnect IRQ.
