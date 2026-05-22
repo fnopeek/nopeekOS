@@ -1487,6 +1487,11 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if self.pci.virtio_9p.bar0_in_range(gpa) {
+                    if handle_mmio_ept_p9(&mut self.regs, &mut self.pci.virtio_9p, &self.pic, gpa, &self.guest_mem) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
                     if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, &self.guest_mem) {
@@ -2042,6 +2047,57 @@ fn handle_mmio_ept_input(
         if advanced {
             // virtio-input IRQ line = 12.
             let vector = pic.vector_for_irq(12);
+            let _ = vmcs::inject_external_irq(vector);
+        }
+    }
+
+    if vmcs::advance_guest_rip().is_err() { return false; }
+    true
+}
+
+/// Handle an EPT violation on virtio-9p BAR0. Mirror of
+/// `handle_mmio_ept_input` — only the device + IRQ line (6) differ.
+fn handle_mmio_ept_p9(
+    regs: &mut vmcs::GuestRegs,
+    p9: &mut crate::microvm::devices::virtio_9p_pci::Virtio9p,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    mem: &GuestMem,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
+    let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
+    let buf = match fetch_inst(rip, cr3, mem) {
+        Some(b) => b,
+        None => {
+            kprintln!("[microvm] mmio-9p: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[microvm] mmio-9p: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - p9.bar0_base()) as u32;
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        p9.mmio_write(off, dec.width, value);
+    } else {
+        let value = p9.mmio_read(off, dec.width);
+        write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = p9.take_pending_kick() {
+        let advanced = p9.service_queues(qidx, mem);
+        if advanced {
+            let vector = pic.vector_for_irq(p9.irq_line());
             let _ = vmcs::inject_external_irq(vector);
         }
     }

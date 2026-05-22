@@ -13,6 +13,7 @@
 //!   bus 0, slot 3, func 0  →  virtio-gpu-pci  (1AF4:1050)
 //!   bus 0, slot 4, func 0  →  virtio-input-pci (1AF4:1052)
 //!   bus 0, slot 5, func 0  →  virtio-blk-pci  (1AF4:1042, ro sqfs → /dev/vdb)
+//!   bus 0, slot 6, func 0  →  virtio-9p-pci   (1AF4:1049, npkFS share → mount -t 9p)
 //!   everything else        →  vendor=0xFFFF (no device)
 //! ```
 //!
@@ -24,6 +25,7 @@ use super::virtio_blk_pci::VirtioBlk;
 use super::virtio_gpu_pci::VirtioGpu;
 use super::virtio_input_pci::VirtioInput;
 use super::virtio_net_pci::VirtioNet;
+use super::virtio_9p_pci::Virtio9p;
 
 pub const PCI_CONFIG_ADDR: u16 = 0xCF8;
 pub const PCI_CONFIG_DATA_START: u16 = 0xCFC;
@@ -40,6 +42,8 @@ pub struct PciBus {
     pub virtio_input: VirtioInput,
     /// Slot 5 — read-only squashfs userspace bundle (/dev/vdb).
     pub virtio_blk_sqfs: VirtioBlk,
+    /// Slot 6 — virtio-9p share onto npkFS home/<user>/ (mount -t 9p).
+    pub virtio_9p: Virtio9p,
 }
 
 impl PciBus {
@@ -51,6 +55,7 @@ impl PciBus {
             virtio_gpu: VirtioGpu::new(),
             virtio_input: VirtioInput::new(),
             virtio_blk_sqfs: VirtioBlk::new_sqfs(),
+            virtio_9p: Virtio9p::new(),
         }
     }
 }
@@ -122,6 +127,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
         3 => bus.virtio_gpu.pci_read_dword(reg),
         4 => bus.virtio_input.pci_read_dword(reg),
         5 => bus.virtio_blk_sqfs.pci_read_dword(reg),
+        6 => bus.virtio_9p.pci_read_dword(reg),
         _ => NO_DEVICE,
     }
 }
@@ -136,6 +142,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
         3 => bus.virtio_gpu.pci_write_dword(reg, val),
         4 => bus.virtio_input.pci_write_dword(reg, val),
         5 => bus.virtio_blk_sqfs.pci_write_dword(reg, val),
+        6 => bus.virtio_9p.pci_write_dword(reg, val),
         _ => {}
     }
 }
