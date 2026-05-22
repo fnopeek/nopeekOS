@@ -33,6 +33,18 @@ use alloc::string::String;
 use alloc::collections::BTreeMap;
 use crate::kprintln;
 use super::guest_mem::GuestMem;
+
+/// Bounded diagnostic log (write-path bring-up). Caps total `[9p]` diag
+/// lines so a long session can't spam; remove once the write path is
+/// validated. Usable from both methods and the free npkfs_* helpers.
+static P9_DIAG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+macro_rules! p9diag {
+    ($($a:tt)*) => {{
+        if P9_DIAG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+            crate::kprintln!($($a)*);
+        }
+    }};
+}
 use super::virtqueue::{read_desc, avail_idx, avail_ring, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
@@ -701,7 +713,11 @@ impl Virtio9p {
         let dir = match self.fids.get(&fid) { Some(f) if f.is_dir => f.path.clone(), _ => return rlerror(tag, ENOTDIR) };
         let path = join_confined(&self.root, &dir, name);
         if path.len() <= dir.len() { return rlerror(tag, EINVAL); } // rejected name
-        if npkfs_write(&path, &[]).is_err() { return rlerror(tag, EIO); }
+        if npkfs_write(&path, &[]).is_err() {
+            p9diag!("[9p] Tlcreate '{}' FAILED", path);
+            return rlerror(tag, EIO);
+        }
+        p9diag!("[9p] Tlcreate '{}'", path);
         // Re-bind fid to the new open file with an empty write buffer.
         self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), dirty: false });
         let mut b = Vec::with_capacity(17);
@@ -812,7 +828,18 @@ impl Virtio9p {
         let oldp = join_confined(&self.root, &olddir, &oldname);
         let newp = join_confined(&self.root, &newdir, newname);
         if oldp.len() <= olddir.len() || newp.len() <= newdir.len() { return rlerror(tag, EINVAL); }
-        if npkfs_rename(&oldp, &newp).is_err() { return rlerror(tag, EIO); }
+        // POSIX rename OVERWRITES the destination; npkFS rename refuses an
+        // existing target. This is exactly the download case: Firefox
+        // pre-creates a 0-byte final file, downloads into a .part, then
+        // renames .part over it. Delete the target first so the move lands.
+        if npkfs_stat(&newp).is_some() {
+            let _ = npkfs_delete(&newp);
+        }
+        if npkfs_rename(&oldp, &newp).is_err() {
+            p9diag!("[9p] Trenameat '{}' -> '{}' FAILED", oldp, newp);
+            return rlerror(tag, EIO);
+        }
+        p9diag!("[9p] Trenameat '{}' -> '{}' ok", oldp, newp);
         msg(RRENAMEAT, tag, &[])
     }
 }
@@ -921,16 +948,16 @@ fn npkfs_read(path: &str) -> Option<Vec<u8>> {
 /// Write (create-or-replace) a whole file. Parent dir must exist (9P
 /// always walks to it first). `Err(())` on any storage error.
 fn npkfs_write(path: &str, data: &[u8]) -> Result<(), ()> {
-    crate::npkfs::fs::write(path, data).map_err(|_| ())
+    crate::npkfs::fs::write(path, data).map_err(|e| { p9diag!("[9p] fs::write({}) err: {:?}", path, e); })
 }
 fn npkfs_mkdir(path: &str) -> Result<(), ()> {
-    crate::npkfs::fs::mkdir(path).map_err(|_| ())
+    crate::npkfs::fs::mkdir(path).map_err(|e| { p9diag!("[9p] fs::mkdir({}) err: {:?}", path, e); })
 }
 fn npkfs_delete(path: &str) -> Result<(), ()> {
-    crate::npkfs::fs::delete(path).map_err(|_| ())
+    crate::npkfs::fs::delete(path).map_err(|e| { p9diag!("[9p] fs::delete({}) err: {:?}", path, e); })
 }
 fn npkfs_rename(old: &str, new: &str) -> Result<(), ()> {
-    crate::npkfs::fs::rename(old, new).map_err(|_| ())
+    crate::npkfs::fs::rename(old, new).map_err(|e| { p9diag!("[9p] fs::rename({}->{}) err: {:?}", old, new, e); })
 }
 
 /// Build a 9P message: size[4] (incl. header) | type[1] | tag[2] | body.
