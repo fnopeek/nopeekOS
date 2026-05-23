@@ -989,6 +989,70 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_window_set_dock(w, h) -> i32
+    // Turn the calling app's widget window into a bottom auto-hide dock:
+    // overlay (no tiling strut), never modal, never focused on reveal,
+    // global across workspaces. Starts hidden; the compositor slides it
+    // in when the cursor holds the bottom edge. Like set_overlay but
+    // bottom-anchored instead of centred, and it does NOT grab focus.
+    //
+    // Returns 0 on success, -1 on cap denied / bad args / no compositor.
+    linker.func_wrap("env", "npk_window_set_dock",
+        |mut caller: Caller<'_, HostState>, w: i32, h: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if w <= 0 || h <= 0 { return -1; }
+
+            let mut wid = caller.data().widget_window_id;
+            if wid == 0 {
+                // Promote the spawning terminal to a widget window if there
+                // is one; otherwise create a fresh widget window. Unlike
+                // the overlay path we do NOT focus it — the dock is a
+                // background overlay that never owns keyboard focus.
+                let terminal_idx = caller.data().terminal_idx;
+                let promoted = if terminal_idx != 255 {
+                    crate::shade::with_compositor(|c|
+                        c.promote_terminal_to_widget(terminal_idx)
+                    ).flatten()
+                } else {
+                    None
+                };
+
+                let new_id = match promoted {
+                    Some(id) => {
+                        caller.data_mut().terminal_idx = 255;
+                        id.0
+                    }
+                    None => {
+                        let title = caller.data().module_name.clone();
+                        match crate::shade::with_compositor(|comp| {
+                            comp.create_widget_window(
+                                if title.is_empty() { "dock" } else { title.as_str() }).0
+                        }) {
+                            Some(v) => v,
+                            None => return -1,
+                        }
+                    }
+                };
+                caller.data_mut().widget_window_id = new_id;
+                wid = new_id;
+            }
+
+            let ok = crate::shade::with_compositor(|comp|
+                comp.set_dock(crate::shade::WindowId(wid), w as u32, h as u32)
+            ).unwrap_or(false);
+
+            if ok {
+                crate::shade::request_render();
+                0
+            } else {
+                -1
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_fs_list(prefix_ptr, prefix_len, out_ptr, out_cap, recursive) -> i32
     // Enumerate npkFS keys under `prefix`. If recursive=0, only direct
     // children are returned (keys that contain no '/' after the prefix,

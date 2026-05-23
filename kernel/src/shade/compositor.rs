@@ -13,6 +13,15 @@ use super::bar::ShadeBar;
 use super::terminal;
 use super::cursor::MouseState;
 
+/// Bottom hot-edge band (px) that arms the dock reveal.
+const DOCK_HOT_EDGE_PX: i32 = 2;
+/// Ticks (100 Hz) the cursor must hold the hot-edge before revealing.
+const DOCK_REVEAL_DWELL_TICKS: u32 = 8;
+/// Ticks the cursor must be away from the dock before it hides again.
+const DOCK_HIDE_DEBOUNCE_TICKS: u32 = 25;
+/// Slack above the dock's top counted as "still over the dock".
+const DOCK_HIDE_MARGIN_PX: i32 = 6;
+
 /// Swap animation state — windows glide from old to new position.
 #[derive(Clone, Copy)]
 pub struct SwapAnimation {
@@ -43,6 +52,24 @@ pub struct DragState {
     /// Resize delta when drag started.
     pub start_rw: i32,
     pub start_rh: i32,
+}
+
+/// Auto-hide bottom dock state. The compositor owns the reveal/hide
+/// slide; the dock app (`dock.wasm`) only declares itself via
+/// `npk_window_set_dock` and renders its icon row.
+#[derive(Clone, Copy)]
+pub struct DockState {
+    pub id: WindowId,
+    /// Dock height in px = the slide distance.
+    pub thickness: u32,
+    /// Reveal target the hot-edge logic drives toward.
+    pub target_shown: bool,
+    /// Current slide offset: 0 = fully shown, `thickness` = fully hidden.
+    pub offset: u32,
+    /// Ticks the cursor has held the bottom hot-edge (reveal dwell).
+    pub dwell: u32,
+    /// Ticks the cursor has been away from the dock while shown (hide debounce).
+    pub debounce: u32,
 }
 
 /// Compositor manages all windows, the bar, and rendering state.
@@ -87,6 +114,8 @@ pub struct Compositor {
     pub drag: Option<DragState>,
     /// Active swap animation (windows gliding to new positions).
     pub animation: Option<SwapAnimation>,
+    /// Auto-hide bottom dock, if a dock app has registered one.
+    pub dock: Option<DockState>,
 }
 
 #[allow(dead_code)]
@@ -136,6 +165,7 @@ impl Compositor {
             },
             drag: None,
             animation: None,
+            dock: None,
         }
     }
 
@@ -294,6 +324,129 @@ impl Compositor {
         }
     }
 
+    /// Bottom edge of the bar-free region — the dock's resting baseline.
+    /// For a top bar this is `screen_h`; for a bottom bar it sits above
+    /// the bar's reserved band.
+    fn dock_baseline(&self) -> u32 {
+        self.bar.workspace_y() + self.bar.workspace_height(self.screen_h)
+    }
+
+    /// `npk_window_set_dock` host fn — turn `id` into a bottom auto-hide
+    /// dock. Overlay (no strut, excluded from retile), never modal, never
+    /// focused on reveal, global across workspaces. Starts fully hidden.
+    pub fn set_dock(&mut self, id: WindowId, w: u32, h: u32) -> bool {
+        let screen_w = self.screen_w;
+        let screen_h = self.screen_h;
+        let baseline = self.dock_baseline();
+        let active_ws = self.active_workspace;
+
+        let dw = w.min(screen_w.saturating_sub(40)).max(120);
+        let dh = h.min(screen_h / 2).max(40);
+
+        let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.state = crate::shade::window::WindowState::Floating;
+            win.is_overlay = true;
+            win.is_dock = true;
+            win.modal = false;
+            win.workspace = active_ws;
+            win.width = dw;
+            win.height = dh;
+            win.x = screen_w.saturating_sub(dw) / 2;
+            win.y = baseline;       // fully hidden (below the usable area)
+            win.visible = false;
+            win.dirty = false;
+            true
+        } else {
+            false
+        };
+
+        if found {
+            self.dock = Some(DockState {
+                id,
+                thickness: dh,
+                target_shown: false,
+                offset: dh,
+                dwell: 0,
+                debounce: 0,
+            });
+            // Overlay → tiling grid is untouched, but retile reclaims any
+            // slot this window held if it was previously tiled.
+            self.retile();
+            self.needs_full_redraw = true;
+        }
+        found
+    }
+
+    /// Drive the dock reveal/hide intent from the current cursor Y.
+    /// Called every frame (poll_render) so dwell/debounce advance even
+    /// while the cursor is parked. Suppressed during a drag/resize so the
+    /// dock never fights a tile being dragged toward the bottom.
+    pub fn dock_update_reveal(&mut self, cursor_y: i32) {
+        let dragging = self.drag.is_some();
+        let baseline = self.dock_baseline() as i32;
+        let Some(dock) = self.dock.as_mut() else { return };
+
+        if dragging {
+            dock.dwell = 0;
+            return;
+        }
+
+        if dock.target_shown {
+            // Hide once the cursor leaves the dock band for long enough.
+            let dock_top = baseline - dock.thickness as i32;
+            let over_dock = cursor_y >= dock_top - DOCK_HIDE_MARGIN_PX;
+            if over_dock {
+                dock.debounce = 0;
+            } else {
+                dock.debounce = dock.debounce.saturating_add(1);
+                if dock.debounce >= DOCK_HIDE_DEBOUNCE_TICKS {
+                    dock.target_shown = false;
+                    dock.dwell = 0;
+                }
+            }
+        } else {
+            // Reveal once the cursor holds the bottom hot-edge.
+            if cursor_y >= baseline - DOCK_HOT_EDGE_PX {
+                dock.dwell = dock.dwell.saturating_add(1);
+                if dock.dwell >= DOCK_REVEAL_DWELL_TICKS {
+                    dock.target_shown = true;
+                    dock.debounce = 0;
+                }
+            } else {
+                dock.dwell = 0;
+            }
+        }
+    }
+
+    /// Advance the dock slide one frame. Returns true while moving (caller
+    /// re-renders). Eases the offset toward 0 (shown) / thickness (hidden).
+    pub fn dock_tick(&mut self) -> bool {
+        let baseline = self.dock_baseline() as i32;
+        let screen_w = self.screen_w;
+
+        let (id, offset, thickness, now_visible) = {
+            let Some(dock) = self.dock.as_mut() else { return false };
+            let target = if dock.target_shown { 0 } else { dock.thickness } as i32;
+            let cur = dock.offset as i32;
+            if cur == target { return false; }
+            let delta = target - cur;
+            // Ease-out: step a quarter of the remaining distance, min 2 px.
+            let step = (delta.abs() / 4).max(2).min(delta.abs());
+            let next = if delta > 0 { cur + step } else { cur - step };
+            dock.offset = next.max(0) as u32;
+            (dock.id, dock.offset, dock.thickness, dock.offset < dock.thickness)
+        };
+
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.x = screen_w.saturating_sub(win.width) / 2;
+            win.y = (baseline - thickness as i32 + offset as i32).max(0) as u32;
+            win.visible = now_visible;
+            win.dirty = true;
+        }
+        self.needs_full_redraw = true;
+        true
+    }
+
     /// True iff any visible window on the active workspace is modal.
     /// Used by shade-action dispatch to lock out focus-shift shortcuts
     /// while modal UI is on-screen.
@@ -306,6 +459,11 @@ impl Compositor {
 
     /// Close a window by ID.
     pub fn close_window(&mut self, id: WindowId) {
+        // If the dock app's window goes away, forget the dock so the
+        // reveal/tick machinery no-ops.
+        if self.dock.map(|d| d.id) == Some(id) {
+            self.dock = None;
+        }
         // Free session + terminal buffer + process before removing window
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             match win.kind {
@@ -374,6 +532,22 @@ impl Compositor {
         if ws == self.active_workspace { return; }
         self.active_workspace = ws;
         self.bar.set_workspace(ws);
+
+        // The dock is global: follow the active workspace and snap shut so
+        // it re-reveals on demand rather than popping up mid-slide.
+        if let Some(dock) = self.dock {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == dock.id) {
+                win.workspace = ws;
+                win.visible = false;
+                win.y = self.bar.workspace_y() + self.bar.workspace_height(self.screen_h);
+            }
+            if let Some(d) = self.dock.as_mut() {
+                d.target_shown = false;
+                d.offset = d.thickness;
+                d.dwell = 0;
+                d.debounce = 0;
+            }
+        }
 
         self.focused = self.z_order.iter()
             .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws))
@@ -880,7 +1054,7 @@ impl Compositor {
         let mut best: Option<(WindowId, i32)> = None;
 
         for win in &self.windows {
-            if win.id == fid || win.workspace != self.active_workspace || !win.visible { continue; }
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock { continue; }
 
             let cx = win.x as i32 + win.width as i32 / 2;
             let cy = win.y as i32 + win.height as i32 / 2;
@@ -912,7 +1086,7 @@ impl Compositor {
     /// Focus next window on active workspace (cycle).
     pub fn focus_next(&mut self) {
         let ws_windows: Vec<WindowId> = self.z_order.iter()
-            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible))
+            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock))
             .copied()
             .collect();
 
@@ -928,7 +1102,7 @@ impl Compositor {
     /// Focus previous window on active workspace (cycle).
     pub fn focus_prev(&mut self) {
         let ws_windows: Vec<WindowId> = self.z_order.iter()
-            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible))
+            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock))
             .copied()
             .collect();
 
@@ -1115,9 +1289,15 @@ impl Compositor {
         // Regular LMB click: focus window + dispatch widget event
         if self.mouse.left_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
+                // The dock must not steal keyboard focus from the tile you
+                // were working in — clicking an icon launches/focuses an
+                // app, the dock itself stays unfocused. Hit-test/events
+                // below still fire.
+                let is_dock_win = self.windows.iter()
+                    .any(|w| w.id == wid && w.is_dock);
                 // Focus on first click into an unfocused window; later
                 // clicks on the same focused widget should dispatch.
-                let focus_changed = self.focused != Some(wid);
+                let focus_changed = !is_dock_win && self.focused != Some(wid);
                 if focus_changed {
                     self.focus_window(wid);
                 }
@@ -1210,7 +1390,7 @@ impl Compositor {
         // Find nearest window in direction (same logic as focus_direction)
         let mut best: Option<(WindowId, i32)> = None;
         for win in &self.windows {
-            if win.id == fid || win.workspace != self.active_workspace || !win.visible { continue; }
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock { continue; }
             let cx = win.x as i32 + win.width as i32 / 2;
             let cy = win.y as i32 + win.height as i32 / 2;
             let rel_x = cx - focused.0;
