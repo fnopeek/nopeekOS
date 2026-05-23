@@ -163,6 +163,20 @@ The app:
 
 Config: `sys/config/dock` (pins), analogous to `sys/config/launcher`.
 
+### Launching (important)
+
+A resident overlay must be launched via the **widget-spawn path**
+(`launch_app` → `spawn_widget_app`: fresh window, no terminal, no
+`APP_RUNNING`), **never** via `run <module>` — `run` captures keyboard
+input (`APP_RUNNING`) and promotes the spawning shell terminal into the
+dock window, so hotkeys and app launches silently break.
+
+Wired as a generic autostart: `shade::start_autostart()` (called after
+`shade::init`) reads the `autostart` config key (comma/space-separated
+app names) and `launch_app`s each. The kernel stays generic — app names
+live in config, not in the kernel. Enable with `set autostart dock`,
+then reboot.
+
 ---
 
 ## 7. Phasing
