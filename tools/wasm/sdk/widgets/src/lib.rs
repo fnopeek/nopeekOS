@@ -50,6 +50,11 @@ pub mod prefab;
 pub mod style;
 pub mod wire;
 
+// Launcher/dock data source. wasm32-only — it imports host fns, so it's
+// compiled out of host-side test builds of the SDK.
+#[cfg(target_arch = "wasm32")]
+pub mod app_catalog;
+
 // Compile-time ABI ordering guard. Mirrors kernel/src/shade/widgets/check_abi.rs.
 mod check_abi;
 

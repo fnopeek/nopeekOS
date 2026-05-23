@@ -7,6 +7,7 @@ exclude = [
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
     "tools/wasm/drun",
+    "tools/wasm/dock",
     "tools/wasm/loft",
     "tools/wasm/testdisk",
     "tools/regen-icons",

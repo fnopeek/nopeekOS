@@ -1,8 +1,8 @@
 [package]
-name = "drun"
-version = "0.6.3"
+name = "dock"
+version = "0.1.0"
 edition = "2024"
-description = "Mod+D app launcher — first interactive widget app."
+description = "Bottom auto-hide app dock (overlay launcher)."
 
 [lib]
 crate-type = ["cdylib"]

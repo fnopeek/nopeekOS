@@ -12,8 +12,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "drun"
-version = "0.6.3"
+name = "dock"
+version = "0.1.0"
 dependencies = [
  "nopeek_widgets",
  "postcard",

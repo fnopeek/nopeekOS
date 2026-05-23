@@ -78,6 +78,11 @@ pub struct Window {
     /// shade-actions that would shift focus or reshape the grid are
     /// suppressed. Set by the app via `npk_window_set_modal`.
     pub modal: bool,
+    /// Dock window: an auto-hide overlay anchored to the bottom edge
+    /// (`npk_window_set_dock`). Implies `is_overlay`. Excluded from the
+    /// focus cycle; the compositor owns its reveal/hide slide and keeps
+    /// its `workspace` synced to the active one (global across spaces).
+    pub is_dock: bool,
 }
 
 #[allow(dead_code)]
@@ -104,6 +109,7 @@ impl Window {
             kind: WindowKind::Terminal,
             is_overlay: false,
             modal: false,
+            is_dock: false,
         }
     }
 

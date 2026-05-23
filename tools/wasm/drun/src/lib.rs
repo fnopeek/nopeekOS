@@ -4,10 +4,10 @@
 
 extern crate alloc;
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
-use nopeek_widgets::app_meta::{self, IconRef};
+use nopeek_widgets::app_catalog::{self, AppEntry, EntryKind};
 use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Spacing};
 use nopeek_widgets::*;
@@ -20,8 +20,6 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_list_modules(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_spawn_module(ptr: i32, len: i32) -> i32;
     fn npk_run_intent(verb_ptr: i32, verb_len: i32) -> i32;
     fn npk_close_widget() -> i32;
@@ -122,26 +120,8 @@ const HOVER_BASE: u32 = 10_000;
 const QUERY_CAP: usize = 63;
 const MAX_VISIBLE_ROWS: usize = 5;
 
-/// What kind of thing a drun entry launches.
-/// - `Module`: a WASM module (`sys/wasm/<name>`) — spawned in a fresh
-///   terminal window via `npk_spawn_module`. The historical case.
-/// - `Intent`: a built-in system intent (e.g. "browser") — invoked via
-///   `npk_run_intent`. The microvm/Surface-window apps live here.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EntryKind { Module, Intent }
-
-struct Entry {
-    /// `Module`: name of the wasm under `sys/wasm/`.
-    /// `Intent`: verb passed to `npk_run_intent`.
-    module_name:  String,
-    display_name: String,
-    description:  String,
-    icon:         IconId,
-    kind:         EntryKind,
-}
-
 struct Drun {
-    entries:    Vec<Entry>,
+    entries:    Vec<AppEntry>,
     filtered:   Vec<usize>,
     selected:   usize,
     row_offset: usize,
@@ -150,36 +130,10 @@ struct Drun {
 
 impl Drun {
     fn load() -> Self {
-        const LIST_BUF_SIZE: usize = 4096;
-        static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
-        let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
-        let n = unsafe { npk_list_modules(buf_ptr as i32, LIST_BUF_SIZE as i32) };
-
-        let mut entries: Vec<Entry> = Vec::new();
-        if n > 0 {
-            let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-            for chunk in slice.split(|&b| b == 0) {
-                if chunk.is_empty() { continue; }
-                if let Ok(s) = core::str::from_utf8(chunk) {
-                    if s == "drun" { continue; }
-                    entries.push(Entry::hydrate(s));
-                }
-            }
-        }
-        // Built-in system intents — apps that live as microvm bundles
-        // / Surface windows rather than WASM modules. Future apps
-        // (office, ide, …) join this list; the launch path is the same
-        // npk_run_intent host-fn.
-        entries.push(Entry {
-            module_name:  String::from("browser"),
-            display_name: String::from("Browser"),
-            description:  String::from("LibreWolf in a sandboxed MicroVM"),
-            // TODO: add a proper Globe glyph to the phosphor atlas;
-            // Monitor is the closest existing icon for now.
-            icon:         IconId::Monitor,
-            kind:         EntryKind::Intent,
-        });
-        entries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        // Installed modules + built-in intents, sorted. Exclude drun
+        // itself and the dock (the dock is launcher infrastructure, not a
+        // user app — listing it would let a click spawn a second dock).
+        let entries = app_catalog::load(&["drun", "dock"]);
 
         let mut filtered: Vec<usize> = Vec::with_capacity(entries.len().max(1));
         for i in 0..entries.len() { filtered.push(i); }
@@ -192,7 +146,7 @@ impl Drun {
         self.filtered.clear();
         let q = self.query.to_ascii_lowercase();
         for (i, e) in self.entries.iter().enumerate() {
-            if q.is_empty() || e.matches(&q) {
+            if q.is_empty() || entry_matches(e, &q) {
                 self.filtered.push(i);
             }
         }
@@ -274,8 +228,8 @@ impl Drun {
         if let Some(&entry_idx) = self.filtered.get(self.selected) {
             if let Some(entry) = self.entries.get(entry_idx) {
                 let ok = match entry.kind {
-                    EntryKind::Module => spawn(&entry.module_name),
-                    EntryKind::Intent => run_intent(&entry.module_name),
+                    EntryKind::Module => spawn(&entry.launch_name),
+                    EntryKind::Intent => run_intent(&entry.launch_name),
                 };
                 if !ok { log("[drun] launch failed"); }
             }
@@ -336,104 +290,12 @@ impl Drun {
 
 enum Outcome { Idle, Rerender, Exit }
 
-// Shared fetch buffer for sys/wasm/<name>. 2 MB covers every first-party
-// module including wifi (~1.5 MB). A single buffer is reused per hydrate
-// call — we only need the meta bytes out of it, then the wasm can be
-// discarded before the next fetch.
-const WASM_FETCH_BUF_SIZE: usize = 2 * 1024 * 1024;
-static mut WASM_FETCH_BUF: [u8; WASM_FETCH_BUF_SIZE] = [0; WASM_FETCH_BUF_SIZE];
-
-impl Entry {
-    fn hydrate(module_name: &str) -> Self {
-        if let Some(meta) = read_meta_from_module(module_name) {
-            return Entry {
-                module_name:  module_name.to_string(),
-                display_name: meta.display_name,
-                description:  meta.description,
-                icon:         icon_ref_to_id(&meta.icon),
-                kind:         EntryKind::Module,
-            };
-        }
-        Entry {
-            module_name:  module_name.to_string(),
-            display_name: module_name.to_string(),
-            description:  String::new(),
-            icon:         IconId::List,
-            kind:         EntryKind::Module,
-        }
-    }
-
-    fn matches(&self, query_lower: &str) -> bool {
-        self.display_name.to_ascii_lowercase().contains(query_lower)
-            || self.module_name.to_ascii_lowercase().contains(query_lower)
-    }
-}
-
-fn read_meta_from_module(name: &str) -> Option<nopeek_widgets::app_meta::AppMeta> {
-    let path = alloc::format!("sys/wasm/{}", name);
-    let buf_ptr = core::ptr::addr_of_mut!(WASM_FETCH_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(
-            path.as_ptr() as i32,
-            path.len() as i32,
-            buf_ptr as i32,
-            WASM_FETCH_BUF_SIZE as i32,
-        )
-    };
-    if n <= 0 { return None; }
-    let wasm = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    let meta_bytes = extract_custom_section(wasm, ".npk.app_meta")?;
-    app_meta::decode(meta_bytes).ok()
-}
-
-fn extract_custom_section<'a>(wasm: &'a [u8], target: &str) -> Option<&'a [u8]> {
-    if wasm.len() < 8 { return None; }
-    if &wasm[0..4] != b"\0asm" { return None; }
-    if &wasm[4..8] != &[0x01, 0x00, 0x00, 0x00] { return None; }
-    let mut cur = &wasm[8..];
-    while !cur.is_empty() {
-        let section_id = cur[0];
-        cur = &cur[1..];
-        let (size, consumed) = read_leb128_u32(cur)?;
-        cur = &cur[consumed..];
-        if size as usize > cur.len() { return None; }
-        let (payload, rest) = cur.split_at(size as usize);
-        cur = rest;
-        if section_id != 0 { continue; }
-        let (name_len, consumed) = match read_leb128_u32(payload) {
-            Some(p) => p,
-            None => continue,
-        };
-        let name_end = consumed + name_len as usize;
-        if name_end > payload.len() { continue; }
-        if &payload[consumed..name_end] == target.as_bytes() {
-            return Some(&payload[name_end..]);
-        }
-    }
-    None
-}
-
-fn read_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
-    let mut result: u32 = 0;
-    let mut shift: u32 = 0;
-    for (i, &b) in buf.iter().enumerate() {
-        if shift >= 32 { return None; }
-        let payload = (b & 0x7F) as u32;
-        if shift == 28 && (payload & !0x0F) != 0 { return None; }
-        result |= payload << shift;
-        if (b & 0x80) == 0 {
-            return Some((result, i + 1));
-        }
-        shift += 7;
-    }
-    None
-}
-
-fn icon_ref_to_id(r: &IconRef) -> IconId {
-    match r {
-        IconRef::Builtin(id) => *id,
-        _ => IconId::List,
-    }
+// Case-insensitive substring match over display + launch name. Lives in
+// drun (not the SDK) because filtering is launcher-specific; the dock has
+// no search box.
+fn entry_matches(e: &AppEntry, query_lower: &str) -> bool {
+    e.display_name.to_ascii_lowercase().contains(query_lower)
+        || e.launch_name.to_ascii_lowercase().contains(query_lower)
 }
 
 fn format_count(total: usize, offset: usize, window: usize) -> String {

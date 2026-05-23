@@ -714,6 +714,18 @@ pub fn poll_render() {
         render_frame();
     }
 
+    // Drive the auto-hide dock. Feed it the current cursor Y so the reveal
+    // dwell / hide debounce advance even while the cursor is parked, then
+    // advance the slide. Re-render the frame while it's moving.
+    let (_, cy) = cursor::atomic_pos();
+    let dock_moving = with_compositor(|comp| {
+        comp.dock_update_reveal(cy);
+        comp.dock_tick()
+    }).unwrap_or(false);
+    if dock_moving {
+        render_frame();
+    }
+
     // Process each mouse event with clean cursor restore + redraw
     while let Some(evt) = crate::xhci::poll_mouse() {
         handle_mouse(&evt);
