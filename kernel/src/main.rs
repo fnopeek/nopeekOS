@@ -383,6 +383,10 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         }
 
         shade::init();
+        // Autostart apps (e.g. the dock) via the widget-spawn path —
+        // never via `run`, which would capture input. Names from the
+        // `autostart` config key.
+        shade::start_autostart();
         // Random wallpaper on boot (if any in wallpapers/)
         intent::random_wallpaper();
         shade::render_frame();

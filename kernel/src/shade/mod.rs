@@ -641,6 +641,26 @@ fn spawn_launcher() {
 /// actions (the 9p "open in loft" trigger from the microvm browser).
 /// MUST run on Core 0 (touches the compositor). Re-focuses an existing
 /// window of that name instead of spawning a duplicate.
+/// Launch every app named in the `autostart` config (comma/space-
+/// separated) via the widget-spawn path — a fresh window, no terminal,
+/// no `APP_RUNNING` capture (so background overlays like the dock don't
+/// hijack keyboard focus the way `run <module>` would). Called once
+/// after `shade::init()`. The kernel stays generic: the app names live
+/// in config, not here. Set with e.g. `set autostart dock`.
+pub fn start_autostart() {
+    let list = match crate::config::get("autostart") {
+        Some(v) => v,
+        None => return,
+    };
+    for name in list
+        .split(|c| c == ',' || c == ' ')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        launch_app(name);
+    }
+}
+
 pub fn launch_app(name: &str) {
     let already_open = with_compositor(|comp| {
         comp.windows.iter()
