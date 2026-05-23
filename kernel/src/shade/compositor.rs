@@ -223,7 +223,9 @@ impl Compositor {
         self.z_order.insert(0, id);
         // Deliberately NOT focus_window(id) — keep focus on the shell
         // that spawned us, so the user's next keystroke lands there.
+        // But this insert(0) put us above the dock, so re-pin it on top.
         self.retile();
+        self.pin_dock_to_front();
         self.needs_full_redraw = true;
 
         id
@@ -246,6 +248,7 @@ impl Compositor {
         self.windows.push(win);
         self.z_order.insert(0, id);
         self.retile();
+        self.pin_dock_to_front();
         self.needs_full_redraw = true;
 
         id
@@ -372,6 +375,7 @@ impl Compositor {
             // Overlay → tiling grid is untouched, but retile reclaims any
             // slot this window held if it was previously tiled.
             self.retile();
+            self.pin_dock_to_front();
             self.needs_full_redraw = true;
         }
         found
@@ -524,7 +528,19 @@ impl Compositor {
                 terminal::restore_cursor();
             }
         }
+        // The dock is never focused, so the insert(0) above would bury it
+        // behind the just-focused window. Re-pin it to the very top.
+        self.pin_dock_to_front();
         // Don't set needs_full_redraw — render_damaged handles 2 windows only
+    }
+
+    /// Keep the dock window at the front of the z-order (topmost). Render
+    /// passes iterate `z_order.rev()`, drawing index 0 last → on top.
+    fn pin_dock_to_front(&mut self) {
+        if let Some(dock) = self.dock {
+            self.z_order.retain(|&wid| wid != dock.id);
+            self.z_order.insert(0, dock.id);
+        }
     }
 
     /// Switch to workspace.
@@ -550,7 +566,7 @@ impl Compositor {
         }
 
         self.focused = self.z_order.iter()
-            .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws))
+            .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws && !w.is_dock))
             .copied();
 
         if let Some(fid) = self.focused {
@@ -563,6 +579,7 @@ impl Compositor {
         }
 
         self.retile();
+        self.pin_dock_to_front();
         self.needs_full_redraw = true;
     }
 
