@@ -120,7 +120,7 @@ fn alloc_mark() -> usize {
 const CLICK_BASE: u32 = 1;
 const HOVER_BASE: u32 = 10_000;
 const QUERY_CAP: usize = 63;
-const MAX_VISIBLE_ROWS: usize = 6;
+const MAX_VISIBLE_ROWS: usize = 5;
 
 /// What kind of thing a drun entry launches.
 /// - `Module`: a WASM module (`sys/wasm/<name>`) — spawned in a fresh
@@ -474,7 +474,7 @@ fn push_usize(s: &mut String, mut n: usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     unsafe {
-        let _ = npk_window_set_overlay(680, 620);
+        let _ = npk_window_set_overlay(600, 540);
         let _ = npk_window_set_modal(1);
     }
 
