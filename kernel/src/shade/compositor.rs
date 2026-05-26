@@ -1021,6 +1021,15 @@ impl Compositor {
                         let dock_op = crate::shade::widgets::palette::chrome_opacity();
                         let tray = crate::shade::widgets::palette::resolve(
                             crate::shade::widgets::abi::Token::SurfaceElevated);
+                        // The bar paints detached pills on the Surface clear;
+                        // its gaps stay that clear colour → treat them as
+                        // transparent so the wallpaper shows between pills.
+                        // (The dock fills its whole tray with SurfaceElevated,
+                        // so it has no Surface pixels — the skip is a no-op there.)
+                        let gap = if win.is_bar {
+                            crate::shade::widgets::palette::resolve(
+                                crate::shade::widgets::abi::Token::Surface)
+                        } else { tray ^ 0x00FF_FFFF };  // sentinel: never matches a real pixel
                         for dy in cy..y1 {
                             let local_y = dy - cy;
                             for dx in cx..x1 {
@@ -1030,6 +1039,7 @@ impl Compositor {
                                 let src_idx = (local_y as usize) * (scene.width as usize)
                                     + (dx - cx) as usize;
                                 let px = scene.pixels[src_idx];
+                                if px == gap { continue; }
                                 let base = if px == tray { dock_op } else { 255 };
                                 let a = (base * cov / 255).min(255);
                                 render::blend_pixel(shadow, info, dx, dy, px, a);
