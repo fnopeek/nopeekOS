@@ -626,6 +626,12 @@ impl Compositor {
 
     /// Set focus to a window.
     pub fn focus_window(&mut self, id: WindowId) {
+        // Panels (dock / bar) are never focusable — focusing them would
+        // route keyboard input into a window that ignores it (the shell
+        // appears to hang). Refuse, no matter which path asked.
+        if self.windows.iter().any(|w| w.id == id && (w.is_dock || w.is_bar)) {
+            return;
+        }
         self.focused = Some(id);
         self.set_focused_flag(id);
 
@@ -691,7 +697,7 @@ impl Compositor {
         }
 
         self.focused = self.z_order.iter()
-            .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws && !w.is_dock))
+            .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws && !w.is_dock && !w.is_bar))
             .copied();
 
         if let Some(fid) = self.focused {
@@ -1285,7 +1291,7 @@ impl Compositor {
         let mut best: Option<(WindowId, i32)> = None;
 
         for win in &self.windows {
-            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock { continue; }
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock || win.is_bar { continue; }
 
             let cx = win.x as i32 + win.width as i32 / 2;
             let cy = win.y as i32 + win.height as i32 / 2;
@@ -1317,7 +1323,7 @@ impl Compositor {
     /// Focus next window on active workspace (cycle).
     pub fn focus_next(&mut self) {
         let ws_windows: Vec<WindowId> = self.z_order.iter()
-            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock))
+            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock && !w.is_bar))
             .copied()
             .collect();
 
@@ -1333,7 +1339,7 @@ impl Compositor {
     /// Focus previous window on active workspace (cycle).
     pub fn focus_prev(&mut self) {
         let ws_windows: Vec<WindowId> = self.z_order.iter()
-            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock))
+            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock && !w.is_bar))
             .copied()
             .collect();
 
@@ -1525,7 +1531,7 @@ impl Compositor {
                 // app, the dock itself stays unfocused. Hit-test/events
                 // below still fire.
                 let is_dock_win = self.windows.iter()
-                    .any(|w| w.id == wid && w.is_dock);
+                    .any(|w| w.id == wid && (w.is_dock || w.is_bar));
                 // Focus on first click into an unfocused window; later
                 // clicks on the same focused widget should dispatch.
                 let focus_changed = !is_dock_win && self.focused != Some(wid);
@@ -1621,7 +1627,7 @@ impl Compositor {
         // Find nearest window in direction (same logic as focus_direction)
         let mut best: Option<(WindowId, i32)> = None;
         for win in &self.windows {
-            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock { continue; }
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock || win.is_bar { continue; }
             let cx = win.x as i32 + win.width as i32 / 2;
             let cy = win.y as i32 + win.height as i32 / 2;
             let rel_x = cx - focused.0;
