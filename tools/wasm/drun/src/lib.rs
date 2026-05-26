@@ -133,7 +133,7 @@ impl Drun {
         // Installed modules + built-in intents, sorted. Exclude drun
         // itself and the dock (the dock is launcher infrastructure, not a
         // user app — listing it would let a click spawn a second dock).
-        let entries = app_catalog::load(&["drun", "dock"]);
+        let entries = app_catalog::load(&["drun", "dock", "bar"]);
 
         let mut filtered: Vec<usize> = Vec::with_capacity(entries.len().max(1));
         for i in 0..entries.len() { filtered.push(i); }
