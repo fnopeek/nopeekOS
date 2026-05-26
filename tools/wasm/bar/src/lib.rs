@@ -190,7 +190,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     ]));
                 }
                 row.push(Widget::Text {
-                    content: alloc::format!("  {}  ", i + 1),
+                    content: alloc::format!("    {}    ", i + 1),
                     style: TextStyle::Body,
                     modifiers: mods,
                 });
