@@ -56,6 +56,13 @@ pub fn current() -> Palette {
     Palette { colors }
 }
 
+/// Translucency (0..255) for floating chrome — the dock tray + the bar
+/// pills. Light surfaces are bright, so a lower opacity in light mode
+/// keeps them from washing out; dark stays denser.
+pub fn chrome_opacity() -> u32 {
+    if is_light_theme() { 150 } else { 210 }
+}
+
 pub fn resolve(token: Token) -> u32 {
     let is_light = is_light_theme();
     let t = if is_light { &LIGHT } else { &DARK };

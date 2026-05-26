@@ -28,8 +28,6 @@ const DOCK_HANDLE_H: u32 = 5;
 /// Floating gap below the revealed dock (1× px, scaled), so it hovers
 /// detached from the bottom edge the way the bar's pills do.
 const DOCK_BOTTOM_GAP: u32 = 12;
-/// Dock translucency (0..255). A frosted, slightly see-through tray.
-const DOCK_OPACITY: u32 = 210;
 
 /// Swap animation state — windows glide from old to new position.
 #[derive(Clone, Copy)]
@@ -804,7 +802,8 @@ impl Compositor {
         let tray = crate::shade::widgets::palette::resolve(
             crate::shade::widgets::abi::Token::SurfaceElevated);
         render::fill_rounded_rect_alpha(shadow, info, x, y, w, hh,
-            tray & 0x00FF_FFFF, hh / 2, DOCK_OPACITY);
+            tray & 0x00FF_FFFF, hh / 2,
+            crate::shade::widgets::palette::chrome_opacity());
     }
 
     /// Fast render: only the current input line of the focused window.
@@ -913,11 +912,12 @@ impl Compositor {
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);
 
                     // The dock is a frosted, floating tray: blend every
-                    // scene pixel over whatever is behind it at
-                    // DOCK_OPACITY, fading along the rounded corners via the
-                    // SDF coverage. (Opaque memcpy can't be translucent.)
+                    // scene pixel over whatever is behind it at the theme's
+                    // chrome opacity, fading along the rounded corners via
+                    // the SDF coverage. (Opaque memcpy can't be translucent.)
                     // Small surface → a full per-pixel blend is cheap.
                     if win.is_dock {
+                        let dock_op = crate::shade::widgets::palette::chrome_opacity();
                         for dy in cy..y1 {
                             let local_y = dy - cy;
                             for dx in cx..x1 {
@@ -927,7 +927,7 @@ impl Compositor {
                                 let src_idx = (local_y as usize) * (scene.width as usize)
                                     + (dx - cx) as usize;
                                 let px = scene.pixels[src_idx];
-                                let a = (DOCK_OPACITY * cov / 255).min(255);
+                                let a = (dock_op * cov / 255).min(255);
                                 render::blend_pixel(shadow, info, dx, dy, px, a);
                             }
                         }
