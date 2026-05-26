@@ -1094,11 +1094,14 @@ impl Compositor {
                                 let cov = render::rect_coverage_sdf(
                                     dx, dy, prx, pry, prw, prh, rad);
                                 if cov == 0 { continue; }
+                                // Opaque pill: bg AND glyph composite the same
+                                // way, so the glyph's baked-in AA edges don't
+                                // form a surface-coloured halo against a
+                                // translucent bg (the "white ring" artefact).
+                                // Only the SDF corner coverage is sub-opaque.
                                 let px = scene.pixels[(local_y as usize)
                                     * (scene.width as usize) + (dx - cx) as usize];
-                                let base = if px == tray { op } else { 255 };
-                                let a = (base * cov / 255).min(255);
-                                render::blend_pixel(shadow, info, dx, dy, px, a);
+                                render::blend_pixel(shadow, info, dx, dy, px, cov);
                             }
                         }
                         return;
