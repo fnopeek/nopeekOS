@@ -93,6 +93,11 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("wallpapers/npk01.png"),
         version: None,
     },
+    BundledAsset {
+        fs_path: "sys/wallpapers/npk02.png",
+        bytes:   include_bytes!("wallpapers/npk02.png"),
+        version: None,
+    },
 
     // ── First-party WASM modules ──────────────────────────────────
     // Keep in sync with release/modules/ output of build.sh release.

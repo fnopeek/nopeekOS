@@ -226,6 +226,11 @@ fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
     // autostart ...` overrides it.
     config::set("autostart", "dock bar");
 
+    // Theme follows the wallpaper: `auto` picks light/dark from the
+    // background luminance (palette::is_light_theme). `theme light|dark`
+    // overrides.
+    config::set("theme", "auto");
+
     kprintln!();
     if !name.is_empty() {
         kprintln!("[npk] ══════════════════════════════════");
