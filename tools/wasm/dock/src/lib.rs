@@ -112,7 +112,7 @@ const LAUNCHER: u32 = 90_000;
 // Visual sizing (px at 1× scale). Kept low + tight for a flat, floating
 // tray; the compositor draws it translucent with a gap from the edge.
 const ICON_SIZE: u16 = 24;
-const DOCK_HEIGHT: i32 = 52;
+const DOCK_HEIGHT: i32 = 48;
 const CELL_FOOTPRINT: i32 = 46; // icon + padding + inter-cell gap
 const SIDE_PADDING: i32 = 28;
 
@@ -157,13 +157,18 @@ impl Dock {
         ));
 
         // Flat look: the compositor renders the dock chrome-less, rounded
-        // and translucent. The scene clears to Surface, so we don't paint
-        // our own background — just inset the icons from the tray edge.
+        // and translucent. Paint the tray SurfaceElevated (a touch lighter
+        // than the Surface that normal windows use) so the dock reads as
+        // distinct chrome, not just another window. Background fills the
+        // whole container rect; Padding only insets the icons.
         Widget::Row {
             children:  cells,
             spacing:   Spacing::Sm.as_u16(),
             align:     Align::Center,
-            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+            modifiers: alloc::vec![
+                Modifier::Padding(Padding::Xs.as_u16()),
+                Modifier::Background(Token::SurfaceElevated),
+            ],
         }
     }
 
