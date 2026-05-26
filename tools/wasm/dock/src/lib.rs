@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use nopeek_widgets::app_catalog::{self, AppEntry, EntryKind};
 use nopeek_widgets::prefab;
-use nopeek_widgets::style::{Padding, Radius, Spacing};
+use nopeek_widgets::style::{Padding, Spacing};
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -109,11 +109,12 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 const CLICK_BASE: u32 = 1;
 const LAUNCHER: u32 = 90_000;
 
-// Visual sizing (px at 1× scale).
-const ICON_SIZE: u16 = 28;
-const DOCK_HEIGHT: i32 = 72;
-const CELL_FOOTPRINT: i32 = 56; // icon + padding + inter-cell gap
-const SIDE_PADDING: i32 = 48;
+// Visual sizing (px at 1× scale). Kept low + tight for a flat, floating
+// tray; the compositor draws it translucent with a gap from the edge.
+const ICON_SIZE: u16 = 24;
+const DOCK_HEIGHT: i32 = 52;
+const CELL_FOOTPRINT: i32 = 46; // icon + padding + inter-cell gap
+const SIDE_PADDING: i32 = 28;
 
 struct Dock {
     entries: Vec<AppEntry>,
@@ -155,18 +156,14 @@ impl Dock {
             None,
         ));
 
-        // Flat look: no hard bordered box (the compositor renders the
-        // dock chrome-less). The icons sit on a soft, rounded translucent
-        // tray that the dock supplies itself.
+        // Flat look: the compositor renders the dock chrome-less, rounded
+        // and translucent. The scene clears to Surface, so we don't paint
+        // our own background — just inset the icons from the tray edge.
         Widget::Row {
             children:  cells,
             spacing:   Spacing::Sm.as_u16(),
             align:     Align::Center,
-            modifiers: alloc::vec![
-                Modifier::Padding(Padding::Sm.as_u16()),
-                Modifier::Background(Token::Surface),
-                Modifier::Rounded(Radius::Xl.as_u8()),
-            ],
+            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
         }
     }
 

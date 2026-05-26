@@ -26,6 +26,11 @@ const DOCK_HIDE_MARGIN_PX: i32 = 6;
 /// lives here" without reserving space or showing the icons.
 const DOCK_HANDLE_W: u32 = 64;
 const DOCK_HANDLE_H: u32 = 4;
+/// Floating gap below the revealed dock (1× px, scaled), so it hovers
+/// detached from the bottom edge the way the bar's pills do.
+const DOCK_BOTTOM_GAP: u32 = 8;
+/// Dock translucency (0..255). A frosted, slightly see-through tray.
+const DOCK_OPACITY: u32 = 210;
 
 /// Swap animation state — windows glide from old to new position.
 #[derive(Clone, Copy)]
@@ -65,11 +70,15 @@ pub struct DragState {
 #[derive(Clone, Copy)]
 pub struct DockState {
     pub id: WindowId,
-    /// Dock height in px = the slide distance.
+    /// Dock (tray) height in px.
     pub thickness: u32,
+    /// Floating gap below the tray when shown (px) — like the bar margin,
+    /// so the revealed dock hovers detached from the bottom edge.
+    pub gap: u32,
     /// Reveal target the hot-edge logic drives toward.
     pub target_shown: bool,
-    /// Current slide offset: 0 = fully shown, `thickness` = fully hidden.
+    /// Current slide offset: 0 = fully shown (floating), `thickness + gap`
+    /// = fully hidden (below the screen edge).
     pub offset: u32,
     /// Ticks the cursor has held the bottom hot-edge (reveal dwell).
     pub dwell: u32,
@@ -369,11 +378,13 @@ impl Compositor {
         };
 
         if found {
+            let gap = DOCK_BOTTOM_GAP * self.scale.max(1);
             self.dock = Some(DockState {
                 id,
                 thickness: dh,
+                gap,
                 target_shown: false,
-                offset: dh,
+                offset: dh + gap,   // fully hidden below the edge
                 dwell: 0,
                 debounce: 0,
             });
@@ -402,7 +413,8 @@ impl Compositor {
 
         if dock.target_shown {
             // Hide once the cursor leaves the dock band for long enough.
-            let dock_top = baseline - dock.thickness as i32;
+            // The shown tray floats `gap` px above the baseline.
+            let dock_top = baseline - (dock.thickness + dock.gap) as i32;
             let over_dock = cursor_y >= dock_top - DOCK_HIDE_MARGIN_PX;
             if over_dock {
                 dock.debounce = 0;
@@ -428,14 +440,16 @@ impl Compositor {
     }
 
     /// Advance the dock slide one frame. Returns true while moving (caller
-    /// re-renders). Eases the offset toward 0 (shown) / thickness (hidden).
+    /// re-renders). Eases the offset toward 0 (shown, floating) /
+    /// `thickness + gap` (hidden, below the edge).
     pub fn dock_tick(&mut self) -> bool {
         let baseline = self.dock_baseline() as i32;
         let screen_w = self.screen_w;
 
-        let (id, offset, thickness, now_visible) = {
+        let (id, offset, slide, now_visible) = {
             let Some(dock) = self.dock.as_mut() else { return false };
-            let target = if dock.target_shown { 0 } else { dock.thickness } as i32;
+            let slide = (dock.thickness + dock.gap) as i32;
+            let target = if dock.target_shown { 0 } else { slide };
             let cur = dock.offset as i32;
             if cur == target { return false; }
             let delta = target - cur;
@@ -443,12 +457,15 @@ impl Compositor {
             let step = (delta.abs() / 4).max(2).min(delta.abs());
             let next = if delta > 0 { cur + step } else { cur - step };
             dock.offset = next.max(0) as u32;
-            (dock.id, dock.offset, dock.thickness, dock.offset < dock.thickness)
+            (dock.id, dock.offset, slide, dock.offset < slide as u32)
         };
 
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             win.x = screen_w.saturating_sub(win.width) / 2;
-            win.y = (baseline - thickness as i32 + offset as i32).max(0) as u32;
+            // Shown (offset 0): top = baseline - slide = baseline - thickness
+            // - gap → tray floats `gap` above the edge. Hidden (offset slide):
+            // top = baseline → fully below the usable area.
+            win.y = (baseline - slide + offset as i32).max(0) as u32;
             win.visible = now_visible;
             win.dirty = true;
         }
@@ -758,7 +775,7 @@ impl Compositor {
         let Some(dock) = self.dock.as_ref() else { return };
         // Only while fully hidden — once it slides up the window itself
         // is the affordance.
-        if dock.offset < dock.thickness { return; }
+        if dock.offset < dock.thickness + dock.gap { return; }
 
         let scale = self.scale.max(1);
         let hw = DOCK_HANDLE_W * scale;
@@ -879,6 +896,28 @@ impl Compositor {
                     let cw_local = x1.saturating_sub(cx);
                     let ch_local = y1.saturating_sub(cy);
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);
+
+                    // The dock is a frosted, floating tray: blend every
+                    // scene pixel over whatever is behind it at
+                    // DOCK_OPACITY, fading along the rounded corners via the
+                    // SDF coverage. (Opaque memcpy can't be translucent.)
+                    // Small surface → a full per-pixel blend is cheap.
+                    if win.is_dock {
+                        for dy in cy..y1 {
+                            let local_y = dy - cy;
+                            for dx in cx..x1 {
+                                let cov = render::rect_coverage_sdf(
+                                    dx, dy, cx, cy, cw_local, ch_local, r);
+                                if cov == 0 { continue; }
+                                let src_idx = (local_y as usize) * (scene.width as usize)
+                                    + (dx - cx) as usize;
+                                let px = scene.pixels[src_idx];
+                                let a = (DOCK_OPACITY * cov / 255).min(255);
+                                render::blend_pixel(shadow, info, dx, dy, px, a);
+                            }
+                        }
+                        return;
+                    }
 
                     for dy in cy..y1 {
                         let local_y = dy - cy;
