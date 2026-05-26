@@ -160,18 +160,25 @@ impl Dock {
         ));
         cells.push(Widget::Spacer { flex: 1 });
 
-        // Flat look: the compositor renders the dock chrome-less, rounded
-        // and translucent. Paint the tray SurfaceElevated (a touch lighter
-        // than the Surface that normal windows use) so the dock reads as
-        // distinct chrome, not just another window. No row Padding — the
-        // icons carry their own, and a padded root would be double-counted
-        // by the layout pass (see note below), collapsing the vertical
-        // centring on a short tray. The Spacers centre horizontally.
-        Widget::Row {
+        // The tray: a rounded SurfaceElevated pill holding the icons. No row
+        // Padding — icons carry their own; a padded root would be double-
+        // counted by the layout pass and collapse the vertical centring on a
+        // short tray. Spacers centre the icons horizontally.
+        let tray = Widget::Row {
             children:  cells,
             spacing:   Spacing::Sm.as_u16(),
             align:     Align::Center,
-            modifiers: alloc::vec![Modifier::Background(Token::SurfaceElevated)],
+            modifiers: alloc::vec![
+                Modifier::Background(Token::SurfaceElevated),
+                Modifier::Rounded(Radius::Lg.as_u8()),
+            ],
+        };
+        // Wrap in a Stack so the compositor renders the dock as a translucent
+        // panel scene (transparent clear + chrome-opacity background, crisp
+        // icons composited by alpha — no halo). Same path as the bar.
+        Widget::Stack {
+            children:  alloc::vec![tray],
+            modifiers: Vec::new(),
         }
     }
 
