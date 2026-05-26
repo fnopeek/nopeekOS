@@ -1068,7 +1068,13 @@ impl Compositor {
                             let cr = child.rect;
                             if cr.w < 3 || cr.h < 3 || cr.x < 0 || cr.y < 0 { continue; }
                             let (rx, ry) = (cr.x as u32, cr.y as u32);
-                            let (mx, my) = (rx + cr.w / 2, ry + cr.h / 2);
+                            // Sample the card's padding edge (top-left corner),
+                            // not its centre: the centre may be covered by child
+                            // content (workspace pills, glyphs) of a different
+                            // colour, but the padding border is always the card
+                            // background (SurfaceElevated). Spacer/gap children
+                            // are the Surface clear here → correctly rejected.
+                            let (mx, my) = (rx + 1, ry + 1);
                             if mx < cx || my < cy { continue; }
                             let (sx, sy) = (mx - cx, my - cy);
                             if sx >= scene.width || sy >= scene.height { continue; }
