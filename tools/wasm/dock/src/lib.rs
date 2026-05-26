@@ -124,7 +124,7 @@ impl Dock {
     fn load() -> Self {
         // Exclude the dock itself, and drun — the trailing launcher
         // button already opens drun, so a separate drun tile is redundant.
-        let catalog = app_catalog::load(&["dock", "drun"]);
+        let catalog = app_catalog::load(&["dock", "drun", "bar"]);
         let entries = match read_pins() {
             Some(pins) if !pins.is_empty() => order_by_pins(catalog, &pins),
             _ => catalog,
