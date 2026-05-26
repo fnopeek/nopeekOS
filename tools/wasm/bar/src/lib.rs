@@ -160,6 +160,8 @@ fn parse_state(s: &str) -> BarState<'_> {
 }
 
 // ── Segment → widgets ────────────────────────────────────────────────
+// No per-widget Padding (the bar is short — the enclosing card supplies
+// the inset; uniform Padding here would overflow the band vertically).
 fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
     match name {
         "workspaces" => {
@@ -167,7 +169,6 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             for i in 0..st.ws_count {
                 let active = i == st.ws_active;
                 let mut mods: Vec<Modifier> = Vec::new();
-                mods.push(Modifier::Padding(Padding::Sm.as_u16()));
                 mods.push(Modifier::OnClick(ActionId(WS_BASE + i as u32)));
                 if active {
                     mods.push(Modifier::Background(Token::AccentMuted));
@@ -185,7 +186,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             }
             alloc::vec![Widget::Row {
                 children: row,
-                spacing: Spacing::Xs.as_u16(),
+                spacing: Spacing::Sm.as_u16(),
                 align: Align::Center,
                 modifiers: Vec::new(),
             }]
@@ -202,54 +203,63 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
         }
         "clock" => alloc::vec![Widget::Text {
             content: st.clock.to_string(),
-            style: TextStyle::Heading,
+            style: TextStyle::Body,
             modifiers: Vec::new(),
         }],
         "tray" => alloc::vec![Widget::Icon {
             id: IconId::Gear,
             size: ICON_SIZE,
-            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+            modifiers: Vec::new(),
         }],
         "power" => alloc::vec![Widget::Icon {
             id: IconId::Power,
             size: ICON_SIZE,
             modifiers: alloc::vec![
-                Modifier::Padding(Padding::Sm.as_u16()),
                 Modifier::Tint(Token::Danger),
                 Modifier::OnClick(ActionId(POWER)),
-                Modifier::Hover(alloc::vec![
-                    Modifier::Background(Token::SurfaceMuted),
-                    Modifier::Rounded(Radius::Sm.as_u8()),
-                ]),
             ],
         }],
         _ => Vec::new(),
     }
 }
 
-fn group(names: &[String], st: &BarState) -> Widget {
+/// A zone → a detached pill (Row with its own translucent SurfaceElevated
+/// background + rounding). Empty zones collapse to a zero spacer so the
+/// left/center/right structure (and the wallpaper gaps) stay intact.
+fn card(names: &[String], st: &BarState) -> Widget {
     let mut kids = Vec::new();
     for n in names { kids.extend(segment_widgets(n, st)); }
+    if kids.is_empty() {
+        return Widget::Spacer { flex: 0 };
+    }
     Widget::Row {
         children: kids,
         spacing: Spacing::Sm.as_u16(),
         align: Align::Center,
-        modifiers: Vec::new(),
+        modifiers: alloc::vec![
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Rounded(Radius::Lg.as_u8()),
+            Modifier::Padding(Padding::Xs.as_u16()),
+        ],
     }
 }
 
 fn build_tree(seg: &Segments, st: &BarState) -> Widget {
+    // Root has NO background/padding: the gaps between the three pills stay
+    // the scene's Surface clear, which the compositor's is_bar blit treats
+    // as transparent so the wallpaper shows through. Flex spacers detach
+    // the pills (left / centre / right).
     Widget::Row {
         children: alloc::vec![
-            group(&seg.left, st),
+            card(&seg.left, st),
             Widget::Spacer { flex: 1 },
-            group(&seg.center, st),
+            card(&seg.center, st),
             Widget::Spacer { flex: 1 },
-            group(&seg.right, st),
+            card(&seg.right, st),
         ],
         spacing: Spacing::Sm.as_u16(),
         align: Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+        modifiers: Vec::new(),
     }
 }
 
