@@ -127,9 +127,16 @@ build() {
 build_installer_disk() {
     log "Building installer boot disk..."
     rm -f "$INSTALLER_DISK"
-    # 96 MB: ESP needs to hold kernel.efi (~3 MB) with plenty of room
-    # for the FAT metadata + a future second slot.
-    dd if=/dev/zero of="$INSTALLER_DISK" bs=1M count=96 2>/dev/null
+    # Size the ESP to the actual kernel.efi + headroom. A plain installer
+    # is ~3 MB, but the bundle-userspace (usb-full) build bakes the
+    # ~261 MB LibreWolf sqfs in via include_bytes! → a ~272 MB .efi that
+    # a fixed 96 MB image can't hold (mcopy → "Disk full"). +64 MB covers
+    # GPT + FAT metadata with room to spare.
+    local efi_mb=$(( ($(stat -c%s "$KERNEL_EFI") / 1024 / 1024) + 1 ))
+    local disk_mb=$(( efi_mb + 64 ))
+    [ "$disk_mb" -lt 96 ] && disk_mb=96
+    log "  ESP size: ${disk_mb} MB (kernel.efi ${efi_mb} MB)"
+    dd if=/dev/zero of="$INSTALLER_DISK" bs=1M count="$disk_mb" 2>/dev/null
     sgdisk --clear "$INSTALLER_DISK" >/dev/null
     sgdisk --new=1:2048:0 --typecode=1:EF00 --change-name=1:"ESP" "$INSTALLER_DISK" >/dev/null
     local part_offset=$((2048 * 512))
