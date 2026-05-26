@@ -263,9 +263,11 @@ fn card(names: &[String], st: &BarState) -> Widget {
         align: Align::Center,
         modifiers: alloc::vec![
             Modifier::Background(Token::SurfaceElevated),
-            // Square fill in the scene; the compositor rounds each pill
-            // cleanly with its SDF (like the dock window) — rasteriser
-            // rounding here would double up + reintroduce corner-AA cruft.
+            // Rounded by the rasteriser: in the bar's transparent scene the
+            // bg is filled at chrome alpha with proper AA corners, then the
+            // compositor composites by per-pixel alpha → clean translucent
+            // pill, no halo.
+            Modifier::Rounded(Radius::Md.as_u8()),
             Modifier::Padding(Padding::Xs.as_u16()),
         ],
     }

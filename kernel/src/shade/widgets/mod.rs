@@ -1220,9 +1220,26 @@ fn rasterize_buffer_with_overlays(
     let pixel_count = (rect.w as usize) * (rect.h as usize);
     let mut pixels: Vec<u32> = alloc::vec![0u32; pixel_count];
 
-    // Clear to Surface token — covers areas not painted by any widget.
-    let bg = palette::resolve(abi::Token::Surface);
-    for p in pixels.iter_mut() { *p = bg; }
+    // Translucent-panel detection: the bar (and only the bar) roots its tree
+    // in a `Stack`. Such a scene clears TRANSPARENT and fills backgrounds at
+    // the chrome opacity, so glyphs stay full-coverage and the compositor
+    // composites the whole scene over the wallpaper by per-pixel alpha (no
+    // halo). Every other app roots in Row/Column → opaque, byte-identical to
+    // before. Derived from the tree so it needs no extra plumbing or locks
+    // (relayout_scene rasterises while holding the SCENES lock).
+    let bg_alpha: u8 = if matches!(tree, abi::Widget::Stack { .. }) {
+        palette::chrome_opacity() as u8
+    } else {
+        255
+    };
+
+    // Opaque scene → clear to the Surface token (covers unpainted areas).
+    // Translucent panel scene → clear TRANSPARENT (alpha 0) so gaps and
+    // glyph edges composite correctly over the wallpaper.
+    if bg_alpha >= 255 {
+        let bg = palette::resolve(abi::Token::Surface);
+        for p in pixels.iter_mut() { *p = bg; }
+    }
 
     let pal = palette::current();
     let mut target = abi::RasterTarget {
@@ -1232,6 +1249,7 @@ fn rasterize_buffer_with_overlays(
         origin:  abi::Point { x: rect.x, y: rect.y },
         scale:   1,
         palette: &pal,
+        bg_alpha,
     };
     let mut rast = raster::cpu::CpuRasterizer::new();
     render::render_with_state(

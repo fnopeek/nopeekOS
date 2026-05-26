@@ -561,6 +561,12 @@ pub struct RasterTarget<'a> {
     pub scale:   u8,
     /// Active theme palette — Token → concrete BGRA.
     pub palette: &'a Palette,
+    /// Alpha (0..=255) applied to Background/Border fills. 255 = opaque
+    /// (normal scenes, unchanged). A panel scene cleared transparent sets
+    /// this to the chrome opacity so its pill backgrounds are translucent
+    /// while glyphs stay full-coverage — the compositor then composites the
+    /// scene over the wallpaper by per-pixel alpha (no halo).
+    pub bg_alpha: u8,
 }
 
 /// Rasterizer backend. CPU in v1 (fontdue + gui/render.rs). GPU in v2+

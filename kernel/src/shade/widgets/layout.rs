@@ -174,24 +174,6 @@ fn collect_popovers(
     }
 }
 
-/// Collect the rects of the OUTERMOST `Modifier::Background`-bearing nodes
-/// — the bar's pill cards. Does not recurse into a pill, so inner pills
-/// (e.g. workspace buttons inside a card) aren't double-counted. Used by
-/// the compositor's `is_bar` blit to round each pill cleanly with its SDF,
-/// independent of layout nesting (so a Stack-centred clock still works).
-pub fn collect_bg_pills(w: &Widget, n: &LayoutNode, out: &mut Vec<Rect>) {
-    let has_bg = mods_of_widget(w)
-        .iter()
-        .any(|m| matches!(m, Modifier::Background(_)));
-    if has_bg {
-        out.push(n.rect);
-        return;
-    }
-    for (cw, cl) in widget_children(w).iter().zip(n.children.iter()) {
-        collect_bg_pills(cw, cl, out);
-    }
-}
-
 /// Children of a widget — used by anchor + popover walkers.
 fn widget_children(w: &Widget) -> &[Widget] {
     match w {
