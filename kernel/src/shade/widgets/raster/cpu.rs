@@ -37,7 +37,8 @@ impl Rasterizer for CpuRasterizer {
         let (x, y) = window_to_target(t, r.x, r.y);
         let Fill::Solid(tok) = fill;
         let color = t.palette.colors[tok as usize];
-        fill_rect_target(t, x, y, r.w as i32, r.h as i32, color, 255);
+        let ba = t.bg_alpha;
+        fill_rect_target(t, x, y, r.w as i32, r.h as i32, color, ba);
     }
 
     fn rect_rounded(&mut self, t: &mut RasterTarget, r: Rect, fill: Fill, radius: u8) {
@@ -289,13 +290,14 @@ fn corner_coverage(dx: i32, dy: i32, r: i32) -> u8 {
 
 fn fill_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) {
     if w <= 0 || h <= 0 { return; }
+    let ba = t.bg_alpha;  // background fill opacity (255 = opaque)
     let r = radius.min(w / 2).min(h / 2).max(0);
     if r == 0 {
-        fill_rect_target(t, x, y, w, h, color, 255);
+        fill_rect_target(t, x, y, w, h, color, ba);
         return;
     }
 
-    fill_rect_target(t, x, y + r, w, h - 2 * r, color, 255);
+    fill_rect_target(t, x, y + r, w, h - 2 * r, color, ba);
 
     for row in 0..r {
         let top_y = y + row;
@@ -305,9 +307,9 @@ fn fill_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32
         let mid_x0 = x + r;
         let mid_w  = w - 2 * r;
         if mid_w > 0 {
-            fill_rect_target(t, mid_x0, top_y, mid_w, 1, color, 255);
+            fill_rect_target(t, mid_x0, top_y, mid_w, 1, color, ba);
             if bot_y != top_y {
-                fill_rect_target(t, mid_x0, bot_y, mid_w, 1, color, 255);
+                fill_rect_target(t, mid_x0, bot_y, mid_w, 1, color, ba);
             }
         }
 
@@ -315,7 +317,7 @@ fn fill_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32
             let left_x  = x + col;
             let right_x = x + w - 1 - col;
             let dx_off = r - 1 - col;
-            let a = corner_coverage(dx_off, dy_off, r);
+            let a = ((corner_coverage(dx_off, dy_off, r) as u32 * ba as u32) / 255) as u8;
             if a == 0 { continue; }
             put_pixel_blended(t, left_x, top_y, color, a);
             put_pixel_blended(t, right_x, top_y, color, a);
@@ -342,13 +344,14 @@ fn stroke_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i
     let y1 = (y + h).min(t.size.h as i32);
     if x0 >= x1 || y0 >= y1 { return; }
 
+    let ba = t.bg_alpha;
     for py in y0..y1 {
         for px in x0..x1 {
             let a_out = rect_coverage(px, py, x, y, w, h, r_out);
             let a_in  = if inner_w > 0 && inner_h > 0 {
                 rect_coverage(px, py, inner_x, inner_y, inner_w, inner_h, r_in)
             } else { 0 };
-            let a = a_out.saturating_sub(a_in);
+            let a = ((a_out.saturating_sub(a_in) as u32 * ba as u32) / 255) as u8;
             if a > 0 {
                 put_pixel_blended(t, px, py, color, a);
             }
@@ -375,22 +378,30 @@ fn rect_coverage(px: i32, py: i32, rx: i32, ry: i32, rw: i32, rh: i32, r: i32) -
 /// at 0xFF (targets are always opaque for now).
 fn blend_over(dst: u32, src: u32, src_alpha: u8) -> u32 {
     if src_alpha == 0 { return dst; }
-    if src_alpha == 255 { return src; }
+    if src_alpha == 255 { return 0xFF00_0000 | (src & 0x00FF_FFFF); }
 
-    let sa  = src_alpha as u32;
-    let inv = 255 - sa;
+    let sa = src_alpha as u32;
+    let da = (dst >> 24) & 0xFF;        // destination alpha (0 for a transparent scene)
+    // Straight-alpha "over": preserves the alpha channel instead of forcing
+    // opaque. For an OPAQUE dst (da == 255) this reduces to the old formula
+    // (out_a = 255, same colour) — so opaque scenes are byte-identical and
+    // every existing app renders unchanged. A transparent scene accumulates
+    // real coverage alpha, which the compositor then composites over the
+    // wallpaper (translucent bar pills, crisp glyphs, no halo).
+    let dst_contrib = da * (255 - sa) / 255;
+    let out_a = sa + dst_contrib;
+    if out_a == 0 { return 0; }
 
     let dr = (dst >> 16) & 0xFF;
     let dg = (dst >> 8)  & 0xFF;
     let db =  dst        & 0xFF;
-
     let sr = (src >> 16) & 0xFF;
     let sg = (src >> 8)  & 0xFF;
     let sb =  src        & 0xFF;
 
-    let r = (sr * sa + dr * inv) / 255;
-    let g = (sg * sa + dg * inv) / 255;
-    let b = (sb * sa + db * inv) / 255;
+    let r = (sr * sa + dr * dst_contrib) / out_a;
+    let g = (sg * sa + dg * dst_contrib) / out_a;
+    let b = (sb * sa + db * dst_contrib) / out_a;
 
-    0xFF_00_00_00 | (r << 16) | (g << 8) | b
+    (out_a << 24) | (r << 16) | (g << 8) | b
 }
