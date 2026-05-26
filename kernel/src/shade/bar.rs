@@ -7,24 +7,18 @@
 //!   center = clock
 //!   right  = status widgets (placeholders for now) + power button
 //!
-//! Pill backgrounds are a fixed dark tone (theme-independent) so the
-//! light text on top stays readable regardless of wallpaper/palette.
+//! Pills + foregrounds follow the theme palette (same SurfaceElevated
+//! tray + translucency as the dock), so light/dark mode applies here too.
 
 use alloc::format;
 use alloc::string::String;
 use crate::framebuffer::FbInfo;
 use crate::gui::{background, font, render};
-use crate::shade::widgets::abi::IconId;
+use crate::shade::widgets::abi::{IconId, Token};
+use crate::shade::widgets::palette;
 
-// ── Fixed palette (contrast-guaranteed, theme-independent) ────────────
-const PILL_BG: u32 = 0x0014_141C;
-const WS_INACTIVE_BG: u32 = 0x002A_2A38;
-const WS_INACTIVE_FG: u32 = 0x00C2_C7D2;
-const WS_ACTIVE_FG: u32 = 0x00FF_FFFF;
-const TITLE_FG: u32 = 0x00DC_E0EA;
-const CLOCK_FG: u32 = 0x00FF_FFFF;
-const SEP_FG: u32 = 0x003C_3C4A;
-const WIDGET_FG: u32 = 0x008A_8F9C;
+// Power button stays a fixed red regardless of theme; band fallback only
+// shows when there's no wallpaper layer to restore from.
 const POWER_FG: u32 = 0x00E2_6A72;
 const BAND_FALLBACK: u32 = 0x000A_0A0E;
 
@@ -151,6 +145,17 @@ impl ShadeBar {
         let radius = 10 * self.scale;
         let hpad = 8 * self.scale;
         let accent = background::accent_color();
+
+        // Theme palette — same tokens + translucency as the dock tray.
+        // Mask to RGB (resolve returns opaque 0xFF.. ARGB; the bar's
+        // draw helpers use the convention of a 0 top byte).
+        let pill_bg  = palette::resolve(Token::SurfaceElevated) & 0x00FF_FFFF;
+        let pill_op  = palette::chrome_opacity();
+        let fg       = palette::resolve(Token::OnSurface)       & 0x00FF_FFFF;
+        let fg_muted = palette::resolve(Token::OnSurfaceMuted)  & 0x00FF_FFFF;
+        let ws_bg    = palette::resolve(Token::SurfaceMuted)    & 0x00FF_FFFF;
+        let on_accent = palette::resolve(Token::OnAccent)       & 0x00FF_FFFF;
+        let sep      = palette::resolve(Token::Border)          & 0x00FF_FFFF;
         let tf = self.text_scale();
         let (cw, ch) = font::char_size(tf);
         let text_y = pill_top + (self.pill_h.saturating_sub(ch)) / 2;
@@ -161,8 +166,8 @@ impl ShadeBar {
         let clock_w = font::measure_str(&time_str, tf);
         let center_w = clock_w + 2 * hpad;
         let center_x = (screen_w.saturating_sub(center_w)) / 2;
-        render::fill_rounded_rect_aa(shadow, info, center_x, pill_top, center_w, self.pill_h, PILL_BG, radius);
-        font::draw_str(shadow, info, &time_str, center_x + hpad, text_y, CLOCK_FG, None, tf);
+        render::fill_rounded_rect_alpha(shadow, info, center_x, pill_top, center_w, self.pill_h, pill_bg, radius, pill_op);
+        font::draw_str(shadow, info, &time_str, center_x + hpad, text_y, fg, None, tf);
 
         // ── Left pill: workspaces │ title ────────────────────────────
         let btn_h = self.pill_h.saturating_sub(8 * self.scale);
@@ -193,23 +198,23 @@ impl ShadeBar {
             left_fixed + title_w + hpad
         };
 
-        render::fill_rounded_rect_aa(shadow, info, left_x, pill_top, left_w, self.pill_h, PILL_BG, radius);
+        render::fill_rounded_rect_alpha(shadow, info, left_x, pill_top, left_w, self.pill_h, pill_bg, radius, pill_op);
 
         let btn_y = pill_top + (self.pill_h.saturating_sub(btn_h)) / 2;
         let mut x = left_x + hpad;
         for i in 0..self.workspace_count {
             let active = i == self.active_workspace;
-            let (bg, fg) = if active { (accent, WS_ACTIVE_FG) } else { (WS_INACTIVE_BG, WS_INACTIVE_FG) };
-            render::fill_rounded_rect_aa(shadow, info, x, btn_y, btn_w, btn_h, bg, 6 * self.scale);
+            let (btn_bg, btn_fg) = if active { (accent, on_accent) } else { (ws_bg, fg_muted) };
+            render::fill_rounded_rect_aa(shadow, info, x, btn_y, btn_w, btn_h, btn_bg, 6 * self.scale);
             let num = format!("{}", i + 1);
-            font::draw_str(shadow, info, &num, x + (btn_w.saturating_sub(cw)) / 2, text_y, fg, None, tf);
+            font::draw_str(shadow, info, &num, x + (btn_w.saturating_sub(cw)) / 2, text_y, btn_fg, None, tf);
             x += btn_w + ws_gap;
         }
         if !title.is_empty() {
             x = x - ws_gap + sep_pad;
-            render::fill_rect(shadow, info, x, btn_y, sep_w, btn_h, SEP_FG);
+            render::fill_rect(shadow, info, x, btn_y, sep_w, btn_h, sep);
             x += sep_w + sep_pad;
-            font::draw_str(shadow, info, &title, x, text_y, TITLE_FG, None, tf);
+            font::draw_str(shadow, info, &title, x, text_y, fg, None, tf);
         }
 
         // ── Right pill: status widgets (placeholder) + power ─────────
@@ -217,12 +222,12 @@ impl ShadeBar {
         let slots = WIDGETS.len() as u32 + 1; // + power
         let right_w = 2 * hpad + slots * icon_box + (slots - 1) * mod_gap;
         let right_x = screen_w.saturating_sub(self.margin + right_w);
-        render::fill_rounded_rect_aa(shadow, info, right_x, pill_top, right_w, self.pill_h, PILL_BG, radius);
+        render::fill_rounded_rect_alpha(shadow, info, right_x, pill_top, right_w, self.pill_h, pill_bg, radius, pill_op);
 
         let icon_y = pill_top + (self.pill_h.saturating_sub(icon_box)) / 2;
         let mut ix = right_x + hpad;
         for &id in WIDGETS {
-            self.draw_icon(shadow, info, id, ix, icon_y, icon_box, WIDGET_FG);
+            self.draw_icon(shadow, info, id, ix, icon_y, icon_box, fg_muted);
             ix += icon_box + mod_gap;
         }
         self.draw_icon(shadow, info, IconId::Power, ix, icon_y, icon_box, POWER_FG);
