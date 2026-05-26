@@ -1053,6 +1053,124 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_window_set_panel(edge, behavior, w, h) -> i32
+    // Generalised edge panel (see PANEL.md): edge 0=Bottom 1=Top,
+    // behavior 0=AutoHide overlay (dock) 1=Strut (bar). Creates/promotes
+    // the caller's widget window WITHOUT grabbing focus (like the dock),
+    // then hands it to the compositor's panel config. `set_dock` above is
+    // now the (Bottom, AutoHide) wrapper of this.
+    //
+    // Returns 0 on success, -1 on cap denied / bad args / no compositor.
+    linker.func_wrap("env", "npk_window_set_panel",
+        |mut caller: Caller<'_, HostState>, edge: i32, behavior: i32, w: i32, h: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if w <= 0 || h <= 0 || edge < 0 || behavior < 0 { return -1; }
+
+            let mut wid = caller.data().widget_window_id;
+            if wid == 0 {
+                let terminal_idx = caller.data().terminal_idx;
+                let promoted = if terminal_idx != 255 {
+                    crate::shade::with_compositor(|c|
+                        c.promote_terminal_to_widget(terminal_idx)
+                    ).flatten()
+                } else {
+                    None
+                };
+                let new_id = match promoted {
+                    Some(id) => { caller.data_mut().terminal_idx = 255; id.0 }
+                    None => {
+                        let title = caller.data().module_name.clone();
+                        match crate::shade::with_compositor(|comp| {
+                            comp.create_widget_window(
+                                if title.is_empty() { "panel" } else { title.as_str() }).0
+                        }) {
+                            Some(v) => v,
+                            None => return -1,
+                        }
+                    }
+                };
+                caller.data_mut().widget_window_id = new_id;
+                wid = new_id;
+            }
+
+            let ok = crate::shade::with_compositor(|comp|
+                comp.set_panel(crate::shade::WindowId(wid),
+                    edge as u8, behavior as u8, w as u32, h as u32)
+            ).unwrap_or(false);
+
+            if ok { crate::shade::request_render(); 0 } else { -1 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_bar_state(buf, max) -> i32
+    // Live state for the bar app: "HH:MM\n<ws_count>\n<ws_active>\n<title>"
+    // (clock already timezone-adjusted). Returns bytes written, -1 on
+    // cap / args / buffer too small.
+    linker.func_wrap("env", "npk_bar_state",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if max <= 0 { return -1; }
+
+            let unix = crate::rtc::read_unix_time().unwrap_or(0);
+            let tz = crate::config::timezone_offset_minutes();
+            let local = unix as i64 + tz as i64 * 60;
+            let secs = ((local % 86400) + 86400) % 86400;
+            let (ws_count, ws_active, title) =
+                crate::shade::with_compositor(|c| c.bar_info())
+                    .unwrap_or((0, 0, alloc::string::String::new()));
+            let s = alloc::format!("{:02}:{:02}\n{}\n{}\n{}",
+                secs / 3600, (secs % 3600) / 60, ws_count, ws_active, title);
+
+            let bytes = s.as_bytes();
+            let write_len = bytes.len().min(max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            if start + write_len <= data.len() {
+                data[start..start + write_len].copy_from_slice(&bytes[..write_len]);
+                write_len as i32
+            } else {
+                -1
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_workspace_switch(n) -> i32 — switch to workspace n (bar clicks).
+    linker.func_wrap("env", "npk_workspace_switch",
+        |caller: Caller<'_, HostState>, n: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if !(0..=255).contains(&n) { return -1; }
+            crate::shade::with_compositor(|c| c.switch_workspace(n as u8));
+            crate::shade::request_render();
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_power() -> i32 — ACPI S5 power-off (bar power button). Does not
+    // return on success.
+    linker.func_wrap("env", "npk_power",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            crate::acpi::power_off();
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_fs_list(prefix_ptr, prefix_len, out_ptr, out_cap, recursive) -> i32
     // Enumerate npkFS keys under `prefix`. If recursive=0, only direct
     // children are returned (keys that contain no '/' after the prefix,
