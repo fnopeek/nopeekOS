@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use nopeek_widgets::app_catalog::{self, AppEntry, EntryKind};
 use nopeek_widgets::prefab;
-use nopeek_widgets::style::{Padding, Spacing};
+use nopeek_widgets::style::Spacing;
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -139,7 +139,10 @@ impl Dock {
     }
 
     fn render(&self) -> Widget {
-        let mut cells: Vec<Widget> = Vec::with_capacity(self.entries.len() + 1);
+        let mut cells: Vec<Widget> = Vec::with_capacity(self.entries.len() + 3);
+        // Leading flex spacer centres the icon group on the main axis
+        // (the row fills the full tray width, icons don't left-pack).
+        cells.push(Widget::Spacer { flex: 1 });
         for (i, e) in self.entries.iter().enumerate() {
             cells.push(prefab::icon_button(
                 e.icon,
@@ -155,20 +158,20 @@ impl Dock {
             Some(ActionId(LAUNCHER)),
             None,
         ));
+        cells.push(Widget::Spacer { flex: 1 });
 
         // Flat look: the compositor renders the dock chrome-less, rounded
         // and translucent. Paint the tray SurfaceElevated (a touch lighter
         // than the Surface that normal windows use) so the dock reads as
-        // distinct chrome, not just another window. Background fills the
-        // whole container rect; Padding only insets the icons.
+        // distinct chrome, not just another window. No row Padding — the
+        // icons carry their own, and a padded root would be double-counted
+        // by the layout pass (see note below), collapsing the vertical
+        // centring on a short tray. The Spacers centre horizontally.
         Widget::Row {
             children:  cells,
             spacing:   Spacing::Sm.as_u16(),
             align:     Align::Center,
-            modifiers: alloc::vec![
-                Modifier::Padding(Padding::Xs.as_u16()),
-                Modifier::Background(Token::SurfaceElevated),
-            ],
+            modifiers: alloc::vec![Modifier::Background(Token::SurfaceElevated)],
         }
     }
 
