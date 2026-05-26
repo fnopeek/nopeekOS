@@ -45,10 +45,45 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.6 + polish ✅ — Browser daily-driver auf QEMU/AMD
-  UND bare-metal Intel-NUC (2026-05-22, kernel v0.172.83, microvm-init
-  0.4.21, drun v0.6.1). Profil-Persistenz + 9p-npkFS-Brücke (Downloads
-  → npkFS → loft) live.** (Details im 2026-05-22-Eintrag unten.)
+- **Phase:** **12.6 + Shell-Polish ✅ — Panel-System (Bar + Dock als
+  WASM) + Browser daily-driver (2026-05-26, kernel v0.173.37, bar
+  0.1.10, dock 0.2.5).** Top-Bar lebt jetzt als `bar.wasm` (Workspaces-
+  Pills + Titel + zentrierte Uhr + Tray/Power), das Dock als `dock.wasm`
+  — beide über die Widget-ABI mit **echtem Alpha-Compositing**
+  (transluzente Panels, scharfe Glyphen, kein Halo; Stack-Root =
+  Panel-Szene). Theme `auto` (folgt Wallpaper-Luminanz), Eklogit-
+  Wallpapers (npk01 hell / npk02 dunkel). Details im 2026-05-26-Eintrag.
+- **2026-05-26 (lange Session, kernel v0.172.x → v0.173.37): Shell-
+  Polish — Panel-System, Theme, OTA/Installer-Fixes.**
+  - **Dock-Optik** (v0.173.6 → .17): chromeless flacher transluzenter
+    Tray, schwebend (Bottom-Gap), zentrierte Icons (Root-Padding-
+    Doppel-Bug umgangen — `[[project-widget-root-padding-bug]]`),
+    grauer Collapsed-Balken statt Pille, **Desktop-leer-Reveal**
+    (kein Fenster → Dock sticky sichtbar).
+  - **Bar → WASM** (Panel-System P1, PANEL.md): `npk_window_set_panel
+    (edge, behavior)` (Dock = Bottom/AutoHide-Wrapper, Bar =
+    Top/Strut), Host-Fns `npk_bar_state`/`npk_workspace_switch`/
+    `npk_power`, `bar.wasm` mit config-Segmenten (`sys/config/bar`).
+    Native ShadeBar nur noch Strut-Geometrie + Fallback. Uhr
+    bildschirm-zentriert via Stack-Layer. Workspace-Pills (Kapsel,
+    aktiv = Accent + OnAccent-Text).
+  - **Alpha-Compositing** (v0.173.36/.37, `[[project-widget-alpha-
+    panels]]`): `blend_over` alpha-erhaltend (opake Szenen identisch),
+    Stack-Root → transparenter Clear + `bg_alpha` → transluzente
+    Panels + scharfe Glyphen, **kein weißes Halo**. Setzbare Textfarbe
+    (`Modifier::Tint` auf Text). Bar UND Dock auf einem Pfad.
+  - **Resident-App-Core-Pinning gefixt** (v0.173.24, `[[project-
+    resident-app-core-pinning]]`): `npk_sleep` führt während der
+    Wartezeit Scheduler-Arbeit aus (statt Busy-Spin) → 2 residente
+    Panels (Dock+Bar) verhungern Intents nicht mehr.
+  - **OTA + Installer**: DiskFull-Fix (gc + altes Asset vor Stream
+    freigeben, `[[project-ota-asset-diskfull]]`), Installer-ESP-Image
+    skaliert mit kernel.efi (272 MB Bundle-Build), Fresh-Install
+    seedet `autostart=dock bar` + `theme=auto`.
+  - **Eklogit-Wallpapers** (`[[project-codename-eklogit]]`): npk01
+    (hell) + npk02 (dunkel) gebündelt, `theme=auto` folgt der
+    Luminanz.
+- **2026-05-22 (Monster-Session, kernel v0.172.63 → v0.172.83,
   Standard LibreWolf-Config (e10s + fission +
   Sandboxes alle wieder default), 2 GiB Guest-RAM (B3 demand-paging
   + B4 multi-PD in main), `browser` Top-Level-Intent + Drun-Eintrag
