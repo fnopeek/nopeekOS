@@ -55,15 +55,9 @@ impl Rasterizer for CpuRasterizer {
         stroke_rounded_rect_target(t, x, y, r.w as i32, r.h as i32, radius as i32, width as i32, color);
     }
 
-    fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, p: Point) {
-        // Resolve text color: Muted style uses OnSurfaceMuted,
-        // everything else OnSurface. (Theme color is not yet exposed
-        // through RasterTarget — palette lookup via Token enum.)
-        let color_tok = match style {
-            TextStyle::Muted => Token::OnSurfaceMuted,
-            _                => Token::OnSurface,
-        };
-        let text_color = t.palette.colors[color_tok as usize];
+    fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, color: Token, p: Point) {
+        // Caller-resolved glyph colour (style-default or a Tint override).
+        let text_color = t.palette.colors[color as usize];
 
         // Baseline start point in window coords → target-local.
         // `f32::ceil` isn't in core; inline the positive-only version.

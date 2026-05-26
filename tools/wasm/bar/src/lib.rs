@@ -180,9 +180,10 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     Modifier::OnClick(ActionId(WS_BASE + i as u32)),
                 ];
                 if active {
-                    // Active = filled Accent pill; inactive stays a plain
-                    // (readable) number that pills on hover — Waybar style.
+                    // Active = filled Accent pill; OnAccent text so the
+                    // number reads on the accent fill (both themes).
                     mods.push(Modifier::Background(Token::Accent));
+                    mods.push(Modifier::Tint(Token::OnAccent));
                 } else {
                     mods.push(Modifier::Hover(alloc::vec![
                         Modifier::Background(Token::SurfaceMuted),

@@ -339,7 +339,17 @@ fn paint_node_eff(
 
     match widget {
         Widget::Text { content, style, .. } => {
-            rast.text(target, content, *style, Point { x: inner_x, y: inner_y });
+            // Style default, overridable by Modifier::Tint (e.g. an active
+            // workspace pill tinted OnAccent so it reads on the Accent fill).
+            let mut color = if matches!(style, super::abi::TextStyle::Muted) {
+                Token::OnSurfaceMuted
+            } else {
+                Token::OnSurface
+            };
+            for m in eff {
+                if let Modifier::Tint(tok) = m { color = *tok; }
+            }
+            rast.text(target, content, *style, color, Point { x: inner_x, y: inner_y });
         }
 
         Widget::Icon { id, size, .. } => {
@@ -370,7 +380,7 @@ fn paint_node_eff(
                 x += 20;
             }
             if !label.is_empty() {
-                rast.text(target, label, super::abi::TextStyle::Body,
+                rast.text(target, label, super::abi::TextStyle::Body, Token::OnSurface,
                           Point { x, y: rect.y + pad_y });
             }
         }
@@ -398,7 +408,7 @@ fn paint_node_eff(
             // Built-in 4 px chrome + the modifier's own padding.
             let text_x = inner_x + 4;
             let text_y = inner_y + 4;
-            rast.text(target, shown, super::abi::TextStyle::Heading,
+            rast.text(target, shown, super::abi::TextStyle::Heading, Token::OnSurface,
                       Point { x: text_x, y: text_y });
 
             // Paint the caret. Only when an editor exists (focused) —
