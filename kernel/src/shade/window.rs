@@ -83,6 +83,11 @@ pub struct Window {
     /// focus cycle; the compositor owns its reveal/hide slide and keeps
     /// its `workspace` synced to the active one (global across spaces).
     pub is_dock: bool,
+    /// Bar window: a top-edge strut panel (`npk_window_set_panel(Top,
+    /// Strut)`). Implies `is_overlay`. Positioned by the compositor into
+    /// the bar band, always visible, global across workspaces, never
+    /// focused. Rendered with the translucent-tray blit like the dock.
+    pub is_bar: bool,
 }
 
 #[allow(dead_code)]
@@ -110,6 +115,7 @@ impl Window {
             is_overlay: false,
             modal: false,
             is_dock: false,
+            is_bar: false,
         }
     }
 
