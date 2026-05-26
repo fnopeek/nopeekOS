@@ -22,12 +22,12 @@ const DOCK_HIDE_DEBOUNCE_TICKS: u32 = 25;
 /// Slack above the dock's top counted as "still over the dock".
 const DOCK_HIDE_MARGIN_PX: i32 = 6;
 /// Height (1× px, scaled at draw time) of the collapsed-dock presence
-/// bar — a thin, dock-width strip with a fine white stripe that hints
-/// "a dock lives here" without reserving space or showing the icons.
-const DOCK_HANDLE_H: u32 = 4;
+/// bar — a thin, dock-width tray-coloured strip that hints "a dock lives
+/// here" without reserving space or showing the icons.
+const DOCK_HANDLE_H: u32 = 5;
 /// Floating gap below the revealed dock (1× px, scaled), so it hovers
 /// detached from the bottom edge the way the bar's pills do.
-const DOCK_BOTTOM_GAP: u32 = 8;
+const DOCK_BOTTOM_GAP: u32 = 10;
 /// Dock translucency (0..255). A frosted, slightly see-through tray.
 const DOCK_OPACITY: u32 = 210;
 
@@ -782,9 +782,9 @@ impl Compositor {
     /// Draw the collapsed-dock presence bar at the resting edge while the
     /// dock is fully hidden, so the user knows a dock lives there. It
     /// mirrors the open dock — same width + same translucent SurfaceElevated
-    /// tray colour — but only ~4 px tall, with a fine white stripe centred
-    /// inside as the pull-up affordance. Drawn over the wallpaper; cleared
-    /// by the full redraw `dock_tick` forces the moment it slides into view.
+    /// tray colour — but only ~5 px tall: just the grey strip is enough to
+    /// signal "a dock lives here". Drawn over the wallpaper; cleared by the
+    /// full redraw `dock_tick` forces the moment it slides into view.
     fn render_dock_handle(&self, shadow: *mut u8, info: &FbInfo) {
         let Some(dock) = self.dock.as_ref() else { return };
         // Only while fully hidden — once it slides up the window itself
@@ -794,7 +794,7 @@ impl Compositor {
         let Some(win) = self.windows.iter().find(|w| w.id == dock.id) else { return };
 
         let scale = self.scale.max(1);
-        let hh = DOCK_HANDLE_H * scale;          // ~4 px tall
+        let hh = DOCK_HANDLE_H * scale;
         let w = win.width;
         let x = win.x;
         let baseline = self.dock_baseline();
@@ -805,16 +805,6 @@ impl Compositor {
             crate::shade::widgets::abi::Token::SurfaceElevated);
         render::fill_rounded_rect_alpha(shadow, info, x, y, w, hh,
             tray & 0x00FF_FFFF, hh / 2, DOCK_OPACITY);
-
-        // Fine white stripe centred inside, inset clear of the rounded ends.
-        let stripe_h = scale;                    // 1 px (scaled)
-        let inset = hh;
-        let sx = x + inset;
-        let sw = w.saturating_sub(inset * 2);
-        let sy = y + hh.saturating_sub(stripe_h) / 2;
-        if sw >= 2 {
-            render::fill_rect(shadow, info, sx, sy, sw, stripe_h, 0x00FF_FFFF);
-        }
     }
 
     /// Fast render: only the current input line of the focused window.
