@@ -314,6 +314,44 @@ pub fn update_all_assets() -> usize {
             kprintln!("[npk]   {} (out of date — refreshing)", spec.npkfs_path);
         }
 
+        // ── Make room before a streaming write ──────────────────────
+        // The streaming writer keeps the OLD copy live until finish(),
+        // so a refresh transiently needs the new asset's size ON TOP of
+        // everything already stored — 2× for a same-path replace. A
+        // previously-aborted download also leaks orphaned chunks that
+        // only gc reclaims. On a tight partition a 261 MB bundle can't
+        // afford either, which is why a fresh fetch failed ~40 MB in
+        // with a bare "npkfs write failed" (= DiskFull). Reclaim and
+        // free up front; bail with a clear message if it still won't fit.
+        const BLOCK: u64 = 4096;
+        let free_bytes = || crate::npkfs::stats().map(|(_, f, _, _)| f * BLOCK).unwrap_or(0);
+        let need = entry.size as u64;
+
+        // 1. Reclaim orphans from any earlier aborted streaming download.
+        if free_bytes() < need {
+            if let Ok(g) = crate::storage::npkfs::fs::gc() {
+                if g.removed > 0 {
+                    kprintln!("[npk]   gc reclaimed {} orphaned object(s)", g.removed);
+                }
+            }
+        }
+        // 2. Still short and an old copy exists → drop it first so we
+        //    don't need 2× the asset size. We're replacing it anyway;
+        //    on a disk this tight, keeping both isn't an option. The
+        //    path unlink orphans the chunk blobs; gc reclaims them.
+        if free_bytes() < need && local_hash.is_some() {
+            if crate::npkfs::delete(spec.npkfs_path).is_ok() {
+                let _ = crate::storage::npkfs::fs::gc();
+                kprintln!("[npk]   freed old {} to make room", spec.npkfs_path);
+            }
+        }
+        // 3. Truly out of space — fail clearly instead of 40 MB in.
+        if free_bytes() < need {
+            kprintln!("[npk]   skipping {}: disk full (need {} MB, {} MB free)",
+                spec.npkfs_path, need / (1024 * 1024), free_bytes() / (1024 * 1024));
+            continue;
+        }
+
         kprint!("[npk]   downloading {} ({} KB)... ", spec.remote_filename, entry.size / 1024);
 
         // Two URL paths:
@@ -382,6 +420,12 @@ pub fn update_all_assets() -> usize {
                 kprintln!("failed: {}{}",
                     e,
                     write_err.map(|w| alloc::format!(" ({})", w)).unwrap_or_default());
+                // Drop the partial writer and sweep the chunks it already
+                // flushed — they're unreachable (finish() never ran), so a
+                // retry starts from a clean slate instead of accumulating
+                // orphaned space across attempts.
+                drop(writer);
+                let _ = crate::storage::npkfs::fs::gc();
                 continue;
             }
         }
