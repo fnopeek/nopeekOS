@@ -396,6 +396,8 @@ impl Compositor {
 
         if found {
             self.bar_window = Some(id);
+            // If the spawn path focused it, drop focus — panels never hold it.
+            if self.focused == Some(id) { self.focused = None; }
             self.retile();
             // Pin the bar to the front of the z-order; keep the dock pinned too.
             self.z_order.retain(|&wid| wid != id);
@@ -451,6 +453,8 @@ impl Compositor {
                 dwell: 0,
                 debounce: 0,
             });
+            // If the spawn path focused it, drop focus — panels never hold it.
+            if self.focused == Some(id) { self.focused = None; }
             // Overlay → tiling grid is untouched, but retile reclaims any
             // slot this window held if it was previously tiled.
             self.retile();
@@ -463,8 +467,11 @@ impl Compositor {
     /// Live state the bar app renders: (workspace_count, active_workspace,
     /// focused window title). Fed to WASM via `npk_bar_state`.
     pub fn bar_info(&self) -> (u8, u8, alloc::string::String) {
+        // Only a real app window's title — never a panel/overlay (the dock
+        // window is titled "dock"; it must not show up as the focused title).
         let title = self.focused
             .and_then(|fid| self.windows.iter().find(|w| w.id == fid))
+            .filter(|w| !w.is_overlay && !w.is_dock && !w.is_bar)
             .map(|w| w.title.clone())
             .unwrap_or_default();
         (self.bar.workspace_count, self.active_workspace, title)

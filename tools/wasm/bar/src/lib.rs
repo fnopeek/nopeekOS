@@ -47,7 +47,7 @@ const BEHAVIOR_STRUT: i32 = 1;
 const WS_BASE: u32 = 1;        // workspace i → WS_BASE + i
 const POWER: u32 = 90_000;
 
-const ICON_SIZE: u16 = 18;
+const ICON_SIZE: u16 = 24;
 
 // ── Bump allocator with a reset mark ─────────────────────────────────
 // Config is parsed once (below MARK and kept); the per-frame widget tree
@@ -167,17 +167,28 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
         "workspaces" => {
             let mut row = Vec::new();
             for i in 0..st.ws_count {
+                if i > 0 {
+                    // Thin separator between workspace numbers.
+                    row.push(Widget::Text {
+                        content: "|".to_string(),
+                        style: TextStyle::Body,
+                        modifiers: Vec::new(),
+                    });
+                }
                 let active = i == st.ws_active;
                 let mut mods: Vec<Modifier> = Vec::new();
+                mods.push(Modifier::Padding(Padding::Xs.as_u16()));
                 mods.push(Modifier::OnClick(ActionId(WS_BASE + i as u32)));
                 if active {
-                    mods.push(Modifier::Background(Token::AccentMuted));
+                    // Clear filled chip for the active workspace.
+                    mods.push(Modifier::Background(Token::Accent));
                     mods.push(Modifier::Rounded(Radius::Sm.as_u8()));
+                } else {
+                    mods.push(Modifier::Hover(alloc::vec![
+                        Modifier::Background(Token::SurfaceMuted),
+                        Modifier::Rounded(Radius::Sm.as_u8()),
+                    ]));
                 }
-                mods.push(Modifier::Hover(alloc::vec![
-                    Modifier::Background(Token::SurfaceMuted),
-                    Modifier::Rounded(Radius::Sm.as_u8()),
-                ]));
                 row.push(Widget::Text {
                     content: alloc::format!("{}", i + 1),
                     style: TextStyle::Body,
@@ -186,7 +197,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             }
             alloc::vec![Widget::Row {
                 children: row,
-                spacing: Spacing::Sm.as_u16(),
+                spacing: Spacing::Xs.as_u16(),
                 align: Align::Center,
                 modifiers: Vec::new(),
             }]
@@ -201,8 +212,11 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 }]
             }
         }
+        // Padded with spaces for horizontal breathing room inside the pill
+        // (uniform Modifier::Padding would also grow it vertically past the
+        // band, so the spaces give left/right air without that).
         "clock" => alloc::vec![Widget::Text {
-            content: st.clock.to_string(),
+            content: alloc::format!("    {}    ", st.clock),
             style: TextStyle::Body,
             modifiers: Vec::new(),
         }],
