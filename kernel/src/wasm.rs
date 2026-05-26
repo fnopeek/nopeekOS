@@ -1507,8 +1507,20 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let freq = crate::interrupts::tsc_freq();
             let ticks_per_ms = freq / 1000;
             let target = crate::interrupts::rdtsc() + (ms as u64) * ticks_per_ms;
+            // Don't busy-pin the core. A resident app (dock / bar) loops on
+            // npk_sleep forever; plain spinning would hog its worker core
+            // and starve intents — which run as worker tasks (see
+            // intent::spawn) — so a second resident app froze the loop.
+            // Instead, run pending scheduler work here while we wait: the
+            // sleeping app's core becomes a helper. Intents are native and
+            // run to completion, which is exactly what unblocks them.
+            let cid = crate::smp::per_core::current_core_id();
             while crate::interrupts::rdtsc() < target {
-                core::hint::spin_loop();
+                if let Some(task) = crate::smp::scheduler::next_task(cid) {
+                    (task.func)(task.arg);
+                } else {
+                    core::hint::spin_loop();
+                }
             }
 
             0

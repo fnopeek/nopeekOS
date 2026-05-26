@@ -219,12 +219,12 @@ fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
     let lang = read_line_default("de");
     config::set("lang", &lang);
 
-    // Default autostart: the app dock. (The top bar is intentionally NOT
-    // default yet: resident WASM apps pin a worker core via busy-wait
-    // npk_sleep, and a second always-active looping app starves intents /
-    // hangs the loop. Re-enable "dock bar" once npk_sleep yields / panels
-    // are event-driven. `set autostart dock bar` opts in meanwhile.)
-    config::set("autostart", "dock");
+    // Default autostart: the app dock + the top bar. Resident apps no
+    // longer pin their worker core — npk_sleep now runs pending scheduler
+    // work while it waits, so multiple looping panels coexist without
+    // starving intents. A config seed, not a kernel hardcode; `set
+    // autostart ...` overrides it.
+    config::set("autostart", "dock bar");
 
     kprintln!();
     if !name.is_empty() {
