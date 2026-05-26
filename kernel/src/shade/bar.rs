@@ -62,7 +62,7 @@ impl ShadeBar {
         let scale = scale.max(1);
         let base = crate::config::get("shade.bar_height")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(26)
+            .unwrap_or(34)  // room for 24px tray icons + pill padding (bar.wasm)
             .max(22); // floor so the 8x16 bar font fits with padding
         let margin = crate::config::get("shade.bar_margin")
             .and_then(|s| s.parse::<u32>().ok())
