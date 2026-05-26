@@ -593,8 +593,8 @@ pub trait Rasterizer: Send + Sync {
         self.rect(t, Rect { x: r.x + r.w as i32 - wi, y: r.y, w: w, h: r.h }, fill);
     }
 
-    /// Draw text at baseline point `p` (window coordinates).
-    fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, p: Point);
+    /// Draw text at baseline point `p` (window coordinates) in `color`.
+    fn text(&mut self, t: &mut RasterTarget, s: &str, style: TextStyle, color: Token, p: Point);
 
     /// Draw an icon from the built-in atlas.
     fn icon(&mut self, t: &mut RasterTarget, id: IconId, size: u16, color: Token, p: Point);
