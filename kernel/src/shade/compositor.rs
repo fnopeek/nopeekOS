@@ -911,13 +911,17 @@ impl Compositor {
                     let ch_local = y1.saturating_sub(cy);
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);
 
-                    // The dock is a frosted, floating tray: blend every
-                    // scene pixel over whatever is behind it at the theme's
-                    // chrome opacity, fading along the rounded corners via
-                    // the SDF coverage. (Opaque memcpy can't be translucent.)
-                    // Small surface → a full per-pixel blend is cheap.
+                    // The dock is a frosted, floating tray: the TRAY blends
+                    // over whatever's behind it at the theme's chrome opacity,
+                    // but the ICONS stay fully opaque so they read crisp (not
+                    // washed out by the translucency). We tell them apart by
+                    // colour — tray pixels equal the SurfaceElevated fill;
+                    // anything else is icon ink (incl. its AA edges). Corners
+                    // fade via the SDF coverage. Small surface → cheap.
                     if win.is_dock {
                         let dock_op = crate::shade::widgets::palette::chrome_opacity();
+                        let tray = crate::shade::widgets::palette::resolve(
+                            crate::shade::widgets::abi::Token::SurfaceElevated);
                         for dy in cy..y1 {
                             let local_y = dy - cy;
                             for dx in cx..x1 {
@@ -927,7 +931,8 @@ impl Compositor {
                                 let src_idx = (local_y as usize) * (scene.width as usize)
                                     + (dx - cx) as usize;
                                 let px = scene.pixels[src_idx];
-                                let a = (dock_op * cov / 255).min(255);
+                                let base = if px == tray { dock_op } else { 255 };
+                                let a = (base * cov / 255).min(255);
                                 render::blend_pixel(shadow, info, dx, dy, px, a);
                             }
                         }

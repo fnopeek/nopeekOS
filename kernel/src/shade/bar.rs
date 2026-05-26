@@ -227,7 +227,7 @@ impl ShadeBar {
         let icon_y = pill_top + (self.pill_h.saturating_sub(icon_box)) / 2;
         let mut ix = right_x + hpad;
         for &id in WIDGETS {
-            self.draw_icon(shadow, info, id, ix, icon_y, icon_box, fg_muted);
+            self.draw_icon(shadow, info, id, ix, icon_y, icon_box, fg);
             ix += icon_box + mod_gap;
         }
         self.draw_icon(shadow, info, IconId::Power, ix, icon_y, icon_box, POWER_FG);
