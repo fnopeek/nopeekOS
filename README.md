@@ -89,7 +89,9 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  loop.wasm  — Intent Loop (command dispatch, terminal)   │
  │  wallpaper.wasm — PNG decoder + color extraction         │
  │  wifi.wasm  — RTL8852BE WiFi driver (PCIe, DMA, FW)     │
- │  Future: file manager, browser, user apps                │
+ │  bar/dock.wasm — top + bottom panels (npk_window_set_panel)│
+ │  drun/loft.wasm — launcher + file browser                │
+ │  Future: more user apps                                  │
  ├──────────────────────────────────────────────────────────┤
  │  WASM Runtime                                            │
  │  wasmi v1.0 (interpreter, fuel-metered)                  │
@@ -288,7 +290,7 @@ Every execution is a sandboxed WASM module:
 - [x] Purple `[npk]` accent color in boot output
 - [x] Shade compositor (Hyprland-inspired tiling WM, dwindle layout)
 - [x] Per-window terminal sessions (heap-allocated, no limit, independent input/output)
-- [x] Shadebar (Waybar-inspired: workspace indicators, clock, window title)
+- [x] Shadebar (Waybar-inspired: workspace indicators, clock, window title) — now a WASM panel (`bar.wasm`); the kernel keeps only the strut geometry + a native fallback
 - [x] Window keybindings: Mod+Enter/Q/1-4/Arrows/Shift+Arrows/Ctrl+Arrows/F/V/PgUp/PgDn
 - [x] Smooth window swap animation (ease-out cubic, 250ms)
 - [x] Aurora background cache (render once, memcpy per region, ~100x faster)
@@ -591,7 +593,13 @@ See `PHASE10_WIDGETS.md` for full architecture + ABI rules.
 **First-party apps**
 - [x] `files-stub` — P10.2 dummy commit app, bundled + OTA (`install files-stub`)
 - [x] `drun` — Mod+D app launcher (centred overlay, modal, keyboard nav, Enter launches)
-- [ ] `files` — real file browser (walks npkFS, opens via intent)
+- [x] `loft` — file browser (sidebar, toolbar, breadcrumb, grid/list view)
+- [x] `dock` — bottom auto-hide app dock (overlay launcher; reveals on a
+      free desktop / bottom hot-edge), `bar` — top status bar (workspace
+      pills, focused-window title, screen-centred clock, tray + power).
+      Both are WASM **panels** via `npk_window_set_panel(edge, behavior)`,
+      rendered with translucent alpha-composited pills (no halo) and
+      config-driven (`sys/config/dock`, `sys/config/bar`). See `PANEL.md`.
 
 **Window-manager integration**
 - [x] Widget-kind windows first-class in shade (own grid slot, rounded corners, separate from terminal windows)
