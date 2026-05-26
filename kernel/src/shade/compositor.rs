@@ -21,6 +21,11 @@ const DOCK_REVEAL_DWELL_TICKS: u32 = 8;
 const DOCK_HIDE_DEBOUNCE_TICKS: u32 = 25;
 /// Slack above the dock's top counted as "still over the dock".
 const DOCK_HIDE_MARGIN_PX: i32 = 6;
+/// Presence handle drawn at the resting edge while the dock is fully
+/// hidden (1× px; scaled at draw time). A small pill that hints "a dock
+/// lives here" without reserving space or showing the icons.
+const DOCK_HANDLE_W: u32 = 64;
+const DOCK_HANDLE_H: u32 = 4;
 
 /// Swap animation state — windows glide from old to new position.
 #[derive(Clone, Copy)]
@@ -736,10 +741,38 @@ impl Compositor {
         // Shadebar
         self.bar.render(shadow, info, self.screen_w, self.screen_h);
 
+        // Presence handle for a fully-hidden dock.
+        self.render_dock_handle(shadow, info);
+
         for win in &mut self.windows {
             win.dirty = false;
         }
         self.needs_full_redraw = false;
+    }
+
+    /// Draw the small presence pill at the dock's resting edge while it
+    /// is fully hidden, so the user knows a dock lives there. Drawn over
+    /// the wallpaper; cleared by the full redraw that `dock_tick` forces
+    /// the moment the dock starts sliding into view.
+    fn render_dock_handle(&self, shadow: *mut u8, info: &FbInfo) {
+        let Some(dock) = self.dock.as_ref() else { return };
+        // Only while fully hidden — once it slides up the window itself
+        // is the affordance.
+        if dock.offset < dock.thickness { return; }
+
+        let scale = self.scale.max(1);
+        let hw = DOCK_HANDLE_W * scale;
+        let hh = DOCK_HANDLE_H * scale;
+        let baseline = self.dock_baseline();
+        let x = self.screen_w.saturating_sub(hw) / 2;
+        let y = baseline.saturating_sub(hh);
+        let color = if crate::theme::is_active() {
+            crate::theme::accent()
+        } else {
+            crate::theme::inactive_border()
+        };
+        render::fill_rounded_rect_alpha(shadow, info, x, y, hw, hh,
+            color & 0x00FF_FFFF, hh / 2, 150);
     }
 
     /// Fast render: only the current input line of the focused window.
@@ -777,28 +810,41 @@ impl Compositor {
         // get border-only — the widget supplies its own content + AA
         // at the inner edge, so the chrome must not bleed `bg_color`
         // into the inner-fringe band.
-        let (ba, bb, b_op) = if crate::theme::is_active() && win.focused {
-            let (ga, gb) = crate::theme::border_gradient();
-            (ga, gb, 200u32)
+        // The dock is chrome-less: no hard bordered box around it. It
+        // supplies its own soft tray background in the widget tree, so
+        // we skip the chrome pass entirely and blit the widget content
+        // edge-to-edge with the full rounding. Everything else gets the
+        // normal border + bg chrome.
+        let (chrome_border, chrome_round) = if win.is_dock {
+            (0u32, rounding)
         } else {
-            (border_color, border_color, 180u32)
+            (border, rounding.saturating_sub(border))
         };
-        let paint_content = matches!(win.kind, crate::shade::window::WindowKind::Terminal);
-        render::fill_rounded_chrome_aa(shadow, info,
-            win.x, win.y, win.width, win.height,
-            ba, bb, win.bg_color,
-            rounding, border, b_op, opacity, paint_content);
 
-        let cx = win.content_x(border);
-        let cy = win.content_y(border);
-        let cw = win.content_w(border);
-        let ch = win.content_h(border);
+        if !win.is_dock {
+            let (ba, bb, b_op) = if crate::theme::is_active() && win.focused {
+                let (ga, gb) = crate::theme::border_gradient();
+                (ga, gb, 200u32)
+            } else {
+                (border_color, border_color, 180u32)
+            };
+            let paint_content = matches!(win.kind, crate::shade::window::WindowKind::Terminal);
+            render::fill_rounded_chrome_aa(shadow, info,
+                win.x, win.y, win.width, win.height,
+                ba, bb, win.bg_color,
+                rounding, border, b_op, opacity, paint_content);
+        }
+
+        let cx = win.content_x(chrome_border);
+        let cy = win.content_y(chrome_border);
+        let cw = win.content_w(chrome_border);
+        let ch = win.content_h(chrome_border);
         // Inner shape is concentric with the outer at radius
         // `rounding - border` — see `fill_rounded_chrome_aa`. The
         // widget-blit AA at the inner edge is computed against this
         // same inner curve so widget pixels and chrome border meet
         // pixel-perfectly along the rounded inner curve.
-        let inner_r = rounding.saturating_sub(border);
+        let inner_r = chrome_round;
 
         // 4. Content-kind specific draw.
         match win.kind {
