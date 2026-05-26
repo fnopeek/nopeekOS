@@ -404,9 +404,22 @@ impl Compositor {
     pub fn dock_update_reveal(&mut self, cursor_y: i32) {
         let dragging = self.drag.is_some();
         let baseline = self.dock_baseline() as i32;
+        // "Desktop free" = no real (non-overlay) window on this workspace.
+        // The dock then stays revealed as a launcher home surface; launching
+        // anything (terminal, widget, browser) hides it again — the bottom
+        // hot-edge still peeks it back on demand.
+        let desktop_empty = !self.windows.iter().any(|w|
+            !w.is_overlay && w.workspace == self.active_workspace);
         let Some(dock) = self.dock.as_mut() else { return };
 
         if dragging {
+            dock.dwell = 0;
+            return;
+        }
+
+        if desktop_empty {
+            dock.target_shown = true;
+            dock.debounce = 0;
             dock.dwell = 0;
             return;
         }
