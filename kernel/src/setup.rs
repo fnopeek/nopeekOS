@@ -219,6 +219,11 @@ fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
     let lang = read_line_default("de");
     config::set("lang", &lang);
 
+    // Default autostart: the app dock. A config seed (comma/space-
+    // separated app names read by shade::start_autostart), not a kernel
+    // hardcode — `set autostart ...` overrides it.
+    config::set("autostart", "dock");
+
     kprintln!();
     if !name.is_empty() {
         kprintln!("[npk] ══════════════════════════════════");
