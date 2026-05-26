@@ -172,19 +172,25 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             for i in 0..st.ws_count {
                 let active = i == st.ws_active;
                 let mut mods: Vec<Modifier> = alloc::vec![
+                    // Spaces give the pill horizontal width (capsule); uniform
+                    // Padding can only add vertical room too, which would
+                    // overflow the band. Small Padding for a thin inset.
                     Modifier::Padding(Padding::Xs.as_u16()),
-                    Modifier::Rounded(Radius::Sm.as_u8()),
+                    Modifier::Rounded(Radius::Lg.as_u8()),  // capsule ends
                     Modifier::OnClick(ActionId(WS_BASE + i as u32)),
-                    Modifier::Background(if active { Token::Accent } else { Token::SurfaceMuted }),
                 ];
-                if !active {
+                if active {
+                    // Active = filled Accent pill; inactive stays a plain
+                    // (readable) number that pills on hover — Waybar style.
+                    mods.push(Modifier::Background(Token::Accent));
+                } else {
                     mods.push(Modifier::Hover(alloc::vec![
-                        Modifier::Background(Token::AccentMuted),
-                        Modifier::Rounded(Radius::Sm.as_u8()),
+                        Modifier::Background(Token::SurfaceMuted),
+                        Modifier::Rounded(Radius::Lg.as_u8()),
                     ]));
                 }
                 row.push(Widget::Text {
-                    content: alloc::format!("{}", i + 1),
+                    content: alloc::format!("  {}  ", i + 1),
                     style: TextStyle::Body,
                     modifiers: mods,
                 });
