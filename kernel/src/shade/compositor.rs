@@ -27,7 +27,7 @@ const DOCK_HIDE_MARGIN_PX: i32 = 6;
 const DOCK_HANDLE_H: u32 = 5;
 /// Floating gap below the revealed dock (1× px, scaled), so it hovers
 /// detached from the bottom edge the way the bar's pills do.
-const DOCK_BOTTOM_GAP: u32 = 10;
+const DOCK_BOTTOM_GAP: u32 = 12;
 /// Dock translucency (0..255). A frosted, slightly see-through tray.
 const DOCK_OPACITY: u32 = 210;
 
