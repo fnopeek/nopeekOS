@@ -21,10 +21,9 @@ const DOCK_REVEAL_DWELL_TICKS: u32 = 8;
 const DOCK_HIDE_DEBOUNCE_TICKS: u32 = 25;
 /// Slack above the dock's top counted as "still over the dock".
 const DOCK_HIDE_MARGIN_PX: i32 = 6;
-/// Presence handle drawn at the resting edge while the dock is fully
-/// hidden (1× px; scaled at draw time). A small pill that hints "a dock
-/// lives here" without reserving space or showing the icons.
-const DOCK_HANDLE_W: u32 = 64;
+/// Height (1× px, scaled at draw time) of the collapsed-dock presence
+/// bar — a thin, dock-width strip with a fine white stripe that hints
+/// "a dock lives here" without reserving space or showing the icons.
 const DOCK_HANDLE_H: u32 = 4;
 /// Floating gap below the revealed dock (1× px, scaled), so it hovers
 /// detached from the bottom edge the way the bar's pills do.
@@ -780,29 +779,42 @@ impl Compositor {
         self.needs_full_redraw = false;
     }
 
-    /// Draw the small presence pill at the dock's resting edge while it
-    /// is fully hidden, so the user knows a dock lives there. Drawn over
-    /// the wallpaper; cleared by the full redraw that `dock_tick` forces
-    /// the moment the dock starts sliding into view.
+    /// Draw the collapsed-dock presence bar at the resting edge while the
+    /// dock is fully hidden, so the user knows a dock lives there. It
+    /// mirrors the open dock — same width + same translucent SurfaceElevated
+    /// tray colour — but only ~4 px tall, with a fine white stripe centred
+    /// inside as the pull-up affordance. Drawn over the wallpaper; cleared
+    /// by the full redraw `dock_tick` forces the moment it slides into view.
     fn render_dock_handle(&self, shadow: *mut u8, info: &FbInfo) {
         let Some(dock) = self.dock.as_ref() else { return };
         // Only while fully hidden — once it slides up the window itself
         // is the affordance.
         if dock.offset < dock.thickness + dock.gap { return; }
+        // Mirror the dock window's geometry (centred, same width).
+        let Some(win) = self.windows.iter().find(|w| w.id == dock.id) else { return };
 
         let scale = self.scale.max(1);
-        let hw = DOCK_HANDLE_W * scale;
-        let hh = DOCK_HANDLE_H * scale;
+        let hh = DOCK_HANDLE_H * scale;          // ~4 px tall
+        let w = win.width;
+        let x = win.x;
         let baseline = self.dock_baseline();
-        let x = self.screen_w.saturating_sub(hw) / 2;
         let y = baseline.saturating_sub(hh);
-        let color = if crate::theme::is_active() {
-            crate::theme::accent()
-        } else {
-            crate::theme::inactive_border()
-        };
-        render::fill_rounded_rect_alpha(shadow, info, x, y, hw, hh,
-            color & 0x00FF_FFFF, hh / 2, 150);
+
+        // Tray-coloured bar: same token + translucency as the revealed dock.
+        let tray = crate::shade::widgets::palette::resolve(
+            crate::shade::widgets::abi::Token::SurfaceElevated);
+        render::fill_rounded_rect_alpha(shadow, info, x, y, w, hh,
+            tray & 0x00FF_FFFF, hh / 2, DOCK_OPACITY);
+
+        // Fine white stripe centred inside, inset clear of the rounded ends.
+        let stripe_h = scale;                    // 1 px (scaled)
+        let inset = hh;
+        let sx = x + inset;
+        let sw = w.saturating_sub(inset * 2);
+        let sy = y + hh.saturating_sub(stripe_h) / 2;
+        if sw >= 2 {
+            render::fill_rect(shadow, info, sx, sy, sw, stripe_h, 0x00FF_FFFF);
+        }
     }
 
     /// Fast render: only the current input line of the focused window.
