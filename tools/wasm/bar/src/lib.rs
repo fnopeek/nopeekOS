@@ -217,7 +217,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
         // band, so the spaces give left/right air without that).
         "clock" => alloc::vec![Widget::Text {
             content: alloc::format!("    {}    ", st.clock),
-            style: TextStyle::Body,
+            style: TextStyle::Heading,
             modifiers: Vec::new(),
         }],
         "tray" => alloc::vec![Widget::Icon {
@@ -252,7 +252,10 @@ fn card(names: &[String], st: &BarState) -> Widget {
         align: Align::Center,
         modifiers: alloc::vec![
             Modifier::Background(Token::SurfaceElevated),
-            Modifier::Rounded(Radius::Lg.as_u8()),
+            // Small rounding: the compositor's gap-skip blit mangles the
+            // AA of a large radius (proper rounded pills need the
+            // transparent-alpha compositing pass — TODO).
+            Modifier::Rounded(Radius::Sm.as_u8()),
             Modifier::Padding(Padding::Xs.as_u16()),
         ],
     }
@@ -272,7 +275,9 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
             card(&seg.right, st),
         ],
         spacing: Spacing::Sm.as_u16(),
-        align: Align::Center,
+        // Stretch: every pill takes the full bar height so they're all the
+        // same size (the clock pill was shorter than the others).
+        align: Align::Stretch,
         modifiers: Vec::new(),
     }
 }

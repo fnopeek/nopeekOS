@@ -467,11 +467,19 @@ impl Compositor {
     /// Live state the bar app renders: (workspace_count, active_workspace,
     /// focused window title). Fed to WASM via `npk_bar_state`.
     pub fn bar_info(&self) -> (u8, u8, alloc::string::String) {
-        // Only a real app window's title — never a panel/overlay (the dock
-        // window is titled "dock"; it must not show up as the focused title).
+        // Title of the focused real app window — never a panel/overlay
+        // (the dock window is titled "dock"). If nothing real is focused
+        // (panels clear focus), fall back to the topmost real window on the
+        // active workspace so the bar still shows what's open.
+        let is_app = |w: &&Window| !w.is_overlay && !w.is_dock && !w.is_bar;
         let title = self.focused
             .and_then(|fid| self.windows.iter().find(|w| w.id == fid))
-            .filter(|w| !w.is_overlay && !w.is_dock && !w.is_bar)
+            .filter(is_app)
+            .or_else(|| {
+                self.z_order.iter()
+                    .filter_map(|wid| self.windows.iter().find(|w| w.id == *wid))
+                    .find(|w| is_app(w) && w.workspace == self.active_workspace && w.visible)
+            })
             .map(|w| w.title.clone())
             .unwrap_or_default();
         (self.bar.workspace_count, self.active_workspace, title)
