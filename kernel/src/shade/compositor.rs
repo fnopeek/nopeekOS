@@ -1031,37 +1031,66 @@ impl Compositor {
                     let ch_local = y1.saturating_sub(cy);
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);
 
-                    // The dock is a frosted, floating tray: the TRAY blends
-                    // over whatever's behind it at the theme's chrome opacity,
-                    // but the ICONS stay fully opaque so they read crisp (not
-                    // washed out by the translucency). We tell them apart by
-                    // colour — tray pixels equal the SurfaceElevated fill;
-                    // anything else is icon ink (incl. its AA edges). Corners
-                    // fade via the SDF coverage. Small surface → cheap.
-                    if win.is_dock || win.is_bar {
-                        let dock_op = crate::shade::widgets::palette::chrome_opacity();
-                        let tray = crate::shade::widgets::palette::resolve(
-                            crate::shade::widgets::abi::Token::SurfaceElevated);
-                        // The bar paints detached pills on the Surface clear;
-                        // its gaps stay that clear colour → treat them as
-                        // transparent so the wallpaper shows between pills.
-                        // (The dock fills its whole tray with SurfaceElevated,
-                        // so it has no Surface pixels — the skip is a no-op there.)
-                        let gap = if win.is_bar {
-                            crate::shade::widgets::palette::resolve(
-                                crate::shade::widgets::abi::Token::Surface)
-                        } else { tray ^ 0x00FF_FFFF };  // sentinel: never matches a real pixel
+                    // The dock is a frosted floating tray: the whole window
+                    // is the tray (SurfaceElevated), so the compositor rounds
+                    // it with one clean SDF over the window rect. Tray pixels
+                    // blend at chrome opacity; icon ink stays opaque (crisp).
+                    let op = crate::shade::widgets::palette::chrome_opacity();
+                    let tray = crate::shade::widgets::palette::resolve(
+                        crate::shade::widgets::abi::Token::SurfaceElevated);
+                    if win.is_dock {
                         for dy in cy..y1 {
                             let local_y = dy - cy;
                             for dx in cx..x1 {
                                 let cov = render::rect_coverage_sdf(
                                     dx, dy, cx, cy, cw_local, ch_local, r);
                                 if cov == 0 { continue; }
-                                let src_idx = (local_y as usize) * (scene.width as usize)
-                                    + (dx - cx) as usize;
-                                let px = scene.pixels[src_idx];
-                                if px == gap { continue; }
-                                let base = if px == tray { dock_op } else { 255 };
+                                let px = scene.pixels[(local_y as usize)
+                                    * (scene.width as usize) + (dx - cx) as usize];
+                                let base = if px == tray { op } else { 255 };
+                                let a = (base * cov / 255).min(255);
+                                render::blend_pixel(shadow, info, dx, dy, px, a);
+                            }
+                        }
+                        return;
+                    }
+
+                    // The bar is detached pills: give EACH pill the same clean
+                    // SDF rounding the dock gets on its window (not the
+                    // rasteriser's rounding + a gap-skip, which mangled the
+                    // corner AA). Pills = top-level layout children whose
+                    // centre pixel is the tray colour; everything outside a
+                    // pill is a gap → wallpaper shows through.
+                    if win.is_bar {
+                        let mut pills: alloc::vec::Vec<(u32, u32, u32, u32)> =
+                            alloc::vec::Vec::new();
+                        for child in &scene.layout_tree.children {
+                            let cr = child.rect;
+                            if cr.w < 3 || cr.h < 3 || cr.x < 0 || cr.y < 0 { continue; }
+                            let (rx, ry) = (cr.x as u32, cr.y as u32);
+                            let (mx, my) = (rx + cr.w / 2, ry + cr.h / 2);
+                            if mx < cx || my < cy { continue; }
+                            let (sx, sy) = (mx - cx, my - cy);
+                            if sx >= scene.width || sy >= scene.height { continue; }
+                            if scene.pixels[(sy * scene.width + sx) as usize] == tray {
+                                pills.push((rx, ry, cr.w, cr.h));
+                            }
+                        }
+                        for dy in cy..y1 {
+                            let local_y = dy - cy;
+                            for dx in cx..x1 {
+                                let Some(&(prx, pry, prw, prh)) = pills.iter().find(
+                                    |&&(px_, py_, pw, ph)|
+                                        dx >= px_ && dx < px_ + pw
+                                        && dy >= py_ && dy < py_ + ph)
+                                else { continue };  // gap → wallpaper
+                                let rad = (8 * scale).min(prw / 2).min(prh / 2);
+                                let cov = render::rect_coverage_sdf(
+                                    dx, dy, prx, pry, prw, prh, rad);
+                                if cov == 0 { continue; }
+                                let px = scene.pixels[(local_y as usize)
+                                    * (scene.width as usize) + (dx - cx) as usize];
+                                let base = if px == tray { op } else { 255 };
                                 let a = (base * cov / 255).min(255);
                                 render::blend_pixel(shadow, info, dx, dy, px, a);
                             }

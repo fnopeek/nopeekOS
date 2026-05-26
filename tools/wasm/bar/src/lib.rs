@@ -252,10 +252,9 @@ fn card(names: &[String], st: &BarState) -> Widget {
         align: Align::Center,
         modifiers: alloc::vec![
             Modifier::Background(Token::SurfaceElevated),
-            // Small rounding: the compositor's gap-skip blit mangles the
-            // AA of a large radius (proper rounded pills need the
-            // transparent-alpha compositing pass — TODO).
-            Modifier::Rounded(Radius::Sm.as_u8()),
+            // Square fill in the scene; the compositor rounds each pill
+            // cleanly with its SDF (like the dock window) — rasteriser
+            // rounding here would double up + reintroduce corner-AA cruft.
             Modifier::Padding(Padding::Xs.as_u16()),
         ],
     }
