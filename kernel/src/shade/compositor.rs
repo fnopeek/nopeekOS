@@ -345,10 +345,27 @@ impl Compositor {
         self.bar.workspace_y() + self.bar.workspace_height(self.screen_h)
     }
 
-    /// `npk_window_set_dock` host fn — turn `id` into a bottom auto-hide
-    /// dock. Overlay (no strut, excluded from retile), never modal, never
-    /// focused on reveal, global across workspaces. Starts fully hidden.
+    /// `npk_window_set_panel` host fn — configure `id` as an edge panel.
+    /// `edge`: 0=Bottom, 1=Top. `behavior`: 0=AutoHide overlay (dock),
+    /// 1=Strut (bar). Bottom+AutoHide is the dock (slide + handle);
+    /// Top+Strut (the bar) is wired in the bar-render step. Returns false
+    /// for not-yet-implemented combos.
+    pub fn set_panel(&mut self, id: WindowId, edge: u8, behavior: u8, w: u32, h: u32) -> bool {
+        match (edge, behavior) {
+            (0, 0) => self.set_dock_panel(id, w, h),
+            _ => false,
+        }
+    }
+
+    /// Back-compat wrapper for the `npk_window_set_dock` host fn.
     pub fn set_dock(&mut self, id: WindowId, w: u32, h: u32) -> bool {
+        self.set_panel(id, 0, 0, w, h)
+    }
+
+    /// Bottom auto-hide dock. Overlay (no strut, excluded from retile),
+    /// never modal, never focused on reveal, global across workspaces.
+    /// Starts fully hidden.
+    fn set_dock_panel(&mut self, id: WindowId, w: u32, h: u32) -> bool {
         let screen_w = self.screen_w;
         let screen_h = self.screen_h;
         let baseline = self.dock_baseline();
@@ -392,6 +409,16 @@ impl Compositor {
             self.needs_full_redraw = true;
         }
         found
+    }
+
+    /// Live state the bar app renders: (workspace_count, active_workspace,
+    /// focused window title). Fed to WASM via `npk_bar_state`.
+    pub fn bar_info(&self) -> (u8, u8, alloc::string::String) {
+        let title = self.focused
+            .and_then(|fid| self.windows.iter().find(|w| w.id == fid))
+            .map(|w| w.title.clone())
+            .unwrap_or_default();
+        (self.bar.workspace_count, self.active_workspace, title)
     }
 
     /// Drive the dock reveal/hide intent from the current cursor Y.
