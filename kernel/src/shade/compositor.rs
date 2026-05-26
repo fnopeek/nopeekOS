@@ -1031,51 +1031,21 @@ impl Compositor {
                     let ch_local = y1.saturating_sub(cy);
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);
 
-                    // The dock is a frosted floating tray: the whole window
-                    // is the tray (SurfaceElevated), so the compositor rounds
-                    // it with one clean SDF over the window rect. Tray pixels
-                    // blend at chrome opacity; icon ink stays opaque (crisp).
-                    let op = crate::shade::widgets::palette::chrome_opacity();
-                    let tray = crate::shade::widgets::palette::resolve(
-                        crate::shade::widgets::abi::Token::SurfaceElevated);
-                    if win.is_dock {
-                        for dy in cy..y1 {
-                            let local_y = dy - cy;
-                            for dx in cx..x1 {
-                                let cov = render::rect_coverage_sdf(
-                                    dx, dy, cx, cy, cw_local, ch_local, r);
-                                if cov == 0 { continue; }
-                                let px = scene.pixels[(local_y as usize)
-                                    * (scene.width as usize) + (dx - cx) as usize];
-                                let base = if px == tray { op } else { 255 };
-                                let a = (base * cov / 255).min(255);
-                                render::blend_pixel(shadow, info, dx, dy, px, a);
-                            }
-                        }
-                        return;
-                    }
-
-                    // The bar is detached pills: give EACH pill the same clean
-                    // SDF rounding the dock gets on its window (not the
-                    // rasteriser's rounding + a gap-skip, which mangled the
-                    // corner AA). Pills = top-level layout children whose
-                    // centre pixel is the tray colour; everything outside a
-                    // pill is a gap → wallpaper shows through.
-                    if win.is_bar {
-                        // The bar scene carries real alpha (transparent gaps,
-                        // chrome-opacity pill backgrounds, full-coverage
-                        // glyphs — see rasterize_buffer_with_overlays). Just
-                        // composite it over the wallpaper by per-pixel alpha:
-                        // translucent pills, crisp glyphs, no halo, and the
-                        // rounded corners come from the rasteriser's AA.
-                        let _ = (op, tray);  // dock-only; not needed here
+                    // Panels (dock + bar). Both root their tree in a Stack, so
+                    // their scene carries real alpha (transparent where empty,
+                    // chrome-opacity backgrounds, full-coverage glyphs — see
+                    // rasterize_buffer_with_overlays). Composite the scene over
+                    // the wallpaper by per-pixel alpha: translucent tray/pills,
+                    // crisp glyphs, AA corners from the rasteriser, wallpaper in
+                    // the gaps — no halo, no per-pill detection.
+                    if win.is_dock || win.is_bar {
                         for dy in cy..y1 {
                             let local_y = dy - cy;
                             for dx in cx..x1 {
                                 let px = scene.pixels[(local_y as usize)
                                     * (scene.width as usize) + (dx - cx) as usize];
                                 let a = (px >> 24) & 0xFF;
-                                if a == 0 { continue; }  // transparent gap → wallpaper
+                                if a == 0 { continue; }  // transparent → wallpaper
                                 render::blend_pixel(shadow, info, dx, dy,
                                     px & 0x00FF_FFFF, a);
                             }
