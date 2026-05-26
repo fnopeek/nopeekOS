@@ -272,22 +272,34 @@ fn card(names: &[String], st: &BarState) -> Widget {
 }
 
 fn build_tree(seg: &Segments, st: &BarState) -> Widget {
-    // Root has NO background/padding: the gaps between the three pills stay
-    // the scene's Surface clear, which the compositor's is_bar blit treats
-    // as transparent so the wallpaper shows through. Flex spacers detach
-    // the pills (left / centre / right).
-    Widget::Row {
+    // Two overlaid full-width layers so the clock is centred on the SCREEN,
+    // not between the (asymmetric) side groups: the sides layer pins left to
+    // the start + right to the end; the centre layer centres the clock with
+    // equal flex spacers. Backgroundless containers stay the Surface clear →
+    // wallpaper shows in the gaps; the cards are the detached pills.
+    // Align::Stretch makes every pill the full bar height.
+    let sides = Widget::Row {
         children: alloc::vec![
             card(&seg.left, st),
-            Widget::Spacer { flex: 1 },
-            card(&seg.center, st),
             Widget::Spacer { flex: 1 },
             card(&seg.right, st),
         ],
         spacing: Spacing::Sm.as_u16(),
-        // Stretch: every pill takes the full bar height so they're all the
-        // same size (the clock pill was shorter than the others).
         align: Align::Stretch,
+        modifiers: Vec::new(),
+    };
+    let center = Widget::Row {
+        children: alloc::vec![
+            Widget::Spacer { flex: 1 },
+            card(&seg.center, st),
+            Widget::Spacer { flex: 1 },
+        ],
+        spacing: Spacing::Sm.as_u16(),
+        align: Align::Stretch,
+        modifiers: Vec::new(),
+    };
+    Widget::Stack {
+        children: alloc::vec![sides, center],
         modifiers: Vec::new(),
     }
 }

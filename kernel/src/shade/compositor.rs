@@ -1062,25 +1062,19 @@ impl Compositor {
                     // centre pixel is the tray colour; everything outside a
                     // pill is a gap → wallpaper shows through.
                     if win.is_bar {
+                        // Pill rects = the outermost Background-bearing nodes
+                        // (the cards), found by walking the widget+layout tree
+                        // — independent of nesting, so a Stack-centred clock
+                        // still works.
+                        let mut rects: alloc::vec::Vec<crate::shade::widgets::abi::Rect> =
+                            alloc::vec::Vec::new();
+                        crate::shade::widgets::layout::collect_bg_pills(
+                            &scene.tree, &scene.layout_tree, &mut rects);
                         let mut pills: alloc::vec::Vec<(u32, u32, u32, u32)> =
                             alloc::vec::Vec::new();
-                        for child in &scene.layout_tree.children {
-                            let cr = child.rect;
-                            if cr.w < 3 || cr.h < 3 || cr.x < 0 || cr.y < 0 { continue; }
-                            let (rx, ry) = (cr.x as u32, cr.y as u32);
-                            // Sample the card's padding edge (top-left corner),
-                            // not its centre: the centre may be covered by child
-                            // content (workspace pills, glyphs) of a different
-                            // colour, but the padding border is always the card
-                            // background (SurfaceElevated). Spacer/gap children
-                            // are the Surface clear here → correctly rejected.
-                            let (mx, my) = (rx + 1, ry + 1);
-                            if mx < cx || my < cy { continue; }
-                            let (sx, sy) = (mx - cx, my - cy);
-                            if sx >= scene.width || sy >= scene.height { continue; }
-                            if scene.pixels[(sy * scene.width + sx) as usize] == tray {
-                                pills.push((rx, ry, cr.w, cr.h));
-                            }
+                        for r in &rects {
+                            if r.w < 3 || r.h < 3 || r.x < 0 || r.y < 0 { continue; }
+                            pills.push((r.x as u32, r.y as u32, r.w, r.h));
                         }
                         for dy in cy..y1 {
                             let local_y = dy - cy;
@@ -1094,14 +1088,15 @@ impl Compositor {
                                 let cov = render::rect_coverage_sdf(
                                     dx, dy, prx, pry, prw, prh, rad);
                                 if cov == 0 { continue; }
-                                // Opaque pill: bg AND glyph composite the same
-                                // way, so the glyph's baked-in AA edges don't
-                                // form a surface-coloured halo against a
-                                // translucent bg (the "white ring" artefact).
-                                // Only the SDF corner coverage is sub-opaque.
                                 let px = scene.pixels[(local_y as usize)
                                     * (scene.width as usize) + (dx - cx) as usize];
-                                render::blend_pixel(shadow, info, dx, dy, px, cov);
+                                // Translucent pill: tray bg at chrome opacity,
+                                // glyph ink opaque. (The glyph AA edges show a
+                                // faint surface-coloured halo — eliminating it
+                                // needs per-glyph alpha; tracked separately.)
+                                let base = if px == tray { op } else { 255 };
+                                let a = (base * cov / 255).min(255);
+                                render::blend_pixel(shadow, info, dx, dy, px, a);
                             }
                         }
                         return;
