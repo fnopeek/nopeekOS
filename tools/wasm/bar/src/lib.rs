@@ -165,27 +165,21 @@ fn parse_state(s: &str) -> BarState<'_> {
 fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
     match name {
         "workspaces" => {
+            // Each workspace is a rounded pill button (Wayland/Waybar style):
+            // active = filled Accent, inactive = subtle SurfaceMuted. No
+            // separators between them.
             let mut row = Vec::new();
             for i in 0..st.ws_count {
-                if i > 0 {
-                    // Thin separator between workspace numbers.
-                    row.push(Widget::Text {
-                        content: "|".to_string(),
-                        style: TextStyle::Body,
-                        modifiers: Vec::new(),
-                    });
-                }
                 let active = i == st.ws_active;
-                let mut mods: Vec<Modifier> = Vec::new();
-                mods.push(Modifier::Padding(Padding::Xs.as_u16()));
-                mods.push(Modifier::OnClick(ActionId(WS_BASE + i as u32)));
-                if active {
-                    // Clear filled chip for the active workspace.
-                    mods.push(Modifier::Background(Token::Accent));
-                    mods.push(Modifier::Rounded(Radius::Sm.as_u8()));
-                } else {
+                let mut mods: Vec<Modifier> = alloc::vec![
+                    Modifier::Padding(Padding::Xs.as_u16()),
+                    Modifier::Rounded(Radius::Sm.as_u8()),
+                    Modifier::OnClick(ActionId(WS_BASE + i as u32)),
+                    Modifier::Background(if active { Token::Accent } else { Token::SurfaceMuted }),
+                ];
+                if !active {
                     mods.push(Modifier::Hover(alloc::vec![
-                        Modifier::Background(Token::SurfaceMuted),
+                        Modifier::Background(Token::AccentMuted),
                         Modifier::Rounded(Radius::Sm.as_u8()),
                     ]));
                 }
@@ -202,14 +196,24 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 modifiers: Vec::new(),
             }]
         }
+        // The title only appears when something is focused/open; prefix it
+        // with a single "|" separator (so the divider shows up only then,
+        // after the workspaces) and give it a trailing space.
         "title" => {
             if st.title.is_empty() { Vec::new() }
             else {
-                alloc::vec![Widget::Text {
-                    content: st.title.to_string(),
-                    style: TextStyle::Body,
-                    modifiers: Vec::new(),
-                }]
+                alloc::vec![
+                    Widget::Text {
+                        content: "|".to_string(),
+                        style: TextStyle::Body,
+                        modifiers: Vec::new(),
+                    },
+                    Widget::Text {
+                        content: alloc::format!("{}  ", st.title),
+                        style: TextStyle::Body,
+                        modifiers: Vec::new(),
+                    },
+                ]
             }
         }
         // Padded with spaces for horizontal breathing room inside the pill
