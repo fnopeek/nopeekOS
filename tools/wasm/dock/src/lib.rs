@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use nopeek_widgets::app_catalog::{self, AppEntry, EntryKind};
 use nopeek_widgets::prefab;
-use nopeek_widgets::style::{Padding, Spacing};
+use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -155,14 +155,19 @@ impl Dock {
             None,
         ));
 
-        let row = Widget::Row {
+        // Flat look: no hard bordered box (the compositor renders the
+        // dock chrome-less). The icons sit on a soft, rounded translucent
+        // tray that the dock supplies itself.
+        Widget::Row {
             children:  cells,
             spacing:   Spacing::Sm.as_u16(),
             align:     Align::Center,
-            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
-        };
-
-        prefab::panel(alloc::vec![row])
+            modifiers: alloc::vec![
+                Modifier::Padding(Padding::Sm.as_u16()),
+                Modifier::Background(Token::Surface),
+                Modifier::Rounded(Radius::Xl.as_u8()),
+            ],
+        }
     }
 
     fn commit_tree(&self) {
