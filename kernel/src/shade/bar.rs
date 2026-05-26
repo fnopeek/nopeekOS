@@ -102,7 +102,7 @@ impl ShadeBar {
     }
 
     /// Y of the visible pills (band inset by the edge margin).
-    fn pill_top(&self, screen_h: u32) -> u32 {
+    pub fn pill_top(&self, screen_h: u32) -> u32 {
         match self.position {
             BarPosition::Top => self.margin,
             BarPosition::Bottom => screen_h.saturating_sub(self.margin + self.pill_h),

@@ -127,6 +127,11 @@ pub struct Compositor {
     pub animation: Option<SwapAnimation>,
     /// Auto-hide bottom dock, if a dock app has registered one.
     pub dock: Option<DockState>,
+    /// Top strut bar window, if a bar app (`bar.wasm`) has registered one.
+    /// While set, the native `ShadeBar` pixel rendering is suppressed and
+    /// this window is drawn into the bar band instead (native fallback when
+    /// `None`, so a missing/broken bar.wasm never leaves a clock-less bar).
+    pub bar_window: Option<WindowId>,
 }
 
 #[allow(dead_code)]
@@ -177,6 +182,7 @@ impl Compositor {
             drag: None,
             animation: None,
             dock: None,
+            bar_window: None,
         }
     }
 
@@ -353,8 +359,51 @@ impl Compositor {
     pub fn set_panel(&mut self, id: WindowId, edge: u8, behavior: u8, w: u32, h: u32) -> bool {
         match (edge, behavior) {
             (0, 0) => self.set_dock_panel(id, w, h),
+            (1, 1) => self.set_bar_panel(id),
             _ => false,
         }
+    }
+
+    /// Top strut bar. Positioned into the existing `ShadeBar` band (which
+    /// still owns the tiling strut), full width minus the bar margin,
+    /// always visible, global across workspaces, never focused. Rendered
+    /// with the dock's translucent-tray blit. `w`/`h` are ignored — the
+    /// compositor sizes it to the band.
+    fn set_bar_panel(&mut self, id: WindowId) -> bool {
+        let screen_w = self.screen_w;
+        let screen_h = self.screen_h;
+        let margin = self.bar.margin;
+        let pill_top = self.bar.pill_top(screen_h);
+        let pill_h = self.bar.pill_h;
+        let active_ws = self.active_workspace;
+
+        let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.state = crate::shade::window::WindowState::Floating;
+            win.is_overlay = true;
+            win.is_bar = true;
+            win.modal = false;
+            win.workspace = active_ws;
+            win.x = margin;
+            win.y = pill_top;
+            win.width = screen_w.saturating_sub(margin * 2).max(120);
+            win.height = pill_h;
+            win.visible = true;
+            win.dirty = true;
+            true
+        } else {
+            false
+        };
+
+        if found {
+            self.bar_window = Some(id);
+            self.retile();
+            // Pin the bar to the front of the z-order; keep the dock pinned too.
+            self.z_order.retain(|&wid| wid != id);
+            self.z_order.insert(0, id);
+            self.pin_dock_to_front();
+            self.needs_full_redraw = true;
+        }
+        found
     }
 
     /// Back-compat wrapper for the `npk_window_set_dock` host fn.
@@ -527,6 +576,12 @@ impl Compositor {
         if self.dock.map(|d| d.id) == Some(id) {
             self.dock = None;
         }
+        // Bar window gone → fall back to the native ShadeBar render.
+        if self.bar_window == Some(id) {
+            self.bar_window = None;
+            self.bar.dirty = true;
+            self.needs_full_redraw = true;
+        }
         // Free session + terminal buffer + process before removing window
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
             match win.kind {
@@ -622,6 +677,17 @@ impl Compositor {
                 d.dwell = 0;
                 d.debounce = 0;
             }
+        }
+
+        // The bar is global too: follow the active workspace, stay visible.
+        if let Some(bw) = self.bar_window {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == bw) {
+                win.workspace = ws;
+                win.visible = true;
+                win.dirty = true;
+            }
+            self.z_order.retain(|&wid| wid != bw);
+            self.z_order.insert(0, bw);
         }
 
         self.focused = self.z_order.iter()
@@ -792,8 +858,11 @@ impl Compositor {
             }
         }
 
-        // Shadebar
-        self.bar.render(shadow, info, self.screen_w, self.screen_h);
+        // Shadebar — native render only when no bar.wasm window owns it
+        // (the bar window itself draws in the window loop above otherwise).
+        if self.bar_window.is_none() {
+            self.bar.render(shadow, info, self.screen_w, self.screen_h);
+        }
 
         // Presence handle for a fully-hidden dock.
         self.render_dock_handle(shadow, info);
@@ -857,8 +926,11 @@ impl Compositor {
                      border_color: u32) {
         // Overlay windows skip the wallpaper restore — rounded-out
         // corners keep showing whatever app is underneath instead of
-        // punching a wallpaper-shaped hole into it.
-        if !win.is_overlay {
+        // punching a wallpaper-shaped hole into it. The bar is the
+        // exception: it's a translucent overlay that repaints every clock
+        // tick, so it MUST restore its band from the wallpaper first or
+        // successive blends would stack into an opaque smear.
+        if !win.is_overlay || win.is_bar {
             background::draw_background_region(shadow, info,
                 win.x, win.y, win.width, win.height);
         }
@@ -873,13 +945,13 @@ impl Compositor {
         // we skip the chrome pass entirely and blit the widget content
         // edge-to-edge with the full rounding. Everything else gets the
         // normal border + bg chrome.
-        let (chrome_border, chrome_round) = if win.is_dock {
+        let (chrome_border, chrome_round) = if win.is_dock || win.is_bar {
             (0u32, rounding)
         } else {
             (border, rounding.saturating_sub(border))
         };
 
-        if !win.is_dock {
+        if !win.is_dock && !win.is_bar {
             let (ba, bb, b_op) = if crate::theme::is_active() && win.focused {
                 let (ga, gb) = crate::theme::border_gradient();
                 (ga, gb, 200u32)
@@ -945,7 +1017,7 @@ impl Compositor {
                     // colour — tray pixels equal the SurfaceElevated fill;
                     // anything else is icon ink (incl. its AA edges). Corners
                     // fade via the SDF coverage. Small surface → cheap.
-                    if win.is_dock {
+                    if win.is_dock || win.is_bar {
                         let dock_op = crate::shade::widgets::palette::chrome_opacity();
                         let tray = crate::shade::widgets::palette::resolve(
                             crate::shade::widgets::abi::Token::SurfaceElevated);
@@ -1151,7 +1223,7 @@ impl Compositor {
             }
         }
 
-        if self.bar.dirty {
+        if self.bar.dirty && self.bar_window.is_none() {
             self.bar.render(shadow, info, self.screen_w, self.screen_h);
             let bar_y = self.bar.y(self.screen_h);
             regions.push((0, bar_y, self.screen_w, self.bar.height));
