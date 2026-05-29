@@ -958,9 +958,19 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 wid = new_id;
             }
 
-            let ok = crate::shade::with_compositor(|comp|
-                comp.set_overlay(crate::shade::WindowId(wid), w as u32, h as u32)
-            ).unwrap_or(false);
+            let ok = crate::shade::with_compositor(|comp| {
+                let ok = comp.set_overlay(crate::shade::WindowId(wid), w as u32, h as u32);
+                // The overlay path always wants this window focused — drun
+                // and any other launcher style app drives keyboard from
+                // here. The promote-or-create branch above already focuses,
+                // but if the app calls set_overlay a second time (or after
+                // some other host fn shifted focus elsewhere) we need to
+                // re-claim it so keys don't end up routed at a stale window.
+                if ok {
+                    comp.focus_window(crate::shade::WindowId(wid));
+                }
+                ok
+            }).unwrap_or(false);
 
             if ok {
                 crate::shade::request_render();
