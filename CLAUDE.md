@@ -45,7 +45,47 @@ See README.md for the full vision and phase planning.
 
 ## Current Status
 
-- **Phase:** **12.6 + Shell-Polish ✅ — Panel-System (Bar + Dock als
+- **Phase:** **12.7 — Apps: Text-Editor "Spell" + Widget-Plattform-Ausbau
+  (2026-05-29, kernel v0.180.1, spell 0.5.3, loft 0.3.1, dock 0.3.9,
+  nopeek_widgets 0.11.0).** Eigener Text-Editor als WASM-Widget-App, plus
+  die Plattform-Bausteine, die er gebraucht hat. Voll im Memory:
+  `memory/project_editor_kickoff.md` (+ `project_file_associations.md`,
+  `project_widget_app_caps.md`).
+- **2026-05-29 (sehr lange Session, kernel v0.175 → v0.180.1): Spell-Editor
+  + Widget-Plattform.**
+  - **`Widget::TextArea`** ins ABI (mehrzeilig, compositor-eigener 2-D-
+    Cursor: Pfeile/Enter/Home-End/PageUp-Down, Tab = 4 Leerzeichen). Plus
+    **`Span { start, len, token }`** + `TextArea.spans` → **Live-Syntax-
+    Highlighting beim Tippen** (App tokenisiert, Compositor malt farbige
+    Runs über den Live-Buffer). Pfad B (Input pro Zeile) verworfen: keine
+    programmatische Fokus-Host-fn.
+  - **Spell-App** (`tools/wasm/spell`): loft-Design, **Tabs** (VS-Code:
+    schon offene Datei → vorhandener Tab), Markdown-Vorschau + Mehrsprach-
+    Highlight (Rust/C/JS/Py/Shell/JSON/HTML), Öffnen/Speichern via npkFS,
+    „Speichern unter"-Namensdialog, **„Ungespeicherte Änderungen"-Guard**
+    beim Schließen, echter Dateipfad im Footer.
+  - **Dateizuordnungen**: `npk_open(app, arg)` + `npk_launch_arg()` +
+    `Event::Open` → loft-Doppelklick öffnet die Datei mit der Handler-App
+    (Endung→App in loft + `sys/config/associations`, nicht im Kernel).
+    Singleton-Routing: 2. Öffnen → Tab in der laufenden Instanz (Fenster
+    synchron angelegt gegen Doppelklick-Race). Widget-Fenster tragen jetzt
+    den **Modulnamen** als Titel (fixt latenten re-focus-Bug + Bar zeigt
+    App-Namen).
+  - **Per-App-Capabilities**: App deklariert Rechte in 1-Byte `.npk.caps`-
+    Section; Kernel vergibt genau die (Default ohne Section: READ|EXEC|
+    RENDER, **nie** WRITE). Ersetzt das pauschale WRITE. **Sicherheit:**
+    Apps dürfen nicht nach `sys/wasm/` schreiben (sonst WRITE→Modul-
+    Überschreiben→Eskalation). Neue Host-fn `npk_home_dir` (Username liegt
+    nur im `.system/config`-Blob, nicht als `sys/config/name`-Objekt).
+  - **Zwei Bump-Allocator-Fallstricke** (gelten für JEDE loft-Loop-Widget-
+    App, in Memory als feedback gesichert): Szenen-Commit IMMER via
+    `wire::encode` (sonst leeres Fenster); Event-String (Open/InputChange)
+    VOR `alloc_reset` in statischen Puffer kopieren (sonst use-after-free →
+    verfälschte Pfade → doppelte Tabs).
+  - **Offen (morgen):** Text-**Markieren** (Maus-Drag + Shift+Pfeil; braucht
+    Modifier-Durchreichung durch `handle_input_key`, schaltet auch Ctrl+S
+    frei), Suchen/Ersetzen, Cursor-Zeile:Spalte im Footer, Tab-Drag-Reorder.
+- **Phase (vorher):** **12.6 + Shell-Polish ✅ — Panel-System (Bar + Dock als
   WASM) + Browser daily-driver (2026-05-26, kernel v0.173.37, bar
   0.1.10, dock 0.2.5).** Top-Bar lebt jetzt als `bar.wasm` (Workspaces-
   Pills + Titel + zentrierte Uhr + Tray/Power), das Dock als `dock.wasm`
