@@ -167,7 +167,12 @@ enum Mode { Edit, Preview }
 enum OpenMenu { File, View, Help }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind { Markdown, Rust, Plain }
+enum Kind { Markdown, Code(Lang), Plain }
+
+/// Languages with a preview highlighter. Markup = HTML/XML (tag-based);
+/// the rest share the C-like tokenizer parameterised by `lang_spec`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lang { Rust, C, Js, Python, Shell, Json, Markup }
 
 struct Spell {
     /// The whole document. Pre-allocated to `TEXT_CAP`; mutated via
@@ -230,21 +235,29 @@ impl Spell {
         sp
     }
 
+    fn ext(&self) -> Option<String> {
+        self.path.as_deref()
+            .and_then(|p| p.rsplit_once('.'))
+            .map(|(_, e)| e.to_ascii_lowercase())
+    }
+
     fn kind(&self) -> Kind {
-        match self.path.as_deref() {
-            Some(p) if p.ends_with(".md") || p.ends_with(".markdown") => Kind::Markdown,
-            Some(p) if p.ends_with(".rs") => Kind::Rust,
-            None => Kind::Markdown, // fresh buffers default to markdown
-            _ => Kind::Plain,
+        match self.ext().as_deref() {
+            Some("md") | Some("markdown")          => Kind::Markdown,
+            Some("rs")                             => Kind::Code(Lang::Rust),
+            Some("c") | Some("h")                  => Kind::Code(Lang::C),
+            Some("js") | Some("ts")                => Kind::Code(Lang::Js),
+            Some("py")                             => Kind::Code(Lang::Python),
+            Some("sh") | Some("bash")              => Kind::Code(Lang::Shell),
+            Some("json")                           => Kind::Code(Lang::Json),
+            Some("html") | Some("htm") | Some("xml") => Kind::Code(Lang::Markup),
+            None                                   => Kind::Markdown, // fresh buffer
+            _                                      => Kind::Plain,    // txt/log/toml/yaml/…
         }
     }
 
-    fn kind_label(&self) -> &'static str {
-        match self.kind() {
-            Kind::Markdown => "md",
-            Kind::Rust     => "rs",
-            Kind::Plain    => "txt",
-        }
+    fn kind_label(&self) -> String {
+        self.ext().unwrap_or_else(|| "md".to_string())
     }
 
     fn set_text(&mut self, s: &str) {
@@ -299,7 +312,7 @@ impl Spell {
         self.name_buf.clear();
         if default.is_empty() {
             self.name_buf.push_str(match self.kind() {
-                Kind::Rust => "unbenannt.rs",
+                Kind::Code(Lang::Rust) => "unbenannt.rs",
                 _ => "unbenannt.md",
             });
         } else {
@@ -508,9 +521,9 @@ fn render_body(sp: &Spell) -> Widget {
         },
         Mode::Preview => {
             let content = match sp.kind() {
-                Kind::Markdown => markdown_preview(&sp.text),
-                Kind::Rust     => code_preview(&sp.text, true),
-                Kind::Plain    => code_preview(&sp.text, false),
+                Kind::Markdown   => markdown_preview(&sp.text),
+                Kind::Code(lang) => code_preview(&sp.text, lang),
+                Kind::Plain      => plain_preview(&sp.text),
             };
             Widget::Scroll {
                 child:     Box::new(content),
@@ -685,31 +698,7 @@ fn code_block(lines: &[String]) -> Widget {
     prefab::card(col, prefab::CardKind::Inset)
 }
 
-// ── Code preview (per-line tokenizer) ─────────────────────────────────
-
-fn code_preview(text: &str, rust: bool) -> Widget {
-    let rows: Vec<Widget> = text.split('\n').map(|line| {
-        if rust {
-            highlight_rust_line(line)
-        } else {
-            Widget::Text { content: line.to_string(), style: TextStyle::Mono, modifiers: alloc::vec![] }
-        }
-    }).collect();
-    Widget::Column {
-        children:  rows,
-        spacing:   0,
-        align:     Align::Start,
-        modifiers: alloc::vec![],
-    }
-}
-
-const RUST_KEYWORDS: &[&str] = &[
-    "fn", "let", "mut", "const", "static", "pub", "use", "mod", "crate", "struct",
-    "enum", "impl", "trait", "type", "for", "while", "loop", "if", "else", "match",
-    "return", "self", "Self", "as", "in", "ref", "move", "where", "async", "await",
-    "dyn", "unsafe", "extern", "break", "continue", "true", "false", "Some", "None",
-    "Ok", "Err", "super",
-];
+// ── Code preview (per-line tokenizers) ────────────────────────────────
 
 fn mono_span(s: &str, tint: Option<Token>) -> Widget {
     let mods = match tint {
@@ -719,15 +708,89 @@ fn mono_span(s: &str, tint: Option<Token>) -> Widget {
     Widget::Text { content: s.to_string(), style: TextStyle::Mono, modifiers: mods }
 }
 
-/// Lightweight single-line Rust highlighter: line comments → muted,
-/// "string literals" → warning, keywords → accent, everything else →
-/// on-surface. Good enough for the visual signal; not a real lexer.
-fn highlight_rust_line(line: &str) -> Widget {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("//") {
-        return mono_span(line, Some(Token::OnSurfaceMuted));
-    }
+fn code_lines(rows: Vec<Widget>) -> Widget {
+    Widget::Column { children: rows, spacing: 0, align: Align::Start, modifiers: alloc::vec![] }
+}
 
+/// Unhighlighted Mono preview (txt/log/toml/yaml/…).
+fn plain_preview(text: &str) -> Widget {
+    code_lines(text.split('\n').map(|l| mono_span(l, None)).collect())
+}
+
+fn code_preview(text: &str, lang: Lang) -> Widget {
+    code_lines(text.split('\n').map(|l| highlight_line(l, lang)).collect())
+}
+
+// Keyword sets — not full lexers, just enough for the visual signal.
+const KW_RUST: &[&str] = &[
+    "fn","let","mut","const","static","pub","use","mod","crate","struct","enum",
+    "impl","trait","type","for","while","loop","if","else","match","return","self",
+    "Self","as","in","ref","move","where","async","await","dyn","unsafe","extern",
+    "break","continue","true","false","Some","None","Ok","Err","super",
+];
+const KW_C: &[&str] = &[
+    "auto","break","case","char","const","continue","default","do","double","else",
+    "enum","extern","float","for","goto","if","inline","int","long","register",
+    "return","short","signed","sizeof","static","struct","switch","typedef","union",
+    "unsigned","void","volatile","while","include","define","ifdef","ifndef","endif",
+    "pragma","sizeof","NULL","true","false",
+];
+const KW_JS: &[&str] = &[
+    "var","let","const","function","return","if","else","for","while","do","switch",
+    "case","default","break","continue","new","delete","typeof","instanceof","this",
+    "class","extends","super","import","export","from","async","await","yield","try",
+    "catch","finally","throw","null","undefined","true","false","in","of","void","static",
+];
+const KW_PY: &[&str] = &[
+    "def","class","return","if","elif","else","for","while","break","continue","import",
+    "from","as","pass","with","try","except","finally","raise","yield","lambda","global",
+    "nonlocal","and","or","not","in","is","None","True","False","async","await","del","assert",
+];
+const KW_SH: &[&str] = &[
+    "if","then","else","elif","fi","for","while","until","do","done","case","esac",
+    "function","in","select","echo","export","local","readonly","return","exit",
+    "source","alias","unset","set","cd","then",
+];
+const KW_JSON: &[&str] = &["true","false","null"];
+
+/// `(keywords, line-comment prefix or None, treat single-quotes as strings)`.
+fn lang_spec(lang: Lang) -> (&'static [&'static str], Option<&'static str>, bool) {
+    match lang {
+        Lang::Rust   => (KW_RUST, Some("//"), false), // ' is a lifetime, not a string
+        Lang::C      => (KW_C,    Some("//"), true),
+        Lang::Js     => (KW_JS,   Some("//"), true),
+        Lang::Python => (KW_PY,   Some("#"),  true),
+        Lang::Shell  => (KW_SH,   Some("#"),  true),
+        Lang::Json   => (KW_JSON, None,       false),
+        Lang::Markup => (&[],     None,       false), // handled separately
+    }
+}
+
+fn highlight_line(line: &str, lang: Lang) -> Widget {
+    if matches!(lang, Lang::Markup) {
+        return highlight_markup_line(line);
+    }
+    let (keywords, comment, squote) = lang_spec(lang);
+    highlight_clike_line(line, keywords, comment, squote)
+}
+
+fn char_len(s: &str, i: usize) -> usize {
+    s[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
+}
+
+/// Generic C-like line highlighter. Keywords → accent, `"…"`/`'…'`
+/// strings → warning, line comments → muted, rest → on-surface. All
+/// string slices land on char boundaries (UTF-8-safe — strings and
+/// comments can hold umlauts).
+fn highlight_clike_line(
+    line: &str, keywords: &[&str], comment: Option<&str>, squote: bool,
+) -> Widget {
+    let trimmed = line.trim_start();
+    if let Some(c) = comment {
+        if trimmed.starts_with(c) {
+            return mono_span(line, Some(Token::OnSurfaceMuted));
+        }
+    }
     let mut spans: Vec<Widget> = Vec::new();
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -735,56 +798,79 @@ fn highlight_rust_line(line: &str) -> Widget {
 
     let flush_word = |spans: &mut Vec<Widget>, line: &str, start: usize, end: usize| {
         let w = &line[start..end];
-        let tint = if RUST_KEYWORDS.contains(&w) { Some(Token::Accent) } else { None };
+        let tint = if keywords.contains(&w) { Some(Token::Accent) } else { None };
         spans.push(mono_span(w, tint));
     };
 
     while i < bytes.len() {
         let b = bytes[i];
-        let is_word = b.is_ascii_alphanumeric() || b == b'_';
-        if is_word {
+        if b.is_ascii_alphanumeric() || b == b'_' {
             if word_start.is_none() { word_start = Some(i); }
             i += 1;
             continue;
         }
-        // Non-word boundary — flush any pending word.
-        if let Some(ws) = word_start.take() {
-            flush_word(&mut spans, line, ws, i);
+        if let Some(ws) = word_start.take() { flush_word(&mut spans, line, ws, i); }
+        // Mid-line comment to end of line.
+        if let Some(c) = comment {
+            if line[i..].starts_with(c) {
+                spans.push(mono_span(&line[i..], Some(Token::OnSurfaceMuted)));
+                break;
+            }
         }
-        // Line comment to end-of-line.
-        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            spans.push(mono_span(&line[i..], Some(Token::OnSurfaceMuted)));
-            break;
-        }
-        // String literal.
-        if b == b'"' {
+        // String / char literal (quote is ASCII, so boundaries are safe).
+        if b == b'"' || (squote && b == b'\'') {
+            let quote = b;
             let start = i;
             i += 1;
             while i < bytes.len() {
-                if bytes[i] == b'\\' { i += 2; continue; }
-                if bytes[i] == b'"' { i += 1; break; }
-                i += 1;
+                if bytes[i] == b'\\' {
+                    i += 1;
+                    if i < bytes.len() { i += char_len(line, i); }
+                    continue;
+                }
+                if bytes[i] == quote { i += 1; break; }
+                i += char_len(line, i);
             }
-            let end = i.min(line.len());
-            spans.push(mono_span(&line[start..end], Some(Token::Warning)));
+            spans.push(mono_span(&line[start..i], Some(Token::Warning)));
             continue;
         }
-        // Punctuation / whitespace — emit one byte as plain.
-        spans.push(mono_span(&line[i..i + 1], None));
-        i += 1;
+        // Punctuation / non-ASCII — emit one whole char.
+        let cl = char_len(line, i);
+        spans.push(mono_span(&line[i..i + cl], None));
+        i += cl;
     }
-    if let Some(ws) = word_start.take() {
-        flush_word(&mut spans, line, ws, bytes.len());
+    if let Some(ws) = word_start.take() { flush_word(&mut spans, line, ws, bytes.len()); }
+    if spans.is_empty() { return mono_span(line, None); }
+    Widget::Row { children: spans, spacing: 0, align: Align::Start, modifiers: alloc::vec![] }
+}
+
+/// HTML/XML: tags `<…>` → accent, `<!-- … -->` → muted, text → plain.
+/// All split points are ASCII (`<`, `>`, `<!--`, `-->`), so boundaries
+/// are safe.
+fn highlight_markup_line(line: &str) -> Widget {
+    let mut spans: Vec<Widget> = Vec::new();
+    let mut i = 0;
+    while i < line.len() {
+        if line[i..].starts_with("<!--") {
+            let end = line[i..].find("-->").map(|p| i + p + 3).unwrap_or(line.len());
+            spans.push(mono_span(&line[i..end], Some(Token::OnSurfaceMuted)));
+            i = end;
+            continue;
+        }
+        if line.as_bytes()[i] == b'<' {
+            let end = line[i..].find('>').map(|p| i + p + 1).unwrap_or(line.len());
+            spans.push(mono_span(&line[i..end], Some(Token::Accent)));
+            i = end;
+            continue;
+        }
+        // Text up to the next tag.
+        let mut end = line[i..].find('<').map(|p| i + p).unwrap_or(line.len());
+        if end <= i { end = line.len(); }
+        spans.push(mono_span(&line[i..end], None));
+        i = end;
     }
-    if spans.is_empty() {
-        return mono_span(line, None);
-    }
-    Widget::Row {
-        children:  spans,
-        spacing:   0,
-        align:     Align::Start,
-        modifiers: alloc::vec![],
-    }
+    if spans.is_empty() { return mono_span(line, None); }
+    Widget::Row { children: spans, spacing: 0, align: Align::Start, modifiers: alloc::vec![] }
 }
 
 // ── Events ────────────────────────────────────────────────────────────

@@ -270,6 +270,7 @@ impl Loft {
         match ext.as_str() {
             "md" | "markdown" | "txt" | "text" | "rs" | "toml" | "json"
             | "log" | "conf" | "ini" | "cfg" | "sh" | "csv" | "yaml" | "yml"
+            | "xml" | "html" | "htm" | "c" | "h" | "py" | "js" | "ts"
                 => Some("spell".to_string()),
             _ => None,
         }
