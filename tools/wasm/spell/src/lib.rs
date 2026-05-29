@@ -309,10 +309,16 @@ impl Spell {
     /// Open a file: focus its tab if already open (VS Code behaviour),
     /// else load it into a new tab (reusing a pristine Unbenannt tab).
     fn open_path(&mut self, path: &str) {
+        log(&alloc::format!("[spell] open_path '{}' ({} docs)", path, self.docs.len()));
+        for (i, d) in self.docs.iter().enumerate() {
+            log(&alloc::format!("[spell]   doc[{}] path={:?}", i, d.path.as_deref()));
+        }
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path)) {
+            log(&alloc::format!("[spell]   -> focus existing tab {}", i));
             self.active = i;
             return;
         }
+        log("[spell]   -> new tab");
         let text = match read_file(path) {
             Some(t) => t,
             None => { log("[spell] open: failed"); return; }
