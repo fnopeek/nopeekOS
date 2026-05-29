@@ -655,6 +655,14 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [ ] **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS` cap, on hold bis ein konkreter Consumer (image viewer, chart) danach fragt.
 - [x] **Loft polish round 5** (kernel `v0.147.0`, loft `v0.2.5`, sdk `0.6.3`) — bump-allocator state-mutation panic fixed, `Modifier::Flex(u8)` flex-grow primitive added, `Modifier::NodeId` + `Widget::Popover` finalised, real menu dropdowns shipped (Datei / Bearbeiten / **Ansicht** / Gehe zu / Hilfe), View → Grid/List view toggle, **List view** with Name/Size/Type/Modified columns. Modified column reads npkFS v3 mtime via the extended `npk_fs_list` ABI.
 
+> **2026-05-29 — Text editor "Spell" + widget-platform build-out (kernel v0.175→v0.180.1, spell 0.5.3, loft 0.3.1, nopeek_widgets 0.11.0).** A real editor app, plus the platform pieces it needed.
+
+- [x] **`Widget::TextArea`** — multi-line editing, compositor-owned 2-D caret (arrows / Enter / line-relative Home-End / PageUp-Down, **Tab = 4 spaces**). `Span { start, len, token }` + `TextArea.spans` give **live syntax highlighting while typing** (app tokenizes, compositor paints coloured runs over the live buffer). (Per-line `Input` was rejected — no programmatic-focus host fn.)
+- [x] **Spell editor** (`tools/wasm/spell`) — loft design, **tabs** (VS-Code dedup: re-open focuses the tab), markdown preview + multi-language highlight (Rust/C/JS/Python/Shell/JSON/HTML/XML), open/save via npkFS, "save as" name dialog, **unsaved-changes guard on close**, real npkFS path in footer.
+- [x] **File associations** — `npk_open(app, arg)` + `npk_launch_arg()` + `Event::Open`: loft double-click opens a file with its handler app (ext→app map in loft + `sys/config/associations`, never in the kernel). Singleton routing → 2nd open = a tab in the running instance. Widget windows now titled with the module name.
+- [x] **Per-app capabilities** — apps declare rights in a 1-byte `.npk.caps` section; kernel grants exactly those (default never WRITE). Apps can't write `sys/wasm/` (anti-escalation). New `npk_home_dir` host fn.
+- [ ] **Text selection** (mouse-drag + Shift+Arrow) + Ctrl+S — both need modifier plumbing through `handle_input_key`. find/replace, caret line:col in footer, tab drag-reorder. *(next)*
+
 ### Phase 11 -- AI Integration (deferred → Phase 13+)
 
 Originally planned next, deprioritised in favour of Phase 12. Returns
