@@ -144,6 +144,10 @@ const ACT_FILE_SAVE_AS: u32 = 6_004;
 // Name dialog: on_submit of the filename Input + the two buttons.
 const ACT_NAME_SUBMIT:  u32 = 6_005;
 const ACT_NAME_CANCEL:  u32 = 6_006;
+// Unsaved-changes-on-close dialog.
+const ACT_CLOSE_SAVE:    u32 = 6_007;
+const ACT_CLOSE_DISCARD: u32 = 6_008;
+const ACT_CLOSE_CANCEL:  u32 = 6_009;
 const ACT_VIEW_EDIT:    u32 = 6_100;
 const ACT_VIEW_PREVIEW: u32 = 6_101;
 const ACT_HELP_ABOUT: u32 = 6_300;
@@ -255,6 +259,9 @@ struct Spell {
     docs_dir:     String,
     /// Files listed by the open dialog (full npkFS paths).
     files:        Vec<String>,
+    /// Tab index pending an unsaved-changes confirmation before close.
+    /// `Some(i)` shows the "save changes?" dialog for tab `i`.
+    confirm_close: Option<usize>,
 }
 
 impl Spell {
@@ -270,6 +277,7 @@ impl Spell {
             name_buf:  String::with_capacity(256),
             docs_dir,
             files:     Vec::new(),
+            confirm_close: None,
         };
 
         // Launched to open a specific file (loft file association)?
@@ -329,6 +337,18 @@ impl Spell {
         } else {
             self.docs.push(Doc::empty());
             self.active = self.docs.len() - 1;
+        }
+    }
+
+    /// Close tab `i`, but if it has unsaved changes show the confirm
+    /// dialog first (focusing it) instead of discarding silently.
+    fn request_close(&mut self, i: usize) {
+        if i >= self.docs.len() { return; }
+        self.active = i;
+        if self.docs[i].dirty {
+            self.confirm_close = Some(i);
+        } else {
+            self.close_tab(i);
         }
     }
 
@@ -625,6 +645,9 @@ fn render_tabbar(sp: &Spell) -> Widget {
 }
 
 fn render_body(sp: &Spell) -> Widget {
+    if sp.confirm_close.is_some() {
+        return render_confirm_dialog(sp);
+    }
     if sp.naming {
         return render_name_dialog(sp);
     }
@@ -656,6 +679,49 @@ fn render_body(sp: &Spell) -> Widget {
             Modifier::Background(Token::Surface),
             Modifier::Padding(Padding::Sm.as_u16()),
         ],
+    }
+}
+
+/// Unsaved-changes confirmation shown when closing a dirty tab. Buttons
+/// only (no text input), so no focus dance needed.
+fn render_confirm_dialog(sp: &Spell) -> Widget {
+    let title = match sp.confirm_close.and_then(|i| sp.docs.get(i)) {
+        Some(d) => d.title.clone(),
+        None => "Datei".to_string(),
+    };
+    let card = prefab::dialog(
+        "Ungespeicherte Änderungen",
+        Widget::Column {
+            children: alloc::vec![
+                Widget::Text {
+                    content:   alloc::format!("„{}“ hat ungespeicherte Änderungen.", title),
+                    style:     TextStyle::Body,
+                    modifiers: alloc::vec![],
+                },
+                Widget::Row {
+                    children: alloc::vec![
+                        prefab::button("Verwerfen", prefab::ButtonStyle::Destructive, ActionId(ACT_CLOSE_DISCARD)),
+                        Widget::Spacer { flex: 1 },
+                        prefab::button("Abbrechen", prefab::ButtonStyle::Ghost,   ActionId(ACT_CLOSE_CANCEL)),
+                        prefab::button("Speichern",  prefab::ButtonStyle::Primary, ActionId(ACT_CLOSE_SAVE)),
+                    ],
+                    spacing:   Spacing::Sm.as_u16(),
+                    align:     Align::Center,
+                    modifiers: alloc::vec![],
+                },
+            ],
+            spacing:   Spacing::Md.as_u16(),
+            align:     Align::Stretch,
+            modifiers: alloc::vec![],
+        },
+        Some("Esc bricht ab"),
+        380,
+    );
+    Widget::Column {
+        children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
     }
 }
 
@@ -992,9 +1058,17 @@ enum Outcome { Idle, Rerender, Exit }
 fn handle(sp: &mut Spell, ev: Event) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => {
-            if sp.naming { sp.naming = false; Outcome::Rerender }
+            if sp.confirm_close.is_some() { sp.confirm_close = None; Outcome::Rerender }
+            else if sp.naming { sp.naming = false; Outcome::Rerender }
             else if sp.picking { sp.picking = false; Outcome::Rerender }
             else if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
+            // Quit only when nothing has unsaved changes; otherwise ask
+            // about the active tab first.
+            else if sp.cur().dirty { sp.request_close(sp.active); Outcome::Rerender }
+            else if sp.docs.iter().any(|d| d.dirty) {
+                if let Some(i) = sp.docs.iter().position(|d| d.dirty) { sp.request_close(i); }
+                Outcome::Rerender
+            }
             else { Outcome::Exit }
         }
         Event::InputChange { value } => {
@@ -1052,7 +1126,27 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         }
         ACT_NAME_SUBMIT => { sp.commit_name(); Outcome::Rerender }
         ACT_NAME_CANCEL => { sp.naming = false; Outcome::Rerender }
-        ACT_FILE_CLOSE => Outcome::Exit,
+        ACT_FILE_CLOSE => { sp.open_menu = None; sp.request_close(sp.active); Outcome::Rerender }
+        // Unsaved-changes dialog buttons.
+        ACT_CLOSE_DISCARD => {
+            if let Some(i) = sp.confirm_close.take() { sp.close_tab(i); }
+            Outcome::Rerender
+        }
+        ACT_CLOSE_CANCEL => { sp.confirm_close = None; Outcome::Rerender }
+        ACT_CLOSE_SAVE => {
+            if let Some(i) = sp.confirm_close.take() {
+                sp.active = i;
+                if let Some(p) = sp.cur().path.clone() {
+                    sp.write_to(&p);
+                    sp.close_tab(i);
+                } else {
+                    // No filename yet → name it first; close afterwards
+                    // (the tab is no longer dirty once saved).
+                    sp.start_naming("");
+                }
+            }
+            Outcome::Rerender
+        }
         ACT_VIEW_EDIT => { sp.open_menu = None; sp.cur_mut().mode = Mode::Edit; Outcome::Rerender }
         ACT_VIEW_PREVIEW => { sp.open_menu = None; sp.cur_mut().mode = Mode::Preview; Outcome::Rerender }
         ACT_HELP_ABOUT => {
@@ -1063,7 +1157,7 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         _ => {
             // Ranges, highest base first.
             if id >= ACT_TAB_CLOSE_BASE {
-                sp.close_tab((id - ACT_TAB_CLOSE_BASE) as usize);
+                sp.request_close((id - ACT_TAB_CLOSE_BASE) as usize);
                 return Outcome::Rerender;
             }
             if id >= ACT_TAB_BASE {
