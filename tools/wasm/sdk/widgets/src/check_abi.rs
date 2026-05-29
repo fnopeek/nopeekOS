@@ -173,6 +173,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::Focus(_)           => 4,
         Event::InputChange { .. } => 5,
         Event::ContextAction(_)   => 6,
+        Event::Open(_)            => 7,
     }
 }
 

@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::IconRef;
 use nopeek_widgets::prefab;
-use nopeek_widgets::style::{Padding, Spacing};
+use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -131,9 +131,6 @@ fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 
 // ── Action / node ids ─────────────────────────────────────────────────
 
-const ACT_TOOLBAR_SAVE: u32 = 4_000;
-const ACT_TOOLBAR_MODE: u32 = 4_001;
-
 const ACT_MENU_FILE: u32 = 5_000;
 const ACT_MENU_VIEW: u32 = 5_002;
 const ACT_MENU_HELP: u32 = 5_004;
@@ -153,6 +150,10 @@ const ACT_HELP_ABOUT: u32 = 6_300;
 
 // i-th file in the open dialog.
 const ACT_OPEN_FILE_BASE: u32 = 7_000;
+
+// Tab bar: select tab i / close tab i.
+const ACT_TAB_BASE:       u32 = 8_000;
+const ACT_TAB_CLOSE_BASE: u32 = 8_500;
 
 const NODE_MENU_FILE: u32 = 100;
 const NODE_MENU_VIEW: u32 = 102;
@@ -174,65 +175,28 @@ enum Kind { Markdown, Code(Lang), Plain }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lang { Rust, C, Js, Python, Shell, Json, Markup }
 
-struct Spell {
-    /// The whole document. Pre-allocated to `TEXT_CAP`; mutated via
-    /// `clear` + `push_str` so the backing buffer stays put across
-    /// `alloc_reset` between frames.
-    text:         String,
+/// One open document = one tab.
+struct Doc {
     /// npkFS path of the open file, or None for an unsaved buffer.
-    path:         Option<String>,
-    /// Basename shown in the toolbar.
-    title:        String,
-    dirty:        bool,
-    mode:         Mode,
-    open_menu:    Option<OpenMenu>,
-    /// The open dialog (a file-list popover) is showing.
-    picking:      bool,
-    /// The "Speichern unter…" name dialog is showing. While true the
-    /// TextArea is hidden, so the name `Input` is the only editable
-    /// widget and `InputChange` is unambiguous.
-    naming:       bool,
-    /// Filename being typed in the name dialog (pre-allocated so edits
-    /// stay within capacity across `alloc_reset`).
-    name_buf:     String,
-    /// `<home>/documents` — the open dialog's source directory.
-    docs_dir:     String,
-    /// Files listed by the open dialog (full npkFS paths).
-    files:        Vec<String>,
+    path:  Option<String>,
+    /// Basename shown on the tab.
+    title: String,
+    /// The whole document (`\n`-separated). Pre-allocated to `TEXT_CAP`.
+    text:  String,
+    dirty: bool,
+    /// Markdown raw↔rendered toggle (per document).
+    mode:  Mode,
 }
 
-impl Spell {
-    fn new() -> Self {
-        let home = read_home_dir();
-        let docs_dir = alloc::format!("{}/documents", home);
-        let mut sp = Spell {
-            text:      String::with_capacity(TEXT_CAP),
-            path:      None,
-            title:     "Unbenannt".to_string(),
-            dirty:     false,
-            mode:      Mode::Edit,
-            open_menu: None,
-            picking:   false,
-            naming:    false,
-            name_buf:  String::with_capacity(256),
-            docs_dir,
-            files:     Vec::new(),
-        };
-
-        // Launched to open a specific file (loft file association)? The
-        // path arrives via npk_launch_arg.
-        let mut argbuf = [0u8; 512];
-        let n = unsafe { npk_launch_arg(argbuf.as_mut_ptr() as i32, argbuf.len() as i32) };
-        if n > 0 {
-            if let Ok(path) = core::str::from_utf8(&argbuf[..n as usize]) {
-                sp.open(path);
-                return sp;
-            }
+impl Doc {
+    fn empty() -> Self {
+        Doc {
+            path:  None,
+            title: "Unbenannt".to_string(),
+            text:  String::with_capacity(TEXT_CAP),
+            dirty: false,
+            mode:  Mode::Edit,
         }
-
-        // No file argument → show the welcome text.
-        sp.text.push_str("# Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über **Datei → Öffnen…**.\n\n- Markdown-Vorschau über *Ansicht → Vorschau*\n- Speichern über das Disketten-Icon\n");
-        sp
     }
 
     fn ext(&self) -> Option<String> {
@@ -265,43 +229,138 @@ impl Spell {
         self.text.push_str(s);
     }
 
-    fn open(&mut self, path: &str) {
-        let buf_ptr = core::ptr::addr_of_mut!(FETCH_BUF) as *mut u8;
-        let n = unsafe {
-            npk_fetch(path.as_ptr() as i32, path.len() as i32,
-                      buf_ptr as i32, FETCH_BUF_SIZE as i32)
+    /// `true` for a fresh, never-edited Unbenannt tab — opening a file
+    /// reuses it instead of stacking a blank tab (VS Code behaviour).
+    fn is_pristine(&self) -> bool {
+        self.path.is_none() && !self.dirty
+    }
+}
+
+struct Spell {
+    /// Open documents, one per tab.
+    docs:         Vec<Doc>,
+    /// Index of the active tab.
+    active:       usize,
+    open_menu:    Option<OpenMenu>,
+    /// The open dialog (a file-list popover) is showing.
+    picking:      bool,
+    /// The "Speichern unter…" name dialog is showing. While true the
+    /// TextArea is hidden, so the name `Input` is the only editable
+    /// widget and `InputChange` is unambiguous.
+    naming:       bool,
+    /// Filename being typed in the name dialog (pre-allocated so edits
+    /// stay within capacity across `alloc_reset`).
+    name_buf:     String,
+    /// `<home>/documents` — the open dialog's source directory.
+    docs_dir:     String,
+    /// Files listed by the open dialog (full npkFS paths).
+    files:        Vec<String>,
+}
+
+impl Spell {
+    fn new() -> Self {
+        let home = read_home_dir();
+        let docs_dir = alloc::format!("{}/documents", home);
+        let mut sp = Spell {
+            docs:      Vec::new(),
+            active:    0,
+            open_menu: None,
+            picking:   false,
+            naming:    false,
+            name_buf:  String::with_capacity(256),
+            docs_dir,
+            files:     Vec::new(),
         };
-        if n <= 0 {
-            log("[spell] open: fetch failed");
-            return;
+
+        // Launched to open a specific file (loft file association)?
+        let mut argbuf = [0u8; 512];
+        let n = unsafe { npk_launch_arg(argbuf.as_mut_ptr() as i32, argbuf.len() as i32) };
+        if n > 0 {
+            if let Ok(path) = core::str::from_utf8(&argbuf[..n as usize]) {
+                if let Some(text) = read_file(path) {
+                    let mut d = Doc::empty();
+                    d.set_text(&text);
+                    d.path = Some(path.to_string());
+                    d.title = basename(path).to_string();
+                    sp.docs.push(d);
+                    return sp;
+                }
+            }
         }
-        let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-        match core::str::from_utf8(slice) {
-            Ok(s) => self.set_text(s),
-            Err(_) => { log("[spell] open: not UTF-8"); return; }
-        }
-        self.path  = Some(path.to_string());
-        self.title = basename(path).to_string();
-        self.dirty = false;
-        self.mode  = Mode::Edit;
+
+        // No file argument → welcome tab.
+        let mut d = Doc::empty();
+        d.text.push_str("# Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über **Datei → Öffnen…** — oder Doppelklick in loft.\n\n- Mehrere Dateien als Tabs\n- Code wird live farbig dargestellt\n- Tab rückt 4 Leerzeichen ein\n");
+        sp.docs.push(d);
+        sp
     }
 
-    /// Save to the current file, or open the name dialog if the buffer
-    /// has no filename yet (fresh "Neu" document).
+    fn cur(&self) -> &Doc { &self.docs[self.active] }
+    fn cur_mut(&mut self) -> &mut Doc { &mut self.docs[self.active] }
+
+    /// Open a file: focus its tab if already open (VS Code behaviour),
+    /// else load it into a new tab (reusing a pristine Unbenannt tab).
+    fn open_path(&mut self, path: &str) {
+        if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path)) {
+            self.active = i;
+            return;
+        }
+        let text = match read_file(path) {
+            Some(t) => t,
+            None => { log("[spell] open: failed"); return; }
+        };
+        let mut d = Doc::empty();
+        d.set_text(&text);
+        d.path = Some(path.to_string());
+        d.title = basename(path).to_string();
+        if self.cur().is_pristine() {
+            let a = self.active;
+            self.docs[a] = d;
+        } else {
+            self.docs.push(d);
+            self.active = self.docs.len() - 1;
+        }
+    }
+
+    fn new_doc(&mut self) {
+        if self.cur().is_pristine() {
+            let a = self.active;
+            self.docs[a] = Doc::empty();
+        } else {
+            self.docs.push(Doc::empty());
+            self.active = self.docs.len() - 1;
+        }
+    }
+
+    fn close_tab(&mut self, i: usize) {
+        if i >= self.docs.len() { return; }
+        self.docs.remove(i);
+        if self.docs.is_empty() {
+            self.docs.push(Doc::empty());
+            self.active = 0;
+        } else if self.active >= self.docs.len() {
+            self.active = self.docs.len() - 1;
+        } else if self.active > i {
+            self.active -= 1;
+        }
+    }
+
+    /// Save the active doc, or open the name dialog if it has no file yet.
     fn save_or_name(&mut self) {
-        match self.path.clone() {
-            Some(p) => self.write_to(&p),
-            None => self.start_naming(""),
+        if let Some(p) = self.cur().path.clone() {
+            self.write_to(&p);
+        } else {
+            self.start_naming("");
         }
     }
 
     fn write_to(&mut self, path: &str) {
         let r = unsafe {
             npk_store(path.as_ptr() as i32, path.len() as i32,
-                      self.text.as_ptr() as i32, self.text.len() as i32)
+                      self.cur().text.as_ptr() as i32, self.cur().text.len() as i32)
         };
         if r < 0 { log("[spell] save: store failed"); return; }
-        self.dirty = false;
+        self.cur_mut().dirty = false;
     }
 
     /// Open the "Speichern unter…" dialog. `default` pre-fills the name
@@ -311,7 +370,7 @@ impl Spell {
         self.picking = false;
         self.name_buf.clear();
         if default.is_empty() {
-            self.name_buf.push_str(match self.kind() {
+            self.name_buf.push_str(match self.cur().kind() {
                 Kind::Code(Lang::Rust) => "unbenannt.rs",
                 _ => "unbenannt.md",
             });
@@ -321,21 +380,35 @@ impl Spell {
         self.naming = true;
     }
 
-    /// Commit the name dialog: write the buffer to `documents/<name>`
-    /// and adopt it as the current file.
+    /// Commit the name dialog: write the active doc to `documents/<name>`
+    /// and adopt it as that doc's file.
     fn commit_name(&mut self) {
         let name = self.name_buf.trim();
         if name.is_empty() { return; }
         let path = alloc::format!("{}/{}", self.docs_dir, name);
         self.write_to(&path);
-        self.title = basename(&path).to_string();
-        self.path = Some(path);
+        let title = basename(&path).to_string();
+        let d = self.cur_mut();
+        d.title = title;
+        d.path = Some(path);
         self.naming = false;
     }
 
     fn refresh_files(&mut self) {
         self.files = list_files(&self.docs_dir);
     }
+}
+
+/// Fetch a file's contents as a String, or None on error / non-UTF-8.
+fn read_file(path: &str) -> Option<String> {
+    let buf_ptr = core::ptr::addr_of_mut!(FETCH_BUF) as *mut u8;
+    let n = unsafe {
+        npk_fetch(path.as_ptr() as i32, path.len() as i32,
+                  buf_ptr as i32, FETCH_BUF_SIZE as i32)
+    };
+    if n <= 0 { return None; }
+    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
+    core::str::from_utf8(slice).ok().map(|s| s.to_string())
 }
 
 // ── Filesystem helpers ────────────────────────────────────────────────
@@ -392,7 +465,7 @@ fn render(sp: &Spell) -> Widget {
     let mut children: Vec<Widget> = alloc::vec![
         render_menu_bar(),
         Widget::Divider,
-        render_toolbar(sp),
+        render_tabbar(sp),
         Widget::Divider,
         render_body(sp),       // Flex(1) — fills
         Widget::Divider,
@@ -452,7 +525,7 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
             prefab::popover_menu(&[
                 ("Quelltext".to_string(), ActionId(ACT_VIEW_EDIT)),
                 ("Vorschau".to_string(),  ActionId(ACT_VIEW_PREVIEW)),
-            ], Some(match sp.mode { Mode::Edit => 0, Mode::Preview => 1 })),
+            ], Some(match sp.cur().mode { Mode::Edit => 0, Mode::Preview => 1 })),
         ),
         OpenMenu::Help => (
             NODE_MENU_HELP,
@@ -482,29 +555,72 @@ fn render_open_dialog(sp: &Spell) -> Widget {
     }
 }
 
-fn render_toolbar(sp: &Spell) -> Widget {
-    let title = if sp.dirty {
-        alloc::format!("{} *", sp.title)
-    } else {
-        sp.title.clone()
-    };
-    let mut children: Vec<Widget> = alloc::vec![
-        Widget::Icon { id: IconId::FileText, size: 24, modifiers: alloc::vec![Modifier::Tint(Token::Accent)] },
-        Widget::Text { content: title, style: TextStyle::Body, modifiers: alloc::vec![] },
-        Widget::Spacer { flex: 1 },
-    ];
-    // Mode toggle is only meaningful for markdown (raw ↔ rendered).
-    // Code/plain are always the live-highlighted editor, no toggle.
-    if matches!(sp.kind(), Kind::Markdown) {
-        let mode_icon = match sp.mode { Mode::Edit => IconId::FileText, Mode::Preview => IconId::Code };
-        children.push(prefab::icon_button(mode_icon, 24, Some(ActionId(ACT_TOOLBAR_MODE)), None));
+/// Tab bar — one tab per open document, active tab highlighted, each
+/// with a dirty dot and a close (×). Trailing "+" opens a new tab.
+/// Replaces the old filename+icons toolbar (save lives in the Datei
+/// menu, the markdown view toggle in the Ansicht menu).
+fn render_tabbar(sp: &Spell) -> Widget {
+    let mut tabs: Vec<Widget> = Vec::with_capacity(sp.docs.len() + 1);
+    for (i, d) in sp.docs.iter().enumerate() {
+        let active = i == sp.active;
+        let label = if d.dirty { alloc::format!("{} ●", d.title) } else { d.title.clone() };
+        let mut mods: Vec<Modifier> = alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::OnClick(ActionId(ACT_TAB_BASE + i as u32)),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ];
+        if active {
+            mods.push(Modifier::Background(Token::SurfaceElevated));
+            mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Sm.as_u8() });
+        } else {
+            mods.push(Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceMuted),
+                Modifier::Rounded(Radius::Sm.as_u8()),
+            ]));
+        }
+        tabs.push(Widget::Row {
+            children: alloc::vec![
+                Widget::Text {
+                    content:   label,
+                    style:     TextStyle::Body,
+                    modifiers: if active { alloc::vec![] } else { alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+                },
+                Widget::Icon {
+                    id:   IconId::X,
+                    size: 14,
+                    modifiers: alloc::vec![
+                        Modifier::OnClick(ActionId(ACT_TAB_CLOSE_BASE + i as u32)),
+                        Modifier::Tint(Token::OnSurfaceMuted),
+                    ],
+                },
+            ],
+            spacing:   Spacing::Xs.as_u16(),
+            align:     Align::Center,
+            modifiers: mods,
+        });
     }
-    children.push(prefab::icon_button(IconId::Download, 24, Some(ActionId(ACT_TOOLBAR_SAVE)), None));
-    Widget::Row {
-        children,
-        spacing:   Spacing::Sm.as_u16(),
-        align:     Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+    // New-tab button.
+    tabs.push(Widget::Text {
+        content:   "+".to_string(),
+        style:     TextStyle::Body,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::OnClick(ActionId(ACT_FILE_NEW)),
+            Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceMuted),
+                Modifier::Rounded(Radius::Sm.as_u8()),
+            ]),
+        ],
+    });
+    Widget::Scroll {
+        child: Box::new(Widget::Row {
+            children:  tabs,
+            spacing:   Spacing::Xs.as_u16(),
+            align:     Align::Center,
+            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+        }),
+        axis:      Axis::Horizontal,
+        modifiers: alloc::vec![],
     }
 }
 
@@ -515,9 +631,10 @@ fn render_body(sp: &Spell) -> Widget {
     // Markdown is the special case: a rendered preview you toggle to.
     // Everything else is the live-highlighted editor — code gets colour
     // spans the compositor paints while you type, no toggle needed.
-    if matches!(sp.kind(), Kind::Markdown) && sp.mode == Mode::Preview {
+    let doc = sp.cur();
+    if matches!(doc.kind(), Kind::Markdown) && doc.mode == Mode::Preview {
         return Widget::Scroll {
-            child:     Box::new(markdown_preview(&sp.text)),
+            child:     Box::new(markdown_preview(&doc.text)),
             axis:      Axis::Vertical,
             modifiers: alloc::vec![
                 Modifier::Flex(1),
@@ -526,12 +643,12 @@ fn render_body(sp: &Spell) -> Widget {
             ],
         };
     }
-    let spans = match sp.kind() {
-        Kind::Code(lang) => code_spans(&sp.text, lang),
+    let spans = match doc.kind() {
+        Kind::Code(lang) => code_spans(&doc.text, lang),
         _ => Vec::new(),
     };
     Widget::TextArea {
-        value:       sp.text.clone(),
+        value:       doc.text.clone(),
         placeholder: "Tippe los…".to_string(),
         spans,
         modifiers:   alloc::vec![
@@ -585,13 +702,15 @@ fn render_name_dialog(sp: &Spell) -> Widget {
 }
 
 fn render_footer(sp: &Spell) -> Widget {
-    let lines = sp.text.split('\n').count();
-    let left = alloc::format!("{} Zeilen · {} Zeichen", lines, sp.text.chars().count());
-    let right = if sp.dirty {
-        alloc::format!("{} · ● geändert", sp.kind_label())
-    } else {
-        alloc::format!("{} · gespeichert", sp.kind_label())
+    let doc = sp.cur();
+    // Left: the real npkFS path of the active file (or "neue Datei").
+    let left = match &doc.path {
+        Some(p) => p.clone(),
+        None => "neue Datei".to_string(),
     };
+    let lines = doc.text.split('\n').count();
+    let state = if doc.dirty { "● geändert" } else { "gespeichert" };
+    let right = alloc::format!("{} · {} Z. · {}", doc.kind_label(), lines, state);
     prefab::footer(&left, &right)
 }
 
@@ -884,10 +1003,17 @@ fn handle(sp: &mut Spell, ev: Event) -> Outcome {
                 sp.name_buf.clear();
                 sp.name_buf.push_str(&value);
             } else {
-                // Mirror the compositor's edit buffer (the whole document).
-                sp.set_text(&value);
-                sp.dirty = true;
+                // Mirror the compositor's edit buffer into the active doc.
+                let d = sp.cur_mut();
+                d.set_text(&value);
+                d.dirty = true;
             }
+            Outcome::Rerender
+        }
+        // Another file was opened while we're running (loft association,
+        // singleton routing) → open it as a tab.
+        Event::Open(path) => {
+            sp.open_path(&path);
             Outcome::Rerender
         }
         Event::Action(ActionId(id)) => handle_action(sp, id),
@@ -897,11 +1023,6 @@ fn handle(sp: &mut Spell, ev: Event) -> Outcome {
 
 fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
     match id {
-        ACT_TOOLBAR_SAVE => { sp.save_or_name(); Outcome::Rerender }
-        ACT_TOOLBAR_MODE => {
-            sp.mode = match sp.mode { Mode::Edit => Mode::Preview, Mode::Preview => Mode::Edit };
-            Outcome::Rerender
-        }
         ACT_MENU_FILE => { sp.picking = false; sp.open_menu = toggle(sp.open_menu, OpenMenu::File); Outcome::Rerender }
         ACT_MENU_VIEW => { sp.picking = false; sp.open_menu = toggle(sp.open_menu, OpenMenu::View); Outcome::Rerender }
         ACT_MENU_HELP => { sp.picking = false; sp.open_menu = toggle(sp.open_menu, OpenMenu::Help); Outcome::Rerender }
@@ -914,11 +1035,7 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         }
         ACT_FILE_NEW => {
             sp.open_menu = None;
-            sp.set_text("");
-            sp.path = None;
-            sp.title = "Unbenannt".to_string();
-            sp.dirty = false;
-            sp.mode = Mode::Edit;
+            sp.new_doc();
             Outcome::Rerender
         }
         ACT_FILE_OPEN => {
@@ -929,25 +1046,35 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         }
         ACT_FILE_SAVE => { sp.open_menu = None; sp.save_or_name(); Outcome::Rerender }
         ACT_FILE_SAVE_AS => {
-            let d = if sp.path.is_some() { sp.title.clone() } else { String::new() };
+            let d = if sp.cur().path.is_some() { sp.cur().title.clone() } else { String::new() };
             sp.start_naming(&d);
             Outcome::Rerender
         }
         ACT_NAME_SUBMIT => { sp.commit_name(); Outcome::Rerender }
         ACT_NAME_CANCEL => { sp.naming = false; Outcome::Rerender }
         ACT_FILE_CLOSE => Outcome::Exit,
-        ACT_VIEW_EDIT => { sp.open_menu = None; sp.mode = Mode::Edit; Outcome::Rerender }
-        ACT_VIEW_PREVIEW => { sp.open_menu = None; sp.mode = Mode::Preview; Outcome::Rerender }
+        ACT_VIEW_EDIT => { sp.open_menu = None; sp.cur_mut().mode = Mode::Edit; Outcome::Rerender }
+        ACT_VIEW_PREVIEW => { sp.open_menu = None; sp.cur_mut().mode = Mode::Preview; Outcome::Rerender }
         ACT_HELP_ABOUT => {
             log("[spell] Spell 0.1 — nopeekOS text editor");
             sp.open_menu = None;
             Outcome::Rerender
         }
         _ => {
+            // Ranges, highest base first.
+            if id >= ACT_TAB_CLOSE_BASE {
+                sp.close_tab((id - ACT_TAB_CLOSE_BASE) as usize);
+                return Outcome::Rerender;
+            }
+            if id >= ACT_TAB_BASE {
+                let i = (id - ACT_TAB_BASE) as usize;
+                if i < sp.docs.len() { sp.active = i; }
+                return Outcome::Rerender;
+            }
             if id >= ACT_OPEN_FILE_BASE {
                 let i = (id - ACT_OPEN_FILE_BASE) as usize;
                 if let Some(path) = sp.files.get(i).cloned() {
-                    sp.open(&path);
+                    sp.open_path(&path);
                     sp.picking = false;
                     return Outcome::Rerender;
                 }

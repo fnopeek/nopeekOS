@@ -1135,7 +1135,7 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
 ///   -1 → version mismatch or cap denied
 ///   -2 → postcard decode failure
 ///   -3 → couldn't allocate a window
-pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
+pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     let (&version, body) = match bytes.split_first() {
         Some(v) => v,
         None => return -1,
@@ -1162,7 +1162,11 @@ pub fn scene_commit(bytes: &[u8], window_id: u32) -> i32 {
     // commit reuses the same slot.
     let (target_id, new_window) = match window_id {
         0 => {
-            let id = crate::shade::with_compositor(|c| c.create_widget_window("widget"))
+            // Title the window with the module name so launch paths can
+            // find an already-running instance (re-focus / singleton +
+            // npk_open tab routing) and the bar shows the app name.
+            let title = if module_name.is_empty() { "widget" } else { module_name };
+            let id = crate::shade::with_compositor(|c| c.create_widget_window(title))
                 .ok_or(-3i32);
             match id {
                 Ok(id) => (id.0, Some(id.0)),
