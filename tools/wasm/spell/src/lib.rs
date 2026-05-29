@@ -659,7 +659,10 @@ fn render_tabbar(sp: &Spell) -> Widget {
             children:  tabs,
             spacing:   Spacing::Xs.as_u16(),
             align:     Align::Center,
-            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+            // Taller padding so the tab row matches loft's toolbar height
+            // (its search box makes it tall) → the divider below the tab
+            // row lines up with loft's across a split view.
+            modifiers: alloc::vec![Modifier::Padding(Padding::Md.as_u16())],
         }),
         axis:      Axis::Horizontal,
         modifiers: alloc::vec![],
