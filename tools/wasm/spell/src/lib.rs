@@ -131,10 +131,14 @@ const ACT_MENU_VIEW: u32 = 5_002;
 const ACT_MENU_HELP: u32 = 5_004;
 const ACT_MENU_DISMISS: u32 = 5_500;
 
-const ACT_FILE_NEW:   u32 = 6_000;
-const ACT_FILE_OPEN:  u32 = 6_001;
-const ACT_FILE_SAVE:  u32 = 6_002;
-const ACT_FILE_CLOSE: u32 = 6_003;
+const ACT_FILE_NEW:     u32 = 6_000;
+const ACT_FILE_OPEN:    u32 = 6_001;
+const ACT_FILE_SAVE:    u32 = 6_002;
+const ACT_FILE_CLOSE:   u32 = 6_003;
+const ACT_FILE_SAVE_AS: u32 = 6_004;
+// Name dialog: on_submit of the filename Input + the two buttons.
+const ACT_NAME_SUBMIT:  u32 = 6_005;
+const ACT_NAME_CANCEL:  u32 = 6_006;
 const ACT_VIEW_EDIT:    u32 = 6_100;
 const ACT_VIEW_PREVIEW: u32 = 6_101;
 const ACT_HELP_ABOUT: u32 = 6_300;
@@ -171,6 +175,13 @@ struct Spell {
     open_menu:    Option<OpenMenu>,
     /// The open dialog (a file-list popover) is showing.
     picking:      bool,
+    /// The "Speichern unter…" name dialog is showing. While true the
+    /// TextArea is hidden, so the name `Input` is the only editable
+    /// widget and `InputChange` is unambiguous.
+    naming:       bool,
+    /// Filename being typed in the name dialog (pre-allocated so edits
+    /// stay within capacity across `alloc_reset`).
+    name_buf:     String,
     /// `<home>/documents` — the open dialog's source directory.
     docs_dir:     String,
     /// Files listed by the open dialog (full npkFS paths).
@@ -191,6 +202,8 @@ impl Spell {
             mode:      Mode::Edit,
             open_menu: None,
             picking:   false,
+            naming:    false,
+            name_buf:  String::with_capacity(256),
             docs_dir,
             files:     Vec::new(),
         }
@@ -239,22 +252,51 @@ impl Spell {
         self.mode  = Mode::Edit;
     }
 
-    fn save(&mut self) {
-        let path = match &self.path {
-            Some(p) => p.clone(),
-            None => {
-                // No filename yet — v1 has no save-as text dialog, so a
-                // fresh buffer can't be persisted. Open a file first.
-                log("[spell] save: no filename (open a file first)");
-                return;
-            }
-        };
+    /// Save to the current file, or open the name dialog if the buffer
+    /// has no filename yet (fresh "Neu" document).
+    fn save_or_name(&mut self) {
+        match self.path.clone() {
+            Some(p) => self.write_to(&p),
+            None => self.start_naming(""),
+        }
+    }
+
+    fn write_to(&mut self, path: &str) {
         let r = unsafe {
             npk_store(path.as_ptr() as i32, path.len() as i32,
                       self.text.as_ptr() as i32, self.text.len() as i32)
         };
         if r < 0 { log("[spell] save: store failed"); return; }
         self.dirty = false;
+    }
+
+    /// Open the "Speichern unter…" dialog. `default` pre-fills the name
+    /// field (current basename, or a sensible suggestion when empty).
+    fn start_naming(&mut self, default: &str) {
+        self.open_menu = None;
+        self.picking = false;
+        self.name_buf.clear();
+        if default.is_empty() {
+            self.name_buf.push_str(match self.kind() {
+                Kind::Rust => "unbenannt.rs",
+                _ => "unbenannt.md",
+            });
+        } else {
+            self.name_buf.push_str(default);
+        }
+        self.naming = true;
+    }
+
+    /// Commit the name dialog: write the buffer to `documents/<name>`
+    /// and adopt it as the current file.
+    fn commit_name(&mut self) {
+        let name = self.name_buf.trim();
+        if name.is_empty() { return; }
+        let path = alloc::format!("{}/{}", self.docs_dir, name);
+        self.write_to(&path);
+        self.title = basename(&path).to_string();
+        self.path = Some(path);
+        self.naming = false;
     }
 
     fn refresh_files(&mut self) {
@@ -369,10 +411,11 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
         OpenMenu::File => (
             NODE_MENU_FILE,
             prefab::popover_menu(&[
-                ("Neu".to_string(),       ActionId(ACT_FILE_NEW)),
-                ("Öffnen…".to_string(),   ActionId(ACT_FILE_OPEN)),
-                ("Speichern".to_string(), ActionId(ACT_FILE_SAVE)),
-                ("Schließen".to_string(), ActionId(ACT_FILE_CLOSE)),
+                ("Neu".to_string(),            ActionId(ACT_FILE_NEW)),
+                ("Öffnen…".to_string(),        ActionId(ACT_FILE_OPEN)),
+                ("Speichern".to_string(),      ActionId(ACT_FILE_SAVE)),
+                ("Speichern unter…".to_string(), ActionId(ACT_FILE_SAVE_AS)),
+                ("Schließen".to_string(),      ActionId(ACT_FILE_CLOSE)),
             ], None),
         ),
         OpenMenu::View => (
@@ -434,6 +477,9 @@ fn render_toolbar(sp: &Spell) -> Widget {
 }
 
 fn render_body(sp: &Spell) -> Widget {
+    if sp.naming {
+        return render_name_dialog(sp);
+    }
     match sp.mode {
         Mode::Edit => Widget::TextArea {
             value:       sp.text.clone(),
@@ -460,6 +506,48 @@ fn render_body(sp: &Spell) -> Widget {
                 ],
             }
         }
+    }
+}
+
+/// "Speichern unter…" dialog — fills the body (TextArea hidden) so the
+/// name `Input` is the only editable widget. Click the field to focus it
+/// (a re-commit doesn't auto-focus), type the name, Enter or Speichern.
+fn render_name_dialog(sp: &Spell) -> Widget {
+    let card = prefab::dialog(
+        "Speichern unter",
+        Widget::Column {
+            children: alloc::vec![
+                Widget::Text {
+                    content:   alloc::format!("Dateiname (in {}/):", basename(&sp.docs_dir)),
+                    style:     TextStyle::Muted,
+                    modifiers: alloc::vec![],
+                },
+                prefab::input(&sp.name_buf, "name.md", prefab::InputKind::Text,
+                              ActionId(ACT_NAME_SUBMIT), None),
+                Widget::Row {
+                    children: alloc::vec![
+                        Widget::Spacer { flex: 1 },
+                        prefab::button("Abbrechen", prefab::ButtonStyle::Ghost,   ActionId(ACT_NAME_CANCEL)),
+                        prefab::button("Speichern",  prefab::ButtonStyle::Primary, ActionId(ACT_NAME_SUBMIT)),
+                    ],
+                    spacing:   Spacing::Sm.as_u16(),
+                    align:     Align::Center,
+                    modifiers: alloc::vec![],
+                },
+            ],
+            spacing:   Spacing::Md.as_u16(),
+            align:     Align::Stretch,
+            modifiers: alloc::vec![],
+        },
+        Some("Klicke ins Feld, dann Enter zum Speichern · Esc bricht ab"),
+        360,
+    );
+    // Centre the dialog in the body area.
+    Widget::Column {
+        children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
     }
 }
 
@@ -690,14 +778,21 @@ enum Outcome { Idle, Rerender, Exit }
 fn handle(sp: &mut Spell, ev: Event) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => {
-            if sp.picking { sp.picking = false; Outcome::Rerender }
+            if sp.naming { sp.naming = false; Outcome::Rerender }
+            else if sp.picking { sp.picking = false; Outcome::Rerender }
             else if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
             else { Outcome::Exit }
         }
         Event::InputChange { value } => {
-            // Mirror the compositor's edit buffer (the whole document).
-            sp.set_text(&value);
-            sp.dirty = true;
+            if sp.naming {
+                // Only the name Input is editable while naming.
+                sp.name_buf.clear();
+                sp.name_buf.push_str(&value);
+            } else {
+                // Mirror the compositor's edit buffer (the whole document).
+                sp.set_text(&value);
+                sp.dirty = true;
+            }
             Outcome::Rerender
         }
         Event::Action(ActionId(id)) => handle_action(sp, id),
@@ -707,7 +802,7 @@ fn handle(sp: &mut Spell, ev: Event) -> Outcome {
 
 fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
     match id {
-        ACT_TOOLBAR_SAVE => { sp.save(); Outcome::Rerender }
+        ACT_TOOLBAR_SAVE => { sp.save_or_name(); Outcome::Rerender }
         ACT_TOOLBAR_MODE => {
             sp.mode = match sp.mode { Mode::Edit => Mode::Preview, Mode::Preview => Mode::Edit };
             Outcome::Rerender
@@ -737,7 +832,14 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
             sp.picking = true;
             Outcome::Rerender
         }
-        ACT_FILE_SAVE => { sp.open_menu = None; sp.save(); Outcome::Rerender }
+        ACT_FILE_SAVE => { sp.open_menu = None; sp.save_or_name(); Outcome::Rerender }
+        ACT_FILE_SAVE_AS => {
+            let d = if sp.path.is_some() { sp.title.clone() } else { String::new() };
+            sp.start_naming(&d);
+            Outcome::Rerender
+        }
+        ACT_NAME_SUBMIT => { sp.commit_name(); Outcome::Rerender }
+        ACT_NAME_CANCEL => { sp.naming = false; Outcome::Rerender }
         ACT_FILE_CLOSE => Outcome::Exit,
         ACT_VIEW_EDIT => { sp.open_menu = None; sp.mode = Mode::Edit; Outcome::Rerender }
         ACT_VIEW_PREVIEW => { sp.open_menu = None; sp.mode = Mode::Preview; Outcome::Rerender }
