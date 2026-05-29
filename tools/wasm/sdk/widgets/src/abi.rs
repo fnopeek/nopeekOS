@@ -465,6 +465,11 @@ pub enum Event {
     /// fired for `MouseButton::Right`. Apps use it to open context
     /// menus (Popover) without consuming the primary click.
     ContextAction(ActionId),
+    /// "Open this resource" — delivered when `npk_open` targets an app
+    /// that is ALREADY running (instead of spawning a duplicate). The
+    /// payload is the launch argument (e.g. a file path). Lets an app
+    /// be a singleton with tabs: a second open routes here as a new tab.
+    Open(String),
     // Appended only.
 }
 

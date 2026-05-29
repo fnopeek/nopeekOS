@@ -703,6 +703,27 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             // Module name only — no path traversal into the store.
             if app.is_empty() || app.contains('/') || app.contains("..") { return -1; }
             let arg = if arg_len > 0 { read_wasm_str(&caller, arg_ptr, arg_len) } else { None };
+
+            // Singleton + tabs: if the target app already has a widget
+            // window (titled with its module name), deliver the open as an
+            // Event::Open to that instance and focus it instead of
+            // spawning a duplicate. Only when there's something to open.
+            if let Some(arg_str) = arg.clone() {
+                let existing = crate::shade::with_compositor(|c| {
+                    c.windows.iter()
+                        .find(|w| w.kind == crate::shade::window::WindowKind::Widget
+                            && w.title == app)
+                        .map(|w| w.id)
+                }).flatten();
+                if let Some(id) = existing {
+                    crate::shade::widgets::push_event(
+                        id.0, crate::shade::widgets::abi::Event::Open(arg_str));
+                    crate::shade::with_compositor(|c| c.focus_window(id));
+                    crate::shade::request_render();
+                    return 0;
+                }
+            }
+
             let path = alloc::format!("sys/wasm/{}", app);
             let bytes = match crate::npkfs::fetch(&path) {
                 Ok((b, _)) => b,
@@ -777,7 +798,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 }
             }
 
-            let result = crate::shade::widgets::scene_commit(&payload, prev_window);
+            let module_name = caller.data().module_name.clone();
+            let result = crate::shade::widgets::scene_commit(&payload, prev_window, &module_name);
 
             // Positive return = newly allocated window id → store so
             // subsequent commits from this app reuse the same slot.
