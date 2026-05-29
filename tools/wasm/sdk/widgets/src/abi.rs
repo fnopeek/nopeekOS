@@ -377,6 +377,22 @@ pub enum Widget {
         items:     Vec<Widget>,
         modifiers: Vec<Modifier>,
     },
+    /// Multi-line text editor. Unlike `Input` (single line, on_submit on
+    /// Enter), the compositor owns a 2-D caret: arrows move within / across
+    /// lines, Enter inserts a newline, Home/End are line-relative,
+    /// PageUp/PageDown scroll by a viewport. `value` is the whole document
+    /// (`\n`-separated). Buffer mutations emit `Event::InputChange { value }`
+    /// (the entire document) exactly like `Input`; only one widget is ever
+    /// focused, so there is no ambiguity. There is intentionally no
+    /// `on_submit` — Enter is a newline, not a submit. Rendered with
+    /// `TextStyle::Mono`; the visible window scrolls to keep the caret in
+    /// view. Apps typically wrap it in `Modifier::Flex(1)` so it fills the
+    /// space between toolbar and footer.
+    TextArea {
+        value:       String,
+        placeholder: String,
+        modifiers:   Vec<Modifier>,
+    },
     // Appended only.
 }
 

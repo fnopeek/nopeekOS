@@ -130,6 +130,7 @@ fn _widget_wire_position(w: &Widget) -> usize {
         Widget::Popover  { .. } => 12,
         Widget::Tooltip  { .. } => 13,
         Widget::Menu     { .. } => 14,
+        Widget::TextArea { .. } => 15,
     }
 }
 

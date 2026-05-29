@@ -450,6 +450,76 @@ fn paint_node_eff(
             }
         }
 
+        Widget::TextArea { value, placeholder, .. } => {
+            // The editing surface. Background / border come from the
+            // app's modifiers (handled in paint_modifiers_eff). When
+            // focused, the live buffer leads the tree's `value` by one
+            // round-trip — render from `edit_state` so typing is instant.
+            let live: &str = match edit_state {
+                Some(e) => e.value.as_str(),
+                None    => value.as_str(),
+            };
+            let style = super::abi::TextStyle::Mono;
+            let line_h = ceil_u32_local(crate::gui::text::line_height(style)).max(1);
+            // Resolve text colour: default OnSurface, Tint overrides.
+            let mut color = Token::OnSurface;
+            for m in eff { if let Modifier::Tint(tok) = m { color = *tok; } }
+
+            let text_x = inner_x + 4;
+            let top_y  = inner_y + 4;
+            let visible = (rect.h / line_h).max(1) as usize;
+
+            // Empty buffer → muted placeholder on the first line.
+            if live.is_empty() {
+                rast.text(target, placeholder, style, Token::OnSurfaceMuted,
+                          Point { x: text_x, y: top_y });
+            }
+
+            // Caret line/column (byte prefix within the caret's line).
+            let (caret_line, caret_prefix) = match edit_state {
+                Some(e) => {
+                    let cur = e.cursor.min(live.len());
+                    let cline = live[..cur].matches('\n').count();
+                    let lstart = live[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    (Some(cline), &live[lstart..cur])
+                }
+                None => (None, ""),
+            };
+
+            // Scroll so the caret line stays in view (follows the caret;
+            // no free scroll without moving the caret in v1).
+            let scroll = match caret_line {
+                Some(cl) if cl + 1 > visible => cl + 1 - visible,
+                _ => 0,
+            };
+
+            // Paint the visible window of lines.
+            for (li, line) in live.split('\n').enumerate() {
+                if li < scroll { continue; }
+                let row = li - scroll;
+                if row >= visible { break; }
+                let y = top_y + (row as u32 * line_h) as i32;
+                if !line.is_empty() {
+                    rast.text(target, line, style, color, Point { x: text_x, y });
+                }
+            }
+
+            // Caret (only when focused / editor present).
+            if let Some(cl) = caret_line {
+                if cl >= scroll && cl - scroll < visible {
+                    let advance = ceil_u32_local(crate::gui::text::measure(caret_prefix, style));
+                    let y = top_y + ((cl - scroll) as u32 * line_h) as i32;
+                    let caret_rect = Rect {
+                        x: text_x + advance as i32,
+                        y,
+                        w: 2,
+                        h: line_h,
+                    };
+                    rast.rect(target, caret_rect, Fill::Solid(Token::OnSurface));
+                }
+            }
+        }
+
         Widget::Checkbox { value, .. } => {
             // Outer stroke + inner fill if checked.
             rast.rect(target, rect, Fill::Solid(Token::Border));
@@ -501,6 +571,7 @@ fn modifiers_of(w: &Widget) -> &[Modifier] {
         Widget::Icon    { modifiers, .. } |
         Widget::Button  { modifiers, .. } |
         Widget::Input   { modifiers, .. } |
+        Widget::TextArea{ modifiers, .. } |
         Widget::Checkbox{ modifiers, .. } |
         Widget::Canvas  { modifiers, .. } |
         Widget::Popover { modifiers, .. } |

@@ -461,6 +461,17 @@ pub enum Widget {
         items:     Vec<Widget>,
         modifiers: Vec<Modifier>,
     },
+    /// Multi-line text editor. The compositor owns a 2-D caret (arrows
+    /// move within/across lines, Enter inserts a newline, Home/End are
+    /// line-relative, PageUp/PageDown scroll a viewport). `value` is the
+    /// whole `\n`-separated document; buffer mutations emit
+    /// `Event::InputChange { value }` like `Input`. No `on_submit` —
+    /// Enter is a newline. See the SDK mirror for the full contract.
+    TextArea {
+        value:       String,
+        placeholder: String,
+        modifiers:   Vec<Modifier>,
+    },
     // Appended only.
 }
 

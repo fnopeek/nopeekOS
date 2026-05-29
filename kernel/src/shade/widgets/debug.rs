@@ -79,6 +79,7 @@ fn widget_label(w: &Widget) -> String {
         Widget::Popover  { .. }           => String::from("Popover (RESERVED)"),
         Widget::Tooltip  { .. }           => String::from("Tooltip (RESERVED)"),
         Widget::Menu     { items, .. }    => alloc::format!("Menu({}) (RESERVED)", items.len()),
+        Widget::TextArea { value, .. }    => alloc::format!("TextArea({} bytes)", value.len()),
     }
 }
 
@@ -176,6 +177,10 @@ fn write_node(out: &mut String, w: &Widget, depth: usize) {
             let _ = writeln!(out, "[npk] {}Menu (RESERVED){}",
                 indent, fmt_mods(modifiers));
             for c in items { write_node(out, c, depth + 1); }
+        }
+        Widget::TextArea { value, placeholder, modifiers } => {
+            let _ = writeln!(out, "[npk] {}TextArea {} bytes placeholder={:?}{}",
+                indent, value.len(), placeholder, fmt_mods(modifiers));
         }
     }
 }
