@@ -472,7 +472,10 @@ impl Compositor {
             };
             // Position the window with the visible tray near the baseline
             // and the popover space stretching upward inside the window.
-            let win_y = (baseline - dh as i32 + offset as i32).max(0) as u32;
+            // Mirrors `dock_tick`: y = baseline - (thickness + gap) + offset
+            // so the floating gap above the screen edge is preserved.
+            let slide = dh as i32 + gap as i32;
+            let win_y = (baseline - slide + offset as i32).max(0) as u32;
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
                 win.y = win_y;
                 win.visible = visible;
