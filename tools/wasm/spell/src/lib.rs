@@ -44,6 +44,7 @@ unsafe extern "C" {
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
@@ -199,10 +200,8 @@ impl Spell {
     fn new() -> Self {
         let home = read_home_dir();
         let docs_dir = alloc::format!("{}/documents", home);
-        let mut text = String::with_capacity(TEXT_CAP);
-        text.push_str("# Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über **Datei → Öffnen…**.\n\n- Markdown-Vorschau über *Ansicht → Vorschau*\n- Speichern über das Disketten-Icon\n");
-        Spell {
-            text,
+        let mut sp = Spell {
+            text:      String::with_capacity(TEXT_CAP),
             path:      None,
             title:     "Unbenannt".to_string(),
             dirty:     false,
@@ -213,7 +212,22 @@ impl Spell {
             name_buf:  String::with_capacity(256),
             docs_dir,
             files:     Vec::new(),
+        };
+
+        // Launched to open a specific file (loft file association)? The
+        // path arrives via npk_launch_arg.
+        let mut argbuf = [0u8; 512];
+        let n = unsafe { npk_launch_arg(argbuf.as_mut_ptr() as i32, argbuf.len() as i32) };
+        if n > 0 {
+            if let Ok(path) = core::str::from_utf8(&argbuf[..n as usize]) {
+                sp.open(path);
+                return sp;
+            }
         }
+
+        // No file argument → show the welcome text.
+        sp.text.push_str("# Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über **Datei → Öffnen…**.\n\n- Markdown-Vorschau über *Ansicht → Vorschau*\n- Speichern über das Disketten-Icon\n");
+        sp
     }
 
     fn kind(&self) -> Kind {

@@ -56,6 +56,9 @@ struct HostState {
     /// scene_commit (or npk_window_set_overlay) creates its widget
     /// window. Cloned from the WASM job at worker entry.
     module_name: String,
+    /// Optional launch argument (e.g. a file path to open) the app reads
+    /// via `npk_launch_arg`. None = launched without an argument.
+    launch_arg: Option<String>,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -76,6 +79,9 @@ struct WasmJob {
     /// Pre-allocated widget window id for widget-kind apps. 0 = app
     /// will get a window on its first npk_scene_commit (classic path).
     widget_window_id: u32,
+    /// Optional launch argument (e.g. a file path to open), readable by
+    /// the app via `npk_launch_arg`. Set by `npk_open`.
+    launch_arg: Option<String>,
 }
 
 static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> = Mutex::new([
@@ -211,14 +217,14 @@ pub fn has_wasm_app(terminal_idx: u8) -> bool {
 /// Spawn a WASM module on a worker core. Returns immediately.
 /// The app gets its own window and terminal.
 pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
-    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true, 0)
+    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, None)
 }
 
 /// Spawn a WASM module as a background task. Unlike spawn_on_worker, this does
 /// NOT set APP_RUNNING for the terminal — the intent shell keeps receiving keys
 /// and the window continues to function normally. Used by debug.wasm.
 pub fn spawn_on_worker_background(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
-    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, false, 0)
+    spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, false, 0, None)
 }
 
 /// Spawn a widget-kind WASM app (Phase 10). The caller pre-allocates a
@@ -227,12 +233,20 @@ pub fn spawn_on_worker_background(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_i
 /// Does NOT allocate a terminal or set APP_RUNNING — widget apps use
 /// `npk_event_poll` for input, not the per-terminal key buffer.
 pub fn spawn_widget_app(wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, widget_wid: u32) -> bool {
-    spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, widget_wid)
+    spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, widget_wid, None)
+}
+
+/// Like `spawn_widget_app` but hands the app a launch argument (e.g. a
+/// file path to open), readable via `npk_launch_arg`.
+pub fn spawn_widget_app_with_arg(
+    wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, launch_arg: Option<String>,
+) -> bool {
+    spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, 0, launch_arg)
 }
 
 fn spawn_on_worker_inner(
     wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
-    foreground: bool, widget_wid: u32,
+    foreground: bool, widget_wid: u32, launch_arg: Option<String>,
 ) -> bool {
     let mut jobs = WASM_JOBS.lock();
     let slot = match jobs.iter().position(|j| j.is_none()) {
@@ -247,7 +261,7 @@ fn spawn_on_worker_inner(
     JOB_DONE[slot].store(false, core::sync::atomic::Ordering::Relaxed);
     jobs[slot] = Some(WasmJob {
         bytes: wasm_bytes, cap_id, terminal_idx, name, name_len: nlen as u8,
-        widget_window_id: widget_wid,
+        widget_window_id: widget_wid, launch_arg,
     });
     drop(jobs);
 
@@ -309,6 +323,7 @@ fn wasm_worker_task(arg: u64) {
         hw: None,
         widget_window_id: job.widget_window_id,
         module_name: String::from(name_str),
+        launch_arg: job.launch_arg.clone(),
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -402,6 +417,7 @@ pub fn execute_interactive(
         hw: None,
         widget_window_id: 0,
         module_name: String::new(),
+        launch_arg: None,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -439,6 +455,7 @@ fn execute_inner(
         hw: None,
         widget_window_id: 0,
         module_name: String::new(),
+        launch_arg: None,
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -637,6 +654,66 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if end > data.len() { return -1; }
             data[start..end].copy_from_slice(bytes);
             bytes.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_launch_arg(buf_ptr, buf_max) -> i32
+    // Read the launch argument the app was started with (e.g. a file
+    // path passed by npk_open). Returns bytes written, 0 if none, -1 on
+    // error. Apps call this once at startup.
+    linker.func_wrap("env", "npk_launch_arg",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let arg = match &caller.data().launch_arg {
+                Some(s) => s.clone(),
+                None => return 0,
+            };
+            let bytes = arg.as_bytes();
+            if bytes.len() > buf_max as usize { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + bytes.len();
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(bytes);
+            bytes.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_open(app_ptr, app_len, arg_ptr, arg_len) -> i32
+    // Launch widget module `app` (sys/wasm/<app>) with `arg` as its launch
+    // argument (read by the app via npk_launch_arg). The launched app gets
+    // its own per-app caps (from its `.npk.caps` section) and a fresh
+    // window. EXECUTE-gated (launch authority). Used by loft for file
+    // associations — open a file with its handler app. The kernel stays
+    // generic: the ext→app mapping lives in the caller (loft + config),
+    // never here.
+    linker.func_wrap("env", "npk_open",
+        |caller: Caller<'_, HostState>, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+                return -1;
+            }
+            let app = match read_wasm_str(&caller, app_ptr, app_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            // Module name only — no path traversal into the store.
+            if app.is_empty() || app.contains('/') || app.contains("..") { return -1; }
+            let arg = if arg_len > 0 { read_wasm_str(&caller, arg_ptr, arg_len) } else { None };
+            let path = alloc::format!("sys/wasm/{}", app);
+            let bytes = match crate::npkfs::fetch(&path) {
+                Ok((b, _)) => b,
+                Err(_) => return -1,
+            };
+            let rights = capability::widget_rights_from_wasm(&bytes);
+            let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
+                Ok(id) => id,
+                Err(_) => return -1,
+            };
+            if spawn_widget_app_with_arg(bytes, module_cap, &app, arg) { 0 } else { -1 }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
