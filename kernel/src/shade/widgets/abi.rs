@@ -144,6 +144,7 @@ pub enum IconId {
     Folders             = 25,
     CaretRight          = 26,
     ArrowClockwise      = 27,
+    Globe               = 28,
     // Appended only.
 }
 
@@ -496,6 +497,10 @@ pub enum Event {
     /// Cursor-only navigation (Left / Right / Home / End) does **not**
     /// fire this event; the caret is purely compositor-side state.
     InputChange { value: alloc::string::String },
+    /// Right-click hit-test result. Same hit-test as `Action`, but fired
+    /// for `MouseButton::Right` instead of `Left`. Apps use it to open
+    /// context menus (Popover) without consuming the primary click.
+    ContextAction(ActionId),
     // Appended only.
 }
 

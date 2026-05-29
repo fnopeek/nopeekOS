@@ -87,8 +87,7 @@ pub fn builtin_intents() -> Vec<AppEntry> {
             launch_name:  "browser".to_string(),
             display_name: "Browser".to_string(),
             description:  "LibreWolf in a sandboxed MicroVM".to_string(),
-            // TODO: a proper Globe glyph; Monitor is the closest existing one.
-            icon:         IconId::Monitor,
+            icon:         IconId::Globe,
             kind:         EntryKind::Intent,
         },
     ]

@@ -1575,6 +1575,32 @@ impl Compositor {
             }
         }
 
+        // Plain RMB (no Mod): right-click for context menus. Hit-test the
+        // widget tree and push ContextAction(id) + raw MouseButton{Right}.
+        // Mod+RMB is the resize-drag above; this branch is only reached
+        // when `!mod_held`. The dock must not steal keyboard focus (same
+        // exclusion as LMB), so we skip the focus shift on dock/bar.
+        if !mod_held && self.mouse.right_clicked() {
+            if let Some(wid) = self.window_at(mx, my) {
+                let is_widget = self.windows.iter()
+                    .find(|w| w.id == wid)
+                    .map(|w| w.kind == crate::shade::window::WindowKind::Widget)
+                    .unwrap_or(false);
+                if is_widget {
+                    use crate::shade::widgets::abi::{Event, MouseButton};
+                    if let Some(action) = crate::shade::widgets::hit_test(wid.0, mx, my) {
+                        crate::shade::widgets::push_event(wid.0, Event::ContextAction(action));
+                    }
+                    crate::shade::widgets::push_event(wid.0, Event::MouseButton {
+                        button: MouseButton::Right,
+                        down:   true,
+                        x:      mx,
+                        y:      my,
+                    });
+                }
+            }
+        }
+
         // Mouse release: clear active state on every widget window
         // (we don't track which window held the press). Cheap — only
         // does work when the window's `active_path` was actually set.
@@ -1593,6 +1619,23 @@ impl Compositor {
                 }
                 crate::shade::widgets::push_event(wid.0, Event::MouseButton {
                     button: MouseButton::Left,
+                    down:   false,
+                    x:      mx,
+                    y:      my,
+                });
+            }
+        }
+
+        // Mirror RMB release to widget windows so apps see press+release pairs.
+        if !mod_held && self.mouse.right_released() {
+            use crate::shade::widgets::abi::{Event, MouseButton};
+            let widget_ids: alloc::vec::Vec<crate::shade::WindowId> = self.windows.iter()
+                .filter(|w| w.kind == crate::shade::window::WindowKind::Widget)
+                .map(|w| w.id)
+                .collect();
+            for wid in widget_ids {
+                crate::shade::widgets::push_event(wid.0, Event::MouseButton {
+                    button: MouseButton::Right,
                     down:   false,
                     x:      mx,
                     y:      my,

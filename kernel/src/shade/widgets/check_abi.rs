@@ -90,6 +90,7 @@ const _: () = {
     assert!(IconId::Folders           as u16 == 25);
     assert!(IconId::CaretRight        as u16 == 26);
     assert!(IconId::ArrowClockwise    as u16 == 27);
+    assert!(IconId::Globe             as u16 == 28);
 
     // Align / Axis — used inside Widget struct variants, positions frozen.
     assert!(Align::Start   as u8 == 0);
@@ -188,6 +189,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::MouseButton { .. }  => 3,
         Event::Focus(_)            => 4,
         Event::InputChange { .. }  => 5,
+        Event::ContextAction(_)    => 6,
     }
 }
 

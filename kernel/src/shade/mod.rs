@@ -618,8 +618,13 @@ fn spawn_launcher() {
         }
     };
 
+    // WRITE is included so panels (dock, bar) can persist their own
+    // config back to npkFS without a custom host fn. Safe today because
+    // every widget-launcher module ships bundled + ECDSA-signed; if
+    // third-party widget apps land, this needs per-app cap policy.
     let module_cap = match crate::capability::create_module_cap(
         crate::capability::Rights::READ
+            | crate::capability::Rights::WRITE
             | crate::capability::Rights::EXECUTE
             | crate::capability::Rights::RENDER,
         Some(600_000),
@@ -677,8 +682,10 @@ pub fn launch_app(name: &str) {
         Ok(v) => v,
         Err(_) => { crate::kprintln!("[npk] launch_app: '{}' not installed", name); return; }
     };
+    // See spawn_launcher: same first-party-bundled assumption applies.
     let module_cap = match crate::capability::create_module_cap(
         crate::capability::Rights::READ
+            | crate::capability::Rights::WRITE
             | crate::capability::Rights::EXECUTE
             | crate::capability::Rights::RENDER,
         Some(600_000),
