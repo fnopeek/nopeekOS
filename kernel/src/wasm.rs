@@ -585,6 +585,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 None => return -1,
             };
 
+            // Apps may not write the module store — see is_module_store_path.
+            if is_module_store_path(&name) {
+                kprintln!("[npk] WASM: npk_store DENIED (sys/wasm is read-only to apps)");
+                return -1;
+            }
+
             let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => return -1,
@@ -1350,6 +1356,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Some(s) => s,
                 None => return -1,
             };
+            // Apps may not delete modules — see is_module_store_path.
+            if is_module_store_path(&name) {
+                kprintln!("[npk] WASM: npk_fs_delete DENIED (sys/wasm is read-only to apps)");
+                return -1;
+            }
             match crate::npkfs::delete(&name) {
                 Ok(_) => 0,
                 Err(_) => -1,
@@ -2225,6 +2236,20 @@ fn cleanup_hw_state(state: &mut HostState) {
                 hw.dma_allocs.len(), total_pages);
         }
     }
+}
+
+/// True if `name` targets the module store (`sys/wasm/…`). WASM apps
+/// must NOT write or delete there: it holds the executable modules plus
+/// their `.npk.caps` declarations, and modules are NOT re-verified at
+/// launch — so an app with WRITE that could overwrite a module (or plant
+/// a new one with caps=ALL) would escalate to arbitrary rights. The
+/// install/update intents reach npkFS directly (root), not through these
+/// host fns, so they are unaffected. The paths layer rejects `.`/`..`
+/// segments, so after trimming slashes a literal `sys/wasm/` prefix is
+/// the only way to actually land in the module store.
+fn is_module_store_path(name: &str) -> bool {
+    let c = name.trim_matches('/');
+    c == "sys/wasm" || c.starts_with("sys/wasm/")
 }
 
 fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<String> {
