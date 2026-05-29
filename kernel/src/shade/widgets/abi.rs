@@ -54,6 +54,16 @@ pub struct Rect {
     pub h: u32,
 }
 
+/// A coloured run inside a `Widget::TextArea`'s `value` (byte offsets +
+/// colour token). Mirror of the SDK `Span`. The compositor colours each
+/// byte of the live buffer by the span covering it; uncovered → default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Span {
+    pub start: u32,
+    pub len:   u32,
+    pub token: Token,
+}
+
 // ── Identifiers ───────────────────────────────────────────────────────
 
 /// App-defined action identifier. Attached to `on_click`, `on_submit`,
@@ -470,6 +480,8 @@ pub enum Widget {
     TextArea {
         value:       String,
         placeholder: String,
+        /// Syntax-highlight colour runs over `value` (byte offsets).
+        spans:       Vec<Span>,
         modifiers:   Vec<Modifier>,
     },
     // Appended only.

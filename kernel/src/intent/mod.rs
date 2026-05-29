@@ -927,10 +927,26 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     if crate::shade::input::try_keybind_event(&event) {
                         continue;
                     }
-                    // Tab / Shift+Tab move focus inside the widget
-                    // window when there's at least one focusable
-                    // widget. Falls through (key reaches the app) if
-                    // no focusable nodes exist (purely decorative tree).
+                    // Keyboard navigation takes visual precedence over
+                    // any stale mouse-hover state. Without this, moving
+                    // the selection with arrows while the cursor sits
+                    // on a different row leaves both rows highlighted.
+                    // Mouse-move re-establishes hover on the next motion.
+                    crate::shade::widgets::suppress_hover(widget_wid);
+                    // If a Widget::Input / TextArea is focused, the
+                    // compositor owns text editing — printable /
+                    // Backspace / Delete / arrows / Home / End / Enter
+                    // (and, in a TextArea, Tab → indent) are intercepted,
+                    // mutate the editor buffer, and emit Event::InputChange
+                    // or Event::Action(on_submit). This runs BEFORE the
+                    // Tab focus-nav below so a TextArea can claim Tab.
+                    if crate::shade::widgets::handle_input_key(widget_wid, event.key) {
+                        continue;
+                    }
+                    // Tab / Shift+Tab move focus between focusable widgets
+                    // when the focused widget didn't consume Tab (i.e. not
+                    // a TextArea). Falls through (key reaches the app) if
+                    // there are no focusable nodes.
                     if matches!(event.key, crate::input::KeyCode::Tab) {
                         let consumed = if event.modifiers.shift {
                             crate::shade::widgets::prev_focus(widget_wid)
@@ -938,23 +954,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                             crate::shade::widgets::next_focus(widget_wid)
                         };
                         if consumed { continue; }
-                    }
-                    // Keyboard navigation takes visual precedence over
-                    // any stale mouse-hover state. Without this, moving
-                    // the selection with arrows while the cursor sits
-                    // on a different row leaves both rows highlighted.
-                    // Mouse-move re-establishes hover on the next motion.
-                    crate::shade::widgets::suppress_hover(widget_wid);
-                    // If a Widget::Input is focused, the compositor
-                    // owns text editing — printable / Backspace /
-                    // Delete / Left / Right / Home / End / Enter are
-                    // intercepted, mutate the editor buffer, and emit
-                    // either Event::InputChange (value changed) or
-                    // Event::Action(on_submit) (Enter). Apps see only
-                    // the events they declared interest in; cursor
-                    // moves never round-trip.
-                    if crate::shade::widgets::handle_input_key(widget_wid, event.key) {
-                        continue;
                     }
                     crate::shade::widgets::push_event(
                         widget_wid,

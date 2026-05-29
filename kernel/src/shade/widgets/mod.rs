@@ -988,6 +988,7 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
     enum Op {
         Insert(u8),
         Newline,
+        Indent,
         Backspace,
         Delete,
         Left,
@@ -1018,6 +1019,9 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
         // `Event::Key` so window-level Enter handlers (drun's launcher)
         // keep working without wiring on_submit just to receive it.
         K::Enter if is_textarea                  => Op::Newline,
+        // Tab in a TextArea indents (4 spaces) instead of moving focus;
+        // for an Input it falls through so Tab still navigates fields.
+        K::Tab   if is_textarea                  => Op::Indent,
         K::Enter if on_submit.0 != u32::MAX      => Op::Submit,
         _                                        => return false,
     };
@@ -1052,6 +1056,11 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
             Op::Newline => {
                 edit.value.insert(edit.cursor, '\n');
                 edit.cursor += 1;
+                changed = true;
+            }
+            Op::Indent => {
+                edit.value.insert_str(edit.cursor, "    ");
+                edit.cursor += 4;
                 changed = true;
             }
             Op::Backspace => {

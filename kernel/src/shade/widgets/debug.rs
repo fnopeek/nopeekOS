@@ -178,9 +178,9 @@ fn write_node(out: &mut String, w: &Widget, depth: usize) {
                 indent, fmt_mods(modifiers));
             for c in items { write_node(out, c, depth + 1); }
         }
-        Widget::TextArea { value, placeholder, modifiers } => {
-            let _ = writeln!(out, "[npk] {}TextArea {} bytes placeholder={:?}{}",
-                indent, value.len(), placeholder, fmt_mods(modifiers));
+        Widget::TextArea { value, placeholder, spans, modifiers } => {
+            let _ = writeln!(out, "[npk] {}TextArea {} bytes {} spans placeholder={:?}{}",
+                indent, value.len(), spans.len(), placeholder, fmt_mods(modifiers));
         }
     }
 }
