@@ -611,6 +611,35 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_home_dir(buf_ptr, buf_max) -> i32
+    // Write the current user's home directory ("home/<name>", or "home"
+    // if unset) into the caller's buffer; returns bytes written or -1.
+    // Apps need this because the username lives in the single encrypted
+    // `.system/config` blob, not a fetchable `sys/config/name` object —
+    // so they can't derive their home/documents path on their own.
+    // READ-gated (it reveals the user identity from config).
+    linker.func_wrap("env", "npk_home_dir",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+                return -1;
+            }
+            let home = crate::intent::home_dir();
+            let bytes = home.as_bytes();
+            if bytes.len() > buf_max as usize { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + bytes.len();
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(bytes);
+            bytes.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_scene_commit(ptr, len) -> i32
     // Phase 10 widget pipeline: WASM app hands the kernel a version-
     // prefixed postcard-serialized Widget tree. Compositor does the

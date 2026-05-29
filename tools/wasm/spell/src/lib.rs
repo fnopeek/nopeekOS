@@ -43,6 +43,7 @@ unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
+    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
@@ -313,21 +314,16 @@ impl Spell {
 // ── Filesystem helpers ────────────────────────────────────────────────
 
 fn read_home_dir() -> String {
-    let key = "sys/config/name";
+    // The username lives in the single encrypted `.system/config` blob,
+    // not a fetchable `sys/config/name` object, so ask the kernel for the
+    // resolved home dir ("home/<name>") directly.
     let buf_ptr = core::ptr::addr_of_mut!(NAME_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(key.as_ptr() as i32, key.len() as i32,
-                  buf_ptr as i32, NAME_FETCH_CAP as i32)
-    };
+    let n = unsafe { npk_home_dir(buf_ptr as i32, NAME_FETCH_CAP as i32) };
     if n <= 0 { return String::from("home"); }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     match core::str::from_utf8(slice) {
-        Ok(name) => {
-            let name = name.trim();
-            if name.is_empty() { String::from("home") }
-            else { alloc::format!("home/{}", name) }
-        }
-        Err(_) => String::from("home"),
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => String::from("home"),
     }
 }
 
