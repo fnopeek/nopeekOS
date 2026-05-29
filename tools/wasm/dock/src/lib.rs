@@ -286,9 +286,24 @@ impl Dock {
     fn render_popover(&self, menu: OpenMenu) -> Widget {
         let (anchor, content) = match menu {
             OpenMenu::IconCtx(idx) => {
+                // Include the app's display name in the unpin label so users
+                // don't have to recognise the icon to know which app they're
+                // about to remove. Falls back to the launch name if the
+                // catalog never hydrated a display name (rare).
+                let name = self.entries.get(idx)
+                    .map(|e| if e.display_name.is_empty() {
+                        e.launch_name.clone()
+                    } else {
+                        e.display_name.clone()
+                    })
+                    .unwrap_or_default();
+                let unpin_label = if name.is_empty() {
+                    "Vom Dock entfernen".to_string()
+                } else {
+                    alloc::format!("{} vom Dock entfernen", name)
+                };
                 let mut items: Vec<(String, ActionId)> = Vec::with_capacity(3);
-                items.push(("Vom Dock entfernen".to_string(),
-                            ActionId(MENU_UNPIN)));
+                items.push((unpin_label, ActionId(MENU_UNPIN)));
                 if idx > 0 {
                     items.push(("Nach links".to_string(),
                                 ActionId(MENU_MOVE_LEFT)));
