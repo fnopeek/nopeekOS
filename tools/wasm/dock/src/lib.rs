@@ -39,6 +39,7 @@ unsafe extern "C" {
     fn npk_run_intent(verb_ptr: i32, verb_len: i32) -> i32;
     fn npk_window_set_dock(w: i32, h: i32) -> i32;
     fn npk_window_set_modal(modal: i32) -> i32;
+    fn npk_get_fb_size() -> i64;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
 }
@@ -145,6 +146,10 @@ const ICON_SIZE: u16 = 24;
 const DOCK_HEIGHT: i32 = 48;
 const CELL_FOOTPRINT: i32 = 46; // icon + padding + inter-cell gap
 const SIDE_PADDING: i32 = 28;
+/// Approximate compositor `DOCK_BOTTOM_GAP * scale` (kernel default is 12,
+/// HiDPI scale 2× → 24). Subtracted from the expanded window height so
+/// the visible bottom gap is preserved when a menu is open.
+const DOCK_GAP_RESERVE: i32 = 24;
 
 const DOCK_CFG_PATH: &str = "sys/config/dock";
 
@@ -167,6 +172,10 @@ struct Dock {
     catalog:    Vec<AppEntry>,
     /// Right-click context menu state.
     open:       Option<OpenMenu>,
+    /// Screen height, fetched once at startup. Used to expand the dock
+    /// window when a menu is open so the popover has room above the tray
+    /// and click-outside lands inside the (now-large) dock window.
+    screen_h:   i32,
 }
 
 impl Dock {
@@ -183,7 +192,9 @@ impl Dock {
         // bump mark (which would leak the Vec buffer on every alloc_reset).
         let mut entries: Vec<AppEntry> = Vec::with_capacity(catalog.len() + 1);
         entries.extend(initial);
-        Dock { entries, catalog, open: None }
+        let packed = unsafe { npk_get_fb_size() };
+        let screen_h = (packed & 0xFFFF_FFFF) as i32;
+        Dock { entries, catalog, open: None, screen_h }
     }
 
     /// Total dock width to request from the compositor (it clamps).
@@ -229,7 +240,19 @@ impl Dock {
             ],
         };
 
-        let mut stack_children: Vec<Widget> = alloc::vec![tray];
+        // When a menu is open the window is grown to the full screen height
+        // (see `apply_window_size`) so the popover has room above and clicks
+        // anywhere outside land inside the dock window → on_dismiss fires.
+        // Push the tray to the bottom of that tall window via a Column with
+        // a flex spacer; when no menu is open the column collapses to the
+        // tray alone in the small (DOCK_HEIGHT) window.
+        let tray_col = Widget::Column {
+            children:  alloc::vec![Widget::Spacer { flex: 1 }, tray],
+            spacing:   Spacing::None.as_u16(),
+            align:     Align::Stretch,
+            modifiers: alloc::vec![],
+        };
+        let mut stack_children: Vec<Widget> = alloc::vec![tray_col];
         if let Some(menu) = self.open {
             stack_children.push(self.render_popover(menu));
         }
@@ -241,6 +264,23 @@ impl Dock {
             children:  stack_children,
             modifiers: Vec::new(),
         }
+    }
+
+    /// Tell the compositor what size the dock window should be. Called
+    /// after every state change. When a menu is open we expand toward
+    /// the full screen height so the popover has room and click-outside
+    /// lands inside the dock window; auto-hide naturally pauses because
+    /// the reveal hot-zone becomes the entire screen. We undershoot by
+    /// `DOCK_GAP_RESERVE` so the visible bottom gap from the screen edge
+    /// is preserved when the window is `shown` (win.y = baseline - dh -
+    /// gap, the dock tray then floats above the bottom edge).
+    fn apply_window_size(&self) {
+        let h = if self.open.is_some() {
+            (self.screen_h - DOCK_GAP_RESERVE).max(DOCK_HEIGHT)
+        } else {
+            DOCK_HEIGHT
+        };
+        unsafe { let _ = npk_window_set_dock(self.width(), h); }
     }
 
     fn render_popover(&self, menu: OpenMenu) -> Widget {
@@ -460,10 +500,8 @@ fn order_by_pins(catalog: &[AppEntry], pins: &[String]) -> Vec<AppEntry> {
 pub extern "C" fn _start() {
     let mut dock = Dock::load();
 
-    unsafe {
-        let _ = npk_window_set_dock(dock.width(), DOCK_HEIGHT);
-        let _ = npk_window_set_modal(0);
-    }
+    unsafe { let _ = npk_window_set_modal(0); }
+    dock.apply_window_size();
 
     let persistent_mark = alloc_mark();
     dock.commit_tree();
@@ -473,6 +511,10 @@ pub extern "C" fn _start() {
             PollResult::Event(ev) => {
                 let dirty = dock.handle(ev);
                 if dirty {
+                    // Window may need to grow/shrink as the menu opens or
+                    // closes. set_dock is idempotent at the same size, so
+                    // unconditionally calling it here costs nothing extra.
+                    dock.apply_window_size();
                     // Per-frame Vecs from render() live past the mark —
                     // reset and rebuild so the heap doesn't grow on every
                     // mutation. entries/catalog were allocated before mark
