@@ -36,6 +36,8 @@ unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
+    fn npk_open(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
+    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
@@ -224,6 +226,9 @@ struct Loft {
     view_mode:      ViewMode,
     /// Which menu's dropdown is currently visible. None = no menu open.
     open_menu:      Option<OpenMenu>,
+    /// File associations (extension → app module), loaded once from
+    /// `sys/config/associations`. Checked before the built-in defaults.
+    assoc:          Vec<(String, String)>,
 }
 
 impl Loft {
@@ -243,11 +248,31 @@ impl Loft {
             sidebar_sel:   Some(0),
             query:         String::with_capacity(QUERY_CAP + 1),
             query_lc:      String::with_capacity(QUERY_CAP + 1),
-            view_mode:     ViewMode::Grid,
+            view_mode:     ViewMode::List,
             open_menu:     None,
+            assoc:         load_associations(),
         };
         lf.refresh();
         lf
+    }
+
+    /// Resolve the handler app for a file name via its extension:
+    /// `sys/config/associations` overrides first, then built-in defaults.
+    /// Returns None for unknown types (loft does nothing on open).
+    fn associated_app(&self, name: &str) -> Option<String> {
+        let ext = match name.rsplit_once('.') {
+            Some((_, e)) if !e.is_empty() => e.to_ascii_lowercase(),
+            _ => return None,
+        };
+        if let Some((_, app)) = self.assoc.iter().find(|(k, _)| *k == ext) {
+            return Some(app.clone());
+        }
+        match ext.as_str() {
+            "md" | "markdown" | "txt" | "text" | "rs" | "toml" | "json"
+            | "log" | "conf" | "ini" | "cfg" | "sh" | "csv" | "yaml" | "yml"
+                => Some("spell".to_string()),
+            _ => None,
+        }
     }
 
     fn refresh(&mut self) {
@@ -370,6 +395,19 @@ impl Loft {
                 alloc::format!("{}/{}", self.current, name)
             };
             self.navigate(next);
+        } else if let Some(app) = self.associated_app(&name) {
+            // Open the file with its associated app (file association).
+            let full = if self.current.is_empty() {
+                name
+            } else {
+                alloc::format!("{}/{}", self.current, name)
+            };
+            unsafe {
+                npk_open(app.as_ptr() as i32, app.len() as i32,
+                         full.as_ptr() as i32, full.len() as i32);
+            }
+        } else {
+            log("[loft] keine zugeordnete App für diesen Dateityp");
         }
     }
 
@@ -962,24 +1000,43 @@ fn toggle_menu(current: Option<OpenMenu>, target: OpenMenu) -> Option<OpenMenu> 
 
 // ── Kernel-side calls ─────────────────────────────────────────────────
 
-fn read_home_dir() -> String {
-    let key = "sys/config/name";
-    let buf_ptr = core::ptr::addr_of_mut!(NAME_BUF) as *mut u8;
+/// Parse `sys/config/associations` (optional) into (ext, app) pairs.
+/// One mapping per line: `ext=app` (`#` comments + blanks skipped).
+/// Absent file → empty (loft falls back to built-in defaults).
+fn load_associations() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let key = "sys/config/associations";
+    let mut buf = [0u8; 2048];
     let n = unsafe {
-        npk_fetch(
-            key.as_ptr() as i32, key.len() as i32,
-            buf_ptr as i32, NAME_FETCH_CAP as i32,
-        )
+        npk_fetch(key.as_ptr() as i32, key.len() as i32,
+                  buf.as_mut_ptr() as i32, buf.len() as i32)
     };
+    if n <= 0 { return out; }
+    if let Ok(s) = core::str::from_utf8(&buf[..n as usize]) {
+        for line in s.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some((ext, app)) = line.split_once('=') {
+                let ext = ext.trim().to_ascii_lowercase();
+                let app = app.trim().to_string();
+                if !ext.is_empty() && !app.is_empty() { out.push((ext, app)); }
+            }
+        }
+    }
+    out
+}
+
+fn read_home_dir() -> String {
+    // The username lives in the single encrypted `.system/config` blob,
+    // not a fetchable `sys/config/name` object — ask the kernel for the
+    // resolved home dir directly.
+    let buf_ptr = core::ptr::addr_of_mut!(NAME_BUF) as *mut u8;
+    let n = unsafe { npk_home_dir(buf_ptr as i32, NAME_FETCH_CAP as i32) };
     if n <= 0 { return String::from("home"); }
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     match core::str::from_utf8(slice) {
-        Ok(name) => {
-            let name = name.trim();
-            if name.is_empty() { String::from("home") }
-            else { alloc::format!("home/{}", name) }
-        }
-        Err(_) => String::from("home"),
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => String::from("home"),
     }
 }
 
