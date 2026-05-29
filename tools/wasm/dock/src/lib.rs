@@ -252,10 +252,13 @@ impl Dock {
         ));
         cells.push(Widget::Spacer { flex: 1 });
 
-        // The tray: a rounded SurfaceElevated pill holding the icons. No row
-        // Padding — icons carry their own; a padded root would be double-
-        // counted by the layout pass and collapse the vertical centring on a
-        // short tray. Spacers centre the icons horizontally.
+        // The tray: a rounded SurfaceElevated pill holding the icons.
+        // Padding::Xs (4 px) on all sides bumps the Row's intrinsic height
+        // from (icon+OnHover-pad) = 40 to a full 48 px → matches DOCK_HEIGHT
+        // in the idle window AND keeps the visible tray the same size when
+        // the menu-expand wraps it in a bottom-anchored Column (whose Spacer
+        // would otherwise let the tray collapse to its intrinsic 40 px and
+        // make the pill look shorter on right-click).
         let tray = Widget::Row {
             children:  cells,
             spacing:   Spacing::Sm.as_u16(),
@@ -263,6 +266,7 @@ impl Dock {
             modifiers: alloc::vec![
                 Modifier::Background(Token::SurfaceElevated),
                 Modifier::Rounded(Radius::Lg.as_u8()),
+                Modifier::Padding(Padding::Xs.as_u16()),
             ],
         };
 
