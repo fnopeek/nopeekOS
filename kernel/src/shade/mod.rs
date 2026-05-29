@@ -618,17 +618,10 @@ fn spawn_launcher() {
         }
     };
 
-    // WRITE is included so panels (dock, bar) can persist their own
-    // config back to npkFS without a custom host fn. Safe today because
-    // every widget-launcher module ships bundled + ECDSA-signed; if
-    // third-party widget apps land, this needs per-app cap policy.
-    let module_cap = match crate::capability::create_module_cap(
-        crate::capability::Rights::READ
-            | crate::capability::Rights::WRITE
-            | crate::capability::Rights::EXECUTE
-            | crate::capability::Rights::RENDER,
-        Some(600_000),
-    ) {
+    // Grant exactly the rights the app declares in its `.npk.caps`
+    // section (per-app, no blanket WRITE); absent → safe default.
+    let rights = crate::capability::widget_rights_from_wasm(&bytes);
+    let module_cap = match crate::capability::create_module_cap(rights, Some(600_000)) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launcher: cap delegation failed: {}", e); return; }
     };
@@ -682,14 +675,10 @@ pub fn launch_app(name: &str) {
         Ok(v) => v,
         Err(_) => { crate::kprintln!("[npk] launch_app: '{}' not installed", name); return; }
     };
-    // See spawn_launcher: same first-party-bundled assumption applies.
-    let module_cap = match crate::capability::create_module_cap(
-        crate::capability::Rights::READ
-            | crate::capability::Rights::WRITE
-            | crate::capability::Rights::EXECUTE
-            | crate::capability::Rights::RENDER,
-        Some(600_000),
-    ) {
+    // Per-app rights from the module's `.npk.caps` section (no blanket
+    // WRITE); absent → safe default.
+    let rights = crate::capability::widget_rights_from_wasm(&bytes);
+    let module_cap = match crate::capability::create_module_cap(rights, Some(600_000)) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launch_app: cap failed: {}", e); return; }
     };

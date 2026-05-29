@@ -30,6 +30,12 @@ use nopeek_widgets::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
+// Declared capabilities: read (catalog) + write (persist dock config) +
+// exec (launch apps/intents) + render. The kernel grants exactly this.
+#[unsafe(link_section = ".npk.caps")]
+#[used]
+static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER];
+
 unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;

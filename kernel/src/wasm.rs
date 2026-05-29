@@ -811,19 +811,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Err(_) => return -1,
             };
 
-            // WRITE so apps that persist via npk_store (the Spell editor
-            // saving files, future apps with state) work when launched
-            // from drun — matches the widget-app cap set granted by the
-            // dock / launch_app path. All sys/wasm modules are
-            // ECDSA-signed first-party code, so this adds no escape
-            // surface beyond what dock / bar already hold.
-            let module_cap = match capability::create_module_cap(
-                capability::Rights::READ
-                    | capability::Rights::WRITE
-                    | capability::Rights::EXECUTE
-                    | capability::Rights::RENDER,
-                Some(600_000),
-            ) {
+            // Grant exactly the rights the app declares in its `.npk.caps`
+            // section (e.g. spell asks for WRITE to save files); apps with
+            // no declaration get the safe default (no WRITE). Per-app, not
+            // a blanket grant.
+            let rights = capability::widget_rights_from_wasm(&bytes);
+            let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
                 Ok(id) => id,
                 Err(_) => return -1,
             };
