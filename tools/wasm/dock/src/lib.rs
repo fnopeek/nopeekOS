@@ -152,6 +152,11 @@ const SIDE_PADDING: i32 = 28;
 const DOCK_GAP_RESERVE: i32 = 24;
 
 const DOCK_CFG_PATH: &str = "sys/config/dock";
+/// Header line written by `persist`. Its presence (returned by
+/// `read_pins`) tells the next boot the user has touched the config —
+/// an otherwise-empty body then means "user wants an empty dock" and
+/// the catalog fallback is suppressed.
+const DOCK_CFG_MARKER: &str = "# nopeekos dock v1";
 
 // ── State ─────────────────────────────────────────────────────────────
 
@@ -194,8 +199,11 @@ impl Dock {
         // button already opens drun, so a separate drun tile is redundant.
         let catalog = app_catalog::load(&["dock", "drun", "bar"]);
         let initial: Vec<AppEntry> = match read_pins() {
-            Some(pins) if !pins.is_empty() => order_by_pins(&catalog, &pins),
-            _ => catalog.clone(),
+            // File exists (incl. empty) → honour the user's choice,
+            // even if it means an empty dock.
+            Some(pins) => order_by_pins(&catalog, &pins),
+            // File never written → first boot, seed from the catalog.
+            None => catalog.clone(),
         };
         // Pre-allocate `entries` to the full catalog size so subsequent
         // Add/Remove mutations never re-allocate behind the persistent
@@ -527,10 +535,13 @@ impl Dock {
     }
 
     /// Write the current pin order to `sys/config/dock` — one launch_name
-    /// per line. Errors are logged but non-fatal: the in-memory ordering
-    /// remains; next boot just falls back to the previous file.
+    /// per line. A leading marker line is written even when entries is
+    /// empty so that "no apps pinned" is distinguishable from "file
+    /// never existed" on the next boot. Errors are logged but non-fatal.
     fn persist(&self) {
-        let mut buf = String::with_capacity(self.entries.len() * 16);
+        let mut buf = String::with_capacity(self.entries.len() * 16 + 32);
+        buf.push_str(DOCK_CFG_MARKER);
+        buf.push('\n');
         for e in &self.entries {
             buf.push_str(&e.launch_name);
             buf.push('\n');
