@@ -177,6 +177,11 @@ struct Dock {
     /// and the next click of any kind exits + persists. Tracked by name
     /// (stable across remove+insert) instead of index.
     moving:     Option<String>,
+    /// True for one MouseButton{Left, down} after entering drag-reorder
+    /// mode — the compositor pushes Action(MENU_MOVE) **and** the
+    /// raw left-down for the same physical click, so without this flag
+    /// the down would immediately re-exit the drag we just entered.
+    suppress_next_press: bool,
     /// Screen height, fetched once at startup. Used to expand the dock
     /// window when a menu is open so the popover has room above the tray
     /// and click-outside lands inside the (now-large) dock window.
@@ -199,7 +204,11 @@ impl Dock {
         entries.extend(initial);
         let packed = unsafe { npk_get_fb_size() };
         let screen_h = (packed & 0xFFFF_FFFF) as i32;
-        Dock { entries, catalog, open: None, moving: None, screen_h }
+        Dock {
+            entries, catalog,
+            open: None, moving: None, suppress_next_press: false,
+            screen_h,
+        }
     }
 
     /// Total dock width to request from the compositor (it clamps).
@@ -377,7 +386,14 @@ impl Dock {
             // cell; this catches the in-between case (clicks on the
             // transparent expand-region with no hit-tested target).
             Event::MouseButton { button: MouseButton::Left, down: true, .. } => {
-                if self.moving.is_some() {
+                if self.suppress_next_press {
+                    // This is the down half of the click that just
+                    // entered drag mode via Action(MENU_MOVE) — swallow
+                    // it so we don't immediately exit. The NEXT press
+                    // commits.
+                    self.suppress_next_press = false;
+                    false
+                } else if self.moving.is_some() {
                     self.exit_move()
                 } else {
                     false
@@ -421,6 +437,10 @@ impl Dock {
                 if let Some(OpenMenu::IconCtx(idx)) = self.open {
                     if let Some(e) = self.entries.get(idx) {
                         self.moving = Some(e.launch_name.clone());
+                        // The MouseButton{down:true} paired with this
+                        // very click is still queued — tag it to be
+                        // ignored so the drag we just armed survives.
+                        self.suppress_next_press = true;
                     }
                 }
                 self.open = None;

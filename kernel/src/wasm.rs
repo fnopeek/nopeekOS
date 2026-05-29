@@ -594,7 +594,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             let end = (start + data_len as usize).min(data.len());
             if start >= end { return -1; }
 
-            match crate::npkfs::store(&name, &data[start..end], cap_id) {
+            // Insert-or-replace: apps with state to persist (panel
+            // configs, etc.) re-write the same key on every change. The
+            // strict-create `store` would fail on the second write and
+            // leave the app's state diverging from disk.
+            match crate::npkfs::upsert(&name, &data[start..end], cap_id) {
                 Ok(_) => 0,
                 Err(_) => -1,
             }
