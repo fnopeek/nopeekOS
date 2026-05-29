@@ -768,9 +768,11 @@ fn toggle(cur: Option<OpenMenu>, want: OpenMenu) -> Option<OpenMenu> {
 
 fn commit_tree(sp: &Spell) {
     let tree = render(sp);
-    match postcard::to_allocvec(&tree) {
-        Ok(bytes) => { let _ = commit(&bytes); }
-        Err(_) => log("[spell] commit: serialize failed"),
+    // `wire::encode` prepends the WIRE_VERSION byte that the compositor's
+    // `scene_commit` checks — a raw postcard payload is rejected (-1).
+    match wire::encode(&tree) {
+        Ok(bytes) => { if commit(&bytes) < 0 { log("[spell] commit failed"); } }
+        Err(_) => log("[spell] encode failed"),
     }
 }
 
