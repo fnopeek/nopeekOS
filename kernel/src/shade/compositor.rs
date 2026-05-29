@@ -419,11 +419,25 @@ impl Compositor {
     fn set_dock_panel(&mut self, id: WindowId, w: u32, h: u32) -> bool {
         let screen_w = self.screen_w;
         let screen_h = self.screen_h;
-        let baseline = self.dock_baseline();
         let active_ws = self.active_workspace;
 
         let dw = w.min(screen_w.saturating_sub(40)).max(120);
-        let dh = h.min(screen_h / 2).max(40);
+        // Cap at full screen height: a popover-bearing dock expands so the
+        // menu has room above the tray and click-outside lands inside the
+        // dock window. The visible tray still floats at the bottom.
+        let dh = h.min(screen_h).max(40);
+
+        // Detect a resize on an already-set-up dock. Preserve the dock state
+        // (visible / offset / target_shown) so reopening the popover doesn't
+        // re-hide the tray; only the geometry is updated.
+        let already_dock = self.dock.map(|d| d.id == id).unwrap_or(false);
+        let same_size = self.windows.iter()
+            .find(|w| w.id == id)
+            .map(|w| w.width == dw && w.height == dh)
+            .unwrap_or(false);
+        if already_dock && same_size {
+            return true;
+        }
 
         let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             win.state = crate::shade::window::WindowState::Floating;
@@ -434,9 +448,7 @@ impl Compositor {
             win.width = dw;
             win.height = dh;
             win.x = screen_w.saturating_sub(dw) / 2;
-            win.y = baseline;       // fully hidden (below the usable area)
-            win.visible = false;
-            win.dirty = false;
+            win.dirty = true;
             true
         } else {
             false
@@ -444,12 +456,33 @@ impl Compositor {
 
         if found {
             let gap = DOCK_BOTTOM_GAP * self.scale.max(1);
+            let baseline = self.dock_baseline() as i32;
+            // On an in-place resize, keep the existing visibility so a
+            // popover-open expand doesn't flicker the dock through a hide
+            // cycle. Brand-new docks start hidden as before.
+            let (target_shown, offset, visible) = if already_dock {
+                let d = self.dock.unwrap();
+                let preserved_visible = self.windows.iter()
+                    .find(|w| w.id == id)
+                    .map(|w| w.visible)
+                    .unwrap_or(true);
+                (d.target_shown, d.offset.min(dh + gap), preserved_visible)
+            } else {
+                (false, dh + gap, false)
+            };
+            // Position the window with the visible tray near the baseline
+            // and the popover space stretching upward inside the window.
+            let win_y = (baseline - dh as i32 + offset as i32).max(0) as u32;
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+                win.y = win_y;
+                win.visible = visible;
+            }
             self.dock = Some(DockState {
                 id,
                 thickness: dh,
                 gap,
-                target_shown: false,
-                offset: dh + gap,   // fully hidden below the edge
+                target_shown,
+                offset,
                 dwell: 0,
                 debounce: 0,
             });
