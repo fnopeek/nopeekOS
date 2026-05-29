@@ -58,6 +58,29 @@ pub mod app_catalog;
 // Compile-time ABI ordering guard. Mirrors kernel/src/shade/widgets/check_abi.rs.
 mod check_abi;
 
+/// Per-app capability declaration. An app embeds a 1-byte `.npk.caps`
+/// custom section combining these bits; the kernel spawn path grants
+/// exactly those rights (no blanket WRITE). An app with no section gets
+/// a safe default (read + execute + render, never write).
+///
+/// ```ignore
+/// #[unsafe(link_section = ".npk.caps")]
+/// #[used]
+/// static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::RENDER];
+/// ```
+///
+/// Bit layout mirrors `capability::CAP_BIT_*` in the kernel.
+pub mod caps {
+    /// `npk_fetch` / `npk_fs_list` / `npk_fs_stat`.
+    pub const READ:   u8 = 0x01;
+    /// `npk_store` / `npk_fs_delete` / `npk_set_wallpaper` / `npk_set_theme`.
+    pub const WRITE:  u8 = 0x02;
+    /// `npk_run_intent` / driver binds.
+    pub const EXEC:   u8 = 0x04;
+    /// `npk_scene_commit` / `npk_event_poll` / window + launcher fns.
+    pub const RENDER: u8 = 0x08;
+}
+
 // Re-export the core ABI types at the crate root for ergonomic use.
 pub use abi::{
     Action, ActionId, Align, Axis, CanvasId, Density, EffectId, Event, Fill,

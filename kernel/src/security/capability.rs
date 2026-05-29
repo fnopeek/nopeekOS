@@ -218,6 +218,84 @@ pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId
     VAULT.lock().create(root, ResourceKind::Execute, rights, ttl_ticks)
 }
 
+// ── Per-app capability declaration (`.npk.caps` section) ──────────────
+//
+// A widget app self-declares the rights it needs in a 1-byte custom
+// section. The spawn path (npk_spawn_module / launch_app / spawn_launcher)
+// reads it and grants EXACTLY those rights — no blanket WRITE. The bit
+// layout mirrors `nopeek_widgets::caps` in the SDK. An absent or
+// malformed section falls back to a safe default that never includes
+// WRITE, so a future app cannot silently gain write access.
+
+const CAP_BIT_READ:   u8 = 0x01;
+const CAP_BIT_WRITE:  u8 = 0x02;
+const CAP_BIT_EXEC:   u8 = 0x04;
+const CAP_BIT_RENDER: u8 = 0x08;
+
+fn rights_from_caps_byte(b: u8) -> Rights {
+    let mut r = Rights::empty();
+    if b & CAP_BIT_READ   != 0 { r |= Rights::READ; }
+    if b & CAP_BIT_WRITE  != 0 { r |= Rights::WRITE; }
+    if b & CAP_BIT_EXEC   != 0 { r |= Rights::EXECUTE; }
+    if b & CAP_BIT_RENDER != 0 { r |= Rights::RENDER; }
+    r
+}
+
+/// Rights granted to a widget app that ships no `.npk.caps` section:
+/// read + execute + render, but NOT write. Matches the pre-per-app
+/// behavior minus the blanket WRITE.
+fn default_widget_rights() -> Rights {
+    Rights::READ | Rights::EXECUTE | Rights::RENDER
+}
+
+/// Resolve the rights to grant a widget module from its `.npk.caps`
+/// custom section, or the safe default if absent / malformed.
+pub fn widget_rights_from_wasm(wasm: &[u8]) -> Rights {
+    match extract_wasm_custom_section(wasm, ".npk.caps") {
+        Some(s) if !s.is_empty() => rights_from_caps_byte(s[0]),
+        _ => default_widget_rights(),
+    }
+}
+
+/// Minimal wasm custom-section reader (mirrors the SDK's app_catalog
+/// parser): walks the module's sections and returns the payload of the
+/// first custom section (id 0) whose name matches `target`.
+fn extract_wasm_custom_section<'a>(wasm: &'a [u8], target: &str) -> Option<&'a [u8]> {
+    if wasm.len() < 8 || &wasm[0..4] != b"\0asm" || &wasm[4..8] != [0x01, 0x00, 0x00, 0x00] {
+        return None;
+    }
+    let mut cur = &wasm[8..];
+    while !cur.is_empty() {
+        let section_id = cur[0];
+        cur = &cur[1..];
+        let (size, consumed) = read_leb128_u32(cur)?;
+        cur = &cur[consumed..];
+        if size as usize > cur.len() { return None; }
+        let (payload, rest) = cur.split_at(size as usize);
+        cur = rest;
+        if section_id != 0 { continue; }
+        let (name_len, consumed) = read_leb128_u32(payload)?;
+        let name_end = consumed + name_len as usize;
+        if name_end > payload.len() { continue; }
+        if &payload[consumed..name_end] == target.as_bytes() {
+            return Some(&payload[name_end..]);
+        }
+    }
+    None
+}
+
+fn read_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
+    let mut result: u32 = 0;
+    let mut shift: u32 = 0;
+    for (i, &b) in buf.iter().enumerate() {
+        if shift >= 32 { return None; }
+        result |= ((b & 0x7F) as u32) << shift;
+        if b & 0x80 == 0 { return Some((result, i + 1)); }
+        shift += 7;
+    }
+    None
+}
+
 /// Check a capability against the global vault.
 pub fn check_global(cap_id: &CapId, required: Rights) -> Result<(), CapError> {
     VAULT.lock().check(cap_id, required).map(|_| ())
