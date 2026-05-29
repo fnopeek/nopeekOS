@@ -84,6 +84,28 @@ static mut NAME_BUF: [u8; NAME_FETCH_CAP] = [0; NAME_FETCH_CAP];
 // don't churn the bump allocator (mirrors loft's `query` discipline).
 const TEXT_CAP: usize = 256 * 1024;
 
+// An event's owned String (Open path / InputChange value) is allocated on
+// the bump heap during poll, ABOVE persistent_mark — so `alloc_reset`
+// before `handle` frees it and the first allocation in `handle` clobbers
+// it (a use-after-free). We copy such payloads into this STATIC buffer
+// (outside the bump heap) before the reset, and hand `handle` a &str into
+// it. Sized to hold a whole-document InputChange.
+const PAYLOAD_CAP: usize = 512 * 1024;
+static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
+
+fn copy_payload(s: &str) -> usize {
+    let n = s.len().min(PAYLOAD_CAP);
+    let dst = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
+    unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), dst, n); }
+    n
+}
+
+fn payload_str(len: usize) -> &'static str {
+    let ptr = core::ptr::addr_of!(PAYLOAD_BUF) as *const u8;
+    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+    core::str::from_utf8(slice).unwrap_or("")
+}
+
 enum PollResult { Event(Event), Empty, WindowGone }
 
 fn poll_event() -> PollResult {
@@ -309,16 +331,10 @@ impl Spell {
     /// Open a file: focus its tab if already open (VS Code behaviour),
     /// else load it into a new tab (reusing a pristine Unbenannt tab).
     fn open_path(&mut self, path: &str) {
-        log(&alloc::format!("[spell] open_path '{}' ({} docs)", path, self.docs.len()));
-        for (i, d) in self.docs.iter().enumerate() {
-            log(&alloc::format!("[spell]   doc[{}] path={:?}", i, d.path.as_deref()));
-        }
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path)) {
-            log(&alloc::format!("[spell]   -> focus existing tab {}", i));
             self.active = i;
             return;
         }
-        log("[spell]   -> new tab");
         let text = match read_file(path) {
             Some(t) => t,
             None => { log("[spell] open: failed"); return; }
@@ -1061,7 +1077,7 @@ fn markup_line_spans(line: &str, base: usize, out: &mut Vec<Span>) {
 
 enum Outcome { Idle, Rerender, Exit }
 
-fn handle(sp: &mut Spell, ev: Event) -> Outcome {
+fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => {
             if sp.confirm_close.is_some() { sp.confirm_close = None; Outcome::Rerender }
@@ -1077,23 +1093,25 @@ fn handle(sp: &mut Spell, ev: Event) -> Outcome {
             }
             else { Outcome::Exit }
         }
-        Event::InputChange { value } => {
+        Event::InputChange { .. } => {
+            // `payload` is the stabilized buffer value (the event's own
+            // String was freed by alloc_reset).
             if sp.naming {
                 // Only the name Input is editable while naming.
                 sp.name_buf.clear();
-                sp.name_buf.push_str(&value);
+                sp.name_buf.push_str(payload);
             } else {
                 // Mirror the compositor's edit buffer into the active doc.
                 let d = sp.cur_mut();
-                d.set_text(&value);
+                d.set_text(payload);
                 d.dirty = true;
             }
             Outcome::Rerender
         }
         // Another file was opened while we're running (loft association,
-        // singleton routing) → open it as a tab.
-        Event::Open(path) => {
-            sp.open_path(&path);
+        // singleton routing) → open it as a tab. `payload` = the path.
+        Event::Open(_) => {
+            sp.open_path(payload);
             Outcome::Rerender
         }
         Event::Action(ActionId(id)) => handle_action(sp, id),
@@ -1214,8 +1232,17 @@ pub extern "C" fn _start() {
     loop {
         match poll_event() {
             PollResult::Event(ev) => {
+                // Stabilize heap-backed payloads (Open path, InputChange
+                // value) into the static buffer BEFORE alloc_reset frees
+                // the event — otherwise handle's first allocation clobbers
+                // them (use-after-free).
+                let plen = match &ev {
+                    Event::Open(s) => copy_payload(s),
+                    Event::InputChange { value } => copy_payload(value),
+                    _ => 0,
+                };
                 alloc_reset(persistent_mark);
-                let outcome = handle(&mut sp, ev);
+                let outcome = handle(&mut sp, ev, payload_str(plen));
                 persistent_mark = alloc_mark();
                 match outcome {
                     Outcome::Idle => {}
