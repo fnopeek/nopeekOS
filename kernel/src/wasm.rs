@@ -236,14 +236,6 @@ pub fn spawn_widget_app(wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, w
     spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, widget_wid, None)
 }
 
-/// Like `spawn_widget_app` but hands the app a launch argument (e.g. a
-/// file path to open), readable via `npk_launch_arg`.
-pub fn spawn_widget_app_with_arg(
-    wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, launch_arg: Option<String>,
-) -> bool {
-    spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, 0, launch_arg)
-}
-
 fn spawn_on_worker_inner(
     wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
     foreground: bool, widget_wid: u32, launch_arg: Option<String>,
@@ -734,7 +726,19 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Ok(id) => id,
                 Err(_) => return -1,
             };
-            if spawn_widget_app_with_arg(bytes, module_cap, &app, arg) { 0 } else { -1 }
+            // Create the widget window NOW (synchronously, titled with the
+            // module name) instead of lazily on first scene_commit. The
+            // app spawns asynchronously, so without this a rapid second
+            // open (e.g. a double-click = two opens) would see no window
+            // yet and spawn a DUPLICATE instance. Pre-creating lets the
+            // next open find it and route an Event::Open tab instead.
+            let win = match crate::shade::with_compositor(|c| c.create_widget_window(&app)) {
+                Some(id) => id,
+                None => return -1,
+            };
+            crate::shade::focus_window(win); // bring the editor to the front
+            crate::shade::request_render();
+            if spawn_on_worker_inner(bytes, module_cap, 255, &app, false, win.0, arg) { 0 } else { -1 }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
