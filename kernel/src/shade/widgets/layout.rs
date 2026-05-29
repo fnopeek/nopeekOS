@@ -240,6 +240,7 @@ fn mods_of_widget(w: &Widget) -> &[Modifier] {
         Widget::Icon    { modifiers, .. } |
         Widget::Button  { modifiers, .. } |
         Widget::Input   { modifiers, .. } |
+        Widget::TextArea{ modifiers, .. } |
         Widget::Checkbox{ modifiers, .. } |
         Widget::Canvas  { modifiers, .. } |
         Widget::Popover { modifiers, .. } |
@@ -355,6 +356,17 @@ fn measure_intrinsic(w: &Widget) -> Size {
             Size { w: w.max(120) + 8 + pad.0 * 2, h: h + 8 + pad.1 * 2 }
         }
 
+        Widget::TextArea { modifiers, .. } => {
+            // Intrinsic floor only — the editing surface is meant to fill
+            // its parent. Apps wrap it in `Modifier::Flex(1)` (vertical
+            // stretch) inside an `Align::Stretch` column (horizontal
+            // stretch); the intrinsic size just keeps it from collapsing
+            // to nothing in a degenerate layout.
+            let line_h = ceil_u32(crate::gui::text::line_height(TextStyle::Mono));
+            let pad = padding(modifiers);
+            Size { w: 280 + 8 + pad.0 * 2, h: line_h * 3 + 8 + pad.1 * 2 }
+        }
+
         Widget::Checkbox { modifiers, .. } => {
             let pad = padding(modifiers);
             Size { w: 16 + pad.0 * 2, h: 16 + pad.1 * 2 }
@@ -430,6 +442,14 @@ fn place(w: &Widget, inner: Rect) -> LayoutNode {
                 baseline,
                 children: Vec::new(),
             }
+        }
+
+        // TextArea is placed as a leaf, but unlike the others it fills
+        // the rect the parent allotted (Flex / Align::Stretch already
+        // expanded `inner`) instead of shrinking to its intrinsic floor.
+        // The render walker scrolls + clips to this rect.
+        Widget::TextArea { .. } => {
+            LayoutNode::leaf(inner)
         }
 
         Widget::Icon { .. }

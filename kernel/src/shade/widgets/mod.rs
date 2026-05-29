@@ -260,6 +260,7 @@ fn is_focusable(w: &abi::Widget) -> bool {
     if matches!(w,
         abi::Widget::Button { .. }
         | abi::Widget::Input { .. }
+        | abi::Widget::TextArea { .. }
         | abi::Widget::Checkbox { .. }
     ) {
         return true;
@@ -522,8 +523,11 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
         };
         let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
         let new_focus_opt: Option<Option<Vec<u32>>> = match press_path.as_ref() {
-            // Input under cursor → focus moves to it.
-            Some(p) if matches!(widget_at_path(&scene.tree, p), Some(abi::Widget::Input { .. })) => {
+            // Input / TextArea under cursor → focus moves to it.
+            Some(p) if matches!(
+                widget_at_path(&scene.tree, p),
+                Some(abi::Widget::Input { .. }) | Some(abi::Widget::TextArea { .. })
+            ) => {
                 Some(Some(p.clone()))
             }
             // Non-Input focusable under cursor → focus untouched.
@@ -803,6 +807,7 @@ fn modifiers_of_ref(w: &abi::Widget) -> &[abi::Modifier] {
         abi::Widget::Icon     { modifiers, .. } |
         abi::Widget::Button   { modifiers, .. } |
         abi::Widget::Input    { modifiers, .. } |
+        abi::Widget::TextArea { modifiers, .. } |
         abi::Widget::Checkbox { modifiers, .. } |
         abi::Widget::Canvas   { modifiers, .. } |
         abi::Widget::Popover  { modifiers, .. } |
@@ -843,14 +848,14 @@ fn widget_at_path<'a>(tree: &'a abi::Widget, path: &[u32]) -> Option<&'a abi::Wi
     Some(cur)
 }
 
-/// DFS for the first focusable `Widget::Input` in document order.
-/// Used by `scene_commit` to auto-focus on first commit so apps with
-/// search bars (drun, future settings dialogs) never need their own
-/// focus-priming host fn.
+/// DFS for the first focusable text widget (`Input` or `TextArea`) in
+/// document order. Used by `scene_commit` to auto-focus on first commit
+/// so apps with a search bar (drun) or an editing surface (spell) never
+/// need their own focus-priming host fn.
 fn find_first_input_path(tree: &abi::Widget) -> Option<Vec<u32>> {
     fn walk(w: &abi::Widget, cursor: &mut Vec<u32>, out: &mut Option<Vec<u32>>) {
         if out.is_some() || is_disabled(w) { return; }
-        if matches!(w, abi::Widget::Input { .. }) {
+        if matches!(w, abi::Widget::Input { .. } | abi::Widget::TextArea { .. }) {
             *out = Some(cursor.clone());
             return;
         }
@@ -883,7 +888,7 @@ fn compute_input_edit(
 ) -> Option<InputEditState> {
     let target = widget_at_path(tree, path)?;
     let value = match target {
-        abi::Widget::Input { value, .. } => value.as_str(),
+        abi::Widget::Input { value, .. } | abi::Widget::TextArea { value, .. } => value.as_str(),
         _ => return None,
     };
     if let Some(p) = prev {
@@ -894,23 +899,77 @@ fn compute_input_edit(
     Some(InputEditState::from_value(value))
 }
 
-/// Compositor-side keyboard intercept for the focused `Widget::Input`.
-/// Returns `true` iff the key was consumed — caller must skip the
-/// usual `push_event(Event::Key)` route to the app.
+// ── Multi-line cursor helpers (TextArea) ──────────────────────────────
+//
+// Caret is a byte index into the whole `\n`-separated document. All
+// helpers are UTF-8-safe (files carry umlauts) — results land on char
+// boundaries, never mid-codepoint, so String::insert / remove can't
+// panic.
+
+/// Byte index of the start of the line containing `cursor`.
+fn line_start(s: &str, cursor: usize) -> usize {
+    s[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// Byte index of the end of the line containing `cursor` (the next
+/// `\n`, or end-of-string).
+fn line_end(s: &str, cursor: usize) -> usize {
+    s[cursor..].find('\n').map(|i| cursor + i).unwrap_or(s.len())
+}
+
+/// Snap `i` down to the nearest char boundary ≤ len.
+fn clamp_boundary(s: &str, mut i: usize) -> usize {
+    if i > s.len() { i = s.len(); }
+    while i > 0 && !s.is_char_boundary(i) { i -= 1; }
+    i
+}
+
+/// Move the caret up one visual line, preserving the byte-column within
+/// the line as closely as the shorter target line allows.
+fn cursor_up(s: &str, cursor: usize) -> usize {
+    let ls = line_start(s, cursor);
+    if ls == 0 { return 0; } // already on the first line
+    let col = cursor - ls;
+    let prev_ls = line_start(s, ls - 1);
+    let prev_len = (ls - 1) - prev_ls;
+    clamp_boundary(s, prev_ls + col.min(prev_len))
+}
+
+/// Move the caret down one visual line, preserving byte-column.
+fn cursor_down(s: &str, cursor: usize) -> usize {
+    let le = line_end(s, cursor);
+    if le == s.len() { return s.len(); } // already on the last line
+    let ls = line_start(s, cursor);
+    let col = cursor - ls;
+    let next_ls = le + 1;
+    let next_len = line_end(s, next_ls) - next_ls;
+    clamp_boundary(s, next_ls + col.min(next_len))
+}
+
+/// Compositor-side keyboard intercept for a focused `Widget::Input` or
+/// `Widget::TextArea`. Returns `true` iff the key was consumed — caller
+/// must skip the usual `push_event(Event::Key)` route to the app.
 ///
-/// Edits the buffer + caret in place. Buffer-mutating keys
-/// (printable, Backspace, Delete) emit a single
-/// `Event::InputChange { value }` so the app can mirror its own
-/// state. Pure caret moves (Left / Right / Home / End) consume the
-/// key silently — no event, no app round-trip. Enter fires
-/// `Event::Action(on_submit)` if the Input declared one
-/// (`NO_ACTION` sentinel = ignore).
+/// Edits the buffer + caret in place. Buffer-mutating keys (printable,
+/// Backspace, Delete, and — for TextArea — Enter→newline) emit a single
+/// `Event::InputChange { value }` carrying the whole document so the app
+/// can mirror its own state. Pure caret moves consume the key silently.
+///
+/// Input vs TextArea divergence:
+///   - Input: Enter fires `Event::Action(on_submit)` (NO_ACTION = let it
+///     fall through to the app as `Event::Key`); Home/End jump to buffer
+///     start/end; Up/Down are NOT consumed (fall through to the app — e.g.
+///     loft's grid navigation).
+///   - TextArea: Enter inserts `\n`; Home/End are line-relative;
+///     Up/Down/PageUp/PageDown move the caret across lines and ARE
+///     consumed (an editor owns its arrows; super+arrow stays WM nav).
 pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
     use crate::input::KeyCode as K;
 
-    // Phase 1: confirm a focused Input exists and capture its
-    // on_submit. Drop the read lock before mutating.
-    let on_submit = {
+    // Phase 1: confirm a focused text widget exists; capture its kind
+    // (Input on_submit, or TextArea) + the window height for paging.
+    // Drop the read lock before mutating.
+    let (is_textarea, on_submit, win_h) = {
         let scenes = SCENES.lock();
         let scene = match scenes.get(&window_id) {
             Some(s) => s,
@@ -920,19 +979,25 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
             return false;
         }
         match widget_at_path(&scene.tree, &scene.focus_path) {
-            Some(abi::Widget::Input { on_submit, .. }) => *on_submit,
+            Some(abi::Widget::Input { on_submit, .. }) => (false, *on_submit, scene.height),
+            Some(abi::Widget::TextArea { .. })         => (true, abi::ActionId(u32::MAX), scene.height),
             _ => return false,
         }
     };
 
     enum Op {
         Insert(u8),
+        Newline,
         Backspace,
         Delete,
         Left,
         Right,
         Home,
         End,
+        Up,
+        Down,
+        PageUp,
+        PageDown,
         Submit,
     }
 
@@ -944,12 +1009,16 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
         K::Right                                 => Op::Right,
         K::Home                                  => Op::Home,
         K::End                                   => Op::End,
-        // Enter only swallowed when the Input declared a real
-        // on_submit; otherwise it falls through to `Event::Key` so
-        // apps that route Enter at the window level (drun's launcher,
-        // any "press Enter to confirm selection" UI) keep working
-        // without needing to wire on_submit just to receive it.
-        K::Enter if on_submit.0 != u32::MAX => Op::Submit,
+        K::Up       if is_textarea               => Op::Up,
+        K::Down     if is_textarea               => Op::Down,
+        K::PageUp   if is_textarea               => Op::PageUp,
+        K::PageDown if is_textarea               => Op::PageDown,
+        // TextArea: Enter is a newline. Input: Enter only swallowed when
+        // it declared a real on_submit; otherwise it falls through to
+        // `Event::Key` so window-level Enter handlers (drun's launcher)
+        // keep working without wiring on_submit just to receive it.
+        K::Enter if is_textarea                  => Op::Newline,
+        K::Enter if on_submit.0 != u32::MAX      => Op::Submit,
         _                                        => return false,
     };
 
@@ -966,9 +1035,13 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
             None    => return false,
         };
         // Defensive: clamp cursor in case a malformed prev state slipped
-        // through (shouldn't happen, but a wild index would panic
-        // String::insert / remove).
-        if edit.cursor > edit.value.len() { edit.cursor = edit.value.len(); }
+        // through (a wild or mid-codepoint index would panic insert/remove).
+        edit.cursor = clamp_boundary(&edit.value, edit.cursor);
+        // One viewport of lines for PageUp/PageDown, derived from the
+        // window height at Mono metrics (a close-enough approximation —
+        // the TextArea's own rect isn't threaded here).
+        let line_h = (crate::gui::text::line_height(abi::TextStyle::Mono) as u32).max(1);
+        let page = ((win_h / line_h).saturating_sub(1)).max(1) as usize;
         let mut changed = false;
         match op {
             Op::Insert(b) => {
@@ -976,9 +1049,14 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
                 edit.cursor += 1;
                 changed = true;
             }
+            Op::Newline => {
+                edit.value.insert(edit.cursor, '\n');
+                edit.cursor += 1;
+                changed = true;
+            }
             Op::Backspace => {
                 if edit.cursor > 0 {
-                    let idx = edit.cursor - 1;
+                    let idx = clamp_boundary(&edit.value, edit.cursor - 1);
                     edit.value.remove(idx);
                     edit.cursor = idx;
                     changed = true;
@@ -990,10 +1068,19 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
                     changed = true;
                 }
             }
-            Op::Left  => if edit.cursor > 0 { edit.cursor -= 1; }
-            Op::Right => if edit.cursor < edit.value.len() { edit.cursor += 1; }
-            Op::Home  => edit.cursor = 0,
-            Op::End   => edit.cursor = edit.value.len(),
+            Op::Left  => edit.cursor = if edit.cursor > 0 {
+                clamp_boundary(&edit.value, edit.cursor - 1)
+            } else { 0 },
+            Op::Right => if edit.cursor < edit.value.len() {
+                let c = edit.value[edit.cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                edit.cursor += c;
+            },
+            Op::Home  => edit.cursor = if is_textarea { line_start(&edit.value, edit.cursor) } else { 0 },
+            Op::End   => edit.cursor = if is_textarea { line_end(&edit.value, edit.cursor) } else { edit.value.len() },
+            Op::Up    => edit.cursor = cursor_up(&edit.value, edit.cursor),
+            Op::Down  => edit.cursor = cursor_down(&edit.value, edit.cursor),
+            Op::PageUp   => for _ in 0..page { edit.cursor = cursor_up(&edit.value, edit.cursor); },
+            Op::PageDown => for _ in 0..page { edit.cursor = cursor_down(&edit.value, edit.cursor); },
             Op::Submit => {}
         }
         (changed, edit.value.clone())
