@@ -811,8 +811,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Err(_) => return -1,
             };
 
+            // WRITE so apps that persist via npk_store (the Spell editor
+            // saving files, future apps with state) work when launched
+            // from drun — matches the widget-app cap set granted by the
+            // dock / launch_app path. All sys/wasm modules are
+            // ECDSA-signed first-party code, so this adds no escape
+            // surface beyond what dock / bar already hold.
             let module_cap = match capability::create_module_cap(
                 capability::Rights::READ
+                    | capability::Rights::WRITE
                     | capability::Rights::EXECUTE
                     | capability::Rights::RENDER,
                 Some(600_000),
