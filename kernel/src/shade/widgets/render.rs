@@ -112,6 +112,18 @@ fn ceil_u32_local(x: f32) -> u32 {
     if (i as f32) < x { i.saturating_add(1) } else { i }
 }
 
+/// Colour token for byte offset `off` from a TextArea's spans, or
+/// `default` if no span covers it. Spans are sorted by `start`, so we
+/// can stop once a span begins past the offset.
+fn span_token_at(spans: &[super::abi::Span], off: usize, default: Token) -> Token {
+    for s in spans {
+        let start = s.start as usize;
+        if start > off { break; }
+        if off < start + s.len as usize { return s.token; }
+    }
+    default
+}
+
 /// Sum every `Modifier::Padding` in the effective list. Mirrors
 /// `layout::padding` so leaf glyph placement matches the layout-side
 /// outer-size growth — a single canonical source for "how much
@@ -450,18 +462,22 @@ fn paint_node_eff(
             }
         }
 
-        Widget::TextArea { value, placeholder, .. } => {
+        Widget::TextArea { value, placeholder, spans, .. } => {
             // The editing surface. Background / border come from the
             // app's modifiers (handled in paint_modifiers_eff). When
             // focused, the live buffer leads the tree's `value` by one
             // round-trip — render from `edit_state` so typing is instant.
+            // `spans` (syntax-highlight colours, byte offsets over the
+            // committed value) are applied to the live buffer; freshly
+            // typed bytes beyond span coverage fall back to the default
+            // colour for one frame until the app re-commits.
             let live: &str = match edit_state {
                 Some(e) => e.value.as_str(),
                 None    => value.as_str(),
             };
             let style = super::abi::TextStyle::Mono;
             let line_h = ceil_u32_local(crate::gui::text::line_height(style)).max(1);
-            // Resolve text colour: default OnSurface, Tint overrides.
+            // Resolve default text colour: OnSurface, Tint overrides.
             let mut color = Token::OnSurface;
             for m in eff { if let Modifier::Tint(tok) = m { color = *tok; } }
 
@@ -493,15 +509,37 @@ fn paint_node_eff(
                 _ => 0,
             };
 
-            // Paint the visible window of lines.
+            // Paint the visible window of lines, colouring each line by
+            // the spans covering its bytes (uncovered → default colour).
+            let mut line_byte = 0usize;
             for (li, line) in live.split('\n').enumerate() {
+                let line_start = line_byte;
+                line_byte += line.len() + 1; // include the '\n'
                 if li < scroll { continue; }
                 let row = li - scroll;
                 if row >= visible { break; }
                 let y = top_y + (row as u32 * line_h) as i32;
-                if !line.is_empty() {
+                if line.is_empty() { continue; }
+                if spans.is_empty() {
                     rast.text(target, line, style, color, Point { x: text_x, y });
+                    continue;
                 }
+                // Split the line into coloured runs.
+                let mut x = text_x;
+                let mut run_start = 0usize;
+                let mut run_tok = span_token_at(spans, line_start, color);
+                for (b, _) in line.char_indices() {
+                    let tok = span_token_at(spans, line_start + b, color);
+                    if tok != run_tok && b > run_start {
+                        let seg = &line[run_start..b];
+                        rast.text(target, seg, style, run_tok, Point { x, y });
+                        x += ceil_u32_local(crate::gui::text::measure(seg, style)) as i32;
+                        run_start = b;
+                        run_tok = tok;
+                    }
+                }
+                let seg = &line[run_start..];
+                rast.text(target, seg, style, run_tok, Point { x, y });
             }
 
             // Caret (only when focused / editor present).

@@ -85,7 +85,7 @@ pub mod caps {
 pub use abi::{
     Action, ActionId, Align, Axis, CanvasId, Density, EffectId, Event, Fill,
     IconId, KeyCode, Modifier, MouseButton, NodeId, Palette, Point, Rect,
-    Role, Shadow, Size, TextStyle, Token, Transition, Widget,
+    Role, Shadow, Size, Span, TextStyle, Token, Transition, Widget,
 };
 pub use app_meta::{AppMeta, AppMetaError, IconRef, APP_META_WIRE};
 pub use style::{Elevation, Motion, Padding, Radius, Spacing};

@@ -36,6 +36,19 @@ pub struct Rect {
     pub h: u32,
 }
 
+/// A coloured run inside a `Widget::TextArea`'s `value`. `start`/`len`
+/// are byte offsets into the (UTF-8) buffer; `token` is the colour. The
+/// app recomputes spans on every edit (syntax highlighting); the
+/// compositor renders the live buffer and colours each byte by the span
+/// covering it (uncovered bytes use the default text colour). Spans
+/// should be sorted by `start` and non-overlapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub start: u32,
+    pub len:   u32,
+    pub token: Token,
+}
+
 // ── Identifiers ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -391,6 +404,9 @@ pub enum Widget {
     TextArea {
         value:       String,
         placeholder: String,
+        /// Syntax-highlight colour runs over `value` (byte offsets). The
+        /// app recomputes these on every edit; empty = plain text.
+        spans:       Vec<Span>,
         modifiers:   Vec<Modifier>,
     },
     // Appended only.

@@ -488,17 +488,20 @@ fn render_toolbar(sp: &Spell) -> Widget {
     } else {
         sp.title.clone()
     };
-    // Mode toggle: in Edit show the preview glyph (click → preview);
-    // in Preview show the code glyph (click → edit).
-    let mode_icon = match sp.mode { Mode::Edit => IconId::FileText, Mode::Preview => IconId::Code };
+    let mut children: Vec<Widget> = alloc::vec![
+        Widget::Icon { id: IconId::FileText, size: 24, modifiers: alloc::vec![Modifier::Tint(Token::Accent)] },
+        Widget::Text { content: title, style: TextStyle::Body, modifiers: alloc::vec![] },
+        Widget::Spacer { flex: 1 },
+    ];
+    // Mode toggle is only meaningful for markdown (raw ↔ rendered).
+    // Code/plain are always the live-highlighted editor, no toggle.
+    if matches!(sp.kind(), Kind::Markdown) {
+        let mode_icon = match sp.mode { Mode::Edit => IconId::FileText, Mode::Preview => IconId::Code };
+        children.push(prefab::icon_button(mode_icon, 24, Some(ActionId(ACT_TOOLBAR_MODE)), None));
+    }
+    children.push(prefab::icon_button(IconId::Download, 24, Some(ActionId(ACT_TOOLBAR_SAVE)), None));
     Widget::Row {
-        children: alloc::vec![
-            Widget::Icon { id: IconId::FileText, size: 24, modifiers: alloc::vec![Modifier::Tint(Token::Accent)] },
-            Widget::Text { content: title, style: TextStyle::Body, modifiers: alloc::vec![] },
-            Widget::Spacer { flex: 1 },
-            prefab::icon_button(mode_icon,        24, Some(ActionId(ACT_TOOLBAR_MODE)), None),
-            prefab::icon_button(IconId::Download,  24, Some(ActionId(ACT_TOOLBAR_SAVE)), None),
-        ],
+        children,
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
         modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
@@ -509,32 +512,33 @@ fn render_body(sp: &Spell) -> Widget {
     if sp.naming {
         return render_name_dialog(sp);
     }
-    match sp.mode {
-        Mode::Edit => Widget::TextArea {
-            value:       sp.text.clone(),
-            placeholder: "Tippe los…".to_string(),
-            modifiers:   alloc::vec![
+    // Markdown is the special case: a rendered preview you toggle to.
+    // Everything else is the live-highlighted editor — code gets colour
+    // spans the compositor paints while you type, no toggle needed.
+    if matches!(sp.kind(), Kind::Markdown) && sp.mode == Mode::Preview {
+        return Widget::Scroll {
+            child:     Box::new(markdown_preview(&sp.text)),
+            axis:      Axis::Vertical,
+            modifiers: alloc::vec![
                 Modifier::Flex(1),
                 Modifier::Background(Token::Surface),
-                Modifier::Padding(Padding::Sm.as_u16()),
+                Modifier::Padding(Padding::Md.as_u16()),
             ],
-        },
-        Mode::Preview => {
-            let content = match sp.kind() {
-                Kind::Markdown   => markdown_preview(&sp.text),
-                Kind::Code(lang) => code_preview(&sp.text, lang),
-                Kind::Plain      => plain_preview(&sp.text),
-            };
-            Widget::Scroll {
-                child:     Box::new(content),
-                axis:      Axis::Vertical,
-                modifiers: alloc::vec![
-                    Modifier::Flex(1),
-                    Modifier::Background(Token::Surface),
-                    Modifier::Padding(Padding::Md.as_u16()),
-                ],
-            }
-        }
+        };
+    }
+    let spans = match sp.kind() {
+        Kind::Code(lang) => code_spans(&sp.text, lang),
+        _ => Vec::new(),
+    };
+    Widget::TextArea {
+        value:       sp.text.clone(),
+        placeholder: "Tippe los…".to_string(),
+        spans,
+        modifiers:   alloc::vec![
+            Modifier::Flex(1),
+            Modifier::Background(Token::Surface),
+            Modifier::Padding(Padding::Sm.as_u16()),
+        ],
     }
 }
 
@@ -698,27 +702,34 @@ fn code_block(lines: &[String]) -> Widget {
     prefab::card(col, prefab::CardKind::Inset)
 }
 
-// ── Code preview (per-line tokenizers) ────────────────────────────────
+// ── Syntax highlighting → colour spans (live in the TextArea) ─────────
+//
+// The tokenizers walk the whole buffer and emit `Span { start, len,
+// token }` byte ranges for non-default tokens (keywords → Accent,
+// strings → Warning, comments → Muted). Uncovered bytes render in the
+// default colour. Spans come out sorted by `start` (left-to-right scan),
+// which the compositor's renderer relies on.
 
-fn mono_span(s: &str, tint: Option<Token>) -> Widget {
-    let mods = match tint {
-        Some(t) => alloc::vec![Modifier::Tint(t)],
-        None => alloc::vec![],
-    };
-    Widget::Text { content: s.to_string(), style: TextStyle::Mono, modifiers: mods }
+fn push_span(out: &mut Vec<Span>, start: usize, len: usize, token: Token) {
+    if len == 0 { return; }
+    out.push(Span { start: start as u32, len: len as u32, token });
 }
 
-fn code_lines(rows: Vec<Widget>) -> Widget {
-    Widget::Column { children: rows, spacing: 0, align: Align::Start, modifiers: alloc::vec![] }
-}
-
-/// Unhighlighted Mono preview (txt/log/toml/yaml/…).
-fn plain_preview(text: &str) -> Widget {
-    code_lines(text.split('\n').map(|l| mono_span(l, None)).collect())
-}
-
-fn code_preview(text: &str, lang: Lang) -> Widget {
-    code_lines(text.split('\n').map(|l| highlight_line(l, lang)).collect())
+/// Tokenise the whole document into colour spans for the given language.
+fn code_spans(text: &str, lang: Lang) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    let mut base = 0usize;
+    let markup = matches!(lang, Lang::Markup);
+    let (kw, comment, squote) = lang_spec(lang);
+    for line in text.split('\n') {
+        if markup {
+            markup_line_spans(line, base, &mut out);
+        } else {
+            clike_line_spans(line, base, kw, comment, squote, &mut out);
+        }
+        base += line.len() + 1; // include the '\n'
+    }
+    out
 }
 
 // Keyword sets — not full lexers, just enough for the visual signal.
@@ -766,42 +777,27 @@ fn lang_spec(lang: Lang) -> (&'static [&'static str], Option<&'static str>, bool
     }
 }
 
-fn highlight_line(line: &str, lang: Lang) -> Widget {
-    if matches!(lang, Lang::Markup) {
-        return highlight_markup_line(line);
-    }
-    let (keywords, comment, squote) = lang_spec(lang);
-    highlight_clike_line(line, keywords, comment, squote)
-}
-
 fn char_len(s: &str, i: usize) -> usize {
     s[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
 }
 
-/// Generic C-like line highlighter. Keywords → accent, `"…"`/`'…'`
-/// strings → warning, line comments → muted, rest → on-surface. All
-/// string slices land on char boundaries (UTF-8-safe — strings and
-/// comments can hold umlauts).
-fn highlight_clike_line(
-    line: &str, keywords: &[&str], comment: Option<&str>, squote: bool,
-) -> Widget {
-    let trimmed = line.trim_start();
+/// Tokenise one C-like line into spans (absolute byte base). Keywords →
+/// Accent, `"…"`/`'…'` strings → Warning, line comments → Muted; the
+/// rest is left uncovered (default colour). UTF-8-safe.
+fn clike_line_spans(
+    line: &str, base: usize, keywords: &[&str], comment: Option<&str>,
+    squote: bool, out: &mut Vec<Span>,
+) {
+    // Whole-line comment.
     if let Some(c) = comment {
-        if trimmed.starts_with(c) {
-            return mono_span(line, Some(Token::OnSurfaceMuted));
+        if line.trim_start().starts_with(c) {
+            push_span(out, base, line.len(), Token::OnSurfaceMuted);
+            return;
         }
     }
-    let mut spans: Vec<Widget> = Vec::new();
     let bytes = line.as_bytes();
     let mut i = 0;
     let mut word_start: Option<usize> = None;
-
-    let flush_word = |spans: &mut Vec<Widget>, line: &str, start: usize, end: usize| {
-        let w = &line[start..end];
-        let tint = if keywords.contains(&w) { Some(Token::Accent) } else { None };
-        spans.push(mono_span(w, tint));
-    };
-
     while i < bytes.len() {
         let b = bytes[i];
         if b.is_ascii_alphanumeric() || b == b'_' {
@@ -809,15 +805,18 @@ fn highlight_clike_line(
             i += 1;
             continue;
         }
-        if let Some(ws) = word_start.take() { flush_word(&mut spans, line, ws, i); }
+        if let Some(ws) = word_start.take() {
+            let w = &line[ws..i];
+            if keywords.contains(&w) { push_span(out, base + ws, i - ws, Token::Accent); }
+        }
         // Mid-line comment to end of line.
         if let Some(c) = comment {
             if line[i..].starts_with(c) {
-                spans.push(mono_span(&line[i..], Some(Token::OnSurfaceMuted)));
-                break;
+                push_span(out, base + i, line.len() - i, Token::OnSurfaceMuted);
+                return;
             }
         }
-        // String / char literal (quote is ASCII, so boundaries are safe).
+        // String / char literal (quote is ASCII → boundaries are safe).
         if b == b'"' || (squote && b == b'\'') {
             let quote = b;
             let start = i;
@@ -831,46 +830,40 @@ fn highlight_clike_line(
                 if bytes[i] == quote { i += 1; break; }
                 i += char_len(line, i);
             }
-            spans.push(mono_span(&line[start..i], Some(Token::Warning)));
+            push_span(out, base + start, i - start, Token::Warning);
             continue;
         }
-        // Punctuation / non-ASCII — emit one whole char.
-        let cl = char_len(line, i);
-        spans.push(mono_span(&line[i..i + cl], None));
-        i += cl;
+        // Default char — no span.
+        i += char_len(line, i);
     }
-    if let Some(ws) = word_start.take() { flush_word(&mut spans, line, ws, bytes.len()); }
-    if spans.is_empty() { return mono_span(line, None); }
-    Widget::Row { children: spans, spacing: 0, align: Align::Start, modifiers: alloc::vec![] }
+    if let Some(ws) = word_start.take() {
+        let w = &line[ws..];
+        if keywords.contains(&w) { push_span(out, base + ws, line.len() - ws, Token::Accent); }
+    }
 }
 
-/// HTML/XML: tags `<…>` → accent, `<!-- … -->` → muted, text → plain.
-/// All split points are ASCII (`<`, `>`, `<!--`, `-->`), so boundaries
-/// are safe.
-fn highlight_markup_line(line: &str) -> Widget {
-    let mut spans: Vec<Widget> = Vec::new();
+/// HTML/XML line → spans: tags `<…>` → Accent, `<!-- … -->` → Muted,
+/// text left uncovered. Split points are ASCII, so boundaries are safe.
+fn markup_line_spans(line: &str, base: usize, out: &mut Vec<Span>) {
     let mut i = 0;
     while i < line.len() {
         if line[i..].starts_with("<!--") {
             let end = line[i..].find("-->").map(|p| i + p + 3).unwrap_or(line.len());
-            spans.push(mono_span(&line[i..end], Some(Token::OnSurfaceMuted)));
+            push_span(out, base + i, end - i, Token::OnSurfaceMuted);
             i = end;
             continue;
         }
         if line.as_bytes()[i] == b'<' {
             let end = line[i..].find('>').map(|p| i + p + 1).unwrap_or(line.len());
-            spans.push(mono_span(&line[i..end], Some(Token::Accent)));
+            push_span(out, base + i, end - i, Token::Accent);
             i = end;
             continue;
         }
-        // Text up to the next tag.
+        // Plain text up to the next tag — no span.
         let mut end = line[i..].find('<').map(|p| i + p).unwrap_or(line.len());
         if end <= i { end = line.len(); }
-        spans.push(mono_span(&line[i..end], None));
         i = end;
     }
-    if spans.is_empty() { return mono_span(line, None); }
-    Widget::Row { children: spans, spacing: 0, align: Align::Start, modifiers: alloc::vec![] }
 }
 
 // ── Events ────────────────────────────────────────────────────────────
