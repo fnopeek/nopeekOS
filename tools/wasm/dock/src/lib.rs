@@ -266,19 +266,25 @@ impl Dock {
             ],
         };
 
-        // When a menu is open the window is grown to the full screen height
-        // (see `apply_window_size`) so the popover has room above and clicks
-        // anywhere outside land inside the dock window → on_dismiss fires.
-        // Push the tray to the bottom of that tall window via a Column with
-        // a flex spacer; when no menu is open the column collapses to the
-        // tray alone in the small (DOCK_HEIGHT) window.
-        let tray_col = Widget::Column {
-            children:  alloc::vec![Widget::Spacer { flex: 1 }, tray],
-            spacing:   Spacing::None.as_u16(),
-            align:     Align::Stretch,
-            modifiers: alloc::vec![],
+        // When the window is expanded (menu open or drag-reorder active),
+        // the tray must be pushed to the bottom — wrap it in a Column with
+        // a flex spacer above. In the normal small window, leave the tray
+        // as the direct Stack child so it fills the full DOCK_HEIGHT pill
+        // (a Column with a Spacer would otherwise leave the tray at its
+        // intrinsic ~40 px and add transparent slack on top, making the
+        // visible pill look shorter).
+        let expanded = self.open.is_some() || self.moving.is_some();
+        let bottom_anchored: Widget = if expanded {
+            Widget::Column {
+                children:  alloc::vec![Widget::Spacer { flex: 1 }, tray],
+                spacing:   Spacing::None.as_u16(),
+                align:     Align::Stretch,
+                modifiers: alloc::vec![],
+            }
+        } else {
+            tray
         };
-        let mut stack_children: Vec<Widget> = alloc::vec![tray_col];
+        let mut stack_children: Vec<Widget> = alloc::vec![bottom_anchored];
         if let Some(menu) = self.open {
             stack_children.push(self.render_popover(menu));
         }
