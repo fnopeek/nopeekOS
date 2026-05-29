@@ -565,7 +565,9 @@ impl Dock {
 /// Single dock cell — `Widget::Icon` with hover + click + a NodeId
 /// anchor so the right-click popover can attach to it. The `hover`
 /// ActionId fires when the cursor enters the cell — the dock uses
-/// this for the drag-reorder live shuffle.
+/// this for the drag-reorder live shuffle. Hover state inflates the
+/// glyph slightly (Mac-Dock style) instead of painting a background
+/// box; the kernel renderer reads `Modifier::Scale` for icons.
 fn icon_cell(icon: IconId, size: u16, click: ActionId, hover: ActionId, anchor: NodeId) -> Widget {
     let mods: Vec<Modifier> = alloc::vec![
         Modifier::Padding(Padding::Sm.as_u16()),
@@ -573,8 +575,9 @@ fn icon_cell(icon: IconId, size: u16, click: ActionId, hover: ActionId, anchor: 
         Modifier::OnHover(hover),
         Modifier::NodeId(anchor),
         Modifier::Hover(alloc::vec![
-            Modifier::Background(Token::SurfaceMuted),
-            Modifier::Rounded(Radius::Sm.as_u8()),
+            // Q8.8: 320 = 1.25× — visible bump without overflowing the
+            // tray pill enough to trample the neighbours.
+            Modifier::Scale(320),
         ]),
     ];
     Widget::Icon { id: icon, size, modifiers: mods }

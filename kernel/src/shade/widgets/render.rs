@@ -354,10 +354,26 @@ fn paint_node_eff(
 
         Widget::Icon { id, size, .. } => {
             let mut color = Token::OnSurface;
+            // Q8.8 fixed-point scale: 256 = 1.0×. Resolved from the
+            // effective modifier list so Hover/Focus/Active states can
+            // inflate the icon (dock cells use this for a Mac-style
+            // hover bump). The scaled glyph stays centred inside the
+            // original cell rect — layout doesn't change, so neighbours
+            // don't shift; a small overflow can paint over the cell
+            // background (the dock's Tray catches it cleanly).
+            let mut q88: u32 = 256;
             for m in eff {
-                if let Modifier::Tint(tok) = m { color = *tok; }
+                match m {
+                    Modifier::Tint(tok)  => color = *tok,
+                    Modifier::Scale(v)   => q88 = *v as u32,
+                    _ => {}
+                }
             }
-            rast.icon(target, *id, *size, color, Point { x: inner_x, y: inner_y });
+            let scaled = (((*size as u32) * q88) / 256).max(1).min(u16::MAX as u32) as u16;
+            let off_x = (*size as i32 - scaled as i32) / 2;
+            let off_y = off_x;
+            rast.icon(target, *id, scaled, color,
+                Point { x: inner_x + off_x, y: inner_y + off_y });
         }
 
         Widget::Button { label, icon, .. } => {
