@@ -129,16 +129,16 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 // ── ActionIds + NodeIds ───────────────────────────────────────────────
 // Ranges are far apart so a future reshuffle can't collide silently.
-const CLICK_BASE:   u32 = 1;            // 1..LAUNCHER : launch cell idx
-const LAUNCHER:     u32 = 90_000;       // open drun
+const CLICK_BASE:   u32 = 1;            // 1..HOVER_BASE : launch cell idx
+const HOVER_BASE:   u32 = 50_000;       // HOVER_BASE+idx : OnHover for cell idx
+const LAUNCHER:     u32 = 90_000;       // open drun (also: hover target N)
 const NODE_CELL:    u32 = 100_000;      // NODE_CELL+idx : anchor for cell idx
 const NODE_LAUNCHER:u32 = 199_000;      // anchor for trailing launcher
 
-const MENU_UNPIN:      u32 = 200_000;
-const MENU_MOVE_LEFT:  u32 = 200_001;
-const MENU_MOVE_RIGHT: u32 = 200_002;
-const MENU_DISMISS:    u32 = 200_003;
-const ADD_BASE:        u32 = 300_000;   // ADD_BASE+catalog_idx : add to dock
+const MENU_UNPIN:   u32 = 200_000;
+const MENU_MOVE:    u32 = 200_001;      // enter drag-to-reorder mode
+const MENU_DISMISS: u32 = 200_003;
+const ADD_BASE:     u32 = 300_000;      // ADD_BASE+catalog_idx : add to dock
 
 // Visual sizing (px at 1× scale). Kept low + tight for a flat, floating
 // tray; the compositor draws it translucent with a gap from the edge.
@@ -172,6 +172,11 @@ struct Dock {
     catalog:    Vec<AppEntry>,
     /// Right-click context menu state.
     open:       Option<OpenMenu>,
+    /// While `Some(launch_name)`, the dock is in drag-to-reorder mode:
+    /// hovering another cell live-shuffles the moving entry to that slot,
+    /// and the next click of any kind exits + persists. Tracked by name
+    /// (stable across remove+insert) instead of index.
+    moving:     Option<String>,
     /// Screen height, fetched once at startup. Used to expand the dock
     /// window when a menu is open so the popover has room above the tray
     /// and click-outside lands inside the (now-large) dock window.
@@ -194,7 +199,7 @@ impl Dock {
         entries.extend(initial);
         let packed = unsafe { npk_get_fb_size() };
         let screen_h = (packed & 0xFFFF_FFFF) as i32;
-        Dock { entries, catalog, open: None, screen_h }
+        Dock { entries, catalog, open: None, moving: None, screen_h }
     }
 
     /// Total dock width to request from the compositor (it clamps).
@@ -213,15 +218,19 @@ impl Dock {
                 e.icon,
                 ICON_SIZE,
                 ActionId(CLICK_BASE + i as u32),
+                ActionId(HOVER_BASE + i as u32),
                 NodeId(NODE_CELL + i as u32),
             ));
         }
         // Trailing launcher button → drun (full search). Right-click on
-        // it opens the Add-to-dock submenu.
+        // it opens the Add-to-dock submenu. Hover with HOVER_BASE+N (where
+        // N == entries.len()) so a drag-reorder can move past the last
+        // pinned slot, dropping the moving entry at the end of the list.
         cells.push(icon_cell(
             IconId::MagnifyingGlass,
             ICON_SIZE,
             ActionId(LAUNCHER),
+            ActionId(HOVER_BASE + self.entries.len() as u32),
             NodeId(NODE_LAUNCHER),
         ));
         cells.push(Widget::Spacer { flex: 1 });
@@ -275,7 +284,10 @@ impl Dock {
     /// is preserved when the window is `shown` (win.y = baseline - dh -
     /// gap, the dock tray then floats above the bottom edge).
     fn apply_window_size(&self) {
-        let h = if self.open.is_some() {
+        // Stay expanded while the user is mid-drag too, so any click
+        // (incl. on empty area) lands inside the dock window and exits
+        // the move cleanly.
+        let h = if self.open.is_some() || self.moving.is_some() {
             (self.screen_h - DOCK_GAP_RESERVE).max(DOCK_HEIGHT)
         } else {
             DOCK_HEIGHT
@@ -302,15 +314,12 @@ impl Dock {
                 } else {
                     alloc::format!("{} vom Dock entfernen", name)
                 };
-                let mut items: Vec<(String, ActionId)> = Vec::with_capacity(3);
+                let mut items: Vec<(String, ActionId)> = Vec::with_capacity(2);
                 items.push((unpin_label, ActionId(MENU_UNPIN)));
-                if idx > 0 {
-                    items.push(("Nach links".to_string(),
-                                ActionId(MENU_MOVE_LEFT)));
-                }
-                if idx + 1 < self.entries.len() {
-                    items.push(("Nach rechts".to_string(),
-                                ActionId(MENU_MOVE_RIGHT)));
+                // "Verschieben" only makes sense when there's somewhere
+                // to move TO — at least two pinned entries.
+                if self.entries.len() > 1 {
+                    items.push(("Verschieben".to_string(), ActionId(MENU_MOVE)));
                 }
                 (NodeId(NODE_CELL + idx as u32),
                  prefab::popover_menu(&items, None))
@@ -362,13 +371,37 @@ impl Dock {
         match ev {
             Event::Action(ActionId(id)) => self.on_action(id),
             Event::ContextAction(ActionId(id)) => self.on_context(id),
+            // A press anywhere — even on the empty area of an expanded
+            // window — exits an active drag-reorder. The hit-tested
+            // Action(...) above already handles clicks that land on a
+            // cell; this catches the in-between case (clicks on the
+            // transparent expand-region with no hit-tested target).
+            Event::MouseButton { button: MouseButton::Left, down: true, .. } => {
+                if self.moving.is_some() {
+                    self.exit_move()
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
 
     fn on_action(&mut self, id: u32) -> bool {
-        // Menu actions take priority — they only fire while a popover is
-        // open and route to a state mutation + close.
+        // While dragging: a hover over another cell shuffles the moving
+        // entry into that slot. Any non-hover Action ends the drag.
+        if self.moving.is_some() {
+            if id >= HOVER_BASE && id < LAUNCHER {
+                let target = (id - HOVER_BASE) as usize;
+                self.reorder_moving_to(target);
+                return true;
+            }
+            // Any other Action (a click on a cell, MENU_DISMISS, …) means
+            // the user is done dragging.
+            return self.exit_move();
+        }
+
+        // Menu actions — only fire while a popover is open.
         match id {
             MENU_DISMISS => {
                 self.open = None;
@@ -384,21 +417,10 @@ impl Dock {
                 self.open = None;
                 return true;
             }
-            MENU_MOVE_LEFT => {
+            MENU_MOVE => {
                 if let Some(OpenMenu::IconCtx(idx)) = self.open {
-                    if idx > 0 && idx < self.entries.len() {
-                        self.entries.swap(idx - 1, idx);
-                        self.persist();
-                    }
-                }
-                self.open = None;
-                return true;
-            }
-            MENU_MOVE_RIGHT => {
-                if let Some(OpenMenu::IconCtx(idx)) = self.open {
-                    if idx + 1 < self.entries.len() {
-                        self.entries.swap(idx, idx + 1);
-                        self.persist();
+                    if let Some(e) = self.entries.get(idx) {
+                        self.moving = Some(e.launch_name.clone());
                     }
                 }
                 self.open = None;
@@ -419,6 +441,11 @@ impl Dock {
             }
             _ => {}
         }
+        // Hover events while no popover is open and no drag is active —
+        // ignore (the cells re-render their own hover modifier).
+        if id >= HOVER_BASE && id < LAUNCHER {
+            return false;
+        }
         // Regular launch click — but close any open menu first.
         if self.open.is_some() {
             self.open = None;
@@ -426,18 +453,23 @@ impl Dock {
         }
         if id == LAUNCHER {
             let _ = spawn("drun");
-        } else if id >= CLICK_BASE && id < LAUNCHER {
+        } else if id >= CLICK_BASE && id < HOVER_BASE {
             self.launch((id - CLICK_BASE) as usize);
         }
         false
     }
 
     fn on_context(&mut self, id: u32) -> bool {
+        // Right-click during a drag commits at the current position too —
+        // no separate cancel, the user accepts wherever the entry sits now.
+        if self.moving.is_some() {
+            return self.exit_move();
+        }
         if id == LAUNCHER {
             self.open = Some(OpenMenu::AddApp);
             return true;
         }
-        if id >= CLICK_BASE && id < LAUNCHER {
+        if id >= CLICK_BASE && id < HOVER_BASE {
             let idx = (id - CLICK_BASE) as usize;
             if idx < self.entries.len() {
                 self.open = Some(OpenMenu::IconCtx(idx));
@@ -445,6 +477,33 @@ impl Dock {
             }
         }
         false
+    }
+
+    /// Shuffle the moving entry to `target` (0..=entries.len() — the
+    /// launcher slot maps to entries.len(), i.e. "end of list").
+    fn reorder_moving_to(&mut self, target: usize) {
+        let Some(name) = self.moving.clone() else { return };
+        let Some(cur) = self.entries.iter().position(|e| e.launch_name == name) else {
+            // The moving entry was removed somehow — drop the mode.
+            self.moving = None;
+            return;
+        };
+        let dest = target.min(self.entries.len().saturating_sub(1));
+        if cur == dest { return; }
+        let entry = self.entries.remove(cur);
+        let insert_at = dest.min(self.entries.len());
+        self.entries.insert(insert_at, entry);
+    }
+
+    /// Exit drag mode and write the new order to disk. Returns true so
+    /// the main loop re-renders + shrinks the window.
+    fn exit_move(&mut self) -> bool {
+        if self.moving.take().is_some() {
+            self.persist();
+            true
+        } else {
+            false
+        }
     }
 
     /// Write the current pin order to `sys/config/dock` — one launch_name
@@ -463,11 +522,14 @@ impl Dock {
 }
 
 /// Single dock cell — `Widget::Icon` with hover + click + a NodeId
-/// anchor so the right-click popover can attach to it.
-fn icon_cell(icon: IconId, size: u16, click: ActionId, anchor: NodeId) -> Widget {
+/// anchor so the right-click popover can attach to it. The `hover`
+/// ActionId fires when the cursor enters the cell — the dock uses
+/// this for the drag-reorder live shuffle.
+fn icon_cell(icon: IconId, size: u16, click: ActionId, hover: ActionId, anchor: NodeId) -> Widget {
     let mods: Vec<Modifier> = alloc::vec![
         Modifier::Padding(Padding::Sm.as_u16()),
         Modifier::OnClick(click),
+        Modifier::OnHover(hover),
         Modifier::NodeId(anchor),
         Modifier::Hover(alloc::vec![
             Modifier::Background(Token::SurfaceMuted),
