@@ -385,7 +385,13 @@ run_qemu_generic() {
     local -a accel_args
     case "$accel" in
         kvm)
-            accel_args=(-enable-kvm -overcommit cpu-pm=on -cpu host,+invtsc)
+            # cpu-pm=on (MWAIT passthrough) dropped for dev: it lets the guest
+            # run MWAIT on the bare CPU with NO vm-exit, so an idle vCPU thread
+            # never yields to the host scheduler → htop shows it ~100% R even
+            # while the guest sleeps (the `cores` cmd reads 1% busy). Without it
+            # guest MWAIT vm-exits → KVM parks the vCPU → idle shows ~0% on the
+            # host. KVM still emulates MWAIT correctly.
+            accel_args=(-enable-kvm -cpu host,+invtsc)
             ;;
         tcg-intel)
             accel_args=(-accel tcg -cpu Skylake-Server)
