@@ -146,6 +146,21 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("testdisk.wasm"),
         version: Some(include_str!("testdisk.version")),
     },
+    BundledAsset {
+        fs_path: "sys/wasm/spell",
+        bytes:   include_bytes!("spell.wasm"),
+        version: Some(include_str!("spell.version")),
+    },
+    BundledAsset {
+        fs_path: "sys/wasm/iris",
+        bytes:   include_bytes!("iris.wasm"),
+        version: Some(include_str!("iris.version")),
+    },
+    BundledAsset {
+        fs_path: "sys/wasm/snap",
+        bytes:   include_bytes!("snap.wasm"),
+        version: Some(include_str!("snap.version")),
+    },
 
     // ── MicroVM userspace bundle (LibreWolf, ~261 MB) ─────────────
     // Optional: only baked in when built with the `bundle-userspace`
