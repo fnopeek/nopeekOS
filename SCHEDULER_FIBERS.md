@@ -71,8 +71,15 @@ USAGE/QUEUE/ROLE) + per-core instrumentation during the rework:
 **Conclusion: point-patches won't fix idle-100%. The system must become
 event-driven end to end (block on input/timer, never poll), which is
 exactly the fiber rework below — plus likely a per-core timer as a
-prerequisite.** Diagnose first via `top` + per-core "what am I doing"
-counters.
+prerequisite.**
+
+**Diagnosis step 0 (new session): the built-in `top` is buggy and needs a
+full redesign — do NOT trust it.** Before touching the scheduler, add
+fresh, trustworthy **per-core instrumentation**: for each core, what is it
+doing right now — HLT/MWAIT-idle vs. running which task/app, plus run-queue
+depth and a real busy% (busy-cycles / total-cycles since last sample).
+That gives the data to pinpoint the idle-100% spinner directly. (Redesign
+of the `top` app itself is a separate follow-up.)
 
 ## The fix: fibers (stackful green threads)
 
