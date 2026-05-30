@@ -330,7 +330,7 @@ fn intent_worker_task(arg: u64) {
 fn is_core0_intent(verb: &str) -> bool {
     matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
                    "clear" | "cls" | "shade" | "shell" | "npk-shell" |
-                   "cd" | "pwd" | "top" | "htop" | "history" | "gpu" |
+                   "cd" | "pwd" | "top" | "htop" | "cores" | "cpu" | "history" | "gpu" |
                    // microvm + browser: VMX state (CR4.VMXE,
                    // IA32_FEATURE_CONTROL lock-bit, TSS, GDT-with-TR-
                    // slot) is BSP-only — worker cores would VMfail
@@ -552,7 +552,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             // starved + crashed the browser. Idle (no VM) still hlts.
             if !crate::microvm::vm_active() {
                 // SAFETY: ring-0, IRQs enabled.
+                let t0 = crate::interrupts::rdtsc();
                 unsafe { core::arch::asm!("hlt"); }
+                crate::smp::per_core::record_halt(
+                    0, crate::interrupts::rdtsc().saturating_sub(t0));
             }
             continue;
         } else {
@@ -561,7 +564,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 drop(serial);
                 // SAFETY: ring-0 idle — 100Hz APIC timer IRQ wakes us reliably,
                 // and all input paths (keyboard, mouse, NIC) are IRQ-driven.
+                let t0 = crate::interrupts::rdtsc();
                 unsafe { core::arch::asm!("hlt"); }
+                crate::smp::per_core::record_halt(
+                    0, crate::interrupts::rdtsc().saturating_sub(t0));
                 continue;
             }
             // Use raw serial read — read_byte() has a legacy loop that also
@@ -1223,6 +1229,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "top" | "htop" => {
             wasm::intent_run_interactive("top");
+        }
+        "cores" | "cpu" => {
+            system::intent_cores();
         }
         "debug" => {
             // Parse "<ip> <port>" and set the target before spawning debug.wasm.

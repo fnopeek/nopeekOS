@@ -95,6 +95,28 @@ depth and a real busy% (busy-cycles / total-cycles since last sample).
 That gives the data to pinpoint the idle-100% spinner directly. (Redesign
 of the `top` app itself is a separate follow-up.)
 
+**Step 0 SHIPPED — kernel v0.184.0 (`cores` / `cpu` command).** The fix is
+to measure idle *directly* instead of trusting self-reported busy-TSC (which
+can't tell a halted core from a spinning one — a spinner never accounts
+itself idle, so it looks free while pegging the vCPU). New per-core counters
+in `smp/per_core.rs` — `CORE_HALT_TSC` + `CORE_HALT_COUNT` — are incremented
+via `record_halt(core, cycles)` at *every* genuine halt site, each bracketed
+with `rdtsc`: worker `MWAIT` + `HLT` fallback + dedicated-VM `HLT`
+(`per_core.rs`), `npk_sleep`'s `HLT` (`wasm.rs`), and Core 0's two shell-idle
+`HLT`s (`intent/mod.rs`). The `cores` command (`intent/system.rs::intent_cores`,
+serial/kprintln — bypasses the broken WASM `top`) double-samples those
+counters over a 500 ms window and prints, per core: **BUSY% = 100 − halted%**,
+**HALTS/s**, **avg C-state residency (µs)**, run-queue depth, and a measured
+ROLE. Reading the table — this is what discriminates the open hypotheses:
+- **BUSY ~100%, HALTS/s ≈ 0** → core is **SPINNING**, never reaches a halt
+  (the prime suspect: `npk_input_wait` in `wasm.rs` is a pure
+  `core::hint::spin_loop()` — confirmed by reading; resident dock/bar block
+  there, not in `npk_sleep`'s HLT).
+- **HALTS/s very high, residency tiny** → MWAIT/HLT wakes immediately and
+  busy-re-checks (spurious-wake spin / no per-core wake source).
+- **low BUSY, few HALTS/s, long residency** → genuinely asleep (healthy).
+Validate `cores` in QEMU then on the NUC before Stage 1.
+
 ## The fix: fibers (stackful green threads)
 
 wasmi cannot be paused mid-`_start` (no arbitrary preemption point; fuel

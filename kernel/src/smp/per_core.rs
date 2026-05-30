@@ -87,6 +87,58 @@ static WORK_START_TSC: [AtomicU64; 256] = {
     [ZERO; 256]
 };
 
+// ── Idle-based instrumentation (scheduler diagnosis step 0) ────────
+//
+// The old `CORE_BUSY_TSC` is *self-reported*: code adds cycles it
+// believes were work. It cannot tell a halted core from one spinning
+// in a busy-loop — a spinner simply never accounts itself idle, so it
+// looks free while pegging the host vCPU at 100%. That is exactly the
+// idle-100% bug (`SCHEDULER_FIBERS.md`) and why `top` lies.
+//
+// These counters measure the opposite, directly: TSC cycles a core
+// spends GENUINELY HALTED (HLT/MWAIT), recorded at every halt site.
+// True busy% over a window = 100 − halted%. A spinner shows ~100%
+// (never halts); a healthy idle core shows ~0%. Halt *entries* expose
+// spurious-wake spin: many entries with tiny residency = the core
+// keeps waking and re-arming instead of staying asleep.
+
+/// Per-core cumulative TSC cycles spent halted (HLT/MWAIT).
+static CORE_HALT_TSC: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+
+/// Per-core count of halt entries (each HLT/MWAIT execution).
+static CORE_HALT_COUNT: [AtomicU64; 256] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 256]
+};
+
+/// Record one genuine idle halt of `cycles` TSC duration on `core_id`.
+/// Called by every site that executes HLT/MWAIT. This is the only
+/// signal that distinguishes "halted" from "spinning".
+pub fn record_halt(core_id: usize, cycles: u64) {
+    if core_id >= 256 { return; }
+    CORE_HALT_TSC[core_id].fetch_add(cycles, Ordering::Relaxed);
+    CORE_HALT_COUNT[core_id].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot (cumulative halted TSC, halt-entry count) for `core_id`.
+/// Sample twice and diff to get true busy% + halt rate over a window.
+pub fn halt_snapshot(core_id: usize) -> (u64, u64) {
+    if core_id >= 256 { return (0, 0); }
+    (
+        CORE_HALT_TSC[core_id].load(Ordering::Relaxed),
+        CORE_HALT_COUNT[core_id].load(Ordering::Relaxed),
+    )
+}
+
+/// Whether `core_id` is currently inside a scheduler task (CORE_ACTIVE).
+pub fn is_active(core_id: usize) -> bool {
+    if core_id >= 256 { return false; }
+    CORE_ACTIVE[core_id].load(Ordering::Relaxed)
+}
+
 /// Platform frequency limits (set once by enable_hwp)
 static MAX_TURBO_MHZ: AtomicU32 = AtomicU32::new(0);
 static MIN_EFF_MHZ: AtomicU32 = AtomicU32::new(0);
@@ -479,7 +531,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             update_core_freq(cid);
             // SAFETY: ring-0 idle; the 100 Hz timer IRQ (≥) wakes us
             // to re-check for a pending launch.
+            let t0 = crate::interrupts::rdtsc();
             unsafe { core::arch::asm!("sti; hlt; cli"); }
+            record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
             continue;
         }
 
@@ -521,16 +575,20 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
                     flush_busy(cid);
                     CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
                 } else {
+                    let t0 = crate::interrupts::rdtsc();
                     core::arch::asm!(
                         "mwait",
                         in("eax") 0x01u32, // C1E — clock gated, frequency drops
                         in("ecx") 0u32,
                     );
+                    record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
                 }
             }
         } else {
             // Fallback: HLT with interrupts enabled (wakes on any interrupt)
+            let t0 = crate::interrupts::rdtsc();
             unsafe { core::arch::asm!("sti; hlt; cli"); }
+            record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
         }
     }
 }
