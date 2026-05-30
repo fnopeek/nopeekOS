@@ -111,6 +111,11 @@ fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 // but live in different bands so we can dedup hover events without
 // confusing them with clicks.
 
+// Idle iterations (~16 ms each) between auto-refresh dir re-scans.
+// ~1.4 s — frequent enough that a new screenshot shows up promptly,
+// rare enough to be negligible load.
+const AUTO_REFRESH_TICKS: u32 = 90;
+
 const ACT_GRID_CLICK_BASE:    u32 = 1_000;
 const ACT_GRID_HOVER_BASE:    u32 = 1_500;
 const ACT_SIDEBAR_CLICK_BASE: u32 = 2_000;
@@ -229,6 +234,11 @@ struct Loft {
     /// File associations (extension → app module), loaded once from
     /// `sys/config/associations`. Checked before the built-in defaults.
     assoc:          Vec<(String, String)>,
+    /// Cheap signature (count + name/size fold) of the current dir's
+    /// listing. The idle loop re-lists periodically and auto-refreshes
+    /// when this changes — so a new file (e.g. a fresh screenshot) shows
+    /// up without a manual refresh.
+    dir_sig:        u64,
 }
 
 impl Loft {
@@ -251,6 +261,7 @@ impl Loft {
             view_mode:     ViewMode::List,
             open_menu:     None,
             assoc:         load_associations(),
+            dir_sig:       0,
         };
         lf.refresh();
         lf
@@ -279,6 +290,7 @@ impl Loft {
 
     fn refresh(&mut self) {
         self.entries = list_dir(&self.current);
+        self.dir_sig = dir_signature(&self.entries);
         // Navigation invalidates any cached recursive listing — the
         // next non-empty query for this directory triggers a fresh
         // `list_dir_recursive` call.
@@ -344,10 +356,6 @@ impl Loft {
 
     fn navigate(&mut self, new_path: String) {
         if new_path == self.current { return; }
-        // Defensive log for the .trash crash report — surfaces the
-        // exact path being entered on serial so any panic / freeze
-        // can be correlated with the trigger.
-        log("[loft] navigate");
         self.history.push(self.current.clone());
         self.forward.clear();
         self.current = new_path;
@@ -1046,6 +1054,22 @@ fn list_dir(prefix: &str) -> Vec<Entry> {
     list_dir_internal(prefix, 0)
 }
 
+/// Cheap order-sensitive signature of a directory listing — folds count,
+/// names, sizes and is_dir of every entry (FNV-1a). Changes when a file
+/// is added, removed, renamed or resized. Used for auto-refresh.
+fn dir_signature(entries: &[Entry]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    h = (h ^ entries.len() as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    for e in entries {
+        for &b in e.name.as_bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h = (h ^ e.size).wrapping_mul(0x0000_0100_0000_01b3);
+        h = (h ^ e.is_dir as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Recursive listing — `recursive=1` to the host fn — for search
 /// mode. Each entry's `name` is the full sub-path under `prefix`
 /// (e.g. "wallpapers/aurora" when listing under
@@ -1309,12 +1333,14 @@ pub extern "C" fn _start() {
     //     region for next frame.
     let mut loft = Loft::new();
     let mut persistent_mark = alloc_mark();
+    let mut idle_ticks: u32 = 0;
 
     commit_tree(&loft);
 
     loop {
         match poll_event() {
             PollResult::Event(ev) => {
+                idle_ticks = 0;
                 alloc_reset(persistent_mark);
                 let outcome = handle(&mut loft, ev);
                 persistent_mark = alloc_mark();
@@ -1324,7 +1350,30 @@ pub extern "C" fn _start() {
                     Outcome::Exit => { close_self(); return; }
                 }
             }
-            PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
+            PollResult::Empty => {
+                unsafe { let _ = npk_sleep(16); }
+                idle_ticks += 1;
+                if idle_ticks >= AUTO_REFRESH_TICKS {
+                    idle_ticks = 0;
+                    // Auto-refresh the browse view when the folder changed
+                    // on disk (new screenshot, download, …). Skip while a
+                    // search or menu is active so we don't disturb the user.
+                    if loft.open_menu.is_none() && loft.query.is_empty() {
+                        // Probe via a THROWAWAY listing + reset so an
+                        // unchanged folder leaks nothing in the bump heap
+                        // (this runs ~every 1.4 s). Only a real change does
+                        // the persistent re-list + re-render.
+                        alloc_reset(persistent_mark);
+                        let new_sig = dir_signature(&list_dir(&loft.current));
+                        alloc_reset(persistent_mark);
+                        if new_sig != loft.dir_sig {
+                            loft.refresh();
+                            persistent_mark = alloc_mark();
+                            commit_tree(&loft);
+                        }
+                    }
+                }
+            }
             PollResult::WindowGone => return,
         }
     }
