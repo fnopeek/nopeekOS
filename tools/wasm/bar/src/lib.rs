@@ -31,6 +31,7 @@ unsafe extern "C" {
     fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
     fn npk_workspace_switch(n: i32) -> i32;
     fn npk_power() -> i32;
+    fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
 }
@@ -46,6 +47,7 @@ const BEHAVIOR_STRUT: i32 = 1;
 // ActionId encoding.
 const WS_BASE: u32 = 1;        // workspace i → WS_BASE + i
 const POWER: u32 = 90_000;
+const SHOT: u32  = 90_001;     // screenshot: left-click = region, right = full
 
 const ICON_SIZE: u16 = 24;
 
@@ -111,7 +113,7 @@ fn default_segments() -> Segments {
     Segments {
         left:   ["workspaces", "title"].iter().map(|s| s.to_string()).collect(),
         center: ["clock"].iter().map(|s| s.to_string()).collect(),
-        right:  ["tray", "power"].iter().map(|s| s.to_string()).collect(),
+        right:  ["tray", "screenshot", "power"].iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -236,6 +238,11 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             size: ICON_SIZE,
             modifiers: Vec::new(),
         }],
+        "screenshot" => alloc::vec![Widget::Icon {
+            id: IconId::Camera,
+            size: ICON_SIZE,
+            modifiers: alloc::vec![Modifier::OnClick(ActionId(SHOT))],
+        }],
         "power" => alloc::vec![Widget::Icon {
             id: IconId::Power,
             size: ICON_SIZE,
@@ -343,13 +350,31 @@ fn rebuild_and_commit(seg: &Segments, len: usize) {
     }
 }
 
+fn launch(app: &str, arg: &str) {
+    unsafe {
+        let _ = npk_launch(app.as_ptr() as i32, app.len() as i32,
+                           arg.as_ptr() as i32, arg.len() as i32);
+    }
+}
+
 fn handle(ev: Event) {
-    if let Event::Action(ActionId(id)) = ev {
-        if id == POWER {
-            unsafe { let _ = npk_power(); }
-        } else if id >= WS_BASE && id < POWER {
-            unsafe { let _ = npk_workspace_switch((id - WS_BASE) as i32); }
+    match ev {
+        // Left-click. Screenshot icon → region select (slice ③; falls
+        // back to full for now). Power → off. Otherwise a workspace pill.
+        Event::Action(ActionId(id)) => {
+            if id == SHOT {
+                launch("snap", "region");
+            } else if id == POWER {
+                unsafe { let _ = npk_power(); }
+            } else if id >= WS_BASE && id < POWER {
+                unsafe { let _ = npk_workspace_switch((id - WS_BASE) as i32); }
+            }
         }
+        // Right-click on the screenshot icon → full-screen capture.
+        Event::ContextAction(ActionId(id)) => {
+            if id == SHOT { launch("snap", "full"); }
+        }
+        _ => {}
     }
 }
 

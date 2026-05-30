@@ -91,6 +91,7 @@ const _: () = {
     assert!(IconId::CaretRight        as u16 == 26);
     assert!(IconId::ArrowClockwise    as u16 == 27);
     assert!(IconId::Globe             as u16 == 28);
+    assert!(IconId::Camera            as u16 == 29);
 
     // Align / Axis — used inside Widget struct variants, positions frozen.
     assert!(Align::Start   as u8 == 0);
