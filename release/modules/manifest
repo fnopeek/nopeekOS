@@ -1,7 +1,7 @@
 [bar]
-version=0.2.0
-size=30245
-sha384=e052c3c8fd6f24b95a1ab0b1e515e06d1bc32404c44e798f12bd34b78f4fc847a3ab29b8ac290710fe6e4290b1fe4a5e
+version=0.2.1
+size=30490
+sha384=bc5de8cc1500b97ea8be984caf43f3accbddccb42704753d5e34ab2b838ef59048df40f56f4d0086ca87753f0a3c4da8
 
 [debug]
 version=0.2.1
