@@ -45,6 +45,9 @@ npk> history                         # Last 32 commands (arrow up/down to recall
 npk> lock                            # Lock system (clear keys)
 npk> passwd                          # Change passphrase
 npk> top                               # System monitor (WASM app: cores, memory, scheduler)
+npk> cores                             # Trustworthy per-core CPU instrumentation (idle-measured)
+npk> find report                       # Search npkFS object names
+npk> grep TODO notes                   # Search inside a stored object
 npk> install wallpaper                 # Install WASM module (signed, verified)
 npk> install top                       # Install system monitor app
 npk> install debug                     # Install remote debug shell
@@ -58,6 +61,11 @@ npk> wallpaper random                  # Random wallpaper from collection
 npk> wallpaper clear                   # Revert to aurora background
 npk> install drun                      # Mod+D app launcher (widget-kind)
 [ Mod+D ]                               # Open drun overlay — ↑↓ select, Enter launch, Esc close
+npk> install loft                      # File browser (widget-kind, list/grid view)
+npk> install spell                     # Text editor (tabs, syntax highlight, npkFS)
+npk> install iris                      # Image viewer (PNG, canvas escape-hatch)
+npk> install snap                      # Screenshot tool (full-screen capture → npkFS)
+npk> browser                           # Launch LibreWolf in a tiled microvm window
 npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
 npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
 npk> gpu 4k                           # Switch to 4K@30Hz
@@ -91,7 +99,8 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
  │  wifi.wasm  — RTL8852BE WiFi driver (PCIe, DMA, FW)     │
  │  bar/dock.wasm — top + bottom panels (npk_window_set_panel)│
  │  drun/loft.wasm — launcher + file browser                │
- │  Future: more user apps                                  │
+ │  spell.wasm — text editor   │  iris.wasm — image viewer  │
+ │  snap.wasm — screenshot     │  Future: more user apps    │
  ├──────────────────────────────────────────────────────────┤
  │  WASM Runtime                                            │
  │  wasmi v1.0 (interpreter, fuel-metered)                  │
@@ -331,7 +340,24 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
 - [x] Intel HWP auto-scaling (per-core, efficiency→turbo, CPUID-based)
 - [x] WASM apps on worker cores (non-blocking, per-app key buffers)
 - [x] Double-buffer framebuffer (shadow A/B, render→back, swap, blit←front, commit_front)
-- [ ] Per-core APIC timer
+- [x] **`cores`/`cpu` — trustworthy per-core instrumentation** (v0.184.0):
+      idle measured directly via per-core HLT/MWAIT cycle counters
+      (`CORE_HALT_TSC`), not the self-reported busy-TSC the WASM `top`
+      uses. Reports true BUSY% (=100−halted), HALTS/s, avg C-state
+      residency, queue depth, measured ROLE. `top`'s busy% can't tell
+      halted from spinning; `cores` is the ground truth.
+- [ ] **Idle path doesn't truly quiesce** (open, diagnosed 2026-05-30):
+      worker cores wake ~1000×/s while genuinely idle (busy 0%) and
+      never reach deep idle → real host load (every KVM vCPU thread at
+      100%, cores in turbo). Root: no per-core wake source — apps block
+      in MWAIT and only the MONITOR cacheline wakes them. Fix = the
+      per-core APIC timer below + the fiber rework (`SCHEDULER_FIBERS.md`).
+- [ ] **Fiber / green-thread app scheduler** (`SCHEDULER_FIBERS.md`):
+      stackful coroutines so blocking host calls (`npk_sleep`,
+      `npk_event_wait`) park the app (0 CPU, 0 core held) instead of
+      pinning a worker core → many apps multiplex over few cores.
+- [ ] Per-core APIC timer (worker cores currently wake via IPI only) —
+      prerequisite for the idle-quiesce + fiber work above
 - [ ] Thermal load balancing (migrate tasks when core >80% busy)
 
 **Event-Driven Intent Architecture**
