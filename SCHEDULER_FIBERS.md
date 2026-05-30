@@ -52,6 +52,28 @@ nopeekOS has neither today.
 
 ---
 
+### v0.183.0 idle-HLT was necessary but INSUFFICIENT (observed)
+
+After v0.183.0 (npk_sleep HLTs when it has no helper work), the host still
+showed **2–4 QEMU vCPUs pegged at ~100% while nopeekOS sat idle** at the
+shell with the panels up. So the spin is NOT just npk_sleep's old
+busy-wait. Static reading didn't isolate the culprit: no continuous
+`scheduler::spawn` in hot paths, Core 0's intent `run_loop` HLTs when idle
+(no VM). Open hypotheses to confirm with the built-in `top` (CORE
+USAGE/QUEUE/ROLE) + per-core instrumentation during the rework:
+- The npk_sleep HLT branch may never be reached because `next_task` keeps
+  returning work (nested resident-app tasks pulled inline → an app's
+  `_start` loop spins in a sub-loop), OR
+- worker cores may lack a **per-core wake source** (the per-core APIC timer
+  is a known TODO), so a worker can't HLT-and-wake cooperatively and ends
+  up spinning, OR
+- the per_core idle MWAIT/HLT path isn't engaging under load.
+**Conclusion: point-patches won't fix idle-100%. The system must become
+event-driven end to end (block on input/timer, never poll), which is
+exactly the fiber rework below — plus likely a per-core timer as a
+prerequisite.** Diagnose first via `top` + per-core "what am I doing"
+counters.
+
 ## The fix: fibers (stackful green threads)
 
 wasmi cannot be paused mid-`_start` (no arbitrary preemption point; fuel
