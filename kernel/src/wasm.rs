@@ -68,7 +68,11 @@ const INTERACTIVE_FUEL: u64 = u64::MAX / 2;
 
 // ── Worker-Core WASM Jobs ──────────────────────────────────────
 
-const MAX_WASM_JOBS: usize = 4;
+// Concurrent in-flight WASM spawn slots. A worker takes its slot out of
+// the array as soon as it starts, so this caps *pending* (not-yet-started)
+// spawns. 4 was too low once dock + bar + loft + iris are all resident —
+// a transient one-shot (a screenshot) couldn't even get queued.
+const MAX_WASM_JOBS: usize = 16;
 
 struct WasmJob {
     bytes: Vec<u8>,
@@ -84,17 +88,12 @@ struct WasmJob {
     launch_arg: Option<String>,
 }
 
-static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> = Mutex::new([
-    None, None, None, None,
-]);
+static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> =
+    Mutex::new([const { None }; MAX_WASM_JOBS]);
 
 /// Per-job completion flag (set by worker, read by BSP)
-static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] = [
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-    core::sync::atomic::AtomicBool::new(false),
-];
+static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; MAX_WASM_JOBS];
 
 // ── Per-App Key Buffers (Core 0 writes, worker reads) ─────────
 //
@@ -1812,7 +1811,23 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 if let Some(task) = crate::smp::scheduler::next_task(cid) {
                     (task.func)(task.arg);
                 } else {
-                    core::hint::spin_loop();
+                    // Nothing to help with → HALT until the next interrupt
+                    // instead of spinning at 100%. A resident app loops here
+                    // forever; the old busy-spin pinned its worker core even
+                    // while idle (cores stuck at 100%, huge power draw). The
+                    // 100 Hz timer wakes us within ~10 ms to re-check the
+                    // deadline + the run-queue. IF-preserving: HLT needs
+                    // interrupts on, so enable-then-restore when they're off.
+                    let rflags: u64;
+                    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+                    if rflags & (1 << 9) != 0 {
+                        // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
+                        unsafe { core::arch::asm!("hlt"); }
+                    } else {
+                        // SAFETY: enable for the HLT, then restore IF=0. The
+                        // sti-shadow defers the IRQ until after HLT is armed.
+                        unsafe { core::arch::asm!("sti; hlt; cli"); }
+                    }
                 }
             }
 
