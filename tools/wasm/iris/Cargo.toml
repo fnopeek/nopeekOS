@@ -1,14 +1,15 @@
 [package]
-name = "loft"
-version = "0.3.2"
+name = "iris"
+version = "0.1.0"
 edition = "2024"
-description = "File browser — Thunar-clone for nopeekOS."
+description = "Image viewer — nopeekOS."
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 nopeek_widgets = { path = "../sdk/widgets" }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 
 [dependencies.postcard]
 version = "1.0"

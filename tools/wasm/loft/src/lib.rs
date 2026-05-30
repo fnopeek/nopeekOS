@@ -272,6 +272,7 @@ impl Loft {
             | "log" | "conf" | "ini" | "cfg" | "sh" | "csv" | "yaml" | "yml"
             | "xml" | "html" | "htm" | "c" | "h" | "py" | "js" | "ts"
                 => Some("spell".to_string()),
+            "png" => Some("iris".to_string()),
             _ => None,
         }
     }

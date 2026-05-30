@@ -576,12 +576,18 @@ fn paint_node_eff(
             rast.rect(target, rect, Fill::Solid(Token::Border));
         }
 
-        Widget::Canvas { width, height, .. } => {
-            // P10.10 hands the app-supplied pixels in via
-            // npk_canvas_commit; until then draw a magenta placeholder
-            // so the slot is visible during debug.
-            let _ = (width, height);
-            rast.rect(target, rect, Fill::Solid(Token::Danger));
+        Widget::Canvas { id, .. } => {
+            // P10.10: the app uploads BGRA pixels via npk_canvas_commit,
+            // stored keyed by (window_id, canvas_id). Blit it contain-fit
+            // into this rect; muted placeholder until something commits.
+            let cid = id.0;
+            let wid = target.window_id;
+            let drawn = super::canvas::with_bitmap(wid, cid, |px, w, h| {
+                rast.canvas_blit(target, px, w, h, rect);
+            }).is_some();
+            if !drawn {
+                rast.rect(target, rect, Fill::Solid(Token::SurfaceMuted));
+            }
         }
 
         // Containers paint nothing themselves — their Background /
