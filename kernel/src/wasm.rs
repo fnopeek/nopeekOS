@@ -887,14 +887,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_screen_size() -> (width << 16) | height, or 0 on error.
-    // RENDER-gated. Apps need the screen size to size a capture buffer
-    // or a fullscreen overlay. (Screens are well under 65535 px/side.)
+    // Allowed for RENDER (overlay sizing) OR CAPTURE (screenshot tool
+    // sizing its capture buffer — it has no RENDER in full-screen mode).
+    // (Screens are well under 65535 px/side.)
     linker.func_wrap("env", "npk_screen_size",
         |caller: Caller<'_, HostState>| -> i32 {
             let cap_id = caller.data().cap_id;
-            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
-                return 0;
-            }
+            let ok = capability::check_global(&cap_id, capability::Rights::RENDER).is_ok()
+                || capability::check_global(&cap_id, capability::Rights::CAPTURE).is_ok();
+            if !ok { return 0; }
             let info = crate::framebuffer::get_info();
             (((info.width & 0xFFFF) << 16) | (info.height & 0xFFFF)) as i32
         },
