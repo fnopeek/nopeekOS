@@ -285,14 +285,27 @@ impl Compositor {
     /// owns that terminal_idx. Does not touch the session; the worker's
     /// exit path still cleans it up.
     pub fn promote_terminal_to_widget(&mut self, terminal_idx: u8) -> Option<WindowId> {
-        let win = self.windows.iter_mut().find(|w| {
-            w.terminal_idx == terminal_idx
-                && w.kind == crate::shade::window::WindowKind::Terminal
-        })?;
-        let id = win.id;
-        win.kind = crate::shade::window::WindowKind::Widget;
-        win.terminal_idx = 255;
-        win.dirty = true;
+        let (id, pid) = {
+            let win = self.windows.iter_mut().find(|w| {
+                w.terminal_idx == terminal_idx
+                    && w.kind == crate::shade::window::WindowKind::Terminal
+            })?;
+            win.kind = crate::shade::window::WindowKind::Widget;
+            win.terminal_idx = 255;
+            let pid = win.pid;
+            win.pid = 0;
+            win.dirty = true;
+            (win.id, pid)
+        };
+        // The window no longer owns a terminal: release the session,
+        // terminal buffer and the "loop" process entry that create_window
+        // allocated. The widget app runs as its own KIND_WASM process
+        // (registered by the spawn path). Without this they leak on every
+        // drun/dock launch of a widget app — close_window only frees them
+        // in its Terminal arm, which a promoted Widget window never hits.
+        crate::intent::destroy_session(terminal_idx);
+        terminal::free(terminal_idx);
+        if pid != 0 { crate::process::exit(pid); }
         self.needs_full_redraw = true;
         Some(id)
     }
@@ -647,6 +660,10 @@ impl Compositor {
                     // backing allocations free with the entries.
                     crate::shade::widgets::remove_scene(id.0);
                     crate::shade::widgets::remove_event_queue(id.0);
+                    // A promoted-from-terminal widget clears its loop PID
+                    // in promote_terminal_to_widget; this is belt-and-
+                    // suspenders for any path that leaves a pid set.
+                    if win.pid != 0 { crate::process::exit(win.pid); }
                 }
                 crate::shade::window::WindowKind::Surface => {
                     // Drop the bitmap surface; ask the bound microvm
