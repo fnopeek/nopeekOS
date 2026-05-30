@@ -145,7 +145,6 @@ struct Iris {
     dir:    String,        // folder being browsed (npkFS path, no trailing /)
     files:  Vec<String>,   // image file names in `dir`, sorted
     idx:    usize,
-    name:   String,        // current file name (basename)
     w:      u32,           // current image dims (0 = none / failed)
     h:      u32,
     failed: bool,          // decode failed for the current file
@@ -155,7 +154,7 @@ impl Iris {
     fn new() -> Self {
         let mut iris = Iris {
             dir: String::new(), files: Vec::new(), idx: 0,
-            name: String::new(), w: 0, h: 0, failed: false,
+            w: 0, h: 0, failed: false,
         };
         // Launched to open a specific file?
         let mut argbuf = [0u8; 512];
@@ -193,10 +192,12 @@ impl Iris {
     }
 
     /// Fetch + decode the current image and upload it to the canvas.
+    /// Mutates only Copy fields (w/h/failed) + the kernel canvas store —
+    /// nothing heap-persistent — so it's safe to run after the per-frame
+    /// alloc mark (its big decode buffers are transient, freed next reset).
     fn load(&mut self) {
-        self.w = 0; self.h = 0; self.failed = false; self.name.clear();
+        self.w = 0; self.h = 0; self.failed = false;
         let path = match self.full_path() { Some(p) => p, None => return };
-        if let Some(f) = self.files.get(self.idx) { self.name.push_str(f); }
         let bytes = match fetch_file(&path) {
             Some(b) => b,
             None => { self.failed = true; log("[iris] fetch failed"); return; }
@@ -242,7 +243,9 @@ fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
 
 // ── Scene ─────────────────────────────────────────────────────────────
 fn render(iris: &Iris) -> Widget {
-    let title = if iris.name.is_empty() { "Kein Bild".to_string() } else { iris.name.clone() };
+    // Title derived from the current file (files[] lives below the alloc
+    // mark, so it survives alloc_reset — unlike a per-load heap String).
+    let title = iris.files.get(iris.idx).cloned().unwrap_or_else(|| "Kein Bild".to_string());
     let meta = if iris.files.is_empty() {
         "—".to_string()
     } else if iris.failed {

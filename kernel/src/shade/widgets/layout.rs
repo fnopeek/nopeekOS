@@ -444,19 +444,21 @@ fn place(w: &Widget, inner: Rect) -> LayoutNode {
             }
         }
 
-        // TextArea is placed as a leaf, but unlike the others it fills
-        // the rect the parent allotted (Flex / Align::Stretch already
-        // expanded `inner`) instead of shrinking to its intrinsic floor.
-        // The render walker scrolls + clips to this rect.
-        Widget::TextArea { .. } => {
+        // TextArea + Canvas are placed as leaves, but unlike the others
+        // they FILL the rect the parent allotted (Flex / Align::Stretch
+        // already expanded `inner`) instead of shrinking to their
+        // intrinsic floor. A non-flex/non-stretch parent allots an
+        // intrinsic-sized rect, so the small-widget case is unchanged;
+        // an image viewer that Flex(1)-fills its body gets the whole
+        // area and the rasterizer contain-fits the bitmap into it.
+        Widget::TextArea { .. } | Widget::Canvas { .. } => {
             LayoutNode::leaf(inner)
         }
 
         Widget::Icon { .. }
         | Widget::Button { .. }
         | Widget::Input { .. }
-        | Widget::Checkbox { .. }
-        | Widget::Canvas { .. } => {
+        | Widget::Checkbox { .. } => {
             let m = measure(w);
             LayoutNode::leaf(Rect { x: inner.x, y: inner.y, w: m.w, h: m.h })
         }
