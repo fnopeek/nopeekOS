@@ -12,6 +12,7 @@ exclude = [
     "tools/wasm/loft",
     "tools/wasm/spell",
     "tools/wasm/iris",
+    "tools/wasm/snap",
     "tools/wasm/testdisk",
     "tools/regen-icons",
 ]

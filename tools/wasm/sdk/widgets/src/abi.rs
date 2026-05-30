@@ -118,6 +118,7 @@ pub enum IconId {
     CaretRight        = 26,
     ArrowClockwise    = 27,
     Globe             = 28,
+    Camera            = 29,
     // Appended only.
 }
 

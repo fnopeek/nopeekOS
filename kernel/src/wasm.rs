@@ -742,6 +742,39 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_launch(app_ptr, app_len, arg_ptr, arg_len) -> 0 / -1
+    // Fire-and-forget launch of sys/wasm/<app> with `arg` as its launch
+    // argument + per-app caps — like npk_open but WITHOUT a pre-created
+    // window and WITHOUT singleton routing. The window (if any) is created
+    // lazily on the app's first scene_commit, so a one-shot tool that
+    // never commits (e.g. a full-screen screenshot) never shows a window
+    // — and so never appears in its own capture. EXECUTE-gated.
+    linker.func_wrap("env", "npk_launch",
+        |caller: Caller<'_, HostState>, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+                return -1;
+            }
+            let app = match read_wasm_str(&caller, app_ptr, app_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            if app.is_empty() || app.contains('/') || app.contains("..") { return -1; }
+            let arg = if arg_len > 0 { read_wasm_str(&caller, arg_ptr, arg_len) } else { None };
+            let path = alloc::format!("sys/wasm/{}", app);
+            let bytes = match crate::npkfs::fetch(&path) {
+                Ok((b, _)) => b,
+                Err(_) => return -1,
+            };
+            let rights = capability::widget_rights_from_wasm(&bytes);
+            let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
+                Ok(id) => id,
+                Err(_) => return -1,
+            };
+            if spawn_on_worker_inner(bytes, module_cap, 255, &app, false, 0, arg) { 0 } else { -1 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_scene_commit(ptr, len) -> i32
     // Phase 10 widget pipeline: WASM app hands the kernel a version-
     // prefixed postcard-serialized Widget tree. Compositor does the
@@ -850,6 +883,70 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             crate::shade::widgets::rerender_window(wid);
             crate::shade::request_render();
             0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_screen_size() -> (width << 16) | height, or 0 on error.
+    // RENDER-gated. Apps need the screen size to size a capture buffer
+    // or a fullscreen overlay. (Screens are well under 65535 px/side.)
+    linker.func_wrap("env", "npk_screen_size",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return 0;
+            }
+            let info = crate::framebuffer::get_info();
+            (((info.width & 0xFFFF) << 16) | (info.height & 0xFFFF)) as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_capture_screen(buf_ptr, buf_max) -> bytes_written or -1
+    // CAPTURE-gated (screen-scrape — only the screenshot tool holds it).
+    // Copies the composited front framebuffer as tightly-packed BGRA32
+    // (width*height*4) into the app buffer. The app then PNG-encodes /
+    // crops it itself; the kernel only hands over the raw pixels.
+    linker.func_wrap("env", "npk_capture_screen",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::CAPTURE).is_err() {
+                return -1;
+            }
+            let info = crate::framebuffer::get_info();
+            let w = info.width as usize;
+            let h = info.height as usize;
+            let pitch = info.pitch as usize;
+            if w == 0 || h == 0 { return -1; }
+            let need = w * h * 4;
+            if (buf_max as usize) < need { return -1; }
+            // Snapshot the composited front buffer row-by-row into a tight
+            // BGRA temp (the source pitch may exceed width*4).
+            let mut tmp = alloc::vec![0u8; need];
+            let ok = crate::framebuffer::with_fb(|fb| {
+                let src = fb.front_ptr();
+                for y in 0..h {
+                    // SAFETY: src is the framebuffer's front shadow, valid
+                    // for pitch*height bytes; we read w*4 ≤ pitch per row.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src.add(y * pitch),
+                            tmp.as_mut_ptr().add(y * w * 4),
+                            w * 4,
+                        );
+                    }
+                }
+                true
+            }).unwrap_or(false);
+            if !ok { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + need;
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(&tmp);
+            need as i32
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
