@@ -297,14 +297,19 @@ impl Compositor {
             win.dirty = true;
             (win.id, pid)
         };
-        // The window no longer owns a terminal: release the session,
-        // terminal buffer and the "loop" process entry that create_window
-        // allocated. The widget app runs as its own KIND_WASM process
-        // (registered by the spawn path). Without this they leak on every
-        // drun/dock launch of a widget app — close_window only frees them
-        // in its Terminal arm, which a promoted Widget window never hits.
-        crate::intent::destroy_session(terminal_idx);
-        terminal::free(terminal_idx);
+        // Drop the "loop" process-table entry that create_window
+        // allocated — for a widget the app runs as its own KIND_WASM
+        // process (registered by the spawn path), so the loop PID is a
+        // misleading orphan that otherwise leaks on every drun/dock
+        // launch (close_window only frees a pid in its Terminal arm,
+        // which a promoted Widget window never reaches). Exiting a pid
+        // only touches the PROCS map. We deliberately do NOT free the
+        // session or terminal buffer here: the terminal's intent loop is
+        // still live and holds a long-lived `&mut IntentSession`, so
+        // freeing them mid-flight is a use-after-free (panicked in
+        // sync_session_to_terminal). Their lifecycle stays tied to the
+        // window via close_window. (Session/terminal-slot leak for
+        // promoted widgets is pre-existing — a separate follow-up.)
         if pid != 0 { crate::process::exit(pid); }
         self.needs_full_redraw = true;
         Some(id)
