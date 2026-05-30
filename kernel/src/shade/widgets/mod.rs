@@ -21,6 +21,7 @@
 //!   P10.11 — first real app (file browser)
 
 pub mod abi;
+pub mod canvas;
 pub mod tile;
 pub mod debug;
 pub mod layout;
@@ -147,6 +148,7 @@ where F: FnOnce(&WidgetScene) -> R,
 pub fn remove_scene(window_id: u32) {
     SCENES.lock().remove(&window_id);
     LAST_HOVER.lock().remove(&window_id);
+    canvas::remove_window(window_id);
 }
 
 // ── Per-window event queues (P10.7) ───────────────────────────────────
@@ -463,7 +465,7 @@ fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
     let pixels = rasterize_buffer_with_overlays(
-        &tree, &layout_tree, &popovers, rect, h, f, a, density,
+        window_id, &tree, &layout_tree, &popovers, rect, h, f, a, density,
         input_edit.as_ref(),
     );
 
@@ -728,7 +730,7 @@ fn rerender_state_only(window_id: u32) {
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
     let pixels = rasterize_buffer_with_overlays(
-        &tree, &layout_tree, &popovers, rect, h, f, a, density,
+        window_id, &tree, &layout_tree, &popovers, rect, h, f, a, density,
         input_edit.as_ref(),
     );
     if let Some(s) = SCENES.lock().get_mut(&window_id) {
@@ -1251,7 +1253,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     let active_slice: Option<&[u32]> = prev_active.as_deref();
 
     let pixels = rasterize_buffer_with_overlays(
-        &tree, &layout_tree, &popovers, layout_rect,
+        target_id, &tree, &layout_tree, &popovers, layout_rect,
         hover_slice, focus_slice, active_slice,
         density, input_edit.as_ref(),
     );
@@ -1307,6 +1309,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
 /// (no hover/focus carry-through to their content) — overlay state
 /// is short-lived and the next commit rebuilds the popover anyway.
 fn rasterize_buffer_with_overlays(
+    window_id: u32,
     tree: &abi::Widget,
     layout_tree: &layout::LayoutNode,
     popovers: &[layout::PopoverLayout],
@@ -1350,6 +1353,7 @@ fn rasterize_buffer_with_overlays(
         scale:   1,
         palette: &pal,
         bg_alpha,
+        window_id,
     };
     let mut rast = raster::cpu::CpuRasterizer::new();
     render::render_with_state(
@@ -1383,36 +1387,44 @@ fn rasterize_buffer_with_overlays(
 pub fn refresh_all_scenes() {
     let keys: alloc::vec::Vec<u32> = SCENES.lock().keys().copied().collect();
     for wid in keys {
-        let (tree, rect, hover_path, focus_path, active_path, density, input_edit) = match SCENES.lock().get(&wid) {
-            Some(s) => (
-                s.tree.clone(),
-                abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
-                s.hover_path.clone(),
-                s.focus_path.clone(),
-                s.active_path.clone(),
-                s.density,
-                s.input_edit.clone(),
-            ),
-            None => continue,
-        };
-        let new_lo = layout::layout(&tree, rect);
-        let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
-        let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
-        let a: Option<&[u32]> = active_path.as_deref();
-        let new_pixels = rasterize_buffer_with_overlays(&tree, &new_lo.tree, &new_lo.popovers, rect, h, f, a, density, input_edit.as_ref());
-        if let Some(scene) = SCENES.lock().get_mut(&wid) {
-            scene.pixels      = new_pixels;
-            scene.layout_tree = new_lo.tree;
-            scene.anchors     = new_lo.anchors;
-            scene.popovers    = new_lo.popovers;
-        }
-        crate::shade::with_compositor(|c| {
-            if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
-                win.dirty = true;
-            }
-        });
+        rerender_window(wid);
     }
     crate::shade::request_render();
+}
+
+/// Re-rasterize a single window's cached scene in place (same geometry +
+/// stored pseudo-state). Used after something the rasteriser reads
+/// changed without an app commit — a theme swap, or a committed
+/// `Widget::Canvas` bitmap (`npk_canvas_commit`). No-op if no scene.
+pub fn rerender_window(wid: u32) {
+    let (tree, rect, hover_path, focus_path, active_path, density, input_edit) = match SCENES.lock().get(&wid) {
+        Some(s) => (
+            s.tree.clone(),
+            abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
+            s.hover_path.clone(),
+            s.focus_path.clone(),
+            s.active_path.clone(),
+            s.density,
+            s.input_edit.clone(),
+        ),
+        None => return,
+    };
+    let new_lo = layout::layout(&tree, rect);
+    let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
+    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
+    let a: Option<&[u32]> = active_path.as_deref();
+    let new_pixels = rasterize_buffer_with_overlays(wid, &tree, &new_lo.tree, &new_lo.popovers, rect, h, f, a, density, input_edit.as_ref());
+    if let Some(scene) = SCENES.lock().get_mut(&wid) {
+        scene.pixels      = new_pixels;
+        scene.layout_tree = new_lo.tree;
+        scene.anchors     = new_lo.anchors;
+        scene.popovers    = new_lo.popovers;
+    }
+    crate::shade::with_compositor(|c| {
+        if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
+            win.dirty = true;
+        }
+    });
 }
 
 pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h: u32) -> bool {
@@ -1437,7 +1449,7 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     let input_edit = scene.input_edit.clone();
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let new_pixels = rasterize_buffer_with_overlays(
-        &tree, &new_lo.tree, &new_lo.popovers, new_rect, None, f, None, new_density,
+        window_id, &tree, &new_lo.tree, &new_lo.popovers, new_rect, None, f, None, new_density,
         input_edit.as_ref(),
     );
     scene.pixels      = new_pixels;

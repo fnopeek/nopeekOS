@@ -79,6 +79,10 @@ pub mod caps {
     pub const EXEC:   u8 = 0x04;
     /// `npk_scene_commit` / `npk_event_poll` / window + launcher fns.
     pub const RENDER: u8 = 0x08;
+    /// `npk_capture_screen` — read the composited framebuffer (screenshot).
+    pub const CAPTURE: u8 = 0x10;
+    /// `npk_canvas_commit` — upload a raw BGRA bitmap into a `Widget::Canvas`.
+    pub const CANVAS: u8 = 0x20;
 }
 
 // Re-export the core ABI types at the crate root for ergonomic use.

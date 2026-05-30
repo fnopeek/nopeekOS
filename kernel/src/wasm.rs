@@ -817,6 +817,42 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_canvas_commit(canvas_id, ptr, len, width, height) -> 0 / -1
+    // P10.10 escape hatch: upload a raw BGRA32 bitmap into the app's
+    // `Widget::Canvas` with the matching id. CANVAS-gated. The app must
+    // already own a widget window (commit a scene first) — the bitmap is
+    // keyed by (window_id, canvas_id); the render walker blits it
+    // contain-fit into the canvas rect on the next rasterise.
+    linker.func_wrap("env", "npk_canvas_commit",
+        |caller: Caller<'_, HostState>, canvas_id: i32, ptr: i32, len: i32,
+         width: i32, height: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::CANVAS).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 || width <= 0 || height <= 0 { return -1; }
+            let pixel_bytes = (width as usize) * (height as usize) * 4;
+            if len as usize != pixel_bytes { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = ptr as usize;
+            let end = start + pixel_bytes;
+            if end > data.len() { return -1; }
+            let px = data[start..end].to_vec();
+            if !crate::shade::widgets::canvas::commit(
+                wid, canvas_id as u32, width as u32, height as u32, px) {
+                return -1;
+            }
+            crate::shade::widgets::rerender_window(wid);
+            crate::shade::request_render();
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_event_poll(buf_ptr, buf_max) -> i32
     // Non-blocking: pop one event from this app's widget-window
     // queue, postcard-encode it into the supplied WASM buffer.

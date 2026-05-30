@@ -157,6 +157,49 @@ impl Rasterizer for CpuRasterizer {
         }
     }
 
+    fn canvas_blit(&mut self, t: &mut RasterTarget, src: &[u8], sw: u32, sh: u32, rect: Rect) {
+        if sw == 0 || sh == 0 || rect.w == 0 || rect.h == 0 { return; }
+        if src.len() < (sw * sh * 4) as usize { return; }
+        // Contain-fit: largest integer scale (numerator/denominator) that
+        // keeps the whole image inside the rect, preserving aspect.
+        // dst_w = sw * rect.w / sw capped... compute via the smaller ratio.
+        let rw = rect.w;
+        let rh = rect.h;
+        // Choose dst size: scale so that dst_w<=rw and dst_h<=rh, max one.
+        let (dst_w, dst_h) = {
+            // fit by width vs by height, pick the one that fits both.
+            let by_w_h = (sh * rw + sw / 2) / sw; // height if scaled to rw
+            if by_w_h <= rh {
+                (rw, by_w_h.max(1))
+            } else {
+                let by_h_w = (sw * rh + sh / 2) / sh; // width if scaled to rh
+                (by_h_w.max(1), rh)
+            }
+        };
+        let (rx, ry) = window_to_target(t, rect.x, rect.y);
+        let ox = rx + ((rw - dst_w) / 2) as i32;
+        let oy = ry + ((rh - dst_h) / 2) as i32;
+        let stride = t.stride as usize;
+        for dy in 0..dst_h {
+            let py = oy + dy as i32;
+            if py < 0 || py as u32 >= t.size.h { continue; }
+            let sy = (dy * sh) / dst_h; // nearest-neighbour
+            let src_row = (sy as usize) * (sw as usize) * 4;
+            let dst_row = (py as usize) * stride;
+            for dx in 0..dst_w {
+                let px = ox + dx as i32;
+                if px < 0 || px as u32 >= t.size.w { continue; }
+                let sx = (dx * sw) / dst_w;
+                let src_off = src_row + (sx as usize) * 4;
+                let b = src[src_off]     as u32;
+                let g = src[src_off + 1] as u32;
+                let r = src[src_off + 2] as u32;
+                let a = src[src_off + 3] as u32;
+                t.pixels[dst_row + px as usize] = (a << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
     // blur / shadow / effect use the default trait impls (no-op).
     fn blur(&mut self, _t: &mut RasterTarget, _r: Rect, _radius: u8) {}
     fn shadow(&mut self, _t: &mut RasterTarget, _r: Rect, _s: Shadow) {}

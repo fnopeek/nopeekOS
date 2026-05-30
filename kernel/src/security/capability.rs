@@ -30,9 +30,14 @@ bitflags! {
         const REVOKE    = 0b0001_0000;
         const AUDIT     = 0b0010_0000;
         /// Phase 10: `npk_scene_commit` — widget-tree rendering.
-        /// CANVAS (pixel upload, P10.10) will land as a separate bit.
         const RENDER    = 0b0100_0000;
-        const ALL       = 0b0111_1111;
+        /// P10.10: `npk_canvas_commit` — upload a raw BGRA bitmap into a
+        /// `Widget::Canvas` (image viewer, future paint app).
+        const CANVAS    = 0b1000_0000;
+        /// `npk_capture_screen` — read the composited framebuffer
+        /// (screenshot tool). Highly privileged: screen-scrape.
+        const CAPTURE   = 0b1_0000_0000;
+        const ALL       = 0b1_1111_1111;
     }
 }
 
@@ -227,17 +232,21 @@ pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId
 // malformed section falls back to a safe default that never includes
 // WRITE, so a future app cannot silently gain write access.
 
-const CAP_BIT_READ:   u8 = 0x01;
-const CAP_BIT_WRITE:  u8 = 0x02;
-const CAP_BIT_EXEC:   u8 = 0x04;
-const CAP_BIT_RENDER: u8 = 0x08;
+const CAP_BIT_READ:    u8 = 0x01;
+const CAP_BIT_WRITE:   u8 = 0x02;
+const CAP_BIT_EXEC:    u8 = 0x04;
+const CAP_BIT_RENDER:  u8 = 0x08;
+const CAP_BIT_CAPTURE: u8 = 0x10;
+const CAP_BIT_CANVAS:  u8 = 0x20;
 
 fn rights_from_caps_byte(b: u8) -> Rights {
     let mut r = Rights::empty();
-    if b & CAP_BIT_READ   != 0 { r |= Rights::READ; }
-    if b & CAP_BIT_WRITE  != 0 { r |= Rights::WRITE; }
-    if b & CAP_BIT_EXEC   != 0 { r |= Rights::EXECUTE; }
-    if b & CAP_BIT_RENDER != 0 { r |= Rights::RENDER; }
+    if b & CAP_BIT_READ    != 0 { r |= Rights::READ; }
+    if b & CAP_BIT_WRITE   != 0 { r |= Rights::WRITE; }
+    if b & CAP_BIT_EXEC    != 0 { r |= Rights::EXECUTE; }
+    if b & CAP_BIT_RENDER  != 0 { r |= Rights::RENDER; }
+    if b & CAP_BIT_CAPTURE != 0 { r |= Rights::CAPTURE; }
+    if b & CAP_BIT_CANVAS  != 0 { r |= Rights::CANVAS; }
     r
 }
 

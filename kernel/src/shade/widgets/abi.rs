@@ -599,6 +599,9 @@ pub struct RasterTarget<'a> {
     /// while glyphs stay full-coverage — the compositor then composites the
     /// scene over the wallpaper by per-pixel alpha (no halo).
     pub bg_alpha: u8,
+    /// Owning widget window id — lets the render walker look up a
+    /// `Widget::Canvas`'s committed bitmap in the canvas store.
+    pub window_id: u32,
 }
 
 /// Rasterizer backend. CPU in v1 (fontdue + gui/render.rs). GPU in v2+
@@ -639,6 +642,11 @@ pub trait Rasterizer: Send + Sync {
 
     /// Copy app-supplied Canvas pixels (BGRA32) into the target.
     fn canvas_copy(&mut self, t: &mut RasterTarget, src: &[u8], w: u16, h: u16);
+
+    /// Blit a BGRA32 bitmap (`sw`×`sh`) contain-fit into `rect` (window
+    /// coordinates): scaled to fit while preserving aspect, centred,
+    /// no background fill outside the fitted image. Default no-op.
+    fn canvas_blit(&mut self, _t: &mut RasterTarget, _src: &[u8], _sw: u32, _sh: u32, _rect: Rect) {}
 
     // ── Reserved (v2+, default no-op on CPU backend) ──────────────────
 
