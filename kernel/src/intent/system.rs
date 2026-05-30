@@ -56,6 +56,110 @@ pub fn intent_status(vault: &Vault) {
     kprintln!();
 }
 
+/// `cores` / `cpu` — trustworthy per-core CPU instrumentation.
+///
+/// Diagnosis step 0 for the scheduler rework: the WASM `top` is broken
+/// (self-reported busy-TSC can't see spinners; APERF/MPERF absent on
+/// AMD/qemu). This measures the opposite, directly: it double-samples
+/// the per-core HALTED-cycle counters (recorded at every HLT/MWAIT site)
+/// over a fixed window and reports the ground truth.
+///
+///   BUSY% = 100 − halted%  → a spinning core never halts → shows ~100%
+///   HALTS/s + avg residency → many short halts = spurious-wake spin;
+///                             few long halts = healthy deep idle.
+///
+/// Output goes to serial via kprintln (primary I/O), bypassing the
+/// broken WASM top entirely.
+pub fn intent_cores() {
+    let cores = crate::smp::per_core::core_count().min(256);
+    let tsc_hz = crate::interrupts::tsc_freq().max(1);
+    let tsc_per_us = (tsc_hz / 1_000_000).max(1);
+
+    // Snapshot 1
+    let mut s0 = [(0u64, 0u64); 256];
+    for c in 0..cores {
+        s0[c] = crate::smp::per_core::halt_snapshot(c);
+    }
+    let wall0 = crate::interrupts::rdtsc();
+
+    // Sample window. Idle Core 0 honestly with HLT (the normal shell-idle
+    // path) instead of busy-waiting, so Core 0's own halt counter advances
+    // and its BUSY% reflects reality rather than this command spinning.
+    let window_ms: u64 = 500;
+    let deadline = wall0 + window_ms * (tsc_hz / 1000);
+    while crate::interrupts::rdtsc() < deadline {
+        let t0 = crate::interrupts::rdtsc();
+        // SAFETY: ring-0, IRQs enabled in the shell loop — the 100 Hz
+        // timer wakes us within ~10 ms to re-check the deadline.
+        unsafe { core::arch::asm!("hlt"); }
+        crate::smp::per_core::record_halt(
+            0, crate::interrupts::rdtsc().saturating_sub(t0));
+    }
+
+    // Snapshot 2
+    let wall1 = crate::interrupts::rdtsc();
+    let mut s1 = [(0u64, 0u64); 256];
+    for c in 0..cores {
+        s1[c] = crate::smp::per_core::halt_snapshot(c);
+    }
+    let dwall = wall1.saturating_sub(wall0).max(1);
+
+    let wakeup = if crate::smp::per_core::has_mwait() { "MWAIT" } else { "HLT" };
+    let vmcore = crate::smp::per_core::dedicated_vm_core();
+
+    kprintln!();
+    kprintln!("  Per-core CPU (idle-measured, {} ms window, wake={})", window_ms, wakeup);
+    kprintln!("  ─────────────────────────────────────────────────────");
+    kprintln!("  CORE   BUSY%   HALTS/s   AVG-RESIDENCY   QUEUE  ROLE");
+    for c in 0..cores {
+        let dhalt = s1[c].0.saturating_sub(s0[c].0);
+        let dcount = s1[c].1.saturating_sub(s0[c].1);
+
+        // True busy% = 100 − (halted cycles / wall cycles).
+        let halt_pct = ((dhalt as u128) * 100 / (dwall as u128)) as u64;
+        let busy = 100u64.saturating_sub(halt_pct.min(100));
+
+        // Halt entries per second (window is window_ms long).
+        let halts_per_s = dcount * 1000 / window_ms;
+
+        // Average residency per halt, in µs.
+        let avg_us = if dcount > 0 { (dhalt / dcount) / tsc_per_us } else { 0 };
+
+        let qlen = crate::smp::scheduler::queue_len(c);
+
+        // ROLE: classify from the measured signals, not a hardcoded guess.
+        let role: &str = if c == 0 {
+            "core0 (kernel/irq/shell)"
+        } else if Some(c) == vmcore {
+            "microvm (dedicated)"
+        } else if busy >= 90 && halts_per_s < 5 {
+            "SPINNING (never halts!)"
+        } else if halts_per_s > 200 && avg_us < 50 {
+            "spin? (spurious wakes)"
+        } else if crate::smp::per_core::is_active(c) {
+            "running task"
+        } else if busy < 5 {
+            "idle (asleep)"
+        } else {
+            "worker"
+        };
+
+        if dcount > 0 {
+            kprintln!("  {:>4}   {:>4}%   {:>7}   {:>10} us   {:>5}  {}",
+                c, busy, halts_per_s, avg_us, qlen, role);
+        } else {
+            kprintln!("  {:>4}   {:>4}%   {:>7}   {:>13}   {:>5}  {}",
+                c, busy, halts_per_s, "—", qlen, role);
+        }
+    }
+    kprintln!();
+    kprintln!("  Read: BUSY%=100−halted. A core pegged at 100% with 0 HALTS/s");
+    kprintln!("  is SPINNING (the idle-100% bug). Many HALTS/s + tiny residency");
+    kprintln!("  = waking spuriously instead of staying asleep. Healthy idle =");
+    kprintln!("  low BUSY%, few HALTS/s, long residency.");
+    kprintln!();
+}
+
 pub fn intent_history() {
     super::print_active_history();
 }

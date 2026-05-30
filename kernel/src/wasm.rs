@@ -1820,6 +1820,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     // interrupts on, so enable-then-restore when they're off.
                     let rflags: u64;
                     unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+                    let t0 = crate::interrupts::rdtsc();
                     if rflags & (1 << 9) != 0 {
                         // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
                         unsafe { core::arch::asm!("hlt"); }
@@ -1828,6 +1829,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                         // sti-shadow defers the IRQ until after HLT is armed.
                         unsafe { core::arch::asm!("sti; hlt; cli"); }
                     }
+                    crate::smp::per_core::record_halt(
+                        cid, crate::interrupts::rdtsc().saturating_sub(t0));
                 }
             }
 
