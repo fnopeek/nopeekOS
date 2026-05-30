@@ -113,7 +113,7 @@ fn default_segments() -> Segments {
     Segments {
         left:   ["workspaces", "title"].iter().map(|s| s.to_string()).collect(),
         center: ["clock"].iter().map(|s| s.to_string()).collect(),
-        right:  ["tray", "screenshot", "power"].iter().map(|s| s.to_string()).collect(),
+        right:  ["tray", "screenshot", "gap", "power"].iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -242,6 +242,13 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             id: IconId::Camera,
             size: ICON_SIZE,
             modifiers: alloc::vec![Modifier::OnClick(ActionId(SHOT))],
+        }],
+        // Fixed-width empty filler — keeps the camera and power icons a
+        // safe distance apart so a click can't land on the wrong one.
+        "gap" => alloc::vec![Widget::Text {
+            content: String::new(),
+            style: TextStyle::Body,
+            modifiers: alloc::vec![Modifier::MinWidth(32)],
         }],
         "power" => alloc::vec![Widget::Icon {
             id: IconId::Power,
