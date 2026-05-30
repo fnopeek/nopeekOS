@@ -919,25 +919,27 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if w == 0 || h == 0 { return -1; }
             let need = w * h * 4;
             if (buf_max as usize) < need { return -1; }
-            // Snapshot the composited front buffer row-by-row into a tight
-            // BGRA temp (the source pitch may exceed width*4).
+            if info.addr == 0 { return -1; }
+            // Read the actual displayed MMIO framebuffer (not a shadow
+            // buffer): it always holds the final composite (background +
+            // windows + cursor) that's physically on screen. The shadow
+            // double-buffer can be mid-swap when we (on a worker core)
+            // read it, yielding a stale background-only frame — the
+            // reason an earlier shadow capture missed all the windows.
+            // Row-by-row into a tight BGRA temp (pitch may exceed w*4).
             let mut tmp = alloc::vec![0u8; need];
-            let ok = crate::framebuffer::with_fb(|fb| {
-                let src = fb.front_ptr();
-                for y in 0..h {
-                    // SAFETY: src is the framebuffer's front shadow, valid
-                    // for pitch*height bytes; we read w*4 ≤ pitch per row.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src.add(y * pitch),
-                            tmp.as_mut_ptr().add(y * w * 4),
-                            w * 4,
-                        );
-                    }
+            let src = info.addr as *const u8;
+            for y in 0..h {
+                // SAFETY: the GOP framebuffer is identity-mapped and valid
+                // for pitch*height bytes; we read w*4 ≤ pitch per row.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.add(y * pitch),
+                        tmp.as_mut_ptr().add(y * w * 4),
+                        w * 4,
+                    );
                 }
-                true
-            }).unwrap_or(false);
-            if !ok { return -1; }
+            }
             let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => return -1,
