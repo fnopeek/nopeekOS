@@ -73,6 +73,20 @@ event-driven end to end (block on input/timer, never poll), which is
 exactly the fiber rework below — plus likely a per-core timer as a
 prerequisite.**
 
+**Confirmed via `top` vs host htop (2026-05-30):** with only dock (core1) +
+bar (core2) + the shell loop (core0) running, nopeekOS `top` reported
+core0=100% (kernel/irq), core1=core2=0%, core3=idle 0% — but the host showed
+cores pegged at ~100% INCLUDING the core `top` calls "idle" — and on the
+bare-metal HW host **all 4 cores sit constantly at 100%** while nopeekOS
+is idle. So (a) `top`'s perf counters are broken (USAGE + MHz both wrong;
+`MHz=0`, `done=0` despite `spawned=5`, `steals=0` despite apps on worker
+cores), and (b) **the MWAIT/HLT idle path does not actually quiesce the
+vCPU** — even a genuinely idle worker core spins at the host level (MWAIT
+likely wakes immediately and busy re-checks instead of staying asleep).
+So the idle-100% is in the idle/wake path itself, not (only) the apps.
+The real idle must MONITOR/MWAIT (or HLT) and STAY asleep until a genuine
+wake — no spurious re-arming.
+
 **Diagnosis step 0 (new session): the built-in `top` is buggy and needs a
 full redesign — do NOT trust it.** Before touching the scheduler, add
 fresh, trustworthy **per-core instrumentation**: for each core, what is it
