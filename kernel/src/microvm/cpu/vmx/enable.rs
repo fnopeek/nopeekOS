@@ -1325,10 +1325,18 @@ impl VmContext {
                     self.consecutive_idle = 0;
                     continue;
                 }
-                // Pure timer-tick → idle counter advances. Reset when
-                // there are active NAT sessions (guest is blocked on
-                // I/O, not actually idle).
-                if pumped || crate::microvm::devices::nat::active_session_count() > 0 {
+                // Pure timer-tick → idle counter advances. Real net data
+                // (`pumped`) resets it. Merely having open NAT sessions
+                // does NOT for a windowed VM — a browser keeps connections
+                // alive while idle, and counting that as "busy" pinned
+                // consecutive_idle at 0 so it never yielded Idle → the
+                // dedicated core spun at 100%. Net is still pumped every
+                // iteration / host wake-up (≤1 ms latency). Headless test
+                // guests keep the old behavior.
+                if pumped
+                    || (crate::microvm::devices::nat::active_session_count() > 0
+                        && crate::microvm::vm_window() == 0)
+                {
                     self.consecutive_idle = 0;
                 } else {
                     self.consecutive_idle = self.consecutive_idle.saturating_add(1);
