@@ -825,6 +825,16 @@ impl Compositor {
     pub fn retile(&mut self) {
         let (area_x, area_y, area_w, area_h) = self.workspace_area();
 
+        // TEMP DIAG (v0.187.14): dump the window table so we can see why
+        // dock-launched apps don't split. Remove once diagnosed.
+        crate::kprintln!("[retile] aws={} windows={}", self.active_workspace, self.windows.len());
+        for w in &self.windows {
+            crate::kprintln!(
+                "  id={} kind={:?} ws={} state={:?} vis={} overlay={} dock={} bar={} rect={},{} {}x{}",
+                w.id.0, w.kind, w.workspace, w.state, w.visible, w.is_overlay,
+                w.is_dock, w.is_bar, w.x, w.y, w.width, w.height);
+        }
+
         let tiled: Vec<WindowId> = self.windows.iter()
             .filter(|w| w.workspace == self.active_workspace
                      && w.state == WindowState::Tiled
@@ -832,6 +842,9 @@ impl Compositor {
                      && !w.is_overlay)
             .map(|w| w.id)
             .collect();
+
+        crate::kprintln!("[retile] tiled={} -> {:?}", tiled.len(),
+            tiled.iter().map(|i| i.0).collect::<alloc::vec::Vec<_>>());
 
         if tiled.is_empty() { return; }
 
