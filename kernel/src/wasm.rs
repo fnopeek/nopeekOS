@@ -1831,6 +1831,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     }
                     crate::smp::per_core::record_halt(
                         cid, crate::interrupts::rdtsc().saturating_sub(t0));
+                    crate::smp::per_core::record_wake(
+                        cid, crate::smp::per_core::WAKE_NPK_SLEEP);
                 }
             }
 

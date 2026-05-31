@@ -133,6 +133,53 @@ pub fn halt_snapshot(core_id: usize) -> (u64, u64) {
     )
 }
 
+// ── Per-source wake attribution (1 kHz spurious-wake diagnosis) ──────
+//
+// HALTS/s says a core wakes ~1000×/s but not WHY. These counters record
+// the CAUSE at each wake: an ISR bumps its vector class as it runs (an
+// ISR that runs while the core was halted IS the wake that returned the
+// HLT), and the MWAIT site records whether it woke to real work or an
+// empty queue (WORK_AVAILABLE cacheline churn). The key diagnostic is
+// UNATTRIBUTED = HALTS − Σcauses: if a core's HALTS/s far exceeds the
+// sum of its ISR + MWAIT causes, the HLT is returning with NO guest ISR
+// — i.e. KVM resuming the vCPU on a host-side event (host HZ tick,
+// scheduler) past the emulated HLT. That is a QEMU/KVM artifact, not a
+// bare-metal idle bug. On real HW every wake must attribute to a cause.
+pub const WAKE_CAUSES: usize = 6;
+pub const WAKE_TIMER: usize = 0;        // 100 Hz PIT / APIC timer ISR
+pub const WAKE_KEYBOARD: usize = 1;     // keyboard IRQ
+pub const WAKE_MWAIT_WORK: usize = 2;   // MWAIT woke → found a task
+pub const WAKE_MWAIT_EMPTY: usize = 3;  // MWAIT woke → empty queue (churn)
+pub const WAKE_HLT_FALLBACK: usize = 4; // sti;hlt;cli fallback returned
+pub const WAKE_NPK_SLEEP: usize = 5;    // npk_sleep HLT returned
+
+/// Short labels for the `cores` breakdown, indexed by cause.
+pub const WAKE_LABELS: [&str; WAKE_CAUSES] =
+    ["timer", "kbd", "mwait-work", "mwait-empty", "hlt-fb", "npk-sleep"];
+
+static CORE_WAKE: [[AtomicU64; WAKE_CAUSES]; 256] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    const ROW: [AtomicU64; WAKE_CAUSES] = [Z; WAKE_CAUSES];
+    [ROW; 256]
+};
+
+/// Record one wake of `cause` on `core_id`. Cheap + lock-free — safe to
+/// call from interrupt context (unlike `current_core_id`, which locks).
+pub fn record_wake(core_id: usize, cause: usize) {
+    if core_id >= 256 || cause >= WAKE_CAUSES { return; }
+    CORE_WAKE[core_id][cause].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot all wake-cause counters for `core_id`.
+pub fn wake_snapshot(core_id: usize) -> [u64; WAKE_CAUSES] {
+    let mut out = [0u64; WAKE_CAUSES];
+    if core_id >= 256 { return out; }
+    for i in 0..WAKE_CAUSES {
+        out[i] = CORE_WAKE[core_id][i].load(Ordering::Relaxed);
+    }
+    out
+}
+
 /// Whether `core_id` is currently inside a scheduler task (CORE_ACTIVE).
 pub fn is_active(core_id: usize) -> bool {
     if core_id >= 256 { return false; }
@@ -534,6 +581,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             let t0 = crate::interrupts::rdtsc();
             unsafe { core::arch::asm!("sti; hlt; cli"); }
             record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
+            record_wake(cid, WAKE_HLT_FALLBACK);
             continue;
         }
 
@@ -582,6 +630,13 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
                         in("ecx") 0u32,
                     );
                     record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
+                    // Did we wake to real work or to a churned cacheline?
+                    let cause = if super::scheduler::queue_len(cid) > 0 {
+                        WAKE_MWAIT_WORK
+                    } else {
+                        WAKE_MWAIT_EMPTY
+                    };
+                    record_wake(cid, cause);
                 }
             }
         } else {
@@ -589,6 +644,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             let t0 = crate::interrupts::rdtsc();
             unsafe { core::arch::asm!("sti; hlt; cli"); }
             record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
+            record_wake(cid, WAKE_HLT_FALLBACK);
         }
     }
 }

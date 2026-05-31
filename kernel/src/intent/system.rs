@@ -1,6 +1,6 @@
 //! System intents: status, time, help, about, caps, audit, halt, set/get/config
 
-use crate::kprintln;
+use crate::{kprint, kprintln};
 use crate::capability::{self, Vault};
 
 pub fn intent_status(vault: &Vault) {
@@ -77,8 +77,10 @@ pub fn intent_cores() {
 
     // Snapshot 1
     let mut s0 = [(0u64, 0u64); 256];
+    let mut w0 = [[0u64; crate::smp::per_core::WAKE_CAUSES]; 256];
     for c in 0..cores {
         s0[c] = crate::smp::per_core::halt_snapshot(c);
+        w0[c] = crate::smp::per_core::wake_snapshot(c);
     }
     let wall0 = crate::interrupts::rdtsc();
 
@@ -99,8 +101,10 @@ pub fn intent_cores() {
     // Snapshot 2
     let wall1 = crate::interrupts::rdtsc();
     let mut s1 = [(0u64, 0u64); 256];
+    let mut w1 = [[0u64; crate::smp::per_core::WAKE_CAUSES]; 256];
     for c in 0..cores {
         s1[c] = crate::smp::per_core::halt_snapshot(c);
+        w1[c] = crate::smp::per_core::wake_snapshot(c);
     }
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -151,12 +155,39 @@ pub fn intent_cores() {
             kprintln!("  {:>4}   {:>4}%   {:>7}   {:>13}   {:>5}  {}",
                 c, busy, halts_per_s, "—", qlen, role);
         }
+
+        // Wake-source breakdown: which cause returned each halt this
+        // window. The decisive number is UNATTR = HALTS − Σcauses: large
+        // here means the HLT returned with NO guest ISR — KVM resuming
+        // the vCPU on a host event (host HZ tick) past the emulated HLT.
+        // That is a QEMU/KVM artifact, not a bare-metal idle bug.
+        let labels = crate::smp::per_core::WAKE_LABELS;
+        let mut attributed = 0u64;
+        // Build "cause=N/s" only for non-zero causes to keep it terse.
+        // (kprintln has no String; print inline per cause.)
+        kprint!("        wakes:");
+        let mut any = false;
+        for i in 0..labels.len() {
+            let d = w1[c][i].saturating_sub(w0[c][i]);
+            attributed = attributed.saturating_add(d);
+            if d > 0 {
+                kprint!(" {}={}/s", labels[i], d * 1000 / window_ms);
+                any = true;
+            }
+        }
+        if !any { kprint!(" (none)"); }
+        let unattr = dcount.saturating_sub(attributed);
+        kprintln!("  | UNATTR={}/s", unattr * 1000 / window_ms);
     }
     kprintln!();
     kprintln!("  Read: BUSY%=100−halted. A core pegged at 100% with 0 HALTS/s");
     kprintln!("  is SPINNING (the idle-100% bug). Many HALTS/s + tiny residency");
     kprintln!("  = waking spuriously instead of staying asleep. Healthy idle =");
     kprintln!("  low BUSY%, few HALTS/s, long residency.");
+    kprintln!("  wakes: which cause returned each halt. UNATTR = HALTS−Σcauses;");
+    kprintln!("  large UNATTR = HLT returned with no guest ISR = KVM/host-tick");
+    kprintln!("  artifact (QEMU), not a bare-metal idle bug. mwait-empty = the");
+    kprintln!("  WORK_AVAILABLE cacheline was churned with no work (thundering herd).");
     kprintln!();
 }
 
