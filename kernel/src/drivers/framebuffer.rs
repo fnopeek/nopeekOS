@@ -187,7 +187,13 @@ pub fn init_from_gpu() {
     crate::kprintln!("[npk] Framebuffer: {}x{} @ {:#x} ({}bpp, {})",
         width, height, addr, bpp, crate::gpu::driver_name());
 
-    // Map framebuffer pages (for GOP; Intel Xe uses identity-mapped RAM)
+    // Map framebuffer pages (for GOP; Intel Xe uses identity-mapped RAM).
+    // WRITE_COMBINE is essential: the GOP MMIO framebuffer is otherwise
+    // effectively uncached on real Intel HW (firmware MTRR), so every CPU
+    // blit write is a separate UC transaction → brutally slow scrolling /
+    // dragging / cursor on bare metal (QEMU's fb is RAM, so it never showed
+    // there). WC batches writes into burst transactions. PAT index 5 = WC is
+    // programmed in paging::init.
     if !crate::gpu::is_native() {
         let fb_size = pitch as u64 * height as u64;
         for page_off in (0..fb_size).step_by(4096) {
@@ -195,7 +201,8 @@ pub fn init_from_gpu() {
             let _ = crate::paging::map_page(
                 pa, pa,
                 crate::paging::PageFlags::PRESENT
-                    | crate::paging::PageFlags::WRITABLE,
+                    | crate::paging::PageFlags::WRITABLE
+                    | crate::paging::PageFlags::WRITE_COMBINE,
             );
         }
     }
