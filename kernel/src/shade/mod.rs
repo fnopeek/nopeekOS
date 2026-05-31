@@ -255,58 +255,59 @@ pub fn render_frame() {
     render_frame_mode(false);
 }
 
-/// Recompose the scene + blit ONLY the cursor's damage rects (old ∪ new
-/// position). For a pure mouse move: the scene is recomposed (cheap RAM
-/// work, with the cursor baked in) but only the two ~12×19 cursor rects
-/// reach MMIO — no 33 MB full-screen blit (the bare-metal bottleneck), and
-/// because the cursor is part of the blitted pixels the move is atomic →
-/// no flicker. QEMU is unaffected (it recomposed fully before too).
+/// Move the cursor WITHOUT recompositing the scene. The front buffer
+/// already holds the composed scene with the cursor baked in at its old
+/// spot + the clean pixels under it saved. Restore those (erase old
+/// cursor), save-under + bake at the new spot, and blit only the affected
+/// bounding box. NO comp.render, NO bg memcpy — that per-move recomposite
+/// was the bare-metal cost (+watts/stutter) whenever a window was open.
 fn render_frame_cursor_only() {
-    render_frame_mode(true);
+    framebuffer::with_fb(|fb| {
+        let info = *fb.info();
+        let front = fb.front_ptr();
+        let old = cursor::saved_pos();
+        let had_old = cursor::save_valid();
+        cursor::restore_under(front, &info);       // erase old cursor in RAM
+        cursor::save_under_and_bake(front, &info);  // save clean + bake new
+        blit_cursor_bbox(fb, old, had_old);         // one atomic small blit
+    });
 }
 
 fn render_frame_mode(cursor_only: bool) {
-    if layers_usable() {
-        render_frame_layered(cursor_only);
+    if cursor_only {
+        render_frame_cursor_only();
+    } else if layers_usable() {
+        render_frame_layered();
     } else {
-        render_frame_legacy(cursor_only);
+        render_frame_legacy();
     }
 }
 
-/// Blit the cursor damage region (current + previous position) from the
-/// front buffer to MMIO. Front at the previous position is clean scene
-/// (the cursor is now at the current position) → blitting it erases the
-/// old cursor; blitting the current rect draws the new one. Two small rects.
-fn blit_cursor_damage(fb: &framebuffer::FbConsole) {
+/// Blit the bounding box of the old ∪ new cursor position from the front
+/// buffer to MMIO — one shot, so the move is atomic (no flicker). The old
+/// position in the front buffer is clean scene again (cursor restored +
+/// re-baked at the new spot), so this both erases the old and draws the new.
+fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool) {
     let (cw, ch) = cursor::cursor_size();
     let (cx, cy) = cursor::atomic_pos();
-    framebuffer::blit_rect(fb, cx.max(0) as u32, cy.max(0) as u32, cw, ch);
-    if PREV_CUR_DRAWN.load(Ordering::Relaxed) {
-        let px = PREV_CUR_X.load(Ordering::Relaxed);
-        let py = PREV_CUR_Y.load(Ordering::Relaxed);
-        if px != cx || py != cy {
-            framebuffer::blit_rect(fb, px.max(0) as u32, py.max(0) as u32, cw, ch);
-        }
-    }
-    PREV_CUR_X.store(cx, Ordering::Relaxed);
-    PREV_CUR_Y.store(cy, Ordering::Relaxed);
-    PREV_CUR_DRAWN.store(true, Ordering::Relaxed);
+    let (x0, y0, x1, y1) = if had_old {
+        (old.0.min(cx), old.1.min(cy),
+         old.0.max(cx) + cw as i32, old.1.max(cy) + ch as i32)
+    } else {
+        (cx, cy, cx + cw as i32, cy + ch as i32)
+    };
+    let x0 = x0.max(0) as u32;
+    let y0 = y0.max(0) as u32;
+    let w = (x1.max(0) as u32).saturating_sub(x0);
+    let h = (y1.max(0) as u32).saturating_sub(y0);
+    if w > 0 && h > 0 { framebuffer::blit_rect(fb, x0, y0, w, h); }
 }
 
-/// Record that a full blit just put the cursor on MMIO at its current pos
-/// (so the next cursor-only move knows which rect to erase).
-fn mark_cursor_blitted() {
-    let (cx, cy) = cursor::atomic_pos();
-    PREV_CUR_X.store(cx, Ordering::Relaxed);
-    PREV_CUR_Y.store(cy, Ordering::Relaxed);
-    PREV_CUR_DRAWN.store(true, Ordering::Relaxed);
-}
-
-/// Layer-based render with double-buffer: render to back, swap, blit from
-/// front. The cursor is composed INTO the back shadow as the final layer so
-/// the shadow→MMIO blit carries it atomically — no blit-vs-cursor race, no
-/// flicker (incl. the dock reveal animation and the microvm tile).
-fn render_frame_layered(cursor_only: bool) {
+/// Full recomposite → blit. Scene is composed CLEAN into the back buffer
+/// (no cursor), swapped to front, then the cursor is saved-under + baked
+/// into the front and the whole frame blitted (cursor included → atomic,
+/// no flicker; incl. the dock reveal animation + the microvm tile).
+fn render_frame_layered() {
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
@@ -326,17 +327,13 @@ fn render_frame_layered(cursor_only: bool) {
             comp.render(back, fb.info());
         }
 
-        // Cursor baked in as the final layer → atomic blit, no flicker.
-        cursor::draw_cursor_on_shadow(back, &info);
-
         fb.swap_buffers();
         fb.commit_front();
 
-        if cursor_only {
-            // Pure move: scene unchanged vs MMIO, only the cursor differs.
-            blit_cursor_damage(fb);
-            return;
-        }
+        // Bake the cursor into the (now) front buffer, saving the clean
+        // pixels under it so a later pure move can erase it without a
+        // recompose. Carried by the full blit below → atomic, no flicker.
+        cursor::save_under_and_bake(fb.front_ptr(), &info);
 
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
@@ -349,12 +346,11 @@ fn render_frame_layered(cursor_only: bool) {
             damage.mark_all();
             damage.flush(fb);
         }
-        mark_cursor_blitted();
     });
 }
 
 /// Legacy render with double-buffer (fallback when layers not initialized).
-fn render_frame_legacy(cursor_only: bool) {
+fn render_frame_legacy() {
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
@@ -366,15 +362,10 @@ fn render_frame_legacy(cursor_only: bool) {
             comp.render(back, fb.info());
         }
 
-        cursor::draw_cursor_on_shadow(back, &info);
-
         fb.swap_buffers();
         fb.commit_front();
 
-        if cursor_only {
-            blit_cursor_damage(fb);
-            return;
-        }
+        cursor::save_under_and_bake(fb.front_ptr(), &info);
 
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
@@ -387,7 +378,6 @@ fn render_frame_legacy(cursor_only: bool) {
             damage.mark_all();
             damage.flush(fb);
         }
-        mark_cursor_blitted();
     });
 }
 
@@ -827,6 +817,12 @@ pub fn poll_render() {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
+        // Erase the baked cursor before repainting windows; it's re-baked
+        // + blitted at the end so the partial update stays flicker-free.
+        let cur_old = cursor::saved_pos();
+        let cur_had = cursor::save_valid();
+        cursor::restore_under(shadow, info);
+
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             // Propagate per-terminal dirty flags to window dirty flags
             for win in &mut comp.windows {
@@ -907,14 +903,16 @@ pub fn poll_render() {
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
                     comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
-                // Cursor baked into the shadow → carried atomically by the
-                // window-rect blit (no flicker).
-                cursor::draw_cursor_on_shadow(shadow, info);
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
             }
         }
+
+        // Re-bake the cursor on top of the repainted windows + blit its
+        // region (atomic). Covers a cursor over a just-redrawn window and
+        // erases it at the old spot.
+        cursor::save_under_and_bake(shadow, info);
+        blit_cursor_bbox(fb, cur_old, cur_had);
     });
-    mark_cursor_blitted();
     return;
 
     // Legacy partial render path (kept for reference)
@@ -990,13 +988,9 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set by handle_mouse when a full scene redraw is needed but deferred.
 /// poll_render picks this up AFTER processing all mouse events.
 static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
-/// A pure mouse move occurred (no scene change). poll_render does a
-/// recompose + cursor-rects-only blit for it (cheap, flicker-free).
+/// A pure mouse move occurred (no scene change). poll_render moves the
+/// cursor via save-under (no recomposite) for it — cheap, flicker-free.
 static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
-/// Last cursor position blitted to MMIO (for the cursor-only erase rect).
-static PREV_CUR_X: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-static PREV_CUR_Y: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-static PREV_CUR_DRAWN: AtomicBool = AtomicBool::new(false);
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
