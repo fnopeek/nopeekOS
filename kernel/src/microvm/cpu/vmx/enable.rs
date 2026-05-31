@@ -1079,6 +1079,17 @@ impl VmContext {
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
         self.trace.record(basic, outcome.exit_qualification);
 
+        // Exit-reason histogram (diagnosis — `cores` shows the mix).
+        crate::microvm::cpu::record_vm_exit(match basic {
+            1 => crate::microvm::cpu::VMX_INTR,
+            12 => crate::microvm::cpu::VMX_HLT,
+            48 => crate::microvm::cpu::VMX_MMIO, // EPT violation
+            30 => crate::microvm::cpu::VMX_IO,
+            31 | 32 => crate::microvm::cpu::VMX_MSR,
+            10 => crate::microvm::cpu::VMX_CPUID,
+            _ => crate::microvm::cpu::VMX_OTHER,
+        });
+
         // DIAG (bare-metal reason-33): per-exit mode trace for the first
         // ~14 exits. Shows EXACTLY when the guest enters long mode (CS.L
         // / EFER.LMA flip 0→1) and whether re-entry into long mode

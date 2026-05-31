@@ -82,6 +82,7 @@ pub fn intent_cores() {
         s0[c] = crate::smp::per_core::halt_snapshot(c);
         w0[c] = crate::smp::per_core::wake_snapshot(c);
     }
+    let vx0 = crate::microvm::cpu::vm_exit_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
     // Sample window. Idle Core 0 honestly with HLT (the normal shell-idle
@@ -106,6 +107,7 @@ pub fn intent_cores() {
         s1[c] = crate::smp::per_core::halt_snapshot(c);
         w1[c] = crate::smp::per_core::wake_snapshot(c);
     }
+    let vx1 = crate::microvm::cpu::vm_exit_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
     let vmcore = crate::smp::per_core::dedicated_vm_core();
@@ -177,6 +179,22 @@ pub fn intent_cores() {
         if !any { kprint!(" (none)"); }
         let unattr = dcount.saturating_sub(attributed);
         kprintln!("  | UNATTR={}/s", unattr * 1000 / window_ms);
+    }
+
+    // VM-exit mix — only when a guest ran during the window. Tells us
+    // WHY the dedicated core is busy: mmio-heavy = the guest is rendering
+    // (legit); hlt/intr-heavy = idle spin (the run loop should yield/sleep).
+    let vlabels = crate::microvm::cpu::VMEXIT_LABELS;
+    let vtotal: u64 = (0..vlabels.len())
+        .map(|i| vx1[i].saturating_sub(vx0[i]))
+        .sum();
+    if vtotal > 0 {
+        kprint!("  VM-exits/s (dedicated guest):");
+        for i in 0..vlabels.len() {
+            let d = vx1[i].saturating_sub(vx0[i]);
+            if d > 0 { kprint!(" {}={}", vlabels[i], d * 1000 / window_ms); }
+        }
+        kprintln!();
     }
     kprintln!();
     kprintln!("  Read: BUSY%=100−halted. A core pegged at 100% with 0 HALTS/s");

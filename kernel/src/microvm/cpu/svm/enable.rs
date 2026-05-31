@@ -938,6 +938,17 @@ impl VmContext {
             run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys, hf, gf);
         let exit = outcome.exit_reason;
 
+        // Exit-reason histogram (diagnosis — `cores` shows the mix).
+        crate::microvm::cpu::record_vm_exit(match exit {
+            EXIT_INTR => crate::microvm::cpu::VMX_INTR,
+            EXIT_HLT => crate::microvm::cpu::VMX_HLT,
+            EXIT_NPF => crate::microvm::cpu::VMX_MMIO,
+            EXIT_IOIO => crate::microvm::cpu::VMX_IO,
+            EXIT_MSR => crate::microvm::cpu::VMX_MSR,
+            EXIT_CPUID => crate::microvm::cpu::VMX_CPUID,
+            _ => crate::microvm::cpu::VMX_OTHER,
+        });
+
         // Consume the injection slot. Proven by the v0.172.41 probe:
         // under KVM-nested SVM the CPU does NOT clear EVENTINJ.V after
         // a successful injection (val=0x800000xx stayed valid before
