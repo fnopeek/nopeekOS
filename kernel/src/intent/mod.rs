@@ -831,6 +831,30 @@ fn common_prefix(strings: &[String]) -> String {
     String::from(&strings[0][..len])
 }
 
+/// Idle Core 0 until the next interrupt instead of busy-spinning between
+/// poll cycles. While a focused app (widget / intent / wasm) runs on a
+/// worker, Core 0 only needs to wake to forward input, drive the cursor /
+/// dock, and detect completion. The per-core 100 Hz LAPIC timer (v0.186)
+/// guarantees a ≤10 ms wake (plain HLT = C1, so the timer keeps ticking —
+/// the old "timer stalls in deep C-states" worry was a cpu-pm/MWAIT issue,
+/// gone since v0.186), and keyboard / mouse / net IRQs wake it immediately.
+/// The old `for 0..5000 { spin_loop() }` cadence pegged Core 0 at 100%
+/// whenever any window was focused.
+#[inline]
+fn core0_idle_tick() {
+    let rflags: u64;
+    // SAFETY: read RFLAGS to preserve the caller's interrupt-enable state.
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+    if rflags & (1 << 9) != 0 {
+        // IF=1 already → HLT wakes on the next IRQ (timer/input).
+        unsafe { core::arch::asm!("hlt"); }
+    } else {
+        // Enable for the HLT, then restore IF=0 (sti-shadow defers the IRQ
+        // until after HLT is armed, so the wake is never lost).
+        unsafe { core::arch::asm!("sti; hlt; cli"); }
+    }
+}
+
 pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     // Store vault reference for worker cores
     VAULT_REF.store(vault as *const _ as *mut _, AtOrd::Release);
@@ -967,10 +991,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     );
                 }
 
-                // Same polling cadence as the WASM-app branch.
-                for _ in 0..5_000 {
-                    core::hint::spin_loop();
-                }
+                // Idle until the next IRQ instead of busy-spinning — a
+                // focused widget app otherwise pegged Core 0 at 100%.
+                core0_idle_tick();
                 continue;
             }
 
@@ -995,15 +1018,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
                 while let Some(_key) = crate::keyboard::read_key() {}
 
-                // While a worker task is running we poll (pause) instead of hlt.
-                // Rationale: hlt + HWP EPP=192 can sink Core 0 deep enough that the
-                // LAPIC timer stalls on some platforms (observed on ADL-N); without
-                // a steady timer tick we'd miss the worker's completion signal.
-                // Net/mouse/key IRQs still wake us, but we can't rely on them
-                // during a silent HTTP stall. Pause keeps the core in C0 cheaply.
-                for _ in 0..5_000 {
-                    core::hint::spin_loop();
-                }
+                // Idle until the next IRQ (≤10 ms via the per-core 100 Hz
+                // timer) instead of busy-spinning — we re-poll the worker's
+                // completion on every wake; 10 ms latency to notice an intent
+                // finished is imperceptible, and net/mouse/key IRQs wake us
+                // sooner. Plain HLT (C1) keeps the LAPIC timer ticking.
+                core0_idle_tick();
                 continue;
             }
 
@@ -1069,13 +1089,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::wasm::push_app_key(focused_term, key);
                 }
 
-                // Poll (pause) — same rationale as the intent-running branch:
-                // while a WASM app runs on a worker, Core 0 must keep ticking to
-                // forward keys and detect completion even if the LAPIC timer
-                // stalls in deep C-states.
-                for _ in 0..5_000 {
-                    core::hint::spin_loop();
-                }
+                // Idle until the next IRQ (timer/input) — same as the
+                // widget / intent branches. Wakes on key/mouse immediately;
+                // the 100 Hz timer re-polls app completion within 10 ms.
+                core0_idle_tick();
                 continue;
             }
         }
