@@ -571,9 +571,12 @@ pub fn vm_core_serve() {
         Vendor::Unknown(reason) => crate::kprintln!("[microvm] {}", reason),
     }
 
-    // VM done — stop the per-core timer and restore the IF=0 state
+    // VM done — swap the 1 kHz VM timer back to the 100 Hz worker idle
+    // timer so this core's park-loop HLT keeps a wake source (it idles
+    // like any worker until the next launch). Restore the IF=0 state
     // `smp_ap_entry`'s park loop expects (it does its own sti;hlt;cli).
     crate::interrupts::disarm_dedicated_vm_timer();
+    crate::interrupts::arm_worker_timer();
     // SAFETY: ring-0; return the core to the parked-loop invariant.
     unsafe { core::arch::asm!("cli") };
 

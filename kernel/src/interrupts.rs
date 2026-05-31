@@ -5,7 +5,7 @@
 
 use crate::serial::{outb, inb};
 use crate::kprintln;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Monotonic tick counter, incremented by timer IRQ at 100 Hz.
 /// Used on hardware with working PIT (e.g. QEMU).
@@ -274,6 +274,11 @@ pub fn init() {
         // ever raises this vector (its own LAPIC timer) — a pure EOI.
         IDT[DEDICATED_VM_TIMER_VECTOR as usize]
             .set_handler(dedicated_vm_timer_handler as *const () as u64);
+        // Per-core worker idle timer (one per AP) — pure EOI, see
+        // `arm_worker_timer`. Shared IDT; each worker raises it on its
+        // own LAPIC so its idle HLT wakes without a host tick.
+        IDT[WORKER_TIMER_VECTOR as usize]
+            .set_handler(worker_timer_handler as *const () as u64);
 
         // Load IDT
         let idt_reg = IdtRegister {
@@ -524,6 +529,71 @@ pub fn disarm_dedicated_vm_timer() {
         core::ptr::write_volatile(b.add(0x320) as *mut u32,
             (1 << 16) | DEDICATED_VM_TIMER_VECTOR as u32);
         core::ptr::write_volatile(b.add(0x380) as *mut u32, 0);
+    }
+}
+
+// ── Per-core worker idle timer ──────────────────────────────────────
+//
+// Worker APs have no wake source of their own: hardware IRQs route to
+// the BSP, and the only other signal was the WORK_AVAILABLE MONITOR
+// cacheline, which needs real-HW MWAIT (`cpu-pm=on` passthrough). That
+// passthrough is exactly what pinned the host at idle: a passthrough
+// HLT/MWAIT never VMEXITs, so KVM never deschedules the idle vCPU
+// thread and the host core stays at 100%/turbo. So every worker arms
+// its OWN periodic LAPIC timer (100 Hz) and idles with plain HLT: HLT
+// VMEXITs → KVM blocks the vCPU thread → the host core actually idles,
+// and the timer guarantees the worker wakes to re-check its run-queue /
+// sleep deadline on bare metal too (where no host tick exists). Pure
+// EOI handler — must NOT touch TICKS (Core 0 owns the wall clock).
+const WORKER_TIMER_VECTOR: u8 = 50;
+static WORKER_APIC_BASE: AtomicU64 = AtomicU64::new(0);
+static WORKER_TIMER_INITIAL: AtomicU32 = AtomicU32::new(0);
+
+extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
+    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
+    if base != 0 {
+        // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
+        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    }
+}
+
+/// Arm the calling core's LAPIC timer at 100 Hz periodic on
+/// `WORKER_TIMER_VECTOR`. Each worker AP calls this once at boot, and
+/// the dedicated core re-arms it after a VM exits. Calibrated once
+/// against the TSC; later callers reuse the cached count (the LAPIC
+/// timer clock is uniform across cores).
+pub fn arm_worker_timer() {
+    let (lo, hi): (u32, u32);
+    // SAFETY: MSR 0x1B (APIC base) is always readable on x86_64 ring 0.
+    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
+    let base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
+    WORKER_APIC_BASE.store(base, Ordering::Relaxed);
+
+    // SAFETY: LAPIC MMIO regs, identity-mapped; this core's own LAPIC.
+    unsafe {
+        let b = base as *mut u8;
+        // Ensure LAPIC enabled (smp_ap_entry already did, defensive).
+        let svr = core::ptr::read_volatile(b.add(0xF0) as *const u32);
+        core::ptr::write_volatile(b.add(0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
+        // Divide = 16.
+        core::ptr::write_volatile(b.add(0x3E0) as *mut u32, 0x03);
+        let mut initial = WORKER_TIMER_INITIAL.load(Ordering::Relaxed);
+        if initial == 0 {
+            // Calibrate ticks/10ms against the TSC (10 ms = 100 Hz).
+            let freq = TSC_FREQ.load(Ordering::Relaxed);
+            core::ptr::write_volatile(b.add(0x380) as *mut u32, 0xFFFF_FFFF);
+            let start = rdtsc();
+            let tsc_10ms = if freq > 0 { freq / 100 } else { 20_000_000 };
+            while rdtsc() - start < tsc_10ms { core::hint::spin_loop(); }
+            initial = 0xFFFF_FFFFu32
+                .wrapping_sub(core::ptr::read_volatile(b.add(0x390) as *const u32))
+                .max(1);
+            WORKER_TIMER_INITIAL.store(initial, Ordering::Relaxed);
+        }
+        // LVT timer: periodic (bit 17) | vector.
+        core::ptr::write_volatile(b.add(0x320) as *mut u32,
+            (1 << 17) | WORKER_TIMER_VECTOR as u32);
+        core::ptr::write_volatile(b.add(0x380) as *mut u32, initial);
     }
 }
 

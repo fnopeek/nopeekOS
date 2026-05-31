@@ -108,11 +108,10 @@ pub fn intent_cores() {
     }
     let dwall = wall1.saturating_sub(wall0).max(1);
 
-    let wakeup = if crate::smp::per_core::has_mwait() { "MWAIT" } else { "HLT" };
     let vmcore = crate::smp::per_core::dedicated_vm_core();
 
     kprintln!();
-    kprintln!("  Per-core CPU (idle-measured, {} ms window, wake={})", window_ms, wakeup);
+    kprintln!("  Per-core CPU (idle-measured, {} ms window, idle=HLT+100Hz timer)", window_ms);
     kprintln!("  ─────────────────────────────────────────────────────");
     kprintln!("  CORE   BUSY%   HALTS/s   AVG-RESIDENCY   QUEUE  ROLE");
     for c in 0..cores {
@@ -185,9 +184,8 @@ pub fn intent_cores() {
     kprintln!("  = waking spuriously instead of staying asleep. Healthy idle =");
     kprintln!("  low BUSY%, few HALTS/s, long residency.");
     kprintln!("  wakes: which cause returned each halt. UNATTR = HALTS−Σcauses;");
-    kprintln!("  large UNATTR = HLT returned with no guest ISR = KVM/host-tick");
-    kprintln!("  artifact (QEMU), not a bare-metal idle bug. mwait-empty = the");
-    kprintln!("  WORK_AVAILABLE cacheline was churned with no work (thundering herd).");
+    kprintln!("  large UNATTR (Core 0) = HLT returned with no guest ISR = KVM/");
+    kprintln!("  host-tick artifact (QEMU), not a bare-metal idle bug.");
     kprintln!();
 }
 
