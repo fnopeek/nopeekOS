@@ -444,7 +444,12 @@ pub fn handle_action(action: input::ShadeAction) {
             // via remove_scene when the closed window's kind is Widget.
             with_compositor(|comp| {
                 if let Some(id) = comp.focused {
-                    comp.close_window(id);
+                    // Never close a panel (dock/bar) via Mod+Q — they are
+                    // managed chrome. Focus shouldn't land on one, but guard
+                    // here too in case some path focuses a panel.
+                    if !comp.is_panel(id) {
+                        comp.close_window(id);
+                    }
                 }
             });
             render_frame();
