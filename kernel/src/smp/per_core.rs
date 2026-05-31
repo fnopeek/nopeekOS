@@ -138,24 +138,19 @@ pub fn halt_snapshot(core_id: usize) -> (u64, u64) {
 // HALTS/s says a core wakes ~1000×/s but not WHY. These counters record
 // the CAUSE at each wake: an ISR bumps its vector class as it runs (an
 // ISR that runs while the core was halted IS the wake that returned the
-// HLT), and the MWAIT site records whether it woke to real work or an
-// empty queue (WORK_AVAILABLE cacheline churn). The key diagnostic is
-// UNATTRIBUTED = HALTS − Σcauses: if a core's HALTS/s far exceeds the
-// sum of its ISR + MWAIT causes, the HLT is returning with NO guest ISR
-// — i.e. KVM resuming the vCPU on a host-side event (host HZ tick,
-// scheduler) past the emulated HLT. That is a QEMU/KVM artifact, not a
+// HLT). The key diagnostic is UNATTRIBUTED = HALTS − Σcauses on Core 0:
+// if its HALTS/s far exceeds its attributed ISRs, the HLT is returning
+// with NO guest ISR — KVM resuming the vCPU on a host-side event (host
+// HZ tick) past the emulated HLT. That is a QEMU/KVM artifact, not a
 // bare-metal idle bug. On real HW every wake must attribute to a cause.
-pub const WAKE_CAUSES: usize = 6;
-pub const WAKE_TIMER: usize = 0;        // 100 Hz PIT / APIC timer ISR
-pub const WAKE_KEYBOARD: usize = 1;     // keyboard IRQ
-pub const WAKE_MWAIT_WORK: usize = 2;   // MWAIT woke → found a task
-pub const WAKE_MWAIT_EMPTY: usize = 3;  // MWAIT woke → empty queue (churn)
-pub const WAKE_HLT_FALLBACK: usize = 4; // sti;hlt;cli fallback returned
-pub const WAKE_NPK_SLEEP: usize = 5;    // npk_sleep HLT returned
+pub const WAKE_CAUSES: usize = 4;
+pub const WAKE_TIMER: usize = 0;        // 100 Hz PIT / APIC timer ISR (Core 0)
+pub const WAKE_KEYBOARD: usize = 1;     // keyboard IRQ (Core 0)
+pub const WAKE_HLT_FALLBACK: usize = 2; // worker idle sti;hlt;cli returned
+pub const WAKE_NPK_SLEEP: usize = 3;    // npk_sleep HLT returned
 
 /// Short labels for the `cores` breakdown, indexed by cause.
-pub const WAKE_LABELS: [&str; WAKE_CAUSES] =
-    ["timer", "kbd", "mwait-work", "mwait-empty", "hlt-fb", "npk-sleep"];
+pub const WAKE_LABELS: [&str; WAKE_CAUSES] = ["timer", "kbd", "hlt-fb", "npk-sleep"];
 
 static CORE_WAKE: [[AtomicU64; WAKE_CAUSES]; 256] = {
     const Z: AtomicU64 = AtomicU64::new(0);
@@ -557,9 +552,14 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         core::hint::spin_loop();
     }
 
+    // Arm this core's own 100 Hz LAPIC timer so its idle HLT has a wake
+    // source independent of the host (IRQs route to the BSP only). This
+    // is what lets us idle with plain HLT — which VMEXITs so KVM frees
+    // the host core — instead of MWAIT-on-cacheline (needs cpu-pm=on).
+    crate::interrupts::arm_worker_timer();
+
     // Enter scheduler loop
     let cid = core_id as usize;
-    let use_mwait = HAS_MWAIT.load(Ordering::Relaxed);
 
     loop {
         // Carved out of the work-stealing pool for the microvm
@@ -598,53 +598,19 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // Before sleep: update usage stats (delta covers work + idle since last call)
         update_core_freq(cid);
 
-        // No work — sleep efficiently
-        if use_mwait {
-            // MONITOR/MWAIT: all APs watch the GLOBAL WORK_AVAILABLE flag.
-            // When BSP (or any core) spawns work, it writes 1 → hardware wakes us.
-            let flag_ptr = super::scheduler::wake_flag_ptr();
-            super::scheduler::clear_wake();
-
-            // SAFETY: MONITOR/MWAIT are safe ring-0 instructions.
-            unsafe {
-                core::arch::asm!(
-                    "monitor",
-                    in("rax") flag_ptr,
-                    in("ecx") 0u32,
-                    in("edx") 0u32,
-                );
-                // Re-check after MONITOR (avoid missed-wakeup race).
-                // If a task arrived between clear_wake and MONITOR, execute it
-                // instead of sleeping (next_task extracts from queue — must not drop!).
-                if let Some(task) = super::scheduler::next_task(cid) {
-                    CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
-                    start_work(cid);
-                    (task.func)(task.arg);
-                    flush_busy(cid);
-                    CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
-                } else {
-                    let t0 = crate::interrupts::rdtsc();
-                    core::arch::asm!(
-                        "mwait",
-                        in("eax") 0x01u32, // C1E — clock gated, frequency drops
-                        in("ecx") 0u32,
-                    );
-                    record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
-                    // Did we wake to real work or to a churned cacheline?
-                    let cause = if super::scheduler::queue_len(cid) > 0 {
-                        WAKE_MWAIT_WORK
-                    } else {
-                        WAKE_MWAIT_EMPTY
-                    };
-                    record_wake(cid, cause);
-                }
-            }
-        } else {
-            // Fallback: HLT with interrupts enabled (wakes on any interrupt)
-            let t0 = crate::interrupts::rdtsc();
-            unsafe { core::arch::asm!("sti; hlt; cli"); }
-            record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
-            record_wake(cid, WAKE_HLT_FALLBACK);
-        }
+        // No work — idle with plain HLT (not MWAIT-on-cacheline). HLT
+        // VMEXITs under KVM → the host scheduler deschedules the idle
+        // vCPU thread → the host core actually idles (no more 100%/turbo
+        // from cpu-pm=on passthrough). The per-core worker timer (armed
+        // above) wakes us within ~10 ms to re-check the run-queue, so a
+        // task spawned just after the check above is picked up at the
+        // next tick (≤10 ms latency; a targeted IPI wake is a future
+        // optimization). sti-shadow arms HLT before the IRQ lands; the
+        // trailing cli restores the IF=0 the loop body runs under.
+        let t0 = crate::interrupts::rdtsc();
+        // SAFETY: ring-0 idle; wakes on the per-core timer (or any IRQ).
+        unsafe { core::arch::asm!("sti; hlt; cli"); }
+        record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
+        record_wake(cid, WAKE_HLT_FALLBACK);
     }
 }

@@ -7,7 +7,7 @@
 //! APs that spawn sub-tasks push to their own deque.
 //! Global WORK_AVAILABLE flag wakes all sleeping APs via MONITOR/MWAIT.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 // ── Task ───────────────────────────────────────────────────────
 
@@ -188,18 +188,6 @@ static TASKS_COMPLETED: AtomicU64 = AtomicU64::new(0);
 /// Total steals performed
 static STEALS: AtomicU64 = AtomicU64::new(0);
 
-/// Global wake signal — ALL APs MONITOR this address.
-/// Set to 1 when new work is available, cleared by APs after waking.
-/// Aligned to cache line to avoid false sharing.
-#[repr(align(64))]
-pub struct WakeSignal {
-    pub flag: AtomicU32,
-}
-
-pub static WORK_AVAILABLE: WakeSignal = WakeSignal {
-    flag: AtomicU32::new(0),
-};
-
 /// Simple PRNG for random victim selection
 static STEAL_RNG: AtomicU64 = AtomicU64::new(0x5851_F42D_4C95_7F2D);
 
@@ -241,7 +229,8 @@ pub fn spawn(priority: Priority, func: fn(u64), arg: u64) {
     let pushed = unsafe { DEQUES[0].push(task) };
     if pushed {
         TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
-        WORK_AVAILABLE.flag.store(1, Ordering::Release);
+        // Idle workers pick this up at their next 100 Hz worker-timer
+        // tick (≤10 ms) — see per_core::smp_ap_entry. No wake flag needed.
     } else {
         func(arg);
     }
@@ -259,9 +248,7 @@ pub fn spawn_local(core_id: usize, priority: Priority, func: fn(u64), arg: u64) 
 
     // SAFETY: core_id is the caller's own core → owner, safe to push
     let pushed = unsafe { DEQUES[core_id].push(task) };
-    if pushed {
-        WORK_AVAILABLE.flag.store(1, Ordering::Release);
-    } else {
+    if !pushed {
         func(arg);
     }
 }
@@ -292,16 +279,6 @@ pub fn next_task(core_id: usize) -> Option<Task> {
     }
 
     None
-}
-
-/// Address of the global wake flag (for MONITOR instruction)
-pub fn wake_flag_ptr() -> *const AtomicU32 {
-    &WORK_AVAILABLE.flag as *const AtomicU32
-}
-
-/// Clear global wake flag (called by AP after waking)
-pub fn clear_wake() {
-    WORK_AVAILABLE.flag.store(0, Ordering::Relaxed);
 }
 
 /// Record a completed task (called after task.func returns)

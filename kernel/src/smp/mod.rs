@@ -99,8 +99,7 @@ pub fn init() {
         per_core::init_dedicated_vm_core(online as usize);
         per_core::start_scheduler();
 
-        let wakeup = if per_core::has_mwait() { "MONITOR/MWAIT" } else { "HLT" };
-        kprintln!("[npk] smp: scheduler ready (work-stealing, {})", wakeup);
+        kprintln!("[npk] smp: scheduler ready (work-stealing, HLT idle + per-core 100Hz timer)");
     }
 }
 

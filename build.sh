@@ -385,17 +385,17 @@ run_qemu_generic() {
     local -a accel_args
     case "$accel" in
         kvm)
-            # cpu-pm=on (MWAIT passthrough) is REQUIRED, not cosmetic: WASM
-            # apps block in MWAIT on worker cores, which have no per-core
-            # wake source yet (wasm.rs npk_sleep note). With passthrough the
-            # MONITOR cacheline-watch works on real HW → workers wake → apps
-            # run. Without it KVM emulates MWAIT as a no-op and workers never
-            # wake → bar.wasm/dock.wasm/etc. don't start and the native
-            # ShadeBar fallback shows ("steinalte Bar"). Downside: an idle
-            # vCPU thread stays ~100% R in host htop (guest `cores` correctly
-            # reads 1% busy). Fix the wake source in the fiber rework, then
-            # this flag can go. DO NOT drop it before then.
-            accel_args=(-enable-kvm -overcommit cpu-pm=on -cpu host,+invtsc)
+            # No cpu-pm=on: as of v0.186.0 worker APs arm their own 100 Hz
+            # LAPIC timer (interrupts.rs arm_worker_timer) and idle with
+            # plain HLT instead of MWAIT-on-the-WORK_AVAILABLE-cacheline.
+            # cpu-pm=on used to be required because that MONITOR watch only
+            # works with real-HW MWAIT passthrough — but passthrough HLT/
+            # MWAIT never VMEXITs, so KVM never descheduled the idle vCPU
+            # threads and ALL host cores sat at 100%/turbo while the guest
+            # idled. Plain HLT VMEXITs → KVM blocks the idle thread → host
+            # cores actually idle, and the per-core timer wakes the workers
+            # so apps still start (no more native-ShadeBar fallback).
+            accel_args=(-enable-kvm -cpu host,+invtsc)
             ;;
         tcg-intel)
             accel_args=(-accel tcg -cpu Skylake-Server)
