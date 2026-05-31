@@ -484,8 +484,13 @@ const EXIT_INVALID: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 /// Outcome of one bounded slice of guest execution (SVM).
 pub enum SliceOutcome {
-    /// Budget exhausted, guest still running — caller may re-enter.
+    /// Budget exhausted, guest still running — caller may re-enter
+    /// immediately (busy guest).
     StillRunning,
+    /// Guest is idle (halted / waiting on its timer) — caller should
+    /// re-enter but may host-idle first so the dedicated core doesn't
+    /// spin VMRUN while the guest has nothing to do.
+    Idle,
     /// Guest exited (HLT / shutdown / NPF / idle / cap).
     Exited(vmcb::LaunchOutcome),
 }
@@ -666,7 +671,7 @@ pub fn run_linux(
     let result = loop {
         match ctx.run_slice(u32::MAX) {
             Ok(SliceOutcome::Exited(o)) => break Ok(o),
-            Ok(SliceOutcome::StillRunning) => continue,
+            Ok(SliceOutcome::StillRunning) | Ok(SliceOutcome::Idle) => continue,
             Err(e) => break Err(e),
         }
     };
@@ -963,10 +968,33 @@ impl VmContext {
             self.reinject = eii;
         }
 
-        if exit != EXIT_INTR { self.consecutive_idle = 0; }
+        // EXIT_HLT counts as idle too (guest halted waiting for an IRQ),
+        // so it shares the EXIT_INTR keepalive path below.
+        if exit != EXIT_INTR && exit != EXIT_HLT { self.consecutive_idle = 0; }
 
         match exit {
-            EXIT_INTR => {
+            EXIT_INTR | EXIT_HLT => {
+                // Guest executed STI;HLT (idle, waiting for its next IRQ).
+                // A headless test guest means "done" → exit. A window-bound
+                // app idling is normal: fall through to the same inject-due-
+                // IRQ + idle-accounting path as a host-timer EXIT_INTR so the
+                // guest's timer/input/net wake it; never kill it on idle. The
+                // injected IRQ (EVENT_INJ) is delivered at the HLT, so the
+                // guest resumes past it — no manual RIP advance needed. The
+                // dedicated core host-idles between ticks via SliceOutcome::Idle.
+                if exit == EXIT_HLT && crate::microvm::vm_window() == 0 {
+                    self.serial.flush();
+                    kprintln!("[svm] guest HLT after {} VM-exits — exiting", self.iter);
+                    last_outcome = Some(outcome);
+                    break;
+                }
+                // HLT is an intercepted instruction: advance RIP past it
+                // (like KVM's skip_emulated_instruction) so that once an
+                // injected IRQ's ISR returns, the guest continues into its
+                // need_resched check and schedules — not back onto the HLT.
+                if exit == EXIT_HLT {
+                    advance_rip(&mut self.vmcb);
+                }
                 // Guest timer tick. The microvm has no PIT/LAPIC
                 // timer event source, so the only thing that ever
                 // wakes a time-blocked task (nanosleep/timerfd/poll
@@ -1088,18 +1116,13 @@ impl VmContext {
                     last_outcome = Some(outcome);
                     break;
                 }
-                // Guest idle → return Core 0 immediately (StillRunning;
-                // guest stays alive). See vmx mirror.
+                // Guest idle → yield, signalling Idle so the dedicated
+                // core host-idles before re-entering (no VMRUN spin) and
+                // Core 0 returns to the shell. Guest stays alive.
                 if self.consecutive_idle >= IDLE_YIELD {
-                    return Ok(SliceOutcome::StillRunning);
+                    return Ok(SliceOutcome::Idle);
                 }
                 last_outcome = Some(outcome);
-            }
-            EXIT_HLT => {
-                self.serial.flush();
-                kprintln!("[svm] guest HLT after {} VM-exits", self.iter);
-                last_outcome = Some(outcome);
-                break;
             }
             EXIT_CPUID => {
                 let leaf = self.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;

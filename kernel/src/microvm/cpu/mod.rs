@@ -430,13 +430,15 @@ pub fn vm_poll_slice() {
 
     let finished: Option<Result<LaunchOutcome, &'static str>> = match slot.as_mut() {
         None => return,
+        // Cooperative Core-0 path: Idle == StillRunning here — just hand
+        // Core 0 back to the shell, whose own idle HLT throttles the loop.
         Some(ActiveVm::Vmx(ctx)) => match ctx.run_slice(SLICE_BUDGET) {
-            Ok(vmx::SliceOutcome::StillRunning) => None,
+            Ok(vmx::SliceOutcome::StillRunning) | Ok(vmx::SliceOutcome::Idle) => None,
             Ok(vmx::SliceOutcome::Exited(o)) => Some(Ok(o)),
             Err(e) => Some(Err(e)),
         },
         Some(ActiveVm::Svm(ctx)) => match ctx.run_slice(SLICE_BUDGET) {
-            Ok(svm::SliceOutcome::StillRunning) => None,
+            Ok(svm::SliceOutcome::StillRunning) | Ok(svm::SliceOutcome::Idle) => None,
             Ok(svm::SliceOutcome::Exited(o)) => Some(Ok(o)),
             Err(e) => Some(Err(e)),
         },
@@ -515,6 +517,16 @@ pub fn vm_core_serve() {
                         }
                         match ctx.run_slice(SLICE_BUDGET) {
                             Ok(vmx::SliceOutcome::StillRunning) => continue,
+                            Ok(vmx::SliceOutcome::Idle) => {
+                                // Guest idle — host-idle until the next
+                                // dedicated-VM-timer tick (~1 ms) instead of
+                                // spinning VMRUN, so this host core actually
+                                // sleeps while the guest has nothing to do.
+                                // SAFETY: ring-0; the dedicated VM timer
+                                // (armed in vm_core_serve) wakes us.
+                                unsafe { core::arch::asm!("sti; hlt") };
+                                continue;
+                            }
                             Ok(vmx::SliceOutcome::Exited(o)) => {
                                 crate::kprintln!(
                                     "[microvm] guest exited — reason {:#x} qual {:#x}",
@@ -549,6 +561,16 @@ pub fn vm_core_serve() {
                         }
                         match ctx.run_slice(SLICE_BUDGET) {
                             Ok(svm::SliceOutcome::StillRunning) => continue,
+                            Ok(svm::SliceOutcome::Idle) => {
+                                // Guest idle — host-idle until the next
+                                // dedicated-VM-timer tick (~1 ms) instead of
+                                // spinning VMRUN, so this host core actually
+                                // sleeps while the guest has nothing to do.
+                                // SAFETY: ring-0; the dedicated VM timer
+                                // (armed in vm_core_serve) wakes us.
+                                unsafe { core::arch::asm!("sti; hlt") };
+                                continue;
+                            }
                             Ok(svm::SliceOutcome::Exited(o)) => {
                                 crate::kprintln!(
                                     "[microvm] guest exited — reason {:#x} qual {:#x}",

@@ -358,8 +358,13 @@ fn run_substrate_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
 
 /// Outcome of one bounded slice of guest execution.
 pub enum SliceOutcome {
-    /// Budget exhausted, guest still running — caller may re-enter.
+    /// Budget exhausted, guest still running — caller may re-enter
+    /// immediately (busy guest).
     StillRunning,
+    /// Guest is idle (halted / waiting on its timer) — caller should
+    /// re-enter but may host-idle first so the dedicated core doesn't
+    /// spin VMRUN while the guest has nothing to do.
+    Idle,
     /// Guest exited (HLT / panic / triple-fault / idle / cap).
     Exited(vmcs::LaunchOutcome),
 }
@@ -671,7 +676,7 @@ pub fn run_linux(
     let result = loop {
         match ctx.run_slice(u32::MAX) {
             Ok(SliceOutcome::Exited(o)) => break Ok(o),
-            Ok(SliceOutcome::StillRunning) => continue,
+            Ok(SliceOutcome::StillRunning) | Ok(SliceOutcome::Idle) => continue,
             Err(e) => break Err(e),
         }
     };
@@ -1092,8 +1097,9 @@ impl VmContext {
 
         // Reset idle-counter on any non-timer-tick activity. The
         // counter only progresses on a clean run of pure reason-1
-        // exits (= guest sitting in pause(2)).
-        if basic != 1 {
+        // exits (= guest sitting in pause(2)) or HLT (= guest halted
+        // waiting for its next IRQ — shares the keepalive path).
+        if basic != 1 && basic != 12 {
             self.consecutive_idle = 0;
         }
 
@@ -1154,7 +1160,28 @@ impl VmContext {
                 last_outcome = Some(outcome);
                 break;
             }
-            1 => {
+            1 | 12 => {
+                // reason 12 = HLT: guest executed STI;HLT (idle, waiting
+                // for its next IRQ). A headless test guest means "done" →
+                // exit; a window-bound app idling is normal → fall through
+                // to the same inject-due-IRQ + idle-accounting path as a
+                // host-timer external interrupt (the injected IRQ is
+                // delivered at the HLT, so the guest resumes past it). The
+                // dedicated core host-idles between ticks via Idle.
+                if basic == 12 && crate::microvm::vm_window() == 0 {
+                    self.serial.flush();
+                    kprintln!("[vmx] guest HLT after {} VM-exits — exiting", self.iter);
+                    self.io_stats.dump();
+                    last_outcome = Some(outcome);
+                    break;
+                }
+                // HLT is an intercepted instruction: advance RIP past it
+                // (like KVM's skip_emulated_instruction) so that once an
+                // injected IRQ's ISR returns, the guest continues into its
+                // need_resched check and schedules — not back onto the HLT.
+                if basic == 12 {
+                    vmcs::advance_guest_rip()?;
+                }
                 // External interrupt — host IRQ that arrived during
                 // guest run. The `sti` at the tail of run_guest_once
                 // already let the host IDT dispatch it; just resume.
@@ -1314,22 +1341,16 @@ impl VmContext {
                     last_outcome = Some(outcome);
                     break;
                 }
-                // Guest idle → give Core 0 back NOW (StillRunning, not
-                // Exited — the guest stays alive). consecutive_idle
-                // persists in the VmContext across yields, so the
-                // unwindowed idle-exit above still triggers once it
+                // Guest idle → yield as Idle (not Exited — guest stays
+                // alive; not StillRunning — so the dedicated core host-
+                // idles before re-entering instead of spinning VMRUN).
+                // consecutive_idle persists in the VmContext across yields,
+                // so the unwindowed idle-exit above still triggers once it
                 // reaches IDLE_THRESHOLD over many yield cycles.
                 if self.consecutive_idle >= IDLE_YIELD {
-                    return Ok(SliceOutcome::StillRunning);
+                    return Ok(SliceOutcome::Idle);
                 }
                 last_outcome = Some(outcome);
-            }
-            12 => {
-                self.serial.flush();
-                kprintln!("[microvm] guest HLT after {} VM-exits", self.iter);
-                self.io_stats.dump();
-                last_outcome = Some(outcome);
-                break;
             }
             10 => {
                 // CPUID — VMX always exits on CPUID. Pass through
