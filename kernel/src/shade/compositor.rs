@@ -311,6 +311,15 @@ impl Compositor {
         // window via close_window. (Session/terminal-slot leak for
         // promoted widgets is pre-existing — a separate follow-up.)
         if pid != 0 { crate::process::exit(pid); }
+        // Re-tile: the promoted window kept whatever geometry it had as a
+        // terminal (often fullscreen, if it was the only window when its
+        // terminal was created). Without this, launching a second app from
+        // the dock left the first app fullscreen and the second stacked
+        // behind it instead of splitting — promote is the only window-
+        // producing path that wasn't re-tiling. Overlay/panel apps (drun,
+        // dock, bar) call set_overlay/set_panel right after, which un-tiles
+        // them again, so this is a no-op for them.
+        self.retile();
         self.needs_full_redraw = true;
         Some(id)
     }
