@@ -430,6 +430,14 @@ pub fn request_render() {
     DEFERRED_RENDER.store(true, Ordering::Relaxed);
 }
 
+/// Request a PARTIAL render — only dirty windows get re-rendered + their
+/// own rects blitted, not the whole 4K screen. Used by the per-move hover
+/// re-render so dragging the cursor over a hover-reactive widget repaints
+/// just that window instead of recompositing + full-blitting everything.
+pub fn request_window_render() {
+    WINDOWS_DIRTY.store(true, Ordering::Relaxed);
+}
+
 /// Process a shade action (called from intent loop).
 pub fn handle_action(action: input::ShadeAction) {
     use input::ShadeAction;
@@ -780,16 +788,20 @@ pub fn poll_render() {
         render_frame();
     }
 
-    if !terminal::is_dirty() { return; }
-    terminal::clear_dirty();
+    let term_dirty = terminal::is_dirty();
+    let win_dirty = WINDOWS_DIRTY.swap(false, Ordering::Relaxed);
+    if !term_dirty && !win_dirty { return; }
+    if term_dirty { terminal::clear_dirty(); }
 
     // Partial render: only re-render dirty or focused windows (not all).
     // Focus change marks old+new windows dirty. Terminal output marks focused dirty.
+    let mut surface_visible = false;
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            surface_visible = comp.any_surface_visible();
             // Propagate per-terminal dirty flags to window dirty flags
             for win in &mut comp.windows {
                 if terminal::is_term_dirty(win.terminal_idx as usize) {
@@ -869,9 +881,21 @@ pub fn poll_render() {
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
                     comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
-                cursor::draw_cursor_on_shadow(shadow, info);
+                // Over a live Surface tile the cursor rides the blit (baked
+                // into the shadow). On the plain desktop the shadow stays
+                // clean — the cursor is drawn as an MMIO overlay after all
+                // window rects are blitted (see below).
+                if surface_visible {
+                    cursor::draw_cursor_on_shadow(shadow, info);
+                }
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
             }
+        }
+
+        // Desktop mode: cursor overlay on top of the freshly-blitted window
+        // rects (shadow stayed clean, so a later pure move can restore from it).
+        if !surface_visible {
+            cursor::redraw_overlay_lockfree_inner(fb);
         }
     });
     return;
@@ -949,6 +973,9 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set by handle_mouse when a full scene redraw is needed but deferred.
 /// poll_render picks this up AFTER processing all mouse events.
 static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
+/// Partial-render request: only dirty windows repaint (their rects blit),
+/// not the full screen. Set by request_window_render (hover re-render).
+static WINDOWS_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).

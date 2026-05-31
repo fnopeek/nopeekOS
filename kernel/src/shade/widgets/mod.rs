@@ -476,7 +476,15 @@ fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
         s.popovers    = popovers;
         s.hover_path  = hover_path.to_vec();
     }
-    mark_dirty(window_id);
+    // Hover re-render touches only this one window — repaint it via the
+    // PARTIAL path (its rect blits), not a full-screen recomposite. That
+    // keeps dragging the cursor over a hover-reactive widget cheap.
+    crate::shade::with_compositor(|c| {
+        if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == window_id) {
+            win.dirty = true;
+        }
+    });
+    crate::shade::request_window_render();
 }
 
 /// Helper: mark the window dirty + request a render. Used by every
