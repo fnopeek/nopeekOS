@@ -27,7 +27,46 @@ pub mod svm;
 pub mod vmx;
 
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicU64, Ordering};
+
+// ── VM-exit reason histogram (diagnosis) ───────────────────────────
+//
+// Why is the dedicated VM core busy? Both backends bump a bucket per
+// guest exit so `cores` can show the mix while a VM runs: lots of `mmio`
+// = the guest is rendering (legit busy); `hlt`/`intr` dominating = idle
+// spin; etc. Backend-agnostic categories — each backend maps its own
+// exit codes onto these.
+pub const VMEXIT_BUCKETS: usize = 7;
+pub const VMX_INTR: usize = 0;  // ext-interrupt / timer
+pub const VMX_HLT: usize = 1;
+pub const VMX_MMIO: usize = 2;  // NPF / EPT-violation (incl. virtio MMIO)
+pub const VMX_IO: usize = 3;
+pub const VMX_MSR: usize = 4;
+pub const VMX_CPUID: usize = 5;
+pub const VMX_OTHER: usize = 6;
+pub const VMEXIT_LABELS: [&str; VMEXIT_BUCKETS] =
+    ["intr", "hlt", "mmio", "io", "msr", "cpuid", "other"];
+
+static VM_EXIT_COUNTS: [AtomicU64; VMEXIT_BUCKETS] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; VMEXIT_BUCKETS]
+};
+
+/// Bump the exit-reason bucket for one guest exit.
+pub fn record_vm_exit(bucket: usize) {
+    if bucket < VMEXIT_BUCKETS {
+        VM_EXIT_COUNTS[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Snapshot all VM-exit buckets (double-sample to get a rate).
+pub fn vm_exit_snapshot() -> [u64; VMEXIT_BUCKETS] {
+    let mut out = [0u64; VMEXIT_BUCKETS];
+    for i in 0..VMEXIT_BUCKETS {
+        out[i] = VM_EXIT_COUNTS[i].load(Ordering::Relaxed);
+    }
+    out
+}
 
 // ── Guest/host FPU (XSAVE) swap ────────────────────────────────────
 //
