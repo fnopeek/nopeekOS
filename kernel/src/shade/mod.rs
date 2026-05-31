@@ -283,57 +283,6 @@ fn render_frame_mode(cursor_only: bool) {
     }
 }
 
-/// Repaint only a hover-damage rect of one window: recopy those rows from
-/// the window's (already re-rasterised) scene into the front buffer + blit
-/// just that rect — no comp.render, no bg memcpy, no full blit. The cursor
-/// is taken down / re-baked around it so it stays correct + flicker-free.
-fn render_hover_damage(window_id: u32, dx: i32, dy: i32, dw: u32, dh: u32) {
-    framebuffer::with_fb(|fb| {
-        let info = *fb.info();
-        let front = fb.front_ptr();
-        let pitch = info.pitch as usize;
-        let sw = info.width as i32;
-        let sh = info.height as i32;
-        let old = cursor::saved_pos();
-        let had_old = cursor::save_valid();
-
-        cursor::restore_under(front, &info);
-
-        // Recopy the damaged rows of the window's scene into the front buffer.
-        widgets::with_scene(window_id, |scene| {
-            let local_x = dx - scene.origin_x;
-            if local_x < 0 { return; }
-            for row in 0..dh as i32 {
-                let sy = dy + row;
-                let ly = sy - scene.origin_y;
-                if ly < 0 || ly >= scene.height as i32 || sy < 0 || sy >= sh { continue; }
-                let copy_w = (dw as i32)
-                    .min(scene.width as i32 - local_x)
-                    .min(sw - dx);
-                if copy_w <= 0 { continue; }
-                let src = (ly as usize) * scene.width as usize + local_x as usize;
-                let dst_off = sy as usize * pitch + dx.max(0) as usize * 4;
-                // SAFETY: bounds-checked rows; src/dst are valid for copy_w u32s.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        scene.pixels.as_ptr().add(src),
-                        front.add(dst_off) as *mut u32,
-                        copy_w as usize,
-                    );
-                }
-            }
-        });
-
-        cursor::save_under_and_bake(front, &info);
-
-        // Blit the damage rect + the cursor's bounding box (both small).
-        if dw > 0 && dh > 0 {
-            framebuffer::blit_rect(fb, dx.max(0) as u32, dy.max(0) as u32, dw, dh);
-        }
-        blit_cursor_bbox(fb, old, had_old);
-    });
-}
-
 /// Blit the bounding box of the old ∪ new cursor position from the front
 /// buffer to MMIO — one shot, so the move is atomic (no flicker). The old
 /// position in the front buffer is clean scene again (cursor restored +
@@ -501,30 +450,6 @@ pub fn take_deferred_render() -> bool {
 /// MMIO work still runs on Core 0.
 pub fn request_render() {
     DEFERRED_RENDER.store(true, Ordering::Relaxed);
-}
-
-/// Request a HOVER-DAMAGE render: only the given screen rect of `window_id`
-/// (the rows whose hover highlight changed) is recopied from the window's
-/// scene + blitted — not the whole screen, no recomposite. The per-move
-/// repaint when the cursor crosses a hover-reactive widget (e.g. loft list
-/// rows) over a full-screen window.
-pub fn request_hover_damage(window_id: u32, x: i32, y: i32, w: u32, h: u32) {
-    HD_WID.store(window_id, Ordering::Relaxed);
-    HD_X.store(x, Ordering::Relaxed);
-    HD_Y.store(y, Ordering::Relaxed);
-    HD_W.store(w, Ordering::Relaxed);
-    HD_H.store(h, Ordering::Relaxed);
-    HD_VALID.store(true, Ordering::Relaxed);
-}
-
-fn take_hover_damage() -> Option<(u32, i32, i32, u32, u32)> {
-    if HD_VALID.swap(false, Ordering::Relaxed) {
-        Some((HD_WID.load(Ordering::Relaxed), HD_X.load(Ordering::Relaxed),
-              HD_Y.load(Ordering::Relaxed), HD_W.load(Ordering::Relaxed),
-              HD_H.load(Ordering::Relaxed)))
-    } else {
-        None
-    }
 }
 
 /// Process a shade action (called from intent loop).
@@ -876,11 +801,6 @@ pub fn poll_render() {
     if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
         render_frame();
         CURSOR_MOVED.store(false, Ordering::Relaxed);
-        let _ = take_hover_damage();
-    } else if let Some((wid, dx, dy, dw, dh)) = take_hover_damage() {
-        // Hover highlight changed on one window → repaint only those rows.
-        render_hover_damage(wid, dx, dy, dw, dh);
-        CURSOR_MOVED.store(false, Ordering::Relaxed);
     } else if !terminal::is_dirty() && CURSOR_MOVED.swap(false, Ordering::Relaxed) {
         // Pure mouse move, nothing else changed → save-under cursor move.
         render_frame_cursor_only();
@@ -1070,13 +990,6 @@ static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 /// A pure mouse move occurred (no scene change). poll_render moves the
 /// cursor via save-under (no recomposite) for it — cheap, flicker-free.
 static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
-/// Pending hover-damage rect (see request_hover_damage).
-static HD_VALID: AtomicBool = AtomicBool::new(false);
-static HD_WID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static HD_X: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-static HD_Y: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-static HD_W: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static HD_H: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).

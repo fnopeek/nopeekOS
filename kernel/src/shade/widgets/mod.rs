@@ -409,38 +409,7 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
             scenes.get(&window_id).map(|s| s.has_pseudo).unwrap_or(false)
         };
         if needs_rerender {
-            // Compute the DAMAGE rect (old ∪ new hovered node, full content
-            // width × their Y-span) before re-rasterising, so we repaint
-            // only the affected rows instead of the whole 4K screen. That's
-            // the per-move hot path when the cursor crosses a hover-reactive
-            // widget (e.g. loft list rows) — full-screen recomposite there
-            // was the bare-metal lag with a window open.
-            let damage = {
-                let scenes = SCENES.lock();
-                scenes.get(&window_id).and_then(|s| {
-                    let old_r = node_rect_at(&s.layout_tree, &s.hover_path);
-                    let new_r = node_rect_at(&s.layout_tree, &new_path);
-                    match (old_r, new_r) {
-                        (None, None) => None,
-                        (a, b) => {
-                            let mut y0 = i32::MAX;
-                            let mut y1 = i32::MIN;
-                            for r in [a, b].into_iter().flatten() {
-                                y0 = y0.min(r.y);
-                                y1 = y1.max(r.y + r.h as i32);
-                            }
-                            Some((s.origin_x, y0, s.width, (y1 - y0).max(0) as u32))
-                        }
-                    }
-                })
-            };
-            rerender_scene_pixels(window_id, &new_path);
-            match damage {
-                Some((dx, dy, dw, dh)) if dh > 0 => {
-                    crate::shade::request_hover_damage(window_id, dx, dy, dw, dh);
-                }
-                _ => mark_dirty(window_id), // fallback: full repaint
-            }
+            rerender_with_state(window_id, &new_path);
         } else {
             // Just bump the cached path so the next move diffs cleanly.
             if let Some(s) = SCENES.lock().get_mut(&window_id) {
@@ -514,16 +483,6 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
 fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
     rerender_scene_pixels(window_id, hover_path);
     mark_dirty(window_id);
-}
-
-/// Screen rect of the layout node addressed by `path` (child-index chain
-/// from the root). `None` if the path doesn't resolve.
-fn node_rect_at(root: &layout::LayoutNode, path: &[u32]) -> Option<abi::Rect> {
-    let mut cur = root;
-    for &i in path {
-        cur = cur.children.get(i as usize)?;
-    }
-    Some(cur.rect)
 }
 
 /// Helper: mark the window dirty + request a render. Used by every
