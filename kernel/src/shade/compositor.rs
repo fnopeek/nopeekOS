@@ -639,6 +639,12 @@ impl Compositor {
     }
 
     /// Close a window by ID.
+    /// Is `id` a panel (dock or bar)? Panels are managed chrome — they
+    /// never hold focus and must not be closed by Mod+Q.
+    pub fn is_panel(&self, id: WindowId) -> bool {
+        self.dock.map(|d| d.id) == Some(id) || self.bar_window == Some(id)
+    }
+
     pub fn close_window(&mut self, id: WindowId) {
         // If the dock app's window goes away, forget the dock so the
         // reveal/tick machinery no-ops.
@@ -683,8 +689,14 @@ impl Compositor {
         self.z_order.retain(|&wid| wid != id);
 
         if self.focused == Some(id) {
-            self.focused = self.z_order.first()
-                .and_then(|&top_id| {
+            // Reassign focus to the topmost REAL window in this workspace.
+            // Panels (dock/bar) must never hold focus — otherwise closing
+            // the last app window would focus a panel, and the next Mod+Q
+            // would close the dock/bar. When only panels remain, focus is
+            // None (empty desktop) and Mod+Q no-ops.
+            self.focused = self.z_order.iter()
+                .filter(|&&wid| !self.is_panel(wid))
+                .find_map(|&top_id| {
                     self.windows.iter().find(|w| w.id == top_id && w.workspace == self.active_workspace)
                 })
                 .map(|w| w.id);

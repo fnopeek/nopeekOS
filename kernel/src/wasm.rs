@@ -1882,7 +1882,31 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 if crate::interrupts::rdtsc() >= deadline {
                     break -1;
                 }
-                core::hint::spin_loop();
+                // Don't busy-spin the worker core. The old spin_loop pinned
+                // it at 100% — invisible while cpu-pm=on made every vCPU
+                // look 100%, but now (cpu-pm dropped) an app blocked here is
+                // THE one hot host core. Mirror npk_sleep: run pending
+                // scheduler work, else HLT until the next interrupt. The
+                // per-core 100 Hz worker timer wakes us to re-check the key
+                // buffer + deadline (≤10 ms input latency). IF-preserving.
+                if let Some(task) = crate::smp::scheduler::next_task(core_id) {
+                    (task.func)(task.arg);
+                } else {
+                    let rflags: u64;
+                    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+                    let t0 = crate::interrupts::rdtsc();
+                    if rflags & (1 << 9) != 0 {
+                        // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
+                        unsafe { core::arch::asm!("hlt"); }
+                    } else {
+                        // SAFETY: enable for the HLT, then restore IF=0.
+                        unsafe { core::arch::asm!("sti; hlt; cli"); }
+                    }
+                    crate::smp::per_core::record_halt(
+                        core_id, crate::interrupts::rdtsc().saturating_sub(t0));
+                    crate::smp::per_core::record_wake(
+                        core_id, crate::smp::per_core::WAKE_NPK_SLEEP);
+                }
             };
 
             // Resume work tracking
