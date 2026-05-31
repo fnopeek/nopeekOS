@@ -19,6 +19,78 @@ const CURSOR_H: u32 = 19;
 /// Cursor bitmap size (w, h) — for callers that blit just the cursor rect.
 pub fn cursor_size() -> (u32, u32) { (CURSOR_W, CURSOR_H) }
 
+// ── Save-under cursor (no recomposite on a pure move) ───────────────────
+//
+// The render path keeps the scene in the shadow buffer with the cursor
+// BAKED in (atomic blit → no flicker). To move the cursor without
+// recompositing the whole scene we remember the clean pixels under it
+// (`SAVE_UNDER`): on a move we restore them (erase the old cursor), then
+// save + bake at the new spot and blit only the small affected region.
+// Core-0 / CONSOLE-lock serialized; the Mutex just satisfies the borrow
+// checker for the static array.
+const SU_N: usize = (CURSOR_W * CURSOR_H) as usize;
+static SAVE_UNDER: spin::Mutex<[u32; SU_N]> = spin::Mutex::new([0; SU_N]);
+static SU_X: AtomicI32 = AtomicI32::new(0);
+static SU_Y: AtomicI32 = AtomicI32::new(0);
+static SU_VALID: AtomicBool = AtomicBool::new(false);
+
+/// Position the cursor is currently baked at (the rect to erase on a move).
+pub fn saved_pos() -> (i32, i32) { (SU_X.load(Ordering::Relaxed), SU_Y.load(Ordering::Relaxed)) }
+pub fn save_valid() -> bool { SU_VALID.load(Ordering::Relaxed) }
+
+/// Save the clean pixels under the cursor's CURRENT position from `buf`,
+/// then bake the cursor there. `buf` is a shadow buffer (plain RAM).
+pub fn save_under_and_bake(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
+    if buf.is_null() || !crate::xhci::mouse_available() { return; }
+    let pitch = info.pitch as usize;
+    let sw = info.width as i32;
+    let sh = info.height as i32;
+    let (cx, cy) = atomic_pos();
+    let mut su = SAVE_UNDER.lock();
+    for row in 0..CURSOR_H as i32 {
+        let py = cy + row;
+        for col in 0..CURSOR_W as i32 {
+            let px = cx + col;
+            let idx = (row as usize) * CURSOR_W as usize + col as usize;
+            if px < 0 || px >= sw || py < 0 || py >= sh { su[idx] = 0; continue; }
+            let off = py as usize * pitch + px as usize * 4;
+            // SAFETY: bounds-checked offset into a kernel-owned shadow buffer.
+            unsafe {
+                let p = buf.add(off) as *mut u32;
+                su[idx] = *p;
+                let bmp = CURSOR_BITMAP[idx];
+                if bmp != 0 { *p = if bmp == 1 { 0x00FF_FFFF } else { 0x0000_0000 }; }
+            }
+        }
+    }
+    SU_X.store(cx, Ordering::Relaxed);
+    SU_Y.store(cy, Ordering::Relaxed);
+    SU_VALID.store(true, Ordering::Relaxed);
+}
+
+/// Restore the saved clean pixels to `buf` at the saved position — erases
+/// the baked cursor so the scene under it is intact again.
+pub fn restore_under(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
+    if buf.is_null() || !SU_VALID.load(Ordering::Relaxed) { return; }
+    let pitch = info.pitch as usize;
+    let sw = info.width as i32;
+    let sh = info.height as i32;
+    let sx = SU_X.load(Ordering::Relaxed);
+    let sy = SU_Y.load(Ordering::Relaxed);
+    let su = SAVE_UNDER.lock();
+    for row in 0..CURSOR_H as i32 {
+        let py = sy + row;
+        for col in 0..CURSOR_W as i32 {
+            let px = sx + col;
+            if px < 0 || px >= sw || py < 0 || py >= sh { continue; }
+            let idx = (row as usize) * CURSOR_W as usize + col as usize;
+            let off = py as usize * pitch + px as usize * 4;
+            // SAFETY: bounds-checked offset into a kernel-owned shadow buffer.
+            unsafe { *(buf.add(off) as *mut u32) = su[idx]; }
+        }
+    }
+}
+
 // ── Lock-free mouse position (written by Core 0, read by anyone) ──
 
 static ATOMIC_X: AtomicI32 = AtomicI32::new(0);
