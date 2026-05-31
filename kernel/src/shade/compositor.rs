@@ -851,6 +851,17 @@ impl Compositor {
         }
     }
 
+    /// True if any visible window on the active workspace is a Surface
+    /// (microvm tile). When one is present the cursor must be composited
+    /// into the shadow + carried by the full blit (atomic, no flicker over
+    /// the live 60 Hz tile). With none, the cheap MMIO cursor overlay is
+    /// used and a pure mouse move never recomposites the scene.
+    pub(crate) fn any_surface_visible(&self) -> bool {
+        self.windows.iter().any(|w|
+            w.kind == crate::shade::window::WindowKind::Surface
+            && w.visible && w.workspace == self.active_workspace)
+    }
+
     /// Recursive dwindle: assign position to first window, recurse for rest.
     fn dwindle_layout(&mut self, ids: &[WindowId],
                       x: u32, y: u32, w: u32, h: u32,
