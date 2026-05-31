@@ -462,6 +462,24 @@ pub fn vm_poll_slice() {
     }
 }
 
+/// Host-idle the dedicated core for ~one dedicated-VM-timer tick when
+/// the guest is idle (SliceOutcome::Idle), instead of spinning VMRUN.
+/// With cpu-pm dropped the HLT VMEXITs → KVM frees the host core. Records
+/// the halt so `cores` reports the dedicated core's real idle (otherwise
+/// it shows a misleading 100% busy with 0 HALTS while the guest idles).
+#[inline]
+fn idle_host_sleep() {
+    let t0 = crate::interrupts::rdtsc();
+    // SAFETY: ring-0; the dedicated VM timer (armed in vm_core_serve)
+    // wakes us within ~1 ms.
+    unsafe { core::arch::asm!("sti; hlt") };
+    if let Some(c) = crate::smp::per_core::dedicated_vm_core() {
+        crate::smp::per_core::record_halt(
+            c, crate::interrupts::rdtsc().saturating_sub(t0));
+        crate::smp::per_core::record_wake(c, crate::smp::per_core::WAKE_HLT_FALLBACK);
+    }
+}
+
 /// Dedicated-core entry point — called every iteration of the
 /// dedicated worker core's `smp_ap_entry` loop. Cheap no-op unless a
 /// launch is pending. When one is, this opens the VM **on this core**
@@ -518,13 +536,7 @@ pub fn vm_core_serve() {
                         match ctx.run_slice(SLICE_BUDGET) {
                             Ok(vmx::SliceOutcome::StillRunning) => continue,
                             Ok(vmx::SliceOutcome::Idle) => {
-                                // Guest idle — host-idle until the next
-                                // dedicated-VM-timer tick (~1 ms) instead of
-                                // spinning VMRUN, so this host core actually
-                                // sleeps while the guest has nothing to do.
-                                // SAFETY: ring-0; the dedicated VM timer
-                                // (armed in vm_core_serve) wakes us.
-                                unsafe { core::arch::asm!("sti; hlt") };
+                                idle_host_sleep();
                                 continue;
                             }
                             Ok(vmx::SliceOutcome::Exited(o)) => {
@@ -562,13 +574,7 @@ pub fn vm_core_serve() {
                         match ctx.run_slice(SLICE_BUDGET) {
                             Ok(svm::SliceOutcome::StillRunning) => continue,
                             Ok(svm::SliceOutcome::Idle) => {
-                                // Guest idle — host-idle until the next
-                                // dedicated-VM-timer tick (~1 ms) instead of
-                                // spinning VMRUN, so this host core actually
-                                // sleeps while the guest has nothing to do.
-                                // SAFETY: ring-0; the dedicated VM timer
-                                // (armed in vm_core_serve) wakes us.
-                                unsafe { core::arch::asm!("sti; hlt") };
+                                idle_host_sleep();
                                 continue;
                             }
                             Ok(svm::SliceOutcome::Exited(o)) => {
