@@ -393,6 +393,8 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
 
 extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     let tick = TICKS.fetch_add(1, Ordering::Relaxed);
+    // Wake attribution: IRQ0 fires on the BSP (Core 0).
+    crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     // Drain USB events from interrupt context (try_lock, never blocks)
     crate::xhci::poll_events_irq();
     // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
@@ -408,6 +410,8 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
+    // Wake attribution: IRQ1 fires on the BSP (Core 0).
+    crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_KEYBOARD);
     crate::keyboard::irq_handler();
     unsafe { pic_eoi(1); }
 }
@@ -416,6 +420,8 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
 /// Same function as PIT timer: tick counter + USB event drain.
 extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
     let tick = TICKS.fetch_add(1, Ordering::Relaxed);
+    // Wake attribution: the APIC timer is armed only on the BSP (Core 0).
+    crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     crate::xhci::poll_events_irq();
     // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
     let freq = TSC_FREQ.load(Ordering::Relaxed);
