@@ -16,6 +16,9 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, 
 const CURSOR_W: u32 = 12;
 const CURSOR_H: u32 = 19;
 
+/// Cursor bitmap size (w, h) — for callers that blit just the cursor rect.
+pub fn cursor_size() -> (u32, u32) { (CURSOR_W, CURSOR_H) }
+
 // ── Lock-free mouse position (written by Core 0, read by anyone) ──
 
 static ATOMIC_X: AtomicI32 = AtomicI32::new(0);

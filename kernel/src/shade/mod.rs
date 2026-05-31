@@ -252,19 +252,61 @@ pub fn force_redraw() {
 
 /// Draw the entire compositor state to the framebuffer.
 pub fn render_frame() {
+    render_frame_mode(false);
+}
+
+/// Recompose the scene + blit ONLY the cursor's damage rects (old ∪ new
+/// position). For a pure mouse move: the scene is recomposed (cheap RAM
+/// work, with the cursor baked in) but only the two ~12×19 cursor rects
+/// reach MMIO — no 33 MB full-screen blit (the bare-metal bottleneck), and
+/// because the cursor is part of the blitted pixels the move is atomic →
+/// no flicker. QEMU is unaffected (it recomposed fully before too).
+fn render_frame_cursor_only() {
+    render_frame_mode(true);
+}
+
+fn render_frame_mode(cursor_only: bool) {
     if layers_usable() {
-        render_frame_layered();
+        render_frame_layered(cursor_only);
     } else {
-        render_frame_legacy();
+        render_frame_legacy(cursor_only);
     }
 }
 
-/// Layer-based render with double-buffer: render to back, swap, blit from front.
-/// Cursor is composed INTO the back shadow as the final layer so the
-/// shadow→MMIO blit carries it atomically (no post-blit redraw,
-/// no blit-vs-cursor race → no flicker over high-frequency surfaces
-/// like the microvm browser tile).
-fn render_frame_layered() {
+/// Blit the cursor damage region (current + previous position) from the
+/// front buffer to MMIO. Front at the previous position is clean scene
+/// (the cursor is now at the current position) → blitting it erases the
+/// old cursor; blitting the current rect draws the new one. Two small rects.
+fn blit_cursor_damage(fb: &framebuffer::FbConsole) {
+    let (cw, ch) = cursor::cursor_size();
+    let (cx, cy) = cursor::atomic_pos();
+    framebuffer::blit_rect(fb, cx.max(0) as u32, cy.max(0) as u32, cw, ch);
+    if PREV_CUR_DRAWN.load(Ordering::Relaxed) {
+        let px = PREV_CUR_X.load(Ordering::Relaxed);
+        let py = PREV_CUR_Y.load(Ordering::Relaxed);
+        if px != cx || py != cy {
+            framebuffer::blit_rect(fb, px.max(0) as u32, py.max(0) as u32, cw, ch);
+        }
+    }
+    PREV_CUR_X.store(cx, Ordering::Relaxed);
+    PREV_CUR_Y.store(cy, Ordering::Relaxed);
+    PREV_CUR_DRAWN.store(true, Ordering::Relaxed);
+}
+
+/// Record that a full blit just put the cursor on MMIO at its current pos
+/// (so the next cursor-only move knows which rect to erase).
+fn mark_cursor_blitted() {
+    let (cx, cy) = cursor::atomic_pos();
+    PREV_CUR_X.store(cx, Ordering::Relaxed);
+    PREV_CUR_Y.store(cy, Ordering::Relaxed);
+    PREV_CUR_DRAWN.store(true, Ordering::Relaxed);
+}
+
+/// Layer-based render with double-buffer: render to back, swap, blit from
+/// front. The cursor is composed INTO the back shadow as the final layer so
+/// the shadow→MMIO blit carries it atomically — no blit-vs-cursor race, no
+/// flicker (incl. the dock reveal animation and the microvm tile).
+fn render_frame_layered(cursor_only: bool) {
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
@@ -279,26 +321,22 @@ fn render_frame_layered() {
             unsafe { core::ptr::copy_nonoverlapping(bg_buf, back, size); }
         }
 
-        // Compose the scene; learn whether a live Surface tile is visible.
-        let surface_visible = if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.aurora_drawn = true;
             comp.render(back, fb.info());
-            comp.any_surface_visible()
-        } else {
-            false
-        };
-
-        // With a Surface tile present, bake the cursor into the shadow so
-        // the blit carries it atomically (no flicker over the live 60 Hz
-        // tile). On the plain desktop the shadow stays clean and the cursor
-        // is a cheap MMIO overlay drawn after the blit — that lets a pure
-        // mouse move skip the recomposite + full blit entirely (handle_mouse).
-        if surface_visible {
-            cursor::draw_cursor_on_shadow(back, &info);
         }
+
+        // Cursor baked in as the final layer → atomic blit, no flicker.
+        cursor::draw_cursor_on_shadow(back, &info);
 
         fb.swap_buffers();
         fb.commit_front();
+
+        if cursor_only {
+            // Pure move: scene unchanged vs MMIO, only the cursor differs.
+            blit_cursor_damage(fb);
+            return;
+        }
 
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
@@ -311,15 +349,12 @@ fn render_frame_layered() {
             damage.mark_all();
             damage.flush(fb);
         }
-
-        if !surface_visible {
-            cursor::redraw_overlay_lockfree_inner(fb);
-        }
+        mark_cursor_blitted();
     });
 }
 
 /// Legacy render with double-buffer (fallback when layers not initialized).
-fn render_frame_legacy() {
+fn render_frame_legacy(cursor_only: bool) {
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
@@ -327,19 +362,19 @@ fn render_frame_legacy() {
         let info = *fb.info();
         let back = fb.shadow_back();
 
-        let surface_visible = if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.render(back, fb.info());
-            comp.any_surface_visible()
-        } else {
-            false
-        };
-
-        if surface_visible {
-            cursor::draw_cursor_on_shadow(back, &info);
         }
+
+        cursor::draw_cursor_on_shadow(back, &info);
 
         fb.swap_buffers();
         fb.commit_front();
+
+        if cursor_only {
+            blit_cursor_damage(fb);
+            return;
+        }
 
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
@@ -352,10 +387,7 @@ fn render_frame_legacy() {
             damage.mark_all();
             damage.flush(fb);
         }
-
-        if !surface_visible {
-            cursor::redraw_overlay_lockfree_inner(fb);
-        }
+        mark_cursor_blitted();
     });
 }
 
@@ -428,14 +460,6 @@ pub fn take_deferred_render() -> bool {
 /// MMIO work still runs on Core 0.
 pub fn request_render() {
     DEFERRED_RENDER.store(true, Ordering::Relaxed);
-}
-
-/// Request a PARTIAL render — only dirty windows get re-rendered + their
-/// own rects blitted, not the whole 4K screen. Used by the per-move hover
-/// re-render so dragging the cursor over a hover-reactive widget repaints
-/// just that window instead of recompositing + full-blitting everything.
-pub fn request_window_render() {
-    WINDOWS_DIRTY.store(true, Ordering::Relaxed);
 }
 
 /// Process a shade action (called from intent loop).
@@ -786,22 +810,24 @@ pub fn poll_render() {
     // Deferred scene redraw (drag resize/swap sets this to avoid blocking event loop)
     if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
         render_frame();
+        CURSOR_MOVED.store(false, Ordering::Relaxed);
+    } else if !terminal::is_dirty() && CURSOR_MOVED.swap(false, Ordering::Relaxed) {
+        // Pure mouse move, nothing else changed → recompose + blit just the
+        // cursor rects (cheap on bare metal, flicker-free).
+        render_frame_cursor_only();
     }
 
-    let term_dirty = terminal::is_dirty();
-    let win_dirty = WINDOWS_DIRTY.swap(false, Ordering::Relaxed);
-    if !term_dirty && !win_dirty { return; }
-    if term_dirty { terminal::clear_dirty(); }
+    if !terminal::is_dirty() { return; }
+    terminal::clear_dirty();
+    CURSOR_MOVED.store(false, Ordering::Relaxed);
 
     // Partial render: only re-render dirty or focused windows (not all).
     // Focus change marks old+new windows dirty. Terminal output marks focused dirty.
-    let mut surface_visible = false;
     framebuffer::with_fb(|fb| {
         let info = fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            surface_visible = comp.any_surface_visible();
             // Propagate per-terminal dirty flags to window dirty flags
             for win in &mut comp.windows {
                 if terminal::is_term_dirty(win.terminal_idx as usize) {
@@ -881,23 +907,14 @@ pub fn poll_render() {
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
                     comp.border, comp.rounding, comp.opacity, comp.scale, border_color);
-                // Over a live Surface tile the cursor rides the blit (baked
-                // into the shadow). On the plain desktop the shadow stays
-                // clean — the cursor is drawn as an MMIO overlay after all
-                // window rects are blitted (see below).
-                if surface_visible {
-                    cursor::draw_cursor_on_shadow(shadow, info);
-                }
+                // Cursor baked into the shadow → carried atomically by the
+                // window-rect blit (no flicker).
+                cursor::draw_cursor_on_shadow(shadow, info);
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
             }
         }
-
-        // Desktop mode: cursor overlay on top of the freshly-blitted window
-        // rects (shadow stayed clean, so a later pure move can restore from it).
-        if !surface_visible {
-            cursor::redraw_overlay_lockfree_inner(fb);
-        }
     });
+    mark_cursor_blitted();
     return;
 
     // Legacy partial render path (kept for reference)
@@ -973,9 +990,13 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set by handle_mouse when a full scene redraw is needed but deferred.
 /// poll_render picks this up AFTER processing all mouse events.
 static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
-/// Partial-render request: only dirty windows repaint (their rects blit),
-/// not the full screen. Set by request_window_render (hover re-render).
-static WINDOWS_DIRTY: AtomicBool = AtomicBool::new(false);
+/// A pure mouse move occurred (no scene change). poll_render does a
+/// recompose + cursor-rects-only blit for it (cheap, flicker-free).
+static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
+/// Last cursor position blitted to MMIO (for the cursor-only erase rect).
+static PREV_CUR_X: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+static PREV_CUR_Y: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+static PREV_CUR_DRAWN: AtomicBool = AtomicBool::new(false);
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
@@ -990,18 +1011,6 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // race-free. forward_pointer_to_guest no-ops unless a Surface
     // window is focused, so this is free in normal desktop use.
     forward_pointer_to_guest(evt);
-
-    // Over a live Surface tile (microvm) the cursor must ride the full
-    // blit so it lands atomically with the scene — no flicker. Schedule a
-    // full render; render_frame bakes the cursor into the shadow in that
-    // mode. On the plain desktop we DON'T recomposite here: a pure move
-    // takes the cheap MMIO cursor overlay at the end of this fn, which
-    // touches only the old+new cursor rects (no 33 MB recomposite + blit
-    // per move — that was the bare-metal lag + idle power with apps up).
-    let surface_visible = with_compositor(|c| c.any_surface_visible()).unwrap_or(false);
-    if surface_visible {
-        request_render();
-    }
 
     // Hover routing — deduplicated per window. Runs on every move so the
     // app can react even when no buttons changed.
@@ -1051,18 +1060,17 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         }
     }
 
-    // Plain desktop, pure positional move: present the cursor with the
-    // cheap MMIO overlay (restore old rect + draw new — two small rects,
-    // no recomposite, no full blit). Skipped when a full render is already
-    // pending (a hover change / focus set DEFERRED_RENDER) or a button /
-    // drag is in play — those flow through the full path, which carries
-    // the cursor itself.
-    if !surface_visible
-        && !is_button_change
+    // If nothing above scheduled a real render (no button, no drag, no
+    // DEFERRED set by a hover/focus change), this was a pure positional
+    // move → flag a cheap cursor-only render (recompose + blit just the
+    // cursor rects). Otherwise the pending full render carries the cursor.
+    if !is_button_change
         && !DRAG_ACTIVE.load(Ordering::Relaxed)
         && !DEFERRED_RENDER.load(Ordering::Relaxed)
     {
-        cursor::redraw_overlay_lockfree();
+        CURSOR_MOVED.store(true, Ordering::Relaxed);
+    } else {
+        CURSOR_MOVED.store(false, Ordering::Relaxed);
     }
 }
 
