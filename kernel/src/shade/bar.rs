@@ -58,8 +58,12 @@ pub struct ShadeBar {
 
 #[allow(dead_code)]
 impl ShadeBar {
-    pub fn new(scale: u32) -> Self {
-        let scale = scale.max(1);
+    pub fn new(_scale: u32) -> Self {
+        // The bar tracks its 1× widget tenant (bar.wasm renders at 1×, like
+        // the dock). Pre-scaling the band to the HiDPI factor doubled the
+        // band height at 4K while the content stayed 1× → too-tall bar with
+        // small glyphs. Pin to 1× so band + content + fallback all agree.
+        let scale = 1u32;
         let base = crate::config::get("shade.bar_height")
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(34)  // room for 24px tray icons + pill padding (bar.wasm)
