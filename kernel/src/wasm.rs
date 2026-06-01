@@ -1790,53 +1790,42 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_sleep(ms) -> 0 — sleep for N milliseconds.
-    // HLT would deliver real idle power, but worker cores don't have
-    // their own APIC timer yet (Phase 9 feature), so HLT stays asleep
-    // until an IPI — keyboard IRQs fire on BSP and never wake the
-    // worker, so drun stopped receiving keys. Back to pause-spin
-    // until per-core timer lands.
+    // Stage 2b: PARK this app's fiber + yield the worker core back to the
+    // per-core scheduler, which runs the core's other ready fibers while we
+    // sleep. So dock+bar+loft+spell multiplex over a couple of workers
+    // instead of each pinning a core (or nesting via the old next_task
+    // helper, which froze the dock — see SCHEDULER_FIBERS.md). The fiber is
+    // resumed once the deadline passes.
     linker.func_wrap("env", "npk_sleep",
         |_caller: Caller<'_, HostState>, ms: i32| -> i32 {
             if ms <= 0 || ms > 60000 { return -1; }
 
+            // The normal path: we run inside a fiber → yield to the scheduler.
+            if crate::smp::fiber::yield_sleep(ms as u64) {
+                return 0;
+            }
+
+            // Fallback: not inside a fiber (degenerate no-worker host, or a
+            // one-shot wasm on Core 0) → HLT-idle until the deadline. NO
+            // core-stealing helper (that was the nesting hazard).
             let freq = crate::interrupts::tsc_freq();
-            let ticks_per_ms = freq / 1000;
-            let target = crate::interrupts::rdtsc() + (ms as u64) * ticks_per_ms;
-            // Don't busy-pin the core. A resident app (dock / bar) loops on
-            // npk_sleep forever; plain spinning would hog its worker core
-            // and starve intents — which run as worker tasks (see
-            // intent::spawn) — so a second resident app froze the loop.
-            // Instead, run pending scheduler work here while we wait: the
-            // sleeping app's core becomes a helper. Intents are native and
-            // run to completion, which is exactly what unblocks them.
+            let target = crate::interrupts::rdtsc() + (ms as u64) * (freq / 1000);
             let cid = crate::smp::per_core::current_core_id();
             while crate::interrupts::rdtsc() < target {
-                if let Some(task) = crate::smp::scheduler::next_task(cid) {
-                    (task.func)(task.arg);
+                let rflags: u64;
+                unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+                let t0 = crate::interrupts::rdtsc();
+                if rflags & (1 << 9) != 0 {
+                    // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
+                    unsafe { core::arch::asm!("hlt"); }
                 } else {
-                    // Nothing to help with → HALT until the next interrupt
-                    // instead of spinning at 100%. A resident app loops here
-                    // forever; the old busy-spin pinned its worker core even
-                    // while idle (cores stuck at 100%, huge power draw). The
-                    // 100 Hz timer wakes us within ~10 ms to re-check the
-                    // deadline + the run-queue. IF-preserving: HLT needs
-                    // interrupts on, so enable-then-restore when they're off.
-                    let rflags: u64;
-                    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
-                    let t0 = crate::interrupts::rdtsc();
-                    if rflags & (1 << 9) != 0 {
-                        // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
-                        unsafe { core::arch::asm!("hlt"); }
-                    } else {
-                        // SAFETY: enable for the HLT, then restore IF=0. The
-                        // sti-shadow defers the IRQ until after HLT is armed.
-                        unsafe { core::arch::asm!("sti; hlt; cli"); }
-                    }
-                    crate::smp::per_core::record_halt(
-                        cid, crate::interrupts::rdtsc().saturating_sub(t0));
-                    crate::smp::per_core::record_wake(
-                        cid, crate::smp::per_core::WAKE_NPK_SLEEP);
+                    // SAFETY: enable for the HLT, then restore IF=0.
+                    unsafe { core::arch::asm!("sti; hlt; cli"); }
                 }
+                crate::smp::per_core::record_halt(
+                    cid, crate::interrupts::rdtsc().saturating_sub(t0));
+                crate::smp::per_core::record_wake(
+                    cid, crate::smp::per_core::WAKE_NPK_SLEEP);
             }
 
             0
@@ -1885,31 +1874,28 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 if crate::interrupts::rdtsc() >= deadline {
                     break -1;
                 }
-                // Don't busy-spin the worker core. The old spin_loop pinned
-                // it at 100% — invisible while cpu-pm=on made every vCPU
-                // look 100%, but now (cpu-pm dropped) an app blocked here is
-                // THE one hot host core. Mirror npk_sleep: run pending
-                // scheduler work, else HLT until the next interrupt. The
-                // per-core 100 Hz worker timer wakes us to re-check the key
-                // buffer + deadline (≤10 ms input latency). IF-preserving.
-                if let Some(task) = crate::smp::scheduler::next_task(core_id) {
-                    (task.func)(task.arg);
+                // Don't busy-spin, and don't run the old next_task helper
+                // here: stealing a fiber task and calling its func directly
+                // would bypass the fiber scheduler and re-introduce the
+                // nesting freeze (SCHEDULER_FIBERS.md). Just HLT until the
+                // next interrupt; the per-core 100 Hz timer wakes us to
+                // re-check the key buffer + deadline (≤10 ms latency).
+                // IF-preserving. (Only `wifi` uses npk_input_wait today; the
+                // panels use npk_event_poll + npk_sleep, which yields.)
+                let rflags: u64;
+                unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+                let t0 = crate::interrupts::rdtsc();
+                if rflags & (1 << 9) != 0 {
+                    // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
+                    unsafe { core::arch::asm!("hlt"); }
                 } else {
-                    let rflags: u64;
-                    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
-                    let t0 = crate::interrupts::rdtsc();
-                    if rflags & (1 << 9) != 0 {
-                        // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
-                        unsafe { core::arch::asm!("hlt"); }
-                    } else {
-                        // SAFETY: enable for the HLT, then restore IF=0.
-                        unsafe { core::arch::asm!("sti; hlt; cli"); }
-                    }
-                    crate::smp::per_core::record_halt(
-                        core_id, crate::interrupts::rdtsc().saturating_sub(t0));
-                    crate::smp::per_core::record_wake(
-                        core_id, crate::smp::per_core::WAKE_NPK_SLEEP);
+                    // SAFETY: enable for the HLT, then restore IF=0.
+                    unsafe { core::arch::asm!("sti; hlt; cli"); }
                 }
+                crate::smp::per_core::record_halt(
+                    core_id, crate::interrupts::rdtsc().saturating_sub(t0));
+                crate::smp::per_core::record_wake(
+                    core_id, crate::smp::per_core::WAKE_NPK_SLEEP);
             };
 
             // Resume work tracking
