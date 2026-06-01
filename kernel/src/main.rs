@@ -131,6 +131,11 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // SMP: discover cores via ACPI MADT, boot Application Processors
     smp::init();
 
+    // Fiber scheduler Stage 1: validate the context-switch primitive on
+    // Core 0 (see SCHEDULER_FIBERS.md). Prints `[fiber] self-test OK`.
+    // Isolated — nothing in the live app path uses fibers yet.
+    smp::fiber::self_test();
+
     // TSS install (BSP). Replaces the boot GDT with a clone that has
     // a real long-mode TSS descriptor in slot 3, then `ltr`s it.
     // VMX host-state validation rejects HOST_TR_SELECTOR=0, so this

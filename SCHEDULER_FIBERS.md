@@ -188,6 +188,45 @@ test-on-HW rules in memory). AMD/QEMU first, NUC after.
 
 ---
 
+## Unified core pool — apps AND guest vCPUs (design guardrail, 2026-06-01)
+
+Florian's directive: real multicore **both** in npkOS and in the microvm.
+The browser guest is compute-heavy; later we run **several microvms at
+once**, and a single guest must be able to use **multiple vCPUs = multiple
+host cores** when it needs them. Design for this from the start so we don't
+build something we throw away.
+
+The unifying insight: a **guest vCPU run-loop is just another schedulable
+entity** — "a stack + saved context that runs until VMEXIT/HLT, then
+yields". That is the *same* park/resume mechanic as an app fiber. So the
+end state is a **single per-core pool** the scheduler dispatches two kinds
+of work onto:
+
+- **App fibers** — wasmi `_start` on its own stack (this doc's Stages 1–5).
+- **vCPU fibers** — a `VMRESUME/VMRUN` loop on its own stack; yields the
+  core on guest-HLT / idle VMEXIT, becomes runnable again on a wake
+  (injected IRQ, timer, device event).
+
+Consequences to keep in mind while building Stages 1–6:
+
+- **Kill the static boot-time carve-out.** `per_core::init_dedicated_vm_core`
+  reserves one core for the VM *at boot, AMD-only* — even when no VM runs
+  (the exact reason loft+spell starve on a 4-core AMD QEMU host: only 2 app
+  workers). Replace it with **dynamic** allocation: cores are normal app
+  workers until a VM needs one, returned to the pool on guest exit. A
+  multi-vCPU guest pulls N cores; several guests share the pool.
+- **The context-switch primitive (Stage 1) is identical for both** — it
+  only swaps rsp + callee-saved. A vCPU fiber's entry is the VMRESUME loop
+  instead of `wasmi.call(_start)`. Build it generic.
+- **The run-queue (Stage 4) holds both kinds.** Fairness/preemption
+  (Stage 6) and "fan a heavy task across cores" apply to app fibers and to
+  multi-vCPU guests alike.
+- Core 0 stays kernel/IRQ/input; the pool is cores `1..N`.
+
+This is the north star; Stages 1–5 still land incrementally and app-first
+(loft+spell is the live pain). The vCPU-as-fiber + dynamic-core work folds
+in around Stage 4 once the run-queue is general.
+
 ## Notes / constraints
 
 - **Core 0 stays the kernel / IRQ / input core** (fixed) — fibers run on
