@@ -544,6 +544,11 @@ pub struct VmShared {
     /// rate-limits the resize round-trip against a drag storm. See
     /// the vmx mirror.
     last_cfg_tick: u64,
+    /// Device IRQ lines (bit N = IRQ N) whose injection was deferred because
+    /// the guest was non-interruptible (IF=0) when the device completed —
+    /// the run loop injects them once the guest can take them. Avoids the
+    /// SMP qspinlock deadlock from forcing an IRQ into a critical section.
+    pending_irqs: u16,
     /// Is the 8259 PIT (i8253 ch0) currently programmed to generate the
     /// timer tick? True until Linux writes PIT mode-0 (port 0x43 ← 0x30,
     /// `clockevent_i8253_disable`) to shut it down after adopting the
@@ -676,6 +681,7 @@ impl VmContext {
                 pic: crate::microvm::devices::pic8259::Pic8259::new(),
                 last_timer_tick: 0,
                 last_cfg_tick: 0,
+                pending_irqs: 0,
                 pit_enabled: true,
             },
             vcpu: Vcpu {
@@ -1095,6 +1101,28 @@ impl VmContext {
                 if exit == EXIT_HLT {
                     advance_rip(&mut self.vcpu.vmcb);
                 }
+                // If the guest can't take an interrupt right now (IF=0 / in
+                // an STI/MOV-SS shadow — i.e. mid `spin_lock_irqsave`), do
+                // NOT inject anything: forcing an IRQ in via EVENTINJ here
+                // deadlocks an SMP guest's qspinlock (the guest-SMP 9p-mount
+                // livelock). Just re-enter so the guest finishes its critical
+                // section; it's busy, not idle, so skip idle-accounting too.
+                // Pending device IRQs + the timer are retried on a later exit
+                // once IF=1 (≤1 ms via the worker/VM timer).
+                if !guest_interruptible(&self.vcpu.vmcb) {
+                    last_outcome = Some(outcome);
+                    continue;
+                }
+                // Deferred device IRQ (queued while the guest was IF=0) is now
+                // deliverable — inject the lowest pending line.
+                if self.shared.pending_irqs != 0 {
+                    let line = self.shared.pending_irqs.trailing_zeros() as u8;
+                    self.shared.pending_irqs &= !(1u16 << line);
+                    let info: u64 = (self.shared.pic.vector_for_irq(line) as u64) | (1u64 << 31);
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
+                    continue;
+                }
                 // Guest timer tick. The microvm has no PIT/LAPIC
                 // timer event source, so the only thing that ever
                 // wakes a time-blocked task (nanosleep/timerfd/poll
@@ -1392,33 +1420,33 @@ impl VmContext {
             EXIT_NPF => {
                 let gpa = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
                 if self.shared.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk, &self.shared.pic, gpa, &self.shared.guest_mem) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.shared.pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_net, &self.shared.pic, gpa, &self.shared.guest_mem) {
+                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_net, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.shared.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_gpu, &self.shared.pic, gpa, &self.shared.guest_mem) {
+                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_gpu, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.shared.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_npf_input(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_input, &self.shared.pic, gpa, &self.shared.guest_mem) {
+                    if handle_mmio_npf_input(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_input, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.shared.pci.virtio_9p.bar0_in_range(gpa) {
-                    if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_9p, &self.shared.pic, gpa, &self.shared.guest_mem) {
+                    if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_9p, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.shared.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk_sqfs, &self.shared.pic, gpa, &self.shared.guest_mem) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk_sqfs, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1622,6 +1650,34 @@ fn handle_linux_io(
 ///
 /// Returns `true` if the fault was handled. `false` falls through to
 /// the generic NPF dump path (decode failure, unsupported opcode).
+/// Can the guest take a maskable external interrupt right now? RFLAGS.IF=1
+/// AND no interrupt shadow (the 1-instruction block after STI / MOV SS).
+/// Mirrors KVM `svm_interrupt_allowed` / the VMX `guest_interruptible`.
+///
+/// EVENTINJ is a FORCED injection — AMD delivers it regardless of guest IF
+/// (APM Vol 2 §15.20). Harmless on a UP guest (spinlocks compile to no-ops),
+/// but on an SMP guest, firing a device IRQ into a `spin_lock_irqsave`
+/// critical section makes the handler spin on the held qspinlock → deadlock
+/// (the guest-SMP 9p-mount livelock). So we only inject when interruptible,
+/// and defer otherwise (see `deliver_irq` + the run-loop pending drain).
+fn guest_interruptible(vmcb: &vmcb::Vmcb) -> bool {
+    let rflags = vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS);
+    let int_state = vmcb.read_u64(vmcb::OFF_INT_STATE);
+    (rflags & (1 << 9)) != 0 && (int_state & 1) == 0
+}
+
+/// Deliver an external IRQ `line` (vector `vector`) to the guest: inject now
+/// via EVENTINJ if interruptible, else set its bit in `pending` so the run
+/// loop injects it once the guest re-enables interrupts. See
+/// `guest_interruptible` for why the gate matters on SMP.
+fn deliver_irq(vmcb: &mut vmcb::Vmcb, pending: &mut u16, line: u8, vector: u8) {
+    if guest_interruptible(vmcb) {
+        vmcb.write_u64(vmcb::OFF_EVENT_INJ, (vector as u64) | (1u64 << 31));
+    } else {
+        *pending |= 1u16 << (line as u16 & 0xF);
+    }
+}
+
 /// #NPF on the LAPIC MMIO page (guest-SMP Stage 1). Decode the faulting
 /// MOV, service it against the per-vCPU `LocalApic`, advance RIP. xAPIC
 /// registers are 32-bit; no device IRQ-kick (unlike the virtio handlers).
@@ -1671,6 +1727,7 @@ fn handle_mmio_npf_blk(
     regs: &mut vmcb::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -1719,11 +1776,8 @@ fn handle_mmio_npf_blk(
     if let Some(qidx) = blk.take_pending_kick() {
         let advanced = blk.service_queues(qidx, mem);
         if advanced {
-            let vector = pic.vector_for_irq(blk.irq_line());
-            // VMCB.EVENT_INJ — vector | type<<8 | valid<<31. Type 0 =
-            // external interrupt. APM Vol 2 §15.20.
-            let info: u64 = (vector as u64) | (1u64 << 31);
-            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+            // Inject if interruptible, else defer (SMP qspinlock safety).
+            deliver_irq(vmcb, pending, blk.irq_line(), pic.vector_for_irq(blk.irq_line()));
         }
     }
 
@@ -1795,6 +1849,7 @@ fn handle_mmio_npf_net(
     regs: &mut vmcb::GuestRegs,
     net: &mut crate::microvm::devices::virtio_net_pci::VirtioNet,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -1833,9 +1888,7 @@ fn handle_mmio_npf_net(
     if let Some(qidx) = net.take_pending_kick() {
         let advanced = net.service_queues(qidx, mem);
         if advanced {
-            let vector = pic.vector_for_irq(10);
-            let info: u64 = (vector as u64) | (1u64 << 31);
-            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+            deliver_irq(vmcb, pending, 10, pic.vector_for_irq(10));
         }
     }
 
@@ -1849,6 +1902,7 @@ fn handle_mmio_npf_gpu(
     regs: &mut vmcb::GuestRegs,
     gpu: &mut crate::microvm::devices::virtio_gpu_pci::VirtioGpu,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -1888,9 +1942,7 @@ fn handle_mmio_npf_gpu(
         let advanced = gpu.service_queues(qidx, mem);
         if advanced {
             // virtio-gpu IRQ line = 9.
-            let vector = pic.vector_for_irq(9);
-            let info: u64 = (vector as u64) | (1u64 << 31);
-            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+            deliver_irq(vmcb, pending, 9, pic.vector_for_irq(9));
         }
     }
 
@@ -1905,6 +1957,7 @@ fn handle_mmio_npf_input(
     regs: &mut vmcb::GuestRegs,
     input: &mut crate::microvm::devices::virtio_input_pci::VirtioInput,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -1944,9 +1997,7 @@ fn handle_mmio_npf_input(
         let advanced = input.service_queues(qidx, mem);
         if advanced {
             // virtio-input IRQ line = 12.
-            let vector = pic.vector_for_irq(12);
-            let info: u64 = (vector as u64) | (1u64 << 31);
-            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+            deliver_irq(vmcb, pending, 12, pic.vector_for_irq(12));
         }
     }
 
@@ -1961,6 +2012,7 @@ fn handle_mmio_npf_p9(
     regs: &mut vmcb::GuestRegs,
     p9: &mut crate::microvm::devices::virtio_9p_pci::Virtio9p,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -1999,9 +2051,7 @@ fn handle_mmio_npf_p9(
     if let Some(qidx) = p9.take_pending_kick() {
         let advanced = p9.service_queues(qidx, mem);
         if advanced {
-            let vector = pic.vector_for_irq(p9.irq_line());
-            let info: u64 = (vector as u64) | (1u64 << 31);
-            vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+            deliver_irq(vmcb, pending, p9.irq_line(), pic.vector_for_irq(p9.irq_line()));
         }
     }
 
