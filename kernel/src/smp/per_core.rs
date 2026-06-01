@@ -311,6 +311,20 @@ pub fn init_dedicated_vm_core(worker_count: usize) {
         crate::microvm::cpu::Vendor::Amd,
     );
 
+    // vCPU-as-fiber (unified pool): when enabled, the guest runs as a
+    // normal pool fiber on a DYNAMIC core — so we do NOT statically carve
+    // one out here (that wasted a core whenever no VM ran, and stranded the
+    // app fibers already on it). See microvm::cpu / SCHEDULER_FIBERS.md.
+    let fiber_mode = crate::microvm::cpu::VCPU_AS_FIBER && is_amd && worker_count >= 1;
+    crate::microvm::cpu::set_vm_fiber_mode(fiber_mode);
+    if fiber_mode {
+        crate::kprintln!(
+            "[npk] smp: microvm runs as a pool fiber on a dynamic core ({} cores, no carve-out)",
+            total
+        );
+        return;
+    }
+
     let dedicate = A2_DEDICATED_CORE_ENABLED
         && is_amd
         && worker_count >= 1

@@ -230,6 +230,29 @@ pub fn yield_sleep(ms: u64) -> bool {
     true
 }
 
+/// Yield the running fiber but stay immediately runnable (Ready) — used by
+/// a compute-heavy fiber (e.g. a guest vCPU between run-slices) to let peer
+/// fibers on the core take a turn, then resume on the next scheduler pass.
+/// Returns `false` if not running inside a fiber.
+pub fn yield_ready() -> bool {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return false;
+    }
+    // SAFETY: CURRENT_FIBER[cid] non-null iff we run inside a fiber here.
+    let f = unsafe { CURRENT_FIBER[cid] };
+    if f.is_null() {
+        return false;
+    }
+    // SAFETY: f is the running fiber; mark Ready and switch back to the
+    // core scheduler, which round-robins on to the next runnable fiber.
+    unsafe {
+        (*f).state = FiberState::Ready;
+        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+    }
+    true
+}
+
 /// Fresh-fiber entry: run the app's `(func, arg)`. On return the trampoline
 /// falls into `fiber_on_exit`.
 extern "C" fn fiber_app_entry(_unused: u64) {
