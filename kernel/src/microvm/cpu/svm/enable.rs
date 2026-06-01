@@ -544,6 +544,13 @@ pub struct VmShared {
     /// rate-limits the resize round-trip against a drag storm. See
     /// the vmx mirror.
     last_cfg_tick: u64,
+    /// Is the 8259 PIT (i8253 ch0) currently programmed to generate the
+    /// timer tick? True until Linux writes PIT mode-0 (port 0x43 ← 0x30,
+    /// `clockevent_i8253_disable`) to shut it down after adopting the
+    /// LAPIC timer. Gates IRQ0 injection so the PIT tick stops then and
+    /// jiffies don't double-count against the LAPIC timer. Starts true so
+    /// IRQ0 drives boot before Linux first programs the PIT.
+    pit_enabled: bool,
 }
 
 /// Per-vCPU state: its own VMCB + register file + FPU areas, plus the
@@ -572,6 +579,9 @@ pub struct Vcpu {
     /// while the guest boots `nolapic`; drives the timer + (later) IPIs
     /// once Linux enables it. See `svm::lapic`.
     lapic: LocalApic,
+    /// `ticks()` of the last injected LAPIC-timer (LVTT) interrupt — the
+    /// per-vCPU analogue of `VmShared::last_timer_tick` (PIT IRQ0).
+    last_lapic_tick: u64,
     /// Consecutive HLT exits taken with guest RFLAGS.IF=0. The idle path
     /// is always `sti; hlt` (IF=1); a sustained `cli; hlt` loop is Linux's
     /// no-ACPI poweroff / panic path (we boot `acpi=off`, so there is no
@@ -666,6 +676,7 @@ impl VmContext {
                 pic: crate::microvm::devices::pic8259::Pic8259::new(),
                 last_timer_tick: 0,
                 last_cfg_tick: 0,
+                pit_enabled: true,
             },
             vcpu: Vcpu {
                 vmcb,
@@ -679,6 +690,7 @@ impl VmContext {
                 msr_log_count: 0,
                 consecutive_idle: 0,
                 lapic: LocalApic::new(),
+                last_lapic_tick: 0,
                 if_off_halts: 0,
             },
         })
@@ -1149,22 +1161,38 @@ impl VmContext {
                 // otherwise input > net, then the normal timer.
                 const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
                 let now = crate::interrupts::ticks();
-                // Timer tick source: once Linux software-enables the LAPIC
-                // timer the tick moves from the 8259 PIT (IRQ0) to the
-                // LVTT vector (svm::lapic). Before that — incl. during
-                // calibrate_APIC_clock, where LVTT is MASKED — the PIT
-                // keeps driving jiffies. Still one tick per host 100 Hz
-                // `ticks()`; Linux's wall-clock is TSC-based.
-                let tick_vector: Option<u8> = self.vcpu.lapic.timer_tick_vector().or_else(|| {
-                    if self.shared.pic.irq_unmasked(0) {
-                        Some(self.shared.pic.vector_for_irq(0))
-                    } else {
-                        None
-                    }
-                });
-                if let Some(vec) = tick_vector {
-                    if now.wrapping_sub(self.shared.last_timer_tick) >= TIMER_MAX_SKIP {
-                        self.shared.last_timer_tick = now;
+                // Two ~100 Hz timer sources may be live, and BOTH must tick
+                // during the LAPIC-timer verification window: apic.c:922
+                // arms the LVTT periodic and checks that jiffies — driven by
+                // the 8259 PIT — advance 1:1 with LVTT interrupts; if the PIT
+                // froze, deltaj=0 → "APIC timer disabled due to verification
+                // failure" → Linux drops the LAPIC timer (fatal for AP
+                // bringup, which has no PIT IRQ0).
+                //   * PIT (IRQ0): jiffies during boot + verification. Gated
+                //     on `pit_enabled`, which goes false when Linux writes
+                //     PIT mode-0 (port 0x43 ← 0x30, clockevent_i8253_disable)
+                //     to shut the PIT down after adopting the LAPIC timer —
+                //     so IRQ0 stops then and jiffies don't double-count.
+                //   * LAPIC timer (LVTT vector): once Linux enables it.
+                // One EVENTINJ slot per VMRUN → inject whichever is due; the
+                // other lands next VMRUN (≥1 kHz). Both paced by the same
+                // 100 Hz `ticks()` so their rates match (the 1:1 the
+                // verification needs). Linux's wall-clock is TSC-based.
+                let pit_live = self.shared.pic.irq_unmasked(0) && self.shared.pit_enabled;
+                let lapic_vec = self.vcpu.lapic.timer_tick_vector();
+                // Forced slot (anti-starvation under page-load net storm —
+                // see vmx mirror): if either is overdue ≥ TIMER_MAX_SKIP host
+                // ticks, force it (≤ ~30 ms jitter, far under any RCU stall).
+                if pit_live && now.wrapping_sub(self.shared.last_timer_tick) >= TIMER_MAX_SKIP {
+                    self.shared.last_timer_tick = now;
+                    let info: u64 = (self.shared.pic.vector_for_irq(0) as u64) | (1u64 << 31);
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
+                    continue;
+                }
+                if let Some(vec) = lapic_vec {
+                    if now.wrapping_sub(self.vcpu.last_lapic_tick) >= TIMER_MAX_SKIP {
+                        self.vcpu.last_lapic_tick = now;
                         let info: u64 = (vec as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.vcpu.consecutive_idle = 0;
@@ -1187,9 +1215,18 @@ impl VmContext {
                     self.vcpu.consecutive_idle = 0;
                     continue;
                 }
-                if let Some(vec) = tick_vector {
-                    if now != self.shared.last_timer_tick {
-                        self.shared.last_timer_tick = now;
+                // Normal slot: PIT tick, then LAPIC-timer tick (one per
+                // 100 Hz `ticks()` window; the other lands next VMRUN).
+                if pit_live && now != self.shared.last_timer_tick {
+                    self.shared.last_timer_tick = now;
+                    let info: u64 = (self.shared.pic.vector_for_irq(0) as u64) | (1u64 << 31);
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
+                    continue;
+                }
+                if let Some(vec) = lapic_vec {
+                    if now != self.vcpu.last_lapic_tick {
+                        self.vcpu.last_lapic_tick = now;
                         let info: u64 = (vec as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.vcpu.consecutive_idle = 0;
@@ -1295,7 +1332,7 @@ impl VmContext {
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
-                handle_linux_io(&mut *self.vcpu.vmcb, &mut self.shared.serial, &mut self.shared.pci, &mut self.shared.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped);
+                handle_linux_io(&mut *self.vcpu.vmcb, &mut self.shared.serial, &mut self.shared.pci, &mut self.shared.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut self.shared.pit_enabled);
                 advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);
             }
@@ -1501,6 +1538,7 @@ fn handle_linux_io(
     dir_in: bool,
     size: u8,
     io_dropped: &mut u32,
+    pit_enabled: &mut bool,
 ) {
     use crate::microvm::devices::{handle_pci_io, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};
     use crate::microvm::devices::pic8259::{handle_pic_io, PIC_MASTER_CMD, PIC_MASTER_IMR, PIC_SLAVE_CMD, PIC_SLAVE_IMR};
@@ -1530,6 +1568,20 @@ fn handle_linux_io(
     }
 
     let in_value: Option<u64> = match (port, dir_in) {
+        // i8253 PIT mode/command (0x43) write. Track whether channel 0 is
+        // programmed to generate the timer tick: a real mode program
+        // (access mode bits 5:4 != 0) on channel 0 (bits 7:6 == 0) sets
+        // pit_enabled = (operating mode != 0). Linux shuts the PIT down with
+        // mode 0 (0x30, clockevent_i8253_disable) after adopting the LAPIC
+        // timer; periodic (0x34, mode 2) / oneshot (0x38, mode 4) keep it
+        // live. Latch commands (bits 5:4 == 0) don't change the mode.
+        (0x43, false) => {
+            let v = val_out as u8;
+            if (v >> 6) & 0x3 == 0 && (v >> 4) & 0x3 != 0 {
+                *pit_enabled = ((v >> 1) & 0x7) != 0;
+            }
+            None
+        }
         (0x3F8, false) => {
             if !serial.dlab { serial.put_char(val_out as u8); }
             None
