@@ -269,7 +269,13 @@ impl VirtioBlk {
             &self.backing,
             crate::capability::CAP_NULL,
         ) {
-            Ok(_) => kprintln!("[virtio-blk] saved home image ({} bytes encrypted)", self.backing.len()),
+            Ok(_) => {
+                let (sum, nz) = img_fingerprint(&self.backing);
+                kprintln!(
+                    "[virtio-blk] saved home image ({} bytes encrypted, fp sum={:#x} nz={})",
+                    self.backing.len(), sum, nz
+                );
+            }
             Err(e) => kprintln!("[virtio-blk] save failed: {}", e),
         }
     }
@@ -609,7 +615,11 @@ fn load_or_init_backing() -> alloc::vec::Vec<u8> {
 
     if let Ok((data, _hash)) = crate::npkfs::fetch(PROFILE_PATH) {
         if data.len() == cap {
-            kprintln!("[virtio-blk] loaded home image ({} bytes) /dev/vda", data.len());
+            let (sum, nz) = img_fingerprint(&data);
+            kprintln!(
+                "[virtio-blk] loaded home image ({} bytes) /dev/vda (fp sum={:#x} nz={})",
+                data.len(), sum, nz
+            );
             return data;
         }
         kprintln!(
@@ -619,6 +629,22 @@ fn load_or_init_backing() -> alloc::vec::Vec<u8> {
     }
 
     seed_home_image(cap)
+}
+
+/// Cheap content fingerprint (wrapping byte sum, non-zero count) for
+/// persistence diagnosis: lets us see across a save→reboot→load cycle
+/// whether the SAME bytes come back (persist OK) or the template
+/// (write/persist broken). TEMP — remove with the diag.
+fn img_fingerprint(data: &[u8]) -> (u64, usize) {
+    let mut sum: u64 = 0;
+    let mut nz: usize = 0;
+    for &b in data {
+        sum = sum.wrapping_add(b as u64);
+        if b != 0 {
+            nz += 1;
+        }
+    }
+    (sum, nz)
 }
 
 /// Expand `HOME_TEMPLATE` into a fresh `cap`-byte empty ext4 image.
@@ -642,7 +668,11 @@ fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
                 }
                 off += 512;
             }
-            kprintln!("[virtio-blk] seeded fresh ext4 home image ({} bytes) /dev/vda", cap);
+            let (sum, nz) = img_fingerprint(&v);
+            kprintln!(
+                "[virtio-blk] seeded fresh ext4 home image ({} bytes) /dev/vda — NO saved profile found (fp sum={:#x} nz={})",
+                cap, sum, nz
+            );
             return v;
         }
     }
