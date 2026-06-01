@@ -314,8 +314,37 @@ const VM_RUNNING: u8 = 2;
 const VM_EXITED: u8 = 3;
 
 /// Dedicated-core VM lifecycle. Only meaningful when a core is
-/// dedicated (cooperative path uses `ACTIVE_VM` instead).
+/// dedicated (cooperative path uses `ACTIVE_VM` instead). Also reused by
+/// the fiber path (REQUESTED → RUNNING → EXITED).
 static VM_RUN_STATE: AtomicU8 = AtomicU8::new(VM_IDLE);
+
+// ── vCPU-as-fiber (unified core pool, Stage: SCHEDULER_FIBERS.md) ───────
+//
+// Instead of statically carving a core for the guest at boot, run the
+// guest's VMRESUME loop as a normal pool FIBER (smp::fiber): admitted when
+// a launch is requested, pinned to whatever worker core picks it up (so the
+// VMX/SVM core-binding holds — no migration), yielding the core to peer app
+// fibers on guest-idle, and freed on guest exit. No wasted core when no VM
+// runs; the guest naturally dominates its core while busy. Multi-vCPU later
+// = N such fibers. Flag-gated so a bad release reverts to the validated
+// dedicated path via OTA (no reinstall): flip to `false` + re-release.
+pub const VCPU_AS_FIBER: bool = true;
+
+/// Decided once at boot (`set_vm_fiber_mode`, from `init_dedicated_vm_core`,
+/// which has the vendor + worker count): true → the guest runs as a pool
+/// fiber and NO core is dedicated. Cheap atomic read on the hot poll path.
+static VM_FIBER_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Set the fiber-mode decision (called once from `init_dedicated_vm_core`).
+pub fn set_vm_fiber_mode(on: bool) {
+    VM_FIBER_MODE.store(on, Ordering::Release);
+}
+
+/// True if the guest runs as a pool fiber (vs the dedicated-core or the
+/// cooperative-Core-0 path).
+pub fn vm_fiber_mode() -> bool {
+    VM_FIBER_MODE.load(Ordering::Acquire)
+}
 
 /// One pending launch request, owned copies so the caller's npkFS
 /// buffers can drop while the dedicated core consumes them.
@@ -371,7 +400,7 @@ const SLICE_BUDGET: u32 = 4096;
 /// Hence: false on the dedicated path (the guest is still composited
 /// through the `focused_surface_id` branch, independent of this).
 pub fn vm_active() -> bool {
-    if crate::smp::per_core::dedicated_vm_core().is_some() {
+    if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         return false;
     }
     ACTIVE_VM.lock().is_some()
@@ -387,6 +416,30 @@ pub fn vm_open(
     initramfs: Option<&[u8]>,
     inject: &[u8],
 ) -> Result<(), &'static str> {
+    // Fiber path: stash the request + spawn a vCPU fiber. A worker admits
+    // it (smp_ap_entry → fiber::admit) and runs the guest ON that core for
+    // its lifetime (VMXON/run/VMXOFF all bind there; the fiber is pinned).
+    // Owned copies so the caller's npkFS Vecs can drop.
+    if vm_fiber_mode() {
+        if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
+            return Err("a microvm is already running");
+        }
+        *PENDING_VM.lock() = Some(PendingVm {
+            bzimage: bzimage.to_vec(),
+            cmdline: cmdline.to_vec(),
+            initramfs: initramfs.map(<[u8]>::to_vec),
+            inject: inject.to_vec(),
+        });
+        VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+        VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
+        crate::smp::scheduler::spawn_fiber(
+            crate::smp::scheduler::Priority::Interactive,
+            vcpu_fiber_task,
+            0,
+        );
+        return Ok(());
+    }
+
     // Dedicated path: hand the request to the VM core (which opens it
     // on itself). Owned copies so the caller's npkFS Vecs can drop.
     if crate::smp::per_core::dedicated_vm_core().is_some() {
@@ -430,12 +483,13 @@ pub fn vm_poll_slice() {
         crate::shade::launch_app("loft");
     }
 
-    // Dedicated path: Core 0 is only the reaper. The VM core owns the
-    // VmContext for its whole lifetime and does its own VMXOFF; Core 0
-    // just runs the compositor-locking teardown once it has exited
-    // (teardown_vm_window must run on Core 0). Cheap atomic load on
-    // the hot poll path when nothing has exited.
-    if crate::smp::per_core::dedicated_vm_core().is_some() {
+    // Dedicated path AND fiber path: Core 0 is only the reaper. The VM
+    // core (dedicated core, or the worker running the vCPU fiber) owns the
+    // VmContext for its whole lifetime and does its own VMXOFF; Core 0 just
+    // runs the compositor-locking teardown once it has exited
+    // (teardown_vm_window must run on Core 0). Cheap atomic load on the hot
+    // poll path when nothing has exited.
+    if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         if VM_RUN_STATE.load(Ordering::Acquire) == VM_EXITED {
             crate::microvm::devices::nat::reset_sessions();
             teardown_vm_window();
@@ -648,6 +702,105 @@ pub fn vm_core_serve() {
     unsafe { core::arch::asm!("cli") };
 
     drop(pending); // owned guest-image buffers freed
+    // Hand off to Core 0's reaper (compositor-locking teardown).
+    VM_RUN_STATE.store(VM_EXITED, Ordering::Release);
+}
+
+/// vCPU-as-fiber entry (fiber mode). Same lifecycle as `vm_core_serve` —
+/// consume the pending request, open the guest ON THIS (the admitting)
+/// core, run it slice-by-slice, close it, signal Core 0 to reap — but
+/// instead of a dedicated forever-loop it YIELDS the core to peer app
+/// fibers between slices (immediately on `StillRunning`, ~2 ms on guest
+/// `Idle`). Pinned to its core (no fiber migration) so the VMX/SVM
+/// core-binding holds. IF=1 only across each `run_slice` (host tick
+/// servicing between VMRUNs), restored to IF=0 before every yield so peer
+/// fibers keep the cooperative IF=0 invariant. The guest IRQ0 clock is
+/// `ticks()`-paced (global, Core-0 100 Hz), independent of this cadence.
+fn vcpu_fiber_task(_arg: u64) {
+    if VM_RUN_STATE.load(Ordering::Acquire) != VM_REQUESTED {
+        return;
+    }
+    let pending = match PENDING_VM.lock().take() {
+        Some(p) => p,
+        None => {
+            VM_RUN_STATE.store(VM_IDLE, Ordering::Release);
+            return;
+        }
+    };
+    VM_RUN_STATE.store(VM_RUNNING, Ordering::Release);
+
+    let cid = crate::smp::per_core::current_core_id();
+    crate::kprintln!("[microvm] vCPU fiber opening guest on core {}", cid);
+
+    // 1 kHz wake source on THIS core so the fiber's idle yields resume
+    // promptly (the 100 Hz worker timer alone would stretch a 2 ms idle
+    // yield to ~10 ms). Restored to the worker timer when the guest ends.
+    crate::interrupts::arm_dedicated_vm_timer();
+
+    match *VENDOR.lock() {
+        Vendor::Amd => {
+            match svm::vm_open(
+                &pending.bzimage,
+                &pending.cmdline,
+                pending.initramfs.as_deref(),
+                &pending.inject,
+            ) {
+                Ok(mut ctx) => {
+                    loop {
+                    if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                        crate::kprintln!("[microvm] window closed — stopping guest");
+                        break;
+                    }
+                    // IF=1 only for the slice (host tick servicing between
+                    // VMRUNs); CLGI/STGI still bracket the VMRUN inside.
+                    // SAFETY: ring-0; mirrors the dedicated path's `sti`.
+                    unsafe { core::arch::asm!("sti") };
+                    let outcome = ctx.run_slice(SLICE_BUDGET);
+                    // Back to IF=0 before yielding so peer fibers run under
+                    // the cooperative IF=0 invariant.
+                    // SAFETY: ring-0.
+                    unsafe { core::arch::asm!("cli") };
+                    match outcome {
+                        // Busy guest: let peers take a turn, resume next pass.
+                        Ok(svm::SliceOutcome::StillRunning) => {
+                            crate::smp::fiber::yield_ready();
+                        }
+                        // Idle guest: park briefly → core runs app fibers.
+                        Ok(svm::SliceOutcome::Idle) => {
+                            crate::smp::fiber::yield_sleep(2);
+                        }
+                        Ok(svm::SliceOutcome::Exited(o)) => {
+                            crate::kprintln!(
+                                "[microvm] guest exited — reason {:#x} qual {:#x}",
+                                (o.exit_reason & 0xFFFF) as u16,
+                                o.exit_qualification
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            crate::kprintln!("[microvm] run FAILED: {}", e);
+                            break;
+                        }
+                    }
+                    }
+                    ctx.close();
+                }
+                Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
+            }
+        }
+        Vendor::Intel => {
+            crate::kprintln!("[microvm] vCPU fiber: Intel/VMX not enabled in fiber mode");
+        }
+        Vendor::Unknown(reason) => crate::kprintln!("[microvm] {}", reason),
+    }
+
+    // Restore this core to the 100 Hz worker idle timer + the IF=0
+    // park-loop invariant `smp_ap_entry` expects.
+    crate::interrupts::disarm_dedicated_vm_timer();
+    crate::interrupts::arm_worker_timer();
+
+    drop(pending); // owned guest-image buffers freed
+    crate::kprintln!("[microvm] vCPU fiber finished on core {}", cid);
     // Hand off to Core 0's reaper (compositor-locking teardown).
     VM_RUN_STATE.store(VM_EXITED, Ordering::Release);
 }
