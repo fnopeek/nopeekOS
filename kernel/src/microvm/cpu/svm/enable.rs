@@ -519,6 +519,13 @@ pub struct VmContext {
     io_dropped: u32,
     msr_log_count: u32,
     consecutive_idle: u32,
+    /// Consecutive HLT exits taken with guest RFLAGS.IF=0. The idle path
+    /// is always `sti; hlt` (IF=1); a sustained `cli; hlt` loop is Linux's
+    /// no-ACPI poweroff / panic path (we boot `acpi=off`, so there is no
+    /// ACPI shutdown signal). Crossing the threshold = the guest powered
+    /// off → exit the VM (tears the window down on browser close instead
+    /// of leaving a black idle window). Reset on any IF=1 HLT.
+    if_off_halts: u32,
     /// Host tick at which we last injected guest timer IRQ0. The
     /// microvm provides no PIT/LAPIC timer event source, so without
     /// this the guest's nanosleep/timerfd/poll-timeout never wake
@@ -624,6 +631,7 @@ impl VmContext {
             io_dropped: 0,
             msr_log_count: 0,
             consecutive_idle: 0,
+            if_off_halts: 0,
             last_timer_tick: 0,
             last_cfg_tick: 0,
             reinject: 0,
@@ -998,6 +1006,31 @@ impl VmContext {
                     kprintln!("[svm] guest HLT after {} VM-exits — exiting", self.iter);
                     last_outcome = Some(outcome);
                     break;
+                }
+                // A WINDOWED guest that HLTs with interrupts DISABLED
+                // (RFLAGS.IF=0) is NOT idle — it has powered off / panicked
+                // (Linux's no-ACPI poweroff + panic paths both end in a
+                // `cli; hlt` loop; the idle path is always `sti; hlt` =
+                // IF=1). We boot `acpi=off`, so there is no ACPI shutdown
+                // signal — this IF check is it. Treat a sustained IF=0 HLT
+                // as a clean exit so the tile tears down when the browser
+                // closes (cage exits → PID-1 `halt -f` → cli;hlt loop)
+                // instead of hanging as a black idle window until Mod+Q.
+                if exit == EXIT_HLT {
+                    if self.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) == 0 {
+                        self.if_off_halts = self.if_off_halts.saturating_add(1);
+                        if self.if_off_halts >= 64 {
+                            self.serial.flush();
+                            kprintln!(
+                                "[svm] guest powered off (HLT with IF=0) after {} iters — exiting",
+                                self.iter
+                            );
+                            last_outcome = Some(outcome);
+                            break;
+                        }
+                    } else {
+                        self.if_off_halts = 0;
+                    }
                 }
                 // HLT is an intercepted instruction: advance RIP past it
                 // (like KVM's skip_emulated_instruction) so that once an
