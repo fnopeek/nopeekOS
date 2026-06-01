@@ -339,19 +339,24 @@ pub const VCPU_AS_FIBER: bool = true;
 /// no guest-kernel rebuild needed). Prerequisite for AP bringup (Stage 3).
 pub const GUEST_LAPIC: bool = true;
 
-/// Guest-SMP Stage 2: enumerate a 2nd vCPU to Linux via an MP-table
-/// (`linux::mptable`, floating pointer @ 0xF0000) and pass `maxcpus=2`.
-/// Linux counts 2 CPUs and *attempts* AP bring-up; the INIT/SIPI it
-/// writes to the LAPIC ICR is decoded + logged in `svm::lapic` but the AP
-/// is NOT started yet (Stage 3), so Linux times out and boots with 1 CPU
-/// online. Requires `GUEST_LAPIC` (no LAPIC → no MP-table point). Flag-
-/// gated so a bad release reverts via OTA (flip to `false` + re-release →
-/// no MP-table, `maxcpus=1` → identical to the validated v0.191.13 UP
-/// guest — no guest-kernel rebuild needed).
+/// Guest-SMP Stage 2: ENUMERATE a 2nd vCPU to Linux via an MP-table
+/// (`linux::mptable`, floating pointer @ 0xF0000). Linux counts
+/// GUEST_VCPUS CPUs; CPU1 becomes present-but-offline. The boot cmdline
+/// stays `maxcpus=1`, so Linux does NOT online (bring up) the AP yet —
+/// starting it is Stage 3, and an enumerated-but-never-responding AP
+/// HANGS Linux's cpuhp bring-up (it waits for CPU1 to report alive; the
+/// non-responding-AP timeout doesn't recover on this backend — observed
+/// as a freeze right after INIT/SIPI on HW, v0.192.1). The `svm::lapic`
+/// ICR INIT/SIPI decode is in place + verified firing (Stage 3 wires the
+/// actual AP-fiber spawn). Requires `GUEST_LAPIC` (no LAPIC → no MP-table
+/// point). Flag-gated so a bad release reverts via OTA (flip to `false` +
+/// re-release → no MP-table → identical to the validated v0.191.13 UP
+/// guest; no guest-kernel rebuild needed).
 pub const GUEST_SMP: bool = true;
 
-/// Number of vCPUs we advertise to the guest when `GUEST_SMP` is on.
-/// Stage 2 keeps this at 2 (BSP + one enumerated-but-unstarted AP).
+/// Number of vCPUs the MP-table enumerates to the guest when `GUEST_SMP`
+/// is on. Stage 2 keeps this at 2 (BSP + one enumerated-but-not-onlined
+/// AP). The boot cmdline still caps onlining at `maxcpus=1` until Stage 3.
 pub const GUEST_VCPUS: u8 = 2;
 
 /// Decided once at boot (`set_vm_fiber_mode`, from `init_dedicated_vm_core`,
