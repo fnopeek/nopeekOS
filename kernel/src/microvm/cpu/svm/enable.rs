@@ -648,6 +648,24 @@ impl VmContext {
         // SAFETY: as above.
         unsafe { core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096); }
 
+        // Intercept IA32_APIC_BASE (0x1B) reads + writes so the EXIT_MSR
+        // handler reports our emulated value — crucially with the BSP bit
+        // (bit 8) set for the boot vCPU. Without this the all-zero MSRPM
+        // passes the RDMSR straight to the host core, which is NOT the
+        // host BSP (the guest runs on an arbitrary worker core) → its
+        // APICBASE has the BSP bit clear. Linux's topology code then sees
+        // an enumerated BSP whose APICBASE BSP bit is unset, mistakes the
+        // guest for a kdump/crash kernel, and caps it at 1 CPU
+        // (`topo_is_converted_bsp`, topology.c) — which silently defeats
+        // guest SMP. MSRPM range 0 covers MSRs 0x0..0x1FFF at 2 bits each
+        // (bit0 read / bit1 write); 0x1B → bit 54 → byte 6, bits 6|7.
+        // Gated on GUEST_LAPIC: with `nolapic` we want host pass-through.
+        if crate::microvm::cpu::GUEST_LAPIC {
+            // SAFETY: msrpm_phys is a freshly allocated, identity-mapped
+            // 8 KB region we own; byte 6 is well within it.
+            unsafe { *((msrpm_phys + 6) as *mut u8) |= 0xC0; }
+        }
+
         let mut vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
         let vmcb_phys = vmcb.phys_addr();
 
@@ -1370,9 +1388,14 @@ impl VmContext {
                 let msr = self.vcpu.regs.rcx as u32;
                 // IA32_APIC_BASE (0x1B): report the LAPIC enabled at its
                 // architectural default base so Linux finds + uses it
-                // (guest-SMP Stage 1). Writes (enable / relocate) are
-                // accepted but we keep the fixed base — the NPT trap page
-                // is wired at 0xFEE00000.
+                // (guest-SMP Stage 1) WITH the BSP bit set (Stage 2: this
+                // is now intercepted via the MSRPM — see the 0x1B intercept
+                // bit in the VM-open path — and the BSP bit is what keeps
+                // Linux's topology code from capping the guest at 1 CPU).
+                // Writes (enable / relocate) are accepted but we keep the
+                // fixed base — the NPT trap page is wired at 0xFEE00000.
+                // Stage 3 (APs): return BSP set only for the BSP vCPU
+                // (apic_id 0); APs must read it clear.
                 if msr == 0x1B {
                     // RDMSR: report enabled LAPIC at default base. WRMSR:
                     // accept silently (keep fixed base). Single trailing
