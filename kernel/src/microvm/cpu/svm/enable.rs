@@ -28,6 +28,7 @@ use super::{cpuid as host_cpuid, npt, rdmsr, vmcb, wrmsr};
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ── MSRs (APM Vol 2 §15.4) ─────────────────────────────────────────
 
@@ -53,10 +54,9 @@ const VM_HSAVE_PA: u32 = 0xC001_0117;
 /// negligible.
 pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     // 1. EFER.SVME on. APM §15.4: "VMRUN faults with #UD if EFER.SVME=0".
+    //    The VM_HSAVE_PA host-save area is programmed per-core lazily on
+    //    the first VMRUN (`ensure_core_host_state` in `run_guest_once`).
     enable_efer_svme()?;
-
-    // 2. Host-save area — one 4 KB frame, zeroed, written to VM_HSAVE_PA.
-    setup_host_save()?;
 
     // 3. IOPM — 3 contiguous frames (12 KB), zeroed = no I/O traps.
     let iopm_phys = memory::allocate_contiguous(3)
@@ -150,18 +150,60 @@ fn enable_efer_svme() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Allocate the 4 KB host-save area, write its physical address to
-/// VM_HSAVE_PA. Idempotent in the sense that calling twice leaks
-/// the previous frame — fine for substrate tests.
-fn setup_host_save() -> Result<(), &'static str> {
-    let host_save_phys = memory::allocate_frame()
-        .ok_or("OOM allocating SVM host-save area")?;
+/// Max host cores we track per-core SVM state for (matches the
+/// `[_; 256]` arrays in `smp::per_core`).
+const MAX_CORES: usize = 256;
+
+/// Per-core SVM host state, indexed by core id. Both are
+/// per-PHYSICAL-CORE resources, so a single global frame is a
+/// correctness bug the moment two cores run VMRUN concurrently
+/// (guest SMP / multiple microvms):
+///   * `HOST_SAVE_FRAMES` — the VM_HSAVE_PA target. VM_HSAVE_PA is a
+///     per-core MSR; the CPU writes host state there on VMRUN and
+///     reads it on VMEXIT. Two cores pointing at one frame clobber
+///     each other.
+///   * `HOST_EXTRA_FRAMES` — the `vmsave`/`vmload` frame for host
+///     FS/GS/KernelGS/TR/LDTR/SYSCALL MSRs (`vmrun` preserves none —
+///     APM Vol 2 §15.5.2). Concurrent vmsave/vmload against one frame
+///     corrupts FS/GS → process-agnostic guest corruption (the
+///     historical "A2 regression", now cross-core).
+/// Each slot is lazily allocated the first time its core runs a VMRUN
+/// (`ensure_core_host_state`), so any core — including future AP vCPU
+/// fibers — is set up automatically without a separate init path.
+static HOST_SAVE_FRAMES: [AtomicU64; MAX_CORES] =
+    { const Z: AtomicU64 = AtomicU64::new(0); [Z; MAX_CORES] };
+static HOST_EXTRA_FRAMES: [AtomicU64; MAX_CORES] =
+    { const Z: AtomicU64 = AtomicU64::new(0); [Z; MAX_CORES] };
+
+/// Ensure THIS core has SVM enabled, its VM_HSAVE_PA programmed to a
+/// private host-save frame, and a private host-extra-save frame
+/// allocated; return the extra-save frame phys. Idempotent per core
+/// (one atomic load + branch on the hot path). MUST run on the core
+/// that will execute VMRUN — VM_HSAVE_PA is a per-core MSR. No
+/// intra-core race (one core runs this serially); distinct cores
+/// touch distinct slots.
+fn ensure_core_host_state() -> u64 {
+    let cid = crate::smp::per_core::current_core_id().min(MAX_CORES - 1);
+    if HOST_SAVE_FRAMES[cid].load(Ordering::Acquire) == 0 {
+        // EFER.SVME on this core (idempotent).
+        let _ = enable_efer_svme();
+        let p = memory::allocate_frame().expect("OOM allocating SVM host-save area");
+        // SAFETY: freshly allocated, identity-mapped, exclusive.
+        unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096); }
+        // SAFETY: VM_HSAVE_PA is architectural + per-core; p is page-aligned
+        // and identity-mapped. Programs THIS core's host-save area.
+        unsafe { wrmsr(VM_HSAVE_PA, p); }
+        HOST_SAVE_FRAMES[cid].store(p, Ordering::Release);
+    }
+    let extra = HOST_EXTRA_FRAMES[cid].load(Ordering::Acquire);
+    if extra != 0 {
+        return extra;
+    }
+    let p = memory::allocate_contiguous(1).expect("OOM host extra-save frame");
     // SAFETY: freshly allocated, identity-mapped, exclusive.
-    unsafe { core::ptr::write_bytes(host_save_phys as *mut u8, 0, 4096); }
-    // SAFETY: VM_HSAVE_PA is architectural; physical address is
-    // page-aligned and within the host's identity-mapped region.
-    unsafe { wrmsr(VM_HSAVE_PA, host_save_phys); }
-    Ok(())
+    unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096); }
+    HOST_EXTRA_FRAMES[cid].store(p, Ordering::Release);
+    p
 }
 
 /// Initialize a VMCB for the substrate-test guest:
@@ -246,32 +288,6 @@ fn setup_vmcb(
 /// Execute one VMRUN against the supplied VMCB and return the
 /// resulting exit-info. CLGI/STGI bracketing per APM §15.17.
 ///
-/// Host extra-state save area for `vmsave`/`vmload` (VMCB-format
-/// page). AMD `vmrun`/#VMEXIT do NOT preserve host FS.base, GS.base,
-/// KernelGSBase, TR, LDTR or the SYSCALL/SYSENTER MSRs — only
-/// `vmsave`/`vmload` do (APM Vol 2 §15.5.2). Without this the host
-/// resumes after #VMEXIT with the guest's GS.base; harmless-ish on
-/// Core 0 but on a dedicated worker core every per-core (GS-relative)
-/// access then hits the wrong memory → process-agnostic guest
-/// corruption (the A2 regression). One global frame is safe: only one
-/// VM runs at a time and never concurrently across cores.
-static HOST_EXTRA_SAVE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-
-
-fn host_extra_save_phys() -> u64 {
-    use core::sync::atomic::Ordering;
-    let cur = HOST_EXTRA_SAVE.load(Ordering::Acquire);
-    if cur != 0 {
-        return cur;
-    }
-    let p = memory::allocate_contiguous(1).expect("OOM host extra-save frame");
-    // SAFETY: freshly allocated, identity-mapped, exclusive.
-    unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096); }
-    HOST_EXTRA_SAVE.store(p, Ordering::Release);
-    p
-}
-
 /// Loads guest GPRs from `regs` before VMRUN, saves them back on
 /// VMEXIT. RAX/RSP are auto-handled by the CPU via VMCB.SAVE.{RAX,
 /// RSP} + the host-save area, so they're not in `regs`.
@@ -289,7 +305,9 @@ fn run_guest_once(
     guest_fpu: *mut crate::microvm::cpu::FpuArea,
 ) -> vmcb::LaunchOutcome {
     let regs_ptr: *mut vmcb::GuestRegs = regs;
-    let host_extra = host_extra_save_phys();
+    // Per-core: VM_HSAVE_PA + host-extra-save frame for THIS core. Lazily
+    // sets up any core that runs VMRUN (BSP today, AP vCPU fibers later).
+    let host_extra = ensure_core_host_state();
 
     // SAFETY: EFER.SVME is set (caller guarantee), VM_HSAVE_PA
     // points at a valid host-save frame, the VMCB has been
@@ -564,8 +582,9 @@ impl VmContext {
     ) -> Result<VmContext, &'static str> {
         use crate::kprintln;
 
+        // EFER.SVME here; VM_HSAVE_PA + host-extra-save are programmed
+        // per-core on the first VMRUN (`ensure_core_host_state`).
         enable_efer_svme()?;
-        setup_host_save()?;
 
         let guest_bytes = crate::microvm::cpu::choose_guest_ram_bytes();
         let (boot_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt(guest_bytes)?;
