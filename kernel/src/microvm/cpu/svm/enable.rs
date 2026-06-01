@@ -1426,6 +1426,24 @@ impl VmContext {
                 // Pending device IRQs + the timer are retried on a later exit
                 // once IF=1 (≤1 ms via the worker/VM timer).
                 if !guest_interruptible(&self.vcpu.vmcb) {
+                    // EXCEPTION: an idle `sti; hlt` runs the HLT INSIDE the STI
+                    // interrupt-shadow, so this branch fires on every idle HLT
+                    // (IF=1, shadow set). We still must not INJECT here (the
+                    // qspinlock-deadlock reason), but the guest IS going idle —
+                    // count it toward the idle-yield so the host core PARKS
+                    // (yield_sleep) instead of spinning through the HLT at VMRUN
+                    // speed. Without this both vCPUs burned ~69k HLT-exits/s and
+                    // the host cores never idled (guest-SMP idle-spin). A non-HLT
+                    // shadowed exit (mid critical section) still just re-enters.
+                    if exit == EXIT_HLT
+                        && self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) != 0
+                    {
+                        self.vcpu.consecutive_idle =
+                            self.vcpu.consecutive_idle.saturating_add(1);
+                        if self.vcpu.consecutive_idle >= IDLE_YIELD {
+                            return Ok(SliceOutcome::Idle);
+                        }
+                    }
                     last_outcome = Some(outcome);
                     continue;
                 }
