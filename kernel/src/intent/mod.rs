@@ -903,14 +903,21 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 }
                 crate::shade::poll_render();
                 crate::net::poll();
-                // This is the loop that actually runs while a microvm
-                // tile is focused (read_line_with_tab does NOT). It
-                // gave the guest a single 3 ms slice, then a composite,
-                // then a pointless 5000-iter busy spin → the ~5 s frame
-                // cadence. Give it a real budget instead: 8 slices
-                // (~24 ms guest) per composite cycle. net::poll runs
-                // inside each slice's pump, so L3 stays responsive.
-                for _ in 0..8 { crate::microvm::vm_poll_slice(); }
+                // Cooperative path (≤2 cores): Core 0 IS the guest's CPU,
+                // so it must keep slicing — 8 slices (~24 ms guest) per
+                // composite cycle (net::poll runs inside each slice's pump,
+                // so L3 stays responsive). Fiber/dedicated path: the guest
+                // runs on a WORKER core; here vm_poll_slice is just a cheap
+                // reaper, so Core 0 must NOT spin — that pegged a host core
+                // at 100% whenever the VM window was focused, even with the
+                // guest idle (same class as the v0.187.11 focused-window
+                // spin; the Surface branch was missed then). We idle below.
+                let cooperative = crate::microvm::vm_active();
+                if cooperative {
+                    for _ in 0..8 { crate::microvm::vm_poll_slice(); }
+                } else {
+                    crate::microvm::vm_poll_slice(); // reaper only
+                }
                 if crate::shade::take_deferred_render() {
                     crate::shade::render_frame();
                 }
@@ -928,6 +935,15 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                         continue;
                     }
                     crate::microvm::devices::virtio_input_keymap::forward_key(&event);
+                }
+                // Guest runs on a worker core → idle Core 0 until the next
+                // IRQ (input, or the 100 Hz timer to re-check for a new
+                // guest frame) instead of spinning at 100%. Keyboard/mouse
+                // IRQs wake us to forward input; a deferred guest frame is
+                // composited within ≤10 ms. Cooperative path keeps spinning
+                // (it drives the guest).
+                if !cooperative {
+                    core0_idle_tick();
                 }
                 continue;
             }
