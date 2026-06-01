@@ -29,7 +29,26 @@ use super::lapic::LocalApic;
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Big-VM lock (guest SMP). Held by a vCPU only around its post-VMRUN
+/// device/MMIO/IO handling — NEVER across `vmrun` or a fiber yield — so
+/// the BSP and an AP vCPU serialize all access to the shared `VmShared`
+/// (device model + guest memory) while their VMRUNs run truly in
+/// parallel on separate host cores. Uncontended (and never even taken)
+/// until an AP is admitted (`AP_ACTIVE`).
+static VM_BIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+/// True once a second vCPU (AP) shares this VM. While false the BSP runs
+/// exactly as the single-vCPU path did — `VM_BIG_LOCK` is not taken, so
+/// the hot loop is byte-identical. Set by the orchestration layer when it
+/// spawns the AP fiber, cleared after the last vCPU exits.
+pub static AP_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn ap_active() -> bool {
+    AP_ACTIVE.load(Ordering::Acquire)
+}
 
 // ── MSRs (APM Vol 2 §15.4) ─────────────────────────────────────────
 
@@ -901,6 +920,140 @@ fn setup_vmcb_linux(
     vmcb.write_u64(vmcb::OFF_SAVE_G_PAT, 0x0007_0406_0007_0406);
 }
 
+/// Configure an AP vCPU's VMCB for a SIPI start (guest SMP, Stage 3b):
+/// 16-bit real mode at CS = `(vector<<8):0000`, i.e. physical entry
+/// `vector<<12`, which is where Linux's BSP copied the real-mode AP
+/// trampoline. The trampoline takes the AP to protected→long mode and
+/// into `start_secondary`. The control area mirrors `setup_vmcb_linux`
+/// and **shares** the BSP's NCR3 / IOPM / MSRPM (one guest address space,
+/// one device intercept policy). `TLB_CTL=1` (flush this guest's TLB on
+/// every entry) means NPT mutations made by any vCPU are picked up by the
+/// others on their next VMRUN — no separate cross-core TLB-shootdown IPI.
+#[allow(dead_code)] // wired by the AP spawn in Stage 3b-2b
+fn setup_vmcb_ap(
+    vmcb: &mut vmcb::Vmcb,
+    iopm_phys: u64,
+    msrpm_phys: u64,
+    npt_root: u64,
+    sipi_vector: u8,
+) {
+    // ── Control area — identical to setup_vmcb_linux ────────────────
+    let misc1 = vmcb::INTERCEPT_INTR
+        | vmcb::INTERCEPT_CPUID
+        | vmcb::INTERCEPT_HLT
+        | vmcb::INTERCEPT_IOIO_PROT
+        | vmcb::INTERCEPT_MSR_PROT
+        | vmcb::INTERCEPT_SHUTDOWN;
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, misc1);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::INTERCEPT_VMRUN);
+    vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
+    vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
+    vmcb.write_u32(vmcb::OFF_ASID, 1);
+    vmcb.write_u8(vmcb::OFF_TLB_CTL, 1);
+    vmcb.write_u64(vmcb::OFF_NESTED_CTL, 1); // NP_ENABLE
+    vmcb.write_u64(vmcb::OFF_NCR3, npt_root);
+
+    // ── State save area: 16-bit real mode, SIPI entry ──────────────
+    let cs_base = (sipi_vector as u64) << 12;
+    vmcb.write_segment(
+        vmcb::OFF_SAVE_CS,
+        /* selector */ (sipi_vector as u16) << 8,
+        /* attrib   */ vmcb::ATTR_CODE_RM,
+        /* limit    */ 0xFFFF,
+        /* base     */ cs_base,
+    );
+    for off in [
+        vmcb::OFF_SAVE_SS,
+        vmcb::OFF_SAVE_DS,
+        vmcb::OFF_SAVE_ES,
+        vmcb::OFF_SAVE_FS,
+        vmcb::OFF_SAVE_GS,
+    ] {
+        vmcb.write_segment(off, 0, vmcb::ATTR_DATA_RM, 0xFFFF, 0);
+    }
+    // GDTR/IDTR limits — leave zero; the trampoline reloads its own.
+    vmcb.write_u32(vmcb::OFF_SAVE_GDTR + 4, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_GDTR + 8, 0);
+    vmcb.write_u32(vmcb::OFF_SAVE_IDTR + 4, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_IDTR + 8, 0);
+
+    // CR registers: architectural INIT/reset state (real mode, paging off,
+    // caches off — Linux's AP path re-enables caching via MTRR init).
+    vmcb.write_u64(vmcb::OFF_SAVE_CR0, 0x6000_0010);
+    vmcb.write_u64(vmcb::OFF_SAVE_CR3, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_CR4, 0);
+
+    // EFER: SVME mandatory (APM §15.5.1); no LME — the AP enters in real
+    // mode and its own trampoline sets LME/LMA when it builds long mode.
+    vmcb.write_u64(vmcb::OFF_SAVE_EFER, EFER_SVME);
+
+    vmcb.write_u64(vmcb::OFF_SAVE_RFLAGS, 0x0000_0002);
+    vmcb.write_u64(vmcb::OFF_SAVE_RIP, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_RSP, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
+    vmcb.write_u8(vmcb::OFF_SAVE_CPL, 0);
+    vmcb.write_u64(vmcb::OFF_SAVE_G_PAT, 0x0007_0406_0007_0406);
+}
+
+#[allow(dead_code)] // wired by the AP spawn in Stage 3b-2b
+impl VmContext {
+    /// Build an AP vCPU that **shares** an already-open BSP's `VmShared`
+    /// (guest SMP, Stage 3b). `shared` aliases the BSP's heap-boxed
+    /// `VmShared` (valid for the VM lifetime via the last-one-out
+    /// refcount); `sipi_vector` is the SIPI start page; `apic_id` is the
+    /// AP's id (1..). No guest RAM / NPT / device allocation here — those
+    /// belong to the BSP and are shared. EFER.SVME is enabled on this
+    /// (the AP's) physical core.
+    pub fn open_ap(
+        shared: *mut VmShared,
+        sipi_vector: u8,
+        apic_id: u8,
+    ) -> Result<VmContext, &'static str> {
+        enable_efer_svme()?;
+
+        // Stable shared fields (set once at BSP open, never mutated) — read
+        // without the lock is sound.
+        // SAFETY: `shared` is valid for the VM lifetime (see SharedRef).
+        let (iopm_phys, msrpm_phys, npt_root) = {
+            let s = unsafe { &*shared };
+            (s.iopm_phys, s.msrpm_phys, s.npt_pml4)
+        };
+
+        let mut vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
+        let vmcb_phys = vmcb.phys_addr();
+        setup_vmcb_ap(&mut vmcb, iopm_phys, msrpm_phys, npt_root, sipi_vector);
+
+        let regs = vmcb::GuestRegs::default();
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        Ok(VmContext {
+            shared: SharedRef::Borrowed(shared),
+            vcpu: Vcpu {
+                apic_id,
+                vmcb,
+                vmcb_phys,
+                regs,
+                host_fpu: crate::microvm::cpu::FpuArea::boxed(),
+                guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
+                reinject: 0,
+                iter: 0,
+                io_dropped: 0,
+                msr_log_count: 0,
+                consecutive_idle: 0,
+                lapic: LocalApic::new(apic_id),
+                last_lapic_tick: 0,
+                if_off_halts: 0,
+            },
+        })
+    }
+
+    /// Raw pointer to this VM's shared state, for an AP vCPU to alias
+    /// (`open_ap`). Only valid to call on the BSP's `Owned` context.
+    pub fn shared_ptr(&mut self) -> *mut VmShared {
+        &mut *self.shared as *mut VmShared
+    }
+}
+
 /// Per-guest serial UART state across exits. Mirrors `vmx::enable
 /// ::SerialState` but lives in the SVM tree to keep the two backends
 /// independently evolvable.
@@ -1128,15 +1281,22 @@ impl VmContext {
         // so it shares the EXIT_INTR keepalive path below.
         if exit != EXIT_INTR && exit != EXIT_HLT { self.vcpu.consecutive_idle = 0; }
 
+        // Take the big-VM lock around this exit's device/memory handling
+        // when an AP shares the VM (guest SMP), so the two vCPUs serialize
+        // access to `VmShared`. Both `_big` and `sh` are dropped at the end
+        // of the loop body — `sh`'s `&mut VmShared` borrow ends before the
+        // lock releases (reverse declaration order), so only the lock holder
+        // ever has a live `&mut` to the shared state (sound aliasing across
+        // the BSP's Owned box and the AP's Borrowed pointer to it). When no
+        // AP is active the lock is not taken and this is byte-identical to
+        // the single-vCPU path.
+        let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
         // Resolve the shared device/memory state once for this exit's
         // handling. Through `SharedRef::DerefMut` this is a single borrow
         // of `self.shared`, so the handlers below can still take disjoint
         // sub-field borrows (`&mut sh.serial` + `&mut sh.pci`) the way they
         // did when `shared` was a plain field; `self.vcpu` stays separately
-        // borrowable (disjoint field of `self`). Re-borrowed per iteration
-        // and dropped at the end of the loop body — never held across
-        // `run_guest_once` or a fiber yield. Stage 3b wraps this block in
-        // VM_BIG_LOCK so an AP vCPU can share the same `VmShared`.
+        // borrowable (disjoint field of `self`).
         let sh = &mut *self.shared;
 
         match exit {
