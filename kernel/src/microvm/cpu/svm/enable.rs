@@ -513,12 +513,13 @@ pub enum SliceOutcome {
     Exited(vmcb::LaunchOutcome),
 }
 
-/// Persistent state of one Linux microvm across cooperative slices
-/// (SVM backend). Core-agnostic (forward-compat contract #1).
-pub struct VmContext {
-    /// Owned (not leaked) so it's reclaimed on drop — relaunch fix.
-    vmcb: alloc::boxed::Box<vmcb::Vmcb>,
-    vmcb_phys: u64,
+/// State shared by ALL vCPUs of one microvm: the single guest address
+/// space (RAM + NPT), the device model, and the host-tick/display
+/// bookkeeping. Today the one vCPU owns it directly inside `VmContext`;
+/// Stage 0c moves it behind a big-VM lock + shared handle so AP vCPU
+/// fibers attach to it (guest SMP). Splitting it out now (Stage 0b) is a
+/// pure, behaviour-preserving decomposition.
+pub struct VmShared {
     guest_mem: GuestMem,
     /// NPT PML4 (= NCR3) phys — `close()` passes it to `npt::release`
     /// to free demand-faulted frames + demand PTs + NPT tables.
@@ -529,10 +530,39 @@ pub struct VmContext {
     guest_raw_base: u64,
     iopm_phys: u64,
     msrpm_phys: u64,
-    regs: vmcb::GuestRegs,
     serial: SerialState,
     pci: crate::microvm::devices::PciBus,
     pic: crate::microvm::devices::pic8259::Pic8259,
+    /// Host tick at which we last injected guest timer IRQ0. The
+    /// microvm provides no PIT/LAPIC timer event source, so without
+    /// this the guest's nanosleep/timerfd/poll-timeout never wake
+    /// (input read() wakes via virtio-input IRQ; time does not).
+    /// One IRQ0 per host tick (≈100 Hz) drives jiffies + wakeups.
+    last_timer_tick: u64,
+    /// `ticks()` of the last virtio-gpu display config-change IRQ —
+    /// rate-limits the resize round-trip against a drag storm. See
+    /// the vmx mirror.
+    last_cfg_tick: u64,
+}
+
+/// Per-vCPU state: its own VMCB + register file + FPU areas, plus the
+/// per-vCPU exit-handling bookkeeping. Each vCPU fiber owns one; guest
+/// SMP = N of these against one shared `VmShared`.
+pub struct Vcpu {
+    /// Owned (not leaked) so it's reclaimed on drop — relaunch fix.
+    vmcb: alloc::boxed::Box<vmcb::Vmcb>,
+    vmcb_phys: u64,
+    regs: vmcb::GuestRegs,
+    /// Host/guest FPU (XSAVE) save areas — `vmrun` preserves neither.
+    /// See `cpu::FpuArea`. guest_fpu starts zeroed = FPU init state.
+    host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
+    guest_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
+    /// Event that was mid-delivery when the last #VMEXIT hit (raw
+    /// VMCB.EXITINTINFO, identical encoding to EVENTINJ). Must be
+    /// re-injected on the next VMRUN or the guest loses an interrupt
+    /// mid-vectoring → corrupt guest state (AMD APM §15.20; KVM
+    /// `svm_complete_interrupts`). 0 = nothing pending.
+    reinject: u64,
     iter: u32,
     io_dropped: u32,
     msr_log_count: u32,
@@ -544,29 +574,14 @@ pub struct VmContext {
     /// off → exit the VM (tears the window down on browser close instead
     /// of leaving a black idle window). Reset on any IF=1 HLT.
     if_off_halts: u32,
-    /// Host tick at which we last injected guest timer IRQ0. The
-    /// microvm provides no PIT/LAPIC timer event source, so without
-    /// this the guest's nanosleep/timerfd/poll-timeout never wake
-    /// (input read() wakes via virtio-input IRQ; time does not).
-    /// One IRQ0 per host tick (≈100 Hz) drives jiffies + wakeups.
-    last_timer_tick: u64,
-    /// `ticks()` of the last virtio-gpu display config-change IRQ —
-    /// rate-limits the resize round-trip against a drag storm. See
-    /// the vmx mirror.
-    last_cfg_tick: u64,
-    /// Event that was mid-delivery when the last #VMEXIT hit (raw
-    /// VMCB.EXITINTINFO, identical encoding to EVENTINJ). Must be
-    /// re-injected on the next VMRUN or the guest loses an interrupt
-    /// mid-vectoring → corrupt guest state (AMD APM §15.20; KVM
-    /// `svm_complete_interrupts`). 0 = nothing pending. Only bites
-    /// the dedicated core in practice: a busy near-native guest
-    /// #VMEXITs mid-delivery far more than the HLT-idle cooperative
-    /// one, so the loss was invisible until A2.
-    reinject: u64,
-    /// Host/guest FPU (XSAVE) save areas — `vmrun` preserves neither.
-    /// See `cpu::FpuArea`. guest_fpu starts zeroed = FPU init state.
-    host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
-    guest_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
+}
+
+/// Persistent state of one Linux microvm across cooperative slices
+/// (SVM backend). Core-agnostic (forward-compat contract #1). Composed
+/// of `VmShared` (all-vCPU) + one `Vcpu` (the BSP today).
+pub struct VmContext {
+    shared: VmShared,
+    vcpu: Vcpu,
 }
 
 impl VmContext {
@@ -635,27 +650,31 @@ impl VmContext {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         Ok(VmContext {
-            vmcb,
-            vmcb_phys,
-            guest_mem: gm,
-            npt_pml4: npt_root,
-            guest_raw_base,
-            iopm_phys,
-            msrpm_phys,
-            regs,
-            serial,
-            pci: crate::microvm::devices::PciBus::new(),
-            pic: crate::microvm::devices::pic8259::Pic8259::new(),
-            iter: 0,
-            io_dropped: 0,
-            msr_log_count: 0,
-            consecutive_idle: 0,
-            if_off_halts: 0,
-            last_timer_tick: 0,
-            last_cfg_tick: 0,
-            reinject: 0,
-            host_fpu: crate::microvm::cpu::FpuArea::boxed(),
-            guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
+            shared: VmShared {
+                guest_mem: gm,
+                npt_pml4: npt_root,
+                guest_raw_base,
+                iopm_phys,
+                msrpm_phys,
+                serial,
+                pci: crate::microvm::devices::PciBus::new(),
+                pic: crate::microvm::devices::pic8259::Pic8259::new(),
+                last_timer_tick: 0,
+                last_cfg_tick: 0,
+            },
+            vcpu: Vcpu {
+                vmcb,
+                vmcb_phys,
+                regs,
+                host_fpu: crate::microvm::cpu::FpuArea::boxed(),
+                guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
+                reinject: 0,
+                iter: 0,
+                io_dropped: 0,
+                msr_log_count: 0,
+                consecutive_idle: 0,
+                if_off_halts: 0,
+            },
         })
     }
 
@@ -673,16 +692,16 @@ impl VmContext {
         // path (VM_CLOSE_REQUESTED → break → close), where run_slice's
         // own loop-end save() never runs (it returned StillRunning).
         // Without this the browser profile is lost on every Mod+Q.
-        self.pci.virtio_blk.save();
+        self.shared.pci.virtio_blk.save();
         // Demand-faulted frames + demand PTs + NPT tables.
-        npt::release(self.npt_pml4, self.guest_mem.len());
+        npt::release(self.shared.npt_pml4, self.shared.guest_mem.len());
         // Contiguous boot window.
         memory::deallocate_contiguous(
-            self.guest_raw_base,
-            npt::boot_frames_for(self.guest_mem.len()),
+            self.shared.guest_raw_base,
+            npt::boot_frames_for(self.shared.guest_mem.len()),
         );
-        memory::deallocate_contiguous(self.iopm_phys, 3);
-        memory::deallocate_contiguous(self.msrpm_phys, 2);
+        memory::deallocate_contiguous(self.shared.iopm_phys, 3);
+        memory::deallocate_contiguous(self.shared.msrpm_phys, 2);
     }
 }
 
@@ -937,12 +956,12 @@ impl VmContext {
     let slice_deadline = crate::interrupts::rdtsc()
         + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
 
-    while self.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
+    while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
             return Ok(SliceOutcome::StillRunning);
         }
 
-        self.iter = self.iter.saturating_add(1);
+        self.vcpu.iter = self.vcpu.iter.saturating_add(1);
         slice_n += 1;
 
         // Re-inject an event that #VMEXITed mid-delivery on the
@@ -950,19 +969,19 @@ impl VmContext {
         // Highest priority for the single EVENTINJ slot: a lost
         // in-flight interrupt corrupts the guest far worse than a
         // skipped fresh tick (which the next EXIT_INTR regenerates).
-        if self.reinject != 0 {
-            self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, self.reinject);
-            self.reinject = 0;
+        if self.vcpu.reinject != 0 {
+            self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, self.vcpu.reinject);
+            self.vcpu.reinject = 0;
         }
 
         // Host↔guest FPU save/restore is embedded in run_guest_once's
         // asm, bracketing vmrun with zero compiler-emittable code (a
         // +avx2 kernel spills ymm between any Rust helper and the asm
         // → clobbers the restored guest FPU). Pass the areas in.
-        let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.host_fpu;
-        let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.guest_fpu;
+        let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
+        let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;
         let outcome =
-            run_guest_once(&mut self.regs, &mut *self.vmcb, self.vmcb_phys, hf, gf);
+            run_guest_once(&mut self.vcpu.regs, &mut *self.vcpu.vmcb, self.vcpu.vmcb_phys, hf, gf);
         let exit = outcome.exit_reason;
 
         // Exit-reason histogram (diagnosis — `cores` shows the mix).
@@ -986,7 +1005,7 @@ impl VmContext {
         // control.event_inj after every run for exactly this; do the
         // same. The reinject/EXIT_INTR/MMIO sites re-arm it for the
         // next VMRUN as needed.
-        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, 0);
+        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, 0);
 
         // Did an event abort mid-vectoring? EXITINTINFO has the same
         // encoding as EVENTINJ. Re-inject ONLY external interrupts
@@ -1000,15 +1019,15 @@ impl VmContext {
         // double delivery → the recurring rt_sigprocmask `<ret>`
         // corruption. Mirrors KVM svm_complete_interrupts' type
         // discrimination.
-        let eii = self.vmcb.read_u64(vmcb::OFF_EXIT_INT_INFO);
+        let eii = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INT_INFO);
         let eii_type = (eii >> 8) & 0x7;
         if eii & (1u64 << 31) != 0 && (eii_type == 0 || eii_type == 2) {
-            self.reinject = eii;
+            self.vcpu.reinject = eii;
         }
 
         // EXIT_HLT counts as idle too (guest halted waiting for an IRQ),
         // so it shares the EXIT_INTR keepalive path below.
-        if exit != EXIT_INTR && exit != EXIT_HLT { self.consecutive_idle = 0; }
+        if exit != EXIT_INTR && exit != EXIT_HLT { self.vcpu.consecutive_idle = 0; }
 
         match exit {
             EXIT_INTR | EXIT_HLT => {
@@ -1021,8 +1040,8 @@ impl VmContext {
                 // guest resumes past it — no manual RIP advance needed. The
                 // dedicated core host-idles between ticks via SliceOutcome::Idle.
                 if exit == EXIT_HLT && crate::microvm::vm_window() == 0 {
-                    self.serial.flush();
-                    kprintln!("[svm] guest HLT after {} VM-exits — exiting", self.iter);
+                    self.shared.serial.flush();
+                    kprintln!("[svm] guest HLT after {} VM-exits — exiting", self.vcpu.iter);
                     last_outcome = Some(outcome);
                     break;
                 }
@@ -1036,19 +1055,19 @@ impl VmContext {
                 // closes (cage exits → PID-1 `halt -f` → cli;hlt loop)
                 // instead of hanging as a black idle window until Mod+Q.
                 if exit == EXIT_HLT {
-                    if self.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) == 0 {
-                        self.if_off_halts = self.if_off_halts.saturating_add(1);
-                        if self.if_off_halts >= 64 {
-                            self.serial.flush();
+                    if self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) == 0 {
+                        self.vcpu.if_off_halts = self.vcpu.if_off_halts.saturating_add(1);
+                        if self.vcpu.if_off_halts >= 64 {
+                            self.shared.serial.flush();
                             kprintln!(
                                 "[svm] guest powered off (HLT with IF=0) after {} iters — exiting",
-                                self.iter
+                                self.vcpu.iter
                             );
                             last_outcome = Some(outcome);
                             break;
                         }
                     } else {
-                        self.if_off_halts = 0;
+                        self.vcpu.if_off_halts = 0;
                     }
                 }
                 // HLT is an intercepted instruction: advance RIP past it
@@ -1056,7 +1075,7 @@ impl VmContext {
                 // injected IRQ's ISR returns, the guest continues into its
                 // need_resched check and schedules — not back onto the HLT.
                 if exit == EXIT_HLT {
-                    advance_rip(&mut self.vmcb);
+                    advance_rip(&mut self.vcpu.vmcb);
                 }
                 // Guest timer tick. The microvm has no PIT/LAPIC
                 // timer event source, so the only thing that ever
@@ -1084,30 +1103,30 @@ impl VmContext {
                     let now_d4 = crate::interrupts::ticks();
                     // Phase 2 of any in-flight D4 cycle: fire reconnect
                     // once the 100 ms disconnect window expired.
-                    if self.pci.virtio_gpu.tick_d4(now_d4) {
-                        let vector = self.pic.vector_for_irq(9);
+                    if self.shared.pci.virtio_gpu.tick_d4(now_d4) {
+                        let vector = self.shared.pic.vector_for_irq(9);
                         let info: u64 = (vector as u64) | (1u64 << 31);
-                        self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.consecutive_idle = 0;
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
                         let _ = wid;
                         continue;
                     }
                     // Phase 1: a fresh dirty from Shade and no cycle
                     // in flight → kick off disconnect.
                     if wid != 0
-                        && !self.pci.virtio_gpu.d4_disconnecting()
+                        && !self.shared.pci.virtio_gpu.d4_disconnecting()
                         && crate::shade::surface::display_dirty_peek(wid)
                     {
                         // R2 debounce — one cycle per ~250 ms; flag stays
                         // dirty during a drag so the final size lands.
-                        if now_d4.wrapping_sub(self.last_cfg_tick) >= 25 {
+                        if now_d4.wrapping_sub(self.shared.last_cfg_tick) >= 25 {
                             let _ = crate::shade::surface::take_display_dirty(wid);
-                            self.last_cfg_tick = now_d4;
-                            self.pci.virtio_gpu.signal_display_change(now_d4);
-                            let vector = self.pic.vector_for_irq(9);
+                            self.shared.last_cfg_tick = now_d4;
+                            self.shared.pci.virtio_gpu.signal_display_change(now_d4);
+                            let vector = self.shared.pic.vector_for_irq(9);
                             let info: u64 = (vector as u64) | (1u64 << 31);
-                            self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                            self.consecutive_idle = 0;
+                            self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                            self.vcpu.consecutive_idle = 0;
                             continue;
                         }
                     }
@@ -1124,38 +1143,38 @@ impl VmContext {
                 // otherwise input > net, then the normal timer.
                 const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
                 let now = crate::interrupts::ticks();
-                if self.pic.irq_unmasked(0)
-                    && now.wrapping_sub(self.last_timer_tick) >= TIMER_MAX_SKIP
+                if self.shared.pic.irq_unmasked(0)
+                    && now.wrapping_sub(self.shared.last_timer_tick) >= TIMER_MAX_SKIP
                 {
-                    self.last_timer_tick = now;
-                    let vector = self.pic.vector_for_irq(0);
+                    self.shared.last_timer_tick = now;
+                    let vector = self.shared.pic.vector_for_irq(0);
                     let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.consecutive_idle = 0;
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
                     continue;
                 }
                 let pumped = crate::microvm::devices::nat::pump(
-                    &mut self.pci.virtio_net, &self.guest_mem);
-                if self.pci.virtio_input.drain_injected(&self.guest_mem) {
-                    let vector = self.pic.vector_for_irq(12);
+                    &mut self.shared.pci.virtio_net, &self.shared.guest_mem);
+                if self.shared.pci.virtio_input.drain_injected(&self.shared.guest_mem) {
+                    let vector = self.shared.pic.vector_for_irq(12);
                     let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.consecutive_idle = 0;
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
                     continue;
                 }
                 if pumped {
-                    let vector = self.pic.vector_for_irq(10);
+                    let vector = self.shared.pic.vector_for_irq(10);
                     let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.consecutive_idle = 0;
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
                     continue;
                 }
-                if now != self.last_timer_tick && self.pic.irq_unmasked(0) {
-                    self.last_timer_tick = now;
-                    let vector = self.pic.vector_for_irq(0);
+                if now != self.shared.last_timer_tick && self.shared.pic.irq_unmasked(0) {
+                    self.shared.last_timer_tick = now;
+                    let vector = self.shared.pic.vector_for_irq(0);
                     let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.consecutive_idle = 0;
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
                     continue;
                 }
                 // Real net data (`pumped`) means not idle. Merely having
@@ -1171,22 +1190,22 @@ impl VmContext {
                     || (crate::microvm::devices::nat::active_session_count() > 0
                         && crate::microvm::vm_window() == 0)
                 {
-                    self.consecutive_idle = 0;
+                    self.vcpu.consecutive_idle = 0;
                 } else {
-                    self.consecutive_idle = self.consecutive_idle.saturating_add(1);
+                    self.vcpu.consecutive_idle = self.vcpu.consecutive_idle.saturating_add(1);
                 }
                 // Idle-auto-exit only for an UNWINDOWED VM. A
                 // window-bound VM is an app — idle is normal, never
                 // kill it; it ends on real guest exit or window close
                 // (VM_CLOSE_REQUESTED in vm_poll_slice). See the vmx
                 // mirror for the full rationale.
-                if self.consecutive_idle >= IDLE_THRESHOLD
+                if self.vcpu.consecutive_idle >= IDLE_THRESHOLD
                     && crate::microvm::vm_window() == 0
                 {
-                    self.serial.flush();
+                    self.shared.serial.flush();
                     kprintln!(
                         "[svm] guest idle in userspace ({} consecutive INTRs after {} iters) — exiting cleanly",
-                        self.consecutive_idle, self.iter,
+                        self.vcpu.consecutive_idle, self.vcpu.iter,
                     );
                     last_outcome = Some(outcome);
                     break;
@@ -1194,14 +1213,14 @@ impl VmContext {
                 // Guest idle → yield, signalling Idle so the dedicated
                 // core host-idles before re-entering (no VMRUN spin) and
                 // Core 0 returns to the shell. Guest stays alive.
-                if self.consecutive_idle >= IDLE_YIELD {
+                if self.vcpu.consecutive_idle >= IDLE_YIELD {
                     return Ok(SliceOutcome::Idle);
                 }
                 last_outcome = Some(outcome);
             }
             EXIT_CPUID => {
-                let leaf = self.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
-                let subleaf = self.regs.rcx as u32;
+                let leaf = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
+                let subleaf = self.vcpu.regs.rcx as u32;
                 let (eax, ebx, mut ecx, mut edx);
                 // Hide hypervisor presence + KVM paravirt leafs entirely.
                 // Without this, Linux sees the L1 KVM signature through
@@ -1236,11 +1255,11 @@ impl VmContext {
                         ecx &= !(1u32 << 4);   // OSPKE
                     }
                 }
-                self.vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);
-                self.regs.rbx = ebx as u64;
-                self.regs.rcx = ecx as u64;
-                self.regs.rdx = edx as u64;
-                advance_rip(&mut *self.vmcb);
+                self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);
+                self.vcpu.regs.rbx = ebx as u64;
+                self.vcpu.regs.rcx = ecx as u64;
+                self.vcpu.regs.rdx = edx as u64;
+                advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);
             }
             EXIT_IOIO => {
@@ -1252,79 +1271,79 @@ impl VmContext {
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
-                handle_linux_io(&mut *self.vmcb, &mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped);
-                advance_rip(&mut *self.vmcb);
+                handle_linux_io(&mut *self.vcpu.vmcb, &mut self.shared.serial, &mut self.shared.pci, &mut self.shared.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped);
+                advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);
             }
             EXIT_MSR => {
                 // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR
                 let is_write = outcome.exit_qualification & 1 != 0;
-                let msr = self.regs.rcx as u32;
+                let msr = self.vcpu.regs.rcx as u32;
                 if is_write {
-                    if self.msr_log_count < MSR_LOG_CAP {
-                        let val = (self.regs.rdx << 32)
-                            | (self.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                    if self.vcpu.msr_log_count < MSR_LOG_CAP {
+                        let val = (self.vcpu.regs.rdx << 32)
+                            | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
                         kprintln!("[svm] WRMSR {:#010x} = {:#018x} (absorbed)", msr, val);
-                        self.msr_log_count += 1;
+                        self.vcpu.msr_log_count += 1;
                     }
                 } else {
-                    if !msr_is_known_noise(msr) && self.msr_log_count < MSR_LOG_CAP {
+                    if !msr_is_known_noise(msr) && self.vcpu.msr_log_count < MSR_LOG_CAP {
                         kprintln!("[svm] RDMSR {:#010x} → 0 (unhandled)", msr);
-                        self.msr_log_count += 1;
+                        self.vcpu.msr_log_count += 1;
                     }
-                    self.regs.rdx = 0;
-                    self.vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
+                    self.vcpu.regs.rdx = 0;
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
                 }
-                advance_rip(&mut *self.vmcb);
+                advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);
             }
             EXIT_SHUTDOWN => {
-                self.serial.flush();
-                if self.serial.panic_observed {
+                self.shared.serial.flush();
+                if self.shared.serial.panic_observed {
                     kprintln!(
                         "[svm] linux kernel panicked (after {} iters): {}",
-                        self.iter, self.serial.panic_msg_str(),
+                        self.vcpu.iter, self.shared.serial.panic_msg_str(),
                     );
                     kprintln!("[svm] guest then triple-faulted via emergency_restart (= expected reboot path)");
                 } else {
                     kprintln!(
                         "[svm] guest triple-faulted/shutdown after {} iters (no kernel-panic on console)",
-                        self.iter,
+                        self.vcpu.iter,
                     );
                 }
                 last_outcome = Some(outcome);
                 break;
             }
             EXIT_NPF => {
-                let gpa = self.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
-                if self.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, &self.guest_mem) {
+                let gpa = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
+                if self.shared.pci.virtio_blk.bar0_in_range(gpa) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk, &self.shared.pic, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_npf_net(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, &self.guest_mem) {
+                } else if self.shared.pci.virtio_net.bar0_in_range(gpa) {
+                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_net, &self.shared.pic, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_npf_gpu(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, &self.guest_mem) {
+                } else if self.shared.pci.virtio_gpu.bar0_in_range(gpa) {
+                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_gpu, &self.shared.pic, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_npf_input(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, &self.guest_mem) {
+                } else if self.shared.pci.virtio_input.bar0_in_range(gpa) {
+                    if handle_mmio_npf_input(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_input, &self.shared.pic, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.pci.virtio_9p.bar0_in_range(gpa) {
-                    if handle_mmio_npf_p9(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_9p, &self.pic, gpa, &self.guest_mem) {
+                } else if self.shared.pci.virtio_9p.bar0_in_range(gpa) {
+                    if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_9p, &self.shared.pic, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
+                } else if self.shared.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_npf_blk(&mut *self.vmcb, &mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, &self.guest_mem) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk_sqfs, &self.shared.pic, gpa, &self.shared.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1334,20 +1353,20 @@ impl VmContext {
                 // block = first touch of a 4-KB demand page → fault it
                 // in + re-enter. Order: MMIO BAR ranges first (above),
                 // RAM-demand here, fatal dump last.
-                if self.guest_mem.ensure(gpa) {
+                if self.shared.guest_mem.ensure(gpa) {
                     last_outcome = Some(outcome);
                     continue;
                 }
-                self.serial.flush();
+                self.shared.serial.flush();
                 kprintln!(
                     "[svm] NPF: gpa={:#018x} info1={:#x} after {} iters",
-                    gpa, outcome.exit_qualification, self.iter,
+                    gpa, outcome.exit_qualification, self.vcpu.iter,
                 );
                 last_outcome = Some(outcome);
                 break;
             }
             EXIT_INVALID => {
-                self.serial.flush();
+                self.shared.serial.flush();
                 kprintln!(
                     "[svm] VMEXIT_INVALID — VMCB consistency check failed (info1={:#x})",
                     outcome.exit_qualification,
@@ -1356,10 +1375,10 @@ impl VmContext {
                 break;
             }
             _ => {
-                self.serial.flush();
+                self.shared.serial.flush();
                 kprintln!(
                     "[svm] unhandled exit {:#x} info1={:#x} after {} iters",
-                    exit, outcome.exit_qualification, self.iter,
+                    exit, outcome.exit_qualification, self.vcpu.iter,
                 );
                 last_outcome = Some(outcome);
                 break;
@@ -1367,18 +1386,18 @@ impl VmContext {
         }
     }
 
-    if self.iter >= MAX_ITERATIONS && crate::microvm::vm_window() == 0 {
-        self.serial.flush();
+    if self.vcpu.iter >= MAX_ITERATIONS && crate::microvm::vm_window() == 0 {
+        self.shared.serial.flush();
         kprintln!(
             "[svm] iteration cap ({}) reached — guest still running ({} I/O drops)",
-            MAX_ITERATIONS, self.io_dropped,
+            MAX_ITERATIONS, self.vcpu.io_dropped,
         );
     }
 
     // Persist the virtio-blk profile-image to npkFS (encrypted at
     // rest). Reached only when the loop ended (guest exit / cap), not
     // on a StillRunning yield — identical to the old run_linux_loop.
-    self.pci.virtio_blk.save();
+    self.shared.pci.virtio_blk.save();
 
     match last_outcome {
         Some(o) => Ok(SliceOutcome::Exited(o)),
