@@ -603,11 +603,60 @@ pub struct Vcpu {
     if_off_halts: u32,
 }
 
+/// Handle to a microvm's `VmShared`. The BSP vCPU **owns** it, heap-boxed
+/// so its address is stable while the BSP's `VmContext` moves on the fiber
+/// stack; an AP vCPU (guest SMP, Stage 3b) holds `Borrowed` — a raw pointer
+/// to the same box. `Deref`/`DerefMut` make every `self.shared.X` access
+/// work unchanged for both. Concurrent access between vCPUs is serialized
+/// by `VM_BIG_LOCK` (taken around post-VMRUN device handling), NOT by this
+/// handle — it only resolves *which* `VmShared` a vCPU's exit-handler sees.
+pub enum SharedRef {
+    Owned(alloc::boxed::Box<VmShared>),
+    /// AP vCPU: aliases the BSP's box. Valid for the VM's lifetime — the
+    /// BSP frees the box only after the last vCPU has exited (last-one-out
+    /// refcount), so the pointer never dangles while an AP runs.
+    /// Constructed in Stage 3b-2 (AP spawn).
+    #[allow(dead_code)]
+    Borrowed(*mut VmShared),
+}
+
+// SAFETY: SharedRef::Borrowed is a raw pointer; the type is only moved
+// into AP fiber tasks, and all access to the pointee is serialized by
+// VM_BIG_LOCK. The Send marker lets it cross into the spawned fiber.
+unsafe impl Send for SharedRef {}
+
+impl SharedRef {
+    fn owned(s: VmShared) -> Self {
+        SharedRef::Owned(alloc::boxed::Box::new(s))
+    }
+}
+
+impl core::ops::Deref for SharedRef {
+    type Target = VmShared;
+    fn deref(&self) -> &VmShared {
+        match self {
+            SharedRef::Owned(b) => b,
+            // SAFETY: see the type-level comment — valid for the VM lifetime.
+            SharedRef::Borrowed(p) => unsafe { &**p },
+        }
+    }
+}
+
+impl core::ops::DerefMut for SharedRef {
+    fn deref_mut(&mut self) -> &mut VmShared {
+        match self {
+            SharedRef::Owned(b) => b,
+            // SAFETY: as above; access is VM_BIG_LOCK-serialized.
+            SharedRef::Borrowed(p) => unsafe { &mut **p },
+        }
+    }
+}
+
 /// Persistent state of one Linux microvm across cooperative slices
 /// (SVM backend). Core-agnostic (forward-compat contract #1). Composed
-/// of `VmShared` (all-vCPU) + one `Vcpu` (the BSP today).
+/// of `VmShared` (all-vCPU, behind `SharedRef`) + one `Vcpu`.
 pub struct VmContext {
-    shared: VmShared,
+    shared: SharedRef,
     vcpu: Vcpu,
 }
 
@@ -695,7 +744,7 @@ impl VmContext {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         Ok(VmContext {
-            shared: VmShared {
+            shared: SharedRef::owned(VmShared {
                 guest_mem: gm,
                 npt_pml4: npt_root,
                 guest_raw_base,
@@ -708,7 +757,7 @@ impl VmContext {
                 last_cfg_tick: 0,
                 pending_irqs: 0,
                 pit_enabled: true,
-            },
+            }),
             vcpu: Vcpu {
                 apic_id: 0, // BSP
                 vmcb,
@@ -1079,6 +1128,17 @@ impl VmContext {
         // so it shares the EXIT_INTR keepalive path below.
         if exit != EXIT_INTR && exit != EXIT_HLT { self.vcpu.consecutive_idle = 0; }
 
+        // Resolve the shared device/memory state once for this exit's
+        // handling. Through `SharedRef::DerefMut` this is a single borrow
+        // of `self.shared`, so the handlers below can still take disjoint
+        // sub-field borrows (`&mut sh.serial` + `&mut sh.pci`) the way they
+        // did when `shared` was a plain field; `self.vcpu` stays separately
+        // borrowable (disjoint field of `self`). Re-borrowed per iteration
+        // and dropped at the end of the loop body — never held across
+        // `run_guest_once` or a fiber yield. Stage 3b wraps this block in
+        // VM_BIG_LOCK so an AP vCPU can share the same `VmShared`.
+        let sh = &mut *self.shared;
+
         match exit {
             EXIT_INTR | EXIT_HLT => {
                 // Guest executed STI;HLT (idle, waiting for its next IRQ).
@@ -1090,7 +1150,7 @@ impl VmContext {
                 // guest resumes past it — no manual RIP advance needed. The
                 // dedicated core host-idles between ticks via SliceOutcome::Idle.
                 if exit == EXIT_HLT && crate::microvm::vm_window() == 0 {
-                    self.shared.serial.flush();
+                    sh.serial.flush();
                     kprintln!("[svm] guest HLT after {} VM-exits — exiting", self.vcpu.iter);
                     last_outcome = Some(outcome);
                     break;
@@ -1108,7 +1168,7 @@ impl VmContext {
                     if self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) == 0 {
                         self.vcpu.if_off_halts = self.vcpu.if_off_halts.saturating_add(1);
                         if self.vcpu.if_off_halts >= 64 {
-                            self.shared.serial.flush();
+                            sh.serial.flush();
                             kprintln!(
                                 "[svm] guest powered off (HLT with IF=0) after {} iters — exiting",
                                 self.vcpu.iter
@@ -1141,10 +1201,10 @@ impl VmContext {
                 }
                 // Deferred device IRQ (queued while the guest was IF=0) is now
                 // deliverable — inject the lowest pending line.
-                if self.shared.pending_irqs != 0 {
-                    let line = self.shared.pending_irqs.trailing_zeros() as u8;
-                    self.shared.pending_irqs &= !(1u16 << line);
-                    let info: u64 = (self.shared.pic.vector_for_irq(line) as u64) | (1u64 << 31);
+                if sh.pending_irqs != 0 {
+                    let line = sh.pending_irqs.trailing_zeros() as u8;
+                    sh.pending_irqs &= !(1u16 << line);
+                    let info: u64 = (sh.pic.vector_for_irq(line) as u64) | (1u64 << 31);
                     self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.vcpu.consecutive_idle = 0;
                     continue;
@@ -1175,8 +1235,8 @@ impl VmContext {
                     let now_d4 = crate::interrupts::ticks();
                     // Phase 2 of any in-flight D4 cycle: fire reconnect
                     // once the 100 ms disconnect window expired.
-                    if self.shared.pci.virtio_gpu.tick_d4(now_d4) {
-                        let vector = self.shared.pic.vector_for_irq(9);
+                    if sh.pci.virtio_gpu.tick_d4(now_d4) {
+                        let vector = sh.pic.vector_for_irq(9);
                         let info: u64 = (vector as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.vcpu.consecutive_idle = 0;
@@ -1186,16 +1246,16 @@ impl VmContext {
                     // Phase 1: a fresh dirty from Shade and no cycle
                     // in flight → kick off disconnect.
                     if wid != 0
-                        && !self.shared.pci.virtio_gpu.d4_disconnecting()
+                        && !sh.pci.virtio_gpu.d4_disconnecting()
                         && crate::shade::surface::display_dirty_peek(wid)
                     {
                         // R2 debounce — one cycle per ~250 ms; flag stays
                         // dirty during a drag so the final size lands.
-                        if now_d4.wrapping_sub(self.shared.last_cfg_tick) >= 25 {
+                        if now_d4.wrapping_sub(sh.last_cfg_tick) >= 25 {
                             let _ = crate::shade::surface::take_display_dirty(wid);
-                            self.shared.last_cfg_tick = now_d4;
-                            self.shared.pci.virtio_gpu.signal_display_change(now_d4);
-                            let vector = self.shared.pic.vector_for_irq(9);
+                            sh.last_cfg_tick = now_d4;
+                            sh.pci.virtio_gpu.signal_display_change(now_d4);
+                            let vector = sh.pic.vector_for_irq(9);
                             let info: u64 = (vector as u64) | (1u64 << 31);
                             self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                             self.vcpu.consecutive_idle = 0;
@@ -1232,14 +1292,14 @@ impl VmContext {
                 // other lands next VMRUN (≥1 kHz). Both paced by the same
                 // 100 Hz `ticks()` so their rates match (the 1:1 the
                 // verification needs). Linux's wall-clock is TSC-based.
-                let pit_live = self.shared.pic.irq_unmasked(0) && self.shared.pit_enabled;
+                let pit_live = sh.pic.irq_unmasked(0) && sh.pit_enabled;
                 let lapic_vec = self.vcpu.lapic.timer_tick_vector();
                 // Forced slot (anti-starvation under page-load net storm —
                 // see vmx mirror): if either is overdue ≥ TIMER_MAX_SKIP host
                 // ticks, force it (≤ ~30 ms jitter, far under any RCU stall).
-                if pit_live && now.wrapping_sub(self.shared.last_timer_tick) >= TIMER_MAX_SKIP {
-                    self.shared.last_timer_tick = now;
-                    let info: u64 = (self.shared.pic.vector_for_irq(0) as u64) | (1u64 << 31);
+                if pit_live && now.wrapping_sub(sh.last_timer_tick) >= TIMER_MAX_SKIP {
+                    sh.last_timer_tick = now;
+                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
                     self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.vcpu.consecutive_idle = 0;
                     continue;
@@ -1254,16 +1314,16 @@ impl VmContext {
                     }
                 }
                 let pumped = crate::microvm::devices::nat::pump(
-                    &mut self.shared.pci.virtio_net, &self.shared.guest_mem);
-                if self.shared.pci.virtio_input.drain_injected(&self.shared.guest_mem) {
-                    let vector = self.shared.pic.vector_for_irq(12);
+                    &mut sh.pci.virtio_net, &sh.guest_mem);
+                if sh.pci.virtio_input.drain_injected(&sh.guest_mem) {
+                    let vector = sh.pic.vector_for_irq(12);
                     let info: u64 = (vector as u64) | (1u64 << 31);
                     self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.vcpu.consecutive_idle = 0;
                     continue;
                 }
                 if pumped {
-                    let vector = self.shared.pic.vector_for_irq(10);
+                    let vector = sh.pic.vector_for_irq(10);
                     let info: u64 = (vector as u64) | (1u64 << 31);
                     self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.vcpu.consecutive_idle = 0;
@@ -1271,9 +1331,9 @@ impl VmContext {
                 }
                 // Normal slot: PIT tick, then LAPIC-timer tick (one per
                 // 100 Hz `ticks()` window; the other lands next VMRUN).
-                if pit_live && now != self.shared.last_timer_tick {
-                    self.shared.last_timer_tick = now;
-                    let info: u64 = (self.shared.pic.vector_for_irq(0) as u64) | (1u64 << 31);
+                if pit_live && now != sh.last_timer_tick {
+                    sh.last_timer_tick = now;
+                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
                     self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.vcpu.consecutive_idle = 0;
                     continue;
@@ -1312,7 +1372,7 @@ impl VmContext {
                 if self.vcpu.consecutive_idle >= IDLE_THRESHOLD
                     && crate::microvm::vm_window() == 0
                 {
-                    self.shared.serial.flush();
+                    sh.serial.flush();
                     kprintln!(
                         "[svm] guest idle in userspace ({} consecutive INTRs after {} iters) — exiting cleanly",
                         self.vcpu.consecutive_idle, self.vcpu.iter,
@@ -1400,7 +1460,7 @@ impl VmContext {
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
-                handle_linux_io(&mut *self.vcpu.vmcb, &mut self.shared.serial, &mut self.shared.pci, &mut self.shared.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut self.shared.pit_enabled);
+                handle_linux_io(&mut *self.vcpu.vmcb, &mut sh.serial, &mut sh.pci, &mut sh.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut sh.pit_enabled);
                 advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);
             }
@@ -1452,11 +1512,11 @@ impl VmContext {
                 last_outcome = Some(outcome);
             }
             EXIT_SHUTDOWN => {
-                self.shared.serial.flush();
-                if self.shared.serial.panic_observed {
+                sh.serial.flush();
+                if sh.serial.panic_observed {
                     kprintln!(
                         "[svm] linux kernel panicked (after {} iters): {}",
-                        self.vcpu.iter, self.shared.serial.panic_msg_str(),
+                        self.vcpu.iter, sh.serial.panic_msg_str(),
                     );
                     kprintln!("[svm] guest then triple-faulted via emergency_restart (= expected reboot path)");
                 } else {
@@ -1470,34 +1530,34 @@ impl VmContext {
             }
             EXIT_NPF => {
                 let gpa = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
-                if self.shared.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
+                if sh.pci.virtio_blk.bar0_in_range(gpa) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_blk, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.shared.pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_net, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
+                } else if sh.pci.virtio_net.bar0_in_range(gpa) {
+                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_net, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.shared.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_gpu, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
+                } else if sh.pci.virtio_gpu.bar0_in_range(gpa) {
+                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_gpu, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.shared.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_npf_input(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_input, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
+                } else if sh.pci.virtio_input.bar0_in_range(gpa) {
+                    if handle_mmio_npf_input(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_input, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.shared.pci.virtio_9p.bar0_in_range(gpa) {
-                    if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_9p, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
+                } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
+                    if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_9p, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if self.shared.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
+                } else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk_sqfs, &self.shared.pic, &mut self.shared.pending_irqs, gpa, &self.shared.guest_mem) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1509,7 +1569,7 @@ impl VmContext {
                 if (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa) {
                     if handle_mmio_npf_lapic(
                         &mut self.vcpu.vmcb, &mut self.vcpu.regs,
-                        &mut self.vcpu.lapic, gpa, &self.shared.guest_mem,
+                        &mut self.vcpu.lapic, gpa, &sh.guest_mem,
                     ) {
                         last_outcome = Some(outcome);
                         continue;
@@ -1520,11 +1580,11 @@ impl VmContext {
                 // block = first touch of a 4-KB demand page → fault it
                 // in + re-enter. Order: MMIO BAR ranges first (above),
                 // RAM-demand here, fatal dump last.
-                if self.shared.guest_mem.ensure(gpa) {
+                if sh.guest_mem.ensure(gpa) {
                     last_outcome = Some(outcome);
                     continue;
                 }
-                self.shared.serial.flush();
+                sh.serial.flush();
                 kprintln!(
                     "[svm] NPF: gpa={:#018x} info1={:#x} after {} iters",
                     gpa, outcome.exit_qualification, self.vcpu.iter,
@@ -1533,7 +1593,7 @@ impl VmContext {
                 break;
             }
             EXIT_INVALID => {
-                self.shared.serial.flush();
+                sh.serial.flush();
                 kprintln!(
                     "[svm] VMEXIT_INVALID — VMCB consistency check failed (info1={:#x})",
                     outcome.exit_qualification,
@@ -1542,7 +1602,7 @@ impl VmContext {
                 break;
             }
             _ => {
-                self.shared.serial.flush();
+                sh.serial.flush();
                 kprintln!(
                     "[svm] unhandled exit {:#x} info1={:#x} after {} iters",
                     exit, outcome.exit_qualification, self.vcpu.iter,
