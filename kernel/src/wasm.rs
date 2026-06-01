@@ -264,7 +264,10 @@ fn spawn_on_worker_inner(
         }
     }
 
-    crate::smp::scheduler::spawn(
+    // Run the app on a fiber (own stack) so it can yield at npk_sleep /
+    // npk_event_wait instead of pinning its worker core — see smp::fiber
+    // + SCHEDULER_FIBERS.md. Native intents still use plain `spawn`.
+    crate::smp::scheduler::spawn_fiber(
         crate::smp::scheduler::Priority::Interactive,
         wasm_worker_task,
         slot as u64,

@@ -26,6 +26,10 @@ pub struct Task {
     pub priority: Priority,
     pub func: fn(u64),
     pub arg: u64,
+    /// Run this task as a stackful FIBER on the worker core (its `func`
+    /// may block at yield points). Native run-to-completion tasks
+    /// (intents) leave this false and run directly. See `smp::fiber`.
+    pub is_fiber: bool,
 }
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
@@ -48,10 +52,11 @@ struct TaskSlot {
     priority: u8,
     func: Option<fn(u64)>,
     arg: u64,
+    is_fiber: bool,
 }
 
 impl TaskSlot {
-    const EMPTY: Self = TaskSlot { id: 0, priority: 0, func: None, arg: 0 };
+    const EMPTY: Self = TaskSlot { id: 0, priority: 0, func: None, arg: 0, is_fiber: false };
 }
 
 pub struct WorkDeque {
@@ -83,6 +88,7 @@ impl WorkDeque {
             priority: task.priority as u8,
             func: Some(task.func),
             arg: task.arg,
+            is_fiber: task.is_fiber,
         };
 
         self.tail.store(tail.wrapping_add(1), Ordering::Release);
@@ -142,6 +148,7 @@ impl WorkDeque {
                 priority: unsafe { core::mem::transmute(slot.priority) },
                 func: f,
                 arg: slot.arg,
+                is_fiber: slot.is_fiber,
             })
         } else {
             None
@@ -161,6 +168,7 @@ impl WorkDeque {
             priority: unsafe { core::mem::transmute(slot.priority) },
             func: slot.func.unwrap(),
             arg: slot.arg,
+            is_fiber: slot.is_fiber,
         }
     }
 }
@@ -211,6 +219,18 @@ pub fn init(num_workers: usize) {
 /// Pushes to BSP's own deque — idle APs will steal it automatically.
 /// This is the ONLY correct way to add work from Core 0.
 pub fn spawn(priority: Priority, func: fn(u64), arg: u64) {
+    spawn_inner(priority, func, arg, false);
+}
+
+/// Like `spawn`, but the task runs as a stackful FIBER on the worker core
+/// (`smp::fiber::run_app_fiber`). Used for `wasm_worker_task` so apps run
+/// on their own stack and can yield at `npk_sleep` / `npk_event_wait`
+/// instead of pinning the core (Stage 2b). Native intents keep `spawn`.
+pub fn spawn_fiber(priority: Priority, func: fn(u64), arg: u64) {
+    spawn_inner(priority, func, arg, true);
+}
+
+fn spawn_inner(priority: Priority, func: fn(u64), arg: u64, is_fiber: bool) {
     let workers = WORKER_COUNT.load(Ordering::Acquire);
     if workers == 0 {
         func(arg);
@@ -222,6 +242,7 @@ pub fn spawn(priority: Priority, func: fn(u64), arg: u64) {
         priority,
         func,
         arg,
+        is_fiber,
     };
 
     // Push to BSP's own deque (Core 0 is the owner → safe)
@@ -244,6 +265,7 @@ pub fn spawn_local(core_id: usize, priority: Priority, func: fn(u64), arg: u64) 
         priority,
         func,
         arg,
+        is_fiber: false,
     };
 
     // SAFETY: core_id is the caller's own core → owner, safe to push
