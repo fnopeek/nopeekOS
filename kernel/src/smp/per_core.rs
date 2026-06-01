@@ -585,23 +585,32 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             continue;
         }
 
-        // Try to get work (own deque first, then steal)
+        // Admit a freshly-spawned app as a fiber, or run a native intent.
+        // New work arrives on the global deque (own deque first, then steal).
         if let Some(task) = super::scheduler::next_task(cid) {
-            CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
-            start_work(cid);
             if task.is_fiber {
-                // App task: run on its own stack so it can yield at
-                // npk_sleep / npk_event_wait (Stage 2b) instead of pinning
-                // this core. Returns when the app's _start completes.
-                super::fiber::run_app_fiber(cid, task.func, task.arg);
+                // App: hand to this core's fiber scheduler. It runs on its
+                // own stack and yields at npk_sleep so peers share the core.
+                super::fiber::admit(cid, task.func, task.arg);
             } else {
                 // Native run-to-completion task (intent) — run directly.
+                CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
+                start_work(cid);
                 (task.func)(task.arg);
+                flush_busy(cid);
+                CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             }
-            flush_busy(cid);
-            CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             continue;
         }
+
+        // Run this core's fibers round-robin: resume any whose sleep
+        // deadline passed, park the rest. Returns when all are sleeping /
+        // none remain — then we idle on the timer and re-enter next tick.
+        CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
+        start_work(cid);
+        super::fiber::run_core_fibers(cid);
+        flush_busy(cid);
+        CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
 
         // Before sleep: update usage stats (delta covers work + idle since last call)
         update_core_freq(cid);

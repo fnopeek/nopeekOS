@@ -1,17 +1,25 @@
-//! Stackful fibers (green threads) — Stage 1: the context-switch primitive.
+//! Stackful fibers (green threads) for WASM apps.
 //!
 //! See `SCHEDULER_FIBERS.md`. A fiber is "a stack + a saved context that
 //! runs until it yields". wasmi cannot be paused mid-`_start`, so we give
 //! each app its own stack and switch the whole CPU context at the yield
-//! points (`npk_sleep` / `npk_event_wait`). The very same primitive will
-//! later host guest-vCPU run-loops (multicore microvm) — it only swaps
-//! `rsp` + the callee-saved registers, so it is agnostic to what runs on
-//! the stack.
+//! point (`npk_sleep`). The same primitive will later host guest-vCPU
+//! run-loops (multicore microvm) — it only swaps `rsp` + the callee-saved
+//! registers, so it is agnostic to what runs on the stack.
 //!
-//! Stage 1 ships ONLY the switch + a boot self-test. Nothing in the live
-//! app path uses it yet (Stage 2 wires `wasm_worker_task` onto a fiber).
+//! - **Stage 1:** the context-switch primitive + a boot self-test.
+//! - **Stage 2a:** `wasm_worker_task` runs on a fiber (own stack).
+//! - **Stage 2b:** `npk_sleep` PARKS the fiber + switches back to a per-core
+//!   scheduler that round-robins the core's other fibers → many apps
+//!   multiplex over few workers (no more core-pinning / helper-nesting).
+//!
+//! A fiber is pinned to the core that admitted it (its wasm `HostState`
+//! caches `core_id`), so each core owns its queue — no cross-core hot path.
 
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
 
 /// Saved execution context. Only `rsp` lives here — the callee-saved
 /// registers (rbx, rbp, r12–r15) are pushed onto the fiber's own stack by
@@ -75,20 +83,25 @@ unsafe extern "C" {
     fn fiber_trampoline();
 }
 
-/// Called by the trampoline when a fiber's entry function returns (Stage 2:
-/// the app's `_start` ran to completion). Switches back to the owning
-/// core's saved scheduler context so `run_app_fiber` resumes and reclaims
-/// the stack. Never returns to the trampoline.
+/// Called by the trampoline when a fiber's entry function returns — the
+/// app's `_start` ran to completion. Mark the fiber Done and switch back to
+/// the owning core's scheduler context, which then frees the stack. Never
+/// returns to the trampoline.
 #[unsafe(no_mangle)]
 pub extern "C" fn fiber_on_exit() {
     let cid = crate::smp::per_core::current_core_id();
-    // SAFETY: `SCHED_CTX[cid]` was saved by this core's `run_app_fiber`
-    // switch-in; `SCRATCH[cid]` is a throwaway save slot (this fiber is
-    // finished and will never be resumed). cid indexes this core only.
+    // SAFETY: CURRENT_FIBER[cid] is the finishing fiber (set by the
+    // scheduler before switching in); SCHED_CTX[cid] is the core's loop ctx.
     unsafe {
-        switch(&raw mut SCRATCH[cid], &raw const SCHED_CTX[cid]);
+        let f = CURRENT_FIBER[cid];
+        if !f.is_null() {
+            (*f).state = FiberState::Done;
+            switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+        }
     }
-    // Unreachable: control resumes in `run_app_fiber` after its `switch`.
+    // Unreachable: control resumes in `run_core_fibers` after its `switch`.
+    // (If CURRENT_FIBER was somehow null, fall through to the trampoline's
+    // own hlt loop.)
 }
 
 /// Default per-fiber stack size. 128 KiB — comfortable headroom over the
@@ -98,69 +111,151 @@ pub extern "C" fn fiber_on_exit() {
 /// call frames. No guard page yet (heap-backed); overflow = corruption.
 pub const DEFAULT_STACK_BYTES: usize = 128 * 1024;
 
-// ── Per-core fiber dispatch (Stage 2a) ─────────────────────────────────
+// ── Per-core fiber scheduler (Stage 2b) ────────────────────────────────
+//
+// Each app is a fiber pinned to the core that admitted it. `npk_sleep`
+// parks the running fiber (Sleeping + a TSC wake-deadline) and switches
+// back to the core's scheduler context, FREEING the core to run its other
+// ready fibers. So dock+bar+loft+spell multiplex over a couple of workers
+// instead of pinning a core each or nesting. No fiber migrates between
+// cores, so each core owns its queue with no cross-core hot path.
 
 const MAX_CORES: usize = 256;
 
-/// Each worker core's scheduler-loop context, saved when it switches INTO
-/// an app fiber and restored when the fiber returns (via `fiber_on_exit`)
-/// or yields (Stage 2b). Indexed by core id; only that core touches it.
-static mut SCHED_CTX: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
-/// Throwaway save target for a finishing fiber's dead context.
-static mut SCRATCH: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
-/// The (func, arg) a fresh app fiber should run, handed over by
-/// `run_app_fiber` right before switching in and consumed by
-/// `fiber_app_entry`. Per-core → no cross-core race (one fiber starts at a
-/// time per core in 2a).
-static mut PENDING_FN: [Option<fn(u64)>; MAX_CORES] = [None; MAX_CORES];
-static mut PENDING_ARG: [u64; MAX_CORES] = [0; MAX_CORES];
-
-/// Fresh-fiber entry: pick up the pending (func, arg) for this core and run
-/// it. When it returns, the trampoline falls into `fiber_on_exit`.
-extern "C" fn fiber_app_entry(_unused: u64) {
-    let cid = crate::smp::per_core::current_core_id();
-    // SAFETY: set by `run_app_fiber` on this core just before the switch in.
-    let f = unsafe { PENDING_FN[cid].take() };
-    let arg = unsafe { PENDING_ARG[cid] };
-    if let Some(f) = f {
-        f(arg);
-    }
+#[derive(Clone, Copy, PartialEq)]
+enum FiberState {
+    Ready,
+    Sleeping(u64), // resume once rdtsc() >= deadline
+    Done,
 }
 
-/// Run `func(arg)` as a fiber on this worker core. Called from the worker
-/// scheduler loop (`smp_ap_entry`) for fiber tasks. Allocates a stack,
-/// switches into it, and returns once the fiber finishes (`func` returns)
-/// — at which point the stack is freed. If `func` is a resident app whose
-/// `_start` never returns, this call never returns either: the worker is
-/// dedicated to that fiber until Stage 2b makes `npk_sleep` yield back.
-pub fn run_app_fiber(cid: usize, func: fn(u64), arg: u64) {
+/// Per-core scheduler-loop context: saved on `switch` INTO a fiber,
+/// restored when the fiber yields (`npk_sleep`) or finishes
+/// (`fiber_on_exit`). Indexed by core id; only that core touches it.
+static mut SCHED_CTX: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
+
+/// The fiber currently executing on each core — a raw ptr into the `Box`
+/// the scheduler checked out of the queue for the run's duration. Read by
+/// `fiber_app_entry` / `npk_sleep` / `fiber_on_exit` to find "self".
+static mut CURRENT_FIBER: [*mut Fiber; MAX_CORES] =
+    [core::ptr::null_mut(); MAX_CORES];
+
+/// Per-core run queue (Ready + Sleeping fibers). Only the owning core
+/// touches it; the lock guards a possible Stage-5 ISR-driven wakeup and is
+/// NEVER held across a `switch`.
+static FIBER_QUEUES: [Mutex<VecDeque<Box<Fiber>>>; MAX_CORES] =
+    [const { Mutex::new(VecDeque::new()) }; MAX_CORES];
+
+/// Admit a freshly-spawned app as a Ready fiber on this core. Called from
+/// the worker loop (`smp_ap_entry`) for `is_fiber` tasks.
+pub fn admit(cid: usize, func: fn(u64), arg: u64) {
     if cid >= MAX_CORES {
-        func(arg);
+        func(arg); // degenerate (no per-core queue) → run inline
         return;
     }
-    let fiber = Fiber::new(DEFAULT_STACK_BYTES, fiber_app_entry, 0);
-    let fiber_ctx: *const Context = &fiber.ctx;
-    // SAFETY: cid is this core's own index; the slots are per-core. The
-    // switch saves the loop context into SCHED_CTX[cid] and enters the
-    // fiber; it returns here when the fiber switches back via
-    // `fiber_on_exit`. `fiber` (its stack) stays alive across the switch.
-    unsafe {
-        PENDING_FN[cid] = Some(func);
-        PENDING_ARG[cid] = arg;
-        switch(&raw mut SCHED_CTX[cid], fiber_ctx);
-    }
-    drop(fiber); // fiber finished → free its stack
+    let mut fiber = Box::new(Fiber::new(DEFAULT_STACK_BYTES, fiber_app_entry, 0));
+    fiber.app_func = Some(func);
+    fiber.app_arg = arg;
+    fiber.state = FiberState::Ready;
+    FIBER_QUEUES[cid].lock().push_back(fiber);
 }
 
-/// A fiber: a saved context plus the heap-backed stack it runs on.
-/// Dropping it frees the stack — only do that when the fiber is finished
-/// or has never started (never while it is parked mid-execution and might
-/// be resumed).
+/// Run this core's runnable fibers round-robin until none are runnable,
+/// waking any whose sleep deadline has passed. Returns when every fiber is
+/// sleeping (future deadline) or the queue is empty — the caller then idles
+/// on the worker timer and re-enters next tick.
+pub fn run_core_fibers(cid: usize) {
+    if cid >= MAX_CORES {
+        return;
+    }
+    loop {
+        let now = crate::interrupts::rdtsc();
+        // Check out the next runnable fiber (FIFO). Lock dropped before the
+        // switch — the fiber's Box is owned by this stack frame meanwhile.
+        let mut fiber = {
+            let mut q = FIBER_QUEUES[cid].lock();
+            let idx = q.iter().position(|f| match f.state {
+                FiberState::Ready => true,
+                FiberState::Sleeping(d) => now >= d,
+                FiberState::Done => false,
+            });
+            match idx {
+                Some(i) => q.remove(i).unwrap(),
+                None => return, // nothing runnable → idle
+            }
+        };
+
+        let fptr: *mut Fiber = &mut *fiber;
+        // SAFETY: fptr is stable across the switch (the Box is this frame's
+        // local). Save the loop ctx into SCHED_CTX[cid], switch into the
+        // fiber; control returns here when it yields (npk_sleep) or finishes
+        // (fiber_on_exit), with `state` already updated.
+        unsafe {
+            CURRENT_FIBER[cid] = fptr;
+            switch(&raw mut SCHED_CTX[cid], &raw const (*fptr).ctx);
+            CURRENT_FIBER[cid] = core::ptr::null_mut();
+        }
+
+        if fiber.state == FiberState::Done {
+            drop(fiber); // _start returned → free the stack
+        } else {
+            FIBER_QUEUES[cid].lock().push_back(fiber);
+        }
+    }
+}
+
+/// Park the running fiber for `ms` and yield its core to peer fibers.
+/// Returns (resumes) once the scheduler re-runs it past the deadline.
+/// Returns `false` if not running inside a fiber (caller falls back to an
+/// in-place wait). This is the heart of Stage 2b — called by `npk_sleep`.
+pub fn yield_sleep(ms: u64) -> bool {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return false;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
+    let f = unsafe { CURRENT_FIBER[cid] };
+    if f.is_null() {
+        return false;
+    }
+    let freq = crate::interrupts::tsc_freq();
+    let deadline = crate::interrupts::rdtsc() + ms.saturating_mul(freq / 1000);
+    // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Set
+    // its state, then switch back to the core scheduler context. Resumes
+    // here when run_core_fibers switches into it again past the deadline.
+    unsafe {
+        (*f).state = FiberState::Sleeping(deadline);
+        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+    }
+    true
+}
+
+/// Fresh-fiber entry: run the app's `(func, arg)`. On return the trampoline
+/// falls into `fiber_on_exit`.
+extern "C" fn fiber_app_entry(_unused: u64) {
+    let cid = crate::smp::per_core::current_core_id();
+    // SAFETY: the scheduler set CURRENT_FIBER[cid] right before switching in.
+    let f = unsafe { CURRENT_FIBER[cid] };
+    if f.is_null() {
+        return;
+    }
+    let (func, arg) = unsafe { ((*f).app_func, (*f).app_arg) };
+    if let Some(func) = func {
+        func(arg);
+    }
+}
+
+/// A fiber: a saved context, the heap-backed stack it runs on, its
+/// scheduling state, and the app entry to run. Dropping it frees the stack
+/// — only when finished (Done) or never started, never while parked.
 pub struct Fiber {
     pub ctx: Context,
+    state: FiberState,
+    app_func: Option<fn(u64)>,
+    app_arg: u64,
     // 16-byte-aligned backing store (Box<[u128]> guarantees align 16, which
     // the ABI needs at the trampoline's `call`). Kept solely to free on drop.
-    _stack: alloc::boxed::Box<[u128]>,
+    _stack: Box<[u128]>,
 }
 
 impl Fiber {
@@ -192,6 +287,9 @@ impl Fiber {
 
         Fiber {
             ctx: Context { rsp: sp0 as u64 },
+            state: FiberState::Ready,
+            app_func: None,
+            app_arg: 0,
             _stack: stack,
         }
     }
