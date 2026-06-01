@@ -24,7 +24,8 @@
 //! dance: VMRUN takes the VMCB physical address as an operand
 //! (loaded into RAX), so multiple VMCBs can coexist trivially.
 
-use super::{cpuid as host_cpuid, npt, rdmsr, vmcb, wrmsr};
+use super::{cpuid as host_cpuid, lapic, npt, rdmsr, vmcb, wrmsr};
+use super::lapic::LocalApic;
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
@@ -567,6 +568,10 @@ pub struct Vcpu {
     io_dropped: u32,
     msr_log_count: u32,
     consecutive_idle: u32,
+    /// Per-vCPU emulated local APIC (xAPIC MMIO @ 0xFEE00000). Inert
+    /// while the guest boots `nolapic`; drives the timer + (later) IPIs
+    /// once Linux enables it. See `svm::lapic`.
+    lapic: LocalApic,
     /// Consecutive HLT exits taken with guest RFLAGS.IF=0. The idle path
     /// is always `sti; hlt` (IF=1); a sustained `cli; hlt` loop is Linux's
     /// no-ACPI poweroff / panic path (we boot `acpi=off`, so there is no
@@ -673,6 +678,7 @@ impl VmContext {
                 io_dropped: 0,
                 msr_log_count: 0,
                 consecutive_idle: 0,
+                lapic: LocalApic::new(),
                 if_off_halts: 0,
             },
         })
@@ -1143,15 +1149,27 @@ impl VmContext {
                 // otherwise input > net, then the normal timer.
                 const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
                 let now = crate::interrupts::ticks();
-                if self.shared.pic.irq_unmasked(0)
-                    && now.wrapping_sub(self.shared.last_timer_tick) >= TIMER_MAX_SKIP
-                {
-                    self.shared.last_timer_tick = now;
-                    let vector = self.shared.pic.vector_for_irq(0);
-                    let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
+                // Timer tick source: once Linux software-enables the LAPIC
+                // timer the tick moves from the 8259 PIT (IRQ0) to the
+                // LVTT vector (svm::lapic). Before that — incl. during
+                // calibrate_APIC_clock, where LVTT is MASKED — the PIT
+                // keeps driving jiffies. Still one tick per host 100 Hz
+                // `ticks()`; Linux's wall-clock is TSC-based.
+                let tick_vector: Option<u8> = self.vcpu.lapic.timer_tick_vector().or_else(|| {
+                    if self.shared.pic.irq_unmasked(0) {
+                        Some(self.shared.pic.vector_for_irq(0))
+                    } else {
+                        None
+                    }
+                });
+                if let Some(vec) = tick_vector {
+                    if now.wrapping_sub(self.shared.last_timer_tick) >= TIMER_MAX_SKIP {
+                        self.shared.last_timer_tick = now;
+                        let info: u64 = (vec as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
                 }
                 let pumped = crate::microvm::devices::nat::pump(
                     &mut self.shared.pci.virtio_net, &self.shared.guest_mem);
@@ -1169,13 +1187,14 @@ impl VmContext {
                     self.vcpu.consecutive_idle = 0;
                     continue;
                 }
-                if now != self.shared.last_timer_tick && self.shared.pic.irq_unmasked(0) {
-                    self.shared.last_timer_tick = now;
-                    let vector = self.shared.pic.vector_for_irq(0);
-                    let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
+                if let Some(vec) = tick_vector {
+                    if now != self.shared.last_timer_tick {
+                        self.shared.last_timer_tick = now;
+                        let info: u64 = (vec as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
                 }
                 // Real net data (`pumped`) means not idle. Merely having
                 // open NAT sessions does NOT — a browser keeps connections
@@ -1238,6 +1257,11 @@ impl VmContext {
                         // tells Linux we're "bare metal" — no probe of
                         // 0x40000000+ leafs, no kvm-clock activation.
                         ecx &= !(1u32 << 31);
+                        // ECX bit 24: TSC-deadline timer. Hide it so Linux
+                        // uses the classic APIC_TMICT/TMCCT periodic timer
+                        // (which svm::lapic emulates) instead of the
+                        // TSC-deadline MSR (0x6E0), which we don't emulate.
+                        ecx &= !(1u32 << 24);
                     }
                     if leaf == 7 && subleaf == 0 {
                         // Hide CET — host has CR4.CET=1 for IBT but
@@ -1279,7 +1303,21 @@ impl VmContext {
                 // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR
                 let is_write = outcome.exit_qualification & 1 != 0;
                 let msr = self.vcpu.regs.rcx as u32;
-                if is_write {
+                // IA32_APIC_BASE (0x1B): report the LAPIC enabled at its
+                // architectural default base so Linux finds + uses it
+                // (guest-SMP Stage 1). Writes (enable / relocate) are
+                // accepted but we keep the fixed base — the NPT trap page
+                // is wired at 0xFEE00000.
+                if msr == 0x1B {
+                    // RDMSR: report enabled LAPIC at default base. WRMSR:
+                    // accept silently (keep fixed base). Single trailing
+                    // advance_rip below handles both.
+                    if !is_write {
+                        let v = lapic::APIC_BASE_MSR_VALUE;
+                        self.vcpu.regs.rdx = v >> 32;
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
+                    }
+                } else if is_write {
                     if self.vcpu.msr_log_count < MSR_LOG_CAP {
                         let val = (self.vcpu.regs.rdx << 32)
                             | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
@@ -1344,6 +1382,19 @@ impl VmContext {
                 } else if self.shared.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
                     if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut self.shared.pci.virtio_blk_sqfs, &self.shared.pic, gpa, &self.shared.guest_mem) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                }
+                // Local APIC MMIO (guest-SMP Stage 1). The LAPIC page
+                // (0xFEE00000) is left NPT-not-present (npt.rs) so the
+                // guest's xAPIC accesses #NPF here → trap-and-emulate.
+                // Inert while booting `nolapic`.
+                if (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa) {
+                    if handle_mmio_npf_lapic(
+                        &mut self.vcpu.vmcb, &mut self.vcpu.regs,
+                        &mut self.vcpu.lapic, gpa, &self.shared.guest_mem,
+                    ) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1519,6 +1570,50 @@ fn handle_linux_io(
 ///
 /// Returns `true` if the fault was handled. `false` falls through to
 /// the generic NPF dump path (decode failure, unsupported opcode).
+/// #NPF on the LAPIC MMIO page (guest-SMP Stage 1). Decode the faulting
+/// MOV, service it against the per-vCPU `LocalApic`, advance RIP. xAPIC
+/// registers are 32-bit; no device IRQ-kick (unlike the virtio handlers).
+fn handle_mmio_npf_lapic(
+    vmcb: &mut vmcb::Vmcb,
+    regs: &mut vmcb::GuestRegs,
+    apic: &mut LocalApic,
+    gpa: u64,
+    mem: &GuestMem,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+    let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
+    let buf = match fetch_inst(rip, cr3, mem) {
+        Some(b) => b,
+        None => {
+            kprintln!("[svm] lapic mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[svm] lapic mmio: unsupported insn @ gpa={:#x} bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - lapic::LAPIC_BASE) as u32;
+    let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+    if dec.is_write {
+        let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
+        apic.write(off, value as u32);
+    } else {
+        let value = apic.read(off) as u64;
+        write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
+    }
+    advance_rip_by_length(vmcb, dec.length);
+    true
+}
+
 fn handle_mmio_npf_blk(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,

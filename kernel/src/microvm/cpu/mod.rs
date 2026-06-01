@@ -330,6 +330,15 @@ static VM_RUN_STATE: AtomicU8 = AtomicU8::new(VM_IDLE);
 // dedicated path via OTA (no reinstall): flip to `false` + re-release.
 pub const VCPU_AS_FIBER: bool = true;
 
+/// Guest-SMP Stage 1: trap-and-emulate the guest local APIC
+/// (`svm::lapic`) instead of booting `nolapic`. When true, the guest
+/// cmdline omits `nolapic` so Linux brings up the LAPIC + uses its timer;
+/// the LAPIC MMIO page NPT-faults into the emulator. Flag-gated so a bad
+/// release reverts via OTA (flip to `false` + re-release → `nolapic`
+/// back → the UP guest boots with the LAPIC disabled, emulator inert —
+/// no guest-kernel rebuild needed). Prerequisite for AP bringup (Stage 3).
+pub const GUEST_LAPIC: bool = true;
+
 /// Decided once at boot (`set_vm_fiber_mode`, from `init_dedicated_vm_core`,
 /// which has the vendor + worker count): true → the guest runs as a pool
 /// fiber and NO core is dedicated. Cheap atomic read on the hot poll path.

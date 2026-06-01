@@ -1796,12 +1796,14 @@ fn microvm_linux(inject: &[u8]) {
     //
     // `panic=1`: halt immediately on any panic (no reboot loop).
     // `nokaslr`: predictable load addresses for our hypervisor side.
-    // `nolapic noapic acpi=off tsc=reliable`: tell Linux to skip
-    // hardware probing it would otherwise crash on. We're not a real
-    // PC — no ACPI tables, no functioning APIC (just an EPT-mapped
-    // scratch page absorbing the MMIO accesses). Without these,
-    // Linux times out / panics on probes that don't behave like real
-    // silicon.
+    // `noapic acpi=off tsc=reliable`: tell Linux to skip hardware
+    // probing it would otherwise crash on — no ACPI tables, no IO-APIC
+    // (device IRQs go through the 8259 PIC). Without these Linux times
+    // out / panics on probes that don't behave like real silicon.
+    // `nolapic` was DROPPED (guest-SMP Stage 1): the local APIC is now
+    // trap-and-emulated (svm::lapic, NPT-faulting page @ 0xFEE00000), so
+    // Linux brings it up + uses the LAPIC timer as its clockevent. This
+    // is the prerequisite for guest SMP (AP bringup is LAPIC INIT-SIPI).
     //
     // PCI is now ON (12.2 step 1) — the legacy 0xCF8/0xCFC config-
     // space path is emulated in `microvm::devices::pci_bus`. Linux
@@ -1846,10 +1848,16 @@ fn microvm_linux(inject: &[u8]) {
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
-panic=1 nokaslr nolapic noapic acpi=off tsc=reliable \
+panic=1 nokaslr noapic acpi=off tsc=reliable \
 tsc_early_khz={} devtmpfs.mount=1",
         tsc_khz,
     );
+    // Guest-SMP Stage 1: keep `nolapic` only when LAPIC emulation is
+    // gated off (OTA rollback). With it on (default) Linux brings up the
+    // emulated local APIC. See `microvm::cpu::GUEST_LAPIC`.
+    if !crate::microvm::cpu::GUEST_LAPIC {
+        let _ = write!(s, " nolapic");
+    }
     if let Some(epoch) =
         crate::rtc::read_unix_time().or_else(crate::net::ntp::unix_time)
     {

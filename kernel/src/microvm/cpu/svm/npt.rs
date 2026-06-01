@@ -188,27 +188,39 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
                 .ok_or("OOM allocating NPT PD_HIGH")?;
             let pt_dummy_phys = memory::allocate_frame()
                 .ok_or("OOM allocating NPT PT_DUMMY")?;
+            let pt_lapic_phys = memory::allocate_frame()
+                .ok_or("OOM allocating NPT PT_LAPIC")?;
             let dummy_page_phys = memory::allocate_frame()
                 .ok_or("OOM allocating NPT dummy page")?;
 
             core::ptr::write_bytes(pd_high_phys as *mut u8, 0, 4096);
             core::ptr::write_bytes(pt_dummy_phys as *mut u8, 0, 4096);
+            core::ptr::write_bytes(pt_lapic_phys as *mut u8, 0, 4096);
             core::ptr::write_bytes(dummy_page_phys as *mut u8, 0, 4096);
 
             pdpt.add(3).write_volatile(pd_high_phys | NPT_P | NPT_RW | NPT_US);
 
-            // PD_HIGH[502] + [503] → same PT_DUMMY (covers
-            // [0xFEC00000, 0xFF000000)). Two PD entries aliased to
-            // one PT, so 4 MB of guest-phys all walk through the
-            // same 512-entry PT.
+            // PD_HIGH[502] → PT_DUMMY (covers [0xFEC00000, 0xFEE00000):
+            // IOAPIC/HPET). PD_HIGH[503] → PT_LAPIC (covers
+            // [0xFEE00000, 0xFF000000): the local APIC). Separate PTs so
+            // we can punch a single not-present page at the LAPIC base.
             let pd_high = pd_high_phys as *mut u64;
             pd_high.add(502).write_volatile(pt_dummy_phys | NPT_P | NPT_RW | NPT_US);
-            pd_high.add(503).write_volatile(pt_dummy_phys | NPT_P | NPT_RW | NPT_US);
+            pd_high.add(503).write_volatile(pt_lapic_phys | NPT_P | NPT_RW | NPT_US);
 
-            // PT_DUMMY[0..512] all → dummy_page. 4 MB → 4 KB scratch.
+            // PT_DUMMY[0..512] all → dummy_page. 2 MB → 4 KB scratch.
             let pt_dummy = pt_dummy_phys as *mut u64;
             for i in 0..512usize {
                 pt_dummy.add(i).write_volatile(dummy_page_phys | NPT_P | NPT_RW | NPT_US);
+            }
+            // PT_LAPIC: entry [0] = the LAPIC MMIO page (0xFEE00000) left
+            // NOT-PRESENT → guest LAPIC accesses #NPF → trap-and-emulate
+            // (svm::lapic, guest-SMP Stage 1). The rest of the 2 MB →
+            // dummy scratch (harmless if ever touched).
+            let pt_lapic = pt_lapic_phys as *mut u64;
+            pt_lapic.add(0).write_volatile(0); // LAPIC page: trap on access
+            for i in 1..512usize {
+                pt_lapic.add(i).write_volatile(dummy_page_phys | NPT_P | NPT_RW | NPT_US);
             }
         }
     }
