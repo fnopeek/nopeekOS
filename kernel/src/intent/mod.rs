@@ -1845,22 +1845,24 @@ fn microvm_linux(inject: &[u8]) {
     // init surfaces on the host console. Re-add the gating once
     // bare-metal is validated. Performance regression on launch is
     // ~150 8250-IO VM-exits, one-shot, acceptable for diag.
-    // Guest-SMP Stage 2: keep `maxcpus=1`. With `GUEST_SMP` the MP-table
-    // makes Linux ENUMERATE GUEST_VCPUS CPUs (CPU1 becomes present-but-
-    // offline), which is the Stage-2 deliverable; `maxcpus=1` stops Linux
-    // from ONLINING the AP at boot. We must NOT let it try yet: starting
-    // the AP is Stage 3, and an enumerated-but-never-responding AP HANGS
-    // the cpuhp bring-up (Linux waits for CPU1 to report SYNC_STATE_ALIVE;
-    // the non-responding-AP timeout does not recover on this backend —
-    // observed as a freeze right after the INIT/SIPI on HW). Stage 3
-    // raises this to GUEST_VCPUS once the AP actually comes up + responds
-    // (then the wait completes immediately, no timeout needed).
+    // Guest-SMP maxcpus. Stage 2 (GUEST_SMP, GUEST_SMP_AP off): keep
+    // `maxcpus=1` — the MP-table makes Linux ENUMERATE GUEST_VCPUS CPUs
+    // (CPU1 present-but-offline) but `maxcpus=1` stops it from ONLINING the
+    // AP, because an enumerated-but-never-responding AP HANGS the cpuhp
+    // bring-up. Stage 3b-2 (GUEST_SMP_AP on): raise to GUEST_VCPUS so Linux
+    // actually brings the AP up — by then INIT-SIPI spawns a responding AP
+    // vCPU (`request_ap_spawn`), so the wait completes instead of hanging.
+    let maxcpus: u8 = if crate::microvm::cpu::GUEST_SMP_AP {
+        crate::microvm::cpu::GUEST_VCPUS
+    } else {
+        1
+    };
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
 panic=1 nokaslr noapic acpi=off tsc=reliable \
-tsc_early_khz={} devtmpfs.mount=1 maxcpus=1",
-        tsc_khz,
+tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
+        tsc_khz, maxcpus,
     );
     // Guest-SMP Stage 1: keep `nolapic` only when LAPIC emulation is
     // gated off (OTA rollback). With it on (default) Linux brings up the

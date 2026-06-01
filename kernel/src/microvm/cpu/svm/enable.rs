@@ -575,6 +575,46 @@ pub struct VmShared {
     /// jiffies don't double-count against the LAPIC timer. Starts true so
     /// IRQ0 drives boot before Linux first programs the PIT.
     pit_enabled: bool,
+    /// Pending inter-processor-interrupt vectors per target vCPU, indexed
+    /// by apic_id: `ipi_pending[t]` is a 256-bit bitmap (bit V = vector V
+    /// pending for vCPU t). A vCPU's ICR write (FIXED IPI) sets bits in the
+    /// target's word; each vCPU drains its own word and injects the lowest
+    /// pending vector via EVENTINJ when interruptible. This is the
+    /// cross-vCPU IPI path that carries reschedule / call-function / TLB
+    /// IPIs — and crucially the AP→BSP `complete()` wakeup without which the
+    /// cpuhp bring-up `wait_for_completion` never returns. Guest SMP only.
+    ipi_pending: [[u64; 4]; MAX_VCPUS],
+}
+
+/// Maximum vCPUs per guest (guest SMP). Sizes the per-vCPU IPI bitmaps;
+/// `GUEST_VCPUS` (the count we actually enumerate) must be ≤ this.
+pub const MAX_VCPUS: usize = 2;
+
+impl VmShared {
+    /// Mark interrupt `vector` pending for the vCPU with `apic_id` (an IPI
+    /// target). No-op if the id is out of range.
+    fn ipi_set(&mut self, apic_id: u8, vector: u8) {
+        let t = apic_id as usize;
+        if t < MAX_VCPUS {
+            self.ipi_pending[t][(vector >> 6) as usize] |= 1u64 << (vector & 63);
+        }
+    }
+
+    /// Take (and clear) the lowest pending IPI vector for `apic_id`, if any.
+    fn ipi_take(&mut self, apic_id: u8) -> Option<u8> {
+        let t = apic_id as usize;
+        if t >= MAX_VCPUS {
+            return None;
+        }
+        for (w, word) in self.ipi_pending[t].iter_mut().enumerate() {
+            if *word != 0 {
+                let bit = word.trailing_zeros();
+                *word &= !(1u64 << bit);
+                return Some((w as u32 * 64 + bit) as u8);
+            }
+        }
+        None
+    }
 }
 
 /// Per-vCPU state: its own VMCB + register file + FPU areas, plus the
@@ -635,7 +675,6 @@ pub enum SharedRef {
     /// BSP frees the box only after the last vCPU has exited (last-one-out
     /// refcount), so the pointer never dangles while an AP runs.
     /// Constructed in Stage 3b-2 (AP spawn).
-    #[allow(dead_code)]
     Borrowed(*mut VmShared),
 }
 
@@ -776,6 +815,7 @@ impl VmContext {
                 last_cfg_tick: 0,
                 pending_irqs: 0,
                 pit_enabled: true,
+                ipi_pending: [[0; 4]; MAX_VCPUS],
             }),
             vcpu: Vcpu {
                 apic_id: 0, // BSP
@@ -929,7 +969,6 @@ fn setup_vmcb_linux(
 /// one device intercept policy). `TLB_CTL=1` (flush this guest's TLB on
 /// every entry) means NPT mutations made by any vCPU are picked up by the
 /// others on their next VMRUN — no separate cross-core TLB-shootdown IPI.
-#[allow(dead_code)] // wired by the AP spawn in Stage 3b-2b
 fn setup_vmcb_ap(
     vmcb: &mut vmcb::Vmcb,
     iopm_phys: u64,
@@ -995,7 +1034,6 @@ fn setup_vmcb_ap(
     vmcb.write_u64(vmcb::OFF_SAVE_G_PAT, 0x0007_0406_0007_0406);
 }
 
-#[allow(dead_code)] // wired by the AP spawn in Stage 3b-2b
 impl VmContext {
     /// Build an AP vCPU that **shares** an already-open BSP's `VmShared`
     /// (guest SMP, Stage 3b). `shared` aliases the BSP's heap-boxed
@@ -1011,10 +1049,14 @@ impl VmContext {
     ) -> Result<VmContext, &'static str> {
         enable_efer_svme()?;
 
-        // Stable shared fields (set once at BSP open, never mutated) — read
-        // without the lock is sound.
-        // SAFETY: `shared` is valid for the VM lifetime (see SharedRef).
+        // Read the shared substrate fields (iopm/msrpm/NPT root — set once
+        // at BSP open, never mutated). Take VM_BIG_LOCK: by now AP_ACTIVE is
+        // set, so the BSP may be accessing `*shared` under the lock — holding
+        // it here keeps the `&*shared` borrow from aliasing the BSP's `&mut`.
         let (iopm_phys, msrpm_phys, npt_root) = {
+            let _big = VM_BIG_LOCK.lock();
+            // SAFETY: `shared` is valid for the VM lifetime (see SharedRef),
+            // and the lock excludes any concurrent `&mut` to `*shared`.
             let s = unsafe { &*shared };
             (s.iopm_phys, s.msrpm_phys, s.npt_pml4)
         };
@@ -1359,9 +1401,25 @@ impl VmContext {
                     last_outcome = Some(outcome);
                     continue;
                 }
+                // Cross-vCPU IPI (guest SMP): a reschedule / call-function /
+                // TLB-flush / AP→BSP `complete()` wakeup another vCPU routed
+                // to this one. Highest priority among injectables here — these
+                // are LAPIC-delivered and carry the SMP bring-up handshake.
+                // No-op on a UP guest (`ipi_pending` stays all-zero).
+                if let Some(vec) = sh.ipi_take(self.vcpu.apic_id) {
+                    let info: u64 = (vec as u64) | (1u64 << 31);
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
+                    continue;
+                }
+                // Device IRQs, the PIT tick, display-resize, NAT pump and
+                // input are BSP-only (PIC mode delivers device lines to the
+                // boot CPU); an AP vCPU only services its own LAPIC timer
+                // (below) + cross-vCPU IPIs (above). Guest SMP, Stage 3b.
+                let is_bsp = self.vcpu.apic_id == 0;
                 // Deferred device IRQ (queued while the guest was IF=0) is now
                 // deliverable — inject the lowest pending line.
-                if sh.pending_irqs != 0 {
+                if is_bsp && sh.pending_irqs != 0 {
                     let line = sh.pending_irqs.trailing_zeros() as u8;
                     sh.pending_irqs &= !(1u16 << line);
                     let info: u64 = (sh.pic.vector_for_irq(line) as u64) | (1u64 << 31);
@@ -1390,7 +1448,7 @@ impl VmContext {
                 // costs the timer at most one tick (Linux tolerates
                 // the jitter) and is the only place an idle guest sees
                 // it. See the vmx mirror.
-                {
+                if is_bsp {
                     let wid = crate::microvm::vm_window();
                     let now_d4 = crate::interrupts::ticks();
                     // Phase 2 of any in-flight D4 cycle: fire reconnect
@@ -1452,7 +1510,7 @@ impl VmContext {
                 // other lands next VMRUN (≥1 kHz). Both paced by the same
                 // 100 Hz `ticks()` so their rates match (the 1:1 the
                 // verification needs). Linux's wall-clock is TSC-based.
-                let pit_live = sh.pic.irq_unmasked(0) && sh.pit_enabled;
+                let pit_live = is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled;
                 let lapic_vec = self.vcpu.lapic.timer_tick_vector();
                 // Forced slot (anti-starvation under page-load net storm —
                 // see vmx mirror): if either is overdue ≥ TIMER_MAX_SKIP host
@@ -1473,21 +1531,26 @@ impl VmContext {
                         continue;
                     }
                 }
-                let pumped = crate::microvm::devices::nat::pump(
-                    &mut sh.pci.virtio_net, &sh.guest_mem);
-                if sh.pci.virtio_input.drain_injected(&sh.guest_mem) {
-                    let vector = sh.pic.vector_for_irq(12);
-                    let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
-                }
-                if pumped {
-                    let vector = sh.pic.vector_for_irq(10);
-                    let info: u64 = (vector as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
+                // Real net data this pass (drives idle accounting below).
+                // BSP-only: the AP never pumps the NAT (stays false).
+                let mut pumped = false;
+                if is_bsp {
+                    pumped = crate::microvm::devices::nat::pump(
+                        &mut sh.pci.virtio_net, &sh.guest_mem);
+                    if sh.pci.virtio_input.drain_injected(&sh.guest_mem) {
+                        let vector = sh.pic.vector_for_irq(12);
+                        let info: u64 = (vector as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
+                    if pumped {
+                        let vector = sh.pic.vector_for_irq(10);
+                        let info: u64 = (vector as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
                 }
                 // Normal slot: PIT tick, then LAPIC-timer tick (one per
                 // 100 Hz `ticks()` window; the other lands next VMRUN).
@@ -1729,7 +1792,7 @@ impl VmContext {
                 if (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa) {
                     if handle_mmio_npf_lapic(
                         &mut self.vcpu.vmcb, &mut self.vcpu.regs,
-                        &mut self.vcpu.lapic, gpa, &sh.guest_mem,
+                        &mut self.vcpu.lapic, self.vcpu.apic_id, sh, gpa,
                     ) {
                         last_outcome = Some(outcome);
                         continue;
@@ -1956,8 +2019,9 @@ fn handle_mmio_npf_lapic(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     apic: &mut LocalApic,
+    apic_id: u8,
+    sh: &mut VmShared,
     gpa: u64,
-    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -1965,7 +2029,7 @@ fn handle_mmio_npf_lapic(
 
     let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
     let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
-    let buf = match fetch_inst(rip, cr3, mem) {
+    let buf = match fetch_inst(rip, cr3, &sh.guest_mem) {
         Some(b) => b,
         None => {
             kprintln!("[svm] lapic mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
@@ -1984,13 +2048,47 @@ fn handle_mmio_npf_lapic(
     let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
     if dec.is_write {
         let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
-        apic.write(off, value as u32);
+        if let Some(icr) = apic.write(off, value as u32) {
+            route_ipi(sh, apic_id, &icr);
+        }
     } else {
         let value = apic.read(off) as u64;
         write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
     }
     advance_rip_by_length(vmcb, dec.length);
     true
+}
+
+/// Route a decoded ICR write (guest SMP). FIXED/LOWEST → mark the vector
+/// pending on the target vCPU(s); STARTUP → ask the orchestration layer to
+/// spawn the AP at the SIPI vector (once); INIT and other modes → no-op
+/// (the AP starts from its SIPI; we don't model NMI/SMI cross-vCPU here).
+fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
+    match icr.delivery_mode {
+        lapic::ICR_DM_STARTUP => {
+            crate::microvm::cpu::request_ap_spawn(icr.vector);
+        }
+        lapic::ICR_DM_FIXED | lapic::ICR_DM_LOWEST => {
+            let n = crate::microvm::cpu::GUEST_VCPUS;
+            match icr.shorthand {
+                0 => sh.ipi_set(icr.dest, icr.vector), // physical dest
+                1 => sh.ipi_set(sender, icr.vector),   // self
+                2 => {
+                    for t in 0..n {
+                        sh.ipi_set(t, icr.vector);
+                    }
+                } // all incl self
+                _ => {
+                    for t in 0..n {
+                        if t != sender {
+                            sh.ipi_set(t, icr.vector);
+                        }
+                    }
+                } // all excl self
+            }
+        }
+        _ => {}
+    }
 }
 
 fn handle_mmio_npf_blk(
