@@ -138,8 +138,14 @@ pub fn vm_open_ap(
 }
 
 /// Set/clear the guest-SMP big-VM-lock engagement (see `enable::AP_ACTIVE`).
+/// Clearing also resets `AP_ESTABLISHED` so the next VM's bring-up starts
+/// with the idle-park optimisation gated off again.
 pub fn set_ap_active(on: bool) {
-    enable::AP_ACTIVE.store(on, core::sync::atomic::Ordering::Release);
+    use core::sync::atomic::Ordering;
+    enable::AP_ACTIVE.store(on, Ordering::Release);
+    if !on {
+        enable::AP_ESTABLISHED.store(false, Ordering::Release);
+    }
 }
 
 // ── shared CPU primitives for SVM submodules ───────────────────────

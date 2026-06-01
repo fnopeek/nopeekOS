@@ -50,6 +50,20 @@ fn ap_active() -> bool {
     AP_ACTIVE.load(Ordering::Acquire)
 }
 
+/// True once the AP vCPU is well PAST its bring-up (its `iter` crossed
+/// `AP_ESTABLISHED_ITERS`). The idle-yield-on-shadowed-HLT optimisation is
+/// gated on this: applying it *during* AP bring-up changes the BSP's
+/// idle/sleep timing and races the cpuhp handshake (the AP got stuck after
+/// one CPUID exit — v0.193.4). Once the AP is established, both vCPUs may
+/// park on an idle `sti; hlt`. Reset on teardown. Stays false on a UP guest
+/// (no AP), which idles fine via the interruptible EXIT_INTR path anyway.
+pub static AP_ESTABLISHED: AtomicBool = AtomicBool::new(false);
+
+/// vCPU `iter` count after which the AP is considered past bring-up. The AP
+/// does at most a few×10k exits during bring-up (~100 ms); idle-spinning it
+/// reaches this in ~3 s — a large, safe margin past the handshake.
+const AP_ESTABLISHED_ITERS: u32 = 200_000;
+
 // ── MSRs (APM Vol 2 §15.4) ─────────────────────────────────────────
 
 /// Extended Feature Enable Register. Bit 12 = SVME (SVM enable).
@@ -1266,6 +1280,17 @@ impl VmContext {
         self.vcpu.iter = self.vcpu.iter.saturating_add(1);
         slice_n += 1;
 
+        // Mark the AP "established" once it is well past bring-up — this
+        // un-gates the idle-yield-on-shadowed-HLT for BOTH vCPUs (see
+        // AP_ESTABLISHED). Only the AP sets it; the BSP reads it.
+        if self.vcpu.apic_id != 0
+            && self.vcpu.iter == AP_ESTABLISHED_ITERS
+            && !AP_ESTABLISHED.load(Ordering::Relaxed)
+        {
+            AP_ESTABLISHED.store(true, Ordering::Release);
+            kprintln!("[svm] AP established (past bring-up) — idle-park enabled");
+        }
+
         // Re-inject an event that #VMEXITed mid-delivery on the
         // previous run (AMD APM §15.20; KVM svm_complete_interrupts).
         // Highest priority for the single EVENTINJ slot: a lost
@@ -1426,6 +1451,27 @@ impl VmContext {
                 // Pending device IRQs + the timer are retried on a later exit
                 // once IF=1 (≤1 ms via the worker/VM timer).
                 if !guest_interruptible(&self.vcpu.vmcb) {
+                    // An idle `sti; hlt` runs the HLT INSIDE the STI interrupt-
+                    // shadow → this branch fires on every idle HLT (IF=1, shadow
+                    // set). We must not INJECT here (the qspinlock-deadlock
+                    // guard), but the guest IS going idle — count it toward the
+                    // idle-yield so the host core PARKS instead of spinning
+                    // through the HLT at VMRUN speed (~69k HLT/s, 2 cores pegged
+                    // + input lag). GATED on AP_ESTABLISHED: doing this during
+                    // AP bring-up changes the BSP sleep timing and races the
+                    // cpuhp handshake (v0.193.4 hang). Once the AP is past
+                    // bring-up, both vCPUs may park. Yielding injects nothing →
+                    // still deadlock-safe.
+                    if AP_ESTABLISHED.load(Ordering::Acquire)
+                        && exit == EXIT_HLT
+                        && self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) != 0
+                    {
+                        self.vcpu.consecutive_idle =
+                            self.vcpu.consecutive_idle.saturating_add(1);
+                        if self.vcpu.consecutive_idle >= IDLE_YIELD {
+                            return Ok(SliceOutcome::Idle);
+                        }
+                    }
                     last_outcome = Some(outcome);
                     continue;
                 }
