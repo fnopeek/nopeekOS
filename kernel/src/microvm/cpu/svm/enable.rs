@@ -562,6 +562,13 @@ pub struct VmShared {
 /// per-vCPU exit-handling bookkeeping. Each vCPU fiber owns one; guest
 /// SMP = N of these against one shared `VmShared`.
 pub struct Vcpu {
+    /// This vCPU's physical (x)APIC ID — BSP = 0, APs = 1.. It must be
+    /// reported identically by CPUID (leaf 1 EBX[31:24], leaf 0xB/0x1F
+    /// EDX), the emulated LAPIC ID register, the IA32_APICBASE BSP bit
+    /// (set only when apic_id == 0), and the MP-table entry, or Linux's
+    /// topology code rejects the CPU. We virtualize it instead of passing
+    /// the host core's APIC ID through (which would differ per worker core).
+    apic_id: u8,
     /// Owned (not leaked) so it's reclaimed on drop — relaunch fix.
     vmcb: alloc::boxed::Box<vmcb::Vmcb>,
     vmcb_phys: u64,
@@ -703,6 +710,7 @@ impl VmContext {
                 pit_enabled: true,
             },
             vcpu: Vcpu {
+                apic_id: 0, // BSP
                 vmcb,
                 vmcb_phys,
                 regs,
@@ -713,7 +721,7 @@ impl VmContext {
                 io_dropped: 0,
                 msr_log_count: 0,
                 consecutive_idle: 0,
-                lapic: LocalApic::new(),
+                lapic: LocalApic::new(0),
                 last_lapic_tick: 0,
                 if_off_halts: 0,
             },
@@ -1323,7 +1331,7 @@ impl VmContext {
             EXIT_CPUID => {
                 let leaf = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
                 let subleaf = self.vcpu.regs.rcx as u32;
-                let (eax, ebx, mut ecx, mut edx);
+                let (eax, mut ebx, mut ecx, mut edx);
                 // Hide hypervisor presence + KVM paravirt leafs entirely.
                 // Without this, Linux sees the L1 KVM signature through
                 // pass-through CPUID, enables kvm-clock, then divides
@@ -1345,6 +1353,20 @@ impl VmContext {
                         // (which svm::lapic emulates) instead of the
                         // TSC-deadline MSR (0x6E0), which we don't emulate.
                         ecx &= !(1u32 << 24);
+                        // EBX bits 31:24: initial (x)APIC ID. Pass-through
+                        // would report the HOST core's ID (e.g. 2 on worker
+                        // core 2) — mismatching our emulated LAPIC + MP-table
+                        // (FW_BUG "APIC ID mismatch"). Report this vCPU's id.
+                        ebx = (ebx & 0x00FF_FFFF) | ((self.vcpu.apic_id as u32) << 24);
+                    }
+                    // Leaf 0xB/0x1F (extended topology): EDX is the 32-bit
+                    // x2APIC ID, which modern Linux uses as the CPU's APIC
+                    // ID. Same reason as leaf 1 EBX — report this vCPU's id,
+                    // not the host core's. EAX/EBX/ECX (level shifts/counts)
+                    // pass through (host topology shape; the AP's distinct
+                    // id places it on its own core — refined in Stage 3b).
+                    if leaf == 0x0B || leaf == 0x1F {
+                        edx = self.vcpu.apic_id as u32;
                     }
                     if leaf == 7 && subleaf == 0 {
                         // Hide CET — host has CR4.CET=1 for IBT but
@@ -1401,7 +1423,13 @@ impl VmContext {
                     // accept silently (keep fixed base). Single trailing
                     // advance_rip below handles both.
                     if !is_write {
-                        let v = lapic::APIC_BASE_MSR_VALUE;
+                        // BSP bit (8) only for the boot vCPU; APs read it
+                        // clear or Linux's topology mistakes them for a 2nd
+                        // BSP. `APIC_BASE_MSR_VALUE` has it set.
+                        let mut v = lapic::APIC_BASE_MSR_VALUE;
+                        if self.vcpu.apic_id != 0 {
+                            v &= !(1u64 << 8);
+                        }
                         self.vcpu.regs.rdx = v >> 32;
                         self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
                     }
