@@ -1450,28 +1450,26 @@ impl VmContext {
                 // section; it's busy, not idle, so skip idle-accounting too.
                 // Pending device IRQs + the timer are retried on a later exit
                 // once IF=1 (≤1 ms via the worker/VM timer).
-                if !guest_interruptible(&self.vcpu.vmcb) {
-                    // An idle `sti; hlt` runs the HLT INSIDE the STI interrupt-
-                    // shadow → this branch fires on every idle HLT (IF=1, shadow
-                    // set). We must not INJECT here (the qspinlock-deadlock
-                    // guard), but the guest IS going idle — count it toward the
-                    // idle-yield so the host core PARKS instead of spinning
-                    // through the HLT at VMRUN speed (~69k HLT/s, 2 cores pegged
-                    // + input lag). GATED on AP_ESTABLISHED: doing this during
-                    // AP bring-up changes the BSP sleep timing and races the
-                    // cpuhp handshake (v0.193.4 hang). Once the AP is past
-                    // bring-up, both vCPUs may park. Yielding injects nothing →
-                    // still deadlock-safe.
-                    if AP_ESTABLISHED.load(Ordering::Acquire)
-                        && exit == EXIT_HLT
-                        && self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) != 0
-                    {
-                        self.vcpu.consecutive_idle =
-                            self.vcpu.consecutive_idle.saturating_add(1);
-                        if self.vcpu.consecutive_idle >= IDLE_YIELD {
-                            return Ok(SliceOutcome::Idle);
-                        }
-                    }
+                // An idle `sti; hlt` runs the HLT inside the STI interrupt-
+                // shadow, so `guest_interruptible` is false even though IF=1.
+                // But the HLT CONSUMES the shadow and MUST be woken by a
+                // pending interrupt — that is the whole point of `sti; hlt`.
+                // So treat such an idle HLT as interruptible: fall through to
+                // the injection path below (deliver the pending IPI/IRQ/timer
+                // that wakes the guest — else the wakeup is LOST and the guest
+                // stalls) and the idle-park accounting. Gated on
+                // AP_ESTABLISHED so AP bring-up keeps the validated timing.
+                let idle_hlt = exit == EXIT_HLT
+                    && self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) != 0;
+                if !guest_interruptible(&self.vcpu.vmcb)
+                    && !(idle_hlt && AP_ESTABLISHED.load(Ordering::Acquire))
+                {
+                    // A genuine IF=0 critical section (e.g. mid
+                    // `spin_lock_irqsave`), or a non-HLT instruction in an
+                    // STI/MOV-SS shadow: do NOT inject — forcing an IRQ in via
+                    // EVENTINJ here deadlocks an SMP guest's qspinlock (the
+                    // 9p-mount livelock). Re-enter so the guest finishes its
+                    // critical section; busy, not idle, so skip idle-accounting.
                     last_outcome = Some(outcome);
                     continue;
                 }
