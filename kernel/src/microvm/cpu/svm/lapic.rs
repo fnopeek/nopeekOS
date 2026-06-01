@@ -88,9 +88,14 @@ pub struct LocalApic {
 }
 
 impl LocalApic {
-    pub fn new() -> Self {
+    /// `apic_id` is this vCPU's physical xAPIC ID (BSP = 0). It seeds the
+    /// APIC_ID register (bits 31:24) so `read_apic_id` returns it — the
+    /// AP's bring-up + Linux's topology depend on each vCPU reporting its
+    /// own ID consistently with CPUID and the MP-table.
+    pub fn new(apic_id: u8) -> Self {
         let mut regs = [0u32; 256];
         regs[idx(APIC_LVR)] = LVR_VALUE;
+        regs[idx(APIC_ID)] = (apic_id as u32) << 24;
         // Reset state: APIC software-disabled, spurious vector 0xFF,
         // all LVTs masked (Linux clears + re-enables in setup_local_APIC).
         regs[idx(APIC_LVTT)] = LVT_MASKED;
