@@ -667,10 +667,6 @@ pub struct Vcpu {
     /// `ticks()` of the last injected LAPIC-timer (LVTT) interrupt — the
     /// per-vCPU analogue of `VmShared::last_timer_tick` (PIT IRQ0).
     last_lapic_tick: u64,
-    /// Guest-SMP idle-spin diagnosis: per-vCPU exit histogram (indexed by
-    /// `VMX_*` bucket) + TSC of the last 3 s dump. Temporary.
-    dbg_exits: [u32; crate::microvm::cpu::VMEXIT_BUCKETS],
-    dbg_last_tsc: u64,
     /// Consecutive HLT exits taken with guest RFLAGS.IF=0. The idle path
     /// is always `sti; hlt` (IF=1); a sustained `cli; hlt` loop is Linux's
     /// no-ACPI poweroff / panic path (we boot `acpi=off`, so there is no
@@ -849,8 +845,6 @@ impl VmContext {
                 consecutive_idle: 0,
                 lapic: LocalApic::new(0),
                 last_lapic_tick: 0,
-                dbg_exits: [0; crate::microvm::cpu::VMEXIT_BUCKETS],
-                dbg_last_tsc: 0,
                 if_off_halts: 0,
             },
         })
@@ -1104,8 +1098,6 @@ impl VmContext {
                 consecutive_idle: 0,
                 lapic: LocalApic::new(apic_id),
                 last_lapic_tick: 0,
-                dbg_exits: [0; crate::microvm::cpu::VMEXIT_BUCKETS],
-                dbg_last_tsc: 0,
                 if_off_halts: 0,
             },
         })
@@ -1312,7 +1304,7 @@ impl VmContext {
         let exit = outcome.exit_reason;
 
         // Exit-reason histogram (diagnosis — `cores` shows the mix).
-        let bucket = match exit {
+        crate::microvm::cpu::record_vm_exit(match exit {
             EXIT_INTR => crate::microvm::cpu::VMX_INTR,
             EXIT_HLT => crate::microvm::cpu::VMX_HLT,
             EXIT_NPF => crate::microvm::cpu::VMX_MMIO,
@@ -1320,27 +1312,7 @@ impl VmContext {
             EXIT_MSR => crate::microvm::cpu::VMX_MSR,
             EXIT_CPUID => crate::microvm::cpu::VMX_CPUID,
             _ => crate::microvm::cpu::VMX_OTHER,
-        };
-        crate::microvm::cpu::record_vm_exit(bucket);
-        // Guest-SMP idle-spin diagnosis (Stage 3b-2b): per-vCPU exit
-        // histogram, logged ~every 3 s so we can see what keeps a vCPU
-        // busy when the guest is idle (intr/hlt/mmio/io/msr/cpuid/other).
-        // Temporary — strip once the AP idle path is fixed.
-        if crate::microvm::cpu::GUEST_SMP_AP {
-            self.vcpu.dbg_exits[bucket] += 1;
-            let dnow = crate::interrupts::rdtsc();
-            if dnow.wrapping_sub(self.vcpu.dbg_last_tsc)
-                >= crate::interrupts::tsc_freq() * 3
-            {
-                self.vcpu.dbg_last_tsc = dnow;
-                let h = self.vcpu.dbg_exits;
-                kprintln!(
-                    "[svm-vcpu{} /3s] intr={} hlt={} mmio={} io={} msr={} cpuid={} other={}",
-                    self.vcpu.apic_id, h[0], h[1], h[2], h[3], h[4], h[5], h[6]
-                );
-                self.vcpu.dbg_exits = [0; crate::microvm::cpu::VMEXIT_BUCKETS];
-            }
-        }
+        });
 
         // Consume the injection slot. Proven by the v0.172.41 probe:
         // under KVM-nested SVM the CPU does NOT clear EVENTINJ.V after
