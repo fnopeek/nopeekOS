@@ -17,6 +17,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// registers (rbx, rbp, r12–r15) are pushed onto the fiber's own stack by
 /// `switch` and popped back on resume, System V style.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Context {
     pub rsp: u64,
 }
@@ -74,19 +75,82 @@ unsafe extern "C" {
     fn fiber_trampoline();
 }
 
-/// Called by the trampoline if a fiber's entry function ever returns.
-/// Stage 1 has no per-core scheduler context to switch back to, so this
-/// only logs; the trampoline then halts that (already-finished) fiber.
-/// Stage 2 replaces the body with a switch back to the owning core's
-/// scheduler context + stack reclaim.
+/// Called by the trampoline when a fiber's entry function returns (Stage 2:
+/// the app's `_start` ran to completion). Switches back to the owning
+/// core's saved scheduler context so `run_app_fiber` resumes and reclaims
+/// the stack. Never returns to the trampoline.
 #[unsafe(no_mangle)]
 pub extern "C" fn fiber_on_exit() {
-    crate::kprintln!("[fiber] entry returned with no scheduler context (Stage 1)");
+    let cid = crate::smp::per_core::current_core_id();
+    // SAFETY: `SCHED_CTX[cid]` was saved by this core's `run_app_fiber`
+    // switch-in; `SCRATCH[cid]` is a throwaway save slot (this fiber is
+    // finished and will never be resumed). cid indexes this core only.
+    unsafe {
+        switch(&raw mut SCRATCH[cid], &raw const SCHED_CTX[cid]);
+    }
+    // Unreachable: control resumes in `run_app_fiber` after its `switch`.
 }
 
-/// Default per-fiber stack size. 64 KiB matches the AP stacks; wasmi apps
-/// run comfortably in it (the WASM linear memory is separate, on the heap).
-pub const DEFAULT_STACK_BYTES: usize = 64 * 1024;
+/// Default per-fiber stack size. 128 KiB — comfortable headroom over the
+/// 64 KiB AP stacks apps already run wasmi on today (and the old nesting
+/// stacked two wasmi instances on those 64 KiB). The WASM linear memory is
+/// separate (on the heap), so this only holds the interpreter + host-fn
+/// call frames. No guard page yet (heap-backed); overflow = corruption.
+pub const DEFAULT_STACK_BYTES: usize = 128 * 1024;
+
+// ── Per-core fiber dispatch (Stage 2a) ─────────────────────────────────
+
+const MAX_CORES: usize = 256;
+
+/// Each worker core's scheduler-loop context, saved when it switches INTO
+/// an app fiber and restored when the fiber returns (via `fiber_on_exit`)
+/// or yields (Stage 2b). Indexed by core id; only that core touches it.
+static mut SCHED_CTX: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
+/// Throwaway save target for a finishing fiber's dead context.
+static mut SCRATCH: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
+/// The (func, arg) a fresh app fiber should run, handed over by
+/// `run_app_fiber` right before switching in and consumed by
+/// `fiber_app_entry`. Per-core → no cross-core race (one fiber starts at a
+/// time per core in 2a).
+static mut PENDING_FN: [Option<fn(u64)>; MAX_CORES] = [None; MAX_CORES];
+static mut PENDING_ARG: [u64; MAX_CORES] = [0; MAX_CORES];
+
+/// Fresh-fiber entry: pick up the pending (func, arg) for this core and run
+/// it. When it returns, the trampoline falls into `fiber_on_exit`.
+extern "C" fn fiber_app_entry(_unused: u64) {
+    let cid = crate::smp::per_core::current_core_id();
+    // SAFETY: set by `run_app_fiber` on this core just before the switch in.
+    let f = unsafe { PENDING_FN[cid].take() };
+    let arg = unsafe { PENDING_ARG[cid] };
+    if let Some(f) = f {
+        f(arg);
+    }
+}
+
+/// Run `func(arg)` as a fiber on this worker core. Called from the worker
+/// scheduler loop (`smp_ap_entry`) for fiber tasks. Allocates a stack,
+/// switches into it, and returns once the fiber finishes (`func` returns)
+/// — at which point the stack is freed. If `func` is a resident app whose
+/// `_start` never returns, this call never returns either: the worker is
+/// dedicated to that fiber until Stage 2b makes `npk_sleep` yield back.
+pub fn run_app_fiber(cid: usize, func: fn(u64), arg: u64) {
+    if cid >= MAX_CORES {
+        func(arg);
+        return;
+    }
+    let fiber = Fiber::new(DEFAULT_STACK_BYTES, fiber_app_entry, 0);
+    let fiber_ctx: *const Context = &fiber.ctx;
+    // SAFETY: cid is this core's own index; the slots are per-core. The
+    // switch saves the loop context into SCHED_CTX[cid] and enters the
+    // fiber; it returns here when the fiber switches back via
+    // `fiber_on_exit`. `fiber` (its stack) stays alive across the switch.
+    unsafe {
+        PENDING_FN[cid] = Some(func);
+        PENDING_ARG[cid] = arg;
+        switch(&raw mut SCHED_CTX[cid], fiber_ctx);
+    }
+    drop(fiber); // fiber finished → free its stack
+}
 
 /// A fiber: a saved context plus the heap-backed stack it runs on.
 /// Dropping it frees the stack — only do that when the fiber is finished

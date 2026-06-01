@@ -589,7 +589,15 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         if let Some(task) = super::scheduler::next_task(cid) {
             CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
             start_work(cid);
-            (task.func)(task.arg);
+            if task.is_fiber {
+                // App task: run on its own stack so it can yield at
+                // npk_sleep / npk_event_wait (Stage 2b) instead of pinning
+                // this core. Returns when the app's _start completes.
+                super::fiber::run_app_fiber(cid, task.func, task.arg);
+            } else {
+                // Native run-to-completion task (intent) — run directly.
+                (task.func)(task.arg);
+            }
             flush_busy(cid);
             CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             continue;
