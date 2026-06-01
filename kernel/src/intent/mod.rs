@@ -1849,7 +1849,7 @@ fn microvm_linux(inject: &[u8]) {
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
 panic=1 nokaslr noapic acpi=off tsc=reliable \
-tsc_early_khz={} devtmpfs.mount=1",
+tsc_early_khz={} devtmpfs.mount=1 maxcpus=1",
         tsc_khz,
     );
     // Guest-SMP Stage 1: keep `nolapic` only when LAPIC emulation is
