@@ -1161,9 +1161,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     Err(_) => return -1,
                 }
             };
-            // Cooperative path = BSP-only; reject early so the caller
-            // knows to fall back to typing the intent at the prompt.
-            if crate::smp::per_core::dedicated_vm_core().is_none() {
+            // Reject only on the pure cooperative Core-0 path (BSP-only),
+            // so the caller falls back to typing the intent at the prompt.
+            // Fiber mode (vCPU as a pool fiber) AND the dedicated-core path
+            // both support launching from a worker, so allow those.
+            if !crate::microvm::cpu::vm_fiber_mode()
+                && crate::smp::per_core::dedicated_vm_core().is_none()
+            {
                 return -1;
             }
             match verb.as_str() {
