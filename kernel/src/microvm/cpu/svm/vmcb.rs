@@ -42,6 +42,10 @@ pub const OFF_ASID: usize = 0x058;
 pub const OFF_TLB_CTL: usize = 0x05C;
 #[allow(dead_code)] pub const OFF_INT_CTL: usize = 0x060;
 pub const OFF_EXIT_CODE: usize = 0x070;
+/// Interrupt shadow / guest interrupt mask (APM Vol 2 App. B). Bit 0 =
+/// interrupt shadow (set for one instruction after STI / MOV SS). Read to
+/// gate IRQ injection (with RFLAGS.IF) — see `guest_interruptible`.
+pub const OFF_INT_STATE: usize = 0x068;
 pub const OFF_EXIT_INFO_1: usize = 0x078;
 #[allow(dead_code)] pub const OFF_EXIT_INFO_2: usize = 0x080;
 #[allow(dead_code)] pub const OFF_EXIT_INT_INFO: usize = 0x088;
