@@ -179,7 +179,13 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'nameserver 10.99.0.1' > /tmp/resolv.conf; \
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
-                 mount -t ext4 /dev/vda /tmp/moz 2>/dev/null; \
+                 ( [ -b /dev/vda ] && echo '<0>[moz-disk] /dev/vda present' > /dev/kmsg || echo '<0>[moz-disk] /dev/vda ABSENT' > /dev/kmsg ); \
+                 if mount -t ext4 /dev/vda /tmp/moz 2>/tmp/mnterr; then \
+                   echo '<0>[moz-disk] ext4 mounted at /tmp/moz (persist OK)' > /dev/kmsg; \
+                 else \
+                   echo '<0>[moz-disk] ext4 mount FAILED -> profile lives in RAM, NO persist:' > /dev/kmsg; \
+                   cat /tmp/mnterr > /dev/kmsg 2>/dev/null; \
+                 fi; \
                  rm -rf /tmp/moz/datareporting 2>/dev/null; \
                  ln -s /tmp/gleandb /tmp/moz/datareporting 2>/dev/null; \
                  mkdir -p /tmp/npkhome; \
