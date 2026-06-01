@@ -8,6 +8,7 @@
 
 core::arch::global_asm!(include_str!("trampoline.s"), options(att_syntax));
 
+pub mod fiber;
 pub mod per_core;
 pub mod scheduler;
 
