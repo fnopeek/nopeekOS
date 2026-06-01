@@ -366,7 +366,7 @@ pub const GUEST_VCPUS: u8 = 2;
 /// identical (no spawn, `maxcpus=1`, big-lock never taken) and flipping it
 /// on is the AP test — a bad release reverts via OTA by flipping back to
 /// false + re-release (clean rollback, no reinstall). Requires `GUEST_SMP`.
-pub const GUEST_SMP_AP: bool = false;
+pub const GUEST_SMP_AP: bool = true;
 
 // ── AP (secondary vCPU) spawn orchestration (guest SMP, Stage 3b-2) ─────
 //
