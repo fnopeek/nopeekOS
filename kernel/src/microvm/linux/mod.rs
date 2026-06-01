@@ -6,3 +6,4 @@
 //! NPT on AMD); from this module's perspective it's just memory.
 
 pub mod bzimage;
+pub mod mptable;

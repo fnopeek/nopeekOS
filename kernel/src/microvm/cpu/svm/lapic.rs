@@ -1,11 +1,14 @@
 //! Minimal trap-and-emulate local APIC (xAPIC, MMIO @ 0xFEE00000) for
 //! the microvm guest. Per-vCPU.
 //!
-//! Scope (guest-SMP Stage 1): enough for a UP Linux 6.18 guest booted
+//! Scope (guest-SMP Stage 1+2): enough for a Linux 6.18 guest booted
 //! `noapic acpi=off` WITHOUT `nolapic` to bring the LAPIC up
-//! (`setup_local_APIC`), calibrate + run the LAPIC timer, and EOI. ICR
-//! writes are stored (IPI / INIT-SIPI decode lands in Stage 3 for
-//! multi-vCPU). Device IRQs still flow through the 8259 PIC.
+//! (`setup_local_APIC`), calibrate + run the LAPIC timer, and EOI.
+//! Stage 2: ICR writes are stored AND the INIT/SIPI delivery modes are
+//! decoded + logged (the guest sends them when bringing up the AP the
+//! MP-table enumerates), but the AP is NOT started — actual cross-vCPU
+//! delivery (spawn the AP fiber) lands in Stage 3. Device IRQs still
+//! flow through the 8259 PIC.
 //!
 //! Semantics are ported 1:1 from the kernel source the guest runs
 //! against (`~/.cache/nopeekos/linux-src/linux-6.18.26`):
@@ -52,6 +55,11 @@ const LVT_MASKED: u32 = 1 << 16;
 const LVT_TIMER_PERIODIC: u32 = 1 << 17;
 const ICR_BUSY: u32 = 1 << 12;
 const VECTOR_MASK: u32 = 0xFF;
+
+// ICR delivery-mode field (bits 10:8) — apicdef.h.
+const ICR_DM_MASK: u32 = 0x700;
+const ICR_DM_INIT: u32 = 0x500;
+const ICR_DM_STARTUP: u32 = 0x600;
 
 /// LVR: integrated xAPIC, version 0x14, MAXLVT = nr_lvt_entries-1 = 5
 /// (6 entries: timer, thermal, perf, lint0, lint1, error), matching
@@ -155,10 +163,28 @@ impl LocalApic {
                 self.timer_start_tsc = rdtsc();
             }
             APIC_TDCR => self.regs[idx(APIC_TDCR)] = val & 0xB,
-            // ICR low: clear BUSY, store. IPI / INIT-SIPI delivery is a
-            // Stage-3 (multi-vCPU) concern — a UP guest in virtual-wire
-            // mode does not send IPIs during bring-up.
-            APIC_ICR => self.regs[idx(APIC_ICR)] = val & !ICR_BUSY,
+            // ICR low: clear BUSY (Linux polls it for idle), store. The
+            // guest writes here during AP bring-up: INIT then 2× SIPI.
+            // Stage 2 decodes + logs them but does NOT start the AP — the
+            // guest times out on the unresponsive AP and boots 1 CPU.
+            // Actual delivery (spawn the AP vCPU fiber) is Stage 3.
+            APIC_ICR => {
+                self.regs[idx(APIC_ICR)] = val & !ICR_BUSY;
+                let dest = self.regs[idx(APIC_ICR2)] >> 24;
+                match val & ICR_DM_MASK {
+                    ICR_DM_INIT => crate::kprintln!(
+                        "[svm] lapic ICR: INIT IPI -> apic {} (Stage 2: logged, AP not started)",
+                        dest
+                    ),
+                    ICR_DM_STARTUP => crate::kprintln!(
+                        "[svm] lapic ICR: SIPI vec={:#04x} -> apic {} (AP trampoline @ {:#x}, deferred to Stage 3)",
+                        val & VECTOR_MASK,
+                        dest,
+                        (val & VECTOR_MASK) << 12
+                    ),
+                    _ => {}
+                }
+            }
             APIC_ICR2 => self.regs[idx(APIC_ICR2)] = val & 0xFF00_0000,
             // LVR is read-only.
             APIC_LVR => {}

@@ -1845,12 +1845,20 @@ fn microvm_linux(inject: &[u8]) {
     // init surfaces on the host console. Re-add the gating once
     // bare-metal is validated. Performance regression on launch is
     // ~150 8250-IO VM-exits, one-shot, acceptable for diag.
+    // Guest-SMP Stage 2: with the MP-table installed (`GUEST_SMP`),
+    // advertise `maxcpus=GUEST_VCPUS` so Linux attempts AP bring-up.
+    // Otherwise stay `maxcpus=1` (validated UP guest).
+    let maxcpus = if crate::microvm::cpu::GUEST_SMP {
+        crate::microvm::cpu::GUEST_VCPUS
+    } else {
+        1
+    };
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
 panic=1 nokaslr noapic acpi=off tsc=reliable \
-tsc_early_khz={} devtmpfs.mount=1 maxcpus=1",
-        tsc_khz,
+tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
+        tsc_khz, maxcpus,
     );
     // Guest-SMP Stage 1: keep `nolapic` only when LAPIC emulation is
     // gated off (OTA rollback). With it on (default) Linux brings up the

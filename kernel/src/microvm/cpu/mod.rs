@@ -339,6 +339,21 @@ pub const VCPU_AS_FIBER: bool = true;
 /// no guest-kernel rebuild needed). Prerequisite for AP bringup (Stage 3).
 pub const GUEST_LAPIC: bool = true;
 
+/// Guest-SMP Stage 2: enumerate a 2nd vCPU to Linux via an MP-table
+/// (`linux::mptable`, floating pointer @ 0xF0000) and pass `maxcpus=2`.
+/// Linux counts 2 CPUs and *attempts* AP bring-up; the INIT/SIPI it
+/// writes to the LAPIC ICR is decoded + logged in `svm::lapic` but the AP
+/// is NOT started yet (Stage 3), so Linux times out and boots with 1 CPU
+/// online. Requires `GUEST_LAPIC` (no LAPIC → no MP-table point). Flag-
+/// gated so a bad release reverts via OTA (flip to `false` + re-release →
+/// no MP-table, `maxcpus=1` → identical to the validated v0.191.13 UP
+/// guest — no guest-kernel rebuild needed).
+pub const GUEST_SMP: bool = true;
+
+/// Number of vCPUs we advertise to the guest when `GUEST_SMP` is on.
+/// Stage 2 keeps this at 2 (BSP + one enumerated-but-unstarted AP).
+pub const GUEST_VCPUS: u8 = 2;
+
 /// Decided once at boot (`set_vm_fiber_mode`, from `init_dedicated_vm_core`,
 /// which has the vendor + worker count): true → the guest runs as a pool
 /// fiber and NO core is dedicated. Cheap atomic read on the hot poll path.

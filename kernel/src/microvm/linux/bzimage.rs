@@ -292,6 +292,13 @@ pub fn load_into_guest_ram(
     // Copy boot_params into guest RAM at 0x90000.
     mem.write_bytes(BOOT_PARAMS_GUEST_PHYS, &bp);
 
+    // Guest-SMP Stage 2: enumerate the vCPUs via an MP-table in the
+    // BIOS window (0xF0000, RESERVED above in our e820). Linux scans
+    // for it when booted `acpi=off` and counts GUEST_VCPUS CPUs.
+    if crate::microvm::cpu::GUEST_SMP {
+        super::mptable::install(mem, crate::microvm::cpu::GUEST_VCPUS);
+    }
+
     Ok(LoadInfo {
         entry_rip: header.code32_start as u64,
         boot_params_phys: BOOT_PARAMS_GUEST_PHYS,
