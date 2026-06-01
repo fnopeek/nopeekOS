@@ -930,7 +930,12 @@ fn vcpu_fiber_task(_arg: u64) {
 fn ap_vcpu_fiber_task(_arg: u64) {
     let ptr = AP_SHARED_PTR.load(Ordering::Acquire);
     let vector = AP_SIPI_VECTOR.load(Ordering::Acquire);
-    if ptr == 0 || !matches!(*VENDOR.lock(), Vendor::Amd) {
+    // NOTE: do NOT lock VENDOR here. The BSP vCPU fiber holds the VENDOR
+    // mutex for its ENTIRE run loop (`match *VENDOR.lock() { Amd => { … } }`),
+    // so contending on it from the AP would block forever (the BSP never
+    // releases it while the guest runs). The AP is AMD/SVM by construction —
+    // it is only spawned from the svm ICR router (`request_ap_spawn`).
+    if ptr == 0 {
         VCPU_COUNT.fetch_sub(1, Ordering::AcqRel);
         return;
     }
