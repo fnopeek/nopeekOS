@@ -125,6 +125,23 @@ pub fn vm_open(
     }
 }
 
+/// Open an AP vCPU context (guest SMP, Stage 3b) sharing the BSP's
+/// `VmShared` at `shared_ptr` (a `*mut VmShared` as a u64), entering real
+/// mode at `sipi_vector`. The caller drives `run_slice` (NOT `close` — the
+/// BSP owns the shared state).
+pub fn vm_open_ap(
+    shared_ptr: u64,
+    sipi_vector: u8,
+    apic_id: u8,
+) -> Result<VmContext, &'static str> {
+    VmContext::open_ap(shared_ptr as *mut enable::VmShared, sipi_vector, apic_id)
+}
+
+/// Set/clear the guest-SMP big-VM-lock engagement (see `enable::AP_ACTIVE`).
+pub fn set_ap_active(on: bool) {
+    enable::AP_ACTIVE.store(on, core::sync::atomic::Ordering::Release);
+}
+
 // ── shared CPU primitives for SVM submodules ───────────────────────
 
 /// Read MSR. Caller must guarantee the MSR exists on this CPU,

@@ -58,8 +58,28 @@ const VECTOR_MASK: u32 = 0xFF;
 
 // ICR delivery-mode field (bits 10:8) — apicdef.h.
 const ICR_DM_MASK: u32 = 0x700;
-const ICR_DM_INIT: u32 = 0x500;
-const ICR_DM_STARTUP: u32 = 0x600;
+pub const ICR_DM_FIXED: u32 = 0x000;
+pub const ICR_DM_LOWEST: u32 = 0x100;
+pub const ICR_DM_INIT: u32 = 0x500;
+pub const ICR_DM_STARTUP: u32 = 0x600;
+
+/// Decoded ICR write — the inter-processor interrupt a vCPU just issued.
+/// The caller (which knows the sender's apic_id + the shared IPI state)
+/// routes it: FIXED/LOWEST → set the target vCPU(s)' pending vector;
+/// STARTUP → spawn the AP at `vector`; INIT → no-op (AP starts at SIPI).
+#[derive(Clone, Copy)]
+pub struct IcrWrite {
+    /// Delivery mode, masked to `ICR_DM_MASK` (one of `ICR_DM_*`).
+    pub delivery_mode: u32,
+    /// Destination shorthand (ICR bits 19:18): 0=dest field, 1=self,
+    /// 2=all-incl-self, 3=all-excl-self.
+    pub shorthand: u32,
+    /// Physical destination APIC id (ICR2 bits 31:24), valid when
+    /// `shorthand == 0`.
+    pub dest: u8,
+    /// Interrupt vector (FIXED) or SIPI start page (STARTUP).
+    pub vector: u8,
+}
 
 /// LVR: integrated xAPIC, version 0x14, MAXLVT = nr_lvt_entries-1 = 5
 /// (6 entries: timer, thermal, perf, lint0, lint1, error), matching
@@ -147,8 +167,11 @@ impl LocalApic {
     }
 
     /// Write a register (32-bit). Side-effects per KVM
-    /// `kvm_lapic_reg_write`.
-    pub fn write(&mut self, off: u32, val: u32) {
+    /// `kvm_lapic_reg_write`. Returns `Some(IcrWrite)` for an ICR-low
+    /// write so the caller can route the IPI cross-vCPU (it knows the
+    /// sender id + shared state); all other writes return `None`.
+    #[must_use]
+    pub fn write(&mut self, off: u32, val: u32) -> Option<IcrWrite> {
         match off & 0xFF0 {
             // EOI is write-only; it clears the highest in-service vector.
             // We deliver one vector at a time via VMCB EVENTINJ and don't
@@ -168,27 +191,17 @@ impl LocalApic {
                 self.timer_start_tsc = rdtsc();
             }
             APIC_TDCR => self.regs[idx(APIC_TDCR)] = val & 0xB,
-            // ICR low: clear BUSY (Linux polls it for idle), store. The
-            // guest writes here during AP bring-up: INIT then 2× SIPI.
-            // Stage 2 decodes + logs them but does NOT start the AP — the
-            // guest times out on the unresponsive AP and boots 1 CPU.
-            // Actual delivery (spawn the AP vCPU fiber) is Stage 3.
+            // ICR low: clear BUSY (Linux polls it for idle), store, and
+            // hand the decoded IPI back to the caller for cross-vCPU
+            // routing (INIT/SIPI bring-up + FIXED reschedule/TLB/etc.).
             APIC_ICR => {
                 self.regs[idx(APIC_ICR)] = val & !ICR_BUSY;
-                let dest = self.regs[idx(APIC_ICR2)] >> 24;
-                match val & ICR_DM_MASK {
-                    ICR_DM_INIT => crate::kprintln!(
-                        "[svm] lapic ICR: INIT IPI -> apic {} (Stage 2: logged, AP not started)",
-                        dest
-                    ),
-                    ICR_DM_STARTUP => crate::kprintln!(
-                        "[svm] lapic ICR: SIPI vec={:#04x} -> apic {} (AP trampoline @ {:#x}, deferred to Stage 3)",
-                        val & VECTOR_MASK,
-                        dest,
-                        (val & VECTOR_MASK) << 12
-                    ),
-                    _ => {}
-                }
+                return Some(IcrWrite {
+                    delivery_mode: val & ICR_DM_MASK,
+                    shorthand: (val >> 18) & 0x3,
+                    dest: (self.regs[idx(APIC_ICR2)] >> 24) as u8,
+                    vector: (val & VECTOR_MASK) as u8,
+                });
             }
             APIC_ICR2 => self.regs[idx(APIC_ICR2)] = val & 0xFF00_0000,
             // LVR is read-only.
@@ -196,6 +209,7 @@ impl LocalApic {
             // Everything else (LVTT/LVT0/LVT1/LVTERR/LDR/DFR/…): store.
             o => self.regs[idx(o)] = val,
         }
+        None
     }
 
     /// If the LAPIC timer is the active clock source right now, the
