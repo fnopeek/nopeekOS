@@ -89,6 +89,16 @@ pub fn init() {
 // mouse — basic cursor + click (gestures/precision need the I2C-HID path later).
 
 static PS2_MOUSE_ENABLED: AtomicBool = AtomicBool::new(false);
+/// True once a PS/2 mouse is up and the i8042 is drained from the Core-0
+/// TIMER IRQ (`poll_ps2_irq`) instead of the run loop. Mirrors how the USB
+/// mouse is serviced (`xhci::poll_events_irq` in the same handlers) → the
+/// polled PS/2 mouse samples at the timer rate independent of the loop's
+/// HLT/spin (fixes laggy-mouse-when-a-window-is-open). When set, the IRQ is
+/// the SOLE i8042 drainer and `read_key` must NOT poll (the IRQ would
+/// preempt it between the STATUS and DATA reads → wrong byte). Stays false
+/// on USB-mouse hosts (QEMU/NUC) so their input path is byte-for-byte
+/// unchanged.
+static PS2_IRQ_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PM_IDX: AtomicU8 = AtomicU8::new(0);
 static PM_B0: AtomicU8 = AtomicU8::new(0);
 static PM_B1: AtomicU8 = AtomicU8::new(0);
@@ -140,7 +150,12 @@ pub fn init_mouse() -> bool {
     let _ = mouse_write(0xF6);   // set defaults
     let _ = mouse_write(0xF4);   // enable data reporting (→ 0xFA)
     PS2_MOUSE_ENABLED.store(true, Ordering::Release);
-    crate::kprintln!("[npk] ps2: touchpad/mouse on i8042 aux");
+    // Init done → hand i8042 draining to the Core-0 timer IRQ (poll_ps2_irq),
+    // so the polled mouse samples at the timer rate regardless of the run
+    // loop. Set LAST so the IRQ can't race the init reads/acks above. From
+    // here read_key reads BUF only (the IRQ is the sole drainer).
+    PS2_IRQ_ACTIVE.store(true, Ordering::Release);
+    crate::kprintln!("[npk] ps2: touchpad/mouse on i8042 aux (timer-IRQ drained)");
     true
 }
 
@@ -228,8 +243,14 @@ pub fn read_key() -> Option<u8> {
     // PS/2 polling: with the legacy PIC masked (UEFI/APIC machines) IRQ1
     // never fires, so the buffer above stays empty — but the i8042 still
     // latches scancodes. Read them on demand. (No-op if no PS/2 keyboard.)
-    if let Some(c) = poll_ps2() {
-        return Some(c);
+    // SKIP when the Core-0 timer IRQ owns the i8042 (PS2_IRQ_ACTIVE): polling
+    // here would race the IRQ on the single output buffer (it can preempt us
+    // between the STATUS and DATA reads → misread byte). Keyboard bytes then
+    // arrive via the IRQ → push_key → the BUF read above.
+    if !PS2_IRQ_ACTIVE.load(Ordering::Relaxed) {
+        if let Some(c) = poll_ps2() {
+            return Some(c);
+        }
     }
     // xHCI USB keyboard (real driver, no legacy emulation needed)
     crate::xhci::poll_keyboard()
@@ -288,6 +309,45 @@ fn poll_ps2() -> Option<u8> {
                 return Some(c);
             }
             // Modifier / release / 0xE0 prefix produced no char — keep draining.
+        }
+    }
+}
+
+/// Drain the i8042 from the Core-0 TIMER IRQ (called next to
+/// `xhci::poll_events_irq`). Non-blocking — NO busy-wait (IRQ context); a
+/// 3-byte mouse packet split across ticks completes on the next tick
+/// (≤ one timer period). Keyboard scancodes → `push_key` (the BUF
+/// `read_key` reads); aux bytes → `feed_mouse` (→ `update_atomic` +
+/// `request_render`, exactly like the USB mouse). This is the SOLE i8042
+/// drainer once active. No-op until `PS2_IRQ_ACTIVE` (set after init, only
+/// when a PS/2 mouse exists) so init can't race the IRQ and USB-mouse hosts
+/// are untouched. Core-0 only (the timer handlers run on the BSP).
+pub fn poll_ps2_irq() {
+    if !PS2_IRQ_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut budget = 64u32;
+    // SAFETY: ring-0 i8042 port access; only the Core-0 timer IRQ calls this,
+    // and once active nothing else touches the i8042 (read_key reads BUF).
+    unsafe {
+        while budget > 0 {
+            let status = inb(STATUS_PORT);
+            if status == 0xFF || status & 0x01 == 0 {
+                return; // no controller / output buffer empty
+            }
+            budget -= 1;
+            if status & 0x20 != 0 {
+                // Aux (touchpad/mouse) byte.
+                let b = inb(DATA_PORT);
+                if PS2_MOUSE_ENABLED.load(Ordering::Relaxed) {
+                    feed_mouse(b);
+                }
+                continue;
+            }
+            let scancode = inb(DATA_PORT);
+            if let Some(c) = decode_scancode(scancode) {
+                push_key(c);
+            }
         }
     }
 }
