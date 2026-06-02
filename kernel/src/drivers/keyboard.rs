@@ -217,13 +217,39 @@ fn poll_ps2() -> Option<u8> {
         // Drain the shared i8042 output buffer: aux (touchpad) bytes feed the
         // mouse assembler, keyboard bytes decode to a char. Draining aux is
         // mandatory — an unread aux byte sits in the single output buffer and
-        // would block keyboard reads. Bounded so it always terminates.
-        for _ in 0..64 {
+        // would block keyboard reads.
+        //
+        // The PS/2 device delivers one byte per ~1 ms, paced by our reads. At a
+        // 100 Hz poll that splits each 3-byte mouse packet across ~30 ms → the
+        // cursor lags and overshoots ("rubber-band"). So while a packet is
+        // mid-assembly we briefly (TSC-bounded ~2 ms) wait for the next byte to
+        // finish the packet in one poll — full sample rate, ≤10 ms latency. The
+        // wait only happens during active movement (PM_IDX != 0) and a byte
+        // budget caps total work per call.
+        let tsc_2ms = crate::interrupts::tsc_freq() / 500;
+        let mut budget = 48u32;
+        loop {
             let status = inb(STATUS_PORT);
-            // 0xFF = no controller; bit0 = output buffer full.
-            if status == 0xFF || status & 0x01 == 0 {
+            if status == 0xFF { return None; }       // no controller
+            if status & 0x01 == 0 {
+                // Buffer empty. Finish an in-flight mouse packet rather than
+                // splitting it across polls.
+                if PS2_MOUSE_ENABLED.load(Ordering::Relaxed)
+                    && PM_IDX.load(Ordering::Relaxed) != 0
+                    && tsc_2ms > 0
+                    && budget > 0
+                {
+                    let deadline = crate::interrupts::rdtsc() + tsc_2ms;
+                    while crate::interrupts::rdtsc() < deadline {
+                        if inb(STATUS_PORT) & 0x01 != 0 { break; }
+                        core::hint::spin_loop();
+                    }
+                    if inb(STATUS_PORT) & 0x01 != 0 { continue; }
+                }
                 return None;
             }
+            if budget == 0 { return None; }
+            budget -= 1;
             if status & 0x20 != 0 {
                 // bit5 set → byte is from the aux device (touchpad/mouse).
                 let b = inb(DATA_PORT);
@@ -238,7 +264,6 @@ fn poll_ps2() -> Option<u8> {
             }
             // Modifier / release / 0xE0 prefix produced no char — keep draining.
         }
-        None
     }
 }
 
