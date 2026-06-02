@@ -1025,9 +1025,33 @@ impl VmContext {
         // next EXTERNAL_INTERRUPT exit, but a mid-vectored event is
         // gone forever if dropped. Overwrites any fresh inject a
         // handler wrote on the previous iteration; that is intended.
+        //
+        // BUT an EXTERNAL interrupt (type 0) may only be injected when
+        // the guest is interruptible (RFLAGS.IF=1, no STI/MOV-SS
+        // shadow): SDM §26.3.1.5 makes that a guest-non-register-state
+        // consistency check, so an IF=0 inject fails VM-entry with
+        // reason 33 on bare-metal Intel (AMD's VMRUN tolerates it,
+        // delivering a guest #GP — why QEMU/AMD never tripped). The
+        // normal injects below were gated on `guest_interruptible()`
+        // in v0.172.77; this re-inject slot was the one ungated write
+        // left, and it tripped reason 33 on the i5-8265U when a virtio
+        // IRQ (IRQ6 = 9p, vector 0x36) was re-injected while the guest
+        // sat IF=0 mid-cage-startup. KVM gates re-injected IRQs the
+        // same way — `__vmx_complete_interrupts` requeues the in-flight
+        // vector into the pending-interrupt queue, and
+        // kvm_check_and_inject_events re-checks `interrupt_allowed`,
+        // HOLDING it pending (never dropping) until the window opens.
+        // So we DEFER: keep `self.reinject` set when not interruptible;
+        // the next ~100 Hz external-interrupt exit retries once the
+        // guest runs `sti`. An NMI (type 2) is not IF-gated (delivered
+        // regardless), so it injects immediately. Nothing is lost — an
+        // IF=0 window is µs–ms, far under any RCU-stall threshold.
         if self.reinject != 0 {
-            let _ = vmcs::write_entry_intr_info(self.reinject);
-            self.reinject = 0;
+            let rtype = (self.reinject >> 8) & 0x7;
+            if rtype != 0 || vmcs::guest_interruptible() {
+                let _ = vmcs::write_entry_intr_info(self.reinject);
+                self.reinject = 0;
+            }
         }
         // FPU host↔guest swap is now embedded inside run_guest_once's
         // asm (mirror of SVM v0.172.53), bracketing VMRESUME with zero
