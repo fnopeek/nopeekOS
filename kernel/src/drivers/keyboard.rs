@@ -4,7 +4,7 @@
 //! Scancode Set 1 with US and DE_CH layouts.
 //! USB keyboards work via BIOS legacy PS/2 emulation.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use crate::serial::{inb, outb};
 
 const DATA_PORT: u16 = 0x60;
@@ -78,6 +78,104 @@ pub fn init() {
     }
 }
 
+// ── PS/2 mouse / touchpad (i8042 aux port) ──
+//
+// On UEFI machines the legacy PIC is masked, so IRQ12 (aux) never fires — same
+// situation as the keyboard. We enable the aux device and read its 3-byte
+// packets in the shared i8042 drain (`poll_ps2`), feeding them into the same
+// pointer ring the USB mouse uses (`xhci::inject_mouse`). Only enabled when no
+// USB mouse is present (so QEMU/NUC USB-mouse setups are untouched). A Synaptics
+// touchpad in PS/2-compatibility mode shows up here as a standard relative
+// mouse — basic cursor + click (gestures/precision need the I2C-HID path later).
+
+static PS2_MOUSE_ENABLED: AtomicBool = AtomicBool::new(false);
+static PM_IDX: AtomicU8 = AtomicU8::new(0);
+static PM_B0: AtomicU8 = AtomicU8::new(0);
+static PM_B1: AtomicU8 = AtomicU8::new(0);
+
+/// Read one byte from the i8042 output buffer with a bounded spin (None on timeout).
+fn ps2_read() -> Option<u8> {
+    for _ in 0..200_000 {
+        if unsafe { inb(STATUS_PORT) } & 0x01 != 0 {
+            return Some(unsafe { inb(DATA_PORT) });
+        }
+    }
+    None
+}
+
+/// Send a command byte to the aux device (0xD4 prefix) and read its reply.
+fn mouse_write(b: u8) -> Option<u8> {
+    wait_write();
+    unsafe { outb(STATUS_PORT, 0xD4); }   // next data-port byte goes to aux
+    wait_write();
+    unsafe { outb(DATA_PORT, b); }
+    ps2_read()
+}
+
+/// Initialize the PS/2 touchpad/mouse on the i8042 aux port. No-op (returns
+/// false) if a USB mouse is already up or no aux device responds.
+pub fn init_mouse() -> bool {
+    if crate::xhci::mouse_available() { return false; }
+    unsafe {
+        if inb(STATUS_PORT) == 0xFF { return false; }   // no i8042 controller
+        // Enable the aux device.
+        wait_write();
+        outb(STATUS_PORT, 0xA8);
+        // Read controller config, enable the aux clock (clear bit5), keep the
+        // keyboard bits. We poll, so leave the aux-IRQ bit alone.
+        wait_write();
+        outb(STATUS_PORT, 0x20);
+        let cfg = match ps2_read() { Some(c) => c, None => return false };
+        wait_write();
+        outb(STATUS_PORT, 0x60);
+        wait_write();
+        outb(DATA_PORT, cfg & !0x20);
+    }
+    // Reset the device (0xFF → 0xFA, 0xAA, 0x00). No reply = no aux device.
+    if mouse_write(0xFF).is_none() {
+        return false;
+    }
+    let _ = ps2_read();   // 0xAA self-test
+    let _ = ps2_read();   // 0x00 device id
+    let _ = mouse_write(0xF6);   // set defaults
+    let _ = mouse_write(0xF4);   // enable data reporting (→ 0xFA)
+    PS2_MOUSE_ENABLED.store(true, Ordering::Release);
+    crate::kprintln!("[npk] ps2: touchpad/mouse on i8042 aux");
+    true
+}
+
+/// Assemble a 3-byte PS/2 mouse packet and inject it as a pointer event.
+fn feed_mouse(byte: u8) {
+    match PM_IDX.load(Ordering::Relaxed) {
+        0 => {
+            if byte & 0x08 == 0 { return; }   // bit3 sync must be set, else resync
+            PM_B0.store(byte, Ordering::Relaxed);
+            PM_IDX.store(1, Ordering::Relaxed);
+        }
+        1 => {
+            PM_B1.store(byte, Ordering::Relaxed);
+            PM_IDX.store(2, Ordering::Relaxed);
+        }
+        _ => {
+            PM_IDX.store(0, Ordering::Relaxed);
+            let b0 = PM_B0.load(Ordering::Relaxed);
+            let b1 = PM_B1.load(Ordering::Relaxed);
+            let b2 = byte;
+            if b0 & 0xC0 != 0 { return; }      // X/Y overflow → bogus packet, drop
+            let buttons = b0 & 0x07;           // bit0=left,1=right,2=middle (== MouseEvent)
+            let dx = if b0 & 0x10 != 0 { b1 as i16 - 256 } else { b1 as i16 };
+            let dy = if b0 & 0x20 != 0 { b2 as i16 - 256 } else { b2 as i16 };
+            let clamp = |v: i16| -> i8 { v.clamp(-127, 127) as i8 };
+            crate::xhci::inject_mouse(crate::xhci::MouseEvent {
+                buttons,
+                dx: clamp(dx),
+                dy: clamp(-dy),   // PS/2 +Y is up; screen +Y is down
+                scroll: 0,
+            });
+        }
+    }
+}
+
 #[allow(dead_code)]
 /// Check if a key is available (IRQ buffer or polled port 0x60).
 pub fn has_key() -> bool {
@@ -116,14 +214,31 @@ pub fn read_key() -> Option<u8> {
 /// (PS/2 mouse/touchpad) bytes so they don't get misread as keystrokes.
 fn poll_ps2() -> Option<u8> {
     unsafe {
-        let status = inb(STATUS_PORT);
-        // bit0 = output buffer full, bit5 = data is from the aux device.
-        // Want keyboard data only: output-full AND not-aux.
-        if status & 0x21 != 0x01 {
-            return None;
+        // Drain the shared i8042 output buffer: aux (touchpad) bytes feed the
+        // mouse assembler, keyboard bytes decode to a char. Draining aux is
+        // mandatory — an unread aux byte sits in the single output buffer and
+        // would block keyboard reads. Bounded so it always terminates.
+        for _ in 0..64 {
+            let status = inb(STATUS_PORT);
+            // 0xFF = no controller; bit0 = output buffer full.
+            if status == 0xFF || status & 0x01 == 0 {
+                return None;
+            }
+            if status & 0x20 != 0 {
+                // bit5 set → byte is from the aux device (touchpad/mouse).
+                let b = inb(DATA_PORT);
+                if PS2_MOUSE_ENABLED.load(Ordering::Relaxed) {
+                    feed_mouse(b);
+                }
+                continue;
+            }
+            let scancode = inb(DATA_PORT);
+            if let Some(c) = decode_scancode(scancode) {
+                return Some(c);
+            }
+            // Modifier / release / 0xE0 prefix produced no char — keep draining.
         }
-        let scancode = inb(DATA_PORT);
-        decode_scancode(scancode)
+        None
     }
 }
 
