@@ -1789,6 +1789,290 @@ fn cmd_configure_endpoint(state: &mut XhciState, ep_dci: u8, max_pkt: u16, inter
     }
 }
 
+// === USB-NIC support: bulk endpoints (for the RTL8153 USB-Ethernet driver) ===
+//
+// A USB-NIC needs bulk IN (RX) + bulk OUT (TX) on top of the control endpoint
+// the rest of this file already drives. We bring up the NIC's controller fresh
+// (it lives on a different controller than the keyboard), address the device,
+// configure its two bulk endpoints, and expose three primitives the class
+// driver (rtl8153.rs) builds on: nic_control (register access via EP0),
+// nic_bulk_out (TX), nic_bulk_in (RX poll). This is the USB *transport*; the
+// chip logic lives in the class driver — the same split a future WASM driver
+// would use via npk_usb_*.
+
+const EP_TYPE_BULK_OUT: u32 = 2;
+const EP_TYPE_BULK_IN:  u32 = 6;
+const NIC_BULK_BUF_PAGES: usize = 4;            // 16 KiB == RTL8153 rx_buf_sz
+const NIC_BULK_BUF_BYTES: usize = NIC_BULK_BUF_PAGES * 4096;
+
+struct NicXhci {
+    x: XhciState,
+    in_ring: u64,  in_cycle: u32,  in_enq: usize,  in_dci: u8,
+    out_ring: u64, out_cycle: u32, out_enq: usize, out_dci: u8,
+    in_buf: u64,   out_buf: u64,
+    rx_in_flight: bool,
+    rx_ready_len: usize,   // bytes of a completed-but-undelivered bulk-IN, 0 = none
+}
+
+static NIC: spin::Mutex<Option<NicXhci>> = spin::Mutex::new(None);
+
+pub fn nic_attached() -> bool { NIC.lock().is_some() }
+
+/// Find `vid:pid` on any xHCI controller, bring the controller up, address the
+/// device, set its configuration and configure bulk IN (EP `ep_in`) + bulk OUT
+/// (EP `ep_out`). On success the device is ready for nic_control / nic_bulk_*.
+pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
+    if NIC.lock().is_some() { return true; }
+    for bus in 0u16..=255 {
+        for dev_num in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
+                let id = pci::read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 { if func == 0 { break; } continue; }
+                let class_reg = pci::read32(addr, 0x08);
+                if ((class_reg >> 24) & 0xFF) as u8 == 0x0C
+                    && ((class_reg >> 16) & 0xFF) as u8 == 0x03
+                    && ((class_reg >> 8) & 0xFF) as u8 == 0x30
+                {
+                    let pci_dev = pci::PciDevice {
+                        addr,
+                        vendor_id: (id & 0xFFFF) as u16,
+                        device_id: ((id >> 16) & 0xFFFF) as u16,
+                        bar0: pci::read32(addr, 0x10),
+                        irq_line: pci::read8(addr, 0x3C),
+                    };
+                    if nic_try_attach(pci_dev, vid, pid, ep_in, ep_out) { return true; }
+                }
+                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
+            }
+        }
+    }
+    false
+}
+
+fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
+    let mut x = match bring_up_controller(dev, 16) { Some(s) => s, None => return false };
+
+    for p in 0..x.max_ports {
+        let sc = r32(x.oper, portsc_off(p));
+        if sc & PORTSC_CCS == 0 { continue; }
+        x.port_speed = (sc >> 10) & 0xF;
+        if sc & PORTSC_PED == 0 {
+            if !reset_port(&x, p) { continue; }
+            x.port_speed = (r32(x.oper, portsc_off(p)) >> 10) & 0xF;
+        }
+
+        let slot = match cmd_enable_slot(&mut x) { Some(s) => s, None => continue };
+        x.slot_id = slot;
+        // SAFETY: slot's device-context pointer into the DMA DCBAA
+        unsafe { core::ptr::write_volatile((x.dcbaa as *mut u64).add(slot as usize), x.device_ctx); }
+
+        let mp0 = match x.port_speed { SPEED_LOW | SPEED_FULL => 8u16, SPEED_HIGH => 64, SPEED_SUPER => 512, _ => 64 };
+        reset_ep0_ring(&mut x);
+        if !cmd_address_device(&mut x, p, mp0) { cmd_disable_slot(&mut x, slot); continue; }
+
+        if !usb_get_descriptor(&mut x, DESC_DEVICE, 18) { cmd_disable_slot(&mut x, slot); continue; }
+        let dvid = u16::from_le_bytes([r8(x.data_buf, 8), r8(x.data_buf, 9)]);
+        let dpid = u16::from_le_bytes([r8(x.data_buf, 10), r8(x.data_buf, 11)]);
+        if dvid != vid || dpid != pid { cmd_disable_slot(&mut x, slot); continue; }
+
+        // Set configuration so the bulk endpoints become usable.
+        if !usb_get_descriptor(&mut x, DESC_CONFIG, 9) { cmd_disable_slot(&mut x, slot); return false; }
+        let config_val = r8(x.data_buf, 5);
+        if !usb_set_config(&mut x, config_val) { cmd_disable_slot(&mut x, slot); return false; }
+
+        let in_ring = alloc_dma(1, "nic bulk-in ring");
+        let out_ring = alloc_dma(1, "nic bulk-out ring");
+        let in_buf = alloc_dma(NIC_BULK_BUF_PAGES, "nic in buf");
+        let out_buf = alloc_dma(NIC_BULK_BUF_PAGES, "nic out buf");
+        if in_ring == 0 || out_ring == 0 || in_buf == 0 || out_buf == 0 {
+            kprintln!("[npk] xhci: nic DMA alloc failed"); return false;
+        }
+        write_trb(in_ring, NUM_TR_TRBS - 1, in_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+        write_trb(out_ring, NUM_TR_TRBS - 1, out_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+
+        let in_dci = ep_in * 2 + 1;   // IN endpoint
+        let out_dci = ep_out * 2;     // OUT endpoint
+        let bulk_mp = if x.port_speed == SPEED_SUPER { 1024 } else { 512 };
+        if !cmd_configure_bulk(&mut x, in_dci, in_ring, out_dci, out_ring, bulk_mp) {
+            kprintln!("[npk] xhci: nic configure-bulk failed (speed {})", x.port_speed);
+            cmd_disable_slot(&mut x, slot);
+            return false;
+        }
+
+        kprintln!("[npk] xhci: NIC attached on port {} (slot {}, bulk in EP{} out EP{}, speed {})",
+            p + 1, slot, ep_in, ep_out, x.port_speed);
+        *NIC.lock() = Some(NicXhci {
+            x, in_ring, in_cycle: 1, in_enq: 0, in_dci,
+            out_ring, out_cycle: 1, out_enq: 0, out_dci,
+            in_buf, out_buf, rx_in_flight: false, rx_ready_len: 0,
+        });
+        return true;
+    }
+    false
+}
+
+/// Configure both bulk endpoints (IN + OUT) in one Configure Endpoint command.
+fn cmd_configure_bulk(state: &mut XhciState, in_dci: u8, in_ring: u64,
+    out_dci: u8, out_ring: u64, max_pkt: u16) -> bool
+{
+    let ctx = state.ctx_size;
+    let input = state.input_ctx;
+    // SAFETY: zeroing the input context
+    unsafe { core::ptr::write_bytes(input as *mut u8, 0, 4096); }
+
+    let max_dci = in_dci.max(out_dci);
+    // SAFETY: Input Control Context — add Slot + both endpoints
+    unsafe {
+        core::ptr::write_volatile((input + 4) as *mut u32,
+            1 | (1u32 << in_dci) | (1u32 << out_dci));
+        // Slot context: Context Entries = highest DCI, plus speed
+        let slot_off = input + ctx as u64;
+        core::ptr::write_volatile(slot_off as *mut u32,
+            ((max_dci as u32) << 27) | ((state.port_speed as u32) << 20));
+    }
+
+    for (dci, ring, ep_type) in [
+        (in_dci, in_ring, EP_TYPE_BULK_IN),
+        (out_dci, out_ring, EP_TYPE_BULK_OUT),
+    ] {
+        let ep = input + (ctx * (dci as usize + 1)) as u64;
+        // SAFETY: endpoint context for a bulk EP
+        unsafe {
+            core::ptr::write_volatile(ep as *mut u32, 0);
+            core::ptr::write_volatile((ep + 4) as *mut u32,
+                (3 << 1) | (ep_type << 3) | ((max_pkt as u32) << 16));
+            core::ptr::write_volatile((ep + 8) as *mut u32, (ring as u32) | 1);
+            core::ptr::write_volatile((ep + 12) as *mut u32, (ring >> 32) as u32);
+            core::ptr::write_volatile((ep + 16) as *mut u32, max_pkt as u32);
+        }
+    }
+
+    let slot_field = (state.slot_id as u32) << 24;
+    post_command(state, input, 0, TRB_CONFIGURE_EP | slot_field);
+    matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS)
+}
+
+/// Consume one transfer event from the NIC controller's event ring (if any).
+/// Bulk-IN completions are stashed (rx_ready_len) so a TX/control wait never
+/// loses a received packet. Returns the consumed event's (cc, dci), or None.
+fn nic_consume_event(nic: &mut NicXhci) -> Option<(u32, u32)> {
+    let (_p, status, control) = read_trb(nic.x.evt_ring, nic.x.evt_dequeue);
+    if control & TRB_CYCLE != nic.x.evt_cycle { return None; }
+
+    nic.x.evt_dequeue += 1;
+    if nic.x.evt_dequeue >= NUM_EVT_TRBS { nic.x.evt_dequeue = 0; nic.x.evt_cycle ^= 1; }
+    let erdp = nic.x.evt_ring + (nic.x.evt_dequeue * 16) as u64;
+    w64(nic.x.rt + 0x20, 0x18, erdp | (1 << 3));
+
+    if control & (0x3F << 10) != EVT_TRANSFER { return Some((0xFF, 0xFF)); }
+    let cc = (status >> 24) & 0xFF;
+    let residual = status & 0x00FF_FFFF;
+    let dci = (control >> 16) & 0x1F;
+    if dci == nic.in_dci as u32 {
+        nic.rx_in_flight = false;
+        nic.rx_ready_len = (NIC_BULK_BUF_BYTES as u32).saturating_sub(residual) as usize;
+    }
+    Some((cc, dci))
+}
+
+/// Wait for a transfer-event on `want_dci` (timeout in ticks). Stashes bulk-IN
+/// completions encountered along the way. Returns the completion code.
+fn nic_wait_dci(nic: &mut NicXhci, want_dci: u32, timeout: u64) -> Option<u32> {
+    let deadline = crate::interrupts::ticks() + timeout;
+    loop {
+        if crate::interrupts::ticks() >= deadline { return None; }
+        match nic_consume_event(nic) {
+            Some((cc, dci)) if dci == want_dci => return Some(cc),
+            Some(_) => {}                       // stashed/ignored, keep waiting
+            None => core::hint::spin_loop(),
+        }
+    }
+}
+
+/// Post a fresh bulk-IN transfer (one in flight at a time).
+fn nic_post_rx(nic: &mut NicXhci) {
+    let idx = nic.in_enq;
+    let cyc = nic.in_cycle;
+    write_trb(nic.in_ring, idx, nic.in_buf, NIC_BULK_BUF_BYTES as u32, TRB_NORMAL | TRB_IOC | cyc);
+    nic.in_enq += 1;
+    if nic.in_enq >= NUM_TR_TRBS - 1 {
+        write_trb(nic.in_ring, NUM_TR_TRBS - 1, nic.in_ring, 0, TRB_LINK | cyc | (1 << 1));
+        nic.in_cycle ^= 1;
+        nic.in_enq = 0;
+    }
+    nic.rx_in_flight = true;
+    let slot = nic.x.slot_id as u32;
+    let dci = nic.in_dci as u32;
+    ring_doorbell(&nic.x, slot, dci);
+}
+
+/// EP0 control transfer for the NIC. `buf` carries the data stage (copied into
+/// the controller's data_buf for OUT, read back for IN). Used for r8152
+/// register access.
+pub fn nic_control(req_type: u8, request: u8, value: u16, index: u16, buf: &mut [u8], dir_in: bool) -> bool {
+    let mut lock = NIC.lock();
+    let nic = match lock.as_mut() { Some(n) => n, None => return false };
+    let len = buf.len().min(2048) as u16;
+    if !dir_in && len > 0 {
+        // SAFETY: data_buf is a 4 KiB DMA page; len <= 2048
+        unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), nic.x.data_buf as *mut u8, len as usize); }
+    }
+    let ok = usb_control_transfer(&mut nic.x, req_type, request, value, index, len, dir_in);
+    if ok && dir_in && len > 0 {
+        // SAFETY: as above
+        unsafe { core::ptr::copy_nonoverlapping(nic.x.data_buf as *const u8, buf.as_mut_ptr(), len as usize); }
+    }
+    ok
+}
+
+/// Bulk OUT (TX): transmit `data` (<= 16 KiB). Returns true on success.
+pub fn nic_bulk_out(data: &[u8]) -> bool {
+    let mut lock = NIC.lock();
+    let nic = match lock.as_mut() { Some(n) => n, None => return false };
+    let len = data.len().min(NIC_BULK_BUF_BYTES);
+    // SAFETY: out_buf is NIC_BULK_BUF_BYTES of DMA memory
+    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), nic.out_buf as *mut u8, len); }
+
+    let idx = nic.out_enq;
+    let cyc = nic.out_cycle;
+    write_trb(nic.out_ring, idx, nic.out_buf, len as u32, TRB_NORMAL | TRB_IOC | cyc);
+    nic.out_enq += 1;
+    if nic.out_enq >= NUM_TR_TRBS - 1 {
+        write_trb(nic.out_ring, NUM_TR_TRBS - 1, nic.out_ring, 0, TRB_LINK | cyc | (1 << 1));
+        nic.out_cycle ^= 1;
+        nic.out_enq = 0;
+    }
+    let slot = nic.x.slot_id as u32;
+    let dci = nic.out_dci as u32;
+    ring_doorbell(&nic.x, slot, dci);
+    matches!(nic_wait_dci(nic, dci, 100), Some(cc) if cc == CC_SUCCESS || cc == CC_SHORT_PACKET)
+}
+
+/// Bulk IN (RX) poll: copy a completed bulk-IN buffer into `buf`, returns its
+/// byte count (an aggregate of one-or-more RTL8153 rx_desc-prefixed packets the
+/// class driver then splits). Non-blocking: returns 0 when nothing is ready.
+pub fn nic_bulk_in(buf: &mut [u8]) -> usize {
+    let mut lock = NIC.lock();
+    let nic = match lock.as_mut() { Some(n) => n, None => return 0 };
+
+    if nic.rx_ready_len == 0 {
+        if !nic.rx_in_flight { nic_post_rx(nic); }
+        // Drain whatever is in the event ring; a bulk-IN completion sets rx_ready_len.
+        while nic_consume_event(nic).is_some() {
+            if nic.rx_ready_len > 0 { break; }
+        }
+    }
+    if nic.rx_ready_len == 0 { return 0; }
+
+    let n = nic.rx_ready_len.min(buf.len());
+    // SAFETY: in_buf holds rx_ready_len bytes of received data
+    unsafe { core::ptr::copy_nonoverlapping(nic.in_buf as *const u8, buf.as_mut_ptr(), n); }
+    nic.rx_ready_len = 0;
+    nic_post_rx(nic);   // re-arm; in_buf is free now that we copied it out
+    n
+}
+
 // === Interrupt Transfer (Keyboard Polling) ===
 
 fn schedule_interrupt_transfer(state: &mut XhciState) {

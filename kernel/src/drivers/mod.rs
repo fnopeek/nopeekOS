@@ -7,6 +7,7 @@ pub mod nvme;
 pub mod virtio_blk;
 pub mod virtio_net;
 pub mod intel_nic;
+pub mod rtl8153;
 pub mod xhci;
 pub mod keyboard;
 pub mod framebuffer;

@@ -2,7 +2,7 @@
 //!
 //! Dispatches to Intel NIC, WASM driver NIC, or virtio-net (in that order).
 
-use crate::{virtio_net, intel_nic};
+use crate::{virtio_net, intel_nic, rtl8153};
 use crate::virtio_net::NetError;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -75,6 +75,8 @@ pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
     if intel_nic::is_available() {
         intel_nic::send(frame)
+    } else if rtl8153::is_available() {
+        rtl8153::send(frame)
     } else if wasm_nic_available() {
         let mut nic = WASM_NIC.lock();
         let len = frame.len().min(MTU);
@@ -89,6 +91,8 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     if intel_nic::is_available() {
         intel_nic::recv(buf)
+    } else if rtl8153::is_available() {
+        rtl8153::recv(buf)
     } else if wasm_nic_available() {
         let mut nic = WASM_NIC.lock();
         if nic.rx_len == 0 { return None; }
@@ -104,6 +108,8 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
 pub fn mac() -> Option<[u8; 6]> {
     if intel_nic::is_available() {
         intel_nic::mac()
+    } else if rtl8153::is_available() {
+        rtl8153::mac()
     } else if wasm_nic_available() {
         Some(WASM_NIC.lock().mac_addr)
     } else {
@@ -112,7 +118,7 @@ pub fn mac() -> Option<[u8; 6]> {
 }
 
 pub fn is_available() -> bool {
-    intel_nic::is_available() || wasm_nic_available() || virtio_net::is_available()
+    intel_nic::is_available() || rtl8153::is_available() || wasm_nic_available() || virtio_net::is_available()
 }
 
 // ── Interface enumeration ──
@@ -135,6 +141,12 @@ pub fn list() -> alloc::vec::Vec<IfaceInfo> {
     if intel_nic::is_available() {
         if let Some(mac) = intel_nic::mac() {
             v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: !primary_taken });
+            primary_taken = true;
+        }
+    }
+    if rtl8153::is_available() {
+        if let Some(mac) = rtl8153::mac() {
+            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: !primary_taken });
             primary_taken = true;
         }
     }

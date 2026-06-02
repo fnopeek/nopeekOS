@@ -19,7 +19,7 @@ mod boot_uefi;
 
 // ── Module groups ──────────────────────────────────────────────
 mod drivers;
-pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic};
+pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
 pub use drivers::{xhci, keyboard, framebuffer, rtc, blkdev, netdev, acpi};
 
 mod mm;
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     }
 
     kprintln!("[npk] Probing network...");
-    let _net_up = virtio_net::init() || intel_nic::init();
+    let _net_up = virtio_net::init() || intel_nic::init() || rtl8153::init();
     if netdev::is_available() {
         vga::show_status(b"Network online");
 
