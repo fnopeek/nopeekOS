@@ -404,21 +404,32 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     let cmd = pci::read16(dev.addr, 0x04);
     pci::write32(dev.addr, 0x04, (cmd | 0x06) as u32);
 
-    // Bridge bus mastering
+    // Enable mem-space + bus-mastering on EVERY bridge in the path to the
+    // controller, not just the top-level one. The Titan Ridge TB3 xHCI sits
+    // behind a chain of bridges (bus 0 → … → its bus); upstream DMA (command +
+    // event ring) only traverses a bridge whose Bus Master Enable is set. MMIO
+    // works without it, so the controller "runs" and ports are visible, but
+    // every command (Enable Slot) times out because its completion never DMAs
+    // back to the event ring. Every ancestor bridge's [secondary..subordinate]
+    // range contains the target bus, so enabling all matching bridges across
+    // all buses covers the whole chain.
     if dev.addr.bus > 0 {
-        for d in 0u8..32 {
-            for f in 0u8..8 {
-                let ba = pci::PciAddr { bus: 0, device: d, function: f };
-                let bid = pci::read32(ba, 0x00);
-                if bid == 0xFFFF_FFFF || bid == 0 { if f == 0 { break; } continue; }
-                if pci::read8(ba, 0x0E) & 0x7F == 1 {
-                    let sec = pci::read8(ba, 0x19);
-                    let sub_bus = pci::read8(ba, 0x1A);
-                    if dev.addr.bus >= sec && dev.addr.bus <= sub_bus {
-                        pci::enable_bus_master(ba);
+        for bus in 0u16..=255 {
+            for d in 0u8..32 {
+                for f in 0u8..8 {
+                    let ba = pci::PciAddr { bus: bus as u8, device: d, function: f };
+                    let bid = pci::read32(ba, 0x00);
+                    if bid == 0xFFFF_FFFF || bid == 0 { if f == 0 { break; } continue; }
+                    if pci::read8(ba, 0x0E) & 0x7F == 1 {
+                        let sec = pci::read8(ba, 0x19);
+                        let sub_bus = pci::read8(ba, 0x1A);
+                        if dev.addr.bus >= sec && dev.addr.bus <= sub_bus {
+                            let bcmd = pci::read16(ba, 0x04);
+                            pci::write32(ba, 0x04, (bcmd | 0x06) as u32); // mem + bus-master
+                        }
                     }
+                    if f == 0 && pci::read8(ba, 0x0E) & 0x80 == 0 { break; }
                 }
-                if f == 0 && pci::read8(ba, 0x0E) & 0x80 == 0 { break; }
             }
         }
     }
@@ -1297,13 +1308,25 @@ fn enumerate_controller(dev: pci::PciDevice) -> u32 {
     let mut found = 0u32;
 
     for p in 0..state.max_ports {
-        if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
-        if !reset_port(&state, p) { continue; }
-        state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+        let sc = r32(state.oper, portsc_off(p));
+        if sc & PORTSC_CCS == 0 { continue; }
+        state.port_speed = (sc >> 10) & 0xF;
+
+        // USB3 (SuperSpeed) root ports are link-trained and Enabled (PED) at
+        // connect; a USB2-style Port Reset on an already-enabled port confuses
+        // it and the following Address Device fails. Only PR-reset ports that
+        // aren't enabled yet (USB2 low/full/high speed).
+        if sc & PORTSC_PED == 0 {
+            if !reset_port(&state, p) {
+                kprintln!("  port {} reset failed", p + 1);
+                continue;
+            }
+            state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+        }
 
         let slot_id = match cmd_enable_slot(&mut state) {
             Some(s) => s,
-            None => continue,
+            None => { kprintln!("  port {} enable-slot failed", p + 1); continue; }
         };
         state.slot_id = slot_id;
         // SAFETY: writing this slot's device-context pointer into the DMA DCBAA
@@ -1320,12 +1343,14 @@ fn enumerate_controller(dev: pci::PciDevice) -> u32 {
         };
         reset_ep0_ring(&mut state);
         if !cmd_address_device(&mut state, p, max_packet) {
+            kprintln!("  port {} address-device failed (speed {})", p + 1, state.port_speed);
             cmd_disable_slot(&mut state, slot_id);
             continue;
         }
 
         // Device descriptor (18 bytes): VID/PID, device class, iProduct.
         if !usb_get_descriptor(&mut state, DESC_DEVICE, 18) {
+            kprintln!("  port {} device-descriptor failed", p + 1);
             cmd_disable_slot(&mut state, slot_id);
             continue;
         }
