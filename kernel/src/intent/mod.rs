@@ -842,6 +842,18 @@ fn common_prefix(strings: &[String]) -> String {
 /// whenever any window was focused.
 #[inline]
 fn core0_idle_tick() {
+    // PS/2 mouse is POLLED (IRQ12 masked on UEFI machines), so HLT-ing until
+    // the 100 Hz timer caps the pointer sample + cursor-redraw rate at ~100 Hz
+    // with pipeline latency → laggy mouse whenever a window is focused (the
+    // run loop reaches here every iteration). While the pointer is actively
+    // moving, DON'T HLT — return so the loop spins, draining the mouse at its
+    // full rate + redrawing the cursor promptly. The instant motion stops
+    // (no PS/2 byte for ~40 ms) we fall through to HLT again → idle power is
+    // unchanged. No-op on USB/IRQ-mouse hosts (mouse_active_within stays
+    // false → always HLT, as before).
+    if crate::keyboard::mouse_active_within(40) {
+        return;
+    }
     let rflags: u64;
     // SAFETY: read RFLAGS to preserve the caller's interrupt-enable state.
     unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
