@@ -233,6 +233,11 @@ fn push_mouse(evt: MouseEvent) {
 /// pointer available on first event.
 pub fn inject_mouse(evt: MouseEvent) {
     MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+    // Move the visible cursor overlay + request a render — same as the USB
+    // mouse parse path. Without this the cursor appears but never moves
+    // (handle_mouse only reads the atomic position; update_atomic writes it).
+    crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
+    crate::shade::request_render();
     push_mouse(evt);
 }
 
