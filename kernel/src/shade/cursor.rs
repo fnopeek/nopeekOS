@@ -13,11 +13,11 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 /// Cursor dimensions.
-const CURSOR_W: u32 = 12;
-const CURSOR_H: u32 = 19;
+const CURSOR_W: u32 = 16;
+const CURSOR_H: u32 = 22;
 
-/// Cursor bitmap size (w, h) — for callers that blit just the cursor rect.
-pub fn cursor_size() -> (u32, u32) { (CURSOR_W, CURSOR_H) }
+/// Effective cursor size (w, h) — for callers that blit just the cursor rect.
+pub fn cursor_size() -> (u32, u32) { eff_dims() }
 
 // ── Save-under cursor (no recomposite on a pure move) ───────────────────
 //
@@ -28,10 +28,13 @@ pub fn cursor_size() -> (u32, u32) { (CURSOR_W, CURSOR_H) }
 // save + bake at the new spot and blit only the small affected region.
 // Core-0 / CONSOLE-lock serialized; the Mutex just satisfies the borrow
 // checker for the static array.
-const SU_N: usize = (CURSOR_W * CURSOR_H) as usize;
+// Sized for the largest cursor (SIZE_MAX_PCT) so scaling never overflows it.
+const SU_N: usize = ((CURSOR_W * SIZE_MAX_PCT / 100) * (CURSOR_H * SIZE_MAX_PCT / 100)) as usize;
 static SAVE_UNDER: spin::Mutex<[u32; SU_N]> = spin::Mutex::new([0; SU_N]);
 static SU_X: AtomicI32 = AtomicI32::new(0);
 static SU_Y: AtomicI32 = AtomicI32::new(0);
+static SU_W: AtomicU32 = AtomicU32::new(0);   // dims the cursor was baked at
+static SU_H: AtomicU32 = AtomicU32::new(0);
 static SU_VALID: AtomicBool = AtomicBool::new(false);
 
 /// Position the cursor is currently baked at (the rect to erase on a move).
@@ -46,25 +49,28 @@ pub fn save_under_and_bake(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
     let sw = info.width as i32;
     let sh = info.height as i32;
     let (cx, cy) = atomic_pos();
+    let (ew, eh) = eff_dims();
     let mut su = SAVE_UNDER.lock();
-    for row in 0..CURSOR_H as i32 {
-        let py = cy + row;
-        for col in 0..CURSOR_W as i32 {
-            let px = cx + col;
-            let idx = (row as usize) * CURSOR_W as usize + col as usize;
+    for row in 0..eh {
+        let py = cy + row as i32;
+        for col in 0..ew {
+            let px = cx + col as i32;
+            let idx = (row * ew + col) as usize;
             if px < 0 || px >= sw || py < 0 || py >= sh { su[idx] = 0; continue; }
             let off = py as usize * pitch + px as usize * 4;
             // SAFETY: bounds-checked offset into a kernel-owned shadow buffer.
             unsafe {
                 let p = buf.add(off) as *mut u32;
                 su[idx] = *p;
-                let bmp = CURSOR_BITMAP[idx];
+                let bmp = cursor_px(col, row);
                 if bmp != 0 { *p = if bmp == 1 { 0x00FF_FFFF } else { 0x0000_0000 }; }
             }
         }
     }
     SU_X.store(cx, Ordering::Relaxed);
     SU_Y.store(cy, Ordering::Relaxed);
+    SU_W.store(ew, Ordering::Relaxed);
+    SU_H.store(eh, Ordering::Relaxed);
     SU_VALID.store(true, Ordering::Relaxed);
 }
 
@@ -77,13 +83,15 @@ pub fn restore_under(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
     let sh = info.height as i32;
     let sx = SU_X.load(Ordering::Relaxed);
     let sy = SU_Y.load(Ordering::Relaxed);
+    let ew = SU_W.load(Ordering::Relaxed);
+    let eh = SU_H.load(Ordering::Relaxed);
     let su = SAVE_UNDER.lock();
-    for row in 0..CURSOR_H as i32 {
-        let py = sy + row;
-        for col in 0..CURSOR_W as i32 {
-            let px = sx + col;
+    for row in 0..eh {
+        let py = sy + row as i32;
+        for col in 0..ew {
+            let px = sx + col as i32;
             if px < 0 || px >= sw || py < 0 || py >= sh { continue; }
-            let idx = (row as usize) * CURSOR_W as usize + col as usize;
+            let idx = (row * ew + col) as usize;
             let off = py as usize * pitch + px as usize * 4;
             // SAFETY: bounds-checked offset into a kernel-owned shadow buffer.
             unsafe { *(buf.add(off) as *mut u32) = su[idx]; }
@@ -113,6 +121,32 @@ static ACC_Y: AtomicI32 = AtomicI32::new(0);
 pub fn set_speed(percent: i32) { SPEED.store(percent.clamp(25, 600), Ordering::Relaxed); }
 /// Current pointer speed (percent).
 pub fn speed() -> i32 { SPEED.load(Ordering::Relaxed) }
+
+/// Cursor size in percent of the base bitmap (100 = 16×22). Clamped 50..=MAX.
+const SIZE_MAX_PCT: u32 = 300;
+static SIZE: AtomicI32 = AtomicI32::new(100);
+
+/// Set cursor size (percent, clamped 50..=300).
+pub fn set_size(percent: i32) { SIZE.store(percent.clamp(50, SIZE_MAX_PCT as i32), Ordering::Relaxed); }
+/// Current cursor size (percent).
+pub fn size() -> i32 { SIZE.load(Ordering::Relaxed) }
+
+/// Effective (scaled) cursor dimensions in pixels.
+fn eff_dims() -> (u32, u32) {
+    let s = SIZE.load(Ordering::Relaxed) as u32;
+    ((CURSOR_W * s / 100).max(1), (CURSOR_H * s / 100).max(1))
+}
+
+/// Sample the base bitmap at a scaled destination pixel (nearest-neighbour).
+/// Returns 0 (transparent) outside the effective cursor.
+fn cursor_px(col: u32, row: u32) -> u8 {
+    let s = SIZE.load(Ordering::Relaxed) as u32;
+    let (ew, eh) = ((CURSOR_W * s / 100).max(1), (CURSOR_H * s / 100).max(1));
+    if col >= ew || row >= eh { return 0; }
+    let sc = (col * 100 / s).min(CURSOR_W - 1);
+    let sr = (row * 100 / s).min(CURSOR_H - 1);
+    CURSOR_BITMAP[(sr * CURSOR_W + sc) as usize]
+}
 
 /// Update mouse position atomically. NO LOCK needed.
 /// Called from Core 0 input polling — takes ~2 nanoseconds.
@@ -190,28 +224,33 @@ pub fn init_atomic(screen_w: u32, screen_h: u32) {
 }
 
 /// Arrow cursor bitmap (1 = white outline, 2 = black fill, 0 = transparent).
-// Arrow pointer (Tabler "pointer-2" style): white fill (1), black outline (2),
-// transparent (0). Hotspot = top-left tip (0,0).
+// Tabler "pointer-2" pointer: hollow rounded send-arrow. Light outline (1),
+// dark interior (2) — so it reads as a hollow outline on the (dark) wallpaper
+// but stays defined on light backgrounds. Transparent (0) outside. Hotspot =
+// the tip at top-left (0,0). Elongated 16×22.
 static CURSOR_BITMAP: [u8; (CURSOR_W * CURSOR_H) as usize] = [
-    2,0,0,0,0,0,0,0,0,0,0,0,
-    2,2,0,0,0,0,0,0,0,0,0,0,
-    2,1,2,0,0,0,0,0,0,0,0,0,
-    2,1,1,2,0,0,0,0,0,0,0,0,
-    2,1,1,1,2,0,0,0,0,0,0,0,
-    2,1,1,1,1,2,0,0,0,0,0,0,
-    2,1,1,1,1,1,2,0,0,0,0,0,
-    2,1,1,1,1,1,1,2,0,0,0,0,
-    2,1,1,1,1,1,1,1,2,0,0,0,
-    2,1,1,1,1,1,1,1,1,2,0,0,
-    2,1,1,1,1,1,1,1,1,1,2,0,
-    2,1,1,1,1,1,2,2,2,2,2,2,
-    2,1,1,2,1,1,2,0,0,0,0,0,
-    2,1,2,0,2,1,1,2,0,0,0,0,
-    2,2,0,0,2,1,1,2,0,0,0,0,
-    2,0,0,0,0,2,1,1,2,0,0,0,
-    0,0,0,0,0,2,1,1,2,0,0,0,
-    0,0,0,0,0,2,1,1,2,0,0,0,
-    0,0,0,0,0,0,2,2,2,0,0,0,
+    1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,1,1,2,1,1,0,0,0,0,0,0,0,0,0,0,
+    0,1,1,2,2,1,1,0,0,0,0,0,0,0,0,0,
+    0,1,1,2,2,2,2,1,1,0,0,0,0,0,0,0,
+    0,1,1,2,2,2,2,2,1,1,0,0,0,0,0,0,
+    0,0,1,1,2,2,2,2,2,2,1,1,0,0,0,0,
+    0,0,1,1,2,2,2,2,2,2,2,1,1,0,0,0,
+    0,0,1,1,2,2,2,2,2,2,2,2,2,1,1,0,
+    0,0,1,1,2,2,2,2,2,2,2,2,2,2,1,1,
+    0,0,0,1,1,2,2,2,2,2,2,2,1,1,0,0,
+    0,0,0,1,1,2,2,2,2,1,1,0,0,0,0,0,
+    0,0,0,1,1,2,2,1,1,0,0,0,0,0,0,0,
+    0,0,0,1,1,2,2,1,1,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,
 ];
 
 /// Mouse state — position, buttons, and overlay tracking.
@@ -317,7 +356,17 @@ impl MouseState {
 
 static DRAWN_LF_X: AtomicI32 = AtomicI32::new(0);
 static DRAWN_LF_Y: AtomicI32 = AtomicI32::new(0);
+static DRAWN_LF_W: AtomicU32 = AtomicU32::new(0);   // dims of the last MMIO-drawn cursor
+static DRAWN_LF_H: AtomicU32 = AtomicU32::new(0);
 static DRAWN_LF: AtomicBool = AtomicBool::new(false);
+
+/// Rect (w,h) to erase for the last MMIO-drawn cursor (falls back to current
+/// effective size if nothing drawn yet).
+fn drawn_erase_dims() -> (u32, u32) {
+    let w = DRAWN_LF_W.load(Ordering::Relaxed);
+    let h = DRAWN_LF_H.load(Ordering::Relaxed);
+    if w == 0 || h == 0 { eff_dims() } else { (w, h) }
+}
 
 /// Truly lock-free cursor redraw: NO CONSOLE lock, uses cached atomic pointers.
 /// Called from Core 0 after update_atomic(). Never blocks on render_frame.
@@ -338,7 +387,7 @@ pub fn redraw_overlay_lockfree() {
     if DRAWN_LF.load(Ordering::Relaxed) {
         let dx = DRAWN_LF_X.load(Ordering::Relaxed);
         let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
-        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
+        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, drawn_erase_dims().0, drawn_erase_dims().1);
     }
 
     // Draw cursor at current atomic position
@@ -364,7 +413,7 @@ pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
     if DRAWN_LF.load(Ordering::Relaxed) {
         let dx = DRAWN_LF_X.load(Ordering::Relaxed);
         let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
-        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
+        blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, drawn_erase_dims().0, drawn_erase_dims().1);
     }
 
     // Draw cursor at current atomic position
@@ -408,7 +457,7 @@ pub fn draw_cursor_after_blit(fb: &mut crate::framebuffer::FbConsole) {
         let dx = DRAWN_LF_X.load(Ordering::Relaxed);
         let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
         if dx != cx || dy != cy {
-            blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, CURSOR_W, CURSOR_H);
+            blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, drawn_erase_dims().0, drawn_erase_dims().1);
         }
     }
 
@@ -431,13 +480,14 @@ pub fn cache_fb_info(addr: u64, pitch: u32) {
 
 /// Draw cursor bitmap directly to MMIO framebuffer at given position.
 fn draw_cursor_on_mmio(mmio: *mut u8, pitch: usize, sw: i32, sh: i32, x: i32, y: i32) {
-    for row in 0..CURSOR_H as i32 {
-        let py = y + row;
+    let (ew, eh) = eff_dims();
+    for row in 0..eh {
+        let py = y + row as i32;
         if py < 0 || py >= sh { continue; }
-        for col in 0..CURSOR_W as i32 {
-            let px = x + col;
+        for col in 0..ew {
+            let px = x + col as i32;
             if px < 0 || px >= sw { continue; }
-            let bmp = CURSOR_BITMAP[(row as usize) * CURSOR_W as usize + col as usize];
+            let bmp = cursor_px(col, row);
             if bmp == 0 { continue; }
             let off = py as usize * pitch + px as usize * 4;
             let color: u32 = if bmp == 1 { 0x00FFFFFF } else { 0x00000000 };
@@ -445,6 +495,8 @@ fn draw_cursor_on_mmio(mmio: *mut u8, pitch: usize, sw: i32, sh: i32, x: i32, y:
             unsafe { core::ptr::write_volatile(mmio.add(off) as *mut u32, color); }
         }
     }
+    DRAWN_LF_W.store(ew, Ordering::Relaxed);
+    DRAWN_LF_H.store(eh, Ordering::Relaxed);
 }
 
 /// Paint cursor bitmap into the back-shadow buffer at the current
@@ -469,13 +521,14 @@ pub fn draw_cursor_on_shadow(shadow: *mut u8, info: &crate::framebuffer::FbInfo)
     let sw = info.width as i32;
     let sh = info.height as i32;
     let (cx, cy) = atomic_pos();
-    for row in 0..CURSOR_H as i32 {
-        let py = cy + row;
+    let (ew, eh) = eff_dims();
+    for row in 0..eh {
+        let py = cy + row as i32;
         if py < 0 || py >= sh { continue; }
-        for col in 0..CURSOR_W as i32 {
-            let px = cx + col;
+        for col in 0..ew {
+            let px = cx + col as i32;
             if px < 0 || px >= sw { continue; }
-            let bmp = CURSOR_BITMAP[(row as usize) * CURSOR_W as usize + col as usize];
+            let bmp = cursor_px(col, row);
             if bmp == 0 { continue; }
             let off = py as usize * pitch + px as usize * 4;
             let color: u32 = if bmp == 1 { 0x00FFFFFF } else { 0x00000000 };

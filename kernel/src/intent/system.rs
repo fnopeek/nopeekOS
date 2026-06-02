@@ -1019,12 +1019,12 @@ pub fn intent_lspci(args: &str) {
     kprintln!();
 }
 
-/// `mouse [speed <n>]` — show or set pointer speed (percent, 25..=600).
-/// Persisted to `mouse_speed` config so it survives reboot.
+/// `mouse [speed <n>] [size <n>]` — show or set pointer speed (25..=600 %) and
+/// cursor size (50..=300 %). Persisted to `mouse_speed` / `mouse_size` config.
 pub fn intent_mouse(args: &str) {
     let a = args.trim();
-    if let Some(rest) = a.strip_prefix("speed") {
-        let v = rest.trim();
+    if let Some(v) = a.strip_prefix("speed") {
+        let v = v.trim();
         if v.is_empty() {
             kprintln!("  mouse speed: {}%", crate::shade::cursor::speed());
         } else if let Ok(n) = v.parse::<i32>() {
@@ -1035,10 +1035,23 @@ pub fn intent_mouse(args: &str) {
         } else {
             kprintln!("  usage: mouse speed <25-600>");
         }
+    } else if let Some(v) = a.strip_prefix("size") {
+        let v = v.trim();
+        if v.is_empty() {
+            kprintln!("  mouse size: {}%", crate::shade::cursor::size());
+        } else if let Ok(n) = v.parse::<i32>() {
+            crate::shade::cursor::set_size(n);
+            let now = crate::shade::cursor::size();
+            crate::config::set("mouse_size", &alloc::format!("{}", now));
+            kprintln!("  mouse size set to {}%", now);
+        } else {
+            kprintln!("  usage: mouse size <50-300>");
+        }
     } else if a.is_empty() {
-        kprintln!("  mouse speed: {}%  (set: mouse speed <25-600>)", crate::shade::cursor::speed());
+        kprintln!("  mouse speed {}%  size {}%", crate::shade::cursor::speed(), crate::shade::cursor::size());
+        kprintln!("  set: mouse speed <25-600> | mouse size <50-300>");
     } else {
-        kprintln!("  usage: mouse speed <25-600>");
+        kprintln!("  usage: mouse [speed <25-600>] [size <50-300>]");
     }
 }
 
