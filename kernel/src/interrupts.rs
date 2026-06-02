@@ -400,6 +400,10 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     // Drain USB events from interrupt context (try_lock, never blocks)
     crate::xhci::poll_events_irq();
+    // Drain the polled PS/2 mouse/keyboard here too (no-op unless a PS/2
+    // mouse is up) — same model as the USB drain → smooth cursor regardless
+    // of the run loop's HLT/spin.
+    crate::keyboard::poll_ps2_irq();
     // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
     let freq = TSC_FREQ.load(Ordering::Relaxed);
     if freq > 0 {
@@ -426,6 +430,7 @@ extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
     // Wake attribution: the APIC timer is armed only on the BSP (Core 0).
     crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     crate::xhci::poll_events_irq();
+    crate::keyboard::poll_ps2_irq();
     // Core 0 busy tracking: add one tick worth of busy TSC (Core 0 runs event loop)
     let freq = TSC_FREQ.load(Ordering::Relaxed);
     if freq > 0 {
