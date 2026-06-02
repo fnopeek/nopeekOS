@@ -234,10 +234,13 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
 
     // Handle extended scancodes (arrow keys, Home, End, etc.)
     if is_extended {
-        // Modifiers: handle BOTH press and release
+        // Modifiers: handle BOTH press and release (must run before the
+        // release-gate below, or the key-up event is swallowed and the
+        // modifier stays stuck — was the case for Super on PS/2 polling).
         match code {
             0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; }   // Right Ctrl
             0x38 => { ALT_GR.store(!released, Ordering::Relaxed); return None; } // AltGr (Right Alt)
+            0x5B | 0x5C => { set_super(!released); return None; }                // Super/Meta (left/right)
             _ => {}
         }
         if released { return None; }
@@ -252,7 +255,6 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
             0x51 => { push_arrow(KEY_PGDN); return None; }
             0x53 => { push_arrow(KEY_DEL); return None; }
             0x52 => { push_arrow(KEY_INSERT); return None; }
-            0x5B | 0x5C => { set_super(!released); return None; } // Super/Meta (left/right)
             _ => return None,
         }
     }

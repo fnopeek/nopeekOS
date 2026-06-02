@@ -390,7 +390,11 @@ pub fn init() -> bool {
     false
 }
 
-fn init_controller(dev: pci::PciDevice) -> bool {
+/// Bring a controller from PCI-discovered to running: map BAR0, halt+reset,
+/// set up command/event rings + scratchpad, start it, power and settle ports.
+/// Returns the running state with no device enumerated yet. `max_slots_en`
+/// caps how many device slots the HC will accept (Address Device).
+fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciState> {
 
     kprintln!("[npk] xhci: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         dev.addr.bus, dev.addr.device, dev.addr.function,
@@ -426,7 +430,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     } else {
         (bar0_raw & 0xFFFF_FFF0) as u64
     };
-    if bar0 == 0 { kprintln!("[npk] xhci: BAR0 is zero"); return false; }
+    if bar0 == 0 { kprintln!("[npk] xhci: BAR0 is zero"); return None; }
 
     // Map BAR0 (64KB)
     let map_size = 64 * 1024u64;
@@ -434,7 +438,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         match paging::map_page(bar0 + off, bar0 + off,
             PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
             Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
-            Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return false; }
+            Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return None; }
         }
     }
 
@@ -469,18 +473,18 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     w32(oper, OP_USBCMD, cmd_val & !CMD_RUN);
     if !wait_for(oper, OP_USBSTS, STS_HCH, STS_HCH) {
         kprintln!("[npk] xhci: halt timeout");
-        return false;
+        return None;
     }
 
     // Reset controller
     w32(oper, OP_USBCMD, CMD_HCRST);
     if !wait_for(oper, OP_USBCMD, CMD_HCRST, 0) {
         kprintln!("[npk] xhci: reset timeout (CMD)");
-        return false;
+        return None;
     }
     if !wait_for(oper, OP_USBSTS, STS_CNR, 0) {
         kprintln!("[npk] xhci: reset timeout (CNR)");
-        return false;
+        return None;
     }
 
     // Allocate DMA structures (all page-aligned, zeroed)
@@ -502,7 +506,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         || data_buf == 0 || mouse_device_ctx == 0 || mouse_ep0_ring == 0
         || mouse_intr_ring == 0 {
         kprintln!("[npk] xhci: DMA alloc failed");
-        return false;
+        return None;
     }
 
     // Set up Link TRBs at end of rings (wrap back to start)
@@ -527,10 +531,10 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     let num_scratchpad = ((sp_hi << 5) | sp_lo) as usize;
     if num_scratchpad > 0 {
         let sp_array = alloc_dma(1, "scratchpad array");
-        if sp_array == 0 { kprintln!("[npk] xhci: scratchpad alloc failed"); return false; }
+        if sp_array == 0 { kprintln!("[npk] xhci: scratchpad alloc failed"); return None; }
         for i in 0..num_scratchpad {
             let page = alloc_dma(1, "scratchpad page");
-            if page == 0 { kprintln!("[npk] xhci: scratchpad page alloc failed"); return false; }
+            if page == 0 { kprintln!("[npk] xhci: scratchpad page alloc failed"); return None; }
             // SAFETY: writing to DMA array
             unsafe { core::ptr::write_volatile((sp_array as *mut u64).add(i), page); }
         }
@@ -541,7 +545,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     }
 
     // Program controller
-    w32(oper, OP_CONFIG, 4); // MaxSlotsEn = 4 (room for probe + keyboard + mouse)
+    w32(oper, OP_CONFIG, max_slots_en); // MaxSlotsEn
     w64(oper, OP_DCBAAP, dcbaa);
     w64(oper, OP_CRCR, cmd_ring | 1); // cycle bit = 1
 
@@ -557,7 +561,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     w32(oper, OP_USBCMD, CMD_RUN);
     if !wait_for(oper, OP_USBSTS, STS_HCH, 0) {
         kprintln!("[npk] xhci: start failed");
-        return false;
+        return None;
     }
     kprintln!("[npk] xhci: controller running");
 
@@ -602,6 +606,16 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         }
     }
 
+    Some(state)
+}
+
+/// Initialize xHCI controller and enumerate a USB keyboard (HID boot protocol).
+fn init_controller(dev: pci::PciDevice) -> bool {
+    let mut state = match bring_up_controller(dev, 4) {
+        Some(s) => s,
+        None => return false,
+    };
+
     // Save original DMA resource pointers (attempt 0 uses primary, attempt 1 uses mouse set)
     let orig_device_ctx = state.device_ctx;
     let orig_ep0_ring = state.ep0_ring;
@@ -610,8 +624,8 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // Non-keyboard devices are left alone (slot stays allocated, no cleanup).
     // Each attempt uses separate DMA resources to avoid corruption.
     let mut attempt = 0u32;
-    for p in 0..max_ports {
-        if r32(oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
+    for p in 0..state.max_ports {
+        if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
         if attempt >= 2 { break; } // only 2 resource sets available
         kprintln!("[npk] xhci: trying port {} (attempt {})", p + 1, attempt);
 
@@ -1209,6 +1223,193 @@ fn find_connected_port(state: &XhciState) -> Option<u32> {
         }
     }
     None
+}
+
+/// Read USB string descriptor `idx` into `out` as ASCII (best effort:
+/// UTF-16LE low bytes, printable only). Returns the byte count written.
+fn usb_get_string(state: &mut XhciState, idx: u8, out: &mut [u8]) -> usize {
+    if idx == 0 { return 0; }
+    // wValue = (STRING desc type 0x03 << 8) | index, wIndex = langid 0x0409.
+    if !usb_control_transfer(state, 0x80, USB_GET_DESCRIPTOR,
+        0x0300 | idx as u16, 0x0409, 255, true) {
+        return 0;
+    }
+    let blen = r8(state.data_buf, 0) as usize;
+    if blen < 2 || r8(state.data_buf, 1) != 0x03 { return 0; }
+    let mut n = 0usize;
+    let mut i = 2usize;
+    while i + 1 < blen && n < out.len() {
+        let lo = r8(state.data_buf, i as u32);
+        let hi = r8(state.data_buf, i as u32 + 1);
+        if hi == 0 && (0x20..0x7F).contains(&lo) { out[n] = lo; n += 1; }
+        i += 2;
+    }
+    n
+}
+
+/// Enumerate every USB device on every xHCI controller and print a table
+/// (controller BDF, port, VID:PID, identifying class, product name). Read-only
+/// probing: each device is slot-enabled, addressed, queried, then released.
+/// Brings each controller up fresh, so a USB keyboard/mouse on a probed
+/// controller may need re-plugging afterwards.
+pub fn list_devices() {
+    let mut total = 0u32;
+    for bus in 0u16..=255 {
+        for dev_num in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
+                let id = pci::read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 {
+                    if func == 0 { break; }
+                    continue;
+                }
+                let class_reg = pci::read32(addr, 0x08);
+                let cls = ((class_reg >> 24) & 0xFF) as u8;
+                let sub = ((class_reg >> 16) & 0xFF) as u8;
+                let prog_if = ((class_reg >> 8) & 0xFF) as u8;
+                if cls == 0x0C && sub == 0x03 && prog_if == 0x30 {
+                    let pci_dev = pci::PciDevice {
+                        addr,
+                        vendor_id: (id & 0xFFFF) as u16,
+                        device_id: ((id >> 16) & 0xFFFF) as u16,
+                        bar0: pci::read32(addr, 0x10),
+                        irq_line: pci::read8(addr, 0x3C),
+                    };
+                    total += enumerate_controller(pci_dev);
+                }
+                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
+            }
+        }
+    }
+    kprintln!();
+    kprintln!("  {} USB device(s) found", total);
+    kprintln!();
+}
+
+/// Bring up one controller, address each connected device, print its identity.
+/// Returns how many devices were reported.
+fn enumerate_controller(dev: pci::PciDevice) -> u32 {
+    let (cbus, cdev, cfunc) = (dev.addr.bus, dev.addr.device, dev.addr.function);
+    let mut state = match bring_up_controller(dev, 16) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let mut found = 0u32;
+
+    for p in 0..state.max_ports {
+        if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
+        if !reset_port(&state, p) { continue; }
+        state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+
+        let slot_id = match cmd_enable_slot(&mut state) {
+            Some(s) => s,
+            None => continue,
+        };
+        state.slot_id = slot_id;
+        // SAFETY: writing this slot's device-context pointer into the DMA DCBAA
+        unsafe {
+            core::ptr::write_volatile(
+                (state.dcbaa as *mut u64).add(slot_id as usize), state.device_ctx);
+        }
+
+        let max_packet = match state.port_speed {
+            SPEED_LOW | SPEED_FULL => 8u16,
+            SPEED_HIGH => 64,
+            SPEED_SUPER => 512,
+            _ => 64,
+        };
+        reset_ep0_ring(&mut state);
+        if !cmd_address_device(&mut state, p, max_packet) {
+            cmd_disable_slot(&mut state, slot_id);
+            continue;
+        }
+
+        // Device descriptor (18 bytes): VID/PID, device class, iProduct.
+        if !usb_get_descriptor(&mut state, DESC_DEVICE, 18) {
+            cmd_disable_slot(&mut state, slot_id);
+            continue;
+        }
+        let vid = u16::from_le_bytes([r8(state.data_buf, 8), r8(state.data_buf, 9)]);
+        let pid = u16::from_le_bytes([r8(state.data_buf, 10), r8(state.data_buf, 11)]);
+        let dclass = r8(state.data_buf, 4);
+        let dsub = r8(state.data_buf, 5);
+        let i_product = r8(state.data_buf, 15);
+
+        // First interface descriptor → its class. Devices whose device-class is
+        // 0 (per-interface) or 0xFF (vendor) defer the real class here — most
+        // USB-NICs do exactly this.
+        let (mut iclass, mut isub, mut iproto) = (0u8, 0u8, 0u8);
+        if usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
+            let total_len = u16::from_le_bytes([r8(state.data_buf, 2), r8(state.data_buf, 3)]) as usize;
+            let fetch = total_len.min(256) as u16;
+            if usb_get_descriptor(&mut state, DESC_CONFIG, fetch) {
+                let mut pos = 0usize;
+                while pos + 2 <= fetch as usize {
+                    let blen = r8(state.data_buf, pos as u32) as usize;
+                    if blen == 0 { break; }
+                    if r8(state.data_buf, pos as u32 + 1) == 0x04 {
+                        iclass = r8(state.data_buf, pos as u32 + 5);
+                        isub = r8(state.data_buf, pos as u32 + 6);
+                        iproto = r8(state.data_buf, pos as u32 + 7);
+                        break;
+                    }
+                    pos += blen;
+                }
+            }
+        }
+
+        let mut name = [0u8; 40];
+        let nlen = usb_get_string(&mut state, i_product, &mut name);
+
+        let vendor = dclass == 0x00 || dclass == 0xFF;
+        let eff_class = if vendor { iclass } else { dclass };
+        let eff_sub = if vendor { isub } else { dsub };
+
+        kprintln!("  {:02x}:{:02x}.{} port {}  {:04x}:{:04x}  {}",
+            cbus, cdev, cfunc, p + 1, vid, pid,
+            usb_class_name(eff_class, eff_sub, iproto));
+        let known = usb_vendor_product(vid, pid);
+        if !known.is_empty() {
+            kprintln!("              {}", known);
+        } else if nlen > 0 {
+            kprintln!("              {}", core::str::from_utf8(&name[..nlen]).unwrap_or(""));
+        }
+
+        found += 1;
+        cmd_disable_slot(&mut state, slot_id);
+    }
+    found
+}
+
+fn usb_class_name(class: u8, sub: u8, proto: u8) -> &'static str {
+    match (class, sub, proto) {
+        (0x01, _, _) => "Audio",
+        (0x02, _, _) => "Communications (CDC)",
+        (0x03, 0x01, 0x01) => "HID keyboard",
+        (0x03, 0x01, 0x02) => "HID mouse",
+        (0x03, _, _) => "HID",
+        (0x08, _, _) => "Mass storage",
+        (0x09, _, _) => "USB hub",
+        (0x0A, _, _) => "CDC data (Ethernet)",
+        (0x0E, _, _) => "Video",
+        (0xE0, 0x01, 0x03) => "Wireless (RNDIS)",
+        (0xE0, _, _) => "Wireless",
+        (0xFF, _, _) => "Vendor-specific",
+        _ => "Unknown class",
+    }
+}
+
+/// Known USB chips relevant to the driver catalog (NIC dongles first).
+fn usb_vendor_product(vid: u16, pid: u16) -> &'static str {
+    match (vid, pid) {
+        (0x0bda, 0x8153) => "Realtek RTL8153 USB GbE (r8152)",
+        (0x0bda, 0x8152) => "Realtek RTL8152 USB FE (r8152)",
+        (0x0b95, 0x1790) => "ASIX AX88179 USB GbE",
+        (0x0b95, 0x178a) => "ASIX AX88179A USB GbE",
+        (0x0bda, _) => "Realtek",
+        (0x0b95, _) => "ASIX",
+        _ => "",
+    }
 }
 
 fn reset_port(state: &XhciState, port: u32) -> bool {
