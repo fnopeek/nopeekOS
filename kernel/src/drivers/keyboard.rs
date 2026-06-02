@@ -84,11 +84,15 @@ pub fn has_key() -> bool {
     if BUF_HEAD.load(Ordering::Relaxed) != BUF_TAIL.load(Ordering::Relaxed) {
         return true;
     }
+    // PS/2 byte waiting in the i8042 output buffer (keyboard, not aux)?
+    if unsafe { inb(STATUS_PORT) } & 0x21 == 0x01 {
+        return true;
+    }
     crate::xhci::is_available()
 }
 
-/// Read next raw key byte from buffer. Falls back to xHCI USB keyboard.
-/// Prefer `read_event()` for typed KeyEvent with modifiers.
+/// Read next raw key byte from buffer. Falls back to PS/2 polling, then
+/// xHCI USB keyboard. Prefer `read_event()` for typed KeyEvent w/ modifiers.
 pub fn read_key() -> Option<u8> {
     let head = BUF_HEAD.load(Ordering::Acquire);
     let tail = BUF_TAIL.load(Ordering::Acquire);
@@ -98,8 +102,29 @@ pub fn read_key() -> Option<u8> {
         BUF_TAIL.store((tail + 1) % BUF_SIZE, Ordering::Release);
         return Some(key);
     }
+    // PS/2 polling: with the legacy PIC masked (UEFI/APIC machines) IRQ1
+    // never fires, so the buffer above stays empty — but the i8042 still
+    // latches scancodes. Read them on demand. (No-op if no PS/2 keyboard.)
+    if let Some(c) = poll_ps2() {
+        return Some(c);
+    }
     // xHCI USB keyboard (real driver, no legacy emulation needed)
     crate::xhci::poll_keyboard()
+}
+
+/// Poll the i8042 PS/2 controller for one keyboard scancode. Skips aux
+/// (PS/2 mouse/touchpad) bytes so they don't get misread as keystrokes.
+fn poll_ps2() -> Option<u8> {
+    unsafe {
+        let status = inb(STATUS_PORT);
+        // bit0 = output buffer full, bit5 = data is from the aux device.
+        // Want keyboard data only: output-full AND not-aux.
+        if status & 0x21 != 0x01 {
+            return None;
+        }
+        let scancode = inb(DATA_PORT);
+        decode_scancode(scancode)
+    }
 }
 
 /// Read next key as a typed KeyEvent. Converts ANSI escape sequences

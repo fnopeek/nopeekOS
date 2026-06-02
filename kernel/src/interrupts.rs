@@ -288,41 +288,21 @@ pub fn init() {
         // SAFETY: IDT is fully initialized above
         core::arch::asm!("lidt [{}]", in(reg) &idt_reg);
 
-        pic_remap();
-
-        // Unmask IRQ0 (timer) + IRQ1 (keyboard)
-        outb(PIC1_DATA, 0xFC);
+        // Do NOT re-initialize the legacy 8259 PIC. Writing ICW1 (0x11)
+        // to its command port (0x20/0xA0) traps via SMI on some UEFI
+        // firmware (HP/Insyde virtualize the legacy PIC in SMM under APIC
+        // mode) and resets the machine post-ExitBootServices — confirmed
+        // by colour-bisecting a serial-less HP notebook. UEFI hands control
+        // over in APIC mode, so we just MASK the PIC fully via its data
+        // ports (plain mask registers — safe) and drive ticks from the
+        // Local APIC timer (interrupts::init_apic_timer). A masked,
+        // un-remapped PIC delivers no IRQs, so the default 0x08-0x0F vector
+        // collision with CPU exceptions never happens.
+        outb(PIC1_DATA, 0xFF);
         outb(PIC2_DATA, 0xFF);
 
-        // Program PIT channel 0 to 100 Hz (10ms per tick)
-        let divisor = (PIT_BASE_FREQ / TARGET_FREQ) as u16;
-        outb(PIT_COMMAND, 0x36); // Channel 0, lobyte/hibyte, rate generator
-        outb(PIT_CHANNEL0, divisor as u8);
-        outb(PIT_CHANNEL0, (divisor >> 8) as u8);
-
-        // SAFETY: IDT loaded, PIC configured, PIT programmed, handlers set
+        // SAFETY: IDT loaded, PIC fully masked, handlers set.
         core::arch::asm!("sti");
-    }
-}
-
-/// Remap PIC: IRQ0-7 → 32-39, IRQ8-15 → 40-47
-/// Without remapping, hardware IRQs collide with CPU exception vectors
-unsafe fn pic_remap() {
-    unsafe {
-        let mask1 = inb(PIC1_DATA);
-        let mask2 = inb(PIC2_DATA);
-
-        outb(PIC1_CMD, 0x11); io_wait();
-        outb(PIC2_CMD, 0x11); io_wait();
-        outb(PIC1_DATA, PIC_OFFSET_MASTER); io_wait();
-        outb(PIC2_DATA, PIC_OFFSET_SLAVE); io_wait();
-        outb(PIC1_DATA, 0x04); io_wait(); // Slave on IRQ2
-        outb(PIC2_DATA, 0x02); io_wait();
-        outb(PIC1_DATA, 0x01); io_wait(); // 8086 mode
-        outb(PIC2_DATA, 0x01); io_wait();
-
-        outb(PIC1_DATA, mask1);
-        outb(PIC2_DATA, mask2);
     }
 }
 
@@ -331,12 +311,6 @@ unsafe fn pic_eoi(irq: u8) {
         if irq >= 8 { outb(PIC2_CMD, PIC_EOI); }
         outb(PIC1_CMD, PIC_EOI);
     }
-}
-
-/// Port 0x80 write provides ~1µs bus delay for PIC timing
-#[inline(always)]
-unsafe fn io_wait() {
-    unsafe { outb(0x80, 0x00); }
 }
 
 // === Exception Handlers ===
