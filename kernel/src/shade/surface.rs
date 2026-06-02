@@ -80,9 +80,15 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32) {
     // A new guest frame must trigger a recomposite — otherwise the
     // tile only updates when some *other* event (a click, a key)
     // happens to call render_frame (observed: cyan appeared only
-    // after clicking the window). request_render just sets an atomic;
-    // run_loop's poll_render/take_deferred_render picks it up.
-    crate::shade::request_render();
+    // after clicking the window). Use the clipped surface path (blit
+    // only the tile rect, not the whole screen) — a 60 Hz guest doing a
+    // full-screen MMIO blit every frame starved the cursor on bare metal.
+    // Both just set an atomic; poll_render picks it up.
+    if crate::shade::SURFACE_CLIP_BLIT {
+        crate::shade::request_surface_render();
+    } else {
+        crate::shade::request_render();
+    }
 }
 
 /// Read the current surface pixels for compositing. `f` gets

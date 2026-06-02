@@ -349,6 +349,77 @@ fn render_frame_layered() {
     });
 }
 
+/// Like `render_frame_layered` but for a Surface-only update (a guest/browser
+/// FLUSH): recomposite the scene (cheap RAM work) yet blit ONLY the surface
+/// tile rect(s) + the cursor to MMIO — not the whole screen. The full-screen
+/// MMIO blit is the dominant bare-metal (GOP framebuffer) cost; a 60 Hz guest
+/// doing it every frame saturated the framebuffer and starved cursor blits
+/// → laggy mouse whenever an app was up. Only the surface pixels changed, so
+/// the rest of the front buffer already matches what's on screen. See
+/// project-baremetal-gfx-perf ("clip the MMIO blit = the main win").
+fn render_frame_surface() {
+    framebuffer::with_fb(|fb| {
+        let screen_w = fb.info().width;
+        let screen_h = fb.info().height;
+        let pitch = fb.info().pitch;
+        let info = *fb.info();
+        let back = fb.shadow_back();
+
+        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
+            let size = pitch as usize * screen_h as usize;
+            // SAFETY: bg_buf and back are valid for size bytes.
+            unsafe { core::ptr::copy_nonoverlapping(bg_buf, back, size); }
+        }
+
+        // Recomposite the whole scene into back (correct w.r.t. overlays),
+        // collecting Surface tile rects while the lock is held.
+        let mut surf_rects = [(0u32, 0u32, 0u32, 0u32); 4];
+        let mut n = 0usize;
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+            comp.aurora_drawn = true;
+            comp.render(back, fb.info());
+            for win in comp.windows.iter() {
+                if win.kind == crate::shade::window::WindowKind::Surface && n < surf_rects.len() {
+                    surf_rects[n] = (win.x, win.y, win.width, win.height);
+                    n += 1;
+                }
+            }
+        }
+
+        fb.swap_buffers();
+        fb.commit_front();
+
+        // Capture the old cursor rect (to erase a ghost if it moved this
+        // frame) BEFORE save_under_and_bake overwrites the saved position.
+        let old = cursor::saved_pos();
+        let had_old = cursor::save_valid();
+        cursor::save_under_and_bake(fb.front_ptr(), &info);
+
+        // On a HW-blit host (native Xe / BCS) a full blit is cheap → keep it.
+        // Otherwise (GOP) clip the MMIO blit to the tiles + cursor bbox.
+        let gpu_ok = if crate::gpu::supports_blit() {
+            try_gpu_blit(fb, pitch, screen_w, screen_h)
+        } else {
+            false
+        };
+        if !gpu_ok {
+            let mut damage = render::DamageTracker::new(screen_w, screen_h);
+            for i in 0..n {
+                let (x, y, w, h) = surf_rects[i];
+                damage.mark(x, y, w, h);
+            }
+            // Cursor bbox (old ∪ new) so a move during this frame ghosts not.
+            let (cw, ch) = cursor::cursor_size();
+            let (cx, cy) = cursor::atomic_pos();
+            damage.mark(cx.max(0) as u32, cy.max(0) as u32, cw, ch);
+            if had_old {
+                damage.mark(old.0.max(0) as u32, old.1.max(0) as u32, cw, ch);
+            }
+            damage.flush(fb);
+        }
+    });
+}
+
 /// Legacy render with double-buffer (fallback when layers not initialized).
 fn render_frame_legacy() {
     framebuffer::with_fb(|fb| {
@@ -799,7 +870,15 @@ pub fn poll_render() {
 
     // Deferred scene redraw (drag resize/swap sets this to avoid blocking event loop)
     if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
+        SURFACE_DIRTY.store(false, Ordering::Relaxed); // a full render covers the tile too
         render_frame();
+        CURSOR_MOVED.store(false, Ordering::Relaxed);
+    } else if !terminal::is_dirty() && SURFACE_DIRTY.swap(false, Ordering::Relaxed) {
+        // Guest produced a new frame → recomposite but blit ONLY the surface
+        // tile rect (+ cursor), not the whole screen. The full-screen MMIO
+        // blit is the dominant bare-metal cost; clipping it stops a 60 Hz
+        // guest from starving the cursor.
+        render_frame_surface();
         CURSOR_MOVED.store(false, Ordering::Relaxed);
     } else if !terminal::is_dirty() && CURSOR_MOVED.swap(false, Ordering::Relaxed) {
         // Pure mouse move, nothing else changed → save-under cursor move.
@@ -990,6 +1069,26 @@ static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 /// A pure mouse move occurred (no scene change). poll_render moves the
 /// cursor via save-under (no recomposite) for it — cheap, flicker-free.
 static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
+
+/// A guest Surface produced a new frame (browser/microvm FLUSH). Distinct
+/// from DEFERRED_RENDER: only the surface tile pixels changed, so the final
+/// MMIO blit can be clipped to the tile rect instead of the whole screen.
+/// The full-screen blit per 60 Hz guest frame is the dominant bare-metal
+/// (GOP framebuffer) cost and starved the cursor → lag when an app is up.
+static SURFACE_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Clip the blit on a Surface flush to the tile rect (vs full-screen). Flag-
+/// gated because the cursor/blit path has a flicker history (see
+/// project-baremetal-gfx-perf) — flip to `false` to fall back to a full
+/// `request_render` per guest frame (the old behavior).
+pub const SURFACE_CLIP_BLIT: bool = true;
+
+/// A guest Surface produced a new frame → clipped recomposite+blit. Set from
+/// `surface::write_frame`; consumed by `poll_render`. No-op (caller uses the
+/// full `request_render`) when `SURFACE_CLIP_BLIT` is off.
+pub fn request_surface_render() {
+    SURFACE_DIRTY.store(true, Ordering::Relaxed);
+}
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
