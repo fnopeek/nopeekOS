@@ -1378,7 +1378,7 @@ impl VmContext {
                 // features we can't safely expose to the guest.
                 let leaf = self.regs.rax as u32;
                 let subleaf = self.regs.rcx as u32;
-                let (eax, ebx, mut ecx, mut edx) =
+                let (mut eax, mut ebx, mut ecx, mut edx) =
                     vmcs::host_cpuid(leaf, subleaf);
                 if leaf == 7 && subleaf == 0 {
                     // Hide CET from the guest. Host nopeekOS has
@@ -1400,6 +1400,28 @@ impl VmContext {
                     // guest entirely. Our microvm doesn't need PK.
                     ecx &= !(1u32 << 3);   // PKU
                     ecx &= !(1u32 << 4);   // OSPKE (driven by PKU)
+                    // Hide MPX — its XSAVE BND state is dropped in leaf
+                    // 0xD below, so the feature bit must go too or the
+                    // guest's xstate enumeration mismatches.
+                    ebx &= !(1u32 << 14);  // MPX
+                }
+                if leaf == 0xD {
+                    // Clamp the guest's XSAVE state to x87 + SSE + AVX only.
+                    // The host CPU may expose extra components (MPX BNDREGS/
+                    // BNDCSR on Intel 8th-gen Whiskey Lake, PKRU, AVX-512…);
+                    // passing leaf 0xD through verbatim makes Linux's XSAVE
+                    // size-consistency check fail (computed size != kernel
+                    // size → "XSAVE disabled" → fpstate_reset NULL-deref
+                    // panic). The N100 (Gracemont) lacks MPX, which is why
+                    // this only bit the notebook. 832 = 512 legacy + 64
+                    // header + 256 YMM_Hi128 is architectural for x87+SSE+AVX.
+                    const XSAVE_BASE_AVX: u32 = 0x340; // 832
+                    match subleaf {
+                        0 => { eax &= 0x7; ebx = XSAVE_BASE_AVX; ecx = XSAVE_BASE_AVX; edx = 0; }
+                        1 => { eax &= 0x7; ebx = XSAVE_BASE_AVX; ecx = 0; edx = 0; } // drop XSAVES/supervisor
+                        2 => { ecx = 0; edx = 0; } // AVX component: keep host size(eax)+offset(ebx)
+                        _ => { eax = 0; ebx = 0; ecx = 0; edx = 0; } // hide MPX/PKRU/AVX-512/…
+                    }
                 }
                 self.regs.rax = eax as u64;
                 self.regs.rbx = ebx as u64;
