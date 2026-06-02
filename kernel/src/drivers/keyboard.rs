@@ -4,7 +4,7 @@
 //! Scancode Set 1 with US and DE_CH layouts.
 //! USB keyboards work via BIOS legacy PS/2 emulation.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use crate::serial::{inb, outb};
 
 const DATA_PORT: u16 = 0x60;
@@ -144,8 +144,33 @@ pub fn init_mouse() -> bool {
     true
 }
 
+/// Host TSC of the last PS/2 mouse byte. On UEFI machines IRQ12 is masked,
+/// so the mouse is *polled* in the Core-0 run loop. When a window is focused
+/// the loop HLTs between 100 Hz timer ticks → the mouse samples + cursor
+/// redraw at only ~100 Hz with pipeline latency → laggy. `core0_idle_tick`
+/// reads this so it can keep the loop SPINNING (full sample rate, smooth
+/// cursor) while the mouse is moving, and HLT (low power) once it stops.
+static LAST_MOUSE_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// True if a PS/2 mouse byte arrived within ~`ms` of now — i.e. the user is
+/// actively moving the pointer. Used by the Core-0 idle path to spin instead
+/// of HLT during interaction. False on hosts with no PS/2 mouse (TSC stays 0,
+/// `saturating_sub` keeps it false) so USB/IRQ setups are unaffected.
+pub fn mouse_active_within(ms: u64) -> bool {
+    let last = LAST_MOUSE_TSC.load(Ordering::Relaxed);
+    if last == 0 {
+        return false;
+    }
+    let freq = crate::interrupts::tsc_freq();
+    if freq == 0 {
+        return false;
+    }
+    crate::interrupts::rdtsc().saturating_sub(last) < freq / 1000 * ms
+}
+
 /// Assemble a 3-byte PS/2 mouse packet and inject it as a pointer event.
 fn feed_mouse(byte: u8) {
+    LAST_MOUSE_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
     match PM_IDX.load(Ordering::Relaxed) {
         0 => {
             if byte & 0x08 == 0 { return; }   // bit3 sync must be set, else resync
