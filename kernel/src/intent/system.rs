@@ -1019,6 +1019,15 @@ pub fn intent_lspci(args: &str) {
     kprintln!();
 }
 
+/// `usb` / `lsusb` — enumerate every device on every xHCI controller and
+/// print VID:PID + class + product. Identifies dongles (NICs etc.) so the
+/// driver catalog can match the right WASM driver.
+pub fn intent_lsusb() {
+    kprintln!();
+    kprintln!("  Enumerating USB (re-plug a USB keyboard/mouse afterwards)...");
+    crate::xhci::list_devices();
+}
+
 fn pci_class_name(cls: u8, sub: u8, prog_if: u8) -> &'static str {
     match (cls, sub, prog_if) {
         (0x00, 0x00, _) => "Legacy device",
