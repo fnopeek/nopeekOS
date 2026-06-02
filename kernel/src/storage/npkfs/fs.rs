@@ -341,12 +341,16 @@ pub fn gc() -> Result<GcStats, Error> {
 // write-side fix is what unblocks `http <huge-url> > path` and
 // >100 MB OTA bundles today.
 
-/// Default streaming-write chunk size. 16 MiB balances:
-///  - NVMe efficiency (single extent typically covers a 16 MiB chunk)
-///  - Heap peak (16 MiB plaintext + ~16 B AES-GCM tag during encrypt)
-///  - Manifest overhead (1 chunk hash per 16 MiB → 32 bytes / 16 MiB
-///    ≈ 2 ppm of disk overhead on top of the data itself)
-pub const STREAMING_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+/// Default streaming-write chunk size. Kept at 1 MiB because each chunk is
+/// hashed in one shot with `blake3::hash(&chunk)`, and BLAKE3's one-shot path
+/// (`compress_subtree_wide`) recurses divide-and-conquer over the whole buffer
+/// with per-level on-stack arrays. At 16 MiB that recursion (depth ~11) blew
+/// the kernel/task stack → smashed return addresses → wild RIP/RSP crash
+/// (observed on the 16 GB notebook: RSP ran past physical RAM, #PF in
+/// blake3_hash_many). 1 MiB keeps the recursion shallow (~depth 7, a few KB of
+/// stack). Manifest overhead is still negligible (32 B per 1 MiB). Reads stitch
+/// chunks transparently, so existing 16 MiB-chunk objects stay readable.
+pub const STREAMING_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Stitch a `Chunked` manifest back into a single `Vec<u8>`. Used by
 /// `read_with_hash` so callers see a transparent file regardless of
