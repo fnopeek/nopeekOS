@@ -529,6 +529,21 @@ fn allocate_zero_msr_bitmap() -> Result<u64, &'static str> {
     let bitmap = memory::allocate_frame().ok_or("OOM: MSR bitmap")?;
     // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe { core::ptr::write_bytes(bitmap as *mut u8, 0, 4096); }
+
+    // Intel parity #2: intercept IA32_APIC_BASE (0x1B) reads AND writes so
+    // the EXIT_MSR handler emulates it (report LAPIC enabled@0xFEE00000 with
+    // the BSP bit). The WRITE intercept is critical — with a zero bitmap a
+    // guest WRMSR 0x1B would pass straight to the HOST core's APIC base
+    // register. Layout (SDM §25.6.9): read-low region @0x000, write-low @
+    // 0x800; MSR 0x1B → byte 3, bit 3. Gated on the LAPIC flag (vmx ⇒ Intel
+    // here) so the `nolapic` rollback keeps the validated zero bitmap.
+    if crate::microvm::cpu::GUEST_LAPIC && crate::microvm::cpu::VMX_GUEST_LAPIC {
+        // SAFETY: bytes 3 and 0x803 are within the 4 KB bitmap we own.
+        unsafe {
+            *((bitmap + 3) as *mut u8) |= 1 << 3;        // RDMSR 0x1B exits
+            *((bitmap + 0x803) as *mut u8) |= 1 << 3;    // WRMSR 0x1B exits
+        }
+    }
     Ok(bitmap)
 }
 

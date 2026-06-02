@@ -394,8 +394,21 @@ pub fn smp_ap_active() -> bool {
 /// Wayland, schedulers) hang forever. So on Intel we must keep `nolapic` in the
 /// cmdline and let the guest fall back to the PIT IRQ0 the VMX path injects.
 pub fn guest_lapic_active() -> bool {
-    GUEST_LAPIC && matches!(current_vendor(), Vendor::Amd)
+    GUEST_LAPIC
+        && match current_vendor() {
+            Vendor::Amd => true,
+            Vendor::Intel => VMX_GUEST_LAPIC,
+            Vendor::Unknown(_) => false,
+        }
 }
+
+/// Intel parity #2: emulate the guest local APIC on VMX too (`vmx::lapic`
+/// reuses the pure `svm::lapic::LocalApic`). When true the Intel guest boots
+/// WITHOUT `nolapic` and the LAPIC MMIO page EPT-faults into the emulator;
+/// when false it keeps `nolapic` (byte-identical to the validated pre-LAPIC
+/// Intel boot). Flag-gated for clean OTA rollback. Prerequisite for VMX
+/// guest-SMP (#4) — Linux needs the per-CPU LAPIC timer to schedule APs.
+pub const VMX_GUEST_LAPIC: bool = true;
 
 // ── AP (secondary vCPU) spawn orchestration (guest SMP, Stage 3b-2) ─────
 //
