@@ -1019,6 +1019,29 @@ pub fn intent_lspci(args: &str) {
     kprintln!();
 }
 
+/// `mouse [speed <n>]` — show or set pointer speed (percent, 25..=600).
+/// Persisted to `mouse_speed` config so it survives reboot.
+pub fn intent_mouse(args: &str) {
+    let a = args.trim();
+    if let Some(rest) = a.strip_prefix("speed") {
+        let v = rest.trim();
+        if v.is_empty() {
+            kprintln!("  mouse speed: {}%", crate::shade::cursor::speed());
+        } else if let Ok(n) = v.parse::<i32>() {
+            crate::shade::cursor::set_speed(n);
+            let now = crate::shade::cursor::speed();
+            crate::config::set("mouse_speed", &alloc::format!("{}", now));
+            kprintln!("  mouse speed set to {}%", now);
+        } else {
+            kprintln!("  usage: mouse speed <25-600>");
+        }
+    } else if a.is_empty() {
+        kprintln!("  mouse speed: {}%  (set: mouse speed <25-600>)", crate::shade::cursor::speed());
+    } else {
+        kprintln!("  usage: mouse speed <25-600>");
+    }
+}
+
 /// `usb` / `lsusb` — enumerate every device on every xHCI controller and
 /// print VID:PID + class + product. Identifies dongles (NICs etc.) so the
 /// driver catalog can match the right WASM driver.
