@@ -227,6 +227,15 @@ fn push_mouse(evt: MouseEvent) {
     }
 }
 
+/// Inject a mouse event from another input source (e.g. the PS/2 touchpad on
+/// the i8042 aux port) into the same ring `poll_mouse` drains, so the main
+/// loop's existing `poll_mouse()` delivers it with no extra plumbing. Marks the
+/// pointer available on first event.
+pub fn inject_mouse(evt: MouseEvent) {
+    MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+    push_mouse(evt);
+}
+
 /// Poll for a key from the USB keyboard. Called from keyboard.rs.
 /// Reads from software buffer only — timer IRQ drains hardware.
 pub fn poll_keyboard() -> Option<u8> {

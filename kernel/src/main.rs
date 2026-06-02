@@ -124,6 +124,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         }
     }
 
+    // PS/2 touchpad/mouse on the i8042 aux port — only when there's no USB
+    // mouse (e.g. the notebook's internal touchpad). Gives a basic cursor.
+    if keyboard::init_mouse() {
+        vga::show_status(b"PS/2 pointer online");
+    }
+
     // APIC timer: if PIT doesn't work (NUC/UEFI-only), use Local APIC for 100Hz ticks.
     // Must be after xhci::init so poll_events_irq can drain USB events.
     interrupts::init_apic_timer();
