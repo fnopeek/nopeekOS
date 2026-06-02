@@ -377,6 +377,16 @@ pub fn smp_ap_active() -> bool {
     GUEST_SMP_AP && matches!(current_vendor(), Vendor::Amd)
 }
 
+/// Whether the guest's local APIC is emulated on this host. LAPIC emulation
+/// (`svm/lapic.rs`) is SVM-only — there is no VMX equivalent yet. With
+/// `GUEST_LAPIC` on but no emulation, an Intel guest would program the LAPIC
+/// (TSC-deadline) timer and then never receive a tick → its event loops (cage/
+/// Wayland, schedulers) hang forever. So on Intel we must keep `nolapic` in the
+/// cmdline and let the guest fall back to the PIT IRQ0 the VMX path injects.
+pub fn guest_lapic_active() -> bool {
+    GUEST_LAPIC && matches!(current_vendor(), Vendor::Amd)
+}
+
 // ── AP (secondary vCPU) spawn orchestration (guest SMP, Stage 3b-2) ─────
 //
 // The guest's INIT-SIPI is decoded on the BSP vCPU fiber (a worker core),

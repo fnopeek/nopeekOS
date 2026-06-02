@@ -1875,10 +1875,12 @@ panic=1 nokaslr noapic acpi=off tsc=reliable \
 tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         tsc_khz, maxcpus,
     );
-    // Guest-SMP Stage 1: keep `nolapic` only when LAPIC emulation is
-    // gated off (OTA rollback). With it on (default) Linux brings up the
-    // emulated local APIC. See `microvm::cpu::GUEST_LAPIC`.
-    if !crate::microvm::cpu::GUEST_LAPIC {
+    // `nolapic` unless the LAPIC is actually emulated for this host. LAPIC
+    // emulation is SVM-only (svm/lapic.rs); on Intel/VMX there is none, so the
+    // guest must fall back to the PIT IRQ0 the VMX path injects — otherwise it
+    // programs the LAPIC timer and hangs waiting for a tick that never comes
+    // (cage/Wayland never starts). See cpu::guest_lapic_active().
+    if !crate::microvm::cpu::guest_lapic_active() {
         let _ = write!(s, " nolapic");
     }
     if let Some(epoch) =
