@@ -22,6 +22,18 @@ use super::{ept, rdmsr, vmcs, wrmsr};
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
+// LAPIC emulation is pure register state (only uses rdtsc) — reuse the SVM
+// module's `LocalApic` rather than duplicate it. Intel parity #2.
+use crate::microvm::cpu::svm::lapic::{self, LocalApic};
+
+/// True when the guest LAPIC is emulated on this (VMX ⇒ Intel) host. Cheap
+/// const check (no vendor lock — vmx code only runs on Intel). Gates every
+/// LAPIC-related VMX path; false ⇒ the validated `nolapic` boot, byte-
+/// identical. See `cpu::VMX_GUEST_LAPIC`.
+#[inline]
+fn vmx_lapic_on() -> bool {
+    crate::microvm::cpu::GUEST_LAPIC && crate::microvm::cpu::VMX_GUEST_LAPIC
+}
 
 const IA32_FEATURE_CONTROL: u32 = 0x3A;
 const IA32_VMX_BASIC: u32 = 0x480;
@@ -561,6 +573,20 @@ pub struct VmContext {
     /// guest-SMP 9p-mount livelock fix, v0.191.13). Nothing is lost: a
     /// latched line is delivered on the next ~100 Hz exit once IF=1.
     pending_irqs: u16,
+    /// Per-vCPU emulated local APIC (Intel parity #2). Inert while booting
+    /// `nolapic`; once Linux software-enables it (SPIV) it drives the timer.
+    /// The MMIO page (0xFEE00000) EPT-faults here. Single-vCPU for now (AP
+    /// bring-up = #4); apic_id 0. Reuses `svm::lapic::LocalApic`.
+    lapic: LocalApic,
+    /// Host tick (`ticks()`) of the last injected LAPIC-timer (LVTT) IRQ,
+    /// paced like `last_timer_tick` for the PIT.
+    last_lapic_tick: u64,
+    /// True until Linux writes PIT mode-0 (port 0x43 ← 0x30) to disable the
+    /// i8253 after adopting the LAPIC timer. While true the PIT IRQ0 is
+    /// injected; after, only the LVTT ticks (so jiffies don't double-count).
+    /// During calibration BOTH tick 1:1 — Linux verifies that before
+    /// switching, else "APIC timer disabled".
+    pit_enabled: bool,
     /// Host/guest FPU (XSAVE) save areas — VMRESUME preserves neither.
     /// See `cpu::FpuArea`. guest_fpu starts zeroed = FPU init state.
     host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
@@ -629,6 +655,9 @@ impl VmContext {
                 last_cfg_tick: 0,
                 reinject: 0,
                 pending_irqs: 0,
+                lapic: LocalApic::new(0),
+                last_lapic_tick: 0,
+                pit_enabled: true,
                 host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
             })
@@ -1345,15 +1374,34 @@ impl VmContext {
                 // effect; only the inject+`continue` is prioritized.
                 const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
                 let now = crate::interrupts::ticks();
-                if can_irq
-                    && self.pic.irq_unmasked(0)
-                    && now.wrapping_sub(self.last_timer_tick) >= TIMER_MAX_SKIP
-                {
+                // Two timer sources, both paced at the host 100 Hz `ticks()`
+                // so their rates match 1:1 — what Linux's APIC-timer
+                // calibration verification needs (else "APIC timer disabled").
+                // PIT IRQ0 until Linux disables the i8253 (pit_enabled → false
+                // after a mode-0 write); the LAPIC LVTT vector once Linux
+                // software-enables + unmasks it. One inject slot per VM-entry
+                // → whichever isn't taken lands next entry (≥1 kHz). LAPIC
+                // emulation (#2) only — None when booting `nolapic`.
+                let pit_live = can_irq && self.pic.irq_unmasked(0) && self.pit_enabled;
+                let lapic_vec = if vmx_lapic_on() && can_irq {
+                    self.lapic.timer_tick_vector()
+                } else {
+                    None
+                };
+                if pit_live && now.wrapping_sub(self.last_timer_tick) >= TIMER_MAX_SKIP {
                     self.last_timer_tick = now;
                     let vector = self.pic.vector_for_irq(0);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                     continue;
+                }
+                if let Some(vec) = lapic_vec {
+                    if now.wrapping_sub(self.last_lapic_tick) >= TIMER_MAX_SKIP {
+                        self.last_lapic_tick = now;
+                        let _ = vmcs::inject_external_irq(vec);
+                        self.consecutive_idle = 0;
+                        continue;
+                    }
                 }
                 let pumped = crate::microvm::devices::nat::pump(
                     &mut self.pci.virtio_net, &self.guest_mem);
@@ -1369,12 +1417,20 @@ impl VmContext {
                     self.consecutive_idle = 0;
                     continue;
                 }
-                if can_irq && now != self.last_timer_tick && self.pic.irq_unmasked(0) {
+                if pit_live && now != self.last_timer_tick {
                     self.last_timer_tick = now;
                     let vector = self.pic.vector_for_irq(0);
                     let _ = vmcs::inject_external_irq(vector);
                     self.consecutive_idle = 0;
                     continue;
+                }
+                if let Some(vec) = lapic_vec {
+                    if now != self.last_lapic_tick {
+                        self.last_lapic_tick = now;
+                        let _ = vmcs::inject_external_irq(vec);
+                        self.consecutive_idle = 0;
+                        continue;
+                    }
                 }
                 // Pure timer-tick → idle counter advances. Real net data
                 // (`pumped`) resets it. Merely having open NAT sessions
@@ -1431,6 +1487,18 @@ impl VmContext {
                 let subleaf = self.regs.rcx as u32;
                 let (mut eax, mut ebx, mut ecx, mut edx) =
                     vmcs::host_cpuid(leaf, subleaf);
+                if leaf == 1 && vmx_lapic_on() {
+                    // ECX bit 24: TSC-deadline timer. Hide it so Linux uses
+                    // the classic APIC_TMICT/TMCCT periodic timer (which
+                    // vmx::lapic emulates) instead of the TSC-deadline MSR
+                    // (0x6E0), which we don't emulate.
+                    ecx &= !(1u32 << 24);
+                    // EBX bits 31:24: initial xAPIC ID. Pass-through reports
+                    // the HOST worker core's id — mismatching our emulated
+                    // LAPIC (seeded apic_id 0) + MP-table. Report this vCPU's
+                    // id (0; single-vCPU until #4).
+                    ebx &= 0x00FF_FFFF;
+                }
                 if leaf == 7 && subleaf == 0 {
                     // Hide CET from the guest. Host nopeekOS has
                     // CR4.CET=1 for IBT, but Alpine vmlinuz has
@@ -1531,7 +1599,7 @@ impl VmContext {
                 if port == 0x3F8 && !dir_in && !self.serial.dlab && size == 1 {
                     self.io_stats.record_serial_byte((self.regs.rax & 0xFF) as u8);
                 }
-                handle_linux_io(&mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped);
+                handle_linux_io(&mut self.serial, &mut self.pci, &mut self.pic, &mut self.regs, port, dir_in, size, &mut self.io_dropped, &mut self.pit_enabled);
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
@@ -1552,6 +1620,19 @@ impl VmContext {
                 // safest answer for unknown info MSRs (Linux's
                 // safe_rdmsr-style code copes with bogus values).
                 let msr = self.regs.rcx as u32;
+                // IA32_APIC_BASE (0x1B): report the LAPIC enabled at its
+                // architectural default base with the BSP bit (Intel parity
+                // #2). Intercepted via the MSR bitmap only when LAPIC is on;
+                // single-vCPU ⇒ this is always the BSP. The MMIO trap page is
+                // wired at 0xFEE00000; writes (below) keep the fixed base.
+                if msr == 0x1B && vmx_lapic_on() {
+                    let v = lapic::APIC_BASE_MSR_VALUE;
+                    self.regs.rax = v & 0xFFFF_FFFF;
+                    self.regs.rdx = v >> 32;
+                    vmcs::advance_guest_rip()?;
+                    last_outcome = Some(outcome);
+                    continue;
+                }
                 if !msr_is_known_noise(msr) && self.msr_log_count < MSR_LOG_CAP {
                     kprintln!("[microvm] RDMSR {:#010x} → 0 (unhandled)", msr);
                     self.msr_log_count += 1;
@@ -1580,6 +1661,16 @@ impl VmContext {
                 // EPT permissions). For accesses landing in virtio-blk's
                 // BAR0 range we emulate; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
+                // LAPIC MMIO page (0xFEE00000) → trap-and-emulate (Intel
+                // parity #2). Left EPT-not-present in ept.rs when LAPIC is on.
+                if vmx_lapic_on()
+                    && (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa)
+                {
+                    if handle_mmio_lapic(&mut self.regs, &mut self.lapic, gpa, &self.guest_mem) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                }
                 if self.pci.virtio_blk.bar0_in_range(gpa) {
                     if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk, &self.pic, &mut self.pending_irqs, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
@@ -1807,6 +1898,7 @@ fn handle_linux_io(
     dir_in: bool,
     size: u8,
     io_dropped: &mut u32,
+    pit_enabled: &mut bool,
 ) {
     use crate::microvm::devices::{handle_pci_io, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};
     use crate::microvm::devices::pic8259::{handle_pic_io, PIC_MASTER_CMD, PIC_MASTER_IMR, PIC_SLAVE_CMD, PIC_SLAVE_IMR};
@@ -1833,6 +1925,18 @@ fn handle_linux_io(
     }
 
     match (port, dir_in) {
+        // i8253 PIT mode/command (0x43) write. Track whether channel 0 is
+        // still generating the timer tick: a mode-set (access bits 5:4 != 0)
+        // on channel 0 (bits 7:6 == 0) sets pit_enabled = (operating mode !=
+        // 0). Linux shuts the PIT down with mode 0 (0x30) after adopting the
+        // LAPIC timer; periodic (0x34) / oneshot (0x38) keep it live. Latch
+        // commands (bits 5:4 == 0) don't change the mode. Mirrors svm.
+        (0x43, false) => {
+            let v = val_out as u8;
+            if (v >> 6) & 0x3 == 0 && (v >> 4) & 0x3 != 0 {
+                *pit_enabled = ((v >> 1) & 0x7) != 0;
+            }
+        }
         // COM1 OUT.
         (0x3F8, false) => {
             if !serial.dlab {
@@ -1896,6 +2000,53 @@ fn handle_linux_io(
 ///
 /// Returns `true` if the fault was handled, `false` otherwise (page
 /// walk failed, opcode unsupported).
+/// EPT-violation on the LAPIC MMIO page (Intel parity #2). Decode the
+/// faulting MOV, service it against the per-vCPU `LocalApic`, advance RIP.
+/// xAPIC registers are 32-bit; no device IRQ-kick. ICR writes are decoded
+/// but not routed — single-vCPU has no peer vCPU to deliver an IPI to
+/// (cross-vCPU IPI is guest-SMP #4). Mirrors svm `handle_mmio_npf_lapic`.
+fn handle_mmio_lapic(
+    regs: &mut vmcs::GuestRegs,
+    apic: &mut LocalApic,
+    gpa: u64,
+    mem: &GuestMem,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
+    let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
+    let buf = match fetch_inst(rip, cr3, mem) {
+        Some(b) => b,
+        None => {
+            kprintln!("[vmx] lapic mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+            return false;
+        }
+    };
+    let dec = match decode_mov(&buf) {
+        Some(d) => d,
+        None => {
+            kprintln!("[vmx] lapic mmio: unsupported insn @ gpa={:#x} bytes={:02x?}", gpa, &buf[..8]);
+            return false;
+        }
+    };
+
+    let off = (gpa - lapic::LAPIC_BASE) as u32;
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        // ICR write returns Some(IcrWrite); single-vCPU → no peer to route to.
+        let _ = apic.write(off, value as u32);
+    } else {
+        let value = apic.read(off) as u64;
+        write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+    if vmcs::advance_guest_rip().is_err() {
+        return false;
+    }
+    true
+}
+
 /// Deliver a device IRQ raised by an MMIO virtqueue-kick: inject it now
 /// if the guest is interruptible, else latch the line in `pending` for
 /// the run loop to drain once IF=1. The MMIO handlers run on EPT-

@@ -135,7 +135,13 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
     let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
     let pd_high_phys = memory::allocate_frame().ok_or("OOM: EPT PD_HIGH")?;
     let pt_dummy_phys = memory::allocate_frame().ok_or("OOM: EPT PT_DUMMY")?;
+    let pt_lapic_phys = memory::allocate_frame().ok_or("OOM: EPT PT_LAPIC")?;
     let dummy_page_phys = memory::allocate_frame().ok_or("OOM: EPT dummy page")?;
+    // Trap the guest LAPIC page (0xFEE00000) into the emulator (vmx::lapic,
+    // Intel parity #2) by leaving it EPT-not-present. Only when LAPIC
+    // emulation is on; otherwise keep the old aliased scratch (byte-
+    // identical rollback for the `nolapic` boot). Mirrors svm/npt.rs.
+    let lapic_trap = crate::microvm::cpu::GUEST_LAPIC && crate::microvm::cpu::VMX_GUEST_LAPIC;
     let mut pd_physs = [0u64; 3];
     for p in 0..num_pds {
         pd_physs[p] = memory::allocate_frame().ok_or("OOM: EPT PD")?;
@@ -177,20 +183,38 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
             }
         }
 
-        // PD_HIGH[502] + [503] → same PT_DUMMY (covers [0xFEC00000,
-        // 0xFF000000) = IOAPIC + HPET + LAPIC). Two PD entries aliased
-        // to one PT, so 4 MB of guest-phys all walk through the same
-        // 512-entry PT.
+        // PD_HIGH[502] → PT_DUMMY (covers [0xFEC00000, 0xFEE00000):
+        // IOAPIC + HPET, scratch). PD_HIGH[503] covers [0xFEE00000,
+        // 0xFF000000) = the LAPIC: when emulating, point it at a SEPARATE
+        // PT_LAPIC whose first page (0xFEE00000) is left not-present so the
+        // guest's LAPIC MMIO EPT-faults into vmx::lapic; the rest stays
+        // scratch. When not emulating, alias it to PT_DUMMY like before
+        // (byte-identical scratch for the `nolapic` boot).
         let pd_high = pd_high_phys as *mut u64;
         core::ptr::write_bytes(pd_high as *mut u8, 0, 4096);
         pd_high.add(502).write_volatile(pt_dummy_phys | EPT_RWX);
-        pd_high.add(503).write_volatile(pt_dummy_phys | EPT_RWX);
+        pd_high.add(503).write_volatile(
+            if lapic_trap { pt_lapic_phys } else { pt_dummy_phys } | EPT_RWX);
 
         let pt_dummy = pt_dummy_phys as *mut u64;
         core::ptr::write_bytes(pt_dummy as *mut u8, 0, 4096);
         core::ptr::write_bytes(dummy_page_phys as *mut u8, 0, 4096);
         for i in 0..512usize {
             pt_dummy
+                .add(i)
+                .write_volatile(dummy_page_phys | EPT_RWX | EPT_MEM_TYPE_WB);
+        }
+
+        // PT_LAPIC: entry [0] = the LAPIC MMIO page (0xFEE00000) left
+        // NOT-PRESENT → guest LAPIC accesses EPT-violate → trap-and-emulate
+        // (vmx::lapic). The rest of the 2 MB → dummy scratch (harmless if
+        // ever touched). Only consulted when `lapic_trap` (PD_HIGH[503]
+        // points here); built unconditionally — a leaked frame otherwise.
+        let pt_lapic = pt_lapic_phys as *mut u64;
+        core::ptr::write_bytes(pt_lapic as *mut u8, 0, 4096);
+        pt_lapic.add(0).write_volatile(0); // LAPIC page: trap on access
+        for i in 1..512usize {
+            pt_lapic
                 .add(i)
                 .write_volatile(dummy_page_phys | EPT_RWX | EPT_MEM_TYPE_WB);
         }
