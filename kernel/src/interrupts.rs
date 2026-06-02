@@ -365,6 +365,30 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
     kprintln!("[npk] Error code: {:#x}", error_code);
     kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
     kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
+
+    // Best-effort backtrace: scan the stack for words that look like return
+    // addresses into kernel code (link base 0x1000_0000 .. ~+8 MB). On this HW
+    // the PIE kernel runs at its link base, so these map directly via
+    // `addr2line -e target/.../nopeekos-kernel <addr>`. Only scanned when RSP
+    // is inside the identity-mapped range so the scan itself can't fault.
+    let rsp = frame.stack_pointer;
+    if rsp >= 0x10_0000 && rsp < 0x10_0000_0000 {
+        kprintln!("[npk] stack trace (return addrs in kernel code):");
+        let mut p = rsp;
+        let mut printed = 0;
+        let mut scanned = 0;
+        while scanned < 1024 && printed < 24 {
+            // SAFETY: rsp is within the identity-mapped range (checked above),
+            // so this read cannot page-fault (re-entry would triple-fault).
+            let v = unsafe { core::ptr::read_volatile(p as *const u64) };
+            if v >= 0x1000_0000 && v < 0x1080_0000 {
+                kprintln!("[npk]   {:#018x}", v);
+                printed += 1;
+            }
+            p += 8;
+            scanned += 1;
+        }
+    }
     halt_loop();
 }
 
