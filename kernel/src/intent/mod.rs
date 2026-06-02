@@ -1860,7 +1860,10 @@ fn microvm_linux(inject: &[u8]) {
     // bring-up. Stage 3b-2 (GUEST_SMP_AP on): raise to GUEST_VCPUS so Linux
     // actually brings the AP up — by then INIT-SIPI spawns a responding AP
     // vCPU (`request_ap_spawn`), so the wait completes instead of hanging.
-    let maxcpus: u8 = if crate::microvm::cpu::GUEST_SMP_AP {
+    // Online the AP only where the host can actually bring it up (AMD/SVM).
+    // On Intel/VMX there is no AP-vCPU path yet, so an onlined-but-unresponsive
+    // AP hangs Linux's cpuhp — keep the guest single-vCPU there.
+    let maxcpus: u8 = if crate::microvm::cpu::smp_ap_active() {
         crate::microvm::cpu::GUEST_VCPUS
     } else {
         1
