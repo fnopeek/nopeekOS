@@ -734,17 +734,24 @@ case "${1:-}" in
         check_deps
         build_installer
         ;;
-    usb|usb-full)
-        # Fully self-contained install stick: bundles EVERYTHING the
-        # installed system needs to run offline — microVM Linux kernel +
-        # initramfs, all first-party WASM modules, fonts/icons/wallpapers
-        # (always in BUNDLED_ASSETS) AND the LibreWolf userspace sqfs
-        # (~250 MB, via BUNDLE_USERSPACE). USB ≈ 290 MB but first boot
-        # has the browser ready with NO internet / OTA round-trip needed.
-        # If the sqfs source is absent, build_installer warns and falls
-        # back to OTA for that one asset (everything else still bundles).
-        # `usb-full` is kept as an explicit alias of `usb`.
-        # The OTA `update` path keeps working for later upgrades.
+    usb)
+        # Bootable install stick (~15 MB EFI). Bundles microVM Linux +
+        # initramfs, all WASM modules, fonts/icons/wallpapers — but NOT
+        # the 261 MB LibreWolf sqfs: embedding it makes a ~290 MB EFI
+        # image that some laptop firmware (e.g. HP) cannot LoadImage (it
+        # can't allocate ~294 MB contiguous), so it bootloops. The
+        # browser bundle arrives via OTA `update` post-install, or use
+        # `usb-full` for the (large) embedded variant on firmware that
+        # tolerates it.
+        check_deps
+        build_installer
+        write_usb "${2:-}"
+        ;;
+    usb-full)
+        # Same as `usb` but embeds the LibreWolf sqfs (~261 MB) so a
+        # fresh install has the browser with no OTA. WARNING: the
+        # resulting ~290 MB EFI fails to load on some firmware (HP
+        # laptops) — use `usb` there. See [[project_uefi_relocatable]].
         check_deps
         BUNDLE_USERSPACE=1 build_installer
         write_usb "${2:-}"
