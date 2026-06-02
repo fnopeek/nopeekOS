@@ -1494,6 +1494,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 system::intent_lsusb();
             }
         }
+        "mouse" => {
+            system::intent_mouse(args);
+        }
         "dmesg" | "bootlog" => {
             system::intent_dmesg();
         }

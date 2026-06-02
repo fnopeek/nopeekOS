@@ -331,6 +331,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // Load system config (after identity — config is encrypted at rest)
     config::load();
     xhci::cache_keyboard_layout();
+    if let Some(v) = config::get("mouse_speed") {
+        if let Ok(n) = v.trim().parse::<i32>() { shade::cursor::set_speed(n); }
+    }
 
     // Inter Variable UI font — read from npkFS (seeded by installer), BLAKE3
     // verified, parsed via fontdue. Login screen + terminals use Spleen

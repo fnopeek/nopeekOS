@@ -101,6 +101,19 @@ static MOUSE_DIRTY: AtomicBool = AtomicBool::new(false);
 static SCREEN_W: AtomicI32 = AtomicI32::new(1920);
 static SCREEN_H: AtomicI32 = AtomicI32::new(1080);
 
+/// Pointer speed in percent (100 = 1:1 with the device deltas). Touchpads
+/// deliver small deltas, so the default scales up. Tunable via the `mouse`
+/// intent / `mouse_speed` config. Sub-100 (slow-down) is smooth because the
+/// fractional remainder is accumulated below.
+static SPEED: AtomicI32 = AtomicI32::new(220);
+static ACC_X: AtomicI32 = AtomicI32::new(0);
+static ACC_Y: AtomicI32 = AtomicI32::new(0);
+
+/// Set pointer speed (percent, clamped 25..=600).
+pub fn set_speed(percent: i32) { SPEED.store(percent.clamp(25, 600), Ordering::Relaxed); }
+/// Current pointer speed (percent).
+pub fn speed() -> i32 { SPEED.load(Ordering::Relaxed) }
+
 /// Update mouse position atomically. NO LOCK needed.
 /// Called from Core 0 input polling — takes ~2 nanoseconds.
 pub fn update_atomic(dx: i8, dy: i8, buttons: u8) {
@@ -108,8 +121,18 @@ pub fn update_atomic(dx: i8, dy: i8, buttons: u8) {
     let sh = SCREEN_H.load(Ordering::Relaxed);
     let old_btn = ATOMIC_BUTTONS.load(Ordering::Relaxed);
 
-    let x = (ATOMIC_X.load(Ordering::Relaxed) + dx as i32).clamp(0, sw - 1);
-    let y = (ATOMIC_Y.load(Ordering::Relaxed) + dy as i32).clamp(0, sh - 1);
+    // Scale device deltas by SPEED%, accumulating the fractional remainder so
+    // slow speeds still move on small deltas and fast speeds stay smooth.
+    let s = SPEED.load(Ordering::Relaxed);
+    let ax = ACC_X.load(Ordering::Relaxed) + dx as i32 * s;
+    let ay = ACC_Y.load(Ordering::Relaxed) + dy as i32 * s;
+    let mvx = ax / 100;
+    let mvy = ay / 100;
+    ACC_X.store(ax - mvx * 100, Ordering::Relaxed);
+    ACC_Y.store(ay - mvy * 100, Ordering::Relaxed);
+
+    let x = (ATOMIC_X.load(Ordering::Relaxed) + mvx).clamp(0, sw - 1);
+    let y = (ATOMIC_Y.load(Ordering::Relaxed) + mvy).clamp(0, sh - 1);
 
     ATOMIC_X.store(x, Ordering::Relaxed);
     ATOMIC_Y.store(y, Ordering::Relaxed);
@@ -167,26 +190,28 @@ pub fn init_atomic(screen_w: u32, screen_h: u32) {
 }
 
 /// Arrow cursor bitmap (1 = white outline, 2 = black fill, 0 = transparent).
+// Arrow pointer (Tabler "pointer-2" style): white fill (1), black outline (2),
+// transparent (0). Hotspot = top-left tip (0,0).
 static CURSOR_BITMAP: [u8; (CURSOR_W * CURSOR_H) as usize] = [
-    1,0,0,0,0,0,0,0,0,0,0,0,
-    1,1,0,0,0,0,0,0,0,0,0,0,
-    1,2,1,0,0,0,0,0,0,0,0,0,
-    1,2,2,1,0,0,0,0,0,0,0,0,
-    1,2,2,2,1,0,0,0,0,0,0,0,
-    1,2,2,2,2,1,0,0,0,0,0,0,
-    1,2,2,2,2,2,1,0,0,0,0,0,
-    1,2,2,2,2,2,2,1,0,0,0,0,
-    1,2,2,2,2,2,2,2,1,0,0,0,
-    1,2,2,2,2,2,2,2,2,1,0,0,
-    1,2,2,2,2,2,2,2,2,2,1,0,
-    1,2,2,2,2,2,2,2,2,2,2,1,
-    1,2,2,2,2,2,1,1,1,1,1,1,
-    1,2,2,2,2,2,1,0,0,0,0,0,
-    1,2,2,1,2,2,1,0,0,0,0,0,
-    1,2,1,0,1,2,2,1,0,0,0,0,
-    1,1,0,0,1,2,2,1,0,0,0,0,
-    1,0,0,0,0,1,2,2,1,0,0,0,
-    0,0,0,0,0,1,1,1,0,0,0,0,
+    2,0,0,0,0,0,0,0,0,0,0,0,
+    2,2,0,0,0,0,0,0,0,0,0,0,
+    2,1,2,0,0,0,0,0,0,0,0,0,
+    2,1,1,2,0,0,0,0,0,0,0,0,
+    2,1,1,1,2,0,0,0,0,0,0,0,
+    2,1,1,1,1,2,0,0,0,0,0,0,
+    2,1,1,1,1,1,2,0,0,0,0,0,
+    2,1,1,1,1,1,1,2,0,0,0,0,
+    2,1,1,1,1,1,1,1,2,0,0,0,
+    2,1,1,1,1,1,1,1,1,2,0,0,
+    2,1,1,1,1,1,1,1,1,1,2,0,
+    2,1,1,1,1,1,2,2,2,2,2,2,
+    2,1,1,2,1,1,2,0,0,0,0,0,
+    2,1,2,0,2,1,1,2,0,0,0,0,
+    2,2,0,0,2,1,1,2,0,0,0,0,
+    2,0,0,0,0,2,1,1,2,0,0,0,
+    0,0,0,0,0,2,1,1,2,0,0,0,
+    0,0,0,0,0,2,1,1,2,0,0,0,
+    0,0,0,0,0,0,2,2,2,0,0,0,
 ];
 
 /// Mouse state — position, buttons, and overlay tracking.
