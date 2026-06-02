@@ -368,6 +368,15 @@ pub const GUEST_VCPUS: u8 = 2;
 /// false + re-release (clean rollback, no reinstall). Requires `GUEST_SMP`.
 pub const GUEST_SMP_AP: bool = true;
 
+/// Whether guest-SMP AP bring-up is enabled AND supported on this host. The
+/// AP-vCPU open path (`svm::vm_open_ap`) + SIPI/LAPIC routing are SVM-only, so
+/// on Intel/VMX the guest must stay single-vCPU: an enumerated-but-never-
+/// onlined AP hangs Linux's cpuhp bring-up. Gate the guest's `maxcpus` (and the
+/// AP spawn) on this so Intel boots single-vCPU until a VMX AP path exists.
+pub fn smp_ap_active() -> bool {
+    GUEST_SMP_AP && matches!(current_vendor(), Vendor::Amd)
+}
+
 // ── AP (secondary vCPU) spawn orchestration (guest SMP, Stage 3b-2) ─────
 //
 // The guest's INIT-SIPI is decoded on the BSP vCPU fiber (a worker core),
