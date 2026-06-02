@@ -334,6 +334,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     if let Some(v) = config::get("mouse_speed") {
         if let Ok(n) = v.trim().parse::<i32>() { shade::cursor::set_speed(n); }
     }
+    if let Some(v) = config::get("mouse_size") {
+        if let Ok(n) = v.trim().parse::<i32>() { shade::cursor::set_size(n); }
+    }
 
     // Inter Variable UI font — read from npkFS (seeded by installer), BLAKE3
     // verified, parsed via fontdue. Login screen + terminals use Spleen
