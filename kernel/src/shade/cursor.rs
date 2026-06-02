@@ -61,9 +61,10 @@ pub fn save_under_and_bake(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
             // SAFETY: bounds-checked offset into a kernel-owned shadow buffer.
             unsafe {
                 let p = buf.add(off) as *mut u32;
-                su[idx] = *p;
-                let bmp = cursor_px(col, row);
-                if bmp != 0 { *p = if bmp == 1 { 0x00FF_FFFF } else { 0x0000_0000 }; }
+                let bg = *p;
+                su[idx] = bg;
+                let (color, a) = cursor_sample_aa(col, row, ew, eh);
+                if a > 0 { *p = blend(bg, color, a); }
             }
         }
     }
@@ -137,15 +138,47 @@ fn eff_dims() -> (u32, u32) {
     ((CURSOR_W * s / 100).max(1), (CURSOR_H * s / 100).max(1))
 }
 
-/// Sample the base bitmap at a scaled destination pixel (nearest-neighbour).
-/// Returns 0 (transparent) outside the effective cursor.
-fn cursor_px(col: u32, row: u32) -> u8 {
-    let s = SIZE.load(Ordering::Relaxed) as u32;
-    let (ew, eh) = ((CURSOR_W * s / 100).max(1), (CURSOR_H * s / 100).max(1));
-    if col >= ew || row >= eh { return 0; }
-    let sc = (col * 100 / s).min(CURSOR_W - 1);
-    let sr = (row * 100 / s).min(CURSOR_H - 1);
-    CURSOR_BITMAP[(sr * CURSOR_W + sc) as usize]
+/// Alpha-blend `fg` over `bg` at coverage `a` (0..=255).
+fn blend(bg: u32, fg: u32, a: u32) -> u32 {
+    let na = 255 - a;
+    let r = (((bg >> 16) & 0xff) * na + ((fg >> 16) & 0xff) * a) / 255;
+    let g = (((bg >> 8) & 0xff) * na + ((fg >> 8) & 0xff) * a) / 255;
+    let b = ((bg & 0xff) * na + (fg & 0xff) * a) / 255;
+    (r << 16) | (g << 8) | b
+}
+
+/// Anti-aliased cursor sample at output pixel (col,row) for effective dims
+/// (ew,eh). Bilinearly interpolates the base bitmap's outline (light) and
+/// interior (dark) coverage → (color, alpha 0..=255). alpha 0 = transparent.
+/// The bilinear ramp gives ~1px soft edges at any scale instead of hard blocks.
+fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
+    let fx = (col as f32 + 0.5) * CURSOR_W as f32 / ew as f32 - 0.5;
+    let fy = (row as f32 + 0.5) * CURSOR_H as f32 / eh as f32 - 0.5;
+    let x0 = if fx >= 0.0 { fx as i32 } else { fx as i32 - 1 };
+    let y0 = if fy >= 0.0 { fy as i32 } else { fy as i32 - 1 };
+    let tx = fx - x0 as f32;
+    let ty = fy - y0 as f32;
+    let at = |x: i32, y: i32| -> (f32, f32) {
+        if x < 0 || y < 0 || x >= CURSOR_W as i32 || y >= CURSOR_H as i32 { return (0.0, 0.0); }
+        match CURSOR_BITMAP[(y as usize) * CURSOR_W as usize + x as usize] {
+            1 => (1.0, 0.0),   // outline (light)
+            2 => (0.0, 1.0),   // interior (dark)
+            _ => (0.0, 0.0),
+        }
+    };
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let (o00, i00) = at(x0, y0);
+    let (o10, i10) = at(x0 + 1, y0);
+    let (o01, i01) = at(x0, y0 + 1);
+    let (o11, i11) = at(x0 + 1, y0 + 1);
+    let o = lerp(lerp(o00, o10, tx), lerp(o01, o11, tx), ty);
+    let i = lerp(lerp(i00, i10, tx), lerp(i01, i11, tx), ty);
+    let a = (o + i).min(1.0);
+    if a <= 0.0 { return (0, 0); }
+    // Outline ≈ white (240), interior ≈ near-black (30), mixed by coverage.
+    let lum = (o * 240.0 + i * 30.0) / (o + i).max(0.0001);
+    let c = (lum as u32) & 0xff;
+    ((c << 16) | (c << 8) | c, ((a * 255.0) as u32).min(255))
 }
 
 /// Update mouse position atomically. NO LOCK needed.
@@ -392,7 +425,7 @@ pub fn redraw_overlay_lockfree() {
 
     // Draw cursor at current atomic position
     let (cx, cy) = atomic_pos();
-    draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
+    draw_cursor_on_mmio(mmio, shadow, pitch, sw, sh, cx, cy);
 
     DRAWN_LF_X.store(cx, Ordering::Relaxed);
     DRAWN_LF_Y.store(cy, Ordering::Relaxed);
@@ -418,7 +451,7 @@ pub fn redraw_overlay_lockfree_inner(fb: &mut crate::framebuffer::FbConsole) {
 
     // Draw cursor at current atomic position
     let (cx, cy) = atomic_pos();
-    draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
+    draw_cursor_on_mmio(mmio, shadow, pitch, sw, sh, cx, cy);
 
     DRAWN_LF_X.store(cx, Ordering::Relaxed);
     DRAWN_LF_Y.store(cy, Ordering::Relaxed);
@@ -436,7 +469,8 @@ pub fn draw_cursor_irq() {
     let sw = SCREEN_W.load(Ordering::Relaxed);
     let sh = SCREEN_H.load(Ordering::Relaxed);
     let (cx, cy) = atomic_pos();
-    draw_cursor_on_mmio(addr as *mut u8, pitch, sw, sh, cx, cy);
+    let shadow = crate::framebuffer::cached_shadow_front();
+    draw_cursor_on_mmio(addr as *mut u8, shadow, pitch, sw, sh, cx, cy);
 }
 
 /// Draw cursor after scene blit. Erases old position ONLY if cursor moved
@@ -461,7 +495,7 @@ pub fn draw_cursor_after_blit(fb: &mut crate::framebuffer::FbConsole) {
         }
     }
 
-    draw_cursor_on_mmio(mmio, pitch, sw, sh, cx, cy);
+    draw_cursor_on_mmio(mmio, shadow, pitch, sw, sh, cx, cy);
 
     DRAWN_LF_X.store(cx, Ordering::Relaxed);
     DRAWN_LF_Y.store(cy, Ordering::Relaxed);
@@ -479,7 +513,7 @@ pub fn cache_fb_info(addr: u64, pitch: u32) {
 }
 
 /// Draw cursor bitmap directly to MMIO framebuffer at given position.
-fn draw_cursor_on_mmio(mmio: *mut u8, pitch: usize, sw: i32, sh: i32, x: i32, y: i32) {
+fn draw_cursor_on_mmio(mmio: *mut u8, bg_buf: *const u8, pitch: usize, sw: i32, sh: i32, x: i32, y: i32) {
     let (ew, eh) = eff_dims();
     for row in 0..eh {
         let py = y + row as i32;
@@ -487,12 +521,17 @@ fn draw_cursor_on_mmio(mmio: *mut u8, pitch: usize, sw: i32, sh: i32, x: i32, y:
         for col in 0..ew {
             let px = x + col as i32;
             if px < 0 || px >= sw { continue; }
-            let bmp = cursor_px(col, row);
-            if bmp == 0 { continue; }
+            let (color, a) = cursor_sample_aa(col, row, ew, eh);
+            if a == 0 { continue; }
             let off = py as usize * pitch + px as usize * 4;
-            let color: u32 = if bmp == 1 { 0x00FFFFFF } else { 0x00000000 };
+            // Blend over the clean shadow pixel if provided, else read back the
+            // current MMIO pixel (slow path; only the IRQ fallback with no shadow).
+            let bg = unsafe {
+                if bg_buf.is_null() { *(mmio.add(off) as *const u32) }
+                else { *(bg_buf.add(off) as *const u32) }
+            };
             // SAFETY: writing to MMIO framebuffer within bounds
-            unsafe { core::ptr::write_volatile(mmio.add(off) as *mut u32, color); }
+            unsafe { core::ptr::write_volatile(mmio.add(off) as *mut u32, blend(bg, color, a)); }
         }
     }
     DRAWN_LF_W.store(ew, Ordering::Relaxed);
@@ -528,13 +567,12 @@ pub fn draw_cursor_on_shadow(shadow: *mut u8, info: &crate::framebuffer::FbInfo)
         for col in 0..ew {
             let px = cx + col as i32;
             if px < 0 || px >= sw { continue; }
-            let bmp = cursor_px(col, row);
-            if bmp == 0 { continue; }
+            let (color, a) = cursor_sample_aa(col, row, ew, eh);
+            if a == 0 { continue; }
             let off = py as usize * pitch + px as usize * 4;
-            let color: u32 = if bmp == 1 { 0x00FFFFFF } else { 0x00000000 };
-            // SAFETY: writing to back-shadow buffer within bounds. Shadow
-            // is a kernel-owned allocation, not MMIO — plain store fine.
-            unsafe { *(shadow.add(off) as *mut u32) = color; }
+            // SAFETY: alpha-blend over the existing back-shadow pixel. Shadow
+            // is a kernel-owned allocation, not MMIO — plain load/store fine.
+            unsafe { let p = shadow.add(off) as *mut u32; *p = blend(*p, color, a); }
         }
     }
 }
