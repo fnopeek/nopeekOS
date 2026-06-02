@@ -306,16 +306,20 @@ pub fn init_dedicated_vm_core(worker_count: usize) {
     // v0.172.62's hand-rolled inline asm which hung QEMU/AMD on the
     // first OTA-deploy. `detect_vendor` is stateless — safe to call
     // before `microvm::cpu::init` has populated the static VENDOR.
-    let is_amd = matches!(
-        crate::microvm::cpu::detect_vendor(),
-        crate::microvm::cpu::Vendor::Amd,
-    );
+    let vendor = crate::microvm::cpu::detect_vendor();
+    let is_amd = matches!(vendor, crate::microvm::cpu::Vendor::Amd);
+    let is_intel = matches!(vendor, crate::microvm::cpu::Vendor::Intel);
 
     // vCPU-as-fiber (unified pool): when enabled, the guest runs as a
     // normal pool fiber on a DYNAMIC core — so we do NOT statically carve
     // one out here (that wasted a core whenever no VM ran, and stranded the
     // app fibers already on it). See microvm::cpu / SCHEDULER_FIBERS.md.
-    let fiber_mode = crate::microvm::cpu::VCPU_AS_FIBER && is_amd && worker_count >= 1;
+    // Intel parity (#3): also enable fiber mode on VMX (flag-gated), so the
+    // browser leaves the cooperative Core-0 path. The per-core TSS the
+    // worker needs for VMX host-state is installed lazily in vmx::vm_open.
+    let fiber_mode = crate::microvm::cpu::VCPU_AS_FIBER
+        && worker_count >= 1
+        && (is_amd || (is_intel && crate::microvm::cpu::VMX_VCPU_AS_FIBER));
     crate::microvm::cpu::set_vm_fiber_mode(fiber_mode);
     if fiber_mode {
         crate::kprintln!(

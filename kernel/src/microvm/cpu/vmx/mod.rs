@@ -126,6 +126,13 @@ pub fn vm_open(
     initramfs: Option<&[u8]>,
     inject: &[u8],
 ) -> Result<VmContext, &'static str> {
+    // Fiber/dedicated mode runs this on a WORKER core, not Core 0. VMX
+    // rejects HOST_TR_SELECTOR=0 at VM-entry; worker cores keep the boot
+    // GDT with TR=0 (only the BSP `ltr`'d at boot). Install a private TSS
+    // on this core first so `write_host_state` captures a valid HOST_TR.
+    // No-op on the BSP (core 0) and when already installed. AMD never
+    // reaches here (it opens via svm::vm_open).
+    crate::tss::ensure_core(crate::smp::per_core::current_core_id());
     match *PROBE.lock() {
         ProbeState::Available(_) => VmContext::open(bzimage, cmdline, initramfs, inject),
         ProbeState::Unavailable(reason) => Err(reason),
