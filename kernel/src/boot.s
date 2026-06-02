@@ -38,6 +38,47 @@ _start:
     mov %rcx, %r12
     mov %rdx, %r13
 
+    /* --- PIE self-relocation -------------------------------------------
+     * We are a position-independent image (relocation-model=pic + -pie).
+     * The firmware may load us at ANY address (DYNAMIC_BASE set in the
+     * PE). Apply every R_X86_64_RELATIVE entry in .rela.dyn to the actual
+     * load address NOW, before any code dereferences relocated data
+     * (statics holding &str / fn-ptrs, the .got). Without this those
+     * pointers hold link-time addresses → triple-fault before any output
+     * (the old static-model bootloop on firmware that didn't keep
+     * ImageBase free). All reloc targets live in the writable
+     * .data/.dynamic/.got window, so this is safe even if firmware maps
+     * .text/.rodata read-only.
+     *
+     * delta = runtime(__image_base) - link-time base. `lea sym(%rip)` is
+     * PC-relative and relocation-invariant → yields the true runtime
+     * address; the 0x10000000 literal is the link-time base (MUST match
+     * __image_base in linker.ld and objcopy --image-base in build.sh).
+     * Each Elf64_Rela is [r_offset, r_info, r_addend] = 24 bytes; for
+     * type R_X86_64_RELATIVE(8): *(r_offset+delta) = r_addend+delta.
+     * Clobbers rax/rcx/rdx/rsi/rdi/r8/r9 — args are saved in r12/r13. */
+    lea __image_base(%rip), %r8
+    movabs $0x10000000, %r9
+    sub %r9, %r8                    /* r8 = load delta */
+    lea __rela_start(%rip), %rsi
+    lea __rela_end(%rip), %rdi
+1:
+    cmp %rdi, %rsi
+    jae 2f
+    movl 8(%rsi), %eax             /* r_info low 32 bits = reloc type */
+    cmp $8, %eax                    /* R_X86_64_RELATIVE? */
+    jne 3f                          /* other types: skip (build asserts none) */
+    mov 0(%rsi), %rcx              /* r_offset (link VMA) */
+    mov 16(%rsi), %rdx             /* r_addend (link VMA) */
+    add %r8, %rcx
+    add %r8, %rdx
+    mov %rdx, (%rcx)              /* *(r_offset+delta) = r_addend+delta */
+3:
+    add $24, %rsi
+    jmp 1b
+2:
+    /* relocation complete — relocated data is now safe to touch */
+
     /* Enable AVX state save (CR4.OSXSAVE = bit 18). UEFI's default
      * CR4 has SSE bits on but not OSXSAVE — and Rust codegen with
      * +avx2 (set in .cargo/config.toml) emits VEX-encoded AVX
@@ -56,10 +97,9 @@ _start:
     mov $7, %eax
     xsetbv
 
-    /* Zero BSS. lea (%rip)-relative because UEFI may load the image
-     * at any address — but we set RELOCS_STRIPPED in the PE, so UEFI
-     * must honor ImageBase exactly; absolute symbol addresses also
-     * work. RIP-relative is safer regardless. */
+    /* Zero BSS. lea (%rip)-relative — position-independent, works at
+     * whatever address the firmware loaded us at (see self-relocation
+     * above). .bss is NOBITS so it carries no relocations. */
     lea __bss_start(%rip), %rdi
     lea __bss_end(%rip), %rcx
     sub %rdi, %rcx
@@ -106,3 +146,31 @@ gdt64_code:
 gdt64_data:
     .quad 0x00CF93000000FFFF      /* 32-bit data, accessed=1 */
 gdt64_end:
+
+/* ============================================================
+ * Dummy PE base-relocation block.
+ *
+ * We self-relocate in _start, so we don't need the firmware to apply
+ * relocations — but some UEFI loaders (observed: OVMF) REFUSE to load
+ * an image whose Base Relocation data directory is empty when they
+ * can't honour ImageBase exactly. A single no-op block makes the
+ * directory non-empty so the loader happily relocates us; the lone
+ * IMAGE_REL_BASED_ABSOLUTE (type 0) entry applies nothing, leaving the
+ * real fixups to _start. tools/pe-fixup.py points DataDirectory[5] at
+ * this section. Format (PE spec §6.6): per 4 KiB page a block of
+ * u32 PageRVA, u32 BlockSize, then u16 entries (type<<12 | offset).
+ *
+ * Named .nreloc, not .reloc: lld's ELF linker reserves the name
+ * `.reloc` and silently drops it. objcopy carries .nreloc into the PE
+ * and pe-fixup.py points DataDirectory[5] at it — the loader keys off
+ * the data directory, not the section name.
+ * ============================================================ */
+.section .nreloc, "a"
+.global __reloc_dummy
+.global __reloc_dummy_end
+__reloc_dummy:
+    .long 0                       /* Page RVA */
+    .long 12                      /* BlockSize = 8 + 2 entries * 2 bytes */
+    .word 0                       /* IMAGE_REL_BASED_ABSOLUTE (no-op) */
+    .word 0                       /* second no-op → pad to 4-byte align */
+__reloc_dummy_end:

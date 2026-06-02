@@ -19,7 +19,8 @@
 #   installer            Two-pass installer build (bundled assets)
 #   qemu-installer       Installer + run (wipes disk, fresh install)
 #   qemu-installer-gui   Same with framebuffer
-#   usb /dev/sdX         Build installer + flash USB stick
+#   usb /dev/sdX         Build self-contained installer + flash USB
+#                        (bundles browser + all modules → offline-ready)
 #   release              Sign kernel + modules + assets (ECDSA P-384)
 #
 # Without argument: build + qemu
@@ -87,6 +88,26 @@ build_microvm_initramfs() {
     ok "microvm-initramfs.cpio.gz ($(stat -c%s "$INIT_OUT") bytes)"
 }
 
+# PIE relocation guard. boot.s's self-relocation loop only applies
+# R_X86_64_RELATIVE entries; a GOT/PLT/absolute dynamic reloc would be
+# silently skipped → wrong pointer → boot crash on relocating firmware.
+# Fail the build loudly here instead of debugging a black screen later.
+assert_relative_only() {
+    local elf="$1"
+    local bad
+    bad=$(readelf -rW "$elf" 2>/dev/null \
+        | awk '$3 ~ /^R_X86_64/ && $3 != "R_X86_64_RELATIVE" {print $3}' \
+        | sort -u)
+    if [ -n "$bad" ]; then
+        err "PIE reloc guard: non-RELATIVE dynamic relocations in $elf:"
+        echo "$bad" >&2
+        err "boot.s only applies R_X86_64_RELATIVE. Avoid the offending"
+        err "construct (e.g. a static fn-ptr needing a GOT slot) or extend"
+        err "the relocation loop in kernel/src/boot.s."
+        exit 1
+    fi
+}
+
 build() {
     log "Building kernel..."
 
@@ -111,6 +132,7 @@ build() {
     # runs it directly — no GRUB, no multiboot. See tools/pe-fixup.py
     # for why objcopy alone produces a PE that OVMF rejects.
     log "Converting to UEFI PE+ binary..."
+    assert_relative_only "$KERNEL_BIN"
     objcopy -O pei-x86-64 --subsystem=efi-app --image-base=0x10000000 \
         "$KERNEL_BIN" "$KERNEL_EFI"
     python3 "$PROJECT_DIR/tools/pe-fixup.py" "$KERNEL_EFI" >/dev/null
@@ -172,6 +194,7 @@ build_installer() {
     # Pass 1: convert ELF to UEFI PE and stash for Pass 2's
     # include_bytes!. The installer kernel will plant this exact
     # binary at /EFI/BOOT/BOOTX64.EFI on the target ESP.
+    assert_relative_only "$KERNEL_BIN"
     objcopy -O pei-x86-64 --subsystem=efi-app --image-base=0x10000000 \
         "$KERNEL_BIN" "$INSTALL_DATA/kernel.efi"
     python3 "$PROJECT_DIR/tools/pe-fixup.py" "$INSTALL_DATA/kernel.efi" >/dev/null
@@ -309,6 +332,7 @@ build_installer() {
     # The installer kernel itself is also UEFI-bootable — that's how
     # it runs from the USB stick / installer-disk image.
     log "Pass 2: converting installer to UEFI PE+..."
+    assert_relative_only "$KERNEL_BIN"
     objcopy -O pei-x86-64 --subsystem=efi-app --image-base=0x10000000 \
         "$KERNEL_BIN" "$KERNEL_EFI"
     python3 "$PROJECT_DIR/tools/pe-fixup.py" "$KERNEL_EFI" >/dev/null
@@ -621,12 +645,12 @@ Installer / release:
                        LibreWolf userspace sqfs (~261 MB) so the
                        fresh install has the browser ready on first
                        boot without any OTA round-trip
-  usb /dev/sdX         Build installer + flash USB stick
-  usb-full /dev/sdX    Same as usb but bundles the LibreWolf userspace
-                       sqfs (~261 MB) → USB grows to ~290 MB but the
-                       browser is ready on first boot, no network
-                       needed post-install. OTA still works for later
-                       browser updates via manifest.large url= flow.
+  usb /dev/sdX         Build fully self-contained installer + flash USB.
+                       Bundles EVERYTHING (microVM Linux+initramfs, all
+                       WASM modules, fonts/icons/wallpapers AND the
+                       LibreWolf browser sqfs) → USB ~290 MB, first boot
+                       works fully offline, no OTA needed post-install.
+  usb-full /dev/sdX    Alias of `usb` (kept for back-compat).
   release              Sign kernel + modules + assets (ECDSA P-384)
   release-large <tag>  Upload release/assets/large/* to GitHub Releases
                        under <tag>, sign with update.key, write
@@ -710,19 +734,17 @@ case "${1:-}" in
         check_deps
         build_installer
         ;;
-    usb)
-        check_deps
-        build_installer
-        write_usb "${2:-}"
-        ;;
-    usb-full)
-        # Same as usb but bakes the LibreWolf userspace sqfs (~261 MB)
-        # into the installer kernel. USB stick swells to ~290 MB but
-        # the freshly-installed system has the browser ready on first
-        # boot without any OTA round-trip. Use for offline / fresh-
-        # install scenarios. The OTA `update` path keeps working —
-        # whenever a newer bundle ships, it'll replace this one via
-        # the existing manifest.large `url=` flow.
+    usb|usb-full)
+        # Fully self-contained install stick: bundles EVERYTHING the
+        # installed system needs to run offline — microVM Linux kernel +
+        # initramfs, all first-party WASM modules, fonts/icons/wallpapers
+        # (always in BUNDLED_ASSETS) AND the LibreWolf userspace sqfs
+        # (~250 MB, via BUNDLE_USERSPACE). USB ≈ 290 MB but first boot
+        # has the browser ready with NO internet / OTA round-trip needed.
+        # If the sqfs source is absent, build_installer warns and falls
+        # back to OTA for that one asset (everything else still bundles).
+        # `usb-full` is kept as an explicit alias of `usb`.
+        # The OTA `update` path keeps working for later upgrades.
         check_deps
         BUNDLE_USERSPACE=1 build_installer
         write_usb "${2:-}"
