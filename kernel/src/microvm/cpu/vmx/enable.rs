@@ -549,6 +549,18 @@ pub struct VmContext {
     /// RIP wasn't advanced (re-injecting would double-deliver; same
     /// type-gate as SVM v0.172.38).
     reinject: u64,
+    /// Device IRQ lines raised while the guest was NOT interruptible
+    /// (IF=0 / STI / MOV-SS shadow — e.g. the guest kicked a virtio
+    /// queue from inside an ISR or `spin_lock_irqsave`). A type-0
+    /// external interrupt may only be injected when interruptible
+    /// (SDM §26.3.1.5 guest-state check), so injecting one into an
+    /// IF=0 guest fails VM-entry with reason 33 on bare-metal Intel.
+    /// We latch the line here (bit = IRQ line) and the run loop drains
+    /// it into VM_ENTRY_INTR_INFO once the guest is interruptible —
+    /// the VMX mirror of SVM's `pending_irqs` + `deliver_irq` (the
+    /// guest-SMP 9p-mount livelock fix, v0.191.13). Nothing is lost: a
+    /// latched line is delivered on the next ~100 Hz exit once IF=1.
+    pending_irqs: u16,
     /// Host/guest FPU (XSAVE) save areas — VMRESUME preserves neither.
     /// See `cpu::FpuArea`. guest_fpu starts zeroed = FPU init state.
     host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
@@ -616,6 +628,7 @@ impl VmContext {
                 last_timer_tick: 0,
                 last_cfg_tick: 0,
                 reinject: 0,
+                pending_irqs: 0,
                 host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
             })
@@ -1266,6 +1279,20 @@ impl VmContext {
                 // (µs–ms) costs at most a tick of jitter — far under any
                 // RCU-stall threshold.
                 let can_irq = vmcs::guest_interruptible();
+                // Deferred device IRQ (a virtio queue-kick the guest
+                // issued while IF=0, latched by `deliver_irq_vmx`) is now
+                // deliverable — inject the lowest pending line. Highest
+                // priority among the device injects; one per exit, and
+                // EXIT_INTR recurs immediately so it drains fast. Mirrors
+                // the SVM `pending_irqs` drain.
+                if can_irq && self.pending_irqs != 0 {
+                    let line = self.pending_irqs.trailing_zeros() as u8;
+                    self.pending_irqs &= !(1u16 << line);
+                    let vector = self.pic.vector_for_irq(line);
+                    let _ = vmcs::inject_external_irq(vector);
+                    self.consecutive_idle = 0;
+                    continue;
+                }
                 if can_irq && self.pic.irq_unmasked(9) {
                     let wid = crate::microvm::vm_window();
                     let now_d4 = crate::interrupts::ticks();
@@ -1554,33 +1581,33 @@ impl VmContext {
                 // BAR0 range we emulate; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
                 if self.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk, &self.pic, gpa, &self.guest_mem) {
+                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk, &self.pic, &mut self.pending_irqs, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_ept_net(&mut self.regs, &mut self.pci.virtio_net, &self.pic, gpa, &self.guest_mem) {
+                    if handle_mmio_ept_net(&mut self.regs, &mut self.pci.virtio_net, &self.pic, &mut self.pending_irqs, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_ept_gpu(&mut self.regs, &mut self.pci.virtio_gpu, &self.pic, gpa, &self.guest_mem) {
+                    if handle_mmio_ept_gpu(&mut self.regs, &mut self.pci.virtio_gpu, &self.pic, &mut self.pending_irqs, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_ept_input(&mut self.regs, &mut self.pci.virtio_input, &self.pic, gpa, &self.guest_mem) {
+                    if handle_mmio_ept_input(&mut self.regs, &mut self.pci.virtio_input, &self.pic, &mut self.pending_irqs, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_9p.bar0_in_range(gpa) {
-                    if handle_mmio_ept_p9(&mut self.regs, &mut self.pci.virtio_9p, &self.pic, gpa, &self.guest_mem) {
+                    if handle_mmio_ept_p9(&mut self.regs, &mut self.pci.virtio_9p, &self.pic, &mut self.pending_irqs, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if self.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, gpa, &self.guest_mem) {
+                    if handle_mmio_ept_blk(&mut self.regs, &mut self.pci.virtio_blk_sqfs, &self.pic, &mut self.pending_irqs, gpa, &self.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1869,10 +1896,30 @@ fn handle_linux_io(
 ///
 /// Returns `true` if the fault was handled, `false` otherwise (page
 /// walk failed, opcode unsupported).
+/// Deliver a device IRQ raised by an MMIO virtqueue-kick: inject it now
+/// if the guest is interruptible, else latch the line in `pending` for
+/// the run loop to drain once IF=1. The MMIO handlers run on EPT-
+/// violation exits while the guest may sit IF=0 (it kicked the queue
+/// from inside an ISR / `spin_lock_irqsave`); injecting a type-0
+/// external interrupt then fails VM-entry with reason 33 on bare-metal
+/// Intel (SDM §26.3.1.5). Mirrors SVM `deliver_irq`/`pending_irqs`.
+fn deliver_irq_vmx(
+    pending: &mut u16,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    line: u8,
+) {
+    if vmcs::guest_interruptible() {
+        let _ = vmcs::inject_external_irq(pic.vector_for_irq(line));
+    } else {
+        *pending |= 1u16 << line;
+    }
+}
+
 fn handle_mmio_ept_blk(
     regs: &mut vmcs::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -1927,8 +1974,7 @@ fn handle_mmio_ept_blk(
     if let Some(qidx) = blk.take_pending_kick() {
         let advanced = blk.service_queues(qidx, mem);
         if advanced {
-            let vector = pic.vector_for_irq(blk.irq_line());
-            let _ = vmcs::inject_external_irq(vector);
+            deliver_irq_vmx(pending, pic, blk.irq_line());
         }
     }
 
@@ -1990,6 +2036,7 @@ fn handle_mmio_ept_net(
     regs: &mut vmcs::GuestRegs,
     net: &mut crate::microvm::devices::virtio_net_pci::VirtioNet,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2027,8 +2074,7 @@ fn handle_mmio_ept_net(
         let advanced = net.service_queues(qidx, mem);
         if advanced {
             // virtio-net IRQ line = 10 (per pci config 0x3C).
-            let vector = pic.vector_for_irq(10);
-            let _ = vmcs::inject_external_irq(vector);
+            deliver_irq_vmx(pending, pic, 10);
         }
     }
 
@@ -2043,6 +2089,7 @@ fn handle_mmio_ept_gpu(
     regs: &mut vmcs::GuestRegs,
     gpu: &mut crate::microvm::devices::virtio_gpu_pci::VirtioGpu,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2080,8 +2127,7 @@ fn handle_mmio_ept_gpu(
         let advanced = gpu.service_queues(qidx, mem);
         if advanced {
             // virtio-gpu IRQ line = 9.
-            let vector = pic.vector_for_irq(9);
-            let _ = vmcs::inject_external_irq(vector);
+            deliver_irq_vmx(pending, pic, 9);
         }
     }
 
@@ -2095,6 +2141,7 @@ fn handle_mmio_ept_input(
     regs: &mut vmcs::GuestRegs,
     input: &mut crate::microvm::devices::virtio_input_pci::VirtioInput,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2132,8 +2179,7 @@ fn handle_mmio_ept_input(
         let advanced = input.service_queues(qidx, mem);
         if advanced {
             // virtio-input IRQ line = 12.
-            let vector = pic.vector_for_irq(12);
-            let _ = vmcs::inject_external_irq(vector);
+            deliver_irq_vmx(pending, pic, 12);
         }
     }
 
@@ -2147,6 +2193,7 @@ fn handle_mmio_ept_p9(
     regs: &mut vmcs::GuestRegs,
     p9: &mut crate::microvm::devices::virtio_9p_pci::Virtio9p,
     pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2183,8 +2230,7 @@ fn handle_mmio_ept_p9(
     if let Some(qidx) = p9.take_pending_kick() {
         let advanced = p9.service_queues(qidx, mem);
         if advanced {
-            let vector = pic.vector_for_irq(p9.irq_line());
-            let _ = vmcs::inject_external_irq(vector);
+            deliver_irq_vmx(pending, pic, p9.irq_line());
         }
     }
 
