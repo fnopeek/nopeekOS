@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Post-process objcopy's pei-x86-64 output for OVMF/UEFI loadability.
 
-objcopy ELF→PE+ produces a binary that OVMF rejects with "Unsupported"
-because:
-  - Characteristics has RELOCS_STRIPPED set but no .reloc section is
-    present, AND the loader can't honor ImageBase exactly on every
-    firmware → mark as relocatable-without-relocs by clearing the
-    stripped flag (we don't have relocs but the firmware can still
-    load PIC-ish code at ImageBase if there's room).
+The kernel is a position-independent image (PIE; see .cargo/config.toml).
+boot.s's _start applies the ELF's R_X86_64_RELATIVE relocations to the
+actual load address itself, so the firmware may load us anywhere. We just
+need to tell the firmware that's allowed:
+  - Clear RELOCS_STRIPPED — with it set, a UEFI loader that can't place
+    us at ImageBase exactly REFUSES to load (the old static-model bootloop
+    on firmware whose memory map didn't keep 0x10000000 free). Cleared,
+    the loader happily relocates us to a free base; our self-relocation
+    loop then fixes the pointers. We carry no PE .reloc section — EDK2/OVMF
+    treats an empty Base Relocation directory as "no relocs to apply" and
+    loads at the new base, which is exactly what we want.
+  - Set DYNAMIC_BASE — hints the loader it may freely relocate us.
   - LARGE_ADDRESS_AWARE missing — most loaders require it.
   - DllCharacteristics lacks NX_COMPAT — modern OVMF demands it.
   - Subsystem version 0 — set to 2.0 to match what real .efi files use.
-
-This is a thin wrapper; for the proper fix we'd link with lld in PE+
-mode and emit real relocations.
 """
 
 import struct
@@ -39,15 +41,13 @@ opt_off = coff_off + 20
 # COFF header: Characteristics at offset 18 (2 bytes LE)
 chars_off = coff_off + 18
 chars = struct.unpack_from("<H", data, chars_off)[0]
-# 0x0001 = RELOCS_STRIPPED → SET. Static relocation model bakes
-#         absolute addresses in `mov $imm64, %reg` for string-slice
-#         pointers etc. — if the loader relocates the image, those
-#         pointers point at the wrong memory. With RELOCS_STRIPPED
-#         set, UEFI loader MUST honor ImageBase exactly or refuse
-#         to load. We pick an ImageBase that's reliably free.
+# 0x0001 = RELOCS_STRIPPED → CLEAR. We are position-independent and
+#         self-relocate in boot.s, so the loader is free to place us at
+#         any base. Leaving this set makes firmware refuse to load when
+#         it can't honor ImageBase exactly (the cross-hardware bootloop).
 # 0x0002 = EXECUTABLE_IMAGE → keep
 # 0x0020 = LARGE_ADDRESS_AWARE → set
-new_chars = chars | 0x0001 | 0x0020
+new_chars = (chars & ~0x0001) | 0x0020
 struct.pack_into("<H", data, chars_off, new_chars)
 
 # Optional header magic (offset 0 in opt header)
@@ -93,10 +93,11 @@ subsys = struct.unpack_from("<H", data, opt_off + 68)[0]
 if subsys != 0x0A:
     print(f"warning: subsystem {subsys:#x} != 0xA (EFI APPLICATION)", file=sys.stderr)
 
-# DllCharacteristics: set NX_COMPAT (0x0100). HIGH_ENTROPY_VA / DYNAMIC_BASE
-# would require relocations, so skip those — we rely on UEFI honoring ImageBase.
+# DllCharacteristics: NX_COMPAT (0x0100) + DYNAMIC_BASE (0x0040). We are
+# position-independent and self-relocate, so DYNAMIC_BASE is honest: the
+# loader may place us at any base.
 dllchar = struct.unpack_from("<H", data, opt_off + 70)[0]
-dllchar |= 0x0100  # NX_COMPAT
+dllchar |= 0x0100 | 0x0040  # NX_COMPAT | DYNAMIC_BASE
 struct.pack_into("<H", data, opt_off + 70, dllchar)
 
 # Stack reserve / commit — modest defaults so the loader doesn't
@@ -104,8 +105,46 @@ struct.pack_into("<H", data, opt_off + 70, dllchar)
 struct.pack_into("<QQ", data, opt_off + 72, 0x100000, 0x1000)   # stack
 struct.pack_into("<QQ", data, opt_off + 88, 0x100000, 0x1000)   # heap
 
+# Point DataDirectory[5] (Base Relocation Table) at our dummy .reloc
+# section (emitted by boot.s). The block applies nothing — it just makes
+# the directory non-empty so loaders that demand it for a relocatable
+# image are satisfied; _start does the real relocation. For PE32+ the
+# data directories start at opt_off + 112; index 5 → +112 + 5*8.
+num_sections = struct.unpack_from("<H", data, coff_off + 2)[0]
+opt_size = struct.unpack_from("<H", data, coff_off + 16)[0]
+sec_table = opt_off + opt_size
+# COFF string table (for "/N" long section names) follows the symbol
+# table: ptr at coff+8, count at coff+12, each symbol 18 bytes.
+sym_ptr = struct.unpack_from("<I", data, coff_off + 8)[0]
+sym_cnt = struct.unpack_from("<I", data, coff_off + 12)[0]
+strtab = sym_ptr + sym_cnt * 18 if sym_ptr else 0
+
+
+def section_name(sh):
+    raw = data[sh:sh + 8]
+    if raw[:1] == b"/" and strtab:  # "/N" → offset N into the string table
+        off = int(raw.rstrip(b"\0")[1:])
+        end = data.index(b"\0", strtab + off)
+        return data[strtab + off:end]
+    return raw.rstrip(b"\0")
+
+
+reloc_rva = reloc_size = None
+for i in range(num_sections):
+    sh = sec_table + i * 40
+    if section_name(sh) == b".nreloc":   # boot.s names it .nreloc (lld drops .reloc)
+        reloc_size = struct.unpack_from("<I", data, sh + 8)[0]   # VirtualSize
+        reloc_rva = struct.unpack_from("<I", data, sh + 12)[0]   # VirtualAddress
+        break
+if reloc_rva is None:
+    print("error: no .nreloc section found (boot.s dummy block missing)",
+          file=sys.stderr)
+    sys.exit(1)
+struct.pack_into("<II", data, opt_off + 112 + 5 * 8, reloc_rva, reloc_size)
+
 with open(path, "wb") as f:
     f.write(data)
 
 print(f"patched {path}: chars {chars:#06x}→{new_chars:#06x}, "
-      f"dllchar+=NX_COMPAT, subsys-ver 2.0, stack/heap 1MB")
+      f"dllchar+=NX_COMPAT|DYNAMIC_BASE, subsys-ver 2.0, "
+      f".reloc dir → RVA {reloc_rva:#x} size {reloc_size}")

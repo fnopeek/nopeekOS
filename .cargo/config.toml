@@ -30,17 +30,28 @@ runner = "bash build.sh run"
 # Linker script (path relative to the kernel build's CWD = repo root).
 rustflags = [
     "-C", "link-arg=-Tkernel/linker.ld",
-    # Static relocation model — every static ref uses a 32-bit absolute
-    # address baked at link time. UEFI must load us at our preferred
-    # ImageBase exactly (RELOCS_STRIPPED is set in the PE) so those
-    # addresses resolve correctly. We pick a high ImageBase (set in
-    # build.sh's objcopy --image-base) that's guaranteed to be
-    # conventional RAM on every UEFI machine we target.
+    # Position-independent image. We build as a PIE so the linker emits
+    # R_X86_64_RELATIVE dynamic relocations for every absolute data
+    # pointer (statics holding &str / fn-ptrs, vtables, the .got).
+    # boot.s's _start applies them against the actual load address
+    # before the first Rust instruction runs, so the firmware may load
+    # us at ANY address (RELOCS_STRIPPED cleared, DYNAMIC_BASE set in
+    # the PE by tools/pe-fixup.py). Firmware-independent instead of
+    # betting that ImageBase (0x10000000) is free on every machine —
+    # the old static model bootlooped on firmware whose memory map
+    # didn't keep that range free (e.g. some notebooks).
     #
-    # The PIC alternative would need PE-style .reloc entries; objcopy
-    # ELF→PE doesn't synthesize them, and the ELF's R_X86_64_RELATIVE
-    # dynamic relocations stay unapplied → .got full of NULL → crash
-    # on first static deref. Solved by static + ImageBase that fits.
-    "-C", "relocation-model=static",
+    # pic codegen also makes every in-code address-take RIP-relative
+    # (lea instead of mov $imm64), so no source-level fixups are needed
+    # for &gdt64 / &__heap_start / addr_of!(IDT) / fn pointers.
+    #
+    # -znorelro: no dynamic loader to enforce RELRO, and we run
+    # identity-mapped. --pack-dyn-relocs=none: force classic .rela.dyn
+    # (RELA) instead of compact .relr.dyn, which boot.s's relocation
+    # loop knows how to walk.
+    "-C", "relocation-model=pic",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=-znorelro",
+    "-C", "link-arg=--pack-dyn-relocs=none",
     "-C", "target-feature=+sse,+sse2,+ssse3,+sse4.1,+sse4.2,+avx,+avx2,+aes,+pclmulqdq,-soft-float",
 ]
