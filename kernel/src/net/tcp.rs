@@ -45,16 +45,30 @@ fn generate_isn(saddr: [u8; 4], daddr: [u8; 4], sport: u16, dport: u16) -> u32 {
 // PR_IO_TIMEOUT_ERROR. 128 matches the NAT session table.
 const MAX_CONNECTIONS: usize = 128;
 const MSS: u16 = 1460; // standard Ethernet MSS
-const INITIAL_WINDOW: u16 = 65535; // Maximum TCP window (no window scaling)
+// The SYN/SYN-ACK window is never scaled (RFC 7323), so it's capped at 16-bit.
+const INITIAL_WINDOW: u16 = 65535;
+// TCP Window Scaling (RFC 7323). Without it the window is capped at 64 KiB and
+// throughput = 64 KiB / RTT (~4 MB/s on a CDN regardless of link/NIC — the
+// observed global slowness). We advertise `free >> OUR_WSCALE`; with a 1 MiB
+// receive buffer the scaled field still fits 16 bits (1 MiB >> 5 = 32768).
+const OUR_WSCALE: u8 = 5;
 
-/// Calculate current receive window based on free buffer space.
+/// Current receive window for the TCP window field. Scaled by OUR_WSCALE once
+/// window scaling has been negotiated, else the raw free space (≤ 64 KiB).
 fn recv_window(conn: &TcpConn) -> u16 {
     let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len());
-    (free as u16).min(INITIAL_WINDOW)
+    if conn.wscale_ok {
+        (free >> OUR_WSCALE).min(65535) as u16
+    } else {
+        free.min(65535) as u16
+    }
 }
 const MAX_RETRIES: u8 = 3;
 const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
-const RECV_BUF_SIZE: usize = 65535;
+// 1 MiB receive buffer → ~1 MiB window with scaling → fills the bandwidth-delay
+// product for ~gigabit at typical RTT. Grown lazily (VecDeque::new), so an idle
+// connection costs nothing and only an actively-bursting one approaches 1 MiB.
+const RECV_BUF_SIZE: usize = 1024 * 1024;
 const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
 
 // TCP flags
@@ -111,6 +125,12 @@ struct TcpConn {
     established: bool,
     closed: bool,
     error: bool,
+
+    // Window scaling (RFC 7323). `wscale_ok` once both SYNs carried the
+    // option; `snd_wscale` is the peer's shift (to scale their advertised
+    // window). Our own advertised window is scaled by OUR_WSCALE.
+    wscale_ok: bool,
+    snd_wscale: u8,
 }
 
 static CONNECTIONS: Mutex<[Option<TcpConn>; MAX_CONNECTIONS]> = Mutex::new(
@@ -149,7 +169,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         snd_iss: iss,
         rcv_nxt: 0,
         rcv_irs: 0,
-        recv_buf: VecDeque::with_capacity(RECV_BUF_SIZE),
+        recv_buf: VecDeque::new(),
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -158,6 +178,8 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         established: false,
         closed: false,
         error: false,
+        wscale_ok: false,
+        snd_wscale: 0,
     };
 
     // Find free slot
@@ -221,7 +243,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         snd_iss: 0,
         rcv_nxt: 0,
         rcv_irs: 0,
-        recv_buf: VecDeque::with_capacity(RECV_BUF_SIZE),
+        recv_buf: VecDeque::new(),
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -230,6 +252,8 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         established: false,
         closed: false,
         error: false,
+        wscale_ok: false,
+        snd_wscale: 0,
     };
 
     let mut conns = CONNECTIONS.lock();
@@ -290,7 +314,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         snd_iss: 0,
         rcv_nxt: 0,
         rcv_irs: 0,
-        recv_buf: VecDeque::with_capacity(RECV_BUF_SIZE),
+        recv_buf: VecDeque::new(),
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -299,6 +323,8 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         established: false,
         closed: false,
         error: false,
+        wscale_ok: false,
+        snd_wscale: 0,
     };
     Ok(())
 }
@@ -469,6 +495,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 if let Some(li) = listen_idx {
                     // Accept the SYN on the listening socket
                     let iss = generate_isn(arp::our_ip(), src_ip, dst_port, src_port);
+                    let peer_ws = parse_wscale(data, data_offset);
                     let conn = conns[li].as_mut().unwrap();
                     conn.state = State::SynReceived;
                     conn.remote_ip = src_ip;
@@ -479,16 +506,19 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.snd_nxt = iss.wrapping_add(1);
                     conn.snd_una = iss;
                     conn.last_send_tick = crate::interrupts::ticks();
+                    // Scaling is active only if the peer offered it too.
+                    conn.wscale_ok = peer_ws.is_some();
+                    conn.snd_wscale = peer_ws.unwrap_or(0);
 
-                    // Send SYN-ACK with MSS option
-                    let mut opts = [0u8; 4];
-                    opts[0] = 2;  // MSS option kind
-                    opts[1] = 4;  // MSS option length
-                    opts[2..4].copy_from_slice(&MSS.to_be_bytes());
-
+                    // SYN-ACK: MSS, and Window Scale only if the peer asked for it.
+                    let opts: &[u8] = if peer_ws.is_some() {
+                        &[2, 4, (MSS >> 8) as u8, MSS as u8, 1, 3, 3, OUR_WSCALE]
+                    } else {
+                        &[2, 4, (MSS >> 8) as u8, MSS as u8]
+                    };
                     send_segment_with_opts(
                         src_ip, dst_port, src_port,
-                        iss, seq.wrapping_add(1), SYN | ACK, INITIAL_WINDOW, &[], &opts,
+                        iss, seq.wrapping_add(1), SYN | ACK, INITIAL_WINDOW, &[], opts,
                     );
                     return;
                 }
@@ -528,6 +558,14 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 conn.snd_una = ack;
                 conn.state = State::Established;
                 conn.established = true;
+
+                // We always offer WScale in our SYN, so scaling is active iff
+                // the SYN-ACK carries it. Set before the ACK so it advertises
+                // the scaled window immediately.
+                if let Some(ws) = parse_wscale(data, data_offset) {
+                    conn.snd_wscale = ws;
+                    conn.wscale_ok = true;
+                }
 
                 // Send ACK with full window
                 send_segment(
@@ -663,11 +701,15 @@ fn send_syn(handle: usize) -> Result<(), TcpError> {
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     conn.last_send_tick = crate::interrupts::ticks();
 
-    // SYN with MSS option
-    let mut opts = [0u8; 4];
+    // SYN with MSS + Window Scale options (MSS, NOP, WScale = 8 bytes, aligned).
+    let mut opts = [0u8; 8];
     opts[0] = 2;  // MSS option kind
     opts[1] = 4;  // MSS option length
     opts[2..4].copy_from_slice(&MSS.to_be_bytes());
+    opts[4] = 1;            // NOP — align the 3-byte WScale to a 4-byte boundary
+    opts[5] = 3;            // Window Scale option kind
+    opts[6] = 3;            // length
+    opts[7] = OUR_WSCALE;   // shift count
 
     send_segment_with_opts(
         conn.remote_ip, conn.local_port, conn.remote_port,
@@ -742,6 +784,29 @@ fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !(sum as u16)
+}
+
+/// Scan a segment's TCP options for the Window Scale option (kind 3) and
+/// return its shift count. `data_offset` is the TCP header length in bytes.
+fn parse_wscale(seg: &[u8], data_offset: usize) -> Option<u8> {
+    let end = data_offset.min(seg.len());
+    let mut i = HEADER_LEN;
+    while i < end {
+        match seg[i] {
+            0 => break,        // End of Option List
+            1 => i += 1,       // NOP
+            kind => {
+                if i + 1 >= end { break; }
+                let len = seg[i + 1] as usize;
+                if len < 2 { break; } // malformed
+                if kind == 3 && len == 3 && i + 2 < end {
+                    return Some(seg[i + 2]);
+                }
+                i += len;
+            }
+        }
+    }
+    None
 }
 
 fn ack_in_range(una: u32, ack: u32, nxt: u32) -> bool {
