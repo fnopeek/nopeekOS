@@ -330,6 +330,16 @@ static VM_RUN_STATE: AtomicU8 = AtomicU8::new(VM_IDLE);
 // dedicated path via OTA (no reinstall): flip to `false` + re-release.
 pub const VCPU_AS_FIBER: bool = true;
 
+/// Intel parity: run the VMX guest as a pool fiber too (not just AMD/SVM),
+/// so the browser leaves the cooperative Core-0 path (which shares Core 0
+/// with Shade/input/cursor and made the guest — and the Core-0 PS/2 mouse
+/// poll — unusably slow under load). Single-vCPU only (guest-SMP AP bring-
+/// up stays SVM-only). Requires per-core TSS on the worker (`tss::ensure_
+/// core`, done in `vmx::vm_open`). Flag-gated for clean OTA rollback: flip
+/// to `false` + re-release → Intel reverts to cooperative Core 0, AMD
+/// unaffected (its fiber mode keys off vendor, not this flag).
+pub const VMX_VCPU_AS_FIBER: bool = true;
+
 /// Guest-SMP Stage 1: trap-and-emulate the guest local APIC
 /// (`svm::lapic`) instead of booting `nolapic`. When true, the guest
 /// cmdline omits `nolapic` so Linux brings up the LAPIC + uses its timer;
@@ -924,7 +934,55 @@ fn vcpu_fiber_task(_arg: u64) {
             }
         }
         Vendor::Intel => {
-            crate::kprintln!("[microvm] vCPU fiber: Intel/VMX not enabled in fiber mode");
+            // Single-vCPU VMX guest as a fiber (Intel parity, #3). No AP /
+            // IPI / shared-state machinery (guest-SMP AP bring-up is SVM-
+            // only). `vmx::vm_open` installs this worker's per-core TSS so
+            // VMX host-state is valid off Core 0. Same IF/yield discipline
+            // as the AMD arm; mirrors `vm_core_serve`'s Intel arm but yields
+            // the core between slices instead of looping forever.
+            match vmx::vm_open(
+                &pending.bzimage,
+                &pending.cmdline,
+                pending.initramfs.as_deref(),
+                &pending.inject,
+            ) {
+                Ok(mut ctx) => {
+                    loop {
+                        if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                            crate::kprintln!("[microvm] window closed — stopping guest");
+                            break;
+                        }
+                        // SAFETY: ring-0; host tick serviced between VMRESUMEs.
+                        unsafe { core::arch::asm!("sti") };
+                        let outcome = ctx.run_slice(SLICE_BUDGET);
+                        // SAFETY: ring-0; back to IF=0 before yielding so peer
+                        // fibers run under the cooperative IF=0 invariant.
+                        unsafe { core::arch::asm!("cli") };
+                        match outcome {
+                            Ok(vmx::SliceOutcome::StillRunning) => {
+                                crate::smp::fiber::yield_ready();
+                            }
+                            Ok(vmx::SliceOutcome::Idle) => {
+                                crate::smp::fiber::yield_sleep(2);
+                            }
+                            Ok(vmx::SliceOutcome::Exited(o)) => {
+                                crate::kprintln!(
+                                    "[microvm] guest exited — reason {:#x} qual {:#x}",
+                                    (o.exit_reason & 0xFFFF) as u16,
+                                    o.exit_qualification
+                                );
+                                break;
+                            }
+                            Err(e) => {
+                                crate::kprintln!("[microvm] run FAILED: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    ctx.close();
+                }
+                Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
+            }
         }
         Vendor::Unknown(reason) => crate::kprintln!("[microvm] {}", reason),
     }
