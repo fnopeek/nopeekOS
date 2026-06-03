@@ -162,6 +162,12 @@ static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// drained + injected by `pump` on the VM thread (same split the old
 /// termination pump used, to keep virtio access on one thread).
 static INBOUND_Q: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+/// Backpressure cap on the staging queue between the NIC drain and the guest
+/// inject. At high throughput (29 MB/s speedtest) the guest's 256-entry RX
+/// virtqueue can briefly fall behind; without a bound the queue grows
+/// unboundedly → host OOM. 4× the guest RX queue gives burst slack; past it we
+/// drop, and the guest's TCP retransmits + backs off — proper flow control.
+const INBOUND_MAX: usize = 1024;
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
@@ -313,6 +319,14 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
         Some(g) => g,
         None => return false,
     };
+    // Backpressure: if the guest can't drain its RX queue fast enough, don't
+    // grow the staging queue without bound (→ OOM). Drop → guest TCP
+    // retransmits + slows. Still `true` (consumed — it IS guest traffic, the
+    // host stack must not also process it).
+    if INBOUND_Q.lock().len() >= INBOUND_MAX {
+        NS_DROPS.fetch_add(1, AtOrd::Relaxed);
+        return true;
+    }
     NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
     NS_LAST_ACTIVITY.store(now, AtOrd::Relaxed);
