@@ -116,6 +116,26 @@ static NS_TX_PKTS: AtomicU64 = AtomicU64::new(0);
 static NS_DROPS: AtomicU64 = AtomicU64::new(0);
 static NS_HIGHWATER: AtomicU64 = AtomicU64::new(0);
 static NS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// `ticks()` of the last guest network activity (any TX or RX packet). The
+/// vCPU run loop checks `recently_active` to decide whether to deep-idle-park
+/// (yield_sleep ~2 ms) or keep spin-pumping: parking quantizes RX delivery to
+/// ~2 ms → caps the TCP ACK clock at ~500 pkt/s → ~0.6 MB/s (measured). While
+/// data is in flight we keep the pump running at VMRESUME speed so RX is
+/// delivered immediately; we only park once the link has been quiet for
+/// `ACTIVE_WINDOW_TICKS`, so a truly idle browser still parks (power).
+static NS_LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+/// ~150 ms (15 ticks @ 100 Hz) of quiet before we let the guest deep-park.
+/// Covers request→response gaps during a page load without spinning forever.
+const ACTIVE_WINDOW_TICKS: u64 = 15;
+
+/// True if the guest sent or received a packet within the last
+/// `ACTIVE_WINDOW_TICKS`. The run loop uses this to avoid deep-idle-parking
+/// while a download / page load is in flight (the park quantizes RX to ~2 ms).
+pub fn recently_active(now: u64) -> bool {
+    let last = NS_LAST_ACTIVITY.load(AtOrd::Relaxed);
+    last != 0 && now.wrapping_sub(last) < ACTIVE_WINDOW_TICKS
+}
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
 /// ephemeral range (49152..=65534, net/tcp.rs) so a guest flow can
 /// never alias a host-originated connection (OTA `update`, `https`).
@@ -211,6 +231,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
     };
     NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
+    NS_LAST_ACTIVITY.store(now, AtOrd::Relaxed);
     let mut seg = l4.to_vec();
     seg[0..2].copy_from_slice(&hp.to_be_bytes());          // src port → host port
     let our_ip = crate::net::arp::our_ip();
@@ -294,6 +315,7 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     };
     NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
+    NS_LAST_ACTIVITY.store(now, AtOrd::Relaxed);
 
     // Rewrite: dst IP → guest, L4 dst port → guest port; recompute
     // both checksums. Wrap in vnet + eth (gateway → guest).
@@ -747,7 +769,7 @@ pub fn active_session_count() -> usize {
 pub fn reset_sessions() {
     l3_reset();
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
-              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK] {
+              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_LAST_ACTIVITY] {
         c.store(0, AtOrd::Relaxed);
     }
 }

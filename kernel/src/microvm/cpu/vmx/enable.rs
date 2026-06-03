@@ -1727,7 +1727,16 @@ impl VmContext {
                 // consecutive_idle persists in the VmContext across yields,
                 // so the unwindowed idle-exit above still triggers once it
                 // reaches IDLE_THRESHOLD over many yield cycles.
-                if self.vcpu.consecutive_idle >= IDLE_YIELD {
+                // BUT do NOT deep-park while network data is in flight: parking
+                // quantizes RX delivery to ~2 ms, which is invisible for a
+                // single bulk stream (speedtest hit 42 MB/s) but kills a
+                // page-load's MANY small request→response round-trips (each
+                // gap = a 2 ms park → YouTube "ewig"). While recently active,
+                // keep spin-pumping (the slice still yields the core every
+                // SLICE_MS); park only once the link is quiet (power).
+                if self.vcpu.consecutive_idle >= IDLE_YIELD
+                    && !crate::microvm::devices::nat::recently_active(now)
+                {
                     return Ok(SliceOutcome::Idle);
                 }
                 last_outcome = Some(outcome);

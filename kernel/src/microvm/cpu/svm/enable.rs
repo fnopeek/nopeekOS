@@ -1651,7 +1651,14 @@ impl VmContext {
                 // Guest idle → yield, signalling Idle so the dedicated
                 // core host-idles before re-entering (no VMRUN spin) and
                 // Core 0 returns to the shell. Guest stays alive.
-                if self.vcpu.consecutive_idle >= IDLE_YIELD {
+                // BUT do NOT deep-park while network data is in flight: the
+                // ~2 ms park quantizes RX delivery, which kills a page-load's
+                // many small request→response round-trips (latency, not
+                // throughput — a single bulk stream is unaffected). Spin-pump
+                // while recently active; park once the link is quiet (power).
+                if self.vcpu.consecutive_idle >= IDLE_YIELD
+                    && !crate::microvm::devices::nat::recently_active(now)
+                {
                     return Ok(SliceOutcome::Idle);
                 }
                 last_outcome = Some(outcome);
