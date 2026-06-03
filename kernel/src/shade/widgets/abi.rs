@@ -156,6 +156,14 @@ pub enum IconId {
     ArrowClockwise      = 27,
     Globe               = 28,
     Camera              = 29,
+    // Battery states (bar plugin) — Phosphor horizontal set.
+    BatteryEmpty        = 30,
+    BatteryLow          = 31,
+    BatteryMedium       = 32,
+    BatteryHigh         = 33,
+    BatteryFull         = 34,
+    BatteryCharging     = 35,
+    BatteryWarning      = 36,
     // Appended only.
 }
 

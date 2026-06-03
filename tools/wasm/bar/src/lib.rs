@@ -29,6 +29,7 @@ unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32;
     fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
+    fn npk_battery() -> i32;
     fn npk_workspace_switch(n: i32) -> i32;
     fn npk_power() -> i32;
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
@@ -113,7 +114,7 @@ fn default_segments() -> Segments {
     Segments {
         left:   ["workspaces", "title"].iter().map(|s| s.to_string()).collect(),
         center: ["clock"].iter().map(|s| s.to_string()).collect(),
-        right:  ["tray", "screenshot", "gap", "power"].iter().map(|s| s.to_string()).collect(),
+        right:  ["battery", "tray", "screenshot", "gap", "power"].iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -149,8 +150,13 @@ const STATE_MAX: usize = 256;
 static mut STATE_BUF: [u8; STATE_MAX] = [0; STATE_MAX];
 static mut LAST_BUF: [u8; STATE_MAX] = [0; STATE_MAX];
 static mut LAST_LEN: usize = usize::MAX;
+// Battery, polled alongside bar_state. -1 = no battery (segment hidden);
+// else (status<<8)|percent. Sentinel i32::MIN = never read yet.
+static mut BAT: i32 = -1;
+static mut LAST_BAT: i32 = i32::MIN;
+static mut BAT_TICK: u32 = 0;
 
-struct BarState<'a> { clock: &'a str, ws_count: u8, ws_active: u8, title: &'a str }
+struct BarState<'a> { clock: &'a str, ws_count: u8, ws_active: u8, title: &'a str, bat: i32 }
 
 fn parse_state(s: &str) -> BarState<'_> {
     let mut it = s.splitn(4, '\n');
@@ -158,7 +164,7 @@ fn parse_state(s: &str) -> BarState<'_> {
     let ws_count = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
     let ws_active = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
     let title = it.next().unwrap_or("");
-    BarState { clock, ws_count, ws_active, title }
+    BarState { clock, ws_count, ws_active, title, bat: -1 }
 }
 
 // ── Segment → widgets ────────────────────────────────────────────────
@@ -233,6 +239,37 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             style: TextStyle::Heading,
             modifiers: Vec::new(),
         }],
+        // Battery: hidden entirely when no smart battery responds (bat < 0,
+        // e.g. desktops/QEMU). Icon picked by charge level; charging shows
+        // the bolt; a near-empty pack tints Danger.
+        "battery" => {
+            if st.bat < 0 { return Vec::new(); }
+            let percent = (st.bat & 0xFF) as u8;
+            let status = (st.bat >> 8) & 0xFF; // 0=discharging 1=charging 2=full
+            let icon = match status {
+                1 => IconId::BatteryCharging,
+                2 => IconId::BatteryFull,
+                _ => match percent {
+                    0..=10  => IconId::BatteryWarning,
+                    11..=30 => IconId::BatteryLow,
+                    31..=55 => IconId::BatteryMedium,
+                    56..=85 => IconId::BatteryHigh,
+                    _       => IconId::BatteryFull,
+                },
+            };
+            let mut icon_mods: Vec<Modifier> = Vec::new();
+            if status == 0 && percent <= 10 {
+                icon_mods.push(Modifier::Tint(Token::Danger));
+            }
+            alloc::vec![
+                Widget::Icon { id: icon, size: ICON_SIZE, modifiers: icon_mods },
+                Widget::Text {
+                    content: alloc::format!(" {}%", percent),
+                    style: TextStyle::Body,
+                    modifiers: Vec::new(),
+                },
+            ]
+        }
         "tray" => alloc::vec![Widget::Icon {
             id: IconId::Gear,
             size: ICON_SIZE,
@@ -327,17 +364,26 @@ fn state_changed() -> Option<usize> {
     let n = unsafe { npk_bar_state(p as i32, STATE_MAX as i32) };
     if n <= 0 { return None; }
     let n = n as usize;
+    // Poll battery too — it changes slowly, so throttle the SMBus reads to
+    // roughly every 5 s (loop tick is 300 ms) and fold the result into the
+    // same change-gate (a % or charge-state flip forces a re-commit).
+    let bat = unsafe {
+        if BAT_TICK == 0 { BAT_TICK = 16; npk_battery() } else { BAT_TICK -= 1; LAST_BAT }
+    };
     let cur = unsafe { core::slice::from_raw_parts(p as *const u8, n) };
     let last = unsafe {
         let lp = core::ptr::addr_of!(LAST_BUF) as *const u8;
         let ll = LAST_LEN;
         if ll == usize::MAX { None } else { Some(core::slice::from_raw_parts(lp, ll)) }
     };
-    if last == Some(cur) { return None; }
+    let bat_same = bat == unsafe { LAST_BAT };
+    if last == Some(cur) && bat_same { return None; }
     unsafe {
         let lp = core::ptr::addr_of_mut!(LAST_BUF) as *mut u8;
         core::ptr::copy_nonoverlapping(p, lp, n);
         LAST_LEN = n;
+        LAST_BAT = bat;
+        BAT = bat;
     }
     Some(n)
 }
@@ -349,7 +395,8 @@ fn rebuild_and_commit(seg: &Segments, len: usize) {
         core::str::from_utf8(core::slice::from_raw_parts(
             core::ptr::addr_of!(STATE_BUF) as *const u8, len)).unwrap_or("")
     };
-    let st = parse_state(s);
+    let mut st = parse_state(s);
+    st.bat = unsafe { BAT };
     let tree = build_tree(seg, &st);
     match wire::encode(&tree) {
         Ok(bytes) => { if commit(&bytes) < 0 { log("[bar] commit failed"); } }

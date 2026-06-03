@@ -16,3 +16,5 @@ pub mod rtc;
 pub mod blkdev;
 pub mod netdev;
 pub mod acpi;
+pub mod smbus;
+pub mod battery;

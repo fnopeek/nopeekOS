@@ -20,7 +20,7 @@ mod boot_uefi;
 // ── Module groups ──────────────────────────────────────────────
 mod drivers;
 pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
-pub use drivers::{xhci, keyboard, framebuffer, rtc, blkdev, netdev, acpi};
+pub use drivers::{xhci, keyboard, framebuffer, rtc, blkdev, netdev, acpi, smbus, battery};
 
 mod mm;
 pub use mm::{memory, heap, paging};
@@ -115,6 +115,10 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     let pci_count = pci::scan();
     kprintln!("[npk] PCI: {} devices", pci_count);
     vga::show_status(b"PCI bus scanned");
+
+    // SMBus host controller (Intel i801) — used by the battery status driver
+    // on notebooks. No-op when absent (desktops/QEMU).
+    smbus::init();
 
     // USB keyboard (xHCI) — before any user input is needed
     if xhci::init() {

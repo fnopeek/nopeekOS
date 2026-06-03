@@ -1438,6 +1438,23 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_battery() -> i32 — battery state for the bar plugin. Returns -1
+    // when no smart battery responds (desktops/QEMU → segment stays empty),
+    // else (status << 8) | percent, with status 0=discharging 1=charging
+    // 2=full and percent in 0..=100.
+    linker.func_wrap("env", "npk_battery",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            match crate::battery::read() {
+                Some(b) => ((b.status as i32) << 8) | b.percent as i32,
+                None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_workspace_switch(n) -> i32 — switch to workspace n (bar clicks).
     linker.func_wrap("env", "npk_workspace_switch",
         |caller: Caller<'_, HostState>, n: i32| -> i32 {
