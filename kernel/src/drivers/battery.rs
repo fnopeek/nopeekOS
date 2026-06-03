@@ -76,6 +76,7 @@ const EC_FULL_CHARGE_MWH: u32 = 50_010;
 /// Read the remaining-capacity word, rejecting single-read glitches: take a
 /// value only when two reads agree (the EC can return a transient mid-update
 /// byte). Falls back to the third read if all differ.
+#[allow(dead_code)]
 fn read_remaining_stable() -> Option<u32> {
     let a = crate::ec::read_u16(EC_REMAINING_MWH)?;
     let b = crate::ec::read_u16(EC_REMAINING_MWH)?;
@@ -88,6 +89,14 @@ fn read_ec() -> Option<BatteryState> {
     // Laptops only — desktops have no battery (and bogus EC RAM here).
     if !crate::acpi::is_mobile() { return None; }
 
+    // DISABLED: 0x4a (EC_REMAINING_MWH) turned out to be a monotonic counter,
+    // not remaining capacity (rose past full-charge after 30 min on battery).
+    // The real remaining-capacity EC offset comes from the DSDT EmbeddedControl
+    // Field (`dsdt` intent). Until that offset is known, report no battery
+    // rather than a bogus %. Re-enable by pointing EC_REMAINING_MWH at the
+    // real offset and removing this early return.
+    return None;
+    #[allow(unreachable_code)]
     let remaining = read_remaining_stable()?;
     // Sanity: a real mWh capacity, not a stray/garbage read.
     if !(1_000..=120_000).contains(&remaining) { return None; }

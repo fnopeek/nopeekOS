@@ -82,6 +82,25 @@ pub fn ensure_mapped_pub(addr: usize, size: usize) {
     ensure_mapped(addr, size);
 }
 
+/// Locate the DSDT (AML) via the FADT: DSDT pointer at offset 40 (32-bit)
+/// or X_DSDT at 140 (64-bit). Returns (addr, len) with the region mapped.
+pub fn dsdt() -> Option<(usize, usize)> {
+    let fadt = find_table(b"FACP")?;
+    ensure_mapped(fadt, 256);
+    let fadt_len = unsafe { *((fadt + 4) as *const u32) } as usize;
+    let mut addr = unsafe { *((fadt + 40) as *const u32) } as usize;
+    if fadt_len >= 148 {
+        let x = unsafe { *((fadt + 140) as *const u64) } as usize;
+        if x != 0 { addr = x; }
+    }
+    if addr == 0 { return None; }
+    ensure_mapped(addr, 64);
+    let len = unsafe { *((addr + 4) as *const u32) } as usize;
+    if !(36..=0x200000).contains(&len) { return None; }
+    ensure_mapped(addr, len);
+    Some((addr, len))
+}
+
 /// FADT "Preferred PM Profile" (offset 45): 2 = Mobile (laptop). Used to
 /// gate the EC battery driver so desktops (NUC = profile 1) never probe for
 /// a battery and show a phantom one.
