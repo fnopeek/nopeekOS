@@ -400,17 +400,20 @@ pub fn intent_dsdt() {
     }
     if ec == 0 { kprintln!("  (no EmbeddedControl region found)"); }
 
-    // Battery methods.
+    // Battery reader methods (the real EC access sequence + offsets) and the
+    // windowed-EC accessor / AC-status helpers.
     for (name, seg) in [
-        ("_BST", [0x5Fu8, 0x42, 0x53, 0x54]),
-        ("_BIF", [0x5Fu8, 0x42, 0x49, 0x46]),
-        ("_BIX", [0x5Fu8, 0x42, 0x49, 0x58]),
+        ("BTST", [0x42u8, 0x54, 0x53, 0x54]), // _BST → BTST: status/rate/remaining
+        ("BTIF", [0x42u8, 0x54, 0x49, 0x46]), // _BIF → BTIF: capacities
+        ("SECP", [0x53u8, 0x45, 0x43, 0x50]), // set-EC-pointer (windowed read)
+        ("GACS", [0x47u8, 0x41, 0x43, 0x53]), // get AC status
+        ("SMAR", [0x53u8, 0x4D, 0x41, 0x52]), // smart-battery read?
     ] {
         let mut found = 0;
         let mut k = 0;
-        while k + 4 < len && found < 2 {
+        while k + 4 < len && found < 1 {
             if b[k..k + 4] == seg {
-                dsdt_dump_range(b, name, k.saturating_sub(6), 448);
+                dsdt_dump_range(b, name, k.saturating_sub(6), 768);
                 found += 1;
             }
             k += 1;
