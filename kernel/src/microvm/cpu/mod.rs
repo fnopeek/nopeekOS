@@ -470,6 +470,34 @@ static AP_SHARED_PTR: AtomicU64 = AtomicU64::new(0);
 /// (last-one-out).
 static VCPU_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// Bitmask of host cores currently running a vCPU fiber (bit c). Core 0 (bit 0)
+/// is always reserved (shell/reaper). Each vCPU MUST get a DISTINCT core: VMX
+/// root is per-physical-core, so two vCPUs VMXONing one core fails with
+/// VMfailValid (the N>2 bug); on SVM it just starves. The reaper places each AP
+/// on the lowest free worker core via `reserve_ap_core` + `fiber::admit`
+/// instead of `spawn_fiber` (whose work-stealing piles every fiber onto the one
+/// awake core). Reset at BSP open + teardown.
+static VM_CORE_MASK: AtomicU32 = AtomicU32::new(1); // bit 0 = Core 0 reserved
+
+/// Reserve a distinct idle worker core (1..core_count()) for an AP vCPU fiber,
+/// marking it taken. `None` if every worker core already runs a vCPU (the
+/// caller then falls back to the shared deque — only safe on SVM; on VMX that
+/// means more vCPUs than host cores, which `guest_vcpus()` avoids by capping at
+/// the worker count). Called only from the Core-0 reaper (single producer).
+fn reserve_ap_core() -> Option<usize> {
+    let ncores = crate::smp::per_core::core_count();
+    loop {
+        let mask = VM_CORE_MASK.load(Ordering::Acquire);
+        let c = (1..ncores).find(|c| mask & (1u32 << c) == 0)?;
+        if VM_CORE_MASK
+            .compare_exchange(mask, mask | (1u32 << c), Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some(c);
+        }
+    }
+}
+
 /// Record a guest SIPI (from a backend ICR router) → ask Core 0 to spawn the
 /// AP with `apic_id` at `sipi_vector`. No-op unless guest-SMP AP bring-up is
 /// enabled or apic_id is out of range. Idempotent: the reaper's `AP_SPAWNED`
@@ -494,6 +522,7 @@ fn ap_orch_reset() {
     AP_SPAWNED.store(0, Ordering::Release);
     AP_SPAWN_REQUESTED.store(0, Ordering::Release);
     AP_SHARED_PTR.store(0, Ordering::Release);
+    VM_CORE_MASK.store(1, Ordering::Release); // only Core 0 reserved
 }
 
 /// Decided once at boot (`set_vm_fiber_mode`, from `init_dedicated_vm_core`,
@@ -680,16 +709,35 @@ pub fn vm_poll_slice() {
                 // big-VM lock before the AP can run.
                 VCPU_COUNT.fetch_add(1, Ordering::AcqRel);
                 vm_set_ap_active(true);
-                crate::kprintln!(
-                    "[microvm] spawning AP vCPU fiber apic_id={} (sipi vec {:#x})",
-                    apic_id,
-                    AP_SIPI_VECTORS[apic_id as usize].load(Ordering::Acquire)
-                );
-                crate::smp::scheduler::spawn_fiber(
-                    crate::smp::scheduler::Priority::Interactive,
-                    ap_vcpu_fiber_task,
-                    apic_id as u64,
-                );
+                let vec = AP_SIPI_VECTORS[apic_id as usize].load(Ordering::Acquire);
+                // Place the AP on a DISTINCT idle worker core (one vCPU per
+                // core — VMX root is per-core). `fiber::admit` pushes straight
+                // to that core's fiber queue (it wakes ≤10 ms later and runs
+                // it) instead of `spawn_fiber`, whose work-stealing piled every
+                // vCPU onto the one awake core → VMXON-VMfailValid on Intel.
+                match reserve_ap_core() {
+                    Some(c) => {
+                        crate::kprintln!(
+                            "[microvm] spawning AP vCPU fiber apic_id={} on core {} (sipi vec {:#x})",
+                            apic_id, c, vec
+                        );
+                        crate::smp::fiber::admit(c, ap_vcpu_fiber_task, apic_id as u64);
+                    }
+                    None => {
+                        // More vCPUs than host cores — share via the deque (SVM
+                        // tolerates it; guest_vcpus() caps at the worker count
+                        // so VMX shouldn't reach here).
+                        crate::kprintln!(
+                            "[microvm] AP apic_id={} — no free core, sharing via deque (sipi vec {:#x})",
+                            apic_id, vec
+                        );
+                        crate::smp::scheduler::spawn_fiber(
+                            crate::smp::scheduler::Priority::Interactive,
+                            ap_vcpu_fiber_task,
+                            apic_id as u64,
+                        );
+                    }
+                }
             }
         }
     }
@@ -936,6 +984,12 @@ fn vcpu_fiber_task(_arg: u64) {
 
     let cid = crate::smp::per_core::current_core_id();
     crate::kprintln!("[microvm] vCPU fiber opening guest on core {}", cid);
+
+    // Guest SMP: (re)initialise the vCPU-core mask with the BSP's own core so
+    // APs are placed on OTHER cores (one vCPU per distinct core). Fresh store,
+    // not OR, so a relaunch starts clean. Runs before the guest boots → before
+    // any SIPI → the reaper always sees the BSP bit.
+    VM_CORE_MASK.store((1u32 << 0) | (1u32 << cid), Ordering::Release);
 
     // 1 kHz wake source on THIS core so the fiber's idle yields resume
     // promptly (the 100 Hz worker timer alone would stretch a 2 ms idle
