@@ -71,6 +71,13 @@ pub fn init() {
     crate::kprintln!("[npk] smbus: i801 @ I/O 0x{:04x} (enabled)", base);
 }
 
+/// The cached SMBus I/O base, or None if no controller was found at boot.
+/// Used by the `akku` diagnostic intent to tell "no controller" apart from
+/// "controller present but no battery on the bus".
+pub fn base() -> Option<u16> {
+    *SMBA.lock()
+}
+
 fn udelay(us: u64) {
     let freq = crate::interrupts::tsc_freq();
     if freq == 0 {
