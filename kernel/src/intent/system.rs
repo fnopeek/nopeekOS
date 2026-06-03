@@ -241,31 +241,80 @@ pub fn intent_battery() {
         ("FullChargeCap    0x10", 0x10),
         ("Voltage          0x09", 0x09),
     ];
-    let mut any = false;
+    let mut sbs_ok = false;
     kprintln!("  Raw @ addr 0x0B:");
     for (name, reg) in regs {
         match crate::smbus::read_word(SBS_ADDR, reg) {
-            Some(v) => { any = true; kprintln!("    {} = 0x{:04x} ({})", name, v, v); }
+            Some(v) => { sbs_ok = true; kprintln!("    {} = 0x{:04x} ({})", name, v, v); }
             None    => kprintln!("    {} = NAK (no response)", name),
         }
     }
-    if !any {
-        kprintln!("  → controller OK but pack does not answer at 0x0B");
-        kprintln!("    (likely behind the EC, not directly on the SMBus)");
+    if sbs_ok {
+        match crate::battery::read() {
+            Some(b) => {
+                let st = match b.status {
+                    crate::battery::ChargeStatus::Charging    => "charging",
+                    crate::battery::ChargeStatus::Discharging => "discharging",
+                    crate::battery::ChargeStatus::Full        => "full",
+                };
+                kprintln!("  Decoded:       {}% — {}", b.percent, st);
+            }
+            None => kprintln!("  Decoded:       read failed"),
+        }
         return;
     }
 
-    match crate::battery::read() {
-        Some(b) => {
-            let st = match b.status {
-                crate::battery::ChargeStatus::Charging    => "charging",
-                crate::battery::ChargeStatus::Discharging => "discharging",
-                crate::battery::ChargeStatus::Full        => "full",
-            };
-            kprintln!("  Decoded:       {}% — {}", b.percent, st);
+    kprintln!("  → pack does not answer at 0x0B (behind the EC).");
+    intent_ec_battery_dump();
+}
+
+/// Dump the EC's 256-byte RAM so we can reverse-engineer the battery
+/// fields on this machine (HP Elite/Dragonfly stores charge as plain EC-RAM
+/// fields: remaining cap, full cap, status — read by the DSDT's _BST). Find
+/// the offset whose byte ≈ the known charge %, and the 16-bit capacity pair.
+fn intent_ec_battery_dump() {
+    kprintln!();
+    kprintln!("  EC RAM dump (0x00..0xFF) — find the battery fields:");
+    let mut ram = [0u8; 256];
+    let mut read_ok = false;
+    for i in 0..256u16 {
+        match crate::ec::read(i as u8) {
+            Some(v) => { ram[i as usize] = v; read_ok = true; }
+            None    => ram[i as usize] = 0xFF,
         }
-        None => kprintln!("  Decoded:       read failed"),
     }
+    if !read_ok {
+        kprintln!("    EC not responding on ports 0x62/0x66 (timeout).");
+        return;
+    }
+    // 16 bytes per row, hex.
+    for row in 0..16usize {
+        let b = &ram[row * 16..row * 16 + 16];
+        kprintln!(
+            "    {:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  \
+             {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+            row * 16,
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+            b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+    }
+    // Leads: bytes that look like a charge % (1..=100).
+    kprint!("  Candidate %% bytes (val 1..100):");
+    for i in 0..256usize {
+        if ram[i] >= 1 && ram[i] <= 100 {
+            kprint!(" [0x{:02x}]={}", i, ram[i]);
+        }
+    }
+    kprintln!();
+    // Leads: 16-bit LE values in a plausible capacity range (mAh or mWh).
+    kprint!("  Candidate capacities (u16 1000..65000):");
+    for i in 0..255usize {
+        let v = ram[i] as u16 | ((ram[i + 1] as u16) << 8);
+        if v >= 1000 && v < 65000 {
+            kprint!(" [0x{:02x}]={}", i, v);
+        }
+    }
+    kprintln!();
+    kprintln!("  → tell me your current charge %, I'll map the offsets.");
 }
 
 pub fn intent_uptime() {
