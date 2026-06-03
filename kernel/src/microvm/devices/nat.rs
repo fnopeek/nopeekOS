@@ -51,6 +51,8 @@ const ETHERTYPE_ARP:  u16 = 0x0806;
 const PROTO_ICMP: u8 = 1;
 const PROTO_UDP:  u8 = 17;
 const PROTO_TCP:  u8 = 6;
+const ICMP_ECHO_REQUEST: u8 = 8;
+const ICMP_ECHO_REPLY:   u8 = 0;
 
 const PORT_DNS: u16 = 53;
 
@@ -74,10 +76,10 @@ impl NetCaps {
     pub const fn dns_only() -> Self {
         Self { allow_dns: true, allow_icmp: false, allow_udp: false, allow_tcp: false }
     }
-    /// Browser default: DNS + TCP + UDP (QUIC/HTTP-3) via L3
-    /// masquerade. ICMP still needs an explicit cap.
+    /// Browser default: DNS + TCP + UDP (QUIC/HTTP-3) + ICMP echo (ping /
+    /// reachability probes) via L3 masquerade.
     pub const fn dns_tcp() -> Self {
-        Self { allow_dns: true, allow_icmp: false, allow_udp: true, allow_tcp: true }
+        Self { allow_dns: true, allow_icmp: true, allow_udp: true, allow_tcp: true }
     }
 }
 
@@ -203,6 +205,51 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
     None
 }
 
+/// Outbound NAT for a guest ICMP echo request (so ping + the browser's
+/// reachability probes to the DNS servers work instead of cap-rejecting). The
+/// ICMP Identifier is the flow key, masqueraded like a port; only echo
+/// requests (type 8) are forwarded, everything else dropped. Mirrors
+/// `l3_outbound` but rewrites the id + uses the pseudo-header-less ICMP
+/// checksum.
+fn l3_icmp_outbound(dst_ip: [u8; 4], l4: &[u8]) -> Option<Vec<u8>> {
+    if l4.len() < 8 || l4[0] != ICMP_ECHO_REQUEST {
+        return None;
+    }
+    let guest_id = u16::from_be_bytes([l4[4], l4[5]]);
+    let now = crate::interrupts::ticks();
+    let hp = l3_map_out(PROTO_ICMP, guest_id, dst_ip, 0, now)?;
+    let mut seg = l4.to_vec();
+    seg[4..6].copy_from_slice(&hp.to_be_bytes()); // id → masquerade id
+    fix_icmp_checksum(&mut seg);
+    crate::net::ipv4::send(dst_ip, PROTO_ICMP, &seg);
+    L3_ACTIVE.store(true, AtOrd::Release);
+    None
+}
+
+/// ICMP checksum: ones-complement sum over the whole ICMP message (no pseudo-
+/// header, unlike TCP/UDP). Zero the field first, then fold carries.
+fn fix_icmp_checksum(icmp: &mut [u8]) {
+    if icmp.len() < 4 {
+        return;
+    }
+    icmp[2] = 0;
+    icmp[3] = 0;
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < icmp.len() {
+        sum += u16::from_be_bytes([icmp[i], icmp[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < icmp.len() {
+        sum += (icmp[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let c = !(sum as u16);
+    icmp[2..4].copy_from_slice(&c.to_be_bytes());
+}
+
 /// Host-RX intercept. `ip` is a full IPv4 packet already filtered to
 /// our IP. If it matches a masquerade mapping, rewrite it back to the
 /// guest, enqueue for `pump`, and return true (consume — the host
@@ -213,12 +260,18 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     let ihl = (ip[0] & 0x0F) as usize * 4;
     if ihl < IPV4_HDR_LEN || ip.len() < ihl { return false; }
     let proto = ip[9];
-    if proto != PROTO_TCP && proto != PROTO_UDP { return false; }
+    if proto != PROTO_TCP && proto != PROTO_UDP && proto != PROTO_ICMP { return false; }
     let src_ip: [u8; 4] = ip[12..16].try_into().unwrap();
     let l4 = &ip[ihl..];
-    if l4.len() < 4 { return false; }
-    let remote_port = u16::from_be_bytes([l4[0], l4[1]]);
-    let host_port   = u16::from_be_bytes([l4[2], l4[3]]);
+    // ICMP echo reply: the Identifier (l4[4..6]) is the masquerade key (no
+    // ports). TCP/UDP: remote port + masquerade host port are l4[0..2]/[2..4].
+    let (remote_port, host_port) = if proto == PROTO_ICMP {
+        if l4.len() < 8 || l4[0] != ICMP_ECHO_REPLY { return false; }
+        (0u16, u16::from_be_bytes([l4[4], l4[5]]))
+    } else {
+        if l4.len() < 4 { return false; }
+        (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]]))
+    };
     let now = crate::interrupts::ticks();
     let gport = match l3_map_in(proto, host_port, src_ip, remote_port, now) {
         Some(g) => g,
@@ -236,8 +289,15 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     let ipc = ipv4_checksum(&frame[ip_off..ip_off + ihl]);
     frame[ip_off + 10..ip_off + 12].copy_from_slice(&ipc.to_be_bytes());
     let l4_off = ip_off + ihl;
-    frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
-    fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
+    if proto == PROTO_ICMP {
+        // Rewrite the echo-reply Identifier back to the guest's + recompute
+        // the ICMP checksum (the IP dst rewrite above doesn't affect it).
+        frame[l4_off + 4..l4_off + 6].copy_from_slice(&gport.to_be_bytes());
+        fix_icmp_checksum(&mut frame[l4_off..]);
+    } else {
+        frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
+        fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
+    }
 
     INBOUND_Q.lock().push_back(frame);
     true
@@ -373,8 +433,9 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
         PROTO_ICMP => {
             if !caps.allow_icmp {
                 cap_reject("ICMP", dst_ip, 0);
+                return None;
             }
-            None
+            l3_icmp_outbound(dst_ip, l4)
         }
         _ => None,
     }
