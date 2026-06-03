@@ -34,7 +34,21 @@ const DESC_F_WRITE: u16 = 2;
 
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
-const RX_BUFFERS: usize = 32;
+// RX ring depth. 32 buffers (~48 KB) under-runs at high throughput: if
+// `net::poll()` can't drain in time (BSP vCPU pump spinning, Core 0
+// compositing, or the POLLING guard contended), the ring fills and
+// QEMU/slirp DROPS inbound frames → guest TCP sees loss → backs off →
+// throughput collapse + latency spikes. Match QEMU's default queue (256)
+// for ~16× the inflight headroom. Capped to the device's actual queue
+// size at init (`RX_BUFFERS.min(rx_qs)`).
+const RX_BUFFERS: usize = 256;
+
+// On a full TX ring, spin-reclaim this many times before dropping the
+// frame. QEMU/slirp drains the ring on its own host thread, so a bounded
+// busy-wait lets in-flight descriptors complete instead of dropping the
+// guest's packet (→ TCP retransmit → upload throughput collapse). Bounded
+// so a genuinely wedged device can't hang the sender.
+const TX_RECLAIM_SPINS: u32 = 4096;
 pub const MTU: usize = 1514; // Ethernet max frame
 
 /// VirtIO net header prepended to every packet (10 bytes, no mergeable buffers)
@@ -281,10 +295,20 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     let mut lock = DEVICE.lock();
     let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
 
-    // Reclaim completed TX descriptors
+    // Reclaim completed TX descriptors. Under burst upload the ring fills
+    // faster than QEMU/slirp drains it; rather than dropping the frame
+    // (→ guest TCP retransmit → upload collapse), spin-reclaim briefly so
+    // in-flight descriptors free up. Backpressure, not loss. Bounded.
     dev.reclaim_tx();
-
-    if dev.tx_num_free < 2 { return Err(NetError::QueueFull); }
+    if dev.tx_num_free < 2 {
+        let mut spins = 0;
+        while dev.tx_num_free < 2 && spins < TX_RECLAIM_SPINS {
+            core::hint::spin_loop();
+            dev.reclaim_tx();
+            spins += 1;
+        }
+        if dev.tx_num_free < 2 { return Err(NetError::QueueFull); }
+    }
 
     let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
     let d1 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
