@@ -211,6 +211,63 @@ pub fn intent_history() {
     super::print_active_history();
 }
 
+/// `akku` / `battery` — Smart-Battery diagnostic. Shows whether the i801
+/// SMBus controller was found, dumps the raw SBS registers read from the
+/// pack at address 0x0B, and prints the decoded charge + status. Lets us
+/// tell "no controller" from "controller but no battery on the bus" from
+/// "battery present but odd values" without a serial cable.
+pub fn intent_battery() {
+    const SBS_ADDR: u8 = 0x0B;
+    kprintln!();
+    kprintln!("  Battery (Smart Battery over SMBus)");
+    kprintln!("  ──────────────────────────────────");
+
+    match crate::smbus::base() {
+        Some(b) => kprintln!("  SMBus i801:    present @ I/O 0x{:04x}", b),
+        None => {
+            kprintln!("  SMBus i801:    NOT FOUND (no PCI class 0C05)");
+            kprintln!("  → no controller → no battery readout possible");
+            return;
+        }
+    }
+
+    // Raw register dump (each is a 16-bit SMBus word read). None = NAK /
+    // no device answering at that address/register.
+    let regs: [(&str, u8); 6] = [
+        ("RelStateOfCharge 0x0D", 0x0D),
+        ("BatteryStatus    0x16", 0x16),
+        ("AverageCurrent   0x0A", 0x0A),
+        ("RemainingCap     0x0F", 0x0F),
+        ("FullChargeCap    0x10", 0x10),
+        ("Voltage          0x09", 0x09),
+    ];
+    let mut any = false;
+    kprintln!("  Raw @ addr 0x0B:");
+    for (name, reg) in regs {
+        match crate::smbus::read_word(SBS_ADDR, reg) {
+            Some(v) => { any = true; kprintln!("    {} = 0x{:04x} ({})", name, v, v); }
+            None    => kprintln!("    {} = NAK (no response)", name),
+        }
+    }
+    if !any {
+        kprintln!("  → controller OK but pack does not answer at 0x0B");
+        kprintln!("    (likely behind the EC, not directly on the SMBus)");
+        return;
+    }
+
+    match crate::battery::read() {
+        Some(b) => {
+            let st = match b.status {
+                crate::battery::ChargeStatus::Charging    => "charging",
+                crate::battery::ChargeStatus::Discharging => "discharging",
+                crate::battery::ChargeStatus::Full        => "full",
+            };
+            kprintln!("  Decoded:       {}% — {}", b.percent, st);
+        }
+        None => kprintln!("  Decoded:       read failed"),
+    }
+}
+
 pub fn intent_uptime() {
     let secs = crate::interrupts::uptime_secs();
     let days = secs / 86400;
