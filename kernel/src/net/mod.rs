@@ -27,24 +27,31 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// (its data is drained by the holder + picked up next pass).
 static POLLING: AtomicBool = AtomicBool::new(false);
 
-/// Process incoming packets and TCP timers. Cross-core mutually exclusive.
+/// Process incoming packets and TCP timers.
 pub fn poll() {
+    // The guard wraps ONLY the single-consumer NIC drain + host-TCP tick
+    // (cross-core mutually exclusive). It must NOT cover the compositor below:
+    // the BSP vCPU pump holds this guard while it spin-pumps under network
+    // load, so if Core 0's poll() returned early here it would never render or
+    // poll the mouse → UI + mouse freeze (observed as a notebook kernel freeze:
+    // a slow NIC keeps the BSP pumping ~continuously → Core 0 fully starved).
     if POLLING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
+        .is_ok()
     {
-        return; // another core is already draining the NIC
-    }
-    let mut buf = [0u8; netdev::MTU];
-    while let Some(len) = netdev::recv(&mut buf) {
-        if len >= 14 {
-            eth::handle_frame(&buf[..len]);
+        let mut buf = [0u8; netdev::MTU];
+        while let Some(len) = netdev::recv(&mut buf) {
+            if len >= 14 {
+                eth::handle_frame(&buf[..len]);
+            }
         }
+        tcp::tick_connections();
+        POLLING.store(false, Ordering::Release);
     }
-    tcp::tick_connections();
-    // Progressive shade render (shows output during long network operations)
+    // ALWAYS run (even if we skipped the drain above): progressive shade render
+    // + mouse. Internally gated to Core 0, so only Core 0 executes it — no race
+    // despite being outside the guard.
     crate::shade::poll_render();
-    POLLING.store(false, Ordering::Release);
 }
 
 /// Network stack statistics
