@@ -116,6 +116,10 @@ static NS_TX_PKTS: AtomicU64 = AtomicU64::new(0);
 static NS_DROPS: AtomicU64 = AtomicU64::new(0);
 static NS_HIGHWATER: AtomicU64 = AtomicU64::new(0);
 static NS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+/// High-water mark of the INBOUND_Q staging depth. If this rides near
+/// INBOUND_MAX (1024) the download is backpressure-capped (guest can't drain /
+/// our bound too low); if it stays shallow, the cap is upstream (slirp/NIC).
+static NS_IQ_HI: AtomicU64 = AtomicU64::new(0);
 
 /// `ticks()` of the last guest network activity (any TX or RX packet). The
 /// vCPU run loop checks `recently_active` to decide whether to deep-idle-park
@@ -732,6 +736,10 @@ pub fn pump(
     if inuse > NS_HIGHWATER.load(AtOrd::Relaxed) {
         NS_HIGHWATER.store(inuse, AtOrd::Relaxed);
     }
+    let iq = INBOUND_Q.lock().len() as u64;
+    if iq > NS_IQ_HI.load(AtOrd::Relaxed) {
+        NS_IQ_HI.store(iq, AtOrd::Relaxed);
+    }
     let last = NS_LAST_TICK.load(AtOrd::Relaxed);
     let dt = now.wrapping_sub(last);
     if last != 0 && dt >= 500 {
@@ -742,9 +750,10 @@ pub fn pump(
         let secs = dt / 100; // ticks → seconds (≥5)
         if secs > 0 && (rxp + txp) > 0 {
             kprintln!(
-                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | nat {}/{} inuse (hi {}), {} drops",
+                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | nat {}/{} (hi {}) | iq hi {}/{} | {} drops",
                 rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
-                inuse, L3_MAX, NS_HIGHWATER.load(AtOrd::Relaxed), NS_DROPS.load(AtOrd::Relaxed),
+                inuse, L3_MAX, NS_HIGHWATER.load(AtOrd::Relaxed),
+                NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX, NS_DROPS.load(AtOrd::Relaxed),
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
@@ -783,7 +792,7 @@ pub fn active_session_count() -> usize {
 pub fn reset_sessions() {
     l3_reset();
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
-              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_LAST_ACTIVITY] {
+              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_LAST_ACTIVITY, &NS_IQ_HI] {
         c.store(0, AtOrd::Relaxed);
     }
 }
