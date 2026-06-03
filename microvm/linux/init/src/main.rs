@@ -231,13 +231,6 @@ fn launch_wayland(kmsg_fd: i64) {
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
                  sleep 1; \
                  echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
-                 ( while sleep 2; do \
-                     [ -f /tmp/cage.log ] && tail -10 /tmp/cage.log 2>/dev/null \
-                       | grep -iE 'fatal|panic|signal|abort|error|wlroots|cage|libxul|moz|launching|exiting|nss_init|gtk|wayland' \
-                       | tail -5 | while read L; do \
-                           [ -n \"$L\" ] && echo \"<0>[diag-tail] $L\" > /dev/kmsg; \
-                         done; \
-                   done ) & \
                  MOZ_LOG_FILE=/tmp/moz.log \
                  MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3' \
                  cage -- librewolf --no-remote --profile /tmp/moz \
