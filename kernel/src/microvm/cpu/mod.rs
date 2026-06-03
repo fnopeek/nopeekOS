@@ -365,14 +365,26 @@ pub const GUEST_LAPIC: bool = true;
 pub const GUEST_SMP: bool = true;
 
 /// Number of vCPUs the MP-table enumerates to the guest when `GUEST_SMP` is on
-/// (BSP apic_id 0 + APs 1..). The AP-spawn orchestration + IPI bitmaps are
-/// N-ready up to `ORCH_MAX_VCPUS` / each backend's `MAX_VCPUS` (4) — bumping
-/// this to 3 or 4 is the only change needed to go N (one AP fiber per extra
-/// id). Kept at 2 for now so the first HW run isolates the genuinely new VMX
-/// AP bring-up against AMD's proven 2-vCPU baseline; once Intel 2-vCPU is
-/// confirmed, raise to 4 (QEMU `-smp 4` / i5-8265U: Core 0 stays the
-/// shell/reaper, the vCPU fibers spread over the worker cores).
-pub const GUEST_VCPUS: u8 = 2;
+/// (BSP apic_id 0 + APs 1..). **Dynamic**: one vCPU per host *worker* core
+/// (Core 0 stays the shell/reaper, so worker count = `core_count() - 1`),
+/// capped at `MAX_VCPUS_CAP` and floored at 1. Bigger machines therefore run
+/// more guest vCPUs automatically; a 1-2 core host falls back to single-vCPU
+/// (no AP). The browser dominates the workers while busy; idle vCPUs park.
+///
+/// Called at VM-launch time (well after SMP bring-up, so `core_count()` is
+/// stable) by the MP-table builder, the `maxcpus=` cmdline, and the IPI
+/// broadcast loops — all see the same value for one run.
+pub fn guest_vcpus() -> u8 {
+    let workers = crate::smp::per_core::core_count().saturating_sub(1);
+    workers.clamp(1, MAX_VCPUS_CAP) as u8
+}
+
+/// Hard cap on guest vCPUs (sizes the per-backend IPI bitmaps + the spawn
+/// bitmask). 8 covers an 8-thread notebook fully and is plenty for a browser;
+/// a 16/32-core desktop caps here rather than spawning a vCPU per core (idle
+/// vCPUs each carry a small wake overhead). Must be ≤ each backend's
+/// `MAX_VCPUS` and ≤ 32 (the `u32` spawn bitmask).
+pub const MAX_VCPUS_CAP: usize = 8;
 
 /// Guest-SMP Stage 3b-2: actually BRING UP the AP vCPU. When true the boot
 /// cmdline raises `maxcpus` to `GUEST_VCPUS`, the guest's INIT-SIPI spawns
@@ -436,8 +448,8 @@ pub const VMX_GUEST_LAPIC: bool = true;
 // bit, so a guest with several APs brings them all up.
 
 /// Largest apic_id + 1 the orchestration tracks. Matches the per-backend
-/// `MAX_VCPUS` (vmx + svm) that size the IPI bitmaps.
-const ORCH_MAX_VCPUS: usize = 4;
+/// `MAX_VCPUS` (vmx + svm) that size the IPI bitmaps + `MAX_VCPUS_CAP`.
+const ORCH_MAX_VCPUS: usize = 8;
 
 /// Bitmask of apic_ids the guest has SIPI'd (1 << apic_id). The reaper spawns
 /// a fiber for each set bit not yet in `AP_SPAWNED`.
