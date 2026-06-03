@@ -167,11 +167,13 @@ static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// termination pump used, to keep virtio access on one thread).
 static INBOUND_Q: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
 /// Backpressure cap on the staging queue between the NIC drain and the guest
-/// inject. At high throughput (29 MB/s speedtest) the guest's 256-entry RX
-/// virtqueue can briefly fall behind; without a bound the queue grows
-/// unboundedly → host OOM. 4× the guest RX queue gives burst slack; past it we
-/// drop, and the guest's TCP retransmits + backs off — proper flow control.
-const INBOUND_MAX: usize = 1024;
+/// inject. Without a bound, a high-throughput burst the guest can't drain in
+/// time grows it unboundedly → host OOM (the speedtest crash). Generous slack
+/// absorbs the host NIC's bursty delivery (slirp dumps buffered frames in
+/// clumps) without dropping; past it we drop → guest TCP backs off. At ~1.5 KB/
+/// entry this caps staging memory at ~12 MB. (Diagnostic: if the download is
+/// unchanged when this is raised, the cap is the NIC/slirp, not our consumer.)
+const INBOUND_MAX: usize = 8192;
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
