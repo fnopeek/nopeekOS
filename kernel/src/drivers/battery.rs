@@ -59,61 +59,46 @@ fn read_sbs() -> Option<BatteryState> {
 }
 
 // ── EC-RAM battery (HP Elite/Dragonfly control-method-battery) ──────────
-// Offsets reverse-engineered live on an HP Elite Dragonfly G1 and validated
-// against its BIOS readout (remaining 40 Wh, full-charge 50.01 Wh). The pack
-// is a degraded 57.8 Wh design (~88 % health). These offsets are specific to
-// the HP Elite EC layout; the `is_mobile()` gate keeps desktops out, and a
-// plausibility check keeps non-HP laptops from showing garbage.
-const EC_REMAINING_MWH: u8 = 0x4a;   // u16 LE: remaining capacity (mWh)
-const EC_CHARGE_FLAGS: u8 = 0xb7;    // bit 0x40 SET = not charging
-const EC_CHARGER_WATTS: u8 = 0xf9;   // 0 on battery, charger wattage on AC
-const EC_NOT_CHARGING: u8 = 0x40;
-// Last-full-charge reference for the percentage. Read from the BIOS rather
-// than the (noisy) EC capacity region; recalibrate if % drifts as the pack
-// ages further.
-const EC_FULL_CHARGE_MWH: u32 = 50_010;
-
-/// Read the remaining-capacity word, rejecting single-read glitches: take a
-/// value only when two reads agree (the EC can return a transient mid-update
-/// byte). Falls back to the third read if all differ.
-#[allow(dead_code)]
-fn read_remaining_stable() -> Option<u32> {
-    let a = crate::ec::read_u16(EC_REMAINING_MWH)?;
-    let b = crate::ec::read_u16(EC_REMAINING_MWH)?;
-    if a == b { return Some(a as u32); }
-    let c = crate::ec::read_u16(EC_REMAINING_MWH)?;
-    Some(c as u32)
-}
+// EC field offsets decoded from the DSDT's Field(ECRM) (via the `dsdt`
+// intent) — the same fields EC0.BTST/BTIF read: select the battery via BSEL,
+// then read the multiplexed capacity/status fields. Validated live on an HP
+// Elite Dragonfly G1 against the BIOS readout: BFC_=6496 mAh ≈ 50.01 Wh,
+// BDC_=7300 mAh ≈ 56.2 Wh design (units are mAh, ~7.7 V pack). Full charge
+// is read live (self-calibrating as the pack ages). HP-Elite-specific; the
+// is_mobile() gate keeps desktops out and a plausibility check guards others.
+pub const EC_BSEL: u8 = 0x86; // battery select (4-bit nibble); 0 on this single-battery laptop
+const EC_BFC: u8 = 0x8d;      // u16 full-charge capacity (mAh)
+const EC_BRC: u8 = 0xa1;      // u16 remaining capacity (mAh)
+const EC_BST: u8 = 0x99;      // status nibble: bit0 = discharging, bit1 = charging
+const EC_CHARGER_WATTS: u8 = 0xf9; // AC adapter present when nonzero
+const BST_DISCHARGING: u8 = 0x01;
+const BST_CHARGING: u8 = 0x02;
 
 fn read_ec() -> Option<BatteryState> {
     // Laptops only — desktops have no battery (and bogus EC RAM here).
     if !crate::acpi::is_mobile() { return None; }
 
-    // DISABLED: 0x4a (EC_REMAINING_MWH) turned out to be a monotonic counter,
-    // not remaining capacity (rose past full-charge after 30 min on battery).
-    // The real remaining-capacity EC offset comes from the DSDT EmbeddedControl
-    // Field (`dsdt` intent). Until that offset is known, report no battery
-    // rather than a bogus %. Re-enable by pointing EC_REMAINING_MWH at the
-    // real offset and removing this early return.
-    return None;
-    #[allow(unreachable_code)]
-    let remaining = read_remaining_stable()?;
-    // Sanity: a real mWh capacity, not a stray/garbage read.
-    if !(1_000..=120_000).contains(&remaining) { return None; }
+    // BSEL is already 0 (single battery) on the Dragonfly, so no EC write is
+    // needed to select BAT0 — we stay read-only.
+    let full = crate::ec::read_u16(EC_BFC)? as u32;
+    let remaining = crate::ec::read_u16(EC_BRC)? as u32;
+    // Plausibility (mAh): guards non-HP laptops whose 0x8d/0xa1 mean nothing.
+    if !(500..=20_000).contains(&full) { return None; }
+    if remaining > full + full / 8 { return None; }
 
-    let percent = ((remaining * 100 + EC_FULL_CHARGE_MWH / 2)
-        / EC_FULL_CHARGE_MWH).min(100) as u8;
+    let percent = ((remaining * 100 + full / 2) / full).min(100) as u8;
 
+    let bst = crate::ec::read(EC_BST).unwrap_or(0) & 0x0F;
     let ac = crate::ec::read(EC_CHARGER_WATTS).map(|w| w != 0).unwrap_or(false);
-    let charging = crate::ec::read(EC_CHARGE_FLAGS)
-        .map(|f| f & EC_NOT_CHARGING == 0).unwrap_or(false);
 
-    let status = if ac && charging {
+    let status = if bst & BST_CHARGING != 0 {
         ChargeStatus::Charging
+    } else if bst & BST_DISCHARGING != 0 {
+        ChargeStatus::Discharging
     } else if percent >= 99 {
         ChargeStatus::Full
     } else if ac {
-        // Plugged in but not charging (HP Adaptive Battery Care holds ~85 %).
+        // Plugged in, not charging (HP Adaptive Battery Care holds ~80 %).
         ChargeStatus::PluggedIdle
     } else {
         ChargeStatus::Discharging
