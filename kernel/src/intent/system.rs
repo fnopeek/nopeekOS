@@ -337,6 +337,87 @@ fn intent_ec_battery_dump() {
     }
 }
 
+/// AML NameString length at `p` (handles root/parent prefixes + dual/multi
+/// name prefixes; plain 4-char NameSeg otherwise).
+fn aml_name_len(b: &[u8], p: usize) -> usize {
+    match b.get(p).copied() {
+        Some(0x5C) | Some(0x5E) => 1 + aml_name_len(b, p + 1),
+        Some(0x2E) => 1 + 8,
+        Some(0x2F) => 2 + (b.get(p + 1).copied().unwrap_or(0) as usize) * 4,
+        _ => 4,
+    }
+}
+
+fn dsdt_dump_range(b: &[u8], label: &str, start: usize, count: usize) {
+    let end = (start + count).min(b.len());
+    kprintln!("  --- {} @ 0x{:x}..0x{:x} ---", label, start, end);
+    let mut i = start;
+    while i < end {
+        let row = (end - i).min(16);
+        // offset + hex + ASCII (field NameSegs are ASCII, easy to spot)
+        let mut line = alloc::format!("  {:05x}: ", i);
+        for j in 0..16 {
+            if j < row {
+                line.push_str(&alloc::format!("{:02x} ", b[i + j]));
+            } else {
+                line.push_str("   ");
+            }
+        }
+        line.push(' ');
+        for j in 0..row {
+            let c = b[i + j];
+            line.push(if (0x20..0x7f).contains(&c) { c as char } else { '.' });
+        }
+        kprintln!("{}", line);
+        i += 16;
+    }
+}
+
+/// `dsdt` — dump only the battery-relevant AML: every EmbeddedControl
+/// OperationRegion+Field (field NameSegs → EC byte offsets, e.g. BRC/BFC)
+/// and the _BST/_BIF/_BIX methods. Small enough to copy from the console;
+/// from this we map the real remaining/full-charge EC offsets.
+pub fn intent_dsdt() {
+    let Some((addr, len)) = crate::acpi::dsdt() else {
+        kprintln!("[npk] DSDT not found");
+        return;
+    };
+    let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+    kprintln!("  DSDT @ 0x{:x}, len {} bytes", addr, len);
+
+    // EmbeddedControl OperationRegions (0x5B 0x80 <name> 0x03) + following Field.
+    let mut ec = 0;
+    let mut i = 0;
+    while i + 12 < len && ec < 2 {
+        if b[i] == 0x5B && b[i + 1] == 0x80 {
+            let sp = i + 2 + aml_name_len(b, i + 2);
+            if sp < len && b[sp] == 0x03 {
+                dsdt_dump_range(b, "EmbeddedControl region+field", i, 3072);
+                ec += 1;
+            }
+        }
+        i += 1;
+    }
+    if ec == 0 { kprintln!("  (no EmbeddedControl region found)"); }
+
+    // Battery methods.
+    for (name, seg) in [
+        ("_BST", [0x5Fu8, 0x42, 0x53, 0x54]),
+        ("_BIF", [0x5Fu8, 0x42, 0x49, 0x46]),
+        ("_BIX", [0x5Fu8, 0x42, 0x49, 0x58]),
+    ] {
+        let mut found = 0;
+        let mut k = 0;
+        while k + 4 < len && found < 2 {
+            if b[k..k + 4] == seg {
+                dsdt_dump_range(b, name, k.saturating_sub(6), 448);
+                found += 1;
+            }
+            k += 1;
+        }
+    }
+}
+
 pub fn intent_uptime() {
     let secs = crate::interrupts::uptime_secs();
     let days = secs / 86400;

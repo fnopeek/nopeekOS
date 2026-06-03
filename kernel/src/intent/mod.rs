@@ -1281,6 +1281,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "akku" | "battery" | "bat" => {
             system::intent_battery();
         }
+        "dsdt" => {
+            system::intent_dsdt();
+        }
         "debug" => {
             // Parse "<ip> <port>" and set the target before spawning debug.wasm.
             // No-arg dev shortcut: dial Florian's laptop on the LAN
