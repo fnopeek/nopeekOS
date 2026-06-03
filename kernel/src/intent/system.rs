@@ -314,7 +314,25 @@ fn intent_ec_battery_dump() {
         }
     }
     kprintln!();
-    kprintln!("  → tell me your current charge %, I'll map the offsets.");
+
+    // Decoded HP-EC battery (offsets locked from the live reverse-engineering
+    // against the BIOS readout). This is what the bar segment shows.
+    let rem = crate::ec::read_u16(0x4a).unwrap_or(0) as u32;
+    let watts = crate::ec::read(0xf9).unwrap_or(0);
+    let flags = crate::ec::read(0xb7).unwrap_or(0);
+    kprintln!("  Decoded (HP-EC): remaining={} mWh, charger={}W, flags=0x{:02x}",
+        rem, watts, flags);
+    match crate::battery::read() {
+        Some(b) => {
+            let st = match b.status {
+                crate::battery::ChargeStatus::Charging    => "charging",
+                crate::battery::ChargeStatus::Discharging => "on battery / held",
+                crate::battery::ChargeStatus::Full        => "full",
+            };
+            kprintln!("  → {}%  ({})", b.percent, st);
+        }
+        None => kprintln!("  → battery decode failed"),
+    }
 }
 
 pub fn intent_uptime() {
