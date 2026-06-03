@@ -82,6 +82,17 @@ pub fn ensure_mapped_pub(addr: usize, size: usize) {
     ensure_mapped(addr, size);
 }
 
+/// FADT "Preferred PM Profile" (offset 45): 2 = Mobile (laptop). Used to
+/// gate the EC battery driver so desktops (NUC = profile 1) never probe for
+/// a battery and show a phantom one.
+pub fn is_mobile() -> bool {
+    let Some(fadt) = find_table(b"FACP") else { return false };
+    ensure_mapped(fadt, 256);
+    let len = unsafe { *((fadt + 4) as *const u32) } as usize;
+    if len < 46 { return false; }
+    unsafe { *((fadt + 45) as *const u8) == 2 }
+}
+
 /// Ensure a memory region is identity-mapped so we can read ACPI tables.
 fn ensure_mapped(addr: usize, size: usize) {
     let start = addr & !0xFFF;
