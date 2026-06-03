@@ -245,10 +245,11 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
         "battery" => {
             if st.bat < 0 { return Vec::new(); }
             let percent = (st.bat & 0xFF) as u8;
-            let status = (st.bat >> 8) & 0xFF; // 0=discharging 1=charging 2=full
+            let status = (st.bat >> 8) & 0xFF; // 0=discharge 1=charge 2=full 3=plugged-idle
             let icon = match status {
-                1 => IconId::BatteryCharging,
+                1 => IconId::BatteryCharging, // actively charging → bolt
                 2 => IconId::BatteryFull,
+                3 => IconId::Plug,            // on AC, held (not charging) → plug
                 _ => match percent {
                     0..=10  => IconId::BatteryWarning,
                     11..=30 => IconId::BatteryLow,

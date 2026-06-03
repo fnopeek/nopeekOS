@@ -99,6 +99,7 @@ const _: () = {
     assert!(IconId::BatteryFull       as u16 == 34);
     assert!(IconId::BatteryCharging   as u16 == 35);
     assert!(IconId::BatteryWarning    as u16 == 36);
+    assert!(IconId::Plug              as u16 == 37);
 
     // Align / Axis — used inside Widget struct variants, positions frozen.
     assert!(Align::Start   as u8 == 0);

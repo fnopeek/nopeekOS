@@ -164,6 +164,7 @@ pub enum IconId {
     BatteryFull         = 34,
     BatteryCharging     = 35,
     BatteryWarning      = 36,
+    Plug                = 37,
     // Appended only.
 }
 

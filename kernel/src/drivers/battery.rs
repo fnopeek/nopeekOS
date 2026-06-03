@@ -22,6 +22,9 @@ pub enum ChargeStatus {
     Discharging = 0,
     Charging = 1,
     Full = 2,
+    /// On AC but not actively charging (e.g. HP Adaptive Battery Care holds
+    /// the charge at ~85 %). Shown with a plug icon, not the charging bolt.
+    PluggedIdle = 3,
 }
 
 #[derive(Clone, Copy)]
@@ -70,11 +73,22 @@ const EC_NOT_CHARGING: u8 = 0x40;
 // ages further.
 const EC_FULL_CHARGE_MWH: u32 = 50_010;
 
+/// Read the remaining-capacity word, rejecting single-read glitches: take a
+/// value only when two reads agree (the EC can return a transient mid-update
+/// byte). Falls back to the third read if all differ.
+fn read_remaining_stable() -> Option<u32> {
+    let a = crate::ec::read_u16(EC_REMAINING_MWH)?;
+    let b = crate::ec::read_u16(EC_REMAINING_MWH)?;
+    if a == b { return Some(a as u32); }
+    let c = crate::ec::read_u16(EC_REMAINING_MWH)?;
+    Some(c as u32)
+}
+
 fn read_ec() -> Option<BatteryState> {
     // Laptops only — desktops have no battery (and bogus EC RAM here).
     if !crate::acpi::is_mobile() { return None; }
 
-    let remaining = crate::ec::read_u16(EC_REMAINING_MWH)? as u32;
+    let remaining = read_remaining_stable()?;
     // Sanity: a real mWh capacity, not a stray/garbage read.
     if !(1_000..=120_000).contains(&remaining) { return None; }
 
@@ -89,9 +103,10 @@ fn read_ec() -> Option<BatteryState> {
         ChargeStatus::Charging
     } else if percent >= 99 {
         ChargeStatus::Full
+    } else if ac {
+        // Plugged in but not charging (HP Adaptive Battery Care holds ~85 %).
+        ChargeStatus::PluggedIdle
     } else {
-        // On battery, or plugged-but-held (HP caps charging at ~80 %): show
-        // the level icon without the charging bolt.
         ChargeStatus::Discharging
     };
 

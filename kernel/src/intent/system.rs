@@ -256,6 +256,7 @@ pub fn intent_battery() {
                     crate::battery::ChargeStatus::Charging    => "charging",
                     crate::battery::ChargeStatus::Discharging => "discharging",
                     crate::battery::ChargeStatus::Full        => "full",
+                    crate::battery::ChargeStatus::PluggedIdle => "plugged, not charging",
                 };
                 kprintln!("  Decoded:       {}% — {}", b.percent, st);
             }
@@ -326,8 +327,9 @@ fn intent_ec_battery_dump() {
         Some(b) => {
             let st = match b.status {
                 crate::battery::ChargeStatus::Charging    => "charging",
-                crate::battery::ChargeStatus::Discharging => "on battery / held",
+                crate::battery::ChargeStatus::Discharging => "on battery",
                 crate::battery::ChargeStatus::Full        => "full",
+                crate::battery::ChargeStatus::PluggedIdle => "plugged, not charging",
             };
             kprintln!("  → {}%  ({})", b.percent, st);
         }
