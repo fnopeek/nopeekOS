@@ -161,13 +161,13 @@ static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// (push TSC, frame) — the TSC lets the pump measure RX delivery latency.
 static INBOUND_Q: Mutex<VecDeque<(u64, Vec<u8>)>> = Mutex::new(VecDeque::new());
 /// Backpressure cap on the staging queue between the NIC drain and the guest
-/// inject. Without a bound, a high-throughput burst the guest can't drain in
-/// time grows it unboundedly → host OOM (the speedtest crash). Generous slack
-/// absorbs the host NIC's bursty delivery (slirp dumps buffered frames in
-/// clumps) without dropping; past it we drop → guest TCP backs off. At ~1.5 KB/
-/// entry this caps staging memory at ~12 MB. (Diagnostic: if the download is
-/// unchanged when this is raised, the cap is the NIC/slirp, not our consumer.)
-const INBOUND_MAX: usize = 8192;
+/// inject. ANTI-BUFFERBLOAT: kept SMALL (≈2× the guest's 256-entry RX queue) on
+/// purpose — a big queue lets TCP fill it, ballooning the latency under load
+/// (measured: 600 ms loaded latency vs ~20 ms native), which is what makes page
+/// loads crawl (every round-trip waits behind a fat download queue). Small ⇒ it
+/// fills fast ⇒ we drop ⇒ TCP backs off ⇒ the queue (and latency) stays short.
+/// For a browser low latency beats peak throughput. Also bounds staging memory.
+const INBOUND_MAX: usize = 512;
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
