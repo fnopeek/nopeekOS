@@ -1656,8 +1656,13 @@ impl VmContext {
                 // many small request→response round-trips (latency, not
                 // throughput — a single bulk stream is unaffected). Spin-pump
                 // while recently active; park once the link is quiet (power).
+                // Only the BSP services the network (device IRQs are BSP-only),
+                // so ONLY the BSP stays spin-pumping while data is in flight —
+                // the AP vCPUs have no network work and must park normally, or
+                // every vCPU spins at 100% during a download (observed: all 5
+                // cores pegged, useless burn).
                 if self.vcpu.consecutive_idle >= IDLE_YIELD
-                    && !crate::microvm::devices::nat::recently_active(now)
+                    && !(is_bsp && crate::microvm::devices::nat::recently_active(now))
                 {
                     return Ok(SliceOutcome::Idle);
                 }

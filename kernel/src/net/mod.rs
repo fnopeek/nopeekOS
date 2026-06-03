@@ -27,6 +27,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// (its data is drained by the holder + picked up next pass).
 static POLLING: AtomicBool = AtomicBool::new(false);
 
+/// Force-clear the NIC-drain guard. Called on microvm teardown so a stuck
+/// guard (e.g. a vCPU fiber that held it when something went wrong) can never
+/// brick the HOST's own networking — without this, a stuck `POLLING=true` makes
+/// every host `net::poll()` skip the NIC drain forever → host DNS / OTA dead
+/// until reboot. Safe to call any time (the microvm fiber is gone by teardown).
+pub fn reset_poll_guard() {
+    POLLING.store(false, Ordering::Release);
+}
+
 /// Process incoming packets and TCP timers.
 pub fn poll() {
     // The guard wraps ONLY the single-consumer NIC drain + host-TCP tick

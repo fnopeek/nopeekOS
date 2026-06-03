@@ -1734,8 +1734,13 @@ impl VmContext {
                 // gap = a 2 ms park → YouTube "ewig"). While recently active,
                 // keep spin-pumping (the slice still yields the core every
                 // SLICE_MS); park only once the link is quiet (power).
+                // Only the BSP services the network (device IRQs are BSP-only),
+                // so ONLY the BSP stays spin-pumping while data is in flight —
+                // the AP vCPUs have no network work and must park normally, or
+                // every vCPU spins at 100% during a download (observed: all 5
+                // cores pegged, useless burn + notebook starvation).
                 if self.vcpu.consecutive_idle >= IDLE_YIELD
-                    && !crate::microvm::devices::nat::recently_active(now)
+                    && !(is_bsp && crate::microvm::devices::nat::recently_active(now))
                 {
                     return Ok(SliceOutcome::Idle);
                 }
