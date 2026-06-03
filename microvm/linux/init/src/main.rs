@@ -176,7 +176,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
-                 echo 'nameserver 10.99.0.1' > /tmp/resolv.conf; \
+                 printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /tmp/resolv.conf; \
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
                  ( [ -b /dev/vda ] && echo '<0>[moz-disk] /dev/vda present' > /dev/kmsg || echo '<0>[moz-disk] /dev/vda ABSENT' > /dev/kmsg ); \
