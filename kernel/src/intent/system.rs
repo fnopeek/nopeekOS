@@ -316,13 +316,15 @@ fn intent_ec_battery_dump() {
     }
     kprintln!();
 
-    // Decoded HP-EC battery (offsets locked from the live reverse-engineering
-    // against the BIOS readout). This is what the bar segment shows.
-    let rem = crate::ec::read_u16(0x4a).unwrap_or(0) as u32;
+    // Decoded HP-EC battery — offsets from the DSDT Field(ECRM): BSEL/BFC_/
+    // BRC_/BST_ (mAh). This is what the bar segment shows.
+    let bsel = crate::ec::read(0x86).unwrap_or(0xff);
+    let full = crate::ec::read_u16(0x8d).unwrap_or(0);
+    let rem = crate::ec::read_u16(0xa1).unwrap_or(0);
+    let bst = crate::ec::read(0x99).unwrap_or(0) & 0x0f;
     let watts = crate::ec::read(0xf9).unwrap_or(0);
-    let flags = crate::ec::read(0xb7).unwrap_or(0);
-    kprintln!("  Decoded (HP-EC): remaining={} mWh, charger={}W, flags=0x{:02x}",
-        rem, watts, flags);
+    kprintln!("  Decoded (HP-EC): BSEL={} BRC_={} mAh BFC_={} mAh BST_=0x{:x} charger={}W",
+        bsel, rem, full, bst, watts);
     match crate::battery::read() {
         Some(b) => {
             let st = match b.status {
