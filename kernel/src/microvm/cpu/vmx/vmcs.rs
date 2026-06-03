@@ -790,6 +790,11 @@ const AR_DATA32: u32 = 0x3 | 0x10 | 0x80 | (1 << 14) | (1 << 15);
 const AR_TSS_BUSY: u32 = 0xB | 0x80;
 // Unusable segment marker (bit 16). Used for guest LDTR (no LDT).
 const AR_UNUSABLE: u32 = 1 << 16;
+// 16-bit real-mode code (CS): type=0xB, S=1, DPL=0, P=1, no G/D (16-bit).
+// Matches SVM `ATTR_CODE_RM`. Used for an AP's SIPI entry (guest SMP).
+const AR_CODE16: u32 = 0x9B;
+// 16-bit real-mode data (SS/DS/ES/FS/GS): type=0x3, S=1, P=1.
+const AR_DATA16: u32 = 0x93;
 
 /// Fill GUEST_* fields for an unrestricted 32-bit protected-mode
 /// guest with flat segments. CR0 has PE=1 PG=0 (paging off — Linux
@@ -883,6 +888,91 @@ pub(super) fn setup_guest_state(guest_rip: u64) -> Result<(), &'static str> {
     vmwrite(GUEST_RFLAGS, 0x2)?; // IF=0, reserved bit 1 set
     vmwrite(GUEST_RSP, 0x80000)?; // arbitrary; real stack comes from caller GPRs if used
     vmwrite(GUEST_RIP, guest_rip)?;
+    vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0)?;
+    vmwrite(GUEST_ACTIVITY_STATE, 0)?;
+    vmwrite(GUEST_PENDING_DBG_EXCEPTIONS, 0)?;
+    vmwrite(GUEST_SYSENTER_CS, 0)?;
+    vmwrite(GUEST_SYSENTER_ESP, 0)?;
+    vmwrite(GUEST_SYSENTER_EIP, 0)?;
+    vmwrite(GUEST_IA32_EFER, 0)?;
+
+    vmwrite(VMCS_LINK_POINTER, !0u64)?;
+
+    Ok(())
+}
+
+/// Fill GUEST_* fields for an AP vCPU's SIPI start (guest SMP): 16-bit
+/// real mode at `CS = (vector<<8):0000`, i.e. physical entry `vector<<12`
+/// — where Linux's BSP copied the real-mode AP trampoline. The trampoline
+/// takes the AP into protected→long mode and `start_secondary`; the
+/// IA-32e/EFER transition is then picked up by `sync_entry_ia32e_with_efer`
+/// exactly as on the BSP's 32-bit→64-bit boot. Real mode is allowed because
+/// unrestricted-guest=1 (set in `setup_execution_controls`, shared with the
+/// BSP). Mirrors svm `setup_vmcb_ap`.
+pub(super) fn setup_guest_state_ap(sipi_vector: u8) -> Result<(), &'static str> {
+    // Real-mode CR0: PE=0, PG=0. Unrestricted-guest relaxes the
+    // CR0_FIXED0 must-be-1 on PE/PG (SDM §26.3.1.1); keep the other
+    // fixed bits, force ET (bit 4).
+    let cr0_f0 = unsafe { rdmsr(0x486) };
+    let cr0_f1 = unsafe { rdmsr(0x487) };
+    let cr0_rm = ((cr0_f0 & cr0_f1) & !((1u64 << 0) | (1u64 << 31))) | (1u64 << 4);
+
+    let host_cr4: u64;
+    // SAFETY: pure register read.
+    unsafe { core::arch::asm!("mov {}, cr4", out(reg) host_cr4, options(nostack, preserves_flags)); }
+    let guest_cr4 = host_cr4 & !(1u64 << 23); // clear CET (see setup_guest_state)
+
+    vmwrite(GUEST_CR0, cr0_rm)?;
+    vmwrite(GUEST_CR3, 0)?;
+    vmwrite(GUEST_CR4, guest_cr4)?;
+
+    let cs_sel = (sipi_vector as u64) << 8;
+    let cs_base = (sipi_vector as u64) << 12;
+    vmwrite(GUEST_CS_SELECTOR, cs_sel)?;
+    vmwrite(GUEST_SS_SELECTOR, 0)?;
+    vmwrite(GUEST_DS_SELECTOR, 0)?;
+    vmwrite(GUEST_ES_SELECTOR, 0)?;
+    vmwrite(GUEST_FS_SELECTOR, 0)?;
+    vmwrite(GUEST_GS_SELECTOR, 0)?;
+    vmwrite(GUEST_LDTR_SELECTOR, 0)?;
+    vmwrite(GUEST_TR_SELECTOR, 0)?;
+
+    vmwrite(GUEST_CS_BASE, cs_base)?;
+    vmwrite(GUEST_SS_BASE, 0)?;
+    vmwrite(GUEST_DS_BASE, 0)?;
+    vmwrite(GUEST_ES_BASE, 0)?;
+    vmwrite(GUEST_FS_BASE, 0)?;
+    vmwrite(GUEST_GS_BASE, 0)?;
+    vmwrite(GUEST_LDTR_BASE, 0)?;
+    vmwrite(GUEST_TR_BASE, 0)?;
+    vmwrite(GUEST_GDTR_BASE, 0)?;
+    vmwrite(GUEST_IDTR_BASE, 0)?;
+
+    // 16-bit real-mode limits (0xFFFF) for the segments; TR/GDTR/IDTR sane.
+    vmwrite(GUEST_CS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_SS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_DS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_ES_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_FS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_GS_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_LDTR_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_TR_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_GDTR_LIMIT, 0xFFFF)?;
+    vmwrite(GUEST_IDTR_LIMIT, 0xFFFF)?;
+
+    vmwrite(GUEST_CS_AR_BYTES, AR_CODE16 as u64)?;
+    vmwrite(GUEST_SS_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_DS_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_ES_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_FS_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_GS_AR_BYTES, AR_DATA16 as u64)?;
+    vmwrite(GUEST_LDTR_AR_BYTES, AR_UNUSABLE as u64)?;
+    vmwrite(GUEST_TR_AR_BYTES, AR_TSS_BUSY as u64)?;
+
+    vmwrite(GUEST_DR7, 0x400)?;
+    vmwrite(GUEST_RFLAGS, 0x2)?; // IF=0, reserved bit 1 set
+    vmwrite(GUEST_RSP, 0)?;
+    vmwrite(GUEST_RIP, 0)?; // real-mode offset 0 within CS=vector<<12
     vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0)?;
     vmwrite(GUEST_ACTIVITY_STATE, 0)?;
     vmwrite(GUEST_PENDING_DBG_EXCEPTIONS, 0)?;

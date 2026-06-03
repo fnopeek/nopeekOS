@@ -364,9 +364,14 @@ pub const GUEST_LAPIC: bool = true;
 /// guest; no guest-kernel rebuild needed).
 pub const GUEST_SMP: bool = true;
 
-/// Number of vCPUs the MP-table enumerates to the guest when `GUEST_SMP`
-/// is on. Stage 2 keeps this at 2 (BSP + one enumerated-but-not-onlined
-/// AP). The boot cmdline still caps onlining at `maxcpus=1` until Stage 3.
+/// Number of vCPUs the MP-table enumerates to the guest when `GUEST_SMP` is on
+/// (BSP apic_id 0 + APs 1..). The AP-spawn orchestration + IPI bitmaps are
+/// N-ready up to `ORCH_MAX_VCPUS` / each backend's `MAX_VCPUS` (4) — bumping
+/// this to 3 or 4 is the only change needed to go N (one AP fiber per extra
+/// id). Kept at 2 for now so the first HW run isolates the genuinely new VMX
+/// AP bring-up against AMD's proven 2-vCPU baseline; once Intel 2-vCPU is
+/// confirmed, raise to 4 (QEMU `-smp 4` / i5-8265U: Core 0 stays the
+/// shell/reaper, the vCPU fibers spread over the worker cores).
 pub const GUEST_VCPUS: u8 = 2;
 
 /// Guest-SMP Stage 3b-2: actually BRING UP the AP vCPU. When true the boot
@@ -378,13 +383,24 @@ pub const GUEST_VCPUS: u8 = 2;
 /// false + re-release (clean rollback, no reinstall). Requires `GUEST_SMP`.
 pub const GUEST_SMP_AP: bool = true;
 
-/// Whether guest-SMP AP bring-up is enabled AND supported on this host. The
-/// AP-vCPU open path (`svm::vm_open_ap`) + SIPI/LAPIC routing are SVM-only, so
-/// on Intel/VMX the guest must stay single-vCPU: an enumerated-but-never-
-/// onlined AP hangs Linux's cpuhp bring-up. Gate the guest's `maxcpus` (and the
-/// AP spawn) on this so Intel boots single-vCPU until a VMX AP path exists.
+/// Whether guest-SMP AP bring-up is enabled AND supported on this host. Both
+/// backends now have an AP-vCPU open path (`svm::vm_open_ap` / `vmx::vm_open_ap`)
+/// + SIPI/LAPIC routing, so this gates the guest's `maxcpus` (and the AP spawn)
+/// on AMD and Intel alike. Unknown vendor stays single-vCPU.
 pub fn smp_ap_active() -> bool {
-    GUEST_SMP_AP && matches!(current_vendor(), Vendor::Amd)
+    GUEST_SMP_AP && matches!(current_vendor(), Vendor::Amd | Vendor::Intel)
+}
+
+/// Set/clear the active backend's guest-SMP big-VM-lock engagement. Dispatches
+/// via `detect_vendor` (lock-free CPUID) NOT `current_vendor()` (which locks
+/// VENDOR) — the BSP vCPU fiber holds the VENDOR lock for its whole run loop,
+/// so the last-one-out call from inside that arm must not re-lock it.
+fn vm_set_ap_active(on: bool) {
+    match detect_vendor() {
+        Vendor::Intel => vmx::set_ap_active(on),
+        Vendor::Amd => svm::set_ap_active(on),
+        Vendor::Unknown(_) => {}
+    }
 }
 
 /// Whether the guest's local APIC is emulated on this host. LAPIC emulation
@@ -410,39 +426,62 @@ pub fn guest_lapic_active() -> bool {
 /// guest-SMP (#4) — Linux needs the per-CPU LAPIC timer to schedule APs.
 pub const VMX_GUEST_LAPIC: bool = true;
 
-// ── AP (secondary vCPU) spawn orchestration (guest SMP, Stage 3b-2) ─────
+// ── AP (secondary vCPU) spawn orchestration (guest SMP, N vCPUs) ────────
 //
-// The guest's INIT-SIPI is decoded on the BSP vCPU fiber (a worker core),
-// which CANNOT push a fiber itself (the run-queue deque is single-producer,
-// owned by Core 0). So the SIPI handler only records a request here; the
-// Core-0 reaper (`vm_poll_slice`) does the actual `spawn_fiber`.
-static AP_SPAWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-static AP_SPAWNED: AtomicBool = AtomicBool::new(false);
-static AP_SIPI_VECTOR: AtomicU8 = AtomicU8::new(0);
-/// The BSP's `*mut VmShared` (as u64), published once the BSP opens, for
-/// the AP fiber to alias. 0 = not yet published.
+// The guest's INIT-SIPI is decoded on a vCPU fiber (a worker core), which
+// CANNOT push a fiber itself (the run-queue deque is single-producer, owned by
+// Core 0). So the SIPI handler only records a request here (per target
+// apic_id); the Core-0 reaper (`vm_poll_slice`) does the actual `spawn_fiber`
+// for each newly-requested AP. N-vCPU-ready: each AP is tracked by its apic_id
+// bit, so a guest with several APs brings them all up.
+
+/// Largest apic_id + 1 the orchestration tracks. Matches the per-backend
+/// `MAX_VCPUS` (vmx + svm) that size the IPI bitmaps.
+const ORCH_MAX_VCPUS: usize = 4;
+
+/// Bitmask of apic_ids the guest has SIPI'd (1 << apic_id). The reaper spawns
+/// a fiber for each set bit not yet in `AP_SPAWNED`.
+static AP_SPAWN_REQUESTED: AtomicU32 = AtomicU32::new(0);
+/// Bitmask of apic_ids already spawned (the reaper's idempotence guard:
+/// absorbs the retried 2nd SIPI per AP).
+static AP_SPAWNED: AtomicU32 = AtomicU32::new(0);
+/// SIPI start vector per apic_id (Linux uses one trampoline page, but track
+/// per-id to stay correct if that ever changes).
+static AP_SIPI_VECTORS: [AtomicU8; ORCH_MAX_VCPUS] =
+    { const Z: AtomicU8 = AtomicU8::new(0); [Z; ORCH_MAX_VCPUS] };
+/// The BSP's `*mut VmShared` (as u64), published once the BSP opens, for an
+/// AP fiber to alias. 0 = not yet published.
 static AP_SHARED_PTR: AtomicU64 = AtomicU64::new(0);
-/// Live vCPU count for this VM. The BSP sets it to 1 at open; the reaper
-/// bumps it when it spawns the AP; each fiber decrements on exit. The BSP
-/// (owner) waits for it to return to 1 before `close()` so the AP never
-/// touches freed shared state (last-one-out).
+/// Live vCPU count for this VM. The BSP sets it to 1 at open; the reaper bumps
+/// it per AP it spawns; each fiber decrements on exit. The BSP (owner) waits
+/// for it to return to 1 before `close()` so no AP touches freed shared state
+/// (last-one-out).
 static VCPU_COUNT: AtomicU32 = AtomicU32::new(0);
 
-/// Record a guest SIPI (from the svm ICR router) → ask Core 0 to spawn the
-/// AP at `sipi_vector`. No-op unless guest-SMP AP bring-up is enabled.
-/// Idempotent: the reaper's `AP_SPAWNED` guard ignores the 2nd SIPI.
-pub fn request_ap_spawn(sipi_vector: u8) {
-    if !GUEST_SMP_AP {
+/// Record a guest SIPI (from a backend ICR router) → ask Core 0 to spawn the
+/// AP with `apic_id` at `sipi_vector`. No-op unless guest-SMP AP bring-up is
+/// enabled or apic_id is out of range. Idempotent: the reaper's `AP_SPAWNED`
+/// guard ignores a re-SIPI of an already-spawned AP.
+pub fn request_ap_spawn(apic_id: u8, sipi_vector: u8) {
+    if !GUEST_SMP_AP || apic_id == 0 || apic_id as usize >= ORCH_MAX_VCPUS {
         return;
     }
-    AP_SIPI_VECTOR.store(sipi_vector, Ordering::Release);
-    AP_SPAWN_REQUESTED.store(true, Ordering::Release);
+    AP_SIPI_VECTORS[apic_id as usize].store(sipi_vector, Ordering::Release);
+    AP_SPAWN_REQUESTED.fetch_or(1u32 << apic_id, Ordering::AcqRel);
 }
 
 /// The BSP publishes the address of its (heap-boxed) `VmShared` so a
 /// spawned AP fiber can alias it.
 pub fn publish_ap_shared(ptr: u64) {
     AP_SHARED_PTR.store(ptr, Ordering::Release);
+}
+
+/// Reset the AP-spawn orchestration statics after the last vCPU has exited
+/// (BSP teardown), so a relaunch starts clean.
+fn ap_orch_reset() {
+    AP_SPAWNED.store(0, Ordering::Release);
+    AP_SPAWN_REQUESTED.store(0, Ordering::Release);
+    AP_SHARED_PTR.store(0, Ordering::Release);
 }
 
 /// Decided once at boot (`set_vm_fiber_mode`, from `init_dedicated_vm_core`,
@@ -610,21 +649,37 @@ pub fn vm_poll_slice() {
     // Once per VM (AP_SPAWNED guard absorbs the retried 2nd SIPI). AP_ACTIVE
     // is set BEFORE the spawn so the BSP starts taking the big-VM lock
     // before the AP can run.
-    if GUEST_SMP_AP
-        && AP_SPAWN_REQUESTED.load(Ordering::Acquire)
-        && !AP_SPAWNED.swap(true, Ordering::AcqRel)
-    {
-        VCPU_COUNT.fetch_add(1, Ordering::AcqRel);
-        svm::set_ap_active(true);
-        crate::kprintln!(
-            "[microvm] spawning AP vCPU fiber (sipi vec {:#x})",
-            AP_SIPI_VECTOR.load(Ordering::Acquire)
-        );
-        crate::smp::scheduler::spawn_fiber(
-            crate::smp::scheduler::Priority::Interactive,
-            ap_vcpu_fiber_task,
-            0,
-        );
+    if GUEST_SMP_AP {
+        let fresh = AP_SPAWN_REQUESTED.load(Ordering::Acquire)
+            & !AP_SPAWNED.load(Ordering::Acquire);
+        if fresh != 0 {
+            for apic_id in 1..ORCH_MAX_VCPUS as u32 {
+                if fresh & (1u32 << apic_id) == 0 {
+                    continue;
+                }
+                // Claim it (idempotent against a re-SIPI / re-poll).
+                if AP_SPAWNED.fetch_or(1u32 << apic_id, Ordering::AcqRel)
+                    & (1u32 << apic_id)
+                    != 0
+                {
+                    continue;
+                }
+                // AP_ACTIVE before the spawn so the BSP starts taking the
+                // big-VM lock before the AP can run.
+                VCPU_COUNT.fetch_add(1, Ordering::AcqRel);
+                vm_set_ap_active(true);
+                crate::kprintln!(
+                    "[microvm] spawning AP vCPU fiber apic_id={} (sipi vec {:#x})",
+                    apic_id,
+                    AP_SIPI_VECTORS[apic_id as usize].load(Ordering::Acquire)
+                );
+                crate::smp::scheduler::spawn_fiber(
+                    crate::smp::scheduler::Priority::Interactive,
+                    ap_vcpu_fiber_task,
+                    apic_id as u64,
+                );
+            }
+        }
     }
 
     if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
@@ -937,9 +992,7 @@ fn vcpu_fiber_task(_arg: u64) {
                         crate::smp::fiber::yield_sleep(2);
                     }
                     svm::set_ap_active(false);
-                    AP_SPAWNED.store(false, Ordering::Release);
-                    AP_SPAWN_REQUESTED.store(false, Ordering::Release);
-                    AP_SHARED_PTR.store(0, Ordering::Release);
+                    ap_orch_reset();
                     ctx.close();
                     VCPU_COUNT.store(0, Ordering::Release);
                 }
@@ -947,12 +1000,13 @@ fn vcpu_fiber_task(_arg: u64) {
             }
         }
         Vendor::Intel => {
-            // Single-vCPU VMX guest as a fiber (Intel parity, #3). No AP /
-            // IPI / shared-state machinery (guest-SMP AP bring-up is SVM-
-            // only). `vmx::vm_open` installs this worker's per-core TSS so
-            // VMX host-state is valid off Core 0. Same IF/yield discipline
-            // as the AMD arm; mirrors `vm_core_serve`'s Intel arm but yields
-            // the core between slices instead of looping forever.
+            // VMX guest as a fiber (Intel parity, #3) + guest-SMP BSP (#4).
+            // `vmx::vm_open` installs this worker's per-core TSS so VMX
+            // host-state is valid off Core 0. Same IF/yield discipline as the
+            // AMD arm; mirrors `vm_core_serve`'s Intel arm but yields the core
+            // between slices. Owns the shared `VmShared`: seeds the live-vCPU
+            // count + publishes its address so AP fibers can alias it, and
+            // last-one-out teardown waits for APs before `close()`.
             match vmx::vm_open(
                 &pending.bzimage,
                 &pending.cmdline,
@@ -960,6 +1014,10 @@ fn vcpu_fiber_task(_arg: u64) {
                 &pending.inject,
             ) {
                 Ok(mut ctx) => {
+                    VCPU_COUNT.store(1, Ordering::Release);
+                    if GUEST_SMP_AP {
+                        publish_ap_shared(ctx.shared_ptr() as u64);
+                    }
                     loop {
                         if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
                             crate::kprintln!("[microvm] window closed — stopping guest");
@@ -992,7 +1050,16 @@ fn vcpu_fiber_task(_arg: u64) {
                             }
                         }
                     }
+                    // Last-one-out: the BSP owns the shared box. If an AP is
+                    // still running, signal down + wait before freeing (close).
+                    VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+                    while VCPU_COUNT.load(Ordering::Acquire) > 1 {
+                        crate::smp::fiber::yield_sleep(2);
+                    }
+                    vmx::set_ap_active(false);
+                    ap_orch_reset();
                     ctx.close();
+                    VCPU_COUNT.store(0, Ordering::Release);
                 }
                 Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
             }
@@ -1011,65 +1078,102 @@ fn vcpu_fiber_task(_arg: u64) {
     VM_RUN_STATE.store(VM_EXITED, Ordering::Release);
 }
 
-/// AP (secondary) vCPU fiber (guest SMP, Stage 3b-2). Spawned by the Core-0
-/// reaper after the guest's SIPI. Aliases the BSP's `VmShared` (it does NOT
-/// open guest RAM / NPT / devices, and never `close()`s — the BSP owns
-/// those). Runs its own VMRUN loop on whatever worker core picks it up, in
-/// parallel with the BSP. Decrements `VCPU_COUNT` on exit so the BSP's
-/// last-one-out teardown can proceed. AMD/SVM only.
-fn ap_vcpu_fiber_task(_arg: u64) {
+/// AP (secondary) vCPU fiber (guest SMP). Spawned by the Core-0 reaper after
+/// the guest's SIPI; `arg` is the AP's apic_id (1..). Aliases the BSP's
+/// `VmShared` (it does NOT open guest RAM / EPT|NPT / devices). Runs its own
+/// VMRUN/VMRESUME loop on whatever worker core picks it up, in parallel with
+/// the BSP. Decrements `VCPU_COUNT` on exit so the BSP's last-one-out teardown
+/// can proceed.
+///
+/// Vendor is resolved via `detect_vendor` (lock-free CPUID), NOT the VENDOR
+/// mutex: the BSP vCPU fiber holds that mutex for its ENTIRE run loop
+/// (`match *VENDOR.lock() { … }`), so contending on it here would block forever
+/// (the AMD v0.193.1 freeze). On Intel the AP must `close_ap` (VMXOFF on its
+/// own core); on AMD it just stops VMRUNning (the BSP owns teardown).
+fn ap_vcpu_fiber_task(arg: u64) {
+    let apic_id = arg as u8;
     let ptr = AP_SHARED_PTR.load(Ordering::Acquire);
-    let vector = AP_SIPI_VECTOR.load(Ordering::Acquire);
-    // NOTE: do NOT lock VENDOR here. The BSP vCPU fiber holds the VENDOR
-    // mutex for its ENTIRE run loop (`match *VENDOR.lock() { Amd => { … } }`),
-    // so contending on it from the AP would block forever (the BSP never
-    // releases it while the guest runs). The AP is AMD/SVM by construction —
-    // it is only spawned from the svm ICR router (`request_ap_spawn`).
+    let vector = AP_SIPI_VECTORS
+        .get(apic_id as usize)
+        .map(|v| v.load(Ordering::Acquire))
+        .unwrap_or(0);
     if ptr == 0 {
         VCPU_COUNT.fetch_sub(1, Ordering::AcqRel);
         return;
     }
     let cid = crate::smp::per_core::current_core_id();
     crate::kprintln!(
-        "[microvm] AP vCPU fiber opening on core {} (sipi vec {:#x})",
-        cid, vector
+        "[microvm] AP vCPU fiber (apic_id {}) opening on core {} (sipi vec {:#x})",
+        apic_id, cid, vector
     );
     // 1 kHz wake source on this core so the AP's idle yields resume promptly
     // (mirrors the BSP fiber).
     crate::interrupts::arm_dedicated_vm_timer();
 
-    match svm::vm_open_ap(ptr, vector, 1) {
-        Ok(mut ctx) => loop {
-            if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
-                break;
+    match detect_vendor() {
+        Vendor::Intel => match vmx::vm_open_ap(ptr, vector, apic_id) {
+            Ok(mut ctx) => {
+                loop {
+                    if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                        break;
+                    }
+                    // SAFETY: ring-0; same IF discipline as the BSP fiber.
+                    unsafe { core::arch::asm!("sti") };
+                    let outcome = ctx.run_slice(SLICE_BUDGET);
+                    // SAFETY: ring-0.
+                    unsafe { core::arch::asm!("cli") };
+                    match outcome {
+                        Ok(vmx::SliceOutcome::StillRunning) => { crate::smp::fiber::yield_ready(); }
+                        Ok(vmx::SliceOutcome::Idle) => { crate::smp::fiber::yield_sleep(2); }
+                        Ok(vmx::SliceOutcome::Exited(o)) => {
+                            crate::kprintln!(
+                                "[microvm] AP vCPU exited — reason {:#x}",
+                                (o.exit_reason & 0xFFFF) as u16
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            crate::kprintln!("[microvm] AP run FAILED: {}", e);
+                            break;
+                        }
+                    }
+                }
+                // VMX: the AP entered VMX root on this core → VMXOFF + free its
+                // own VMXON/VMCS (but NOT the shared state — the BSP owns it).
+                ctx.close_ap();
             }
-            // SAFETY: ring-0; same IF discipline as the BSP fiber.
-            unsafe { core::arch::asm!("sti") };
-            let outcome = ctx.run_slice(SLICE_BUDGET);
-            // SAFETY: ring-0.
-            unsafe { core::arch::asm!("cli") };
-            match outcome {
-                Ok(svm::SliceOutcome::StillRunning) => {
-                    crate::smp::fiber::yield_ready();
-                }
-                Ok(svm::SliceOutcome::Idle) => {
-                    crate::smp::fiber::yield_sleep(2);
-                }
-                Ok(svm::SliceOutcome::Exited(o)) => {
-                    crate::kprintln!(
-                        "[microvm] AP vCPU exited — reason {:#x}",
-                        (o.exit_reason & 0xFFFF) as u16
-                    );
-                    break;
-                }
-                Err(e) => {
-                    crate::kprintln!("[microvm] AP run FAILED: {}", e);
-                    break;
-                }
-            }
-            // The AP does NOT close() — the BSP owns + frees the shared box.
+            Err(e) => crate::kprintln!("[microvm] AP open FAILED: {}", e),
         },
-        Err(e) => crate::kprintln!("[microvm] AP open FAILED: {}", e),
+        Vendor::Amd => match svm::vm_open_ap(ptr, vector, apic_id) {
+            Ok(mut ctx) => loop {
+                if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                    break;
+                }
+                // SAFETY: ring-0; same IF discipline as the BSP fiber.
+                unsafe { core::arch::asm!("sti") };
+                let outcome = ctx.run_slice(SLICE_BUDGET);
+                // SAFETY: ring-0.
+                unsafe { core::arch::asm!("cli") };
+                match outcome {
+                    Ok(svm::SliceOutcome::StillRunning) => { crate::smp::fiber::yield_ready(); }
+                    Ok(svm::SliceOutcome::Idle) => { crate::smp::fiber::yield_sleep(2); }
+                    Ok(svm::SliceOutcome::Exited(o)) => {
+                        crate::kprintln!(
+                            "[microvm] AP vCPU exited — reason {:#x}",
+                            (o.exit_reason & 0xFFFF) as u16
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        crate::kprintln!("[microvm] AP run FAILED: {}", e);
+                        break;
+                    }
+                }
+                // AMD: the AP does NOT close() — the BSP owns + frees the box.
+            },
+            Err(e) => crate::kprintln!("[microvm] AP open FAILED: {}", e),
+        },
+        Vendor::Unknown(_) => {}
     }
 
     crate::interrupts::disarm_dedicated_vm_timer();

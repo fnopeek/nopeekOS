@@ -140,6 +140,28 @@ pub fn vm_open(
     }
 }
 
+/// Open an AP vCPU context (guest SMP) sharing the BSP's `VmShared` at
+/// `shared_ptr` (a `*mut VmShared` as a u64), entering real mode at
+/// `sipi_vector`. Enters VMX root ON THIS (the AP's) worker core. The caller
+/// drives `run_slice` then `close_ap` (NOT `close` — the BSP owns the shared
+/// state).
+pub fn vm_open_ap(
+    shared_ptr: u64,
+    sipi_vector: u8,
+    apic_id: u8,
+) -> Result<VmContext, &'static str> {
+    VmContext::open_ap(shared_ptr as *mut enable::VmShared, sipi_vector, apic_id)
+}
+
+/// Set/clear the guest-SMP big-VM-lock engagement (see `enable::AP_ACTIVE`).
+/// Mirror of `svm::set_ap_active` — but VMX needs no idle-park `AP_ESTABLISHED`
+/// gate (VMX clears the STI shadow on a HLT exit, so an idle HLT is already
+/// interruptible; see the run-loop gate).
+pub fn set_ap_active(on: bool) {
+    use core::sync::atomic::Ordering;
+    enable::AP_ACTIVE.store(on, Ordering::Release);
+}
+
 pub use vmcs::{decode_io_exit_qualification, host_cpuid, LaunchOutcome};
 
 // ── shared CPU primitives for submodules ───────────────────────────
