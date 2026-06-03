@@ -296,7 +296,7 @@ pub fn load_into_guest_ram(
     // BIOS window (0xF0000, RESERVED above in our e820). Linux scans
     // for it when booted `acpi=off` and counts GUEST_VCPUS CPUs.
     if crate::microvm::cpu::GUEST_SMP {
-        super::mptable::install(mem, crate::microvm::cpu::GUEST_VCPUS);
+        super::mptable::install(mem, crate::microvm::cpu::guest_vcpus());
     }
 
     Ok(LoadInfo {

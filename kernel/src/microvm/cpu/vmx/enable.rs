@@ -70,8 +70,8 @@ fn ap_active() -> bool {
 }
 
 /// Maximum vCPUs per guest (guest SMP). Sizes the per-vCPU IPI bitmaps;
-/// `cpu::GUEST_VCPUS` (the count actually enumerated) must be ≤ this.
-pub const MAX_VCPUS: usize = 4;
+/// `cpu::guest_vcpus()` (the count actually enumerated) must be ≤ this.
+pub const MAX_VCPUS: usize = 8;
 
 const IA32_FEATURE_CONTROL: u32 = 0x3A;
 const IA32_VMX_BASIC: u32 = 0x480;
@@ -2321,7 +2321,7 @@ fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
             crate::microvm::cpu::request_ap_spawn(icr.dest, icr.vector);
         }
         lapic::ICR_DM_FIXED | lapic::ICR_DM_LOWEST => {
-            let n = crate::microvm::cpu::GUEST_VCPUS;
+            let n = crate::microvm::cpu::guest_vcpus();
             match icr.shorthand {
                 0 => sh.ipi_set(icr.dest, icr.vector), // physical dest
                 1 => sh.ipi_set(sender, icr.vector),   // self

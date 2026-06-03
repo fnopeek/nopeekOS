@@ -601,9 +601,9 @@ pub struct VmShared {
 }
 
 /// Maximum vCPUs per guest (guest SMP). Sizes the per-vCPU IPI bitmaps;
-/// `GUEST_VCPUS` (the count we actually enumerate) must be ≤ this. Matches the
-/// VMX twin + `cpu::ORCH_MAX_VCPUS` so apic_ids 0..3 (N-vCPU) all have a slot.
-pub const MAX_VCPUS: usize = 4;
+/// `guest_vcpus()` (the count we actually enumerate) must be ≤ this. Matches the
+/// VMX twin + `cpu::ORCH_MAX_VCPUS`/`MAX_VCPUS_CAP` so every apic_id has a slot.
+pub const MAX_VCPUS: usize = 8;
 
 impl VmShared {
     /// Mark interrupt `vector` pending for the vCPU with `apic_id` (an IPI
@@ -2114,7 +2114,7 @@ fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
             crate::microvm::cpu::request_ap_spawn(icr.dest, icr.vector);
         }
         lapic::ICR_DM_FIXED | lapic::ICR_DM_LOWEST => {
-            let n = crate::microvm::cpu::GUEST_VCPUS;
+            let n = crate::microvm::cpu::guest_vcpus();
             match icr.shorthand {
                 0 => sh.ipi_set(icr.dest, icr.vector), // physical dest
                 1 => sh.ipi_set(sender, icr.vector),   // self
