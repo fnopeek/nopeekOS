@@ -385,35 +385,21 @@ pub fn intent_dsdt() {
     let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
     kprintln!("  DSDT @ 0x{:x}, len {} bytes", addr, len);
 
-    // EmbeddedControl OperationRegions (0x5B 0x80 <name> 0x03) + following Field.
-    let mut ec = 0;
-    let mut i = 0;
-    while i + 12 < len && ec < 2 {
-        if b[i] == 0x5B && b[i + 1] == 0x80 {
-            let sp = i + 2 + aml_name_len(b, i + 2);
-            if sp < len && b[sp] == 0x03 {
-                dsdt_dump_range(b, "EmbeddedControl region+field", i, 3072);
-                ec += 1;
-            }
-        }
-        i += 1;
-    }
-    if ec == 0 { kprintln!("  (no EmbeddedControl region found)"); }
-
-    // Battery reader methods (the real EC access sequence + offsets) and the
-    // windowed-EC accessor / AC-status helpers.
+    // Only the actual battery-reader METHOD DEFINITIONS (MethodOp 0x14 just
+    // before the name). The real reader is the EC0-scope BTST/BTIF (the 2nd
+    // occurrence); the outer one only forwards to it. Everything else
+    // (EC region/field, SECP, _BST…) is already captured.
     for (name, seg) in [
-        ("BTST", [0x42u8, 0x54, 0x53, 0x54]), // _BST → BTST: status/rate/remaining
-        ("BTIF", [0x42u8, 0x54, 0x49, 0x46]), // _BIF → BTIF: capacities
-        ("SECP", [0x53u8, 0x45, 0x43, 0x50]), // set-EC-pointer (windowed read)
-        ("GACS", [0x47u8, 0x41, 0x43, 0x53]), // get AC status
-        ("SMAR", [0x53u8, 0x4D, 0x41, 0x52]), // smart-battery read?
+        ("BTST def", [0x42u8, 0x54, 0x53, 0x54]),
+        ("BTIF def", [0x42u8, 0x54, 0x49, 0x46]),
     ] {
         let mut found = 0;
-        let mut k = 0;
-        while k + 4 < len && found < 1 {
-            if b[k..k + 4] == seg {
-                dsdt_dump_range(b, name, k.saturating_sub(6), 768);
+        let mut k = 4;
+        while k + 4 < len && found < 3 {
+            if b[k..k + 4] == seg
+                && (b[k - 2] == 0x14 || b[k - 3] == 0x14 || b[k - 4] == 0x14)
+            {
+                dsdt_dump_range(b, name, k.saturating_sub(4), 1024);
                 found += 1;
             }
             k += 1;
