@@ -117,9 +117,21 @@ static NS_DROPS: AtomicU64 = AtomicU64::new(0);
 static NS_HIGHWATER: AtomicU64 = AtomicU64::new(0);
 static NS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 /// High-water mark of the INBOUND_Q staging depth. If this rides near
-/// INBOUND_MAX (1024) the download is backpressure-capped (guest can't drain /
-/// our bound too low); if it stays shallow, the cap is upstream (slirp/NIC).
+/// INBOUND_MAX the download is backpressure-capped; if shallow, the cap is
+/// upstream (slirp/NIC).
 static NS_IQ_HI: AtomicU64 = AtomicU64::new(0);
+/// RX delivery latency = how long a guest-bound packet sat in INBOUND_Q before
+/// the BSP pump injected it (TSC ticks, summed + counted for an avg, plus a
+/// max). THE decisive page-load metric: high (~ms) ⇒ our RX delivery is the
+/// bottleneck (the BSP parks between bursts → event-driven wake is the fix);
+/// low (~µs) ⇒ the cap is upstream (RTT / DNS / QUIC / server), not our code.
+static NS_RXLAT_SUM: AtomicU64 = AtomicU64::new(0);
+static NS_RXLAT_N: AtomicU64 = AtomicU64::new(0);
+static NS_RXLAT_MAX: AtomicU64 = AtomicU64::new(0);
+/// New-flow counts by transport, to spot QUIC: a cold page that opens lots of
+/// UDP flows is using HTTP/3 — if those churn/stall it points at QUIC-over-NAT.
+static NS_TCP_FLOWS: AtomicU64 = AtomicU64::new(0);
+static NS_UDP_FLOWS: AtomicU64 = AtomicU64::new(0);
 
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
 /// ephemeral range (49152..=65534, net/tcp.rs) so a guest flow can
@@ -146,7 +158,8 @@ static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Rewritten guest-bound frames produced from the host-RX context,
 /// drained + injected by `pump` on the VM thread (same split the old
 /// termination pump used, to keep virtio access on one thread).
-static INBOUND_Q: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+/// (push TSC, frame) — the TSC lets the pump measure RX delivery latency.
+static INBOUND_Q: Mutex<VecDeque<(u64, Vec<u8>)>> = Mutex::new(VecDeque::new());
 /// Backpressure cap on the staging queue between the NIC drain and the guest
 /// inject. Without a bound, a high-throughput burst the guest can't drain in
 /// time grows it unboundedly → host OOM (the speedtest crash). Generous slack
@@ -179,6 +192,12 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
     let slot = tbl.iter_mut().find(|s| s.is_none())?;
     *slot = Some(L3Map { proto, guest_port: gport, remote_ip: rip,
                           remote_port: rport, host_port: hp, last_tick: now });
+    // New flow — count by transport (UDP-heavy cold load = QUIC/HTTP-3).
+    match proto {
+        PROTO_TCP => { NS_TCP_FLOWS.fetch_add(1, AtOrd::Relaxed); }
+        PROTO_UDP => { NS_UDP_FLOWS.fetch_add(1, AtOrd::Relaxed); }
+        _ => {}
+    }
     Some(hp)
 }
 
@@ -337,7 +356,7 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
         fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
     }
 
-    INBOUND_Q.lock().push_back(frame);
+    INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), frame));
     true
 }
 
@@ -729,12 +748,22 @@ pub fn pump(
         let txb = NS_TX_BYTES.swap(0, AtOrd::Relaxed);
         let txp = NS_TX_PKTS.swap(0, AtOrd::Relaxed);
         let secs = dt / 100; // ticks → seconds (≥5)
+        // RX delivery latency this window (TSC → µs): avg + max.
+        let lat_n = NS_RXLAT_N.swap(0, AtOrd::Relaxed);
+        let lat_sum = NS_RXLAT_SUM.swap(0, AtOrd::Relaxed);
+        let lat_max = NS_RXLAT_MAX.swap(0, AtOrd::Relaxed);
+        let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+        let lat_avg_us = if lat_n > 0 { (lat_sum / lat_n) / mhz } else { 0 };
+        let lat_max_us = lat_max / mhz;
         if secs > 0 && (rxp + txp) > 0 {
             kprintln!(
-                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | nat {}/{} (hi {}) | iq hi {}/{} | {} drops",
+                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | nat {}/{} (hi {}) | iq hi {}/{} | flows {}tcp {}udp | {} drops",
                 rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
+                lat_avg_us, lat_max_us,
                 inuse, L3_MAX, NS_HIGHWATER.load(AtOrd::Relaxed),
-                NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX, NS_DROPS.load(AtOrd::Relaxed),
+                NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX,
+                NS_TCP_FLOWS.load(AtOrd::Relaxed), NS_UDP_FLOWS.load(AtOrd::Relaxed),
+                NS_DROPS.load(AtOrd::Relaxed),
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
@@ -745,13 +774,20 @@ pub fn pump(
     // Deliver every rewritten reply the host-RX intercept queued.
     let mut any = false;
     loop {
-        let frame = { INBOUND_Q.lock().pop_front() };
-        let Some(frame) = frame else { break };
+        let item = { INBOUND_Q.lock().pop_front() };
+        let Some((push_tsc, frame)) = item else { break };
         if net.inject_rx(mem, &frame) {
             any = true;
+            // RX delivery latency: how long this packet waited in the queue.
+            let lat = crate::interrupts::rdtsc().saturating_sub(push_tsc);
+            NS_RXLAT_SUM.fetch_add(lat, AtOrd::Relaxed);
+            NS_RXLAT_N.fetch_add(1, AtOrd::Relaxed);
+            if lat > NS_RXLAT_MAX.load(AtOrd::Relaxed) {
+                NS_RXLAT_MAX.store(lat, AtOrd::Relaxed);
+            }
         } else {
             // Guest RX queue full — requeue and retry next pump.
-            INBOUND_Q.lock().push_front(frame);
+            INBOUND_Q.lock().push_front((push_tsc, frame));
             break;
         }
     }
@@ -776,7 +812,9 @@ pub fn reset_sessions() {
     // can never leave the HOST's own networking (DNS / OTA) bricked.
     crate::net::reset_poll_guard();
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
-              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI] {
+              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI,
+              &NS_RXLAT_SUM, &NS_RXLAT_N, &NS_RXLAT_MAX,
+              &NS_TCP_FLOWS, &NS_UDP_FLOWS] {
         c.store(0, AtOrd::Relaxed);
     }
 }
