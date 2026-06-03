@@ -99,10 +99,23 @@ impl Default for NetCaps {
 // table — no rtx/ack/RTO logic, none of the termination brittleness.
 // ===========================================================================
 
-use core::sync::atomic::{AtomicBool, Ordering as AtOrd};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtOrd};
 use alloc::collections::VecDeque;
 
-const L3_MAX: usize = 256;
+const L3_MAX: usize = 1024;
+
+// ── Throughput / NAT-usage instrumentation (page-load perf diagnosis) ──
+// Cheap relaxed counters; `pump` prints a one-line host-side `[netstat]`
+// summary every ~5 s while a VM is active (NOT guest kmsg → no [guest] spam),
+// so we can see whether page-load slowness is throughput, NAT-table drops, or
+// latency. Window counters reset each summary; HIGHWATER + DROPS are lifetime.
+static NS_RX_BYTES: AtomicU64 = AtomicU64::new(0);
+static NS_RX_PKTS: AtomicU64 = AtomicU64::new(0);
+static NS_TX_BYTES: AtomicU64 = AtomicU64::new(0);
+static NS_TX_PKTS: AtomicU64 = AtomicU64::new(0);
+static NS_DROPS: AtomicU64 = AtomicU64::new(0);
+static NS_HIGHWATER: AtomicU64 = AtomicU64::new(0);
+static NS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
 /// ephemeral range (49152..=65534, net/tcp.rs) so a guest flow can
 /// never alias a host-originated connection (OTA `update`, `https`).
@@ -194,8 +207,10 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
     let now = crate::interrupts::ticks();
     let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, now) {
         Some(p) => p,
-        None => { kprintln!("[nat] L3 table full, dropping flow"); return None; }
+        None => { NS_DROPS.fetch_add(1, AtOrd::Relaxed); kprintln!("[nat] L3 table full, dropping flow"); return None; }
     };
+    NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
+    NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
     let mut seg = l4.to_vec();
     seg[0..2].copy_from_slice(&hp.to_be_bytes());          // src port → host port
     let our_ip = crate::net::arp::our_ip();
@@ -277,6 +292,8 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
         Some(g) => g,
         None => return false,
     };
+    NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
+    NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
 
     // Rewrite: dst IP → guest, L4 dst port → guest port; recompute
     // both checksums. Wrap in vnet + eth (gateway → guest).
@@ -672,6 +689,33 @@ pub fn pump(
     let now = crate::interrupts::ticks();
     l3_reap(now);
 
+    // Track NAT-table high-water + emit a host-side [netstat] summary every
+    // ~5 s (≈500 ticks @ 100 Hz) so page-load slowness is diagnosable as
+    // throughput vs NAT drops vs latency. Host log only — no [guest] spam.
+    let inuse = L3.lock().iter().flatten().count() as u64;
+    if inuse > NS_HIGHWATER.load(AtOrd::Relaxed) {
+        NS_HIGHWATER.store(inuse, AtOrd::Relaxed);
+    }
+    let last = NS_LAST_TICK.load(AtOrd::Relaxed);
+    let dt = now.wrapping_sub(last);
+    if last != 0 && dt >= 500 {
+        let rxb = NS_RX_BYTES.swap(0, AtOrd::Relaxed);
+        let rxp = NS_RX_PKTS.swap(0, AtOrd::Relaxed);
+        let txb = NS_TX_BYTES.swap(0, AtOrd::Relaxed);
+        let txp = NS_TX_PKTS.swap(0, AtOrd::Relaxed);
+        let secs = dt / 100; // ticks → seconds (≥5)
+        if secs > 0 && (rxp + txp) > 0 {
+            kprintln!(
+                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | nat {}/{} inuse (hi {}), {} drops",
+                rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
+                inuse, L3_MAX, NS_HIGHWATER.load(AtOrd::Relaxed), NS_DROPS.load(AtOrd::Relaxed),
+            );
+        }
+        NS_LAST_TICK.store(now, AtOrd::Relaxed);
+    } else if last == 0 {
+        NS_LAST_TICK.store(now, AtOrd::Relaxed);
+    }
+
     // Deliver every rewritten reply the host-RX intercept queued.
     let mut any = false;
     loop {
@@ -702,4 +746,8 @@ pub fn active_session_count() -> usize {
 /// and the host's own networking — start clean.
 pub fn reset_sessions() {
     l3_reset();
+    for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
+              &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK] {
+        c.store(0, AtOrd::Relaxed);
+    }
 }
