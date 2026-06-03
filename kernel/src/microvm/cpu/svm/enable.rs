@@ -605,6 +605,12 @@ pub struct VmShared {
 /// VMX twin + `cpu::ORCH_MAX_VCPUS`/`MAX_VCPUS_CAP` so every apic_id has a slot.
 pub const MAX_VCPUS: usize = 8;
 
+/// Bounded adaptive halt-polling (KVM `halt_poll_ns` model) — see the VMX twin.
+/// Idle vCPU polls its window for a wake before parking; grows on a caught wake,
+/// shrinks on expiry. Replaces the old global `recently_active` spin. µs units.
+const HALT_POLL_MIN_US: u64 = 5;
+const HALT_POLL_MAX_US: u64 = 200;
+
 impl VmShared {
     /// Mark interrupt `vector` pending for the vCPU with `apic_id` (an IPI
     /// target). No-op if the id is out of range.
@@ -668,6 +674,10 @@ pub struct Vcpu {
     /// `ticks()` of the last injected LAPIC-timer (LVTT) interrupt — the
     /// per-vCPU analogue of `VmShared::last_timer_tick` (PIT IRQ0).
     last_lapic_tick: u64,
+    /// Bounded adaptive halt-poll window (µs) + its current TSC deadline (0 =
+    /// not polling). See `HALT_POLL_MIN_US`.
+    halt_poll_us: u64,
+    halt_poll_deadline: u64,
     /// Consecutive HLT exits taken with guest RFLAGS.IF=0. The idle path
     /// is always `sti; hlt` (IF=1); a sustained `cli; hlt` loop is Linux's
     /// no-ACPI poweroff / panic path (we boot `acpi=off`, so there is no
@@ -846,6 +856,8 @@ impl VmContext {
                 consecutive_idle: 0,
                 lapic: LocalApic::new(0),
                 last_lapic_tick: 0,
+                halt_poll_us: HALT_POLL_MIN_US,
+                halt_poll_deadline: 0,
                 if_off_halts: 0,
             },
         })
@@ -1099,6 +1111,8 @@ impl VmContext {
                 consecutive_idle: 0,
                 lapic: LocalApic::new(apic_id),
                 last_lapic_tick: 0,
+                halt_poll_us: HALT_POLL_MIN_US,
+                halt_poll_deadline: 0,
                 if_off_halts: 0,
             },
         })
@@ -1272,6 +1286,13 @@ impl VmContext {
 
         self.vcpu.iter = self.vcpu.iter.saturating_add(1);
         slice_n += 1;
+
+        // Halt-poll adapt (KVM model): the poll caught a wake (we were polling
+        // and the guest is busy again) → grow the window. See the VMX twin.
+        if self.vcpu.halt_poll_deadline != 0 && self.vcpu.consecutive_idle == 0 {
+            self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us * 2).min(HALT_POLL_MAX_US);
+            self.vcpu.halt_poll_deadline = 0;
+        }
 
         // Mark the AP "established" once it is well past bring-up — this
         // un-gates the idle-yield-on-shadowed-HLT for BOTH vCPUs (see
@@ -1656,15 +1677,21 @@ impl VmContext {
                 // many small request→response round-trips (latency, not
                 // throughput — a single bulk stream is unaffected). Spin-pump
                 // while recently active; park once the link is quiet (power).
-                // Only the BSP services the network (device IRQs are BSP-only),
-                // so ONLY the BSP stays spin-pumping while data is in flight —
-                // the AP vCPUs have no network work and must park normally, or
-                // every vCPU spins at 100% during a download (observed: all 5
-                // cores pegged, useless burn).
-                if self.vcpu.consecutive_idle >= IDLE_YIELD
-                    && !(is_bsp && crate::microvm::devices::nat::recently_active(now))
-                {
-                    return Ok(SliceOutcome::Idle);
+                // Bounded adaptive halt-polling (KVM halt_poll_ns model) — see
+                // the VMX twin. Idle → poll the per-vCPU window for a wake, then
+                // shrink + park on expiry. Grow-on-wake is at the loop top.
+                if self.vcpu.consecutive_idle >= IDLE_YIELD {
+                    let now_tsc = crate::interrupts::rdtsc();
+                    if self.vcpu.halt_poll_deadline == 0 {
+                        self.vcpu.halt_poll_deadline = now_tsc
+                            + (crate::interrupts::tsc_freq() / 1_000_000) * self.vcpu.halt_poll_us;
+                    }
+                    if now_tsc >= self.vcpu.halt_poll_deadline {
+                        self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us / 2).max(HALT_POLL_MIN_US);
+                        self.vcpu.halt_poll_deadline = 0;
+                        return Ok(SliceOutcome::Idle);
+                    }
+                    // else: within the poll window → keep looping (poll).
                 }
                 last_outcome = Some(outcome);
             }
