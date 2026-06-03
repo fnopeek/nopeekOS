@@ -793,6 +793,9 @@ pub fn active_session_count() -> usize {
 /// and the host's own networking — start clean.
 pub fn reset_sessions() {
     l3_reset();
+    // Belt-and-suspenders: clear the shared NIC-drain guard so a microvm run
+    // can never leave the HOST's own networking (DNS / OTA) bricked.
+    crate::net::reset_poll_guard();
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
               &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_LAST_ACTIVITY, &NS_IQ_HI] {
         c.store(0, AtOrd::Relaxed);
