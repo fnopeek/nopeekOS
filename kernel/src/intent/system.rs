@@ -385,25 +385,41 @@ pub fn intent_dsdt() {
     let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
     kprintln!("  DSDT @ 0x{:x}, len {} bytes", addr, len);
 
-    // Only the actual battery-reader METHOD DEFINITIONS (MethodOp 0x14 just
-    // before the name). The real reader is the EC0-scope BTST/BTIF (the 2nd
-    // occurrence); the outer one only forwards to it. Everything else
-    // (EC region/field, SECP, _BST…) is already captured.
+    // We now know EC0.BTST reads fields BSEL/BST_/BPR_/BRC_/BPV_ and BTIF
+    // reads BDC_/BFC_/BDV_. We need their EC byte offsets → dump the
+    // enclosing Field() definition(s). Find each field NameSeg, scan back to
+    // the FieldOp (0x5B 0x81) that declares it, dump from there so the
+    // bit-offset accumulation (incl. Offset() skips) is visible from the top.
+    let mut dumped: [usize; 8] = [usize::MAX; 8];
+    let mut nd = 0;
     for (name, seg) in [
-        ("BTST def", [0x42u8, 0x54, 0x53, 0x54]),
-        ("BTIF def", [0x42u8, 0x54, 0x49, 0x46]),
+        ("Field(BSEL)", [0x42u8, 0x53, 0x45, 0x4C]),
+        ("Field(BRC_)", [0x42u8, 0x52, 0x43, 0x5F]),
+        ("Field(BFC_)", [0x42u8, 0x46, 0x43, 0x5F]),
     ] {
-        let mut found = 0;
-        let mut k = 4;
-        while k + 4 < len && found < 3 {
-            if b[k..k + 4] == seg
-                && (b[k - 2] == 0x14 || b[k - 3] == 0x14 || b[k - 4] == 0x14)
-            {
-                dsdt_dump_range(b, name, k.saturating_sub(4), 1024);
-                found += 1;
-            }
+        // first occurrence of the NameSeg
+        let mut k = 0;
+        let mut at = usize::MAX;
+        while k + 4 < len {
+            if b[k..k + 4] == seg { at = k; break; }
             k += 1;
         }
+        if at == usize::MAX { kprintln!("  {}: not found", name); continue; }
+        // scan back for the FieldOp 0x5B 0x81
+        let mut s = at;
+        let lo = at.saturating_sub(2048);
+        while s > lo {
+            if b[s] == 0x5B && b[s + 1] == 0x81 { break; }
+            s -= 1;
+        }
+        if !(b[s] == 0x5B && b[s + 1] == 0x81) {
+            // no FieldOp found nearby — just dump around the name
+            dsdt_dump_range(b, name, at.saturating_sub(8), 256);
+            continue;
+        }
+        if nd < dumped.len() && dumped[..nd].contains(&s) { continue; } // dedup
+        dsdt_dump_range(b, name, s, 1024);
+        if nd < dumped.len() { dumped[nd] = s; nd += 1; }
     }
 }
 
