@@ -73,6 +73,17 @@ fn ap_active() -> bool {
 /// `cpu::guest_vcpus()` (the count actually enumerated) must be ≤ this.
 pub const MAX_VCPUS: usize = 8;
 
+/// Bounded adaptive halt-polling (KVM `halt_poll_ns` model). When a vCPU goes
+/// idle it polls — re-pumping + re-checking for a wake event (RX / IRQ / IPI) —
+/// for up to its current window before truly parking. A wake within the window
+/// grows the window (×2, latency pays off); an expiry shrinks it (÷2, the vCPU
+/// was idle, save power). This replaces the old global `recently_active` spin:
+/// idle vCPUs shrink toward the floor (~park), a latency-sensitive vCPU (the
+/// network BSP between RX bursts) grows toward the cap, and a busy vCPU never
+/// reaches the idle path at all. Per-vCPU, no global state. µs units.
+const HALT_POLL_MIN_US: u64 = 5;   // floor — always poll a little, recoverable
+const HALT_POLL_MAX_US: u64 = 200; // KVM default cap
+
 const IA32_FEATURE_CONTROL: u32 = 0x3A;
 const IA32_VMX_BASIC: u32 = 0x480;
 const IA32_VMX_CR0_FIXED0: u32 = 0x486;
@@ -649,6 +660,10 @@ pub struct Vcpu {
     /// `ticks()` of the last injected LAPIC-timer (LVTT) IRQ, paced like the
     /// PIT's `last_timer_tick`.
     last_lapic_tick: u64,
+    /// Bounded adaptive halt-poll window (µs) + its current TSC deadline (0 =
+    /// not polling). See `HALT_POLL_MIN_US`.
+    halt_poll_us: u64,
+    halt_poll_deadline: u64,
     /// Host/guest FPU (XSAVE) save areas — VMRESUME preserves neither.
     host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
     guest_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
@@ -777,6 +792,8 @@ impl VmContext {
                     reinject: 0,
                     lapic: LocalApic::new(0),
                     last_lapic_tick: 0,
+                    halt_poll_us: HALT_POLL_MIN_US,
+                    halt_poll_deadline: 0,
                     host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                     guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 },
@@ -844,6 +861,8 @@ impl VmContext {
                     reinject: 0,
                     lapic: LocalApic::new(apic_id),
                     last_lapic_tick: 0,
+                    halt_poll_us: HALT_POLL_MIN_US,
+                    halt_poll_deadline: 0,
                     host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                     guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 },
@@ -1256,6 +1275,15 @@ impl VmContext {
         }
         self.vcpu.iter = self.vcpu.iter.saturating_add(1);
         slice_n += 1;
+
+        // Halt-poll adapt: if we were polling (deadline armed) and the guest is
+        // no longer idle (consecutive_idle reset by a delivered wake), the poll
+        // caught an event → grow the window (×2, capped) and disarm. A busy
+        // vCPU keeps deadline 0, so this is a no-op for it.
+        if self.vcpu.halt_poll_deadline != 0 && self.vcpu.consecutive_idle == 0 {
+            self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us * 2).min(HALT_POLL_MAX_US);
+            self.vcpu.halt_poll_deadline = 0;
+        }
 
         // Before each entry, sync the IA-32e-mode-guest control to
         // the current GUEST_IA32_EFER.LMA — once Linux flips into
@@ -1734,15 +1762,25 @@ impl VmContext {
                 // gap = a 2 ms park → YouTube "ewig"). While recently active,
                 // keep spin-pumping (the slice still yields the core every
                 // SLICE_MS); park only once the link is quiet (power).
-                // Only the BSP services the network (device IRQs are BSP-only),
-                // so ONLY the BSP stays spin-pumping while data is in flight —
-                // the AP vCPUs have no network work and must park normally, or
-                // every vCPU spins at 100% during a download (observed: all 5
-                // cores pegged, useless burn + notebook starvation).
-                if self.vcpu.consecutive_idle >= IDLE_YIELD
-                    && !(is_bsp && crate::microvm::devices::nat::recently_active(now))
-                {
-                    return Ok(SliceOutcome::Idle);
+                // Bounded adaptive halt-polling (KVM halt_poll_ns model). Once
+                // idle, poll the current per-vCPU window (re-pumping + checking
+                // for a wake) before truly parking; on expiry shrink + park
+                // (power). The grow-on-wake is handled at the loop top. Replaces
+                // the old global `recently_active` spin: no core pegged at 100%
+                // unless it's doing real work; idle vCPUs shrink toward the
+                // floor and park; a latency-sensitive vCPU grows toward the cap.
+                if self.vcpu.consecutive_idle >= IDLE_YIELD {
+                    let now_tsc = crate::interrupts::rdtsc();
+                    if self.vcpu.halt_poll_deadline == 0 {
+                        self.vcpu.halt_poll_deadline = now_tsc
+                            + (crate::interrupts::tsc_freq() / 1_000_000) * self.vcpu.halt_poll_us;
+                    }
+                    if now_tsc >= self.vcpu.halt_poll_deadline {
+                        self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us / 2).max(HALT_POLL_MIN_US);
+                        self.vcpu.halt_poll_deadline = 0;
+                        return Ok(SliceOutcome::Idle);
+                    }
+                    // else: within the poll window → keep looping (poll).
                 }
                 last_outcome = Some(outcome);
             }
