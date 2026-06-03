@@ -18,3 +18,4 @@ pub mod netdev;
 pub mod acpi;
 pub mod smbus;
 pub mod battery;
+pub mod ec;
