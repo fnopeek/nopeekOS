@@ -139,13 +139,16 @@ impl Rasterizer for CpuRasterizer {
         let w = w as u32;
         let h = h as u32;
         if src.len() < (w * h * 4) as usize { return; }
+        let (clx0, cly0, clx1, cly1) = local_clip(t);
         let stride = t.stride as usize;
         for cy in 0..h {
             let dst_row = cy as usize * stride;
             let src_row = cy as usize * (w as usize) * 4;
-            if cy as u32 >= t.size.h { break; }
+            if (cy as i32) < cly0 { continue; }
+            if cy as i32 >= cly1 { break; }
             for cx in 0..w {
-                if cx >= t.size.w { break; }
+                if (cx as i32) < clx0 { continue; }
+                if cx as i32 >= clx1 { break; }
                 let src_off = src_row + (cx as usize) * 4;
                 let dst_off = dst_row + cx as usize;
                 let b = src[src_off]     as u32;
@@ -179,16 +182,17 @@ impl Rasterizer for CpuRasterizer {
         let (rx, ry) = window_to_target(t, rect.x, rect.y);
         let ox = rx + ((rw - dst_w) / 2) as i32;
         let oy = ry + ((rh - dst_h) / 2) as i32;
+        let (clx0, cly0, clx1, cly1) = local_clip(t);
         let stride = t.stride as usize;
         for dy in 0..dst_h {
             let py = oy + dy as i32;
-            if py < 0 || py as u32 >= t.size.h { continue; }
+            if py < cly0 || py >= cly1 { continue; }
             let sy = (dy * sh) / dst_h; // nearest-neighbour
             let src_row = (sy as usize) * (sw as usize) * 4;
             let dst_row = (py as usize) * stride;
             for dx in 0..dst_w {
                 let px = ox + dx as i32;
-                if px < 0 || px as u32 >= t.size.w { continue; }
+                if px < clx0 || px >= clx1 { continue; }
                 let sx = (dx * sw) / dst_w;
                 let src_off = src_row + (sx as usize) * 4;
                 let b = src[src_off]     as u32;
@@ -214,14 +218,31 @@ fn window_to_target(t: &RasterTarget, wx: i32, wy: i32) -> (i32, i32) {
     (wx - t.origin.x, wy - t.origin.y)
 }
 
+/// Effective draw bounds in target-local coords: the target size,
+/// further narrowed by any active `Widget::Scroll` clip rect. Every
+/// blit helper clamps to this so scrolled content can't paint outside
+/// its viewport.
+#[inline]
+fn local_clip(t: &RasterTarget) -> (i32, i32, i32, i32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (0i32, 0i32, t.size.w as i32, t.size.h as i32);
+    if let Some((cx0, cy0, cx1, cy1)) = t.clip {
+        x0 = x0.max(cx0);
+        y0 = y0.max(cy0);
+        x1 = x1.min(cx1);
+        y1 = y1.min(cy1);
+    }
+    (x0, y0, x1, y1)
+}
+
 /// Fill a rectangle in target-local coordinates, clipping to the
 /// target size. `alpha` is 0..=255; 255 = fully opaque overwrite.
 fn fill_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8) {
     if w <= 0 || h <= 0 { return; }
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x + w).min(t.size.w as i32);
-    let y1 = (y + h).min(t.size.h as i32);
+    let (cx0, cy0, cx1, cy1) = local_clip(t);
+    let x0 = x.max(cx0);
+    let y0 = y.max(cy0);
+    let x1 = (x + w).min(cx1);
+    let y1 = (y + h).min(cy1);
     if x0 >= x1 || y0 >= y1 { return; }
 
     let stride = t.stride as usize;
@@ -250,10 +271,11 @@ fn composite_alpha_target(
     x: i32, y: i32, w: u32, h: u32, alpha: &[u8], color: u32,
 ) {
     if w == 0 || h == 0 { return; }
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x + w as i32).min(t.size.w as i32);
-    let y1 = (y + h as i32).min(t.size.h as i32);
+    let (cx0, cy0, cx1, cy1) = local_clip(t);
+    let x0 = x.max(cx0);
+    let y0 = y.max(cy0);
+    let x1 = (x + w as i32).min(cx1);
+    let y1 = (y + h as i32).min(cy1);
     if x0 >= x1 || y0 >= y1 { return; }
 
     let stride = t.stride as usize;
@@ -277,10 +299,11 @@ fn composite_alpha_scaled(
     x: i32, y: i32, size: u32, atlas_size: u32, alpha: &[u8], color: u32,
 ) {
     if size == 0 || atlas_size == 0 { return; }
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x + size as i32).min(t.size.w as i32);
-    let y1 = (y + size as i32).min(t.size.h as i32);
+    let (cx0, cy0, cx1, cy1) = local_clip(t);
+    let x0 = x.max(cx0);
+    let y0 = y.max(cy0);
+    let x1 = (x + size as i32).min(cx1);
+    let y1 = (y + size as i32).min(cy1);
     if x0 >= x1 || y0 >= y1 { return; }
 
     let stride = t.stride as usize;
@@ -302,8 +325,8 @@ fn composite_alpha_scaled(
 }
 
 fn put_pixel_blended(t: &mut RasterTarget, x: i32, y: i32, color: u32, alpha: u8) {
-    if x < 0 || y < 0 { return; }
-    if x >= t.size.w as i32 || y >= t.size.h as i32 { return; }
+    let (cx0, cy0, cx1, cy1) = local_clip(t);
+    if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 { return; }
     let base = y as usize * t.stride as usize + x as usize;
     let dst = t.pixels[base];
     t.pixels[base] = blend_over(dst, color, alpha);
@@ -381,10 +404,11 @@ fn stroke_rounded_rect_target(t: &mut RasterTarget, x: i32, y: i32, w: i32, h: i
     let inner_w = (w - 2 * width).max(0);
     let inner_h = (h - 2 * width).max(0);
 
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x + w).min(t.size.w as i32);
-    let y1 = (y + h).min(t.size.h as i32);
+    let (cx0, cy0, cx1, cy1) = local_clip(t);
+    let x0 = x.max(cx0);
+    let y0 = y.max(cy0);
+    let x1 = (x + w).min(cx1);
+    let y1 = (y + h).min(cy1);
     if x0 >= x1 || y0 >= y1 { return; }
 
     let ba = t.bg_alpha;

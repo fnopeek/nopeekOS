@@ -87,15 +87,36 @@ pub struct LayoutOutput {
     pub tree:     LayoutNode,
     pub anchors:  BTreeMap<u32, Rect>,
     pub popovers: Vec<PopoverLayout>,
+    /// Largest scroll offset any vertical `Widget::Scroll` in the tree
+    /// can take (content height − viewport height). The compositor clamps
+    /// the window's stored scroll offset to this so a wheel-up at the
+    /// bottom responds immediately. Zero → nothing scrolls.
+    pub max_scroll_y: u32,
+}
+
+/// Threaded through placement so a `Widget::Scroll` can offset its child
+/// by the window's current scroll amount and report back the maximum
+/// legal offset. One offset per window (applied to every vertical
+/// Scroll); apps in practice have a single scroll region.
+struct ScrollCtx {
+    offset: u32,
+    max:    u32,
 }
 
 /// Lay out `root` inside `container` (absolute px). Returns the
 /// main layout tree, a NodeId→Rect lookup, and any floating popover
-/// overlays positioned via anchor lookups.
+/// overlays positioned via anchor lookups. `scroll_y` shifts vertical
+/// `Widget::Scroll` content up by that many pixels (wheel scroll).
 pub fn layout(root: &Widget, container: Rect) -> LayoutOutput {
+    layout_scrolled(root, container, 0)
+}
+
+pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutOutput {
     // Pass 1: main tree.
     let (_, inner) = unpack_modifiers(root, container);
-    let tree = place(root, inner);
+    let mut ctx = ScrollCtx { offset: scroll_y, max: 0 };
+    let tree = place(root, inner, &mut ctx);
+    let max_scroll_y = ctx.max;
 
     // Pass 2: walk widget+layout in lockstep, record NodeId-tagged
     // rects so popovers (which always come after their anchor in
@@ -109,7 +130,7 @@ pub fn layout(root: &Widget, container: Rect) -> LayoutOutput {
     let mut popovers: Vec<PopoverLayout> = Vec::new();
     collect_popovers(root, container, &anchors, &mut popovers);
 
-    LayoutOutput { tree, anchors, popovers }
+    LayoutOutput { tree, anchors, popovers, max_scroll_y }
 }
 
 /// Walk widget+layout trees in lockstep, recording (NodeId, rect)
@@ -156,7 +177,9 @@ fn collect_popovers(
             let max_x = window.x + window.w as i32 - csize.w as i32;
             let x = anchor_rect.x.min(max_x.max(window.x));
             let frect = Rect { x, y, w: csize.w, h: csize.h };
-            let layout = place(child, frect);
+            // Popover content is floating chrome — never scrolled.
+            let mut pctx = ScrollCtx { offset: 0, max: 0 };
+            let layout = place(child, frect, &mut pctx);
             out.push(PopoverLayout {
                 on_dismiss:  *on_dismiss,
                 anchor_rect,
@@ -302,7 +325,20 @@ fn measure_intrinsic(w: &Widget) -> Size {
             Size { w: max_w + outer_pad.0 * 2, h: max_h + outer_pad.1 * 2 }
         }
 
-        Widget::Scroll { child, .. } => measure(child),
+        Widget::Scroll { child, axis, .. } => {
+            // A scroll container does NOT demand its child's full extent on
+            // the scroll axis — that's the whole point: it lets a flex
+            // parent size it to the viewport and clips/scrolls the overflow.
+            // Report the child's cross size, but only a small floor on the
+            // scroll axis so siblings (e.g. a footer) keep their space.
+            let cs = measure(child);
+            const AXIS_FLOOR: u32 = 24;
+            match axis {
+                Axis::Vertical   => Size { w: cs.w, h: AXIS_FLOOR },
+                Axis::Horizontal => Size { w: AXIS_FLOOR, h: cs.h },
+                Axis::Both       => Size { w: AXIS_FLOOR, h: AXIS_FLOOR },
+            }
+        }
 
         Widget::Text { content, style, modifiers } => {
             let w = ceil_u32(crate::gui::text::measure(content, *style));
@@ -392,18 +428,18 @@ fn measure_intrinsic(w: &Widget) -> Size {
 
 /// Place `w` inside `inner` (already-padded rect). Returns the absolute
 /// layout tree rooted at `w`.
-fn place(w: &Widget, inner: Rect) -> LayoutNode {
+fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
     match w {
         Widget::Column { children, spacing, align, modifiers } => {
             let (container, content) = unpack_modifiers_on(modifiers, inner);
-            let mut node = place_axis(children, *spacing, *align, content, /* vertical = */ true);
+            let mut node = place_axis(children, *spacing, *align, content, /* vertical = */ true, ctx);
             node.rect = container;
             node
         }
 
         Widget::Row { children, spacing, align, modifiers } => {
             let (container, content) = unpack_modifiers_on(modifiers, inner);
-            let mut node = place_axis(children, *spacing, *align, content, false);
+            let mut node = place_axis(children, *spacing, *align, content, false, ctx);
             node.rect = container;
             node
         }
@@ -412,21 +448,30 @@ fn place(w: &Widget, inner: Rect) -> LayoutNode {
             let (container, content) = unpack_modifiers_on(modifiers, inner);
             let mut kids = Vec::with_capacity(children.len());
             for c in children {
-                kids.push(place(c, content));
+                kids.push(place(c, content, ctx));
             }
             LayoutNode { rect: container, baseline: 0, children: kids }
         }
 
         Widget::Scroll { child, axis, .. } => {
-            // Scroll: child takes container's cross size, natural size on
-            // main axis. Clipping + scroll-offset come in the rasterizer.
+            // Scroll: child takes the container's cross size and its natural
+            // size on the scroll axis; the rasterizer clips to `inner`. For a
+            // vertical scroll we shift the child up by the window's scroll
+            // offset (clamped to content−viewport) and report that ceiling so
+            // the compositor can clamp the wheel.
             let csize = measure(child);
             let child_rect = match axis {
-                Axis::Vertical   => Rect { x: inner.x, y: inner.y, w: inner.w, h: csize.h.max(inner.h) },
+                Axis::Vertical => {
+                    let content_h = csize.h.max(inner.h);
+                    let max_off = content_h.saturating_sub(inner.h);
+                    let off = ctx.offset.min(max_off);
+                    if max_off > ctx.max { ctx.max = max_off; }
+                    Rect { x: inner.x, y: inner.y - off as i32, w: inner.w, h: content_h }
+                }
                 Axis::Horizontal => Rect { x: inner.x, y: inner.y, w: csize.w.max(inner.w), h: inner.h },
                 Axis::Both       => Rect { x: inner.x, y: inner.y, w: csize.w.max(inner.w), h: csize.h.max(inner.h) },
             };
-            let inner_layout = place(child, child_rect);
+            let inner_layout = place(child, child_rect, ctx);
             LayoutNode {
                 rect: inner,
                 baseline: 0,
@@ -487,6 +532,7 @@ fn place_axis(
     align: Align,
     content: Rect,
     vertical: bool,
+    ctx: &mut ScrollCtx,
 ) -> LayoutNode {
     let main_avail: u32 = if vertical { content.h } else { content.w };
     let cross_avail: u32 = if vertical { content.w } else { content.h };
@@ -574,7 +620,7 @@ fn place_axis(
             }
         };
 
-        kids.push(place(c, child_rect));
+        kids.push(place(c, child_rect, ctx));
         cursor = cursor.saturating_add(main_sz);
         if idx + 1 < children.len() {
             cursor = cursor.saturating_add(spacing as u32);
