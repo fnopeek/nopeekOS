@@ -1171,6 +1171,35 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
         (changed, edit.value.clone())
     };
 
+    // Phase 3b: caret-follow scroll. The render no longer pulls the view to
+    // the caret every frame (that defeated wheel/drag scrolling), so do it
+    // HERE — only on a caret move — for the focused TextArea: nudge
+    // scroll_y just enough to keep the caret line on screen.
+    if is_textarea {
+        let mut scenes = SCENES.lock();
+        if let Some(s) = scenes.get_mut(&window_id) {
+            if s.scroll_viewport.h > 0 {
+                let line_h = (crate::gui::text::line_height(abi::TextStyle::Mono) as u32).max(1);
+                let visible = (s.scroll_viewport.h / line_h).max(1) as usize;
+                let max_sy = s.max_scroll_y;
+                let caret_line = match &s.input_edit {
+                    Some(e) => {
+                        let cur = e.cursor.min(e.value.len());
+                        e.value[..cur].matches('\n').count()
+                    }
+                    None => 0,
+                };
+                let mut sl = (s.scroll_y / line_h) as usize;
+                if caret_line < sl {
+                    sl = caret_line;
+                } else if caret_line + 1 > sl + visible {
+                    sl = caret_line + 1 - visible;
+                }
+                s.scroll_y = ((sl as u32) * line_h).min(max_sy);
+            }
+        }
+    }
+
     // Phase 3: push the right event(s).
     match op {
         Op::Submit => {
