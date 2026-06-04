@@ -496,7 +496,20 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
         // intrinsic-sized rect, so the small-widget case is unchanged;
         // an image viewer that Flex(1)-fills its body gets the whole
         // area and the rasterizer contain-fits the bitmap into it.
-        Widget::TextArea { .. } | Widget::Canvas { .. } => {
+        Widget::TextArea { value, .. } => {
+            // Report how far the editor can scroll (content lines beyond the
+            // viewport) so the compositor routes the wheel here; the render
+            // applies the offset + keeps the caret visible. Mirrors the
+            // render's `visible`/line-window math (Mono metrics, +4 inset).
+            let line_h = ceil_u32(crate::gui::text::line_height(TextStyle::Mono)).max(1);
+            let visible = (inner.h / line_h).max(1) as usize;
+            let total = value.split('\n').count();
+            let max_off = (total.saturating_sub(visible)) as u32 * line_h;
+            if max_off > ctx.max { ctx.max = max_off; }
+            LayoutNode::leaf(inner)
+        }
+
+        Widget::Canvas { .. } => {
             LayoutNode::leaf(inner)
         }
 

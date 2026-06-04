@@ -498,7 +498,7 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
     let a: Option<&[u32]> = active_path.as_deref();
     let pixels = rasterize_buffer_with_overlays(
         window_id, &tree, &layout_tree, &popovers, rect, h, f, a, density,
-        input_edit.as_ref(),
+        input_edit.as_ref(), scroll_y,
     );
 
     if let Some(s) = SCENES.lock().get_mut(&window_id) {
@@ -773,7 +773,7 @@ fn rerender_state_only(window_id: u32) {
     let a: Option<&[u32]> = active_path.as_deref();
     let pixels = rasterize_buffer_with_overlays(
         window_id, &tree, &layout_tree, &popovers, rect, h, f, a, density,
-        input_edit.as_ref(),
+        input_edit.as_ref(), scroll_y,
     );
     if let Some(s) = SCENES.lock().get_mut(&window_id) {
         s.pixels      = pixels;
@@ -1304,7 +1304,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     let pixels = rasterize_buffer_with_overlays(
         target_id, &tree, &layout_tree, &popovers, layout_rect,
         hover_slice, focus_slice, active_slice,
-        density, input_edit.as_ref(),
+        density, input_edit.as_ref(), scroll_y,
     );
 
     // Store into the per-window scene map. Keep a clone of the tree
@@ -1370,6 +1370,7 @@ fn rasterize_buffer_with_overlays(
     active_path: Option<&[u32]>,
     density: abi::Density,
     input_edit: Option<&InputEditState>,
+    scroll_y: u32,
 ) -> Vec<u32> {
     let pixel_count = (rect.w as usize) * (rect.h as usize);
     let mut pixels: Vec<u32> = alloc::vec![0u32; pixel_count];
@@ -1411,16 +1412,16 @@ fn rasterize_buffer_with_overlays(
     render::render_with_state(
         &mut rast, &mut target, tree, layout_tree,
         hover_path, focus_path, active_path, density,
-        input_edit,
+        input_edit, scroll_y,
     );
 
     // Overlays — paint after the main tree so they sit on top of any
     // pixels the main pass wrote into the same screen region. No
-    // pseudo-state paths — popovers are transient by definition.
+    // pseudo-state paths — popovers are transient by definition (scroll 0).
     for p in popovers {
         render::render_with_state(
             &mut rast, &mut target, &p.child, &p.layout,
-            None, None, None, density, None,
+            None, None, None, density, None, 0,
         );
     }
 
@@ -1466,7 +1467,7 @@ pub fn rerender_window(wid: u32) {
     let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
-    let new_pixels = rasterize_buffer_with_overlays(wid, &tree, &new_lo.tree, &new_lo.popovers, rect, h, f, a, density, input_edit.as_ref());
+    let new_pixels = rasterize_buffer_with_overlays(wid, &tree, &new_lo.tree, &new_lo.popovers, rect, h, f, a, density, input_edit.as_ref(), scroll_y);
     if let Some(scene) = SCENES.lock().get_mut(&wid) {
         scene.pixels      = new_pixels;
         scene.layout_tree = new_lo.tree;
@@ -1506,7 +1507,7 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let new_pixels = rasterize_buffer_with_overlays(
         window_id, &tree, &new_lo.tree, &new_lo.popovers, new_rect, None, f, None, new_density,
-        input_edit.as_ref(),
+        input_edit.as_ref(), scroll_y,
     );
     scene.pixels      = new_pixels;
     scene.width       = new_w;

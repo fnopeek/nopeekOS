@@ -509,9 +509,7 @@ fn render(sp: &Spell) -> Widget {
         Widget::Divider,
         render_tabbar(sp),
         Widget::Divider,
-        render_body(sp),       // Flex(1) — fills
-        Widget::Divider,
-        render_footer(sp),
+        render_body(sp),       // Flex(1) — fills (no footer; removed as noise)
     ];
 
     // Open dialog takes precedence over the Datei dropdown (it replaces
@@ -790,19 +788,6 @@ fn render_name_dialog(sp: &Spell) -> Widget {
         align:     Align::Center,
         modifiers: alloc::vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
     }
-}
-
-fn render_footer(sp: &Spell) -> Widget {
-    let doc = sp.cur();
-    // Left: the real npkFS path of the active file (or "neue Datei").
-    let left = match &doc.path {
-        Some(p) => p.clone(),
-        None => "neue Datei".to_string(),
-    };
-    let lines = doc.text.split('\n').count();
-    let state = if doc.dirty { "● geändert" } else { "gespeichert" };
-    let right = alloc::format!("{} · {} Z. · {}", doc.kind_label(), lines, state);
-    prefab::footer(&left, &right)
 }
 
 // ── Markdown preview ──────────────────────────────────────────────────

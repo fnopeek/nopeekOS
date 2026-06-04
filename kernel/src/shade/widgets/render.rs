@@ -31,7 +31,7 @@ pub fn render(
     widget: &Widget,
     layout: &LayoutNode,
 ) {
-    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular, None);
+    render_with_state(rast, target, widget, layout, None, None, None, Density::Regular, None, 0);
 }
 
 /// Render with explicit pseudo-state context.
@@ -57,6 +57,10 @@ pub fn render_with_state(
     active_path: Option<&[u32]>,
     density: Density,
     input_edit: Option<&InputEditState>,
+    // Window vertical scroll offset (px). Applied to a focused TextArea's
+    // line window (wheel scroll); Widget::Scroll handles its own offset in
+    // layout, so this only matters at the TextArea leaf.
+    scroll_y: u32,
 ) {
     let is_hovered = hover_path.is_some();
     let is_focused = focus_path.is_some();
@@ -71,7 +75,7 @@ pub fn render_with_state(
     // check.
     let edit_for_node: Option<&InputEditState> =
         if matches!(focus_path, Some(p) if p.is_empty()) { input_edit } else { None };
-    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node);
+    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y);
 
     // A Scroll clips its subtree to its viewport rect so overflowing
     // content is masked (and, for a vertical scroll, an overlay scrollbar
@@ -97,7 +101,7 @@ pub fn render_with_state(
         let child_active = descend(active_path, i as u32);
         render_with_state(
             rast, target, cw, cl,
-            child_hover, child_focus, child_active, density, input_edit,
+            child_hover, child_focus, child_active, density, input_edit, scroll_y,
         );
     }
 
@@ -392,6 +396,7 @@ fn paint_node_eff(
     layout: &LayoutNode,
     eff: &[Modifier],
     edit_state: Option<&InputEditState>,
+    scroll_y: u32,
 ) {
     let rect = layout.rect;
     // Inner-rect origin for leaf glyph placement. The OUTER rect is
@@ -558,12 +563,19 @@ fn paint_node_eff(
                 None => (None, ""),
             };
 
-            // Scroll so the caret line stays in view (follows the caret;
-            // no free scroll without moving the caret in v1).
-            let scroll = match caret_line {
-                Some(cl) if cl + 1 > visible => cl + 1 - visible,
-                _ => 0,
-            };
+            // Line window: start from the manual wheel offset (scroll_y px →
+            // lines), clamped to the document, then correct so the caret
+            // stays visible (typing/arrowing always pulls the view to it).
+            let total_lines = live.split('\n').count();
+            let max_scroll = total_lines.saturating_sub(visible);
+            let mut scroll = ((scroll_y / line_h) as usize).min(max_scroll);
+            if let Some(cl) = caret_line {
+                if cl < scroll {
+                    scroll = cl;
+                } else if cl + 1 > scroll + visible {
+                    scroll = cl + 1 - visible;
+                }
+            }
 
             // Paint the visible window of lines, colouring each line by
             // the spans covering its bytes (uncovered → default colour).
