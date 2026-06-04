@@ -39,10 +39,19 @@ const LIGHT_TERMINAL_OPACITY_DROP: u32 = 56;
 /// Platform close button — the compositor draws a small "X" affordance in
 /// the top-right corner of every real (non-panel) window so mouse users
 /// can close it without remembering Mod+Q. Not per-app: provided here
-/// once for all windows. Edge of the (square) hit/disc box at 1× scale.
+/// once for all windows. Edge of the (square) hit box at 1× scale.
 const CLOSE_BTN_BOX: u32 = 22;
-/// Inset of the button from the window's top-right corner (1× px).
+/// Inset of the button from the window's right edge (1× px).
 const CLOSE_BTN_MARGIN: u32 = 6;
+/// Assumed height of the app's top menu/toolbar band (loft/spell:
+/// `Datei Bearbeiten …`) at 1× — the X is vertically centred in this
+/// band so it lines up with the menu labels instead of clinging to the
+/// very top edge. Windows without a menu bar (browser, terminal) just
+/// get the X centred in their top ~band; close enough.
+const CLOSE_BTN_BAND: u32 = 40;
+/// White close X glyph size at 1× (no disc → a touch larger than the
+/// old 16 so the bare glyph reads as a button).
+const CLOSE_BTN_GLYPH: u32 = 20;
 
 /// Screen rect `(x, y, w, h)` of a window's platform close button, or
 /// `None` for panels (dock/bar are managed chrome — never closable here)
@@ -58,38 +67,25 @@ fn close_button_rect(win: &Window, border: u32, scale: u32)
     let margin = CLOSE_BTN_MARGIN * scale;
     if win.width <= border * 2 + margin + box_px { return None; }
     let bx = win.x + win.width - border - margin - box_px;
-    let by = win.y + border + margin;
+    // Centre the box vertically in the app's menu-bar band so the X
+    // aligns with `Datei / Bearbeiten / …` rather than the top edge.
+    let band = CLOSE_BTN_BAND * scale;
+    let inset = band.saturating_sub(box_px) / 2;
+    let by = win.y + border + inset;
     Some((bx, by, box_px, box_px))
 }
 
-/// Paint the platform close button (translucent dark disc + white X) into
-/// the shadow buffer at a window's top-right corner. Drawn last in
-/// `render_window` so it sits over the window content. The dark disc keeps
-/// the white X legible on any background (light wallpaper, browser pixels,
-/// app surface alike).
+/// Paint the platform close button — a bare white X — into the shadow
+/// buffer, vertically centred in the window's top menu-bar band. Drawn
+/// last in `render_window` so it sits over the window content. No disc /
+/// colour highlight (Florian's call): just the glyph, a touch larger so
+/// it still reads as a button.
 fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, scale: u32) {
     let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) else { return };
-    // Translucent disc background.
-    let ccx = bx as i32 + bw as i32 / 2;
-    let ccy = by as i32 + bh as i32 / 2;
-    let r = (bw.min(bh) / 2) as i32;
-    let r2 = r * r;
-    let inner2 = (r - 1).max(0) * (r - 1).max(0);
-    for py in by..(by + bh).min(info.height) {
-        for px in bx..(bx + bw).min(info.width) {
-            let dx = px as i32 - ccx;
-            let dy = py as i32 - ccy;
-            let d2 = dx * dx + dy * dy;
-            if d2 > r2 { continue; }
-            // Slightly softer alpha on the outer ring for a cleaner edge.
-            let alpha = if d2 <= inner2 { 120 } else { 80 };
-            render::blend_pixel(shadow, info, px, py, 0x0000_0000, alpha);
-        }
-    }
-    // White X glyph, atlas-native, centred in the disc.
+    // White X glyph, atlas-native, centred in the hit box.
     use crate::shade::widgets::abi::IconId;
-    let req = 16 * scale.max(1);
+    let req = CLOSE_BTN_GLYPH * scale.max(1);
     if let Some((asz, glyph)) = crate::gui::icons::alpha_for(IconId::X, req as u16) {
         let asz = asz as u32;
         if asz > 0 && glyph.len() >= (asz * asz) as usize {

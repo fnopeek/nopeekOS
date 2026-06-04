@@ -311,7 +311,10 @@ fn card(names: &[String], st: &BarState) -> Widget {
     }
     Widget::Row {
         children: kids,
-        spacing: Spacing::Sm.as_u16(),
+        // A touch more air between the icons (gear/camera/battery) than the
+        // default Sm so they don't crowd each other; the big pre-power gap is
+        // the separate `gap` filler.
+        spacing: Spacing::Md.as_u16(),
         align: Align::Center,
         modifiers: alloc::vec![
             Modifier::Background(Token::SurfaceElevated),
