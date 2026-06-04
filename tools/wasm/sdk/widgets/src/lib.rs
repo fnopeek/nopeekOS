@@ -83,6 +83,9 @@ pub mod caps {
     pub const CAPTURE: u8 = 0x10;
     /// `npk_canvas_commit` — upload a raw BGRA bitmap into a `Widget::Canvas`.
     pub const CANVAS: u8 = 0x20;
+    /// `npk_acpi_dsdt` / `npk_ec_read` / `npk_ec_write` — raw firmware + EC
+    /// access (the AML battery driver). Highly privileged: direct hardware I/O.
+    pub const HARDWARE: u8 = 0x40;
 }
 
 // Re-export the core ABI types at the crate root for ergonomic use.

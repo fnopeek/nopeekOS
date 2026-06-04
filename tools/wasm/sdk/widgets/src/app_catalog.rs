@@ -52,6 +52,13 @@ static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
 const WASM_FETCH_BUF_SIZE: usize = 2 * 1024 * 1024;
 static mut WASM_FETCH_BUF: [u8; WASM_FETCH_BUF_SIZE] = [0; WASM_FETCH_BUF_SIZE];
 
+/// System / background / dev modules that are never user-launchable apps, so
+/// they don't clutter the launcher or dock. (Panels dock/bar/drun are excluded
+/// per-caller via `exclude`.) Background drivers that ship no `.npk.app_meta`
+/// section are hidden automatically — this list is only for modules that DO
+/// carry app_meta but still aren't apps.
+const SYSTEM_HIDDEN: &[&str] = &["debug", "testdisk", "wifi", "wallpaper", "snap"];
+
 /// Load the full catalog: installed modules + standard built-in intents,
 /// sorted by display name. `exclude` skips module names (e.g. the
 /// caller's own module so it doesn't list itself).
@@ -65,8 +72,9 @@ pub fn load(exclude: &[&str]) -> Vec<AppEntry> {
         for chunk in slice.split(|&b| b == 0) {
             if chunk.is_empty() { continue; }
             if let Ok(s) = core::str::from_utf8(chunk) {
-                if exclude.contains(&s) { continue; }
-                entries.push(hydrate_module(s));
+                if exclude.contains(&s) || SYSTEM_HIDDEN.contains(&s) { continue; }
+                // No app_meta ⇒ background/driver module ⇒ not a launchable app.
+                if let Some(e) = hydrate_module(s) { entries.push(e); }
             }
         }
     }
@@ -93,23 +101,18 @@ pub fn builtin_intents() -> Vec<AppEntry> {
     ]
 }
 
-fn hydrate_module(module_name: &str) -> AppEntry {
-    if let Some(meta) = read_meta(module_name) {
-        return AppEntry {
-            launch_name:  module_name.to_string(),
-            display_name: meta.display_name,
-            description:  meta.description,
-            icon:         icon_ref_to_id(&meta.icon),
-            kind:         EntryKind::Module,
-        };
-    }
-    AppEntry {
+/// Build a catalog entry from a module's `.npk.app_meta`. Returns None when the
+/// module has no app_meta — that marks it a background/driver module (e.g. the
+/// AML battery driver), which is never shown as a launchable app.
+fn hydrate_module(module_name: &str) -> Option<AppEntry> {
+    let meta = read_meta(module_name)?;
+    Some(AppEntry {
         launch_name:  module_name.to_string(),
-        display_name: module_name.to_string(),
-        description:  String::new(),
-        icon:         IconId::List,
+        display_name: meta.display_name,
+        description:  meta.description,
+        icon:         icon_ref_to_id(&meta.icon),
         kind:         EntryKind::Module,
-    }
+    })
 }
 
 fn read_meta(name: &str) -> Option<AppMeta> {

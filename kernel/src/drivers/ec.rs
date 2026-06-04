@@ -5,11 +5,13 @@
 //! 256-byte RAM is read one byte at a time via the RD_EC command over the
 //! ISA ports 0x62 (data) / 0x66 (status+command). On HP (and most x86) the
 //! battery lives here as plain EC-RAM fields (remaining/full capacity,
-//! status) that the DSDT's `_BST`/`_BIF` read — so once we know the offsets
-//! we can read charge directly, no AML interpreter needed.
+//! status) that the DSDT's `_BST`/`_BIF` read.
 //!
-//! READ-ONLY: we never WR_EC. Writing arbitrary EC RAM can brick thermal /
-//! charge control. Reads race-tolerantly share the EC with SMM/firmware.
+//! Reads race-tolerantly share the EC with SMM/firmware. [`write`] is
+//! firmware-directed only: the AML interpreter runs the DSDT's own
+//! `_BST`/`_BIF`, which writes the battery-select field (BSEL) before reading
+//! the multiplexed capacity registers — exactly as ACPICA drives the EC. We
+//! never poke arbitrary offsets ourselves.
 
 use crate::serial::{inb, outb};
 
@@ -22,6 +24,7 @@ const EC_FLAG_OBF: u8 = 0x01; // output buffer full → data ready to read
 const EC_FLAG_IBF: u8 = 0x02; // input buffer full → controller still busy
 
 const CMD_READ: u8 = 0x80; // RD_EC
+const CMD_WRITE: u8 = 0x81; // WR_EC
 
 fn udelay(us: u64) {
     let freq = crate::interrupts::tsc_freq();
@@ -68,4 +71,18 @@ pub fn read_u16(addr: u8) -> Option<u16> {
     let lo = read(addr)? as u16;
     let hi = read(addr.wrapping_add(1))? as u16;
     Some(lo | (hi << 8))
+}
+
+/// Write one byte to EC RAM at `addr`. Polling WR_EC:
+/// IBF-clear → cmd 0x81 → IBF-clear → addr → IBF-clear → data. Returns false
+/// on timeout. See the module note on firmware-directed-only writes.
+pub fn write(addr: u8, val: u8) -> bool {
+    if !wait_ibf_clear() { return false; }
+    unsafe { outb(EC_SC, CMD_WRITE); }
+    if !wait_ibf_clear() { return false; }
+    unsafe { outb(EC_DATA, addr); }
+    if !wait_ibf_clear() { return false; }
+    unsafe { outb(EC_DATA, val); }
+    let _ = wait_ibf_clear();
+    true
 }

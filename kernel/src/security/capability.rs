@@ -37,7 +37,11 @@ bitflags! {
         /// `npk_capture_screen` — read the composited framebuffer
         /// (screenshot tool). Highly privileged: screen-scrape.
         const CAPTURE   = 0b1_0000_0000;
-        const ALL       = 0b1_1111_1111;
+        /// `npk_acpi_dsdt` / `npk_ec_read` / `npk_ec_write` — raw firmware +
+        /// embedded-controller access (the AML battery driver). Highly
+        /// privileged: direct hardware I/O.
+        const HARDWARE  = 0b10_0000_0000;
+        const ALL       = 0b11_1111_1111;
     }
 }
 
@@ -238,15 +242,17 @@ const CAP_BIT_EXEC:    u8 = 0x04;
 const CAP_BIT_RENDER:  u8 = 0x08;
 const CAP_BIT_CAPTURE: u8 = 0x10;
 const CAP_BIT_CANVAS:  u8 = 0x20;
+const CAP_BIT_HARDWARE: u8 = 0x40;
 
 fn rights_from_caps_byte(b: u8) -> Rights {
     let mut r = Rights::empty();
-    if b & CAP_BIT_READ    != 0 { r |= Rights::READ; }
-    if b & CAP_BIT_WRITE   != 0 { r |= Rights::WRITE; }
-    if b & CAP_BIT_EXEC    != 0 { r |= Rights::EXECUTE; }
-    if b & CAP_BIT_RENDER  != 0 { r |= Rights::RENDER; }
-    if b & CAP_BIT_CAPTURE != 0 { r |= Rights::CAPTURE; }
-    if b & CAP_BIT_CANVAS  != 0 { r |= Rights::CANVAS; }
+    if b & CAP_BIT_READ     != 0 { r |= Rights::READ; }
+    if b & CAP_BIT_WRITE    != 0 { r |= Rights::WRITE; }
+    if b & CAP_BIT_EXEC      != 0 { r |= Rights::EXECUTE; }
+    if b & CAP_BIT_RENDER   != 0 { r |= Rights::RENDER; }
+    if b & CAP_BIT_CAPTURE  != 0 { r |= Rights::CAPTURE; }
+    if b & CAP_BIT_CANVAS   != 0 { r |= Rights::CANVAS; }
+    if b & CAP_BIT_HARDWARE != 0 { r |= Rights::HARDWARE; }
     r
 }
 
