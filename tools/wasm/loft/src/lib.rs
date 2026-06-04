@@ -116,6 +116,11 @@ fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 // rare enough to be negligible load.
 const AUTO_REFRESH_TICKS: u32 = 90;
 
+// Folders scanned per idle tick (~16 ms) for recursive size/count. Small
+// enough that each tick stays snappy, enough that a typical directory
+// fills in within a few hundred ms.
+const STATS_PUMP_BUDGET: usize = 3;
+
 const ACT_GRID_CLICK_BASE:    u32 = 1_000;
 const ACT_GRID_HOVER_BASE:    u32 = 1_500;
 const ACT_SIDEBAR_CLICK_BASE: u32 = 2_000;
@@ -140,6 +145,12 @@ const ACT_VIEW_LIST:          u32 = 6_101;
 const ACT_GO_HOME:            u32 = 6_200;
 const ACT_GO_FILESYSTEM:      u32 = 6_201;
 const ACT_HELP_ABOUT:         u32 = 6_300;
+// List-view column headers — click to sort / toggle direction.
+const ACT_HEADER_NAME:        u32 = 7_000;
+const ACT_HEADER_SIZE:        u32 = 7_001;
+const ACT_HEADER_FILES:       u32 = 7_002;
+const ACT_HEADER_TYPE:        u32 = 7_003;
+const ACT_HEADER_MTIME:       u32 = 7_004;
 
 // NodeIds for menu-bar labels — used as Popover anchors.
 const NODE_MENU_FILE: u32 = 100;
@@ -171,8 +182,21 @@ struct Entry {
     /// on every keystroke. Critical for typing latency once the
     /// directory is large.
     name_lc: String,
+    /// For files: the file's own byte size. For folders: the recursive
+    /// sum of every descendant file's size, filled in by
+    /// `annotate_folder_stats` on refresh (0 until then). Lets the list
+    /// view show real folder sizes like Thunar/Finder.
     size:    u64,
     is_dir:  bool,
+    /// Number of descendant files inside a folder (recursive). 0 for
+    /// files. Drives the "Files" column. Filled progressively off the
+    /// idle loop (see `pump_stats`).
+    files:   u64,
+    /// Folder whose recursive size/count hasn't been computed yet.
+    /// True from refresh until `pump_stats` reaches it; always false for
+    /// files. Rendered as "…" so the directory paints instantly and the
+    /// numbers fill in without ever blocking the event loop.
+    stats_pending: bool,
     /// UTC seconds since the Unix epoch, captured at write time by
     /// the kernel. Zero = unknown (RTC was unreadable when the entry
     /// was created). Filled in from the v3 `npk_fs_list` ABI tail.
@@ -183,6 +207,18 @@ struct Entry {
 enum ViewMode {
     Grid,
     List,
+}
+
+/// Which column the list view sorts by. Folders are always grouped
+/// before files (Thunar/Files "folders first" idiom); the key only
+/// orders entries *within* each group.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    Name,
+    Size,
+    Files,
+    Type,
+    Modified,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -239,6 +275,19 @@ struct Loft {
     /// when this changes — so a new file (e.g. a fresh screenshot) shows
     /// up without a manual refresh.
     dir_sig:        u64,
+    /// Active list-view sort column + direction. Clicking a header sets
+    /// the key (or toggles direction if it's already active) and re-sorts
+    /// `entries` in place.
+    sort_key:       SortKey,
+    sort_asc:       bool,
+    /// Indices into `entries` of folders still awaiting a recursive
+    /// size/count scan. Drained a few at a time off the idle loop
+    /// (`pump_stats`) so opening a directory never blocks on a deep tree.
+    stats_queue:    Vec<usize>,
+    /// Reusable path buffer for `pump_stats` — pre-allocated before the
+    /// persistent mark so building "current/sub" each tick allocates
+    /// nothing on the hot path.
+    scratch:        String,
 }
 
 impl Loft {
@@ -262,6 +311,10 @@ impl Loft {
             open_menu:     None,
             assoc:         load_associations(),
             dir_sig:       0,
+            sort_key:      SortKey::Name,
+            sort_asc:      true,
+            stats_queue:   Vec::new(),
+            scratch:       String::with_capacity(512),
         };
         lf.refresh();
         lf
@@ -290,7 +343,18 @@ impl Loft {
 
     fn refresh(&mut self) {
         self.entries = list_dir(&self.current);
+        // Signature is captured from the raw (un-annotated) listing so it
+        // matches the idle probe's `dir_signature(&list_dir(..))` — folder
+        // sizes are filled in below and must not perturb change-detection.
         self.dir_sig = dir_signature(&self.entries);
+        // Mark folders "pending" and queue them for a recursive
+        // size/count scan — the actual scanning happens incrementally off
+        // the idle loop (`pump_stats`) so the directory paints instantly
+        // even when it holds many/large subtrees. Order by the active
+        // column first (pending folders all read size 0 → tie on name).
+        init_folder_stats(&mut self.entries);
+        sort_entries(&mut self.entries, self.sort_key, self.sort_asc);
+        self.stats_queue = pending_folder_indices(&self.entries);
         // Navigation invalidates any cached recursive listing — the
         // next non-empty query for this directory triggers a fresh
         // `list_dir_recursive` call.
@@ -298,6 +362,60 @@ impl Loft {
         self.recursive_dir = None;
         self.refilter();
         self.sync_sidebar_from_current();
+    }
+
+    /// Re-sort the browse listing under a (possibly new) column. Clicking
+    /// the already-active column flips direction; a different column
+    /// switches to it with a sensible default direction (ascending for
+    /// text, descending for the numeric/date columns where "biggest /
+    /// newest first" is the usual intent).
+    fn set_sort(&mut self, key: SortKey) {
+        if self.sort_key == key {
+            self.sort_asc = !self.sort_asc;
+        } else {
+            self.sort_key = key;
+            self.sort_asc = matches!(key, SortKey::Name | SortKey::Type);
+        }
+        sort_entries(&mut self.entries, self.sort_key, self.sort_asc);
+        self.refilter();
+    }
+
+    /// Compute the recursive size + file count for up to `budget` queued
+    /// folders, one host scan per folder. Runs off the idle loop so a
+    /// directory with many or deep subfolders fills in progressively
+    /// instead of freezing the app on open. Returns true if anything
+    /// changed (→ caller re-renders). Caller must wrap this between
+    /// `alloc_reset(persistent_mark)` / re-capture like the other state
+    /// mutations so `filtered`/`scratch` growth lands in the kept region.
+    fn pump_stats(&mut self, budget: usize) -> bool {
+        if self.stats_queue.is_empty() { return false; }
+        let mut changed = false;
+        for _ in 0..budget {
+            let Some(idx) = self.stats_queue.pop() else { break };
+            if self.entries.get(idx).map(|e| e.is_dir) != Some(true) { continue; }
+            // Build "current/<name>" into the reusable scratch buffer
+            // (disjoint field borrows — no per-tick allocation).
+            self.scratch.clear();
+            self.scratch.push_str(&self.current);
+            if !self.current.is_empty() { self.scratch.push('/'); }
+            self.scratch.push_str(&self.entries[idx].name);
+            let (bytes, files) = scan_folder_stats(&self.scratch);
+            if let Some(e) = self.entries.get_mut(idx) {
+                e.size = bytes;
+                e.files = files;
+                e.stats_pending = false;
+            }
+            changed = true;
+        }
+        // Settle the order once every folder is in, but only when the
+        // active column actually depends on the numbers we just filled.
+        if self.stats_queue.is_empty()
+            && matches!(self.sort_key, SortKey::Size | SortKey::Files)
+        {
+            sort_entries(&mut self.entries, self.sort_key, self.sort_asc);
+            self.refilter();
+        }
+        changed
     }
 
     /// Pick the active source list for filtering — direct children
@@ -682,19 +800,25 @@ fn render_grid(lf: &Loft) -> Widget {
     prefab::grid(grid_children, GRID_COLS)
 }
 
-/// Detail-list view: one row per entry, columns Name | Size | Type
-/// | Modified. English headers (Florian's request — international
-/// FS UX, less ambiguity than the German labels in the menu bar).
+/// Detail-list view: one row per entry, columns Name | Size | Files |
+/// Type | Modified, spanning the full window width (Name flexes to fill
+/// the slack). Headers are clickable — a click sorts by that column,
+/// clicking the active column flips direction (▲/▼ marker). English
+/// headers (Florian's request — international FS UX).
 fn render_list(lf: &Loft) -> Widget {
     let source = lf.source();
+    // Folder size/count is only computed for the browse listing; in
+    // search mode (recursive source) folders show "—" rather than a
+    // misleading zero.
+    let browsing = lf.query.is_empty();
     let mut rows: Vec<Widget> = Vec::with_capacity(lf.filtered.len() + 1);
-    rows.push(list_header_row());
+    rows.push(list_header_row(lf));
     rows.push(Widget::Divider);
     for (ui_idx, &entry_idx) in lf.filtered.iter().enumerate() {
         let e = &source[entry_idx];
         let selected = lf.grid_sel == Some(ui_idx);
         rows.push(list_data_row(
-            e, selected,
+            e, selected, browsing,
             ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32),
             ActionId(ACT_GRID_HOVER_BASE + ui_idx as u32),
         ));
@@ -707,13 +831,14 @@ fn render_list(lf: &Loft) -> Widget {
     }
 }
 
-fn list_header_row() -> Widget {
+fn list_header_row(lf: &Loft) -> Widget {
     Widget::Row {
         children: alloc::vec![
-            list_cell_text("Name",     true,  COL_NAME_W),
-            list_cell_text("Size",     false, COL_SIZE_W),
-            list_cell_text("Type",     false, COL_TYPE_W),
-            list_cell_text("Modified", false, COL_MTIME_W),
+            header_cell(lf, "Name",     SortKey::Name,     ACT_HEADER_NAME,  COL_NAME_W,  true),
+            header_cell(lf, "Size",     SortKey::Size,     ACT_HEADER_SIZE,  COL_SIZE_W,  false),
+            header_cell(lf, "Files",    SortKey::Files,    ACT_HEADER_FILES, COL_FILES_W, false),
+            header_cell(lf, "Type",     SortKey::Type,     ACT_HEADER_TYPE,  COL_TYPE_W,  false),
+            header_cell(lf, "Modified", SortKey::Modified, ACT_HEADER_MTIME, COL_MTIME_W, false),
         ],
         spacing: Spacing::Md.as_u16(),
         align:   Align::Center,
@@ -721,9 +846,32 @@ fn list_header_row() -> Widget {
     }
 }
 
-fn list_data_row(e: &Entry, selected: bool, on_click: ActionId, on_hover: ActionId) -> Widget {
+/// One clickable column header. Appends a ↑/↓ marker when this is the
+/// active sort column. `flex` lets the Name header grow to fill the row.
+fn header_cell(lf: &Loft, label: &str, key: SortKey, action: u32,
+               min_w: u16, flex: bool) -> Widget {
+    let mut content = String::from(label);
+    if lf.sort_key == key {
+        content.push(' ');
+        content.push(if lf.sort_asc { '↑' } else { '↓' });
+    }
+    let mut mods: Vec<Modifier> = alloc::vec![
+        Modifier::MinWidth(min_w),
+        Modifier::OnClick(ActionId(action)),
+        Modifier::Hover(alloc::vec![
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ]),
+    ];
+    if flex { mods.push(Modifier::Flex(1)); }
+    Widget::Text { content, style: TextStyle::Caption, modifiers: mods }
+}
+
+fn list_data_row(e: &Entry, selected: bool, browsing: bool,
+                 on_click: ActionId, on_hover: ActionId) -> Widget {
     let icon = icon_for(e);
-    // Name cell with icon + label.
+    // Name cell with icon + label. Flex(1) so the column absorbs the
+    // row's slack and the fixed columns sit flush against the right edge.
     let name_cell = Widget::Row {
         children: alloc::vec![
             Widget::Icon { id: icon, size: 24, modifiers: alloc::vec![] },
@@ -735,9 +883,29 @@ fn list_data_row(e: &Entry, selected: bool, on_click: ActionId, on_hover: Action
         ],
         spacing: Spacing::Sm.as_u16(),
         align:   Align::Center,
-        modifiers: alloc::vec![Modifier::MinWidth(COL_NAME_W)],
+        modifiers: alloc::vec![Modifier::MinWidth(COL_NAME_W), Modifier::Flex(1)],
     };
-    let size_str   = if e.is_dir { "—".to_string() } else { format_size(e.size) };
+    // Folders show their recursive byte sum + file count once scanned
+    // ("…" while pending, "—" in search mode where we don't compute it);
+    // files show their own size and "—" in the Files column.
+    let size_str = if e.is_dir {
+        if !browsing { "—".to_string() }
+        else if e.stats_pending { "…".to_string() }
+        else { format_size(e.size) }
+    } else {
+        format_size(e.size)
+    };
+    let files_str = if e.is_dir {
+        if !browsing { "—".to_string() }
+        else if e.stats_pending { "…".to_string() }
+        else {
+            let mut s = String::with_capacity(8);
+            push_usize(&mut s, e.files as usize);
+            s
+        }
+    } else {
+        "—".to_string()
+    };
     let type_str   = type_for(e);
     let mtime_str  = format_mtime(e.mtime);
     let mut row_mods: Vec<Modifier> = alloc::vec![
@@ -760,9 +928,10 @@ fn list_data_row(e: &Entry, selected: bool, on_click: ActionId, on_hover: Action
     Widget::Row {
         children: alloc::vec![
             name_cell,
-            list_cell_text(&size_str,  false, COL_SIZE_W),
-            list_cell_text(&type_str,  false, COL_TYPE_W),
-            list_cell_text(&mtime_str, false, COL_MTIME_W),
+            list_cell_text(&size_str,  COL_SIZE_W),
+            list_cell_text(&files_str, COL_FILES_W),
+            list_cell_text(&type_str,  COL_TYPE_W),
+            list_cell_text(&mtime_str, COL_MTIME_W),
         ],
         spacing: Spacing::Md.as_u16(),
         align:   Align::Center,
@@ -770,18 +939,19 @@ fn list_data_row(e: &Entry, selected: bool, on_click: ActionId, on_hover: Action
     }
 }
 
-fn list_cell_text(text: &str, header: bool, min_w: u16) -> Widget {
+fn list_cell_text(text: &str, min_w: u16) -> Widget {
     Widget::Text {
         content: text.to_string(),
-        style:   if header { TextStyle::Caption } else { TextStyle::Body },
+        style:   TextStyle::Body,
         modifiers: alloc::vec![Modifier::MinWidth(min_w)],
     }
 }
 
-const COL_NAME_W:  u16 = 320;
-const COL_SIZE_W:  u16 = 100;
+const COL_NAME_W:  u16 = 240;   // min — flexes to fill the row
+const COL_SIZE_W:  u16 = 110;
+const COL_FILES_W: u16 = 90;
 const COL_TYPE_W:  u16 = 120;
-const COL_MTIME_W: u16 = 180;
+const COL_MTIME_W: u16 = 170;
 
 fn render_footer(lf: &Loft) -> Widget {
     // Mockup-aligned: hints on the left, count + selection + size on
@@ -938,6 +1108,12 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             lf.open_menu = None;
             Outcome::Rerender
         }
+        // Column-header clicks → sort / toggle direction.
+        ACT_HEADER_NAME  => { lf.set_sort(SortKey::Name);     Outcome::Rerender }
+        ACT_HEADER_SIZE  => { lf.set_sort(SortKey::Size);     Outcome::Rerender }
+        ACT_HEADER_FILES => { lf.set_sort(SortKey::Files);    Outcome::Rerender }
+        ACT_HEADER_TYPE  => { lf.set_sort(SortKey::Type);     Outcome::Rerender }
+        ACT_HEADER_MTIME => { lf.set_sort(SortKey::Modified); Outcome::Rerender }
         _ => {
             if id >= ACT_BREADCRUMB_BASE && id < ACT_TOOLBAR_BACK {
                 let n = (id - ACT_BREADCRUMB_BASE) as usize;
@@ -1102,6 +1278,83 @@ fn list_dir_internal(prefix: &str, recursive: i32) -> Vec<Entry> {
     out
 }
 
+// ── Folder size/count + sorting ───────────────────────────────────────
+
+/// Reset every folder row to "pending" so `pump_stats` will scan it.
+/// Order-independent (just flips flags), so it's safe to call before the
+/// sort. Files are left untouched (they already carry their own size).
+fn init_folder_stats(entries: &mut [Entry]) {
+    for e in entries.iter_mut() {
+        if e.is_dir {
+            e.size = 0;
+            e.files = 0;
+            e.stats_pending = true;
+        }
+    }
+}
+
+/// Indices of folders still flagged pending, in current (sorted) order.
+fn pending_folder_indices(entries: &[Entry]) -> Vec<usize> {
+    entries.iter().enumerate()
+        .filter(|(_, e)| e.is_dir && e.stats_pending)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Recursive (size, file_count) of a single folder. One
+/// `npk_fs_list(recursive=1)` scan, summed inline without allocating an
+/// `Entry` per descendant — cheap even for large subtrees, and called one
+/// folder at a time off the idle loop so no single scan stalls the app.
+fn scan_folder_stats(path: &str) -> (u64, u64) {
+    let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
+    let n = unsafe {
+        npk_fs_list(
+            path.as_ptr() as i32, path.len() as i32,
+            buf_ptr as i32, LIST_BUF_SIZE as i32,
+            1,
+        )
+    };
+    if n <= 0 { return (0, 0); }
+    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
+    let (mut bytes, mut files) = (0u64, 0u64);
+    for line in slice.split(|&b| b == b'\n') {
+        let Some(nul) = line.iter().position(|&b| b == 0) else { continue };
+        let rest = &line[nul + 1..];
+        if rest.len() < 10 { continue; }
+        if rest[9] != 0 { continue; }            // directory → count files only
+        let Ok(b8) = rest[..8].try_into() else { continue };
+        bytes = bytes.saturating_add(u64::from_le_bytes(b8));
+        files += 1;
+    }
+    (bytes, files)
+}
+
+/// Sort the browse listing: folders always grouped before files
+/// (Thunar/Files idiom), then ordered within each group by `key`,
+/// reversed for descending.
+fn sort_entries(v: &mut [Entry], key: SortKey, asc: bool) {
+    v.sort_by(|a, b| {
+        match (a.is_dir, b.is_dir) {
+            (true, false) => return core::cmp::Ordering::Less,
+            (false, true) => return core::cmp::Ordering::Greater,
+            _ => {}
+        }
+        let o = cmp_entries(a, b, key);
+        if asc { o } else { o.reverse() }
+    });
+}
+
+fn cmp_entries(a: &Entry, b: &Entry, key: SortKey) -> core::cmp::Ordering {
+    let tie = a.name_lc.cmp(&b.name_lc);
+    match key {
+        SortKey::Name     => tie,
+        SortKey::Size     => a.size.cmp(&b.size).then(tie),
+        SortKey::Files    => a.files.cmp(&b.files).then(tie),
+        SortKey::Type     => type_for(a).cmp(&type_for(b)).then(tie),
+        SortKey::Modified => a.mtime.cmp(&b.mtime).then(tie),
+    }
+}
+
 /// Drop sidebar entries whose path is not currently backed by a
 /// `.dir` marker. Keeps "Filesystem" (empty path = npkFS root) — it
 /// always exists by definition. Honest UI: if you can see it, you
@@ -1148,7 +1401,7 @@ fn parse_entry(line: &[u8]) -> Option<Entry> {
         0
     };
     let name_lc = name.to_ascii_lowercase();
-    Some(Entry { name, name_lc, size, is_dir, mtime })
+    Some(Entry { name, name_lc, size, is_dir, files: 0, stats_pending: false, mtime })
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────
@@ -1352,6 +1605,18 @@ pub extern "C" fn _start() {
             }
             PollResult::Empty => {
                 unsafe { let _ = npk_sleep(16); }
+
+                // Progressively fill folder sizes/counts a few per tick.
+                // Wrapped in the alloc_reset/recapture discipline so the
+                // scratch/filtered growth lands in the persistent region.
+                // Skipped while searching (folder stats aren't shown then).
+                if loft.query.is_empty() && !loft.stats_queue.is_empty() {
+                    alloc_reset(persistent_mark);
+                    let changed = loft.pump_stats(STATS_PUMP_BUDGET);
+                    persistent_mark = alloc_mark();
+                    if changed { commit_tree(&loft); }
+                }
+
                 idle_ticks += 1;
                 if idle_ticks >= AUTO_REFRESH_TICKS {
                     idle_ticks = 0;
