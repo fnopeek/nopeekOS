@@ -120,6 +120,16 @@ pub fn focus_window(id: WindowId) {
 /// `Widget::Scroll` (≈3 text lines).
 const WIDGET_SCROLL_STEP: i32 = 48;
 
+/// True if the focused window is a terminal (loop) window — used to route
+/// the mouse wheel to the terminal scrollback.
+fn focused_is_terminal() -> bool {
+    with_compositor(|comp| {
+        let Some(fid) = comp.focused else { return false };
+        comp.windows.iter().any(|w|
+            w.id == fid && w.kind == window::WindowKind::Terminal)
+    }).unwrap_or(false)
+}
+
 /// If the currently focused window is a widget-kind window, return its id.
 /// The intent loop uses this to route key events to the widget's event queue
 /// instead of the terminal input path.
@@ -1120,6 +1130,28 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // race-free. forward_pointer_to_guest no-ops unless a Surface
     // window is focused, so this is free in normal desktop use.
     forward_pointer_to_guest(evt);
+
+    // Mouse wheel over a focused widget app → scroll its Widget::Scroll.
+    // (Surface/microvm windows already consumed the wheel in
+    // forward_pointer_to_guest above; terminal scrollback uses PageUp/Down.)
+    // The raw USB wheel never went through the ShadeAction::Scroll* path —
+    // that only fires for keyboard/serial — so wire it here. scroll_by locks
+    // the compositor internally, so it must run outside any with_compositor.
+    if evt.scroll != 0 {
+        if let Some(wid) = focused_widget_id() {
+            let delta = -(evt.scroll as i32) * WIDGET_SCROLL_STEP;
+            if widgets::scroll_by(wid, delta) { request_render(); }
+        } else if focused_is_terminal() {
+            // loop/terminal scrollback — wheel up = older lines.
+            if evt.scroll > 0 { terminal::scroll_up(3); } else { terminal::scroll_down(3); }
+            with_compositor(|comp| {
+                if let Some(fid) = comp.focused {
+                    if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
+                }
+            });
+            render_damaged();
+        }
+    }
 
     // Hover routing — deduplicated per window. Runs on every move so the
     // app can react even when no buttons changed.

@@ -59,7 +59,11 @@ const CLOSE_BTN_GLYPH: u32 = 20;
 fn close_button_rect(win: &Window, border: u32, scale: u32)
     -> Option<(u32, u32, u32, u32)>
 {
-    if win.is_dock || win.is_bar { return None; }
+    // No X on managed chrome (dock/bar), on transient overlays (drun and
+    // other launchers — dismissed with Esc, not closed), or on Surface
+    // windows (the microvm browser owns its own close via its UI).
+    if win.is_dock || win.is_bar || win.is_overlay { return None; }
+    if win.kind == crate::shade::window::WindowKind::Surface { return None; }
     let scale = scale.max(1);
     let box_px = CLOSE_BTN_BOX * scale;
     // The box is centred vertically in the app's menu-bar band so the X
