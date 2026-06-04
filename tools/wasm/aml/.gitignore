@@ -1,0 +1,4 @@
+core/target/
+harness/target/
+dev/capture.bin
+dev/DSDT.dsl

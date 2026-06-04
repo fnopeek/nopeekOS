@@ -1,0 +1,11 @@
+[package]
+name = "aml_harness"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aml_harness"
+path = "src/main.rs"
+
+[dependencies]
+aml_core = { path = "../core" }
