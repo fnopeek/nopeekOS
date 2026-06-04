@@ -425,6 +425,41 @@ pub fn intent_dsdt() {
     }
 }
 
+/// `dsdt full` — base64-dump the entire DSDT to the console, framed by
+/// markers, so the aml.wasm interpreter dev-harness can reconstruct the exact
+/// bytes the kernel sees (cross-check against Linux's acpidump). Generic ACPI
+/// diagnostic — no device-specific logic.
+pub fn intent_dsdt_full() {
+    let Some((addr, len)) = crate::acpi::dsdt() else {
+        kprintln!("[npk] DSDT not found");
+        return;
+    };
+    let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+    const A: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    kprintln!("---DSDT-BEGIN len={}---", len);
+    // Encode in 48-byte input chunks (→ 64 base64 chars per line).
+    let mut i = 0;
+    while i < len {
+        let chunk = (len - i).min(48);
+        let mut line = alloc::string::String::with_capacity(64);
+        let mut j = 0;
+        while j < chunk {
+            let b0 = b[i + j];
+            let b1 = if j + 1 < chunk { b[i + j + 1] } else { 0 };
+            let b2 = if j + 2 < chunk { b[i + j + 2] } else { 0 };
+            line.push(A[(b0 >> 2) as usize] as char);
+            line.push(A[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            line.push(if j + 1 < chunk { A[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
+            line.push(if j + 2 < chunk { A[(b2 & 0x3f) as usize] as char } else { '=' });
+            j += 3;
+        }
+        kprintln!("{}", line);
+        i += chunk;
+    }
+    kprintln!("---DSDT-END---");
+}
+
 pub fn intent_uptime() {
     let secs = crate::interrupts::uptime_secs();
     let days = secs / 86400;
