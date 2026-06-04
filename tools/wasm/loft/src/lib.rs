@@ -564,23 +564,19 @@ fn render(lf: &Loft) -> Widget {
     let menu = render_menu_bar();
     let toolbar = render_toolbar(lf);
     let body = render_body(lf);
-    let footer = render_footer(lf);
 
     // Custom outer column instead of `prefab::panel`: panel's
     // Padding-Xs + Spacing-Md kept the menu-bar bg from reaching
     // the window edges + put a 12 px gap between menu and divider.
     // Loft wants the menu strip + sidebar fill to be flush —
     // file-manager idiom (Thunar / Files / Finder all do this).
-    // Spacing/padding on individual rows (toolbar / footer / body
-    // content) handle their own breathing room.
+    // Footer removed (noise) — the body fills to the bottom edge.
     let mut children: Vec<Widget> = alloc::vec![
         menu,
         Widget::Divider,
         toolbar,
         Widget::Divider,
         body,                           // Modifier::Flex(1) — fills
-        Widget::Divider,
-        footer,
     ];
 
     // Append the open menu's dropdown as a Popover. The compositor
@@ -970,35 +966,6 @@ const COL_SIZE_W:  u16 = 110;
 const COL_FILES_W: u16 = 90;
 const COL_TYPE_W:  u16 = 120;
 const COL_MTIME_W: u16 = 170;
-
-fn render_footer(lf: &Loft) -> Widget {
-    // Mockup-aligned: hints on the left, count + selection + size on
-    // the right. Selection text changes verbatim with grid_sel; the
-    // total directory size is summed across visible entries (the
-    // filtered set, not the raw list, so users see what their search
-    // narrowed to).
-    let hints = "↑↓ navigate   ↵ open   esc clear/close";
-
-    let visible = lf.filtered.len();
-    let mut total_bytes: u64 = 0;
-    let source = lf.source();
-    for &i in &lf.filtered {
-        if let Some(e) = source.get(i) {
-            if !e.is_dir { total_bytes = total_bytes.saturating_add(e.size); }
-        }
-    }
-    let mut right = String::with_capacity(48);
-    push_usize(&mut right, visible);
-    right.push_str(if visible == 1 { " item" } else { " items" });
-    if let Some(idx) = lf.grid_sel {
-        if idx < lf.filtered.len() { right.push_str(" · 1 selected"); }
-    }
-    if total_bytes > 0 {
-        right.push_str(" · ");
-        push_size(&mut right, total_bytes);
-    }
-    prefab::footer(hints, &right)
-}
 
 fn breadcrumb_for(path: &str) -> Widget {
     let mut segs: Vec<(String, ActionId)> = Vec::new();
