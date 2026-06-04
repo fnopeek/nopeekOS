@@ -436,7 +436,10 @@ pub fn render_to_window(
     if cols == 0 || rows == 0 { return; }
 
     let visible_rows = rows as usize;
+    let cols = cols as usize;
 
+    // Snapshot the last `rows` logical lines. Each wraps to ≥1 screen row,
+    // so this is always enough to fill the viewport bottom-up.
     let lines: alloc::vec::Vec<(alloc::vec::Vec<u8>, usize)> = term.visible_lines(visible_rows)
         .map(|(data, len)| {
             let mut v = alloc::vec![0u8; len];
@@ -445,33 +448,49 @@ pub fn render_to_window(
         })
         .collect();
 
+    // Soft-wrap each logical line into `cols`-wide screen-row segments
+    // (logical index, byte start, byte end) so long lines wrap instead of
+    // running off the right edge. Then show the bottom-most `rows` segments.
+    let mut segs: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
+    for (li, (_, len)) in lines.iter().enumerate() {
+        if *len == 0 { segs.push((li, 0, 0)); continue; }
+        let mut s = 0usize;
+        while s < *len {
+            let e = (s + cols).min(*len);
+            segs.push((li, s, e));
+            s = e;
+        }
+    }
+    let first_seg = segs.len().saturating_sub(visible_rows);
+
     let fg = theme_fg();
     let prompt_color = theme_prompt();
 
-    for (i, (line_data, len)) in lines.iter().enumerate() {
-        let py = y + i as u32 * char_h;
+    for (row, &(li, s, e)) in segs[first_seg..].iter().enumerate() {
+        let py = y + row as u32 * char_h;
         if py + char_h > y + h { break; }
-
-        let len = *len;
-        let visible_len = len.min(cols as usize);
-
-        if visible_len == 0 { continue; }
-
-        if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
-            if text.starts_with("[npk]") {
-                // System message: [npk] in accent, rest in white
+        if e == s { continue; }
+        let line_data = &lines[li].0;
+        // Special colouring (system [npk] / `path> ` prompt) only on the
+        // FIRST wrapped row of a logical line; continuation rows are plain.
+        let first = s == 0;
+        if let Ok(text) = core::str::from_utf8(&line_data[s..e]) {
+            if first && text.starts_with("[npk]") {
                 crate::gui::font::draw_str(shadow, info, "[npk]", x, py, prompt_color, None, 1);
-                if visible_len > 5 {
-                    if let Ok(rest) = core::str::from_utf8(&line_data[5..visible_len]) {
+                if e > 5 {
+                    if let Ok(rest) = core::str::from_utf8(&line_data[5..e]) {
                         crate::gui::font::draw_str(shadow, info, rest, x + 5 * char_w, py, fg, None, 1);
                     }
                 }
-            } else if let Some(pos) = text.find("> ") {
-                // Prompt line: path> in accent, input in white
-                let prompt_end = pos + 2; // include "> "
-                crate::gui::font::draw_str(shadow, info, &text[..prompt_end], x, py, prompt_color, None, 1);
-                if visible_len > prompt_end {
-                    crate::gui::font::draw_str(shadow, info, &text[prompt_end..], x + prompt_end as u32 * char_w, py, fg, None, 1);
+            } else if first {
+                if let Some(pos) = text.find("> ") {
+                    let prompt_end = pos + 2; // include "> "
+                    crate::gui::font::draw_str(shadow, info, &text[..prompt_end], x, py, prompt_color, None, 1);
+                    if text.len() > prompt_end {
+                        crate::gui::font::draw_str(shadow, info, &text[prompt_end..], x + prompt_end as u32 * char_w, py, fg, None, 1);
+                    }
+                } else {
+                    crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
                 }
             } else {
                 crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
