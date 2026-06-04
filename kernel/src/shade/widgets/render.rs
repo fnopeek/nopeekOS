@@ -563,19 +563,14 @@ fn paint_node_eff(
                 None => (None, ""),
             };
 
-            // Line window: start from the manual wheel offset (scroll_y px →
-            // lines), clamped to the document, then correct so the caret
-            // stays visible (typing/arrowing always pulls the view to it).
+            // Line window from the stored scroll offset (wheel / drag /
+            // caret-follow). The view is authoritative here: caret-follow
+            // happens on caret MOVES (handle_input_key adjusts scroll_y), so
+            // the render must NOT re-pull to the caret every frame — that
+            // would defeat manual wheel/drag scrolling.
             let total_lines = live.split('\n').count();
             let max_scroll = total_lines.saturating_sub(visible);
-            let mut scroll = ((scroll_y / line_h) as usize).min(max_scroll);
-            if let Some(cl) = caret_line {
-                if cl < scroll {
-                    scroll = cl;
-                } else if cl + 1 > scroll + visible {
-                    scroll = cl + 1 - visible;
-                }
-            }
+            let scroll = ((scroll_y / line_h) as usize).min(max_scroll);
 
             // Paint the visible window of lines, colouring each line by
             // the spans covering its bytes (uncovered → default colour).
