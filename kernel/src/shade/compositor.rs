@@ -29,6 +29,78 @@ const DOCK_HANDLE_H: u32 = 5;
 /// detached from the bottom edge the way the bar's pills do.
 const DOCK_BOTTOM_GAP: u32 = 12;
 
+/// Platform close button — the compositor draws a small "X" affordance in
+/// the top-right corner of every real (non-panel) window so mouse users
+/// can close it without remembering Mod+Q. Not per-app: provided here
+/// once for all windows. Edge of the (square) hit/disc box at 1× scale.
+const CLOSE_BTN_BOX: u32 = 22;
+/// Inset of the button from the window's top-right corner (1× px).
+const CLOSE_BTN_MARGIN: u32 = 6;
+
+/// Screen rect `(x, y, w, h)` of a window's platform close button, or
+/// `None` for panels (dock/bar are managed chrome — never closable here)
+/// and windows too narrow to host the button. Shared by the renderer and
+/// the click hit-test so the drawn disc and the clickable area always
+/// coincide.
+fn close_button_rect(win: &Window, border: u32, scale: u32)
+    -> Option<(u32, u32, u32, u32)>
+{
+    if win.is_dock || win.is_bar { return None; }
+    let scale = scale.max(1);
+    let box_px = CLOSE_BTN_BOX * scale;
+    let margin = CLOSE_BTN_MARGIN * scale;
+    if win.width <= border * 2 + margin + box_px { return None; }
+    let bx = win.x + win.width - border - margin - box_px;
+    let by = win.y + border + margin;
+    Some((bx, by, box_px, box_px))
+}
+
+/// Paint the platform close button (translucent dark disc + white X) into
+/// the shadow buffer at a window's top-right corner. Drawn last in
+/// `render_window` so it sits over the window content. The dark disc keeps
+/// the white X legible on any background (light wallpaper, browser pixels,
+/// app surface alike).
+fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
+                     border: u32, scale: u32) {
+    let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) else { return };
+    // Translucent disc background.
+    let ccx = bx as i32 + bw as i32 / 2;
+    let ccy = by as i32 + bh as i32 / 2;
+    let r = (bw.min(bh) / 2) as i32;
+    let r2 = r * r;
+    let inner2 = (r - 1).max(0) * (r - 1).max(0);
+    for py in by..(by + bh).min(info.height) {
+        for px in bx..(bx + bw).min(info.width) {
+            let dx = px as i32 - ccx;
+            let dy = py as i32 - ccy;
+            let d2 = dx * dx + dy * dy;
+            if d2 > r2 { continue; }
+            // Slightly softer alpha on the outer ring for a cleaner edge.
+            let alpha = if d2 <= inner2 { 120 } else { 80 };
+            render::blend_pixel(shadow, info, px, py, 0x0000_0000, alpha);
+        }
+    }
+    // White X glyph, atlas-native, centred in the disc.
+    use crate::shade::widgets::abi::IconId;
+    let req = 16 * scale.max(1);
+    if let Some((asz, glyph)) = crate::gui::icons::alpha_for(IconId::X, req as u16) {
+        let asz = asz as u32;
+        if asz > 0 && glyph.len() >= (asz * asz) as usize {
+            let ox = bx + bw.saturating_sub(asz) / 2;
+            let oy = by + bh.saturating_sub(asz) / 2;
+            for row in 0..asz {
+                for col in 0..asz {
+                    let a = glyph[(row * asz + col) as usize] as u32;
+                    if a > 0 {
+                        render::blend_pixel(shadow, info, ox + col, oy + row,
+                            0x00FF_FFFF, a + (a >> 7));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Swap animation state — windows glide from old to new position.
 #[derive(Clone, Copy)]
 pub struct SwapAnimation {
@@ -1276,6 +1348,10 @@ impl Compositor {
                 });
             }
         }
+
+        // Platform close button (top-right). Panels return None and are
+        // skipped; everything else gets the mouse-friendly "X".
+        draw_close_button(shadow, info, win, border, scale);
     }
 
     /// Render only changed regions. Returns list of (x, y, w, h) to blit.
@@ -1509,6 +1585,15 @@ impl Compositor {
             }
         }
 
+        // Plain LMB on a window's close button → close it (see the
+        // button-event path for the rationale).
+        if !mod_held && self.mouse.left_clicked() {
+            if let Some(wid) = self.close_button_at(mx, my) {
+                self.close_window(wid);
+                return true;
+            }
+        }
+
         // Regular LMB click: focus window
         if self.mouse.left_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
@@ -1597,6 +1682,17 @@ impl Compositor {
                     start_rw: rw, start_rh: rh,
                 });
                 self.focus_window(wid);
+                return true;
+            }
+        }
+
+        // Plain LMB on a window's close button → close it. Checked before
+        // focus/dispatch so the corner "X" always wins over whatever widget
+        // sits beneath it. Mod+LMB is the swap-drag above, so guard on
+        // `!mod_held` to keep the two gestures from overlapping.
+        if !mod_held && self.mouse.left_clicked() {
+            if let Some(wid) = self.close_button_at(mx, my) {
+                self.close_window(wid);
                 return true;
             }
         }
@@ -1884,6 +1980,28 @@ impl Compositor {
                 let wh = win.height as i32;
                 if x >= wx && x < wx + ww && y >= wy && y < wy + wh {
                     return Some(wid);
+                }
+            }
+        }
+        None
+    }
+
+    /// Find the window whose platform close button contains `(x, y)`,
+    /// front-to-back so the topmost button wins. Returns `None` if the
+    /// point isn't over any close button.
+    fn close_button_at(&self, x: i32, y: i32) -> Option<WindowId> {
+        let border = self.border;
+        let scale = self.scale;
+        for &wid in &self.z_order {
+            if let Some(win) = self.windows.iter().find(|w| w.id == wid
+                && w.workspace == self.active_workspace && w.visible)
+            {
+                if let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) {
+                    if x >= bx as i32 && x < (bx + bw) as i32
+                        && y >= by as i32 && y < (by + bh) as i32
+                    {
+                        return Some(wid);
+                    }
                 }
             }
         }
