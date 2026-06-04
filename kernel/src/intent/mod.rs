@@ -2051,7 +2051,11 @@ fn intent_theme(args: &str) {
         "dark" | "light" | "auto" => {
             crate::config::set("theme", mode);
             crate::shade::widgets::refresh_all_scenes();
-            crate::shade::request_render();
+            // Full redraw (not just request_render) so terminal windows
+            // repaint with the new Surface/OnSurface colors too — they
+            // resolve the theme at render time and the input-line cache
+            // must be invalidated.
+            crate::shade::force_redraw();
             kprintln!("[npk] theme: {}", mode);
         }
         _ => {
