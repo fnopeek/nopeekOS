@@ -612,6 +612,11 @@ pub struct RasterTarget<'a> {
     /// Owning widget window id — lets the render walker look up a
     /// `Widget::Canvas`'s committed bitmap in the canvas store.
     pub window_id: u32,
+    /// Optional clip rectangle in **target-local** coords `(x0,y0,x1,y1)`.
+    /// `None` = clip only to the target size (default). A `Widget::Scroll`
+    /// sets this to its viewport rect for the duration of its subtree so
+    /// overflowing content is masked instead of bleeding past the panel.
+    pub clip: Option<(i32, i32, i32, i32)>,
 }
 
 /// Rasterizer backend. CPU in v1 (fontdue + gui/render.rs). GPU in v2+

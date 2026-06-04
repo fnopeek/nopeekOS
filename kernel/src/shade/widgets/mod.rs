@@ -130,6 +130,13 @@ pub struct WidgetScene {
     /// the focused widget isn't an Input). Drives caret render +
     /// keyboard intercept in `handle_input_key`.
     pub input_edit:  Option<InputEditState>,
+    /// Current vertical scroll offset (px) applied to this window's
+    /// `Widget::Scroll` content, driven by the mouse wheel. Clamped to
+    /// `max_scroll_y` after each layout.
+    pub scroll_y:     u32,
+    /// Largest legal `scroll_y` from the last layout (content − viewport
+    /// over the tallest vertical Scroll). Zero → nothing scrolls.
+    pub max_scroll_y: u32,
 }
 
 static SCENES: Mutex<BTreeMap<u32, WidgetScene>> = Mutex::new(BTreeMap::new());
@@ -141,6 +148,29 @@ pub fn with_scene<F, R>(window_id: u32, f: F) -> Option<R>
 where F: FnOnce(&WidgetScene) -> R,
 {
     SCENES.lock().get(&window_id).map(f)
+}
+
+/// True if a widget scene with scrollable (overflowing) content exists
+/// for `window_id`. Lets shade route the mouse wheel to widget scroll
+/// instead of the terminal scrollback for the focused window.
+pub fn has_scrollable(window_id: u32) -> bool {
+    SCENES.lock().get(&window_id).map(|s| s.max_scroll_y > 0).unwrap_or(false)
+}
+
+/// Adjust a widget window's vertical scroll by `delta` px (positive =
+/// content moves up / scroll down). Clamped to `[0, max_scroll_y]`.
+/// Re-renders + marks dirty on change. Returns true if the offset moved.
+pub fn scroll_by(window_id: u32, delta: i32) -> bool {
+    let changed = {
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        if s.max_scroll_y == 0 { return false; }
+        let next = ((s.scroll_y as i64 + delta as i64)
+            .clamp(0, s.max_scroll_y as i64)) as u32;
+        if next == s.scroll_y { false } else { s.scroll_y = next; true }
+    };
+    if changed { rerender_window(window_id); }
+    changed
 }
 
 /// Drop a scene. Called from compositor::close_window when the
@@ -443,7 +473,7 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
 /// active come from the cached scene). Does NOT request a repaint — the
 /// caller decides full vs. damage-rect. Locks SCENES internally.
 fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
-    let (tree, rect, density, focus_path, active_path, input_edit) = {
+    let (tree, rect, density, focus_path, active_path, input_edit, scroll_y) = {
         let scenes = SCENES.lock();
         match scenes.get(&window_id) {
             Some(s) => (
@@ -453,14 +483,16 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
                 s.focus_path.clone(),
                 s.active_path.clone(),
                 s.input_edit.clone(),
+                s.scroll_y,
             ),
             None => return,
         }
     };
-    let lo = layout::layout(&tree, rect);
+    let lo = layout::layout_scrolled(&tree, rect, scroll_y);
     let layout_tree = lo.tree;
     let anchors = lo.anchors;
     let popovers = lo.popovers;
+    let max_scroll_y = lo.max_scroll_y;
     let h = if hover_path.is_empty() { None } else { Some(hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
@@ -475,6 +507,8 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
         s.anchors     = anchors;
         s.popovers    = popovers;
         s.hover_path  = hover_path.to_vec();
+        s.max_scroll_y = max_scroll_y;
+        s.scroll_y    = s.scroll_y.min(max_scroll_y);
     }
 }
 
@@ -713,7 +747,7 @@ pub fn release_at(window_id: u32) -> bool {
 /// responsible for marking the window dirty). Pure scene-state work,
 /// safe to call while the compositor lock is held.
 fn rerender_state_only(window_id: u32) {
-    let (tree, rect, density, hover_path, focus_path, active_path, input_edit) = {
+    let (tree, rect, density, hover_path, focus_path, active_path, input_edit, scroll_y) = {
         let scenes = SCENES.lock();
         match scenes.get(&window_id) {
             Some(s) => (
@@ -724,14 +758,16 @@ fn rerender_state_only(window_id: u32) {
                 s.focus_path.clone(),
                 s.active_path.clone(),
                 s.input_edit.clone(),
+                s.scroll_y,
             ),
             None => return,
         }
     };
-    let lo = layout::layout(&tree, rect);
+    let lo = layout::layout_scrolled(&tree, rect, scroll_y);
     let layout_tree = lo.tree;
     let anchors = lo.anchors;
     let popovers = lo.popovers;
+    let max_scroll_y = lo.max_scroll_y;
     let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
@@ -744,6 +780,8 @@ fn rerender_state_only(window_id: u32) {
         s.layout_tree = layout_tree;
         s.anchors     = anchors;
         s.popovers    = popovers;
+        s.max_scroll_y = max_scroll_y;
+        s.scroll_y    = s.scroll_y.min(max_scroll_y);
     }
 }
 
@@ -1201,10 +1239,15 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     if win_w == 0 || win_h == 0 { return -3; }
 
     let layout_rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
-    let lo = layout::layout(&tree, layout_rect);
+    // Preserve the wheel scroll position across re-commits so an app that
+    // re-renders on every event doesn't snap back to the top.
+    let prev_scroll_y = SCENES.lock().get(&target_id).map(|s| s.scroll_y).unwrap_or(0);
+    let lo = layout::layout_scrolled(&tree, layout_rect, prev_scroll_y);
     let layout_tree = lo.tree;
     let anchors = lo.anchors;
     let popovers = lo.popovers;
+    let max_scroll_y = lo.max_scroll_y;
+    let scroll_y = prev_scroll_y.min(max_scroll_y);
     let density = classify_density(win_w);
     let has_pseudo = render::tree_has_pseudo_state(&tree);
 
@@ -1283,6 +1326,8 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         density,
         has_pseudo,
         input_edit,
+        scroll_y,
+        max_scroll_y,
     });
 
     // Mark the window dirty so shade paints it in the next render,
@@ -1360,6 +1405,7 @@ fn rasterize_buffer_with_overlays(
         palette: &pal,
         bg_alpha,
         window_id,
+        clip:    None,
     };
     let mut rast = raster::cpu::CpuRasterizer::new();
     render::render_with_state(
@@ -1403,7 +1449,7 @@ pub fn refresh_all_scenes() {
 /// changed without an app commit — a theme swap, or a committed
 /// `Widget::Canvas` bitmap (`npk_canvas_commit`). No-op if no scene.
 pub fn rerender_window(wid: u32) {
-    let (tree, rect, hover_path, focus_path, active_path, density, input_edit) = match SCENES.lock().get(&wid) {
+    let (tree, rect, hover_path, focus_path, active_path, density, input_edit, scroll_y) = match SCENES.lock().get(&wid) {
         Some(s) => (
             s.tree.clone(),
             abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
@@ -1412,10 +1458,11 @@ pub fn rerender_window(wid: u32) {
             s.active_path.clone(),
             s.density,
             s.input_edit.clone(),
+            s.scroll_y,
         ),
         None => return,
     };
-    let new_lo = layout::layout(&tree, rect);
+    let new_lo = layout::layout_scrolled(&tree, rect, scroll_y);
     let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
@@ -1425,6 +1472,8 @@ pub fn rerender_window(wid: u32) {
         scene.layout_tree = new_lo.tree;
         scene.anchors     = new_lo.anchors;
         scene.popovers    = new_lo.popovers;
+        scene.max_scroll_y = new_lo.max_scroll_y;
+        scene.scroll_y    = scene.scroll_y.min(new_lo.max_scroll_y);
     }
     crate::shade::with_compositor(|c| {
         if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
@@ -1445,12 +1494,13 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     }
     let new_rect = abi::Rect { x: new_x, y: new_y, w: new_w, h: new_h };
     let tree = scene.tree.clone();
+    let scroll_y = scene.scroll_y;
     let new_density = classify_density(new_w);
     // Resize invalidates the cached hover_path AND active_path —
     // coordinates of the old layout no longer match. Focus survives
     // (a focused input stays focused after resize). Active is
     // mouse-tied so it gets cleared.
-    let new_lo = layout::layout(&tree, new_rect);
+    let new_lo = layout::layout_scrolled(&tree, new_rect, scroll_y);
     let focus_path = scene.focus_path.clone();
     let input_edit = scene.input_edit.clone();
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
@@ -1467,6 +1517,8 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     scene.anchors     = new_lo.anchors;
     scene.popovers    = new_lo.popovers;
     scene.density     = new_density;
+    scene.max_scroll_y = new_lo.max_scroll_y;
+    scene.scroll_y    = scene.scroll_y.min(new_lo.max_scroll_y);
     scene.hover_path.clear();
     scene.active_path = None;
     true

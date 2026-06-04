@@ -116,6 +116,10 @@ pub fn focus_window(id: WindowId) {
     with_compositor(|comp| comp.focus_window(id));
 }
 
+/// Pixels a single mouse-wheel notch scrolls a widget app's
+/// `Widget::Scroll` (≈3 text lines).
+const WIDGET_SCROLL_STEP: i32 = 48;
+
 /// If the currently focused window is a widget-kind window, return its id.
 /// The intent loop uses this to route key events to the widget's event queue
 /// instead of the terminal input path.
@@ -659,23 +663,36 @@ pub fn handle_action(action: input::ShadeAction) {
             render_frame();
         }
         ShadeAction::ScrollUp => {
-            terminal::scroll_up(10);
-            // Mark focused window dirty for re-render
-            with_compositor(|comp| {
-                if let Some(fid) = comp.focused {
-                    if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
-                }
-            });
-            render_damaged();
+            // Focused widget app with scrollable content → scroll its
+            // Widget::Scroll; otherwise the terminal scrollback. (scroll_by
+            // locks the compositor internally, so resolve the target first
+            // and release the lock before calling it — no re-entrancy.)
+            if let Some(wid) = focused_widget_id() {
+                widgets::scroll_by(wid, -WIDGET_SCROLL_STEP);
+                render_damaged();
+            } else {
+                terminal::scroll_up(10);
+                with_compositor(|comp| {
+                    if let Some(fid) = comp.focused {
+                        if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
+                    }
+                });
+                render_damaged();
+            }
         }
         ShadeAction::ScrollDown => {
-            terminal::scroll_down(10);
-            with_compositor(|comp| {
-                if let Some(fid) = comp.focused {
-                    if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
-                }
-            });
-            render_damaged();
+            if let Some(wid) = focused_widget_id() {
+                widgets::scroll_by(wid, WIDGET_SCROLL_STEP);
+                render_damaged();
+            } else {
+                terminal::scroll_down(10);
+                with_compositor(|comp| {
+                    if let Some(fid) = comp.focused {
+                        if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
+                    }
+                });
+                render_damaged();
+            }
         }
         ShadeAction::Lock => {
             // Lock handled by intent loop

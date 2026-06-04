@@ -17,7 +17,7 @@
 use alloc::vec::Vec;
 
 use super::abi::{
-    Density, Fill, Modifier, Point, RasterTarget, Rasterizer, Rect, Token, Widget,
+    Axis, Density, Fill, Modifier, Point, RasterTarget, Rasterizer, Rect, Token, Widget,
 };
 use super::layout::LayoutNode;
 use super::InputEditState;
@@ -73,6 +73,22 @@ pub fn render_with_state(
         if matches!(focus_path, Some(p) if p.is_empty()) { input_edit } else { None };
     paint_node_eff(rast, target, widget, layout, &eff, edit_for_node);
 
+    // A Scroll clips its subtree to its viewport rect so overflowing
+    // content is masked (and, for a vertical scroll, an overlay scrollbar
+    // is drawn after). Save/restore the previous clip around the children.
+    let saved_clip = target.clip;
+    let is_scroll = matches!(widget, Widget::Scroll { .. });
+    if is_scroll {
+        let r = layout.rect;
+        let lx0 = r.x - target.origin.x;
+        let ly0 = r.y - target.origin.y;
+        let (nx0, ny0, nx1, ny1) = (lx0, ly0, lx0 + r.w as i32, ly0 + r.h as i32);
+        target.clip = Some(match saved_clip {
+            Some((a, b, c, d)) => (a.max(nx0), b.max(ny0), c.min(nx1), d.min(ny1)),
+            None => (nx0, ny0, nx1, ny1),
+        });
+    }
+
     // Recurse — at most one child sits on each path.
     let kids = widget_children(widget);
     for (i, (cw, cl)) in kids.iter().zip(layout.children.iter()).enumerate() {
@@ -83,6 +99,11 @@ pub fn render_with_state(
             rast, target, cw, cl,
             child_hover, child_focus, child_active, density, input_edit,
         );
+    }
+
+    if is_scroll {
+        target.clip = saved_clip;
+        paint_scrollbar(rast, target, widget, layout);
     }
 
     // Modifier::Opacity acts as a post-paint dampening over the node's
@@ -102,6 +123,41 @@ fn descend(path: Option<&[u32]>, i: u32) -> Option<&[u32]> {
         Some(p) if !p.is_empty() && p[0] == i => Some(&p[1..]),
         _ => None,
     }
+}
+
+/// Thin overlay scrollbar for a vertical `Widget::Scroll`. Drawn only
+/// when the content overflows the viewport — otherwise nothing shows
+/// (macOS/GTK overlay-scrollbar idiom). Painted over the content, it
+/// reserves no layout space, so toggling it never reflows anything.
+fn paint_scrollbar(
+    rast: &mut dyn Rasterizer,
+    target: &mut RasterTarget,
+    widget: &Widget,
+    layout: &LayoutNode,
+) {
+    if !matches!(widget, Widget::Scroll { axis: Axis::Vertical, .. }) { return; }
+    let viewport = layout.rect;
+    let child = match layout.children.first() { Some(c) => c, None => return };
+    let content_h = child.rect.h;
+    if content_h <= viewport.h || viewport.h == 0 { return; }
+
+    let off = (viewport.y - child.rect.y).max(0) as u64;     // scrolled px
+    let max_off = (content_h - viewport.h) as u64;
+    let track_h = viewport.h as u64;
+    // Thumb height proportional to the visible fraction, with a floor.
+    let thumb_h = ((track_h * track_h) / content_h as u64).max(24).min(track_h) as u32;
+    let travel = track_h - thumb_h as u64;
+    let thumb_y = viewport.y + if max_off == 0 { 0 } else { (off * travel / max_off) as i32 };
+
+    let thumb_w: i32 = 4;
+    let margin: i32 = 2;
+    let thumb_x = viewport.x + viewport.w as i32 - thumb_w - margin;
+    rast.rect_rounded(
+        target,
+        Rect { x: thumb_x, y: thumb_y, w: thumb_w as u32, h: thumb_h },
+        Fill::Solid(Token::OnSurfaceMuted),
+        2,
+    );
 }
 
 /// Local mirror of `layout::ceil_u32` — kept private so the caret-paint

@@ -749,6 +749,14 @@ fn render_body(lf: &Loft) -> Widget {
         prefab::sidebar_section("PLACES",  places_rows),
         prefab::sidebar_section("DEVICES", devices_rows),
     ]);
+    // Also scroll the sidebar so a long PLACES/DEVICES list can never push
+    // the footer off-screen either; its overlay bar only appears if it
+    // actually overflows (usually it doesn't).
+    let sidebar = Widget::Scroll {
+        child:     alloc::boxed::Box::new(sidebar),
+        axis:      Axis::Vertical,
+        modifiers: alloc::vec![],
+    };
 
     // Content — filtered grid OR list, plus two empty states
     // (genuinely empty directory vs. nothing matched the search).
@@ -764,6 +772,16 @@ fn render_body(lf: &Loft) -> Widget {
             ViewMode::Grid => render_grid(lf),
             ViewMode::List => render_list(lf),
         }
+    };
+
+    // Wrap the file area in a vertical Scroll so a long listing scrolls
+    // (mouse wheel) and is clipped to the body instead of overflowing and
+    // pushing the footer off-screen in a small (¼-screen) window. The
+    // overlay scrollbar only shows when the content actually overflows.
+    let content = Widget::Scroll {
+        child:     alloc::boxed::Box::new(content),
+        axis:      Axis::Vertical,
+        modifiers: alloc::vec![Modifier::Flex(1)],
     };
 
     Widget::Row {
