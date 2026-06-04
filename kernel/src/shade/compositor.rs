@@ -29,6 +29,12 @@ const DOCK_HANDLE_H: u32 = 5;
 /// detached from the bottom edge the way the bar's pills do.
 const DOCK_BOTTOM_GAP: u32 = 12;
 
+/// Terminal content opacity floor in light mode (0..256). The default
+/// `shade.opacity` (~160) keeps the dark terminal crisp, but a light
+/// Surface at that blend washes out over the wallpaper — so light-mode
+/// terminals get this more-solid floor. Dark mode is untouched.
+const LIGHT_TERMINAL_OPACITY: u32 = 224;
+
 /// Platform close button — the compositor draws a small "X" affordance in
 /// the top-right corner of every real (non-panel) window so mouse users
 /// can close it without remembering Mod+Q. Not per-app: provided here
@@ -1140,10 +1146,20 @@ impl Compositor {
             } else {
                 win.bg_color
             };
+            // A light Surface blended at the default ~62% opacity washes
+            // out over the wallpaper; dark stays crisp. So raise the
+            // terminal content opacity in light mode only (dark unchanged).
+            let content_opacity = if paint_content
+                && crate::shade::widgets::palette::is_light_theme()
+            {
+                opacity.max(LIGHT_TERMINAL_OPACITY)
+            } else {
+                opacity
+            };
             render::fill_rounded_chrome_aa(shadow, info,
                 win.x, win.y, win.width, win.height,
                 ba, bb, content_bg,
-                rounding, border, b_op, opacity, paint_content);
+                rounding, border, b_op, content_opacity, paint_content);
         }
 
         let cx = win.content_x(chrome_border);

@@ -84,7 +84,7 @@ pub fn resolve(token: Token) -> u32 {
     }
 }
 
-fn is_light_theme() -> bool {
+pub fn is_light_theme() -> bool {
     let setting = crate::config::get("theme").unwrap_or_default();
     match setting.as_str() {
         "light" => true,
