@@ -1131,9 +1131,18 @@ impl Compositor {
                 (border_color, border_color, 180u32)
             };
             let paint_content = matches!(win.kind, crate::shade::window::WindowKind::Terminal);
+            // Terminal (`loop`) windows track the active theme like the
+            // widget apps — Surface bg + OnSurface text — so light mode is
+            // consistent across every window instead of a lone dark tile.
+            let content_bg = if paint_content {
+                crate::shade::widgets::palette::resolve(
+                    crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
+            } else {
+                win.bg_color
+            };
             render::fill_rounded_chrome_aa(shadow, info,
                 win.x, win.y, win.width, win.height,
-                ba, bb, win.bg_color,
+                ba, bb, content_bg,
                 rounding, border, b_op, opacity, paint_content);
         }
 

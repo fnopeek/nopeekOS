@@ -397,6 +397,29 @@ pub fn clear_dirty() {
     DIRTY.store(false, Ordering::Release);
 }
 
+/// Terminal foreground (text + cursor) from the active theme's OnSurface
+/// token — so `loop` windows turn dark-on-light in light mode, matching
+/// the widget apps. Masked to opaque RGB (the shadow buffer is opaque).
+fn theme_fg() -> u32 {
+    crate::shade::widgets::palette::resolve(
+        crate::shade::widgets::abi::Token::OnSurface) & 0x00FF_FFFF
+}
+
+/// Terminal background from the active theme's Surface token.
+fn theme_bg() -> u32 {
+    crate::shade::widgets::palette::resolve(
+        crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
+}
+
+/// Prompt / `[npk]` accent from the active theme. The widget Accent token
+/// is contrast-adjusted against the surface (darkens on a light surface),
+/// unlike the raw wallpaper accent — so the prompt stays readable in light
+/// mode too.
+fn theme_prompt() -> u32 {
+    crate::shade::widgets::palette::resolve(
+        crate::shade::widgets::abi::Token::Accent) & 0x00FF_FFFF
+}
+
 /// Render a specific terminal's content into a window region.
 pub fn render_to_window(
     shadow: *mut u8,
@@ -422,8 +445,8 @@ pub fn render_to_window(
         })
         .collect();
 
-    let fg = 0x00E8E8E8u32;
-    let prompt_color = crate::gui::background::accent_color();
+    let fg = theme_fg();
+    let prompt_color = theme_prompt();
 
     for (i, (line_data, len)) in lines.iter().enumerate() {
         let py = y + i as u32 * char_h;
@@ -504,16 +527,16 @@ pub fn render_input_line(
             }
         }
     } else {
-        // No cache — fallback: clear with bg_color
+        // No cache — fallback: clear with the theme surface color.
         crate::gui::render::fill_rect(shadow, info,
-            win_cx, last_line_y, win_cw, char_h, 0x00101018);
+            win_cx, last_line_y, win_cw, char_h, theme_bg());
     }
 
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
     if visible_len > 0 {
-        let prompt_color = crate::gui::background::accent_color();
-        let fg = 0x00E8E8E8u32;
+        let prompt_color = theme_prompt();
+        let fg = theme_fg();
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
             if let Some(pos) = text.find("> ") {
                 let prompt_end = pos + 2;
@@ -531,7 +554,7 @@ pub fn render_input_line(
     let cur = cursor_pos();
     let cursor_x = win_cx + cur as u32 * char_w;
     if cursor_x + 2 <= win_cx + win_cw {
-        let cursor_color = 0x00E8E8E8u32;
+        let cursor_color = theme_fg();
         crate::gui::render::fill_rect(shadow, info, cursor_x, last_line_y, 2, char_h, cursor_color);
     }
 
@@ -575,8 +598,8 @@ pub fn render_input_line_to_layer(
     let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
     if visible_len > 0 {
-        let prompt_color = crate::gui::background::accent_color();
-        let fg = 0x00E8E8E8u32;
+        let prompt_color = theme_prompt();
+        let fg = theme_fg();
         if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
             if let Some(pos) = text.find("> ") {
                 let prompt_end = pos + 2;
@@ -594,7 +617,7 @@ pub fn render_input_line_to_layer(
     let cur = cursor_pos();
     let cursor_x = win_cx + cur as u32 * char_w;
     if cursor_x + 2 <= win_cx + win_cw {
-        let cursor_color = 0x00E8E8E8u32;
+        let cursor_color = theme_fg();
         crate::gui::render::fill_rect(text_buf, info, cursor_x, last_line_y, 2, char_h, cursor_color);
     }
 
