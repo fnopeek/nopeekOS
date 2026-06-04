@@ -137,6 +137,9 @@ pub struct WidgetScene {
     /// Largest legal `scroll_y` from the last layout (content − viewport
     /// over the tallest vertical Scroll). Zero → nothing scrolls.
     pub max_scroll_y: u32,
+    /// Screen rect of the scrollable viewport (from layout) — the
+    /// compositor hit-tests its right edge for scrollbar dragging.
+    pub scroll_viewport: abi::Rect,
 }
 
 static SCENES: Mutex<BTreeMap<u32, WidgetScene>> = Mutex::new(BTreeMap::new());
@@ -171,6 +174,29 @@ pub fn scroll_by(window_id: u32, delta: i32) -> bool {
     };
     if changed { rerender_window(window_id); }
     changed
+}
+
+/// Set the absolute vertical scroll offset (px), clamped. Used by the
+/// scrollbar drag. Re-renders on change; returns true if it moved.
+pub fn set_scroll(window_id: u32, y: u32) -> bool {
+    let changed = {
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        if s.max_scroll_y == 0 { return false; }
+        let next = y.min(s.max_scroll_y);
+        if next == s.scroll_y { false } else { s.scroll_y = next; true }
+    };
+    if changed { rerender_window(window_id); }
+    changed
+}
+
+/// Scrollable viewport rect + max offset (px) for a window's scrollbar,
+/// or None if nothing scrolls. Used by the compositor's scrollbar hit-test.
+pub fn scroll_viewport_of(window_id: u32) -> Option<(abi::Rect, u32)> {
+    let scenes = SCENES.lock();
+    let s = scenes.get(&window_id)?;
+    if s.max_scroll_y == 0 { return None; }
+    Some((s.scroll_viewport, s.max_scroll_y))
 }
 
 /// Drop a scene. Called from compositor::close_window when the
@@ -493,6 +519,7 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
     let anchors = lo.anchors;
     let popovers = lo.popovers;
     let max_scroll_y = lo.max_scroll_y;
+    let max_scroll_rect = lo.max_scroll_rect;
     let h = if hover_path.is_empty() { None } else { Some(hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
@@ -508,6 +535,7 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
         s.popovers    = popovers;
         s.hover_path  = hover_path.to_vec();
         s.max_scroll_y = max_scroll_y;
+        s.scroll_viewport = max_scroll_rect;
         s.scroll_y    = s.scroll_y.min(max_scroll_y);
     }
 }
@@ -768,6 +796,7 @@ fn rerender_state_only(window_id: u32) {
     let anchors = lo.anchors;
     let popovers = lo.popovers;
     let max_scroll_y = lo.max_scroll_y;
+    let max_scroll_rect = lo.max_scroll_rect;
     let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
     let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
     let a: Option<&[u32]> = active_path.as_deref();
@@ -781,6 +810,7 @@ fn rerender_state_only(window_id: u32) {
         s.anchors     = anchors;
         s.popovers    = popovers;
         s.max_scroll_y = max_scroll_y;
+        s.scroll_viewport = max_scroll_rect;
         s.scroll_y    = s.scroll_y.min(max_scroll_y);
     }
 }
@@ -1247,6 +1277,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     let anchors = lo.anchors;
     let popovers = lo.popovers;
     let max_scroll_y = lo.max_scroll_y;
+    let max_scroll_rect = lo.max_scroll_rect;
     let scroll_y = prev_scroll_y.min(max_scroll_y);
     let density = classify_density(win_w);
     let has_pseudo = render::tree_has_pseudo_state(&tree);
@@ -1328,6 +1359,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         input_edit,
         scroll_y,
         max_scroll_y,
+        scroll_viewport: max_scroll_rect,
     });
 
     // Mark the window dirty so shade paints it in the next render,
@@ -1474,6 +1506,7 @@ pub fn rerender_window(wid: u32) {
         scene.anchors     = new_lo.anchors;
         scene.popovers    = new_lo.popovers;
         scene.max_scroll_y = new_lo.max_scroll_y;
+        scene.scroll_viewport = new_lo.max_scroll_rect;
         scene.scroll_y    = scene.scroll_y.min(new_lo.max_scroll_y);
     }
     crate::shade::with_compositor(|c| {
@@ -1519,6 +1552,7 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     scene.popovers    = new_lo.popovers;
     scene.density     = new_density;
     scene.max_scroll_y = new_lo.max_scroll_y;
+        scene.scroll_viewport = new_lo.max_scroll_rect;
     scene.scroll_y    = scene.scroll_y.min(new_lo.max_scroll_y);
     scene.hover_path.clear();
     scene.active_path = None;
