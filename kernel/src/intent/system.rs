@@ -460,6 +460,43 @@ pub fn intent_dsdt_full() {
     kprintln!("---DSDT-END---");
 }
 
+/// `dsdt send <ip> <port>` — stream the raw DSDT bytes over TCP to a
+/// `nc -l <port>` listener (exact bytes, no base64, no terminal-mirror ring
+/// overflow). Paced in small chunks so the NIC TX ring drains. The DSDT
+/// carries its own length at header bytes 4..8, so the receiver can self-verify
+/// the transfer is complete. Generic ACPI diagnostic.
+pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
+    let Some((addr, len)) = crate::acpi::dsdt() else {
+        kprintln!("[npk] DSDT not found");
+        return;
+    };
+    let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+    kprintln!("[npk] dsdt send → {}.{}.{}.{}:{} ({} bytes)",
+        ip[0], ip[1], ip[2], ip[3], port, len);
+
+    let handle = match crate::net::tcp::connect(ip, port) {
+        Ok(h) => h,
+        Err(_) => { kprintln!("[npk] connect failed (is `nc -l {}` running?)", port); return; }
+    };
+
+    let mut off = 0usize;
+    while off < len {
+        let end = (off + 1024).min(len);
+        if crate::net::tcp::send(handle, &b[off..end]).is_err() {
+            kprintln!("[npk] send failed at offset {}", off);
+            let _ = crate::net::tcp::close(handle);
+            return;
+        }
+        off = end;
+        // Pace ~10 ms so the (fire-and-forget) segments don't overrun the ring.
+        let t0 = crate::interrupts::ticks();
+        while crate::interrupts::ticks() == t0 {}
+    }
+
+    let _ = crate::net::tcp::close(handle);
+    kprintln!("[npk] dsdt sent ({} bytes); verify: filesize == u32(bytes[4..8])", len);
+}
+
 pub fn intent_uptime() {
     let secs = crate::interrupts::uptime_secs();
     let days = secs / 86400;

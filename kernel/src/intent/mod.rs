@@ -1282,12 +1282,21 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             system::intent_battery();
         }
         "dsdt" => {
-            // `dsdt full` base64-dumps the whole table (for the aml.wasm
-            // interpreter dev harness); bare `dsdt` dumps battery fields.
-            if args.split_whitespace().next() == Some("full") {
-                system::intent_dsdt_full();
-            } else {
-                system::intent_dsdt();
+            // `dsdt send <ip> <port>` streams the raw table over TCP (exact
+            // bytes, no terminal-mirror ring-overflow); `dsdt full` base64-
+            // dumps it to the console; bare `dsdt` dumps battery fields.
+            let mut it = args.split_whitespace();
+            match it.next() {
+                Some("send") => {
+                    let ip_s = it.next().unwrap_or("");
+                    let port_s = it.next().unwrap_or("");
+                    match (parse_ip(ip_s), port_s.parse::<u16>()) {
+                        (Some(ip), Ok(port)) if port != 0 => system::intent_dsdt_send(ip, port),
+                        _ => kprintln!("[npk] usage: dsdt send <ip> <port>"),
+                    }
+                }
+                Some("full") => system::intent_dsdt_full(),
+                _ => system::intent_dsdt(),
             }
         }
         "debug" => {
