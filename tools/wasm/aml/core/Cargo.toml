@@ -1,0 +1,12 @@
+[package]
+name = "aml_core"
+version = "0.1.0"
+edition = "2021"
+
+# no_std + alloc library. Builds for the std dev-harness AND for wasm32.
+[lib]
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
