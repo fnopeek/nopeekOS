@@ -1282,7 +1282,13 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             system::intent_battery();
         }
         "dsdt" => {
-            system::intent_dsdt();
+            // `dsdt full` base64-dumps the whole table (for the aml.wasm
+            // interpreter dev harness); bare `dsdt` dumps battery fields.
+            if args.split_whitespace().next() == Some("full") {
+                system::intent_dsdt_full();
+            } else {
+                system::intent_dsdt();
+            }
         }
         "debug" => {
             // Parse "<ip> <port>" and set the target before spawning debug.wasm.
