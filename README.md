@@ -65,7 +65,8 @@ npk> install loft                      # File browser (widget-kind, list/grid vi
 npk> install spell                     # Text editor (tabs, syntax highlight, npkFS)
 npk> install iris                      # Image viewer (PNG, canvas escape-hatch)
 npk> install snap                      # Screenshot tool (full-screen capture → npkFS)
-npk> browser                           # Launch LibreWolf in a tiled microvm window
+npk> install aml                       # AML battery driver (vendor-independent % via firmware _BST/_BIF)
+npk> browser                           # Launch LibreWolf in a tiled microvm window (multi-vCPU)
 npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
 npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
 npk> gpu 4k                           # Switch to 4K@30Hz
@@ -280,6 +281,20 @@ Every execution is a sandboxed WASM module:
 - [x] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
 - [x] WiFi driver: RTL8852BE firmware download (WASM module, PCIe DMA, MFW container)
 - [ ] WiFi driver: MAC init, RF calibration, scan, association
+- [x] **RTL8153 USB-Ethernet** (v0.194.0, HW-validated on the HP notebook) —
+      xHCI bulk + r8152 class driver + netdev; wired LAN on first try (0bda:8153)
+- [x] **TCP Window Scaling** (v0.194.9) — RFC 7323 + 1 MiB receive buffer;
+      downloads went from a ~4 MB/s (64 KB-window) cap to ~gigabit
+- [x] **`aml.wasm` — AML interpreter as the first real WASM driver**
+      (v0.200.0, HW-validated on the HP) — runs the firmware's `_BST`/`_BIF`
+      AML methods (ACPICA-style) for a **vendor-independent battery %**, no
+      per-device offset hardcode. New `HARDWARE` capability (0x40) gates
+      firmware-driven EC reads/writes; the bar reads it via `npk_battery`
+- [x] **UEFI relocatable boot — HP notebook boots again** (v0.193.10) —
+      PIE/relocation fix, schliesslich 4 layered problems: Secure Boot,
+      non-relocatable image, oversized EFI, and the HP trapping a legacy-PIC
+      ICW1 write via SMI → reset (fix: mask the PIC + APIC timer only, PS/2
+      polling fallback)
 
 ### Phase 8 -- Human View
 
@@ -300,6 +315,9 @@ Every execution is a sandboxed WASM module:
 - [x] Shade compositor (Hyprland-inspired tiling WM, dwindle layout)
 - [x] Per-window terminal sessions (heap-allocated, no limit, independent input/output)
 - [x] Shadebar (Waybar-inspired: workspace indicators, clock, window title) — now a WASM panel (`bar.wasm`); the kernel keeps only the strut geometry + a native fallback
+- [x] **Battery indicator in the top bar** (v0.199→v0.200) — Phosphor battery
+      glyphs + live %; segment only shows when a battery responds. Reads via
+      the `aml.wasm` AML driver (see Phase 7), HW-validated on the HP notebook
 - [x] Window keybindings: Mod+Enter/Q/1-4/Arrows/Shift+Arrows/Ctrl+Arrows/F/V/PgUp/PgDn
 - [x] Smooth window swap animation (ease-out cubic, 250ms)
 - [x] Aurora background cache (render once, memcpy per region, ~100x faster)
@@ -317,6 +335,21 @@ Every execution is a sandboxed WASM module:
 - [x] Wallpaper demo (4 procedural themes, quarter-res, auto-theme extraction)
 - [x] BCS blitter engine (Gen 12 ExecList, GPU-accelerated compositing)
 - [x] GPU-composited cursor (save-under, eliminates blit race)
+- [x] **Platform window close button** (kernel v0.201→v0.204) — the compositor
+      draws a bare theme-coloured `X` near the top-right of every real window
+      (not per-app; light/dark aware, equal margins). Mouse-close without
+      Mod+Q. Suppressed on panels, launcher overlays (drun) and the browser
+- [x] **Light/dark theme for loop/terminal** (v0.202.x) — terminal windows
+      resolve fg/bg from the theme like widget apps; follow `theme=auto`
+      (wallpaper luminance), with extra wallpaper show-through in light mode
+- [x] **Auto-hide dock pushes tiles up** (v0.202.5) — when the dock reveals,
+      tiled windows glide up to make room (equal gap above/below) and glide
+      back down as it hides
+- [x] **Scrollable windows + draggable scrollbars** (v0.203→v0.204) —
+      `Widget::Scroll` became a real platform primitive (clip + wheel offset +
+      overlay scrollbar shown only on overflow) usable by any app; the loop
+      terminal and the spell editor scroll too. Mouse-wheel **and** drag the
+      thin overlay bar; the loop/terminal also soft-wraps long lines
 - [ ] VSync via PLANE_SURF double-buffer flip (zero-tearing + zero-latency)
 - [ ] Web rendering engine (long-term)
 
@@ -346,18 +379,22 @@ Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
       uses. Reports true BUSY% (=100−halted), HALTS/s, avg C-state
       residency, queue depth, measured ROLE. `top`'s busy% can't tell
       halted from spinning; `cores` is the ground truth.
-- [ ] **Idle path doesn't truly quiesce** (open, diagnosed 2026-05-30):
-      worker cores wake ~1000×/s while genuinely idle (busy 0%) and
-      never reach deep idle → real host load (every KVM vCPU thread at
-      100%, cores in turbo). Root: no per-core wake source — apps block
-      in MWAIT and only the MONITOR cacheline wakes them. Fix = the
-      per-core APIC timer below + the fiber rework (`SCHEDULER_FIBERS.md`).
-- [ ] **Fiber / green-thread app scheduler** (`SCHEDULER_FIBERS.md`):
-      stackful coroutines so blocking host calls (`npk_sleep`,
-      `npk_event_wait`) park the app (0 CPU, 0 core held) instead of
-      pinning a worker core → many apps multiplex over few cores.
-- [ ] Per-core APIC timer (worker cores currently wake via IPI only) —
-      prerequisite for the idle-quiesce + fiber work above
+- [x] **Idle path quiesces** (v0.186.0) — root cause was `cpu-pm=on`
+      (HLT/MWAIT passthrough so the vCPU thread never VM-exited → KVM never
+      parked it). Fix: per-core worker APIC timer (vec 50) + plain HLT idle
+      (VM-exits → host core actually frees) and `cpu-pm` dropped
+- [x] **Per-core APIC timer** (v0.186.0) — worker cores arm their own
+      100 Hz timer instead of waking via IPI only; the idle-quiesce prereq
+- [x] **Fiber / green-thread app scheduler** (`SCHEDULER_FIBERS.md`,
+      v0.188→v0.191, HW-validated 2026-06-01) — stackful coroutines: blocking
+      host calls (`npk_sleep`) yield, so loft + spell run side-by-side without
+      each pinning a core; the microvm vCPU runs as a dynamic pool fiber
+      (no wasted pinned core)
+- [x] **Guest-SMP (multi-vCPU)** (v0.193→v0.198, AMD + Intel/VMX
+      HW-validated) — one guest vCPU per distinct host worker core
+      (`fiber::admit`, VMX-root is per-core): MP table → LAPIC emulation →
+      per-vCPU APIC-ID → SIPI AP bring-up → cross-vCPU IPIs. The browser
+      boots on 2 vCPUs; AMD 6-core scales to 5. Idle vCPUs park (host CPU → 0)
 - [ ] Thermal load balancing (migrate tasks when core >80% busy)
 
 **Event-Driven Intent Architecture**
@@ -688,6 +725,30 @@ Progress milestones (per `PHASE10_WIDGETS.md`):
 - [x] **File associations** — `npk_open(app, arg)` + `npk_launch_arg()` + `Event::Open`: loft double-click opens a file with its handler app (ext→app map in loft + `sys/config/associations`, never in the kernel). Singleton routing → 2nd open = a tab in the running instance. Widget windows now titled with the module name.
 - [x] **Per-app capabilities** — apps declare rights in a 1-byte `.npk.caps` section; kernel grants exactly those (default never WRITE). Apps can't write `sys/wasm/` (anti-escalation). New `npk_home_dir` host fn.
 - [ ] **Text selection** (mouse-drag + Shift+Arrow) + Ctrl+S — both need modifier plumbing through `handle_input_key`. find/replace, caret line:col in footer, tab drag-reorder. *(next)*
+
+> **2026-06-01…04 — Daily-driver shell polish + first WASM hardware driver
+> (kernel v0.181→v0.204.1, loft 0.5.1, spell 0.5.4, bar 0.3.2).** A run of
+> usability + bring-up work across the desktop, the microvm, and the laptop.
+
+- [x] **Scroll, platform-wide** — `Widget::Scroll` is now a real primitive:
+      rasterizer clip rect, `measure(Scroll)` frees the scroll axis, per-window
+      wheel offset, overlay scrollbar shown only on overflow. loft (file list +
+      sidebar), the spell editor (`TextArea`) and markdown preview, and the
+      loop/terminal all scroll. **Mouse-wheel + draggable** scrollbars; the
+      loop **soft-wraps** long lines instead of truncating them.
+- [x] **Window close button + dock-push + theme** — see Phase 8: a platform
+      `X`, the auto-hide dock gliding tiles up, and light/dark theming of the
+      loop/terminal. loft gained sortable full-width columns (↑/↓), a "Files"
+      column and recursive folder sizes (progressive/non-blocking). spell +
+      loft footers removed as noise.
+- [x] **Battery in the bar + `aml.wasm`** — see Phases 7/8: the first real
+      WASM driver runs firmware AML for a vendor-independent battery %, shown
+      live in the top bar (HW-validated on the HP).
+- [x] **Browsing is usable** (v0.198.15, confirmed) — a chain of latency
+      fixes: DNS direct to 1.1.1.1 via L3-NAT, bounded adaptive halt-polling
+      (KVM model), and de-bufferbloating the host virtio-net RX ring (32→256)
+      with TX backpressure (upload 75→139 Mbit, latency 600→22 ms).
+- [x] **Fiber scheduler + Guest-SMP + HP UEFI boot** — see Phase 9 / Phase 7.
 
 ### Phase 11 -- AI Integration (deferred → Phase 13+)
 
