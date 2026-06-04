@@ -120,6 +120,96 @@ pub fn focus_window(id: WindowId) {
 /// `Widget::Scroll` (≈3 text lines).
 const WIDGET_SCROLL_STEP: i32 = 48;
 
+/// Width (px) of the clickable scrollbar strip at a window's right edge.
+const SCROLLBAR_STRIP: i32 = 16;
+
+/// Active scrollbar drag (set on press over the bar, cleared on release).
+static SCROLL_DRAG: spin::Mutex<Option<ScrollDragState>> = spin::Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct ScrollDragState {
+    window: u32,
+    is_terminal: bool,
+    term_idx: u8,
+    vx: i32, vy: i32, vw: u32, vh: u32,
+    max_px: u32,            // widget: max scroll offset
+    total: usize, rows: usize, // terminal: logical lines / visible rows
+}
+
+#[inline]
+fn in_scroll_strip(mx: i32, my: i32, vx: i32, vy: i32, vw: u32, vh: u32) -> bool {
+    mx >= vx + vw as i32 - SCROLLBAR_STRIP && mx < vx + vw as i32
+        && my >= vy && my < vy + vh as i32
+}
+
+/// Map a drag cursor Y to a scroll offset and apply it.
+fn apply_scroll_drag(s: &ScrollDragState, my: i32) {
+    let vh = s.vh as i64;
+    if vh <= 0 { return; }
+    let thumb_h = if s.is_terminal {
+        let total = s.total.max(1) as i64;
+        let rows = s.rows.max(1) as i64;
+        (vh * rows / total).clamp(24, vh)
+    } else {
+        let content_h = vh + s.max_px as i64;
+        (vh * vh / content_h.max(1)).clamp(24, vh)
+    };
+    let travel = (vh - thumb_h).max(1);
+    let thumb_top = ((my as i64 - s.vy as i64) - thumb_h / 2).clamp(0, travel);
+    if s.is_terminal {
+        // offset 0 = bottom; thumb at top = max scrollback.
+        let max_lines = (s.total as i64 - s.rows as i64).max(0);
+        let from_bottom = max_lines * (travel - thumb_top) / travel;
+        terminal::set_scroll_offset(s.term_idx as usize, from_bottom as usize);
+    } else {
+        let off = (s.max_px as i64) * thumb_top / travel;
+        widgets::set_scroll(s.window, off as u32);
+    }
+}
+
+/// Try to grab a scrollbar under `(mx, my)`. Returns the drag state if the
+/// cursor is on a scrollable window's right-edge strip (and not on the
+/// close button).
+fn scrollbar_grab(mx: i32, my: i32) -> Option<ScrollDragState> {
+    let hit = with_compositor(|c| c.scroll_hit_at(mx, my)).flatten()?;
+    if let Some((bx, by, bw, bh)) = hit.close_rect {
+        if mx >= bx as i32 && mx < (bx + bw) as i32
+            && my >= by as i32 && my < (by + bh) as i32 { return None; }
+    }
+    if hit.is_terminal {
+        let (total, _) = terminal::scroll_metrics(hit.term_idx as usize)?;
+        let (vx, vy, vw, vh) = hit.text_rect;
+        let rows = (vh / hit.char_h.max(1)).max(1) as usize;
+        if total <= rows || !in_scroll_strip(mx, my, vx, vy, vw, vh) { return None; }
+        Some(ScrollDragState { window: hit.window, is_terminal: true, term_idx: hit.term_idx,
+            vx, vy, vw, vh, max_px: 0, total, rows })
+    } else {
+        let (vp, max_px) = widgets::scroll_viewport_of(hit.window)?;
+        if !in_scroll_strip(mx, my, vp.x, vp.y, vp.w, vp.h) { return None; }
+        Some(ScrollDragState { window: hit.window, is_terminal: false, term_idx: 0,
+            vx: vp.x, vy: vp.y, vw: vp.w, vh: vp.h, max_px, total: 0, rows: 0 })
+    }
+}
+
+/// Drive a scrollbar drag from the current mouse state. Returns true if it
+/// consumed the event (caller skips the normal focus/window-drag path).
+fn handle_scrollbar_drag(mx: i32, my: i32, lmb: bool, was: bool) -> bool {
+    let mut guard = SCROLL_DRAG.lock();
+    if !lmb {
+        return guard.take().is_some();
+    }
+    if guard.is_none() && !was {
+        *guard = scrollbar_grab(mx, my);
+    }
+    if let Some(s) = guard.as_ref().copied() {
+        drop(guard);
+        apply_scroll_drag(&s, my);
+        render_damaged();
+        return true;
+    }
+    false
+}
+
 /// True if the focused window is a terminal (loop) window — used to route
 /// the mouse wheel to the terminal scrollback.
 fn focused_is_terminal() -> bool {
@@ -1150,6 +1240,17 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
                 }
             });
             render_damaged();
+        }
+    }
+
+    // Scrollbar drag (loop + widget windows). Handled before the
+    // compositor's focus/window-drag logic so dragging the bar never moves
+    // or refocuses windows; a consumed event short-circuits the rest.
+    {
+        let (smx, smy) = cursor::atomic_pos();
+        let (btn, prev) = cursor::atomic_buttons();
+        if handle_scrollbar_drag(smx, smy, btn & 1 != 0, prev & 1 != 0) {
+            return;
         }
     }
 

@@ -715,6 +715,22 @@ pub fn scroll_down(lines: usize) {
     }
 }
 
+/// (total logical lines, current scroll_offset) for terminal `idx` —
+/// used by the compositor to draw + drag the scrollbar.
+pub fn scroll_metrics(idx: usize) -> Option<(usize, usize)> {
+    term_ref(idx).map(|t| (t.total, t.scroll_offset))
+}
+
+/// Set the absolute scroll_offset (logical lines from the bottom) for
+/// terminal `idx`, clamped. Used by the scrollbar drag.
+pub fn set_scroll_offset(idx: usize, off: usize) {
+    if let Some(term) = term_mut(idx) {
+        let max_scroll = term.total.saturating_sub(1);
+        term.scroll_offset = off.min(max_scroll);
+        DIRTY.store(true, Ordering::Release);
+    }
+}
+
 /// Reset scroll to bottom (show latest content).
 pub fn scroll_reset() {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;

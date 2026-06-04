@@ -624,6 +624,22 @@ fn paint_node_eff(
                     rast.rect(target, caret_rect, Fill::Solid(Token::OnSurface));
                 }
             }
+
+            // Overlay scrollbar — only when the document overflows. Mirrors
+            // paint_scrollbar (Widget::Scroll) so the editor and file views
+            // look identical; thumb position tracks the line window.
+            if total_lines > visible && rect.h > 0 {
+                let content_h = (total_lines as u32) * line_h;
+                let track_h = rect.h as u64;
+                let thumb_h = ((track_h * track_h) / content_h.max(1) as u64).max(24).min(track_h) as u32;
+                let travel = track_h - thumb_h as u64;
+                let max_off = (total_lines - visible) as u64;
+                let thumb_y = rect.y + if max_off == 0 { 0 } else { (scroll as u64 * travel / max_off) as i32 };
+                let thumb_x = rect.x + rect.w as i32 - 6;
+                rast.rect_rounded(target,
+                    Rect { x: thumb_x, y: thumb_y, w: 4, h: thumb_h },
+                    Fill::Solid(Token::OnSurfaceMuted), 2);
+            }
         }
 
         Widget::Checkbox { value, .. } => {

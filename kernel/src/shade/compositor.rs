@@ -125,6 +125,21 @@ pub struct SwapAnimation {
 #[derive(Clone, Copy, PartialEq)]
 pub enum DragMode { Swap, Resize }
 
+/// Window + geometry under the cursor for a scrollbar hit-test/drag.
+#[derive(Clone, Copy)]
+pub struct ScrollHit {
+    pub window: u32,
+    pub is_terminal: bool,
+    pub term_idx: u8,
+    /// Terminal text rect `(x, y, w, h)` in screen coords (content minus
+    /// the terminal padding) — the scrollbar track for terminals.
+    pub text_rect: (i32, i32, u32, u32),
+    /// Monospace cell height (px) — terminal rows = text_rect.h / char_h.
+    pub char_h: u32,
+    /// The window's close-button rect, to exclude from the bar strip.
+    pub close_rect: Option<(u32, u32, u32, u32)>,
+}
+
 /// Drag state for Mod+LMB (swap) or Mod+RMB (resize).
 #[derive(Clone, Copy)]
 pub struct DragState {
@@ -1214,6 +1229,32 @@ impl Compositor {
                 terminal::render_to_window(shadow, info,
                     text_x, text_y, text_w, text_h,
                     scale, win.terminal_idx);
+
+                // Overlay scrollbar — only when the scrollback overflows.
+                // Mirrors the widget overlay bar; geometry must match
+                // `scroll_hit_at` so the drawn thumb and the drag area agree.
+                if let Some((total, soff)) = terminal::scroll_metrics(win.terminal_idx as usize) {
+                    let (_, char_h) = crate::gui::font::char_size(scale);
+                    let rows = (text_h / char_h.max(1)).max(1) as usize;
+                    if total > rows && text_h > 0 {
+                        let track_h = text_h as u64;
+                        let thumb_h = ((track_h * rows as u64) / total as u64).max(24).min(track_h) as u32;
+                        let travel = track_h - thumb_h as u64;
+                        let max_scroll = (total - rows) as u64;
+                        let soff = (soff as u64).min(max_scroll);
+                        // soff 0 = bottom → thumb at bottom; soff max = top.
+                        let from_top = if max_scroll == 0 { 0 } else { travel * (max_scroll - soff) / max_scroll };
+                        let ty = text_y + from_top as u32;
+                        let tx = text_x + text_w.saturating_sub(6);
+                        let color = crate::shade::widgets::palette::resolve(
+                            crate::shade::widgets::abi::Token::OnSurfaceMuted) & 0x00FF_FFFF;
+                        for py in ty..(ty + thumb_h).min(info.height) {
+                            for px in tx..(tx + 4).min(info.width) {
+                                render::blend_pixel(shadow, info, px, py, color, 200);
+                            }
+                        }
+                    }
+                }
             }
             crate::shade::window::WindowKind::Widget => {
                 let _ = crate::shade::widgets::relayout_scene(
@@ -2057,6 +2098,33 @@ impl Compositor {
             }
         }
         None
+    }
+
+    /// Geometry for a scrollbar drag at `(x, y)`: the window under the
+    /// cursor plus its terminal text rect (for terminals) and close-button
+    /// rect (to exclude from the bar). Widget windows fill the viewport from
+    /// their scene; here we just identify the window + kind. `None` for
+    /// panels or empty space.
+    pub fn scroll_hit_at(&self, x: i32, y: i32) -> Option<ScrollHit> {
+        let wid = self.window_at(x, y)?;
+        let win = self.windows.iter().find(|w| w.id == wid)?;
+        if win.is_dock || win.is_bar { return None; }
+        let border = self.border;
+        let pad = 6 * self.scale;
+        let text_rect = (
+            (win.content_x(border) + pad) as i32,
+            (win.content_y(border) + pad) as i32,
+            win.content_w(border).saturating_sub(pad * 2),
+            win.content_h(border).saturating_sub(pad * 2),
+        );
+        Some(ScrollHit {
+            window: wid.0,
+            is_terminal: win.kind == crate::shade::window::WindowKind::Terminal,
+            term_idx: win.terminal_idx,
+            text_rect,
+            char_h: crate::gui::font::char_size(self.scale).1,
+            close_rect: close_button_rect(win, border, self.scale),
+        })
     }
 
     // ── Layer-based rendering ──────────────────────────────────────────

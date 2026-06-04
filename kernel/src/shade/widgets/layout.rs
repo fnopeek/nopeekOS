@@ -92,6 +92,9 @@ pub struct LayoutOutput {
     /// the window's stored scroll offset to this so a wheel-up at the
     /// bottom responds immediately. Zero → nothing scrolls.
     pub max_scroll_y: u32,
+    /// Screen rect of the scrollable viewport (for the scrollbar hit-test /
+    /// drag). Zero-sized when nothing scrolls.
+    pub max_scroll_rect: Rect,
 }
 
 /// Threaded through placement so a `Widget::Scroll` can offset its child
@@ -101,6 +104,9 @@ pub struct LayoutOutput {
 struct ScrollCtx {
     offset: u32,
     max:    u32,
+    /// Screen rect of the scrollable node that set `max` (the viewport) —
+    /// the compositor hit-tests its right edge for scrollbar dragging.
+    max_rect: Rect,
 }
 
 /// Lay out `root` inside `container` (absolute px). Returns the
@@ -114,9 +120,10 @@ pub fn layout(root: &Widget, container: Rect) -> LayoutOutput {
 pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutOutput {
     // Pass 1: main tree.
     let (_, inner) = unpack_modifiers(root, container);
-    let mut ctx = ScrollCtx { offset: scroll_y, max: 0 };
+    let mut ctx = ScrollCtx { offset: scroll_y, max: 0, max_rect: Rect { x: 0, y: 0, w: 0, h: 0 } };
     let tree = place(root, inner, &mut ctx);
     let max_scroll_y = ctx.max;
+    let max_scroll_rect = ctx.max_rect;
 
     // Pass 2: walk widget+layout in lockstep, record NodeId-tagged
     // rects so popovers (which always come after their anchor in
@@ -130,7 +137,7 @@ pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutO
     let mut popovers: Vec<PopoverLayout> = Vec::new();
     collect_popovers(root, container, &anchors, &mut popovers);
 
-    LayoutOutput { tree, anchors, popovers, max_scroll_y }
+    LayoutOutput { tree, anchors, popovers, max_scroll_y, max_scroll_rect }
 }
 
 /// Walk widget+layout trees in lockstep, recording (NodeId, rect)
@@ -178,7 +185,7 @@ fn collect_popovers(
             let x = anchor_rect.x.min(max_x.max(window.x));
             let frect = Rect { x, y, w: csize.w, h: csize.h };
             // Popover content is floating chrome — never scrolled.
-            let mut pctx = ScrollCtx { offset: 0, max: 0 };
+            let mut pctx = ScrollCtx { offset: 0, max: 0, max_rect: Rect { x: 0, y: 0, w: 0, h: 0 } };
             let layout = place(child, frect, &mut pctx);
             out.push(PopoverLayout {
                 on_dismiss:  *on_dismiss,
@@ -465,7 +472,7 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
                     let content_h = csize.h.max(inner.h);
                     let max_off = content_h.saturating_sub(inner.h);
                     let off = ctx.offset.min(max_off);
-                    if max_off > ctx.max { ctx.max = max_off; }
+                    if max_off > ctx.max { ctx.max = max_off; ctx.max_rect = inner; }
                     Rect { x: inner.x, y: inner.y - off as i32, w: inner.w, h: content_h }
                 }
                 Axis::Horizontal => Rect { x: inner.x, y: inner.y, w: csize.w.max(inner.w), h: inner.h },
@@ -505,7 +512,7 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             let visible = (inner.h / line_h).max(1) as usize;
             let total = value.split('\n').count();
             let max_off = (total.saturating_sub(visible)) as u32 * line_h;
-            if max_off > ctx.max { ctx.max = max_off; }
+            if max_off > ctx.max { ctx.max = max_off; ctx.max_rect = inner; }
             LayoutNode::leaf(inner)
         }
 
