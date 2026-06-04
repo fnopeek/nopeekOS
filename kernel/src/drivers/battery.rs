@@ -8,6 +8,25 @@
 //! which case [`read`] simply returns None and the bar segment stays empty).
 
 use crate::smbus;
+use core::sync::atomic::{AtomicI32, Ordering};
+
+// Battery state reported by the AML driver (aml.wasm), encoded as the bar
+// expects: (status << 8) | percent, or -1 for "no battery / no report yet".
+// The driver runs the firmware's _BST/_BIF (vendor-independent) and pushes
+// here; `npk_battery()` returns this. Replaces the old per-device EC offset
+// hardcode (which only worked on one HP model).
+static REPORT: AtomicI32 = AtomicI32::new(-1);
+
+/// Called by the AML driver via `npk_battery_report`.
+pub fn report(packed: i32) {
+    REPORT.store(packed, Ordering::Release);
+}
+
+/// The latest driver report (or -1). `npk_battery()` returns this, falling
+/// back to the standardised SBS-over-SMBus path for desktops/SBS laptops.
+pub fn cached() -> i32 {
+    REPORT.load(Ordering::Acquire)
+}
 
 const SBS_ADDR: u8 = 0x0B;
 const REG_REL_STATE_OF_CHARGE: u8 = 0x0D;
@@ -33,12 +52,13 @@ pub struct BatteryState {
     pub status: ChargeStatus,
 }
 
-/// Read the current battery state, or None if no battery is found. Tries the
-/// standardised SBS-over-SMBus path first; if the pack doesn't sit on the
-/// SMBus (HP and most laptops hide it behind the EC), falls back to the EC
-/// path below.
+/// Read the current battery state via the standardised SBS-over-SMBus path
+/// (works when the pack sits directly on the bus). Laptops that hide the pack
+/// behind the EC report through the AML driver instead — see [`cached`]. The
+/// former per-device EC offset hardcode was removed in favour of aml.wasm,
+/// which runs the firmware's own `_BST`/`_BIF` and is vendor-independent.
 pub fn read() -> Option<BatteryState> {
-    read_sbs().or_else(read_ec)
+    read_sbs()
 }
 
 /// Smart Battery System over the i801 SMBus (works when the pack is wired
@@ -53,55 +73,6 @@ fn read_sbs() -> Option<BatteryState> {
         Some(s) if s & BATTERY_DISCHARGING != 0 => ChargeStatus::Discharging,
         Some(_) => ChargeStatus::Charging,
         None => ChargeStatus::Discharging,
-    };
-
-    Some(BatteryState { percent, status })
-}
-
-// ── EC-RAM battery (HP Elite/Dragonfly control-method-battery) ──────────
-// EC field offsets decoded from the DSDT's Field(ECRM) (via the `dsdt`
-// intent) — the same fields EC0.BTST/BTIF read: select the battery via BSEL,
-// then read the multiplexed capacity/status fields. Validated live on an HP
-// Elite Dragonfly G1 against the BIOS readout: BFC_=6496 mAh ≈ 50.01 Wh,
-// BDC_=7300 mAh ≈ 56.2 Wh design (units are mAh, ~7.7 V pack). Full charge
-// is read live (self-calibrating as the pack ages). HP-Elite-specific; the
-// is_mobile() gate keeps desktops out and a plausibility check guards others.
-pub const EC_BSEL: u8 = 0x86; // battery select (4-bit nibble); 0 on this single-battery laptop
-const EC_BFC: u8 = 0x8d;      // u16 full-charge capacity (mAh)
-const EC_BRC: u8 = 0xa1;      // u16 remaining capacity (mAh)
-const EC_BST: u8 = 0x99;      // status nibble: bit0 = discharging, bit1 = charging
-const EC_CHARGER_WATTS: u8 = 0xf9; // AC adapter present when nonzero
-const BST_DISCHARGING: u8 = 0x01;
-const BST_CHARGING: u8 = 0x02;
-
-fn read_ec() -> Option<BatteryState> {
-    // Laptops only — desktops have no battery (and bogus EC RAM here).
-    if !crate::acpi::is_mobile() { return None; }
-
-    // BSEL is already 0 (single battery) on the Dragonfly, so no EC write is
-    // needed to select BAT0 — we stay read-only.
-    let full = crate::ec::read_u16(EC_BFC)? as u32;
-    let remaining = crate::ec::read_u16(EC_BRC)? as u32;
-    // Plausibility (mAh): guards non-HP laptops whose 0x8d/0xa1 mean nothing.
-    if !(500..=20_000).contains(&full) { return None; }
-    if remaining > full + full / 8 { return None; }
-
-    let percent = ((remaining * 100 + full / 2) / full).min(100) as u8;
-
-    let bst = crate::ec::read(EC_BST).unwrap_or(0) & 0x0F;
-    let ac = crate::ec::read(EC_CHARGER_WATTS).map(|w| w != 0).unwrap_or(false);
-
-    let status = if bst & BST_CHARGING != 0 {
-        ChargeStatus::Charging
-    } else if bst & BST_DISCHARGING != 0 {
-        ChargeStatus::Discharging
-    } else if percent >= 99 {
-        ChargeStatus::Full
-    } else if ac {
-        // Plugged in, not charging (HP Adaptive Battery Care holds ~80 %).
-        ChargeStatus::PluggedIdle
-    } else {
-        ChargeStatus::Discharging
     };
 
     Some(BatteryState { percent, status })

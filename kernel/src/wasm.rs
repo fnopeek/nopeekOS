@@ -1439,19 +1439,95 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_battery() -> i32 — battery state for the bar plugin. Returns -1
-    // when no smart battery responds (desktops/QEMU → segment stays empty),
-    // else (status << 8) | percent, with status 0=discharging 1=charging
-    // 2=full and percent in 0..=100.
+    // when no battery is known (desktops/QEMU → segment stays empty), else
+    // (status << 8) | percent, with status 0=discharging 1=charging 2=full
+    // 3=plugged-idle and percent in 0..=100. Prefers the AML driver's report
+    // (aml.wasm, vendor-independent via _BST/_BIF); falls back to the
+    // standardised SBS-over-SMBus path for SBS laptops.
     linker.func_wrap("env", "npk_battery",
         |caller: Caller<'_, HostState>| -> i32 {
             let cap_id = caller.data().cap_id;
             if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
                 return -1;
             }
+            let cached = crate::battery::cached();
+            if cached >= 0 {
+                return cached;
+            }
             match crate::battery::read() {
                 Some(b) => ((b.status as i32) << 8) | b.percent as i32,
                 None => -1,
             }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // ── AML battery driver (aml.wasm) host-fns — all HARDWARE-gated ──────
+    // npk_acpi_dsdt(buf_ptr, buf_max) -> i32: copy the DSDT (firmware AML)
+    // into the caller's buffer; returns the DSDT length. If it exceeds
+    // buf_max nothing is copied (caller sizes its buffer up). -1 on error.
+    linker.func_wrap("env", "npk_acpi_dsdt",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+                return -1;
+            }
+            let Some((addr, len)) = crate::acpi::dsdt() else { return -1 };
+            if len > buf_max as usize {
+                return len as i32; // too small: tell the caller the needed size
+            }
+            // SAFETY: acpi::dsdt() mapped [addr, addr+len) for us.
+            let src = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            let end = start + len;
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(src);
+            len as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_ec_read(addr) -> i32: read one EC-RAM byte (0..255) or -1.
+    linker.func_wrap("env", "npk_ec_read",
+        |caller: Caller<'_, HostState>, addr: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+                return -1;
+            }
+            if !(0..=255).contains(&addr) { return -1; }
+            match crate::ec::read(addr as u8) {
+                Some(v) => v as i32,
+                None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_ec_write(addr, val) -> i32: firmware-directed EC write (BSEL etc.).
+    // 0 on success, -1 on error.
+    linker.func_wrap("env", "npk_ec_write",
+        |caller: Caller<'_, HostState>, addr: i32, val: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+                return -1;
+            }
+            if !(0..=255).contains(&addr) || !(0..=255).contains(&val) { return -1; }
+            if crate::ec::write(addr as u8, val as u8) { 0 } else { -1 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_battery_report(packed): the AML driver pushes the decoded battery
+    // state ((status<<8)|percent, or -1 for absent) into the kernel cache
+    // that npk_battery() returns.
+    linker.func_wrap("env", "npk_battery_report",
+        |caller: Caller<'_, HostState>, packed: i32| {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+                return;
+            }
+            crate::battery::report(packed);
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
