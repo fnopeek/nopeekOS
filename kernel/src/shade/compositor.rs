@@ -266,8 +266,29 @@ impl Compositor {
         let x = self.gaps;
         let y = self.bar.workspace_y() + self.gaps;
         let w = self.screen_w.saturating_sub(self.gaps * 2);
-        let h = self.bar.workspace_height(self.screen_h).saturating_sub(self.gaps * 2);
+        let h = self.bar.workspace_height(self.screen_h)
+            .saturating_sub(self.gaps * 2)
+            .saturating_sub(self.dock_bottom_reserve());
         (x, y, w, h)
+    }
+
+    /// Vertical band the tiling area gives up at the bottom for the
+    /// auto-hide dock. Zero when the dock is fully hidden (so tiles reach
+    /// their normal extent), ramping to the full dock band + a top gap
+    /// matching the dock's floating bottom gap when fully revealed.
+    /// Linear in the reveal fraction so a retile per `dock_tick` makes the
+    /// tiles glide up/down in lockstep with the sliding dock.
+    fn dock_bottom_reserve(&self) -> u32 {
+        let Some(dock) = self.dock else { return 0 };
+        let slide = dock.thickness + dock.gap;
+        if slide == 0 { return 0 }
+        // Fully-shown reservation: the dock band plus a top gap equal to its
+        // floating bottom gap (→ equal air above and below), minus the tile
+        // gap the area already leaves above the baseline.
+        let full = (dock.thickness + 2 * dock.gap).saturating_sub(self.gaps);
+        // offset: 0 = shown, `slide` = hidden. risen = how far it has slid up.
+        let risen = slide.saturating_sub(dock.offset.min(slide));
+        (full as u64 * risen as u64 / slide as u64) as u32
     }
 
     /// Create a new window and add it to the current workspace.
@@ -708,6 +729,10 @@ impl Compositor {
             win.visible = now_visible;
             win.dirty = true;
         }
+        // Reflow tiles to the dock-reserved area at the current offset so the
+        // windows glide up/down together with the sliding dock (the reserve
+        // is keyed off `dock.offset`, which we just stepped).
+        self.retile();
         self.needs_full_redraw = true;
         true
     }
