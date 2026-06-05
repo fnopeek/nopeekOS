@@ -455,6 +455,29 @@ pub const UERR_DATA1: usize = 6;
 pub const UERR_CMD_HEADER: usize = 13;
 pub const UERR_WORDS: usize = 15;
 
+// ── Stage 4d2b2: beacon / RX MPDU parse (fw/api/rx.h, mvm/rxmq.c) ──
+// REPLY_RX_MPDU_CMD (0xc1, LEGACY_GROUP) carries an iwl_rx_mpdu_desc followed by
+// the 802.11 frame. For family < AX210 the descriptor is IWL_RX_DESC_SIZE_V1 =
+// offsetofend(struct iwl_rx_mpdu_desc, v1) = 20 (common head) + 28 (v1) = 48.
+pub const REPLY_RX_MPDU_CMD: u8 = 0xc1;
+pub const IWL_RX_DESC_SIZE_V1: usize = 48;
+// Field offsets within iwl_rx_mpdu_desc, relative to pkt->data (RX_PKT_DATA_OFF).
+pub const MPDU_OFF_MPDU_LEN: usize = 0; // __le16
+pub const MPDU_OFF_ENERGY_A: usize = 32; // v1.energy_a (union @20 + v1 offset 12)
+pub const MPDU_OFF_ENERGY_B: usize = 33; // v1.energy_b
+pub const MPDU_OFF_CHANNEL: usize = 34; // v1.channel
+// 802.11 management frame (ieee80211_hdr + beacon/probe-response body).
+pub const DOT11_HDR_LEN: usize = 24; // fc(2)+dur(2)+addr1/2/3(18)+seq(2)
+pub const DOT11_OFF_ADDR3: usize = 16; // BSSID
+pub const DOT11_BEACON_FIXED: usize = 12; // timestamp(8)+beacon_int(2)+capab(2)
+pub const DOT11_OFF_IES: usize = DOT11_HDR_LEN + DOT11_BEACON_FIXED; // 36
+pub const WLAN_EID_SSID: u8 = 0;
+// Management-frame subtypes (frame_control bits 4-7) we collect APs from.
+pub const DOT11_STYPE_BEACON: u8 = 8;
+pub const DOT11_STYPE_PROBE_RESP: u8 = 5;
+pub const MAX_APS: usize = 32;
+pub const SSID_MAX: usize = 32;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
