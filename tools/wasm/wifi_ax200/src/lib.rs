@@ -249,7 +249,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.2.0 — Stage 0b (reset + APM)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.2.1 — Stage 0b (reset + APM)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -299,6 +299,8 @@ pub extern "C" fn _start() {
         host::print("[ax200] Stage 0b FAILED\n");
     }
 
-    // Idle until 'q' (matches the RTL driver's quit convention).
-    loop { if host::input_wait(1000) == 0x71 { return; } }
+    // Probe-stage driver: return so the fiber ends and the core is freed.
+    // npk_input_wait HLTs without yielding to the scheduler, so idling here
+    // would pin the core and starve the shell. A persistent run-loop comes
+    // with the RX/event path (Stage 4+) and must use a yielding primitive.
 }
