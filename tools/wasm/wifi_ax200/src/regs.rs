@@ -138,6 +138,18 @@ pub const IWL_CTXT_INFO_RB_SIZE_SHIFT: u32 = 9; // mask 0x1e00
 pub const IWL_CTXT_INFO_RB_SIZE_4K: u32 = 0x4; // default rx_buf_size
 pub const CMD_QUEUE_CB_SIZE: u8 = 2; // TFD_QUEUE_CB_SIZE(32) = ilog2(32)-3
 
+// ── Stage 3: RX restock + ALIVE notification ─────────────────────
+// RFH free-RBD write-pointer trigger (direct MMIO in BAR0, gen2 < BZ).
+pub const RFH_Q0_FRBDCB_WIDX_TRG: u32 = 0x1C80;
+// RB pool size: enough to receive the alive notification (kept small to
+// stay under MAX_DMA_ALLOCS; no npk_dma_free in the ABI). Each RB = 1 page.
+pub const RX_NUM_RBS: usize = 64;
+pub const RB_SIZE_BYTES: usize = 4096; // IWL_AMSDU_4K
+// rb_stts.closed_rb_num producer index mask.
+pub const RB_STTS_CLOSED_MASK: u32 = 0x0FFF;
+// UCODE_ALIVE_NTFY command id (group 0).
+pub const UCODE_ALIVE_NTFY: u8 = 0x01;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
