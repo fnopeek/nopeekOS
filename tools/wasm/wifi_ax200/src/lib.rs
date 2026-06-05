@@ -66,6 +66,19 @@ impl Dma {
     fn ok(&self) -> bool { self.handle >= 0 }
 }
 
+/// A discovered access point (from a scan beacon / probe response).
+#[derive(Clone, Copy)]
+struct Ap {
+    bssid: [u8; 6],
+    ssid: [u8; SSID_MAX],
+    ssid_len: u8,
+    rssi: i8, // dBm
+    channel: u8,
+}
+impl Ap {
+    const EMPTY: Ap = Ap { bssid: [0; 6], ssid: [0; SSID_MAX], ssid_len: 0, rssi: 0, channel: 0 };
+}
+
 /// AX200 transport state. Mirrors the bits of `struct iwl_trans_pcie` we use.
 struct Ax200 {
     mmio: i32,
@@ -1133,6 +1146,105 @@ impl Ax200 {
         // probe_params: zeroed (passive scan, no probe request transmitted).
     }
 
+    // ── iwl_mvm_rx_mpdu_mq (mvm/rxmq.c) — parse a scan beacon ─────
+    // A REPLY_RX_MPDU_CMD RB holds: [len_n_flags 4][cmd_hdr 4][iwl_rx_mpdu_desc]
+    // [802.11 frame]. For family < AX210 the descriptor is IWL_RX_DESC_SIZE_V1
+    // (48), so the frame starts at RX_PKT_DATA_OFF + 48. We extract the BSSID
+    // (addr3), the SSID (IE 0), the RSSI (max of the two energy chains, negated
+    // to dBm), and the channel, de-duplicating by BSSID. Only beacon / probe-
+    // response management frames carry these, so other subtypes are skipped.
+    fn parse_beacon(&self, rb: &Dma, aps: &mut [Ap], n_aps: &mut usize) {
+        let mut buf = [0u8; 384];
+        host::dma_read_buf(rb.handle, 0, &mut buf);
+        let d = RX_PKT_DATA_OFF; // iwl_rx_mpdu_desc base
+
+        // RSSI: iwl_mvm_get_signal_strength — energy is a positive magnitude,
+        // negated to dBm; 0 means "no signal" (S8_MIN). Take the stronger chain.
+        let to_dbm = |e: u8| if e != 0 { -(e as i16) } else { -128 };
+        let rssi = to_dbm(buf[d + MPDU_OFF_ENERGY_A]).max(to_dbm(buf[d + MPDU_OFF_ENERGY_B])) as i8;
+        let channel = buf[d + MPDU_OFF_CHANNEL];
+
+        let f = d + IWL_RX_DESC_SIZE_V1; // 802.11 frame
+        // frame_control low byte: type bits 2-3 (0 = management), subtype 4-7.
+        let fc = buf[f];
+        if fc & 0x0c != 0 {
+            return; // not a management frame
+        }
+        let subtype = (fc >> 4) & 0xf;
+        if subtype != DOT11_STYPE_BEACON && subtype != DOT11_STYPE_PROBE_RESP {
+            return;
+        }
+
+        let mut bssid = [0u8; 6];
+        bssid.copy_from_slice(&buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6]);
+        // De-dup by BSSID; refresh RSSI if we hear a stronger beacon.
+        for i in 0..*n_aps {
+            if aps[i].bssid == bssid {
+                if rssi > aps[i].rssi {
+                    aps[i].rssi = rssi;
+                }
+                return;
+            }
+        }
+
+        // Walk the information elements for the SSID (element id 0).
+        let mut ssid = [0u8; SSID_MAX];
+        let mut ssid_len = 0u8;
+        let mut p = f + DOT11_OFF_IES;
+        while p + 2 <= buf.len() {
+            let id = buf[p];
+            let len = buf[p + 1] as usize;
+            if p + 2 + len > buf.len() {
+                break;
+            }
+            if id == WLAN_EID_SSID {
+                let l = len.min(SSID_MAX);
+                ssid[..l].copy_from_slice(&buf[p + 2..p + 2 + l]);
+                ssid_len = l as u8;
+                break;
+            }
+            p += 2 + len;
+        }
+
+        if *n_aps < aps.len() {
+            aps[*n_aps] = Ap { bssid, ssid, ssid_len, rssi, channel };
+            *n_aps += 1;
+        }
+    }
+
+    // Print the collected AP list (SSID, BSSID, RSSI, channel).
+    fn print_aps(aps: &[Ap], n_aps: usize) {
+        host::print("[ax200] === access points found: ");
+        host::print_dec(n_aps as u32);
+        host::print(" ===\n");
+        for ap in &aps[..n_aps] {
+            host::print("[ax200]   ");
+            // SSID (printable ASCII; hidden / empty → <hidden>).
+            if ap.ssid_len == 0 {
+                host::print("<hidden>");
+            } else {
+                for &b in &ap.ssid[..ap.ssid_len as usize] {
+                    let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
+                    host::print(unsafe { core::str::from_utf8_unchecked(core::slice::from_ref(&c)) });
+                }
+            }
+            host::print("  [");
+            for i in 0..6 {
+                if i != 0 {
+                    host::print(":");
+                }
+                host::print_hex8(ap.bssid[i]);
+            }
+            host::print("]  ");
+            // RSSI in dBm (always negative here).
+            host::print("-");
+            host::print_dec((-(ap.rssi as i32)) as u32);
+            host::print(" dBm  ch ");
+            host::print_dec(ap.channel as u32);
+            host::print("\n");
+        }
+    }
+
     // Send the scan and run a resident loop (npk_sleep yields — never input_wait)
     // that drains the RX ring, recycles every consumed RB so the firmware never
     // runs dry, counts the forwarded beacons/probe-responses, and returns when
@@ -1144,6 +1256,8 @@ impl Ax200 {
         host::print("[ax200] SCAN_REQ_UMAC sent (passive, 2.4GHz ch1-13), scanning...\n");
 
         let mut frames = 0u32;
+        let mut aps = [Ap::EMPTY; MAX_APS];
+        let mut n_aps = 0usize;
         for _ in 0..8000 {
             host::fence();
             let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
@@ -1162,19 +1276,16 @@ impl Ax200 {
                         self.recycle_rb(vid);
                         self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
                         self.flush_free_bd();
-                        host::print("[ax200] SCAN_COMPLETE_UMAC received — frames seen: 0x");
-                        host::print_hex32(frames);
+                        host::print("[ax200] SCAN_COMPLETE_UMAC received — frames seen: ");
+                        host::print_dec(frames);
                         host::print("\n");
+                        Self::print_aps(&aps, n_aps);
                         return true;
                     }
-                    // Log the first few frames (beacons/probe responses arrive
-                    // as REPLY_RX_MPDU_CMD 0xc1, group 0).
-                    if frames < 8 {
-                        host::print("[ax200]   scan RX cmd=0x");
-                        host::print_hex32(cmd as u32);
-                        host::print(" group=0x");
-                        host::print_hex32(grp as u32);
-                        host::print("\n");
+                    // Beacons / probe responses arrive as REPLY_RX_MPDU_CMD
+                    // (0xc1, LEGACY_GROUP) — parse them into the AP list.
+                    if cmd == REPLY_RX_MPDU_CMD && grp == 0 {
+                        self.parse_beacon(&rb, &mut aps, &mut n_aps);
                     }
                     frames += 1;
                     self.recycle_rb(vid);
@@ -1393,7 +1504,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.18.0 — scan channel band fix (v15 v2.band)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.19.0 — Stage 4d2b2 (beacon parse → APs)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1513,9 +1624,10 @@ pub extern "C" fn _start() {
                             dev.add_mac_context();
                             host::print("[ax200] Stage 4d2b1b OK — MAC context added\n");
 
-                            // ── Stage 4d2b1: passive scan → SCAN_COMPLETE ──
+                            // ── Stage 4d2b1/2: passive scan → SCAN_COMPLETE,
+                            // parse beacons → access points (SSID/BSSID/RSSI). ──
                             if dev.run_scan() {
-                                host::print("[ax200] Stage 4d2b1 OK — *** SCAN COMPLETE *** 🎉\n");
+                                host::print("[ax200] Stage 4d2b2 OK — *** SCAN COMPLETE, APs listed *** 🎉\n");
                             } else {
                                 host::print("[ax200] Stage 4d2b1 FAILED — no SCAN_COMPLETE\n");
                             }
