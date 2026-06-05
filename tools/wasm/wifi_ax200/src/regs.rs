@@ -212,6 +212,33 @@ pub const IWL_INIT_NVM_FLAG: u32 = 1 << 1;
 // RX used_bd entry is a bare __le32 for family < AX210; low 12 bits = VID.
 pub const RX_VID_MASK: u32 = 0x0FFF;
 
+// ── Stage 4c: NVM_GET_INFO (read channels/MAC/SKU) ───────────────
+pub const NVM_GET_INFO: u8 = 0x02; // REGULATORY_AND_NVM_GROUP (nvm-reg.h)
+// iwl_rx_packet frame-size field (iwl-trans.h FH_RSCSR_FRAME_SIZE_MSK).
+pub const FH_FRAME_SIZE_MASK: u32 = 0x0000_3FFF;
+// MAC-address CSR registers. CSR_ADDR_BASE = base->mac_addr_from_csr = 0x380
+// for family 22000 (cfg/22000.c). STRAP is the OEM-fused address; if invalid,
+// fall back to the OTP address (iwl_set_hw_address_from_csr).
+pub const CSR_MAC_ADDR0_STRAP: u32 = 0x388;
+pub const CSR_MAC_ADDR1_STRAP: u32 = 0x38C;
+pub const CSR_MAC_ADDR0_OTP: u32 = 0x380;
+pub const CSR_MAC_ADDR1_OTP: u32 = 0x384;
+// iwl_nvm_get_info_rsp field offsets (within the response payload). The
+// general/mac_sku/phy_sku part is identical in the v3 and v4 responses.
+pub const NVM_OFF_FLAGS: usize = 0; // general.flags __le32
+pub const NVM_OFF_VERSION: usize = 4; // general.nvm_version __le16
+pub const NVM_OFF_N_HW_ADDRS: usize = 7; // general.n_hw_addrs u8
+pub const NVM_OFF_MAC_SKU: usize = 8; // mac_sku.mac_sku_flags __le32
+pub const NVM_OFF_TX_CHAINS: usize = 12; // phy_sku.tx_chains __le32
+pub const NVM_OFF_RX_CHAINS: usize = 16; // phy_sku.rx_chains __le32
+pub const NVM_OFF_LAR: usize = 20; // regulatory.lar_enabled __le32
+// mac_sku_flags bits (enum iwl_nvm_mac_sku_flags).
+pub const NVM_SKU_BAND_24: u32 = 1 << 0;
+pub const NVM_SKU_BAND_52: u32 = 1 << 1;
+pub const NVM_SKU_11N: u32 = 1 << 2;
+pub const NVM_SKU_11AC: u32 = 1 << 3;
+pub const NVM_SKU_11AX: u32 = 1 << 4;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
