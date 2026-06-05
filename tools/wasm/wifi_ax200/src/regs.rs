@@ -265,6 +265,51 @@ pub const SCAN_ITERATION_COMPLETE_UMAC: u8 = 0xb5;
 // Valid antenna mask (chains A+B). iwl_mvm_get_valid_tx_ant / iwl_mvm_scan_rx_ant
 // resolve to fw->valid_tx/rx_ant & nvm = 0x3 on this 2×2 AX200 (Stage 4c caps).
 pub const ANT_AB: u32 = 0x3;
+
+// ── Stage 4d2b: SCAN_REQ_UMAC v17 (passive regular scan) ─────────
+// Total size of iwl_scan_req_umac_v17 (uid 4 + ooc 4 + general 36 + channel
+// 4+67*8 + periodic 12 + probe 1344). probe_params stays zeroed (passive scan
+// transmits no probe request, so its preq is unused).
+pub const SCAN_CMD_LEN: usize = 1940;
+// iwl_scan_req_umac_v17 field offsets:
+pub const SC_OFF_OOC_PRIORITY: usize = 4; // uid @ 0 stays 0
+// general_params_v11 @ 8 (36 bytes):
+pub const SC_OFF_GP_FLAGS: usize = 8; // __le16
+pub const SC_OFF_GP_ACTIVE_DWELL: usize = 12; // u8[2] (LB, HB)
+pub const SC_OFF_GP_ADWELL_2G: usize = 14;
+pub const SC_OFF_GP_ADWELL_5G: usize = 15;
+pub const SC_OFF_GP_ADWELL_SOCIAL: usize = 16;
+pub const SC_OFF_GP_FLAGS2: usize = 17; // 0 (non-cdb, regular)
+pub const SC_OFF_GP_ADWELL_BUDGET: usize = 18; // __le16
+// max_out_of_time[2] @ 20, suspend_time[2] @ 28 — all 0 for UNASSOC type.
+pub const SC_OFF_GP_SCAN_PRIO: usize = 36; // __le32
+pub const SC_OFF_GP_PASSIVE_DWELL: usize = 40; // u8[2]
+// num_of_fragments[2] @ 42 — 0 (not fragmented).
+// channel_params_v7 @ 44:
+pub const SC_OFF_CP_FLAGS: usize = 44; // u8
+pub const SC_OFF_CP_COUNT: usize = 45; // u8
+pub const SC_OFF_CP_N_APS_OVERRIDE: usize = 46; // u8[2]
+pub const SC_OFF_CP_CHANNELS: usize = 48; // iwl_scan_channel_cfg_umac[67]
+pub const SCAN_CH_CFG_LEN: usize = 8; // {__le32 flags, u8 channel_num, union[3]}
+// periodic_params_v1 @ 584: schedule[2] (4 B each), delay, reserved.
+pub const SC_OFF_PERIODIC_SCHED0_ITER: usize = 584 + 2; // schedule[0].iter_count
+
+// Values (mvm/scan.c):
+pub const SCAN_OOC_PRIORITY_REGULAR: u32 = 6; // IWL_SCAN_PRIORITY_EXT_6
+// gen flags v2: FORCE_PASSIVE BIT(11) | PASS_ALL BIT(1) | ADAPTIVE_DWELL BIT(7).
+pub const SCAN_GP_FLAGS_PASSIVE: u16 = (1 << 11) | (1 << 1) | (1 << 7);
+pub const IWL_SCAN_DWELL_ACTIVE: u8 = 10;
+pub const IWL_SCAN_DWELL_PASSIVE: u8 = 110;
+pub const ADWELL_DEFAULT_LB_N_APS: u8 = 2;
+pub const ADWELL_DEFAULT_HB_N_APS: u8 = 8;
+pub const ADWELL_DEFAULT_N_APS_SOCIAL: u8 = 10;
+pub const ADWELL_MAX_BUDGET_FULL: u16 = 300;
+pub const SCAN_N_APS_GO_FRIENDLY: u8 = 10;
+pub const SCAN_N_APS_SOCIAL_CHS: u8 = 2;
+pub const SCAN_CHAN_FLAG_ENABLE_CHAN_ORDER: u8 = 1 << 5; // BIT(5)
+pub const PHY_BAND_24: u32 = 1; // phy-ctxt.h
+pub const CHAN_CFG_FLAGS_BAND_POS: u32 = 30;
+pub const SCAN_24G_CHANNELS: u8 = 13; // ch 1..13
 // iwl_scan_config (SCAN_CFG v5, fw/api/scan.h): enable_cam_mode, enable_promisc,
 // bcast_sta_id, reserved (all u8 → 0; v5 FW ignores bcast_sta_id), then
 // __le32 tx_chains, __le32 rx_chains. 12 bytes total.
