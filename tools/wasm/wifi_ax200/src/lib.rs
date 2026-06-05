@@ -854,17 +854,33 @@ impl Ax200 {
     // best-effort / BIOS-gated commands in iwl_mvm_up — SAR, PPAG, TAS, RFI, BT
     // coex tuning, power, RSS, SF — are deferred like op_mode_nic_config; they
     // aren't needed for a scan to return APs.) Real validation is the scan.
+    // The complete mandatory iwl_mvm_up command sequence between ALIVE and the
+    // scan, in order — no cherry-picking. Faithful omissions: configure_rxq and
+    // rss_cfg are no-ops for a single RX queue (both `return 0` when num_rxqs==1,
+    // and ours is 1); the BIOS/ACPI-gated commands (lari_cfg, ppag_init,
+    // sar_init, sgom_init, tas_init) send nothing without platform tables, just
+    // as Linux on a machine that lacks them (ppag: !approved→0, sgom: !enabled→0,
+    // sar: post-config_scan anyway); the remaining post-config_scan tuning is not
+    // a scan prerequisite. Best-effort, non-fatal calls (shared_mem_conf,
+    // sf_update, tt_tx_backoff, config_ltr) are also skipped — Linux itself
+    // continues when they fail. Everything that gates with `goto error` and
+    // actually emits a command for our config is here.
     fn run_scan_prereqs(&mut self) {
         // TX_ANT_CONFIGURATION_CMD (legacy group 0): valid tx antennas.
         self.send_hcmd(0, TX_ANT_CONFIGURATION_CMD, &ANT_AB.to_le_bytes());
         self.pump_rx(50);
 
+        self.send_bt_init();      // iwl_mvm_send_bt_init_conf
+        self.send_soc_latency();  // iwl_set_soc_latency (SOC_LATENCY_SUPPORT cap)
+        self.send_dqa();          // iwl_mvm_send_dqa_cmd (DQA_SUPPORT cap)
+        self.send_power();        // iwl_mvm_power_update_device
+
         // iwl_mvm_init_mcc: set the regulatory domain. With LAR enabled the FW
         // blocks scans until this is done (iwl_mvm_up does it before config_scan).
         self.set_regulatory();
 
-        // SCAN_CFG_CMD v5 (LONG_GROUP): reduced config — tx/rx antenna chains.
-        // bcast_sta_id stays 0 (v5 firmware no longer uses it).
+        // iwl_mvm_config_scan → SCAN_CFG_CMD v5 (LONG_GROUP): reduced config —
+        // tx/rx antenna chains. bcast_sta_id stays 0 (v5 firmware ignores it).
         let mut cfg = [0u8; SCAN_CFG_LEN];
         cfg[SCAN_CFG_OFF_TX_CHAINS..SCAN_CFG_OFF_TX_CHAINS + 4]
             .copy_from_slice(&ANT_AB.to_le_bytes());
@@ -872,6 +888,60 @@ impl Ax200 {
             .copy_from_slice(&ANT_AB.to_le_bytes());
         self.send_hcmd(IWL_ALWAYS_LONG_GROUP, SCAN_CFG_CMD, &cfg);
         self.pump_rx(50);
+    }
+
+    // ── iwl_mvm_send_bt_init_conf (mvm/coex.c) ────────────────────
+    // BT coex config (combo chip shares the antenna). mode = network coex;
+    // enabled_modules = SYNC2SCO (IWL_MVM_BT_COEX_SYNC2SCO=1, always) | MPLUT
+    // (only if the BT_MPLUT_SUPPORT capability is present) | HIGH_BAND_RET.
+    fn send_bt_init(&mut self) {
+        let mut modules = BT_COEX_SYNC2SCO_ENABLED | BT_COEX_HIGH_BAND_RET;
+        if fw_has_capa(CAPA_BT_MPLUT_SUPPORT) {
+            modules |= BT_COEX_MPLUT_ENABLED;
+        }
+        let mut cmd = [0u8; BT_COEX_CMD_LEN];
+        put_u32(&mut cmd, 0, BT_COEX_NW);
+        put_u32(&mut cmd, 4, modules);
+        self.send_hcmd(0, BT_CONFIG, &cmd);
+        self.pump_rx(20);
+    }
+
+    // ── iwl_set_soc_latency (fw/init.c) ───────────────────────────
+    // SOC config. AX200 is a discrete card (mac_cfg.integrated unset) → flags =
+    // DISCRETE, latency = xtal_latency (0). Sent only if the firmware advertises
+    // SOC_LATENCY_SUPPORT (the gate in iwl_mvm_up).
+    fn send_soc_latency(&mut self) {
+        if !fw_has_capa(CAPA_SOC_LATENCY_SUPPORT) {
+            return;
+        }
+        let mut cmd = [0u8; SOC_CONFIG_CMD_LEN];
+        put_u32(&mut cmd, 0, SOC_CONFIG_CMD_FLAGS_DISCRETE);
+        // latency @ 4 = 0 (AX200 mac_cfg.xtal_latency)
+        self.send_hcmd(SYSTEM_GROUP, SOC_CONFIGURATION_CMD, &cmd);
+        self.pump_rx(20);
+    }
+
+    // ── iwl_mvm_send_dqa_cmd (mvm/fw.c) ───────────────────────────
+    // Enable dynamic queue allocation. cmd_queue = IWL_MVM_DQA_CMD_QUEUE (0).
+    // Sent only if the firmware advertises DQA_SUPPORT (the gate in iwl_mvm_up).
+    fn send_dqa(&mut self) {
+        if !fw_has_capa(CAPA_DQA_SUPPORT) {
+            return;
+        }
+        let mut cmd = [0u8; DQA_ENABLE_CMD_LEN];
+        put_u32(&mut cmd, 0, IWL_CMD_QUEUE_ID);
+        self.send_hcmd(DATA_PATH_GROUP, DQA_ENABLE_CMD, &cmd);
+        self.pump_rx(20);
+    }
+
+    // ── iwl_mvm_power_update_device (mvm/power.c) ─────────────────
+    // Device power table. The default power scheme is BPS (not CAM), so power
+    // save is enabled; no other flags apply outside D3.
+    fn send_power(&mut self) {
+        let mut cmd = [0u8; DEVICE_POWER_CMD_LEN];
+        put_u16(&mut cmd, 0, DEVICE_POWER_FLAGS_POWER_SAVE_ENA);
+        self.send_hcmd(0, POWER_TABLE_CMD, &cmd);
+        self.pump_rx(20);
     }
 
     // ── iwl_mvm_init_mcc → iwl_mvm_update_mcc (mvm/nvm.c) ──────────
@@ -1141,6 +1211,31 @@ fn fw_cmd_ver(group: u8, cmd: u8) -> u8 {
     IWL_FW_CMD_VER_UNKNOWN
 }
 
+/// fw_has_capa (iwl-drv.c iwl_set_ucode_capabilities): true if the firmware's
+/// IWL_UCODE_TLV_ENABLED_CAPABILITIES TLVs set capability bit `cap`. Each such
+/// TLV is { __le32 api_index; __le32 api_capa }; bit `cap` lives in the TLV with
+/// api_index == cap/32, at position cap%32 in api_capa.
+fn fw_has_capa(cap: u32) -> bool {
+    let want_index = cap / 32;
+    let want_bit = 1u32 << (cap % 32);
+    let mut off = FW_TLV_HEADER_LEN;
+    while off + 8 <= FW.len() {
+        let t = le32(FW, off);
+        let l = le32(FW, off + 4) as usize;
+        let body = off + 8;
+        if body + l > FW.len() {
+            break;
+        }
+        if t == IWL_UCODE_TLV_ENABLED_CAPABILITIES && l >= 8 {
+            if le32(FW, body) == want_index && le32(FW, body + 4) & want_bit != 0 {
+                return true;
+            }
+        }
+        off = body + ((l + 3) & !0x3);
+    }
+    false
+}
+
 /// Log one command's firmware version (Stage 4d1 diagnostics).
 fn log_cmd_ver(name: &str, group: u8, cmd: u8) {
     host::print("[ax200]   ");
@@ -1199,7 +1294,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.14.0 — Stage 4d2b1c (MCC + MAC ctx + scan)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.15.0 — Stage 4d2b1d (full mvm_up pre-scan)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1310,7 +1405,7 @@ pub extern "C" fn _start() {
 
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
-                            host::print("[ax200] Stage 4d2a OK — TX_ANT + MCC + SCAN_CFG sent\n");
+                            host::print("[ax200] Stage 4d2a OK — full iwl_mvm_up pre-scan seq sent\n");
 
                             // ── Stage 4d2b1b: add the MAC context the scan ──
                             // references (scan_start_mac_or_link_id → ctx id 0).
