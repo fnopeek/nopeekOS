@@ -68,6 +68,23 @@ pub const PREG_WFPM_ACCESS: u32 = 0x0000_1000; // BIT(12)
 pub const HW_READY_TIMEOUT_US: u32 = 50;
 pub const MAC_CLOCK_TIMEOUT_US: u32 = 25_000;
 
+// ── Stage 1: RX/TX rings (iwl-csr.h / iwl-fh.h / fw/api/txq.h) ────
+pub const CSR_INT_COALESCING: u32 = 0x004; // 32-usec units, u8 write
+pub const IWL_HOST_INT_TIMEOUT_DEF: u8 = 0x40;
+// Shadow-register enable mask written to CSR_MAC_SHADOW_REG_CTRL.
+pub const CSR_MAC_SHADOW_REG_CTRL_VAL: u32 = 0x800F_FFFF;
+
+// RX ring geometry. AX200 = mq_rx, family 22000 (< AX210), RF = HR.
+pub const NUM_RBDS: usize = 256 * 8; // IWL_NUM_RBDS_HE (rf-hr.c)
+pub const FREE_BD_SIZE: usize = 8; // __le64 RBD (mq, < AX210)
+pub const USED_BD_SIZE: usize = 4; // __le32 (< AX210, < BZ)
+pub const RB_STTS_SIZE: usize = 12; // sizeof(struct iwl_rb_status)
+
+// TX command queue geometry (gen2).
+pub const IWL_CMD_QUEUE_SIZE: usize = 32; // fw/api/txq.h
+pub const TFH_TFD_SIZE: usize = 256; // sizeof(struct iwl_tfh_tfd)
+pub const IWL_FIRST_TB_SIZE_ALIGN: usize = 64; // ALIGN(20, 64)
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability

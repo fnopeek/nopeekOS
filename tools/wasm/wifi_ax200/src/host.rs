@@ -115,6 +115,18 @@ pub fn mmio_w32_mask(handle: i32, offset: u32, mask: u32, val: u32) {
     mmio_w32(handle, offset, word);
 }
 
+/// Write a single byte within a 32-bit MMIO register (iwl_write8 semantics).
+/// No `npk_mmio_write8` host fn exists, so RMW the containing dword: this
+/// preserves the other three bytes, matching a true 8-bit register write.
+pub fn mmio_w8(handle: i32, offset: u32, val: u8) {
+    let aligned = offset & !0x3;
+    let shift = (offset & 0x3) * 8;
+    let mut word = mmio_r32(handle, aligned);
+    word &= !(0xFFu32 << shift);
+    word |= (val as u32) << shift;
+    mmio_w32(handle, aligned, word);
+}
+
 /// Read-modify-write: set bits in a byte within a 32-bit MMIO register.
 pub fn mmio_set8(handle: i32, offset: u32, bits: u8) {
     let aligned = offset & !0x3;
@@ -186,6 +198,15 @@ pub fn print_hex16(val: u16) {
     let mut buf = [0u8; 4];
     for i in 0..4 {
         buf[3 - i] = HEX[((val >> (i * 4)) & 0xF) as usize];
+    }
+    let s = unsafe { core::str::from_utf8_unchecked(&buf) };
+    print(s);
+}
+
+pub fn print_hex64(val: u64) {
+    let mut buf = [0u8; 16];
+    for i in 0..16 {
+        buf[15 - i] = HEX[((val >> (i * 4)) & 0xF) as usize];
     }
     let s = unsafe { core::str::from_utf8_unchecked(&buf) };
     print(s);
