@@ -24,10 +24,28 @@ use regs::*;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
+/// A coherent DMA allocation: kernel-held physical address + WASM handle.
+#[derive(Clone, Copy)]
+struct Dma {
+    handle: i32,
+    phys: u64,
+}
+impl Dma {
+    const NONE: Dma = Dma { handle: -1, phys: 0 };
+    fn ok(&self) -> bool { self.handle >= 0 }
+}
+
 /// AX200 transport state. Mirrors the bits of `struct iwl_trans_pcie` we use.
 struct Ax200 {
     mmio: i32,
     ltr_enabled: bool,
+    // RX queue DMA (iwl_pcie_alloc_rxq_dma) — addresses go into ctxt_info.
+    rxq_bd: Dma,       // RBD ring (__le64 * NUM_RBDS)
+    rxq_used_bd: Dma,  // used-BD ring (__le32 * NUM_RBDS)
+    rxq_rb_stts: Dma,  // struct iwl_rb_status
+    // TX command queue DMA (iwl_pcie_txq_alloc, gen2).
+    cmd_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_CMD_QUEUE_SIZE)
+    cmd_first_tb: Dma, // first-TB staging buffers
 }
 
 impl Ax200 {
@@ -218,6 +236,89 @@ impl Ax200 {
         host::print("[ax200] apm_init done — MAC clock ready\n");
         true
     }
+
+    // ── iwl_pcie_gen2_apm_init (trans-gen2.c) ───────────────────
+    // Same register effect as apm_init for family 22000 (gen1's DIS_L0S /
+    // pll branches are already conditioned out). nic_init re-runs it.
+    fn gen2_apm_init(&mut self) -> bool {
+        self.set_bit(CSR_GIO_CHICKEN_BITS, CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX);
+        self.set_bit(CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL);
+        self.set_bit(CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_HAP_WAKE);
+        self.apm_config();
+        self.activate_nic()
+        // STATUS_DEVICE_ENABLED is host-side bookkeeping, not a register.
+    }
+
+    /// Allocate a coherent DMA buffer of at least `bytes`. npk_dma_alloc
+    /// zeroes the pages and guarantees contiguous + below 4 GB, matching
+    /// Linux' dma_alloc_coherent + the "no 4 GB boundary cross" requirement.
+    fn alloc_dma(&self, bytes: usize, name: &str) -> Dma {
+        let pages = ((bytes + 4095) / 4096) as u16;
+        let handle = host::dma_alloc(pages);
+        if handle < 0 {
+            host::print("[ax200] DMA alloc failed: ");
+            host::print(name);
+            host::print("\n");
+            return Dma::NONE;
+        }
+        Dma { handle, phys: host::dma_phys(handle) }
+    }
+
+    // ── iwl_pcie_gen2_rx_init (rx.c) ────────────────────────────
+    // gen2 does NOT configure the RFH (firmware does it at alive) and the RB
+    // page pool is filled at restock (alive). So here: set the int-coalescing
+    // timer and allocate the ctxt_info-referenced RX rings. num_rxqs = 1.
+    fn gen2_rx_init(&mut self) -> bool {
+        host::mmio_w8(self.mmio, CSR_INT_COALESCING, IWL_HOST_INT_TIMEOUT_DEF);
+
+        self.rxq_bd = self.alloc_dma(FREE_BD_SIZE * NUM_RBDS, "rxq.bd");
+        self.rxq_used_bd = self.alloc_dma(USED_BD_SIZE * NUM_RBDS, "rxq.used_bd");
+        self.rxq_rb_stts = self.alloc_dma(RB_STTS_SIZE, "rxq.rb_stts");
+
+        self.rxq_bd.ok() && self.rxq_used_bd.ok() && self.rxq_rb_stts.ok()
+    }
+
+    // ── iwl_txq_gen2_init (tx-gen2.c) — command queue ───────────
+    // iwl_pcie_txq_alloc allocates the TFD ring + first-TB staging buffers.
+    // dma_alloc zeroing leaves every TFD with num_tbs=0 (set-invalid-gen2).
+    // The byte-count table is not in the gen2 cmd-queue path and is not
+    // referenced by ctxt_info, so it is not allocated here.
+    fn txq_gen2_init(&mut self) -> bool {
+        let slots = IWL_CMD_QUEUE_SIZE; // max(IWL_CMD_QUEUE_SIZE, min_txq_size=0)
+        self.cmd_tfd = self.alloc_dma(TFH_TFD_SIZE * slots, "cmd.tfd");
+        self.cmd_first_tb = self.alloc_dma(IWL_FIRST_TB_SIZE_ALIGN * slots, "cmd.first_tb");
+        self.cmd_tfd.ok() && self.cmd_first_tb.ok()
+    }
+
+    // ── iwl_pcie_gen2_nic_init (trans-gen2.c) ───────────────────
+    fn nic_init(&mut self) -> bool {
+        if !self.gen2_apm_init() {
+            host::print("[ax200] nic_init: gen2_apm_init failed\n");
+            return false;
+        }
+        // iwl_op_mode_nic_config (mvm): DEFERRED. It is the op-mode/NVM layer
+        // (radio-stepping CSR bits), not the PCIe transport, and is not needed
+        // for the firmware CPU to reach ALIVE. Lands with the mvm port.
+
+        if !self.gen2_rx_init() {
+            return false;
+        }
+        if !self.txq_gen2_init() {
+            return false;
+        }
+
+        // enable shadow regs in HW
+        self.set_bit(CSR_MAC_SHADOW_REG_CTRL, CSR_MAC_SHADOW_REG_CTRL_VAL);
+        true
+    }
+}
+
+/// Log a DMA allocation's physical address (Stage 1 diagnostics).
+fn log_dma(name: &str, d: &Dma) {
+    host::print(name);
+    host::print(": phys 0x");
+    host::print_hex64(d.phys);
+    host::print("\n");
 }
 
 /// iwl_trans_is_hw_error_value (iwl-trans.h).
@@ -249,7 +350,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.2.1 — Stage 0b (reset + APM)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.3.0 — Stage 1 (RX/TX rings)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -274,7 +375,15 @@ pub extern "C" fn _start() {
     }
     host::print("[ax200] BAR0 mapped\n");
 
-    let mut dev = Ax200 { mmio, ltr_enabled: false };
+    let mut dev = Ax200 {
+        mmio,
+        ltr_enabled: false,
+        rxq_bd: Dma::NONE,
+        rxq_used_bd: Dma::NONE,
+        rxq_rb_stts: Dma::NONE,
+        cmd_tfd: Dma::NONE,
+        cmd_first_tb: Dma::NONE,
+    };
 
     let hw_rev = dev.r32(CSR_HW_REV);
     let rf_id = dev.r32(CSR_HW_RF_ID);
@@ -293,10 +402,22 @@ pub extern "C" fn _start() {
     }
 
     // ── Stage 0b: reset + APM bring-up ───────────────────────────
-    if dev.start_hw() {
-        host::print("[ax200] Stage 0b OK — chip powered up, PRPH accessible\n");
-    } else {
+    if !dev.start_hw() {
         host::print("[ax200] Stage 0b FAILED\n");
+        return;
+    }
+    host::print("[ax200] Stage 0b OK — chip powered up, PRPH accessible\n");
+
+    // ── Stage 1: RX/TX rings + command queue ─────────────────────
+    if dev.nic_init() {
+        host::print("[ax200] Stage 1 OK — rings allocated:\n");
+        log_dma("  rxq.bd      ", &dev.rxq_bd);
+        log_dma("  rxq.used_bd ", &dev.rxq_used_bd);
+        log_dma("  rxq.rb_stts ", &dev.rxq_rb_stts);
+        log_dma("  cmd.tfd     ", &dev.cmd_tfd);
+        log_dma("  cmd.first_tb", &dev.cmd_first_tb);
+    } else {
+        host::print("[ax200] Stage 1 FAILED\n");
     }
 
     // Probe-stage driver: return so the fiber ends and the core is freed.
