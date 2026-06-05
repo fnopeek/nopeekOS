@@ -194,9 +194,14 @@ pub const HDRW_OFF_SEQ: usize = 2; // __le16
 pub const HDRW_OFF_LEN: usize = 4; // __le16 (payload length)
 // iwl_txq_inc_wrap wraps at max_tfd_queue_size (TFD_QUEUE_SIZE_MAX = 256).
 pub const MAX_TFD_QUEUE_SIZE: u32 = 256;
-// iwl_tfh_tb: tb_len(__le16) + addr(__le64, unaligned) = 10 bytes. A TFD with a
-// single TB needs num_tbs(__le16) + one tb = 12 bytes (rest of the 256 zeroed).
-pub const TFD_SINGLE_TB_LEN: usize = 12;
+// iwl_tfh_tb: tb_len(__le16) + addr(__le64, unaligned) = 10 bytes.
+pub const TFH_TB_LEN: usize = 10;
+// Max payload bytes that ride in the first-TB staging buffer alongside the
+// 8-byte wide header (IWL_FIRST_TB_SIZE - CMD_HDR_WIDE_LEN = 20 - 8).
+pub const FIRST_TB_HEAD_MAX: usize = IWL_FIRST_TB_SIZE - CMD_HDR_WIDE_LEN;
+// cmd_data buffer: holds the bulk of a large host command (mapped as TB1).
+// One page covers SCAN_REQ_UMAC (~1.7 KB).
+pub const CMD_DATA_BYTES: usize = 4096;
 
 // Command groups (fw/api/commands.h iwl_mvm_command_groups).
 pub const LONG_GROUP: u8 = 0x1;
