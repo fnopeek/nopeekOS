@@ -199,6 +199,12 @@ pub fn print_hex32(val: u32) {
     print(s);
 }
 
+pub fn print_hex8(val: u8) {
+    let buf = [HEX[(val >> 4) as usize], HEX[(val & 0xF) as usize]];
+    let s = unsafe { core::str::from_utf8_unchecked(&buf) };
+    print(s);
+}
+
 pub fn print_hex16(val: u16) {
     let mut buf = [0u8; 4];
     for i in 0..4 {

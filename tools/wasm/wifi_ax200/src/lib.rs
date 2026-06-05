@@ -683,17 +683,18 @@ impl Ax200 {
         host::print("\n");
     }
 
-    // Drain newly-closed RBs from the used-BD ring, looking for a notification
-    // with the given cmd id in the legacy group (group 0). Returns true once it
-    // is seen. Mirrors the read-pointer walk of iwl_pcie_rx_handle (mq path):
-    // r = closed_rb_num, walk used_bd[read..r], vid → rb_pool[vid-1]. No RB
-    // recycling — 64 posted RBs are plenty for the handful of init frames.
-    fn drain_rx_for(&mut self, want_cmd: u8) -> bool {
+    // Drain newly-closed RBs from the used-BD ring, looking for a frame with the
+    // given (cmd, group). Returns the matching RB on success. Mirrors the read-
+    // pointer walk of iwl_pcie_rx_handle (mq path): r = closed_rb_num, walk
+    // used_bd[read..r], vid → rb_pool[vid-1]. No RB recycling — 64 posted RBs
+    // are plenty for the handful of init/NVM frames.
+    fn drain_rx_until(&mut self, want_cmd: u8, want_group: u8) -> Option<Dma> {
         host::fence();
         let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
         while self.rxq_read != r {
             let i = self.rxq_read as usize;
             let vid = host::dma_r32(self.rxq_used_bd.handle, (i * 4) as u32) & RX_VID_MASK;
+            let mut matched = None;
             if vid >= 1 && vid as usize <= RX_NUM_RBS {
                 let rb = self.rb_pool[vid as usize - 1];
                 let mut hdr = [0u8; 8];
@@ -705,14 +706,27 @@ impl Ax200 {
                 host::print(" group=0x");
                 host::print_hex32(grp as u32);
                 host::print("\n");
-                if cmd == want_cmd && grp == 0 {
-                    self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
-                    return true;
+                if cmd == want_cmd && grp == want_group {
+                    matched = Some(rb);
                 }
             }
             self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
+            if matched.is_some() {
+                return matched;
+            }
         }
-        false
+        None
+    }
+
+    // Poll the RX queue for up to `ms` milliseconds for a (cmd, group) frame.
+    fn wait_rx(&mut self, want_cmd: u8, want_group: u8, ms: u32) -> Option<Dma> {
+        for _ in 0..ms {
+            if let Some(rb) = self.drain_rx_until(want_cmd, want_group) {
+                return Some(rb);
+            }
+            host::sleep_ms(1);
+        }
+        None
     }
 
     // ── iwl_run_unified_mvm_ucode post-alive init flow (mvm/fw.c) ──
@@ -728,14 +742,84 @@ impl Ax200 {
         self.send_hcmd(REGULATORY_AND_NVM_GROUP, NVM_ACCESS_COMPLETE, &0u32.to_le_bytes());
 
         host::print("[ax200] init cmds sent, waiting for INIT_COMPLETE_NOTIF...\n");
-        for _ in 0..2000 {
-            if self.drain_rx_for(INIT_COMPLETE_NOTIF) {
-                return true;
-            }
-            host::sleep_ms(1);
+        // INIT_COMPLETE_NOTIF is a legacy-group (0) notification.
+        if self.wait_rx(INIT_COMPLETE_NOTIF, 0, 2000).is_some() {
+            return true;
         }
         host::print("[ax200] INIT_COMPLETE_NOTIF timeout\n");
         false
+    }
+
+    // ── iwl_get_nvm (iwl-nvm-parse.c) — read NVM info ──────────────
+    // Send NVM_GET_INFO and parse the response: nvm version, reserved-MAC count,
+    // MAC SKU caps (bands / 11n / 11ac / 11ax), PHY tx/rx antenna chains, LAR.
+    // The MAC address is NOT in this response — it is read from the CSR strap/OTP
+    // registers (iwl_set_hw_address_from_csr). The channel profile in the
+    // response feeds the scan channel list (Stage 4d).
+    fn read_nvm(&mut self) -> bool {
+        self.send_hcmd(REGULATORY_AND_NVM_GROUP, NVM_GET_INFO, &0u32.to_le_bytes());
+        host::print("[ax200] NVM_GET_INFO sent, waiting for response...\n");
+        let rb = match self.wait_rx(NVM_GET_INFO, REGULATORY_AND_NVM_GROUP, 2000) {
+            Some(rb) => rb,
+            None => {
+                host::print("[ax200] NVM_GET_INFO timeout\n");
+                return false;
+            }
+        };
+
+        let mut p = [0u8; 48];
+        host::dma_read_buf(rb.handle, 0, &mut p);
+        let lnf = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+        let payload_len = (lnf & FH_FRAME_SIZE_MASK).wrapping_sub(4); // frame - hdr(4)
+        let b = RX_PKT_DATA_OFF;
+        let rd16 = |o: usize| u16::from_le_bytes([p[b + o], p[b + o + 1]]);
+        let rd32 = |o: usize| {
+            u32::from_le_bytes([p[b + o], p[b + o + 1], p[b + o + 2], p[b + o + 3]])
+        };
+
+        let mac_sku = rd32(NVM_OFF_MAC_SKU);
+        host::print("[ax200]   NVM rsp_len=");
+        host::print_hex32(payload_len);
+        host::print(" version=0x");
+        host::print_hex16(rd16(NVM_OFF_VERSION));
+        host::print(" n_hw_addrs=");
+        host::print_hex32(p[b + NVM_OFF_N_HW_ADDRS] as u32);
+        host::print("\n");
+
+        host::print("[ax200]   bands:");
+        if mac_sku & NVM_SKU_BAND_24 != 0 { host::print(" 2.4G"); }
+        if mac_sku & NVM_SKU_BAND_52 != 0 { host::print(" 5G"); }
+        if mac_sku & NVM_SKU_11N != 0 { host::print(" 11n"); }
+        if mac_sku & NVM_SKU_11AC != 0 { host::print(" 11ac"); }
+        if mac_sku & NVM_SKU_11AX != 0 { host::print(" 11ax"); }
+        host::print(" | tx_chains=0x");
+        host::print_hex32(rd32(NVM_OFF_TX_CHAINS));
+        host::print(" rx_chains=0x");
+        host::print_hex32(rd32(NVM_OFF_RX_CHAINS));
+        host::print(" lar=0x");
+        host::print_hex32(rd32(NVM_OFF_LAR));
+        host::print("\n");
+
+        self.log_mac_address();
+        true
+    }
+
+    // ── iwl_set_hw_address_from_csr / iwl_flip_hw_address ──────────
+    // Read the 6-byte MAC from the STRAP registers; if the result isn't a valid
+    // unicast address, fall back to the OTP registers.
+    fn log_mac_address(&self) {
+        let mut mac = mac_from_regs(self.r32(CSR_MAC_ADDR0_STRAP), self.r32(CSR_MAC_ADDR1_STRAP));
+        if !is_valid_mac(&mac) {
+            mac = mac_from_regs(self.r32(CSR_MAC_ADDR0_OTP), self.r32(CSR_MAC_ADDR1_OTP));
+        }
+        host::print("[ax200]   MAC address: ");
+        for i in 0..6 {
+            if i != 0 {
+                host::print(":");
+            }
+            host::print_hex8(mac[i]);
+        }
+        host::print("\n");
     }
 
     // Halt the firmware's DMA engines before the driver returns. The kernel
@@ -753,6 +837,26 @@ fn log_dma(name: &str, d: &Dma) {
     host::print(": phys 0x");
     host::print_hex64(d.phys);
     host::print("\n");
+}
+
+/// iwl_flip_hw_address: build the 6-byte MAC from the two CSR registers.
+/// addr0 holds bytes [3,2,1,0] (high→low), addr1 holds bytes [4,5] in its low
+/// half (byte1, byte0). On a little-endian host iwl_read32 + cpu_to_le32 leaves
+/// the register value with byte k at (val >> 8*k).
+fn mac_from_regs(addr0: u32, addr1: u32) -> [u8; 6] {
+    [
+        (addr0 >> 24) as u8,
+        (addr0 >> 16) as u8,
+        (addr0 >> 8) as u8,
+        addr0 as u8,
+        (addr1 >> 8) as u8,
+        addr1 as u8,
+    ]
+}
+
+/// is_valid_ether_addr: not multicast (bit 0 of first octet clear) and not all-zero.
+fn is_valid_mac(mac: &[u8; 6]) -> bool {
+    (mac[0] & 0x1) == 0 && mac.iter().any(|&b| b != 0)
 }
 
 /// iwl_trans_is_hw_error_value (iwl-trans.h).
@@ -784,7 +888,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.7.0 — Stage 4b (init handshake)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.8.0 — Stage 4c (read NVM info)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -875,6 +979,13 @@ pub extern "C" fn _start() {
                     // ── Stage 4b: init-flow host commands → INIT_COMPLETE ──
                     if dev.run_init_handshake() {
                         host::print("[ax200] Stage 4b OK — *** INIT_COMPLETE_NOTIF received *** 🎉\n");
+
+                        // ── Stage 4c: read NVM info (caps + MAC address) ──
+                        if dev.read_nvm() {
+                            host::print("[ax200] Stage 4c OK — NVM info read\n");
+                        } else {
+                            host::print("[ax200] Stage 4c FAILED — no NVM response\n");
+                        }
                     } else {
                         host::print("[ax200] Stage 4b FAILED — no INIT_COMPLETE\n");
                     }
