@@ -233,34 +233,33 @@ pub fn intent_run_driver(args: &str) {
 }
 
 fn parse_bdf(s: &str) -> Option<(u8, u8, u8)> {
-    // "01:00.0" -> (1, 0, 0)
+    // "6c:00.0" -> (0x6c, 0, 0). Hex to match lspci output.
     let mut parts = s.splitn(2, ':');
-    let bus: u8 = parts.next()?.parse().ok()?;
+    let bus = u8::from_str_radix(parts.next()?, 16).ok()?;
     let rest = parts.next()?;
     let mut parts = rest.splitn(2, '.');
-    let dev: u8 = parts.next()?.parse().ok()?;
-    let func: u8 = parts.next()?.parse().ok()?;
+    let dev = u8::from_str_radix(parts.next()?, 16).ok()?;
+    let func = u8::from_str_radix(parts.next()?, 16).ok()?;
     Some((bus, dev, func))
 }
 
 fn auto_detect_device(name: &str) -> Option<crate::drivers::pci::PciDevice> {
     use crate::drivers::pci;
+    // Prefix-match so chip-specific names (wifi_ax200, wifi_rtl8852be, …) all
+    // resolve to the network class without hardcoding each chip in the kernel.
+    if name.starts_with("wifi") || name.starts_with("wlan") || name.starts_with("wireless") {
+        // Class 02:80 = Network controller (other — WiFi)
+        return pci::find_by_class(0x02, 0x80)
+            .or_else(|| pci::find_by_class(0x0D, 0x80));
+    }
+    if name.starts_with("bluetooth") {
+        // Bluetooth is often on the same device or a USB subfunction
+        return pci::find_by_class(0x0D, 0x01);
+    }
     match name {
-        "wifi" | "wlan" | "wireless" => {
-            // Class 02:80 = Network controller (other — WiFi)
-            pci::find_by_class(0x02, 0x80)
-                .or_else(|| pci::find_by_class(0x0D, 0x80))
-        }
-        "bluetooth" | "bt" => {
-            // Bluetooth is often on the same device or a USB subfunction
-            pci::find_by_class(0x0D, 0x01)
-        }
-        "gpu" | "graphics" => {
-            pci::find_by_class(0x03, 0x00)
-        }
-        "audio" | "sound" => {
-            pci::find_by_class(0x04, 0x03)
-        }
+        "bt" => pci::find_by_class(0x0D, 0x01),
+        "gpu" | "graphics" => pci::find_by_class(0x03, 0x00),
+        "audio" | "sound" => pci::find_by_class(0x04, 0x03),
         _ => None,
     }
 }
