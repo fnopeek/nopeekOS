@@ -870,6 +870,48 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
+    // ── iwl_mvm_mac_ctxt_add → iwl_mvm_mac_ctxt_cmd_sta (mvm/mac-ctxt.c) ──
+    // Add the firmware MAC context the scan references. mac80211 creates this
+    // at add_interface; our driver-initiated scan must add it first or the
+    // firmware silently drops the scan (scan_start_mac_or_link_id points at a
+    // non-existent context). We model a single unassociated STATION vif:
+    // iwl_mvm_mac_ctxt_init assigns the first non-p2p station id 0 / color 0 /
+    // TSF A. node_addr is our own MAC (CSR strap, OTP fallback); bssid is
+    // broadcast (no BSS yet). is_assoc = 0 makes the firmware forward foreign
+    // beacons (MAC_FILTER_IN_BEACON). cck/ofdm_rates are the default mandatory
+    // ACK bitmaps iwl_mvm_ack_rates yields for an empty BSSBasicRateSet.
+    // protection_flags / qos_flags / ac[] stay 0: a passive scan transmits
+    // nothing, so the per-AC EDCA params (populated by mac80211's conf_tx
+    // before any real TX) are unused here. Sent fire-and-forget like the other
+    // config commands (CMD_SYNC reclaim, no RX notification of its own).
+    fn add_mac_context(&mut self) {
+        let mut cmd = [0u8; MAC_CTX_CMD_LEN];
+        put_u32(&mut cmd, MC_OFF_ID_COLOR, 0); // FW_CMD_ID_AND_COLOR(0, 0)
+        put_u32(&mut cmd, MC_OFF_ACTION, FW_CTXT_ACTION_ADD);
+        put_u32(&mut cmd, MC_OFF_MAC_TYPE, FW_MAC_TYPE_BSS_STA);
+        put_u32(&mut cmd, MC_OFF_TSF_ID, 0); // TSF_ID_A
+
+        let mut mac =
+            mac_from_regs(self.r32(CSR_MAC_ADDR0_STRAP), self.r32(CSR_MAC_ADDR1_STRAP));
+        if !is_valid_mac(&mac) {
+            mac = mac_from_regs(self.r32(CSR_MAC_ADDR0_OTP), self.r32(CSR_MAC_ADDR1_OTP));
+        }
+        cmd[MC_OFF_NODE_ADDR..MC_OFF_NODE_ADDR + 6].copy_from_slice(&mac);
+        for b in &mut cmd[MC_OFF_BSSID_ADDR..MC_OFF_BSSID_ADDR + 6] {
+            *b = 0xFF; // eth_broadcast_addr (no bssid_override, no bss_conf.bssid)
+        }
+
+        put_u32(&mut cmd, MC_OFF_CCK_RATES, MAC_CCK_RATES_DEFAULT);
+        put_u32(&mut cmd, MC_OFF_OFDM_RATES, MAC_OFDM_RATES_DEFAULT);
+        // protection_flags / cck_short_preamble / short_slot / qos_flags = 0.
+        put_u32(&mut cmd, MC_OFF_FILTER_FLAGS, MAC_FILTER_ACCEPT_GRP | MAC_FILTER_IN_BEACON);
+        // union iwl_mac_data_sta: is_assoc = 0 and all timing fields = 0.
+
+        self.send_hcmd(0, MAC_CONTEXT_CMD_OP, &cmd);
+        host::print("[ax200] MAC_CONTEXT_CMD (add station ctx id 0) sent\n");
+        self.pump_rx(50);
+    }
+
     // ── iwl_set_hw_address_from_csr / iwl_flip_hw_address ──────────
     // Read the 6-byte MAC from the STRAP registers; if the result isn't a valid
     // unicast address, fall back to the OTP registers.
@@ -919,6 +961,9 @@ impl Ax200 {
 
         // general_params_v11
         put_u16(buf, SC_OFF_GP_FLAGS, SCAN_GP_FLAGS_PASSIVE);
+        // scan_start_mac_or_link_id = scan_vif->id (version < 16). Names the FW
+        // MAC context added in add_mac_context(); 0 here, but set explicitly.
+        buf[SC_OFF_GP_SCAN_START_MAC] = SCAN_VIF_MAC_ID;
         buf[SC_OFF_GP_ACTIVE_DWELL] = IWL_SCAN_DWELL_ACTIVE; // LB
         buf[SC_OFF_GP_ACTIVE_DWELL + 1] = IWL_SCAN_DWELL_ACTIVE; // HB
         buf[SC_OFF_GP_ADWELL_2G] = ADWELL_DEFAULT_LB_N_APS;
@@ -1115,7 +1160,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.12.0 — Stage 4d2b1 (passive scan)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.13.0 — Stage 4d2b1b (MAC context + scan)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1227,6 +1272,11 @@ pub extern "C" fn _start() {
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
                             host::print("[ax200] Stage 4d2a OK — TX_ANT + SCAN_CFG sent\n");
+
+                            // ── Stage 4d2b1b: add the MAC context the scan ──
+                            // references (scan_start_mac_or_link_id → ctx id 0).
+                            dev.add_mac_context();
+                            host::print("[ax200] Stage 4d2b1b OK — MAC context added\n");
 
                             // ── Stage 4d2b1: passive scan → SCAN_COMPLETE ──
                             if dev.run_scan() {

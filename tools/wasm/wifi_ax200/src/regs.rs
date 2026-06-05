@@ -316,6 +316,48 @@ pub const SCAN_24G_CHANNELS: u8 = 13; // ch 1..13
 pub const SCAN_CFG_LEN: usize = 12;
 pub const SCAN_CFG_OFF_TX_CHAINS: usize = 4;
 pub const SCAN_CFG_OFF_RX_CHAINS: usize = 8;
+// general_params.scan_start_mac_or_link_id (u8 @ general+3 → cmd offset 11).
+// It must name the firmware MAC context the scan runs on. For SCAN_REQ_UMAC
+// version < 16 this is scan_vif->id (mvm/scan.c iwl_mvm_scan_umac_fill_general_
+// p_v12); our station vif gets MAC id 0 (see Stage 4d2b1b below).
+pub const SC_OFF_GP_SCAN_START_MAC: usize = 11;
+
+// ── Stage 4d2b1b: MAC context (iwl_mac_ctx_cmd, fw/api/mac.h) ─────
+// A scan references a firmware MAC context (scan_start_mac_or_link_id).
+// mac80211 creates it on add_interface (iwl_mvm_mac_ctxt_add); our driver-
+// initiated scan must add it first. NOTE: no aux station / TX queue is added
+// — for ADD_STA cmd_ver >= 12 (this firmware) iwl_mvm_has_new_station_api is
+// true, so iwl_mvm_up does NOT call iwl_mvm_add_aux_sta; the firmware uses an
+// internal aux station for scan activity (mvm/fw.c:1459, mvm/mvm.h:1509).
+// MAC_CONTEXT_CMD is opcode 0x28 in the legacy group (group 0).
+pub const MAC_CONTEXT_CMD_OP: u8 = 0x28;
+// sizeof(struct iwl_mac_ctx_cmd): 100-byte common+qos+ac[AC_NUM+1=5] + a
+// 48-byte union (largest member p2p_sta). We fill only the 44-byte .sta.
+pub const MAC_CTX_CMD_LEN: usize = 148;
+pub const FW_CTXT_ACTION_ADD: u32 = 1; // enum iwl_ctxt_action (INVALID=0,ADD=1)
+pub const FW_MAC_TYPE_BSS_STA: u32 = 5; // enum iwl_mac_types
+pub const SCAN_VIF_MAC_ID: u8 = 0; // ctxt_init id for the 1st non-p2p station
+// iwl_mac_ctx_cmd field offsets (packed):
+pub const MC_OFF_ID_COLOR: usize = 0; // __le32 FW_CMD_ID_AND_COLOR(0,0)=0
+pub const MC_OFF_ACTION: usize = 4; // __le32
+pub const MC_OFF_MAC_TYPE: usize = 8; // __le32
+pub const MC_OFF_TSF_ID: usize = 12; // __le32 (TSF_ID_A = 0)
+pub const MC_OFF_NODE_ADDR: usize = 16; // u8[6] (+ __le16 reserved @ 22)
+pub const MC_OFF_BSSID_ADDR: usize = 24; // u8[6] (+ __le16 reserved @ 30)
+pub const MC_OFF_CCK_RATES: usize = 32; // __le32
+pub const MC_OFF_OFDM_RATES: usize = 36; // __le32
+pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (0, unassociated)
+pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
+// cck_short_preamble @ 44, short_slot @ 48, qos_flags @ 56, ac[5] @ 60 — all 0.
+// union iwl_mac_data_sta @ 100; is_assoc @100 stays 0 (unassociated), so bi /
+// dtim_interval / listen_interval are unused and left 0.
+// filter flags (enum iwl_mac_filter_flags): accept multicast + foreign beacons.
+pub const MAC_FILTER_ACCEPT_GRP: u32 = 1 << 2;
+pub const MAC_FILTER_IN_BEACON: u32 = 1 << 6;
+// Default basic-rate ACK bitmaps for an empty BSSBasicRateSet (iwl_mvm_ack_rates
+// with basic_rates == 0): mandatory CCK 1/2/5.5/11 = 0x0F, OFDM 6/12/24 = 0x15.
+pub const MAC_CCK_RATES_DEFAULT: u32 = 0x0F;
+pub const MAC_OFDM_RATES_DEFAULT: u32 = 0x15;
 
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
