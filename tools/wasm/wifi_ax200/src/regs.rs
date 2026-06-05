@@ -1,0 +1,77 @@
+//! AX200 register definitions — verified 1:1 against Linux 6.18.26
+//! `drivers/net/wireless/intel/iwlwifi/iwl-csr.h` (CSR_BASE = 0x000).
+//!
+//! Only offsets verified against the header live here. Bit masks are added
+//! per stage as each function is ported (strict 1:1, no guessed values —
+//! see memory/feedback_linux_strict.md). BAR0 carries the CSR block.
+
+// ── PCI identity ─────────────────────────────────────────────────
+pub const AX200_VENDOR: u16 = 0x8086;
+pub const AX200_DEVICE: u16 = 0x2723; // iwl_ax200_mac_cfg, RF = HR, family 22000
+
+// BAR carrying the CSR/PRPH register block (iwlwifi: BAR0).
+pub const BAR_CSR: u8 = 0;
+
+// ── CSR registers (iwl-csr.h, CSR_BASE = 0x000) ──────────────────
+pub const CSR_HW_IF_CONFIG_REG: u32 = 0x000; // hardware interface config
+pub const CSR_INT: u32 = 0x008; // host interrupt status/ack
+pub const CSR_INT_MASK: u32 = 0x00C; // host interrupt enable
+pub const CSR_FH_INT_STATUS: u32 = 0x010; // busmaster int status/ack
+pub const CSR_RESET: u32 = 0x020; // busmaster enable, NMI, etc.
+pub const CSR_GP_CNTRL: u32 = 0x024;
+pub const CSR_HW_REV: u32 = 0x028;
+pub const CSR_FUNC_SCRATCH: u32 = 0x02C; // FW debug scratch
+pub const CSR_GIO_REG: u32 = 0x03C;
+pub const CSR_UCODE_DRV_GP1: u32 = 0x054;
+pub const CSR_MBOX_SET_REG: u32 = 0x088;
+pub const CSR_HW_RF_ID: u32 = 0x09C;
+pub const CSR_MAC_SHADOW_REG_CTRL: u32 = 0x0A8;
+pub const CSR_GIO_CHICKEN_BITS: u32 = 0x100;
+pub const CSR_DBG_HPET_MEM_REG: u32 = 0x240;
+pub const CSR_DBG_LINK_PWR_MGMT_REG: u32 = 0x250;
+
+// ── CSR bit masks (iwl-csr.h, verified) ──────────────────────────
+// HW_IF_CONFIG
+pub const CSR_HW_IF_CONFIG_REG_HAP_WAKE: u32 = 0x0008_0000;
+pub const CSR_HW_IF_CONFIG_REG_PCI_OWN_SET: u32 = 0x0040_0000;
+pub const CSR_HW_IF_CONFIG_REG_WAKE_ME: u32 = 0x0800_0000;
+// MBOX_SET
+pub const CSR_MBOX_SET_REG_OS_ALIVE: u32 = 0x0000_0020; // BIT(5)
+// RESET
+pub const CSR_RESET_REG_FLAG_SW_RESET: u32 = 0x0000_0080;
+pub const CSR_RESET_LINK_PWR_MGMT_DISABLED: u32 = 0x8000_0000;
+// GP_CNTRL
+pub const CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY: u32 = 0x0000_0001;
+pub const CSR_GP_CNTRL_REG_FLAG_INIT_DONE: u32 = 0x0000_0004;
+// GIO_CHICKEN / GIO / DBG_HPET
+pub const CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX: u32 = 0x0080_0000;
+pub const CSR_GIO_REG_VAL_L0S_DISABLED: u32 = 0x0000_0002;
+pub const CSR_DBG_HPET_MEM_REG_VAL: u32 = 0xFFFF_0000;
+// HW_RF_ID type (masked compare) — AX200 carries HR
+pub const CSR_HW_RF_ID_TYPE_HR: u32 = 0x0010_A000;
+
+// ── PRPH access via HBUS (iwl-csr.h, HBUS_BASE = 0x400) ───────────
+pub const HBUS_TARG_PRPH_WADDR: u32 = 0x444;
+pub const HBUS_TARG_PRPH_RADDR: u32 = 0x448;
+pub const HBUS_TARG_PRPH_WDAT: u32 = 0x44C;
+pub const HBUS_TARG_PRPH_RDAT: u32 = 0x450;
+// PRPH address mask for family < AX210 (iwl_trans_pcie_prph_msk)
+pub const PRPH_MASK: u32 = 0x000F_FFFF;
+
+// ── PRPH registers / bits (iwl-prph.h) ───────────────────────────
+pub const HPM_DEBUG: u32 = 0x00A0_3440;
+pub const PERSISTENCE_BIT: u32 = 0x0000_1000; // BIT(12)
+pub const PREG_PRPH_WPROT_22000: u32 = 0x00A0_4D00;
+pub const PREG_WFPM_ACCESS: u32 = 0x0000_1000; // BIT(12)
+
+// ── Poll timeouts (iwl-io.c / trans.c, microseconds) ─────────────
+pub const HW_READY_TIMEOUT_US: u32 = 50;
+pub const MAC_CLOCK_TIMEOUT_US: u32 = 25_000;
+
+// ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
+pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
+pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
+pub const PCI_EXP_LNKCTL: u8 = 0x10; // offset within PCIe cap
+pub const PCI_EXP_DEVCTL2: u8 = 0x28; // offset within PCIe cap
+pub const PCI_EXP_LNKCTL_ASPM_L0S: u16 = 0x0001;
+pub const PCI_EXP_DEVCTL2_LTR_EN: u16 = 0x0400;

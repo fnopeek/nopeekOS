@@ -1,0 +1,200 @@
+//! Host function bindings for nopeekOS WASM Driver ABI
+
+unsafe extern "C" {
+    // Output
+    fn npk_print(ptr: i32, len: i32);
+    fn npk_log(ptr: i32, len: i32);
+
+    // PCI
+    fn npk_pci_bind(vendor: i32, device: i32) -> i32;
+    fn npk_pci_bind_class(class: i32, subclass: i32) -> i32;
+    fn npk_pci_enable_bus_master() -> i32;
+    fn npk_pci_read_config(offset: i32) -> i32;
+    fn npk_pci_write_config(offset: i32, value: i32) -> i32;
+
+    // MMIO
+    fn npk_mmio_map_bar(bar_idx: i32, pages: i32) -> i32;
+    fn npk_mmio_read16(handle: i32, offset: i32) -> i32;
+    fn npk_mmio_write16(handle: i32, offset: i32, value: i32) -> i32;
+    fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
+    fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
+    fn npk_mmio_read64(handle: i32, offset: i32) -> i64;
+    fn npk_mmio_write64(handle: i32, offset: i32, value: i64) -> i32;
+
+    // DMA
+    fn npk_dma_alloc(pages: i32) -> i32;
+    fn npk_dma_phys_addr(handle: i32) -> i64;
+    fn npk_dma_read(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
+    fn npk_dma_write(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
+    fn npk_dma_read32(handle: i32, offset: i32) -> i32;
+    fn npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;
+
+    // Misc
+    fn npk_memory_fence() -> i32;
+    fn npk_sleep(ms: i32) -> i32;
+    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_netdev_register(mac_ptr: i32) -> i32;
+    fn npk_input_wait(timeout_ms: i32) -> i32;
+}
+
+// ── Safe wrappers ────────────────────────────────────────────────
+
+pub fn print(s: &str) {
+    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32); }
+}
+
+pub fn log(s: &str) {
+    unsafe { npk_log(s.as_ptr() as i32, s.len() as i32); }
+}
+
+pub fn pci_bind(vendor: u16, device: u16) -> i32 {
+    unsafe { npk_pci_bind(vendor as i32, device as i32) }
+}
+
+pub fn pci_enable_bus_master() -> i32 {
+    unsafe { npk_pci_enable_bus_master() }
+}
+
+pub fn pci_read_config(offset: u8) -> u32 {
+    unsafe { npk_pci_read_config(offset as i32) as u32 }
+}
+
+pub fn pci_write_config(offset: u8, value: u32) {
+    unsafe { npk_pci_write_config(offset as i32, value as i32); }
+}
+
+pub fn mmio_map_bar(bar: u8, pages: u16) -> i32 {
+    unsafe { npk_mmio_map_bar(bar as i32, pages as i32) }
+}
+
+pub fn mmio_r32(handle: i32, offset: u32) -> u32 {
+    unsafe { npk_mmio_read32(handle, offset as i32) as u32 }
+}
+
+pub fn mmio_w32(handle: i32, offset: u32, val: u32) {
+    unsafe { npk_mmio_write32(handle, offset as i32, val as i32); }
+}
+
+/// Read a 16-bit MMIO register (true 16-bit bus access, no RMW).
+/// Offset must be 2-byte aligned.
+pub fn mmio_r16(handle: i32, offset: u32) -> u16 {
+    unsafe { npk_mmio_read16(handle, offset as i32) as u16 }
+}
+
+/// Write a 16-bit MMIO register (true 16-bit bus access, no RMW).
+/// Required for split registers like RX/TX BD IDX where the upper 16 bits
+/// are HW-owned and must not be clobbered by a 32-bit RMW.
+/// Offset must be 2-byte aligned.
+pub fn mmio_w16(handle: i32, offset: u32, val: u16) {
+    unsafe { npk_mmio_write16(handle, offset as i32, val as i32); }
+}
+
+pub fn mmio_r64(handle: i32, offset: u32) -> u64 {
+    unsafe { npk_mmio_read64(handle, offset as i32) as u64 }
+}
+
+/// Read-modify-write: set bits in a 32-bit MMIO register.
+pub fn mmio_set32(handle: i32, offset: u32, bits: u32) {
+    let val = mmio_r32(handle, offset);
+    mmio_w32(handle, offset, val | bits);
+}
+
+/// Read-modify-write: clear bits in a 32-bit MMIO register.
+pub fn mmio_clr32(handle: i32, offset: u32, bits: u32) {
+    let val = mmio_r32(handle, offset);
+    mmio_w32(handle, offset, val & !bits);
+}
+
+/// Read-modify-write: write a field value into a masked region.
+/// `val` is the unshifted value (shifted to mask position automatically).
+pub fn mmio_w32_mask(handle: i32, offset: u32, mask: u32, val: u32) {
+    let shift = mask.trailing_zeros();
+    let mut word = mmio_r32(handle, offset);
+    word &= !mask;
+    word |= (val << shift) & mask;
+    mmio_w32(handle, offset, word);
+}
+
+/// Read-modify-write: set bits in a byte within a 32-bit MMIO register.
+pub fn mmio_set8(handle: i32, offset: u32, bits: u8) {
+    let aligned = offset & !0x3;
+    let shift = (offset & 0x3) * 8;
+    let mut word = mmio_r32(handle, aligned);
+    word |= (bits as u32) << shift;
+    mmio_w32(handle, aligned, word);
+}
+
+/// Read-modify-write: clear bits in a byte within a 32-bit MMIO register.
+pub fn mmio_clr8(handle: i32, offset: u32, bits: u8) {
+    let aligned = offset & !0x3;
+    let shift = (offset & 0x3) * 8;
+    let mut word = mmio_r32(handle, aligned);
+    word &= !((bits as u32) << shift);
+    mmio_w32(handle, aligned, word);
+}
+
+pub fn dma_alloc(pages: u16) -> i32 {
+    unsafe { npk_dma_alloc(pages as i32) }
+}
+
+pub fn dma_phys(handle: i32) -> u64 {
+    unsafe { npk_dma_phys_addr(handle) as u64 }
+}
+
+pub fn dma_write_buf(handle: i32, offset: u32, data: &[u8]) -> i32 {
+    unsafe { npk_dma_write(handle, offset as i32, data.as_ptr() as i32, data.len() as i32) }
+}
+
+pub fn dma_read_buf(handle: i32, offset: u32, buf: &mut [u8]) -> i32 {
+    unsafe { npk_dma_read(handle, offset as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+pub fn dma_r32(handle: i32, offset: u32) -> u32 {
+    unsafe { npk_dma_read32(handle, offset as i32) as u32 }
+}
+
+pub fn dma_w32(handle: i32, offset: u32, val: u32) {
+    unsafe { npk_dma_write32(handle, offset as i32, val as i32); }
+}
+
+pub fn fence() {
+    unsafe { npk_memory_fence(); }
+}
+
+pub fn sleep_ms(ms: u32) {
+    unsafe { npk_sleep(ms as i32); }
+}
+
+pub fn input_wait(timeout_ms: u32) -> i32 {
+    unsafe { npk_input_wait(timeout_ms as i32) }
+}
+
+// ── Hex output helpers ───────────────────────────────────────────
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+pub fn print_hex32(val: u32) {
+    let mut buf = [0u8; 8];
+    for i in 0..8 {
+        buf[7 - i] = HEX[((val >> (i * 4)) & 0xF) as usize];
+    }
+    let s = unsafe { core::str::from_utf8_unchecked(&buf) };
+    print(s);
+}
+
+pub fn print_hex16(val: u16) {
+    let mut buf = [0u8; 4];
+    for i in 0..4 {
+        buf[3 - i] = HEX[((val >> (i * 4)) & 0xF) as usize];
+    }
+    let s = unsafe { core::str::from_utf8_unchecked(&buf) };
+    print(s);
+}
+
+pub fn log_reg(name: &str, val: u32) {
+    print("  ");
+    print(name);
+    print(": 0x");
+    print_hex32(val);
+    print("\n");
+}
