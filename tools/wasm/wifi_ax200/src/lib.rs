@@ -670,6 +670,14 @@ impl Ax200 {
     //     never touched by enqueue_hcmd). The command queue is DQA queue 0;
     //     seq = QUEUE_TO_SEQ(0) | INDEX_TO_SEQ(write_ptr).
     fn send_hcmd(&mut self, group: u8, opcode: u8, payload: &[u8]) {
+        // iwl_trans_send_cmd (iwl-trans.c): with wide_cmd_header (always true on
+        // gen2, where every command carries the long header), a legacy command
+        // with group 0 is promoted to LONG_GROUP via DEF_ID(opcode) = (1<<8) |
+        // opcode. The firmware registers these "legacy" commands (TX_ANT 0x98,
+        // BT 0x9b, POWER 0x77, MCC 0xc8, MAC_CONTEXT 0x28, …) ONLY under group 1
+        // — sending them as group 0 yields a BAD_COMMAND assert. (REPLY_ERROR is
+        // the lone exception in Linux; we never send it.)
+        let group = if group == 0 { IWL_ALWAYS_LONG_GROUP } else { group };
         let wp = self.cmd_write_ptr;
         let idx = (wp & (IWL_CMD_QUEUE_SIZE as u32 - 1)) as usize;
         let total = CMD_HDR_WIDE_LEN + payload.len();
@@ -964,7 +972,9 @@ impl Ax200 {
         self.send_hcmd(0, MCC_UPDATE_CMD, &cmd);
         host::print("[ax200] MCC_UPDATE_CMD (ZZ / get-current) sent, waiting...\n");
 
-        match self.wait_rx(MCC_UPDATE_CMD, 0, 2000) {
+        // The command is promoted to LONG_GROUP (1) in send_hcmd, so its
+        // WANT_SKB response echoes group 1 (cf. NVM_GET_INFO echoing its group).
+        match self.wait_rx(MCC_UPDATE_CMD, IWL_ALWAYS_LONG_GROUP, 2000) {
             Some(rb) => {
                 let mut p = [0u8; 40];
                 host::dma_read_buf(rb.handle, 0, &mut p);
@@ -1378,7 +1388,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.16.0 — Stage 4d2b1d + FW error-log dump\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.17.0 — legacy cmds → LONG_GROUP (BAD_COMMAND fix)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
