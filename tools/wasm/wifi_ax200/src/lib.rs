@@ -488,6 +488,77 @@ impl Ax200 {
         host::print("\n");
         false
     }
+
+    // ── iwl_pcie_rxmq_restock + read the ALIVE notification ─────
+    // After the early ALIVE interrupt the firmware has configured the RFH, so
+    // we may restock: allocate the RB pool, write each buffer into the free-RBD
+    // ring (bd[i] = page_dma | vid, gen2 < AX210), then bump the HW write
+    // pointer. The firmware then DMAs UCODE_ALIVE_NTFY into the first RB and
+    // advances rb_stts.closed_rb_num, which we poll.
+    fn rx_restock_and_alive(&mut self) -> bool {
+        let mut bd = [0u8; RX_NUM_RBS * 8];
+        let mut rb0 = Dma::NONE;
+        for i in 0..RX_NUM_RBS {
+            let rb = self.alloc_dma(RB_SIZE_BYTES, "rb");
+            if !rb.ok() {
+                return false;
+            }
+            if i == 0 {
+                rb0 = rb;
+            }
+            // vid = i + 1; page is 4K-aligned so the low bits hold the vid.
+            let entry = rb.phys | (i as u64 + 1);
+            bd[i * 8..i * 8 + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        host::dma_write_buf(self.rxq_bd.handle, 0, &bd);
+        host::fence();
+
+        // iwl_pcie_rxq_inc_wr_ptr: write_actual = round_down(write, 8).
+        let write_actual = (RX_NUM_RBS as u32) & !0x7;
+        self.w32(RFH_Q0_FRBDCB_WIDX_TRG, write_actual);
+
+        host::print("[ax200] RX restocked, waiting for alive notification...\n");
+        let mut closed = 0u32;
+        for _ in 0..1000 {
+            host::fence();
+            closed = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
+            if closed != 0 {
+                break;
+            }
+            host::sleep_ms(1);
+        }
+        if closed == 0 {
+            host::print("[ax200] no RX — alive notification timeout\n");
+            return false;
+        }
+        host::print("[ax200] RX active — closed_rb_num=0x");
+        host::print_hex32(closed);
+        host::print("\n");
+
+        // Dump the first RB header (iwl_rx_packet: len_n_flags, cmd, group_id).
+        let mut hdr = [0u8; 8];
+        host::dma_read_buf(rb0.handle, 0, &mut hdr);
+        let len_n_flags = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        host::print("[ax200] RB[0] len_n_flags=0x");
+        host::print_hex32(len_n_flags);
+        host::print(" cmd=0x");
+        host::print_hex32(hdr[4] as u32);
+        host::print(" group=0x");
+        host::print_hex32(hdr[5] as u32);
+        host::print("\n");
+        if hdr[4] == UCODE_ALIVE_NTFY && hdr[5] == 0 {
+            host::print("[ax200] → UCODE_ALIVE_NTFY confirmed\n");
+        }
+        true
+    }
+
+    // Halt the firmware's DMA engines before the driver returns. The kernel
+    // frees our DMA buffers on return; a still-running chip must not DMA into
+    // them afterwards. sw_reset (CSR_RESET) stops the device.
+    fn stop(&self) {
+        self.set_bit(CSR_RESET, CSR_RESET_REG_FLAG_SW_RESET);
+        host::sleep_ms(6);
+    }
 }
 
 /// Log a DMA allocation's physical address (Stage 1 diagnostics).
@@ -527,7 +598,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.4.0 — Stage 2 (FW load + ALIVE)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.5.0 — Stage 3 (RX + alive ntfy)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -602,12 +673,21 @@ pub extern "C" fn _start() {
     // ── Stage 2: context-info + FW self-load + ALIVE ─────────────
     if dev.load_firmware() {
         host::print("[ax200] Stage 2 OK — *** FIRMWARE ALIVE *** 🎉\n");
+
+        // ── Stage 3: RX restock + read the ALIVE notification ────
+        if dev.rx_restock_and_alive() {
+            host::print("[ax200] Stage 3 OK — RX path live, alive notification received\n");
+        } else {
+            host::print("[ax200] Stage 3 FAILED\n");
+        }
     } else {
         host::print("[ax200] Stage 2 FAILED (no ALIVE)\n");
     }
 
-    // Probe-stage driver: return so the fiber ends and the core is freed.
-    // npk_input_wait HLTs without yielding to the scheduler, so idling here
-    // would pin the core and starve the shell. A persistent run-loop comes
-    // with the RX/event path (Stage 4+) and must use a yielding primitive.
+    // Halt the chip before returning: the kernel frees our DMA buffers on
+    // return and a still-running firmware must not DMA into them afterwards.
+    // (Probe-stage driver — we return rather than idle; npk_input_wait HLTs
+    // without yielding, which would pin the core. A persistent yielding
+    // run-loop arrives with Stage 4+.)
+    dev.stop();
 }
