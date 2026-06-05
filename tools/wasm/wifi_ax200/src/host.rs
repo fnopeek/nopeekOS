@@ -93,6 +93,11 @@ pub fn mmio_r64(handle: i32, offset: u32) -> u64 {
     unsafe { npk_mmio_read64(handle, offset as i32) as u64 }
 }
 
+/// Write a 64-bit MMIO register (iwl_write64). Offset must be 8-byte aligned.
+pub fn mmio_w64(handle: i32, offset: u32, val: u64) {
+    unsafe { npk_mmio_write64(handle, offset as i32, val as i64); }
+}
+
 /// Read-modify-write: set bits in a 32-bit MMIO register.
 pub fn mmio_set32(handle: i32, offset: u32, bits: u32) {
     let val = mmio_r32(handle, offset);

@@ -24,6 +24,29 @@ use regs::*;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
+/// AX200 runtime firmware (unified ucode), embedded like the RTL driver embeds
+/// rtw8852b_fw.bin. API 77 = the exact version Linux 6.18.26 requests.
+static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
+
+// Little-endian readers over the embedded firmware.
+fn le32(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+// Little-endian writers into the context-info buffer.
+fn put_u16(buf: &mut [u8], off: usize, v: u16) {
+    buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
+}
+fn put_u32(buf: &mut [u8], off: usize, v: u32) {
+    buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+fn put_u64(buf: &mut [u8], off: usize, v: u64) {
+    buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+}
+/// u32_encode_bits: place `v` into the field described by `mask`.
+fn encode_bits(v: u32, mask: u32) -> u32 {
+    (v << mask.trailing_zeros()) & mask
+}
+
 /// A coherent DMA allocation: kernel-held physical address + WASM handle.
 #[derive(Clone, Copy)]
 struct Dma {
@@ -39,6 +62,7 @@ impl Dma {
 struct Ax200 {
     mmio: i32,
     ltr_enabled: bool,
+    hw_rev: u32,
     // RX queue DMA (iwl_pcie_alloc_rxq_dma) — addresses go into ctxt_info.
     rxq_bd: Dma,       // RBD ring (__le64 * NUM_RBDS)
     rxq_used_bd: Dma,  // used-BD ring (__le32 * NUM_RBDS)
@@ -311,6 +335,159 @@ impl Ax200 {
         self.set_bit(CSR_MAC_SHADOW_REG_CTRL, CSR_MAC_SHADOW_REG_CTRL_VAL);
         true
     }
+
+    // ── start_fw prologue (trans-gen2.c, the bits before nic_init) ──
+    // disable interrupts, check RF-kill, clear the RF-kill handshake so the
+    // firmware doesn't think the radio is killed, then clear pending ints.
+    fn prepare_for_fw_load(&self) {
+        // iwl_disable_interrupts
+        self.w32(CSR_INT_MASK, 0);
+        self.w32(CSR_INT, 0xFFFF_FFFF);
+        self.w32(CSR_FH_INT_STATUS, 0xFFFF_FFFF);
+
+        // iwl_pcie_check_hw_rf_kill: bit clear == radio killed.
+        let gp = self.r32(CSR_GP_CNTRL);
+        if gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW == 0 {
+            host::print("[ax200] WARNING: HW RF-kill asserted — firmware may not boot\n");
+        }
+
+        // make sure rfkill handshake bits are cleared
+        self.w32(CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_SW_BIT_RFKILL);
+        self.w32(CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED);
+        self.w32(CSR_INT, 0xFFFF_FFFF);
+    }
+
+    // ── iwl_pcie_set_ltr (trans-gen2.c, 22000 non-integrated) ───
+    fn set_ltr(&self) {
+        let ltr = CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ
+            | encode_bits(CSR_LTR_LONG_VAL_AD_SCALE_USEC, CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE)
+            | encode_bits(250, CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL)
+            | CSR_LTR_LONG_VAL_AD_SNOOP_REQ
+            | encode_bits(CSR_LTR_LONG_VAL_AD_SCALE_USEC, CSR_LTR_LONG_VAL_AD_SNOOP_SCALE)
+            | encode_bits(250, CSR_LTR_LONG_VAL_AD_SNOOP_VAL);
+        self.w32(CSR_LTR_LONG_VAL_AD, ltr);
+    }
+
+    // ── iwl_pcie_init_fw_sec (ctxt-info.c) ──────────────────────
+    // Walk the SEC_RT TLVs in order; the CPU1_CPU2 / PAGING separators split
+    // them into lmac / umac / paging. DMA each section's data and record its
+    // physical address into the matching ctxt_dram image array. The firmware
+    // reads these chunks itself; init_fw_sec ignores the per-section offset.
+    fn init_fw_sec(
+        &self,
+        lmac: &mut [u64; IWL_MAX_DRAM_ENTRY],
+        umac: &mut [u64; IWL_MAX_DRAM_ENTRY],
+        virt: &mut [u64; IWL_MAX_DRAM_ENTRY],
+    ) -> (usize, usize, usize) {
+        let (mut lc, mut uc, mut vc) = (0usize, 0usize, 0usize);
+        let mut region = 0u8; // 0 = lmac, 1 = umac, 2 = paging
+        let mut off = FW_TLV_HEADER_LEN;
+
+        while off + 8 <= FW.len() {
+            let t = le32(FW, off);
+            let l = le32(FW, off + 4) as usize;
+            let body = off + 8;
+            if body + l > FW.len() {
+                break;
+            }
+            if t == IWL_UCODE_TLV_SEC_RT {
+                let sec_off = le32(FW, body);
+                if sec_off == CPU1_CPU2_SEPARATOR_SECTION {
+                    region = 1;
+                } else if sec_off == PAGING_SEPARATOR_SECTION {
+                    region = 2;
+                } else {
+                    let data = &FW[body + 4..body + l];
+                    let dma = self.alloc_dma(data.len(), "fw.sec");
+                    if !dma.ok() {
+                        return (lc, uc, vc); // caller checks counts
+                    }
+                    host::dma_write_buf(dma.handle, 0, data);
+                    match region {
+                        0 if lc < IWL_MAX_DRAM_ENTRY => { lmac[lc] = dma.phys; lc += 1; }
+                        1 if uc < IWL_MAX_DRAM_ENTRY => { umac[uc] = dma.phys; uc += 1; }
+                        2 if vc < IWL_MAX_DRAM_ENTRY => { virt[vc] = dma.phys; vc += 1; }
+                        _ => {}
+                    }
+                }
+            }
+            off = body + ((l + 3) & !0x3);
+        }
+        (lc, uc, vc)
+    }
+
+    // ── iwl_pcie_ctxt_info_init + the start_fw tail → ALIVE ─────
+    fn load_firmware(&mut self) -> bool {
+        self.prepare_for_fw_load();
+
+        // init_fw_sec: DMA the firmware sections.
+        let mut lmac = [0u64; IWL_MAX_DRAM_ENTRY];
+        let mut umac = [0u64; IWL_MAX_DRAM_ENTRY];
+        let mut virt = [0u64; IWL_MAX_DRAM_ENTRY];
+        let (lc, uc, vc) = self.init_fw_sec(&mut lmac, &mut umac, &mut virt);
+        if lc == 0 || uc == 0 {
+            host::print("[ax200] FW section load failed\n");
+            return false;
+        }
+        host::print("[ax200] FW sections loaded: lmac=");
+        host::print_hex32(lc as u32);
+        host::print(" umac=");
+        host::print_hex32(uc as u32);
+        host::print(" paging=");
+        host::print_hex32(vc as u32);
+        host::print("\n");
+
+        // Build the context-info structure (zeroed buffer + filled fields).
+        let mut ci = [0u8; CTXT_INFO_SIZE];
+        put_u16(&mut ci, CI_OFF_MAC_ID, self.hw_rev as u16);
+        put_u16(&mut ci, CI_OFF_VERSION, 0);
+        put_u16(&mut ci, CI_OFF_SIZE, (CTXT_INFO_SIZE / 4) as u16);
+
+        let cb_size = (NUM_RBDS as u32).trailing_zeros(); // RX_QUEUE_CB_SIZE = ilog2
+        let control_flags = IWL_CTXT_INFO_TFD_FORMAT_LONG
+            | (cb_size << IWL_CTXT_INFO_RB_CB_SIZE_SHIFT)
+            | (IWL_CTXT_INFO_RB_SIZE_4K << IWL_CTXT_INFO_RB_SIZE_SHIFT);
+        put_u32(&mut ci, CI_OFF_CONTROL_FLAGS, control_flags);
+
+        put_u64(&mut ci, CI_OFF_FREE_RBD, self.rxq_bd.phys);
+        put_u64(&mut ci, CI_OFF_USED_RBD, self.rxq_used_bd.phys);
+        put_u64(&mut ci, CI_OFF_STATUS_WR, self.rxq_rb_stts.phys);
+        put_u64(&mut ci, CI_OFF_CMD_QUEUE_ADDR, self.cmd_tfd.phys);
+        ci[CI_OFF_CMD_QUEUE_SIZE] = CMD_QUEUE_CB_SIZE;
+
+        for i in 0..lc { put_u64(&mut ci, CI_OFF_LMAC_IMG + i * 8, lmac[i]); }
+        for i in 0..uc { put_u64(&mut ci, CI_OFF_UMAC_IMG + i * 8, umac[i]); }
+        for i in 0..vc { put_u64(&mut ci, CI_OFF_VIRTUAL_IMG + i * 8, virt[i]); }
+
+        let ci_dma = self.alloc_dma(CTXT_INFO_SIZE, "ctxt_info");
+        if !ci_dma.ok() {
+            return false;
+        }
+        host::dma_write_buf(ci_dma.handle, 0, &ci);
+
+        // iwl_enable_fw_load_int_ctx_info (non-MSI-X): the early ALIVE comes as
+        // CSR_INT_BIT_ALIVE; FH_RX is for the later (Stage 3) ALIVE notification.
+        self.w32(CSR_INT_MASK, CSR_INT_BIT_ALIVE | CSR_INT_BIT_FH_RX);
+
+        // kick FW self-load: write the ctxt_info physical address.
+        host::mmio_w64(self.mmio, CSR_CTXT_INFO_BA, ci_dma.phys);
+
+        self.set_ltr();
+
+        // tell the FW CPU to run (family < AX210 → regular PRPH).
+        self.prph_write(UREG_CPU_INIT_RUN, 1);
+
+        // Poll CSR_INT for the early ALIVE interrupt (no MSI-X, no notif_wait).
+        host::print("[ax200] FW kicked, waiting for ALIVE...\n");
+        if self.poll_bit(CSR_INT, CSR_INT_BIT_ALIVE, 2_000_000) {
+            return true;
+        }
+        let intr = self.r32(CSR_INT);
+        host::print("[ax200] ALIVE timeout — CSR_INT=0x");
+        host::print_hex32(intr);
+        host::print("\n");
+        false
+    }
 }
 
 /// Log a DMA allocation's physical address (Stage 1 diagnostics).
@@ -350,7 +527,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.3.0 — Stage 1 (RX/TX rings)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.4.0 — Stage 2 (FW load + ALIVE)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -378,6 +555,7 @@ pub extern "C" fn _start() {
     let mut dev = Ax200 {
         mmio,
         ltr_enabled: false,
+        hw_rev: 0,
         rxq_bd: Dma::NONE,
         rxq_used_bd: Dma::NONE,
         rxq_rb_stts: Dma::NONE,
@@ -386,6 +564,7 @@ pub extern "C" fn _start() {
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
+    dev.hw_rev = hw_rev;
     let rf_id = dev.r32(CSR_HW_RF_ID);
     host::log_reg("CSR_HW_REV", hw_rev);
     host::log_reg("CSR_HW_RF_ID", rf_id);
@@ -409,15 +588,22 @@ pub extern "C" fn _start() {
     host::print("[ax200] Stage 0b OK — chip powered up, PRPH accessible\n");
 
     // ── Stage 1: RX/TX rings + command queue ─────────────────────
-    if dev.nic_init() {
-        host::print("[ax200] Stage 1 OK — rings allocated:\n");
-        log_dma("  rxq.bd      ", &dev.rxq_bd);
-        log_dma("  rxq.used_bd ", &dev.rxq_used_bd);
-        log_dma("  rxq.rb_stts ", &dev.rxq_rb_stts);
-        log_dma("  cmd.tfd     ", &dev.cmd_tfd);
-        log_dma("  cmd.first_tb", &dev.cmd_first_tb);
-    } else {
+    if !dev.nic_init() {
         host::print("[ax200] Stage 1 FAILED\n");
+        return;
+    }
+    host::print("[ax200] Stage 1 OK — rings allocated:\n");
+    log_dma("  rxq.bd      ", &dev.rxq_bd);
+    log_dma("  rxq.used_bd ", &dev.rxq_used_bd);
+    log_dma("  rxq.rb_stts ", &dev.rxq_rb_stts);
+    log_dma("  cmd.tfd     ", &dev.cmd_tfd);
+    log_dma("  cmd.first_tb", &dev.cmd_first_tb);
+
+    // ── Stage 2: context-info + FW self-load + ALIVE ─────────────
+    if dev.load_firmware() {
+        host::print("[ax200] Stage 2 OK — *** FIRMWARE ALIVE *** 🎉\n");
+    } else {
+        host::print("[ax200] Stage 2 FAILED (no ALIVE)\n");
     }
 
     // Probe-stage driver: return so the fiber ends and the core is freed.

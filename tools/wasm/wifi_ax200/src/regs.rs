@@ -85,6 +85,59 @@ pub const IWL_CMD_QUEUE_SIZE: usize = 32; // fw/api/txq.h
 pub const TFH_TFD_SIZE: usize = 256; // sizeof(struct iwl_tfh_tfd)
 pub const IWL_FIRST_TB_SIZE_ALIGN: usize = 64; // ALIGN(20, 64)
 
+// ── Stage 2: context-info + FW load + ALIVE ──────────────────────
+pub const CSR_CTXT_INFO_BA: u32 = 0x040; // 64-bit ctxt_info base address (kick)
+pub const CSR_UCODE_DRV_GP1_CLR: u32 = 0x05C;
+pub const CSR_UCODE_SW_BIT_RFKILL: u32 = 0x0000_0002;
+pub const CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED: u32 = 0x0000_0004;
+pub const CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW: u32 = 0x0800_0000;
+
+// CSR_INT cause bits (iwl-csr.h)
+pub const CSR_INT_BIT_ALIVE: u32 = 1 << 0; // uCode initialised
+pub const CSR_INT_BIT_FH_RX: u32 = 1 << 31; // Rx DMA / cmd responses
+
+// LTR boot workaround (iwl_pcie_set_ltr, 22000 non-integrated path)
+pub const CSR_LTR_LONG_VAL_AD: u32 = 0x0D4;
+pub const CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ: u32 = 0x8000_0000;
+pub const CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE: u32 = 0x1c00_0000;
+pub const CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL: u32 = 0x03ff_0000;
+pub const CSR_LTR_LONG_VAL_AD_SNOOP_REQ: u32 = 0x0000_8000;
+pub const CSR_LTR_LONG_VAL_AD_SNOOP_SCALE: u32 = 0x0000_1c00;
+pub const CSR_LTR_LONG_VAL_AD_SNOOP_VAL: u32 = 0x0000_03ff;
+pub const CSR_LTR_LONG_VAL_AD_SCALE_USEC: u32 = 2;
+
+// PRPH: tell the FW CPU to run (iwl-prph.h)
+pub const UREG_CPU_INIT_RUN: u32 = 0x00A0_5C44;
+
+// ── Firmware TLV format (fw/file.h) ──────────────────────────────
+pub const FW_TLV_HEADER_LEN: usize = 88; // iwl_tlv_ucode_header
+pub const IWL_UCODE_TLV_SEC_RT: u32 = 19; // regular runtime section
+pub const CPU1_CPU2_SEPARATOR_SECTION: u32 = 0xFFFF_CCCC;
+pub const PAGING_SEPARATOR_SECTION: u32 = 0xAAAA_BBBB;
+pub const IWL_MAX_DRAM_ENTRY: usize = 64;
+
+// ── Context-info struct (iwl-context-info.h), packed, 1792 bytes ──
+pub const CTXT_INFO_SIZE: usize = 1792;
+pub const CI_OFF_MAC_ID: usize = 0; // version.mac_id (u16)
+pub const CI_OFF_VERSION: usize = 2; // version.version (u16)
+pub const CI_OFF_SIZE: usize = 4; // version.size (u16, DWs)
+pub const CI_OFF_CONTROL_FLAGS: usize = 8; // control.control_flags (u32)
+pub const CI_OFF_FREE_RBD: usize = 24; // rbd_cfg.free_rbd_addr (u64)
+pub const CI_OFF_USED_RBD: usize = 32; // rbd_cfg.used_rbd_addr (u64)
+pub const CI_OFF_STATUS_WR: usize = 40; // rbd_cfg.status_wr_ptr (u64)
+pub const CI_OFF_CMD_QUEUE_ADDR: usize = 48; // hcmd_cfg.cmd_queue_addr (u64)
+pub const CI_OFF_CMD_QUEUE_SIZE: usize = 56; // hcmd_cfg.cmd_queue_size (u8)
+pub const CI_OFF_UMAC_IMG: usize = 192; // dram.umac_img[64] (u64 each)
+pub const CI_OFF_LMAC_IMG: usize = 704; // dram.lmac_img[64]
+pub const CI_OFF_VIRTUAL_IMG: usize = 1216; // dram.virtual_img[64]
+
+// control_flags fields (iwl_context_info_flags)
+pub const IWL_CTXT_INFO_TFD_FORMAT_LONG: u32 = 0x0100;
+pub const IWL_CTXT_INFO_RB_CB_SIZE_SHIFT: u32 = 4; // mask 0x00f0
+pub const IWL_CTXT_INFO_RB_SIZE_SHIFT: u32 = 9; // mask 0x1e00
+pub const IWL_CTXT_INFO_RB_SIZE_4K: u32 = 0x4; // default rx_buf_size
+pub const CMD_QUEUE_CB_SIZE: u8 = 2; // TFD_QUEUE_CB_SIZE(32) = ilog2(32)-3
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
