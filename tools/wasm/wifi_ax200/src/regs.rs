@@ -431,6 +431,30 @@ pub const CAPA_DQA_SUPPORT: u32 = 12;
 pub const CAPA_SOC_LATENCY_SUPPORT: u32 = 37;
 pub const CAPA_BT_MPLUT_SUPPORT: u32 = 67;
 
+// ── FW error-log dump (iwl_mvm_dump_nic_error_log) ───────────────
+// Read the firmware's lmac/umac error tables from device SRAM via the HBUS
+// periphery-memory window. If valid != 0 the firmware asserted; error_id +
+// the last hcmd/cmd_header reveal which command faulted it.
+pub const HBUS_TARG_MEM_RADDR: u32 = 0x40C; // HBUS_BASE(0x400)+0x0C
+pub const HBUS_TARG_MEM_RDAT: u32 = 0x41C; // auto-incrementing read data
+// CSR_GP_CNTRL: grab NIC access to read SRAM (iwl_pcie_grab_nic_access).
+pub const CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ: u32 = 0x0000_0008;
+pub const CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP: u32 = 0x0000_0010;
+// iwl_error_event_table (lmac) / iwl_umac_error_event_table u32 field indices.
+pub const LERR_VALID: usize = 0;
+pub const LERR_ERROR_ID: usize = 1;
+pub const LERR_DATA1: usize = 7;
+pub const LERR_DATA2: usize = 8;
+pub const LERR_DATA3: usize = 9;
+pub const LERR_HCMD: usize = 23;
+pub const LERR_LAST_CMD_ID: usize = 29;
+pub const LERR_WORDS: usize = 32; // enough to reach last_cmd_id
+pub const UERR_VALID: usize = 0;
+pub const UERR_ERROR_ID: usize = 1;
+pub const UERR_DATA1: usize = 6;
+pub const UERR_CMD_HEADER: usize = 13;
+pub const UERR_WORDS: usize = 15;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
