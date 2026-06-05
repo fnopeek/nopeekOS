@@ -359,6 +359,29 @@ pub const MAC_FILTER_IN_BEACON: u32 = 1 << 6;
 pub const MAC_CCK_RATES_DEFAULT: u32 = 0x0F;
 pub const MAC_OFDM_RATES_DEFAULT: u32 = 0x15;
 
+// ── Stage 4d2a': regulatory domain (MCC_UPDATE_CMD, fw/api/nvm-reg.h) ──
+// With LAR enabled (our NVM reported lar=1) the firmware refuses to scan until
+// the regulatory domain is set: "Disallow scans that might crash the FW while
+// the LAR regdomain is not set" (mvm/nvm.c iwl_mvm_init_mcc). iwl_mvm_up calls
+// init_mcc right before config_scan. The initial update queries the FW's own
+// default with alpha2 "ZZ" and source GET_CURRENT (mvm/mac80211.c
+// iwl_mvm_get_current_regdomain → iwl_mvm_update_mcc); the FW replies with its
+// chosen MCC + channel profile, after which scans are allowed. MCC_UPDATE_CMD
+// is opcode 0xc8 in the legacy group and carries CMD_WANT_SKB (it responds).
+pub const MCC_UPDATE_CMD: u8 = 0xc8;
+// struct iwl_mcc_update_cmd: __le16 mcc, u8 source_id, u8 reserved, __le32 key,
+// u8 reserved2[20] = 28 bytes.
+pub const MCC_UPDATE_CMD_LEN: usize = 28;
+pub const MCC_OFF_MCC: usize = 0; // __le16 (alpha2[0] << 8 | alpha2[1])
+pub const MCC_OFF_SOURCE: usize = 2; // u8 source_id
+pub const MCC_ALPHA2_ZZ: u16 = ((b'Z' as u16) << 8) | (b'Z' as u16); // 0x5A5A
+pub const MCC_SOURCE_GET_CURRENT: u8 = 0x10; // enum iwl_mcc_source
+// iwl_mcc_update_resp_v8 payload offsets (relative to the rx packet data[]):
+// __le32 status, __le16 mcc, ... __le32 n_channels @ 20.
+pub const MCC_RESP_OFF_STATUS: usize = 0;
+pub const MCC_RESP_OFF_MCC: usize = 4;
+pub const MCC_RESP_OFF_N_CHANNELS: usize = 20;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability

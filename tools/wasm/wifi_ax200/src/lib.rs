@@ -859,6 +859,10 @@ impl Ax200 {
         self.send_hcmd(0, TX_ANT_CONFIGURATION_CMD, &ANT_AB.to_le_bytes());
         self.pump_rx(50);
 
+        // iwl_mvm_init_mcc: set the regulatory domain. With LAR enabled the FW
+        // blocks scans until this is done (iwl_mvm_up does it before config_scan).
+        self.set_regulatory();
+
         // SCAN_CFG_CMD v5 (LONG_GROUP): reduced config — tx/rx antenna chains.
         // bcast_sta_id stays 0 (v5 firmware no longer uses it).
         let mut cfg = [0u8; SCAN_CFG_LEN];
@@ -868,6 +872,41 @@ impl Ax200 {
             .copy_from_slice(&ANT_AB.to_le_bytes());
         self.send_hcmd(IWL_ALWAYS_LONG_GROUP, SCAN_CFG_CMD, &cfg);
         self.pump_rx(50);
+    }
+
+    // ── iwl_mvm_init_mcc → iwl_mvm_update_mcc (mvm/nvm.c) ──────────
+    // Set the firmware regulatory domain. With LAR enabled the firmware refuses
+    // to scan until the regdomain is set ("Disallow scans that might crash the
+    // FW while the LAR regdomain is not set"). The first update queries the FW's
+    // own default — alpha2 "ZZ", source GET_CURRENT — and the FW replies with
+    // its chosen MCC + channel profile (CMD_WANT_SKB), after which scans run.
+    fn set_regulatory(&mut self) {
+        let mut cmd = [0u8; MCC_UPDATE_CMD_LEN];
+        put_u16(&mut cmd, MCC_OFF_MCC, MCC_ALPHA2_ZZ);
+        cmd[MCC_OFF_SOURCE] = MCC_SOURCE_GET_CURRENT;
+        self.send_hcmd(0, MCC_UPDATE_CMD, &cmd);
+        host::print("[ax200] MCC_UPDATE_CMD (ZZ / get-current) sent, waiting...\n");
+
+        match self.wait_rx(MCC_UPDATE_CMD, 0, 2000) {
+            Some(rb) => {
+                let mut p = [0u8; 40];
+                host::dma_read_buf(rb.handle, 0, &mut p);
+                let b = RX_PKT_DATA_OFF;
+                let rd32 = |o: usize| {
+                    u32::from_le_bytes([p[b + o], p[b + o + 1], p[b + o + 2], p[b + o + 3]])
+                };
+                let mcc = u16::from_le_bytes([p[b + MCC_RESP_OFF_MCC], p[b + MCC_RESP_OFF_MCC + 1]]);
+                let cc = [(mcc >> 8) as u8, mcc as u8];
+                host::print("[ax200]   MCC set to '");
+                host::print(unsafe { core::str::from_utf8_unchecked(&cc) });
+                host::print("' status=0x");
+                host::print_hex32(rd32(MCC_RESP_OFF_STATUS));
+                host::print(" n_channels=0x");
+                host::print_hex32(rd32(MCC_RESP_OFF_N_CHANNELS));
+                host::print("\n");
+            }
+            None => host::print("[ax200]   MCC: no response (scan may stay blocked)\n"),
+        }
     }
 
     // ── iwl_mvm_mac_ctxt_add → iwl_mvm_mac_ctxt_cmd_sta (mvm/mac-ctxt.c) ──
@@ -1160,7 +1199,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.13.0 — Stage 4d2b1b (MAC context + scan)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.14.0 — Stage 4d2b1c (MCC + MAC ctx + scan)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1271,7 +1310,7 @@ pub extern "C" fn _start() {
 
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
-                            host::print("[ax200] Stage 4d2a OK — TX_ANT + SCAN_CFG sent\n");
+                            host::print("[ax200] Stage 4d2a OK — TX_ANT + MCC + SCAN_CFG sent\n");
 
                             // ── Stage 4d2b1b: add the MAC context the scan ──
                             // references (scan_start_mac_or_link_id → ctx id 0).
