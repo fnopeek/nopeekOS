@@ -150,6 +150,33 @@ pub const RB_STTS_CLOSED_MASK: u32 = 0x0FFF;
 // UCODE_ALIVE_NTFY command id (group 0).
 pub const UCODE_ALIVE_NTFY: u8 = 0x01;
 
+// ── Stage 4a: ALIVE notification struct (fw/api/alive.h) ─────────
+// The firmware DMAs a `struct iwl_alive_ntf_v6` (144 bytes) as the payload
+// of an iwl_rx_packet. data[] starts after len_n_flags(4) + iwl_cmd_header(4).
+pub const RX_PKT_DATA_OFF: usize = 8;
+pub const IWL_ALIVE_STATUS_OK: u16 = 0xCAFE;
+pub const IWL_ALIVE_STATUS_ERR: u16 = 0xDEAD;
+// error_info_addr carries cache-control bits that must be masked off
+// (fw/img.h: FW_ADDR_CACHE_CONTROL).
+pub const FW_ADDR_CACHE_CONTROL: u32 = 0xC000_0000;
+// Field offsets within iwl_alive_ntf_v6 (relative to the struct base):
+//   __le16 status; __le16 flags; iwl_lmac_alive lmac_data[2];
+//   iwl_umac_alive umac_data; iwl_sku_id sku_id; iwl_imr_alive_info imr;
+pub const AL_OFF_STATUS: usize = 0; // __le16
+pub const AL_OFF_LMAC0: usize = 4; // iwl_lmac_alive[0] (48 bytes)
+pub const AL_OFF_UMAC: usize = 100; // 4 + 2*48
+pub const AL_OFF_SKU_ID: usize = 116; // 4 + 2*48 + 16
+// Within iwl_lmac_alive (48 bytes):
+pub const LMAC_OFF_UCODE_MAJOR: usize = 0; // __le32
+pub const LMAC_OFF_UCODE_MINOR: usize = 4; // __le32
+pub const LMAC_OFF_VER_SUBTYPE: usize = 8; // u8
+pub const LMAC_OFF_VER_TYPE: usize = 9; // u8
+pub const LMAC_OFF_ERR_TABLE: usize = 16; // dbg_ptrs.error_event_table_ptr
+// Within iwl_umac_alive (16 bytes):
+pub const UMAC_OFF_MAJOR: usize = 0; // __le32
+pub const UMAC_OFF_MINOR: usize = 4; // __le32
+pub const UMAC_OFF_ERR_INFO: usize = 8; // dbg_ptrs.error_info_addr
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability

@@ -495,13 +495,13 @@ impl Ax200 {
     // ring (bd[i] = page_dma | vid, gen2 < AX210), then bump the HW write
     // pointer. The firmware then DMAs UCODE_ALIVE_NTFY into the first RB and
     // advances rb_stts.closed_rb_num, which we poll.
-    fn rx_restock_and_alive(&mut self) -> bool {
+    fn rx_restock_and_alive(&mut self) -> Option<Dma> {
         let mut bd = [0u8; RX_NUM_RBS * 8];
         let mut rb0 = Dma::NONE;
         for i in 0..RX_NUM_RBS {
             let rb = self.alloc_dma(RB_SIZE_BYTES, "rb");
             if !rb.ok() {
-                return false;
+                return None;
             }
             if i == 0 {
                 rb0 = rb;
@@ -529,7 +529,7 @@ impl Ax200 {
         }
         if closed == 0 {
             host::print("[ax200] no RX — alive notification timeout\n");
-            return false;
+            return None;
         }
         host::print("[ax200] RX active — closed_rb_num=0x");
         host::print_hex32(closed);
@@ -549,7 +549,79 @@ impl Ax200 {
         if hdr[4] == UCODE_ALIVE_NTFY && hdr[5] == 0 {
             host::print("[ax200] → UCODE_ALIVE_NTFY confirmed\n");
         }
-        true
+        Some(rb0)
+    }
+
+    // ── iwl_alive_fn (mvm/fw.c, version >= 6 path) ──────────────
+    // Parse the `struct iwl_alive_ntf_v6` the firmware DMA'd into RB[0]'s
+    // payload (data[] begins at RX_PKT_DATA_OFF). Confirms the firmware
+    // reported OK status and surfaces the LMAC/UMAC version + error-table
+    // pointers + sku_id. The sku_id gates the next stage: an all-zero
+    // sku_id means PNVM load is skipped entirely (iwl_pnvm_load). Linux's
+    // IMR / debug active-region bookkeeping is debug-only and is deferred.
+    fn parse_alive_ntf(&self, rb0: &Dma) -> bool {
+        let mut p = [0u8; 160]; // len_n_flags(4) + hdr(4) + v6(144) = 152
+        host::dma_read_buf(rb0.handle, 0, &mut p);
+        let s = RX_PKT_DATA_OFF; // alive struct base
+        let rd16 = |o: usize| u16::from_le_bytes([p[s + o], p[s + o + 1]]);
+        let rd32 = |o: usize| {
+            u32::from_le_bytes([p[s + o], p[s + o + 1], p[s + o + 2], p[s + o + 3]])
+        };
+
+        let status = rd16(AL_OFF_STATUS);
+        let l = AL_OFF_LMAC0; // lmac_data[0]
+        let u = AL_OFF_UMAC;
+        let sku = AL_OFF_SKU_ID;
+
+        host::print("[ax200] ALIVE status=0x");
+        host::print_hex16(status);
+        host::print(if status == IWL_ALIVE_STATUS_OK {
+            " (OK)\n"
+        } else if status == IWL_ALIVE_STATUS_ERR {
+            " (ERR!)\n"
+        } else {
+            " (unknown)\n"
+        });
+
+        host::print("[ax200]   LMAC ucode ");
+        host::print_hex32(rd32(l + LMAC_OFF_UCODE_MAJOR));
+        host::print(".");
+        host::print_hex32(rd32(l + LMAC_OFF_UCODE_MINOR));
+        host::print(" ver_type=0x");
+        host::print_hex32(p[s + l + LMAC_OFF_VER_TYPE] as u32);
+        host::print(" subtype=0x");
+        host::print_hex32(p[s + l + LMAC_OFF_VER_SUBTYPE] as u32);
+        host::print("\n");
+
+        host::print("[ax200]   UMAC ver ");
+        host::print_hex32(rd32(u + UMAC_OFF_MAJOR));
+        host::print(".");
+        host::print_hex32(rd32(u + UMAC_OFF_MINOR));
+        host::print("\n");
+
+        let umac_err = rd32(u + UMAC_OFF_ERR_INFO) & !FW_ADDR_CACHE_CONTROL;
+        host::print("[ax200]   err tables: lmac=0x");
+        host::print_hex32(rd32(l + LMAC_OFF_ERR_TABLE));
+        host::print(" umac=0x");
+        host::print_hex32(umac_err);
+        host::print("\n");
+
+        let sku0 = rd32(sku);
+        let sku1 = rd32(sku + 4);
+        let sku2 = rd32(sku + 8);
+        host::print("[ax200]   sku_id: 0x");
+        host::print_hex32(sku0);
+        host::print(" 0x");
+        host::print_hex32(sku1);
+        host::print(" 0x");
+        host::print_hex32(sku2);
+        host::print(if sku0 == 0 && sku1 == 0 && sku2 == 0 {
+            " (empty → PNVM skipped)\n"
+        } else {
+            " (PNVM required)\n"
+        });
+
+        status == IWL_ALIVE_STATUS_OK
     }
 
     // Halt the firmware's DMA engines before the driver returns. The kernel
@@ -598,7 +670,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.5.0 — Stage 3 (RX + alive ntfy)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.6.0 — Stage 4a (parse ALIVE ntfy)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -675,10 +747,18 @@ pub extern "C" fn _start() {
         host::print("[ax200] Stage 2 OK — *** FIRMWARE ALIVE *** 🎉\n");
 
         // ── Stage 3: RX restock + read the ALIVE notification ────
-        if dev.rx_restock_and_alive() {
-            host::print("[ax200] Stage 3 OK — RX path live, alive notification received\n");
-        } else {
-            host::print("[ax200] Stage 3 FAILED\n");
+        match dev.rx_restock_and_alive() {
+            Some(rb0) => {
+                host::print("[ax200] Stage 3 OK — RX path live, alive notification received\n");
+
+                // ── Stage 4a: parse the ALIVE notification struct ──
+                if dev.parse_alive_ntf(&rb0) {
+                    host::print("[ax200] Stage 4a OK — firmware ALIVE valid (status OK)\n");
+                } else {
+                    host::print("[ax200] Stage 4a FAILED — firmware ALIVE not valid\n");
+                }
+            }
+            None => host::print("[ax200] Stage 3 FAILED\n"),
         }
     } else {
         host::print("[ax200] Stage 2 FAILED (no ALIVE)\n");
