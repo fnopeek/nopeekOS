@@ -239,6 +239,25 @@ pub const NVM_SKU_11N: u32 = 1 << 2;
 pub const NVM_SKU_11AC: u32 = 1 << 3;
 pub const NVM_SKU_11AX: u32 = 1 << 4;
 
+// ── Stage 4d: scan setup ─────────────────────────────────────────
+// Firmware command-version TLV (fw/file.h): array of iwl_fw_cmd_version
+// { u8 cmd; u8 group; u8 cmd_ver; u8 notif_ver; }. iwl_fw_lookup_cmd_ver maps
+// (group ?: LONG_GROUP, cmd) → cmd_ver; this picks the versioned struct layouts
+// the scan path needs (SCAN_REQ_UMAC etc. range over v1..v17).
+pub const IWL_UCODE_TLV_CMD_VERSIONS: u32 = 48;
+pub const IWL_FW_CMD_VER_UNKNOWN: u8 = 99;
+pub const IWL_ALWAYS_LONG_GROUP: u8 = 1;
+pub const FW_CMD_VER_ENTRY_LEN: usize = 4; // sizeof(iwl_fw_cmd_version)
+// Command ids (fw/api/commands.h) for the scan path.
+pub const PHY_CONTEXT_CMD: u8 = 0x08;
+pub const SCAN_CFG_CMD: u8 = 0x0c;
+pub const SCAN_REQ_UMAC: u8 = 0x0d;
+pub const SCAN_COMPLETE_UMAC: u8 = 0x0f;
+pub const ADD_STA: u8 = 0x18;
+pub const MAC_CONTEXT_CMD: u8 = 0x28;
+pub const TX_ANT_CONFIGURATION_CMD: u8 = 0x98;
+pub const SCAN_ITERATION_COMPLETE_UMAC: u8 = 0xb5;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability

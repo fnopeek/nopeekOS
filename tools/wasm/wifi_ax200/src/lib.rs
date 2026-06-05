@@ -839,6 +839,43 @@ fn log_dma(name: &str, d: &Dma) {
     host::print("\n");
 }
 
+/// iwl_fw_lookup_cmd_ver (fw/img.c): walk the embedded firmware's
+/// IWL_UCODE_TLV_CMD_VERSIONS TLV for the (group, cmd) entry and return its
+/// cmd_ver. Group 0 maps to LONG_GROUP (the legacy command space). Returns
+/// IWL_FW_CMD_VER_UNKNOWN (99) if absent — callers fall back to a default.
+fn fw_cmd_ver(group: u8, cmd: u8) -> u8 {
+    let grp = if group == 0 { IWL_ALWAYS_LONG_GROUP } else { group };
+    let mut off = FW_TLV_HEADER_LEN;
+    while off + 8 <= FW.len() {
+        let t = le32(FW, off);
+        let l = le32(FW, off + 4) as usize;
+        let body = off + 8;
+        if body + l > FW.len() {
+            break;
+        }
+        if t == IWL_UCODE_TLV_CMD_VERSIONS {
+            let n = l / FW_CMD_VER_ENTRY_LEN;
+            for i in 0..n {
+                let e = body + i * FW_CMD_VER_ENTRY_LEN;
+                if FW[e + 1] == grp && FW[e] == cmd {
+                    return FW[e + 2]; // cmd_ver (may be IWL_FW_CMD_VER_UNKNOWN)
+                }
+            }
+        }
+        off = body + ((l + 3) & !0x3);
+    }
+    IWL_FW_CMD_VER_UNKNOWN
+}
+
+/// Log one command's firmware version (Stage 4d1 diagnostics).
+fn log_cmd_ver(name: &str, group: u8, cmd: u8) {
+    host::print("[ax200]   ");
+    host::print(name);
+    host::print(" v=");
+    host::print_hex32(fw_cmd_ver(group, cmd) as u32);
+    host::print("\n");
+}
+
 /// iwl_flip_hw_address: build the 6-byte MAC from the two CSR registers.
 /// addr0 holds bytes [3,2,1,0] (high→low), addr1 holds bytes [4,5] in its low
 /// half (byte1, byte0). On a little-endian host iwl_read32 + cpu_to_le32 leaves
@@ -888,7 +925,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.8.0 — Stage 4c (read NVM info)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.9.0 — Stage 4d1 (FW cmd versions)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -983,6 +1020,17 @@ pub extern "C" fn _start() {
                         // ── Stage 4c: read NVM info (caps + MAC address) ──
                         if dev.read_nvm() {
                             host::print("[ax200] Stage 4c OK — NVM info read\n");
+
+                            // ── Stage 4d1: firmware command versions (scan path) ──
+                            host::print("[ax200] FW cmd versions (scan path):\n");
+                            log_cmd_ver("SCAN_REQ_UMAC ", IWL_ALWAYS_LONG_GROUP, SCAN_REQ_UMAC);
+                            log_cmd_ver("SCAN_CFG_CMD  ", IWL_ALWAYS_LONG_GROUP, SCAN_CFG_CMD);
+                            log_cmd_ver("ADD_STA       ", IWL_ALWAYS_LONG_GROUP, ADD_STA);
+                            log_cmd_ver("PHY_CONTEXT   ", IWL_ALWAYS_LONG_GROUP, PHY_CONTEXT_CMD);
+                            log_cmd_ver("MAC_CONTEXT   ", IWL_ALWAYS_LONG_GROUP, MAC_CONTEXT_CMD);
+                            log_cmd_ver("TX_ANT_CFG    ", IWL_ALWAYS_LONG_GROUP, TX_ANT_CONFIGURATION_CMD);
+                            log_cmd_ver("SCAN_COMPLETE ", IWL_ALWAYS_LONG_GROUP, SCAN_COMPLETE_UMAC);
+                            host::print("[ax200] Stage 4d1 OK — cmd versions read\n");
                         } else {
                             host::print("[ax200] Stage 4c FAILED — no NVM response\n");
                         }
