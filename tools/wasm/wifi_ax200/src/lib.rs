@@ -1115,12 +1115,17 @@ impl Ax200 {
         buf[SC_OFF_CP_N_APS_OVERRIDE + 1] = SCAN_N_APS_SOCIAL_CHS;
         for i in 0..SCAN_24G_CHANNELS as usize {
             let o = SC_OFF_CP_CHANNELS + i * SCAN_CH_CFG_LEN;
-            // v17: band rides in flags (bits 30-31); per-channel cfg flags 0
-            // (no directed scan, station vif → no n_aps_flag).
-            put_u32(buf, o, PHY_BAND_24 << CHAN_CFG_FLAGS_BAND_POS);
+            // iwl_mvm_umac_scan_cfg_channels_v7, version < 17 (our cmd_ver is 15):
+            // cfg.flags holds the directed-scan SSID bitmap (bits 0-19) — 0 for a
+            // passive station scan (no SSID, n_aps_flag only for P2P) — and the
+            // band rides in the v2.band BYTE (@ +5), NOT in flags bits 30-31.
+            // (The v17 path puts band in flags; doing that for v15 left band=0 =
+            // PHY_BAND_5/5GHz on 2.4GHz channels → BAD scan params → FW assert.)
+            // cfg.flags @ o stays 0 (zeroed buffer).
             buf[o + 4] = (i + 1) as u8; // channel_num 1..13
-            // band byte @ o+5 = 0 (v17 uses flags), iter_interval @ o+7 = 0
+            buf[o + 5] = PHY_BAND_24 as u8; // v2.band = 1 (2.4 GHz)
             buf[o + 6] = 1; // v2.iter_count
+            // v2.iter_interval @ o+7 = 0
         }
 
         // periodic_params: regular scan = one plan, one iteration.
@@ -1388,7 +1393,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.17.0 — legacy cmds → LONG_GROUP (BAD_COMMAND fix)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.18.0 — scan channel band fix (v15 v2.band)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
