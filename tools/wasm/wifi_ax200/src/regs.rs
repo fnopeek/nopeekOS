@@ -177,6 +177,41 @@ pub const UMAC_OFF_MAJOR: usize = 0; // __le32
 pub const UMAC_OFF_MINOR: usize = 4; // __le32
 pub const UMAC_OFF_ERR_INFO: usize = 8; // dbg_ptrs.error_info_addr
 
+// ── Stage 4b: host-command enqueue + init handshake ──────────────
+// TX command-queue write-pointer doorbell (iwl-csr.h, HBUS_BASE 0x400 + 0x60).
+pub const HBUS_TARG_WRPTR: u32 = 0x460;
+// Command queue id = IWL_MVM_DQA_CMD_QUEUE (BUILD_BUG_ON forces it to 0).
+pub const IWL_CMD_QUEUE_ID: u32 = 0;
+// iwl_cmd_header_wide (fw/api/cmdhdr.h): cmd, group_id, __le16 sequence,
+// __le16 length, reserved, version = 8 bytes.
+pub const CMD_HDR_WIDE_LEN: usize = 8;
+// IWL_FIRST_TB_SIZE (iwl-trans.h) — minimum bidirectional-DMA copy size; our
+// whole init command fits within it (single TB).
+pub const IWL_FIRST_TB_SIZE: usize = 20;
+pub const HDRW_OFF_CMD: usize = 0;
+pub const HDRW_OFF_GROUP: usize = 1;
+pub const HDRW_OFF_SEQ: usize = 2; // __le16
+pub const HDRW_OFF_LEN: usize = 4; // __le16 (payload length)
+// iwl_txq_inc_wrap wraps at max_tfd_queue_size (TFD_QUEUE_SIZE_MAX = 256).
+pub const MAX_TFD_QUEUE_SIZE: u32 = 256;
+// iwl_tfh_tb: tb_len(__le16) + addr(__le64, unaligned) = 10 bytes. A TFD with a
+// single TB needs num_tbs(__le16) + one tb = 12 bytes (rest of the 256 zeroed).
+pub const TFD_SINGLE_TB_LEN: usize = 12;
+
+// Command groups (fw/api/commands.h iwl_mvm_command_groups).
+pub const LONG_GROUP: u8 = 0x1;
+pub const SYSTEM_GROUP: u8 = 0x2;
+pub const REGULATORY_AND_NVM_GROUP: u8 = 0xc;
+// Init-flow command ids.
+pub const INIT_EXTENDED_CFG_CMD: u8 = 0x03; // SYSTEM_GROUP (fw/api/commands.h)
+pub const NVM_ACCESS_COMPLETE: u8 = 0x00; // REGULATORY_AND_NVM_GROUP (nvm-reg.h)
+pub const INIT_COMPLETE_NOTIF: u8 = 0x04; // legacy group 0 (commands.h)
+// iwl_init_extended_cfg_cmd.init_flags = BIT(IWL_INIT_NVM); IWL_INIT_NVM = 1.
+pub const IWL_INIT_NVM_FLAG: u32 = 1 << 1;
+
+// RX used_bd entry is a bare __le32 for family < AX210; low 12 bits = VID.
+pub const RX_VID_MASK: u32 = 0x0FFF;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability

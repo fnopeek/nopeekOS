@@ -70,6 +70,10 @@ struct Ax200 {
     // TX command queue DMA (iwl_pcie_txq_alloc, gen2).
     cmd_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_CMD_QUEUE_SIZE)
     cmd_first_tb: Dma, // first-TB staging buffers
+    cmd_write_ptr: u32, // txq->write_ptr for the command queue
+    // RX RB pool (vid v → rb_pool[v-1]) + our read index into the used-BD ring.
+    rb_pool: [Dma; RX_NUM_RBS],
+    rxq_read: u32,
 }
 
 impl Ax200 {
@@ -497,15 +501,12 @@ impl Ax200 {
     // advances rb_stts.closed_rb_num, which we poll.
     fn rx_restock_and_alive(&mut self) -> Option<Dma> {
         let mut bd = [0u8; RX_NUM_RBS * 8];
-        let mut rb0 = Dma::NONE;
         for i in 0..RX_NUM_RBS {
             let rb = self.alloc_dma(RB_SIZE_BYTES, "rb");
             if !rb.ok() {
                 return None;
             }
-            if i == 0 {
-                rb0 = rb;
-            }
+            self.rb_pool[i] = rb;
             // vid = i + 1; page is 4K-aligned so the low bits hold the vid.
             let entry = rb.phys | (i as u64 + 1);
             bd[i * 8..i * 8 + 8].copy_from_slice(&entry.to_le_bytes());
@@ -534,6 +535,16 @@ impl Ax200 {
         host::print("[ax200] RX active — closed_rb_num=0x");
         host::print_hex32(closed);
         host::print("\n");
+
+        // The FW reports each filled RB in the used-BD ring (vid). Read used_bd[0]
+        // to find which RB holds the first frame (iwl_pcie_get_rxb, < AX210 path).
+        let vid = host::dma_r32(self.rxq_used_bd.handle, 0) & RX_VID_MASK;
+        if vid == 0 || vid as usize > RX_NUM_RBS {
+            host::print("[ax200] bad RX vid\n");
+            return None;
+        }
+        let rb0 = self.rb_pool[vid as usize - 1];
+        self.rxq_read = 1; // consumed used_bd[0]
 
         // Dump the first RB header (iwl_rx_packet: len_n_flags, cmd, group_id).
         let mut hdr = [0u8; 8];
@@ -624,6 +635,109 @@ impl Ax200 {
         status == IWL_ALIVE_STATUS_OK
     }
 
+    // ── iwl_pcie_gen2_enqueue_hcmd (tx-gen2.c) — small single-TB cmd ──
+    // For our tiny init commands the whole command (iwl_cmd_header_wide +
+    // payload, ≤ IWL_FIRST_TB_SIZE = 20 bytes) fits in the first-TB staging
+    // buffer, so the TFD needs exactly one TB (no second mapped fragment, no
+    // byte-count table — enqueue_hcmd never touches the bc table). The command
+    // queue is DQA queue 0; seq = QUEUE_TO_SEQ(0) | INDEX_TO_SEQ(write_ptr).
+    fn send_hcmd(&mut self, group: u8, opcode: u8, payload: &[u8]) {
+        let wp = self.cmd_write_ptr;
+        let idx = (wp & (IWL_CMD_QUEUE_SIZE as u32 - 1)) as usize;
+
+        // Build the command: wide header (8 B) + payload.
+        let total = CMD_HDR_WIDE_LEN + payload.len();
+        let mut cmd = [0u8; IWL_FIRST_TB_SIZE];
+        cmd[HDRW_OFF_CMD] = opcode;
+        cmd[HDRW_OFF_GROUP] = group;
+        // sequence (queue 0): low byte = write_ptr index.
+        cmd[HDRW_OFF_SEQ..HDRW_OFF_SEQ + 2].copy_from_slice(&(wp as u16).to_le_bytes());
+        cmd[HDRW_OFF_LEN..HDRW_OFF_LEN + 2]
+            .copy_from_slice(&(payload.len() as u16).to_le_bytes());
+        // reserved (6) + version (7) stay 0.
+        cmd[CMD_HDR_WIDE_LEN..total].copy_from_slice(payload);
+
+        // Copy into the first-TB staging buffer for this slot.
+        let ftb_off = (idx * IWL_FIRST_TB_SIZE_ALIGN) as u32;
+        host::dma_write_buf(self.cmd_first_tb.handle, ftb_off, &cmd[..total]);
+        let tb_phys = self.cmd_first_tb.phys + (idx * IWL_FIRST_TB_SIZE_ALIGN) as u64;
+
+        // Build the TFD (num_tbs = 1; one TB pointing at the staging buffer).
+        let mut tfd = [0u8; TFD_SINGLE_TB_LEN];
+        tfd[0..2].copy_from_slice(&1u16.to_le_bytes()); // num_tbs
+        tfd[2..4].copy_from_slice(&(total as u16).to_le_bytes()); // tb_len
+        tfd[4..12].copy_from_slice(&tb_phys.to_le_bytes()); // addr (unaligned le64)
+        let tfd_off = (idx * TFH_TFD_SIZE) as u32;
+        host::dma_write_buf(self.cmd_tfd.handle, tfd_off, &tfd);
+        host::fence();
+
+        // iwl_txq_inc_wrap then iwl_txq_inc_wr_ptr: bump write_ptr (wrap at 256)
+        // and ring the doorbell with the new write_ptr | (queue_id << 16).
+        self.cmd_write_ptr = (wp + 1) & (MAX_TFD_QUEUE_SIZE - 1);
+        self.w32(HBUS_TARG_WRPTR, self.cmd_write_ptr | (IWL_CMD_QUEUE_ID << 16));
+
+        host::print("[ax200] hcmd sent: group=0x");
+        host::print_hex32(group as u32);
+        host::print(" cmd=0x");
+        host::print_hex32(opcode as u32);
+        host::print("\n");
+    }
+
+    // Drain newly-closed RBs from the used-BD ring, looking for a notification
+    // with the given cmd id in the legacy group (group 0). Returns true once it
+    // is seen. Mirrors the read-pointer walk of iwl_pcie_rx_handle (mq path):
+    // r = closed_rb_num, walk used_bd[read..r], vid → rb_pool[vid-1]. No RB
+    // recycling — 64 posted RBs are plenty for the handful of init frames.
+    fn drain_rx_for(&mut self, want_cmd: u8) -> bool {
+        host::fence();
+        let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
+        while self.rxq_read != r {
+            let i = self.rxq_read as usize;
+            let vid = host::dma_r32(self.rxq_used_bd.handle, (i * 4) as u32) & RX_VID_MASK;
+            if vid >= 1 && vid as usize <= RX_NUM_RBS {
+                let rb = self.rb_pool[vid as usize - 1];
+                let mut hdr = [0u8; 8];
+                host::dma_read_buf(rb.handle, 0, &mut hdr);
+                let cmd = hdr[4];
+                let grp = hdr[5];
+                host::print("[ax200]   RX cmd=0x");
+                host::print_hex32(cmd as u32);
+                host::print(" group=0x");
+                host::print_hex32(grp as u32);
+                host::print("\n");
+                if cmd == want_cmd && grp == 0 {
+                    self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
+                    return true;
+                }
+            }
+            self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
+        }
+        false
+    }
+
+    // ── iwl_run_unified_mvm_ucode post-alive init flow (mvm/fw.c) ──
+    // For unified ucode (AX200) the flow after ALIVE is: INIT_EXTENDED_CFG_CMD
+    // (declares we will send NVM access) → NVM_ACCESS_COMPLETE → wait for
+    // INIT_COMPLETE_NOTIF. PNVM load is skipped (sku_id empty), the external
+    // NVM file path is skipped (internal NVM), and iwl_send_phy_cfg_cmd is a
+    // no-op for unified ucode. So exactly two host commands, then the notif.
+    fn run_init_handshake(&mut self) -> bool {
+        // INIT_EXTENDED_CFG_CMD { __le32 init_flags = BIT(IWL_INIT_NVM) }
+        self.send_hcmd(SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD, &IWL_INIT_NVM_FLAG.to_le_bytes());
+        // NVM_ACCESS_COMPLETE { __le32 reserved = 0 }
+        self.send_hcmd(REGULATORY_AND_NVM_GROUP, NVM_ACCESS_COMPLETE, &0u32.to_le_bytes());
+
+        host::print("[ax200] init cmds sent, waiting for INIT_COMPLETE_NOTIF...\n");
+        for _ in 0..2000 {
+            if self.drain_rx_for(INIT_COMPLETE_NOTIF) {
+                return true;
+            }
+            host::sleep_ms(1);
+        }
+        host::print("[ax200] INIT_COMPLETE_NOTIF timeout\n");
+        false
+    }
+
     // Halt the firmware's DMA engines before the driver returns. The kernel
     // frees our DMA buffers on return; a still-running chip must not DMA into
     // them afterwards. sw_reset (CSR_RESET) stops the device.
@@ -670,7 +784,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.6.0 — Stage 4a (parse ALIVE ntfy)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.7.0 — Stage 4b (init handshake)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -704,6 +818,9 @@ pub extern "C" fn _start() {
         rxq_rb_stts: Dma::NONE,
         cmd_tfd: Dma::NONE,
         cmd_first_tb: Dma::NONE,
+        cmd_write_ptr: 0,
+        rb_pool: [Dma::NONE; RX_NUM_RBS],
+        rxq_read: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
@@ -754,6 +871,13 @@ pub extern "C" fn _start() {
                 // ── Stage 4a: parse the ALIVE notification struct ──
                 if dev.parse_alive_ntf(&rb0) {
                     host::print("[ax200] Stage 4a OK — firmware ALIVE valid (status OK)\n");
+
+                    // ── Stage 4b: init-flow host commands → INIT_COMPLETE ──
+                    if dev.run_init_handshake() {
+                        host::print("[ax200] Stage 4b OK — *** INIT_COMPLETE_NOTIF received *** 🎉\n");
+                    } else {
+                        host::print("[ax200] Stage 4b FAILED — no INIT_COMPLETE\n");
+                    }
                 } else {
                     host::print("[ax200] Stage 4a FAILED — firmware ALIVE not valid\n");
                 }
