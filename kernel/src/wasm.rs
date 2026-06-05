@@ -31,8 +31,9 @@ struct HwDriverState {
 }
 
 const MAX_MMIO_MAPS: usize = 4;
-const MAX_DMA_ALLOCS: usize = 64;
-const MAX_DMA_PAGES: usize = 256; // 1MB total
+const MAX_DMA_ALLOCS: usize = 128;
+const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
+const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 
 struct HostState {
     output: String,
@@ -2438,7 +2439,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 Some(h) => h,
                 None => return -1,
             };
-            if pages <= 0 || pages > 64 { return -1; }
+            if pages <= 0 || pages as usize > MAX_DMA_PAGES_PER_CALL { return -1; }
             let page_count = pages as usize;
             if hw.dma_allocs.len() >= MAX_DMA_ALLOCS { return -1; }
             let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
