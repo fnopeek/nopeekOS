@@ -85,6 +85,10 @@ struct Ax200 {
     rb_pool: [Dma; RX_NUM_RBS],
     rxq_read: u32,
     free_bd_write: u32,
+    // Firmware error-table SRAM pointers (from the ALIVE notification), for
+    // dumping the FW error log when a command/scan produces no response.
+    lmac_err_ptr: u32,
+    umac_err_ptr: u32,
 }
 
 impl Ax200 {
@@ -586,7 +590,7 @@ impl Ax200 {
     // pointers + sku_id. The sku_id gates the next stage: an all-zero
     // sku_id means PNVM load is skipped entirely (iwl_pnvm_load). Linux's
     // IMR / debug active-region bookkeeping is debug-only and is deferred.
-    fn parse_alive_ntf(&self, rb0: &Dma) -> bool {
+    fn parse_alive_ntf(&mut self, rb0: &Dma) -> bool {
         let mut p = [0u8; 160]; // len_n_flags(4) + hdr(4) + v6(144) = 152
         host::dma_read_buf(rb0.handle, 0, &mut p);
         let s = RX_PKT_DATA_OFF; // alive struct base
@@ -627,6 +631,9 @@ impl Ax200 {
         host::print("\n");
 
         let umac_err = rd32(u + UMAC_OFF_ERR_INFO) & !FW_ADDR_CACHE_CONTROL;
+        // Stash the error-table SRAM pointers for later error-log dumps.
+        self.lmac_err_ptr = rd32(l + LMAC_OFF_ERR_TABLE);
+        self.umac_err_ptr = umac_err;
         host::print("[ax200]   err tables: lmac=0x");
         host::print_hex32(rd32(l + LMAC_OFF_ERR_TABLE));
         host::print(" umac=0x");
@@ -975,7 +982,12 @@ impl Ax200 {
                 host::print_hex32(rd32(MCC_RESP_OFF_N_CHANNELS));
                 host::print("\n");
             }
-            None => host::print("[ax200]   MCC: no response (scan may stay blocked)\n"),
+            None => {
+                host::print("[ax200]   MCC: no response (scan may stay blocked)\n");
+                // No response to a CMD_WANT_SKB command is a strong sign the FW
+                // asserted on an earlier command — dump its error log.
+                self.dump_fw_error_log();
+            }
         }
     }
 
@@ -1163,7 +1175,79 @@ impl Ax200 {
         host::print("[ax200] SCAN_COMPLETE timeout — frames seen: 0x");
         host::print_hex32(frames);
         host::print("\n");
+        self.dump_fw_error_log();
         false
+    }
+
+    // ── iwl_pcie_grab_nic_access + iwl_trans_pcie_read_mem ────────
+    // Grab NIC access (so device SRAM is reachable) and read `out.len()` words
+    // from device memory at `addr` through the HBUS periphery window (the read
+    // data register auto-increments). Used only by the error-log dump.
+    fn grab_nic_access(&self) -> bool {
+        self.set_bit(CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+        for _ in 0..1500 {
+            let gp = self.r32(CSR_GP_CNTRL);
+            if gp & (CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY
+                | CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP)
+                == CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY
+            {
+                return true;
+            }
+            for _ in 0..64 {
+                core::hint::spin_loop();
+            }
+        }
+        false
+    }
+
+    fn read_mem(&self, addr: u32, out: &mut [u32]) {
+        self.w32(HBUS_TARG_MEM_RADDR, addr);
+        for w in out.iter_mut() {
+            *w = self.r32(HBUS_TARG_MEM_RDAT);
+        }
+    }
+
+    // ── iwl_mvm_dump_nic_error_log (mvm/utils.c) ──────────────────
+    // Read the lmac + umac error tables from device SRAM. valid != 0 means the
+    // firmware asserted; error_id classifies it and hcmd / last_cmd_id /
+    // cmd_header name the command the firmware faulted on.
+    fn dump_fw_error_log(&self) {
+        if self.lmac_err_ptr == 0 || !self.grab_nic_access() {
+            host::print("[ax200] err-log: no NIC access\n");
+            return;
+        }
+        let mut l = [0u32; LERR_WORDS];
+        self.read_mem(self.lmac_err_ptr, &mut l);
+        host::print("[ax200] LMAC err: valid=0x");
+        host::print_hex32(l[LERR_VALID]);
+        host::print(" id=0x");
+        host::print_hex32(l[LERR_ERROR_ID]);
+        host::print(" data1=0x");
+        host::print_hex32(l[LERR_DATA1]);
+        host::print(" data2=0x");
+        host::print_hex32(l[LERR_DATA2]);
+        host::print(" data3=0x");
+        host::print_hex32(l[LERR_DATA3]);
+        host::print(" hcmd=0x");
+        host::print_hex32(l[LERR_HCMD]);
+        host::print(" last_cmd=0x");
+        host::print_hex32(l[LERR_LAST_CMD_ID]);
+        host::print("\n");
+
+        if self.umac_err_ptr != 0 {
+            let mut u = [0u32; UERR_WORDS];
+            self.read_mem(self.umac_err_ptr, &mut u);
+            host::print("[ax200] UMAC err: valid=0x");
+            host::print_hex32(u[UERR_VALID]);
+            host::print(" id=0x");
+            host::print_hex32(u[UERR_ERROR_ID]);
+            host::print(" data1=0x");
+            host::print_hex32(u[UERR_DATA1]);
+            host::print(" cmd_hdr=0x");
+            host::print_hex32(u[UERR_CMD_HEADER]);
+            host::print("\n");
+        }
+        host::mmio_clr32(self.mmio, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
     }
 
     // Halt the firmware's DMA engines before the driver returns. The kernel
@@ -1294,7 +1378,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.15.0 — Stage 4d2b1d (full mvm_up pre-scan)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.16.0 — Stage 4d2b1d + FW error-log dump\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1333,6 +1417,8 @@ pub extern "C" fn _start() {
         rb_pool: [Dma::NONE; RX_NUM_RBS],
         rxq_read: 0,
         free_bd_write: 0,
+        lmac_err_ptr: 0,
+        umac_err_ptr: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
