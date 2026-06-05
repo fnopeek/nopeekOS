@@ -257,6 +257,15 @@ pub const ADD_STA: u8 = 0x18;
 pub const MAC_CONTEXT_CMD: u8 = 0x28;
 pub const TX_ANT_CONFIGURATION_CMD: u8 = 0x98;
 pub const SCAN_ITERATION_COMPLETE_UMAC: u8 = 0xb5;
+// Valid antenna mask (chains A+B). iwl_mvm_get_valid_tx_ant / iwl_mvm_scan_rx_ant
+// resolve to fw->valid_tx/rx_ant & nvm = 0x3 on this 2×2 AX200 (Stage 4c caps).
+pub const ANT_AB: u32 = 0x3;
+// iwl_scan_config (SCAN_CFG v5, fw/api/scan.h): enable_cam_mode, enable_promisc,
+// bcast_sta_id, reserved (all u8 → 0; v5 FW ignores bcast_sta_id), then
+// __le32 tx_chains, __le32 rx_chains. 12 bytes total.
+pub const SCAN_CFG_LEN: usize = 12;
+pub const SCAN_CFG_OFF_TX_CHAINS: usize = 4;
+pub const SCAN_CFG_OFF_RX_CHAINS: usize = 8;
 
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer

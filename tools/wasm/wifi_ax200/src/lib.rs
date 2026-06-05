@@ -804,6 +804,35 @@ impl Ax200 {
         true
     }
 
+    // ── Scan prerequisites from iwl_mvm_up (mvm/fw.c) ──────────────
+    // The hard pre-scan config commands. iwl_mvm_send_cmd_pdu is synchronous, so
+    // each command echoes a response through RX which we wait for. (The many
+    // best-effort / BIOS-gated commands in iwl_mvm_up — SAR, PPAG, TAS, RFI, BT
+    // coex tuning, power, RSS, SF — are deferred like op_mode_nic_config; they
+    // aren't needed for a scan to return APs.)
+    fn run_scan_prereqs(&mut self) -> bool {
+        // TX_ANT_CONFIGURATION_CMD (legacy group 0): valid tx antennas.
+        self.send_hcmd(0, TX_ANT_CONFIGURATION_CMD, &ANT_AB.to_le_bytes());
+        if self.wait_rx(TX_ANT_CONFIGURATION_CMD, 0, 500).is_none() {
+            host::print("[ax200] TX_ANT_CFG: no response\n");
+            return false;
+        }
+
+        // SCAN_CFG_CMD v5 (LONG_GROUP): reduced config — tx/rx antenna chains.
+        // bcast_sta_id stays 0 (v5 firmware no longer uses it).
+        let mut cfg = [0u8; SCAN_CFG_LEN];
+        cfg[SCAN_CFG_OFF_TX_CHAINS..SCAN_CFG_OFF_TX_CHAINS + 4]
+            .copy_from_slice(&ANT_AB.to_le_bytes());
+        cfg[SCAN_CFG_OFF_RX_CHAINS..SCAN_CFG_OFF_RX_CHAINS + 4]
+            .copy_from_slice(&ANT_AB.to_le_bytes());
+        self.send_hcmd(IWL_ALWAYS_LONG_GROUP, SCAN_CFG_CMD, &cfg);
+        if self.wait_rx(SCAN_CFG_CMD, IWL_ALWAYS_LONG_GROUP, 500).is_none() {
+            host::print("[ax200] SCAN_CFG: no response\n");
+            return false;
+        }
+        true
+    }
+
     // ── iwl_set_hw_address_from_csr / iwl_flip_hw_address ──────────
     // Read the 6-byte MAC from the STRAP registers; if the result isn't a valid
     // unicast address, fall back to the OTP registers.
@@ -925,7 +954,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.9.0 — Stage 4d1 (FW cmd versions)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.10.0 — Stage 4d2a (scan prereqs)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1031,6 +1060,13 @@ pub extern "C" fn _start() {
                             log_cmd_ver("TX_ANT_CFG    ", IWL_ALWAYS_LONG_GROUP, TX_ANT_CONFIGURATION_CMD);
                             log_cmd_ver("SCAN_COMPLETE ", IWL_ALWAYS_LONG_GROUP, SCAN_COMPLETE_UMAC);
                             host::print("[ax200] Stage 4d1 OK — cmd versions read\n");
+
+                            // ── Stage 4d2a: scan-config prerequisites ──
+                            if dev.run_scan_prereqs() {
+                                host::print("[ax200] Stage 4d2a OK — TX_ANT + SCAN_CFG accepted\n");
+                            } else {
+                                host::print("[ax200] Stage 4d2a FAILED\n");
+                            }
                         } else {
                             host::print("[ax200] Stage 4c FAILED — no NVM response\n");
                         }
