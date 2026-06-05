@@ -223,6 +223,23 @@ pub fn print_hex64(val: u64) {
     print(s);
 }
 
+/// Print an unsigned decimal number (for channel / count / RSSI magnitude).
+pub fn print_dec(mut val: u32) {
+    if val == 0 {
+        print("0");
+        return;
+    }
+    let mut buf = [0u8; 10];
+    let mut i = 10;
+    while val > 0 {
+        i -= 1;
+        buf[i] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
+    let s = unsafe { core::str::from_utf8_unchecked(&buf[i..]) };
+    print(s);
+}
+
 pub fn log_reg(name: &str, val: u32) {
     print("  ");
     print(name);
