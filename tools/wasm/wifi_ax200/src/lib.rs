@@ -80,9 +80,11 @@ struct Ax200 {
     cmd_first_tb: Dma, // first-TB staging buffers
     cmd_data: Dma,     // payload buffer for large (NOCOPY) commands → TB1
     cmd_write_ptr: u32, // txq->write_ptr for the command queue
-    // RX RB pool (vid v → rb_pool[v-1]) + our read index into the used-BD ring.
+    // RX RB pool (vid v → rb_pool[v-1]) + our read index into the used-BD ring
+    // + the free-BD ring write index (for recycling RBs during the scan).
     rb_pool: [Dma; RX_NUM_RBS],
     rxq_read: u32,
+    free_bd_write: u32,
 }
 
 impl Ax200 {
@@ -528,7 +530,8 @@ impl Ax200 {
         host::fence();
 
         // iwl_pcie_rxq_inc_wr_ptr: write_actual = round_down(write, 8).
-        let write_actual = (RX_NUM_RBS as u32) & !0x7;
+        self.free_bd_write = RX_NUM_RBS as u32; // 64 RBs posted at slots 0..63
+        let write_actual = self.free_bd_write & !0x7;
         self.w32(RFH_Q0_FRBDCB_WIDX_TRG, write_actual);
 
         host::print("[ax200] RX restocked, waiting for alive notification...\n");
@@ -885,6 +888,130 @@ impl Ax200 {
         host::print("\n");
     }
 
+    // ── iwl_pcie_rxmq_restock — recycle one consumed RB ────────────
+    // Re-post the RB identified by `vid` into the free-BD ring at the next write
+    // slot so the firmware can fill it again. The page is the same; only its
+    // ring position changes (bd[slot] = page_dma | vid, gen2 < AX210).
+    fn recycle_rb(&mut self, vid: u32) {
+        let slot = (self.free_bd_write & (NUM_RBDS as u32 - 1)) as usize;
+        let rb = self.rb_pool[vid as usize - 1];
+        let entry = rb.phys | vid as u64;
+        host::dma_write_buf(self.rxq_bd.handle, (slot * 8) as u32, &entry.to_le_bytes());
+        self.free_bd_write += 1;
+    }
+
+    // Push the recycled free-BD write index to the HW (round down to 8).
+    fn flush_free_bd(&self) {
+        host::fence();
+        self.w32(RFH_Q0_FRBDCB_WIDX_TRG, self.free_bd_write & !0x7);
+    }
+
+    // ── iwl_mvm_scan_umac_v14_and_above (mvm/scan.c, version 15) ────
+    // Build a passive regular scan over the 2.4 GHz channels (1..13) and send it
+    // as SCAN_REQ_UMAC. Passive (n_ssids = 0 → FORCE_PASSIVE) means no probe
+    // request is transmitted, so probe_params stays zeroed; PASS_ALL makes the
+    // firmware forward every beacon to the host. All general/channel parameters
+    // are filled exactly as the Linux fill helpers do (dwell 10/110, adwell
+    // 2/8/10, budget 300, EXT_6 priority, UNASSOC timing = 0, adaptive dwell).
+    fn build_scan_cmd(buf: &mut [u8]) {
+        // uid @ 0 = 0; ooc_priority + scan_priority = IWL_SCAN_PRIORITY_EXT_6.
+        put_u32(buf, SC_OFF_OOC_PRIORITY, SCAN_OOC_PRIORITY_REGULAR);
+
+        // general_params_v11
+        put_u16(buf, SC_OFF_GP_FLAGS, SCAN_GP_FLAGS_PASSIVE);
+        buf[SC_OFF_GP_ACTIVE_DWELL] = IWL_SCAN_DWELL_ACTIVE; // LB
+        buf[SC_OFF_GP_ACTIVE_DWELL + 1] = IWL_SCAN_DWELL_ACTIVE; // HB
+        buf[SC_OFF_GP_ADWELL_2G] = ADWELL_DEFAULT_LB_N_APS;
+        buf[SC_OFF_GP_ADWELL_5G] = ADWELL_DEFAULT_HB_N_APS;
+        buf[SC_OFF_GP_ADWELL_SOCIAL] = ADWELL_DEFAULT_N_APS_SOCIAL;
+        // flags2 @ 17 = 0
+        put_u16(buf, SC_OFF_GP_ADWELL_BUDGET, ADWELL_MAX_BUDGET_FULL);
+        // max_out_of_time / suspend_time = 0 (UNASSOC timing)
+        put_u32(buf, SC_OFF_GP_SCAN_PRIO, SCAN_OOC_PRIORITY_REGULAR);
+        buf[SC_OFF_GP_PASSIVE_DWELL] = IWL_SCAN_DWELL_PASSIVE; // LB
+        buf[SC_OFF_GP_PASSIVE_DWELL + 1] = IWL_SCAN_DWELL_PASSIVE; // HB
+        // num_of_fragments = 0
+
+        // channel_params_v7
+        buf[SC_OFF_CP_FLAGS] = SCAN_CHAN_FLAG_ENABLE_CHAN_ORDER;
+        buf[SC_OFF_CP_COUNT] = SCAN_24G_CHANNELS;
+        buf[SC_OFF_CP_N_APS_OVERRIDE] = SCAN_N_APS_GO_FRIENDLY;
+        buf[SC_OFF_CP_N_APS_OVERRIDE + 1] = SCAN_N_APS_SOCIAL_CHS;
+        for i in 0..SCAN_24G_CHANNELS as usize {
+            let o = SC_OFF_CP_CHANNELS + i * SCAN_CH_CFG_LEN;
+            // v17: band rides in flags (bits 30-31); per-channel cfg flags 0
+            // (no directed scan, station vif → no n_aps_flag).
+            put_u32(buf, o, PHY_BAND_24 << CHAN_CFG_FLAGS_BAND_POS);
+            buf[o + 4] = (i + 1) as u8; // channel_num 1..13
+            // band byte @ o+5 = 0 (v17 uses flags), iter_interval @ o+7 = 0
+            buf[o + 6] = 1; // v2.iter_count
+        }
+
+        // periodic_params: regular scan = one plan, one iteration.
+        buf[SC_OFF_PERIODIC_SCHED0_ITER] = 1;
+        // probe_params: zeroed (passive scan, no probe request transmitted).
+    }
+
+    // Send the scan and run a resident loop (npk_sleep yields — never input_wait)
+    // that drains the RX ring, recycles every consumed RB so the firmware never
+    // runs dry, counts the forwarded beacons/probe-responses, and returns when
+    // SCAN_COMPLETE_UMAC arrives.
+    fn run_scan(&mut self) -> bool {
+        let mut buf = [0u8; SCAN_CMD_LEN];
+        Self::build_scan_cmd(&mut buf);
+        self.send_hcmd(IWL_ALWAYS_LONG_GROUP, SCAN_REQ_UMAC, &buf);
+        host::print("[ax200] SCAN_REQ_UMAC sent (passive, 2.4GHz ch1-13), scanning...\n");
+
+        let mut frames = 0u32;
+        for _ in 0..8000 {
+            host::fence();
+            let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
+            let mut recycled = false;
+            while self.rxq_read != r {
+                let i = self.rxq_read as usize;
+                let vid =
+                    host::dma_r32(self.rxq_used_bd.handle, (i * 4) as u32) & RX_VID_MASK;
+                if vid >= 1 && vid as usize <= RX_NUM_RBS {
+                    let rb = self.rb_pool[vid as usize - 1];
+                    let mut hdr = [0u8; 8];
+                    host::dma_read_buf(rb.handle, 0, &mut hdr);
+                    let cmd = hdr[4];
+                    let grp = hdr[5];
+                    if cmd == SCAN_COMPLETE_UMAC && grp == 0 {
+                        self.recycle_rb(vid);
+                        self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
+                        self.flush_free_bd();
+                        host::print("[ax200] SCAN_COMPLETE_UMAC received — frames seen: 0x");
+                        host::print_hex32(frames);
+                        host::print("\n");
+                        return true;
+                    }
+                    // Log the first few frames (beacons/probe responses arrive
+                    // as REPLY_RX_MPDU_CMD 0xc1, group 0).
+                    if frames < 8 {
+                        host::print("[ax200]   scan RX cmd=0x");
+                        host::print_hex32(cmd as u32);
+                        host::print(" group=0x");
+                        host::print_hex32(grp as u32);
+                        host::print("\n");
+                    }
+                    frames += 1;
+                    self.recycle_rb(vid);
+                    recycled = true;
+                }
+                self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
+            }
+            if recycled {
+                self.flush_free_bd();
+            }
+            host::sleep_ms(1);
+        }
+        host::print("[ax200] SCAN_COMPLETE timeout — frames seen: 0x");
+        host::print_hex32(frames);
+        host::print("\n");
+        false
+    }
+
     // Halt the firmware's DMA engines before the driver returns. The kernel
     // frees our DMA buffers on return; a still-running chip must not DMA into
     // them afterwards. sw_reset (CSR_RESET) stops the device.
@@ -988,7 +1115,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.11.0 — Stage 4d2 (multi-TB hcmd)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.12.0 — Stage 4d2b1 (passive scan)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1026,6 +1153,7 @@ pub extern "C" fn _start() {
         cmd_write_ptr: 0,
         rb_pool: [Dma::NONE; RX_NUM_RBS],
         rxq_read: 0,
+        free_bd_write: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
@@ -1099,6 +1227,13 @@ pub extern "C" fn _start() {
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
                             host::print("[ax200] Stage 4d2a OK — TX_ANT + SCAN_CFG sent\n");
+
+                            // ── Stage 4d2b1: passive scan → SCAN_COMPLETE ──
+                            if dev.run_scan() {
+                                host::print("[ax200] Stage 4d2b1 OK — *** SCAN COMPLETE *** 🎉\n");
+                            } else {
+                                host::print("[ax200] Stage 4d2b1 FAILED — no SCAN_COMPLETE\n");
+                            }
                         } else {
                             host::print("[ax200] Stage 4c FAILED — no NVM response\n");
                         }
