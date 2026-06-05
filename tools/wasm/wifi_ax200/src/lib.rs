@@ -47,6 +47,14 @@ fn encode_bits(v: u32, mask: u32) -> u32 {
     (v << mask.trailing_zeros()) & mask
 }
 
+/// Write transfer block `i` (iwl_tfh_tb { __le16 tb_len; __le64 addr }) into a
+/// TFD. tbs[] start at offset 2 (after num_tbs); addr is stored unaligned.
+fn put_tfh_tb(tfd: &mut [u8], i: usize, len: u16, addr: u64) {
+    let o = 2 + i * TFH_TB_LEN;
+    tfd[o..o + 2].copy_from_slice(&len.to_le_bytes());
+    tfd[o + 2..o + 10].copy_from_slice(&addr.to_le_bytes());
+}
+
 /// A coherent DMA allocation: kernel-held physical address + WASM handle.
 #[derive(Clone, Copy)]
 struct Dma {
@@ -70,6 +78,7 @@ struct Ax200 {
     // TX command queue DMA (iwl_pcie_txq_alloc, gen2).
     cmd_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_CMD_QUEUE_SIZE)
     cmd_first_tb: Dma, // first-TB staging buffers
+    cmd_data: Dma,     // payload buffer for large (NOCOPY) commands → TB1
     cmd_write_ptr: u32, // txq->write_ptr for the command queue
     // RX RB pool (vid v → rb_pool[v-1]) + our read index into the used-BD ring.
     rb_pool: [Dma; RX_NUM_RBS],
@@ -315,7 +324,11 @@ impl Ax200 {
         let slots = IWL_CMD_QUEUE_SIZE; // max(IWL_CMD_QUEUE_SIZE, min_txq_size=0)
         self.cmd_tfd = self.alloc_dma(TFH_TFD_SIZE * slots, "cmd.tfd");
         self.cmd_first_tb = self.alloc_dma(IWL_FIRST_TB_SIZE_ALIGN * slots, "cmd.first_tb");
-        self.cmd_tfd.ok() && self.cmd_first_tb.ok()
+        // Payload buffer for large host commands: their bulk is mapped as a
+        // second TB (NOCOPY) instead of being copied into the cmd buffer. One
+        // page covers the largest command we build (SCAN_REQ_UMAC ~1.7 KB).
+        self.cmd_data = self.alloc_dma(CMD_DATA_BYTES, "cmd.data");
+        self.cmd_tfd.ok() && self.cmd_first_tb.ok() && self.cmd_data.ok()
     }
 
     // ── iwl_pcie_gen2_nic_init (trans-gen2.c) ───────────────────
@@ -635,38 +648,53 @@ impl Ax200 {
         status == IWL_ALIVE_STATUS_OK
     }
 
-    // ── iwl_pcie_gen2_enqueue_hcmd (tx-gen2.c) — small single-TB cmd ──
-    // For our tiny init commands the whole command (iwl_cmd_header_wide +
-    // payload, ≤ IWL_FIRST_TB_SIZE = 20 bytes) fits in the first-TB staging
-    // buffer, so the TFD needs exactly one TB (no second mapped fragment, no
-    // byte-count table — enqueue_hcmd never touches the bc table). The command
-    // queue is DQA queue 0; seq = QUEUE_TO_SEQ(0) | INDEX_TO_SEQ(write_ptr).
+    // ── iwl_pcie_gen2_enqueue_hcmd (tx-gen2.c) ──────────────────
+    // Enqueue a host command. The iwl_cmd_header_wide (8 B) + payload is laid
+    // out across one or two TBs exactly as the Linux enqueue does:
+    //   - The first IWL_FIRST_TB_SIZE (20) bytes of the command (header + the
+    //     leading payload bytes) always go into the per-slot first-TB staging
+    //     buffer as TB0 (it is the bidirectional-DMA buffer the HW writes back).
+    //   - If the command is larger, the remaining payload is mapped as TB1
+    //     pointing into the cmd_data buffer (this is the IWL_HCMD_DFL_NOCOPY
+    //     path large commands like SCAN_REQ_UMAC use; the byte-count table is
+    //     never touched by enqueue_hcmd). The command queue is DQA queue 0;
+    //     seq = QUEUE_TO_SEQ(0) | INDEX_TO_SEQ(write_ptr).
     fn send_hcmd(&mut self, group: u8, opcode: u8, payload: &[u8]) {
         let wp = self.cmd_write_ptr;
         let idx = (wp & (IWL_CMD_QUEUE_SIZE as u32 - 1)) as usize;
-
-        // Build the command: wide header (8 B) + payload.
         let total = CMD_HDR_WIDE_LEN + payload.len();
-        let mut cmd = [0u8; IWL_FIRST_TB_SIZE];
-        cmd[HDRW_OFF_CMD] = opcode;
-        cmd[HDRW_OFF_GROUP] = group;
-        // sequence (queue 0): low byte = write_ptr index.
-        cmd[HDRW_OFF_SEQ..HDRW_OFF_SEQ + 2].copy_from_slice(&(wp as u16).to_le_bytes());
-        cmd[HDRW_OFF_LEN..HDRW_OFF_LEN + 2]
+
+        // first-TB staging: wide header (8 B) + up to FIRST_TB_HEAD_MAX (12)
+        // payload bytes, capped at IWL_FIRST_TB_SIZE (20).
+        let head = payload.len().min(FIRST_TB_HEAD_MAX);
+        let tb0_len = CMD_HDR_WIDE_LEN + head;
+        let mut ftb = [0u8; IWL_FIRST_TB_SIZE];
+        ftb[HDRW_OFF_CMD] = opcode;
+        ftb[HDRW_OFF_GROUP] = group;
+        ftb[HDRW_OFF_SEQ..HDRW_OFF_SEQ + 2].copy_from_slice(&(wp as u16).to_le_bytes());
+        ftb[HDRW_OFF_LEN..HDRW_OFF_LEN + 2]
             .copy_from_slice(&(payload.len() as u16).to_le_bytes());
         // reserved (6) + version (7) stay 0.
-        cmd[CMD_HDR_WIDE_LEN..total].copy_from_slice(payload);
-
-        // Copy into the first-TB staging buffer for this slot.
+        ftb[CMD_HDR_WIDE_LEN..tb0_len].copy_from_slice(&payload[..head]);
         let ftb_off = (idx * IWL_FIRST_TB_SIZE_ALIGN) as u32;
-        host::dma_write_buf(self.cmd_first_tb.handle, ftb_off, &cmd[..total]);
-        let tb_phys = self.cmd_first_tb.phys + (idx * IWL_FIRST_TB_SIZE_ALIGN) as u64;
+        host::dma_write_buf(self.cmd_first_tb.handle, ftb_off, &ftb[..tb0_len]);
+        let tb0_phys = self.cmd_first_tb.phys + (idx * IWL_FIRST_TB_SIZE_ALIGN) as u64;
 
-        // Build the TFD (num_tbs = 1; one TB pointing at the staging buffer).
-        let mut tfd = [0u8; TFD_SINGLE_TB_LEN];
-        tfd[0..2].copy_from_slice(&1u16.to_le_bytes()); // num_tbs
-        tfd[2..4].copy_from_slice(&(total as u16).to_le_bytes()); // tb_len
-        tfd[4..12].copy_from_slice(&tb_phys.to_le_bytes()); // addr (unaligned le64)
+        // Build the TFD: TB0 = staging buffer; TB1 (if any) = the remaining
+        // payload mapped from cmd_data. iwl_tfh_tfd: num_tbs @0, then 10-byte
+        // TBs {tb_len __le16, addr __le64}.
+        let mut tfd = [0u8; TFH_TFD_SIZE];
+        put_tfh_tb(&mut tfd, 0, tb0_len as u16, tb0_phys);
+        let num_tbs = if total > IWL_FIRST_TB_SIZE {
+            // remaining payload → cmd_data, mapped as TB1 (NOCOPY semantics).
+            host::dma_write_buf(self.cmd_data.handle, 0, payload);
+            let rest = payload.len() - head;
+            put_tfh_tb(&mut tfd, 1, rest as u16, self.cmd_data.phys + head as u64);
+            2u16
+        } else {
+            1u16
+        };
+        tfd[0..2].copy_from_slice(&num_tbs.to_le_bytes());
         let tfd_off = (idx * TFH_TFD_SIZE) as u32;
         host::dma_write_buf(self.cmd_tfd.handle, tfd_off, &tfd);
         host::fence();
@@ -960,7 +988,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.10.1 — Stage 4d2a (scan prereqs)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.11.0 — Stage 4d2 (multi-TB hcmd)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -994,6 +1022,7 @@ pub extern "C" fn _start() {
         rxq_rb_stts: Dma::NONE,
         cmd_tfd: Dma::NONE,
         cmd_first_tb: Dma::NONE,
+        cmd_data: Dma::NONE,
         cmd_write_ptr: 0,
         rb_pool: [Dma::NONE; RX_NUM_RBS],
         rxq_read: 0,
