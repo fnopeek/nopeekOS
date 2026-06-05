@@ -382,6 +382,55 @@ pub const MCC_RESP_OFF_STATUS: usize = 0;
 pub const MCC_RESP_OFF_MCC: usize = 4;
 pub const MCC_RESP_OFF_N_CHANNELS: usize = 20;
 
+// ── Stage 4d2b1d: the rest of the mandatory iwl_mvm_up pre-scan cmds ──
+// The full sequence iwl_mvm_up runs between ALIVE and config_scan, faithfully:
+// TX_ANT → BT coex → SOC latency → DQA → device power → MCC → SCAN_CFG.
+// configure_rxq + rss_cfg are no-ops for num_rxqs==1 (both return early); the
+// BIOS/ACPI-gated cmds (lari/ppag/sar/sgom/tas) send nothing without platform
+// tables (e.g. ppag !approved → return 0, sgom !enabled → return 0), exactly
+// as Linux on a machine without them; the post-config_scan tuning isn't a scan
+// prerequisite. The cap-gated ones below check the firmware capability bitmap.
+pub const DATA_PATH_GROUP: u8 = 0x5; // fw/api/commands.h (SYSTEM_GROUP = 0x2 above)
+
+// iwl_mvm_send_bt_init_conf (mvm/coex.c): BT_CONFIG, legacy group, struct
+// iwl_bt_coex_cmd { __le32 mode; __le32 enabled_modules } = 8 bytes.
+pub const BT_CONFIG: u8 = 0x9b;
+pub const BT_COEX_CMD_LEN: usize = 8;
+pub const BT_COEX_NW: u32 = 0x1; // enum: mode = network-coexistence
+pub const BT_COEX_SYNC2SCO_ENABLED: u32 = 1 << 2; // IWL_MVM_BT_COEX_SYNC2SCO=1 → always
+pub const BT_COEX_MPLUT_ENABLED: u32 = 1 << 0; // only if BT_MPLUT_SUPPORT cap
+pub const BT_COEX_HIGH_BAND_RET: u32 = 1 << 4; // always
+
+// iwl_set_soc_latency (fw/init.c): SOC_CONFIGURATION_CMD in SYSTEM_GROUP, struct
+// iwl_soc_configuration_cmd { __le32 flags; __le32 latency } = 8 bytes. AX200 is
+// a discrete card (mac_cfg.integrated unset) → flags = DISCRETE, latency = 0.
+// Gated by the SOC_LATENCY_SUPPORT capability.
+pub const SOC_CONFIGURATION_CMD: u8 = 0x01;
+pub const SOC_CONFIG_CMD_LEN: usize = 8;
+pub const SOC_CONFIG_CMD_FLAGS_DISCRETE: u32 = 1 << 0;
+
+// iwl_mvm_send_dqa_cmd (mvm/fw.c): DQA_ENABLE_CMD in DATA_PATH_GROUP, struct
+// iwl_dqa_enable_cmd { __le32 cmd_queue } = 4 bytes. cmd_queue = the command
+// queue id (IWL_MVM_DQA_CMD_QUEUE = 0 = IWL_CMD_QUEUE_ID). Gated by DQA_SUPPORT.
+pub const DQA_ENABLE_CMD: u8 = 0x0;
+pub const DQA_ENABLE_CMD_LEN: usize = 4;
+
+// iwl_mvm_power_update_device (mvm/power.c): POWER_TABLE_CMD, legacy group,
+// struct iwl_device_power_cmd { __le16 flags; __le16 reserved } = 4 bytes. The
+// default power scheme is BPS (not CAM) so power-save is enabled.
+pub const POWER_TABLE_CMD: u8 = 0x77;
+pub const DEVICE_POWER_CMD_LEN: usize = 4;
+pub const DEVICE_POWER_FLAGS_POWER_SAVE_ENA: u16 = 1 << 0;
+
+// FW capability bitmap (IWL_UCODE_TLV_ENABLED_CAPABILITIES = 30, fw/file.h).
+// Each such TLV is struct iwl_ucode_capa { __le32 api_index; __le32 api_capa };
+// capability bit N is set iff a TLV has api_index == N/32 and bit (N%32) in
+// api_capa (iwl-drv.c iwl_set_ucode_capabilities). Bit numbers from fw/file.h.
+pub const IWL_UCODE_TLV_ENABLED_CAPABILITIES: u32 = 30;
+pub const CAPA_DQA_SUPPORT: u32 = 12;
+pub const CAPA_SOC_LATENCY_SUPPORT: u32 = 37;
+pub const CAPA_BT_MPLUT_SUPPORT: u32 = 67;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
