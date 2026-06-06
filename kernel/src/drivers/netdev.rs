@@ -22,6 +22,11 @@ struct WasmNic {
     /// RX mailbox: WASM driver writes received frames here for the kernel
     rx_buf: [u8; MTU],
     rx_len: u16,
+    /// Carrier/link state, set by the driver via npk_netdev_set_link. For a
+    /// WiFi NIC this is "associated + keyed" (data path live), distinct from
+    /// mere registration. A wired NIC has no such notion (always linked once
+    /// present), so this only refines the WASM NIC's reported state.
+    link_up: bool,
 }
 
 impl WasmNic {
@@ -32,6 +37,7 @@ impl WasmNic {
             tx_len: 0,
             rx_buf: [0; MTU],
             rx_len: 0,
+            link_up: false,
         }
     }
 }
@@ -42,16 +48,28 @@ pub fn register_wasm_nic(mac: [u8; 6]) {
     nic.mac_addr = mac;
     nic.tx_len = 0;
     nic.rx_len = 0;
+    nic.link_up = false;
     WASM_NIC_ACTIVE.store(true, Ordering::Release);
 }
 
 /// Called by cleanup_hw_state when WASM driver exits
 pub fn unregister_wasm_nic() {
+    WASM_NIC.lock().link_up = false;
     WASM_NIC_ACTIVE.store(false, Ordering::Release);
 }
 
 pub fn wasm_nic_available() -> bool {
     WASM_NIC_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Driver reports its carrier/link state (associated + keyed) via
+/// npk_netdev_set_link. Lets `net` show a real UP/DOWN for `wlan`.
+pub fn set_wasm_nic_link(up: bool) {
+    WASM_NIC.lock().link_up = up;
+}
+
+pub fn wasm_nic_link_up() -> bool {
+    wasm_nic_available() && WASM_NIC.lock().link_up
 }
 
 /// WASM driver calls this to submit a received frame to the kernel network stack
@@ -130,6 +148,9 @@ pub struct IfaceInfo {
     pub mac: [u8; 6],
     /// True for the interface that carries the global IP/Gateway/DNS config.
     pub primary: bool,
+    /// Carrier/link state. Wired NICs are linked once present; the WiFi NIC is
+    /// linked only once associated + keyed (driver reports via set_wasm_nic_link).
+    pub link_up: bool,
 }
 
 /// List all active network interfaces. The first UP interface (Intel → WASM → virtio)
@@ -140,24 +161,24 @@ pub fn list() -> alloc::vec::Vec<IfaceInfo> {
 
     if intel_nic::is_available() {
         if let Some(mac) = intel_nic::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: !primary_taken });
+            v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: !primary_taken, link_up: true });
             primary_taken = true;
         }
     }
     if rtl8153::is_available() {
         if let Some(mac) = rtl8153::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: !primary_taken });
+            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: !primary_taken, link_up: true });
             primary_taken = true;
         }
     }
     if wasm_nic_available() {
         let mac = WASM_NIC.lock().mac_addr;
-        v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: !primary_taken });
+        v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: !primary_taken, link_up: wasm_nic_link_up() });
         primary_taken = true;
     }
     if virtio_net::is_available() {
         if let Some(mac) = virtio_net::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "virtio-net", mac, primary: !primary_taken });
+            v.push(IfaceInfo { name: "eth", driver: "virtio-net", mac, primary: !primary_taken, link_up: true });
         }
     }
     v
