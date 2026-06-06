@@ -107,6 +107,8 @@ struct Ax200 {
     scan_chans: [u8; SCAN_MAX_CHANS], // channel numbers
     scan_bands: [u8; SCAN_MAX_CHANS], // PHY_BAND_24 / PHY_BAND_5 per channel
     n_scan_chans: usize,
+    // The card's MAC address (from the CSR strap/OTP), for netdev registration.
+    mac: [u8; 6],
 }
 
 impl Ax200 {
@@ -866,7 +868,7 @@ impl Ax200 {
         host::print_hex32(rd32(NVM_OFF_LAR));
         host::print("\n");
 
-        self.log_mac_address();
+        self.read_mac_address();
 
         // ── Build the scan channel list from the regulatory section ──
         // iwl_init_channel_map (iwl-nvm-parse.c): walk iwl_ext_nvm_channels,
@@ -1098,20 +1100,26 @@ impl Ax200 {
 
     // ── iwl_set_hw_address_from_csr / iwl_flip_hw_address ──────────
     // Read the 6-byte MAC from the STRAP registers; if the result isn't a valid
-    // unicast address, fall back to the OTP registers.
-    fn log_mac_address(&self) {
+    // unicast address, fall back to the OTP registers. Store it for netdev
+    // registration and log it.
+    fn read_mac_address(&mut self) {
         let mut mac = mac_from_regs(self.r32(CSR_MAC_ADDR0_STRAP), self.r32(CSR_MAC_ADDR1_STRAP));
         if !is_valid_mac(&mac) {
             mac = mac_from_regs(self.r32(CSR_MAC_ADDR0_OTP), self.r32(CSR_MAC_ADDR1_OTP));
         }
+        self.mac = mac;
         host::print("[ax200]   MAC address: ");
+        Self::print_mac(&mac);
+        host::print("\n");
+    }
+
+    fn print_mac(mac: &[u8; 6]) {
         for i in 0..6 {
             if i != 0 {
                 host::print(":");
             }
             host::print_hex8(mac[i]);
         }
-        host::print("\n");
     }
 
     // ── iwl_pcie_rxmq_restock — recycle one consumed RB ────────────
@@ -1195,7 +1203,7 @@ impl Ax200 {
     // (addr3), the SSID (IE 0), the RSSI (max of the two energy chains, negated
     // to dBm), and the channel, de-duplicating by BSSID. Only beacon / probe-
     // response management frames carry these, so other subtypes are skipped.
-    fn parse_beacon(&self, rb: &Dma, aps: &mut [Ap], n_aps: &mut usize) {
+    fn parse_beacon(rb: &Dma, aps: &mut [Ap], n_aps: &mut usize) {
         let mut buf = [0u8; 384];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF; // iwl_rx_mpdu_desc base
@@ -1287,10 +1295,44 @@ impl Ax200 {
         }
     }
 
-    // Send the scan and run a resident loop (npk_sleep yields — never input_wait)
-    // that drains the RX ring, recycles every consumed RB so the firmware never
-    // runs dry, counts the forwarded beacons/probe-responses, and returns when
-    // SCAN_COMPLETE_UMAC arrives.
+    // ── iwl_pcie_rx_handle — service the multi-queue RX ring ──────
+    // Drain every RB the firmware has closed since our last read, recycling
+    // each one back into the free-BD ring so the firmware never runs dry.
+    // `on_frame(cmd, group, &rb)` runs for each frame and returns `false` to
+    // stop draining early (a terminal notification). Returns the number of
+    // frames seen. Shared by the scan loop and the resident NIC service loop —
+    // the one place that walks used_bd → rb_pool → recycle.
+    fn service_rx<F: FnMut(u8, u8, &Dma) -> bool>(&mut self, mut on_frame: F) -> u32 {
+        host::fence();
+        let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
+        let mut frames = 0u32;
+        let mut recycled = false;
+        let mut stop = false;
+        while self.rxq_read != r && !stop {
+            let i = self.rxq_read as usize;
+            let vid = host::dma_r32(self.rxq_used_bd.handle, (i * 4) as u32) & RX_VID_MASK;
+            if vid >= 1 && vid as usize <= RX_NUM_RBS {
+                let rb = self.rb_pool[vid as usize - 1];
+                let mut hdr = [0u8; 8];
+                host::dma_read_buf(rb.handle, 0, &mut hdr);
+                frames += 1;
+                if !on_frame(hdr[4], hdr[5], &rb) {
+                    stop = true;
+                }
+                self.recycle_rb(vid);
+                recycled = true;
+            }
+            self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
+        }
+        if recycled {
+            self.flush_free_bd();
+        }
+        frames
+    }
+
+    // Send the scan and poll the RX ring (npk_sleep yields — never input_wait)
+    // until SCAN_COMPLETE_UMAC arrives, parsing every beacon / probe response
+    // into the AP list along the way.
     fn run_scan(&mut self) -> bool {
         let mut buf = [0u8; SCAN_CMD_LEN];
         self.build_scan_cmd(&mut buf);
@@ -1302,45 +1344,29 @@ impl Ax200 {
         let mut frames = 0u32;
         let mut aps = [Ap::EMPTY; MAX_APS];
         let mut n_aps = 0usize;
+        let mut completed = false;
         // ~12 s budget: a passive scan of both bands (up to ~40 channels at
         // 110 ms dwell) takes longer than the 2.4-GHz-only scan did.
         for _ in 0..12000 {
-            host::fence();
-            let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
-            let mut recycled = false;
-            while self.rxq_read != r {
-                let i = self.rxq_read as usize;
-                let vid =
-                    host::dma_r32(self.rxq_used_bd.handle, (i * 4) as u32) & RX_VID_MASK;
-                if vid >= 1 && vid as usize <= RX_NUM_RBS {
-                    let rb = self.rb_pool[vid as usize - 1];
-                    let mut hdr = [0u8; 8];
-                    host::dma_read_buf(rb.handle, 0, &mut hdr);
-                    let cmd = hdr[4];
-                    let grp = hdr[5];
-                    if cmd == SCAN_COMPLETE_UMAC && grp == 0 {
-                        self.recycle_rb(vid);
-                        self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
-                        self.flush_free_bd();
-                        host::print("[ax200] SCAN_COMPLETE_UMAC received — frames seen: ");
-                        host::print_dec(frames);
-                        host::print("\n");
-                        Self::print_aps(&aps, n_aps);
-                        return true;
-                    }
-                    // Beacons / probe responses arrive as REPLY_RX_MPDU_CMD
-                    // (0xc1, LEGACY_GROUP) — parse them into the AP list.
-                    if cmd == REPLY_RX_MPDU_CMD && grp == 0 {
-                        self.parse_beacon(&rb, &mut aps, &mut n_aps);
-                    }
-                    frames += 1;
-                    self.recycle_rb(vid);
-                    recycled = true;
+            self.service_rx(|cmd, grp, rb| {
+                if cmd == SCAN_COMPLETE_UMAC && grp == 0 {
+                    completed = true;
+                    return false; // stop draining; the scan is done
                 }
-                self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
-            }
-            if recycled {
-                self.flush_free_bd();
+                // Beacons / probe responses arrive as REPLY_RX_MPDU_CMD
+                // (0xc1, LEGACY_GROUP) — parse them into the AP list.
+                if cmd == REPLY_RX_MPDU_CMD && grp == 0 {
+                    Self::parse_beacon(rb, &mut aps, &mut n_aps);
+                }
+                frames += 1;
+                true
+            });
+            if completed {
+                host::print("[ax200] SCAN_COMPLETE_UMAC received — frames seen: ");
+                host::print_dec(frames);
+                host::print("\n");
+                Self::print_aps(&aps, n_aps);
+                return true;
             }
             host::sleep_ms(1);
         }
@@ -1349,6 +1375,31 @@ impl Ax200 {
         host::print("\n");
         self.dump_fw_error_log();
         false
+    }
+
+    // ── Resident NIC service loop ─────────────────────────────────
+    // The chip is up and the scan has run; register as a network interface and
+    // own the card from here. Same shape as aml.wasm: an infinite loop that
+    // does the driver's work and yields via npk_sleep — never returns (the
+    // driver holds its DMA + the netdev registration for its lifetime). Frame
+    // bridging to the kernel netdev mailboxes (TX poll / RX submit) plugs into
+    // this loop once association brings up the data path.
+    fn run_netdev(&mut self) -> ! {
+        let mac = self.mac;
+        if host::netdev_register(&mac) == 0 {
+            host::print("[ax200] registered as network interface 'wlan' (");
+            Self::print_mac(&mac);
+            host::print(")\n");
+        } else {
+            host::print("[ax200] netdev_register failed\n");
+        }
+        loop {
+            // Keep the RX ring drained + recycled so the firmware never stalls.
+            // (No data frames flow until association; this drains stray
+            // management / notification frames.)
+            self.service_rx(|_cmd, _grp, _rb| true);
+            host::sleep_ms(100);
+        }
     }
 
     // ── iwl_pcie_grab_nic_access + iwl_trans_pcie_read_mem ────────
@@ -1550,7 +1601,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.20.0 — NVM channels (2.4 + 5 GHz scan)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.21.0 — netdev register + resident NIC\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1594,6 +1645,7 @@ pub extern "C" fn _start() {
         scan_chans: [0; SCAN_MAX_CHANS],
         scan_bands: [0; SCAN_MAX_CHANS],
         n_scan_chans: 0,
+        mac: [0; 6],
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
@@ -1677,6 +1729,11 @@ pub extern "C" fn _start() {
                             // parse beacons → access points (SSID/BSSID/RSSI). ──
                             if dev.run_scan() {
                                 host::print("[ax200] Stage 4d2b2 OK — *** SCAN COMPLETE, APs listed *** 🎉\n");
+                                // ── Stage 4e: register as a NIC + go resident ──
+                                // run_netdev never returns: the driver owns the
+                                // card and the `wlan` interface for its lifetime
+                                // (same model as aml.wasm).
+                                dev.run_netdev();
                             } else {
                                 host::print("[ax200] Stage 4d2b1 FAILED — no SCAN_COMPLETE\n");
                             }
