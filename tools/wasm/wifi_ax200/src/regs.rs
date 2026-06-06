@@ -540,6 +540,50 @@ pub const BC_OFF_MACS: usize = 8;     // __le32 macs[3] (MAX_MACS_IN_BINDING)
 pub const BC_OFF_PHY: usize = 20;     // __le32 phy = FW_CMD_ID_AND_COLOR(phy_id=0,0)
 pub const BC_OFF_LMAC_ID: usize = 24; // __le32 lmac_id
 
+// ── Stage 5b: connect — station (AP peer) + gen2 TX queue ─────────
+// ADD_STA v12 (fw/api/sta.h, struct iwl_mvm_add_sta_cmd, 48 B). ADD_STA = 0x18
+// already defined above. Status response (ADD_STA_SUCCESS = 0x1).
+pub const ADD_STA_CMD_LEN: usize = 48;
+pub const AS_OFF_ADD_MODIFY: usize = 0;   // u8 (0 = add)
+pub const AS_OFF_TID_DISABLE: usize = 2;  // __le16 tid_disable_tx
+pub const AS_OFF_MAC_ID_COLOR: usize = 4; // __le32 FW_CMD_ID_AND_COLOR(0,0)=0
+pub const AS_OFF_ADDR: usize = 8;         // u8[6] AP BSSID
+pub const AS_OFF_STA_ID: usize = 16;      // u8
+pub const AS_OFF_STATION_FLAGS: usize = 20;     // __le32
+pub const AS_OFF_STATION_FLAGS_MSK: usize = 24; // __le32
+pub const AS_OFF_STATION_TYPE: usize = 35;      // u8
+pub const IWL_STA_LINK: u8 = 0;           // enum iwl_sta_type
+pub const ADD_STA_SUCCESS: u32 = 0x1;
+pub const ADD_STA_STATUS_MASK: u32 = 0xff; // IWL_ADD_STA_STATUS_MASK
+pub const TID_DISABLE_AGG_INIT: u16 = 0xffff; // "No aggs at first" (sta.c:1779)
+// station_flags_msk for the add: FAT_EN(3<<26) | MIMO_EN(3<<28) | RTS_MIMO_PROT(BIT17).
+pub const STA_FLAGS_MSK_ADD: u32 = (3 << 26) | (3 << 28) | (1 << 17); // 0x3C020000
+pub const AP_STA_ID: u8 = 0;              // first free station table index
+
+// SCD_QUEUE_CONFIG_CMD v3 (DATA_PATH_GROUP/0x17, struct iwl_scd_queue_cfg_cmd
+// ADD union, 36 B). gen2 dynamic TX queue allocation.
+pub const SCD_QUEUE_CONFIG_CMD: u8 = 0x17;
+pub const SCD_CMD_LEN: usize = 36;
+pub const IWL_SCD_QUEUE_ADD: u32 = 0;
+pub const SQ_OFF_OPERATION: usize = 0;   // __le32
+pub const SQ_OFF_STA_MASK: usize = 4;    // __le32 BIT(sta_id)
+pub const SQ_OFF_TID: usize = 8;         // u8
+pub const SQ_OFF_FLAGS: usize = 12;      // __le32 (0 for v3 ADD)
+pub const SQ_OFF_CB_SIZE: usize = 16;    // __le32 TFD_QUEUE_CB_SIZE(size)=ilog2(size)-3
+pub const SQ_OFF_BC_DRAM_ADDR: usize = 20; // __le64
+pub const SQ_OFF_TFDQ_DRAM_ADDR: usize = 28; // __le64
+// iwl_tx_queue_cfg_rsp: queue_number __le16 @0, flags @2, write_pointer @4.
+pub const SQ_RSP_OFF_QUEUE_NUMBER: usize = 0;
+pub const SQ_RSP_OFF_WRITE_PTR: usize = 4;
+// MGMT queue (auth/assoc TX): tid = IWL_MGMT_TID, size = IWL_MGMT_QUEUE_SIZE
+// (22000 has no min_txq_size → max(16,0)=16). cb_size = ilog2(16)-3 = 1.
+pub const IWL_MGMT_TID: u8 = 15;
+pub const IWL_MGMT_QUEUE_SIZE: usize = 16;
+pub const MGMT_QUEUE_CB_SIZE: u32 = 1;
+// bc table (gen2, non-AX210): iwl_bc_tbl_entry(__le16) * TFD_QUEUE_BC_SIZE(256+64).
+pub const TFD_QUEUE_BC_SIZE: usize = 256 + 64;
+pub const BC_TBL_BYTES: usize = TFD_QUEUE_BC_SIZE * 2; // 640
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
