@@ -154,14 +154,13 @@ pub fn intent_net_info() {
         if iface.primary {
             if ip == [0, 0, 0, 0] {
                 kprintln!("    IPv4    (no lease)");
-                kprintln!("    State   UP (no IP)");
             } else {
                 kprintln!("    IPv4    {}.{}.{}.{}/{}", ip[0], ip[1], ip[2], ip[3], prefix);
-                kprintln!("    State   UP");
             }
-        } else {
-            kprintln!("    State   DOWN");
         }
+        // State reflects the real carrier (WiFi: associated + keyed; wired:
+        // present), not whether this is the primary interface.
+        kprintln!("    State   {}", if iface.link_up { "UP" } else { "DOWN" });
         kprintln!();
     }
 

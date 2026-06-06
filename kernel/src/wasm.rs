@@ -2616,7 +2616,146 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // ── WiFi-class control channel (WIFI_CLASS_ABI.md) ───────────────────
+    // A kernel-mediated mailbox pair routing opaque control messages between
+    // the vendor driver (wifi_*.wasm) and the supplicant (wifid.wasm). The
+    // kernel carries bytes only — no WPA / vendor knowledge. Manager side is
+    // NETCTL-gated (only wifid, which declares it in .npk.caps); driver side
+    // is gated by being a bound driver (hw state present), like the other
+    // device host-fns.
+
+    // npk_wifi_send_cmd(buf_ptr, len) -> 0 / -1 — manager enqueues a command.
+    linker.func_wrap("env", "npk_wifi_send_cmd",
+        |caller: Caller<'_, HostState>, buf_ptr: i32, len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::NETCTL).is_err() {
+                return -1;
+            }
+            match read_wasm_bytes(&caller, buf_ptr, len) {
+                Some(msg) if crate::wifi::send_cmd(&msg) => 0,
+                _ => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_wifi_poll_event(buf_ptr, max) -> len / -1 — manager dequeues an event.
+    linker.func_wrap("env", "npk_wifi_poll_event",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::NETCTL).is_err() {
+                return -1;
+            }
+            wifi_poll_into(&mut caller, buf_ptr, max, crate::wifi::poll_event)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_wifi_poll_cmd(buf_ptr, max) -> len / -1 — driver dequeues a command.
+    linker.func_wrap("env", "npk_wifi_poll_cmd",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, max: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            wifi_poll_into(&mut caller, buf_ptr, max, crate::wifi::poll_cmd)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_wifi_send_event(buf_ptr, len) -> 0 / -1 — driver enqueues an event.
+    linker.func_wrap("env", "npk_wifi_send_event",
+        |caller: Caller<'_, HostState>, buf_ptr: i32, len: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            match read_wasm_bytes(&caller, buf_ptr, len) {
+                Some(msg) if crate::wifi::send_event(&msg) => 0,
+                _ => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // ── WiFi/NIC data path (driver ↔ kernel IP stack via the netdev mailbox) ─
+
+    // npk_netdev_submit_rx(buf_ptr, len) -> 0 / -1 — driver hands a received
+    // Ethernet frame to the kernel network stack.
+    linker.func_wrap("env", "npk_netdev_submit_rx",
+        |caller: Caller<'_, HostState>, buf_ptr: i32, len: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            match read_wasm_bytes(&caller, buf_ptr, len) {
+                Some(frame) => { crate::netdev::wasm_nic_submit_rx(&frame); 0 }
+                None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_netdev_poll_tx(buf_ptr, max) -> len / -1 — driver fetches the next
+    // frame the kernel wants transmitted (-1 when none / buffer too small).
+    linker.func_wrap("env", "npk_netdev_poll_tx",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, max: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            let mut frame = [0u8; crate::netdev::MTU];
+            let len = match crate::netdev::wasm_nic_poll_tx(&mut frame) {
+                Some(n) => n,
+                None => return -1,
+            };
+            if max < 0 || (max as usize) < len { return -1; }
+            write_wasm_bytes(&mut caller, buf_ptr, &frame[..len])
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_netdev_set_link(up) -> 0 — driver reports carrier state (associated +
+    // keyed). Lets `net` show a real UP/DOWN for the wlan interface.
+    linker.func_wrap("env", "npk_netdev_set_link",
+        |caller: Caller<'_, HostState>, up: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            crate::netdev::set_wasm_nic_link(up != 0);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     Ok(())
+}
+
+/// Read `len` bytes from the caller's linear memory at `ptr` into a Vec.
+fn read_wasm_bytes(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<alloc::vec::Vec<u8>> {
+    if ptr < 0 || len <= 0 { return None; }
+    let mem = caller.get_export("memory").and_then(|e| e.into_memory())?;
+    let data = mem.data(caller);
+    let start = ptr as usize;
+    let end = start.checked_add(len as usize)?;
+    if end > data.len() { return None; }
+    Some(data[start..end].to_vec())
+}
+
+/// Write `bytes` into the caller's linear memory at `ptr`; returns the length
+/// written, or -1 if the region is out of bounds.
+fn write_wasm_bytes(caller: &mut Caller<'_, HostState>, ptr: i32, bytes: &[u8]) -> i32 {
+    if ptr < 0 { return -1; }
+    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(m) => m,
+        None => return -1,
+    };
+    let data = mem.data_mut(caller);
+    let start = ptr as usize;
+    let end = match start.checked_add(bytes.len()) {
+        Some(e) => e,
+        None => return -1,
+    };
+    if end > data.len() { return -1; }
+    data[start..end].copy_from_slice(bytes);
+    bytes.len() as i32
+}
+
+/// Shared body for the two poll fns: pull one message from `dequeue` into the
+/// caller's buffer (bounded by `max`), returning its length or -1.
+fn wifi_poll_into(
+    caller: &mut Caller<'_, HostState>,
+    buf_ptr: i32,
+    max: i32,
+    dequeue: fn(&mut [u8]) -> Option<usize>,
+) -> i32 {
+    if max <= 0 { return -1; }
+    let cap = (max as usize).min(crate::wifi::WIFI_MSG_MAX);
+    let mut tmp = [0u8; crate::wifi::WIFI_MSG_MAX];
+    let len = match dequeue(&mut tmp[..cap]) {
+        Some(n) => n,
+        None => return -1,
+    };
+    write_wasm_bytes(caller, buf_ptr, &tmp[..len])
 }
 
 /// Free all hardware resources allocated by a WASM driver module.
@@ -2629,6 +2768,9 @@ fn cleanup_hw_state(state: &mut HostState) {
         }
         if hw.registered_as_netdev {
             crate::netdev::unregister_wasm_nic();
+            // The WiFi driver owns the control channel's device side — clear it
+            // so a re-launch doesn't inherit stale commands/events.
+            crate::wifi::reset();
         }
         if !hw.dma_allocs.is_empty() || hw.registered_as_netdev {
             kprintln!("[npk] driver cleanup: freed {} DMA buffers ({} pages)",

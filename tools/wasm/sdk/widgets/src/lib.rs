@@ -86,6 +86,9 @@ pub mod caps {
     /// `npk_acpi_dsdt` / `npk_ec_read` / `npk_ec_write` — raw firmware + EC
     /// access (the AML battery driver). Highly privileged: direct hardware I/O.
     pub const HARDWARE: u8 = 0x40;
+    /// `npk_wifi_send_cmd` / `npk_wifi_poll_event` — WiFi-class control channel
+    /// manager side (the wifid supplicant). See WIFI_CLASS_ABI.md.
+    pub const NETCTL: u8 = 0x80;
 }
 
 // Re-export the core ABI types at the crate root for ergonomic use.

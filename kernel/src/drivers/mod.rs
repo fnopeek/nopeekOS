@@ -15,6 +15,7 @@ pub mod serial;
 pub mod rtc;
 pub mod blkdev;
 pub mod netdev;
+pub mod wifi;
 pub mod acpi;
 pub mod smbus;
 pub mod battery;

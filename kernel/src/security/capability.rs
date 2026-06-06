@@ -41,7 +41,11 @@ bitflags! {
         /// embedded-controller access (the AML battery driver). Highly
         /// privileged: direct hardware I/O.
         const HARDWARE  = 0b10_0000_0000;
-        const ALL       = 0b11_1111_1111;
+        /// `npk_wifi_send_cmd` / `npk_wifi_poll_event` — the WiFi-class control
+        /// channel manager side (wifid.wasm supplicant). Privileged: can scan,
+        /// connect, and read EAPOL handshake frames. See WIFI_CLASS_ABI.md.
+        const NETCTL    = 0b100_0000_0000;
+        const ALL       = 0b111_1111_1111;
     }
 }
 
@@ -243,6 +247,7 @@ const CAP_BIT_RENDER:  u8 = 0x08;
 const CAP_BIT_CAPTURE: u8 = 0x10;
 const CAP_BIT_CANVAS:  u8 = 0x20;
 const CAP_BIT_HARDWARE: u8 = 0x40;
+const CAP_BIT_NETCTL:   u8 = 0x80;
 
 fn rights_from_caps_byte(b: u8) -> Rights {
     let mut r = Rights::empty();
@@ -253,6 +258,7 @@ fn rights_from_caps_byte(b: u8) -> Rights {
     if b & CAP_BIT_CAPTURE  != 0 { r |= Rights::CAPTURE; }
     if b & CAP_BIT_CANVAS   != 0 { r |= Rights::CANVAS; }
     if b & CAP_BIT_HARDWARE != 0 { r |= Rights::HARDWARE; }
+    if b & CAP_BIT_NETCTL   != 0 { r |= Rights::NETCTL; }
     r
 }
 
