@@ -244,6 +244,25 @@ pub const NVM_SKU_11N: u32 = 1 << 2;
 pub const NVM_SKU_11AC: u32 = 1 << 3;
 pub const NVM_SKU_11AX: u32 = 1 << 4;
 
+// NVM_GET_INFO v4 regulatory section: per-channel flags. lar_enabled @20,
+// n_channels @24, then channel_profile (__le32 per channel) @28 within the
+// response payload (iwl_nvm_get_info_rsp, REGULATORY_NVM_GET_INFO_RSP_API_S_VER_4).
+pub const NVM_OFF_CHANNEL_PROFILE: usize = 28;
+// iwl_nvm_channel_flags (iwl-nvm-parse.h): bit 0 = usable for this SKU/geo.
+pub const NVM_CHANNEL_VALID: u32 = 1 << 0;
+// AX200 is RF-HR → cfg.nvm_type = IWL_NVM_EXT, not uhb → iwl_ext_nvm_channels:
+// 14 × 2.4 GHz then 37 × 5 GHz (iwl_nl80211_band_from_channel_idx splits at 14).
+pub const NVM_NUM_2GHZ: usize = 14;
+pub const NVM_EXT_NUM_CHANNELS: usize = 51;
+pub const IWL_EXT_NVM_CHANNELS: [u8; NVM_EXT_NUM_CHANNELS] = [
+    // 2.4 GHz
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    // 5 GHz
+    36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92,
+    96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177, 181,
+];
+
 // ── Stage 4d: scan setup ─────────────────────────────────────────
 // Firmware command-version TLV (fw/file.h): array of iwl_fw_cmd_version
 // { u8 cmd; u8 group; u8 cmd_ver; u8 notif_ver; }. iwl_fw_lookup_cmd_ver maps
@@ -308,8 +327,10 @@ pub const SCAN_N_APS_GO_FRIENDLY: u8 = 10;
 pub const SCAN_N_APS_SOCIAL_CHS: u8 = 2;
 pub const SCAN_CHAN_FLAG_ENABLE_CHAN_ORDER: u8 = 1 << 5; // BIT(5)
 pub const PHY_BAND_24: u32 = 1; // phy-ctxt.h
+pub const PHY_BAND_5: u32 = 0; // phy-ctxt.h
 pub const CHAN_CFG_FLAGS_BAND_POS: u32 = 30;
-pub const SCAN_24G_CHANNELS: u8 = 13; // ch 1..13
+// Upper bound on channels we put in one scan: command holds SCAN_MAX_NUM_CHANS_V3.
+pub const SCAN_MAX_CHANS: usize = 67;
 // iwl_scan_config (SCAN_CFG v5, fw/api/scan.h): enable_cam_mode, enable_promisc,
 // bcast_sta_id, reserved (all u8 → 0; v5 FW ignores bcast_sta_id), then
 // __le32 tx_chains, __le32 rx_chains. 12 bytes total.
@@ -475,7 +496,7 @@ pub const WLAN_EID_SSID: u8 = 0;
 // Management-frame subtypes (frame_control bits 4-7) we collect APs from.
 pub const DOT11_STYPE_BEACON: u8 = 8;
 pub const DOT11_STYPE_PROBE_RESP: u8 = 5;
-pub const MAX_APS: usize = 32;
+pub const MAX_APS: usize = 64; // both bands → more networks than 2.4 GHz alone
 pub const SSID_MAX: usize = 32;
 
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
