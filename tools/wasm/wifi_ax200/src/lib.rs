@@ -1560,6 +1560,99 @@ impl Ax200 {
         }
     }
 
+    // ── Stage 5c: gen2 TX data path — send an 802.11 frame (connect step 3) ──
+    // iwl_txq_gen2_tx + iwl_txq_gen2_build_tx (pcie/.../tx-gen2.c). The first real
+    // frame transmission: build a device TX command — short iwl_cmd_header (TX_CMD,
+    // group 0) + iwl_tx_cmd_v9 (len/flags/rate) + the 802.11 frame — lay it across
+    // the management queue's TFD as two TBs (TB0 = first-TB staging holding the
+    // first 20 bytes, TB1 = the remainder from cmd_data), fill the byte-count
+    // table, bump the write pointer and ring the doorbell. The test frame is an
+    // open-system AUTH request to the target AP; a TX completion (TX_CMD response)
+    // proves the path. (Hardcoded here like the early scan; later wifid builds the
+    // frame and hands it down via TX_MGMT.) For AX200 (< BZ) mgmt frames use the
+    // host rate (IWL_TX_FLAGS_CMD_RATE), so we set a legacy rate explicitly.
+    fn connect_send_auth(&mut self) -> bool {
+        let qid = self.mgmt_queue_id;
+        let idx = (self.mgmt_write_ptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
+
+        // Build the full device TX command in a scratch buffer.
+        let mut buf = [0u8; 64];
+        // iwl_cmd_header (short): cmd, group_id 0, sequence.
+        buf[0] = TX_CMD;
+        buf[1] = 0;
+        let seq = (((qid as u16) & 0x1f) << 8) | (idx as u16 & 0xff);
+        buf[2..4].copy_from_slice(&seq.to_le_bytes());
+        // iwl_tx_cmd_v9.
+        let frame_len = (DOT11_HDR_LEN + DOT11_AUTH_BODY_LEN) as u16;
+        put_u16(&mut buf, TXC_OFF_LEN, frame_len);
+        put_u16(&mut buf, TXC_OFF_OFFLOAD, 0);
+        put_u32(&mut buf, TXC_OFF_FLAGS, IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE);
+        // dram_info @TXC_OFF_DRAM = 0 (no key).
+        let rate = if self.target_band == PHY_BAND_24 as u8 {
+            RATE_1M_CCK_ANT_A
+        } else {
+            RATE_6M_OFDM_ANT_A
+        };
+        put_u32(&mut buf, TXC_OFF_RATE, rate);
+        // 802.11 auth header (24 B): mgmt/auth, DA = AP, SA = us, BSSID = AP.
+        let f = TXC_OFF_FRAME;
+        buf[f] = DOT11_FC_AUTH;
+        // fc byte1 / duration / seq_ctrl stay 0 (FW assigns the sequence).
+        buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
+        buf[f + DOT11_OFF_ADDR2..f + DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
+        buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
+        // Auth body @ f+24: open system, transaction seq 1, status 0.
+        let b = f + DOT11_HDR_LEN;
+        put_u16(&mut buf, b, DOT11_AUTH_ALG_OPEN);
+        put_u16(&mut buf, b + 2, DOT11_AUTH_SEQ_1);
+        put_u16(&mut buf, b + 4, 0);
+        let total = b + DOT11_AUTH_BODY_LEN; // 54
+
+        // The full dev_cmd lives in cmd_data; TB0 staging gets its first 20 bytes.
+        host::dma_write_buf(self.cmd_data.handle, 0, &buf[..total]);
+        let ftb_off = (idx * IWL_FIRST_TB_SIZE_ALIGN) as u32;
+        host::dma_write_buf(self.mgmt_first_tb.handle, ftb_off, &buf[..IWL_FIRST_TB_SIZE]);
+
+        // TFD: TB0 = first-TB staging (20 B), TB1 = cmd_data + 20 (remainder).
+        let mut tfd = [0u8; TFH_TFD_SIZE];
+        let tb0_phys = self.mgmt_first_tb.phys + ftb_off as u64;
+        put_tfh_tb(&mut tfd, 0, IWL_FIRST_TB_SIZE as u16, tb0_phys);
+        put_tfh_tb(
+            &mut tfd,
+            1,
+            (total - IWL_FIRST_TB_SIZE) as u16,
+            self.cmd_data.phys + IWL_FIRST_TB_SIZE as u64,
+        );
+        tfd[0..2].copy_from_slice(&2u16.to_le_bytes()); // num_tbs
+        host::dma_write_buf(self.mgmt_tfd.handle, (idx * TFH_TFD_SIZE) as u32, &tfd);
+
+        // Byte-count table entry (gen2): DIV_ROUND_UP(len,4) | (fetch_chunks<<12).
+        // 2 TBs → filled TFD = offsetof(tbs)+2*10 ≤ 64 → 0 fetch chunks.
+        let bc_ent = ((frame_len as u32 + 3) / 4) as u16;
+        host::dma_write_buf(self.mgmt_bc_tbl.handle, (idx * 2) as u32, &bc_ent.to_le_bytes());
+
+        // Advance the write pointer and ring the doorbell.
+        host::fence();
+        self.mgmt_write_ptr = (self.mgmt_write_ptr + 1) & (MAX_TFD_QUEUE_SIZE - 1);
+        self.w32(HBUS_TARG_WRPTR, self.mgmt_write_ptr | ((qid as u32) << 16));
+        host::print("[ax200] AUTH frame TX'd (open-system) on queue ");
+        host::print_dec(qid as u32);
+        host::print("\n");
+
+        // Wait for the TX completion (TX_CMD response, LEGACY_GROUP).
+        match self.wait_rx(TX_CMD, 0, 1000) {
+            Some(_) => {
+                host::print("[ax200] Stage 5c OK — TX completion received (TX path live)\n");
+                true
+            }
+            None => {
+                host::print("[ax200] Stage 5c: no TX completion\n");
+                self.dump_fw_error_log();
+                false
+            }
+        }
+    }
+
     // ── Resident NIC service loop ─────────────────────────────────
     // The chip is up and the scan has run; register as a network interface and
     // own the card from here. Same shape as aml.wasm: an infinite loop that
@@ -1784,7 +1877,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.23.0 — connect 5b (station + TX queue)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.24.0 — connect 5c (gen2 TX → AUTH)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1926,9 +2019,11 @@ pub extern "C" fn _start() {
                                 // First connect step (no TX yet): set the target
                                 // AP's operating channel + bind MAC↔PHY. Target =
                                 // strongest AP from the scan.
-                                if dev.target_valid && dev.connect_phy_binding() {
-                                    // ── Stage 5b: AP station + gen2 TX queue ──
-                                    dev.connect_add_station();
+                                if dev.target_valid && dev.connect_phy_binding()
+                                    && dev.connect_add_station()
+                                {
+                                    // ── Stage 5c: gen2 TX path → AUTH frame ──
+                                    dev.connect_send_auth();
                                 }
 
                                 // ── Register as a NIC + go resident ──
