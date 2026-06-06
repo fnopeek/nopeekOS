@@ -186,6 +186,13 @@ pub fn input_wait(timeout_ms: u32) -> i32 {
     unsafe { npk_input_wait(timeout_ms as i32) }
 }
 
+/// Register this driver as a network interface with the given MAC. The kernel
+/// exposes it as `wlan` and routes the global IP stack to it when no wired NIC
+/// is present. Returns 0 on success, -1 if already registered / on error.
+pub fn netdev_register(mac: &[u8; 6]) -> i32 {
+    unsafe { npk_netdev_register(mac.as_ptr() as i32) }
+}
+
 // ── Hex output helpers ───────────────────────────────────────────
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
