@@ -102,6 +102,11 @@ struct Ax200 {
     // dumping the FW error log when a command/scan produces no response.
     lmac_err_ptr: u32,
     umac_err_ptr: u32,
+    // Scan channel list parsed from the NVM_GET_INFO regulatory section: the
+    // NVM_CHANNEL_VALID channels with their PHY band, for both 2.4 and 5 GHz.
+    scan_chans: [u8; SCAN_MAX_CHANS], // channel numbers
+    scan_bands: [u8; SCAN_MAX_CHANS], // PHY_BAND_24 / PHY_BAND_5 per channel
+    n_scan_chans: usize,
 }
 
 impl Ax200 {
@@ -826,7 +831,9 @@ impl Ax200 {
             }
         };
 
-        let mut p = [0u8; 48];
+        // Cover the header fields plus the regulatory channel_profile
+        // (__le32[51] at payload offset 28 → absolute 8+28 = 36, ending at 240).
+        let mut p = [0u8; 256];
         host::dma_read_buf(rb.handle, 0, &mut p);
         let lnf = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
         let payload_len = (lnf & FH_FRAME_SIZE_MASK).wrapping_sub(4); // frame - hdr(4)
@@ -860,6 +867,39 @@ impl Ax200 {
         host::print("\n");
 
         self.log_mac_address();
+
+        // ── Build the scan channel list from the regulatory section ──
+        // iwl_init_channel_map (iwl-nvm-parse.c): walk iwl_ext_nvm_channels,
+        // read the per-channel __le32 flags from channel_profile, keep the
+        // NVM_CHANNEL_VALID channels. 5 GHz channels are gated on the 5.2 band
+        // SKU bit. Each channel's PHY band rides in v2.band in the scan command.
+        let band_52 = mac_sku & NVM_SKU_BAND_52 != 0;
+        let prof = b + NVM_OFF_CHANNEL_PROFILE;
+        self.n_scan_chans = 0;
+        for idx in 0..NVM_EXT_NUM_CHANNELS {
+            let flags = u32::from_le_bytes([
+                p[prof + idx * 4],
+                p[prof + idx * 4 + 1],
+                p[prof + idx * 4 + 2],
+                p[prof + idx * 4 + 3],
+            ]);
+            if flags & NVM_CHANNEL_VALID == 0 {
+                continue;
+            }
+            let is_5ghz = idx >= NVM_NUM_2GHZ;
+            if is_5ghz && !band_52 {
+                continue;
+            }
+            let band = if is_5ghz { PHY_BAND_5 } else { PHY_BAND_24 };
+            if self.n_scan_chans < SCAN_MAX_CHANS {
+                self.scan_chans[self.n_scan_chans] = IWL_EXT_NVM_CHANNELS[idx];
+                self.scan_bands[self.n_scan_chans] = band as u8;
+                self.n_scan_chans += 1;
+            }
+        }
+        host::print("[ax200]   scan channels: ");
+        host::print_dec(self.n_scan_chans as u32);
+        host::print(" valid (2.4 + 5 GHz)\n");
         true
     }
 
@@ -1099,7 +1139,7 @@ impl Ax200 {
     // firmware forward every beacon to the host. All general/channel parameters
     // are filled exactly as the Linux fill helpers do (dwell 10/110, adwell
     // 2/8/10, budget 300, EXT_6 priority, UNASSOC timing = 0, adaptive dwell).
-    fn build_scan_cmd(buf: &mut [u8]) {
+    fn build_scan_cmd(&self, buf: &mut [u8]) {
         // uid @ 0 = 0; ooc_priority + scan_priority = IWL_SCAN_PRIORITY_EXT_6.
         put_u32(buf, SC_OFF_OOC_PRIORITY, SCAN_OOC_PRIORITY_REGULAR);
 
@@ -1121,12 +1161,14 @@ impl Ax200 {
         buf[SC_OFF_GP_PASSIVE_DWELL + 1] = IWL_SCAN_DWELL_PASSIVE; // HB
         // num_of_fragments = 0
 
-        // channel_params_v7
+        // channel_params_v7 — the NVM_CHANNEL_VALID channels from read_nvm,
+        // both bands. Per channel, the band rides in the v2.band BYTE (@ +5);
+        // see the band-encoding note below.
         buf[SC_OFF_CP_FLAGS] = SCAN_CHAN_FLAG_ENABLE_CHAN_ORDER;
-        buf[SC_OFF_CP_COUNT] = SCAN_24G_CHANNELS;
+        buf[SC_OFF_CP_COUNT] = self.n_scan_chans as u8;
         buf[SC_OFF_CP_N_APS_OVERRIDE] = SCAN_N_APS_GO_FRIENDLY;
         buf[SC_OFF_CP_N_APS_OVERRIDE + 1] = SCAN_N_APS_SOCIAL_CHS;
-        for i in 0..SCAN_24G_CHANNELS as usize {
+        for i in 0..self.n_scan_chans {
             let o = SC_OFF_CP_CHANNELS + i * SCAN_CH_CFG_LEN;
             // iwl_mvm_umac_scan_cfg_channels_v7, version < 17 (our cmd_ver is 15):
             // cfg.flags holds the directed-scan SSID bitmap (bits 0-19) — 0 for a
@@ -1135,8 +1177,8 @@ impl Ax200 {
             // (The v17 path puts band in flags; doing that for v15 left band=0 =
             // PHY_BAND_5/5GHz on 2.4GHz channels → BAD scan params → FW assert.)
             // cfg.flags @ o stays 0 (zeroed buffer).
-            buf[o + 4] = (i + 1) as u8; // channel_num 1..13
-            buf[o + 5] = PHY_BAND_24 as u8; // v2.band = 1 (2.4 GHz)
+            buf[o + 4] = self.scan_chans[i]; // channel_num
+            buf[o + 5] = self.scan_bands[i]; // v2.band (1 = 2.4 GHz, 0 = 5 GHz)
             buf[o + 6] = 1; // v2.iter_count
             // v2.iter_interval @ o+7 = 0
         }
@@ -1251,14 +1293,18 @@ impl Ax200 {
     // SCAN_COMPLETE_UMAC arrives.
     fn run_scan(&mut self) -> bool {
         let mut buf = [0u8; SCAN_CMD_LEN];
-        Self::build_scan_cmd(&mut buf);
+        self.build_scan_cmd(&mut buf);
         self.send_hcmd(IWL_ALWAYS_LONG_GROUP, SCAN_REQ_UMAC, &buf);
-        host::print("[ax200] SCAN_REQ_UMAC sent (passive, 2.4GHz ch1-13), scanning...\n");
+        host::print("[ax200] SCAN_REQ_UMAC sent (passive, ");
+        host::print_dec(self.n_scan_chans as u32);
+        host::print(" channels, 2.4 + 5 GHz), scanning...\n");
 
         let mut frames = 0u32;
         let mut aps = [Ap::EMPTY; MAX_APS];
         let mut n_aps = 0usize;
-        for _ in 0..8000 {
+        // ~12 s budget: a passive scan of both bands (up to ~40 channels at
+        // 110 ms dwell) takes longer than the 2.4-GHz-only scan did.
+        for _ in 0..12000 {
             host::fence();
             let r = host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK;
             let mut recycled = false;
@@ -1504,7 +1550,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.19.0 — Stage 4d2b2 (beacon parse → APs)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.20.0 — NVM channels (2.4 + 5 GHz scan)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1545,6 +1591,9 @@ pub extern "C" fn _start() {
         free_bd_write: 0,
         lmac_err_ptr: 0,
         umac_err_ptr: 0,
+        scan_chans: [0; SCAN_MAX_CHANS],
+        scan_bands: [0; SCAN_MAX_CHANS],
+        n_scan_chans: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
