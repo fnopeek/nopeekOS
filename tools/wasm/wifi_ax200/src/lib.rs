@@ -109,6 +109,11 @@ struct Ax200 {
     n_scan_chans: usize,
     // The card's MAC address (from the CSR strap/OTP), for netdev registration.
     mac: [u8; 6],
+    // Connect target picked from the scan (strongest AP) — for #3 connect (5a+).
+    target_bssid: [u8; 6],
+    target_chan: u8,
+    target_band: u8, // PHY_BAND_24 / PHY_BAND_5
+    target_valid: bool,
 }
 
 impl Ax200 {
@@ -1366,6 +1371,21 @@ impl Ax200 {
                 host::print_dec(frames);
                 host::print("\n");
                 Self::print_aps(&aps, n_aps);
+                // Pick the strongest AP as the connect target (#3 connect).
+                let mut best = usize::MAX;
+                for i in 0..n_aps {
+                    if best == usize::MAX || aps[i].rssi > aps[best].rssi {
+                        best = i;
+                    }
+                }
+                if best != usize::MAX {
+                    self.target_bssid = aps[best].bssid;
+                    self.target_chan = aps[best].channel;
+                    // Band by channel: 1..14 = 2.4 GHz, else 5 GHz (iwl_nvm_channels).
+                    self.target_band =
+                        if aps[best].channel <= 14 { PHY_BAND_24 as u8 } else { PHY_BAND_5_U8 };
+                    self.target_valid = true;
+                }
                 return true;
             }
             host::sleep_ms(1);
@@ -1375,6 +1395,70 @@ impl Ax200 {
         host::print("\n");
         self.dump_fw_error_log();
         false
+    }
+
+    // ── Stage 5a: PHY context + RLC + binding (connect step 1) ────
+    // iwl_mvm_phy_ctxt_add + iwl_mvm_phy_send_rlc + iwl_mvm_binding_add_vif
+    // (mvm/phy-ctxt.c, mvm/binding.c). Sets the target AP's operating channel
+    // (PHY_CONTEXT_CMD v4, 20 MHz), configures the RX chains (RLC_CONFIG_CMD v2 —
+    // not offloaded on this FW, cmd_ver=2 < 3), and binds the MAC context (id 0)
+    // to the PHY context (id 0) (BINDING_CONTEXT_CMD v2, full struct: CDB binding
+    // support, but lmac_id 0 since no CDB). PHY + RLC are fire-and-forget; BINDING
+    // returns a status word (CMD_WANT_SKB). All cmd_vers parsed from the FW file.
+    fn connect_phy_binding(&mut self) -> bool {
+        // PHY_CONTEXT_CMD v4 (action ADD) — 20 MHz on the target channel/band.
+        let mut pc = [0u8; PHY_CTX_CMD_LEN];
+        put_u32(&mut pc, PC_OFF_ID_COLOR, 0); // FW_CMD_ID_AND_COLOR(phy 0, color 0)
+        put_u32(&mut pc, PC_OFF_ACTION, FW_CTXT_ACTION_ADD);
+        put_u32(&mut pc, PC_OFF_CI_CHANNEL, self.target_chan as u32);
+        pc[PC_OFF_CI_BAND] = self.target_band;
+        pc[PC_OFF_CI_WIDTH] = IWL_PHY_CHANNEL_MODE20;
+        pc[PC_OFF_CI_CTRL_POS] = 0; // 20 MHz → control channel position 0
+        put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX); // no CDB → 0
+        self.send_hcmd(0, PHY_CONTEXT_CMD, &pc); // legacy → LONG_GROUP
+        host::print("[ax200] PHY_CONTEXT_CMD sent (ch ");
+        host::print_dec(self.target_chan as u32);
+        host::print(", band ");
+        host::print_dec(self.target_band as u32);
+        host::print(")\n");
+        self.pump_rx(20);
+
+        // RLC_CONFIG_CMD v2 (DATA_PATH_GROUP) — RX chains for the PHY context.
+        let mut rlc = [0u8; RLC_CMD_LEN];
+        put_u32(&mut rlc, RLC_OFF_PHY_ID, 0);
+        put_u32(&mut rlc, RLC_OFF_RX_CHAIN_INFO, RLC_RX_CHAIN_INFO_2X2);
+        self.send_hcmd(DATA_PATH_GROUP, RLC_CONFIG_CMD, &rlc);
+        host::print("[ax200] RLC_CONFIG_CMD sent\n");
+        self.pump_rx(20);
+
+        // BINDING_CONTEXT_CMD v2 (action ADD): MAC ctx 0 ↔ PHY ctx 0.
+        let mut bc = [0u8; BINDING_CMD_LEN];
+        put_u32(&mut bc, BC_OFF_ID_COLOR, 0); // phy id 0 / color 0
+        put_u32(&mut bc, BC_OFF_ACTION, FW_CTXT_ACTION_ADD);
+        put_u32(&mut bc, BC_OFF_MACS, 0); // macs[0] = MAC ctx id 0
+        put_u32(&mut bc, BC_OFF_MACS + 4, FW_CTXT_INVALID); // macs[1]
+        put_u32(&mut bc, BC_OFF_MACS + 8, FW_CTXT_INVALID); // macs[2]
+        put_u32(&mut bc, BC_OFF_PHY, 0); // phy id 0
+        put_u32(&mut bc, BC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX);
+        self.send_hcmd(0, BINDING_CONTEXT_CMD, &bc); // legacy → LONG_GROUP
+        host::print("[ax200] BINDING_CONTEXT_CMD sent, waiting for status...\n");
+        match self.wait_rx(BINDING_CONTEXT_CMD, IWL_ALWAYS_LONG_GROUP, 1000) {
+            Some(rb) => {
+                let mut p = [0u8; 16];
+                host::dma_read_buf(rb.handle, 0, &mut p);
+                let status = le32(&p, RX_PKT_DATA_OFF);
+                host::print("[ax200]   binding status=0x");
+                host::print_hex32(status);
+                host::print("\n");
+                host::print("[ax200] Stage 5a OK — PHY context + RLC + binding\n");
+                true
+            }
+            None => {
+                host::print("[ax200] Stage 5a FAILED — binding no response\n");
+                self.dump_fw_error_log();
+                false
+            }
+        }
     }
 
     // ── Resident NIC service loop ─────────────────────────────────
@@ -1601,7 +1685,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.21.0 — netdev register + resident NIC\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.22.0 — connect 5a (PHY ctx + binding)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1646,6 +1730,10 @@ pub extern "C" fn _start() {
         scan_bands: [0; SCAN_MAX_CHANS],
         n_scan_chans: 0,
         mac: [0; 6],
+        target_bssid: [0; 6],
+        target_chan: 0,
+        target_band: 0,
+        target_valid: false,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
@@ -1729,7 +1817,16 @@ pub extern "C" fn _start() {
                             // parse beacons → access points (SSID/BSSID/RSSI). ──
                             if dev.run_scan() {
                                 host::print("[ax200] Stage 4d2b2 OK — *** SCAN COMPLETE, APs listed *** 🎉\n");
-                                // ── Stage 4e: register as a NIC + go resident ──
+
+                                // ── Stage 5a: PHY context + RLC + binding ──
+                                // First connect step (no TX yet): set the target
+                                // AP's operating channel + bind MAC↔PHY. Target =
+                                // strongest AP from the scan.
+                                if dev.target_valid {
+                                    dev.connect_phy_binding();
+                                }
+
+                                // ── Register as a NIC + go resident ──
                                 // run_netdev never returns: the driver owns the
                                 // card and the `wlan` interface for its lifetime
                                 // (same model as aml.wasm).
