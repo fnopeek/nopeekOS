@@ -1637,20 +1637,45 @@ impl Ax200 {
         self.w32(HBUS_TARG_WRPTR, self.mgmt_write_ptr | ((qid as u32) << 16));
         host::print("[ax200] AUTH frame TX'd (open-system) on queue ");
         host::print_dec(qid as u32);
+        host::print(" idx ");
+        host::print_dec(idx as u32);
+        host::print(" bc=");
+        host::print_dec(bc_ent as u32);
         host::print("\n");
 
-        // Wait for the TX completion (TX_CMD response, LEGACY_GROUP).
-        match self.wait_rx(TX_CMD, 0, 1000) {
-            Some(_) => {
-                host::print("[ax200] Stage 5c OK — TX completion received (TX path live)\n");
+        // Diagnostic drain: log every frame the firmware emits over ~3 s so we
+        // can see the TX completion (TX_CMD 0x1c) and/or the AP's auth response
+        // (REPLY_RX_MPDU 0xc1). Recycles RBs so the ring never stalls.
+        let mut got_tx = false;
+        let mut got_resp = false;
+        let mut n = 0u32;
+        for _ in 0..3000 {
+            self.service_rx(|cmd, grp, _rb| {
+                if n < 16 {
+                    host::print("[ax200]   txdiag RX cmd=0x");
+                    host::print_hex8(cmd);
+                    host::print(" group=0x");
+                    host::print_hex8(grp);
+                    host::print("\n");
+                }
+                n += 1;
+                if cmd == TX_CMD && grp == 0 { got_tx = true; }
+                if cmd == REPLY_RX_MPDU_CMD && grp == 0 { got_resp = true; }
                 true
-            }
-            None => {
-                host::print("[ax200] Stage 5c: no TX completion\n");
-                self.dump_fw_error_log();
-                false
-            }
+            });
+            host::sleep_ms(1);
         }
+        if got_tx {
+            host::print("[ax200] Stage 5c OK — TX completion received (TX path live)\n");
+        } else if got_resp {
+            host::print("[ax200] Stage 5c — no TX completion, but AP frame seen (TX likely worked)\n");
+        } else {
+            host::print("[ax200] Stage 5c — no TX completion, no AP frame (frames seen: ");
+            host::print_dec(n);
+            host::print(")\n");
+            self.dump_fw_error_log();
+        }
+        got_tx || got_resp
     }
 
     // ── Resident NIC service loop ─────────────────────────────────
@@ -1877,7 +1902,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.24.0 — connect 5c (gen2 TX → AUTH)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.24.1 — connect 5c (TX diag)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
