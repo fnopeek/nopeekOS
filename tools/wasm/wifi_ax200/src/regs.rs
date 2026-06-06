@@ -489,6 +489,8 @@ pub const MPDU_OFF_ENERGY_B: usize = 33; // v1.energy_b
 pub const MPDU_OFF_CHANNEL: usize = 34; // v1.channel
 // 802.11 management frame (ieee80211_hdr + beacon/probe-response body).
 pub const DOT11_HDR_LEN: usize = 24; // fc(2)+dur(2)+addr1/2/3(18)+seq(2)
+pub const DOT11_OFF_ADDR1: usize = 4;  // DA (receiver)
+pub const DOT11_OFF_ADDR2: usize = 10; // SA (transmitter)
 pub const DOT11_OFF_ADDR3: usize = 16; // BSSID
 pub const DOT11_BEACON_FIXED: usize = 12; // timestamp(8)+beacon_int(2)+capab(2)
 pub const DOT11_OFF_IES: usize = DOT11_HDR_LEN + DOT11_BEACON_FIXED; // 36
@@ -583,6 +585,35 @@ pub const MGMT_QUEUE_CB_SIZE: u32 = 1;
 // bc table (gen2, non-AX210): iwl_bc_tbl_entry(__le16) * TFD_QUEUE_BC_SIZE(256+64).
 pub const TFD_QUEUE_BC_SIZE: usize = 256 + 64;
 pub const BC_TBL_BYTES: usize = TFD_QUEUE_BC_SIZE * 2; // 640
+
+// ── Stage 5c: gen2 TX data path (send an 802.11 frame) ───────────
+// TX_CMD = 0x1c. The device TX command is a SHORT 4-byte iwl_cmd_header
+// (cmd, group_id=0, sequence) followed by iwl_tx_cmd_v9 (TX_CMD cmd_ver=9) and
+// the 802.11 frame. Unlike host commands, TX uses the short header (group 0).
+pub const TX_CMD: u8 = 0x1c;
+// iwl_tx_cmd_v9 (fw/api/tx.h): len/offload/flags/dram_info/rate_n_flags = 20 B,
+// then the 802.11 header+body. Field offsets relative to the dev_cmd start
+// (after the 4-byte cmd header), i.e. tx_cmd begins at dev_cmd offset 4.
+pub const TXC_HDR_LEN: usize = 4;       // iwl_cmd_header (short)
+pub const TXC_OFF_LEN: usize = 4;       // tx_cmd_v9.len __le16 (full 802.11 frame len)
+pub const TXC_OFF_OFFLOAD: usize = 6;   // tx_cmd_v9.offload_assist __le16
+pub const TXC_OFF_FLAGS: usize = 8;     // tx_cmd_v9.flags __le32
+pub const TXC_OFF_DRAM: usize = 12;     // tx_cmd_v9.dram_info (8 B, 0 = no key)
+pub const TXC_OFF_RATE: usize = 20;     // tx_cmd_v9.rate_n_flags __le32
+pub const TXC_OFF_FRAME: usize = 24;    // 802.11 frame (hdr[]) starts here
+// iwl_tx_flags (NEW gen2 set — NOT the gen1 TX_CMD_FLG_*).
+pub const IWL_TX_FLAGS_CMD_RATE: u32 = 1 << 0; // use rate_n_flags from the cmd
+pub const IWL_TX_FLAGS_ENCRYPT_DIS: u32 = 1 << 1; // unencrypted
+// rate_n_flags (fw_rates_ver=2: TX_CMD cmd_ver 9 ≥8 <11). Modern format:
+// MOD_TYPE @ bit8 (CCK=0, LEGACY_OFDM=1<<8), legacy rate in bits 0-2, ANT @ bit14.
+// 1 Mbps CCK ant A = 0x4000; 6 Mbps OFDM ant A = 0x4100 (iwl_v3_rate_to_v2_v3).
+pub const RATE_1M_CCK_ANT_A: u32 = 0x0000_4000;
+pub const RATE_6M_OFDM_ANT_A: u32 = 0x0000_4100;
+// 802.11 management auth frame (open system): 24-byte header + 6-byte body.
+pub const DOT11_FC_AUTH: u8 = 0xB0; // frame_control byte0: type mgmt(0), subtype auth(11)
+pub const DOT11_AUTH_BODY_LEN: usize = 6; // algorithm(2) + seq(2) + status(2)
+pub const DOT11_AUTH_ALG_OPEN: u16 = 0;
+pub const DOT11_AUTH_SEQ_1: u16 = 1;
 
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
