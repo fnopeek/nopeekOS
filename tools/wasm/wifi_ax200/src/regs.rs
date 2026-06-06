@@ -499,6 +499,47 @@ pub const DOT11_STYPE_PROBE_RESP: u8 = 5;
 pub const MAX_APS: usize = 64; // both bands → more networks than 2.4 GHz alone
 pub const SSID_MAX: usize = 32;
 
+// ── Stage 5a: connect — PHY context + RLC + binding ──────────────
+// All cmd_vers parsed from the FW file: PHY_CONTEXT v4, RLC_CONFIG v2,
+// BINDING v2 (BINDING_CDB_SUPPORT=yes → full struct), CDB_SUPPORT=no → lmac_id 0.
+pub const PHY_BAND_5_U8: u8 = 0; // PHY_BAND_5
+pub const IWL_PHY_CHANNEL_MODE20: u8 = 0;
+pub const IWL_LMAC_24G_INDEX: u32 = 0; // no CDB → lmac_id always 0
+pub const FW_CTXT_INVALID: u32 = 0xffff_ffff;
+
+// PHY_CONTEXT_CMD v4 (fw/api/phy-ctxt.h, struct iwl_phy_context_cmd, 32 B).
+// PHY_CONTEXT_CMD = 0x08 already defined above (scan section).
+pub const PHY_CTX_CMD_LEN: usize = 32;
+pub const PC_OFF_ID_COLOR: usize = 0;     // __le32 FW_CMD_ID_AND_COLOR(phy_id=0,0)=0
+pub const PC_OFF_ACTION: usize = 4;       // __le32 FW_CTXT_ACTION_ADD
+pub const PC_OFF_CI_CHANNEL: usize = 8;   // ci.channel __le32
+pub const PC_OFF_CI_BAND: usize = 12;     // ci.band u8 (PHY_BAND_24/5)
+pub const PC_OFF_CI_WIDTH: usize = 13;    // ci.width u8 (MODE20)
+pub const PC_OFF_CI_CTRL_POS: usize = 14; // ci.ctrl_pos u8 (0 for 20 MHz)
+pub const PC_OFF_LMAC_ID: usize = 16;     // __le32 (ci.reserved @15)
+// rxchain_info @20 (reserved in v4 → 0), dsp_cfg_flags @24,
+// secondary_ctrl_chnl_loc @28, reserved[3] @29 — all 0.
+
+// RLC_CONFIG_CMD v2 (DATA_PATH_GROUP/0x08, struct iwl_rlc_config_cmd, 32 B).
+// Required: RLC cmd_ver=2 (< 3 = not offloaded), so the driver sends rx_chain_info.
+pub const RLC_CONFIG_CMD: u8 = 0x08;
+pub const RLC_CMD_LEN: usize = 32;
+pub const RLC_OFF_PHY_ID: usize = 0;        // __le32 phy_id
+pub const RLC_OFF_RX_CHAIN_INFO: usize = 4; // rlc.rx_chain_info __le32
+// rlc.reserved @8; sad{chain_a@12,chain_b@16,mac_id@20,reserved@24}=0; flags@28; rsv@29.
+// iwl_mvm_phy_ctxt_set_rxchain: valid_rx_ant<<PHY_RX_CHAIN_VALID_POS(1) |
+// idle_cnt<<CNT_POS(10) | active_cnt<<MIMO_CNT_POS(12). 2x2 + diversity → idle=active=2.
+pub const RLC_RX_CHAIN_INFO_2X2: u32 = (0x3 << 1) | (2 << 10) | (2 << 12); // 0x2806
+
+// BINDING_CONTEXT_CMD v2 (0x2b, struct iwl_binding_cmd, 28 B; CDB → full w/ lmac_id).
+pub const BINDING_CONTEXT_CMD: u8 = 0x2b;
+pub const BINDING_CMD_LEN: usize = 28;
+pub const BC_OFF_ID_COLOR: usize = 0; // FW_CMD_ID_AND_COLOR(phy_id=0,0)=0
+pub const BC_OFF_ACTION: usize = 4;   // FW_CTXT_ACTION_ADD
+pub const BC_OFF_MACS: usize = 8;     // __le32 macs[3] (MAX_MACS_IN_BINDING)
+pub const BC_OFF_PHY: usize = 20;     // __le32 phy = FW_CMD_ID_AND_COLOR(phy_id=0,0)
+pub const BC_OFF_LMAC_ID: usize = 24; // __le32 lmac_id
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
