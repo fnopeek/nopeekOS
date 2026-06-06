@@ -106,9 +106,52 @@ mvm Host-Commands: Station/MAC-Context, Scan-Command → APs sehen. `mvm/scan.c`
 `mvm/mac-ctxt.c`, `mvm/sta.c`. Host-Commands gehen über die TFD-Command-Queue
 (Stage 1).
 
-### Stage 5 — Assoc + TX/RX (daily driver)
-Association, Keys, TX/RX-Datenpfad → `npk_netdev_register` → in den nopeek-
-Netstack. `mvm/tx.c`, `mvm/rxmq.c`, `mvm/sta.c`.
+### Stage 5 — Connect / Assoc + TX/RX-Datenpfad (= „#3 connect")
+Der erste **TX-Datenpfad** + 802.11-Verbindung. Gestaffelt, jede Stage 1:1 nach
+der kartierten iwlwifi-mvm-Sequenz (linux-6.18.26), eine Version/Commit pro
+Stage, HW-Test am Ende. **Zuerst hartkodiert** gegen einen Test-AP (wie der Scan
+zuerst hartkodiert war), **dann** an die WiFi-Klassen-ABI verdrahtet.
+
+**cmd_ver am Build-Start aus der FW-Datei parsen** (Python-TLV, wie beim Scan):
+PHY_CONTEXT, BINDING, ADD_STA(=12 bekannt), ADD_STA_KEY, SCD_QUEUE_CONFIG, TX_CMD.
+
+- **5a — PHY-Context + Binding** (reine Control-Cmds, kein TX): `PHY_CONTEXT_CMD`
+  (0x08, `iwl_phy_context_cmd`, v?; ci=channel-info des AP, band, 20 MHz,
+  action ADD) + ggf. `RLC_CONFIG_CMD` (DATA_PATH) + `BINDING_CONTEXT_CMD` (0x2b,
+  `iwl_binding_cmd`, MAC↔PHY, action ADD). Quellen: `mvm/phy-ctxt.c`,
+  `mvm/binding.c`, `fw/api/phy-ctxt.h`+`binding.h`. **Test:** Echo/Status OK.
+- **5b — Station (AP-Peer) + gen2-TX-Queue:** `ADD_STA` v12 (`iwl_mvm_add_sta_cmd`,
+  sta_id, addr=BSSID, station_type=IWL_STA_LINK, add_modify=0) → Status SUCCESS;
+  dann **dyn. TX-Queue** via `SCD_QUEUE_CONFIG_CMD` (DATA_PATH_GROUP, v3,
+  `iwl_scd_queue_cfg_cmd`: op ADD, tfdq_dram_addr, **bc_dram_addr**, sta_mask,
+  tid) → FW gibt **queue_id** zurück. Quellen: `mvm/sta.c`, `pcie/.../tx-gen2.c`
+  `iwl_trans_txq_alloc`. **Test:** ADD_STA SUCCESS + queue_id geloggt.
+- **5c — gen2-TX-Datenpfad (das harte neue Fundament):** TFD-Bau für Daten-Queue
+  + **eingebettetes `tx_cmd`** (`iwl_tx_cmd` v?; len/flags/rate_n_flags/802.11-hdr)
+  + **byte-count-table-Update** (`iwl_pcie_gen2_update_byte_tbl`) + Doorbell +
+  **TX-Completion** (`TX_CMD`-Resp über RX-Ring). Quellen: `pcie/.../tx-gen2.c`
+  `iwl_txq_gen2_tx`, `fw/api/tx.h`. **Test:** ein 802.11-Frame (QoS-Null oder
+  hartkodierter Auth-Frame) raus → TX-Completion empfangen. Make-or-break.
+- **5d — Auth + Assoc (OPEN-Netz zuerst!):** Auth-Frame (open-system) bauen+TX,
+  Auth-Resp im RX (0xc1) sehen; Assoc-Req bauen+TX, Assoc-Resp mit **AID** lesen;
+  dann `MAC_CONTEXT` is_assoc=1 + `ADD_STA` modify (assoc_id). Gegen ein **offenes**
+  Test-Netz → **erster echter Daten-Pfad ohne 4-Way** = Meilenstein (DHCP läuft).
+  Quellen: `mvm/mac-ctxt.c` (is_assoc), `mvm/sta.c` update, `mvm/mac80211.c`
+  state-machine-Reihenfolge.
+- **5e — WPA2 Keys + EAPOL + authorized:** ab hier **kommt `wifid` ins Spiel**
+  (PSK/4-Way gehören NICHT in den Treiber). Treiber: EAPOL-Demux (Ethertype
+  0x888E → uplink) + `ADD_STA_KEY` (0x17, `iwl_mvm_add_sta_key_cmd`, v?; PTK key_off
+  0 / GTK key_off 1, STA_KEY_FLG_CCM) auf SET_KEY + `set_link(up)`. `wifid` macht
+  PMK(PBKDF2)/PTK/GTK + die 4 EAPOL-Frames. Quellen: `mvm/sta.c`
+  `iwl_mvm_send_sta_key`, `fw/api/sta.h`.
+
+**Treiber- vs ABI-Arbeit:** PHY/Bind/Sta/TXQ/Keys = reine Treiber-FW-Plumbing.
+Auth/Assoc/EAPOL-**Frames** baut die obere Schicht (`wifid`); der Treiber
+transportiert sie nur (TX_MGMT/RX_MGMT/EAPOL über die ABI). **ABI-Verfeinerung
+(in WIFI_CLASS_ABI.md nachziehen):** für die MLME-in-`wifid`-Trennung braucht's
+neben TX_EAPOL auch generisches TX_MGMT/RX_MGMT + Signale ASSOC_READY (FW geprepped)
+und ASSOCIATED{aid} (→ mac_ctxt is_assoc + update_sta) + AUTHORIZED.
+**Größte neue Infrastruktur:** dyn. gen2-Daten-TXQ, **bc_tbl**, eingebettetes tx_cmd.
 
 ### `bt_ax200` (unabhängig, parallel möglich)
 USB `8087:0029` über bestehenden xHCI/USB-Stack. btusb-HCI-Transport

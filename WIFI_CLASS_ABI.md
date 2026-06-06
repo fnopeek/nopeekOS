@@ -87,15 +87,15 @@ npk_wifi_poll_cmd(buf_ptr, max) -> i32     // nächstes Kommando aus downlink, -
 npk_wifi_send_event(buf_ptr, len) -> i32   // Event in uplink (an Manager)
 ```
 
-### Data-Pfad-Verdrahtung (Treiber — Kernel-Fns existieren, Host-Fns NOCH NICHT)
+### Data-Pfad-Verdrahtung (Treiber — ✅ alle in Kernel v0.205.0)
 ```
 npk_netdev_submit_rx(buf_ptr, len) -> i32  // empfangenes Eth-Frame → IP-Stack  (→ wasm_nic_submit_rx)
 npk_netdev_poll_tx(buf_ptr, max) -> i32    // zu sendendes Eth-Frame holen, -1 = keins (→ wasm_nic_poll_tx)
 npk_netdev_set_link(up) -> i32             // echter Link-State (assoziiert ja/nein)
 ```
-`npk_netdev_register` existiert bereits (0.21.0). `set_link` löst das
-„State DOWN = nur nicht-primär"-Schönheitsproblem: `intent_net_info` (net.rs)
-soll künftig den echten Link-State zeigen statt `primary==UP`.
+`npk_netdev_register` existiert seit 0.21.0. `set_link` (v0.205.0) löst das
+„State DOWN = nur nicht-primär"-Problem: `intent_net_info` (net.rs) zeigt jetzt
+den echten Link-State statt `primary==UP`.
 
 ---
 
@@ -104,14 +104,22 @@ soll künftig den echten Link-State zeigen statt `primary==UP`.
 Kompakt-binär, hand-codiert (matcht den no_std-Stil der Treiber — kein postcard
 im Treiber). Jede Nachricht: `[u8 type][payload…]`, little-endian.
 
+**802.11-MLME (Auth/Assoc-Frame-Bau) lebt im `wifid`, NICHT im Treiber** (vendor-
+unabhängig → keine Redundanz pro Chip). Der Treiber macht nur die FW-Plumbing
+(PHY/Bind/Sta/TXQ/Keys) + transportiert die Frames. Darum generisches TX_MGMT/
+RX_MGMT statt Auth/Assoc im Treiber.
+
 ### 4a. downlink (Manager → Treiber)
 | type | Name | Payload |
 |------|------|---------|
 | `0x01` | `SCAN` | flags u8 (0=passiv-all-band v1), band_mask u8 (bit0=2.4 bit1=5) |
-| `0x02` | `CONNECT` | bssid[6], channel u8, band u8 (PHY_BAND_*), security u8, ssid_len u8, ssid[ssid_len] |
+| `0x02` | `CONNECT` | bssid[6], channel u8, band u8 (PHY_BAND_*) — Treiber: PHY-Ctxt+Binding+ADD_STA+TXQ, dann `READY` |
 | `0x03` | `DISCONNECT` | — |
 | `0x04` | `SET_KEY` | key_type u8 (0=PTK/pairwise 1=GTK/group), key_idx u8, cipher u8 (4=CCMP), key_len u8, key[key_len], rsc[6] |
-| `0x05` | `TX_EAPOL` | frame_len u16, frame[frame_len] (802.1X/EAPOL payload, Treiber rahmt als 802.11-Data) |
+| `0x05` | `TX_EAPOL` | frame_len u16, frame[frame_len] — EAPOL-Data-Frame (4-Way) |
+| `0x06` | `TX_MGMT` | frame_len u16, frame[frame_len] — 802.11-Mgmt-Frame (Auth / Assoc-Req), `wifid` baut, Treiber sendet |
+| `0x07` | `ASSOCIATED` | aid u16 — `wifid` meldet Assoc-Erfolg → Treiber: MAC_CONTEXT is_assoc=1 + ADD_STA modify(assoc_id) |
+| `0x08` | `AUTHORIZED` | — — 4-Way fertig → Treiber: Station authorized + `set_link(up)` → uplink `LINK_UP` |
 
 **Keys kommen NIE im CONNECT** — erst nach dem Handshake via SET_KEY. Der
 Treiber sieht nie den PSK, nur die fertige PTK/GTK.
@@ -121,11 +129,12 @@ Treiber sieht nie den PSK, nur die fertige PTK/GTK.
 |------|------|---------|
 | `0x81` | `SCAN_AP` | bssid[6], rssi i8, channel u8, band u8, security u8, ssid_len u8, ssid[ssid_len] — **ein Event pro AP** (kein Sizing-Problem) |
 | `0x82` | `SCAN_DONE` | count u16 |
-| `0x83` | `ASSOC_OK` | bssid[6] — assoziiert (pre-Handshake), ab jetzt fließt EAPOL |
-| `0x84` | `EAPOL_RX` | frame_len u16, frame[frame_len] — EAPOL vom AP → Manager rechnet 4-Way-HS |
+| `0x83` | `READY` | bssid[6] — FW geprepped (PHY/Bind/Sta/TXQ), `wifid` darf jetzt Auth (`TX_MGMT`) senden |
+| `0x84` | `EAPOL_RX` | frame_len u16, frame[frame_len] — EAPOL vom AP → `wifid` rechnet 4-Way-HS |
 | `0x85` | `LINK_UP` | bssid[6] — HS fertig, Keys installiert, Data-Pfad live |
 | `0x86` | `LINK_DOWN` | reason u8 (0=requested 1=deauth 2=lost) |
 | `0x87` | `CONNECT_FAILED` | reason u8 (1=no-such-AP 2=assoc-timeout 3=auth-reject) |
+| `0x88` | `RX_MGMT` | frame_len u16, frame[frame_len] — empfangener Mgmt-Frame (Auth-Resp / Assoc-Resp), `wifid` parst AID |
 
 `security`-Enum (beacon RSN/WPA-IE-Parse): 0=open 1=WEP 2=WPA2-PSK 3=WPA3-SAE
 4=WPA2/3-mixed. v1 zielt auf **WPA2-PSK (CCMP)**; WPA3-SAE später.
@@ -139,19 +148,29 @@ UI: „verbinden mit IvyPie_New" ──► wifid
 wifid ─SCAN──────────────────────► Treiber ──► SCAN_REQ_UMAC (vendor)
 Treiber ─SCAN_AP×N, SCAN_DONE────► wifid ──► UI zeigt Liste + RSSI-Icon
 wifid: PSK aus npkFS (oder UI-Dialog) → PMK ableiten (PBKDF2)
-wifid ─CONNECT{bssid,ssid,WPA2}──► Treiber ──► PHY_CTXT+BINDING+ADD_STA+AUTH+ASSOC (vendor)
-Treiber ─ASSOC_OK────────────────► wifid
+wifid ─CONNECT{bssid,channel,band}► Treiber ─► PHY_CTXT+BINDING+ADD_STA+TXQ (vendor-FW)
+Treiber ─READY───────────────────► wifid
+   ┌─ 802.11-MLME (wifid baut Frames, Treiber transportiert) ─┐
+   │ wifid ─TX_MGMT(Auth)──► Treiber ─TX──► AP                │
+   │ Treiber ─RX_MGMT(Auth-Resp)──► wifid                     │
+   │ wifid ─TX_MGMT(Assoc-Req)──► Treiber ─TX──► AP           │
+   │ Treiber ─RX_MGMT(Assoc-Resp, AID)──► wifid               │
+   └──────────────────────────────────────────────────────────┘
+wifid ─ASSOCIATED{aid}───────────► Treiber ─► MAC_CONTEXT is_assoc=1 + ADD_STA modify
    ┌─ 4-Way-Handshake (rein im wifid, vendor-unabhängig) ─┐
    │ Treiber ─EAPOL_RX(M1)─► wifid ─TX_EAPOL(M2)─► Treiber │
    │ Treiber ─EAPOL_RX(M3)─► wifid ─TX_EAPOL(M4)─► Treiber │
    │ wifid leitet PTK/GTK ab                                │
    └────────────────────────────────────────────────────────┘
-wifid ─SET_KEY(PTK)──────────────► Treiber ──► SEC_KEY_CMD (vendor, in FW)
-wifid ─SET_KEY(GTK)──────────────► Treiber ──► SEC_KEY_CMD
-Treiber ─LINK_UP─────────────────► wifid; Treiber ► npk_netdev_set_link(up)
+wifid ─SET_KEY(PTK)──────────────► Treiber ──► ADD_STA_KEY (vendor, in FW)
+wifid ─SET_KEY(GTK)──────────────► Treiber ──► ADD_STA_KEY
+wifid ─AUTHORIZED────────────────► Treiber ─► Station authorized + npk_netdev_set_link(up)
+Treiber ─LINK_UP─────────────────► wifid
 ab jetzt: normaler Traffic Treiber ↔ npk_netdev_submit_rx/poll_tx ↔ IP-Stack
 wifid: DHCP über den jetzt-UP wlan (Kernel-IP-Stack)
 ```
+Hinweis: ein **OFFENES** Netz überspringt den 4-Way + Keys (CONNECT→READY→MLME→
+ASSOCIATED→AUTHORIZED) — das ist der erste testbare Daten-Pfad (Stage 5d).
 
 ---
 
@@ -179,10 +198,13 @@ nichts** — Trennung der Geheimnisse.
 **Braucht für die ABI:**
 - Control-Channel-Polling im resident-Loop: `npk_wifi_poll_cmd` neben `service_rx`.
 - SCAN auf Kommando (statt einmalig in `_start`) + SCAN_AP/SCAN_DONE senden.
-- **#3 connect = der erste TX-Datenpfad:** PHY_CONTEXT_CMD v4 + BINDING + ADD_STA
-  v12 + AUTH/ASSOC-Mgmt-Frames (gen2-TX-Queue + bc_tbl, bisher nur Cmd-Queue+RX).
-- EAPOL-Demux (Ethertype 0x888E) + SET_KEY→SEC_KEY_CMD.
-- Data-Pfad: `npk_netdev_submit_rx`/`poll_tx`/`set_link` (Host-Fns verdrahten).
+- **#3 connect = der erste TX-Datenpfad:** PHY_CONTEXT_CMD + BINDING_CONTEXT_CMD +
+  ADD_STA v12 + dyn. gen2-TX-Queue (SCD_QUEUE_CONFIG + **bc_tbl**) + eingebettetes
+  tx_cmd; Auth/Assoc-Frames baut `wifid` (TX_MGMT/RX_MGMT). Bisher nur Cmd-Queue+RX.
+  Voller Stage-Plan (5a–5e) in `WIFI_AX200.md`.
+- EAPOL-Demux (Ethertype 0x888E) + SET_KEY→**ADD_STA_KEY (0x17)** (diese FW,
+  new_station_api; nicht SEC_KEY_CMD).
+- Data-Pfad: `npk_netdev_submit_rx`/`poll_tx`/`set_link` (Host-Fns ✅ in v0.205.0).
 
 **Kernel-Arbeit (einmalig, generisch):** Control-Mailbox-Paar + 4 Host-Fns
 (§3) + NETCTL-Rights-Bit + die 3 netdev-Data-Host-Fns verdrahten. **Kein**
