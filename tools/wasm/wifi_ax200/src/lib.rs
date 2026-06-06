@@ -785,6 +785,15 @@ impl Ax200 {
                 host::print("\n");
                 if cmd == want_cmd && grp == want_group {
                     matched = Some(rb);
+                } else {
+                    // Recycle non-matched RBs (notifications, echoes — the bulk)
+                    // back into the free-BD ring. The driver is now resident, so
+                    // the 64-RB pool must be replenished or the firmware runs dry
+                    // and can post no further frames (TX completions, beacons).
+                    // The matched RB is returned to the caller to read, so it is
+                    // NOT recycled here (that would race the firmware writing it).
+                    self.recycle_rb(vid);
+                    self.flush_free_bd();
                 }
             }
             self.rxq_read = (self.rxq_read + 1) & (NUM_RBDS as u32 - 1);
@@ -1902,7 +1911,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.24.1 — connect 5c (TX diag)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.24.2 — connect 5c (RX recycle fix)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
