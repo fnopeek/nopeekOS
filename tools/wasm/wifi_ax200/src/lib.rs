@@ -114,6 +114,12 @@ struct Ax200 {
     target_chan: u8,
     target_band: u8, // PHY_BAND_24 / PHY_BAND_5
     target_valid: bool,
+    // gen2 management TX queue for the AP station (auth/assoc frames, 5b+).
+    mgmt_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_MGMT_QUEUE_SIZE)
+    mgmt_first_tb: Dma, // first-TB staging buffers
+    mgmt_bc_tbl: Dma,   // byte-count table (FW DMA scheduling)
+    mgmt_queue_id: u16, // queue id returned by the firmware
+    mgmt_write_ptr: u32,
 }
 
 impl Ax200 {
@@ -1461,6 +1467,99 @@ impl Ax200 {
         }
     }
 
+    // ── Stage 5b: station (AP peer) + gen2 TX queue (connect step 2) ──
+    // iwl_mvm_add_sta + iwl_mvm_tvqm_enable_txq → iwl_trans_txq_alloc (mvm/sta.c,
+    // pcie/.../tx-gen2.c). Adds the AP as a LINK station (ADD_STA v12, sta_id 0,
+    // minimal flags — HT/rate flags come at assoc) and allocates a dynamic gen2
+    // management TX queue for it (for the auth/assoc frames): a TFD ring + first-
+    // TB staging + byte-count table, registered with the firmware via
+    // SCD_QUEUE_CONFIG_CMD v3 which returns the queue id. No frame is transmitted
+    // yet (that is 5c). Both commands return a status (CMD_WANT_SKB).
+    fn connect_add_station(&mut self) -> bool {
+        // ADD_STA v12 (action ADD) — the AP peer station.
+        let mut sc = [0u8; ADD_STA_CMD_LEN];
+        sc[AS_OFF_ADD_MODIFY] = 0; // add (not modify)
+        put_u16(&mut sc, AS_OFF_TID_DISABLE, TID_DISABLE_AGG_INIT);
+        put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0); // FW_CMD_ID_AND_COLOR(mac 0, 0)
+        sc[AS_OFF_ADDR..AS_OFF_ADDR + 6].copy_from_slice(&self.target_bssid);
+        sc[AS_OFF_STA_ID] = AP_STA_ID;
+        put_u32(&mut sc, AS_OFF_STATION_FLAGS, 0); // refined at assoc (5d)
+        put_u32(&mut sc, AS_OFF_STATION_FLAGS_MSK, STA_FLAGS_MSK_ADD);
+        sc[AS_OFF_STATION_TYPE] = IWL_STA_LINK;
+        self.send_hcmd(0, ADD_STA, &sc); // legacy → LONG_GROUP
+        host::print("[ax200] ADD_STA sent (AP peer, sta_id 0), waiting...\n");
+        match self.wait_rx(ADD_STA, IWL_ALWAYS_LONG_GROUP, 1000) {
+            Some(rb) => {
+                let mut p = [0u8; 16];
+                host::dma_read_buf(rb.handle, 0, &mut p);
+                let status = le32(&p, RX_PKT_DATA_OFF) & ADD_STA_STATUS_MASK;
+                host::print("[ax200]   ADD_STA status=0x");
+                host::print_hex32(status);
+                host::print("\n");
+                if status != ADD_STA_SUCCESS {
+                    host::print("[ax200] Stage 5b FAILED — ADD_STA rejected\n");
+                    self.dump_fw_error_log();
+                    return false;
+                }
+            }
+            None => {
+                host::print("[ax200] Stage 5b FAILED — ADD_STA no response\n");
+                self.dump_fw_error_log();
+                return false;
+            }
+        }
+
+        // Allocate the management TX queue DMA: TFD ring + first-TB staging +
+        // byte-count table (16-slot queue → IWL_MGMT_QUEUE_SIZE).
+        self.mgmt_tfd = self.alloc_dma(TFH_TFD_SIZE * IWL_MGMT_QUEUE_SIZE, "mgmt.tfd");
+        self.mgmt_first_tb =
+            self.alloc_dma(IWL_FIRST_TB_SIZE_ALIGN * IWL_MGMT_QUEUE_SIZE, "mgmt.first_tb");
+        self.mgmt_bc_tbl = self.alloc_dma(BC_TBL_BYTES, "mgmt.bc_tbl");
+        if !self.mgmt_tfd.ok() || !self.mgmt_first_tb.ok() || !self.mgmt_bc_tbl.ok() {
+            host::print("[ax200] Stage 5b FAILED — TX queue DMA alloc\n");
+            return false;
+        }
+
+        // SCD_QUEUE_CONFIG_CMD v3 (ADD): hand the DMA addresses to the firmware.
+        let mut q = [0u8; SCD_CMD_LEN];
+        put_u32(&mut q, SQ_OFF_OPERATION, IWL_SCD_QUEUE_ADD);
+        put_u32(&mut q, SQ_OFF_STA_MASK, 1 << AP_STA_ID); // BIT(sta_id)
+        q[SQ_OFF_TID] = IWL_MGMT_TID;
+        put_u32(&mut q, SQ_OFF_FLAGS, 0);
+        put_u32(&mut q, SQ_OFF_CB_SIZE, MGMT_QUEUE_CB_SIZE);
+        put_u64(&mut q, SQ_OFF_BC_DRAM_ADDR, self.mgmt_bc_tbl.phys);
+        put_u64(&mut q, SQ_OFF_TFDQ_DRAM_ADDR, self.mgmt_tfd.phys);
+        self.send_hcmd(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD, &q);
+        host::print("[ax200] SCD_QUEUE_CONFIG_CMD sent (mgmt tid 15), waiting...\n");
+        match self.wait_rx(SCD_QUEUE_CONFIG_CMD, DATA_PATH_GROUP, 1000) {
+            Some(rb) => {
+                let mut p = [0u8; 16];
+                host::dma_read_buf(rb.handle, 0, &mut p);
+                let b = RX_PKT_DATA_OFF;
+                self.mgmt_queue_id = u16::from_le_bytes([
+                    p[b + SQ_RSP_OFF_QUEUE_NUMBER],
+                    p[b + SQ_RSP_OFF_QUEUE_NUMBER + 1],
+                ]);
+                self.mgmt_write_ptr = u16::from_le_bytes([
+                    p[b + SQ_RSP_OFF_WRITE_PTR],
+                    p[b + SQ_RSP_OFF_WRITE_PTR + 1],
+                ]) as u32;
+                host::print("[ax200]   mgmt queue_id=");
+                host::print_dec(self.mgmt_queue_id as u32);
+                host::print(" write_ptr=");
+                host::print_dec(self.mgmt_write_ptr);
+                host::print("\n");
+                host::print("[ax200] Stage 5b OK — station + TX queue allocated\n");
+                true
+            }
+            None => {
+                host::print("[ax200] Stage 5b FAILED — SCD_QUEUE_CONFIG no response\n");
+                self.dump_fw_error_log();
+                false
+            }
+        }
+    }
+
     // ── Resident NIC service loop ─────────────────────────────────
     // The chip is up and the scan has run; register as a network interface and
     // own the card from here. Same shape as aml.wasm: an infinite loop that
@@ -1685,7 +1784,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.22.0 — connect 5a (PHY ctx + binding)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.23.0 — connect 5b (station + TX queue)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -1734,6 +1833,11 @@ pub extern "C" fn _start() {
         target_chan: 0,
         target_band: 0,
         target_valid: false,
+        mgmt_tfd: Dma::NONE,
+        mgmt_first_tb: Dma::NONE,
+        mgmt_bc_tbl: Dma::NONE,
+        mgmt_queue_id: 0,
+        mgmt_write_ptr: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
@@ -1822,8 +1926,9 @@ pub extern "C" fn _start() {
                                 // First connect step (no TX yet): set the target
                                 // AP's operating channel + bind MAC↔PHY. Target =
                                 // strongest AP from the scan.
-                                if dev.target_valid {
-                                    dev.connect_phy_binding();
+                                if dev.target_valid && dev.connect_phy_binding() {
+                                    // ── Stage 5b: AP station + gen2 TX queue ──
+                                    dev.connect_add_station();
                                 }
 
                                 // ── Register as a NIC + go resident ──
