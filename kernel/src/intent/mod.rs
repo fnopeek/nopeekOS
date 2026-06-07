@@ -1578,6 +1578,20 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        "dhcp" => {
+            if require_cap(vault, &session, Rights::WRITE, "dhcp") {
+                // Re-run DHCP on the active NIC (the boot-time configure() ran
+                // before a WiFi link existed). Brings up IP over `wlan` once the
+                // 4-way completed and it's the active interface.
+                kprintln!("[npk] DHCP: requesting a lease...");
+                if crate::net::dhcp::configure() {
+                    kprintln!("[npk] DHCP: configured — run `net` for the address");
+                } else {
+                    kprintln!("[npk] DHCP: failed (no offer)");
+                }
+            }
+        }
+
         "run" | "exec" => {
             if require_cap(vault, &session, Rights::EXECUTE, "run") {
                 wasm::intent_run(args);

@@ -39,6 +39,11 @@ unsafe extern "C" {
     // WiFi-class control channel (driver side — gated to bound drivers).
     fn npk_wifi_poll_cmd(buf_ptr: i32, max: i32) -> i32;
     fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
+
+    // netdev data path (driver ↔ kernel IP stack).
+    fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
+    fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
+    fn npk_netdev_set_link(up: i32) -> i32;
 }
 
 // ── Safe wrappers ────────────────────────────────────────────────
@@ -206,6 +211,23 @@ pub fn wifi_poll_cmd(buf: &mut [u8]) -> i32 {
 /// Send one event (uplink) to the manager. Returns 0 on success, -1 on error.
 pub fn wifi_send_event(msg: &[u8]) -> i32 {
     unsafe { npk_wifi_send_event(msg.as_ptr() as i32, msg.len() as i32) }
+}
+
+/// Hand a received Ethernet frame to the kernel IP stack.
+pub fn netdev_submit_rx(frame: &[u8]) {
+    unsafe { npk_netdev_submit_rx(frame.as_ptr() as i32, frame.len() as i32) };
+}
+
+/// Fetch the next Ethernet frame the kernel wants transmitted into `buf`.
+/// Returns its length, or 0 when there is none.
+pub fn netdev_poll_tx(buf: &mut [u8]) -> usize {
+    let n = unsafe { npk_netdev_poll_tx(buf.as_mut_ptr() as i32, buf.len() as i32) };
+    if n > 0 { n as usize } else { 0 }
+}
+
+/// Report carrier state (associated + keyed → data path live).
+pub fn netdev_set_link(up: bool) {
+    unsafe { npk_netdev_set_link(if up { 1 } else { 0 }) };
 }
 
 // ── Hex output helpers ───────────────────────────────────────────
