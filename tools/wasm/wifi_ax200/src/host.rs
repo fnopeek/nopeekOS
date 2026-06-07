@@ -35,6 +35,10 @@ unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_netdev_register(mac_ptr: i32) -> i32;
     fn npk_input_wait(timeout_ms: i32) -> i32;
+
+    // WiFi-class control channel (driver side — gated to bound drivers).
+    fn npk_wifi_poll_cmd(buf_ptr: i32, max: i32) -> i32;
+    fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
 }
 
 // ── Safe wrappers ────────────────────────────────────────────────
@@ -191,6 +195,17 @@ pub fn input_wait(timeout_ms: u32) -> i32 {
 /// is present. Returns 0 on success, -1 if already registered / on error.
 pub fn netdev_register(mac: &[u8; 6]) -> i32 {
     unsafe { npk_netdev_register(mac.as_ptr() as i32) }
+}
+
+/// Dequeue one control command from the manager (wifid). Returns its length
+/// (0 if none / -1 on error). The driver side is gated to bound drivers.
+pub fn wifi_poll_cmd(buf: &mut [u8]) -> i32 {
+    unsafe { npk_wifi_poll_cmd(buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+/// Send one event (uplink) to the manager. Returns 0 on success, -1 on error.
+pub fn wifi_send_event(msg: &[u8]) -> i32 {
+    unsafe { npk_wifi_send_event(msg.as_ptr() as i32, msg.len() as i32) }
 }
 
 // ── Hex output helpers ───────────────────────────────────────────

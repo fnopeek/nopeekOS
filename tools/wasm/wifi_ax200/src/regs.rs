@@ -678,6 +678,24 @@ pub const MP_OFF_FLAGS: usize = 4;        // __le16 (0 = PS disabled)
 pub const MP_OFF_KEEP_ALIVE: usize = 6;   // __le16 keep_alive_seconds
 pub const POWER_KEEP_ALIVE_PERIOD_SEC: u16 = 25; // max(3*dtim*bi, this); dtim=0 → 25
 
+// ── Stage 5e: EAPOL transport + WiFi-class control channel ───────
+// After association the AP runs the WPA2 4-way handshake; its EAPOL-Key frames
+// arrive as 802.11 DATA frames (LLC/SNAP, ethertype 0x888E). We demux them off
+// the RX ring and forward to wifid (the supplicant) over the control channel.
+pub const ETHERTYPE_EAPOL: u16 = 0x888E;
+pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
+pub const DOT11_FC_TYPE_DATA: u8 = 0x08; // fc byte0 & 0x0c == data
+pub const DOT11_STYPE_QOS: u8 = 0x08;    // subtype bit → +2-byte QoS control
+// Control-channel wire ops (WIFI_CLASS_ABI.md). downlink = manager→driver.
+pub const CMD_SET_KEY: u8 = 0x04;
+pub const CMD_TX_EAPOL: u8 = 0x05;
+pub const CMD_ASSOCIATED: u8 = 0x07;
+pub const CMD_AUTHORIZED: u8 = 0x08;
+// uplink = driver→manager.
+pub const EV_EAPOL_RX: u8 = 0x84;
+pub const EV_LINK_UP: u8 = 0x85;
+pub const EV_READY: u8 = 0x83;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
