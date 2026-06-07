@@ -103,14 +103,14 @@ Legende: ✅ gebaut & HW-validiert · 🟡 gebaut, HW-Test offen · 🔶 teilwei
 
 ## ▶▶ NOCH NICHT GEBAUT — die offenen Gaps (Connect-to-Authorized)
 
-### Phase G — Auth-Response + Assoc (5d) 🟡 (0.27.0 gebaut, HW-Test offen)
+### Phase G — Auth-Response + Assoc (5d) ✅ HW-VALIDIERT (0.27.0, aid=2 gegen WPA2-AP)
 Erster echter **Empfangs→Sende-Dialog**. Gemeinsamer TX-Helper `tx_mgmt_frame` +
 RX-Parse `rx_mgmt_for_us`/`wait_mgmt_response`.
 | Linux | FW-Cmd | unsere fn | Status |
 |---|---|---|---|
-| `iwl_mvm_rx_mpdu` → **Auth-Response parsen** (seq2/status0) | — | `connect_send_auth` | 🟡 |
-| **Assoc-Request bauen + TX** (SSID, Rates, ExtRates, RSN für WPA2) | TX_CMD 0x1c | `connect_send_assoc` | 🟡 |
-| **Assoc-Response parsen** → status + AID | — | `connect_send_assoc` | 🟡 |
+| `iwl_mvm_rx_mpdu` → **Auth-Response parsen** (seq2/status0) | — | `connect_send_auth` | ✅ |
+| **Assoc-Request bauen + TX** (SSID, Rates, ExtRates, RSN für WPA2) | TX_CMD 0x1c | `connect_send_assoc` | ✅ |
+| **Assoc-Response parsen** → status + AID | — | `connect_send_assoc` | ✅ (aid=2) |
 | HT/VHT/HE-Caps im Assoc-Req | — | — | ❌ (legacy-Assoc erst; bei Reject nachrüsten) |
 | `iwl_mvm_sta_state` AUTH→ASSOC: `iwl_mvm_update_sta` (ADD_STA modify) | ADD_STA 0x18 | — | ❌ |
 | MAC_CONTEXT MODIFY `is_assoc=1` (braucht dtim aus Assoc) | MAC_CONTEXT 0x28 | — | ❌ |
