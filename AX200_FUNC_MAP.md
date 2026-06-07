@@ -123,11 +123,13 @@ In **`wifid.wasm`** (Supplicant, vendor-unabhängig, aml-Struktur core/wasm/harn
 | wifid liest SSID+PSK (2 npkFS-Objekte), leitet PMK ab | — | ✅ HW (PMK auf HP, IvyPie_New) |
 | wifid Control-Channel-Client (send_cmd/poll_event, NETCTL) | — | 🟡 (NETCTL nur via Autostart) |
 | **AES-128 + AES-Key-Unwrap (RFC 3394)** für GTK-unwrap | — | ❌ core nächste Slice |
-| **4-Way-State-Machine** (msg1→PTK, msg2-MIC, msg3-GTK-unwrap, msg4) | — | ❌ nächste Slice |
-| **EAPOL-TX** (als Daten-Frame über STA-Daten-Queue) | TX_CMD 0x1c | ❌ (braucht Daten-Queue + LLC/SNAP) |
-| **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | ❌ Treiberseite |
-| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 | ❌ |
-| `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ |
+| **AES-128 + AES-Key-Unwrap (RFC 3394)** für GTK-unwrap | — | ✅ std-getestet (FIPS-197/RFC-3394) |
+| **4-Way-State-Machine** (`eapol::Supplicant`: msg1→PTK, msg2+MIC, msg3 GTK-unwrap, msg4) | — | ✅ std-getestet (msg1→msg4-Roundtrip) |
+| **EAPOL-TX** (als Daten-Frame über STA-Daten-Queue) | TX_CMD 0x1c | ❌ (braucht Daten-Queue + LLC/SNAP) — slice B |
+| **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | ❌ Treiberseite — slice B |
+| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 | ❌ slice B |
+| wifid↔Treiber verdrahten + wifid resident (yieldend) | — | ❌ slice C |
+| `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ slice C |
 
 ### Phase I — Daten-Pfad (resident NIC, echte Frames) 🔶
 Aktuell: `run_netdev` registriert nur das Interface + drained RX (kein echter TX/RX-Datenfluss).
