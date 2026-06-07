@@ -120,8 +120,9 @@ In **`wifid.wasm`** (Supplicant, vendor-unabhängig, aml-Struktur core/wasm/harn
 | Schritt | Cmd | Status |
 |---|---|---|
 | **`wifid_core` Crypto** (SHA1/HMAC/PBKDF2→PMK, PRF→PTK) | — | ✅ std-getestet (IEEE-802.11i-Vektor) |
-| wifid liest PSK aus `sys/config/wifi_psk`, leitet PMK ab | — | 🟡 (HW-Test: PMK-Log) |
-| wifid Control-Channel-Client (send_cmd/poll_event, NETCTL) | — | 🟡 |
+| wifid liest SSID+PSK (2 npkFS-Objekte), leitet PMK ab | — | ✅ HW (PMK auf HP, IvyPie_New) |
+| wifid Control-Channel-Client (send_cmd/poll_event, NETCTL) | — | 🟡 (NETCTL nur via Autostart) |
+| **AES-128 + AES-Key-Unwrap (RFC 3394)** für GTK-unwrap | — | ❌ core nächste Slice |
 | **4-Way-State-Machine** (msg1→PTK, msg2-MIC, msg3-GTK-unwrap, msg4) | — | ❌ nächste Slice |
 | **EAPOL-TX** (als Daten-Frame über STA-Daten-Queue) | TX_CMD 0x1c | ❌ (braucht Daten-Queue + LLC/SNAP) |
 | **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | ❌ Treiberseite |
