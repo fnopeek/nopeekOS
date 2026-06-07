@@ -31,11 +31,13 @@ unsafe extern "C" {
     fn npk_wifi_send_cmd(buf_ptr: i32, len: i32) -> i32;
     fn npk_wifi_poll_event(buf_ptr: i32, max: i32) -> i32;
     fn npk_sleep(ms: i32) -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
+    // Terminal/framebuffer output (like the driver) — visible on serial-less HW;
+    // npk_log_serial is invisible on machines without a COM port (the HP).
+    fn npk_print(ptr: i32, len: i32);
 }
 
 fn log(s: &str) {
-    unsafe { npk_log_serial(s.as_ptr() as i32, s.len() as i32) };
+    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
 
 fn log_hex(prefix: &str, bytes: &[u8]) {
