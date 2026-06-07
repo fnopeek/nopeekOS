@@ -2031,11 +2031,9 @@ impl Ax200 {
         } else {
             host::print("[ax200] netdev_register failed\n");
         }
-        // Allocate the data TX queue (tid 0) so we can transmit EAPOL frames.
-        if !self.alloc_data_queue() {
-            host::print("[ax200] data queue alloc FAILED — EAPOL TX unavailable\n");
-        }
-        // Tell wifid the connection is ready + the MACs it needs for the PTK.
+        // The data TX queue was allocated before auth (so its SCD-response wait
+        // wouldn't swallow the AP's first EAPOL frame). Tell wifid the connection
+        // is ready + the MACs it needs for the PTK, then listen immediately.
         let our_mac = self.mac;
         let mut ready = [0u8; 13];
         ready[0] = EV_READY;
@@ -2311,7 +2309,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.29.0 — 5e EAPOL TX + keys\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.29.1 — 5e data-queue before auth\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -2468,6 +2466,13 @@ pub extern "C" fn _start() {
                                     // ── Stage 5b': power + MAC context (target BSSID) ──
                                     // The chanctx tail Linux runs before the auth TX.
                                     dev.connect_finish_chanctx();
+                                    // Allocate the data TX queue BEFORE auth so its
+                                    // SCD-response wait doesn't discard the AP's
+                                    // first EAPOL frame, and the post-assoc listen
+                                    // can begin immediately.
+                                    if !dev.alloc_data_queue() {
+                                        host::print("[ax200] data queue alloc FAILED\n");
+                                    }
                                     // ── Stage 5c/5d: AUTH → ASSOC mgmt dialog ──
                                     if dev.connect_send_auth() {
                                         dev.connect_send_assoc();
