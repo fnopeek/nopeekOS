@@ -15,11 +15,13 @@
 use wifid_core::eapol::{Step, Supplicant};
 use wifid_core::wpa2_pmk;
 
-// Manager side of the WiFi-class channel → declare NETCTL (bit 0x80). The
-// kernel grants exactly that (gates npk_wifi_send_cmd / npk_wifi_poll_event).
+// Capabilities: NETCTL (0x80, the control channel) + READ (0x01, fetch the
+// credential) + WRITE (0x02, write the debug log). The kernel grants EXACTLY
+// these from the caps byte — so NETCTL alone (0x80) would have no READ and the
+// autostart instance couldn't even load the PSK.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [0x80];
+static NPK_CAPS: [u8; 1] = [0x83];
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -35,10 +37,31 @@ unsafe extern "C" {
     // Terminal/framebuffer output (like the driver) — visible on serial-less HW;
     // npk_log_serial is invisible on machines without a COM port (the HP).
     fn npk_print(ptr: i32, len: i32);
+    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
 }
 
+const LOG_CAP: usize = 8192;
+static mut LOG_BUF: [u8; LOG_CAP] = [0; LOG_CAP];
+static mut LOG_LEN: usize = 0;
+
+// Log to the terminal AND persist to npkFS `sys/log/wifid` — wifid runs in an
+// invisible autostart window, so its log is read back with `fetch /sys/log/wifid`.
 fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
+    unsafe {
+        let buf = core::ptr::addr_of_mut!(LOG_BUF) as *mut u8;
+        let len_ptr = core::ptr::addr_of_mut!(LOG_LEN);
+        let mut l = len_ptr.read();
+        for &c in s.as_bytes() {
+            if l < LOG_CAP {
+                buf.add(l).write(c);
+                l += 1;
+            }
+        }
+        len_ptr.write(l);
+        let name = b"sys/log/wifid";
+        npk_store(name.as_ptr() as i32, name.len() as i32, buf as i32, l as i32);
+    }
 }
 
 fn log_hex(prefix: &str, bytes: &[u8]) {
