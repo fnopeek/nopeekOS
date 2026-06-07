@@ -125,9 +125,10 @@ In **`wifid.wasm`** (Supplicant, vendor-unabhängig, aml-Struktur core/wasm/harn
 | **AES-128 + AES-Key-Unwrap (RFC 3394)** für GTK-unwrap | — | ❌ core nächste Slice |
 | **AES-128 + AES-Key-Unwrap (RFC 3394)** für GTK-unwrap | — | ✅ std-getestet (FIPS-197/RFC-3394) |
 | **4-Way-State-Machine** (`eapol::Supplicant`: msg1→PTK, msg2+MIC, msg3 GTK-unwrap, msg4) | — | ✅ std-getestet (msg1→msg4-Roundtrip) |
-| **EAPOL-TX** (als Daten-Frame über STA-Daten-Queue) | TX_CMD 0x1c | ❌ (braucht Daten-Queue + LLC/SNAP) — slice B |
-| **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | ❌ Treiberseite — slice B |
-| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 | ❌ slice B |
+| **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | 🟡 gebaut (0.28.0, HW-Test offen) |
+| Control-Host-Fns Treiber (`npk_wifi_poll_cmd`/`send_event`) | — | ✅ verdrahtet (0.28.0) |
+| **EAPOL-TX** (als Daten-Frame über STA-Daten-Queue) | TX_CMD 0x1c | ❌ (Daten-Queue + LLC/SNAP) — slice C |
+| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 (cmd_ver 3, 76 B) | ❌ slice C |
 | wifid↔Treiber verdrahten + wifid resident (yieldend) | — | ❌ slice C |
 | `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ slice C |
 
