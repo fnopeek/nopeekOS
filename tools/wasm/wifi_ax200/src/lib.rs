@@ -1660,7 +1660,7 @@ impl Ax200 {
     // advanced write pointer. (The 802.11 frame is built by the caller.)
     fn tx_raw(&self, qid: u16, wptr: u32, tfd_ring: Dma, first_tb: Dma, bc: Dma, flags: u32, frame: &[u8]) -> u32 {
         let idx = (wptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
-        let mut buf = [0u8; 320];
+        let mut buf = [0u8; 2048]; // dev_cmd header + tx_cmd + up to a full MTU frame
         buf[0] = TX_CMD;
         buf[1] = 0; // group 0 (short header)
         let seq = (((qid) & 0x1f) << 8) | (idx as u16 & 0xff);
@@ -1852,7 +1852,10 @@ impl Ax200 {
         if fc & 0x0c != DOT11_FC_TYPE_DATA {
             return RxKind::None;
         }
-        if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] != our_mac[..] {
+        // Accept frames to us OR to a group address (multicast bit / broadcast) —
+        // a DHCP offer / ARP reply often comes back L2-broadcast.
+        let a1 = &buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6];
+        if a1 != our_mac[..] && a1[0] & 0x01 == 0 {
             return RxKind::None;
         }
         let subtype = (fc >> 4) & 0xf;
@@ -2390,7 +2393,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.1 — data-path diag\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.2 — fix TX buf overflow + bcast RX\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
