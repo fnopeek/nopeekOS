@@ -134,6 +134,12 @@ struct Ax200 {
     mgmt_bc_tbl: Dma,   // byte-count table (FW DMA scheduling)
     mgmt_queue_id: u16, // queue id returned by the firmware
     mgmt_write_ptr: u32,
+    // gen2 data TX queue (tid 0) for EAPOL frames during the 4-way (5e+).
+    data_tfd: Dma,
+    data_first_tb: Dma,
+    data_bc_tbl: Dma,
+    data_queue_id: u16,
+    data_write_ptr: u32,
 }
 
 impl Ax200 {
@@ -1639,14 +1645,16 @@ impl Ax200 {
     // (TB0 = first-TB staging with the first 20 bytes, TB1 = the remainder from
     // cmd_data), fills the byte-count table, bumps the write pointer and rings the
     // doorbell. For AX200 (< BZ) mgmt frames use the host rate (IWL_TX_FLAGS_CMD_RATE).
-    fn tx_mgmt_frame(&mut self, frame: &[u8]) {
-        let qid = self.mgmt_queue_id;
-        let idx = (self.mgmt_write_ptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
-
+    // Generic gen2 TX onto a given queue (mgmt or data): build the dev TX command
+    // (short header + tx_cmd_v9 + frame) across the TFD's two TBs, fill the
+    // byte-count table, bump the write pointer and ring the doorbell. Returns the
+    // advanced write pointer. (The 802.11 frame is built by the caller.)
+    fn tx_raw(&self, qid: u16, wptr: u32, tfd_ring: Dma, first_tb: Dma, bc: Dma, frame: &[u8]) -> u32 {
+        let idx = (wptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
         let mut buf = [0u8; 320];
         buf[0] = TX_CMD;
-        buf[1] = 0; // group 0 (short header — TX is a device command, not a host cmd)
-        let seq = (((qid as u16) & 0x1f) << 8) | (idx as u16 & 0xff);
+        buf[1] = 0; // group 0 (short header)
+        let seq = (((qid) & 0x1f) << 8) | (idx as u16 & 0xff);
         buf[2..4].copy_from_slice(&seq.to_le_bytes());
         let frame_len = frame.len() as u16;
         put_u16(&mut buf, TXC_OFF_LEN, frame_len);
@@ -1663,26 +1671,118 @@ impl Ax200 {
 
         host::dma_write_buf(self.cmd_data.handle, 0, &buf[..total]);
         let ftb_off = (idx * IWL_FIRST_TB_SIZE_ALIGN) as u32;
-        host::dma_write_buf(self.mgmt_first_tb.handle, ftb_off, &buf[..IWL_FIRST_TB_SIZE]);
+        host::dma_write_buf(first_tb.handle, ftb_off, &buf[..IWL_FIRST_TB_SIZE]);
 
         let mut tfd = [0u8; TFH_TFD_SIZE];
-        let tb0_phys = self.mgmt_first_tb.phys + ftb_off as u64;
-        put_tfh_tb(&mut tfd, 0, IWL_FIRST_TB_SIZE as u16, tb0_phys);
-        put_tfh_tb(
-            &mut tfd,
-            1,
-            (total - IWL_FIRST_TB_SIZE) as u16,
-            self.cmd_data.phys + IWL_FIRST_TB_SIZE as u64,
-        );
+        put_tfh_tb(&mut tfd, 0, IWL_FIRST_TB_SIZE as u16, first_tb.phys + ftb_off as u64);
+        put_tfh_tb(&mut tfd, 1, (total - IWL_FIRST_TB_SIZE) as u16, self.cmd_data.phys + IWL_FIRST_TB_SIZE as u64);
         tfd[0..2].copy_from_slice(&2u16.to_le_bytes()); // num_tbs
-        host::dma_write_buf(self.mgmt_tfd.handle, (idx * TFH_TFD_SIZE) as u32, &tfd);
+        host::dma_write_buf(tfd_ring.handle, (idx * TFH_TFD_SIZE) as u32, &tfd);
 
         let bc_ent = ((frame_len as u32 + 3) / 4) as u16;
-        host::dma_write_buf(self.mgmt_bc_tbl.handle, (idx * 2) as u32, &bc_ent.to_le_bytes());
+        host::dma_write_buf(bc.handle, (idx * 2) as u32, &bc_ent.to_le_bytes());
 
         host::fence();
-        self.mgmt_write_ptr = (self.mgmt_write_ptr + 1) & (MAX_TFD_QUEUE_SIZE - 1);
-        self.w32(HBUS_TARG_WRPTR, self.mgmt_write_ptr | ((qid as u32) << 16));
+        let next = (wptr + 1) & (MAX_TFD_QUEUE_SIZE - 1);
+        self.w32(HBUS_TARG_WRPTR, next | ((qid as u32) << 16));
+        next
+    }
+
+    fn tx_mgmt_frame(&mut self, frame: &[u8]) {
+        self.mgmt_write_ptr = self.tx_raw(
+            self.mgmt_queue_id,
+            self.mgmt_write_ptr,
+            self.mgmt_tfd,
+            self.mgmt_first_tb,
+            self.mgmt_bc_tbl,
+            frame,
+        );
+    }
+
+    // Transmit an EAPOL payload as an 802.11 DATA frame on the data queue:
+    // data header (toDS: addr1=BSSID, addr2=us, addr3=BSSID) + LLC/SNAP + payload.
+    fn tx_data_frame(&mut self, ethertype: u16, payload: &[u8]) {
+        let mut fr = [0u8; 320];
+        fr[0] = DOT11_FC_DATA;
+        fr[1] = DOT11_FC1_TODS;
+        fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
+        fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
+        fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
+        let mut p = DOT11_HDR_LEN;
+        fr[p..p + 6].copy_from_slice(&LLC_SNAP_HDR);
+        fr[p + 6] = (ethertype >> 8) as u8;
+        fr[p + 7] = ethertype as u8;
+        p += 8;
+        fr[p..p + payload.len()].copy_from_slice(payload);
+        p += payload.len();
+        self.data_write_ptr = self.tx_raw(
+            self.data_queue_id,
+            self.data_write_ptr,
+            self.data_tfd,
+            self.data_first_tb,
+            self.data_bc_tbl,
+            &fr[..p],
+        );
+    }
+
+    // Allocate a gen2 data TX queue (tid 0) for the AP station, so EAPOL frames
+    // have a data path. Same SCD_QUEUE_CONFIG mechanism as the mgmt queue.
+    fn alloc_data_queue(&mut self) -> bool {
+        self.data_tfd = self.alloc_dma(TFH_TFD_SIZE * IWL_DATA_QUEUE_SIZE, "data.tfd");
+        self.data_first_tb =
+            self.alloc_dma(IWL_FIRST_TB_SIZE_ALIGN * IWL_DATA_QUEUE_SIZE, "data.first_tb");
+        self.data_bc_tbl = self.alloc_dma(BC_TBL_BYTES, "data.bc_tbl");
+        if !self.data_tfd.ok() || !self.data_first_tb.ok() || !self.data_bc_tbl.ok() {
+            return false;
+        }
+        let mut q = [0u8; SCD_CMD_LEN];
+        put_u32(&mut q, SQ_OFF_OPERATION, IWL_SCD_QUEUE_ADD);
+        put_u32(&mut q, SQ_OFF_STA_MASK, 1 << AP_STA_ID);
+        q[SQ_OFF_TID] = IWL_DATA_TID;
+        put_u32(&mut q, SQ_OFF_CB_SIZE, MGMT_QUEUE_CB_SIZE);
+        put_u64(&mut q, SQ_OFF_BC_DRAM_ADDR, self.data_bc_tbl.phys);
+        put_u64(&mut q, SQ_OFF_TFDQ_DRAM_ADDR, self.data_tfd.phys);
+        self.send_hcmd(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD, &q);
+        match self.wait_rx(SCD_QUEUE_CONFIG_CMD, DATA_PATH_GROUP, 1000) {
+            Some(rb) => {
+                let mut p = [0u8; 16];
+                host::dma_read_buf(rb.handle, 0, &mut p);
+                let b = RX_PKT_DATA_OFF;
+                self.data_queue_id =
+                    u16::from_le_bytes([p[b + SQ_RSP_OFF_QUEUE_NUMBER], p[b + SQ_RSP_OFF_QUEUE_NUMBER + 1]]);
+                self.data_write_ptr =
+                    u16::from_le_bytes([p[b + SQ_RSP_OFF_WRITE_PTR], p[b + SQ_RSP_OFF_WRITE_PTR + 1]]) as u32;
+                host::print("[ax200] data queue_id=");
+                host::print_dec(self.data_queue_id as u32);
+                host::print("\n");
+                true
+            }
+            None => false,
+        }
+    }
+
+    // ADD_STA_KEY (0x17, cmd_ver 3) — install a CCMP key the supplicant computed.
+    // `group` = GTK (multicast) vs PTK (pairwise). rx_mic/tx_mic/tx_seq stay 0.
+    fn install_key(&mut self, group: bool, key_idx: u8, key: &[u8], rsc: &[u8]) {
+        let mut cmd = [0u8; ADD_STA_KEY_LEN];
+        cmd[KEY_OFF_STA_ID] = AP_STA_ID;
+        cmd[KEY_OFF_KEY_OFFSET] = if group { 1 } else { 0 };
+        let mut flags = STA_KEY_FLG_CCM | ((key_idx as u16) << STA_KEY_FLG_KEYID_POS);
+        if group {
+            flags |= STA_KEY_MULTICAST;
+        }
+        put_u16(&mut cmd, KEY_OFF_KEY_FLAGS, flags);
+        let kl = key.len().min(32);
+        cmd[KEY_OFF_KEY..KEY_OFF_KEY + kl].copy_from_slice(&key[..kl]);
+        let rl = rsc.len().min(16);
+        cmd[KEY_OFF_RX_SEQ..KEY_OFF_RX_SEQ + rl].copy_from_slice(&rsc[..rl]);
+        self.send_hcmd(0, ADD_STA_KEY_CMD, &cmd); // → LONG_GROUP(1)
+        self.pump_rx(20);
+        host::print(if group {
+            "[ax200] ADD_STA_KEY GTK installed\n"
+        } else {
+            "[ax200] ADD_STA_KEY PTK installed\n"
+        });
     }
 
     // Extract an 802.11 management frame from an RX buffer if it is addressed to
@@ -1931,8 +2031,18 @@ impl Ax200 {
         } else {
             host::print("[ax200] netdev_register failed\n");
         }
-        host::print("[ax200] associated — listening for EAPOL (4-way handshake)\n");
+        // Allocate the data TX queue (tid 0) so we can transmit EAPOL frames.
+        if !self.alloc_data_queue() {
+            host::print("[ax200] data queue alloc FAILED — EAPOL TX unavailable\n");
+        }
+        // Tell wifid the connection is ready + the MACs it needs for the PTK.
         let our_mac = self.mac;
+        let mut ready = [0u8; 13];
+        ready[0] = EV_READY;
+        ready[1..7].copy_from_slice(&self.target_bssid);
+        ready[7..13].copy_from_slice(&our_mac);
+        host::wifi_send_event(&ready);
+        host::print("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
         let mut eapol = [0u8; 512];
         let mut evt = [0u8; 600];
         let mut cmd = [0u8; 600];
@@ -1966,13 +2076,38 @@ impl Ax200 {
         }
     }
 
-    // Dispatch one control command from wifid. Slice B logs; the TX_EAPOL data
-    // path + SET_KEY → ADD_STA_KEY install land in slice C.
+    // Dispatch one control command from wifid (the supplicant).
     fn handle_wifi_cmd(&mut self, cmd: &[u8]) {
         match cmd.first().copied() {
-            Some(CMD_TX_EAPOL) => host::print("[ax200] cmd TX_EAPOL (slice C)\n"),
-            Some(CMD_SET_KEY) => host::print("[ax200] cmd SET_KEY (slice C)\n"),
-            Some(CMD_AUTHORIZED) => host::print("[ax200] cmd AUTHORIZED (slice C)\n"),
+            // TX_EAPOL: [op][len u16][frame] → transmit as an EAPOL data frame.
+            Some(CMD_TX_EAPOL) if cmd.len() >= 3 => {
+                let len = ((cmd[2] as usize) << 8) | cmd[1] as usize;
+                if cmd.len() >= 3 + len {
+                    host::print("[ax200] TX_EAPOL (len ");
+                    host::print_dec(len as u32);
+                    host::print(")\n");
+                    self.tx_data_frame(ETHERTYPE_EAPOL, &cmd[3..3 + len]);
+                }
+            }
+            // SET_KEY: [op][key_type][key_idx][cipher][key_len][key..][rsc 6].
+            Some(CMD_SET_KEY) if cmd.len() >= 5 => {
+                let key_type = cmd[1]; // 0=PTK/pairwise 1=GTK/group
+                let key_idx = cmd[2];
+                let key_len = cmd[4] as usize;
+                if cmd.len() >= 5 + key_len + 6 {
+                    let key = &cmd[5..5 + key_len];
+                    let rsc = &cmd[5 + key_len..5 + key_len + 6];
+                    self.install_key(key_type == 1, key_idx, key, rsc);
+                }
+            }
+            // AUTHORIZED: 4-way done → carrier up, tell wifid + bring the link up.
+            Some(CMD_AUTHORIZED) => {
+                host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉\n");
+                let mut up = [0u8; 7];
+                up[0] = EV_LINK_UP;
+                up[1..7].copy_from_slice(&self.target_bssid);
+                host::wifi_send_event(&up);
+            }
             _ => {}
         }
     }
@@ -2176,7 +2311,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.28.0 — 5e EAPOL RX demux\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.29.0 — 5e EAPOL TX + keys\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -2234,6 +2369,11 @@ pub extern "C" fn _start() {
         mgmt_bc_tbl: Dma::NONE,
         mgmt_queue_id: 0,
         mgmt_write_ptr: 0,
+        data_tfd: Dma::NONE,
+        data_first_tb: Dma::NONE,
+        data_bc_tbl: Dma::NONE,
+        data_queue_id: 0,
+        data_write_ptr: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);

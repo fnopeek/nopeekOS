@@ -12,6 +12,7 @@
 
 #![no_std]
 
+use wifid_core::eapol::{Step, Supplicant};
 use wifid_core::wpa2_pmk;
 
 // Manager side of the WiFi-class channel → declare NETCTL (bit 0x80). The
@@ -54,12 +55,21 @@ fn log_hex(prefix: &str, bytes: &[u8]) {
 }
 
 // ── control-channel wire format (WIFI_CLASS_ABI.md) ──────────────────────
-const CMD_SCAN: u8 = 0x01;
-const EV_SCAN_AP: u8 = 0x81;
-const EV_SCAN_DONE: u8 = 0x82;
+// downlink (manager → driver)
+const CMD_SET_KEY: u8 = 0x04;
+const CMD_TX_EAPOL: u8 = 0x05;
+const CMD_AUTHORIZED: u8 = 0x08;
+// uplink (driver → manager)
+const EV_READY: u8 = 0x83;
+const EV_EAPOL_RX: u8 = 0x84;
+const EV_LINK_UP: u8 = 0x85;
 
-// No heap needed yet; provide a tiny bump allocator only so `alloc`-free core
-// links cleanly (wifid_core itself is allocation-free).
+// Our RSN element (WPA2-PSK-CCMP) — MUST match the one the driver put in the
+// assoc request, since it is echoed in 4-way msg2's key_data.
+const RSN_IE: [u8; 22] = [
+    0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+    0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
+];
 
 static mut SSID_BUF: [u8; 64] = [0; 64];
 static mut PSK_BUF: [u8; 128] = [0; 128];
@@ -96,41 +106,108 @@ pub extern "C" fn _start() {
     // ── Derive the PMK (PBKDF2-HMAC-SHA1, 4096 iters) — the std-tested core.
     let pmk = wpa2_pmk(pass, ssid);
     log_hex("[wifid] PMK = ", &pmk);
+    log("[wifid] supplicant resident — waiting for the driver to associate\n");
 
-    // ── Exercise the control channel: ask the driver to scan, drain a few
-    // events. ONE-SHOT for now: derive-PMK + a quick channel probe, then return
-    // (a resident event loop would pin the worker core via npk_sleep — it comes
-    // back, yielding correctly, with the EAPOL 4-way slice). Returning frees the
-    // loop so `run wifid` doesn't block the machine.
-    let scan = [CMD_SCAN];
-    let r = unsafe { npk_wifi_send_cmd(scan.as_ptr() as i32, scan.len() as i32) };
-    if r < 0 {
-        log("[wifid] control channel: send blocked (no NETCTL — expected via `run`)\n");
-    } else {
-        log("[wifid] SCAN command sent to driver\n");
-        // Brief, bounded drain so we don't spin: a handful of polls.
-        let ev_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
-        for _ in 0..10 {
+    // ── Resident supplicant loop. Runs on a worker core via autostart; drains
+    // control-channel events and drives the 4-way handshake to completion. ──
+    let ev_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
+    let mut sup: Option<Supplicant> = None;
+    let mut out = [0u8; 256];
+    loop {
+        loop {
             let len = unsafe { npk_wifi_poll_event(ev_ptr as i32, 2048) };
-            if len > 0 {
-                let ev = unsafe { core::slice::from_raw_parts(ev_ptr as *const u8, len as usize) };
-                handle_event(ev);
+            if len <= 0 {
+                break;
             }
-            unsafe { npk_sleep(50) };
+            let ev = unsafe { core::slice::from_raw_parts(ev_ptr as *const u8, len as usize) };
+            handle_event(ev, &pmk, &mut sup, &mut out);
         }
+        unsafe { npk_sleep(50) };
     }
-    log("[wifid] foundation OK (PSK loaded, PMK derived) — supplicant idle\n");
 }
 
-fn handle_event(ev: &[u8]) {
+fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &mut [u8]) {
     match ev.first().copied() {
-        Some(EV_SCAN_AP) => log("[wifid] event: SCAN_AP\n"),
-        Some(EV_SCAN_DONE) => log("[wifid] event: SCAN_DONE\n"),
-        Some(op) => {
-            log_hex("[wifid] event op=", &[op]);
+        // READY: [op][ap_mac 6][our_mac 6] → build the supplicant for this BSS.
+        Some(EV_READY) if ev.len() >= 13 => {
+            let mut aa = [0u8; 6];
+            let mut sa = [0u8; 6];
+            aa.copy_from_slice(&ev[1..7]);
+            sa.copy_from_slice(&ev[7..13]);
+            // SNonce: a fixed bring-up value (functional; real entropy is a TODO —
+            // see project_keystore / no npk_random host-fn yet).
+            let mut snonce = [0u8; 32];
+            for (i, b) in snonce.iter_mut().enumerate() {
+                *b = 0x5a ^ sa[i % 6] ^ (i as u8);
+            }
+            *sup = Some(Supplicant::new(*pmk, aa, sa, snonce, &RSN_IE));
+            log("[wifid] READY — supplicant armed for 4-way\n");
         }
-        None => {}
+        // EAPOL_RX: [op][len u16][frame] → feed the 4-way state machine.
+        Some(EV_EAPOL_RX) if ev.len() >= 3 => {
+            let n = ((ev[2] as usize) << 8) | ev[1] as usize;
+            if ev.len() < 3 + n {
+                return;
+            }
+            let frame = &ev[3..3 + n];
+            let s = match sup {
+                Some(s) => s,
+                None => {
+                    log("[wifid] EAPOL_RX but no supplicant (missed READY)\n");
+                    return;
+                }
+            };
+            match s.on_eapol(frame, out) {
+                Step::Reply(m) => {
+                    log("[wifid] 4-way: sending msg2\n");
+                    send_tx_eapol(&out[..m]);
+                }
+                Step::Done(m) => {
+                    log("[wifid] 4-way: msg3 OK — sending msg4 + installing keys\n");
+                    send_tx_eapol(&out[..m]);
+                    if let Some(ptk) = s.ptk() {
+                        send_set_key(false, 0, &ptk.tk, &[0u8; 6]);
+                    }
+                    if let Some((gtk, id)) = s.gtk() {
+                        send_set_key(true, id, gtk, &[0u8; 6]);
+                    }
+                    send_cmd(&[CMD_AUTHORIZED]);
+                    log("[wifid] *** 4-way complete — AUTHORIZED ***\n");
+                }
+                Step::Fail => log("[wifid] 4-way FAILED (bad MIC / unwrap)\n"),
+                Step::Ignore => {}
+            }
+        }
+        Some(EV_LINK_UP) => log("[wifid] link up — connected\n"),
+        _ => {}
     }
+}
+
+fn send_cmd(msg: &[u8]) {
+    unsafe { npk_wifi_send_cmd(msg.as_ptr() as i32, msg.len() as i32) };
+}
+
+// TX_EAPOL: [op][len u16][frame].
+fn send_tx_eapol(frame: &[u8]) {
+    let mut buf = [0u8; 259];
+    buf[0] = CMD_TX_EAPOL;
+    buf[1] = (frame.len() & 0xff) as u8;
+    buf[2] = (frame.len() >> 8) as u8;
+    buf[3..3 + frame.len()].copy_from_slice(frame);
+    send_cmd(&buf[..3 + frame.len()]);
+}
+
+// SET_KEY: [op][key_type][key_idx][cipher=4 CCMP][key_len][key..][rsc 6].
+fn send_set_key(group: bool, key_idx: u8, key: &[u8], rsc: &[u8; 6]) {
+    let mut buf = [0u8; 64];
+    buf[0] = CMD_SET_KEY;
+    buf[1] = if group { 1 } else { 0 };
+    buf[2] = key_idx;
+    buf[3] = 4; // CCMP
+    buf[4] = key.len() as u8;
+    buf[5..5 + key.len()].copy_from_slice(key);
+    buf[5 + key.len()..5 + key.len() + 6].copy_from_slice(rsc);
+    send_cmd(&buf[..5 + key.len() + 6]);
 }
 
 /// Fetch a config object into `buf` and return its value with trailing
