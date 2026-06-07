@@ -134,14 +134,16 @@ In **`wifid.wasm`** (Supplicant, vendor-unabhängig, aml-Struktur core/wasm/harn
 | `is_assoc=1` war NICHT nötig (FW akzeptierte Daten-TX so) | — | ✅ (gut zu wissen) |
 | `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ slice C |
 
-### Phase I — IP-Daten-Pfad (echtes Internet) ❌ ← LETZTER SCHRITT
-Keys installiert + authorized; jetzt der Nutzdaten-Fluss zum Kernel-IP-Stack.
+### Phase I — IP-Daten-Pfad (echtes Internet) 🟡 Frames fließen, noch keine IP ← MORGEN
+Keys + authorized; Daten-Pfad gebaut (wifi_ax200 0.30.3 + Kernel 0.207.0). DHCP läuft noch nicht durch.
 | Linux | unsere fn | Status |
 |---|---|---|
-| RX-Data-Frame (von FW entschlüsselt) → `npk_netdev_submit_rx` an IP-Stack | run_netdev (EAPOL-Demux-Gerüst da) | ❌ |
-| `npk_netdev_poll_tx` → TX-Data-Frame (802.11-Data+LLC, **OHNE ENCRYPT_DIS** → FW verschlüsselt mit TK) | `tx_data_frame` (wiederverwendbar) | ❌ |
-| `iwl_mvm_rx_tx_cmd` (Daten-TX-Completion, Ring-Reclaim) | — | 🔶 (für low-rate ok) |
-| → DHCP → IP → Ping/Browse | Kernel-IP-Stack | ❌ |
+| RX-Data → `npk_netdev_submit_rx` (EAPOL/IP/Broadcast-Split) | `rx_classify` | 🟡 HW (RX-Events kommen) |
+| `npk_netdev_poll_tx` → verschlüsseltes 802.11-Data (toDS+LLC, no ENCRYPT_DIS) | `tx_eth`/`tx_8023`/`tx_raw` | 🟡 HW (TX-Discover raus) |
+| Net-Stack bevorzugt wlan bei Link-up (stale rtl8153 umgehen) | Kernel `netdev::send/recv/mac/list` | ✅ 0.207.0 |
+| `dhcp`-Kommando (on-demand, Boot-DHCP war vor WiFi) | Kernel intent | ✅ 0.206.0 |
+| **DHCP completed → echte IP** | Kernel-IP-Stack | ❌ (Verdacht: rx_classify CCMP/MIC-Offset → mangled Frame) |
+| → Ping/Browse | — | ❌ |
 
 ### Phase J — WiFi-Class-ABI-Integration (→ wifid) ❌
 Siehe `WIFI_CLASS_ABI.md` §8. Control-Channel-Host-Fns existieren im Kernel (v0.205.0),
