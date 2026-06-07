@@ -356,6 +356,7 @@ pub const MAC_CONTEXT_CMD_OP: u8 = 0x28;
 // 48-byte union (largest member p2p_sta). We fill only the 44-byte .sta.
 pub const MAC_CTX_CMD_LEN: usize = 148;
 pub const FW_CTXT_ACTION_ADD: u32 = 1; // enum iwl_ctxt_action (INVALID=0,ADD=1)
+pub const FW_CTXT_ACTION_MODIFY: u32 = 2; // enum iwl_ctxt_action (MODIFY=2)
 pub const FW_MAC_TYPE_BSS_STA: u32 = 5; // enum iwl_mac_types
 pub const SCAN_VIF_MAC_ID: u8 = 0; // ctxt_init id for the 1st non-p2p station
 // iwl_mac_ctx_cmd field offsets (packed):
@@ -370,8 +371,14 @@ pub const MC_OFF_OFDM_RATES: usize = 36; // __le32
 pub const MC_OFF_PROT_FLAGS: usize = 40; // __le32 (0, unassociated)
 pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
 // cck_short_preamble @ 44, short_slot @ 48, qos_flags @ 56, ac[5] @ 60 — all 0.
-// union iwl_mac_data_sta @ 100; is_assoc @100 stays 0 (unassociated), so bi /
-// dtim_interval / listen_interval are unused and left 0.
+// union iwl_mac_data_sta @ 100 (after qos_flags @56 + ac[AC_NUM+1=5]*8 = 40).
+// For the connect MODIFY (iwl_mvm_mac_ctxt_cmd_sta, unassoc branch) we set the
+// timing fields the firmware needs to schedule the auth/assoc on the target BSS.
+pub const MC_OFF_STA_IS_ASSOC: usize = 100; // __le32 (0 = not yet associated)
+pub const MC_OFF_STA_BI: usize = 116;        // __le32 beacon interval (TU)
+pub const MC_OFF_STA_DTIM_INTERVAL: usize = 124; // __le32 (bi * dtim_period)
+pub const MC_OFF_STA_LISTEN_INTERVAL: usize = 132; // __le32
+pub const MC_OFF_STA_ASSOC_ID: usize = 136;  // __le32 (aid; 0 before assoc)
 // filter flags (enum iwl_mac_filter_flags): accept multicast + foreign beacons.
 pub const MAC_FILTER_ACCEPT_GRP: u32 = 1 << 2;
 pub const MAC_FILTER_IN_BEACON: u32 = 1 << 6;
@@ -632,6 +639,19 @@ pub const SP_OFF_DURATION_TU: usize = 12; // MSEC_TO_TU(900) = 900*1000/1024 = 8
 // repetition_count @16, interval @20 — not used, 0.
 pub const SESSION_PROTECT_CONF_ASSOC: u32 = 0; // first enum value
 pub const SP_DURATION_TU: u32 = 878; // schedule_session_protection passes 900 ms
+
+// ── Connect tail: per-MAC power (iwl_mvm_power_update_mac) ────────
+// __iwl_mvm_assign_vif_chanctx sends power before quotas ("Power state must be
+// updated before quotas"). iwl_mvm_power_send_cmd → MAC_PM_POWER_TABLE (0xa9,
+// legacy group → promoted to LONG_GROUP). struct iwl_mac_power_cmd, 40 B. We
+// model the power-save-disabled path (iwl_mvm_power_build_cmd early-return):
+// only id_and_color + keep_alive_seconds, flags = 0 (no PS — we don't sleep).
+pub const MAC_PM_POWER_TABLE: u8 = 0xa9;
+pub const MAC_POWER_CMD_LEN: usize = 40;
+pub const MP_OFF_ID_COLOR: usize = 0;     // __le32 FW_CMD_ID_AND_COLOR(0,0)=0
+pub const MP_OFF_FLAGS: usize = 4;        // __le16 (0 = PS disabled)
+pub const MP_OFF_KEEP_ALIVE: usize = 6;   // __le16 keep_alive_seconds
+pub const POWER_KEEP_ALIVE_PERIOD_SEC: u16 = 25; // max(3*dtim*bi, this); dtim=0 → 25
 
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer

@@ -74,9 +74,11 @@ struct Ap {
     ssid_len: u8,
     rssi: i8, // dBm
     channel: u8,
+    beacon_int: u16, // beacon interval (TU) — for the connect MAC context
 }
 impl Ap {
-    const EMPTY: Ap = Ap { bssid: [0; 6], ssid: [0; SSID_MAX], ssid_len: 0, rssi: 0, channel: 0 };
+    const EMPTY: Ap =
+        Ap { bssid: [0; 6], ssid: [0; SSID_MAX], ssid_len: 0, rssi: 0, channel: 0, beacon_int: 0 };
 }
 
 /// AX200 transport state. Mirrors the bits of `struct iwl_trans_pcie` we use.
@@ -113,6 +115,7 @@ struct Ax200 {
     target_bssid: [u8; 6],
     target_chan: u8,
     target_band: u8, // PHY_BAND_24 / PHY_BAND_5
+    target_beacon_int: u16, // beacon interval of the target AP (for MAC context)
     target_valid: bool,
     // gen2 management TX queue for the AP station (auth/assoc frames, 5b+).
     mgmt_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_MGMT_QUEUE_SIZE)
@@ -1247,6 +1250,10 @@ impl Ax200 {
 
         let mut bssid = [0u8; 6];
         bssid.copy_from_slice(&buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6]);
+        // Beacon interval: fixed param after the 24-byte header + 8-byte timestamp
+        // (__le16 TU). Needed for the connect MAC context (iwl_mac_data_sta.bi).
+        let bi_off = f + DOT11_HDR_LEN + 8;
+        let beacon_int = u16::from_le_bytes([buf[bi_off], buf[bi_off + 1]]);
         // De-dup by BSSID; refresh RSSI if we hear a stronger beacon.
         for i in 0..*n_aps {
             if aps[i].bssid == bssid {
@@ -1277,7 +1284,7 @@ impl Ax200 {
         }
 
         if *n_aps < aps.len() {
-            aps[*n_aps] = Ap { bssid, ssid, ssid_len, rssi, channel };
+            aps[*n_aps] = Ap { bssid, ssid, ssid_len, rssi, channel, beacon_int };
             *n_aps += 1;
         }
     }
@@ -1399,6 +1406,7 @@ impl Ax200 {
                     // Band by channel: 1..14 = 2.4 GHz, else 5 GHz (iwl_nvm_channels).
                     self.target_band =
                         if aps[best].channel <= 14 { PHY_BAND_24 as u8 } else { PHY_BAND_5_U8 };
+                    self.target_beacon_int = aps[best].beacon_int;
                     self.target_valid = true;
                 }
                 return true;
@@ -1567,6 +1575,45 @@ impl Ax200 {
                 false
             }
         }
+    }
+
+    // ── Stage 5b': finish the connect chanctx tail (iwl_mvm_assign_vif_chanctx) ──
+    // __iwl_mvm_assign_vif_chanctx does binding → power_update_mac → (quota, only
+    // for monitor) and the connect flow then re-sends the MAC context with the
+    // target BSSID (iwl_mvm_mac_ctxt_changed on BSS_CHANGED_BSSID). We had skipped
+    // this whole tail and went straight to the auth TX with a MAC context still
+    // holding the scan-time broadcast BSSID + zero timing — so once session
+    // protection put the firmware on-channel and it actually processed the auth,
+    // the time-event/scheduler (UMAC) asserted. Send both before the auth.
+    fn connect_finish_chanctx(&mut self) {
+        // iwl_mvm_power_update_mac → MAC_PM_POWER_TABLE for the bss vif. Power-save
+        // disabled path: only id_and_color + keep_alive_seconds, flags = 0.
+        let mut pm = [0u8; MAC_POWER_CMD_LEN];
+        put_u32(&mut pm, MP_OFF_ID_COLOR, 0); // FW_CMD_ID_AND_COLOR(0,0)
+        put_u16(&mut pm, MP_OFF_KEEP_ALIVE, POWER_KEEP_ALIVE_PERIOD_SEC);
+        self.send_hcmd(0, MAC_PM_POWER_TABLE, &pm);
+        host::print("[ax200] MAC_PM_POWER_TABLE sent (PS disabled)\n");
+        self.pump_rx(20);
+
+        // iwl_mvm_mac_ctxt_changed (MODIFY) with the target AP's BSSID + timing,
+        // unassociated branch (is_assoc = 0, MAC_FILTER_IN_BEACON).
+        let mut cmd = [0u8; MAC_CTX_CMD_LEN];
+        put_u32(&mut cmd, MC_OFF_ID_COLOR, 0);
+        put_u32(&mut cmd, MC_OFF_ACTION, FW_CTXT_ACTION_MODIFY);
+        put_u32(&mut cmd, MC_OFF_MAC_TYPE, FW_MAC_TYPE_BSS_STA);
+        put_u32(&mut cmd, MC_OFF_TSF_ID, 0);
+        cmd[MC_OFF_NODE_ADDR..MC_OFF_NODE_ADDR + 6].copy_from_slice(&self.mac);
+        cmd[MC_OFF_BSSID_ADDR..MC_OFF_BSSID_ADDR + 6].copy_from_slice(&self.target_bssid);
+        put_u32(&mut cmd, MC_OFF_CCK_RATES, MAC_CCK_RATES_DEFAULT);
+        put_u32(&mut cmd, MC_OFF_OFDM_RATES, MAC_OFDM_RATES_DEFAULT);
+        put_u32(&mut cmd, MC_OFF_FILTER_FLAGS, MAC_FILTER_ACCEPT_GRP | MAC_FILTER_IN_BEACON);
+        // iwl_mac_data_sta (unassoc): is_assoc = 0, bi = beacon interval, dtim
+        // unknown pre-assoc (→ 0), assoc_id = 0.
+        put_u32(&mut cmd, MC_OFF_STA_IS_ASSOC, 0);
+        put_u32(&mut cmd, MC_OFF_STA_BI, self.target_beacon_int as u32);
+        self.send_hcmd(0, MAC_CONTEXT_CMD_OP, &cmd);
+        host::print("[ax200] MAC_CONTEXT_CMD (modify, target BSSID) sent\n");
+        self.pump_rx(50);
     }
 
     // ── Stage 5c: gen2 TX data path — send an 802.11 frame (connect step 3) ──
@@ -1975,6 +2022,7 @@ pub extern "C" fn _start() {
         target_bssid: [0; 6],
         target_chan: 0,
         target_band: 0,
+        target_beacon_int: 0,
         target_valid: false,
         mgmt_tfd: Dma::NONE,
         mgmt_first_tb: Dma::NONE,
@@ -2072,6 +2120,9 @@ pub extern "C" fn _start() {
                                 if dev.target_valid && dev.connect_phy_binding()
                                     && dev.connect_add_station()
                                 {
+                                    // ── Stage 5b': power + MAC context (target BSSID) ──
+                                    // The chanctx tail Linux runs before the auth TX.
+                                    dev.connect_finish_chanctx();
                                     // ── Stage 5c: gen2 TX path → AUTH frame ──
                                     dev.connect_send_auth();
                                 }
