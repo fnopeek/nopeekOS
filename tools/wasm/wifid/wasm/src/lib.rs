@@ -59,6 +59,7 @@ const EV_SCAN_DONE: u8 = 0x82;
 // No heap needed yet; provide a tiny bump allocator only so `alloc`-free core
 // links cleanly (wifid_core itself is allocation-free).
 
+static mut SSID_BUF: [u8; 64] = [0; 64];
 static mut PSK_BUF: [u8; 128] = [0; 128];
 static mut EVENT_BUF: [u8; 2048] = [0; 2048];
 
@@ -66,21 +67,23 @@ static mut EVENT_BUF: [u8; 2048] = [0; 2048];
 pub extern "C" fn _start() {
     log("[wifid] WiFi manager start (WPA2 supplicant)\n");
 
-    // ── Load the credential from npkFS: sys/config/wifi_psk = "SSID\nPASSWORD".
-    let name = b"sys/config/wifi_psk";
-    let psk_ptr = core::ptr::addr_of_mut!(PSK_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(name.as_ptr() as i32, name.len() as i32, psk_ptr as i32, 128)
+    // ── Load the credential from npkFS — two objects so SSID and passphrase
+    // can both contain spaces (set from the loop, e.g.
+    //   store /sys/config/wifi_ssid My Network
+    //   store /sys/config/wifi_psk  my secret pass
+    // This plaintext-in-an-(at-rest-encrypted)-object is a bring-up provisional;
+    // a capability-gated keystore replaces it later (see project_keystore).
+    let ssid = match read_cfg(b"sys/config/wifi_ssid", core::ptr::addr_of_mut!(SSID_BUF) as *mut u8, 64) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            log("[wifid] no sys/config/wifi_ssid — set it: store /sys/config/wifi_ssid <name>. Idle.\n");
+            return;
+        }
     };
-    if n <= 0 {
-        log("[wifid] no sys/config/wifi_psk — create it as \"SSID\\nPASSWORD\". Idle.\n");
-        return;
-    }
-    let blob = unsafe { core::slice::from_raw_parts(psk_ptr as *const u8, n as usize) };
-    let (ssid, pass) = match split_psk(blob) {
-        Some(v) => v,
-        None => {
-            log("[wifid] malformed wifi_psk (want \"SSID\\nPASSWORD\"). Idle.\n");
+    let pass = match read_cfg(b"sys/config/wifi_psk", core::ptr::addr_of_mut!(PSK_BUF) as *mut u8, 128) {
+        Some(p) if p.len() >= 8 => p,
+        _ => {
+            log("[wifid] no/short sys/config/wifi_psk — set it: store /sys/config/wifi_psk <pass>. Idle.\n");
             return;
         }
     };
@@ -128,20 +131,20 @@ fn handle_event(ev: &[u8]) {
     }
 }
 
-/// Split a "SSID\nPASSWORD" credential blob (trailing whitespace trimmed).
-fn split_psk(blob: &[u8]) -> Option<(&[u8], &[u8])> {
-    let nl = blob.iter().position(|&b| b == b'\n')?;
-    let ssid = &blob[..nl];
-    let mut pass = &blob[nl + 1..];
-    while let Some(&last) = pass.last() {
-        if last == b'\n' || last == b'\r' || last == b' ' {
-            pass = &pass[..pass.len() - 1];
+/// Fetch a config object into `buf` and return its value with trailing
+/// whitespace (newline a text editor may append) trimmed. None on miss.
+fn read_cfg(name: &[u8], buf: *mut u8, max: i32) -> Option<&'static [u8]> {
+    let n = unsafe { npk_fetch(name.as_ptr() as i32, name.len() as i32, buf as i32, max) };
+    if n <= 0 {
+        return None;
+    }
+    let mut v = unsafe { core::slice::from_raw_parts(buf as *const u8, n as usize) };
+    while let Some(&last) = v.last() {
+        if matches!(last, b'\n' | b'\r' | b' ' | b'\t') {
+            v = &v[..v.len() - 1];
         } else {
             break;
         }
     }
-    if ssid.is_empty() || pass.len() < 8 {
-        return None;
-    }
-    Some((ssid, pass))
+    Some(v)
 }
