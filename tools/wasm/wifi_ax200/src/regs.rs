@@ -696,6 +696,26 @@ pub const EV_EAPOL_RX: u8 = 0x84;
 pub const EV_LINK_UP: u8 = 0x85;
 pub const EV_READY: u8 = 0x83;
 
+// ── Stage 5e: data TX queue (tid 0) + key install ────────────────
+pub const IWL_DATA_TID: u8 = 0;
+pub const IWL_DATA_QUEUE_SIZE: usize = 16;
+// ADD_STA_KEY (0x17 LEGACY → LONG_GROUP, cmd_ver 3). struct iwl_mvm_add_sta_key_cmd
+// = common(52) + rx_mic(8) + tx_mic(8) + tx_seq(8) = 76 B. CCMP: mic/seq all 0.
+pub const ADD_STA_KEY_CMD: u8 = 0x17;
+pub const ADD_STA_KEY_LEN: usize = 76;
+pub const KEY_OFF_STA_ID: usize = 0;       // u8
+pub const KEY_OFF_KEY_OFFSET: usize = 1;   // u8 (FW key-table slot)
+pub const KEY_OFF_KEY_FLAGS: usize = 2;    // __le16
+pub const KEY_OFF_KEY: usize = 4;          // u8[32]
+pub const KEY_OFF_RX_SEQ: usize = 36;      // u8[16] (rx_secur_seq_cnt / RSC)
+// iwl_sta_key_flag: CCMP encryption + key id + group/MFP.
+pub const STA_KEY_FLG_CCM: u16 = 2 << 0;
+pub const STA_KEY_FLG_KEYID_POS: u16 = 8;
+pub const STA_KEY_MULTICAST: u16 = 1 << 14;
+// 802.11 data frame: frame_control byte0 = data(type 2), byte1 toDS for STA→AP.
+pub const DOT11_FC_DATA: u8 = 0x08; // type data, subtype 0
+pub const DOT11_FC1_TODS: u8 = 0x01;
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
