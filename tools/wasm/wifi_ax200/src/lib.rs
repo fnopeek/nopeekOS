@@ -1706,6 +1706,43 @@ impl Ax200 {
         Some((subtype, body))
     }
 
+    // Extract an EAPOL payload from an RX buffer if it is an 802.11 DATA frame
+    // addressed to us carrying LLC/SNAP ethertype 0x888E (the WPA2 4-way frames).
+    // Copies the self-describing EAPOL frame (4-byte header + body_length) into
+    // `out` and returns its length. The 4-way runs unencrypted, so no decrypt.
+    fn rx_eapol(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8]) -> Option<usize> {
+        let mut buf = [0u8; 512];
+        host::dma_read_buf(rb.handle, 0, &mut buf);
+        let f = RX_PKT_DATA_OFF + IWL_RX_DESC_SIZE_V1; // 56
+        let fc = buf[f];
+        if fc & 0x0c != DOT11_FC_TYPE_DATA {
+            return None; // not a data frame
+        }
+        if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] != our_mac[..] {
+            return None; // not addressed to us
+        }
+        let subtype = (fc >> 4) & 0xf;
+        let hdrlen = if subtype & DOT11_STYPE_QOS != 0 { 26 } else { 24 };
+        let llc = f + hdrlen;
+        if llc + 8 > buf.len() || buf[llc..llc + 6] != LLC_SNAP_HDR {
+            return None;
+        }
+        let ethertype = ((buf[llc + 6] as u16) << 8) | buf[llc + 7] as u16;
+        if ethertype != ETHERTYPE_EAPOL {
+            return None;
+        }
+        let e = llc + 8;
+        if e + 4 > buf.len() {
+            return None;
+        }
+        let elen = 4 + (((buf[e + 2] as usize) << 8) | buf[e + 3] as usize);
+        if e + elen > buf.len() || elen > out.len() {
+            return None;
+        }
+        out[..elen].copy_from_slice(&buf[e..e + elen]);
+        Some(elen)
+    }
+
     // Drain the RX ring up to `ms` ms looking for a management frame of the given
     // subtype addressed to us; return its first 8 body bytes. Recycles RBs.
     fn wait_mgmt_response(&mut self, want_subtype: u8, ms: u32) -> Option<[u8; 8]> {
@@ -1894,12 +1931,49 @@ impl Ax200 {
         } else {
             host::print("[ax200] netdev_register failed\n");
         }
+        host::print("[ax200] associated — listening for EAPOL (4-way handshake)\n");
+        let our_mac = self.mac;
+        let mut eapol = [0u8; 512];
+        let mut evt = [0u8; 600];
+        let mut cmd = [0u8; 600];
         loop {
-            // Keep the RX ring drained + recycled so the firmware never stalls.
-            // (No data frames flow until association; this drains stray
-            // management / notification frames.)
-            self.service_rx(|_cmd, _grp, _rb| true);
-            host::sleep_ms(100);
+            // RX: drain + recycle the ring; demux the AP's EAPOL-Key frames off
+            // the data path and forward each to wifid (the supplicant) as an
+            // EAPOL_RX event. Everything else is drained (IP data path: slice C).
+            let mut got: Option<usize> = None;
+            self.service_rx(|c, g, rb| {
+                if got.is_none() && c == REPLY_RX_MPDU_CMD && g == 0 {
+                    got = Self::rx_eapol(rb, &our_mac, &mut eapol);
+                }
+                true
+            });
+            if let Some(n) = got {
+                host::print("[ax200] EAPOL RX (len ");
+                host::print_dec(n as u32);
+                host::print(") → wifid\n");
+                evt[0] = EV_EAPOL_RX;
+                evt[1] = (n & 0xff) as u8;
+                evt[2] = (n >> 8) as u8;
+                evt[3..3 + n].copy_from_slice(&eapol[..n]);
+                host::wifi_send_event(&evt[..3 + n]);
+            }
+            // Control commands from wifid (TX_EAPOL / SET_KEY / AUTHORIZED).
+            let clen = host::wifi_poll_cmd(&mut cmd);
+            if clen > 0 {
+                self.handle_wifi_cmd(&cmd[..clen as usize]);
+            }
+            host::sleep_ms(20);
+        }
+    }
+
+    // Dispatch one control command from wifid. Slice B logs; the TX_EAPOL data
+    // path + SET_KEY → ADD_STA_KEY install land in slice C.
+    fn handle_wifi_cmd(&mut self, cmd: &[u8]) {
+        match cmd.first().copied() {
+            Some(CMD_TX_EAPOL) => host::print("[ax200] cmd TX_EAPOL (slice C)\n"),
+            Some(CMD_SET_KEY) => host::print("[ax200] cmd SET_KEY (slice C)\n"),
+            Some(CMD_AUTHORIZED) => host::print("[ax200] cmd AUTHORIZED (slice C)\n"),
+            _ => {}
         }
     }
 
@@ -2102,7 +2176,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.27.0 — connect 5d (auth+assoc)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.28.0 — 5e EAPOL RX demux\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
