@@ -127,9 +127,10 @@ In **`wifid.wasm`** (Supplicant, vendor-unabhängig, aml-Struktur core/wasm/harn
 | **4-Way-State-Machine** (`eapol::Supplicant`: msg1→PTK, msg2+MIC, msg3 GTK-unwrap, msg4) | — | ✅ std-getestet (msg1→msg4-Roundtrip) |
 | **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | 🟡 gebaut (0.28.0, HW-Test offen) |
 | Control-Host-Fns Treiber (`npk_wifi_poll_cmd`/`send_event`) | — | ✅ verdrahtet (0.28.0) |
-| **EAPOL-TX** (als Daten-Frame über STA-Daten-Queue) | TX_CMD 0x1c | ❌ (Daten-Queue + LLC/SNAP) — slice C |
-| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 (cmd_ver 3, 76 B) | ❌ slice C |
-| wifid↔Treiber verdrahten + wifid resident (yieldend) | — | ❌ slice C |
+| **EAPOL-TX** (Daten-Queue tid 0 + 802.11-Data + LLC/SNAP) | TX_CMD 0x1c | 🟡 gebaut (0.29.0) |
+| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 (cmd_ver 3, 76 B) | 🟡 gebaut (0.29.0) |
+| wifid↔Treiber verdrahtet + wifid resident (4-Way driving) | — | 🟡 gebaut (wifid 0.2.0) |
+| `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ (evtl. nötig falls msg2-TX nicht durchgeht) |
 | `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ slice C |
 
 ### Phase I — Daten-Pfad (resident NIC, echte Frames) 🔶
