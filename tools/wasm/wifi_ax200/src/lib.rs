@@ -1581,6 +1581,22 @@ impl Ax200 {
     // frame and hands it down via TX_MGMT.) For AX200 (< BZ) mgmt frames use the
     // host rate (IWL_TX_FLAGS_CMD_RATE), so we set a legacy rate explicitly.
     fn connect_send_auth(&mut self) -> bool {
+        // Session protection — the prepare_tx hook mac80211 runs right before the
+        // auth frame (iwl_mvm_mac_mgd_prepare_tx → iwl_mvm_protect_assoc →
+        // iwl_mvm_schedule_session_protection). Reserves channel time for the
+        // auth/assoc exchange; without it the FW holds the frame back. Our FW has
+        // CAPA_SESSION_PROT_CMD so we use SESSION_PROTECTION_CMD (cmd_ver 1,
+        // wait_for_notif=false → send only, don't wait for the notif).
+        let mut sp = [0u8; SP_CMD_LEN];
+        put_u32(&mut sp, SP_OFF_ID_COLOR, 0); // mvmvif->id = 0 (cmd_ver 1)
+        put_u32(&mut sp, SP_OFF_ACTION, FW_CTXT_ACTION_ADD);
+        put_u32(&mut sp, SP_OFF_CONF_ID, SESSION_PROTECT_CONF_ASSOC);
+        put_u32(&mut sp, SP_OFF_DURATION_TU, SP_DURATION_TU);
+        self.send_hcmd(MAC_CONF_GROUP, SESSION_PROTECTION_CMD, &sp);
+        host::print("[ax200] SESSION_PROTECTION_CMD sent (assoc, 878 TU)\n");
+        // Give the firmware time to set up the protection event before TX.
+        self.pump_rx(50);
+
         let qid = self.mgmt_queue_id;
         let idx = (self.mgmt_write_ptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
 

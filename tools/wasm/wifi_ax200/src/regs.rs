@@ -615,6 +615,24 @@ pub const DOT11_AUTH_BODY_LEN: usize = 6; // algorithm(2) + seq(2) + status(2)
 pub const DOT11_AUTH_ALG_OPEN: u16 = 0;
 pub const DOT11_AUTH_SEQ_1: u16 = 1;
 
+// ── Stage 5c: session protection (prepare_tx hook before auth) ────
+// mac80211 calls drv_mgd_prepare_tx → iwl_mvm_mac_mgd_prepare_tx →
+// iwl_mvm_protect_assoc → iwl_mvm_schedule_session_protection right before the
+// auth frame. It reserves channel time for the auth/assoc exchange; without it
+// the unassociated STA gets no airtime and the FW holds the frame back.
+// FW has CAPA_SESSION_PROT_CMD (bit 54) → the SESSION_PROTECTION_CMD path.
+pub const MAC_CONF_GROUP: u8 = 0x3; // fw/api/commands.h
+pub const SESSION_PROTECTION_CMD: u8 = 0x5; // MAC_CONF_GROUP, cmd_ver=1 (fw/api/mac-cfg.h)
+// struct iwl_session_prot_cmd (fw/api/time-event.h), 24 B, all __le32.
+pub const SP_CMD_LEN: usize = 24;
+pub const SP_OFF_ID_COLOR: usize = 0;  // mac id (cmd_ver 1 → mvmvif->id = 0)
+pub const SP_OFF_ACTION: usize = 4;    // FW_CTXT_ACTION_ADD
+pub const SP_OFF_CONF_ID: usize = 8;   // SESSION_PROTECT_CONF_ASSOC = 0
+pub const SP_OFF_DURATION_TU: usize = 12; // MSEC_TO_TU(900) = 900*1000/1024 = 878
+// repetition_count @16, interval @20 — not used, 0.
+pub const SESSION_PROTECT_CONF_ASSOC: u32 = 0; // first enum value
+pub const SP_DURATION_TU: u32 = 878; // schedule_session_protection passes 900 ms
+
 // ── PCIe capability layout (apm_config: ASPM / LTR detect) ───────
 pub const PCI_CAP_PTR: u8 = 0x34; // first capability pointer
 pub const PCI_CAP_ID_EXP: u8 = 0x10; // PCI Express capability
