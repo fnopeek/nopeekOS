@@ -75,10 +75,18 @@ struct Ap {
     rssi: i8, // dBm
     channel: u8,
     beacon_int: u16, // beacon interval (TU) — for the connect MAC context
+    privacy: bool,   // capability Privacy bit (encrypted → needs RSN in assoc-req)
 }
 impl Ap {
-    const EMPTY: Ap =
-        Ap { bssid: [0; 6], ssid: [0; SSID_MAX], ssid_len: 0, rssi: 0, channel: 0, beacon_int: 0 };
+    const EMPTY: Ap = Ap {
+        bssid: [0; 6],
+        ssid: [0; SSID_MAX],
+        ssid_len: 0,
+        rssi: 0,
+        channel: 0,
+        beacon_int: 0,
+        privacy: false,
+    };
 }
 
 /// AX200 transport state. Mirrors the bits of `struct iwl_trans_pcie` we use.
@@ -116,6 +124,9 @@ struct Ax200 {
     target_chan: u8,
     target_band: u8, // PHY_BAND_24 / PHY_BAND_5
     target_beacon_int: u16, // beacon interval of the target AP (for MAC context)
+    target_ssid: [u8; SSID_MAX],
+    target_ssid_len: u8,
+    target_privacy: bool, // target is encrypted (WPA2) → assoc-req carries an RSN IE
     target_valid: bool,
     // gen2 management TX queue for the AP station (auth/assoc frames, 5b+).
     mgmt_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_MGMT_QUEUE_SIZE)
@@ -1254,6 +1265,8 @@ impl Ax200 {
         // (__le16 TU). Needed for the connect MAC context (iwl_mac_data_sta.bi).
         let bi_off = f + DOT11_HDR_LEN + 8;
         let beacon_int = u16::from_le_bytes([buf[bi_off], buf[bi_off + 1]]);
+        // Privacy bit of the capability field → AP is encrypted (needs RSN).
+        let privacy = buf[f + DOT11_BEACON_CAP_OFF] & WLAN_CAP_PRIVACY_BIT != 0;
         // De-dup by BSSID; refresh RSSI if we hear a stronger beacon.
         for i in 0..*n_aps {
             if aps[i].bssid == bssid {
@@ -1284,7 +1297,7 @@ impl Ax200 {
         }
 
         if *n_aps < aps.len() {
-            aps[*n_aps] = Ap { bssid, ssid, ssid_len, rssi, channel, beacon_int };
+            aps[*n_aps] = Ap { bssid, ssid, ssid_len, rssi, channel, beacon_int, privacy };
             *n_aps += 1;
         }
     }
@@ -1407,6 +1420,9 @@ impl Ax200 {
                     self.target_band =
                         if aps[best].channel <= 14 { PHY_BAND_24 as u8 } else { PHY_BAND_5_U8 };
                     self.target_beacon_int = aps[best].beacon_int;
+                    self.target_ssid = aps[best].ssid;
+                    self.target_ssid_len = aps[best].ssid_len;
+                    self.target_privacy = aps[best].privacy;
                     self.target_valid = true;
                 }
                 return true;
@@ -1616,76 +1632,39 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
-    // ── Stage 5c: gen2 TX data path — send an 802.11 frame (connect step 3) ──
-    // iwl_txq_gen2_tx + iwl_txq_gen2_build_tx (pcie/.../tx-gen2.c). The first real
-    // frame transmission: build a device TX command — short iwl_cmd_header (TX_CMD,
-    // group 0) + iwl_tx_cmd_v9 (len/flags/rate) + the 802.11 frame — lay it across
-    // the management queue's TFD as two TBs (TB0 = first-TB staging holding the
-    // first 20 bytes, TB1 = the remainder from cmd_data), fill the byte-count
-    // table, bump the write pointer and ring the doorbell. The test frame is an
-    // open-system AUTH request to the target AP; a TX completion (TX_CMD response)
-    // proves the path. (Hardcoded here like the early scan; later wifid builds the
-    // frame and hands it down via TX_MGMT.) For AX200 (< BZ) mgmt frames use the
-    // host rate (IWL_TX_FLAGS_CMD_RATE), so we set a legacy rate explicitly.
-    fn connect_send_auth(&mut self) -> bool {
-        // Session protection — the prepare_tx hook mac80211 runs right before the
-        // auth frame (iwl_mvm_mac_mgd_prepare_tx → iwl_mvm_protect_assoc →
-        // iwl_mvm_schedule_session_protection). Reserves channel time for the
-        // auth/assoc exchange; without it the FW holds the frame back. Our FW has
-        // CAPA_SESSION_PROT_CMD so we use SESSION_PROTECTION_CMD (cmd_ver 1,
-        // wait_for_notif=false → send only, don't wait for the notif).
-        let mut sp = [0u8; SP_CMD_LEN];
-        put_u32(&mut sp, SP_OFF_ID_COLOR, 0); // mvmvif->id = 0 (cmd_ver 1)
-        put_u32(&mut sp, SP_OFF_ACTION, FW_CTXT_ACTION_ADD);
-        put_u32(&mut sp, SP_OFF_CONF_ID, SESSION_PROTECT_CONF_ASSOC);
-        put_u32(&mut sp, SP_OFF_DURATION_TU, SP_DURATION_TU);
-        self.send_hcmd(MAC_CONF_GROUP, SESSION_PROTECTION_CMD, &sp);
-        host::print("[ax200] SESSION_PROTECTION_CMD sent (assoc, 878 TU)\n");
-        // Give the firmware time to set up the protection event before TX.
-        self.pump_rx(50);
-
+    // ── gen2 mgmt-frame TX (iwl_txq_gen2_tx + iwl_txq_gen2_build_tx) ──────
+    // Transmit one 802.11 management frame on the AP station's queue. Builds a
+    // device TX command — short iwl_cmd_header (TX_CMD, group 0) + iwl_tx_cmd_v9
+    // (len/flags/host-rate) + the frame — and lays it across the TFD as two TBs
+    // (TB0 = first-TB staging with the first 20 bytes, TB1 = the remainder from
+    // cmd_data), fills the byte-count table, bumps the write pointer and rings the
+    // doorbell. For AX200 (< BZ) mgmt frames use the host rate (IWL_TX_FLAGS_CMD_RATE).
+    fn tx_mgmt_frame(&mut self, frame: &[u8]) {
         let qid = self.mgmt_queue_id;
         let idx = (self.mgmt_write_ptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
 
-        // Build the full device TX command in a scratch buffer.
-        let mut buf = [0u8; 64];
-        // iwl_cmd_header (short): cmd, group_id 0, sequence.
+        let mut buf = [0u8; 320];
         buf[0] = TX_CMD;
-        buf[1] = 0;
+        buf[1] = 0; // group 0 (short header — TX is a device command, not a host cmd)
         let seq = (((qid as u16) & 0x1f) << 8) | (idx as u16 & 0xff);
         buf[2..4].copy_from_slice(&seq.to_le_bytes());
-        // iwl_tx_cmd_v9.
-        let frame_len = (DOT11_HDR_LEN + DOT11_AUTH_BODY_LEN) as u16;
+        let frame_len = frame.len() as u16;
         put_u16(&mut buf, TXC_OFF_LEN, frame_len);
         put_u16(&mut buf, TXC_OFF_OFFLOAD, 0);
         put_u32(&mut buf, TXC_OFF_FLAGS, IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE);
-        // dram_info @TXC_OFF_DRAM = 0 (no key).
         let rate = if self.target_band == PHY_BAND_24 as u8 {
             RATE_1M_CCK_ANT_A
         } else {
             RATE_6M_OFDM_ANT_A
         };
         put_u32(&mut buf, TXC_OFF_RATE, rate);
-        // 802.11 auth header (24 B): mgmt/auth, DA = AP, SA = us, BSSID = AP.
-        let f = TXC_OFF_FRAME;
-        buf[f] = DOT11_FC_AUTH;
-        // fc byte1 / duration / seq_ctrl stay 0 (FW assigns the sequence).
-        buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
-        buf[f + DOT11_OFF_ADDR2..f + DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
-        buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
-        // Auth body @ f+24: open system, transaction seq 1, status 0.
-        let b = f + DOT11_HDR_LEN;
-        put_u16(&mut buf, b, DOT11_AUTH_ALG_OPEN);
-        put_u16(&mut buf, b + 2, DOT11_AUTH_SEQ_1);
-        put_u16(&mut buf, b + 4, 0);
-        let total = b + DOT11_AUTH_BODY_LEN; // 54
+        buf[TXC_OFF_FRAME..TXC_OFF_FRAME + frame.len()].copy_from_slice(frame);
+        let total = TXC_OFF_FRAME + frame.len();
 
-        // The full dev_cmd lives in cmd_data; TB0 staging gets its first 20 bytes.
         host::dma_write_buf(self.cmd_data.handle, 0, &buf[..total]);
         let ftb_off = (idx * IWL_FIRST_TB_SIZE_ALIGN) as u32;
         host::dma_write_buf(self.mgmt_first_tb.handle, ftb_off, &buf[..IWL_FIRST_TB_SIZE]);
 
-        // TFD: TB0 = first-TB staging (20 B), TB1 = cmd_data + 20 (remainder).
         let mut tfd = [0u8; TFH_TFD_SIZE];
         let tb0_phys = self.mgmt_first_tb.phys + ftb_off as u64;
         put_tfh_tb(&mut tfd, 0, IWL_FIRST_TB_SIZE as u16, tb0_phys);
@@ -1698,56 +1677,205 @@ impl Ax200 {
         tfd[0..2].copy_from_slice(&2u16.to_le_bytes()); // num_tbs
         host::dma_write_buf(self.mgmt_tfd.handle, (idx * TFH_TFD_SIZE) as u32, &tfd);
 
-        // Byte-count table entry (gen2): DIV_ROUND_UP(len,4) | (fetch_chunks<<12).
-        // 2 TBs → filled TFD = offsetof(tbs)+2*10 ≤ 64 → 0 fetch chunks.
         let bc_ent = ((frame_len as u32 + 3) / 4) as u16;
         host::dma_write_buf(self.mgmt_bc_tbl.handle, (idx * 2) as u32, &bc_ent.to_le_bytes());
 
-        // Advance the write pointer and ring the doorbell.
         host::fence();
         self.mgmt_write_ptr = (self.mgmt_write_ptr + 1) & (MAX_TFD_QUEUE_SIZE - 1);
         self.w32(HBUS_TARG_WRPTR, self.mgmt_write_ptr | ((qid as u32) << 16));
-        host::print("[ax200] AUTH frame TX'd (open-system) on queue ");
-        host::print_dec(qid as u32);
-        host::print(" idx ");
-        host::print_dec(idx as u32);
-        host::print(" bc=");
-        host::print_dec(bc_ent as u32);
-        host::print("\n");
+    }
 
-        // Diagnostic drain: log every frame the firmware emits over ~3 s so we
-        // can see the TX completion (TX_CMD 0x1c) and/or the AP's auth response
-        // (REPLY_RX_MPDU 0xc1). Recycles RBs so the ring never stalls.
-        let mut got_tx = false;
-        let mut got_resp = false;
-        let mut n = 0u32;
-        for _ in 0..3000 {
-            self.service_rx(|cmd, grp, _rb| {
-                if n < 16 {
-                    host::print("[ax200]   txdiag RX cmd=0x");
-                    host::print_hex8(cmd);
-                    host::print(" group=0x");
-                    host::print_hex8(grp);
-                    host::print("\n");
+    // Extract an 802.11 management frame from an RX buffer if it is addressed to
+    // us (addr1 == our MAC). Returns (subtype, first 8 body bytes after the 24-byte
+    // header). Same RB layout as parse_beacon: frame @ RX_PKT_DATA_OFF + desc(48).
+    fn rx_mgmt_for_us(rb: &Dma, our_mac: &[u8; 6]) -> Option<(u8, [u8; 8])> {
+        let mut buf = [0u8; 96];
+        host::dma_read_buf(rb.handle, 0, &mut buf);
+        let f = RX_PKT_DATA_OFF + IWL_RX_DESC_SIZE_V1; // 56
+        let fc = buf[f];
+        if fc & 0x0c != 0 {
+            return None; // not a management frame
+        }
+        if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] != our_mac[..] {
+            return None; // not addressed to us
+        }
+        let subtype = (fc >> 4) & 0xf;
+        let b = f + DOT11_HDR_LEN;
+        let mut body = [0u8; 8];
+        body.copy_from_slice(&buf[b..b + 8]);
+        Some((subtype, body))
+    }
+
+    // Drain the RX ring up to `ms` ms looking for a management frame of the given
+    // subtype addressed to us; return its first 8 body bytes. Recycles RBs.
+    fn wait_mgmt_response(&mut self, want_subtype: u8, ms: u32) -> Option<[u8; 8]> {
+        let our_mac = self.mac;
+        let mut found: Option<[u8; 8]> = None;
+        for _ in 0..ms {
+            self.service_rx(|cmd, grp, rb| {
+                if cmd == REPLY_RX_MPDU_CMD && grp == 0 {
+                    if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
+                        if st == want_subtype {
+                            found = Some(body);
+                            return false;
+                        }
+                    }
                 }
-                n += 1;
-                if cmd == TX_CMD && grp == 0 { got_tx = true; }
-                if cmd == REPLY_RX_MPDU_CMD && grp == 0 { got_resp = true; }
                 true
             });
+            if found.is_some() {
+                break;
+            }
             host::sleep_ms(1);
         }
-        if got_tx {
-            host::print("[ax200] Stage 5c OK — TX completion received (TX path live)\n");
-        } else if got_resp {
-            host::print("[ax200] Stage 5c — no TX completion, but AP frame seen (TX likely worked)\n");
-        } else {
-            host::print("[ax200] Stage 5c — no TX completion, no AP frame (frames seen: ");
-            host::print_dec(n);
-            host::print(")\n");
-            self.dump_fw_error_log();
+        found
+    }
+
+    // ── Stage 5c: open-system AUTH (connect step 3) ──────────────────────
+    // Session protection (the prepare_tx hook) then an open-system auth request to
+    // the target AP, then wait for the AP's auth response (subtype auth, seq 2).
+    fn connect_send_auth(&mut self) -> bool {
+        // SESSION_PROTECTION_CMD (cmd_ver 1, wait_for_notif=false) — reserves
+        // channel time so the firmware actually transmits the unassociated frame.
+        let mut sp = [0u8; SP_CMD_LEN];
+        put_u32(&mut sp, SP_OFF_ID_COLOR, 0);
+        put_u32(&mut sp, SP_OFF_ACTION, FW_CTXT_ACTION_ADD);
+        put_u32(&mut sp, SP_OFF_CONF_ID, SESSION_PROTECT_CONF_ASSOC);
+        put_u32(&mut sp, SP_OFF_DURATION_TU, SP_DURATION_TU);
+        self.send_hcmd(MAC_CONF_GROUP, SESSION_PROTECTION_CMD, &sp);
+        host::print("[ax200] SESSION_PROTECTION_CMD sent (assoc, 878 TU)\n");
+        self.pump_rx(50);
+
+        // 802.11 open-system auth request: DA/BSSID = AP, SA = us, seq 1.
+        let mut fr = [0u8; DOT11_HDR_LEN + DOT11_AUTH_BODY_LEN];
+        fr[0] = DOT11_FC_AUTH;
+        fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
+        fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
+        fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
+        let b = DOT11_HDR_LEN;
+        put_u16(&mut fr, b, DOT11_AUTH_ALG_OPEN);
+        put_u16(&mut fr, b + 2, DOT11_AUTH_SEQ_1);
+        put_u16(&mut fr, b + 4, 0);
+        self.tx_mgmt_frame(&fr);
+        host::print("[ax200] AUTH request TX'd (open-system), waiting for response...\n");
+
+        // Auth response body: algorithm(2), seq(2), status(2).
+        match self.wait_mgmt_response(DOT11_STYPE_AUTH, 2000) {
+            Some(body) => {
+                let seq = u16::from_le_bytes([body[2], body[3]]);
+                let status = u16::from_le_bytes([body[4], body[5]]);
+                if status == DOT11_STATUS_SUCCESS && seq == DOT11_AUTH_SEQ_2 {
+                    host::print("[ax200] Stage 5c OK — AUTH accepted (status 0, seq 2)\n");
+                    true
+                } else {
+                    host::print("[ax200] AUTH rejected: status=");
+                    host::print_dec(status as u32);
+                    host::print(" seq=");
+                    host::print_dec(seq as u32);
+                    host::print("\n");
+                    false
+                }
+            }
+            None => {
+                host::print("[ax200] Stage 5c — no AUTH response\n");
+                self.dump_fw_error_log();
+                false
+            }
         }
-        got_tx || got_resp
+    }
+
+    // ── Stage 5d: association request → response (connect step 4) ─────────
+    // Build an association request (mac80211 ieee80211_send_assoc, legacy IE set)
+    // for the target AP, transmit it, and wait for the association response
+    // (subtype 1) to read the status code + AID. For an encrypted AP we include a
+    // WPA2-PSK-CCMP RSN element so the AP accepts the association (the 4-way
+    // handshake / key install that follows lives in wifid — Phase H).
+    fn connect_send_assoc(&mut self) -> bool {
+        let mut fr = [0u8; 256];
+        fr[0] = DOT11_FC_ASSOC_REQ;
+        fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
+        fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
+        fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
+        let mut p = DOT11_HDR_LEN;
+
+        // Fixed fields: capability info + listen interval.
+        let mut cap = WLAN_CAP_ESS | WLAN_CAP_SHORT_PREAMBLE;
+        if self.target_band == PHY_BAND_24 as u8 {
+            cap |= WLAN_CAP_SHORT_SLOT;
+        }
+        if self.target_privacy {
+            cap |= WLAN_CAP_PRIVACY;
+        }
+        put_u16(&mut fr, p, cap);
+        put_u16(&mut fr, p + 2, DOT11_LISTEN_INTERVAL);
+        p += 4;
+
+        // SSID element.
+        let sl = self.target_ssid_len as usize;
+        fr[p] = WLAN_EID_SSID;
+        fr[p + 1] = sl as u8;
+        fr[p + 2..p + 2 + sl].copy_from_slice(&self.target_ssid[..sl]);
+        p += 2 + sl;
+
+        // Supported + extended supported rates (rate byte = Mbps*2, basic bit 0x80).
+        let (supp, ext): (&[u8], &[u8]) = if self.target_band == PHY_BAND_24 as u8 {
+            (&[0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24], &[0x30, 0x48, 0x60, 0x6c])
+        } else {
+            (&[0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c], &[])
+        };
+        fr[p] = WLAN_EID_SUPP_RATES;
+        fr[p + 1] = supp.len() as u8;
+        fr[p + 2..p + 2 + supp.len()].copy_from_slice(supp);
+        p += 2 + supp.len();
+        if !ext.is_empty() {
+            fr[p] = WLAN_EID_EXT_SUPP_RATES;
+            fr[p + 1] = ext.len() as u8;
+            fr[p + 2..p + 2 + ext.len()].copy_from_slice(ext);
+            p += 2 + ext.len();
+        }
+
+        // RSN element (WPA2-PSK-CCMP) for encrypted APs.
+        if self.target_privacy {
+            let rsn: [u8; 20] = [
+                0x01, 0x00, // version 1
+                0x00, 0x0f, 0xac, 0x04, // group cipher: CCMP
+                0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, // pairwise: 1 × CCMP
+                0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, // AKM: 1 × PSK
+                0x00, 0x00, // RSN capabilities
+            ];
+            fr[p] = WLAN_EID_RSN;
+            fr[p + 1] = rsn.len() as u8;
+            fr[p + 2..p + 2 + rsn.len()].copy_from_slice(&rsn);
+            p += 2 + rsn.len();
+        }
+
+        self.tx_mgmt_frame(&fr[..p]);
+        host::print("[ax200] ASSOC request TX'd, waiting for response...\n");
+
+        // Assoc response body: capability(2), status_code(2), aid(2).
+        match self.wait_mgmt_response(DOT11_STYPE_ASSOC_RESP, 2000) {
+            Some(body) => {
+                let status =
+                    u16::from_le_bytes([body[ASSOC_RESP_OFF_STATUS], body[ASSOC_RESP_OFF_STATUS + 1]]);
+                let aid =
+                    u16::from_le_bytes([body[ASSOC_RESP_OFF_AID], body[ASSOC_RESP_OFF_AID + 1]]) & 0x3fff;
+                if status == DOT11_STATUS_SUCCESS {
+                    host::print("[ax200] Stage 5d OK — *** ASSOCIATED *** aid=");
+                    host::print_dec(aid as u32);
+                    host::print("\n");
+                    true
+                } else {
+                    host::print("[ax200] ASSOC rejected: status=");
+                    host::print_dec(status as u32);
+                    host::print("\n");
+                    false
+                }
+            }
+            None => {
+                host::print("[ax200] Stage 5d — no ASSOC response\n");
+                false
+            }
+        }
     }
 
     // ── Resident NIC service loop ─────────────────────────────────
@@ -1974,7 +2102,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.24.2 — connect 5c (RX recycle fix)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.27.0 — connect 5d (auth+assoc)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -2023,6 +2151,9 @@ pub extern "C" fn _start() {
         target_chan: 0,
         target_band: 0,
         target_beacon_int: 0,
+        target_ssid: [0; SSID_MAX],
+        target_ssid_len: 0,
+        target_privacy: false,
         target_valid: false,
         mgmt_tfd: Dma::NONE,
         mgmt_first_tb: Dma::NONE,
@@ -2123,8 +2254,10 @@ pub extern "C" fn _start() {
                                     // ── Stage 5b': power + MAC context (target BSSID) ──
                                     // The chanctx tail Linux runs before the auth TX.
                                     dev.connect_finish_chanctx();
-                                    // ── Stage 5c: gen2 TX path → AUTH frame ──
-                                    dev.connect_send_auth();
+                                    // ── Stage 5c/5d: AUTH → ASSOC mgmt dialog ──
+                                    if dev.connect_send_auth() {
+                                        dev.connect_send_assoc();
+                                    }
                                 }
 
                                 // ── Register as a NIC + go resident ──
