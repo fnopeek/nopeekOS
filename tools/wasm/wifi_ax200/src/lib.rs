@@ -1854,8 +1854,8 @@ impl Ax200 {
         }
         // Accept frames to us OR to a group address (multicast bit / broadcast) —
         // a DHCP offer / ARP reply often comes back L2-broadcast.
-        let a1 = &buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6];
-        if a1 != our_mac[..] && a1[0] & 0x01 == 0 {
+        let multicast = buf[f + DOT11_OFF_ADDR1] & 0x01 != 0;
+        if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] != our_mac[..] && !multicast {
             return RxKind::None;
         }
         let subtype = (fc >> 4) & 0xf;
@@ -2393,7 +2393,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.2 — fix TX buf overflow + bcast RX\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.3 — fix TX buf overflow + bcast RX\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
