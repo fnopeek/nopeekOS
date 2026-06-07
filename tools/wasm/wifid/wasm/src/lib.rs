@@ -97,29 +97,29 @@ pub extern "C" fn _start() {
     let pmk = wpa2_pmk(pass, ssid);
     log_hex("[wifid] PMK = ", &pmk);
 
-    // ── Exercise the control channel: ask the driver to scan.
+    // ── Exercise the control channel: ask the driver to scan, drain a few
+    // events. ONE-SHOT for now: derive-PMK + a quick channel probe, then return
+    // (a resident event loop would pin the worker core via npk_sleep — it comes
+    // back, yielding correctly, with the EAPOL 4-way slice). Returning frees the
+    // loop so `run wifid` doesn't block the machine.
     let scan = [CMD_SCAN];
     let r = unsafe { npk_wifi_send_cmd(scan.as_ptr() as i32, scan.len() as i32) };
     if r < 0 {
-        log("[wifid] control channel send failed (driver not bound?)\n");
+        log("[wifid] control channel: send blocked (no NETCTL — expected via `run`)\n");
     } else {
         log("[wifid] SCAN command sent to driver\n");
-    }
-
-    // ── Resident loop: drain events from the driver and log them. The 4-way
-    // handshake response to EAPOL_RX events lands in the next slice.
-    let ev_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
-    loop {
-        loop {
+        // Brief, bounded drain so we don't spin: a handful of polls.
+        let ev_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
+        for _ in 0..10 {
             let len = unsafe { npk_wifi_poll_event(ev_ptr as i32, 2048) };
-            if len <= 0 {
-                break;
+            if len > 0 {
+                let ev = unsafe { core::slice::from_raw_parts(ev_ptr as *const u8, len as usize) };
+                handle_event(ev);
             }
-            let ev = unsafe { core::slice::from_raw_parts(ev_ptr as *const u8, len as usize) };
-            handle_event(ev);
+            unsafe { npk_sleep(50) };
         }
-        unsafe { npk_sleep(200) };
     }
+    log("[wifid] foundation OK (PSK loaded, PMK derived) — supplicant idle\n");
 }
 
 fn handle_event(ev: &[u8]) {
