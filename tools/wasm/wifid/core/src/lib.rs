@@ -13,6 +13,9 @@
 
 #![no_std]
 
+pub mod aes;
+pub mod eapol;
+
 // ── SHA-1 ────────────────────────────────────────────────────────────────
 // FIPS 180-4. 64-byte block, 20-byte digest.
 pub struct Sha1 {
