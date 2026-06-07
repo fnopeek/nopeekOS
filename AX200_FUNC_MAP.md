@@ -115,15 +115,18 @@ RX-Parse `rx_mgmt_for_us`/`wait_mgmt_response`.
 | `iwl_mvm_sta_state` AUTH→ASSOC: `iwl_mvm_update_sta` (ADD_STA modify) | ADD_STA 0x18 | — | ❌ |
 | MAC_CONTEXT MODIFY `is_assoc=1` (braucht dtim aus Assoc) | MAC_CONTEXT 0x28 | — | ❌ |
 
-### Phase H — WPA2 4-Way-Handshake + Keys (5e) ❌
-Gehört laut Architektur in **`wifid.wasm`** (Supplicant), Treiber = nur Transport.
-| Linux | FW-Cmd | Status |
+### Phase H — WPA2 4-Way-Handshake + Keys (5e) 🟡 Crypto-Foundation gebaut (wifid 0.1.0)
+In **`wifid.wasm`** (Supplicant, vendor-unabhängig, aml-Struktur core/wasm/harness).
+| Schritt | Cmd | Status |
 |---|---|---|
-| **EAPOL-TX** (4-Way-HS-Frames als Daten-Frame über die STA-Queue) | TX_CMD 0x1c | ❌ |
-| **EAPOL-RX-Demux** (Ethertype 0x888E → wifid, sonst → IP) | — | ❌ |
-| `iwl_mvm_set_sta_key` → `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 | ❌ (NICHT SEC_KEY_CMD bei dieser FW) |
-| `iwl_mvm_sta_state` ASSOC→AUTHORIZED: `update_sta` (MFP-Flag clear) | ADD_STA 0x18 | ❌ |
-| `mvmvif->authorized=1` + MAC_CONTEXT MODIFY (authorized) | MAC_CONTEXT 0x28 | ❌ |
+| **`wifid_core` Crypto** (SHA1/HMAC/PBKDF2→PMK, PRF→PTK) | — | ✅ std-getestet (IEEE-802.11i-Vektor) |
+| wifid liest PSK aus `sys/config/wifi_psk`, leitet PMK ab | — | 🟡 (HW-Test: PMK-Log) |
+| wifid Control-Channel-Client (send_cmd/poll_event, NETCTL) | — | 🟡 |
+| **4-Way-State-Machine** (msg1→PTK, msg2-MIC, msg3-GTK-unwrap, msg4) | — | ❌ nächste Slice |
+| **EAPOL-TX** (als Daten-Frame über STA-Daten-Queue) | TX_CMD 0x1c | ❌ (braucht Daten-Queue + LLC/SNAP) |
+| **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | ❌ Treiberseite |
+| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 | ❌ |
+| `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ |
 
 ### Phase I — Daten-Pfad (resident NIC, echte Frames) 🔶
 Aktuell: `run_netdev` registriert nur das Interface + drained RX (kein echter TX/RX-Datenfluss).
