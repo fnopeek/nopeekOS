@@ -91,7 +91,17 @@ pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
 }
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
-    if intel_nic::is_available() {
+    // An associated + keyed WiFi link wins: the user explicitly brought it up,
+    // and a wired NIC may report stale-available (USB unplug isn't detected),
+    // which would otherwise keep swallowing DHCP. Wired is used only when WiFi
+    // is down.
+    if wasm_nic_link_up() {
+        let mut nic = WASM_NIC.lock();
+        let len = frame.len().min(MTU);
+        nic.tx_buf[..len].copy_from_slice(&frame[..len]);
+        nic.tx_len = len as u16;
+        Ok(())
+    } else if intel_nic::is_available() {
         intel_nic::send(frame)
     } else if rtl8153::is_available() {
         rtl8153::send(frame)
@@ -107,7 +117,14 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
 }
 
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
-    if intel_nic::is_available() {
+    if wasm_nic_link_up() {
+        let mut nic = WASM_NIC.lock();
+        if nic.rx_len == 0 { return None; }
+        let len = nic.rx_len as usize;
+        buf[..len].copy_from_slice(&nic.rx_buf[..len]);
+        nic.rx_len = 0;
+        Some(len)
+    } else if intel_nic::is_available() {
         intel_nic::recv(buf)
     } else if rtl8153::is_available() {
         rtl8153::recv(buf)
@@ -124,7 +141,9 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
 }
 
 pub fn mac() -> Option<[u8; 6]> {
-    if intel_nic::is_available() {
+    if wasm_nic_link_up() {
+        Some(WASM_NIC.lock().mac_addr)
+    } else if intel_nic::is_available() {
         intel_nic::mac()
     } else if rtl8153::is_available() {
         rtl8153::mac()
@@ -157,23 +176,26 @@ pub struct IfaceInfo {
 /// is marked primary and carries the global IPv4/Gateway/DNS config.
 pub fn list() -> alloc::vec::Vec<IfaceInfo> {
     let mut v = alloc::vec::Vec::new();
+    // An associated WiFi link is the primary interface (carries the global IP),
+    // overriding a stale-available wired NIC.
+    let wifi_up = wasm_nic_available() && wasm_nic_link_up();
     let mut primary_taken = false;
 
     if intel_nic::is_available() {
         if let Some(mac) = intel_nic::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: !primary_taken, link_up: true });
+            v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: !primary_taken && !wifi_up, link_up: true });
             primary_taken = true;
         }
     }
     if rtl8153::is_available() {
         if let Some(mac) = rtl8153::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: !primary_taken, link_up: true });
+            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: !primary_taken && !wifi_up, link_up: true });
             primary_taken = true;
         }
     }
     if wasm_nic_available() {
         let mac = WASM_NIC.lock().mac_addr;
-        v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: !primary_taken, link_up: wasm_nic_link_up() });
+        v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: wifi_up || !primary_taken, link_up: wasm_nic_link_up() });
         primary_taken = true;
     }
     if virtio_net::is_available() {
