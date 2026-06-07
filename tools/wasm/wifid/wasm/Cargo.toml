@@ -1,0 +1,15 @@
+[package]
+name = "wifid"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wifid_core = { path = "../core" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

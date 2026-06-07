@@ -1,0 +1,13 @@
+[package]
+name = "wifid_harness"
+version = "0.1.0"
+edition = "2024"
+
+# std dev-harness: runs wifid_core's WPA2 crypto against published test vectors
+# on the developer machine — no hardware round-trip needed (run with `cargo run`).
+[[bin]]
+name = "wifid_harness"
+path = "src/main.rs"
+
+[dependencies]
+wifid_core = { path = "../core" }

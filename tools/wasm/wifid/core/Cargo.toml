@@ -1,0 +1,14 @@
+[package]
+name = "wifid_core"
+version = "0.1.0"
+edition = "2024"
+
+# no_std + alloc library. Builds for the std dev-harness AND for wasm32.
+# Holds the vendor-independent WPA2 supplicant logic: crypto primitives
+# (SHA1 / HMAC-SHA1 / PBKDF2 / PRF) and — later — the 4-way state machine.
+[lib]
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
