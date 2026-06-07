@@ -66,6 +66,15 @@ impl Dma {
     fn ok(&self) -> bool { self.handle >= 0 }
 }
 
+/// Classification of a received 802.11 data frame addressed to us.
+enum RxKind {
+    None,
+    /// EAPOL-Key frame (the 4-way) → forward to wifid. `out` holds the frame.
+    Eapol(usize),
+    /// IP/other data → the kernel IP stack. `out` holds an Ethernet frame.
+    Ip(usize),
+}
+
 /// A discovered access point (from a scan beacon / probe response).
 #[derive(Clone, Copy)]
 struct Ap {
@@ -1649,7 +1658,7 @@ impl Ax200 {
     // (short header + tx_cmd_v9 + frame) across the TFD's two TBs, fill the
     // byte-count table, bump the write pointer and ring the doorbell. Returns the
     // advanced write pointer. (The 802.11 frame is built by the caller.)
-    fn tx_raw(&self, qid: u16, wptr: u32, tfd_ring: Dma, first_tb: Dma, bc: Dma, frame: &[u8]) -> u32 {
+    fn tx_raw(&self, qid: u16, wptr: u32, tfd_ring: Dma, first_tb: Dma, bc: Dma, flags: u32, frame: &[u8]) -> u32 {
         let idx = (wptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
         let mut buf = [0u8; 320];
         buf[0] = TX_CMD;
@@ -1659,7 +1668,7 @@ impl Ax200 {
         let frame_len = frame.len() as u16;
         put_u16(&mut buf, TXC_OFF_LEN, frame_len);
         put_u16(&mut buf, TXC_OFF_OFFLOAD, 0);
-        put_u32(&mut buf, TXC_OFF_FLAGS, IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE);
+        put_u32(&mut buf, TXC_OFF_FLAGS, flags);
         let rate = if self.target_band == PHY_BAND_24 as u8 {
             RATE_1M_CCK_ANT_A
         } else {
@@ -1695,19 +1704,22 @@ impl Ax200 {
             self.mgmt_tfd,
             self.mgmt_first_tb,
             self.mgmt_bc_tbl,
+            IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE,
             frame,
         );
     }
 
-    // Transmit an EAPOL payload as an 802.11 DATA frame on the data queue:
-    // data header (toDS: addr1=BSSID, addr2=us, addr3=BSSID) + LLC/SNAP + payload.
-    fn tx_data_frame(&mut self, ethertype: u16, payload: &[u8]) {
-        let mut fr = [0u8; 320];
+    // Transmit a payload as an 802.11 DATA frame on the data queue (toDS:
+    // addr1=BSSID, addr2=us, addr3=dst) + LLC/SNAP. `encrypt`=false sets
+    // ENCRYPT_DIS (EAPOL during the 4-way); =true lets the firmware encrypt with
+    // the installed PTK (IP traffic after AUTHORIZED).
+    fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool) {
+        let mut fr = [0u8; 1600];
         fr[0] = DOT11_FC_DATA;
         fr[1] = DOT11_FC1_TODS;
         fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
         fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
-        fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&self.target_bssid);
+        fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&dst);
         let mut p = DOT11_HDR_LEN;
         fr[p..p + 6].copy_from_slice(&LLC_SNAP_HDR);
         fr[p + 6] = (ethertype >> 8) as u8;
@@ -1715,14 +1727,32 @@ impl Ax200 {
         p += 8;
         fr[p..p + payload.len()].copy_from_slice(payload);
         p += payload.len();
+        let flags = if encrypt {
+            IWL_TX_FLAGS_CMD_RATE
+        } else {
+            IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE
+        };
         self.data_write_ptr = self.tx_raw(
             self.data_queue_id,
             self.data_write_ptr,
             self.data_tfd,
             self.data_first_tb,
             self.data_bc_tbl,
+            flags,
             &fr[..p],
         );
+    }
+
+    // Convert an Ethernet frame from the IP stack ([dst 6][src 6][etype 2][pl])
+    // into an encrypted 802.11 data frame and transmit it.
+    fn tx_eth(&mut self, eth: &[u8]) {
+        if eth.len() < 14 {
+            return;
+        }
+        let mut dst = [0u8; 6];
+        dst.copy_from_slice(&eth[0..6]);
+        let ethertype = ((eth[12] as u16) << 8) | eth[13] as u16;
+        self.tx_8023(dst, ethertype, &eth[14..], true);
     }
 
     // Allocate a gen2 data TX queue (tid 0) for the AP station, so EAPOL frames
@@ -1806,41 +1836,61 @@ impl Ax200 {
         Some((subtype, body))
     }
 
-    // Extract an EAPOL payload from an RX buffer if it is an 802.11 DATA frame
-    // addressed to us carrying LLC/SNAP ethertype 0x888E (the WPA2 4-way frames).
-    // Copies the self-describing EAPOL frame (4-byte header + body_length) into
-    // `out` and returns its length. The 4-way runs unencrypted, so no decrypt.
-    fn rx_eapol(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8]) -> Option<usize> {
-        let mut buf = [0u8; 512];
+    // Classify a received 802.11 DATA frame addressed to us: EAPOL (4-way) vs IP.
+    // Finds the LLC/SNAP header at the 802.11 header end or 8 bytes further (an
+    // intact CCMP header on a just-decrypted frame). EAPOL → the self-describing
+    // EAPOL frame in `out`; IP → an Ethernet frame [dst=us][src=addr3][etype][pl].
+    fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8]) -> RxKind {
+        let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
-        let f = RX_PKT_DATA_OFF + IWL_RX_DESC_SIZE_V1; // 56
+        let d = RX_PKT_DATA_OFF;
+        let mpdu_len = (((buf[d + MPDU_OFF_MPDU_LEN + 1] as usize) << 8)
+            | buf[d + MPDU_OFF_MPDU_LEN] as usize)
+            .min(buf.len() - d);
+        let f = d + IWL_RX_DESC_SIZE_V1; // 56
         let fc = buf[f];
         if fc & 0x0c != DOT11_FC_TYPE_DATA {
-            return None; // not a data frame
+            return RxKind::None;
         }
         if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] != our_mac[..] {
-            return None; // not addressed to us
+            return RxKind::None;
         }
         let subtype = (fc >> 4) & 0xf;
         let hdrlen = if subtype & DOT11_STYPE_QOS != 0 { 26 } else { 24 };
-        let llc = f + hdrlen;
-        if llc + 8 > buf.len() || buf[llc..llc + 6] != LLC_SNAP_HDR {
-            return None;
-        }
+        // LLC/SNAP directly after the header, or after an 8-byte CCMP header.
+        let llc = if f + hdrlen + 6 <= buf.len() && buf[f + hdrlen..f + hdrlen + 6] == LLC_SNAP_HDR {
+            f + hdrlen
+        } else if f + hdrlen + 14 <= buf.len() && buf[f + hdrlen + 8..f + hdrlen + 14] == LLC_SNAP_HDR {
+            f + hdrlen + 8
+        } else {
+            return RxKind::None;
+        };
         let ethertype = ((buf[llc + 6] as u16) << 8) | buf[llc + 7] as u16;
-        if ethertype != ETHERTYPE_EAPOL {
-            return None;
+        let pl = llc + 8; // payload after LLC/SNAP
+        if ethertype == ETHERTYPE_EAPOL {
+            if pl + 4 > buf.len() {
+                return RxKind::None;
+            }
+            let elen = 4 + (((buf[pl + 2] as usize) << 8) | buf[pl + 3] as usize);
+            if pl + elen > buf.len() || elen > out.len() {
+                return RxKind::None;
+            }
+            out[..elen].copy_from_slice(&buf[pl..pl + elen]);
+            RxKind::Eapol(elen)
+        } else {
+            // Ethernet frame for the IP stack: dst = us (addr1), src = addr3 (SA).
+            let end = (f + mpdu_len).min(buf.len());
+            if end <= pl || 14 + (end - pl) > out.len() {
+                return RxKind::None;
+            }
+            let plen = end - pl;
+            out[0..6].copy_from_slice(&buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6]);
+            out[6..12].copy_from_slice(&buf[f + DOT11_OFF_ADDR3..f + DOT11_OFF_ADDR3 + 6]);
+            out[12] = (ethertype >> 8) as u8;
+            out[13] = ethertype as u8;
+            out[14..14 + plen].copy_from_slice(&buf[pl..end]);
+            RxKind::Ip(14 + plen)
         }
-        let e = llc + 8;
-        if e + 4 > buf.len() {
-            return None;
-        }
-        let elen = 4 + (((buf[e + 2] as usize) << 8) | buf[e + 3] as usize);
-        if e + elen > buf.len() || elen > out.len() {
-            return None;
-        }
-        out[..elen].copy_from_slice(&buf[e..e + elen]);
-        Some(elen)
     }
 
     // Drain the RX ring up to `ms` ms looking for a management frame of the given
@@ -2041,29 +2091,36 @@ impl Ax200 {
         ready[7..13].copy_from_slice(&our_mac);
         host::wifi_send_event(&ready);
         host::print("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
-        let mut eapol = [0u8; 512];
-        let mut evt = [0u8; 600];
+        let mut rxbuf = [0u8; 1600];
+        let mut evt = [0u8; 1700];
         let mut cmd = [0u8; 600];
+        let mut txbuf = [0u8; 1514];
         loop {
-            // RX: drain + recycle the ring; demux the AP's EAPOL-Key frames off
-            // the data path and forward each to wifid (the supplicant) as an
-            // EAPOL_RX event. Everything else is drained (IP data path: slice C).
-            let mut got: Option<usize> = None;
+            // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
+            // decrypted IP/other data → the kernel IP stack as Ethernet frames.
             self.service_rx(|c, g, rb| {
-                if got.is_none() && c == REPLY_RX_MPDU_CMD && g == 0 {
-                    got = Self::rx_eapol(rb, &our_mac, &mut eapol);
+                if c == REPLY_RX_MPDU_CMD && g == 0 {
+                    match Self::rx_classify(rb, &our_mac, &mut rxbuf) {
+                        RxKind::Eapol(n) => {
+                            evt[0] = EV_EAPOL_RX;
+                            evt[1] = (n & 0xff) as u8;
+                            evt[2] = (n >> 8) as u8;
+                            evt[3..3 + n].copy_from_slice(&rxbuf[..n]);
+                            host::wifi_send_event(&evt[..3 + n]);
+                        }
+                        RxKind::Ip(n) => host::netdev_submit_rx(&rxbuf[..n]),
+                        RxKind::None => {}
+                    }
                 }
                 true
             });
-            if let Some(n) = got {
-                host::print("[ax200] EAPOL RX (len ");
-                host::print_dec(n as u32);
-                host::print(") → wifid\n");
-                evt[0] = EV_EAPOL_RX;
-                evt[1] = (n & 0xff) as u8;
-                evt[2] = (n >> 8) as u8;
-                evt[3..3 + n].copy_from_slice(&eapol[..n]);
-                host::wifi_send_event(&evt[..3 + n]);
+            // TX: send every Ethernet frame the IP stack queued (DHCP, ARP, …).
+            loop {
+                let n = host::netdev_poll_tx(&mut txbuf);
+                if n == 0 {
+                    break;
+                }
+                self.tx_eth(&txbuf[..n]);
             }
             // Control commands from wifid (TX_EAPOL / SET_KEY / AUTHORIZED).
             let clen = host::wifi_poll_cmd(&mut cmd);
@@ -2077,14 +2134,15 @@ impl Ax200 {
     // Dispatch one control command from wifid (the supplicant).
     fn handle_wifi_cmd(&mut self, cmd: &[u8]) {
         match cmd.first().copied() {
-            // TX_EAPOL: [op][len u16][frame] → transmit as an EAPOL data frame.
+            // TX_EAPOL: [op][len u16][frame] → unencrypted EAPOL to the AP.
             Some(CMD_TX_EAPOL) if cmd.len() >= 3 => {
                 let len = ((cmd[2] as usize) << 8) | cmd[1] as usize;
                 if cmd.len() >= 3 + len {
                     host::print("[ax200] TX_EAPOL (len ");
                     host::print_dec(len as u32);
                     host::print(")\n");
-                    self.tx_data_frame(ETHERTYPE_EAPOL, &cmd[3..3 + len]);
+                    let dst = self.target_bssid;
+                    self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], false);
                 }
             }
             // SET_KEY: [op][key_type][key_idx][cipher][key_len][key..][rsc 6].
@@ -2098,9 +2156,10 @@ impl Ax200 {
                     self.install_key(key_type == 1, key_idx, key, rsc);
                 }
             }
-            // AUTHORIZED: 4-way done → carrier up, tell wifid + bring the link up.
+            // AUTHORIZED: 4-way done → carrier up, IP data path live.
             Some(CMD_AUTHORIZED) => {
-                host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉\n");
+                host::netdev_set_link(true);
+                host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉 (run `dhcp`)\n");
                 let mut up = [0u8; 7];
                 up[0] = EV_LINK_UP;
                 up[1..7].copy_from_slice(&self.target_bssid);
@@ -2309,7 +2368,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.29.1 — 5e data-queue before auth\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.0 — IP data path (DHCP)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
