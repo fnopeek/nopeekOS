@@ -103,15 +103,17 @@ Legende: ✅ gebaut & HW-validiert · 🟡 gebaut, HW-Test offen · 🔶 teilwei
 
 ## ▶▶ NOCH NICHT GEBAUT — die offenen Gaps (Connect-to-Authorized)
 
-### Phase G — Auth-Response + Assoc (5d) ❌
-Erster echter **Empfangs→Sende-Dialog**. Aktuell loggen wir die Auth-Response nur (`0xc1`).
-| Linux | FW-Cmd | Status |
-|---|---|---|
-| `iwl_mvm_rx_mpdu` → mac80211: **Auth-Response (0xc1) parsen** (status=success?) | — | ❌ |
-| **Assoc-Request bauen + TX** (IEs: SSID, Rates, HT/VHT/HE-Caps, RSN) | TX_CMD 0x1c | ❌ |
-| **Assoc-Response (0xc1) parsen** → AID | — | ❌ |
-| `iwl_mvm_sta_state` AUTH→ASSOC: `iwl_mvm_update_sta` (ADD_STA modify, assoc) | ADD_STA 0x18 | ❌ |
-| MAC_CONTEXT MODIFY `is_assoc=1` (+ bi/dtim/listen/aid füllen) | MAC_CONTEXT 0x28 | ❌ (Felder stehen schon im Struct) |
+### Phase G — Auth-Response + Assoc (5d) 🟡 (0.27.0 gebaut, HW-Test offen)
+Erster echter **Empfangs→Sende-Dialog**. Gemeinsamer TX-Helper `tx_mgmt_frame` +
+RX-Parse `rx_mgmt_for_us`/`wait_mgmt_response`.
+| Linux | FW-Cmd | unsere fn | Status |
+|---|---|---|---|
+| `iwl_mvm_rx_mpdu` → **Auth-Response parsen** (seq2/status0) | — | `connect_send_auth` | 🟡 |
+| **Assoc-Request bauen + TX** (SSID, Rates, ExtRates, RSN für WPA2) | TX_CMD 0x1c | `connect_send_assoc` | 🟡 |
+| **Assoc-Response parsen** → status + AID | — | `connect_send_assoc` | 🟡 |
+| HT/VHT/HE-Caps im Assoc-Req | — | — | ❌ (legacy-Assoc erst; bei Reject nachrüsten) |
+| `iwl_mvm_sta_state` AUTH→ASSOC: `iwl_mvm_update_sta` (ADD_STA modify) | ADD_STA 0x18 | — | ❌ |
+| MAC_CONTEXT MODIFY `is_assoc=1` (braucht dtim aus Assoc) | MAC_CONTEXT 0x28 | — | ❌ |
 
 ### Phase H — WPA2 4-Way-Handshake + Keys (5e) ❌
 Gehört laut Architektur in **`wifid.wasm`** (Supplicant), Treiber = nur Transport.
@@ -165,7 +167,7 @@ sind aber im Treiber-Loop noch nicht verdrahtet.
 | 6 | MAC_PM_POWER_TABLE | 0xa9 | LONG(1) | ✅ |
 | 7 | MAC_CONTEXT_CMD | 0x28 | LONG(1) | ✅ (add+modify-bssid) / ❌ (is_assoc=1) |
 | 8 | SESSION_PROTECTION_CMD | 0x05 | MAC_CONF(3) | ✅ |
-| 9 | TX_CMD | 0x1c | g0 (short hdr) | ✅ (auth) / ❌ (assoc/eapol/data) |
+| 9 | TX_CMD | 0x1c | g0 (short hdr) | ✅ (auth+assoc) / ❌ (eapol/data) |
 | 10 | TIME_QUOTA_CMD | 0x2c | LONG(1) | ⬜ pre-assoc skip |
 | 11 | ADD_STA_KEY | 0x17 | LONG(1) | ❌ (WPA-Keys) |
 | 12 | REMOVE_STA | 0x19 | LONG(1) | ❌ (Teardown) |
