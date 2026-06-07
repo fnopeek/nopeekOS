@@ -2095,6 +2095,8 @@ impl Ax200 {
         let mut evt = [0u8; 1700];
         let mut cmd = [0u8; 600];
         let mut txbuf = [0u8; 1514];
+        let mut rx_log = 0u32; // throttle the data-path diagnostics
+        let mut tx_log = 0u32;
         loop {
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
@@ -2108,7 +2110,18 @@ impl Ax200 {
                             evt[3..3 + n].copy_from_slice(&rxbuf[..n]);
                             host::wifi_send_event(&evt[..3 + n]);
                         }
-                        RxKind::Ip(n) => host::netdev_submit_rx(&rxbuf[..n]),
+                        RxKind::Ip(n) => {
+                            if rx_log < 12 {
+                                host::print("[ax200] data RX → IP stack (len ");
+                                host::print_dec(n as u32);
+                                host::print(", etype 0x");
+                                host::print_hex8(rxbuf[12]);
+                                host::print_hex8(rxbuf[13]);
+                                host::print(")\n");
+                                rx_log += 1;
+                            }
+                            host::netdev_submit_rx(&rxbuf[..n]);
+                        }
                         RxKind::None => {}
                     }
                 }
@@ -2119,6 +2132,15 @@ impl Ax200 {
                 let n = host::netdev_poll_tx(&mut txbuf);
                 if n == 0 {
                     break;
+                }
+                if tx_log < 12 {
+                    host::print("[ax200] data TX ← IP stack (len ");
+                    host::print_dec(n as u32);
+                    host::print(", etype 0x");
+                    host::print_hex8(txbuf[12]);
+                    host::print_hex8(txbuf[13]);
+                    host::print(")\n");
+                    tx_log += 1;
                 }
                 self.tx_eth(&txbuf[..n]);
             }
@@ -2368,7 +2390,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.0 — IP data path (DHCP)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.1 — data-path diag\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
