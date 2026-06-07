@@ -621,6 +621,31 @@ pub const DOT11_FC_AUTH: u8 = 0xB0; // frame_control byte0: type mgmt(0), subtyp
 pub const DOT11_AUTH_BODY_LEN: usize = 6; // algorithm(2) + seq(2) + status(2)
 pub const DOT11_AUTH_ALG_OPEN: u16 = 0;
 pub const DOT11_AUTH_SEQ_1: u16 = 1;
+pub const DOT11_AUTH_SEQ_2: u16 = 2;  // AP's auth response
+pub const DOT11_STATUS_SUCCESS: u16 = 0;
+
+// ── Stage 5d: association request / response ──────────────────────
+pub const DOT11_FC_ASSOC_REQ: u8 = 0x00; // mgmt(0), subtype assoc-req(0)
+pub const DOT11_STYPE_AUTH: u8 = 11;     // subtype of an auth frame
+pub const DOT11_STYPE_ASSOC_RESP: u8 = 1; // subtype of an assoc response
+// assoc-req fixed fields: capability(2) + listen_interval(2), then IEs.
+// assoc-resp body: capability(2) + status_code(2) + aid(2), then IEs.
+pub const ASSOC_RESP_OFF_STATUS: usize = 2; // within the 802.11 body
+pub const ASSOC_RESP_OFF_AID: usize = 4;
+pub const DOT11_LISTEN_INTERVAL: u16 = 10;
+// ieee80211 capability bits (assoc-req).
+pub const WLAN_CAP_ESS: u16 = 1 << 0;
+pub const WLAN_CAP_PRIVACY: u16 = 1 << 4;
+pub const WLAN_CAP_SHORT_PREAMBLE: u16 = 1 << 5;
+pub const WLAN_CAP_SHORT_SLOT: u16 = 1 << 10;
+// information element ids.
+pub const WLAN_EID_SUPP_RATES: u8 = 1;
+pub const WLAN_EID_HT_CAPABILITY: u8 = 45;
+pub const WLAN_EID_RSN: u8 = 48;
+pub const WLAN_EID_EXT_SUPP_RATES: u8 = 50;
+// privacy bit in a beacon's capability field (offset hdr+8+2 = 34).
+pub const DOT11_BEACON_CAP_OFF: usize = DOT11_HDR_LEN + 8 + 2; // 34
+pub const WLAN_CAP_PRIVACY_BIT: u8 = 0x10;
 
 // ── Stage 5c: session protection (prepare_tx hook before auth) ────
 // mac80211 calls drv_mgd_prepare_tx → iwl_mvm_mac_mgd_prepare_tx →
