@@ -127,20 +127,21 @@ In **`wifid.wasm`** (Supplicant, vendor-unabhängig, aml-Struktur core/wasm/harn
 | **4-Way-State-Machine** (`eapol::Supplicant`: msg1→PTK, msg2+MIC, msg3 GTK-unwrap, msg4) | — | ✅ std-getestet (msg1→msg4-Roundtrip) |
 | **EAPOL-RX-Demux** (Ethertype 0x888E → wifid via send_event) | — | 🟡 gebaut (0.28.0, HW-Test offen) |
 | Control-Host-Fns Treiber (`npk_wifi_poll_cmd`/`send_event`) | — | ✅ verdrahtet (0.28.0) |
-| **EAPOL-TX** (Daten-Queue tid 0 + 802.11-Data + LLC/SNAP) | TX_CMD 0x1c | 🟡 gebaut (0.29.0) |
-| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 (cmd_ver 3, 76 B) | 🟡 gebaut (0.29.0) |
-| wifid↔Treiber verdrahtet + wifid resident (4-Way driving) | — | 🟡 gebaut (wifid 0.2.0) |
-| `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ (evtl. nötig falls msg2-TX nicht durchgeht) |
+| **EAPOL-RX-Demux** + **EAPOL-TX** (Daten-Queue tid 0 + LLC/SNAP) | TX_CMD 0x1c | ✅ HW (4-Way komplett!) |
+| `iwl_mvm_send_sta_key`: **PTK/GTK install** | ADD_STA_KEY 0x17 (cmd_ver 3, 76 B) | ✅ HW |
+| wifid resident 4-Way (msg1→4, MIC, GTK-unwrap) | — | ✅ HW (AP akzeptierte!) |
+| `*** AUTHORIZED ***` — Keys drin, link up | — | ✅ HW |
+| `is_assoc=1` war NICHT nötig (FW akzeptierte Daten-TX so) | — | ✅ (gut zu wissen) |
 | `mvmvif->authorized=1` + MAC_CONTEXT is_assoc=1 | MAC_CONTEXT 0x28 | ❌ slice C |
 
-### Phase I — Daten-Pfad (resident NIC, echte Frames) 🔶
-Aktuell: `run_netdev` registriert nur das Interface + drained RX (kein echter TX/RX-Datenfluss).
+### Phase I — IP-Daten-Pfad (echtes Internet) ❌ ← LETZTER SCHRITT
+Keys installiert + authorized; jetzt der Nutzdaten-Fluss zum Kernel-IP-Stack.
 | Linux | unsere fn | Status |
 |---|---|---|
-| `iwl_mvm_tx_mpdu` / `tx_skb_sta` (Daten-TX über STA-Queue) | — | ❌ (Mechanik = `connect_send_auth` wiederverwendbar) |
-| `iwl_mvm_rx_mpdu_mq` (Daten-RX → netdev) | `service_rx` (Gerüst da) | 🔶 (parst nur Beacons) |
-| Host-Fns `npk_netdev_submit_rx`/`poll_tx` an WASM verdrahten | — | ❌ (Kernel-Fns existieren) |
-| `iwl_mvm_rx_tx_cmd` (Daten-TX-Completion, Ring-Reclaim) | — | ❌ |
+| RX-Data-Frame (von FW entschlüsselt) → `npk_netdev_submit_rx` an IP-Stack | run_netdev (EAPOL-Demux-Gerüst da) | ❌ |
+| `npk_netdev_poll_tx` → TX-Data-Frame (802.11-Data+LLC, **OHNE ENCRYPT_DIS** → FW verschlüsselt mit TK) | `tx_data_frame` (wiederverwendbar) | ❌ |
+| `iwl_mvm_rx_tx_cmd` (Daten-TX-Completion, Ring-Reclaim) | — | 🔶 (für low-rate ok) |
+| → DHCP → IP → Ping/Browse | Kernel-IP-Stack | ❌ |
 
 ### Phase J — WiFi-Class-ABI-Integration (→ wifid) ❌
 Siehe `WIFI_CLASS_ABI.md` §8. Control-Channel-Host-Fns existieren im Kernel (v0.205.0),
