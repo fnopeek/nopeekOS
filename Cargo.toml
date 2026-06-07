@@ -18,6 +18,9 @@ exclude = [
     "tools/wasm/aml/core",
     "tools/wasm/aml/harness",
     "tools/wasm/aml/wasm",
+    "tools/wasm/wifid/core",
+    "tools/wasm/wifid/harness",
+    "tools/wasm/wifid/wasm",
     "tools/regen-icons",
 ]
 resolver = "2"
