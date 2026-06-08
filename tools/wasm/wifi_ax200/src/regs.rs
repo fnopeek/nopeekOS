@@ -724,7 +724,18 @@ pub const EV_READY: u8 = 0x83;
 
 // ── Stage 5e: data TX queue (tid 0) + key install ────────────────
 pub const IWL_DATA_TID: u8 = 0;
-pub const IWL_DATA_QUEUE_SIZE: usize = 16;
+// Data TX queue depth. 16 was too shallow once rate scaling lifted throughput
+// from 1 Mbit to tens of Mbit: under a burst the firmware's read pointer lags
+// (TX retries) and the ring overflows. 64 gives headroom over the kernel's
+// 16-slot TX mailbox while staying well within the gen2 max (256). The TFD slot
+// index = write_ptr & (size-1); cb_size = ilog2(size)-3 (must match the size).
+pub const IWL_DATA_QUEUE_SIZE: usize = 64;
+pub const DATA_QUEUE_CB_SIZE: u32 = 3; // TFD_QUEUE_CB_SIZE(64) = ilog2(64)-3
+// Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its OWN
+// payload region, or back-to-back frames clobber each other's data before the
+// firmware DMAs it (the bug behind "dies under load once the rate went up").
+// One full dev-cmd + 802.11 data frame (24 + ~1532) fits in 2 KiB.
+pub const TX_PAYLOAD_STRIDE: usize = 2048;
 // ADD_STA_KEY (0x17 LEGACY → LONG_GROUP, cmd_ver 3). struct iwl_mvm_add_sta_key_cmd
 // = common(52) + rx_mic(8) + tx_mic(8) + tx_seq(8) = 76 B. CCMP: mic/seq all 0.
 pub const ADD_STA_KEY_CMD: u8 = 0x17;
