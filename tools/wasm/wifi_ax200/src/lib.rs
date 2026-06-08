@@ -1065,14 +1065,14 @@ impl Ax200 {
     }
 
     // ── iwl_mvm_power_update_device (mvm/power.c) ─────────────────
-    // Device power table. We run CAM (Continuously Active Mode): flags = 0, no
-    // POWER_SAVE_ENA — the radio never sleeps. Linux's default BPS enables device
-    // power save, but it relies on dynamic-PS / the per-MAC PM management to wake
-    // and retrieve AP-buffered frames; we don't implement that, so with PS on the
-    // firmware sleeps unpredictably and the AP buffers our traffic, delivering it
-    // in multi-second batches (the latency-spike sawtooth). CAM = lowest latency.
+    // Device power table. Default power scheme (BPS): POWER_SAVE_ENA set, like
+    // Linux's default. CAM (flags = 0) was tried in 0.37 to kill the latency
+    // sawtooth but regressed connectivity (radio always-on → broadcast flood
+    // pins the driver core → freeze), so it is reverted. The latency spikes are
+    // most likely fiber-starvation, not power-save — the WiFi-IRQ is the real fix.
     fn send_power(&mut self) {
-        let cmd = [0u8; DEVICE_POWER_CMD_LEN]; // flags = 0 → CAM (ps_disabled)
+        let mut cmd = [0u8; DEVICE_POWER_CMD_LEN];
+        put_u16(&mut cmd, 0, DEVICE_POWER_FLAGS_POWER_SAVE_ENA);
         self.send_hcmd(0, POWER_TABLE_CMD, &cmd);
         self.pump_rx(20);
     }
@@ -2522,7 +2522,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.37.0 — CAM (no power-save) — kills latency spikes\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.38.0 — revert CAM (power-save back on, stable connect)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
