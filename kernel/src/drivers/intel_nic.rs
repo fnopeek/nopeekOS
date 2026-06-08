@@ -524,6 +524,17 @@ pub fn is_available() -> bool {
     AVAILABLE.load(Ordering::Relaxed)
 }
 
+/// Live link (carrier) state: reads STATUS.LU right now, so a pulled/plugged
+/// cable is reflected immediately. Cheap MMIO read — but call from Core 0 (it
+/// takes the DEVICE lock). False if the NIC isn't present.
+pub fn link_up() -> bool {
+    if !AVAILABLE.load(Ordering::Relaxed) { return false; }
+    match DEVICE.lock().as_ref() {
+        Some(d) => r32(d.mmio, STATUS) & STATUS_LU != 0,
+        None => false,
+    }
+}
+
 pub fn mac() -> Option<[u8; 6]> {
     DEVICE.lock().as_ref().map(|d| d.mac_addr)
 }

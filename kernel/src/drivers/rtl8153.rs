@@ -438,6 +438,15 @@ pub fn init() -> bool {
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Acquire) }
 pub fn mac() -> Option<[u8; 6]> { if is_available() { Some(*MAC.lock()) } else { None } }
 
+/// Live carrier state: reads the PHY's BMSR link bit over USB, so a pulled or
+/// plugged cable is reflected right now (a yanked cable drops the carrier even
+/// though the USB device stays present). Does a USB control transfer — call
+/// from Core 0 at a low rate, never from an interrupt handler.
+pub fn link_up() -> bool {
+    if !AVAILABLE.load(Ordering::Acquire) { return false; }
+    mdio_read(MII_BMSR) & BMSR_LSTATUS != 0
+}
+
 /// Transmit one Ethernet frame: prepend an 8-byte tx_desc, send on bulk OUT.
 /// The chip appends the FCS itself.
 pub fn send(frame: &[u8]) -> Result<(), NetError> {

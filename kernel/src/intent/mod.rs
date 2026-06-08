@@ -884,6 +884,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     let mut shade_was_active = crate::shade::is_active();
 
     loop {
+        // ~1 Hz (self-throttled): refresh wired carrier + auto-reconfigure IP
+        // when the active interface changes (LAN cable pulled → WiFi takes over
+        // with a fresh DHCP lease, or a static config). No manual `dhcp` needed.
+        crate::net::tick_link_and_reconfigure();
+
         // If focused window has a running WASM app or intent, route keys / wait.
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();

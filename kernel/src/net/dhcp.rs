@@ -24,13 +24,18 @@ pub fn configure() -> bool {
         None => return false,
     };
 
+    // Keep our previous lease if we had a real one, so re-running DHCP (e.g. on
+    // a link switch) doesn't needlessly churn the address.
+    let prev = arp::our_ip();
+    let hint = if prev != [0, 0, 0, 0] && prev != [10, 0, 2, 15] { prev } else { [0; 4] };
+
     // Temporarily set IP to 0.0.0.0 for DHCP
     arp::set_ip([0, 0, 0, 0]);
 
     udp::listen(CLIENT_PORT);
 
-    // 1. DISCOVER (with retries)
-    let discover = build_dhcp(&mac, MSG_DISCOVER, [0; 4], [0; 4]);
+    // 1. DISCOVER (with retries), hinting our previous lease.
+    let discover = build_dhcp(&mac, MSG_DISCOVER, hint, [0; 4]);
     let mut offer = None;
     for attempt in 0..3u32 {
         if attempt > 0 {
@@ -42,7 +47,6 @@ pub fn configure() -> bool {
             break;
         }
     }
-    crate::intel_nic::debug_stats();
 
     // 2. Check for OFFER
     let (offered_ip, server_ip) = match offer {
@@ -121,18 +125,18 @@ fn build_dhcp(mac: &[u8; 6], msg_type: u8, requested_ip: [u8; 4], server_ip: [u8
     pkt[pos] = 53; pkt[pos + 1] = 1; pkt[pos + 2] = msg_type;
     pos += 3;
 
-    if msg_type == MSG_REQUEST {
-        // Option 50: Requested IP
+    // Option 50: Requested IP — on the REQUEST (the offered address) and, as a
+    // hint, on a DISCOVER when we want the server to keep our previous lease.
+    if requested_ip != [0; 4] {
         pkt[pos] = 50; pkt[pos + 1] = 4;
         pkt[pos + 2..pos + 6].copy_from_slice(&requested_ip);
         pos += 6;
-
-        // Option 54: Server Identifier
-        if server_ip != [0; 4] {
-            pkt[pos] = 54; pkt[pos + 1] = 4;
-            pkt[pos + 2..pos + 6].copy_from_slice(&server_ip);
-            pos += 6;
-        }
+    }
+    // Option 54: Server Identifier (REQUEST only)
+    if msg_type == MSG_REQUEST && server_ip != [0; 4] {
+        pkt[pos] = 54; pkt[pos + 1] = 4;
+        pkt[pos + 2..pos + 6].copy_from_slice(&server_ip);
+        pos += 6;
     }
 
     // Option 55: Parameter Request List (router, DNS, subnet mask)

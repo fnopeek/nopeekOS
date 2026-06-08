@@ -1881,6 +1881,12 @@ impl Ax200 {
             out[..elen].copy_from_slice(&buf[pl..pl + elen]);
             RxKind::Eapol(elen)
         } else {
+            // Only IPv4 (0x0800) + ARP (0x0806) belong in the kernel IP stack.
+            // Other ethertypes the AP floods (0x88e1 HomePlug, multicast, …) are
+            // not ours to handle — drop them early instead of feeding the stack.
+            if ethertype != 0x0800 && ethertype != 0x0806 {
+                return RxKind::None;
+            }
             // Ethernet frame for the IP stack: dst = us (addr1), src = addr3 (SA).
             let end = (f + mpdu_len).min(buf.len());
             if end <= pl || 14 + (end - pl) > out.len() {
@@ -2406,7 +2412,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.32.0 — adaptive RX/TX pacing\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.33.0 — RX filter (IP/ARP only)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
