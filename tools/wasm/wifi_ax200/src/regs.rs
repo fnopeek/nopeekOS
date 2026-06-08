@@ -499,6 +499,7 @@ pub const DOT11_HDR_LEN: usize = 24; // fc(2)+dur(2)+addr1/2/3(18)+seq(2)
 pub const DOT11_OFF_ADDR1: usize = 4;  // DA (receiver)
 pub const DOT11_OFF_ADDR2: usize = 10; // SA (transmitter)
 pub const DOT11_OFF_ADDR3: usize = 16; // BSSID
+pub const DOT11_OFF_SEQ: usize = 22;   // seq_ctrl __le16 (frag 0-3 | seq_num 4-15)
 pub const DOT11_BEACON_FIXED: usize = 12; // timestamp(8)+beacon_int(2)+capab(2)
 pub const DOT11_OFF_IES: usize = DOT11_HDR_LEN + DOT11_BEACON_FIXED; // 36
 pub const WLAN_EID_SSID: u8 = 0;

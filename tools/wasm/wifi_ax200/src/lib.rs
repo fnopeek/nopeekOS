@@ -155,6 +155,11 @@ struct Ax200 {
     // (TX_CMD response). Flow control: never enqueue past the queue depth, or we
     // overwrite a TFD the firmware is still transmitting → corruption/stall.
     data_in_flight: u32,
+    // 802.11 sequence number for non-QoS data frames. mac80211 assigns this per
+    // frame (ieee80211_tx_h_sequence); the gen2 firmware does NOT do it for us,
+    // so every data frame must carry a unique, incrementing seq or the AP treats
+    // distinct frames as duplicates (dropping TCP data, duplicating ACKed ones).
+    tx_seq: u16,
 }
 
 impl Ax200 {
@@ -1772,6 +1777,10 @@ impl Ax200 {
         fr[DOT11_OFF_ADDR1..DOT11_OFF_ADDR1 + 6].copy_from_slice(&self.target_bssid);
         fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
         fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&dst);
+        // Unique, incrementing sequence number (seq_num << 4, frag 0). Without it
+        // every data frame is seq 0 → the AP's duplicate filter mangles the flow.
+        put_u16(&mut fr, DOT11_OFF_SEQ, (self.tx_seq & 0x0fff) << 4);
+        self.tx_seq = self.tx_seq.wrapping_add(1);
         let mut p = DOT11_HDR_LEN;
         fr[p..p + 6].copy_from_slice(&LLC_SNAP_HDR);
         fr[p + 6] = (ethertype >> 8) as u8;
@@ -2264,10 +2273,12 @@ impl Ax200 {
             }
             // Adaptive pacing: while frames are flowing OR completions are still
             // pending, poll again in 1 ms so the RX ring is drained before it
-            // overflows and queue slots free up quickly; when fully idle, sleep
-            // 20 ms to yield the core (npk_sleep yields the fiber either way).
+            // overflows and queue slots free up quickly; when idle, 4 ms keeps the
+            // RX latency floor low (the ping/round-trip baseline) while still
+            // yielding the core (npk_sleep yields the fiber). A proper IRQ wake is
+            // the eventual fix; 4 ms is the interim quick-win over the old 20 ms.
             let busy = rx_frames > 0 || tx_any || clen > 0 || self.data_in_flight > 0;
-            host::sleep_ms(if busy { 1 } else { 20 });
+            host::sleep_ms(if busy { 1 } else { 4 });
         }
     }
 
@@ -2508,7 +2519,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.35.0 — per-slot TX buffers + flow control\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.36.0 — 802.11 sequence numbers + faster RX poll\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -2574,6 +2585,7 @@ pub extern "C" fn _start() {
         data_queue_id: 0,
         data_write_ptr: 0,
         data_in_flight: 0,
+        tx_seq: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
