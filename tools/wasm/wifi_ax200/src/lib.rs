@@ -2075,7 +2075,7 @@ impl Ax200 {
     // driver holds its DMA + the netdev registration for its lifetime). Frame
     // bridging to the kernel netdev mailboxes (TX poll / RX submit) plugs into
     // this loop once association brings up the data path.
-    fn run_netdev(&mut self) -> ! {
+    fn run_netdev(&mut self, associated: bool) -> ! {
         let mac = self.mac;
         if host::netdev_register(&mac) == 0 {
             host::print("[ax200] registered as network interface 'wlan' (");
@@ -2086,14 +2086,20 @@ impl Ax200 {
         }
         // The data TX queue was allocated before auth (so its SCD-response wait
         // wouldn't swallow the AP's first EAPOL frame). Tell wifid the connection
-        // is ready + the MACs it needs for the PTK, then listen immediately.
+        // is ready + the MACs it needs for the PTK, then listen immediately — but
+        // ONLY if we actually associated. Otherwise the link stays down (wlan is
+        // registered but not primary) and we don't arm wifid for a dead BSS.
         let our_mac = self.mac;
-        let mut ready = [0u8; 13];
-        ready[0] = EV_READY;
-        ready[1..7].copy_from_slice(&self.target_bssid);
-        ready[7..13].copy_from_slice(&our_mac);
-        host::wifi_send_event(&ready);
-        host::print("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
+        if associated {
+            let mut ready = [0u8; 13];
+            ready[0] = EV_READY;
+            ready[1..7].copy_from_slice(&self.target_bssid);
+            ready[7..13].copy_from_slice(&our_mac);
+            host::wifi_send_event(&ready);
+            host::print("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
+        } else {
+            host::print("[ax200] NOT associated — wlan registered but link down (no 4-way)\n");
+        }
         let mut rxbuf = [0u8; 1600];
         let mut evt = [0u8; 1700];
         let mut cmd = [0u8; 600];
@@ -2393,7 +2399,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.30.3 — fix TX buf overflow + bcast RX\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.31.0 — auth/assoc retry 3x + gate READY\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -2544,6 +2550,7 @@ pub extern "C" fn _start() {
                                 // First connect step (no TX yet): set the target
                                 // AP's operating channel + bind MAC↔PHY. Target =
                                 // strongest AP from the scan.
+                                let mut associated = false;
                                 if dev.target_valid && dev.connect_phy_binding()
                                     && dev.connect_add_station()
                                 {
@@ -2558,16 +2565,31 @@ pub extern "C" fn _start() {
                                         host::print("[ax200] data queue alloc FAILED\n");
                                     }
                                     // ── Stage 5c/5d: AUTH → ASSOC mgmt dialog ──
-                                    if dev.connect_send_auth() {
-                                        dev.connect_send_assoc();
+                                    // Retry the whole auth+assoc up to 3× like
+                                    // mac80211 (IEEE80211_AUTH_MAX_TRIES /
+                                    // ASSOC_MAX_TRIES): a single lost mgmt frame
+                                    // must not abort the connect.
+                                    for attempt in 0..3 {
+                                        if attempt > 0 {
+                                            host::print("[ax200] connect retry ");
+                                            host::print_dec(attempt as u32 + 1);
+                                            host::print("/3...\n");
+                                        }
+                                        if dev.connect_send_auth() && dev.connect_send_assoc() {
+                                            associated = true;
+                                            break;
+                                        }
                                     }
                                 }
 
                                 // ── Register as a NIC + go resident ──
                                 // run_netdev never returns: the driver owns the
                                 // card and the `wlan` interface for its lifetime
-                                // (same model as aml.wasm).
-                                dev.run_netdev();
+                                // (same model as aml.wasm). It only tells wifid the
+                                // link is READY (→ the 4-way) when we actually
+                                // associated — otherwise wifid would arm a
+                                // supplicant for a BSS we never joined and stall.
+                                dev.run_netdev(associated);
                             } else {
                                 host::print("[ax200] Stage 4d2b1 FAILED — no SCAN_COMPLETE\n");
                             }
