@@ -14,18 +14,58 @@ pub const MTU: usize = 1514;
 static WASM_NIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WASM_NIC: Mutex<WasmNic> = Mutex::new(WasmNic::empty());
 
+// Frame ring between the kernel net stack and a WASM NIC driver. Unlike a
+// single-slot mailbox (which overwrites — and so DROPS — an undrained frame on
+// the next submit), this absorbs bursts: the producer drops only when the ring
+// is genuinely full, never clobbering a frame already queued. One slot is kept
+// empty to distinguish full from empty. All access is under the WASM_NIC lock,
+// so plain indices suffice (no atomics needed).
+struct Ring<const N: usize> {
+    bufs: [[u8; MTU]; N],
+    lens: [u16; N],
+    head: usize, // consumer reads here
+    tail: usize, // producer writes here
+}
+
+impl<const N: usize> Ring<N> {
+    const fn new() -> Self {
+        Ring { bufs: [[0; MTU]; N], lens: [0; N], head: 0, tail: 0 }
+    }
+    /// Enqueue a frame. Returns false (frame dropped) only if the ring is full.
+    fn push(&mut self, frame: &[u8]) -> bool {
+        let next = (self.tail + 1) % N;
+        if next == self.head { return false; }
+        let len = frame.len().min(MTU);
+        self.bufs[self.tail][..len].copy_from_slice(&frame[..len]);
+        self.lens[self.tail] = len as u16;
+        self.tail = next;
+        true
+    }
+    /// Dequeue the oldest frame into `out`. None if empty.
+    fn pop(&mut self, out: &mut [u8; MTU]) -> Option<usize> {
+        if self.head == self.tail { return None; }
+        let len = self.lens[self.head] as usize;
+        out[..len].copy_from_slice(&self.bufs[self.head][..len]);
+        self.head = (self.head + 1) % N;
+        Some(len)
+    }
+    fn clear(&mut self) { self.head = 0; self.tail = 0; }
+}
+
+// RX absorbs the driver's burst between Core-0 net::poll drains; TX queues the
+// kernel's frames for the driver to pull. ~72 KiB total.
+const RX_RING: usize = 32;
+const TX_RING: usize = 16;
+
 struct WasmNic {
     mac_addr: [u8; 6],
-    /// TX mailbox: kernel writes frames here for the WASM driver to transmit
-    tx_buf: [u8; MTU],
-    tx_len: u16,
-    /// RX mailbox: WASM driver writes received frames here for the kernel
-    rx_buf: [u8; MTU],
-    rx_len: u16,
+    /// Frames the WASM driver received, waiting for the kernel to consume.
+    rx: Ring<RX_RING>,
+    /// Frames the kernel queued, waiting for the WASM driver to transmit.
+    tx: Ring<TX_RING>,
     /// Carrier/link state, set by the driver via npk_netdev_set_link. For a
     /// WiFi NIC this is "associated + keyed" (data path live), distinct from
-    /// mere registration. A wired NIC has no such notion (always linked once
-    /// present), so this only refines the WASM NIC's reported state.
+    /// mere registration.
     link_up: bool,
 }
 
@@ -33,10 +73,8 @@ impl WasmNic {
     const fn empty() -> Self {
         WasmNic {
             mac_addr: [0; 6],
-            tx_buf: [0; MTU],
-            tx_len: 0,
-            rx_buf: [0; MTU],
-            rx_len: 0,
+            rx: Ring::new(),
+            tx: Ring::new(),
             link_up: false,
         }
     }
@@ -46,8 +84,8 @@ impl WasmNic {
 pub fn register_wasm_nic(mac: [u8; 6]) {
     let mut nic = WASM_NIC.lock();
     nic.mac_addr = mac;
-    nic.tx_len = 0;
-    nic.rx_len = 0;
+    nic.rx.clear();
+    nic.tx.clear();
     nic.link_up = false;
     WASM_NIC_ACTIVE.store(true, Ordering::Release);
 }
@@ -122,30 +160,17 @@ pub fn active_id() -> u8 {
 /// WASM driver calls this to submit a received frame to the kernel network stack
 pub fn wasm_nic_submit_rx(frame: &[u8]) {
     if frame.len() > MTU { return; }
-    let mut nic = WASM_NIC.lock();
-    nic.rx_buf[..frame.len()].copy_from_slice(frame);
-    nic.rx_len = frame.len() as u16;
+    WASM_NIC.lock().rx.push(frame);
 }
 
 /// WASM driver calls this to get a frame to transmit
 pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
-    let mut nic = WASM_NIC.lock();
-    if nic.tx_len == 0 { return None; }
-    let len = nic.tx_len as usize;
-    buf[..len].copy_from_slice(&nic.tx_buf[..len]);
-    nic.tx_len = 0;
-    Some(len)
+    WASM_NIC.lock().tx.pop(buf)
 }
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
     match active() {
-        Active::Wasm => {
-            let mut nic = WASM_NIC.lock();
-            let len = frame.len().min(MTU);
-            nic.tx_buf[..len].copy_from_slice(&frame[..len]);
-            nic.tx_len = len as u16;
-            Ok(())
-        }
+        Active::Wasm => { WASM_NIC.lock().tx.push(frame); Ok(()) }
         Active::Intel => intel_nic::send(frame),
         Active::Rtl => rtl8153::send(frame),
         Active::Virtio | Active::None => virtio_net::send(frame),
@@ -154,14 +179,7 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
 
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     match active() {
-        Active::Wasm => {
-            let mut nic = WASM_NIC.lock();
-            if nic.rx_len == 0 { return None; }
-            let len = nic.rx_len as usize;
-            buf[..len].copy_from_slice(&nic.rx_buf[..len]);
-            nic.rx_len = 0;
-            Some(len)
-        }
+        Active::Wasm => WASM_NIC.lock().rx.pop(buf),
         Active::Intel => intel_nic::recv(buf),
         Active::Rtl => rtl8153::recv(buf),
         Active::Virtio | Active::None => virtio_net::recv(buf),
