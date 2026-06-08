@@ -78,30 +78,29 @@ pub fn wasm_nic_link_up() -> bool {
 // which runs in IRQ context. refresh_link_state() (Core 0, ~1 Hz) reads them
 // into this cache; dispatch + active() read the cache, staying cheap + IRQ-safe.
 static INTEL_LINK: AtomicBool = AtomicBool::new(false);
-static RTL_LINK: AtomicBool = AtomicBool::new(false);
 
-/// Refresh the cached wired link state. Core 0 only (~1 Hz): does an MMIO read
-/// (intel) + a USB control transfer (rtl8153), neither safe from an IRQ.
+/// Refresh the cached wired link state. Core 0 only (~1 Hz). ONLY the intel NIC
+/// is polled live — a cheap, safe MMIO STATUS.LU read. The rtl8153 carrier is
+/// NOT polled: reading it needs a USB control transfer, which takes the xHCI NIC
+/// lock, and a timer IRQ landing mid-lock (poll_mouse takes the same lock)
+/// deadlocks Core 0 (observed: networking died after ~20 ticks, instantly when
+/// the USB NIC also carried traffic). A USB-LAN NIC's cable state is inferred
+/// from presence + the WiFi link instead — see active().
 pub fn refresh_link_state() {
     INTEL_LINK.store(intel_nic::link_up(), Ordering::Relaxed);
-    RTL_LINK.store(rtl8153::link_up(), Ordering::Relaxed);
 }
 
-/// The active interface, picked by REAL link state — wired (LAN) first, then
-/// WiFi: the conventional priority. Only if nothing reports a live link do we
-/// fall back to a merely-present NIC, so the stack is never dead while a driver
-/// is still negotiating. Replaces the old "WiFi wins when up" inversion, which
-/// existed only because the wired NICs couldn't report live carrier (so a
-/// yanked cable kept stealing traffic).
+/// The active interface. A wired NIC with a real, live carrier wins (intel reads
+/// STATUS.LU live). An associated WiFi link is then preferred over a USB-LAN NIC
+/// whose carrier we can't safely probe — so a yanked USB-LAN cable doesn't
+/// strand traffic on a dead interface, while a live wired desktop NIC still
+/// wins. Only if nothing of those applies do we fall back to mere presence.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Active { Intel, Rtl, Wasm, Virtio, None }
 
 pub fn active() -> Active {
-    // 1) a real, live link — LAN first, then WiFi
     if intel_nic::is_available() && INTEL_LINK.load(Ordering::Relaxed) { return Active::Intel; }
-    if rtl8153::is_available() && RTL_LINK.load(Ordering::Relaxed) { return Active::Rtl; }
     if wasm_nic_link_up() { return Active::Wasm; }
-    // 2) no confirmed link anywhere — fall back to whatever is present, LAN first
     if intel_nic::is_available() { return Active::Intel; }
     if rtl8153::is_available() { return Active::Rtl; }
     if wasm_nic_available() { return Active::Wasm; }
@@ -212,7 +211,9 @@ pub fn list() -> alloc::vec::Vec<IfaceInfo> {
     }
     if rtl8153::is_available() {
         if let Some(mac) = rtl8153::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: act == Active::Rtl, link_up: RTL_LINK.load(Ordering::Relaxed) });
+            // No safe per-tick USB carrier read (see refresh_link_state); report
+            // presence. `primary` reflects what the stack actually uses.
+            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: act == Active::Rtl, link_up: rtl8153::is_available() });
         }
     }
     if wasm_nic_available() {
