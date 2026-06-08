@@ -1647,6 +1647,35 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
+    // ── Rate scaling: TLC offload (iwl_mvm_rs_fw_rate_init, mvm/rs-fw.c) ──
+    // Configure firmware rate scaling for the AP station so data frames stop
+    // going out at the fixed host rate (1 Mbit CCK in tx_raw). We advertise the
+    // station's legacy (non-HT) rate set; the firmware then picks the best rate
+    // per frame from its TLC table. Sent once after association (Linux sends it
+    // CMD_ASYNC → fire-and-forget, then a TLC_MNG_UPDATE_NOTIF reports the rate).
+    // TLC_MNG_CONFIG_CMD cmd_ver=4 on this FW → struct iwl_tlc_config_cmd_v4.
+    // HT/VHT/HE MCS (mode HT/VHT/HE + ht_rates) is a later rung: it needs the
+    // matching cap IEs in the assoc request + station HT flags. Legacy alone
+    // already lifts us from 1 Mbit to up to 54 Mbit OFDM.
+    fn connect_tlc_config(&mut self) {
+        let mut cmd = [0u8; TLC_CMD_LEN];
+        cmd[TLC_OFF_STA_ID] = AP_STA_ID;
+        cmd[TLC_OFF_MAX_CH_WIDTH] = TLC_CH_WIDTH_20MHZ;
+        cmd[TLC_OFF_MODE] = TLC_MODE_NON_HT;
+        cmd[TLC_OFF_CHAINS] = ANT_AB as u8; // chain A|B = BIT(0)|BIT(1)
+        // sgi / flags / ht_rates / max_mpdu_len / max_tx_op stay 0 (legacy mode,
+        // no aggregation, no SGI — exactly the non-HT cfg Linux builds).
+        let non_ht = if self.target_band == PHY_BAND_24 as u8 {
+            TLC_NON_HT_RATES_24
+        } else {
+            TLC_NON_HT_RATES_5
+        };
+        put_u16(&mut cmd, TLC_OFF_NON_HT_RATES, non_ht);
+        self.send_hcmd(DATA_PATH_GROUP, TLC_MNG_CONFIG_CMD, &cmd);
+        host::print("[ax200] TLC_MNG_CONFIG_CMD sent — rate scaling on (legacy 1..54M)\n");
+        self.pump_rx(20);
+    }
+
     // ── gen2 mgmt-frame TX (iwl_txq_gen2_tx + iwl_txq_gen2_build_tx) ──────
     // Transmit one 802.11 management frame on the AP station's queue. Builds a
     // device TX command — short iwl_cmd_header (TX_CMD, group 0) + iwl_tx_cmd_v9
@@ -1728,8 +1757,11 @@ impl Ax200 {
         fr[p..p + payload.len()].copy_from_slice(payload);
         p += payload.len();
         let flags = if encrypt {
-            IWL_TX_FLAGS_CMD_RATE
+            // IP data after AUTHORIZED: no CMD_RATE → the firmware rate-scales
+            // (TLC); no ENCRYPT_DIS → it encrypts with the installed PTK.
+            0
         } else {
+            // EAPOL during the 4-way: robust fixed 1 Mbit CCK, unencrypted.
             IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE
         };
         self.data_write_ptr = self.tx_raw(
@@ -2103,6 +2135,10 @@ impl Ax200 {
             ready[7..13].copy_from_slice(&our_mac);
             host::wifi_send_event(&ready);
             host::print("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
+            // Configure firmware rate scaling for the station now (Linux does it
+            // at the assoc state change). Data only flows after AUTHORIZED, so
+            // TLC is always in place before the first IP frame.
+            self.connect_tlc_config();
         } else {
             host::print("[ax200] NOT associated — wlan registered but link down (no 4-way)\n");
         }
@@ -2412,7 +2448,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.33.0 — RX filter (IP/ARP only)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.34.0 — TLC rate scaling (no more 1M lock)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
