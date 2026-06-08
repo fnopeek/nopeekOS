@@ -140,15 +140,21 @@ struct Ax200 {
     // gen2 management TX queue for the AP station (auth/assoc frames, 5b+).
     mgmt_tfd: Dma,      // TFD ring (iwl_tfh_tfd * IWL_MGMT_QUEUE_SIZE)
     mgmt_first_tb: Dma, // first-TB staging buffers
+    mgmt_payload: Dma,  // per-slot TB1 payload staging (no shared-buffer clobber)
     mgmt_bc_tbl: Dma,   // byte-count table (FW DMA scheduling)
     mgmt_queue_id: u16, // queue id returned by the firmware
     mgmt_write_ptr: u32,
-    // gen2 data TX queue (tid 0) for EAPOL frames during the 4-way (5e+).
+    // gen2 data TX queue (tid 0) for EAPOL + IP frames.
     data_tfd: Dma,
     data_first_tb: Dma,
+    data_payload: Dma,  // per-slot TB1 payload staging (one region per TFD slot)
     data_bc_tbl: Dma,
     data_queue_id: u16,
     data_write_ptr: u32,
+    // Frames handed to the data queue but not yet reported complete by the FW
+    // (TX_CMD response). Flow control: never enqueue past the queue depth, or we
+    // overwrite a TFD the firmware is still transmitting → corruption/stall.
+    data_in_flight: u32,
 }
 
 impl Ax200 {
@@ -1562,8 +1568,9 @@ impl Ax200 {
         self.mgmt_tfd = self.alloc_dma(TFH_TFD_SIZE * IWL_MGMT_QUEUE_SIZE, "mgmt.tfd");
         self.mgmt_first_tb =
             self.alloc_dma(IWL_FIRST_TB_SIZE_ALIGN * IWL_MGMT_QUEUE_SIZE, "mgmt.first_tb");
+        self.mgmt_payload = self.alloc_dma(TX_PAYLOAD_STRIDE * IWL_MGMT_QUEUE_SIZE, "mgmt.payload");
         self.mgmt_bc_tbl = self.alloc_dma(BC_TBL_BYTES, "mgmt.bc_tbl");
-        if !self.mgmt_tfd.ok() || !self.mgmt_first_tb.ok() || !self.mgmt_bc_tbl.ok() {
+        if !self.mgmt_tfd.ok() || !self.mgmt_first_tb.ok() || !self.mgmt_payload.ok() || !self.mgmt_bc_tbl.ok() {
             host::print("[ax200] Stage 5b FAILED — TX queue DMA alloc\n");
             return false;
         }
@@ -1687,9 +1694,9 @@ impl Ax200 {
     // (short header + tx_cmd_v9 + frame) across the TFD's two TBs, fill the
     // byte-count table, bump the write pointer and ring the doorbell. Returns the
     // advanced write pointer. (The 802.11 frame is built by the caller.)
-    fn tx_raw(&self, qid: u16, wptr: u32, tfd_ring: Dma, first_tb: Dma, bc: Dma, flags: u32, frame: &[u8]) -> u32 {
-        let idx = (wptr & (IWL_MGMT_QUEUE_SIZE as u32 - 1)) as usize;
-        let mut buf = [0u8; 2048]; // dev_cmd header + tx_cmd + up to a full MTU frame
+    fn tx_raw(&self, qid: u16, wptr: u32, qsize: usize, tfd_ring: Dma, first_tb: Dma, payload: Dma, bc: Dma, flags: u32, frame: &[u8]) -> u32 {
+        let idx = (wptr & (qsize as u32 - 1)) as usize;
+        let mut buf = [0u8; TX_PAYLOAD_STRIDE]; // dev_cmd header + tx_cmd + full frame
         buf[0] = TX_CMD;
         buf[1] = 0; // group 0 (short header)
         let seq = (((qid) & 0x1f) << 8) | (idx as u16 & 0xff);
@@ -1707,13 +1714,18 @@ impl Ax200 {
         buf[TXC_OFF_FRAME..TXC_OFF_FRAME + frame.len()].copy_from_slice(frame);
         let total = TXC_OFF_FRAME + frame.len();
 
-        host::dma_write_buf(self.cmd_data.handle, 0, &buf[..total]);
+        // Per-slot staging: TB0 = this slot's first-TB buffer (first 20 bytes),
+        // TB1 = this slot's payload region (the rest). Every in-flight TFD has
+        // its own payload region, so a later frame never overwrites an earlier
+        // one before the firmware has DMA'd it.
+        let pl_off = (idx * TX_PAYLOAD_STRIDE) as u32;
+        host::dma_write_buf(payload.handle, pl_off, &buf[..total]);
         let ftb_off = (idx * IWL_FIRST_TB_SIZE_ALIGN) as u32;
         host::dma_write_buf(first_tb.handle, ftb_off, &buf[..IWL_FIRST_TB_SIZE]);
 
         let mut tfd = [0u8; TFH_TFD_SIZE];
         put_tfh_tb(&mut tfd, 0, IWL_FIRST_TB_SIZE as u16, first_tb.phys + ftb_off as u64);
-        put_tfh_tb(&mut tfd, 1, (total - IWL_FIRST_TB_SIZE) as u16, self.cmd_data.phys + IWL_FIRST_TB_SIZE as u64);
+        put_tfh_tb(&mut tfd, 1, (total - IWL_FIRST_TB_SIZE) as u16, payload.phys + pl_off as u64 + IWL_FIRST_TB_SIZE as u64);
         tfd[0..2].copy_from_slice(&2u16.to_le_bytes()); // num_tbs
         host::dma_write_buf(tfd_ring.handle, (idx * TFH_TFD_SIZE) as u32, &tfd);
 
@@ -1730,8 +1742,10 @@ impl Ax200 {
         self.mgmt_write_ptr = self.tx_raw(
             self.mgmt_queue_id,
             self.mgmt_write_ptr,
+            IWL_MGMT_QUEUE_SIZE,
             self.mgmt_tfd,
             self.mgmt_first_tb,
+            self.mgmt_payload,
             self.mgmt_bc_tbl,
             IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_CMD_RATE,
             frame,
@@ -1742,7 +1756,16 @@ impl Ax200 {
     // addr1=BSSID, addr2=us, addr3=dst) + LLC/SNAP. `encrypt`=false sets
     // ENCRYPT_DIS (EAPOL during the 4-way); =true lets the firmware encrypt with
     // the installed PTK (IP traffic after AUTHORIZED).
-    fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool) {
+    // Returns false if the frame was dropped because the data queue is full
+    // (the firmware hasn't drained it yet) — the caller leaves it to the IP
+    // stack to retransmit rather than overwrite an in-flight TFD.
+    fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool) -> bool {
+        // Flow control: never let more than (queue depth − 1) frames be in
+        // flight, or write_ptr laps the firmware's read pointer and overwrites a
+        // TFD it is still transmitting.
+        if self.data_in_flight as usize >= IWL_DATA_QUEUE_SIZE - 1 {
+            return false;
+        }
         let mut fr = [0u8; 1600];
         fr[0] = DOT11_FC_DATA;
         fr[1] = DOT11_FC1_TODS;
@@ -1767,24 +1790,29 @@ impl Ax200 {
         self.data_write_ptr = self.tx_raw(
             self.data_queue_id,
             self.data_write_ptr,
+            IWL_DATA_QUEUE_SIZE,
             self.data_tfd,
             self.data_first_tb,
+            self.data_payload,
             self.data_bc_tbl,
             flags,
             &fr[..p],
         );
+        self.data_in_flight += 1;
+        true
     }
 
     // Convert an Ethernet frame from the IP stack ([dst 6][src 6][etype 2][pl])
-    // into an encrypted 802.11 data frame and transmit it.
-    fn tx_eth(&mut self, eth: &[u8]) {
+    // into an encrypted 802.11 data frame and transmit it. Returns false if the
+    // queue was full (frame dropped → the IP stack will retransmit).
+    fn tx_eth(&mut self, eth: &[u8]) -> bool {
         if eth.len() < 14 {
-            return;
+            return true;
         }
         let mut dst = [0u8; 6];
         dst.copy_from_slice(&eth[0..6]);
         let ethertype = ((eth[12] as u16) << 8) | eth[13] as u16;
-        self.tx_8023(dst, ethertype, &eth[14..], true);
+        self.tx_8023(dst, ethertype, &eth[14..], true)
     }
 
     // Allocate a gen2 data TX queue (tid 0) for the AP station, so EAPOL frames
@@ -1793,15 +1821,16 @@ impl Ax200 {
         self.data_tfd = self.alloc_dma(TFH_TFD_SIZE * IWL_DATA_QUEUE_SIZE, "data.tfd");
         self.data_first_tb =
             self.alloc_dma(IWL_FIRST_TB_SIZE_ALIGN * IWL_DATA_QUEUE_SIZE, "data.first_tb");
+        self.data_payload = self.alloc_dma(TX_PAYLOAD_STRIDE * IWL_DATA_QUEUE_SIZE, "data.payload");
         self.data_bc_tbl = self.alloc_dma(BC_TBL_BYTES, "data.bc_tbl");
-        if !self.data_tfd.ok() || !self.data_first_tb.ok() || !self.data_bc_tbl.ok() {
+        if !self.data_tfd.ok() || !self.data_first_tb.ok() || !self.data_payload.ok() || !self.data_bc_tbl.ok() {
             return false;
         }
         let mut q = [0u8; SCD_CMD_LEN];
         put_u32(&mut q, SQ_OFF_OPERATION, IWL_SCD_QUEUE_ADD);
         put_u32(&mut q, SQ_OFF_STA_MASK, 1 << AP_STA_ID);
         q[SQ_OFF_TID] = IWL_DATA_TID;
-        put_u32(&mut q, SQ_OFF_CB_SIZE, MGMT_QUEUE_CB_SIZE);
+        put_u32(&mut q, SQ_OFF_CB_SIZE, DATA_QUEUE_CB_SIZE);
         put_u64(&mut q, SQ_OFF_BC_DRAM_ADDR, self.data_bc_tbl.phys);
         put_u64(&mut q, SQ_OFF_TFDQ_DRAM_ADDR, self.data_tfd.phys);
         self.send_hcmd(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD, &q);
@@ -2148,11 +2177,17 @@ impl Ax200 {
         let mut txbuf = [0u8; 1514];
         let mut rx_log = 0u32; // throttle the data-path diagnostics
         let mut tx_log = 0u32;
+        let mut stall = 0u32; // iterations the data queue has been stuck full
         loop {
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
+            // TX completions (TX_CMD response) free data-queue slots.
+            let mut tx_done = 0u32;
             let rx_frames = self.service_rx(|c, g, rb| {
-                if c == REPLY_RX_MPDU_CMD && g == 0 {
+                if c == TX_CMD && g == 0 {
+                    // gen2 TX completion — one per transmitted data/mgmt frame.
+                    tx_done += 1;
+                } else if c == REPLY_RX_MPDU_CMD && g == 0 {
                     match Self::rx_classify(rb, &our_mac, &mut rxbuf) {
                         RxKind::Eapol(n) => {
                             evt[0] = EV_EAPOL_RX;
@@ -2178,9 +2213,17 @@ impl Ax200 {
                 }
                 true
             });
-            // TX: send every Ethernet frame the IP stack queued (DHCP, ARP, …).
+            // Free the data-queue slots the firmware just reported done.
+            self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
+            // TX: send every Ethernet frame the IP stack queued (DHCP, ARP, …),
+            // but stop once the data queue is full — leave the rest in the kernel
+            // mailbox so we never pop a frame we'd have to drop (and never lap the
+            // firmware's read pointer).
             let mut tx_any = false;
             loop {
+                if self.data_in_flight as usize >= IWL_DATA_QUEUE_SIZE - 1 {
+                    break;
+                }
                 let n = host::netdev_poll_tx(&mut txbuf);
                 if n == 0 {
                     break;
@@ -2202,11 +2245,28 @@ impl Ax200 {
             if clen > 0 {
                 self.handle_wifi_cmd(&cmd[..clen as usize]);
             }
-            // Adaptive pacing: while frames are flowing, poll again in 1 ms so
-            // the RX ring is drained before it overflows (→ packet loss) and
-            // latency stays low; when idle, sleep 20 ms so we yield the core to
-            // the rest of the system (npk_sleep yields the fiber either way).
-            let busy = rx_frames > 0 || tx_any || clen > 0;
+            // Stall watchdog: if the data queue stays full for ~0.5 s the
+            // firmware has stopped draining it (assert / wedged TX) — dump its
+            // error log once so the death isn't silent, then keep going.
+            if self.data_in_flight as usize >= IWL_DATA_QUEUE_SIZE - 1 {
+                stall += 1;
+                if stall == 500 {
+                    host::print("[ax200] WARNING: data TX queue stuck full — FW not draining\n");
+                    self.dump_fw_error_log();
+                    // Recover rather than wedge TX forever: if completions were
+                    // somehow missed, clear the in-flight count so TX resumes.
+                    // (Better one possible overwrite than a permanently dead link.)
+                    self.data_in_flight = 0;
+                    stall = 0;
+                }
+            } else {
+                stall = 0;
+            }
+            // Adaptive pacing: while frames are flowing OR completions are still
+            // pending, poll again in 1 ms so the RX ring is drained before it
+            // overflows and queue slots free up quickly; when fully idle, sleep
+            // 20 ms to yield the core (npk_sleep yields the fiber either way).
+            let busy = rx_frames > 0 || tx_any || clen > 0 || self.data_in_flight > 0;
             host::sleep_ms(if busy { 1 } else { 20 });
         }
     }
@@ -2222,7 +2282,7 @@ impl Ax200 {
                     host::print_dec(len as u32);
                     host::print(")\n");
                     let dst = self.target_bssid;
-                    self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], false);
+                    let _ = self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], false);
                 }
             }
             // SET_KEY: [op][key_type][key_idx][cipher][key_len][key..][rsc 6].
@@ -2448,7 +2508,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.34.0 — TLC rate scaling (no more 1M lock)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.35.0 — per-slot TX buffers + flow control\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
@@ -2503,14 +2563,17 @@ pub extern "C" fn _start() {
         target_valid: false,
         mgmt_tfd: Dma::NONE,
         mgmt_first_tb: Dma::NONE,
+        mgmt_payload: Dma::NONE,
         mgmt_bc_tbl: Dma::NONE,
         mgmt_queue_id: 0,
         mgmt_write_ptr: 0,
         data_tfd: Dma::NONE,
         data_first_tb: Dma::NONE,
+        data_payload: Dma::NONE,
         data_bc_tbl: Dma::NONE,
         data_queue_id: 0,
         data_write_ptr: 0,
+        data_in_flight: 0,
     };
 
     let hw_rev = dev.r32(CSR_HW_REV);
