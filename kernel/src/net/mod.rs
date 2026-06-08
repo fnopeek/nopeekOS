@@ -15,7 +15,7 @@ pub mod ntp;
 pub mod tcp;
 
 use crate::netdev;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 /// Serialises NIC RX-ring access across cores. With guest-SMP, Core 0's loop
 /// AND the BSP vCPU pump both call `poll()`. `netdev::recv` drains a
@@ -61,6 +61,64 @@ pub fn poll() {
     // + mouse. Internally gated to Core 0, so only Core 0 executes it — no race
     // despite being outside the guard.
     crate::shade::poll_render();
+}
+
+/// Tracks the active interface so a change (cable pulled/plugged, WiFi
+/// associated) triggers a fresh IP config. 0xff = not yet seeded.
+static LAST_ACTIVE: AtomicU8 = AtomicU8::new(0xff);
+static NEXT_LINK_CHECK: AtomicU64 = AtomicU64::new(0);
+
+/// Seed the active-interface tracker WITHOUT reconfiguring — call once after the
+/// boot-time DHCP so the first tick doesn't redundantly re-DHCP the same link.
+pub fn seed_active() {
+    netdev::refresh_link_state();
+    LAST_ACTIVE.store(netdev::active_id(), Ordering::Relaxed);
+}
+
+/// Core 0, ~1 Hz: refresh the wired carrier cache, and when the active interface
+/// changes, reconfigure IP — a static config if set, else DHCP. Replaces the
+/// boot-only one-shot + the manual `dhcp`: pull the LAN cable and WiFi takes
+/// over with a fresh lease automatically. Must NOT run in IRQ context (it does
+/// USB reads + DHCP can block); call from the Core 0 shell loop.
+pub fn tick_link_and_reconfigure() {
+    if crate::smp::per_core::current_core_id() != 0 { return; }
+    let now = crate::interrupts::rdtsc();
+    if now < NEXT_LINK_CHECK.load(Ordering::Relaxed) { return; }
+    NEXT_LINK_CHECK.store(now + crate::interrupts::tsc_freq(), Ordering::Relaxed); // +~1 s
+
+    netdev::refresh_link_state();
+    let act = netdev::active_id();
+    if act != LAST_ACTIVE.swap(act, Ordering::Relaxed) && act != 0 {
+        reconfigure();
+    }
+}
+
+/// Apply a static IP config if `static_ip` is set, else run DHCP. Sets gateway
+/// (`static_gw`) + DNS (`static_dns`) when given.
+fn reconfigure() {
+    if let Some(ip) = crate::config::get("static_ip").and_then(|s| parse_ipv4(s.trim())) {
+        arp::set_ip(ip);
+        if let Some(gw) = crate::config::get("static_gw").and_then(|s| parse_ipv4(s.trim())) {
+            ipv4::set_gateway(gw);
+        }
+        if let Some(d) = crate::config::get("static_dns").and_then(|s| parse_ipv4(s.trim())) {
+            dns::set_server(d);
+        }
+        crate::kprintln!("[npk] net: static IP {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        return;
+    }
+    crate::kprintln!("[npk] net: link changed -> requesting DHCP lease...");
+    let _ = dhcp::configure();
+}
+
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut it = s.split('.');
+    let a = it.next()?.parse::<u8>().ok()?;
+    let b = it.next()?.parse::<u8>().ok()?;
+    let c = it.next()?.parse::<u8>().ok()?;
+    let d = it.next()?.parse::<u8>().ok()?;
+    if it.next().is_some() { return None; }
+    Some([a, b, c, d])
 }
 
 /// Network stack statistics

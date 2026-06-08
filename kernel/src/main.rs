@@ -187,6 +187,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         if net::dhcp::configure() {
             vga::show_status(b"DHCP configured");
         }
+        // Seed the active-interface tracker so the periodic link tick only
+        // re-configures on a real change (cable pulled, WiFi associated).
+        net::seed_active();
 
         kprintln!("[npk] Syncing time (NTP)...");
         if net::ntp::sync_via_dns("pool.ntp.org") {

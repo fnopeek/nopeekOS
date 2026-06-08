@@ -72,6 +72,54 @@ pub fn wasm_nic_link_up() -> bool {
     wasm_nic_available() && WASM_NIC.lock().link_up
 }
 
+// ── Wired link-state cache + active-NIC selection ─────────────────────────
+// The wired NICs only report carrier live via an MMIO read (intel STATUS.LU) or
+// a USB control transfer (rtl8153 PHY BMSR) — too costly for the dispatch path,
+// which runs in IRQ context. refresh_link_state() (Core 0, ~1 Hz) reads them
+// into this cache; dispatch + active() read the cache, staying cheap + IRQ-safe.
+static INTEL_LINK: AtomicBool = AtomicBool::new(false);
+static RTL_LINK: AtomicBool = AtomicBool::new(false);
+
+/// Refresh the cached wired link state. Core 0 only (~1 Hz): does an MMIO read
+/// (intel) + a USB control transfer (rtl8153), neither safe from an IRQ.
+pub fn refresh_link_state() {
+    INTEL_LINK.store(intel_nic::link_up(), Ordering::Relaxed);
+    RTL_LINK.store(rtl8153::link_up(), Ordering::Relaxed);
+}
+
+/// The active interface, picked by REAL link state — wired (LAN) first, then
+/// WiFi: the conventional priority. Only if nothing reports a live link do we
+/// fall back to a merely-present NIC, so the stack is never dead while a driver
+/// is still negotiating. Replaces the old "WiFi wins when up" inversion, which
+/// existed only because the wired NICs couldn't report live carrier (so a
+/// yanked cable kept stealing traffic).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Active { Intel, Rtl, Wasm, Virtio, None }
+
+pub fn active() -> Active {
+    // 1) a real, live link — LAN first, then WiFi
+    if intel_nic::is_available() && INTEL_LINK.load(Ordering::Relaxed) { return Active::Intel; }
+    if rtl8153::is_available() && RTL_LINK.load(Ordering::Relaxed) { return Active::Rtl; }
+    if wasm_nic_link_up() { return Active::Wasm; }
+    // 2) no confirmed link anywhere — fall back to whatever is present, LAN first
+    if intel_nic::is_available() { return Active::Intel; }
+    if rtl8153::is_available() { return Active::Rtl; }
+    if wasm_nic_available() { return Active::Wasm; }
+    if virtio_net::is_available() { return Active::Virtio; }
+    Active::None
+}
+
+/// A cheap numeric id of the active interface, for change detection.
+pub fn active_id() -> u8 {
+    match active() {
+        Active::None => 0,
+        Active::Intel => 1,
+        Active::Rtl => 2,
+        Active::Wasm => 3,
+        Active::Virtio => 4,
+    }
+}
+
 /// WASM driver calls this to submit a received frame to the kernel network stack
 pub fn wasm_nic_submit_rx(frame: &[u8]) {
     if frame.len() > MTU { return; }
@@ -91,66 +139,43 @@ pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
 }
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
-    // An associated + keyed WiFi link wins: the user explicitly brought it up,
-    // and a wired NIC may report stale-available (USB unplug isn't detected),
-    // which would otherwise keep swallowing DHCP. Wired is used only when WiFi
-    // is down.
-    if wasm_nic_link_up() {
-        let mut nic = WASM_NIC.lock();
-        let len = frame.len().min(MTU);
-        nic.tx_buf[..len].copy_from_slice(&frame[..len]);
-        nic.tx_len = len as u16;
-        Ok(())
-    } else if intel_nic::is_available() {
-        intel_nic::send(frame)
-    } else if rtl8153::is_available() {
-        rtl8153::send(frame)
-    } else if wasm_nic_available() {
-        let mut nic = WASM_NIC.lock();
-        let len = frame.len().min(MTU);
-        nic.tx_buf[..len].copy_from_slice(&frame[..len]);
-        nic.tx_len = len as u16;
-        Ok(())
-    } else {
-        virtio_net::send(frame)
+    match active() {
+        Active::Wasm => {
+            let mut nic = WASM_NIC.lock();
+            let len = frame.len().min(MTU);
+            nic.tx_buf[..len].copy_from_slice(&frame[..len]);
+            nic.tx_len = len as u16;
+            Ok(())
+        }
+        Active::Intel => intel_nic::send(frame),
+        Active::Rtl => rtl8153::send(frame),
+        Active::Virtio | Active::None => virtio_net::send(frame),
     }
 }
 
 pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
-    if wasm_nic_link_up() {
-        let mut nic = WASM_NIC.lock();
-        if nic.rx_len == 0 { return None; }
-        let len = nic.rx_len as usize;
-        buf[..len].copy_from_slice(&nic.rx_buf[..len]);
-        nic.rx_len = 0;
-        Some(len)
-    } else if intel_nic::is_available() {
-        intel_nic::recv(buf)
-    } else if rtl8153::is_available() {
-        rtl8153::recv(buf)
-    } else if wasm_nic_available() {
-        let mut nic = WASM_NIC.lock();
-        if nic.rx_len == 0 { return None; }
-        let len = nic.rx_len as usize;
-        buf[..len].copy_from_slice(&nic.rx_buf[..len]);
-        nic.rx_len = 0;
-        Some(len)
-    } else {
-        virtio_net::recv(buf)
+    match active() {
+        Active::Wasm => {
+            let mut nic = WASM_NIC.lock();
+            if nic.rx_len == 0 { return None; }
+            let len = nic.rx_len as usize;
+            buf[..len].copy_from_slice(&nic.rx_buf[..len]);
+            nic.rx_len = 0;
+            Some(len)
+        }
+        Active::Intel => intel_nic::recv(buf),
+        Active::Rtl => rtl8153::recv(buf),
+        Active::Virtio | Active::None => virtio_net::recv(buf),
     }
 }
 
 pub fn mac() -> Option<[u8; 6]> {
-    if wasm_nic_link_up() {
-        Some(WASM_NIC.lock().mac_addr)
-    } else if intel_nic::is_available() {
-        intel_nic::mac()
-    } else if rtl8153::is_available() {
-        rtl8153::mac()
-    } else if wasm_nic_available() {
-        Some(WASM_NIC.lock().mac_addr)
-    } else {
-        virtio_net::mac()
+    match active() {
+        Active::Wasm => Some(WASM_NIC.lock().mac_addr),
+        Active::Intel => intel_nic::mac(),
+        Active::Rtl => rtl8153::mac(),
+        Active::Virtio => virtio_net::mac(),
+        Active::None => None,
     }
 }
 
@@ -176,31 +201,27 @@ pub struct IfaceInfo {
 /// is marked primary and carries the global IPv4/Gateway/DNS config.
 pub fn list() -> alloc::vec::Vec<IfaceInfo> {
     let mut v = alloc::vec::Vec::new();
-    // An associated WiFi link is the primary interface (carries the global IP),
-    // overriding a stale-available wired NIC.
-    let wifi_up = wasm_nic_available() && wasm_nic_link_up();
-    let mut primary_taken = false;
-
+    // `primary` is the interface the dispatch actually uses (active()), and
+    // `link_up` is the cached REAL carrier — so a pulled cable shows DOWN and
+    // the WiFi link takes over, matching what the stack does.
+    let act = active();
     if intel_nic::is_available() {
         if let Some(mac) = intel_nic::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: !primary_taken && !wifi_up, link_up: true });
-            primary_taken = true;
+            v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: act == Active::Intel, link_up: INTEL_LINK.load(Ordering::Relaxed) });
         }
     }
     if rtl8153::is_available() {
         if let Some(mac) = rtl8153::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: !primary_taken && !wifi_up, link_up: true });
-            primary_taken = true;
+            v.push(IfaceInfo { name: "eth", driver: "Realtek RTL8153 (USB)", mac, primary: act == Active::Rtl, link_up: RTL_LINK.load(Ordering::Relaxed) });
         }
     }
     if wasm_nic_available() {
         let mac = WASM_NIC.lock().mac_addr;
-        v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: wifi_up || !primary_taken, link_up: wasm_nic_link_up() });
-        primary_taken = true;
+        v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: act == Active::Wasm, link_up: wasm_nic_link_up() });
     }
     if virtio_net::is_available() {
         if let Some(mac) = virtio_net::mac() {
-            v.push(IfaceInfo { name: "eth", driver: "virtio-net", mac, primary: !primary_taken, link_up: true });
+            v.push(IfaceInfo { name: "eth", driver: "virtio-net", mac, primary: act == Active::Virtio, link_up: true });
         }
     }
     v
