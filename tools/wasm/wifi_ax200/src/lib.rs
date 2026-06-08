@@ -2109,7 +2109,7 @@ impl Ax200 {
         loop {
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
-            self.service_rx(|c, g, rb| {
+            let rx_frames = self.service_rx(|c, g, rb| {
                 if c == REPLY_RX_MPDU_CMD && g == 0 {
                     match Self::rx_classify(rb, &our_mac, &mut rxbuf) {
                         RxKind::Eapol(n) => {
@@ -2137,11 +2137,13 @@ impl Ax200 {
                 true
             });
             // TX: send every Ethernet frame the IP stack queued (DHCP, ARP, …).
+            let mut tx_any = false;
             loop {
                 let n = host::netdev_poll_tx(&mut txbuf);
                 if n == 0 {
                     break;
                 }
+                tx_any = true;
                 if tx_log < 12 {
                     host::print("[ax200] data TX ← IP stack (len ");
                     host::print_dec(n as u32);
@@ -2158,7 +2160,12 @@ impl Ax200 {
             if clen > 0 {
                 self.handle_wifi_cmd(&cmd[..clen as usize]);
             }
-            host::sleep_ms(20);
+            // Adaptive pacing: while frames are flowing, poll again in 1 ms so
+            // the RX ring is drained before it overflows (→ packet loss) and
+            // latency stays low; when idle, sleep 20 ms so we yield the core to
+            // the rest of the system (npk_sleep yields the fiber either way).
+            let busy = rx_frames > 0 || tx_any || clen > 0;
+            host::sleep_ms(if busy { 1 } else { 20 });
         }
     }
 
@@ -2399,7 +2406,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.31.0 — auth/assoc retry 3x + gate READY\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.32.0 — adaptive RX/TX pacing\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
