@@ -1065,11 +1065,14 @@ impl Ax200 {
     }
 
     // ── iwl_mvm_power_update_device (mvm/power.c) ─────────────────
-    // Device power table. The default power scheme is BPS (not CAM), so power
-    // save is enabled; no other flags apply outside D3.
+    // Device power table. We run CAM (Continuously Active Mode): flags = 0, no
+    // POWER_SAVE_ENA — the radio never sleeps. Linux's default BPS enables device
+    // power save, but it relies on dynamic-PS / the per-MAC PM management to wake
+    // and retrieve AP-buffered frames; we don't implement that, so with PS on the
+    // firmware sleeps unpredictably and the AP buffers our traffic, delivering it
+    // in multi-second batches (the latency-spike sawtooth). CAM = lowest latency.
     fn send_power(&mut self) {
-        let mut cmd = [0u8; DEVICE_POWER_CMD_LEN];
-        put_u16(&mut cmd, 0, DEVICE_POWER_FLAGS_POWER_SAVE_ENA);
+        let cmd = [0u8; DEVICE_POWER_CMD_LEN]; // flags = 0 → CAM (ps_disabled)
         self.send_hcmd(0, POWER_TABLE_CMD, &cmd);
         self.pump_rx(20);
     }
@@ -2519,7 +2522,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.36.0 — 802.11 sequence numbers + faster RX poll\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.37.0 — CAM (no power-save) — kills latency spikes\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
