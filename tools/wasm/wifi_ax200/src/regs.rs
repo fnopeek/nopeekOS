@@ -593,6 +593,32 @@ pub const MGMT_QUEUE_CB_SIZE: u32 = 1;
 pub const TFD_QUEUE_BC_SIZE: usize = 256 + 64;
 pub const BC_TBL_BYTES: usize = TFD_QUEUE_BC_SIZE * 2; // 640
 
+// ── Rate scaling (TLC offload) — TLC_MNG_CONFIG_CMD (DATA_PATH_GROUP/0x0F) ──
+// struct iwl_tlc_config_cmd_v4 (fw/api/rs.h, TLC_MNG_CONFIG_CMD_API_S_VER_4),
+// 28 bytes. Our FW reports cmd_ver=4. Without this command the firmware never
+// rate-scales and every data frame goes out at the fixed host rate (1 Mbit CCK,
+// tx_raw); with it the firmware picks the best per-frame rate from the station's
+// advertised rate set (iwl_mvm_rs_fw_rate_init, mvm/rs-fw.c).
+pub const TLC_MNG_CONFIG_CMD: u8 = 0x0F;
+pub const TLC_CMD_LEN: usize = 28;
+pub const TLC_OFF_STA_ID: usize = 0;       // u8
+pub const TLC_OFF_MAX_CH_WIDTH: usize = 4; // u8 (enum iwl_tlc_mng_cfg_cw)
+pub const TLC_OFF_MODE: usize = 5;         // u8 (enum iwl_tlc_mng_cfg_mode)
+pub const TLC_OFF_CHAINS: usize = 6;       // u8 (chain A|B mask, = ANT_AB)
+pub const TLC_OFF_SGI: usize = 7;          // u8 sgi_ch_width_supp
+pub const TLC_OFF_FLAGS: usize = 8;        // __le16
+pub const TLC_OFF_NON_HT_RATES: usize = 10; // __le16
+pub const TLC_OFF_HT_RATES: usize = 12;    // __le16[2][3] (12 B, 0 for legacy)
+pub const TLC_OFF_MAX_MPDU: usize = 24;    // __le16
+pub const TLC_OFF_MAX_TXOP: usize = 26;    // __le16
+pub const TLC_CH_WIDTH_20MHZ: u8 = 0;      // IWL_TLC_MNG_CH_WIDTH_20MHZ
+pub const TLC_MODE_NON_HT: u8 = 0;         // IWL_TLC_MNG_MODE_NON_HT
+// Supported legacy-rate bitmap: BIT(hw_value) per rate (IWL_RATE_*_INDEX). Full
+// 2.4 GHz 11g = CCK 1/2/5.5/11 (bits 0-3) + OFDM 6..54 (bits 4-11) = 0x0FFF;
+// 5 GHz is OFDM-only (no CCK) = bits 4-11 = 0x0FF0.
+pub const TLC_NON_HT_RATES_24: u16 = 0x0FFF;
+pub const TLC_NON_HT_RATES_5: u16 = 0x0FF0;
+
 // ── Stage 5c: gen2 TX data path (send an 802.11 frame) ───────────
 // TX_CMD = 0x1c. The device TX command is a SHORT 4-byte iwl_cmd_header
 // (cmd, group_id=0, sequence) followed by iwl_tx_cmd_v9 (TX_CMD cmd_ver=9) and
