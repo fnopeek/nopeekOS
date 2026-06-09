@@ -77,6 +77,12 @@ const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 // worst-case footprint is small; the guest browser uses its own (microvm) TCP.
 const RECV_BUF_SIZE: usize = 8 * 1024 * 1024;
 const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
+// ACK coalescing: send one ACK per N in-order segments (a held ACK is still
+// flushed by the 40 ms timer). 8 ≈ one ACK per ~11.7 KB at 1460 MSS, cutting
+// our TX-ACK packet rate ~4× (38500→9600/s at 850 Mbit) — fewer packets through
+// the single-threaded path (QEMU slirp) and less work on the busy-spin RX core.
+// Safe now that timestamps give the sender a per-segment RTT regardless.
+const ACK_COALESCE: u16 = 8;
 
 // Out-of-order receive counters (diagnostic). `AHEAD` = a segment past rcv_nxt
 // (a gap → the sender will have to retransmit); `BEHIND` = a duplicate at/below
@@ -151,6 +157,8 @@ struct TcpConn {
     // Delayed ACK
     ack_pending: bool,
     ack_tick: u64,
+    // In-order segments received since our last ACK (ACK-coalescing counter).
+    acks_held: u16,
 
     // Connection complete flag
     established: bool,
@@ -213,6 +221,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         last_send_tick: 0,
         ack_pending: false,
         ack_tick: 0,
+        acks_held: 0,
         established: false,
         closed: false,
         error: false,
@@ -289,6 +298,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         last_send_tick: 0,
         ack_pending: false,
         ack_tick: 0,
+        acks_held: 0,
         established: false,
         closed: false,
         error: false,
@@ -362,6 +372,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         last_send_tick: 0,
         ack_pending: false,
         ack_tick: 0,
+        acks_held: 0,
         established: false,
         closed: false,
         error: false,
@@ -434,6 +445,7 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
         let w = recv_window(conn);
         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
         conn.ack_pending = false;
+        conn.acks_held = 0;
     }
 
     Ok(available)
@@ -647,15 +659,14 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
                     TCP_MAX_RXBUF.fetch_max(conn.recv_buf.len(),
                         core::sync::atomic::Ordering::Relaxed);
-                    // Delayed ACK (RFC 1122): ACK every SECOND in-order segment,
-                    // not every one — halves the send_segment/s on the RX core. A
-                    // lone pending ACK is flushed by the 40 ms timer in
-                    // tick_connections. (v0.219.8's ACK-every-segment did NOT
-                    // help throughput — flat ~580 Mbit — so we keep the cheaper
-                    // delayed ACK.)
-                    if conn.ack_pending {
+                    // Coalesced ACK: one ACK per ACK_COALESCE in-order segments.
+                    // A lone held ACK is flushed by the 40 ms timer in
+                    // tick_connections so a trickle/idle never strands the sender.
+                    conn.acks_held += 1;
+                    if conn.acks_held >= ACK_COALESCE {
                         let w = recv_window(conn);
                         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                        conn.acks_held = 0;
                         conn.ack_pending = false;
                     } else {
                         conn.ack_pending = true;
@@ -736,6 +747,7 @@ pub fn tick_connections() {
             let w = recv_window(slot);
             send_seg(slot, slot.snd_nxt, slot.rcv_nxt, ACK, w, &[]);
             slot.ack_pending = false;
+            slot.acks_held = 0;
         }
 
         // SYN retry
