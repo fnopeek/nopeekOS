@@ -96,10 +96,12 @@ fn do_http_request(args: &str, use_tls: bool) {
     // legacy buffered path (capped at HTTP_MAX_RESPONSE = 128 KB)
     // because we never want to encourage cleartext downloads of
     // anything large enough to need streaming.
-    if use_tls && (flags.discard || store_as.is_some()) {
+    if flags.discard || store_as.is_some() {
         // Sink for the streamed body. With -d we DON'T open npkFS — bytes are
-        // counted + thrown away, so this measures the pure net+TLS throughput
+        // counted + thrown away, so this measures the pure net throughput
         // and rules the disk OUT as a bottleneck. Otherwise stream to npkFS.
+        // Works for both https (TLS) and http (plain) — plain http sidesteps
+        // our minimal TLS for arbitrary hosts and is a cleaner speed test.
         let mut writer: Option<(String, crate::npkfs::fs::StreamingWriter)> = if flags.discard {
             if !flags.silent {
                 kprintln!("[npk] Streaming to RAM (-d, discard) — pure throughput, no disk");
@@ -127,9 +129,8 @@ fn do_http_request(args: &str, use_tls: bool) {
         let start_tick = crate::interrupts::ticks();
         let mut last_tick = start_tick;
         let max_size = usize::MAX;
-        let stream_result = https_get_streaming(
-            host, path, max_size,
-            &mut |chunk: &[u8]| -> Result<(), &'static str> {
+        let stream_result = {
+            let mut sink = |chunk: &[u8]| -> Result<(), &'static str> {
                 if first {
                     kprintln!("[npk]   first body bytes ({} B)", chunk.len());
                     first = false;
@@ -148,8 +149,13 @@ fn do_http_request(args: &str, use_tls: bool) {
                     last_tick = now;
                 }
                 Ok(())
-            },
-        );
+            };
+            if use_tls {
+                https_get_streaming(host, path, max_size, &mut sink)
+            } else {
+                http_get_streaming(host, path, max_size, &mut sink)
+            }
+        };
         if let Err(e) = stream_result {
             kprintln!("[npk] download failed: {}", e);
             return;
@@ -754,6 +760,174 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
             Err(_) => return Err("recv error"),
         }
     }
+}
+
+/// Plain-TCP recv with polling (no TLS). Analog of `tls_recv_poll`.
+fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+    let start = crate::interrupts::ticks();
+    loop {
+        crate::net::poll();
+        match crate::net::tcp::recv(handle, buf) {
+            Ok(0) => {
+                if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
+                    return Err("recv timeout");
+                }
+                core::hint::spin_loop();
+            }
+            Ok(n) => return Ok(n),
+            Err(_) => return Err("recv error"),
+        }
+    }
+}
+
+/// Parse a Location into (host, path) for the PLAIN-HTTP path: accepts
+/// `http://…` and absolute-path; rejects https upgrade (our TLS is minimal).
+fn parse_http_url(loc: &str, current_host: &str) -> Result<(String, String), &'static str> {
+    let loc = loc.trim();
+    if let Some(rest) = loc.strip_prefix("http://") {
+        let (h, p) = match rest.find('/') { Some(i) => (&rest[..i], &rest[i..]), None => (rest, "/") };
+        if h.is_empty() { return Err("redirect: empty host"); }
+        Ok((String::from(h), String::from(p)))
+    } else if loc.starts_with('/') {
+        Ok((String::from(current_host), String::from(loc)))
+    } else if loc.starts_with("https://") {
+        Err("redirect to https — our TLS is minimal; use a direct-http mirror")
+    } else {
+        Err("redirect: unsupported Location")
+    }
+}
+
+/// Plain-HTTP streaming GET (no TLS) — for throughput tests + plain-http
+/// mirrors (our TLS only handshakes with a couple of CAs, so arbitrary HTTPS
+/// fails; plain HTTP sidesteps it AND is a cleaner pure-net speed test).
+/// Follows up to 4 http→http (or absolute-path) redirects. Requires
+/// Content-Length (true for static file mirrors); rejects chunked.
+pub fn http_get_streaming(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<usize, &'static str> {
+    let mut cur_host = String::from(host);
+    let mut cur_path = String::from(path);
+    for _ in 0..5 {
+        let mut total: usize = 0;
+        let resp = http_get_once(&cur_host, &cur_path, max_size,
+            &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                on_chunk(chunk)?;
+                total = total.saturating_add(chunk.len());
+                Ok(())
+            })?;
+        match resp.status {
+            200..=299 => {
+                if total == 0 { return Err("empty body"); }
+                return Ok(total);
+            }
+            301 | 302 | 303 | 307 | 308 => {
+                let loc = resp.location.ok_or("redirect without Location")?;
+                let (h, p) = parse_http_url(&loc, &cur_host)?;
+                cur_host = h;
+                cur_path = p;
+            }
+            _ => return Err("HTTP non-2xx response"),
+        }
+    }
+    Err("too many redirects")
+}
+
+/// One plain-HTTP round-trip (no TLS, no redirect follow). Mirrors
+/// `https_get_once` but over raw TCP. Content-Length bodies only.
+fn http_get_once(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<HttpResponse, &'static str> {
+    let ip = match parse_ip(host) {
+        Some(ip) => ip,
+        None => crate::net::dns::resolve(host).ok_or("DNS resolution failed")?,
+    };
+    kprintln!("[npk]   {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
+    let gw = crate::net::ipv4::gateway();
+    crate::net::arp::request(gw);
+    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+
+    kprintln!("[npk]   TCP connect {}:80 ...", host);
+    let handle = crate::net::tcp::connect(ip, 80).map_err(|_| "TCP connect failed")?;
+
+    let request = alloc::format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    if crate::net::tcp::send(handle, request.as_bytes()).is_err() {
+        let _ = crate::net::tcp::close(handle);
+        return Err("HTTP send failed");
+    }
+
+    let mut raw = alloc::vec::Vec::new();
+    let mut buf = [0u8; 17000];
+    let mut header_end = None;
+    loop {
+        match tcp_recv_poll(handle, &mut buf) {
+            Ok(0) => continue,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = Some(pos);
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+        if raw.len() > 32_768 {
+            let _ = crate::net::tcp::close(handle);
+            return Err("headers too large");
+        }
+    }
+    let hdr_end = match header_end {
+        Some(p) => p,
+        None => { let _ = crate::net::tcp::close(handle); return Err("no HTTP headers received"); }
+    };
+    let body_start = hdr_end + 4;
+    let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
+    let status = parse_status_code(hdr_str).unwrap_or(0);
+    let location = parse_header_value(hdr_str, "location").map(String::from);
+
+    if (300..400).contains(&status) {
+        match &location {
+            Some(l) => kprintln!("[npk]   HTTP {} → {}", status, l),
+            None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
+        }
+        let _ = crate::net::tcp::close(handle);
+        return Ok(HttpResponse { status, location });
+    }
+    kprintln!("[npk]   HTTP {} — receiving body", status);
+
+    let cl = match parse_header_value(hdr_str, "content-length").and_then(|v| v.trim().parse::<usize>().ok()) {
+        Some(c) => c,
+        None => { let _ = crate::net::tcp::close(handle); return Err("plain http needs Content-Length (chunked unsupported)"); }
+    };
+    let cap = core::cmp::min(cl, max_size);
+    let leading = &raw[body_start..];
+    let mut delivered: usize = 0;
+    let n_leading = core::cmp::min(leading.len(), cap);
+    if n_leading > 0 {
+        on_chunk(&leading[..n_leading])?;
+        delivered += n_leading;
+    }
+    while delivered < cap {
+        match tcp_recv_poll(handle, &mut buf) {
+            Ok(0) => continue,
+            Ok(n) => {
+                let take = core::cmp::min(n, cap - delivered);
+                on_chunk(&buf[..take])?;
+                delivered += take;
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = crate::net::tcp::close(handle);
+    Ok(HttpResponse { status, location })
 }
 
 /// Parse HTTP status code from first header line.
