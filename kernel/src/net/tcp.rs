@@ -49,9 +49,12 @@ const MSS: u16 = 1460; // standard Ethernet MSS
 const INITIAL_WINDOW: u16 = 65535;
 // TCP Window Scaling (RFC 7323). Without it the window is capped at 64 KiB and
 // throughput = 64 KiB / RTT (~4 MB/s on a CDN regardless of link/NIC — the
-// observed global slowness). We advertise `free >> OUR_WSCALE`; with a 1 MiB
-// receive buffer the scaled field still fits 16 bits (1 MiB >> 5 = 32768).
-const OUR_WSCALE: u8 = 5;
+// observed global slowness). We advertise `free >> OUR_WSCALE`.
+// WSCALE 7 so the 16-bit window field can express the full 4 MiB buffer
+// (4 MiB >> 7 = 32768 ≤ 65535). At WSCALE 5 a 1 MiB window capped a single
+// flow at ~727 Mbit (1 MiB / ~11 ms RTT) — measured 585/710 Mbit vs 857 native;
+// the receive window was the bottleneck, not the link.
+const OUR_WSCALE: u8 = 7;
 
 /// Current receive window for the TCP window field. Scaled by OUR_WSCALE once
 /// window scaling has been negotiated, else the raw free space (≤ 64 KiB).
@@ -65,10 +68,13 @@ fn recv_window(conn: &TcpConn) -> u16 {
 }
 const MAX_RETRIES: u8 = 3;
 const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
-// 1 MiB receive buffer → ~1 MiB window with scaling → fills the bandwidth-delay
-// product for ~gigabit at typical RTT. Grown lazily (VecDeque::new), so an idle
-// connection costs nothing and only an actively-bursting one approaches 1 MiB.
-const RECV_BUF_SIZE: usize = 1024 * 1024;
+// 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
+// product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
+// higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
+// connection costs nothing and only an actively-bursting one approaches 4 MiB.
+// Host TCP only ever has a handful of live connections (OTA/https/dns), so the
+// worst-case footprint is small; the guest browser uses its own (microvm) TCP.
+const RECV_BUF_SIZE: usize = 4 * 1024 * 1024;
 const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
 
 // TCP flags
