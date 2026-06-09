@@ -63,6 +63,35 @@ pub fn poll() {
     crate::shade::poll_render();
 }
 
+/// A WASM NIC driver delivers a received Ethernet frame straight into the IP
+/// stack from its own (worker-core) fiber context — the Linux NAPI topology:
+/// drain → stack in one context, no relay-ring + Core-0 hop (that double poll
+/// was the WiFi latency/throughput bottleneck). Uses the single-drainer POLLING
+/// guard so it never races Core 0's net::poll(). If Core 0 is mid-drain we can't
+/// take the guard → spill to the fallback ring (Core 0 picks it up next pass),
+/// never dropping. Any frames already spilled there are flushed first so order
+/// is preserved.
+pub fn wasm_deliver_rx(frame: &[u8]) {
+    if frame.len() < 14 {
+        return;
+    }
+    if POLLING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        let mut buf = [0u8; netdev::MTU];
+        while let Some(len) = netdev::wasm_nic_poll_rx(&mut buf) {
+            if len >= 14 {
+                eth::handle_frame(&buf[..len]);
+            }
+        }
+        eth::handle_frame(frame);
+        POLLING.store(false, Ordering::Release);
+    } else {
+        netdev::wasm_nic_submit_rx(frame);
+    }
+}
+
 /// Tracks the active interface so a change (cable pulled/plugged, WiFi
 /// associated) triggers a fresh IP config. 0xff = not yet seeded.
 static LAST_ACTIVE: AtomicU8 = AtomicU8::new(0xff);

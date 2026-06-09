@@ -52,10 +52,13 @@ impl<const N: usize> Ring<N> {
     fn clear(&mut self) { self.head = 0; self.tail = 0; }
 }
 
-// RX absorbs the driver's burst between Core-0 net::poll drains; TX queues the
-// kernel's frames for the driver to pull. ~72 KiB total.
-const RX_RING: usize = 32;
-const TX_RING: usize = 16;
+// RX is now only a FALLBACK: the driver normally delivers each frame straight
+// into the IP stack from its own fiber (net::wasm_deliver_rx, the NAPI topology)
+// and only spills to this ring when Core 0 holds the drain guard. TX queues the
+// kernel's frames for the driver to pull — deep enough to absorb a bulk-upload
+// ack/segment burst between 1 ms driver polls.
+const RX_RING: usize = 64;
+const TX_RING: usize = 64;
 
 struct WasmNic {
     mac_addr: [u8; 6],
@@ -117,6 +120,13 @@ pub fn wasm_nic_link_up() -> bool {
 // into this cache; dispatch + active() read the cache, staying cheap + IRQ-safe.
 static INTEL_LINK: AtomicBool = AtomicBool::new(false);
 
+/// Cached NIC preference: true = prefer WiFi (wlan), false = prefer wired (LAN).
+/// Refreshed by refresh_link_state() (Core 0, ~1 Hz) from config `net_prefer`,
+/// so active() stays cheap + IRQ-safe. Default = wired (the usual convention).
+/// Whichever side is preferred wins ONLY when it has a usable link; otherwise we
+/// fall back to the other interface if it has one.
+static PREFER_WIFI: AtomicBool = AtomicBool::new(false);
+
 /// Refresh the cached wired link state. Core 0 only (~1 Hz). ONLY the intel NIC
 /// is polled live — a cheap, safe MMIO STATUS.LU read. The rtl8153 carrier is
 /// NOT polled: reading it needs a USB control transfer, which takes the xHCI NIC
@@ -126,21 +136,40 @@ static INTEL_LINK: AtomicBool = AtomicBool::new(false);
 /// from presence + the WiFi link instead — see active().
 pub fn refresh_link_state() {
     INTEL_LINK.store(intel_nic::link_up(), Ordering::Relaxed);
+    PREFER_WIFI.store(
+        crate::config::get("net_prefer")
+            .map(|v| v.trim().eq_ignore_ascii_case("wifi"))
+            .unwrap_or(false),
+        Ordering::Relaxed,
+    );
 }
 
-/// The active interface. A wired NIC with a real, live carrier wins (intel reads
-/// STATUS.LU live). An associated WiFi link is then preferred over a USB-LAN NIC
-/// whose carrier we can't safely probe — so a yanked USB-LAN cable doesn't
-/// strand traffic on a dead interface, while a live wired desktop NIC still
-/// wins. Only if nothing of those applies do we fall back to mere presence.
+/// The active interface, honouring the `net_prefer` config (cached in
+/// PREFER_WIFI). The preferred side (wired by default, or WiFi) wins ONLY when it
+/// has a usable link; if it has none we fall back to the other interface if that
+/// one does. "Usable link" = intel STATUS.LU live (read live), or a USB-LAN
+/// (rtl8153) present (its carrier can't be safely probed, so presence is the best
+/// signal), or WiFi associated + keyed. If nothing has a usable link we fall back
+/// to mere presence.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Active { Intel, Rtl, Wasm, Virtio, None }
 
 pub fn active() -> Active {
-    if intel_nic::is_available() && INTEL_LINK.load(Ordering::Relaxed) { return Active::Intel; }
-    if wasm_nic_link_up() { return Active::Wasm; }
+    let intel_up = intel_nic::is_available() && INTEL_LINK.load(Ordering::Relaxed);
+    let rtl_present = rtl8153::is_available();
+    let wifi_up = wasm_nic_link_up();
+
+    if PREFER_WIFI.load(Ordering::Relaxed) {
+        if wifi_up { return Active::Wasm; }
+        if intel_up { return Active::Intel; }
+        if rtl_present { return Active::Rtl; }
+    } else {
+        if intel_up { return Active::Intel; }
+        if rtl_present { return Active::Rtl; }
+        if wifi_up { return Active::Wasm; }
+    }
+    // Nothing with a usable link in the preferred order — fall back to presence.
     if intel_nic::is_available() { return Active::Intel; }
-    if rtl8153::is_available() { return Active::Rtl; }
     if wasm_nic_available() { return Active::Wasm; }
     if virtio_net::is_available() { return Active::Virtio; }
     Active::None
@@ -166,6 +195,13 @@ pub fn wasm_nic_submit_rx(frame: &[u8]) {
 /// WASM driver calls this to get a frame to transmit
 pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
     WASM_NIC.lock().tx.pop(buf)
+}
+
+/// Pop the oldest fallback-RX frame, if any. Used by net::wasm_deliver_rx to
+/// flush frames that spilled to the ring (while Core 0 held the drain guard)
+/// before the freshly-delivered one — preserving FIFO order.
+pub fn wasm_nic_poll_rx(buf: &mut [u8; MTU]) -> Option<usize> {
+    WASM_NIC.lock().rx.pop(buf)
 }
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
