@@ -151,6 +151,13 @@ struct TcpConn {
     // window). Our own advertised window is scaled by OUR_WSCALE.
     wscale_ok: bool,
     snd_wscale: u8,
+
+    // TCP Timestamps (RFC 7323). `ts_ok` once both SYNs carried the option;
+    // `ts_recent` = the peer's most recent in-order TSval, echoed as our TSecr
+    // so the sender measures RTT per-segment (robust to our ACK jitter) →
+    // accurate RTO → no spurious retransmits.
+    ts_ok: bool,
+    ts_recent: u32,
 }
 
 static CONNECTIONS: Mutex<[Option<TcpConn>; MAX_CONNECTIONS]> = Mutex::new(
@@ -200,6 +207,8 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         error: false,
         wscale_ok: false,
         snd_wscale: 0,
+        ts_ok: false,
+        ts_recent: 0,
     };
 
     // Find free slot
@@ -274,6 +283,8 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         error: false,
         wscale_ok: false,
         snd_wscale: 0,
+        ts_ok: false,
+        ts_recent: 0,
     };
 
     let mut conns = CONNECTIONS.lock();
@@ -345,6 +356,8 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         error: false,
         wscale_ok: false,
         snd_wscale: 0,
+        ts_ok: false,
+        ts_recent: 0,
     };
     Ok(())
 }
@@ -356,19 +369,12 @@ pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     if conn.state != State::Established { return Err(TcpError::NotConnected); }
 
     // Send in MSS-sized chunks immediately (no Nagle)
-    let remote_ip = conn.remote_ip;
-    let remote_port = conn.remote_port;
-    let local_port = conn.local_port;
-
     for chunk in data.chunks(MSS as usize) {
         let seq = conn.snd_nxt;
         conn.snd_nxt = conn.snd_nxt.wrapping_add(chunk.len() as u32);
         conn.last_send_tick = crate::interrupts::ticks();
-
-        send_segment(
-            remote_ip, local_port, remote_port,
-            seq, conn.rcv_nxt, ACK | PSH, recv_window(conn), chunk,
-        );
+        let w = recv_window(conn);
+        send_seg(conn, seq, conn.rcv_nxt, ACK | PSH, w, chunk);
     }
 
     Ok(())
@@ -414,10 +420,8 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
     // so this is one bare ACK per record — normal ACK density, not
     // a flood.
     if available > 0 && conn.state == State::Established {
-        send_segment(
-            conn.remote_ip, conn.local_port, conn.remote_port,
-            conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-        );
+        let w = recv_window(conn);
+        send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
         conn.ack_pending = false;
     }
 
@@ -460,11 +464,7 @@ pub fn close(handle: usize) -> Result<(), TcpError> {
         let seq = conn.snd_nxt;
         conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
         conn.state = State::FinWait1;
-
-        send_segment(
-            conn.remote_ip, conn.local_port, conn.remote_port,
-            seq, conn.rcv_nxt, FIN | ACK, 0, &[],
-        );
+        send_seg(conn, seq, conn.rcv_nxt, FIN | ACK, 0, &[]);
     }
     drop(conns);
 
@@ -596,12 +596,17 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.snd_wscale = ws;
                     conn.wscale_ok = true;
                 }
+                // Timestamps active iff the SYN-ACK echoes the option (RFC 7323).
+                // Seed ts_recent with the peer's TSval so our handshake ACK
+                // already carries a valid TSecr.
+                if let Some(ts) = parse_ts(data, data_offset) {
+                    conn.ts_ok = true;
+                    conn.ts_recent = ts;
+                }
 
                 // Send ACK with full window
-                send_segment(
-                    conn.remote_ip, conn.local_port, conn.remote_port,
-                    conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-                );
+                let w = recv_window(conn);
+                send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
             }
         }
 
@@ -616,6 +621,13 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
             // Data processing
             if !payload.is_empty() {
                 if seq == conn.rcv_nxt {
+                    // RFC 7323: advance ts_recent to this in-order segment's
+                    // TSval so our echoed TSecr gives the sender a fresh RTT.
+                    if conn.ts_ok {
+                        if let Some(ts) = parse_ts(data, data_offset) {
+                            conn.ts_recent = ts;
+                        }
+                    }
                     let space = RECV_BUF_SIZE - conn.recv_buf.len();
                     let copy = payload.len().min(space);
                     // Bulk append — NOT byte-by-byte push_back (that was ~87M
@@ -629,10 +641,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // help throughput — flat ~580 Mbit — so we keep the cheaper
                     // delayed ACK.)
                     if conn.ack_pending {
-                        send_segment(
-                            conn.remote_ip, conn.local_port, conn.remote_port,
-                            conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-                        );
+                        let w = recv_window(conn);
+                        send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
                         conn.ack_pending = false;
                     } else {
                         conn.ack_pending = true;
@@ -646,10 +656,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         // fast-retransmits (RFC 5681) instead of waiting for an
                         // RTO. (In practice ahead=0 on this path — no loss.)
                         TCP_OOO_AHEAD.fetch_add(1, Relaxed);
-                        send_segment(
-                            conn.remote_ip, conn.local_port, conn.remote_port,
-                            conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-                        );
+                        let w = recv_window(conn);
+                        send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
                         conn.ack_pending = false;
                     } else {
                         // BEHIND = a pure duplicate (data we already have). Do NOT
@@ -668,10 +676,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 conn.state = State::CloseWait;
                 conn.closed = true;
                 // ACK the FIN
-                send_segment(
-                    conn.remote_ip, conn.local_port, conn.remote_port,
-                    conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[],
-                );
+                send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
             }
 
         }
@@ -682,10 +687,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 if flags & FIN != 0 {
                     conn.rcv_nxt = seq.wrapping_add(1);
                     conn.state = State::TimeWait;
-                    send_segment(
-                        conn.remote_ip, conn.local_port, conn.remote_port,
-                        conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[],
-                    );
+                    send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
                 } else {
                     conn.state = State::FinWait2;
                 }
@@ -696,10 +698,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
             if flags & FIN != 0 {
                 conn.rcv_nxt = seq.wrapping_add(1);
                 conn.state = State::TimeWait;
-                send_segment(
-                    conn.remote_ip, conn.local_port, conn.remote_port,
-                    conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[],
-                );
+                send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
             }
         }
 
@@ -721,10 +720,8 @@ pub fn tick_connections() {
     for slot in conns.iter_mut().flatten() {
         // Delayed ACK
         if slot.ack_pending && now - slot.ack_tick >= DELAYED_ACK_TICKS {
-            send_segment(
-                slot.remote_ip, slot.local_port, slot.remote_port,
-                slot.snd_nxt, slot.rcv_nxt, ACK, recv_window(slot), &[],
-            );
+            let w = recv_window(slot);
+            send_seg(slot, slot.snd_nxt, slot.rcv_nxt, ACK, w, &[]);
             slot.ack_pending = false;
         }
 
@@ -760,15 +757,22 @@ fn send_syn(handle: usize) -> Result<(), TcpError> {
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     conn.last_send_tick = crate::interrupts::ticks();
 
-    // SYN with MSS + Window Scale options (MSS, NOP, WScale = 8 bytes, aligned).
-    let mut opts = [0u8; 8];
+    // SYN options: MSS(4) + Timestamp(NOP,NOP,kind=8 len=10) + WScale(NOP,3) = 20.
+    let mut opts = [0u8; 20];
     opts[0] = 2;  // MSS option kind
     opts[1] = 4;  // MSS option length
     opts[2..4].copy_from_slice(&MSS.to_be_bytes());
-    opts[4] = 1;            // NOP — align the 3-byte WScale to a 4-byte boundary
-    opts[5] = 3;            // Window Scale option kind
-    opts[6] = 3;            // length
-    opts[7] = OUR_WSCALE;   // shift count
+    opts[4] = 1;            // NOP
+    opts[5] = 1;            // NOP — align the 10-byte Timestamp to 4 bytes
+    opts[6] = 8;            // Timestamp option kind
+    opts[7] = 10;           // length
+    let tsval = crate::interrupts::ticks() as u32;
+    opts[8..12].copy_from_slice(&tsval.to_be_bytes()); // TSval
+    // opts[12..16] TSecr = 0 on the initial SYN
+    opts[16] = 1;           // NOP — align the 3-byte WScale to a 4-byte boundary
+    opts[17] = 3;           // Window Scale option kind
+    opts[18] = 3;           // length
+    opts[19] = OUR_WSCALE;  // shift count
 
     send_segment_with_opts(
         conn.remote_ip, conn.local_port, conn.remote_port,
@@ -866,6 +870,49 @@ fn parse_wscale(seg: &[u8], data_offset: usize) -> Option<u8> {
         }
     }
     None
+}
+
+/// Scan a segment's options for the Timestamp option (kind 8, len 10) and
+/// return the peer's TSval. `data_offset` is the TCP header length in bytes.
+fn parse_ts(seg: &[u8], data_offset: usize) -> Option<u32> {
+    let end = data_offset.min(seg.len());
+    let mut i = HEADER_LEN;
+    while i < end {
+        match seg[i] {
+            0 => break,        // End of Option List
+            1 => i += 1,       // NOP
+            kind => {
+                if i + 1 >= end { break; }
+                let len = seg[i + 1] as usize;
+                if len < 2 { break; } // malformed
+                if kind == 8 && len == 10 && i + 6 <= end {
+                    return Some(u32::from_be_bytes(
+                        [seg[i + 2], seg[i + 3], seg[i + 4], seg[i + 5]]));
+                }
+                i += len;
+            }
+        }
+    }
+    None
+}
+
+/// Send a segment for a known connection, adding the Timestamp option (our
+/// TSval + the peer's echoed TSval) when timestamps were negotiated (RFC 7323).
+/// All connection-originated segments (ACKs, data, FIN) must carry it so the
+/// sender gets a clean per-segment RTT sample despite our ACK jitter.
+fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) {
+    if conn.ts_ok {
+        // NOP, NOP, then the 10-byte Timestamp option (4-byte aligned).
+        let mut opts = [1u8, 1, 8, 10, 0, 0, 0, 0, 0, 0, 0, 0];
+        let tsval = crate::interrupts::ticks() as u32;
+        opts[4..8].copy_from_slice(&tsval.to_be_bytes());
+        opts[8..12].copy_from_slice(&conn.ts_recent.to_be_bytes());
+        send_segment_with_opts(conn.remote_ip, conn.local_port, conn.remote_port,
+            seq, ack, flags, window, payload, &opts);
+    } else {
+        send_segment(conn.remote_ip, conn.local_port, conn.remote_port,
+            seq, ack, flags, window, payload);
+    }
 }
 
 fn ack_in_range(una: u32, ack: u32, nxt: u32) -> bool {
