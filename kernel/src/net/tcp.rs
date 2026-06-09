@@ -621,39 +621,43 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // push_back/s at ~700 Mbit). extend reserves once + copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
-                    // EXPERIMENT (v0.219.8): ACK every in-order segment again
-                    // (was: delayed-ACK every 2nd + 40 ms timer, v0.219.x). The
-                    // delayed-ACK halved the ACK rate to save RX-core CPU, but it
-                    // adds ACK latency → the sender's cwnd is ACK-clocked slower
-                    // AND it spuriously RTO-retransmits (measured dup=24..67/2s,
-                    // ahead=0 = no real loss) → reads those as congestion → cuts
-                    // cwnd → the slow non-plateauing ramp we measured (349→707 in
-                    // 10 s vs ~843 native). Prompt ACKs keep the sender's cwnd
-                    // growing. CPU cost comes back later as quickack-only-during-
-                    // slow-start once the flow plateaus (these transfers don't).
-                    send_segment(
-                        conn.remote_ip, conn.local_port, conn.remote_port,
-                        conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-                    );
-                    conn.ack_pending = false;
+                    // Delayed ACK (RFC 1122): ACK every SECOND in-order segment,
+                    // not every one — halves the send_segment/s on the RX core. A
+                    // lone pending ACK is flushed by the 40 ms timer in
+                    // tick_connections. (v0.219.8's ACK-every-segment did NOT
+                    // help throughput — flat ~580 Mbit — so we keep the cheaper
+                    // delayed ACK.)
+                    if conn.ack_pending {
+                        send_segment(
+                            conn.remote_ip, conn.local_port, conn.remote_port,
+                            conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
+                        );
+                        conn.ack_pending = false;
+                    } else {
+                        conn.ack_pending = true;
+                        conn.ack_tick = crate::interrupts::ticks();
+                    }
                 } else {
-                    // Out-of-order or duplicate. We have no reassembly buffer
-                    // yet, so the payload is dropped — but we MUST send an
-                    // immediate DUPLICATE ACK (re-ACK rcv_nxt) so the sender
-                    // fast-retransmits the gap (RFC 5681) instead of waiting for
-                    // an RTO (hundreds of ms, exponentially backing off — the
-                    // multi-second tail-stall we measured). Never delay this one.
+                    // Out-of-order or duplicate; no reassembly buffer yet → drop.
                     use core::sync::atomic::Ordering::Relaxed;
                     if (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0 {
+                        // AHEAD = a real gap → send a duplicate ACK so the sender
+                        // fast-retransmits (RFC 5681) instead of waiting for an
+                        // RTO. (In practice ahead=0 on this path — no loss.)
                         TCP_OOO_AHEAD.fetch_add(1, Relaxed);
+                        send_segment(
+                            conn.remote_ip, conn.local_port, conn.remote_port,
+                            conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
+                        );
+                        conn.ack_pending = false;
                     } else {
+                        // BEHIND = a pure duplicate (data we already have). Do NOT
+                        // re-ACK: that ACK is itself a duplicate ACK and 3 of them
+                        // make the sender fast-retransmit → a spurious-retransmit
+                        // feedback loop (v0.219.7/8 doubled dup this way). Count
+                        // only; the next in-order segment's ACK re-syncs the sender.
                         TCP_OOO_BEHIND.fetch_add(1, Relaxed);
                     }
-                    send_segment(
-                        conn.remote_ip, conn.local_port, conn.remote_port,
-                        conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-                    );
-                    conn.ack_pending = false;
                 }
             }
 
