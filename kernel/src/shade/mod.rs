@@ -980,6 +980,26 @@ pub fn poll_render() {
         render_frame();
     }
 
+    // TEMP dockdiag: prove whether poll_render runs at idle and what the
+    // auto-hide dock decides. One line/sec; pr = poll_render calls since last.
+    {
+        use core::sync::atomic::{AtomicU32, Ordering as O};
+        static PR_CALLS: AtomicU32 = AtomicU32::new(0);
+        static LAST_TICK: AtomicU32 = AtomicU32::new(0);
+        let n = PR_CALLS.fetch_add(1, O::Relaxed) + 1;
+        let t = crate::interrupts::ticks() as u32;
+        let last = LAST_TICK.load(O::Relaxed);
+        if t.wrapping_sub(last) >= 100 {
+            LAST_TICK.store(t, O::Relaxed);
+            PR_CALLS.store(0, O::Relaxed);
+            let (present, empty, shown, off, dwell, base) =
+                with_compositor(|comp| comp.dock_diag()).unwrap_or((false,false,false,0,0,0));
+            crate::kprintln!(
+                "[dockdiag] pr={} ticks={} dock={} empty={} shown={} off={} dwell={} cy={} base={}",
+                n, t, present as u8, empty as u8, shown as u8, off, dwell, cy, base);
+        }
+    }
+
     // Process each mouse event with clean cursor restore + redraw
     while let Some(evt) = crate::xhci::poll_mouse() {
         handle_mouse(&evt);

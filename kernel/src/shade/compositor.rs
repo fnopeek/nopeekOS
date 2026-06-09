@@ -310,6 +310,18 @@ impl Compositor {
         (full as u64 * risen as u64 / slide as u64) as u32
     }
 
+    /// TEMP dockdiag: snapshot of the auto-hide dock decision inputs.
+    /// Returns (dock_present, desktop_empty, target_shown, offset, dwell, baseline).
+    pub fn dock_diag(&self) -> (bool, bool, bool, u32, u32, u32) {
+        let empty = !self.windows.iter().any(|w|
+            !w.is_overlay && w.workspace == self.active_workspace);
+        let base = self.dock_baseline();
+        match &self.dock {
+            Some(d) => (true, empty, d.target_shown, d.offset, d.dwell, base),
+            None => (false, empty, false, 0, 0, base),
+        }
+    }
+
     /// Create a new window and add it to the current workspace.
     /// Returns None if no terminal slots available.
     pub fn create_window(&mut self, title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<WindowId> {
