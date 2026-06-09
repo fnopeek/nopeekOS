@@ -1672,6 +1672,7 @@ impl Ax200 {
     // 4-way. Returns true once associated.
 
     // PHY_CONTEXT_CMD v4 (action MODIFY) — re-point the PHY at the new channel.
+    #[allow(dead_code)] // re-enabled once link-loss root cause is fixed (genuine loss only)
     fn update_phy_context(&mut self) {
         let mut pc = [0u8; PHY_CTX_CMD_LEN];
         put_u32(&mut pc, PC_OFF_ID_COLOR, 0);
@@ -1686,6 +1687,7 @@ impl Ax200 {
     }
 
     // ADD_STA v12 (action MODIFY) — re-point the AP-peer station at the new BSSID.
+    #[allow(dead_code)]
     fn retarget_station(&mut self) {
         let mut sc = [0u8; ADD_STA_CMD_LEN];
         sc[AS_OFF_ADD_MODIFY] = 1; // modify
@@ -1700,6 +1702,7 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
+    #[allow(dead_code)] // disabled: reconnect must not mask a code bug; only for genuine AP loss
     fn reconnect(&mut self) -> bool {
         host::print("[ax200] link lost — re-scanning to reconnect...\n");
         host::netdev_set_link(false);
@@ -2271,6 +2274,7 @@ impl Ax200 {
         let mut rx_log = 0u32; // throttle the data-path diagnostics
         let mut tx_log = 0u32;
         let mut stall = 0u32; // iterations the data queue has been stuck full
+        let mut deauth_total = 0u32; // diagnostic: link-loss events seen
         loop {
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
@@ -2278,22 +2282,24 @@ impl Ax200 {
             let mut tx_done = 0u32;
             let mut link_lost = false;
             let mut deauth_reason = 0u16;
+            let mut deauth_subtype = 0u8;
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
                     tx_done += 1;
                 } else if c == REPLY_RX_MPDU_CMD && g == 0 {
-                    // A DEAUTH / DISASSOC addressed to us = the AP dropped us
-                    // (the Fritz mesh steers between Fritzbox + repeater this way).
-                    // Stop draining and reconnect — otherwise the link silently
-                    // dies until the driver is re-run.
+                    // DIAGNOSTIC ONLY: note a DEAUTH / DISASSOC addressed to us +
+                    // its reason, but do NOT tear down or reconnect — a reconnect
+                    // would just mask whatever made us lose the link (our bug vs a
+                    // genuinely-absent AP). Keep draining so detection never
+                    // disrupts a healthy link.
                     if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
                         if st == DOT11_STYPE_DEAUTH || st == DOT11_STYPE_DISASSOC {
                             link_lost = true;
+                            deauth_subtype = st;
                             deauth_reason = u16::from_le_bytes([body[0], body[1]]);
-                            return false;
                         }
-                        return true; // other mgmt (beacon etc.) — ignore
+                        return true; // mgmt frame — not for the IP path
                     }
                     match Self::rx_classify(rb, &our_mac, &mut rxbuf) {
                         RxKind::Eapol(n) => {
@@ -2327,19 +2333,21 @@ impl Ax200 {
             });
             // Free the data-queue slots the firmware just reported done.
             self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
-            // Link lost (deauth / disassoc): re-scan + reconnect to the best AP
-            // (may be the other mesh node). Keep retrying until associated; wifid
-            // then re-runs the 4-way and brings the link back up.
+            // DIAGNOSTIC: a DEAUTH (subtype 12) / DISASSOC (10) arrived. Log it
+            // with the 802.11 reason code — do NOT reconnect (that would mask the
+            // root cause). The reason tells us whether the AP genuinely dropped us
+            // or our own behaviour provoked it:
+            //   1=unspecified  2=prev-auth-invalid  4=inactivity  6/7=class2/3
+            //   frame from nonassoc STA (= our state/TX bug)  15=4-way timeout.
             if link_lost {
-                host::print("[ax200] DEAUTH/DISASSOC from AP (reason ");
+                deauth_total += 1;
+                host::print("[ax200] ** LINK-LOSS EVENT ** ");
+                host::print(if deauth_subtype == DOT11_STYPE_DEAUTH { "DEAUTH" } else { "DISASSOC" });
+                host::print(" reason=");
                 host::print_dec(deauth_reason as u32);
-                host::print(") — reconnecting\n");
-                while !self.reconnect() {
-                    host::print("[ax200] reconnect failed — retrying in 2s\n");
-                    host::sleep_ms(2000);
-                }
-                stall = 0;
-                continue;
+                host::print(" count=");
+                host::print_dec(deauth_total);
+                host::print(" (NOT reconnecting — diagnosing root cause)\n");
             }
             // TX: send every Ethernet frame the IP stack queued (DHCP, ARP, …),
             // but stop once the data queue is full — leave the rest in the kernel
@@ -2639,7 +2647,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.42.0 — AQL in-flight cap (anti-bufferbloat) + reconnect\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.43.0 — link-loss DIAGNOSTIC (no auto-reconnect)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
