@@ -497,7 +497,11 @@ pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Resul
         if crate::interrupts::ticks() - t0 > timeout_ticks {
             return Ok(0);
         }
-        core::hint::spin_loop();
+        // Timer-NAPI: HLT instead of spinning (the OTA-update / https core-peg
+        // Florian saw — same root as tcp_recv_poll). Records the halt so `cores`
+        // is honest. Wakes on the per-core timer (100 Hz here; OTA payloads are
+        // small so the latency is fine), the NIC re-fills the ring in the gap.
+        crate::interrupts::worker_idle_hlt();
     }
 }
 

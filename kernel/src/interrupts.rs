@@ -618,6 +618,32 @@ pub fn set_worker_poll_hz(hz: u32) {
     }
 }
 
+/// Shared idle primitive for a worker-core busy-wait loop (the network recv
+/// loops: tcp_recv_poll, recv_blocking). HLT until the next IRQ (the per-core
+/// LAPIC timer — sped to ~10 kHz by set_worker_poll_hz during a download, else
+/// 100 Hz) instead of burning the core in a spin. HLT VMEXITs so the host core
+/// idles too. Records the halt so `cores` reports the truth (a raw asm hlt is
+/// invisible to the diag → the core looks 100 % "SPINNING" when it is actually
+/// mostly idle). No-op spin on Core 0 (it owns the wall-clock timer / its own
+/// idle path).
+pub fn worker_idle_hlt() {
+    let core = crate::smp::per_core::current_core_id();
+    if core == 0 { core::hint::spin_loop(); return; }
+    let t0 = rdtsc();
+    let rflags: u64;
+    // SAFETY: read IF to preserve the caller's interrupt-enable state.
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
+    if rflags & (1 << 9) != 0 {
+        // SAFETY: IF=1 → HLT wakes on the next timer IRQ.
+        unsafe { core::arch::asm!("hlt"); }
+    } else {
+        // SAFETY: sti-shadow defers the IRQ until HLT is armed; restore IF=0.
+        unsafe { core::arch::asm!("sti; hlt; cli"); }
+    }
+    crate::smp::per_core::record_halt(core, rdtsc().wrapping_sub(t0));
+    crate::smp::per_core::record_wake(core, crate::smp::per_core::WAKE_HLT_FALLBACK);
+}
+
 /// Initialize Local APIC timer (for hardware without PIT).
 /// Call after init() — detects if PIT is working, sets up APIC timer if not.
 pub fn init_apic_timer() {
