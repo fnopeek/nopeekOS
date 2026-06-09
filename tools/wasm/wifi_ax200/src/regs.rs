@@ -655,6 +655,8 @@ pub const DOT11_STATUS_SUCCESS: u16 = 0;
 pub const DOT11_FC_ASSOC_REQ: u8 = 0x00; // mgmt(0), subtype assoc-req(0)
 pub const DOT11_STYPE_AUTH: u8 = 11;     // subtype of an auth frame
 pub const DOT11_STYPE_ASSOC_RESP: u8 = 1; // subtype of an assoc response
+pub const DOT11_STYPE_DISASSOC: u8 = 10; // mgmt subtype disassociation
+pub const DOT11_STYPE_DEAUTH: u8 = 12;   // mgmt subtype deauthentication (mesh steering kick)
 // assoc-req fixed fields: capability(2) + listen_interval(2), then IEs.
 // assoc-resp body: capability(2) + status_code(2) + aid(2), then IEs.
 pub const ASSOC_RESP_OFF_STATUS: usize = 2; // within the 802.11 body
@@ -721,6 +723,7 @@ pub const CMD_AUTHORIZED: u8 = 0x08;
 // uplink = driver→manager.
 pub const EV_EAPOL_RX: u8 = 0x84;
 pub const EV_LINK_UP: u8 = 0x85;
+pub const EV_LINK_DOWN: u8 = 0x86;
 pub const EV_READY: u8 = 0x83;
 
 // ── Stage 5e: data TX queue (tid 0) + key install ────────────────
