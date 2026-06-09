@@ -91,6 +91,17 @@ pub fn take_ooo_stats() -> (u32, u32) {
     (TCP_OOO_AHEAD.swap(0, Relaxed), TCP_OOO_BEHIND.swap(0, Relaxed))
 }
 
+// Max recv_buf depth seen since last read (diagnostic). High (→RECV_BUF_SIZE) =
+// our consumer/core can't drain fast enough → window closes → sender stalls
+// (consumer-limited). Low = buffer drains fine → a tail slowdown is the sender
+// throttling (bufferbloat backoff), not us.
+static TCP_MAX_RXBUF: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Max recv-buffer depth (bytes) seen since the last call; resets to 0.
+pub fn take_max_rxbuf() -> usize {
+    TCP_MAX_RXBUF.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 // TCP flags
 const FIN: u8 = 0x01;
 const SYN: u8 = 0x02;
@@ -634,6 +645,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // push_back/s at ~700 Mbit). extend reserves once + copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
+                    TCP_MAX_RXBUF.fetch_max(conn.recv_buf.len(),
+                        core::sync::atomic::Ordering::Relaxed);
                     // Delayed ACK (RFC 1122): ACK every SECOND in-order segment,
                     // not every one — halves the send_segment/s on the RX core. A
                     // lone pending ACK is flushed by the 40 ms timer in
