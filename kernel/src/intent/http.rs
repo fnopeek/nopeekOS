@@ -150,11 +150,10 @@ fn do_http_request(args: &str, use_tls: bool) {
                 }
                 Ok(())
             };
-            if use_tls {
-                https_get_streaming(host, path, max_size, &mut sink)
-            } else {
-                http_get_streaming(host, path, max_size, &mut sink)
-            }
+            // Cross-scheme redirect-following download: lets `https cdimage…`
+            // chase its 302 to a fast plain-http mirror (the user's gigabit
+            // source) where strict https would dead-end.
+            user_download_streaming(host, path, use_tls, max_size, &mut sink)
         };
         if let Err(e) = stream_result {
             kprintln!("[npk] download failed: {}", e);
@@ -833,6 +832,71 @@ pub fn http_get_streaming(
         }
     }
     Err("too many redirects")
+}
+
+/// Streaming download for the USER `http`/`https` intents — follows redirects
+/// across BOTH schemes, including https→http downgrade (which OTA's strict
+/// `https_get` refuses on purpose). This lets `https cdimage.debian.org/…iso`
+/// chase its 302 to a fast plain-http mirror — the user's confirmed gigabit
+/// source — instead of dead-ending. `start_tls` = first hop's scheme.
+/// NOT for OTA (that path stays strict, signatures aside).
+fn user_download_streaming(
+    host: &str,
+    path: &str,
+    start_tls: bool,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<usize, &'static str> {
+    let mut cur_host = String::from(host);
+    let mut cur_path = String::from(path);
+    let mut use_tls = start_tls;
+    for _ in 0..6 {
+        let resp = if use_tls {
+            https_get_once(&cur_host, &cur_path, max_size, on_chunk)?
+        } else {
+            http_get_once(&cur_host, &cur_path, max_size, on_chunk)?
+        };
+        match resp.status {
+            200..=299 => return Ok(0), // bytes already counted by the caller's sink
+            301 | 302 | 303 | 307 | 308 => {
+                let loc = resp.location.ok_or("redirect without Location")?;
+                let (h, p, tls) = parse_any_url(&loc, &cur_host, use_tls)?;
+                if !use_tls && tls {
+                    return Err("redirect http→https — our TLS is minimal; use a direct mirror");
+                }
+                cur_host = h;
+                cur_path = p;
+                use_tls = tls;
+            }
+            _ => return Err("HTTP non-2xx response"),
+        }
+    }
+    Err("too many redirects")
+}
+
+/// Permissive redirect-URL parser: accepts http://, https://, and absolute
+/// paths. Returns (host, path, is_tls).
+fn parse_any_url(loc: &str, current_host: &str, current_tls: bool) -> Result<(String, String, bool), &'static str> {
+    let loc = loc.trim();
+    let split = |rest: &str| -> (String, String) {
+        match rest.find('/') {
+            Some(i) => (String::from(&rest[..i]), String::from(&rest[i..])),
+            None => (String::from(rest), String::from("/")),
+        }
+    };
+    if let Some(rest) = loc.strip_prefix("https://") {
+        let (h, p) = split(rest);
+        if h.is_empty() { return Err("redirect: empty host"); }
+        Ok((h, p, true))
+    } else if let Some(rest) = loc.strip_prefix("http://") {
+        let (h, p) = split(rest);
+        if h.is_empty() { return Err("redirect: empty host"); }
+        Ok((h, p, false))
+    } else if loc.starts_with('/') {
+        Ok((String::from(current_host), String::from(loc), current_tls))
+    } else {
+        Err("redirect: unsupported Location")
+    }
 }
 
 /// One plain-HTTP round-trip (no TLS, no redirect follow). Mirrors
