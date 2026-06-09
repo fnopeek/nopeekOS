@@ -1848,10 +1848,11 @@ impl Ax200 {
     // (the firmware hasn't drained it yet) — the caller leaves it to the IP
     // stack to retransmit rather than overwrite an in-flight TFD.
     fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool) -> bool {
-        // Flow control: never let more than (queue depth − 1) frames be in
-        // flight, or write_ptr laps the firmware's read pointer and overwrites a
-        // TFD it is still transmitting.
-        if self.data_in_flight as usize >= IWL_DATA_QUEUE_SIZE - 1 {
+        // Flow control + anti-bufferbloat: cap in-flight at TX_INFLIGHT_MAX (well
+        // below the ring depth) so write_ptr never laps the firmware's read
+        // pointer AND a latency-sensitive packet never waits behind a deep
+        // backlog. Caller leaves the rest in the kernel mailbox for retransmit.
+        if self.data_in_flight >= TX_INFLIGHT_MAX {
             return false;
         }
         let mut fr = [0u8; 1600];
@@ -2346,7 +2347,7 @@ impl Ax200 {
             // firmware's read pointer).
             let mut tx_any = false;
             loop {
-                if self.data_in_flight as usize >= IWL_DATA_QUEUE_SIZE - 1 {
+                if self.data_in_flight >= TX_INFLIGHT_MAX {
                     break;
                 }
                 let n = host::netdev_poll_tx(&mut txbuf);
@@ -2370,10 +2371,13 @@ impl Ax200 {
             if clen > 0 {
                 self.handle_wifi_cmd(&cmd[..clen as usize]);
             }
-            // Stall watchdog: if the data queue stays full for ~0.5 s the
-            // firmware has stopped draining it (assert / wedged TX) — dump its
-            // error log once so the death isn't silent, then keep going.
-            if self.data_in_flight as usize >= IWL_DATA_QUEUE_SIZE - 1 {
+            // Stall watchdog: a TRUE wedge = the in-flight cap is hit AND no TX
+            // completion arrived this pass for ~0.5 s (FW stopped draining). Note
+            // the `tx_done == 0` guard: with the low BQL cap a sustained upload
+            // legitimately sits at the cap, but completions keep flowing — that
+            // must NOT trip the watchdog (resetting in-flight mid-flight would let
+            // write_ptr lap the FW read pointer).
+            if self.data_in_flight >= TX_INFLIGHT_MAX && tx_done == 0 {
                 stall += 1;
                 if stall == 500 {
                     host::dprint("[ax200] WARNING: data TX queue stuck full — FW not draining\n");
@@ -2635,7 +2639,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.41.0 — auto-reconnect on deauth (mesh steering)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.42.0 — AQL in-flight cap (anti-bufferbloat) + reconnect\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);

@@ -5,6 +5,7 @@
 //! Every connection requires a capability token.
 
 pub mod eth;
+pub mod fq_codel;
 pub mod arp;
 pub mod ipv4;
 pub mod icmp;

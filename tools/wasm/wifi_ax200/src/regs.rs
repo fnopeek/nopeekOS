@@ -734,6 +734,14 @@ pub const IWL_DATA_TID: u8 = 0;
 // 16-slot TX mailbox while staying well within the gen2 max (256). The TFD slot
 // index = write_ptr & (size-1); cb_size = ilog2(size)-3 (must match the size).
 pub const IWL_DATA_QUEUE_SIZE: usize = 64;
+
+// BQL-style anti-bufferbloat cap: never let more than this many data frames sit
+// in-flight in the FW queue, even though the ring holds 64. Each in-flight frame
+// = ~1.5 KB of airtime a latency-sensitive packet (a ping) must wait behind, so
+// the full 63-deep queue is tens of ms of bufferbloat. ~1 BDP at the current
+// achieved rate keeps throughput while slashing latency-under-load. Raise once
+// HT/A-MPDU lifts the air rate (then the BDP grows). Must stay < QUEUE_SIZE-1.
+pub const TX_INFLIGHT_MAX: u32 = 16;
 pub const DATA_QUEUE_CB_SIZE: u32 = 3; // TFD_QUEUE_CB_SIZE(64) = ilog2(64)-3
 // Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its OWN
 // payload region, or back-to-back frames clobber each other's data before the
