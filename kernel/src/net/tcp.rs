@@ -604,12 +604,23 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 let space = RECV_BUF_SIZE - conn.recv_buf.len();
                 let copy = payload.len().min(space);
                 // Bulk append — NOT byte-by-byte push_back (that was ~87M
-                // push_back/s at ~700 Mbit = the host-stack ceiling). extend
-                // reserves once + copies.
+                // push_back/s at ~700 Mbit). extend reserves once + copies.
                 conn.recv_buf.extend(payload[..copy].iter().copied());
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
-                conn.ack_pending = true;
-                conn.ack_tick = crate::interrupts::ticks();
+                // Delayed ACK (RFC 1122): ACK every SECOND full-data segment,
+                // not every one — halves the ~60k send_segment/s (each an alloc-
+                // heavy packet build + TX) that pegged the RX core. A lone
+                // pending ACK is flushed by the 40 ms timer in tick_connections.
+                if conn.ack_pending {
+                    send_segment(
+                        conn.remote_ip, conn.local_port, conn.remote_port,
+                        conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
+                    );
+                    conn.ack_pending = false;
+                } else {
+                    conn.ack_pending = true;
+                    conn.ack_tick = crate::interrupts::ticks();
+                }
             }
 
             // FIN from remote
@@ -624,14 +635,6 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 );
             }
 
-            // Send ACK immediately for received data (with dynamic window)
-            if conn.ack_pending && !payload.is_empty() {
-                send_segment(
-                    conn.remote_ip, conn.local_port, conn.remote_port,
-                    conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
-                );
-                conn.ack_pending = false;
-            }
         }
 
         State::FinWait1 => {
