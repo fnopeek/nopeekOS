@@ -179,4 +179,5 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("static_ip", "Static IPv4 (e.g. 192.168.1.50); unset = DHCP"),
     ("static_gw", "Static default gateway (with static_ip)"),
     ("static_dns", "Static DNS server (with static_ip)"),
+    ("net_prefer", "Preferred NIC: 'wifi' or 'lan' (default lan); falls back if no link"),
 ];

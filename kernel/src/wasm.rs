@@ -2682,6 +2682,21 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_netdev_rx_deliver(buf_ptr, len) -> 0 / -1 — driver delivers a received
+    // frame STRAIGHT into the IP stack from its own fiber (the NAPI topology:
+    // drain → stack in one context, no relay-ring + Core-0 hop). Falls back to
+    // the ring internally if Core 0 holds the drain guard. Preferred over
+    // npk_netdev_submit_rx for the hot path.
+    linker.func_wrap("env", "npk_netdev_rx_deliver",
+        |caller: Caller<'_, HostState>, buf_ptr: i32, len: i32| -> i32 {
+            if caller.data().hw.is_none() { return -1; }
+            match read_wasm_bytes(&caller, buf_ptr, len) {
+                Some(frame) => { crate::net::wasm_deliver_rx(&frame); 0 }
+                None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_netdev_poll_tx(buf_ptr, max) -> len / -1 — driver fetches the next
     // frame the kernel wants transmitted (-1 when none / buffer too small).
     linker.func_wrap("env", "npk_netdev_poll_tx",

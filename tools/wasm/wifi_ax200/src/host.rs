@@ -42,6 +42,7 @@ unsafe extern "C" {
 
     // netdev data path (driver ↔ kernel IP stack).
     fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
+    fn npk_netdev_rx_deliver(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
     fn npk_netdev_set_link(up: i32) -> i32;
 }
@@ -218,6 +219,13 @@ pub fn netdev_submit_rx(frame: &[u8]) {
     unsafe { npk_netdev_submit_rx(frame.as_ptr() as i32, frame.len() as i32) };
 }
 
+/// Deliver a received Ethernet frame STRAIGHT into the kernel IP stack from this
+/// driver fiber's context (NAPI topology: drain → stack in one hop, off Core 0).
+/// Falls back to the relay ring internally if Core 0 holds the drain guard.
+pub fn netdev_rx_deliver(frame: &[u8]) {
+    unsafe { npk_netdev_rx_deliver(frame.as_ptr() as i32, frame.len() as i32) };
+}
+
 /// Fetch the next Ethernet frame the kernel wants transmitted into `buf`.
 /// Returns its length, or 0 when there is none.
 pub fn netdev_poll_tx(buf: &mut [u8]) -> usize {
@@ -291,3 +299,18 @@ pub fn log_reg(name: &str, val: u32) {
     print_hex32(val);
     print("\n");
 }
+
+// ── Debug tracing ────────────────────────────────────────────────
+// Verbose bring-up / per-frame traces. OFF in releases: the driver is run in a
+// window, so every print also RENDERS → hundreds of lines visibly slow the
+// connect. Flip DEBUG to true to get the full bring-up log back. Essential,
+// user-facing lines (version, scan results, AUTHORIZED, failures) use the plain
+// print* fns and are always shown.
+pub const DEBUG: bool = false;
+
+#[inline] pub fn dprint(s: &str) { if DEBUG { print(s); } }
+#[inline] pub fn dprint_dec(val: u32) { if DEBUG { print_dec(val); } }
+#[inline] pub fn dprint_hex8(val: u8) { if DEBUG { print_hex8(val); } }
+#[inline] pub fn dprint_hex16(val: u16) { if DEBUG { print_hex16(val); } }
+#[inline] pub fn dprint_hex32(val: u32) { if DEBUG { print_hex32(val); } }
+#[inline] pub fn dprint_hex64(val: u64) { if DEBUG { print_hex64(val); } }

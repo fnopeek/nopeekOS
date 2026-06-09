@@ -261,7 +261,7 @@ impl Ax200 {
         if !is_hw_error_value(hpm) && (hpm & PERSISTENCE_BIT) != 0 {
             let wprot_val = self.prph_read(PREG_PRPH_WPROT_22000);
             if wprot_val & PREG_WFPM_ACCESS != 0 {
-                host::print("[ax200] error: can not clear persistence bit\n");
+                host::dprint("[ax200] error: can not clear persistence bit\n");
                 return false;
             }
             self.prph_write(HPM_DEBUG, hpm & !PERSISTENCE_BIT);
@@ -282,8 +282,8 @@ impl Ax200 {
             let cap2 = pci_read16(cap + PCI_EXP_DEVCTL2);
             self.ltr_enabled = cap2 & PCI_EXP_DEVCTL2_LTR_EN != 0;
         }
-        host::print("[ax200] apm_config: LTR ");
-        host::print(if self.ltr_enabled { "enabled\n" } else { "disabled\n" });
+        host::dprint("[ax200] apm_config: LTR ");
+        host::dprint(if self.ltr_enabled { "enabled\n" } else { "disabled\n" });
     }
 
     // ── iwl_pcie_gen1_2_activate_nic (trans.c) ──────────────────
@@ -300,7 +300,7 @@ impl Ax200 {
             MAC_CLOCK_TIMEOUT_US,
         );
         if !ok {
-            host::print("[ax200] failed to wake NIC (MAC clock not ready)\n");
+            host::dprint("[ax200] failed to wake NIC (MAC clock not ready)\n");
         }
 
         for _ in 0..1024 { core::hint::spin_loop(); } // bisr_workaround: udelay(200)
@@ -326,20 +326,20 @@ impl Ax200 {
     // ── _iwl_trans_pcie_start_hw (trans.c) ──────────────────────
     fn start_hw(&mut self) -> bool {
         if !self.prepare_card_hw() {
-            host::print("[ax200] error while preparing HW (AMT owns the device?)\n");
+            host::dprint("[ax200] error while preparing HW (AMT owns the device?)\n");
             return false;
         }
-        host::print("[ax200] card prepared (ownership taken)\n");
+        host::dprint("[ax200] card prepared (ownership taken)\n");
 
         if !self.clear_persistence_bit() {
             return false;
         }
 
         if !self.sw_reset(true) {
-            host::print("[ax200] sw_reset: card not ready after reset\n");
+            host::dprint("[ax200] sw_reset: card not ready after reset\n");
             return false;
         }
-        host::print("[ax200] sw_reset done\n");
+        host::dprint("[ax200] sw_reset done\n");
 
         // force_power_gating: family==22000 && integrated. AX200 is a discrete
         // M.2 card (not integrated) → skipped.
@@ -347,7 +347,7 @@ impl Ax200 {
         if !self.apm_init() {
             return false;
         }
-        host::print("[ax200] apm_init done — MAC clock ready\n");
+        host::dprint("[ax200] apm_init done — MAC clock ready\n");
         true
     }
 
@@ -370,9 +370,9 @@ impl Ax200 {
         let pages = ((bytes + 4095) / 4096) as u16;
         let handle = host::dma_alloc(pages);
         if handle < 0 {
-            host::print("[ax200] DMA alloc failed: ");
-            host::print(name);
-            host::print("\n");
+            host::dprint("[ax200] DMA alloc failed: ");
+            host::dprint(name);
+            host::dprint("\n");
             return Dma::NONE;
         }
         Dma { handle, phys: host::dma_phys(handle) }
@@ -411,7 +411,7 @@ impl Ax200 {
     // ── iwl_pcie_gen2_nic_init (trans-gen2.c) ───────────────────
     fn nic_init(&mut self) -> bool {
         if !self.gen2_apm_init() {
-            host::print("[ax200] nic_init: gen2_apm_init failed\n");
+            host::dprint("[ax200] nic_init: gen2_apm_init failed\n");
             return false;
         }
         // iwl_op_mode_nic_config (mvm): DEFERRED. It is the op-mode/NVM layer
@@ -442,7 +442,7 @@ impl Ax200 {
         // iwl_pcie_check_hw_rf_kill: bit clear == radio killed.
         let gp = self.r32(CSR_GP_CNTRL);
         if gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW == 0 {
-            host::print("[ax200] WARNING: HW RF-kill asserted — firmware may not boot\n");
+            host::dprint("[ax200] WARNING: HW RF-kill asserted — firmware may not boot\n");
         }
 
         // make sure rfkill handshake bits are cleared
@@ -520,16 +520,16 @@ impl Ax200 {
         let mut virt = [0u64; IWL_MAX_DRAM_ENTRY];
         let (lc, uc, vc) = self.init_fw_sec(&mut lmac, &mut umac, &mut virt);
         if lc == 0 || uc == 0 {
-            host::print("[ax200] FW section load failed\n");
+            host::dprint("[ax200] FW section load failed\n");
             return false;
         }
-        host::print("[ax200] FW sections loaded: lmac=");
-        host::print_hex32(lc as u32);
-        host::print(" umac=");
-        host::print_hex32(uc as u32);
-        host::print(" paging=");
-        host::print_hex32(vc as u32);
-        host::print("\n");
+        host::dprint("[ax200] FW sections loaded: lmac=");
+        host::dprint_hex32(lc as u32);
+        host::dprint(" umac=");
+        host::dprint_hex32(uc as u32);
+        host::dprint(" paging=");
+        host::dprint_hex32(vc as u32);
+        host::dprint("\n");
 
         // Build the context-info structure (zeroed buffer + filled fields).
         let mut ci = [0u8; CTXT_INFO_SIZE];
@@ -572,14 +572,14 @@ impl Ax200 {
         self.prph_write(UREG_CPU_INIT_RUN, 1);
 
         // Poll CSR_INT for the early ALIVE interrupt (no MSI-X, no notif_wait).
-        host::print("[ax200] FW kicked, waiting for ALIVE...\n");
+        host::dprint("[ax200] FW kicked, waiting for ALIVE...\n");
         if self.poll_bit(CSR_INT, CSR_INT_BIT_ALIVE, 2_000_000) {
             return true;
         }
         let intr = self.r32(CSR_INT);
-        host::print("[ax200] ALIVE timeout — CSR_INT=0x");
-        host::print_hex32(intr);
-        host::print("\n");
+        host::dprint("[ax200] ALIVE timeout — CSR_INT=0x");
+        host::dprint_hex32(intr);
+        host::dprint("\n");
         false
     }
 
@@ -609,7 +609,7 @@ impl Ax200 {
         let write_actual = self.free_bd_write & !0x7;
         self.w32(RFH_Q0_FRBDCB_WIDX_TRG, write_actual);
 
-        host::print("[ax200] RX restocked, waiting for alive notification...\n");
+        host::dprint("[ax200] RX restocked, waiting for alive notification...\n");
         let mut closed = 0u32;
         for _ in 0..1000 {
             host::fence();
@@ -620,18 +620,18 @@ impl Ax200 {
             host::sleep_ms(1);
         }
         if closed == 0 {
-            host::print("[ax200] no RX — alive notification timeout\n");
+            host::dprint("[ax200] no RX — alive notification timeout\n");
             return None;
         }
-        host::print("[ax200] RX active — closed_rb_num=0x");
-        host::print_hex32(closed);
-        host::print("\n");
+        host::dprint("[ax200] RX active — closed_rb_num=0x");
+        host::dprint_hex32(closed);
+        host::dprint("\n");
 
         // The FW reports each filled RB in the used-BD ring (vid). Read used_bd[0]
         // to find which RB holds the first frame (iwl_pcie_get_rxb, < AX210 path).
         let vid = host::dma_r32(self.rxq_used_bd.handle, 0) & RX_VID_MASK;
         if vid == 0 || vid as usize > RX_NUM_RBS {
-            host::print("[ax200] bad RX vid\n");
+            host::dprint("[ax200] bad RX vid\n");
             return None;
         }
         let rb0 = self.rb_pool[vid as usize - 1];
@@ -641,15 +641,15 @@ impl Ax200 {
         let mut hdr = [0u8; 8];
         host::dma_read_buf(rb0.handle, 0, &mut hdr);
         let len_n_flags = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-        host::print("[ax200] RB[0] len_n_flags=0x");
-        host::print_hex32(len_n_flags);
-        host::print(" cmd=0x");
-        host::print_hex32(hdr[4] as u32);
-        host::print(" group=0x");
-        host::print_hex32(hdr[5] as u32);
-        host::print("\n");
+        host::dprint("[ax200] RB[0] len_n_flags=0x");
+        host::dprint_hex32(len_n_flags);
+        host::dprint(" cmd=0x");
+        host::dprint_hex32(hdr[4] as u32);
+        host::dprint(" group=0x");
+        host::dprint_hex32(hdr[5] as u32);
+        host::dprint("\n");
         if hdr[4] == UCODE_ALIVE_NTFY && hdr[5] == 0 {
-            host::print("[ax200] → UCODE_ALIVE_NTFY confirmed\n");
+            host::dprint("[ax200] → UCODE_ALIVE_NTFY confirmed\n");
         }
         Some(rb0)
     }
@@ -675,9 +675,9 @@ impl Ax200 {
         let u = AL_OFF_UMAC;
         let sku = AL_OFF_SKU_ID;
 
-        host::print("[ax200] ALIVE status=0x");
-        host::print_hex16(status);
-        host::print(if status == IWL_ALIVE_STATUS_OK {
+        host::dprint("[ax200] ALIVE status=0x");
+        host::dprint_hex16(status);
+        host::dprint(if status == IWL_ALIVE_STATUS_OK {
             " (OK)\n"
         } else if status == IWL_ALIVE_STATUS_ERR {
             " (ERR!)\n"
@@ -685,42 +685,42 @@ impl Ax200 {
             " (unknown)\n"
         });
 
-        host::print("[ax200]   LMAC ucode ");
-        host::print_hex32(rd32(l + LMAC_OFF_UCODE_MAJOR));
-        host::print(".");
-        host::print_hex32(rd32(l + LMAC_OFF_UCODE_MINOR));
-        host::print(" ver_type=0x");
-        host::print_hex32(p[s + l + LMAC_OFF_VER_TYPE] as u32);
-        host::print(" subtype=0x");
-        host::print_hex32(p[s + l + LMAC_OFF_VER_SUBTYPE] as u32);
-        host::print("\n");
+        host::dprint("[ax200]   LMAC ucode ");
+        host::dprint_hex32(rd32(l + LMAC_OFF_UCODE_MAJOR));
+        host::dprint(".");
+        host::dprint_hex32(rd32(l + LMAC_OFF_UCODE_MINOR));
+        host::dprint(" ver_type=0x");
+        host::dprint_hex32(p[s + l + LMAC_OFF_VER_TYPE] as u32);
+        host::dprint(" subtype=0x");
+        host::dprint_hex32(p[s + l + LMAC_OFF_VER_SUBTYPE] as u32);
+        host::dprint("\n");
 
-        host::print("[ax200]   UMAC ver ");
-        host::print_hex32(rd32(u + UMAC_OFF_MAJOR));
-        host::print(".");
-        host::print_hex32(rd32(u + UMAC_OFF_MINOR));
-        host::print("\n");
+        host::dprint("[ax200]   UMAC ver ");
+        host::dprint_hex32(rd32(u + UMAC_OFF_MAJOR));
+        host::dprint(".");
+        host::dprint_hex32(rd32(u + UMAC_OFF_MINOR));
+        host::dprint("\n");
 
         let umac_err = rd32(u + UMAC_OFF_ERR_INFO) & !FW_ADDR_CACHE_CONTROL;
         // Stash the error-table SRAM pointers for later error-log dumps.
         self.lmac_err_ptr = rd32(l + LMAC_OFF_ERR_TABLE);
         self.umac_err_ptr = umac_err;
-        host::print("[ax200]   err tables: lmac=0x");
-        host::print_hex32(rd32(l + LMAC_OFF_ERR_TABLE));
-        host::print(" umac=0x");
-        host::print_hex32(umac_err);
-        host::print("\n");
+        host::dprint("[ax200]   err tables: lmac=0x");
+        host::dprint_hex32(rd32(l + LMAC_OFF_ERR_TABLE));
+        host::dprint(" umac=0x");
+        host::dprint_hex32(umac_err);
+        host::dprint("\n");
 
         let sku0 = rd32(sku);
         let sku1 = rd32(sku + 4);
         let sku2 = rd32(sku + 8);
-        host::print("[ax200]   sku_id: 0x");
-        host::print_hex32(sku0);
-        host::print(" 0x");
-        host::print_hex32(sku1);
-        host::print(" 0x");
-        host::print_hex32(sku2);
-        host::print(if sku0 == 0 && sku1 == 0 && sku2 == 0 {
+        host::dprint("[ax200]   sku_id: 0x");
+        host::dprint_hex32(sku0);
+        host::dprint(" 0x");
+        host::dprint_hex32(sku1);
+        host::dprint(" 0x");
+        host::dprint_hex32(sku2);
+        host::dprint(if sku0 == 0 && sku1 == 0 && sku2 == 0 {
             " (empty → PNVM skipped)\n"
         } else {
             " (PNVM required)\n"
@@ -793,11 +793,11 @@ impl Ax200 {
         self.cmd_write_ptr = (wp + 1) & (MAX_TFD_QUEUE_SIZE - 1);
         self.w32(HBUS_TARG_WRPTR, self.cmd_write_ptr | (IWL_CMD_QUEUE_ID << 16));
 
-        host::print("[ax200] hcmd sent: group=0x");
-        host::print_hex32(group as u32);
-        host::print(" cmd=0x");
-        host::print_hex32(opcode as u32);
-        host::print("\n");
+        host::dprint("[ax200] hcmd sent: group=0x");
+        host::dprint_hex32(group as u32);
+        host::dprint(" cmd=0x");
+        host::dprint_hex32(opcode as u32);
+        host::dprint("\n");
     }
 
     // Drain newly-closed RBs from the used-BD ring, looking for a frame with the
@@ -818,11 +818,11 @@ impl Ax200 {
                 host::dma_read_buf(rb.handle, 0, &mut hdr);
                 let cmd = hdr[4];
                 let grp = hdr[5];
-                host::print("[ax200]   RX cmd=0x");
-                host::print_hex32(cmd as u32);
-                host::print(" group=0x");
-                host::print_hex32(grp as u32);
-                host::print("\n");
+                host::dprint("[ax200]   RX cmd=0x");
+                host::dprint_hex32(cmd as u32);
+                host::dprint(" group=0x");
+                host::dprint_hex32(grp as u32);
+                host::dprint("\n");
                 if cmd == want_cmd && grp == want_group {
                     matched = Some(rb);
                 } else {
@@ -867,12 +867,12 @@ impl Ax200 {
         // NVM_ACCESS_COMPLETE { __le32 reserved = 0 }
         self.send_hcmd(REGULATORY_AND_NVM_GROUP, NVM_ACCESS_COMPLETE, &0u32.to_le_bytes());
 
-        host::print("[ax200] init cmds sent, waiting for INIT_COMPLETE_NOTIF...\n");
+        host::dprint("[ax200] init cmds sent, waiting for INIT_COMPLETE_NOTIF...\n");
         // INIT_COMPLETE_NOTIF is a legacy-group (0) notification.
         if self.wait_rx(INIT_COMPLETE_NOTIF, 0, 2000).is_some() {
             return true;
         }
-        host::print("[ax200] INIT_COMPLETE_NOTIF timeout\n");
+        host::dprint("[ax200] INIT_COMPLETE_NOTIF timeout\n");
         false
     }
 
@@ -884,11 +884,11 @@ impl Ax200 {
     // response feeds the scan channel list (Stage 4d).
     fn read_nvm(&mut self) -> bool {
         self.send_hcmd(REGULATORY_AND_NVM_GROUP, NVM_GET_INFO, &0u32.to_le_bytes());
-        host::print("[ax200] NVM_GET_INFO sent, waiting for response...\n");
+        host::dprint("[ax200] NVM_GET_INFO sent, waiting for response...\n");
         let rb = match self.wait_rx(NVM_GET_INFO, REGULATORY_AND_NVM_GROUP, 2000) {
             Some(rb) => rb,
             None => {
-                host::print("[ax200] NVM_GET_INFO timeout\n");
+                host::dprint("[ax200] NVM_GET_INFO timeout\n");
                 return false;
             }
         };
@@ -906,27 +906,27 @@ impl Ax200 {
         };
 
         let mac_sku = rd32(NVM_OFF_MAC_SKU);
-        host::print("[ax200]   NVM rsp_len=");
-        host::print_hex32(payload_len);
-        host::print(" version=0x");
-        host::print_hex16(rd16(NVM_OFF_VERSION));
-        host::print(" n_hw_addrs=");
-        host::print_hex32(p[b + NVM_OFF_N_HW_ADDRS] as u32);
-        host::print("\n");
+        host::dprint("[ax200]   NVM rsp_len=");
+        host::dprint_hex32(payload_len);
+        host::dprint(" version=0x");
+        host::dprint_hex16(rd16(NVM_OFF_VERSION));
+        host::dprint(" n_hw_addrs=");
+        host::dprint_hex32(p[b + NVM_OFF_N_HW_ADDRS] as u32);
+        host::dprint("\n");
 
-        host::print("[ax200]   bands:");
-        if mac_sku & NVM_SKU_BAND_24 != 0 { host::print(" 2.4G"); }
-        if mac_sku & NVM_SKU_BAND_52 != 0 { host::print(" 5G"); }
-        if mac_sku & NVM_SKU_11N != 0 { host::print(" 11n"); }
-        if mac_sku & NVM_SKU_11AC != 0 { host::print(" 11ac"); }
-        if mac_sku & NVM_SKU_11AX != 0 { host::print(" 11ax"); }
-        host::print(" | tx_chains=0x");
-        host::print_hex32(rd32(NVM_OFF_TX_CHAINS));
-        host::print(" rx_chains=0x");
-        host::print_hex32(rd32(NVM_OFF_RX_CHAINS));
-        host::print(" lar=0x");
-        host::print_hex32(rd32(NVM_OFF_LAR));
-        host::print("\n");
+        host::dprint("[ax200]   bands:");
+        if mac_sku & NVM_SKU_BAND_24 != 0 { host::dprint(" 2.4G"); }
+        if mac_sku & NVM_SKU_BAND_52 != 0 { host::dprint(" 5G"); }
+        if mac_sku & NVM_SKU_11N != 0 { host::dprint(" 11n"); }
+        if mac_sku & NVM_SKU_11AC != 0 { host::dprint(" 11ac"); }
+        if mac_sku & NVM_SKU_11AX != 0 { host::dprint(" 11ax"); }
+        host::dprint(" | tx_chains=0x");
+        host::dprint_hex32(rd32(NVM_OFF_TX_CHAINS));
+        host::dprint(" rx_chains=0x");
+        host::dprint_hex32(rd32(NVM_OFF_RX_CHAINS));
+        host::dprint(" lar=0x");
+        host::dprint_hex32(rd32(NVM_OFF_LAR));
+        host::dprint("\n");
 
         self.read_mac_address();
 
@@ -959,9 +959,9 @@ impl Ax200 {
                 self.n_scan_chans += 1;
             }
         }
-        host::print("[ax200]   scan channels: ");
-        host::print_dec(self.n_scan_chans as u32);
-        host::print(" valid (2.4 + 5 GHz)\n");
+        host::dprint("[ax200]   scan channels: ");
+        host::dprint_dec(self.n_scan_chans as u32);
+        host::dprint(" valid (2.4 + 5 GHz)\n");
         true
     }
 
@@ -1088,7 +1088,7 @@ impl Ax200 {
         put_u16(&mut cmd, MCC_OFF_MCC, MCC_ALPHA2_ZZ);
         cmd[MCC_OFF_SOURCE] = MCC_SOURCE_GET_CURRENT;
         self.send_hcmd(0, MCC_UPDATE_CMD, &cmd);
-        host::print("[ax200] MCC_UPDATE_CMD (ZZ / get-current) sent, waiting...\n");
+        host::dprint("[ax200] MCC_UPDATE_CMD (ZZ / get-current) sent, waiting...\n");
 
         // The command is promoted to LONG_GROUP (1) in send_hcmd, so its
         // WANT_SKB response echoes group 1 (cf. NVM_GET_INFO echoing its group).
@@ -1102,16 +1102,16 @@ impl Ax200 {
                 };
                 let mcc = u16::from_le_bytes([p[b + MCC_RESP_OFF_MCC], p[b + MCC_RESP_OFF_MCC + 1]]);
                 let cc = [(mcc >> 8) as u8, mcc as u8];
-                host::print("[ax200]   MCC set to '");
-                host::print(unsafe { core::str::from_utf8_unchecked(&cc) });
-                host::print("' status=0x");
-                host::print_hex32(rd32(MCC_RESP_OFF_STATUS));
-                host::print(" n_channels=0x");
-                host::print_hex32(rd32(MCC_RESP_OFF_N_CHANNELS));
-                host::print("\n");
+                host::dprint("[ax200]   MCC set to '");
+                host::dprint(unsafe { core::str::from_utf8_unchecked(&cc) });
+                host::dprint("' status=0x");
+                host::dprint_hex32(rd32(MCC_RESP_OFF_STATUS));
+                host::dprint(" n_channels=0x");
+                host::dprint_hex32(rd32(MCC_RESP_OFF_N_CHANNELS));
+                host::dprint("\n");
             }
             None => {
-                host::print("[ax200]   MCC: no response (scan may stay blocked)\n");
+                host::dprint("[ax200]   MCC: no response (scan may stay blocked)\n");
                 // No response to a CMD_WANT_SKB command is a strong sign the FW
                 // asserted on an earlier command — dump its error log.
                 self.dump_fw_error_log();
@@ -1157,7 +1157,7 @@ impl Ax200 {
         // union iwl_mac_data_sta: is_assoc = 0 and all timing fields = 0.
 
         self.send_hcmd(0, MAC_CONTEXT_CMD_OP, &cmd);
-        host::print("[ax200] MAC_CONTEXT_CMD (add station ctx id 0) sent\n");
+        host::dprint("[ax200] MAC_CONTEXT_CMD (add station ctx id 0) sent\n");
         self.pump_rx(50);
     }
 
@@ -1171,17 +1171,17 @@ impl Ax200 {
             mac = mac_from_regs(self.r32(CSR_MAC_ADDR0_OTP), self.r32(CSR_MAC_ADDR1_OTP));
         }
         self.mac = mac;
-        host::print("[ax200]   MAC address: ");
+        host::dprint("[ax200]   MAC address: ");
         Self::print_mac(&mac);
-        host::print("\n");
+        host::dprint("\n");
     }
 
     fn print_mac(mac: &[u8; 6]) {
         for i in 0..6 {
             if i != 0 {
-                host::print(":");
+                host::dprint(":");
             }
-            host::print_hex8(mac[i]);
+            host::dprint_hex8(mac[i]);
         }
     }
 
@@ -1406,9 +1406,9 @@ impl Ax200 {
         let mut buf = [0u8; SCAN_CMD_LEN];
         self.build_scan_cmd(&mut buf);
         self.send_hcmd(IWL_ALWAYS_LONG_GROUP, SCAN_REQ_UMAC, &buf);
-        host::print("[ax200] SCAN_REQ_UMAC sent (passive, ");
-        host::print_dec(self.n_scan_chans as u32);
-        host::print(" channels, 2.4 + 5 GHz), scanning...\n");
+        host::dprint("[ax200] SCAN_REQ_UMAC sent (passive, ");
+        host::dprint_dec(self.n_scan_chans as u32);
+        host::dprint(" channels, 2.4 + 5 GHz), scanning...\n");
 
         let mut frames = 0u32;
         let mut aps = [Ap::EMPTY; MAX_APS];
@@ -1431,9 +1431,9 @@ impl Ax200 {
                 true
             });
             if completed {
-                host::print("[ax200] SCAN_COMPLETE_UMAC received — frames seen: ");
-                host::print_dec(frames);
-                host::print("\n");
+                host::dprint("[ax200] SCAN_COMPLETE_UMAC received — frames seen: ");
+                host::dprint_dec(frames);
+                host::dprint("\n");
                 Self::print_aps(&aps, n_aps);
                 // Pick the strongest AP as the connect target (#3 connect).
                 let mut best = usize::MAX;
@@ -1458,9 +1458,9 @@ impl Ax200 {
             }
             host::sleep_ms(1);
         }
-        host::print("[ax200] SCAN_COMPLETE timeout — frames seen: 0x");
-        host::print_hex32(frames);
-        host::print("\n");
+        host::dprint("[ax200] SCAN_COMPLETE timeout — frames seen: 0x");
+        host::dprint_hex32(frames);
+        host::dprint("\n");
         self.dump_fw_error_log();
         false
     }
@@ -1484,11 +1484,11 @@ impl Ax200 {
         pc[PC_OFF_CI_CTRL_POS] = 0; // 20 MHz → control channel position 0
         put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX); // no CDB → 0
         self.send_hcmd(0, PHY_CONTEXT_CMD, &pc); // legacy → LONG_GROUP
-        host::print("[ax200] PHY_CONTEXT_CMD sent (ch ");
-        host::print_dec(self.target_chan as u32);
-        host::print(", band ");
-        host::print_dec(self.target_band as u32);
-        host::print(")\n");
+        host::dprint("[ax200] PHY_CONTEXT_CMD sent (ch ");
+        host::dprint_dec(self.target_chan as u32);
+        host::dprint(", band ");
+        host::dprint_dec(self.target_band as u32);
+        host::dprint(")\n");
         self.pump_rx(20);
 
         // RLC_CONFIG_CMD v2 (DATA_PATH_GROUP) — RX chains for the PHY context.
@@ -1496,7 +1496,7 @@ impl Ax200 {
         put_u32(&mut rlc, RLC_OFF_PHY_ID, 0);
         put_u32(&mut rlc, RLC_OFF_RX_CHAIN_INFO, RLC_RX_CHAIN_INFO_2X2);
         self.send_hcmd(DATA_PATH_GROUP, RLC_CONFIG_CMD, &rlc);
-        host::print("[ax200] RLC_CONFIG_CMD sent\n");
+        host::dprint("[ax200] RLC_CONFIG_CMD sent\n");
         self.pump_rx(20);
 
         // BINDING_CONTEXT_CMD v2 (action ADD): MAC ctx 0 ↔ PHY ctx 0.
@@ -1509,20 +1509,20 @@ impl Ax200 {
         put_u32(&mut bc, BC_OFF_PHY, 0); // phy id 0
         put_u32(&mut bc, BC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX);
         self.send_hcmd(0, BINDING_CONTEXT_CMD, &bc); // legacy → LONG_GROUP
-        host::print("[ax200] BINDING_CONTEXT_CMD sent, waiting for status...\n");
+        host::dprint("[ax200] BINDING_CONTEXT_CMD sent, waiting for status...\n");
         match self.wait_rx(BINDING_CONTEXT_CMD, IWL_ALWAYS_LONG_GROUP, 1000) {
             Some(rb) => {
                 let mut p = [0u8; 16];
                 host::dma_read_buf(rb.handle, 0, &mut p);
                 let status = le32(&p, RX_PKT_DATA_OFF);
-                host::print("[ax200]   binding status=0x");
-                host::print_hex32(status);
-                host::print("\n");
-                host::print("[ax200] Stage 5a OK — PHY context + RLC + binding\n");
+                host::dprint("[ax200]   binding status=0x");
+                host::dprint_hex32(status);
+                host::dprint("\n");
+                host::dprint("[ax200] Stage 5a OK — PHY context + RLC + binding\n");
                 true
             }
             None => {
-                host::print("[ax200] Stage 5a FAILED — binding no response\n");
+                host::dprint("[ax200] Stage 5a FAILED — binding no response\n");
                 self.dump_fw_error_log();
                 false
             }
@@ -1549,23 +1549,23 @@ impl Ax200 {
         put_u32(&mut sc, AS_OFF_STATION_FLAGS_MSK, STA_FLAGS_MSK_ADD);
         sc[AS_OFF_STATION_TYPE] = IWL_STA_LINK;
         self.send_hcmd(0, ADD_STA, &sc); // legacy → LONG_GROUP
-        host::print("[ax200] ADD_STA sent (AP peer, sta_id 0), waiting...\n");
+        host::dprint("[ax200] ADD_STA sent (AP peer, sta_id 0), waiting...\n");
         match self.wait_rx(ADD_STA, IWL_ALWAYS_LONG_GROUP, 1000) {
             Some(rb) => {
                 let mut p = [0u8; 16];
                 host::dma_read_buf(rb.handle, 0, &mut p);
                 let status = le32(&p, RX_PKT_DATA_OFF) & ADD_STA_STATUS_MASK;
-                host::print("[ax200]   ADD_STA status=0x");
-                host::print_hex32(status);
-                host::print("\n");
+                host::dprint("[ax200]   ADD_STA status=0x");
+                host::dprint_hex32(status);
+                host::dprint("\n");
                 if status != ADD_STA_SUCCESS {
-                    host::print("[ax200] Stage 5b FAILED — ADD_STA rejected\n");
+                    host::dprint("[ax200] Stage 5b FAILED — ADD_STA rejected\n");
                     self.dump_fw_error_log();
                     return false;
                 }
             }
             None => {
-                host::print("[ax200] Stage 5b FAILED — ADD_STA no response\n");
+                host::dprint("[ax200] Stage 5b FAILED — ADD_STA no response\n");
                 self.dump_fw_error_log();
                 return false;
             }
@@ -1579,7 +1579,7 @@ impl Ax200 {
         self.mgmt_payload = self.alloc_dma(TX_PAYLOAD_STRIDE * IWL_MGMT_QUEUE_SIZE, "mgmt.payload");
         self.mgmt_bc_tbl = self.alloc_dma(BC_TBL_BYTES, "mgmt.bc_tbl");
         if !self.mgmt_tfd.ok() || !self.mgmt_first_tb.ok() || !self.mgmt_payload.ok() || !self.mgmt_bc_tbl.ok() {
-            host::print("[ax200] Stage 5b FAILED — TX queue DMA alloc\n");
+            host::dprint("[ax200] Stage 5b FAILED — TX queue DMA alloc\n");
             return false;
         }
 
@@ -1593,7 +1593,7 @@ impl Ax200 {
         put_u64(&mut q, SQ_OFF_BC_DRAM_ADDR, self.mgmt_bc_tbl.phys);
         put_u64(&mut q, SQ_OFF_TFDQ_DRAM_ADDR, self.mgmt_tfd.phys);
         self.send_hcmd(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD, &q);
-        host::print("[ax200] SCD_QUEUE_CONFIG_CMD sent (mgmt tid 15), waiting...\n");
+        host::dprint("[ax200] SCD_QUEUE_CONFIG_CMD sent (mgmt tid 15), waiting...\n");
         match self.wait_rx(SCD_QUEUE_CONFIG_CMD, DATA_PATH_GROUP, 1000) {
             Some(rb) => {
                 let mut p = [0u8; 16];
@@ -1607,16 +1607,16 @@ impl Ax200 {
                     p[b + SQ_RSP_OFF_WRITE_PTR],
                     p[b + SQ_RSP_OFF_WRITE_PTR + 1],
                 ]) as u32;
-                host::print("[ax200]   mgmt queue_id=");
-                host::print_dec(self.mgmt_queue_id as u32);
-                host::print(" write_ptr=");
-                host::print_dec(self.mgmt_write_ptr);
-                host::print("\n");
-                host::print("[ax200] Stage 5b OK — station + TX queue allocated\n");
+                host::dprint("[ax200]   mgmt queue_id=");
+                host::dprint_dec(self.mgmt_queue_id as u32);
+                host::dprint(" write_ptr=");
+                host::dprint_dec(self.mgmt_write_ptr);
+                host::dprint("\n");
+                host::dprint("[ax200] Stage 5b OK — station + TX queue allocated\n");
                 true
             }
             None => {
-                host::print("[ax200] Stage 5b FAILED — SCD_QUEUE_CONFIG no response\n");
+                host::dprint("[ax200] Stage 5b FAILED — SCD_QUEUE_CONFIG no response\n");
                 self.dump_fw_error_log();
                 false
             }
@@ -1638,7 +1638,7 @@ impl Ax200 {
         put_u32(&mut pm, MP_OFF_ID_COLOR, 0); // FW_CMD_ID_AND_COLOR(0,0)
         put_u16(&mut pm, MP_OFF_KEEP_ALIVE, POWER_KEEP_ALIVE_PERIOD_SEC);
         self.send_hcmd(0, MAC_PM_POWER_TABLE, &pm);
-        host::print("[ax200] MAC_PM_POWER_TABLE sent (PS disabled)\n");
+        host::dprint("[ax200] MAC_PM_POWER_TABLE sent (PS disabled)\n");
         self.pump_rx(20);
 
         // iwl_mvm_mac_ctxt_changed (MODIFY) with the target AP's BSSID + timing,
@@ -1658,7 +1658,7 @@ impl Ax200 {
         put_u32(&mut cmd, MC_OFF_STA_IS_ASSOC, 0);
         put_u32(&mut cmd, MC_OFF_STA_BI, self.target_beacon_int as u32);
         self.send_hcmd(0, MAC_CONTEXT_CMD_OP, &cmd);
-        host::print("[ax200] MAC_CONTEXT_CMD (modify, target BSSID) sent\n");
+        host::dprint("[ax200] MAC_CONTEXT_CMD (modify, target BSSID) sent\n");
         self.pump_rx(50);
     }
 
@@ -1687,7 +1687,7 @@ impl Ax200 {
         };
         put_u16(&mut cmd, TLC_OFF_NON_HT_RATES, non_ht);
         self.send_hcmd(DATA_PATH_GROUP, TLC_MNG_CONFIG_CMD, &cmd);
-        host::print("[ax200] TLC_MNG_CONFIG_CMD sent — rate scaling on (legacy 1..54M)\n");
+        host::dprint("[ax200] TLC_MNG_CONFIG_CMD sent — rate scaling on (legacy 1..54M)\n");
         self.pump_rx(20);
     }
 
@@ -1855,9 +1855,9 @@ impl Ax200 {
                     u16::from_le_bytes([p[b + SQ_RSP_OFF_QUEUE_NUMBER], p[b + SQ_RSP_OFF_QUEUE_NUMBER + 1]]);
                 self.data_write_ptr =
                     u16::from_le_bytes([p[b + SQ_RSP_OFF_WRITE_PTR], p[b + SQ_RSP_OFF_WRITE_PTR + 1]]) as u32;
-                host::print("[ax200] data queue_id=");
-                host::print_dec(self.data_queue_id as u32);
-                host::print("\n");
+                host::dprint("[ax200] data queue_id=");
+                host::dprint_dec(self.data_queue_id as u32);
+                host::dprint("\n");
                 true
             }
             None => false,
@@ -1881,7 +1881,7 @@ impl Ax200 {
         cmd[KEY_OFF_RX_SEQ..KEY_OFF_RX_SEQ + rl].copy_from_slice(&rsc[..rl]);
         self.send_hcmd(0, ADD_STA_KEY_CMD, &cmd); // → LONG_GROUP(1)
         self.pump_rx(20);
-        host::print(if group {
+        host::dprint(if group {
             "[ax200] ADD_STA_KEY GTK installed\n"
         } else {
             "[ax200] ADD_STA_KEY PTK installed\n"
@@ -2012,7 +2012,7 @@ impl Ax200 {
         put_u32(&mut sp, SP_OFF_CONF_ID, SESSION_PROTECT_CONF_ASSOC);
         put_u32(&mut sp, SP_OFF_DURATION_TU, SP_DURATION_TU);
         self.send_hcmd(MAC_CONF_GROUP, SESSION_PROTECTION_CMD, &sp);
-        host::print("[ax200] SESSION_PROTECTION_CMD sent (assoc, 878 TU)\n");
+        host::dprint("[ax200] SESSION_PROTECTION_CMD sent (assoc, 878 TU)\n");
         self.pump_rx(50);
 
         // 802.11 open-system auth request: DA/BSSID = AP, SA = us, seq 1.
@@ -2026,7 +2026,7 @@ impl Ax200 {
         put_u16(&mut fr, b + 2, DOT11_AUTH_SEQ_1);
         put_u16(&mut fr, b + 4, 0);
         self.tx_mgmt_frame(&fr);
-        host::print("[ax200] AUTH request TX'd (open-system), waiting for response...\n");
+        host::dprint("[ax200] AUTH request TX'd (open-system), waiting for response...\n");
 
         // Auth response body: algorithm(2), seq(2), status(2).
         match self.wait_mgmt_response(DOT11_STYPE_AUTH, 2000) {
@@ -2034,7 +2034,7 @@ impl Ax200 {
                 let seq = u16::from_le_bytes([body[2], body[3]]);
                 let status = u16::from_le_bytes([body[4], body[5]]);
                 if status == DOT11_STATUS_SUCCESS && seq == DOT11_AUTH_SEQ_2 {
-                    host::print("[ax200] Stage 5c OK — AUTH accepted (status 0, seq 2)\n");
+                    host::dprint("[ax200] Stage 5c OK — AUTH accepted (status 0, seq 2)\n");
                     true
                 } else {
                     host::print("[ax200] AUTH rejected: status=");
@@ -2046,7 +2046,7 @@ impl Ax200 {
                 }
             }
             None => {
-                host::print("[ax200] Stage 5c — no AUTH response\n");
+                host::print("[ax200] no AUTH response\n");
                 self.dump_fw_error_log();
                 false
             }
@@ -2119,7 +2119,7 @@ impl Ax200 {
         }
 
         self.tx_mgmt_frame(&fr[..p]);
-        host::print("[ax200] ASSOC request TX'd, waiting for response...\n");
+        host::dprint("[ax200] ASSOC request TX'd, waiting for response...\n");
 
         // Assoc response body: capability(2), status_code(2), aid(2).
         match self.wait_mgmt_response(DOT11_STYPE_ASSOC_RESP, 2000) {
@@ -2129,7 +2129,7 @@ impl Ax200 {
                 let aid =
                     u16::from_le_bytes([body[ASSOC_RESP_OFF_AID], body[ASSOC_RESP_OFF_AID + 1]]) & 0x3fff;
                 if status == DOT11_STATUS_SUCCESS {
-                    host::print("[ax200] Stage 5d OK — *** ASSOCIATED *** aid=");
+                    host::print("[ax200] *** ASSOCIATED *** aid=");
                     host::print_dec(aid as u32);
                     host::print("\n");
                     true
@@ -2141,7 +2141,7 @@ impl Ax200 {
                 }
             }
             None => {
-                host::print("[ax200] Stage 5d — no ASSOC response\n");
+                host::print("[ax200] no ASSOC response\n");
                 false
             }
         }
@@ -2157,11 +2157,11 @@ impl Ax200 {
     fn run_netdev(&mut self, associated: bool) -> ! {
         let mac = self.mac;
         if host::netdev_register(&mac) == 0 {
-            host::print("[ax200] registered as network interface 'wlan' (");
+            host::dprint("[ax200] registered as network interface 'wlan' (");
             Self::print_mac(&mac);
-            host::print(")\n");
+            host::dprint(")\n");
         } else {
-            host::print("[ax200] netdev_register failed\n");
+            host::dprint("[ax200] netdev_register failed\n");
         }
         // The data TX queue was allocated before auth (so its SCD-response wait
         // wouldn't swallow the AP's first EAPOL frame). Tell wifid the connection
@@ -2175,7 +2175,7 @@ impl Ax200 {
             ready[1..7].copy_from_slice(&self.target_bssid);
             ready[7..13].copy_from_slice(&our_mac);
             host::wifi_send_event(&ready);
-            host::print("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
+            host::dprint("[ax200] associated — READY sent, listening for EAPOL (4-way)\n");
             // Configure firmware rate scaling for the station now (Linux does it
             // at the assoc state change). Data only flows after AUTHORIZED, so
             // TLC is always in place before the first IP frame.
@@ -2210,15 +2210,17 @@ impl Ax200 {
                         }
                         RxKind::Ip(n) => {
                             if rx_log < 12 {
-                                host::print("[ax200] data RX → IP stack (len ");
-                                host::print_dec(n as u32);
-                                host::print(", etype 0x");
-                                host::print_hex8(rxbuf[12]);
-                                host::print_hex8(rxbuf[13]);
-                                host::print(")\n");
+                                host::dprint("[ax200] data RX → IP stack (len ");
+                                host::dprint_dec(n as u32);
+                                host::dprint(", etype 0x");
+                                host::dprint_hex8(rxbuf[12]);
+                                host::dprint_hex8(rxbuf[13]);
+                                host::dprint(")\n");
                                 rx_log += 1;
                             }
-                            host::netdev_submit_rx(&rxbuf[..n]);
+                            // Deliver straight into the IP stack from this fiber
+                            // (NAPI topology) — no relay-ring + Core-0 hop.
+                            host::netdev_rx_deliver(&rxbuf[..n]);
                         }
                         RxKind::None => {}
                     }
@@ -2242,12 +2244,12 @@ impl Ax200 {
                 }
                 tx_any = true;
                 if tx_log < 12 {
-                    host::print("[ax200] data TX ← IP stack (len ");
-                    host::print_dec(n as u32);
-                    host::print(", etype 0x");
-                    host::print_hex8(txbuf[12]);
-                    host::print_hex8(txbuf[13]);
-                    host::print(")\n");
+                    host::dprint("[ax200] data TX ← IP stack (len ");
+                    host::dprint_dec(n as u32);
+                    host::dprint(", etype 0x");
+                    host::dprint_hex8(txbuf[12]);
+                    host::dprint_hex8(txbuf[13]);
+                    host::dprint(")\n");
                     tx_log += 1;
                 }
                 self.tx_eth(&txbuf[..n]);
@@ -2263,7 +2265,7 @@ impl Ax200 {
             if self.data_in_flight as usize >= IWL_DATA_QUEUE_SIZE - 1 {
                 stall += 1;
                 if stall == 500 {
-                    host::print("[ax200] WARNING: data TX queue stuck full — FW not draining\n");
+                    host::dprint("[ax200] WARNING: data TX queue stuck full — FW not draining\n");
                     self.dump_fw_error_log();
                     // Recover rather than wedge TX forever: if completions were
                     // somehow missed, clear the in-flight count so TX resumes.
@@ -2292,9 +2294,9 @@ impl Ax200 {
             Some(CMD_TX_EAPOL) if cmd.len() >= 3 => {
                 let len = ((cmd[2] as usize) << 8) | cmd[1] as usize;
                 if cmd.len() >= 3 + len {
-                    host::print("[ax200] TX_EAPOL (len ");
-                    host::print_dec(len as u32);
-                    host::print(")\n");
+                    host::dprint("[ax200] TX_EAPOL (len ");
+                    host::dprint_dec(len as u32);
+                    host::dprint(")\n");
                     let dst = self.target_bssid;
                     let _ = self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], false);
                 }
@@ -2313,7 +2315,7 @@ impl Ax200 {
             // AUTHORIZED: 4-way done → carrier up, IP data path live.
             Some(CMD_AUTHORIZED) => {
                 host::netdev_set_link(true);
-                host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉 (run `dhcp`)\n");
+                host::print("[ax200] *** AUTHORIZED *** — link up, data path live 🎉\n");
                 let mut up = [0u8; 7];
                 up[0] = EV_LINK_UP;
                 up[1..7].copy_from_slice(&self.target_bssid);
@@ -2357,39 +2359,39 @@ impl Ax200 {
     // cmd_header name the command the firmware faulted on.
     fn dump_fw_error_log(&self) {
         if self.lmac_err_ptr == 0 || !self.grab_nic_access() {
-            host::print("[ax200] err-log: no NIC access\n");
+            host::dprint("[ax200] err-log: no NIC access\n");
             return;
         }
         let mut l = [0u32; LERR_WORDS];
         self.read_mem(self.lmac_err_ptr, &mut l);
-        host::print("[ax200] LMAC err: valid=0x");
-        host::print_hex32(l[LERR_VALID]);
-        host::print(" id=0x");
-        host::print_hex32(l[LERR_ERROR_ID]);
-        host::print(" data1=0x");
-        host::print_hex32(l[LERR_DATA1]);
-        host::print(" data2=0x");
-        host::print_hex32(l[LERR_DATA2]);
-        host::print(" data3=0x");
-        host::print_hex32(l[LERR_DATA3]);
-        host::print(" hcmd=0x");
-        host::print_hex32(l[LERR_HCMD]);
-        host::print(" last_cmd=0x");
-        host::print_hex32(l[LERR_LAST_CMD_ID]);
-        host::print("\n");
+        host::dprint("[ax200] LMAC err: valid=0x");
+        host::dprint_hex32(l[LERR_VALID]);
+        host::dprint(" id=0x");
+        host::dprint_hex32(l[LERR_ERROR_ID]);
+        host::dprint(" data1=0x");
+        host::dprint_hex32(l[LERR_DATA1]);
+        host::dprint(" data2=0x");
+        host::dprint_hex32(l[LERR_DATA2]);
+        host::dprint(" data3=0x");
+        host::dprint_hex32(l[LERR_DATA3]);
+        host::dprint(" hcmd=0x");
+        host::dprint_hex32(l[LERR_HCMD]);
+        host::dprint(" last_cmd=0x");
+        host::dprint_hex32(l[LERR_LAST_CMD_ID]);
+        host::dprint("\n");
 
         if self.umac_err_ptr != 0 {
             let mut u = [0u32; UERR_WORDS];
             self.read_mem(self.umac_err_ptr, &mut u);
-            host::print("[ax200] UMAC err: valid=0x");
-            host::print_hex32(u[UERR_VALID]);
-            host::print(" id=0x");
-            host::print_hex32(u[UERR_ERROR_ID]);
-            host::print(" data1=0x");
-            host::print_hex32(u[UERR_DATA1]);
-            host::print(" cmd_hdr=0x");
-            host::print_hex32(u[UERR_CMD_HEADER]);
-            host::print("\n");
+            host::dprint("[ax200] UMAC err: valid=0x");
+            host::dprint_hex32(u[UERR_VALID]);
+            host::dprint(" id=0x");
+            host::dprint_hex32(u[UERR_ERROR_ID]);
+            host::dprint(" data1=0x");
+            host::dprint_hex32(u[UERR_DATA1]);
+            host::dprint(" cmd_hdr=0x");
+            host::dprint_hex32(u[UERR_CMD_HEADER]);
+            host::dprint("\n");
         }
         host::mmio_clr32(self.mmio, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
     }
@@ -2405,10 +2407,10 @@ impl Ax200 {
 
 /// Log a DMA allocation's physical address (Stage 1 diagnostics).
 fn log_dma(name: &str, d: &Dma) {
-    host::print(name);
-    host::print(": phys 0x");
-    host::print_hex64(d.phys);
-    host::print("\n");
+    host::dprint(name);
+    host::dprint(": phys 0x");
+    host::dprint_hex64(d.phys);
+    host::dprint("\n");
 }
 
 /// iwl_fw_lookup_cmd_ver (fw/img.c): walk the embedded firmware's
@@ -2466,11 +2468,11 @@ fn fw_has_capa(cap: u32) -> bool {
 
 /// Log one command's firmware version (Stage 4d1 diagnostics).
 fn log_cmd_ver(name: &str, group: u8, cmd: u8) {
-    host::print("[ax200]   ");
-    host::print(name);
-    host::print(" v=");
-    host::print_hex32(fw_cmd_ver(group, cmd) as u32);
-    host::print("\n");
+    host::dprint("[ax200]   ");
+    host::dprint(name);
+    host::dprint(" v=");
+    host::dprint_hex32(fw_cmd_ver(group, cmd) as u32);
+    host::dprint("\n");
 }
 
 /// iwl_flip_hw_address: build the 6-byte MAC from the two CSR registers.
@@ -2522,30 +2524,30 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.38.0 — revert CAM (power-save back on, stable connect)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.39.0 — RX direct-to-IP-stack (NAPI topology, off Core 0)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
     if rc != 0 {
-        host::print("[ax200] PCI bind failed (");
+        host::dprint("[ax200] PCI bind failed (");
         match rc {
-            -1 => host::print("not found"),
-            -2 => host::print("denied"),
-            _ => host::print("unknown error"),
+            -1 => host::dprint("not found"),
+            -2 => host::dprint("denied"),
+            _ => host::dprint("unknown error"),
         }
-        host::print(")\n");
+        host::dprint(")\n");
         return;
     }
-    host::print("[ax200] PCI bind OK\n");
+    host::dprint("[ax200] PCI bind OK\n");
 
     host::pci_enable_bus_master();
 
     let mmio = host::mmio_map_bar(BAR_CSR, 16);
     if mmio < 0 {
-        host::print("[ax200] BAR0 map failed\n");
+        host::dprint("[ax200] BAR0 map failed\n");
         return;
     }
-    host::print("[ax200] BAR0 mapped\n");
+    host::dprint("[ax200] BAR0 mapped\n");
 
     let mut dev = Ax200 {
         mmio,
@@ -2598,29 +2600,29 @@ pub extern "C" fn _start() {
     host::log_reg("CSR_HW_RF_ID", rf_id);
 
     if hw_rev == 0xFFFF_FFFF || hw_rev == 0 {
-        host::print("[ax200] HW_REV looks wrong — chip not responding?\n");
+        host::dprint("[ax200] HW_REV looks wrong — chip not responding?\n");
         return;
     }
     // RF type lives in the high nibble pattern; HR is the AX200's radio.
     if rf_id & 0x0FFF_F000 == CSR_HW_RF_ID_TYPE_HR & 0x0FFF_F000 {
-        host::print("[ax200] RF type = HR (matches AX200) — Stage 0a OK\n");
+        host::dprint("[ax200] RF type = HR (matches AX200) — Stage 0a OK\n");
     } else {
-        host::print("[ax200] RF type unexpected (continuing anyway)\n");
+        host::dprint("[ax200] RF type unexpected (continuing anyway)\n");
     }
 
     // ── Stage 0b: reset + APM bring-up ───────────────────────────
     if !dev.start_hw() {
-        host::print("[ax200] Stage 0b FAILED\n");
+        host::dprint("[ax200] Stage 0b FAILED\n");
         return;
     }
-    host::print("[ax200] Stage 0b OK — chip powered up, PRPH accessible\n");
+    host::dprint("[ax200] Stage 0b OK — chip powered up, PRPH accessible\n");
 
     // ── Stage 1: RX/TX rings + command queue ─────────────────────
     if !dev.nic_init() {
-        host::print("[ax200] Stage 1 FAILED\n");
+        host::dprint("[ax200] Stage 1 FAILED\n");
         return;
     }
-    host::print("[ax200] Stage 1 OK — rings allocated:\n");
+    host::dprint("[ax200] Stage 1 OK — rings allocated:\n");
     log_dma("  rxq.bd      ", &dev.rxq_bd);
     log_dma("  rxq.used_bd ", &dev.rxq_used_bd);
     log_dma("  rxq.rb_stts ", &dev.rxq_rb_stts);
@@ -2629,27 +2631,27 @@ pub extern "C" fn _start() {
 
     // ── Stage 2: context-info + FW self-load + ALIVE ─────────────
     if dev.load_firmware() {
-        host::print("[ax200] Stage 2 OK — *** FIRMWARE ALIVE *** 🎉\n");
+        host::dprint("[ax200] Stage 2 OK — *** FIRMWARE ALIVE *** 🎉\n");
 
         // ── Stage 3: RX restock + read the ALIVE notification ────
         match dev.rx_restock_and_alive() {
             Some(rb0) => {
-                host::print("[ax200] Stage 3 OK — RX path live, alive notification received\n");
+                host::dprint("[ax200] Stage 3 OK — RX path live, alive notification received\n");
 
                 // ── Stage 4a: parse the ALIVE notification struct ──
                 if dev.parse_alive_ntf(&rb0) {
-                    host::print("[ax200] Stage 4a OK — firmware ALIVE valid (status OK)\n");
+                    host::dprint("[ax200] Stage 4a OK — firmware ALIVE valid (status OK)\n");
 
                     // ── Stage 4b: init-flow host commands → INIT_COMPLETE ──
                     if dev.run_init_handshake() {
-                        host::print("[ax200] Stage 4b OK — *** INIT_COMPLETE_NOTIF received *** 🎉\n");
+                        host::dprint("[ax200] Stage 4b OK — *** INIT_COMPLETE_NOTIF received *** 🎉\n");
 
                         // ── Stage 4c: read NVM info (caps + MAC address) ──
                         if dev.read_nvm() {
-                            host::print("[ax200] Stage 4c OK — NVM info read\n");
+                            host::dprint("[ax200] Stage 4c OK — NVM info read\n");
 
                             // ── Stage 4d1: firmware command versions (scan path) ──
-                            host::print("[ax200] FW cmd versions (scan path):\n");
+                            host::dprint("[ax200] FW cmd versions (scan path):\n");
                             log_cmd_ver("SCAN_REQ_UMAC ", IWL_ALWAYS_LONG_GROUP, SCAN_REQ_UMAC);
                             log_cmd_ver("SCAN_CFG_CMD  ", IWL_ALWAYS_LONG_GROUP, SCAN_CFG_CMD);
                             log_cmd_ver("ADD_STA       ", IWL_ALWAYS_LONG_GROUP, ADD_STA);
@@ -2657,21 +2659,21 @@ pub extern "C" fn _start() {
                             log_cmd_ver("MAC_CONTEXT   ", IWL_ALWAYS_LONG_GROUP, MAC_CONTEXT_CMD);
                             log_cmd_ver("TX_ANT_CFG    ", IWL_ALWAYS_LONG_GROUP, TX_ANT_CONFIGURATION_CMD);
                             log_cmd_ver("SCAN_COMPLETE ", IWL_ALWAYS_LONG_GROUP, SCAN_COMPLETE_UMAC);
-                            host::print("[ax200] Stage 4d1 OK — cmd versions read\n");
+                            host::dprint("[ax200] Stage 4d1 OK — cmd versions read\n");
 
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
-                            host::print("[ax200] Stage 4d2a OK — full iwl_mvm_up pre-scan seq sent\n");
+                            host::dprint("[ax200] Stage 4d2a OK — full iwl_mvm_up pre-scan seq sent\n");
 
                             // ── Stage 4d2b1b: add the MAC context the scan ──
                             // references (scan_start_mac_or_link_id → ctx id 0).
                             dev.add_mac_context();
-                            host::print("[ax200] Stage 4d2b1b OK — MAC context added\n");
+                            host::dprint("[ax200] Stage 4d2b1b OK — MAC context added\n");
 
                             // ── Stage 4d2b1/2: passive scan → SCAN_COMPLETE,
                             // parse beacons → access points (SSID/BSSID/RSSI). ──
                             if dev.run_scan() {
-                                host::print("[ax200] Stage 4d2b2 OK — *** SCAN COMPLETE, APs listed *** 🎉\n");
+                                host::dprint("[ax200] Stage 4d2b2 OK — *** SCAN COMPLETE, APs listed *** 🎉\n");
 
                                 // ── Stage 5a: PHY context + RLC + binding ──
                                 // First connect step (no TX yet): set the target
@@ -2689,7 +2691,7 @@ pub extern "C" fn _start() {
                                     // first EAPOL frame, and the post-assoc listen
                                     // can begin immediately.
                                     if !dev.alloc_data_queue() {
-                                        host::print("[ax200] data queue alloc FAILED\n");
+                                        host::dprint("[ax200] data queue alloc FAILED\n");
                                     }
                                     // ── Stage 5c/5d: AUTH → ASSOC mgmt dialog ──
                                     // Retry the whole auth+assoc up to 3× like
@@ -2718,22 +2720,22 @@ pub extern "C" fn _start() {
                                 // supplicant for a BSS we never joined and stall.
                                 dev.run_netdev(associated);
                             } else {
-                                host::print("[ax200] Stage 4d2b1 FAILED — no SCAN_COMPLETE\n");
+                                host::dprint("[ax200] Stage 4d2b1 FAILED — no SCAN_COMPLETE\n");
                             }
                         } else {
-                            host::print("[ax200] Stage 4c FAILED — no NVM response\n");
+                            host::dprint("[ax200] Stage 4c FAILED — no NVM response\n");
                         }
                     } else {
-                        host::print("[ax200] Stage 4b FAILED — no INIT_COMPLETE\n");
+                        host::dprint("[ax200] Stage 4b FAILED — no INIT_COMPLETE\n");
                     }
                 } else {
-                    host::print("[ax200] Stage 4a FAILED — firmware ALIVE not valid\n");
+                    host::dprint("[ax200] Stage 4a FAILED — firmware ALIVE not valid\n");
                 }
             }
-            None => host::print("[ax200] Stage 3 FAILED\n"),
+            None => host::dprint("[ax200] Stage 3 FAILED\n"),
         }
     } else {
-        host::print("[ax200] Stage 2 FAILED (no ALIVE)\n");
+        host::dprint("[ax200] Stage 2 FAILED (no ALIVE)\n");
     }
 
     // Halt the chip before returning: the kernel frees our DMA buffers on
