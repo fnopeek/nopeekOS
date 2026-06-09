@@ -149,9 +149,16 @@ fn do_http_request(args: &str, use_tls: bool) {
                     let maxbuf = crate::net::tcp::take_max_rxbuf();
                     let txsegs = crate::net::tcp::take_tx_segs();
                     let dt2 = now.wrapping_sub(last_tick).max(1);
-                    kprintln!("[npk]   rx {} KiB (~{} Mbit/s)  ooo: ahead={} dup={}  rxbuf_max={} KiB  tx_acks={}/s",
+                    // Profiler: avg ns in poll_rx_only vs recv per loop iter.
+                    use core::sync::atomic::Ordering::Relaxed;
+                    let iters = PROF_ITERS.swap(0, Relaxed).max(1);
+                    let poll_cyc = PROF_POLL_CYC.swap(0, Relaxed);
+                    let recv_cyc = PROF_RECV_CYC.swap(0, Relaxed);
+                    let ghz = (crate::interrupts::tsc_freq() / 1_000_000_000).max(1);
+                    kprintln!("[npk]   rx {} KiB (~{} Mbit/s)  ooo: a={} d={}  rxbuf={}K  tx_acks={}/s  | iters={} poll={}ns recv={}ns",
                         total / 1024, mbps, ooo_ahead, ooo_behind, maxbuf / 1024,
-                        txsegs as u64 * 100 / dt2);
+                        txsegs as u64 * 100 / dt2,
+                        iters, poll_cyc / iters / ghz, recv_cyc / iters / ghz);
                     last_tick = now;
                 }
                 Ok(())
@@ -768,11 +775,25 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
 }
 
 /// Plain-TCP recv with polling (no TLS). Analog of `tls_recv_poll`.
+// TEMP profiler: where does the recv loop's time go? TSC cycles + iteration
+// count, read+reset in the http heartbeat. Pinpoints the ~13 µs/packet.
+static PROF_POLL_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static PROF_RECV_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static PROF_ITERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+    use core::sync::atomic::Ordering::Relaxed;
     let start = crate::interrupts::ticks();
     loop {
+        let t0 = crate::interrupts::rdtsc();
         crate::net::poll_rx_only();
-        match crate::net::tcp::recv(handle, buf) {
+        let t1 = crate::interrupts::rdtsc();
+        let r = crate::net::tcp::recv(handle, buf);
+        let t2 = crate::interrupts::rdtsc();
+        PROF_POLL_CYC.fetch_add(t1.wrapping_sub(t0), Relaxed);
+        PROF_RECV_CYC.fetch_add(t2.wrapping_sub(t1), Relaxed);
+        PROF_ITERS.fetch_add(1, Relaxed);
+        match r {
             Ok(0) => {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
