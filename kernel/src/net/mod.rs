@@ -72,6 +72,29 @@ pub fn poll() {
     // per-frame notify to avoid a VM-exit per uploaded packet). No-op when no
     // virtio NIC / nothing pending.
     crate::virtio_net::tx_flush();
+}
+
+/// NIC-drain-only poll for the hot recv busy-spins (`tcp_recv_poll` /
+/// `tls_recv_poll`). Drains the RX ring into the IP stack but SKIPS
+/// `tcp::tick_connections` (128-slot scan + CONNECTIONS lock) and
+/// `shade::poll_render`. Those don't need to run at busy-spin rate (~1 M/s) —
+/// Core 0's `poll()` runs the TCP timers. Calling the full `poll()` in the spin
+/// burned the RX core on ~1 M CONNECTIONS-lock acquisitions + ~128 M slot-checks
+/// per second between chunks, starving the actual packet processing.
+pub fn poll_rx_only() {
+    if POLLING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        let mut buf = [0u8; netdev::MTU];
+        while let Some(len) = netdev::recv(&mut buf) {
+            if len >= 14 {
+                eth::handle_frame(&buf[..len]);
+            }
+        }
+        POLLING.store(false, Ordering::Release);
+    }
+    crate::virtio_net::tx_flush();
     // ALWAYS run (even if we skipped the drain above): progressive shade render
     // + mouse. Internally gated to Core 0, so only Core 0 executes it — no race
     // despite being outside the guard.
