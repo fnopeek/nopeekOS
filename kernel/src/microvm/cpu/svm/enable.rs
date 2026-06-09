@@ -1844,6 +1844,15 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_net.bar0_in_range(gpa) {
                     if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_net, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                        // Drain RX into the guest on its virtio-net access (was
+                        // starved at the ~1500/s timer/HLT pump → download cap).
+                        // Mirrors the VMX side. BSP only.
+                        if self.vcpu.apic_id == 0
+                            && crate::microvm::devices::nat::pump_fast(
+                                &mut sh.pci.virtio_net, &sh.guest_mem)
+                        {
+                            sh.pending_irqs |= 1 << 10;
+                        }
                         last_outcome = Some(outcome);
                         continue;
                     }
