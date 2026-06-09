@@ -1662,6 +1662,86 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
+    // ── Reconnect after a link loss (mesh steering / deauth) ──────────────
+    // The Fritzbox + Fritz repeater run one SSID across two APs and steer the
+    // client between them with a DEAUTH. We re-scan, re-point the already-added
+    // PHY context + station + MAC context at the best AP (may be the OTHER mesh
+    // node, on a different channel) via MODIFY actions — the binding (MAC0↔PHY0)
+    // and the TX queues persist, so NO DMA is re-allocated (the DMA budget can't
+    // churn per reconnect). Then redo auth + assoc and re-arm wifid for a fresh
+    // 4-way. Returns true once associated.
+
+    // PHY_CONTEXT_CMD v4 (action MODIFY) — re-point the PHY at the new channel.
+    fn update_phy_context(&mut self) {
+        let mut pc = [0u8; PHY_CTX_CMD_LEN];
+        put_u32(&mut pc, PC_OFF_ID_COLOR, 0);
+        put_u32(&mut pc, PC_OFF_ACTION, FW_CTXT_ACTION_MODIFY);
+        put_u32(&mut pc, PC_OFF_CI_CHANNEL, self.target_chan as u32);
+        pc[PC_OFF_CI_BAND] = self.target_band;
+        pc[PC_OFF_CI_WIDTH] = IWL_PHY_CHANNEL_MODE20;
+        pc[PC_OFF_CI_CTRL_POS] = 0;
+        put_u32(&mut pc, PC_OFF_LMAC_ID, IWL_LMAC_24G_INDEX);
+        self.send_hcmd(0, PHY_CONTEXT_CMD, &pc); // legacy → LONG_GROUP
+        self.pump_rx(20);
+    }
+
+    // ADD_STA v12 (action MODIFY) — re-point the AP-peer station at the new BSSID.
+    fn retarget_station(&mut self) {
+        let mut sc = [0u8; ADD_STA_CMD_LEN];
+        sc[AS_OFF_ADD_MODIFY] = 1; // modify
+        put_u16(&mut sc, AS_OFF_TID_DISABLE, TID_DISABLE_AGG_INIT);
+        put_u32(&mut sc, AS_OFF_MAC_ID_COLOR, 0);
+        sc[AS_OFF_ADDR..AS_OFF_ADDR + 6].copy_from_slice(&self.target_bssid);
+        sc[AS_OFF_STA_ID] = AP_STA_ID;
+        put_u32(&mut sc, AS_OFF_STATION_FLAGS, 0);
+        put_u32(&mut sc, AS_OFF_STATION_FLAGS_MSK, STA_FLAGS_MSK_ADD);
+        sc[AS_OFF_STATION_TYPE] = IWL_STA_LINK;
+        self.send_hcmd(0, ADD_STA, &sc); // legacy → LONG_GROUP
+        self.pump_rx(50);
+    }
+
+    fn reconnect(&mut self) -> bool {
+        host::print("[ax200] link lost — re-scanning to reconnect...\n");
+        host::netdev_set_link(false);
+        let mut down = [0u8; 7];
+        down[0] = EV_LINK_DOWN;
+        down[1..7].copy_from_slice(&self.target_bssid);
+        host::wifi_send_event(&down);
+
+        if !self.run_scan() || !self.target_valid {
+            return false;
+        }
+        // Re-point PHY + station + MAC context at the (possibly new) best AP.
+        self.update_phy_context();
+        self.retarget_station();
+        self.connect_finish_chanctx();
+
+        let mut associated = false;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                host::print("[ax200] reconnect retry ");
+                host::print_dec(attempt as u32 + 1);
+                host::print("/3...\n");
+            }
+            if self.connect_send_auth() && self.connect_send_assoc() {
+                associated = true;
+                break;
+            }
+        }
+        if associated {
+            host::print("[ax200] re-associated — re-running 4-way\n");
+            self.data_in_flight = 0;
+            let our_mac = self.mac;
+            let mut ready = [0u8; 13];
+            ready[0] = EV_READY;
+            ready[1..7].copy_from_slice(&self.target_bssid);
+            ready[7..13].copy_from_slice(&our_mac);
+            host::wifi_send_event(&ready);
+            self.connect_tlc_config();
+        }
+        associated
+    }
+
     // ── Rate scaling: TLC offload (iwl_mvm_rs_fw_rate_init, mvm/rs-fw.c) ──
     // Configure firmware rate scaling for the AP station so data frames stop
     // going out at the fixed host rate (1 Mbit CCK in tx_raw). We advertise the
@@ -2195,11 +2275,25 @@ impl Ax200 {
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
             // TX completions (TX_CMD response) free data-queue slots.
             let mut tx_done = 0u32;
+            let mut link_lost = false;
+            let mut deauth_reason = 0u16;
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
                     tx_done += 1;
                 } else if c == REPLY_RX_MPDU_CMD && g == 0 {
+                    // A DEAUTH / DISASSOC addressed to us = the AP dropped us
+                    // (the Fritz mesh steers between Fritzbox + repeater this way).
+                    // Stop draining and reconnect — otherwise the link silently
+                    // dies until the driver is re-run.
+                    if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
+                        if st == DOT11_STYPE_DEAUTH || st == DOT11_STYPE_DISASSOC {
+                            link_lost = true;
+                            deauth_reason = u16::from_le_bytes([body[0], body[1]]);
+                            return false;
+                        }
+                        return true; // other mgmt (beacon etc.) — ignore
+                    }
                     match Self::rx_classify(rb, &our_mac, &mut rxbuf) {
                         RxKind::Eapol(n) => {
                             evt[0] = EV_EAPOL_RX;
@@ -2232,6 +2326,20 @@ impl Ax200 {
             });
             // Free the data-queue slots the firmware just reported done.
             self.data_in_flight = self.data_in_flight.saturating_sub(tx_done);
+            // Link lost (deauth / disassoc): re-scan + reconnect to the best AP
+            // (may be the other mesh node). Keep retrying until associated; wifid
+            // then re-runs the 4-way and brings the link back up.
+            if link_lost {
+                host::print("[ax200] DEAUTH/DISASSOC from AP (reason ");
+                host::print_dec(deauth_reason as u32);
+                host::print(") — reconnecting\n");
+                while !self.reconnect() {
+                    host::print("[ax200] reconnect failed — retrying in 2s\n");
+                    host::sleep_ms(2000);
+                }
+                stall = 0;
+                continue;
+            }
             // TX: send every Ethernet frame the IP stack queued (DHCP, ARP, …),
             // but stop once the data queue is full — leave the rest in the kernel
             // mailbox so we never pop a frame we'd have to drop (and never lap the
@@ -2527,7 +2635,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.40.0 — revert NAPI RX (restore stable connect)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.41.0 — auto-reconnect on deauth (mesh steering)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
