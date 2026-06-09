@@ -17,11 +17,12 @@ struct HttpFlags {
     headers_only: bool,  // -h: show only headers
     body_only: bool,     // -b: show only body
     silent: bool,        // -s: no status output
+    discard: bool,       // -d: stream + count + report MB/s, DON'T store (RAM only)
 }
 
 /// Parse flags from anywhere in the args, return flags + cleaned args.
 fn parse_http_args(args: &str) -> (HttpFlags, String) {
-    let mut flags = HttpFlags { headers_only: false, body_only: false, silent: false };
+    let mut flags = HttpFlags { headers_only: false, body_only: false, silent: false, discard: false };
     let mut cleaned = String::new();
 
     for part in args.split_whitespace() {
@@ -29,6 +30,7 @@ fn parse_http_args(args: &str) -> (HttpFlags, String) {
             "-h" => flags.headers_only = true,
             "-b" => flags.body_only = true,
             "-s" => flags.silent = true,
+            "-d" => flags.discard = true,
             _ => {
                 if !cleaned.is_empty() { cleaned.push(' '); }
                 cleaned.push_str(part);
@@ -53,10 +55,11 @@ fn do_http_request(args: &str, use_tls: bool) {
     let url = url.as_str();
 
     if url.is_empty() {
-        kprintln!("[npk] Usage: {} [-h|-b|-s] <host> [path] [> name]", proto);
+        kprintln!("[npk] Usage: {} [-h|-b|-s|-d] <host> [path] [> name]", proto);
         kprintln!("[npk]   -h  Headers only");
         kprintln!("[npk]   -b  Body only (no headers)");
         kprintln!("[npk]   -s  Silent (no status messages)");
+        kprintln!("[npk]   -d  Discard to RAM + report MB/s (speed test, no disk)");
         return;
     }
 
@@ -93,8 +96,17 @@ fn do_http_request(args: &str, use_tls: bool) {
     // legacy buffered path (capped at HTTP_MAX_RESPONSE = 128 KB)
     // because we never want to encourage cleartext downloads of
     // anything large enough to need streaming.
-    if use_tls {
-        if let Some(name) = &store_as {
+    if use_tls && (flags.discard || store_as.is_some()) {
+        // Sink for the streamed body. With -d we DON'T open npkFS — bytes are
+        // counted + thrown away, so this measures the pure net+TLS throughput
+        // and rules the disk OUT as a bottleneck. Otherwise stream to npkFS.
+        let mut writer: Option<(String, crate::npkfs::fs::StreamingWriter)> = if flags.discard {
+            if !flags.silent {
+                kprintln!("[npk] Streaming to RAM (-d, discard) — pure throughput, no disk");
+            }
+            None
+        } else {
+            let name = store_as.as_ref().unwrap();
             let store_path = match resolve_store_target(name, path) {
                 Some(p) => p,
                 None => {
@@ -105,55 +117,57 @@ fn do_http_request(args: &str, use_tls: bool) {
             if !flags.silent {
                 kprintln!("[npk] Streaming to npkFS: {}", store_path);
             }
-            let mut writer = match crate::npkfs::open_streaming_write(&store_path) {
-                Ok(w) => w,
+            match crate::npkfs::open_streaming_write(&store_path) {
+                Ok(w) => Some((store_path, w)),
                 Err(e) => { kprintln!("[npk] npkfs open failed: {:?}", e); return; }
-            };
-            let mut total: usize = 0;
-            let mut first = true;
-            // Time-based heartbeat (~2 s @ 100 Hz ticks). Distinguishes
-            // "stuck" (byte count frozen) from "slow" (count creeps up)
-            // regardless of throughput — a byte-threshold heartbeat
-            // can't tell those apart on a slow link.
-            let mut last_tick = crate::interrupts::ticks();
-            // No max_size cap for user-initiated downloads — the
-            // ceiling is whatever fits on disk. We still defend the
-            // kernel via the per-chunk allocator (each 16 MiB chunk
-            // is freed after flush) so a 1 TB download just uses
-            // 16 MiB of heap throughout.
-            let max_size = usize::MAX;
-            let stream_result = https_get_streaming(
-                host, path, max_size,
-                &mut |chunk: &[u8]| -> Result<(), &'static str> {
-                    if first {
-                        kprintln!("[npk]   first body bytes ({} B)", chunk.len());
-                        first = false;
-                    }
-                    if writer.write(chunk).is_err() {
+            }
+        };
+        let mut total: usize = 0;
+        let mut first = true;
+        let start_tick = crate::interrupts::ticks();
+        let mut last_tick = start_tick;
+        let max_size = usize::MAX;
+        let stream_result = https_get_streaming(
+            host, path, max_size,
+            &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                if first {
+                    kprintln!("[npk]   first body bytes ({} B)", chunk.len());
+                    first = false;
+                }
+                if let Some((_, w)) = writer.as_mut() {
+                    if w.write(chunk).is_err() {
                         return Err("npkfs write failed");
                     }
-                    total = total.saturating_add(chunk.len());
-                    let now = crate::interrupts::ticks();
-                    if now.wrapping_sub(last_tick) >= 200 {
-                        kprintln!("[npk]   rx {} KiB", total / 1024);
-                        last_tick = now;
-                    }
-                    Ok(())
-                },
-            );
-            match stream_result {
-                Ok(_) => {}
-                Err(e) => { kprintln!("[npk] download failed: {}", e); return; }
-            }
-            match writer.finish() {
-                Ok(written) => {
-                    kprintln!("[npk] Stored '{}' ({} bytes)", store_path, written);
                 }
-                Err(e) => kprintln!("[npk] publish failed: {:?}", e),
-            }
-            let _ = total;
+                total = total.saturating_add(chunk.len());
+                let now = crate::interrupts::ticks();
+                if now.wrapping_sub(last_tick) >= 200 {
+                    let dt = now.wrapping_sub(start_tick).max(1);
+                    let mbps = (total as u64 * 8 * 100) / dt / 1_000_000;
+                    kprintln!("[npk]   rx {} KiB (~{} Mbit/s)", total / 1024, mbps);
+                    last_tick = now;
+                }
+                Ok(())
+            },
+        );
+        if let Err(e) = stream_result {
+            kprintln!("[npk] download failed: {}", e);
             return;
         }
+        // Final throughput summary (the headline number for a speed test).
+        let dt = crate::interrupts::ticks().wrapping_sub(start_tick).max(1);
+        let mbps = (total as u64 * 8 * 100) / dt / 1_000_000;
+        let mbytes_s = (total as u64 * 100) / dt / 1_000_000;
+        let secs10 = dt * 10 / 100;
+        kprintln!("[npk] done: {} KiB in {}.{} s = ~{} Mbit/s (~{} MB/s)",
+            total / 1024, secs10 / 10, secs10 % 10, mbps, mbytes_s);
+        if let Some((store_path, w)) = writer {
+            match w.finish() {
+                Ok(written) => kprintln!("[npk] Stored '{}' ({} bytes)", store_path, written),
+                Err(e) => kprintln!("[npk] publish failed: {:?}", e),
+            }
+        }
+        return;
     }
 
     // Resolve hostname
