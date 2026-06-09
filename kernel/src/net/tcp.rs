@@ -50,11 +50,12 @@ const INITIAL_WINDOW: u16 = 65535;
 // TCP Window Scaling (RFC 7323). Without it the window is capped at 64 KiB and
 // throughput = 64 KiB / RTT (~4 MB/s on a CDN regardless of link/NIC — the
 // observed global slowness). We advertise `free >> OUR_WSCALE`.
-// WSCALE 7 so the 16-bit window field can express the full 4 MiB buffer
-// (4 MiB >> 7 = 32768 ≤ 65535). At WSCALE 5 a 1 MiB window capped a single
-// flow at ~727 Mbit (1 MiB / ~11 ms RTT) — measured 585/710 Mbit vs 857 native;
-// the receive window was the bottleneck, not the link.
-const OUR_WSCALE: u8 = 7;
+// WSCALE 8 so the 16-bit window field can express the full 8 MiB buffer
+// (8 MiB >> 8 = 32768 ≤ 65535). History: WSCALE 5 / 1 MiB capped a flow at
+// ~727 Mbit; WSCALE 7 / 4 MiB reached ~650 avg but never plateaued (4 MiB ≈
+// the BDP to a ~35 ms-RTT mirror = throughput·RTT, so zero headroom → any RTT
+// jitter underfills). 8 MiB = ~2× BDP headroom → fill the pipe to ~native.
+const OUR_WSCALE: u8 = 8;
 
 /// Current receive window for the TCP window field. Scaled by OUR_WSCALE once
 /// window scaling has been negotiated, else the raw free space (≤ 64 KiB).
@@ -74,7 +75,7 @@ const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 // connection costs nothing and only an actively-bursting one approaches 4 MiB.
 // Host TCP only ever has a handful of live connections (OTA/https/dns), so the
 // worst-case footprint is small; the guest browser uses its own (microvm) TCP.
-const RECV_BUF_SIZE: usize = 4 * 1024 * 1024;
+const RECV_BUF_SIZE: usize = 8 * 1024 * 1024;
 const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
 
 // Out-of-order receive counters (diagnostic). `AHEAD` = a segment past rcv_nxt
