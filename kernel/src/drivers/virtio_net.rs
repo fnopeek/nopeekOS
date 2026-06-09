@@ -95,6 +95,7 @@ struct VirtioNet {
     tx_avail_idx: u16,
     tx_last_used: u16,
     tx_num_free: u16,
+    tx_notify_pending: bool, // TX frames queued but doorbell not yet rung (batch it)
     tx_free_head: u16,
     tx_hdrs: u64,   // pre-allocated net headers for TX
     /// Pre-allocated DMA-stable TX data pool — one MTU-sized slot per
@@ -280,6 +281,7 @@ pub fn init() -> bool {
             tx_avail_idx: 0,
             tx_last_used: 0,
             tx_num_free: tx_qs,
+            tx_notify_pending: false,
             tx_free_head: 0,
             tx_hdrs,
             tx_data,
@@ -353,7 +355,16 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
         core::ptr::write_volatile(avail_idx_ptr, dev.tx_avail_idx);
 
         fence(Ordering::SeqCst);
-        outw(dev.io_base + REG_QUEUE_NOTIFY, TX_QUEUE);
+    }
+
+    // Batch the TX doorbell: an outw() notify is a VM-exit, and notifying per
+    // frame was a per-packet exit on the upload path (the asymmetry vs download).
+    // Mark pending; net::poll() flushes it once per cycle (tx_flush). Flush
+    // immediately only if the ring is filling, so QEMU drains before send() has
+    // to spin-reclaim.
+    dev.tx_notify_pending = true;
+    if dev.tx_num_free < 16 {
+        dev.tx_kick();
     }
 
     Ok(())
@@ -414,6 +425,14 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
 
 pub fn mac() -> Option<[u8; 6]> {
     DEVICE.lock().as_ref().map(|d| d.mac)
+}
+
+/// Ring the deferred TX doorbell, if any frames were queued since the last kick.
+/// Called once per net::poll() cycle so per-frame send() avoids a VM-exit each.
+pub fn tx_flush() {
+    if let Some(dev) = DEVICE.lock().as_mut() {
+        dev.tx_kick();
+    }
 }
 
 #[allow(dead_code)]
@@ -489,6 +508,16 @@ impl VirtioNet {
         if self.rx_repost_pending >= 64 {
             self.rx_kick();
         }
+    }
+
+    // Ring the TX doorbell once for all frames queued since the last kick.
+    fn tx_kick(&mut self) {
+        if !self.tx_notify_pending {
+            return;
+        }
+        fence(Ordering::SeqCst);
+        unsafe { outw(self.io_base + REG_QUEUE_NOTIFY, TX_QUEUE); }
+        self.tx_notify_pending = false;
     }
 
     // Ring the RX doorbell once for all buffers reposted since the last kick.
