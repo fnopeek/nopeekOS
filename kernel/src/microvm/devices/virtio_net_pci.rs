@@ -212,6 +212,10 @@ impl VirtioNet {
         let advanced;
         let new_used_idx;
         let mut pending_rx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        // Per-frame scratch on the stack — NO per-packet heap alloc (the old
+        // Vec::with_capacity + per-descriptor vec![] + extend was 2 mallocs +
+        // 2 copies for every uploaded packet; ~18k mallocs/s at 100 Mbit).
+        let mut frame = [0u8; 2048];
         {
             let q_idx = 1usize;
             let q = match self.queues.get_mut(q_idx) {
@@ -238,22 +242,27 @@ impl VirtioNet {
                 // descriptors. The first 12 bytes of the chain are the
                 // virtio_net_hdr; the rest is the ethernet frame.
                 let mut total_len: u32 = 0;
-                let mut payload = alloc::vec::Vec::with_capacity(2048);
+                let mut off: usize = 0;
                 let mut idx = head;
                 loop {
                     let d = match read_desc(mem, q.desc_gpa(), idx, q.size) {
                         Some(d) => d, None => break,
                     };
                     let n = d.len as usize;
-                    let mut chunk = alloc::vec![0u8; n];
-                    mem.read_bytes(d.addr, &mut chunk);
-                    payload.extend_from_slice(&chunk);
+                    // Read straight from guest memory into the scratch frame at
+                    // the running offset — no per-descriptor alloc/copy.
+                    let take = n.min(frame.len().saturating_sub(off));
+                    if take > 0 {
+                        mem.read_bytes(d.addr, &mut frame[off..off + take]);
+                        off += take;
+                    }
                     total_len = total_len.saturating_add(n as u32);
                     if d.flags & VRING_DESC_F_NEXT == 0 { break; }
                     idx = d.next;
                 }
+                let payload = &frame[..off];
 
-                tx_log(&payload);
+                tx_log(payload);
 
                 used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, total_len);
                 q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
@@ -263,7 +272,7 @@ impl VirtioNet {
                 // back via RX. We can't inject inline here — q is
                 // borrowed mutably as queue 1; injecting needs queue 0.
                 // Defer until after the TX-walk loop ends.
-                for rep in super::nat::process_tx(&payload, &self_caps) {
+                for rep in super::nat::process_tx(payload, &self_caps) {
                     pending_rx.push(rep);
                 }
             }

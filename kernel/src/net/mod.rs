@@ -68,6 +68,10 @@ pub fn poll() {
         tcp::tick_connections();
         POLLING.store(false, Ordering::Release);
     }
+    // Flush the batched virtio-net TX doorbell once per cycle (send() defers the
+    // per-frame notify to avoid a VM-exit per uploaded packet). No-op when no
+    // virtio NIC / nothing pending.
+    crate::virtio_net::tx_flush();
     // ALWAYS run (even if we skipped the drain above): progressive shade render
     // + mouse. Internally gated to Core 0, so only Core 0 executes it — no race
     // despite being outside the guard.
