@@ -600,6 +600,24 @@ pub fn arm_worker_timer() {
     }
 }
 
+/// Timer-NAPI: temporarily retune the CALLING worker core's LAPIC timer reload
+/// count so HLT-idling in a hot poll loop (the download recv) wakes at ~`hz`
+/// instead of 100 Hz — low-latency polling without a device IRQ. Pass 100 to
+/// restore the normal idle rate. No-op on Core 0 (it owns the wall-clock timer)
+/// and before the worker timer is calibrated. Only the reload count changes; the
+/// periodic LVT + vector-50 pure-EOI handler stay as-is.
+pub fn set_worker_poll_hz(hz: u32) {
+    if crate::smp::per_core::current_core_id() != 0 {
+        let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
+        let cnt100 = WORKER_TIMER_INITIAL.load(Ordering::Relaxed);
+        if base != 0 && cnt100 != 0 {
+            let count = ((cnt100 as u64) * 100 / (hz.max(1) as u64)).max(1) as u32;
+            // SAFETY: this core's own LAPIC timer initial-count register.
+            unsafe { core::ptr::write_volatile((base + 0x380) as *mut u32, count); }
+        }
+    }
+}
+
 /// Initialize Local APIC timer (for hardware without PIT).
 /// Call after init() — detects if PIT is working, sets up APIC timer if not.
 pub fn init_apic_timer() {
