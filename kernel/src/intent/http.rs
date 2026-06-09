@@ -923,6 +923,9 @@ fn http_get_once(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, host
     );
+    // DEBUG: dump the exact request line we send (path len + bytes) so a 404 on
+    // a path curl fetches fine is diagnosable (truncation / stray char / split).
+    kprintln!("[npk]   >>> GET [{}] (path len {})", path, path.len());
     if crate::net::tcp::send(handle, request.as_bytes()).is_err() {
         let _ = crate::net::tcp::close(handle);
         return Err("HTTP send failed");
