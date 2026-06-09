@@ -130,11 +130,12 @@ pub fn poll_rx_only() {
     }
     let c = rd();
     crate::virtio_net::tx_flush();
-    let d = rd();
-    // ALWAYS run (gated to Core 0 internally, no-op on a worker).
-    crate::shade::poll_render();
-    PROF_TXFLUSH.fetch_add(d.wrapping_sub(c), Relaxed);
-    PROF_RENDER.fetch_add(rd().wrapping_sub(d), Relaxed);
+    PROF_TXFLUSH.fetch_add(rd().wrapping_sub(c), Relaxed);
+    // NO shade::poll_render() here. poll_rx_only runs ONLY on the worker recv
+    // loops (tcp_recv_poll / recv_blocking), where poll_render did nothing but
+    // its own ~6 µs core-gate (current_core_id = rdmsr + APIC-MMIO = 2 VM-exits)
+    // before bailing — ~30 % of poll_rx_only's cost, pure waste. Core 0 renders
+    // via its own run-loop / net::poll().
 }
 
 /// A WASM NIC driver delivers a received Ethernet frame straight into the IP
