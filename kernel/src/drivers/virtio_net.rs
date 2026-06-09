@@ -85,6 +85,7 @@ struct VirtioNet {
     rx_queue_size: u16,
     rx_last_used: u16,
     rx_buffers: u64, // contiguous RX buffer region
+    rx_repost_pending: u16, // RX buffers reposted but not yet notified (batch the doorbell)
 
     // TX queue
     tx_desc_base: u64,
@@ -270,6 +271,7 @@ pub fn init() -> bool {
             rx_used_base: rx_used,
             rx_queue_size: rx_qs,
             rx_last_used: 0,
+            rx_repost_pending: 0,
             rx_buffers,
             tx_desc_base: tx_desc,
             tx_avail_base: tx_avail,
@@ -367,6 +369,9 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     let used_idx = unsafe { core::ptr::read_volatile(used_idx_ptr) };
 
     if used_idx == dev.rx_last_used {
+        // Ring drained — ring the doorbell once for everything reposted during
+        // this drain (batched notify instead of one VM-exit per packet).
+        dev.rx_kick();
         return None; // no new packets
     }
 
@@ -463,7 +468,13 @@ impl VirtioNet {
     }
 
     fn repost_rx(&mut self, desc_idx: usize) {
-        // Re-add this buffer to the RX available ring
+        // Re-add this buffer to the RX available ring — but DON'T ring the
+        // doorbell per packet. An `outw` to the notify port is a VM-exit; doing
+        // it once per received packet costs a VM-exit per packet (~100k/s under
+        // load) and was a major throughput/latency tax. We publish the buffer to
+        // the avail ring now and batch the notify (see recv): one doorbell per
+        // drain instead of per packet. A mid-burst safety notify keeps the device
+        // from running dry if a caller doesn't drain to empty.
         let avail_ring = self.rx_avail_base + 4;
         let avail_idx_ptr = (self.rx_avail_base + 2) as *mut u16;
 
@@ -473,8 +484,21 @@ impl VirtioNet {
             core::ptr::write_volatile(slot, desc_idx as u16);
             fence(Ordering::SeqCst);
             core::ptr::write_volatile(avail_idx_ptr, idx.wrapping_add(1));
-            outw(self.io_base + REG_QUEUE_NOTIFY, RX_QUEUE);
         }
+        self.rx_repost_pending += 1;
+        if self.rx_repost_pending >= 64 {
+            self.rx_kick();
+        }
+    }
+
+    // Ring the RX doorbell once for all buffers reposted since the last kick.
+    fn rx_kick(&mut self) {
+        if self.rx_repost_pending == 0 {
+            return;
+        }
+        fence(Ordering::SeqCst);
+        unsafe { outw(self.io_base + REG_QUEUE_NOTIFY, RX_QUEUE); }
+        self.rx_repost_pending = 0;
     }
 }
 
