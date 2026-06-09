@@ -1992,6 +1992,17 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_net.bar0_in_range(gpa) {
                     if handle_mmio_ept_net(&mut self.vcpu.regs, &mut sh.pci.virtio_net, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                        // The guest just touched virtio-net (queue notify / ISR
+                        // read) — drain RX into it NOW instead of waiting for the
+                        // ~1500/s timer/HLT pump. This tracks RX delivery to the
+                        // guest's device activity (~15k/s), lifting the download
+                        // ceiling (pump/s was ≪ VM-exits/s). BSP only.
+                        if is_bsp
+                            && crate::microvm::devices::nat::pump_fast(
+                                &mut sh.pci.virtio_net, &sh.guest_mem)
+                        {
+                            sh.pending_irqs |= 1 << 10;
+                        }
                         last_outcome = Some(outcome);
                         continue;
                     }

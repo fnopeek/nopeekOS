@@ -793,7 +793,29 @@ pub fn pump(
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
     }
 
-    // Deliver every rewritten reply the host-RX intercept queued.
+    let _ = PUMP_LOG;
+    drain_inbound(net, mem)
+}
+
+/// Lightweight pump for the HOT device-exit path: pull the host NIC + deliver to
+/// the guest, WITHOUT the periodic NAT reap / netstat bookkeeping that pump()
+/// does. Called on every guest virtio-net MMIO exit so RX delivery tracks the
+/// guest's device activity instead of starving at the ~1500/s timer/HLT rate
+/// (that starvation was the download ceiling: pump/s ≪ VM-exits/s).
+pub fn pump_fast(
+    net: &mut super::virtio_net_pci::VirtioNet,
+    mem: &GuestMem,
+) -> bool {
+    NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
+    crate::net::poll();
+    drain_inbound(net, mem)
+}
+
+/// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
+fn drain_inbound(
+    net: &mut super::virtio_net_pci::VirtioNet,
+    mem: &GuestMem,
+) -> bool {
     let mut any = false;
     loop {
         let item = { INBOUND_Q.lock().pop_front() };
@@ -815,7 +837,6 @@ pub fn pump(
             break;
         }
     }
-    let _ = PUMP_LOG;
     any
 }
 
