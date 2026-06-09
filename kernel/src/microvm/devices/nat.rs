@@ -128,6 +128,11 @@ static NS_IQ_HI: AtomicU64 = AtomicU64::new(0);
 static NS_RXLAT_SUM: AtomicU64 = AtomicU64::new(0);
 static NS_RXLAT_N: AtomicU64 = AtomicU64::new(0);
 static NS_RXLAT_MAX: AtomicU64 = AtomicU64::new(0);
+/// Consumer-bottleneck diagnostics (which serial limit caps RX): how often the
+/// pump runs, how often inject_rx bailed because the guest RX ring had no buffer
+/// (= guest-NAPI-bound), and total injected (→ avg batch per pump call).
+static NS_PUMP_CALLS: AtomicU64 = AtomicU64::new(0);
+static NS_INJECT_FALSE: AtomicU64 = AtomicU64::new(0);
 /// New-flow counts by transport, to spot QUIC: a cold page that opens lots of
 /// UDP flows is using HTTP/3 — if those churn/stall it points at QUIC-over-NAT.
 static NS_TCP_FLOWS: AtomicU64 = AtomicU64::new(0);
@@ -731,6 +736,8 @@ pub fn pump(
     use core::sync::atomic::{AtomicU32, Ordering};
     static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
 
+    NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
+
     // CRITICAL: drain the host NIC RX ring. Intel I226-V is a polling
     // driver — nothing else calls handle_frame, so server replies (and
     // our l3_inbound intercept) only run because of this poll.
@@ -765,15 +772,21 @@ pub fn pump(
         let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
         let lat_avg_us = if lat_n > 0 { (lat_sum / lat_n) / mhz } else { 0 };
         let lat_max_us = lat_max / mhz;
+        let pumps = NS_PUMP_CALLS.swap(0, AtOrd::Relaxed);
+        let injfalse = NS_INJECT_FALSE.swap(0, AtOrd::Relaxed);
+        // avg packets injected per pump call (batch size) — low pumps/s with a
+        // big batch = pump-cadence-bound; high injfalse = guest-NAPI-bound.
+        let batch = if pumps > 0 { rxp / pumps } else { 0 };
         if secs > 0 && (rxp + txp) > 0 {
             kprintln!(
-                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | nat {}/{} (hi {}) | iq hi {}/{} | flows {}tcp {}udp | {} drops",
+                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | nat {}/{} (hi {}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",
                 rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
                 lat_avg_us, lat_max_us,
                 inuse, L3_MAX, NS_HIGHWATER.load(AtOrd::Relaxed),
                 NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX,
                 NS_TCP_FLOWS.load(AtOrd::Relaxed), NS_UDP_FLOWS.load(AtOrd::Relaxed),
                 NS_DROPS.load(AtOrd::Relaxed),
+                pumps / secs, injfalse / secs, batch,
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
@@ -796,7 +809,9 @@ pub fn pump(
                 NS_RXLAT_MAX.store(lat, AtOrd::Relaxed);
             }
         } else {
-            // Guest RX queue full — requeue and retry next pump.
+            // Guest RX queue full (no avail buffer) — requeue + retry next pump.
+            // High rate here = the GUEST is the limiter (NAPI/repost too slow).
+            NS_INJECT_FALSE.fetch_add(1, AtOrd::Relaxed);
             INBOUND_Q.lock().push_front((push_tsc, frame));
             break;
         }
