@@ -603,9 +603,10 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
             if !payload.is_empty() && seq == conn.rcv_nxt {
                 let space = RECV_BUF_SIZE - conn.recv_buf.len();
                 let copy = payload.len().min(space);
-                for &b in &payload[..copy] {
-                    conn.recv_buf.push_back(b);
-                }
+                // Bulk append — NOT byte-by-byte push_back (that was ~87M
+                // push_back/s at ~700 Mbit = the host-stack ceiling). extend
+                // reserves once + copies.
+                conn.recv_buf.extend(payload[..copy].iter().copied());
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
                 conn.ack_pending = true;
                 conn.ack_tick = crate::interrupts::ticks();
