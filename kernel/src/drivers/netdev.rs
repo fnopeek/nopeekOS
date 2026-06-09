@@ -52,20 +52,19 @@ impl<const N: usize> Ring<N> {
     fn clear(&mut self) { self.head = 0; self.tail = 0; }
 }
 
-// RX is now only a FALLBACK: the driver normally delivers each frame straight
-// into the IP stack from its own fiber (net::wasm_deliver_rx, the NAPI topology)
-// and only spills to this ring when Core 0 holds the drain guard. TX queues the
-// kernel's frames for the driver to pull — deep enough to absorb a bulk-upload
-// ack/segment burst between 1 ms driver polls.
+// RX is a FALLBACK: the driver normally delivers each frame straight into the IP
+// stack from its own fiber (net::wasm_deliver_rx, the NAPI topology) and only
+// spills to this ring when Core 0 holds the drain guard.
 const RX_RING: usize = 64;
-const TX_RING: usize = 64;
 
 struct WasmNic {
     mac_addr: [u8; 6],
     /// Frames the WASM driver received, waiting for the kernel to consume.
     rx: Ring<RX_RING>,
-    /// Frames the kernel queued, waiting for the WASM driver to transmit.
-    tx: Ring<TX_RING>,
+    /// Frames the kernel queued for the driver to transmit. fq_codel (Linux
+    /// "Make WiFi Fast"): per-flow fair queueing + CoDel AQM so a ping isn't
+    /// stuck behind a bulk backlog and stale packets are dropped, not delayed.
+    tx: crate::net::fq_codel::FqCodel,
     /// Carrier/link state, set by the driver via npk_netdev_set_link. For a
     /// WiFi NIC this is "associated + keyed" (data path live), distinct from
     /// mere registration.
@@ -77,7 +76,7 @@ impl WasmNic {
         WasmNic {
             mac_addr: [0; 6],
             rx: Ring::new(),
-            tx: Ring::new(),
+            tx: crate::net::fq_codel::FqCodel::new(),
             link_up: false,
         }
     }
@@ -197,9 +196,9 @@ pub fn wasm_nic_submit_rx(frame: &[u8]) {
     WASM_NIC.lock().rx.push(frame);
 }
 
-/// WASM driver calls this to get a frame to transmit
+/// WASM driver calls this to get a frame to transmit (fq_codel-scheduled)
 pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
-    WASM_NIC.lock().tx.pop(buf)
+    WASM_NIC.lock().tx.dequeue(buf)
 }
 
 /// Pop the oldest fallback-RX frame, if any. Used by net::wasm_deliver_rx to
@@ -211,7 +210,7 @@ pub fn wasm_nic_poll_rx(buf: &mut [u8; MTU]) -> Option<usize> {
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
     match active() {
-        Active::Wasm => { WASM_NIC.lock().tx.push(frame); Ok(()) }
+        Active::Wasm => { WASM_NIC.lock().tx.enqueue(frame); Ok(()) }
         Active::Intel => intel_nic::send(frame),
         Active::Rtl => rtl8153::send(frame),
         Active::Virtio | Active::None => virtio_net::send(frame),
