@@ -455,8 +455,14 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
 pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Result<usize, TcpError> {
     let t0 = crate::interrupts::ticks();
     loop {
-        super::poll();
-        tick_connections();
+        // NIC-drain only (the TLS / OTA-https recv hot path). The old code ran
+        // the FULL super::poll() — tcp::tick_connections (128-slot scan +
+        // CONNECTIONS lock) + shade::poll_render — AND then tick_connections()
+        // AGAIN, every spin iteration at ~1 M/s: double the 128-slot scan + lock,
+        // contending the CONNECTIONS lock with actual packet processing →
+        // pegged the worker core AND throttled https/OTA throughput. Core 0's
+        // poll() runs the TCP timers; here we just drain RX, like tcp_recv_poll.
+        super::poll_rx_only();
 
         let n = recv(handle, buf)?;
         if n > 0 { return Ok(n); }
