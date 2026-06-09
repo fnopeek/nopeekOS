@@ -37,6 +37,23 @@ pub fn reset_poll_guard() {
     POLLING.store(false, Ordering::Release);
 }
 
+// TEMP profiler: split poll_rx_only's per-call cost. TSC cycles in the netdev
+// drain (driver + virtio doorbells), the IP/TCP stack (handle_frame), tx_flush,
+// and poll_render — plus packets processed. Read+reset via take_poll_prof().
+static PROF_NETDEV: AtomicU64 = AtomicU64::new(0);
+static PROF_STACK: AtomicU64 = AtomicU64::new(0);
+static PROF_TXFLUSH: AtomicU64 = AtomicU64::new(0);
+static PROF_RENDER: AtomicU64 = AtomicU64::new(0);
+static PROF_PKTS: AtomicU64 = AtomicU64::new(0);
+
+/// (netdev_cyc, stack_cyc, txflush_cyc, render_cyc, packets) since last call; resets.
+pub fn take_poll_prof() -> (u64, u64, u64, u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (PROF_NETDEV.swap(0, Relaxed), PROF_STACK.swap(0, Relaxed),
+     PROF_TXFLUSH.swap(0, Relaxed), PROF_RENDER.swap(0, Relaxed),
+     PROF_PKTS.swap(0, Relaxed))
+}
+
 /// Process incoming packets and TCP timers.
 pub fn poll() {
     // The guard wraps ONLY the single-consumer NIC drain + host-TCP tick
@@ -88,23 +105,36 @@ pub fn poll() {
 /// burned the RX core on ~1 M CONNECTIONS-lock acquisitions + ~128 M slot-checks
 /// per second between chunks, starving the actual packet processing.
 pub fn poll_rx_only() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let rd = crate::interrupts::rdtsc;
     if POLLING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
     {
         let mut buf = [0u8; netdev::MTU];
-        while let Some(len) = netdev::recv(&mut buf) {
-            if len >= 14 {
-                eth::handle_frame(&buf[..len]);
+        loop {
+            let a = rd();
+            let r = netdev::recv(&mut buf);
+            let b = rd();
+            PROF_NETDEV.fetch_add(b.wrapping_sub(a), Relaxed);
+            match r {
+                Some(len) => {
+                    if len >= 14 { eth::handle_frame(&buf[..len]); }
+                    PROF_STACK.fetch_add(rd().wrapping_sub(b), Relaxed);
+                    PROF_PKTS.fetch_add(1, Relaxed);
+                }
+                None => break,
             }
         }
         POLLING.store(false, Ordering::Release);
     }
+    let c = rd();
     crate::virtio_net::tx_flush();
-    // ALWAYS run (even if we skipped the drain above): progressive shade render
-    // + mouse. Internally gated to Core 0, so only Core 0 executes it — no race
-    // despite being outside the guard.
+    let d = rd();
+    // ALWAYS run (gated to Core 0 internally, no-op on a worker).
     crate::shade::poll_render();
+    PROF_TXFLUSH.fetch_add(d.wrapping_sub(c), Relaxed);
+    PROF_RENDER.fetch_add(rd().wrapping_sub(d), Relaxed);
 }
 
 /// A WASM NIC driver delivers a received Ethernet frame straight into the IP
