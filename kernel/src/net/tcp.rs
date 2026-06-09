@@ -361,8 +361,18 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
 
     let available = conn.recv_buf.len().min(buf.len());
-    for i in 0..available {
-        buf[i] = conn.recv_buf.pop_front().unwrap();
+    // Bulk copy out of the ring buffer instead of byte-by-byte pop_front
+    // (that was ~112M pop_front/s at 100 MB/s — pure call overhead). The
+    // VecDeque exposes its contents as up to two contiguous slices; memcpy
+    // each, then drain in one shot.
+    {
+        let (a, b) = conn.recv_buf.as_slices();
+        let na = a.len().min(available);
+        buf[..na].copy_from_slice(&a[..na]);
+        if na < available {
+            buf[na..available].copy_from_slice(&b[..available - na]);
+        }
+        conn.recv_buf.drain(..available);
     }
 
     // Window-update ACK on every drain.
