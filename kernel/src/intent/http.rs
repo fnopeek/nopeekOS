@@ -159,6 +159,10 @@ fn do_http_request(args: &str, use_tls: bool) {
                         total / 1024, mbps, ooo_ahead, ooo_behind, maxbuf / 1024,
                         txsegs as u64 * 100 / dt2,
                         iters, poll_cyc / iters / ghz, recv_cyc / iters / ghz);
+                    let (nd, st, tf, rn, pk) = crate::net::take_poll_prof();
+                    let pk = pk.max(1);
+                    kprintln!("[npk]      poll-split per pkt: netdev={}ns stack={}ns  | per-poll: txflush={}ns render={}ns  pkts/poll={}",
+                        nd / pk / ghz, st / pk / ghz, tf / iters / ghz, rn / iters / ghz, pk / iters);
                     last_tick = now;
                 }
                 Ok(())
