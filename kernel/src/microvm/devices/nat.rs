@@ -167,7 +167,17 @@ static INBOUND_Q: Mutex<VecDeque<(u64, Vec<u8>)>> = Mutex::new(VecDeque::new());
 /// loads crawl (every round-trip waits behind a fat download queue). Small ⇒ it
 /// fills fast ⇒ we drop ⇒ TCP backs off ⇒ the queue (and latency) stays short.
 /// For a browser low latency beats peak throughput. Also bounds staging memory.
-const INBOUND_MAX: usize = 512;
+///
+/// 2026-06-09: measured PERMANENTLY full at 512 during a speedtest (iq 512/512,
+/// monotonically climbing drops) — inflow (~340 Mbit from slirp) far outruns the
+/// guest's consume rate (~120 Mbit), so a 512-deep FIFO just adds ~50 ms staging
+/// AND lets TCP overshoot massively before the first drop → big cwnd sawtooth →
+/// RTO-retransmit bursts = the "starts, stalls, continues" stutter + 400 ms
+/// loaded latency the user saw. Shrunk to 64: a tight control loop — TCP sees
+/// loss sooner, swings less, converges to the sustainable rate with far fewer
+/// drops. (Next step: replace this dumb tail-drop FIFO with fq_codel for per-flow
+/// fairness so the latency probe isn't stuck behind the bulk download at all.)
+const INBOUND_MAX: usize = 64;
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
