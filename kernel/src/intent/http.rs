@@ -932,7 +932,13 @@ fn http_get_once(
     }
 
     let mut raw = alloc::vec::Vec::new();
-    let mut buf = [0u8; 17000];
+    // Large HEAP read buffer (a 512 KiB stack array would overflow the kernel
+    // stack). recv() returns at most buf.len() per call; the old 17 KB cap made
+    // the consumer drain far slower than poll_rx_only bulk-fills recv_buf (it
+    // empties the whole NIC ring per call) → recv_buf climbed to the 8 MiB
+    // window cap → window 0 → the sender stalled (measured rxbuf_max≈8191 KiB).
+    // A big drain per call keeps recv_buf near-empty → window stays open.
+    let mut buf = alloc::vec![0u8; 512 * 1024];
     let mut header_end = None;
     loop {
         match tcp_recv_poll(handle, &mut buf) {
