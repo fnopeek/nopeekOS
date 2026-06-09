@@ -744,7 +744,7 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
         // ceiling regardless of link speed. Polling once and
         // returning the instant a record is ready makes throughput
         // bound by the actual network, not a fixed busy-wait tax.
-        crate::net::poll();
+        crate::net::poll_rx_only();
         match crate::tls::tls_recv(tls, buf) {
             Ok(0) => {
                 // No app data yet (partial record, or a control
@@ -765,7 +765,7 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
 fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     let start = crate::interrupts::ticks();
     loop {
-        crate::net::poll();
+        crate::net::poll_rx_only();
         match crate::net::tcp::recv(handle, buf) {
             Ok(0) => {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
