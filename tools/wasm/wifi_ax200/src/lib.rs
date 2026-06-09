@@ -2218,9 +2218,12 @@ impl Ax200 {
                                 host::dprint(")\n");
                                 rx_log += 1;
                             }
-                            // Deliver straight into the IP stack from this fiber
-                            // (NAPI topology) — no relay-ring + Core-0 hop.
-                            host::netdev_rx_deliver(&rxbuf[..n]);
+                            // Hand the frame to the kernel via the relay ring;
+                            // Core 0's net::poll drains it + runs the TCP tick.
+                            // (Direct in-fiber delivery via npk_netdev_rx_deliver
+                            // exists but starved the Core-0 TCP tick under load →
+                            // connection drops; revisit with #2 WiFi-IRQ.)
+                            host::netdev_submit_rx(&rxbuf[..n]);
                         }
                         RxKind::None => {}
                     }
@@ -2524,7 +2527,7 @@ fn pcie_find_cap(id: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.39.0 — RX direct-to-IP-stack (NAPI topology, off Core 0)\n");
+    host::print("[ax200] Intel Wi-Fi 6 AX200 driver v0.40.0 — revert NAPI RX (restore stable connect)\n");
 
     // ── Stage 0a: bind, bus master, map BAR0, identity ───────────
     let rc = host::pci_bind(AX200_VENDOR, AX200_DEVICE);
