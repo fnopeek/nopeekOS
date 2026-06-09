@@ -164,9 +164,14 @@ pub fn active() -> Active {
         if intel_up { return Active::Intel; }
         if rtl_present { return Active::Rtl; }
     } else {
+        // Prefer wired — but only a PROVEN wired link (intel STATUS.LU) outranks
+        // a proven WiFi link. A USB-LAN (rtl8153) has no carrier detect, so a
+        // cable-less / merely-enumerated dongle must NOT strand a working WiFi
+        // link (that would route DHCP out the dead NIC → no lease). So it ranks
+        // BELOW associated WiFi.
         if intel_up { return Active::Intel; }
-        if rtl_present { return Active::Rtl; }
         if wifi_up { return Active::Wasm; }
+        if rtl_present { return Active::Rtl; }
     }
     // Nothing with a usable link in the preferred order — fall back to presence.
     if intel_nic::is_available() { return Active::Intel; }
