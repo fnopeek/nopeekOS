@@ -471,6 +471,27 @@ run_qemu_generic() {
             -device usb-storage,bus=xhci.0,drive=instdisk
         )
     fi
+
+    # Network backend. Default: slirp (-nic user) — easy, no host setup, but
+    # single-threaded and caps ~300-340 Mbit. QEMU_NET=tap uses a vhost/tap
+    # device (kernel-accelerated, near line-rate) to test our stack WITHOUT the
+    # slirp ceiling. Requires a host tap device set up once (see message), e.g.:
+    #   sudo ip tuntap add dev tap0 mode tap user "$USER"
+    #   sudo ip addr add 172.30.0.1/24 dev tap0 && sudo ip link set tap0 up
+    #   # + NAT to your uplink:  sudo iptables -t nat -A POSTROUTING -s 172.30.0.0/24 -j MASQUERADE
+    #   # + sysctl net.ipv4.ip_forward=1
+    # Override the device name with QEMU_TAP=tapX.
+    local -a net_args
+    if [ "${QEMU_NET:-}" = "tap" ]; then
+        local tapdev="${QEMU_TAP:-tap0}"
+        net_args=(
+            -netdev tap,id=net0,ifname="$tapdev",script=no,downscript=no,vhost=on
+            -device virtio-net-pci,netdev=net0
+        )
+        info "Network: vhost/tap ($tapdev) — bypassing slirp"
+    else
+        net_args=(-nic user,model=virtio-net-pci)
+    fi
     echo ""
 
     # Serial output: COM1 → live file unbuffered AND mirrored to stdio
@@ -499,7 +520,7 @@ run_qemu_generic() {
         -device usb-kbd,bus=xhci.0 \
         -device usb-mouse,bus=xhci.0 \
         "${installer_args[@]}" \
-        -nic user,model=virtio-net-pci \
+        "${net_args[@]}" \
         -no-reboot \
         "$@"
 }
