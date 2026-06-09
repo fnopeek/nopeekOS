@@ -173,16 +173,15 @@ static INBOUND_Q: Mutex<VecDeque<(u64, Vec<u8>)>> = Mutex::new(VecDeque::new());
 /// fills fast ⇒ we drop ⇒ TCP backs off ⇒ the queue (and latency) stays short.
 /// For a browser low latency beats peak throughput. Also bounds staging memory.
 ///
-/// 2026-06-09: measured PERMANENTLY full at 512 during a speedtest (iq 512/512,
-/// monotonically climbing drops) — inflow (~340 Mbit from slirp) far outruns the
-/// guest's consume rate (~120 Mbit), so a 512-deep FIFO just adds ~50 ms staging
-/// AND lets TCP overshoot massively before the first drop → big cwnd sawtooth →
-/// RTO-retransmit bursts = the "starts, stalls, continues" stutter + 400 ms
-/// loaded latency the user saw. Shrunk to 64: a tight control loop — TCP sees
-/// loss sooner, swings less, converges to the sustainable rate with far fewer
-/// drops. (Next step: replace this dumb tail-drop FIFO with fq_codel for per-flow
-/// fairness so the latency probe isn't stuck behind the bulk download at all.)
-const INBOUND_MAX: usize = 64;
+/// 2026-06-09: the drops were NOT really a consume-rate problem. Diagnostics
+/// showed injfalse=0 (the guest ALWAYS had RX buffers) yet tens of thousands of
+/// drops — because Core 0 was racing the BSP pump to fill this queue and winning
+/// (it can't drain — no VmContext). Fixed by making the BSP pump the sole NIC
+/// drainer while a VM is active (net::poll skip on Core 0). With that race gone
+/// the pump fills+drains in one call, so the queue empties immediately and a
+/// deeper buffer no longer balloons latency — it just absorbs a single pump's
+/// slirp burst without dropping. 256 ≈ one fat burst.
+const INBOUND_MAX: usize = 256;
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.

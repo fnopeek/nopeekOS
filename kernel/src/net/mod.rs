@@ -45,9 +45,19 @@ pub fn poll() {
     // load, so if Core 0's poll() returned early here it would never render or
     // poll the mouse → UI + mouse freeze (observed as a notebook kernel freeze:
     // a slow NIC keeps the BSP pumping ~continuously → Core 0 fully starved).
-    if POLLING
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
+    // While a microvm is active, Core 0 must NOT drain the host NIC: it pulls
+    // guest-bound (slirp) packets into the NAT's INBOUND_Q but CANNOT inject them
+    // (no VmContext) — only the BSP vCPU pump can. Core 0 winning the drain race
+    // outran the pump, overflowing INBOUND_Q → packet drops EVEN THOUGH the guest
+    // always had RX buffers (measured: injfalse=0 yet ~49k drops). So the BSP
+    // pump (a worker core, calls net::poll() itself) becomes the sole NIC drainer:
+    // fill + inject happen together, no race, no drops, throughput = pump rate.
+    let skip_nic_drain =
+        crate::microvm::vm_active() && crate::smp::per_core::current_core_id() == 0;
+    if !skip_nic_drain
+        && POLLING
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     {
         let mut buf = [0u8; netdev::MTU];
         while let Some(len) = netdev::recv(&mut buf) {
