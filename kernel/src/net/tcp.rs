@@ -77,6 +77,19 @@ const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 const RECV_BUF_SIZE: usize = 4 * 1024 * 1024;
 const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
 
+// Out-of-order receive counters (diagnostic). `AHEAD` = a segment past rcv_nxt
+// (a gap → the sender will have to retransmit); `BEHIND` = a duplicate at/below
+// rcv_nxt (a retransmit we already have). A burst of AHEAD during a download =
+// packet loss + go-back-N. Read+reset via take_ooo_stats().
+static TCP_OOO_AHEAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static TCP_OOO_BEHIND: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// (ahead, behind) out-of-order segment counts since the last call; resets both.
+pub fn take_ooo_stats() -> (u32, u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (TCP_OOO_AHEAD.swap(0, Relaxed), TCP_OOO_BEHIND.swap(0, Relaxed))
+}
+
 // TCP flags
 const FIN: u8 = 0x01;
 const SYN: u8 = 0x02;
@@ -600,26 +613,46 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
             }
 
             // Data processing
-            if !payload.is_empty() && seq == conn.rcv_nxt {
-                let space = RECV_BUF_SIZE - conn.recv_buf.len();
-                let copy = payload.len().min(space);
-                // Bulk append — NOT byte-by-byte push_back (that was ~87M
-                // push_back/s at ~700 Mbit). extend reserves once + copies.
-                conn.recv_buf.extend(payload[..copy].iter().copied());
-                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
-                // Delayed ACK (RFC 1122): ACK every SECOND full-data segment,
-                // not every one — halves the ~60k send_segment/s (each an alloc-
-                // heavy packet build + TX) that pegged the RX core. A lone
-                // pending ACK is flushed by the 40 ms timer in tick_connections.
-                if conn.ack_pending {
+            if !payload.is_empty() {
+                if seq == conn.rcv_nxt {
+                    let space = RECV_BUF_SIZE - conn.recv_buf.len();
+                    let copy = payload.len().min(space);
+                    // Bulk append — NOT byte-by-byte push_back (that was ~87M
+                    // push_back/s at ~700 Mbit). extend reserves once + copies.
+                    conn.recv_buf.extend(payload[..copy].iter().copied());
+                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
+                    // Delayed ACK (RFC 1122): ACK every SECOND full-data segment,
+                    // not every one — halves the ~60k send_segment/s (each an alloc-
+                    // heavy packet build + TX) that pegged the RX core. A lone
+                    // pending ACK is flushed by the 40 ms timer in tick_connections.
+                    if conn.ack_pending {
+                        send_segment(
+                            conn.remote_ip, conn.local_port, conn.remote_port,
+                            conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
+                        );
+                        conn.ack_pending = false;
+                    } else {
+                        conn.ack_pending = true;
+                        conn.ack_tick = crate::interrupts::ticks();
+                    }
+                } else {
+                    // Out-of-order or duplicate. We have no reassembly buffer
+                    // yet, so the payload is dropped — but we MUST send an
+                    // immediate DUPLICATE ACK (re-ACK rcv_nxt) so the sender
+                    // fast-retransmits the gap (RFC 5681) instead of waiting for
+                    // an RTO (hundreds of ms, exponentially backing off — the
+                    // multi-second tail-stall we measured). Never delay this one.
+                    use core::sync::atomic::Ordering::Relaxed;
+                    if (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0 {
+                        TCP_OOO_AHEAD.fetch_add(1, Relaxed);
+                    } else {
+                        TCP_OOO_BEHIND.fetch_add(1, Relaxed);
+                    }
                     send_segment(
                         conn.remote_ip, conn.local_port, conn.remote_port,
                         conn.snd_nxt, conn.rcv_nxt, ACK, recv_window(conn), &[],
                     );
                     conn.ack_pending = false;
-                } else {
-                    conn.ack_pending = true;
-                    conn.ack_tick = crate::interrupts::ticks();
                 }
             }
 
