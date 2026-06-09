@@ -72,6 +72,12 @@ pub fn poll() {
     // per-frame notify to avoid a VM-exit per uploaded packet). No-op when no
     // virtio NIC / nothing pending.
     crate::virtio_net::tx_flush();
+    // ALWAYS run (even if we skipped the drain above): progressive shade render
+    // + mouse + auto-hide dock reveal/tick. Internally gated to Core 0, so only
+    // Core 0 executes it — no race despite being outside the guard. This is the
+    // heartbeat that drives the dock hover-reveal from the shell-prompt idle
+    // loop (read_line_with_tab), which polls net but never renders directly.
+    crate::shade::poll_render();
 }
 
 /// NIC-drain-only poll for the hot recv busy-spins (`tcp_recv_poll` /
