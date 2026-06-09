@@ -10,8 +10,12 @@ use crate::serial::{inb, outb};
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
 
-// Lock-free ring buffer for decoded key events (interrupt-safe)
-const BUF_SIZE: usize = 64;
+// Lock-free ring buffer for decoded key events (interrupt-safe).
+// 512 (was 64): a pasted line (e.g. a long URL) arrives as a fast key burst;
+// the shell drains one key per loop iteration, so a small ring overflowed mid-
+// paste and silently dropped the tail of the line. 512 absorbs any pasteable
+// line (matches INPUT_BUF_SIZE).
+const BUF_SIZE: usize = 512;
 static mut KEY_BUF: [u8; BUF_SIZE] = [0; BUF_SIZE];
 static BUF_HEAD: AtomicUsize = AtomicUsize::new(0);
 static BUF_TAIL: AtomicUsize = AtomicUsize::new(0);
