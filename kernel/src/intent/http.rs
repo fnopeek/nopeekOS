@@ -147,8 +147,11 @@ fn do_http_request(args: &str, use_tls: bool) {
                     let mbps = (total as u64 * 8 * 100) / dt / 1_000_000;
                     let (ooo_ahead, ooo_behind) = crate::net::tcp::take_ooo_stats();
                     let maxbuf = crate::net::tcp::take_max_rxbuf();
-                    kprintln!("[npk]   rx {} KiB (~{} Mbit/s)  ooo: ahead={} dup={}  rxbuf_max={} KiB",
-                        total / 1024, mbps, ooo_ahead, ooo_behind, maxbuf / 1024);
+                    let txsegs = crate::net::tcp::take_tx_segs();
+                    let dt2 = now.wrapping_sub(last_tick).max(1);
+                    kprintln!("[npk]   rx {} KiB (~{} Mbit/s)  ooo: ahead={} dup={}  rxbuf_max={} KiB  tx_acks={}/s",
+                        total / 1024, mbps, ooo_ahead, ooo_behind, maxbuf / 1024,
+                        txsegs as u64 * 100 / dt2);
                     last_tick = now;
                 }
                 Ok(())

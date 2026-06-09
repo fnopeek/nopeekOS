@@ -108,6 +108,15 @@ pub fn take_max_rxbuf() -> usize {
     TCP_MAX_RXBUF.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
 
+// Segments we transmitted (mostly ACKs) — diagnostic. A bulk download flooding
+// one ACK per packet shows up here as ~tens of thousands/s.
+static TCP_TX_SEGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Count of connection-originated segments sent since the last call; resets.
+pub fn take_tx_segs() -> u32 {
+    TCP_TX_SEGS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 // TCP flags
 const FIN: u8 = 0x01;
 const SYN: u8 = 0x02;
@@ -159,6 +168,9 @@ struct TcpConn {
     ack_tick: u64,
     // In-order segments received since our last ACK (ACK-coalescing counter).
     acks_held: u16,
+    // Bytes drained since our last recv()-side window-update ACK. Rate-limits
+    // those ACKs so a bulk download doesn't emit one per recv() call (~70k/s).
+    freed_since_winupd: u32,
 
     // Connection complete flag
     established: bool,
@@ -222,6 +234,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
+        freed_since_winupd: 0,
         established: false,
         closed: false,
         error: false,
@@ -299,6 +312,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
+        freed_since_winupd: 0,
         established: false,
         closed: false,
         error: false,
@@ -373,6 +387,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
+        freed_since_winupd: 0,
         established: false,
         closed: false,
         error: false,
@@ -408,7 +423,8 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
 
-    let available = conn.recv_buf.len().min(buf.len());
+    let pre_len = conn.recv_buf.len();
+    let available = pre_len.min(buf.len());
     // Bulk copy out of the ring buffer instead of byte-by-byte pop_front
     // (that was ~112M pop_front/s at 100 MB/s — pure call overhead). The
     // VecDeque exposes its contents as up to two contiguous slices; memcpy
@@ -423,27 +439,28 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
         conn.recv_buf.drain(..available);
     }
 
-    // Window-update ACK on every drain.
+    // Window-update ACK — RATE-LIMITED.
     //
-    // The old code only ACKed when a SINGLE recv() freed >25 % of
-    // the buffer (>16 KiB). But `recv_exact` (TLS) drains in small
-    // increments, so that threshold was almost never met on a
-    // sender that trickles (codeload generates tarballs on the
-    // fly). The receive window then collapsed to 0 and only the
-    // peer's exponentially-backing-off zero-window probe reopened
-    // it → a fixed, host-independent ~31 KiB/s sawtooth. Static
-    // CDNs (raw.githubusercontent) happened to deliver clean
-    // ≥16 KiB bursts so the threshold fired and they ran ~100×
-    // faster on the very same code path — that asymmetry was the
-    // tell.
+    // We must re-advertise the window the consumer just reopened so a
+    // trickle / zero-window sender resumes (the case this ACK was added for:
+    // a TLS sender that bursts then goes quiet, no more handle_tcp data-ACKs,
+    // → window stuck small → peer zero-window-probes → ~31 KiB/s sawtooth).
+    // But a BULK plain-http download calls recv() once PER PACKET (~70k/s, not
+    // per ~16 KiB TLS record), so ACKing on every drain floods the TX path:
+    // ~70k ACKs/s, each an alloc + a virtio TX-doorbell VM-exit → pegs the
+    // worker core AND defeats the handle_tcp ACK-coalescing.
     //
-    // Acknowledging as we consume is exactly what TCP is supposed
-    // to do. recv() is called at ~TLS-record granularity (~16 KiB),
-    // so this is one bare ACK per record — normal ACK density, not
-    // a flood.
-    if available > 0 && conn.state == State::Established {
+    // So: ACK immediately only when the window was actually CONSTRAINED
+    // (buffer >1/4 full → window shrinking, the trickle/zero-window case),
+    // otherwise at most once per ~64 KiB freed. handle_tcp's coalesced
+    // data-ACKs carry the (wide-open) window the rest of the time.
+    conn.freed_since_winupd = conn.freed_since_winupd.saturating_add(available as u32);
+    let constrained = pre_len > RECV_BUF_SIZE / 4;
+    if available > 0 && conn.state == State::Established
+        && (constrained || conn.freed_since_winupd >= 64 * 1024) {
         let w = recv_window(conn);
         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+        conn.freed_since_winupd = 0;
         conn.ack_pending = false;
         conn.acks_held = 0;
     }
@@ -932,6 +949,7 @@ fn parse_ts(seg: &[u8], data_offset: usize) -> Option<u32> {
 /// All connection-originated segments (ACKs, data, FIN) must carry it so the
 /// sender gets a clean per-segment RTT sample despite our ACK jitter.
 fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) {
+    TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if conn.ts_ok {
         // NOP, NOP, then the 10-byte Timestamp option (4-byte aligned).
         let mut opts = [1u8, 1, 8, 10, 0, 0, 0, 0, 0, 0, 0, 0];
