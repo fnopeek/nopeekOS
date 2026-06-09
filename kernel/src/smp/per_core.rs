@@ -477,13 +477,24 @@ pub fn core_usage(core_id: usize) -> u32 {
 }
 
 /// Read current core's sequential ID via LAPIC.
+/// Cached APIC base (MSR 0x1B). Identical on every core and never changes, so
+/// reading it once avoids an `rdmsr` — a VM-exit under virtualization — on every
+/// current_core_id() call (hot: poll loops, idle, core-gating).
+static APIC_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn current_core_id() -> usize {
-    let (lo, hi): (u32, u32);
-    // SAFETY: MSR 0x1B (APIC base) always readable on x86_64 ring 0
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
-    let apic_base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
-    // SAFETY: APIC MMIO is identity-mapped
-    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    use core::sync::atomic::Ordering::Relaxed;
+    let mut base = APIC_BASE.load(Relaxed);
+    if base == 0 {
+        let (lo, hi): (u32, u32);
+        // SAFETY: MSR 0x1B (APIC base) always readable on x86_64 ring 0.
+        unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
+        base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
+        APIC_BASE.store(base, Relaxed);
+    }
+    // SAFETY: APIC MMIO is identity-mapped. One MMIO read remains (the per-core
+    // APIC ID register); the rdmsr VM-exit is gone.
+    let apic_id = unsafe { core::ptr::read_volatile((base + 0x20) as *const u32) } >> 24;
     let cores = CORES.lock();
     cores.iter().position(|c| c.apic_id == apic_id).unwrap_or(0)
 }
