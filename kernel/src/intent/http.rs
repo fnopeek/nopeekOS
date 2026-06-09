@@ -802,25 +802,10 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
                 }
-                // Timer-NAPI: on a worker core the caller armed a fast LAPIC
-                // timer, so HLT until the next tick instead of burning the core
-                // at 100 % in a spin. HLT VMEXITs → the host core idles too. The
-                // ring refills in the gap; the 512 KB buffer drains it next wake.
-                // Core 0 (no worker timer) keeps the cheap spin.
-                if crate::smp::per_core::current_core_id() != 0 {
-                    let rflags: u64;
-                    // SAFETY: read IF to preserve interrupt-enable state.
-                    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
-                    if rflags & (1 << 9) != 0 {
-                        // SAFETY: IF=1 → HLT wakes on the next (fast) timer IRQ.
-                        unsafe { core::arch::asm!("hlt"); }
-                    } else {
-                        // SAFETY: sti-shadow defers the IRQ until HLT is armed.
-                        unsafe { core::arch::asm!("sti; hlt; cli"); }
-                    }
-                } else {
-                    core::hint::spin_loop();
-                }
+                // Timer-NAPI: HLT until the next (10 kHz, during a download) tick
+                // instead of burning the core. Shared with recv_blocking; records
+                // the halt so `cores` is honest. The ring refills in the gap.
+                crate::interrupts::worker_idle_hlt();
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
