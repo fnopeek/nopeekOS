@@ -48,8 +48,16 @@ pub enum EntryKind {
 /// quirk, …). Field added in npkfs v3; old v2 trees are not
 /// readable by this kernel (mount halts with a reinstall message).
 ///
-/// `flags` is a u8 bitmap reserved for future per-entry metadata
-/// (xattrs, hidden, lock, …). Zero in v3.0.
+/// `flags` is a u8 bitmap of per-entry metadata. For `File` entries the
+/// low two bits record the object shape so GC can decide reachability
+/// WITHOUT reading the object (see `FLAG_BLOB` / `FLAG_CHUNKED`):
+///   - `FLAG_BLOB`    (0x02): single `Object::Blob` — a leaf, GC skips it.
+///   - `FLAG_CHUNKED` (0x01): `Object::Chunked` manifest — GC reads it to
+///                            reach the chunk blobs.
+/// `flags == 0` on a `File` is the legacy/unknown case (entries written
+/// before the flag existed): GC falls back to reading the object to
+/// classify it, so a pre-flag chunked file's chunks are never mistaken
+/// for orphans. `Dir` entries leave `flags` unused (GC keys on `kind`).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TreeEntry {
     pub name:  String,
@@ -101,6 +109,13 @@ pub enum ObjectError {
 }
 
 impl TreeEntry {
+    /// `flags` bit: this `File` references an `Object::Chunked` manifest.
+    /// GC must read it to reach the chunk blobs.
+    pub const FLAG_CHUNKED: u8 = 0x01;
+    /// `flags` bit: this `File` references a single `Object::Blob` (a
+    /// leaf). GC marks it reachable without reading the body.
+    pub const FLAG_BLOB: u8 = 0x02;
+
     /// Validate the name component. Names must be 1..=MAX_NAME_LEN bytes,
     /// UTF-8 (guaranteed by `String`), and contain neither `/` nor NUL.
     pub fn validate_name(&self) -> Result<(), ObjectError> {

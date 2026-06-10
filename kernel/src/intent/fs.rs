@@ -420,6 +420,40 @@ pub fn intent_disk_info() {
                 kprintln!("  Max/cmd:   {} blocks ({} KB)", max_blocks, max_blocks * 4);
             }
             kprintln!("  Status:    online");
+
+            // ── Filesystem (npkFS) + GC status ────────────────────────
+            if let Some((total_blocks, free_blocks, object_count, _gen)) = crate::npkfs::stats() {
+                let total_mb = total_blocks * 4096 / (1024 * 1024);
+                let free_mb = free_blocks * 4096 / (1024 * 1024);
+                kprintln!();
+                kprintln!("  Filesystem (npkFS)");
+                kprintln!("  ────────────────────────");
+                kprintln!("  Objects:   {}", object_count);
+                kprintln!("  Free:      {} MB / {} MB", free_mb, total_mb);
+                match crate::storage::npkfs::fs::last_gc() {
+                    Some(g) => {
+                        let ago = crate::drivers::rtc::read_unix_time()
+                            .zip(Some(g.when_unix))
+                            .filter(|(now, w)| *w != 0 && *now >= *w)
+                            .map(|(now, w)| now - w);
+                        let when = match ago {
+                            Some(s) if s < 90      => alloc::format!("vor {}s", s),
+                            Some(s) if s < 5400    => alloc::format!("vor {}min", s / 60),
+                            Some(s)                => alloc::format!("vor {}h", s / 3600),
+                            None                   => alloc::string::String::from("diese Session"),
+                        };
+                        if g.failed == 0 {
+                            kprintln!("  GC:        sauber {} — {} entfernt, {} behalten",
+                                when, g.removed, g.kept);
+                        } else {
+                            kprintln!("  GC:        {} — {} entfernt, {} behalten, {} KORRUPT übersprungen",
+                                when, g.removed, g.kept, g.failed);
+                        }
+                    }
+                    None => kprintln!("  GC:        seit Boot nicht gelaufen"),
+                }
+            }
+
             print_crypto_bench();
             kprintln!();
         }

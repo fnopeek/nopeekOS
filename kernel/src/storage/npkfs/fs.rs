@@ -250,6 +250,51 @@ pub struct GcStats {
     pub removed: usize,
 }
 
+/// Read a Tree object for GC marking. `Ok(Some(entries))` for a Tree,
+/// `Ok(None)` for a dangling hash or a hash that isn't a Tree (skip),
+/// `Err(())` after logging an unreadable/out-of-range object (skip).
+fn read_tree_for_gc(hash: &[u8; 32]) -> Result<Option<Vec<TreeEntry>>, ()> {
+    let bytes = match storage::get(hash) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            crate::kprintln!("[npk] gc: unreadable tree {:02x}{:02x}.. ({:?}) — skipping",
+                hash[0], hash[1], e);
+            return Err(());
+        }
+    };
+    match super::object::Object::decode(&bytes) {
+        Ok(super::object::Object::Tree(entries)) => Ok(Some(entries)),
+        // A root/Dir hash that decodes to a non-Tree is corruption — skip.
+        Ok(_) | Err(_) => Ok(None),
+    }
+}
+
+/// Mark a `File` object's transitive chunks reachable. Only called for
+/// Chunked manifests (and legacy flag==0 entries): reads the object and,
+/// if it's a `Chunked` manifest, marks every chunk hash. A single Blob
+/// here (legacy path) is just read + discarded. Read errors are logged
+/// + skipped — a corrupt manifest's chunks become orphans, which is
+/// correct. Single-Blob files with `FLAG_BLOB` never reach this.
+fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]>) {
+    let bytes = match storage::get(hash) {
+        Ok(Some(b)) => b,
+        Ok(None) => return,
+        Err(e) => {
+            crate::kprintln!("[npk] gc: unreadable file obj {:02x}{:02x}.. ({:?}) — skipping",
+                hash[0], hash[1], e);
+            return;
+        }
+    };
+    if let Ok(super::object::Object::Chunked { chunks, .. }) =
+        super::object::Object::decode(&bytes)
+    {
+        for c in chunks {
+            if c != paths::EMPTY_ROOT { reachable.insert(c); }
+        }
+    }
+}
+
 /// Mark-and-sweep GC over the v2 object store.
 ///
 /// Reachability roots: every valid SB slot's `root_tree_hash`. The 8
@@ -267,44 +312,42 @@ pub fn gc() -> Result<GcStats, Error> {
 
     let roots = storage::all_root_hashes().map_err(Error::Storage)?;
     let mut reachable: HashSet<[u8; 32]> = HashSet::new();
-    let mut work: alloc::vec::Vec<[u8; 32]> = roots;
+    // Work-list holds Tree hashes ONLY (roots + Dir entries). File
+    // entries are marked reachable straight from their parent Tree's
+    // `kind` + `flags` — so GC never reads a single-Blob file's body
+    // (the bulk of the disk). Only Trees and Chunked manifests are read.
+    // This is what makes GC cheap enough to run automatically.
+    let mut tree_work: alloc::vec::Vec<[u8; 32]> = roots;
 
-    while let Some(hash) = work.pop() {
+    while let Some(hash) = tree_work.pop() {
         if hash == paths::EMPTY_ROOT { continue; }
         if !reachable.insert(hash) { continue; }
 
-        let bytes = match storage::get(&hash) {
-            Ok(Some(b)) => b,
-            // A dangling reference means an upstream commit referenced
-            // an object that's not in the B-tree. Either pre-GC partial
-            // state or genuine corruption — either way, we can't recurse
-            // into it. Skip and keep going.
-            Ok(None) => continue,
-            // Corrupt / out-of-range object (e.g. a bad extent left by an
-            // interrupted streaming write). Log + skip instead of aborting
-            // the whole GC — its children won't be marked reachable, but a
-            // corrupt object's children are orphans anyway.
-            Err(e) => {
-                crate::kprintln!("[npk] gc: unreadable object {:02x}{:02x}.. ({:?}) — skipping",
-                    hash[0], hash[1], e);
-                continue;
-            }
+        let entries = match read_tree_for_gc(&hash) {
+            Ok(Some(e)) => e,
+            // Dangling ref, or a hash that isn't a Tree (corruption) —
+            // skip; already-logged errors return Err and skip too.
+            Ok(None) | Err(()) => continue,
         };
-        // Tree + Chunked objects expand the work-list; Blobs are leaves.
-        match super::object::Object::decode(&bytes) {
-            Ok(super::object::Object::Tree(entries)) => {
-                for e in entries {
-                    if e.hash != paths::EMPTY_ROOT {
-                        work.push(e.hash);
+        for e in entries {
+            if e.hash == paths::EMPTY_ROOT { continue; }
+            match e.kind {
+                EntryKind::Dir => tree_work.push(e.hash),
+                EntryKind::File => {
+                    // Mark the file object itself reachable WITHOUT reading it.
+                    reachable.insert(e.hash);
+                    let chunked = e.flags & super::object::TreeEntry::FLAG_CHUNKED != 0;
+                    let known_blob = e.flags & super::object::TreeEntry::FLAG_BLOB != 0;
+                    // Chunked manifest → read it for the chunk hashes.
+                    // Legacy entries (flags==0) fall here too: read to
+                    // classify, so a pre-flag chunked file's chunks are
+                    // never mistaken for orphans. Single-Blob files
+                    // (FLAG_BLOB) are leaves and skip the read entirely.
+                    if chunked || !known_blob {
+                        mark_file_object(&e.hash, &mut reachable);
                     }
                 }
             }
-            Ok(super::object::Object::Chunked { chunks, .. }) => {
-                for h in chunks {
-                    if h != paths::EMPTY_ROOT { work.push(h); }
-                }
-            }
-            Ok(super::object::Object::Blob(_)) | Err(_) => {}
         }
     }
 
@@ -339,8 +382,34 @@ pub fn gc() -> Result<GcStats, Error> {
     // we'd typically be running maintenance anyway.
     storage::trim().map_err(Error::Storage)?;
 
+    // Record this run so `disk` can report when GC last completed and
+    // whether it was clean (no corrupt objects skipped).
+    *LAST_GC.lock() = Some(LastGc {
+        when_unix: crate::drivers::rtc::read_unix_time().unwrap_or(0),
+        kept: reachable.len(),
+        removed,
+        failed,
+    });
+
     Ok(GcStats { kept: reachable.len(), removed })
 }
+
+/// Summary of the most recent `gc()` completion (this session only —
+/// resets on reboot). `failed == 0` means a clean sweep.
+#[derive(Clone, Copy, Debug)]
+pub struct LastGc {
+    /// UTC seconds since epoch at completion (0 if RTC unreadable).
+    pub when_unix: u64,
+    pub kept: usize,
+    pub removed: usize,
+    /// Orphans that couldn't be removed (corrupt) — left in place.
+    pub failed: usize,
+}
+
+static LAST_GC: Mutex<Option<LastGc>> = Mutex::new(None);
+
+/// The most recent `gc()` result, or `None` if GC hasn't run since boot.
+pub fn last_gc() -> Option<LastGc> { *LAST_GC.lock() }
 
 // ── Streaming writer (chunked blobs) ─────────────────────────────────
 //

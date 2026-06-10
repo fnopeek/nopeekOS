@@ -310,7 +310,8 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
         kind: EntryKind::File,
         size: data.len() as u64,
         mtime: now_unix(),
-        flags: 0,
+        // Single Blob → leaf; lets GC skip reading the body.
+        flags: TreeEntry::FLAG_BLOB,
     };
     insert_entry_at(root, &segs, entry, /* allow_replace */ true)
 }
@@ -335,7 +336,8 @@ pub fn install_chunked_file(
         kind: EntryKind::File,
         size: total_size,
         mtime: now_unix(),
-        flags: 0,
+        // Chunked manifest → GC must read it to reach the chunk blobs.
+        flags: TreeEntry::FLAG_CHUNKED,
     };
     insert_entry_at(root, &segs, entry, /* allow_replace */ true)
 }
