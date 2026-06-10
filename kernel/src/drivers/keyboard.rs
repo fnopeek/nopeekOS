@@ -509,7 +509,15 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
     let alt_gr = ALT_GR.load(Ordering::Relaxed);
     let caps = CAPS_LOCK.load(Ordering::Relaxed);
 
-    if ctrl && code == 0x2E { return Some(0x03); } // Ctrl+C
+    if ctrl && code == 0x2E {
+        // Ctrl+C → terminal SIGINT: cancel a running foreground intent
+        // (download/OTA). Set here so it works even when the main loop is
+        // blocked in a download — the timer IRQ's poll_ps2_irq still decodes
+        // scancodes and reaches this point. (The 0x03 is also buffered for the
+        // normal read path.)
+        crate::intent::request_cancel();
+        return Some(0x03);
+    }
 
     let layout = crate::config::get("keyboard");
     let is_de = !matches!(layout.as_deref(), Some("us"));

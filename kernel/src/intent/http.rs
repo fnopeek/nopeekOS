@@ -110,6 +110,10 @@ fn do_http_request(args: &str, use_tls: bool) {
                 kprintln!("[npk] Streaming to RAM (-d, discard) — pure throughput, no disk");
                 if crate::xhci::nic_attached() {
                     kprintln!("[npk] NIC USB link: {}", crate::xhci::nic_link_speed_str());
+                    let (eth_mbit, full) = crate::drivers::rtl8153::link_speed();
+                    kprintln!("[npk] NIC Ethernet link: {} Mbit {}-duplex{}",
+                        eth_mbit, if full { "full" } else { "half" },
+                        if eth_mbit != 0 && eth_mbit < 1000 { "  <- NOT gigabit!" } else { "" });
                 }
             }
             None
