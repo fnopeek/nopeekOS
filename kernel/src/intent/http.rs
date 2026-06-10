@@ -828,10 +828,16 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
                 }
-                // Timer-NAPI: HLT until the next (10 kHz, during a download) tick
-                // instead of burning the core. Shared with recv_blocking; records
-                // the halt so `cores` is honest. The ring refills in the gap.
-                crate::interrupts::worker_idle_hlt();
+                // BUSY-SPIN, do NOT HLT. The USB NIC has no IRQ — its RX ring is
+                // re-armed ONLY by poll_rx_only() above. worker_idle_hlt() parks
+                // this core until the next 100 Hz worker tick (up to 10 ms);
+                // nothing re-arms the ring in that gap, so the chip exhausts all
+                // buffers in a few ms and then drops every frame → the ~24 Mbit
+                // cap + massive TCP reorder on rtl8153. (virtio/QEMU is immune:
+                // it delivers RX from a fiber, not this polled loop.) tcp_recv_poll
+                // only runs during an active download, so spinning is correct —
+                // and matches tls_recv_poll, which never had the HLT.
+                core::hint::spin_loop();
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
