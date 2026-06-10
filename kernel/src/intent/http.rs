@@ -110,10 +110,7 @@ fn do_http_request(args: &str, use_tls: bool) {
                 kprintln!("[npk] Streaming to RAM (-d, discard) — pure throughput, no disk");
                 if crate::xhci::nic_attached() {
                     kprintln!("[npk] NIC USB link: {}", crate::xhci::nic_link_speed_str());
-                    let (eth_mbit, full) = crate::drivers::rtl8153::link_speed();
-                    kprintln!("[npk] NIC Ethernet link: {} Mbit {}-duplex{}",
-                        eth_mbit, if full { "full" } else { "half" },
-                        if eth_mbit != 0 && eth_mbit < 1000 { "  <- NOT gigabit!" } else { "" });
+                    crate::drivers::rtl8153::log_link_diag();
                 }
             }
             None
@@ -181,6 +178,10 @@ fn do_http_request(args: &str, use_tls: bool) {
                     kprintln!("[npk]      NIC-usb: {} Mbit  avg_batch={}B  empty_polls={}%  ring_depth={}  | tx_acks={} tx_wait={}ns",
                         nic_mbit, rxb / deliv1, empty * 100 / polls.max(1),
                         armed / deliv1, txc, if txc > 0 { txcyc / txc / ghz } else { 0 });
+                    // Do WE discard received bytes in the rx_desc walker?
+                    let (frames, trunc, discard) = crate::drivers::rtl8153::take_rx_parse_stats();
+                    kprintln!("[npk]      rx-parse: frames={}  truncated_batches={}  DISCARDED={} B",
+                        frames, trunc, discard);
                     last_tick = now;
                 }
                 Ok(())
