@@ -171,11 +171,22 @@ struct Fid {
     is_dir: bool,
     /// Working buffer: a regular file's bytes, cached at Tlopen/Tlcreate.
     /// Tread slices it; Twrite/Tsetattr mutate it. None for dirs / not
-    /// yet opened.
+    /// yet opened, or once a large sequential write promoted to `stream`.
     data: Option<Vec<u8>>,
     /// `data` has unflushed writes — persisted to npkFS on Tfsync/Tclunk.
     dirty: bool,
+    /// Set once a write grows the file past STREAM_PROMOTE_BYTES while
+    /// appending sequentially (a download): subsequent writes stream chunk-
+    /// by-chunk to npkFS instead of buffering the whole file in RAM (which
+    /// OOM'd at ~1 GiB on a 500 MB+ ISO) and doing an O(n²) whole-object
+    /// rewrite. Published (manifest + path) on Tclunk via `finish()`.
+    stream: Option<crate::npkfs::fs::StreamingWriter>,
 }
+
+/// Promote a buffered file to streaming once it reaches this size AND the
+/// current write appended at the end. Small files (configs, editor saves) stay
+/// fully buffered; only big sequential downloads stream.
+const STREAM_PROMOTE_BYTES: usize = 4 * 1024 * 1024;
 
 impl Virtio9p {
     pub fn new() -> Self {
@@ -531,7 +542,7 @@ impl Virtio9p {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         let root = self.root.clone();
-        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, dirty: false });
+        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, dirty: false, stream: None });
         if self.log_count < 32 {
             kprintln!("[9p] Tattach fid={} → root '{}'", fid, root);
             self.log_count += 1;
@@ -570,7 +581,7 @@ impl Virtio9p {
         let walked = (qids.len() / 13) as u16;
         if walked as usize == nw {
             let is_dir = npkfs_stat(&cur).map(|s| s.0).unwrap_or(true);
-            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, dirty: false });
+            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, dirty: false, stream: None });
         }
         let mut b = Vec::with_capacity(2 + qids.len());
         b.extend_from_slice(&walked.to_le_bytes());
@@ -583,7 +594,13 @@ impl Virtio9p {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         let path = match self.fids.get(&fid) { Some(f) => f.path.clone(), None => return rlerror(tag, EINVAL) };
-        let (is_dir, size, mtime) = if is_magic(&path) {
+        // A streaming (in-progress download) fid isn't published in npkFS until
+        // Tclunk — report its live written size so a mid-download fstat doesn't
+        // see ENOENT.
+        let stream_size = self.fids.get(&fid).and_then(|f| f.stream.as_ref()).map(|w| w.written());
+        let (is_dir, size, mtime) = if let Some(sz) = stream_size {
+            (false, sz, 0)
+        } else if is_magic(&path) {
             (false, MAGIC_OPEN_CONTENT.len() as u64, 0)
         } else {
             match npkfs_stat(&path) { Some(s) => s, None => return rlerror(tag, ENOENT) }
@@ -677,9 +694,15 @@ impl Virtio9p {
         let fid = rd_u32(body, 0);
         let offset = u64::from_le_bytes(body[4..12].try_into().unwrap()) as usize;
         let count = rd_u32(body, 12) as usize;
-        let data = match self.fids.get(&fid).and_then(|f| f.data.as_ref()) {
+        let f = match self.fids.get(&fid) { Some(f) => f, None => return rlerror(tag, EINVAL) };
+        let data = match f.data.as_ref() {
             Some(d) => d,
-            None => return rlerror(tag, EINVAL),
+            // A streaming (write-only download) fid has no readable buffer →
+            // empty read (EOF); a genuinely unopened fid is an error.
+            None => {
+                if f.stream.is_some() { return msg(RREAD, tag, &0u32.to_le_bytes()); }
+                return rlerror(tag, EINVAL);
+            }
         };
         let start = offset.min(data.len());
         let end = offset.saturating_add(count).min(data.len());
@@ -694,12 +717,15 @@ impl Virtio9p {
     fn t_clunk(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
-        if let Some(f) = self.fids.get(&fid) {
-            if f.dirty {
+        if let Some(f) = self.fids.remove(&fid) {
+            if let Some(w) = f.stream {
+                // Streamed file: flush the final chunk, write the manifest, and
+                // publish it at the path atomically.
+                let _ = w.finish();
+            } else if f.dirty {
                 if let Some(d) = &f.data { let _ = npkfs_write(&f.path, d); }
             }
         }
-        self.fids.remove(&fid);
         msg(RCLUNK, tag, &[])
     }
 
@@ -736,7 +762,7 @@ impl Virtio9p {
         }
         p9diag!("[9p] Tlcreate '{}'", path);
         // Re-bind fid to the new open file with an empty write buffer.
-        self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), dirty: false });
+        self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), dirty: false, stream: None });
         let mut b = Vec::with_capacity(17);
         b.extend_from_slice(&qid(&path, false));
         b.extend_from_slice(&0u32.to_le_bytes()); // iounit
@@ -752,11 +778,42 @@ impl Virtio9p {
         let count = rd_u32(body, 12) as usize;
         let data = &body[16..body.len().min(16 + count)];
         let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
-        let buf = f.data.get_or_insert_with(Vec::new);
-        let end = offset + data.len();
-        if buf.len() < end { buf.resize(end, 0); }
-        buf[offset..end].copy_from_slice(data);
+
+        // Streaming mode (large sequential download already promoted): append
+        // chunk-by-chunk to npkFS, never holding the whole file in RAM.
+        if let Some(w) = f.stream.as_mut() {
+            if offset as u64 != w.written() {
+                // Non-sequential write into a streamed file — unsupported.
+                return rlerror(tag, EIO);
+            }
+            if w.write(data).is_err() { return rlerror(tag, EIO); }
+            return msg(RWRITE, tag, &(data.len() as u32).to_le_bytes());
+        }
+
+        // Buffered mode (small files / random writes).
+        {
+            let buf = f.data.get_or_insert_with(Vec::new);
+            let end = offset + data.len();
+            if buf.len() < end { buf.resize(end, 0); }
+            buf[offset..end].copy_from_slice(data);
+        }
         f.dirty = true;
+
+        // Promote to streaming once the buffer is large AND this write appended
+        // at the end (the download pattern). Hands the buffered prefix to a
+        // StreamingWriter, then frees the RAM buffer — bounding memory at one
+        // chunk instead of the whole file, and avoiding the O(n²) whole-object
+        // rewrite that OOM'd at ~1 GiB.
+        let dlen = f.data.as_ref().map_or(0, |b| b.len());
+        if dlen >= STREAM_PROMOTE_BYTES && offset + data.len() == dlen {
+            let mut w = crate::npkfs::fs::open_streaming_write(&f.path);
+            let ok = f.data.as_ref().map_or(false, |b| w.write(b).is_ok());
+            if ok {
+                f.stream = Some(w);
+                f.data = None;
+                f.dirty = false;
+            }
+        }
         msg(RWRITE, tag, &(data.len() as u32).to_le_bytes())
     }
 
@@ -786,7 +843,10 @@ impl Virtio9p {
         if valid & P9_SETATTR_SIZE != 0 && body.len() >= 32 {
             let size = u64::from_le_bytes(body[24..32].try_into().unwrap()) as usize;
             if let Some(f) = self.fids.get_mut(&fid) {
-                if !f.is_dir {
+                // Ignore resize on a streaming file (would corrupt state by
+                // creating a second buffer); downloads only truncate at open,
+                // before promotion.
+                if !f.is_dir && f.stream.is_none() {
                     let buf = f.data.get_or_insert_with(Vec::new);
                     buf.resize(size, 0);
                     f.dirty = true;
