@@ -946,7 +946,14 @@ fn drain_inbound(
             break;
         }
     }
-    any
+    // Fire the guest's RX IRQ only if we delivered something AND the driver
+    // hasn't suppressed interrupts (NAPI poll sets VIRTQ_AVAIL_F_NO_INTERRUPT).
+    // Firing IRQ10 during a NAPI poll preempts the guest's ring-drain → it
+    // reposts RX buffers slower → the ring exhausts (injfalse) → INBOUND_Q
+    // overflows → drops → TCP sawtooth (the speedtest "200→60→200" oscillation).
+    // The guest re-checks the used ring when it re-enables interrupts, so a
+    // suppressed packet is never stranded.
+    any && net.rx_wants_irq(mem)
 }
 
 /// Number of currently-active (non-closed) TCP sessions. The run_linux

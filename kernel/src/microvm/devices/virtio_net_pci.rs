@@ -507,6 +507,19 @@ impl VirtioNet {
     ///
     /// `pub(super)` so `nat::pump` can inject host-bound TCP response
     /// segments from the timer-tick path.
+    /// True if the guest wants an RX interrupt right now — i.e. it has NOT set
+    /// VIRTQ_AVAIL_F_NO_INTERRUPT on the RX queue. Linux's virtio-net NAPI sets
+    /// that flag while polling the ring; firing IRQ10 anyway preempts the drain,
+    /// so the guest reposts buffers slower → RX ring exhausts → INBOUND_Q
+    /// overflows → TCP sawtooth. The pump checks this before injecting IRQ10.
+    pub(super) fn rx_wants_irq(&self, mem: &GuestMem) -> bool {
+        match self.queues.get(0) {
+            Some(q) if q.enable != 0 && q.size != 0 =>
+                !super::virtqueue::avail_no_interrupt(mem, q.driver_gpa()),
+            _ => true,
+        }
+    }
+
     pub(super) fn inject_rx(&mut self, mem: &GuestMem, payload: &[u8]) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 

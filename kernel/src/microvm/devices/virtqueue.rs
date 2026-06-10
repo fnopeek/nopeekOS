@@ -59,6 +59,18 @@ pub fn avail_idx(mem: &GuestMem, avail_gpa: u64) -> Option<u16> {
     mem.read_u16(avail_gpa + 2)
 }
 
+/// VIRTQ_AVAIL_F_NO_INTERRUPT — the driver sets this in avail.flags (@ +0) while
+/// it polls the ring (Linux NAPI does this between the IRQ and re-enabling), to
+/// tell the device NOT to send an interrupt. Honouring it avoids a spurious-IRQ
+/// storm that preempts the guest's ring-drain.
+pub const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
+
+/// True if the driver has suppressed interrupts on this queue (NAPI poll in
+/// progress). Falls back to "interrupt wanted" if the flags can't be read.
+pub fn avail_no_interrupt(mem: &GuestMem, avail_gpa: u64) -> bool {
+    mem.read_u16(avail_gpa).map_or(false, |f| f & VIRTQ_AVAIL_F_NO_INTERRUPT != 0)
+}
+
 /// Read the descriptor head index for a given slot in the avail-ring.
 pub fn avail_ring(mem: &GuestMem, avail_gpa: u64, queue_size: u16, slot: u16) -> Option<u16> {
     let i = (slot % queue_size) as u64;
