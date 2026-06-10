@@ -42,7 +42,7 @@ pub use types::{FsError, BLOCK_SIZE};
 /// streaming download flushes one 16 MiB chunk after another and
 /// each would emit a `[put]` line, drowning the console. Flip to
 /// `true` when actively profiling the FS.
-pub(crate) const FS_PERF_LOG: bool = true;
+pub(crate) const FS_PERF_LOG: bool = false;
 
 use alloc::string::String;
 use alloc::vec::Vec;

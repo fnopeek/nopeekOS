@@ -109,7 +109,13 @@ const VIRTIO_9P_F_MOUNT_TAG: u32 = 1 << 0;
 const MOUNT_TAG: &[u8] = b"npkhome";
 
 /// Largest 9P message we negotiate. Bounds the per-request buffers.
-const MAX_MSIZE: u32 = 128 * 1024;
+///
+/// 512 KiB: the guest mounts with `msize=524288`, cutting a large
+/// download from ~90k tiny round-trips (8 KiB default) to ~1.4k — each
+/// 9P message is a VM-exit, so this is the GRO-equivalent for the disk
+/// path. A 512 KiB message spans ~128 virtqueue descriptors (4 KiB
+/// pages); our queue is 256-deep, so it fits with headroom.
+const MAX_MSIZE: u32 = 512 * 1024;
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
