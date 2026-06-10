@@ -273,13 +273,22 @@ pub fn gc() -> Result<GcStats, Error> {
         if hash == paths::EMPTY_ROOT { continue; }
         if !reachable.insert(hash) { continue; }
 
-        let bytes = match storage::get(&hash).map_err(Error::Storage)? {
-            Some(b) => b,
+        let bytes = match storage::get(&hash) {
+            Ok(Some(b)) => b,
             // A dangling reference means an upstream commit referenced
             // an object that's not in the B-tree. Either pre-GC partial
             // state or genuine corruption — either way, we can't recurse
             // into it. Skip and keep going.
-            None => continue,
+            Ok(None) => continue,
+            // Corrupt / out-of-range object (e.g. a bad extent left by an
+            // interrupted streaming write). Log + skip instead of aborting
+            // the whole GC — its children won't be marked reachable, but a
+            // corrupt object's children are orphans anyway.
+            Err(e) => {
+                crate::kprintln!("[npk] gc: unreadable object {:02x}{:02x}.. ({:?}) — skipping",
+                    hash[0], hash[1], e);
+                continue;
+            }
         };
         // Tree + Chunked objects expand the work-list; Blobs are leaves.
         match super::object::Object::decode(&bytes) {
@@ -301,6 +310,7 @@ pub fn gc() -> Result<GcStats, Error> {
 
     let all = storage::all_object_hashes().map_err(Error::Storage)?;
     let mut removed = 0usize;
+    let mut failed = 0usize;
     for h in all {
         if reachable.contains(&h) { continue; }
         // remove returns ObjectNotFound only if the entry vanished
@@ -309,8 +319,18 @@ pub fn gc() -> Result<GcStats, Error> {
         match storage::remove(&h) {
             Ok(()) => removed += 1,
             Err(super::types::FsError::ObjectNotFound) => {}
-            Err(e) => return Err(Error::Storage(e)),
+            // A corrupt extent / indirect pointer can make remove fail
+            // (out-of-range read). Log + skip so the remaining orphans
+            // still get reclaimed instead of one bad object wedging GC.
+            Err(e) => {
+                crate::kprintln!("[npk] gc: failed to remove {:02x}{:02x}.. ({:?}) — skipping",
+                    h[0], h[1], e);
+                failed += 1;
+            }
         }
+    }
+    if failed > 0 {
+        crate::kprintln!("[npk] gc: {} orphan(s) could not be removed (corrupt) — left in place", failed);
     }
 
     // Drain accumulated TRIM-pending ranges in one batch. Removed from

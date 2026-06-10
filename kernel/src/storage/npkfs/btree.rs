@@ -295,38 +295,61 @@ pub fn iter_all<F: FnMut(&BTreeEntryRaw)>(
     cache: &mut BlockCache, root: u64, f: &mut F,
 ) -> Result<(), FsError> {
     if root == 0 { return Ok(()); }
-    iter_subtree(cache, root, f)
+    iter_subtree(cache, root, 0, f)
 }
 
+/// **Best-effort** traversal used only by `iter_all` (GC enumeration):
+/// a node that is out-of-range, unreadable, has a bad magic / type, or
+/// a corrupt `num_entries` is logged and skipped rather than aborting
+/// the whole sweep — one bad pointer must not wedge GC forever. Depth-
+/// guarded against corrupt cycles, and `num_entries` is clamped to the
+/// node capacity so a garbage count can't index past the 4 KiB buffer
+/// (which would panic). `lookup`/`insert`/`delete` stay strict.
 #[allow(dead_code)]
 fn iter_subtree<F: FnMut(&BTreeEntryRaw)>(
-    cache: &mut BlockCache, block: u64, f: &mut F,
+    cache: &mut BlockCache, block: u64, depth: u32, f: &mut F,
 ) -> Result<(), FsError> {
+    if depth > 64 {
+        crate::kprintln!("[npk] gc: btree depth >64 at block {} — corrupt cycle, skipping", block);
+        return Ok(());
+    }
     let mut buf = [0u8; BLOCK_SIZE];
-    read_node(cache, block, &mut buf)?;
+    if let Err(e) = read_node(cache, block, &mut buf) {
+        crate::kprintln!("[npk] gc: unreadable btree node {} ({:?}) — skipping subtree", block, e);
+        return Ok(());
+    }
     let hdr = read_header(&buf);
-    if hdr.magic != BTREE_NODE_MAGIC { return Err(FsError::Corrupt); }
+    if hdr.magic != BTREE_NODE_MAGIC {
+        crate::kprintln!("[npk] gc: bad btree magic at block {} — skipping subtree", block);
+        return Ok(());
+    }
 
     match hdr.node_type {
         BTREE_LEAF => {
-            for i in 0..hdr.num_entries as usize {
+            let n = (hdr.num_entries as usize).min(MAX_LEAF_ENTRIES);
+            for i in 0..n {
                 f(&leaf_entry(&buf, i));
             }
             Ok(())
         }
         BTREE_INTERNAL => {
-            for i in 0..hdr.num_entries as usize {
+            let n = (hdr.num_entries as usize).min(MAX_INTERNAL_KEYS);
+            for i in 0..n {
                 let child = internal_child(&buf, i);
                 if child != 0 {
-                    iter_subtree(cache, child, f)?;
+                    iter_subtree(cache, child, depth + 1, f)?;
                 }
             }
             if hdr.right_child != 0 {
-                iter_subtree(cache, hdr.right_child, f)?;
+                iter_subtree(cache, hdr.right_child, depth + 1, f)?;
             }
             Ok(())
         }
-        _ => Err(FsError::Corrupt),
+        _ => {
+            crate::kprintln!("[npk] gc: bad btree node_type {} at block {} — skipping",
+                hdr.node_type, block);
+            Ok(())
+        }
     }
 }
 
