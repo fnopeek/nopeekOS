@@ -167,6 +167,14 @@ fn session_mut(terminal_idx: u8) -> Option<&'static mut IntentSession> {
     unsafe { (*sessions_ptr()).get_mut(&terminal_idx).map(|b| &mut **b) }
 }
 
+/// Does a session for `terminal_idx` still exist? Lets the read loop detect
+/// that a mouse-driven window close (close_window → destroy_session) freed the
+/// session it holds, WITHOUT dereferencing the dangling reference. Core 0 only.
+fn session_exists(terminal_idx: u8) -> bool {
+    // SAFETY: Core 0 only
+    unsafe { (*sessions_ptr()).contains_key(&terminal_idx) }
+}
+
 /// Per-terminal CWD (accessible from all cores via Mutex).
 /// Separate from IntentSession because workers need read access (resolve_path).
 static CWDS: Mutex<BTreeMap<u8, String>> = Mutex::new(BTreeMap::new());
@@ -415,6 +423,9 @@ fn sync_session_to_terminal(session: &IntentSession) {
 fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                       session_id: CapId) -> Option<usize> {
     session.history.reset_cursor();
+    // Plain copy of our terminal so we can check the session is still alive
+    // after re-entrant compositor calls without touching a freed `session`.
+    let term_idx = session.terminal_idx;
 
     loop {
         // Detect focus change (mouse click, shade action, WASM switch)
@@ -492,6 +503,12 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         while let Some(evt) = crate::xhci::poll_mouse() {
             crate::shade::handle_mouse(&evt);
         }
+        // A click on the window's X button closes it inside handle_mouse
+        // (close_window → destroy_session), freeing THIS `session`. The
+        // ShadeAction (Mod+Q) close path below is guarded by sync+return, but
+        // the mouse path is not — bail before any further deref. run_loop
+        // re-acquires a valid session on the next pass (None arm).
+        if !session_exists(term_idx) { return None; }
 
         if crate::shade::take_deferred_render() {
             crate::shade::render_frame();
