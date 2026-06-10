@@ -1825,12 +1825,22 @@ const NIC_BULK_BUF_BYTES: usize = NIC_BULK_BUF_PAGES * 4096;
 // Mbit. The bulk-IN TR ring uses slots 0..NIC_RX_BUFS with the link at slot
 // NIC_RX_BUFS; producer + consumer walk it in lockstep so cycle bits line up.
 const NIC_RX_BUFS: usize = 8;
+// Async bulk-OUT (TX): a small ring of TX buffers so a frame can be posted and
+// the call returns WITHOUT busy-waiting ~22 µs for the USB completion (the
+// dominant per-packet cost — every ACK/dup-ACK was paying it inline in the IP
+// stack). Completions are reaped lazily; buffers are reused round-robin and a
+// buffer is never overwritten while in flight (tx_inflight < NIC_TX_BUFS).
+// 2 KiB each covers MTU(1514)+tx_desc(8); 16 deep covers ACK bursts.
+const NIC_TX_BUFS: usize = 16;
+const NIC_TX_BUF_BYTES: usize = 2048;
 
 struct NicXhci {
     x: XhciState,
     in_ring: u64,  in_cycle: u32,  in_enq: usize,  in_dci: u8,
     out_ring: u64, out_cycle: u32, out_enq: usize, out_dci: u8,
-    in_buf: u64,   out_buf: u64,
+    in_buf: u64,   out_buf: u64,       // out_buf = base of NIC_TX_BUFS TX buffers
+    tx_inflight: usize,                // posted-but-not-completed TX
+    tx_next: usize,                    // round-robin TX buffer index
     rx_armed: usize,                   // bulk-IN TRBs currently device-owned
     trb_buf: [usize; NIC_RX_BUFS],     // bulk-IN ring slot -> buffer index
     rx_done_buf: [usize; NIC_RX_BUFS], // FIFO of completed buffers...
@@ -1950,7 +1960,7 @@ fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8
         let in_ring = alloc_dma(1, "nic bulk-in ring");
         let out_ring = alloc_dma(1, "nic bulk-out ring");
         let in_buf = alloc_dma(NIC_RX_BUFS * NIC_BULK_BUF_PAGES, "nic in bufs");
-        let out_buf = alloc_dma(NIC_BULK_BUF_PAGES, "nic out buf");
+        let out_buf = alloc_dma((NIC_TX_BUFS * NIC_TX_BUF_BYTES).div_ceil(4096), "nic tx bufs");
         if in_ring == 0 || out_ring == 0 || in_buf == 0 || out_buf == 0 {
             kprintln!("[npk] xhci: nic DMA alloc failed"); return false;
         }
@@ -1973,6 +1983,7 @@ fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8
             x, in_ring, in_cycle: 1, in_enq: 0, in_dci,
             out_ring, out_cycle: 1, out_enq: 0, out_dci,
             in_buf, out_buf,
+            tx_inflight: 0, tx_next: 0,
             rx_armed: 0, trb_buf: [0; NIC_RX_BUFS],
             rx_done_buf: [0; NIC_RX_BUFS], rx_done_len: [0; NIC_RX_BUFS],
             rx_done_head: 0, rx_done_count: 0,
@@ -2057,22 +2068,11 @@ fn nic_consume_event(nic: &mut NicXhci) -> Option<(u32, u32)> {
             nic.rx_done_len[t] = len;
             nic.rx_done_count += 1;
         }
+    } else if dci == nic.out_dci as u32 {
+        // Bulk-OUT completion: free one in-flight TX buffer.
+        if nic.tx_inflight > 0 { nic.tx_inflight -= 1; }
     }
     Some((cc, dci))
-}
-
-/// Wait for a transfer-event on `want_dci` (timeout in ticks). Stashes bulk-IN
-/// completions encountered along the way. Returns the completion code.
-fn nic_wait_dci(nic: &mut NicXhci, want_dci: u32, timeout: u64) -> Option<u32> {
-    let deadline = crate::interrupts::ticks() + timeout;
-    loop {
-        if crate::interrupts::ticks() >= deadline { return None; }
-        match nic_consume_event(nic) {
-            Some((cc, dci)) if dci == want_dci => return Some(cc),
-            Some(_) => {}                       // stashed/ignored, keep waiting
-            None => core::hint::spin_loop(),
-        }
-    }
 }
 
 /// Arm one bulk-IN TRB pointing at RX buffer `buf_idx`. The producer cycles
@@ -2115,32 +2115,52 @@ pub fn nic_control(req_type: u8, request: u8, value: u16, index: u16, buf: &mut 
     ok
 }
 
-/// Bulk OUT (TX): transmit `data` (<= 16 KiB). Returns true on success.
+/// Bulk OUT (TX): post `data` (<= NIC_TX_BUF_BYTES) and return immediately —
+/// the USB completion is reaped lazily (next nic_bulk_out / nic_bulk_in drain).
+/// A frame is never lost: it sits in its own TX buffer until the device DMAs it.
 pub fn nic_bulk_out(data: &[u8]) -> bool {
     let mut lock = NIC.lock();
     let nic = match lock.as_mut() { Some(n) => n, None => return false };
-    let len = data.len().min(NIC_BULK_BUF_BYTES);
-    // SAFETY: out_buf is NIC_BULK_BUF_BYTES of DMA memory
-    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), nic.out_buf as *mut u8, len); }
+    use core::sync::atomic::Ordering::Relaxed;
+
+    // Reap finished TX (frees buffers) + drain any pending RX completions.
+    while nic_consume_event(nic).is_some() {}
+
+    // Backpressure: only if ALL TX buffers are still in flight do we wait
+    // (bounded) for one to drain — otherwise we'd overwrite live DMA.
+    if nic.tx_inflight >= NIC_TX_BUFS {
+        let t0 = crate::interrupts::rdtsc();
+        let deadline = crate::interrupts::ticks() + 100;
+        while nic.tx_inflight >= NIC_TX_BUFS {
+            if crate::interrupts::ticks() >= deadline { return false; }
+            if nic_consume_event(nic).is_none() { core::hint::spin_loop(); }
+        }
+        NIC_TX_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t0), Relaxed);
+    }
+
+    let len = data.len().min(NIC_TX_BUF_BYTES);
+    let bidx = nic.tx_next;
+    let addr = nic.out_buf + (bidx * NIC_TX_BUF_BYTES) as u64;
+    // SAFETY: TX buffer `bidx` is free (tx_inflight < NIC_TX_BUFS guarantees the
+    // last user of this round-robin slot already completed).
+    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, len); }
 
     let idx = nic.out_enq;
     let cyc = nic.out_cycle;
-    write_trb(nic.out_ring, idx, nic.out_buf, len as u32, TRB_NORMAL | TRB_IOC | cyc);
+    write_trb(nic.out_ring, idx, addr, len as u32, TRB_NORMAL | TRB_IOC | cyc);
     nic.out_enq += 1;
     if nic.out_enq >= NUM_TR_TRBS - 1 {
         write_trb(nic.out_ring, NUM_TR_TRBS - 1, nic.out_ring, 0, TRB_LINK | cyc | (1 << 1));
         nic.out_cycle ^= 1;
         nic.out_enq = 0;
     }
+    nic.tx_next = (bidx + 1) % NIC_TX_BUFS;
+    nic.tx_inflight += 1;
     let slot = nic.x.slot_id as u32;
     let dci = nic.out_dci as u32;
     ring_doorbell(&nic.x, slot, dci);
-    use core::sync::atomic::Ordering::Relaxed;
-    let t0 = crate::interrupts::rdtsc();
-    let ok = matches!(nic_wait_dci(nic, dci, 100), Some(cc) if cc == CC_SUCCESS || cc == CC_SHORT_PACKET);
-    NIC_TX_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t0), Relaxed);
     NIC_TX_CALLS.fetch_add(1, Relaxed);
-    ok
+    true   // fire-and-forget
 }
 
 /// Bulk IN (RX) poll: copy a completed bulk-IN buffer into `buf`, returns its
