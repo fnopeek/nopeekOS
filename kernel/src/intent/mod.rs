@@ -684,7 +684,16 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                                 session.pos += 1;
                             }
                         }
-                        kprint!("{}", completion);
+                        session.cursor = session.pos;
+                        if crate::shade::is_active() {
+                            crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
+                            crate::shade::terminal::set_cursor_pos(
+                                crate::shade::terminal::current_line_len()
+                                    .saturating_sub(session.pos - session.cursor));
+                            crate::shade::render_input_line();
+                        } else {
+                            kprint!("{}", completion);
+                        }
                     }
                 }
                 continue; // skip cursor update below
