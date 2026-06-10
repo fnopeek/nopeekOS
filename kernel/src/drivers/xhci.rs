@@ -1818,19 +1818,40 @@ const EP_TYPE_BULK_OUT: u32 = 2;
 const EP_TYPE_BULK_IN:  u32 = 6;
 const NIC_BULK_BUF_PAGES: usize = 4;            // 16 KiB == RTL8153 rx_buf_sz
 const NIC_BULK_BUF_BYTES: usize = NIC_BULK_BUF_PAGES * 4096;
+// Bulk-IN buffers kept simultaneously in flight so the device always has a
+// buffer to DMA into (Linux r8152 RTL8152_MAX_RX). With a single buffer the
+// endpoint sits unarmed between each completion and the host's re-arm — at
+// gigabit the chip's RX FIFO overflows in that gap and TCP collapses to a few
+// Mbit. The bulk-IN TR ring uses slots 0..NIC_RX_BUFS with the link at slot
+// NIC_RX_BUFS; producer + consumer walk it in lockstep so cycle bits line up.
+const NIC_RX_BUFS: usize = 8;
 
 struct NicXhci {
     x: XhciState,
     in_ring: u64,  in_cycle: u32,  in_enq: usize,  in_dci: u8,
     out_ring: u64, out_cycle: u32, out_enq: usize, out_dci: u8,
     in_buf: u64,   out_buf: u64,
-    rx_in_flight: bool,
-    rx_ready_len: usize,   // bytes of a completed-but-undelivered bulk-IN, 0 = none
+    rx_armed: usize,                   // bulk-IN TRBs currently device-owned
+    trb_buf: [usize; NIC_RX_BUFS],     // bulk-IN ring slot -> buffer index
+    rx_done_buf: [usize; NIC_RX_BUFS], // FIFO of completed buffers...
+    rx_done_len: [usize; NIC_RX_BUFS], // ...and their byte counts
+    rx_done_head: usize,
+    rx_done_count: usize,
 }
 
 static NIC: spin::Mutex<Option<NicXhci>> = spin::Mutex::new(None);
 
 pub fn nic_attached() -> bool { NIC.lock().is_some() }
+
+/// USB link speed of the attached NIC as an r8152 coalesce class:
+/// 2 = SuperSpeed, 1 = High, 0 = Full/other. Picks the RX aggregation timeout.
+pub fn nic_speed_class() -> u8 {
+    match NIC.lock().as_ref().map(|n| n.x.port_speed) {
+        Some(SPEED_SUPER) => 2,
+        Some(SPEED_HIGH) => 1,
+        _ => 0,
+    }
+}
 
 /// Find `vid:pid` on any xHCI controller, bring the controller up, address the
 /// device, set its configuration and configure bulk IN (EP `ep_in`) + bulk OUT
@@ -1897,12 +1918,13 @@ fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8
 
         let in_ring = alloc_dma(1, "nic bulk-in ring");
         let out_ring = alloc_dma(1, "nic bulk-out ring");
-        let in_buf = alloc_dma(NIC_BULK_BUF_PAGES, "nic in buf");
+        let in_buf = alloc_dma(NIC_RX_BUFS * NIC_BULK_BUF_PAGES, "nic in bufs");
         let out_buf = alloc_dma(NIC_BULK_BUF_PAGES, "nic out buf");
         if in_ring == 0 || out_ring == 0 || in_buf == 0 || out_buf == 0 {
             kprintln!("[npk] xhci: nic DMA alloc failed"); return false;
         }
-        write_trb(in_ring, NUM_TR_TRBS - 1, in_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+        // Bulk-IN ring loops over NIC_RX_BUFS slots; bulk-OUT keeps the full ring.
+        write_trb(in_ring, NIC_RX_BUFS, in_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
         write_trb(out_ring, NUM_TR_TRBS - 1, out_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
 
         let in_dci = ep_in * 2 + 1;   // IN endpoint
@@ -1916,11 +1938,18 @@ fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8
 
         kprintln!("[npk] xhci: NIC attached on port {} (slot {}, bulk in EP{} out EP{}, speed {})",
             p + 1, slot, ep_in, ep_out, x.port_speed);
-        *NIC.lock() = Some(NicXhci {
+        let mut nic = NicXhci {
             x, in_ring, in_cycle: 1, in_enq: 0, in_dci,
             out_ring, out_cycle: 1, out_enq: 0, out_dci,
-            in_buf, out_buf, rx_in_flight: false, rx_ready_len: 0,
-        });
+            in_buf, out_buf,
+            rx_armed: 0, trb_buf: [0; NIC_RX_BUFS],
+            rx_done_buf: [0; NIC_RX_BUFS], rx_done_len: [0; NIC_RX_BUFS],
+            rx_done_head: 0, rx_done_count: 0,
+        };
+        // Prime the RX ring: arm every buffer so the device can fill them
+        // back-to-back without ever stalling for a host re-arm.
+        for b in 0..NIC_RX_BUFS { nic_arm_rx(&mut nic, b); }
+        *NIC.lock() = Some(nic);
         return true;
     }
     false
@@ -1971,7 +2000,7 @@ fn cmd_configure_bulk(state: &mut XhciState, in_dci: u8, in_ring: u64,
 /// Bulk-IN completions are stashed (rx_ready_len) so a TX/control wait never
 /// loses a received packet. Returns the consumed event's (cc, dci), or None.
 fn nic_consume_event(nic: &mut NicXhci) -> Option<(u32, u32)> {
-    let (_p, status, control) = read_trb(nic.x.evt_ring, nic.x.evt_dequeue);
+    let (param, status, control) = read_trb(nic.x.evt_ring, nic.x.evt_dequeue);
     if control & TRB_CYCLE != nic.x.evt_cycle { return None; }
 
     nic.x.evt_dequeue += 1;
@@ -1984,8 +2013,19 @@ fn nic_consume_event(nic: &mut NicXhci) -> Option<(u32, u32)> {
     let residual = status & 0x00FF_FFFF;
     let dci = (control >> 16) & 0x1F;
     if dci == nic.in_dci as u32 {
-        nic.rx_in_flight = false;
-        nic.rx_ready_len = (NIC_BULK_BUF_BYTES as u32).saturating_sub(residual) as usize;
+        // Bulk-IN completion: map the event's TRB pointer back to its buffer
+        // (param = address of the completed Transfer TRB) and queue it for
+        // delivery. The buffer stays device-detached until nic_bulk_in re-arms.
+        let slot = ((param.wrapping_sub(nic.in_ring)) / 16) as usize;
+        let buf_idx = if slot < NIC_RX_BUFS { nic.trb_buf[slot] } else { 0 };
+        let len = (NIC_BULK_BUF_BYTES as u32).saturating_sub(residual) as usize;
+        if nic.rx_armed > 0 { nic.rx_armed -= 1; }
+        if nic.rx_done_count < NIC_RX_BUFS {
+            let t = (nic.rx_done_head + nic.rx_done_count) % NIC_RX_BUFS;
+            nic.rx_done_buf[t] = buf_idx;
+            nic.rx_done_len[t] = len;
+            nic.rx_done_count += 1;
+        }
     }
     Some((cc, dci))
 }
@@ -2004,21 +2044,25 @@ fn nic_wait_dci(nic: &mut NicXhci, want_dci: u32, timeout: u64) -> Option<u32> {
     }
 }
 
-/// Post a fresh bulk-IN transfer (one in flight at a time).
-fn nic_post_rx(nic: &mut NicXhci) {
-    let idx = nic.in_enq;
+/// Arm one bulk-IN TRB pointing at RX buffer `buf_idx`. The producer cycles
+/// through ring slots 0..NIC_RX_BUFS-1; the link TRB at slot NIC_RX_BUFS wraps
+/// it and toggles the cycle bit, exactly one lap ahead of the device's consumer.
+fn nic_arm_rx(nic: &mut NicXhci, buf_idx: usize) {
+    let slot = nic.in_enq;
     let cyc = nic.in_cycle;
-    write_trb(nic.in_ring, idx, nic.in_buf, NIC_BULK_BUF_BYTES as u32, TRB_NORMAL | TRB_IOC | cyc);
+    let addr = nic.in_buf + (buf_idx * NIC_BULK_BUF_BYTES) as u64;
+    write_trb(nic.in_ring, slot, addr, NIC_BULK_BUF_BYTES as u32, TRB_NORMAL | TRB_IOC | cyc);
+    nic.trb_buf[slot] = buf_idx;
     nic.in_enq += 1;
-    if nic.in_enq >= NUM_TR_TRBS - 1 {
-        write_trb(nic.in_ring, NUM_TR_TRBS - 1, nic.in_ring, 0, TRB_LINK | cyc | (1 << 1));
+    if nic.in_enq >= NIC_RX_BUFS {
+        write_trb(nic.in_ring, NIC_RX_BUFS, nic.in_ring, 0, TRB_LINK | cyc | (1 << 1));
         nic.in_cycle ^= 1;
         nic.in_enq = 0;
     }
-    nic.rx_in_flight = true;
-    let slot = nic.x.slot_id as u32;
+    nic.rx_armed += 1;
+    let sid = nic.x.slot_id as u32;
     let dci = nic.in_dci as u32;
-    ring_doorbell(&nic.x, slot, dci);
+    ring_doorbell(&nic.x, sid, dci);
 }
 
 /// EP0 control transfer for the NIC. `buf` carries the data stage (copied into
@@ -2070,20 +2114,23 @@ pub fn nic_bulk_in(buf: &mut [u8]) -> usize {
     let mut lock = NIC.lock();
     let nic = match lock.as_mut() { Some(n) => n, None => return 0 };
 
-    if nic.rx_ready_len == 0 {
-        if !nic.rx_in_flight { nic_post_rx(nic); }
-        // Drain whatever is in the event ring; a bulk-IN completion sets rx_ready_len.
-        while nic_consume_event(nic).is_some() {
-            if nic.rx_ready_len > 0 { break; }
-        }
-    }
-    if nic.rx_ready_len == 0 { return 0; }
+    // Drain all pending completions into the done FIFO (keeps the device's
+    // event ring from backing up and stalling the controller).
+    while nic_consume_event(nic).is_some() {}
 
-    let n = nic.rx_ready_len.min(buf.len());
-    // SAFETY: in_buf holds rx_ready_len bytes of received data
-    unsafe { core::ptr::copy_nonoverlapping(nic.in_buf as *const u8, buf.as_mut_ptr(), n); }
-    nic.rx_ready_len = 0;
-    nic_post_rx(nic);   // re-arm; in_buf is free now that we copied it out
+    if nic.rx_done_count == 0 { return 0; }
+
+    let h = nic.rx_done_head;
+    let b = nic.rx_done_buf[h];
+    let len = nic.rx_done_len[h];
+    nic.rx_done_head = (h + 1) % NIC_RX_BUFS;
+    nic.rx_done_count -= 1;
+
+    let n = len.min(buf.len());
+    let src = nic.in_buf + (b * NIC_BULK_BUF_BYTES) as u64;
+    // SAFETY: src is RX buffer `b`, which holds `len` bytes of received data
+    unsafe { core::ptr::copy_nonoverlapping(src as *const u8, buf.as_mut_ptr(), n); }
+    nic_arm_rx(nic, b);   // re-arm; buffer `b` is free now that we copied it out
     n
 }
 
