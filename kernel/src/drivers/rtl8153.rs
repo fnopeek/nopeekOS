@@ -43,6 +43,7 @@ const PLA_WDT6_CTRL: u16 = 0xe428;
 const PLA_TCR0: u16 = 0xe610;
 const PLA_MTPS: u16 = 0xe615;
 const PLA_TXFIFO_CTRL: u16 = 0xe618;
+const PLA_PHYSTATUS: u16 = 0xe908;  // negotiated link speed/duplex (r8152)
 const PLA_CR: u16 = 0xe813;
 const PLA_CRWECR: u16 = 0xe81c;
 const PLA_PHY_PWR: u16 = 0xe84c;
@@ -465,6 +466,17 @@ pub fn init() -> bool {
 }
 
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Acquire) }
+
+/// Negotiated Ethernet link as (speed_mbit, full_duplex). 0 Mbit = no link.
+/// Reads PLA_PHYSTATUS (r8152 `rtl8152_get_speed`). A 10/100 result — or
+/// half-duplex — caps throughput far below gigabit and is the first thing to
+/// rule out when a USB-3 dongle crawls.
+pub fn link_speed() -> (u16, bool) {
+    if !is_available() { return (0, false); }
+    let s = ocp_read_word(MCU_PLA, PLA_PHYSTATUS);
+    let mbit = if s & 0x10 != 0 { 1000 } else if s & 0x08 != 0 { 100 } else if s & 0x04 != 0 { 10 } else { 0 };
+    (mbit, s & 0x01 != 0)
+}
 pub fn mac() -> Option<[u8; 6]> { if is_available() { Some(*MAC.lock()) } else { None } }
 
 /// Live carrier state: reads the PHY's BMSR link bit over USB, so a pulled or
