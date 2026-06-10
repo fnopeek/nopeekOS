@@ -429,7 +429,9 @@ fn first_init() {
     wait_link_list_ready();
     set_bits16(MCU_PLA, PLA_SFF_STS_7, RE_INIT_LL);
     wait_link_list_ready();
-    ocp_write_word(MCU_PLA, PLA_RMS, (MTU as u16) + 22);   // mtu_to_size
+    // mtu_to_size(L3 mtu) = mtu + VLAN_ETH_HLEN(18) + ETH_FCS_LEN(4). MTU here
+    // is the L2 frame length (1514), so the L3 mtu is MTU-14 → RMS = 1522.
+    ocp_write_word(MCU_PLA, PLA_RMS, (MTU as u16) - 14 + 22);
     ocp_write_byte(MCU_PLA, PLA_MTPS, MTPS_JUMBO);
     set_bits16(MCU_PLA, PLA_TCR0, TCR0_AUTO_FIFO);
     nic_reset();
