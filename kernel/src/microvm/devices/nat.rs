@@ -251,6 +251,21 @@ fn fix_l4_checksum(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], l4: &mut [u8]) {
     }
 }
 
+/// Incremental ones-complement checksum update (RFC 1624). Adjust an existing
+/// checksum for a set of changed 16-bit words in O(changes) instead of
+/// recomputing over the whole segment — `HC' = ~(~HC + Σ(~old + new))`. NAT only
+/// rewrites the IP + port (≤3 words), so this replaces the full ~1500-byte
+/// `tcp_checksum` loop that dominated the inbound per-packet cost (~2.6µs/pkt).
+fn csum_update(old_check: u16, changes: &[(u16, u16)]) -> u16 {
+    let mut sum = (!old_check) as u32;
+    for &(old, new) in changes {
+        sum += (!old) as u32 & 0xFFFF;
+        sum += new as u32;
+    }
+    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
+    !(sum as u16)
+}
+
 /// Outbound SNAT: rewrite the guest's L4 source port to a masquerade
 /// host port and send from our host IP. The guest's TCP/UDP semantics
 /// (seq/ack/window/options/QUIC) pass through untouched.
@@ -264,9 +279,24 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
     NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
     let mut seg = l4.to_vec();
-    seg[0..2].copy_from_slice(&hp.to_be_bytes());          // src port → host port
     let our_ip = crate::net::arp::our_ip();
-    fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
+    if proto == PROTO_TCP && seg.len() >= TCP_HDR_LEN {
+        // Incremental TCP checksum (RFC 1624): only the src IP (guest → host, in
+        // the pseudo-header) and src port changed. The guest computes full
+        // checksums (no VIRTIO_NET_F_CSUM offload negotiated), so the existing
+        // checksum is a valid base. Read old values before overwriting the port.
+        let old_check = u16::from_be_bytes([seg[16], seg[17]]);
+        let new_check = csum_update(old_check, &[
+            (u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]]), u16::from_be_bytes([our_ip[0], our_ip[1]])),
+            (u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]]), u16::from_be_bytes([our_ip[2], our_ip[3]])),
+            (src_port, hp),
+        ]);
+        seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
+        seg[16..18].copy_from_slice(&new_check.to_be_bytes());
+    } else {
+        seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
+        fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
+    }
     crate::net::ipv4::send(dst_ip, proto, &seg);
     L3_ACTIVE.store(true, AtOrd::Release);
     None
@@ -371,7 +401,23 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
         // the ICMP checksum (the IP dst rewrite above doesn't affect it).
         frame[l4_off + 4..l4_off + 6].copy_from_slice(&gport.to_be_bytes());
         fix_icmp_checksum(&mut frame[l4_off..]);
+    } else if proto == PROTO_TCP && frame[l4_off..].len() >= TCP_HDR_LEN {
+        // Incremental TCP checksum (RFC 1624): only the dst IP (host → guest, in
+        // the pseudo-header) and the dst port changed, so adjust the server's
+        // checksum in O(1) instead of recomputing over the whole ~1500 B segment
+        // (that full recompute was the dominant inbound per-packet cost). Must
+        // read the old values before overwriting the port bytes; `ip[16..20]` is
+        // the original (host) dst IP, pre-rewrite.
+        let old_check = u16::from_be_bytes([frame[l4_off + 16], frame[l4_off + 17]]);
+        let new_check = csum_update(old_check, &[
+            (u16::from_be_bytes([ip[16], ip[17]]), u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]])),
+            (u16::from_be_bytes([ip[18], ip[19]]), u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]])),
+            (host_port, gport),
+        ]);
+        frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
+        frame[l4_off + 16..l4_off + 18].copy_from_slice(&new_check.to_be_bytes());
     } else {
+        // UDP: checksum set to 0 (disabled, valid for IPv4) — already cheap.
         frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
         fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
     }
