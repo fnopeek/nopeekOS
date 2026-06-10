@@ -154,6 +154,34 @@ const COALESCE_SUPER: u32 = 85_000;   // USB SuperSpeed
 const COALESCE_HIGH: u32 = 250_000;   // USB High-Speed
 const COALESCE_SLOW: u32 = 524_280;   // USB Full / other
 
+// EEE (Energy Efficient Ethernet) — must be configured, not left at ROM
+// default. With EEE on, the PHY enters Low-Power-Idle between bursts and drops
+// the first frames of the next burst while waking → bursty TCP loss. We disable
+// it (Linux keeps it on only with the full PHY-tuning + wake-timing FW patch we
+// skip). r8153_eee_en(false) for RTL_VER_03/04/05.
+const PLA_EEE_CR: u16 = 0xe040;
+const EEE_RX_EN: u16 = 0x0001;
+const EEE_TX_EN: u16 = 0x0002;
+const EEE10_EN: u16 = 0x0010;          // OCP_EEE_CFG bit (PHY window)
+const OCP_EEE_ADV: u16 = 0xa5d0;
+// Flow control: advertise 802.3x PAUSE so the upstream switch throttles us
+// instead of overrunning the chip RX FIFO (r8152b_enable_fc).
+const MII_ADVERTISE: u16 = 0x04;
+const ADVERTISE_PAUSE_CAP: u16 = 0x0400;
+const ADVERTISE_PAUSE_ASYM: u16 = 0x0800;
+// Inter-frame gap (rtl_set_ifg) + 10M idle, speed-dependent (PLA_PHYSTATUS bits).
+const PLA_TCR1: u16 = 0xe612;
+const PLA_MAC_PWR_CTRL4: u16 = 0xe0ce;
+const PLA_EEEP_CR: u16 = 0xe080;
+const IFG_MASK: u16 = (1 << 3) | (1 << 9) | (1 << 8);
+const IFG_144NS: u16 = 1 << 9;
+const IFG_96NS: u16 = (1 << 9) | (1 << 8);
+const TX10MIDLE_EN: u16 = 0x0100;
+const EEEP_CR_EEEP_TX: u16 = 0x0002;
+const SPD_10: u16 = 0x04;             // PLA_PHYSTATUS speed bits
+const SPD_100: u16 = 0x08;
+const SPD_FULL: u16 = 0x01;
+
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 static MAC: Mutex<[u8; 6]> = Mutex::new([0; 6]);
 static OCP_BASE: AtomicU16 = AtomicU16::new(0xffff);
@@ -327,9 +355,25 @@ fn r8153_init(ver: u16) {
     clr_bits16(MCU_USB, USB_USB_CTRL, RX_AGG_DISABLE | RX_ZERO_EN);
 }
 
+/// Disable EEE (r8153_eee_en(false) + advertise no EEE). We skip the FW patch
+/// that makes EEE's LPI wake reliable, so leaving EEE on (ROM default) drops
+/// the head of each RX burst — disable it outright.
+fn eee_disable() {
+    clr_bits16(MCU_PLA, PLA_EEE_CR, EEE_RX_EN | EEE_TX_EN);
+    ocp_clr_reg(OCP_EEE_CFG, EEE10_EN);  // PHY-window register
+    ocp_reg_write(OCP_EEE_ADV, 0);       // advertise no EEE to the link partner
+}
+
+/// Advertise 802.3x PAUSE flow control (r8152b_enable_fc). Done before link-up
+/// so the first auto-negotiation carries it.
+fn enable_fc() {
+    let anar = mdio_read(MII_ADVERTISE) | ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM;
+    mdio_write(MII_ADVERTISE, anar);
+}
+
 fn r8153_hw_phy_cfg(ver: u16) {
     aldps_en(false);
-    // (firmware patch + EEE skipped — ROM defaults bring the link up)
+    eee_disable();                       // before PHY param updates (Linux order)
     if ver == 0x5c00 { ocp_clr_reg(OCP_EEE_CFG, CTAP_SHORT_EN); } // VER_03
     ocp_set_reg(OCP_POWER_CFG, EEE_CLKDIV_EN);
     ocp_set_reg(OCP_DOWN_SPEED, EN_10M_BGOFF);
@@ -339,8 +383,31 @@ fn r8153_hw_phy_cfg(ver: u16) {
     sram_write(SRAM_LPF_CFG, 0xf70f);
     sram_write(SRAM_10M_AMP1, 0x00af);
     sram_write(SRAM_10M_AMP2, 0x0208);
+    enable_fc();                         // advertise PAUSE before negotiation
     aldps_en(true);
     if ver == 0x5c20 { u2p3en(true); } // VER_05
+}
+
+/// Speed-dependent MAC config that must run AFTER auto-negotiation settles
+/// (rtl_set_ifg + rtl_set_eee_plus). Linux re-runs the enable path on every
+/// carrier-up; we call this once the link comes up in `init()`.
+fn on_link_up() {
+    let speed = ocp_read_word(MCU_PLA, PLA_PHYSTATUS);
+    // rtl_set_ifg: inter-frame gap depends on speed/duplex.
+    let mut tcr1 = ocp_read_word(MCU_PLA, PLA_TCR1) & !IFG_MASK;
+    let slow_half = (speed & (SPD_10 | SPD_100)) != 0 && (speed & SPD_FULL) == 0;
+    if slow_half {
+        tcr1 |= IFG_144NS;
+        ocp_write_word(MCU_PLA, PLA_TCR1, tcr1);
+        clr_bits16(MCU_PLA, PLA_MAC_PWR_CTRL4, TX10MIDLE_EN);
+    } else {
+        tcr1 |= IFG_96NS;
+        ocp_write_word(MCU_PLA, PLA_TCR1, tcr1);
+        set_bits16(MCU_PLA, PLA_MAC_PWR_CTRL4, TX10MIDLE_EN);
+    }
+    // rtl_set_eee_plus: only the 10 Mbit path needs EEEP TX-idle.
+    if speed & SPD_10 != 0 { set_bits16(MCU_PLA, PLA_EEEP_CR, EEEP_CR_EEEP_TX); }
+    else { clr_bits16(MCU_PLA, PLA_EEEP_CR, EEEP_CR_EEEP_TX); }
 }
 
 fn teredo_off() {
@@ -460,6 +527,12 @@ pub fn init() -> bool {
     for _ in 0..40 {
         if mdio_read(MII_BMSR) & BMSR_LSTATUS != 0 { up = true; break; }
         crate::interrupts::delay_ms(100);
+    }
+    if up {
+        // Auto-negotiation settled — program the speed-dependent MAC regs
+        // (IFG, EEEP) now that PLA_PHYSTATUS reflects the real link.
+        on_link_up();
+        log_link_diag();
     }
     crate::kprintln!("[npk] rtl8153: link {}", if up { "up" } else { "down (no cable?)" });
     true
