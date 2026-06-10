@@ -9,6 +9,7 @@
 
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
+use alloc::collections::BTreeMap;
 use spin::{Mutex, Once};
 use super::{ipv4, arp};
 
@@ -83,6 +84,10 @@ const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
 // the single-threaded path (QEMU slirp) and less work on the busy-spin RX core.
 // Safe now that timestamps give the sender a per-segment RTT regardless.
 const ACK_COALESCE: u16 = 8;
+// Cap on buffered out-of-order data per connection. Beyond this, new
+// ahead-segments are dropped (the sender will retransmit) so a lossy link
+// can't blow up the heap.
+const OOO_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 // Out-of-order receive counters (diagnostic). `AHEAD` = a segment past rcv_nxt
 // (a gap → the sender will have to retransmit); `BEHIND` = a duplicate at/below
@@ -158,6 +163,14 @@ struct TcpConn {
     // Buffers
     recv_buf: VecDeque<u8>,
     send_buf: Vec<u8>,
+    // Out-of-order reassembly: segments received ahead of a gap, keyed by
+    // stream offset (seq - rcv_irs). Without this a single lost packet forced
+    // the sender into go-back-N (retransmit the whole window) which re-burst
+    // and re-overflowed the USB-NIC FIFO → collapse. With it only the one lost
+    // segment is retransmitted. Bounded by OOO_MAX_BYTES (else dropped → the
+    // sender retransmits). Offsets assume < 4 GiB per connection.
+    ooo: BTreeMap<u32, Vec<u8>>,
+    ooo_bytes: usize,
 
     // Retransmit
     retries: u8,
@@ -228,6 +241,8 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         rcv_nxt: 0,
         rcv_irs: 0,
         recv_buf: VecDeque::new(),
+        ooo: BTreeMap::new(),
+        ooo_bytes: 0,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -306,6 +321,8 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         rcv_nxt: 0,
         rcv_irs: 0,
         recv_buf: VecDeque::new(),
+        ooo: BTreeMap::new(),
+        ooo_bytes: 0,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -381,6 +398,8 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         rcv_nxt: 0,
         rcv_irs: 0,
         recv_buf: VecDeque::new(),
+        ooo: BTreeMap::new(),
+        ooo_bytes: 0,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -684,8 +703,40 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // push_back/s at ~700 Mbit). extend reserves once + copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
+                    // Gap just filled — pull any now-contiguous segments out of
+                    // the reassembly queue. Only the lowest stored offset can be
+                    // next; if it doesn't meet rcv_nxt there's still a hole.
+                    let mut filled = false;
+                    loop {
+                        let want = conn.rcv_nxt.wrapping_sub(conn.rcv_irs);
+                        // Peek the lowest stored offset (copy out k+len so the
+                        // immutable borrow ends before we remove).
+                        let (k, seglen) = match conn.ooo.iter().next() {
+                            Some((&k, seg)) => (k, seg.len()),
+                            None => break,
+                        };
+                        // Drop fully-stale segments (already delivered).
+                        if (k as usize) + seglen <= want as usize {
+                            conn.ooo.remove(&k); conn.ooo_bytes -= seglen; continue;
+                        }
+                        if k != want { break; }                 // still a gap before it
+                        if conn.recv_buf.len() + seglen > RECV_BUF_SIZE { break; }
+                        let seg = conn.ooo.remove(&k).unwrap();
+                        conn.ooo_bytes -= seg.len();
+                        conn.rcv_nxt = conn.rcv_nxt.wrapping_add(seg.len() as u32);
+                        conn.recv_buf.extend(seg.into_iter());
+                        filled = true;
+                    }
                     TCP_MAX_RXBUF.fetch_max(conn.recv_buf.len(),
                         core::sync::atomic::Ordering::Relaxed);
+                    // A filled gap must be ACKed immediately so the sender stops
+                    // retransmitting and advances — don't let it sit in coalescing.
+                    if filled {
+                        let w = recv_window(conn);
+                        send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                        conn.acks_held = 0;
+                        conn.ack_pending = false;
+                    } else {
                     // Coalesced ACK: one ACK per ACK_COALESCE in-order segments.
                     // A lone held ACK is flushed by the 40 ms timer in
                     // tick_connections so a trickle/idle never strands the sender.
@@ -699,14 +750,23 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         conn.ack_pending = true;
                         conn.ack_tick = crate::interrupts::ticks();
                     }
+                    }
                 } else {
-                    // Out-of-order or duplicate; no reassembly buffer yet → drop.
                     use core::sync::atomic::Ordering::Relaxed;
                     if (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0 {
-                        // AHEAD = a real gap → send a duplicate ACK so the sender
-                        // fast-retransmits (RFC 5681) instead of waiting for an
-                        // RTO. (In practice ahead=0 on this path — no loss.)
+                        // AHEAD = a real gap (an earlier segment was lost). Buffer
+                        // this segment for reassembly + send a duplicate ACK so the
+                        // sender fast-retransmits ONLY the hole (RFC 5681) — not the
+                        // whole window. Bounded; over budget or already-have → skip.
                         TCP_OOO_AHEAD.fetch_add(1, Relaxed);
+                        let off = seq.wrapping_sub(conn.rcv_irs);
+                        if !payload.is_empty()
+                            && !conn.ooo.contains_key(&off)
+                            && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
+                        {
+                            conn.ooo_bytes += payload.len();
+                            conn.ooo.insert(off, payload.to_vec());
+                        }
                         let w = recv_window(conn);
                         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
                         conn.ack_pending = false;
