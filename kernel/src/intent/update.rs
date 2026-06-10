@@ -107,6 +107,7 @@ fn hex_to_bytes48(hex: &str) -> Result<[u8; 48], &'static str> {
 }
 
 pub fn intent_update(_args: &str) {
+    super::clear_cancel(); // arm Ctrl+C cancel for this OTA run
     kprintln!("[npk] Checking for updates...");
 
     // 1. Download manifest

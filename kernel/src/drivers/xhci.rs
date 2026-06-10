@@ -1851,6 +1851,19 @@ static NIC_RX_ARMED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 static NIC_TX_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static NIC_TX_CYC:   core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // cycles spent waiting for TX completion
 
+/// Negotiated USB link speed of the NIC: "SuperSpeed" / "High-Speed" /
+/// "Full-Speed" / "Low-Speed". Full/Low would cap an Ethernet dongle far below
+/// gigabit (Full-Speed = 12 Mbit), so this rules that enumeration fault in/out.
+pub fn nic_link_speed_str() -> &'static str {
+    match NIC.lock().as_ref().map(|n| n.x.port_speed) {
+        Some(SPEED_SUPER) => "SuperSpeed (5 Gbit)",
+        Some(SPEED_HIGH) => "High-Speed (480 Mbit)",
+        Some(SPEED_FULL) => "Full-Speed (12 Mbit!)",
+        Some(SPEED_LOW) => "Low-Speed (1.5 Mbit!)",
+        _ => "unknown",
+    }
+}
+
 /// (rx_bytes, rx_deliveries, rx_empty_polls, sum_ring_depth, tx_calls, tx_wait_cycles), each reset to 0.
 pub fn nic_take_stats() -> (u64, u64, u64, u64, u64, u64) {
     use core::sync::atomic::Ordering::Relaxed;
@@ -2396,6 +2409,15 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         if key == 0 || key == 1 { continue; } // no key / error rollover
         // Only process newly pressed keys
         if state.prev_keys.contains(&key) { continue; }
+
+        // Ctrl+C → cooperative cancel of the running foreground intent
+        // (download / OTA). Terminal SIGINT semantics; swallow so it never
+        // types 'c'. (Widget-app copy, once it exists, must gate on focus
+        // before reaching here.) HID usage 0x06 = 'c'.
+        if ctrl && key == 0x06 {
+            crate::intent::request_cancel();
+            continue;
+        }
 
         // Mod+special keys: push shade actions directly (avoids ESC sequence race)
         if super_held && crate::shade::is_active() {
