@@ -2060,17 +2060,30 @@ fn nic_consume_event(nic: &mut NicXhci) -> Option<(u32, u32)> {
     let dci = (control >> 16) & 0x1F;
     if dci == nic.in_dci as u32 {
         // Bulk-IN completion: map the event's TRB pointer back to its buffer
-        // (param = address of the completed Transfer TRB) and queue it for
-        // delivery. The buffer stays device-detached until nic_bulk_in re-arms.
+        // (param = address of the completed Transfer TRB).
         let slot = ((param.wrapping_sub(nic.in_ring)) / 16) as usize;
-        let buf_idx = if slot < NIC_RX_BUFS { nic.trb_buf[slot] } else { 0 };
-        let len = (NIC_BULK_BUF_BYTES as u32).saturating_sub(residual) as usize;
+        if slot >= NIC_RX_BUFS {
+            // Stray / link-TRB event — not a data buffer. Ignore it; never
+            // synthesize a delivery of buffer 0 (that injected a duplicate).
+            return Some((cc, dci));
+        }
+        let buf_idx = nic.trb_buf[slot];
         if nic.rx_armed > 0 { nic.rx_armed -= 1; }
-        if nic.rx_done_count < NIC_RX_BUFS {
+        // Only deliver clean completions. On an error CC the residual/length is
+        // not a valid byte count → delivering it feeds the rx_desc walker a
+        // wrong-length aggregate (the truncated_batches/DISCARDED we saw). And
+        // if the done-FIFO is momentarily full we must not drop the buffer on
+        // the floor. In both cases re-arm it right away so it never leaks out
+        // of the ring (Linux skips a bad-status URB and re-submits it).
+        let ok = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
+        if ok && nic.rx_done_count < NIC_RX_BUFS {
+            let len = (NIC_BULK_BUF_BYTES as u32).saturating_sub(residual) as usize;
             let t = (nic.rx_done_head + nic.rx_done_count) % NIC_RX_BUFS;
             nic.rx_done_buf[t] = buf_idx;
             nic.rx_done_len[t] = len;
             nic.rx_done_count += 1;
+        } else {
+            nic_arm_rx(nic, buf_idx);
         }
     } else if dci == nic.out_dci as u32 {
         // Bulk-OUT completion: free one in-flight TX buffer.
