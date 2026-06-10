@@ -248,6 +248,58 @@ pub struct GcStats {
     pub kept: usize,
     /// Number of objects removed because no SB referenced them.
     pub removed: usize,
+    /// True if GC backed off without sweeping because a streaming write
+    /// was in flight (its uncommitted chunks would look like orphans).
+    pub skipped: bool,
+}
+
+// ── Streaming-write activity (GC race guard) ──────────────────────────
+//
+// A `StreamingWriter` flushes chunk Blobs via `storage::put`, which
+// updates the in-memory B-tree root WITHOUT committing (only `finish`
+// commits, under ROOT_MUTEX). So mid-stream, the flushed chunks are
+// visible to GC's orphan enumeration yet unreachable from any committed
+// root — GC would delete the in-progress download's data. This counter
+// lets GC detect an in-flight stream and back off. Incremented when a
+// writer is constructed, decremented on its Drop (finish OR abort), so
+// it's balanced regardless of how the writer ends.
+static ACTIVE_STREAMS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// True while ≥1 `StreamingWriter` is alive (open, not yet finished/dropped).
+pub fn stream_active() -> bool {
+    ACTIVE_STREAMS.load(core::sync::atomic::Ordering::Acquire) > 0
+}
+fn stream_begin() { ACTIVE_STREAMS.fetch_add(1, core::sync::atomic::Ordering::Release); }
+fn stream_end()   { ACTIVE_STREAMS.fetch_sub(1, core::sync::atomic::Ordering::Release); }
+
+// ── GC pressure counter (auto-GC trigger) ─────────────────────────────
+//
+// Every committed mutation orphans something: an overwrite orphans the
+// old blob, a delete orphans the entry's blob, and *any* write orphans
+// the old ancestor Tree objects it rebuilt (content-addressed COW). So a
+// commit count is a good proxy for "orphans waiting to be reclaimed" —
+// the Git `gc --auto` model (threshold on loose objects). `commit_root`
+// bumps it on each real commit; the idle trigger in the shell run-loop
+// fires `gc()` once it crosses `GC_PRESSURE_THRESHOLD`, and `gc()` resets
+// it on a successful sweep. GC's own sweep deletes go through the
+// storage-internal commit (not `commit_root`), so they don't self-feed.
+static MUTATIONS_SINCE_GC: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Mutations to accumulate before the idle trigger runs GC. ~Git's
+/// loose-object threshold, scaled down: enough churn to be worth a sweep,
+/// low enough that orphans never pile up unbounded on an active disk.
+pub const GC_PRESSURE_THRESHOLD: usize = 128;
+
+/// Note a committed mutation (called from `storage::commit_root`).
+pub(crate) fn note_commit() {
+    MUTATIONS_SINCE_GC.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Mutations committed since the last successful GC.
+pub fn gc_pressure() -> usize {
+    MUTATIONS_SINCE_GC.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Read a Tree object for GC marking. `Ok(Some(entries))` for a Tree,
@@ -310,6 +362,19 @@ pub fn gc() -> Result<GcStats, Error> {
 
     let _g = ROOT_MUTEX.lock();
 
+    // Race guard: never sweep while a streaming write is in flight — its
+    // flushed-but-uncommitted chunks are visible to the orphan
+    // enumeration but unreachable from any committed root, so we'd delete
+    // the in-progress download. We hold ROOT_MUTEX, which blocks
+    // `StreamingWriter::finish` (it also takes ROOT_MUTEX to commit), so a
+    // stream cannot commit mid-GC; thus any stream that touches the store
+    // during our run stays alive (counter > 0) and is caught here or at
+    // the post-snapshot re-check below.
+    if stream_active() {
+        crate::kprintln!("[npk] gc: skipped — streaming write in progress");
+        return Ok(GcStats { kept: 0, removed: 0, skipped: true });
+    }
+
     let roots = storage::all_root_hashes().map_err(Error::Storage)?;
     let mut reachable: HashSet<[u8; 32]> = HashSet::new();
     // Work-list holds Tree hashes ONLY (roots + Dir entries). File
@@ -352,6 +417,19 @@ pub fn gc() -> Result<GcStats, Error> {
     }
 
     let all = storage::all_object_hashes().map_err(Error::Storage)?;
+
+    // Re-check: a stream may have opened during the mark phase and flushed
+    // chunks that landed in `all` but were marked after our reachability
+    // walk. `finish` is blocked on ROOT_MUTEX (we hold it), so such a
+    // stream is still alive (counter > 0) — back off before sweeping its
+    // chunks. If the counter is zero here, no stream touched the store
+    // across the whole start→snapshot window, so `all` reflects only
+    // committed state and is safe to sweep.
+    if stream_active() {
+        crate::kprintln!("[npk] gc: aborted — streaming write started mid-sweep");
+        return Ok(GcStats { kept: reachable.len(), removed: 0, skipped: true });
+    }
+
     let mut removed = 0usize;
     let mut failed = 0usize;
     for h in all {
@@ -382,6 +460,9 @@ pub fn gc() -> Result<GcStats, Error> {
     // we'd typically be running maintenance anyway.
     storage::trim().map_err(Error::Storage)?;
 
+    // Reset pressure — this sweep covered everything orphaned so far.
+    MUTATIONS_SINCE_GC.store(0, core::sync::atomic::Ordering::Relaxed);
+
     // Record this run so `disk` can report when GC last completed and
     // whether it was clean (no corrupt objects skipped).
     *LAST_GC.lock() = Some(LastGc {
@@ -391,7 +472,7 @@ pub fn gc() -> Result<GcStats, Error> {
         failed,
     });
 
-    Ok(GcStats { kept: reachable.len(), removed })
+    Ok(GcStats { kept: reachable.len(), removed, skipped: false })
 }
 
 /// Summary of the most recent `gc()` completion (this session only —
@@ -525,7 +606,10 @@ impl StreamingWriter {
         let total_size = self.written;
         let manifest = super::object::Object::Chunked {
             total_size,
-            chunks: self.chunk_hashes,
+            // `take` rather than move: StreamingWriter now has a Drop impl
+            // (the GC race-guard decrement), and you can't move a field
+            // out of a Drop type. Leaves an empty Vec for Drop to reap.
+            chunks: core::mem::take(&mut self.chunk_hashes),
         };
         let (encoded, manifest_hash) =
             manifest.encode_and_hash().map_err(|_| PathError::Corrupt)?;
@@ -549,11 +633,24 @@ impl StreamingWriter {
 /// already names a File it's replaced atomically at `finish`; if it
 /// names a Dir, `finish` errors with `AlreadyExists`.
 pub fn open_streaming_write(path: &str) -> StreamingWriter {
+    // Mark a stream in flight so GC backs off until `finish`/drop. Done
+    // here (at construction) so BOTH the public wrapper and the direct
+    // 9p caller are covered. Balanced by `Drop`.
+    stream_begin();
     StreamingWriter {
         path: alloc::string::String::from(path),
         chunk_size: STREAMING_CHUNK_SIZE,
         buf: Vec::with_capacity(STREAMING_CHUNK_SIZE),
         chunk_hashes: Vec::new(),
         written: 0,
+    }
+}
+
+impl Drop for StreamingWriter {
+    /// Clear the GC race guard whether the writer finished or was
+    /// abandoned (a dropped-without-finish writer leaks its flushed
+    /// chunks until the next GC — which is now free to run again).
+    fn drop(&mut self) {
+        stream_end();
     }
 }

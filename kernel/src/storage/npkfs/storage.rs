@@ -326,7 +326,15 @@ pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
         fs.journal.record_free(b, 1);
     }
     // journal_head is set inside commit(), AFTER prepare() advances it.
-    commit(fs, &pending)
+    let r = commit(fs, &pending);
+    if r.is_ok() {
+        // Feed the auto-GC pressure counter (Git `gc --auto` model). Only
+        // real commits count; GC's own sweep removes go through the
+        // storage-internal `commit()` directly, not here, so GC can't
+        // feed its own trigger.
+        super::fs::note_commit();
+    }
+    r
 }
 
 // ── Object operations ─────────────────────────────────────────────────

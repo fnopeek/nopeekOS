@@ -867,6 +867,42 @@ fn core0_idle_tick() {
     }
 }
 
+/// Idle auto-GC trigger, called from the shell run-loop's ~1 Hz top.
+/// Reclaims orphans once `GC_PRESSURE_THRESHOLD` mutations have piled up,
+/// but ONLY when the system is quiet: FS mounted, no in-flight streaming
+/// write (GC would eat its chunks), and no focused microvm surface (the
+/// loop is busy slicing the guest — a GC stall there would hitch it).
+/// Self-throttled so the gate checks don't run on every spin. GC itself
+/// is cheap now (skips Blob bodies) and resets the pressure counter, so
+/// after a sweep this won't fire again until real churn rebuilds it.
+fn maybe_idle_gc() {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static LAST_CHECK: AtomicU64 = AtomicU64::new(0);
+    const CHECK_INTERVAL_TICKS: u64 = 300; // ~3 s @ 100 Hz
+
+    let now = crate::interrupts::ticks();
+    if now.wrapping_sub(LAST_CHECK.load(Ordering::Relaxed)) < CHECK_INTERVAL_TICKS {
+        return;
+    }
+    LAST_CHECK.store(now, Ordering::Relaxed);
+
+    if !crate::storage::npkfs::is_mounted() { return; }
+    if crate::shade::focused_surface_id().is_some() { return; }
+    if crate::storage::npkfs::fs::stream_active() { return; }
+    if crate::storage::npkfs::fs::gc_pressure()
+        < crate::storage::npkfs::fs::GC_PRESSURE_THRESHOLD
+    {
+        return;
+    }
+
+    match crate::storage::npkfs::fs::gc() {
+        Ok(s) if !s.skipped && s.removed > 0 =>
+            kprintln!("[npk] auto-gc: reclaimed {} orphan(s), {} kept", s.removed, s.kept),
+        // skipped (a stream raced in) or nothing to reclaim — stay quiet.
+        _ => {}
+    }
+}
+
 pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     // Store vault reference for worker cores
     VAULT_REF.store(vault as *const _ as *mut _, AtOrd::Release);
@@ -888,6 +924,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // when the active interface changes (LAN cable pulled → WiFi takes over
         // with a fresh DHCP lease, or a static config). No manual `dhcp` needed.
         crate::net::tick_link_and_reconfigure();
+
+        // Self-throttled: reclaim orphaned objects when enough mutations
+        // have accumulated and the system is quiet. Keeps an active disk
+        // from filling with COW/overwrite/delete orphans (npkFS is
+        // content-addressed → every write orphans the old version). The
+        // F2FS / `git gc --auto` model.
+        maybe_idle_gc();
 
         // If focused window has a running WASM app or intent, route keys / wait.
         if crate::shade::is_active() {
@@ -1622,6 +1665,8 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "gc" => {
             if require_cap(vault, &session, Rights::AUDIT, "gc") {
                 match crate::storage::npkfs::fs::gc() {
+                    Ok(s) if s.skipped =>
+                        kprintln!("[npk] gc: skipped — streaming write in progress, try again later"),
                     Ok(s) => kprintln!("[npk] gc: kept {}, removed {}", s.kept, s.removed),
                     Err(e) => kprintln!("[npk] gc error: {:?}", e),
                 }
