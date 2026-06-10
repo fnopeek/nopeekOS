@@ -202,6 +202,13 @@ struct TcpConn {
     // accurate RTO → no spurious retransmits.
     ts_ok: bool,
     ts_recent: u32,
+
+    // Selective ACK (RFC 2018). `sack_ok` once both SYNs carried SACK-permitted.
+    // As the receiver we then tell the sender which out-of-order ranges we
+    // already hold (straight from `ooo`), so it retransmits ONLY the real holes
+    // instead of everything past the cumulative ACK — the difference between a
+    // loss collapsing throughput and a one-segment recovery.
+    sack_ok: bool,
 }
 
 static CONNECTIONS: Mutex<[Option<TcpConn>; MAX_CONNECTIONS]> = Mutex::new(
@@ -257,6 +264,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         snd_wscale: 0,
         ts_ok: false,
         ts_recent: 0,
+        sack_ok: false,
     };
 
     // Find free slot
@@ -337,6 +345,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         snd_wscale: 0,
         ts_ok: false,
         ts_recent: 0,
+        sack_ok: false,
     };
 
     let mut conns = CONNECTIONS.lock();
@@ -414,6 +423,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         snd_wscale: 0,
         ts_ok: false,
         ts_recent: 0,
+        sack_ok: false,
     };
     Ok(())
 }
@@ -672,6 +682,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.ts_ok = true;
                     conn.ts_recent = ts;
                 }
+                // SACK active iff the SYN-ACK also carried SACK-permitted.
+                conn.sack_ok = parse_sack_permitted(data, data_offset);
 
                 // Send ACK with full window
                 let w = recv_window(conn);
@@ -869,22 +881,25 @@ fn send_syn(handle: usize) -> Result<(), TcpError> {
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     conn.last_send_tick = crate::interrupts::ticks();
 
-    // SYN options: MSS(4) + Timestamp(NOP,NOP,kind=8 len=10) + WScale(NOP,3) = 20.
-    let mut opts = [0u8; 20];
+    // SYN options: MSS(4) + SACK-permitted(2) + NOP,NOP + Timestamp(kind=8,10) +
+    // NOP + WScale(3) = 22 (padded to 24).
+    let mut opts = [0u8; 24];
     opts[0] = 2;  // MSS option kind
     opts[1] = 4;  // MSS option length
     opts[2..4].copy_from_slice(&MSS.to_be_bytes());
-    opts[4] = 1;            // NOP
-    opts[5] = 1;            // NOP — align the 10-byte Timestamp to 4 bytes
-    opts[6] = 8;            // Timestamp option kind
-    opts[7] = 10;           // length
+    opts[4] = 4;            // SACK-permitted kind
+    opts[5] = 2;            // length
+    opts[6] = 1;            // NOP
+    opts[7] = 1;            // NOP — align the 10-byte Timestamp to 4 bytes
+    opts[8] = 8;            // Timestamp option kind
+    opts[9] = 10;           // length
     let tsval = crate::interrupts::ticks() as u32;
-    opts[8..12].copy_from_slice(&tsval.to_be_bytes()); // TSval
-    // opts[12..16] TSecr = 0 on the initial SYN
-    opts[16] = 1;           // NOP — align the 3-byte WScale to a 4-byte boundary
-    opts[17] = 3;           // Window Scale option kind
-    opts[18] = 3;           // length
-    opts[19] = OUR_WSCALE;  // shift count
+    opts[10..14].copy_from_slice(&tsval.to_be_bytes()); // TSval
+    // opts[14..18] TSecr = 0 on the initial SYN
+    opts[18] = 1;           // NOP — align the 3-byte WScale to a 4-byte boundary
+    opts[19] = 3;           // Window Scale option kind
+    opts[20] = 3;           // length
+    opts[21] = OUR_WSCALE;  // shift count
 
     send_segment_with_opts(
         conn.remote_ip, conn.local_port, conn.remote_port,
@@ -963,6 +978,62 @@ fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {
 
 /// Scan a segment's TCP options for the Window Scale option (kind 3) and
 /// return its shift count. `data_offset` is the TCP header length in bytes.
+/// Did the peer's options carry SACK-permitted (kind 4, len 2)?
+fn parse_sack_permitted(seg: &[u8], data_offset: usize) -> bool {
+    let end = data_offset.min(seg.len());
+    let mut i = HEADER_LEN;
+    while i < end {
+        match seg[i] {
+            0 => break,
+            1 => i += 1,
+            kind => {
+                if i + 1 >= end { break; }
+                let len = seg[i + 1] as usize;
+                if len < 2 { break; }
+                if kind == 4 && len == 2 { return true; }
+                i += len;
+            }
+        }
+    }
+    false
+}
+
+/// Build the TCP SACK option (kind 5) into `out` from the connection's
+/// out-of-order reassembly map: up to 3 contiguous [left,right) runs as
+/// absolute sequence numbers. Returns bytes written (0 if nothing to report).
+/// First block = the highest run (most recently relevant), per RFC 2018.
+fn build_sack_blocks(conn: &TcpConn, out: &mut [u8]) -> usize {
+    if !conn.sack_ok || conn.ooo.is_empty() { return 0; }
+    // Collapse the per-segment map into contiguous runs (offsets from rcv_irs).
+    let mut runs: [(u32, u32); 8] = [(0, 0); 8];
+    let mut n = 0usize;
+    let mut cur: Option<(u32, u32)> = None;
+    for (&off, seg) in conn.ooo.iter() {
+        let (s, e) = (off, off.wrapping_add(seg.len() as u32));
+        match cur {
+            None => cur = Some((s, e)),
+            Some((cs, ce)) if s == ce => cur = Some((cs, e)), // contiguous
+            Some(run) => { if n < runs.len() { runs[n] = run; n += 1; } cur = Some((s, e)); }
+        }
+    }
+    if let Some(run) = cur { if n < runs.len() { runs[n] = run; n += 1; } }
+    if n == 0 { return 0; }
+
+    // Emit the LAST (highest) up-to-3 runs, highest first.
+    let take = n.min(3);
+    out[0] = 5;                       // SACK option kind
+    out[1] = (2 + 8 * take) as u8;    // length
+    let mut p = 2;
+    for k in 0..take {
+        let (s, e) = runs[n - 1 - k];
+        let l = conn.rcv_irs.wrapping_add(s);
+        let r = conn.rcv_irs.wrapping_add(e);
+        out[p..p + 4].copy_from_slice(&l.to_be_bytes()); p += 4;
+        out[p..p + 4].copy_from_slice(&r.to_be_bytes()); p += 4;
+    }
+    p
+}
+
 fn parse_wscale(seg: &[u8], data_offset: usize) -> Option<u8> {
     let end = data_offset.min(seg.len());
     let mut i = HEADER_LEN;
@@ -1014,14 +1085,32 @@ fn parse_ts(seg: &[u8], data_offset: usize) -> Option<u32> {
 /// sender gets a clean per-segment RTT sample despite our ACK jitter.
 fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) {
     TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Build the option list (max 40 bytes): Timestamp, then SACK blocks during
+    // a gap. Both 4-byte aligned via leading NOPs.
+    let mut opts = [0u8; 40];
+    let mut len = 0;
     if conn.ts_ok {
-        // NOP, NOP, then the 10-byte Timestamp option (4-byte aligned).
-        let mut opts = [1u8, 1, 8, 10, 0, 0, 0, 0, 0, 0, 0, 0];
+        opts[len] = 1; opts[len + 1] = 1;          // NOP, NOP
+        opts[len + 2] = 8; opts[len + 3] = 10;     // Timestamp kind, len
         let tsval = crate::interrupts::ticks() as u32;
-        opts[4..8].copy_from_slice(&tsval.to_be_bytes());
-        opts[8..12].copy_from_slice(&conn.ts_recent.to_be_bytes());
+        opts[len + 4..len + 8].copy_from_slice(&tsval.to_be_bytes());
+        opts[len + 8..len + 12].copy_from_slice(&conn.ts_recent.to_be_bytes());
+        len += 12;
+    }
+    // SACK blocks: only on a pure ACK while we hold out-of-order data (a gap).
+    // Never on a SYN — that advertises SACK-permitted instead.
+    if conn.sack_ok && flags & SYN == 0 && !conn.ooo.is_empty() {
+        let mut sack = [0u8; 26]; // 2 + 8*3
+        let slen = build_sack_blocks(conn, &mut sack);
+        if slen > 0 && len + 2 + slen <= opts.len() {
+            opts[len] = 1; opts[len + 1] = 1;       // NOP, NOP align
+            opts[len + 2..len + 2 + slen].copy_from_slice(&sack[..slen]);
+            len += 2 + slen;
+        }
+    }
+    if len > 0 {
         send_segment_with_opts(conn.remote_ip, conn.local_port, conn.remote_port,
-            seq, ack, flags, window, payload, &opts);
+            seq, ack, flags, window, payload, &opts[..len]);
     } else {
         send_segment(conn.remote_ip, conn.local_port, conn.remote_port,
             seq, ack, flags, window, payload);
