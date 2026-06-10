@@ -146,6 +146,13 @@ const ETH_FCS_LEN: usize = 4;
 
 const RX_BATCH_BYTES: usize = 16 * 1024;
 
+// RX aggregation (USB MCU regs) — r8153_set_rx_early_{timeout,size}.
+const USB_RX_EARLY_TIMEOUT: u16 = 0xd42c;
+const USB_RX_EARLY_SIZE: u16 = 0xd42e;
+const COALESCE_SUPER: u32 = 85_000;   // USB SuperSpeed
+const COALESCE_HIGH: u32 = 250_000;   // USB High-Speed
+const COALESCE_SLOW: u32 = 524_280;   // USB Full / other
+
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 static MAC: Mutex<[u8; 6]> = Mutex::new([0; 6]);
 static OCP_BASE: AtomicU16 = AtomicU16::new(0xffff);
@@ -376,7 +383,29 @@ fn set_mac(mac: &[u8; 6]) {
     ocp_write_byte(MCU_PLA, PLA_CRWECR, CRWECR_NORMAL);
 }
 
+/// RX aggregation tuning (r8152 RTL_VER_03/04/05). Tells the chip how long and
+/// how full to coalesce received packets into one bulk-IN buffer before flushing
+/// it. Without this the chip uses power-on defaults that flush tiny aggregates →
+/// one short USB transfer per packet → throughput collapses to a few Mbit.
+fn set_rx_early() {
+    let coalesce = match crate::xhci::nic_speed_class() {
+        2 => COALESCE_SUPER,
+        1 => COALESCE_HIGH,
+        _ => COALESCE_SLOW,
+    };
+    ocp_write_word(MCU_USB, USB_RX_EARLY_TIMEOUT, (coalesce / 8) as u16);
+
+    // ocp_data = rx_buf_sz - rx_reserved_size(mtu), VER_03/04/05 writes it /4.
+    // rx_reserved_size = mtu_to_size(L3 mtu) + sizeof(rx_desc) + RX_ALIGN
+    //                  = ((MTU-14) + 22) + 24 + 8
+    let reserved = (MTU as u32 - 14) + 22 + RX_DESC_LEN as u32 + 8;
+    let ocp_data = (RX_BATCH_BYTES as u32).saturating_sub(reserved);
+    ocp_write_word(MCU_USB, USB_RX_EARLY_SIZE, (ocp_data / 4) as u16);
+}
+
 fn enable() {
+    // Configure RX aggregation before turning the receiver on.
+    set_rx_early();
     // reset packet filter
     clr_bits16(MCU_PLA, PLA_FMC, FMC_FCR_MCU_EN);
     set_bits16(MCU_PLA, PLA_FMC, FMC_FCR_MCU_EN);
