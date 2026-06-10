@@ -907,13 +907,21 @@ pub fn pump_fast(
     mem: &GuestMem,
 ) -> bool {
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
+    // Drain any backlog FIRST, so INBOUND_Q has headroom before poll_rx_only
+    // refills it from the host NIC. Otherwise a full NIC-ring burst (up to 256)
+    // is pushed into an already-occupied 256-deep queue and l3_inbound drops the
+    // overflow — the measured download-drop source (drops ≫ injfalse) that drove
+    // the TCP sawtooth (~0.13% loss capped throughput at ~400 Mbit). Then fill +
+    // deliver the fresh packets.
+    let mut fired = drain_inbound(net, mem);
     // NIC-drain-only (NOT full poll()): the hot ~15k/s device-exit path must not
     // run tcp::tick_connections (128-slot host-stack scan + lock) or
     // shade::poll_render (current_core_id = an APIC-MMIO VM-exit) every call —
     // pure waste on the BSP vCPU. The host stack's TCP timers run at the ~100 Hz
     // pump() timer path instead (the host stack is idle during a browser session).
     crate::net::poll_rx_only();
-    drain_inbound(net, mem)
+    fired |= drain_inbound(net, mem);
+    fired
 }
 
 /// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().

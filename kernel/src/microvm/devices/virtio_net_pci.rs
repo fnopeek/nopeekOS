@@ -86,7 +86,11 @@ const VIRTIO_NET_F_STATUS: u32 = 16;
 const VIRTIO_NET_S_LINK_UP: u16 = 1;
 
 const NUM_QUEUES: u16 = 2;
-const MAX_QUEUE_SIZE: u16 = 256;
+// 1024 (up from 256): lets the Linux guest post a deeper RX virtqueue so it can
+// hold more available buffers, cutting inject_rx "guest ring full" bails
+// (injfalse) — and with them the INBOUND_Q back-pressure drops — during download
+// bursts. The host NIC ring (drivers/virtio_net.rs) stays QEMU's queue size.
+const MAX_QUEUE_SIZE: u16 = 1024;
 
 use super::guest_mem::GuestMem;
 use super::nat::{GUEST_MAC, NetCaps};
