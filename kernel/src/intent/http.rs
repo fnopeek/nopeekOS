@@ -163,6 +163,14 @@ fn do_http_request(args: &str, use_tls: bool) {
                     let pk = pk.max(1);
                     kprintln!("[npk]      poll-split per pkt: netdev={}ns stack={}ns  | per-poll: txflush={}ns render={}ns  pkts/poll={}",
                         nd / pk / ghz, st / pk / ghz, tf / iters / ghz, rn / iters / ghz, pk / iters);
+                    // USB-transport layer: is the bulk RX itself the cap?
+                    let (rxb, deliv, empty, armed, txc, txcyc) = crate::xhci::nic_take_stats();
+                    let deliv1 = deliv.max(1);
+                    let polls = deliv + empty;
+                    let nic_mbit = rxb * 8 * 100 / dt2 / 1_000_000;
+                    kprintln!("[npk]      NIC-usb: {} Mbit  avg_batch={}B  empty_polls={}%  ring_depth={}  | tx_acks={} tx_wait={}ns",
+                        nic_mbit, rxb / deliv1, empty * 100 / polls.max(1),
+                        armed / deliv1, txc, if txc > 0 { txcyc / txc / ghz } else { 0 });
                     last_tick = now;
                 }
                 Ok(())
