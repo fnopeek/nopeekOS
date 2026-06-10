@@ -110,12 +110,17 @@ const MOUNT_TAG: &[u8] = b"npkhome";
 
 /// Largest 9P message we negotiate. Bounds the per-request buffers.
 ///
-/// 512 KiB: the guest mounts with `msize=524288`, cutting a large
-/// download from ~90k tiny round-trips (8 KiB default) to ~1.4k — each
-/// 9P message is a VM-exit, so this is the GRO-equivalent for the disk
-/// path. A 512 KiB message spans ~128 virtqueue descriptors (4 KiB
-/// pages); our queue is 256-deep, so it fits with headroom.
-const MAX_MSIZE: u32 = 512 * 1024;
+/// Kept at 128 KiB: bumping to 512 KiB (with a guest `msize=524288`
+/// mount) put a large download at Linux's `VIRTQUEUE_NUM = 128`
+/// descriptor edge and correlated with a ~500 MB download abort (the
+/// old StreamingWriter-OOM point — a larger/altered write pattern can
+/// break the sequential-append promotion at virtio_9p_pci t_write,
+/// reverting to the buffered path that OOMs). No upside anyway: the
+/// microvm download is RX-pump-cadence-limited (~1700 pump/s × small
+/// batch ≈ 4 MB/s), not 9p-round-trip-limited — so fewer 9P messages
+/// move nothing. Revisit only once the RX-delivery cadence is fixed
+/// and the disk/9p path actually becomes the bottleneck.
+const MAX_MSIZE: u32 = 128 * 1024;
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
