@@ -325,7 +325,7 @@ pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
     for &b in &pending {
         fs.journal.record_free(b, 1);
     }
-    fs.sb.journal_head = fs.journal.head();
+    // journal_head is set inside commit(), AFTER prepare() advances it.
     commit(fs, &pending)
 }
 
@@ -682,7 +682,7 @@ pub fn remove(hash: &[u8; 32]) -> Result<(), FsError> {
     fs.sb.object_count = fs.sb.object_count.saturating_sub(1);
     fs.sb.free_blocks = fs.bitmap.free_count();
     fs.sb.generation = fs.generation;
-    fs.sb.journal_head = fs.journal.head();
+    // journal_head is set inside commit(), AFTER prepare() advances it.
 
     commit(fs, &old_blocks)?;
 
@@ -735,7 +735,17 @@ fn rollback_alloc(fs: &mut State, extents: &[Extent], indirect_block: u64) {
 fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     // Phase 1: write journal entries with committed=0 (safe to crash).
     fs.journal.prepare(&mut fs.cache)?;
+    // Snapshot head+seq AFTER prepare advanced them — prepare wrote this
+    // commit's entries at [old_head, head) and bumped `head` past them.
+    // The SB must record the post-prepare head so `replay` scans BACKWARDS
+    // from just past this commit's entries and actually finds them. Setting
+    // journal_head before prepare (the old bug) made the SB point at the
+    // START of this commit, so replay read the previous commit first
+    // (seq < expected → break) and never recovered the latest commit's
+    // frees → freed COW/data blocks leaked after a crash, and the next
+    // mount resumed the journal at a stale head.
     fs.sb.journal_seq = fs.journal.seq();
+    fs.sb.journal_head = fs.journal.head();
 
     // Phase 2: persist bitmap + superblock to next ring slot.
     fs.bitmap.sync(&mut fs.cache)?;
