@@ -50,6 +50,9 @@ pub fn intent_https(args: &str) {
 }
 
 fn do_http_request(args: &str, use_tls: bool) {
+    // Arm Ctrl+C cancellation for this download (cleared so a stale earlier
+    // press doesn't abort us immediately).
+    super::clear_cancel();
     let proto = if use_tls { "https" } else { "http" };
     let (flags, url) = parse_http_args(args);
     let url = url.as_str();
@@ -105,6 +108,9 @@ fn do_http_request(args: &str, use_tls: bool) {
         let mut writer: Option<(String, crate::npkfs::fs::StreamingWriter)> = if flags.discard {
             if !flags.silent {
                 kprintln!("[npk] Streaming to RAM (-d, discard) — pure throughput, no disk");
+                if crate::xhci::nic_attached() {
+                    kprintln!("[npk] NIC USB link: {}", crate::xhci::nic_link_speed_str());
+                }
             }
             None
         } else {
@@ -181,7 +187,12 @@ fn do_http_request(args: &str, use_tls: bool) {
             user_download_streaming(host, path, use_tls, max_size, &mut sink)
         };
         if let Err(e) = stream_result {
-            kprintln!("[npk] download failed: {}", e);
+            if e == "cancelled" {
+                kprintln!("[npk] ^C — download abgebrochen ({} KiB empfangen)", total / 1024);
+            } else {
+                kprintln!("[npk] download failed: {}", e);
+            }
+            // `writer` drops here → StreamingWriter::drop cleans up the partial.
             return;
         }
         // Final throughput summary (the headline number for a speed test).
@@ -759,6 +770,7 @@ fn parse_https_url(loc: &str, current_host: &str) -> Result<(String, String), &'
 fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usize, &'static str> {
     let start = crate::interrupts::ticks();
     loop {
+        if super::cancel_requested() { return Err("cancelled"); }
         // ONE poll per attempt. `net::poll()` already drains the
         // entire NIC ring (`while let Some = netdev::recv`), ticks
         // TCP, and runs a shade render pass — so a single call
@@ -797,6 +809,7 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     use core::sync::atomic::Ordering::Relaxed;
     let start = crate::interrupts::ticks();
     loop {
+        if super::cancel_requested() { return Err("cancelled"); }
         let t0 = crate::interrupts::rdtsc();
         crate::net::poll_rx_only();
         let t1 = crate::interrupts::rdtsc();

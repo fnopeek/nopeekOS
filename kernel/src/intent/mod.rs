@@ -22,6 +22,25 @@ use spin::Mutex;
 
 const INPUT_BUF_SIZE: usize = 512;
 
+/// Cooperative cancel for long-running foreground intents (downloads, OTA).
+/// Set from the keyboard IRQ on Ctrl+C (terminal SIGINT semantics — the loop
+/// has no copy concept; widget-app copy, when it exists, gates by focus first),
+/// polled by the recv busy-loops. Cleared at the start of each cancellable op.
+static CANCEL_REQUESTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// IRQ-safe: request cancellation of the running foreground intent.
+pub fn request_cancel() {
+    CANCEL_REQUESTED.store(true, core::sync::atomic::Ordering::Release);
+}
+/// Has the user pressed Ctrl+C since the last `clear_cancel`?
+pub fn cancel_requested() -> bool {
+    CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Acquire)
+}
+/// Arm cancellation afresh — call before a cancellable operation.
+pub fn clear_cancel() {
+    CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Release);
+}
+
 // -- Command history --
 const HIST_MAX: usize = 32;
 const HIST_LINE: usize = 256;
