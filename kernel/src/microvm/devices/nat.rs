@@ -171,6 +171,40 @@ static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// termination pump used, to keep virtio access on one thread).
 /// (push TSC, frame) — the TSC lets the pump measure RX delivery latency.
 static INBOUND_Q: Mutex<VecDeque<(u64, Vec<u8>)>> = Mutex::new(VecDeque::new());
+
+/// Recycled frame buffers for the inbound staging path. Each download packet
+/// used to `vec![0u8; ~1514]` (allocator free-list walk + memset) and free it
+/// after injection — the dominant inbound per-packet cost (~2.6µs/pkt: the
+/// first-fit allocator walks an O(n) free list under churn, plus the memset).
+/// Linux solves this with skb pools; we keep a small ring of buffers that the
+/// producer (l3_inbound) borrows and the consumer (drain_inbound) returns, so
+/// after warmup the datapath does ZERO heap alloc/free — only the unavoidable
+/// payload memcpy. Bounded so it can't grow without limit; only used while a VM
+/// is active (the BSP is the sole accessor, so the lock is uncontended).
+static FRAME_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+const FRAME_POOL_MAX: usize = INBOUND_MAX + 16;
+const FRAME_BUF_CAP: usize = 2048; // ≥ vnet+eth+MTU, so resize never reallocs
+
+/// Borrow a frame buffer sized to `len` from the pool (or allocate once if the
+/// pool is cold). The contents are uninitialised beyond what the caller writes —
+/// l3_inbound overwrites every byte (vnet hdr + eth hdr + full IP copy).
+fn frame_pool_get(len: usize) -> Vec<u8> {
+    let mut buf = FRAME_POOL.lock().pop()
+        .unwrap_or_else(|| Vec::with_capacity(FRAME_BUF_CAP.max(len)));
+    buf.clear();
+    if buf.capacity() < len { buf.reserve(len - buf.capacity()); }
+    // SAFETY: capacity ≥ len after the reserve above. The caller writes all
+    // `len` bytes before the buffer is read (vnet[0..12]=0, eth[12..26],
+    // ip-copy[26..len]), so no uninitialised byte is ever observed.
+    unsafe { buf.set_len(len); }
+    buf
+}
+
+/// Return a frame buffer to the pool for reuse (dropped if the pool is full).
+fn frame_pool_put(buf: Vec<u8>) {
+    let mut pool = FRAME_POOL.lock();
+    if pool.len() < FRAME_POOL_MAX { pool.push(buf); }
+}
 /// Backpressure cap on the staging queue between the NIC drain and the guest
 /// inject. ANTI-BUFFERBLOAT: kept SMALL (≈2× the guest's 256-entry RX queue) on
 /// purpose — a big queue lets TCP fill it, ballooning the latency under load
@@ -386,8 +420,11 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
 
     // Rewrite: dst IP → guest, L4 dst port → guest port; recompute
-    // both checksums. Wrap in vnet + eth (gateway → guest).
-    let mut frame = alloc::vec![0u8; VNET_HDR_LEN + ETH_HDR_LEN + ip.len()];
+    // both checksums. Wrap in vnet + eth (gateway → guest). Buffer is borrowed
+    // from the recycle pool (no per-packet heap alloc/memset); every byte below
+    // is written: vnet hdr zeroed, eth hdr, then the full IP copy.
+    let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());
+    frame[..VNET_HDR_LEN].fill(0); // empty virtio-net header
     write_eth(&mut frame, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
     let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
     frame[ip_off..].copy_from_slice(ip);
@@ -444,6 +481,7 @@ pub fn l3_reset() {
     L3_ACTIVE.store(false, AtOrd::Release);
     *L3.lock() = [const { None }; L3_MAX];
     INBOUND_Q.lock().clear();
+    *FRAME_POOL.lock() = Vec::new(); // release recycled buffers
 }
 
 /// Classify a guest TX frame (virtio-net hdr + ethernet) and produce
@@ -899,6 +937,7 @@ fn drain_inbound(
             if lat > NS_RXLAT_MAX.load(AtOrd::Relaxed) {
                 NS_RXLAT_MAX.store(lat, AtOrd::Relaxed);
             }
+            frame_pool_put(frame); // recycle the buffer (no per-packet free)
         } else {
             // Guest RX queue full (no avail buffer) — requeue + retry next pump.
             // High rate here = the GUEST is the limiter (NAPI/repost too slow).
