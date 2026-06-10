@@ -467,15 +467,32 @@ pub fn init() -> bool {
 
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Acquire) }
 
-/// Negotiated Ethernet link as (speed_mbit, full_duplex). 0 Mbit = no link.
-/// Reads PLA_PHYSTATUS (r8152 `rtl8152_get_speed`). A 10/100 result — or
-/// half-duplex — caps throughput far below gigabit and is the first thing to
-/// rule out when a USB-3 dongle crawls.
-pub fn link_speed() -> (u16, bool) {
-    if !is_available() { return (0, false); }
-    let s = ocp_read_word(MCU_PLA, PLA_PHYSTATUS);
-    let mbit = if s & 0x10 != 0 { 1000 } else if s & 0x08 != 0 { 100 } else if s & 0x04 != 0 { 10 } else { 0 };
-    (mbit, s & 0x01 != 0)
+// recv() batch-parse instrumentation: catches the case where OUR rx_desc
+// walker discards received bytes (a wrong bulk-IN length from the ring, or a
+// bogus desc) — which would show up as TCP out-of-order/loss.
+static RX_FRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RX_TRUNC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RX_DISCARD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// (frames_delivered, truncated_batches, discarded_bytes), each reset to 0.
+pub fn take_rx_parse_stats() -> (u64, u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (RX_FRAMES.swap(0, Relaxed), RX_TRUNC.swap(0, Relaxed), RX_DISCARD.swap(0, Relaxed))
+}
+
+/// Dump the PHY link registers raw + derived speed. PLA_PHYSTATUS is the chip's
+/// own speed view; BMSR/LPA/STAT1000 show what auto-negotiation settled on with
+/// the link partner — so a 10/100 or half-duplex link (the prime suspect for a
+/// dongle stuck at single-digit Mbit) is visible directly.
+pub fn log_link_diag() {
+    if !is_available() { return; }
+    let physt = ocp_read_word(MCU_PLA, PLA_PHYSTATUS);
+    let bmsr = mdio_read(MII_BMSR);
+    let lpa = mdio_read(0x05);       // link-partner ability (10/100)
+    let stat1000 = mdio_read(0x0a);  // 1000BASE-T status
+    let mbit = if physt & 0x10 != 0 { 1000 } else if physt & 0x08 != 0 { 100 }
+               else if physt & 0x04 != 0 { 10 } else { 0 };
+    crate::kprintln!("[npk] rtl8153 link: {}Mbit {} | PHYSTATUS={:#06x} BMSR={:#06x} LPA={:#06x} STAT1000={:#06x}",
+        mbit, if physt & 1 != 0 { "full-dup" } else { "half-dup" }, physt, bmsr, lpa, stat1000);
 }
 pub fn mac() -> Option<[u8; 6]> { if is_available() { Some(*MAC.lock()) } else { None } }
 
@@ -513,13 +530,25 @@ pub fn recv(out: &mut [u8; MTU]) -> Option<usize> {
             let c = rx.cursor;
             let opts1 = u32::from_le_bytes([rx.buf[c], rx.buf[c + 1], rx.buf[c + 2], rx.buf[c + 3]]);
             let pkt_len = (opts1 & RX_LEN_MASK) as usize;        // incl. 4-byte FCS
-            if pkt_len < 60 { rx.cursor = rx.valid; break; }     // end of batch
-            if c + RX_DESC_LEN + pkt_len > rx.valid { rx.cursor = rx.valid; break; } // truncated
+            use core::sync::atomic::Ordering::Relaxed;
+            if pkt_len < 60 {
+                // Normal aggregation terminator — but if >64 real-looking bytes
+                // remain, we just threw away packets (a bad length upstream).
+                let rem = rx.valid - c;
+                if rem > 64 { RX_DISCARD.fetch_add(rem as u64, Relaxed); }
+                rx.cursor = rx.valid; break;
+            }
+            if c + RX_DESC_LEN + pkt_len > rx.valid {            // truncated last packet
+                RX_TRUNC.fetch_add(1, Relaxed);
+                RX_DISCARD.fetch_add((rx.valid - c) as u64, Relaxed);
+                rx.cursor = rx.valid; break;
+            }
             let frame_len = pkt_len - ETH_FCS_LEN;
             let n = frame_len.min(MTU);
             let start = c + RX_DESC_LEN;
             out[..n].copy_from_slice(&rx.buf[start..start + n]);
             rx.cursor = (c + RX_DESC_LEN + pkt_len + 7) & !7;    // 8-byte aligned stride
+            RX_FRAMES.fetch_add(1, Relaxed);
             return Some(n);
         }
         // Batch exhausted — pull a new one (non-blocking) straight into the
