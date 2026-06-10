@@ -1824,7 +1824,11 @@ const NIC_BULK_BUF_BYTES: usize = NIC_BULK_BUF_PAGES * 4096;
 // gigabit the chip's RX FIFO overflows in that gap and TCP collapses to a few
 // Mbit. The bulk-IN TR ring uses slots 0..NIC_RX_BUFS with the link at slot
 // NIC_RX_BUFS; producer + consumer walk it in lockstep so cycle bits line up.
-const NIC_RX_BUFS: usize = 8;
+// 16 deep (256 KiB) absorbs a gigabit micro-burst (~2 ms) while the stack
+// drains it — the chip can DMA into more host buffers before its small internal
+// RX FIFO overflows, which is the loss source on a 1 Gbit link behind 480-Mbit
+// USB. Pairs with async bulk-OUT (fast drain) to keep the ring from starving.
+const NIC_RX_BUFS: usize = 16;
 // Async bulk-OUT (TX): a small ring of TX buffers so a frame can be posted and
 // the call returns WITHOUT busy-waiting ~22 µs for the USB completion (the
 // dominant per-packet cost — every ACK/dup-ACK was paying it inline in the IP
