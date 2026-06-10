@@ -137,6 +137,12 @@ static NS_INJECT_FALSE: AtomicU64 = AtomicU64::new(0);
 /// UDP flows is using HTTP/3 — if those churn/stall it points at QUIC-over-NAT.
 static NS_TCP_FLOWS: AtomicU64 = AtomicU64::new(0);
 static NS_UDP_FLOWS: AtomicU64 = AtomicU64::new(0);
+/// TEMP profiler: total TSC cycles spent inside net.inject_rx (the consumer /
+/// guest-side cost — guest-mem walk + scatter write + used-ring). Divided by
+/// NS_RXLAT_N (successful injects) → cycles per delivered packet. Tells us
+/// whether the bridge cap is per-packet inject cost vs pump cadence. Strip when
+/// done (same dev-tool class as the http -d poll-split profiler).
+static NS_INJECT_CYC: AtomicU64 = AtomicU64::new(0);
 
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
 /// ephemeral range (49152..=65534, net/tcp.rs) so a guest flow can
@@ -776,6 +782,12 @@ pub fn pump(
         // avg packets injected per pump call (batch size) — low pumps/s with a
         // big batch = pump-cadence-bound; high injfalse = guest-NAPI-bound.
         let batch = if pumps > 0 { rxp / pumps } else { 0 };
+        // TEMP per-packet profiler: inject (consumer) ns/pkt + producer split
+        // from poll_rx_only (netdev drain + l3_inbound "stack" + tx_flush).
+        let inj_cyc = NS_INJECT_CYC.swap(0, AtOrd::Relaxed);
+        let inj_ns = if lat_n > 0 { (inj_cyc / lat_n) * 1000 / mhz } else { 0 };
+        let (p_netdev, p_stack, p_txflush, _p_render, p_pkts) = crate::net::take_poll_prof();
+        let ns = |cyc: u64, n: u64| if n > 0 { (cyc / n) * 1000 / mhz } else { 0 };
         if secs > 0 && (rxp + txp) > 0 {
             kprintln!(
                 "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | nat {}/{} (hi {}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",
@@ -786,6 +798,10 @@ pub fn pump(
                 NS_TCP_FLOWS.load(AtOrd::Relaxed), NS_UDP_FLOWS.load(AtOrd::Relaxed),
                 NS_DROPS.load(AtOrd::Relaxed),
                 pumps / secs, injfalse / secs, batch,
+            );
+            kprintln!(
+                "[netstat]   per-pkt: inject={}ns (consumer) | producer: netdev={}ns stack={}ns/pkt txflush={}ns/poll  poll_pkts={}",
+                inj_ns, ns(p_netdev, p_pkts), ns(p_stack, p_pkts), ns(p_txflush, pumps), p_pkts,
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
@@ -807,7 +823,12 @@ pub fn pump_fast(
     mem: &GuestMem,
 ) -> bool {
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
-    crate::net::poll();
+    // NIC-drain-only (NOT full poll()): the hot ~15k/s device-exit path must not
+    // run tcp::tick_connections (128-slot host-stack scan + lock) or
+    // shade::poll_render (current_core_id = an APIC-MMIO VM-exit) every call —
+    // pure waste on the BSP vCPU. The host stack's TCP timers run at the ~100 Hz
+    // pump() timer path instead (the host stack is idle during a browser session).
+    crate::net::poll_rx_only();
     drain_inbound(net, mem)
 }
 
@@ -820,7 +841,10 @@ fn drain_inbound(
     loop {
         let item = { INBOUND_Q.lock().pop_front() };
         let Some((push_tsc, frame)) = item else { break };
-        if net.inject_rx(mem, &frame) {
+        let inj_t0 = crate::interrupts::rdtsc();
+        let injected = net.inject_rx(mem, &frame);
+        NS_INJECT_CYC.fetch_add(crate::interrupts::rdtsc().saturating_sub(inj_t0), AtOrd::Relaxed);
+        if injected {
             any = true;
             // RX delivery latency: how long this packet waited in the queue.
             let lat = crate::interrupts::rdtsc().saturating_sub(push_tsc);
