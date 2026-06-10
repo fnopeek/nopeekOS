@@ -1841,6 +1841,24 @@ struct NicXhci {
 
 static NIC: spin::Mutex<Option<NicXhci>> = spin::Mutex::new(None);
 
+// USB-transport-layer profiling (read + reset via nic_take_stats). Lets a
+// speed test see whether the bottleneck is the bulk RX path (few bytes /
+// many empty polls / shallow ring) or above it (TCP/ACK/poll cadence).
+static NIC_RX_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NIC_RX_DELIV: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // calls returning data
+static NIC_RX_EMPTY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // calls returning 0
+static NIC_RX_ARMED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // sum of in-flight depth at delivery
+static NIC_TX_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NIC_TX_CYC:   core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // cycles spent waiting for TX completion
+
+/// (rx_bytes, rx_deliveries, rx_empty_polls, sum_ring_depth, tx_calls, tx_wait_cycles), each reset to 0.
+pub fn nic_take_stats() -> (u64, u64, u64, u64, u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (NIC_RX_BYTES.swap(0, Relaxed), NIC_RX_DELIV.swap(0, Relaxed),
+     NIC_RX_EMPTY.swap(0, Relaxed), NIC_RX_ARMED.swap(0, Relaxed),
+     NIC_TX_CALLS.swap(0, Relaxed), NIC_TX_CYC.swap(0, Relaxed))
+}
+
 pub fn nic_attached() -> bool { NIC.lock().is_some() }
 
 /// USB link speed of the attached NIC as an r8152 coalesce class:
@@ -2104,7 +2122,12 @@ pub fn nic_bulk_out(data: &[u8]) -> bool {
     let slot = nic.x.slot_id as u32;
     let dci = nic.out_dci as u32;
     ring_doorbell(&nic.x, slot, dci);
-    matches!(nic_wait_dci(nic, dci, 100), Some(cc) if cc == CC_SUCCESS || cc == CC_SHORT_PACKET)
+    use core::sync::atomic::Ordering::Relaxed;
+    let t0 = crate::interrupts::rdtsc();
+    let ok = matches!(nic_wait_dci(nic, dci, 100), Some(cc) if cc == CC_SUCCESS || cc == CC_SHORT_PACKET);
+    NIC_TX_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t0), Relaxed);
+    NIC_TX_CALLS.fetch_add(1, Relaxed);
+    ok
 }
 
 /// Bulk IN (RX) poll: copy a completed bulk-IN buffer into `buf`, returns its
@@ -2118,7 +2141,11 @@ pub fn nic_bulk_in(buf: &mut [u8]) -> usize {
     // event ring from backing up and stalling the controller).
     while nic_consume_event(nic).is_some() {}
 
-    if nic.rx_done_count == 0 { return 0; }
+    use core::sync::atomic::Ordering::Relaxed;
+    if nic.rx_done_count == 0 {
+        NIC_RX_EMPTY.fetch_add(1, Relaxed);
+        return 0;
+    }
 
     let h = nic.rx_done_head;
     let b = nic.rx_done_buf[h];
@@ -2130,6 +2157,9 @@ pub fn nic_bulk_in(buf: &mut [u8]) -> usize {
     let src = nic.in_buf + (b * NIC_BULK_BUF_BYTES) as u64;
     // SAFETY: src is RX buffer `b`, which holds `len` bytes of received data
     unsafe { core::ptr::copy_nonoverlapping(src as *const u8, buf.as_mut_ptr(), n); }
+    NIC_RX_BYTES.fetch_add(n as u64, Relaxed);
+    NIC_RX_DELIV.fetch_add(1, Relaxed);
+    NIC_RX_ARMED.fetch_add(nic.rx_armed as u64, Relaxed); // ring depth still armed behind the device
     nic_arm_rx(nic, b);   // re-arm; buffer `b` is free now that we copied it out
     n
 }
