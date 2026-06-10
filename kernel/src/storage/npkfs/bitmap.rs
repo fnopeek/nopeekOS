@@ -25,7 +25,7 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
-    /// Load bitmap from disk. v2 superblock passes layout primitives
+    /// Load bitmap from disk. the superblock passes layout primitives
     /// directly; bitmap layout is identical between v1 and v2.
     pub fn load_args(
         cache: &mut BlockCache,

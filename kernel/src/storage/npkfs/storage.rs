@@ -1,8 +1,8 @@
-//! v2 storage entry points: mkfs / mount / unmount / put / get / has / remove.
+//! npkFS storage entry points: mkfs / mount / unmount / put / get / has / remove.
 //!
 //! Step-2 scope: a content-addressed object store. Caller hands in
 //! `(hash, payload)` where `hash == BLAKE3(payload)`; we encrypt on
-//! disk (if a master key is set), index by hash in the v2 B-tree, and
+//! disk (if a master key is set), index by hash in the B-tree, and
 //! verify on read. No path layer, no Tree-walker — those land in
 //! Steps 3-4.
 
@@ -257,7 +257,7 @@ pub fn trim() -> Result<(), FsError> {
     Ok(())
 }
 
-/// Read every valid v2 superblock slot and return their `root_tree_hash`
+/// Read every valid superblock slot and return their `root_tree_hash`
 /// values. Used by GC for the snapshot guarantee — anything reachable
 /// from any of the 8 rotating slots stays alive.
 pub fn all_root_hashes() -> Result<Vec<[u8; 32]>, FsError> {
@@ -404,7 +404,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
 
     // Race-check: someone else could have inserted the same hash while
     // we did the encrypt without holding the lock. ROOT_MUTEX in
-    // v2::fs::write serialises all path-layer mutations, so this is
+    // fs::write serialises all path-layer mutations, so this is
     // defensive in single-threaded operation but cheap.
     if btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some() {
         return Ok(());

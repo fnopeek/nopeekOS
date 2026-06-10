@@ -1,4 +1,4 @@
-//! v2 Copy-on-Write B-tree, keyed by 32-byte content hashes.
+//! Copy-on-Write B-tree, keyed by 32-byte content hashes.
 //!
 //! Forked from v1's btree.rs (variable-length 64-byte names) with the
 //! key shape changed to fixed 32-byte hashes and the leaf-entry shape

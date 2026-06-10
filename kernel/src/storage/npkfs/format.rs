@@ -38,7 +38,7 @@ pub const DISK_MAGIC: [u8; 8] = *b"npkFS\x03\0\0";
 /// pre-mtime disks and surface a clear reinstall message.
 pub const DISK_MAGIC_V2: [u8; 8] = *b"npkFS\x02\0\0";
 
-/// On-disk version field of the v3 superblock.
+/// On-disk format version field of the superblock.
 pub const DISK_VERSION: u32 = 3;
 
 /// B-tree node magic. ASCII "NPK2" little-endian. Unchanged across
@@ -120,7 +120,7 @@ pub struct BTreeNodeHeader {
 
 // ── Superblock ────────────────────────────────────────────────────────
 
-/// 4096-byte v2 superblock. Adds `root_tree_hash` for Step 4 (path
+/// 4096-byte superblock. Adds `root_tree_hash` for Step 4 (path
 /// walker / mutations) — populated 0 in Step 2 since no path layer exists.
 #[derive(Clone, Copy)]
 #[repr(C)]

@@ -1,4 +1,4 @@
-//! v2 path layer — read & mutate via `(root_tree_hash, slash_path)`.
+//! npkFS path layer — read & mutate via `(root_tree_hash, slash_path)`.
 //!
 //! Pure functions over the storage layer: each mutation takes the
 //! current root Tree hash + a path + payload, and returns a NEW root

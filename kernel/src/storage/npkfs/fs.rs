@@ -1,4 +1,4 @@
-//! v2 high-level filesystem API.
+//! High-level filesystem API.
 //!
 //! This is the layer the rest of the kernel talks to: take a `&str`
 //! path, do the right thing, atomically flip the superblock to the
@@ -347,7 +347,7 @@ fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]
     }
 }
 
-/// Mark-and-sweep GC over the v2 object store.
+/// Mark-and-sweep GC over the object store.
 ///
 /// Reachability roots: every valid SB slot's `root_tree_hash`. The 8
 /// rotating slots give us "last 8 commits" snapshots automatically —

@@ -1,7 +1,7 @@
-//! npkFS v3 object format — content-addressed Blob/Tree objects.
+//! npkFS object format — content-addressed Blob/Tree objects.
 //!
 //! Every object is encoded with postcard, hashed with BLAKE3 over the
-//! encoded bytes, and stored under that 32-byte hash in the v2 B-tree.
+//! encoded bytes, and stored under that 32-byte hash in the B-tree.
 //! The hash IS the address; equal content produces equal addresses by
 //! construction.
 //!
@@ -45,7 +45,7 @@ pub enum EntryKind {
 /// `mtime` is UTC seconds since the Unix epoch, captured at write
 /// time from the host RTC. Zero means "unknown" — the RTC was not
 /// readable when this entry was created (early boot, hardware
-/// quirk, …). Field added in npkfs v3; old v2 trees are not
+/// quirk, …). Field added with the mtime schema; older trees are not
 /// readable by this kernel (mount halts with a reinstall message).
 ///
 /// `flags` is a u8 bitmap of per-entry metadata. For `File` entries the
