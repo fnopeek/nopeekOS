@@ -9,7 +9,6 @@
 
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
-use hashbrown::HashMap;
 use spin::{Mutex, Once};
 use super::{ipv4, arp};
 
@@ -196,27 +195,6 @@ static CONNECTIONS: Mutex<[Option<TcpConn>; MAX_CONNECTIONS]> = Mutex::new(
     [const { None }; MAX_CONNECTIONS]
 );
 
-// Connection lookup index: packed 4-tuple → slot in CONNECTIONS. Replaces the
-// per-packet 128-slot linear scan in handle_tcp — each slot is a large TcpConn
-// on its own cache line, so the scan strided ~20 KiB per packet (at ~77k pkt/s
-// during a download that was the dominant per-packet cost). The index keys are
-// 8 bytes, densely packed → an L1-resident O(1) lookup. Kept in sync at every
-// site that creates, destroys, or re-keys a slot. Lock order is always
-// CONNECTIONS → CONN_INDEX (never the reverse) to avoid deadlock.
-static CONN_INDEX: Once<Mutex<HashMap<u64, usize>>> = Once::new();
-
-fn conn_index() -> &'static Mutex<HashMap<u64, usize>> {
-    CONN_INDEX.call_once(|| Mutex::new(HashMap::new()))
-}
-
-/// Pack a connection 4-tuple into the index key. The local IP is fixed (our
-/// single host address), so local_port + remote_ip + remote_port is unique.
-fn conn_key(local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> u64 {
-    ((local_port as u64) << 48)
-        | ((remote_port as u64) << 32)
-        | (u32::from_be_bytes(remote_ip) as u64)
-}
-
 static NEXT_PORT: Mutex<u16> = Mutex::new(49152);
 
 fn alloc_port() -> u16 {
@@ -278,12 +256,6 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
             .or_else(|| conns.iter()
                 .position(|c| matches!(c, Some(x) if x.state == State::Closed)))
             .ok_or(TcpError::TooManyConnections)?;
-        let mut index = conn_index().lock();
-        // Reclaiming a Closed corpse: evict its stale 4-tuple from the index.
-        if let Some(old) = conns[slot].as_ref() {
-            index.remove(&conn_key(old.local_port, old.remote_ip, old.remote_port));
-        }
-        index.insert(conn_key(local_port, remote_ip, remote_port), slot);
         conns[slot] = Some(conn);
         slot
     };
@@ -397,8 +369,6 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     let port = conn.local_port;
-    // Drop the established 4-tuple from the index — back to a bare listener.
-    conn_index().lock().remove(&conn_key(conn.local_port, conn.remote_ip, conn.remote_port));
 
     *conn = TcpConn {
         state: State::Listen,
@@ -585,8 +555,12 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 
     let mut conns = CONNECTIONS.lock();
 
-    // Find matching connection via the 4-tuple index (O(1), was a 128-slot scan).
-    let idx = conn_index().lock().get(&conn_key(dst_port, src_ip, src_port)).copied();
+    // Find matching connection
+    let idx = conns.iter().position(|c| {
+        c.as_ref().map_or(false, |c|
+            c.local_port == dst_port && c.remote_port == src_port && c.remote_ip == src_ip
+        )
+    });
 
     let idx = match idx {
         Some(i) => i,
@@ -615,8 +589,6 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // Scaling is active only if the peer offered it too.
                     conn.wscale_ok = peer_ws.is_some();
                     conn.snd_wscale = peer_ws.unwrap_or(0);
-                    // Listener now has a full 4-tuple — add it to the index.
-                    conn_index().lock().insert(conn_key(dst_port, src_ip, src_port), li);
 
                     // SYN-ACK: MSS, and Window Scale only if the peer asked for it.
                     let opts: &[u8] = if peer_ws.is_some() {
@@ -1004,11 +976,7 @@ fn ack_in_range(una: u32, ack: u32, nxt: u32) -> bool {
 }
 
 fn close_cleanup(handle: usize) {
-    let mut conns = CONNECTIONS.lock();
-    if let Some(c) = conns[handle].as_ref() {
-        conn_index().lock().remove(&conn_key(c.local_port, c.remote_ip, c.remote_port));
-    }
-    conns[handle] = None;
+    CONNECTIONS.lock()[handle] = None;
 }
 
 /// List active connections for netstat display
