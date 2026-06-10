@@ -9,8 +9,8 @@ use super::cache::BlockCache;
 use super::types::{AlignedBlock, BLOCK_SIZE, FsError};
 use super::format::{SuperblockRaw, SUPERBLOCK_SLOTS, SUPERBLOCK_START, DISK_MAGIC, DISK_VERSION, DISK_MAGIC_V2};
 
-/// Read the highest-generation valid v3 superblock from the 8-slot ring.
-/// Returns `Ok(None)` if no slot validates as v3 — caller decides whether
+/// Read the highest-generation valid superblock from the 8-slot ring.
+/// Returns `Ok(None)` if no slot validates — caller decides whether
 /// that means "fresh disk, format it" or "older-version disk, refuse"
 /// (`read_legacy_magic` covers the second case).
 pub fn read_best(cache: &mut BlockCache) -> Result<Option<SuperblockRaw>, FsError> {
