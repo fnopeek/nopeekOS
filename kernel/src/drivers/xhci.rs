@@ -1888,6 +1888,81 @@ pub fn nic_take_stats() -> (u64, u64, u64, u64, u64, u64) {
 
 pub fn nic_attached() -> bool { NIC.lock().is_some() }
 
+/// Read-only scan of EVERY xHCI controller in the system: PCI id, port count,
+/// and each connected/USB3 port's protocol + link state. Finds whether USB-C
+/// SuperSpeed routes through a SEPARATE controller (e.g. a Thunderbolt/Titan
+/// Ridge xHCI we never bring up) — the dongle's USB2 half lands on the PCH xHCI,
+/// but its SS half could be on a controller that's dark. Mem-decode is enabled
+/// so BAR reads work; nothing is reset, halted, or addressed.
+pub fn scan_all_controllers() {
+    let mut n = 0u32;
+    for bus in 0u16..=255 {
+        for dev_num in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
+                let id = pci::read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 { if func == 0 { break; } continue; }
+                let class_reg = pci::read32(addr, 0x08);
+                if ((class_reg >> 24) & 0xFF) == 0x0C
+                    && ((class_reg >> 16) & 0xFF) == 0x03
+                    && ((class_reg >> 8) & 0xFF) == 0x30
+                {
+                    n += 1;
+                    scan_one_controller(addr, (id & 0xFFFF) as u16, ((id >> 16) & 0xFFFF) as u16);
+                }
+                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
+            }
+        }
+    }
+    if n == 0 { kprintln!("[npk] usb: no xHCI controllers found"); }
+    else { kprintln!("[npk] usb: {} xHCI controller(s) total", n); }
+}
+
+fn scan_one_controller(addr: pci::PciAddr, vid: u16, did: u16) {
+    // Thunderbolt/USB4 host xHCIs are the usual hiding place for USB-C SS.
+    let tb = vid == 0x8086 && matches!(did, 0x1574 | 0x15b5 | 0x15b6 | 0x15c1 | 0x15d4
+        | 0x15db | 0x15e8 | 0x15e9 | 0x15ec | 0x15ef | 0x15f0 | 0x1130 | 0x9a13 | 0x9a17);
+    kprintln!("[npk] usb: xHCI {:02x}:{:02x}.{} [{:04x}:{:04x}]{}",
+        addr.bus, addr.device, addr.function, vid, did,
+        if tb { "  <- Thunderbolt/USB4 host" } else { "" });
+
+    let cmd = pci::read16(addr, 0x04);
+    pci::write32(addr, 0x04, (cmd | 0x02) as u32); // enable memory-space decode
+    let bar0_raw = pci::read32(addr, 0x10);
+    let bar0 = if bar0_raw & 0x04 != 0 { pci::read_bar64(addr, 0x10) }
+               else { (bar0_raw & 0xFFFF_FFF0) as u64 };
+    if bar0 == 0 { kprintln!("    BAR0 unassigned (controller off / D3 — SS path likely dark here)"); return; }
+
+    for off in (0..64 * 1024u64).step_by(4096) {
+        match paging::map_page(bar0 + off, bar0 + off,
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
+            Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
+            Err(_) => { kprintln!("    BAR0 map failed"); return; }
+        }
+    }
+
+    let caplength = r8(bar0, CAP_CAPLENGTH) as u64;
+    let hcsparams1 = r32(bar0, CAP_HCSPARAMS1);
+    let max_ports = (hcsparams1 >> 24) & 0xFF;
+    if max_ports == 0 || max_ports > 64 { kprintln!("    ports={} (unreadable — not running)", max_ports); return; }
+    let oper = bar0 + caplength;
+    kprintln!("    ports={}", max_ports);
+    for p in 0..max_ports {
+        let sc = r32(oper, portsc_off(p));
+        let ccs = sc & PORTSC_CCS != 0;
+        let ver = port_usb_version(bar0, p);
+        if !ccs && ver != 3 { continue; } // show every USB3 port even if empty
+        let speed = (sc >> 10) & 0xF;
+        let pls = (sc >> 5) & 0xF;
+        let sname = match speed {
+            SPEED_SUPER => "SuperSpeed", SPEED_HIGH => "High", SPEED_FULL => "Full",
+            SPEED_LOW => "Low", 0 => "-", _ => "?",
+        };
+        kprintln!("    port {} USB{} ccs={} ped={} pls={} speed={}({}) portsc={:#010x}",
+            p + 1, ver, ccs as u8, (sc & PORTSC_PED != 0) as u8, pls, speed, sname, sc);
+    }
+}
+
 /// On-demand re-dump of the NIC controller's root ports + negotiated link speed.
 /// The boot-time scan scrolls past fast; this lets the `nic` command print the
 /// same USB2/USB3 protocol + ccs/speed table whenever asked.
