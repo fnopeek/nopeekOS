@@ -872,7 +872,11 @@ pub fn pump(
         let inj_ns = if lat_n > 0 { (inj_cyc / lat_n) * 1000 / mhz } else { 0 };
         let (p_netdev, p_stack, p_txflush, _p_render, p_pkts) = crate::net::take_poll_prof();
         let ns = |cyc: u64, n: u64| if n > 0 { (cyc / n) * 1000 / mhz } else { 0 };
-        if secs > 0 && (rxp + txp) > 0 {
+        // Per-second microvm net stats — gated OFF (flip to true to re-enable
+        // for throughput/latency debugging). Was spamming the console during
+        // browser/network use.
+        const NETSTAT_DEBUG: bool = false;
+        if NETSTAT_DEBUG && secs > 0 && (rxp + txp) > 0 {
             kprintln!(
                 "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | nat {}/{} (hi {}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",
                 rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
