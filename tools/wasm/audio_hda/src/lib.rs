@@ -181,8 +181,12 @@ fn setup_codec(mmio: i32, cad: u32) -> u32 {
     let w_start = (w >> 16) & 0xFF;
     let w_count = w & 0xFF;
 
-    // Find an output-capable pin that is a line-out/speaker/HP and connected.
+    // Find the best output pin. Prefer the built-in speaker (so a tone is
+    // audible with no cable), then headphone, then line-out. Log every
+    // output-capable pin so the real codec topology is visible on hardware.
     let mut pin = 0u32;
+    let mut pin_pri = 99u32;
+    let mut pin_dev = 0xFFu32;
     let mut pin_fallback = 0u32;
     for nid in w_start..w_start + w_count {
         if widget_type(mmio, cad, nid) != WTYPE_PIN { continue; }
@@ -192,9 +196,16 @@ fn setup_codec(mmio: i32, cad: u32) -> u32 {
         let cfg = codec_cmd(mmio, cad, nid, vget_config_default()).unwrap_or(0);
         let conn = (cfg >> 30) & 0x3; // 1 = no physical connection
         let dev = (cfg >> 20) & 0xF; // 0=LineOut 1=Speaker 2=HPOut
-        if conn != 1 && (dev == 0 || dev == 1 || dev == 2) {
+        loghex("[audio_hda]  out-pin nid=0x", nid);
+        loghex(" dev=0x", dev);
+        loghex(" conn=0x", conn);
+        log("\n");
+        if conn == 1 { continue; } // no physical jack/connection
+        let pri = match dev { 1 => 0, 2 => 1, 0 => 2, _ => continue };
+        if pri < pin_pri {
+            pin_pri = pri;
             pin = nid;
-            break;
+            pin_dev = dev;
         }
     }
     if pin == 0 { pin = pin_fallback; }
@@ -202,7 +213,15 @@ fn setup_codec(mmio: i32, cad: u32) -> u32 {
         log("[audio_hda] no output pin\n");
         return 0;
     }
-    loghex("[audio_hda] output pin nid=0x", pin);
+    let devname = match pin_dev {
+        1 => "speaker",
+        2 => "headphone",
+        0 => "line-out",
+        _ => "(fallback)",
+    };
+    log("[audio_hda] selected output: ");
+    log(devname);
+    loghex(" pin nid=0x", pin);
     log("\n");
 
     let dac = trace_to_dac(mmio, cad, pin);
@@ -266,7 +285,7 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.1.0 — generic HDA driver starting\n");
+    log("[audio_hda] v0.1.1 — generic HDA driver starting\n");
 
     if pci_bind_class(0x04, 0x03) != 0 {
         log("[audio_hda] no HDA controller (class 04:03) — exit\n");
