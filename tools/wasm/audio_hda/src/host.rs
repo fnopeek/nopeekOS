@@ -5,7 +5,6 @@ unsafe extern "C" {
     fn npk_print(ptr: i32, len: i32);
 
     // PCI
-    fn npk_pci_bind(vendor: i32, device: i32) -> i32;
     fn npk_pci_bind_class(class: i32, subclass: i32) -> i32;
     fn npk_pci_enable_bus_master() -> i32;
     fn npk_pci_read_config(offset: i32) -> i32;
@@ -31,9 +30,6 @@ pub fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
 
-pub fn pci_bind(vendor: u16, device: u16) -> i32 {
-    unsafe { npk_pci_bind(vendor as i32, device as i32) }
-}
 pub fn pci_bind_class(class: u8, subclass: u8) -> i32 {
     unsafe { npk_pci_bind_class(class as i32, subclass as i32) }
 }
