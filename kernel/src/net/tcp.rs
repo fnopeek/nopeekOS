@@ -58,30 +58,53 @@ const INITIAL_WINDOW: u16 = 65535;
 // jitter underfills). 8 MiB = ~2× BDP headroom → fill the pipe to ~native.
 const OUR_WSCALE: u8 = 8;
 
-// Advertised-window cap (bytes). Default: the full buffer (no extra cap). A NIC
-// whose real bottleneck is far below gigabit — e.g. a gigabit-wire dongle behind
-// 480-Mbit USB — sets this to ~its bandwidth-delay product so the sender can't
-// ramp an 8 MiB window's worth in flight and blast the chip RX FIFO into
-// overflow (bufferbloat). NOT a link cripple: the wire stays gigabit and
-// throughput stays at the real bottleneck; only the loss-inducing overshoot is
-// removed. Set via set_rx_window_cap() from the active NIC driver.
-static RX_WINDOW_CAP: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(usize::MAX);
-
-/// Set the advertised-window cap (bytes). `usize::MAX` = no cap.
-pub fn set_rx_window_cap(bytes: usize) {
-    RX_WINDOW_CAP.store(bytes, core::sync::atomic::Ordering::Relaxed);
-}
+// Receive-window auto-tuning bounds (Linux DRS-style). The advertised window is
+// NOT a hardcoded per-link value — it self-sizes to the connection's measured
+// bandwidth-delay product (`rcv_wnd_cap`, derived per RTT), floored/ceiled here.
+// MIN keeps a fresh or low-RTT flow moving before the first measurement; MAX is
+// the buffer itself. This is what lets one stack serve USB2-behind-gigabit,
+// native gigabit, and SuperSpeed at any RTT with no clashing magic numbers.
+const RCV_WND_MIN: usize = 256 * 1024;
+const RCV_WND_MAX: usize = RECV_BUF_SIZE;
 
 /// Current receive window for the TCP window field. Scaled by OUR_WSCALE once
 /// window scaling has been negotiated, else the raw free space (≤ 64 KiB).
+/// Bounded by the connection's auto-tuned `rcv_wnd_cap` so the sender's in-flight
+/// stays near BW×RTT instead of ramping the full buffer and overflowing a slow
+/// bottleneck (the rx_missed / death-spiral on the USB dongle).
 fn recv_window(conn: &TcpConn) -> u16 {
-    let cap = RX_WINDOW_CAP.load(core::sync::atomic::Ordering::Relaxed);
-    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(cap);
+    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(conn.rcv_wnd_cap);
     if conn.wscale_ok {
         (free >> OUR_WSCALE).min(65535) as u16
     } else {
         free.min(65535) as u16
+    }
+}
+
+/// Merge [s,e) into the coalesced out-of-order run set (offsets from rcv_irs).
+fn ooo_runs_add(runs: &mut BTreeMap<u32, u32>, s: u32, e: u32) {
+    let mut s = s;
+    let mut e = e;
+    // Absorb a contiguous/overlapping left neighbour (greatest start < s).
+    if let Some((&ls, &le)) = runs.range(..s).next_back() {
+        if le >= s { s = ls; }
+    }
+    // Absorb every run starting within [s, e] (overlap or adjacency).
+    let keys: alloc::vec::Vec<u32> = runs.range(s..=e).map(|(&k, _)| k).collect();
+    for k in keys {
+        if runs[&k] > e { e = runs[&k]; }
+        runs.remove(&k);
+    }
+    runs.insert(s, e);
+}
+
+/// Drop/trim runs now delivered (everything below offset `want`).
+fn ooo_runs_trim(runs: &mut BTreeMap<u32, u32>, want: u32) {
+    let keys: alloc::vec::Vec<u32> =
+        runs.range(..want).filter(|&(_, &e)| e <= want).map(|(&k, _)| k).collect();
+    for k in keys { runs.remove(&k); }
+    if let Some((&ks, &ke)) = runs.range(..want).next_back() {
+        if ke > want { runs.remove(&ks); runs.insert(want, ke); }
     }
 }
 const MAX_RETRIES: u8 = 3;
@@ -187,6 +210,20 @@ struct TcpConn {
     // sender retransmits). Offsets assume < 4 GiB per connection.
     ooo: BTreeMap<u32, Vec<u8>>,
     ooo_bytes: usize,
+    // Coalesced [start,end) runs of `ooo`, kept in sync — so building SACK
+    // blocks is O(runs), not an O(n)-segments full-map scan per ACK (that cost
+    // ~38µs/pkt once a large window let `ooo` reach thousands of entries and
+    // collapsed the pipeline). Advisory: a desync only makes SACK suboptimal,
+    // never corrupts data (the bytes still come from `ooo`).
+    ooo_runs: BTreeMap<u32, u32>,
+    // Receive-window auto-tuning (Linux DRS). `srtt_ticks`: smoothed RTT from the
+    // peer's echoed TSecr. Each RTT we size `rcv_wnd_cap` to ~2× the bytes
+    // delivered that RTT (≈ 2× BW×RTT), so the window tracks the real path
+    // instead of a hardcoded number — works for any link/RTT without clashing.
+    srtt_ticks: u32,
+    rcvtune_bytes: u32,
+    rcvtune_start: u64,
+    rcv_wnd_cap: usize,
 
     // Retransmit
     retries: u8,
@@ -266,6 +303,11 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         recv_buf: VecDeque::new(),
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
+        ooo_runs: BTreeMap::new(),
+        srtt_ticks: 0,
+        rcvtune_bytes: 0,
+        rcvtune_start: 0,
+        rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -347,6 +389,11 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         recv_buf: VecDeque::new(),
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
+        ooo_runs: BTreeMap::new(),
+        srtt_ticks: 0,
+        rcvtune_bytes: 0,
+        rcvtune_start: 0,
+        rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -425,6 +472,11 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         recv_buf: VecDeque::new(),
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
+        ooo_runs: BTreeMap::new(),
+        srtt_ticks: 0,
+        rcvtune_bytes: 0,
+        rcvtune_start: 0,
+        rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -731,6 +783,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // push_back/s at ~700 Mbit). extend reserves once + copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
+                    conn.rcvtune_bytes = conn.rcvtune_bytes.saturating_add(copy as u32);
                     // Gap just filled — pull any now-contiguous segments out of
                     // the reassembly queue. Only the lowest stored offset can be
                     // next; if it doesn't meet rcv_nxt there's still a hole.
@@ -752,11 +805,43 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         let seg = conn.ooo.remove(&k).unwrap();
                         conn.ooo_bytes -= seg.len();
                         conn.rcv_nxt = conn.rcv_nxt.wrapping_add(seg.len() as u32);
+                        conn.rcvtune_bytes = conn.rcvtune_bytes.saturating_add(seg.len() as u32);
                         conn.recv_buf.extend(seg.into_iter());
                         filled = true;
                     }
                     TCP_MAX_RXBUF.fetch_max(conn.recv_buf.len(),
                         core::sync::atomic::Ordering::Relaxed);
+
+                    // Keep the SACK run-set in sync with what's now delivered, then
+                    // run receive-window auto-tuning (DRS): estimate RTT from the
+                    // peer's echoed TSecr and, once a measurement period of data is
+                    // in, size the window to ~2× bytes-per-RTT. No hardcoded value.
+                    let delivered = conn.rcv_nxt.wrapping_sub(conn.rcv_irs);
+                    ooo_runs_trim(&mut conn.ooo_runs, delivered);
+                    if conn.ts_ok {
+                        if let Some(tsecr) = parse_tsecr(data, data_offset) {
+                            if tsecr != 0 {
+                                let sample = (crate::interrupts::ticks() as u32).wrapping_sub(tsecr);
+                                if (1..6000).contains(&sample) {
+                                    conn.srtt_ticks = if conn.srtt_ticks == 0 { sample }
+                                        else { (conn.srtt_ticks * 7 + sample) / 8 };
+                                }
+                            }
+                        }
+                    }
+                    {
+                        let now = crate::interrupts::ticks();
+                        if conn.rcvtune_start == 0 { conn.rcvtune_start = now; }
+                        // Measurement period = the RTT (or 50 ms until one is known).
+                        let period = if conn.srtt_ticks > 0 { conn.srtt_ticks as u64 } else { 5 };
+                        if now.wrapping_sub(conn.rcvtune_start) >= period {
+                            let target = (conn.rcvtune_bytes as usize)
+                                .saturating_mul(2).clamp(RCV_WND_MIN, RCV_WND_MAX);
+                            if target > conn.rcv_wnd_cap { conn.rcv_wnd_cap = target; } // grow-only
+                            conn.rcvtune_bytes = 0;
+                            conn.rcvtune_start = now;
+                        }
+                    }
                     // A filled gap must be ACKed immediately so the sender stops
                     // retransmitting and advances — don't let it sit in coalescing.
                     if filled {
@@ -794,6 +879,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         {
                             conn.ooo_bytes += payload.len();
                             conn.ooo.insert(off, payload.to_vec());
+                            ooo_runs_add(&mut conn.ooo_runs,
+                                off, off.wrapping_add(payload.len() as u32));
                         }
                         let w = recv_window(conn);
                         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
@@ -1019,34 +1106,22 @@ fn parse_sack_permitted(seg: &[u8], data_offset: usize) -> bool {
 /// absolute sequence numbers. Returns bytes written (0 if nothing to report).
 /// First block = the highest run (most recently relevant), per RFC 2018.
 fn build_sack_blocks(conn: &TcpConn, out: &mut [u8]) -> usize {
-    if !conn.sack_ok || conn.ooo.is_empty() { return 0; }
-    // Collapse the per-segment map into contiguous runs (offsets from rcv_irs).
-    let mut runs: [(u32, u32); 8] = [(0, 0); 8];
-    let mut n = 0usize;
-    let mut cur: Option<(u32, u32)> = None;
-    for (&off, seg) in conn.ooo.iter() {
-        let (s, e) = (off, off.wrapping_add(seg.len() as u32));
-        match cur {
-            None => cur = Some((s, e)),
-            Some((cs, ce)) if s == ce => cur = Some((cs, e)), // contiguous
-            Some(run) => { if n < runs.len() { runs[n] = run; n += 1; } cur = Some((s, e)); }
-        }
-    }
-    if let Some(run) = cur { if n < runs.len() { runs[n] = run; n += 1; } }
-    if n == 0 { return 0; }
-
-    // Emit the LAST (highest) up-to-3 runs, highest first.
-    let take = n.min(3);
+    if !conn.sack_ok || conn.ooo_runs.is_empty() { return 0; }
+    // `ooo_runs` is already coalesced, so this is O(runs) — no per-ACK scan of
+    // the whole segment map. Emit the highest up-to-3 runs, highest first
+    // (RFC 2018 §4: the most recently received block goes first).
     out[0] = 5;                       // SACK option kind
-    out[1] = (2 + 8 * take) as u8;    // length
     let mut p = 2;
-    for k in 0..take {
-        let (s, e) = runs[n - 1 - k];
+    let mut take = 0usize;
+    for (&s, &e) in conn.ooo_runs.iter().rev().take(3) {
         let l = conn.rcv_irs.wrapping_add(s);
         let r = conn.rcv_irs.wrapping_add(e);
         out[p..p + 4].copy_from_slice(&l.to_be_bytes()); p += 4;
         out[p..p + 4].copy_from_slice(&r.to_be_bytes()); p += 4;
+        take += 1;
     }
+    if take == 0 { return 0; }
+    out[1] = (2 + 8 * take) as u8;    // length
     p
 }
 
@@ -1087,6 +1162,31 @@ fn parse_ts(seg: &[u8], data_offset: usize) -> Option<u32> {
                 if kind == 8 && len == 10 && i + 6 <= end {
                     return Some(u32::from_be_bytes(
                         [seg[i + 2], seg[i + 3], seg[i + 4], seg[i + 5]]));
+                }
+                i += len;
+            }
+        }
+    }
+    None
+}
+
+/// Scan for the Timestamp option (kind 8) and return TSecr — the peer's echo of
+/// OUR most recent TSval. Since our TSval is `ticks()`, `ticks() - TSecr` is a
+/// receiver-measured RTT (used for window auto-tuning).
+fn parse_tsecr(seg: &[u8], data_offset: usize) -> Option<u32> {
+    let end = data_offset.min(seg.len());
+    let mut i = HEADER_LEN;
+    while i < end {
+        match seg[i] {
+            0 => break,
+            1 => i += 1,
+            kind => {
+                if i + 1 >= end { break; }
+                let len = seg[i + 1] as usize;
+                if len < 2 { break; }
+                if kind == 8 && len == 10 && i + 10 <= end {
+                    return Some(u32::from_be_bytes(
+                        [seg[i + 6], seg[i + 7], seg[i + 8], seg[i + 9]]));
                 }
                 i += len;
             }
