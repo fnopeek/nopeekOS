@@ -1660,6 +1660,17 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "beep" | "test-audio" => {
             intent_beep(args);
         }
+        "volume" | "vol" => {
+            let a = args.trim();
+            if a.is_empty() {
+                kprintln!("volume: {}%", crate::audio::get_volume());
+            } else if let Ok(n) = a.parse::<u32>() {
+                crate::audio::set_volume(n.min(100) as u8);
+                kprintln!("volume: {}%", crate::audio::get_volume());
+            } else {
+                kprintln!("volume: usage: volume [0-100]");
+            }
+        }
         "dmesg" | "bootlog" => {
             system::intent_dmesg();
         }

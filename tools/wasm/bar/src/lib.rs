@@ -32,6 +32,8 @@ unsafe extern "C" {
     fn npk_battery() -> i32;
     fn npk_workspace_switch(n: i32) -> i32;
     fn npk_power() -> i32;
+    fn npk_audio_get_volume() -> i32;
+    fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
@@ -49,6 +51,9 @@ const BEHAVIOR_STRUT: i32 = 1;
 const WS_BASE: u32 = 1;        // workspace i → WS_BASE + i
 const POWER: u32 = 90_000;
 const SHOT: u32  = 90_001;     // screenshot: left-click = region, right = full
+const VOL_DOWN: u32 = 90_002;
+const VOL_UP: u32   = 90_003;
+const MUTE: u32     = 90_004;
 
 const ICON_SIZE: u16 = 24;
 
@@ -114,7 +119,7 @@ fn default_segments() -> Segments {
     Segments {
         left:   ["workspaces", "title"].iter().map(|s| s.to_string()).collect(),
         center: ["clock"].iter().map(|s| s.to_string()).collect(),
-        right:  ["battery", "tray", "screenshot", "gap", "power"].iter().map(|s| s.to_string()).collect(),
+        right:  ["volume", "battery", "tray", "screenshot", "gap", "power"].iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -155,8 +160,12 @@ static mut LAST_LEN: usize = usize::MAX;
 static mut BAT: i32 = -1;
 static mut LAST_BAT: i32 = i32::MIN;
 static mut BAT_TICK: u32 = 0;
+// Master volume (0..=100), polled each tick (cheap atomic). i32::MIN = unread.
+static mut VOL: i32 = 80;
+static mut LAST_VOL: i32 = i32::MIN;
+static mut PRE_MUTE: i32 = 50; // level restored on un-mute
 
-struct BarState<'a> { clock: &'a str, ws_count: u8, ws_active: u8, title: &'a str, bat: i32 }
+struct BarState<'a> { clock: &'a str, ws_count: u8, ws_active: u8, title: &'a str, bat: i32, vol: u8 }
 
 fn parse_state(s: &str) -> BarState<'_> {
     let mut it = s.splitn(4, '\n');
@@ -164,7 +173,7 @@ fn parse_state(s: &str) -> BarState<'_> {
     let ws_count = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
     let ws_active = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
     let title = it.next().unwrap_or("");
-    BarState { clock, ws_count, ws_active, title, bat: -1 }
+    BarState { clock, ws_count, ws_active, title, bat: -1, vol: 0 }
 }
 
 // ── Segment → widgets ────────────────────────────────────────────────
@@ -296,6 +305,24 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 Modifier::OnClick(ActionId(POWER)),
             ],
         }],
+        // Volume: speaker icon (level / mute) toggles mute; minus/plus step by
+        // 10. Reflects the kernel master volume (also moved by `volume`/apps).
+        "volume" => {
+            let v = st.vol;
+            let icon = if v == 0 { IconId::SpeakerX }
+                       else if v <= 50 { IconId::SpeakerLow }
+                       else { IconId::SpeakerHigh };
+            alloc::vec![
+                Widget::Icon { id: icon, size: ICON_SIZE,
+                    modifiers: alloc::vec![Modifier::OnClick(ActionId(MUTE))] },
+                Widget::Icon { id: IconId::Minus, size: ICON_SIZE,
+                    modifiers: alloc::vec![Modifier::OnClick(ActionId(VOL_DOWN))] },
+                Widget::Text { content: alloc::format!(" {}% ", v),
+                    style: TextStyle::Body, modifiers: Vec::new() },
+                Widget::Icon { id: IconId::Plus, size: ICON_SIZE,
+                    modifiers: alloc::vec![Modifier::OnClick(ActionId(VOL_UP))] },
+            ]
+        }
         _ => Vec::new(),
     }
 }
@@ -374,6 +401,7 @@ fn state_changed() -> Option<usize> {
     let bat = unsafe {
         if BAT_TICK == 0 { BAT_TICK = 16; npk_battery() } else { BAT_TICK -= 1; LAST_BAT }
     };
+    let vol = unsafe { npk_audio_get_volume() };
     let cur = unsafe { core::slice::from_raw_parts(p as *const u8, n) };
     let last = unsafe {
         let lp = core::ptr::addr_of!(LAST_BUF) as *const u8;
@@ -381,13 +409,16 @@ fn state_changed() -> Option<usize> {
         if ll == usize::MAX { None } else { Some(core::slice::from_raw_parts(lp, ll)) }
     };
     let bat_same = bat == unsafe { LAST_BAT };
-    if last == Some(cur) && bat_same { return None; }
+    let vol_same = vol == unsafe { LAST_VOL };
+    if last == Some(cur) && bat_same && vol_same { return None; }
     unsafe {
         let lp = core::ptr::addr_of_mut!(LAST_BUF) as *mut u8;
         core::ptr::copy_nonoverlapping(p, lp, n);
         LAST_LEN = n;
         LAST_BAT = bat;
         BAT = bat;
+        LAST_VOL = vol;
+        VOL = vol;
     }
     Some(n)
 }
@@ -401,6 +432,7 @@ fn rebuild_and_commit(seg: &Segments, len: usize) {
     };
     let mut st = parse_state(s);
     st.bat = unsafe { BAT };
+    st.vol = unsafe { VOL as u8 };
     let tree = build_tree(seg, &st);
     match wire::encode(&tree) {
         Ok(bytes) => { if commit(&bytes) < 0 { log("[bar] commit failed"); } }
@@ -424,6 +456,19 @@ fn handle(ev: Event) {
                 launch("snap", "region");
             } else if id == POWER {
                 unsafe { let _ = npk_power(); }
+            } else if id == VOL_DOWN {
+                let v = unsafe { npk_audio_get_volume() };
+                unsafe { let _ = npk_audio_set_volume((v - 10).max(0)); }
+            } else if id == VOL_UP {
+                let v = unsafe { npk_audio_get_volume() };
+                unsafe { let _ = npk_audio_set_volume((v + 10).min(100)); }
+            } else if id == MUTE {
+                let v = unsafe { npk_audio_get_volume() };
+                if v > 0 {
+                    unsafe { PRE_MUTE = v; let _ = npk_audio_set_volume(0); }
+                } else {
+                    unsafe { let _ = npk_audio_set_volume(PRE_MUTE.max(10)); }
+                }
             } else if id >= WS_BASE && id < POWER {
                 unsafe { let _ = npk_workspace_switch((id - WS_BASE) as i32); }
             }
