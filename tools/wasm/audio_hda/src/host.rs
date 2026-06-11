@@ -24,6 +24,14 @@ unsafe extern "C" {
 
     fn npk_memory_fence() -> i32;
     fn npk_sleep(ms: i32) -> i32;
+
+    // Audio mailbox (driver side): pull a mixed S16/48k/stereo buffer.
+    fn npk_audio_poll_mix(ptr: i32, max: i32) -> i32;
+}
+
+pub fn audio_poll_mix(buf: &mut [u8]) -> usize {
+    let n = unsafe { npk_audio_poll_mix(buf.as_mut_ptr() as i32, buf.len() as i32) };
+    if n > 0 { n as usize } else { 0 }
 }
 
 pub fn log(s: &str) {

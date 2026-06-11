@@ -42,6 +42,7 @@ pub use gui::{theme, layers};
 mod interrupts;
 mod input;
 mod net;
+mod audio;
 mod intent;
 mod config;
 mod vga;
