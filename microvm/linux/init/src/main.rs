@@ -233,7 +233,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  sleep 1; \
                  echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
                  MOZ_LOG_FILE=/tmp/moz.log \
-                 MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3' \
+                 MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3,cubeb:5' \
                  cage -- librewolf --no-remote --profile /tmp/moz \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \

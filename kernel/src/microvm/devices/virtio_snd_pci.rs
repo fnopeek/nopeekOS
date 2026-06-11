@@ -30,8 +30,12 @@ pub const BAR0_BASE: u64 = 0xFE01_8000;
 pub const BAR0_SIZE: u64 = 0x4000;
 const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 
-/// IRQ line (8259). 5/6/9/10/11/12 are taken (sqfs/9p/gpu/net/blk/input).
-const IRQ_LINE: u8 = 8;
+/// IRQ line. SHARES virtio-net's IRQ 10 (PCI INTx is shareable; the guest
+/// demuxes via each device's ISR). IRQ 8 was the legacy RTC line — under
+/// `acpi=off` the guest's rtc_cmos claims it, so our tx-completion IRQs were
+/// not delivered and cubeb stalled after one period. IRQ 10 delivers reliably
+/// (constant network traffic), so this rules out IRQ delivery as the cause.
+const IRQ_LINE: u8 = 10;
 
 const CAP_COMMON_OFF: u8 = 0x40;
 const CAP_NOTIFY_OFF: u8 = 0x54;
@@ -394,7 +398,7 @@ impl VirtioSnd {
             last = last.wrapping_add(1);
             any = true;
             let n = SND_TX_BUFS.fetch_add(1, Ordering::Relaxed);
-            if n == 0 || n % 200 == 0 {
+            if n < 10 || n % 200 == 0 {
                 kprintln!("[snd] tx buf #{} ({} bytes, mailbox free {})", n + 1, pcm_len, cap);
             }
         }
