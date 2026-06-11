@@ -165,6 +165,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run 2>/dev/null; \
+                 mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null; \
                  mkdir -p /run/udev; \
                  udevd --daemon 2>/dev/null; \
                  udevadm trigger --type=devices --action=add 2>/dev/null; \
@@ -229,7 +230,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
-                 MOZ_ENABLE_WAYLAND=1; \
+                 MOZ_ENABLE_WAYLAND=1 \
+                 MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
                  sleep 1; \
