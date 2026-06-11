@@ -128,6 +128,11 @@ pub enum IconId {
     BatteryCharging   = 35,
     BatteryWarning    = 36,
     Plug              = 37,
+    SpeakerHigh       = 38,
+    SpeakerLow        = 39,
+    SpeakerX          = 40,
+    Minus             = 41,
+    Plus              = 42,
     // Appended only.
 }
 
