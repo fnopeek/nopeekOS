@@ -111,6 +111,7 @@ fn do_http_request(args: &str, use_tls: bool) {
                 if crate::xhci::nic_attached() {
                     kprintln!("[npk] NIC USB link: {}", crate::xhci::nic_link_speed_str());
                     crate::drivers::rtl8153::log_link_diag();
+                    crate::drivers::rtl8153::tally_reset(); // zero chip stats for this run
                 }
             }
             None
@@ -207,6 +208,7 @@ fn do_http_request(args: &str, use_tls: bool) {
         let secs10 = dt * 10 / 100;
         kprintln!("[npk] done: {} KiB in {}.{} s = ~{} Mbit/s (~{} MB/s)",
             total / 1024, secs10 / 10, secs10 % 10, mbps, mbytes_s);
+        if crate::xhci::nic_attached() { crate::drivers::rtl8153::dump_tally("after"); }
         if let Some((store_path, w)) = writer {
             match w.finish() {
                 Ok(written) => kprintln!("[npk] Stored '{}' ({} bytes)", store_path, written),

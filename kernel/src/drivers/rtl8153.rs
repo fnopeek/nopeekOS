@@ -43,6 +43,9 @@ const PLA_WDT6_CTRL: u16 = 0xe428;
 const PLA_TCR0: u16 = 0xe610;
 const PLA_MTPS: u16 = 0xe615;
 const PLA_TXFIFO_CTRL: u16 = 0xe618;
+const PLA_RSTTALLY: u16 = 0xe800;   // tally-counter reset
+const PLA_TALLYCNT: u16 = 0xe890;   // hardware stats block (struct tally_counter)
+const TALLY_RESET: u16 = 0x0001;
 const PLA_PHYSTATUS: u16 = 0xe908;  // negotiated link speed/duplex (r8152)
 const PLA_CR: u16 = 0xe813;
 const PLA_CRWECR: u16 = 0xe81c;
@@ -552,6 +555,34 @@ static RX_DISCARD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 pub fn take_rx_parse_stats() -> (u64, u64, u64) {
     use core::sync::atomic::Ordering::Relaxed;
     (RX_FRAMES.swap(0, Relaxed), RX_TRUNC.swap(0, Relaxed), RX_DISCARD.swap(0, Relaxed))
+}
+
+/// Zero the chip's hardware tally counters (PLA_RSTTALLY |= TALLY_RESET) so a
+/// following download measures only its own RX FIFO overflow / error counts.
+pub fn tally_reset() {
+    if !is_available() { return; }
+    set_bits16(MCU_PLA, PLA_RSTTALLY, TALLY_RESET);
+}
+
+/// Read + print the chip's hardware tally counters. `rx_missed` is the RX FIFO
+/// overflow drop count straight from the silicon — the definitive answer to
+/// whether the gigabit-wire→USB2-pipe mismatch is overflowing the chip (i.e.
+/// flow control is not throttling the switch) vs. loss happening elsewhere.
+pub fn dump_tally(label: &str) {
+    if !is_available() { return; }
+    let mut b = [0u8; 64];
+    if !get_regs(PLA_TALLYCNT, MCU_PLA, &mut b) {
+        crate::kprintln!("[npk] rtl8153 tally[{}]: read failed", label);
+        return;
+    }
+    let rx_packets = u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+    let rx_errors = u32::from_le_bytes([b[24], b[25], b[26], b[27]]);
+    let rx_missed = u16::from_le_bytes([b[28], b[29]]);     // RX FIFO overflow drops
+    let align_errors = u16::from_le_bytes([b[30], b[31]]);
+    let tx_underrun = u16::from_le_bytes([b[62], b[63]]);
+    crate::kprintln!(
+        "[npk] rtl8153 tally[{}]: rx_pkts={} rx_missed(FIFO-overflow)={} rx_errors={} align={} tx_underrun={}",
+        label, rx_packets, rx_missed, rx_errors, align_errors, tx_underrun);
 }
 
 /// Dump the PHY link registers raw + derived speed. PLA_PHYSTATUS is the chip's
