@@ -540,20 +540,10 @@ pub fn init() -> bool {
         log_link_diag();
     }
     crate::kprintln!("[npk] rtl8153: link {}", if up { "up" } else { "down (no cable?)" });
-
-    // Size the host TCP receive window to this link's real bottleneck. A gigabit
-    // wire behind USB (≤ ~480 Mbit HS) caps real throughput at ~200-300 Mbit; an
-    // 8 MiB window lets the sender ramp far past that and blast the chip RX FIFO
-    // into overflow (the rx_missed loss / death-spiral). 1 MiB is the measured
-    // sweet spot (~157 Mbit clean, ooo≈0): it keeps in-flight near the bottleneck
-    // so a loss leaves only a small ahead-queue, which SACK recovers in ~2µs/pkt.
-    // 2 MiB tested WORSE (106 Mbit): a bigger window lets ooo balloon to ~18k
-    // segments and our O(n) ooo/SACK reassembly then costs ~38µs/pkt, collapsing
-    // the pipeline. Raising this further needs O(log n) ooo handling first.
-    // SuperSpeed, if ever negotiated, has the headroom and keeps the full window.
-    if crate::xhci::nic_speed_class() < 2 {
-        crate::net::tcp::set_rx_window_cap(1024 * 1024);
-    }
+    // No hardcoded receive-window cap here any more: the host TCP stack now
+    // auto-tunes the window to each connection's measured BW×RTT (Linux DRS),
+    // which self-sizes for this USB-behind-gigabit link AND for native gigabit /
+    // SuperSpeed without a per-link magic number that would clash.
     true
 }
 
