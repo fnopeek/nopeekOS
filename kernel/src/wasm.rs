@@ -1532,6 +1532,67 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // ── Audio mailbox + mixer ────────────────────────────────────────────
+    // Apps push PCM (S16LE / 48 kHz / stereo) into per-slot rings; the HDA
+    // driver pulls a mixed stream via npk_audio_poll_mix. Ungated: audio
+    // playback is not a security boundary, and the kernel holds no HDA
+    // knowledge — it just shuttles + sum-mixes bytes.
+
+    // npk_audio_open() -> slot index, or -1 if no slot free.
+    linker.func_wrap("env", "npk_audio_open",
+        |_caller: Caller<'_, HostState>| -> i32 { crate::audio::open() },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_audio_close(slot) -> 0.
+    linker.func_wrap("env", "npk_audio_close",
+        |_caller: Caller<'_, HostState>, slot: i32| -> i32 {
+            if slot >= 0 { crate::audio::close(slot as usize); }
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_audio_submit(slot, ptr, len) -> bytes accepted, or -1 on bad args.
+    linker.func_wrap("env", "npk_audio_submit",
+        |caller: Caller<'_, HostState>, slot: i32, ptr: i32, len: i32| -> i32 {
+            if slot < 0 || ptr < 0 || len < 0 { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let (start, end) = (ptr as usize, ptr as usize + len as usize);
+            if end > data.len() { return -1; }
+            crate::audio::submit(slot as usize, &data[start..end]) as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_audio_poll_mix(ptr, max) -> bytes written (driver side).
+    linker.func_wrap("env", "npk_audio_poll_mix",
+        |mut caller: Caller<'_, HostState>, ptr: i32, max: i32| -> i32 {
+            if ptr < 0 || max < 0 { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let (start, end) = (ptr as usize, ptr as usize + max as usize);
+            if end > data.len() { return -1; }
+            crate::audio::poll_mix(&mut data[start..end]) as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_audio_set_volume(pct) -> 0; npk_audio_get_volume() -> 0..=100.
+    linker.func_wrap("env", "npk_audio_set_volume",
+        |_caller: Caller<'_, HostState>, pct: i32| -> i32 {
+            if pct < 0 { return -1; }
+            crate::audio::set_volume(pct.min(100) as u8);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+    linker.func_wrap("env", "npk_audio_get_volume",
+        |_caller: Caller<'_, HostState>| -> i32 { crate::audio::get_volume() as i32 },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_workspace_switch(n) -> i32 — switch to workspace n (bar clicks).
     linker.func_wrap("env", "npk_workspace_switch",
         |caller: Caller<'_, HostState>, n: i32| -> i32 {

@@ -1351,6 +1351,40 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     }
 }
 
+/// Integer parabolic sine: `x` is a full-circle phase (0..65536), `amp` the
+/// peak amplitude. No FPU use, so it is safe to call from kernel context.
+fn isin_fixed(x: u16, amp: i64) -> i16 {
+    const HALF: u32 = 1 << 15; // 32768 = pi
+    let xi = x as u32;
+    let (sign, t) = if xi < HALF { (1i64, xi) } else { (-1i64, xi - HALF) };
+    let prod = (t as u64) * ((HALF - t) as u64); // <= 2^28, peak at t = 16384
+    (((prod as i64) * amp >> 28) * sign) as i16
+}
+
+/// `beep [hz]` — play a short test tone through the audio mailbox → HDA driver
+/// → speaker. Proves the app → mailbox → driver → hardware path (M2). Needs
+/// `audio_hda` running (autostart) to be audible.
+fn intent_beep(args: &str) {
+    const SR: u32 = 48000;
+    const MS: u32 = 150;
+    let hz: u32 = args.trim().parse().unwrap_or(440).clamp(50, 12000);
+    let frames = (SR * MS / 1000) as usize;
+    let step = ((65536u32 * hz / SR) as u16).max(1);
+    let mut buf = alloc::vec::Vec::with_capacity(frames * crate::audio::BYTES_PER_FRAME);
+    let mut phase: u16 = 0;
+    for _ in 0..frames {
+        let s = isin_fixed(phase, 6000).to_le_bytes();
+        buf.push(s[0]); buf.push(s[1]); // left
+        buf.push(s[0]); buf.push(s[1]); // right
+        phase = phase.wrapping_add(step);
+    }
+    if crate::audio::play_oneshot(&buf) {
+        kprintln!("beep {} Hz", hz);
+    } else {
+        kprintln!("beep: no free audio slot (is audio_hda running?)");
+    }
+}
+
 fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
     if input.is_empty() { return; }
 
@@ -1622,6 +1656,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "mouse" => {
             system::intent_mouse(args);
+        }
+        "beep" | "test-audio" => {
+            intent_beep(args);
         }
         "dmesg" | "bootlog" => {
             system::intent_dmesg();

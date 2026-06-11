@@ -33,46 +33,17 @@ static NPK_CAPS: [u8; 1] = [0x04];
 
 // ── audio buffer geometry ───────────────────────────────────────────────
 // 480 Hz tone @ 48 kHz = exactly 100 samples/period -> a clean cyclic loop.
-const SAMPLE_RATE: usize = 48000;
-const TONE_HZ: usize = 480;
-const PERIOD: usize = SAMPLE_RATE / TONE_HZ; // 100 frames
-const FRAMES: usize = 4800; // 0.1 s, 48 whole periods
-const BYTES_PER_FRAME: usize = 4; // S16 stereo
-const AUDIO_BYTES: usize = FRAMES * BYTES_PER_FRAME; // 19200
-const AMPLITUDE: f64 = 5000.0; // of 32767 (~ -16 dBFS, comfortable test level)
+// HDA playback ring: two ping-pong halves fed from the kernel audio mailbox.
+// The DMA cycles the ring; each tick we keep the half it is NOT currently
+// playing filled with freshly mixed PCM (silence when no app is playing).
+const HALF_FRAMES: usize = 2048; // ~43 ms per half @ 48 kHz
+const HALF_BYTES: usize = HALF_FRAMES * 4; // S16 stereo
+const RING_BYTES: usize = HALF_BYTES * 2;
 
 const STREAM_TAG: u32 = 1;
 
-static mut AUDIO: [u8; AUDIO_BYTES] = [0; AUDIO_BYTES];
-static mut SINE: [i16; PERIOD] = [0; PERIOD];
-
-// ── 7th-order Taylor sine (no libm in no_std; wasm has hardware f64) ──────
-fn sinf(x: f64) -> f64 {
-    let x2 = x * x;
-    x * (1.0 - x2 * (1.0 / 6.0 - x2 * (1.0 / 120.0 - x2 * (1.0 / 5040.0))))
-}
-
-fn build_tone() {
-    const PI: f64 = 3.14159265358979;
-    let sine = core::ptr::addr_of_mut!(SINE);
-    for j in 0..PERIOD {
-        let arg = 2.0 * PI * (j as f64) / (PERIOD as f64); // [0, 2pi)
-        let a = if arg > PI { arg - 2.0 * PI } else { arg }; // reduce to [-pi, pi]
-        let v = (sinf(a) * AMPLITUDE) as i16;
-        unsafe { (*sine)[j] = v };
-    }
-    let audio = core::ptr::addr_of_mut!(AUDIO);
-    for i in 0..FRAMES {
-        let v = unsafe { (*sine)[i % PERIOD] }.to_le_bytes();
-        let o = i * BYTES_PER_FRAME;
-        unsafe {
-            (*audio)[o] = v[0];
-            (*audio)[o + 1] = v[1]; // left
-            (*audio)[o + 2] = v[0];
-            (*audio)[o + 3] = v[1]; // right
-        }
-    }
-}
+// Scratch buffer for one mailbox poll -> one ring half.
+static mut MIXBUF: [u8; HALF_BYTES] = [0; HALF_BYTES];
 
 // ── small hex/dec logging helpers (no alloc) ──────────────────────────────
 fn loghex(prefix: &str, v: u32) {
@@ -286,7 +257,7 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.1.5 — generic HDA driver starting\n");
+    log("[audio_hda] v0.2.0 — generic HDA driver (mailbox streaming) starting\n");
 
     // Bind the HDA controller by PCI class — hardware-independent, no
     // vendor:device hardcode. Intel cAVS controllers report subclass 0x01
@@ -343,52 +314,59 @@ pub extern "C" fn _start() {
         return;
     }
 
-    // ── build the tone + DMA buffers ──────────────────────────────────────
-    build_tone();
-    let audio = dma_alloc(((AUDIO_BYTES + 4095) / 4096) as u16);
+    // ── DMA: the playback ring (zeroed by the kernel = silence) + its BDL ──
+    let audio = dma_alloc(((RING_BYTES + 4095) / 4096) as u16);
     let bdl = dma_alloc(1);
     if audio < 0 || bdl < 0 {
         log("[audio_hda] DMA alloc failed — exit\n");
         return;
     }
     let audio_phys = dma_phys(audio);
-    dma_write(audio, 0, unsafe { &*core::ptr::addr_of!(AUDIO) });
 
-    // BDL: two equal cyclic entries (HDA wants >= 2; LVI = entries-1).
-    let half = (AUDIO_BYTES / 2) as u32;
+    // BDL: two equal cyclic halves (HDA wants >= 2; LVI = entries-1).
+    let half = HALF_BYTES as u32;
     let mut bdl_buf = [0u8; 32];
     let mk = |buf: &mut [u8], i: usize, addr: u64, len: u32| {
         buf[i..i + 8].copy_from_slice(&addr.to_le_bytes());
         buf[i + 8..i + 12].copy_from_slice(&len.to_le_bytes());
-        buf[i + 12..i + 16].copy_from_slice(&1u32.to_le_bytes()); // IOC
+        buf[i + 12..i + 16].copy_from_slice(&1u32.to_le_bytes()); // IOC (unused: we poll)
     };
     mk(&mut bdl_buf, 0, audio_phys, half);
     mk(&mut bdl_buf, 16, audio_phys + half as u64, half);
     dma_write(bdl, 0, &bdl_buf);
     let bdl_phys = dma_phys(bdl);
 
-    // ── program the output stream descriptor ──────────────────────────────
+    // ── program + start the output stream descriptor ──────────────────────
     let base = SD_BASE + iss * SD_STRIDE; // first output stream
     reset_stream(mmio, base);
     mmio_w32(mmio, base + SD_BDLPL, (bdl_phys & 0xFFFF_FFFF) as u32);
     mmio_w32(mmio, base + SD_BDLPU, (bdl_phys >> 32) as u32);
-    mmio_w32(mmio, base + SD_CBL, AUDIO_BYTES as u32);
+    mmio_w32(mmio, base + SD_CBL, RING_BYTES as u32);
     mmio_w16(mmio, base + SD_LVI, 1);
     mmio_w16(mmio, base + SD_FORMAT, FMT_48K_S16_STEREO);
     fence();
-    // Stream tag + RUN.
     mmio_w32(mmio, base + SD_CTL, (STREAM_TAG << SD_CTL_STRM_SHIFT) | SD_CTL_RUN);
     fence();
 
-    log("[audio_hda] stream running — playing ~3s test tone\n");
-    sleep_ms(3000);
+    log("[audio_hda] streaming from audio mailbox\n");
 
-    // Stop cleanly and exit. A resident endless loop here would (a) keep the
-    // worker core busy (blocking other loop windows) and (b) leave the HDA
-    // RUN bit set, so the controller keeps DMAing the buffer even after the
-    // kernel reclaims it on exit -> endless tone that only a reboot clears.
-    // Clearing RUN stops the stream BEFORE we return.
-    mmio_w32(mmio, base + SD_CTL, 0);
-    fence();
-    log("[audio_hda] tone stopped — exit\n");
+    // Streaming loop: keep the half the DMA is NOT playing filled from the
+    // kernel mixer. poll_mix always returns a full buffer (silence when idle),
+    // so the speaker stays fed and the driver is silent until an app plays.
+    // (Resident service — belongs in autostart, not a `run` window.)
+    let mut last_filled: usize = 2; // neither half yet
+    loop {
+        let pos = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
+        let playing = if pos < HALF_BYTES { 0 } else { 1 };
+        let fill = 1 - playing;
+        if fill != last_filled {
+            let mix = unsafe { &mut *core::ptr::addr_of_mut!(MIXBUF) };
+            audio_poll_mix(mix);
+            dma_write(audio, (fill * HALF_BYTES) as u32, unsafe {
+                &*core::ptr::addr_of!(MIXBUF)
+            });
+            last_filled = fill;
+        }
+        sleep_ms(8);
+    }
 }
