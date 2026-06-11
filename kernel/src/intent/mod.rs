@@ -1680,6 +1680,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 }
             }
         }
+        "usb" => {
+            if require_cap(vault, &session, Rights::READ, "usb") {
+                crate::xhci::scan_all_controllers();
+            }
+        }
 
         "dhcp" => {
             if require_cap(vault, &session, Rights::WRITE, "dhcp") {
