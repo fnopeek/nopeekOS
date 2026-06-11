@@ -58,22 +58,39 @@ const INITIAL_WINDOW: u16 = 65535;
 // jitter underfills). 8 MiB = ~2× BDP headroom → fill the pipe to ~native.
 const OUR_WSCALE: u8 = 8;
 
-// Receive-window auto-tuning bounds (Linux DRS-style). The advertised window is
-// NOT a hardcoded per-link value — it self-sizes to the connection's measured
-// bandwidth-delay product (`rcv_wnd_cap`, derived per RTT), floored/ceiled here.
-// MIN keeps a fresh or low-RTT flow moving before the first measurement; MAX is
-// the buffer itself. This is what lets one stack serve USB2-behind-gigabit,
-// native gigabit, and SuperSpeed at any RTT with no clashing magic numbers.
 const RCV_WND_MIN: usize = 256 * 1024;
 const RCV_WND_MAX: usize = RECV_BUF_SIZE;
 
-/// Current receive window for the TCP window field. Scaled by OUR_WSCALE once
-/// window scaling has been negotiated, else the raw free space (≤ 64 KiB).
-/// Bounded by the connection's auto-tuned `rcv_wnd_cap` so the sender's in-flight
-/// stays near BW×RTT instead of ramping the full buffer and overflowing a slow
-/// bottleneck (the rx_missed / death-spiral on the USB dongle).
+// Link receive-capacity hint (bytes/sec) declared by the active NIC driver.
+// Default u32::MAX = uncapped (full buffer window) — native gigabit, SuperSpeed,
+// virtio. A link whose clean sustainable TCP rate is far below the buffer's
+// implied window — a gigabit-wire dongle behind 480-Mbit USB — sets this to that
+// rate, and the receive window is then `rate × measured RTT` (= BDP). Scaling by
+// RTT keeps the offered RATE constant near and far, so it's not URL/RTT-tuned;
+// the constant is the link CLASS's capacity (a hardware property), and it only
+// applies to the NIC that sets it — so it can't clash with faster links.
+static LINK_RX_RATE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// Declare the active link's clean RX capacity in bytes/sec (u32::MAX = uncapped).
+pub fn set_link_rx_rate(bytes_per_sec: u32) {
+    LINK_RX_RATE.store(bytes_per_sec, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Advertised receive window = min(free buffer, BDP) where BDP = link capacity ×
+/// smoothed RTT (50 ms assumed until the first TSecr-derived RTT). Keeps the
+/// sender's in-flight near the bandwidth-delay product instead of ramping the
+/// whole buffer and overflowing a slow bottleneck — without a per-link constant.
 fn recv_window(conn: &TcpConn) -> u16 {
-    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(conn.rcv_wnd_cap);
+    let rate = LINK_RX_RATE.load(core::sync::atomic::Ordering::Relaxed);
+    let cap = if rate == u32::MAX {
+        RCV_WND_MAX
+    } else {
+        let rtt_ticks = if conn.srtt_ticks > 0 { conn.srtt_ticks as u64 } else { 5 };
+        // bytes/sec × ticks ÷ 100 Hz = bytes-in-flight for one RTT.
+        ((rate as u64 * rtt_ticks / 100) as usize).clamp(RCV_WND_MIN, RCV_WND_MAX)
+    };
+    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(cap);
     if conn.wscale_ok {
         (free >> OUR_WSCALE).min(65535) as u16
     } else {
@@ -216,15 +233,10 @@ struct TcpConn {
     // collapsed the pipeline). Advisory: a desync only makes SACK suboptimal,
     // never corrupts data (the bytes still come from `ooo`).
     ooo_runs: BTreeMap<u32, u32>,
-    // Receive-window auto-tuning (Linux DRS). `srtt_ticks`: smoothed RTT from the
-    // peer's echoed TSecr. Each RTT we size `rcv_wnd_cap` to ~2× the bytes
-    // delivered that RTT (≈ 2× BW×RTT), so the window tracks the real path
-    // instead of a hardcoded number — works for any link/RTT without clashing.
+    // Smoothed RTT in ticks, from the peer's echoed TSecr (our TSval is ticks()).
+    // Used by recv_window() to size the advertised window to link-capacity × RTT
+    // (BDP) — so the window scales with the path, not a hardcoded value.
     srtt_ticks: u32,
-    rcvtune_bytes: u32,
-    rcvtune_prev: u32,
-    rcvtune_start: u64,
-    rcv_wnd_cap: usize,
 
     // Retransmit
     retries: u8,
@@ -306,10 +318,6 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         ooo_bytes: 0,
         ooo_runs: BTreeMap::new(),
         srtt_ticks: 0,
-        rcvtune_bytes: 0,
-        rcvtune_prev: 0,
-        rcvtune_start: 0,
-        rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -393,10 +401,6 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         ooo_bytes: 0,
         ooo_runs: BTreeMap::new(),
         srtt_ticks: 0,
-        rcvtune_bytes: 0,
-        rcvtune_prev: 0,
-        rcvtune_start: 0,
-        rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -477,10 +481,6 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         ooo_bytes: 0,
         ooo_runs: BTreeMap::new(),
         srtt_ticks: 0,
-        rcvtune_bytes: 0,
-        rcvtune_prev: 0,
-        rcvtune_start: 0,
-        rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -787,7 +787,6 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // push_back/s at ~700 Mbit). extend reserves once + copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
-                    conn.rcvtune_bytes = conn.rcvtune_bytes.saturating_add(copy as u32);
                     // Gap just filled — pull any now-contiguous segments out of
                     // the reassembly queue. Only the lowest stored offset can be
                     // next; if it doesn't meet rcv_nxt there's still a hole.
@@ -809,17 +808,16 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         let seg = conn.ooo.remove(&k).unwrap();
                         conn.ooo_bytes -= seg.len();
                         conn.rcv_nxt = conn.rcv_nxt.wrapping_add(seg.len() as u32);
-                        conn.rcvtune_bytes = conn.rcvtune_bytes.saturating_add(seg.len() as u32);
                         conn.recv_buf.extend(seg.into_iter());
                         filled = true;
                     }
                     TCP_MAX_RXBUF.fetch_max(conn.recv_buf.len(),
                         core::sync::atomic::Ordering::Relaxed);
 
-                    // Keep the SACK run-set in sync with what's now delivered, then
-                    // run receive-window auto-tuning (DRS): estimate RTT from the
-                    // peer's echoed TSecr and, once a measurement period of data is
-                    // in, size the window to ~2× bytes-per-RTT. No hardcoded value.
+                    // Keep the SACK run-set in sync with what's now delivered, and
+                    // refresh the RTT estimate from the peer's echoed TSecr (our
+                    // TSval is ticks(), so ticks()-TSecr = RTT). recv_window() turns
+                    // that into the window via link-capacity × RTT.
                     let delivered = conn.rcv_nxt.wrapping_sub(conn.rcv_irs);
                     ooo_runs_trim(&mut conn.ooo_runs, delivered);
                     if conn.ts_ok {
@@ -831,31 +829,6 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                                         else { (conn.srtt_ticks * 7 + sample) / 8 };
                                 }
                             }
-                        }
-                    }
-                    {
-                        let now = crate::interrupts::ticks();
-                        if conn.rcvtune_start == 0 { conn.rcvtune_start = now; }
-                        // Measurement period = the RTT (or 50 ms until one is known).
-                        let period = if conn.srtt_ticks > 0 { conn.srtt_ticks as u64 } else { 5 };
-                        if now.wrapping_sub(conn.rcvtune_start) >= period {
-                            // Ramp fast (×2) while throughput is still climbing, then
-                            // SETTLE to ~1.1× BW×RTT once it plateaus. Linux DRS uses a
-                            // flat 2×, but that's predicated on a link that doesn't drop
-                            // on bufferbloat; ours (gigabit wire → USB2, no working
-                            // PAUSE) overflows the chip FIFO above ~1× BDP, so we hold
-                            // the steady window just over the BDP. Allows shrink so a
-                            // ramp overshoot settles back down. Still fully derived from
-                            // measurement — no per-link constant.
-                            let d = conn.rcvtune_bytes as usize;
-                            let growing = conn.rcvtune_bytes > conn.rcvtune_prev
-                                + conn.rcvtune_prev / 4;
-                            let target = if growing { d.saturating_mul(2) }
-                                else { d.saturating_add(d / 8) };
-                            conn.rcv_wnd_cap = target.clamp(RCV_WND_MIN, RCV_WND_MAX);
-                            conn.rcvtune_prev = conn.rcvtune_bytes;
-                            conn.rcvtune_bytes = 0;
-                            conn.rcvtune_start = now;
                         }
                     }
                     // A filled gap must be ACKed immediately so the sender stops

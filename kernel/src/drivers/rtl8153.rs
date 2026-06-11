@@ -540,10 +540,17 @@ pub fn init() -> bool {
         log_link_diag();
     }
     crate::kprintln!("[npk] rtl8153: link {}", if up { "up" } else { "down (no cable?)" });
-    // No hardcoded receive-window cap here any more: the host TCP stack now
-    // auto-tunes the window to each connection's measured BW×RTT (Linux DRS),
-    // which self-sizes for this USB-behind-gigabit link AND for native gigabit /
-    // SuperSpeed without a per-link magic number that would clash.
+    // Declare this link's clean RX capacity so the host TCP stack sizes the
+    // receive window to capacity × measured RTT (BDP). A gigabit wire behind
+    // High-Speed USB sustains ~160 Mbit cleanly (above that the chip RX FIFO
+    // overflows); the value is a link-CLASS property, RTT-scaled in tcp.rs, and
+    // only set for sub-SuperSpeed USB — native gigabit / SuperSpeed stay uncapped
+    // (no clashing per-link window). SuperSpeed has the USB headroom → no cap.
+    if crate::xhci::nic_speed_class() < 2 {
+        crate::net::tcp::set_link_rx_rate(20_000_000); // ~160 Mbit/s clean
+    } else {
+        crate::net::tcp::set_link_rx_rate(u32::MAX);    // uncapped
+    }
     true
 }
 
