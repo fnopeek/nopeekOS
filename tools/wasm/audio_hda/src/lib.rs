@@ -286,7 +286,7 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.1.4 — generic HDA driver starting\n");
+    log("[audio_hda] v0.1.5 — generic HDA driver starting\n");
 
     // Bind the HDA controller by PCI class — hardware-independent, no
     // vendor:device hardcode. Intel cAVS controllers report subclass 0x01
@@ -380,10 +380,15 @@ pub extern "C" fn _start() {
     mmio_w32(mmio, base + SD_CTL, (STREAM_TAG << SD_CTL_STRM_SHIFT) | SD_CTL_RUN);
     fence();
 
-    log("[audio_hda] stream running — tone should be audible\n");
+    log("[audio_hda] stream running — playing ~3s test tone\n");
+    sleep_ms(3000);
 
-    // Resident loop: keep the module alive (DMA cycles the buffer on its own).
-    loop {
-        sleep_ms(1000);
-    }
+    // Stop cleanly and exit. A resident endless loop here would (a) keep the
+    // worker core busy (blocking other loop windows) and (b) leave the HDA
+    // RUN bit set, so the controller keeps DMAing the buffer even after the
+    // kernel reclaims it on exit -> endless tone that only a reboot clears.
+    // Clearing RUN stops the stream BEFORE we return.
+    mmio_w32(mmio, base + SD_CTL, 0);
+    fence();
+    log("[audio_hda] tone stopped — exit\n");
 }
