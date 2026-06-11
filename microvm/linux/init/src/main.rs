@@ -238,7 +238,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
                  echo '<0>[diag] === cubeb/alsa/audio lines (cage+moz) ===' > /dev/kmsg; \
-                 grep -iaE 'cubeb|alsa|audio|snd_pcm|underrun|xrun|epipe|virtio_snd|AudioIPC|MediaSink' /tmp/cage.log /tmp/moz.log 2>/dev/null | tail -50 | while read L; do echo \"<0>[aud] $L\" > /dev/kmsg; done; \
+                 grep -iaE 'cubeb|alsa|audio|snd_pcm|underrun|xrun|epipe|virtio_snd|AudioIPC|MediaSink' /tmp/cage.log /tmp/moz.log* 2>/dev/null | tail -60 | while read L; do echo \"<0>[aud] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === /tmp/cage.log tail 60 ===' > /dev/kmsg; \
                  tail -60 /tmp/cage.log 2>/dev/null | while read L; do echo \"<0>[cage] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === /tmp/moz.log tail 80 ===' > /dev/kmsg; \
