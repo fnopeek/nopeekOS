@@ -241,8 +241,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  cage -- librewolf --no-remote --profile /tmp/moz \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
-                 echo '<0>[diag] === cubeb/alsa/audio lines (cage+moz) ===' > /dev/kmsg; \
-                 grep -iaE 'cubeb|alsa|audio|snd_pcm|underrun|xrun|epipe|virtio_snd|AudioIPC|MediaSink' /tmp/cage.log /tmp/moz.log* 2>/dev/null | tail -60 | while read L; do echo \"<0>[aud] $L\" > /dev/kmsg; done; \
+                 echo '<0>[diag] === moz.log files (parent vs utility/server) ===' > /dev/kmsg; \
+                 ls -la /tmp/moz.log* 2>/dev/null | while read L; do echo \"<0>[aud-ls] $L\" > /dev/kmsg; done; \
+                 echo '<0>[diag] === cubeb/alsa errors (shm_area_size spam filtered out) ===' > /dev/kmsg; \
+                 grep -iaE 'cubeb|alsa|snd_pcm|underrun|xrun|epipe|emfile|enomem|virtio_snd|AudioIPC|MediaSink|backend|server|connect|sandbox|seccomp' /tmp/cage.log /tmp/moz.log* 2>/dev/null | grep -ivaE 'shm_area_size' | tail -70 | while read L; do echo \"<0>[aud] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === /tmp/cage.log tail 60 ===' > /dev/kmsg; \
                  tail -60 /tmp/cage.log 2>/dev/null | while read L; do echo \"<0>[cage] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === /tmp/moz.log tail 80 ===' > /dev/kmsg; \
