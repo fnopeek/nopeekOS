@@ -2,7 +2,7 @@
 //! Subset needed by the HDA driver: serial log, PCI, MMIO, DMA, sleep, fence.
 
 unsafe extern "C" {
-    fn npk_log_serial(ptr: i32, len: i32);
+    fn npk_print(ptr: i32, len: i32);
 
     // PCI
     fn npk_pci_bind_class(class: i32, subclass: i32) -> i32;
@@ -27,7 +27,7 @@ unsafe extern "C" {
 }
 
 pub fn log(s: &str) {
-    unsafe { npk_log_serial(s.as_ptr() as i32, s.len() as i32) };
+    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
 
 pub fn pci_bind_class(class: u8, subclass: u8) -> i32 {
