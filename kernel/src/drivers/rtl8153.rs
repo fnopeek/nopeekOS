@@ -172,6 +172,18 @@ const OCP_EEE_ADV: u16 = 0xa5d0;
 const MII_ADVERTISE: u16 = 0x04;
 const ADVERTISE_PAUSE_CAP: u16 = 0x0400;
 const ADVERTISE_PAUSE_ASYM: u16 = 0x0800;
+// Speed advertisement (MII_ADVERTISE base page + MII_CTRL1000 gigabit page).
+const MII_CTRL1000: u16 = 0x09;
+const ADVERTISE_10HALF: u16 = 0x0020;
+const ADVERTISE_10FULL: u16 = 0x0040;
+const ADVERTISE_100HALF: u16 = 0x0080;
+const ADVERTISE_100FULL: u16 = 0x0100;
+const ADVERTISE_SPEED_MASK: u16 = ADVERTISE_10HALF | ADVERTISE_10FULL
+    | ADVERTISE_100HALF | ADVERTISE_100FULL;
+const ADVERTISE_1000FULL: u16 = 0x0200;
+const ADVERTISE_1000HALF: u16 = 0x0100;
+const BMCR_ANRESTART: u16 = 0x0200;
+const BMCR_ANENABLE: u16 = 0x1000;
 // Inter-frame gap (rtl_set_ifg) + 10M idle, speed-dependent (PLA_PHYSTATUS bits).
 const PLA_TCR1: u16 = 0xe612;
 const PLA_MAC_PWR_CTRL4: u16 = 0xe0ce;
@@ -372,6 +384,40 @@ fn eee_disable() {
 fn enable_fc() {
     let anar = mdio_read(MII_ADVERTISE) | ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM;
     mdio_write(MII_ADVERTISE, anar);
+}
+
+/// Restrict (or restore) the auto-negotiated Ethernet link speed and restart
+/// auto-negotiation. `mbit`: 10 / 100 / 1000, or 0 = auto (all speeds).
+///
+/// On a USB High-Speed dongle a gigabit wire overruns the ~300 Mbit USB pipe →
+/// the chip RX FIFO overflows (rx_missed) → TCP collapses. Forcing 100 Mbit
+/// makes the wire slower than the USB drain so the FIFO never overflows: lower
+/// peak, but zero loss and a rock-steady link. Always re-advertises PAUSE.
+pub fn set_link_speed(mbit: u16) -> bool {
+    if !is_available() { return false; }
+    let mut anar = mdio_read(MII_ADVERTISE) & !ADVERTISE_SPEED_MASK;
+    let mut gctrl = mdio_read(MII_CTRL1000) & !(ADVERTISE_1000FULL | ADVERTISE_1000HALF);
+    match mbit {
+        10 => anar |= ADVERTISE_10HALF | ADVERTISE_10FULL,
+        100 => anar |= ADVERTISE_100HALF | ADVERTISE_100FULL,
+        1000 => gctrl |= ADVERTISE_1000FULL,
+        _ => { anar |= ADVERTISE_SPEED_MASK; gctrl |= ADVERTISE_1000FULL; }
+    }
+    anar |= ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM;
+    mdio_write(MII_ADVERTISE, anar);
+    mdio_write(MII_CTRL1000, gctrl);
+    mdio_write(MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
+    crate::kprintln!("[npk] rtl8153: link speed set to {} — renegotiating...",
+        if mbit == 0 { 0 } else { mbit });
+    // Wait for the link to come back up, then reprogram speed-dependent MAC regs.
+    let mut up = false;
+    for _ in 0..50 {
+        if mdio_read(MII_BMSR) & BMSR_LSTATUS != 0 { up = true; break; }
+        crate::interrupts::delay_ms(100);
+    }
+    if up { on_link_up(); log_link_diag(); }
+    crate::kprintln!("[npk] rtl8153: link {}", if up { "up" } else { "down" });
+    up
 }
 
 fn r8153_hw_phy_cfg(ver: u16) {
