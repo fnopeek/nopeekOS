@@ -540,6 +540,16 @@ pub fn init() -> bool {
         log_link_diag();
     }
     crate::kprintln!("[npk] rtl8153: link {}", if up { "up" } else { "down (no cable?)" });
+
+    // Size the host TCP receive window to this link's real bottleneck. A gigabit
+    // wire behind USB (≤ ~480 Mbit HS) caps real throughput at ~200-300 Mbit; an
+    // 8 MiB window lets the sender ramp far past that and blast the chip RX FIFO
+    // into overflow (the rx_missed loss). ~1 MiB ≈ the BDP at ~250 Mbit / 30 ms,
+    // so the sender stays near the bottleneck instead of overshooting into loss.
+    // SuperSpeed (if ever negotiated) has the headroom and keeps the full window.
+    if crate::xhci::nic_speed_class() < 2 {
+        crate::net::tcp::set_rx_window_cap(1024 * 1024);
+    }
     true
 }
 

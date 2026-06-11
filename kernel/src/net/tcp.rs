@@ -58,10 +58,26 @@ const INITIAL_WINDOW: u16 = 65535;
 // jitter underfills). 8 MiB = ~2× BDP headroom → fill the pipe to ~native.
 const OUR_WSCALE: u8 = 8;
 
+// Advertised-window cap (bytes). Default: the full buffer (no extra cap). A NIC
+// whose real bottleneck is far below gigabit — e.g. a gigabit-wire dongle behind
+// 480-Mbit USB — sets this to ~its bandwidth-delay product so the sender can't
+// ramp an 8 MiB window's worth in flight and blast the chip RX FIFO into
+// overflow (bufferbloat). NOT a link cripple: the wire stays gigabit and
+// throughput stays at the real bottleneck; only the loss-inducing overshoot is
+// removed. Set via set_rx_window_cap() from the active NIC driver.
+static RX_WINDOW_CAP: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Set the advertised-window cap (bytes). `usize::MAX` = no cap.
+pub fn set_rx_window_cap(bytes: usize) {
+    RX_WINDOW_CAP.store(bytes, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Current receive window for the TCP window field. Scaled by OUR_WSCALE once
 /// window scaling has been negotiated, else the raw free space (≤ 64 KiB).
 fn recv_window(conn: &TcpConn) -> u16 {
-    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len());
+    let cap = RX_WINDOW_CAP.load(core::sync::atomic::Ordering::Relaxed);
+    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(cap);
     if conn.wscale_ok {
         (free >> OUR_WSCALE).min(65535) as u16
     } else {
