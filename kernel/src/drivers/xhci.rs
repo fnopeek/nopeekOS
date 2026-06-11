@@ -1825,11 +1825,16 @@ const NIC_BULK_BUF_BYTES: usize = NIC_BULK_BUF_PAGES * 4096;
 // gigabit the chip's RX FIFO overflows in that gap and TCP collapses to a few
 // Mbit. The bulk-IN TR ring uses slots 0..NIC_RX_BUFS with the link at slot
 // NIC_RX_BUFS; producer + consumer walk it in lockstep so cycle bits line up.
-// 16 deep (256 KiB) absorbs a gigabit micro-burst (~2 ms) while the stack
-// drains it — the chip can DMA into more host buffers before its small internal
-// RX FIFO overflows, which is the loss source on a 1 Gbit link behind 480-Mbit
-// USB. Pairs with async bulk-OUT (fast drain) to keep the ring from starving.
-const NIC_RX_BUFS: usize = 16;
+// 128 deep (2 MiB) absorbs a gigabit burst (~16 ms) while the single-core stack
+// drains+re-arms it. HW tally proved the loss root: rx_missed (chip RX FIFO
+// overflow) ~4.6% on a 1 Gbit wire behind ~480-Mbit USB — the chip fills the
+// ring faster than our per-packet TCP processing re-arms it, starves for armed
+// buffers, and overflows its tiny internal FIFO. Since TCP settles at the USB
+// bottleneck rate, only transient ramp bursts overflow; a deep ring absorbs them
+// (re-arm catches up after the burst) without throttling the wire. 16→128 was
+// the fix (8→16 in v0.219.42 only covered ~2 ms). Bounded by the 256-entry
+// event ring + 256-TRB (one-page) bulk-IN ring, so ≤ ~255.
+const NIC_RX_BUFS: usize = 128;
 // Async bulk-OUT (TX): a small ring of TX buffers so a frame can be posted and
 // the call returns WITHOUT busy-waiting ~22 µs for the USB completion (the
 // dominant per-packet cost — every ACK/dup-ACK was paying it inline in the IP

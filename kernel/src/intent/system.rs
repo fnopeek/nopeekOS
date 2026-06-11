@@ -952,7 +952,6 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  nic                      USB-NIC root-port scan (USB2/3 + link)");
             kprintln!("  xhci                     Scan all xHCI controllers + port link-state");
             kprintln!("  tbtrain                  Warm-reset Thunderbolt USB3 ports (SS link)");
-            kprintln!("  linkspeed <auto|10|100|1000>  Force Ethernet link speed (rtl8153)");
             kprintln!();
             kprintln!("  http  <host> [path]      HTTP GET (plaintext)");
             kprintln!("  https <host> [path]      HTTPS GET (TLS 1.3)");
