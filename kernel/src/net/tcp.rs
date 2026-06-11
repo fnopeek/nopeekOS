@@ -222,6 +222,7 @@ struct TcpConn {
     // instead of a hardcoded number — works for any link/RTT without clashing.
     srtt_ticks: u32,
     rcvtune_bytes: u32,
+    rcvtune_prev: u32,
     rcvtune_start: u64,
     rcv_wnd_cap: usize,
 
@@ -306,6 +307,7 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         ooo_runs: BTreeMap::new(),
         srtt_ticks: 0,
         rcvtune_bytes: 0,
+        rcvtune_prev: 0,
         rcvtune_start: 0,
         rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
@@ -392,6 +394,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         ooo_runs: BTreeMap::new(),
         srtt_ticks: 0,
         rcvtune_bytes: 0,
+        rcvtune_prev: 0,
         rcvtune_start: 0,
         rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
@@ -475,6 +478,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         ooo_runs: BTreeMap::new(),
         srtt_ticks: 0,
         rcvtune_bytes: 0,
+        rcvtune_prev: 0,
         rcvtune_start: 0,
         rcv_wnd_cap: RCV_WND_MIN,
         send_buf: Vec::new(),
@@ -835,9 +839,21 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         // Measurement period = the RTT (or 50 ms until one is known).
                         let period = if conn.srtt_ticks > 0 { conn.srtt_ticks as u64 } else { 5 };
                         if now.wrapping_sub(conn.rcvtune_start) >= period {
-                            let target = (conn.rcvtune_bytes as usize)
-                                .saturating_mul(2).clamp(RCV_WND_MIN, RCV_WND_MAX);
-                            if target > conn.rcv_wnd_cap { conn.rcv_wnd_cap = target; } // grow-only
+                            // Ramp fast (×2) while throughput is still climbing, then
+                            // SETTLE to ~1.1× BW×RTT once it plateaus. Linux DRS uses a
+                            // flat 2×, but that's predicated on a link that doesn't drop
+                            // on bufferbloat; ours (gigabit wire → USB2, no working
+                            // PAUSE) overflows the chip FIFO above ~1× BDP, so we hold
+                            // the steady window just over the BDP. Allows shrink so a
+                            // ramp overshoot settles back down. Still fully derived from
+                            // measurement — no per-link constant.
+                            let d = conn.rcvtune_bytes as usize;
+                            let growing = conn.rcvtune_bytes > conn.rcvtune_prev
+                                + conn.rcvtune_prev / 4;
+                            let target = if growing { d.saturating_mul(2) }
+                                else { d.saturating_add(d / 8) };
+                            conn.rcv_wnd_cap = target.clamp(RCV_WND_MIN, RCV_WND_MAX);
+                            conn.rcvtune_prev = conn.rcvtune_bytes;
                             conn.rcvtune_bytes = 0;
                             conn.rcvtune_start = now;
                         }
