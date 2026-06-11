@@ -39,7 +39,7 @@ const PERIOD: usize = SAMPLE_RATE / TONE_HZ; // 100 frames
 const FRAMES: usize = 4800; // 0.1 s, 48 whole periods
 const BYTES_PER_FRAME: usize = 4; // S16 stereo
 const AUDIO_BYTES: usize = FRAMES * BYTES_PER_FRAME; // 19200
-const AMPLITUDE: f64 = 12000.0; // of 32767 (~ -8.7 dBFS)
+const AMPLITUDE: f64 = 5000.0; // of 32767 (~ -16 dBFS, comfortable test level)
 
 const STREAM_TAG: u32 = 1;
 
@@ -122,7 +122,8 @@ fn widget_type(mmio: i32, cad: u32, nid: u32) -> u32 {
 // Unmute the output amp of a widget at (near) max gain.
 fn unmute_out(mmio: i32, cad: u32, nid: u32) {
     let steps = (get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP) >> 8) & 0x7F;
-    let gain = (steps & 0x7F) as u16;
+    // ~3/4 of max gain — audible but not blasting (real volume control = M4).
+    let gain = ((steps * 3 / 4) & 0x7F) as u16;
     codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH | gain));
 }
 
@@ -285,7 +286,7 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.1.2 — generic HDA driver starting\n");
+    log("[audio_hda] v0.1.3 — generic HDA driver starting\n");
 
     // Bind the HDA controller. Prefer by class (HW-independent); fall back to
     // the known Intel vendor:device as a diagnostic — log both return codes so
