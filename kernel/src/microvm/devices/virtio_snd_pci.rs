@@ -101,6 +101,11 @@ const PCM_FMT_S16:   u64 = 1 << 5;  // VIRTIO_SND_PCM_FMT_S16
 const PCM_RATE_48000: u64 = 1 << 7; // VIRTIO_SND_PCM_RATE_48000
 const D_OUTPUT: u8 = 0;
 
+/// PCM playback bytes per host 100 Hz tick at our advertised format
+/// (48 kHz × 2 ch × 2 bytes = 192000 B/s ÷ 100 = 1920). Drives the
+/// wall-clock pacing of tx-buffer completion in `service_tx`.
+const BYTES_PER_TICK: u64 = 192_000 / 100;
+
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
     size: u16,
@@ -141,6 +146,17 @@ pub struct VirtioSnd {
     /// Audio mailbox slot held while the PCM stream is prepared/running.
     slot: i32,
     started: bool,
+
+    /// Wall-clock playback pacing. A real audio device returns each PCM period
+    /// on the used-ring only *after* it has been played — `period_bytes / rate`
+    /// seconds later. We complete instantly otherwise, so the guest's ALSA
+    /// hw_ptr jumps several periods in ~0 ms → underrun → cubeb errors right
+    /// after the initial buffer fill (the "4 tx buffers then silence" symptom).
+    /// `play_start_tick` = host 100 Hz tick at PCM_START; `bytes_completed` =
+    /// PCM bytes returned to the guest since then. A buffer is completed only
+    /// once `bytes_completed + period <= elapsed_ticks * BYTES_PER_TICK`.
+    play_start_tick: u64,
+    bytes_completed: u64,
 }
 
 impl VirtioSnd {
@@ -168,6 +184,8 @@ impl VirtioSnd {
             pending_kick_queue: None,
             slot: -1,
             started: false,
+            play_start_tick: 0,
+            bytes_completed: 0,
         }
     }
 
@@ -305,7 +323,14 @@ impl VirtioSnd {
                 put32(resp, 0, if self.slot >= 0 { S_OK } else { S_IO_ERR });
                 4
             }
-            R_PCM_START => { self.started = true; put32(resp, 0, S_OK); 4 }
+            R_PCM_START => {
+                // Reset the playback clock so completion pacing starts now.
+                self.started = true;
+                self.play_start_tick = crate::interrupts::ticks();
+                self.bytes_completed = 0;
+                put32(resp, 0, S_OK);
+                4
+            }
             R_PCM_STOP  => { self.started = false; put32(resp, 0, S_OK); 4 }
             R_PCM_RELEASE => {
                 if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
@@ -341,6 +366,12 @@ impl VirtioSnd {
         let mut any = false;
         let mut chunk = [0u8; 4096];
 
+        // Wall-clock playback budget: bytes that *should* have been played by
+        // now (48 kHz). Buffers are completed only up to this watermark so the
+        // guest sees an honest real-time sink instead of an instant drain.
+        let now = crate::interrupts::ticks();
+        let budget = now.wrapping_sub(self.play_start_tick).saturating_mul(BYTES_PER_TICK);
+
         while last != avail_top {
             let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
 
@@ -373,12 +404,14 @@ impl VirtioSnd {
                 idx = d.next;
             }
 
-            // Pace: only consume this period once it fits the mailbox (drain
-            // rate = real 48 kHz playback). Oversized periods (> ring) submit
-            // best-effort to avoid a deadlock.
-            let cap = crate::audio::free_space(slot);
-            if pcm_len > cap && pcm_len <= 32 * 1024 {
-                break; // hold; retry next pump/kick when the mailbox drains
+            // Wall-clock pace: hold this period until the virtual 48 kHz clock
+            // has advanced past it. Completing early advances the guest's ALSA
+            // hw_ptr several periods in ~0 ms → underrun → cubeb aborts right
+            // after the initial buffer fill (the "4 tx buffers then silence"
+            // symptom). The mailbox submit below is best-effort + decoupled:
+            // audio::submit self-clamps a full ring; audio_hda drains it.
+            if self.bytes_completed.wrapping_add(pcm_len as u64) > budget {
+                break; // too early; retry next pump tick
             }
 
             // Pass 2: submit the PCM in ≤4 KB chunks; track peak |sample| to
@@ -407,11 +440,13 @@ impl VirtioSnd {
                 mem.write_bytes(status_addr, &st);
             }
             used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
+            self.bytes_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
             last = last.wrapping_add(1);
             any = true;
             let n = SND_TX_BUFS.fetch_add(1, Ordering::Relaxed);
             if n < 10 || n % 200 == 0 {
-                kprintln!("[snd] tx buf #{} ({} bytes, free {}, peak {})", n + 1, pcm_len, cap, peak);
+                kprintln!("[snd] tx buf #{} ({} bytes, mbox-free {}, peak {})",
+                    n + 1, pcm_len, crate::audio::free_space(slot), peak);
             }
         }
 
