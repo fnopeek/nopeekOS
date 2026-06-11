@@ -16,6 +16,11 @@
 
 use super::guest_mem::GuestMem;
 use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+use crate::kprintln;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+// Diagnostic counter for tx PCM buffers (localizes a "no audio" break).
+static SND_TX_BUFS: AtomicU32 = AtomicU32::new(0);
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_SND_DEVICE: u32 = 0x1059;
@@ -255,6 +260,15 @@ impl VirtioSnd {
     fn process_control(&mut self, req: &[u8], resp: &mut [u8]) -> usize {
         let code = le32(req, 0);
         match code {
+            R_PCM_INFO => kprintln!("[snd] ctrl PCM_INFO"),
+            R_PCM_SET_PARAMS => kprintln!("[snd] ctrl SET_PARAMS"),
+            R_PCM_PREPARE => kprintln!("[snd] ctrl PREPARE"),
+            R_PCM_START => kprintln!("[snd] ctrl START"),
+            R_PCM_STOP => kprintln!("[snd] ctrl STOP"),
+            R_PCM_RELEASE => kprintln!("[snd] ctrl RELEASE"),
+            _ => kprintln!("[snd] ctrl {:#x}", code),
+        }
+        match code {
             R_PCM_INFO => {
                 // virtio_snd_query_info { hdr; start_id; count; size }
                 let start = le32(req, 4);
@@ -379,6 +393,10 @@ impl VirtioSnd {
             used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
             last = last.wrapping_add(1);
             any = true;
+            let n = SND_TX_BUFS.fetch_add(1, Ordering::Relaxed);
+            if n == 0 || n % 200 == 0 {
+                kprintln!("[snd] tx buf #{} ({} bytes, mailbox free {})", n + 1, pcm_len, cap);
+            }
         }
 
         if let Some(qm) = self.queues.get_mut(2) { qm.last_avail_idx = last; qm.used_idx = used; }
