@@ -285,11 +285,23 @@ fn reset_stream(mmio: i32, base: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    log("[audio_hda] v0.1.1 — generic HDA driver starting\n");
+    log("[audio_hda] v0.1.2 — generic HDA driver starting\n");
 
-    if pci_bind_class(0x04, 0x03) != 0 {
-        log("[audio_hda] no HDA controller (class 04:03) — exit\n");
-        return;
+    // Bind the HDA controller. Prefer by class (HW-independent); fall back to
+    // the known Intel vendor:device as a diagnostic — log both return codes so
+    // we can see WHY class-bind failed on hardware (-1 not found, -2 denied).
+    let rc = pci_bind_class(0x04, 0x03);
+    loghex("[audio_hda] bind_class(04:03) rc=0x", rc as u32);
+    log("\n");
+    if rc != 0 {
+        let rc2 = pci_bind(0x8086, 0x9dc8);
+        loghex("[audio_hda] bind(8086:9dc8) rc=0x", rc2 as u32);
+        log("\n");
+        if rc2 != 0 {
+            log("[audio_hda] both binds failed — exit\n");
+            return;
+        }
+        log("[audio_hda] bound by vendor:device (class-bind failed — investigate)\n");
     }
     pci_enable_bus_master();
     // Intel quirk: clear TCSEL (PCI 0x44) traffic-class bits so DMA uses TC0.
