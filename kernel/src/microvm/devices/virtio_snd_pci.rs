@@ -322,7 +322,11 @@ impl VirtioSnd {
     // ── tx (playback) queue ──────────────────────────────────────────────
     // Chain: [virtio_snd_pcm_xfer {le32 stream_id}] [PCM data...] [virtio_snd_pcm_status {le32 status; le32 latency} writable]
     fn service_tx(&mut self, mem: &GuestMem) -> bool {
-        if self.slot < 0 { return false; }
+        // Per virtio-sound: do NOT consume tx buffers until PCM_START. cubeb
+        // pre-fills the tx queue before START; completing that pre-roll early
+        // advances the guest's ALSA hw_ptr before playback begins -> underrun
+        // -> cubeb errors right at START. Hold the pre-roll until started.
+        if self.slot < 0 || !self.started { return false; }
         let slot = self.slot as usize;
 
         let q = match self.queues.get(2) {
