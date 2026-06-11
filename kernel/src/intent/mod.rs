@@ -1685,6 +1685,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 crate::xhci::scan_all_controllers();
             }
         }
+        "tbtrain" => {
+            if require_cap(vault, &session, Rights::WRITE, "tbtrain") {
+                crate::xhci::tb_warm_reset();
+            }
+        }
 
         "dhcp" => {
             if require_cap(vault, &session, Rights::WRITE, "dhcp") {

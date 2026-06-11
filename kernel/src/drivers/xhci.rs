@@ -55,7 +55,8 @@ const STS_CNR: u32 = 1 << 11; // Controller Not Ready
 // PORTSC bits
 const PORTSC_CCS:   u32 = 1 << 0;  // Current Connect Status
 const PORTSC_PED:   u32 = 1 << 1;  // Port Enabled
-const PORTSC_PR:    u32 = 1 << 4;  // Port Reset
+const PORTSC_PR:    u32 = 1 << 4;  // Port Reset (hot — USB2)
+const PORTSC_WPR:   u32 = 1 << 31; // Warm Port Reset (USB3 link recovery)
 #[allow(dead_code)]
 const PORTSC_PLS_MASK: u32 = 0xF << 5; // Port Link State
 const PORTSC_PP:    u32 = 1 << 9;  // Port Power
@@ -1960,6 +1961,94 @@ fn scan_one_controller(addr: pci::PciAddr, vid: u16, did: u16) {
         };
         kprintln!("    port {} USB{} ccs={} ped={} pls={} speed={}({}) portsc={:#010x}",
             p + 1, ver, ccs as u8, (sc & PORTSC_PED != 0) as u8, pls, speed, sname, sc);
+    }
+}
+
+/// Warm-reset the USB3 ports of every Thunderbolt/Titan Ridge xHCI and report
+/// the before/after link state. A USB3 link stuck in Disabled/Inactive (PLS=4/6)
+/// — exactly where the dongle's SS lanes sit on TB port 4 (CSC seen, link
+/// Disabled) — only recovers via a WARM reset (WPR, bit 31); the normal port
+/// path issues a hot reset (PR, bit 4) which can't revive a Disabled link. If a
+/// port reaches Enabled (PED=1) at speed=4 afterwards, SuperSpeed trained and the
+/// dongle is attachable on this controller. Touches only TB-host USB3 ports.
+pub fn tb_warm_reset() {
+    let mut hit = 0u32;
+    for bus in 0u16..=255 {
+        for dev_num in 0u8..32 {
+            for func in 0u8..8 {
+                let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
+                let id = pci::read32(addr, 0x00);
+                if id == 0xFFFF_FFFF || id == 0 { if func == 0 { break; } continue; }
+                let vid = (id & 0xFFFF) as u16;
+                let did = ((id >> 16) & 0xFFFF) as u16;
+                let class_reg = pci::read32(addr, 0x08);
+                let is_xhci = ((class_reg >> 24) & 0xFF) == 0x0C
+                    && ((class_reg >> 16) & 0xFF) == 0x03
+                    && ((class_reg >> 8) & 0xFF) == 0x30;
+                let tb = vid == 0x8086 && matches!(did, 0x1574 | 0x15b5 | 0x15b6 | 0x15c1
+                    | 0x15d4 | 0x15db | 0x15e8 | 0x15e9 | 0x15ec | 0x15ef | 0x15f0
+                    | 0x1130 | 0x9a13 | 0x9a17);
+                if is_xhci && tb { hit += 1; tb_warm_reset_ctrl(addr, did); }
+                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
+            }
+        }
+    }
+    if hit == 0 { kprintln!("[npk] tbtrain: no Thunderbolt xHCI found"); }
+}
+
+fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
+    let cmd = pci::read16(addr, 0x04);
+    pci::write32(addr, 0x04, (cmd | 0x02) as u32);
+    let bar0_raw = pci::read32(addr, 0x10);
+    let bar0 = if bar0_raw & 0x04 != 0 { pci::read_bar64(addr, 0x10) }
+               else { (bar0_raw & 0xFFFF_FFF0) as u64 };
+    if bar0 == 0 { kprintln!("[npk] tbtrain: {:04x} BAR0 unassigned", did); return; }
+    for off in (0..64 * 1024u64).step_by(4096) {
+        match paging::map_page(bar0 + off, bar0 + off,
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
+            Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
+            Err(_) => { kprintln!("[npk] tbtrain: BAR0 map failed"); return; }
+        }
+    }
+    let caplength = r8(bar0, CAP_CAPLENGTH) as u64;
+    let max_ports = (r32(bar0, CAP_HCSPARAMS1) >> 24) & 0xFF;
+    if max_ports == 0 || max_ports > 64 { kprintln!("[npk] tbtrain: {:04x} not running", did); return; }
+    let oper = bar0 + caplength;
+
+    kprintln!("[npk] tbtrain: TB xHCI [{:04x}] warm-resetting USB3 ports", did);
+    for p in 0..max_ports {
+        if port_usb_version(bar0, p) != 3 { continue; }
+        let off = portsc_off(p);
+        let before = r32(oper, off);
+        kprintln!("  port {}: before portsc={:#010x} (pls={})", p + 1, before, (before >> 5) & 0xF);
+
+        // Issue warm reset: preserve PP, set WPR (RW1S, self-clearing).
+        w32(oper, off, (before & !PORTSC_RW1C) | PORTSC_PP | PORTSC_WPR);
+        // Wait up to ~500ms for the reset to complete (WRC or PRC), polling ticks.
+        let deadline = crate::interrupts::ticks() + 50;
+        loop {
+            let sc = r32(oper, off);
+            if sc & (PORTSC_WRC | PORTSC_PRC) != 0 { break; }
+            if crate::interrupts::ticks() >= deadline { break; }
+            core::hint::spin_loop();
+        }
+        // Clear all change bits.
+        let sc = r32(oper, off);
+        w32(oper, off, (sc & !PORTSC_RW1C) | PORTSC_CSC | PORTSC_PEC | PORTSC_WRC
+            | PORTSC_PRC | PORTSC_PLC);
+        // Settle, then read the resulting state.
+        let s2 = crate::interrupts::ticks() + 10;
+        while crate::interrupts::ticks() < s2 { core::hint::spin_loop(); }
+        let after = r32(oper, off);
+        let speed = (after >> 10) & 0xF;
+        let sname = match speed {
+            SPEED_SUPER => "SuperSpeed", SPEED_HIGH => "High", SPEED_FULL => "Full",
+            SPEED_LOW => "Low", 0 => "-", _ => "?",
+        };
+        kprintln!("  port {}: after  portsc={:#010x} ccs={} ped={} pls={} speed={}({}){}",
+            p + 1, after, (after & PORTSC_CCS != 0) as u8, (after & PORTSC_PED != 0) as u8,
+            (after >> 5) & 0xF, speed, sname,
+            if after & PORTSC_PED != 0 && speed == SPEED_SUPER { "  <<< SuperSpeed LINK UP!" } else { "" });
     }
 }
 
