@@ -950,7 +950,7 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("  netstat                  Active connections");
             kprintln!("  net                      Interface info");
             kprintln!("  nic                      USB-NIC root-port scan (USB2/3 + link)");
-            kprintln!("  usb                      Scan all xHCI controllers + ports");
+            kprintln!("  xhci                     Scan all xHCI controllers + port link-state");
             kprintln!();
             kprintln!("  http  <host> [path]      HTTP GET (plaintext)");
             kprintln!("  https <host> [path]      HTTPS GET (TLS 1.3)");
