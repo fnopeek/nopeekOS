@@ -1930,8 +1930,56 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     false
 }
 
+/// xHCI major USB revision of root port `port0` (0-based) from the Supported
+/// Protocol extended capability (ID=2): 3 = USB3/SuperSpeed-capable, 2 = USB2,
+/// 0 = unknown. The same physical USB-C jack appears as two logical ports — one
+/// USB2, one USB3 — so this is how we tell whether a SuperSpeed port even exists.
+fn port_usb_version(mmio: u64, port0: u32) -> u8 {
+    let hccparams1 = r32(mmio, CAP_HCCPARAMS1);
+    let mut off = ((hccparams1 >> 16) & 0xFFFF) * 4;
+    let port_num = port0 + 1; // Supported-Protocol port offset is 1-based
+    for _ in 0..64 {
+        if off == 0 { break; }
+        let d0 = r32(mmio, off);
+        if d0 & 0xFF == 2 {
+            let major = ((d0 >> 24) & 0xFF) as u8;
+            let d2 = r32(mmio, off + 8);
+            let cpo = d2 & 0xFF;          // compatible port offset (1-based)
+            let cpc = (d2 >> 8) & 0xFF;   // compatible port count
+            if port_num >= cpo && port_num < cpo + cpc { return major; }
+        }
+        let next = (d0 >> 8) & 0xFF;
+        if next == 0 { break; }
+        off += next * 4;
+    }
+    0
+}
+
+/// Dump every populated/connected root port with its protocol + link state.
+/// Tells us whether the dongle trained a SuperSpeed link (USB3 port, speed=4)
+/// or fell back to the USB2 companion port (speed=3) — the difference between a
+/// 480 Mbit ceiling and the 5 Gbit headroom we'd need for true gigabit.
+fn dump_nic_ports(x: &XhciState) {
+    kprintln!("[npk] xhci: NIC ctrl root-port scan ({} ports):", x.max_ports);
+    for p in 0..x.max_ports {
+        let sc = r32(x.oper, portsc_off(p));
+        let ver = port_usb_version(x.mmio, p);
+        let ccs = sc & PORTSC_CCS != 0;
+        if !ccs && ver != 3 { continue; } // show all USB3 ports even if empty
+        let speed = (sc >> 10) & 0xF;
+        let pls = (sc >> 5) & 0xF;
+        let sname = match speed {
+            SPEED_SUPER => "SuperSpeed", SPEED_HIGH => "High", SPEED_FULL => "Full",
+            SPEED_LOW => "Low", 0 => "-", _ => "?",
+        };
+        kprintln!("  port {} USB{} ccs={} ped={} pls={} speed={}({}) portsc={:#010x}",
+            p + 1, ver, ccs as u8, (sc & PORTSC_PED != 0) as u8, pls, speed, sname, sc);
+    }
+}
+
 fn nic_try_attach(dev: pci::PciDevice, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     let mut x = match bring_up_controller(dev, 16) { Some(s) => s, None => return false };
+    dump_nic_ports(&x);
 
     for p in 0..x.max_ports {
         let sc = r32(x.oper, portsc_off(p));
