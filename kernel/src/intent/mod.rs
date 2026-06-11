@@ -1690,6 +1690,17 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 crate::xhci::tb_warm_reset();
             }
         }
+        "linkspeed" => {
+            if require_cap(vault, &session, Rights::WRITE, "linkspeed") {
+                match args.trim() {
+                    "10" => { crate::drivers::rtl8153::set_link_speed(10); }
+                    "100" => { crate::drivers::rtl8153::set_link_speed(100); }
+                    "1000" => { crate::drivers::rtl8153::set_link_speed(1000); }
+                    "auto" | "" => { crate::drivers::rtl8153::set_link_speed(0); }
+                    other => kprintln!("[npk] usage: linkspeed <auto|10|100|1000> (got '{}')", other),
+                }
+            }
+        }
 
         "dhcp" => {
             if require_cap(vault, &session, Rights::WRITE, "dhcp") {
