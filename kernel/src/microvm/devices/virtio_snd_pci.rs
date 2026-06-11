@@ -377,12 +377,20 @@ impl VirtioSnd {
                 break; // hold; retry next pump/kick when the mailbox drains
             }
 
-            // Pass 2: submit the PCM in ≤4 KB chunks.
+            // Pass 2: submit the PCM in ≤4 KB chunks; track peak |sample| to
+            // tell real audio (peak large) from silence (peak ~0) at the host.
+            let mut peak: u16 = 0;
             for s in 0..pcm_seg_n {
                 let (mut a, mut remaining) = (pcm_segs[s].0, pcm_segs[s].1 as usize);
                 while remaining > 0 {
                     let n = remaining.min(chunk.len());
                     mem.read_bytes(a, &mut chunk[..n]);
+                    let mut i = 0;
+                    while i + 1 < n {
+                        let amp = i16::from_le_bytes([chunk[i], chunk[i + 1]]).unsigned_abs();
+                        if amp > peak { peak = amp; }
+                        i += 2;
+                    }
                     crate::audio::submit(slot, &chunk[..n]);
                     a += n as u64; remaining -= n;
                 }
@@ -399,7 +407,7 @@ impl VirtioSnd {
             any = true;
             let n = SND_TX_BUFS.fetch_add(1, Ordering::Relaxed);
             if n < 10 || n % 200 == 0 {
-                kprintln!("[snd] tx buf #{} ({} bytes, mailbox free {})", n + 1, pcm_len, cap);
+                kprintln!("[snd] tx buf #{} ({} bytes, free {}, peak {})", n + 1, pcm_len, cap, peak);
             }
         }
 
