@@ -21,6 +21,7 @@ pub mod virtio_input_pci;
 pub mod virtio_input_keymap;
 pub mod virtio_net_pci;
 pub mod virtio_9p_pci;
+pub mod virtio_snd_pci;
 pub mod virtqueue;
 
 pub use pci_bus::{handle_pci_io, PciBus, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};

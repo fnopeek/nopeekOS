@@ -131,6 +131,17 @@ pub fn poll_mix(out: &mut [u8]) -> usize {
     frames * BYTES_PER_FRAME
 }
 
+/// Free bytes in a slot's ring (0 if the slot is closed). The virtio-snd
+/// bridge uses this to pace the guest: it only completes a PCM period once
+/// the period fits, so the mailbox drain rate (= real playback at 48 kHz)
+/// becomes the guest's audio clock — no separate timer needed.
+pub fn free_space(slot: usize) -> usize {
+    if slot >= NUM_SLOTS { return 0; }
+    let slots = SLOTS.lock();
+    if !slots[slot].active { return 0; }
+    SLOT_BYTES - slots[slot].len
+}
+
 /// Set master volume (0..=100 %).
 pub fn set_volume(pct: u8) {
     VOLUME.store(pct.min(100), Ordering::Relaxed);
