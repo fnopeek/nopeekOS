@@ -1671,6 +1671,16 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        "nic" | "usbnet" => {
+            if require_cap(vault, &session, Rights::READ, "nic") {
+                if crate::xhci::nic_attached() {
+                    crate::xhci::nic_dump_ports();
+                } else {
+                    kprintln!("[npk] nic: no USB NIC attached");
+                }
+            }
+        }
+
         "dhcp" => {
             if require_cap(vault, &session, Rights::WRITE, "dhcp") {
                 // Re-run DHCP on the active NIC (the boot-time configure() ran

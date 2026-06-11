@@ -1888,6 +1888,26 @@ pub fn nic_take_stats() -> (u64, u64, u64, u64, u64, u64) {
 
 pub fn nic_attached() -> bool { NIC.lock().is_some() }
 
+/// On-demand re-dump of the NIC controller's root ports + negotiated link speed.
+/// The boot-time scan scrolls past fast; this lets the `nic` command print the
+/// same USB2/USB3 protocol + ccs/speed table whenever asked.
+pub fn nic_dump_ports() {
+    match NIC.lock().as_ref() {
+        Some(n) => {
+            dump_nic_ports(&n.x);
+            let link = match n.x.port_speed {
+                SPEED_SUPER => "SuperSpeed (5 Gbit)",
+                SPEED_HIGH => "High-Speed (480 Mbit)",
+                SPEED_FULL => "Full-Speed (12 Mbit!)",
+                SPEED_LOW => "Low-Speed (1.5 Mbit!)",
+                _ => "unknown",
+            };
+            kprintln!("[npk] xhci: NIC link = {}", link);
+        }
+        None => kprintln!("[npk] xhci: no NIC attached"),
+    }
+}
+
 /// USB link speed of the attached NIC as an r8152 coalesce class:
 /// 2 = SuperSpeed, 1 = High, 0 = Full/other. Picks the RX aggregation timeout.
 pub fn nic_speed_class() -> u8 {
