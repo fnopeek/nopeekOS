@@ -26,6 +26,7 @@ use super::virtio_gpu_pci::VirtioGpu;
 use super::virtio_input_pci::VirtioInput;
 use super::virtio_net_pci::VirtioNet;
 use super::virtio_9p_pci::Virtio9p;
+use super::virtio_snd_pci::VirtioSnd;
 
 pub const PCI_CONFIG_ADDR: u16 = 0xCF8;
 pub const PCI_CONFIG_DATA_START: u16 = 0xCFC;
@@ -44,6 +45,8 @@ pub struct PciBus {
     pub virtio_blk_sqfs: VirtioBlk,
     /// Slot 6 — virtio-9p share onto npkFS home/<user>/ (mount -t 9p).
     pub virtio_9p: Virtio9p,
+    /// Slot 7 — virtio-sound: bridges guest audio → kernel audio mailbox.
+    pub virtio_snd: VirtioSnd,
 }
 
 impl PciBus {
@@ -56,6 +59,7 @@ impl PciBus {
             virtio_input: VirtioInput::new(),
             virtio_blk_sqfs: VirtioBlk::new_sqfs(),
             virtio_9p: Virtio9p::new(),
+            virtio_snd: VirtioSnd::new(),
         }
     }
 }
@@ -128,6 +132,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
         4 => bus.virtio_input.pci_read_dword(reg),
         5 => bus.virtio_blk_sqfs.pci_read_dword(reg),
         6 => bus.virtio_9p.pci_read_dword(reg),
+        7 => bus.virtio_snd.pci_read_dword(reg),
         _ => NO_DEVICE,
     }
 }
@@ -143,6 +148,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
         4 => bus.virtio_input.pci_write_dword(reg, val),
         5 => bus.virtio_blk_sqfs.pci_write_dword(reg, val),
         6 => bus.virtio_9p.pci_write_dword(reg, val),
+        7 => bus.virtio_snd.pci_write_dword(reg, val),
         _ => {}
     }
 }

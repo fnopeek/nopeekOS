@@ -1692,6 +1692,12 @@ impl VmContext {
                         self.vcpu.consecutive_idle = 0;
                         continue;
                     }
+                    if sh.pci.virtio_snd.pump(&sh.guest_mem) {
+                        let vector = sh.pic.vector_for_irq(sh.pci.virtio_snd.irq_line());
+                        let _ = vmcs::inject_external_irq(vector);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
                     if pumped {
                         let vector = sh.pic.vector_for_irq(10);
                         let _ = vmcs::inject_external_irq(vector);
@@ -2024,6 +2030,11 @@ impl VmContext {
                 } else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
                     if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                } else if sh.pci.virtio_snd.bar0_in_range(gpa) {
+                    if handle_mmio_ept_snd(&mut self.vcpu.regs, &mut sh.pci.virtio_snd, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2741,6 +2752,44 @@ fn handle_mmio_ept_p9(
         let advanced = p9.service_queues(qidx, mem);
         if advanced {
             deliver_irq_vmx(pending, pic, p9.irq_line());
+        }
+    }
+
+    if vmcs::advance_guest_rip().is_err() { return false; }
+    true
+}
+
+/// Handle EPT-trap on virtio-snd BAR0. Mirror of `handle_mmio_ept_net` —
+/// only the device + IRQ line (8) differ.
+fn handle_mmio_ept_snd(
+    regs: &mut vmcs::GuestRegs,
+    snd: &mut crate::microvm::devices::virtio_snd_pci::VirtioSnd,
+    pic: &crate::microvm::devices::pic8259::Pic8259,
+    pending: &mut u16,
+    gpa: u64,
+    mem: &GuestMem,
+) -> bool {
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
+    let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
+    let buf = match fetch_inst(rip, cr3, mem) { Some(b) => b, None => return false };
+    let dec = match decode_mov(&buf) { Some(d) => d, None => return false };
+
+    let off = (gpa - snd.bar0_base()) as u32;
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        snd.mmio_write(off, dec.width, value);
+    } else {
+        let value = snd.mmio_read(off, dec.width);
+        write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+
+    if let Some(qidx) = snd.take_pending_kick() {
+        let advanced = snd.service_queues(qidx, mem);
+        if advanced {
+            deliver_irq_vmx(pending, pic, snd.irq_line());
         }
     }
 
