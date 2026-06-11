@@ -69,7 +69,10 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # fontconfig (pulled by librewolf) has nothing → all GTK + web text
 # renders as tofu boxes. dejavu covers Latin UI/body; noto adds
 # broad Unicode + a sane sans default so real pages look right.
-APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput eudev mesa-gbm font-dejavu font-noto}"
+# alsa-lib: libasound for LibreWolf's cubeb ALSA backend (no PulseAudio /
+# PipeWire in the bundle). cubeb opens the ALSA "default" PCM → our virtio-snd
+# card (card 0) → host audio mailbox → audio_hda → speaker.
+APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput eudev mesa-gbm font-dejavu font-noto alsa-lib}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
