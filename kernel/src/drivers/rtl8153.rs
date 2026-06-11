@@ -544,13 +544,15 @@ pub fn init() -> bool {
     // Size the host TCP receive window to this link's real bottleneck. A gigabit
     // wire behind USB (≤ ~480 Mbit HS) caps real throughput at ~200-300 Mbit; an
     // 8 MiB window lets the sender ramp far past that and blast the chip RX FIFO
-    // into overflow (the rx_missed loss / death-spiral). 2 MiB ≈ the BDP at
-    // ~300 Mbit / ~53 ms (measured RTT to the test mirror) — enough to fill the
-    // USB bottleneck without overshooting, and it matches the 2 MiB RX ring that
-    // absorbs exactly that much. (1 MiB was clean but window-limited to ~157
-    // Mbit at this RTT.) SuperSpeed, if ever negotiated, keeps the full window.
+    // into overflow (the rx_missed loss / death-spiral). 1 MiB is the measured
+    // sweet spot (~157 Mbit clean, ooo≈0): it keeps in-flight near the bottleneck
+    // so a loss leaves only a small ahead-queue, which SACK recovers in ~2µs/pkt.
+    // 2 MiB tested WORSE (106 Mbit): a bigger window lets ooo balloon to ~18k
+    // segments and our O(n) ooo/SACK reassembly then costs ~38µs/pkt, collapsing
+    // the pipeline. Raising this further needs O(log n) ooo handling first.
+    // SuperSpeed, if ever negotiated, has the headroom and keeps the full window.
     if crate::xhci::nic_speed_class() < 2 {
-        crate::net::tcp::set_rx_window_cap(2 * 1024 * 1024);
+        crate::net::tcp::set_rx_window_cap(1024 * 1024);
     }
     true
 }
