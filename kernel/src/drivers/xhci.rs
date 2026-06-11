@@ -2282,14 +2282,25 @@ fn cmd_configure_bulk(state: &mut XhciState, in_dci: u8, in_ring: u64,
 /// Consume one transfer event from the NIC controller's event ring (if any).
 /// Bulk-IN completions are stashed (rx_ready_len) so a TX/control wait never
 /// loses a received packet. Returns the consumed event's (cc, dci), or None.
+/// Write the Event Ring Dequeue Pointer once, clearing Event Handler Busy.
+/// Call after a drain batch (only when events were consumed) instead of per
+/// event — collapses N MMIO writes per poll into one.
+#[inline]
+fn nic_flush_erdp(nic: &NicXhci) {
+    let erdp = nic.x.evt_ring + (nic.x.evt_dequeue * 16) as u64;
+    w64(nic.x.rt + 0x20, 0x18, erdp | (1 << 3));
+}
+
 fn nic_consume_event(nic: &mut NicXhci) -> Option<(u32, u32)> {
     let (param, status, control) = read_trb(nic.x.evt_ring, nic.x.evt_dequeue);
     if control & TRB_CYCLE != nic.x.evt_cycle { return None; }
 
     nic.x.evt_dequeue += 1;
     if nic.x.evt_dequeue >= NUM_EVT_TRBS { nic.x.evt_dequeue = 0; nic.x.evt_cycle ^= 1; }
-    let erdp = nic.x.evt_ring + (nic.x.evt_dequeue * 16) as u64;
-    w64(nic.x.rt + 0x20, 0x18, erdp | (1 << 3));
+    // ERDP is flushed ONCE per drain batch (nic_flush_erdp), not per event — a
+    // per-event MMIO write cost ~300ns each, which with the 128-deep ring meant
+    // up to ~40µs per nic_bulk_in (the netdev spikes that starved the USB drain
+    // and re-overflowed the chip FIFO despite armed buffers).
 
     if control & (0x3F << 10) != EVT_TRANSFER { return Some((0xFF, 0xFF)); }
     let cc = (status >> 24) & 0xFF;
@@ -2378,7 +2389,8 @@ pub fn nic_bulk_out(data: &[u8]) -> bool {
     use core::sync::atomic::Ordering::Relaxed;
 
     // Reap finished TX (frees buffers) + drain any pending RX completions.
-    while nic_consume_event(nic).is_some() {}
+    let mut drained = 0u32;
+    while nic_consume_event(nic).is_some() { drained += 1; }
 
     // Backpressure: only if ALL TX buffers are still in flight do we wait
     // (bounded) for one to drain — otherwise we'd overwrite live DMA.
@@ -2386,11 +2398,15 @@ pub fn nic_bulk_out(data: &[u8]) -> bool {
         let t0 = crate::interrupts::rdtsc();
         let deadline = crate::interrupts::ticks() + 100;
         while nic.tx_inflight >= NIC_TX_BUFS {
-            if crate::interrupts::ticks() >= deadline { return false; }
-            if nic_consume_event(nic).is_none() { core::hint::spin_loop(); }
+            if crate::interrupts::ticks() >= deadline {
+                if drained > 0 { nic_flush_erdp(nic); }
+                return false;
+            }
+            if nic_consume_event(nic).is_some() { drained += 1; } else { core::hint::spin_loop(); }
         }
         NIC_TX_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t0), Relaxed);
     }
+    if drained > 0 { nic_flush_erdp(nic); }
 
     let len = data.len().min(NIC_TX_BUF_BYTES);
     let bidx = nic.tx_next;
@@ -2425,8 +2441,12 @@ pub fn nic_bulk_in(buf: &mut [u8]) -> usize {
     let nic = match lock.as_mut() { Some(n) => n, None => return 0 };
 
     // Drain all pending completions into the done FIFO (keeps the device's
-    // event ring from backing up and stalling the controller).
-    while nic_consume_event(nic).is_some() {}
+    // event ring from backing up and stalling the controller). Flush ERDP once
+    // for the whole batch (not per event) — and only if we consumed any, so an
+    // empty poll (99% of them) costs no MMIO.
+    let mut drained = 0u32;
+    while nic_consume_event(nic).is_some() { drained += 1; }
+    if drained > 0 { nic_flush_erdp(nic); }
 
     use core::sync::atomic::Ordering::Relaxed;
     if nic.rx_done_count == 0 {
