@@ -325,25 +325,36 @@ fn read_tree_for_gc(hash: &[u8; 32]) -> Result<Option<Vec<TreeEntry>>, ()> {
 /// Mark a `File` object's transitive chunks reachable. Only called for
 /// Chunked manifests (and legacy flag==0 entries): reads the object and,
 /// if it's a `Chunked` manifest, marks every chunk hash. A single Blob
-/// here (legacy path) is just read + discarded. Read errors are logged
-/// + skipped — a corrupt manifest's chunks become orphans, which is
-/// correct. Single-Blob files with `FLAG_BLOB` never reach this.
-fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]>) {
+/// here (legacy path) is just read + discarded. Single-Blob files with
+/// `FLAG_BLOB` never reach this.
+///
+/// Returns `false` if the object (manifest) could not be read — its chunks
+/// are then UNKNOWN, so the caller must mark the whole GC walk incomplete and
+/// skip the sweep. A corrupt manifest's chunks are NOT orphans: the live
+/// committed file still references them, so freeing them corrupts the fs.
+#[must_use]
+fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]>) -> bool {
     let bytes = match storage::get(hash) {
         Ok(Some(b)) => b,
-        Ok(None) => return,
+        Ok(None) => return true, // genuinely absent → nothing to mark, not an error
         Err(e) => {
-            crate::kprintln!("[npk] gc: unreadable file obj {:02x}{:02x}.. ({:?}) — skipping",
+            crate::kprintln!("[npk] gc: unreadable file obj {:02x}{:02x}.. ({:?}) — mark incomplete",
                 hash[0], hash[1], e);
-            return;
+            return false;
         }
     };
-    if let Ok(super::object::Object::Chunked { chunks, .. }) =
-        super::object::Object::decode(&bytes)
-    {
-        for c in chunks {
-            if c != paths::EMPTY_ROOT { reachable.insert(c); }
+    match super::object::Object::decode(&bytes) {
+        Ok(super::object::Object::Chunked { chunks, .. }) => {
+            for c in chunks {
+                if c != paths::EMPTY_ROOT { reachable.insert(c); }
+            }
+            true
         }
+        // A legacy single Blob decodes to non-Chunked — fine, it's a leaf.
+        Ok(_) => true,
+        // Decode failure on an object we could read = corruption; its chunk
+        // refs are unknown → incomplete, don't risk sweeping them.
+        Err(_) => false,
     }
 }
 
@@ -384,15 +395,25 @@ pub fn gc() -> Result<GcStats, Error> {
     // This is what makes GC cheap enough to run automatically.
     let mut tree_work: alloc::vec::Vec<[u8; 32]> = roots;
 
+    // Whether the reachability walk read EVERY object it needed. If any tree
+    // or manifest came back missing/unreadable/corrupt, the set is INCOMPLETE
+    // and we must NOT sweep: the unread subtree's objects would look like
+    // orphans and we'd free blocks the committed root still references —
+    // turning a localized corruption into an unmountable filesystem (boots to
+    // installer). Leaking orphan blocks until the fs is healthy is the safe
+    // failure mode; deleting live data is not.
+    let mut mark_incomplete = false;
+
     while let Some(hash) = tree_work.pop() {
         if hash == paths::EMPTY_ROOT { continue; }
         if !reachable.insert(hash) { continue; }
 
         let entries = match read_tree_for_gc(&hash) {
             Ok(Some(e)) => e,
-            // Dangling ref, or a hash that isn't a Tree (corruption) —
-            // skip; already-logged errors return Err and skip too.
-            Ok(None) | Err(()) => continue,
+            // A hash we reached from a root/Dir must resolve to a Tree. Missing
+            // (Ok(None)), non-Tree, or unreadable (Err) all mean this subtree's
+            // children are UNKNOWN → the mark is incomplete → skip the sweep.
+            Ok(None) | Err(()) => { mark_incomplete = true; continue; }
         };
         for e in entries {
             if e.hash == paths::EMPTY_ROOT { continue; }
@@ -409,11 +430,23 @@ pub fn gc() -> Result<GcStats, Error> {
                     // never mistaken for orphans. Single-Blob files
                     // (FLAG_BLOB) are leaves and skip the read entirely.
                     if chunked || !known_blob {
-                        mark_file_object(&e.hash, &mut reachable);
+                        if !mark_file_object(&e.hash, &mut reachable) {
+                            mark_incomplete = true;
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Never sweep on an incomplete mark — see `mark_incomplete` above.
+    if mark_incomplete {
+        crate::kprintln!(
+            "[npk] gc: mark incomplete (unreadable/corrupt objects) — \
+             skipping sweep to avoid freeing live data. Filesystem needs \
+             a check / reinstall."
+        );
+        return Ok(GcStats { kept: reachable.len(), removed: 0, skipped: true });
     }
 
     let all = storage::all_object_hashes().map_err(Error::Storage)?;
