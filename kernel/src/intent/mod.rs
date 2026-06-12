@@ -2081,7 +2081,7 @@ fn microvm_linux(inject: &[u8]) {
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
-panic=1 nokaslr noapic acpi=off tsc=reliable \
+panic=1 nokaslr noapic acpi=off tsc=reliable idle=halt \
 tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         tsc_khz, maxcpus,
     );
