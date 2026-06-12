@@ -1714,18 +1714,23 @@ impl VmContext {
                 } else {
                     None
                 };
+                // NB: the periodic 100 Hz timer is NOT a wake — it must NOT
+                // reset consecutive_idle. Resetting it here made the loop-top
+                // halt-poll grower (consecutive_idle==0 + armed poll) treat every
+                // tick as "the poll caught an event" → halt_poll_us doubled to MAX
+                // every 10 ms → the core busy-polled instead of parking (idle=halt
+                // exposed this: 3.3M hlt/s, cores pegged 100%, 0 host-HLTs). Only
+                // real device wakes (net/input/audio/IPI, below) reset it.
                 if pit_live && now.wrapping_sub(sh.last_timer_tick) >= TIMER_MAX_SKIP {
                     sh.last_timer_tick = now;
                     let vector = sh.pic.vector_for_irq(0);
                     let _ = vmcs::inject_external_irq(vector);
-                    self.vcpu.consecutive_idle = 0;
                     continue;
                 }
                 if let Some(vec) = lapic_vec {
                     if now.wrapping_sub(self.vcpu.last_lapic_tick) >= TIMER_MAX_SKIP {
                         self.vcpu.last_lapic_tick = now;
                         let _ = vmcs::inject_external_irq(vec);
-                        self.vcpu.consecutive_idle = 0;
                         continue;
                     }
                 }
@@ -1754,18 +1759,17 @@ impl VmContext {
                         continue;
                     }
                 }
+                // (periodic timer — does NOT reset consecutive_idle; see above.)
                 if pit_live && now != sh.last_timer_tick {
                     sh.last_timer_tick = now;
                     let vector = sh.pic.vector_for_irq(0);
                     let _ = vmcs::inject_external_irq(vector);
-                    self.vcpu.consecutive_idle = 0;
                     continue;
                 }
                 if let Some(vec) = lapic_vec {
                     if now != self.vcpu.last_lapic_tick {
                         self.vcpu.last_lapic_tick = now;
                         let _ = vmcs::inject_external_irq(vec);
-                        self.vcpu.consecutive_idle = 0;
                         continue;
                     }
                 }
