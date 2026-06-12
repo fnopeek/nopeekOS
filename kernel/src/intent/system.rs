@@ -83,6 +83,7 @@ pub fn intent_cores() {
         w0[c] = crate::smp::per_core::wake_snapshot(c);
     }
     let vx0 = crate::microvm::cpu::vm_exit_snapshot();
+    let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
     // Sample window. Idle Core 0 honestly with HLT (the normal shell-idle
@@ -108,6 +109,7 @@ pub fn intent_cores() {
         w1[c] = crate::smp::per_core::wake_snapshot(c);
     }
     let vx1 = crate::microvm::cpu::vm_exit_snapshot();
+    let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
     let vmcore = crate::smp::per_core::dedicated_vm_core();
@@ -195,6 +197,24 @@ pub fn intent_cores() {
             if d > 0 { kprint!(" {}={}", vlabels[i], d * 1000 / window_ms); }
         }
         kprintln!();
+    }
+    // Host-time breakdown: where the dedicated guest cores actually SPENT
+    // their cycles this window. guest% = in VMRESUME (the guest really ran);
+    // a high mmio/io% with low guest% PROVES the host burns the core on
+    // exit-handling (mmio decode / PIC EOI) and the guest is starved — its
+    // "0% CPU" is because it never gets scheduled, not because nothing runs.
+    let gdelta = gcy1.saturating_sub(gcy0);
+    let cdelta: u64 = (0..vlabels.len()).map(|i| cy1[i].saturating_sub(cy0[i])).sum();
+    let ctotal = gdelta + cdelta;
+    if ctotal > 0 {
+        kprint!("  Host cycles: guest={}%", gdelta * 100 / ctotal);
+        for i in 0..vlabels.len() {
+            let d = cy1[i].saturating_sub(cy0[i]);
+            if d * 100 / ctotal > 0 { kprint!(" {}={}%", vlabels[i], d * 100 / ctotal); }
+        }
+        kprintln!();
+        kprintln!("  (guest%=in VMRESUME; high mmio/io% + low guest% = host burns the");
+        kprintln!("   core on exit-handling, guest starved -> its '0% CPU' is no time given)");
     }
     kprintln!();
     kprintln!("  Read: BUSY%=100−halted. A core pegged at 100% with 0 HALTS/s");
