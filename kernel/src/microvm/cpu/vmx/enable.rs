@@ -971,6 +971,10 @@ struct SerialState {
     /// `Unable to mount root fs` reason.
     panic_msg: [u8; 192],
     panic_msg_n: usize,
+    /// Set on the first `reboot: System halted` / `Power down` line — the
+    /// guest shut itself down (LibreWolf X → cage exit → PID-1 halt). Drives
+    /// the auto-close-and-save so the user doesn't need a second Mod+Q.
+    halt_observed: bool,
     /// Phase 12.1.4 — RX FIFO. Bytes pre-injected by the host before
     /// VMLAUNCH; drained one at a time when the guest reads RBR
     /// (0x3F8 IN with DLAB=0). LSR.DR (bit 0) on 0x3FD IN reflects
@@ -992,6 +996,7 @@ impl SerialState {
             panic_observed: false,
             panic_msg: [0; 192],
             panic_msg_n: 0,
+            halt_observed: false,
             rx: [0; 128],
             rx_pos: 0,
             rx_n: 0,
@@ -1027,6 +1032,7 @@ impl SerialState {
         if byte == b'\n' || self.line_n == self.line.len() {
             let n = self.line_n;
             self.scan_for_panic(n);
+            self.scan_for_shutdown(n);
             let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
             kprintln!("[guest] {}", s);
             self.line_n = 0;
@@ -1043,6 +1049,7 @@ impl SerialState {
         if self.line_n > 0 {
             let n = self.line_n;
             self.scan_for_panic(n);
+            self.scan_for_shutdown(n);
             let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
             kprintln!("[guest] {}", s);
             self.line_n = 0;
@@ -1073,6 +1080,33 @@ impl SerialState {
     fn panic_msg_str(&self) -> &str {
         core::str::from_utf8(&self.panic_msg[..self.panic_msg_n]).unwrap_or("?")
     }
+
+    /// Detect a clean guest self-shutdown in the printk stream. Linux's
+    /// reboot path emits `reboot: System halted` (PID-1 `halt`) or
+    /// `reboot: Power down`. The marker is specific to kernel/reboot.c, so
+    /// an app log line can't false-trigger it. On the first hit, ask the run
+    /// loop to take the normal Mod+Q close path (break → save → window close).
+    fn scan_for_shutdown(&mut self, n: usize) {
+        if self.halt_observed { return; }
+        // Require the `reboot: ` prefix (kernel/reboot.c only). PID-1 mirrors
+        // cage/moz app logs to /dev/kmsg → serial, so a bare "Power down"
+        // substring could false-trigger; the prefix can't appear in app text.
+        let line = &self.line[..n];
+        let hit = line_contains(line, b"reboot: System halted")
+            || line_contains(line, b"reboot: Power down")
+            || line_contains(line, b"reboot: Restarting");
+        if hit {
+            self.halt_observed = true;
+            crate::kprintln!("[microvm] guest shut down — closing window + saving profile");
+            crate::microvm::cpu::note_guest_shutdown();
+        }
+    }
+}
+
+/// True if `hay` contains `needle` as a contiguous byte substring.
+fn line_contains(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() { return false; }
+    (0..=(hay.len() - needle.len())).any(|i| &hay[i..i + needle.len()] == needle)
 }
 
 /// Per-port I/O exit counter. Linux's boot touches dozens of unique
