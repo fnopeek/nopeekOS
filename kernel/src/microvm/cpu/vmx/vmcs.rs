@@ -1394,6 +1394,22 @@ pub fn guest_interruptible() -> bool {
     (rflags & IF) != 0 && (intr & 0b11) == 0
 }
 
+/// Clear blocking-by-STI (bit 0) + blocking-by-MOV-SS (bit 1) in the guest
+/// interruptibility-state. Call after advancing past a HLT: the HLT IS the
+/// single instruction the STI shadow covered, so executing it consumes the
+/// shadow. Without this, an idle `sti; hlt` returns with blocking-by-STI
+/// still set → `guest_interruptible()` is false → the HLT handler's gate
+/// re-enters instead of injecting the wakeup + parking → a 3.3M-hlt/s spin
+/// (SVM never hit it because AMD tolerates inject-while-shadowed; VMX rejects
+/// it with reason 33, so we must clear the shadow ourselves).
+pub fn consume_sti_shadow() -> Result<(), &'static str> {
+    let v = vmread(GUEST_INTERRUPTIBILITY_INFO)?;
+    if v & 0b11 != 0 {
+        vmwrite(GUEST_INTERRUPTIBILITY_INFO, v & !0b11)?;
+    }
+    Ok(())
+}
+
 /// Read VMCS VM_ENTRY_CONTROLS — the live entry-control field
 /// after our last VMWRITE (or fixed_ctrl-applied initial value).
 pub fn read_vm_entry_controls() -> Result<u64, &'static str> {

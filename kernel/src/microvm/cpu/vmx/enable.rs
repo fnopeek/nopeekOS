@@ -1557,6 +1557,14 @@ impl VmContext {
                 // need_resched check and schedules — not back onto the HLT.
                 if basic == 12 {
                     vmcs::advance_guest_rip()?;
+                    // The HLT was the single instruction the preceding STI's
+                    // interrupt-shadow covered — executing it consumes the
+                    // shadow. Clear blocking-by-STI/MOV-SS so an idle `sti;hlt`
+                    // (IF=1) reads as interruptible: the gate below then injects
+                    // its wakeup IRQ + parks the core, instead of re-entering on
+                    // a still-shadowed HLT forever (3.3M hlt/s, cores at 100%).
+                    // A real `cli;hlt` keeps IF=0 → still gated (correct).
+                    let _ = vmcs::consume_sti_shadow();
                 }
                 // SMP interruptibility gate: if the guest can't take an
                 // interrupt right now (IF=0 / in an STI/MOV-SS shadow — e.g.
