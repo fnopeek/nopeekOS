@@ -248,8 +248,6 @@ fn launch_wayland(kmsg_fd: i64) {
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 \
-                 CUBEB_LOG_LEVEL=verbose \
-                 RUST_LOG=audioipc=trace,audioipc2=trace,cubeb=trace \
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
@@ -264,8 +262,6 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo '<0>[diag] === audio prefs present in user.js? (burst-safe) ===' > /dev/kmsg; \
                  grep -iaE 'cubeb|audioipc|latency' /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs-aud] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
-                 MOZ_LOG_FILE=/tmp/moz.log \
-                 MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3,cubeb:5' \
                  cage -- librewolf --no-remote --profile /tmp/moz \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
