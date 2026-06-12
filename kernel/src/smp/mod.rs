@@ -17,7 +17,17 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const TRAMPOLINE_BASE: usize = 0x8000;
-const AP_STACK_SIZE: usize = 64 * 1024; // 64KB per AP
+// 2 MB per AP — matches the BSP boot stack (linker.ld). Native intents
+// dispatched from the GUI run on a worker core's AP stack via
+// `scheduler::spawn` (NOT a fiber), and an `update` drives the full OTA chain
+// there: https_get_once alone keeps a 17 KB record buffer live for the whole
+// body stream, on top of a deep TLS → StreamingWriter → storage::put →
+// btree::insert chain whose split path nests several 4 KB node buffers plus
+// BLAKE3. The first B-tree split (~16 MiB into a large asset, once the tree
+// fills) tipped the old 64 KB stack over → silent overflow smashed return
+// addresses → wild RIP page fault. There's no guard page, so the size is the
+// only safety margin — the BSP learned this exact lesson (256 KB → 2 MB).
+const AP_STACK_SIZE: usize = 2 * 1024 * 1024;
 
 // Data area offsets within trampoline (must match trampoline.s).
 // All shifted up by 0x10 in v0.85.5 to give the AVX bring-up
@@ -232,7 +242,7 @@ fn send_ipi(apic_base: u64, target_apic_id: u32, icr_low: u32) {
     }
 }
 
-/// Allocate 64KB stack for an AP. Returns stack top (stacks grow down).
+/// Allocate the per-AP stack (`AP_STACK_SIZE`). Returns stack top (grows down).
 fn allocate_ap_stack() -> u64 {
     let pages = AP_STACK_SIZE / crate::memory::PAGE_SIZE;
     match crate::memory::allocate_contiguous(pages) {
