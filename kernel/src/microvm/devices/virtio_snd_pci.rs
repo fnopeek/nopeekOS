@@ -16,11 +16,6 @@
 
 use super::guest_mem::GuestMem;
 use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
-use crate::kprintln;
-use core::sync::atomic::{AtomicU32, Ordering};
-
-// Diagnostic counter for tx PCM buffers (localizes a "no audio" break).
-static SND_TX_BUFS: AtomicU32 = AtomicU32::new(0);
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_SND_DEVICE: u32 = 0x1059;
@@ -282,26 +277,6 @@ impl VirtioSnd {
     fn process_control(&mut self, req: &[u8], resp: &mut [u8]) -> usize {
         let code = le32(req, 0);
         match code {
-            R_PCM_INFO => kprintln!("[snd] ctrl PCM_INFO"),
-            R_PCM_SET_PARAMS => {
-                // virtio_snd_pcm_set_params: hdr(4) stream_id(4) buffer_bytes(4)
-                // period_bytes(4) features(4) channels(1) format(1) rate(1).
-                // Logging this reveals — on OUR side, no dependency on cubeb's
-                // own (Gecko-captured, invisible) logs — whether a latency pref
-                // actually changed the buffer size, and the period geometry.
-                kprintln!("[snd] ctrl SET_PARAMS buf={} period={} ch={} fmt={} rate={}",
-                    le32(req, 8), le32(req, 12),
-                    req.get(20).copied().unwrap_or(0),
-                    req.get(21).copied().unwrap_or(0),
-                    req.get(22).copied().unwrap_or(0));
-            }
-            R_PCM_PREPARE => kprintln!("[snd] ctrl PREPARE"),
-            R_PCM_START => kprintln!("[snd] ctrl START"),
-            R_PCM_STOP => kprintln!("[snd] ctrl STOP"),
-            R_PCM_RELEASE => kprintln!("[snd] ctrl RELEASE"),
-            _ => kprintln!("[snd] ctrl {:#x}", code),
-        }
-        match code {
             R_PCM_INFO => {
                 // virtio_snd_query_info { hdr; start_id; count; size }
                 let start = le32(req, 4);
@@ -425,20 +400,12 @@ impl VirtioSnd {
                 break; // too early; retry next pump tick
             }
 
-            // Pass 2: submit the PCM in ≤4 KB chunks; track peak |sample| to
-            // tell real audio (peak large) from silence (peak ~0) at the host.
-            let mut peak: u16 = 0;
+            // Submit the PCM into the mailbox in ≤4 KB chunks.
             for s in 0..pcm_seg_n {
                 let (mut a, mut remaining) = (pcm_segs[s].0, pcm_segs[s].1 as usize);
                 while remaining > 0 {
                     let n = remaining.min(chunk.len());
                     mem.read_bytes(a, &mut chunk[..n]);
-                    let mut i = 0;
-                    while i + 1 < n {
-                        let amp = i16::from_le_bytes([chunk[i], chunk[i + 1]]).unsigned_abs();
-                        if amp > peak { peak = amp; }
-                        i += 2;
-                    }
                     crate::audio::submit(slot, &chunk[..n]);
                     a += n as u64; remaining -= n;
                 }
@@ -454,11 +421,6 @@ impl VirtioSnd {
             self.bytes_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
             last = last.wrapping_add(1);
             any = true;
-            let n = SND_TX_BUFS.fetch_add(1, Ordering::Relaxed);
-            if n < 10 || n % 200 == 0 {
-                kprintln!("[snd] tx buf #{} ({} bytes, mbox-free {}, peak {})",
-                    n + 1, pcm_len, crate::audio::free_space(slot), peak);
-            }
         }
 
         if let Some(qm) = self.queues.get_mut(2) { qm.last_avail_idx = last; qm.used_idx = used; }

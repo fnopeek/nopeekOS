@@ -235,12 +235,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"media.cubeb.sandbox\", false);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb_latency_playback_ms\", 2000);' >> /tmp/moz/user.js; \
-                 echo 'user_pref(\"NPK.sentinel.last\", 1);' >> /tmp/moz/user.js; \
-                 rcw=$?; sync; \
-                 if grep -q 'NPK.sentinel.last' /tmp/moz/user.js 2>/dev/null; then echo '<0>[djf] user.js sentinel OK -> writes land' > /dev/kmsg; else echo \"<0>[djf] user.js sentinel MISSING -> writes truncated (rc=$rcw) = DISK FULL/RO\" > /dev/kmsg; fi; \
-                 echo \"<0>[djf] user.js bytes=$(wc -c < /tmp/moz/user.js 2>/dev/null) lines=$(wc -l < /tmp/moz/user.js 2>/dev/null)\" > /dev/kmsg; \
-                 df -k /tmp/moz 2>/dev/null | tail -1 | while read L; do echo \"<0>[djf] df /tmp/moz: $L\" > /dev/kmsg; done; \
-                 dmesg 2>/dev/null | grep -iaE 'ext4|no space|EROFS|read-only|quota' | tail -6 | while read L; do echo \"<0>[djf] $L\" > /dev/kmsg; done; \
+                 sync; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
@@ -251,41 +246,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
-                 ( sleep 14; echo '<0>[diag] === idle CPU: TOP consumers (real %, 3s window) ===' > /dev/kmsg; \
-                   top -b -n2 -d 3 2>/dev/null | awk '/PID/{n++} n>=2' | head -20 | while read L; do echo \"<0>[cpu] $L\" > /dev/kmsg; done; \
-                   echo '<0>[diag] === virtio-gpu flush rate proxy: guest frame stats ===' > /dev/kmsg; \
-                   grep -aE 'fps|frame|vblank|page.?flip|repaint' /tmp/cage.log 2>/dev/null | tail -8 | while read L; do echo \"<0>[gpu] $L\" > /dev/kmsg; done ) & \
                  sleep 1; \
-                 echo '<0>[diag] === user.js we wrote (verify clean, pre-launch) ===' > /dev/kmsg; \
-                 cat /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs] $L\" > /dev/kmsg; done; \
-                 echo \"<0>[ujs-n] user.js line count: $(wc -l < /tmp/moz/user.js 2>/dev/null)\" > /dev/kmsg; \
-                 echo '<0>[diag] === audio prefs present in user.js? (burst-safe) ===' > /dev/kmsg; \
-                 grep -iaE 'cubeb|audioipc|latency' /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs-aud] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
                  cage -- librewolf --no-remote --profile /tmp/moz \
                    > /tmp/cage.log 2>&1; \
-                 rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
-                 echo '<0>[diag] === profile actually used? (Florian: temp-profile suspicion) ===' > /dev/kmsg; \
-                 ls -la /tmp/moz/prefs.js /tmp/moz/times.json /tmp/moz/compatibility.ini 2>/dev/null | while read L; do echo \"<0>[prof] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === stray profile dirs outside /tmp/moz (= temp profile!) ===' > /dev/kmsg; \
-                 ls -la /tmp/.mozilla /root/.mozilla /tmp/moz/.parentlock 2>/dev/null | while read L; do echo \"<0>[prof] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === prefs.js: which media/cubeb prefs did Firefox actually load? ===' > /dev/kmsg; \
-                 grep -iaE 'cubeb|audioipc|latency' /tmp/moz/prefs.js 2>/dev/null | while read L; do echo \"<0>[prefs] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === moz.log files (parent vs utility/server) ===' > /dev/kmsg; \
-                 ls -la /tmp/moz.log* 2>/dev/null | while read L; do echo \"<0>[aud-ls] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === cubeb/alsa errors (shm_area_size spam filtered out) ===' > /dev/kmsg; \
-                 grep -iaE 'cubeb|alsa|snd_pcm|underrun|xrun|epipe|emfile|enomem|virtio_snd|AudioIPC|MediaSink|backend|server|connect|sandbox|seccomp' /tmp/cage.log /tmp/moz.log* 2>/dev/null | grep -ivaE 'shm_area_size' | tail -70 | while read L; do echo \"<0>[aud] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === shm_area_size ground-truth (want non-zero) ===' > /dev/kmsg; \
-                 grep -iaE 'shm_area_size' /tmp/moz.log* /tmp/cage.log 2>/dev/null | head -3 | while read L; do echo \"<0>[shm] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === cubeb-C / audioipc server trace (CUBEB_LOG_LEVEL+RUST_LOG) ===' > /dev/kmsg; \
-                 grep -iaE 'alsa|snd_pcm|pcm_open|set_params|hw_params|sw_params|avail|writei|state|shm|ringbuf|rpc|register_device_collection|stream_init|audioipc' /tmp/cage.log 2>/dev/null | tail -50 | while read L; do echo \"<0>[snd-srv] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === /tmp/cage.log tail 60 ===' > /dev/kmsg; \
-                 tail -60 /tmp/cage.log 2>/dev/null | while read L; do echo \"<0>[cage] $L\" > /dev/kmsg; done; \
-                 echo '<0>[diag] === /tmp/moz.log tail 80 ===' > /dev/kmsg; \
-                 tail -80 /tmp/moz.log 2>/dev/null | while read L; do echo \"<0>[moz] $L\" > /dev/kmsg; done; \
-                 dmesg 2>/dev/null \
-                   | grep -iE 'segfault|fatal signal|Comm:|RIP:|RSP:|Code:' \
-                   | tail -40 | while read L; do echo \"<0>[crash] $L\" > /dev/kmsg; done; \
+                 rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
@@ -604,16 +568,11 @@ unsafe fn rt_check_thread(pid: &[u8], tid: &[u8], kmsg_fd: i64) {
     if r <= 0 { return; }
     let comm = &comm[..r as usize];
     if !rt_match(comm) { return; }
-
-    // sched_setscheduler(tid, SCHED_RR, &{ sched_priority = 2 }).
-    let param: [i32; 1] = [2];
-    let rc = unsafe { syscall3(SYS_SCHED_SETSCHEDULER, tidnum as u64, SCHED_RR, param.as_ptr() as u64) };
-    if unsafe { rt_already(tidnum) } { return; } // log each tid once
-    if rc == 0 {
-        say(kmsg_fd, b"[rt] promoted audio thread -> SCHED_RR 2\n");
-    } else {
-        say(kmsg_fd, b"[rt] sched_setscheduler FAILED on audio thread\n");
-    }
+    let _ = kmsg_fd;
+    // Promote each matching thread once (idempotent; skip if already done).
+    if unsafe { rt_already(tidnum) } { return; }
+    let param: [i32; 1] = [2]; // sched_priority = 2
+    let _ = unsafe { syscall3(SYS_SCHED_SETSCHEDULER, tidnum as u64, SCHED_RR, param.as_ptr() as u64) };
 }
 
 // ── Raw syscall wrappers ───────────────────────────────────────────
