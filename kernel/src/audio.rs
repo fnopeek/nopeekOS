@@ -66,6 +66,16 @@ pub fn close(slot: usize) {
     slots[slot].len = 0;
 }
 
+/// Empty a slot's ring without releasing it. Used when a still-held stream is
+/// re-prepared (e.g. cubeb re-initialising after an underrun without a clean
+/// RELEASE): reuse the slot + drop stale PCM instead of leaking a fresh one.
+pub fn reset(slot: usize) {
+    if slot >= NUM_SLOTS { return; }
+    let mut slots = SLOTS.lock();
+    slots[slot].head = 0;
+    slots[slot].len = 0;
+}
+
 /// Append PCM to a slot's ring. Returns the number of bytes accepted (fewer
 /// than `data.len()` when the ring is full — the submitter must retry/pace).
 pub fn submit(slot: usize, data: &[u8]) -> usize {
