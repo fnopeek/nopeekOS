@@ -100,8 +100,15 @@ pub const NODE_HEADER_SIZE: usize = 16;
 /// 32-byte checksum trailer, BLAKE3 over the rest of the block.
 pub const CHECKSUM_SIZE: usize = 32;
 
+// Reserve the 32-byte BLAKE3 checksum trailer (at BLOCK_SIZE-32), same as
+// MAX_LEAF_ENTRIES does. Without it the constant was 102, but entry 101 sits at
+// offset 16+101*40 = 4056..4096 and overlaps the checksum at 4064 — writing the
+// checksum then clobbers that entry's child pointer with hash bytes (a
+// high-entropy garbage block number → OutOfRange on the next descent), and it
+// slips past read_node's checksum verify because the clobbered bytes ARE the
+// checksum. 101 keeps the last entry below 4064.
 pub const MAX_INTERNAL_KEYS: usize =
-    (BLOCK_SIZE - NODE_HEADER_SIZE) / INTERNAL_ENTRY_SIZE; // 102
+    (BLOCK_SIZE - NODE_HEADER_SIZE - CHECKSUM_SIZE) / INTERNAL_ENTRY_SIZE; // 101
 pub const MAX_LEAF_ENTRIES: usize =
     (BLOCK_SIZE - NODE_HEADER_SIZE - CHECKSUM_SIZE) / LEAF_ENTRY_SIZE; // 36
 
