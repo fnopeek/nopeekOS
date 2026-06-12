@@ -283,7 +283,18 @@ impl VirtioSnd {
         let code = le32(req, 0);
         match code {
             R_PCM_INFO => kprintln!("[snd] ctrl PCM_INFO"),
-            R_PCM_SET_PARAMS => kprintln!("[snd] ctrl SET_PARAMS"),
+            R_PCM_SET_PARAMS => {
+                // virtio_snd_pcm_set_params: hdr(4) stream_id(4) buffer_bytes(4)
+                // period_bytes(4) features(4) channels(1) format(1) rate(1).
+                // Logging this reveals — on OUR side, no dependency on cubeb's
+                // own (Gecko-captured, invisible) logs — whether a latency pref
+                // actually changed the buffer size, and the period geometry.
+                kprintln!("[snd] ctrl SET_PARAMS buf={} period={} ch={} fmt={} rate={}",
+                    le32(req, 8), le32(req, 12),
+                    req.get(20).copied().unwrap_or(0),
+                    req.get(21).copied().unwrap_or(0),
+                    req.get(22).copied().unwrap_or(0));
+            }
             R_PCM_PREPARE => kprintln!("[snd] ctrl PREPARE"),
             R_PCM_START => kprintln!("[snd] ctrl START"),
             R_PCM_STOP => kprintln!("[snd] ctrl STOP"),
