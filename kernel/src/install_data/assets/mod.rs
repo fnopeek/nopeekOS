@@ -117,11 +117,6 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         version: Some(include_str!("wallpaper.version")),
     },
     BundledAsset {
-        fs_path: "sys/wasm/wifi",
-        bytes:   include_bytes!("wifi.wasm"),
-        version: Some(include_str!("wifi.version")),
-    },
-    BundledAsset {
         fs_path: "sys/wasm/drun",
         bytes:   include_bytes!("drun.wasm"),
         version: Some(include_str!("drun.version")),
