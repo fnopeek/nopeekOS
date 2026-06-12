@@ -15,7 +15,13 @@ pub const CHANNELS: usize = 2;
 pub const BYTES_PER_FRAME: usize = CHANNELS * 2; // S16
 
 const NUM_SLOTS: usize = 4;
-const SLOT_BYTES: usize = 32768; // ~170 ms; also holds a short one-shot in full
+// ~1.36 s ring per slot. The old 32 KiB (~170 ms) was too small to absorb the
+// clock drift between virtio-snd's wall-clock-paced fill (100 Hz ticks) and
+// audio_hda's HDA-crystal-paced drain, plus the resident-driver poll jitter
+// under heavy browser load — `mbox-free` pegged at 0 the whole session, so
+// `submit` dropped real PCM (the "choppy / cuts out" symptom). Zero-init →
+// .bss, so 4 × 256 KiB = 1 MiB costs no binary size.
+const SLOT_BYTES: usize = 262144;
 
 struct Slot {
     active: bool,
