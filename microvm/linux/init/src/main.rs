@@ -253,6 +253,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
+                 ( sleep 14; echo '<0>[diag] === idle CPU by process (real %, 3s window) ===' > /dev/kmsg; \
+                   top -b -n2 -d 3 2>/dev/null | tail -24 | while read L; do echo \"<0>[cpu] $L\" > /dev/kmsg; done; \
+                   echo '<0>[diag] === virtio-gpu flush rate proxy: guest frame stats ===' > /dev/kmsg; \
+                   grep -aE 'fps|frame|vblank|page.?flip|repaint' /tmp/cage.log 2>/dev/null | tail -8 | while read L; do echo \"<0>[gpu] $L\" > /dev/kmsg; done ) & \
                  sleep 1; \
                  echo '<0>[diag] === user.js we wrote (verify clean, pre-launch) ===' > /dev/kmsg; \
                  cat /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs] $L\" > /dev/kmsg; done; \
