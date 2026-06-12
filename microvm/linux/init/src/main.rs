@@ -231,6 +231,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp HOME=/tmp \
                  MOZ_ENABLE_WAYLAND=1 \
+                 CUBEB_LOG_LEVEL=verbose \
+                 RUST_LOG=audioipc=trace,audioipc2=trace,cubeb=trace \
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
@@ -245,6 +247,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  ls -la /tmp/moz.log* 2>/dev/null | while read L; do echo \"<0>[aud-ls] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === cubeb/alsa errors (shm_area_size spam filtered out) ===' > /dev/kmsg; \
                  grep -iaE 'cubeb|alsa|snd_pcm|underrun|xrun|epipe|emfile|enomem|virtio_snd|AudioIPC|MediaSink|backend|server|connect|sandbox|seccomp' /tmp/cage.log /tmp/moz.log* 2>/dev/null | grep -ivaE 'shm_area_size' | tail -70 | while read L; do echo \"<0>[aud] $L\" > /dev/kmsg; done; \
+                 echo '<0>[diag] === shm_area_size ground-truth (want non-zero) ===' > /dev/kmsg; \
+                 grep -iaE 'shm_area_size' /tmp/moz.log* /tmp/cage.log 2>/dev/null | head -3 | while read L; do echo \"<0>[shm] $L\" > /dev/kmsg; done; \
+                 echo '<0>[diag] === cubeb-C / audioipc server trace (CUBEB_LOG_LEVEL+RUST_LOG) ===' > /dev/kmsg; \
+                 grep -iaE 'alsa|snd_pcm|pcm_open|set_params|hw_params|sw_params|avail|writei|state|shm|ringbuf|rpc|register_device_collection|stream_init|audioipc' /tmp/cage.log 2>/dev/null | tail -50 | while read L; do echo \"<0>[snd-srv] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === /tmp/cage.log tail 60 ===' > /dev/kmsg; \
                  tail -60 /tmp/cage.log 2>/dev/null | while read L; do echo \"<0>[cage] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === /tmp/moz.log tail 80 ===' > /dev/kmsg; \
