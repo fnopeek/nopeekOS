@@ -1303,6 +1303,12 @@ impl VmContext {
     let slice_deadline = crate::interrupts::rdtsc()
         + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
 
+    // Host-time profiler: attribute cycles to guest-run vs each exit
+    // handler. `prof_post` = TSC right after the previous VMRESUME;
+    // `prof_bucket` = that exit's bucket. The gap to the next VMRESUME is
+    // the handler cost. 0 = no previous sample yet.
+    let mut prof_post: u64 = 0;
+    let mut prof_bucket: usize = crate::microvm::cpu::VMX_OTHER;
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
             return Ok(SliceOutcome::StillRunning);
@@ -1374,7 +1380,15 @@ impl VmContext {
         // pass-through).
         let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
         let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;
+        // Profiler: charge the time since the last exit to that exit's
+        // handler bucket, then time the VMRESUME itself as guest cycles.
+        let prof_pre = crate::interrupts::rdtsc();
+        if prof_post != 0 {
+            crate::microvm::cpu::record_exit_cycles(prof_bucket, prof_pre.wrapping_sub(prof_post));
+        }
         let result = vmcs::run_guest_once(&mut self.vcpu.regs, self.vcpu.launched, hf, gf);
+        prof_post = crate::interrupts::rdtsc();
+        crate::microvm::cpu::record_guest_cycles(prof_post.wrapping_sub(prof_pre));
         let outcome = result?;
         self.vcpu.launched = true;
         // DIAG (bare-metal reason-33): snapshot the injection field that
@@ -1414,7 +1428,7 @@ impl VmContext {
         self.vcpu.trace.record(basic, outcome.exit_qualification);
 
         // Exit-reason histogram (diagnosis — `cores` shows the mix).
-        crate::microvm::cpu::record_vm_exit(match basic {
+        prof_bucket = match basic {
             1 => crate::microvm::cpu::VMX_INTR,
             12 => crate::microvm::cpu::VMX_HLT,
             48 => crate::microvm::cpu::VMX_MMIO, // EPT violation
@@ -1422,7 +1436,8 @@ impl VmContext {
             31 | 32 => crate::microvm::cpu::VMX_MSR,
             10 => crate::microvm::cpu::VMX_CPUID,
             _ => crate::microvm::cpu::VMX_OTHER,
-        });
+        };
+        crate::microvm::cpu::record_vm_exit(prof_bucket);
 
         // DIAG (bare-metal reason-33): per-exit mode trace for the first
         // ~14 exits. Shows EXACTLY when the guest enters long mode (CS.L

@@ -68,6 +68,38 @@ pub fn vm_exit_snapshot() -> [u64; VMEXIT_BUCKETS] {
     out
 }
 
+// ── Host-time profiler ─────────────────────────────────────────────
+// Where do the dedicated guest cores' cycles actually go? Counts (above)
+// say HOW OFTEN we exit; these say HOW LONG each kind of handling costs vs
+// time spent running the guest (VMRESUME). Proves whether the host wastes
+// the core in mmio-decode / io-PIC handling (→ guest starved, "0% CPU"
+// because it never gets the time) or genuinely runs the guest.
+static VM_EXIT_CYCLES: [AtomicU64; VMEXIT_BUCKETS] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; VMEXIT_BUCKETS]
+};
+static VM_GUEST_CYCLES: AtomicU64 = AtomicU64::new(0);
+
+/// TSC cycles spent IN the handler for `bucket` (between the exit and the
+/// next VMRESUME).
+pub fn record_exit_cycles(bucket: usize, cycles: u64) {
+    if bucket < VMEXIT_BUCKETS {
+        VM_EXIT_CYCLES[bucket].fetch_add(cycles, Ordering::Relaxed);
+    }
+}
+/// TSC cycles spent inside VMRESUME (the guest actually executing).
+pub fn record_guest_cycles(cycles: u64) {
+    VM_GUEST_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+}
+/// `(per-bucket handler cycles, total guest cycles)` for a rate snapshot.
+pub fn vm_cycle_snapshot() -> ([u64; VMEXIT_BUCKETS], u64) {
+    let mut out = [0u64; VMEXIT_BUCKETS];
+    for i in 0..VMEXIT_BUCKETS {
+        out[i] = VM_EXIT_CYCLES[i].load(Ordering::Relaxed);
+    }
+    (out, VM_GUEST_CYCLES.load(Ordering::Relaxed))
+}
+
 // ── Guest/host FPU (XSAVE) swap ────────────────────────────────────
 //
 // `vmrun`/VMRESUME do NOT save or restore x87/SSE/AVX/AVX-512 — host
