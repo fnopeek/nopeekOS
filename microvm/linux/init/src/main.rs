@@ -224,8 +224,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb.backend\", \"alsa\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb.sandbox\", false);' >> /tmp/moz/user.js; \
-                 echo 'user_pref(\"media.audioipc.shm_area_size\", 65536);' >> /tmp/moz/user.js; \
-                 echo 'user_pref(\"media.cubeb_latency_playback_ms\", 1000);' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.cubeb_latency_playback_ms\", 2000);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"NPK.sentinel.last\", 1);' >> /tmp/moz/user.js; \
                  rcw=$?; sync; \
                  if grep -q 'NPK.sentinel.last' /tmp/moz/user.js 2>/dev/null; then echo '<0>[djf] user.js sentinel OK -> writes land' > /dev/kmsg; else echo \"<0>[djf] user.js sentinel MISSING -> writes truncated (rc=$rcw) = DISK FULL/RO\" > /dev/kmsg; fi; \
