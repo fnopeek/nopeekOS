@@ -519,6 +519,9 @@ run_qemu_generic() {
         -device qemu-xhci,id=xhci \
         -device usb-kbd,bus=xhci.0 \
         -device usb-mouse,bus=xhci.0 \
+        -device intel-hda \
+        -device hda-output,audiodev=snd0 \
+        -audiodev "${QEMU_AUDIODEV:-wav,id=snd0,path=/tmp/nopeek-audio.wav}" \
         "${installer_args[@]}" \
         "${net_args[@]}" \
         -no-reboot \
