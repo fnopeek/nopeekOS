@@ -28,12 +28,13 @@ struct Slot {
     auto_close: bool, // free the slot once drained (one-shot sounds, e.g. `beep`)
     head: usize,      // read offset into `buf`
     len: usize,       // bytes currently buffered
+    drained: u64,     // total bytes pulled by `poll_mix` since `open` (real 48 kHz clock)
     buf: [u8; SLOT_BYTES],
 }
 
 impl Slot {
     const fn new() -> Self {
-        Self { active: false, auto_close: false, head: 0, len: 0, buf: [0u8; SLOT_BYTES] }
+        Self { active: false, auto_close: false, head: 0, len: 0, drained: 0, buf: [0u8; SLOT_BYTES] }
     }
 }
 
@@ -52,6 +53,7 @@ pub fn open() -> i32 {
             s.auto_close = false;
             s.head = 0;
             s.len = 0;
+            s.drained = 0;
             return i as i32;
         }
     }
@@ -130,6 +132,7 @@ pub fn poll_mix(out: &mut [u8]) -> usize {
             let ro = i16::from_le_bytes([s.buf[(p + 2) % SLOT_BYTES], s.buf[(p + 3) % SLOT_BYTES]]);
             s.head = (p + BYTES_PER_FRAME) % SLOT_BYTES;
             s.len -= BYTES_PER_FRAME;
+            s.drained += BYTES_PER_FRAME as u64; // real-clock pacing for virtio-snd
             l += lo as i32;
             r += ro as i32;
             if s.len == 0 && s.auto_close { s.active = false; }
@@ -156,6 +159,16 @@ pub fn free_space(slot: usize) -> usize {
     let slots = SLOTS.lock();
     if !slots[slot].active { return 0; }
     SLOT_BYTES - slots[slot].len
+}
+
+/// Total bytes `poll_mix` has pulled from a slot since it was opened — the
+/// real 48 kHz speaker clock. The virtio-snd bridge paces tx-buffer completion
+/// off this (instead of a separate host wall-clock) so the guest's audio clock
+/// tracks the actual HDA drain and doesn't drift. 0 if the slot is closed.
+pub fn drained(slot: usize) -> u64 {
+    if slot >= NUM_SLOTS { return 0; }
+    let slots = SLOTS.lock();
+    slots[slot].drained
 }
 
 /// Set master volume (0..=100 %).
