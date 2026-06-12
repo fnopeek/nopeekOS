@@ -29,6 +29,14 @@ const SYS_CHDIR: u64 = 80;
 const SYS_CHROOT: u64 = 161;
 const SYS_MOUNT: u64 = 165;
 const SYS_REBOOT: u64 = 169;
+const SYS_FORK: u64 = 57;
+const SYS_GETDENTS64: u64 = 217;
+const SYS_NANOSLEEP: u64 = 35;
+const SYS_SCHED_SETSCHEDULER: u64 = 144;
+
+// O_DIRECTORY for opendir-style reads, SCHED_RR for the RT promoter.
+const O_DIRECTORY: u64 = 0o200000;
+const SCHED_RR: u64 = 2;
 
 // mount(2) flags
 const MS_RDONLY: u64 = 1;
@@ -245,25 +253,6 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
-                 : > /tmp/.rtseen; \
-                 ( while true; do \
-                     for c in /proc/[0-9]*/task/[0-9]*/comm; do \
-                       [ -r \"$c\" ] || continue; n=$(cat \"$c\" 2>/dev/null); \
-                       case \"$n\" in \
-                         *cubeb*|*AudioIPC*|*udioStream*) \
-                           t=\"${c%/comm}\"; t=\"${t##*/}\"; \
-                           grep -q \"^$t\\$\" /tmp/.rtseen 2>/dev/null && continue; \
-                           if chrt -r -p 2 \"$t\" 2>/dev/null; then \
-                             echo \"$t\" >> /tmp/.rtseen; \
-                             echo \"<0>[rt] promoted tid $t ($n) -> SCHED_RR 2\" > /dev/kmsg; \
-                           else \
-                             echo \"$t\" >> /tmp/.rtseen; \
-                             echo \"<0>[rt] chrt FAILED for $n (busybox chrt missing? need util-linux)\" > /dev/kmsg; \
-                           fi ;; \
-                       esac; \
-                     done; \
-                     sleep 1; \
-                   done ) & \
                  sleep 1; \
                  echo '<0>[diag] === user.js we wrote (verify clean, pre-launch) ===' > /dev/kmsg; \
                  cat /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs] $L\" > /dev/kmsg; done; \
@@ -304,6 +293,11 @@ fn launch_wayland(kmsg_fd: i64) {
 
     let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
     let envp = [env0, env1, core::ptr::null::<u8>()];
+
+    // Fork the RT-promoter before becoming the shell. The child loops on
+    // /proc promoting cubeb/AudioIPC threads to SCHED_RR from outside the
+    // sandbox; the parent execs cage+librewolf as usual.
+    unsafe { spawn_rt_watcher(kmsg_fd); }
 
     unsafe {
         syscall3(
@@ -465,6 +459,158 @@ fn halt() -> ! {
         let _ = syscall1(SYS_EXIT, 0);
     }
     loop {}
+}
+
+// ── Real-time audio-thread promoter ────────────────────────────────
+//
+// LibreWolf's audio thread needs SCHED_RR to avoid underruns under our
+// software-everything CPU load, but inside the content sandbox it can't
+// promote itself (seccomp blocks sched_setscheduler) and we have no
+// rtkit/D-Bus broker. So PID-1 forks a tiny watcher that, from OUTSIDE
+// the sandbox (as root), scans /proc for the cubeb/AudioIPC threads and
+// sched_setscheduler's them to SCHED_RR. Root-from-outside is NOT
+// blocked by the target's seccomp filter → the content sandbox stays on.
+// Runs as a separate child: a bug here can't take down PID-1.
+
+static mut RT_SEEN: [i32; 96] = [0; 96];
+static mut RT_SEEN_N: usize = 0;
+
+unsafe fn rt_already(tid: i32) -> bool {
+    unsafe {
+        // Raw-pointer access: edition 2024 denies references to `static mut`.
+        let base = (&raw mut RT_SEEN) as *mut i32;
+        let np = &raw mut RT_SEEN_N;
+        let n = *np;
+        let mut i = 0usize;
+        while i < n {
+            if *base.add(i) == tid { return true; }
+            i += 1;
+        }
+        if n < 96 { *base.add(n) = tid; *np = n + 1; }
+        false
+    }
+}
+
+fn rt_match(comm: &[u8]) -> bool {
+    byte_find(comm, b"cubeb") || byte_find(comm, b"AudioIPC")
+}
+
+fn byte_find(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() { return false; }
+    let mut i = 0;
+    // Manual byte compare — slice `==` would emit a bcmp/memcmp call that
+    // this freestanding (no libc) binary can't link.
+    while i + needle.len() <= hay.len() {
+        let mut j = 0;
+        while j < needle.len() && hay[i + j] == needle[j] { j += 1; }
+        if j == needle.len() { return true; }
+        i += 1;
+    }
+    false
+}
+
+/// Fork the RT watcher. Parent returns immediately; the child never returns.
+unsafe fn spawn_rt_watcher(kmsg_fd: i64) {
+    let pid = unsafe { syscall0(SYS_FORK) };
+    if pid == 0 {
+        unsafe { rt_watcher_loop(kmsg_fd); }
+    }
+}
+
+unsafe fn rt_watcher_loop(kmsg_fd: i64) -> ! {
+    loop {
+        unsafe { rt_scan_proc(kmsg_fd); }
+        // ~500 ms between sweeps: timespec { tv_sec=0, tv_nsec=500e6 }.
+        let ts: [i64; 2] = [0, 500_000_000];
+        unsafe { let _ = syscall2(SYS_NANOSLEEP, ts.as_ptr() as u64, 0); }
+    }
+}
+
+unsafe fn rt_scan_proc(kmsg_fd: i64) {
+    let fd = unsafe { syscall2(SYS_OPEN, b"/proc\0".as_ptr() as u64, O_RDONLY | O_DIRECTORY) };
+    if fd < 0 { return; }
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = unsafe { syscall3(SYS_GETDENTS64, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+        if n <= 0 { break; }
+        let n = n as usize;
+        let mut off = 0usize;
+        // linux_dirent64: d_ino(8) d_off(8) d_reclen@16(2) d_type@18(1) d_name@19
+        while off + 19 <= n {
+            let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+            if reclen < 19 || off + reclen > n { break; }
+            let name = &buf[off + 19..off + reclen];
+            if name[0] >= b'0' && name[0] <= b'9' {
+                unsafe { rt_scan_tasks(name, kmsg_fd); }
+            }
+            off += reclen;
+        }
+    }
+    unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
+}
+
+unsafe fn rt_scan_tasks(pid: &[u8], kmsg_fd: i64) {
+    // "/proc/<pid>/task\0"
+    let mut path = [0u8; 64];
+    let mut p = 0usize;
+    for &b in b"/proc/" { path[p] = b; p += 1; }
+    for &b in pid { if b == 0 { break; } if p >= 56 { return; } path[p] = b; p += 1; }
+    for &b in b"/task\0" { path[p] = b; p += 1; }
+    let fd = unsafe { syscall2(SYS_OPEN, path.as_ptr() as u64, O_RDONLY | O_DIRECTORY) };
+    if fd < 0 { return; }
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = unsafe { syscall3(SYS_GETDENTS64, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+        if n <= 0 { break; }
+        let n = n as usize;
+        let mut off = 0usize;
+        while off + 19 <= n {
+            let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+            if reclen < 19 || off + reclen > n { break; }
+            let tid = &buf[off + 19..off + reclen];
+            if tid[0] >= b'0' && tid[0] <= b'9' {
+                unsafe { rt_check_thread(pid, tid, kmsg_fd); }
+            }
+            off += reclen;
+        }
+    }
+    unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
+}
+
+unsafe fn rt_check_thread(pid: &[u8], tid: &[u8], kmsg_fd: i64) {
+    // "/proc/<pid>/task/<tid>/comm\0" + parse tid as int.
+    let mut path = [0u8; 80];
+    let mut p = 0usize;
+    for &b in b"/proc/" { path[p] = b; p += 1; }
+    for &b in pid { if b == 0 { break; } if p >= 40 { return; } path[p] = b; p += 1; }
+    for &b in b"/task/" { path[p] = b; p += 1; }
+    let mut tidnum: i32 = 0;
+    for &b in tid {
+        if b == 0 { break; }
+        if p >= 70 || b < b'0' || b > b'9' { return; }
+        path[p] = b; p += 1;
+        tidnum = tidnum.wrapping_mul(10).wrapping_add((b - b'0') as i32);
+    }
+    for &b in b"/comm\0" { path[p] = b; p += 1; }
+
+    let fd = unsafe { syscall2(SYS_OPEN, path.as_ptr() as u64, O_RDONLY) };
+    if fd < 0 { return; }
+    let mut comm = [0u8; 32];
+    let r = unsafe { syscall3(SYS_READ, fd as u64, comm.as_mut_ptr() as u64, comm.len() as u64) };
+    unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
+    if r <= 0 { return; }
+    let comm = &comm[..r as usize];
+    if !rt_match(comm) { return; }
+
+    // sched_setscheduler(tid, SCHED_RR, &{ sched_priority = 2 }).
+    let param: [i32; 1] = [2];
+    let rc = unsafe { syscall3(SYS_SCHED_SETSCHEDULER, tidnum as u64, SCHED_RR, param.as_ptr() as u64) };
+    if unsafe { rt_already(tidnum) } { return; } // log each tid once
+    if rc == 0 {
+        say(kmsg_fd, b"[rt] promoted audio thread -> SCHED_RR 2\n");
+    } else {
+        say(kmsg_fd, b"[rt] sched_setscheduler FAILED on audio thread\n");
+    }
 }
 
 // ── Raw syscall wrappers ───────────────────────────────────────────
