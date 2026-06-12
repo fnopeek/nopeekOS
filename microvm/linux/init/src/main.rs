@@ -206,7 +206,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.theme.content-theme|0' \
                    'layout.css.prefers-color-scheme.content-override|0' \
                    'security.sandbox.warn_unprivileged_namespaces|false' \
-                   'security.sandbox.content.level|0' \
+                   'media.av1.enabled|false' \
                    'browser.startup.page|3' \
                    'browser.sessionstore.interval|5000' \
                    'browser.cache.disk.enable|false' \
@@ -242,11 +242,28 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_ENABLE_WAYLAND=1 \
                  CUBEB_LOG_LEVEL=verbose \
                  RUST_LOG=audioipc=trace,audioipc2=trace,cubeb=trace \
-                 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
-                 ulimit -r 99 2>/dev/null; ulimit -l unlimited 2>/dev/null; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
+                 : > /tmp/.rtseen; \
+                 ( while true; do \
+                     for c in /proc/[0-9]*/task/[0-9]*/comm; do \
+                       [ -r \"$c\" ] || continue; n=$(cat \"$c\" 2>/dev/null); \
+                       case \"$n\" in \
+                         *cubeb*|*AudioIPC*|*udioStream*) \
+                           t=\"${c%/comm}\"; t=\"${t##*/}\"; \
+                           grep -q \"^$t\\$\" /tmp/.rtseen 2>/dev/null && continue; \
+                           if chrt -r -p 2 \"$t\" 2>/dev/null; then \
+                             echo \"$t\" >> /tmp/.rtseen; \
+                             echo \"<0>[rt] promoted tid $t ($n) -> SCHED_RR 2\" > /dev/kmsg; \
+                           else \
+                             echo \"$t\" >> /tmp/.rtseen; \
+                             echo \"<0>[rt] chrt FAILED for $n (busybox chrt missing? need util-linux)\" > /dev/kmsg; \
+                           fi ;; \
+                       esac; \
+                     done; \
+                     sleep 1; \
+                   done ) & \
                  sleep 1; \
                  echo '<0>[diag] === user.js we wrote (verify clean, pre-launch) ===' > /dev/kmsg; \
                  cat /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs] $L\" > /dev/kmsg; done; \
