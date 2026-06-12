@@ -826,7 +826,10 @@ pub fn intent_shade(args: &str) {
                     kprintln!("  windows: {}", comp.window_count());
                     kprintln!("  workspace: {}/4", comp.active_workspace + 1);
                     kprintln!("  gaps: {}px  border: {}px", comp.gaps, comp.border);
-                    kprintln!("  bar: {:?} ({}px)", comp.bar.position, comp.bar.height);
+                    match comp.top_strut {
+                        Some(s) => kprintln!("  bar: strut {}px (+{}px margin)", s.pill_h, s.margin),
+                        None => kprintln!("  bar: none"),
+                    }
                 });
             } else {
                 kprintln!("[npk] shade: not running (use 'shade init' to start)");

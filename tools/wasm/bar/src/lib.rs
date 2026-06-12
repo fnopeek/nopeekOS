@@ -486,9 +486,10 @@ pub extern "C" fn _start() {
     let seg = read_segments();
     unsafe { HEAP_MARK = HEAP_POS; }   // freeze config; tree rebuilds above this
 
-    // Declare the top strut panel. w/h are advisory — the compositor sizes
-    // the bar to its band.
-    unsafe { let _ = npk_window_set_panel(EDGE_TOP, BEHAVIOR_STRUT, 1920, 28); }
+    // Declare the top strut panel. `h` is the band height we need (room for
+    // 24px tray icons + pill padding); the compositor reserves `margin + h`
+    // and sizes our window to it. `w` is advisory.
+    unsafe { let _ = npk_window_set_panel(EDGE_TOP, BEHAVIOR_STRUT, 1920, 34); }
 
     // First commit.
     if let Some(len) = state_changed() {
