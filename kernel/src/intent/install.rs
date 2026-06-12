@@ -390,7 +390,6 @@ fn is_bundled_module(name: &str) -> bool {
         "wallpaper",
         "top",
         "debug",
-        "wifi",
         "drun",
         "loft",
         "dock",
