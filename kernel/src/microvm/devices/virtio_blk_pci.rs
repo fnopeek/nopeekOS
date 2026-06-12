@@ -261,22 +261,33 @@ impl VirtioBlk {
         if !self.persist {
             return; // read-only sqfs bundle — nothing to write back.
         }
-        // upsert = insert-or-replace; npkfs::store is strict-create and
-        // refuses to overwrite an existing profile-image on the second
-        // run.
-        match crate::npkfs::upsert(
-            PROFILE_PATH,
-            &self.backing,
-            crate::capability::CAP_NULL,
-        ) {
-            Ok(_) => {
+        // STREAM the save in 1 MiB chunks instead of a whole-blob upsert.
+        // upsert encodes + AES-GCM-encrypts the entire image at once, which
+        // needs ~image-size of transient buffers ON TOP of the resident
+        // backing — at 512 MiB that OOM'd the host (256 MiB alloc failed on
+        // a 4-6 GB box already holding the 2 GiB guest + sqfs). The streaming
+        // writer caps peak at one ~1 MiB chunk, and content-addressed dedup
+        // means the mostly-zero fresh image collapses to a handful of blobs
+        // (every all-zero chunk hashes identically → stored once). It
+        // atomically replaces the old image at `finish` (same as upsert).
+        let mut w = match crate::npkfs::open_streaming_write(PROFILE_PATH) {
+            Ok(w) => w,
+            Err(e) => { kprintln!("[virtio-blk] save open failed: {:?}", e); return; }
+        };
+        if let Err(e) = w.write(&self.backing) {
+            // Drop w → flushed chunks orphaned (gc reclaims); old image intact.
+            kprintln!("[virtio-blk] save write failed: {:?}", e);
+            return;
+        }
+        match w.finish() {
+            Ok(n) => {
                 let (sum, nz) = img_fingerprint(&self.backing);
                 kprintln!(
-                    "[virtio-blk] saved home image ({} bytes encrypted, fp sum={:#x} nz={})",
-                    self.backing.len(), sum, nz
+                    "[virtio-blk] saved home image ({} bytes streamed, fp sum={:#x} nz={})",
+                    n, sum, nz
                 );
             }
-            Err(e) => kprintln!("[virtio-blk] save failed: {}", e),
+            Err(e) => kprintln!("[virtio-blk] save finish failed: {:?}", e),
         }
     }
 
