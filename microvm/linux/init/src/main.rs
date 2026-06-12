@@ -520,8 +520,11 @@ unsafe fn spawn_rt_watcher(kmsg_fd: i64) {
 unsafe fn rt_watcher_loop(kmsg_fd: i64) -> ! {
     loop {
         unsafe { rt_scan_proc(kmsg_fd); }
-        // ~500 ms between sweeps: timespec { tv_sec=0, tv_nsec=500e6 }.
-        let ts: [i64; 2] = [0, 500_000_000];
+        // ~50 ms between sweeps: catch a freshly-spawned cubeb/AudioIPC
+        // thread and give it SCHED_RR before it underruns its first periods
+        // (the 500 ms sweep raced — audio worked only when promotion beat the
+        // first buffering gap). Scan is cheap + we have idle headroom now.
+        let ts: [i64; 2] = [0, 50_000_000];
         unsafe { let _ = syscall2(SYS_NANOSLEEP, ts.as_ptr() as u64, 0); }
     }
 }
