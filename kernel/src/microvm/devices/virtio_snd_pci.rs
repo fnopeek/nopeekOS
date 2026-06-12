@@ -152,6 +152,15 @@ pub struct VirtioSnd {
     /// once `bytes_completed + period <= elapsed_ticks * BYTES_PER_TICK`.
     play_start_tick: u64,
     bytes_completed: u64,
+
+    /// Guest's PCM period size in bytes (from SET_PARAMS). Sizes the pacing
+    /// cushion: the wall-clock budget is allowed to lead `bytes_completed` by
+    /// at most two periods. When the guest stops feeding (YouTube buffering /
+    /// network stall) while the stream stays `started`, the budget would
+    /// otherwise run far ahead and be handed back as one instant burst on
+    /// resume — fast-forwarding the guest's hw_ptr → underrun → cubeb error →
+    /// silent reload. Clamping the lead keeps resume paced. 0 until SET_PARAMS.
+    period_bytes: u32,
 }
 
 impl VirtioSnd {
@@ -181,6 +190,7 @@ impl VirtioSnd {
             started: false,
             play_start_tick: 0,
             bytes_completed: 0,
+            period_bytes: 0,
         }
     }
 
@@ -300,12 +310,24 @@ impl VirtioSnd {
                 len.min(resp.len())
             }
             R_PCM_SET_PARAMS => {
-                // We advertise only S16/48k/stereo, so just accept.
+                // virtio_snd_pcm_set_params: hdr(4) stream_id(4) buffer_bytes(4)
+                // period_bytes(4) ... — remember the period to size the pacing
+                // cushion. We advertise only S16/48k/stereo, so just accept.
+                self.period_bytes = le32(req, 12);
                 put32(resp, 0, S_OK);
                 4
             }
             R_PCM_PREPARE => {
+                // One OUTPUT stream only. If a slot is still held from a stream
+                // that wasn't cleanly released (cubeb hard-erroring and
+                // re-initialising after an underrun), reuse + clear it instead
+                // of leaking a second slot — four leaked re-inits exhaust the
+                // mailbox, open() returns -1, and every reinit ("OpenCubeb
+                // failed") is then permanently silent.
                 if self.slot < 0 { self.slot = crate::audio::open(); }
+                else { crate::audio::reset(self.slot as usize); }
+                self.started = false;
+                self.bytes_completed = 0;
                 put32(resp, 0, if self.slot >= 0 { S_OK } else { S_IO_ERR });
                 4
             }
@@ -356,7 +378,20 @@ impl VirtioSnd {
         // now (48 kHz). Buffers are completed only up to this watermark so the
         // guest sees an honest real-time sink instead of an instant drain.
         let now = crate::interrupts::ticks();
-        let budget = now.wrapping_sub(self.play_start_tick).saturating_mul(BYTES_PER_TICK);
+        let mut budget = now.wrapping_sub(self.play_start_tick).saturating_mul(BYTES_PER_TICK);
+
+        // Cushion clamp: while the guest stopped feeding (YouTube buffering /
+        // network stall) the budget ran ahead of what we actually completed.
+        // Handing that whole lead back as one burst on resume fast-forwards the
+        // guest's hw_ptr → underrun → cubeb error → silent reload. Re-anchor the
+        // clock so the lead never exceeds two periods of catch-up.
+        let period = (self.period_bytes as u64).max(BYTES_PER_TICK);
+        let cushion = period.saturating_mul(2);
+        if budget > self.bytes_completed.wrapping_add(cushion) {
+            let target = self.bytes_completed.wrapping_add(cushion);
+            self.play_start_tick = now.wrapping_sub(target / BYTES_PER_TICK);
+            budget = target;
+        }
 
         while last != avail_top {
             let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
