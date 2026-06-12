@@ -177,7 +177,7 @@ pub struct VirtioBlk {
     serviced_log_count: u32,
 }
 
-const CAPACITY_SECTORS: u64 = 131072; // 64 MiB — ext4 home image (/dev/vda)
+const CAPACITY_SECTORS: u64 = 1048576; // 512 MiB — ext4 home image (/dev/vda); template regenerated via tools/gen_home_template.py
 
 impl VirtioBlk {
     /// Slot 1 — the read-write, npkFS-persisted per-app home image.
@@ -598,12 +598,13 @@ const fn width_mask(width: u8) -> u64 {
 /// lands so codium/office get their own `apps/<app>/home.img`).
 const PROFILE_PATH: &str = "sys/microvm/apps/browser/home.img";
 
-/// Embedded sparse template of a freshly-mke2fs'd empty 64 MiB ext4.
+/// Embedded sparse template of a freshly-mke2fs'd empty 512 MiB ext4.
 /// Format: `"NHT1" | image_size:u32 | num_entries:u32 | (sector_idx:u32,
-/// data:[u8;512])*` — only the non-zero sectors of the fresh fs (348 of
+/// data:[u8;512])*` — only the non-zero sectors of the fresh fs (133 of
 /// them). Lets the host seed a valid empty ext4 with NO inflate/gzip
 /// crate in the kernel: alloc zeros, patch the listed sectors in.
-/// Regenerate with tools (see commit) if the size/layout ever changes.
+/// Regenerate with `python3 tools/gen_home_template.py [SIZE_MIB]` if the
+/// size/layout ever changes (must match CAPACITY_SECTORS).
 static HOME_TEMPLATE: &[u8] = include_bytes!("home_template.bin");
 
 /// Build the initial backing buffer. Tries to load the saved home image
