@@ -570,6 +570,16 @@ pub fn vm_close_for_window(window_id: u32) {
     }
 }
 
+/// The guest shut itself down (e.g. LibreWolf's own window-X → cage exits →
+/// PID-1 `halt` → `reboot: System halted`). The serial scanner calls this so
+/// the run loop takes the SAME clean exit as a user Mod+Q: break → `close()`
+/// (saves the home image) → Core-0 reaper closes the window. Without it a
+/// `cli;hlt`-halted guest just spins the run loop forever (black tile, no
+/// save) until the user closes the host window manually.
+pub fn note_guest_shutdown() {
+    VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+}
+
 /// Drop the VM↔window binding + its surface and close the Shade
 /// window. MUST be called with the ACTIVE_VM lock NOT held (it locks
 /// the compositor, whose close path re-enters microvm). Idempotent.
