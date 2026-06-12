@@ -96,13 +96,19 @@ const PCM_FMT_S16:   u64 = 1 << 5;  // VIRTIO_SND_PCM_FMT_S16
 const PCM_RATE_48000: u64 = 1 << 7; // VIRTIO_SND_PCM_RATE_48000
 const D_OUTPUT: u8 = 0;
 
-/// How far ahead of real playback we keep the guest's hw_ptr — the PCM we let
-/// the guest "pre-fill" past what audio_hda has actually drained. At our format
-/// (48 kHz × 2ch × 2B = 192000 B/s) this is ~125 ms. Large enough to absorb
-/// pump-cadence jitter (the pump runs on VM-exits, sparse under guest CPU load),
-/// small enough to stay well inside the guest's ALSA buffer (no XRUN) and far
-/// below the 256 KiB mailbox (no submit drop). Frame-aligned (÷4).
-const LEAD_BYTES: u64 = 24_000;
+/// How far ahead of real playback we keep the guest's hw_ptr — the PCM the guest
+/// "pre-fills" past what audio_hda has actually drained. At our format (48 kHz ×
+/// 2ch × 2B = 192000 B/s), `LEAD_START` ≈ 125 ms. Kept ≤ the guest ALSA buffer so
+/// completing it at PCM_START (drained==0) doesn't fast-forward the hw_ptr past
+/// the ring → no start XRUN. Once playback is underway the lead ramps up by
+/// `LEAD_RAMP_EXTRA` (→ ~200 ms steady) for a deeper jitter cushion: under YouTube
+/// software-decode CPU load the guest's cubeb feeder occasionally delivers a tx
+/// buffer late → the mailbox briefly underruns → poll_mix emits silence → a
+/// crackle / mini-dropout. A deeper buffer masks that. Capped low because this
+/// buffering is hidden latency the guest under-reports (too deep → A/V lip-sync
+/// drift). Frame-aligned (÷4).
+const LEAD_START: u64 = 24_000;
+const LEAD_RAMP_EXTRA: u64 = 14_400; // +75 ms once draining → ~200 ms steady
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
@@ -151,9 +157,9 @@ pub struct VirtioSnd {
     /// We pace completion off the REAL consumption clock: `audio::drained(slot)`
     /// counts bytes the HDA driver (audio_hda) has actually pulled from the
     /// mailbox at the speaker's 48 kHz crystal. A buffer is completed only once
-    /// `bytes_completed + len <= (drained - drained_at_start) + LEAD_BYTES`, so
+    /// `bytes_completed + len <= (drained - drained_at_start) + lead`, so
     /// the guest's clock TRACKS the speaker (no host-wall-clock drift, which was
-    /// the cause of long-stream / webradio aborts). `LEAD_BYTES` is the buffer
+    /// the cause of long-stream / webradio aborts). the `lead` is the buffer
     /// we keep ahead of real playback (absorbs pump jitter); `drained_at_start`
     /// is the drain counter captured at PCM_START. `bytes_completed` = bytes
     /// returned to the guest since START.
@@ -379,9 +385,12 @@ impl VirtioSnd {
         // crystal → mailbox over/underflow → long-stream / webradio aborts).
         // During a guest buffering stall the mailbox drains to empty, `drained`
         // plateaus, and the budget stops growing → resume catches up at most
-        // LEAD_BYTES, no burst (this also subsumes the old cushion clamp).
+        // the lead, no burst (this also subsumes the old cushion clamp).
         let drained = crate::audio::drained(slot).wrapping_sub(self.drained_at_start);
-        let budget = drained.wrapping_add(LEAD_BYTES);
+        // Lead ramps from LEAD_START (safe at PCM_START) to LEAD_START +
+        // LEAD_RAMP_EXTRA once playback has drained past the ramp window.
+        let lead = LEAD_START.wrapping_add(drained.min(LEAD_RAMP_EXTRA));
+        let budget = drained.wrapping_add(lead);
 
         while last != avail_top {
             let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
@@ -423,7 +432,7 @@ impl VirtioSnd {
             }
             // Mailbox-room ceiling: never complete a buffer we can't fully
             // submit — a partial submit would drop PCM (silent gap). With the
-            // drain budget the fill stays ~LEAD_BYTES, so this is a safety net.
+            // drain budget the fill stays ~lead, so this is a safety net.
             if (crate::audio::free_space(slot) as usize) < pcm_len {
                 break;
             }
