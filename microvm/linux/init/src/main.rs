@@ -226,6 +226,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"media.cubeb.sandbox\", false);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 65536);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb_latency_playback_ms\", 1000);' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"NPK.sentinel.last\", 1);' >> /tmp/moz/user.js; \
+                 rcw=$?; sync; \
+                 if grep -q 'NPK.sentinel.last' /tmp/moz/user.js 2>/dev/null; then echo '<0>[djf] user.js sentinel OK -> writes land' > /dev/kmsg; else echo \"<0>[djf] user.js sentinel MISSING -> writes truncated (rc=$rcw) = DISK FULL/RO\" > /dev/kmsg; fi; \
+                 echo \"<0>[djf] user.js bytes=$(wc -c < /tmp/moz/user.js 2>/dev/null) lines=$(wc -l < /tmp/moz/user.js 2>/dev/null)\" > /dev/kmsg; \
+                 df -k /tmp/moz 2>/dev/null | tail -1 | while read L; do echo \"<0>[djf] df /tmp/moz: $L\" > /dev/kmsg; done; \
+                 dmesg 2>/dev/null | grep -iaE 'ext4|no space|EROFS|read-only|quota' | tail -6 | while read L; do echo \"<0>[djf] $L\" > /dev/kmsg; done; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
