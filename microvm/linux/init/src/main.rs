@@ -161,6 +161,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
                  echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
                  echo 1 > /proc/sys/kernel/printk 2>/dev/null; \
+                 echo on > /proc/sys/kernel/printk_devkmsg 2>/dev/null; \
                  hostname nopeek 2>/dev/null \
                    || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
@@ -240,6 +241,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  sleep 1; \
                  echo '<0>[diag] === user.js we wrote (verify clean, pre-launch) ===' > /dev/kmsg; \
                  cat /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs] $L\" > /dev/kmsg; done; \
+                 echo \"<0>[ujs-n] user.js line count: $(wc -l < /tmp/moz/user.js 2>/dev/null)\" > /dev/kmsg; \
+                 echo '<0>[diag] === audio prefs present in user.js? (burst-safe) ===' > /dev/kmsg; \
+                 grep -iaE 'cubeb|audioipc|latency' /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs-aud] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
                  MOZ_LOG_FILE=/tmp/moz.log \
                  MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3,cubeb:5' \
