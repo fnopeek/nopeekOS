@@ -224,6 +224,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"media.cubeb.backend\", \"alsa\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb.sandbox\", false);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 65536);' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.cubeb_latency_playback_ms\", 1000);' >> /tmp/moz/user.js; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
@@ -237,12 +238,20 @@ fn launch_wayland(kmsg_fd: i64) {
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( while true; do sync 2>/dev/null; sleep 3; done ) & \
                  sleep 1; \
+                 echo '<0>[diag] === user.js we wrote (verify clean, pre-launch) ===' > /dev/kmsg; \
+                 cat /tmp/moz/user.js 2>/dev/null | while read L; do echo \"<0>[ujs] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] cage+librewolf starting (output -> /tmp/cage.log)' > /dev/kmsg; \
                  MOZ_LOG_FILE=/tmp/moz.log \
                  MOZ_LOG='startup:4,Widget:4,WidgetWayland:4,Compositor:3,cubeb:5' \
                  cage -- librewolf --no-remote --profile /tmp/moz \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] cage exited rc=$rc\" > /dev/kmsg; \
+                 echo '<0>[diag] === profile actually used? (Florian: temp-profile suspicion) ===' > /dev/kmsg; \
+                 ls -la /tmp/moz/prefs.js /tmp/moz/times.json /tmp/moz/compatibility.ini 2>/dev/null | while read L; do echo \"<0>[prof] $L\" > /dev/kmsg; done; \
+                 echo '<0>[diag] === stray profile dirs outside /tmp/moz (= temp profile!) ===' > /dev/kmsg; \
+                 ls -la /tmp/.mozilla /root/.mozilla /tmp/moz/.parentlock 2>/dev/null | while read L; do echo \"<0>[prof] $L\" > /dev/kmsg; done; \
+                 echo '<0>[diag] === prefs.js: which media/cubeb prefs did Firefox actually load? ===' > /dev/kmsg; \
+                 grep -iaE 'cubeb|audioipc|latency' /tmp/moz/prefs.js 2>/dev/null | while read L; do echo \"<0>[prefs] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === moz.log files (parent vs utility/server) ===' > /dev/kmsg; \
                  ls -la /tmp/moz.log* 2>/dev/null | while read L; do echo \"<0>[aud-ls] $L\" > /dev/kmsg; done; \
                  echo '<0>[diag] === cubeb/alsa errors (shm_area_size spam filtered out) ===' > /dev/kmsg; \
