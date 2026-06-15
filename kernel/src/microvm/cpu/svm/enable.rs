@@ -1421,6 +1421,16 @@ impl VmContext {
         // borrowable (disjoint field of `self`).
         let sh = &mut *self.shared;
 
+        // Pace audio on EVERY exit, not just the INTR/HLT inject path. Running
+        // the snd pump only there starved it under load (a busy guest exits via
+        // NPF/MMIO thousands of times/sec but rarely INTR/HLT), so wall-clock-
+        // paced completion fell behind → audio slow + stuttered. On every exit
+        // the pump rate scales with load. Completion latches the snd IRQ into
+        // pending_irqs; the INTR/HLT drain injects it at a safe point.
+        if self.vcpu.apic_id == 0 && sh.pci.virtio_snd.pump(&sh.guest_mem) {
+            sh.pending_irqs |= 1 << sh.pci.virtio_snd.irq_line();
+        }
+
         match exit {
             EXIT_INTR | EXIT_HLT => {
                 // Guest executed STI;HLT (idle, waiting for its next IRQ).
@@ -1643,13 +1653,8 @@ impl VmContext {
                         self.vcpu.consecutive_idle = 0;
                         continue;
                     }
-                    if sh.pci.virtio_snd.pump(&sh.guest_mem) {
-                        let vector = sh.pic.vector_for_irq(sh.pci.virtio_snd.irq_line());
-                        let info: u64 = (vector as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
+                    // (snd pump moved to the per-exit common path above; its IRQ
+                    // is drained from pending_irqs at the top of this block.)
                     if pumped {
                         let vector = sh.pic.vector_for_irq(10);
                         let info: u64 = (vector as u64) | (1u64 << 31);
