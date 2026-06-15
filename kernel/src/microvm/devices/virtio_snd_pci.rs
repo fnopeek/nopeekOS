@@ -101,14 +101,25 @@ const D_OUTPUT: u8 = 0;
 /// 2ch × 2B = 192000 B/s), `LEAD_START` ≈ 125 ms. Kept ≤ the guest ALSA buffer so
 /// completing it at PCM_START (drained==0) doesn't fast-forward the hw_ptr past
 /// the ring → no start XRUN. Once playback is underway the lead ramps up by
-/// `LEAD_RAMP_EXTRA` (→ ~200 ms steady) for a deeper jitter cushion: under YouTube
+/// `LEAD_RAMP_EXTRA` (→ ~450 ms steady) for a deep jitter cushion: under YouTube
 /// software-decode CPU load the guest's cubeb feeder occasionally delivers a tx
 /// buffer late → the mailbox briefly underruns → poll_mix emits silence → a
-/// crackle / mini-dropout. A deeper buffer masks that. Capped low because this
-/// buffering is hidden latency the guest under-reports (too deep → A/V lip-sync
-/// drift). Frame-aligned (÷4).
+/// crackle / mini-dropout. A deeper buffer masks that.
+///
+/// This used to be capped low (~200 ms) because the lead is hidden latency: we
+/// reported `latency_bytes = 0` to the guest, so a deeper buffer drifted A/V
+/// lip-sync (video ran ahead). We now report the REAL buffered-ahead bytes in the
+/// tx status (see `service_tx`), which Linux's virtio-snd driver feeds into
+/// `runtime->delay` (sound/virtio/virtio_pcm_msg.c) = `snd_pcm_delay` → cubeb's
+/// A/V clock accounts for it. So the lead can run deep without drift. Frame-aligned
+/// (÷4). `LEAD_START` stays start-XRUN-safe (≤ the ~32 KiB guest ALSA buffer).
 const LEAD_START: u64 = 24_000;
-const LEAD_RAMP_EXTRA: u64 = 14_400; // +75 ms once draining → ~200 ms steady
+const LEAD_RAMP_EXTRA: u64 = 62_400; // +325 ms once draining → ~450 ms steady
+
+/// Fixed buffering downstream of the mailbox: audio_hda's HDA ring is 2 halves of
+/// 2048 frames = 16384 bytes sitting between poll_mix and the speaker. Added to
+/// the reported latency so the guest's A/V sync accounts for it too.
+const HDA_RING_BYTES: u64 = 16_384;
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
@@ -448,14 +459,24 @@ impl VirtioSnd {
                 }
             }
 
-            // Write the status response (S_OK, latency 0) + complete the buffer.
+            // Write the status response (S_OK + real latency) + complete the
+            // buffer. latency_bytes = PCM received-but-not-yet-played = bytes the
+            // guest now considers handed off (bytes_completed incl. this buffer)
+            // minus what the speaker has actually drained, plus audio_hda's ring.
+            // Linux feeds this into runtime->delay → guest A/V sync compensates
+            // for our hidden buffer, so the lead can run deep without drift.
+            let new_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
             if status_addr != 0 {
                 let mut st = [0u8; 8];
                 put32(&mut st, 0, S_OK);
+                let latency = new_completed
+                    .saturating_sub(drained)
+                    .saturating_add(HDA_RING_BYTES);
+                put32(&mut st, 4, latency.min(u32::MAX as u64) as u32);
                 mem.write_bytes(status_addr, &st);
             }
             used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
-            self.bytes_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
+            self.bytes_completed = new_completed;
             last = last.wrapping_add(1);
             any = true;
         }
