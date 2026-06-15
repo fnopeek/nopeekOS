@@ -161,6 +161,17 @@ pub fn free_space(slot: usize) -> usize {
     SLOT_BYTES - slots[slot].len
 }
 
+/// Bytes currently buffered in a slot's ring (0 if closed). The virtio-snd
+/// bridge reports this (plus the HDA ring) as the PCM-received-but-not-yet-played
+/// latency in each tx completion, so the guest's A/V sync accounts for our
+/// hidden host buffering.
+pub fn buffered(slot: usize) -> usize {
+    if slot >= NUM_SLOTS { return 0; }
+    let slots = SLOTS.lock();
+    if !slots[slot].active { return 0; }
+    slots[slot].len
+}
+
 /// Total bytes `poll_mix` has pulled from a slot since it was opened — the
 /// real 48 kHz speaker clock. The virtio-snd bridge paces tx-buffer completion
 /// off this (instead of a separate host wall-clock) so the guest's audio clock

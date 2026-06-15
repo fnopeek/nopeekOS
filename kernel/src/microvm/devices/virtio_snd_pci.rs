@@ -96,25 +96,25 @@ const PCM_FMT_S16:   u64 = 1 << 5;  // VIRTIO_SND_PCM_FMT_S16
 const PCM_RATE_48000: u64 = 1 << 7; // VIRTIO_SND_PCM_RATE_48000
 const D_OUTPUT: u8 = 0;
 
-/// How far ahead of real playback we keep the guest's hw_ptr — the PCM the guest
-/// "pre-fills" past what audio_hda has actually drained. At our format (48 kHz ×
-/// 2ch × 2B = 192000 B/s), `LEAD_START` ≈ 125 ms. Kept ≤ the guest ALSA buffer so
-/// completing it at PCM_START (drained==0) doesn't fast-forward the hw_ptr past
-/// the ring → no start XRUN. Once playback is underway the lead ramps up by
-/// `LEAD_RAMP_EXTRA` (→ ~450 ms steady) for a deep jitter cushion: under YouTube
-/// software-decode CPU load the guest's cubeb feeder occasionally delivers a tx
-/// buffer late → the mailbox briefly underruns → poll_mix emits silence → a
-/// crackle / mini-dropout. A deeper buffer masks that.
+/// PCM playback bytes per host 100 Hz tick at our advertised format
+/// (48 kHz × 2 ch × 2 bytes = 192000 B/s ÷ 100 = 1920). Drives the wall-clock
+/// pacing of tx-buffer completion in `service_tx`.
 ///
-/// This used to be capped low (~200 ms) because the lead is hidden latency: we
-/// reported `latency_bytes = 0` to the guest, so a deeper buffer drifted A/V
-/// lip-sync (video ran ahead). We now report the REAL buffered-ahead bytes in the
-/// tx status (see `service_tx`), which Linux's virtio-snd driver feeds into
-/// `runtime->delay` (sound/virtio/virtio_pcm_msg.c) = `snd_pcm_delay` → cubeb's
-/// A/V clock accounts for it. So the lead can run deep without drift. Frame-aligned
-/// (÷4). `LEAD_START` stays start-XRUN-safe (≤ the ~32 KiB guest ALSA buffer).
-const LEAD_START: u64 = 24_000;
-const LEAD_RAMP_EXTRA: u64 = 62_400; // +325 ms once draining → ~450 ms steady
+/// WHY wall-clock and not audio_hda's actual drain: the guest virtio-snd driver
+/// is 100 % device-clocked — its hw_ptr, period wakeups and A/V delay ALL come
+/// from when/how much the device completes tx buffers (sound/virtio/
+/// virtio_pcm_msg.c: hw_ptr advances only in msg_complete; no guest timer). A
+/// real device (QEMU virtio_snd_pcm_out_cb) completes each buffer as the real
+/// audio sink consumes it, at the sink's regular small period, never starved.
+/// Our sink (audio_hda.wasm) is a polled best-effort loop that drains in 43 ms
+/// gulps and can be starved under browser load — pacing completion off its
+/// `drained` counter (v0.222.37) made the guest's whole clock gulpy + starvable
+/// → crackle + long buffering + pause-burst. The host HDA plays at exactly
+/// 48 kHz, so a 192000 B/s wall-clock is a faithful, smooth, drain-independent
+/// model of real consumption (this is the model that played 3 min of music
+/// cleanly at v0.222.21). Drift vs the HDA crystal is ~0.01 % and bounded by the
+/// free_space ceiling.
+const BYTES_PER_TICK: u64 = 192_000 / 100;
 
 /// Fixed buffering downstream of the mailbox: audio_hda's HDA ring is 2 halves of
 /// 2048 frames = 16384 bytes sitting between poll_mix and the speaker. Added to
@@ -162,20 +162,24 @@ pub struct VirtioSnd {
     slot: i32,
     started: bool,
 
-    /// Drain-paced playback completion. A real audio device returns each PCM
-    /// buffer on the used-ring only *after* it has been played; completing
-    /// instantly fast-forwards the guest's ALSA hw_ptr → underrun → cubeb error.
-    /// We pace completion off the REAL consumption clock: `audio::drained(slot)`
-    /// counts bytes the HDA driver (audio_hda) has actually pulled from the
-    /// mailbox at the speaker's 48 kHz crystal. A buffer is completed only once
-    /// `bytes_completed + len <= (drained - drained_at_start) + lead`, so
-    /// the guest's clock TRACKS the speaker (no host-wall-clock drift, which was
-    /// the cause of long-stream / webradio aborts). the `lead` is the buffer
-    /// we keep ahead of real playback (absorbs pump jitter); `drained_at_start`
-    /// is the drain counter captured at PCM_START. `bytes_completed` = bytes
-    /// returned to the guest since START.
-    drained_at_start: u64,
+    /// Wall-clock playback pacing. A real audio device returns each PCM buffer on
+    /// the used-ring only *after* it has been played; completing instantly
+    /// fast-forwards the guest's ALSA hw_ptr → underrun → cubeb error. We pace
+    /// completion off a smooth 192000 B/s host clock (a faithful, drain-
+    /// independent model of the HDA's exact 48 kHz — see `BYTES_PER_TICK`).
+    /// `play_start_tick` = host 100 Hz tick at PCM_START; `bytes_completed` =
+    /// PCM bytes returned to the guest since then. A buffer is completed only
+    /// once `bytes_completed + len <= elapsed_ticks * BYTES_PER_TICK`.
+    play_start_tick: u64,
     bytes_completed: u64,
+
+    /// Guest's PCM period size in bytes (from SET_PARAMS). Sizes the pacing
+    /// cushion: the wall-clock budget may lead `bytes_completed` by at most two
+    /// periods. When the guest stops feeding (YouTube buffering / pause) while the
+    /// stream stays `started`, the budget would otherwise run far ahead and be
+    /// handed back as one instant burst on resume → hw_ptr jump → underrun →
+    /// cubeb error → "can't pause / silent reload". Clamping keeps resume paced.
+    period_bytes: u32,
 }
 
 impl VirtioSnd {
@@ -203,8 +207,9 @@ impl VirtioSnd {
             pending_kick_queue: None,
             slot: -1,
             started: false,
-            drained_at_start: 0,
+            play_start_tick: 0,
             bytes_completed: 0,
+            period_bytes: 0,
         }
     }
 
@@ -324,7 +329,10 @@ impl VirtioSnd {
                 len.min(resp.len())
             }
             R_PCM_SET_PARAMS => {
-                // We advertise only S16/48k/stereo, so just accept.
+                // virtio_snd_pcm_set_params: hdr(4) stream_id(4) buffer_bytes(4)
+                // period_bytes(4) ... — remember the period to size the pacing
+                // cushion. We advertise only S16/48k/stereo, so just accept.
+                self.period_bytes = le32(req, 12);
                 put32(resp, 0, S_OK);
                 4
             }
@@ -343,12 +351,9 @@ impl VirtioSnd {
                 4
             }
             R_PCM_START => {
-                // Anchor the drain clock here: completion paces off bytes drained
-                // since this point, so the guest's hw_ptr tracks real playback.
+                // Reset the playback clock so completion pacing starts now.
                 self.started = true;
-                self.drained_at_start = if self.slot >= 0 {
-                    crate::audio::drained(self.slot as usize)
-                } else { 0 };
+                self.play_start_tick = crate::interrupts::ticks();
                 self.bytes_completed = 0;
                 put32(resp, 0, S_OK);
                 4
@@ -388,20 +393,26 @@ impl VirtioSnd {
         let mut any = false;
         let mut chunk = [0u8; 4096];
 
-        // Drain-paced completion budget: bytes audio_hda has actually pulled
-        // from the mailbox since START (= real 48 kHz speaker clock) plus the
-        // lead we keep buffered ahead. Buffers complete only up to this, so the
-        // guest's hw_ptr tracks the speaker — no host-wall-clock drift (the old
-        // pacer used a separate 100 Hz tick that slowly diverged from the HDA
-        // crystal → mailbox over/underflow → long-stream / webradio aborts).
-        // During a guest buffering stall the mailbox drains to empty, `drained`
-        // plateaus, and the budget stops growing → resume catches up at most
-        // the lead, no burst (this also subsumes the old cushion clamp).
-        let drained = crate::audio::drained(slot).wrapping_sub(self.drained_at_start);
-        // Lead ramps from LEAD_START (safe at PCM_START) to LEAD_START +
-        // LEAD_RAMP_EXTRA once playback has drained past the ramp window.
-        let lead = LEAD_START.wrapping_add(drained.min(LEAD_RAMP_EXTRA));
-        let budget = drained.wrapping_add(lead);
+        // Wall-clock playback budget: bytes that *should* have been played by
+        // now (smooth 48 kHz, drain-independent). Buffers are completed only up
+        // to this watermark, so the guest sees an honest real-time sink instead
+        // of an instant drain (and the clock can't be starved by audio_hda's
+        // scheduling, unlike the v0.222.37 drain-pacing this replaces).
+        let now = crate::interrupts::ticks();
+        let mut budget = now.wrapping_sub(self.play_start_tick).saturating_mul(BYTES_PER_TICK);
+
+        // Cushion clamp: while the guest stopped feeding (YouTube buffering /
+        // pause) the budget ran ahead of what we actually completed. Handing that
+        // whole lead back as one burst on resume fast-forwards the guest's hw_ptr
+        // → underrun → cubeb error → "can't pause / silent reload". Re-anchor the
+        // clock so the lead never exceeds two periods of catch-up.
+        let period = (self.period_bytes as u64).max(BYTES_PER_TICK);
+        let cushion = period.saturating_mul(2);
+        if budget > self.bytes_completed.wrapping_add(cushion) {
+            let target = self.bytes_completed.wrapping_add(cushion);
+            self.play_start_tick = now.wrapping_sub(target / BYTES_PER_TICK);
+            budget = target;
+        }
 
         while last != avail_top {
             let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
@@ -435,7 +446,7 @@ impl VirtioSnd {
                 idx = d.next;
             }
 
-            // Drain floor: hold this buffer until real playback (+ lead) has
+            // Wall-clock floor: hold this buffer until the 48 kHz clock has
             // advanced past it — completing early fast-forwards the guest's
             // hw_ptr → underrun → cubeb abort.
             if self.bytes_completed.wrapping_add(pcm_len as u64) > budget {
@@ -460,23 +471,20 @@ impl VirtioSnd {
             }
 
             // Write the status response (S_OK + real latency) + complete the
-            // buffer. latency_bytes = PCM received-but-not-yet-played = bytes the
-            // guest now considers handed off (bytes_completed incl. this buffer)
-            // minus what the speaker has actually drained, plus audio_hda's ring.
-            // Linux feeds this into runtime->delay → guest A/V sync compensates
-            // for our hidden buffer, so the lead can run deep without drift.
-            let new_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
+            // buffer. latency_bytes = PCM received-but-not-yet-played = what is
+            // currently buffered in the mailbox plus audio_hda's HDA ring. Linux
+            // feeds this into runtime->delay (sound/virtio/virtio_pcm_msg.c) →
+            // snd_pcm_delay → cubeb's A/V clock accounts for our hidden buffer.
             if status_addr != 0 {
                 let mut st = [0u8; 8];
                 put32(&mut st, 0, S_OK);
-                let latency = new_completed
-                    .saturating_sub(drained)
+                let latency = (crate::audio::buffered(slot) as u64)
                     .saturating_add(HDA_RING_BYTES);
                 put32(&mut st, 4, latency.min(u32::MAX as u64) as u32);
                 mem.write_bytes(status_addr, &st);
             }
             used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
-            self.bytes_completed = new_completed;
+            self.bytes_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
             last = last.wrapping_add(1);
             any = true;
         }
