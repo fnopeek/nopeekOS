@@ -350,23 +350,33 @@ pub extern "C" fn _start() {
 
     log("[audio_hda] streaming from audio mailbox\n");
 
-    // Streaming loop: keep the half the DMA is NOT playing filled from the
-    // kernel mixer. poll_mix always returns a full buffer (silence when idle),
-    // so the speaker stays fed and the driver is silent until an app plays.
-    // (Resident service — belongs in autostart, not a `run` window.)
-    let mut last_filled: usize = 2; // neither half yet
+    // Streaming loop: a TRUE ring-buffer copy. Each poll we refill exactly the
+    // region the DMA has played since last time — [write_pos, LPIB) — pulling
+    // that many bytes from the kernel mixer. This locks the drain rate to the
+    // DMA's real 48 kHz REGARDLESS of how often this loop is scheduled.
+    //
+    // The old ping-pong refilled one whole half only when it *detected* a buffer
+    // crossing, so coarse/jittery wakeups (npk_sleep is bounded by the worker
+    // timer → ~10-30 ms effective under load) missed crossings → the mailbox
+    // drained at only ~74 % of 48 kHz → the whole pipeline (which back-pressures
+    // on mailbox room) ran slow + delayed (HW-confirmed: mailbox pinned full,
+    // completion throttled to 74 %). write_pos chases LPIB; the ring stays ~one
+    // lap ahead of the play head (~85 ms latency, reported to the guest as the
+    // HDA-ring latency). poll_mix yields silence when no app is playing.
+    let mut write_pos: usize = 0;
     loop {
-        let pos = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
-        let playing = if pos < HALF_BYTES { 0 } else { 1 };
-        let fill = 1 - playing;
-        if fill != last_filled {
+        let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
+        loop {
+            // Bytes the DMA has played since we last filled (frame-aligned to 4).
+            let avail = ((lpib + RING_BYTES - write_pos) % RING_BYTES) & !3;
+            if avail == 0 { break; }
+            // Don't cross the ring end or overflow MIXBUF in one copy.
+            let n = avail.min(RING_BYTES - write_pos).min(HALF_BYTES);
             let mix = unsafe { &mut *core::ptr::addr_of_mut!(MIXBUF) };
-            audio_poll_mix(mix);
-            dma_write(audio, (fill * HALF_BYTES) as u32, unsafe {
-                &*core::ptr::addr_of!(MIXBUF)
-            });
-            last_filled = fill;
+            audio_poll_mix(&mut mix[..n]);
+            dma_write(audio, write_pos as u32, &mix[..n]);
+            write_pos = (write_pos + n) % RING_BYTES;
         }
-        sleep_ms(8);
+        sleep_ms(4);
     }
 }
