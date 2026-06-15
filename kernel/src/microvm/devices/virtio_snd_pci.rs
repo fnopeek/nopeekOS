@@ -281,7 +281,7 @@ impl VirtioSnd {
 
             // Build the response, write it across the writable segments.
             let mut resp = [0u8; 64];
-            let resp_len = self.process_control(&req[..req_len], &mut resp);
+            let resp_len = self.process_control(&req[..req_len], &mut resp, mem);
             let mut off = 0usize;
             let mut written = 0u32;
             for s in 0..resp_seg_n {
@@ -302,8 +302,9 @@ impl VirtioSnd {
     }
 
     /// Process one control request into `resp`, return the response length.
-    /// Every response starts with a virtio_snd_hdr (le32 status).
-    fn process_control(&mut self, req: &[u8], resp: &mut [u8]) -> usize {
+    /// Every response starts with a virtio_snd_hdr (le32 status). `mem` is needed
+    /// because RELEASE must flush the tx queue (return all pending I/O buffers).
+    fn process_control(&mut self, req: &[u8], resp: &mut [u8], mem: &GuestMem) -> usize {
         let code = le32(req, 0);
         match code {
             R_PCM_INFO => {
@@ -360,8 +361,18 @@ impl VirtioSnd {
             }
             R_PCM_STOP  => { self.started = false; put32(resp, 0, S_OK); 4 }
             R_PCM_RELEASE => {
-                if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
+                // Spec (§5.14.6.6.5.1): "upon receipt of the RELEASE command the
+                // device MUST complete all pending I/O messages for the stream."
+                // The guest's sync_stop() then waits for the tx queue to drain
+                // (virtsnd_pcm_msg_pending_num == 0) before it considers the
+                // stream released. Pacing always leaves a few tx buffers un-
+                // completed in the avail ring, so without this flush the guest's
+                // wait TIMES OUT ("failed to flush I/O queue") and the next stream
+                // (resume after pause / page reload) starts on an inconsistent
+                // queue → permanent silence. Flush BEFORE closing the slot.
                 self.started = false;
+                self.flush_tx(mem);
+                if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
                 put32(resp, 0, S_OK);
                 4
             }
@@ -369,6 +380,45 @@ impl VirtioSnd {
             R_JACK_INFO | R_CHMAP_INFO => { put32(resp, 0, S_OK); 4 }
             _ => { put32(resp, 0, S_NOT_SUPP); 4 }
         }
+    }
+
+    /// Complete (return on the used ring) EVERY pending tx buffer immediately,
+    /// ignoring pacing. Required on PCM_RELEASE: the guest's sync_stop() blocks
+    /// until the tx queue is empty, so any buffer left in the avail ring hangs
+    /// the teardown (and corrupts the next stream). We discard the un-played PCM
+    /// (the stream is ending) — the guest just needs the buffers handed back +
+    /// an IRQ so its tx callback decrements msg_count → wakes msg_empty.
+    fn flush_tx(&mut self, mem: &GuestMem) {
+        let q = match self.queues.get(2) {
+            Some(q) if q.enable != 0 && q.size != 0 => *q,
+            _ => return,
+        };
+        let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return };
+        let mut last = q.last_avail_idx;
+        let mut used = q.used_idx;
+        let mut any = false;
+        while last != avail_top {
+            let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
+            // Find the writable status desc in the chain and ack it S_OK.
+            let mut idx = head;
+            let mut status_addr = 0u64;
+            loop {
+                let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
+                if d.flags & VRING_DESC_F_WRITE != 0 && status_addr == 0 { status_addr = d.addr; }
+                if d.flags & VRING_DESC_F_NEXT == 0 { break; }
+                idx = d.next;
+            }
+            if status_addr != 0 {
+                let mut st = [0u8; 8];
+                put32(&mut st, 0, S_OK);
+                mem.write_bytes(status_addr, &st);
+            }
+            used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
+            last = last.wrapping_add(1);
+            any = true;
+        }
+        if let Some(qm) = self.queues.get_mut(2) { qm.last_avail_idx = last; qm.used_idx = used; }
+        if any { self.isr |= 1; }
     }
 
     // ── tx (playback) queue ──────────────────────────────────────────────
