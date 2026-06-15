@@ -121,6 +121,17 @@ const BYTES_PER_TICK: u64 = 192_000 / 100;
 /// the reported latency so the guest's A/V sync accounts for it too.
 const HDA_RING_BYTES: u64 = 16_384;
 
+/// PCM playback rate in bytes/sec (48 kHz × 2 ch × 2 bytes). The TSC-based
+/// real-time budget uses this directly.
+const PLAYBACK_BYTES_PER_SEC: u64 = 192_000;
+
+/// Verbose lifecycle + rate diagnostics (host serial → run window). On while we
+/// stabilise audio; strip once solid (cheap — lifecycle is a few lines/stream,
+/// the rate heartbeat is throttled to ~2 s).
+const SND_DIAG: bool = true;
+static DBG_LAST_HB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DBG_BYTES_AT_HB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
     size: u16,
@@ -165,12 +176,14 @@ pub struct VirtioSnd {
     /// Wall-clock playback pacing. A real audio device returns each PCM buffer on
     /// the used-ring only *after* it has been played; completing instantly
     /// fast-forwards the guest's ALSA hw_ptr → underrun → cubeb error. We pace
-    /// completion off a smooth 192000 B/s host clock (a faithful, drain-
-    /// independent model of the HDA's exact 48 kHz — see `BYTES_PER_TICK`).
-    /// `play_start_tick` = host 100 Hz tick at PCM_START; `bytes_completed` =
-    /// PCM bytes returned to the guest since then. A buffer is completed only
-    /// once `bytes_completed + len <= elapsed_ticks * BYTES_PER_TICK`.
-    play_start_tick: u64,
+    /// completion off a smooth 192000 B/s clock derived from the TSC — NOT
+    /// `interrupts::ticks()`, whose 100 Hz counter is incremented by Core 0's
+    /// timer IRQ and runs slow when Core 0 is busy compositing the browser tile
+    /// under load (→ the guest's audio clock dragged "too slow / delayed", worse
+    /// at higher resolution). The TSC advances at a constant rate regardless of
+    /// interrupt load. `play_start_tsc` = TSC at PCM_START; `bytes_completed` =
+    /// PCM bytes returned to the guest since then.
+    play_start_tsc: u64,
     bytes_completed: u64,
 
     /// Guest's PCM period size in bytes (from SET_PARAMS). Sizes the pacing
@@ -207,7 +220,7 @@ impl VirtioSnd {
             pending_kick_queue: None,
             slot: -1,
             started: false,
-            play_start_tick: 0,
+            play_start_tsc: 0,
             bytes_completed: 0,
             period_bytes: 0,
         }
@@ -348,18 +361,24 @@ impl VirtioSnd {
                 else { crate::audio::reset(self.slot as usize); }
                 self.started = false;
                 self.bytes_completed = 0;
+                if SND_DIAG { crate::kprintln!("[snd] PREPARE slot={}", self.slot); }
                 put32(resp, 0, if self.slot >= 0 { S_OK } else { S_IO_ERR });
                 4
             }
             R_PCM_START => {
                 // Reset the playback clock so completion pacing starts now.
                 self.started = true;
-                self.play_start_tick = crate::interrupts::ticks();
+                self.play_start_tsc = crate::interrupts::rdtsc();
                 self.bytes_completed = 0;
+                if SND_DIAG { crate::kprintln!("[snd] START slot={}", self.slot); }
                 put32(resp, 0, S_OK);
                 4
             }
-            R_PCM_STOP  => { self.started = false; put32(resp, 0, S_OK); 4 }
+            R_PCM_STOP  => {
+                self.started = false;
+                if SND_DIAG { crate::kprintln!("[snd] STOP slot={}", self.slot); }
+                put32(resp, 0, S_OK); 4
+            }
             R_PCM_RELEASE => {
                 // Spec (§5.14.6.6.5.1): "upon receipt of the RELEASE command the
                 // device MUST complete all pending I/O messages for the stream."
@@ -371,7 +390,8 @@ impl VirtioSnd {
                 // (resume after pause / page reload) starts on an inconsistent
                 // queue → permanent silence. Flush BEFORE closing the slot.
                 self.started = false;
-                self.flush_tx(mem);
+                let flushed = self.flush_tx(mem);
+                if SND_DIAG { crate::kprintln!("[snd] RELEASE slot={} flushed={}", self.slot, flushed); }
                 if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
                 put32(resp, 0, S_OK);
                 4
@@ -388,15 +408,16 @@ impl VirtioSnd {
     /// the teardown (and corrupts the next stream). We discard the un-played PCM
     /// (the stream is ending) — the guest just needs the buffers handed back +
     /// an IRQ so its tx callback decrements msg_count → wakes msg_empty.
-    fn flush_tx(&mut self, mem: &GuestMem) {
+    fn flush_tx(&mut self, mem: &GuestMem) -> u32 {
         let q = match self.queues.get(2) {
             Some(q) if q.enable != 0 && q.size != 0 => *q,
-            _ => return,
+            _ => return 0,
         };
-        let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return };
+        let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return 0 };
         let mut last = q.last_avail_idx;
         let mut used = q.used_idx;
         let mut any = false;
+        let mut n = 0u32;
         while last != avail_top {
             let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
             // Find the writable status desc in the chain and ack it S_OK.
@@ -416,9 +437,11 @@ impl VirtioSnd {
             used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
             last = last.wrapping_add(1);
             any = true;
+            n += 1;
         }
         if let Some(qm) = self.queues.get_mut(2) { qm.last_avail_idx = last; qm.used_idx = used; }
         if any { self.isr |= 1; }
+        n
     }
 
     // ── tx (playback) queue ──────────────────────────────────────────────
@@ -443,32 +466,51 @@ impl VirtioSnd {
         let mut any = false;
         let mut chunk = [0u8; 4096];
 
-        // Wall-clock playback budget: bytes that *should* have been played by
-        // now (smooth 48 kHz, drain-independent). Buffers are completed only up
-        // to this watermark, so the guest sees an honest real-time sink instead
-        // of an instant drain (and the clock can't be starved by audio_hda's
-        // scheduling, unlike the v0.222.37 drain-pacing this replaces).
-        let now = crate::interrupts::ticks();
-        let mut budget = now.wrapping_sub(self.play_start_tick).saturating_mul(BYTES_PER_TICK);
+        // Real-time playback budget from the TSC (constant rate, immune to
+        // interrupt-load jitter — `interrupts::ticks()` runs slow when Core 0 is
+        // busy compositing under load, which dragged the guest's audio clock too
+        // slow). Buffers complete only up to this watermark, so the guest sees an
+        // honest real-time sink instead of an instant drain.
+        let tsc_now = crate::interrupts::rdtsc();
+        let tsc_hz = crate::interrupts::tsc_freq().max(1);
+        let mut budget = ((tsc_now.wrapping_sub(self.play_start_tsc) as u128)
+            .saturating_mul(PLAYBACK_BYTES_PER_SEC as u128) / tsc_hz as u128) as u64;
 
         // Cushion clamp: while the guest stopped feeding (YouTube buffering /
         // pause) the budget ran ahead of what we actually completed. Handing that
         // whole lead back as one burst on resume fast-forwards the guest's hw_ptr
-        // → underrun → cubeb error → "can't pause / silent reload". Re-anchor the
-        // clock so the lead never exceeds two periods of catch-up.
+        // → underrun → cubeb error. Re-anchor the clock so the lead never exceeds
+        // two periods of catch-up.
         let period = (self.period_bytes as u64).max(BYTES_PER_TICK);
         let cushion = period.saturating_mul(2);
         if budget > self.bytes_completed.wrapping_add(cushion) {
             let target = self.bytes_completed.wrapping_add(cushion);
-            self.play_start_tick = now.wrapping_sub(target / BYTES_PER_TICK);
+            let target_cycles = ((target as u128).saturating_mul(tsc_hz as u128)
+                / PLAYBACK_BYTES_PER_SEC as u128) as u64;
+            self.play_start_tsc = tsc_now.wrapping_sub(target_cycles);
             budget = target;
+        }
+
+        // Rate heartbeat (~2 s): actual bytes completed vs the 192000 B/s target
+        // — confirms the guest's clock runs real-time. Also prints ticks() so we
+        // can see how far the IRQ-counter lagged the TSC under load.
+        if SND_DIAG {
+            let last = DBG_LAST_HB.load(core::sync::atomic::Ordering::Relaxed);
+            if tsc_now.wrapping_sub(last) > tsc_hz.saturating_mul(2) {
+                DBG_LAST_HB.store(tsc_now, core::sync::atomic::Ordering::Relaxed);
+                let prev = DBG_BYTES_AT_HB.swap(self.bytes_completed, core::sync::atomic::Ordering::Relaxed);
+                crate::kprintln!("[snd] hb done={}B/2s (want ~384000) ticks={} free={} buf={}",
+                    self.bytes_completed.wrapping_sub(prev), crate::interrupts::ticks(),
+                    crate::audio::free_space(slot), crate::audio::buffered(slot));
+            }
         }
 
         while last != avail_top {
             let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
 
-            // Pass 1: walk the chain, collect readable PCM segments + the status desc.
-            let mut pcm_segs: [(u64, u32); 8] = [(0, 0); 8];
+            // Pass 1: walk the chain, collect readable PCM segments + the status
+            // desc. 16 segs covers any guest period (≤80 ms = ≤5 pages) with margin.
+            let mut pcm_segs: [(u64, u32); 16] = [(0, 0); 16];
             let mut pcm_seg_n = 0usize;
             let mut pcm_len = 0usize;
             let mut status_addr: u64 = 0;
