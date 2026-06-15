@@ -1479,6 +1479,19 @@ impl VmContext {
         let sh = &mut *self.shared;
         let is_bsp = self.vcpu.apic_id == 0;
 
+        // Pace audio on EVERY exit, not just the 1|12 inject path. The snd pump
+        // feeds the mailbox + advances the guest's hw_ptr (wall-clock-paced
+        // completion). Running it only on external-interrupt/HLT exits starved it
+        // under load: a busy guest exits via MMIO (reason 48) thousands of
+        // times/sec but rarely 1/12, so completion fell behind the 100 Hz budget
+        // → audio played progressively slow + stuttered. On every exit the pump
+        // rate scales with load and bytes_completed tracks the budget. Completion
+        // latches the snd IRQ into pending_irqs; the 1|12 drain injects it at a
+        // safe point (one-inject-per-entry + interruptibility gate stay intact).
+        if is_bsp && sh.pci.virtio_snd.pump(&sh.guest_mem) {
+            sh.pending_irqs |= 1 << sh.pci.virtio_snd.irq_line();
+        }
+
         match basic {
             0 => {
                 // Exception/NMI. EXCEPTION_BITMAP=0 in production —
@@ -1754,12 +1767,8 @@ impl VmContext {
                         self.vcpu.consecutive_idle = 0;
                         continue;
                     }
-                    if sh.pci.virtio_snd.pump(&sh.guest_mem) {
-                        let vector = sh.pic.vector_for_irq(sh.pci.virtio_snd.irq_line());
-                        let _ = vmcs::inject_external_irq(vector);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
+                    // (snd pump moved to the per-exit common path above; its IRQ
+                    // is drained from pending_irqs at the top of this block.)
                     if pumped {
                         let vector = sh.pic.vector_for_irq(10);
                         let _ = vmcs::inject_external_irq(vector);
