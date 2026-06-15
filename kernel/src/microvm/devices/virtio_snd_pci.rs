@@ -125,6 +125,14 @@ const HDA_RING_BYTES: u64 = 16_384;
 /// real-time budget uses this directly.
 const PLAYBACK_BYTES_PER_SEC: u64 = 192_000;
 
+/// How far ahead of real-time playback we keep the mailbox filled (~64 ms). With
+/// the budget paced to exact real time the mailbox hovered near empty (HW: buf
+/// troughed at ~450 B = 2 ms); audio_hda refills in bursts (one worker-timer
+/// period of drain at once, ~tens of ms), so a burst-pull against a near-empty
+/// mailbox drained it to silence → residual stutter. This lead keeps a cushion;
+/// it's reported to the guest as latency_bytes so A/V stays synced. Frame-aligned.
+const LEAD: u64 = 12_288;
+
 /// Verbose lifecycle + rate diagnostics (host serial → run window). On while we
 /// stabilise audio; strip once solid (cheap — lifecycle is a few lines/stream,
 /// the rate heartbeat is throttled to ~2 s).
@@ -473,21 +481,28 @@ impl VirtioSnd {
         // honest real-time sink instead of an instant drain.
         let tsc_now = crate::interrupts::rdtsc();
         let tsc_hz = crate::interrupts::tsc_freq().max(1);
-        let mut budget = ((tsc_now.wrapping_sub(self.play_start_tsc) as u128)
+        // Real-time playback position (bytes that should have reached the speaker
+        // by now), from the TSC.
+        let position = ((tsc_now.wrapping_sub(self.play_start_tsc) as u128)
             .saturating_mul(PLAYBACK_BYTES_PER_SEC as u128) / tsc_hz as u128) as u64;
 
-        // Cushion clamp: while the guest stopped feeding (YouTube buffering /
-        // pause) the budget ran ahead of what we actually completed. Handing that
-        // whole lead back as one burst on resume fast-forwards the guest's hw_ptr
-        // → underrun → cubeb error. Re-anchor the clock so the lead never exceeds
-        // two periods of catch-up.
+        // Complete up to LEAD ahead of real playback so the mailbox keeps a
+        // cushion against audio_hda's bursty poll-pulls (else it momentarily
+        // empties → silence → brief dropout, seen on YouTube + webradio).
+        let mut budget = position.saturating_add(LEAD);
+
+        // Cushion clamp: while the guest stopped feeding (buffering / pause) the
+        // budget ran ahead of what we completed; handing that back as one burst on
+        // resume fast-forwards the guest's hw_ptr → underrun. Re-anchor the TSC
+        // clock so the lead never exceeds LEAD + two periods of catch-up.
         let period = (self.period_bytes as u64).max(BYTES_PER_TICK);
-        let cushion = period.saturating_mul(2);
-        if budget > self.bytes_completed.wrapping_add(cushion) {
-            let target = self.bytes_completed.wrapping_add(cushion);
-            let target_cycles = ((target as u128).saturating_mul(tsc_hz as u128)
+        let cap = LEAD.saturating_add(period.saturating_mul(2));
+        if budget > self.bytes_completed.wrapping_add(cap) {
+            let target = self.bytes_completed.wrapping_add(cap);
+            // Re-anchor so `position` (= target - LEAD) maps to `tsc_now`.
+            let pos_cycles = ((target.wrapping_sub(LEAD) as u128).saturating_mul(tsc_hz as u128)
                 / PLAYBACK_BYTES_PER_SEC as u128) as u64;
-            self.play_start_tsc = tsc_now.wrapping_sub(target_cycles);
+            self.play_start_tsc = tsc_now.wrapping_sub(pos_cycles);
             budget = target;
         }
 
