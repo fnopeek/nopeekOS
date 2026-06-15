@@ -125,13 +125,23 @@ const HDA_RING_BYTES: u64 = 16_384;
 /// real-time budget uses this directly.
 const PLAYBACK_BYTES_PER_SEC: u64 = 192_000;
 
-/// How far ahead of real-time playback we keep the mailbox filled (~64 ms). With
+/// How far ahead of real-time playback we keep the mailbox filled (~43 ms). With
 /// the budget paced to exact real time the mailbox hovered near empty (HW: buf
 /// troughed at ~450 B = 2 ms); audio_hda refills in bursts (one worker-timer
 /// period of drain at once, ~tens of ms), so a burst-pull against a near-empty
 /// mailbox drained it to silence → residual stutter. This lead keeps a cushion;
 /// it's reported to the guest as latency_bytes so A/V stays synced. Frame-aligned.
-const LEAD: u64 = 12_288;
+const LEAD: u64 = 8_192;
+
+/// Hard cap on mailbox fill (~107 ms). The CPU TSC runs ~0.2 % faster than the
+/// HDA codec crystal, so `bytes_completed` (TSC-paced) creeps ahead of what
+/// audio_hda drains → the mailbox slowly fills. Without the lead, network feed
+/// gaps drained it back down; WITH the lead it doesn't bottom out, so the drift
+/// would accumulate until the mailbox is full and the `free_space` ceiling
+/// throttles completion to the drain rate → the guest clock creeps slow ("the
+/// speed bug came back after a while"). Capping the fill here bounds `buf` so the
+/// drift is bled off continuously instead → real-time pace holds. Must be > LEAD.
+const MAX_FILL: u64 = 20_480;
 
 /// Verbose lifecycle + rate diagnostics (host serial → run window). On while we
 /// stabilise audio; strip once solid (cheap — lifecycle is a few lines/stream,
@@ -559,10 +569,11 @@ impl VirtioSnd {
             if self.bytes_completed.wrapping_add(pcm_len as u64) > budget {
                 break; // too early; retry next pump tick
             }
-            // Mailbox-room ceiling: never complete a buffer we can't fully
-            // submit — a partial submit would drop PCM (silent gap). With the
-            // drain budget the fill stays ~lead, so this is a safety net.
-            if (crate::audio::free_space(slot) as usize) < pcm_len {
+            // Fill cap: bound mailbox occupancy at MAX_FILL so the TSC-vs-HDA
+            // crystal drift can't slowly fill it to the brim (→ free_space
+            // throttle → guest clock creeps slow). Also guarantees room to submit
+            // the whole buffer (MAX_FILL ≪ SLOT_BYTES), so no partial-submit drop.
+            if (crate::audio::buffered(slot) as u64).wrapping_add(pcm_len as u64) > MAX_FILL {
                 break;
             }
 
