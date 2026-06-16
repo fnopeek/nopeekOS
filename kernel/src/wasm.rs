@@ -2311,6 +2311,54 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // ── Device-interrupt ABI (MSI-X → LAPIC → fiber wake) ───────────────
+    //
+    // Lets a WASM driver go IRQ-driven instead of `npk_sleep`-polling: bind a
+    // device, `npk_irq_register` its MSI-X entry once, then loop
+    //   since = npk_irq_arm(vec); <enable/submit device work>;
+    //   npk_irq_wait(vec, since, timeout); <service>
+    // The driver's fiber parks until the device fires; the IRQ wakes its core.
+    // The driver still enables the device's own interrupt source via its MMIO
+    // (e.g. a queue's IRQ-enable) using the existing npk_mmio_* fns.
+
+    // npk_irq_register(entry) -> LAPIC vector (>=0), or -1. Programs the bound
+    // device's MSI-X table `entry` to deliver to this driver's core.
+    linker.func_wrap("env", "npk_irq_register",
+        |caller: Caller<'_, HostState>, entry: i32| -> i32 {
+            let hw = match caller.data().hw.as_ref() { Some(h) => h, None => return -1 };
+            if !(0..2048).contains(&entry) { return -1; }
+            match crate::irq::register(hw.pci_addr, entry as u16) {
+                Some(v) => v as i32,
+                None => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_irq_arm(vector) -> fired-count snapshot, or -1 on a bad vector. Call
+    // BEFORE submitting/enabling the device work that triggers the IRQ; pass
+    // the result to npk_irq_wait. Also routes the IRQ to the calling core.
+    linker.func_wrap("env", "npk_irq_arm",
+        |_caller: Caller<'_, HostState>, vector: i32| -> i64 {
+            let base = crate::interrupts::DEVICE_IRQ_VEC_BASE as i32;
+            let count = crate::interrupts::DEVICE_IRQ_VEC_COUNT as i32;
+            if vector < base || vector >= base + count { return -1; }
+            crate::irq::arm(vector as u8) as i64
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_irq_wait(vector, since, timeout_ms) -> 1 fired, 0 timeout, -1 bad arg.
+    // Parks the driver's fiber until the device IRQ advances the fired-count
+    // past `since`, or `timeout_ms` elapses (defaults to 1000 if <= 0).
+    linker.func_wrap("env", "npk_irq_wait",
+        |_caller: Caller<'_, HostState>, vector: i32, since: i64, timeout_ms: i32| -> i32 {
+            let base = crate::interrupts::DEVICE_IRQ_VEC_BASE as i32;
+            let count = crate::interrupts::DEVICE_IRQ_VEC_COUNT as i32;
+            if vector < base || vector >= base + count || since < 0 { return -1; }
+            let t = if timeout_ms <= 0 { 1000 } else { timeout_ms as u64 };
+            if crate::irq::wait(vector as u8, since as u64, t) { 1 } else { 0 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_mmio_map_bar(bar_index, page_count) -> handle or -1
     //
     // Sizes the BAR first and clamps `pages` to the actual BAR size. This

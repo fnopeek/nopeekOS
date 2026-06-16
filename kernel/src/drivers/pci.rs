@@ -351,6 +351,46 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
     true
 }
 
+/// Re-point an already-programmed MSI-X table `entry` of `dev` to deliver to
+/// LAPIC `dest_apic` — rewrites ONLY the message address (one MMIO write).
+/// Lets the IRQ subsystem route a device's interrupt to whichever core is
+/// about to wait on it (so the IRQ wakes the right core out of HLT). The entry
+/// must already be programmed + the table page mapped (via `program_msix`).
+pub fn msix_set_dest(dev: PciAddr, entry: u16, dest_apic: u32) {
+    if read16(dev, 0x06) & (1 << 4) == 0 {
+        return;
+    }
+    let mut cap = read8(dev, 0x34) & 0xFC;
+    while cap != 0 {
+        if read8(dev, cap) == 0x11 {
+            break;
+        }
+        cap = read8(dev, cap + 1) & 0xFC;
+    }
+    if cap == 0 {
+        return;
+    }
+    let table = read32(dev, cap + 4);
+    let bir = (table & 0x7) as u8;
+    let tbl_off = (table & !0x7) as u64;
+    let bar_offset = 0x10 + bir * 4;
+    let bar_lo = read32(dev, bar_offset);
+    let is_64 = bar_lo & 0x04 != 0;
+    let bar_base = if is_64 {
+        ((read32(dev, bar_offset + 4) as u64) << 32) | ((bar_lo as u64) & !0xF)
+    } else {
+        (bar_lo as u64) & !0xF
+    };
+    if bar_base == 0 {
+        return;
+    }
+    let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
+    let msg_addr_lo: u32 = 0xFEE0_0000 | ((dest_apic & 0xFF) << 12);
+    // SAFETY: MSI-X table MMIO (mapped when `program_msix` first ran). Writing
+    // the message-address low word re-points delivery; no enable/mask change.
+    unsafe { core::ptr::write_volatile(entry_addr as *mut u32, msg_addr_lo); }
+}
+
 /// Live MSI-X state for diagnostics (read on demand, e.g. from `disk`).
 #[derive(Clone, Copy)]
 pub struct MsixDebug {
