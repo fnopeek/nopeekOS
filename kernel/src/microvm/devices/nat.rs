@@ -822,9 +822,10 @@ pub fn pump(
     net: &mut super::virtio_net_pci::VirtioNet,
     mem: &GuestMem,
 ) -> bool {
-    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
     static RX_IRQ_ROUTED: AtomicBool = AtomicBool::new(false);
+    static NS_LAST_RXIRQ: AtomicU64 = AtomicU64::new(0); // for net-RX IRQ rate
 
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
 
@@ -882,16 +883,21 @@ pub fn pump(
         let inj_ns = if lat_n > 0 { (inj_cyc / lat_n) * 1000 / mhz } else { 0 };
         let (p_netdev, p_stack, p_txflush, _p_render, p_pkts) = crate::net::take_poll_prof();
         let ns = |cyc: u64, n: u64| if n > 0 { (cyc / n) * 1000 / mhz } else { 0 };
-        // Per-second microvm net stats — gated OFF (flip to true to re-enable
-        // for throughput/latency debugging). Was spamming the console during
-        // browser/network use.
-        const NETSTAT_DEBUG: bool = false;
+        // Per-second microvm net stats. Re-enabled to verify net-RX: rxlat
+        // (the latency root — should DROP), pump/s (should track RX), and the
+        // RX-IRQ fire rate `rxirq/s` (proves the IRQ fires vs polling fallback).
+        const NETSTAT_DEBUG: bool = true;
+        // net-RX IRQ fire rate this window (0 + v0x0 = polling, IRQ never set up).
+        let rx_vec = crate::drivers::virtio_net::rx_irq_vector();
+        let rxirq_now = if rx_vec != 0 { crate::irq::fired_count(rx_vec) } else { 0 };
+        let rxirq_per_s = rxirq_now
+            .saturating_sub(NS_LAST_RXIRQ.swap(rxirq_now, AtOrd::Relaxed)) / secs;
         if NETSTAT_DEBUG && secs > 0 && (rxp + txp) > 0 {
             kprintln!(
-                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | nat {}/{} (hi {}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",
+                "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | rxirq {}/s (v{:#04x}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",
                 rxb / 1024 / secs, rxp / secs, txb / 1024 / secs, txp / secs,
                 lat_avg_us, lat_max_us,
-                inuse, L3_MAX, NS_HIGHWATER.load(AtOrd::Relaxed),
+                rxirq_per_s, rx_vec,
                 NS_IQ_HI.load(AtOrd::Relaxed), INBOUND_MAX,
                 NS_TCP_FLOWS.load(AtOrd::Relaxed), NS_UDP_FLOWS.load(AtOrd::Relaxed),
                 NS_DROPS.load(AtOrd::Relaxed),
