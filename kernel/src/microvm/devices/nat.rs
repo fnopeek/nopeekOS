@@ -822,10 +822,20 @@ pub fn pump(
     net: &mut super::virtio_net_pci::VirtioNet,
     mem: &GuestMem,
 ) -> bool {
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     static PUMP_LOG: AtomicU32 = AtomicU32::new(0);
+    static RX_IRQ_ROUTED: AtomicBool = AtomicBool::new(false);
 
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
+
+    // net-RX: route the host NIC's RX IRQ to THIS (BSP-pump) core once, so RX
+    // arrival wakes this core out of HLT → this pump delivers it promptly
+    // (event-driven instead of pump-cadence-bound — the measured latency root).
+    // One-shot; the BSP-pump core is pinned. No-op if net-RX IRQ is off (the
+    // NIC returns vector 0).
+    if !RX_IRQ_ROUTED.swap(true, Ordering::Relaxed) {
+        crate::irq::route_to_current(crate::drivers::virtio_net::rx_irq_vector());
+    }
 
     // CRITICAL: drain the host NIC RX ring. Intel I226-V is a polling
     // driver — nothing else calls handle_frame, so server replies (and

@@ -138,12 +138,12 @@ pub fn init() -> bool {
     // config layout: device config moves 20 → 24). Falls back to polling if
     // the device has no usable MSI-X.
     //
-    // GATED OFF until net-RX is wired end-to-end: this MSI-X enable alone makes
-    // the device fire an IRQ PER RX PACKET (no NAPI suppression yet) at the
-    // register-time core → would storm Core 0 with no benefit. Flip on only
-    // together with (2) routing the IRQ to the vCPU core, (3) the vCPU pumping
-    // on wake, and (4) NAPI-style RX-IRQ suppression during drain.
-    const NET_RX_IRQ_ENABLED: bool = false;
+    // net-RX wired end-to-end: (1) here — enable RX MSI-X; (2) nat::pump routes
+    // the IRQ to the vCPU/BSP-pump core; (3) the IRQ wakes that core out of HLT
+    // → the run-loop pump delivers RX promptly (event-driven, not pump-cadence-
+    // bound); (4) recv() does NAPI-style RX-IRQ suppression during the drain so
+    // the device doesn't interrupt per packet.
+    const NET_RX_IRQ_ENABLED: bool = true;
     let rx_vec = if NET_RX_IRQ_ENABLED {
         crate::irq::register(dev.addr, 0).unwrap_or(0)
     } else {
@@ -431,10 +431,37 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     let used_idx = unsafe { core::ptr::read_volatile(used_idx_ptr) };
 
     if used_idx == dev.rx_last_used {
-        // Ring drained — ring the doorbell once for everything reposted during
-        // this drain (batched notify instead of one VM-exit per packet).
-        dev.rx_kick();
-        return None; // no new packets
+        // Ring appears drained. NAPI: if RX IRQs are enabled (MSI-X on) and we
+        // had suppressed them during a drain (avail.flags==1), this is the
+        // drain end → re-enable + re-check once (a frame may have landed in the
+        // window) before parking, so no wakeup is lost. If already enabled
+        // (flags==0), the next RX will interrupt — nothing to do.
+        if dev.rx_msix_vector != 0 {
+            let flags = unsafe { core::ptr::read_volatile(dev.rx_avail_base as *const u16) };
+            if flags != 0 {
+                unsafe { core::ptr::write_volatile(dev.rx_avail_base as *mut u16, 0); }
+                fence(Ordering::SeqCst);
+                let used2 = unsafe { core::ptr::read_volatile(used_idx_ptr) };
+                if used2 == dev.rx_last_used {
+                    dev.rx_kick();
+                    return None; // truly empty, IRQ re-armed for the next frame
+                }
+                // A frame arrived in the window — re-suppress + fall through.
+                unsafe { core::ptr::write_volatile(dev.rx_avail_base as *mut u16, 1); }
+            } else {
+                dev.rx_kick();
+                return None;
+            }
+        } else {
+            // Ring drained — ring the doorbell once for everything reposted
+            // during this drain (batched notify, not one VM-exit per packet).
+            dev.rx_kick();
+            return None; // no new packets
+        }
+    } else if dev.rx_msix_vector != 0 {
+        // Frames present → we're draining; suppress further RX IRQs until the
+        // ring empties (NAPI), so the device doesn't interrupt per packet.
+        unsafe { core::ptr::write_volatile(dev.rx_avail_base as *mut u16, 1); }
     }
 
     // Read the used ring entry
