@@ -454,29 +454,32 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
         children: alloc::vec![sides, center],
         modifiers: Vec::new(),
     };
-    // Pin the band to the top with a flex spacer below it: while the window
-    // is expanded for the volume dropdown the pills keep their height
-    // instead of stretching to fill the tall (full-screen) window.
+    // The root MUST stay a `Stack`: the compositor keys its translucent-panel
+    // treatment (transparent clear + per-pixel alpha) on a Stack root. A
+    // Column root renders opaque → a black band. So when collapsed, return
+    // the bare band Stack unchanged.
+    if !unsafe { POPOVER_OPEN } {
+        return band;
+    }
+    // Open: the window is expanded tall. Pin the band to the top with a flex
+    // spacer below it so the pills keep their height instead of stretching to
+    // fill the tall window. Wrap in a Stack root (still translucent) and
+    // overlay the popover (declared after `base` so the anchor rect exists).
     let base = Widget::Column {
         children: alloc::vec![band, Widget::Spacer { flex: 1 }],
         spacing: Spacing::None.as_u16(),
         align: Align::Stretch,
         modifiers: Vec::new(),
     };
-    if unsafe { POPOVER_OPEN } {
-        // Declared after `base` so the anchor's rect is already recorded.
-        let pop = Widget::Popover {
-            anchor: NodeId(VOL_ANCHOR),
-            child: alloc::boxed::Box::new(volume_popover(st.vol)),
-            on_dismiss: ActionId(VOL_DISMISS),
-            modifiers: Vec::new(),
-        };
-        Widget::Stack {
-            children: alloc::vec![base, pop],
-            modifiers: Vec::new(),
-        }
-    } else {
-        base
+    let pop = Widget::Popover {
+        anchor: NodeId(VOL_ANCHOR),
+        child: alloc::boxed::Box::new(volume_popover(st.vol)),
+        on_dismiss: ActionId(VOL_DISMISS),
+        modifiers: Vec::new(),
+    };
+    Widget::Stack {
+        children: alloc::vec![base, pop],
+        modifiers: Vec::new(),
     }
 }
 
