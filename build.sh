@@ -490,7 +490,15 @@ run_qemu_generic() {
         )
         info "Network: vhost/tap ($tapdev) — bypassing slirp"
     else
-        net_args=(-nic user,model=virtio-net-pci)
+        # Explicit device (not the -nic shorthand) so we can request MSI-X
+        # vectors (config + RX + TX). The shorthand's virtio-net exposes NO
+        # MSI-X capability, which blocks net-RX's event-driven RX IRQ
+        # (confirmed: "[npk] msix: 00:03.0 no MSI-X capability"). Transitional
+        # (1af4:1000) so the legacy driver still binds; slirp backend unchanged.
+        net_args=(
+            -netdev user,id=net0
+            -device virtio-net-pci,netdev=net0,vectors=3
+        )
     fi
     echo ""
 
