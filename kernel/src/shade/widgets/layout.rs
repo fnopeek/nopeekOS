@@ -174,7 +174,7 @@ fn collect_popovers(
             // below the anchor with a small gap so it reads as detached
             // (a bar dropdown floats clear of the panel; menus clear their
             // trigger). Flip above when there's no room.
-            const POPOVER_GAP: i32 = 4;
+            const POPOVER_GAP: i32 = 8;
             let csize = measure(child);
             let below_y = anchor_rect.y + anchor_rect.h as i32 + POPOVER_GAP;
             let fits_below = below_y + csize.h as i32 <= window.y + window.h as i32;

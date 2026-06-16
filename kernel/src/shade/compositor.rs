@@ -580,17 +580,30 @@ impl Compositor {
         let new_h = h
             .min(self.screen_h.saturating_sub(strut.margin))
             .max(strut.pill_h);
-        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-            if win.height == new_h { return true; }
-            win.height = new_h;
-            win.dirty = true;
-            // Shrinking exposes the area the dropdown covered; force a full
-            // recomposite so it repaints from whatever is underneath.
-            self.needs_full_redraw = true;
+        let expanding = new_h > strut.pill_h;
+        let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            if win.height != new_h {
+                win.height = new_h;
+                win.dirty = true;
+            }
             true
         } else {
             false
+        };
+        if !found { return false; }
+        // While expanded the bar overlaps tiled windows. Focusing an app pins
+        // it (and the dock) ahead of the bar in z-order, so without this the
+        // dropdown renders BEHIND an open window. Pin the bar to the very
+        // front while expanded so its popover stays on top; collapsed it's a
+        // thin strut that never overlaps, so there's nothing to restore.
+        if expanding {
+            self.z_order.retain(|&wid| wid != id);
+            self.z_order.insert(0, id);
         }
+        // Shrinking exposes the area the dropdown covered (and re-pinning
+        // changes z-order); force a full recomposite either way.
+        self.needs_full_redraw = true;
+        true
     }
 
     /// Back-compat wrapper for the `npk_window_set_dock` host fn.
