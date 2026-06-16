@@ -149,6 +149,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // Isolated — nothing in the live app path uses fibers yet.
     smp::fiber::self_test();
 
+    // Resident worker that persists npkFS streaming-write chunks off the
+    // caller's thread (the download-stall fix: a guest 9p write no longer
+    // blocks the vCPU on AES-GCM + NVMe). Spawn AFTER smp::init() so workers
+    // exist (else it would run inline and never return).
+    storage::npkfs::fs::start_flush_worker();
+
     // TSS install (BSP). Replaces the boot GDT with a clone that has
     // a real long-mode TSS descriptor in slot 3, then `ltr`s it.
     // VMX host-state validation rejects HOST_TR_SELECTOR=0, so this
