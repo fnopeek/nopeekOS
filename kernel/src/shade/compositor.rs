@@ -504,6 +504,57 @@ impl Compositor {
         }
     }
 
+    /// Position an overlay window's top-left at `(x, y)` with size `(w, h)`,
+    /// clamped to the screen. Like `set_overlay` but app-positioned instead
+    /// of centred — for dropdowns that anchor to a screen corner (e.g. the
+    /// volume slider just under the bar). Does not touch focus.
+    pub fn set_overlay_at(&mut self, id: WindowId, x: i32, y: i32, w: u32, h: u32) -> bool {
+        let screen_w = self.screen_w;
+        let screen_h = self.screen_h;
+        let ow = w.min(screen_w).max(60);
+        let oh = h.min(screen_h).max(40);
+        let ox = x.clamp(0, screen_w.saturating_sub(ow) as i32) as u32;
+        let oy = y.clamp(0, screen_h.saturating_sub(oh) as i32) as u32;
+        let changed = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.state = crate::shade::window::WindowState::Floating;
+            win.is_overlay = true;
+            win.x = ox;
+            win.y = oy;
+            win.width = ow;
+            win.height = oh;
+            win.dirty = true;
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.retile();
+            self.needs_full_redraw = true;
+        }
+        changed
+    }
+
+    /// Toggle light-dismiss (close-on-outside-click) for a window.
+    pub fn set_light_dismiss(&mut self, id: WindowId, on: bool) -> bool {
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.light_dismiss = on;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A visible light-dismiss window NOT containing `(x, y)`, if any — the
+    /// click-handler closes it so transient overlays vanish on an outside
+    /// click. (Clicks inside keep it open to interact with.)
+    fn light_dismiss_outside(&self, x: i32, y: i32) -> Option<WindowId> {
+        self.windows.iter().find(|w| {
+            w.light_dismiss && w.visible && !(
+                x >= w.x as i32 && x < (w.x + w.width) as i32 &&
+                y >= w.y as i32 && y < (w.y + w.height) as i32)
+        }).map(|w| w.id)
+    }
+
     /// Bottom edge of the dock's resting baseline. The bar is a top strut, so
     /// the dock always rests at the screen bottom.
     fn dock_baseline(&self) -> u32 {
@@ -1745,6 +1796,16 @@ impl Compositor {
             } else {
                 self.drag = None;
                 return drag.mode == DragMode::Resize;
+            }
+        }
+
+        // Light-dismiss: a window that opted in (npk_window_set_light_dismiss)
+        // closes on a fresh click outside it — the volume slider overlay etc.
+        // The dismiss click is consumed (it just closes the overlay).
+        if self.mouse.left_clicked() || self.mouse.right_clicked() {
+            if let Some(id) = self.light_dismiss_outside(mx, my) {
+                self.close_window(id);
+                return true;
             }
         }
 
