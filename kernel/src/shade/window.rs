@@ -88,6 +88,10 @@ pub struct Window {
     /// the bar band, always visible, global across workspaces, never
     /// focused. Rendered with the translucent-tray blit like the dock.
     pub is_bar: bool,
+    /// Light-dismiss: close this window when a click lands outside it
+    /// (opt-in via `npk_window_set_light_dismiss`). Used by transient
+    /// overlays like the volume slider. Independent of `modal`.
+    pub light_dismiss: bool,
 }
 
 #[allow(dead_code)]
@@ -116,6 +120,7 @@ impl Window {
             modal: false,
             is_dock: false,
             is_bar: false,
+            light_dismiss: false,
         }
     }
 

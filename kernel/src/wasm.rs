@@ -1284,6 +1284,85 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_window_set_overlay_at(x, y, w, h) -> i32
+    // Like npk_window_set_overlay but positions the overlay's top-left at
+    // (x, y) instead of centring it — for corner-anchored dropdowns (e.g.
+    // the volume slider under the bar). Creates/promotes + focuses the
+    // caller's widget window, same as the centred overlay path.
+    //
+    // Returns 0 on success, -1 on cap denied / bad args / no compositor.
+    linker.func_wrap("env", "npk_window_set_overlay_at",
+        |mut caller: Caller<'_, HostState>, x: i32, y: i32, w: i32, h: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if w <= 0 || h <= 0 || x < 0 || y < 0 { return -1; }
+
+            let mut wid = caller.data().widget_window_id;
+            if wid == 0 {
+                let terminal_idx = caller.data().terminal_idx;
+                let promoted = if terminal_idx != 255 {
+                    crate::shade::with_compositor(|c|
+                        c.promote_terminal_to_widget(terminal_idx)
+                    ).flatten()
+                } else {
+                    None
+                };
+                let new_id = match promoted {
+                    Some(id) => {
+                        caller.data_mut().terminal_idx = 255;
+                        crate::shade::with_compositor(|comp| comp.focus_window(id));
+                        id.0
+                    }
+                    None => {
+                        let title = caller.data().module_name.clone();
+                        match crate::shade::with_compositor(|comp| {
+                            let id = comp.create_widget_window(
+                                if title.is_empty() { "widget" } else { title.as_str() });
+                            comp.focus_window(id);
+                            id.0
+                        }) {
+                            Some(v) => v,
+                            None => return -1,
+                        }
+                    }
+                };
+                caller.data_mut().widget_window_id = new_id;
+                wid = new_id;
+            }
+
+            let ok = crate::shade::with_compositor(|comp| {
+                let ok = comp.set_overlay_at(crate::shade::WindowId(wid),
+                    x, y, w as u32, h as u32);
+                if ok { comp.focus_window(crate::shade::WindowId(wid)); }
+                ok
+            }).unwrap_or(false);
+
+            if ok { crate::shade::request_render(); 0 } else { -1 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_window_set_light_dismiss(on: i32) -> i32
+    // Opt the caller's widget window into light-dismiss: the compositor
+    // closes it when a click lands outside it (transient overlays like the
+    // volume slider). Off by default, so other overlays (loft, drun) are
+    // unaffected. Returns 0 on success, -1 if no widget window / cap denied.
+    linker.func_wrap("env", "npk_window_set_light_dismiss",
+        |caller: Caller<'_, HostState>, on: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 { return -1; }
+            let ok = crate::shade::with_compositor(|comp|
+                comp.set_light_dismiss(crate::shade::WindowId(wid), on != 0)
+            ).unwrap_or(false);
+            if ok { 0 } else { -1 }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_window_set_dock(w, h) -> i32
     // Turn the calling app's widget window into a bottom auto-hide dock:
     // overlay (no tiling strut), never modal, never focused on reveal,

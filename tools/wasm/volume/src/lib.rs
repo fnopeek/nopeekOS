@@ -24,8 +24,9 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_window_set_overlay(w: i32, h: i32) -> i32;
-    fn npk_window_set_modal(modal: i32) -> i32;
+    fn npk_screen_size() -> i32;
+    fn npk_window_set_overlay_at(x: i32, y: i32, w: i32, h: i32) -> i32;
+    fn npk_window_set_light_dismiss(on: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_audio_get_volume() -> i32;
     fn npk_audio_set_volume(pct: i32) -> i32;
@@ -88,10 +89,13 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 
 // ── State + actions ──────────────────────────────────────────────────
-const CLOSE: u32 = 1;
 const MUTE: u32  = 2;
 const VOL_SET_BASE: u32 = 100;
 const VOL_STEPS: u32 = 20;          // 5 %-steps
+
+// Overlay size (px). Sized to the header + a 20-cell track.
+const W: i32 = 340;
+const H: i32 = 92;
 
 static mut VOL: u8 = 50;
 static mut PRE_MUTE: u8 = 50;       // level restored on un-mute
@@ -128,16 +132,13 @@ fn render() -> Widget {
     let icon = if vol == 0 { IconId::SpeakerX }
                else if vol <= 50 { IconId::SpeakerLow }
                else { IconId::SpeakerHigh };
+    // Speaker → toggle mute. Esc / click-outside close (no chrome button).
     let header = Widget::Row {
         children: alloc::vec![
-            // Speaker → toggle mute. X → close.
-            Widget::Icon { id: icon, size: 24,
+            Widget::Icon { id: icon, size: 20,
                 modifiers: alloc::vec![Modifier::OnClick(ActionId(MUTE))] },
             Widget::Text { content: alloc::format!("  {}%", vol),
-                style: TextStyle::Title, modifiers: Vec::new() },
-            Widget::Spacer { flex: 1 },
-            Widget::Icon { id: IconId::X, size: 20,
-                modifiers: alloc::vec![Modifier::OnClick(ActionId(CLOSE))] },
+                style: TextStyle::Body, modifiers: Vec::new() },
         ],
         spacing: Spacing::Sm.as_u16(),
         align: Align::Center,
@@ -146,9 +147,9 @@ fn render() -> Widget {
 
     Widget::Column {
         children: alloc::vec![header, track],
-        spacing: Spacing::Md.as_u16(),
+        spacing: Spacing::Sm.as_u16(),
         align: Align::Stretch,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Md.as_u16())],
+        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
     }
 }
 
@@ -172,9 +173,7 @@ fn handle(ev: Event) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => Outcome::Exit,
         Event::Action(ActionId(id)) => {
-            if id == CLOSE {
-                Outcome::Exit
-            } else if id == MUTE {
+            if id == MUTE {
                 let v = unsafe { npk_audio_get_volume() };
                 if v > 0 {
                     unsafe { PRE_MUTE = v as u8; }
@@ -200,10 +199,14 @@ pub extern "C" fn _start() {
     unsafe {
         VOL = npk_audio_get_volume().clamp(0, 100) as u8;
         PRE_MUTE = if VOL > 0 { VOL } else { 50 };
-        // Centred modal overlay (drun pattern). The compositor clamps the
-        // size; this is enough for the header + a 20-cell track.
-        let _ = npk_window_set_overlay(360, 150);
-        let _ = npk_window_set_modal(1);
+        // Top-right, just below the bar (≈8 px under the ~40 px strut). The
+        // compositor clamps to the screen. Light-dismiss = close on a click
+        // outside; Esc closes too.
+        let packed = npk_screen_size();
+        let screen_w = ((packed >> 16) & 0xFFFF).max(W + 20);
+        let x = screen_w - W - 12;
+        let _ = npk_window_set_overlay_at(x, 48, W, H);
+        let _ = npk_window_set_light_dismiss(1);
     }
 
     commit_tree();
