@@ -1430,6 +1430,19 @@ impl VmContext {
         if self.vcpu.apic_id == 0 && sh.pci.virtio_snd.pump(&sh.guest_mem) {
             sh.pending_irqs |= 1 << sh.pci.virtio_snd.irq_line();
         }
+        // Deliver microvm RX on EVERY exit too (not just the ~1762/s that reach
+        // the INTR/HLT pump below). The guest HLTs ~7300/s WAITING for RX but
+        // the pump only ran when the inject block reached it → RX-starved →
+        // single-stream download capped at pump-cadence (~5 MB/s; measured
+        // hlt>>pump). `pump_fast` drains the host NIC + injects into the guest
+        // RX ring; latch IRQ10 into pending_irqs (drained at a safe point in the
+        // INTR/HLT block, which yields to an overdue timer so this can't starve
+        // guest jiffies → RCU). BSP-only.
+        if self.vcpu.apic_id == 0
+            && crate::microvm::devices::nat::pump_fast(&mut sh.pci.virtio_net, &sh.guest_mem)
+        {
+            sh.pending_irqs |= 1 << 10;
+        }
 
         match exit {
             EXIT_INTR | EXIT_HLT => {
@@ -1526,15 +1539,29 @@ impl VmContext {
                 // boot CPU); an AP vCPU only services its own LAPIC timer
                 // (below) + cross-vCPU IPIs (above). Guest SMP, Stage 3b.
                 let is_bsp = self.vcpu.apic_id == 0;
-                // Deferred device IRQ (queued while the guest was IF=0) is now
-                // deliverable — inject the lowest pending line.
+                // Deferred device IRQ (queued while the guest was IF=0, or the
+                // per-exit net-RX pump) is now deliverable — inject the lowest
+                // pending line. BUT yield to an overdue guest timer first: with
+                // the per-exit net-RX pump, IRQ10 can be pending almost every
+                // pass; draining here unconditionally would starve jiffies →
+                // RCU stall. If the timer is overdue (≥ TIMER_MAX_SKIP=3 host
+                // ticks) skip this pass and let the timer block below fire it;
+                // pending_irqs stays set for the next pass (≤30 ms jitter).
                 if is_bsp && sh.pending_irqs != 0 {
-                    let line = sh.pending_irqs.trailing_zeros() as u8;
-                    sh.pending_irqs &= !(1u16 << line);
-                    let info: u64 = (sh.pic.vector_for_irq(line) as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
+                    let now_t = crate::interrupts::ticks();
+                    let timer_overdue = (sh.pic.irq_unmasked(0)
+                        && sh.pit_enabled
+                        && now_t.wrapping_sub(sh.last_timer_tick) >= 3)
+                        || (self.vcpu.lapic.timer_tick_vector().is_some()
+                            && now_t.wrapping_sub(self.vcpu.last_lapic_tick) >= 3);
+                    if !timer_overdue {
+                        let line = sh.pending_irqs.trailing_zeros() as u8;
+                        sh.pending_irqs &= !(1u16 << line);
+                        let info: u64 = (sh.pic.vector_for_irq(line) as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
                 }
                 // Guest timer tick. The microvm has no PIT/LAPIC
                 // timer event source, so the only thing that ever
