@@ -1400,30 +1400,6 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_bar_expand(h) -> i32
-    // Grow / shrink ONLY the bar window's buffer height (downward) so a
-    // dropdown popover (e.g. the volume slider) has room to render below
-    // the band. The reserved top strut is unchanged → tiled windows do
-    // not move. The caller must already be the top-strut bar; `h` is
-    // clamped to [band height, screen height - margin]; pass the band
-    // height to collapse back. Returns 0 ok, -1 on cap / not-the-bar / no
-    // window.
-    linker.func_wrap("env", "npk_bar_expand",
-        |caller: Caller<'_, HostState>, h: i32| -> i32 {
-            let cap_id = caller.data().cap_id;
-            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
-                return -1;
-            }
-            if h <= 0 { return -1; }
-            let wid = caller.data().widget_window_id;
-            if wid == 0 { return -1; }
-            let ok = crate::shade::with_compositor(|comp|
-                comp.expand_bar(crate::shade::WindowId(wid), h as u32)
-            ).unwrap_or(false);
-            if ok { crate::shade::request_render(); 0 } else { -1 }
-        },
-    ).map_err(|_| WasmError::HostFunctionError)?;
-
     // npk_bar_state(buf, max) -> i32
     // Live state for the bar app: "HH:MM\n<ws_count>\n<ws_active>\n<title>"
     // (clock already timezone-adjusted). Returns bytes written, -1 on

@@ -15,6 +15,7 @@ exclude = [
     "tools/wasm/spell",
     "tools/wasm/iris",
     "tools/wasm/snap",
+    "tools/wasm/volume",
     "tools/wasm/testdisk",
     "tools/wasm/aml/core",
     "tools/wasm/aml/harness",

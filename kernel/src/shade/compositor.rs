@@ -566,46 +566,6 @@ impl Compositor {
         found
     }
 
-    /// Grow / shrink ONLY the top-strut bar window's buffer height,
-    /// downward, so a dropdown popover (e.g. the volume slider) has room
-    /// to render below the band. The reserved strut (`top_strut.pill_h`)
-    /// is left untouched, so tiled windows do not move — this is purely a
-    /// render-buffer resize, unlike `set_bar_panel` which re-reserves the
-    /// band and retiles. `h` is clamped to `[pill_h, screen_h - margin]`;
-    /// passing `pill_h` collapses it back. Valid only for the current
-    /// top-strut window. Returns false otherwise.
-    pub fn expand_bar(&mut self, id: WindowId, h: u32) -> bool {
-        let Some(strut) = self.top_strut else { return false };
-        if strut.id != id { return false; }
-        let new_h = h
-            .min(self.screen_h.saturating_sub(strut.margin))
-            .max(strut.pill_h);
-        let expanding = new_h > strut.pill_h;
-        let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-            if win.height != new_h {
-                win.height = new_h;
-                win.dirty = true;
-            }
-            true
-        } else {
-            false
-        };
-        if !found { return false; }
-        // While expanded the bar overlaps tiled windows. Focusing an app pins
-        // it (and the dock) ahead of the bar in z-order, so without this the
-        // dropdown renders BEHIND an open window. Pin the bar to the very
-        // front while expanded so its popover stays on top; collapsed it's a
-        // thin strut that never overlaps, so there's nothing to restore.
-        if expanding {
-            self.z_order.retain(|&wid| wid != id);
-            self.z_order.insert(0, id);
-        }
-        // Shrinking exposes the area the dropdown covered (and re-pinning
-        // changes z-order); force a full recomposite either way.
-        self.needs_full_redraw = true;
-        true
-    }
-
     /// Back-compat wrapper for the `npk_window_set_dock` host fn.
     pub fn set_dock(&mut self, id: WindowId, w: u32, h: u32) -> bool {
         self.set_panel(id, 0, 0, w, h)
