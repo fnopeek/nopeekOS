@@ -40,6 +40,7 @@ const CSTS_RDY: u32 = 1 << 0;      // Ready
 const ADM_IDENTIFY: u8 = 0x06;
 const ADM_CREATE_IO_CQ: u8 = 0x05;
 const ADM_CREATE_IO_SQ: u8 = 0x01;
+const ADM_SET_FEATURES: u8 = 0x09;
 
 // NVM opcodes
 const NVM_READ: u8 = 0x02;
@@ -543,6 +544,24 @@ pub fn init() -> bool {
     if admin_command(&mut state, cmd).is_err() {
         kprintln!("[npk] nvme: Create I/O SQ failed");
         return false;
+    }
+
+    // Disable interrupt coalescing (Set Features FID 0x08, value 0) so the
+    // controller raises an MSI-X per completion instead of aggregating by
+    // count/time. Our io_command poll-drains the CQ immediately; if the
+    // controller defaults to time-based coalescing, the held interrupt
+    // condition clears before the timer fires → no MSI ever. (Linux waits on
+    // the IRQ rather than poll-draining, so it never hits this.) Best-effort —
+    // ignore errors; controllers that lack the feature still work via poll.
+    if state.msix_vector != 0 {
+        let mut cmd = SqEntry::zeroed();
+        cmd.opcode = ADM_SET_FEATURES;
+        cmd.cdw10 = 0x08; // FID = Interrupt Coalescing
+        cmd.cdw11 = 0; // aggregation threshold = 0, time = 0 → no coalescing
+        match admin_command(&mut state, cmd) {
+            Ok(_) => kprintln!("[npk] nvme: interrupt coalescing disabled"),
+            Err(_) => kprintln!("[npk] nvme: set-features (coalescing) not supported"),
+        }
     }
 
     state.io_sq = io_sq;
