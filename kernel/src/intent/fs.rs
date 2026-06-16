@@ -433,6 +433,13 @@ pub fn intent_disk_info() {
                     kprintln!("  MSI-X:     entry addr={:#x} data={:#x} vctrl={:#x} | msgctrl={:#06x} en={} fmask={}",
                         d.e_addr, d.e_data, d.e_vctrl, d.ctrl, (d.ctrl >> 15) & 1, (d.ctrl >> 14) & 1);
                 }
+                // Positive control: does our IDT/ISR/LAPIC receive path deliver
+                // a vector at all? Self-IPI to a test vector. OK + NVMe count 0
+                // ⇒ the device MSI specifically isn't arriving (H10/fabric);
+                // FAIL ⇒ our receive path is broken (affects all device IRQs).
+                kprintln!("  IRQ test:  self-IPI → {}",
+                    if crate::irq::self_test() { "FIRED ✓ (IDT/ISR/LAPIC receive OK)" }
+                    else { "NOT fired ✗ (receive path broken)" });
             }
             kprintln!("  Status:    online");
 
