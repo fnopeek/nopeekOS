@@ -418,6 +418,14 @@ pub fn intent_disk_info() {
             if is_nvme {
                 let max_blocks = crate::nvme::max_blocks_per_cmd();
                 kprintln!("  Max/cmd:   {} blocks ({} KB)", max_blocks, max_blocks * 4);
+                match crate::nvme::msix_status() {
+                    Some((vec, fires)) => kprintln!(
+                        "  IRQ:       MSI-X vector {:#04x}, {} completion IRQs{}",
+                        vec, fires,
+                        if fires > 0 { "  (host-device-irq ✓)" } else { "  (none yet — poll)" },
+                    ),
+                    None => kprintln!("  IRQ:       polled (no MSI-X)"),
+                }
             }
             kprintln!("  Status:    online");
 

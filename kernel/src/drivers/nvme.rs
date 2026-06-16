@@ -1330,6 +1330,18 @@ pub fn max_blocks_per_cmd() -> u32 {
     MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed)
 }
 
+/// (LAPIC vector, total completion-IRQ fires) for the I/O-CQ MSI-X, or None
+/// if MSI-X isn't set up (poll-only). For the `disk` diagnostic — `fires > 0`
+/// proves the host-device-irq path works on this hardware.
+pub fn msix_status() -> Option<(u8, u64)> {
+    let guard = NVME.lock();
+    let v = guard.as_ref()?.msix_vector;
+    if v == 0 {
+        return None;
+    }
+    Some((v, crate::irq::fired_count(v)))
+}
+
 #[allow(dead_code)]
 /// Return capacity in GB.
 pub fn capacity_gb() -> Option<u64> {
