@@ -426,6 +426,13 @@ pub fn intent_disk_info() {
                     ),
                     None => kprintln!("  IRQ:       polled (no MSI-X)"),
                 }
+                // Live MSI-X read-back: did our table programming stick?
+                if let Some(d) = crate::nvme::msix_debug() {
+                    kprintln!("  MSI-X:     cap@{:#x} size={} bir={} off={:#x} tbl@{:#x} pcicmd={:#06x} (busmaster={})",
+                        d.cap, d.table_size, d.bir, d.tbl_off, d.entry_addr, d.pci_cmd, (d.pci_cmd >> 2) & 1);
+                    kprintln!("  MSI-X:     entry addr={:#x} data={:#x} vctrl={:#x} | msgctrl={:#06x} en={} fmask={}",
+                        d.e_addr, d.e_data, d.e_vctrl, d.ctrl, (d.ctrl >> 15) & 1, (d.ctrl >> 14) & 1);
+                }
             }
             kprintln!("  Status:    online");
 

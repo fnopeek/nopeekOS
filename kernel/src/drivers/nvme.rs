@@ -125,6 +125,7 @@ struct NvmeState {
     oncs: u16,                  // Optional NVM Command Support (from Identify Controller)
     command_id: u16,
     msix_vector: u8,            // LAPIC vector for I/O CQ completion MSI-X (0 = none/poll)
+    pci_addr: pci::PciAddr,     // for live MSI-X read-back (disk diagnostic)
 }
 
 static NVME: Mutex<Option<NvmeState>> = Mutex::new(None);
@@ -407,6 +408,7 @@ pub fn init() -> bool {
         oncs: 0,
         command_id: 1,
         msix_vector: 0,
+        pci_addr: dev.addr,
     };
 
     // Allocate DMA buffer for Identify data (4KB)
@@ -1340,6 +1342,14 @@ pub fn msix_status() -> Option<(u8, u64)> {
         return None;
     }
     Some((v, crate::irq::fired_count(v)))
+}
+
+/// Live MSI-X capability + table-entry read-back for the `disk` diagnostic.
+/// Shows whether our programming stuck (entry unmasked, MSI-X enabled, addr/
+/// data correct) — so we can debug "programmed but no IRQ" without the boot log.
+pub fn msix_debug() -> Option<crate::pci::MsixDebug> {
+    let dev = NVME.lock().as_ref().map(|s| s.pci_addr)?;
+    crate::pci::msix_debug(dev, 0)
 }
 
 #[allow(dead_code)]

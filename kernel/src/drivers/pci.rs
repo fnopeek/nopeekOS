@@ -348,15 +348,56 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
     let new_ctrl = (msg_ctrl | (1 << 15)) & !(1 << 14);
     let new_dword = (ctrl_dword & 0x0000_FFFF) | ((new_ctrl as u32) << 16);
     write32(dev, cap, new_dword);
+    true
+}
 
-    // Diagnostic read-back (runs once per device at init): confirms WHERE the
-    // table is + whether our writes landed + that MSI-X is enabled/unmasked.
-    // If rb_* match what we wrote and rb_ctrl has bit15 set / bit14 clear and
-    // rb_vctrl=0, the table programming is correct → look at the controller/CQ
-    // side. If they DON'T match, the table location (BIR/offset) is wrong.
-    let rb_ctrl = (read32(dev, cap) >> 16) as u16;
-    let cmd_reg = read16(dev, 0x04);
-    let (rb_addr, rb_data, rb_vctrl) = unsafe {
+/// Live MSI-X state for diagnostics (read on demand, e.g. from `disk`).
+#[derive(Clone, Copy)]
+pub struct MsixDebug {
+    pub cap: u8,
+    pub ctrl: u16,       // Message Control: bit15 enable, bit14 function-mask, [10:0] size-1
+    pub table_size: u16,
+    pub bir: u8,
+    pub tbl_off: u64,
+    pub entry_addr: u64,
+    pub pci_cmd: u16,    // PCI command reg (bit2 = bus master, needed to issue the MSI write)
+    pub e_addr: u32,     // table entry: message address low
+    pub e_data: u32,     // table entry: message data (= delivered vector)
+    pub e_vctrl: u32,    // table entry: vector control (bit0 = masked)
+}
+
+/// Re-read `dev`'s MSI-X capability + table `entry` live. None if no MSI-X.
+/// Lets `disk` show whether our programming stuck (entry unmasked, enabled,
+/// addr/data correct) without scrolling the boot log.
+pub fn msix_debug(dev: PciAddr, entry: u16) -> Option<MsixDebug> {
+    if read16(dev, 0x06) & (1 << 4) == 0 {
+        return None;
+    }
+    let mut cap = read8(dev, 0x34) & 0xFC;
+    while cap != 0 {
+        if read8(dev, cap) == 0x11 {
+            break;
+        }
+        cap = read8(dev, cap + 1) & 0xFC;
+    }
+    if cap == 0 {
+        return None;
+    }
+    let ctrl = (read32(dev, cap) >> 16) as u16;
+    let table = read32(dev, cap + 4);
+    let bir = (table & 0x7) as u8;
+    let tbl_off = (table & !0x7) as u64;
+    let bar_offset = 0x10 + bir * 4;
+    let bar_lo = read32(dev, bar_offset);
+    let is_64 = bar_lo & 0x04 != 0;
+    let bar_base = if is_64 {
+        ((read32(dev, bar_offset + 4) as u64) << 32) | ((bar_lo as u64) & !0xF)
+    } else {
+        (bar_lo as u64) & !0xF
+    };
+    let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
+    // SAFETY: MSI-X table MMIO (mapped at program_msix time), read-only here.
+    let (e_addr, e_data, e_vctrl) = unsafe {
         let p = entry_addr as *const u32;
         (
             core::ptr::read_volatile(p.add(0)),
@@ -364,11 +405,18 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
             core::ptr::read_volatile(p.add(3)),
         )
     };
-    kprintln!("[npk] msix: cap@{:#x} size={} bir={} off={:#x} tbl@{:#x} pcicmd={:#06x}",
-        cap, table_size, bir, tbl_off, entry_addr, cmd_reg);
-    kprintln!("[npk] msix: wrote addr={:#x} data={:#x} | readback addr={:#x} data={:#x} vctrl={:#x} ctrl={:#06x}",
-        msg_addr_lo, vector, rb_addr, rb_data, rb_vctrl, rb_ctrl);
-    true
+    Some(MsixDebug {
+        cap,
+        ctrl,
+        table_size: (ctrl & 0x7FF) + 1,
+        bir,
+        tbl_off,
+        entry_addr,
+        pci_cmd: read16(dev, 0x04),
+        e_addr,
+        e_data,
+        e_vctrl,
+    })
 }
 
 /// Scan PCI bus, print all devices, return count
