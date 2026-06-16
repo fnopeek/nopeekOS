@@ -875,7 +875,7 @@ pub fn pump(
         // Per-second microvm net stats — gated OFF (flip to true to re-enable
         // for throughput/latency debugging). Was spamming the console during
         // browser/network use.
-        const NETSTAT_DEBUG: bool = true;
+        const NETSTAT_DEBUG: bool = false;
         if NETSTAT_DEBUG && secs > 0 && (rxp + txp) > 0 {
             kprintln!(
                 "[netstat] rx {} KB/s ({} pkt/s) tx {} KB/s ({} pkt/s) | rxlat avg {}us max {}us | nat {}/{} (hi {}) | iq hi {}/{} | flows {}tcp {}udp | {} drops | pump {}/s injfalse {}/s batch {}",

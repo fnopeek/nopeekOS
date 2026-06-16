@@ -80,34 +80,6 @@ pub fn wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
 /// the CURRENT core's LAPIC. Call this from the driver fiber so the IRQ wakes
 /// exactly the core that will service it. Returns the vector, or None if the
 /// device has no usable MSI-X capability or the vector pool is exhausted.
-/// Positive control for the MSI receive path: fire a self-IPI to the last
-/// pool vector (0x7F) and check our ISR ran (its fired-count advanced). This
-/// exercises IDT[0x7F] → di15 → note_fired → LAPIC EOI exactly like a device
-/// MSI's delivery half — WITHOUT a device. If this works but a device's MSI
-/// doesn't, the gap is specifically the device emitting / the fabric routing
-/// its memory write (not our ISR/IDT/LAPIC setup). Returns true if the ISR
-/// fired. Must run with interrupts enabled (normal intent context).
-pub fn self_test() -> bool {
-    let vec = DEVICE_IRQ_VEC_BASE + (DEVICE_IRQ_VEC_COUNT as u8 - 1); // 0x7F
-    let base = crate::interrupts::apic_base();
-    if base == 0 {
-        return false;
-    }
-    let before = fired_count(vec);
-    // ICR-low (LAPIC offset 0x300): vector | assert(bit14) | self-shorthand
-    // (bits19:18 = 0b01). Fixed delivery, edge. Self-shorthand ignores ICR-high.
-    let icr_low = (vec as u32) | (1 << 14) | (0b01 << 18);
-    // SAFETY: LAPIC ICR MMIO; self-directed fixed IPI to an installed vector.
-    unsafe { core::ptr::write_volatile((base + 0x300) as *mut u32, icr_low); }
-    for _ in 0..1_000_000u32 {
-        if fired_count(vec) != before {
-            return true;
-        }
-        core::hint::spin_loop();
-    }
-    false
-}
-
 /// One-shot guard for the VT-d interrupt-remapping check below.
 static IR_HANDLED: AtomicBool = AtomicBool::new(false);
 
