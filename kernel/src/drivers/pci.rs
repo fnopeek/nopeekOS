@@ -319,6 +319,18 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
     }
     let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
 
+    // Defensively identity-map the MSI-X table page NO_CACHE — the device's
+    // BAR may not be mapped if its driver only mapped a register window.
+    // Avoids a #PF on the writes below (AlreadyMapped is fine).
+    let page = entry_addr & !0xFFF;
+    let _ = crate::paging::map_page(
+        page,
+        page,
+        crate::paging::PageFlags::PRESENT
+            | crate::paging::PageFlags::WRITABLE
+            | crate::paging::PageFlags::NO_CACHE,
+    );
+
     // MSI-X table entry: addr_lo, addr_hi, data, vector-control (bit0 = mask).
     let msg_addr_lo: u32 = 0xFEE0_0000 | ((dest_apic & 0xFF) << 12);
     // SAFETY: MSI-X table MMIO inside the device BAR (identity-mapped). The

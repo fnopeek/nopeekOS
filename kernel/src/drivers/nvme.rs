@@ -124,6 +124,7 @@ struct NvmeState {
     serial: [u8; 20],
     oncs: u16,                  // Optional NVM Command Support (from Identify Controller)
     command_id: u16,
+    msix_vector: u8,            // LAPIC vector for I/O CQ completion MSI-X (0 = none/poll)
 }
 
 static NVME: Mutex<Option<NvmeState>> = Mutex::new(None);
@@ -259,11 +260,31 @@ fn io_command(state: &mut NvmeState, mut cmd: SqEntry) -> Result<CqEntry, BlkErr
             if status_code != 0 {
                 return Err(BlkError::IoError);
             }
+            // One-shot HW validation (B-1): the poll completed this command;
+            // if the MSI-X ISR also fired (count advanced), the device-IRQ
+            // path works end-to-end. Logged once, in non-ISR context.
+            nvme_msix_confirm(state.msix_vector);
             return Ok(entry);
         }
         core::hint::spin_loop();
     }
     Err(BlkError::Timeout)
+}
+
+/// One-shot confirmation that NVMe completions raise our MSI-X ISR. Validates
+/// the `host-device-irq` foundation on real hardware without changing the
+/// (poll-based) completion logic. Removed once B-2 makes `io_command` actually
+/// wait on the IRQ.
+static MSIX_CONFIRMED: AtomicBool = AtomicBool::new(false);
+fn nvme_msix_confirm(vector: u8) {
+    if vector != 0 && !MSIX_CONFIRMED.load(Ordering::Relaxed) {
+        let n = crate::irq::fired_count(vector);
+        if n > 0 {
+            MSIX_CONFIRMED.store(true, Ordering::Relaxed);
+            kprintln!("[npk] nvme: MSI-X completion IRQ CONFIRMED (vector {:#04x}, {} fires) — host-device-irq works",
+                vector, n);
+        }
+    }
 }
 
 /// Initialize the NVMe controller.
@@ -385,6 +406,7 @@ pub fn init() -> bool {
         serial: [0; 20],
         oncs: 0,
         command_id: 1,
+        msix_vector: 0,
     };
 
     // Allocate DMA buffer for Identify data (4KB)
@@ -478,11 +500,26 @@ pub fn init() -> bool {
     };
     unsafe { core::ptr::write_bytes(io_cq as *mut u8, 0, io_cq_pages * 4096); }
 
+    // Set up MSI-X completion interrupts for the I/O CQ (foundation:
+    // host-device-irq). Allocate a LAPIC vector + program the device's MSI-X
+    // table entry 0 to deliver to this (BSP) core. MSI-X writes go straight
+    // to the LAPIC (no PIC/IOAPIC), so the masked-PIC setup is irrelevant. If
+    // the device has no usable MSI-X, the vector stays 0 and the CQ is created
+    // without interrupts (IEN=0) → pure poll, exactly the old behavior.
+    state.msix_vector = crate::irq::register(dev.addr, 0).unwrap_or(0);
+    let ien = if state.msix_vector != 0 { 1u32 << 1 } else { 0 }; // cdw11 bit1 = IEN
+    if state.msix_vector != 0 {
+        kprintln!("[npk] nvme: MSI-X I/O-completion IRQ → LAPIC vector {:#04x} (IV=0)",
+            state.msix_vector);
+    } else {
+        kprintln!("[npk] nvme: no usable MSI-X — polling completions");
+    }
+
     let mut cmd = SqEntry::zeroed();
     cmd.opcode = ADM_CREATE_IO_CQ;
     cmd.prp1 = io_cq;
     cmd.cdw10 = ((IO_QUEUE_SIZE as u32 - 1) << 16) | 1; // QID=1, size
-    cmd.cdw11 = 1; // Physically contiguous
+    cmd.cdw11 = 1 | ien; // bit0 = Physically Contiguous, bit1 = IEN; IV=0
     if admin_command(&mut state, cmd).is_err() {
         kprintln!("[npk] nvme: Create I/O CQ failed");
         return false;
