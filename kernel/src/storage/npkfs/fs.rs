@@ -14,10 +14,7 @@
 
 #![allow(dead_code)]
 
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use super::object::{EntryKind, TreeEntry};
@@ -590,101 +587,12 @@ fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathE
 /// path tree is only updated atomically at `finish`. This is the
 /// failure mode we want: a partial download never appears as a
 /// half-written file.
-// ── Async chunk-flush offload (download-stall fix) ──────────────────────
-//
-// `flush_chunk` used to encrypt + write each 1 MiB chunk to disk INLINE.
-// For a microvm download that runs in the guest's 9p `Twrite` handler on the
-// vCPU thread → it blocked the vCPU for ~3 ms/chunk → RX servicing stalled →
-// the INBOUND_Q overflowed → TCP sawtooth (measured: 1 GiB download = ~1/10).
-//
-// We keep the cheap BLAKE3 `encode_and_hash` on the vCPU (so `chunk_hashes`
-// stay collected in order — manifest order is trivial, no cross-fiber
-// coordination) and offload only the expensive `storage::put` (AES-GCM +
-// NVMe write) to a resident worker fiber. Chunk puts are content-addressed →
-// order-independent, so a single FIFO worker is enough. `finish()`/`Drop`
-// wait for all of a stream's puts before publishing the manifest / releasing
-// the GC stream-guard (the durability barrier).
-
-/// Per-stream flush state, shared (Arc) between the producing StreamingWriter
-/// and the worker fiber that drains its chunks.
-struct StreamFlush {
-    pending: AtomicUsize, // chunks queued/in-flight (not yet persisted)
-    error: AtomicBool,    // a put failed → finish() must NOT publish the manifest
-}
-
-struct FlushJob {
-    hash: [u8; 32],
-    bytes: Vec<u8>,
-    flush: Arc<StreamFlush>,
-}
-
-static FLUSH_QUEUE: Mutex<VecDeque<FlushJob>> = Mutex::new(VecDeque::new());
-
-/// Per-stream cap on offloaded chunks. Above it, `flush_chunk` does the put
-/// inline (backpressure) — bounds queued RAM at ~16 MiB/stream. Rarely hit:
-/// the disk outpaces the bridged download, so the queue stays shallow.
-const FLUSH_MAX_INFLIGHT: usize = 16;
-
-/// Resident worker fiber: drain the flush queue, persisting chunks off the
-/// vCPU. Spawned once at boot (`start_flush_worker`) — MUST be boot-spawned,
-/// not lazily from `t_write`: `scheduler::spawn` pushes to the BSP's deque and
-/// `t_write` runs on a worker core (vCPU), which would race. Adaptive backoff
-/// keeps idle wake-ups negligible.
-fn flush_worker(_: u64) {
-    let mut idle: u32 = 0;
-    loop {
-        let job = { FLUSH_QUEUE.lock().pop_front() };
-        match job {
-            Some(j) => {
-                idle = 0;
-                if !storage::has(&j.hash) {
-                    if storage::put(&j.hash, &j.bytes, true).is_err() {
-                        j.flush.error.store(true, Ordering::Release);
-                    }
-                }
-                j.flush.pending.fetch_sub(1, Ordering::Release);
-            }
-            None => {
-                idle = idle.saturating_add(1);
-                let ms = if idle < 8 { 1 } else if idle < 64 { 10 } else { 100 };
-                if !crate::smp::fiber::yield_sleep(ms) {
-                    // Not running as a fiber (shouldn't happen) — brief spin.
-                    for _ in 0..100_000 { core::hint::spin_loop(); }
-                }
-            }
-        }
-    }
-}
-
-/// Spawn the resident flush worker. Call ONCE at boot, after `smp::init()` so
-/// `WORKER_COUNT > 0` (else `spawn_fiber` runs it inline → boot hang).
-pub fn start_flush_worker() {
-    crate::smp::scheduler::spawn_fiber(
-        crate::smp::scheduler::Priority::Normal,
-        flush_worker,
-        0,
-    );
-}
-
-/// Block until `flush.pending == 0` (all offloaded puts done). Yields to peer
-/// fibers if running on a fiber; spins otherwise (the worker drains on its own
-/// core regardless). Used by `finish()` (before manifest publish) and `Drop`
-/// (before releasing the GC stream-guard).
-fn drain_flush(flush: &StreamFlush) {
-    while flush.pending.load(Ordering::Acquire) > 0 {
-        if !crate::smp::fiber::yield_sleep(1) {
-            core::hint::spin_loop();
-        }
-    }
-}
-
 pub struct StreamingWriter {
     path: alloc::string::String,
     chunk_size: usize,
     buf: Vec<u8>,
     chunk_hashes: Vec<[u8; 32]>,
     written: u64,
-    flush: Arc<StreamFlush>,
 }
 
 impl StreamingWriter {
@@ -709,29 +617,17 @@ impl StreamingWriter {
     fn flush_chunk(&mut self) -> Result<(), Error> {
         if self.buf.is_empty() { return Ok(()); }
         let chunk_len = self.buf.len();
-        // Move the chunk into an `Object::Blob`, encode + hash. We
+        // Move the chunk into an `Object::Blob`, encode + store. We
         // take(buf) so the next chunk reuses the same allocation
-        // (Vec::take + Vec::with_capacity). encode_and_hash (BLAKE3) stays
-        // on the calling (vCPU) thread so `chunk_hashes` is collected in
-        // order — the manifest needs no cross-fiber coordination.
+        // (Vec::take + Vec::with_capacity).
         let bytes = core::mem::replace(&mut self.buf, Vec::with_capacity(self.chunk_size));
         let blob = super::object::Object::Blob(bytes);
         let (encoded, hash) = blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+        if !storage::has(&hash) {
+            storage::put(&hash, &encoded, /* encrypt */ true)?;
+        }
         self.chunk_hashes.push(hash);
         self.written += chunk_len as u64;
-        // Already stored (dedup) → nothing to write.
-        if storage::has(&hash) { return Ok(()); }
-        // Offload the encrypt + NVMe write to the resident flush worker so the
-        // caller (the guest's 9p Twrite, on the vCPU) doesn't block ~3 ms. The
-        // hash is already recorded; puts are content-addressed (order-free).
-        // Backpressure: if this stream already has FLUSH_MAX_INFLIGHT chunks
-        // queued, write inline to bound RAM (rare — disk outpaces the download).
-        if self.flush.pending.load(Ordering::Acquire) >= FLUSH_MAX_INFLIGHT {
-            storage::put(&hash, &encoded, /* encrypt */ true)?;
-            return Ok(());
-        }
-        self.flush.pending.fetch_add(1, Ordering::Release);
-        FLUSH_QUEUE.lock().push_back(FlushJob { hash, bytes: encoded, flush: self.flush.clone() });
         Ok(())
     }
 
@@ -740,13 +636,6 @@ impl StreamingWriter {
     /// number of bytes written.
     pub fn finish(mut self) -> Result<u64, Error> {
         self.flush_chunk()?;
-        // Durability barrier: wait for every offloaded chunk put to complete
-        // before publishing the manifest, and bail if any failed (so a partial
-        // download never appears as a half-written file).
-        drain_flush(&self.flush);
-        if self.flush.error.load(Ordering::Acquire) {
-            return Err(PathError::Corrupt);
-        }
         let total_size = self.written;
         let manifest = super::object::Object::Chunked {
             total_size,
@@ -787,10 +676,6 @@ pub fn open_streaming_write(path: &str) -> StreamingWriter {
         buf: Vec::with_capacity(STREAMING_CHUNK_SIZE),
         chunk_hashes: Vec::new(),
         written: 0,
-        flush: Arc::new(StreamFlush {
-            pending: AtomicUsize::new(0),
-            error: AtomicBool::new(false),
-        }),
     }
 }
 
@@ -799,11 +684,6 @@ impl Drop for StreamingWriter {
     /// abandoned (a dropped-without-finish writer leaks its flushed
     /// chunks until the next GC — which is now free to run again).
     fn drop(&mut self) {
-        // Wait for in-flight offloaded puts before releasing the GC stream-
-        // guard — else the flush worker would `put()` after `stream_end()`,
-        // racing the GC. (After `finish()` this is already 0; for an abandoned
-        // writer it blocks until the queued chunks drain.)
-        drain_flush(&self.flush);
         stream_end();
     }
 }
