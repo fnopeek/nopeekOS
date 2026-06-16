@@ -17,12 +17,54 @@
 //!
 //! This closes the fiber scheduler's open "event-wake" hole and is the
 //! foundation every poll-based HW driver (NVMe/NIC/audio_hda/xHCI) migrates
-//! onto. First beneficiary: NVMe completion.
+//! onto. First beneficiary: NVMe completion (HW-validated on the Intel H10).
+//!
+//! ## Driver contract (host + WASM)
+//!
+//! Run the driver as a **resident fiber** (pinned to its core). Once, after
+//! binding the device:
+//! ```text
+//!   let vec = irq::register(dev, entry);   // host  — or npk_irq_register(entry) in WASM
+//! ```
+//! Then loop, servicing on the SAME fiber:
+//! ```text
+//!   loop {
+//!       let since = irq::arm(vec);         // snapshot + route the IRQ to THIS core
+//!       // enable / submit the device work that will raise the IRQ
+//!       irq::wait(vec, since, timeout_ms); // park until it fires (or timeout)
+//!       // service (drain the ring / read the completion)
+//!   }
+//! ```
+//! **Rules that keep it correct + general:**
+//! - `arm()` BEFORE the device submit closes the lost-wakeup window (an IRQ that
+//!   races the park still advances the count past the snapshot).
+//! - `arm()` re-routes the MSI-X dest to the calling core, so the driver may run
+//!   on any core / migrate; the IRQ always wakes the core that's about to wait.
+//! - **Never hold a lock across `wait()`** — a same-core fiber spinning on it
+//!   would deadlock the parked waiter. Snapshot/submit under the lock, drop it,
+//!   then `arm`/`wait`, then re-acquire to service.
+//!
+//! WASM drivers use the mirror host-fns `npk_irq_register` / `npk_irq_arm` /
+//! `npk_irq_wait` (see `wasm.rs`). The device must expose an MSI-X capability
+//! (NIC / NVMe / AX200 / modern virtio do; legacy MSI-only devices are TODO).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use spin::Mutex;
 
 use crate::drivers::pci::{self, PciAddr};
 use crate::interrupts::{DEVICE_IRQ_VEC_BASE, DEVICE_IRQ_VEC_COUNT};
+
+/// Per-vector registration: which device/MSI-X-entry a vector drives, and the
+/// LAPIC the IRQ is currently pointed at. Lets `arm()` re-route the IRQ to the
+/// core that is about to wait on it — so a device's interrupt always wakes the
+/// right core out of HLT regardless of which fiber/core services it.
+#[derive(Clone, Copy)]
+struct IrqReg {
+    dev: PciAddr,
+    entry: u16,
+    last_dest: u32, // APIC ID the MSI-X entry currently targets
+}
+static IRQ_REG: Mutex<[Option<IrqReg>; 256]> = Mutex::new([None; 256]);
 
 /// Per-vector fired count, bumped by the ISR. Indexed by IDT vector (full
 /// 256 so the ISR indexes without a bounds branch). A driver snapshots the
@@ -63,8 +105,23 @@ pub fn alloc_vector() -> Option<u8> {
 /// command (ringing the doorbell). Pass the returned token to `wait`. This
 /// closes the lost-wakeup window: an IRQ that fires between submit and park
 /// still advances the count past the snapshot, so `wait` returns at once.
-#[inline]
+///
+/// Also routes the IRQ to the CURRENT core (where the caller will `wait`), so
+/// the device's interrupt wakes this core out of HLT → its scheduler resumes
+/// the parked fiber with ~no latency. Reprograms the MSI-X dest only when the
+/// waiting core changed — a no-op for a driver that always services on its own
+/// pinned fiber; cheap (one MMIO write) for one that moves between cores.
 pub fn arm(vector: u8) -> u64 {
+    let apic = crate::interrupts::current_apic_id();
+    {
+        let mut reg = IRQ_REG.lock();
+        if let Some(r) = reg[vector as usize].as_mut() {
+            if r.last_dest != apic {
+                pci::msix_set_dest(r.dev, r.entry, apic);
+                r.last_dest = apic;
+            }
+        }
+    }
     fired_count(vector)
 }
 
@@ -177,6 +234,7 @@ pub fn register(dev: PciAddr, entry: u16) -> Option<u8> {
     let vector = alloc_vector()?;
     let dest = crate::interrupts::current_apic_id();
     if pci::program_msix(dev, entry, vector, dest) {
+        IRQ_REG.lock()[vector as usize] = Some(IrqReg { dev, entry, last_dest: dest });
         Some(vector)
     } else {
         None
