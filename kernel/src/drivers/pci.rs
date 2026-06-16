@@ -281,7 +281,9 @@ pub fn msix_enabled(addr: PciAddr) -> bool {
 pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> bool {
     // Walk the capability list for MSI-X (cap ID 0x11).
     if read16(dev, 0x06) & (1 << 4) == 0 {
-        return false; // no capabilities list
+        kprintln!("[npk] msix: {:02x}:{:02x}.{} no capabilities list",
+            dev.bus, dev.device, dev.function);
+        return false;
     }
     let mut cap = read8(dev, 0x34) & 0xFC;
     while cap != 0 {
@@ -291,6 +293,8 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
         cap = read8(dev, cap + 1) & 0xFC;
     }
     if cap == 0 {
+        kprintln!("[npk] msix: {:02x}:{:02x}.{} no MSI-X capability (0x11)",
+            dev.bus, dev.device, dev.function);
         return false;
     }
 
@@ -299,6 +303,8 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
     let msg_ctrl = (ctrl_dword >> 16) as u16;
     let table_size = (msg_ctrl & 0x7FF) + 1; // encoded as N-1
     if entry >= table_size {
+        kprintln!("[npk] msix: {:02x}:{:02x}.{} entry {} >= table_size {}",
+            dev.bus, dev.device, dev.function, entry, table_size);
         return false;
     }
 
@@ -315,6 +321,8 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
         (bar_lo as u64) & !0xF
     };
     if bar_base == 0 {
+        kprintln!("[npk] msix: {:02x}:{:02x}.{} table BAR{} (off {:#x}) not assigned (bar_lo={:#x})",
+            dev.bus, dev.device, dev.function, bir, bar_offset, bar_lo);
         return false;
     }
     let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
