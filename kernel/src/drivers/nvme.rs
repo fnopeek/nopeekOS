@@ -20,6 +20,7 @@ const NVME_SUBCLASS: u8 = 0x08;
 const REG_CAP: usize = 0x00;       // Controller Capabilities (64-bit)
 const REG_VS: usize = 0x08;        // Version
 const REG_INTMS: usize = 0x0C;     // Interrupt Mask Set
+const REG_INTMC: usize = 0x10;     // Interrupt Mask Clear
 const REG_CC: usize = 0x14;        // Controller Configuration
 const REG_CSTS: usize = 0x1C;      // Controller Status
 const REG_AQA: usize = 0x24;       // Admin Queue Attributes
@@ -562,6 +563,14 @@ pub fn init() -> bool {
             Ok(_) => kprintln!("[npk] nvme: interrupt coalescing disabled"),
             Err(_) => kprintln!("[npk] nvme: set-features (coalescing) not supported"),
         }
+        // We set INTMS=0xFFFFFFFF early ("mask all, we poll") and never cleared
+        // it. The spec says MSI-X uses the per-vector table mask and ignores
+        // INTMS — but some Intel controllers honor it anyway and gate the MSI.
+        // Clear it (INTMC) now that MSI-X is configured + unmasked, so it can't
+        // suppress our completion interrupt. Harmless if the controller is
+        // spec-compliant (write ignored under MSI-X).
+        mmio_write32(bar0_virt, REG_INTMC, 0xFFFF_FFFF);
+        kprintln!("[npk] nvme: INTMS cleared (INTMC) for MSI-X");
     }
 
     state.io_sq = io_sq;
