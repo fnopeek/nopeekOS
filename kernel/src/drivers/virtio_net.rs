@@ -19,6 +19,11 @@ const REG_QUEUE_SEL: u16     = 0x0E;
 const REG_QUEUE_NOTIFY: u16  = 0x10;
 const REG_STATUS: u16        = 0x12;
 const REG_ISR: u16           = 0x13;
+// Legacy-virtio MSI-X vector registers — present only when MSI-X is enabled
+// (which also shifts the device config from offset 20 to 24).
+const REG_CONFIG_MSIX_VEC: u16 = 0x14;
+const REG_QUEUE_MSIX_VEC: u16  = 0x16;
+const MSIX_NO_VECTOR: u16      = 0xFFFF;
 
 const S_ACKNOWLEDGE: u8 = 1;
 const S_DRIVER: u8      = 2;
@@ -86,6 +91,8 @@ struct VirtioNet {
     rx_last_used: u16,
     rx_buffers: u64, // contiguous RX buffer region
     rx_repost_pending: u16, // RX buffers reposted but not yet notified (batch the doorbell)
+    pci_addr: pci::PciAddr, // for MSI-X dest re-routing (net-RX IRQ)
+    rx_msix_vector: u8,     // LAPIC vector for RX-queue MSI-X (0 = none, polling)
 
     // TX queue
     tx_desc_base: u64,
@@ -125,7 +132,24 @@ pub fn init() -> bool {
     }
     let io = (dev.bar0 & 0xFFFC) as u16;
     pci::enable_bus_master(dev.addr);
-    let cfg_off: u16 = if pci::msix_enabled(dev.addr) { 24 } else { 20 };
+    // Try to enable MSI-X for the RX queue → the device raises an interrupt on
+    // RX so delivery is event-driven (a drain/wake) instead of pump-cadence
+    // polling. `register` enables the MSI-X PCI cap (which shifts the legacy
+    // config layout: device config moves 20 → 24). Falls back to polling if
+    // the device has no usable MSI-X.
+    //
+    // GATED OFF until net-RX is wired end-to-end: this MSI-X enable alone makes
+    // the device fire an IRQ PER RX PACKET (no NAPI suppression yet) at the
+    // register-time core → would storm Core 0 with no benefit. Flip on only
+    // together with (2) routing the IRQ to the vCPU core, (3) the vCPU pumping
+    // on wake, and (4) NAPI-style RX-IRQ suppression during drain.
+    const NET_RX_IRQ_ENABLED: bool = false;
+    let rx_vec = if NET_RX_IRQ_ENABLED {
+        crate::irq::register(dev.addr, 0).unwrap_or(0)
+    } else {
+        0
+    };
+    let cfg_off: u16 = if rx_vec != 0 || pci::msix_enabled(dev.addr) { 24 } else { 20 };
 
     // SAFETY: All port I/O targets the VirtIO device's I/O BAR
     unsafe {
@@ -251,6 +275,24 @@ pub fn init() -> bool {
         // Suppress TX interrupts
         *(tx_avail as *mut u16) = 1;
 
+        // Bind the RX queue to MSI-X table entry 0 so the device fires our
+        // vector on RX. config_msix_vector = NO_VECTOR (we don't want a
+        // config-change IRQ). Read-back guards a device that rejects it →
+        // rx_msix_vector stays 0 and we keep polling (the recv path is
+        // unchanged either way).
+        let mut rx_msix_vector = 0u8;
+        if rx_vec != 0 {
+            outw(io + REG_CONFIG_MSIX_VEC, MSIX_NO_VECTOR);
+            outw(io + REG_QUEUE_SEL, RX_QUEUE);
+            outw(io + REG_QUEUE_MSIX_VEC, 0);
+            if inw(io + REG_QUEUE_MSIX_VEC) == 0 {
+                rx_msix_vector = rx_vec;
+                kprintln!("[npk] virtio-net: RX MSI-X on vector {:#04x}", rx_vec);
+            } else {
+                kprintln!("[npk] virtio-net: RX MSI-X vector rejected — polling");
+            }
+        }
+
         // Go live
         outb(io + REG_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_DRIVER_OK);
         if inb(io + REG_STATUS) & S_FAILED != 0 {
@@ -274,6 +316,8 @@ pub fn init() -> bool {
             rx_last_used: 0,
             rx_repost_pending: 0,
             rx_buffers,
+            pci_addr: dev.addr,
+            rx_msix_vector,
             tx_desc_base: tx_desc,
             tx_avail_base: tx_avail,
             tx_used_base: tx_used,
@@ -290,6 +334,13 @@ pub fn init() -> bool {
 
     kprintln!("[npk] virtio-net: online");
     true
+}
+
+/// LAPIC vector the host NIC raises on RX (0 = none / polling). The microvm
+/// routes this IRQ to its vCPU core (step 2) so RX arrival wakes the vCPU to
+/// pump. Returns 0 until net-RX is enabled end-to-end.
+pub fn rx_irq_vector() -> u8 {
+    DEVICE.lock().as_ref().map_or(0, |d| d.rx_msix_vector)
 }
 
 /// Send an Ethernet frame. `frame` must be a complete Ethernet frame (dst + src + type + payload).
