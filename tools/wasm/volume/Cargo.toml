@@ -1,8 +1,8 @@
 [package]
-name = "bar"
-version = "0.6.0"
+name = "volume"
+version = "0.1.0"
 edition = "2024"
-description = "Top status bar (strut panel)."
+description = "Volume mixer — a centred overlay slider (drun-style)."
 
 [lib]
 crate-type = ["cdylib"]
