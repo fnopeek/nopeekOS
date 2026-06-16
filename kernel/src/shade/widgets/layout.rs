@@ -171,14 +171,17 @@ fn collect_popovers(
     if let Widget::Popover { anchor, child, on_dismiss, modifiers: _ } = w {
         if let Some(&anchor_rect) = anchors.get(&anchor.0) {
             // Measure child's intrinsic size, then position it just
-            // below the anchor. Flip above when there's no room.
+            // below the anchor with a small gap so it reads as detached
+            // (a bar dropdown floats clear of the panel; menus clear their
+            // trigger). Flip above when there's no room.
+            const POPOVER_GAP: i32 = 4;
             let csize = measure(child);
-            let below_y = anchor_rect.y + anchor_rect.h as i32;
+            let below_y = anchor_rect.y + anchor_rect.h as i32 + POPOVER_GAP;
             let fits_below = below_y + csize.h as i32 <= window.y + window.h as i32;
             let y = if fits_below {
                 below_y
             } else {
-                (anchor_rect.y - csize.h as i32).max(window.y)
+                (anchor_rect.y - POPOVER_GAP - csize.h as i32).max(window.y)
             };
             // Horizontally, anchor-left clamped to window-right.
             let max_x = window.x + window.w as i32 - csize.w as i32;
