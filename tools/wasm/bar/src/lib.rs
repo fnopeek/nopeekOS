@@ -34,6 +34,7 @@ unsafe extern "C" {
     fn npk_power() -> i32;
     fn npk_audio_get_volume() -> i32;
     fn npk_audio_set_volume(pct: i32) -> i32;
+    fn npk_bar_expand(h: i32) -> i32;
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
@@ -51,11 +52,18 @@ const BEHAVIOR_STRUT: i32 = 1;
 const WS_BASE: u32 = 1;        // workspace i → WS_BASE + i
 const POWER: u32 = 90_000;
 const SHOT: u32  = 90_001;     // screenshot: left-click = region, right = full
-const VOL_DOWN: u32 = 90_002;
-const VOL_UP: u32   = 90_003;
-const MUTE: u32     = 90_004;
+// Volume: left-click the speaker → toggle the slider dropdown; right-click
+// → mute. The slider track is a row of clickable cells (VOL_SET_BASE + i).
+const VOL_TOGGLE: u32   = 90_005;
+const VOL_DISMISS: u32  = 90_006;
+const VOL_SET_BASE: u32 = 90_100;
+const VOL_STEPS: u32    = 20;          // 5 %-steps
+const VOL_ANCHOR: u32   = 7_000;       // NodeId the dropdown anchors to
 
 const ICON_SIZE: u16 = 24;
+// Band height reported to the compositor; also the collapsed window height
+// the dropdown shrinks back to (see apply_window_size / npk_bar_expand).
+const BAND_H: i32 = 34;
 
 // ── Bump allocator with a reset mark ─────────────────────────────────
 // Config is parsed once (below MARK and kept); the per-frame widget tree
@@ -164,6 +172,9 @@ static mut BAT_TICK: u32 = 0;
 static mut VOL: i32 = 80;
 static mut LAST_VOL: i32 = i32::MIN;
 static mut PRE_MUTE: i32 = 50; // level restored on un-mute
+// Volume slider dropdown open? Local UI state (not in npk_bar_state), so
+// toggling it forces a rebuild via the event loop's dirty flag.
+static mut POPOVER_OPEN: bool = false;
 
 struct BarState<'a> { clock: &'a str, ws_count: u8, ws_active: u8, title: &'a str, bat: i32, vol: u8 }
 
@@ -305,8 +316,9 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 Modifier::OnClick(ActionId(POWER)),
             ],
         }],
-        // Volume: speaker icon (level / mute) toggles mute; minus/plus step by
-        // 10. Reflects the kernel master volume (also moved by `volume`/apps).
+        // Volume: speaker icon + level. Left-click either → toggle the slider
+        // dropdown (anchored to the icon); right-click → mute. Reflects the
+        // kernel master volume (also moved by `volume`/apps).
         "volume" => {
             let v = st.vol;
             let icon = if v == 0 { IconId::SpeakerX }
@@ -314,13 +326,13 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                        else { IconId::SpeakerHigh };
             alloc::vec![
                 Widget::Icon { id: icon, size: ICON_SIZE,
-                    modifiers: alloc::vec![Modifier::OnClick(ActionId(MUTE))] },
-                Widget::Icon { id: IconId::Minus, size: ICON_SIZE,
-                    modifiers: alloc::vec![Modifier::OnClick(ActionId(VOL_DOWN))] },
-                Widget::Text { content: alloc::format!(" {}% ", v),
-                    style: TextStyle::Body, modifiers: Vec::new() },
-                Widget::Icon { id: IconId::Plus, size: ICON_SIZE,
-                    modifiers: alloc::vec![Modifier::OnClick(ActionId(VOL_UP))] },
+                    modifiers: alloc::vec![
+                        Modifier::NodeId(NodeId(VOL_ANCHOR)),
+                        Modifier::OnClick(ActionId(VOL_TOGGLE)),
+                    ] },
+                Widget::Text { content: alloc::format!(" {}%", v),
+                    style: TextStyle::Body,
+                    modifiers: alloc::vec![Modifier::OnClick(ActionId(VOL_TOGGLE))] },
             ]
         }
         _ => Vec::new(),
@@ -355,6 +367,62 @@ fn card(names: &[String], st: &BarState) -> Widget {
     }
 }
 
+/// The volume slider dropdown: a header (icon + %) over a horizontal track
+/// of `VOL_STEPS` clickable cells. A cell is filled (Accent) up to the
+/// current level, muted past it; clicking cell `i` sets the volume to that
+/// step. No drag (the ABI gives clicks, not motion), so the cells double as
+/// the slider's discrete stops.
+fn volume_popover(vol: u8) -> Widget {
+    let cur = vol as u32;
+    let step = 100 / VOL_STEPS; // 5
+    let mut cells: Vec<Widget> = Vec::with_capacity(VOL_STEPS as usize);
+    for i in 0..VOL_STEPS {
+        let level = (i + 1) * step;
+        let tok = if level <= cur { Token::Accent } else { Token::SurfaceMuted };
+        cells.push(Widget::Text {
+            // A space gives the cell its line-height; MinWidth its width.
+            content: " ".to_string(),
+            style: TextStyle::Body,
+            modifiers: alloc::vec![
+                Modifier::MinWidth(10),
+                Modifier::Background(tok),
+                Modifier::Rounded(Radius::Sm.as_u8()),
+                Modifier::OnClick(ActionId(VOL_SET_BASE + i)),
+            ],
+        });
+    }
+    let track = Widget::Row {
+        children: cells,
+        spacing: Spacing::Xs.as_u16(),
+        align: Align::Center,
+        modifiers: Vec::new(),
+    };
+    let icon = if cur == 0 { IconId::SpeakerX }
+               else if cur <= 50 { IconId::SpeakerLow }
+               else { IconId::SpeakerHigh };
+    let header = Widget::Row {
+        children: alloc::vec![
+            Widget::Icon { id: icon, size: 20, modifiers: Vec::new() },
+            Widget::Text { content: alloc::format!("  {}%", cur),
+                style: TextStyle::Body, modifiers: Vec::new() },
+        ],
+        spacing: Spacing::Xs.as_u16(),
+        align: Align::Center,
+        modifiers: Vec::new(),
+    };
+    Widget::Column {
+        children: alloc::vec![header, track],
+        spacing: Spacing::Sm.as_u16(),
+        align: Align::Start,
+        modifiers: alloc::vec![
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinWidth(240),
+        ],
+    }
+}
+
 fn build_tree(seg: &Segments, st: &BarState) -> Widget {
     // Two overlaid full-width layers so the clock is centred on the SCREEN,
     // not between the (asymmetric) side groups: the sides layer pins left to
@@ -382,10 +450,42 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
         align: Align::Stretch,
         modifiers: Vec::new(),
     };
-    Widget::Stack {
+    let band = Widget::Stack {
         children: alloc::vec![sides, center],
         modifiers: Vec::new(),
+    };
+    // Pin the band to the top with a flex spacer below it: while the window
+    // is expanded for the volume dropdown the pills keep their height
+    // instead of stretching to fill the tall (full-screen) window.
+    let base = Widget::Column {
+        children: alloc::vec![band, Widget::Spacer { flex: 1 }],
+        spacing: Spacing::None.as_u16(),
+        align: Align::Stretch,
+        modifiers: Vec::new(),
+    };
+    if unsafe { POPOVER_OPEN } {
+        // Declared after `base` so the anchor's rect is already recorded.
+        let pop = Widget::Popover {
+            anchor: NodeId(VOL_ANCHOR),
+            child: alloc::boxed::Box::new(volume_popover(st.vol)),
+            on_dismiss: ActionId(VOL_DISMISS),
+            modifiers: Vec::new(),
+        };
+        Widget::Stack {
+            children: alloc::vec![base, pop],
+            modifiers: Vec::new(),
+        }
+    } else {
+        base
     }
+}
+
+/// Grow the bar window for the dropdown (kernel clamps to screen height),
+/// or collapse it back to the band. The reserved strut is unchanged either
+/// way, so tiled windows never move.
+fn apply_window_size() {
+    let h = if unsafe { POPOVER_OPEN } { 4096 } else { BAND_H };
+    unsafe { let _ = npk_bar_expand(h); }
 }
 
 /// Read live state into STATE_BUF; return Some(len) if it changed since
@@ -447,37 +547,56 @@ fn launch(app: &str, arg: &str) {
     }
 }
 
-fn handle(ev: Event) {
+/// Returns true if the tree must be rebuilt for a reason `state_changed`
+/// can't see (the popover opening/closing) — the caller then resizes the
+/// window and re-commits.
+fn handle(ev: Event) -> bool {
     match ev {
         // Left-click. Screenshot icon → region select (slice ③; falls
         // back to full for now). Power → off. Otherwise a workspace pill.
         Event::Action(ActionId(id)) => {
             if id == SHOT {
                 launch("snap", "region");
+                false
             } else if id == POWER {
                 unsafe { let _ = npk_power(); }
-            } else if id == VOL_DOWN {
-                let v = unsafe { npk_audio_get_volume() };
-                unsafe { let _ = npk_audio_set_volume((v - 10).max(0)); }
-            } else if id == VOL_UP {
-                let v = unsafe { npk_audio_get_volume() };
-                unsafe { let _ = npk_audio_set_volume((v + 10).min(100)); }
-            } else if id == MUTE {
+                false
+            } else if id == VOL_TOGGLE {
+                unsafe { POPOVER_OPEN = !POPOVER_OPEN; }
+                true
+            } else if id == VOL_DISMISS {
+                unsafe { POPOVER_OPEN = false; }
+                true
+            } else if id >= VOL_SET_BASE && id < VOL_SET_BASE + VOL_STEPS {
+                // Slider cell i → set volume to that step. The volume change
+                // is picked up by `state_changed`, which re-renders the fill
+                // with the dropdown still open.
+                let step = id - VOL_SET_BASE;
+                let level = ((step + 1) * (100 / VOL_STEPS)).min(100) as i32;
+                unsafe { let _ = npk_audio_set_volume(level); }
+                false
+            } else if id >= WS_BASE && id < POWER {
+                unsafe { let _ = npk_workspace_switch((id - WS_BASE) as i32); }
+                false
+            } else {
+                false
+            }
+        }
+        // Right-click: screenshot icon → full-screen capture; speaker → mute.
+        Event::ContextAction(ActionId(id)) => {
+            if id == SHOT {
+                launch("snap", "full");
+            } else if id == VOL_TOGGLE {
                 let v = unsafe { npk_audio_get_volume() };
                 if v > 0 {
                     unsafe { PRE_MUTE = v; let _ = npk_audio_set_volume(0); }
                 } else {
                     unsafe { let _ = npk_audio_set_volume(PRE_MUTE.max(10)); }
                 }
-            } else if id >= WS_BASE && id < POWER {
-                unsafe { let _ = npk_workspace_switch((id - WS_BASE) as i32); }
             }
+            false
         }
-        // Right-click on the screenshot icon → full-screen capture.
-        Event::ContextAction(ActionId(id)) => {
-            if id == SHOT { launch("snap", "full"); }
-        }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -498,18 +617,29 @@ pub extern "C" fn _start() {
 
     loop {
         // Drain any pending click events first.
+        let mut dirty = false;
         loop {
             match poll_event() {
-                PollResult::Event(ev) => handle(ev),
+                PollResult::Event(ev) => { if handle(ev) { dirty = true; } }
                 PollResult::Empty => break,
                 PollResult::WindowGone => return,
             }
         }
-        // Re-render only when the live state changed (clock minute / title
-        // / active workspace), so the tree isn't rebuilt every tick.
+        // The popover toggled (no state change `state_changed` sees): resize
+        // the window for / against the dropdown and re-commit the last state.
+        if dirty {
+            apply_window_size();
+            let len = unsafe { LAST_LEN };
+            if len != usize::MAX { rebuild_and_commit(&seg, len); }
+        }
+        // Re-render when the live state changed (clock minute / title /
+        // active workspace / volume), so the tree isn't rebuilt every tick.
         if let Some(len) = state_changed() {
             rebuild_and_commit(&seg, len);
         }
-        unsafe { let _ = npk_sleep(300); }
+        // Poll faster while the dropdown is open so cell clicks feel snappy;
+        // idle otherwise (the clock only moves once a minute).
+        let nap = if unsafe { POPOVER_OPEN } { 32 } else { 120 };
+        unsafe { let _ = npk_sleep(nap); }
     }
 }
