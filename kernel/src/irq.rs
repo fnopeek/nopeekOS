@@ -112,17 +112,26 @@ pub fn alloc_vector() -> Option<u8> {
 /// waiting core changed — a no-op for a driver that always services on its own
 /// pinned fiber; cheap (one MMIO write) for one that moves between cores.
 pub fn arm(vector: u8) -> u64 {
+    route_to_current(vector);
+    fired_count(vector)
+}
+
+/// Route an already-registered device IRQ to the CURRENT core. For the
+/// "wake this core" usage where no fiber calls `arm`/`wait` — e.g. the host
+/// NIC RX-IRQ, which targets the vCPU core so RX arrival wakes the vCPU to
+/// pump. No-op if `vector` isn't registered or already targets this core.
+pub fn route_to_current(vector: u8) {
+    if vector == 0 {
+        return;
+    }
     let apic = crate::interrupts::current_apic_id();
-    {
-        let mut reg = IRQ_REG.lock();
-        if let Some(r) = reg[vector as usize].as_mut() {
-            if r.last_dest != apic {
-                pci::msix_set_dest(r.dev, r.entry, apic);
-                r.last_dest = apic;
-            }
+    let mut reg = IRQ_REG.lock();
+    if let Some(r) = reg[vector as usize].as_mut() {
+        if r.last_dest != apic {
+            pci::msix_set_dest(r.dev, r.entry, apic);
+            r.last_dest = apic;
         }
     }
-    fired_count(vector)
 }
 
 /// Park the current fiber until `vector` fires (its count moves past `since`)
