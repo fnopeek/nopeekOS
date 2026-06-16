@@ -279,6 +279,8 @@ pub fn init() {
         // own LAPIC so its idle HLT wakes without a host tick.
         IDT[WORKER_TIMER_VECTOR as usize]
             .set_handler(worker_timer_handler as *const () as u64);
+        // Device-IRQ pool (MSI-X → LAPIC vector → fiber wake). See `crate::irq`.
+        install_device_isrs();
 
         // Load IDT
         let idt_reg = IdtRegister {
@@ -571,6 +573,9 @@ pub fn arm_worker_timer() {
     unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
     let base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
     WORKER_APIC_BASE.store(base, Ordering::Relaxed);
+    // Also publish the (core-invariant) xAPIC base for the device-IRQ ISR EOI
+    // path, in case Core 0 runs on the PIT and never set APIC_BASE itself.
+    let _ = APIC_BASE.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed);
 
     // SAFETY: LAPIC MMIO regs, identity-mapped; this core's own LAPIC.
     unsafe {
@@ -642,6 +647,81 @@ pub fn worker_idle_hlt() {
     }
     crate::smp::per_core::record_halt(core, rdtsc().wrapping_sub(t0));
     crate::smp::per_core::record_wake(core, crate::smp::per_core::WAKE_HLT_FALLBACK);
+}
+
+// ── Device interrupts (MSI-X → LAPIC vector → fiber wake) ───────────
+//
+// Real-hardware device IRQs route via MSI-X to a vector in this pool (the
+// PIC is masked, no IOAPIC). Each vector has a tiny ISR that bumps a
+// per-vector fired-count (`irq::note_fired`) + EOIs the LAPIC; a driver
+// fiber parks on it via `irq::wait`. See `crate::irq`. Vectors 0x70..0x80
+// sit above the timer vectors (32/48/49/50) and the masked PIC range.
+pub const DEVICE_IRQ_VEC_BASE: u8 = 0x70;
+pub const DEVICE_IRQ_VEC_COUNT: usize = 16;
+
+/// Shared body of every device-IRQ ISR: note the fire (wakes the parked
+/// driver fiber via its count) + EOI this core's LAPIC. Minimal by design —
+/// no fiber-state touch in interrupt context (the scheduler owns that; the
+/// atomic bump is race-free across cores).
+#[inline]
+fn device_irq_common(vector: u8) {
+    crate::irq::note_fired(vector);
+    // LAPIC EOI: write 0 to offset 0xB0. The xAPIC base is the same physical
+    // address on every core; this write hits the LAPIC of the core that took
+    // the interrupt (the MSI-X destination = the driver fiber's core).
+    let base = APIC_BASE.load(Ordering::Relaxed);
+    if base != 0 {
+        // SAFETY: LAPIC MMIO EOI register, identity-mapped.
+        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    }
+}
+
+// Generate one `extern "x86-interrupt"` stub per pool vector (each hardcodes
+// its vector, since the CPU passes none) + an installer that wires them into
+// the IDT. Macro keeps the 16 stubs + 16 IDT writes in lockstep.
+macro_rules! device_isrs {
+    ($($name:ident = $idx:expr),+ $(,)?) => {
+        $(
+            extern "x86-interrupt" fn $name(_f: InterruptStackFrame) {
+                device_irq_common(DEVICE_IRQ_VEC_BASE + $idx);
+            }
+        )+
+        /// Install the device-IRQ ISRs into the (global) IDT. Called from
+        /// `init()` on the BSP before APs boot, so every core that loads this
+        /// IDT sees them.
+        unsafe fn install_device_isrs() {
+            // SAFETY: writing IDT entries before `sti`/AP-bringup; vectors are
+            // in the dedicated device pool, distinct from timer/exception ones.
+            unsafe {
+                $( IDT[(DEVICE_IRQ_VEC_BASE as usize) + $idx]
+                    .set_handler($name as *const () as u64); )+
+            }
+        }
+    };
+}
+device_isrs!(
+    di0 = 0, di1 = 1, di2 = 2, di3 = 3, di4 = 4, di5 = 5, di6 = 6, di7 = 7,
+    di8 = 8, di9 = 9, di10 = 10, di11 = 11, di12 = 12, di13 = 13, di14 = 14,
+    di15 = 15,
+);
+
+/// Hardware APIC ID of the calling core (xAPIC ID register, bits 31:24).
+/// Used to set an MSI-X message's destination so the IRQ wakes this core.
+/// Reads MSR 0x1B directly if `APIC_BASE` isn't cached yet.
+pub fn current_apic_id() -> u32 {
+    let base = {
+        let b = APIC_BASE.load(Ordering::Relaxed);
+        if b != 0 {
+            b
+        } else {
+            let (lo, hi): (u32, u32);
+            // SAFETY: MSR 0x1B (APIC base) is always readable in ring 0.
+            unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
+            ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000
+        }
+    };
+    // SAFETY: LAPIC ID register at MMIO offset 0x20, identity-mapped.
+    unsafe { core::ptr::read_volatile((base + 0x20) as *const u32) >> 24 }
 }
 
 /// Initialize Local APIC timer (for hardware without PIT).

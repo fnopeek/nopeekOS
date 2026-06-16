@@ -126,6 +126,11 @@ const MAX_CORES: usize = 256;
 enum FiberState {
     Ready,
     Sleeping(u64), // resume once rdtsc() >= deadline
+    /// Parked on a device IRQ (`crate::irq`): resume once the vector's
+    /// fired-count moves past `since`, or `deadline` (timeout) passes. The
+    /// IRQ wakes this core out of HLT, so the scheduler re-runs and resumes
+    /// here with ~no latency — no polling.
+    WaitingIrq { vector: u8, since: u64, deadline: u64 },
     Done,
 }
 
@@ -177,6 +182,9 @@ pub fn run_core_fibers(cid: usize) {
             let idx = q.iter().position(|f| match f.state {
                 FiberState::Ready => true,
                 FiberState::Sleeping(d) => now >= d,
+                FiberState::WaitingIrq { vector, since, deadline } => {
+                    crate::irq::fired_count(vector) != since || now >= deadline
+                }
                 FiberState::Done => false,
             });
             match idx {
@@ -251,6 +259,35 @@ pub fn yield_ready() -> bool {
         switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
     }
     true
+}
+
+/// Park the running fiber until device-IRQ `vector` fires (its fired-count
+/// moves past `since`) or `timeout_ms` elapses. Returns true if the IRQ
+/// fired, false on timeout (or if not running inside a fiber). The caller
+/// snapshots `since` via `irq::arm(vector)` BEFORE submitting the device
+/// command, so an IRQ racing the park is never lost. The MSI-X targets this
+/// core, so the IRQ itself wakes it from HLT → the scheduler resumes us.
+pub fn irq_wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return false;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
+    let f = unsafe { CURRENT_FIBER[cid] };
+    if f.is_null() {
+        return false;
+    }
+    let freq = crate::interrupts::tsc_freq();
+    let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
+    // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Park
+    // it, switch back to the scheduler; resumes here when the count advances
+    // or the deadline passes.
+    unsafe {
+        (*f).state = FiberState::WaitingIrq { vector, since, deadline };
+        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+    }
+    // Resumed: the IRQ fired iff the count advanced past the snapshot.
+    crate::irq::fired_count(vector) != since
 }
 
 /// Fresh-fiber entry: run the app's `(func, arg)`. On return the trampoline

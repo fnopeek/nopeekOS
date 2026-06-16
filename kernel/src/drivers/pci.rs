@@ -269,6 +269,76 @@ pub fn msix_enabled(addr: PciAddr) -> bool {
     false
 }
 
+/// Program MSI-X table `entry` of `dev` to deliver `vector` to the LAPIC of
+/// `dest_apic` (physical destination, fixed delivery, edge), unmask that
+/// entry, and enable MSI-X (+ clear the global function mask). Returns false
+/// if the device has no MSI-X capability or `entry` is out of range.
+///
+/// MSI-X writes go straight to the LAPIC (message address
+/// `0xFEE0_0000 | apic<<12`) — no PIC/IOAPIC involved, so the HP firmware
+/// PIC-reinit SMI trap is irrelevant. The MSI-X table lives in a device BAR
+/// (the cap's Table Offset/BIR); we write it via identity-mapped MMIO.
+pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> bool {
+    // Walk the capability list for MSI-X (cap ID 0x11).
+    if read16(dev, 0x06) & (1 << 4) == 0 {
+        return false; // no capabilities list
+    }
+    let mut cap = read8(dev, 0x34) & 0xFC;
+    while cap != 0 {
+        if read8(dev, cap) == 0x11 {
+            break;
+        }
+        cap = read8(dev, cap + 1) & 0xFC;
+    }
+    if cap == 0 {
+        return false;
+    }
+
+    // Message Control (high 16 bits of the dword at `cap`): table size, enable.
+    let ctrl_dword = read32(dev, cap);
+    let msg_ctrl = (ctrl_dword >> 16) as u16;
+    let table_size = (msg_ctrl & 0x7FF) + 1; // encoded as N-1
+    if entry >= table_size {
+        return false;
+    }
+
+    // Table Offset / BIR (cap + 4): low 3 bits = BAR index, rest = byte offset.
+    let table = read32(dev, cap + 4);
+    let bir = (table & 0x7) as u8;
+    let tbl_off = (table & !0x7) as u64;
+    let bar_offset = 0x10 + bir * 4;
+    let bar_lo = read32(dev, bar_offset);
+    let is_64 = bar_lo & 0x04 != 0;
+    let bar_base = if is_64 {
+        ((read32(dev, bar_offset + 4) as u64) << 32) | ((bar_lo as u64) & !0xF)
+    } else {
+        (bar_lo as u64) & !0xF
+    };
+    if bar_base == 0 {
+        return false;
+    }
+    let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
+
+    // MSI-X table entry: addr_lo, addr_hi, data, vector-control (bit0 = mask).
+    let msg_addr_lo: u32 = 0xFEE0_0000 | ((dest_apic & 0xFF) << 12);
+    // SAFETY: MSI-X table MMIO inside the device BAR (identity-mapped). The
+    // entry was bounds-checked against the table size above.
+    unsafe {
+        let p = entry_addr as *mut u32;
+        core::ptr::write_volatile(p.add(0), msg_addr_lo); // Message Address (low)
+        core::ptr::write_volatile(p.add(1), 0); // Message Address (high)
+        core::ptr::write_volatile(p.add(2), vector as u32); // Message Data = vector
+        core::ptr::write_volatile(p.add(3), 0); // Vector Control: unmasked
+    }
+
+    // Enable MSI-X (bit 15) + clear global function mask (bit 14), preserving
+    // cap ID + next ptr in the low 16 bits of the dword.
+    let new_ctrl = (msg_ctrl | (1 << 15)) & !(1 << 14);
+    let new_dword = (ctrl_dword & 0x0000_FFFF) | ((new_ctrl as u32) << 16);
+    write32(dev, cap, new_dword);
+    true
+}
+
 /// Scan PCI bus, print all devices, return count
 pub fn scan() -> u16 {
     let mut count = 0u16;
