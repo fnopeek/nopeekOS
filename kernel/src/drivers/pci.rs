@@ -348,6 +348,26 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
     let new_ctrl = (msg_ctrl | (1 << 15)) & !(1 << 14);
     let new_dword = (ctrl_dword & 0x0000_FFFF) | ((new_ctrl as u32) << 16);
     write32(dev, cap, new_dword);
+
+    // Diagnostic read-back (runs once per device at init): confirms WHERE the
+    // table is + whether our writes landed + that MSI-X is enabled/unmasked.
+    // If rb_* match what we wrote and rb_ctrl has bit15 set / bit14 clear and
+    // rb_vctrl=0, the table programming is correct → look at the controller/CQ
+    // side. If they DON'T match, the table location (BIR/offset) is wrong.
+    let rb_ctrl = (read32(dev, cap) >> 16) as u16;
+    let cmd_reg = read16(dev, 0x04);
+    let (rb_addr, rb_data, rb_vctrl) = unsafe {
+        let p = entry_addr as *const u32;
+        (
+            core::ptr::read_volatile(p.add(0)),
+            core::ptr::read_volatile(p.add(2)),
+            core::ptr::read_volatile(p.add(3)),
+        )
+    };
+    kprintln!("[npk] msix: cap@{:#x} size={} bir={} off={:#x} tbl@{:#x} pcicmd={:#06x}",
+        cap, table_size, bir, tbl_off, entry_addr, cmd_reg);
+    kprintln!("[npk] msix: wrote addr={:#x} data={:#x} | readback addr={:#x} data={:#x} vctrl={:#x} ctrl={:#06x}",
+        msg_addr_lo, vector, rb_addr, rb_data, rb_vctrl, rb_ctrl);
     true
 }
 
