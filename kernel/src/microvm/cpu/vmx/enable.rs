@@ -1492,6 +1492,13 @@ impl VmContext {
             sh.pending_irqs |= 1 << sh.pci.virtio_snd.irq_line();
         }
 
+        // Post deferred 9p write replies the async persist worker finished (the
+        // vCPU owns the virtqueue, so this is the only place they're posted).
+        // Decouples disk persistence from the vCPU → no freeze on download-write.
+        if is_bsp && sh.pci.virtio_9p.drain_async_done(&sh.guest_mem) {
+            sh.pending_irqs |= 1 << sh.pci.virtio_9p.irq_line();
+        }
+
         match basic {
             0 => {
                 // Exception/NMI. EXCEPTION_BITMAP=0 in production —
@@ -2094,6 +2101,17 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
                     if handle_mmio_ept_p9(&mut self.vcpu.regs, &mut sh.pci.virtio_9p, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                        // A 9p access (e.g. a download write) runs the npkFS
+                        // write INLINE here — during which the net RX pump does
+                        // not run, so the staging queue overflows and RX drops
+                        // (the download-to-disk sawtooth). Drain RX right after,
+                        // so disk activity no longer starves it. BSP only.
+                        if is_bsp
+                            && crate::microvm::devices::nat::pump_fast(
+                                &mut sh.pci.virtio_net, &sh.guest_mem)
+                        {
+                            sh.pending_irqs |= 1 << 10;
+                        }
                         last_outcome = Some(outcome);
                         continue;
                     }

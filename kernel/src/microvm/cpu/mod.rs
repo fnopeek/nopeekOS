@@ -511,6 +511,24 @@ static VCPU_COUNT: AtomicU32 = AtomicU32::new(0);
 /// awake core). Reset at BSP open + teardown.
 static VM_CORE_MASK: AtomicU32 = AtomicU32::new(1); // bit 0 = Core 0 reserved
 
+/// Pick the least-contended core for an async-offload worker (e.g. the 9p
+/// persist fiber). NEVER Core 0 — it is the keep-alive minimum (shell,
+/// compositor) and must not compete. Prefers a core with no vCPU on it (not in
+/// `VM_CORE_MASK`); if every worker core runs a vCPU, returns the highest one
+/// (it shares, but still off Core 0). Single-core hosts return 0 (no choice).
+/// v1: chosen at spawn. v2 (future): the worker migrates to follow load/heat.
+pub fn pick_offload_core() -> usize {
+    let ncores = crate::smp::per_core::core_count();
+    if ncores <= 1 { return 0; }
+    let mask = VM_CORE_MASK.load(Ordering::Acquire);
+    // Prefer a free (no-vCPU) worker core.
+    for c in 1..ncores {
+        if mask & (1u32 << c) == 0 { return c; }
+    }
+    // All busy with vCPUs → share the highest worker core, never Core 0.
+    ncores - 1
+}
+
 /// Reserve a distinct idle worker core (1..core_count()) for an AP vCPU fiber,
 /// marking it taken. `None` if every worker core already runs a vCPU (the
 /// caller then falls back to the shared deque — only safe on SVM; on VMX that
@@ -786,6 +804,7 @@ pub fn vm_poll_slice() {
 
     if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         if VM_RUN_STATE.load(Ordering::Acquire) == VM_EXITED {
+            crate::microvm::devices::p9_async::stop_worker();
             crate::microvm::devices::nat::reset_sessions();
             teardown_vm_window();
             VM_CLOSE_REQUESTED.store(false, Ordering::Release);
@@ -810,6 +829,7 @@ pub fn vm_poll_slice() {
         }
         *slot = None;
         drop(slot); // release before teardown — it locks the compositor
+        crate::microvm::devices::p9_async::stop_worker();
         crate::microvm::devices::nat::reset_sessions();
         teardown_vm_window();
         crate::kprintln!("[microvm] guest stopped (window closed)");
@@ -839,6 +859,7 @@ pub fn vm_poll_slice() {
     }
     *slot = None;
     drop(slot); // release before teardown — it locks the compositor
+    crate::microvm::devices::p9_async::stop_worker();
     crate::microvm::devices::nat::reset_sessions();
     teardown_vm_window();
     match result {
