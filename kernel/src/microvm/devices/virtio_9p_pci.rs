@@ -885,6 +885,13 @@ impl Virtio9p {
         // the Rwrite once it's done.
         if f.async_stream {
             if offset as u64 != f.stream_next {
+                // Diagnostic: does cache=loose writeback arrive out-of-order? If
+                // this fires, the streamed-write path needs a reorder buffer.
+                let n = P9_DIAG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 12 {
+                    crate::kprintln!("[9p] non-seq write off={} expected={} len={}",
+                        offset, f.stream_next, data.len());
+                }
                 return rlerror(tag, EIO); // non-sequential into a streamed file
             }
             f.stream_next += data.len() as u64;
