@@ -1934,6 +1934,10 @@ impl VmContext {
                         {
                             sh.pending_irqs |= 1 << 10;
                         }
+                        // Deliver a deferred device IRQ (esp. an async 9p
+                        // write-completion) NOW rather than at the next
+                        // EXIT_INTR/EXIT_HLT ~10 ms out — the download rxlat fix.
+                        try_prompt_device_irq(&mut self.vcpu, sh);
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1960,6 +1964,10 @@ impl VmContext {
                         {
                             sh.pending_irqs |= 1 << 10;
                         }
+                        // Deliver the freshly-completed 9p write-reply IRQ NOW
+                        // (latched by drain_async_done at the loop top) instead
+                        // of waiting for the next EXIT_INTR/EXIT_HLT.
+                        try_prompt_device_irq(&mut self.vcpu, sh);
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2200,6 +2208,42 @@ fn deliver_irq(vmcb: &mut vmcb::Vmcb, pending: &mut u16, line: u8, vector: u8) {
     } else {
         *pending |= 1u16 << (line as u16 & 0xF);
     }
+}
+
+/// Promptly deliver a deferred device IRQ (a 9p async-write completion, a
+/// net-RX pump, …) latched in `pending_irqs`, at an #NPF/MMIO exit — instead
+/// of leaving it until the next EXIT_INTR/EXIT_HLT exit. During a download the
+/// guest exits almost only via #NPF, so a 9p completion latched by
+/// `drain_async_done` waited ~10 ms for the next host-timer EXIT_INTR (the
+/// rxlat spikes that cap download-to-disk at the per-write round-trip rate).
+/// VMX twin of `vmx::enable::try_prompt_device_irq`; see it for the full
+/// invariant rationale (BSP-only, interruptibility gate, one-inject-per-VMRUN
+/// = no clobber of a handler's EVENTINJ or a pending `reinject`, timer
+/// non-starvable via the same ≥3-host-tick overdue check).
+fn try_prompt_device_irq(vcpu: &mut Vcpu, sh: &mut VmShared) {
+    if vcpu.apic_id != 0 || sh.pending_irqs == 0 || vcpu.reinject != 0 {
+        return;
+    }
+    if !guest_interruptible(&vcpu.vmcb) {
+        return;
+    }
+    if vcpu.vmcb.read_u64(vmcb::OFF_EVENT_INJ) & (1u64 << 31) != 0 {
+        return;
+    }
+    let now = crate::interrupts::ticks();
+    let timer_overdue = (sh.pic.irq_unmasked(0)
+        && sh.pit_enabled
+        && now.wrapping_sub(sh.last_timer_tick) >= 3)
+        || (vcpu.lapic.timer_tick_vector().is_some()
+            && now.wrapping_sub(vcpu.last_lapic_tick) >= 3);
+    if timer_overdue {
+        return;
+    }
+    let line = sh.pending_irqs.trailing_zeros() as u8;
+    sh.pending_irqs &= !(1u16 << line);
+    let info: u64 = (sh.pic.vector_for_irq(line) as u64) | (1u64 << 31);
+    vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+    vcpu.consecutive_idle = 0;
 }
 
 /// #NPF on the LAPIC MMIO page (guest-SMP Stage 1). Decode the faulting
