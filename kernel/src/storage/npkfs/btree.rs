@@ -298,6 +298,53 @@ pub fn iter_all<F: FnMut(&BTreeEntryRaw)>(
     iter_subtree(cache, root, 0, f)
 }
 
+/// fsck enumeration: collect every B-tree node block id (root + every child
+/// pointer — including ones that turn out unreadable, so a node overwritten by
+/// data is still counted and surfaces as a double-alloc) into `nodes`, and
+/// every leaf entry into `entries`. Corruption-tolerant like `iter_all`: a bad
+/// node is skipped, never fatal. Read-only.
+pub fn collect_for_fsck(
+    cache: &mut BlockCache, root: u64,
+    nodes: &mut alloc::vec::Vec<u64>, entries: &mut alloc::vec::Vec<BTreeEntryRaw>,
+) -> Result<(), FsError> {
+    if root == 0 { return Ok(()); }
+    nodes.push(root);
+    fsck_subtree(cache, root, 0, nodes, entries);
+    Ok(())
+}
+
+fn fsck_subtree(
+    cache: &mut BlockCache, block: u64, depth: u32,
+    nodes: &mut alloc::vec::Vec<u64>, entries: &mut alloc::vec::Vec<BTreeEntryRaw>,
+) {
+    if depth > 64 { return; }
+    let mut buf = [0u8; BLOCK_SIZE];
+    if read_node(cache, block, &mut buf).is_err() { return; }
+    let hdr = read_header(&buf);
+    if hdr.magic != BTREE_NODE_MAGIC { return; }
+    match hdr.node_type {
+        BTREE_LEAF => {
+            let n = (hdr.num_entries as usize).min(MAX_LEAF_ENTRIES);
+            for i in 0..n { entries.push(leaf_entry(&buf, i)); }
+        }
+        BTREE_INTERNAL => {
+            let n = (hdr.num_entries as usize).min(MAX_INTERNAL_KEYS);
+            for i in 0..n {
+                let child = internal_child(&buf, i);
+                if child != 0 {
+                    nodes.push(child);
+                    fsck_subtree(cache, child, depth + 1, nodes, entries);
+                }
+            }
+            if hdr.right_child != 0 {
+                nodes.push(hdr.right_child);
+                fsck_subtree(cache, hdr.right_child, depth + 1, nodes, entries);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// **Best-effort** traversal used only by `iter_all` (GC enumeration):
 /// a node that is out-of-range, unreadable, has a bad magic / type, or
 /// a corrupt `num_entries` is logged and skipped rather than aborting

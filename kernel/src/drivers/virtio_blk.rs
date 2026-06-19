@@ -223,6 +223,21 @@ pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     dev.do_rw(BLK_T_OUT, sector, buf.as_ptr() as u64, BLOCK_SIZE as u32, false)
 }
 
+/// Durability barrier. We negotiate write-through (no VIRTIO_BLK_F_FLUSH in
+/// `init`), so per the virtio spec the device keeps no volatile write cache and
+/// there is nothing to flush — an explicit no-op so `blkdev::flush()` has a
+/// backend on the QEMU path. (HW durability testing targets NVMe regardless.)
+pub fn flush() -> Result<(), BlkError> {
+    Ok(())
+}
+
+/// No separate FUA path under write-through negotiation — a completed
+/// `write_block` is already as durable as the device gets. Mirrors
+/// `write_block` so `blkdev` has a backend.
+pub fn write_block_fua(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    write_block(block, buf)
+}
+
 /// TRIM/DISCARD blocks. Silent no-op if device doesn't support DISCARD.
 pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
     if count == 0 { return Ok(()); }

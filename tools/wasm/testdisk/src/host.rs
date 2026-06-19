@@ -33,6 +33,13 @@ pub fn bench_aes_dec_mbs() -> u64   { unsafe { npk_sys_info(32) as u64 } }
 pub fn bench_raw_write_mbs() -> u64 { unsafe { npk_sys_info(33) as u64 } }
 pub fn bench_raw_read_mbs() -> u64  { unsafe { npk_sys_info(34) as u64 } }
 
+/// Read-only FS integrity self-check (key 40). Runs the kernel's btree
+/// refcount scan NOW (not cached) and returns the total problem count
+/// (0 = clean, -1 = scan error). The detailed report is logged to serial
+/// by the kernel. Called at the end of a run so corruption surfaces before
+/// a reboot bricks the mount.
+pub fn fs_selfcheck() -> i64 { unsafe { npk_sys_info(40) } }
+
 pub fn print(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32); }
 }

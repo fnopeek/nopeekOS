@@ -244,6 +244,117 @@ pub fn raw_blk_bench() -> Option<(u64, u64)> {
     Some((write_mbs, read_mbs))
 }
 
+// ── fsck: read-only integrity self-check ──────────────────────────────
+
+#[derive(Clone, Copy)]
+pub struct FsckReport {
+    pub total_blocks: u64,
+    pub objects: u64,
+    pub btree_nodes: u64,
+    pub referenced: u64,
+    pub double_alloc: u64,
+    pub out_of_range: u64,
+    pub free_but_referenced: u64,
+    pub first_dup_block: u64,
+    pub first_oor_ptr: u64,
+}
+
+fn fsck_mark(seen: &mut [u64], dup: &mut [u64], rep: &mut FsckReport, block: u64) {
+    if block >= rep.total_blocks {
+        rep.out_of_range += 1;
+        if rep.first_oor_ptr == 0 { rep.first_oor_ptr = block; }
+        return;
+    }
+    let w = (block / 64) as usize;
+    let m = 1u64 << (block % 64);
+    if seen[w] & m != 0 {
+        if dup[w] & m == 0 {
+            rep.double_alloc += 1;
+            if rep.first_dup_block == 0 { rep.first_dup_block = block; }
+        }
+        dup[w] |= m;
+    } else {
+        seen[w] |= m;
+        rep.referenced += 1;
+    }
+}
+
+/// Read-only filesystem integrity scan. Walks the committed B-tree, builds a
+/// block-level refcount over every node + every object's data extents +
+/// indirect-chain blocks, and reports:
+///   - `double_alloc`: a block reachable from two places — THE corruption we
+///     keep chasing (data written over a B-tree node / another object),
+///   - `out_of_range`: a child/extent pointer past the device end,
+///   - `free_but_referenced`: a referenced block the allocator thinks is free
+///     (it will be handed out again → a future double-alloc).
+/// No writes, no repair — pure diagnosis. Safe to call any time.
+pub fn self_check() -> Result<FsckReport, FsError> {
+    let mut lock = FS.lock();
+    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+
+    let total = fs.bitmap.total_blocks();
+    let words = ((total + 63) / 64) as usize;
+    let mut seen = alloc::vec![0u64; words];
+    let mut dup = alloc::vec![0u64; words];
+    let mut rep = FsckReport {
+        total_blocks: total, objects: 0, btree_nodes: 0, referenced: 0,
+        double_alloc: 0, out_of_range: 0, free_but_referenced: 0,
+        first_dup_block: 0, first_oor_ptr: 0,
+    };
+
+    // Phase A — collect the tree structure (node blocks) + all leaf entries.
+    let root = fs.sb.btree_root;
+    let mut nodes: Vec<u64> = Vec::new();
+    let mut entries: Vec<super::format::BTreeEntryRaw> = Vec::new();
+    btree::collect_for_fsck(&mut fs.cache, root, &mut nodes, &mut entries)?;
+    rep.btree_nodes = nodes.len() as u64;
+    rep.objects = entries.len() as u64;
+
+    // Mark every B-tree node block.
+    for &b in &nodes {
+        fsck_mark(&mut seen, &mut dup, &mut rep, b);
+    }
+
+    // Mark every object's data extents + indirect-chain blocks. The chain
+    // walk already yields `indirect_block` as its first element, so we never
+    // mark it separately (that would be a false self-overlap).
+    for e in &entries {
+        let direct = (e.extent_count as usize).min(DIRECT_EXTENTS);
+        for ext in &e.extents[..direct] {
+            for b in 0..ext.block_count {
+                fsck_mark(&mut seen, &mut dup, &mut rep, ext.start_block + b);
+            }
+        }
+        if e.indirect_block != 0 {
+            if let Ok((exts, chain)) = read_indirect_chain(&mut fs.cache, e.indirect_block) {
+                for &cb in &chain {
+                    fsck_mark(&mut seen, &mut dup, &mut rep, cb);
+                }
+                for ext in &exts {
+                    for b in 0..ext.block_count {
+                        fsck_mark(&mut seen, &mut dup, &mut rep, ext.start_block + b);
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase C — referenced-but-free (serious: the allocator will re-hand it out).
+    for w in 0..words {
+        let mut bits = seen[w];
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as u64;
+            bits &= bits - 1;
+            let block = (w as u64) * 64 + bit;
+            if !fs.bitmap.is_allocated(block) {
+                rep.free_but_referenced += 1;
+            }
+        }
+    }
+
+    Ok(rep)
+}
+
 /// Drain accumulated TRIM-pending ranges and issue them to the SSD.
 /// Each `bitmap.free` adds to an in-memory list; this drains it in
 /// one batch (merged + sorted ranges → fewer NVMe DEALLOCATE commands).
@@ -755,12 +866,26 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     fs.sb.journal_seq = fs.journal.seq();
     fs.sb.journal_head = fs.journal.head();
 
-    // Phase 2: persist bitmap + superblock to next ring slot.
+    // Phase 2: persist bitmap + the data/metadata the new superblock
+    // references, with a REAL durability barrier before the SB. `cache.flush()`
+    // only pushes bytes into the controller's volatile write cache; on real
+    // hardware the SB could otherwise reach NAND before the btree/bitmap/data
+    // it points at, and a power-loss there leaves the SB referencing
+    // stale/garbage blocks — or blocks the bitmap still calls free — i.e.
+    // block double-alloc on remount. `blkdev::flush()` forces the order.
     fs.bitmap.sync(&mut fs.cache)?;
-    sb_io::write_next(&mut fs.cache, &mut fs.sb)?;
-    fs.cache.flush()?;
+    fs.cache.flush()?;        // journal(committed=0) + bitmap + new btree → controller
+    crate::blkdev::flush()?;  // ▷ BARRIER: those + data extents now on stable media
+    // SB written durably (FUA, straight to disk, bypassing the cache) so it
+    // lands strictly after the barrier. One FLUSH + one FUA per commit — the
+    // minimum that preserves the ordering invariant.
+    sb_io::write_next_durable(&mut fs.cache, &mut fs.sb)?;
 
-    // Phase 3: mark journal committed (the new SB is durable now).
+    // Phase 3: mark journal committed. The SB is durable now, so committed=1
+    // can never reach media before it. We deliberately do NOT force a barrier
+    // here: if power is lost before this persists, replay simply skips the
+    // (still committed=0) entry and the freed COW blocks leak — a benign,
+    // gc-reclaimable space leak, never corruption.
     fs.journal.finalize(&mut fs.cache)?;
     fs.cache.flush()?;
 

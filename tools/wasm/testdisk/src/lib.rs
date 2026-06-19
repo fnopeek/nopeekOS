@@ -330,11 +330,27 @@ pub extern "C" fn _start() {
     print_dec(host::bench_raw_read_mbs());
     host::print(" MB/s  (1 MB extent, no FS, no crypto)\n");
 
-    if total_fails == 0 {
+    // ── Integrity self-check (SAME run — a corrupt FS only shows up here;
+    // after a reboot the mount fails and we never get to run again) ────────
+    host::print("\n  Self-check: ");
+    let problems = host::fs_selfcheck();
+    if problems == 0 {
+        host::print("CLEAN\n");
+    } else if problems < 0 {
+        host::print("scan error (FS not mounted?)\n");
+    } else {
+        host::print("PROBLEMS=");
+        print_dec(problems as u64);
+        host::print("  — see [npk] fsck log for first dup/oor block\n");
+    }
+
+    if total_fails == 0 && problems == 0 {
         host::print("\n[testdisk] ALL OK\n");
     } else {
         host::print("\n[testdisk] FAILED — ");
         print_dec(total_fails as u64);
-        host::print(" errors\n");
+        host::print(" io errors, ");
+        print_dec(problems.max(0) as u64);
+        host::print(" fsck problems\n");
     }
 }
