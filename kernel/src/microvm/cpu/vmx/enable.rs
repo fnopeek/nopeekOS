@@ -2086,6 +2086,10 @@ impl VmContext {
                         {
                             sh.pending_irqs |= 1 << 10;
                         }
+                        // Deliver a deferred device IRQ (esp. an async 9p
+                        // write-completion) NOW rather than at the next
+                        // reason-1/12 exit ~10 ms out — the download rxlat fix.
+                        try_prompt_device_irq(&mut self.vcpu, sh);
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2112,6 +2116,10 @@ impl VmContext {
                         {
                             sh.pending_irqs |= 1 << 10;
                         }
+                        // Deliver the freshly-completed 9p write-reply IRQ NOW
+                        // (latched by drain_async_done at the loop top) instead
+                        // of waiting for the next reason-1/12 exit.
+                        try_prompt_device_irq(&mut self.vcpu, sh);
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2522,6 +2530,53 @@ fn deliver_irq_vmx(
     } else {
         *pending |= 1u16 << line;
     }
+}
+
+/// Promptly deliver a deferred device IRQ (a 9p async-write completion, a
+/// net-RX pump, …) latched in `pending_irqs`, at an EPT/MMIO (reason-48) exit
+/// — instead of leaving it until the next external-interrupt/HLT (reason-1/12)
+/// exit. During a download the guest exits almost only via MMIO, so a 9p
+/// completion latched by `drain_async_done` waited ~10 ms for the next host-
+/// timer reason-1 exit (the rxlat spikes that cap download-to-disk at the
+/// per-write round-trip rate). Draining it here closes that gap.
+///
+/// Mirrors the 1|12 `pending_irqs` drain and keeps every invariant intact:
+///   * BSP-only — device lines are PIC-routed to the boot CPU.
+///   * interruptibility-gated — an inject into IF=0 / an STI/MOV-SS shadow
+///     fails VM-entry with reason 33 on bare-metal Intel; leave it latched.
+///   * one-inject-per-entry — skip if this exit's device handler already
+///     queued an inject (VM_ENTRY_INTR_INFO valid) or a mid-vectored event is
+///     pending re-injection (`reinject`, which the top-of-loop re-arm would
+///     write over ours — and the cleared `pending_irqs` bit would be lost).
+///   * timer NON-STARVABLE — if the guest timer is overdue (≥ TIMER_MAX_SKIP
+///     = 3 host ticks) leave the device IRQ latched so the next reason-1
+///     timer-force isn't pushed further out. The host 100 Hz timer keeps
+///     producing reason-1 exits regardless of guest MMIO, so the timer still
+///     fires ≤30 ms — the central RCU-stall invariant holds.
+fn try_prompt_device_irq(vcpu: &mut Vcpu, sh: &mut VmShared) {
+    if vcpu.apic_id != 0 || sh.pending_irqs == 0 || vcpu.reinject != 0 {
+        return;
+    }
+    if !vmcs::guest_interruptible() {
+        return;
+    }
+    if vmcs::read_entry_intr_info().unwrap_or(0) & (1u64 << 31) != 0 {
+        return;
+    }
+    let now = crate::interrupts::ticks();
+    let timer_overdue = (sh.pic.irq_unmasked(0)
+        && sh.pit_enabled
+        && now.wrapping_sub(sh.last_timer_tick) >= 3)
+        || (vmx_lapic_on()
+            && vcpu.lapic.timer_tick_vector().is_some()
+            && now.wrapping_sub(vcpu.last_lapic_tick) >= 3);
+    if timer_overdue {
+        return;
+    }
+    let line = sh.pending_irqs.trailing_zeros() as u8;
+    sh.pending_irqs &= !(1u16 << line);
+    let _ = vmcs::inject_external_irq(sh.pic.vector_for_irq(line));
+    vcpu.consecutive_idle = 0;
 }
 
 fn handle_mmio_ept_blk(
