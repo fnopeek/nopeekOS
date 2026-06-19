@@ -58,6 +58,18 @@ static STAT_TFSYNC: AtomicU64 = AtomicU64::new(0);
 static STAT_TREAD: AtomicU64 = AtomicU64::new(0);
 static STAT_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static STAT_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+// Round-trip decomposition (where do the ~555 µs/write go?). The streaming
+// (download) Twrite path stamps the inter-Twrite TSC gap = the full synchronous
+// round-trip period the guest sees per chunk. P9 MMIO exits (notify + ISR-read)
+// and per-message host service time localise that gap to host vs guest vs
+// exit-count. All TSC; emit_9p_stat converts to µs.
+static STAT_TWRITE_GAP_SUM: AtomicU64 = AtomicU64::new(0);
+static STAT_TWRITE_GAP_MAX: AtomicU64 = AtomicU64::new(0);
+static STAT_LAST_TWRITE_TSC: AtomicU64 = AtomicU64::new(0);
+static STAT_P9_MMIO: AtomicU64 = AtomicU64::new(0);
+static STAT_P9_ISR_READS: AtomicU64 = AtomicU64::new(0);
+static STAT_HOST_SVC_SUM: AtomicU64 = AtomicU64::new(0);
+static STAT_MSGS: AtomicU64 = AtomicU64::new(0);
 
 fn emit_9p_stat() {
     let now = crate::interrupts::ticks();
@@ -71,11 +83,30 @@ fn emit_9p_stat() {
             let fs = STAT_TFSYNC.swap(0, AtO::Relaxed);
             let rd = STAT_TREAD.swap(0, AtO::Relaxed);
             let df = STAT_DEFERRED.swap(0, AtO::Relaxed);
+            let gap_sum = STAT_TWRITE_GAP_SUM.swap(0, AtO::Relaxed);
+            let gap_max = STAT_TWRITE_GAP_MAX.swap(0, AtO::Relaxed);
+            let mmio = STAT_P9_MMIO.swap(0, AtO::Relaxed);
+            let isr = STAT_P9_ISR_READS.swap(0, AtO::Relaxed);
+            let svc_sum = STAT_HOST_SVC_SUM.swap(0, AtO::Relaxed);
+            let msgs = STAT_MSGS.swap(0, AtO::Relaxed);
             if w + rd + fs > 0 {
                 let avg = if w > 0 { wb / w } else { 0 };
                 crate::kprintln!(
                     "[9p-stat] writes {}/s ({} KB/s, avg {} B) | fsync {}/s | reads {}/s | deferred {}/s",
                     w / secs, wb / 1024 / secs, avg, fs / secs, rd / secs, df / secs);
+                // Round-trip decomposition. gap = full per-write round-trip the
+                // guest sees; exits/write + host µs/msg split it host vs guest.
+                let tpus = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+                let gap_avg_us = if w > 0 { gap_sum / w / tpus } else { 0 };
+                let gap_max_us = gap_max / tpus;
+                let svc_avg_us = if msgs > 0 { svc_sum / msgs / tpus } else { 0 };
+                // x100 to keep one decimal without floats.
+                let mmio_per_w = if w > 0 { mmio * 100 / w } else { 0 };
+                let isr_per_w = if w > 0 { isr * 100 / w } else { 0 };
+                crate::kprintln!(
+                    "[9p-rtt] gap avg {}us max {}us | host svc {}us/msg | p9 mmio {}.{:02}/w (isr {}.{:02}/w)",
+                    gap_avg_us, gap_max_us, svc_avg_us,
+                    mmio_per_w / 100, mmio_per_w % 100, isr_per_w / 100, isr_per_w % 100);
             }
         }
     } else if last == 0 {
@@ -358,9 +389,11 @@ impl Virtio9p {
 
     // ── BAR0 MMIO ───────────────────────────────────────────────────
     pub fn mmio_read(&mut self, off: u32, width: u8) -> u64 {
+        STAT_P9_MMIO.fetch_add(1, AtO::Relaxed);
         if off >= COMMON_OFF && off < COMMON_OFF + COMMON_LEN {
             self.common_read(off - COMMON_OFF, width)
         } else if off >= ISR_OFF && off < ISR_OFF + ISR_LEN {
+            STAT_P9_ISR_READS.fetch_add(1, AtO::Relaxed);
             let v = self.isr as u64; self.isr = 0; v & width_mask(width)
         } else if off >= DEVICE_OFF && off < DEVICE_OFF + DEVICE_LEN {
             self.device_read(off - DEVICE_OFF, width)
@@ -370,6 +403,7 @@ impl Virtio9p {
     }
 
     pub fn mmio_write(&mut self, off: u32, width: u8, value: u64) {
+        STAT_P9_MMIO.fetch_add(1, AtO::Relaxed);
         if off >= COMMON_OFF && off < COMMON_OFF + COMMON_LEN {
             self.common_write(off - COMMON_OFF, width, value);
         } else if off >= NOTIFY_OFF && off < NOTIFY_OFF + NOTIFY_LEN {
@@ -526,7 +560,11 @@ impl Virtio9p {
                 if guard > size as u32 { break; } // malformed loop guard
             }
 
+            let svc_t0 = crate::interrupts::rdtsc();
             let resp = self.process_message(&req);
+            STAT_HOST_SVC_SUM.fetch_add(
+                crate::interrupts::rdtsc().wrapping_sub(svc_t0), AtO::Relaxed);
+            STAT_MSGS.fetch_add(1, AtO::Relaxed);
 
             if let Some(kind) = self.pending_defer.take() {
                 // Async write/clunk: the worker will persist; remember where to
@@ -935,6 +973,15 @@ impl Virtio9p {
                 return rlerror(tag, EIO); // non-sequential into a streamed file
             }
             f.stream_next += data.len() as u64;
+            // Stamp the inter-Twrite gap on the streaming (download) path — the
+            // full synchronous round-trip period the guest takes per chunk.
+            let now_tsc = crate::interrupts::rdtsc();
+            let prev = STAT_LAST_TWRITE_TSC.swap(now_tsc, AtO::Relaxed);
+            if prev != 0 {
+                let gap = now_tsc.wrapping_sub(prev);
+                STAT_TWRITE_GAP_SUM.fetch_add(gap, AtO::Relaxed);
+                STAT_TWRITE_GAP_MAX.fetch_max(gap, AtO::Relaxed);
+            }
             // Backpressure: only DEFER the reply (make the guest wait) when the
             // worker is behind, so host RAM stays bounded. Otherwise ack NOW —
             // the data is buffered host-side and persists async; 9p durability
