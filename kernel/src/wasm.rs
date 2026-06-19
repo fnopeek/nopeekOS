@@ -154,6 +154,30 @@ fn ensure_bench() -> BenchCache {
     result
 }
 
+fn fsck_sys_info() -> i64 {
+    match crate::storage::npkfs::storage::self_check() {
+        Ok(r) => {
+            let problems = r.double_alloc + r.out_of_range + r.free_but_referenced;
+            crate::kprintln!(
+                "[npk] fsck: objects={} nodes={} refd={}/{} | double_alloc={} oor={} free_but_refd={}",
+                r.objects, r.btree_nodes, r.referenced, r.total_blocks,
+                r.double_alloc, r.out_of_range, r.free_but_referenced);
+            if problems == 0 {
+                crate::kprintln!("[npk] fsck: CLEAN");
+            } else {
+                crate::kprintln!(
+                    "[npk] fsck: {} PROBLEM(S) — first dup block {}, first oor ptr {}",
+                    problems, r.first_dup_block, r.first_oor_ptr);
+            }
+            problems as i64
+        }
+        Err(e) => {
+            crate::kprintln!("[npk] fsck: scan failed: {:?}", e);
+            -1
+        }
+    }
+}
+
 fn bench_sys_info(key: i32) -> i64 {
     let b = ensure_bench();
     match key & 0xFF {
@@ -2021,6 +2045,14 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 // First call across any of these triggers ~100 ms of
                 // measurement; results live in BENCH_CACHE until reboot.
                 30..=34 => bench_sys_info(key),
+
+                // ── fsck self-check (key 40) → read-only integrity scan ──
+                // Runs on every call (NOT cached), logs a full report to
+                // serial, and returns the total problem count (0 = clean,
+                // -1 = scan error). testdisk calls this at the END of its run
+                // so corruption surfaces in-flight — a reboot would brick the
+                // mount before we could ever see it.
+                40 => fsck_sys_info(),
 
                 _ => -1,
             }

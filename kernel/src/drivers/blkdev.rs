@@ -173,6 +173,32 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     }
 }
 
+/// Force everything previously written to stable media (durability barrier).
+/// NVMe issues an NVM Flush; virtio-blk is a no-op (write-through negotiated).
+/// The npkFS commit calls this between the data/bitmap writes and the
+/// superblock so a power-loss can never expose an SB pointing at not-yet-
+/// persisted blocks (= block double-alloc on remount).
+pub fn flush() -> Result<(), BlkError> {
+    if nvme::is_available() {
+        nvme::flush()
+    } else {
+        virtio_blk::flush()
+    }
+}
+
+/// Write a single block with Force Unit Access (durable on completion). Used
+/// for the npkFS superblock so it lands after the preceding `flush()` barrier
+/// without a second full-cache FLUSH. Partition offset applied as in
+/// `write_block`.
+pub fn write_block_fua(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    let actual = block + PARTITION_OFFSET.load(Ordering::Acquire);
+    if nvme::is_available() {
+        nvme::write_block_fua(actual, buf)
+    } else {
+        virtio_blk::write_block_fua(actual, buf)
+    }
+}
+
 pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlkError> {
     let offset_sectors = PARTITION_OFFSET.load(Ordering::Acquire) * 8;
     let actual = sector + offset_sectors;

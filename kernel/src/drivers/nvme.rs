@@ -44,6 +44,7 @@ const ADM_CREATE_IO_SQ: u8 = 0x01;
 const ADM_SET_FEATURES: u8 = 0x09;
 
 // NVM opcodes
+const NVM_FLUSH: u8 = 0x00; // Flush volatile write cache to stable media
 const NVM_READ: u8 = 0x02;
 const NVM_WRITE: u8 = 0x01;
 const NVM_DSM: u8 = 0x09;   // Dataset Management (TRIM/Deallocate)
@@ -440,11 +441,18 @@ pub fn init() -> bool {
         core::ptr::copy_nonoverlapping(buf.add(24), state.model.as_mut_ptr(), 40);
     }
 
-    // ONCS (Optional NVM Command Support) at offset 256 (2 bytes)
-    // Bit 2 = Dataset Management (TRIM/Deallocate)
+    // ONCS (Optional NVM Command Support) at byte 520 (2 bytes); bit 2 =
+    // Dataset Management (TRIM/Deallocate). The old code read byte 256, which
+    // is OACS — Optional *Admin* Command Support — so TRIM detection keyed off
+    // the firmware-download bit by accident.
     unsafe {
-        state.oncs = core::ptr::read_volatile(buf.add(256) as *const u16);
+        state.oncs = core::ptr::read_volatile(buf.add(520) as *const u16);
     }
+    // VWC (Volatile Write Cache) at byte 525; bit 0 = a volatile write cache is
+    // present. When set, completed writes may sit in controller DRAM until an
+    // NVM Flush — which is exactly why the npkFS commit issues a flush barrier
+    // before the superblock. Logged so the property is visible on real HW.
+    let vwc_present = unsafe { core::ptr::read_volatile(buf.add(525) as *const u8) } & 1 != 0;
 
     // MDTS (Maximum Data Transfer Size) at offset 77, 1 byte. Units of
     // 2^(12 + CAP.MPSMIN) bytes; for MPSMIN=0 (~all NVMe SSDs) that's
@@ -467,9 +475,10 @@ pub fn init() -> bool {
     let model_str = core::str::from_utf8(&state.model).unwrap_or("?").trim();
     let serial_str = core::str::from_utf8(&state.serial).unwrap_or("?").trim();
     let has_trim = state.oncs & (1 << 2) != 0;
-    kprintln!("[npk] nvme: {} (SN: {}), TRIM={}, MDTS={} ({} KB/cmd)",
+    kprintln!("[npk] nvme: {} (SN: {}), TRIM={}, VWC={}, MDTS={} ({} KB/cmd)",
         model_str, serial_str,
         if has_trim { "yes" } else { "no" },
+        if vwc_present { "yes" } else { "no" },
         mdts, max_blocks_per_cmd * 4);
 
     // Identify Namespace 1 (CNS=0, NSID=1)
@@ -1265,6 +1274,18 @@ pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<()
 
 /// Write a 4KB block (8 sectors).
 pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    write_block_inner(block, buf, false)
+}
+
+/// Like `write_block` but with Force Unit Access: the controller must place the
+/// data on stable media before completing, regardless of its volatile write
+/// cache. Used for the npkFS superblock so it is durable the instant the commit
+/// returns, without a separate full-cache FLUSH after it.
+pub fn write_block_fua(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    write_block_inner(block, buf, true)
+}
+
+fn write_block_inner(block: u64, buf: &[u8; BLOCK_SIZE], fua: bool) -> Result<(), BlkError> {
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
     let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
@@ -1279,8 +1300,23 @@ pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     cmd.prp1 = dma;
     cmd.cdw10 = sector as u32;
     cmd.cdw11 = (sector >> 32) as u32;
-    cmd.cdw12 = 7; // 8 sectors - 1
+    cmd.cdw12 = 7 | if fua { 1 << 30 } else { 0 }; // 8 sectors - 1, + FUA bit
 
+    io_command(state, cmd)?;
+    Ok(())
+}
+
+/// Force the controller's volatile write cache to stable media (NVM Flush,
+/// opcode 0x00, namespace-wide). Without this, completed writes may linger in
+/// controller DRAM and be lost or reordered on power-loss — which would break
+/// the npkFS commit ordering (superblock durable only after the data it points
+/// at). This is the durability barrier the 4-phase commit relies on.
+pub fn flush() -> Result<(), BlkError> {
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    let mut cmd = SqEntry::zeroed();
+    cmd.opcode = NVM_FLUSH;
+    cmd.nsid = 1;
     io_command(state, cmd)?;
     Ok(())
 }

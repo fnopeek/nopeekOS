@@ -85,6 +85,17 @@ impl Bitmap {
 
     pub fn free_count(&self) -> u64 { self.free_count }
 
+    pub fn total_blocks(&self) -> u64 { self.total_blocks }
+
+    /// True iff `block` is marked allocated. Out-of-range blocks report
+    /// `false` (they can't be validly allocated). Used by the fsck self-check
+    /// to flag blocks the tree references but the allocator believes are free
+    /// (→ they'd be handed out again = a future double-alloc).
+    pub fn is_allocated(&self, block: u64) -> bool {
+        if block >= self.total_blocks { return false; }
+        !is_free(&self.data, block)
+    }
+
     /// Allocate `count` contiguous blocks. Returns start block.
     /// Uses next-fit: starts searching from last allocation point (amortized O(1)).
     pub fn alloc(&mut self, count: u64) -> Result<u64, FsError> {

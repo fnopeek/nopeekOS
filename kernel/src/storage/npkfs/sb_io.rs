@@ -1,4 +1,4 @@
-//! Superblock ring I/O (read_best / write_next / write_all).
+//! Superblock ring I/O (read_best / write_next_durable / write_all).
 //!
 //! 8-slot rotating layout. `read_best` matches strictly against the
 //! current `DISK_MAGIC` + `DISK_VERSION`; older-version disks (e.g.
@@ -50,12 +50,18 @@ pub fn read_legacy_magic(cache: &mut BlockCache) -> Option<u8> {
     None
 }
 
-/// Write the next generation to slot `gen % SUPERBLOCK_SLOTS`.
-pub fn write_next(cache: &mut BlockCache, sb: &mut SuperblockRaw) -> Result<u64, FsError> {
+/// Commit the next-generation superblock DURABLY: write it straight to disk
+/// with FUA (bypassing the write-back cache) so it is on stable media when this
+/// returns, and drop any stale cached copy of the slot. The caller MUST have
+/// issued a `blkdev::flush()` first so everything the SB references is already
+/// durable — otherwise a power-loss could expose an SB pointing at not-yet-
+/// persisted data (block double-alloc on remount).
+pub fn write_next_durable(cache: &mut BlockCache, sb: &mut SuperblockRaw) -> Result<u64, FsError> {
     sb.set_checksum();
     let slot = SUPERBLOCK_START + (sb.generation % SUPERBLOCK_SLOTS);
     let buf = unsafe { &*(sb as *const SuperblockRaw as *const [u8; BLOCK_SIZE]) };
-    cache.write(slot, buf)?;
+    cache.invalidate(slot);
+    crate::blkdev::write_block_fua(slot, buf)?;
     Ok(slot)
 }
 
