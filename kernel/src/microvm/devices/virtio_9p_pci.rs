@@ -887,16 +887,18 @@ impl Virtio9p {
             if offset as u64 != f.stream_next {
                 return rlerror(tag, EIO); // non-sequential into a streamed file
             }
-            if super::p9_async::is_full() {
-                // Backpressure: shouldn't reach here (service_queues stops
-                // pulling the avail-ring when full), but if it does, reject so
-                // the guest retries rather than us unbounding RAM.
-                return rlerror(tag, EIO);
-            }
             f.stream_next += data.len() as u64;
-            super::p9_async::enqueue_write(tag, fid as u64, data.to_vec());
-            self.pending_defer = Some(DeferKind::Write(data.len() as u32));
-            return Vec::new();
+            // Backpressure: only DEFER the reply (make the guest wait) when the
+            // worker is behind, so host RAM stays bounded. Otherwise ack NOW —
+            // the data is buffered host-side and persists async; 9p durability
+            // is at Tfsync/Tclunk (they wait for the worker → file is durable).
+            let backpressure = super::p9_async::is_full();
+            super::p9_async::enqueue_write(tag, fid as u64, data.to_vec(), backpressure);
+            if backpressure {
+                self.pending_defer = Some(DeferKind::Write(data.len() as u32));
+                return Vec::new();
+            }
+            return msg(RWRITE, tag, &(data.len() as u32).to_le_bytes());
         }
 
         // Buffered mode (small files / random writes) — synchronous, persisted
@@ -923,10 +925,15 @@ impl Virtio9p {
             // Ensure the persist worker is running on a load-aware, non-Core-0
             // core (idempotent). Cross-core admit is safe (lock-guarded queue).
             super::p9_async::start_worker(crate::microvm::cpu::pick_offload_core());
-            super::p9_async::enqueue_start(tag, fid as u64, path, prefix);
-            // Rwrite for THIS Twrite reports this write's bytes, not the prefix.
-            self.pending_defer = Some(DeferKind::Write(data.len() as u32));
-            return Vec::new();
+            let backpressure = super::p9_async::is_full();
+            super::p9_async::enqueue_start(tag, fid as u64, path, prefix, backpressure);
+            // Rwrite reports THIS write's bytes, not the prefix. Ack now unless
+            // the worker is already behind (then defer for backpressure).
+            if backpressure {
+                self.pending_defer = Some(DeferKind::Write(data.len() as u32));
+                return Vec::new();
+            }
+            return msg(RWRITE, tag, &(data.len() as u32).to_le_bytes());
         }
         msg(RWRITE, tag, &(data.len() as u32).to_le_bytes())
     }
