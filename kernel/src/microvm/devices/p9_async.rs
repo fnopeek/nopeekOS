@@ -76,12 +76,19 @@ pub fn enqueue_finish(tag: u16, key: u64) {
 /// vCPU side: drain one completion (build its deferred reply in the device).
 pub fn poll_done() -> Option<Done> { DONE.lock().pop_front() }
 
+/// Persist worker stack. npkFS writes (AES + B-tree COW) and especially the
+/// commit at `finish()` (journal + bitmap + superblock) run a deep call chain —
+/// fine on the main kernel stack but it overflows the default 128 KiB fiber
+/// stack, which has no guard page → silent memory smash → worker death → the
+/// guest hangs on its next 9p write. 1 MiB is generous headroom.
+const WORKER_STACK_BYTES: usize = 1024 * 1024;
+
 /// Spawn the persist worker on `core` (chosen load-aware, never Core 0).
 /// Idempotent within a VM session: a second call while one runs is a no-op.
 pub fn start_worker(core: usize) {
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; } // already running
     STOP.store(false, Ordering::Release);
-    crate::smp::fiber::admit(core, worker_entry, 0);
+    crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
 }
 
 /// Stop the worker at VM teardown and WAIT (bounded) for it to exit, so it
@@ -98,8 +105,17 @@ pub fn stop_worker() {
     }
 }
 
+/// Ticks (100 Hz → 10 ms each) to stay HOT after the last persisted chunk
+/// before parking. The synchronous per-chunk 9p round-trip means the guest
+/// waits for each Rwrite; if the worker parks between chunks it wakes only on
+/// the ~10 ms per-core timer, gating throughput at ~1 chunk/10 ms. Staying hot
+/// (cooperative `yield_ready`, not a parking `yield_sleep`) during a transfer
+/// keeps the round-trip in the µs range. ~300 ms hot window covers gaps.
+const HOT_TICKS: u64 = 30;
+
 fn worker_entry(_: u64) {
     let mut writers: BTreeMap<u64, crate::storage::npkfs::fs::StreamingWriter> = BTreeMap::new();
+    let mut last_work = crate::interrupts::ticks();
     loop {
         // Check teardown FIRST so close is snappy (abandon any queued writes;
         // dropping `writers` balances the stream gc-guard).
@@ -118,17 +134,33 @@ fn worker_entry(_: u64) {
                     Op::Start { data, .. } | Op::Write { data } => data.len(),
                     Op::Finish => 0,
                 };
+                let tag = p.tag;
                 let result = apply(&mut writers, p.key, p.op);
+                if result < 0 {
+                    let n = DIAG.fetch_add(1, Ordering::Relaxed);
+                    if n < 16 { crate::kprintln!("[p9-async] persist error (tag={} result={})", tag, result); }
+                }
                 if nbytes > 0 { PENDING_BYTES.fetch_sub(nbytes, Ordering::AcqRel); }
-                DONE.lock().push_back(Done { tag: p.tag, result });
-                // Cooperative: let the core's other fibers (incl. a co-located
-                // vCPU on a shared core) run between chunks.
+                DONE.lock().push_back(Done { tag, result });
+                last_work = crate::interrupts::ticks();
+                // Cooperative yield: lets a co-located vCPU (shared core) run,
+                // returns immediately when alone so we grab the next chunk fast.
                 crate::smp::fiber::yield_ready();
             }
-            None => { crate::smp::fiber::yield_sleep(1); }
+            None => {
+                // Stay hot right after a transfer (low round-trip latency); park
+                // only once genuinely idle so we don't burn the core forever.
+                if crate::interrupts::ticks().wrapping_sub(last_work) < HOT_TICKS {
+                    crate::smp::fiber::yield_ready();
+                } else {
+                    crate::smp::fiber::yield_sleep(5);
+                }
+            }
         }
     }
 }
+
+static DIAG: AtomicUsize = AtomicUsize::new(0);
 
 fn apply(
     writers: &mut BTreeMap<u64, crate::storage::npkfs::fs::StreamingWriter>,
