@@ -47,6 +47,42 @@ macro_rules! p9diag {
 }
 use super::virtqueue::{read_desc, avail_idx, avail_ring, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
+// ── 9p I/O stats (download-bottleneck diagnosis) ──────────────────────
+// Reveals the GUEST's write pattern: writes/s, throughput, avg write size,
+// fsync/s, and how many Twrites hit the slow (deferred-backpressure) vs fast
+// (ack-on-buffer) path. Emitted ~every 5 s while there's write traffic.
+use core::sync::atomic::{AtomicU64, Ordering as AtO};
+static STAT_TWRITES: AtomicU64 = AtomicU64::new(0);
+static STAT_TWRITE_BYTES: AtomicU64 = AtomicU64::new(0);
+static STAT_TFSYNC: AtomicU64 = AtomicU64::new(0);
+static STAT_TREAD: AtomicU64 = AtomicU64::new(0);
+static STAT_DEFERRED: AtomicU64 = AtomicU64::new(0);
+static STAT_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+
+fn emit_9p_stat() {
+    let now = crate::interrupts::ticks();
+    let last = STAT_LAST_TICK.load(AtO::Relaxed);
+    let dt = now.wrapping_sub(last);
+    if last != 0 && dt >= 500 {
+        if STAT_LAST_TICK.compare_exchange(last, now, AtO::Relaxed, AtO::Relaxed).is_ok() {
+            let secs = (dt / 100).max(1);
+            let w = STAT_TWRITES.swap(0, AtO::Relaxed);
+            let wb = STAT_TWRITE_BYTES.swap(0, AtO::Relaxed);
+            let fs = STAT_TFSYNC.swap(0, AtO::Relaxed);
+            let rd = STAT_TREAD.swap(0, AtO::Relaxed);
+            let df = STAT_DEFERRED.swap(0, AtO::Relaxed);
+            if w + rd + fs > 0 {
+                let avg = if w > 0 { wb / w } else { 0 };
+                crate::kprintln!(
+                    "[9p-stat] writes {}/s ({} KB/s, avg {} B) | fsync {}/s | reads {}/s | deferred {}/s",
+                    w / secs, wb / 1024 / secs, avg, fs / secs, rd / secs, df / secs);
+            }
+        }
+    } else if last == 0 {
+        STAT_LAST_TICK.store(now, AtO::Relaxed);
+    }
+}
+
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 /// Modern virtio device id = 0x1040 + device-type. 9p = type 9.
 const VIRTIO_9P_DEVICE: u32 = 0x1049;
@@ -574,6 +610,7 @@ impl Virtio9p {
     /// Process one T-message, return the R-message bytes. STEP 1:
     /// only `Tversion` is real; everything else → `Rlerror(ENOSYS)`.
     fn process_message(&mut self, req: &[u8]) -> Vec<u8> {
+        emit_9p_stat();
         // Header: size[4] type[1] tag[2]
         if req.len() < 7 {
             return rlerror(0xFFFF, EINVAL);
@@ -786,6 +823,7 @@ impl Virtio9p {
 
     /// Tread: fid[4] offset[8] count[4]. Slices the cached file bytes.
     fn t_read(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        STAT_TREAD.fetch_add(1, AtO::Relaxed);
         if body.len() < 16 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         let offset = u64::from_le_bytes(body[4..12].try_into().unwrap()) as usize;
@@ -876,6 +914,8 @@ impl Virtio9p {
         let offset = u64::from_le_bytes(body[4..12].try_into().unwrap()) as usize;
         let count = rd_u32(body, 12) as usize;
         let data = &body[16..body.len().min(16 + count)];
+        STAT_TWRITES.fetch_add(1, AtO::Relaxed);
+        STAT_TWRITE_BYTES.fetch_add(data.len() as u64, AtO::Relaxed);
         let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
 
         // Async streaming mode (large sequential download, already promoted):
@@ -902,6 +942,7 @@ impl Virtio9p {
             let backpressure = super::p9_async::is_full();
             super::p9_async::enqueue_write(tag, fid as u64, data.to_vec(), backpressure);
             if backpressure {
+                STAT_DEFERRED.fetch_add(1, AtO::Relaxed);
                 self.pending_defer = Some(DeferKind::Write(data.len() as u32));
                 return Vec::new();
             }
@@ -937,6 +978,7 @@ impl Virtio9p {
             // Rwrite reports THIS write's bytes, not the prefix. Ack now unless
             // the worker is already behind (then defer for backpressure).
             if backpressure {
+                STAT_DEFERRED.fetch_add(1, AtO::Relaxed);
                 self.pending_defer = Some(DeferKind::Write(data.len() as u32));
                 return Vec::new();
             }
@@ -947,6 +989,7 @@ impl Virtio9p {
 
     /// Tfsync: fid[4] datasync[4]. Flush the working buffer to npkFS.
     fn t_fsync(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
+        STAT_TFSYNC.fetch_add(1, AtO::Relaxed);
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         if let Some(f) = self.fids.get(&fid) {
