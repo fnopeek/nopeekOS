@@ -217,11 +217,21 @@ fn frame_pool_put(buf: Vec<u8>) {
 /// showed injfalse=0 (the guest ALWAYS had RX buffers) yet tens of thousands of
 /// drops — because Core 0 was racing the BSP pump to fill this queue and winning
 /// (it can't drain — no VmContext). Fixed by making the BSP pump the sole NIC
-/// drainer while a VM is active (net::poll skip on Core 0). With that race gone
-/// the pump fills+drains in one call, so the queue empties immediately and a
-/// deeper buffer no longer balloons latency — it just absorbs a single pump's
-/// slirp burst without dropping. 256 ≈ one fat burst.
-const INBOUND_MAX: usize = 256;
+/// drainer while a VM is active (net::poll skip on Core 0).
+///
+/// 2026-06-19: that old 256 ("one fat burst") rested on a regime where the pump
+/// drained every call. Today's bottleneck is different: during a download-to-disk
+/// the inline 9p→npkFS write stalls the pump for whole `rxlat max` windows (8–16
+/// ms), and at ~1 Gbit the host NIC fills the queue in those windows → overflow
+/// drops → TCP sawtooth (~10 MB/s where QEMU should do 80–90). 256 is now the
+/// binding cap, not bufferbloat protection. Bumped to 1024 ≈ one 12 ms stall
+/// burst at line rate, so a transient stall is absorbed instead of dropped. This
+/// is NOT bufferbloat as long as the queue still drains between stalls (the pump
+/// now also runs on 9p exits) — and `rxlat avg` in [netstat] MEASURES that: if it
+/// stays low the deep buffer only absorbs transients; if it balloons, switch to
+/// time-based AQM (drop by head-of-queue standing age via the per-packet
+/// `push_tsc` we already record), which gives low latency AND throughput.
+const INBOUND_MAX: usize = 1024;
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.

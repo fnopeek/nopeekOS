@@ -171,7 +171,26 @@ pub struct Virtio9p {
     root: String,
     /// Active fids: fid number → resolved npkFS path + open-file cache.
     fids: BTreeMap<u32, Fid>,
+    /// Requests whose reply is deferred until the async persist worker finishes.
+    /// tag → where to scatter the R-message (the vCPU owns the virtqueue, so
+    /// only this thread ever touches `in_flight` + the used-ring).
+    in_flight: BTreeMap<u16, InFlight>,
+    /// Side-channel set by a handler that just deferred its reply (so
+    /// `service_queues` skips the immediate used-ring post). Taken each message.
+    pending_defer: Option<DeferKind>,
 }
+
+/// A reply we'll build + post once the worker reports the op done.
+struct InFlight {
+    queue_idx: u16,
+    head: u16,
+    wtargets: Vec<(u64, u32)>,
+    kind: DeferKind,
+    fid: u32,
+}
+
+#[derive(Clone, Copy)]
+enum DeferKind { Write(u32), Fsync, Clunk }
 
 /// One open 9P fid: a resolved npkFS path plus, for an opened regular
 /// file, a cached copy of its bytes (npkFS reads whole blobs, so we
@@ -187,11 +206,15 @@ struct Fid {
     /// `data` has unflushed writes — persisted to npkFS on Tfsync/Tclunk.
     dirty: bool,
     /// Set once a write grows the file past STREAM_PROMOTE_BYTES while
-    /// appending sequentially (a download): subsequent writes stream chunk-
-    /// by-chunk to npkFS instead of buffering the whole file in RAM (which
-    /// OOM'd at ~1 GiB on a 500 MB+ ISO) and doing an O(n²) whole-object
-    /// rewrite. Published (manifest + path) on Tclunk via `finish()`.
-    stream: Option<crate::npkfs::fs::StreamingWriter>,
+    /// appending sequentially (a download): subsequent writes are handed to the
+    /// async persist worker (`p9_async`) — the actual `StreamingWriter` lives on
+    /// the worker's core, NOT here, so the vCPU never blocks on disk. Replies
+    /// are deferred until the worker has durably persisted.
+    async_stream: bool,
+    /// Next expected write offset for the streamed file (= bytes handed to the
+    /// worker so far). The vCPU enforces sequential appends here without holding
+    /// the writer; a non-sequential write is rejected (EIO), as before.
+    stream_next: u64,
 }
 
 /// Promote a buffered file to streaming once it reaches this size AND the
@@ -225,6 +248,8 @@ impl Virtio9p {
             log_count: 0,
             root: crate::intent::home_dir(),
             fids: BTreeMap::new(),
+            in_flight: BTreeMap::new(),
+            pending_defer: None,
         }
     }
 
@@ -434,9 +459,15 @@ impl Virtio9p {
         if head_avail == last { return false; }
 
         let mut used_idx = self.queues[queue_idx as usize].used_idx;
-        let mut serviced = false;
+        let mut serviced = false;        // consumed at least one avail entry
+        let mut immediate_posted = false; // posted at least one used entry now
 
         while last != head_avail {
+            // Backpressure: if the async persist queue is full, stop pulling new
+            // requests. The remaining avail entries are picked up later when
+            // drain_async_done frees space + re-services (the vCPU never blocks).
+            if super::p9_async::is_full() { break; }
+
             let head = match avail_ring(mem, avail, size, last) { Some(v) => v, None => break };
 
             // Gather readable bytes + collect writable (addr,len) targets.
@@ -461,16 +492,24 @@ impl Virtio9p {
 
             let resp = self.process_message(&req);
 
-            // Scatter the response across the writable descriptors.
-            let mut off = 0usize;
-            for (addr, len) in &wtargets {
-                if off >= resp.len() { break; }
-                let n = ((*len as usize)).min(resp.len() - off);
-                mem.write_bytes(*addr, &resp[off..off + n]);
-                off += n;
+            if let Some(kind) = self.pending_defer.take() {
+                // Async write/clunk: the worker will persist; remember where to
+                // post the reply and DON'T touch the used-ring now (deferred).
+                let tagv = if req.len() >= 7 { u16::from_le_bytes([req[5], req[6]]) } else { 0 };
+                let fid = if req.len() >= 11 { rd_u32(&req, 7) } else { 0 };
+                self.in_flight.insert(tagv, InFlight { queue_idx, head, wtargets, kind, fid });
+            } else {
+                // Immediate reply: scatter across writable descriptors + post.
+                let mut off = 0usize;
+                for (addr, len) in &wtargets {
+                    if off >= resp.len() { break; }
+                    let n = ((*len as usize)).min(resp.len() - off);
+                    mem.write_bytes(*addr, &resp[off..off + n]);
+                    off += n;
+                }
+                used_push(mem, used, size, &mut used_idx, head, resp.len() as u32);
+                immediate_posted = true;
             }
-
-            used_push(mem, used, size, &mut used_idx, head, resp.len() as u32);
             last = last.wrapping_add(1);
             serviced = true;
         }
@@ -479,9 +518,55 @@ impl Virtio9p {
             let q = &mut self.queues[queue_idx as usize];
             q.last_avail_idx = last;
             q.used_idx = used_idx;
-            self.isr |= 1;
+            if immediate_posted { self.isr |= 1; }
         }
-        serviced
+        immediate_posted
+    }
+
+    /// Post deferred replies for ops the async persist worker has finished, then
+    /// resume any avail entries that backpressure paused. Runs on the vCPU exit
+    /// loop — the vCPU is the sole owner of the virtqueue + `in_flight`, so no
+    /// cross-core race. Returns true if it posted at least one reply (the caller
+    /// injects the 9p IRQ).
+    pub fn drain_async_done(&mut self, mem: &GuestMem) -> bool {
+        let mut posted = false;
+        while let Some(done) = super::p9_async::poll_done() {
+            let inf = match self.in_flight.remove(&done.tag) { Some(i) => i, None => continue };
+            let resp = match inf.kind {
+                DeferKind::Write(count) => {
+                    if done.result >= 0 { msg(RWRITE, done.tag, &count.to_le_bytes()) }
+                    else { rlerror(done.tag, (-done.result) as u32) }
+                }
+                DeferKind::Fsync => {
+                    if done.result >= 0 { msg(RFSYNC, done.tag, &[]) }
+                    else { rlerror(done.tag, (-done.result) as u32) }
+                }
+                DeferKind::Clunk => {
+                    self.fids.remove(&inf.fid); // free the fid now the file is durable
+                    if done.result >= 0 { msg(RCLUNK, done.tag, &[]) }
+                    else { rlerror(done.tag, (-done.result) as u32) }
+                }
+            };
+            let (used, size, mut used_idx) = {
+                let q = match self.queues.get(inf.queue_idx as usize) { Some(q) => q, None => continue };
+                (q.device_gpa(), q.size, q.used_idx)
+            };
+            let mut off = 0usize;
+            for (addr, len) in &inf.wtargets {
+                if off >= resp.len() { break; }
+                let n = (*len as usize).min(resp.len() - off);
+                mem.write_bytes(*addr, &resp[off..off + n]);
+                off += n;
+            }
+            used_push(mem, used, size, &mut used_idx, inf.head, resp.len() as u32);
+            self.queues[inf.queue_idx as usize].used_idx = used_idx;
+            self.isr |= 1;
+            posted = true;
+        }
+        // Backpressure may have paused the avail-ring while PENDING was full;
+        // now that the worker drained some, pick up the rest.
+        if posted { self.service_queues(0, mem); }
+        posted
     }
 
     // ── 9P2000.L protocol ───────────────────────────────────────────
@@ -553,7 +638,7 @@ impl Virtio9p {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         let root = self.root.clone();
-        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, dirty: false, stream: None });
+        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, dirty: false, async_stream: false, stream_next: 0 });
         if self.log_count < 32 {
             kprintln!("[9p] Tattach fid={} → root '{}'", fid, root);
             self.log_count += 1;
@@ -592,7 +677,7 @@ impl Virtio9p {
         let walked = (qids.len() / 13) as u16;
         if walked as usize == nw {
             let is_dir = npkfs_stat(&cur).map(|s| s.0).unwrap_or(true);
-            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, dirty: false, stream: None });
+            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, dirty: false, async_stream: false, stream_next: 0 });
         }
         let mut b = Vec::with_capacity(2 + qids.len());
         b.extend_from_slice(&walked.to_le_bytes());
@@ -608,7 +693,7 @@ impl Virtio9p {
         // A streaming (in-progress download) fid isn't published in npkFS until
         // Tclunk — report its live written size so a mid-download fstat doesn't
         // see ENOENT.
-        let stream_size = self.fids.get(&fid).and_then(|f| f.stream.as_ref()).map(|w| w.written());
+        let stream_size = self.fids.get(&fid).filter(|f| f.async_stream).map(|f| f.stream_next);
         let (is_dir, size, mtime) = if let Some(sz) = stream_size {
             (false, sz, 0)
         } else if is_magic(&path) {
@@ -711,7 +796,7 @@ impl Virtio9p {
             // A streaming (write-only download) fid has no readable buffer →
             // empty read (EOF); a genuinely unopened fid is an error.
             None => {
-                if f.stream.is_some() { return msg(RREAD, tag, &0u32.to_le_bytes()); }
+                if f.async_stream { return msg(RREAD, tag, &0u32.to_le_bytes()); }
                 return rlerror(tag, EINVAL);
             }
         };
@@ -728,12 +813,15 @@ impl Virtio9p {
     fn t_clunk(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
+        // Async-streamed file: defer Rclunk until the worker flushes the final
+        // chunk + commits (durable). Keep the fid; drain_async_done removes it.
+        if self.fids.get(&fid).map_or(false, |f| f.async_stream) {
+            super::p9_async::enqueue_finish(tag, fid as u64);
+            self.pending_defer = Some(DeferKind::Clunk);
+            return Vec::new();
+        }
         if let Some(f) = self.fids.remove(&fid) {
-            if let Some(w) = f.stream {
-                // Streamed file: flush the final chunk, write the manifest, and
-                // publish it at the path atomically.
-                let _ = w.finish();
-            } else if f.dirty {
+            if f.dirty {
                 if let Some(d) = &f.data { let _ = npkfs_write(&f.path, d); }
             }
         }
@@ -773,7 +861,7 @@ impl Virtio9p {
         }
         p9diag!("[9p] Tlcreate '{}'", path);
         // Re-bind fid to the new open file with an empty write buffer.
-        self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), dirty: false, stream: None });
+        self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), dirty: false, async_stream: false, stream_next: 0 });
         let mut b = Vec::with_capacity(17);
         b.extend_from_slice(&qid(&path, false));
         b.extend_from_slice(&0u32.to_le_bytes()); // iounit
@@ -790,18 +878,29 @@ impl Virtio9p {
         let data = &body[16..body.len().min(16 + count)];
         let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
 
-        // Streaming mode (large sequential download already promoted): append
-        // chunk-by-chunk to npkFS, never holding the whole file in RAM.
-        if let Some(w) = f.stream.as_mut() {
-            if offset as u64 != w.written() {
-                // Non-sequential write into a streamed file — unsupported.
+        // Async streaming mode (large sequential download, already promoted):
+        // hand the chunk to the persist worker and DEFER the reply — the vCPU
+        // never blocks on disk, so the guest keeps draining the socket (ACKs
+        // flow, TCP ramps). The worker persists durably; drain_async_done posts
+        // the Rwrite once it's done.
+        if f.async_stream {
+            if offset as u64 != f.stream_next {
+                return rlerror(tag, EIO); // non-sequential into a streamed file
+            }
+            if super::p9_async::is_full() {
+                // Backpressure: shouldn't reach here (service_queues stops
+                // pulling the avail-ring when full), but if it does, reject so
+                // the guest retries rather than us unbounding RAM.
                 return rlerror(tag, EIO);
             }
-            if w.write(data).is_err() { return rlerror(tag, EIO); }
-            return msg(RWRITE, tag, &(data.len() as u32).to_le_bytes());
+            f.stream_next += data.len() as u64;
+            super::p9_async::enqueue_write(tag, fid as u64, data.to_vec());
+            self.pending_defer = Some(DeferKind::Write(data.len() as u32));
+            return Vec::new();
         }
 
-        // Buffered mode (small files / random writes).
+        // Buffered mode (small files / random writes) — synchronous, persisted
+        // on Tfsync/Tclunk (small, so blocking is fine).
         {
             let buf = f.data.get_or_insert_with(Vec::new);
             let end = offset + data.len();
@@ -810,20 +909,24 @@ impl Virtio9p {
         }
         f.dirty = true;
 
-        // Promote to streaming once the buffer is large AND this write appended
-        // at the end (the download pattern). Hands the buffered prefix to a
-        // StreamingWriter, then frees the RAM buffer — bounding memory at one
-        // chunk instead of the whole file, and avoiding the O(n²) whole-object
-        // rewrite that OOM'd at ~1 GiB.
+        // Promote to async streaming once the buffer is large AND this write
+        // appended at the end (the download pattern). Hand the buffered prefix
+        // to the worker via Start (defer this reply); the worker owns the
+        // StreamingWriter from here, so the vCPU never holds the whole file.
         let dlen = f.data.as_ref().map_or(0, |b| b.len());
         if dlen >= STREAM_PROMOTE_BYTES && offset + data.len() == dlen {
-            let mut w = crate::npkfs::fs::open_streaming_write(&f.path);
-            let ok = f.data.as_ref().map_or(false, |b| w.write(b).is_ok());
-            if ok {
-                f.stream = Some(w);
-                f.data = None;
-                f.dirty = false;
-            }
+            let prefix = f.data.take().unwrap_or_default();
+            f.async_stream = true;
+            f.stream_next = dlen as u64;
+            f.dirty = false;
+            let path = f.path.clone();
+            // Ensure the persist worker is running on a load-aware, non-Core-0
+            // core (idempotent). Cross-core admit is safe (lock-guarded queue).
+            super::p9_async::start_worker(crate::microvm::cpu::pick_offload_core());
+            super::p9_async::enqueue_start(tag, fid as u64, path, prefix);
+            // Rwrite for THIS Twrite reports this write's bytes, not the prefix.
+            self.pending_defer = Some(DeferKind::Write(data.len() as u32));
+            return Vec::new();
         }
         msg(RWRITE, tag, &(data.len() as u32).to_le_bytes())
     }
@@ -857,7 +960,7 @@ impl Virtio9p {
                 // Ignore resize on a streaming file (would corrupt state by
                 // creating a second buffer); downloads only truncate at open,
                 // before promotion.
-                if !f.is_dir && f.stream.is_none() {
+                if !f.is_dir && !f.async_stream {
                     let buf = f.data.get_or_insert_with(Vec::new);
                     buf.resize(size, 0);
                     f.dirty = true;
