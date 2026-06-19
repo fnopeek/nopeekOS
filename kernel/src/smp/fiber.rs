@@ -154,11 +154,20 @@ static FIBER_QUEUES: [Mutex<VecDeque<Box<Fiber>>>; MAX_CORES] =
 /// Admit a freshly-spawned app as a Ready fiber on this core. Called from
 /// the worker loop (`smp_ap_entry`) for `is_fiber` tasks.
 pub fn admit(cid: usize, func: fn(u64), arg: u64) {
+    admit_with_stack(cid, func, arg, DEFAULT_STACK_BYTES);
+}
+
+/// Like `admit` but with an explicit stack size. Use for long-running kernel
+/// workers that run deep call chains (e.g. the 9p persist worker doing npkFS
+/// writes/commits — AES + B-tree COW + journal — which the main kernel stack
+/// handles fine but overflow the default 128 KiB fiber stack, silently smashing
+/// memory since fibers have no guard page).
+pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) {
     if cid >= MAX_CORES {
         func(arg); // degenerate (no per-core queue) → run inline
         return;
     }
-    let mut fiber = Box::new(Fiber::new(DEFAULT_STACK_BYTES, fiber_app_entry, 0));
+    let mut fiber = Box::new(Fiber::new(stack_bytes, fiber_app_entry, 0));
     fiber.app_func = Some(func);
     fiber.app_arg = arg;
     fiber.state = FiberState::Ready;
