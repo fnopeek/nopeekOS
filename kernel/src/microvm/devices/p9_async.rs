@@ -43,7 +43,16 @@ enum Op {
     Finish,
 }
 
-struct Pending { tag: u16, key: u64, op: Op }
+struct Pending {
+    tag: u16,
+    key: u64,
+    op: Op,
+    /// Whether the vCPU is waiting for a deferred reply (true) or already acked
+    /// this Twrite (false — fast path). The worker only emits a `Done` when
+    /// `reply`, so an already-acked write whose tag the guest later reuses can't
+    /// be mis-matched in `in_flight`.
+    reply: bool,
+}
 
 /// A completed op the vCPU must turn into a deferred R-message.
 pub struct Done {
@@ -61,16 +70,16 @@ static STOP: AtomicBool = AtomicBool::new(false);
 pub fn pending_bytes() -> usize { PENDING_BYTES.load(Ordering::Acquire) }
 pub fn is_full() -> bool { pending_bytes() >= MAX_PENDING_BYTES }
 
-pub fn enqueue_start(tag: u16, key: u64, path: String, data: Vec<u8>) {
+pub fn enqueue_start(tag: u16, key: u64, path: String, data: Vec<u8>, reply: bool) {
     PENDING_BYTES.fetch_add(data.len(), Ordering::AcqRel);
-    PENDING.lock().push_back(Pending { tag, key, op: Op::Start { path, data } });
+    PENDING.lock().push_back(Pending { tag, key, op: Op::Start { path, data }, reply });
 }
-pub fn enqueue_write(tag: u16, key: u64, data: Vec<u8>) {
+pub fn enqueue_write(tag: u16, key: u64, data: Vec<u8>, reply: bool) {
     PENDING_BYTES.fetch_add(data.len(), Ordering::AcqRel);
-    PENDING.lock().push_back(Pending { tag, key, op: Op::Write { data } });
+    PENDING.lock().push_back(Pending { tag, key, op: Op::Write { data }, reply });
 }
 pub fn enqueue_finish(tag: u16, key: u64) {
-    PENDING.lock().push_back(Pending { tag, key, op: Op::Finish });
+    PENDING.lock().push_back(Pending { tag, key, op: Op::Finish, reply: true });
 }
 
 /// vCPU side: drain one completion (build its deferred reply in the device).
@@ -135,13 +144,16 @@ fn worker_entry(_: u64) {
                     Op::Finish => 0,
                 };
                 let tag = p.tag;
+                let reply = p.reply;
                 let result = apply(&mut writers, p.key, p.op);
                 if result < 0 {
                     let n = DIAG.fetch_add(1, Ordering::Relaxed);
                     if n < 16 { crate::kprintln!("[p9-async] persist error (tag={} result={})", tag, result); }
                 }
                 if nbytes > 0 { PENDING_BYTES.fetch_sub(nbytes, Ordering::AcqRel); }
-                DONE.lock().push_back(Done { tag, result });
+                // Only deferred ops are awaited by the vCPU; fast-path-acked
+                // writes (reply=false) must NOT post a Done (tag could be reused).
+                if reply { DONE.lock().push_back(Done { tag, result }); }
                 last_work = crate::interrupts::ticks();
                 // Cooperative yield: lets a co-located vCPU (shared core) run,
                 // returns immediately when alone so we grab the next chunk fast.
