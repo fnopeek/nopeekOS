@@ -575,18 +575,13 @@ impl GpuHal for IntelXeDriver {
 impl IntelXeDriver {
     /// Scan PCI bus for Intel Xe GPU.
     pub fn detect() -> Option<Self> {
-        // Try known ADL-N device IDs first
+        // Only activate native modesetting on hardware we explicitly support
+        // (ADL-N / N100). Any other Intel GPU stays on the safe GOP framebuffer
+        // the firmware set up — programming ADL-N registers on a different gen
+        // tears down the live pipe and blacks the screen.
         for &(did, name) in KNOWN_DEVICE_IDS {
             if let Some(dev) = pci::find_device(INTEL_VENDOR, did) {
                 return Some(Self::new(dev, did, name));
-            }
-        }
-
-        // Fallback: any Intel VGA controller (class 03:00)
-        if let Some(dev) = pci::find_by_class(0x03, 0x00) {
-            if dev.vendor_id == INTEL_VENDOR {
-                let did = dev.device_id;
-                return Some(Self::new(dev, did, "Intel GPU (unknown)"));
             }
         }
 
