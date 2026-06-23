@@ -409,6 +409,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
 /// into the front and the whole frame blitted (cursor included → atomic,
 /// no flicker; incl. the dock reveal animation + the microvm tile).
 fn render_frame_layered() {
+    let t0 = crate::interrupts::rdtsc();
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
@@ -422,11 +423,13 @@ fn render_frame_layered() {
             // SAFETY: bg_buf and back are valid for size bytes
             unsafe { core::ptr::copy_nonoverlapping(bg_buf, back, size); }
         }
+        let t_bg = crate::interrupts::rdtsc();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.aurora_drawn = true;
             comp.render(back, fb.info());
         }
+        let t_comp = crate::interrupts::rdtsc();
 
         fb.swap_buffers();
         fb.commit_front();
@@ -435,6 +438,7 @@ fn render_frame_layered() {
         // pixels under it so a later pure move can erase it without a
         // recompose. Carried by the full blit below → atomic, no flicker.
         cursor::save_under_and_bake(fb.front_ptr(), &info);
+        let t_cursor = crate::interrupts::rdtsc();
 
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
@@ -447,6 +451,7 @@ fn render_frame_layered() {
             damage.mark_all();
             damage.flush(fb);
         }
+        record_surface_render(t0, t_bg, t_comp, t_cursor);
     });
 }
 
@@ -604,7 +609,7 @@ fn record_surface_render(t0: u64, t_bg: u64, t_comp: u64, t_cursor: u64) {
         let cur = SURF_CUR_SUM.swap(0, Ordering::Relaxed);
         let e = SURF_RENDER_LOG_EVERY;
         crate::kprintln!(
-            "[surf-render] {} blits avg {}us (bg {} | comp {} | cursor {} | blit {}) max {}us",
+            "[render] {} frames avg {}us (bg {} | comp {} | cursor {} | blit {}) max {}us",
             e, (sum / e) / mhz, (bg / e) / mhz, (comp / e) / mhz, (cur / e) / mhz,
             (sum.saturating_sub(bg + comp + cur) / e) / mhz, max / mhz,
         );
