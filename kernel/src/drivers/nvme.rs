@@ -998,10 +998,12 @@ fn record_drain(t0: u64, vector: u8) {
         let avg_us = (sum / NVME_DRAIN_LOG_EVERY) / mhz;
         let max_us = max / mhz;
         let fires = crate::irq::fired_count(vector);
+        if crate::shade::PERF_LOG {
         kprintln!(
             "[nvme-spin] {} drains: avg {}us max {}us slow(>{}us) {} | msix vec {:#04x} fires {}",
             NVME_DRAIN_LOG_EVERY, avg_us, max_us, NVME_SLOW_US, slow, vector, fires,
         );
+        }
     }
 }
 
