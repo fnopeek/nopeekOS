@@ -96,6 +96,14 @@ pub fn has_wallpaper() -> bool {
     WALLPAPER_SET.load(Ordering::Acquire)
 }
 
+/// Raw wallpaper buffer (framebuffer-pitch layout, BGRX u32) + a value that
+/// changes whenever the wallpaper is replaced. For the glass-tint precompute
+/// in `render` — it caches `blend(bg, wallpaper)` so the translucent terminal
+/// chrome is a memcpy instead of a per-pixel blend at any window size.
+pub fn wallpaper_ptr() -> *const u8 {
+    if WALLPAPER_SET.load(Ordering::Acquire) { unsafe { WALLPAPER } } else { core::ptr::null() }
+}
+
 pub fn clear_wallpaper() {
     WALLPAPER_SET.store(false, Ordering::Release);
     crate::theme::clear();
