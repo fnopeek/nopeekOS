@@ -205,6 +205,10 @@ pub fn init_from_gpu() {
                     | crate::paging::PageFlags::WRITE_COMBINE,
             );
         }
+        // Diagnose the EFFECTIVE memory type of the FB: a firmware MTRR of
+        // type UC over this region overrides our PAT WC (UC always wins) →
+        // the blit runs at ~150 MB/s instead of GB/s. Read-only.
+        diagnose_fb_memory_type(addr);
     }
 
     let info = FbInfo { addr, pitch, width, height, bpp };
@@ -426,6 +430,72 @@ pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
                 len,
             );
         }
+    }
+}
+
+/// Read-only: report the framebuffer's EFFECTIVE memory type (firmware
+/// MTRRs vs our PAT WC). A UC MTRR over this region overrides PAT WC (UC
+/// always wins) → the ~150 MB/s blit we measured. Confirms the root cause
+/// before we touch MTRR programming.
+fn diagnose_fb_memory_type(fb_addr: u64) {
+    // SAFETY: rdmsr on architectural MTRR/PAT MSRs, all read-only.
+    unsafe fn rdmsr(msr: u32) -> u64 {
+        let lo: u32;
+        let hi: u32;
+        core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
+            options(nomem, nostack, preserves_flags));
+        ((hi as u64) << 32) | lo as u64
+    }
+    fn type_name(t: u8) -> &'static str {
+        match t { 0 => "UC", 1 => "WC", 4 => "WT", 5 => "WP", 6 => "WB", _ => "??" }
+    }
+
+    let cap = unsafe { rdmsr(0xFE) };
+    let vcnt = (cap & 0xFF) as u32;
+    let def = unsafe { rdmsr(0x2FF) };
+    let def_type = (def & 0xFF) as u8;
+    crate::kprintln!(
+        "[mtrr] cap vcnt={} wc_supported={} | def_type={} mtrr_enabled={} | fb @ {:#x}",
+        vcnt, (cap >> 10) & 1, type_name(def_type), (def >> 11) & 1, fb_addr,
+    );
+
+    // Effective MTRR type for fb_addr: scan valid variable MTRRs (UC wins,
+    // else WT over WB, else the matching type, else the default type).
+    let mut eff: Option<u8> = None;
+    for n in 0..vcnt.min(16) {
+        let base = unsafe { rdmsr(0x200 + 2 * n) };
+        let mask = unsafe { rdmsr(0x201 + 2 * n) };
+        if mask & (1 << 11) == 0 { continue; } // V bit clear → not valid
+        let mtype = (base & 0xFF) as u8;
+        let phys_base = base & 0x000F_FFFF_FFFF_F000;
+        let phys_mask = mask & 0x000F_FFFF_FFFF_F000;
+        if (fb_addr & phys_mask) == (phys_base & phys_mask) {
+            let size = (!phys_mask & 0x000F_FFFF_FFFF_F000).wrapping_add(0x1000);
+            crate::kprintln!("[mtrr]  var{}: base={:#x} size={:#x} type={} COVERS fb",
+                n, phys_base, size, type_name(mtype));
+            eff = Some(match (eff, mtype) {
+                (_, 0) | (Some(0), _) => 0,
+                (Some(4), 6) | (Some(6), 4) => 4,
+                (_, t) => t,
+            });
+        }
+    }
+    let eff_type = eff.unwrap_or(def_type);
+    crate::kprintln!(
+        "[mtrr] => FB effective MTRR type = {} {}",
+        type_name(eff_type),
+        if eff_type == 1 { "(WC already — blit should be fast)" }
+        else { "(NOT WC → overrides our PAT WC → slow UC blit, this is the wall)" },
+    );
+
+    // Read back the FB PTE and decode its PAT index — confirm WE asked WC.
+    if let Some((entry, level)) = crate::paging::leaf_entry(fb_addr) {
+        let pwt = (entry >> 3) & 1;
+        let pcd = (entry >> 4) & 1;
+        let pat_bit = if level == 3 { (entry >> 7) & 1 } else { (entry >> 12) & 1 };
+        let idx = (pat_bit << 2) | (pcd << 1) | pwt;
+        crate::kprintln!("[mtrr] FB PTE level={} (3=4KB) PAT_idx={} (5=WC requested) raw={:#x}",
+            level, idx, entry);
     }
 }
 

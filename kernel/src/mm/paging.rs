@@ -356,6 +356,27 @@ pub fn translate(vaddr: u64) -> Option<u64> {
     }
 }
 
+/// Return the raw leaf paging entry (with flag bits) mapping `vaddr`, plus
+/// the page level: 1 = 1 GB, 2 = 2 MB, 3 = 4 KB. `None` if not present.
+/// Read-only — lets a diagnostic decode the PAT/PCD/PWT memory-type bits.
+pub fn leaf_entry(vaddr: u64) -> Option<(u64, u8)> {
+    let pml4 = PML4_PHYS.load(Ordering::Relaxed);
+    // SAFETY: read-only table walk within identity-mapped range.
+    unsafe {
+        let pml4_e = read_entry(pml4, pml4_index(vaddr));
+        if pml4_e & PageFlags::PRESENT.bits() == 0 { return None; }
+        let pdpt_e = read_entry(entry_addr(pml4_e), pdpt_index(vaddr));
+        if pdpt_e & PageFlags::PRESENT.bits() == 0 { return None; }
+        if pdpt_e & PageFlags::HUGE.bits() != 0 { return Some((pdpt_e, 1)); }
+        let pdt_e = read_entry(entry_addr(pdpt_e), pdt_index(vaddr));
+        if pdt_e & PageFlags::PRESENT.bits() == 0 { return None; }
+        if pdt_e & PageFlags::HUGE.bits() != 0 { return Some((pdt_e, 2)); }
+        let pt_e = read_entry(entry_addr(pdt_e), pt_index(vaddr));
+        if pt_e & PageFlags::PRESENT.bits() == 0 { return None; }
+        Some((pt_e, 3))
+    }
+}
+
 /// Count mapped pages: (huge_2mb, small_4kb)
 fn count_mappings(pml4: u64) -> (usize, usize) {
     let mut huge = 0;
