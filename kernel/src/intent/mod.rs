@@ -1719,6 +1719,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        "mtrr" | "fbinfo" | "gfx" => {
+            if require_cap(vault, &session, Rights::READ, "mtrr") {
+                crate::framebuffer::dump_memory_type();
+            }
+        }
+
         "nic" | "usbnet" => {
             if require_cap(vault, &session, Rights::READ, "nic") {
                 if crate::xhci::nic_attached() {
