@@ -483,6 +483,11 @@ impl GpuHal for IntelXeDriver {
 
     fn is_native(&self) -> bool { true }
 
+    /// Only ADL-N has a validated DPLL/pipe modeset path. Non-ADL-N Gen12
+    /// (Tiger Lake) runs blit-only and keeps the firmware mode — a modeset
+    /// there reprograms an unvalidated pipeline and blacks the scanout.
+    fn supports_modeset(&self) -> bool { is_adln(self.device_id) }
+
     fn flip(&mut self, surface_addr: u64) {
         if self.bar0 == 0 { return; }
         // Write PLANE_SURF — GPU reads new address at next vblank
@@ -906,6 +911,16 @@ impl IntelXeDriver {
     /// allocates new framebuffer via GGTT, returns aperture address.
     /// DDI/PHY stay running — only pipe+plane are cycled.
     pub fn set_mode(&mut self, width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError> {
+        // Blit-only takeovers (non-ADL-N Gen12) keep the firmware mode; a real
+        // DPLL/pipe/transcoder reprogram is only validated on ADL-N and would
+        // black the scanout here. Refuse so neither the post-login auto-upgrade
+        // nor a manual `gpu mode` can blank a blit-only panel.
+        if !is_adln(self.device_id) {
+            kprintln!("[npk]   GPU: {:#06x} is blit-only — modeset not supported, keeping firmware mode",
+                self.device_id);
+            return Err(GpuError::UnsupportedMode);
+        }
+
         let timing = find_timing(width, height, hz)
             .ok_or(GpuError::UnsupportedMode)?;
 

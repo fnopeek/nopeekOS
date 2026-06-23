@@ -319,8 +319,11 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             // Graphical login screen
             let _master_key = gui::login::run(&salt);
 
-            // Auto-upgrade to highest refresh rate if monitor is now connected
-            if gpu::is_native() && gpu::current_hz() < 60 {
+            // Auto-upgrade to highest refresh rate if monitor is now connected.
+            // Only on GPUs with a validated modeset path — a blit-only takeover
+            // (non-ADL-N Gen12 / Tiger Lake) must keep the firmware mode, else
+            // the DPLL/pipe reprogram blacks the scanout after login.
+            if gpu::is_native() && gpu::supports_modeset() && gpu::current_hz() < 60 {
                 kprintln!("[npk] GPU: upgrading to 4K@60Hz...");
                 match gpu::set_mode(3840, 2160, 60) {
                     Ok(fb) => {
