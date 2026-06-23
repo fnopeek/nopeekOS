@@ -363,6 +363,7 @@ pub fn render_frame() {
 /// bounding box. NO comp.render, NO bg memcpy — that per-move recomposite
 /// was the bare-metal cost (+watts/stutter) whenever a window was open.
 fn render_frame_cursor_only() {
+    note_render(2);
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
         let front = fb.front_ptr();
@@ -409,6 +410,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
 /// into the front and the whole frame blitted (cursor included → atomic,
 /// no flicker; incl. the dock reveal animation + the microvm tile).
 fn render_frame_layered() {
+    note_render(0);
     let t0 = crate::interrupts::rdtsc();
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
@@ -464,6 +466,7 @@ fn render_frame_layered() {
 /// the rest of the front buffer already matches what's on screen. See
 /// project-baremetal-gfx-perf ("clip the MMIO blit = the main win").
 fn render_frame_surface() {
+    note_render(1);
     let t0 = crate::interrupts::rdtsc();
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
@@ -560,7 +563,31 @@ fn render_frame_surface() {
 static SURF_RENDER_COUNT: AtomicU64 = AtomicU64::new(0);
 static SURF_RENDER_TSC_SUM: AtomicU64 = AtomicU64::new(0);
 static SURF_RENDER_TSC_MAX: AtomicU64 = AtomicU64::new(0);
-const SURF_RENDER_LOG_EVERY: u64 = 120;
+const SURF_RENDER_LOG_EVERY: u64 = 30;
+
+// [render-mix] which render path actually fires (a slow desktop with an app
+// open may be re-rendering the whole scene on mouse-move instead of the cheap
+// cursor-only path). Counts: layered, surface, cursor-only, legacy.
+static MIX_LAYERED: AtomicU64 = AtomicU64::new(0);
+static MIX_SURFACE: AtomicU64 = AtomicU64::new(0);
+static MIX_CURSOR: AtomicU64 = AtomicU64::new(0);
+static MIX_LEGACY: AtomicU64 = AtomicU64::new(0);
+
+fn note_render(kind: u8) {
+    match kind {
+        0 => MIX_LAYERED.fetch_add(1, Ordering::Relaxed),
+        1 => MIX_SURFACE.fetch_add(1, Ordering::Relaxed),
+        2 => MIX_CURSOR.fetch_add(1, Ordering::Relaxed),
+        _ => MIX_LEGACY.fetch_add(1, Ordering::Relaxed),
+    };
+    let l = MIX_LAYERED.load(Ordering::Relaxed);
+    let s = MIX_SURFACE.load(Ordering::Relaxed);
+    let c = MIX_CURSOR.load(Ordering::Relaxed);
+    let g = MIX_LEGACY.load(Ordering::Relaxed);
+    if (l + s + c + g) % 60 == 0 {
+        crate::kprintln!("[render-mix] layered={} surface={} cursor-only={} legacy={}", l, s, c, g);
+    }
+}
 
 // [gpu-blit] does the real full-frame BCS blit succeed, and how long?
 static GPU_BLIT_OK: AtomicU64 = AtomicU64::new(0);
@@ -618,6 +645,7 @@ fn record_surface_render(t0: u64, t_bg: u64, t_comp: u64, t_cursor: u64) {
 
 /// Legacy render with double-buffer (fallback when layers not initialized).
 fn render_frame_legacy() {
+    note_render(3);
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
