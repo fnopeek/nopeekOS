@@ -610,7 +610,12 @@ fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> boo
 
     let src_ggtt = fb.front_ggtt();
     let dst_ggtt = crate::gpu::fb_ggtt_offset();
-    if src_ggtt == 0 || dst_ggtt == 0 { return false; }
+    // dst_ggtt == 0 is VALID: when the firmware scanout sits at GGTT offset 0
+    // (Tiger Lake blit-only, fw PLANE_SURF=0), that IS the live scanout. Only
+    // a missing shadow mapping (src == 0) means "not set up". Treating dst 0 as
+    // invalid was silently routing the whole frame back to the 100ms CPU/UC
+    // blit even though BCS is up + readback-verified.
+    if src_ggtt == 0 { return false; }
 
     crate::gpu::gpu_blit_rect(src_ggtt, pitch, dst_ggtt, pitch, 0, 0, pitch / 4, h)
 }
