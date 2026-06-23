@@ -1204,6 +1204,18 @@ pub fn request_surface_render() {
     SURFACE_DIRTY.store(true, Ordering::Relaxed);
 }
 
+/// Signal a bare pointer move from the input IRQ. Picks the cheap cursor-
+/// only render as the default; `handle_mouse` (run by the Core-0 loop /
+/// poll_render before this flag is consumed) upgrades to a full
+/// DEFERRED_RENDER if the event turns out to be a drag/click/scroll. The
+/// IRQ previously called the full `request_render`, which forced a whole-
+/// scene recomposite on *every* pointer delta and defeated `handle_mouse`'s
+/// own CURSOR_MOVED logic (DEFERRED_RENDER is never cleared by it) — the
+/// dominant framebuffer cost while a window/tile was open.
+pub fn request_cursor_move() {
+    CURSOR_MOVED.store(true, Ordering::Relaxed);
+}
+
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
