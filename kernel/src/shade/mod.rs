@@ -15,7 +15,7 @@ pub mod cursor;
 pub mod widgets;
 pub mod surface;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::framebuffer::{self};
@@ -987,13 +987,31 @@ pub fn poll_render() {
         SURFACE_DIRTY.store(false, Ordering::Relaxed); // a full render covers the tile too
         render_frame();
         CURSOR_MOVED.store(false, Ordering::Relaxed);
-    } else if !terminal::is_dirty() && SURFACE_DIRTY.swap(false, Ordering::Relaxed) {
+    } else if !terminal::is_dirty() && SURFACE_DIRTY.load(Ordering::Relaxed) {
         // Guest produced a new frame → recomposite but blit ONLY the surface
-        // tile rect (+ cursor), not the whole screen. The full-screen MMIO
-        // blit is the dominant bare-metal cost; clipping it stops a 60 Hz
-        // guest from starving the cursor.
-        render_frame_surface();
-        CURSOR_MOVED.store(false, Ordering::Relaxed);
+        // tile rect (+ cursor), not the whole screen. Even clipped to the
+        // tile, at 4K on a GOP framebuffer that blit is tens of MB and runs
+        // at the guest's flush rate (e.g. a loading page / speedtest graph
+        // animating). Doing it on every tick saturated Core 0 and the host
+        // cursor stuttered across ALL windows whenever something was
+        // loading. So while the host mouse is actively moving, prefer the
+        // cheap cursor-only render and let the surface coalesce to a later
+        // tick — UNLESS it has gone stale, so the tile still updates a few
+        // times/sec even during continuous cursor movement.
+        let now = crate::interrupts::ticks();
+        let stale = now.wrapping_sub(LAST_SURFACE_TICK.load(Ordering::Relaxed))
+            >= SURFACE_MAX_STALE_TICKS;
+        if CURSOR_MOVED.load(Ordering::Relaxed) && !stale {
+            // Mouse moving + tile fresh enough → keep the cursor buttery;
+            // SURFACE_DIRTY stays set and renders on a mouse-idle/stale tick.
+            CURSOR_MOVED.store(false, Ordering::Relaxed);
+            render_frame_cursor_only();
+        } else {
+            SURFACE_DIRTY.store(false, Ordering::Relaxed);
+            LAST_SURFACE_TICK.store(now, Ordering::Relaxed);
+            render_frame_surface();
+            CURSOR_MOVED.store(false, Ordering::Relaxed);
+        }
     } else if !terminal::is_dirty() && CURSOR_MOVED.swap(false, Ordering::Relaxed) {
         // Pure mouse move, nothing else changed → save-under cursor move.
         render_frame_cursor_only();
@@ -1190,6 +1208,17 @@ static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
 /// The full-screen blit per 60 Hz guest frame is the dominant bare-metal
 /// (GOP framebuffer) cost and starved the cursor → lag when an app is up.
 static SURFACE_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Last tick (100 Hz) at which a Surface (guest) frame was actually
+/// composited+blit. poll_render throttles the expensive 4K-tile surface
+/// render in favour of the cheap cursor-only path while the host mouse is
+/// moving, so a busy guest can't starve the cursor across all windows.
+static LAST_SURFACE_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Max ticks the surface tile may go un-updated while the mouse is moving
+/// before a surface render is forced anyway — caps tile staleness at
+/// ~50 ms (≥20 fps) during continuous cursor movement.
+const SURFACE_MAX_STALE_TICKS: u64 = 5;
 
 /// Clip the blit on a Surface flush to the tile rect (vs full-screen). Flag-
 /// gated because the cursor/blit path has a flicker history (see
