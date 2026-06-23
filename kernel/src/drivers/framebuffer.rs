@@ -443,6 +443,18 @@ pub fn dump_memory_type() {
     }
     crate::kprintln!("[mtrr] native_gpu={} (WC mapping only applied for GOP)",
         crate::gpu::is_native());
+    // Which display device is this, and did the native (display-only) Xe
+    // driver claim it? On a non-ADL-N GPU it falls back to the slow GOP UC
+    // blit — the device ID tells us if it's a trivial ID-add (Gen12) or a
+    // new display-gen port.
+    if let Some(dev) = crate::pci::find_by_class(0x03, 0x00) {
+        crate::kprintln!(
+            "[gfx] display PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] native_detected={} driver={}",
+            dev.addr.bus, dev.addr.device, dev.addr.function,
+            dev.vendor_id, dev.device_id, crate::gpu::native_detected(),
+            crate::gpu::native_gpu_name().unwrap_or("GOP fallback (slow UC blit)"),
+        );
+    }
     diagnose_fb_memory_type(addr);
 }
 
