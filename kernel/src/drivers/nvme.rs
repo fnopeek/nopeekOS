@@ -6,7 +6,7 @@
 use crate::{kprintln, pci, paging, memory};
 use crate::paging::PageFlags;
 use crate::virtio_blk::BlkError;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -947,6 +947,7 @@ fn build_prp_list(list_addr: u64, dma_base: u64, count: u64) {
 /// Drain one I/O completion from the IO queue. Caller must have
 /// submitted a single cmd and rung the doorbell.
 fn drain_one_completion(state: &mut NvmeState) -> Result<(), BlkError> {
+    let t0 = crate::interrupts::rdtsc();
     let mut budget = 50_000_000u32;
     loop {
         if budget == 0 { return Err(BlkError::Timeout); }
@@ -963,9 +964,44 @@ fn drain_one_completion(state: &mut NvmeState) -> Result<(), BlkError> {
         if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
         ring_cq_doorbell(state, 1, state.io_cq_head);
 
+        // [nvme-spin] measure how long this completion busy-spun. Tells us
+        // whether the poll wastes real CPU (→ worth the lock-restructure to
+        // an IRQ-park) or completes in µs (→ leave it). Pure measurement.
+        record_drain(t0, state.msix_vector);
+
         let status_code = (entry.status >> 1) & 0x7FF;
         if status_code != 0 { return Err(BlkError::IoError); }
         return Ok(());
+    }
+}
+
+// [nvme-spin] rolling spin-duration stats over the shared completion drain.
+static NVME_DRAIN_COUNT: AtomicU64 = AtomicU64::new(0);
+static NVME_DRAIN_TSC_SUM: AtomicU64 = AtomicU64::new(0);
+static NVME_DRAIN_TSC_MAX: AtomicU64 = AtomicU64::new(0);
+static NVME_DRAIN_SLOW: AtomicU64 = AtomicU64::new(0);
+const NVME_DRAIN_LOG_EVERY: u64 = 512;
+const NVME_SLOW_US: u64 = 200; // a completion that spun > this is "slow"
+
+fn record_drain(t0: u64, vector: u8) {
+    let dt = crate::interrupts::rdtsc().saturating_sub(t0);
+    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let us = dt / mhz;
+    NVME_DRAIN_TSC_SUM.fetch_add(dt, Ordering::Relaxed);
+    NVME_DRAIN_TSC_MAX.fetch_max(dt, Ordering::Relaxed);
+    if us > NVME_SLOW_US { NVME_DRAIN_SLOW.fetch_add(1, Ordering::Relaxed); }
+    let n = NVME_DRAIN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % NVME_DRAIN_LOG_EVERY == 0 {
+        let sum = NVME_DRAIN_TSC_SUM.swap(0, Ordering::Relaxed);
+        let max = NVME_DRAIN_TSC_MAX.swap(0, Ordering::Relaxed);
+        let slow = NVME_DRAIN_SLOW.swap(0, Ordering::Relaxed);
+        let avg_us = (sum / NVME_DRAIN_LOG_EVERY) / mhz;
+        let max_us = max / mhz;
+        let fires = crate::irq::fired_count(vector);
+        kprintln!(
+            "[nvme-spin] {} drains: avg {}us max {}us slow(>{}us) {} | msix vec {:#04x} fires {}",
+            NVME_DRAIN_LOG_EVERY, avg_us, max_us, NVME_SLOW_US, slow, vector, fires,
+        );
     }
 }
 

@@ -32,6 +32,14 @@ pub struct GuestSurface {
     /// Set on `write_frame`, cleared by `take_dirty`. Lets the
     /// compositor skip recompositing an unchanged surface tile.
     dirty: bool,
+    /// Union of the guest's damage rects (surface-local coords) since the
+    /// last `take_damage`. The MMIO blit is clipped to this instead of the
+    /// whole tile — at 4K that turns a tens-of-MB full-tile blit into just
+    /// the changed region (e.g. a video/graph). Unions across frames that
+    /// coalesced while the cursor took priority (see poll_render), so no
+    /// damage is lost. `None` = nothing changed; a full-buffer (re)alloc
+    /// sets it to the whole surface.
+    damage: Option<(u32, u32, u32, u32)>,
     /// Desired output size = the window's content rect, written by
     /// Shade on create + every retile (`set_tile_size`). virtio-gpu
     /// `GET_DISPLAY_INFO` reports this so the guest (wlroots/cage)
@@ -52,7 +60,7 @@ static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new()
 /// into the window's surface and mark it dirty. Creates/resizes the
 /// surface on first frame or geometry change. Cheap no-op if `src` is
 /// too small for the claimed geometry (defensive — never panics).
-pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32) {
+pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u32, u32, u32, u32)) {
     let px_count = (width as usize).saturating_mul(height as usize);
     if px_count == 0 || src.len() < px_count * 4 {
         return;
@@ -63,11 +71,13 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32) {
         width,
         height,
         dirty: false,
+        damage: None,
         tile_w: 0,
         tile_h: 0,
         display_dirty: false,
     });
-    if surf.width != width || surf.height != height || surf.pixels.len() != px_count {
+    let realloc = surf.width != width || surf.height != height || surf.pixels.len() != px_count;
+    if realloc {
         surf.width = width;
         surf.height = height;
         surf.pixels = alloc::vec![0u32; px_count];
@@ -84,6 +94,32 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32) {
     };
     dst.copy_from_slice(&src[..px_count * 4]);
     surf.dirty = true;
+
+    // Union the guest's damage rect (clamped to the surface) into the
+    // pending region. A fresh buffer must blit in full — the new pixels
+    // around the reported rect are otherwise undefined. Coalesced frames
+    // (cursor took priority) accumulate here until the next render.
+    let dmg = if realloc {
+        (0, 0, width, height)
+    } else {
+        let x = dmg.0.min(width);
+        let y = dmg.1.min(height);
+        let w = dmg.2.min(width - x);
+        let h = dmg.3.min(height - y);
+        (x, y, w, h)
+    };
+    if dmg.2 > 0 && dmg.3 > 0 {
+        surf.damage = Some(match surf.damage {
+            None => dmg,
+            Some(o) => {
+                let x0 = o.0.min(dmg.0);
+                let y0 = o.1.min(dmg.1);
+                let x1 = (o.0 + o.2).max(dmg.0 + dmg.2);
+                let y1 = (o.1 + o.3).max(dmg.1 + dmg.3);
+                (x0, y0, x1 - x0, y1 - y0)
+            }
+        });
+    }
     drop(map);
     // A new guest frame must trigger a recomposite — otherwise the
     // tile only updates when some *other* event (a click, a key)
@@ -107,6 +143,13 @@ where
 {
     let map = SURFACES.lock();
     map.get(&window_id).map(|s| f(&s.pixels, s.width, s.height))
+}
+
+/// Take (and clear) the union of damage rects (surface-local coords)
+/// accumulated since the last call. The compositor blits only this region
+/// to MMIO instead of the whole tile. `None` if nothing changed.
+pub fn take_damage(window_id: u32) -> Option<(u32, u32, u32, u32)> {
+    SURFACES.lock().get_mut(&window_id).and_then(|s| s.damage.take())
 }
 
 /// True (and clears the flag) if the surface changed since last call.
@@ -138,6 +181,7 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         width: 0,
         height: 0,
         dirty: false,
+        damage: None,
         tile_w: 0,
         tile_h: 0,
         display_dirty: false,
