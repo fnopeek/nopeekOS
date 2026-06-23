@@ -1119,9 +1119,16 @@ impl Compositor {
         let rounding = self.rounding;
         let opacity = self.opacity;
         let scale = self.scale;
+        let mut wc = [0u32; 4]; // terminal, widget, surface, other(panel)
         for &wid in self.z_order.iter().rev() {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
                 if win.workspace != self.active_workspace || !win.visible { continue; }
+                match win.kind {
+                    crate::shade::window::WindowKind::Terminal => wc[0] += 1,
+                    crate::shade::window::WindowKind::Widget if !win.is_dock && !win.is_bar => wc[1] += 1,
+                    crate::shade::window::WindowKind::Surface => wc[2] += 1,
+                    _ => wc[3] += 1,
+                }
 
                 let active_border = if crate::theme::is_active() {
                     crate::gui::background::accent_color()
@@ -1135,6 +1142,14 @@ impl Compositor {
                 };
                 Self::render_window(shadow, info, win, border, rounding, opacity, scale,
                     if win.focused { active_border } else { inactive_border });
+            }
+        }
+        {
+            static COMP_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            let n = COMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            if n % 60 == 0 {
+                crate::kprintln!("[comp] windows: {} terminal | {} widget | {} surface | {} panel/other",
+                    wc[0], wc[1], wc[2], wc[3]);
             }
         }
 
