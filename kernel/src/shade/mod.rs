@@ -479,9 +479,30 @@ fn render_frame_surface() {
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.aurora_drawn = true;
             comp.render(back, fb.info());
+            let border = comp.border;
             for win in comp.windows.iter() {
                 if win.kind == crate::shade::window::WindowKind::Surface && n < surf_rects.len() {
-                    surf_rects[n] = (win.x, win.y, win.width, win.height);
+                    // Blit only the guest's damage rect (content-clipped,
+                    // translated to screen coords) instead of the whole
+                    // tile — at 4K that's the difference between a tens-of-MB
+                    // MMIO blit and just the changed region. comp.render
+                    // already produced correct pixels in `back` everywhere,
+                    // and nothing but this tile changed, so a partial blit is
+                    // correct. Falls back to the full tile if no damage was
+                    // recorded or the clamp degenerates.
+                    let full = (win.x, win.y, win.width, win.height);
+                    let cx = win.x + border;
+                    let cy = win.y + border;
+                    let cw = win.width.saturating_sub(border * 2);
+                    let ch = win.height.saturating_sub(border * 2);
+                    surf_rects[n] = match crate::shade::surface::take_damage(win.id.0) {
+                        Some((dx, dy, dw, dh)) if dx < cw && dy < ch => {
+                            let rw = dw.min(cw - dx);
+                            let rh = dh.min(ch - dy);
+                            if rw > 0 && rh > 0 { (cx + dx, cy + dy, rw, rh) } else { full }
+                        }
+                        _ => full,
+                    };
                     n += 1;
                 }
             }

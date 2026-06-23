@@ -25,6 +25,9 @@ use crate::kprintln;
 use alloc::vec::Vec;
 use super::guest_mem::GuestMem;
 
+/// How often the [gpu-dmg] coverage line is logged (every N flushes).
+const DMG_LOG_EVERY: u32 = 120;
+
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_GPU_DEVICE: u32 = 0x1050;
 
@@ -227,6 +230,14 @@ pub struct VirtioGpu {
     /// (res 3 ↔ 4 at the guest's refresh rate). Logging each floods
     /// the loop terminal forever; first 5 are enough to confirm setup.
     set_scanout_log_count: u32,
+
+    /// [gpu-dmg] instrumentation: rolling sum of FLUSH damage-rect area vs
+    /// tile area, logged every `DMG_LOG_EVERY` flushes so we can see on HW
+    /// whether the guest sends tight damage rects (→ damage-clipped MMIO
+    /// blit is a big 4K win) or dirties the whole scanout (→ no win).
+    dmg_area_acc: u64,
+    dmg_tile_acc: u64,
+    dmg_flush_count: u32,
 }
 
 impl VirtioGpu {
@@ -258,6 +269,9 @@ impl VirtioGpu {
             flush_log_count: 0,
             transfer_log_count: 0,
             set_scanout_log_count: 0,
+            dmg_area_acc: 0,
+            dmg_tile_acc: 0,
+            dmg_flush_count: 0,
             d4_disconnect_until: None,
         }
     }
@@ -731,9 +745,29 @@ impl VirtioGpu {
         // tile content — composited with z-order, the tiling
         // invariant holds (never fullscreen). Fallback to the legacy
         // fullscreen blit only if unbound (e.g. compositor not up).
+        // The FLUSH rect (x,y,w,h) is the guest's damage region for this
+        // present. Clamp it to the resource and forward it so the host
+        // blits only the changed pixels (4K win) instead of the whole tile.
+        let dmg_w = w.min(r.width.saturating_sub(x.min(r.width)));
+        let dmg_h = h.min(r.height.saturating_sub(y.min(r.height)));
+
+        // [gpu-dmg] rolling coverage: damage area vs tile area.
+        self.dmg_area_acc += (dmg_w as u64) * (dmg_h as u64);
+        self.dmg_tile_acc += (r.width as u64) * (r.height as u64);
+        self.dmg_flush_count = self.dmg_flush_count.wrapping_add(1);
+        if self.dmg_flush_count % DMG_LOG_EVERY == 0 && self.dmg_tile_acc > 0 {
+            let pct = self.dmg_area_acc.saturating_mul(100) / self.dmg_tile_acc;
+            kprintln!(
+                "[gpu-dmg] {} flushes: avg damage {}% of tile (last {}x{}+{}+{} of {}x{})",
+                DMG_LOG_EVERY, pct, dmg_w, dmg_h, x, y, r.width, r.height,
+            );
+            self.dmg_area_acc = 0;
+            self.dmg_tile_acc = 0;
+        }
+
         let wid = crate::microvm::vm_window();
         if wid != 0 {
-            crate::shade::surface::write_frame(wid, pix, r.width, r.height);
+            crate::shade::surface::write_frame(wid, pix, r.width, r.height, (x, y, dmg_w, dmg_h));
         } else {
             blit_to_host_fb(pix, r.width, r.height);
         }
