@@ -1529,16 +1529,30 @@ impl Compositor {
         draw_close_button(shadow, info, win, border, scale);
 
         use core::sync::atomic::Ordering::Relaxed;
-        RW_BG.fetch_add(t_rw_bg.saturating_sub(t_rw0), Relaxed);
-        RW_CHROME.fetch_add(t_rw_chrome.saturating_sub(t_rw_bg), Relaxed);
-        RW_CONTENT.fetch_add(t_rw_content.saturating_sub(t_rw_chrome), Relaxed);
-        let n = RW_COUNT.fetch_add(1, Relaxed) + 1;
-        if n % 120 == 0 {
-            let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
-            let bg = RW_BG.swap(0, Relaxed) / 120 / mhz;
-            let ch = RW_CHROME.swap(0, Relaxed) / 120 / mhz;
-            let ct = RW_CONTENT.swap(0, Relaxed) / 120 / mhz;
-            crate::kprintln!("[rw-phase] per window avg: wallpaper {}us | chrome {}us | content {}us", bg, ch, ct);
+        let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+        if win.is_dock || win.is_bar {
+            // Panels return early from the widget arm but still flow here.
+            // Time them SEPARATELY — averaging them with the terminal made
+            // the phase numbers ambiguous (panels carry their own cost).
+            static T_PANEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            static N_PANEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            T_PANEL.fetch_add(t_rw_content.saturating_sub(t_rw0), Relaxed);
+            let np = N_PANEL.fetch_add(1, Relaxed) + 1;
+            if np % 60 == 0 {
+                crate::kprintln!("[rw-panel] avg per-panel render: {}us (dock/bar)",
+                    T_PANEL.swap(0, Relaxed) / 60 / mhz);
+            }
+        } else {
+            RW_BG.fetch_add(t_rw_bg.saturating_sub(t_rw0), Relaxed);
+            RW_CHROME.fetch_add(t_rw_chrome.saturating_sub(t_rw_bg), Relaxed);
+            RW_CONTENT.fetch_add(t_rw_content.saturating_sub(t_rw_chrome), Relaxed);
+            let n = RW_COUNT.fetch_add(1, Relaxed) + 1;
+            if n % 60 == 0 {
+                let bg = RW_BG.swap(0, Relaxed) / 60 / mhz;
+                let ch = RW_CHROME.swap(0, Relaxed) / 60 / mhz;
+                let ct = RW_CONTENT.swap(0, Relaxed) / 60 / mhz;
+                crate::kprintln!("[rw-phase] terminal avg: wallpaper {}us | chrome {}us | content {}us", bg, ch, ct);
+            }
         }
     }
 
