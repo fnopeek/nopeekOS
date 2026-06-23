@@ -433,6 +433,9 @@ pub struct IntelXeDriver {
     fb_phys: u64,         // Physical address of framebuffer memory
     fb_pages: u32,        // Number of 4KB pages allocated
     active_timing: Option<&'static DisplayTiming>,
+    measured_hz: u8,      // Refresh measured from the vblank frame counter
+                          // (0 = not measured; firmware mode is only ASSUMED
+                          // from resolution, so measure it instead of guessing)
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
     firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
     // BCS engine state (ExecList / ELSQ)
@@ -478,7 +481,7 @@ impl GpuHal for IntelXeDriver {
     }
 
     fn current_hz(&self) -> u8 {
-        self.active_timing.map_or(0, |t| t.hz)
+        IntelXeDriver::current_hz(self)
     }
 
     fn is_native(&self) -> bool { true }
@@ -677,6 +680,7 @@ impl IntelXeDriver {
             fb_phys: 0,
             fb_pages: 0,
             active_timing: None,
+            measured_hz: 0,
             ddi_port: 0,
             firmware_dpll: 1,
             bcs_ring_phys: 0,
@@ -768,7 +772,32 @@ impl IntelXeDriver {
     }
 
     pub fn current_hz(&self) -> u8 {
+        // Prefer the empirically measured rate — the firmware mode's hz is only
+        // assumed from resolution (match_firmware_timing hardcodes 30 for 4K).
+        if self.measured_hz != 0 { return self.measured_hz; }
         self.active_timing.map_or(0, |t| t.hz)
+    }
+
+    /// Measure the real refresh rate from the vblank frame counter
+    /// (PIPE_FRMCNT increments once per frame). Read-only — counts frames over
+    /// a fixed wall-clock window via the 100 Hz tick counter, no register
+    /// writes. Returns 0 if the counter doesn't advance (pipe idle / no clock).
+    pub fn measure_refresh_hz(&self) -> u8 {
+        if self.bar0 == 0 { return 0; }
+        const WINDOW_TICKS: u64 = 50; // 500 ms @ 100 Hz → 60Hz→~30 / 30Hz→~15 frames
+        let f0 = mmio_read32(self.bar0, PIPE_FRMCNT_A);
+        let t0 = crate::interrupts::ticks();
+        // Bail if ticks aren't advancing at all (no time source) to avoid a hang.
+        let mut elapsed = 0u64;
+        while elapsed < WINDOW_TICKS {
+            core::hint::spin_loop();
+            elapsed = crate::interrupts::ticks().wrapping_sub(t0);
+            if elapsed > WINDOW_TICKS + 200 { break; } // ~2.5s safety ceiling
+        }
+        if elapsed == 0 { return 0; }
+        let frames = mmio_read32(self.bar0, PIPE_FRMCNT_A).wrapping_sub(f0) as u64;
+        // hz = frames / (elapsed/100 s) = frames*100/elapsed, rounded to nearest.
+        ((frames * 100 + elapsed / 2) / elapsed) as u8
     }
 
     pub fn framebuffer(&self) -> FramebufferInfo {
@@ -869,6 +898,13 @@ impl IntelXeDriver {
 
         self.fb = Some(fb);
         self.active_timing = Some(timing);
+
+        // The firmware mode's hz above is ASSUMED from resolution. Measure the
+        // real refresh from the vblank counter so status + current_hz() report
+        // the truth (and we know whether a 60Hz modeset is even worth pursuing).
+        self.measured_hz = self.measure_refresh_hz();
+        kprintln!("[npk]   Measured refresh: {}Hz (assumed {}Hz from {}x{})",
+            self.measured_hz, timing.hz, width, height);
 
         // Non-ADL-N Gen12 (e.g. Tiger Lake): the display register layout is
         // shared, but the PLL/modeset path is only validated on ADL-N.
