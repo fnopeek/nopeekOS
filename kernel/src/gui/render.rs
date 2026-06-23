@@ -330,8 +330,26 @@ pub fn fill_rounded_chrome_aa(
     let bo = border_opacity.min(255);
     let go = bg_opacity.min(255);
 
+    // In widget mode (!paint_content) the whole inner-full area (inner==256)
+    // is just `continue`d here — it's painted by the widget blit. Computing
+    // rect_coverage_sdf for every one of those millions of interior pixels of
+    // a maximised 4K window was comp.render's entire cost (~96ms/frame). Skip
+    // that guaranteed-interior horizontal span on the vertically-straight rows;
+    // only the border ring + the four rounded corners still need per-pixel SDF.
+    // (Terminal mode paints the interior, so it keeps the full sweep.)
+    let straight_lo = inner_y + r_in;
+    let straight_hi = (inner_y + inner_h).saturating_sub(r_in);
+    let skip_lo = (inner_x + 2).min(x_max);
+    let skip_hi = (inner_x + inner_w).saturating_sub(2).max(skip_lo);
     for py in y..y_max {
-        for px in x..x_max {
+        let straight = !paint_content && py >= straight_lo && py < straight_hi;
+        let ranges = if straight {
+            [(x, skip_lo), (skip_hi, x_max)]
+        } else {
+            [(x, x_max), (x_max, x_max)]
+        };
+        for &(rx0, rx1) in ranges.iter() {
+        for px in rx0..rx1 {
             let outer = rect_coverage_sdf(px, py, x, y, w, h, r_out);
             if outer == 0 { continue; }
 
@@ -375,6 +393,7 @@ pub fn fill_rounded_chrome_aa(
                 let bg_alpha = (go * inner / 256).min(255);
                 put_pixel(shadow, info, px, py, blend(bg_color, after_border, bg_alpha));
             }
+        }
         }
     }
 }
