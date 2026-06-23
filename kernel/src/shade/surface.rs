@@ -72,9 +72,17 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32) {
         surf.height = height;
         surf.pixels = alloc::vec![0u32; px_count];
     }
-    for (dst, chunk) in surf.pixels.iter_mut().zip(src.chunks_exact(4)) {
-        *dst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
+    // The guest sends little-endian BGRX bytes, which on x86 (LE) ARE the
+    // exact in-memory layout of the packed u32 the compositor reads. Bulk-
+    // copy the bytes in one memcpy instead of a per-pixel `from_le_bytes`
+    // scalar pass — that loop was a full extra frame-sized pass on the VM-
+    // pump core every guest FLUSH (TRANSFER already copied the same bytes).
+    // SAFETY: surf.pixels holds px_count u32s = px_count*4 contiguous bytes;
+    // src has at least px_count*4 bytes (checked above).
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(surf.pixels.as_mut_ptr() as *mut u8, px_count * 4)
+    };
+    dst.copy_from_slice(&src[..px_count * 4]);
     surf.dirty = true;
     drop(map);
     // A new guest frame must trigger a recomposite — otherwise the

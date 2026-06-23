@@ -1154,7 +1154,10 @@ fn process_mouse_report(state: &mut XhciState) {
         // in-flight blit and produce flicker over high-frequency
         // surfaces (microvm browser tile @ 60 Hz).
         crate::shade::cursor::update_atomic(dx, dy, buttons);
-        crate::shade::request_render();
+        // Default to the cheap cursor-only path; handle_mouse upgrades to a
+        // full render if this is a drag/click/scroll. The old full
+        // request_render() recomposited the whole scene on every move.
+        crate::shade::request_cursor_move();
     }
 }
 

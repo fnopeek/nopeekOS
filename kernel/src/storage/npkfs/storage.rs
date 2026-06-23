@@ -684,6 +684,22 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         all_extents.extend(read_indirect_extents(&mut fs.cache, entry.indirect_block)?);
     }
 
+    // Everything below (NVMe DMA + AES-GCM decrypt, ~10ms/4MB) needs only
+    // the extent list + a couple of sizes — not `fs`. Copy those out and
+    // DROP the global FS lock here so unrelated storage users (Core-0
+    // render reading icons/fonts, worker-core browser save(), gc, any
+    // WASM npk_fs_read) don't serialize behind this read's slow tail. The
+    // object is reachable from the committed btree root we just walked, so
+    // gc (which marks reachable blocks) won't free these extents; the only
+    // residual race — entry removed + gc + realloc inside this window — is
+    // caught by the AES-GCM tag below (→ Corrupt), never a crash/escape.
+    let disk_size = entry.disk_size;
+    let plaintext_size = entry.plaintext_size;
+    let extent_list: Vec<(u64, u64)> = all_extents.iter()
+        .map(|e| (e.start_block, e.block_count))
+        .collect();
+    drop(lock);
+
     let total_blocks: u64 = all_extents.iter().map(|e| e.block_count).sum();
     let total_bytes = (total_blocks as usize) * BLOCK_SIZE;
 
@@ -701,15 +717,12 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     // matches the old `read_extent` cost; for a fragmented blob (e.g.
     // 1 MB split into 257 single-block extents after lots of churn)
     // the parallelism saves seconds-per-MB at the worst.
-    let extent_list: Vec<(u64, u64)> = all_extents.iter()
-        .map(|e| (e.start_block, e.block_count))
-        .collect();
     crate::blkdev::read_multi_extent(&extent_list, &mut staging[..total_bytes])?;
     let t_dma = rdtsc();
 
-    staging.truncate(entry.disk_size as usize);
+    staging.truncate(disk_size as usize);
 
-    let was_encrypted = entry.disk_size > entry.plaintext_size;
+    let was_encrypted = disk_size > plaintext_size;
 
     if was_encrypted {
         let master_key = match crypto::get_master_key() {

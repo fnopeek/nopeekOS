@@ -930,39 +930,58 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 /// Periodic tick: retransmit, delayed ACKs, timeouts
 pub fn tick_connections() {
     let now = crate::interrupts::ticks();
-    let mut conns = CONNECTIONS.lock();
 
-    for slot in conns.iter_mut().flatten() {
-        // Delayed ACK
-        if slot.ack_pending && now - slot.ack_tick >= DELAYED_ACK_TICKS {
-            let w = recv_window(slot);
-            send_seg(slot, slot.snd_nxt, slot.rcv_nxt, ACK, w, &[]);
-            slot.ack_pending = false;
-            slot.acks_held = 0;
-        }
+    // Collect the segments to send WHILE holding the lock (they read conn
+    // state), then drop the lock and hit the NIC. Holding CONNECTIONS
+    // across the TX doorbell blocked worker-core `recv` behind Core-0's
+    // periodic ACKs/retries (contention ④).
+    let mut pending: alloc::vec::Vec<PendingSeg> = alloc::vec::Vec::new();
+    {
+        let mut conns = CONNECTIONS.lock();
+        for slot in conns.iter_mut().flatten() {
+            // Delayed ACK
+            if slot.ack_pending && now - slot.ack_tick >= DELAYED_ACK_TICKS {
+                let w = recv_window(slot);
+                let mut opts = [0u8; 40];
+                let len = build_seg_opts(slot, ACK, &mut opts);
+                pending.push(PendingSeg {
+                    dst_ip: slot.remote_ip, src_port: slot.local_port,
+                    dst_port: slot.remote_port, seq: slot.snd_nxt,
+                    ack: slot.rcv_nxt, flags: ACK, window: w, opts, opts_len: len,
+                });
+                slot.ack_pending = false;
+                slot.acks_held = 0;
+            }
 
-        // SYN retry
-        if slot.state == State::SynSent {
-            let retry_interval = RETRY_TICKS_BASE << slot.retries.min(4);
-            if now - slot.last_send_tick > retry_interval {
-                if slot.retries >= MAX_RETRIES {
-                    slot.error = true;
-                    slot.state = State::Closed;
-                } else {
-                    slot.retries += 1;
-                    slot.last_send_tick = now;
-                    send_segment(
-                        slot.remote_ip, slot.local_port, slot.remote_port,
-                        slot.snd_iss, 0, SYN, INITIAL_WINDOW, &[],
-                    );
+            // SYN retry
+            if slot.state == State::SynSent {
+                let retry_interval = RETRY_TICKS_BASE << slot.retries.min(4);
+                if now - slot.last_send_tick > retry_interval {
+                    if slot.retries >= MAX_RETRIES {
+                        slot.error = true;
+                        slot.state = State::Closed;
+                    } else {
+                        slot.retries += 1;
+                        slot.last_send_tick = now;
+                        pending.push(PendingSeg {
+                            dst_ip: slot.remote_ip, src_port: slot.local_port,
+                            dst_port: slot.remote_port, seq: slot.snd_iss,
+                            ack: 0, flags: SYN, window: INITIAL_WINDOW,
+                            opts: [0u8; 40], opts_len: 0,
+                        });
+                    }
                 }
             }
-        }
 
-        // TimeWait cleanup (2 seconds)
-        if slot.state == State::TimeWait && now - slot.last_send_tick > 200 {
-            slot.state = State::Closed;
+            // TimeWait cleanup (2 seconds)
+            if slot.state == State::TimeWait && now - slot.last_send_tick > 200 {
+                slot.state = State::Closed;
+            }
         }
+    }
+
+    for p in &pending {
+        send_pending(p);
     }
 }
 
@@ -1188,11 +1207,12 @@ fn parse_tsecr(seg: &[u8], data_offset: usize) -> Option<u32> {
 /// TSval + the peer's echoed TSval) when timestamps were negotiated (RFC 7323).
 /// All connection-originated segments (ACKs, data, FIN) must carry it so the
 /// sender gets a clean per-segment RTT sample despite our ACK jitter.
-fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) {
-    TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    // Build the option list (max 40 bytes): Timestamp, then SACK blocks during
-    // a gap. Both 4-byte aligned via leading NOPs.
-    let mut opts = [0u8; 40];
+/// Build the TCP option list (Timestamp, then SACK blocks during a gap;
+/// both 4-byte aligned via leading NOPs) for `conn`/`flags` into `opts`,
+/// returning its length. Shared by the inline `send_seg` and the deferred
+/// tick path, which materializes segments under the CONNECTIONS lock and
+/// sends them after dropping it.
+fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40]) -> usize {
     let mut len = 0;
     if conn.ts_ok {
         opts[len] = 1; opts[len + 1] = 1;          // NOP, NOP
@@ -1213,12 +1233,46 @@ fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload:
             len += 2 + slen;
         }
     }
+    len
+}
+
+fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) {
+    TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let mut opts = [0u8; 40];
+    let len = build_seg_opts(conn, flags, &mut opts);
     if len > 0 {
         send_segment_with_opts(conn.remote_ip, conn.local_port, conn.remote_port,
             seq, ack, flags, window, payload, &opts[..len]);
     } else {
         send_segment(conn.remote_ip, conn.local_port, conn.remote_port,
             seq, ack, flags, window, payload);
+    }
+}
+
+/// A fully-resolved zero-payload segment captured under the CONNECTIONS
+/// lock so it can be sent (the NIC doorbell) AFTER the lock is dropped.
+/// Keeps `tick_connections` from holding the lock across TX, which blocked
+/// worker-core `recv` behind Core-0's periodic delayed-ACKs / SYN retries.
+struct PendingSeg {
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    opts: [u8; 40],
+    opts_len: usize,
+}
+
+fn send_pending(p: &PendingSeg) {
+    TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if p.opts_len > 0 {
+        send_segment_with_opts(p.dst_ip, p.src_port, p.dst_port,
+            p.seq, p.ack, p.flags, p.window, &[], &p.opts[..p.opts_len]);
+    } else {
+        send_segment(p.dst_ip, p.src_port, p.dst_port,
+            p.seq, p.ack, p.flags, p.window, &[]);
     }
 }
 

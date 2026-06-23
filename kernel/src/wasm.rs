@@ -458,13 +458,19 @@ pub fn execute_interactive(
 fn execute_inner(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
 ) -> Result<WasmResult, WasmError> {
-    let engine_guard = ENGINE.lock();
-    let engine = engine_guard.as_ref().ok_or(WasmError::NotInitialized)?;
+    // Clone the engine (cheap Arc bump) and drop the ENGINE lock so two
+    // one-shot decodes (run/wallpaper) can run concurrently. The resident
+    // + `execute` paths already do this; only this one held the lock over
+    // the whole instantiate+call.
+    let engine = {
+        let guard = ENGINE.lock();
+        guard.as_ref().ok_or(WasmError::NotInitialized)?.clone()
+    };
 
-    let module = Module::new(engine, wasm_bytes)
+    let module = Module::new(&engine, wasm_bytes)
         .map_err(|_| WasmError::InvalidModule)?;
 
-    let mut store = Store::new(engine, HostState {
+    let mut store = Store::new(&engine, HostState {
         output: String::new(),
         cap_id,
         direct_output: false,
@@ -478,7 +484,7 @@ fn execute_inner(
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
-    let mut linker = <Linker<HostState>>::new(engine);
+    let mut linker = <Linker<HostState>>::new(&engine);
     register_host_functions(&mut linker)?;
 
     let instance = linker.instantiate_and_start(&mut store, &module)
