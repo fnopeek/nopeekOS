@@ -443,6 +443,7 @@ pub struct IntelXeDriver {
     // PAINTS (ring advancing is not enough — on Tiger Lake the ring caught
     // up but no pixels landed → black screen). Gates the display-blit path.
     bcs_verified: bool,
+    bcs_readback_got: u32, // last verify_blit_readback dst[0] (diagnostic)
     // Shadow buffer GGTT state
     shadow_a_ggtt: u32,   // GGTT offset of shadow buffer A (0 = not mapped)
     shadow_b_ggtt: u32,   // GGTT offset of shadow buffer B (0 = not mapped)
@@ -518,6 +519,9 @@ impl GpuHal for IntelXeDriver {
     fn supports_blit(&self) -> bool {
         self.bcs_ready() && self.bcs_verified
     }
+
+    fn blit_verified(&self) -> bool { self.bcs_verified }
+    fn blit_readback(&self) -> u32 { self.bcs_readback_got }
 
     fn blit_rect_hw(
         &mut self, src_ggtt: u32, src_pitch: u32,
@@ -612,6 +616,15 @@ impl IntelXeDriver {
         None
     }
 
+    /// Whether this GPU may be auto-activated at boot (before login). Only
+    /// ADL-N is validated end-to-end (modeset + BCS paints + scanout). Other
+    /// Gen12 (Tiger Lake) detect + can be activated MANUALLY for bring-up,
+    /// but must not auto-engage — the BCS scanout path isn't proven there
+    /// yet, and a non-painting blit blacks the desktop after login.
+    pub fn auto_activate_ok(&self) -> bool {
+        is_adln(self.device_id)
+    }
+
     fn new(dev: pci::PciDevice, device_id: u16, name: &'static str) -> Self {
         // Enable PCI memory space access
         let cmd = pci::read32(dev.addr, 0x04);
@@ -660,6 +673,7 @@ impl IntelXeDriver {
             bcs_lrc_phys: 0,
             bcs_initialized: false,
             bcs_verified: false,
+            bcs_readback_got: 0,
             shadow_a_ggtt: 0,
             shadow_b_ggtt: 0,
             shadow_pages: 0,
@@ -2054,6 +2068,7 @@ impl IntelXeDriver {
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let got = unsafe { core::ptr::read_volatile(dst_phys as *const u32) };
+        self.bcs_readback_got = got;
         let ok = got == PAT;
         kprintln!("[npk]   BCS: blit-readback {} (dst[0]={:#010x} want {:#010x})",
             if ok { "OK — pixels land, BCS drives display" }

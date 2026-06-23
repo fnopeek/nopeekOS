@@ -302,8 +302,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     } else {
         // === Subsequent boot: Verify passphrase ===
         if framebuffer::is_available() {
-            // Activate native GPU + 4K before login screen
-            if gpu::native_detected() {
+            // Activate native GPU + 4K before login screen — ONLY for
+            // validated generations (ADL-N). Other detected Gen12 (Tiger
+            // Lake) stay on GOP at boot (visible) and are activated manually
+            // via `gpu init` for bring-up, so an unproven BCS scanout can't
+            // black the desktop after every login.
+            if gpu::native_detected() && gpu::native_auto_activate_ok() {
                 match gpu::activate_native() {
                     Ok(fb) => {
                         framebuffer::init_from_gpu();

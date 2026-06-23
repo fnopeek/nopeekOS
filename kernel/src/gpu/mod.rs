@@ -100,6 +100,11 @@ pub trait GpuHal: Send {
     /// True if hardware blit (BCS) is available.
     fn supports_blit(&self) -> bool { false }
 
+    /// True if the BCS blit passed its readback self-test (pixels land).
+    fn blit_verified(&self) -> bool { false }
+    /// Last readback self-test dst[0] value (diagnostic).
+    fn blit_readback(&self) -> u32 { 0 }
+
     /// Submit a rectangular blit from src GGTT → dst GGTT.
     fn blit_rect_hw(
         &mut self, src_ggtt: u32, src_pitch: u32,
@@ -203,6 +208,23 @@ pub fn native_detected() -> bool {
 /// Name of detected native GPU (if any).
 pub fn native_gpu_name() -> Option<&'static str> {
     DETECTED_XE.lock().as_ref().map(|d| d.name())
+}
+
+/// Whether the detected GPU may be AUTO-activated at boot. Only validated
+/// generations (ADL-N) qualify; others (Tiger Lake) are manual-only for
+/// bring-up so a non-painting BCS blit can't black the desktop at every boot.
+pub fn native_auto_activate_ok() -> bool {
+    DETECTED_XE.lock().as_ref().is_some_and(|d| d.auto_activate_ok())
+}
+
+/// True if the active GPU's BCS blit passed its readback self-test.
+pub fn blit_verified() -> bool {
+    GPU.lock().as_ref().is_some_and(|drv| drv.blit_verified())
+}
+
+/// Last BCS readback self-test dst[0] value (diagnostic).
+pub fn blit_readback() -> u32 {
+    GPU.lock().as_ref().map(|drv| drv.blit_readback()).unwrap_or(0)
 }
 
 /// Get current framebuffer info (if any GPU is active).
