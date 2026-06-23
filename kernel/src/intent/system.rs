@@ -697,6 +697,12 @@ pub fn intent_gpu(args: &str) {
             // BCS blitter status
             let bcs_ok = crate::gpu::supports_blit();
             kprintln!("  BCS:      {}", if bcs_ok { "active" } else { "off (probe failed)" });
+            // Readback self-test: did the blit actually PAINT? Distinguishes
+            // "copy broken" (verified=no) from "copy ok but scanout wrong"
+            // (verified=yes but screen black) on Tiger Lake bring-up.
+            kprintln!("  Verified: {} (readback={:#010x})",
+                if crate::gpu::blit_verified() { "YES — blit paints" } else { "no — blit did not paint" },
+                crate::gpu::blit_readback());
             if bcs_ok {
                 let fb_ggtt = crate::gpu::fb_ggtt_offset();
                 let (ga, gb) = crate::gpu::shadow_ggtt();
