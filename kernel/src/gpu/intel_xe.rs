@@ -616,13 +616,18 @@ impl IntelXeDriver {
         None
     }
 
-    /// Whether this GPU may be auto-activated at boot (before login). Only
-    /// ADL-N is validated end-to-end (modeset + BCS paints + scanout). Other
-    /// Gen12 (Tiger Lake) detect + can be activated MANUALLY for bring-up,
-    /// but must not auto-engage — the BCS scanout path isn't proven there
-    /// yet, and a non-painting blit blacks the desktop after login.
+    /// Whether this GPU may be auto-activated at boot (before login) — so the
+    /// user never has to run `gpu init` + `gpu blit init` by hand. The set is
+    /// the GPUs validated end-to-end on real hardware:
+    ///   - ADL-N (modeset + BCS paints + scanout),
+    ///   - Tiger Lake-LP GT2 0x9A78 (blit-only takeover, BCS paints @ ~4ms).
+    /// Safe regardless: init() for non-ADL-N is blit-only (no modeset glitch),
+    /// and the BCS display path is readback-gated — a GPU that detects but
+    /// doesn't paint falls back to the visible CPU/GOP blit, never black.
+    /// A newly-added (untested) device ID should be left OUT of this set until
+    /// validated, so it detects + can be brought up manually first.
     pub fn auto_activate_ok(&self) -> bool {
-        is_adln(self.device_id)
+        is_adln(self.device_id) || matches!(self.device_id, 0x9A78)
     }
 
     fn new(dev: pci::PciDevice, device_id: u16, name: &'static str) -> Self {
