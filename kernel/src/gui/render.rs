@@ -307,6 +307,47 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
 ///
 /// `border_a == border_b` paints solid; different values give a 45°
 /// gradient (top-left → bottom-right).
+// Precomputed "glass" tint: blend(bg_color, wallpaper, opacity) for the whole
+// screen, cached and recomputed only when bg/opacity/wallpaper change. The
+// translucent terminal chrome interior memcpys a row from this instead of
+// blending per pixel, so it's ~2ms at ANY window size — which is what makes
+// the dock glide (it resizes the terminal every frame, so the chrome cache
+// can't catch it) smooth. (Recompute is ~one-off on a theme/wallpaper change.)
+static GLASS_TINT: spin::Mutex<Option<(u64, u32, alloc::vec::Vec<u32>)>> =
+    spin::Mutex::new(None);
+
+fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*const u32, usize)> {
+    let wp = crate::gui::background::wallpaper_ptr();
+    if wp.is_null() { return None; }
+    let pitch_px = info.pitch as usize / 4;
+    let (width, height) = (info.width as usize, info.height as usize);
+    let mut k = 0xcbf29ce484222325u64;
+    for v in [bg_color as u64, opacity as u64, wp as usize as u64,
+              info.width as u64, info.height as u64] {
+        k ^= v;
+        k = k.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut g = GLASS_TINT.lock();
+    if g.as_ref().map(|(key, _, _)| *key != k).unwrap_or(true) {
+        let mut buf = alloc::vec![0u32; pitch_px * height];
+        for py in 0..height {
+            // SAFETY: wp is screen-sized (pitch*height); py<height, px<width.
+            let wprow = unsafe { wp.add(py * pitch_px * 4) as *const u32 };
+            let base = py * pitch_px;
+            for px in 0..width {
+                let wpx = unsafe { *wprow.add(px) };
+                buf[base + px] = blend(bg_color, wpx, opacity);
+            }
+        }
+        *g = Some((k, pitch_px as u32, buf));
+    }
+    let (_, pp, buf) = g.as_ref().unwrap();
+    // SAFETY: render is Core-0-only and the buffer is reallocated only on a
+    // key change (can't recur within this frame), so the pointer stays valid
+    // for the duration of this fill_rounded_chrome_aa call.
+    Some((buf.as_ptr(), *pp as usize))
+}
+
 pub fn fill_rounded_chrome_aa(
     shadow: *mut u8, info: &FbInfo,
     x: u32, y: u32, w: u32, h: u32,
@@ -344,71 +385,95 @@ pub fn fill_rounded_chrome_aa(
     let skip_lo = (inner_x + 2).min(x_max);
     let skip_hi = (inner_x + inner_w).saturating_sub(2).max(skip_lo);
     let opaque_fill = paint_content && go >= 255;
+    // Translucent terminal interior → memcpy a row from the precomputed glass
+    // tint (any size, ~2ms) instead of per-pixel blend. Border ring + corners
+    // keep the per-pixel SDF path below.
+    let tint = if paint_content && !opaque_fill {
+        ensure_glass_tint(bg_color, go, info)
+    } else {
+        None
+    };
+    let pitch = info.pitch as usize;
+
+    // Per-pixel SDF path — used for the border ring + the four rounded corners
+    // (everything that is NOT the known-interior straight span).
+    let mut paint_px = |px: u32, py: u32| {
+        let outer = rect_coverage_sdf(px, py, x, y, w, h, r_out);
+        if outer == 0 { return; }
+        let border_color = if solid {
+            border_a
+        } else {
+            let t = (((px - x) as u64 + (py - y) as u64) * 1000 / diag_max) as u32;
+            crate::theme::lerp_color(border_a, border_b, t.min(1000))
+        };
+        let bg_pixel = read_pixel(shadow, info, px, py);
+        if outer < 256 {
+            let alpha = (outer * bo / 256).min(255);
+            put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, alpha));
+            return;
+        }
+        let inner = if border_px == 0 {
+            256
+        } else {
+            rect_coverage_sdf(px, py, inner_x, inner_y, inner_w, inner_h, r_in)
+        };
+        if !paint_content {
+            if inner == 256 { return; }
+            put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
+            return;
+        }
+        let after_border = blend(border_color, bg_pixel, bo);
+        if inner == 0 {
+            put_pixel(shadow, info, px, py, after_border);
+        } else {
+            let bg_alpha = (go * inner / 256).min(255);
+            put_pixel(shadow, info, px, py, blend(bg_color, after_border, bg_alpha));
+        }
+    };
+
     for py in y..y_max {
         let straight = skip_hi > skip_lo && py >= straight_lo && py < straight_hi;
-        for px in x..x_max {
-            // Interior fast path: no SDF (outer=inner=256 by construction).
-            if straight && px >= skip_lo && px < skip_hi {
-                if !paint_content { continue; } // widget blit paints it
-                if opaque_fill {
-                    put_pixel(shadow, info, px, py, bg_color);
-                    continue;
+        if !straight {
+            for px in x..x_max { paint_px(px, py); }
+            continue;
+        }
+        // Straight row: per-pixel border on the left, fast interior, border on
+        // the right.
+        for px in x..skip_lo.min(x_max) { paint_px(px, py); }
+        let lo = skip_lo.min(x_max);
+        let hi = skip_hi.min(x_max);
+        if paint_content && hi > lo {
+            let span = (hi - lo) as usize;
+            if opaque_fill {
+                // SAFETY: row within fb; [lo,hi) within width.
+                unsafe {
+                    let dst = shadow.add(py as usize * pitch + lo as usize * 4) as *mut u32;
+                    for i in 0..span { *dst.add(i) = bg_color; }
                 }
-                let border_color = if solid {
-                    border_a
-                } else {
-                    let t = (((px - x) as u64 + (py - y) as u64) * 1000 / diag_max) as u32;
-                    crate::theme::lerp_color(border_a, border_b, t.min(1000))
-                };
-                let after_border = blend(border_color, read_pixel(shadow, info, px, py), bo);
-                put_pixel(shadow, info, px, py, blend(bg_color, after_border, go.min(255)));
-                continue;
-            }
-
-            let outer = rect_coverage_sdf(px, py, x, y, w, h, r_out);
-            if outer == 0 { continue; }
-
-            let border_color = if solid {
-                border_a
+            } else if let Some((tptr, tpitch)) = tint {
+                // SAFETY: tint is screen-sized (tpitch*height); py<height,
+                // hi<=width; Core-0-only so tptr is valid this frame.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        tptr.add(py as usize * tpitch + lo as usize),
+                        shadow.add(py as usize * pitch + lo as usize * 4) as *mut u32,
+                        span,
+                    );
+                }
             } else {
-                let in_x = (px - x) as u64;
-                let in_y = (py - y) as u64;
-                let t = ((in_x + in_y) * 1000 / diag_max) as u32;
-                crate::theme::lerp_color(border_a, border_b, t.min(1000))
-            };
-            let bg_pixel = read_pixel(shadow, info, px, py);
-
-            // Outer fringe (both modes): border vs wallpaper.
-            if outer < 256 {
-                let alpha = (outer * bo / 256).min(255);
-                put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, alpha));
-                continue;
-            }
-
-            let inner = if border_px == 0 {
-                256
-            } else {
-                rect_coverage_sdf(px, py, inner_x, inner_y, inner_w, inner_h, r_in)
-            };
-
-            if !paint_content {
-                // Widget mode: solid border in (ring + inner-fringe);
-                // hand the inner-full area off to the widget blit.
-                if inner == 256 { continue; }
-                put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
-                continue;
-            }
-
-            // Terminal mode: layer content over border so a translucent
-            // bg picks up a slight border tint at the inner edge.
-            let after_border = blend(border_color, bg_pixel, bo);
-            if inner == 0 {
-                put_pixel(shadow, info, px, py, after_border);
-            } else {
-                let bg_alpha = (go * inner / 256).min(255);
-                put_pixel(shadow, info, px, py, blend(bg_color, after_border, bg_alpha));
+                for px in lo..hi {
+                    let bc = if solid {
+                        border_a
+                    } else {
+                        let t = (((px - x) as u64 + (py - y) as u64) * 1000 / diag_max) as u32;
+                        crate::theme::lerp_color(border_a, border_b, t.min(1000))
+                    };
+                    let after_border = blend(bc, read_pixel(shadow, info, px, py), bo);
+                    put_pixel(shadow, info, px, py, blend(bg_color, after_border, go));
+                }
             }
         }
+        for px in skip_hi.max(x)..x_max { paint_px(px, py); }
     }
 }
 
