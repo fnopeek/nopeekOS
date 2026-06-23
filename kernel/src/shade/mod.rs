@@ -553,6 +553,30 @@ static SURF_RENDER_TSC_SUM: AtomicU64 = AtomicU64::new(0);
 static SURF_RENDER_TSC_MAX: AtomicU64 = AtomicU64::new(0);
 const SURF_RENDER_LOG_EVERY: u64 = 120;
 
+// [gpu-blit] does the real full-frame BCS blit succeed, and how long?
+static GPU_BLIT_OK: AtomicU64 = AtomicU64::new(0);
+static GPU_BLIT_FAIL: AtomicU64 = AtomicU64::new(0);
+static GPU_BLIT_TSC_SUM: AtomicU64 = AtomicU64::new(0);
+static GPU_BLIT_TSC_MAX: AtomicU64 = AtomicU64::new(0);
+
+fn record_gpu_blit(t0: u64, ok: bool) {
+    let dt = crate::interrupts::rdtsc().saturating_sub(t0);
+    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    GPU_BLIT_TSC_SUM.fetch_add(dt, Ordering::Relaxed);
+    GPU_BLIT_TSC_MAX.fetch_max(dt, Ordering::Relaxed);
+    if ok { GPU_BLIT_OK.fetch_add(1, Ordering::Relaxed); }
+    else { GPU_BLIT_FAIL.fetch_add(1, Ordering::Relaxed); }
+    let total = GPU_BLIT_OK.load(Ordering::Relaxed) + GPU_BLIT_FAIL.load(Ordering::Relaxed);
+    if total % 120 == 0 {
+        let sum = GPU_BLIT_TSC_SUM.swap(0, Ordering::Relaxed);
+        let max = GPU_BLIT_TSC_MAX.swap(0, Ordering::Relaxed);
+        let okc = GPU_BLIT_OK.swap(0, Ordering::Relaxed);
+        let failc = GPU_BLIT_FAIL.swap(0, Ordering::Relaxed);
+        crate::kprintln!("[gpu-blit] {} blits: ok={} fail={} | avg {}us max {}us",
+            okc + failc, okc, failc, (sum / 120) / mhz, max / mhz);
+    }
+}
+
 fn record_surface_render(t0: u64) {
     let dt = crate::interrupts::rdtsc().saturating_sub(t0);
     let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
@@ -617,7 +641,14 @@ fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> boo
     // blit even though BCS is up + readback-verified.
     if src_ggtt == 0 { return false; }
 
-    crate::gpu::gpu_blit_rect(src_ggtt, pitch, dst_ggtt, pitch, 0, 0, pitch / 4, h)
+    // [gpu-blit] instrument: does the real (full 4K) blit succeed, and how
+    // long does submit+poll take? A small readback blit verified fine but a
+    // 33MB blit may time out submit_blit's completion poll → false → CPU
+    // fallback (the 100ms we still measure).
+    let t = crate::interrupts::rdtsc();
+    let ok = crate::gpu::gpu_blit_rect(src_ggtt, pitch, dst_ggtt, pitch, 0, 0, pitch / 4, h);
+    record_gpu_blit(t, ok);
+    ok
 }
 
 /// Render only damaged regions (efficient partial update).
