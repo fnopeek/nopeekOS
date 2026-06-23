@@ -1350,7 +1350,20 @@ impl Compositor {
                 // Terminal glass bg is static + expensive — cache it.
                 let key = chrome_key(win.x, win.y, win.width, win.height, win.focused,
                     ba, bb, b_op, content_bg, content_opacity, rounding, border);
-                if !chrome_cache_blit(key, win.x, win.y, win.width, win.height, shadow, info) {
+                let hit = chrome_cache_blit(key, win.x, win.y, win.width, win.height, shadow, info);
+                {
+                    static HITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                    static MISS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                    use core::sync::atomic::Ordering::Relaxed;
+                    if hit { HITS.fetch_add(1, Relaxed); } else { MISS.fetch_add(1, Relaxed); }
+                    let m = MISS.load(Relaxed);
+                    if (HITS.load(Relaxed) + m) % 30 == 0 {
+                        crate::kprintln!("[chrome-cache] hits {} miss {} | geo {}x{}+{}+{} key {:#x}",
+                            HITS.swap(0, Relaxed), MISS.swap(0, Relaxed),
+                            win.width, win.height, win.x, win.y, key);
+                    }
+                }
+                if !hit {
                     render::fill_rounded_chrome_aa(shadow, info,
                         win.x, win.y, win.width, win.height,
                         ba, bb, content_bg,
