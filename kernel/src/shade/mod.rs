@@ -472,6 +472,7 @@ fn render_frame_surface() {
             // SAFETY: bg_buf and back are valid for size bytes.
             unsafe { core::ptr::copy_nonoverlapping(bg_buf, back, size); }
         }
+        let t_bg = crate::interrupts::rdtsc();
 
         // Recomposite the whole scene into back (correct w.r.t. overlays),
         // collecting Surface tile rects while the lock is held.
@@ -509,6 +510,8 @@ fn render_frame_surface() {
             }
         }
 
+        let t_comp = crate::interrupts::rdtsc();
+
         fb.swap_buffers();
         fb.commit_front();
 
@@ -517,6 +520,7 @@ fn render_frame_surface() {
         let old = cursor::saved_pos();
         let had_old = cursor::save_valid();
         cursor::save_under_and_bake(fb.front_ptr(), &info);
+        let t_cursor = crate::interrupts::rdtsc();
 
         // On a HW-blit host (native Xe / BCS) a full blit is cheap → keep it.
         // Otherwise (GOP) clip the MMIO blit to the tiles + cursor bbox.
@@ -540,8 +544,8 @@ fn render_frame_surface() {
             }
             damage.flush(fb);
         }
+        record_surface_render(t0, t_bg, t_comp, t_cursor);
     });
-    record_surface_render(t0);
 }
 
 // [surf-render] rolling cost of a full surface composite+blit — the real
@@ -577,18 +581,32 @@ fn record_gpu_blit(t0: u64, ok: bool) {
     }
 }
 
-fn record_surface_render(t0: u64) {
-    let dt = crate::interrupts::rdtsc().saturating_sub(t0);
+static SURF_BG_SUM: AtomicU64 = AtomicU64::new(0);
+static SURF_COMP_SUM: AtomicU64 = AtomicU64::new(0);
+static SURF_CUR_SUM: AtomicU64 = AtomicU64::new(0);
+
+fn record_surface_render(t0: u64, t_bg: u64, t_comp: u64, t_cursor: u64) {
+    let t_end = crate::interrupts::rdtsc();
+    let dt = t_end.saturating_sub(t0);
     let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
     SURF_RENDER_TSC_SUM.fetch_add(dt, Ordering::Relaxed);
     SURF_RENDER_TSC_MAX.fetch_max(dt, Ordering::Relaxed);
+    // Sub-phase breakdown: bg memcpy | comp.render | swap+cursor | blit.
+    SURF_BG_SUM.fetch_add(t_bg.saturating_sub(t0), Ordering::Relaxed);
+    SURF_COMP_SUM.fetch_add(t_comp.saturating_sub(t_bg), Ordering::Relaxed);
+    SURF_CUR_SUM.fetch_add(t_cursor.saturating_sub(t_comp), Ordering::Relaxed);
     let n = SURF_RENDER_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if n % SURF_RENDER_LOG_EVERY == 0 {
         let sum = SURF_RENDER_TSC_SUM.swap(0, Ordering::Relaxed);
         let max = SURF_RENDER_TSC_MAX.swap(0, Ordering::Relaxed);
+        let bg = SURF_BG_SUM.swap(0, Ordering::Relaxed);
+        let comp = SURF_COMP_SUM.swap(0, Ordering::Relaxed);
+        let cur = SURF_CUR_SUM.swap(0, Ordering::Relaxed);
+        let e = SURF_RENDER_LOG_EVERY;
         crate::kprintln!(
-            "[surf-render] {} blits: avg {}us max {}us",
-            SURF_RENDER_LOG_EVERY, (sum / SURF_RENDER_LOG_EVERY) / mhz, max / mhz,
+            "[surf-render] {} blits avg {}us (bg {} | comp {} | cursor {} | blit {}) max {}us",
+            e, (sum / e) / mhz, (bg / e) / mhz, (comp / e) / mhz, (cur / e) / mhz,
+            (sum.saturating_sub(bg + comp + cur) / e) / mhz, max / mhz,
         );
     }
 }
