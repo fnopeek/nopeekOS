@@ -433,6 +433,19 @@ pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
     }
 }
 
+/// On-demand version of the boot-time MTRR diagnostic (the `mtrr` intent),
+/// so it can be read without catching the fast-scrolling boot log.
+pub fn dump_memory_type() {
+    let addr = with_fb(|fb| fb.info().addr).unwrap_or(0);
+    if addr == 0 {
+        crate::kprintln!("[mtrr] no active framebuffer");
+        return;
+    }
+    crate::kprintln!("[mtrr] native_gpu={} (WC mapping only applied for GOP)",
+        crate::gpu::is_native());
+    diagnose_fb_memory_type(addr);
+}
+
 /// Read-only: report the framebuffer's EFFECTIVE memory type (firmware
 /// MTRRs vs our PAT WC). A UC MTRR over this region overrides PAT WC (UC
 /// always wins) → the ~150 MB/s blit we measured. Confirms the root cause
