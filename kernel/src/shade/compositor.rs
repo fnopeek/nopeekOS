@@ -1217,8 +1217,10 @@ impl Compositor {
             static COMP_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
             let n = COMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
             if n % 60 == 0 {
+                if crate::shade::PERF_LOG {
                 crate::kprintln!("[comp] windows: {} terminal | {} widget | {} surface | {} panel/other",
                     wc[0], wc[1], wc[2], wc[3]);
+                }
             }
         }
 
@@ -1357,7 +1359,7 @@ impl Compositor {
                     use core::sync::atomic::Ordering::Relaxed;
                     if hit { HITS.fetch_add(1, Relaxed); } else { MISS.fetch_add(1, Relaxed); }
                     let m = MISS.load(Relaxed);
-                    if (HITS.load(Relaxed) + m) % 30 == 0 {
+                    if crate::shade::PERF_LOG && (HITS.load(Relaxed) + m) % 30 == 0 {
                         crate::kprintln!("[chrome-cache] hits {} miss {} | geo {}x{}+{}+{} key {:#x}",
                             HITS.swap(0, Relaxed), MISS.swap(0, Relaxed),
                             win.width, win.height, win.x, win.y, key);
@@ -1633,7 +1635,7 @@ impl Compositor {
             static N_PANEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
             T_PANEL.fetch_add(t_rw_content.saturating_sub(t_rw0), Relaxed);
             let np = N_PANEL.fetch_add(1, Relaxed) + 1;
-            if np % 60 == 0 {
+            if crate::shade::PERF_LOG && np % 60 == 0 {
                 crate::kprintln!("[rw-panel] avg per-panel render: {}us (dock/bar)",
                     T_PANEL.swap(0, Relaxed) / 60 / mhz);
             }
@@ -1642,7 +1644,7 @@ impl Compositor {
             RW_CHROME.fetch_add(t_rw_chrome.saturating_sub(t_rw_bg), Relaxed);
             RW_CONTENT.fetch_add(t_rw_content.saturating_sub(t_rw_chrome), Relaxed);
             let n = RW_COUNT.fetch_add(1, Relaxed) + 1;
-            if n % 60 == 0 {
+            if crate::shade::PERF_LOG && n % 60 == 0 {
                 let bg = RW_BG.swap(0, Relaxed) / 60 / mhz;
                 let ch = RW_CHROME.swap(0, Relaxed) / 60 / mhz;
                 let ct = RW_CONTENT.swap(0, Relaxed) / 60 / mhz;

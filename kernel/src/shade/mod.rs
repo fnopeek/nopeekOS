@@ -18,6 +18,11 @@ pub mod surface;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
+/// Per-frame render/compositor performance logging ([render], [comp],
+/// [chrome-cache], [gpu-blit], [rw-phase], [nvme-spin] …). Off for normal
+/// use; flip to `true` to re-enable the breakdown for future perf work.
+pub const PERF_LOG: bool = false;
+
 use crate::framebuffer::{self};
 use crate::gui::{font, render};
 
@@ -585,7 +590,7 @@ fn note_render(kind: u8) {
     let c = MIX_CURSOR.load(Ordering::Relaxed);
     let g = MIX_LEGACY.load(Ordering::Relaxed);
     if (l + s + c + g) % 60 == 0 {
-        crate::kprintln!("[render-mix] layered={} surface={} cursor-only={} legacy={}", l, s, c, g);
+        if PERF_LOG { crate::kprintln!("[render-mix] layered={} surface={} cursor-only={} legacy={}", l, s, c, g); }
     }
 }
 
@@ -608,8 +613,10 @@ fn record_gpu_blit(t0: u64, ok: bool) {
         let max = GPU_BLIT_TSC_MAX.swap(0, Ordering::Relaxed);
         let okc = GPU_BLIT_OK.swap(0, Ordering::Relaxed);
         let failc = GPU_BLIT_FAIL.swap(0, Ordering::Relaxed);
+        if PERF_LOG {
         crate::kprintln!("[gpu-blit] {} blits: ok={} fail={} | avg {}us max {}us",
             okc + failc, okc, failc, (sum / 120) / mhz, max / mhz);
+        }
     }
 }
 
@@ -635,11 +642,13 @@ fn record_surface_render(t0: u64, t_bg: u64, t_comp: u64, t_cursor: u64) {
         let comp = SURF_COMP_SUM.swap(0, Ordering::Relaxed);
         let cur = SURF_CUR_SUM.swap(0, Ordering::Relaxed);
         let e = SURF_RENDER_LOG_EVERY;
+        if PERF_LOG {
         crate::kprintln!(
             "[render] {} frames avg {}us (bg {} | comp {} | cursor {} | blit {}) max {}us",
             e, (sum / e) / mhz, (bg / e) / mhz, (comp / e) / mhz, (cur / e) / mhz,
             (sum.saturating_sub(bg + comp + cur) / e) / mhz, max / mhz,
         );
+        }
     }
 }
 
