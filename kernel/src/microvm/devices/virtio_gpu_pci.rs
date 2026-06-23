@@ -757,10 +757,15 @@ impl VirtioGpu {
         self.dmg_flush_count = self.dmg_flush_count.wrapping_add(1);
         if self.dmg_flush_count % DMG_LOG_EVERY == 0 && self.dmg_tile_acc > 0 {
             let pct = self.dmg_area_acc.saturating_mul(100) / self.dmg_tile_acc;
-            kprintln!(
-                "[gpu-dmg] {} flushes: avg damage {}% of tile (last {}x{}+{}+{} of {}x{})",
-                DMG_LOG_EVERY, pct, dmg_w, dmg_h, x, y, r.width, r.height,
-            );
+            // HW confirmed the guest dirties 100% of the scanout every frame,
+            // so only shout when partial damage actually appears (a future
+            // guest/compositor that would make damage-clipping pay off).
+            if pct < 95 {
+                kprintln!(
+                    "[gpu-dmg] {} flushes: avg damage {}% of tile (last {}x{}+{}+{} of {}x{})",
+                    DMG_LOG_EVERY, pct, dmg_w, dmg_h, x, y, r.width, r.height,
+                );
+            }
             self.dmg_area_acc = 0;
             self.dmg_tile_acc = 0;
         }

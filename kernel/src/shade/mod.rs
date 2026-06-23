@@ -459,6 +459,7 @@ fn render_frame_layered() {
 /// the rest of the front buffer already matches what's on screen. See
 /// project-baremetal-gfx-perf ("clip the MMIO blit = the main win").
 fn render_frame_surface() {
+    let t0 = crate::interrupts::rdtsc();
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
@@ -540,6 +541,32 @@ fn render_frame_surface() {
             damage.flush(fb);
         }
     });
+    record_surface_render(t0);
+}
+
+// [surf-render] rolling cost of a full surface composite+blit — the real
+// per-frame Core-0 work whose saturation (at the guest's 60 Hz, full-tile)
+// stutters the cursor + spikes network rxlat. Tells us the per-blit µs so
+// we can size the FPS cap above.
+static SURF_RENDER_COUNT: AtomicU64 = AtomicU64::new(0);
+static SURF_RENDER_TSC_SUM: AtomicU64 = AtomicU64::new(0);
+static SURF_RENDER_TSC_MAX: AtomicU64 = AtomicU64::new(0);
+const SURF_RENDER_LOG_EVERY: u64 = 120;
+
+fn record_surface_render(t0: u64) {
+    let dt = crate::interrupts::rdtsc().saturating_sub(t0);
+    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    SURF_RENDER_TSC_SUM.fetch_add(dt, Ordering::Relaxed);
+    SURF_RENDER_TSC_MAX.fetch_max(dt, Ordering::Relaxed);
+    let n = SURF_RENDER_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % SURF_RENDER_LOG_EVERY == 0 {
+        let sum = SURF_RENDER_TSC_SUM.swap(0, Ordering::Relaxed);
+        let max = SURF_RENDER_TSC_MAX.swap(0, Ordering::Relaxed);
+        crate::kprintln!(
+            "[surf-render] {} blits: avg {}us max {}us",
+            SURF_RENDER_LOG_EVERY, (sum / SURF_RENDER_LOG_EVERY) / mhz, max / mhz,
+        );
+    }
 }
 
 /// Legacy render with double-buffer (fallback when layers not initialized).
@@ -1009,29 +1036,31 @@ pub fn poll_render() {
         render_frame();
         CURSOR_MOVED.store(false, Ordering::Relaxed);
     } else if !terminal::is_dirty() && SURFACE_DIRTY.load(Ordering::Relaxed) {
-        // Guest produced a new frame → recomposite but blit ONLY the surface
-        // tile rect (+ cursor), not the whole screen. Even clipped to the
-        // tile, at 4K on a GOP framebuffer that blit is tens of MB and runs
-        // at the guest's flush rate (e.g. a loading page / speedtest graph
-        // animating). Doing it on every tick saturated Core 0 and the host
-        // cursor stuttered across ALL windows whenever something was
-        // loading. So while the host mouse is actively moving, prefer the
-        // cheap cursor-only render and let the surface coalesce to a later
-        // tick — UNLESS it has gone stale, so the tile still updates a few
-        // times/sec even during continuous cursor movement.
+        // Guest produced a new frame. On HW the guest reports 100% damage
+        // every frame, so this is always a full-tile blit — ~16 MB of MMIO
+        // at 4K. Run unthrottled at the guest's 60 Hz it saturates Core 0,
+        // which ALSO drains the NIC RX ring, so saturation spiked network
+        // rxlat into the 100 ms range and the host cursor stuttered across
+        // ALL windows. So FPS-cap the heavy blit: at most once per
+        // SURFACE_MIN_TICKS normally, and stretch the cap to
+        // SURFACE_MAX_STALE_TICKS while the mouse is actively moving (the
+        // browser briefly drops fps) so the cursor stays smooth — the gaps
+        // are filled with the cheap cursor-only render. Coalescing is free:
+        // SURFACE_DIRTY stays set and we render the latest frame when due.
         let now = crate::interrupts::ticks();
-        let stale = now.wrapping_sub(LAST_SURFACE_TICK.load(Ordering::Relaxed))
-            >= SURFACE_MAX_STALE_TICKS;
-        if CURSOR_MOVED.load(Ordering::Relaxed) && !stale {
-            // Mouse moving + tile fresh enough → keep the cursor buttery;
-            // SURFACE_DIRTY stays set and renders on a mouse-idle/stale tick.
-            CURSOR_MOVED.store(false, Ordering::Relaxed);
-            render_frame_cursor_only();
+        let since = now.wrapping_sub(LAST_SURFACE_TICK.load(Ordering::Relaxed));
+        let cap = if CURSOR_MOVED.load(Ordering::Relaxed) {
+            SURFACE_MAX_STALE_TICKS
         } else {
+            SURFACE_MIN_TICKS
+        };
+        if since >= cap {
             SURFACE_DIRTY.store(false, Ordering::Relaxed);
             LAST_SURFACE_TICK.store(now, Ordering::Relaxed);
             render_frame_surface();
             CURSOR_MOVED.store(false, Ordering::Relaxed);
+        } else if CURSOR_MOVED.swap(false, Ordering::Relaxed) {
+            render_frame_cursor_only();
         }
     } else if !terminal::is_dirty() && CURSOR_MOVED.swap(false, Ordering::Relaxed) {
         // Pure mouse move, nothing else changed → save-under cursor move.
@@ -1236,9 +1265,13 @@ static SURFACE_DIRTY: AtomicBool = AtomicBool::new(false);
 /// moving, so a busy guest can't starve the cursor across all windows.
 static LAST_SURFACE_TICK: AtomicU64 = AtomicU64::new(0);
 
-/// Max ticks the surface tile may go un-updated while the mouse is moving
-/// before a surface render is forced anyway — caps tile staleness at
-/// ~50 ms (≥20 fps) during continuous cursor movement.
+/// Min ticks (100 Hz) between full-tile surface blits when the mouse is
+/// idle — FPS-caps the ~16 MB 4K MMIO blit at ~50 fps so a 60 Hz guest
+/// can't peg Core 0 (which also drains the NIC RX ring).
+const SURFACE_MIN_TICKS: u64 = 2;
+/// Min ticks between surface blits while the mouse is actively moving —
+/// the browser drops to ~20 fps so the cheap cursor-only path can keep the
+/// cursor smooth in the gaps.
 const SURFACE_MAX_STALE_TICKS: u64 = 5;
 
 /// Clip the blit on a Surface flush to the tile rect (vs full-screen). Flag-
