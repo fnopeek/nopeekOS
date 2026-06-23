@@ -439,6 +439,10 @@ pub struct IntelXeDriver {
     bcs_ring_phys: u64,   // Physical address of ring buffer (4KB)
     bcs_lrc_phys: u64,    // Physical address of LRC (8KB: HWSP + context)
     bcs_initialized: bool,
+    // True only after a readback self-test proved the BCS blit actually
+    // PAINTS (ring advancing is not enough — on Tiger Lake the ring caught
+    // up but no pixels landed → black screen). Gates the display-blit path.
+    bcs_verified: bool,
     // Shadow buffer GGTT state
     shadow_a_ggtt: u32,   // GGTT offset of shadow buffer A (0 = not mapped)
     shadow_b_ggtt: u32,   // GGTT offset of shadow buffer B (0 = not mapped)
@@ -500,11 +504,19 @@ impl GpuHal for IntelXeDriver {
     }
 
     fn init_blit_engine(&mut self) -> bool {
-        self.init_bcs().is_ok()
+        if self.init_bcs().is_err() {
+            return false;
+        }
+        // Ring up ≠ pixels land. Prove the blit actually paints (readback)
+        // before letting it drive the display — else a non-painting blit
+        // (Tiger Lake) silently blacks the screen because try_gpu_blit
+        // reports success and the CPU fallback is skipped.
+        self.bcs_verified = self.verify_blit_readback();
+        self.bcs_verified
     }
 
     fn supports_blit(&self) -> bool {
-        self.bcs_ready()
+        self.bcs_ready() && self.bcs_verified
     }
 
     fn blit_rect_hw(
@@ -647,6 +659,7 @@ impl IntelXeDriver {
             bcs_ring_phys: 0,
             bcs_lrc_phys: 0,
             bcs_initialized: false,
+            bcs_verified: false,
             shadow_a_ggtt: 0,
             shadow_b_ggtt: 0,
             shadow_pages: 0,
@@ -1996,6 +2009,59 @@ impl IntelXeDriver {
     }
 
     /// Submit XY_FAST_COPY_BLT via ELSQ context re-submission.
+    /// Prove the BCS engine actually PAINTS: blit a known pattern between two
+    /// scratch GGTT buffers (NOT the live scanout — invisible, safe), then
+    /// CPU-read the destination. Returns true only if the bytes arrived. On
+    /// Tiger Lake the ring advances but no pixels land, so the ring-head
+    /// check in `submit_blit` is not enough; this readback is the real proof.
+    /// Also a bring-up oracle: FAIL here = the copy itself is broken (command
+    /// / context / GGTT); PASS-but-screen-black = a scanout/flip targeting
+    /// problem instead.
+    fn verify_blit_readback(&mut self) -> bool {
+        if !self.bcs_initialized || self.bar0 == 0 {
+            return false;
+        }
+        const SRC_GGTT: u32 = 0x0400_3000; // reuse BCS_TEST_GGTT slot
+        const DST_GGTT: u32 = 0x0400_7000;
+        const PAT: u32 = 0xA5C3_F00D;
+        let src_phys = match memory::allocate_contiguous(1) { Some(p) => p, None => return false };
+        let dst_phys = match memory::allocate_contiguous(1) { Some(p) => p, None => return false };
+        // SAFETY: freshly allocated, identity-mapped, one page each.
+        unsafe {
+            let s = src_phys as *mut u32;
+            for i in 0..1024 { s.add(i).write_volatile(PAT); }
+            let d = dst_phys as *mut u32;
+            for i in 0..1024 { d.add(i).write_volatile(0); }
+        }
+        self.map_pages_ggtt_at(src_phys, 1, SRC_GGTT);
+        self.map_pages_ggtt_at(dst_phys, 1, DST_GGTT);
+        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
+        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+
+        // Copy a 16×16 px block src→dst (64 px/row → 256 B pitch).
+        self.submit_blit(SRC_GGTT, 256, DST_GGTT, 256, 0, 0, 16, 16);
+
+        // The dst page is WB identity-mapped and we just wrote zeros to it, so
+        // they sit in cache. The GPU wrote the real bytes to memory via GGTT —
+        // flush the cached zeros so the CPU re-reads from memory.
+        // SAFETY: dst_phys is identity-mapped; clflush on a mapped address.
+        unsafe {
+            let d = dst_phys as *const u8;
+            for line in 0..4u64 {
+                core::arch::asm!("clflush [{}]", in(reg) d.add((line * 64) as usize),
+                    options(nostack, preserves_flags));
+            }
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        let got = unsafe { core::ptr::read_volatile(dst_phys as *const u32) };
+        let ok = got == PAT;
+        kprintln!("[npk]   BCS: blit-readback {} (dst[0]={:#010x} want {:#010x})",
+            if ok { "OK — pixels land, BCS drives display" }
+            else { "FAILED — no paint, staying on CPU blit (visible)" },
+            got, PAT);
+        ok
+    }
+
     pub fn submit_blit(
         &mut self,
         src_ggtt: u32, src_pitch: u32,
