@@ -79,6 +79,75 @@ fn close_button_rect(win: &Window, border: u32, scale: u32)
 
 /// Paint the platform close button — a bare X — into the shadow buffer,
 /// vertically centred in the window's top menu-bar band. Drawn last in
+// ── Terminal chrome cache ──────────────────────────────────────────────
+// The translucent "glass" terminal background (bg_color blended over the
+// wallpaper, per pixel) is the dominant compositor cost (~71ms for a
+// maximised 4K terminal) and it's STATIC — only geometry / theme / focus /
+// wallpaper change it, not the text drawn on top. Cache the rendered chrome
+// region (wallpaper+border+glass) and memcpy it back each frame instead of
+// re-blending. One entry (the common case is one focused terminal); a second
+// terminal just thrashes it (still correct, recomputes on miss).
+struct ChromeCache { key: u64, w: u32, h: u32, px: Vec<u32> }
+static CHROME_CACHE: spin::Mutex<Option<ChromeCache>> = spin::Mutex::new(None);
+
+#[allow(clippy::too_many_arguments)]
+fn chrome_key(x: u32, y: u32, w: u32, h: u32, focused: bool,
+              ba: u32, bb: u32, b_op: u32, content_bg: u32, content_opacity: u32,
+              rounding: u32, border: u32) -> u64 {
+    let mut k = 0xcbf29ce484222325u64;
+    for v in [x, y, w, h, focused as u32, ba, bb, b_op, content_bg, content_opacity, rounding, border] {
+        k ^= v as u64;
+        k = k.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    k
+}
+
+/// On a cache hit, memcpy the cached chrome region into the back buffer and
+/// return true. The text is drawn over it afterwards (every frame), so only
+/// the static glass background is cached.
+fn chrome_cache_blit(key: u64, x: u32, y: u32, w: u32, h: u32, shadow: *mut u8, info: &FbInfo) -> bool {
+    let cache = CHROME_CACHE.lock();
+    let Some(c) = cache.as_ref() else { return false };
+    if c.key != key || c.w != w || c.h != h { return false; }
+    let pitch = info.pitch as usize;
+    let rows = h.min(info.height.saturating_sub(y));
+    let span = w.min(info.width.saturating_sub(x)) as usize;
+    for row in 0..rows {
+        let dst_off = (y + row) as usize * pitch + x as usize * 4;
+        let src_off = row as usize * w as usize;
+        // SAFETY: dst within fb (clamped), src within px (w*h, row<h).
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                c.px.as_ptr().add(src_off),
+                shadow.add(dst_off) as *mut u32,
+                span,
+            );
+        }
+    }
+    true
+}
+
+/// Capture the just-rendered chrome region from the back buffer into the cache.
+fn chrome_cache_store(key: u64, x: u32, y: u32, w: u32, h: u32, shadow: *const u8, info: &FbInfo) {
+    let mut px = alloc::vec![0u32; (w as usize) * (h as usize)];
+    let pitch = info.pitch as usize;
+    let rows = h.min(info.height.saturating_sub(y));
+    let span = w.min(info.width.saturating_sub(x)) as usize;
+    for row in 0..rows {
+        let src_off = (y + row) as usize * pitch + x as usize * 4;
+        let dst_off = row as usize * w as usize;
+        // SAFETY: src within fb (clamped), dst within px (w*h, row<h).
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                shadow.add(src_off) as *const u32,
+                px.as_mut_ptr().add(dst_off),
+                span,
+            );
+        }
+    }
+    *CHROME_CACHE.lock() = Some(ChromeCache { key, w, h, px });
+}
+
 /// `render_window` so it sits over the window content. No disc / colour
 /// highlight (Florian's call): just the glyph, a touch larger so it reads
 /// as a button. The glyph takes the theme's `OnSurface` colour so it stays
@@ -1277,10 +1346,23 @@ impl Compositor {
             } else {
                 opacity
             };
-            render::fill_rounded_chrome_aa(shadow, info,
-                win.x, win.y, win.width, win.height,
-                ba, bb, content_bg,
-                rounding, border, b_op, content_opacity, paint_content);
+            if paint_content {
+                // Terminal glass bg is static + expensive — cache it.
+                let key = chrome_key(win.x, win.y, win.width, win.height, win.focused,
+                    ba, bb, b_op, content_bg, content_opacity, rounding, border);
+                if !chrome_cache_blit(key, win.x, win.y, win.width, win.height, shadow, info) {
+                    render::fill_rounded_chrome_aa(shadow, info,
+                        win.x, win.y, win.width, win.height,
+                        ba, bb, content_bg,
+                        rounding, border, b_op, content_opacity, paint_content);
+                    chrome_cache_store(key, win.x, win.y, win.width, win.height, shadow, info);
+                }
+            } else {
+                render::fill_rounded_chrome_aa(shadow, info,
+                    win.x, win.y, win.width, win.height,
+                    ba, bb, content_bg,
+                    rounding, border, b_op, content_opacity, paint_content);
+            }
         }
 
         let t_rw_chrome = crate::interrupts::rdtsc();
