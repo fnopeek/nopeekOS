@@ -1201,6 +1201,12 @@ impl Compositor {
     pub(crate) fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, rounding: u32, opacity: u32, scale: u32,
                      border_color: u32) {
+        // [rw-phase] per-window timing: wallpaper restore | chrome | content.
+        static RW_BG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static RW_CHROME: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static RW_CONTENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static RW_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let t_rw0 = crate::interrupts::rdtsc();
         // Overlay windows skip the wallpaper restore — rounded-out
         // corners keep showing whatever app is underneath instead of
         // punching a wallpaper-shaped hole into it. The bar is the
@@ -1211,6 +1217,7 @@ impl Compositor {
             background::draw_background_region(shadow, info,
                 win.x, win.y, win.width, win.height);
         }
+        let t_rw_bg = crate::interrupts::rdtsc();
 
         // 2+3. Single-pass chrome. Terminal windows get the full
         // layered paint (border + bg_color content). Widget windows
@@ -1261,6 +1268,7 @@ impl Compositor {
                 rounding, border, b_op, content_opacity, paint_content);
         }
 
+        let t_rw_chrome = crate::interrupts::rdtsc();
         let cx = win.content_x(chrome_border);
         let cy = win.content_y(chrome_border);
         let cw = win.content_w(chrome_border);
@@ -1499,9 +1507,24 @@ impl Compositor {
             }
         }
 
+        let t_rw_content = crate::interrupts::rdtsc();
+
         // Platform close button (top-right). Panels return None and are
         // skipped; everything else gets the mouse-friendly "X".
         draw_close_button(shadow, info, win, border, scale);
+
+        use core::sync::atomic::Ordering::Relaxed;
+        RW_BG.fetch_add(t_rw_bg.saturating_sub(t_rw0), Relaxed);
+        RW_CHROME.fetch_add(t_rw_chrome.saturating_sub(t_rw_bg), Relaxed);
+        RW_CONTENT.fetch_add(t_rw_content.saturating_sub(t_rw_chrome), Relaxed);
+        let n = RW_COUNT.fetch_add(1, Relaxed) + 1;
+        if n % 120 == 0 {
+            let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+            let bg = RW_BG.swap(0, Relaxed) / 120 / mhz;
+            let ch = RW_CHROME.swap(0, Relaxed) / 120 / mhz;
+            let ct = RW_CONTENT.swap(0, Relaxed) / 120 / mhz;
+            crate::kprintln!("[rw-phase] per window avg: wallpaper {}us | chrome {}us | content {}us", bg, ch, ct);
+        }
     }
 
     /// Render only changed regions. Returns list of (x, y, w, h) to blit.
