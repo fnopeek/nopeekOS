@@ -330,26 +330,41 @@ pub fn fill_rounded_chrome_aa(
     let bo = border_opacity.min(255);
     let go = bg_opacity.min(255);
 
-    // In widget mode (!paint_content) the whole inner-full area (inner==256)
-    // is just `continue`d here — it's painted by the widget blit. Computing
-    // rect_coverage_sdf for every one of those millions of interior pixels of
-    // a maximised 4K window was comp.render's entire cost (~96ms/frame). Skip
-    // that guaranteed-interior horizontal span on the vertically-straight rows;
-    // only the border ring + the four rounded corners still need per-pixel SDF.
-    // (Terminal mode paints the interior, so it keeps the full sweep.)
+    // The inner-full area (outer==inner==256) is the bulk of a window's
+    // pixels; at 4K that's millions, and computing rect_coverage_sdf TWICE per
+    // pixel for all of them was comp.render's entire cost (~96ms for a widget,
+    // ~40ms even for one terminal). On the vertically-straight rows that span
+    // is the known rectangle [skip_lo, skip_hi) — short-circuit the SDF there
+    // (outer=inner=256): widget mode `continue`s it (the widget blit paints
+    // it); an opaque content fill becomes a plain store; a translucent one
+    // still blends over the wallpaper but without the SDF. The border ring +
+    // the four rounded corners keep the full per-pixel SDF. Visually identical.
     let straight_lo = inner_y + r_in;
     let straight_hi = (inner_y + inner_h).saturating_sub(r_in);
     let skip_lo = (inner_x + 2).min(x_max);
     let skip_hi = (inner_x + inner_w).saturating_sub(2).max(skip_lo);
+    let opaque_fill = paint_content && go >= 255;
     for py in y..y_max {
-        let straight = !paint_content && py >= straight_lo && py < straight_hi;
-        let ranges = if straight {
-            [(x, skip_lo), (skip_hi, x_max)]
-        } else {
-            [(x, x_max), (x_max, x_max)]
-        };
-        for &(rx0, rx1) in ranges.iter() {
-        for px in rx0..rx1 {
+        let straight = skip_hi > skip_lo && py >= straight_lo && py < straight_hi;
+        for px in x..x_max {
+            // Interior fast path: no SDF (outer=inner=256 by construction).
+            if straight && px >= skip_lo && px < skip_hi {
+                if !paint_content { continue; } // widget blit paints it
+                if opaque_fill {
+                    put_pixel(shadow, info, px, py, bg_color);
+                    continue;
+                }
+                let border_color = if solid {
+                    border_a
+                } else {
+                    let t = (((px - x) as u64 + (py - y) as u64) * 1000 / diag_max) as u32;
+                    crate::theme::lerp_color(border_a, border_b, t.min(1000))
+                };
+                let after_border = blend(border_color, read_pixel(shadow, info, px, py), bo);
+                put_pixel(shadow, info, px, py, blend(bg_color, after_border, go.min(255)));
+                continue;
+            }
+
             let outer = rect_coverage_sdf(px, py, x, y, w, h, r_out);
             if outer == 0 { continue; }
 
@@ -393,7 +408,6 @@ pub fn fill_rounded_chrome_aa(
                 let bg_alpha = (go * inner / 256).min(255);
                 put_pixel(shadow, info, px, py, blend(bg_color, after_border, bg_alpha));
             }
-        }
         }
     }
 }
