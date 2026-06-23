@@ -50,15 +50,15 @@ const CLOSE_BTN_BAND: u32 = 40;
 /// old 16 so the bare glyph reads as a button).
 const CLOSE_BTN_GLYPH: u32 = 20;
 
-/// The X tracks the window's CONTENT scale, not the raw screen scale.
-/// Widget apps (loft/spell/drun) render their UI at a fixed pixel size — the
-/// widget rasterizer runs at `RasterTarget.scale = 1` (apps size via density,
-/// not a HiDPI factor), so the content does NOT grow with screen resolution.
-/// A screen-scaled X therefore balloons against fixed-px content on 4K (the
-/// "only the X is too big" report). Terminals DO scale their text by the
-/// screen factor, so they keep it.
-fn close_btn_scale(win: &Window, scale: u32) -> u32 {
-    if win.kind == crate::shade::window::WindowKind::Terminal { scale.max(1) } else { 1 }
+/// The platform close-X is a FIXED pixel size — it never tracks the screen
+/// HiDPI scale. Widget apps render their UI at fixed px (the widget rasterizer
+/// runs at `RasterTarget.scale = 1`; apps size via density, not a HiDPI
+/// factor), so a screen-scaled X balloons against the content on 4K. We tried
+/// keeping the scale for terminals (whose text does grow 2×), but a 2× X on a
+/// loop tile looked absurdly large next to the small widget X — Florian wants
+/// every close-X the same small size. So: always 1×, on every window kind.
+fn close_btn_scale(_win: &Window, _scale: u32) -> u32 {
+    1
 }
 
 /// Screen rect `(x, y, w, h)` of a window's platform close button, or
