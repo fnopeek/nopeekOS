@@ -84,6 +84,12 @@ pub trait GpuHal: Send {
     /// True if this is a native driver (not GOP fallback).
     fn is_native(&self) -> bool;
 
+    /// True if a real modeset (DPLL/pipe/transcoder reprogram) is validated on
+    /// this GPU. False for GOP and for blit-only takeovers (e.g. non-ADL-N
+    /// Gen12), where set_mode would reprogram an unvalidated pipeline and black
+    /// the scanout — those keep the firmware mode. Conservative default: false.
+    fn supports_modeset(&self) -> bool { false }
+
     /// Schedule page flip — GPU scans from new surface at next vblank.
     /// `surface_addr` is driver-specific (GGTT offset for Intel, phys for others).
     fn flip(&mut self, surface_addr: u64);
@@ -268,6 +274,15 @@ pub fn current_hz() -> u8 {
 pub fn is_native() -> bool {
     match GPU.lock().as_ref() {
         Some(drv) => drv.is_native(),
+        None => false,
+    }
+}
+
+/// True if a real modeset is validated on the active GPU (false for GOP and
+/// blit-only takeovers, which must keep the firmware mode).
+pub fn supports_modeset() -> bool {
+    match GPU.lock().as_ref() {
+        Some(drv) => drv.supports_modeset(),
         None => false,
     }
 }
