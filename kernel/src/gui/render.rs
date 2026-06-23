@@ -422,10 +422,18 @@ pub fn fill_rounded_chrome_aa(
             put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
             return;
         }
-        let after_border = blend(border_color, bg_pixel, bo);
         if inner == 0 {
-            put_pixel(shadow, info, px, py, after_border);
+            // Border ring (outside the inner rect): solid border over wallpaper.
+            put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
+        } else if inner == 256 {
+            // Deep interior — MUST match the straight-row glass tint exactly
+            // (glass over wallpaper, NO border tint), else the corner bands
+            // show a border-coloured bar where the per-pixel path used to add
+            // the tint but the straight middle no longer does.
+            put_pixel(shadow, info, px, py, blend(bg_color, bg_pixel, go));
         } else {
+            // Inner fringe: AA transition from border to glass over ~1 px.
+            let after_border = blend(border_color, bg_pixel, bo);
             let bg_alpha = (go * inner / 256).min(255);
             put_pixel(shadow, info, px, py, blend(bg_color, after_border, bg_alpha));
         }
