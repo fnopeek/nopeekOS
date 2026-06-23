@@ -19,7 +19,19 @@ const KNOWN_DEVICE_IDS: &[(u16, &str)] = &[
     (0x46D0, "Alder Lake-N GT1"),
     (0x46D1, "Alder Lake-N GT1 (variant)"),
     (0x46D2, "Alder Lake-N GT1 (variant)"),
+    // Tiger Lake-LP GT2 (Iris Xe, Gen12.1) — same display register layout as
+    // ADL-N (Gen12.2). Activated blit-only (no PLL modeset, see `init`): we
+    // keep the firmware's live mode and only attach the BCS engine, so the
+    // CPU stops blitting to the slow UC framebuffer. Validated path; the 4K
+    // modeset stays ADL-N-only until tested on TGL.
+    (0x9A78, "Tiger Lake-LP GT2 (blit-only)"),
 ];
+
+/// ADL-N GT1 — the only gen whose full PLL/modeset path is validated. Other
+/// known Gen12 GPUs (e.g. Tiger Lake) take the blit-only route in `init`.
+fn is_adln(device_id: u16) -> bool {
+    matches!(device_id, 0x46D0 | 0x46D1 | 0x46D2)
+}
 
 // ── MMIO Register Offsets (from BAR0) ───────────────────────────────
 
@@ -820,6 +832,19 @@ impl IntelXeDriver {
 
         self.fb = Some(fb);
         self.active_timing = Some(timing);
+
+        // Non-ADL-N Gen12 (e.g. Tiger Lake): the display register layout is
+        // shared, but the PLL/modeset path is only validated on ADL-N.
+        // Take the safe blit-only route — keep the firmware's live mode and
+        // expose the scanout (fb_ggtt_offset = fw_plane_surf, set above) for
+        // the BCS engine. No PLL/pipe reprogram → no black-screen risk. The
+        // CPU stops blitting to the slow UC framebuffer; the GPU copies
+        // shadow→scanout instead. `gpu blit init` then attaches BCS.
+        if !is_adln(self.device_id) {
+            kprintln!("[npk]   GPU: {:#06x} non-ADL-N → blit-only, keeping firmware mode {}x{}",
+                self.device_id, width, height);
+            return Ok(fb);
+        }
 
         // Try 4K@60 (HDMI 2.0 scrambling), fallback to 4K@30
         kprintln!("[npk]   Attempting 4K@60Hz...");
