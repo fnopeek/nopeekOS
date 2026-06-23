@@ -50,6 +50,17 @@ const CLOSE_BTN_BAND: u32 = 40;
 /// old 16 so the bare glyph reads as a button).
 const CLOSE_BTN_GLYPH: u32 = 20;
 
+/// The X tracks the window's CONTENT scale, not the raw screen scale.
+/// Widget apps (loft/spell/drun) render their UI at a fixed pixel size — the
+/// widget rasterizer runs at `RasterTarget.scale = 1` (apps size via density,
+/// not a HiDPI factor), so the content does NOT grow with screen resolution.
+/// A screen-scaled X therefore balloons against fixed-px content on 4K (the
+/// "only the X is too big" report). Terminals DO scale their text by the
+/// screen factor, so they keep it.
+fn close_btn_scale(win: &Window, scale: u32) -> u32 {
+    if win.kind == crate::shade::window::WindowKind::Terminal { scale.max(1) } else { 1 }
+}
+
 /// Screen rect `(x, y, w, h)` of a window's platform close button, or
 /// `None` for panels (dock/bar are managed chrome — never closable here)
 /// and windows too narrow to host the button. Shared by the renderer and
@@ -63,7 +74,7 @@ fn close_button_rect(win: &Window, border: u32, scale: u32)
     // windows (the microvm browser owns its own close via its UI).
     if win.is_dock || win.is_bar || win.is_overlay { return None; }
     if win.kind == crate::shade::window::WindowKind::Surface { return None; }
-    let scale = scale.max(1);
+    let scale = close_btn_scale(win, scale);
     let box_px = CLOSE_BTN_BOX * scale;
     // The box is centred vertically in the app's menu-bar band so the X
     // aligns with `Datei / Bearbeiten / …` rather than the top edge. Reuse
@@ -157,7 +168,7 @@ fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
     let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) else { return };
     use crate::shade::widgets::abi::{IconId, Token};
     let color = crate::shade::widgets::palette::resolve(Token::OnSurface) & 0x00FF_FFFF;
-    let req = CLOSE_BTN_GLYPH * scale.max(1);
+    let req = CLOSE_BTN_GLYPH * close_btn_scale(win, scale);
     if let Some((asz, glyph)) = crate::gui::icons::alpha_for(IconId::X, req as u16) {
         let asz = asz as u32;
         if asz > 0 && glyph.len() >= (asz * asz) as usize {
