@@ -89,11 +89,10 @@ const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;
 const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;
 const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
 /// Master switch for RX GRO. Flip false to fall back to plain per-packet RX.
-/// v0.225.2: GSO RX frame now uses NEEDS_CSUM + pseudo-header partial (the
-/// path Linux's own virtio_net_hdr_from_skb produces for CHECKSUM_PARTIAL);
-/// the earlier DATA_VALID format hit the fragile flow-dissect path and the
-/// guest dropped the merged frames (v0.225.0 → no internet).
-const NET_GRO_ENABLED: bool = true;
+/// v0.225.3: DISABLED again — both DATA_VALID (v0.225.0) and NEEDS_CSUM
+/// (v0.225.2) GSO frames killed connectivity. Two failures = stop guessing
+/// the frame format; isolate big-packets-mode vs the GSO frame before re-try.
+const NET_GRO_ENABLED: bool = false;
 
 // virtio device-status bit (driver finished feature negotiation + setup).
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
