@@ -264,6 +264,12 @@ pub fn set_gro_enabled(on: bool) { GRO_ENABLED.store(on, AtOrd::Relaxed); }
 static NS_GRO_FRAMES: AtomicU64 = AtomicU64::new(0);
 static NS_GRO_SEGS:   AtomicU64 = AtomicU64::new(0);
 
+/// Isolation switch: when false, the device still advertises the offloads
+/// (guest in big-packets mode) but `gro_offer` passes every frame through
+/// unchanged — no coalescing, no GSO frame. Splits big-packets-mode vs the
+/// GSO frame as the connectivity-break cause. v0.225.4 diagnostic = false.
+const GRO_COALESCE: bool = false;
+
 const GRO_SLOTS:       usize = 16;      // concurrent flows we coalesce
 const GRO_MAX_PAYLOAD: usize = 60_000;  // < 64 KiB IP total-length limit
 const GRO_MAX_SEGS:    usize = 44;      // ~ one 64 KB superframe of MSS≈1448
@@ -385,6 +391,7 @@ fn gro_alloc_slot(tbl: &mut [Option<GroCtx>; GRO_SLOTS], now: u64) -> usize {
 /// Offer a freshly-rewritten inbound TCP frame to the GRO engine. Returns
 /// `None` if consumed (held or appended), or `Some(frame)` to inject as-is.
 fn gro_offer(frame: Vec<u8>) -> Option<Vec<u8>> {
+    if !GRO_COALESCE { return Some(frame); } // diagnostic: big-packets, no coalesce
     let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
     if frame.len() < ip_off + IPV4_HDR_LEN { return Some(frame); }
     let ihl = (frame[ip_off] & 0x0F) as usize * 4;

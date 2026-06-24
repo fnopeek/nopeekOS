@@ -88,11 +88,13 @@ const VIRTIO_NET_F_STATUS: u32 = 16;
 const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;
 const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;
 const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
-/// Master switch for RX GRO. Flip false to fall back to plain per-packet RX.
-/// v0.225.3: DISABLED again — both DATA_VALID (v0.225.0) and NEEDS_CSUM
-/// (v0.225.2) GSO frames killed connectivity. Two failures = stop guessing
-/// the frame format; isolate big-packets-mode vs the GSO frame before re-try.
-const NET_GRO_ENABLED: bool = false;
+/// Master switch for RX GRO feature advertisement (GUEST_CSUM/TSO4/TSO6 →
+/// guest enters "big packets" mode). v0.225.4 ISOLATION DIAGNOSTIC: this is
+/// ON but nat.rs `GRO_COALESCE` is OFF → the guest is in big-packets mode but
+/// every RX frame is a plain pass-through. If connectivity works here, big-
+/// packets/inject is innocent and the coalesced GSO frame is the culprit; if
+/// it breaks, the offload advertisement / big-packets path itself is.
+const NET_GRO_ENABLED: bool = true;
 
 // virtio device-status bit (driver finished feature negotiation + setup).
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
