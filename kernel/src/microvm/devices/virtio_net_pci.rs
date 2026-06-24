@@ -89,7 +89,11 @@ const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;
 const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;
 const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
 /// Master switch for RX GRO. Flip false to fall back to plain per-packet RX.
-const NET_GRO_ENABLED: bool = true;
+/// TEMP false (v0.225.1): the GSO RX frame format needs the exact checksum
+/// semantics a real RX-coalescing backend uses (QEMU RSC: NEEDS_CSUM +
+/// pseudo-header partial, not DATA_VALID) — restore connectivity first, fix
+/// the header construction against the reference, then re-enable.
+const NET_GRO_ENABLED: bool = false;
 
 // virtio device-status bit (driver finished feature negotiation + setup).
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
