@@ -259,14 +259,20 @@ const INBOUND_MAX: usize = 1024;
 static GRO_ENABLED: AtomicBool = AtomicBool::new(false);
 pub fn set_gro_enabled(on: bool) { GRO_ENABLED.store(on, AtOrd::Relaxed); }
 
+// GRO effectiveness counters (printed in [netstat]): coalesced GSO frames
+// emitted + total segments merged into them → avg segs/frame is the win factor.
+static NS_GRO_FRAMES: AtomicU64 = AtomicU64::new(0);
+static NS_GRO_SEGS:   AtomicU64 = AtomicU64::new(0);
+
 const GRO_SLOTS:       usize = 16;      // concurrent flows we coalesce
 const GRO_MAX_PAYLOAD: usize = 60_000;  // < 64 KiB IP total-length limit
 const GRO_MAX_SEGS:    usize = 44;      // ~ one 64 KB superframe of MSS≈1448
 const GRO_START_MIN:   usize = 1000;    // only hold near-full (mid-burst) segs
 const GRO_TIMEOUT_US:  u64   = 200;     // max hold before a forced flush
 
-const VNET_HDR_F_DATA_VALID: u8 = 2;
+const VNET_HDR_F_NEEDS_CSUM: u8 = 1;
 const VNET_HDR_GSO_TCPV4:    u8 = 1;
+const TCP_CSUM_OFF:         u16 = 16; // checksum field offset within the TCP header
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
 const TCP_RST: u8 = 0x04;
@@ -301,19 +307,47 @@ fn gro_finalize(c: &mut GroCtx) {
     let ipc = ipv4_checksum(&c.frame[ip_off..ip_off + ihl]);
     c.frame[ip_off + 10..ip_off + 12].copy_from_slice(&ipc.to_be_bytes());
     if c.seg_count > 1 {
-        // LRO'd TCPv4 frame of `mss`-sized segments, checksum already validated
-        // (we merged verified segments) → guest skips the stale TCP checksum.
-        c.frame[0] = VNET_HDR_F_DATA_VALID;
+        // An LRO'd TCPv4 frame of `mss`-sized segments. Use NEEDS_CSUM +
+        // CHECKSUM_PARTIAL semantics — exactly what Linux's own
+        // virtio_net_hdr_from_skb emits for a GSO skb — so the guest takes the
+        // well-trodden skb_partial_csum_set path (the DATA_VALID variant hit a
+        // fragile flow-dissect path and the merged frames got dropped). The
+        // TCP checksum field holds the pseudo-header partial (length 0); the
+        // guest completes/validates it per segment.
+        let l4 = c.l4_off;
+        let src: [u8; 4] = c.frame[ip_off + 12..ip_off + 16].try_into().unwrap();
+        let dst: [u8; 4] = c.frame[ip_off + 16..ip_off + 20].try_into().unwrap();
+        let partial = tcp_pseudo_partial(src, dst);
+        c.frame[l4 + 16..l4 + 18].copy_from_slice(&partial.to_be_bytes());
+
+        c.frame[0] = VNET_HDR_F_NEEDS_CSUM;
         c.frame[1] = VNET_HDR_GSO_TCPV4;
         let hdr_len = (ETH_HDR_LEN + ihl + c.tcp_hl) as u16;
+        let csum_start = (ETH_HDR_LEN + ihl) as u16; // TCP offset from eth start
         c.frame[2..4].copy_from_slice(&hdr_len.to_le_bytes());
         c.frame[4..6].copy_from_slice(&c.mss.to_le_bytes());
-        c.frame[6..8].fill(0);   // csum_start
-        c.frame[8..10].fill(0);  // csum_offset
+        c.frame[6..8].copy_from_slice(&csum_start.to_le_bytes());
+        c.frame[8..10].copy_from_slice(&TCP_CSUM_OFF.to_le_bytes());
         c.frame[10..12].copy_from_slice(&1u16.to_le_bytes()); // num_buffers
+        NS_GRO_FRAMES.fetch_add(1, AtOrd::Relaxed);
+        NS_GRO_SEGS.fetch_add(c.seg_count as u64, AtOrd::Relaxed);
     } else {
         c.frame[0..12].fill(0);
     }
+}
+
+/// One's-complement folded sum of the TCP pseudo-header with length 0 — the
+/// CHECKSUM_PARTIAL seed for a GSO frame (the guest adds per-segment length +
+/// data when completing each segment's checksum). Matches `~csum_tcpudp_magic
+/// (src, dst, 0, IPPROTO_TCP, 0)`.
+fn tcp_pseudo_partial(src: [u8; 4], dst: [u8; 4]) -> u16 {
+    let mut sum: u32 = (u16::from_be_bytes([src[0], src[1]]) as u32)
+        + (u16::from_be_bytes([src[2], src[3]]) as u32)
+        + (u16::from_be_bytes([dst[0], dst[1]]) as u32)
+        + (u16::from_be_bytes([dst[2], dst[3]]) as u32)
+        + PROTO_TCP as u32; // + length 0
+    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
+    sum as u16
 }
 
 fn gro_flush_slot(tbl: &mut [Option<GroCtx>; GRO_SLOTS], i: usize) {
@@ -1121,6 +1155,18 @@ pub fn pump(
                 "[netstat]   per-pkt: inject={}ns (consumer) | producer: netdev={}ns stack={}ns/pkt txflush={}ns/poll  poll_pkts={}",
                 inj_ns, ns(p_netdev, p_pkts), ns(p_stack, p_pkts), ns(p_txflush, pumps), p_pkts,
             );
+            // RX-GRO effectiveness: coalesced GSO frames/s + avg segments each
+            // (the packet-reduction factor seen by the guest).
+            let gro_frames = NS_GRO_FRAMES.swap(0, AtOrd::Relaxed);
+            let gro_segs = NS_GRO_SEGS.swap(0, AtOrd::Relaxed);
+            if GRO_ENABLED.load(AtOrd::Relaxed) {
+                kprintln!(
+                    "[netstat]   gro {}/s frames | avg {} segs/frame | {} segs/s merged",
+                    gro_frames / secs,
+                    if gro_frames > 0 { gro_segs / gro_frames } else { 0 },
+                    gro_segs / secs,
+                );
+            }
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
     } else if last == 0 {
@@ -1222,7 +1268,7 @@ pub fn reset_sessions() {
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
               &NS_DROPS, &NS_HIGHWATER, &NS_LAST_TICK, &NS_IQ_HI,
               &NS_RXLAT_SUM, &NS_RXLAT_N, &NS_RXLAT_MAX,
-              &NS_TCP_FLOWS, &NS_UDP_FLOWS] {
+              &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS] {
         c.store(0, AtOrd::Relaxed);
     }
 }
