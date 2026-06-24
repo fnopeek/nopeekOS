@@ -89,12 +89,17 @@ const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;
 const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;
 const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
 /// Master switch for RX GRO feature advertisement (GUEST_CSUM/TSO4/TSO6 →
-/// guest enters "big packets" mode). v0.225.4 ISOLATION DIAGNOSTIC: this is
-/// ON but nat.rs `GRO_COALESCE` is OFF → the guest is in big-packets mode but
-/// every RX frame is a plain pass-through. If connectivity works here, big-
-/// packets/inject is innocent and the coalesced GSO frame is the culprit; if
-/// it breaks, the offload advertisement / big-packets path itself is.
-const NET_GRO_ENABLED: bool = true;
+/// guest enters "big packets" mode).
+///
+/// 2026-06-24 ISOLATION RESULT (v0.225.4, GRO_COALESCE=false): advertising the
+/// offloads alone — with NO coalescing, every RX frame a plain pass-through —
+/// kills ALL guest networking (zero netstat traffic, no internet). So the
+/// culprit is the offload-advertise / big-packets path itself, NOT the
+/// coalesced GSO frame. DISABLED (false) again to keep main working. Next
+/// (tomorrow): get the guest log to see whether virtio_net probes / eth0 comes
+/// up in big-packets mode, or switch to the mergeable-rxbuf RX path (QEMU
+/// default, best-tested) instead of big-packets. See project_microvm_rx_gro.
+const NET_GRO_ENABLED: bool = false;
 
 // virtio device-status bit (driver finished feature negotiation + setup).
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
