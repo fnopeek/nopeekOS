@@ -81,6 +81,18 @@ const DC_STATUS_OFF: u32 = 0x06;  // u16
 // virtio-net feature bits we advertise
 const VIRTIO_NET_F_MAC: u32 = 5;
 const VIRTIO_NET_F_STATUS: u32 = 16;
+// Guest RX-offload features. Negotiating GUEST_TSO4 puts Linux's virtio-net in
+// "big packets" mode (page-chain RX buffers) and lets it accept coalesced GSO
+// frames → host-side GRO in nat.rs merges bulk TCP segments (throughput +
+// loaded latency). GUEST_CSUM is the prerequisite for the TSO bits.
+const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;
+const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;
+const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
+/// Master switch for RX GRO. Flip false to fall back to plain per-packet RX.
+const NET_GRO_ENABLED: bool = true;
+
+// virtio device-status bit (driver finished feature negotiation + setup).
+const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 
 // Status bits
 const VIRTIO_NET_S_LINK_UP: u16 = 1;
@@ -400,7 +412,13 @@ impl VirtioNet {
                     1 // VIRTIO_F_VERSION_1 (bit 32)
                 } else {
                     // bit 5 = VIRTIO_NET_F_MAC, bit 16 = VIRTIO_NET_F_STATUS
-                    (1u64 << VIRTIO_NET_F_MAC) | (1u64 << VIRTIO_NET_F_STATUS)
+                    let mut f = (1u64 << VIRTIO_NET_F_MAC) | (1u64 << VIRTIO_NET_F_STATUS);
+                    if NET_GRO_ENABLED {
+                        f |= (1u64 << VIRTIO_NET_F_GUEST_CSUM)
+                           | (1u64 << VIRTIO_NET_F_GUEST_TSO4)
+                           | (1u64 << VIRTIO_NET_F_GUEST_TSO6);
+                    }
+                    f
                 }
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
@@ -457,6 +475,11 @@ impl VirtioNet {
                     self.device_feature_select = 0;
                     self.queue_select = 0;
                     self.config_generation = self.config_generation.wrapping_add(1);
+                    super::nat::set_gro_enabled(false);
+                } else if self.device_status & VIRTIO_STATUS_DRIVER_OK != 0 {
+                    // Feature negotiation is done by DRIVER_OK — latch whether
+                    // the guest will accept coalesced GSO RX frames.
+                    super::nat::set_gro_enabled(self.guest_gso_ok());
                 }
             }
             CC_QUEUE_SELECT => self.queue_select = val as u16,
@@ -516,6 +539,12 @@ impl VirtioNet {
     /// that flag while polling the ring; firing IRQ10 anyway preempts the drain,
     /// so the guest reposts buffers slower → RX ring exhausts → INBOUND_Q
     /// overflows → TCP sawtooth. The pump checks this before injecting IRQ10.
+    /// True once the driver accepted GUEST_TSO4 — i.e. it will accept the
+    /// coalesced GSO RX frames the host-side GRO engine produces.
+    fn guest_gso_ok(&self) -> bool {
+        NET_GRO_ENABLED && self.driver_features[0] & (1u32 << VIRTIO_NET_F_GUEST_TSO4) != 0
+    }
+
     pub(super) fn rx_wants_irq(&self, mem: &GuestMem) -> bool {
         match self.queues.get(0) {
             Some(q) if q.enable != 0 && q.size != 0 =>

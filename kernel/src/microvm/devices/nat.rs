@@ -202,6 +202,9 @@ fn frame_pool_get(len: usize) -> Vec<u8> {
 
 /// Return a frame buffer to the pool for reuse (dropped if the pool is full).
 fn frame_pool_put(buf: Vec<u8>) {
+    // GRO superframes grow well past a normal frame; don't pool them or we'd
+    // hand a 60 KB buffer back for a 1.5 KB frame forever.
+    if buf.capacity() > FRAME_BUF_CAP { return; }
     let mut pool = FRAME_POOL.lock();
     if pool.len() < FRAME_POOL_MAX { pool.push(buf); }
 }
@@ -232,6 +235,196 @@ fn frame_pool_put(buf: Vec<u8>) {
 /// time-based AQM (drop by head-of-queue standing age via the per-packet
 /// `push_tsc` we already record), which gives low latency AND throughput.
 const INBOUND_MAX: usize = 1024;
+
+// ─── RX GRO (generic receive offload) ──────────────────────────────────────
+// At ~1 Gbit the guest sees ~30–44k packets/s of 1.5 KB TCP segments. Without
+// offload the guest vCPU is CPU-bound just running its per-packet RX path
+// (NAPI/softirq/TCP) → throughput caps at ~½ the host-direct rate AND latency-
+// sensitive traffic (a speedtest ping) starves behind the bulk backlog INSIDE
+// the guest (measured: ~500 ms loaded latency vs ~21 ms native; our own rxlat
+// is only ~2.5 ms → the delay is in the guest, not our delivery).
+//
+// Fix: coalesce contiguous, same-flow bulk TCP segments into one large GSO
+// frame before injecting — host-side GRO, exactly what a NIC's LRO does. The
+// guest negotiates VIRTIO_NET_F_GUEST_TSO4 → "big packets" mode (page-chain RX
+// buffers, which inject_rx already walks). One ~60 KB super-frame replaces ~40
+// segments → ~40× fewer packets up the guest stack.
+//
+// Only FULL-size bulk segments are ever held; ACKs, SYN/FIN/RST, small packets
+// and the latency probe pass through instantly, and GRO_TIMEOUT_US bounds any
+// hold. Gated on the guest actually negotiating the feature → inert otherwise.
+
+/// Set by the emulated virtio-net device once the driver negotiates
+/// VIRTIO_NET_F_GUEST_TSO4 (DRIVER_OK); cleared on reset / VM teardown.
+static GRO_ENABLED: AtomicBool = AtomicBool::new(false);
+pub fn set_gro_enabled(on: bool) { GRO_ENABLED.store(on, AtOrd::Relaxed); }
+
+const GRO_SLOTS:       usize = 16;      // concurrent flows we coalesce
+const GRO_MAX_PAYLOAD: usize = 60_000;  // < 64 KiB IP total-length limit
+const GRO_MAX_SEGS:    usize = 44;      // ~ one 64 KB superframe of MSS≈1448
+const GRO_START_MIN:   usize = 1000;    // only hold near-full (mid-burst) segs
+const GRO_TIMEOUT_US:  u64   = 200;     // max hold before a forced flush
+
+const VNET_HDR_F_DATA_VALID: u8 = 2;
+const VNET_HDR_GSO_TCPV4:    u8 = 1;
+const TCP_FIN: u8 = 0x01;
+const TCP_SYN: u8 = 0x02;
+const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
+const TCP_URG: u8 = 0x20;
+
+struct GroCtx {
+    gport: u16,
+    remote_ip: [u8; 4],
+    remote_port: u16,
+    next_seq: u32,        // sequence number the next segment must carry
+    mss: u16,             // payload size of the merged segments (= gso_size)
+    seg_count: usize,
+    payload_bytes: usize,
+    ip_off: usize,
+    l4_off: usize,        // TCP header offset in the base frame
+    tcp_hl: usize,
+    last_tsc: u64,
+    frame: Vec<u8>,       // accumulating vnet+eth+ip+tcp+payload frame
+}
+
+static GRO: Mutex<[Option<GroCtx>; GRO_SLOTS]> = Mutex::new([const { None }; GRO_SLOTS]);
+
+/// IP total-length + checksum, then the virtio-net GSO header (only when >1
+/// segment was actually merged; a lone segment keeps its original checksum).
+fn gro_finalize(c: &mut GroCtx) {
+    let ip_off = c.ip_off;
+    let ihl = (c.frame[ip_off] & 0x0F) as usize * 4;
+    let total = ihl + c.tcp_hl + c.payload_bytes;
+    c.frame[ip_off + 2..ip_off + 4].copy_from_slice(&(total as u16).to_be_bytes());
+    c.frame[ip_off + 10] = 0; c.frame[ip_off + 11] = 0;
+    let ipc = ipv4_checksum(&c.frame[ip_off..ip_off + ihl]);
+    c.frame[ip_off + 10..ip_off + 12].copy_from_slice(&ipc.to_be_bytes());
+    if c.seg_count > 1 {
+        // LRO'd TCPv4 frame of `mss`-sized segments, checksum already validated
+        // (we merged verified segments) → guest skips the stale TCP checksum.
+        c.frame[0] = VNET_HDR_F_DATA_VALID;
+        c.frame[1] = VNET_HDR_GSO_TCPV4;
+        let hdr_len = (ETH_HDR_LEN + ihl + c.tcp_hl) as u16;
+        c.frame[2..4].copy_from_slice(&hdr_len.to_le_bytes());
+        c.frame[4..6].copy_from_slice(&c.mss.to_le_bytes());
+        c.frame[6..8].fill(0);   // csum_start
+        c.frame[8..10].fill(0);  // csum_offset
+        c.frame[10..12].copy_from_slice(&1u16.to_le_bytes()); // num_buffers
+    } else {
+        c.frame[0..12].fill(0);
+    }
+}
+
+fn gro_flush_slot(tbl: &mut [Option<GroCtx>; GRO_SLOTS], i: usize) {
+    if let Some(mut c) = tbl[i].take() {
+        gro_finalize(&mut c);
+        INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), c.frame));
+    }
+}
+
+/// Flush contexts idle longer than GRO_TIMEOUT_US so a stalled burst is never
+/// held back. Called from the pump (frequent, cheap).
+fn gro_flush_expired(now: u64) {
+    let timeout = (crate::interrupts::tsc_freq() / 1_000_000).max(1) * GRO_TIMEOUT_US;
+    let mut tbl = GRO.lock();
+    for i in 0..GRO_SLOTS {
+        let stale = matches!(tbl[i].as_ref(), Some(c) if now.wrapping_sub(c.last_tsc) > timeout);
+        if stale { gro_flush_slot(&mut tbl, i); }
+    }
+}
+
+/// A free slot, or the least-recently-appended flow evicted (flushed).
+fn gro_alloc_slot(tbl: &mut [Option<GroCtx>; GRO_SLOTS], now: u64) -> usize {
+    if let Some(i) = tbl.iter().position(|c| c.is_none()) { return i; }
+    let (mut oldest, mut oldest_age) = (0usize, 0u64);
+    for (i, c) in tbl.iter().enumerate() {
+        if let Some(c) = c {
+            let age = now.wrapping_sub(c.last_tsc);
+            if age >= oldest_age { oldest_age = age; oldest = i; }
+        }
+    }
+    gro_flush_slot(tbl, oldest);
+    oldest
+}
+
+/// Offer a freshly-rewritten inbound TCP frame to the GRO engine. Returns
+/// `None` if consumed (held or appended), or `Some(frame)` to inject as-is.
+fn gro_offer(frame: Vec<u8>) -> Option<Vec<u8>> {
+    let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
+    if frame.len() < ip_off + IPV4_HDR_LEN { return Some(frame); }
+    let ihl = (frame[ip_off] & 0x0F) as usize * 4;
+    let l4_off = ip_off + ihl;
+    if ihl < IPV4_HDR_LEN || frame.len() < l4_off + TCP_HDR_LEN { return Some(frame); }
+    let tcp_hl = ((frame[l4_off + 12] >> 4) & 0x0F) as usize * 4;
+    let payload_off = l4_off + tcp_hl;
+    if tcp_hl < TCP_HDR_LEN || frame.len() < payload_off { return Some(frame); }
+    let payload_len = frame.len() - payload_off;
+    let flags = frame[l4_off + 13];
+    let seq = u32::from_be_bytes([frame[l4_off + 4], frame[l4_off + 5], frame[l4_off + 6], frame[l4_off + 7]]);
+    let remote_ip = [frame[ip_off + 12], frame[ip_off + 13], frame[ip_off + 14], frame[ip_off + 15]];
+    let remote_port = u16::from_be_bytes([frame[l4_off], frame[l4_off + 1]]);
+    let gport = u16::from_be_bytes([frame[l4_off + 2], frame[l4_off + 3]]);
+    let now = crate::interrupts::rdtsc();
+
+    let mut tbl = GRO.lock();
+    let slot = tbl.iter().position(|c| matches!(c, Some(c)
+        if c.gport == gport && c.remote_port == remote_port && c.remote_ip == remote_ip));
+
+    // Control / zero-payload segments are never coalesced: flush this flow's
+    // pending data first (ordering), then inject this one directly.
+    if payload_len == 0 || flags & (TCP_SYN | TCP_FIN | TCP_RST | TCP_URG) != 0 {
+        if let Some(i) = slot { gro_flush_slot(&mut tbl, i); }
+        return Some(frame);
+    }
+
+    if let Some(i) = slot {
+        let c = tbl[i].as_mut().unwrap();
+        let appendable = seq == c.next_seq
+            && payload_len <= c.mss as usize
+            && c.payload_bytes + payload_len <= GRO_MAX_PAYLOAD
+            && c.seg_count < GRO_MAX_SEGS;
+        if appendable {
+            c.frame.extend_from_slice(&frame[payload_off..]);
+            c.next_seq = c.next_seq.wrapping_add(payload_len as u32);
+            c.payload_bytes += payload_len;
+            c.seg_count += 1;
+            c.last_tsc = now;
+            // Carry the latest ACK + window into the merged TCP header.
+            let bl4 = c.l4_off;
+            c.frame[bl4 + 8..bl4 + 12].copy_from_slice(&frame[l4_off + 8..l4_off + 12]);
+            c.frame[bl4 + 14..bl4 + 16].copy_from_slice(&frame[l4_off + 14..l4_off + 16]);
+            let tail = payload_len < c.mss as usize;
+            if tail || flags & TCP_PSH != 0
+                || c.payload_bytes >= GRO_MAX_PAYLOAD || c.seg_count >= GRO_MAX_SEGS {
+                gro_flush_slot(&mut tbl, i);
+            }
+            frame_pool_put(frame);
+            return None;
+        }
+        // Not contiguous / size change: flush the open burst, then maybe start
+        // a fresh one with this segment below.
+        gro_flush_slot(&mut tbl, i);
+    }
+
+    // Hold only a near-full, non-PSH segment (likely mid-burst). PSH or small
+    // ⇒ end-of-burst ⇒ inject directly (no latency hold).
+    if payload_len >= GRO_START_MIN && flags & TCP_PSH == 0 {
+        let i = gro_alloc_slot(&mut tbl, now);
+        tbl[i] = Some(GroCtx {
+            gport, remote_ip, remote_port,
+            next_seq: seq.wrapping_add(payload_len as u32),
+            mss: payload_len as u16,
+            seg_count: 1,
+            payload_bytes: payload_len,
+            ip_off, l4_off, tcp_hl,
+            last_tsc: now,
+            frame,
+        });
+        return None;
+    }
+    Some(frame)
+}
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
@@ -469,7 +662,16 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
         fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
     }
 
-    INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), frame));
+    // TCP bulk → host-side GRO (coalesce into GSO superframes); everything
+    // else (and GRO pass-throughs) goes straight to the staging queue.
+    if proto == PROTO_TCP && GRO_ENABLED.load(AtOrd::Relaxed) {
+        match gro_offer(frame) {
+            None => return true,
+            Some(f) => { INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), f)); }
+        }
+    } else {
+        INBOUND_Q.lock().push_back((crate::interrupts::rdtsc(), frame));
+    }
     true
 }
 
@@ -491,6 +693,8 @@ pub fn l3_reset() {
     L3_ACTIVE.store(false, AtOrd::Release);
     *L3.lock() = [const { None }; L3_MAX];
     INBOUND_Q.lock().clear();
+    *GRO.lock() = [const { None }; GRO_SLOTS]; // drop held GRO bursts
+    GRO_ENABLED.store(false, AtOrd::Relaxed);
     *FRAME_POOL.lock() = Vec::new(); // release recycled buffers
 }
 
@@ -959,6 +1163,11 @@ fn drain_inbound(
     net: &mut super::virtio_net_pci::VirtioNet,
     mem: &GuestMem,
 ) -> bool {
+    // Push out any GRO burst that's been held past its latency budget, so its
+    // superframe is delivered in this same drain pass.
+    if GRO_ENABLED.load(AtOrd::Relaxed) {
+        gro_flush_expired(crate::interrupts::rdtsc());
+    }
     let mut any = false;
     loop {
         let item = { INBOUND_Q.lock().pop_front() };
