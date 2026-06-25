@@ -447,17 +447,26 @@ impl VirtioNet {
         let v: u64 = match off {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select as u64,
             CC_DEVICE_FEATURE => {
-                let f = if self.device_feature_select == 1 {
-                    1 // VIRTIO_F_VERSION_1 (bit 32)
-                } else {
-                    // bit 5 = VIRTIO_NET_F_MAC, bit 16 = VIRTIO_NET_F_STATUS
-                    let mut f = (1u64 << VIRTIO_NET_F_MAC) | (1u64 << VIRTIO_NET_F_STATUS);
-                    if NET_GRO_ENABLED {
-                        f |= (1u64 << VIRTIO_NET_F_GUEST_CSUM)
-                           | (1u64 << VIRTIO_NET_F_GUEST_TSO4)
-                           | (1u64 << VIRTIO_NET_F_GUEST_TSO6);
+                // Feature words: 0 = device/transport low (bits 0..31),
+                // 1 = transport high (bit 32 = VERSION_1). Words >= 2 carry
+                // NOTHING — and MUST read back 0. Linux 6.18 reads the
+                // extended feature range (selects 2/3, bits 64..127); if we
+                // mirror the low word there, the guest negotiates a phantom
+                // feature it happens to support in that range and the wire
+                // protocol diverges (this was the "no internet" regression).
+                let f = match self.device_feature_select {
+                    0 => {
+                        // bit 5 = VIRTIO_NET_F_MAC, bit 16 = VIRTIO_NET_F_STATUS
+                        let mut f = (1u64 << VIRTIO_NET_F_MAC) | (1u64 << VIRTIO_NET_F_STATUS);
+                        if NET_GRO_ENABLED {
+                            f |= (1u64 << VIRTIO_NET_F_GUEST_CSUM)
+                               | (1u64 << VIRTIO_NET_F_GUEST_TSO4)
+                               | (1u64 << VIRTIO_NET_F_GUEST_TSO6);
+                        }
+                        f
                     }
-                    f
+                    1 => 1, // VIRTIO_F_VERSION_1 (bit 32)
+                    _ => 0,
                 };
                 if neg_trace_allowed() {
                     kprintln!("[net-gro] OFFER dev_feat[sel={}] = 0x{:08x} (w{})",
@@ -496,8 +505,14 @@ impl VirtioNet {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select = val as u32,
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select = val as u32,
             CC_DRIVER_FEATURE => {
-                let half = (self.driver_feature_select & 1) as usize;
-                self.driver_features[half] = val as u32;
+                // Only words 0/1 carry features we offer. Ignore the guest's
+                // writes for words >= 2 (it writes 0 there now) — masking them
+                // onto [0]/[1] with `& 1` was what corrupted the negotiated set
+                // (sel=2 clobbered word 0, sel=3 clobbered word 1).
+                let sel = self.driver_feature_select as usize;
+                if sel < 2 {
+                    self.driver_features[sel] = val as u32;
+                }
                 if neg_trace_allowed() {
                     kprintln!("[net-gro] COMMIT drv_feat[sel={}] = 0x{:08x} (w{})",
                         self.driver_feature_select, val as u32, width);
