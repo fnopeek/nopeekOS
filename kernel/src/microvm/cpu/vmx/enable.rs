@@ -581,6 +581,11 @@ pub struct VmShared {
     /// Host tick of the last injected guest timer IRQ0 (≈100 Hz). The only
     /// thing that wakes a time-blocked guest task (no PIT/LAPIC source).
     last_timer_tick: u64,
+    /// Host TSC of the last TSC-paced PIT IRQ0. The PIT has no i8254 reload
+    /// tracking, so we pace it at ~1 kHz off the TSC to MATCH the guest's
+    /// programmed LAPIC-timer rate (CONFIG_HZ=1000) — see the guest-timer
+    /// block. SVM's `last_pit_tsc` twin.
+    last_pit_tsc: u64,
     /// `ticks()` of the last virtio-gpu display config-change IRQ — rate-
     /// limits the resize round-trip (R2 debounce).
     last_cfg_tick: u64,
@@ -772,6 +777,7 @@ impl VmContext {
                     pci: crate::microvm::devices::PciBus::new(),
                     pic: crate::microvm::devices::pic8259::Pic8259::new(),
                     last_timer_tick: 0,
+                    last_pit_tsc: 0,
                     last_cfg_tick: 0,
                     pending_irqs: 0,
                     pit_enabled: true,
@@ -1613,6 +1619,44 @@ impl VmContext {
                     self.vcpu.consecutive_idle = 0;
                     continue;
                 }
+                // ── Guest timer FIRST, at the rate the GUEST programmed ──
+                // (Ported 1:1 from the SVM path, v0.225.16.) The guest is
+                // CONFIG_HZ=1000 and programs its LAPIC timer (TMICT, TSC-
+                // calibrated) for ~1 ms periods. Pacing it at our 100 Hz
+                // `ticks()` (the old code below) ran the guest's jiffies +
+                // every hrtimer (TCP pacing / delayed-ACK / RTO / NAPI) 10×
+                // slow → networking quantized to data-per-100 Hz-tick (the
+                // ~175 ms `drainmax` measured on bare-metal Intel). Honour the
+                // programmed deadline here; `timer_due()` is rate-capped at
+                // ~1 kHz internally, and net IRQ10 still fires on the many
+                // net-MMIO exits via the per-exit pump, so it isn't starved.
+                // LVTT is per-vCPU; the PIT is BSP-only + boot-only.
+                if vmx_lapic_on() && self.vcpu.lapic.timer_due() {
+                    if let Some(vec) = self.vcpu.lapic.timer_tick_vector() {
+                        let _ = vmcs::inject_external_irq(vec);
+                        self.vcpu.last_lapic_tick = crate::interrupts::ticks();
+                        self.vcpu.consecutive_idle = 0;
+                        crate::microvm::devices::nat::note_guest_timer();
+                        continue;
+                    }
+                }
+                // PIT (IRQ0): boot + the LVTT-vs-PIT 1:1 verification only. No
+                // i8254 reload tracking, so pace at ~1 kHz off the TSC to MATCH
+                // the LAPIC timer's programmed rate (else verification fails and
+                // Linux drops the LVTT). Disabled once Linux adopts the LVTT.
+                if is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled {
+                    let tsc_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
+                    let now_tsc = crate::interrupts::rdtsc();
+                    if now_tsc.wrapping_sub(sh.last_pit_tsc) >= tsc_ms {
+                        sh.last_pit_tsc = now_tsc;
+                        sh.last_timer_tick = crate::interrupts::ticks();
+                        let vector = sh.pic.vector_for_irq(0);
+                        let _ = vmcs::inject_external_irq(vector);
+                        self.vcpu.consecutive_idle = 0;
+                        crate::microvm::devices::nat::note_guest_timer();
+                        continue;
+                    }
+                }
                 // External interrupt — host IRQ that arrived during
                 // guest run. The `sti` at the tail of run_guest_once
                 // already let the host IDT dispatch it; just resume.
@@ -1667,14 +1711,29 @@ impl VmContext {
                 // (below) + cross-vCPU IPIs (above). Guest SMP.
                 // Deferred device IRQ (a virtio queue-kick the guest issued
                 // while IF=0, latched by `deliver_irq_vmx`) is now deliverable
-                // — inject the lowest pending line. Mirrors the SVM drain.
+                // — inject the lowest pending line. BUT yield to an overdue
+                // guest timer first: with the per-exit net-RX pump, IRQ10 can
+                // be pending almost every pass; draining here unconditionally
+                // would starve jiffies → RCU stall. If the timer is overdue
+                // (≥ TIMER_MAX_SKIP=3 host ticks) skip this pass and let the
+                // timer block fire it; pending_irqs stays set (≤30 ms jitter).
+                // Mirrors the SVM drain.
                 if is_bsp && sh.pending_irqs != 0 {
+                    let now_t = crate::interrupts::ticks();
+                    let timer_overdue = (sh.pic.irq_unmasked(0)
+                        && sh.pit_enabled
+                        && now_t.wrapping_sub(sh.last_timer_tick) >= 3)
+                        || (vmx_lapic_on()
+                            && self.vcpu.lapic.timer_tick_vector().is_some()
+                            && now_t.wrapping_sub(self.vcpu.last_lapic_tick) >= 3);
+                    if !timer_overdue {
                     let line = sh.pending_irqs.trailing_zeros() as u8;
                     sh.pending_irqs &= !(1u16 << line);
                     let vector = sh.pic.vector_for_irq(line);
                     let _ = vmcs::inject_external_irq(vector);
                     self.vcpu.consecutive_idle = 0;
                     continue;
+                    }
                 }
                 if is_bsp && sh.pic.irq_unmasked(9) {
                     let wid = crate::microvm::vm_window();
@@ -1783,20 +1842,10 @@ impl VmContext {
                         continue;
                     }
                 }
-                // (periodic timer — does NOT reset consecutive_idle; see above.)
-                if pit_live && now != sh.last_timer_tick {
-                    sh.last_timer_tick = now;
-                    let vector = sh.pic.vector_for_irq(0);
-                    let _ = vmcs::inject_external_irq(vector);
-                    continue;
-                }
-                if let Some(vec) = lapic_vec {
-                    if now != self.vcpu.last_lapic_tick {
-                        self.vcpu.last_lapic_tick = now;
-                        let _ = vmcs::inject_external_irq(vec);
-                        continue;
-                    }
-                }
+                // (Normal 100 Hz PIT/LAPIC slots removed — the guest timer is now
+                // delivered at its programmed ~1 kHz rate in the priority block at
+                // the top of this match arm. The forced slots above stay as a
+                // ≤30 ms anti-starvation safety under a net-IRQ storm.)
                 // Pure timer-tick → idle counter advances. Real net data
                 // (`pumped`) resets it. Merely having open NAT sessions
                 // does NOT for a windowed VM — a browser keeps connections
