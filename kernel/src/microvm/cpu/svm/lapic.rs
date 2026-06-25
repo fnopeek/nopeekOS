@@ -105,6 +105,10 @@ pub struct LocalApic {
     /// count-down origin. Mirrors KVM `lapic_timer.target_expiration`'s
     /// role, expressed in host TSC instead of ktime.
     timer_start_tsc: u64,
+    /// One-shot latch: a one-shot timer fires exactly once per arm; cleared on
+    /// every TMICT write (the guest re-arms for each hrtimer deadline). Periodic
+    /// mode ignores this (re-arms by advancing the origin each period).
+    timer_fired: bool,
 }
 
 impl LocalApic {
@@ -119,7 +123,7 @@ impl LocalApic {
         // Reset state: APIC software-disabled, spurious vector 0xFF,
         // all LVTs masked (Linux clears + re-enables in setup_local_APIC).
         regs[idx(APIC_LVTT)] = LVT_MASKED;
-        LocalApic { regs, timer_start_tsc: 0 }
+        LocalApic { regs, timer_start_tsc: 0, timer_fired: false }
     }
 
     /// True once Linux has software-enabled the APIC (SPIV bit 8).
@@ -189,6 +193,7 @@ impl LocalApic {
             APIC_TMICT => {
                 self.regs[idx(APIC_TMICT)] = val;
                 self.timer_start_tsc = rdtsc();
+                self.timer_fired = false; // re-armed → one-shot may fire again
             }
             APIC_TDCR => self.regs[idx(APIC_TDCR)] = val & 0xB,
             // ICR low: clear BUSY (Linux polls it for idle), store, and
@@ -221,6 +226,39 @@ impl LocalApic {
     /// vector. We pace one tick per host 100 Hz `ticks()` exactly like
     /// the IRQ0 path (Linux's wall-clock is TSC-based; jiffies just need
     /// a steady tick).
+    /// True if the programmed LAPIC timer has reached 0 since the last delivery
+    /// — i.e. a tick is due NOW, at the rate the GUEST programmed (its TMICT is
+    /// TSC-calibrated). The inject path delivers on this instead of pacing one
+    /// tick per host 100 Hz `ticks()`: the guest is CONFIG_HZ=1000, so the old
+    /// 100 Hz pacing ran its jiffies + every hrtimer (TCP pacing / delayed-ACK /
+    /// RTO / NAPI) 10× slow, quantizing download bandwidth to data-per-100 Hz-
+    /// tick. Periodic re-arms by advancing the TSC origin each whole period (so
+    /// `tmcct` stays exact); one-shot fires once until the guest re-writes TMICT.
+    pub fn timer_due(&mut self) -> bool {
+        let tmict = self.regs[idx(APIC_TMICT)];
+        if !self.enabled() || self.regs[idx(APIC_LVTT)] & LVT_MASKED != 0 || tmict == 0 {
+            return false;
+        }
+        let period = (tmict as u64) * self.divide_count();
+        if period == 0 {
+            return false;
+        }
+        let elapsed = rdtsc().saturating_sub(self.timer_start_tsc);
+        if elapsed < period {
+            return false;
+        }
+        if self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0 {
+            let periods = elapsed / period;
+            self.timer_start_tsc = self.timer_start_tsc.wrapping_add(periods * period);
+            true
+        } else if !self.timer_fired {
+            self.timer_fired = true;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn timer_tick_vector(&self) -> Option<u8> {
         let lvtt = self.regs[idx(APIC_LVTT)];
         if self.enabled() && lvtt & LVT_MASKED == 0 && self.regs[idx(APIC_TMICT)] != 0 {
