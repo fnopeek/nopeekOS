@@ -129,11 +129,14 @@ const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 const VIRTIO_NET_S_LINK_UP: u16 = 1;
 
 const NUM_QUEUES: u16 = 2;
-// 1024 (up from 256): lets the Linux guest post a deeper RX virtqueue so it can
-// hold more available buffers, cutting inject_rx "guest ring full" bails
-// (injfalse) — and with them the INBOUND_Q back-pressure drops — during download
-// bursts. The host NIC ring (drivers/virtio_net.rs) stays QEMU's queue size.
-const MAX_QUEUE_SIZE: u16 = 1024;
+// 4096 (up from 1024): in big-packets mode (GRO on) the guest posts each RX
+// buffer as a ~19-descriptor page chain, so a 1024-deep virtqueue only holds
+// ~53 buffers — which the HW trace showed exhausting under download bursts
+// (rxring min 0, injfalse in the thousands/s). 4096 descriptors → ~215 RX
+// buffers, ~4× the burst headroom → far fewer "guest ring full" bails and the
+// frames-waiting-in-INBOUND_Q latency that comes with them. The host NIC ring
+// (drivers/virtio_net.rs) stays QEMU's queue size.
+const MAX_QUEUE_SIZE: u16 = 4096;
 
 use super::guest_mem::GuestMem;
 use super::nat::{GUEST_MAC, NetCaps};

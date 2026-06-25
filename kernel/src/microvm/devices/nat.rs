@@ -1279,6 +1279,11 @@ fn drain_inbound(
     loop {
         let item = { INBOUND_Q.lock().pop_front() };
         let Some((push_tsc, frame)) = item else { break };
+        // RX is flowing — mark activity even if the inject below fails on a full
+        // guest ring, so the BSP keeps parking event-driven on the RX IRQ
+        // (recently_active) through ring-full stretches instead of falling back
+        // to the 10 ms timer sleep exactly when it's busiest.
+        NS_LAST_ACTIVITY.store(drain_now, AtOrd::Relaxed);
         let inj_t0 = crate::interrupts::rdtsc();
         let injected = net.inject_rx(mem, &frame);
         NS_INJECT_CYC.fetch_add(crate::interrupts::rdtsc().saturating_sub(inj_t0), AtOrd::Relaxed);
@@ -1300,10 +1305,6 @@ fn drain_inbound(
             break;
         }
     }
-    // Mark RX activity so the BSP vCPU idle path parks event-driven on the host
-    // NIC RX IRQ (recently_active) instead of a blind 10 ms timer sleep.
-    if any { NS_LAST_ACTIVITY.store(drain_now, AtOrd::Relaxed); }
-
     // Fire the guest's RX IRQ only if we delivered something AND the driver
     // hasn't suppressed interrupts (NAPI poll sets VIRTQ_AVAIL_F_NO_INTERRUPT).
     // Firing IRQ10 during a NAPI poll preempts the guest's ring-drain → it
