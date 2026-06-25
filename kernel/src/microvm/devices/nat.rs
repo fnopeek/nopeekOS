@@ -1181,7 +1181,7 @@ fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
 /// Returns `true` iff at least one segment was injected (caller fires
 /// IRQ 10 to wake the guest's virtio-net driver).
 pub fn pump(
-    net: &mut super::virtio_net_pci::VirtioNet,
+    net: &mut super::virtio_net_dev::VirtioNet,
     mem: &GuestMem,
 ) -> bool {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -1324,7 +1324,7 @@ pub fn pump(
 /// guest's device activity instead of starving at the ~1500/s timer/HLT rate
 /// (that starvation was the download ceiling: pump/s ≪ VM-exits/s).
 pub fn pump_fast(
-    net: &mut super::virtio_net_pci::VirtioNet,
+    net: &mut super::virtio_net_dev::VirtioNet,
     mem: &GuestMem,
 ) -> bool {
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
@@ -1392,7 +1392,7 @@ pub fn note_gpu_transfer(bytes: u64) {
 
 /// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
 fn drain_inbound(
-    net: &mut super::virtio_net_pci::VirtioNet,
+    net: &mut super::virtio_net_dev::VirtioNet,
     mem: &GuestMem,
 ) -> bool {
     // Pump-starvation probe: longest gap between drain passes this window.
