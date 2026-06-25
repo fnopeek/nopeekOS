@@ -122,8 +122,15 @@ const TXD_CMD_IFCS: u8  = 1 << 1;   // Insert FCS/CRC
 const TXD_CMD_RS: u8    = 1 << 3;   // Report Status
 const TXD_STAT_DD: u8   = 1 << 0;   // Descriptor Done
 
-const NUM_RX_DESC: usize = 32;
-const NUM_TX_DESC: usize = 32;
+// 256 (up from 32 — Linux igc/e1000e default). The microvm RX producer drains
+// the ring on a SHARED worker core, so it gets a turn only every ~2.7 ms (one
+// guest-vCPU slice). A 32-desc ring (~32 frames) overflows at ~100 Mbit between
+// drains → silent NIC drops → guest-TCP backoff (the measured i3 cap, while
+// host-direct on the SAME NIC busy-spins the drain and hits ~600). 256 frames of
+// headroom lets the periodic drain keep up to ~1 Gbit. 256*16=4096 B ring (RDLEN
+// %128==0) + 256*2048=512 KiB buffers, both allocated once at boot.
+const NUM_RX_DESC: usize = 256;
+const NUM_TX_DESC: usize = 256;
 const RX_BUF_SIZE: usize = 2048;
 
 /// Legacy RX Descriptor (16 bytes, for e1000)
