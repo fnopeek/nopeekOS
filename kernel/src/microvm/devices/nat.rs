@@ -305,7 +305,7 @@ static NS_GRO_SEGS:   AtomicU64 = AtomicU64::new(0);
 // Set false to deliver frames individually (smooth) and see if the single-conn
 // window ramps. If it does, GRO's burstiness is the cap → redesign GRO to pace
 // delivery instead of one-burst-per-RTT.
-const GRO_COALESCE: bool = false;
+const GRO_COALESCE: bool = true;
 
 const GRO_SLOTS:       usize = 16;      // concurrent flows we coalesce
 const GRO_MAX_PAYLOAD: usize = 60_000;  // < 64 KiB IP total-length limit

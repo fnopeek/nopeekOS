@@ -109,6 +109,14 @@ pub struct LocalApic {
     /// every TMICT write (the guest re-arms for each hrtimer deadline). Periodic
     /// mode ignores this (re-arms by advancing the origin each period).
     timer_fired: bool,
+    /// Host TSC of the last timer-IRQ delivery — rate-caps injection at ~1 kHz.
+    /// CONFIG_HZ=1000 means the guest programs ~1 ms ticks, but during bursts of
+    /// short hrtimers (TCP pacing at connection setup) it can arm ~40 µs one-
+    /// shots; firing every one (~25 kHz, measured) with priority over IRQ10
+    /// STARVES the network at cold start (the "first speedtest after boot is far
+    /// worse" symptom). The guest tolerates 1 ms granularity (its jiffies tick),
+    /// so cap delivery at ~1 kHz and let IRQ10 keep its slots.
+    last_fire_tsc: u64,
 }
 
 impl LocalApic {
@@ -123,7 +131,7 @@ impl LocalApic {
         // Reset state: APIC software-disabled, spurious vector 0xFF,
         // all LVTs masked (Linux clears + re-enables in setup_local_APIC).
         regs[idx(APIC_LVTT)] = LVT_MASKED;
-        LocalApic { regs, timer_start_tsc: 0, timer_fired: false }
+        LocalApic { regs, timer_start_tsc: 0, timer_fired: false, last_fire_tsc: 0 }
     }
 
     /// True once Linux has software-enabled the APIC (SPIV bit 8).
@@ -243,10 +251,18 @@ impl LocalApic {
         if period == 0 {
             return false;
         }
-        let elapsed = rdtsc().saturating_sub(self.timer_start_tsc);
+        let now = rdtsc();
+        // Rate-cap at ~1 kHz: never deliver two ticks closer than 1 ms apart,
+        // however short the guest's programmed oneshot is (anti-IRQ10-starvation).
+        let min_gap = (crate::interrupts::tsc_freq() / 1000).max(1);
+        if now.wrapping_sub(self.last_fire_tsc) < min_gap {
+            return false;
+        }
+        let elapsed = now.saturating_sub(self.timer_start_tsc);
         if elapsed < period {
             return false;
         }
+        self.last_fire_tsc = now;
         if self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0 {
             let periods = elapsed / period;
             self.timer_start_tsc = self.timer_start_tsc.wrapping_add(periods * period);
