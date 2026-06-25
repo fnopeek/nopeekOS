@@ -1294,13 +1294,15 @@ pub fn pump(
             let rxring_min = NS_RXRING_MIN.swap(u64::MAX, AtOrd::Relaxed);
             let prod_drains = NS_PRODUCER_DRAINS.swap(0, AtOrd::Relaxed);
             let gtimer = NS_GTIMER.swap(0, AtOrd::Relaxed);
+            let net_irq = NS_NET_IRQ.swap(0, AtOrd::Relaxed);
             kprintln!(
-                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s",
+                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s",
                 drain_max / mhz,
                 if rxring_min == u64::MAX { 0 } else { rxring_min },
                 if super::net_rx_worker::active() { "on" } else { "off" },
                 prod_drains / secs,
                 gtimer / secs,
+                net_irq / secs,
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
@@ -1369,6 +1371,10 @@ static NS_PRODUCER_DRAINS: AtomicU64 = AtomicU64::new(0);
 /// the old ~100/s (our wall-clock pacing). Incremented from the SVM inject path.
 static NS_GTIMER: AtomicU64 = AtomicU64::new(0);
 pub fn note_guest_timer() { NS_GTIMER.fetch_add(1, AtOrd::Relaxed); }
+/// Count of net-RX IRQ10 actually raised to the guest (after ITR moderation).
+/// vs the per-packet rate it would be without — the io-EOI-storm signal.
+static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);
+pub fn note_net_irq() { NS_NET_IRQ.fetch_add(1, AtOrd::Relaxed); }
 
 /// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
 fn drain_inbound(
