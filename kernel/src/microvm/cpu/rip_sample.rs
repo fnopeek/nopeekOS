@@ -58,6 +58,25 @@ static H: Mutex<Hist> = Mutex::new(Hist::new());
 /// Lock-free cadence gate so `maybe_dump` doesn't lock on every VM-exit.
 static LAST_DUMP_TSC: AtomicU64 = AtomicU64::new(0);
 
+/// PV-TLB-flush ceiling probe: of all cross-vCPU IPI targets (TLB shootdowns
+/// etc.), how many were PREEMPTED (idle/parked, not running guest) at send time.
+/// That fraction is exactly what KVM_FEATURE_PV_TLB_FLUSH could skip the IPI +
+/// csd_lock_wait for — high → PV pays off, low → vCPUs are all-busy and the
+/// lever is vCPU count instead. Measured host-side, no guest changes needed.
+static IPI_TARGETS: AtomicU64 = AtomicU64::new(0);
+static IPI_TARGETS_PREEMPTED: AtomicU64 = AtomicU64::new(0);
+
+/// Record one cross-vCPU IPI target and whether it was preempted at send time.
+pub fn note_ipi_target(preempted: bool) {
+    if !DEBUG {
+        return;
+    }
+    IPI_TARGETS.fetch_add(1, Ordering::Relaxed);
+    if preempted {
+        IPI_TARGETS_PREEMPTED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Record one guest-RIP sample taken at an `EXIT_INTR` preemption of vCPU
 /// `vcpu`. Space-Saving: hit an existing bucket, else evict the least-frequent
 /// slot inheriting its count (so genuine heavy hitters can't be displaced by a
@@ -129,6 +148,20 @@ fn dump_and_reset(window_us: u64) {
         h.vcpu[0], h.vcpu[1], h.vcpu[2], h.vcpu[3],
         h.vcpu[4], h.vcpu[5], h.vcpu[6], h.vcpu[7],
     );
+
+    // PV-TLB-flush ceiling: % of cross-vCPU IPI targets that were preempted
+    // (idle/parked) at send time — the upper bound on what PV could skip.
+    let tgt = IPI_TARGETS.swap(0, Ordering::Relaxed);
+    let pre = IPI_TARGETS_PREEMPTED.swap(0, Ordering::Relaxed);
+    if tgt > 0 {
+        kprintln!(
+            "[ripsample]   ipi-targets {}/s | preempted {}% ({}/{}) = PV-TLB-flush skip ceiling",
+            tgt / secs,
+            pre * 100 / tgt,
+            pre,
+            tgt,
+        );
+    }
 
     // Top buckets by count (simple selection over 48 slots).
     let total = h.total;
