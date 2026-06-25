@@ -2483,7 +2483,7 @@ fn write_guest_gpr(
 fn handle_mmio_npf_net(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
-    net: &mut crate::microvm::devices::virtio_net_pci::VirtioNet,
+    net: &mut crate::microvm::devices::virtio_net_dev::VirtioNet,
     pic: &crate::microvm::devices::pic8259::Pic8259,
     pending: &mut u16,
     gpa: u64,
