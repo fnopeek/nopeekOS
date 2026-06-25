@@ -620,6 +620,14 @@ pub const MAX_VCPUS: usize = 8;
 static VCPU_HOST_CORE: [AtomicUsize; MAX_VCPUS] =
     [const { AtomicUsize::new(usize::MAX) }; MAX_VCPUS];
 
+/// Last TSC each vCPU took a VM-exit, indexed by apic_id. A running vCPU exits
+/// ≥1 kHz (timer/kicks); a parked/idle one (HLT → fiber yielded, no VMRUN) goes
+/// quiet. `route_ipi` reads it to classify an IPI target as preempted (stale
+/// > ~2 ms) — the PV-TLB-flush skip-ceiling measurement (rip_sample). 0 = never
+/// ran yet (treated as preempted).
+static VCPU_LAST_ACTIVE: [AtomicU64; MAX_VCPUS] =
+    [const { AtomicU64::new(0) }; MAX_VCPUS];
+
 /// Bounded adaptive halt-polling (KVM `halt_poll_ns` model) — see the VMX twin.
 /// Idle vCPU polls its window for a wake before parking; grows on a caught wake,
 /// shrinks on expiry. Replaces the old global `recently_active` spin. µs units.
@@ -1401,6 +1409,12 @@ impl VmContext {
             crate::microvm::cpu::rip_sample::record(rip, self.vcpu.apic_id);
         }
         crate::microvm::cpu::rip_sample::maybe_dump();
+        // Liveness stamp for the PV-TLB-flush preempted-target measurement: a
+        // running vCPU exits ≥1 kHz, a parked one goes quiet (route_ipi reads it).
+        if (self.vcpu.apic_id as usize) < MAX_VCPUS {
+            VCPU_LAST_ACTIVE[self.vcpu.apic_id as usize]
+                .store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+        }
 
         // Exit-reason histogram (diagnosis — `cores` shows the mix).
         crate::microvm::cpu::record_vm_exit(match exit {
@@ -2391,6 +2405,23 @@ fn kick_vcpu_core(target: u8, self_core: usize) {
     crate::smp::kick_host_core(hc);
 }
 
+/// True if vCPU `target` looks preempted (idle/parked) right now: it hasn't
+/// taken a VM-exit in > ~2 ms. A running vCPU exits ≥1 kHz; a parked one (HLT →
+/// fiber yielded → no VMRUN) goes quiet. This is the PV-TLB-flush skip estimate
+/// — a preempted target is one KVM's PV path would mark FLUSH_TLB + skip the IPI.
+fn vcpu_preempted(target: u8) -> bool {
+    let t = target as usize;
+    if t >= MAX_VCPUS {
+        return false;
+    }
+    let last = VCPU_LAST_ACTIVE[t].load(Ordering::Relaxed);
+    if last == 0 {
+        return true; // never ran → definitely not executing guest
+    }
+    let stale = (crate::interrupts::tsc_freq() / 1000) * 2; // ~2 ms of TSC
+    crate::interrupts::rdtsc().wrapping_sub(last) > stale
+}
+
 /// Route a decoded ICR write (guest SMP). FIXED/LOWEST → mark the vector
 /// pending on the target vCPU(s) + kick its host core for prompt delivery;
 /// STARTUP → ask the orchestration layer to spawn the AP at the SIPI vector
@@ -2422,15 +2453,25 @@ fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
                 2 => {
                     for t in 0..n {
                         let edge = sh.ipi_set(t, icr.vector);
-                        if t != sender && edge {
-                            kick_vcpu_core(t, self_core);
+                        if t != sender {
+                            crate::microvm::cpu::rip_sample::note_ipi_target(
+                                vcpu_preempted(t),
+                            );
+                            if edge {
+                                kick_vcpu_core(t, self_core);
+                            }
                         }
                     }
                 } // all incl self
                 _ => {
                     for t in 0..n {
-                        if t != sender && sh.ipi_set(t, icr.vector) {
-                            kick_vcpu_core(t, self_core);
+                        if t != sender {
+                            crate::microvm::cpu::rip_sample::note_ipi_target(
+                                vcpu_preempted(t),
+                            );
+                            if sh.ipi_set(t, icr.vector) {
+                                kick_vcpu_core(t, self_core);
+                            }
                         }
                     }
                 } // all excl self
