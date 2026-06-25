@@ -143,6 +143,15 @@ static NS_UDP_FLOWS: AtomicU64 = AtomicU64::new(0);
 /// whether the bridge cap is per-packet inject cost vs pump cadence. Strip when
 /// done (same dev-tool class as the http -d poll-split profiler).
 static NS_INJECT_CYC: AtomicU64 = AtomicU64::new(0);
+/// Pump-starvation probe: longest gap (TSC) between two `drain_inbound` calls
+/// this window. If `drainmax` (µs) tracks `rxlat max`, the latency spikes are
+/// the BSP pump not running (vCPU busy / descheduled), NOT guest ring
+/// exhaustion (injfalse) or INBOUND_Q backlog (iq). Plus the min count of RX
+/// buffers the guest had posted (`rxring min`) — near 0 ⇒ shallow big-packets
+/// ring is the limiter. Both reset per window.
+static NS_DRAIN_GAP_MAX: AtomicU64 = AtomicU64::new(0);
+static NS_LAST_DRAIN: AtomicU64 = AtomicU64::new(0);
+static NS_RXRING_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
 /// ephemeral range (49152..=65534, net/tcp.rs) so a guest flow can
@@ -1179,6 +1188,16 @@ pub fn pump(
                     gro_segs / secs,
                 );
             }
+            // Latency-spike attribution: drainmax = longest pump gap (µs),
+            // rxring min = fewest RX buffers the guest had ready. If drainmax
+            // ≈ rxlat max ⇒ pump starvation; if rxring min ≈ 0 ⇒ shallow ring.
+            let drain_max = NS_DRAIN_GAP_MAX.swap(0, AtOrd::Relaxed);
+            let rxring_min = NS_RXRING_MIN.swap(u64::MAX, AtOrd::Relaxed);
+            kprintln!(
+                "[netstat]   drainmax {}us | rxring min {}",
+                drain_max / mhz,
+                if rxring_min == u64::MAX { 0 } else { rxring_min },
+            );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
     } else if last == 0 {
@@ -1221,6 +1240,21 @@ fn drain_inbound(
     net: &mut super::virtio_net_pci::VirtioNet,
     mem: &GuestMem,
 ) -> bool {
+    // Pump-starvation probe: longest gap between drain passes this window.
+    let drain_now = crate::interrupts::rdtsc();
+    let last_drain = NS_LAST_DRAIN.swap(drain_now, AtOrd::Relaxed);
+    if last_drain != 0 {
+        let gap = drain_now.wrapping_sub(last_drain);
+        if gap > NS_DRAIN_GAP_MAX.load(AtOrd::Relaxed) {
+            NS_DRAIN_GAP_MAX.store(gap, AtOrd::Relaxed);
+        }
+    }
+    // Min RX buffers the guest had ready at the start of a drain pass.
+    let ring = net.rx_avail_count(mem);
+    if ring < NS_RXRING_MIN.load(AtOrd::Relaxed) {
+        NS_RXRING_MIN.store(ring, AtOrd::Relaxed);
+    }
+
     // Push out any GRO burst that's been held past its latency budget, so its
     // superframe is delivered in this same drain pass.
     if GRO_ENABLED.load(AtOrd::Relaxed) {
