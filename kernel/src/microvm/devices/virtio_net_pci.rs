@@ -88,6 +88,15 @@ const VIRTIO_NET_F_STATUS: u32 = 16;
 const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;
 const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;
 const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
+// Host(device)-side TX-offload features. Negotiating CSUM (the gate, per
+// virtio_net.c:6825 — without it Linux disables NETIF_F_SG/TSO entirely) plus
+// HOST_TSO4 lets the guest hand us a single ≤64 KB GSO super-frame per upload
+// instead of pre-segmenting to ~1448-byte MSS frames in software. We segment it
+// in `service_tx`/`nat::process_tx` (1:1 from Linux tcp_gso_segment). This is
+// the TX twin of the RX GRO path and the fix for upload ≈ ½ download. We do NOT
+// advertise HOST_TSO6 (our NAT is IPv4-only) so the guest never TSO's IPv6.
+const VIRTIO_NET_F_CSUM:       u32 = 0;
+const VIRTIO_NET_F_HOST_TSO4:  u32 = 11;
 /// Master switch for RX GRO feature advertisement (GUEST_CSUM/TSO4/TSO6 →
 /// guest enters "big packets" mode).
 ///
@@ -100,6 +109,13 @@ const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
 /// up in big-packets mode, or switch to the mergeable-rxbuf RX path (QEMU
 /// default, best-tested) instead of big-packets. See project_microvm_rx_gro.
 const NET_GRO_ENABLED: bool = true;
+
+/// Master switch for TX-side offload (CSUM + HOST_TSO4 → the guest sends large
+/// GSO/TSO super-frames on upload, which we segment in software). Independent of
+/// NET_GRO_ENABLED so each direction can be HW-bisected. Flag-gated because it
+/// touches feature negotiation (the regression-prone path) — flip to false to
+/// revert to per-MSS guest segmentation if a regression appears.
+const NET_TX_GSO_ENABLED: bool = true;
 
 /// One-shot guards for the RX-GRO bring-up diagnostic logs.
 static GRO_DIAG_LOGGED: core::sync::atomic::AtomicBool =
@@ -187,6 +203,12 @@ pub struct VirtioNet {
     isr: u8,
     pending_kick_queue: Option<u16>,
 
+    /// Reusable contiguous read buffer for guest TX frames. A non-GSO frame is
+    /// ≤1514 B, but with TX-GSO the guest hands us one ≤64 KB super-frame, far
+    /// past the kernel-stack budget — so this lives on the heap and is grown
+    /// once on first use (new() is const, can't allocate).
+    tx_scratch: alloc::vec::Vec<u8>,
+
     notify_log_count: u32,
 
     /// Per-VM net policy. Set by the microvm session when the device is
@@ -218,6 +240,7 @@ impl VirtioNet {
             }; NUM_QUEUES as usize],
             isr: 0,
             pending_kick_queue: None,
+            tx_scratch: alloc::vec::Vec::new(),
             notify_log_count: 0,
             caps: NetCaps::dns_tcp(),
         }
@@ -262,10 +285,14 @@ impl VirtioNet {
         let advanced;
         let new_used_idx;
         let mut pending_rx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-        // Per-frame scratch on the stack — NO per-packet heap alloc (the old
-        // Vec::with_capacity + per-descriptor vec![] + extend was 2 mallocs +
-        // 2 copies for every uploaded packet; ~18k mallocs/s at 100 Mbit).
-        let mut frame = [0u8; 2048];
+        // Reusable heap scratch for the frame — taken out so the mutable queue
+        // borrow below doesn't conflict, restored after the walk. Sized for a
+        // full GSO super-frame (TX-GSO); grown once (NO per-packet alloc: this
+        // Vec is reused every call, identical cost to the old stack scratch once
+        // warm). A non-GSO frame uses only the first ~1514 bytes.
+        const TX_FRAME_MAX: usize = 65_536 + 128;
+        let mut frame = core::mem::take(&mut self.tx_scratch);
+        if frame.len() < TX_FRAME_MAX { frame.resize(TX_FRAME_MAX, 0); }
         {
             let q_idx = 1usize;
             let q = match self.queues.get_mut(q_idx) {
@@ -337,6 +364,8 @@ impl VirtioNet {
             advanced = any;
             new_used_idx = q.used_idx;
         }
+        // Restore the scratch for reuse next call (frame is no longer borrowed).
+        self.tx_scratch = frame;
 
         // Inject any pending RX replies (ARP-Replies for the gateway).
         let mut rx_advanced = false;
@@ -465,6 +494,13 @@ impl VirtioNet {
                             f |= (1u64 << VIRTIO_NET_F_GUEST_CSUM)
                                | (1u64 << VIRTIO_NET_F_GUEST_TSO4)
                                | (1u64 << VIRTIO_NET_F_GUEST_TSO6);
+                        }
+                        if NET_TX_GSO_ENABLED {
+                            // CSUM is the gate that unlocks SG + TSO in the guest
+                            // (virtio_net.c:6825); HOST_TSO4 then makes it offer
+                            // up ≤64 KB GSO frames on TX, which we segment.
+                            f |= (1u64 << VIRTIO_NET_F_CSUM)
+                               | (1u64 << VIRTIO_NET_F_HOST_TSO4);
                         }
                         f
                     }

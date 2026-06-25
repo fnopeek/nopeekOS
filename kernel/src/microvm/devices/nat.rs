@@ -321,6 +321,10 @@ const TCP_SYN: u8 = 0x02;
 const TCP_RST: u8 = 0x04;
 const TCP_PSH: u8 = 0x08;
 const TCP_URG: u8 = 0x20;
+const TCP_CWR: u8 = 0x80;
+/// virtio-net header gso_type for a TCPv4 GSO/TSO super-frame on TX (the ECN
+/// flag 0x80 is OR'd on top and must be masked off before comparing).
+const VNET_HDR_GSO_ECN: u8 = 0x80;
 
 struct GroCtx {
     gport: u16,
@@ -585,36 +589,94 @@ fn csum_update(old_check: u16, changes: &[(u16, u16)]) -> u16 {
 /// host port and send from our host IP. The guest's TCP/UDP semantics
 /// (seq/ack/window/options/QUIC) pass through untouched.
 fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
-                dst_port: u16, l4: &[u8]) -> Option<Vec<u8>> {
+                dst_port: u16, l4: &[u8], gso_size: u16) -> Option<Vec<u8>> {
     let now = crate::interrupts::ticks();
     let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, now) {
         Some(p) => p,
         None => { NS_DROPS.fetch_add(1, AtOrd::Relaxed); kprintln!("[nat] L3 table full, dropping flow"); return None; }
     };
-    NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
-    NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
-    let mut seg = l4.to_vec();
     let our_ip = crate::net::arp::our_ip();
-    if proto == PROTO_TCP && seg.len() >= TCP_HDR_LEN {
-        // Incremental TCP checksum (RFC 1624): only the src IP (guest → host, in
-        // the pseudo-header) and src port changed. The guest computes full
-        // checksums (no VIRTIO_NET_F_CSUM offload negotiated), so the existing
-        // checksum is a valid base. Read old values before overwriting the port.
-        let old_check = u16::from_be_bytes([seg[16], seg[17]]);
-        let new_check = csum_update(old_check, &[
-            (u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]]), u16::from_be_bytes([our_ip[0], our_ip[1]])),
-            (u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]]), u16::from_be_bytes([our_ip[2], our_ip[3]])),
-            (src_port, hp),
-        ]);
-        seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
-        seg[16..18].copy_from_slice(&new_check.to_be_bytes());
+    if proto == PROTO_TCP {
+        // TCP: software TSO segmentation (gso_size > 0 + payload past one MSS) or
+        // a single segment. Either way the TCP checksum is recomputed in full —
+        // with VIRTIO_NET_F_CSUM negotiated the guest now offloads its checksum
+        // (CHECKSUM_PARTIAL: the field holds only the pseudo-header seed), so the
+        // old incremental update has no valid base. Full recompute is correct
+        // whether or not CSUM is on and is required per-segment anyway.
+        emit_tcp_out(hp, our_ip, dst_ip, l4, gso_size);
     } else {
+        // UDP (and anything else routed here): single datagram, port rewrite +
+        // checksum fix-up, no segmentation.
+        NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
+        NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
+        let mut seg = l4.to_vec();
         seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
         fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
+        crate::net::ipv4::send(dst_ip, proto, &seg);
     }
-    crate::net::ipv4::send(dst_ip, proto, &seg);
     L3_ACTIVE.store(true, AtOrd::Release);
     None
+}
+
+/// Emit a guest TCP segment outbound, software-segmenting a GSO/TSO super-frame
+/// into `gso_size`-byte segments when needed. Ports the field math of Linux's
+/// `tcp_gso_segment` (net/ipv4/tcp_offload.c): per segment, seq advances by the
+/// payload already emitted; FIN/PSH are kept only on the last; CWR is cleared on
+/// every segment but the first; the TCP checksum is computed in full over each
+/// independent segment. The IP layer (`ipv4::send`) builds the per-segment IPv4
+/// header (src/total-len/checksum), so we only fix up the TCP header here.
+fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
+                l4: &[u8], gso_size: u16) {
+    if l4.len() < TCP_HDR_LEN { return; }
+    let thlen = ((l4[12] >> 4) & 0x0F) as usize * 4;
+    if thlen < TCP_HDR_LEN || l4.len() < thlen { return; }
+    let payload = &l4[thlen..];
+    let mss = gso_size as usize;
+
+    // Non-GSO (or fits in one MSS): single segment.
+    if mss == 0 || payload.len() <= mss {
+        let mut seg = l4.to_vec();
+        seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
+        seg[16] = 0; seg[17] = 0;
+        let c = tcp_checksum(our_ip, dst_ip, &seg);
+        seg[16..18].copy_from_slice(&c.to_be_bytes());
+        NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
+        NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
+        crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg);
+        return;
+    }
+
+    let base_seq = u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]);
+    let orig_flags = l4[13];
+    let n = payload.len().div_ceil(mss);
+    let mut off = 0usize;
+    for k in 0..n {
+        let this = (payload.len() - off).min(mss);
+        let is_last = k == n - 1;
+
+        let mut seg = Vec::with_capacity(thlen + this);
+        seg.extend_from_slice(&l4[..thlen]);                  // verbatim TCP header
+        seg.extend_from_slice(&payload[off..off + this]);     // this segment's data
+
+        seg[0..2].copy_from_slice(&hp.to_be_bytes());         // src port → host port
+        let seq = base_seq.wrapping_add(off as u32);          // seq += bytes emitted
+        seg[4..8].copy_from_slice(&seq.to_be_bytes());
+
+        // FIN/PSH only on the last segment; CWR only on the first.
+        let mut flags = orig_flags;
+        if !is_last { flags &= !(TCP_FIN | TCP_PSH); }
+        if k != 0 { flags &= !TCP_CWR; }
+        seg[13] = flags;
+
+        seg[16] = 0; seg[17] = 0;                             // full TCP checksum
+        let c = tcp_checksum(our_ip, dst_ip, &seg);
+        seg[16..18].copy_from_slice(&c.to_be_bytes());
+
+        NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
+        NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
+        crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg);
+        off += this;
+    }
 }
 
 /// Outbound NAT for a guest ICMP echo request (so ping + the browser's
@@ -782,6 +844,14 @@ pub fn l3_reset() {
 pub fn process_tx(payload: &[u8], caps: &NetCaps) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     if payload.len() < VNET_HDR_LEN + ETH_HDR_LEN { return out; }
+    // virtio-net header (12 B): byte 1 = gso_type, bytes 4..6 = gso_size (LE).
+    // With TX-GSO the guest hands us one ≤64 KB TCPv4 super-frame; gso_size is
+    // the MSS we re-segment to. Mask off the ECN flag (0x80) before comparing.
+    let gso_size = if (payload[1] & !VNET_HDR_GSO_ECN) == VNET_HDR_GSO_TCPV4 {
+        u16::from_le_bytes([payload[4], payload[5]])
+    } else {
+        0
+    };
     let frame = &payload[VNET_HDR_LEN..];
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
@@ -790,7 +860,7 @@ pub fn process_tx(payload: &[u8], caps: &NetCaps) -> Vec<Vec<u8>> {
             if let Some(rep) = handle_arp(frame) { out.push(rep); }
         }
         ETHERTYPE_IPV4 => {
-            if let Some(rep) = handle_ipv4(frame, caps) { out.push(rep); }
+            if let Some(rep) = handle_ipv4(frame, caps, gso_size) { out.push(rep); }
         }
         _ => {
             // Quiet: IPv6 / LLDP / STP / etc. — guest has nothing
@@ -830,7 +900,7 @@ fn handle_arp(frame: &[u8]) -> Option<Vec<u8>> {
 
 /// IPv4 dispatch: only UDP→10.99.0.1:53 has a real handler today.
 /// Everything else logs a cap-reject and returns None.
-fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
+fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
     if frame.len() < ETH_HDR_LEN + IPV4_HDR_LEN { return None; }
     let ip = &frame[ETH_HDR_LEN..];
     let ihl = (ip[0] & 0x0F) as usize * 4;
@@ -870,7 +940,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
                     cap_reject("UDP", dst_ip, dst_port);
                     return None;
                 }
-                l3_outbound(PROTO_UDP, src_port, dst_ip, dst_port, l4)
+                l3_outbound(PROTO_UDP, src_port, dst_ip, dst_port, l4, 0)
             }
         }
         PROTO_TCP => {
@@ -881,7 +951,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps) -> Option<Vec<u8>> {
                 cap_reject("TCP", dst_ip, dst_port);
                 return None;
             }
-            l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4)
+            l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size)
         }
         PROTO_ICMP => {
             if !caps.allow_icmp {
