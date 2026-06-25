@@ -111,6 +111,16 @@ static TX_DIAG_LOGGED: core::sync::atomic::AtomicBool =
 /// (no-buf bails) from "guest drops our frames" (delivered but ignored).
 static RX_DIAG_COUNT: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
+/// Feature-negotiation trace: bounded count of device-feature reads / driver-
+/// feature + status writes, so we can see EXACTLY what we offer and what the
+/// guest commits (the v0.225.7 DRIVER_OK showed a collapsed lo=0x2/hi=0 set).
+static NEG_TRACE_COUNT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+#[inline]
+fn neg_trace_allowed() -> bool {
+    NEG_TRACE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40
+}
 
 // virtio device-status bit (driver finished feature negotiation + setup).
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
@@ -437,7 +447,7 @@ impl VirtioNet {
         let v: u64 = match off {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select as u64,
             CC_DEVICE_FEATURE => {
-                if self.device_feature_select == 1 {
+                let f = if self.device_feature_select == 1 {
                     1 // VIRTIO_F_VERSION_1 (bit 32)
                 } else {
                     // bit 5 = VIRTIO_NET_F_MAC, bit 16 = VIRTIO_NET_F_STATUS
@@ -448,7 +458,12 @@ impl VirtioNet {
                            | (1u64 << VIRTIO_NET_F_GUEST_TSO6);
                     }
                     f
+                };
+                if neg_trace_allowed() {
+                    kprintln!("[net-gro] OFFER dev_feat[sel={}] = 0x{:08x} (w{})",
+                        self.device_feature_select, f, width);
                 }
+                f
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
             CC_DRIVER_FEATURE => {
@@ -483,12 +498,19 @@ impl VirtioNet {
             CC_DRIVER_FEATURE => {
                 let half = (self.driver_feature_select & 1) as usize;
                 self.driver_features[half] = val as u32;
+                if neg_trace_allowed() {
+                    kprintln!("[net-gro] COMMIT drv_feat[sel={}] = 0x{:08x} (w{})",
+                        self.driver_feature_select, val as u32, width);
+                }
             }
             CC_MSIX_CONFIG => self.msix_config = val as u16,
             CC_DEVICE_STATUS => {
                 let prev = self.device_status;
                 self.device_status = val as u8;
                 let _ = prev;
+                if neg_trace_allowed() {
+                    kprintln!("[net-gro] STATUS 0x{:02x} -> 0x{:02x}", prev, self.device_status);
+                }
                 if self.device_status == 0 {
                     for q in self.queues.iter_mut() {
                         *q = VirtQueue {
@@ -509,6 +531,7 @@ impl VirtioNet {
                     GRO_DIAG_LOGGED.store(false, core::sync::atomic::Ordering::Relaxed);
                     TX_DIAG_LOGGED.store(false, core::sync::atomic::Ordering::Relaxed);
                     RX_DIAG_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+                    NEG_TRACE_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
                 } else if self.device_status & VIRTIO_STATUS_DRIVER_OK != 0 {
                     // Feature negotiation is done by DRIVER_OK — latch whether
                     // the guest will accept coalesced GSO RX frames.
