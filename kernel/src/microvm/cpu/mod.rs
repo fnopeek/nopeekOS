@@ -23,6 +23,7 @@
 //! window setup + Linux loader integration), a real trait can be
 //! lifted from the convergent code. For now: simple match.
 
+pub mod rip_sample;
 pub mod svm;
 pub mod vmx;
 
@@ -807,6 +808,7 @@ pub fn vm_poll_slice() {
             crate::microvm::devices::net_rx_worker::stop_worker();
             crate::microvm::devices::p9_async::stop_worker();
             crate::microvm::devices::nat::reset_sessions();
+            crate::microvm::cpu::rip_sample::reset();
             teardown_vm_window();
             VM_CLOSE_REQUESTED.store(false, Ordering::Release);
             VM_RUN_STATE.store(VM_IDLE, Ordering::Release);
@@ -833,6 +835,7 @@ pub fn vm_poll_slice() {
         crate::microvm::devices::net_rx_worker::stop_worker();
         crate::microvm::devices::p9_async::stop_worker();
         crate::microvm::devices::nat::reset_sessions();
+        crate::microvm::cpu::rip_sample::reset();
         teardown_vm_window();
         crate::kprintln!("[microvm] guest stopped (window closed)");
         return;
@@ -864,6 +867,7 @@ pub fn vm_poll_slice() {
     crate::microvm::devices::net_rx_worker::stop_worker();
     crate::microvm::devices::p9_async::stop_worker();
     crate::microvm::devices::nat::reset_sessions();
+    crate::microvm::cpu::rip_sample::reset();
     teardown_vm_window();
     match result {
         Ok(o) => crate::kprintln!(

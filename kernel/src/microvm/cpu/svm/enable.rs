@@ -1366,6 +1366,18 @@ impl VmContext {
             run_guest_once(&mut self.vcpu.regs, &mut *self.vcpu.vmcb, self.vcpu.vmcb_phys, hf, gf);
         let exit = outcome.exit_reason;
 
+        // Guest-RIP profiler: EXIT_INTR = a host physical interrupt (per-core
+        // timer / device IRQ) preempted a RUNNING guest, so VMCB.SAVE.RIP is an
+        // unbiased PC sample of whatever is burning the vCPU. Idle vCPUs take
+        // EXIT_HLT instead and aren't sampled. Identifies the spinning-core
+        // workload (the speedtest ~250 Mbit cap). maybe_dump is cheap (lock-free
+        // cadence gate) and prints every ~5 s.
+        if exit == EXIT_INTR {
+            let rip = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+            crate::microvm::cpu::rip_sample::record(rip, self.vcpu.apic_id);
+        }
+        crate::microvm::cpu::rip_sample::maybe_dump();
+
         // Exit-reason histogram (diagnosis — `cores` shows the mix).
         crate::microvm::cpu::record_vm_exit(match exit {
             EXIT_INTR => crate::microvm::cpu::VMX_INTR,
