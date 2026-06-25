@@ -1295,14 +1295,18 @@ pub fn pump(
             let prod_drains = NS_PRODUCER_DRAINS.swap(0, AtOrd::Relaxed);
             let gtimer = NS_GTIMER.swap(0, AtOrd::Relaxed);
             let net_irq = NS_NET_IRQ.swap(0, AtOrd::Relaxed);
+            let gpu_bytes = NS_GPU_BYTES.swap(0, AtOrd::Relaxed);
+            let gpu_xfers = NS_GPU_XFERS.swap(0, AtOrd::Relaxed);
             kprintln!(
-                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s",
+                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s | gpu {}KB/s ({}/s)",
                 drain_max / mhz,
                 if rxring_min == u64::MAX { 0 } else { rxring_min },
                 if super::net_rx_worker::active() { "on" } else { "off" },
                 prod_drains / secs,
                 gtimer / secs,
                 net_irq / secs,
+                gpu_bytes / secs / 1024,
+                gpu_xfers / secs,
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
@@ -1375,6 +1379,16 @@ pub fn note_guest_timer() { NS_GTIMER.fetch_add(1, AtOrd::Relaxed); }
 /// vs the per-packet rate it would be without — the io-EOI-storm signal.
 static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);
 pub fn note_net_irq() { NS_NET_IRQ.fetch_add(1, AtOrd::Relaxed); }
+/// virtio-gpu TRANSFER_TO_HOST pixel bytes copied on the vCPU core (the browser
+/// rendering). If high during a download, the framebuffer copy is stealing vCPU
+/// cycles from the net pump (the framebuffer↔pump contention) — Florian's
+/// "graphics?" hypothesis, measured.
+static NS_GPU_BYTES: AtomicU64 = AtomicU64::new(0);
+static NS_GPU_XFERS: AtomicU64 = AtomicU64::new(0);
+pub fn note_gpu_transfer(bytes: u64) {
+    NS_GPU_BYTES.fetch_add(bytes, AtOrd::Relaxed);
+    NS_GPU_XFERS.fetch_add(1, AtOrd::Relaxed);
+}
 
 /// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
 fn drain_inbound(

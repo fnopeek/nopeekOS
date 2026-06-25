@@ -701,6 +701,9 @@ impl VirtioGpu {
             if dst_lin + row_bytes > host_buf.len() { break; }
             copy_from_backing(mem, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
         }
+        // Measure the per-frame pixel-copy cost on the vCPU core (framebuffer↔
+        // pump contention probe — does the browser's rendering steal net cycles?).
+        crate::microvm::devices::nat::note_gpu_transfer((h as u64) * (row_bytes as u64));
 
         // One-time bring-up confirmation; the pixel pipeline is proven
         // (LibreWolf renders) so the per-frame churn is just noise.
