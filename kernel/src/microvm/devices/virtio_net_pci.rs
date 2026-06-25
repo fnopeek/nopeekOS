@@ -99,7 +99,13 @@ const VIRTIO_NET_F_GUEST_TSO6: u32 = 9;
 /// (tomorrow): get the guest log to see whether virtio_net probes / eth0 comes
 /// up in big-packets mode, or switch to the mergeable-rxbuf RX path (QEMU
 /// default, best-tested) instead of big-packets. See project_microvm_rx_gro.
-const NET_GRO_ENABLED: bool = false;
+const NET_GRO_ENABLED: bool = true;
+
+/// One-shot guards for the RX-GRO bring-up diagnostic logs.
+static GRO_DIAG_LOGGED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static TX_DIAG_LOGGED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 // virtio device-status bit (driver finished feature negotiation + setup).
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
@@ -287,6 +293,14 @@ impl VirtioNet {
                     idx = d.next;
                 }
                 let payload = &frame[..off];
+
+                // DIAG (RX-GRO bring-up): first TX frame from the guest proves
+                // eth0 came up and is sending — i.e. probe/negotiation succeeded
+                // even with the offloads advertised. Its absence (with GRO on)
+                // pins the break to probe/negotiation, not RX delivery. One-shot.
+                if !TX_DIAG_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                    kprintln!("[net-gro] first guest TX frame, {} bytes — eth0 is up", off);
+                }
 
                 tx_log(payload);
 
@@ -486,10 +500,25 @@ impl VirtioNet {
                     self.queue_select = 0;
                     self.config_generation = self.config_generation.wrapping_add(1);
                     super::nat::set_gro_enabled(false);
+                    // Fresh diagnostic on each device reset / VM relaunch.
+                    GRO_DIAG_LOGGED.store(false, core::sync::atomic::Ordering::Relaxed);
+                    TX_DIAG_LOGGED.store(false, core::sync::atomic::Ordering::Relaxed);
                 } else if self.device_status & VIRTIO_STATUS_DRIVER_OK != 0 {
                     // Feature negotiation is done by DRIVER_OK — latch whether
                     // the guest will accept coalesced GSO RX frames.
                     super::nat::set_gro_enabled(self.guest_gso_ok());
+                    // DIAG (RX-GRO bring-up): print the exact feature words the
+                    // guest accepted, once. Tells us whether GUEST_CSUM(1)/
+                    // TSO4(7)/TSO6(9) were really negotiated (→ big-packets) or
+                    // the guest renegotiated them away — separates a probe/
+                    // negotiation break from an RX-delivery break. One-shot.
+                    if !GRO_DIAG_LOGGED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                        kprintln!(
+                            "[net-gro] DRIVER_OK feat lo=0x{:08x} hi=0x{:08x} gso_ok={}",
+                            self.driver_features[0], self.driver_features[1],
+                            self.guest_gso_ok(),
+                        );
+                    }
                 }
             }
             CC_QUEUE_SELECT => self.queue_select = val as u16,
