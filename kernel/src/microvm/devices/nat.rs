@@ -297,7 +297,15 @@ static NS_GRO_SEGS:   AtomicU64 = AtomicU64::new(0);
 /// GRO test: coalesce bulk TCP into NEEDS_CSUM/CHECKSUM_PARTIAL GSO superframes.
 /// The earlier "GSO frame broke the internet" results were the negotiation bug,
 /// not the frame — this is the first clean test of the GSO frame itself.
-const GRO_COALESCE: bool = true;
+// TEST (2026-06-25): single-connection download caps at ~2.2 MB/s = a ~33 KB
+// guest receive window at ~15 ms RTT (host-direct uses ~1.2 MB). Hypothesis:
+// GRO delivers one ~35 KB superframe per RTT (avg 24 segs/frame) instead of a
+// smooth segment stream, so the guest's rcv_rtt_est / receive-buffer
+// auto-tuning underestimates the BDP and never scales the window past ~33 KB.
+// Set false to deliver frames individually (smooth) and see if the single-conn
+// window ramps. If it does, GRO's burstiness is the cap → redesign GRO to pace
+// delivery instead of one-burst-per-RTT.
+const GRO_COALESCE: bool = false;
 
 const GRO_SLOTS:       usize = 16;      // concurrent flows we coalesce
 const GRO_MAX_PAYLOAD: usize = 60_000;  // < 64 KiB IP total-length limit
