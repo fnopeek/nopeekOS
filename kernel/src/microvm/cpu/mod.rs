@@ -1043,19 +1043,10 @@ pub fn vm_core_serve() {
 /// latency floor (drainmax ~10 ms ≈ rxlat max). 2 ms timeout is the fallback if
 /// the NIC is polled (RX IRQ never fires) or the link goes quiet mid-park.
 fn park_vcpu_idle() {
-    // DIAGNOSTIC TEST (2026-06-25): is the BSP inject-cadence the speedtest cap?
-    // Signals (rxring min 0, injfalse, iq hi 718, drainmax 10-16 ms) say the BSP
-    // stops injecting for 10-16 ms while the guest briefly idles, the guest's RX
-    // ring drains (no IRQ10 → no NAPI repost), and connections stall. While net
-    // is RECENTLY ACTIVE, do NOT park — stay runnable so the BSP keeps pumping +
-    // injecting every pass (consistent delivery, no ring-drain gap). BOUNDED by
-    // recently_active (~50 ms), on the dedicated vCPU worker core, never Core 0.
-    // If this lifts the speedtest toward 700-800, the park IS the cap → then make
-    // it event-driven properly (RX IRQ → BSP wake) instead of spinning.
-    if crate::microvm::devices::nat::recently_active() {
-        crate::smp::fiber::yield_ready();
-        return;
-    }
+    // (A bounded spin-while-recently-active test was REVERTED: it pegged a worker
+    // core at 100% and starved Core 0's compositor → massive UI lag + latency
+    // peaks. Confirms the "never an unbounded spin" rule — the consumer-wake must
+    // be event-driven, not spun.)
     // When the dedicated RX producer is active it OWNS the host NIC RX IRQ
     // (routed to its own core). The BSP here is the CONSUMER — it injects what
     // the producer staged. It must NOT arm/route that IRQ (that would steal the
