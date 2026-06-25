@@ -279,6 +279,10 @@ pub fn init() {
         // own LAPIC so its idle HLT wakes without a host tick.
         IDT[WORKER_TIMER_VECTOR as usize]
             .set_handler(worker_timer_handler as *const () as u64);
+
+        // Cross-vCPU kick IPI (guest SMP) — prompt inter-vCPU IPI delivery.
+        IDT[VCPU_KICK_VECTOR as usize]
+            .set_handler(vcpu_kick_handler as *const () as u64);
         // Device-IRQ pool (MSI-X → LAPIC vector → fiber wake). See `crate::irq`.
         install_device_isrs();
 
@@ -555,6 +559,23 @@ static WORKER_APIC_BASE: AtomicU64 = AtomicU64::new(0);
 static WORKER_TIMER_INITIAL: AtomicU32 = AtomicU32::new(0);
 
 extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
+    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
+    if base != 0 {
+        // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
+        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    }
+}
+
+/// Cross-vCPU kick IPI (guest SMP). When a guest vCPU sends an inter-processor
+/// interrupt to another vCPU (reschedule / call-function / TLB-shootdown), the
+/// sender's host core fires this vector at the TARGET vCPU's host core, forcing
+/// its VMRUN to #VMEXIT(INTR) so it injects the guest IPI within microseconds
+/// instead of waiting up to a host-timer tick (~10 ms). That ~10 ms latency is
+/// what made `smp_call_function`'s `csd_lock_wait` spin burn ~50% of guest CPU
+/// across all vCPUs (measured via rip_sample). Pure EOI — receipt IS the effect.
+pub const VCPU_KICK_VECTOR: u8 = 51;
+
+extern "x86-interrupt" fn vcpu_kick_handler(_frame: InterruptStackFrame) {
     let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
     if base != 0 {
         // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
