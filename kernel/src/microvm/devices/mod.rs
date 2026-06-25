@@ -13,6 +13,7 @@ pub mod guest_fetch;
 pub mod guest_mem;
 pub mod insn_decoder;
 pub mod nat;
+pub mod net_rx_worker;
 pub mod p9_async;
 pub mod pci_bus;
 pub mod pic8259;

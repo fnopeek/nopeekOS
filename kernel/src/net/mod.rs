@@ -69,8 +69,13 @@ pub fn poll() {
     // always had RX buffers (measured: injfalse=0 yet ~49k drops). So the BSP
     // pump (a worker core, calls net::poll() itself) becomes the sole NIC drainer:
     // fill + inject happen together, no race, no drops, throughput = pump rate.
-    let skip_nic_drain =
-        crate::microvm::vm_active() && crate::smp::per_core::current_core_id() == 0;
+    // Core 0 must not drain the host NIC while a microvm owns it: either the old
+    // BSP-pump-as-sole-drainer mode (vm_active) OR the dedicated RX producer
+    // fiber (net_rx_worker::active). In both cases Core 0 would fill INBOUND_Q it
+    // cannot inject, racing the real drainer and overflowing the queue.
+    let skip_nic_drain = (crate::microvm::vm_active()
+        || crate::microvm::devices::net_rx_worker::active())
+        && crate::smp::per_core::current_core_id() == 0;
     if !skip_nic_drain
         && POLLING
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

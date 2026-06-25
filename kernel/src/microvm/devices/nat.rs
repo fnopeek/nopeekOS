@@ -1113,19 +1113,25 @@ pub fn pump(
 
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
 
+    let producer = super::net_rx_worker::active();
+
     // net-RX: route the host NIC's RX IRQ to THIS (BSP-pump) core once, so RX
-    // arrival wakes this core out of HLT → this pump delivers it promptly
-    // (event-driven instead of pump-cadence-bound — the measured latency root).
-    // One-shot; the BSP-pump core is pinned. No-op if net-RX IRQ is off (the
-    // NIC returns vector 0).
-    if !RX_IRQ_ROUTED.swap(true, Ordering::Relaxed) {
+    // arrival wakes this core out of HLT → this pump delivers it promptly. Skip
+    // when the dedicated producer is active — IT owns the RX IRQ (routed to its
+    // own core); routing it here too would steal the wake from the producer.
+    if !producer && !RX_IRQ_ROUTED.swap(true, Ordering::Relaxed) {
         crate::irq::route_to_current(crate::drivers::virtio_net::rx_irq_vector());
     }
 
-    // CRITICAL: drain the host NIC RX ring. Intel I226-V is a polling
-    // driver — nothing else calls handle_frame, so server replies (and
-    // our l3_inbound intercept) only run because of this poll.
-    crate::net::poll();
+    // Drain the host NIC RX ring (handle_frame → l3_inbound). The dedicated
+    // producer does this on its own core when active, so the BSP must NOT also
+    // drain (single-consumer ring); it only flushes the guest's batched TX
+    // doorbell so host-originated/ACK egress isn't stranded.
+    if producer {
+        crate::virtio_net::tx_flush();
+    } else {
+        crate::net::poll();
+    }
 
     let now = crate::interrupts::ticks();
     l3_reap(now);
@@ -1208,10 +1214,13 @@ pub fn pump(
             // ≈ rxlat max ⇒ pump starvation; if rxring min ≈ 0 ⇒ shallow ring.
             let drain_max = NS_DRAIN_GAP_MAX.swap(0, AtOrd::Relaxed);
             let rxring_min = NS_RXRING_MIN.swap(u64::MAX, AtOrd::Relaxed);
+            let prod_drains = NS_PRODUCER_DRAINS.swap(0, AtOrd::Relaxed);
             kprintln!(
-                "[netstat]   drainmax {}us | rxring min {}",
+                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s)",
                 drain_max / mhz,
                 if rxring_min == u64::MAX { 0 } else { rxring_min },
+                if super::net_rx_worker::active() { "on" } else { "off" },
+                prod_drains / secs,
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
@@ -1240,15 +1249,40 @@ pub fn pump_fast(
     // the TCP sawtooth (~0.13% loss capped throughput at ~400 Mbit). Then fill +
     // deliver the fresh packets.
     let mut fired = drain_inbound(net, mem);
-    // NIC-drain-only (NOT full poll()): the hot ~15k/s device-exit path must not
-    // run tcp::tick_connections (128-slot host-stack scan + lock) or
-    // shade::poll_render (current_core_id = an APIC-MMIO VM-exit) every call —
-    // pure waste on the BSP vCPU. The host stack's TCP timers run at the ~100 Hz
-    // pump() timer path instead (the host stack is idle during a browser session).
-    crate::net::poll_rx_only();
+    if super::net_rx_worker::active() {
+        // A dedicated producer fiber owns the NIC drain on another core; the BSP
+        // only injects. Still flush the guest's batched TX doorbell here so ACKs
+        // egress promptly on the BSP's TX-MMIO exits (the producer wakes on RX,
+        // not TX, so it can't be relied on to flush during an upload).
+        crate::virtio_net::tx_flush();
+    } else {
+        // No producer: BSP is the sole drainer (old path). NIC-drain-only (NOT
+        // full poll()): the hot ~15k/s device-exit path must not run
+        // tcp::tick_connections (128-slot host-stack scan + lock) or
+        // shade::poll_render every call — pure waste on the BSP vCPU.
+        crate::net::poll_rx_only();
+    }
     fired |= drain_inbound(net, mem);
     fired
 }
+
+/// Producer half (runs on the dedicated `net_rx_worker` fiber, a separate core):
+/// drain the host NIC RX ring through the IP stack into INBOUND_Q + flush any
+/// GRO burst past its latency budget. Deliberately does NOT touch the guest
+/// virtqueue — the BSP vCPU owns inject_rx. Keeps producer (NIC→queue) and
+/// consumer (queue→guest) on different cores so they pipeline.
+pub fn rx_producer_drain() {
+    NS_PRODUCER_DRAINS.fetch_add(1, AtOrd::Relaxed);
+    crate::net::poll_rx_only();
+    if GRO_ENABLED.load(AtOrd::Relaxed) {
+        gro_flush_expired(crate::interrupts::rdtsc());
+    }
+}
+
+/// How often the dedicated RX producer fiber ran a drain pass this window
+/// (printed in [netstat]). High = it's keeping up with the RX IRQ; the BSP's
+/// `drainmax`/`pump` then reflect only the consumer (inject) cadence.
+static NS_PRODUCER_DRAINS: AtomicU64 = AtomicU64::new(0);
 
 /// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
 fn drain_inbound(

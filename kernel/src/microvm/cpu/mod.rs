@@ -804,6 +804,7 @@ pub fn vm_poll_slice() {
 
     if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         if VM_RUN_STATE.load(Ordering::Acquire) == VM_EXITED {
+            crate::microvm::devices::net_rx_worker::stop_worker();
             crate::microvm::devices::p9_async::stop_worker();
             crate::microvm::devices::nat::reset_sessions();
             teardown_vm_window();
@@ -829,6 +830,7 @@ pub fn vm_poll_slice() {
         }
         *slot = None;
         drop(slot); // release before teardown — it locks the compositor
+        crate::microvm::devices::net_rx_worker::stop_worker();
         crate::microvm::devices::p9_async::stop_worker();
         crate::microvm::devices::nat::reset_sessions();
         teardown_vm_window();
@@ -859,6 +861,7 @@ pub fn vm_poll_slice() {
     }
     *slot = None;
     drop(slot); // release before teardown — it locks the compositor
+    crate::microvm::devices::net_rx_worker::stop_worker();
     crate::microvm::devices::p9_async::stop_worker();
     crate::microvm::devices::nat::reset_sessions();
     teardown_vm_window();
@@ -1040,6 +1043,17 @@ pub fn vm_core_serve() {
 /// latency floor (drainmax ~10 ms ≈ rxlat max). 2 ms timeout is the fallback if
 /// the NIC is polled (RX IRQ never fires) or the link goes quiet mid-park.
 fn park_vcpu_idle() {
+    // When the dedicated RX producer is active it OWNS the host NIC RX IRQ
+    // (routed to its own core). The BSP here is the CONSUMER — it injects what
+    // the producer staged. It must NOT arm/route that IRQ (that would steal the
+    // producer's event-wake). A short timer park suffices: the dedicated ~1 kHz
+    // VM timer + the guest's own RX-repost/ACK MMIO exits drive the inject; with
+    // a download in flight that's frequent, so a queued frame is injected within
+    // ~1 ms instead of waiting on a blind 10 ms worker tick.
+    if crate::microvm::devices::net_rx_worker::active() {
+        crate::smp::fiber::yield_sleep(1);
+        return;
+    }
     if crate::microvm::devices::nat::recently_active() {
         let vec = crate::drivers::virtio_net::rx_irq_vector();
         if vec != 0 {
@@ -1077,6 +1091,12 @@ fn vcpu_fiber_task(_arg: u64) {
     // promptly (the 100 Hz worker timer alone would stretch a 2 ms idle
     // yield to ~10 ms). Restored to the worker timer when the guest ends.
     crate::interrupts::arm_dedicated_vm_timer();
+
+    // Spawn the dedicated host-NIC RX producer on another core (the Linux-NAPI
+    // split): it drains the NIC + IP stack + GRO into INBOUND_Q, event-driven on
+    // the RX IRQ, so THIS BSP vCPU only injects — the two halves pipeline instead
+    // of serializing on one core. Stopped in this fiber's teardown + vm_poll_slice.
+    crate::microvm::devices::net_rx_worker::start_worker(pick_offload_core());
 
     match *VENDOR.lock() {
         Vendor::Amd => {
@@ -1215,6 +1235,10 @@ fn vcpu_fiber_task(_arg: u64) {
         }
         Vendor::Unknown(reason) => crate::kprintln!("[microvm] {}", reason),
     }
+
+    // Stop the RX producer (also covers an open-FAILED path where vm_poll_slice
+    // teardown might not run). Idempotent with the vm_poll_slice stop sites.
+    crate::microvm::devices::net_rx_worker::stop_worker();
 
     // Restore this core to the 100 Hz worker idle timer + the IF=0
     // park-loop invariant `smp_ap_entry` expects.
