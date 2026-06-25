@@ -23,6 +23,13 @@
 
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Software-TLB size (direct-mapped, power of two). 1024 slots cover a 4 MiB
+/// working set of distinct guest pages — far more than the RX/TX buffer pool the
+/// net hot path reuses. 8 KiB per VM.
+const TLB_SIZE: usize = 1024;
+
 /// Canonical guest-RAM size: 2 GiB. Real-world browsers (Firefox/
 /// LibreWolf with e10s + content sandboxing on) routinely hit 1 GiB
 /// resident with a couple of moderate tabs — 1 GiB is below the
@@ -67,6 +74,15 @@ pub struct GuestMem {
     len: u64,
     table_root: u64,
     sl: SecondLevel,
+    /// Software TLB for the demand region: caches the page-table walk
+    /// (`demand_fault_in`) that `page_host` would otherwise repeat on EVERY
+    /// access. The demand map is STABLE once faulted (a guest page → one host
+    /// frame for the VM's life — no remapping until balloon, which doesn't
+    /// exist), so entries never need invalidation. Each slot is ONE atomic u64
+    /// packing `(page>>12)<<32 | (host>>12)` → lock-free, no torn reads, safe
+    /// for concurrent AP-vCPU access. 0 = empty. Killed the `inject=33µs`
+    /// per-frame walk (RX buffers are reused → near-100% hit rate).
+    tlb: [AtomicU64; TLB_SIZE],
 }
 
 impl GuestMem {
@@ -77,7 +93,10 @@ impl GuestMem {
         table_root: u64,
         sl: SecondLevel,
     ) -> Self {
-        Self { boot_base, boot_bytes, len, table_root, sl }
+        Self {
+            boot_base, boot_bytes, len, table_root, sl,
+            tlb: [const { AtomicU64::new(0) }; TLB_SIZE],
+        }
     }
 
     /// Advertised guest RAM size in bytes.
@@ -97,14 +116,27 @@ impl GuestMem {
         if page < self.boot_bytes {
             return Some(self.boot_base + page);
         }
-        match self.sl {
+        // Software TLB: the demand map is stable once faulted, so a hit skips the
+        // EPT/NPT walk entirely. One atomic load, no lock, no torn read (tag+host
+        // packed in a single u64). pn ≥ 65536 here (page ≥ 256 MiB boot window),
+        // so a packed entry is never 0 → 0 reliably means "empty".
+        let pn = page >> 12;
+        let slot = (pn as usize) & (TLB_SIZE - 1);
+        let cached = self.tlb[slot].load(Ordering::Relaxed);
+        if cached != 0 && (cached >> 32) == pn {
+            return Some((cached & 0xFFFF_FFFF) << 12);
+        }
+        let host = match self.sl {
             SecondLevel::Ept => {
                 crate::microvm::cpu::vmx::ept::demand_fault_in(self.table_root, page)
             }
             SecondLevel::Npt => {
                 crate::microvm::cpu::svm::npt::demand_fault_in(self.table_root, page)
             }
-        }
+        }?;
+        // host is page-aligned (a fresh demand frame), so host>>12<<12 == host.
+        self.tlb[slot].store((pn << 32) | (host >> 12), Ordering::Relaxed);
+        Some(host)
     }
 
     /// Fault the 4 KB page containing `gpa` into the demand region
