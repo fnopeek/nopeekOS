@@ -41,19 +41,28 @@ pub fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 /// smash on overflow). 512 KiB is generous headroom for the RX path.
 const WORKER_STACK_BYTES: usize = 512 * 1024;
 
-/// Master switch. The producer/consumer split (NIC drain on a separate core)
-/// was HW-measured net-negative: it adds an INBOUND_Q producer→consumer handoff
-/// (rxlat avg 20µs → 270µs) that RAISES end-to-end RTT → LOWERS throughput,
-/// without relieving any real bottleneck (the cap is RTT/window-bound, not the
-/// single-core NIC-drain serialization). Disabled so the BSP drains+injects in
-/// one pass again (low RTT). Kept inert for reference / a future load-aware
-/// revival once the RTT path is otherwise minimal. See project_microvm_rx_gro.
-const ENABLED: bool = false;
+/// Master switch. The producer/consumer split (NIC drain on a separate core) is
+/// gated to a POLLED host NIC (`rx_irq_vector() == 0`) in `start_worker` — see
+/// there for why. On an IRQ-driven NIC (QEMU virtio) it was HW-measured net-
+/// negative (the INBOUND_Q handoff raised rxlat 20µs→270µs → RTT → lower
+/// throughput, with the BSP keeping up anyway); on a polled bare-metal NIC the
+/// BSP-sole-drainer CANNOT keep up (it parks/compute-stalls → the tiny 32-desc
+/// NIC ring overflows silently → the measured ~190ms drainmax → 40 Mbit while
+/// host-direct on the SAME NIC does ~600). There the independent drainer is the
+/// fix, not a regression. See project_browser_net_perf / project_microvm_rx_gro.
+const ENABLED: bool = true;
 
 /// Spawn the RX producer on `core` (load-aware, never Core 0). Idempotent within
-/// a VM session.
+/// a VM session. NO-OP on an IRQ-driven NIC (the BSP keeps the ring drained there
+/// and the handoff only adds RTT); runs ONLY when the host NIC is polled.
 pub fn start_worker(core: usize) {
     if !ENABLED { return; }
+    // Gate: only a POLLED host NIC (no RX MSI-X) needs an independent drainer.
+    // virtio (QEMU) exposes an RX IRQ → vector != 0 → the BSP wakes on it and
+    // keeps up; the real bare-metal NICs (intel_nic / rtl8153) are pure-poll →
+    // vector 0 → without this fiber nothing drains them while the BSP is parked
+    // or busy in the guest.
+    if crate::drivers::virtio_net::rx_irq_vector() != 0 { return; }
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
     // ACTIVE is set by the fiber itself on its first iteration, NOT here: the
