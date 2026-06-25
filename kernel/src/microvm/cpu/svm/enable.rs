@@ -628,12 +628,20 @@ const HALT_POLL_MAX_US: u64 = 200;
 
 impl VmShared {
     /// Mark interrupt `vector` pending for the vCPU with `apic_id` (an IPI
-    /// target). No-op if the id is out of range.
-    fn ipi_set(&mut self, apic_id: u8, vector: u8) {
+    /// target). No-op if the id is out of range. Returns `true` only on the
+    /// empty→non-empty transition (this is the FIRST un-drained IPI for the
+    /// target) — the caller kicks the target's host core only then, so a burst
+    /// of IPIs to an as-yet-undrained vCPU coalesces into ONE host kick instead
+    /// of a storm (KVM's vcpu->mode / KVM_REQ coalescing). Once the target
+    /// drains its bitmap empty, the next IPI re-arms a kick.
+    fn ipi_set(&mut self, apic_id: u8, vector: u8) -> bool {
         let t = apic_id as usize;
-        if t < MAX_VCPUS {
-            self.ipi_pending[t][(vector >> 6) as usize] |= 1u64 << (vector & 63);
+        if t >= MAX_VCPUS {
+            return false;
         }
+        let was_empty = self.ipi_pending[t].iter().all(|&w| w == 0);
+        self.ipi_pending[t][(vector >> 6) as usize] |= 1u64 << (vector & 63);
+        was_empty
     }
 
     /// Take (and clear) the lowest pending IPI vector for `apic_id`, if any.
@@ -1570,14 +1578,29 @@ impl VmContext {
                 }
                 // Cross-vCPU IPI (guest SMP): a reschedule / call-function /
                 // TLB-flush / AP→BSP `complete()` wakeup another vCPU routed
-                // to this one. Highest priority among injectables here — these
-                // are LAPIC-delivered and carry the SMP bring-up handshake.
-                // No-op on a UP guest (`ipi_pending` stays all-zero).
-                if let Some(vec) = sh.ipi_take(self.vcpu.apic_id) {
-                    let info: u64 = (vec as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
+                // to this one. No-op on a UP guest (`ipi_pending` all-zero).
+                //
+                // BUT yield to a DUE guest timer first. Before the prompt IPI
+                // kick, IPIs trickled in and this rarely had work, so the timer
+                // block below ran most exits. With the kick, a busy SMP guest's
+                // IPI flood would inject here EVERY pass and starve the 1 kHz
+                // LAPIC timer (step 2) → jiffies/TCP/NAPI hrtimers stop → the
+                // guest clock stalls and the network dies (measured: gtimer
+                // 330→71/s, drainmax 150 ms). `timer_due()` is the precise
+                // per-vCPU 1 ms deadline (the 30 ms host-tick guard used for
+                // device IRQs below is too coarse to protect a 1 ms clock), so
+                // gate on it: when the timer is due, skip the IPI this pass and
+                // let step 2 fire; the IPI stays pending and drains next pass
+                // (≤ ~1 ms later). During boot/AP-bring-up the LVTT isn't armed
+                // yet → timer_due() is false → IPIs keep absolute priority, so
+                // the cpuhp `complete()` handshake timing is unchanged.
+                if !self.vcpu.lapic.timer_due() {
+                    if let Some(vec) = sh.ipi_take(self.vcpu.apic_id) {
+                        let info: u64 = (vec as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
                 }
                 // Device IRQs, the PIT tick, display-resize, NAT pump and
                 // input are BSP-only (PIC mode delivers device lines to the
@@ -2388,22 +2411,25 @@ fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
             };
             match icr.shorthand {
                 0 => {
-                    sh.ipi_set(icr.dest, icr.vector); // physical dest
-                    kick_vcpu_core(icr.dest, self_core);
+                    // physical dest — kick only on the empty→non-empty edge.
+                    if sh.ipi_set(icr.dest, icr.vector) {
+                        kick_vcpu_core(icr.dest, self_core);
+                    }
                 }
-                1 => sh.ipi_set(sender, icr.vector), // self — no kick
+                1 => {
+                    let _ = sh.ipi_set(sender, icr.vector); // self — no kick
+                }
                 2 => {
                     for t in 0..n {
-                        sh.ipi_set(t, icr.vector);
-                        if t != sender {
+                        let edge = sh.ipi_set(t, icr.vector);
+                        if t != sender && edge {
                             kick_vcpu_core(t, self_core);
                         }
                     }
                 } // all incl self
                 _ => {
                     for t in 0..n {
-                        if t != sender {
-                            sh.ipi_set(t, icr.vector);
+                        if t != sender && sh.ipi_set(t, icr.vector) {
                             kick_vcpu_core(t, self_core);
                         }
                     }
