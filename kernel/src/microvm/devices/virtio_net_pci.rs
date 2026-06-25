@@ -106,6 +106,11 @@ static GRO_DIAG_LOGGED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 static TX_DIAG_LOGGED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+/// RX-inject diagnostic: log the first few inject_rx attempts (q0 state +
+/// outcome) so we can tell "guest posts no RX buffers in big-packets mode"
+/// (no-buf bails) from "guest drops our frames" (delivered but ignored).
+static RX_DIAG_COUNT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
 
 // virtio device-status bit (driver finished feature negotiation + setup).
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
@@ -503,6 +508,7 @@ impl VirtioNet {
                     // Fresh diagnostic on each device reset / VM relaunch.
                     GRO_DIAG_LOGGED.store(false, core::sync::atomic::Ordering::Relaxed);
                     TX_DIAG_LOGGED.store(false, core::sync::atomic::Ordering::Relaxed);
+                    RX_DIAG_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
                 } else if self.device_status & VIRTIO_STATUS_DRIVER_OK != 0 {
                     // Feature negotiation is done by DRIVER_OK — latch whether
                     // the guest will accept coalesced GSO RX frames.
@@ -595,16 +601,34 @@ impl VirtioNet {
     pub(super) fn inject_rx(&mut self, mem: &GuestMem, payload: &[u8]) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
+        // DIAG (RX-GRO): trace the first few inject attempts. `diag` is the
+        // 0-based call index; once it exceeds the cap we stop logging.
+        let diag = RX_DIAG_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let diag = if diag < 8 { Some(diag) } else { None };
+
         let q = match self.queues.get_mut(0) {  // RX = q0
             Some(q) if q.enable != 0 => q,
-            _ => return false,
+            _ => {
+                if let Some(i) = diag { kprintln!("[net-gro] inject#{} q0 not enabled", i); }
+                return false;
+            }
         };
-        if q.size == 0 { return false; }
+        if q.size == 0 {
+            if let Some(i) = diag { kprintln!("[net-gro] inject#{} q0 size=0", i); }
+            return false;
+        }
 
         let avail_top = match avail_idx(mem, q.driver_gpa()) {
-            Some(v) => v, None => return false,
+            Some(v) => v, None => {
+                if let Some(i) = diag { kprintln!("[net-gro] inject#{} avail_idx unreadable", i); }
+                return false;
+            }
         };
         if avail_top == q.last_avail_idx {
+            if let Some(i) = diag {
+                kprintln!("[net-gro] inject#{} NO RX BUFFERS (avail={} last={} size={})",
+                    i, avail_top, q.last_avail_idx, q.size);
+            }
             return false;  // no buffers
         }
 
@@ -616,12 +640,20 @@ impl VirtioNet {
         let mut idx = head;
         let mut written: u32 = 0;
         let mut off: usize = 0;
+        let mut desc_count: u32 = 0;
+        let mut first_desc_len: u32 = 0;
         loop {
             let d = match read_desc(mem, q.desc_gpa(), idx, q.size) {
                 Some(v) => v, None => return false,
             };
+            if desc_count == 0 { first_desc_len = d.len; }
+            desc_count += 1;
             if d.flags & VRING_DESC_F_WRITE == 0 {
                 // Driver gave us a non-writable buffer — malformed.
+                if let Some(i) = diag {
+                    kprintln!("[net-gro] inject#{} desc#{} NOT writable (flags={:#x})",
+                        i, desc_count - 1, d.flags);
+                }
                 return false;
             }
             if off < payload.len() {
@@ -636,6 +668,11 @@ impl VirtioNet {
                 break;
             }
             idx = d.next;
+        }
+
+        if let Some(i) = diag {
+            kprintln!("[net-gro] inject#{} OK delivered={}B payload={}B descs={} sg0_len={}",
+                i, written, payload.len(), desc_count, first_desc_len);
         }
 
         used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, written);
