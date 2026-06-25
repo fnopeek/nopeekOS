@@ -29,7 +29,7 @@ use super::lapic::LocalApic;
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Big-VM lock (guest SMP). Held by a vCPU only around its post-VMRUN
 /// device/MMIO/IO handling — NEVER across `vmrun` or a fiber yield — so
@@ -611,6 +611,14 @@ pub struct VmShared {
 /// `guest_vcpus()` (the count we actually enumerate) must be ≤ this. Matches the
 /// VMX twin + `cpu::ORCH_MAX_VCPUS`/`MAX_VCPUS_CAP` so every apic_id has a slot.
 pub const MAX_VCPUS: usize = 8;
+
+/// Host core (sequential id) each vCPU is currently running on, indexed by
+/// apic_id. Written at each `run_slice` entry; read by `route_ipi` to kick the
+/// target vCPU's host core out of VMRUN on a cross-vCPU IPI send (prompt µs
+/// delivery vs the ~10 ms next-natural-exit latency that made `csd_lock_wait`
+/// burn ~50% of guest CPU). `usize::MAX` = not yet mapped (no kick).
+static VCPU_HOST_CORE: [AtomicUsize; MAX_VCPUS] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_VCPUS];
 
 /// Bounded adaptive halt-polling (KVM `halt_poll_ns` model) — see the VMX twin.
 /// Idle vCPU polls its window for a wake before parking; grows on a caught wake,
@@ -1319,6 +1327,14 @@ impl VmContext {
     const SLICE_MS: u64 = 3;
     let slice_deadline = crate::interrupts::rdtsc()
         + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
+
+    // Publish this vCPU's host core so a peer vCPU's cross-vCPU IPI send can
+    // kick it out of VMRUN promptly (route_ipi). Once per slice — the fiber
+    // doesn't migrate mid-slice; a stale value only forfeits one fast kick.
+    if (self.vcpu.apic_id as usize) < MAX_VCPUS {
+        VCPU_HOST_CORE[self.vcpu.apic_id as usize]
+            .store(crate::smp::per_core::current_core_id(), Ordering::Relaxed);
+    }
 
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
@@ -2338,10 +2354,25 @@ fn handle_mmio_npf_lapic(
     true
 }
 
+/// Kick vCPU `target`'s host core out of VMRUN so it injects the just-set IPI
+/// promptly. Skips an unmapped target and the sender's own core (`self_core`).
+fn kick_vcpu_core(target: u8, self_core: usize) {
+    let t = target as usize;
+    if t >= MAX_VCPUS {
+        return;
+    }
+    let hc = VCPU_HOST_CORE[t].load(Ordering::Relaxed);
+    if hc == usize::MAX || hc == self_core {
+        return;
+    }
+    crate::smp::kick_host_core(hc);
+}
+
 /// Route a decoded ICR write (guest SMP). FIXED/LOWEST → mark the vector
-/// pending on the target vCPU(s); STARTUP → ask the orchestration layer to
-/// spawn the AP at the SIPI vector (once); INIT and other modes → no-op
-/// (the AP starts from its SIPI; we don't model NMI/SMI cross-vCPU here).
+/// pending on the target vCPU(s) + kick its host core for prompt delivery;
+/// STARTUP → ask the orchestration layer to spawn the AP at the SIPI vector
+/// (once); INIT and other modes → no-op (the AP starts from its SIPI; we don't
+/// model NMI/SMI cross-vCPU here).
 fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
     match icr.delivery_mode {
         lapic::ICR_DM_STARTUP => {
@@ -2349,18 +2380,31 @@ fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
         }
         lapic::ICR_DM_FIXED | lapic::ICR_DM_LOWEST => {
             let n = crate::microvm::cpu::guest_vcpus();
+            // The sender's own host core (so we never kick ourselves).
+            let self_core = if (sender as usize) < MAX_VCPUS {
+                VCPU_HOST_CORE[sender as usize].load(Ordering::Relaxed)
+            } else {
+                usize::MAX
+            };
             match icr.shorthand {
-                0 => sh.ipi_set(icr.dest, icr.vector), // physical dest
-                1 => sh.ipi_set(sender, icr.vector),   // self
+                0 => {
+                    sh.ipi_set(icr.dest, icr.vector); // physical dest
+                    kick_vcpu_core(icr.dest, self_core);
+                }
+                1 => sh.ipi_set(sender, icr.vector), // self — no kick
                 2 => {
                     for t in 0..n {
                         sh.ipi_set(t, icr.vector);
+                        if t != sender {
+                            kick_vcpu_core(t, self_core);
+                        }
                     }
                 } // all incl self
                 _ => {
                     for t in 0..n {
                         if t != sender {
                             sh.ipi_set(t, icr.vector);
+                            kick_vcpu_core(t, self_core);
                         }
                     }
                 } // all excl self

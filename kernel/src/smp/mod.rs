@@ -227,6 +227,34 @@ fn boot_ap(apic_base: u64, target_apic_id: u32, core_id: u32) -> bool {
     false
 }
 
+/// Force the host core with sequential id `core_id` out of VMRUN by sending it
+/// the vCPU-kick IPI from the CALLING core's LAPIC. Used by guest-SMP IPI
+/// delivery so a target vCPU takes a cross-vCPU interrupt within microseconds
+/// (its VMRUN #VMEXIT(INTR)s on receipt) instead of at its next natural exit
+/// (~10 ms host-timer tick). No-op if the core id is unknown. The kick vector's
+/// host ISR is a pure EOI — the receipt itself is the wakeup.
+pub fn kick_host_core(core_id: usize) {
+    let apic_id = {
+        let cores = per_core::CORES.lock();
+        match cores.get(core_id) {
+            Some(c) => c.apic_id,
+            None => return,
+        }
+    };
+    // xAPIC base (core-invariant physical address). SAFETY: MSR 0x1B always
+    // readable in ring 0; we mask to the 4 KiB-aligned base.
+    let base = {
+        let (lo, hi): (u32, u32);
+        unsafe {
+            core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi,
+                             options(nomem, nostack, preserves_flags));
+        }
+        ((hi as u64) << 32 | lo as u64) & 0xFFFF_F000
+    };
+    // FIXED delivery (mode 000), level assert (bit 14), physical dest.
+    send_ipi(base, apic_id, 0x0000_4000 | crate::interrupts::VCPU_KICK_VECTOR as u32);
+}
+
 /// Send IPI via Local APIC ICR (wait for idle first)
 fn send_ipi(apic_base: u64, target_apic_id: u32, icr_low: u32) {
     // SAFETY: APIC MMIO is mapped. ICR write triggers IPI.
