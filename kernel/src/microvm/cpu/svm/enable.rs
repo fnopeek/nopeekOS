@@ -573,6 +573,13 @@ pub struct VmShared {
     /// (input read() wakes via virtio-input IRQ; time does not).
     /// One IRQ0 per host tick (≈100 Hz) drives jiffies + wakeups.
     last_timer_tick: u64,
+    /// Host TSC of the last PIT IRQ0 injection. The PIT is boot-only (jiffies +
+    /// the LVTT-vs-PIT 1:1 verification), but the guest is CONFIG_HZ=1000, so we
+    /// pace IRQ0 at ~1 kHz off the TSC to MATCH the LAPIC timer's programmed
+    /// rate — else the verification (LVTT 1 kHz vs PIT 100 Hz) fails and Linux
+    /// drops the LAPIC timer. After adoption the PIT is disabled and only the
+    /// LVTT (its own programmed deadline) ticks.
+    last_pit_tsc: u64,
     /// `ticks()` of the last virtio-gpu display config-change IRQ —
     /// rate-limits the resize round-trip against a drag storm. See
     /// the vmx mirror.
@@ -837,6 +844,7 @@ impl VmContext {
                 pci: crate::microvm::devices::PciBus::new(),
                 pic: crate::microvm::devices::pic8259::Pic8259::new(),
                 last_timer_tick: 0,
+                last_pit_tsc: 0,
                 last_cfg_tick: 0,
                 pending_irqs: 0,
                 pit_enabled: true,
@@ -1548,6 +1556,43 @@ impl VmContext {
                 // boot CPU); an AP vCPU only services its own LAPIC timer
                 // (below) + cross-vCPU IPIs (above). Guest SMP, Stage 3b.
                 let is_bsp = self.vcpu.apic_id == 0;
+
+                // ── Guest timer FIRST, at the rate the GUEST programmed ──
+                // The guest is CONFIG_HZ=1000 and programs its LAPIC timer
+                // (TMICT, TSC-calibrated) for ~1 ms periods. Delivering it at our
+                // 100 Hz `ticks()` instead ran the guest's jiffies + every
+                // hrtimer (TCP pacing / delayed-ACK / RTO / NAPI) 10× slow →
+                // download bandwidth quantized to data-per-100 Hz-tick (the
+                // constant ~10 ms `drainmax`). Honour the programmed deadline
+                // here, with priority over net IRQ10 (which still fires on the
+                // many net-MMIO exits via `try_prompt_device_irq`, so it is not
+                // starved). LVTT is per-vCPU; the PIT is BSP-only + boot-only.
+                if self.vcpu.lapic.timer_due() {
+                    if let Some(vec) = self.vcpu.lapic.timer_tick_vector() {
+                        let info: u64 = (vec as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.last_lapic_tick = crate::interrupts::ticks();
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
+                }
+                // PIT (IRQ0): boot + the LVTT-vs-PIT 1:1 verification only. No
+                // i8254 reload tracking, so pace at ~1 kHz off the TSC to MATCH
+                // the LAPIC timer's programmed rate (else verification fails and
+                // Linux drops the LVTT). Disabled once Linux adopts the LVTT.
+                if is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled {
+                    let tsc_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
+                    let now_tsc = crate::interrupts::rdtsc();
+                    if now_tsc.wrapping_sub(sh.last_pit_tsc) >= tsc_ms {
+                        sh.last_pit_tsc = now_tsc;
+                        sh.last_timer_tick = crate::interrupts::ticks();
+                        let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
+                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                        self.vcpu.consecutive_idle = 0;
+                        continue;
+                    }
+                }
+
                 // Deferred device IRQ (queued while the guest was IF=0, or the
                 // per-exit net-RX pump) is now deliverable — inject the lowest
                 // pending line. BUT yield to an overdue guest timer first: with
@@ -1699,24 +1744,10 @@ impl VmContext {
                         continue;
                     }
                 }
-                // Normal slot: PIT tick, then LAPIC-timer tick (one per
-                // 100 Hz `ticks()` window; the other lands next VMRUN).
-                if pit_live && now != sh.last_timer_tick {
-                    sh.last_timer_tick = now;
-                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
-                }
-                if let Some(vec) = lapic_vec {
-                    if now != self.vcpu.last_lapic_tick {
-                        self.vcpu.last_lapic_tick = now;
-                        let info: u64 = (vec as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
-                }
+                // (Normal 100 Hz PIT/LAPIC slots removed — the guest timer is now
+                // delivered at its programmed rate in the priority block at the
+                // top of this match arm. The forced slots above stay as a ≤30 ms
+                // anti-starvation safety under a net-IRQ storm.)
                 // Real net data (`pumped`) means not idle. Merely having
                 // open NAT sessions does NOT — a browser keeps connections
                 // alive while sitting idle, and counting that as "busy"
