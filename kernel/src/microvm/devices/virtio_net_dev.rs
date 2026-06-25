@@ -555,12 +555,18 @@ impl VirtioNet {
         if !q.ready() { return false; }
         if self.driver_features[0] & (1 << VIRTIO_RING_F_EVENT_IDX) != 0 {
             let ev = used_event(mem, q.avail_gpa(), q.size);
-            let fire = need_event(ev, q.used_idx, q.last_irq_used_idx);
+            // QEMU virtio_should_notify: `old = signalled_used; signalled_used =
+            // used_idx; need_event(used_event, used_idx, old)`. signalled_used is
+            // updated on EVERY check, NOT only when we fire — else last_irq runs
+            // ahead of the guest's used_event and need_event stays false forever
+            // (no IRQ → idle NAPI never wakes → network hangs after a while).
+            let old = q.last_irq_used_idx;
+            q.last_irq_used_idx = q.used_idx;
+            let fire = need_event(ev, q.used_idx, old);
             if diag(&DIAG_IRQ) {
-                kprintln!("[net-dev] rx irq? ev={} used={} last={} -> {}", ev, q.used_idx, q.last_irq_used_idx, fire);
+                kprintln!("[net-dev] rx irq? ev={} used={} old={} -> {}", ev, q.used_idx, old, fire);
             }
-            if fire { q.last_irq_used_idx = q.used_idx; return true; }
-            false
+            fire
         } else {
             avail_flags(mem, q.avail_gpa()) & VRING_AVAIL_F_NO_INTERRUPT == 0
         }
@@ -673,11 +679,9 @@ impl VirtioNet {
         if !q.ready() { return false; }
         if self.driver_features[0] & (1 << VIRTIO_RING_F_EVENT_IDX) != 0 {
             let ev = used_event(mem, q.avail_gpa(), q.size);
-            if need_event(ev, q.used_idx, q.last_irq_used_idx) {
-                q.last_irq_used_idx = q.used_idx;
-                return true;
-            }
-            false
+            let old = q.last_irq_used_idx;
+            q.last_irq_used_idx = q.used_idx;   // signalled_used every check (QEMU)
+            need_event(ev, q.used_idx, old)
         } else {
             avail_flags(mem, q.avail_gpa()) & VRING_AVAIL_F_NO_INTERRUPT == 0
         }
