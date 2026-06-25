@@ -1573,6 +1573,7 @@ impl VmContext {
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.vcpu.last_lapic_tick = crate::interrupts::ticks();
                         self.vcpu.consecutive_idle = 0;
+                        crate::microvm::devices::nat::note_guest_timer();
                         continue;
                     }
                 }
@@ -1589,6 +1590,7 @@ impl VmContext {
                         let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.vcpu.consecutive_idle = 0;
+                        crate::microvm::devices::nat::note_guest_timer();
                         continue;
                     }
                 }

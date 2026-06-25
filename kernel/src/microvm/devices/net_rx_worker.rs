@@ -41,9 +41,19 @@ pub fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 /// smash on overflow). 512 KiB is generous headroom for the RX path.
 const WORKER_STACK_BYTES: usize = 512 * 1024;
 
+/// Master switch. The producer/consumer split (NIC drain on a separate core)
+/// was HW-measured net-negative: it adds an INBOUND_Q producer→consumer handoff
+/// (rxlat avg 20µs → 270µs) that RAISES end-to-end RTT → LOWERS throughput,
+/// without relieving any real bottleneck (the cap is RTT/window-bound, not the
+/// single-core NIC-drain serialization). Disabled so the BSP drains+injects in
+/// one pass again (low RTT). Kept inert for reference / a future load-aware
+/// revival once the RTT path is otherwise minimal. See project_microvm_rx_gro.
+const ENABLED: bool = false;
+
 /// Spawn the RX producer on `core` (load-aware, never Core 0). Idempotent within
 /// a VM session.
 pub fn start_worker(core: usize) {
+    if !ENABLED { return; }
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
     // ACTIVE is set by the fiber itself on its first iteration, NOT here: the
