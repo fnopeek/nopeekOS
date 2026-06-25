@@ -540,6 +540,9 @@ impl VirtioNet {
         q.used_idx = start_used.wrapping_add(nbuf);
         used_publish(mem, q.used_gpa(), q.used_idx);
         self.isr |= 1;
+        if diag(&DIAG_RX) {
+            kprintln!("[net-dev] inject ok nbuf={} wrote={}/{}B used_idx={}", nbuf, written, total, q.used_idx);
+        }
         true
     }
 
@@ -552,10 +555,11 @@ impl VirtioNet {
         if !q.ready() { return false; }
         if self.driver_features[0] & (1 << VIRTIO_RING_F_EVENT_IDX) != 0 {
             let ev = used_event(mem, q.avail_gpa(), q.size);
-            if need_event(ev, q.used_idx, q.last_irq_used_idx) {
-                q.last_irq_used_idx = q.used_idx;
-                return true;
+            let fire = need_event(ev, q.used_idx, q.last_irq_used_idx);
+            if diag(&DIAG_IRQ) {
+                kprintln!("[net-dev] rx irq? ev={} used={} last={} -> {}", ev, q.used_idx, q.last_irq_used_idx, fire);
             }
+            if fire { q.last_irq_used_idx = q.used_idx; return true; }
             false
         } else {
             avail_flags(mem, q.avail_gpa()) & VRING_AVAIL_F_NO_INTERRUPT == 0
@@ -587,40 +591,50 @@ impl VirtioNet {
         let mut frame = core::mem::take(&mut self.tx_scratch);
         if frame.len() < TX_FRAME_MAX { frame.resize(TX_FRAME_MAX, 0); }
 
+        let evidx = self.event_idx_on();
         let advanced;
         {
             let q = &mut self.queues[1];
             if !q.ready() { self.tx_scratch = frame; return false; }
-            let avail_top = match avail_idx(mem, q.avail_gpa()) {
-                Some(v) => v, None => { self.tx_scratch = frame; return false; }
-            };
             let start_used = q.used_idx;
             let mut nused: u16 = 0;
+            let mut avail_top = match avail_idx(mem, q.avail_gpa()) {
+                Some(v) => v, None => { self.tx_scratch = frame; return false; }
+            };
 
-            while q.last_avail_idx != avail_top {
-                let head = match avail_ring(mem, q.avail_gpa(), q.size, q.last_avail_idx) {
-                    Some(v) => v, None => break,
-                };
-                // Walk the (driver-readable) descriptor chain into the scratch.
-                let mut total_len: u32 = 0;
-                let mut off = 0usize;
-                let mut idx = head;
-                loop {
-                    let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
-                    let take = (d.len as usize).min(frame.len().saturating_sub(off));
-                    if take > 0 { mem.read_bytes(d.addr, &mut frame[off..off + take]); off += take; }
-                    total_len = total_len.saturating_add(d.len);
-                    if d.flags & VRING_DESC_F_NEXT == 0 { break; }
-                    idx = d.next;
+            // EVENT_IDX "process, then arm notification, then re-check" loop:
+            // after draining we publish avail_event = last consumed avail.idx so
+            // the guest kicks on the NEXT frame; we re-read avail.idx to catch a
+            // frame that landed in the arming window (else TX stalls after one).
+            loop {
+                while q.last_avail_idx != avail_top {
+                    let head = match avail_ring(mem, q.avail_gpa(), q.size, q.last_avail_idx) {
+                        Some(v) => v, None => break,
+                    };
+                    let mut off = 0usize;
+                    let mut idx = head;
+                    loop {
+                        let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
+                        let take = (d.len as usize).min(frame.len().saturating_sub(off));
+                        if take > 0 { mem.read_bytes(d.addr, &mut frame[off..off + take]); off += take; }
+                        if d.flags & VRING_DESC_F_NEXT == 0 { break; }
+                        idx = d.next;
+                    }
+                    let payload = &frame[..off];
+                    for rep in super::nat::process_tx(payload, &self_caps) { pending_rx.push(rep); }
+
+                    // TX buffers are device-read-only → used len = 0 (virtio spec).
+                    used_fill(mem, q.used_gpa(), q.size, start_used.wrapping_add(nused), head, 0);
+                    nused = nused.wrapping_add(1);
+                    q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
                 }
-                let payload = &frame[..off];
-                for rep in super::nat::process_tx(payload, &self_caps) { pending_rx.push(rep); }
-
-                // TX buffers are device-read-only → used len = 0 (virtio spec).
-                used_fill(mem, q.used_gpa(), q.size, start_used.wrapping_add(nused), head, 0);
-                let _ = total_len;
-                nused = nused.wrapping_add(1);
-                q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
+                if !evidx { break; }
+                // Arm: kick me when avail.idx passes what I've consumed.
+                set_avail_event(mem, q.used_gpa(), q.size, q.last_avail_idx);
+                fence(Ordering::SeqCst);
+                let new_top = avail_idx(mem, q.avail_gpa()).unwrap_or(q.last_avail_idx);
+                if new_top == q.last_avail_idx { break; }
+                avail_top = new_top;
             }
 
             if nused > 0 {
@@ -628,6 +642,9 @@ impl VirtioNet {
                 used_publish(mem, q.used_gpa(), q.used_idx);
             }
             advanced = nused > 0;
+            if advanced && diag(&DIAG_TX) {
+                kprintln!("[net-dev] TX serviced {} frame(s), replies={}", nused, pending_rx.len());
+            }
         }
         self.tx_scratch = frame;
 
@@ -670,3 +687,11 @@ impl VirtioNet {
 const fn width_mask(width: u8) -> u64 {
     match width { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFF_FFFF, _ => 0xFFFF_FFFF_FFFF_FFFF }
 }
+
+// ── Bring-up diagnostics (bounded one-shots; stripped once validated) ──
+use core::sync::atomic::AtomicU32;
+static DIAG_TX: AtomicU32 = AtomicU32::new(0);
+static DIAG_RX: AtomicU32 = AtomicU32::new(0);
+static DIAG_IRQ: AtomicU32 = AtomicU32::new(0);
+#[inline]
+fn diag(ctr: &AtomicU32) -> bool { ctr.fetch_add(1, Ordering::Relaxed) < 12 }
