@@ -153,29 +153,19 @@ static NS_DRAIN_GAP_MAX: AtomicU64 = AtomicU64::new(0);
 static NS_LAST_DRAIN: AtomicU64 = AtomicU64::new(0);
 static NS_RXRING_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Timer-NAPI for the microvm RX path. The drainmax probe proved the
-/// loaded-latency spikes are the BSP vCPU parking on `yield_sleep(2)` and the
-/// worker core only re-checking the sleep deadline on its 100 Hz LAPIC tick
-/// (~10 ms wake granularity). While RX is flowing, speed THIS core's LAPIC to
-/// 10 kHz so the 2 ms park is honoured at ~100 µs granularity (drainmax 10→~2
-/// ms). Edge-triggered off `NS_LAST_ACTIVITY` (last successful inject, TSC) so
-/// it self-restores to 100 Hz ~200 ms after the download stops. Same mechanism
-/// http.rs uses for host-direct downloads.
+/// Last successful RX inject (TSC). Drives the BSP vCPU's idle park decision:
+/// while RX is recently active the vCPU parks event-driven on the host NIC RX
+/// IRQ (`irq_wait`) instead of a blind 10 ms timer sleep, so a download lull is
+/// woken the moment the next batch arrives (drainmax 10 ms → ~sub-ms).
 static NS_LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
-static POLL_HZ_HIGH: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
 
-/// Bump/restore the calling (BSP vCPU) worker core's LAPIC poll rate based on
-/// whether RX was active in the last ~200 ms. Edge-triggered → one MMIO write
-/// per transition, not per call.
-fn tune_worker_poll(now: u64) {
-    let window = crate::interrupts::tsc_freq() / 5; // ~200 ms in TSC
-    let active = now.wrapping_sub(NS_LAST_ACTIVITY.load(AtOrd::Relaxed)) < window;
-    if active && !POLL_HZ_HIGH.swap(true, AtOrd::Relaxed) {
-        crate::interrupts::set_worker_poll_hz(10_000);
-    } else if !active && POLL_HZ_HIGH.swap(false, AtOrd::Relaxed) {
-        crate::interrupts::set_worker_poll_hz(100);
-    }
+/// True if RX delivered a packet in the last ~50 ms — i.e. a download is in
+/// flight and the BSP vCPU should wake on the host NIC RX IRQ rather than
+/// deep-parking on the 100 Hz worker timer.
+pub fn recently_active() -> bool {
+    let now = crate::interrupts::rdtsc();
+    let window = crate::interrupts::tsc_freq() / 20; // ~50 ms in TSC
+    now.wrapping_sub(NS_LAST_ACTIVITY.load(AtOrd::Relaxed)) < window
 }
 
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
@@ -1310,11 +1300,9 @@ fn drain_inbound(
             break;
         }
     }
-    // Timer-NAPI: mark RX activity (keeps the worker LAPIC at 10 kHz so the
-    // park honours its 2 ms deadline) and re-evaluate the poll rate on every
-    // pass so it self-restores to 100 Hz ~200 ms after the download stops.
+    // Mark RX activity so the BSP vCPU idle path parks event-driven on the host
+    // NIC RX IRQ (recently_active) instead of a blind 10 ms timer sleep.
     if any { NS_LAST_ACTIVITY.store(drain_now, AtOrd::Relaxed); }
-    tune_worker_poll(drain_now);
 
     // Fire the guest's RX IRQ only if we delivered something AND the driver
     // hasn't suppressed interrupts (NAPI poll sets VIRTQ_AVAIL_F_NO_INTERRUPT).
@@ -1348,10 +1336,5 @@ pub fn reset_sessions() {
               &NS_TCP_FLOWS, &NS_UDP_FLOWS, &NS_GRO_FRAMES, &NS_GRO_SEGS] {
         c.store(0, AtOrd::Relaxed);
     }
-    // Drop the timer-NAPI poll-rate bump so the next launch re-tunes cleanly
-    // and a worker core is never left ticking at 10 kHz after teardown.
     NS_LAST_ACTIVITY.store(0, AtOrd::Relaxed);
-    if POLL_HZ_HIGH.swap(false, AtOrd::Relaxed) {
-        crate::interrupts::set_worker_poll_hz(100);
-    }
 }

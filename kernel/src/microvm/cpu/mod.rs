@@ -1032,6 +1032,25 @@ pub fn vm_core_serve() {
 /// servicing between VMRUNs), restored to IF=0 before every yield so peer
 /// fibers keep the cooperative IF=0 invariant. The guest IRQ0 clock is
 /// `ticks()`-paced (global, Core-0 100 Hz), independent of this cadence.
+/// Park the BSP vCPU fiber when the guest is idle. While a download is in
+/// flight (`nat::recently_active`), park EVENT-DRIVEN on the host NIC RX IRQ
+/// (routed to this core by `irq::arm`) so a momentary lull is woken the instant
+/// the next RX batch arrives — instead of `yield_sleep`, whose wake is the
+/// 100 Hz worker timer (~10 ms granularity), which was the measured loaded-
+/// latency floor (drainmax ~10 ms ≈ rxlat max). 2 ms timeout is the fallback if
+/// the NIC is polled (RX IRQ never fires) or the link goes quiet mid-park.
+fn park_vcpu_idle() {
+    if crate::microvm::devices::nat::recently_active() {
+        let vec = crate::drivers::virtio_net::rx_irq_vector();
+        if vec != 0 {
+            let since = crate::irq::arm(vec); // snapshot + route IRQ to this core
+            crate::smp::fiber::irq_wait(vec, since, 2);
+            return;
+        }
+    }
+    crate::smp::fiber::yield_sleep(2);
+}
+
 fn vcpu_fiber_task(_arg: u64) {
     if VM_RUN_STATE.load(Ordering::Acquire) != VM_REQUESTED {
         return;
@@ -1096,8 +1115,9 @@ fn vcpu_fiber_task(_arg: u64) {
                             crate::smp::fiber::yield_ready();
                         }
                         // Idle guest: park briefly → core runs app fibers.
+                        // Event-driven on host RX IRQ while downloading.
                         Ok(svm::SliceOutcome::Idle) => {
-                            crate::smp::fiber::yield_sleep(2);
+                            park_vcpu_idle();
                         }
                         Ok(svm::SliceOutcome::Exited(o)) => {
                             crate::kprintln!(
@@ -1163,7 +1183,7 @@ fn vcpu_fiber_task(_arg: u64) {
                                 crate::smp::fiber::yield_ready();
                             }
                             Ok(vmx::SliceOutcome::Idle) => {
-                                crate::smp::fiber::yield_sleep(2);
+                                park_vcpu_idle();
                             }
                             Ok(vmx::SliceOutcome::Exited(o)) => {
                                 crate::kprintln!(
