@@ -628,6 +628,21 @@ impl VirtioNet {
         NET_GRO_ENABLED && self.driver_features[0] & (1u32 << VIRTIO_NET_F_GUEST_TSO4) != 0
     }
 
+    /// Number of RX buffers the guest currently has posted (avail - consumed).
+    /// In big-packets mode each "buffer" is a ~19-descriptor chain, so the count
+    /// caps around queue_size/19 — a shallow ring that can starve under bursts.
+    pub(super) fn rx_avail_count(&self, mem: &GuestMem) -> u64 {
+        match self.queues.get(0) {
+            Some(q) if q.enable != 0 && q.size != 0 => {
+                match super::virtqueue::avail_idx(mem, q.driver_gpa()) {
+                    Some(top) => top.wrapping_sub(q.last_avail_idx) as u64,
+                    None => 0,
+                }
+            }
+            _ => 0,
+        }
+    }
+
     pub(super) fn rx_wants_irq(&self, mem: &GuestMem) -> bool {
         match self.queues.get(0) {
             Some(q) if q.enable != 0 && q.size != 0 =>
