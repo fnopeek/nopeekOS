@@ -225,6 +225,14 @@ pub struct VirtioGpu {
     /// console-line update which is a full 3.6 MB blit; logging each
     /// via kprintln stalls the guest for tens of seconds.
     transfer_log_count: u32,
+    /// Host TSC of the last ACTUALLY-COPIED TRANSFER_TO_HOST_2D. The guest
+    /// (browser/wlroots) issues ~150-200 FULL-framebuffer transfers/s (~15 MB
+    /// each = 2-3 GB/s of guest-RAM reads), all on the vCPU exit path — which
+    /// starves the net pump on the same core (measured: cores pegged for a
+    /// trickle of traffic). The display is ~60 Hz, so we cap the copy at ~60 fps:
+    /// skip the pixel copy when one happened < ~16 ms ago (the host_pixels stays
+    /// at most one frame stale → imperceptible). Cuts the GPU copy ~3×.
+    last_transfer_tsc: u64,
     /// Same for SET_SCANOUT — a wlroots/cage compositor double-buffers
     /// by flipping the scanout between two resources every frame
     /// (res 3 ↔ 4 at the guest's refresh rate). Logging each floods
@@ -268,6 +276,7 @@ impl VirtioGpu {
             scanouts: [Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 } }; MAX_SCANOUTS],
             flush_log_count: 0,
             transfer_log_count: 0,
+            last_transfer_tsc: 0,
             set_scanout_log_count: 0,
             dmg_area_acc: 0,
             dmg_tile_acc: 0,
@@ -672,6 +681,20 @@ impl VirtioGpu {
             body[20], body[21], body[22], body[23],
         ]);
         let resource_id = u32::from_le_bytes([body[24], body[25], body[26], body[27]]);
+
+        // 30-fps copy cap: the guest issues ~200 full-framebuffer transfers/s
+        // (2-3 GB/s of guest-RAM reads on the vCPU core, starving the net pump);
+        // the display only needs ~30 Hz for a browser/UI so the surplus is pure
+        // waste. Skip the copy when the last one was < ~33 ms ago — host_pixels
+        // stays at most one 30-fps frame stale. The controlq response is still
+        // sent by the caller (we only skip the copy). NEXT lever (Florian): also
+        // discard unchanged pixels (damage-track the rect) so each copy is small.
+        let now_tsc = crate::interrupts::rdtsc();
+        let frame_gap = (crate::interrupts::tsc_freq() / 1000) * 33; // ~30 fps
+        if now_tsc.wrapping_sub(self.last_transfer_tsc) < frame_gap {
+            return;
+        }
+        self.last_transfer_tsc = now_tsc;
 
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
             Some(r) => r, None => return,
