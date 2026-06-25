@@ -596,15 +596,6 @@ pub struct VmShared {
     /// jiffies don't double-count against the LAPIC timer. Starts true so
     /// IRQ0 drives boot before Linux first programs the PIT.
     pit_enabled: bool,
-    /// Pending inter-processor-interrupt vectors per target vCPU, indexed
-    /// by apic_id: `ipi_pending[t]` is a 256-bit bitmap (bit V = vector V
-    /// pending for vCPU t). A vCPU's ICR write (FIXED IPI) sets bits in the
-    /// target's word; each vCPU drains its own word and injects the lowest
-    /// pending vector via EVENTINJ when interruptible. This is the
-    /// cross-vCPU IPI path that carries reschedule / call-function / TLB
-    /// IPIs — and crucially the AP→BSP `complete()` wakeup without which the
-    /// cpuhp bring-up `wait_for_completion` never returns. Guest SMP only.
-    ipi_pending: [[u64; 4]; MAX_VCPUS],
 }
 
 /// Maximum vCPUs per guest (guest SMP). Sizes the per-vCPU IPI bitmaps;
@@ -628,46 +619,73 @@ static VCPU_HOST_CORE: [AtomicUsize; MAX_VCPUS] =
 static VCPU_LAST_ACTIVE: [AtomicU64; MAX_VCPUS] =
     [const { AtomicU64::new(0) }; MAX_VCPUS];
 
+/// Pending inter-processor-interrupt vectors per target vCPU, indexed by
+/// apic_id: `IPI_PENDING[t]` is a 256-bit bitmap (bit V = vector V pending for
+/// vCPU t). A vCPU's ICR write (FIXED IPI) sets bits in the target's word (any
+/// sender); the target vCPU drains its OWN word and injects the lowest pending
+/// vector via EVENTINJ when interruptible. Carries reschedule / call-function /
+/// TLB IPIs + the AP→BSP `complete()` cpuhp wakeup. Guest SMP only.
+///
+/// LOCK-FREE (moved out of `VmShared`/`VM_BIG_LOCK`): the target reads + injects
+/// its pending IPI without taking the big lock, so it no longer queues behind
+/// the BSP's net pump (which holds the lock during `inject_rx`) — that queuing
+/// was extending the sender's `csd_lock_wait` spin. Single-consumer per target
+/// (only vCPU t clears `IPI_PENDING[t]`), multi-producer (any sender OR's bits)
+/// → `fetch_or`/`fetch_and` are race-free here.
+static IPI_PENDING: [[AtomicU64; 4]; MAX_VCPUS] =
+    [const { [const { AtomicU64::new(0) }; 4] }; MAX_VCPUS];
+
+/// Mark `vector` pending for vCPU `apic_id`. Returns `true` only on the
+/// empty→non-empty edge (best-effort; a benign double-kick race under
+/// concurrent senders is harmless) so the caller kicks the target's host core
+/// just once per un-drained burst (coalescing — see route_ipi).
+fn ipi_set(apic_id: u8, vector: u8) -> bool {
+    let t = apic_id as usize;
+    if t >= MAX_VCPUS {
+        return false;
+    }
+    let was_empty = IPI_PENDING[t]
+        .iter()
+        .all(|w| w.load(Ordering::Relaxed) == 0);
+    IPI_PENDING[t][(vector >> 6) as usize]
+        .fetch_or(1u64 << (vector & 63), Ordering::Release);
+    was_empty
+}
+
+/// Take (and clear) the lowest pending IPI vector for `apic_id`, if any. Only
+/// the target vCPU calls this for its own slot → no take/take race; concurrent
+/// `ipi_set` from senders touches different bits atomically.
+fn ipi_take(apic_id: u8) -> Option<u8> {
+    let t = apic_id as usize;
+    if t >= MAX_VCPUS {
+        return None;
+    }
+    for w in 0..4 {
+        let word = IPI_PENDING[t][w].load(Ordering::Acquire);
+        if word != 0 {
+            let bit = word.trailing_zeros();
+            IPI_PENDING[t][w].fetch_and(!(1u64 << bit), Ordering::Release);
+            return Some((w as u32 * 64 + bit) as u8);
+        }
+    }
+    None
+}
+
+/// Clear all pending IPIs (VM teardown/start) so a stale vector can't inject a
+/// spurious interrupt into the next guest. Called from the reset path.
+pub fn ipi_reset() {
+    for t in IPI_PENDING.iter() {
+        for w in t.iter() {
+            w.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Bounded adaptive halt-polling (KVM `halt_poll_ns` model) — see the VMX twin.
 /// Idle vCPU polls its window for a wake before parking; grows on a caught wake,
 /// shrinks on expiry. Replaces the old global `recently_active` spin. µs units.
 const HALT_POLL_MIN_US: u64 = 5;
 const HALT_POLL_MAX_US: u64 = 200;
-
-impl VmShared {
-    /// Mark interrupt `vector` pending for the vCPU with `apic_id` (an IPI
-    /// target). No-op if the id is out of range. Returns `true` only on the
-    /// empty→non-empty transition (this is the FIRST un-drained IPI for the
-    /// target) — the caller kicks the target's host core only then, so a burst
-    /// of IPIs to an as-yet-undrained vCPU coalesces into ONE host kick instead
-    /// of a storm (KVM's vcpu->mode / KVM_REQ coalescing). Once the target
-    /// drains its bitmap empty, the next IPI re-arms a kick.
-    fn ipi_set(&mut self, apic_id: u8, vector: u8) -> bool {
-        let t = apic_id as usize;
-        if t >= MAX_VCPUS {
-            return false;
-        }
-        let was_empty = self.ipi_pending[t].iter().all(|&w| w == 0);
-        self.ipi_pending[t][(vector >> 6) as usize] |= 1u64 << (vector & 63);
-        was_empty
-    }
-
-    /// Take (and clear) the lowest pending IPI vector for `apic_id`, if any.
-    fn ipi_take(&mut self, apic_id: u8) -> Option<u8> {
-        let t = apic_id as usize;
-        if t >= MAX_VCPUS {
-            return None;
-        }
-        for (w, word) in self.ipi_pending[t].iter_mut().enumerate() {
-            if *word != 0 {
-                let bit = word.trailing_zeros();
-                *word &= !(1u64 << bit);
-                return Some((w as u32 * 64 + bit) as u8);
-            }
-        }
-        None
-    }
-}
 
 /// Per-vCPU state: its own VMCB + register file + FPU areas, plus the
 /// per-vCPU exit-handling bookkeeping. Each vCPU fiber owns one; guest
@@ -857,6 +875,10 @@ impl VmContext {
         // consistency-check path.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
+        // Fresh IPI state for this VM (IPI_PENDING is a static now, not a
+        // VmShared field, so it isn't auto-reset when a new VmShared is built).
+        ipi_reset();
+
         Ok(VmContext {
             shared: SharedRef::owned(VmShared {
                 guest_mem: gm,
@@ -872,7 +894,6 @@ impl VmContext {
                 last_cfg_tick: 0,
                 pending_irqs: 0,
                 pit_enabled: true,
-                ipi_pending: [[0; 4]; MAX_VCPUS],
             }),
             vcpu: Vcpu {
                 apic_id: 0, // BSP
@@ -1461,6 +1482,38 @@ impl VmContext {
         // so it shares the EXIT_INTR keepalive path below.
         if exit != EXIT_INTR && exit != EXIT_HLT { self.vcpu.consecutive_idle = 0; }
 
+        // ── Lock-free fast cross-vCPU IPI delivery ──────────────────────────
+        // A kicked target vCPU injects its pending IPI WITHOUT taking
+        // VM_BIG_LOCK, so it no longer queues behind the BSP's net pump (which
+        // holds the lock during inject_rx). That queuing was extending the
+        // sender's csd_lock_wait spin (rip_sample: smp_call_function_many_cond
+        // ~40% across all vCPUs). Everything this touches is per-vCPU (vmcb /
+        // lapic / regs) or the lock-free IPI_PENDING atomic — no VmShared field
+        // — so it is sound outside the lock. Deliberately NARROW: only a running
+        // vCPU (EXIT_INTR, interruptible, no aborted-vectoring reinject pending,
+        // timer not due); HLT / IF=0 / timer-due / bring-up all fall through to
+        // the unchanged locked path (which re-checks IPI_PENDING as a fallback).
+        // Gated on AP_ESTABLISHED so AP bring-up keeps its validated in-lock
+        // timing; the `complete()` wakeup still goes through the locked path.
+        // APs ONLY: they are the ones that wait behind the BSP's lock-held pump;
+        // the BSP is usually the lock holder (doesn't wait), and its device /
+        // timer / pump injection logic stays byte-identical on the locked path.
+        if exit == EXIT_INTR
+            && self.vcpu.apic_id != 0
+            && AP_ESTABLISHED.load(Ordering::Acquire)
+            && self.vcpu.reinject == 0
+            && !self.vcpu.lapic.timer_due()
+            && guest_interruptible(&self.vcpu.vmcb)
+        {
+            if let Some(vec) = ipi_take(self.vcpu.apic_id) {
+                let info: u64 = (vec as u64) | (1u64 << 31);
+                self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                self.vcpu.consecutive_idle = 0;
+                last_outcome = Some(outcome);
+                continue;
+            }
+        }
+
         // Take the big-VM lock around this exit's device/memory handling
         // when an AP shares the VM (guest SMP), so the two vCPUs serialize
         // access to `VmShared`. Both `_big` and `sh` are dropped at the end
@@ -1609,7 +1662,7 @@ impl VmContext {
                 // yet → timer_due() is false → IPIs keep absolute priority, so
                 // the cpuhp `complete()` handshake timing is unchanged.
                 if !self.vcpu.lapic.timer_due() {
-                    if let Some(vec) = sh.ipi_take(self.vcpu.apic_id) {
+                    if let Some(vec) = ipi_take(self.vcpu.apic_id) {
                         let info: u64 = (vec as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.vcpu.consecutive_idle = 0;
@@ -2381,7 +2434,7 @@ fn handle_mmio_npf_lapic(
     if dec.is_write {
         let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
         if let Some(icr) = apic.write(off, value as u32) {
-            route_ipi(sh, apic_id, &icr);
+            route_ipi(apic_id, &icr);
         }
     } else {
         let value = apic.read(off) as u64;
@@ -2427,7 +2480,7 @@ fn vcpu_preempted(target: u8) -> bool {
 /// STARTUP → ask the orchestration layer to spawn the AP at the SIPI vector
 /// (once); INIT and other modes → no-op (the AP starts from its SIPI; we don't
 /// model NMI/SMI cross-vCPU here).
-fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
+fn route_ipi(sender: u8, icr: &lapic::IcrWrite) {
     match icr.delivery_mode {
         lapic::ICR_DM_STARTUP => {
             crate::microvm::cpu::request_ap_spawn(icr.dest, icr.vector);
@@ -2443,16 +2496,16 @@ fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
             match icr.shorthand {
                 0 => {
                     // physical dest — kick only on the empty→non-empty edge.
-                    if sh.ipi_set(icr.dest, icr.vector) {
+                    if ipi_set(icr.dest, icr.vector) {
                         kick_vcpu_core(icr.dest, self_core);
                     }
                 }
                 1 => {
-                    let _ = sh.ipi_set(sender, icr.vector); // self — no kick
+                    let _ = ipi_set(sender, icr.vector); // self — no kick
                 }
                 2 => {
                     for t in 0..n {
-                        let edge = sh.ipi_set(t, icr.vector);
+                        let edge = ipi_set(t, icr.vector);
                         if t != sender {
                             crate::microvm::cpu::rip_sample::note_ipi_target(
                                 vcpu_preempted(t),
@@ -2469,7 +2522,7 @@ fn route_ipi(sh: &mut VmShared, sender: u8, icr: &lapic::IcrWrite) {
                             crate::microvm::cpu::rip_sample::note_ipi_target(
                                 vcpu_preempted(t),
                             );
-                            if sh.ipi_set(t, icr.vector) {
+                            if ipi_set(t, icr.vector) {
                                 kick_vcpu_core(t, self_core);
                             }
                         }
