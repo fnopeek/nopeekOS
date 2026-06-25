@@ -266,9 +266,14 @@ static NS_GRO_SEGS:   AtomicU64 = AtomicU64::new(0);
 
 /// Isolation switch: when false, the device still advertises the offloads
 /// (guest in big-packets mode) but `gro_offer` passes every frame through
-/// unchanged — no coalescing, no GSO frame. Splits big-packets-mode vs the
-/// GSO frame as the connectivity-break cause. v0.225.4 diagnostic = false.
-const GRO_COALESCE: bool = false;
+/// unchanged — no coalescing, no GSO frame.
+///
+/// v0.225.9 fixed the real root cause (feature-word read bug) → big-packets RX
+/// confirmed working (gso_ok=true, injects deliver). Now TRUE for the actual
+/// GRO test: coalesce bulk TCP into NEEDS_CSUM/CHECKSUM_PARTIAL GSO superframes.
+/// The earlier "GSO frame broke the internet" results were the negotiation bug,
+/// not the frame — this is the first clean test of the GSO frame itself.
+const GRO_COALESCE: bool = true;
 
 const GRO_SLOTS:       usize = 16;      // concurrent flows we coalesce
 const GRO_MAX_PAYLOAD: usize = 60_000;  // < 64 KiB IP total-length limit
