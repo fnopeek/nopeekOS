@@ -1677,6 +1677,32 @@ impl VmContext {
                     last_outcome = Some(outcome);
                     continue;
                 }
+                // Backend RX IRQ10, BEFORE the cross-vCPU IPI block. ROOT CAUSE
+                // of the Stage-2b "guest net dies" bug: with the RX data-plane on
+                // the worker core, IRQ10 was raised lock-free + the BSP kicked,
+                // but it only injected at the LOW-PRIORITY pending_irqs step
+                // (after the IPI block). Under a download the guest's
+                // csd_lock_wait IPI storm took the single EVENT_INJ slot on nearly
+                // every exit (step 2) → IRQ10 starved → guest never drained RX →
+                // TCP stalled → sockets died (rx 154→0). In Stage 2a IRQ10 rode
+                // the many net-MMIO exits (try_prompt_device_irq); 2b suppresses
+                // those (EVENT_IDX RX-repost), so it must be delivered here.
+                // Give it priority over the IPI but still YIELD to a due guest
+                // timer (jiffies/RCU). It's raised at NAPI rate (EVENT_IDX-gated),
+                // so the IPI flood still gets nearly every other exit → csd is
+                // barely affected. `note_net_irq()` makes `netirq/s` show the
+                // real RX-IRQ delivery rate.
+                if self.vcpu.apic_id == 0
+                    && !self.vcpu.lapic.timer_due()
+                    && sh.pending_irqs & (1 << 10) != 0
+                {
+                    sh.pending_irqs &= !(1u16 << 10);
+                    let info: u64 = (sh.pic.vector_for_irq(10) as u64) | (1u64 << 31);
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
+                    crate::microvm::devices::nat::note_net_irq();
+                    continue;
+                }
                 // Cross-vCPU IPI (guest SMP): a reschedule / call-function /
                 // TLB-flush / AP→BSP `complete()` wakeup another vCPU routed
                 // to this one. No-op on a UP guest (`ipi_pending` all-zero).
