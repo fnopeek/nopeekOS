@@ -73,6 +73,7 @@ pub fn report() {
             kprintln!("[svm]   nrip_save       = {}", c.nrip_save);
             kprintln!("[svm]   decode_assists  = {}", c.decode_assists);
             kprintln!("[svm]   vmsave_vmload   = {}", c.vmsave_vmload);
+            kprintln!("[svm]   avic            = {}  (nested-AVIC gate: Y ⇒ csd-fix buildable in QEMU)", c.avic);
             kprintln!("[svm]   substrate-test  = run 'microvm test' to exercise (12.1.0b)");
         }
         ProbeState::Unavailable(reason) => {

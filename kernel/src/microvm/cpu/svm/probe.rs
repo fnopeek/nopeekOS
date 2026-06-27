@@ -39,6 +39,14 @@ pub struct Capabilities {
     /// populates VMCB exit-info fields with decoded operand info,
     /// avoiding instruction-stream re-fetch on string I/O exits.
     pub decode_assists: bool,
+    /// AVIC — Advanced Virtual Interrupt Controller (CPUID 8000_000A
+    /// EDX[13]). Hardware delivers guest→guest IPIs (incl. TLB-shootdown
+    /// IPIs) directly into the target vCPU's vAPIC with NO #VMEXIT when the
+    /// target is running — exactly the `csd_lock_wait` fix. CRITICAL for us:
+    /// nopeekOS runs nested under KVM, so this bit is only set if KVM
+    /// virtualizes AVIC for its guest (nested AVIC). If false here, AVIC is
+    /// bare-metal-only and not worth building for the QEMU path.
+    pub avic: bool,
 }
 
 /// Probe the running CPU for SVM. Returns `None` if SVM is either
@@ -71,6 +79,7 @@ pub fn probe() -> Option<Capabilities> {
         nrip_save: edx_a & (1 << 3) != 0,
         decode_assists: edx_a & (1 << 7) != 0,
         vmsave_vmload: edx_a & (1 << 15) != 0,
+        avic: edx_a & (1 << 13) != 0,
     })
 }
 
