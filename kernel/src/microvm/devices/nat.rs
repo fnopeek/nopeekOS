@@ -1352,6 +1352,18 @@ pub fn pump_fast(
     fired
 }
 
+/// Backend consumer half (Stage 2b): drain INBOUND_Q into the guest RX ring on
+/// the dedicated worker core — the NIC drain (producer) already filled the queue
+/// via `rx_producer_drain`. Returns true iff the guest wants its RX IRQ raised
+/// (the worker then signals + kicks the BSP to inject IRQ10). Lets the whole RX
+/// data-plane run off the vCPU.
+pub fn drain_to_guest(
+    net: &mut super::virtio_net_dev::VirtioNet,
+    mem: &GuestMem,
+) -> bool {
+    drain_inbound(net, mem)
+}
+
 /// Producer half (runs on the dedicated `net_rx_worker` fiber, a separate core):
 /// drain the host NIC RX ring through the IP stack into INBOUND_Q + flush any
 /// GRO burst past its latency budget. Deliberately does NOT touch the guest

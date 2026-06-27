@@ -936,6 +936,11 @@ impl VmContext {
     /// B3: `npt::release` now walks + frees the demand frames, demand
     /// PTs, and NPT tables (no longer leaked).
     pub fn close(&mut self) {
+        // Stop the off-vCPU net backend FIRST: it holds &'static GuestMem via
+        // guest_mem::active(); clear_active() below frees it, so the worker must
+        // have stopped touching it. Bounded-waits for the fiber to exit;
+        // idempotent (the teardown path calls it again).
+        crate::microvm::devices::net_rx_worker::stop_worker();
         // Persist the home image to npkFS BEFORE freeing. close() is
         // reached on EVERY teardown — crucially the Mod+Q window-close
         // path (VM_CLOSE_REQUESTED → break → close), where run_slice's
@@ -1537,7 +1542,9 @@ impl VmContext {
         // The guest IRQ10 is signalled lock-free (`raise_irq`) and folded into
         // pending_irqs by the BSP below. BSP-only; NET is released (temporary
         // guard) before VM_BIG_LOCK is requested, so no lock cycle.
-        if self.vcpu.apic_id == 0 {
+        // Skipped entirely when the full off-vCPU RX backend (Stage 2b) owns the
+        // RX data-plane on its own core — then the BSP does NO net RX work here.
+        if self.vcpu.apic_id == 0 && !crate::microvm::devices::net_backend::full_active() {
             if let Some(gm) = crate::microvm::devices::guest_mem::active() {
                 if crate::microvm::devices::nat::pump_fast(
                     &mut *crate::microvm::devices::net_backend::lock(), gm)
@@ -2109,8 +2116,9 @@ impl VmContext {
                     if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *net, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         // Drain RX into the guest on its virtio-net access (was
                         // starved at the ~1500/s timer/HLT pump → download cap).
-                        // Mirrors the VMX side. BSP only.
+                        // Skipped in full-backend mode (the worker owns RX).
                         if self.vcpu.apic_id == 0
+                            && !crate::microvm::devices::net_backend::full_active()
                             && crate::microvm::devices::nat::pump_fast(&mut *net, sh.guest_mem)
                         {
                             sh.pending_irqs |= 1 << 10;
@@ -2139,8 +2147,10 @@ impl VmContext {
                         // write INLINE here — during which the net RX pump does
                         // not run, so the staging queue overflows and RX drops
                         // (the download-to-disk sawtooth). Drain RX right after,
-                        // so disk activity no longer starves it. BSP only.
+                        // so disk activity no longer starves it. BSP only; skipped
+                        // in full-backend mode (the worker owns RX on its core).
                         if self.vcpu.apic_id == 0
+                            && !crate::microvm::devices::net_backend::full_active()
                             && crate::microvm::devices::nat::pump_fast(
                                 &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem)
                         {
@@ -2473,6 +2483,18 @@ fn handle_mmio_npf_lapic(
     }
     advance_rip_by_length(vmcb, dec.length);
     true
+}
+
+/// Kick the BSP (vCPU 0) out of VMRUN so it promptly folds the lock-free net-IRQ
+/// (raised by the off-vCPU RX backend on another core) into `pending_irqs` and
+/// injects IRQ10. Called from the `net_rx_worker` fiber after it injects RX into
+/// the guest. No-op if the BSP isn't mapped yet (early boot) — the BSP folds the
+/// signal on its next natural exit anyway.
+pub fn kick_bsp_net_irq() {
+    let hc = VCPU_HOST_CORE[0].load(Ordering::Relaxed);
+    if hc != usize::MAX {
+        crate::smp::kick_host_core(hc);
+    }
 }
 
 /// Kick vCPU `target`'s host core out of VMRUN so it injects the just-set IPI

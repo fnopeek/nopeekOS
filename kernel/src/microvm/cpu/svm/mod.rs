@@ -108,7 +108,7 @@ pub fn run_linux(
     }
 }
 
-pub use enable::{SliceOutcome, VmContext};
+pub use enable::{kick_bsp_net_irq, SliceOutcome, VmContext};
 
 /// Open a re-entrant VM context (12.4 step 1b). Probe-gated like
 /// `run_linux`. The caller drives `run_slice` + `close`.

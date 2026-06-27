@@ -55,14 +55,15 @@ const ENABLED: bool = true;
 /// Spawn the RX producer on `core` (load-aware, never Core 0). Idempotent within
 /// a VM session. NO-OP on an IRQ-driven NIC (the BSP keeps the ring drained there
 /// and the handoff only adds RTT); runs ONLY when the host NIC is polled.
-pub fn start_worker(core: usize) {
+pub fn start_worker(core: usize, full: bool) {
     if !ENABLED { return; }
-    // Gate: only a POLLED host NIC (no RX MSI-X) needs an independent drainer.
-    // virtio (QEMU) exposes an RX IRQ → vector != 0 → the BSP wakes on it and
-    // keeps up; the real bare-metal NICs (intel_nic / rtl8153) are pure-poll →
-    // vector 0 → without this fiber nothing drains them while the BSP is parked
-    // or busy in the guest.
-    if crate::drivers::virtio_net::rx_irq_vector() != 0 { return; }
+    // Producer-only mode (full=false): only a POLLED host NIC (no RX MSI-X) needs
+    // an independent drainer — on an IRQ-driven NIC (QEMU) the BSP keeps up and
+    // the producer→BSP handoff was net-negative, so skip it there.
+    // Full mode (Stage 2b, full=true): this fiber ALSO injects, so the WHOLE RX
+    // path runs off the vCPU on ONE core (no cross-core handoff) — that wins even
+    // on an IRQ-driven NIC, so it runs regardless of the vector.
+    if !full && crate::drivers::virtio_net::rx_irq_vector() != 0 { return; }
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
     // ACTIVE is set by the fiber itself on its first iteration, NOT here: the
@@ -71,16 +72,17 @@ pub fn start_worker(core: usize) {
     // (admit only queues it; the worker core picks it up ≤ one tick later) would
     // open a window where everyone yields the drain but the producer isn't live
     // yet → nobody drains. Until the fiber runs, the old BSP-drains path stands.
-    crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
+    crate::smp::fiber::admit_with_stack(core, worker_entry, full as u64, WORKER_STACK_BYTES);
 }
 
 /// Stop the producer at VM teardown and wait (bounded) for it to exit, so the
 /// host's own networking (Core 0 `net::poll`, OTA) reclaims the NIC drain.
 pub fn stop_worker() {
     if !WORKER_RUNNING.load(Ordering::Acquire) { return; }
-    // Clear ACTIVE first so the BSP/Core-0 resume draining immediately even
-    // before the fiber observes STOP and exits.
+    // Clear ACTIVE + FULL first so the BSP/Core-0 resume draining (and the BSP
+    // resumes its own RX pump) immediately, even before the fiber observes STOP.
     ACTIVE.store(false, Ordering::Release);
+    crate::microvm::devices::net_backend::set_full_active(false);
     STOP.store(true, Ordering::Release);
     for _ in 0..50_000_000u64 {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
@@ -88,11 +90,31 @@ pub fn stop_worker() {
     }
 }
 
-fn worker_entry(_: u64) {
+/// Stage 2b consumer: drain INBOUND_Q into the guest RX ring on THIS core, then
+/// signal + kick the BSP to inject IRQ10 if the guest wants it. Only in full
+/// mode; gracefully no-ops if guest memory was already torn down (active()=None).
+#[inline]
+fn full_consume(full: bool) {
+    if !full { return; }
+    if let Some(gm) = crate::microvm::devices::guest_mem::active() {
+        let want_irq = super::nat::drain_to_guest(
+            &mut crate::microvm::devices::net_backend::lock(), gm);
+        if want_irq {
+            crate::microvm::devices::net_backend::raise_irq();
+            crate::microvm::cpu::svm::kick_bsp_net_irq();
+        }
+    }
+}
+
+fn worker_entry(arg: u64) {
+    let full = arg != 0;
     // Now that we're actually scheduled, claim the NIC drain (closes the
     // start_worker→admit launch gap where the gates would yield to a not-yet-live
     // producer). stop_worker clears this first, before STOP, for a clean handoff.
     ACTIVE.store(true, Ordering::Release);
+    // Publish full-backend mode only once we're live, so the BSP keeps its own RX
+    // pump until this fiber actually starts draining (no RX gap at launch).
+    if full { crate::microvm::devices::net_backend::set_full_active(true); }
     let mut last_tick = crate::interrupts::ticks();
     loop {
         if STOP.load(Ordering::Acquire) {
@@ -103,6 +125,9 @@ fn worker_entry(_: u64) {
         // Drain the host NIC into INBOUND_Q + flush any GRO burst past its
         // latency budget. This is the producer half of the pipeline.
         super::nat::rx_producer_drain();
+        // Full mode: also consume (inject into the guest) — the whole RX path on
+        // this core, off the vCPU.
+        full_consume(full);
 
         // Host-stack TCP timers (retransmit/RTO) — the guest uses its own TCP via
         // L3-NAT so this is only for host-originated connections (OTA/https). Run
@@ -125,9 +150,11 @@ fn worker_entry(_: u64) {
         if vec != 0 {
             let since = crate::irq::arm(vec);
             super::nat::rx_producer_drain();
+            full_consume(full);
             crate::smp::fiber::irq_wait(vec, since, 2);
         } else {
             // Polled NIC (no RX MSI-X): short sleep, still off the BSP core.
+            full_consume(full);
             crate::smp::fiber::yield_sleep(1);
         }
     }
