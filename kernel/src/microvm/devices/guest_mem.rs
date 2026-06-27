@@ -23,7 +23,50 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+extern crate alloc;
+use alloc::boxed::Box;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::ptr;
+
+/// The active microvm's `GuestMem`, held OUTSIDE `VmShared` so the off-vCPU
+/// network backend can share `&GuestMem` across cores without aliasing the
+/// vCPU's `&mut VmShared`. Sound because `GuestMem` is `&self`-only + `Sync`
+/// (its only interior mutability is the atomic software TLB) — a vCPU's
+/// `&mut VmShared` governs only the stored reference, never the pointee. One
+/// instance (one microvm at a time); a future multi-VM world keys this per VM.
+static ACTIVE_GM: AtomicPtr<GuestMem> = AtomicPtr::new(ptr::null_mut());
+
+/// Install `gm` as the active guest memory and return a `'static` handle to it.
+/// The `'static` is self-managed: `clear_active()` frees it at VM close, after
+/// all vCPUs + the backend fiber have stopped touching it.
+pub fn set_active(gm: GuestMem) -> &'static GuestMem {
+    let p = Box::into_raw(Box::new(gm));
+    ACTIVE_GM.store(p, Ordering::Release);
+    // SAFETY: `p` was just allocated and is non-null; it stays live until
+    // `clear_active()` (called only at close, after the VM threads stop).
+    unsafe { &*p }
+}
+
+/// The active guest memory, if a microvm is running. Used by the off-vCPU
+/// backend fiber (which has no `VmShared` handle).
+pub fn active() -> Option<&'static GuestMem> {
+    let p = ACTIVE_GM.load(Ordering::Acquire);
+    if p.is_null() { None } else {
+        // SAFETY: non-null ⇒ set_active installed a live Box not yet cleared.
+        unsafe { Some(&*p) }
+    }
+}
+
+/// Free the active guest memory at VM close. Idempotent. Caller guarantees no
+/// vCPU or backend fiber still holds a handle (teardown order: stop threads →
+/// release page tables → clear_active).
+pub fn clear_active() {
+    let p = ACTIVE_GM.swap(ptr::null_mut(), Ordering::AcqRel);
+    if !p.is_null() {
+        // SAFETY: `p` came from `Box::into_raw` in set_active and is freed once.
+        unsafe { drop(Box::from_raw(p)); }
+    }
+}
 
 /// Software-TLB size (direct-mapped, power of two). 1024 slots cover a 4 MiB
 /// working set of distinct guest pages — far more than the RX/TX buffer pool the

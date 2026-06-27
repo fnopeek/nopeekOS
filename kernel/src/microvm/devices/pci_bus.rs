@@ -24,7 +24,6 @@
 use super::virtio_blk_pci::VirtioBlk;
 use super::virtio_gpu_pci::VirtioGpu;
 use super::virtio_input_pci::VirtioInput;
-use super::virtio_net_dev::VirtioNet;
 use super::virtio_9p_pci::Virtio9p;
 use super::virtio_snd_pci::VirtioSnd;
 
@@ -38,7 +37,9 @@ const NO_DEVICE: u32 = 0xFFFF_FFFF;
 pub struct PciBus {
     config_addr: u32,
     pub virtio_blk: VirtioBlk,
-    pub virtio_net: VirtioNet,
+    // virtio-net lives in `net_backend` (out of VmShared/VM_BIG_LOCK), so the
+    // off-vCPU backend can own its data-plane. Config-space dispatch reaches it
+    // via `net_backend::lock()`.
     pub virtio_gpu: VirtioGpu,
     pub virtio_input: VirtioInput,
     /// Slot 5 — read-only squashfs userspace bundle (/dev/vdb).
@@ -54,7 +55,6 @@ impl PciBus {
         Self {
             config_addr: 0,
             virtio_blk: VirtioBlk::new(),
-            virtio_net: VirtioNet::new(),
             virtio_gpu: VirtioGpu::new(),
             virtio_input: VirtioInput::new(),
             virtio_blk_sqfs: VirtioBlk::new_sqfs(),
@@ -127,7 +127,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
     match slot {
         0 => host_bridge_config(reg),
         1 => bus.virtio_blk.pci_read_dword(reg),
-        2 => bus.virtio_net.pci_read_dword(reg),
+        2 => super::net_backend::lock().pci_read_dword(reg),
         3 => bus.virtio_gpu.pci_read_dword(reg),
         4 => bus.virtio_input.pci_read_dword(reg),
         5 => bus.virtio_blk_sqfs.pci_read_dword(reg),
@@ -143,7 +143,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
     }
     match slot {
         1 => bus.virtio_blk.pci_write_dword(reg, val),
-        2 => bus.virtio_net.pci_write_dword(reg, val),
+        2 => super::net_backend::lock().pci_write_dword(reg, val),
         3 => bus.virtio_gpu.pci_write_dword(reg, val),
         4 => bus.virtio_input.pci_write_dword(reg, val),
         5 => bus.virtio_blk_sqfs.pci_write_dword(reg, val),
