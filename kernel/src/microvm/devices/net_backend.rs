@@ -44,6 +44,10 @@ pub fn take_irq() -> bool { NET_IRQ_PENDING.swap(false, Ordering::AcqRel) }
 /// (the BSP was 2× the hottest vCPU under download: pump + GPU copy + guest RX
 /// softirq all on it). SVM only (the IRQ fold + BSP kick live there); enabled
 /// per-VM by the AMD open path. Compile-time gate for clean OTA rollback.
+///
+/// First HW test (v0.226.9) broke guest networking (RX+TX near-zero, socket
+/// errors): the cross-core RX-IRQ delivery (worker inject → kick BSP → fold →
+/// inject IRQ10) didn't wake the guest reliably. Debugging that path.
 pub const FULL_RX_BACKEND: bool = true;
 
 /// Runtime state of the full RX backend (set true only on the AMD open path, so
