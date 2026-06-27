@@ -107,12 +107,37 @@ fn full_consume(full: bool) {
     }
 }
 
+/// Stage 2c TX: service the guest TX queue on THIS core when the vCPU rang the
+/// TX doorbell — process_tx (segment/NAT/send) + tx_flush, so RX and TX run on
+/// one core / one NET path. Raises IRQ10 for the TX-completion (so the guest
+/// reaps its TX descriptors) + any synthetic ARP/DNS reply, via the same
+/// lock-free raise + BSP kick as RX.
+#[inline]
+fn full_tx(full: bool) {
+    if !full || !crate::microvm::devices::net_backend::take_tx_kick() { return; }
+    if let Some(gm) = crate::microvm::devices::guest_mem::active() {
+        let raise = crate::microvm::devices::net_backend::lock().service_queues(1, gm);
+        // Egress the frames service_tx queued into the host NIC TX ring (the
+        // worker owns TX egress now → no cross-core race on that ring).
+        crate::virtio_net::tx_flush();
+        if raise {
+            crate::microvm::devices::net_backend::raise_irq();
+            crate::microvm::cpu::svm::kick_bsp_net_irq();
+        }
+    }
+}
+
 fn worker_entry(arg: u64) {
     let full = arg != 0;
     // Now that we're actually scheduled, claim the NIC drain (closes the
     // start_worker→admit launch gap where the gates would yield to a not-yet-live
     // producer). stop_worker clears this first, before STOP, for a clean handoff.
     ACTIVE.store(true, Ordering::Release);
+    // Record our core so a vCPU TX-kick can wake us promptly (Stage 2c).
+    if full {
+        crate::microvm::devices::net_backend::set_worker_core(
+            crate::smp::per_core::current_core_id());
+    }
     // Publish full-backend mode only once we're live, so the BSP keeps its own RX
     // pump until this fiber actually starts draining (no RX gap at launch).
     if full { crate::microvm::devices::net_backend::set_full_active(true); }
@@ -127,8 +152,9 @@ fn worker_entry(arg: u64) {
         // latency budget. This is the producer half of the pipeline.
         super::nat::rx_producer_drain();
         // Full mode: also consume (inject into the guest) — the whole RX path on
-        // this core, off the vCPU.
+        // this core, off the vCPU — and service guest TX (Stage 2c).
         full_consume(full);
+        full_tx(full);
 
         // Host-stack TCP timers (retransmit/RTO) — the guest uses its own TCP via
         // L3-NAT so this is only for host-originated connections (OTA/https). Run
@@ -152,10 +178,12 @@ fn worker_entry(arg: u64) {
             let since = crate::irq::arm(vec);
             super::nat::rx_producer_drain();
             full_consume(full);
+            full_tx(full);
             crate::smp::fiber::irq_wait(vec, since, 2);
         } else {
             // Polled NIC (no RX MSI-X): short sleep, still off the BSP core.
             full_consume(full);
+            full_tx(full);
             crate::smp::fiber::yield_sleep(1);
         }
     }
