@@ -1104,7 +1104,12 @@ fn vcpu_fiber_task(_arg: u64) {
     // split): it drains the NIC + IP stack + GRO into INBOUND_Q, event-driven on
     // the RX IRQ, so THIS BSP vCPU only injects — the two halves pipeline instead
     // of serializing on one core. Stopped in this fiber's teardown + vm_poll_slice.
-    crate::microvm::devices::net_rx_worker::start_worker(pick_offload_core());
+    // Full off-vCPU RX backend (Stage 2b) is SVM-only (the IRQ fold + BSP kick
+    // live in svm::enable). `current_vendor()` is safe here — the BSP hasn't
+    // taken the VENDOR lock for its run loop yet (that's the match below).
+    let full_backend = crate::microvm::devices::net_backend::FULL_RX_BACKEND
+        && matches!(current_vendor(), Vendor::Amd);
+    crate::microvm::devices::net_rx_worker::start_worker(pick_offload_core(), full_backend);
 
     match *VENDOR.lock() {
         Vendor::Amd => {

@@ -37,6 +37,23 @@ pub fn raise_irq() { NET_IRQ_PENDING.store(true, Ordering::Release); }
 #[inline]
 pub fn take_irq() -> bool { NET_IRQ_PENDING.swap(false, Ordering::AcqRel) }
 
+/// Stage 2b master switch: the full off-vCPU RX backend. When on, the dedicated
+/// `net_rx_worker` fiber owns the RX data-plane (host-NIC drain + `inject_rx`)
+/// on its own core, so the BSP vCPU does NO net RX work — it only folds the
+/// lock-free net-IRQ and is kicked to inject IRQ10. Frees the bottleneck core
+/// (the BSP was 2× the hottest vCPU under download: pump + GPU copy + guest RX
+/// softirq all on it). SVM only (the IRQ fold + BSP kick live there); enabled
+/// per-VM by the AMD open path. Compile-time gate for clean OTA rollback.
+pub const FULL_RX_BACKEND: bool = true;
+
+/// Runtime state of the full RX backend (set true only on the AMD open path, so
+/// the vCPU knows to skip its own RX pump and the worker knows to consume).
+static FULL_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[inline]
+pub fn full_active() -> bool { FULL_ACTIVE.load(Ordering::Acquire) }
+#[inline]
+pub fn set_full_active(on: bool) { FULL_ACTIVE.store(on, Ordering::Release); }
+
 /// The one microvm virtio-net device. `VirtioNet::new()` is `const`, so this
 /// needs no lazy init. Persists across VM runs; `reset()` re-arms it at open.
 static NET: Mutex<VirtioNet> = Mutex::new(VirtioNet::new());
@@ -53,4 +70,5 @@ pub fn lock() -> MutexGuard<'static, VirtioNet> {
 pub fn reset() {
     *NET.lock() = VirtioNet::new();
     NET_IRQ_PENDING.store(false, Ordering::Release);
+    FULL_ACTIVE.store(false, Ordering::Release);
 }

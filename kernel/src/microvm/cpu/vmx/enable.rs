@@ -925,6 +925,9 @@ impl VmContext {
     /// still leak (~tens of KB per run — negligible vs. the GB guest RAM
     /// this now reclaims). Tracked; needs an EPT teardown walker.
     pub fn close(&mut self) {
+        // Stop the off-vCPU net backend FIRST (it holds &'static GuestMem via
+        // guest_mem::active(), freed by clear_active() below). Idempotent.
+        crate::microvm::devices::net_rx_worker::stop_worker();
         // Persist the home image BEFORE teardown — see the svm mirror:
         // the Mod+Q window-close path reaches close() without run_slice's
         // loop-end save(), so without this the profile is lost on close.
