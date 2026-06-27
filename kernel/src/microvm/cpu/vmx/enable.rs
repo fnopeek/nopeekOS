@@ -562,7 +562,12 @@ unsafe fn vmx_exit_root() {
 /// BSP owns it heap-boxed (behind `SharedRef`); an AP aliases it. Mirror of
 /// svm `VmShared`.
 pub struct VmShared {
-    guest_mem: GuestMem,
+    /// Shared handle to the active guest memory (owned by `guest_mem`'s
+    /// `ACTIVE_GM`, freed at close). A reference — NOT the owned `GuestMem` — so
+    /// the off-vCPU net backend can hold the same `&'static GuestMem` without
+    /// aliasing this `&mut VmShared` (borrow governs the pointer, not the `Sync`
+    /// pointee). Mirror of svm.
+    guest_mem: &'static GuestMem,
     /// EPT PML4 phys — `close()` passes it to `ept::release` to free
     /// every demand-faulted 4 KB frame + the demand PT pages + the
     /// fixed tables.
@@ -761,6 +766,9 @@ impl VmContext {
                 crate::microvm::devices::guest_mem::SecondLevel::Ept,
             );
             let load = bzimage::load_into_guest_ram(&gm, bzimage, cmdline, initramfs)?;
+            // Install as the active guest memory (out of VmShared); `gm` is now
+            // the shared `&'static` handle, also reachable by the net backend.
+            let gm = crate::microvm::devices::guest_mem::set_active(gm);
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state(load.entry_rip)?;
             vmcs::setup_execution_controls(eptp)?;
@@ -773,6 +781,10 @@ impl VmContext {
                 serial.inject(inject);
                 kprintln!("[microvm] pre-injected {} bytes into UART RX FIFO", inject.len());
             }
+
+            // virtio-net lives in net_backend (a static, out of VmShared) so the
+            // off-vCPU backend can own it; re-arm it to power-on state per VM.
+            crate::microvm::devices::net_backend::reset();
 
             Ok(VmContext {
                 shared: SharedRef::owned(VmShared {
@@ -928,6 +940,9 @@ impl VmContext {
         );
         memory::deallocate_frame(self.vcpu.vmcs_phys);
         memory::deallocate_frame(self.vcpu.vmxon_phys);
+        // Free the active GuestMem (held outside VmShared); page tables are
+        // released above and all vCPUs + the net backend have stopped.
+        crate::microvm::devices::guest_mem::clear_active();
     }
 
     /// Tear down ONLY this AP vCPU's VMX root (VMXOFF on its core + free its
@@ -1502,14 +1517,14 @@ impl VmContext {
         // rate scales with load and bytes_completed tracks the budget. Completion
         // latches the snd IRQ into pending_irqs; the 1|12 drain injects it at a
         // safe point (one-inject-per-entry + interruptibility gate stay intact).
-        if is_bsp && sh.pci.virtio_snd.pump(&sh.guest_mem) {
+        if is_bsp && sh.pci.virtio_snd.pump(sh.guest_mem) {
             sh.pending_irqs |= 1 << sh.pci.virtio_snd.irq_line();
         }
 
         // Post deferred 9p write replies the async persist worker finished (the
         // vCPU owns the virtqueue, so this is the only place they're posted).
         // Decouples disk persistence from the vCPU → no freeze on download-write.
-        if is_bsp && sh.pci.virtio_9p.drain_async_done(&sh.guest_mem) {
+        if is_bsp && sh.pci.virtio_9p.drain_async_done(sh.guest_mem) {
             sh.pending_irqs |= 1 << sh.pci.virtio_9p.irq_line();
         }
 
@@ -1564,7 +1579,7 @@ impl VmContext {
                 );
                 if vector == 14 {
                     let cr3 = vmcs::read_guest_cr3().unwrap_or(0);
-                    dump_page_walk(&sh.guest_mem, cr3, outcome.exit_qualification);
+                    dump_page_walk(sh.guest_mem, cr3, outcome.exit_qualification);
                 }
                 self.vcpu.trace.dump();
                 last_outcome = Some(outcome);
@@ -1834,8 +1849,8 @@ impl VmContext {
                 let mut pumped = false;
                 if is_bsp {
                     pumped = crate::microvm::devices::nat::pump(
-                        &mut sh.pci.virtio_net, &sh.guest_mem);
-                    if sh.pci.virtio_input.drain_injected(&sh.guest_mem) {
+                        &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem);
+                    if sh.pci.virtio_input.drain_injected(sh.guest_mem) {
                         let vector = sh.pic.vector_for_irq(12);
                         let _ = vmcs::inject_external_irq(vector);
                         self.vcpu.consecutive_idle = 0;
@@ -2126,26 +2141,30 @@ impl VmContext {
                     }
                 }
                 if sh.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if sh.pci.virtio_net.bar0_in_range(gpa) {
-                    if handle_mmio_ept_net(&mut self.vcpu.regs, &mut sh.pci.virtio_net, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                } else if crate::microvm::devices::net_backend::lock().bar0_in_range(gpa) {
+                    // Hold the net device lock across the MMIO handler + RX pump so
+                    // net access stays atomic (uncontended in Stage 1 — only the
+                    // vCPU touches it; the off-vCPU backend lands in Stage 2).
+                    let mut net = crate::microvm::devices::net_backend::lock();
+                    if handle_mmio_ept_net(&mut self.vcpu.regs, &mut *net, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         // The guest just touched virtio-net (queue notify / ISR
                         // read) — drain RX into it NOW instead of waiting for the
                         // ~1500/s timer/HLT pump. This tracks RX delivery to the
                         // guest's device activity (~15k/s), lifting the download
                         // ceiling (pump/s was ≪ VM-exits/s). BSP only.
                         if is_bsp
-                            && crate::microvm::devices::nat::pump_fast(
-                                &mut sh.pci.virtio_net, &sh.guest_mem)
+                            && crate::microvm::devices::nat::pump_fast(&mut *net, sh.guest_mem)
                         {
                             // Interrupt moderation: frames are already delivered
                             // into the ring; raise IRQ10 at most ~1 per gap so
                             // NAPI drains batches (not the io=18170 EOI storm).
                             if net_irq_due(sh) { sh.pending_irqs |= 1 << 10; }
                         }
+                        drop(net);
                         // Deliver a deferred device IRQ (esp. an async 9p
                         // write-completion) NOW rather than at the next
                         // reason-1/12 exit ~10 ms out — the download rxlat fix.
@@ -2154,17 +2173,17 @@ impl VmContext {
                         continue;
                     }
                 } else if sh.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut sh.pci.virtio_gpu, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut sh.pci.virtio_gpu, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_ept_input(&mut self.vcpu.regs, &mut sh.pci.virtio_input, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                    if handle_mmio_ept_input(&mut self.vcpu.regs, &mut sh.pci.virtio_input, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
-                    if handle_mmio_ept_p9(&mut self.vcpu.regs, &mut sh.pci.virtio_9p, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                    if handle_mmio_ept_p9(&mut self.vcpu.regs, &mut sh.pci.virtio_9p, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         // A 9p access (e.g. a download write) runs the npkFS
                         // write INLINE here — during which the net RX pump does
                         // not run, so the staging queue overflows and RX drops
@@ -2172,7 +2191,7 @@ impl VmContext {
                         // so disk activity no longer starves it. BSP only.
                         if is_bsp
                             && crate::microvm::devices::nat::pump_fast(
-                                &mut sh.pci.virtio_net, &sh.guest_mem)
+                                &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem)
                         {
                             // Interrupt moderation: frames are already delivered
                             // into the ring; raise IRQ10 at most ~1 per gap so
@@ -2188,12 +2207,12 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_snd.bar0_in_range(gpa) {
-                    if handle_mmio_ept_snd(&mut self.vcpu.regs, &mut sh.pci.virtio_snd, &sh.pic, &mut sh.pending_irqs, gpa, &sh.guest_mem) {
+                    if handle_mmio_ept_snd(&mut self.vcpu.regs, &mut sh.pci.virtio_snd, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2513,7 +2532,7 @@ fn handle_mmio_lapic(
 
     let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
     let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
-    let buf = match fetch_inst(rip, cr3, &sh.guest_mem) {
+    let buf = match fetch_inst(rip, cr3, sh.guest_mem) {
         Some(b) => b,
         None => {
             kprintln!("[vmx] lapic mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
