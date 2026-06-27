@@ -17,9 +17,46 @@
 //! Single instance: exactly one microvm runs at a time. A future multi-microvm
 //! world makes this per-VM (an array keyed by VM id).
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 use super::virtio_net_dev::VirtioNet;
+
+/// Guest TX kick (q1 notify) doorbell, set by the vCPU's net-MMIO exit in full
+/// mode INSTEAD of servicing TX inline. The worker fiber drains it → service_tx +
+/// tx_flush on ITS core, so RX and TX share one core / one NET path: no
+/// cross-core NET-lock fight (the worker holding the lock for RX-inject was
+/// delaying the vCPU's TX/ACK egress → throttling downloads, which also need
+/// prompt ACKs). Stage 2c — the symmetric counterpart to the RX backend.
+static TX_KICK: AtomicBool = AtomicBool::new(false);
+/// Host core the worker fiber runs on, so a vCPU TX-kick can wake it out of its
+/// RX-IRQ park promptly (else TX waits up to the 2 ms park timeout → slow ACKs).
+static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Worker records its core at startup so TX-kicks can target it.
+pub fn set_worker_core(core: usize) { WORKER_CORE.store(core, Ordering::Release); }
+
+/// vCPU: the guest kicked TX (q1). Set the doorbell and, on the empty→set edge,
+/// wake the worker's core (coalesced like the IPI kick).
+pub fn note_tx_kick() {
+    if !TX_KICK.swap(true, Ordering::AcqRel) {
+        let c = WORKER_CORE.load(Ordering::Acquire);
+        if c != usize::MAX {
+            // The worker parks in irq_wait on the RX IRQ vector (it resumes when
+            // fired_count(rx_vec) advances). Bump that count so the scheduler
+            // resumes it to service this TX kick, then wake its core (if idle/
+            // HLTed) to run the scheduler. On a polled NIC (vec 0) it yield_sleeps
+            // → the kick wakes the core and the short sleep bounds TX latency.
+            let rx_vec = crate::drivers::virtio_net::rx_irq_vector();
+            if rx_vec != 0 {
+                crate::irq::note_fired(rx_vec);
+            }
+            crate::smp::kick_host_core(c);
+        }
+    }
+}
+
+/// Worker: take the TX-kick doorbell (clears it). True ⇒ run service_tx.
+pub fn take_tx_kick() -> bool { TX_KICK.swap(false, Ordering::AcqRel) }
 
 /// Guest RX/TX IRQ (IRQ10) raised by the net pump, which now runs OUTSIDE
 /// `VM_BIG_LOCK` (it no longer touches `VmShared`). The BSP folds this into its
@@ -75,4 +112,6 @@ pub fn reset() {
     *NET.lock() = VirtioNet::new();
     NET_IRQ_PENDING.store(false, Ordering::Release);
     FULL_ACTIVE.store(false, Ordering::Release);
+    TX_KICK.store(false, Ordering::Release);
+    WORKER_CORE.store(usize::MAX, Ordering::Release);
 }

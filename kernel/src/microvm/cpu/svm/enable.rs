@@ -2777,9 +2777,16 @@ fn handle_mmio_npf_net(
     }
 
     if let Some(qidx) = net.take_pending_kick() {
-        let advanced = net.service_queues(qidx, mem);
-        if advanced {
-            deliver_irq(vmcb, pending, 10, pic.vector_for_irq(10));
+        if crate::microvm::devices::net_backend::full_active() && qidx == 1 {
+            // TX off-vCPU (Stage 2c): hand the TX kick to the worker, which owns
+            // service_tx + tx_flush on its core — RX and TX then share one core /
+            // one NET path (no cross-core NET-lock fight delaying ACK egress).
+            crate::microvm::devices::net_backend::note_tx_kick();
+        } else {
+            let advanced = net.service_queues(qidx, mem);
+            if advanced {
+                deliver_irq(vmcb, pending, 10, pic.vector_for_irq(10));
+            }
         }
     }
 
