@@ -1297,14 +1297,16 @@ pub fn pump(
             let net_irq = NS_NET_IRQ.swap(0, AtOrd::Relaxed);
             let gpu_bytes = NS_GPU_BYTES.swap(0, AtOrd::Relaxed);
             let gpu_xfers = NS_GPU_XFERS.swap(0, AtOrd::Relaxed);
+            let wraise = NS_WORKER_RAISE.swap(0, AtOrd::Relaxed);
             kprintln!(
-                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s | gpu {}KB/s ({}/s)",
+                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s wraise {}/s | gpu {}KB/s ({}/s)",
                 drain_max / mhz,
                 if rxring_min == u64::MAX { 0 } else { rxring_min },
                 if super::net_rx_worker::active() { "on" } else { "off" },
                 prod_drains / secs,
                 gtimer / secs,
                 net_irq / secs,
+                wraise / secs,
                 gpu_bytes / secs / 1024,
                 gpu_xfers / secs,
             );
@@ -1315,6 +1317,14 @@ pub fn pump(
     }
 
     let _ = PUMP_LOG;
+    // Full RX backend: the worker fiber is the SOLE RX consumer. The BSP must NOT
+    // also drain_inbound here — two consumers both call inject_rx +
+    // rx_should_interrupt, and the double EVENT_IDX `signalled_used` update
+    // corrupts the IRQ decision (the guest misses RX IRQs → NAPI stalls → no ACKs
+    // → traffic dies). The tx_flush + reap + netstat above still run on the BSP.
+    if super::net_backend::full_active() {
+        return false;
+    }
     drain_inbound(net, mem)
 }
 
@@ -1391,6 +1401,12 @@ pub fn note_guest_timer() { NS_GTIMER.fetch_add(1, AtOrd::Relaxed); }
 /// vs the per-packet rate it would be without — the io-EOI-storm signal.
 static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);
 pub fn note_net_irq() { NS_NET_IRQ.fetch_add(1, AtOrd::Relaxed); }
+/// DEBUG (Stage 2b): times the off-vCPU worker decided the guest wants an RX IRQ
+/// (raise_irq + kick BSP). Compare to `netirq` (BSP actually injected IRQ10):
+/// wraise≫netirq ⇒ the kick/inject isn't delivering; wraise≈netirq ⇒ delivery
+/// is fine and any cap is RX volume / TX, not the IRQ path.
+static NS_WORKER_RAISE: AtomicU64 = AtomicU64::new(0);
+pub fn note_worker_raise() { NS_WORKER_RAISE.fetch_add(1, AtOrd::Relaxed); }
 /// virtio-gpu TRANSFER_TO_HOST pixel bytes copied on the vCPU core (the browser
 /// rendering). If high during a download, the framebuffer copy is stealing vCPU
 /// cycles from the net pump (the framebuffer↔pump contention) — Florian's
