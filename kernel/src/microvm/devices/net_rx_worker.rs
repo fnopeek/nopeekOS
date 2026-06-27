@@ -100,6 +100,7 @@ fn full_consume(full: bool) {
         let want_irq = super::nat::drain_to_guest(
             &mut crate::microvm::devices::net_backend::lock(), gm);
         if want_irq {
+            super::nat::note_worker_raise();
             crate::microvm::devices::net_backend::raise_irq();
             crate::microvm::cpu::svm::kick_bsp_net_irq();
         }
