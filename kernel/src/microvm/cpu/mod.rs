@@ -433,7 +433,12 @@ pub const RESERVE_OFFLOAD_CORE: bool = true;
 fn reserve_offload_core() -> bool {
     RESERVE_OFFLOAD_CORE
         && crate::microvm::devices::net_backend::FULL_RX_BACKEND
-        && matches!(current_vendor(), Vendor::Amd)
+        // detect_vendor() (raw CPUID, lock-free) — NOT current_vendor(): the
+        // latter takes VENDOR.lock(), but guest_vcpus() is called from the
+        // MP-table build + SIPI loop INSIDE `match *VENDOR.lock()` (the whole
+        // guest run holds it) → reentrant lock = deadlock (hang right after the
+        // net-worker spawn). CPUID is the same on every core, so this is sound.
+        && matches!(detect_vendor(), Vendor::Amd)
         // Need ≥3 cores: Core 0 (BSP) + ≥1 vCPU + 1 worker. Below that, fall
         // back to co-location rather than starving the guest to a single vCPU.
         && crate::smp::per_core::core_count() >= 3
