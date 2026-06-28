@@ -159,6 +159,23 @@ static NS_RXRING_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
 /// woken the moment the next batch arrives (drainmax 10 ms → ~sub-ms).
 static NS_LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 
+/// GPU-throttle signal: TSC of the last *bulk* RX frame (a GRO superframe >4 KB,
+/// only produced by a sustained download — browsing/idle frames are <1500 B).
+/// The virtio-gpu framebuffer copy runs INLINE on the vCPU exit (steals net-
+/// processing cycles + the memory bus); while this is recent it backs off from
+/// ~30 fps to ~8 fps so the download isn't throttled by pixel copies. Florian's
+/// "smaller window / hidden desktop = faster download" observation exposed the
+/// coupling. Probe to size the win before the full off-vCPU GPU copy.
+static DL_LAST_BULK_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// True if a bulk RX frame arrived in the last ~250 ms (= an active download).
+pub fn download_active() -> bool {
+    let last = DL_LAST_BULK_TSC.load(AtOrd::Relaxed);
+    if last == 0 { return false; }
+    let win = (crate::interrupts::tsc_freq() / 1000) * 250; // 250 ms in TSC ticks
+    crate::interrupts::rdtsc().wrapping_sub(last) < win
+}
+
 /// True if RX delivered a packet in the last ~50 ms — i.e. a download is in
 /// flight and the BSP vCPU should wake on the host NIC RX IRQ rather than
 /// deep-parking on the 100 Hz worker timer.
@@ -761,6 +778,10 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     }
     NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
+    // Bulk frame (GRO superframe) ⇒ a download is live → throttle the GPU copy.
+    if ip.len() > 4000 {
+        DL_LAST_BULK_TSC.store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
+    }
 
     // Rewrite: dst IP → guest, L4 dst port → guest port; recompute
     // both checksums. Wrap in vnet + eth (gateway → guest). Buffer is borrowed

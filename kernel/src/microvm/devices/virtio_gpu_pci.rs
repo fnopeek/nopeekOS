@@ -680,7 +680,14 @@ impl VirtioGpu {
         let resource_id = u32::from_le_bytes([body[24], body[25], body[26], body[27]]);
 
         let now_tsc = crate::interrupts::rdtsc();
-        let frame_gap = (crate::interrupts::tsc_freq() / 1000) * 33; // ~30 fps
+        // Adaptive copy cap: the copy runs INLINE on this vCPU exit (8 MB/frame
+        // guest→host + a 2nd compositor pass), stealing net-processing cycles +
+        // the memory bus. Florian's "smaller window / hidden = faster download"
+        // exposed the coupling. 30 fps idle (smooth UI); back off to ~8 fps while
+        // a download is live (display stays usable, the vCPU is freed for RX).
+        // Probe to size the win before the full off-vCPU GPU copy.
+        let frame_ms = if super::nat::download_active() { 125 } else { 33 };
+        let frame_gap = (crate::interrupts::tsc_freq() / 1000) * frame_ms;
 
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
             Some(r) => r, None => return,
