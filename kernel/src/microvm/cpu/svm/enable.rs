@@ -1543,7 +1543,7 @@ impl VmContext {
             && self.vcpu.apic_id != 0
             && AP_ESTABLISHED.load(Ordering::Acquire)
             && self.vcpu.reinject == 0
-            && !self.vcpu.lapic.timer_due()
+            && !self.vcpu.lapic.timer_pending()
             && guest_interruptible(&self.vcpu.vmcb)
         {
             if let Some(vec) = ipi_take(self.vcpu.apic_id) {
@@ -1714,7 +1714,7 @@ impl VmContext {
                 // barely affected. `note_net_irq()` makes `netirq/s` show the
                 // real RX-IRQ delivery rate.
                 if self.vcpu.apic_id == 0
-                    && !self.vcpu.lapic.timer_due()
+                    && !self.vcpu.lapic.timer_pending()
                     && sh.pending_irqs & (1 << 10) != 0
                 {
                     sh.pending_irqs &= !(1u16 << 10);
@@ -1742,7 +1742,7 @@ impl VmContext {
                 // (≤ ~1 ms later). During boot/AP-bring-up the LVTT isn't armed
                 // yet → timer_due() is false → IPIs keep absolute priority, so
                 // the cpuhp `complete()` handshake timing is unchanged.
-                if !self.vcpu.lapic.timer_due() {
+                if !self.vcpu.lapic.timer_pending() {
                     if let Some(vec) = ipi_take(self.vcpu.apic_id) {
                         let info: u64 = (vec as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
@@ -1802,12 +1802,13 @@ impl VmContext {
                         // fairness); no-op once the PIT is gone (steady state).
                         if pit_active { sh.boot_tick_want_pit = true; }
                         crate::microvm::devices::nat::note_guest_timer();
-                        if pit_active {
+                        {
                             use core::sync::atomic::Ordering::Relaxed;
                             let l = DBG_LVTT_FIRES.fetch_add(1, Relaxed) + 1;
-                            if l % 200 == 0 {
-                                crate::kprintln!("[boot-timer] lvtt={} pit={} (co-active; ratio→deltaj)",
-                                    l, DBG_PIT_FIRES.load(Relaxed));
+                            if l <= 800 && l % 25 == 0 {
+                                crate::kprintln!("[boot-timer] lvtt={} pit={} pit_en={} irq0={}",
+                                    l, DBG_PIT_FIRES.load(Relaxed),
+                                    sh.pit_enabled, sh.pic.irq_unmasked(0));
                             }
                         }
                         continue;
