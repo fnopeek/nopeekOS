@@ -27,8 +27,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Master switch. Set false (and rebuild) to strip the probe once the spinning
-/// core is identified.
-const DEBUG: bool = true;
+/// core is identified. OFF: `record()` runs on EVERY exit (~30k/s) + the ~5 s
+/// dump (~13 kprintln lines) BLOCKS its core ~60ms on the UART THRE spin — both
+/// pollute the very latency/throughput we measure. Flip on only to diagnose.
+const DEBUG: bool = false;
 
 const SLOTS: usize = 48;
 /// 64-byte RIP buckets: clusters a hot loop's instructions into one entry so

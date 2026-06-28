@@ -1254,7 +1254,10 @@ pub fn pump(
         // Per-second microvm net stats. Re-enabled to verify net-RX: rxlat
         // (the latency root — should DROP), pump/s (should track RX), and the
         // RX-IRQ fire rate `rxirq/s` (proves the IRQ fires vs polling fallback).
-        const NETSTAT_DEBUG: bool = true;
+        // OFF: the 5 s [netstat] dump (~4 kprintln lines) BLOCKS the pump core
+        // ~60-120ms on the UART THRE spin (serial.rs:93, ~87µs/byte @ 115200) →
+        // it was itself a download-latency spike. Flip on only to diagnose.
+        const NETSTAT_DEBUG: bool = false;
         // net-RX IRQ fire rate this window (0 + v0x0 = polling, IRQ never set up).
         let rx_vec = crate::drivers::virtio_net::rx_irq_vector();
         let rxirq_now = if rx_vec != 0 { crate::irq::fired_count(rx_vec) } else { 0 };
