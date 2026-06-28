@@ -275,6 +275,35 @@ impl LocalApic {
         }
     }
 
+    /// Non-consuming peek: would `timer_due()` fire RIGHT NOW? Same predicate,
+    /// but WITHOUT the `last_fire_tsc`/`timer_start_tsc`/`timer_fired` mutation.
+    /// The inject loop calls `timer_due()` (which consumes) at multiple yield
+    /// checks before the actual LVTT inject — the first true-returning call ate
+    /// the tick and the inject site then saw false → the LVTT IRQ was NEVER
+    /// delivered → Linux's calibrate_APIC_clock verification starved →
+    /// "APIC timer disabled" → no hrtimers. Use this peek for the yield checks;
+    /// only the inject site calls `timer_due()` to consume.
+    pub fn timer_pending(&self) -> bool {
+        let tmict = self.regs[idx(APIC_TMICT)];
+        if !self.enabled() || self.regs[idx(APIC_LVTT)] & LVT_MASKED != 0 || tmict == 0 {
+            return false;
+        }
+        let period = (tmict as u64) * self.divide_count();
+        if period == 0 {
+            return false;
+        }
+        let now = rdtsc();
+        let min_gap = (crate::interrupts::tsc_freq() / 1000).max(1);
+        if now.wrapping_sub(self.last_fire_tsc) < min_gap {
+            return false;
+        }
+        if now.saturating_sub(self.timer_start_tsc) < period {
+            return false;
+        }
+        // Periodic always pending when due; one-shot only until it has fired.
+        self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0 || !self.timer_fired
+    }
+
     pub fn timer_tick_vector(&self) -> Option<u8> {
         let lvtt = self.regs[idx(APIC_LVTT)];
         if self.enabled() && lvtt & LVT_MASKED == 0 && self.regs[idx(APIC_TMICT)] != 0 {
