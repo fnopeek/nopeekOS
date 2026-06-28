@@ -170,6 +170,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
                  echo 1 > /proc/sys/kernel/printk 2>/dev/null; \
                  echo on > /proc/sys/kernel/printk_devkmsg 2>/dev/null; \
+                 if echo always > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null; then \
+                   echo madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null; \
+                   echo '<0>[thp] transparent_hugepage=always (cut TLB shootdowns / csd)' > /dev/kmsg; \
+                 else echo '<0>[thp] THP sysfs ABSENT — not compiled in, kernel rebuild needed' > /dev/kmsg; fi; \
                  hostname nopeek 2>/dev/null \
                    || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null; \
                  mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
