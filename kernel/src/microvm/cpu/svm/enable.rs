@@ -39,6 +39,13 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 /// until an AP is admitted (`AP_ACTIVE`).
 static VM_BIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+// TEMP boot-timer diagnostic: count PIT (IRQ0/jiffies) vs LVTT injections to
+// see the actual ratio during Linux's calibrate_APIC_clock verification (the
+// "APIC timer disabled due to verification failure" → no-hrtimers root cause).
+// Printed every 200 LVTT fires while the PIT is still co-active (boot only).
+static DBG_PIT_FIRES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static DBG_LVTT_FIRES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// True once a second vCPU (AP) shares this VM. While false the BSP runs
 /// exactly as the single-vCPU path did — `VM_BIG_LOCK` is not taken, so
 /// the hot loop is byte-identical. Set by the orchestration layer when it
@@ -1780,6 +1787,7 @@ impl VmContext {
                     self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.vcpu.consecutive_idle = 0;
                     crate::microvm::devices::nat::note_guest_timer();
+                    DBG_PIT_FIRES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
 
@@ -1794,6 +1802,14 @@ impl VmContext {
                         // fairness); no-op once the PIT is gone (steady state).
                         if pit_active { sh.boot_tick_want_pit = true; }
                         crate::microvm::devices::nat::note_guest_timer();
+                        if pit_active {
+                            use core::sync::atomic::Ordering::Relaxed;
+                            let l = DBG_LVTT_FIRES.fetch_add(1, Relaxed) + 1;
+                            if l % 200 == 0 {
+                                crate::kprintln!("[boot-timer] lvtt={} pit={} (co-active; ratio→deltaj)",
+                                    l, DBG_PIT_FIRES.load(Relaxed));
+                            }
+                        }
                         continue;
                     }
                 }
@@ -1808,6 +1824,7 @@ impl VmContext {
                     self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                     self.vcpu.consecutive_idle = 0;
                     crate::microvm::devices::nat::note_guest_timer();
+                    DBG_PIT_FIRES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
 
