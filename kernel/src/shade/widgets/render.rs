@@ -572,6 +572,10 @@ fn paint_node_eff(
             let max_scroll = total_lines.saturating_sub(visible);
             let scroll = ((scroll_y / line_h) as usize).min(max_scroll);
 
+            // Selected byte range (anchor↔caret), painted as a highlight
+            // block under the text on each line it covers.
+            let selection = edit_state.and_then(|e| e.selection());
+
             // Paint the visible window of lines, colouring each line by
             // the spans covering its bytes (uncovered → default colour).
             let mut line_byte = 0usize;
@@ -582,6 +586,23 @@ fn paint_node_eff(
                 let row = li - scroll;
                 if row >= visible { break; }
                 let y = top_y + (row as u32 * line_h) as i32;
+                // Selection highlight under the text (before glyphs so they
+                // stay on top). A selection crossing this line's end (the
+                // '\n') or an empty selected line gets a small trailing block.
+                if let Some((sel_s, sel_e)) = selection {
+                    let line_lo = line_start;
+                    let line_hi = line_start + line.len();
+                    if sel_e > line_lo && sel_s <= line_hi {
+                        let a = sel_s.max(line_lo) - line_lo;
+                        let b = sel_e.min(line_hi) - line_lo;
+                        let ax = ceil_u32_local(crate::gui::text::measure(&line[..a], style));
+                        let mut w = ceil_u32_local(crate::gui::text::measure(&line[a..b], style));
+                        if sel_e > line_hi { w += 6; } // newline included
+                        if w < 2 { w = 6; }            // empty line / zero-width
+                        rast.rect(target, Rect { x: text_x + ax as i32, y, w, h: line_h },
+                                  Fill::Solid(Token::AccentMuted));
+                    }
+                }
                 if line.is_empty() { continue; }
                 if spans.is_empty() {
                     rast.text(target, line, style, color, Point { x: text_x, y });

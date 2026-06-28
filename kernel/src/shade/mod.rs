@@ -14,6 +14,7 @@ pub mod input;
 pub mod cursor;
 pub mod widgets;
 pub mod surface;
+pub mod clipboard;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
