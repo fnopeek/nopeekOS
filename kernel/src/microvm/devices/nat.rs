@@ -395,6 +395,13 @@ fn gro_finalize(c: &mut GroCtx) {
         c.frame[10..12].copy_from_slice(&1u16.to_le_bytes()); // num_buffers
         NS_GRO_FRAMES.fetch_add(1, AtOrd::Relaxed);
         NS_GRO_SEGS.fetch_add(c.seg_count as u64, AtOrd::Relaxed);
+        // Active-download signal for the GPU-copy throttle. A GRO super-frame of
+        // several segments only forms under sustained bulk RX (never idle or
+        // browsing) — this is the POST-coalesce point, unlike the broken pre-GRO
+        // per-packet check (always <1500 B → `dl N`, throttle never engaged).
+        if c.seg_count >= 4 {
+            DL_LAST_BULK_TSC.store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
+        }
     } else {
         c.frame[0..12].fill(0);
     }
@@ -778,10 +785,6 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     }
     NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
-    // Bulk frame (GRO superframe) ⇒ a download is live → throttle the GPU copy.
-    if ip.len() > 4000 {
-        DL_LAST_BULK_TSC.store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
-    }
 
     // Rewrite: dst IP → guest, L4 dst port → guest port; recompute
     // both checksums. Wrap in vnet + eth (gateway → guest). Buffer is borrowed

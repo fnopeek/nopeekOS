@@ -186,9 +186,6 @@ fn launch_wayland(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
-                 echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null; \
-                 for q in /sys/class/net/\"$IFACE\"/queues/rx-*; do echo fe > \"$q/rps_cpus\" 2>/dev/null; echo 32768 > \"$q/rps_flow_cnt\" 2>/dev/null; done; \
-                 echo '<0>[rps] receive-packet-steering set rps_cpus=fe (RX spread off CPU0)' > /dev/kmsg; \
                  printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /tmp/resolv.conf; \
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
