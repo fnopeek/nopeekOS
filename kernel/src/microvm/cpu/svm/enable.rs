@@ -601,6 +601,19 @@ pub struct VmShared {
     /// jiffies don't double-count against the LAPIC timer. Starts true so
     /// IRQ0 drives boot before Linux first programs the PIT.
     pit_enabled: bool,
+    /// Boot-only fairness toggle between the PIT (IRQ0, jiffies) and the LVTT
+    /// while BOTH are co-active — i.e. during Linux's `calibrate_APIC_clock`
+    /// verification, which runs the LVTT periodic AND the PIT at ~1 kHz and
+    /// checks that ~LAPIC_CAL_LOOPS jiffies elapse per LAPIC_CAL_LOOPS LVTT
+    /// ticks. With a single EVENT_INJ slot per VMRUN and a ~1 kHz host exit
+    /// budget, the strict-priority LVTT monopolized the slot → jiffies froze →
+    /// `deltaj≈0` ∉ [CAL-2, CAL+2] → "APIC timer disabled due to verification
+    /// failure" → no hrtimers (TCP pacing/RTO/NAPI fall back to 10 ms jiffies).
+    /// True ⇒ the next co-active slot goes to the PIT; set after each LVTT tick,
+    /// cleared after each PIT tick → strict 1:1 alternation → both fire at the
+    /// same rate → ratio 1:1 → verification passes. Irrelevant once the PIT is
+    /// disabled (`pit_enabled=false`): steady-state stays LVTT-only.
+    boot_tick_want_pit: bool,
 }
 
 /// Maximum vCPUs per guest (guest SMP). Sizes the per-vCPU IPI bitmaps;
@@ -905,6 +918,7 @@ impl VmContext {
                 last_cfg_tick: 0,
                 pending_irqs: 0,
                 pit_enabled: true,
+                boot_tick_want_pit: false,
             }),
             vcpu: Vcpu {
                 apic_id: 0, // BSP
@@ -1745,32 +1759,56 @@ impl VmContext {
                 // here, with priority over net IRQ10 (which still fires on the
                 // many net-MMIO exits via `try_prompt_device_irq`, so it is not
                 // starved). LVTT is per-vCPU; the PIT is BSP-only + boot-only.
+                // The PIT (IRQ0, jiffies) is BSP-only + boot-only; pace it at
+                // ~1 kHz off the TSC (no i8254 reload tracking). `pit_due` is
+                // side-effect-free; `timer_tick_vector()` ⇒ the LVTT is armed.
+                let pit_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
+                let pit_active = is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled;
+                let pit_due = pit_active
+                    && crate::interrupts::rdtsc().wrapping_sub(sh.last_pit_tsc) >= pit_ms;
+                let lvtt_armed = self.vcpu.lapic.timer_tick_vector().is_some();
+
+                // Boot-verification fairness: when the PIT and LVTT are BOTH
+                // co-active, alternate (PIT's turn, or pure-PIT boot before the
+                // LVTT is armed) so neither starves the single inject slot — else
+                // the strict-priority LVTT freezes jiffies and Linux disables it.
+                if pit_due && (!lvtt_armed || sh.boot_tick_want_pit) {
+                    sh.last_pit_tsc = crate::interrupts::rdtsc();
+                    sh.last_timer_tick = crate::interrupts::ticks();
+                    sh.boot_tick_want_pit = false;
+                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
+                    crate::microvm::devices::nat::note_guest_timer();
+                    continue;
+                }
+
+                // ── Guest LAPIC timer, at the rate the GUEST programmed ──
                 if self.vcpu.lapic.timer_due() {
                     if let Some(vec) = self.vcpu.lapic.timer_tick_vector() {
                         let info: u64 = (vec as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
                         self.vcpu.last_lapic_tick = crate::interrupts::ticks();
                         self.vcpu.consecutive_idle = 0;
+                        // Hand the next co-active slot to the PIT (verification
+                        // fairness); no-op once the PIT is gone (steady state).
+                        if pit_active { sh.boot_tick_want_pit = true; }
                         crate::microvm::devices::nat::note_guest_timer();
                         continue;
                     }
                 }
-                // PIT (IRQ0): boot + the LVTT-vs-PIT 1:1 verification only. No
-                // i8254 reload tracking, so pace at ~1 kHz off the TSC to MATCH
-                // the LAPIC timer's programmed rate (else verification fails and
-                // Linux drops the LVTT). Disabled once Linux adopts the LVTT.
-                if is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled {
-                    let tsc_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
-                    let now_tsc = crate::interrupts::rdtsc();
-                    if now_tsc.wrapping_sub(sh.last_pit_tsc) >= tsc_ms {
-                        sh.last_pit_tsc = now_tsc;
-                        sh.last_timer_tick = crate::interrupts::ticks();
-                        let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        crate::microvm::devices::nat::note_guest_timer();
-                        continue;
-                    }
+
+                // PIT fallback: the LVTT wasn't due this pass but the PIT is —
+                // keep jiffies advancing even when it was "the LVTT's turn".
+                if pit_due {
+                    sh.last_pit_tsc = crate::interrupts::rdtsc();
+                    sh.last_timer_tick = crate::interrupts::ticks();
+                    sh.boot_tick_want_pit = false;
+                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
+                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+                    self.vcpu.consecutive_idle = 0;
+                    crate::microvm::devices::nat::note_guest_timer();
+                    continue;
                 }
 
                 // Deferred device IRQ (queued while the guest was IF=0, or the
