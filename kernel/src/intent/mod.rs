@@ -1091,7 +1091,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     // mutate the editor buffer, and emit Event::InputChange
                     // or Event::Action(on_submit). This runs BEFORE the
                     // Tab focus-nav below so a TextArea can claim Tab.
-                    if crate::shade::widgets::handle_input_key(widget_wid, event.key) {
+                    if crate::shade::widgets::handle_input_key(widget_wid, event.key, event.modifiers) {
                         continue;
                     }
                     // Tab / Shift+Tab move focus between focusable widgets

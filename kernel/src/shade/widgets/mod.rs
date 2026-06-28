@@ -57,11 +57,26 @@ pub struct InputEditState {
     /// Caret position as a byte index into `value`. Always at a UTF-8
     /// boundary; v1 only inserts ASCII so `byte_index == char_index`.
     pub cursor: usize,
+    /// Selection anchor (byte index) — the fixed end of a text selection;
+    /// the caret is the moving end. `None` = no selection. Set by Shift+
+    /// movement and mouse-drag, cleared by any plain (non-Shift) move or
+    /// edit. The selected range is `min(anchor, cursor)..max(anchor, cursor)`.
+    pub sel_anchor: Option<usize>,
 }
 
 impl InputEditState {
     fn from_value(v: &str) -> Self {
-        InputEditState { value: v.into(), cursor: v.len() }
+        InputEditState { value: v.into(), cursor: v.len(), sel_anchor: None }
+    }
+
+    /// Selected byte range `[start, end)` if a non-empty selection exists.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        match self.sel_anchor {
+            Some(a) if a != self.cursor => {
+                Some((a.min(self.cursor), a.max(self.cursor)))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -972,6 +987,11 @@ fn compute_input_edit(
             return Some(p.clone());
         }
     }
+    if prev.map_or(false, |p| p.sel_anchor.is_some()) {
+        crate::kprintln!("[clip] REBUILD wipes sel: prev_anchor={:?} prev_vlen={} new_vlen={}",
+            prev.and_then(|p| p.sel_anchor),
+            prev.map(|p| p.value.len()).unwrap_or(0), value.len());
+    }
     Some(InputEditState::from_value(value))
 }
 
@@ -1022,6 +1042,122 @@ fn cursor_down(s: &str, cursor: usize) -> usize {
     clamp_boundary(s, next_ls + col.min(next_len))
 }
 
+/// Nudge a focused TextArea's vertical scroll so the caret line stays on
+/// screen. Called on every caret move / edit (incl. paste, which can jump
+/// the caret far). No-op for non-scrolling content.
+fn caret_follow_scroll(window_id: u32) {
+    let mut scenes = SCENES.lock();
+    if let Some(s) = scenes.get_mut(&window_id) {
+        if s.scroll_viewport.h > 0 {
+            let line_h = (crate::gui::text::line_height(abi::TextStyle::Mono) as u32).max(1);
+            let visible = (s.scroll_viewport.h / line_h).max(1) as usize;
+            let max_sy = s.max_scroll_y;
+            let caret_line = match &s.input_edit {
+                Some(e) => {
+                    let cur = e.cursor.min(e.value.len());
+                    e.value[..cur].matches('\n').count()
+                }
+                None => 0,
+            };
+            let mut sl = (s.scroll_y / line_h) as usize;
+            if caret_line < sl {
+                sl = caret_line;
+            } else if caret_line + 1 > sl + visible {
+                sl = caret_line + 1 - visible;
+            }
+            s.scroll_y = ((sl as u32) * line_h).min(max_sy);
+        }
+    }
+}
+
+/// Ctrl+C / X / V / A on a focused Input/TextArea. Copies/cuts the
+/// selection to the kernel clipboard, pastes at the caret (replacing any
+/// selection), or selects all. Returns `true` (the key is always consumed
+/// once we're here). Emits `Event::InputChange` only when the buffer
+/// actually changes (cut/paste), and always re-renders so a new selection
+/// shows immediately.
+fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
+    let changed_value: Option<String> = {
+        let mut scenes = SCENES.lock();
+        let scene = match scenes.get_mut(&window_id) {
+            Some(s) => s,
+            None    => return false,
+        };
+        let edit = match scene.input_edit.as_mut() {
+            Some(e) => e,
+            None    => return false,
+        };
+        edit.cursor = clamp_boundary(&edit.value, edit.cursor);
+        let sel = edit.selection();
+        crate::kprintln!("[clip] key='{}' anchor={:?} cursor={} sel={:?} vlen={}",
+            letter as char, edit.sel_anchor, edit.cursor, sel, edit.value.len());
+        match letter {
+            b'a' => {
+                // Select all (anchor at start, caret at end).
+                if !edit.value.is_empty() {
+                    edit.sel_anchor = Some(0);
+                    edit.cursor = edit.value.len();
+                }
+                None
+            }
+            b'c' => {
+                if let Some((s, e)) = sel {
+                    crate::shade::clipboard::set_text(edit.value[s..e].as_bytes());
+                }
+                None
+            }
+            b'x' => {
+                if let Some((s, e)) = sel {
+                    crate::shade::clipboard::set_text(edit.value[s..e].as_bytes());
+                    edit.value.replace_range(s..e, "");
+                    edit.cursor = clamp_boundary(&edit.value, s);
+                    edit.sel_anchor = None;
+                    Some(edit.value.clone())
+                } else {
+                    None
+                }
+            }
+            b'v' => {
+                match crate::shade::clipboard::get_text() {
+                    Some(bytes) => {
+                        crate::kprintln!("[clip] paste get_text len={}", bytes.len());
+                        let mut text = match core::str::from_utf8(&bytes) {
+                            Ok(s) => String::from(s),
+                            Err(_) => return true, // ignore a non-UTF-8 paste
+                        };
+                        // An Input is single-line — strip newlines on paste.
+                        if !is_textarea {
+                            text.retain(|c| c != '\n' && c != '\r');
+                        }
+                        if let Some((s, e)) = sel {
+                            edit.value.replace_range(s..e, &text);
+                            edit.cursor = clamp_boundary(&edit.value, s + text.len());
+                        } else {
+                            edit.value.insert_str(edit.cursor, &text);
+                            edit.cursor = clamp_boundary(&edit.value, edit.cursor + text.len());
+                        }
+                        edit.sel_anchor = None;
+                        Some(edit.value.clone())
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        }
+    };
+
+    if is_textarea {
+        caret_follow_scroll(window_id);
+    }
+    if let Some(v) = changed_value {
+        push_event(window_id, abi::Event::InputChange { value: v });
+    }
+    rerender_state_only(window_id);
+    mark_dirty(window_id);
+    crate::shade::request_render();
+    true
+}
+
 /// Compositor-side keyboard intercept for a focused `Widget::Input` or
 /// `Widget::TextArea`. Returns `true` iff the key was consumed — caller
 /// must skip the usual `push_event(Event::Key)` route to the app.
@@ -1039,7 +1175,11 @@ fn cursor_down(s: &str, cursor: usize) -> usize {
 ///   - TextArea: Enter inserts `\n`; Home/End are line-relative;
 ///     Up/Down/PageUp/PageDown move the caret across lines and ARE
 ///     consumed (an editor owns its arrows; super+arrow stays WM nav).
-pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
+pub fn handle_input_key(
+    window_id: u32,
+    key: crate::input::KeyCode,
+    mods: crate::input::Modifiers,
+) -> bool {
     use crate::input::KeyCode as K;
 
     // Phase 1: confirm a focused text widget exists; capture its kind
@@ -1060,6 +1200,27 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
             _ => return false,
         }
     };
+
+    // Phase 1b: Ctrl+C / X / V / A — clipboard + select-all. Applies to
+    // both Input and TextArea. The keyboard driver maps Ctrl+C to control
+    // byte 0x03; the others arrive as the plain letter — both carry
+    // `mods.ctrl`, so normalize a control byte back to its letter.
+    // Clipboard / select-all shortcuts. Two ways the combo arrives:
+    //  - Ctrl+C is translated by the PS/2 layer to control byte 0x03 (the
+    //    SIGINT convention), produced ONLY when Ctrl was held — so detect it
+    //    directly, immune to `mods.ctrl` being sampled a tick late (the
+    //    buffered key is often processed after Ctrl is already released).
+    //  - Ctrl+V/X/A arrive as the plain letter; they need mods.ctrl.
+    let clip_letter = match key {
+        K::Char(0x03)              => Some(b'c'),
+        K::Char(b) if mods.ctrl    => Some(if b < 0x20 { b | 0x60 } else { b.to_ascii_lowercase() }),
+        _                          => None,
+    };
+    if let Some(letter) = clip_letter {
+        if matches!(letter, b'c' | b'x' | b'v' | b'a') {
+            return handle_clipboard_key(window_id, letter, is_textarea);
+        }
+    }
 
     enum Op {
         Insert(u8),
@@ -1123,6 +1284,34 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
         let line_h = (crate::gui::text::line_height(abi::TextStyle::Mono) as u32).max(1);
         let page = ((win_h / line_h).saturating_sub(1)).max(1) as usize;
         let mut changed = false;
+
+        // Selection-aware editing. Movement ops update or clear the anchor
+        // (Shift extends; a plain move drops the selection). An edit op with
+        // an active selection replaces it: delete the range first, then the
+        // op (insert / newline / indent) applies at the collapsed caret;
+        // Backspace/Delete are satisfied by the range removal alone.
+        let sel = edit.selection();
+        let had_sel = sel.is_some();
+        let is_move = matches!(op,
+            Op::Left | Op::Right | Op::Home | Op::End |
+            Op::Up | Op::Down | Op::PageUp | Op::PageDown);
+        let is_edit = matches!(op,
+            Op::Insert(_) | Op::Newline | Op::Indent | Op::Backspace | Op::Delete);
+        if is_move {
+            if mods.shift {
+                if edit.sel_anchor.is_none() { edit.sel_anchor = Some(edit.cursor); }
+            } else {
+                edit.sel_anchor = None;
+            }
+        } else if is_edit {
+            if let Some((s, e)) = sel {
+                edit.value.replace_range(s..e, "");
+                edit.cursor = clamp_boundary(&edit.value, s);
+                changed = true;
+            }
+            edit.sel_anchor = None;
+        }
+
         match op {
             Op::Insert(b) => {
                 edit.value.insert(edit.cursor, b as char);
@@ -1140,7 +1329,7 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
                 changed = true;
             }
             Op::Backspace => {
-                if edit.cursor > 0 {
+                if !had_sel && edit.cursor > 0 {
                     let idx = clamp_boundary(&edit.value, edit.cursor - 1);
                     edit.value.remove(idx);
                     edit.cursor = idx;
@@ -1148,7 +1337,7 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
                 }
             }
             Op::Delete => {
-                if edit.cursor < edit.value.len() {
+                if !had_sel && edit.cursor < edit.value.len() {
                     edit.value.remove(edit.cursor);
                     changed = true;
                 }
@@ -1176,28 +1365,7 @@ pub fn handle_input_key(window_id: u32, key: crate::input::KeyCode) -> bool {
     // HERE — only on a caret move — for the focused TextArea: nudge
     // scroll_y just enough to keep the caret line on screen.
     if is_textarea {
-        let mut scenes = SCENES.lock();
-        if let Some(s) = scenes.get_mut(&window_id) {
-            if s.scroll_viewport.h > 0 {
-                let line_h = (crate::gui::text::line_height(abi::TextStyle::Mono) as u32).max(1);
-                let visible = (s.scroll_viewport.h / line_h).max(1) as usize;
-                let max_sy = s.max_scroll_y;
-                let caret_line = match &s.input_edit {
-                    Some(e) => {
-                        let cur = e.cursor.min(e.value.len());
-                        e.value[..cur].matches('\n').count()
-                    }
-                    None => 0,
-                };
-                let mut sl = (s.scroll_y / line_h) as usize;
-                if caret_line < sl {
-                    sl = caret_line;
-                } else if caret_line + 1 > sl + visible {
-                    sl = caret_line + 1 - visible;
-                }
-                s.scroll_y = ((sl as u32) * line_h).min(max_sy);
-            }
-        }
+        caret_follow_scroll(window_id);
     }
 
     // Phase 3: push the right event(s).

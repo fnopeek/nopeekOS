@@ -408,8 +408,35 @@ pub const GUEST_SMP: bool = true;
 /// stable) by the MP-table builder, the `maxcpus=` cmdline, and the IPI
 /// broadcast loops — all see the same value for one run.
 pub fn guest_vcpus() -> u8 {
-    let workers = crate::smp::per_core::core_count().saturating_sub(1);
+    let mut workers = crate::smp::per_core::core_count().saturating_sub(1);
+    // EXPERIMENT (RESERVE_OFFLOAD_CORE): when the off-vCPU net backend runs it
+    // needs its OWN worker core. Otherwise pick_offload_core() falls through to
+    // `ncores-1` and co-locates the net worker with a vCPU. That vCPU gets
+    // preempted by the worker, so it answers cross-vCPU TLB-shootdown IPIs late
+    // → the other vCPUs spin in csd_lock_wait (~40%). Leaving one worker core
+    // free maps each vCPU 1:1 to a core (like nested-Linux/iperf → 1 Gbit), so
+    // IPIs are answered promptly. Flag-gated for clean before/after measurement.
+    if reserve_offload_core() {
+        workers = workers.saturating_sub(1);
+    }
     workers.clamp(1, MAX_VCPUS_CAP) as u8
+}
+
+/// EXPERIMENT toggle: reserve a dedicated worker core for the off-vCPU net
+/// backend fiber (see `guest_vcpus`). Flip to `false` + re-release to revert to
+/// the co-located-worker behavior (one more vCPU, but csd_lock_wait contention).
+pub const RESERVE_OFFLOAD_CORE: bool = true;
+
+/// True when the off-vCPU net worker will actually claim a core this run (full
+/// RX+TX backend, AMD/SVM only today) AND the reservation experiment is on AND
+/// there is a core to spare. Mirrors the `full_backend` gate at `start_worker`.
+fn reserve_offload_core() -> bool {
+    RESERVE_OFFLOAD_CORE
+        && crate::microvm::devices::net_backend::FULL_RX_BACKEND
+        && matches!(current_vendor(), Vendor::Amd)
+        // Need ≥3 cores: Core 0 (BSP) + ≥1 vCPU + 1 worker. Below that, fall
+        // back to co-location rather than starving the guest to a single vCPU.
+        && crate::smp::per_core::core_count() >= 3
 }
 
 /// Hard cap on guest vCPUs (sizes the per-backend IPI bitmaps + the spawn
@@ -528,6 +555,31 @@ pub fn pick_offload_core() -> usize {
     }
     // All busy with vCPUs → share the highest worker core, never Core 0.
     ncores - 1
+}
+
+/// Like `pick_offload_core`, but MARKS the chosen core in `VM_CORE_MASK` so the
+/// later AP placement (`reserve_ap_core`, fired by guest SIPIs) skips it — the
+/// net worker gets a core to itself instead of being overwritten by a vCPU.
+/// Used for the off-vCPU net backend when `reserve_offload_core()` is on
+/// (`guest_vcpus()` already left one worker core free for exactly this). Falls
+/// back to a shared core (no mark) if none is free. Single producer (the vCPU
+/// fiber, before guest boot → before any SIPI), same CAS discipline as
+/// `reserve_ap_core`.
+fn claim_offload_core() -> usize {
+    let ncores = crate::smp::per_core::core_count();
+    if ncores <= 1 { return 0; }
+    loop {
+        let mask = VM_CORE_MASK.load(Ordering::Acquire);
+        let Some(c) = (1..ncores).find(|c| mask & (1u32 << c) == 0) else {
+            return ncores - 1; // all busy → co-locate on highest worker core
+        };
+        if VM_CORE_MASK
+            .compare_exchange(mask, mask | (1u32 << c), Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return c;
+        }
+    }
 }
 
 /// Reserve a distinct idle worker core (1..core_count()) for an AP vCPU fiber,
@@ -1109,7 +1161,19 @@ fn vcpu_fiber_task(_arg: u64) {
     // taken the VENDOR lock for its run loop yet (that's the match below).
     let full_backend = crate::microvm::devices::net_backend::FULL_RX_BACKEND
         && matches!(current_vendor(), Vendor::Amd);
-    crate::microvm::devices::net_rx_worker::start_worker(pick_offload_core(), full_backend);
+    // When the reservation experiment is on, guest_vcpus() left one worker core
+    // free and claim_offload_core() marks it so the SIPI'd APs skip it → the net
+    // worker runs on its OWN core (no vCPU co-location → no csd_lock_wait spin).
+    let worker_core = if reserve_offload_core() {
+        claim_offload_core()
+    } else {
+        pick_offload_core()
+    };
+    crate::kprintln!(
+        "[microvm] net worker core {} (vCPUs={}, reserve={})",
+        worker_core, guest_vcpus(), reserve_offload_core()
+    );
+    crate::microvm::devices::net_rx_worker::start_worker(worker_core, full_backend);
 
     match *VENDOR.lock() {
         Vendor::Amd => {

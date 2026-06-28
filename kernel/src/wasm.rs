@@ -707,6 +707,83 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // ── Clipboard (cross-app copy/paste) ──────────────────────────────
+    //
+    // A single kernel-owned selection buffer (crate::shade::clipboard).
+    // Gated on RENDER + focus: only the *currently focused* widget app may
+    // read or write it — a background app cannot snoop the clipboard, the
+    // same focus-ambient contract as receiving keystrokes. (When a future
+    // third-party app store lands, promote clipboard-read to a declared
+    // CLIPBOARD cap — needs a 2nd `.npk.caps` byte; the 1-byte section is
+    // full today.)
+
+    // npk_clipboard_set(ptr, len) -> i32
+    // Copy `len` UTF-8 bytes from guest memory into the clipboard as Text.
+    // Returns bytes stored, or -1 (denied / not focused / bad ptr).
+    linker.func_wrap("env", "npk_clipboard_set",
+        |caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if !app_is_focused(&caller) { return -1; }
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data(&caller);
+            let start = ptr as usize;
+            let end = (start + len.max(0) as usize).min(data.len());
+            if start > end { return -1; }
+            let slice = &data[start..end];
+            crate::shade::clipboard::set_text(slice);
+            slice.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_clipboard_len() -> i32
+    // Byte length of the current clipboard text (0 if empty). Lets an app
+    // size its buffer before npk_clipboard_get. Focus-gated like the rest.
+    linker.func_wrap("env", "npk_clipboard_len",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if !app_is_focused(&caller) { return -1; }
+            crate::shade::clipboard::text_len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_clipboard_get(ptr, max) -> i32
+    // Write up to `max` clipboard bytes into the guest buffer. Returns the
+    // FULL text length (so the app can detect truncation and re-query with
+    // a bigger buffer), 0 if empty, or -1 (denied / not focused / bad ptr).
+    linker.func_wrap("env", "npk_clipboard_get",
+        |mut caller: Caller<'_, HostState>, ptr: i32, max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if !app_is_focused(&caller) { return -1; }
+            let text = match crate::shade::clipboard::get_text() {
+                Some(t) => t,
+                None => return 0,
+            };
+            let n = text.len().min(max.max(0) as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = ptr as usize;
+            let end = start + n;
+            if end > data.len() { return -1; }
+            data[start..end].copy_from_slice(&text[..n]);
+            text.len() as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_open(app_ptr, app_len, arg_ptr, arg_len) -> i32
     // Launch widget module `app` (sys/wasm/<app>) with `arg` as its launch
     // argument (read by the app via npk_launch_arg). The launched app gets
@@ -3043,6 +3120,14 @@ fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<S
     let mut buf = alloc::vec![0u8; end - start];
     buf.copy_from_slice(&data[start..end]);
     core::str::from_utf8(&buf).ok().map(String::from)
+}
+
+/// True if the calling WASM app owns the currently-focused widget window.
+/// The clipboard focus-gate: only the focused app may touch the clipboard,
+/// so a background app cannot snoop or poison it.
+fn app_is_focused(caller: &Caller<'_, HostState>) -> bool {
+    let wid = caller.data().widget_window_id;
+    wid != 0 && crate::shade::focused_widget_id() == Some(wid)
 }
 
 fn map_exec_error(e: wasmi::Error) -> WasmError {
