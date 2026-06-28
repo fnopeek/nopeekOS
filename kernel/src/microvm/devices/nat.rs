@@ -1275,10 +1275,10 @@ pub fn pump(
         // Per-second microvm net stats. Re-enabled to verify net-RX: rxlat
         // (the latency root — should DROP), pump/s (should track RX), and the
         // RX-IRQ fire rate `rxirq/s` (proves the IRQ fires vs polling fallback).
-        // OFF: the 5 s [netstat] dump (~4 kprintln lines) BLOCKS the pump core
-        // ~60-120ms on the UART THRE spin (serial.rs:93, ~87µs/byte @ 115200) →
-        // it was itself a download-latency spike. Flip on only to diagnose.
-        const NETSTAT_DEBUG: bool = false;
+        // The 5 s [netstat] dump BLOCKS the pump core ~60-120ms on the UART THRE
+        // spin (serial.rs:93) — but v0.226.17 proved it's NOT the latency brake,
+        // and we need `gpu KB/s` + `dl` to verify the GPU throttle engages.
+        const NETSTAT_DEBUG: bool = true;
         // net-RX IRQ fire rate this window (0 + v0x0 = polling, IRQ never set up).
         let rx_vec = crate::drivers::virtio_net::rx_irq_vector();
         let rxirq_now = if rx_vec != 0 { crate::irq::fired_count(rx_vec) } else { 0 };
@@ -1323,7 +1323,7 @@ pub fn pump(
             let gpu_xfers = NS_GPU_XFERS.swap(0, AtOrd::Relaxed);
             let wraise = NS_WORKER_RAISE.swap(0, AtOrd::Relaxed);
             kprintln!(
-                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s wraise {}/s | gpu {}KB/s ({}/s)",
+                "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s wraise {}/s | gpu {}KB/s ({}/s) | dl {}",
                 drain_max / mhz,
                 if rxring_min == u64::MAX { 0 } else { rxring_min },
                 if super::net_rx_worker::active() { "on" } else { "off" },
@@ -1333,6 +1333,7 @@ pub fn pump(
                 wraise / secs,
                 gpu_bytes / secs / 1024,
                 gpu_xfers / secs,
+                if download_active() { "Y" } else { "N" },
             );
         }
         NS_LAST_TICK.store(now, AtOrd::Relaxed);
