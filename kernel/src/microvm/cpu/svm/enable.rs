@@ -2213,7 +2213,7 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if crate::microvm::devices::net_backend::lock().bar0_in_range(gpa) {
+                } else if crate::microvm::devices::net_backend::bar0_in_range(gpa) {
                     // Hold the net device lock across the MMIO handler + RX pump so
                     // net access stays atomic (the lock is uncontended in Stage 1 —
                     // only the vCPU touches it; the off-vCPU backend lands in Stage 2).
