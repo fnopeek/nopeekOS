@@ -323,12 +323,15 @@ fn launch_bench(kmsg_fd: i64) {
                  echo \"<0>[netbench-vm] iface=$IFACE -- SHORT bench (run 'cores' during a GET) ===\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] === idle RTT (ping x8) ===\" > /dev/kmsg; \
                  ping -c 8 10.0.2.2 2>&1 | tail -3; \
-                 echo \"<0>[netbench-vm] === GET 100/300/500 (lottery check) ===\" > /dev/kmsg; \
-                 for SZ in 100 300 500; do \
+                 echo 1 > /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null; \
+                 echo 1 > /proc/sys/net/ipv4/tcp_no_ssthresh_metrics_save 2>/dev/null; \
+                 NMS=$(cat /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null); \
+                 echo \"<0>[netbench-vm] === GET 6x150MB | tcp_no_metrics_save=$NMS (lottery=per-dest cwnd cache?) ===\" > /dev/kmsg; \
+                 for I in 1 2 3 4 5 6; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
-                   wget -q -O /dev/null \"http://10.0.2.2/get?mb=$SZ\" 2>/dev/null; \
+                   wget -q -O /dev/null \"http://10.0.2.2/get?mb=150\" 2>/dev/null; \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
-                   echo \"<0>[netbench-vm] GET $SZ MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
+                   awk -v a=$T0 -v b=$T1 -v i=$I 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] GET #%s 150MB: %.2fs = %.0f Mbit\\n\",i,d,150*8/d}' > /dev/kmsg; \
                  done; \
                  echo \"<0>[netbench-vm] === PUT 300 ===\" > /dev/kmsg; \
                  B=$((300*1024*1024)); \
