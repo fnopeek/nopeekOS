@@ -342,6 +342,9 @@ fn launch_bench(kmsg_fd: i64) {
                    T1=$(cut -d' ' -f1 /proc/uptime); \
                    echo \"<0>[netbench-vm] PUT $SZ MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
                  done; \
+                 echo \"<0>[netbench-vm] === guest TCP counters (loss/reorder evidence) ===\" > /dev/kmsg; \
+                 grep '^Tcp:' /proc/net/snmp; \
+                 grep '^TcpExt:' /proc/net/netstat; \
                  echo \"<0>[netbench-vm] done -- halting\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
