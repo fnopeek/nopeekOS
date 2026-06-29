@@ -320,6 +320,9 @@ fn launch_bench(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
+                 echo \"<0>[netbench-vm] cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null) hystart_before=$(cat /sys/module/tcp_cubic/parameters/hystart 2>/dev/null)\" > /dev/kmsg; \
+                 echo 0 > /sys/module/tcp_cubic/parameters/hystart 2>/dev/null; \
+                 echo \"<0>[netbench-vm] HyStart DISABLED (hystart=$(cat /sys/module/tcp_cubic/parameters/hystart 2>/dev/null)) -- lottery test\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] iface=$IFACE -- RTT idle, RTT loaded, then GET/PUT sweep\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] === idle RTT (ping x20) ===\" > /dev/kmsg; \
                  ping -c 20 10.0.2.2 2>&1 | tail -8; \
