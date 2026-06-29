@@ -711,6 +711,55 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
     }
 }
 
+/// vhost-style TX (symmetric with RX `l3_rewrite_inbound`): masquerade the
+/// guest's outbound TCP segment IN PLACE — rewrite src port + adjust the
+/// CHECKSUM_PARTIAL pseudo-header for the src-IP change (O(1), no full checksum,
+/// no re-segmentation) — and hand the WHOLE frame (GSO super-frame and all) to
+/// the host NIC, which segments + checksums it. The exact mirror of the inbound
+/// rewrite — one data plane, same behaviour both directions. Returns None (the
+/// frame went straight to the host NIC; TCP retransmits on any drop).
+fn l3_outbound_offload(src_port: u16, dst_ip: [u8; 4], dst_port: u16,
+                       l4: &[u8], gso_size: u16) -> Option<Vec<u8>> {
+    if l4.len() < TCP_HDR_LEN { return None; }
+    let now = crate::interrupts::ticks();
+    let hp = match l3_map_out(PROTO_TCP, src_port, dst_ip, dst_port, now) {
+        Some(p) => p,
+        None => { NS_DROPS.fetch_add(1, AtOrd::Relaxed); return None; }
+    };
+    let mut seg = l4.to_vec();
+    seg[0..2].copy_from_slice(&hp.to_be_bytes()); // src port → masquerade port
+    // Adjust the pseudo-header partial for the src-IP rewrite (GUEST_IP → our_ip).
+    // The port is part of the data the device checksums, so only the IP changes
+    // the partial. Mirrors the inbound incremental csum, minus the final
+    // complement (CHECKSUM_PARTIAL stores the un-complemented sum).
+    let our_ip = crate::net::arp::our_ip();
+    let old = u16::from_be_bytes([seg[16], seg[17]]);
+    let new = adjust_partial(old, GUEST_IP, our_ip);
+    seg[16..18].copy_from_slice(&new.to_be_bytes());
+
+    NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
+    NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
+    if !crate::net::ipv4::send_offload(dst_ip, PROTO_TCP, &seg, gso_size) {
+        NS_DROPS.fetch_add(1, AtOrd::Relaxed); // NIC couldn't take it; TCP retransmits
+    }
+    L3_ACTIVE.store(true, AtOrd::Release);
+    None
+}
+
+/// Incremental update of a CHECKSUM_PARTIAL (un-complemented pseudo-header sum)
+/// for a 4-byte source-address change — like the inbound `csum_update` (RFC 1624)
+/// but WITHOUT the final ones-complement (the device completes the un-complemented
+/// partial).
+fn adjust_partial(partial: u16, old_ip: [u8; 4], new_ip: [u8; 4]) -> u16 {
+    let mut sum = partial as u32;
+    sum += (!u16::from_be_bytes([old_ip[0], old_ip[1]])) as u32 & 0xFFFF;
+    sum += (!u16::from_be_bytes([old_ip[2], old_ip[3]])) as u32 & 0xFFFF;
+    sum += u16::from_be_bytes([new_ip[0], new_ip[1]]) as u32;
+    sum += u16::from_be_bytes([new_ip[2], new_ip[3]]) as u32;
+    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
+    sum as u16
+}
+
 /// Outbound NAT for a guest ICMP echo request (so ping + the browser's
 /// reachability probes to the DNS servers work instead of cap-rejecting). The
 /// ICMP Identifier is the flow key, masqueraded like a port; only echo
@@ -1057,7 +1106,15 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
                 cap_reject("TCP", dst_ip, dst_port);
                 return None;
             }
-            l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size)
+            // Unified data plane: when the host NIC does checksum + TSO, forward
+            // the guest's GSO super-frame AS-IS (rewrite + incremental csum, the
+            // mirror of RX) instead of SW re-segmenting it. Fall back to the SW
+            // path only when offload isn't available.
+            if crate::drivers::virtio_net::host_offload_ok() {
+                l3_outbound_offload(src_port, dst_ip, dst_port, l4, gso_size)
+            } else {
+                l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size)
+            }
         }
         PROTO_ICMP => {
             if !caps.allow_icmp {
