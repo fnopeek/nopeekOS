@@ -87,6 +87,7 @@ pub fn intent_cores() {
     let wk0 = crate::microvm::devices::net_rx_worker::wake_snapshot();
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let dk0 = crate::microvm::devices::nat::decoupled_kick_count();
+    let rf0 = crate::microvm::devices::nat::ringfull_kick_count();
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
@@ -117,6 +118,7 @@ pub fn intent_cores() {
     let wk1 = crate::microvm::devices::net_rx_worker::wake_snapshot();
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let dk1 = crate::microvm::devices::nat::decoupled_kick_count();
+    let rf1 = crate::microvm::devices::nat::ringfull_kick_count();
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -224,14 +226,16 @@ pub fn intent_cores() {
         // Net RX worker wakeup attribution: irq = event-driven (host RX MSI-X
         // woke it, ~µs); timeout = fell to the 2ms fallback (host IRQ did NOT
         // fire → silent polling = the cold-start floor); polled = no MSI-X.
-        let (wi, wt, wp) = (
+        let (wi, wt, wp, ws) = (
             wk1.0.saturating_sub(wk0.0),
             wk1.1.saturating_sub(wk0.1),
             wk1.2.saturating_sub(wk0.2),
+            wk1.3.saturating_sub(wk0.3),
         );
-        if wi + wt + wp > 0 {
-            kprintln!("    net worker wakes/s: irq={} timeout={} polled={}",
-                      wi * 1000 / window_ms, wt * 1000 / window_ms, wp * 1000 / window_ms);
+        if wi + wt + wp + ws > 0 {
+            kprintln!("    net worker wakes/s: irq={} timeout={} polled={} spin={}",
+                      wi * 1000 / window_ms, wt * 1000 / window_ms,
+                      wp * 1000 / window_ms, ws * 1000 / window_ms);
         }
         // BSP consumer park: kicked = the worker's kick woke it (event-driven);
         // timeout = it fell to the 2ms fallback = the typical ~3ms cold floor.
@@ -240,9 +244,11 @@ pub fn intent_cores() {
         // !want_irq). These used to be lost wakes → the 2ms `timeout` stalls; now
         // they wake the vCPU. timeout should fall toward 0 as decoupled rises.
         let dk = dk1.saturating_sub(dk0);
+        let rf = rf1.saturating_sub(rf0);
         if kk + kt > 0 {
-            kprintln!("    bsp kick_wait/s: kicked={} timeout={} decoupled={}",
-                      kk * 1000 / window_ms, kt * 1000 / window_ms, dk * 1000 / window_ms);
+            kprintln!("    bsp kick_wait/s: kicked={} timeout={} decoupled={} ringfull={}",
+                      kk * 1000 / window_ms, kt * 1000 / window_ms,
+                      dk * 1000 / window_ms, rf * 1000 / window_ms);
         }
     }
     // Host-time breakdown: where the dedicated guest cores actually SPENT
