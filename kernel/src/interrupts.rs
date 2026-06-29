@@ -482,6 +482,13 @@ const DEDICATED_VM_TIMER_VECTOR: u8 = 49;
 /// populated on the APIC-timer path (Core 0 may be on PIT).
 static DEDICATED_APIC_BASE: AtomicU64 = AtomicU64::new(0);
 
+/// Core id the dedicated VM timer is armed on (the BSP vCPU core), captured at
+/// arm time in NORMAL context. The timer IRQ handler reads it LOCK-FREE — it must
+/// NOT call `current_core_id()` (which takes `CORES.lock()`) from interrupt
+/// context: if the interrupted code on this core holds that lock, it deadlocks
+/// (the 0.226.54 hang). `u64::MAX` = not armed.
+static DEDICATED_TIMER_CORE: AtomicU64 = AtomicU64::new(u64::MAX);
+
 extern "x86-interrupt" fn dedicated_vm_timer_handler(_frame: InterruptStackFrame) {
     // EOI first.
     let base = DEDICATED_APIC_BASE.load(Ordering::Relaxed);
@@ -499,7 +506,10 @@ extern "x86-interrupt" fn dedicated_vm_timer_handler(_frame: InterruptStackFrame
     // idle guest is NOT woken 1 kHz (no core burn). The bump wakes a vCPU parked
     // in `kick_wait_until`; harmless when it's running.
     if crate::microvm::devices::nat::recently_active() {
-        crate::smp::fiber::net_kick_bump(crate::smp::per_core::current_core_id());
+        let cid = DEDICATED_TIMER_CORE.load(Ordering::Relaxed);
+        if cid != u64::MAX {
+            crate::smp::fiber::net_kick_bump(cid as usize);
+        }
     }
 }
 
@@ -509,6 +519,10 @@ extern "x86-interrupt" fn dedicated_vm_timer_handler(_frame: InterruptStackFrame
 /// servicing + slice cadence; the guest IRQ0 stays 100 Hz (TICKS-
 /// paced) regardless.
 pub fn arm_dedicated_vm_timer() {
+    // Capture this (BSP) core's id NOW, in normal context, so the IRQ handler can
+    // wake the parked vCPU lock-free (never call current_core_id() from the ISR).
+    DEDICATED_TIMER_CORE.store(
+        crate::smp::per_core::current_core_id() as u64, Ordering::Relaxed);
     let (lo, hi): (u32, u32);
     // SAFETY: MSR 0x1B (APIC base) is always readable on x86_64.
     unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
