@@ -482,34 +482,17 @@ const DEDICATED_VM_TIMER_VECTOR: u8 = 49;
 /// populated on the APIC-timer path (Core 0 may be on PIT).
 static DEDICATED_APIC_BASE: AtomicU64 = AtomicU64::new(0);
 
-/// Core id the dedicated VM timer is armed on (the BSP vCPU core), captured at
-/// arm time in NORMAL context. The timer IRQ handler reads it LOCK-FREE — it must
-/// NOT call `current_core_id()` (which takes `CORES.lock()`) from interrupt
-/// context: if the interrupted code on this core holds that lock, it deadlocks
-/// (the 0.226.54 hang). `u64::MAX` = not armed.
-static DEDICATED_TIMER_CORE: AtomicU64 = AtomicU64::new(u64::MAX);
-
 extern "x86-interrupt" fn dedicated_vm_timer_handler(_frame: InterruptStackFrame) {
-    // EOI first.
+    // EOI only — purpose is purely to make VMRUN return periodically.
+    // (A Stage-1 experiment that woke the parked vCPU 1 kHz here was REVERTED: the
+    // guest is tickless (NO_HZ) and only asks for ~356 ticks/s — it does NOT want
+    // 1000, so forcing wakes didn't raise its effective HZ and just span a core.
+    // The effective HZ tracks load; it is a SYMPTOM, not the cause — as the
+    // original diagnosis already found.)
     let base = DEDICATED_APIC_BASE.load(Ordering::Relaxed);
     if base != 0 {
         // SAFETY: LAPIC MMIO, identity-mapped, per-core EOI register.
         unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
-    }
-    // KVM `apic_timer_fn` model (the Stage-1 root fix): this ~1 kHz host timer
-    // runs on the BSP vCPU's core INDEPENDENT of VMRUN. During an active transfer,
-    // wake the parked vCPU fiber every tick so it re-enters VMRUN and injects the
-    // guest's LAPIC tick at the HOST's 1 kHz rate — instead of the guest clock
-    // being coupled to the park-wake rate (~360 Hz measured). A guest clock stuck
-    // at ~360 Hz stretches ALL guest TCP timers ~2.8× (delayed-ACK fires at ~2.8ms
-    // instead of ~1ms) → the bistable ~3 ms RTT. Gated on recently_active so an
-    // idle guest is NOT woken 1 kHz (no core burn). The bump wakes a vCPU parked
-    // in `kick_wait_until`; harmless when it's running.
-    if crate::microvm::devices::nat::recently_active() {
-        let cid = DEDICATED_TIMER_CORE.load(Ordering::Relaxed);
-        if cid != u64::MAX {
-            crate::smp::fiber::net_kick_bump(cid as usize);
-        }
     }
 }
 
@@ -519,10 +502,6 @@ extern "x86-interrupt" fn dedicated_vm_timer_handler(_frame: InterruptStackFrame
 /// servicing + slice cadence; the guest IRQ0 stays 100 Hz (TICKS-
 /// paced) regardless.
 pub fn arm_dedicated_vm_timer() {
-    // Capture this (BSP) core's id NOW, in normal context, so the IRQ handler can
-    // wake the parked vCPU lock-free (never call current_core_id() from the ISR).
-    DEDICATED_TIMER_CORE.store(
-        crate::smp::per_core::current_core_id() as u64, Ordering::Relaxed);
     let (lo, hi): (u32, u32);
     // SAFETY: MSR 0x1B (APIC base) is always readable on x86_64.
     unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
@@ -640,8 +619,16 @@ pub fn arm_worker_timer() {
             let start = rdtsc();
             let tsc_10ms = if freq > 0 { freq / 100 } else { 20_000_000 };
             while rdtsc() - start < tsc_10ms { core::hint::spin_loop(); }
-            initial = 0xFFFF_FFFFu32
+            // Calibrated over 10 ms, then /10 → ~1 kHz (1 ms period). The worker
+            // idle timer used to be 100 Hz (10 ms) — but the net worker AND the
+            // guest both want ms granularity, so a parked worker whose host RX IRQ
+            // didn't fire promptly fell to the next 100 Hz tick = a 10 ms cold-wake
+            // floor (the ~3-11 ms idle ping / cold-start RTT). Matching the guest's
+            // 1 kHz drops that floor to 1 ms. Pure-EOI handler + plain HLT between,
+            // so it's just a 1 kHz wake, no core burn.
+            initial = (0xFFFF_FFFFu32
                 .wrapping_sub(core::ptr::read_volatile(b.add(0x390) as *const u32))
+                / 10)
                 .max(1);
             WORKER_TIMER_INITIAL.store(initial, Ordering::Relaxed);
         }
