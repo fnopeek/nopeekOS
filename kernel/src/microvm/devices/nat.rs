@@ -728,14 +728,24 @@ fn l3_outbound_offload(src_port: u16, dst_ip: [u8; 4], dst_port: u16,
     };
     let mut seg = l4.to_vec();
     seg[0..2].copy_from_slice(&hp.to_be_bytes()); // src port → masquerade port
-    // Adjust the pseudo-header partial for the src-IP rewrite (GUEST_IP → our_ip).
-    // The port is part of the data the device checksums, so only the IP changes
-    // the partial. Mirrors the inbound incremental csum, minus the final
-    // complement (CHECKSUM_PARTIAL stores the un-complemented sum).
     let our_ip = crate::net::arp::our_ip();
-    let old = u16::from_be_bytes([seg[16], seg[17]]);
-    let new = adjust_partial(old, GUEST_IP, our_ip);
-    seg[16..18].copy_from_slice(&new.to_be_bytes());
+    if gso_size > 0 {
+        // GSO super-frame: the device segments + checksums per segment, so we only
+        // adjust the pseudo-header PARTIAL for the src-IP rewrite (GUEST_IP →
+        // our_ip) — the incremental inbound csum mirror, minus the final
+        // complement (CHECKSUM_PARTIAL stores the un-complemented sum).
+        let old = u16::from_be_bytes([seg[16], seg[17]]);
+        let new = adjust_partial(old, GUEST_IP, our_ip);
+        seg[16..18].copy_from_slice(&new.to_be_bytes());
+    } else {
+        // Non-GSO frame (ACK / control / ≤ one MSS): compute the FULL TCP checksum
+        // in SW (cheap) — this device's legacy F_GSO NEEDS_CSUM is unreliable for
+        // small frames (HW test: download crawled to 9 Mbit). Still passthrough,
+        // no re-segmentation.
+        seg[16] = 0; seg[17] = 0;
+        let c = tcp_checksum(our_ip, dst_ip, &seg);
+        seg[16..18].copy_from_slice(&c.to_be_bytes());
+    }
 
     NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);

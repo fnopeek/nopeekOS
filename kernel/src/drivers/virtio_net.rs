@@ -18,7 +18,7 @@ static HOST_OFFLOAD: AtomicBool = AtomicBool::new(false);
 /// (negotiation + send_offload + l3_outbound_offload) stays in the tree for
 /// debugging; flip true to retest. With it false, TX falls back to the working
 /// SW path (`emit_tcp_out`).
-const TX_OFFLOAD_ENABLED: bool = false;
+const TX_OFFLOAD_ENABLED: bool = true;
 
 /// True iff the host NIC accepts offloaded (CSUM+TSO) TX frames via `send_offload`.
 pub fn host_offload_ok() -> bool {
@@ -530,12 +530,18 @@ pub fn send_offload(frame: &[u8], gso_size: u16, csum_start: u16,
     let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
     let hdr_addr = dev.tx_hdrs + d0 as u64 * NET_HDR_SIZE as u64;
     let mut h = [0u8; NET_HDR_SIZE];
-    h[0] = VNET_HDR_F_NEEDS_CSUM;
-    h[1] = if gso_size > 0 { VNET_HDR_GSO_TCPV4 } else { 0 }; // 0 = GSO_NONE
-    h[2..4].copy_from_slice(&hdr_len.to_le_bytes());
-    h[4..6].copy_from_slice(&gso_size.to_le_bytes());
-    h[6..8].copy_from_slice(&csum_start.to_le_bytes());
-    h[8..10].copy_from_slice(&csum_offset.to_le_bytes());
+    // GSO frames NEED the device to checksum (the per-segment checksums don't
+    // exist yet). Non-GSO frames carry a complete SW checksum already (this
+    // device's legacy F_GSO NEEDS_CSUM proved unreliable for small frames), so
+    // they go out as a plain frame — no offload flag, csum fields zero.
+    if gso_size > 0 {
+        h[0] = VNET_HDR_F_NEEDS_CSUM;
+        h[1] = VNET_HDR_GSO_TCPV4;
+        h[2..4].copy_from_slice(&hdr_len.to_le_bytes());
+        h[4..6].copy_from_slice(&gso_size.to_le_bytes());
+        h[6..8].copy_from_slice(&csum_start.to_le_bytes());
+        h[8..10].copy_from_slice(&csum_offset.to_le_bytes());
+    }
     // SAFETY: pre-allocated DMA buffers + this core's own descriptor table.
     unsafe {
         core::ptr::copy_nonoverlapping(h.as_ptr(), hdr_addr as *mut u8, NET_HDR_SIZE);
