@@ -619,16 +619,11 @@ pub fn arm_worker_timer() {
             let start = rdtsc();
             let tsc_10ms = if freq > 0 { freq / 100 } else { 20_000_000 };
             while rdtsc() - start < tsc_10ms { core::hint::spin_loop(); }
-            // Calibrated over 10 ms, then /10 → ~1 kHz (1 ms period). The worker
-            // idle timer used to be 100 Hz (10 ms) — but the net worker AND the
-            // guest both want ms granularity, so a parked worker whose host RX IRQ
-            // didn't fire promptly fell to the next 100 Hz tick = a 10 ms cold-wake
-            // floor (the ~3-11 ms idle ping / cold-start RTT). Matching the guest's
-            // 1 kHz drops that floor to 1 ms. Pure-EOI handler + plain HLT between,
-            // so it's just a 1 kHz wake, no core burn.
-            initial = (0xFFFF_FFFFu32
+            // Calibrate ticks/10ms against the TSC (10 ms = 100 Hz). (A 1 kHz
+            // variant was tried + reverted: it didn't lower the cold ping and
+            // introduced TCP OFO from a different RX-processing cadence.)
+            initial = 0xFFFF_FFFFu32
                 .wrapping_sub(core::ptr::read_volatile(b.add(0x390) as *const u32))
-                / 10)
                 .max(1);
             WORKER_TIMER_INITIAL.store(initial, Ordering::Relaxed);
         }
