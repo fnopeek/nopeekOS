@@ -85,6 +85,7 @@ pub fn intent_cores() {
     let vx0 = crate::microvm::cpu::vm_exit_snapshot();
     let io0 = crate::microvm::cpu::io_port_snapshot();
     let wk0 = crate::microvm::devices::net_rx_worker::wake_snapshot();
+    let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
@@ -113,6 +114,7 @@ pub fn intent_cores() {
     let vx1 = crate::microvm::cpu::vm_exit_snapshot();
     let io1 = crate::microvm::cpu::io_port_snapshot();
     let wk1 = crate::microvm::devices::net_rx_worker::wake_snapshot();
+    let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -228,6 +230,13 @@ pub fn intent_cores() {
         if wi + wt + wp > 0 {
             kprintln!("    net worker wakes/s: irq={} timeout={} polled={}",
                       wi * 1000 / window_ms, wt * 1000 / window_ms, wp * 1000 / window_ms);
+        }
+        // BSP consumer park: kicked = the worker's kick woke it (event-driven);
+        // timeout = it fell to the 2ms fallback = the typical ~3ms cold floor.
+        let (kk, kt) = (kw1.0.saturating_sub(kw0.0), kw1.1.saturating_sub(kw0.1));
+        if kk + kt > 0 {
+            kprintln!("    bsp kick_wait/s: kicked={} timeout={}",
+                      kk * 1000 / window_ms, kt * 1000 / window_ms);
         }
     }
     // Host-time breakdown: where the dedicated guest cores actually SPENT
