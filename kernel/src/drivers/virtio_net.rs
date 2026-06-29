@@ -202,6 +202,8 @@ pub fn init() -> bool {
         // promise a GSO frame the device can't segment.
         let mut accepted = features & F_MAC;
         let offload = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
+        kprintln!("[npk] virtio-net: dev features {:#010x} (csum={} host_tso4={} → offload={})",
+                  features, features & F_CSUM != 0, features & F_HOST_TSO4 != 0, offload);
         if offload {
             accepted |= F_CSUM | F_HOST_TSO4;
             kprintln!("[npk] virtio-net: TX offload negotiated (CSUM + HOST_TSO4)");
