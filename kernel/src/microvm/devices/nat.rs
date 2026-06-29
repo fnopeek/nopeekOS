@@ -1353,7 +1353,7 @@ pub fn pump(
     if super::net_backend::full_active() {
         return false;
     }
-    drain_inbound(net, mem)
+    drain_inbound(net, mem).want_irq
 }
 
 /// Lightweight pump for the HOT device-exit path: pull the host NIC + deliver to
@@ -1372,7 +1372,7 @@ pub fn pump_fast(
     // overflow — the measured download-drop source (drops ≫ injfalse) that drove
     // the TCP sawtooth (~0.13% loss capped throughput at ~400 Mbit). Then fill +
     // deliver the fresh packets.
-    let mut fired = drain_inbound(net, mem);
+    let mut fired = drain_inbound(net, mem).want_irq;
     if super::net_rx_worker::active() {
         // A dedicated producer fiber owns the NIC drain on another core; the BSP
         // only injects. Still flush the guest's batched TX doorbell here so ACKs
@@ -1386,7 +1386,7 @@ pub fn pump_fast(
         // shade::poll_render every call — pure waste on the BSP vCPU.
         crate::net::poll_rx_only();
     }
-    fired |= drain_inbound(net, mem);
+    fired |= drain_inbound(net, mem).want_irq;
     fired
 }
 
@@ -1398,7 +1398,7 @@ pub fn pump_fast(
 pub fn drain_to_guest(
     net: &mut super::virtio_net_dev::VirtioNet,
     mem: &GuestMem,
-) -> bool {
+) -> RxDrain {
     drain_inbound(net, mem)
 }
 
@@ -1435,6 +1435,14 @@ pub fn note_net_irq() { NS_NET_IRQ.fetch_add(1, AtOrd::Relaxed); }
 /// is fine and any cap is RX volume / TX, not the IRQ path.
 static NS_WORKER_RAISE: AtomicU64 = AtomicU64::new(0);
 pub fn note_worker_raise() { NS_WORKER_RAISE.fetch_add(1, AtOrd::Relaxed); }
+/// Times the worker kicked the parked BSP vCPU to inject RX it had STAGED while
+/// the guest's EVENT_IDX suppressed the IRQ line (`injected && !want_irq`). Before
+/// the scheduler-wake/IRQ-raise split these never woke the vCPU → it ate the 2ms
+/// park timeout (the measured `kick_wait timeout` → the download throughput
+/// lottery). High here = the decoupled wake is doing real work.
+static NS_KICK_DECOUPLED: AtomicU64 = AtomicU64::new(0);
+pub fn note_decoupled_kick() { NS_KICK_DECOUPLED.fetch_add(1, AtOrd::Relaxed); }
+pub fn decoupled_kick_count() -> u64 { NS_KICK_DECOUPLED.load(AtOrd::Relaxed) }
 /// virtio-gpu TRANSFER_TO_HOST pixel bytes copied on the vCPU core (the browser
 /// rendering). If high during a download, the framebuffer copy is stealing vCPU
 /// cycles from the net pump (the framebuffer↔pump contention) — Florian's
@@ -1446,11 +1454,22 @@ pub fn note_gpu_transfer(bytes: u64) {
     NS_GPU_XFERS.fetch_add(1, AtOrd::Relaxed);
 }
 
+/// Outcome of one staging-queue → guest RX-ring drain pass.
+#[derive(Clone, Copy, Default)]
+pub struct RxDrain {
+    /// At least one RX buffer was injected into the guest this pass. Drives the
+    /// vCPU SCHEDULER wake (a parked vCPU can't NAPI-poll a non-empty ring).
+    pub injected: bool,
+    /// The guest wants its RX IRQ line raised: EVENT_IDX threshold crossed AND
+    /// NAPI hasn't suppressed. Drives `raise_irq` only. Implies `injected`.
+    pub want_irq: bool,
+}
+
 /// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
 fn drain_inbound(
     net: &mut super::virtio_net_dev::VirtioNet,
     mem: &GuestMem,
-) -> bool {
+) -> RxDrain {
     // Pump-starvation probe: longest gap between drain passes this window.
     let drain_now = crate::interrupts::rdtsc();
     let last_drain = NS_LAST_DRAIN.swap(drain_now, AtOrd::Relaxed);
@@ -1508,7 +1527,7 @@ fn drain_inbound(
     // overflows → drops → TCP sawtooth (the speedtest "200→60→200" oscillation).
     // The guest re-checks the used ring when it re-enables interrupts, so a
     // suppressed packet is never stranded.
-    any && net.rx_wants_irq(mem)
+    RxDrain { injected: any, want_irq: any && net.rx_wants_irq(mem) }
 }
 
 /// Number of currently-active (non-closed) TCP sessions. The run_linux
