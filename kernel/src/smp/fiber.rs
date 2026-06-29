@@ -131,6 +131,12 @@ enum FiberState {
     /// IRQ wakes this core out of HLT, so the scheduler re-runs and resumes
     /// here with ~no latency — no polling.
     WaitingIrq { vector: u8, since: u64, deadline: u64 },
+    /// Parked until this core's net-kick generation moves past `gen` (an
+    /// off-vCPU producer injected + kicked us), or `deadline` (timeout) passes.
+    /// The kick's IPI wakes this core out of HLT, so the scheduler re-runs and
+    /// resumes here in ~µs instead of waiting on the next timer tick — the
+    /// cold-start fix for the inject pipeline.
+    WaitingKick { kgen: u64, deadline: u64 },
     Done,
 }
 
@@ -193,6 +199,9 @@ pub fn run_core_fibers(cid: usize) {
                 FiberState::Sleeping(d) => now >= d,
                 FiberState::WaitingIrq { vector, since, deadline } => {
                     crate::irq::fired_count(vector) != since || now >= deadline
+                }
+                FiberState::WaitingKick { kgen, deadline } => {
+                    net_kick_gen(cid) != kgen || now >= deadline
                 }
                 FiberState::Done => false,
             });
@@ -297,6 +306,57 @@ pub fn irq_wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
     }
     // Resumed: the IRQ fired iff the count advanced past the snapshot.
     crate::irq::fired_count(vector) != since
+}
+
+/// Per-core net-kick generation. An off-vCPU producer (the net RX worker)
+/// bumps the target core's counter via [`net_kick_bump`] right before sending
+/// its VCPU_KICK IPI, so a consumer fiber parked in `kick_wait` on that core is
+/// resumed event-driven (the IPI wakes the core out of HLT → the scheduler
+/// re-runs → the bumped generation marks the fiber runnable) instead of
+/// waiting on the next ~1–10 ms timer tick. This is the cold-start fix.
+static NET_KICK_GEN: [AtomicU64; MAX_CORES] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; MAX_CORES]
+};
+
+/// Bump core `cid`'s net-kick generation (called from `kick_host_core`, before
+/// the IPI, so the wake can't be lost: a fiber that snapshots after this sees
+/// the new value and doesn't park).
+pub fn net_kick_bump(cid: usize) {
+    if cid < MAX_CORES {
+        NET_KICK_GEN[cid].fetch_add(1, Ordering::Release);
+    }
+}
+
+fn net_kick_gen(cid: usize) -> u64 {
+    if cid < MAX_CORES { NET_KICK_GEN[cid].load(Ordering::Acquire) } else { 0 }
+}
+
+/// Park the running fiber until this core's net-kick generation advances (an
+/// off-vCPU producer injected + kicked) or `timeout_ms` elapses. The snapshot
+/// is taken HERE, after the caller has drained its inbound queue, so a kick
+/// racing the park is never lost (it advances the gen past the snapshot →
+/// resumes at once). Returns true if kicked, false on timeout / not-in-fiber.
+pub fn kick_wait(timeout_ms: u64) -> bool {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return false;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
+    let f = unsafe { CURRENT_FIBER[cid] };
+    if f.is_null() {
+        return false;
+    }
+    let kgen = net_kick_gen(cid);
+    let freq = crate::interrupts::tsc_freq();
+    let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
+    // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Park it,
+    // switch to the scheduler; resumes when the gen advances or the deadline passes.
+    unsafe {
+        (*f).state = FiberState::WaitingKick { kgen, deadline };
+        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+    }
+    net_kick_gen(cid) != kgen
 }
 
 /// Fresh-fiber entry: run the app's `(func, arg)`. On return the trampoline

@@ -234,6 +234,10 @@ fn boot_ap(apic_base: u64, target_apic_id: u32, core_id: u32) -> bool {
 /// (~10 ms host-timer tick). No-op if the core id is unknown. The kick vector's
 /// host ISR is a pure EOI — the receipt itself is the wakeup.
 pub fn kick_host_core(core_id: usize) {
+    // Event-wake a consumer fiber parked in `kick_wait` on the target core
+    // BEFORE the IPI, so the wake is never lost. Harmless for non-net kicks
+    // (only `kick_wait` fibers observe the generation).
+    crate::smp::fiber::net_kick_bump(core_id);
     let apic_id = {
         let cores = per_core::CORES.lock();
         match cores.get(core_id) {
