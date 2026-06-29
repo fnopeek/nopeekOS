@@ -42,17 +42,25 @@ def tcp_info(sock):
     except OSError:
         return None
 
+    def u8(o):
+        return raw[o] if o < len(raw) else 0
+
     def u32(o):
         return struct.unpack_from("<I", raw, o)[0] if o + 4 <= len(raw) else 0
 
     def u64(o):
         return struct.unpack_from("<Q", raw, o)[0] if o + 8 <= len(raw) else 0
 
-    return dict(snd_mss=u32(16), sacked=u32(28), lost=u32(32),
+    # retransmits = RTO-based retransmits (real stall). lost = packets the sender
+    # currently believes lost. dsack_dups = receiver sent a DSACK = the sender
+    # retransmitted something that ARRIVED FINE = SPURIOUS (late ACK, not loss).
+    # reord_seen = reordering events. So: retrans>0 + dsack_dups>0 → spurious
+    # (ACK-timing); retrans>0 + lost>0 + dsack_dups==0 → real drops.
+    return dict(retransmits=u8(2), snd_mss=u32(16), sacked=u32(28), lost=u32(32),
                 rcv_ssthresh=u32(64), rtt=u32(68), rttvar=u32(72),
-                ssthresh=u32(76), cwnd=u32(80), advmss=u32(84),
-                retrans=u32(100), pacing=u64(104), rcv_rtt=u32(92),
-                rcv_space=u32(96))
+                ssthresh=u32(76), cwnd=u32(80), advmss=u32(84), reordering=u32(88),
+                rcv_rtt=u32(92), rcv_space=u32(96), retrans=u32(100),
+                pacing=u64(104), dsack_dups=u32(216), reord_seen=u32(220))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -99,6 +107,8 @@ class Handler(BaseHTTPRequestHandler):
               f"= {rate:.0f} Mbit/s | cwnd={ti.get('cwnd',0)} "
               f"(min{min_cwnd}/peak{peak_cwnd}) ssthresh={ti.get('ssthresh',0)} "
               f"rtt={ti.get('rtt',0)}us retrans={ti.get('retrans',0)} "
+              f"rto={ti.get('retransmits',0)} lost={ti.get('lost',0)} "
+              f"dsack={ti.get('dsack_dups',0)} reord={ti.get('reord_seen',0)} "
               f"pacing={pacing_mbit:.0f}Mbit")
 
     def do_POST(self):
