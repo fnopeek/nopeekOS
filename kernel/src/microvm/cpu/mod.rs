@@ -1146,6 +1146,12 @@ pub fn vm_core_serve() {
 /// download/active guest never reaches it.
 const PARK_SAFETY_MS: u64 = 8;
 
+/// vCPU-side halt-poll budget (µs) during an active transfer — the KVM
+/// `halt_poll_ns` analogue for the guest vCPU. ~500 µs bridges the inter-batch
+/// gap so the guest resumes warm and drains RX before its receive window can
+/// collapse to zero. Spent only while `recently_active`, on a non-Core-0 core.
+const VCPU_HALT_POLL_US: u64 = 500;
+
 /// Park the BSP vCPU fiber when the guest is idle — the unified block-on-event
 /// model (KVM `kvm_vcpu_block`): one park, woken by whichever event fires first.
 ///   * RX/TX/IPI ready → the off-vCPU backend / a peer vCPU bumps this core's
@@ -1171,7 +1177,19 @@ fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
     // via the net-kick generation — we must NOT arm/route the host RX IRQ here
     // (that would steal the worker's event-wake). Block on the unified deadline.
     if crate::microvm::devices::net_dataplane::active() {
-        crate::smp::fiber::kick_wait_until(deadline);
+        // vCPU-side halt-poll (the symmetric counterpart to the worker's): during
+        // an active transfer keep the GUEST vCPU warm so it processes injected RX
+        // in µs (drains its receive buffer → window stays open, ACKs prompt) instead
+        // of HLTing and eating the park/wake latency that is the cold ~3 ms bridge
+        // RTT (the same RTT seen on an idle local ping — absurd for a local path).
+        // Gated to a non-Core-0 core (Core 0 owns the compositor — never spin it).
+        if crate::microvm::devices::nat::recently_active()
+            && crate::smp::per_core::current_core_id() != 0
+        {
+            crate::smp::fiber::kick_wait_until_polled(deadline, VCPU_HALT_POLL_US);
+        } else {
+            crate::smp::fiber::kick_wait_until(deadline);
+        }
         return;
     }
 

@@ -222,13 +222,14 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     // vhost_signal (RX): raise IRQ10 only when used.idx crossed used_event.
     let rx_raise = injected && dev.rx_should_interrupt(gm);
 
-    // ── handle_tx: service the guest TX ring on the doorbell (process_tx does the
-    //    L3 masquerade + GSO segmentation), then egress via the host NIC. ──
-    let tx_raise = if net_backend::take_tx_kick() {
-        dev.service_queues(1, gm)
-    } else {
-        false
-    };
+    // ── handle_tx: POLL the guest TX ring every pass — symmetric with RX (vhost
+    //    services both queues the same way), not only on the doorbell. A queued
+    //    ACK then egresses in the SAME warm loop iteration instead of waiting for
+    //    the doorbell→kick→service chain (the cold ACK latency = spurious TLP).
+    //    take_tx_kick just clears the doorbell so the halt-poll's tx_kick_pending
+    //    resets. service_queues is cheap when the ring is empty.
+    net_backend::take_tx_kick();
+    let tx_raise = dev.service_queues(1, gm);
     drop(dev);
 
     // Host-stack frames (outside the device lock).
