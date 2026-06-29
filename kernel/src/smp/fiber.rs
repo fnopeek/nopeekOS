@@ -381,6 +381,35 @@ pub fn kick_wait_until(deadline: u64) -> bool {
     woke
 }
 
+/// Halt-poll variant of `kick_wait_until` (the KVM `halt_poll_ns` model for the
+/// vCPU side): BEFORE parking, busy-poll this core's net-kick generation for
+/// `poll_us` µs. If a kick lands in that window (the worker injected RX + kicked),
+/// return immediately WITHOUT ever HLTing — the vCPU resumes in µs and processes
+/// the RX while warm, so the guest drains its receive buffer fast (window stays
+/// open) and ACKs promptly (no spurious TLP). Only when the poll budget expires
+/// with no kick do we fall to the HLT park (`kick_wait_until`) so a truly idle
+/// guest never burns the core. Caller gates on `recently_active` + a non-Core-0
+/// core (Core 0 owns the compositor — never spin it).
+pub fn kick_wait_until_polled(deadline: u64, poll_us: u64) -> bool {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return false;
+    }
+    let kgen = net_kick_gen(cid);
+    let freq = crate::interrupts::tsc_freq();
+    let poll_deadline = crate::interrupts::rdtsc()
+        + poll_us.saturating_mul((freq / 1_000_000).max(1));
+    while crate::interrupts::rdtsc() < poll_deadline {
+        if net_kick_gen(cid) != kgen {
+            KICK_WOKE.fetch_add(1, Ordering::Relaxed);
+            return true; // kicked → resume warm, no HLT
+        }
+        core::hint::spin_loop();
+    }
+    // No kick during the poll → HLT-park until the next kick or the timer deadline.
+    kick_wait_until(deadline)
+}
+
 /// Fresh-fiber entry: run the app's `(func, arg)`. On return the trampoline
 /// falls into `fiber_on_exit`.
 extern "C" fn fiber_app_entry(_unused: u64) {
