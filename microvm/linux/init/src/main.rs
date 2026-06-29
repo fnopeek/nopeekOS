@@ -320,22 +320,20 @@ fn launch_bench(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
-                 MB=$(sed -n 's/.*nopeekbench=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
-                 [ -z \"$MB\" ] && MB=1000; \
-                 BYTES=$((MB*1024*1024)); \
-                 echo \"<0>[netbench-vm] iface=$IFACE mb=$MB -- GET x3 then PUT x3\" > /dev/kmsg; \
-                 for i in 1 2 3; do \
+                 echo \"<0>[netbench-vm] iface=$IFACE -- GET sweep then PUT sweep (100/500/1000/2000 MB)\" > /dev/kmsg; \
+                 for SZ in 100 500 1000 2000; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
-                   wget -q -O /dev/null \"http://10.0.2.2/get?mb=$MB\" 2>/dev/null; \
+                   wget -q -O /dev/null \"http://10.0.2.2/get?mb=$SZ\" 2>/dev/null; \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
-                   echo \"<0>[netbench-vm] GET run $i: guest uptime $T0 -> $T1\" > /dev/kmsg; \
+                   echo \"<0>[netbench-vm] GET $SZ MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
                  done; \
-                 for i in 1 2 3; do \
+                 for SZ in 100 500 1000 2000; do \
+                   B=$((SZ*1024*1024)); \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
-                   { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: %d\\r\\nContent-Type: application/octet-stream\\r\\nConnection: close\\r\\n\\r\\n' \"$BYTES\"; \
-                     dd if=/dev/zero bs=1M count=$MB 2>/dev/null; } | nc 10.0.2.2 80; \
+                   { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: %d\\r\\nContent-Type: application/octet-stream\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
+                     dd if=/dev/zero bs=1M count=$SZ 2>/dev/null; } | nc 10.0.2.2 80; \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
-                   echo \"<0>[netbench-vm] PUT run $i: guest uptime $T0 -> $T1\" > /dev/kmsg; \
+                   echo \"<0>[netbench-vm] PUT $SZ MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
                  done; \
                  echo \"<0>[netbench-vm] done -- halting\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
