@@ -56,11 +56,16 @@ def tcp_info(sock):
     # retransmitted something that ARRIVED FINE = SPURIOUS (late ACK, not loss).
     # reord_seen = reordering events. So: retrans>0 + dsack_dups>0 → spurious
     # (ACK-timing); retrans>0 + lost>0 + dsack_dups==0 → real drops.
+    # snd_wnd = the window the PEER (guest) advertised to us = the guest's receive
+    # window. For a download (we are the sender) this is the rwnd cap on our
+    # flight. If it's small (< ~15 KB ≈ 10 MSS) the guest's receive window — not
+    # our cwnd — is the bottleneck, which fits cwnd being pinned at the initial 10.
     return dict(retransmits=u8(2), snd_mss=u32(16), sacked=u32(28), lost=u32(32),
                 rcv_ssthresh=u32(64), rtt=u32(68), rttvar=u32(72),
                 ssthresh=u32(76), cwnd=u32(80), advmss=u32(84), reordering=u32(88),
                 rcv_rtt=u32(92), rcv_space=u32(96), retrans=u32(100),
-                pacing=u64(104), dsack_dups=u32(216), reord_seen=u32(220))
+                pacing=u64(104), dsack_dups=u32(216), reord_seen=u32(220),
+                snd_wnd=u32(228), rcv_wnd=u32(232))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -83,6 +88,8 @@ class Handler(BaseHTTPRequestHandler):
         sent = 0
         peak_cwnd = 0
         min_cwnd = 1 << 30
+        min_sndwnd = 1 << 30
+        peak_sndwnd = 0
         next_sample = 16 * CHUNK
         try:
             while sent < total:
@@ -94,6 +101,8 @@ class Handler(BaseHTTPRequestHandler):
                     if ti:
                         peak_cwnd = max(peak_cwnd, ti["cwnd"])
                         min_cwnd = min(min_cwnd, ti["cwnd"])
+                        min_sndwnd = min(min_sndwnd, ti["snd_wnd"])
+                        peak_sndwnd = max(peak_sndwnd, ti["snd_wnd"])
                     next_sample += 16 * CHUNK
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -102,14 +111,16 @@ class Handler(BaseHTTPRequestHandler):
         ti = tcp_info(sock) or {}
         if min_cwnd == 1 << 30:
             min_cwnd = ti.get("cwnd", 0)
+        if min_sndwnd == 1 << 30:
+            min_sndwnd = ti.get("snd_wnd", 0)
         pacing_mbit = ti.get("pacing", 0) * 8 / 1e6
         print(f"[server] GET  served {sent//CHUNK} MB in {dt*1e3:.0f} ms "
               f"= {rate:.0f} Mbit/s | cwnd={ti.get('cwnd',0)} "
-              f"(min{min_cwnd}/peak{peak_cwnd}) ssthresh={ti.get('ssthresh',0)} "
+              f"(min{min_cwnd}/peak{peak_cwnd}) "
+              f"snd_wnd={ti.get('snd_wnd',0)} (min{min_sndwnd}/peak{peak_sndwnd}) "
+              f"ssthresh={ti.get('ssthresh',0)} "
               f"rtt={ti.get('rtt',0)}us retrans={ti.get('retrans',0)} "
-              f"rto={ti.get('retransmits',0)} lost={ti.get('lost',0)} "
-              f"dsack={ti.get('dsack_dups',0)} reord={ti.get('reord_seen',0)} "
-              f"pacing={pacing_mbit:.0f}Mbit")
+              f"dsack={ti.get('dsack_dups',0)} pacing={pacing_mbit:.0f}Mbit")
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
