@@ -499,9 +499,11 @@ run_qemu_generic() {
         # download burst that outruns a brief drain gap is absorbed instead of
         # dropped by QEMU/slirp (the dropped frames made the SERVER retransmit →
         # its cwnd collapsed → the download lottery). Pairs with RX_BUFFERS=1024.
+        # (tx_queue_size stays 256 — slirp/non-vhost caps TX at 256; download
+        # loss is RX-side anyway.)
         net_args=(
             -netdev user,id=net0
-            -device virtio-net-pci,netdev=net0,vectors=3,rx_queue_size=1024,tx_queue_size=1024
+            -device virtio-net-pci,netdev=net0,vectors=3,rx_queue_size=1024
         )
     fi
     echo ""
