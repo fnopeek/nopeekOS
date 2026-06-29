@@ -84,6 +84,7 @@ pub fn intent_cores() {
     }
     let vx0 = crate::microvm::cpu::vm_exit_snapshot();
     let io0 = crate::microvm::cpu::io_port_snapshot();
+    let wk0 = crate::microvm::devices::net_rx_worker::wake_snapshot();
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
@@ -111,6 +112,7 @@ pub fn intent_cores() {
     }
     let vx1 = crate::microvm::cpu::vm_exit_snapshot();
     let io1 = crate::microvm::cpu::io_port_snapshot();
+    let wk1 = crate::microvm::devices::net_rx_worker::wake_snapshot();
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -214,6 +216,18 @@ pub fn intent_cores() {
                 if d > 0 { kprint!(" {}={}", iolabels[i], d * 1000 / window_ms); }
             }
             kprintln!();
+        }
+        // Net RX worker wakeup attribution: irq = event-driven (host RX MSI-X
+        // woke it, ~µs); timeout = fell to the 2ms fallback (host IRQ did NOT
+        // fire → silent polling = the cold-start floor); polled = no MSI-X.
+        let (wi, wt, wp) = (
+            wk1.0.saturating_sub(wk0.0),
+            wk1.1.saturating_sub(wk0.1),
+            wk1.2.saturating_sub(wk0.2),
+        );
+        if wi + wt + wp > 0 {
+            kprintln!("    net worker wakes/s: irq={} timeout={} polled={}",
+                      wi * 1000 / window_ms, wt * 1000 / window_ms, wp * 1000 / window_ms);
         }
     }
     // Host-time breakdown: where the dedicated guest cores actually SPENT

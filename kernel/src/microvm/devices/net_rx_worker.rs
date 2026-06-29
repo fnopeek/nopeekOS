@@ -25,7 +25,22 @@
 //! POLLING guard protects). If the producer is stopped, the old BSP-drains path
 //! is restored unchanged.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Worker wakeup attribution: how the RX producer's park returned this window.
+/// irq = host RX MSI-X woke us (event-driven, µs); timeout = fell to the 2ms
+/// fallback (the host IRQ did NOT fire → silent ~3ms polling = the cold floor);
+/// polled = no MSI-X vector at all (100Hz yield_sleep). Surfaced in `cores`.
+static WAKE_IRQ: AtomicU64 = AtomicU64::new(0);
+static WAKE_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+static WAKE_POLLED: AtomicU64 = AtomicU64::new(0);
+
+/// (irq, timeout, polled) wake counts — double-sample for a per-second rate.
+pub fn wake_snapshot() -> (u64, u64, u64) {
+    (WAKE_IRQ.load(Ordering::Relaxed),
+     WAKE_TIMEOUT.load(Ordering::Relaxed),
+     WAKE_POLLED.load(Ordering::Relaxed))
+}
 
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -179,11 +194,18 @@ fn worker_entry(arg: u64) {
             super::nat::rx_producer_drain();
             full_consume(full);
             full_tx(full);
-            crate::smp::fiber::irq_wait(vec, since, 2);
+            // Diagnostic: did the host RX MSI-X wake us (event-driven, µs) or did
+            // we fall to the 2ms timeout (silent polling → the ~3ms cold floor)?
+            if crate::smp::fiber::irq_wait(vec, since, 2) {
+                WAKE_IRQ.fetch_add(1, Ordering::Relaxed);
+            } else {
+                WAKE_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+            }
         } else {
             // Polled NIC (no RX MSI-X): short sleep, still off the BSP core.
             full_consume(full);
             full_tx(full);
+            WAKE_POLLED.fetch_add(1, Ordering::Relaxed);
             crate::smp::fiber::yield_sleep(1);
         }
     }
