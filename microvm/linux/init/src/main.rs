@@ -351,9 +351,8 @@ fn launch_bench(kmsg_fd: i64) {
                  grep '^Tcp:' /proc/net/snmp; \
                  echo \"<0>[netbench-vm] --- named loss/reorder counters (netstat -s) ---\" > /dev/kmsg; \
                  netstat -s 2>/dev/null | grep -iE 'reorder|out.of.order|retrans|sack|lost|recover|prune|collaps|drop|fail|dupl'; \
-                 echo \"<0>[netbench-vm] --- TcpExt header+values (fallback) ---\" > /dev/kmsg; \
-                 grep '^TcpExt:' /proc/net/netstat | head -1; \
-                 grep '^TcpExt:' /proc/net/netstat | tail -1; \
+                 echo \"<0>[netbench-vm] --- named TcpExt counters (value > 100) ---\" > /dev/kmsg; \
+                 awk '/^TcpExt:/{if(!h){for(i=2;i<=NF;i++)n[i]=$i;h=1;next}for(i=2;i<=NF;i++)if($i+0>100)print n[i],$i}' /proc/net/netstat; \
                  echo \"<0>[netbench-vm] done -- halting\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
