@@ -332,6 +332,15 @@ fn net_kick_gen(cid: usize) -> u64 {
     if cid < MAX_CORES { NET_KICK_GEN[cid].load(Ordering::Acquire) } else { 0 }
 }
 
+/// kick_wait wakeup attribution: woke = a kick advanced the gen (event-driven,
+/// µs); timeout = fell to the 2ms fallback (no kick arrived → the cold floor).
+static KICK_WOKE: AtomicU64 = AtomicU64::new(0);
+static KICK_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+/// (woke, timeout) counts — double-sample for a rate.
+pub fn kick_wait_snapshot() -> (u64, u64) {
+    (KICK_WOKE.load(Ordering::Relaxed), KICK_TIMEOUT.load(Ordering::Relaxed))
+}
+
 /// Park the running fiber until this core's net-kick generation advances (an
 /// off-vCPU producer injected + kicked) or `timeout_ms` elapses. The snapshot
 /// is taken HERE, after the caller has drained its inbound queue, so a kick
@@ -356,7 +365,10 @@ pub fn kick_wait(timeout_ms: u64) -> bool {
         (*f).state = FiberState::WaitingKick { kgen, deadline };
         switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
     }
-    net_kick_gen(cid) != kgen
+    let woke = net_kick_gen(cid) != kgen;
+    if woke { KICK_WOKE.fetch_add(1, Ordering::Relaxed); }
+    else { KICK_TIMEOUT.fetch_add(1, Ordering::Relaxed); }
+    woke
 }
 
 /// Fresh-fiber entry: run the app's `(func, arg)`. On return the trampoline
