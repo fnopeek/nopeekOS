@@ -320,7 +320,14 @@ fn launch_bench(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
-                 echo \"<0>[netbench-vm] iface=$IFACE -- GET sweep then PUT sweep (100/500/1000/2000 MB)\" > /dev/kmsg; \
+                 echo \"<0>[netbench-vm] iface=$IFACE -- RTT idle, RTT loaded, then GET/PUT sweep\" > /dev/kmsg; \
+                 echo \"<0>[netbench-vm] === idle RTT (ping x20) ===\" > /dev/kmsg; \
+                 ping -c 20 10.0.2.2 2>&1 | tail -8; \
+                 echo \"<0>[netbench-vm] === loaded RTT (ping x30 during a 2000 MB download) ===\" > /dev/kmsg; \
+                 wget -q -O /dev/null \"http://10.0.2.2/get?mb=2000\" 2>/dev/null & \
+                 ping -c 30 10.0.2.2 2>&1 | tail -12; \
+                 wait; \
+                 echo \"<0>[netbench-vm] === throughput sweep ===\" > /dev/kmsg; \
                  for SZ in 100 500 1000 2000; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
                    wget -q -O /dev/null \"http://10.0.2.2/get?mb=$SZ\" 2>/dev/null; \
