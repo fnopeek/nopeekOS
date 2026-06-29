@@ -174,63 +174,68 @@ pub fn stop_worker() {
 }
 
 /// vhost `handle_rx` + `handle_tx` for the full off-vCPU path: one pass on this
-/// core, then wake the guest. Holds the device lock across the drain (the worker
-/// is the sole RX consumer + TX servicer; the vCPU's TX doorbell is a lock-free
-/// flag, and RX kicks are EVENT_IDX-suppressed, so it rarely contends).
+/// core, then wake the guest.
+///
+/// Lock discipline (the ACK-jitter fix): the host-NIC drain + L3 rewrite is the
+/// SLOW part (per-frame DMA copy + masquerade) and touches ONLY the host NIC +
+/// NAT — NOT the guest device — so it runs WITHOUT `net_backend` (POLLING guard
+/// only). The device mutex is then held for just the SHORT guest-ring critical
+/// section (inject + TX service). The vCPU spins on that same mutex for its
+/// per-IRQ ISR read, which sits on the guest's ACK/NAPI path; holding it across
+/// the whole drain (the old code) stalled ACK egress → spurious TLP. Keep it short.
 fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     use crate::microvm::devices::{nat, net_backend};
-    let mut dev = net_backend::lock();
 
-    // ── handle_rx: pull the NIC frame-by-frame, inject while the guest has RX
-    //    buffers, STOP when it doesn't (vhost backpressure → NIC ring fills →
-    //    sender flow-controls). No INBOUND_Q, no GRO, no synthetic drop. ──
-    let mut injected = false;
+    // ── Phase 1: drain the host NIC LOCK-FREE (POLLING guard only) and rewrite
+    //    each masqueraded frame into a staging Vec. No net_backend lock held, so
+    //    the vCPU's ISR-read / ACK MMIO exits never wait on this slow host I/O. ──
+    let mut rewritten: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
     let mut host_frames: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-    // Re-inject anything staged on a previous pass FIRST (oldest first → in order).
-    inject_stage(&mut dev, gm, &mut injected);
     if crate::net::try_acquire_drain() {
         let mut buf = [0u8; crate::drivers::virtio_net::MTU];
-        // Drain the host NIC COMPLETELY — never leave a frame in the NIC ring (it
-        // overflows → QEMU/slirp drops → server retransmits → cwnd collapse). If
-        // the guest ring is momentarily full, STAGE the frame (lossless) instead
-        // of dropping or leaving it in the NIC ring.
         while let Some(len) = crate::netdev::recv(&mut buf) {
             if len < 14 { continue; }
             let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
             if ethertype == crate::net::eth::ETHERTYPE_IPV4 {
                 if let Some(gframe) = nat::l3_rewrite_inbound(&buf[14..len]) {
-                    if dev.rx_avail_count(gm) > 0 && dev.inject_rx(gm, &gframe) {
-                        injected = true;
-                        nat::recycle_frame(gframe);
-                    } else {
-                        stage_push(gframe);
-                    }
+                    rewritten.push(gframe);
                     continue;
                 }
             }
-            // Not masqueraded guest traffic (ARP / host IPv4) — process on the
-            // host stack after we release the device + drain guards. Rare while a
-            // guest download is in flight.
+            // Not masqueraded guest traffic (ARP / host IPv4) — host stack, later.
             host_frames.push(buf[..len].to_vec());
         }
         crate::net::release_drain();
-        // Mark the NIC as drained up to here so the busy-poll's has_work() only
-        // fires on a genuinely NEW frame (used.idx moving past this point).
+        // Mark the NIC drained to here so has_work() only fires on a NEW frame.
         LAST_RX_USED.store(
             crate::drivers::virtio_net::rx_used_idx() as u32, Ordering::Relaxed);
     }
-    // vhost_signal (RX): raise IRQ10 only when used.idx crossed used_event.
-    let rx_raise = injected && dev.rx_should_interrupt(gm);
 
-    // ── handle_tx: POLL the guest TX ring every pass — symmetric with RX (vhost
-    //    services both queues the same way), not only on the doorbell. A queued
-    //    ACK then egresses in the SAME warm loop iteration instead of waiting for
-    //    the doorbell→kick→service chain (the cold ACK latency = spurious TLP).
-    //    take_tx_kick just clears the doorbell so the halt-poll's tx_kick_pending
-    //    resets. service_queues is cheap when the ring is empty.
-    net_backend::take_tx_kick();
-    let tx_raise = dev.service_queues(1, gm);
-    drop(dev);
+    // ── Phase 2: SHORT device-mutex section — guest-ring work only. Inject any
+    //    previously staged frames first (in order), then the freshly drained ones;
+    //    a frame the guest ring can't take is STAGED (lossless), never dropped /
+    //    left in the NIC ring. Then service the guest TX ring (symmetric with RX,
+    //    polled every pass). ──
+    let mut injected = false;
+    let (rx_raise, tx_raise) = {
+        let mut dev = net_backend::lock();
+        inject_stage(&mut dev, gm, &mut injected);
+        for gframe in rewritten {
+            if dev.rx_avail_count(gm) > 0 && dev.inject_rx(gm, &gframe) {
+                injected = true;
+                nat::recycle_frame(gframe);
+            } else {
+                stage_push(gframe);
+            }
+        }
+        // vhost_signal (RX): raise IRQ10 only when used.idx crossed used_event.
+        let rx_raise = injected && dev.rx_should_interrupt(gm);
+        // handle_tx: poll the guest TX ring every pass (take_tx_kick clears the
+        // doorbell so the halt-poll's tx_kick_pending resets). Cheap if empty.
+        net_backend::take_tx_kick();
+        let tx_raise = dev.service_queues(1, gm);
+        (rx_raise, tx_raise)
+    }; // device mutex released here — vCPU ACK exits no longer wait on the drain
 
     // Host-stack frames (outside the device lock).
     for f in &host_frames { crate::net::eth::handle_frame(f); }

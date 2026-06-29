@@ -109,6 +109,18 @@ pub fn lock() -> MutexGuard<'static, VirtioNet> {
     NET.lock()
 }
 
+/// LOCK-FREE BAR0 range check for the vCPU's NPF/EPT exit dispatch. Every non-blk
+/// MMIO exit used to take the device mutex JUST to range-check the gpa — which
+/// collided with the off-vCPU worker holding it (the ACK-jitter contention). The
+/// BAR is fixed at `BAR0_BASE` (Linux keeps it there; confirmed in the boot log),
+/// so the range test needs no lock. The mutex is taken only AFTER a hit, for the
+/// actual MMIO service.
+#[inline]
+pub fn bar0_in_range(gpa: u64) -> bool {
+    gpa >= super::virtio_net_dev::BAR0_BASE
+        && gpa < super::virtio_net_dev::BAR0_BASE + super::virtio_net_dev::BAR0_SIZE
+}
+
 /// Re-initialise to power-on state at VM open. The static outlives a single VM
 /// run, so this restores the per-VM-fresh state that `PciBus::new()` used to
 /// give the device when it lived inside the bus.
