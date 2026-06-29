@@ -84,7 +84,7 @@ pub fn intent_cores() {
     }
     let vx0 = crate::microvm::cpu::vm_exit_snapshot();
     let io0 = crate::microvm::cpu::io_port_snapshot();
-    let wk0 = crate::microvm::devices::net_rx_worker::wake_snapshot();
+    let wk0 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let dk0 = crate::microvm::devices::nat::decoupled_kick_count();
     let rf0 = crate::microvm::devices::nat::ringfull_kick_count();
@@ -117,7 +117,7 @@ pub fn intent_cores() {
     }
     let vx1 = crate::microvm::cpu::vm_exit_snapshot();
     let io1 = crate::microvm::cpu::io_port_snapshot();
-    let wk1 = crate::microvm::devices::net_rx_worker::wake_snapshot();
+    let wk1 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let dk1 = crate::microvm::devices::nat::decoupled_kick_count();
     let rf1 = crate::microvm::devices::nat::ringfull_kick_count();

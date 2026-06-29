@@ -961,7 +961,7 @@ impl VmContext {
         // guest_mem::active(); clear_active() below frees it, so the worker must
         // have stopped touching it. Bounded-waits for the fiber to exit;
         // idempotent (the teardown path calls it again).
-        crate::microvm::devices::net_rx_worker::stop_worker();
+        crate::microvm::devices::net_dataplane::stop_worker();
         // Persist the home image to npkFS BEFORE freeing. close() is
         // reached on EVERY teardown — crucially the Mod+Q window-close
         // path (VM_CLOSE_REQUESTED → break → close), where run_slice's
@@ -2578,7 +2578,7 @@ fn handle_mmio_npf_lapic(
 
 /// Kick the BSP (vCPU 0) out of VMRUN so it promptly folds the lock-free net-IRQ
 /// (raised by the off-vCPU RX backend on another core) into `pending_irqs` and
-/// injects IRQ10. Called from the `net_rx_worker` fiber after it injects RX into
+/// injects IRQ10. Called from the `net_dataplane` fiber after it injects RX into
 /// the guest. No-op if the BSP isn't mapped yet (early boot) — the BSP folds the
 /// signal on its next natural exit anyway.
 pub fn kick_bsp_net_irq() {

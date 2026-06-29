@@ -898,7 +898,7 @@ pub fn vm_poll_slice() {
 
     if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         if VM_RUN_STATE.load(Ordering::Acquire) == VM_EXITED {
-            crate::microvm::devices::net_rx_worker::stop_worker();
+            crate::microvm::devices::net_dataplane::stop_worker();
             crate::microvm::devices::p9_async::stop_worker();
             crate::microvm::devices::nat::reset_sessions();
             crate::microvm::cpu::rip_sample::reset();
@@ -925,7 +925,7 @@ pub fn vm_poll_slice() {
         }
         *slot = None;
         drop(slot); // release before teardown — it locks the compositor
-        crate::microvm::devices::net_rx_worker::stop_worker();
+        crate::microvm::devices::net_dataplane::stop_worker();
         crate::microvm::devices::p9_async::stop_worker();
         crate::microvm::devices::nat::reset_sessions();
         crate::microvm::cpu::rip_sample::reset();
@@ -957,7 +957,7 @@ pub fn vm_poll_slice() {
     }
     *slot = None;
     drop(slot); // release before teardown — it locks the compositor
-    crate::microvm::devices::net_rx_worker::stop_worker();
+    crate::microvm::devices::net_dataplane::stop_worker();
     crate::microvm::devices::p9_async::stop_worker();
     crate::microvm::devices::nat::reset_sessions();
     crate::microvm::cpu::rip_sample::reset();
@@ -1170,7 +1170,7 @@ fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
     // When the off-vCPU RX backend (or producer) owns the NIC drain, RX wakes us
     // via the net-kick generation — we must NOT arm/route the host RX IRQ here
     // (that would steal the worker's event-wake). Block on the unified deadline.
-    if crate::microvm::devices::net_rx_worker::active() {
+    if crate::microvm::devices::net_dataplane::active() {
         crate::smp::fiber::kick_wait_until(deadline);
         return;
     }
@@ -1235,7 +1235,7 @@ fn vcpu_fiber_task(_arg: u64) {
         "[microvm] net worker core {} (vCPUs={}, reserve={})",
         worker_core, guest_vcpus(), reserve_offload_core()
     );
-    crate::microvm::devices::net_rx_worker::start_worker(worker_core, full_backend);
+    crate::microvm::devices::net_dataplane::start_worker(worker_core, full_backend);
 
     match *VENDOR.lock() {
         Vendor::Amd => {
@@ -1377,7 +1377,7 @@ fn vcpu_fiber_task(_arg: u64) {
 
     // Stop the RX producer (also covers an open-FAILED path where vm_poll_slice
     // teardown might not run). Idempotent with the vm_poll_slice stop sites.
-    crate::microvm::devices::net_rx_worker::stop_worker();
+    crate::microvm::devices::net_dataplane::stop_worker();
 
     // Restore this core to the 100 Hz worker idle timer + the IF=0
     // park-loop invariant `smp_ap_entry` expects.

@@ -37,6 +37,24 @@ pub fn reset_poll_guard() {
     POLLING.store(false, Ordering::Release);
 }
 
+/// Acquire the single-consumer NIC-drain guard for the off-vCPU data plane
+/// (`net_dataplane`), which pulls host-NIC frames one at a time (`netdev::recv`)
+/// and decides per-frame whether to keep pulling — vhost-net backpressure: stop
+/// when the guest RX ring is full, so the NIC ring fills and the sender flow-
+/// controls, instead of a synthetic staging-queue drop. Returns false if Core 0
+/// is mid-`poll()`; the worker then skips this pass (Core 0 already skips the
+/// drain while the data plane is `active()`, so this is just the race backstop).
+pub fn try_acquire_drain() -> bool {
+    POLLING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// Release the guard taken by [`try_acquire_drain`].
+pub fn release_drain() {
+    POLLING.store(false, Ordering::Release);
+}
+
 // TEMP profiler: split poll_rx_only's per-call cost. TSC cycles in the netdev
 // drain (driver + virtio doorbells), the IP/TCP stack (handle_frame), tx_flush,
 // and poll_render — plus packets processed. Read+reset via take_poll_prof().
@@ -71,10 +89,10 @@ pub fn poll() {
     // fill + inject happen together, no race, no drops, throughput = pump rate.
     // Core 0 must not drain the host NIC while a microvm owns it: either the old
     // BSP-pump-as-sole-drainer mode (vm_active) OR the dedicated RX producer
-    // fiber (net_rx_worker::active). In both cases Core 0 would fill INBOUND_Q it
+    // fiber (net_dataplane::active). In both cases Core 0 would fill INBOUND_Q it
     // cannot inject, racing the real drainer and overflowing the queue.
     let skip_nic_drain = (crate::microvm::vm_active()
-        || crate::microvm::devices::net_rx_worker::active())
+        || crate::microvm::devices::net_dataplane::active())
         && crate::smp::per_core::current_core_id() == 0;
     if !skip_nic_drain
         && POLLING

@@ -935,7 +935,7 @@ impl VmContext {
     pub fn close(&mut self) {
         // Stop the off-vCPU net backend FIRST (it holds &'static GuestMem via
         // guest_mem::active(), freed by clear_active() below). Idempotent.
-        crate::microvm::devices::net_rx_worker::stop_worker();
+        crate::microvm::devices::net_dataplane::stop_worker();
         // Persist the home image BEFORE teardown — see the svm mirror:
         // the Mod+Q window-close path reaches close() without run_slice's
         // loop-end save(), so without this the profile is lost on close.

@@ -75,7 +75,7 @@ pub fn raise_irq() { NET_IRQ_PENDING.store(true, Ordering::Release); }
 pub fn take_irq() -> bool { NET_IRQ_PENDING.swap(false, Ordering::AcqRel) }
 
 /// Stage 2b master switch: the full off-vCPU RX backend. When on, the dedicated
-/// `net_rx_worker` fiber owns the RX data-plane (host-NIC drain + `inject_rx`)
+/// `net_dataplane` fiber owns the RX data-plane (host-NIC drain + `inject_rx`)
 /// on its own core, so the BSP vCPU does NO net RX work — it only folds the
 /// lock-free net-IRQ and is kicked to inject IRQ10. Frees the bottleneck core
 /// (the BSP was 2× the hottest vCPU under download: pump + GPU copy + guest RX

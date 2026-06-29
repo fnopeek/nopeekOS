@@ -1,0 +1,215 @@
+//! Off-vCPU virtio-net data plane for the microvm — the vhost-net model.
+//!
+//! Ported 1:1 from the in-kernel virtio-net DEVICE backend Linux runs:
+//!   * `drivers/vhost/net.c` — `handle_rx` / `handle_tx` (the worker pulls the
+//!     tap one frame at a time, copies into the guest ring while the guest has
+//!     RX buffers, and STOPS when it doesn't — real backpressure, no synthetic
+//!     staging queue).
+//!   * `drivers/vhost/vhost.c` — `vhost_add_used_and_signal` / `vhost_signal` /
+//!     `vhost_notify` (EVENT_IDX: raise the guest IRQ only when used.idx crosses
+//!     the driver's `used_event` threshold). Our `VirtioNet::inject_rx` +
+//!     `rx_should_interrupt` implement that decision.
+//!   * `virt/kvm/eventfd.c` — irqfd: RX-ready → IRQ inject + vCPU wake in one.
+//!     Here: `raise_irq()` (folds IRQ10) + `kick_bsp_net_irq()` (wakes the
+//!     parked vCPU fiber).
+//!
+//! Why off-vCPU: the whole RX+TX data plane runs on ONE dedicated core (this
+//! fiber), so the vCPUs only ring the TX doorbell (a lock-free flag) and reap
+//! their IRQ. The vCPU is never the NIC drainer, so it can't serialize the
+//! producer behind the consumer. This REPLACES the hand-rolled surrogate
+//! (`INBOUND_Q` staging queue + custom GRO + `drain_inbound`): RX now flows
+//! host-NIC → `l3_rewrite_inbound` (address translation only) → guest ring,
+//! with NIC-ring backpressure instead of a lossy 1024-deep middle queue.
+//!
+//! Two modes:
+//!   * `full` (the AMD/off-vCPU path): this fiber owns RX **and** TX — the vhost
+//!     model above. The vCPU does no net work beyond the TX doorbell + IRQ reap.
+//!   * producer-only (`!full`, a POLLED bare-metal NIC with no RX MSI-X): the
+//!     legacy path — drain the NIC into the BSP-consumed staging queue
+//!     (`nat::rx_producer_drain`), because that NIC needs an independent drainer
+//!     but the off-vCPU inject/IRQ-fold is SVM-only today. Migrated to the full
+//!     vhost path when VMX mirrors the BSP-kick.
+
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Worker wakeup attribution (surfaced in `cores`): irq = host RX MSI-X woke us
+/// (event-driven, µs); timeout = fell to the safety park; polled = no MSI-X
+/// vector (yield_sleep). The 4th slot (`spin`) is retained at 0 for the `cores`
+/// tuple shape.
+static WAKE_IRQ: AtomicU64 = AtomicU64::new(0);
+static WAKE_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+static WAKE_POLLED: AtomicU64 = AtomicU64::new(0);
+
+/// (irq, timeout, polled, spin) — double-sample for a per-second rate.
+pub fn wake_snapshot() -> (u64, u64, u64, u64) {
+    (WAKE_IRQ.load(Ordering::Relaxed),
+     WAKE_TIMEOUT.load(Ordering::Relaxed),
+     WAKE_POLLED.load(Ordering::Relaxed),
+     0)
+}
+
+static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
+static STOP: AtomicBool = AtomicBool::new(false);
+/// True between start_worker and stop_worker. Core 0's `net::poll()` yields the
+/// NIC drain to this fiber while it's set.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// True while the data-plane fiber owns the host NIC drain.
+pub fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
+
+/// Producer stack: `netdev::recv` → `l3_rewrite_inbound` (rewrite + checksums) →
+/// `inject_rx` (guest-memory writes) is a deep chain; the default 128 KiB fiber
+/// stack has no guard page. 512 KiB is generous headroom.
+const WORKER_STACK_BYTES: usize = 512 * 1024;
+
+/// Event-park safety cap (ms). The real wake is the host NIC RX IRQ (routed to
+/// this core) or the TX doorbell (`note_tx_kick` bumps the RX vector's fired
+/// count + IPIs this core). This only bounds a quiet link so a held state still
+/// re-checks — kept short because the wake is reliably event-driven.
+const PARK_SAFETY_MS: u64 = 2;
+
+/// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
+/// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
+/// On a `!full` IRQ-driven NIC the BSP keeps the ring drained itself, so the
+/// fiber is a NO-OP there; it runs `!full` only for a POLLED NIC that needs an
+/// independent drainer.
+pub fn start_worker(core: usize, full: bool) {
+    if !full && crate::drivers::virtio_net::rx_irq_vector() != 0 { return; }
+    if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
+    STOP.store(false, Ordering::Release);
+    crate::smp::fiber::admit_with_stack(core, worker_entry, full as u64, WORKER_STACK_BYTES);
+}
+
+/// Stop the fiber at VM teardown and wait (bounded) for it to exit so the host's
+/// own networking reclaims the NIC drain.
+pub fn stop_worker() {
+    if !WORKER_RUNNING.load(Ordering::Acquire) { return; }
+    ACTIVE.store(false, Ordering::Release);
+    crate::microvm::devices::net_backend::set_full_active(false);
+    STOP.store(true, Ordering::Release);
+    for _ in 0..50_000_000u64 {
+        if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
+        core::hint::spin_loop();
+    }
+}
+
+/// vhost `handle_rx` + `handle_tx` for the full off-vCPU path: one pass on this
+/// core, then wake the guest. Holds the device lock across the drain (the worker
+/// is the sole RX consumer + TX servicer; the vCPU's TX doorbell is a lock-free
+/// flag, and RX kicks are EVENT_IDX-suppressed, so it rarely contends).
+fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
+    use crate::microvm::devices::{nat, net_backend};
+    let mut dev = net_backend::lock();
+
+    // ── handle_rx: pull the NIC frame-by-frame, inject while the guest has RX
+    //    buffers, STOP when it doesn't (vhost backpressure → NIC ring fills →
+    //    sender flow-controls). No INBOUND_Q, no GRO, no synthetic drop. ──
+    let mut injected = false;
+    let mut host_frames: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+    if crate::net::try_acquire_drain() {
+        let mut buf = [0u8; crate::drivers::virtio_net::MTU];
+        loop {
+            // Backpressure: don't read the NIC if the guest can't take a frame.
+            if dev.rx_avail_count(gm) == 0 { break; }
+            let len = match crate::netdev::recv(&mut buf) { Some(l) => l, None => break };
+            if len < 14 { continue; }
+            let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
+            if ethertype == crate::net::eth::ETHERTYPE_IPV4 {
+                if let Some(gframe) = nat::l3_rewrite_inbound(&buf[14..len]) {
+                    if dev.inject_rx(gm, &gframe) { injected = true; }
+                    nat::recycle_frame(gframe);
+                    continue;
+                }
+            }
+            // Not masqueraded guest traffic (ARP / host IPv4) — process on the
+            // host stack after we release the device + drain guards. Rare while a
+            // guest download is in flight.
+            host_frames.push(buf[..len].to_vec());
+        }
+        crate::net::release_drain();
+    }
+    // vhost_signal (RX): raise IRQ10 only when used.idx crossed used_event.
+    let rx_raise = injected && dev.rx_should_interrupt(gm);
+
+    // ── handle_tx: service the guest TX ring on the doorbell (process_tx does the
+    //    L3 masquerade + GSO segmentation), then egress via the host NIC. ──
+    let tx_raise = if net_backend::take_tx_kick() {
+        dev.service_queues(1, gm)
+    } else {
+        false
+    };
+    drop(dev);
+
+    // Host-stack frames (outside the device lock).
+    for f in &host_frames { crate::net::eth::handle_frame(f); }
+    // Flush any guest TX / host egress queued into the host NIC TX ring.
+    crate::virtio_net::tx_flush();
+
+    // irqfd: wake the guest. Raise IRQ10 when EVENT_IDX says so; otherwise still
+    // kick the vCPU scheduler so a parked vCPU NAPI-polls the non-empty ring (a
+    // parked vCPU can't poll on its own).
+    if rx_raise || tx_raise {
+        net_backend::raise_irq();
+        crate::microvm::cpu::svm::kick_bsp_net_irq();
+    } else if injected {
+        crate::microvm::cpu::svm::kick_bsp_net_irq();
+    }
+}
+
+fn worker_entry(arg: u64) {
+    let full = arg != 0;
+    ACTIVE.store(true, Ordering::Release);
+    if full {
+        crate::microvm::devices::net_backend::set_worker_core(
+            crate::smp::per_core::current_core_id());
+        crate::microvm::devices::net_backend::set_full_active(true);
+    }
+    let mut last_tick = crate::interrupts::ticks();
+    loop {
+        if STOP.load(Ordering::Acquire) {
+            WORKER_RUNNING.store(false, Ordering::Release);
+            return;
+        }
+
+        if full {
+            if let Some(gm) = crate::microvm::devices::guest_mem::active() {
+                service_full(gm);
+            }
+        } else {
+            // Producer-only (polled NIC): legacy staging-queue drain; BSP injects.
+            crate::microvm::devices::nat::rx_producer_drain();
+        }
+
+        // Host-originated TCP timers (OTA/https) at most ~100 Hz — never per-wake.
+        let now = crate::interrupts::ticks();
+        if now != last_tick {
+            crate::net::tcp::tick_connections();
+            last_tick = now;
+        }
+
+        // Park EVENT-DRIVEN on the host NIC RX IRQ (routed to this core). Arm
+        // AFTER the drain, then drain once more, so a frame that arrived in the
+        // arming window already advanced the fired count → irq_wait returns at
+        // once (no lost wakeup). The TX doorbell also wakes us: `note_tx_kick`
+        // bumps this vector's fired count + IPIs this core.
+        let vec = crate::drivers::virtio_net::rx_irq_vector();
+        if vec != 0 {
+            let since = crate::irq::arm(vec);
+            if full {
+                if let Some(gm) = crate::microvm::devices::guest_mem::active() {
+                    service_full(gm);
+                }
+            } else {
+                crate::microvm::devices::nat::rx_producer_drain();
+            }
+            if crate::smp::fiber::irq_wait(vec, since, PARK_SAFETY_MS) {
+                WAKE_IRQ.fetch_add(1, Ordering::Relaxed);
+            } else {
+                WAKE_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            WAKE_POLLED.fetch_add(1, Ordering::Relaxed);
+            crate::smp::fiber::yield_sleep(1);
+        }
+    }
+}
