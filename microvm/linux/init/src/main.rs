@@ -323,6 +323,10 @@ fn launch_bench(kmsg_fd: i64) {
                  echo \"<0>[netbench-vm] cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null) hystart_before=$(cat /sys/module/tcp_cubic/parameters/hystart 2>/dev/null)\" > /dev/kmsg; \
                  echo 0 > /sys/module/tcp_cubic/parameters/hystart 2>/dev/null; \
                  echo \"<0>[netbench-vm] HyStart DISABLED (hystart=$(cat /sys/module/tcp_cubic/parameters/hystart 2>/dev/null)) -- lottery test\" > /dev/kmsg; \
+                 echo 0 > /proc/sys/net/ipv4/tcp_moderate_rcvbuf 2>/dev/null; \
+                 echo '4096 8388608 16777216' > /proc/sys/net/ipv4/tcp_rmem 2>/dev/null; \
+                 echo '4096 8388608 16777216' > /proc/sys/net/ipv4/tcp_wmem 2>/dev/null; \
+                 echo \"<0>[netbench-vm] rcvbuf autotune OFF, tcp_rmem/wmem pinned 8MB -- rwnd test\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] iface=$IFACE -- RTT idle, RTT loaded, then GET/PUT sweep\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] === idle RTT (ping x20) ===\" > /dev/kmsg; \
                  ping -c 20 10.0.2.2 2>&1 | tail -8; \
