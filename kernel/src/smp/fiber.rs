@@ -347,6 +347,18 @@ pub fn kick_wait_snapshot() -> (u64, u64) {
 /// racing the park is never lost (it advances the gen past the snapshot →
 /// resumes at once). Returns true if kicked, false on timeout / not-in-fiber.
 pub fn kick_wait(timeout_ms: u64) -> bool {
+    let freq = crate::interrupts::tsc_freq();
+    let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
+    kick_wait_until(deadline)
+}
+
+/// Park the running fiber until this core's net-kick generation advances (an
+/// off-vCPU producer / IPI kicked us) or absolute host TSC `deadline` passes.
+/// The deadline variant is the vCPU-park form: the caller passes the guest's
+/// next LAPIC-timer deadline (`LocalApic::next_timer_deadline_tsc`), so the park
+/// ends exactly at the guest's own 1 kHz tick — the KVM hrtimer model — instead
+/// of a magic fixed timeout. Returns true if a kick woke us, false on deadline.
+pub fn kick_wait_until(deadline: u64) -> bool {
     let cid = crate::smp::per_core::current_core_id();
     if cid >= MAX_CORES {
         return false;
@@ -357,8 +369,6 @@ pub fn kick_wait(timeout_ms: u64) -> bool {
         return false;
     }
     let kgen = net_kick_gen(cid);
-    let freq = crate::interrupts::tsc_freq();
-    let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
     // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Park it,
     // switch to the scheduler; resumes when the gen advances or the deadline passes.
     unsafe {

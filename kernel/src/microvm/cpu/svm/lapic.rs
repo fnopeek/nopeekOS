@@ -304,6 +304,43 @@ impl LocalApic {
         self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0 || !self.timer_fired
     }
 
+    /// Absolute host TSC at which the guest's LVTT will NEXT fire — the
+    /// hrtimer deadline in KVM's `start_sw_timer`/`apic_timer_fn` model. The
+    /// vCPU fiber parks until this instant (or an RX/TX/IPI kick), so the guest
+    /// 1 kHz clock advances at its programmed rate INDEPENDENT of VMRUN, instead
+    /// of being polled only while in VMRUN (the frozen-clock symptom). `None`
+    /// when no timer is armed (LAPIC software-disabled, LVTT masked, TMICT=0, or
+    /// a one-shot that has already fired) → the caller parks on the safety cap.
+    /// Honours the same ~1 kHz `min_gap` rate-cap as `timer_due`, so the returned
+    /// deadline is never earlier than the next legal delivery.
+    pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
+        let tmict = self.regs[idx(APIC_TMICT)];
+        if !self.enabled() || self.regs[idx(APIC_LVTT)] & LVT_MASKED != 0 || tmict == 0 {
+            return None;
+        }
+        let period = (tmict as u64) * self.divide_count();
+        if period == 0 {
+            return None;
+        }
+        let now = rdtsc();
+        let min_gap = (crate::interrupts::tsc_freq() / 1000).max(1);
+        let gap_floor = self.last_fire_tsc.wrapping_add(min_gap);
+        let periodic = self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0;
+        let elapsed = now.saturating_sub(self.timer_start_tsc);
+        let boundary = if periodic {
+            if elapsed >= period {
+                now // overdue: fires now (subject to the gap floor)
+            } else {
+                self.timer_start_tsc.wrapping_add(period)
+            }
+        } else if self.timer_fired {
+            return None; // one-shot already delivered, no further tick
+        } else {
+            self.timer_start_tsc.wrapping_add(period)
+        };
+        Some(boundary.max(gap_floor))
+    }
+
     pub fn timer_tick_vector(&self) -> Option<u8> {
         let lvtt = self.regs[idx(APIC_LVTT)];
         if self.enabled() && lvtt & LVT_MASKED == 0 && self.regs[idx(APIC_TMICT)] != 0 {
