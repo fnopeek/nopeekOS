@@ -1425,6 +1425,12 @@ static NS_PRODUCER_DRAINS: AtomicU64 = AtomicU64::new(0);
 /// the old ~100/s (our wall-clock pacing). Incremented from the SVM inject path.
 static NS_GTIMER: AtomicU64 = AtomicU64::new(0);
 pub fn note_guest_timer() { NS_GTIMER.fetch_add(1, AtOrd::Relaxed); }
+/// Cumulative guest timer-IRQ injections (LVTT+PIT). Surfaced in `cores` to
+/// MEASURE the effective guest HZ: ~1000/s = the guest's programmed 1 kHz tick
+/// is delivered; <1000/s = the BSP's 2ms parks are freezing the guest timer
+/// (floor b) → the guest's delayed-ACK/RTO/pacing slow → the slow download
+/// regime. Tests the "1000 vs 100, mal gut mal schlecht" hypothesis directly.
+pub fn guest_timer_count() -> u64 { NS_GTIMER.load(AtOrd::Relaxed) }
 /// Count of net-RX IRQ10 actually raised to the guest (after ITR moderation).
 /// vs the per-packet rate it would be without — the io-EOI-storm signal.
 static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);
@@ -1449,6 +1455,18 @@ pub fn decoupled_kick_count() -> u64 { NS_KICK_DECOUPLED.load(AtOrd::Relaxed) }
 static NS_KICK_RINGFULL: AtomicU64 = AtomicU64::new(0);
 pub fn note_ringfull_kick() { NS_KICK_RINGFULL.fetch_add(1, AtOrd::Relaxed); }
 pub fn ringfull_kick_count() -> u64 { NS_KICK_RINGFULL.load(AtOrd::Relaxed) }
+
+/// Bridge RX-backpressure health for `cores`, to find the SLOW-regime root:
+/// (drops, inject_false, rxlat_max_tsc). drops = INBOUND_Q overflow drops — the
+/// guest can't drain fast enough so RX is dropped → the SERVER retransmits +
+/// collapses cwnd → the slow download regime. inject_false = guest RX ring full.
+/// rxlat_max = worst staging latency (TSC ticks). Cumulative per VM run. If drops
+/// climb during a slow GET, the lottery is server-cwnd-collapse from our drops.
+pub fn rx_health_snapshot() -> (u64, u64, u64) {
+    (NS_DROPS.load(AtOrd::Relaxed),
+     NS_INJECT_FALSE.load(AtOrd::Relaxed),
+     NS_RXLAT_MAX.load(AtOrd::Relaxed))
+}
 /// virtio-gpu TRANSFER_TO_HOST pixel bytes copied on the vCPU core (the browser
 /// rendering). If high during a download, the framebuffer copy is stealing vCPU
 /// cycles from the net pump (the framebuffer↔pump contention) — Florian's

@@ -73,6 +73,11 @@ const WORKER_STACK_BYTES: usize = 512 * 1024;
 /// fix, not a regression. See project_browser_net_perf / project_microvm_rx_gro.
 const ENABLED: bool = true;
 
+/// Active-download inline-spin experiment (Lever 1). DISABLED: HW-measured
+/// net-negative (see the gated branch in worker_entry). Flip to retest only
+/// after the upstream INBOUND_Q-drop bottleneck is understood.
+const SPIN_DURING_DOWNLOAD: bool = false;
+
 /// Spawn the RX producer on `core` (load-aware, never Core 0). Idempotent within
 /// a VM session. NO-OP on an IRQ-driven NIC (the BSP keeps the ring drained there
 /// and the handoff only adds RTT); runs ONLY when the host NIC is polled.
@@ -219,7 +224,13 @@ fn worker_entry(arg: u64) {
             // the compositor/Core 0 — unlike the reverted BSP-core spin). When RX
             // goes quiet (>50ms, recently_active=false) we fall through to the
             // event-park below so an idle worker never burns the core.
-            if full && super::nat::recently_active() {
+            // DISABLED (v0.226.44): HW-measured net-NEGATIVE. The 100% spin on the
+            // reserved core hammered the NIC + net_backend locks ~290k/s and
+            // SLOWED a fast GET (909→597) while the slow regime persisted
+            // (kick_wait timeout stayed ~330) — proving worker-park latency is NOT
+            // the download bottleneck. Kept behind a flag to retest; the real
+            // bottleneck is upstream (INBOUND_Q drops / window), now being measured.
+            if SPIN_DURING_DOWNLOAD && full && super::nat::recently_active() {
                 WAKE_SPIN.fetch_add(1, Ordering::Relaxed);
                 crate::smp::fiber::yield_ready();
                 continue;
