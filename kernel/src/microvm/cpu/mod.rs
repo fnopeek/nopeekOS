@@ -1177,19 +1177,12 @@ fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
     // via the net-kick generation — we must NOT arm/route the host RX IRQ here
     // (that would steal the worker's event-wake). Block on the unified deadline.
     if crate::microvm::devices::net_dataplane::active() {
-        // vCPU-side halt-poll (the symmetric counterpart to the worker's): during
-        // an active transfer keep the GUEST vCPU warm so it processes injected RX
-        // in µs (drains its receive buffer → window stays open, ACKs prompt) instead
-        // of HLTing and eating the park/wake latency that is the cold ~3 ms bridge
-        // RTT (the same RTT seen on an idle local ping — absurd for a local path).
-        // Gated to a non-Core-0 core (Core 0 owns the compositor — never spin it).
-        if crate::microvm::devices::nat::recently_active()
-            && crate::smp::per_core::current_core_id() != 0
-        {
-            crate::smp::fiber::kick_wait_until_polled(deadline, VCPU_HALT_POLL_US);
-        } else {
-            crate::smp::fiber::kick_wait_until(deadline);
-        }
+        // The off-vCPU worker injects RX + kicks this fiber. A vCPU-side halt-poll
+        // (busy-spin before HLT) was REVERTED: it pegged the BSP core at 100% and
+        // pushed guest HLT exits to ~76k/s with NO throughput gain — the guest
+        // idles waiting for data (cwnd=10 server-limited), it is not CPU-bound, so
+        // keeping it warm buys nothing. Event-driven park (kick or timer deadline).
+        crate::smp::fiber::kick_wait_until(deadline);
         return;
     }
 
