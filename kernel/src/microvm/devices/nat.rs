@@ -185,6 +185,14 @@ pub fn recently_active() -> bool {
     now.wrapping_sub(NS_LAST_ACTIVITY.load(AtOrd::Relaxed)) < window
 }
 
+/// Mark the data plane active NOW (a frame moved RX or TX). The off-vCPU
+/// `net_dataplane` worker calls this each pass it does real work, so
+/// `recently_active()` gates its halt-poll (the legacy `drain_inbound` that used
+/// to set this isn't on the full-mode path).
+pub fn mark_active() {
+    NS_LAST_ACTIVITY.store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
+}
+
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
 /// ephemeral range (49152..=65534, net/tcp.rs) so a guest flow can
 /// never alias a host-originated connection (OTA `update`, `https`).

@@ -58,6 +58,10 @@ pub fn note_tx_kick() {
 /// Worker: take the TX-kick doorbell (clears it). True ⇒ run service_tx.
 pub fn take_tx_kick() -> bool { TX_KICK.swap(false, Ordering::AcqRel) }
 
+/// Lock-free peek (does NOT clear): is a guest TX kick pending? Used by the
+/// data-plane busy-poll so a queued ACK is egressed without HLTing first.
+pub fn tx_kick_pending() -> bool { TX_KICK.load(Ordering::Acquire) }
+
 /// Guest RX/TX IRQ (IRQ10) raised by the net pump, which now runs OUTSIDE
 /// `VM_BIG_LOCK` (it no longer touches `VmShared`). The BSP folds this into its
 /// `pending_irqs` at a safe injection point. A lock-free atomic instead of

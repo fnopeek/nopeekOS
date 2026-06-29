@@ -30,9 +30,28 @@
 //!     but the off-vCPU inject/IRQ-fold is SVM-only today. Migrated to the full
 //!     vhost path when VMX mirrors the BSP-kick.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use alloc::collections::VecDeque;
 use spin::Mutex;
+
+/// Lock-free RX_STAGE depth + last-drained host-NIC RX used.idx, so the busy-poll
+/// can test "is there RX/ACK work?" without taking any lock (the cheap condition
+/// that keeps it from being the reverted lock-hammer spin).
+static RX_STAGE_LEN: AtomicUsize = AtomicUsize::new(0);
+static LAST_RX_USED: AtomicU32 = AtomicU32::new(0);
+
+/// True iff there is RX or TX work to service RIGHT NOW — a fresh host-NIC RX
+/// frame (used.idx moved past what we last drained) or a queued ACK (TX kick).
+/// Lock-free. Deliberately does NOT include the RX stage: a stage that can't
+/// drain because the guest ring is full must NOT busy-spin (the guest frees
+/// buffers asynchronously; the next real RX/TX event drains the stage). The
+/// `RX_STAGE_LEN` counter is kept for diagnostics / future use.
+#[inline]
+fn has_work() -> bool {
+    let _ = RX_STAGE_LEN.load(Ordering::Relaxed);
+    crate::drivers::virtio_net::rx_used_idx() as u32 != LAST_RX_USED.load(Ordering::Relaxed)
+        || crate::microvm::devices::net_backend::tx_kick_pending()
+}
 
 /// Worker-local RX overflow stage. The host NIC RX ring MUST be kept empty every
 /// pass — leaving frames in it lets it overflow → QEMU/slirp drops → the server
@@ -56,6 +75,7 @@ fn stage_push(frame: alloc::vec::Vec<u8>) {
         }
     }
     s.push_back(frame);
+    RX_STAGE_LEN.store(s.len(), Ordering::Relaxed);
 }
 
 /// Re-inject staged frames (oldest first) while the guest ring has room.
@@ -70,6 +90,7 @@ fn inject_stage(
         if dev.inject_rx(gm, &f) { *injected = true; }
         crate::microvm::devices::nat::recycle_frame(f);
     }
+    RX_STAGE_LEN.store(s.len(), Ordering::Relaxed);
 }
 
 /// Drop the RX stage at VM teardown so a stale frame can't leak into the next run.
@@ -78,6 +99,7 @@ pub fn reset_stage() {
     while let Some(f) = s.pop_front() {
         crate::microvm::devices::nat::recycle_frame(f);
     }
+    RX_STAGE_LEN.store(0, Ordering::Relaxed);
 }
 
 /// Worker wakeup attribution (surfaced in `cores`): irq = host RX MSI-X woke us
@@ -87,13 +109,16 @@ pub fn reset_stage() {
 static WAKE_IRQ: AtomicU64 = AtomicU64::new(0);
 static WAKE_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 static WAKE_POLLED: AtomicU64 = AtomicU64::new(0);
+/// busy = the halt-poll caught work and stayed warm (no HLT). High during an
+/// active transfer = the RX→ACK loop is running hot → ACKs prompt → no TLP.
+static WAKE_BUSY: AtomicU64 = AtomicU64::new(0);
 
-/// (irq, timeout, polled, spin) — double-sample for a per-second rate.
+/// (irq, timeout, polled, busy) — double-sample for a per-second rate.
 pub fn wake_snapshot() -> (u64, u64, u64, u64) {
     (WAKE_IRQ.load(Ordering::Relaxed),
      WAKE_TIMEOUT.load(Ordering::Relaxed),
      WAKE_POLLED.load(Ordering::Relaxed),
-     0)
+     WAKE_BUSY.load(Ordering::Relaxed))
 }
 
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -115,6 +140,12 @@ const WORKER_STACK_BYTES: usize = 512 * 1024;
 /// count + IPIs this core). This only bounds a quiet link so a held state still
 /// re-checks — kept short because the wake is reliably event-driven.
 const PARK_SAFETY_MS: u64 = 2;
+
+/// Halt-poll budget (µs) during an active transfer before falling to the HLT
+/// park — the KVM `halt_poll_ns` analogue. ~1 ms bridges the natural inter-burst
+/// gap so an ACK never waits long enough to trip the server's Tail-Loss-Probe
+/// (~2×SRTT). Only spent while `recently_active`, on the reserved worker core.
+const BUSY_POLL_US: u64 = 1000;
 
 /// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
 /// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
@@ -183,6 +214,10 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
             host_frames.push(buf[..len].to_vec());
         }
         crate::net::release_drain();
+        // Mark the NIC as drained up to here so the busy-poll's has_work() only
+        // fires on a genuinely NEW frame (used.idx moving past this point).
+        LAST_RX_USED.store(
+            crate::drivers::virtio_net::rx_used_idx() as u32, Ordering::Relaxed);
     }
     // vhost_signal (RX): raise IRQ10 only when used.idx crossed used_event.
     let rx_raise = injected && dev.rx_should_interrupt(gm);
@@ -200,6 +235,12 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     for f in &host_frames { crate::net::eth::handle_frame(f); }
     // Flush any guest TX / host egress queued into the host NIC TX ring.
     crate::virtio_net::tx_flush();
+
+    // Mark the data plane active so the worker's halt-poll (recently_active)
+    // stays warm through this transfer — RX in or an ACK out both count.
+    if injected || tx_raise {
+        nat::mark_active();
+    }
 
     // irqfd: wake the guest. Raise IRQ10 when EVENT_IDX says so; otherwise still
     // kick the vCPU scheduler so a parked vCPU NAPI-polls the non-empty ring (a
@@ -241,6 +282,34 @@ fn worker_entry(arg: u64) {
         if now != last_tick {
             crate::net::tcp::tick_connections();
             last_tick = now;
+        }
+
+        // HALT-POLL (KVM/NAPI busy-poll, the Linux model): during an ACTIVE
+        // transfer, stay WARM instead of HLTing between bursts. The RX→ACK loop
+        // (worker injects RX → guest ACKs → worker egresses the ACK) must not hit
+        // the ~1 ms HLT/timer granularity: a delayed ACK makes the server fire a
+        // Tail-Loss-Probe → SPURIOUS retransmit (measured: dsack==retrans, lost=0)
+        // → its cwnd/pacing get confused → throughput collapses (the lottery). So
+        // busy-poll the LOCK-FREE has_work() condition for up to BUSY_POLL_US; the
+        // instant RX arrives or an ACK is queued, loop and service it in µs. This
+        // is NOT the reverted lock-hammer spin — between events it only reads two
+        // atomics + cpu_relax, never the device lock. Reserved worker core +
+        // gated on recently_active (idle → HLT at once, no core-burn).
+        if full && crate::microvm::devices::nat::recently_active() {
+            let freq = crate::interrupts::tsc_freq();
+            let deadline = crate::interrupts::rdtsc()
+                + BUSY_POLL_US.saturating_mul((freq / 1_000_000).max(1));
+            let mut got = false;
+            while crate::interrupts::rdtsc() < deadline {
+                if has_work() { got = true; break; }
+                core::hint::spin_loop();
+            }
+            if got {
+                WAKE_BUSY.fetch_add(1, Ordering::Relaxed);
+                continue; // stay warm — service the work on the next loop pass
+            }
+            // Budget exhausted with no work → the transfer paused; fall through
+            // to the event-park (HLT) so an idle worker never burns the core.
         }
 
         // Park EVENT-DRIVEN on the host NIC RX IRQ (routed to this core). Arm
