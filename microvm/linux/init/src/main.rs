@@ -320,40 +320,23 @@ fn launch_bench(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
-                 echo \"<0>[netbench-vm] cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null) hystart_before=$(cat /sys/module/tcp_cubic/parameters/hystart 2>/dev/null)\" > /dev/kmsg; \
-                 echo 0 > /sys/module/tcp_cubic/parameters/hystart 2>/dev/null; \
-                 echo \"<0>[netbench-vm] HyStart DISABLED (hystart=$(cat /sys/module/tcp_cubic/parameters/hystart 2>/dev/null)) -- lottery test\" > /dev/kmsg; \
-                 echo 0 > /proc/sys/net/ipv4/tcp_moderate_rcvbuf 2>/dev/null; \
-                 echo '4096 8388608 16777216' > /proc/sys/net/ipv4/tcp_rmem 2>/dev/null; \
-                 echo '4096 8388608 16777216' > /proc/sys/net/ipv4/tcp_wmem 2>/dev/null; \
-                 echo \"<0>[netbench-vm] rcvbuf autotune OFF, tcp_rmem/wmem pinned 8MB -- rwnd test\" > /dev/kmsg; \
-                 echo \"<0>[netbench-vm] iface=$IFACE -- RTT idle, RTT loaded, then GET/PUT sweep\" > /dev/kmsg; \
-                 echo \"<0>[netbench-vm] === idle RTT (ping x20) ===\" > /dev/kmsg; \
-                 ping -c 20 10.0.2.2 2>&1 | tail -8; \
-                 echo \"<0>[netbench-vm] === loaded RTT (ping x30 during a 2000 MB download) ===\" > /dev/kmsg; \
-                 wget -q -O /dev/null \"http://10.0.2.2/get?mb=2000\" 2>/dev/null & \
-                 ping -c 30 10.0.2.2 2>&1 | tail -12; \
-                 wait; \
-                 echo \"<0>[netbench-vm] === upload socket state (ss -ti mid 500 MB PUT) ===\" > /dev/kmsg; \
-                 ( { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: 524288000\\r\\nConnection: close\\r\\n\\r\\n'; dd if=/dev/zero bs=1M count=500 2>/dev/null; } | nc 10.0.2.2 80 ) & \
-                 sleep 3; \
-                 ss -tin 2>/dev/null | grep -A2 '10.0.2.2' | head -6; \
-                 wait; \
-                 echo \"<0>[netbench-vm] === throughput sweep ===\" > /dev/kmsg; \
-                 for SZ in 100 500 1000 2000; do \
+                 echo \"<0>[netbench-vm] iface=$IFACE -- SHORT bench (run 'cores' during a GET) ===\" > /dev/kmsg; \
+                 echo \"<0>[netbench-vm] === idle RTT (ping x8) ===\" > /dev/kmsg; \
+                 ping -c 8 10.0.2.2 2>&1 | tail -3; \
+                 echo \"<0>[netbench-vm] === GET 100/300/500 (lottery check) ===\" > /dev/kmsg; \
+                 for SZ in 100 300 500; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
                    wget -q -O /dev/null \"http://10.0.2.2/get?mb=$SZ\" 2>/dev/null; \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
                    echo \"<0>[netbench-vm] GET $SZ MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
                  done; \
-                 for SZ in 100 500 1000 2000; do \
-                   B=$((SZ*1024*1024)); \
-                   T0=$(cut -d' ' -f1 /proc/uptime); \
-                   { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: %d\\r\\nContent-Type: application/octet-stream\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
-                     dd if=/dev/zero bs=1M count=$SZ 2>/dev/null; } | nc 10.0.2.2 80; \
-                   T1=$(cut -d' ' -f1 /proc/uptime); \
-                   echo \"<0>[netbench-vm] PUT $SZ MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
-                 done; \
+                 echo \"<0>[netbench-vm] === PUT 300 ===\" > /dev/kmsg; \
+                 B=$((300*1024*1024)); \
+                 T0=$(cut -d' ' -f1 /proc/uptime); \
+                 { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
+                   dd if=/dev/zero bs=1M count=300 2>/dev/null; } | nc 10.0.2.2 80; \
+                 T1=$(cut -d' ' -f1 /proc/uptime); \
+                 echo \"<0>[netbench-vm] PUT 300 MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] === guest TCP counters (loss/reorder evidence) ===\" > /dev/kmsg; \
                  grep '^Tcp:' /proc/net/snmp; \
                  echo \"<0>[netbench-vm] --- named loss/reorder counters (netstat -s) ---\" > /dev/kmsg; \
