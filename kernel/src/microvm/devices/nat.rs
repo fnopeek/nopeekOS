@@ -1281,7 +1281,7 @@ pub fn pump(
         // The 5 s [netstat] dump BLOCKS the pump core ~60-120ms on the UART THRE
         // spin (serial.rs:93) — but v0.226.17 proved it's NOT the latency brake,
         // and we need `gpu KB/s` + `dl` to verify the GPU throttle engages.
-        const NETSTAT_DEBUG: bool = true;
+        const NETSTAT_DEBUG: bool = false;
         // net-RX IRQ fire rate this window (0 + v0x0 = polling, IRQ never set up).
         let rx_vec = crate::drivers::virtio_net::rx_irq_vector();
         let rxirq_now = if rx_vec != 0 { crate::irq::fired_count(rx_vec) } else { 0 };

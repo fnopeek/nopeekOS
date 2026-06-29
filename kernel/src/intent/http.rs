@@ -902,6 +902,131 @@ pub fn http_get_streaming(
     Err("too many redirects")
 }
 
+/// Network throughput benchmark against a plain-HTTP server — isolates our net
+/// stack from the WAN so we can see where the real bottleneck is. Reaches a
+/// local server (e.g. `10.0.2.2:80` = QEMU slirp host alias).
+///   netbench get <host> <path>        download into a counting sink (we time)
+///   netbench put <host> <path> [MB]    upload a RAM buffer (the SERVER times it
+///                                      and returns the rate — our send side has
+///                                      no congestion control, so it can't)
+pub fn intent_netbench(args: &str) {
+    let mut it = args.split_whitespace();
+    match it.next().unwrap_or("") {
+        "get" => {
+            let host = match it.next() { Some(h) => h, None => { kprintln!("usage: netbench get <host> <path>"); return; } };
+            let path = it.next().unwrap_or("/");
+            bench_get(host, path);
+        }
+        "put" => {
+            let host = match it.next() { Some(h) => h, None => { kprintln!("usage: netbench put <host> <path> [MB]"); return; } };
+            let path = it.next().unwrap_or("/upload");
+            let mb: usize = it.next().and_then(|s| s.parse().ok()).unwrap_or(50);
+            bench_put(host, path, mb);
+        }
+        _ => kprintln!("usage: netbench get <host> <path> | netbench put <host> <path> [MB]"),
+    }
+}
+
+/// Print bytes/elapsed as MB, ms, Mbit/s, MB/s using integer math (no float).
+fn bench_report(label: &str, bytes: usize, cyc: u64) {
+    let freq = crate::interrupts::tsc_freq().max(1) as u128;
+    let us = (cyc as u128 * 1_000_000 / freq).max(1);
+    let ms = (us / 1000) as u64;
+    let mbit_s = (bytes as u128 * 8 / us) as u64; // bits/us = Mbit/s
+    let mbyte_s = (bytes as u128 / us) as u64;    // bytes/us = MB/s
+    let mb = bytes / (1024 * 1024);
+    kprintln!("[netbench] {}: {} MB in {} ms = {} Mbit/s ({} MB/s)", label, mb, ms, mbit_s, mbyte_s);
+}
+
+fn bench_get(host: &str, path: &str) {
+    kprintln!("[netbench] GET http://{}{}", host, path);
+    let mut bytes: usize = 0;
+    let mut sink = |c: &[u8]| -> Result<(), &'static str> { bytes += c.len(); Ok(()) };
+    let t0 = crate::interrupts::rdtsc();
+    let res = http_get_streaming(host, path, usize::MAX, &mut sink);
+    let t1 = crate::interrupts::rdtsc();
+    match res {
+        Ok(_) => bench_report("GET", bytes, t1.wrapping_sub(t0)),
+        Err(e) => kprintln!("[netbench] GET failed after {} bytes: {}", bytes, e),
+    }
+}
+
+fn bench_put(host: &str, path: &str, mb: usize) {
+    let total = mb * 1024 * 1024;
+    kprintln!("[netbench] PUT http://{}{} ({} MB)", host, path, mb);
+    let t0 = crate::interrupts::rdtsc();
+    let res = http_post_zeros(host, path, total);
+    let t1 = crate::interrupts::rdtsc();
+    match res {
+        Ok(reply) => {
+            bench_report("PUT(local)", total, t1.wrapping_sub(t0));
+            // The server measures the true received rate (our send side has no
+            // congestion control); echo whatever it reported.
+            let r = reply.trim();
+            if !r.is_empty() { kprintln!("[netbench] PUT(server): {}", r); }
+        }
+        Err(e) => kprintln!("[netbench] PUT failed: {}", e),
+    }
+}
+
+/// POST `total` zero-bytes to <host><path>; returns the server's response body
+/// (which is expected to report the server-measured throughput).
+fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'static str> {
+    let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host)).ok_or("DNS/IP failed")?;
+    let gw = crate::net::ipv4::gateway();
+    crate::net::arp::request(gw);
+    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+    let handle = crate::net::tcp::connect(ip, 80).map_err(|_| "TCP connect failed")?;
+    crate::interrupts::set_worker_poll_hz(10_000);
+    struct PollHzGuard;
+    impl Drop for PollHzGuard {
+        fn drop(&mut self) { crate::interrupts::set_worker_poll_hz(100); }
+    }
+    let _poll_hz_guard = PollHzGuard;
+
+    let req = alloc::format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+        path, host, total
+    );
+    if crate::net::tcp::send(handle, req.as_bytes()).is_err() {
+        let _ = crate::net::tcp::close(handle);
+        return Err("send header failed");
+    }
+
+    let chunk = alloc::vec![0u8; 256 * 1024];
+    let mut sent = 0;
+    while sent < total {
+        let n = core::cmp::min(chunk.len(), total - sent);
+        if crate::net::tcp::send(handle, &chunk[..n]).is_err() {
+            let _ = crate::net::tcp::close(handle);
+            return Err("send body failed");
+        }
+        sent += n;
+        // Drive the stack so ACKs come in and the retransmit buffer is trimmed
+        // (send() has no flow control, so without this the send_buf grows).
+        crate::net::poll();
+    }
+
+    // Read the server's response (it measured the receive rate).
+    let mut raw = alloc::vec::Vec::new();
+    let mut buf = alloc::vec![0u8; 4096];
+    for _ in 0..200_000 {
+        match tcp_recv_poll(handle, &mut buf) {
+            Ok(0) => { core::hint::spin_loop(); }
+            Ok(n) => { raw.extend_from_slice(&buf[..n]); if raw.len() > 8192 { break; } }
+            Err(_) => break,
+        }
+        if raw.windows(4).any(|w| w == b"\r\n\r\n") && raw.len() > 16 { break; }
+    }
+    let _ = crate::net::tcp::close(handle);
+    // Return the body after the header (best-effort).
+    let body = match raw.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(p) => String::from_utf8_lossy(&raw[p + 4..]).into_owned(),
+        None => String::new(),
+    };
+    Ok(body)
+}
+
 /// Streaming download for the USER `http`/`https` intents — follows redirects
 /// across BOTH schemes, including https→http downgrade (which OTA's strict
 /// `https_get` refuses on purpose). This lets `https cdimage.debian.org/…iso`
