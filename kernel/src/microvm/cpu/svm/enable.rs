@@ -2115,6 +2115,7 @@ impl VmContext {
                     else if info & 0x20 != 0 { 2 }
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
+                crate::microvm::cpu::record_io_port(port);
                 handle_linux_io(&mut *self.vcpu.vmcb, &mut sh.serial, &mut sh.pci, &mut sh.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut sh.pit_enabled);
                 advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);

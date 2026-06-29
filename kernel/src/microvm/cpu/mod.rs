@@ -69,6 +69,42 @@ pub fn vm_exit_snapshot() -> [u64; VMEXIT_BUCKETS] {
     out
 }
 
+// ── Per-port I/O exit breakdown ────────────────────────────────────
+// The `io` exit bucket is dominated, during heavy guest RX, by the PIC
+// EOI (`outb 0x20`): the guest runs `noapic`, so every device IRQ is
+// ack'd through the 8259, and each ack is its own port-I/O VM-exit.
+// Bucketing the ports proves where an io-exit storm actually comes from.
+pub const IO_PORT_BUCKETS: usize = 7;
+pub const IO_PORT_LABELS: [&str; IO_PORT_BUCKETS] =
+    ["pic", "pit", "serial", "pci", "rtc", "kbd", "other"];
+static IO_PORT_COUNTS: [AtomicU64; IO_PORT_BUCKETS] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; IO_PORT_BUCKETS]
+};
+fn io_port_bucket(port: u16) -> usize {
+    match port {
+        0x20 | 0x21 | 0xA0 | 0xA1 => 0,     // 8259 PIC (EOI / mask)
+        0x40..=0x43 | 0x61 => 1,            // PIT
+        0x2F8..=0x2FF | 0x3F8..=0x3FF => 2, // serial (COM1/COM2)
+        0xCF8..=0xCFF => 3,                 // PCI config space
+        0x70 | 0x71 => 4,                   // RTC / CMOS
+        0x60 | 0x64 => 5,                   // i8042 keyboard
+        _ => 6,                             // other
+    }
+}
+/// Bucket one guest port-I/O exit by port (call from the IOIO handler).
+pub fn record_io_port(port: u16) {
+    IO_PORT_COUNTS[io_port_bucket(port)].fetch_add(1, Ordering::Relaxed);
+}
+/// Snapshot the per-port I/O buckets (double-sample for a rate).
+pub fn io_port_snapshot() -> [u64; IO_PORT_BUCKETS] {
+    let mut out = [0u64; IO_PORT_BUCKETS];
+    for i in 0..IO_PORT_BUCKETS {
+        out[i] = IO_PORT_COUNTS[i].load(Ordering::Relaxed);
+    }
+    out
+}
+
 // ── Host-time profiler ─────────────────────────────────────────────
 // Where do the dedicated guest cores' cycles actually go? Counts (above)
 // say HOW OFTEN we exit; these say HOW LONG each kind of handling costs vs
