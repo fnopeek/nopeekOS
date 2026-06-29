@@ -112,11 +112,22 @@ pub fn stop_worker() {
 fn full_consume(full: bool) {
     if !full { return; }
     if let Some(gm) = crate::microvm::devices::guest_mem::active() {
-        let want_irq = super::nat::drain_to_guest(
+        let d = super::nat::drain_to_guest(
             &mut crate::microvm::devices::net_backend::lock(), gm);
-        if want_irq {
+        // Raise the guest IRQ10 LINE only when EVENT_IDX says so (avoids preempting
+        // an active NAPI poll → the rx_wants_irq sawtooth guard, nat.rs).
+        if d.want_irq {
             super::nat::note_worker_raise();
             crate::microvm::devices::net_backend::raise_irq();
+        }
+        // Wake the BSP vCPU FIBER whenever we injected ANY RX, decoupled from the
+        // IRQ decision. A parked vCPU can't NAPI-poll a non-empty ring; gating the
+        // wake on want_irq stranded suppressed-but-pending RX until the 2ms park
+        // timeout — the measured `kick_wait timeout` stalls that ARE the download
+        // throughput lottery. The kick is a bare scheduler IPI (net_kick_bump +
+        // VCPU_KICK), no guest IRQ line, so it does NOT preempt NAPI.
+        if d.injected {
+            if !d.want_irq { super::nat::note_decoupled_kick(); }
             crate::microvm::cpu::svm::kick_bsp_net_irq();
         }
     }
