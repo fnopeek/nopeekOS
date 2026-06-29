@@ -237,7 +237,7 @@ pub fn intent_cores() {
             wk1.3.saturating_sub(wk0.3),
         );
         if wi + wt + wp + ws > 0 {
-            kprintln!("    net worker wakes/s: irq={} timeout={} polled={} spin={}",
+            kprintln!("    net worker wakes/s: irq={} timeout={} polled={} busy={}",
                       wi * 1000 / window_ms, wt * 1000 / window_ms,
                       wp * 1000 / window_ms, ws * 1000 / window_ms);
         }

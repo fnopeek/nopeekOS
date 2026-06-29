@@ -3,7 +3,25 @@
 //! Legacy (0.9.5) VirtIO PCI transport with RX/TX virtqueues.
 //! Provides Ethernet frame send/receive for the TCP/IP stack.
 
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
+
+/// Lock-free pointer to the host NIC RX used.idx (`rx_used_base + 2`), published
+/// at init. Lets the off-vCPU data-plane busy-poll for RX arrival WITHOUT taking
+/// the DEVICE lock every spin iteration (the lock-hammer that made the earlier
+/// worker-spin net-negative). 0 = not yet up.
+static RX_USED_IDX_PTR: AtomicU64 = AtomicU64::new(0);
+
+/// Current host NIC RX used.idx (lock-free volatile read). The data-plane worker
+/// caches the value it last drained to; a change means a frame arrived.
+#[inline]
+pub fn rx_used_idx() -> u16 {
+    let p = RX_USED_IDX_PTR.load(Ordering::Relaxed);
+    if p == 0 { return 0; }
+    // SAFETY: p is the device's used-ring idx field, identity-mapped, set once
+    // at init and stable for the device's life; a torn 16-bit read at worst
+    // costs one extra poll iteration.
+    unsafe { core::ptr::read_volatile(p as *const u16) }
+}
 use spin::Mutex;
 use crate::serial::{outb, outw, outl, inb, inw, inl};
 use crate::{kprintln, memory, pci};
@@ -315,7 +333,7 @@ pub fn init() -> bool {
             mac,
             rx_desc_base: rx_desc,
             rx_avail_base: rx_avail,
-            rx_used_base: rx_used,
+            rx_used_base: { RX_USED_IDX_PTR.store(rx_used + 2, Ordering::Relaxed); rx_used },
             rx_queue_size: rx_qs,
             rx_last_used: 0,
             rx_repost_pending: 0,
