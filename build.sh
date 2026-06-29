@@ -495,9 +495,13 @@ run_qemu_generic() {
         # MSI-X capability, which blocks net-RX's event-driven RX IRQ
         # (confirmed: "[npk] msix: 00:03.0 no MSI-X capability"). Transitional
         # (1af4:1000) so the legacy driver still binds; slirp backend unchanged.
+        # rx_queue_size=1024: deepen the host NIC RX ring (default 256) so a
+        # download burst that outruns a brief drain gap is absorbed instead of
+        # dropped by QEMU/slirp (the dropped frames made the SERVER retransmit →
+        # its cwnd collapsed → the download lottery). Pairs with RX_BUFFERS=1024.
         net_args=(
             -netdev user,id=net0
-            -device virtio-net-pci,netdev=net0,vectors=3
+            -device virtio-net-pci,netdev=net0,vectors=3,rx_queue_size=1024,tx_queue_size=1024
         )
     fi
     echo ""
