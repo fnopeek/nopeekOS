@@ -540,9 +540,6 @@ impl VirtioNet {
         q.used_idx = start_used.wrapping_add(nbuf);
         used_publish(mem, q.used_gpa(), q.used_idx);
         self.isr |= 1;
-        if diag(&DIAG_RX) {
-            kprintln!("[net-dev] inject ok nbuf={} wrote={}/{}B used_idx={}", nbuf, written, total, q.used_idx);
-        }
         true
     }
 
@@ -562,11 +559,7 @@ impl VirtioNet {
             // (no IRQ → idle NAPI never wakes → network hangs after a while).
             let old = q.last_irq_used_idx;
             q.last_irq_used_idx = q.used_idx;
-            let fire = need_event(ev, q.used_idx, old);
-            if diag(&DIAG_IRQ) {
-                kprintln!("[net-dev] rx irq? ev={} used={} old={} -> {}", ev, q.used_idx, old, fire);
-            }
-            fire
+            need_event(ev, q.used_idx, old)
         } else {
             avail_flags(mem, q.avail_gpa()) & VRING_AVAIL_F_NO_INTERRUPT == 0
         }
@@ -648,9 +641,6 @@ impl VirtioNet {
                 used_publish(mem, q.used_gpa(), q.used_idx);
             }
             advanced = nused > 0;
-            if advanced && diag(&DIAG_TX) {
-                kprintln!("[net-dev] TX serviced {} frame(s), replies={}", nused, pending_rx.len());
-            }
         }
         self.tx_scratch = frame;
 
@@ -691,11 +681,3 @@ impl VirtioNet {
 const fn width_mask(width: u8) -> u64 {
     match width { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFF_FFFF, _ => 0xFFFF_FFFF_FFFF_FFFF }
 }
-
-// ── Bring-up diagnostics (bounded one-shots; stripped once validated) ──
-use core::sync::atomic::AtomicU32;
-static DIAG_TX: AtomicU32 = AtomicU32::new(0);
-static DIAG_RX: AtomicU32 = AtomicU32::new(0);
-static DIAG_IRQ: AtomicU32 = AtomicU32::new(0);
-#[inline]
-fn diag(ctr: &AtomicU32) -> bool { ctr.fetch_add(1, Ordering::Relaxed) < 12 }
