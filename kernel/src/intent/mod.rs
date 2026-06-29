@@ -1708,6 +1708,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 http::intent_https(args);
             }
         }
+        "netbench" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "netbench") {
+                http::intent_netbench(args);
+            }
+        }
         "ping" => {
             if require_cap(vault, &session, Rights::EXECUTE, "ping") {
                 net::intent_ping(args);

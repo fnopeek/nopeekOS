@@ -30,7 +30,7 @@ use spin::Mutex;
 /// core is identified. `record()` runs on EVERY exit (~30k/s) + the ~5 s dump
 /// (~13 kprintln lines) BLOCKS its core ~60ms on the UART THRE spin — on for
 /// diagnosis (csd visibility), strip before shipping.
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 const SLOTS: usize = 48;
 /// 64-byte RIP buckets: clusters a hot loop's instructions into one entry so
