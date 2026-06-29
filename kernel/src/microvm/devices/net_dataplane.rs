@@ -31,6 +31,54 @@
 //!     vhost path when VMX mirrors the BSP-kick.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::collections::VecDeque;
+use spin::Mutex;
+
+/// Worker-local RX overflow stage. The host NIC RX ring MUST be kept empty every
+/// pass — leaving frames in it lets it overflow → QEMU/slirp drops → the server
+/// retransmits → its cwnd collapses (the download lottery). So we ALWAYS drain
+/// the whole NIC ring; a frame the guest ring can't take this instant is staged
+/// here (lossless) and re-injected oldest-first next pass. Only the data-plane
+/// fiber touches it (single consumer). Bounded: on sustained overload (the guest
+/// genuinely can't keep up) the oldest staged frame is dropped — but a transient
+/// guest-slow window (the common case) is absorbed, never lost.
+static RX_STAGE: Mutex<VecDeque<alloc::vec::Vec<u8>>> = Mutex::new(VecDeque::new());
+/// ~3 MB of frames ≈ 24 ms at 1 Gbit — far more than any guest-slow transient.
+const RX_STAGE_MAX: usize = 2048;
+
+/// Stage a frame the guest ring couldn't take. Drops (recycles) the OLDEST on
+/// sustained overload to bound memory; the NIC ring is still emptied either way.
+fn stage_push(frame: alloc::vec::Vec<u8>) {
+    let mut s = RX_STAGE.lock();
+    if s.len() >= RX_STAGE_MAX {
+        if let Some(old) = s.pop_front() {
+            crate::microvm::devices::nat::recycle_frame(old);
+        }
+    }
+    s.push_back(frame);
+}
+
+/// Re-inject staged frames (oldest first) while the guest ring has room.
+fn inject_stage(
+    dev: &mut crate::microvm::devices::virtio_net_dev::VirtioNet,
+    gm: &crate::microvm::devices::guest_mem::GuestMem,
+    injected: &mut bool,
+) {
+    let mut s = RX_STAGE.lock();
+    while !s.is_empty() && dev.rx_avail_count(gm) > 0 {
+        let f = s.pop_front().unwrap();
+        if dev.inject_rx(gm, &f) { *injected = true; }
+        crate::microvm::devices::nat::recycle_frame(f);
+    }
+}
+
+/// Drop the RX stage at VM teardown so a stale frame can't leak into the next run.
+pub fn reset_stage() {
+    let mut s = RX_STAGE.lock();
+    while let Some(f) = s.pop_front() {
+        crate::microvm::devices::nat::recycle_frame(f);
+    }
+}
 
 /// Worker wakeup attribution (surfaced in `cores`): irq = host RX MSI-X woke us
 /// (event-driven, µs); timeout = fell to the safety park; polled = no MSI-X
@@ -91,6 +139,7 @@ pub fn stop_worker() {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
         core::hint::spin_loop();
     }
+    reset_stage();
 }
 
 /// vhost `handle_rx` + `handle_tx` for the full off-vCPU path: one pass on this
@@ -106,18 +155,25 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     //    sender flow-controls). No INBOUND_Q, no GRO, no synthetic drop. ──
     let mut injected = false;
     let mut host_frames: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+    // Re-inject anything staged on a previous pass FIRST (oldest first → in order).
+    inject_stage(&mut dev, gm, &mut injected);
     if crate::net::try_acquire_drain() {
         let mut buf = [0u8; crate::drivers::virtio_net::MTU];
-        loop {
-            // Backpressure: don't read the NIC if the guest can't take a frame.
-            if dev.rx_avail_count(gm) == 0 { break; }
-            let len = match crate::netdev::recv(&mut buf) { Some(l) => l, None => break };
+        // Drain the host NIC COMPLETELY — never leave a frame in the NIC ring (it
+        // overflows → QEMU/slirp drops → server retransmits → cwnd collapse). If
+        // the guest ring is momentarily full, STAGE the frame (lossless) instead
+        // of dropping or leaving it in the NIC ring.
+        while let Some(len) = crate::netdev::recv(&mut buf) {
             if len < 14 { continue; }
             let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
             if ethertype == crate::net::eth::ETHERTYPE_IPV4 {
                 if let Some(gframe) = nat::l3_rewrite_inbound(&buf[14..len]) {
-                    if dev.inject_rx(gm, &gframe) { injected = true; }
-                    nat::recycle_frame(gframe);
+                    if dev.rx_avail_count(gm) > 0 && dev.inject_rx(gm, &gframe) {
+                        injected = true;
+                        nat::recycle_frame(gframe);
+                    } else {
+                        stage_push(gframe);
+                    }
                     continue;
                 }
             }

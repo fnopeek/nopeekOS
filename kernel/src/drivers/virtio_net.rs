@@ -43,10 +43,14 @@ const TX_QUEUE: u16 = 1;
 // `net::poll()` can't drain in time (BSP vCPU pump spinning, Core 0
 // compositing, or the POLLING guard contended), the ring fills and
 // QEMU/slirp DROPS inbound frames → guest TCP sees loss → backs off →
-// throughput collapse + latency spikes. Match QEMU's default queue (256)
-// for ~16× the inflight headroom. Capped to the device's actual queue
-// size at init (`RX_BUFFERS.min(rx_qs)`).
-const RX_BUFFERS: usize = 256;
+// throughput collapse + latency spikes. 256 buffers (~387 KB ≈ 3 ms at 1 Gbit)
+// was too shallow: a download burst that outran a brief drain gap overflowed the
+// host NIC RX ring → QEMU/slirp DROPPED frames → the SERVER retransmitted →
+// its cwnd collapsed (the measured per-connection download lottery: server
+// total_retrans 6-14 on slow runs, 0 on fast). 1024 gives ~12 ms of cushion so
+// a transient burst is absorbed instead of lost. Needs QEMU `rx_queue_size=1024`
+// (else capped to the device's actual queue size via `RX_BUFFERS.min(rx_qs)`).
+const RX_BUFFERS: usize = 1024;
 
 // On a full TX ring, spin-reclaim this many times before dropping the
 // frame. QEMU/slirp drains the ring on its own host thread, so a bounded
