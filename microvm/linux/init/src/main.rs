@@ -327,6 +327,11 @@ fn launch_bench(kmsg_fd: i64) {
                  wget -q -O /dev/null \"http://10.0.2.2/get?mb=2000\" 2>/dev/null & \
                  ping -c 30 10.0.2.2 2>&1 | tail -12; \
                  wait; \
+                 echo \"<0>[netbench-vm] === upload socket state (ss -ti mid 500 MB PUT) ===\" > /dev/kmsg; \
+                 ( { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: 524288000\\r\\nConnection: close\\r\\n\\r\\n'; dd if=/dev/zero bs=1M count=500 2>/dev/null; } | nc 10.0.2.2 80 ) & \
+                 sleep 3; \
+                 ss -tin 2>/dev/null | grep -A2 '10.0.2.2' | head -6; \
+                 wait; \
                  echo \"<0>[netbench-vm] === throughput sweep ===\" > /dev/kmsg; \
                  for SZ in 100 500 1000 2000; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
