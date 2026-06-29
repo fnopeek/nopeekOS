@@ -83,6 +83,7 @@ pub fn intent_cores() {
         w0[c] = crate::smp::per_core::wake_snapshot(c);
     }
     let vx0 = crate::microvm::cpu::vm_exit_snapshot();
+    let io0 = crate::microvm::cpu::io_port_snapshot();
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
@@ -109,6 +110,7 @@ pub fn intent_cores() {
         w1[c] = crate::smp::per_core::wake_snapshot(c);
     }
     let vx1 = crate::microvm::cpu::vm_exit_snapshot();
+    let io1 = crate::microvm::cpu::io_port_snapshot();
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -197,6 +199,22 @@ pub fn intent_cores() {
             if d > 0 { kprint!(" {}={}", vlabels[i], d * 1000 / window_ms); }
         }
         kprintln!();
+        // Break the `io` exit bucket down by port. During heavy RX this is
+        // expected to be dominated by `pic` (the 8259 EOI, one outb 0x20 per
+        // device IRQ since the guest runs noapic) — proving the io storm is
+        // the interrupt-ack path, not the data path.
+        let iolabels = crate::microvm::cpu::IO_PORT_LABELS;
+        let iototal: u64 = (0..iolabels.len())
+            .map(|i| io1[i].saturating_sub(io0[i]))
+            .sum();
+        if iototal > 0 {
+            kprint!("    io-exit ports/s:");
+            for i in 0..iolabels.len() {
+                let d = io1[i].saturating_sub(io0[i]);
+                if d > 0 { kprint!(" {}={}", iolabels[i], d * 1000 / window_ms); }
+            }
+            kprintln!();
+        }
     }
     // Host-time breakdown: where the dedicated guest cores actually SPENT
     // their cycles this window. guest% = in VMRESUME (the guest really ran);
