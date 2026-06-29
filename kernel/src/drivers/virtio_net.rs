@@ -60,6 +60,10 @@ const S_FAILED: u8      = 128;
 
 const F_MAC: u32       = 1 << 5;
 const F_CSUM: u32      = 1 << 0;   // VIRTIO_NET_F_CSUM      — device checksums TX
+const F_GSO: u32       = 1 << 6;   // VIRTIO_NET_F_GSO (legacy) — device handles
+                                   // ANY GSO type + checksum. QEMU's transitional
+                                   // virtio-net offers this (not the modern
+                                   // per-type HOST_TSO4) to a legacy driver.
 const F_HOST_TSO4: u32 = 1 << 11;  // VIRTIO_NET_F_HOST_TSO4 — device segments TSOv4
 /// virtio_net_hdr.flags / gso_type for offloaded TX (host does csum + TCP-GSO).
 const VNET_HDR_F_NEEDS_CSUM: u8 = 1;
@@ -201,12 +205,23 @@ pub fn init() -> bool {
         // `send_offload`). Only enable offload when both are present so we never
         // promise a GSO frame the device can't segment.
         let mut accepted = features & F_MAC;
-        let offload = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
-        kprintln!("[npk] virtio-net: dev features {:#010x} (csum={} host_tso4={} → offload={})",
-                  features, features & F_CSUM != 0, features & F_HOST_TSO4 != 0, offload);
-        if offload {
+        // Prefer the modern per-type bits; fall back to the legacy combined F_GSO
+        // (what QEMU's transitional device offers a legacy driver). Either lets us
+        // forward the guest's GSO super-frame AS-IS (device segments + checksums).
+        let modern = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
+        let legacy_gso = features & F_GSO != 0;
+        let offload = modern || legacy_gso;
+        kprintln!("[npk] virtio-net: dev features {:#010x} (csum={} gso={} host_tso4={} → offload={})",
+                  features, features & F_CSUM != 0, legacy_gso, features & F_HOST_TSO4 != 0, offload);
+        if modern {
             accepted |= F_CSUM | F_HOST_TSO4;
-            kprintln!("[npk] virtio-net: TX offload negotiated (CSUM + HOST_TSO4)");
+        } else if legacy_gso {
+            // F_GSO bundles checksum; accept F_CSUM too if the device lists it.
+            accepted |= F_GSO | (features & F_CSUM);
+        }
+        if offload {
+            kprintln!("[npk] virtio-net: TX offload negotiated ({})",
+                      if modern { "CSUM+HOST_TSO4" } else { "legacy GSO" });
         }
         HOST_OFFLOAD.store(offload, Ordering::Relaxed);
         outl(io + REG_DRV_FEATURES, accepted);
