@@ -1152,7 +1152,11 @@ fn park_vcpu_idle() {
     // a download in flight that's frequent, so a queued frame is injected within
     // ~1 ms instead of waiting on a blind 10 ms worker tick.
     if crate::microvm::devices::net_rx_worker::active() {
-        crate::smp::fiber::yield_sleep(1);
+        // Event-driven: the worker bumps this core's net-kick generation +
+        // sends a VCPU_KICK IPI right after it injects, so we resume in ~µs
+        // instead of waiting on the ~1 ms dedicated / ~10 ms worker timer tick
+        // (the measured cold-start floor). 2 ms timeout is the safety fallback.
+        crate::smp::fiber::kick_wait(2);
         return;
     }
     if crate::microvm::devices::nat::recently_active() {
