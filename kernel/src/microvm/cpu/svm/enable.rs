@@ -1217,6 +1217,14 @@ impl VmContext {
     pub fn shared_ptr(&mut self) -> *mut VmShared {
         &mut *self.shared as *mut VmShared
     }
+
+    /// Absolute host TSC of the BSP vCPU's next guest LAPIC-timer tick — the
+    /// hrtimer deadline the idle park waits on (KVM `apic_timer_fn` model), so
+    /// the guest 1 kHz clock advances independent of VMRUN. `None` when no guest
+    /// timer is armed → the park falls back to its safety cap.
+    pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
+        self.vcpu.lapic.next_timer_deadline_tsc()
+    }
 }
 
 /// Per-guest serial UART state across exits. Mirrors `vmx::enable

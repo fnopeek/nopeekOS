@@ -911,6 +911,14 @@ impl VmContext {
         &mut *self.shared as *mut VmShared
     }
 
+    /// Absolute host TSC of the BSP vCPU's next guest LAPIC-timer tick — the
+    /// hrtimer deadline the idle park waits on (KVM `apic_timer_fn` model), so
+    /// the guest 1 kHz clock advances independent of VMRUN. `None` when no guest
+    /// timer is armed → the park falls back to its safety cap.
+    pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
+        self.vcpu.lapic.next_timer_deadline_tsc()
+    }
+
     /// Leave VMX root and free the per-VM allocations so the VM can be
     /// relaunched in the same boot. Order matters: VMXOFF first (the
     /// VMCS must not be current/in-use when its frame is freed), then

@@ -1139,44 +1139,52 @@ pub fn vm_core_serve() {
 /// 100 Hz worker timer (~10 ms granularity), which was the measured loaded-
 /// latency floor (drainmax ~10 ms ≈ rxlat max). 2 ms timeout is the fallback if
 /// the NIC is polled (RX IRQ never fires) or the link goes quiet mid-park.
-fn park_vcpu_idle() {
-    // (A bounded spin-while-recently-active test was REVERTED: it pegged a worker
-    // core at 100% and starved Core 0's compositor → massive UI lag + latency
-    // peaks. Confirms the "never an unbounded spin" rule — the consumer-wake must
-    // be event-driven, not spun.)
-    // When the dedicated RX producer is active it OWNS the host NIC RX IRQ
-    // (routed to its own core). The BSP here is the CONSUMER — it injects what
-    // the producer staged. It must NOT arm/route that IRQ (that would steal the
-    // producer's event-wake). A short timer park suffices: the dedicated ~1 kHz
-    // VM timer + the guest's own RX-repost/ACK MMIO exits drive the inject; with
-    // a download in flight that's frequent, so a queued frame is injected within
-    // ~1 ms instead of waiting on a blind 10 ms worker tick.
+/// Idle-park safety cap. The real wakes are event-driven — an RX/TX/IPI kick
+/// (net-kick generation) or the guest's own LAPIC-timer deadline — so this only
+/// bounds a truly idle guest (no timer armed, no traffic) from sleeping forever
+/// and never re-checking VM_CLOSE_REQUESTED. 8 ms ≈ the old idle yield, but a
+/// download/active guest never reaches it.
+const PARK_SAFETY_MS: u64 = 8;
+
+/// Park the BSP vCPU fiber when the guest is idle — the unified block-on-event
+/// model (KVM `kvm_vcpu_block`): one park, woken by whichever event fires first.
+///   * RX/TX/IPI ready → the off-vCPU backend / a peer vCPU bumps this core's
+///     net-kick generation + sends a VCPU_KICK IPI → we resume in ~µs.
+///   * Guest timer due → `next_timer_tsc` is the guest's next LAPIC-timer
+///     deadline (KVM `apic_timer_fn` hrtimer); the park ends there so the guest
+///     1 kHz clock advances at its programmed rate INDEPENDENT of VMRUN. This
+///     replaced the magic 1/2 ms parks that polled the timer only while in
+///     VMRUN, freezing the guest clock to ~300 effective HZ under load.
+///   * Safety cap (`PARK_SAFETY_MS`) — only an idle guest with no timer reaches it.
+/// (A bounded spin-while-active test was REVERTED: it pegged a worker core and
+/// starved the compositor — the consumer-wake must be event-driven, not spun.)
+fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
+    let now = crate::interrupts::rdtsc();
+    let freq = crate::interrupts::tsc_freq();
+    let safety = now + PARK_SAFETY_MS.saturating_mul(freq / 1000);
+    // Wait until the guest's next timer tick, clamped to [now, safety]: a
+    // past/overdue deadline → re-enter at once and inject; a far-future or
+    // absent one → re-check no later than the safety cap.
+    let deadline = next_timer_tsc.map(|d| d.clamp(now, safety)).unwrap_or(safety);
+
+    // When the off-vCPU RX backend (or producer) owns the NIC drain, RX wakes us
+    // via the net-kick generation — we must NOT arm/route the host RX IRQ here
+    // (that would steal the worker's event-wake). Block on the unified deadline.
     if crate::microvm::devices::net_rx_worker::active() {
-        // Event-driven: the worker bumps this core's net-kick generation +
-        // sends a VCPU_KICK IPI right after it injects, so we resume in ~µs on RX.
-        // The TIMEOUT is the guest-timer wake: the guest's 1kHz LVTT is injected
-        // only while the BSP is IN VMRUN, so a 2ms park froze the guest clock to
-        // ~300 effective HZ (MEASURED) — starving the guest's TCP receive
-        // processing/window-update so its advertised window collapses and the
-        // server throttles (the slow download regime; drops=0 ruled out loss).
-        // 1ms during an active transfer wakes the BSP at the guest's own 1kHz
-        // tick (KVM's hrtimer-backed LAPIC model) so the guest clock + RX drain
-        // run at full rate — WITHOUT spinning (it HLTs between wakes, no core
-        // pegging, unlike the reverted worker spin). Relax to 2ms when idle so a
-        // quiet guest doesn't burn the core at 1kHz.
-        let to = if crate::microvm::devices::nat::recently_active() { 1 } else { 2 };
-        crate::smp::fiber::kick_wait(to);
+        crate::smp::fiber::kick_wait_until(deadline);
         return;
     }
-    if crate::microvm::devices::nat::recently_active() {
-        let vec = crate::drivers::virtio_net::rx_irq_vector();
-        if vec != 0 {
-            let since = crate::irq::arm(vec); // snapshot + route IRQ to this core
-            crate::smp::fiber::irq_wait(vec, since, 2);
-            return;
-        }
+
+    // No backend: THIS vCPU drains the NIC itself, so it must also wake on the
+    // host RX IRQ (routed to this core). Bound the wait by the timer deadline.
+    let timeout_ms = ((deadline.saturating_sub(now)) / (freq / 1000).max(1)).max(1);
+    let vec = crate::drivers::virtio_net::rx_irq_vector();
+    if vec != 0 {
+        let since = crate::irq::arm(vec); // snapshot + route IRQ to this core
+        crate::smp::fiber::irq_wait(vec, since, timeout_ms);
+        return;
     }
-    crate::smp::fiber::yield_sleep(2);
+    crate::smp::fiber::yield_sleep(timeout_ms);
 }
 
 fn vcpu_fiber_task(_arg: u64) {
@@ -1268,7 +1276,7 @@ fn vcpu_fiber_task(_arg: u64) {
                         // Idle guest: park briefly → core runs app fibers.
                         // Event-driven on host RX IRQ while downloading.
                         Ok(svm::SliceOutcome::Idle) => {
-                            park_vcpu_idle();
+                            park_vcpu_idle(ctx.next_timer_deadline_tsc());
                         }
                         Ok(svm::SliceOutcome::Exited(o)) => {
                             crate::kprintln!(
@@ -1334,7 +1342,7 @@ fn vcpu_fiber_task(_arg: u64) {
                                 crate::smp::fiber::yield_ready();
                             }
                             Ok(vmx::SliceOutcome::Idle) => {
-                                park_vcpu_idle();
+                                park_vcpu_idle(ctx.next_timer_deadline_tsc());
                             }
                             Ok(vmx::SliceOutcome::Exited(o)) => {
                                 crate::kprintln!(
