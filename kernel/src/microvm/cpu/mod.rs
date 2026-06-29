@@ -1153,10 +1153,19 @@ fn park_vcpu_idle() {
     // ~1 ms instead of waiting on a blind 10 ms worker tick.
     if crate::microvm::devices::net_rx_worker::active() {
         // Event-driven: the worker bumps this core's net-kick generation +
-        // sends a VCPU_KICK IPI right after it injects, so we resume in ~µs
-        // instead of waiting on the ~1 ms dedicated / ~10 ms worker timer tick
-        // (the measured cold-start floor). 2 ms timeout is the safety fallback.
-        crate::smp::fiber::kick_wait(2);
+        // sends a VCPU_KICK IPI right after it injects, so we resume in ~µs on RX.
+        // The TIMEOUT is the guest-timer wake: the guest's 1kHz LVTT is injected
+        // only while the BSP is IN VMRUN, so a 2ms park froze the guest clock to
+        // ~300 effective HZ (MEASURED) — starving the guest's TCP receive
+        // processing/window-update so its advertised window collapses and the
+        // server throttles (the slow download regime; drops=0 ruled out loss).
+        // 1ms during an active transfer wakes the BSP at the guest's own 1kHz
+        // tick (KVM's hrtimer-backed LAPIC model) so the guest clock + RX drain
+        // run at full rate — WITHOUT spinning (it HLTs between wakes, no core
+        // pegging, unlike the reverted worker spin). Relax to 2ms when idle so a
+        // quiet guest doesn't burn the core at 1kHz.
+        let to = if crate::microvm::devices::nat::recently_active() { 1 } else { 2 };
+        crate::smp::fiber::kick_wait(to);
         return;
     }
     if crate::microvm::devices::nat::recently_active() {
