@@ -12,8 +12,18 @@ use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 /// per-segment SW re-segmentation/checksum. Falls back to `emit_tcp_out` if unset.
 static HOST_OFFLOAD: AtomicBool = AtomicBool::new(false);
 
+/// Master switch for the TX offload path. DISABLED: first HW test hung the
+/// download after the TCP handshake — the offloaded data frame is malformed for
+/// QEMU's legacy F_GSO (SYN went through, then the connection stalled). The path
+/// (negotiation + send_offload + l3_outbound_offload) stays in the tree for
+/// debugging; flip true to retest. With it false, TX falls back to the working
+/// SW path (`emit_tcp_out`).
+const TX_OFFLOAD_ENABLED: bool = false;
+
 /// True iff the host NIC accepts offloaded (CSUM+TSO) TX frames via `send_offload`.
-pub fn host_offload_ok() -> bool { HOST_OFFLOAD.load(Ordering::Relaxed) }
+pub fn host_offload_ok() -> bool {
+    TX_OFFLOAD_ENABLED && HOST_OFFLOAD.load(Ordering::Relaxed)
+}
 
 /// Lock-free pointer to the host NIC RX used.idx (`rx_used_base + 2`), published
 /// at init. Lets the off-vCPU data-plane busy-poll for RX arrival WITHOUT taking
