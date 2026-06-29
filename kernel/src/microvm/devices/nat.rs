@@ -839,6 +839,70 @@ pub fn l3_inbound(ip: &[u8]) -> bool {
     true
 }
 
+/// vhost `handle_rx` rewrite (the new off-vCPU data plane, `net_dataplane`).
+/// Translate ONE inbound host-network IPv4 packet back to the guest (dst IP/port
+/// → guest, checksums fixed incrementally) and return the guest-bound ethernet
+/// frame (vnet+eth+ip), or `None` if it isn't masqueraded guest traffic. PURE —
+/// no staging queue, no GRO, no synthetic drop: the caller injects the returned
+/// frame straight into the guest RX ring and applies real backpressure (stop
+/// draining the NIC when the guest ring is full), exactly like vhost-net reading
+/// a tap. `ip` is the IPv4 packet (no ethernet header). Recycle the returned
+/// buffer via [`recycle_frame`] after injecting.
+pub fn l3_rewrite_inbound(ip: &[u8]) -> Option<Vec<u8>> {
+    if !L3_ACTIVE.load(AtOrd::Acquire) { return None; }
+    if ip.len() < IPV4_HDR_LEN { return None; }
+    let ihl = (ip[0] & 0x0F) as usize * 4;
+    if ihl < IPV4_HDR_LEN || ip.len() < ihl { return None; }
+    let proto = ip[9];
+    if proto != PROTO_TCP && proto != PROTO_UDP && proto != PROTO_ICMP { return None; }
+    let src_ip: [u8; 4] = ip[12..16].try_into().unwrap();
+    let l4 = &ip[ihl..];
+    let (remote_port, host_port) = if proto == PROTO_ICMP {
+        if l4.len() < 8 || l4[0] != ICMP_ECHO_REPLY { return None; }
+        (0u16, u16::from_be_bytes([l4[4], l4[5]]))
+    } else {
+        if l4.len() < 4 { return None; }
+        (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]]))
+    };
+    let now = crate::interrupts::ticks();
+    let gport = l3_map_in(proto, host_port, src_ip, remote_port, now)?;
+    NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
+    NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
+
+    let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());
+    frame[..VNET_HDR_LEN].fill(0); // empty virtio-net header
+    write_eth(&mut frame, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
+    let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
+    frame[ip_off..].copy_from_slice(ip);
+    frame[ip_off + 16..ip_off + 20].copy_from_slice(&GUEST_IP);
+    frame[ip_off + 10] = 0; frame[ip_off + 11] = 0;
+    let ipc = ipv4_checksum(&frame[ip_off..ip_off + ihl]);
+    frame[ip_off + 10..ip_off + 12].copy_from_slice(&ipc.to_be_bytes());
+    let l4_off = ip_off + ihl;
+    if proto == PROTO_ICMP {
+        frame[l4_off + 4..l4_off + 6].copy_from_slice(&gport.to_be_bytes());
+        fix_icmp_checksum(&mut frame[l4_off..]);
+    } else if proto == PROTO_TCP && frame[l4_off..].len() >= TCP_HDR_LEN {
+        // Incremental TCP checksum (RFC 1624): only dst IP + dst port changed.
+        let old_check = u16::from_be_bytes([frame[l4_off + 16], frame[l4_off + 17]]);
+        let new_check = csum_update(old_check, &[
+            (u16::from_be_bytes([ip[16], ip[17]]), u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]])),
+            (u16::from_be_bytes([ip[18], ip[19]]), u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]])),
+            (host_port, gport),
+        ]);
+        frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
+        frame[l4_off + 16..l4_off + 18].copy_from_slice(&new_check.to_be_bytes());
+    } else {
+        frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
+        fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
+    }
+    Some(frame)
+}
+
+/// Return a frame buffer (from `l3_rewrite_inbound`) to the recycle pool after
+/// it's been injected into the guest ring — no per-packet heap churn.
+pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
+
 /// Drop idle mappings so the table can't fill over a long session.
 fn l3_reap(now: u64) {
     let mut tbl = L3.lock();
@@ -1215,7 +1279,7 @@ pub fn pump(
 
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
 
-    let producer = super::net_rx_worker::active();
+    let producer = super::net_dataplane::active();
 
     // net-RX: route the host NIC's RX IRQ to THIS (BSP-pump) core once, so RX
     // arrival wakes this core out of HLT → this pump delivers it promptly. Skip
@@ -1329,7 +1393,7 @@ pub fn pump(
                 "[netstat]   drainmax {}us | rxring min {} | producer {} ({}/s) | gtimer {}/s | netirq {}/s wraise {}/s | gpu {}KB/s ({}/s) | dl {}",
                 drain_max / mhz,
                 if rxring_min == u64::MAX { 0 } else { rxring_min },
-                if super::net_rx_worker::active() { "on" } else { "off" },
+                if super::net_dataplane::active() { "on" } else { "off" },
                 prod_drains / secs,
                 gtimer / secs,
                 net_irq / secs,
@@ -1366,26 +1430,24 @@ pub fn pump_fast(
     mem: &GuestMem,
 ) -> bool {
     NS_PUMP_CALLS.fetch_add(1, AtOrd::Relaxed);
-    // Drain any backlog FIRST, so INBOUND_Q has headroom before poll_rx_only
-    // refills it from the host NIC. Otherwise a full NIC-ring burst (up to 256)
-    // is pushed into an already-occupied 256-deep queue and l3_inbound drops the
-    // overflow — the measured download-drop source (drops ≫ injfalse) that drove
-    // the TCP sawtooth (~0.13% loss capped throughput at ~400 Mbit). Then fill +
-    // deliver the fresh packets.
-    let mut fired = drain_inbound(net, mem).want_irq;
-    if super::net_rx_worker::active() {
-        // A dedicated producer fiber owns the NIC drain on another core; the BSP
-        // only injects. Still flush the guest's batched TX doorbell here so ACKs
-        // egress promptly on the BSP's TX-MMIO exits (the producer wakes on RX,
-        // not TX, so it can't be relied on to flush during an upload).
+    // Full backend (vhost): the `net_dataplane` worker is the SOLE RX consumer
+    // (drains the NIC + injects directly) AND the TX servicer. The BSP must NOT
+    // call drain_inbound — a SECOND `inject_rx` + `rx_should_interrupt` consumer
+    // double-updates the EVENT_IDX `signalled_used`, corrupting the RX-IRQ
+    // decision (the guest then misses RX IRQs → NAPI stalls → no ACKs → the
+    // server's ACK-clock collapses). Only flush the guest's batched TX doorbell
+    // so a host-originated frame egresses promptly between worker passes.
+    if super::net_backend::full_active() {
         crate::virtio_net::tx_flush();
-    } else {
-        // No producer: BSP is the sole drainer (old path). NIC-drain-only (NOT
-        // full poll()): the hot ~15k/s device-exit path must not run
-        // tcp::tick_connections (128-slot host-stack scan + lock) or
-        // shade::poll_render every call — pure waste on the BSP vCPU.
-        crate::net::poll_rx_only();
+        return false;
     }
+    // No producer: BSP is the sole drainer (legacy / VMX path). Drain backlog
+    // FIRST so INBOUND_Q has headroom before poll_rx_only refills it (else a full
+    // NIC-ring burst overflows an already-occupied queue → l3_inbound drops). Then
+    // NIC-drain-only (NOT full poll(): the hot ~15k/s device-exit path must not run
+    // tcp::tick_connections or shade::poll_render every call).
+    let mut fired = drain_inbound(net, mem).want_irq;
+    crate::net::poll_rx_only();
     fired |= drain_inbound(net, mem).want_irq;
     fired
 }
@@ -1402,7 +1464,7 @@ pub fn drain_to_guest(
     drain_inbound(net, mem)
 }
 
-/// Producer half (runs on the dedicated `net_rx_worker` fiber, a separate core):
+/// Producer half (runs on the dedicated `net_dataplane` fiber, a separate core):
 /// drain the host NIC RX ring through the IP stack into INBOUND_Q + flush any
 /// GRO burst past its latency budget. Deliberately does NOT touch the guest
 /// virtqueue — the BSP vCPU owns inject_rx. Keeps producer (NIC→queue) and
