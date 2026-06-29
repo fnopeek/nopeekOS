@@ -483,11 +483,23 @@ const DEDICATED_VM_TIMER_VECTOR: u8 = 49;
 static DEDICATED_APIC_BASE: AtomicU64 = AtomicU64::new(0);
 
 extern "x86-interrupt" fn dedicated_vm_timer_handler(_frame: InterruptStackFrame) {
-    // EOI only — purpose is purely to make VMRUN return periodically.
+    // EOI first.
     let base = DEDICATED_APIC_BASE.load(Ordering::Relaxed);
     if base != 0 {
         // SAFETY: LAPIC MMIO, identity-mapped, per-core EOI register.
         unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    }
+    // KVM `apic_timer_fn` model (the Stage-1 root fix): this ~1 kHz host timer
+    // runs on the BSP vCPU's core INDEPENDENT of VMRUN. During an active transfer,
+    // wake the parked vCPU fiber every tick so it re-enters VMRUN and injects the
+    // guest's LAPIC tick at the HOST's 1 kHz rate — instead of the guest clock
+    // being coupled to the park-wake rate (~360 Hz measured). A guest clock stuck
+    // at ~360 Hz stretches ALL guest TCP timers ~2.8× (delayed-ACK fires at ~2.8ms
+    // instead of ~1ms) → the bistable ~3 ms RTT. Gated on recently_active so an
+    // idle guest is NOT woken 1 kHz (no core burn). The bump wakes a vCPU parked
+    // in `kick_wait_until`; harmless when it's running.
+    if crate::microvm::devices::nat::recently_active() {
+        crate::smp::fiber::net_kick_bump(crate::smp::per_core::current_core_id());
     }
 }
 
