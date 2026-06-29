@@ -93,6 +93,14 @@ unsafe extern "C" fn rust_main() -> ! {
         say(kmsg_fd, b"[microvm-init] switched to squashfs bundle root\n");
     }
 
+    // Diagnostic: if the host passed `nopeekbench=` on the cmdline, run a pure
+    // busybox download through the nat bridge (no cage/GPU/browser) so the
+    // BRIDGE can be measured in isolation, then halt. Bisects bridge vs
+    // browser-userspace for the loaded-latency hunt.
+    if bench_requested() {
+        launch_bench(kmsg_fd);
+    }
+
     // Hand the framebuffer to the Wayland stack: cage (wlroots kiosk
     // compositor) running LibreWolf, rendered through the pixman
     // software renderer + wlroots DRM backend → /dev/dri/card0 →
@@ -276,6 +284,67 @@ fn launch_wayland(kmsg_fd: i64) {
         );
     }
     say(kmsg_fd, b"[microvm-init] cage execve failed -- falling back\n");
+}
+
+/// True if the kernel cmdline contains `nopeekbench` — the host asked for a
+/// pure-bridge throughput run instead of the browser.
+fn bench_requested() -> bool {
+    let fd = unsafe {
+        syscall3(SYS_OPEN, b"/proc/cmdline\0".as_ptr() as u64, 0 /*O_RDONLY*/, 0)
+    };
+    if fd < 0 { return false; }
+    let mut buf = [0u8; 1024];
+    let n = unsafe {
+        syscall3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+    };
+    let _ = unsafe { syscall3(SYS_CLOSE, fd as u64, 0, 0) };
+    if n <= 0 { return false; }
+    let s = &buf[..n as usize];
+    let needle = b"nopeekbench";
+    s.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Pure-bridge throughput run: bring up eth0, wget a big file three times from
+/// the local server (10.0.2.2 via slirp) through our nat bridge — no cage, no
+/// GPU, no browser. The SERVER reports the authoritative rate; guest /proc/
+/// uptime gives a cross-check. Then halt. `MB` read from the cmdline.
+fn launch_bench(kmsg_fd: i64) {
+    say(kmsg_fd, b"[microvm-init] netbench mode: pure-bridge throughput run\n");
+    let prog = b"/bin/sh\0".as_ptr();
+    let arg0 = b"/bin/sh\0".as_ptr();
+    let arg1 = b"-c\0".as_ptr();
+    let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
+                 ip link set \"$IFACE\" up 2>/dev/null || ifconfig \"$IFACE\" up 2>/dev/null; \
+                 ip addr add 10.99.0.2/24 dev \"$IFACE\" 2>/dev/null \
+                   || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
+                 ip route add default via 10.99.0.1 2>/dev/null \
+                   || route add default gw 10.99.0.1 2>/dev/null; \
+                 MB=$(sed -n 's/.*nopeekbench=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
+                 [ -z \"$MB\" ] && MB=1000; \
+                 echo \"<0>[netbench-vm] iface=$IFACE mb=$MB GET x3\" > /dev/kmsg; \
+                 for i in 1 2 3; do \
+                   T0=$(cut -d' ' -f1 /proc/uptime); \
+                   wget -q -O /dev/null \"http://10.0.2.2/get?mb=$MB\" 2>/dev/null; \
+                   T1=$(cut -d' ' -f1 /proc/uptime); \
+                   echo \"<0>[netbench-vm] GET run $i: guest uptime $T0 -> $T1\" > /dev/kmsg; \
+                 done; \
+                 echo \"<0>[netbench-vm] done -- halting\" > /dev/kmsg; \
+                 sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
+                 while true; do sleep 3600; done\0".as_ptr();
+    let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
+    let env1 = b"TERM=linux\0".as_ptr();
+    let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
+    let envp = [env0, env1, core::ptr::null::<u8>()];
+    unsafe {
+        syscall3(
+            SYS_EXECVE,
+            prog as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        );
+    }
+    say(kmsg_fd, b"[microvm-init] netbench execve failed\n");
 }
 
 /// Mount the read-only squashfs userspace bundle from `/dev/vdb` and
