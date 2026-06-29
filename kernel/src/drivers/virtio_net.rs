@@ -18,7 +18,7 @@ static HOST_OFFLOAD: AtomicBool = AtomicBool::new(false);
 /// (negotiation + send_offload + l3_outbound_offload) stays in the tree for
 /// debugging; flip true to retest. With it false, TX falls back to the working
 /// SW path (`emit_tcp_out`).
-const TX_OFFLOAD_ENABLED: bool = true;
+const TX_OFFLOAD_ENABLED: bool = false;
 
 /// True iff the host NIC accepts offloaded (CSUM+TSO) TX frames via `send_offload`.
 pub fn host_offload_ok() -> bool {
