@@ -1513,7 +1513,16 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 }
             } else if sub == "linux" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm linux") {
-                    microvm_linux(b"");
+                    microvm_linux(b"", None);
+                }
+            } else if let Some(rest) = sub.strip_prefix("benchvm") {
+                // `microvm benchvm [<MB>]` — launch the microvm in pure-bridge
+                // throughput mode: PID-1 wgets <MB> MiB through the nat bridge
+                // (no cage/GPU/browser), the local netbench_server reports the
+                // rate. Isolates the bridge from the browser userspace.
+                if require_cap(vault, &session, Rights::EXECUTE, "microvm benchvm") {
+                    let mb: u32 = rest.trim().parse().unwrap_or(1000);
+                    microvm_linux(b"", Some(mb));
                 }
             } else if let Some(rest) = sub.strip_prefix("shell") {
                 // `microvm shell [<line>]` — pre-injects <line> + '\n'
@@ -1528,7 +1537,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     let mut buf = alloc::vec::Vec::with_capacity(line.len() + 1);
                     buf.extend_from_slice(line.as_bytes());
                     buf.push(b'\n');
-                    microvm_linux(&buf);
+                    microvm_linux(&buf, None);
                 }
             } else {
                 kprintln!("[microvm] unknown subcommand: '{}'", sub);
@@ -1541,7 +1550,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             // (substrate self-test + bare-boot diag); `browser` is what
             // the user types or what drun spawns.
             if require_cap(vault, &session, Rights::EXECUTE, "browser") {
-                microvm_linux(b"");
+                microvm_linux(b"", None);
             }
         }
         "caps" | "capabilities" => {
@@ -1992,10 +2001,10 @@ fn microvm_linux_info() {
 /// requires BSP state and will fail from a worker → host-fn returns
 /// -1; caller must type `browser` at a Core-0 prompt instead.
 pub fn launch_browser() {
-    microvm_linux(b"");
+    microvm_linux(b"", None);
 }
 
-fn microvm_linux(inject: &[u8]) {
+fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
     const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
     /// Optional userspace bundle — Alpine minirootfs + busybox + (future)
@@ -2108,6 +2117,11 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         crate::rtc::read_unix_time().or_else(crate::net::ntp::unix_time)
     {
         let _ = write!(s, " nopeektime={}", epoch);
+    }
+    // Diagnostic pure-bridge throughput run: PID-1 sees `nopeekbench=` and runs
+    // a busybox wget loop through the nat bridge instead of cage/browser.
+    if let Some(mb) = bench_mb {
+        let _ = write!(s, " nopeekbench={}", mb);
     }
     let cmdline: alloc::vec::Vec<u8> = s.into_bytes();
     let cmdline: &[u8] = &cmdline;
