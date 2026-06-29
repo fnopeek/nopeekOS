@@ -1969,8 +1969,22 @@ impl VmContext {
                 // BSP-only: the AP never pumps the NAT (stays false).
                 let mut pumped = false;
                 if is_bsp {
-                    pumped = crate::microvm::devices::nat::pump(
-                        &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem);
+                    // Full off-vCPU mode: the `net_dataplane` worker owns the net
+                    // device (RX + TX + flush) on its own core. The BSP does NOT
+                    // touch the device here — only lock-free NAT housekeeping — so
+                    // RX and TX live on ONE path (the worker) instead of split
+                    // across the worker and the vCPU's pump. `recently_active`
+                    // (set by the worker) feeds idle-accounting; the worker's RX
+                    // IRQ10 is folded lock-free into `pending_irqs` and injected at
+                    // the top of this block, so we must NOT inject it again here.
+                    let full = crate::microvm::devices::net_backend::full_active();
+                    if full {
+                        crate::microvm::devices::nat::housekeep();
+                        pumped = crate::microvm::devices::nat::recently_active();
+                    } else {
+                        pumped = crate::microvm::devices::nat::pump(
+                            &mut *crate::microvm::devices::net_backend::lock(), sh.guest_mem);
+                    }
                     if sh.pci.virtio_input.drain_injected(sh.guest_mem) {
                         let vector = sh.pic.vector_for_irq(12);
                         let info: u64 = (vector as u64) | (1u64 << 31);
@@ -1978,9 +1992,9 @@ impl VmContext {
                         self.vcpu.consecutive_idle = 0;
                         continue;
                     }
-                    // (snd pump moved to the per-exit common path above; its IRQ
-                    // is drained from pending_irqs at the top of this block.)
-                    if pumped {
+                    // Non-full only: the legacy pump injected RX → raise IRQ10.
+                    // In full mode the worker's raise_irq handles this (above).
+                    if pumped && !full {
                         let vector = sh.pic.vector_for_irq(10);
                         let info: u64 = (vector as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);

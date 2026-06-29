@@ -911,6 +911,16 @@ pub fn l3_rewrite_inbound(ip: &[u8]) -> Option<Vec<u8>> {
 /// it's been injected into the guest ring — no per-packet heap churn.
 pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
 
+/// Lock-free NAT housekeeping for the full off-vCPU data plane: reap idle
+/// masquerade mappings so the table can't fill over a long session. In full mode
+/// the device-touching work (`tx_flush`/RX drain) is the `net_dataplane` worker's
+/// job — the BSP only needs this, and it takes NO net-device lock (so the BSP
+/// never contends with the worker on the hot path). The worker owns RX+TX; the
+/// vCPU owns guest execution + IRQ injection. That's the single, unified path.
+pub fn housekeep() {
+    l3_reap(crate::interrupts::ticks());
+}
+
 /// Drop idle mappings so the table can't fill over a long session.
 fn l3_reap(now: u64) {
     let mut tbl = L3.lock();
