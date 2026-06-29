@@ -1443,6 +1443,12 @@ pub fn note_worker_raise() { NS_WORKER_RAISE.fetch_add(1, AtOrd::Relaxed); }
 static NS_KICK_DECOUPLED: AtomicU64 = AtomicU64::new(0);
 pub fn note_decoupled_kick() { NS_KICK_DECOUPLED.fetch_add(1, AtOrd::Relaxed); }
 pub fn decoupled_kick_count() -> u64 { NS_KICK_DECOUPLED.load(AtOrd::Relaxed) }
+/// Times the worker kicked the BSP because the guest RX ring was FULL (pending,
+/// nothing injected) so the guest must run to drain+repost. High = the guest's
+/// NAPI/repost is the limiter and the ring-full stall was real.
+static NS_KICK_RINGFULL: AtomicU64 = AtomicU64::new(0);
+pub fn note_ringfull_kick() { NS_KICK_RINGFULL.fetch_add(1, AtOrd::Relaxed); }
+pub fn ringfull_kick_count() -> u64 { NS_KICK_RINGFULL.load(AtOrd::Relaxed) }
 /// virtio-gpu TRANSFER_TO_HOST pixel bytes copied on the vCPU core (the browser
 /// rendering). If high during a download, the framebuffer copy is stealing vCPU
 /// cycles from the net pump (the framebuffer↔pump contention) — Florian's
@@ -1463,6 +1469,12 @@ pub struct RxDrain {
     /// The guest wants its RX IRQ line raised: EVENT_IDX threshold crossed AND
     /// NAPI hasn't suppressed. Drives `raise_irq` only. Implies `injected`.
     pub want_irq: bool,
+    /// We had staged RX but the guest RX ring was FULL (inject_rx=false) — the
+    /// frame is requeued. The guest must RUN to drain its ring + repost buffers,
+    /// so the BSP must be kicked even though nothing was injected. Without this
+    /// the parked BSP eats the full 2ms kick_wait timeout before reposting (the
+    /// confirmed ring-full stall = a chunk of the download lottery).
+    pub pending: bool,
 }
 
 /// Drain the staging queue into the guest RX ring. Shared by pump() + pump_fast().
@@ -1491,6 +1503,7 @@ fn drain_inbound(
         gro_flush_expired(crate::interrupts::rdtsc());
     }
     let mut any = false;
+    let mut stalled = false;
     loop {
         let item = { INBOUND_Q.lock().pop_front() };
         let Some((push_tsc, frame)) = item else { break };
@@ -1517,6 +1530,7 @@ fn drain_inbound(
             // High rate here = the GUEST is the limiter (NAPI/repost too slow).
             NS_INJECT_FALSE.fetch_add(1, AtOrd::Relaxed);
             INBOUND_Q.lock().push_front((push_tsc, frame));
+            stalled = true;
             break;
         }
     }
@@ -1527,7 +1541,7 @@ fn drain_inbound(
     // overflows → drops → TCP sawtooth (the speedtest "200→60→200" oscillation).
     // The guest re-checks the used ring when it re-enables interrupts, so a
     // suppressed packet is never stranded.
-    RxDrain { injected: any, want_irq: any && net.rx_wants_irq(mem) }
+    RxDrain { injected: any, want_irq: any && net.rx_wants_irq(mem), pending: stalled }
 }
 
 /// Number of currently-active (non-closed) TCP sessions. The run_linux

@@ -34,12 +34,18 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 static WAKE_IRQ: AtomicU64 = AtomicU64::new(0);
 static WAKE_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 static WAKE_POLLED: AtomicU64 = AtomicU64::new(0);
+/// spin = during an active transfer we did NOT park on the 2ms timeout but
+/// cooperatively yielded and re-looped (native-consumer-style inline drain on
+/// the reserved worker core). This is what keeps the guest ACK clock off the
+/// 2ms park raster → out of the slow throughput regime (the download lottery).
+static WAKE_SPIN: AtomicU64 = AtomicU64::new(0);
 
-/// (irq, timeout, polled) wake counts — double-sample for a per-second rate.
-pub fn wake_snapshot() -> (u64, u64, u64) {
+/// (irq, timeout, polled, spin) wake counts — double-sample for a per-second rate.
+pub fn wake_snapshot() -> (u64, u64, u64, u64) {
     (WAKE_IRQ.load(Ordering::Relaxed),
      WAKE_TIMEOUT.load(Ordering::Relaxed),
-     WAKE_POLLED.load(Ordering::Relaxed))
+     WAKE_POLLED.load(Ordering::Relaxed),
+     WAKE_SPIN.load(Ordering::Relaxed))
 }
 
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -120,14 +126,17 @@ fn full_consume(full: bool) {
             super::nat::note_worker_raise();
             crate::microvm::devices::net_backend::raise_irq();
         }
-        // Wake the BSP vCPU FIBER whenever we injected ANY RX, decoupled from the
-        // IRQ decision. A parked vCPU can't NAPI-poll a non-empty ring; gating the
-        // wake on want_irq stranded suppressed-but-pending RX until the 2ms park
-        // timeout — the measured `kick_wait timeout` stalls that ARE the download
-        // throughput lottery. The kick is a bare scheduler IPI (net_kick_bump +
-        // VCPU_KICK), no guest IRQ line, so it does NOT preempt NAPI.
-        if d.injected {
-            if !d.want_irq { super::nat::note_decoupled_kick(); }
+        // Wake the BSP vCPU FIBER whenever we injected ANY RX, OR when the guest
+        // RX ring was full (pending) so the guest must run to drain+repost.
+        // Decoupled from the IRQ decision: a parked vCPU can't NAPI-poll a
+        // non-empty ring nor repost a full one; gating the wake on want_irq
+        // stranded both until the 2ms park timeout — the measured `kick_wait
+        // timeout` stalls that ARE the download lottery. The kick is a bare
+        // scheduler IPI (net_kick_bump + VCPU_KICK), no guest IRQ line, so it
+        // does NOT preempt an active NAPI poll.
+        if d.injected || d.pending {
+            if d.pending && !d.injected { super::nat::note_ringfull_kick(); }
+            else if !d.want_irq { super::nat::note_decoupled_kick(); }
             crate::microvm::cpu::svm::kick_bsp_net_irq();
         }
     }
@@ -201,6 +210,20 @@ fn worker_entry(arg: u64) {
         // held GRO burst still flushes and a polled NIC (vector 0) still drains.
         let vec = crate::drivers::virtio_net::rx_irq_vector();
         if vec != 0 {
+            // ACTIVE-TRANSFER FAST PATH (the native-consumer mirror): while a
+            // download is in flight, do NOT park on the 2ms RX-IRQ timeout. That
+            // coarse park is what phase-locks the guest ACK clock into the slow
+            // regime — the per-connection download lottery. Instead drain + inject
+            // + service TX inline and YIELD cooperatively, re-looping immediately
+            // (the worker is on a RESERVED core, so this spin steals nothing from
+            // the compositor/Core 0 — unlike the reverted BSP-core spin). When RX
+            // goes quiet (>50ms, recently_active=false) we fall through to the
+            // event-park below so an idle worker never burns the core.
+            if full && super::nat::recently_active() {
+                WAKE_SPIN.fetch_add(1, Ordering::Relaxed);
+                crate::smp::fiber::yield_ready();
+                continue;
+            }
             let since = crate::irq::arm(vec);
             super::nat::rx_producer_drain();
             full_consume(full);
