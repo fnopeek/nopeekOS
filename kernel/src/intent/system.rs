@@ -88,6 +88,8 @@ pub fn intent_cores() {
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let dk0 = crate::microvm::devices::nat::decoupled_kick_count();
     let rf0 = crate::microvm::devices::nat::ringfull_kick_count();
+    let rh0 = crate::microvm::devices::nat::rx_health_snapshot();
+    let gt0 = crate::microvm::devices::nat::guest_timer_count();
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
@@ -119,6 +121,8 @@ pub fn intent_cores() {
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let dk1 = crate::microvm::devices::nat::decoupled_kick_count();
     let rf1 = crate::microvm::devices::nat::ringfull_kick_count();
+    let rh1 = crate::microvm::devices::nat::rx_health_snapshot();
+    let gt1 = crate::microvm::devices::nat::guest_timer_count();
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -250,6 +254,19 @@ pub fn intent_cores() {
                       kk * 1000 / window_ms, kt * 1000 / window_ms,
                       dk * 1000 / window_ms, rf * 1000 / window_ms);
         }
+        // Bridge RX backpressure: drops/s = INBOUND_Q overflow (→ server retransmit
+        // → cwnd collapse → the slow regime). If this climbs during a SLOW GET, the
+        // lottery is server-cwnd-collapse from our drops, not park latency.
+        let drops = rh1.0.saturating_sub(rh0.0);
+        let injf = rh1.1.saturating_sub(rh0.1);
+        let rxlat_us = rh1.2.saturating_mul(1_000_000) / tsc_hz.max(1);
+        kprintln!("    net bridge backpressure: drops={}/s injfalse={}/s rxlat_max={}us",
+                  drops * 1000 / window_ms, injf * 1000 / window_ms, rxlat_us);
+        // Effective guest HZ: the guest programs 1 kHz (CONFIG_HZ=1000); injected
+        // only while VMRUN runs, so a parky (slow) connection sees <1000 = the
+        // timer freezing under the 2ms parks = the "1000 vs 100" lottery.
+        let gt = gt1.saturating_sub(gt0);
+        kprintln!("    guest timer/s (effective HZ): {}", gt * 1000 / window_ms);
     }
     // Host-time breakdown: where the dedicated guest cores actually SPENT
     // their cycles this window. guest% = in VMRESUME (the guest really ran);
