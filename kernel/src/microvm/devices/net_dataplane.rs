@@ -121,6 +121,38 @@ pub fn wake_snapshot() -> (u64, u64, u64, u64) {
      WAKE_BUSY.load(Ordering::Relaxed))
 }
 
+/// Full-path RX diagnostics — the INBOUND_Q `rxlat`/`drops` counters are BLIND in
+/// full mode (they only record on the `!full` staging path), so `cores` needs
+/// these to read the actual RX cadence. `FRAMES`/`PASSES` give the avg inject
+/// batch; `GAP_MAX` is the peak TSC between successive non-empty drains (= the
+/// inter-burst gap that, if > the warm window, drops us into the ~1.5 ms park).
+static RX_PASS_FRAMES: AtomicU64 = AtomicU64::new(0);
+static RX_PASS_COUNT: AtomicU64 = AtomicU64::new(0);
+static RX_GAP_MAX_TSC: AtomicU64 = AtomicU64::new(0);
+static RX_LAST_PASS_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// Record one non-empty RX drain pass: `n` frames drained, at TSC `now`.
+fn note_rx_pass(n: u64, now: u64) {
+    RX_PASS_FRAMES.fetch_add(n, Ordering::Relaxed);
+    RX_PASS_COUNT.fetch_add(1, Ordering::Relaxed);
+    let last = RX_LAST_PASS_TSC.swap(now, Ordering::Relaxed);
+    if last != 0 {
+        let gap = now.wrapping_sub(last);
+        if gap > RX_GAP_MAX_TSC.load(Ordering::Relaxed) {
+            RX_GAP_MAX_TSC.store(gap, Ordering::Relaxed);
+        }
+    }
+}
+
+/// (frames cumulative, passes cumulative, gap_max TSC). `gap_max` is swap-reset on
+/// read so two calls bracket a window: the t0 call clears it, the t1 call returns
+/// the window peak. `cores` diffs frames/passes for avg batch.
+pub fn rx_pass_stats() -> (u64, u64, u64) {
+    (RX_PASS_FRAMES.load(Ordering::Relaxed),
+     RX_PASS_COUNT.load(Ordering::Relaxed),
+     RX_GAP_MAX_TSC.swap(0, Ordering::Relaxed))
+}
+
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
 /// True between start_worker and stop_worker. Core 0's `net::poll()` yields the
@@ -146,6 +178,17 @@ const PARK_SAFETY_MS: u64 = 2;
 /// gap so an ACK never waits long enough to trip the server's Tail-Loss-Probe
 /// (~2×SRTT). Only spent while `recently_active`, on the reserved worker core.
 const BUSY_POLL_US: u64 = 1000;
+
+/// Experiment (v0.226.65): keep the worker WARM for the WHOLE active transfer
+/// (busy-poll while `recently_active`) instead of only `BUSY_POLL_US`. Measured
+/// root: the fixed 1 ms budget let the slow regime's ~1.5 ms inter-burst gap drop
+/// the worker into the ~1.5 ms host-IRQ park → that park rate IS the slow RTT →
+/// with cwnd pinned at 10, throughput = rwnd/RTT collapses → the lottery. The
+/// worker is the cadence gate (the reverted vCPU-side halt-poll was decoupled —
+/// it warmed the wrong core). Reserved worker core + `recently_active` gate ⇒ a
+/// paused transfer parks within one ~50 ms window, no idle core-burn. Flip to
+/// `false` to A/B against the .64 behaviour.
+const WARM_THROUGH_TRANSFER: bool = true;
 
 /// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
 /// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
@@ -209,6 +252,10 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
         // Mark the NIC drained to here so has_work() only fires on a NEW frame.
         LAST_RX_USED.store(
             crate::drivers::virtio_net::rx_used_idx() as u32, Ordering::Relaxed);
+    }
+    // Full-path RX cadence diagnostic (the only place that sees the real batch).
+    if !rewritten.is_empty() {
+        note_rx_pass(rewritten.len() as u64, crate::interrupts::rdtsc());
     }
 
     // ── Phase 2: SHORT device-mutex section — guest-ring work only. Inject any
@@ -330,16 +377,30 @@ fn worker_entry(arg: u64) {
             let deadline = crate::interrupts::rdtsc()
                 + BUSY_POLL_US.saturating_mul((freq / 1_000_000).max(1));
             let mut got = false;
-            while crate::interrupts::rdtsc() < deadline {
+            let mut spins: u32 = 0;
+            loop {
                 if has_work() { got = true; break; }
+                spins = spins.wrapping_add(1);
+                if WARM_THROUGH_TRANSFER {
+                    // Stay warm for the whole transfer: re-check the ~50 ms active
+                    // window periodically (cheap tick read); park only once the
+                    // transfer truly pauses, so a slow regime's ~1.5 ms inter-burst
+                    // gap no longer drops us into the host-IRQ park (the slow RTT).
+                    if spins & 0x3FF == 0
+                        && !crate::microvm::devices::nat::recently_active() {
+                        break;
+                    }
+                } else if crate::interrupts::rdtsc() >= deadline {
+                    break; // .64 behaviour: fixed BUSY_POLL_US budget
+                }
                 core::hint::spin_loop();
             }
             if got {
                 WAKE_BUSY.fetch_add(1, Ordering::Relaxed);
                 continue; // stay warm — service the work on the next loop pass
             }
-            // Budget exhausted with no work → the transfer paused; fall through
-            // to the event-park (HLT) so an idle worker never burns the core.
+            // No work and the active window expired → the transfer paused; fall
+            // through to the event-park (HLT) so an idle worker never burns the core.
         }
 
         // Park EVENT-DRIVEN on the host NIC RX IRQ (routed to this core). Arm
