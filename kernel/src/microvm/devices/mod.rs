@@ -14,6 +14,7 @@ pub mod guest_mem;
 pub mod insn_decoder;
 pub mod nat;
 pub mod net_backend;
+pub mod gpu_backend;
 pub mod net_dataplane;
 pub mod p9_async;
 pub mod pci_bus;
