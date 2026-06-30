@@ -684,9 +684,12 @@ impl VirtioGpu {
         // guest→host + a 2nd compositor pass), stealing net-processing cycles +
         // the memory bus. Florian's "smaller window / hidden = faster download"
         // exposed the coupling. 30 fps idle (smooth UI); back off to ~8 fps while
-        // a download is live (display stays usable, the vCPU is freed for RX).
-        // Probe to size the win before the full off-vCPU GPU copy.
-        let frame_ms = if super::nat::download_active() { 125 } else { 33 };
+        // ANY transfer is live (the display stays usable, the vCPU is freed for
+        // RX *and* TX). Was `download_active()` — download-only — which left the
+        // GPU at 30 fps during a speedtest UPLOAD, so the 8 MB copies contended
+        // with the per-segment TX on the vCPU and the upload hung. `recently_active`
+        // covers both directions. Probe to size the win before off-vCPU GPU copy.
+        let frame_ms = if super::nat::recently_active() { 125 } else { 33 };
         let frame_gap = (crate::interrupts::tsc_freq() / 1000) * frame_ms;
 
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
