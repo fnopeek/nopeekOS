@@ -2901,10 +2901,15 @@ fn handle_mmio_ept_gpu(
     }
 
     if let Some(qidx) = gpu.take_pending_kick() {
-        let advanced = gpu.service_queues(qidx, mem);
-        if advanced {
-            // virtio-gpu IRQ line = 9.
-            deliver_irq_vmx(pending, pic, 9);
+        if crate::microvm::devices::gpu_backend::full_active() {
+            // Off-vCPU: defer the heavy copy + write_frame to the GPU worker.
+            crate::microvm::devices::gpu_backend::note_gpu_kick(qidx);
+        } else {
+            let advanced = gpu.service_queues(qidx, mem);
+            if advanced {
+                // virtio-gpu IRQ line = 9.
+                deliver_irq_vmx(pending, pic, 9);
+            }
         }
     }
 

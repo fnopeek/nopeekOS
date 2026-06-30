@@ -455,6 +455,11 @@ pub fn guest_vcpus() -> u8 {
     if reserve_offload_core() {
         workers = workers.saturating_sub(1);
     }
+    // A second reserved core for the off-vCPU GPU worker (framebuffer copy off
+    // the vCPU). One fewer vCPU; the browser is not guest-CPU-bound so it wins.
+    if reserve_gpu_core() {
+        workers = workers.saturating_sub(1);
+    }
     workers.clamp(1, MAX_VCPUS_CAP) as u8
 }
 
@@ -478,6 +483,16 @@ fn reserve_offload_core() -> bool {
         // Need ≥3 cores: Core 0 (BSP) + ≥1 vCPU + 1 worker. Below that, fall
         // back to co-location rather than starving the guest to a single vCPU.
         && crate::smp::per_core::core_count() >= 3
+}
+
+/// Reserve a SECOND dedicated worker core for the off-vCPU GPU backend (the
+/// ~8 MB/frame framebuffer copy + write_frame). Needs ≥4 cores: Core 0 + ≥1 vCPU
+/// + net worker + gpu worker. AMD-only (the off-vCPU backends are SVM-only today).
+/// Below that the GPU stays inline on the vCPU (Stage 1 / the framerate-throttle).
+fn reserve_gpu_core() -> bool {
+    reserve_offload_core()
+        && crate::microvm::devices::gpu_backend::FULL_GPU_BACKEND
+        && crate::smp::per_core::core_count() >= 4
 }
 
 /// Hard cap on guest vCPUs (sizes the per-backend IPI bitmaps + the spawn
@@ -1247,6 +1262,18 @@ fn vcpu_fiber_task(_arg: u64) {
         worker_core, guest_vcpus(), reserve_offload_core()
     );
     crate::microvm::devices::net_dataplane::start_worker(worker_core, full_backend);
+
+    // Off-vCPU GPU worker (Stage 2): on AMD with a spare core, claim a SECOND
+    // reserved core and run the ~8 MB/frame framebuffer copy + write_frame there,
+    // off the vCPU — so the browser's rendering never steals the net-servicing
+    // cycles (the 166 ms-loaded-latency root). guest_vcpus() already left this
+    // core free. Gated on FULL_GPU_BACKEND + AMD + ≥4 cores; else GPU stays inline.
+    if reserve_gpu_core() {
+        let gpu_core = claim_offload_core();
+        crate::kprintln!(
+            "[microvm] gpu worker core {} (off-vCPU framebuffer copy)", gpu_core);
+        crate::microvm::devices::gpu_backend::start_worker(gpu_core);
+    }
 
     match *VENDOR.lock() {
         Vendor::Amd => {

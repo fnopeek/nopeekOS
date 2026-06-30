@@ -67,3 +67,68 @@ pub fn take_gpu_kick() -> Option<u16> {
     let q = GPU_KICK.swap(0xFFFF, Ordering::AcqRel);
     if q == 0xFFFF { None } else { Some(q) }
 }
+
+/// Guest GPU completion IRQ (line 9), raised by the worker after it advanced the
+/// used-ring, folded into the BSP's `pending_irqs` on its next exit (mirror of the
+/// net IRQ10 path). Lock-free so the worker needs no `VmShared` borrow.
+static GPU_IRQ_PENDING: AtomicBool = AtomicBool::new(false);
+#[inline]
+pub fn raise_irq() { GPU_IRQ_PENDING.store(true, Ordering::Release); }
+/// BSP: take the pending GPU IRQ (clears it). True ⇒ fold IRQ9 into pending_irqs.
+#[inline]
+pub fn take_irq() -> bool { GPU_IRQ_PENDING.swap(false, Ordering::AcqRel) }
+
+// ── The off-vCPU GPU worker fiber (Stage 2) ──
+static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
+static STOP: AtomicBool = AtomicBool::new(false);
+/// service_queues does the ~8 MB framebuffer copy + write_frame; give it a roomy
+/// fiber stack (the default 128 KiB has no guard page).
+const WORKER_STACK_BYTES: usize = 256 * 1024;
+
+/// Spawn the GPU worker on its OWN reserved `core`. Idempotent per VM session.
+/// Only when `FULL_GPU_BACKEND` + a core was reserved (see `mod::guest_vcpus`).
+pub fn start_worker(core: usize) {
+    if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
+    STOP.store(false, Ordering::Release);
+    set_worker_core(core);
+    set_full_active(true);
+    crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
+}
+
+/// Stop the worker at VM teardown and wait (bounded) for it to exit.
+pub fn stop_worker() {
+    if !WORKER_RUNNING.load(Ordering::Acquire) { return; }
+    set_full_active(false);
+    STOP.store(true, Ordering::Release);
+    for _ in 0..50_000_000u64 {
+        if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
+        core::hint::spin_loop();
+    }
+    GPU_KICK.store(0xFFFF, Ordering::Release);
+    GPU_IRQ_PENDING.store(false, Ordering::Release);
+    WORKER_CORE.store(usize::MAX, Ordering::Release);
+}
+
+fn worker_entry(_arg: u64) {
+    loop {
+        if STOP.load(Ordering::Acquire) {
+            WORKER_RUNNING.store(false, Ordering::Release);
+            return;
+        }
+        // Drain any deferred controlq notify: do the heavy copy + write_frame on
+        // THIS core, off the vCPU. Raise IRQ9 + wake the BSP to inject it.
+        if let Some(qidx) = take_gpu_kick() {
+            if let Some(gm) = crate::microvm::devices::guest_mem::active() {
+                let advanced = GPU.lock().service_queues(qidx, gm);
+                if advanced {
+                    raise_irq();
+                    crate::microvm::cpu::svm::kick_bsp_net_irq();
+                }
+            }
+        }
+        // Park until the next doorbell: `note_gpu_kick` → `kick_host_core` bumps
+        // this core's net-kick generation + IPIs it, so `kick_wait` resumes us
+        // event-driven (2 ms safety re-check on a quiet display).
+        crate::smp::fiber::kick_wait(2);
+    }
+}

@@ -211,6 +211,11 @@ pub fn start_worker(core: usize, full: bool) {
 /// Stop the fiber at VM teardown and wait (bounded) for it to exit so the host's
 /// own networking reclaims the NIC drain.
 pub fn stop_worker() {
+    // The off-vCPU GPU worker shares this lifecycle (both spawned in
+    // vcpu_fiber_task); stop it here so every net-worker teardown site covers it
+    // too (else a leaked GPU fiber + a stale WORKER_RUNNING would block the next
+    // VM's GPU worker from starting). Idempotent (its own RUNNING guard).
+    crate::microvm::devices::gpu_backend::stop_worker();
     if !WORKER_RUNNING.load(Ordering::Acquire) { return; }
     ACTIVE.store(false, Ordering::Release);
     crate::microvm::devices::net_backend::set_full_active(false);
