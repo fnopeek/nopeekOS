@@ -47,7 +47,11 @@ static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 static FULL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Compile-time gate for the off-vCPU GPU worker (clean OTA rollback).
-pub const FULL_GPU_BACKEND: bool = true;
+/// OFF: the off-vCPU GPU's async IRQ9 delivery to the guest is unreliable —
+/// cage's virtio-gpu driver stalled waiting for a completion that never arrived
+/// ("no new frames"), so the GPU stays INLINE on the vCPU (synchronous
+/// deliver_irq) for now. Re-enable only once the worker→guest IRQ path is proven.
+pub const FULL_GPU_BACKEND: bool = false;
 #[inline]
 pub fn full_active() -> bool { FULL_ACTIVE.load(Ordering::Acquire) }
 pub fn set_full_active(on: bool) { FULL_ACTIVE.store(on, Ordering::Release); }
