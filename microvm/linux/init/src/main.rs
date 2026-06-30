@@ -381,6 +381,12 @@ fn launch_bench(kmsg_fd: i64) {
     let env1 = b"TERM=linux\0".as_ptr();
     let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
     let envp = [env0, env1, core::ptr::null::<u8>()];
+    // Fork the guest-side probe so [gdiag] runs alongside the bench — the clean
+    // measurement (raw wget/nc, no browser compute). The decisive question for the
+    // lottery: during a SLOW GET is the guest CPU-bound, or IDLE and waiting on us?
+    if gdiag_requested() {
+        unsafe { spawn_gdiag(kmsg_fd); }
+    }
     unsafe {
         syscall3(
             SYS_EXECVE,
