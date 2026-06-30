@@ -190,11 +190,26 @@ const BUSY_POLL_US: u64 = 1000;
 /// `false` to A/B against the .64 behaviour.
 ///
 /// EXONERATED (v0.226.65 HW): warm worker (cores irq=0) but throughput stayed a
-/// lottery and gap_max stayed/grew (3.3-40ms) → the RTT gap is UPSTREAM of our
-/// park (slirp + host oversubscription / guest rwnd), not the park. Reverted to
-/// false (warm-spin only added host contention, starving QEMU's single-threaded
-/// slirp). Kept behind the flag for a future bare-metal A/B if ever relevant.
-const WARM_THROUGH_TRANSFER: bool = false;
+/// lottery and gap_max stayed/grew (3.3-40ms) → concluded the RTT gap is UPSTREAM
+/// of our park (slirp + host oversubscription / guest rwnd), not the park.
+///
+/// RE-OPENED (v0.226.78): that exoneration was CONFOUNDED. It ran at .65, BEFORE
+/// the v0.226.69 BSP warm halt-poll existed — so back then ONLY the worker was
+/// warm while the BSP still parked COLD on every RX (a ~0.8ms vCPU-thread
+/// reschedule per RX→ACK round-trip), which kept the lottery alive regardless of
+/// the worker. The "gap is upstream" conclusion is therefore untrustworthy. The
+/// guest-side [gdiag] (v0.226.77) since PROVED the guest is 0% CPU during a slow
+/// GET, and the bridge-latency-decompose workflow localised the ~3ms to THREE
+/// cold cross-core park→wake reschedules — the worker re-park in the >1ms
+/// inter-burst gap (WAKE3) being the binding short-budget hop now that the BSP
+/// rides the gap (4ms spin, enable.rs:1486) but the worker still parks at 1ms.
+/// So "worker warm AND BSP warm through the whole transfer" was NEVER tested.
+/// This flip is that test. DIAGNOSTIC: this is the unbounded warm SPIN (pegs the
+/// reserved worker core while recently_active) — if it collapses the lottery we
+/// re-engineer it as a 0-CPU bounded poll-then-park (kick_wait_until_polled);
+/// if QEMU's slirp starves instead (RTT climbs), the host-oversubscription half
+/// of the .65 finding is the real wall and only bare-metal/AVIC crosses it.
+const WARM_THROUGH_TRANSFER: bool = true;
 
 /// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
 /// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
