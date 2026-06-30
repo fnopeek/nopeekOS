@@ -86,6 +86,7 @@ pub fn intent_cores() {
     let io0 = crate::microvm::cpu::io_port_snapshot();
     let wk0 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
+    let kl0 = crate::smp::fiber::kick_latency_snapshot(); // clears max
     let dk0 = crate::microvm::devices::nat::decoupled_kick_count();
     let rf0 = crate::microvm::devices::nat::ringfull_kick_count();
     let rh0 = crate::microvm::devices::nat::rx_health_snapshot();
@@ -121,6 +122,7 @@ pub fn intent_cores() {
     let io1 = crate::microvm::cpu::io_port_snapshot();
     let wk1 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
+    let kl1 = crate::smp::fiber::kick_latency_snapshot();
     let dk1 = crate::microvm::devices::nat::decoupled_kick_count();
     let rf1 = crate::microvm::devices::nat::ringfull_kick_count();
     let rh1 = crate::microvm::devices::nat::rx_health_snapshot();
@@ -257,6 +259,17 @@ pub fn intent_cores() {
             kprintln!("    bsp kick_wait/s: kicked={} timeout={} decoupled={} ringfull={}",
                       kk * 1000 / window_ms, kt * 1000 / window_ms,
                       dk * 1000 / window_ms, rf * 1000 / window_ms);
+        }
+        // kick→resume LATENCY (the irqfd-gap probe): how long from the worker's RX
+        // kick to the parked BSP vCPU actually resuming. µs = IPI-prompt (3ms RTT
+        // is elsewhere); ms = kicked-but-host-descheduled wake (nested oversub) =
+        // the structural irqfd gap → the real per-packet-round-trip cost.
+        let kln = kl1.1.saturating_sub(kl0.1);
+        if kln > 0 {
+            let avg_us = (kl1.0.saturating_sub(kl0.0)) / kln * 1_000_000 / tsc_hz.max(1);
+            let max_us = kl1.2.saturating_mul(1_000_000) / tsc_hz.max(1);
+            kprintln!("    bsp kick→resume: avg={}us max={}us (n={}/s)",
+                      avg_us, max_us, kln * 1000 / window_ms);
         }
         // Bridge RX backpressure: drops/s = INBOUND_Q overflow (→ server retransmit
         // → cwnd collapse → the slow regime). If this climbs during a SLOW GET, the

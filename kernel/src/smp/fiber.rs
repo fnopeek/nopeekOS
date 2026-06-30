@@ -325,6 +325,10 @@ static NET_KICK_GEN: [AtomicU64; MAX_CORES] = {
 pub fn net_kick_bump(cid: usize) {
     if cid < MAX_CORES {
         NET_KICK_GEN[cid].fetch_add(1, Ordering::Release);
+        // probe: stamp the FIRST kick after a park began (CAS 0→now); cleared at
+        // park start in kick_wait_until, read on resume → kick→resume latency.
+        let _ = KICK_SENT_TSC[cid].compare_exchange(
+            0, crate::interrupts::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
     }
 }
 
@@ -339,6 +343,26 @@ static KICK_TIMEOUT: AtomicU64 = AtomicU64::new(0);
 /// (woke, timeout) counts — double-sample for a rate.
 pub fn kick_wait_snapshot() -> (u64, u64) {
     (KICK_WOKE.load(Ordering::Relaxed), KICK_TIMEOUT.load(Ordering::Relaxed))
+}
+
+/// kick→resume LATENCY probe (the irqfd-gap measurement): per-core TSC of the
+/// first net-kick that lands AFTER a fiber begins parking (cleared at park start,
+/// CAS-set in `net_kick_bump`). On resume the parked fiber reads it → delta = how
+/// long the kick took to actually reschedule this core. µs ⇒ the IPI woke it
+/// promptly (the ~3 ms RTT is elsewhere); ms ⇒ the kicked-but-HLTed core waited
+/// for the host scheduler / nested-IPI delivery — exactly what KVM's irqfd avoids.
+static KICK_SENT_TSC: [AtomicU64; MAX_CORES] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; MAX_CORES]
+};
+static KICK_LAT_SUM: AtomicU64 = AtomicU64::new(0);
+static KICK_LAT_N: AtomicU64 = AtomicU64::new(0);
+static KICK_LAT_MAX: AtomicU64 = AtomicU64::new(0);
+/// (sum_tsc, n, max_tsc) — max is swap-reset so `cores` reads the window peak.
+pub fn kick_latency_snapshot() -> (u64, u64, u64) {
+    (KICK_LAT_SUM.load(Ordering::Relaxed),
+     KICK_LAT_N.load(Ordering::Relaxed),
+     KICK_LAT_MAX.swap(0, Ordering::Relaxed))
 }
 
 /// Park the running fiber until this core's net-kick generation advances (an
@@ -369,6 +393,7 @@ pub fn kick_wait_until(deadline: u64) -> bool {
         return false;
     }
     let kgen = net_kick_gen(cid);
+    KICK_SENT_TSC[cid].store(0, Ordering::Relaxed); // probe: measure kicks from here
     // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Park it,
     // switch to the scheduler; resumes when the gen advances or the deadline passes.
     unsafe {
@@ -376,8 +401,20 @@ pub fn kick_wait_until(deadline: u64) -> bool {
         switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
     }
     let woke = net_kick_gen(cid) != kgen;
-    if woke { KICK_WOKE.fetch_add(1, Ordering::Relaxed); }
-    else { KICK_TIMEOUT.fetch_add(1, Ordering::Relaxed); }
+    if woke {
+        KICK_WOKE.fetch_add(1, Ordering::Relaxed);
+        let sent = KICK_SENT_TSC[cid].swap(0, Ordering::Relaxed);
+        if sent != 0 {
+            let d = crate::interrupts::rdtsc().wrapping_sub(sent);
+            KICK_LAT_SUM.fetch_add(d, Ordering::Relaxed);
+            KICK_LAT_N.fetch_add(1, Ordering::Relaxed);
+            if d > KICK_LAT_MAX.load(Ordering::Relaxed) {
+                KICK_LAT_MAX.store(d, Ordering::Relaxed);
+            }
+        }
+    } else {
+        KICK_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+    }
     woke
 }
 
