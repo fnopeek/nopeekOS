@@ -2121,18 +2121,18 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     // Diagnostic pure-bridge throughput run: PID-1 sees `nopeekbench=` and runs
     // a busybox wget loop through the nat bridge instead of cage/browser.
     if let Some(mb) = bench_mb {
-        // Experiment (v0.226.66, BENCH-ONLY so the browser is untouched): nohz=off
-        // forces a periodic 1000 Hz tick. Measured root (v0.226.65 cores): with the
-        // worker warm (irq=0) the slow regime still shows gap_max≈3319µs ≈ 1/358 =
-        // the guest's tickless effective HZ, and snd_wnd collapses to 0 with
-        // DelayedACKs present → the guest's window-update ACK rides the coarse
-        // ~2.8 ms tick → the server waits ~3 ms for the window to reopen → high RTT
-        // → with cwnd pinned at 10, throughput = rwnd/RTT collapses (the lottery).
-        // nohz=off advances jiffies (and the jiffy-based delack timer) at 1 ms. If
-        // the slow regime + gap_max collapse, delayed-ACK-on-the-coarse-tick is it
-        // (then the real fix is surgical: deliver guest ticks faster on demand, not
-        // a permanent periodic tick). If unchanged, the gap is server/slirp pacing.
-        let _ = write!(s, " nohz=off nopeekbench={}", mb);
+        // `nohz=off` EXONERATED (v0.226.66 HW): forced 1000→2008 Hz effective tick
+        // but throughput stayed a lottery and gap_max grew to 40 ms (the extra
+        // timer-injects added host contention). So delayed-ACK-on-tick is NOT the
+        // root — reverted. `nopeekbenchhost=<gw>` lets PID-1 target whatever server
+        // sits at our host-NIC gateway, so the SAME bench works on slirp (10.0.2.2)
+        // and tap/vhost (e.g. 172.30.0.1) without a rebuild — that is the tap test
+        // that bypasses the single-threaded slirp ceiling (build.sh QEMU_NET=tap).
+        let gw = crate::net::ipv4::gateway();
+        let _ = write!(
+            s, " nopeekbenchhost={}.{}.{}.{} nopeekbench={}",
+            gw[0], gw[1], gw[2], gw[3], mb,
+        );
     }
     let cmdline: alloc::vec::Vec<u8> = s.into_bytes();
     let cmdline: &[u8] = &cmdline;
