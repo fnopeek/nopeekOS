@@ -204,12 +204,19 @@ const BUSY_POLL_US: u64 = 1000;
 /// inter-burst gap (WAKE3) being the binding short-budget hop now that the BSP
 /// rides the gap (4ms spin, enable.rs:1486) but the worker still parks at 1ms.
 /// So "worker warm AND BSP warm through the whole transfer" was NEVER tested.
-/// This flip is that test. DIAGNOSTIC: this is the unbounded warm SPIN (pegs the
-/// reserved worker core while recently_active) — if it collapses the lottery we
-/// re-engineer it as a 0-CPU bounded poll-then-park (kick_wait_until_polled);
-/// if QEMU's slirp starves instead (RTT climbs), the host-oversubscription half
-/// of the .65 finding is the real wall and only bare-metal/AVIC crosses it.
-const WARM_THROUGH_TRANSFER: bool = true;
+/// TESTED v0.226.78 (QEMU/AMD HW): worker-warm + BSP-warm together DID collapse
+/// the spurious-retransmit lottery — guest RetransSegs went to 0 and the floor
+/// rose (526 vs 125 Mbit, no catastrophic tail). CONFIRMED the worker park was a
+/// real root. BUT host `cores` showed TWO cores pegged 100% (net worker + BSP
+/// warm_poll, both spinning) — not 0-CPU — and throughput still capped/varied
+/// (526-1622). Root insight: the ~0.8ms cold park→wake is a QEMU-NESTING
+/// artifact — a parked nopeekOS core is a QEMU vCPU THREAD the L0 host must
+/// reschedule. On real hardware a HLTed core wakes on a hardware IPI in µs (no
+/// scheduler), so the lottery is largely a QEMU ghost and parking (0-CPU) is
+/// fine on bare metal. Reverted to false: the spin is not the answer (not 0-CPU,
+/// and it only papers over the QEMU reschedule tax). The 0-CPU bounded
+/// poll-then-park belongs on bare-metal where the wake is already fast.
+const WARM_THROUGH_TRANSFER: bool = false;
 
 /// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
 /// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
