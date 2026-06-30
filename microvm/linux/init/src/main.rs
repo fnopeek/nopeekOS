@@ -320,35 +320,37 @@ fn launch_bench(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
-                 echo \"<0>[netbench-vm] iface=$IFACE -- SHORT bench (run 'cores' during a GET) ===\" > /dev/kmsg; \
+                 H=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^nopeekbenchhost=//p'); \
+                 [ -z \"$H\" ] && H=10.0.2.2; \
+                 echo \"<0>[netbench-vm] iface=$IFACE server=$H -- SHORT bench (run 'cores' during a GET) ===\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] === idle RTT (ping x8) ===\" > /dev/kmsg; \
-                 ping -c 8 10.0.2.2 2>&1 | tail -3; \
+                 ping -c 8 \"$H\" 2>&1 | tail -3; \
                  echo 1 > /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null; \
                  echo 1 > /proc/sys/net/ipv4/tcp_no_ssthresh_metrics_save 2>/dev/null; \
                  NMS=$(cat /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null); \
                  echo \"<0>[netbench-vm] === GET 3x wget + 3x nc (is busybox wget the bottleneck?) ===\" > /dev/kmsg; \
                  for I in 1 2 3; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
-                   wget -q -O /dev/null \"http://10.0.2.2/get?mb=150\" 2>/dev/null; \
+                   wget -q -O /dev/null \"http://$H/get?mb=150\" 2>/dev/null; \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
                    awk -v a=$T0 -v b=$T1 -v i=$I 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] GET wget#%s 150MB: %.2fs = %.0f Mbit\\n\",i,d,150*8/d}' > /dev/kmsg; \
                  done; \
                  for I in 1 2 3; do \
                    T0=$(cut -d' ' -f1 /proc/uptime); \
-                   printf 'GET /get?mb=150 HTTP/1.0\\r\\nHost: 10.0.2.2\\r\\n\\r\\n' | nc -w 20 10.0.2.2 80 > /dev/null 2>&1; \
+                   printf 'GET /get?mb=150 HTTP/1.0\\r\\nHost: '\"$H\"'\\r\\n\\r\\n' | nc -w 20 \"$H\" 80 > /dev/null 2>&1; \
                    T1=$(cut -d' ' -f1 /proc/uptime); \
                    awk -v a=$T0 -v b=$T1 -v i=$I 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] GET nc#%s 150MB: %.2fs = %.0f Mbit\\n\",i,d,150*8/d}' > /dev/kmsg; \
                  done; \
                  echo \"<0>[netbench-vm] === PUT 300 (+ mid-flight upload-socket cwnd/rtt) ===\" > /dev/kmsg; \
                  B=$((300*1024*1024)); \
                  T0=$(cut -d' ' -f1 /proc/uptime); \
-                 { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
-                   dd if=/dev/zero bs=1M count=300 2>/dev/null; } | nc 10.0.2.2 80 & \
+                 { printf 'POST /upload HTTP/1.1\\r\\nHost: '\"$H\"'\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
+                   dd if=/dev/zero bs=1M count=300 2>/dev/null; } | nc \"$H\" 80 & \
                  NCJOB=$!; \
                  sleep 2; \
                  if command -v ss >/dev/null 2>&1; then \
                    echo \"<0>[netbench-vm] --- ss -tin upload socket (mid-flight: snd_cwnd/rtt) ---\" > /dev/kmsg; \
-                   ss -tin 2>/dev/null | grep -A1 '10.0.2.2:80'; \
+                   ss -tin 2>/dev/null | grep -A1 \"$H:80\"; \
                  else echo \"<0>[netbench-vm] ss absent (busybox) -- read host 'cores' net TX + worker BUSY% for b1/b2\" > /dev/kmsg; fi; \
                  wait $NCJOB; \
                  T1=$(cut -d' ' -f1 /proc/uptime); \

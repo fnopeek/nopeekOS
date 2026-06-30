@@ -188,7 +188,13 @@ const BUSY_POLL_US: u64 = 1000;
 /// it warmed the wrong core). Reserved worker core + `recently_active` gate ⇒ a
 /// paused transfer parks within one ~50 ms window, no idle core-burn. Flip to
 /// `false` to A/B against the .64 behaviour.
-const WARM_THROUGH_TRANSFER: bool = true;
+///
+/// EXONERATED (v0.226.65 HW): warm worker (cores irq=0) but throughput stayed a
+/// lottery and gap_max stayed/grew (3.3-40ms) → the RTT gap is UPSTREAM of our
+/// park (slirp + host oversubscription / guest rwnd), not the park. Reverted to
+/// false (warm-spin only added host contention, starving QEMU's single-threaded
+/// slirp). Kept behind the flag for a future bare-metal A/B if ever relevant.
+const WARM_THROUGH_TRANSFER: bool = false;
 
 /// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
 /// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
