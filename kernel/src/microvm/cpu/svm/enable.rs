@@ -696,6 +696,16 @@ fn ipi_take(apic_id: u8) -> Option<u8> {
     None
 }
 
+/// Non-consuming peek: does this vCPU have ANY pending cross-vCPU IPI? The warm
+/// halt-poll breaks on it and VMRUNs (where `ipi_take` injects it) — a pending IPI
+/// must NEVER wait behind the spin: the sending guest AP spins in csd_lock_wait
+/// for the ack and pegs a whole core until it lands.
+fn ipi_any_pending(apic_id: u8) -> bool {
+    let t = apic_id as usize;
+    if t >= MAX_VCPUS { return false; }
+    IPI_PENDING[t].iter().any(|w| w.load(Ordering::Acquire) != 0)
+}
+
 /// Clear all pending IPIs (VM teardown/start) so a stale vector can't inject a
 /// spurious interrupt into the next guest. Called from the reset path.
 pub fn ipi_reset() {
@@ -1402,10 +1412,6 @@ impl VmContext {
     // vmx mirror. A parked guest must not freeze Core 0 for a whole
     // SLICE_BUDGET of timer-tick-rate VMRUNs.
     const IDLE_YIELD: u32 = 4;
-    // KVM halt_poll_ns default is 200 µs: the warm-poll busy-spins the unified
-    // kick-gen this long to catch a back-to-back burst warm, then HLT-parks so
-    // the host core is freed (vs pegging it to the deadline → slirp starvation).
-    const WARM_POLL_US: u64 = 200;
 
     // MAX_ITERATIONS is a *lifetime* cap on cumulative VMRUNs (never
     // reset across slices) — a safety pad for short headless test
@@ -1464,27 +1470,32 @@ impl VmContext {
         // The previous exit was an idle guest HLT during an active transfer.
         // Instead of re-VMRUNning straight into another immediate HLT (≈76k nested
         // VM-entries/s for nothing — the spin that pinned the BSP at 76%), halt-poll
-        // on the unified per-core kick generation: BUSY-POLL it for WARM_POLL_US
-        // (catches a back-to-back RX/TX burst warm — the throughput win), then
-        // HLT-PARK so the host core is FREED. Host-spinning it to the deadline
-        // instead (the old code) pegged the BSP at 100% → oversubscribed QEMU's
-        // slirp thread + the other vCPUs → the loaded-latency peaks. ONE
-        // net_kick_gen carries EVERY wake this path needs — the off-vCPU net
-        // worker's RX/TX kick, the off-vCPU GPU worker's kick (kick_bsp_net_irq),
-        // AND a guest cross-vCPU IPI (route_ipi → kick_vcpu_core, the
-        // smp_call_function path) — so park-with-poll loses none of them. The old
-        // hand-rolled spin checked only net_backend::irq_pending()/timer/ipi and
-        // was BLIND to the GPU worker's kick → a GPU completion IRQ stalled behind
-        // it (cage froze, cores idle). Bounded by the guest's next LAPIC deadline
-        // so jiffies still advance (4 ms safety covers a disarmed timer). LOCK-FREE,
-        // OUTSIDE VM_BIG_LOCK so the APs are never starved.
+        // on the HOST — LOCK-FREE, OUTSIDE VM_BIG_LOCK so the APs are never starved
+        // — until something is actually injectable, then VMRUN ONCE to deliver it.
+        // The break conditions ARE the full injectable set: the off-vCPU worker's
+        // RX/TX IRQ, a due guest timer, AND a pending cross-vCPU IPI. The IPI check
+        // is LOAD-BEARING: a guest AP that calls smp_call_function spins in
+        // csd_lock_wait until the BSP acks — if the BSP halt-polls past a pending
+        // IPI the two APs peg at 100% forever (observed: kick_wait kicked=0). A
+        // pure park on the edge-gated kick LOSES that IPI wake → do NOT replace this
+        // poll with kick_wait_until until the IPI path reliably bumps net_kick_gen.
+        // Bounded by the guest's next LAPIC deadline so jiffies still advance (4 ms
+        // safety covers a disarmed timer). One VMRUN per real event.
         if self.vcpu.warm_poll {
             self.vcpu.warm_poll = false;
             let now0 = crate::interrupts::rdtsc();
             let cap = now0 + (crate::interrupts::tsc_freq() / 250).max(1);
             let deadline = self.vcpu.lapic.next_timer_deadline_tsc()
                 .map(|d| d.clamp(now0, cap)).unwrap_or(cap);
-            crate::smp::fiber::kick_wait_until_polled(deadline, WARM_POLL_US);
+            while crate::interrupts::rdtsc() < deadline {
+                if crate::microvm::devices::net_backend::irq_pending()
+                    || self.vcpu.lapic.timer_pending()
+                    || ipi_any_pending(self.vcpu.apic_id)
+                {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
         }
 
         // Re-inject an event that #VMEXITed mid-delivery on the
