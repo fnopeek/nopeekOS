@@ -37,10 +37,9 @@ const NO_DEVICE: u32 = 0xFFFF_FFFF;
 pub struct PciBus {
     config_addr: u32,
     pub virtio_blk: VirtioBlk,
-    // virtio-net lives in `net_backend` (out of VmShared/VM_BIG_LOCK), so the
-    // off-vCPU backend can own its data-plane. Config-space dispatch reaches it
-    // via `net_backend::lock()`.
-    pub virtio_gpu: VirtioGpu,
+    // virtio-net AND virtio-gpu live out of VmShared/VM_BIG_LOCK (in
+    // `net_backend` / `gpu_backend`), so their off-vCPU workers can own the
+    // data-plane. Config-space dispatch reaches the GPU via `gpu_backend::lock()`.
     pub virtio_input: VirtioInput,
     /// Slot 5 — read-only squashfs userspace bundle (/dev/vdb).
     pub virtio_blk_sqfs: VirtioBlk,
@@ -55,7 +54,6 @@ impl PciBus {
         Self {
             config_addr: 0,
             virtio_blk: VirtioBlk::new(),
-            virtio_gpu: VirtioGpu::new(),
             virtio_input: VirtioInput::new(),
             virtio_blk_sqfs: VirtioBlk::new_sqfs(),
             virtio_9p: Virtio9p::new(),
@@ -128,7 +126,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
         0 => host_bridge_config(reg),
         1 => bus.virtio_blk.pci_read_dword(reg),
         2 => super::net_backend::lock().pci_read_dword(reg),
-        3 => bus.virtio_gpu.pci_read_dword(reg),
+        3 => super::gpu_backend::lock().pci_read_dword(reg),
         4 => bus.virtio_input.pci_read_dword(reg),
         5 => bus.virtio_blk_sqfs.pci_read_dword(reg),
         6 => bus.virtio_9p.pci_read_dword(reg),
@@ -144,7 +142,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
     match slot {
         1 => bus.virtio_blk.pci_write_dword(reg, val),
         2 => super::net_backend::lock().pci_write_dword(reg, val),
-        3 => bus.virtio_gpu.pci_write_dword(reg, val),
+        3 => super::gpu_backend::lock().pci_write_dword(reg, val),
         4 => bus.virtio_input.pci_write_dword(reg, val),
         5 => bus.virtio_blk_sqfs.pci_write_dword(reg, val),
         6 => bus.virtio_9p.pci_write_dword(reg, val),

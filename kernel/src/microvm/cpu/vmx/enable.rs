@@ -785,6 +785,7 @@ impl VmContext {
             // virtio-net lives in net_backend (a static, out of VmShared) so the
             // off-vCPU backend can own it; re-arm it to power-on state per VM.
             crate::microvm::devices::net_backend::reset();
+            crate::microvm::devices::gpu_backend::reset();
 
             Ok(VmContext {
                 shared: SharedRef::owned(VmShared {
@@ -1773,7 +1774,7 @@ impl VmContext {
                     let wid = crate::microvm::vm_window();
                     let now_d4 = crate::interrupts::ticks();
                     // Phase 2 of any in-flight D4 cycle: reconnect IRQ.
-                    if sh.pci.virtio_gpu.tick_d4(now_d4) {
+                    if crate::microvm::devices::gpu_backend::lock().tick_d4(now_d4) {
                         let vector = sh.pic.vector_for_irq(9);
                         let _ = vmcs::inject_external_irq(vector);
                         self.vcpu.consecutive_idle = 0;
@@ -1785,13 +1786,13 @@ impl VmContext {
                     // later. R2 debounce ensures ≤4 cycles/sec during a
                     // drag — only the final size sticks.
                     if wid != 0
-                        && !sh.pci.virtio_gpu.d4_disconnecting()
+                        && !crate::microvm::devices::gpu_backend::lock().d4_disconnecting()
                         && crate::shade::surface::display_dirty_peek(wid)
                     {
                         if now_d4.wrapping_sub(sh.last_cfg_tick) >= 25 {
                             let _ = crate::shade::surface::take_display_dirty(wid);
                             sh.last_cfg_tick = now_d4;
-                            sh.pci.virtio_gpu.signal_display_change(now_d4);
+                            crate::microvm::devices::gpu_backend::lock().signal_display_change(now_d4);
                             let vector = sh.pic.vector_for_irq(9);
                             let _ = vmcs::inject_external_irq(vector);
                             self.vcpu.consecutive_idle = 0;
@@ -2183,8 +2184,9 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if sh.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut sh.pci.virtio_gpu, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                } else if crate::microvm::devices::gpu_backend::bar0_in_range(gpa) {
+                    let mut gpu = crate::microvm::devices::gpu_backend::lock();
+                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut *gpu, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }

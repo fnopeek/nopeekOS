@@ -923,6 +923,7 @@ impl VmContext {
         // virtio-net lives in net_backend (a static, out of VmShared) so the
         // off-vCPU backend can own it; re-arm it to power-on state per VM.
         crate::microvm::devices::net_backend::reset();
+        crate::microvm::devices::gpu_backend::reset();
 
         Ok(VmContext {
             shared: SharedRef::owned(VmShared {
@@ -1929,7 +1930,7 @@ impl VmContext {
                     let now_d4 = crate::interrupts::ticks();
                     // Phase 2 of any in-flight D4 cycle: fire reconnect
                     // once the 100 ms disconnect window expired.
-                    if sh.pci.virtio_gpu.tick_d4(now_d4) {
+                    if crate::microvm::devices::gpu_backend::lock().tick_d4(now_d4) {
                         let vector = sh.pic.vector_for_irq(9);
                         let info: u64 = (vector as u64) | (1u64 << 31);
                         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
@@ -1940,7 +1941,7 @@ impl VmContext {
                     // Phase 1: a fresh dirty from Shade and no cycle
                     // in flight → kick off disconnect.
                     if wid != 0
-                        && !sh.pci.virtio_gpu.d4_disconnecting()
+                        && !crate::microvm::devices::gpu_backend::lock().d4_disconnecting()
                         && crate::shade::surface::display_dirty_peek(wid)
                     {
                         // R2 debounce — one cycle per ~250 ms; flag stays
@@ -1948,7 +1949,7 @@ impl VmContext {
                         if now_d4.wrapping_sub(sh.last_cfg_tick) >= 25 {
                             let _ = crate::shade::surface::take_display_dirty(wid);
                             sh.last_cfg_tick = now_d4;
-                            sh.pci.virtio_gpu.signal_display_change(now_d4);
+                            crate::microvm::devices::gpu_backend::lock().signal_display_change(now_d4);
                             let vector = sh.pic.vector_for_irq(9);
                             let info: u64 = (vector as u64) | (1u64 << 31);
                             self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
@@ -2291,8 +2292,9 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
-                } else if sh.pci.virtio_gpu.bar0_in_range(gpa) {
-                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_gpu, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                } else if crate::microvm::devices::gpu_backend::bar0_in_range(gpa) {
+                    let mut gpu = crate::microvm::devices::gpu_backend::lock();
+                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *gpu, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
