@@ -1578,6 +1578,15 @@ pub fn note_guest_timer() { NS_GTIMER.fetch_add(1, AtOrd::Relaxed); }
 /// (floor b) → the guest's delayed-ACK/RTO/pacing slow → the slow download
 /// regime. Tests the "1000 vs 100, mal gut mal schlecht" hypothesis directly.
 pub fn guest_timer_count() -> u64 { NS_GTIMER.load(AtOrd::Relaxed) }
+/// Cumulative outbound TX (segments, bytes) — surfaced in `cores` as segs/s +
+/// avg segment size during an upload. The b1-vs-b2 discriminator: a high segs/s
+/// with the worker core pegged = the SW-TSO emit pipeline is the cap (b1, the
+/// lock-split + host-TX batching lift it); the same segs/s with an idle worker =
+/// the cap is cwnd × inflated bridge RTT (b2, an ACK-clock the emit path can't
+/// raise). Monotonic in full mode (pump's swap never runs); diff two snapshots.
+pub fn tx_stats() -> (u64, u64) {
+    (NS_TX_PKTS.load(AtOrd::Relaxed), NS_TX_BYTES.load(AtOrd::Relaxed))
+}
 /// Count of net-RX IRQ10 actually raised to the guest (after ITR moderation).
 /// vs the per-packet rate it would be without — the io-EOI-storm signal.
 static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);

@@ -339,11 +339,18 @@ fn launch_bench(kmsg_fd: i64) {
                    T1=$(cut -d' ' -f1 /proc/uptime); \
                    awk -v a=$T0 -v b=$T1 -v i=$I 'BEGIN{d=b-a;if(d<=0)d=0.001;printf \"<0>[netbench-vm] GET nc#%s 150MB: %.2fs = %.0f Mbit\\n\",i,d,150*8/d}' > /dev/kmsg; \
                  done; \
-                 echo \"<0>[netbench-vm] === PUT 300 ===\" > /dev/kmsg; \
+                 echo \"<0>[netbench-vm] === PUT 300 (+ mid-flight upload-socket cwnd/rtt) ===\" > /dev/kmsg; \
                  B=$((300*1024*1024)); \
                  T0=$(cut -d' ' -f1 /proc/uptime); \
                  { printf 'POST /upload HTTP/1.1\\r\\nHost: 10.0.2.2\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n' \"$B\"; \
-                   dd if=/dev/zero bs=1M count=300 2>/dev/null; } | nc 10.0.2.2 80; \
+                   dd if=/dev/zero bs=1M count=300 2>/dev/null; } | nc 10.0.2.2 80 & \
+                 NCJOB=$!; \
+                 sleep 2; \
+                 if command -v ss >/dev/null 2>&1; then \
+                   echo \"<0>[netbench-vm] --- ss -tin upload socket (mid-flight: snd_cwnd/rtt) ---\" > /dev/kmsg; \
+                   ss -tin 2>/dev/null | grep -A1 '10.0.2.2:80'; \
+                 else echo \"<0>[netbench-vm] ss absent (busybox) -- read host 'cores' net TX + worker BUSY% for b1/b2\" > /dev/kmsg; fi; \
+                 wait $NCJOB; \
                  T1=$(cut -d' ' -f1 /proc/uptime); \
                  echo \"<0>[netbench-vm] PUT 300 MB: guest uptime $T0 -> $T1\" > /dev/kmsg; \
                  echo \"<0>[netbench-vm] === guest TCP counters (loss/reorder evidence) ===\" > /dev/kmsg; \

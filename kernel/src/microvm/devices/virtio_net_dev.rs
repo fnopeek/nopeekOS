@@ -583,22 +583,41 @@ impl VirtioNet {
     }
 
     // ── TX: read guest frames, segment GSO, forward; batched used + EVENT_IDX ──
+    /// Combined TX service for the INLINE callers (Intel/VMX + AMD non-full):
+    /// drain the ring (cheap, device-touching), emit the segments, finish. AMD
+    /// full mode does NOT use this — the worker calls the three pieces below with
+    /// the expensive `process_tx` emit run OUTSIDE the device mutex (the TX half
+    /// of the v0.226.63 ACK-jitter fix; see net_dataplane::service_full).
     fn service_tx(&mut self, mem: &GuestMem) -> bool {
         let self_caps = self.caps;
+        let payloads = self.drain_tx_payloads(mem);
+        let advanced = !payloads.is_empty();
         let mut pending_rx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        for p in &payloads {
+            for rep in super::nat::process_tx(p, &self_caps) { pending_rx.push(rep); }
+        }
+        self.tx_finish(mem, advanced, &pending_rx)
+    }
+
+    /// Phase 2a (under the device mutex, CHEAP): walk the guest TX avail ring,
+    /// copy each frame's bytes into an owned Vec, publish the used ring. No
+    /// segmentation / checksum / host-NIC send here — those are the expensive
+    /// part and run lock-free in the caller (`nat::process_tx`). Returns one
+    /// owned payload per consumed frame (len == frames consumed = "advanced").
+    pub fn drain_tx_payloads(&mut self, mem: &GuestMem) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        let mut payloads: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
         const TX_FRAME_MAX: usize = 65_536 + 128;
         let mut frame = core::mem::take(&mut self.tx_scratch);
         if frame.len() < TX_FRAME_MAX { frame.resize(TX_FRAME_MAX, 0); }
 
         let evidx = self.event_idx_on();
-        let advanced;
         {
             let q = &mut self.queues[1];
-            if !q.ready() { self.tx_scratch = frame; return false; }
+            if !q.ready() { self.tx_scratch = frame; return payloads; }
             let start_used = q.used_idx;
             let mut nused: u16 = 0;
             let mut avail_top = match avail_idx(mem, q.avail_gpa()) {
-                Some(v) => v, None => { self.tx_scratch = frame; return false; }
+                Some(v) => v, None => { self.tx_scratch = frame; return payloads; }
             };
 
             // EVENT_IDX "process, then arm notification, then re-check" loop:
@@ -619,8 +638,7 @@ impl VirtioNet {
                         if d.flags & VRING_DESC_F_NEXT == 0 { break; }
                         idx = d.next;
                     }
-                    let payload = &frame[..off];
-                    for rep in super::nat::process_tx(payload, &self_caps) { pending_rx.push(rep); }
+                    payloads.push(frame[..off].to_vec());   // own it; emit lock-free later
 
                     // TX buffers are device-read-only → used len = 0 (virtio spec).
                     used_fill(mem, q.used_gpa(), q.size, start_used.wrapping_add(nused), head, 0);
@@ -640,10 +658,16 @@ impl VirtioNet {
                 q.used_idx = start_used.wrapping_add(nused);
                 used_publish(mem, q.used_gpa(), q.used_idx);
             }
-            advanced = nused > 0;
         }
         self.tx_scratch = frame;
+        payloads
+    }
 
+    /// Phase 2c (under the device mutex, CHEAP): set the TX ISR, inject any
+    /// synthetic RX replies (ARP/DNS) the emit produced, and decide whether to
+    /// raise IRQ10. `advanced` = at least one TX frame was consumed in the drain.
+    pub fn tx_finish(&mut self, mem: &GuestMem, advanced: bool,
+                     pending_rx: &[alloc::vec::Vec<u8>]) -> bool {
         // ISR reflects "queue work pending"; the RETURN value tells the run loop
         // whether to actually assert IRQ10, EVENT_IDX-gated (need_event).
         let mut raise = false;
@@ -654,7 +678,7 @@ impl VirtioNet {
 
         // Inject any synthetic replies (ARP/DNS) into RX.
         let mut rx_advanced = false;
-        for reply in &pending_rx {
+        for reply in pending_rx {
             if self.inject_rx(mem, reply) { rx_advanced = true; }
         }
         if rx_advanced {
@@ -663,6 +687,10 @@ impl VirtioNet {
         }
         raise
     }
+
+    /// The negotiated capability mask (Copy) — the worker reads it once under the
+    /// device lock, then drives `nat::process_tx` lock-free.
+    pub fn caps(&self) -> NetCaps { self.caps }
 
     fn tx_should_interrupt(&mut self, mem: &GuestMem) -> bool {
         let q = &mut self.queues[1];
