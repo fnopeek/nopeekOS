@@ -275,6 +275,13 @@ fn launch_wayland(kmsg_fd: i64) {
     // sandbox; the parent execs cage+librewolf as usual.
     unsafe { spawn_rt_watcher(kmsg_fd); }
 
+    // Fork the guest-side diagnostic probe (only if the host asked via
+    // `nopeekgdiag` on the cmdline). It dumps the guest's INTERNAL view every
+    // second — the inside angle we never had while chasing the download latency.
+    if gdiag_requested() {
+        unsafe { spawn_gdiag(kmsg_fd); }
+    }
+
     unsafe {
         syscall3(
             SYS_EXECVE,
@@ -583,6 +590,74 @@ unsafe fn spawn_rt_watcher(kmsg_fd: i64) {
     let pid = unsafe { syscall0(SYS_FORK) };
     if pid == 0 {
         unsafe { rt_watcher_loop(kmsg_fd); }
+    }
+}
+
+/// True if the kernel cmdline contains `nopeekgdiag` — the host asked for the
+/// guest-side diagnostic probe (per-vCPU busy/softirq %, download-socket TCP
+/// state, softnet drops/squeeze every second).
+fn gdiag_requested() -> bool {
+    let fd = unsafe {
+        syscall3(SYS_OPEN, b"/proc/cmdline\0".as_ptr() as u64, 0, 0)
+    };
+    if fd < 0 { return false; }
+    let mut buf = [0u8; 1024];
+    let n = unsafe {
+        syscall3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+    };
+    let _ = unsafe { syscall3(SYS_CLOSE, fd as u64, 0, 0) };
+    if n <= 0 { return false; }
+    let hay = &buf[..n as usize];
+    let needle = b"nopeekgdiag";
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Fork a busybox loop that dumps the GUEST's internal state to /dev/kmsg every
+/// second — the inside view we never had. Per pass:
+///   cpu(busy/sirq%)  — per-vCPU busy% and softirq% from /proc/stat deltas: is a
+///                      vCPU pegged, and is it pegged on network softirq (= the
+///                      guest is the RX bottleneck, not our bridge)?
+///   sock             — every socket's cwnd/rtt/retrans (the bulk download flow's
+///                      TCP state from inside the guest).
+///   softnet          — /proc/net/softnet_stat: col2 = drops, col3 = times the
+///                      NAPI poll ran out of budget (squeeze = guest can't drain).
+/// The child execs /bin/sh; on exec failure it parks (never falls back into the
+/// parent's cage launch).
+unsafe fn spawn_gdiag(kmsg_fd: i64) {
+    let pid = unsafe { syscall0(SYS_FORK) };
+    if pid != 0 {
+        return; // parent continues to cage
+    }
+    let prog = b"/bin/sh\0".as_ptr();
+    let arg0 = b"/bin/sh\0".as_ptr();
+    let arg1 = b"-c\0".as_ptr();
+    let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 echo '<0>[gdiag] guest-side probe up (1s cadence)'; \
+                 while true; do \
+                   A=$(grep '^cpu[0-9]' /proc/stat); \
+                   sleep 1; \
+                   B=$(grep '^cpu[0-9]' /proc/stat); \
+                   CPU=$( { echo \"$A\"; echo =; echo \"$B\"; } | awk '/^=$/{s=1;next} !s{for(i=2;i<=11;i++)p[$1,i]=$i;next} {t=0;for(i=2;i<=11;i++)t+=$i-p[$1,i];id=$5-p[$1,5];sq=$8-p[$1,8];if(t>0)printf \"%s=%d/%d \",$1,int(100*(t-id)/t+0.5),int(100*sq/t+0.5)}' ); \
+                   echo \"<0>[gdiag] cpu(busy/sirq%): $CPU\"; \
+                   echo \"<0>[gdiag] sock: $(ss -tin 2>/dev/null | grep -oE 'cwnd:[0-9]+|rtt:[0-9.]+|retrans:[0-9/]+|bytes_acked:[0-9]+' | tr '\\n' ' ')\"; \
+                   echo \"<0>[gdiag] softnet(proc/drop/squeeze): $(tr '\\n' '|' < /proc/net/softnet_stat)\"; \
+                 done\0".as_ptr();
+    let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
+    let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
+    let envp = [env0, core::ptr::null::<u8>()];
+    unsafe {
+        syscall3(
+            SYS_EXECVE,
+            prog as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        );
+    }
+    // execve failed — park forever so the child NEVER falls back into the
+    // parent's cage launch (a double cage exec).
+    say(kmsg_fd, b"[gdiag] /bin/sh execve failed -- probe off\n");
+    loop {
+        let _ = unsafe { syscall0(SYS_PAUSE) };
     }
 }
 

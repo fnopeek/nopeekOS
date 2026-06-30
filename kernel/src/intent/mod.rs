@@ -2118,6 +2118,13 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     {
         let _ = write!(s, " nopeektime={}", epoch);
     }
+    // Guest-side diagnostic probe: PID-1 forks a 1 s busybox loop that dumps the
+    // GUEST's own view (per-vCPU busy/softirq %, download-socket cwnd/rtt/retrans,
+    // softnet drops/squeeze) to /dev/kmsg → our console as `[gdiag]`. We have only
+    // ever measured the bridge from the HOST side; this is the missing inside view
+    // for the loaded-latency-under-download question (is the guest CPU/softirq
+    // bound, or is the buffer ours?). Strip the flag to silence it.
+    let _ = write!(s, " nopeekgdiag=1");
     // Diagnostic pure-bridge throughput run: PID-1 sees `nopeekbench=` and runs
     // a busybox wget loop through the nat bridge instead of cage/browser.
     if let Some(mb) = bench_mb {
