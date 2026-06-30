@@ -687,9 +687,20 @@ impl VirtioGpu {
         // ANY transfer is live (the display stays usable, the vCPU is freed for
         // RX *and* TX). Was `download_active()` — download-only — which left the
         // GPU at 30 fps during a speedtest UPLOAD, so the 8 MB copies contended
-        // with the per-segment TX on the vCPU and the upload hung. `recently_active`
-        // covers both directions. Probe to size the win before off-vCPU GPU copy.
-        let frame_ms = if super::nat::recently_active() { 125 } else { 33 };
+        // with the per-segment TX on the vCPU and the upload hung.
+        //
+        // With the off-vCPU GPU backend active (Stage 2) this copy runs on the GPU
+        // WORKER core, NOT the vCPU — so the transfer-throttle band-aid is no longer
+        // needed: stay at 30 fps (smooth UI) and let the worker absorb it. The
+        // `recently_active` throttle only still applies on the inline path (Stage 1
+        // / no spare core), where the copy IS on the vCPU.
+        let frame_ms = if super::gpu_backend::full_active() {
+            33
+        } else if super::nat::recently_active() {
+            125
+        } else {
+            33
+        };
         let frame_gap = (crate::interrupts::tsc_freq() / 1000) * frame_ms;
 
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {

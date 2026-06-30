@@ -1660,6 +1660,11 @@ impl VmContext {
         if self.vcpu.apic_id == 0 && crate::microvm::devices::net_backend::take_irq() {
             sh.pending_irqs |= 1 << 10;
         }
+        // Off-vCPU GPU worker finished a controlq batch → fold IRQ9 (line 9) the
+        // same way (it kicked the BSP). The pending_irqs path below injects it.
+        if self.vcpu.apic_id == 0 && crate::microvm::devices::gpu_backend::take_irq() {
+            sh.pending_irqs |= 1 << 9;
+        }
 
         // Post deferred 9p write replies the async persist worker finished (the
         // vCPU owns the virtqueue). Decouples disk persistence from the vCPU →
@@ -2973,10 +2978,19 @@ fn handle_mmio_npf_gpu(
     }
 
     if let Some(qidx) = gpu.take_pending_kick() {
-        let advanced = gpu.service_queues(qidx, mem);
-        if advanced {
-            // virtio-gpu IRQ line = 9.
-            deliver_irq(vmcb, pending, 9, pic.vector_for_irq(9));
+        if crate::microvm::devices::gpu_backend::full_active() {
+            // Off-vCPU: defer the heavy ~8 MB copy + write_frame to the GPU worker
+            // on its own core (it raises IRQ9 + kicks the BSP). The vCPU exit stays
+            // cheap → no framebuffer copy stealing net cycles. note_gpu_kick is
+            // lock-free (atomics); the worker briefly waits for this exit to drop
+            // the gpu_backend lock on return — no cycle (it never takes VM_BIG_LOCK).
+            crate::microvm::devices::gpu_backend::note_gpu_kick(qidx);
+        } else {
+            let advanced = gpu.service_queues(qidx, mem);
+            if advanced {
+                // virtio-gpu IRQ line = 9.
+                deliver_irq(vmcb, pending, 9, pic.vector_for_irq(9));
+            }
         }
     }
 
