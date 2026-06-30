@@ -217,7 +217,10 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     //    left in the NIC ring. Then service the guest TX ring (symmetric with RX,
     //    polled every pass). ──
     let mut injected = false;
-    let (rx_raise, tx_raise) = {
+    // Phase 2a — SHORT locked section: RX inject + the CHEAP guest-TX ring drain
+    // only (walk avail ring, copy frame bytes out, publish used). The expensive
+    // SW-TSO emit is deferred to Phase 2b, lock-free.
+    let (rx_raise, tx_payloads, caps) = {
         let mut dev = net_backend::lock();
         inject_stage(&mut dev, gm, &mut injected);
         for gframe in rewritten {
@@ -233,9 +236,30 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
         // handle_tx: poll the guest TX ring every pass (take_tx_kick clears the
         // doorbell so the halt-poll's tx_kick_pending resets). Cheap if empty.
         net_backend::take_tx_kick();
-        let tx_raise = dev.service_queues(1, gm);
-        (rx_raise, tx_raise)
-    }; // device mutex released here — vCPU ACK exits no longer wait on the drain
+        let tx_payloads = dev.drain_tx_payloads(gm);
+        let caps = dev.caps();
+        (rx_raise, tx_payloads, caps)
+    }; // device mutex released — vCPU ACK exits wait on neither the RX drain NOR
+       // the TX emit now (the TX half of the v0.226.63 ACK-jitter fix).
+
+    // Phase 2b — LOCK-FREE: software-segment + per-segment checksum + host-NIC
+    // send, the mirror of Phase 1's lock-free RX drain. On a bulk upload this is
+    // the long pole; running it OUTSIDE the guest device mutex stops it from
+    // stalling the vCPU's ACK/ping ISR reads (svm/enable.rs net-MMIO exits).
+    let tx_advanced = !tx_payloads.is_empty();
+    let mut tx_replies: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+    for p in &tx_payloads {
+        for rep in nat::process_tx(p, &caps) { tx_replies.push(rep); }
+    }
+
+    // Phase 2c — SHORT locked section: set TX ISR, inject any synthetic replies,
+    // decide the raise. The worker is the sole TX (and RX) consumer in full mode
+    // (the vCPU only note_tx_kick's), so dropping the lock between 2a and 2c is
+    // race-free: no other context touches the guest TX/RX rings.
+    let tx_raise = {
+        let mut dev = net_backend::lock();
+        dev.tx_finish(gm, tx_advanced, &tx_replies)
+    };
 
     // Host-stack frames (outside the device lock).
     for f in &host_frames { crate::net::eth::handle_frame(f); }

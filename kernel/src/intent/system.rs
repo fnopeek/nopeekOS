@@ -90,6 +90,7 @@ pub fn intent_cores() {
     let rf0 = crate::microvm::devices::nat::ringfull_kick_count();
     let rh0 = crate::microvm::devices::nat::rx_health_snapshot();
     let gt0 = crate::microvm::devices::nat::guest_timer_count();
+    let tx0 = crate::microvm::devices::nat::tx_stats();
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
@@ -123,6 +124,7 @@ pub fn intent_cores() {
     let rf1 = crate::microvm::devices::nat::ringfull_kick_count();
     let rh1 = crate::microvm::devices::nat::rx_health_snapshot();
     let gt1 = crate::microvm::devices::nat::guest_timer_count();
+    let tx1 = crate::microvm::devices::nat::tx_stats();
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -262,6 +264,18 @@ pub fn intent_cores() {
         let rxlat_us = rh1.2.saturating_mul(1_000_000) / tsc_hz.max(1);
         kprintln!("    net bridge backpressure: drops={}/s injfalse={}/s rxlat_max={}us",
                   drops * 1000 / window_ms, injf * 1000 / window_ms, rxlat_us);
+        // Outbound TX rate (the b1-vs-b2 upload discriminator). Read TOGETHER with
+        // the worker core's BUSY% above: high segs/s + worker pegged ~100% = the
+        // SW-TSO emit pipeline is the cap (b1); the same Mbit with the worker idle
+        // = cwnd × inflated bridge RTT (b2, an ACK-clock the emit can't lift).
+        let txp = tx1.0.saturating_sub(tx0.0);
+        let txb = tx1.1.saturating_sub(tx0.1);
+        if txp > 0 {
+            kprintln!("    net TX: {}segs/s avgseg={}B {}Mbit",
+                      txp * 1000 / window_ms,
+                      txb / txp,
+                      txb * 8 / 1000 / window_ms);
+        }
         // Effective guest HZ: the guest programs 1 kHz (CONFIG_HZ=1000); injected
         // only while VMRUN runs, so a parky (slow) connection sees <1000 = the
         // timer freezing under the 2ms parks = the "1000 vs 100" lottery.
