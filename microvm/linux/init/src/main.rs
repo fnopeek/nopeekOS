@@ -198,6 +198,12 @@ fn launch_wayland(kmsg_fd: i64) {
                    || ifconfig \"$IFACE\" 10.99.0.2 netmask 255.255.255.0 2>/dev/null; \
                  ip route add default via 10.99.0.1 2>/dev/null \
                    || route add default gw 10.99.0.1 2>/dev/null; \
+                 echo 1000 > /proc/sys/net/core/netdev_budget 2>/dev/null; \
+                 echo 8000 > /proc/sys/net/core/netdev_budget_usecs 2>/dev/null; \
+                 echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null; \
+                 echo f > /sys/class/net/\"$IFACE\"/queues/rx-0/rps_cpus 2>/dev/null; \
+                 echo 4096 > /sys/class/net/\"$IFACE\"/queues/rx-0/rps_flow_cnt 2>/dev/null; \
+                 echo \"<0>[rxtune] budget=$(cat /proc/sys/net/core/netdev_budget) rps_cpus=$(cat /sys/class/net/$IFACE/queues/rx-0/rps_cpus 2>/dev/null)\" > /dev/kmsg; \
                  printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /tmp/resolv.conf; \
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
