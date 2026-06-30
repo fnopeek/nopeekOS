@@ -696,6 +696,15 @@ fn ipi_take(apic_id: u8) -> Option<u8> {
     None
 }
 
+/// Non-consuming peek: does this vCPU have ANY pending cross-vCPU IPI? Used by the
+/// warm halt-poll to break out and VMRUN (where `ipi_take` injects it) — a pending
+/// IPI must never wait behind the spin (the guest spins in csd_lock_wait for it).
+fn ipi_any_pending(apic_id: u8) -> bool {
+    let t = apic_id as usize;
+    if t >= MAX_VCPUS { return false; }
+    IPI_PENDING[t].iter().any(|w| w.load(Ordering::Acquire) != 0)
+}
+
 /// Clear all pending IPIs (VM teardown/start) so a stale vector can't inject a
 /// spurious interrupt into the next guest. Called from the reset path.
 pub fn ipi_reset() {
@@ -752,6 +761,11 @@ pub struct Vcpu {
     /// not polling). See `HALT_POLL_MIN_US`.
     halt_poll_us: u64,
     halt_poll_deadline: u64,
+    /// Loop-top warm halt-poll armed: the previous exit was an idle guest HLT
+    /// during an active transfer. Spin LOCK-FREE for a real wake before the next
+    /// VMRUN instead of re-VMRUNning into an immediate re-HLT (the un-Linux
+    /// ~76k/s nested-entry spin; KVM halt_poll_ns model, but off VM_BIG_LOCK).
+    warm_poll: bool,
     /// Consecutive HLT exits taken with guest RFLAGS.IF=0. The idle path
     /// is always `sti; hlt` (IF=1); a sustained `cli; hlt` loop is Linux's
     /// no-ACPI poweroff / panic path (we boot `acpi=off`, so there is no
@@ -943,6 +957,7 @@ impl VmContext {
                 last_lapic_tick: 0,
                 halt_poll_us: HALT_POLL_MIN_US,
                 halt_poll_deadline: 0,
+                warm_poll: false,
                 if_off_halts: 0,
             },
         })
@@ -1207,6 +1222,7 @@ impl VmContext {
                 last_lapic_tick: 0,
                 halt_poll_us: HALT_POLL_MIN_US,
                 halt_poll_deadline: 0,
+                warm_poll: false,
                 if_off_halts: 0,
             },
         })
@@ -1446,6 +1462,32 @@ impl VmContext {
         {
             AP_ESTABLISHED.store(true, Ordering::Release);
             kprintln!("[svm] AP established (past bring-up) — idle-park enabled");
+        }
+
+        // ── KVM halt_poll model (the un-Linux re-VMRUN-spin fix) ──
+        // The previous exit was an idle guest HLT during an active transfer.
+        // Instead of re-VMRUNning straight into another immediate HLT (≈76k nested
+        // VM-entries/s for nothing — the spin that pinned the BSP at 76%), halt-poll
+        // on the HOST — LOCK-FREE, OUTSIDE VM_BIG_LOCK so the APs are never starved
+        // — until something is actually injectable (the worker's RX IRQ, a due guest
+        // timer, or a cross-vCPU IPI), then VMRUN ONCE to deliver it. Bounded by the
+        // guest's next LAPIC deadline so jiffies still advance (4 ms safety covers a
+        // disarmed timer). One VMRUN per real event instead of per idle HLT.
+        if self.vcpu.warm_poll {
+            self.vcpu.warm_poll = false;
+            let now0 = crate::interrupts::rdtsc();
+            let cap = now0 + (crate::interrupts::tsc_freq() / 250).max(1);
+            let deadline = self.vcpu.lapic.next_timer_deadline_tsc()
+                .map(|d| d.clamp(now0, cap)).unwrap_or(cap);
+            while crate::interrupts::rdtsc() < deadline {
+                if crate::microvm::devices::net_backend::irq_pending()
+                    || self.vcpu.lapic.timer_pending()
+                    || ipi_any_pending(self.vcpu.apic_id)
+                {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
         }
 
         // Re-inject an event that #VMEXITed mid-delivery on the
@@ -2062,6 +2104,19 @@ impl VmContext {
                         return Ok(SliceOutcome::Idle);
                     }
                     // else: within the poll window → keep looping (poll).
+                }
+                // Idle guest HLT during an active transfer (full off-vCPU mode,
+                // consecutive_idle < IDLE_YIELD so not the idle-park case above):
+                // arm the loop-top warm halt-poll so the next re-entry waits
+                // lock-free on the host for a real wake instead of re-VMRUNning
+                // straight into another HLT. Quiesces to the normal idle/park path
+                // the moment the transfer ends (recently_active goes false).
+                if exit == EXIT_HLT && idle_hlt
+                    && self.vcpu.consecutive_idle < IDLE_YIELD
+                    && crate::microvm::devices::net_backend::full_active()
+                    && crate::microvm::devices::nat::recently_active()
+                {
+                    self.vcpu.warm_poll = true;
                 }
                 last_outcome = Some(outcome);
             }
