@@ -91,6 +91,7 @@ pub fn intent_cores() {
     let rh0 = crate::microvm::devices::nat::rx_health_snapshot();
     let gt0 = crate::microvm::devices::nat::guest_timer_count();
     let tx0 = crate::microvm::devices::nat::tx_stats();
+    let rp0 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // clears gap_max
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
@@ -125,6 +126,7 @@ pub fn intent_cores() {
     let rh1 = crate::microvm::devices::nat::rx_health_snapshot();
     let gt1 = crate::microvm::devices::nat::guest_timer_count();
     let tx1 = crate::microvm::devices::nat::tx_stats();
+    let rp1 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // gap_max = window peak
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
     let dwall = wall1.saturating_sub(wall0).max(1);
 
@@ -275,6 +277,17 @@ pub fn intent_cores() {
                       txp * 1000 / window_ms,
                       txb / txp,
                       txb * 8 / 1000 / window_ms);
+        }
+        // Full-path RX cadence (the rxlat/drops line above is BLIND in full mode).
+        // batch = avg frames drained per non-empty pass; gap_max = peak µs between
+        // passes. Decisive read: small batch + ~1.5ms gap = park-cadence (lever a,
+        // RTT-bound); large batch (+ guest ring full) = receiver-drain (lever b).
+        let rpf = rp1.0.saturating_sub(rp0.0);
+        let rpc = rp1.1.saturating_sub(rp0.1);
+        let gap_us = rp1.2.saturating_mul(1_000_000) / tsc_hz.max(1);
+        if rpc > 0 {
+            kprintln!("    net RX cadence: {}passes/s batch={}frames gap_max={}us",
+                      rpc * 1000 / window_ms, rpf / rpc, gap_us);
         }
         // Effective guest HZ: the guest programs 1 kHz (CONFIG_HZ=1000); injected
         // only while VMRUN runs, so a parky (slow) connection sees <1000 = the
