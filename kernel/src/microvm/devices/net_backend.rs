@@ -78,11 +78,6 @@ pub fn raise_irq() { NET_IRQ_PENDING.store(true, Ordering::Release); }
 #[inline]
 pub fn take_irq() -> bool { NET_IRQ_PENDING.swap(false, Ordering::AcqRel) }
 
-/// Non-consuming peek — does the worker have an RX IRQ waiting? Used by the BSP's
-/// lock-free warm halt-poll to break out and VMRUN (where `take_irq` injects it).
-#[inline]
-pub fn irq_pending() -> bool { NET_IRQ_PENDING.load(Ordering::Acquire) }
-
 /// Stage 2b master switch: the full off-vCPU RX backend. When on, the dedicated
 /// `net_dataplane` fiber owns the RX data-plane (host-NIC drain + `inject_rx`)
 /// on its own core, so the BSP vCPU does NO net RX work — it only folds the
