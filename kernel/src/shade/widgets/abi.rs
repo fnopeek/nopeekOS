@@ -544,6 +544,10 @@ pub enum Event {
     /// already running (instead of spawning a duplicate). Payload is the
     /// launch argument (e.g. a file path). Enables singleton-with-tabs.
     Open(alloc::string::String),
+    /// Mouse wheel over a focused app with no `Widget::Scroll` to consume it.
+    /// `dy` is pixel-scaled (positive = scroll down). Canvas/surface apps
+    /// scroll their own viewport; others ignore it.
+    Wheel { dy: i32 },
     // Appended only.
 }
 

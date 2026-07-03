@@ -1069,6 +1069,43 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_canvas_rect(canvas_id, out_ptr) -> 0 / -1
+    // Writes the canvas widget's actual laid-out rect as 4 little-endian i32
+    // [x, y, w, h] into out_ptr (16 bytes), so an app can paint its canvas
+    // 1:1 (no contain-fit scaling) and map click coordinates into content
+    // space. RENDER-gated. Returns -1 until the canvas has been laid out once
+    // (commit a scene with the Canvas first, then query on the next frame).
+    linker.func_wrap("env", "npk_canvas_rect",
+        |mut caller: Caller<'_, HostState>, canvas_id: i32, out_ptr: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 {
+                return -1;
+            }
+            let (x, y, w, h) = match crate::shade::widgets::canvas::rect_of(wid, canvas_id as u32) {
+                Some(r) => r,
+                None => return -1,
+            };
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = out_ptr as usize;
+            if start + 16 > data.len() {
+                return -1;
+            }
+            data[start..start + 4].copy_from_slice(&x.to_le_bytes());
+            data[start + 4..start + 8].copy_from_slice(&y.to_le_bytes());
+            data[start + 8..start + 12].copy_from_slice(&(w as i32).to_le_bytes());
+            data[start + 12..start + 16].copy_from_slice(&(h as i32).to_le_bytes());
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_capture_screen(buf_ptr, buf_max) -> bytes_written or -1
     // CAPTURE-gated (screen-scrape — only the screenshot tool holds it).
     // Copies the composited front framebuffer as tightly-packed BGRA32

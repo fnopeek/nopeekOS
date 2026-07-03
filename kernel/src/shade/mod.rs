@@ -1439,7 +1439,13 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     if evt.scroll != 0 {
         if let Some(wid) = focused_widget_id() {
             let delta = -(evt.scroll as i32) * WIDGET_SCROLL_STEP;
-            if widgets::scroll_by(wid, delta) { request_render(); }
+            if widgets::scroll_by(wid, delta) {
+                request_render();
+            } else {
+                // No Widget::Scroll consumed it → forward to the app so a
+                // Canvas/surface app (e.g. the browser) can scroll itself.
+                widgets::push_event(wid, widgets::abi::Event::Wheel { dy: delta });
+            }
         } else if focused_is_terminal() {
             // loop/terminal scrollback — wheel up = older lines.
             if evt.scroll > 0 { terminal::scroll_up(3); } else { terminal::scroll_down(3); }

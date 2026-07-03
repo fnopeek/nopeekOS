@@ -682,6 +682,9 @@ fn paint_node_eff(
             // into this rect; muted placeholder until something commits.
             let cid = id.0;
             let wid = target.window_id;
+            // Record the actual rect so the app can query it (npk_canvas_rect)
+            // and paint 1:1 / map click coordinates.
+            super::canvas::record_rect(wid, cid, rect.x, rect.y, rect.w, rect.h);
             let drawn = super::canvas::with_bitmap(wid, cid, |px, w, h| {
                 rast.canvas_blit(target, px, w, h, rect);
             }).is_some();

@@ -24,6 +24,11 @@ struct Bitmap {
 
 static CANVASES: Mutex<BTreeMap<(u32, u32), Bitmap>> = Mutex::new(BTreeMap::new());
 
+/// Last laid-out rect (x, y, w, h) per (window_id, canvas_id), recorded by
+/// the render walker so an app (e.g. the browser) can query its real
+/// on-screen size and paint 1:1 instead of relying on the contain-fit blit.
+static RECTS: Mutex<BTreeMap<(u32, u32), (i32, i32, u32, u32)>> = Mutex::new(BTreeMap::new());
+
 /// Store (or replace) the bitmap for `(window_id, canvas_id)`. `px` must
 /// be `w * h * 4` BGRA bytes; rejected (returns false) if oversized or
 /// the length doesn't match.
@@ -42,8 +47,19 @@ pub fn with_bitmap<R>(window_id: u32, canvas_id: u32, f: impl FnOnce(&[u8], u32,
     guard.get(&(window_id, canvas_id)).map(|b| f(&b.px, b.w, b.h))
 }
 
-/// Drop every bitmap owned by a window — called from `remove_scene`
+/// Record the canvas widget's laid-out rect (called by the render walker).
+pub fn record_rect(window_id: u32, canvas_id: u32, x: i32, y: i32, w: u32, h: u32) {
+    RECTS.lock().insert((window_id, canvas_id), (x, y, w, h));
+}
+
+/// The last recorded rect for a canvas, if it has been laid out at least once.
+pub fn rect_of(window_id: u32, canvas_id: u32) -> Option<(i32, i32, u32, u32)> {
+    RECTS.lock().get(&(window_id, canvas_id)).copied()
+}
+
+/// Drop every bitmap + rect owned by a window — called from `remove_scene`
 /// when a widget window closes.
 pub fn remove_window(window_id: u32) {
     CANVASES.lock().retain(|&(wid, _), _| wid != window_id);
+    RECTS.lock().retain(|&(wid, _), _| wid != window_id);
 }

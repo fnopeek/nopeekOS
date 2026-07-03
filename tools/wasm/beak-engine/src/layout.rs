@@ -74,6 +74,12 @@ fn measure(font: &Font, s: &str, size: f32) -> f32 {
     s.chars().map(|c| font.metrics(c, size).advance_width).sum()
 }
 
+/// `ceil` for a non-negative f32 — `no_std` has no `f32::ceil`.
+fn ceil_i32(x: f32) -> i32 {
+    let c = x as i32;
+    if (c as f32) < x { c + 1 } else { c }
+}
+
 /// Greedy word-wrap `text` into the content box, emitting one `Text` op per
 /// line. Returns the y just below the last line. When `href` is set, each
 /// wrapped line also gets a `LinkRect` (so multi-line links are clickable).
@@ -90,11 +96,11 @@ fn flow_text(
     links: &mut Vec<LinkRect>,
     href: Option<&str>,
 ) -> i32 {
-    let line_h = font
-        .horizontal_line_metrics(size)
-        .map(|m| m.new_line_size)
-        .unwrap_or(size * 1.3)
-        .ceil() as i32;
+    let line_h = ceil_i32(
+        font.horizontal_line_metrics(size)
+            .map(|m| m.new_line_size)
+            .unwrap_or(size * 1.3),
+    );
     let space_w = font.metrics(' ', size).advance_width;
 
     let mut y = y0;
@@ -116,7 +122,7 @@ fn flow_text(
             links.push(LinkRect {
                 x,
                 y: *y,
-                w: line_w.ceil() as i32,
+                w: ceil_i32(*line_w),
                 h: line_h,
                 href: String::from(h),
             });
