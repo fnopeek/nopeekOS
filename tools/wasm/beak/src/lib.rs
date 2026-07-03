@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use alloc::vec;
 
 use beak_engine::Engine;
+use linked_list_allocator::LockedHeap;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::{caps, prefab};
 use nopeek_widgets::*;
@@ -97,13 +98,6 @@ fn html_str() -> &'static str {
         let ptr = core::ptr::addr_of!(HTML_BUF) as *const u8;
         core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
     }
-}
-fn copy_payload(s: &str) -> usize {
-    let n = s.len().min(PAYLOAD_CAP);
-    unsafe {
-        core::ptr::copy_nonoverlapping(s.as_ptr(), core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8, n);
-    }
-    n
 }
 fn payload_str(len: usize) -> &'static str {
     unsafe {
@@ -318,11 +312,11 @@ fn render_chrome() {
 
 /// Handle one event. Returns true if the chrome (address bar / title) should
 /// be re-committed.
-fn handle(engine: &Engine, ev: Event, payload: &str) -> bool {
+fn handle(engine: &Engine, ev: Event) -> bool {
     match ev {
         // Keep URL_BUF synced with the address-bar edit buffer.
-        Event::InputChange { .. } => {
-            set_url(payload);
+        Event::InputChange { value } => {
+            set_url(&value);
             false
         }
         Event::Action(ActionId(id)) => {
@@ -361,8 +355,8 @@ fn handle(engine: &Engine, ev: Event, payload: &str) -> bool {
             mark_dirty();
             false
         }
-        Event::Open(_) => {
-            go(payload);
+        Event::Open(s) => {
+            go(&s);
             true
         }
         _ => false,
@@ -391,36 +385,14 @@ fn poll_event() -> PollResult {
     }
 }
 
-// ── Bump allocator (32 MB: the parsed font lives below `base`, one viewport
-//    paint buffer + a transient layout above it, reset each iteration). ─────
+// ── Heap: a real free-list allocator (32 MB). The font (persistent) + each
+//    frame's layout + paint buffer are freed on drop, unlike a bump heap. ───
 
 const HEAP_SIZE: usize = 32 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
 
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-        if aligned + layout.size() > HEAP_SIZE {
-            return core::ptr::null_mut();
-        }
-        unsafe { pos_ptr.write(aligned + layout.size()) };
-        unsafe { (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
-
-fn alloc_reset(pos: usize) {
-    unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos) };
-}
-fn alloc_mark() -> usize {
-    unsafe { core::ptr::addr_of!(HEAP_POS).read() }
-}
+static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 // u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
 // even when the panic is an allocation failure).
@@ -455,6 +427,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    // Init the heap FIRST — before any allocation.
+    unsafe {
+        ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
+    }
+
     // Launch argument: `npk_open("beak", "https://…")` opens straight to a URL.
     let arg_len = {
         let p = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
@@ -466,30 +443,21 @@ pub extern "C" fn _start() {
         go(&arg);
     }
 
-    // Parse the font once; everything below `base` survives the per-frame reset.
     log("[beak] parsing font…");
     let engine = Engine::new();
     log("[beak] engine ready");
-    let base = alloc_mark();
 
     render_chrome();
 
     loop {
         match poll_event() {
             PollResult::Event(ev) => {
-                let plen = match &ev {
-                    Event::InputChange { value } => copy_payload(value),
-                    Event::Open(s) => copy_payload(s),
-                    _ => 0,
-                };
-                alloc_reset(base);
-                if handle(&engine, ev, payload_str(plen)) {
+                if handle(&engine, ev) {
                     render_chrome();
                 }
                 maybe_repaint(&engine);
             }
             PollResult::Empty => {
-                alloc_reset(base);
                 maybe_repaint(&engine);
                 unsafe {
                     let _ = npk_sleep(16);
