@@ -658,14 +658,19 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> boo
             _ => false,
         },
         // Link clicks land in the canvas → hit-test the engine's link rects.
+        // IMPORTANT: only clicks INSIDE the canvas are ours. Menu-bar/toolbar
+        // clicks are delivered here too (as a MouseButton alongside their
+        // Action); touching the open menu on those would close the dropdown the
+        // very same click just opened (it "flashed open then shut"). Those are
+        // handled entirely by their Action / the Popover's on_dismiss.
         Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
-            // A click with a menu open just closes it (don't also hit a link).
-            if open_menu() != 0 {
-                set_open_menu(0);
-                return true;
-            }
             if let Some((rx, ry, w, h)) = canvas_rect() {
                 if x >= rx && x < rx + w && y >= ry && y < ry + h {
+                    // A page click with a menu open just dismisses it (no nav).
+                    if open_menu() != 0 {
+                        set_open_menu(0);
+                        return true;
+                    }
                     let cx = x - rx;
                     let cy = y - ry + scroll_y();
                     // Hit-test the cached layout if it still matches; else lay
