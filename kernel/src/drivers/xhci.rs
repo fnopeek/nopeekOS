@@ -2707,12 +2707,18 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         // Only process newly pressed keys
         if state.prev_keys.contains(&key) { continue; }
 
-        // Ctrl+C → cooperative cancel of the running foreground intent
-        // (download / OTA). Terminal SIGINT semantics; swallow so it never
-        // types 'c'. (Widget-app copy, once it exists, must gate on focus
-        // before reaching here.) HID usage 0x06 = 'c'.
+        // Ctrl+C → two things at once, mirroring the PS/2 path (see
+        // decode_scancode): (1) terminal SIGINT — cancel the running
+        // foreground intent (download / OTA); (2) buffer control byte 0x03
+        // so the compositor's clipboard intercept (handle_input_key →
+        // handle_clipboard_key) can turn it into a copy when a text widget
+        // is focused. Without the push, USB-keyboard copy was dead because
+        // the byte was swallowed here and never reached the widget layer.
+        // The 0x03 is harmless elsewhere — loop consumes it as ^C. HID
+        // usage 0x06 = 'c'.
         if ctrl && key == 0x06 {
             crate::intent::request_cancel();
+            push_key(0x03);
             continue;
         }
 
