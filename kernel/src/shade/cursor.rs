@@ -13,7 +13,7 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 /// Cursor dimensions.
-const CURSOR_W: u32 = 16;
+const CURSOR_W: u32 = 15;
 const CURSOR_H: u32 = 22;
 
 /// Effective cursor size (w, h) — for callers that blit just the cursor rect.
@@ -147,60 +147,50 @@ fn blend(bg: u32, fg: u32, a: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// Bilinear (outline, interior) coverage of the base bitmap at source
-/// coordinate (fx, fy). Out-of-bounds reads as transparent.
-fn cursor_bilinear(fx: f32, fy: f32) -> (f32, f32) {
-    let x0 = if fx >= 0.0 { fx as i32 } else { fx as i32 - 1 };
-    let y0 = if fy >= 0.0 { fy as i32 } else { fy as i32 - 1 };
-    let tx = fx - x0 as f32;
-    let ty = fy - y0 as f32;
-    let at = |x: i32, y: i32| -> (f32, f32) {
-        if x < 0 || y < 0 || x >= CURSOR_W as i32 || y >= CURSOR_H as i32 { return (0.0, 0.0); }
-        match CURSOR_BITMAP[(y as usize) * CURSOR_W as usize + x as usize] {
-            1 => (1.0, 0.0),   // outline (light)
-            2 => (0.0, 1.0),   // interior (dark)
-            _ => (0.0, 0.0),
+/// Even-odd point-in-polygon test in reference space.
+fn in_poly(poly: &[(f32, f32)], x: f32, y: f32) -> bool {
+    let n = poly.len();
+    let mut c = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = poly[i];
+        let (xj, yj) = poly[j];
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            c = !c;
         }
-    };
-    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-    let (o00, i00) = at(x0, y0);
-    let (o10, i10) = at(x0 + 1, y0);
-    let (o01, i01) = at(x0, y0 + 1);
-    let (o11, i11) = at(x0 + 1, y0 + 1);
-    (lerp(lerp(o00, o10, tx), lerp(o01, o11, tx), ty),
-     lerp(lerp(i00, i10, tx), lerp(i01, i11, tx), ty))
+        j = i;
+    }
+    c
+}
+
+/// Supersampled coverage (0..=1) of `poly` at output pixel (col,row), mapping
+/// the pixel into the REF_W×REF_H reference space. SS×SS subsamples.
+fn poly_cov(poly: &[(f32, f32)], col: u32, row: u32, ew: u32, eh: u32) -> f32 {
+    const SS: u32 = 4;
+    let sx = REF_W / ew as f32;
+    let sy = REF_H / eh as f32;
+    let mut hit = 0u32;
+    for sj in 0..SS {
+        for si in 0..SS {
+            let x = (col as f32 + (si as f32 + 0.5) / SS as f32) * sx;
+            let y = (row as f32 + (sj as f32 + 0.5) / SS as f32) * sy;
+            if in_poly(poly, x, y) { hit += 1; }
+        }
+    }
+    hit as f32 / (SS * SS) as f32
 }
 
 /// Anti-aliased cursor sample at output pixel (col,row) for effective dims
-/// (ew,eh). Supersamples the base bitmap (SS×SS bilinear taps averaged) →
-/// (grayscale color, alpha 0..=255); alpha 0 = transparent. Supersampling
-/// is what gives smooth edges at 100% (1:1): a single bilinear tap there
-/// lands on texel centres and reproduces the hard 1-bit blocks, whereas the
-/// offset subsamples straddle edge texels and average to real coverage.
+/// (ew,eh). Rasterizes the vector arrow (OUTER outline + INNER dark fill)
+/// with supersampled coverage → (grayscale color, alpha 0..=255); alpha 0 =
+/// transparent. Resolution-independent: smooth at any cursor size.
 fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
-    const SS: u32 = 4;                       // 4×4 subsamples per output pixel
-    let sx = CURSOR_W as f32 / ew as f32;
-    let sy = CURSOR_H as f32 / eh as f32;
-    let mut o_sum = 0.0f32;
-    let mut i_sum = 0.0f32;
-    for sj in 0..SS {
-        for si in 0..SS {
-            let subx = col as f32 + (si as f32 + 0.5) / SS as f32;
-            let suby = row as f32 + (sj as f32 + 0.5) / SS as f32;
-            let (o, i) = cursor_bilinear(subx * sx - 0.5, suby * sy - 0.5);
-            o_sum += o;
-            i_sum += i;
-        }
-    }
-    let n = (SS * SS) as f32;
-    let o = o_sum / n;
-    let i = i_sum / n;
-    let a = (o + i).min(1.0);
+    let a = poly_cov(&OUTER, col, row, ew, eh);      // outline silhouette → alpha
     if a <= 0.0 { return (0, 0); }
-    // Outline ≈ white (240), interior ≈ near-black (30), mixed by coverage.
-    let lum = (o * 240.0 + i * 30.0) / (o + i).max(0.0001);
-    let c = (lum as u32) & 0xff;
-    ((c << 16) | (c << 8) | c, ((a * 255.0) as u32).min(255))
+    let i = poly_cov(&INNER, col, row, ew, eh);      // dark-fill fraction
+    // Outline ≈ white (235), interior ≈ near-black (30), mixed by fill cover.
+    let lum = ((235.0 * (1.0 - i) + 30.0 * i) as u32) & 0xff;
+    ((lum << 16) | (lum << 8) | lum, ((a * 255.0) as u32).min(255))
 }
 
 /// Update mouse position atomically. NO LOCK needed.
@@ -278,34 +268,36 @@ pub fn init_atomic(screen_w: u32, screen_h: u32) {
     ATOMIC_Y.store((screen_h / 2) as i32, Ordering::Relaxed);
 }
 
-/// Arrow cursor bitmap (1 = white outline, 2 = black fill, 0 = transparent).
-// Tabler "pointer-2" pointer: hollow rounded send-arrow. Light outline (1),
-// dark interior (2) — so it reads as a hollow outline on the (dark) wallpaper
-// but stays defined on light backgrounds. Transparent (0) outside. Hotspot =
-// the tip at top-left (0,0). Elongated 16×22.
-static CURSOR_BITMAP: [u8; (CURSOR_W * CURSOR_H) as usize] = [
-    1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,1,1,2,1,1,0,0,0,0,0,0,0,0,0,0,
-    0,1,1,2,2,1,1,0,0,0,0,0,0,0,0,0,
-    0,1,1,2,2,2,2,1,1,0,0,0,0,0,0,0,
-    0,1,1,2,2,2,2,2,1,1,0,0,0,0,0,0,
-    0,0,1,1,2,2,2,2,2,2,1,1,0,0,0,0,
-    0,0,1,1,2,2,2,2,2,2,2,1,1,0,0,0,
-    0,0,1,1,2,2,2,2,2,2,2,2,2,1,1,0,
-    0,0,1,1,2,2,2,2,2,2,2,2,2,2,1,1,
-    0,0,0,1,1,2,2,2,2,2,2,2,1,1,0,0,
-    0,0,0,1,1,2,2,2,2,1,1,0,0,0,0,0,
-    0,0,0,1,1,2,2,1,1,0,0,0,0,0,0,0,
-    0,0,0,1,1,2,2,1,1,0,0,0,0,0,0,0,
-    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
-    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
-    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
-    0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,
+/// Vector arrow cursor. A classic `left_ptr`: tip (hotspot) at (0,0), a
+/// light outline (OUTER silhouette) around a dark fill (INNER = OUTER inset
+/// by the outline width, computed offline). Both are rasterized with
+/// supersampled point-in-polygon coverage in a REF_W×REF_H reference space,
+/// so the cursor is resolution-independent — smooth at any size, unlike the
+/// old 16×22 bitmap that pixelated at 1:1. REF is exactly 2× the base dims
+/// (15×22) so the default maps 1 ref = 0.5 px with no aspect distortion.
+const REF_W: f32 = 30.0;
+const REF_H: f32 = 44.0;
+
+/// Outline silhouette (outer boundary of the light stroke), tip at (0,0).
+static OUTER: [(f32, f32); 7] = [
+    (0.0,  0.0),   // tip / hotspot
+    (0.0, 30.0),   // bottom of the left edge
+    (7.4, 22.8),   // notch (inner)
+    (13.2, 35.6),  // tail bottom-left
+    (19.0, 33.0),  // tail bottom-right
+    (14.0, 21.4),  // notch (outer)
+    (22.2, 21.4),  // right wing
+];
+
+/// Dark fill — OUTER inset by the outline width (precomputed miter offset).
+static INNER: [(f32, f32); 7] = [
+    (2.30,  5.41),
+    (2.30, 24.55),
+    (8.14, 18.87),
+    (14.35, 32.56),
+    (15.99, 31.83),
+    (10.50, 19.10),
+    (16.50, 19.10),
 ];
 
 /// Mouse state — position, buttons, and overlay tracking.
@@ -368,43 +360,6 @@ impl MouseState {
         (self.buttons & 2) == 0 && (self.prev_buttons & 2) != 0
     }
 
-    /// Redraw cursor overlay: restore old position from shadow→MMIO, draw at new position on MMIO.
-    /// Call after any scene blit, or when cursor moves.
-    #[allow(dead_code)]
-    pub fn redraw_overlay(&mut self, shadow: *mut u8, info: &crate::framebuffer::FbInfo) {
-        let mmio = info.addr as *mut u8;
-        let pitch = info.pitch as usize;
-        let sw = info.width as i32;
-        let sh = info.height as i32;
-
-        // Restore old cursor area: copy shadow → MMIO
-        if self.drawn {
-            blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh,
-                self.drawn_x, self.drawn_y, CURSOR_W, CURSOR_H);
-        }
-
-        // Draw cursor at current position directly on MMIO
-        for row in 0..CURSOR_H as i32 {
-            let py = self.y + row;
-            if py < 0 || py >= sh { continue; }
-            for col in 0..CURSOR_W as i32 {
-                let px = self.x + col;
-                if px < 0 || px >= sw { continue; }
-                let bmp = CURSOR_BITMAP[(row as usize) * CURSOR_W as usize + col as usize];
-                if bmp == 0 { continue; }
-                let off = py as usize * pitch + px as usize * 4;
-                let color: u32 = if bmp == 1 { 0x00FFFFFF } else { 0x00000000 };
-                // SAFETY: writing to MMIO framebuffer within bounds
-                unsafe {
-                    core::ptr::write_volatile(mmio.add(off) as *mut u32, color);
-                }
-            }
-        }
-
-        self.drawn_x = self.x;
-        self.drawn_y = self.y;
-        self.drawn = true;
-    }
 }
 
 // ── Shared cursor-drawn state (used by both lock-free and inner paths) ──

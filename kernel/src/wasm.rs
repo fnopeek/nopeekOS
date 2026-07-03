@@ -611,6 +611,64 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_http_request(url_ptr, url_len, buf_ptr, buf_max) -> bytes or -1
+    // Outbound HTTPS GET for the native browser (beak). Parses the URL,
+    // fetches the body (following redirects) via the same TLS path OTA
+    // uses, and copies up to buf_max bytes into the caller's buffer.
+    // NET-gated — distinct from npkFS READ and from WiFi NETCTL.
+    linker.func_wrap("env", "npk_http_request",
+        |mut caller: Caller<'_, HostState>, url_ptr: i32, url_len: i32,
+         buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
+                kprintln!("[npk] WASM: npk_http_request DENIED (cap_id={:08x}, {:?})",
+                    capability::short_id(&cap_id), e);
+                return -1;
+            }
+            if buf_max <= 0 { return -1; }
+            let cap = buf_max as usize;
+
+            let url = match read_wasm_str(&caller, url_ptr, url_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let (host, path) = match crate::intent::http::parse_url(&url) {
+                Ok(hp) => hp,
+                Err(e) => {
+                    kprintln!("[npk] WASM: npk_http_request bad url: {}", e);
+                    return -1;
+                }
+            };
+
+            let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let res = crate::intent::http::https_get_streaming(
+                &host, &path, cap,
+                &mut |chunk: &[u8]| -> Result<(), &'static str> {
+                    if out.len() < cap {
+                        let take = chunk.len().min(cap - out.len());
+                        out.extend_from_slice(&chunk[..take]);
+                    }
+                    Ok(())
+                },
+            );
+            if res.is_err() { return -1; }
+
+            let write_len = out.len().min(cap);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            if start + write_len <= data.len() {
+                data[start..start + write_len].copy_from_slice(&out[..write_len]);
+                write_len as i32
+            } else {
+                -1
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_store(name_ptr, name_len, data_ptr, data_len) -> 0 or -1
     linker.func_wrap("env", "npk_store",
         |caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
