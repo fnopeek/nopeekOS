@@ -52,6 +52,12 @@ pub enum ShadeAction {
     /// no hardcoded module name — replacing drun with a different
     /// launcher is a config change, not a rebuild.
     SpawnLauncher,
+    /// Ctrl+Shift+C: copy the focused window's selection (terminal drag
+    /// selection, or focused Input/TextArea) to the kernel clipboard.
+    Copy,
+    /// Ctrl+Shift+V: paste the clipboard into the focused window (terminal
+    /// input line, or focused Input/TextArea).
+    Paste,
 }
 
 /// Check if the configured mod key is currently held (public for ESC state capture).

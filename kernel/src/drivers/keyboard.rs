@@ -509,6 +509,19 @@ fn decode_scancode(scancode: u8) -> Option<u8> {
     let alt_gr = ALT_GR.load(Ordering::Relaxed);
     let caps = CAPS_LOCK.load(Ordering::Relaxed);
 
+    // Ctrl+Shift+C → copy the selection (terminal drag-selection or focused
+    // Input/TextArea) via a ShadeAction (runs in the main loop, not here).
+    // In a terminal Ctrl+C must stay SIGINT, so copy is the Shift variant.
+    if ctrl && shift && code == 0x2E {
+        crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::Copy);
+        return None;
+    }
+    // Ctrl+Shift+V → paste the clipboard. Plain Ctrl+V still reaches widgets
+    // as 'v'+ctrl. Scancode 0x2F = 'v'.
+    if ctrl && shift && code == 0x2F {
+        crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::Paste);
+        return None;
+    }
     if ctrl && code == 0x2E {
         // Ctrl+C → terminal SIGINT: cancel a running foreground intent
         // (download/OTA). Set here so it works even when the main loop is

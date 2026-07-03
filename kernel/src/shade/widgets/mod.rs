@@ -1158,6 +1158,180 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
     true
 }
 
+// ── Mouse text selection ──────────────────────────────────────────────
+//
+// Maps a screen pixel to a byte offset in the focused Input/TextArea, so a
+// click positions the caret and a drag selects. The selection model
+// (`sel_anchor` + `cursor`) is the same one Shift+movement and Ctrl+C/X/V
+// already use — copy/paste come for free once the mouse sets it.
+
+use core::sync::atomic::{AtomicU32, Ordering};
+
+/// Window id (+1) whose focused text widget is being drag-selected; 0 = none.
+static TEXT_DRAG: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+fn ceil_u32(v: f32) -> u32 { let i = v as u32; if v > i as f32 { i + 1 } else { i } }
+
+/// Sum every `Modifier::Padding` — mirrors render's `leaf_padding` so the
+/// inverse hit-mapping uses the same text origin the glyphs were drawn at.
+fn padding_sum(mods: &[abi::Modifier]) -> u32 {
+    let mut p = 0u32;
+    for m in mods { if let abi::Modifier::Padding(n) = m { p = p.saturating_add(*n as u32); } }
+    p
+}
+
+fn layout_node_at_path<'a>(root: &'a layout::LayoutNode, path: &[u32])
+    -> Option<&'a layout::LayoutNode>
+{
+    let mut node = root;
+    for &i in path { node = node.children.get(i as usize)?; }
+    Some(node)
+}
+
+/// Byte offset in `s` whose glyph boundary sits nearest `target_x` px from
+/// the text origin. Evaluates every char boundary (lines are short, so the
+/// O(n) `measure` calls are cheap) and picks the closest.
+fn byte_at_x(s: &str, style: abi::TextStyle, target_x: u32) -> usize {
+    let mut best = 0usize;
+    let mut best_d = target_x; // distance at the 0-offset boundary (width 0)
+    for b in s.char_indices().map(|(i, _)| i).skip(1).chain(core::iter::once(s.len())) {
+        let w = ceil_u32(crate::gui::text::measure(&s[..b], style));
+        let d = if w >= target_x { w - target_x } else { target_x - w };
+        if d < best_d { best_d = d; best = b; }
+    }
+    best
+}
+
+/// (byte start, slice) of the `n`th '\n'-delimited line in `s`.
+fn nth_line(s: &str, n: usize) -> (usize, &str) {
+    let mut start = 0usize;
+    for (i, line) in s.split('\n').enumerate() {
+        if i == n { return (start, line); }
+        start += line.len() + 1;
+    }
+    (s.len(), "")
+}
+
+/// Byte offset in the focused text widget's value under screen pixel (x,y).
+/// Mirrors the render geometry (Input: Heading, single line; TextArea: Mono,
+/// scrolled lines). `require_inside` rejects points outside the widget rect
+/// (initial click); false clamps to the content (drag-extend).
+fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Option<usize> {
+    if scene.focus_path.is_empty() { return None; }
+    let widget = widget_at_path(&scene.tree, &scene.focus_path)?;
+    let node = layout_node_at_path(&scene.layout_tree, &scene.focus_path)?;
+    let edit = scene.input_edit.as_ref()?;
+    let rect = node.rect;
+    if require_inside && !rect_contains(rect, x, y) { return None; }
+    let pad = padding_sum(modifiers_of_ref(widget)) as i32;
+    let text_x = rect.x + pad + 4;
+    let value = edit.value.as_str();
+    match widget {
+        abi::Widget::Input { .. } => {
+            Some(byte_at_x(value, abi::TextStyle::Heading, (x - text_x).max(0) as u32))
+        }
+        abi::Widget::TextArea { .. } => {
+            let style = abi::TextStyle::Mono;
+            let line_h = ceil_u32(crate::gui::text::line_height(style)).max(1);
+            let top_y = rect.y + pad + 4;
+            let visible = (rect.h / line_h).max(1) as usize;
+            let total_lines = value.split('\n').count();
+            let max_scroll = total_lines.saturating_sub(visible);
+            let scroll = ((scene.scroll_y / line_h) as usize).min(max_scroll);
+            let row = ((y - top_y).max(0) as u32 / line_h) as usize;
+            let target_line = (scroll + row).min(total_lines.saturating_sub(1));
+            let (line_start, line_str) = nth_line(value, target_line);
+            Some(line_start + byte_at_x(line_str, style, (x - text_x).max(0) as u32))
+        }
+        _ => None,
+    }
+}
+
+/// True while a text-selection drag is in progress.
+pub fn text_selecting() -> bool { TEXT_DRAG.load(Ordering::Acquire) != 0 }
+
+/// Abandon any in-progress text drag (focus left the widget world).
+pub fn text_select_cancel() { TEXT_DRAG.store(0, Ordering::Release); }
+
+/// Position the caret at (x,y) and start a selection there. Returns true if
+/// it began — the press must land inside the focused Input/TextArea.
+pub fn text_select_begin(window_id: u32, x: i32, y: i32) -> bool {
+    let began = {
+        let mut scenes = SCENES.lock();
+        let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        let off = match offset_at(scene, x, y, true) { Some(o) => o, None => return false };
+        match scene.input_edit.as_mut() {
+            Some(edit) => {
+                edit.cursor = clamp_boundary(&edit.value, off);
+                edit.sel_anchor = Some(edit.cursor);
+                true
+            }
+            None => false,
+        }
+    };
+    if began {
+        TEXT_DRAG.store(window_id + 1, Ordering::Release);
+        rerender_state_only(window_id);
+        mark_dirty(window_id);
+        crate::shade::request_render();
+    }
+    began
+}
+
+/// Move the caret (selection's moving end) to (x,y). Returns true if it
+/// changed (caller re-renders). Clamps to content so a drag past the edge
+/// keeps extending.
+pub fn text_select_extend(window_id: u32, x: i32, y: i32) -> bool {
+    let changed = {
+        let mut scenes = SCENES.lock();
+        let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        let off = match offset_at(scene, x, y, false) { Some(o) => o, None => return false };
+        match scene.input_edit.as_mut() {
+            Some(edit) => {
+                let c = clamp_boundary(&edit.value, off);
+                if c != edit.cursor { edit.cursor = c; true } else { false }
+            }
+            None => false,
+        }
+    };
+    if changed {
+        caret_follow_scroll(window_id);
+        rerender_state_only(window_id);
+        mark_dirty(window_id);
+        crate::shade::request_render();
+    }
+    changed
+}
+
+/// End a text drag. A collapsed (single-click) selection is cleared so a
+/// plain click leaves no highlight.
+pub fn text_select_end(window_id: u32) {
+    TEXT_DRAG.store(0, Ordering::Release);
+    let mut scenes = SCENES.lock();
+    if let Some(scene) = scenes.get_mut(&window_id) {
+        if let Some(edit) = scene.input_edit.as_mut() {
+            if edit.sel_anchor == Some(edit.cursor) { edit.sel_anchor = None; }
+        }
+    }
+}
+
+/// Ctrl+Shift+C / V routed from the compositor: copy or paste the focused
+/// text widget's selection via the existing clipboard handler.
+pub fn clipboard_copy(window_id: u32) -> bool { widget_clipboard(window_id, b'c') }
+pub fn clipboard_paste(window_id: u32) -> bool { widget_clipboard(window_id, b'v') }
+
+fn widget_clipboard(window_id: u32, letter: u8) -> bool {
+    let is_textarea = {
+        let scenes = SCENES.lock();
+        let scene = match scenes.get(&window_id) { Some(s) => s, None => return false };
+        if scene.focus_path.is_empty() || scene.input_edit.is_none() { return false; }
+        matches!(widget_at_path(&scene.tree, &scene.focus_path),
+                 Some(abi::Widget::TextArea { .. }))
+    };
+    handle_clipboard_key(window_id, letter, is_textarea)
+}
+
 /// Compositor-side keyboard intercept for a focused `Widget::Input` or
 /// `Widget::TextArea`. Returns `true` iff the key was consumed — caller
 /// must skip the usual `push_event(Event::Key)` route to the app.
