@@ -43,7 +43,7 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
-| Tokenizer / parser | css-syntax-3 | 🟡 | `<style>` block parser (`css.rs`: rule list + selector list + declaration blocks, `/* */` comments, `@…{}`/`@…;` at-rules skipped) + inline `style="…"` declaration parser. Not a full token stream; no external `<link>` fetch yet |
+| Tokenizer / parser | css-syntax-3 | 🟡 | `<style>` block parser (`css.rs`: rule list + selector list + declaration blocks, `/* */` comments, `@…{}`/`@…;` at-rules skipped) + inline `style="…"` + **external `<link rel=stylesheet>`** (shell fetches, cascades before `<style>`). Reader-mode toggle (UA-only) as a fallback. Not a full token stream |
 | Selectors (type/class/id/desc/…) | selectors-4 | 🟡 | type / `.class` / `#id` / `*`, compounds (`div.a#b`), **descendant** (space) + **child** (`>`) combinators, comma lists. No pseudo-classes/`[attr]`/`+`~` siblings (those selectors are dropped, not mis-applied) |
 | Cascade, specificity, inheritance | css-cascade | 🟡 | full order UA → author (**`(id,class,type)` specificity** + doc-order tie-break) → inline, plus inheritance. No `!important`/`@media`/external sheets |
 | **UA default stylesheet** | HTML rendering §15 | ✅ | real UA sheet as data (`style.rs::ua_rule`): `display`, em-relative `font-size`, weight/italic/mono, `color` role, margins, list indent — no longer hardcoded in layout |
