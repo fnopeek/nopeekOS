@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 
@@ -51,8 +52,43 @@ fn log(m: &str) {
 }
 
 const CANVAS_ID: i32 = 1;
+
+// Toolbar
 const ACT_GO: u32 = 1;
-const ACT_RELOAD: u32 = 2;
+const ACT_BACK: u32 = 2;
+const ACT_FORWARD: u32 = 3;
+const ACT_RELOAD: u32 = 4;
+
+// Menu-bar labels (toggle a dropdown)
+const ACT_MENU_FILE: u32 = 5_000;
+const ACT_MENU_EDIT: u32 = 5_001;
+const ACT_MENU_VIEW: u32 = 5_002;
+const ACT_MENU_HELP: u32 = 5_004;
+const ACT_MENU_DISMISS: u32 = 5_500;
+
+// Menu items
+const ACT_FILE_CLOSE: u32 = 6_000;
+const ACT_VIEW_RELOAD: u32 = 6_020;
+const ACT_HELP_ABOUT: u32 = 6_100;
+
+// Menu-label anchor NodeIds (for the dropdown Popover)
+const NODE_MENU_FILE: u32 = 100;
+const NODE_MENU_EDIT: u32 = 101;
+const NODE_MENU_VIEW: u32 = 102;
+const NODE_MENU_HELP: u32 = 104;
+
+// Which menu dropdown is open (0 = none, else ACT_MENU_FILE..HELP encoded 1..4).
+static mut OPEN_MENU: u8 = 0;
+fn open_menu() -> u8 {
+    unsafe { core::ptr::addr_of!(OPEN_MENU).read() }
+}
+fn set_open_menu(v: u8) {
+    unsafe { core::ptr::addr_of_mut!(OPEN_MENU).write(v) };
+}
+fn toggle_menu(which: u8) {
+    let cur = open_menu();
+    set_open_menu(if cur == which { 0 } else { which });
+}
 
 // ── Persistent state (static buffers — no heap growth across page loads) ───
 
@@ -139,7 +175,15 @@ fn fetch(url: &str) -> bool {
     n >= 0
 }
 
-/// Navigate the address bar's typed text (normalise scheme, then fetch).
+/// Set the address + fetch, WITHOUT touching history (used by back/forward).
+fn fetch_url(url: &str) {
+    set_url(url);
+    if !fetch(url) {
+        log("[beak] fetch failed");
+    }
+}
+
+/// Navigate the address bar's typed text (normalise scheme) — new entry.
 fn go(typed: &str) {
     let t = typed.trim();
     if t.is_empty() {
@@ -152,19 +196,80 @@ fn go(typed: &str) {
         s.push_str(t);
         s
     };
-    set_url(&abs);
-    if !fetch(&abs) {
-        log("[beak] fetch failed");
-    }
+    fetch_url(&abs);
+    hist_push(&abs);
 }
 
-/// Follow a link href relative to the current page.
+/// Follow a link href relative to the current page — new history entry.
 fn follow(href: &str) {
     let base = url_str().to_string();
     let abs = resolve(&base, href);
-    set_url(&abs);
-    if !fetch(&abs) {
-        log("[beak] fetch failed");
+    fetch_url(&abs);
+    hist_push(&abs);
+}
+
+// ── Back/forward history (fixed-size static ring of URLs) ──────────────────
+
+const HIST_MAX: usize = 64;
+static mut HIST: [[u8; URL_CAP]; HIST_MAX] = [[0; URL_CAP]; HIST_MAX];
+static mut HIST_LEN: [usize; HIST_MAX] = [0; HIST_MAX];
+static mut HIST_COUNT: usize = 0;
+static mut HIST_POS: usize = 0;
+
+fn hist_get(i: usize) -> &'static str {
+    unsafe {
+        let slot = (core::ptr::addr_of!(HIST) as *const [u8; URL_CAP]).add(i) as *const u8;
+        let len = (core::ptr::addr_of!(HIST_LEN) as *const usize).add(i).read();
+        core::str::from_utf8(core::slice::from_raw_parts(slot, len)).unwrap_or("")
+    }
+}
+fn hist_set(i: usize, url: &str) {
+    let n = url.len().min(URL_CAP);
+    unsafe {
+        let slot = (core::ptr::addr_of_mut!(HIST) as *mut [u8; URL_CAP]).add(i) as *mut u8;
+        core::ptr::copy_nonoverlapping(url.as_ptr(), slot, n);
+        (core::ptr::addr_of_mut!(HIST_LEN) as *mut usize).add(i).write(n);
+    }
+}
+/// Record a new navigation: truncate forward entries, append (caps at HIST_MAX).
+fn hist_push(url: &str) {
+    unsafe {
+        let count = core::ptr::addr_of!(HIST_COUNT).read();
+        let pos = core::ptr::addr_of!(HIST_POS).read();
+        if count > 0 && hist_get(pos) == url {
+            return;
+        }
+        let new_pos = if count == 0 { 0 } else { pos + 1 };
+        if new_pos >= HIST_MAX {
+            hist_set(HIST_MAX - 1, url);
+            return;
+        }
+        hist_set(new_pos, url);
+        core::ptr::addr_of_mut!(HIST_POS).write(new_pos);
+        core::ptr::addr_of_mut!(HIST_COUNT).write(new_pos + 1);
+    }
+}
+fn hist_back() -> Option<&'static str> {
+    unsafe {
+        let pos = core::ptr::addr_of!(HIST_POS).read();
+        if pos > 0 {
+            core::ptr::addr_of_mut!(HIST_POS).write(pos - 1);
+            Some(hist_get(pos - 1))
+        } else {
+            None
+        }
+    }
+}
+fn hist_forward() -> Option<&'static str> {
+    unsafe {
+        let pos = core::ptr::addr_of!(HIST_POS).read();
+        let count = core::ptr::addr_of!(HIST_COUNT).read();
+        if pos + 1 < count {
+            core::ptr::addr_of_mut!(HIST_POS).write(pos + 1);
+            Some(hist_get(pos + 1))
+        } else {
+            None
+        }
     }
 }
 
@@ -256,17 +361,31 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>) {
     }
 }
 
-/// Commit the loft-styled chrome: a flush toolbar (nav icon-buttons + a
-/// framed address bar in loft's `search_input` idiom) over the canvas body.
-/// No footer — the body fills to the bottom edge (file-manager idiom).
+/// Commit the loft-styled chrome: menu bar · toolbar (back/forward/reload +
+/// framed address bar) · canvas body · the open dropdown as a Popover.
 fn render_chrome() {
+    let menu = prefab::menu_bar_with_anchors(
+        &[
+            ("Datei".to_string(), ActionId(ACT_MENU_FILE)),
+            ("Bearbeiten".to_string(), ActionId(ACT_MENU_EDIT)),
+            ("Ansicht".to_string(), ActionId(ACT_MENU_VIEW)),
+            ("Hilfe".to_string(), ActionId(ACT_MENU_HELP)),
+        ],
+        &[
+            NodeId(NODE_MENU_FILE),
+            NodeId(NODE_MENU_EDIT),
+            NodeId(NODE_MENU_VIEW),
+            NodeId(NODE_MENU_HELP),
+        ],
+    );
+
     // loft's framed-input idiom: icon prefix + Input, SurfaceMuted fill, a
-    // visible Border stroke (not just on focus), Focus→Accent — grown to fill.
+    // visible Border stroke, Focus→Accent — grown to fill the toolbar.
     let address = Widget::Row {
         children: vec![
             Widget::Icon {
                 id: IconId::Bird,
-                size: 24,
+                size: 20,
                 modifiers: vec![Modifier::Tint(Token::Accent)],
             },
             Widget::Input {
@@ -294,7 +413,9 @@ fn render_chrome() {
 
     let toolbar = Widget::Row {
         children: vec![
-            prefab::icon_button(IconId::ArrowClockwise, 24, Some(ActionId(ACT_RELOAD)), None),
+            prefab::icon_button(IconId::ArrowLeft, 22, Some(ActionId(ACT_BACK)), None),
+            prefab::icon_button(IconId::ArrowRight, 22, Some(ActionId(ACT_FORWARD)), None),
+            prefab::icon_button(IconId::ArrowClockwise, 22, Some(ActionId(ACT_RELOAD)), None),
             address,
         ],
         spacing: Spacing::Sm.as_u16(),
@@ -302,17 +423,30 @@ fn render_chrome() {
         modifiers: vec![Modifier::Padding(Padding::Sm.as_u16())],
     };
 
+    let mut children = vec![
+        menu,
+        Widget::Divider,
+        toolbar,
+        Widget::Divider,
+        Widget::Canvas {
+            id: CanvasId(CANVAS_ID as u32),
+            width: 800,
+            height: 600,
+            modifiers: vec![Modifier::Flex(1), Modifier::Background(Token::Surface)],
+        },
+    ];
+
+    if let Some((anchor, content)) = dropdown_for(open_menu()) {
+        children.push(Widget::Popover {
+            anchor: NodeId(anchor),
+            child: Box::new(content),
+            on_dismiss: ActionId(ACT_MENU_DISMISS),
+            modifiers: vec![],
+        });
+    }
+
     let tree = Widget::Column {
-        children: vec![
-            toolbar,
-            Widget::Divider,
-            Widget::Canvas {
-                id: CanvasId(CANVAS_ID as u32),
-                width: 800,
-                height: 600,
-                modifiers: vec![Modifier::Flex(1), Modifier::Background(Token::Surface)],
-            },
-        ],
+        children,
         spacing: Spacing::None.as_u16(),
         align: Align::Stretch,
         modifiers: vec![],
@@ -328,6 +462,29 @@ fn render_chrome() {
     }
 }
 
+/// Dropdown content for the open menu code (1=File .. 4=Help) → (anchor, menu).
+fn dropdown_for(which: u8) -> Option<(u32, Widget)> {
+    match which {
+        1 => Some((
+            NODE_MENU_FILE,
+            prefab::popover_menu(&[("Schließen".to_string(), ActionId(ACT_FILE_CLOSE))], None),
+        )),
+        2 => Some((
+            NODE_MENU_EDIT,
+            prefab::popover_menu(&[("(noch nichts)".to_string(), ActionId(ACT_MENU_DISMISS))], None),
+        )),
+        3 => Some((
+            NODE_MENU_VIEW,
+            prefab::popover_menu(&[("Neu laden".to_string(), ActionId(ACT_VIEW_RELOAD))], None),
+        )),
+        4 => Some((
+            NODE_MENU_HELP,
+            prefab::popover_menu(&[("Über beak".to_string(), ActionId(ACT_HELP_ABOUT))], None),
+        )),
+        _ => None,
+    }
+}
+
 /// Handle one event. Returns true if the chrome (address bar / title) should
 /// be re-committed.
 fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> bool {
@@ -337,23 +494,70 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> boo
             set_url(&value);
             false
         }
-        Event::Action(ActionId(id)) => {
-            if id == ACT_GO {
+        Event::Action(ActionId(id)) => match id {
+            ACT_GO => {
                 let t = url_str().to_string();
                 go(&t);
+                set_open_menu(0);
                 true
-            } else if id == ACT_RELOAD {
+            }
+            ACT_RELOAD | ACT_VIEW_RELOAD => {
                 let t = url_str().to_string();
                 if !t.is_empty() {
-                    go(&t);
+                    fetch_url(&t);
+                }
+                set_open_menu(0);
+                true
+            }
+            ACT_BACK => {
+                if let Some(u) = hist_back() {
+                    fetch_url(u);
+                }
+                set_open_menu(0);
+                true
+            }
+            ACT_FORWARD => {
+                if let Some(u) = hist_forward() {
+                    fetch_url(u);
+                }
+                set_open_menu(0);
+                true
+            }
+            ACT_MENU_FILE => {
+                toggle_menu(1);
+                true
+            }
+            ACT_MENU_EDIT => {
+                toggle_menu(2);
+                true
+            }
+            ACT_MENU_VIEW => {
+                toggle_menu(3);
+                true
+            }
+            ACT_MENU_HELP => {
+                toggle_menu(4);
+                true
+            }
+            ACT_MENU_DISMISS | ACT_HELP_ABOUT => {
+                set_open_menu(0);
+                true
+            }
+            ACT_FILE_CLOSE => {
+                unsafe {
+                    let _ = npk_close_widget();
                 }
                 true
-            } else {
-                false
             }
-        }
+            _ => false,
+        },
         // Link clicks land in the canvas → hit-test the engine's link rects.
         Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
+            // A click with a menu open just closes it (don't also hit a link).
+            if open_menu() != 0 {
+                set_open_menu(0);
+                return true;
+            }
             if let Some((rx, ry, w, h)) = canvas_rect() {
                 if x >= rx && x < rx + w && y >= ry && y < ry + h {
                     let cx = x - rx;
@@ -459,22 +663,32 @@ pub extern "C" fn _start() {
         ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
     }
 
-    // Launch argument: `npk_open("beak", "https://…")` opens straight to a URL.
+    // Launch argument: `npk_open("beak", "https://…")` → prime the address bar
+    // now; the actual fetch waits until the font is parsed (below).
     let arg_len = {
         let p = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
         let n = unsafe { npk_launch_arg(p as i32, PAYLOAD_CAP as i32) };
         if n > 0 { n as usize } else { 0 }
     };
     if arg_len > 0 {
-        let arg = payload_str(arg_len).to_string();
-        go(&arg);
+        set_url(payload_str(arg_len));
     }
+
+    // Commit the chrome IMMEDIATELY so the window is an opaque browser from the
+    // first frame. Parsing the 880 KB font (below) is slow enough to otherwise
+    // leave the window empty/transparent for a beat (the "loop window" look)
+    // and makes beak feel slower to start than font-free apps (spell/loft).
+    render_chrome();
 
     log("[beak] parsing font…");
     let engine = Engine::new();
     log("[beak] engine ready");
 
-    render_chrome();
+    // Engine is up — fetch the launch URL now (if we were opened with one).
+    if arg_len > 0 {
+        let u = url_str().to_string();
+        go(&u);
+    }
 
     // Cached layout: (Layout, width it was laid out at, content generation).
     let mut cache: Option<(Layout, i32, u32)> = None;
