@@ -17,13 +17,28 @@ use crate::Block;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
-// Dark reader theme (matches the compositor's dark surfaces).
-pub const BG: Rgb = Rgb(24, 24, 28);
-const TEXT: Rgb = Rgb(212, 212, 216);
-const HEADING: Rgb = Rgb(245, 245, 248);
-const LINK: Rgb = Rgb(96, 165, 250);
-const MUTED: Rgb = Rgb(148, 148, 154);
-const RULE: Rgb = Rgb(58, 58, 64);
+/// Resolved page colours for the active theme. The shell fills these from the
+/// compositor palette (npk_theme_token) so the page follows light/dark like
+/// the rest of the UI; `DARK` is the fallback before the query.
+#[derive(Clone, Copy)]
+pub struct Theme {
+    pub bg: Rgb,
+    pub text: Rgb,
+    pub heading: Rgb,
+    pub link: Rgb,
+    pub muted: Rgb,
+    pub rule: Rgb,
+}
+impl Theme {
+    pub const DARK: Theme = Theme {
+        bg: Rgb(24, 24, 28),
+        text: Rgb(212, 212, 216),
+        heading: Rgb(245, 245, 248),
+        link: Rgb(96, 165, 250),
+        muted: Rgb(148, 148, 154),
+        rule: Rgb(58, 58, 64),
+    };
+}
 
 const PAD: i32 = 20;
 
@@ -149,7 +164,7 @@ fn flow_text(
 }
 
 /// Lay a document out into a scroll-independent display list.
-pub fn layout(font: &Font, blocks: &[Block], width: u32) -> Layout {
+pub fn layout(font: &Font, blocks: &[Block], width: u32, theme: &Theme) -> Layout {
     let mut ops: Vec<DrawOp> = Vec::new();
     let mut links: Vec<LinkRect> = Vec::new();
 
@@ -162,25 +177,25 @@ pub fn layout(font: &Font, blocks: &[Block], width: u32) -> Layout {
             Block::Heading { level, text } => {
                 let size = heading_size(*level);
                 y += (size * 0.5) as i32;
-                y = flow_text(font, text, cx, y, cw, size, HEADING, &mut ops, &mut links, None);
+                y = flow_text(font, text, cx, y, cw, size, theme.heading, &mut ops, &mut links, None);
                 y += (size * 0.28) as i32;
             }
             Block::Para(text) => {
-                y = flow_text(font, text, cx, y, cw, 16.0, TEXT, &mut ops, &mut links, None);
+                y = flow_text(font, text, cx, y, cw, 16.0, theme.text, &mut ops, &mut links, None);
                 y += 9;
             }
             Block::ListItem(text) => {
-                ops.push(DrawOp::Rect { x: cx + 5, y: y + 9, w: 4, h: 4, color: MUTED });
-                y = flow_text(font, text, cx + 22, y, cw - 22, 16.0, TEXT, &mut ops, &mut links, None);
+                ops.push(DrawOp::Rect { x: cx + 5, y: y + 9, w: 4, h: 4, color: theme.muted });
+                y = flow_text(font, text, cx + 22, y, cw - 22, 16.0, theme.text, &mut ops, &mut links, None);
                 y += 5;
             }
             Block::Link { text, href } => {
-                y = flow_text(font, text, cx, y, cw, 16.0, LINK, &mut ops, &mut links, Some(href));
+                y = flow_text(font, text, cx, y, cw, 16.0, theme.link, &mut ops, &mut links, Some(href));
                 y += 5;
             }
             Block::Rule => {
                 y += 7;
-                ops.push(DrawOp::Rect { x: cx, y, w: cw, h: 1, color: RULE });
+                ops.push(DrawOp::Rect { x: cx, y, w: cw, h: 1, color: theme.rule });
                 y += 11;
             }
         }

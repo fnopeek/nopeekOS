@@ -11,7 +11,7 @@ use core::cell::RefCell;
 use fontdue::{Font, FontSettings, Metrics};
 use hashbrown::HashMap;
 
-use crate::layout::{DrawOp, Layout, Rgb, BG};
+use crate::layout::{DrawOp, Layout, Rgb, Theme};
 use crate::Block;
 
 static FONT_BYTES: &[u8] = include_bytes!("../assets/inter.ttf");
@@ -22,6 +22,8 @@ pub struct Engine {
     /// is not free; without this every glyph is re-rasterised every frame,
     /// which makes scrolling lag. Bounded by the glyph set the page uses.
     glyphs: RefCell<HashMap<(u32, u32), (Metrics, Vec<u8>)>>,
+    /// Page colours (theme-resolved by the shell; dark until then).
+    theme: Theme,
 }
 
 impl Default for Engine {
@@ -39,20 +41,27 @@ impl Engine {
         Engine {
             font,
             glyphs: RefCell::new(HashMap::new()),
+            theme: Theme::DARK,
         }
+    }
+
+    /// Set the page colours (the shell resolves these from the compositor
+    /// palette so the page follows light/dark).
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
     }
 
     /// Parse + lay out a document at `width`. Scroll-independent.
     pub fn layout(&self, html: &str, width: u32) -> Layout {
         let blocks: Vec<Block> = crate::parse(html);
-        crate::layout::layout(&self.font, &blocks, width)
+        crate::layout::layout(&self.font, &blocks, width, &self.theme)
     }
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
     /// `w * h * 4` BGRA bytes).
     pub fn paint(&self, layout: &Layout, w: u32, h: u32, scroll_y: i32, out: &mut [u8]) {
         let (wi, hi) = (w as i32, h as i32);
-        fill(out, wi, hi, 0, 0, wi, hi, BG);
+        fill(out, wi, hi, 0, 0, wi, hi, self.theme.bg);
         for op in &layout.ops {
             match op {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
