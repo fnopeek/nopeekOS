@@ -773,6 +773,26 @@ fn parse_https_url(loc: &str, current_host: &str) -> Result<(String, String), &'
     }
 }
 
+/// Parse a user-facing URL (from a WASM app, e.g. beak) into (host, path).
+/// Accepts `https://host/path`, `host/path`, or a bare `host` (path
+/// defaults to `/`). Scheme-less input is treated as https; plain `http://`
+/// is refused (no downgrade). Reuses `parse_https_url`'s rules.
+pub(crate) fn parse_url(url: &str) -> Result<(String, String), &'static str> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("empty url");
+    }
+    if url.starts_with("https://") {
+        parse_https_url(url, "")
+    } else if url.starts_with("http://") {
+        Err("refusing http downgrade")
+    } else {
+        let mut full = String::from("https://");
+        full.push_str(url);
+        parse_https_url(&full, "")
+    }
+}
+
 /// TLS recv with network polling. Retries on Ok(0) up to a hard timeout.
 fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usize, &'static str> {
     let start = crate::interrupts::ticks();

@@ -45,7 +45,11 @@ bitflags! {
         /// channel manager side (wifid.wasm supplicant). Privileged: can scan,
         /// connect, and read EAPOL handshake frames. See WIFI_CLASS_ABI.md.
         const NETCTL    = 0b100_0000_0000;
-        const ALL       = 0b111_1111_1111;
+        /// `npk_http_request` — outbound HTTPS fetch for the native browser
+        /// (beak). Distinct from NETCTL (WiFi-supplicant control): NET is
+        /// simply "may make outbound TLS requests", the browser's fetch cap.
+        const NET       = 0b1000_0000_0000;
+        const ALL       = 0b1111_1111_1111;
     }
 }
 
@@ -262,6 +266,17 @@ fn rights_from_caps_byte(b: u8) -> Rights {
     r
 }
 
+// Second `.npk.caps` byte — the first byte's 8 bits are full. Apps that
+// need an extension right ship a 2-byte section; a 1-byte (or absent)
+// section grants nothing from byte 2.
+const CAP2_BIT_NET: u8 = 0x01; // npk_http_request (beak's outbound fetch)
+
+fn rights_from_caps_byte2(b: u8) -> Rights {
+    let mut r = Rights::empty();
+    if b & CAP2_BIT_NET != 0 { r |= Rights::NET; }
+    r
+}
+
 /// Rights granted to a widget app that ships no `.npk.caps` section:
 /// read + execute + render, but NOT write. Matches the pre-per-app
 /// behavior minus the blanket WRITE.
@@ -273,7 +288,11 @@ fn default_widget_rights() -> Rights {
 /// custom section, or the safe default if absent / malformed.
 pub fn widget_rights_from_wasm(wasm: &[u8]) -> Rights {
     match extract_wasm_custom_section(wasm, ".npk.caps") {
-        Some(s) if !s.is_empty() => rights_from_caps_byte(s[0]),
+        Some(s) if !s.is_empty() => {
+            let mut r = rights_from_caps_byte(s[0]);
+            if s.len() >= 2 { r |= rights_from_caps_byte2(s[1]); }
+            r
+        }
         _ => default_widget_rights(),
     }
 }
