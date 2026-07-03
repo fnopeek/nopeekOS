@@ -59,7 +59,7 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 | Box model (margin/border/padding) | css-box-3 | 🟡 | vertical margins (+collapse) + `padding-left`/`margin-left`; no borders/full padding yet |
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (honor newlines, no wrap); no `nowrap`/`pre-wrap` distinction |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs::layout_table`: rows stack, cells in auto-width columns (content-preferred, clamped to fit, wrap allowed), `th` bold, `<caption>`, row separators. No colspan/rowspan/border-collapse/`table-layout:fixed` |
-| Flexbox | css-flexbox-1 | ❌ | |
+| Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex` (single line): row/column direction, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`. No wrap/reverse/`margin:auto`/baseline |
 | Grid | css-grid-2 | ❌ | |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | ❌ | |
 | Values & units (px/em/%/rem/…) | css-values-4 | ❌ | |

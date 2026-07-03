@@ -27,6 +27,36 @@ pub enum Display {
     /// `<table>` — establishes the (simplified) table formatting context in
     /// `layout.rs`; its `tr`/`td`/`th` descendants are laid by that walker.
     Table,
+    /// `display: flex` — flex formatting context (single-line) in `layout.rs`.
+    Flex,
+}
+
+/// `justify-content` — main-axis distribution of leftover space.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Justify {
+    Start,
+    End,
+    Center,
+    Between,
+    Around,
+    Evenly,
+}
+
+/// `align-items` / `align-self` — cross-axis placement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CrossAlign {
+    Stretch,
+    Start,
+    Center,
+    End,
+}
+
+/// `flex-basis` — an item's main-size seed before grow/shrink.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FlexBasis {
+    Auto, // use the content's intrinsic main size
+    Px(f32),
+    Pct(f32),
 }
 
 /// The subset of computed properties the renderer consumes. Split by CSS
@@ -48,6 +78,18 @@ pub struct ComputedStyle {
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
+    // — flex container —
+    pub flex_row: bool, // flex-direction: row (true) vs column (false)
+    pub flex_wrap: bool,
+    pub justify: Justify,
+    pub align_items: CrossAlign,
+    pub gap: f32,
+    // — flex item —
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_basis: FlexBasis,
+    pub align_self: Option<CrossAlign>,
+    pub order: i32,
 }
 
 impl ComputedStyle {
@@ -67,6 +109,16 @@ impl ComputedStyle {
             is_link: false,
             is_rule: false,
             is_break: false,
+            flex_row: true,
+            flex_wrap: false,
+            justify: Justify::Start,
+            align_items: CrossAlign::Stretch,
+            gap: 0.0,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: FlexBasis::Auto,
+            align_self: None,
+            order: 0,
         }
     }
 }
@@ -99,6 +151,16 @@ pub fn resolve(
         is_link: false,
         is_rule: false,
         is_break: false,
+        flex_row: true,
+        flex_wrap: false,
+        justify: Justify::Start,
+        align_items: CrossAlign::Stretch,
+        gap: 0.0,
+        flex_grow: 0.0,
+        flex_shrink: 1.0,
+        flex_basis: FlexBasis::Auto,
+        align_self: None,
+        order: 0,
     };
     ua_rule(&el.tag, parent, theme, &mut s);
 
@@ -269,8 +331,9 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "none" => Display::None,
                 "list-item" => Display::ListItem,
                 "inline" | "inline-block" => Display::Inline,
-                "table" => Display::Table,
-                // block / flex / grid all fall back to block flow for now
+                "table" | "inline-table" => Display::Table,
+                "flex" | "inline-flex" => Display::Flex,
+                // block / grid fall back to block flow for now
                 _ => Display::Block,
             };
         }
@@ -301,8 +364,129 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "padding-left" | "margin-left" => {
             s.padding_left = parse_length(&v, s.font_px).unwrap_or(s.padding_left)
         }
+
+        // — flex —
+        "flex-direction" => s.flex_row = !v.starts_with("column"),
+        "flex-wrap" => s.flex_wrap = v.starts_with("wrap"),
+        "flex-flow" => {
+            for tok in v.split_whitespace() {
+                match tok {
+                    "row" | "row-reverse" => s.flex_row = true,
+                    "column" | "column-reverse" => s.flex_row = false,
+                    "wrap" | "wrap-reverse" => s.flex_wrap = true,
+                    "nowrap" => s.flex_wrap = false,
+                    _ => {}
+                }
+            }
+        }
+        "justify-content" => {
+            s.justify = match v.as_str() {
+                "flex-end" | "end" | "right" => Justify::End,
+                "center" => Justify::Center,
+                "space-between" => Justify::Between,
+                "space-around" => Justify::Around,
+                "space-evenly" => Justify::Evenly,
+                _ => Justify::Start,
+            };
+        }
+        "align-items" => s.align_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
+        "align-self" => s.align_self = parse_cross(&v),
+        "gap" | "column-gap" | "row-gap" | "grid-gap" => {
+            let first = v.split_whitespace().next().unwrap_or(&v);
+            if let Some(g) = parse_length(first, s.font_px) {
+                s.gap = g;
+            }
+        }
+        "flex-grow" => {
+            if let Ok(f) = v.parse::<f32>() {
+                s.flex_grow = f;
+            }
+        }
+        "flex-shrink" => {
+            if let Ok(f) = v.parse::<f32>() {
+                s.flex_shrink = f;
+            }
+        }
+        "flex-basis" => s.flex_basis = parse_basis(&v, s.font_px),
+        "order" => {
+            if let Ok(o) = v.parse::<i32>() {
+                s.order = o;
+            }
+        }
+        "flex" => apply_flex_shorthand(&v, s),
+
         _ => {}
     }
+}
+
+fn parse_cross(v: &str) -> Option<CrossAlign> {
+    Some(match v {
+        "flex-start" | "start" | "self-start" | "baseline" => CrossAlign::Start,
+        "flex-end" | "end" | "self-end" => CrossAlign::End,
+        "center" => CrossAlign::Center,
+        "stretch" | "normal" => CrossAlign::Stretch,
+        _ => return None,
+    })
+}
+
+fn parse_basis(v: &str, em: f32) -> FlexBasis {
+    match v {
+        "auto" | "content" | "max-content" | "min-content" | "fit-content" => FlexBasis::Auto,
+        _ => {
+            if let Some(pct) = v.strip_suffix('%') {
+                pct.trim().parse::<f32>().map(FlexBasis::Pct).unwrap_or(FlexBasis::Auto)
+            } else {
+                parse_length(v, em).map(FlexBasis::Px).unwrap_or(FlexBasis::Auto)
+            }
+        }
+    }
+}
+
+/// `flex` shorthand: keywords (`none`/`auto`/`initial`) or `grow [shrink] [basis]`.
+/// A bare number `flex:1` = `1 1 0` (per spec `<n> 1 0%`).
+fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
+    match v {
+        "none" => {
+            s.flex_grow = 0.0;
+            s.flex_shrink = 0.0;
+            s.flex_basis = FlexBasis::Auto;
+            return;
+        }
+        "auto" => {
+            s.flex_grow = 1.0;
+            s.flex_shrink = 1.0;
+            s.flex_basis = FlexBasis::Auto;
+            return;
+        }
+        "initial" => {
+            s.flex_grow = 0.0;
+            s.flex_shrink = 1.0;
+            s.flex_basis = FlexBasis::Auto;
+            return;
+        }
+        _ => {}
+    }
+    let mut nums = alloc::vec::Vec::new();
+    let mut basis = None;
+    for tok in v.split_whitespace() {
+        if let Ok(f) = tok.parse::<f32>() {
+            nums.push(f);
+        } else {
+            basis = Some(parse_basis(tok, s.font_px));
+        }
+    }
+    match nums.len() {
+        0 => {}
+        1 => {
+            s.flex_grow = nums[0];
+            s.flex_shrink = 1.0;
+        }
+        _ => {
+            s.flex_grow = nums[0];
+            s.flex_shrink = nums[1];
+        }
+    }
+    s.flex_basis = basis.unwrap_or(if nums.is_empty() { FlexBasis::Auto } else { FlexBasis::Px(0.0) });
 }
 
 /// Parse a CSS `<length>` to px. Supports `px`, `em`/`rem` (relative to
