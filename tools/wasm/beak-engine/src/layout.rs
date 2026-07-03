@@ -22,8 +22,55 @@ use fontdue::Font;
 use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::style::{
-    self, ComputedStyle, CrossAlign, Display, FlexBasis, GridTrack, Justify, BASE_FONT_PX,
+    self, ComputedStyle, CrossAlign, Display, FlexBasis, GridTrack, Justify, Len, BASE_FONT_PX,
 };
+
+/// Resolve a block box's horizontal geometry within a containing block of
+/// content width `avail`: CSS2.1 §10.3.3 (used width + margins) plus the
+/// §10.4 min/max-width redo. Returns (content-width, content-left-offset =
+/// margin-left + padding-left).
+fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
+    let pad = st.pad_left + st.pad_right;
+    let (mut cw, mut ml) = solve_h(st.width, st.margin_left, st.margin_right, avail, pad, st.box_border);
+
+    if let Some(maxw) = st.max_width.px(avail) {
+        let maxc = if st.box_border { (maxw - pad).max(0.0) } else { maxw };
+        if cw > maxc {
+            let redo = if st.box_border { maxw } else { maxc };
+            (cw, ml) = solve_h(Len::Px(redo), st.margin_left, st.margin_right, avail, pad, st.box_border);
+        }
+    }
+    if let Some(minw) = st.min_width.px(avail) {
+        let minc = if st.box_border { (minw - pad).max(0.0) } else { minw };
+        if cw < minc {
+            let redo = if st.box_border { minw } else { minc };
+            (cw, ml) = solve_h(Len::Px(redo), st.margin_left, st.margin_right, avail, pad, st.box_border);
+        }
+    }
+    (cw.max(1.0), ml + st.pad_left)
+}
+
+/// Solve used content-width + left margin for one width value. Auto width fills
+/// (auto margins → 0); a definite width lets auto margins center / take slack.
+fn solve_h(width: Len, ml: Len, mr: Len, avail: f32, pad: f32, border_box: bool) -> (f32, f32) {
+    match width.px(avail) {
+        None => {
+            let ml = ml.px(avail).unwrap_or(0.0);
+            let mr = mr.px(avail).unwrap_or(0.0);
+            ((avail - ml - mr - pad).max(0.0), ml)
+        }
+        Some(wv) => {
+            let cw = if border_box { (wv - pad).max(0.0) } else { wv };
+            let rest = avail - cw - pad;
+            let ml_final = match (ml.px(avail), mr.px(avail)) {
+                (None, None) => (rest / 2.0).max(0.0), // margin:0 auto → center
+                (None, Some(mr)) => (rest - mr).max(0.0),
+                (Some(ml), _) => ml,
+            };
+            (cw, ml_final)
+        }
+    }
+}
 
 /// 8-bit RGB. The rasteriser converts to the buffer's BGRA at blit time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,28 +243,63 @@ impl Ctx<'_> {
         y
     }
 
-    /// Lay one block-level box: rule / list bullet / preformatted / normal flow.
+    /// Lay one block-level box with the CSS block box model: resolve the
+    /// horizontal box (margins incl. `auto`-centering, width, min/max-width,
+    /// padding) within the containing block's content width `w`, add vertical
+    /// padding, then lay the content. This is what makes `max-width` + `margin:
+    /// 0 auto` **centered containers** work.
     fn layout_block(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        let y = y0;
+        let (cw, off_left) = resolve_block_h(st, w as f32);
+        let content_x = x + off_left as i32;
+        let content_w = cw.max(1.0) as i32;
+
+        // Border-box geometry (the caller already advanced past margin-top → y0
+        // is the border-box top). Background is inserted at `bg_idx` so it lands
+        // behind the box's content; the border is drawn on top of the edges.
+        let box_left = content_x - st.pad_left as i32;
+        let box_w = content_w + (st.pad_left + st.pad_right) as i32;
+        let bg_idx = self.ops.len();
+
+        let mut y = y0 + st.pad_top as i32;
         if st.is_rule {
-            self.ops.push(DrawOp::Rect { x, y: y + 1, w: w.max(1), h: 1, color: self.theme.rule });
-            return y + 3;
+            self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
+            return y + 3 + st.pad_bottom as i32;
         }
-
-        let content_x = x + st.padding_left as i32;
-        let content_w = (w - st.padding_left as i32).max(20);
-
         if st.display == Display::ListItem {
             let s = 4;
             let by = y + (st.font_px * 0.55) as i32;
             self.ops.push(DrawOp::Rect { x: content_x - 12, y: by, w: s, h: s, color: self.theme.muted });
         }
 
-        if st.pre {
-            return layout_pre(self.font, el, st, content_x, content_w, y, &mut self.ops);
-        }
+        y = if st.pre {
+            layout_pre(self.font, el, st, content_x, content_w, y, &mut self.ops)
+        } else {
+            self.layout_children(&el.children, st, content_x, content_w, y)
+        };
+        y += st.pad_bottom as i32;
 
-        self.layout_children(&el.children, st, content_x, content_w, y)
+        self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
+        y
+    }
+
+    /// Insert the block's `background-color` behind its content (at `bg_idx`)
+    /// and stroke its `border` on the border-box edges.
+    fn paint_box_decoration(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        if let Some(bg) = st.bg {
+            self.ops.insert(bg_idx, DrawOp::Rect { x, y, w, h, color: bg });
+        }
+        if let Some(bc) = st.border_color {
+            let b = st.border_width as i32;
+            if b > 0 {
+                self.ops.push(DrawOp::Rect { x, y, w, h: b, color: bc }); // top
+                self.ops.push(DrawOp::Rect { x, y: y + h - b, w, h: b, color: bc }); // bottom
+                self.ops.push(DrawOp::Rect { x, y, w: b, h, color: bc }); // left
+                self.ops.push(DrawOp::Rect { x: x + w - b, y, w: b, h, color: bc }); // right
+            }
+        }
     }
 
     /// Simplified table layout: rows stack; cells sit in auto-width columns.
@@ -978,6 +1060,31 @@ mod tests {
             l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, bold: true, .. } if text == "Land")),
             "th renders bold"
         );
+    }
+
+    #[test]
+    fn max_width_container_centers_and_pads() {
+        // `.container { max-width:400px; margin:0 auto; padding:20px }` on an
+        // 800px viewport (body content width 760): the box is capped to 400 and
+        // centered → left margin (760-400)/2 = 180, +PAD(20) +pad_left(20) → x≈220.
+        let l = lay(
+            "<body><div style=\"max-width:400px; margin:0 auto; padding:20px\"><p>hi</p></div></body>",
+            800,
+        );
+        let x = l.ops.iter().find_map(|o| match o {
+            DrawOp::Text { x, text, .. } if text == "hi" => Some(*x),
+            _ => None,
+        }).unwrap();
+        assert!((190..=250).contains(&x), "container centered+padded → x≈220, got {x}");
+    }
+
+    #[test]
+    fn block_background_paints_behind_content() {
+        let l = lay("<body><div style=\"background:#202030; padding:10px\"><p>x</p></div></body>", 800);
+        let bg = l.ops.iter().position(|o| matches!(o, DrawOp::Rect { color, .. } if *color == Rgb(0x20, 0x20, 0x30)));
+        let tx = l.ops.iter().position(|o| matches!(o, DrawOp::Text { text, .. } if text == "x"));
+        assert!(bg.is_some(), "background rect emitted");
+        assert!(bg < tx, "background paints before (behind) the text");
     }
 
     #[test]

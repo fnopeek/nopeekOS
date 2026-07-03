@@ -168,12 +168,50 @@ impl Stylesheet {
 
 /// Gather + parse every `<style>` block in the document into one stylesheet.
 pub fn collect(dom: &Dom) -> Stylesheet {
-    let mut css = String::new();
+    collect_all(dom, "")
+}
+
+/// Author stylesheet = already-fetched external `<link>` CSS (document order:
+/// `<head>` first) followed by inline `<style>` blocks. The shell fetches the
+/// linked files (the engine is host-free) and hands their bytes in as `external`.
+pub fn collect_all(dom: &Dom, external: &str) -> Stylesheet {
+    let mut css = String::from(external);
+    css.push('\n');
     gather_style_text(&dom.root, &mut css);
-    if css.is_empty() {
+    if css.trim().is_empty() {
         return Stylesheet::empty();
     }
     parse(&css)
+}
+
+/// Hrefs of every `<link rel="stylesheet">` in the document, for the shell to
+/// fetch as sub-resources.
+pub fn stylesheet_links(dom: &Dom) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_links(&dom.root, &mut out);
+    out
+}
+
+fn collect_links(el: &Element, out: &mut Vec<String>) {
+    for c in &el.children {
+        if let Node::Element(e) = c {
+            if e.tag == "link" {
+                let is_ss = e
+                    .attr("rel")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .any(|r| r.eq_ignore_ascii_case("stylesheet"));
+                if is_ss {
+                    if let Some(h) = e.attr("href") {
+                        if !h.trim().is_empty() {
+                            out.push(h.trim().to_string());
+                        }
+                    }
+                }
+            }
+            collect_links(e, out);
+        }
+    }
 }
 
 fn gather_style_text(el: &Element, out: &mut String) {
