@@ -1,0 +1,25 @@
+[package]
+name = "beak"
+version = "0.1.0"
+edition = "2024"
+description = "beak — the native, sandboxed web browser for nopeekOS. See BROWSER.md."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+beak-engine = { path = "../beak-engine" }
+
+[dependencies.postcard]
+version = "1.0"
+default-features = false
+features = ["alloc"]
+
+[build-dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -289,7 +289,7 @@ build_installer() {
     # modules. The .version file is what lets `intent::install` and
     # `intent::update::update_all_modules` tell that a bundled module
     # is already up-to-date — without it they trigger redownloads.
-    for mod in top debug wallpaper drun dock bar loft spell iris snap volume testdisk aml wifid wifi_ax200 audio_hda; do
+    for mod in top debug wallpaper drun dock bar loft spell iris snap beak volume testdisk aml wifid wifi_ax200 audio_hda; do
         WASM_SRC="$PROJECT_DIR/release/modules/${mod}.wasm"
         VER_SRC="$PROJECT_DIR/release/modules/${mod}.version"
 

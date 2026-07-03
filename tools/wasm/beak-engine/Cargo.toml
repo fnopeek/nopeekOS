@@ -1,0 +1,10 @@
+[package]
+name = "beak-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Portable browser engine core for beak (nopeekOS) — pure no_std+alloc, host-agnostic. See BROWSER.md §10."
+
+[lib]
+# rlib: the nopeek shell (wasm) and native tests both depend on this.
+
+[dependencies]
