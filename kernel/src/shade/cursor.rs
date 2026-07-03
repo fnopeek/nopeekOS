@@ -279,25 +279,20 @@ const REF_W: f32 = 30.0;
 const REF_H: f32 = 44.0;
 
 /// Outline silhouette (outer boundary of the light stroke), tip at (0,0).
-static OUTER: [(f32, f32); 7] = [
+/// A tail-less arrowhead: vertical left edge, concave bottom notch, wing.
+static OUTER: [(f32, f32); 4] = [
     (0.0,  0.0),   // tip / hotspot
-    (0.0, 30.0),   // bottom of the left edge
-    (7.4, 22.8),   // notch (inner)
-    (13.2, 35.6),  // tail bottom-left
-    (19.0, 33.0),  // tail bottom-right
-    (14.0, 21.4),  // notch (outer)
-    (22.2, 21.4),  // right wing
+    (0.0, 29.0),   // bottom of the left edge
+    (9.5, 21.5),   // notch (concave bottom)
+    (22.5, 21.5),  // right wing
 ];
 
 /// Dark fill — OUTER inset by the outline width (precomputed miter offset).
-static INNER: [(f32, f32); 7] = [
-    (2.30,  5.41),
-    (2.30, 24.55),
-    (8.14, 18.87),
-    (14.35, 32.56),
-    (15.99, 31.83),
-    (10.50, 19.10),
-    (16.50, 19.10),
+static INNER: [(f32, f32); 4] = [
+    (2.30,  5.38),
+    (2.30, 24.25),
+    (8.70, 19.20),
+    (16.76, 19.20),
 ];
 
 /// Mouse state — position, buttons, and overlay tracking.
