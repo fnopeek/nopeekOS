@@ -12,10 +12,9 @@
 extern crate alloc;
 
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::vec;
 
-use beak_engine::Engine;
+use beak_engine::{Engine, Layout};
 use linked_list_allocator::LockedHeap;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::{caps, prefab};
@@ -115,6 +114,19 @@ fn mark_dirty() {
     unsafe { core::ptr::addr_of_mut!(DIRTY).write(true) };
 }
 
+// Content generation — bumped on every fetch so the layout cache knows to
+// re-lay-out (vs. reusing it for scroll, which keeps scrolling smooth).
+static mut CONTENT_GEN: u32 = 0;
+fn bump_content_gen() {
+    unsafe {
+        let p = core::ptr::addr_of_mut!(CONTENT_GEN);
+        p.write(p.read().wrapping_add(1));
+    }
+}
+fn content_gen() -> u32 {
+    unsafe { core::ptr::addr_of!(CONTENT_GEN).read() }
+}
+
 /// Fetch `url` into HTML_BUF; resets scroll + marks dirty.
 fn fetch(url: &str) -> bool {
     let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
@@ -123,6 +135,7 @@ fn fetch(url: &str) -> bool {
     unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(len) };
     set_scroll(0);
     mark_dirty();
+    bump_content_gen();
     n >= 0
 }
 
@@ -201,7 +214,7 @@ fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
 /// Re-layout + paint the visible slice into the canvas if it's dirty or the
 /// viewport resized. Paints only the viewport (bounded memory, any page
 /// length — long one-pagers just scroll).
-fn maybe_repaint(engine: &Engine) {
+fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>) {
     let (_x, _y, w, h) = match canvas_rect() {
         Some(r) => r,
         None => return,
@@ -216,19 +229,24 @@ fn maybe_repaint(engine: &Engine) {
         return;
     }
 
-    if lw < 0 {
-        log("[beak] first paint w/h:");
-        log(u32_str(w as u32));
-        log(u32_str(h as u32));
+    // (Re)lay out only when the content or width changed — NOT on every scroll.
+    // Reusing the cached layout for scroll is what keeps scrolling smooth.
+    let cur_gen = content_gen();
+    let need_layout = match cache.as_ref() {
+        None => true,
+        Some((_, cw, cg)) => *cw != w || *cg != cur_gen,
+    };
+    if need_layout {
+        *cache = Some((engine.layout(html_str(), w as u32), w, cur_gen));
     }
-    let layout = engine.layout(html_str(), w as u32);
-    // clamp scroll to the document
+    let layout = &cache.as_ref().unwrap().0;
+
     let max_scroll = (layout.height as i32 - h).max(0);
     let sy = scroll_y().clamp(0, max_scroll);
     set_scroll(sy);
 
     let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
-    engine.paint(&layout, w as u32, h as u32, sy, &mut buf);
+    engine.paint(layout, w as u32, h as u32, sy, &mut buf);
     unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
 
     unsafe {
@@ -312,7 +330,7 @@ fn render_chrome() {
 
 /// Handle one event. Returns true if the chrome (address bar / title) should
 /// be re-committed.
-fn handle(engine: &Engine, ev: Event) -> bool {
+fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> bool {
     match ev {
         // Keep URL_BUF synced with the address-bar edit buffer.
         Event::InputChange { value } => {
@@ -340,9 +358,18 @@ fn handle(engine: &Engine, ev: Event) -> bool {
                 if x >= rx && x < rx + w && y >= ry && y < ry + h {
                     let cx = x - rx;
                     let cy = y - ry + scroll_y();
-                    let layout = engine.layout(html_str(), w as u32);
-                    if let Some(href) = layout.hit_test(cx, cy) {
-                        let href = href.to_string();
+                    // Hit-test the cached layout if it still matches; else lay
+                    // out on the fly (rare — only if a click races a resize).
+                    let href = match cache.as_ref() {
+                        Some((lay, cw, cg)) if *cw == w && *cg == content_gen() => {
+                            lay.hit_test(cx, cy).map(|s| s.to_string())
+                        }
+                        _ => engine
+                            .layout(html_str(), w as u32)
+                            .hit_test(cx, cy)
+                            .map(|s| s.to_string()),
+                    };
+                    if let Some(href) = href {
                         follow(&href);
                         return true;
                     }
@@ -449,16 +476,18 @@ pub extern "C" fn _start() {
 
     render_chrome();
 
+    // Cached layout: (Layout, width it was laid out at, content generation).
+    let mut cache: Option<(Layout, i32, u32)> = None;
     loop {
         match poll_event() {
             PollResult::Event(ev) => {
-                if handle(&engine, ev) {
+                if handle(&engine, ev, &cache) {
                     render_chrome();
                 }
-                maybe_repaint(&engine);
+                maybe_repaint(&engine, &mut cache);
             }
             PollResult::Empty => {
-                maybe_repaint(&engine);
+                maybe_repaint(&engine, &mut cache);
                 unsafe {
                     let _ = npk_sleep(16);
                 }
