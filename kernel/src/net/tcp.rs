@@ -606,6 +606,17 @@ pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Resul
     }
 }
 
+/// True if `handle` is an established, un-closed, un-errored connection —
+/// i.e. safe to send another request on (HTTP keep-alive reuse). A peer
+/// FIN moves the state out of `Established` (→ CloseWait) and sets
+/// `closed`, so a server that dropped an idle keep-alive connection reads
+/// as unhealthy here and the caller reconnects instead of hanging.
+pub fn conn_healthy(handle: usize) -> bool {
+    let conns = CONNECTIONS.lock();
+    matches!(conns.get(handle), Some(Some(c))
+        if c.state == State::Established && !c.closed && !c.error)
+}
+
 /// Close a connection gracefully (sends FIN).
 pub fn close(handle: usize) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();

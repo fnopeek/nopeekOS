@@ -337,6 +337,13 @@ impl TlsSession {
     pub fn cipher_name(&self) -> &'static str {
         self.cipher.name()
     }
+
+    /// True while the underlying TCP connection is still usable for
+    /// another request — the gate for HTTP keep-alive session reuse.
+    /// Goes false once the peer closes or the connection errors.
+    pub fn is_healthy(&self) -> bool {
+        tcp::conn_healthy(self.tcp_handle)
+    }
 }
 
 #[derive(Debug)]
