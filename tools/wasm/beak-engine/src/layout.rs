@@ -21,7 +21,9 @@ use fontdue::Font;
 
 use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
-use crate::style::{self, ComputedStyle, CrossAlign, Display, FlexBasis, Justify, BASE_FONT_PX};
+use crate::style::{
+    self, ComputedStyle, CrossAlign, Display, FlexBasis, GridTrack, Justify, BASE_FONT_PX,
+};
 
 /// 8-bit RGB. The rasteriser converts to the buffer's BGRA at blit time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,7 +166,11 @@ impl Ctx<'_> {
                             self.collect_inline(el, &st, None, &mut inline);
                             self.path.pop();
                         }
-                        Display::Block | Display::ListItem | Display::Table | Display::Flex => {
+                        Display::Block
+                        | Display::ListItem
+                        | Display::Table
+                        | Display::Flex
+                        | Display::Grid => {
                             if !inline.is_empty() {
                                 y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
                                 inline = Inline::new();
@@ -308,8 +314,124 @@ impl Ctx<'_> {
         match st.display {
             Display::Table => self.layout_table(el, st, x, w, y),
             Display::Flex => self.layout_flex(el, st, x, w, y),
+            Display::Grid => self.layout_grid(el, st, x, w, y),
             _ => self.layout_block(el, st, x, w, y),
         }
+    }
+
+    /// Grid layout (css-grid-2 subset): explicit `grid-template-columns`
+    /// (px/%/fr/auto/`repeat`), row-major **auto-placement**, column `span`,
+    /// `gap`; row heights are content-driven (auto). No explicit line
+    /// placement, `grid-template-rows`/`areas`, dense flow, or item alignment.
+    fn layout_grid(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        let ncols = st.grid_ncols as usize;
+        // No template → fall back to normal block flow (single implicit column).
+        if ncols == 0 {
+            return self.layout_children(&el.children, st, x, w, y0);
+        }
+
+        let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
+        for c in &el.children {
+            if let Node::Element(ce) = c {
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path);
+                if cs.display != Display::None {
+                    items.push((ce, cs));
+                }
+            }
+        }
+        if items.is_empty() {
+            return self.layout_children(&el.children, st, x, w, y0);
+        }
+
+        // Row-major auto-placement: (col, span, row) per item.
+        let mut place: Vec<(usize, usize, usize)> = Vec::with_capacity(items.len());
+        let (mut col, mut row) = (0usize, 0usize);
+        for (_, s) in &items {
+            let span = (s.grid_col_span as usize).clamp(1, ncols);
+            if col + span > ncols {
+                row += 1;
+                col = 0;
+            }
+            place.push((col, span, row));
+            col += span;
+            if col >= ncols {
+                row += 1;
+                col = 0;
+            }
+        }
+        let nrows = place.iter().map(|(_, _, r)| r + 1).max().unwrap_or(0);
+        let gap = st.gap;
+
+        // Column sizing: fixed/% resolve directly, `auto` = max content of its
+        // single-span items, `fr` splits the remaining space.
+        let avail = w as f32;
+        let mut auto_content = vec![0.0f32; ncols];
+        for (i, (el_i, _)) in items.iter().enumerate() {
+            let (c, span, _) = place[i];
+            if span == 1 {
+                auto_content[c] = auto_content[c].max(self.intrinsic_width(el_i).0);
+            }
+        }
+        let mut colw = vec![0.0f32; ncols];
+        let (mut fr_sum, mut used) = (0.0f32, 0.0f32);
+        for c in 0..ncols {
+            match st.grid_tracks[c] {
+                GridTrack::Fixed(px) => {
+                    colw[c] = px;
+                    used += px;
+                }
+                GridTrack::Pct(p) => {
+                    colw[c] = p / 100.0 * avail;
+                    used += colw[c];
+                }
+                GridTrack::Auto => {
+                    colw[c] = auto_content[c];
+                    used += colw[c];
+                }
+                GridTrack::Fr(f) => fr_sum += f,
+            }
+        }
+        let gaps_w = gap * (ncols as f32 - 1.0).max(0.0);
+        let leftover = (avail - gaps_w - used).max(0.0);
+        if fr_sum > 0.0 {
+            for c in 0..ncols {
+                if let GridTrack::Fr(f) = st.grid_tracks[c] {
+                    colw[c] = leftover * f / fr_sum;
+                }
+            }
+        }
+        let mut colx = vec![0.0f32; ncols];
+        let mut acc = x as f32;
+        for c in 0..ncols {
+            colx[c] = acc;
+            acc += colw[c] + gap;
+        }
+
+        // Lay rows top to bottom; row height = tallest cell in the row.
+        let mut y = y0;
+        for r in 0..nrows {
+            let row_top = y;
+            let mut row_h = 0i32;
+            for (i, (el_i, s)) in items.iter().enumerate() {
+                let (c, span, ir) = place[i];
+                if ir != r {
+                    continue;
+                }
+                let mut iw = gap * (span as f32 - 1.0).max(0.0);
+                for k in 0..span {
+                    iw += colw[c + k];
+                }
+                self.path.push(ElemInfo::of(el_i));
+                let bottom = self.layout_box(el_i, s, colx[c] as i32, iw.max(1.0) as i32, row_top);
+                self.path.pop();
+                row_h = row_h.max(bottom - row_top);
+            }
+            y = row_top + row_h;
+            if r + 1 < nrows {
+                y += gap as i32;
+            }
+        }
+        y
     }
 
     /// Single-line flex layout (css-flexbox-1 subset): row or column direction,
@@ -883,6 +1005,40 @@ mod tests {
         let sx = start.ops.iter().find_map(|o| match o { DrawOp::Text { x, text, .. } if text == "x" => Some(*x), _ => None }).unwrap();
         let ex = end.ops.iter().find_map(|o| match o { DrawOp::Text { x, text, .. } if text == "x" => Some(*x), _ => None }).unwrap();
         assert!(ex > sx + 400, "justify-content:flex-end moves the item far right");
+    }
+
+    #[test]
+    fn grid_places_items_in_columns_and_wraps_rows() {
+        // 3 columns, 4 items → items 1-3 on row 1 (distinct x, same y), item 4
+        // wraps to row 2 under item 1.
+        let l = lay(
+            "<body><div style=\"display:grid; grid-template-columns:repeat(3,1fr); gap:10px\">\
+             <div>a</div><div>b</div><div>c</div><div>d</div></div></body>",
+            900,
+        );
+        let t = texts(&l);
+        let g = |s: &str| *t.iter().find(|(_, _, x)| *x == s).expect(s);
+        let (a, b, c, d) = (g("a"), g("b"), g("c"), g("d"));
+        assert_eq!(a.1, b.1, "a,b same row");
+        assert_eq!(b.1, c.1, "b,c same row");
+        assert!(a.0 < b.0 && b.0 < c.0, "columns left→right");
+        assert_eq!(a.0, d.0, "d wraps under a (col 0)");
+        assert!(d.1 > a.1, "d on the next row");
+    }
+
+    #[test]
+    fn grid_column_span_widens_an_item() {
+        // col 2 spans both tracks → its content box starts at col 0 (full width).
+        let l = lay(
+            "<body><div style=\"display:grid; grid-template-columns:1fr 1fr\">\
+             <div>x</div><div style=\"grid-column:span 2\">wide</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let x = *t.iter().find(|(_, _, s)| *s == "x").unwrap();
+        let wide = *t.iter().find(|(_, _, s)| *s == "wide").unwrap();
+        assert!(wide.1 > x.1, "spanning item wraps to the next row");
+        assert_eq!(wide.0, x.0, "span-2 item starts at column 0");
     }
 
     #[test]

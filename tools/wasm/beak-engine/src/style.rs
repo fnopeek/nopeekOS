@@ -13,6 +13,8 @@
 //! Colours resolve against the active `Theme` so pages follow light/dark like
 //! the rest of the UI (until pages set their own `color`, which we honor).
 
+use alloc::string::String;
+
 use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::Element;
 use crate::layout::{Rgb, Theme};
@@ -29,7 +31,21 @@ pub enum Display {
     Table,
     /// `display: flex` — flex formatting context (single-line) in `layout.rs`.
     Flex,
+    /// `display: grid` — grid formatting context (explicit columns + auto rows).
+    Grid,
 }
+
+/// A `grid-template-columns` track size.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum GridTrack {
+    Auto,      // size to column content (max-content)
+    Fixed(f32), // px
+    Pct(f32),
+    Fr(f32), // fraction of leftover space
+}
+
+/// Max explicit grid columns we track (content grids rarely exceed this).
+pub const MAX_GRID_COLS: usize = 16;
 
 /// `justify-content` — main-axis distribution of leftover space.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -90,6 +106,11 @@ pub struct ComputedStyle {
     pub flex_basis: FlexBasis,
     pub align_self: Option<CrossAlign>,
     pub order: i32,
+    // — grid container —
+    pub grid_ncols: u8,
+    pub grid_tracks: [GridTrack; MAX_GRID_COLS],
+    // — grid item —
+    pub grid_col_span: u16,
 }
 
 impl ComputedStyle {
@@ -119,6 +140,9 @@ impl ComputedStyle {
             flex_basis: FlexBasis::Auto,
             align_self: None,
             order: 0,
+            grid_ncols: 0,
+            grid_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+            grid_col_span: 1,
         }
     }
 }
@@ -161,6 +185,9 @@ pub fn resolve(
         flex_basis: FlexBasis::Auto,
         align_self: None,
         order: 0,
+        grid_ncols: 0,
+        grid_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+        grid_col_span: 1,
     };
     ua_rule(&el.tag, parent, theme, &mut s);
 
@@ -333,7 +360,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "inline" | "inline-block" => Display::Inline,
                 "table" | "inline-table" => Display::Table,
                 "flex" | "inline-flex" => Display::Flex,
-                // block / grid fall back to block flow for now
+                "grid" | "inline-grid" => Display::Grid,
                 _ => Display::Block,
             };
         }
@@ -415,7 +442,114 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         "flex" => apply_flex_shorthand(&v, s),
 
+        // — grid —
+        "grid-template-columns" => {
+            let (n, tracks) = parse_grid_tracks(&v);
+            s.grid_ncols = n;
+            s.grid_tracks = tracks;
+        }
+        "grid-column" => s.grid_col_span = parse_col_span(&v),
+
         _ => {}
+    }
+}
+
+/// Parse `grid-template-columns` into (count, tracks), expanding `repeat(n, …)`.
+/// Truncates at `MAX_GRID_COLS`.
+fn parse_grid_tracks(v: &str) -> (u8, [GridTrack; MAX_GRID_COLS]) {
+    let mut tracks = [GridTrack::Auto; MAX_GRID_COLS];
+    let mut n = 0usize;
+    for tok in split_top_level(v) {
+        if n >= MAX_GRID_COLS {
+            break;
+        }
+        let inner = tok.strip_prefix("repeat(").and_then(|s| s.strip_suffix(')'));
+        if let Some(inner) = inner {
+            let mut parts = inner.splitn(2, ',');
+            let count_s = parts.next().unwrap_or("").trim();
+            let count = if count_s == "auto-fill" || count_s == "auto-fit" {
+                1
+            } else {
+                count_s.parse::<usize>().unwrap_or(1)
+            };
+            let (sn, st) = parse_grid_tracks(parts.next().unwrap_or("").trim());
+            for _ in 0..count {
+                for t in st.iter().take(sn as usize) {
+                    if n < MAX_GRID_COLS {
+                        tracks[n] = *t;
+                        n += 1;
+                    }
+                }
+            }
+        } else {
+            tracks[n] = parse_track(&tok);
+            n += 1;
+        }
+    }
+    (n as u8, tracks)
+}
+
+fn parse_track(t: &str) -> GridTrack {
+    let t = t.trim();
+    if t == "auto" || t == "min-content" || t == "max-content" {
+        GridTrack::Auto
+    } else if let Some(f) = t.strip_suffix("fr") {
+        GridTrack::Fr(f.trim().parse().unwrap_or(1.0))
+    } else if let Some(p) = t.strip_suffix('%') {
+        GridTrack::Pct(p.trim().parse().unwrap_or(0.0))
+    } else if t.starts_with("minmax(") {
+        if t.contains("fr") { GridTrack::Fr(1.0) } else { GridTrack::Auto }
+    } else if let Some(px) = t.strip_suffix("px") {
+        GridTrack::Fixed(px.trim().parse().unwrap_or(0.0))
+    } else {
+        t.parse::<f32>().map(GridTrack::Fixed).unwrap_or(GridTrack::Auto)
+    }
+}
+
+/// Split on whitespace, but keep `repeat(…)` / `minmax(…)` (parens) intact.
+fn split_top_level(v: &str) -> alloc::vec::Vec<alloc::string::String> {
+    let mut out = alloc::vec::Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for ch in v.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !cur.is_empty() {
+                    out.push(core::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// `grid-column` → column span. Handles `span N`, `A / B`, `A / span N`, `A`.
+fn parse_col_span(v: &str) -> u16 {
+    if let Some((a, b)) = v.split_once('/') {
+        let b = b.trim();
+        if let Some(s) = b.strip_prefix("span") {
+            return s.trim().parse().unwrap_or(1);
+        }
+        if let (Ok(a), Ok(b)) = (a.trim().parse::<i32>(), b.parse::<i32>()) {
+            return (b - a).max(1) as u16;
+        }
+        1
+    } else if let Some(s) = v.strip_prefix("span") {
+        s.trim().parse().unwrap_or(1)
+    } else {
+        1
     }
 }
 

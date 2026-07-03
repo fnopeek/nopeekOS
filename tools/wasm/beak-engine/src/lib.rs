@@ -74,6 +74,9 @@ aus einer <b>Author-CSS-Regel</b> im <code>&lt;style&gt;</code>-Block, nicht aus
 <div style=\"flex:1; color:#e0662c\">flex:1 — linke Spalte</div>\
 <div style=\"flex:2\">flex:2 — rechte Spalte, doppelt so breit; Text bricht \
 innerhalb der Flex-Spalte um wenn er nicht in eine Zeile passt.</div></div>\
+<div style=\"display:grid; grid-template-columns:repeat(3, 1fr); gap:10px\">\
+<div style=\"color:#4fd1c5\">Grid A</div><div>Grid B</div><div>Grid C</div>\
+<div style=\"grid-column:span 2; color:#e0662c\">Grid D (span 2)</div><div>Grid E</div></div>\
 <hr>\
 <h2>Nächste Schritte</h2>\
 <p>Tabellen-Layout und Flexbox/Grid — der Reihe nach. Die Engine bleibt portabel: \
