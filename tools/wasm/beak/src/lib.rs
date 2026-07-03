@@ -222,6 +222,11 @@ fn maybe_repaint(engine: &Engine) {
         return;
     }
 
+    if lw < 0 {
+        log("[beak] first paint w/h:");
+        log(u32_str(w as u32));
+        log(u32_str(h as u32));
+    }
     let layout = engine.layout(html_str(), w as u32);
     // clamp scroll to the document
     let max_scroll = (layout.height as i32 - h).max(0);
@@ -417,9 +422,34 @@ fn alloc_mark() -> usize {
     unsafe { core::ptr::addr_of!(HEAP_POS).read() }
 }
 
+// u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
+// even when the panic is an allocation failure).
+static mut NUMBUF: [u8; 12] = [0; 12];
+fn u32_str(mut n: u32) -> &'static str {
+    let b = core::ptr::addr_of_mut!(NUMBUF) as *mut u8;
+    let buf = unsafe { core::slice::from_raw_parts_mut(b, 12) };
+    let mut i = 12;
+    if n == 0 {
+        i -= 1;
+        buf[i] = b'0';
+    }
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }
+}
+
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    log("[beak] panic!");
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    log("[beak] PANIC");
+    if let Some(loc) = info.location() {
+        log(loc.file());
+        log(u32_str(loc.line()));
+    } else {
+        log("[beak] no location (likely alloc failure)");
+    }
     loop {}
 }
 
@@ -437,7 +467,9 @@ pub extern "C" fn _start() {
     }
 
     // Parse the font once; everything below `base` survives the per-frame reset.
+    log("[beak] parsing font…");
     let engine = Engine::new();
+    log("[beak] engine ready");
     let base = alloc_mark();
 
     render_chrome();
