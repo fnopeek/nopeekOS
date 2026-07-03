@@ -115,9 +115,21 @@ pub fn verify_chain(chain: &[&[u8]], hostname: &str) -> Result<(), CertError> {
                     return Ok(());
                 }
             }
-            // Also check if the last cert IS a root (self-signed)
+            // The last cert IS one of our trusted roots. Match it by
+            // IDENTITY — same subject + same public key — NOT by verifying
+            // its own signature. This is required for cross-signed roots:
+            // e.g. google.* now serves GTS Root R1 cross-signed by GlobalSign
+            // Root CA (issuer != subject), so its self-signature check fails
+            // against GTS R1's own key even though the key IS our anchor. The
+            // chain up to `current` was already signature-verified above, and
+            // an anchor is trusted by its key (RFC 5280 §6.1 trust anchor), so
+            // matching the embedded key is sufficient and correct. The
+            // `verify_signature` arm keeps the classic self-signed path.
             if current.subject_cn == root.subject_cn {
-                if verify_signature(&current, &root) {
+                let key_is_anchor = current.key_type == root.key_type
+                    && current.public_key == root.public_key
+                    && current.rsa_exponent == root.rsa_exponent;
+                if key_is_anchor || verify_signature(&current, &root) {
                     return Ok(());
                 }
             }
