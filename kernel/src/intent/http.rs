@@ -276,7 +276,7 @@ fn do_http_request(args: &str, use_tls: bool) {
     // Send HTTP GET
     let http_ver = if use_tls { "1.1" } else { "1.0" };
     let request = alloc::format!(
-        "GET {} HTTP/{}\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/{}\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) beak/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, http_ver, host
     );
 
@@ -714,7 +714,7 @@ fn https_exchange(
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, ExchangeErr> {
     let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) beak/0.1\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
         path, host
     );
     if crate::tls::tls_send(&mut tls, request.as_bytes()).is_err() {
@@ -1298,7 +1298,7 @@ fn http_get_once(
     let _poll_hz_guard = PollHzGuard;
 
     let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) beak/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, host
     );
     if crate::net::tcp::send(handle, request.as_bytes()).is_err() {
