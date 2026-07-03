@@ -571,58 +571,162 @@ pub fn https_get_streaming(
     Err("too many redirects")
 }
 
-/// One HTTPS round-trip — no redirect following. Body bytes are
-/// pushed through `on_chunk` as they arrive; the returned
-/// `HttpResponse.body` is always empty (the sink owns the bytes).
-fn https_get_once(
-    host: &str,
-    path: &str,
-    max_size: usize,
-    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
-) -> Result<HttpResponse, &'static str> {
-    // Resolve hostname
-    kprintln!("[npk]   resolving {} ...", host);
+// ── HTTPS keep-alive connection pool ───────────────────────────────
+// A page load in beak fans out to ~20 sub-resources (CSS, images), most
+// from one or two hosts. Without reuse each pays a full fresh DNS + TCP
+// + TLS handshake, serially — the "Zeitlupe" page load Florian saw on
+// the serial log. Holding the TLS session open and sending
+// `Connection: keep-alive` collapses those ~20 handshakes to ~1 per host.
+//
+// A session is returned to the pool ONLY when its response was fully
+// framed (Content-Length or chunked, and we read the whole body off the
+// wire) and the peer did not signal `Connection: close`. Otherwise the
+// message boundary on the wire is unknown and reuse would desync the
+// byte stream.
+struct PooledConn {
+    host: String,
+    tls: crate::tls::TlsSession,
+}
+const CONN_POOL_SIZE: usize = 8;
+static CONN_POOL: spin::Mutex<[Option<PooledConn>; CONN_POOL_SIZE]> =
+    spin::Mutex::new([const { None }; CONN_POOL_SIZE]);
+
+/// Take a *live* pooled session for `host`, if any. A session the server
+/// has since closed (idle-timeout FIN → state left `Established`) is
+/// closed and skipped here, so the caller never sends on a dead socket.
+fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
+    let mut pool = CONN_POOL.lock();
+    for slot in pool.iter_mut() {
+        if matches!(slot, Some(c) if c.host == host) {
+            let mut tls = slot.take().unwrap().tls;
+            if tls.is_healthy() {
+                return Some(tls);
+            }
+            let _ = crate::tls::tls_close(&mut tls);
+            return None;
+        }
+    }
+    None
+}
+
+/// Return a reusable session to the pool. Evicts (and closes) the first
+/// slot when the pool is full.
+fn pool_put(host: &str, tls: crate::tls::TlsSession) {
+    let mut pool = CONN_POOL.lock();
+    for slot in pool.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(PooledConn { host: String::from(host), tls });
+            return;
+        }
+    }
+    if let Some(mut old) = pool[0].replace(PooledConn { host: String::from(host), tls }) {
+        let _ = crate::tls::tls_close(&mut old.tls);
+    }
+}
+
+/// True if `value` (an HTTP list header) contains `token` as a
+/// comma-separated element, case-insensitively.
+fn header_has_token(value: &str, token: &str) -> bool {
+    value.split(',').any(|t| t.trim().eq_ignore_ascii_case(token))
+}
+
+/// Either pool `tls` for reuse or close it — exactly one, never both.
+fn finish_conn(host: &str, tls: crate::tls::TlsSession, reusable: bool) {
+    if reusable {
+        pool_put(host, tls);
+    } else {
+        let mut t = tls;
+        let _ = crate::tls::tls_close(&mut t);
+    }
+}
+
+/// Fresh DNS + ARP + TCP + TLS to `host:443`. Only paid on a pool miss.
+fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     let ip = if let Some(ip) = parse_ip(host) {
         ip
     } else {
         crate::net::dns::resolve(host).ok_or("DNS resolution failed")?
     };
-    kprintln!("[npk]   {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
-
-    // ARP resolve gateway (use actual gateway from DHCP, not hardcoded)
+    // ARP the gateway (cached after the first hit; only fresh connects reach here).
     let gw = crate::net::ipv4::gateway();
     crate::net::arp::request(gw);
     for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
 
-    kprintln!("[npk]   TCP connect {}:443 ...", host);
+    kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443", host, ip[0], ip[1], ip[2], ip[3]);
     let handle = crate::net::tcp::connect(ip, 443).map_err(|_| "TCP connect failed")?;
-
-    kprintln!("[npk]   TLS handshake ...");
-    let mut tls = match crate::tls::tls_connect(handle, host) {
-        Ok(s) => s,
+    match crate::tls::tls_connect(handle, host) {
+        Ok(s) => Ok(s),
         Err(_) => {
             let _ = crate::net::tcp::close(handle);
-            return Err("TLS handshake failed");
+            Err("TLS handshake failed")
         }
-    };
-    kprintln!("[npk]   TLS up, GET {}", path);
+    }
+}
 
-    // Send HTTP/1.1 GET
+/// Exchange failure mode. `Retry` = failed in the send/header phase,
+/// before any body byte reached the sink → safe to retry on a fresh
+/// connection (this is how a stale pooled socket surfaces). `Fatal` =
+/// failed mid-body or a protocol error → propagate.
+enum ExchangeErr {
+    Retry,
+    Fatal(&'static str),
+}
+
+/// Discard a redirect's (small) body so the socket is left at a clean
+/// message boundary and can be reused. Returns true iff the whole body
+/// was consumed.
+fn drain_body(
+    tls: &mut crate::tls::TlsSession,
+    leading: &[u8],
+    content_length: Option<usize>,
+    chunked: bool,
+    buf: &mut [u8],
+) -> bool {
+    if let Some(cl) = content_length {
+        let mut got = core::cmp::min(leading.len(), cl);
+        while got < cl {
+            match tls_recv_poll(tls, buf) {
+                Ok(0) => continue,
+                Ok(n) => got += core::cmp::min(n, cl - got),
+                Err(_) => return false,
+            }
+        }
+        true
+    } else if chunked {
+        let mut sink = |_: &[u8]| -> Result<(), &'static str> { Ok(()) };
+        stream_chunked_body(leading, tls, buf, usize::MAX, &mut sink).is_ok()
+    } else {
+        // A redirect with no framing → boundary unknown; not reusable.
+        false
+    }
+}
+
+/// One HTTPS round-trip over an OWNED TLS session (`Connection:
+/// keep-alive`). Reads + parses the response, streams the body through
+/// `on_chunk`, and hands the session back to the pool (if cleanly
+/// reusable) or closes it. No redirect following — the returned
+/// `HttpResponse` carries status + Location for the caller to follow.
+fn https_exchange(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    mut tls: crate::tls::TlsSession,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<HttpResponse, ExchangeErr> {
     let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: nopeekOS/0.1\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
         path, host
     );
     if crate::tls::tls_send(&mut tls, request.as_bytes()).is_err() {
+        // Stale pooled socket (or a send error) — nothing delivered, retry fresh.
         let _ = crate::tls::tls_close(&mut tls);
-        return Err("HTTP send failed");
+        return Err(ExchangeErr::Retry);
     }
 
-    // ── Phase 1: Receive HTTP headers ──────────────────────────
-    // Read TLS records until we have the full header block (\r\n\r\n).
+    // ── Phase 1: read the header block (up to \r\n\r\n) ──
     let mut raw = alloc::vec::Vec::new();
     let mut buf = [0u8; 17000]; // >= max TLS record (16KB)
     let mut header_end = None;
-
     loop {
         match tls_recv_poll(&mut tls, &mut buf) {
             Ok(0) => continue,
@@ -633,60 +737,80 @@ fn https_get_once(
                     break;
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                // A live server always answers — no header means the socket
+                // was dead/stale. No body delivered yet → safe to retry fresh.
+                let _ = crate::tls::tls_close(&mut tls);
+                return Err(ExchangeErr::Retry);
+            }
         }
         if raw.len() > 32_768 {
             let _ = crate::tls::tls_close(&mut tls);
-            return Err("headers too large");
+            return Err(ExchangeErr::Fatal("headers too large"));
         }
     }
-
     let hdr_end = match header_end {
-        Some(pos) => pos,
+        Some(p) => p,
         None => {
             let _ = crate::tls::tls_close(&mut tls);
-            return Err("no HTTP headers received");
+            return Err(ExchangeErr::Retry);
         }
     };
     let body_start = hdr_end + 4;
 
-    // ── Phase 2: Parse HTTP status + headers ───────────────────
-    let hdr_str = core::str::from_utf8(&raw[..hdr_end]).map_err(|_| "invalid header encoding")?;
-
+    // ── Phase 2: parse status + framing ──
+    let hdr_str = match core::str::from_utf8(&raw[..hdr_end]) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = crate::tls::tls_close(&mut tls);
+            return Err(ExchangeErr::Fatal("invalid header encoding"));
+        }
+    };
     let status = parse_status_code(hdr_str).unwrap_or(0);
     let location = parse_header_value(hdr_str, "location").map(String::from);
-
-    // On redirect we still drain the body (some servers send a short HTML
-    // courtesy page) but skip the work of streaming a multi-MB asset.
-    if (300..400).contains(&status) {
-        match &location {
-            Some(l) => kprintln!("[npk]   HTTP {} → {}", status, l),
-            None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
-        }
-        let _ = crate::tls::tls_close(&mut tls);
-        return Ok(HttpResponse { status, location });
-    }
-    kprintln!("[npk]   HTTP {} — receiving body", status);
-
     let content_length = parse_header_value(hdr_str, "content-length")
         .and_then(|v| v.trim().parse::<usize>().ok());
     let chunked = parse_header_value(hdr_str, "transfer-encoding")
         .map(|v| v.contains("chunked"))
         .unwrap_or(false);
+    let conn_hdr = parse_header_value(hdr_str, "connection");
+    let explicit_close = conn_hdr.map(|v| header_has_token(v, "close")).unwrap_or(false);
+    let explicit_keepalive = conn_hdr.map(|v| header_has_token(v, "keep-alive")).unwrap_or(false);
+    // HTTP/1.1 is persistent by default; HTTP/1.0 is not.
+    let http10 = hdr_str.starts_with("HTTP/1.0");
+    let persistent = if explicit_close { false }
+        else if explicit_keepalive { true }
+        else { !http10 };
 
-    // ── Phase 3: Receive body, push through sink ───────────────
-    // Bytes after the header terminator (`\r\n\r\n`) that arrived in
-    // the same TLS record are the first body bytes.
     let leading = &raw[body_start..];
-    let mut delivered: usize = 0;
 
+    // ── Phase 3: consume the body ──
+    // Redirect: drain the courtesy body so the socket is clean, then hand
+    // the Location back to the caller (no bytes go to the sink).
+    if (300..400).contains(&status) {
+        match &location {
+            Some(l) => kprintln!("[npk]   HTTP {} -> {}", status, l),
+            None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
+        }
+        let drained = drain_body(&mut tls, leading, content_length, chunked, &mut buf);
+        finish_conn(host, tls, persistent && drained);
+        return Ok(HttpResponse { status, location });
+    }
+    kprintln!("[npk]   HTTP {} — receiving body", status);
+
+    // 2xx / other: stream the body. The headers already proved the socket
+    // live, so a failure HERE is a genuine mid-body drop (partial bytes are
+    // already in the sink) → Fatal, never a retry.
+    let fully_drained;
     if let Some(cl) = content_length {
-        // Content-Length path: deliver exactly `cl` bytes (clipped to
-        // `max_size`), then close.
         let cap = core::cmp::min(cl, max_size);
         let n_leading = core::cmp::min(leading.len(), cap);
+        let mut delivered = 0usize;
         if n_leading > 0 {
-            on_chunk(&leading[..n_leading])?;
+            if on_chunk(&leading[..n_leading]).is_err() {
+                finish_conn(host, tls, false);
+                return Err(ExchangeErr::Fatal("sink write failed"));
+            }
             delivered += n_leading;
         }
         while delivered < cap {
@@ -694,40 +818,39 @@ fn https_get_once(
                 Ok(0) => continue,
                 Ok(n) => {
                     let take = core::cmp::min(n, cap - delivered);
-                    on_chunk(&buf[..take])?;
+                    if on_chunk(&buf[..take]).is_err() {
+                        finish_conn(host, tls, false);
+                        return Err(ExchangeErr::Fatal("sink write failed"));
+                    }
                     delivered += take;
                 }
                 Err(_) => break,
             }
         }
+        // Reusable only if we consumed the ENTIRE body — a max_size-clipped
+        // (truncated) read leaves unread bytes on the wire.
+        fully_drained = delivered == cl;
     } else if chunked {
-        // Transfer-Encoding: chunked — true streaming decoder.
-        // GitHub's codeload serves dynamically-generated tarballs
-        // (git archive on the fly) chunked + binary, so the body
-        // is both huge and impossible to buffer-then-scan: a gzip
-        // stream contains the byte sequence "0\r\n" by chance
-        // almost immediately, which would false-trip any
-        // end-of-body heuristic. A proper chunk-size state machine
-        // is the only correct option.
+        // True streaming chunked decoder (RFC 7230 §4.1) — GitHub codeload
+        // serves dynamically-generated tarballs chunked + binary, so the
+        // body can't be buffer-then-scanned.
         match stream_chunked_body(leading, &mut tls, &mut buf, max_size, on_chunk) {
-            Ok(n) => delivered += n,
+            Ok(_) => fully_drained = true,
             Err(e) => {
-                // A chunked stream that ends before the 0-size chunk
-                // is a genuine truncation (dropped connection, sink
-                // write failure). Propagate so the caller does NOT
-                // commit a partial file — for OTA the SHA-384 check
-                // would catch it anyway, but `https <url> > path`
-                // has no hash and would otherwise silently store
-                // corrupt data.
-                let _ = crate::tls::tls_close(&mut tls);
-                return Err(e);
+                finish_conn(host, tls, false);
+                return Err(ExchangeErr::Fatal(e));
             }
         }
     } else {
-        // Connection: close — push all bytes until peer closes.
+        // Neither Content-Length nor chunked → close-delimited body: read
+        // until the peer closes. Never reusable (no boundary to stop at).
+        let mut delivered = 0usize;
         if !leading.is_empty() {
             let take = core::cmp::min(leading.len(), max_size);
-            on_chunk(&leading[..take])?;
+            if on_chunk(&leading[..take]).is_err() {
+                finish_conn(host, tls, false);
+                return Err(ExchangeErr::Fatal("sink write failed"));
+            }
             delivered += take;
         }
         while delivered < max_size {
@@ -735,16 +858,47 @@ fn https_get_once(
                 Ok(0) => continue,
                 Ok(n) => {
                     let take = core::cmp::min(n, max_size - delivered);
-                    on_chunk(&buf[..take])?;
+                    if on_chunk(&buf[..take]).is_err() {
+                        finish_conn(host, tls, false);
+                        return Err(ExchangeErr::Fatal("sink write failed"));
+                    }
                     delivered += take;
                 }
                 Err(_) => break,
             }
         }
+        fully_drained = false;
     }
 
-    let _ = crate::tls::tls_close(&mut tls);
+    finish_conn(host, tls, persistent && fully_drained);
     Ok(HttpResponse { status, location })
+}
+
+/// One HTTPS round-trip — no redirect following. Reuses a pooled
+/// keep-alive session for `host` when one is available, transparently
+/// falling back to a fresh connection if the pooled socket turned out
+/// stale. Body bytes are pushed through `on_chunk` as they arrive.
+fn https_get_once(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<HttpResponse, &'static str> {
+    // Attempt 1: reuse a pooled session (no DNS/TCP/TLS handshake).
+    if let Some(tls) = pool_take(host) {
+        match https_exchange(host, path, max_size, tls, on_chunk) {
+            Ok(r) => return Ok(r),
+            Err(ExchangeErr::Retry) => {} // stale — reconnect below
+            Err(ExchangeErr::Fatal(e)) => return Err(e),
+        }
+    }
+    // Attempt 2: fresh connection.
+    let tls = open_tls(host)?;
+    match https_exchange(host, path, max_size, tls, on_chunk) {
+        Ok(r) => Ok(r),
+        Err(ExchangeErr::Retry) => Err("connection reset after handshake"),
+        Err(ExchangeErr::Fatal(e)) => Err(e),
+    }
 }
 
 /// Parse a Location header value into (host, path-with-query).
