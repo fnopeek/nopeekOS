@@ -58,6 +58,7 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 | Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. No bidi/UAX-14 yet |
 | Box model (margin/border/padding) | css-box-3 | 🟡 | vertical margins (+collapse) + `padding-left`/`margin-left`; no borders/full padding yet |
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (honor newlines, no wrap); no `nowrap`/`pre-wrap` distinction |
+| Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs::layout_table`: rows stack, cells in auto-width columns (content-preferred, clamped to fit, wrap allowed), `th` bold, `<caption>`, row separators. No colspan/rowspan/border-collapse/`table-layout:fixed` |
 | Flexbox | css-flexbox-1 | ❌ | |
 | Grid | css-grid-2 | ❌ | |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | ❌ | |

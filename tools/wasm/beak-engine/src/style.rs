@@ -24,6 +24,9 @@ pub enum Display {
     Block,
     Inline,
     ListItem,
+    /// `<table>` — establishes the (simplified) table formatting context in
+    /// `layout.rs`; its `tr`/`td`/`th` descendants are laid by that walker.
+    Table,
 }
 
 /// The subset of computed properties the renderer consumes. Split by CSS
@@ -131,8 +134,27 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // Block containers.
         "html" | "body" | "div" | "section" | "article" | "header" | "footer" | "main" | "nav"
         | "aside" | "figure" | "figcaption" | "form" | "address" | "details" | "summary"
-        | "table" | "tbody" | "thead" | "tr" | "fieldset" => {
+        | "tbody" | "thead" | "tfoot" | "tr" | "fieldset" => {
             s.display = Display::Block;
+        }
+
+        // Tables. `<table>` gets the table formatting context; cells are block
+        // containers for their own content (`th` also bold). `tr`/`tbody`/… are
+        // walked by `layout_table`, so their display is only a fallback.
+        "table" => {
+            s.display = Display::Table;
+            s.margin_top = em * 0.5;
+            s.margin_bottom = em * 0.5;
+        }
+        "td" => s.display = Display::Block,
+        "th" => {
+            s.display = Display::Block;
+            s.bold = true;
+        }
+        "caption" => {
+            s.display = Display::Block;
+            s.bold = true;
+            s.margin_bottom = em * 0.3;
         }
         "p" => {
             s.display = Display::Block;
@@ -247,7 +269,8 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "none" => Display::None,
                 "list-item" => Display::ListItem,
                 "inline" | "inline-block" => Display::Inline,
-                // block / flex / grid / table all fall back to block flow for now
+                "table" => Display::Table,
+                // block / flex / grid all fall back to block flow for now
                 _ => Display::Block,
             };
         }
