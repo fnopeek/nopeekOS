@@ -147,13 +147,9 @@ fn blend(bg: u32, fg: u32, a: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// Anti-aliased cursor sample at output pixel (col,row) for effective dims
-/// (ew,eh). Bilinearly interpolates the base bitmap's outline (light) and
-/// interior (dark) coverage → (color, alpha 0..=255). alpha 0 = transparent.
-/// The bilinear ramp gives ~1px soft edges at any scale instead of hard blocks.
-fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
-    let fx = (col as f32 + 0.5) * CURSOR_W as f32 / ew as f32 - 0.5;
-    let fy = (row as f32 + 0.5) * CURSOR_H as f32 / eh as f32 - 0.5;
+/// Bilinear (outline, interior) coverage of the base bitmap at source
+/// coordinate (fx, fy). Out-of-bounds reads as transparent.
+fn cursor_bilinear(fx: f32, fy: f32) -> (f32, f32) {
     let x0 = if fx >= 0.0 { fx as i32 } else { fx as i32 - 1 };
     let y0 = if fy >= 0.0 { fy as i32 } else { fy as i32 - 1 };
     let tx = fx - x0 as f32;
@@ -171,8 +167,34 @@ fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
     let (o10, i10) = at(x0 + 1, y0);
     let (o01, i01) = at(x0, y0 + 1);
     let (o11, i11) = at(x0 + 1, y0 + 1);
-    let o = lerp(lerp(o00, o10, tx), lerp(o01, o11, tx), ty);
-    let i = lerp(lerp(i00, i10, tx), lerp(i01, i11, tx), ty);
+    (lerp(lerp(o00, o10, tx), lerp(o01, o11, tx), ty),
+     lerp(lerp(i00, i10, tx), lerp(i01, i11, tx), ty))
+}
+
+/// Anti-aliased cursor sample at output pixel (col,row) for effective dims
+/// (ew,eh). Supersamples the base bitmap (SS×SS bilinear taps averaged) →
+/// (grayscale color, alpha 0..=255); alpha 0 = transparent. Supersampling
+/// is what gives smooth edges at 100% (1:1): a single bilinear tap there
+/// lands on texel centres and reproduces the hard 1-bit blocks, whereas the
+/// offset subsamples straddle edge texels and average to real coverage.
+fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
+    const SS: u32 = 4;                       // 4×4 subsamples per output pixel
+    let sx = CURSOR_W as f32 / ew as f32;
+    let sy = CURSOR_H as f32 / eh as f32;
+    let mut o_sum = 0.0f32;
+    let mut i_sum = 0.0f32;
+    for sj in 0..SS {
+        for si in 0..SS {
+            let subx = col as f32 + (si as f32 + 0.5) / SS as f32;
+            let suby = row as f32 + (sj as f32 + 0.5) / SS as f32;
+            let (o, i) = cursor_bilinear(subx * sx - 0.5, suby * sy - 0.5);
+            o_sum += o;
+            i_sum += i;
+        }
+    }
+    let n = (SS * SS) as f32;
+    let o = o_sum / n;
+    let i = i_sum / n;
     let a = (o + i).min(1.0);
     if a <= 0.0 { return (0, 0); }
     // Outline ≈ white (240), interior ≈ near-black (30), mixed by coverage.
