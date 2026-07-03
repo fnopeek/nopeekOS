@@ -214,8 +214,9 @@ fn handle_scrollbar_drag(mx: i32, my: i32, lmb: bool, was: bool) -> bool {
 }
 
 /// True if the focused window is a terminal (loop) window — used to route
-/// the mouse wheel to the terminal scrollback.
-fn focused_is_terminal() -> bool {
+/// the mouse wheel to the terminal scrollback, and by the intent loop to
+/// decide whether to drive a terminal session at all.
+pub fn focused_is_terminal() -> bool {
     with_compositor(|comp| {
         let Some(fid) = comp.focused else { return false };
         comp.windows.iter().any(|w|
