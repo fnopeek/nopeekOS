@@ -36,27 +36,28 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 | Tokenizer (tags, text, attrs) | WHATWG HTML §13.2 | 🟡 | tolerant subset; not the full state machine |
 | Comments `<!-- -->` | §13.2 | ✅ | incl. inner markup / multiline |
 | Character references (entities) | §13.2 | 🟡 | named common set + numeric `&#…;` / `&#x…;` |
-| Tree construction (real DOM) | §13.2.6 | ❌ | slice-0 emits flat `Block`s, not a node tree |
+| Tree construction (real DOM) | §13.2.6 | 🟡 | owned node tree (`dom.rs`): elements+attrs+text, tolerant recovery — implied `</p>`/`</li>`/`</dt>`/`</td>`, unmatched end tags ignored, raw-text `<script>`/`<style>`. Not the full insertion-mode state machine |
 | `<script>`/`<style>` raw-text | §13.2 | 🟡 | content skipped (not yet executed/applied) |
 
 ## CSS — parsing & cascade
 
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
-| Tokenizer / parser | css-syntax-3 | ❌ | no author CSS parsed yet |
-| Selectors (type/class/id/desc/…) | selectors-4 | ❌ | |
-| Cascade, specificity, inheritance | css-cascade | ❌ | |
-| **UA default stylesheet** | HTML rendering §15 | 🟡 | styles are hardcoded in `layout.rs` today → **must become a real UA sheet** (h1{font-size:2em;font-weight:bold;…}) so we're standard-shaped from the start |
+| Tokenizer / parser | css-syntax-3 | 🟡 | declaration parser (`style.rs::apply_declarations`) for inline `style="…"` — real `prop:val` syntax, forward-compatible (unknown props ignored). No `<style>` block tokenizer / selectors yet |
+| Selectors (type/class/id/desc/…) | selectors-4 | ❌ | inline styles have no selectors; author `<style>` selectors are next |
+| Cascade, specificity, inheritance | css-cascade | 🟡 | inheritance (font/colour/`white-space`) + cascade **order** (UA sheet → inline `style=`) implemented; specificity arrives with author selectors |
+| **UA default stylesheet** | HTML rendering §15 | ✅ | real UA sheet as data (`style.rs::ua_rule`): `display`, em-relative `font-size`, weight/italic/mono, `color` role, margins, list indent — no longer hardcoded in layout |
+| `getComputedStyle` (CSSOM) | cssom-1 | ❌ | needs DOM + JS |
 | `getComputedStyle` (CSSOM) | cssom-1 | ❌ | needs DOM + JS |
 
 ## CSS — layout
 
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
-| Block flow (vertical stacking) | CSS2.1 §9 | 🟡 | hand-rolled substrate exists |
-| Inline flow / line boxes | CSS2.1 §9.4.2 | 🟡 | greedy word-wrap only; no mixed-style runs |
-| Box model (margin/border/padding) | css-box-3 | 🟡 | margins only, crude |
-| Text wrapping / `white-space` | css-text-3 | 🟡 | collapse + wrap; no `pre`/`nowrap` |
+| Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
+| Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. No bidi/UAX-14 yet |
+| Box model (margin/border/padding) | css-box-3 | 🟡 | vertical margins (+collapse) + `padding-left`/`margin-left`; no borders/full padding yet |
+| Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (honor newlines, no wrap); no `nowrap`/`pre-wrap` distinction |
 | Flexbox | css-flexbox-1 | ❌ | |
 | Grid | css-grid-2 | ❌ | |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | ❌ | |
@@ -66,9 +67,9 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
-| Color / text color | css-color-4 | 🟡 | fixed theme colors, no `color:` yet |
+| Color / text color | css-color-4 | 🟡 | `color:` parsed (`#rgb`/`#rrggbb` + common named colours) via inline styles; theme roles otherwise. No `rgb()`/`hsl()` yet |
 | Backgrounds / borders | css-backgrounds-3 | ❌ | |
-| Font size / weight / family | css-fonts-4 | 🟡 | size via layout; single font (Inter), no weight/family |
+| Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade; **weight** (synthetic bold smear) + **italic** (faux shear) — single Inter face, no real bold/italic/mono font loaded yet |
 | Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend (infrastructure) |
 | Transforms / opacity / filters | css-transforms/… | ❌ | §9 frontier |
 
