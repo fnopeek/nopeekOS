@@ -96,6 +96,16 @@ impl Len {
     }
 }
 
+/// CSS `position`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+    Sticky,
+}
+
 /// The subset of computed properties the renderer consumes. Split by CSS
 /// inheritance: font/colour/`white-space` inherit; box/`display` do not.
 #[derive(Clone, Copy)]
@@ -125,6 +135,12 @@ pub struct ComputedStyle {
     pub bg: Option<Rgb>, // background-color (None = transparent)
     pub border_color: Option<Rgb>,
     pub border_width: f32, // uniform border (all sides)
+    // — positioning —
+    pub position: Position,
+    pub top: Len,
+    pub right: Len,
+    pub bottom: Len,
+    pub left: Len,
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
@@ -173,6 +189,11 @@ impl ComputedStyle {
             bg: None,
             border_color: None,
             border_width: 0.0,
+            position: Position::Static,
+            top: Len::Auto,
+            right: Len::Auto,
+            bottom: Len::Auto,
+            left: Len::Auto,
             is_link: false,
             is_rule: false,
             is_break: false,
@@ -230,6 +251,11 @@ pub fn resolve(
         bg: None,
         border_color: None,
         border_width: 0.0,
+        position: Position::Static,
+        top: Len::Auto,
+        right: Len::Auto,
+        bottom: Len::Auto,
+        left: Len::Auto,
         is_link: false,
         is_rule: false,
         is_break: false,
@@ -508,6 +534,21 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         "border-color" => s.border_color = parse_color(&v, theme),
         "border-width" => s.border_width = parse_length(&v, s.font_px).unwrap_or(s.border_width),
+
+        // — positioning —
+        "position" => {
+            s.position = match v.as_str() {
+                "relative" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
+                "sticky" => Position::Sticky,
+                _ => Position::Static,
+            };
+        }
+        "top" => s.top = parse_len(&v, s.font_px),
+        "right" => s.right = parse_len(&v, s.font_px),
+        "bottom" => s.bottom = parse_len(&v, s.font_px),
+        "left" => s.left = parse_len(&v, s.font_px),
 
         // — flex —
         "flex-direction" => s.flex_row = !v.starts_with("column"),

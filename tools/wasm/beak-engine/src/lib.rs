@@ -88,6 +88,10 @@ innerhalb der Flex-Spalte um wenn er nicht in eine Zeile passt.</div></div>\
 <b>Container</b> mit <code>max-width</code> + <code>margin:0 auto</code> (zentriert), \
 <code>padding</code>, <code>background</code> und <code>border</code> — genau so steckt \
 auf echten Seiten jeder Block in einem Container.</div>\
+<div style=\"position:relative; background:#1f2430; padding:16px; margin-top:14px; border:1px solid #3a3f4b\">\
+<span style=\"position:absolute; top:8px; right:12px; color:#4fd1c5\">position:absolute</span>\
+<b>position:relative</b>-Container — das Badge oben rechts sitzt per \
+<code>position:absolute</code> (aus dem Fluss) an der Container-Ecke.</div>\
 <hr>\
 <h2>Nächste Schritte</h2>\
 <p>Tabellen-Layout und Flexbox/Grid — der Reihe nach. Die Engine bleibt portabel: \

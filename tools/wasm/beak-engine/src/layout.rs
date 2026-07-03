@@ -22,7 +22,8 @@ use fontdue::Font;
 use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::style::{
-    self, ComputedStyle, CrossAlign, Display, FlexBasis, GridTrack, Justify, Len, BASE_FONT_PX,
+    self, ComputedStyle, CrossAlign, Display, FlexBasis, GridTrack, Justify, Len, Position,
+    BASE_FONT_PX,
 };
 
 /// Resolve a block box's horizontal geometry within a containing block of
@@ -48,6 +49,24 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
         }
     }
     (cw.max(1.0), ml + st.pad_left)
+}
+
+/// `position:relative` paint offset (dx, dy): `left`/`top` win over `right`/
+/// `bottom`; `%` resolves against the containing block's content width.
+fn rel_offset(st: &ComputedStyle, cb_w: f32) -> (i32, i32) {
+    let dx = st
+        .left
+        .px(cb_w)
+        .map(|l| l as i32)
+        .or_else(|| st.right.px(cb_w).map(|r| -(r as i32)))
+        .unwrap_or(0);
+    let dy = st
+        .top
+        .px(cb_w)
+        .map(|t| t as i32)
+        .or_else(|| st.bottom.px(cb_w).map(|b| -(b as i32)))
+        .unwrap_or(0);
+    (dx, dy)
 }
 
 /// Solve used content-width + left margin for one width value. Auto width fills
@@ -169,15 +188,26 @@ struct Ctx<'a> {
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     path: Vec<ElemInfo>, // root → … → current parent
+    /// Positioned containing block (x, y, width) for `position:absolute`
+    /// descendants — the nearest ancestor with `position != static`, else page.
+    cb: (i32, i32, i32),
 }
 
 /// Lay a document out into a scroll-independent display list.
 pub fn layout(font: &Font, dom: &Dom, sheet: &Stylesheet, width: u32, theme: &Theme) -> Layout {
     let root = ComputedStyle::root(theme);
-    let mut ctx = Ctx { font, theme, sheet, ops: Vec::new(), links: Vec::new(), path: Vec::new() };
-
     let cx = PAD;
     let cw = (width as i32 - 2 * PAD).max(60);
+    let mut ctx = Ctx {
+        font,
+        theme,
+        sheet,
+        ops: Vec::new(),
+        links: Vec::new(),
+        path: Vec::new(),
+        cb: (cx, PAD, cw), // initial containing block = the page content area
+    };
+
     let mut y = PAD;
 
     // Resolve <body> itself so `body { … }` rules inherit into the page, and
@@ -202,38 +232,53 @@ impl Ctx<'_> {
         let mut had_block = false;
 
         for node in nodes {
-            match node {
-                Node::Text(t) => inline.text(self.font, t, parent, None),
-                Node::Element(el) => {
-                    let st = style::resolve(el, parent, self.theme, self.sheet, &self.path);
-                    match st.display {
-                        Display::None => {}
-                        Display::Inline => {
-                            self.path.push(ElemInfo::of(el));
-                            self.collect_inline(el, &st, None, &mut inline);
-                            self.path.pop();
-                        }
-                        Display::Block
-                        | Display::ListItem
-                        | Display::Table
-                        | Display::Flex
-                        | Display::Grid => {
-                            if !inline.is_empty() {
-                                y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
-                                inline = Inline::new();
-                                carry = 0.0;
-                            }
-                            let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
-                            y += top as i32;
-                            self.path.push(ElemInfo::of(el));
-                            y = self.layout_box(el, &st, x, w, y);
-                            self.path.pop();
-                            carry = st.margin_bottom;
-                            had_block = true;
-                        }
-                    }
+            let el = match node {
+                Node::Text(t) => {
+                    inline.text(self.font, t, parent, None);
+                    continue;
+                }
+                Node::Element(el) => el,
+            };
+            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path);
+            if st.display == Display::None {
+                continue;
+            }
+            // `position:absolute`/`fixed` are out of flow → laid at a
+            // containing-block-relative position, not advancing `y`.
+            if matches!(st.position, Position::Absolute | Position::Fixed) {
+                self.path.push(ElemInfo::of(el));
+                self.layout_abs(el, &st);
+                self.path.pop();
+                continue;
+            }
+            if st.display == Display::Inline {
+                self.path.push(ElemInfo::of(el));
+                self.collect_inline(el, &st, None, &mut inline);
+                self.path.pop();
+                continue;
+            }
+            // Block-level, in normal flow.
+            if !inline.is_empty() {
+                y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
+                inline = Inline::new();
+                carry = 0.0;
+            }
+            let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
+            y += top as i32;
+            self.path.push(ElemInfo::of(el));
+            let op0 = self.ops.len();
+            let link0 = self.links.len();
+            y = self.layout_box(el, &st, x, w, y);
+            // `position:relative` stays in flow but its paint shifts by top/left.
+            if st.position == Position::Relative {
+                let (dx, dy) = rel_offset(&st, w as f32);
+                if dx != 0 || dy != 0 {
+                    self.shift_ops(op0, self.ops.len(), link0, self.links.len(), dx, dy);
                 }
             }
+            self.path.pop();
+            carry = st.margin_bottom;
+            had_block = true;
         }
         if !inline.is_empty() {
             y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
@@ -271,15 +316,48 @@ impl Ctx<'_> {
             self.ops.push(DrawOp::Rect { x: content_x - 12, y: by, w: s, h: s, color: self.theme.muted });
         }
 
+        // A positioned block (`position != static`) becomes the containing
+        // block for its `absolute` descendants.
+        let prev_cb = self.cb;
+        if st.position != Position::Static {
+            self.cb = (content_x, y0, content_w);
+        }
         y = if st.pre {
             layout_pre(self.font, el, st, content_x, content_w, y, &mut self.ops)
         } else {
             self.layout_children(&el.children, st, content_x, content_w, y)
         };
+        self.cb = prev_cb;
         y += st.pad_bottom as i32;
 
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
         y
+    }
+
+    /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
+    /// from the containing block (`self.cb`) + `top`/`left`/`right`. `bottom`
+    /// needs the CB height (unknown mid-flow) and is not resolved yet. The
+    /// element is `el`, already pushed onto `self.path` by the caller.
+    fn layout_abs(&mut self, el: &Element, st: &ComputedStyle) {
+        let (cbx, cby, cbw) = self.cb;
+        let avail = cbw as f32;
+        let left = st.left.px(avail);
+        let right = st.right.px(avail);
+        let width = match (st.width.px(avail), left, right) {
+            (Some(wd), _, _) => wd,
+            (None, Some(l), Some(r)) => (avail - l - r).max(0.0),
+            _ => self.intrinsic_width(el).0.min(avail), // shrink-to-fit
+        };
+        let px = if let Some(l) = left {
+            cbx as f32 + l
+        } else if let Some(r) = right {
+            cbx as f32 + avail - r - width
+        } else {
+            cbx as f32
+        };
+        let py = cby as f32 + st.top.px(avail).unwrap_or(0.0);
+        // layout_box → layout_block re-establishes the CB for its own children.
+        let _ = self.layout_box(el, st, px as i32, width.max(1.0) as i32, py as i32);
     }
 
     /// Insert the block's `background-color` behind its content (at `bg_idx`)
@@ -616,7 +694,7 @@ impl Ctx<'_> {
                 CrossAlign::End => line_cross - h,
             };
             if dy != 0 {
-                self.shift_ops(op0, op1, link0, link1, dy);
+                self.shift_ops(op0, op1, link0, link1, 0, dy);
             }
         }
         y0 + line_cross
@@ -648,16 +726,24 @@ impl Ctx<'_> {
         y
     }
 
-    /// Shift a contiguous slice of already-emitted ops + links by `dy` (used to
-    /// place a flex item on the cross axis after the line's size is known).
-    fn shift_ops(&mut self, o0: usize, o1: usize, l0: usize, l1: usize, dy: i32) {
+    /// Shift a contiguous slice of already-emitted ops + links by `(dx, dy)` —
+    /// used to place a flex item on the cross axis, and to offset a
+    /// `position:relative` box after it is laid in flow.
+    fn shift_ops(&mut self, o0: usize, o1: usize, l0: usize, l1: usize, dx: i32, dy: i32) {
         for op in &mut self.ops[o0..o1] {
             match op {
-                DrawOp::Text { y, .. } => *y += dy,
-                DrawOp::Rect { y, .. } => *y += dy,
+                DrawOp::Text { x, y, .. } => {
+                    *x += dx;
+                    *y += dy;
+                }
+                DrawOp::Rect { x, y, .. } => {
+                    *x += dx;
+                    *y += dy;
+                }
             }
         }
         for lk in &mut self.links[l0..l1] {
+            lk.x += dx;
             lk.y += dy;
         }
     }
@@ -1060,6 +1146,38 @@ mod tests {
             l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, bold: true, .. } if text == "Land")),
             "th renders bold"
         );
+    }
+
+    #[test]
+    fn position_relative_shifts_paint_but_keeps_flow() {
+        // The relative <p> is nudged right+down; the following <p> keeps the
+        // normal-flow position (relative reserves its original space).
+        let base = lay("<body><p>a</p><p>b</p></body>", 800);
+        let rel = lay("<body><p style=\"position:relative; left:40px; top:15px\">a</p><p>b</p></body>", 800);
+        let ax = |l: &Layout| l.ops.iter().find_map(|o| match o { DrawOp::Text { x, text, .. } if text == "a" => Some(*x), _ => None }).unwrap();
+        let by = |l: &Layout| l.ops.iter().find_map(|o| match o { DrawOp::Text { y, text, .. } if text == "b" => Some(*y), _ => None }).unwrap();
+        assert_eq!(ax(&rel), ax(&base) + 40, "relative shifts x by left");
+        assert_eq!(by(&rel), by(&base), "following block keeps its flow position");
+    }
+
+    #[test]
+    fn position_absolute_uses_containing_block_and_leaves_flow() {
+        // The absolute badge is positioned at cb.left+left / cb.top+top; the
+        // sibling <p> flows as if the badge weren't there.
+        let l = lay(
+            "<body><div style=\"position:relative\">\
+             <span style=\"position:absolute; left:30px; top:8px\">badge</span>\
+             <p>flow</p></div></body>",
+            800,
+        );
+        let badge = l.ops.iter().find_map(|o| match o { DrawOp::Text { x, y, text, .. } if text == "badge" => Some((*x, *y)), _ => None }).unwrap();
+        let flow_y = |ll: &Layout| ll.ops.iter().find_map(|o| match o { DrawOp::Text { y, text, .. } if text == "flow" => Some(*y), _ => None }).unwrap();
+        // cb = the relative div's content box; its left = PAD(20), top = PAD(20).
+        assert_eq!(badge.0, 20 + 30, "abs left = cb.left + left");
+        assert!(badge.1 >= 20 + 8 && badge.1 <= 20 + 8 + 6, "abs top ≈ cb.top + top");
+        // out of flow: the sibling <p> lands where it would with no badge at all.
+        let without = lay("<body><div style=\"position:relative\"><p>flow</p></div></body>", 800);
+        assert_eq!(flow_y(&l), flow_y(&without), "absolute badge does not shift the following text");
     }
 
     #[test]
