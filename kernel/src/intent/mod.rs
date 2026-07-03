@@ -507,7 +507,11 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // reported bug). With an empty input there is nothing to
         // protect — redrawing an empty `path> ` between every
         // streamed line is pure noise (observed during guest boot).
-        if session.pos > 0 && crate::serial::write_gen() != console_gen {
+        // Serial console only: in shade the live input line is redrawn via
+        // rewrite_input, and this kprint would (a) duplicate the prompt and
+        // (b) go to the primary debug sink, not the focused loop.
+        if !crate::shade::is_active()
+            && session.pos > 0 && crate::serial::write_gen() != console_gen {
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
             let inp = core::str::from_utf8(&session.input_buf[..session.pos]).unwrap_or("");
@@ -713,7 +717,13 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             }
             KeyCode::Enter => {
                 session.cursor = session.pos;
+                // Route the commit newline to THIS loop (like the prompt +
+                // command output), not the primary debug sink — otherwise
+                // with active != primary the '\n' lands in the primary loop
+                // and prompts stack on one line in the focused loop.
+                crate::shade::terminal::set_output_redirect(session.terminal_idx);
                 kprint!("\n");
+                crate::shade::terminal::clear_output_redirect();
                 session.history.push(&session.input_buf[..session.pos]);
                 return Some(session.pos);
             }
