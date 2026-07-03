@@ -18,11 +18,13 @@ extern crate alloc;
 
 pub mod css;
 pub mod dom;
+pub mod image;
 pub mod layout;
 pub mod raster;
 pub mod style;
 
 pub use dom::{parse, title, Dom, Element, Node};
+pub use image::{Image, ImageMap};
 pub use layout::{Layout, Rgb, Theme};
 pub use raster::Engine;
 
@@ -31,6 +33,29 @@ pub use raster::Engine;
 /// `Engine::layout_ext` (the engine cannot fetch — it is host-free).
 pub fn stylesheet_links(html: &str) -> alloc::vec::Vec<alloc::string::String> {
     css::stylesheet_links(&dom::parse(html))
+}
+
+/// `src` of every `<img>` in an HTML document (as written), for the shell to
+/// fetch + hand back via `Engine::set_images`.
+pub fn image_srcs(html: &str) -> alloc::vec::Vec<alloc::string::String> {
+    fn walk(el: &Element, out: &mut alloc::vec::Vec<alloc::string::String>) {
+        for c in &el.children {
+            if let Node::Element(e) = c {
+                if e.tag == "img" {
+                    if let Some(s) = e.attr("src") {
+                        if !s.trim().is_empty() {
+                            out.push(alloc::string::ToString::to_string(s.trim()));
+                        }
+                    }
+                }
+                walk(e, out);
+            }
+        }
+    }
+    let dom = dom::parse(html);
+    let mut out = alloc::vec::Vec::new();
+    walk(&dom.root, &mut out);
+    out
 }
 
 // Host demo: render a representative page to a BMP so the layout + text can be
@@ -92,6 +117,10 @@ auf echten Seiten jeder Block in einem Container.</div>\
 <span style=\"position:absolute; top:8px; right:12px; color:#4fd1c5\">position:absolute</span>\
 <b>position:relative</b>-Container — das Badge oben rechts sitzt per \
 <code>position:absolute</code> (aus dem Fluss) an der Container-Ecke.</div>\
+<p>Ein echtes Bild (dekodiert + skaliert), daneben ein Platzhalter für ein \
+nicht ladbares:</p>\
+<img src=\"demo.png\" alt=\"Verlauf\" width=\"240\" height=\"160\">\
+<img src=\"fehlt.jpg\" alt=\"nicht geladen (JPEG folgt)\" width=\"240\" height=\"90\">\
 <hr>\
 <h2>Nächste Schritte</h2>\
 <p>Tabellen-Layout und Flexbox/Grid — der Reihe nach. Die Engine bleibt portabel: \
@@ -127,7 +156,13 @@ dieselbe Rechnerei läuft auf dem Desktop.</p>\
 
     #[test]
     fn render_sample_to_bmp() {
-        let eng = Engine::new();
+        let mut eng = Engine::new();
+        // Feed the demo <img src="demo.png"> a real decoded image (the shell
+        // fetches these over the network; here we embed one for the host demo).
+        eng.set_images(&[(
+            alloc::string::String::from("demo.png"),
+            include_bytes!("../assets/demo.png").to_vec(),
+        )]);
         let width = 760u32;
         let lay = eng.layout(SAMPLE, width);
         let height = lay.height.min(3000);

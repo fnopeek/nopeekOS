@@ -78,9 +78,9 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| PNG decode | 🟡 | exists in iris; not wired into beak yet |
-| JPEG decode | ❌ | |
-| `<img>` layout + paint | ❌ | |
+| PNG decode | ✅ | `image.rs` (8-bit RGB/RGBA, non-interlaced, miniz_oxide inflate) — wired into `<img>` |
+| JPEG decode | ❌ | common web case → next; JPEG `<img>` currently shows a placeholder |
+| `<img>` layout + paint | 🟡 | block-level image box (size from `width`/`height`/intrinsic, scaled to fit, aspect kept), decoded PNG blit (nearest-neighbour + alpha) or a labelled placeholder. Shell fetches the bytes (≤16/page, 24 MB decode budget). No inline images / `srcset` / `object-fit` |
 
 ## DOM + JavaScript
 

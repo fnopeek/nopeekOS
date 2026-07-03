@@ -21,3 +21,9 @@ features = ["hashbrown"]
 version = "0.14"
 default-features = false
 features = ["ahash"]
+
+# miniz_oxide: no_std DEFLATE/inflate for PNG IDAT (same crate iris/wallpaper use).
+[dependencies.miniz_oxide]
+version = "0.9"
+default-features = false
+features = ["with-alloc"]
