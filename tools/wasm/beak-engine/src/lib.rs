@@ -77,6 +77,10 @@ innerhalb der Flex-Spalte um wenn er nicht in eine Zeile passt.</div></div>\
 <div style=\"display:grid; grid-template-columns:repeat(3, 1fr); gap:10px\">\
 <div style=\"color:#4fd1c5\">Grid A</div><div>Grid B</div><div>Grid C</div>\
 <div style=\"grid-column:span 2; color:#e0662c\">Grid D (span 2)</div><div>Grid E</div></div>\
+<div style=\"max-width:520px; margin:18px auto; padding:16px; background:#1f2430; border:1px solid #3a3f4b\">\
+<b>Container</b> mit <code>max-width</code> + <code>margin:0 auto</code> (zentriert), \
+<code>padding</code>, <code>background</code> und <code>border</code> — genau so steckt \
+auf echten Seiten jeder Block in einem Container.</div>\
 <hr>\
 <h2>Nächste Schritte</h2>\
 <p>Tabellen-Layout und Flexbox/Grid — der Reihe nach. Die Engine bleibt portabel: \

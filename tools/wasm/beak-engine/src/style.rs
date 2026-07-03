@@ -75,6 +75,27 @@ pub enum FlexBasis {
     Pct(f32),
 }
 
+/// A CSS length keyword/value for the box model. `Auto` means "auto" (for
+/// width/margins) or "none" (for max-width). `%` is relative to the containing
+/// block's content width, resolved at layout time.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Len {
+    Auto,
+    Px(f32),
+    Pct(f32),
+}
+
+impl Len {
+    /// Resolve to px against a containing-block width; `Auto` → `None`.
+    pub fn px(self, cb: f32) -> Option<f32> {
+        match self {
+            Len::Auto => None,
+            Len::Px(p) => Some(p),
+            Len::Pct(p) => Some(p / 100.0 * cb),
+        }
+    }
+}
+
 /// The subset of computed properties the renderer consumes. Split by CSS
 /// inheritance: font/colour/`white-space` inherit; box/`display` do not.
 #[derive(Clone, Copy)]
@@ -88,9 +109,22 @@ pub struct ComputedStyle {
     pub color: Rgb,
     // — not inherited —
     pub display: Display,
+    // — box model (block) —
+    pub width: Len,
+    pub min_width: Len,
+    pub max_width: Len, // Auto = no maximum
     pub margin_top: f32,
     pub margin_bottom: f32,
-    pub padding_left: f32,
+    pub margin_left: Len,
+    pub margin_right: Len,
+    pub pad_top: f32,
+    pub pad_right: f32,
+    pub pad_bottom: f32,
+    pub pad_left: f32,
+    pub box_border: bool, // box-sizing: border-box
+    pub bg: Option<Rgb>, // background-color (None = transparent)
+    pub border_color: Option<Rgb>,
+    pub border_width: f32, // uniform border (all sides)
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
@@ -124,9 +158,21 @@ impl ComputedStyle {
             pre: false,
             color: theme.text,
             display: Display::Block,
+            width: Len::Auto,
+            min_width: Len::Auto,
+            max_width: Len::Auto,
             margin_top: 0.0,
             margin_bottom: 0.0,
-            padding_left: 0.0,
+            margin_left: Len::Px(0.0),
+            margin_right: Len::Px(0.0),
+            pad_top: 0.0,
+            pad_right: 0.0,
+            pad_bottom: 0.0,
+            pad_left: 0.0,
+            box_border: false,
+            bg: None,
+            border_color: None,
+            border_width: 0.0,
             is_link: false,
             is_rule: false,
             is_break: false,
@@ -169,9 +215,21 @@ pub fn resolve(
         pre: parent.pre,
         color: parent.color,
         display: Display::Inline, // CSS initial `display` is inline
+        width: Len::Auto,
+        min_width: Len::Auto,
+        max_width: Len::Auto,
         margin_top: 0.0,
         margin_bottom: 0.0,
-        padding_left: 0.0,
+        margin_left: Len::Px(0.0),
+        margin_right: Len::Px(0.0),
+        pad_top: 0.0,
+        pad_right: 0.0,
+        pad_bottom: 0.0,
+        pad_left: 0.0,
+        box_border: false,
+        bg: None,
+        border_color: None,
+        border_width: 0.0,
         is_link: false,
         is_rule: false,
         is_break: false,
@@ -262,7 +320,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // Lists.
         "ul" | "ol" => {
             s.display = Display::Block;
-            s.padding_left = 26.0;
+            s.pad_left = 26.0;
             s.margin_top = em * 0.5;
             s.margin_bottom = em * 0.5;
         }
@@ -275,12 +333,12 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         "dt" => s.display = Display::Block,
         "dd" => {
             s.display = Display::Block;
-            s.padding_left = 26.0;
+            s.pad_left = 26.0;
         }
 
         "blockquote" => {
             s.display = Display::Block;
-            s.padding_left = 24.0;
+            s.pad_left = 24.0;
             s.margin_top = em * 0.6;
             s.margin_bottom = em * 0.6;
             s.color = theme.muted;
@@ -386,11 +444,70 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "font-family" => {
             s.mono = v.contains("mono") || v.contains("courier") || v.contains("consol");
         }
-        "margin-top" => s.margin_top = parse_length(&v, s.font_px).unwrap_or(s.margin_top),
-        "margin-bottom" => s.margin_bottom = parse_length(&v, s.font_px).unwrap_or(s.margin_bottom),
-        "padding-left" | "margin-left" => {
-            s.padding_left = parse_length(&v, s.font_px).unwrap_or(s.padding_left)
+        // — box model —
+        "width" => s.width = parse_len(&v, s.font_px),
+        "min-width" => s.min_width = parse_len(&v, s.font_px),
+        "max-width" => s.max_width = if v == "none" { Len::Auto } else { parse_len(&v, s.font_px) },
+        "box-sizing" => s.box_border = v == "border-box",
+        "margin" => {
+            let em = s.font_px;
+            let (t, r, b, l) = four_values(&v);
+            s.margin_top = margin_tb(t, em);
+            s.margin_right = margin_lr(r, em);
+            s.margin_bottom = margin_tb(b, em);
+            s.margin_left = margin_lr(l, em);
         }
+        "margin-top" => s.margin_top = margin_tb(&v, s.font_px),
+        "margin-bottom" => s.margin_bottom = margin_tb(&v, s.font_px),
+        "margin-left" => s.margin_left = margin_lr(&v, s.font_px),
+        "margin-right" => s.margin_right = margin_lr(&v, s.font_px),
+        "padding" => {
+            let em = s.font_px;
+            let (t, r, b, l) = four_values(&v);
+            s.pad_top = parse_length(t, em).unwrap_or(0.0);
+            s.pad_right = parse_length(r, em).unwrap_or(0.0);
+            s.pad_bottom = parse_length(b, em).unwrap_or(0.0);
+            s.pad_left = parse_length(l, em).unwrap_or(0.0);
+        }
+        "padding-top" => s.pad_top = parse_length(&v, s.font_px).unwrap_or(s.pad_top),
+        "padding-right" => s.pad_right = parse_length(&v, s.font_px).unwrap_or(s.pad_right),
+        "padding-bottom" => s.pad_bottom = parse_length(&v, s.font_px).unwrap_or(s.pad_bottom),
+        "padding-left" => s.pad_left = parse_length(&v, s.font_px).unwrap_or(s.pad_left),
+
+        // — background + border —
+        "background-color" | "background" => {
+            if v == "none" || v == "transparent" {
+                s.bg = None;
+            } else {
+                // `background` shorthand may carry more than a colour → take the
+                // first token that parses as one; gradients/images are ignored.
+                for tok in v.split_whitespace() {
+                    if let Some(c) = parse_color(tok, theme) {
+                        s.bg = Some(c);
+                        break;
+                    }
+                }
+            }
+        }
+        "border" | "border-top" | "border-bottom" | "border-left" | "border-right" => {
+            if v == "none" || v == "0" || v.starts_with("0 ") {
+                s.border_color = None;
+                s.border_width = 0.0;
+            } else {
+                for tok in v.split_whitespace() {
+                    if let Some(c) = parse_color(tok, theme) {
+                        s.border_color = Some(c);
+                    } else if let Some(bw) = parse_length(tok, s.font_px) {
+                        s.border_width = bw;
+                    }
+                }
+                if s.border_color.is_some() && s.border_width == 0.0 {
+                    s.border_width = 1.0; // `medium` default when only colour given
+                }
+            }
+        }
+        "border-color" => s.border_color = parse_color(&v, theme),
+        "border-width" => s.border_width = parse_length(&v, s.font_px).unwrap_or(s.border_width),
 
         // — flex —
         "flex-direction" => s.flex_row = !v.starts_with("column"),
@@ -451,6 +568,40 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "grid-column" => s.grid_col_span = parse_col_span(&v),
 
         _ => {}
+    }
+}
+
+/// A `<length>`/`auto`/`%` value for the box model.
+fn parse_len(v: &str, em: f32) -> Len {
+    let v = v.trim();
+    if v == "auto" {
+        return Len::Auto;
+    }
+    if let Some(p) = v.strip_suffix('%') {
+        return p.trim().parse::<f32>().map(Len::Pct).unwrap_or(Len::Auto);
+    }
+    parse_length(v, em).map(Len::Px).unwrap_or(Len::Auto)
+}
+
+/// Top/bottom margin: `auto` computes to 0 for block boxes.
+fn margin_tb(v: &str, em: f32) -> f32 {
+    if v.trim() == "auto" { 0.0 } else { parse_length(v, em).unwrap_or(0.0) }
+}
+
+/// Left/right margin keeps `auto` (drives centering / slack).
+fn margin_lr(v: &str, em: f32) -> Len {
+    parse_len(v, em)
+}
+
+/// Expand a 1–4 token box shorthand into (top, right, bottom, left).
+fn four_values(v: &str) -> (&str, &str, &str, &str) {
+    let p: alloc::vec::Vec<&str> = v.split_whitespace().collect();
+    match p.len() {
+        0 => ("0", "0", "0", "0"),
+        1 => (p[0], p[0], p[0], p[0]),
+        2 => (p[0], p[1], p[0], p[1]),
+        3 => (p[0], p[1], p[2], p[1]),
+        _ => (p[0], p[1], p[2], p[3]),
     }
 }
 

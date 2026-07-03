@@ -56,20 +56,20 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 |---------|------|--------|-------|
 | Block flow (vertical stacking) | CSS2.1 §9 | ✅ | block formatting context (`layout.rs`): stack + adjacent-sibling **margin collapse**; anonymous inline runs flushed at block boundaries |
 | Inline flow / line boxes | CSS2.1 §9.4.2 | ✅ | line boxes with **mixed-style runs** (size/colour/weight/italic) sharing a baseline; greedy wrap; `<a>`/`<b>`/`<i>`/`<code>` flow inline; `<br>` breaks. No bidi/UAX-14 yet |
-| Box model (margin/border/padding) | css-box-3 | 🟡 | vertical margins (+collapse) + `padding-left`/`margin-left`; no borders/full padding yet |
+| Box model (margin/border/padding) | css-box-3 | 🟡 | full block box model: `width`/`min-width`/`max-width`, `margin` (4-side + **`auto` centering**, §10.3.3 + §10.4 min/max redo), `padding` (4-side), `box-sizing`, vertical margin collapse → **centered `max-width` containers work**. No per-side borders/`border-radius` |
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (honor newlines, no wrap); no `nowrap`/`pre-wrap` distinction |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs::layout_table`: rows stack, cells in auto-width columns (content-preferred, clamped to fit, wrap allowed), `th` bold, `<caption>`, row separators. No colspan/rowspan/border-collapse/`table-layout:fixed` |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex` (single line): row/column direction, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`. No wrap/reverse/`margin:auto`/baseline |
 | Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns` (px/%/`fr`/`auto`/`repeat()`), row-major auto-placement, `grid-column: span N` / `A / B`, `gap`; auto row heights. No explicit line placement / `grid-template-rows`/`-areas` / dense flow / item alignment |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | ❌ | |
-| Values & units (px/em/%/rem/…) | css-values-4 | ❌ | |
+| Values & units (px/em/%/rem/…) | css-values-4 | 🟡 | `px`/`em`/`rem`/`%` lengths, `auto`, `fr`, hex/named colours — parsed across box model / flex / grid. No `calc()`/`vw`/`vh`/`ch` |
 
 ## CSS — paint
 
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
 | Color / text color | css-color-4 | 🟡 | `color:` parsed (`#rgb`/`#rrggbb` + common named colours) via inline styles; theme roles otherwise. No `rgb()`/`hsl()` yet |
-| Backgrounds / borders | css-backgrounds-3 | ❌ | |
+| Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (behind content) + uniform `border` (4 edges) on block boxes; hex/named colours. No gradients/images/`border-radius`/per-side |
 | Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade; **weight** (synthetic bold smear) + **italic** (faux shear) — single Inter face, no real bold/italic/mono font loaded yet |
 | Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend (infrastructure) |
 | Transforms / opacity / filters | css-transforms/… | ❌ | §9 frontier |
