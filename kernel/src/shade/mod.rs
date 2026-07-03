@@ -1546,6 +1546,18 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
 /// Geometry is captured at press so a drag can run past the window edge.
 /// Doesn't consume the event — a plain LMB drag in a terminal never moves
 /// the window, so the normal focus/click flow runs alongside.
+/// Re-render the focused terminal so a selection change (mouse or keyboard)
+/// shows. Marks the terminal + its window dirty, then repaints damage.
+pub fn refresh_focused_terminal() {
+    terminal::mark_dirty();
+    with_compositor(|comp| {
+        if let Some(fid) = comp.focused {
+            if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
+        }
+    });
+    render_damaged();
+}
+
 fn update_terminal_selection(mx: i32, my: i32, lmb: bool, was: bool) {
     if terminal::selection_dragging() {
         let changed = if lmb {
@@ -1554,13 +1566,7 @@ fn update_terminal_selection(mx: i32, my: i32, lmb: bool, was: bool) {
             terminal::selection_end()
         };
         if changed {
-            terminal::mark_dirty();
-            with_compositor(|comp| {
-                if let Some(fid) = comp.focused {
-                    if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
-                }
-            });
-            render_damaged();
+            refresh_focused_terminal();
         }
         return;
     }

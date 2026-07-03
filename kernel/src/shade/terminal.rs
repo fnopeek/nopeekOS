@@ -585,10 +585,58 @@ pub fn paste_clipboard() {
 }
 
 /// Drop the selection if it belongs to terminal `idx` (its content just
-/// changed under it, e.g. on clear — the absolute lines no longer map).
-pub fn clear_selection(idx: usize) {
+/// changed under it, e.g. on clear or a plain key — the absolute lines no
+/// longer map / the user moved on). Returns true if a selection was dropped.
+pub fn clear_selection(idx: usize) -> bool {
     let mut g = SELECTION.lock();
-    if g.as_ref().map_or(false, |s| s.term_idx == idx) { *g = None; }
+    if g.as_ref().map_or(false, |s| s.term_idx == idx) { *g = None; true } else { false }
+}
+
+/// Direction for keyboard (Shift+arrow) selection.
+#[derive(Clone, Copy)]
+pub enum SelDir { Left, Right, Up, Down }
+
+/// Extend a terminal selection one cell via Shift+arrow. Anchors at the
+/// current input caret `(total, INPUT_CURSOR_POS)` when starting fresh; a
+/// mouse selection already present is continued from its moving end. Moves
+/// are clamped to the ring-valid range. Returns true if it changed.
+pub fn selection_key(idx: usize, dir: SelDir) -> bool {
+    let term = match term_ref(idx) { Some(t) => t, None => return false };
+    let line_len = |ln: usize| -> usize { term.lens[ln % MAX_LINES] };
+    let oldest = term.total.saturating_sub(MAX_LINES - 1); // first ring-valid line
+    let caret_col = unsafe { INPUT_CURSOR_POS }.min(line_len(term.total));
+    let caret = (term.total, caret_col);
+
+    let mut g = SELECTION.lock();
+    let mut sel = match g.take() {
+        Some(s) if s.term_idx == idx => s,
+        _ => Selection { term_idx: idx, rx: 0, ry: 0, rw: 0, rh: 0,
+                         anchor: caret, head: caret, active: false },
+    };
+    sel.active = false; // keyboard selection is not a drag
+
+    let (mut hl, mut hc) = sel.head;
+    match dir {
+        SelDir::Left => {
+            if hc > 0 { hc -= 1; }
+            else if hl > oldest { hl -= 1; hc = line_len(hl); }
+        }
+        SelDir::Right => {
+            if hc < line_len(hl) { hc += 1; }
+            else if hl < term.total { hl += 1; hc = 0; }
+        }
+        SelDir::Up => {
+            if hl > oldest { hl -= 1; hc = hc.min(line_len(hl)); }
+        }
+        SelDir::Down => {
+            if hl < term.total { hl += 1; hc = hc.min(line_len(hl)); }
+        }
+    }
+    let new_head = (hl, hc);
+    let changed = new_head != sel.head;
+    sel.head = new_head;
+    if sel.anchor == sel.head { *g = None; } else { *g = Some(sel); }
+    changed
 }
 
 /// Render a specific terminal's content into a window region.

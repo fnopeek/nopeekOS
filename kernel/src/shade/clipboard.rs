@@ -54,11 +54,7 @@ pub fn set_text(bytes: &[u8]) {
     } else {
         Some(ClipData::Text(data.to_vec()))
     };
-    let g = GENERATION.fetch_add(1, Ordering::Release) + 1;
-    let preview = core::str::from_utf8(data).unwrap_or("<non-utf8>");
-    let mut hl = preview.len().min(24);
-    while hl > 0 && !preview.is_char_boundary(hl) { hl -= 1; }
-    crate::kprintln!("[clip] set_text len={} gen={} head={:?}", data.len(), g, &preview[..hl]);
+    GENERATION.fetch_add(1, Ordering::Release);
 }
 
 /// Current clipboard text, or `None` if empty / holding a non-text kind.

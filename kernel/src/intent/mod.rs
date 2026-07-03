@@ -627,6 +627,31 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         }
 
         use crate::input::KeyCode;
+
+        // Shift+arrow → extend a terminal text selection (mirrors the widget
+        // editor); Ctrl+Shift+C then copies it. Any other key drops a stale
+        // selection so the next Shift+arrow re-anchors at the caret. Only in
+        // shade mode — serial has no selectable grid.
+        if crate::shade::is_active() {
+            let dir = if event.modifiers.shift {
+                match event.key {
+                    KeyCode::Left  => Some(crate::shade::terminal::SelDir::Left),
+                    KeyCode::Right => Some(crate::shade::terminal::SelDir::Right),
+                    KeyCode::Up    => Some(crate::shade::terminal::SelDir::Up),
+                    KeyCode::Down  => Some(crate::shade::terminal::SelDir::Down),
+                    _ => None,
+                }
+            } else { None };
+            if let Some(d) = dir {
+                if crate::shade::terminal::selection_key(session.terminal_idx as usize, d) {
+                    crate::shade::refresh_focused_terminal();
+                }
+                continue;
+            } else if crate::shade::terminal::clear_selection(session.terminal_idx as usize) {
+                crate::shade::refresh_focused_terminal();
+            }
+        }
+
         match event.key {
             KeyCode::Up => {
                 if let Some((line, len)) = session.history.up() {
