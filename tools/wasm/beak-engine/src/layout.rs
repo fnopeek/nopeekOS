@@ -256,18 +256,16 @@ impl Ctx<'_> {
             if st.display == Display::None {
                 continue;
             }
-            // `<img>`: block-level box for v1 (its own line), decoded or a
-            // labelled placeholder. Inline images (icons in text) come later.
+            // `<img>` is an atomic inline box: add it to the current inline run
+            // (a lone `<img>` flows as one item → its own line; an `<img>` in an
+            // `<a>`/`<span>` flows with the text). Nested imgs are handled in
+            // `collect_inline`; this catches direct children of any display.
             if el.tag == "img" {
-                if !inline.is_empty() {
-                    y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
-                    inline = Inline::new();
-                    carry = 0.0;
-                }
-                y += 4;
-                y = self.layout_img(el, &st, x, w, y);
-                y += 4;
-                had_block = true;
+                self.path.push(ElemInfo::of(el));
+                let (img, iw, ih) = self.img_box(el);
+                let alt = el.attr("alt").unwrap_or("").trim().to_string();
+                inline.image(img, iw, ih, None, alt);
+                self.path.pop();
                 continue;
             }
             // `position:absolute`/`fixed` are out of flow → laid at a
@@ -286,7 +284,7 @@ impl Ctx<'_> {
             }
             // Block-level, in normal flow.
             if !inline.is_empty() {
-                y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
+                y = inline.flow(self.font, self.theme, x, w, y, &mut self.ops, &mut self.links);
                 inline = Inline::new();
                 carry = 0.0;
             }
@@ -308,7 +306,7 @@ impl Ctx<'_> {
             had_block = true;
         }
         if !inline.is_empty() {
-            y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
+            y = inline.flow(self.font, self.theme, x, w, y, &mut self.ops, &mut self.links);
         } else if had_block {
             y += carry as i32;
         }
@@ -361,51 +359,20 @@ impl Ctx<'_> {
         y
     }
 
-    /// Lay an `<img>` box: size from `width`/`height` (attr or CSS) or the
-    /// decoded intrinsic size, scaled down to fit the content width (aspect
-    /// preserved). A decoded image → `DrawOp::Image`; a missing/undecodable one
-    /// → a bordered placeholder with its `alt` text.
-    fn layout_img(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+    /// The decoded image (if any) + natural box size for an `<img>`: from the
+    /// `width`/`height` attributes, else the decoded intrinsic size, else a
+    /// fallback. Not clamped to the line width — `flow` fits it when placing.
+    fn img_box(&self, el: &Element) -> (Option<Rc<Image>>, i32, i32) {
         let img = el.attr("src").and_then(|s| self.images.get(s)).cloned();
         let (iw, ih) = img.as_ref().map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0));
-
-        let attr_px = |n: &str| {
-            el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
-        };
-        let avail = w as f32;
-        let mut bw = st.width.px(avail).or_else(|| attr_px("width")).unwrap_or(if iw > 0.0 { iw } else { 320.0 });
-        let mut bh = match attr_px("height") {
+        let attr = |n: &str| el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
+        let bw = attr("width").unwrap_or(if iw > 0.0 { iw } else { 100.0 });
+        let bh = match attr("height") {
             Some(h) => h,
             None if iw > 0.0 => bw * ih / iw,
-            None => bw * 0.60,
+            None => bw * 0.75,
         };
-        if bw > avail {
-            bh *= avail / bw;
-            bw = avail;
-        }
-        let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
-
-        if let Some(img) = img {
-            self.ops.push(DrawOp::Image { x, y, w: bw, h: bh, img });
-        } else {
-            let c = self.theme.rule;
-            self.ops.push(DrawOp::Rect { x, y, w: bw, h: 1, color: c });
-            self.ops.push(DrawOp::Rect { x, y: y + bh - 1, w: bw, h: 1, color: c });
-            self.ops.push(DrawOp::Rect { x, y, w: 1, h: bh, color: c });
-            self.ops.push(DrawOp::Rect { x: x + bw - 1, y, w: 1, h: bh, color: c });
-            let alt = el.attr("alt").unwrap_or("").trim();
-            let label = if alt.is_empty() { "[Bild]" } else { alt };
-            self.ops.push(DrawOp::Text {
-                x: x + 8,
-                y: y + 6,
-                size: 14.0,
-                color: self.theme.muted,
-                bold: false,
-                italic: false,
-                text: label.to_string(),
-            });
-        }
-        y + bh
+        (img, bw.max(1.0) as i32, bh.max(1.0) as i32)
     }
 
     /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
@@ -897,6 +864,14 @@ impl Ctx<'_> {
             inline.brk();
             return;
         }
+        // An `<img>` inside inline content (e.g. `<a><img></a>` — Wikipedia's
+        // thumbnails) is an atomic inline box; carry the enclosing link so it
+        // stays clickable.
+        if el.tag == "img" {
+            let (img, iw, ih) = self.img_box(el);
+            inline.image(img, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string());
+            return;
+        }
         let href = if st.is_link { el.attr("href").or(href) } else { href };
         for c in &el.children {
             match c {
@@ -926,9 +901,10 @@ struct RunStyle {
     italic: bool,
 }
 
-/// One inline item: a word (with its run style + optional link) or a `<br>`.
+/// One inline item: a word, an atomic `<img>`, or a `<br>`.
 enum Item {
     Word { text: String, style: RunStyle, href: Option<String>, space_before: bool },
+    Image { img: Option<Rc<Image>>, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool },
     Break,
 }
 
@@ -975,6 +951,14 @@ impl Inline {
         self.items.push(Item::Word { text, style, href: href.map(|s| s.to_string()), space_before });
     }
 
+    /// Add an atomic `<img>` (decoded or a placeholder) to the inline run,
+    /// carrying the enclosing link so an image-in-a-link stays clickable.
+    fn image(&mut self, img: Option<Rc<Image>>, w: i32, h: i32, href: Option<&str>, alt: String) {
+        let space_before = self.pending_space && !self.items.is_empty();
+        self.pending_space = false;
+        self.items.push(Item::Image { img, w, h, href: href.map(|s| s.to_string()), alt, space_before });
+    }
+
     fn brk(&mut self) {
         self.items.push(Item::Break);
         self.pending_space = false;
@@ -982,9 +966,12 @@ impl Inline {
 
     /// Flow the accumulated items into line boxes starting at `y0`; append the
     /// resulting `DrawOp`s + `LinkRect`s. Returns the y below the last line.
+    /// `theme` supplies placeholder colours for undecodable images.
+    #[allow(clippy::too_many_arguments)]
     fn flow(
         &self,
         font: &Font,
+        theme: &Theme,
         x: i32,
         w: i32,
         y0: i32,
@@ -992,7 +979,7 @@ impl Inline {
         links: &mut Vec<LinkRect>,
     ) -> i32 {
         let mut y = y0;
-        let mut line: Vec<Seg> = Vec::new();
+        let mut line: Vec<Placed> = Vec::new();
         let mut pen = x as f32;
         let mut line_ascent = 0.0f32;
         let mut gap = 0.0f32;
@@ -1004,7 +991,7 @@ impl Inline {
                     if line.is_empty() {
                         y += ceil_i32(line_gap(font, BASE_FONT_PX));
                     } else {
-                        y = emit_line(font, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
                     }
                     pen = x as f32;
                     line_ascent = 0.0;
@@ -1014,34 +1001,70 @@ impl Inline {
                     let ww = measure(font, text, style.size);
                     let sw = if *space_before { space_width(font, style.size) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ww > right {
-                        y = emit_line(font, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
                         pen = x as f32;
                         line_ascent = 0.0;
                         gap = 0.0;
                     }
                     let lead = if line.is_empty() { 0.0 } else { sw };
                     let sx = (pen + lead) as i32;
-                    let merge = matches!(line.last(), Some(last) if last.style == *style && last.href == *href);
+                    let merge = matches!(line.last(), Some(Placed::Text(last)) if last.style == *style && last.href == *href);
                     if merge {
-                        let last = line.last_mut().unwrap();
-                        if lead > 0.0 {
-                            last.text.push(' ');
+                        if let Some(Placed::Text(last)) = line.last_mut() {
+                            if lead > 0.0 {
+                                last.text.push(' ');
+                            }
+                            last.text.push_str(text);
                         }
-                        last.text.push_str(text);
                     } else {
-                        line.push(Seg { x: sx, text: text.clone(), style: *style, href: href.clone() });
+                        line.push(Placed::Text(Seg { x: sx, text: text.clone(), style: *style, href: href.clone() }));
                     }
                     pen += lead + ww;
                     line_ascent = line_ascent.max(font.horizontal_line_metrics(style.size).map(|m| m.ascent).unwrap_or(style.size));
                     gap = gap.max(line_gap(font, style.size));
                 }
+                Item::Image { img, w: iw, h: ih, href, alt, space_before } => {
+                    // Fit the image to the content width, keeping aspect.
+                    let (mut bw, mut bh) = (*iw as f32, *ih as f32);
+                    if bw > w as f32 {
+                        bh *= w as f32 / bw;
+                        bw = w as f32;
+                    }
+                    let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
+                    let sw = if *space_before { space_width(font, BASE_FONT_PX) } else { 0.0 };
+                    if !line.is_empty() && pen + sw + bw as f32 > right {
+                        y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
+                        pen = x as f32;
+                        line_ascent = 0.0;
+                        gap = 0.0;
+                    }
+                    let lead = if line.is_empty() { 0.0 } else { sw };
+                    let sx = (pen + lead) as i32;
+                    line.push(Placed::Image {
+                        x: sx,
+                        w: bw,
+                        h: bh,
+                        img: img.clone(),
+                        href: href.clone(),
+                        alt: alt.clone(),
+                    });
+                    pen += lead + bw as f32;
+                    line_ascent = line_ascent.max(bh as f32);
+                    gap = gap.max(bh as f32 + 2.0);
+                }
             }
         }
         if !line.is_empty() {
-            y = emit_line(font, &mut line, y, line_ascent, gap, ops, links);
+            y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
         }
         y
     }
+}
+
+/// One item placed on the current line: a same-style text run or an image.
+enum Placed {
+    Text(Seg),
+    Image { x: i32, w: i32, h: i32, img: Option<Rc<Image>>, href: Option<String>, alt: String },
 }
 
 /// One same-style segment placed on the current line.
@@ -1052,13 +1075,14 @@ struct Seg {
     href: Option<String>,
 }
 
-/// Emit one completed line's segments at a shared baseline; return the next
-/// line's top y. Each run's `y` is set so `top + ascent(size) == baseline`,
-/// which is exactly how the rasteriser reconstructs the baseline → mixed sizes
-/// on a line align.
+/// Emit one completed line at a shared baseline; return the next line's top y.
+/// Text runs sit on the baseline (`top + ascent == baseline`); images are
+/// bottom-aligned to the baseline. Images in a link get a `LinkRect` too.
+#[allow(clippy::too_many_arguments)]
 fn emit_line(
     font: &Font,
-    line: &mut Vec<Seg>,
+    theme: &Theme,
+    line: &mut Vec<Placed>,
     y: i32,
     line_ascent: f32,
     gap: f32,
@@ -1068,21 +1092,51 @@ fn emit_line(
     let line_top = y;
     let baseline = y + line_ascent as i32;
     let box_h = ceil_i32(gap).max(1);
-    for seg in line.drain(..) {
-        let top = baseline - ascent_i(font, seg.style.size);
-        if let Some(h) = &seg.href {
-            let sw = measure(font, &seg.text, seg.style.size);
-            links.push(LinkRect { x: seg.x, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
+    for placed in line.drain(..) {
+        match placed {
+            Placed::Text(seg) => {
+                let top = baseline - ascent_i(font, seg.style.size);
+                if let Some(h) = &seg.href {
+                    let sw = measure(font, &seg.text, seg.style.size);
+                    links.push(LinkRect { x: seg.x, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
+                }
+                ops.push(DrawOp::Text {
+                    x: seg.x,
+                    y: top,
+                    size: seg.style.size,
+                    color: seg.style.color,
+                    bold: seg.style.bold,
+                    italic: seg.style.italic,
+                    text: seg.text,
+                });
+            }
+            Placed::Image { x, w, h, img, href, alt } => {
+                let top = baseline - h; // image bottom sits on the baseline
+                if let Some(href) = &href {
+                    links.push(LinkRect { x, y: top, w, h, href: href.clone() });
+                }
+                if let Some(img) = img {
+                    ops.push(DrawOp::Image { x, y: top, w, h, img });
+                } else {
+                    let c = theme.rule;
+                    ops.push(DrawOp::Rect { x, y: top, w, h: 1, color: c });
+                    ops.push(DrawOp::Rect { x, y: top + h - 1, w, h: 1, color: c });
+                    ops.push(DrawOp::Rect { x, y: top, w: 1, h, color: c });
+                    ops.push(DrawOp::Rect { x: x + w - 1, y: top, w: 1, h, color: c });
+                    if !alt.is_empty() && w > 24 {
+                        ops.push(DrawOp::Text {
+                            x: x + 4,
+                            y: top + 4,
+                            size: 13.0,
+                            color: theme.muted,
+                            bold: false,
+                            italic: false,
+                            text: alt,
+                        });
+                    }
+                }
+            }
         }
-        ops.push(DrawOp::Text {
-            x: seg.x,
-            y: top,
-            size: seg.style.size,
-            color: seg.style.color,
-            bold: seg.style.bold,
-            italic: seg.style.italic,
-            text: seg.text,
-        });
     }
     line_top + box_h
 }
@@ -1275,6 +1329,22 @@ mod tests {
         let rects = l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
         assert!(rects >= 4, "placeholder draws a 4-edge border");
         assert!(l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Foto")));
+    }
+
+    #[test]
+    fn img_in_a_link_flows_inline_and_is_clickable() {
+        // Wikipedia's pattern: <a><img></a> among text. The image must flow on
+        // the same line as the surrounding words AND be a clickable link.
+        let l = lay(
+            "<body><p>vor <a href=\"/x\"><img src=\"/i.png\" alt=\"pic\" width=\"40\" height=\"30\"></a> nach</p></body>",
+            2000,
+        );
+        let t = texts(&l);
+        let vor = *t.iter().find(|(_, _, s)| *s == "vor").expect("vor");
+        let nach = *t.iter().find(|(_, _, s)| *s == "nach").expect("nach");
+        assert_eq!(vor.1, nach.1, "text before + after the inline image share a line");
+        assert!(nach.0 > vor.0 + 40, "the image took horizontal space between them");
+        assert!(l.links.iter().any(|lk| lk.href == "/x"), "the linked image is clickable");
     }
 
     #[test]
