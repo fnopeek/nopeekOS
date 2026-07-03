@@ -9,6 +9,8 @@
 #   build                Compile kernel + create bootable ISO
 #   qemu                 Build + run in QEMU (KVM, host CPU, serial)
 #   qemu-gui             Build + run in QEMU with framebuffer GUI
+#   boot / qemu-gui-boot Boot the EXISTING installed disk (NO rebuild, GUI)
+#   qemu-boot            Same, serial only
 #   debug                Build + run in QEMU with GDB stub on :1234
 #
 # Cross-vendor testing (TCG, slow but vendor-correct):
@@ -362,6 +364,25 @@ ensure_disk_img() {
     fi
 }
 
+# Guard for the boot-only targets: refuse to launch on a missing or empty
+# (never-installed) disk — otherwise QEMU boots a blank 16G sparse image and
+# just sits at the UEFI shell, which looks like a hang.
+require_installed_disk() {
+    if [ ! -f "$DISK_IMG" ]; then
+        err "No disk image at $DISK_IMG — install first: ./build.sh qemu-installer-gui"
+        exit 1
+    fi
+    # A freshly-truncated sparse image allocates ~0 blocks; an installed one
+    # has the OS + npkFS written. `du` reports actual allocation, not the
+    # 16G apparent size.
+    local used_kb
+    used_kb=$(du -k "$DISK_IMG" 2>/dev/null | cut -f1)
+    if [ "${used_kb:-0}" -lt 1024 ]; then
+        err "Disk image is empty (no OS installed) — run: ./build.sh qemu-installer-gui"
+        exit 1
+    fi
+}
+
 # qemu-installer modes wipe the disk first — the installer's job is
 # to lay down a fresh npkFS, and a stale disk would just trigger the
 # "already set up, log in" path on second boot.
@@ -669,6 +690,8 @@ Common:
   build                Compile kernel.efi (PE32+ UEFI Application)
   qemu                 Build + run in QEMU (KVM, host CPU, serial)
   qemu-gui             Build + run in QEMU with framebuffer GUI
+  boot / qemu-gui-boot Boot the EXISTING installed disk, NO rebuild (GUI)
+  qemu-boot            Same, serial only
   debug                Build + run in QEMU with GDB stub on :1234
 
 Cross-vendor testing (TCG, slow but vendor-correct):
@@ -719,6 +742,22 @@ case "${1:-}" in
         check_deps
         build
         run_qemu_generic gui kvm normal
+        ;;
+    # Boot the EXISTING installed disk without rebuilding the kernel.
+    # Normal-mode boot runs straight from disk.img's ESP — the fresh
+    # kernel.efi is only used by the installer — so `build` is wasted work
+    # when you just want to boot what's already installed. Use these for a
+    # fast relaunch; use OTA `update` inside the OS (or a fresh installer
+    # run) to change the installed kernel.
+    qemu-gui-boot|boot)
+        check_deps
+        require_installed_disk
+        run_qemu_generic gui kvm normal
+        ;;
+    qemu-boot)
+        check_deps
+        require_installed_disk
+        run_qemu_generic serial kvm normal
         ;;
     qemu-intel)
         check_deps
