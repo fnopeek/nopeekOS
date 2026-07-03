@@ -1267,6 +1267,39 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
+        // No loop window is focused (desktop, or a non-terminal like the
+        // dock/a widget has focus): there is no terminal session to drive.
+        // Without this, keys typed on the bare desktop were read into a
+        // stale terminal session and EXECUTED (the output only showed on
+        // serial). Idle here instead — shade keybinds (Mod+Enter to open a
+        // loop, Mod+D launcher) + mouse still work; plain keys are dropped.
+        // Guard only applies in shade mode; serial-only mode has no windows.
+        if crate::shade::is_active() && !crate::shade::focused_is_terminal() {
+            crate::shade::poll_render();
+            crate::net::poll();
+            crate::microvm::vm_poll_slice();
+            while let Some(evt) = crate::xhci::poll_mouse() {
+                crate::shade::handle_mouse(&evt);
+            }
+            if crate::shade::take_deferred_render() {
+                crate::shade::render_frame();
+            }
+            if let Some(action) = crate::shade::input::poll_action() {
+                crate::shade::handle_action(action);
+            }
+            while let Some(key) = crate::keyboard::read_key() {
+                // Keybinds (Mod+…) still fire; plain keys have no session to
+                // land in on the desktop, so they're discarded.
+                if crate::shade::input::try_keybind(key) {
+                    if let Some(action) = crate::shade::input::poll_action() {
+                        crate::shade::handle_action(action);
+                    }
+                }
+            }
+            core0_idle_tick();
+            continue;
+        }
+
         // Get session for active terminal (create if needed)
         let term = crate::shade::terminal::active_idx();
         if session_mut(term).is_none() {
@@ -1293,7 +1326,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
             let p = alloc::format!("{}> ", path);
+            // Route the prompt (and, below, command output) to THIS terminal
+            // even though the default sink is the primary loop — so prompts +
+            // results land in the loop the user is typing in, while background
+            // debug still goes to the primary. See terminal::write.
+            crate::shade::terminal::set_output_redirect(session.terminal_idx);
             kprint!("{}", p);
+            crate::shade::terminal::clear_output_redirect();
             session.prompt_len = p.len();
             if crate::shade::is_active() {
                 crate::shade::terminal::set_prompt_len(session.prompt_len);
@@ -1362,7 +1401,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
+        // Core-0 intent output goes to the loop it was typed in (not the
+        // primary debug sink). Synchronous, so the redirect is safe to clear
+        // right after — no idle in between where background debug would leak.
+        crate::shade::terminal::set_output_redirect(term);
         dispatch_intent(input, vault, session_id);
+        crate::shade::terminal::clear_output_redirect();
 
         if crate::shade::is_active() {
             crate::shade::render_frame();

@@ -140,8 +140,13 @@ fn term_mut(idx: usize) -> Option<&'static mut TerminalBuffer> {
     if ptr.is_null() { None } else { unsafe { Some(&mut *ptr) } }
 }
 
-/// Currently active terminal index (receives kprintln output).
+/// Currently active (focused) terminal index — drives rendering + is the
+/// interactive I/O target.
 static ACTIVE_IDX: AtomicU8 = AtomicU8::new(0);
+/// The "primary" terminal — the first loop opened. Spontaneous kernel debug
+/// (kprintln with no per-core output redirect) lands here so it stays put
+/// instead of chasing window focus across multiple loops. 255 = none open.
+static PRIMARY_IDX: AtomicU8 = AtomicU8::new(255);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set when new content is written (cleared after render).
 static DIRTY: AtomicBool = AtomicBool::new(false);
@@ -255,6 +260,9 @@ pub fn allocate() -> Option<u8> {
             let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut TerminalBuffer;
             if ptr.is_null() { return None; }
             TERM_PTRS[i].store(ptr, Ordering::Release);
+            // First loop opened → it becomes the primary debug sink.
+            let _ = PRIMARY_IDX.compare_exchange(
+                255, i as u8, Ordering::AcqRel, Ordering::Relaxed);
             return Some(i as u8);
         }
     }
@@ -268,6 +276,18 @@ pub fn free(idx: u8) {
         // SAFETY: ptr was created by alloc_zeroed in allocate()
         let layout = alloc::alloc::Layout::new::<TerminalBuffer>();
         unsafe { alloc::alloc::dealloc(ptr as *mut u8, layout); }
+    }
+    // If the primary just closed, hand primary to the lowest surviving loop
+    // (the next-oldest by index), or 255 when none remain.
+    if PRIMARY_IDX.load(Ordering::Acquire) == idx {
+        let mut new_primary = 255u8;
+        for i in 0..MAX_SLOTS {
+            if !TERM_PTRS[i].load(Ordering::Acquire).is_null() {
+                new_primary = i as u8;
+                break;
+            }
+        }
+        PRIMARY_IDX.store(new_primary, Ordering::Release);
     }
 }
 
@@ -349,8 +369,18 @@ pub fn write(s: &str) {
         }
     }
 
-    // Default: write to active terminal (Core 0 path)
-    let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
+    // Default (Core 0, no per-core redirect): the PRIMARY terminal — the
+    // first loop — so background/system debug stays put instead of following
+    // window focus. The interactive run loop brackets its prompt + command
+    // output with a Core-0 redirect to the focused terminal, so those still
+    // land where the user is typing. Falls back to the active terminal if no
+    // primary is set (shouldn't happen once a loop exists).
+    let primary = PRIMARY_IDX.load(Ordering::Acquire);
+    let idx = if primary != 255 {
+        primary as usize
+    } else {
+        ACTIVE_IDX.load(Ordering::Acquire) as usize
+    };
     if let Some(t) = term_mut(idx) {
         t.write_str(s);
         DIRTY.store(true, Ordering::Release);
