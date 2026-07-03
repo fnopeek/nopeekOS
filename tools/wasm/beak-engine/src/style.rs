@@ -13,6 +13,7 @@
 //! Colours resolve against the active `Theme` so pages follow light/dark like
 //! the rest of the UI (until pages set their own `color`, which we honor).
 
+use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::Element;
 use crate::layout::{Rgb, Theme};
 
@@ -69,9 +70,17 @@ impl ComputedStyle {
 
 pub const BASE_FONT_PX: f32 = 16.0;
 
-/// Resolve an element's computed style: inherit from `parent`, apply the UA
-/// rule for its tag, then any inline `style="…"`.
-pub fn resolve(el: &Element, parent: &ComputedStyle, theme: &Theme) -> ComputedStyle {
+/// Resolve an element's computed style by the cascade: inherit from `parent`,
+/// apply the UA rule for its tag, then matching author `<style>` rules (by
+/// specificity + order), then any inline `style="…"` (highest). `ancestors` is
+/// the root→…→parent chain, for descendant/child selector matching.
+pub fn resolve(
+    el: &Element,
+    parent: &ComputedStyle,
+    theme: &Theme,
+    sheet: &Stylesheet,
+    ancestors: &[ElemInfo],
+) -> ComputedStyle {
     // Start from the inherited slice; reset the non-inherited slice to initial.
     let mut s = ComputedStyle {
         font_px: parent.font_px,
@@ -89,6 +98,19 @@ pub fn resolve(el: &Element, parent: &ComputedStyle, theme: &Theme) -> ComputedS
         is_break: false,
     };
     ua_rule(&el.tag, parent, theme, &mut s);
+
+    // Author `<style>` rules, applied low→high specificity (ties: doc order).
+    if !sheet.is_empty() {
+        let info = ElemInfo::of(el);
+        let mut matched = sheet.matched(&info, ancestors);
+        matched.sort_by_key(|(spec, order, _)| (*spec, *order));
+        for (_, _, decls) in matched {
+            for (p, v) in decls {
+                apply_one(p, v, theme, &mut s);
+            }
+        }
+    }
+
     if let Some(decls) = el.attr("style") {
         apply_declarations(decls, theme, &mut s);
     }
@@ -319,23 +341,21 @@ fn parse_color(v: &str, _theme: &Theme) -> Option<Rgb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::css;
     use crate::dom;
 
-    fn only_el(html: &str) -> dom::Dom {
-        dom::parse(html)
+    fn first_el(dom: &dom::Dom) -> &Element {
+        match &dom.body().children[0] {
+            dom::Node::Element(e) => e,
+            _ => panic!("expected element"),
+        }
     }
 
     #[test]
     fn ua_sheet_gives_headings_size_weight_and_colour() {
-        let dom = only_el("<body><h1>x</h1></body>");
+        let dom = dom::parse("<body><h1>x</h1></body>");
         let theme = Theme::DARK;
-        let root = ComputedStyle::root(&theme);
-        let body = dom.body();
-        let h1 = match &body.children[0] {
-            dom::Node::Element(e) => e,
-            _ => panic!(),
-        };
-        let st = resolve(h1, &root, &theme);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[]);
         assert_eq!(st.display, Display::Block);
         assert!(st.bold);
         assert!(st.font_px > BASE_FONT_PX * 1.5);
@@ -344,17 +364,34 @@ mod tests {
 
     #[test]
     fn inline_style_attribute_is_parsed() {
-        let dom = only_el("<body><p style=\"color:#ff0000; font-weight:bold; font-size:20px\">x</p></body>");
+        let dom = dom::parse("<body><p style=\"color:#ff0000; font-weight:bold; font-size:20px\">x</p></body>");
         let theme = Theme::DARK;
-        let root = ComputedStyle::root(&theme);
-        let p = match &dom.body().children[0] {
-            dom::Node::Element(e) => e,
-            _ => panic!(),
-        };
-        let st = resolve(p, &root, &theme);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[]);
         assert_eq!(st.color, Rgb(255, 0, 0));
         assert!(st.bold);
         assert_eq!(st.font_px, 20.0);
+    }
+
+    #[test]
+    fn author_stylesheet_applies_and_inline_wins() {
+        let dom = dom::parse(
+            "<body><p class=\"lead\" style=\"color:#00ff00\">x</p><p class=\"lead\">y</p></body>",
+        );
+        let theme = Theme::DARK;
+        let sheet = css::parse(".lead { color: #ff0000; font-weight: bold }");
+        let root = ComputedStyle::root(&theme);
+        // 1st <p>: author sets red+bold, inline overrides colour to green.
+        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[]);
+        assert_eq!(a.color, Rgb(0, 255, 0));
+        assert!(a.bold);
+        // 2nd <p>: author red+bold, no inline.
+        let p2 = match &dom.body().children[1] {
+            dom::Node::Element(e) => e,
+            _ => panic!(),
+        };
+        let b = resolve(p2, &root, &theme, &sheet, &[]);
+        assert_eq!(b.color, Rgb(255, 0, 0));
+        assert!(b.bold);
     }
 
     #[test]
@@ -365,7 +402,8 @@ mod tests {
             let html = alloc::format!("<{tag}>x</{tag}>");
             let dom = dom::parse(&html);
             if let dom::Node::Element(e) = &dom.root.children[0] {
-                assert_eq!(resolve(e, &root, &theme).display, Display::None, "{tag}");
+                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[]);
+                assert_eq!(st.display, Display::None, "{tag}");
             }
         }
     }

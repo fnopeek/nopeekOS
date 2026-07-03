@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+pub mod css;
 pub mod dom;
 pub mod layout;
 pub mod raster;
@@ -33,7 +34,14 @@ pub use raster::Engine;
 mod demo {
     use crate::Engine;
 
-    const SAMPLE: &str = "<!DOCTYPE html><html><head><title>beak — CSS + inline flow</title></head><body>\
+    const SAMPLE: &str = "<!DOCTYPE html><html><head><title>beak — CSS + inline flow</title>\
+<style>\
+  h2 { color: #4fd1c5 }\
+  .note { color: #e0662c; font-weight: bold }\
+  .box a { color: #f6c453 }\
+  blockquote { color: #9aa0a6; font-style: italic }\
+</style>\
+</head><body>\
 <h1>Ein nativer Browser für <i>nopeekOS</i></h1>\
 <p>Dieser Absatz wird von der eigenen Layout-Engine umgebrochen — die Wörter fließen \
 auf die Content-Breite, und <b>fetter</b> wie <i>kursiver</i> Text sowie \
@@ -44,16 +52,19 @@ im Satz statt jeweils auf eigener Zeile. Kein Linux, kein microVM, keine fremde 
 <li>echter DOM-Baum statt flacher Blöcke</li>\
 <li>UA-Stylesheet als Daten (Kaskade + Vererbung)</li>\
 <li>Inline-Flow mit gemischten Stilen auf einer Zeile</li>\
-<li><code>style=\"…\"</code> wird als echtes CSS geparst</li>\
+<li><code>&lt;style&gt;</code>-Regeln (Selektoren + Spezifität) und <code>style=\"…\"</code></li>\
 </ul>\
-<p style=\"color:#e0662c\">Dieser Absatz setzt seine Farbe per Inline-CSS \
-(<code>color:#e0662c</code>) — geparst, nicht geraten.</p>\
+<p class=\"note\">Dieser Absatz trägt <code>class=\"note\"</code> — Farbe und Fettung kommen \
+aus einer <b>Author-CSS-Regel</b> im <code>&lt;style&gt;</code>-Block, nicht aus dem Markup.</p>\
+<div class=\"box\">In dieser <code>.box</code> ist der \
+<a href=\"https://de.wikipedia.org/\">Link</a> per Descendant-Selektor \
+(<code>.box a</code>) anders eingefärbt als sonst.</div>\
 <blockquote>Standard-first: gemessen gegen die Strichliste, nicht nach Augenmaß.</blockquote>\
 <pre>fn main() {\n    println!(\"pre erhält Whitespace + Zeilen\");\n}</pre>\
 <hr>\
 <h2>Nächste Schritte</h2>\
-<p>Author-CSS: <code>&lt;style&gt;</code>-Regeln mit Selektoren + Spezifität, dann \
-Flexbox/Grid. Die Engine bleibt portabel — dieselbe Rechnerei läuft auf dem Desktop.</p>\
+<p>Tabellen-Layout und Flexbox/Grid — der Reihe nach. Die Engine bleibt portabel: \
+dieselbe Rechnerei läuft auf dem Desktop.</p>\
 </body></html>";
 
     fn to_bmp(bgra: &[u8], w: u32, h: u32) -> alloc::vec::Vec<u8> {

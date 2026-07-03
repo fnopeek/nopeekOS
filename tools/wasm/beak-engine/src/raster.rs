@@ -50,10 +50,12 @@ impl Engine {
         self.theme = theme;
     }
 
-    /// Parse + lay out a document at `width`. Scroll-independent.
+    /// Parse + lay out a document at `width`. Scroll-independent. Collects the
+    /// page's `<style>` blocks into the author stylesheet used by the cascade.
     pub fn layout(&self, html: &str, width: u32) -> Layout {
         let dom = crate::dom::parse(html);
-        crate::layout::layout(&self.font, &dom, width, &self.theme)
+        let sheet = crate::css::collect(&dom);
+        crate::layout::layout(&self.font, &dom, &sheet, width, &self.theme)
     }
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
