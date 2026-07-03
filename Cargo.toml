@@ -16,6 +16,8 @@ exclude = [
     "tools/wasm/iris",
     "tools/wasm/snap",
     "tools/wasm/volume",
+    "tools/wasm/beak",
+    "tools/wasm/beak-engine",
     "tools/wasm/testdisk",
     "tools/wasm/aml/core",
     "tools/wasm/aml/harness",

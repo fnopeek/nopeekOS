@@ -156,6 +156,11 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("snap.wasm"),
         version: Some(include_str!("snap.version")),
     },
+    BundledAsset {
+        fs_path: "sys/wasm/beak",
+        bytes:   include_bytes!("beak.wasm"),
+        version: Some(include_str!("beak.version")),
+    },
 
     // ── MicroVM userspace bundle (LibreWolf, ~261 MB) ─────────────
     // Optional: only baked in when built with the `bundle-userspace`

@@ -89,6 +89,18 @@ pub mod caps {
     /// `npk_wifi_send_cmd` / `npk_wifi_poll_event` — WiFi-class control channel
     /// manager side (the wifid supplicant). See WIFI_CLASS_ABI.md.
     pub const NETCTL: u8 = 0x80;
+
+    /// Second `.npk.caps` byte — the first byte's 8 bits above are full.
+    /// An app needing one of these ships a **2-byte** section:
+    /// ```ignore
+    /// #[unsafe(link_section = ".npk.caps")]
+    /// #[used]
+    /// static NPK_CAPS: [u8; 2] = [caps::RENDER | caps::CANVAS, caps::ext::NET];
+    /// ```
+    pub mod ext {
+        /// `npk_http_request` — outbound HTTPS fetch (the native browser, beak).
+        pub const NET: u8 = 0x01;
+    }
 }
 
 // Re-export the core ABI types at the crate root for ergonomic use.
