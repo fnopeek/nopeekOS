@@ -60,6 +60,12 @@ aus einer <b>Author-CSS-Regel</b> im <code>&lt;style&gt;</code>-Block, nicht aus
 <a href=\"https://de.wikipedia.org/\">Link</a> per Descendant-Selektor \
 (<code>.box a</code>) anders eingefärbt als sonst.</div>\
 <blockquote>Standard-first: gemessen gegen die Strichliste, nicht nach Augenmaß.</blockquote>\
+<table>\
+<caption>Beispiel-Infobox (Tabellen-Layout)</caption>\
+<tr><th>Land</th><td>Schweiz</td></tr>\
+<tr><th>Kanton</th><td>Nidwalden</td></tr>\
+<tr><th>Fläche</th><td>17,11 km² — Wörter in einer Zelle brechen bei Bedarf um</td></tr>\
+</table>\
 <pre>fn main() {\n    println!(\"pre erhält Whitespace + Zeilen\");\n}</pre>\
 <hr>\
 <h2>Nächste Schritte</h2>\

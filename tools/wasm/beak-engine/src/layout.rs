@@ -15,6 +15,7 @@
 //! draws the visible slice at any offset. Flex/Grid/floats/position come next.
 
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use fontdue::Font;
 
@@ -163,7 +164,7 @@ impl Ctx<'_> {
                             self.collect_inline(el, &st, None, &mut inline);
                             self.path.pop();
                         }
-                        Display::Block | Display::ListItem => {
+                        Display::Block | Display::ListItem | Display::Table => {
                             if !inline.is_empty() {
                                 y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
                                 inline = Inline::new();
@@ -172,7 +173,11 @@ impl Ctx<'_> {
                             let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
                             y += top as i32;
                             self.path.push(ElemInfo::of(el));
-                            y = self.layout_block(el, &st, x, w, y);
+                            y = if st.display == Display::Table {
+                                self.layout_table(el, &st, x, w, y)
+                            } else {
+                                self.layout_block(el, &st, x, w, y)
+                            };
                             self.path.pop();
                             carry = st.margin_bottom;
                             had_block = true;
@@ -211,6 +216,118 @@ impl Ctx<'_> {
         }
 
         self.layout_children(&el.children, st, content_x, content_w, y)
+    }
+
+    /// Simplified table layout: rows stack; cells sit in auto-width columns.
+    /// Column widths come from cell content (preferred, clamped to fit the
+    /// available width, never below the longest word). No colspan/rowspan/
+    /// border-collapse yet — enough to make infoboxes + data tables readable.
+    fn layout_table(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        const PADC: i32 = 6; // per-cell padding
+
+        // <caption> renders as a block above the grid.
+        let mut y = y0;
+        for c in &el.children {
+            if let Node::Element(e) = c {
+                if e.tag == "caption" {
+                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path);
+                    self.path.push(ElemInfo::of(e));
+                    y = self.layout_children(&e.children, &cs, x, w, y);
+                    self.path.pop();
+                }
+            }
+        }
+
+        let mut rows: Vec<Vec<&Element>> = Vec::new();
+        collect_rows(el, &mut rows);
+        rows.retain(|r| !r.is_empty());
+        let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).min(64);
+        if ncols == 0 {
+            return y;
+        }
+
+        // Intrinsic widths per column: preferred (whole content on one line)
+        // and minimum (longest single word — never wrap inside a word).
+        let mut pref = vec![0.0f32; ncols];
+        let mut minw = vec![0.0f32; ncols];
+        for row in &rows {
+            for (c, cell) in row.iter().enumerate().take(ncols) {
+                let (p, m) = self.cell_intrinsic(cell);
+                pref[c] = pref[c].max(p);
+                minw[c] = minw[c].max(m);
+            }
+        }
+
+        // Resolve column content widths to fit `avail` (excluding cell padding).
+        let avail = (w - 2 * PADC * ncols as i32).max(ncols as i32 * 10) as f32;
+        let total: f32 = pref.iter().sum();
+        let mut colw = pref.clone();
+        if total > avail && total > 0.0 {
+            for c in 0..ncols {
+                colw[c] = (avail * pref[c] / total).max(minw[c]);
+            }
+        }
+
+        // Lay each row: cells side by side, row height = tallest cell.
+        for row in &rows {
+            let mut cx = x;
+            let mut row_h = 0i32;
+            for (c, cell) in row.iter().enumerate().take(ncols) {
+                let cw = colw[c] as i32;
+                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path);
+                if cs.display == Display::None {
+                    cx += cw + 2 * PADC;
+                    continue;
+                }
+                self.path.push(ElemInfo::of(cell));
+                let bottom = self.layout_children(&cell.children, &cs, cx + PADC, cw, y + PADC);
+                self.path.pop();
+                row_h = row_h.max(bottom - (y + PADC));
+                cx += cw + 2 * PADC;
+            }
+            let row_bottom = y + row_h + 2 * PADC;
+            // subtle row separator
+            self.ops.push(DrawOp::Rect { x, y: row_bottom, w: (cx - x).max(1), h: 1, color: self.theme.rule });
+            y = row_bottom + 1;
+        }
+        y
+    }
+
+    /// (preferred, minimum) content width of a cell: preferred = all text on one
+    /// line, minimum = the widest single word. Approximated over concatenated
+    /// text (ignores nested font sizes) — fine for the auto-width heuristic.
+    fn cell_intrinsic(&self, cell: &Element) -> (f32, f32) {
+        let mut text = String::new();
+        gather_text(cell, &mut text);
+        let pref = measure(self.font, text.trim(), BASE_FONT_PX);
+        let min = text
+            .split_whitespace()
+            .map(|wd| measure(self.font, wd, BASE_FONT_PX))
+            .fold(0.0f32, f32::max);
+        (pref, min)
+    }
+}
+
+/// Flatten a table's rows (through `thead`/`tbody`/`tfoot`) into lists of cells.
+fn collect_rows<'a>(el: &'a Element, rows: &mut Vec<Vec<&'a Element>>) {
+    for c in &el.children {
+        if let Node::Element(e) = c {
+            match e.tag.as_str() {
+                "tr" => {
+                    let cells = e
+                        .children
+                        .iter()
+                        .filter_map(|cc| match cc {
+                            Node::Element(ce) if ce.tag == "td" || ce.tag == "th" => Some(ce),
+                            _ => None,
+                        })
+                        .collect();
+                    rows.push(cells);
+                }
+                "thead" | "tbody" | "tfoot" => collect_rows(e, rows),
+                _ => {}
+            }
+        }
     }
 }
 
@@ -565,6 +682,29 @@ mod tests {
         assert_eq!(color_of("red"), Some(Rgb(255, 0, 0)));
         assert_eq!(color_of("blue"), Some(Rgb(0, 0, 255))); // #id wins over p
         assert_eq!(color_of("green"), Some(Rgb(0, 255, 0))); // .box a matched
+    }
+
+    #[test]
+    fn table_lays_cells_in_columns_and_stacks_rows() {
+        let l = lay(
+            "<body><table>\
+             <tr><th>Land</th><td>Schweiz</td></tr>\
+             <tr><th>Kanton</th><td>Nidwalden</td></tr>\
+             </table></body>",
+            800,
+        );
+        let t = texts(&l);
+        let cell = |s: &str| *t.iter().find(|(_, _, txt)| *txt == s).expect(s);
+        let land = cell("Land");
+        let schweiz = cell("Schweiz");
+        let kanton = cell("Kanton");
+        assert_eq!(land.1, schweiz.1, "cells of a row share a y (same row)");
+        assert!(schweiz.0 > land.0, "2nd column sits to the right of the 1st");
+        assert!(kanton.1 > land.1, "row 2 is below row 1");
+        assert!(
+            l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, bold: true, .. } if text == "Land")),
+            "th renders bold"
+        );
     }
 
     #[test]
