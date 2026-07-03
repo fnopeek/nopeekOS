@@ -1458,7 +1458,17 @@ impl Compositor {
                     let fb_w = info.width;
                     let fb_h = info.height;
                     let x1 = (cx + scene.width).min(fb_w);
-                    let y1 = (cy + scene.height).min(fb_h);
+                    // Defensive: a scene caught mid-resize (e.g. the browser's
+                    // Canvas re-sizing) can report a width/height larger than
+                    // its actual pixel buffer. Clamp the blit to the rows the
+                    // buffer really holds so a rounded-corner index can never
+                    // run past `scene.pixels` — a kernel OOB there halts the OS.
+                    let usable_h = if scene.width > 0 {
+                        (scene.pixels.len() / scene.width as usize) as u32
+                    } else {
+                        0
+                    };
+                    let y1 = (cy + scene.height.min(usable_h)).min(fb_h);
                     let cw_local = x1.saturating_sub(cx);
                     let ch_local = y1.saturating_sub(cy);
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);

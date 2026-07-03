@@ -7,7 +7,9 @@
 //! adapter (into a window framebuffer), see BROWSER.md §10.
 
 use alloc::vec::Vec;
-use fontdue::{Font, FontSettings};
+use core::cell::RefCell;
+use fontdue::{Font, FontSettings, Metrics};
+use hashbrown::HashMap;
 
 use crate::layout::{DrawOp, Layout, Rgb, BG};
 use crate::Block;
@@ -16,6 +18,10 @@ static FONT_BYTES: &[u8] = include_bytes!("../assets/inter.ttf");
 
 pub struct Engine {
     font: Font,
+    /// Rasterised-glyph cache keyed by (char, size-bits). fontdue's rasterise
+    /// is not free; without this every glyph is re-rasterised every frame,
+    /// which makes scrolling lag. Bounded by the glyph set the page uses.
+    glyphs: RefCell<HashMap<(u32, u32), (Metrics, Vec<u8>)>>,
 }
 
 impl Default for Engine {
@@ -30,7 +36,10 @@ impl Engine {
     pub fn new() -> Engine {
         let font = Font::from_bytes(FONT_BYTES, FontSettings::default())
             .expect("embedded inter.ttf is a valid TrueType font");
-        Engine { font }
+        Engine {
+            font,
+            glyphs: RefCell::new(HashMap::new()),
+        }
     }
 
     /// Parse + lay out a document at `width`. Scroll-independent.
@@ -69,7 +78,13 @@ impl Engine {
         let baseline = y + ascent as i32;
         let mut pen = x as f32;
         for ch in text.chars() {
-            let (m, cov) = self.font.rasterize(ch, size);
+            let key = (ch as u32, size.to_bits());
+            if !self.glyphs.borrow().contains_key(&key) {
+                let g = self.font.rasterize(ch, size);
+                self.glyphs.borrow_mut().insert(key, g);
+            }
+            let cache = self.glyphs.borrow();
+            let (m, cov) = cache.get(&key).unwrap();
             let gx0 = pen as i32 + m.xmin;
             let gy0 = baseline - m.ymin - m.height as i32;
             for gy in 0..m.height {
