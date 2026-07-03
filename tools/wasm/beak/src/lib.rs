@@ -94,6 +94,7 @@ const ACT_MENU_DISMISS: u32 = 5_500;
 // Menu items
 const ACT_FILE_CLOSE: u32 = 6_000;
 const ACT_VIEW_RELOAD: u32 = 6_020;
+const ACT_VIEW_TOGGLE_CSS: u32 = 6_021;
 const ACT_HELP_ABOUT: u32 = 6_100;
 
 // Menu-label anchor NodeIds (for the dropdown Popover)
@@ -124,6 +125,12 @@ static mut URL_LEN: usize = 0;
 const HTML_CAP: usize = 3 * 1024 * 1024;
 static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
 static mut HTML_LEN: usize = 0;
+
+// Concatenated bytes of the page's external <link rel=stylesheet> files.
+const CSS_CAP: usize = 2 * 1024 * 1024;
+const MAX_CSS_LINKS: usize = 16;
+static mut CSS_BUF: [u8; CSS_CAP] = [0; CSS_CAP];
+static mut CSS_LEN: usize = 0;
 
 const PAYLOAD_CAP: usize = URL_CAP;
 static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
@@ -159,6 +166,32 @@ fn html_str() -> &'static str {
         core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
     }
 }
+fn css_str() -> &'static str {
+    unsafe {
+        let len = core::ptr::addr_of!(CSS_LEN).read();
+        let ptr = core::ptr::addr_of!(CSS_BUF) as *const u8;
+        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
+    }
+}
+
+// Reader-mode toggle: apply the site's own (external + <style>) CSS, or render
+// with just our UA sheet (BROWSER.md §9.7 — never worse than clean content).
+static mut USE_SITE_CSS: bool = true;
+fn use_site_css() -> bool {
+    unsafe { core::ptr::addr_of!(USE_SITE_CSS).read() }
+}
+fn toggle_site_css() {
+    unsafe { core::ptr::addr_of_mut!(USE_SITE_CSS).write(!use_site_css()) };
+}
+/// Lay out the current page honoring the reader-mode toggle: full site CSS
+/// (external `<link>` + inline `<style>`) when on, UA-only when off.
+fn do_layout(engine: &Engine, w: u32) -> Layout {
+    if use_site_css() {
+        engine.layout_ext(html_str(), css_str(), w)
+    } else {
+        engine.layout_ua(html_str(), w)
+    }
+}
 fn payload_str(len: usize) -> &'static str {
     unsafe {
         let ptr = core::ptr::addr_of!(PAYLOAD_BUF) as *const u8;
@@ -188,7 +221,8 @@ fn content_gen() -> u32 {
     unsafe { core::ptr::addr_of!(CONTENT_GEN).read() }
 }
 
-/// Fetch `url` into HTML_BUF; resets scroll + marks dirty.
+/// Fetch `url` into HTML_BUF, then its linked stylesheets; resets scroll +
+/// marks dirty.
 fn fetch(url: &str) -> bool {
     let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
     let n = unsafe { npk_http_request(url.as_ptr() as i32, url.len() as i32, dst as i32, HTML_CAP as i32) };
@@ -197,7 +231,38 @@ fn fetch(url: &str) -> bool {
     set_scroll(0);
     mark_dirty();
     bump_content_gen();
+    if len > 0 {
+        fetch_stylesheets(url);
+    } else {
+        unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+    }
     n >= 0
+}
+
+/// Fetch every `<link rel=stylesheet>` of the just-loaded page into CSS_BUF
+/// (concatenated), resolving hrefs against `base`. Bounded by CSS_CAP +
+/// MAX_CSS_LINKS. Each is a blocking sub-resource request (adds latency).
+fn fetch_stylesheets(base: &str) {
+    let links = beak_engine::stylesheet_links(html_str());
+    let base = base.to_string();
+    let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
+    let mut len = 0usize;
+    for (i, href) in links.iter().enumerate() {
+        if i >= MAX_CSS_LINKS || len + 8192 >= CSS_CAP {
+            break;
+        }
+        let abs = resolve(&base, href);
+        let remaining = (CSS_CAP - len - 1) as i32;
+        let n = unsafe {
+            npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst.add(len) as i32, remaining)
+        };
+        if n > 0 {
+            len += n as usize;
+            unsafe { *dst.add(len) = b'\n' };
+            len += 1;
+        }
+    }
+    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(len) };
 }
 
 /// Set the address + fetch, WITHOUT touching history (used by back/forward).
@@ -367,7 +432,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>) {
         Some((_, cw, cg)) => *cw != w || *cg != cur_gen,
     };
     if need_layout {
-        *cache = Some((engine.layout(html_str(), w as u32), w, cur_gen));
+        *cache = Some((do_layout(engine, w as u32), w, cur_gen));
     }
     let layout = &cache.as_ref().unwrap().0;
 
@@ -500,7 +565,16 @@ fn dropdown_for(which: u8) -> Option<(u32, Widget)> {
         )),
         3 => Some((
             NODE_MENU_VIEW,
-            prefab::popover_menu(&[("Neu laden".to_string(), ActionId(ACT_VIEW_RELOAD))], None),
+            prefab::popover_menu(
+                &[
+                    ("Neu laden".to_string(), ActionId(ACT_VIEW_RELOAD)),
+                    (
+                        if use_site_css() { "Site-CSS: an".to_string() } else { "Site-CSS: aus".to_string() },
+                        ActionId(ACT_VIEW_TOGGLE_CSS),
+                    ),
+                ],
+                None,
+            ),
         )),
         4 => Some((
             NODE_MENU_HELP,
@@ -531,6 +605,13 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> boo
                 if !t.is_empty() {
                     fetch_url(&t);
                 }
+                set_open_menu(0);
+                true
+            }
+            ACT_VIEW_TOGGLE_CSS => {
+                toggle_site_css();
+                bump_content_gen(); // force re-layout with/without site CSS
+                mark_dirty();
                 set_open_menu(0);
                 true
             }
@@ -593,10 +674,7 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> boo
                         Some((lay, cw, cg)) if *cw == w && *cg == content_gen() => {
                             lay.hit_test(cx, cy).map(|s| s.to_string())
                         }
-                        _ => engine
-                            .layout(html_str(), w as u32)
-                            .hit_test(cx, cy)
-                            .map(|s| s.to_string()),
+                        _ => do_layout(engine, w as u32).hit_test(cx, cy).map(|s| s.to_string()),
                     };
                     if let Some(href) = href {
                         follow(&href);

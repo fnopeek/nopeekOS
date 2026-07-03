@@ -53,9 +53,24 @@ impl Engine {
     /// Parse + lay out a document at `width`. Scroll-independent. Collects the
     /// page's `<style>` blocks into the author stylesheet used by the cascade.
     pub fn layout(&self, html: &str, width: u32) -> Layout {
+        self.layout_ext(html, "", width)
+    }
+
+    /// Like `layout`, but also applies `external_css` — the concatenated bytes
+    /// of the page's `<link rel=stylesheet>` files, which the shell fetches
+    /// (the engine is host-free) and passes in. External CSS cascades before
+    /// inline `<style>` (document/head order).
+    pub fn layout_ext(&self, html: &str, external_css: &str, width: u32) -> Layout {
         let dom = crate::dom::parse(html);
-        let sheet = crate::css::collect(&dom);
+        let sheet = crate::css::collect_all(&dom, external_css);
         crate::layout::layout(&self.font, &dom, &sheet, width, &self.theme)
+    }
+
+    /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
+    /// (reader mode; BROWSER.md §9.7 "never worse than clean content").
+    pub fn layout_ua(&self, html: &str, width: u32) -> Layout {
+        let dom = crate::dom::parse(html);
+        crate::layout::layout(&self.font, &dom, &crate::css::Stylesheet::empty(), width, &self.theme)
     }
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be

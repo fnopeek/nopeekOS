@@ -505,6 +505,27 @@ mod tests {
     }
 
     #[test]
+    fn extracts_stylesheet_link_hrefs() {
+        let dom = dom::parse(
+            "<head><link rel=stylesheet href=/a.css>\
+             <link rel=\"icon\" href=/x.ico>\
+             <link rel=\"stylesheet\" href='/b.css'></head>",
+        );
+        assert_eq!(stylesheet_links(&dom), alloc::vec!["/a.css".to_string(), "/b.css".to_string()]);
+    }
+
+    #[test]
+    fn external_css_cascades_before_inline_style() {
+        // external (red) parsed first, inline <style> (blue) after → blue wins.
+        let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
+        let ss = collect_all(&dom, "p { color: red }");
+        let mut m = ss.matched(&info("p", None, &[]), &[]);
+        m.sort_by_key(|(spec, order, _)| (*spec, *order));
+        assert_eq!(m.len(), 2, "both external + inline rules match");
+        assert!(m[0].1 < m[1].1, "external rule has earlier document order");
+    }
+
+    #[test]
     fn collects_style_blocks_from_dom() {
         let dom = dom::parse("<html><head><style>p{color:red}</style></head>\
             <body><style>.x{color:blue}</style><p>hi</p></body></html>");

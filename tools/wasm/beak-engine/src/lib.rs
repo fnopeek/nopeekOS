@@ -26,6 +26,13 @@ pub use dom::{parse, title, Dom, Element, Node};
 pub use layout::{Layout, Rgb, Theme};
 pub use raster::Engine;
 
+/// Hrefs of every `<link rel="stylesheet">` in an HTML document. The shell
+/// fetches these as sub-resources and feeds the bytes back via
+/// `Engine::layout_ext` (the engine cannot fetch — it is host-free).
+pub fn stylesheet_links(html: &str) -> alloc::vec::Vec<alloc::string::String> {
+    css::stylesheet_links(&dom::parse(html))
+}
+
 // Host demo: render a representative page to a BMP so the layout + text can be
 // eyeballed on the dev box without booting the OS (BROWSER.md §10).
 // Run: `cargo test --release render_sample_to_bmp -- --nocapture`
