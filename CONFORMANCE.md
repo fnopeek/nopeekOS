@@ -60,7 +60,7 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 | Text wrapping / `white-space` | css-text-3 | 🟡 | `normal` collapse+wrap and `pre` (honor newlines, no wrap); no `nowrap`/`pre-wrap` distinction |
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs::layout_table`: rows stack, cells in auto-width columns (content-preferred, clamped to fit, wrap allowed), `th` bold, `<caption>`, row separators. No colspan/rowspan/border-collapse/`table-layout:fixed` |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex` (single line): row/column direction, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`. No wrap/reverse/`margin:auto`/baseline |
-| Grid | css-grid-2 | ❌ | |
+| Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns` (px/%/`fr`/`auto`/`repeat()`), row-major auto-placement, `grid-column: span N` / `A / B`, `gap`; auto row heights. No explicit line placement / `grid-template-rows`/`-areas` / dense flow / item alignment |
 | Positioning (rel/abs/fixed/sticky) | css-position-3 | ❌ | |
 | Values & units (px/em/%/rem/…) | css-values-4 | ❌ | |
 
