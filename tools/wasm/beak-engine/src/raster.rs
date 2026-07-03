@@ -12,7 +12,6 @@ use fontdue::{Font, FontSettings, Metrics};
 use hashbrown::HashMap;
 
 use crate::layout::{DrawOp, Layout, Rgb, Theme};
-use crate::Block;
 
 static FONT_BYTES: &[u8] = include_bytes!("../assets/inter.ttf");
 
@@ -53,8 +52,8 @@ impl Engine {
 
     /// Parse + lay out a document at `width`. Scroll-independent.
     pub fn layout(&self, html: &str, width: u32) -> Layout {
-        let blocks: Vec<Block> = crate::parse(html);
-        crate::layout::layout(&self.font, &blocks, width, &self.theme)
+        let dom = crate::dom::parse(html);
+        crate::layout::layout(&self.font, &dom, width, &self.theme)
     }
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
@@ -67,18 +66,36 @@ impl Engine {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
                     fill(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *color);
                 }
-                DrawOp::Text { x, y, size, color, text } => {
+                DrawOp::Text { x, y, size, color, bold, italic, text } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
                         continue; // fully off-screen line → skip
                     }
-                    self.draw_run(out, wi, hi, *x, vy, *size, *color, text);
+                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, text);
                 }
             }
         }
     }
 
-    fn draw_run(&self, out: &mut [u8], w: i32, h: i32, x: i32, y: i32, size: f32, color: Rgb, text: &str) {
+    /// Draw a run at `(x, y=run-top)`. `bold`/`italic` have no dedicated font
+    /// face (single Inter), so they're synthesised: **bold** = a 1px horizontal
+    /// smear (double-blend at px+1); *italic* = a faux slant sheared around the
+    /// baseline. Good enough to distinguish `<b>`/`<i>`; a real bold/italic
+    /// face is a later font-loading step.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_run(
+        &self,
+        out: &mut [u8],
+        w: i32,
+        h: i32,
+        x: i32,
+        y: i32,
+        size: f32,
+        color: Rgb,
+        bold: bool,
+        italic: bool,
+        text: &str,
+    ) {
         let ascent = self
             .font
             .horizontal_line_metrics(size)
@@ -101,17 +118,23 @@ impl Engine {
                 if py < 0 || py >= h {
                     continue;
                 }
+                let shear = if italic { (((baseline - py) as f32) * 0.21) as i32 } else { 0 };
                 let row = gy * m.width;
                 for gx in 0..m.width {
                     let a = cov[row + gx];
                     if a == 0 {
                         continue;
                     }
-                    let px = gx0 + gx as i32;
-                    if px < 0 || px >= w {
-                        continue;
+                    let px = gx0 + gx as i32 + shear;
+                    if px >= 0 && px < w {
+                        blend(out, w, px, py, color, a);
                     }
-                    blend(out, w, px, py, color, a);
+                    if bold {
+                        let pxb = px + 1;
+                        if pxb >= 0 && pxb < w {
+                            blend(out, w, pxb, py, color, a);
+                        }
+                    }
                 }
             }
             pen += m.advance_width;
