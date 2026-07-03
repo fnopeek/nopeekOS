@@ -8,8 +8,7 @@ fn main() {
     let meta = AppMeta {
         display_name: "beak".into(),
         description: "Native web browser".into(),
-        // Globe until a dedicated Bird glyph is added to the icon set.
-        icon: IconRef::Builtin(IconId::Globe),
+        icon: IconRef::Builtin(IconId::Bird),
     };
     let bytes = encode(&meta).expect("encode AppMeta");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");

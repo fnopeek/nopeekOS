@@ -57,6 +57,28 @@ pub fn parse(html: &str) -> Vec<Block> {
             if !closed {
                 break; // unterminated tag → stop
             }
+
+            // HTML comment `<!-- ... -->`. `raw` is the text up to the first
+            // '>'. A comment that contains inner markup (e.g. a commented-out
+            // menu `<!-- <li><a>…</a> -->`) has its first '>' *inside* the
+            // comment, so `raw` won't end with "--" — keep consuming until we
+            // actually reach "-->". (A pure-text comment closes right here.)
+            if raw.starts_with("!--") {
+                if !raw.ends_with("--") {
+                    let mut dashes = 0;
+                    for nc in chars.by_ref() {
+                        if nc == '-' {
+                            dashes += 1;
+                        } else if nc == '>' && dashes >= 2 {
+                            break;
+                        } else {
+                            dashes = 0;
+                        }
+                    }
+                }
+                continue;
+            }
+
             let closing = raw.starts_with('/');
             let name = tag_name(&raw);
 
@@ -299,6 +321,19 @@ mod tests {
         // script/style bodies never leak into content
         assert!(!blocks.iter().any(|b| matches!(b, Block::Para(t) if t.contains("evil"))));
         assert!(!blocks.iter().any(|b| matches!(b, Block::Para(t) if t.contains("color"))));
+    }
+
+    #[test]
+    fn skips_comments_even_with_inner_markup() {
+        let html = "<p>before</p><!-- <li><a>Über uns</a> Referenzen \
+                    Lab -->\n<p>after</p><!-- plain comment -->";
+        let blocks = parse(html);
+        assert!(blocks.contains(&Block::Para("before".to_string())));
+        assert!(blocks.contains(&Block::Para("after".to_string())));
+        assert!(!blocks.iter().any(|b| matches!(b, Block::Para(t)
+            if t.contains("Über uns") || t.contains("Referenzen") || t.contains("--"))));
+        assert!(!blocks.iter().any(|b| matches!(b, Block::Link { text, .. }
+            if text.contains("Über uns"))));
     }
 
     #[test]
