@@ -11,6 +11,12 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+pub mod layout;
+pub mod raster;
+
+pub use layout::Layout;
+pub use raster::Engine;
+
 /// A platform-neutral piece of rendered content. The engine parses HTML into
 /// these; each platform adapter maps them to its own presentation (nopeek →
 /// widget tree, desktop → painted boxes). Deliberately host-free.
@@ -38,7 +44,7 @@ pub fn parse(html: &str) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     let mut buf = String::new();
     let mut kind = Kind::Para;
-    let mut skip = false; // inside <script>/<style>
+    let mut skip_depth: u32 = 0; // inside <script>/<style>/<head>/<title>
     let mut in_link = false;
     let mut link_href = String::new();
 
@@ -82,11 +88,17 @@ pub fn parse(html: &str) -> Vec<Block> {
             let closing = raw.starts_with('/');
             let name = tag_name(&raw);
 
-            if name == "script" || name == "style" {
-                skip = !closing;
+            // Non-rendered content: skip everything inside these (with a
+            // depth counter so <head><title>…</title></head> nests cleanly).
+            if matches!(name.as_str(), "script" | "style" | "head" | "title") {
+                if closing {
+                    skip_depth = skip_depth.saturating_sub(1);
+                } else {
+                    skip_depth += 1;
+                }
                 continue;
             }
-            if skip {
+            if skip_depth > 0 {
                 continue;
             }
             // Inside a link, ignore structural tags — keep the link text intact.
@@ -139,7 +151,7 @@ pub fn parse(html: &str) -> Vec<Block> {
                 }
                 _ => {} // inline / unknown tag → ignore, keep accumulating text
             }
-        } else if !skip {
+        } else if skip_depth == 0 {
             buf.push(c);
         }
     }
@@ -340,5 +352,78 @@ mod tests {
     fn numeric_entities_and_whitespace() {
         let blocks = parse("<p>a&#38;b   c&#x2014;d</p>");
         assert_eq!(blocks, alloc::vec![Block::Para("a&b c\u{2014}d".to_string())]);
+    }
+}
+
+// Host demo: render a representative page to a BMP so the layout + text can
+// be eyeballed on the dev box without booting the OS (BROWSER.md §10).
+// Run: `cargo test --release render_sample_to_bmp -- --nocapture`
+// → writes `tools/wasm/beak-engine/sample.bmp`.
+#[cfg(test)]
+mod demo {
+    use crate::Engine;
+
+    const SAMPLE: &str = "<!DOCTYPE html><html><head><title>beak — Stage 0.1</title></head><body>\
+<h1>Ein nativer Browser für nopeekOS</h1>\
+<p>Dieser Absatz wird von der eigenen Layout-Engine umgebrochen — die Wörter fließen \
+auf die Content-Breite, mit echten Vorschubbreiten aus der Inter-Schrift, statt flach \
+untereinander zu kippen. Kein Linux, kein microVM, keine fremde Render-Engine.</p>\
+<h2>Was schon läuft</h2>\
+<ul><li>HTTPS holen über npk_http_request</li><li>tolerantes HTML nach Blocks</li>\
+<li>Block-Flow-Layout mit Wortumbruch</li><li>Glyph-Rasterung (fontdue + Inter)</li></ul>\
+<p>Links sind klickbar und farblich abgesetzt, etwa \
+<a href=\"https://de.wikipedia.org/\">Wikipedia</a> oder die \
+<a href=\"https://phosphoricons.com/\">Phosphor-Icons</a>.</p>\
+<hr>\
+<h2>Nächste Schritte</h2>\
+<p>Standard-first: echtes CSS gegen die Strichliste (CONFORMANCE.md), dann Canvas-Wiring \
+und Live-Test im OS. Die Engine ist portabel — dieselbe Rechnerei läuft auf dem Desktop.</p>\
+</body></html>";
+
+    fn to_bmp(bgra: &[u8], w: u32, h: u32) -> alloc::vec::Vec<u8> {
+        let row = (w * 4) as usize;
+        let pixels = row * h as usize;
+        let mut b = alloc::vec::Vec::with_capacity(54 + pixels);
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&((54 + pixels) as u32).to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&(w as i32).to_le_bytes());
+        b.extend_from_slice(&(h as i32).to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&32u16.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&(pixels as u32).to_le_bytes());
+        b.extend_from_slice(&2835u32.to_le_bytes());
+        b.extend_from_slice(&2835u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        // our buffer is top-down; BMP is bottom-up → reverse rows.
+        for y in (0..h).rev() {
+            let s = y as usize * row;
+            b.extend_from_slice(&bgra[s..s + row]);
+        }
+        b
+    }
+
+    #[test]
+    fn render_sample_to_bmp() {
+        let eng = Engine::new();
+        let width = 760u32;
+        let lay = eng.layout(SAMPLE, width);
+        let height = lay.height.min(3000);
+        let mut buf = alloc::vec![0u8; (width * height * 4) as usize];
+        eng.paint(&lay, width, height, 0, &mut buf);
+
+        // sanity: something was actually drawn (not pure background).
+        let bg_b = crate::layout::BG.2;
+        assert!(buf.chunks(4).any(|p| p[0] != bg_b), "nothing rendered");
+
+        std::fs::write("sample.bmp", to_bmp(&buf, width, height)).expect("write sample.bmp");
+        std::eprintln!(
+            "beak render: {}x{} px, {} draw ops, {} links → sample.bmp",
+            width, height, lay.ops.len(), lay.links.len()
+        );
     }
 }
