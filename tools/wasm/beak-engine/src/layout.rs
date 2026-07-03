@@ -18,6 +18,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use fontdue::Font;
 
+use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::style::{self, ComputedStyle, Display, BASE_FONT_PX};
 
@@ -105,108 +106,112 @@ fn line_gap(font: &Font, size: f32) -> f32 {
     font.horizontal_line_metrics(size).map(|m| m.new_line_size).unwrap_or(size * 1.3)
 }
 
-// ── entry point ────────────────────────────────────────────────────────────
+// ── entry point + block/inline tree walk ───────────────────────────────────
+
+/// Per-layout mutable context: the shared inputs (font / theme / author sheet)
+/// plus the accumulating display list and the live ancestor `path` (for
+/// selector matching). Bundling these keeps the recursive walkers from carrying
+/// a dozen arguments each.
+struct Ctx<'a> {
+    font: &'a Font,
+    theme: &'a Theme,
+    sheet: &'a Stylesheet,
+    ops: Vec<DrawOp>,
+    links: Vec<LinkRect>,
+    path: Vec<ElemInfo>, // root → … → current parent
+}
 
 /// Lay a document out into a scroll-independent display list.
-pub fn layout(font: &Font, dom: &Dom, width: u32, theme: &Theme) -> Layout {
-    let mut ops: Vec<DrawOp> = Vec::new();
-    let mut links: Vec<LinkRect> = Vec::new();
+pub fn layout(font: &Font, dom: &Dom, sheet: &Stylesheet, width: u32, theme: &Theme) -> Layout {
     let root = ComputedStyle::root(theme);
+    let mut ctx = Ctx { font, theme, sheet, ops: Vec::new(), links: Vec::new(), path: Vec::new() };
 
     let cx = PAD;
     let cw = (width as i32 - 2 * PAD).max(60);
     let mut y = PAD;
-    y = layout_children(font, &dom.body().children, &root, cx, cw, y, theme, &mut ops, &mut links);
+
+    // Resolve <body> itself so `body { … }` rules inherit into the page, and
+    // put it on the ancestor path so `body p` / `.article p` selectors match.
+    let body = dom.body();
+    let body_style = style::resolve(body, &root, theme, sheet, &[]);
+    ctx.path.push(ElemInfo::of(body));
+    y = ctx.layout_children(&body.children, &body_style, cx, cw, y);
     y += PAD;
 
-    Layout { ops, links, height: y.max(1) as u32 }
+    Layout { ops: ctx.ops, links: ctx.links, height: y.max(1) as u32 }
 }
 
-/// Block formatting context: lay `nodes` out as a vertical stack, grouping
-/// consecutive inline-level content into line boxes. Returns the y below the
-/// last child.
-#[allow(clippy::too_many_arguments)]
-fn layout_children(
-    font: &Font,
-    nodes: &[Node],
-    parent: &ComputedStyle,
-    x: i32,
-    w: i32,
-    y0: i32,
-    theme: &Theme,
-    ops: &mut Vec<DrawOp>,
-    links: &mut Vec<LinkRect>,
-) -> i32 {
-    let mut y = y0;
-    let mut inline = Inline::new();
-    let mut carry = 0.0f32; // previous block's (collapsible) bottom margin
-    let mut had_block = false;
+impl Ctx<'_> {
+    /// Block formatting context: lay `nodes` as a vertical stack, grouping
+    /// consecutive inline-level content into line boxes. Returns the y below
+    /// the last child.
+    fn layout_children(&mut self, nodes: &[Node], parent: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        let mut y = y0;
+        let mut inline = Inline::new();
+        let mut carry = 0.0f32; // previous block's (collapsible) bottom margin
+        let mut had_block = false;
 
-    for node in nodes {
-        match node {
-            Node::Text(t) => inline.text(font, t, parent, None),
-            Node::Element(el) => {
-                let st = style::resolve(el, parent, theme);
-                match st.display {
-                    Display::None => {}
-                    Display::Inline => collect_inline(font, el, &st, None, theme, &mut inline),
-                    Display::Block | Display::ListItem => {
-                        if !inline.is_empty() {
-                            y = inline.flow(font, x, w, y, ops, links);
-                            inline = Inline::new();
-                            carry = 0.0;
+        for node in nodes {
+            match node {
+                Node::Text(t) => inline.text(self.font, t, parent, None),
+                Node::Element(el) => {
+                    let st = style::resolve(el, parent, self.theme, self.sheet, &self.path);
+                    match st.display {
+                        Display::None => {}
+                        Display::Inline => {
+                            self.path.push(ElemInfo::of(el));
+                            self.collect_inline(el, &st, None, &mut inline);
+                            self.path.pop();
                         }
-                        let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
-                        y += top as i32;
-                        y = layout_block(font, el, &st, x, w, y, theme, ops, links);
-                        carry = st.margin_bottom;
-                        had_block = true;
+                        Display::Block | Display::ListItem => {
+                            if !inline.is_empty() {
+                                y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
+                                inline = Inline::new();
+                                carry = 0.0;
+                            }
+                            let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
+                            y += top as i32;
+                            self.path.push(ElemInfo::of(el));
+                            y = self.layout_block(el, &st, x, w, y);
+                            self.path.pop();
+                            carry = st.margin_bottom;
+                            had_block = true;
+                        }
                     }
                 }
             }
         }
-    }
-    if !inline.is_empty() {
-        y = inline.flow(font, x, w, y, ops, links);
-    } else if had_block {
-        y += carry as i32;
-    }
-    y
-}
-
-/// Lay one block-level box: rule / list bullet / preformatted / normal flow.
-#[allow(clippy::too_many_arguments)]
-fn layout_block(
-    font: &Font,
-    el: &Element,
-    st: &ComputedStyle,
-    x: i32,
-    w: i32,
-    y0: i32,
-    theme: &Theme,
-    ops: &mut Vec<DrawOp>,
-    links: &mut Vec<LinkRect>,
-) -> i32 {
-    let y = y0;
-    if st.is_rule {
-        ops.push(DrawOp::Rect { x, y: y + 1, w: w.max(1), h: 1, color: theme.rule });
-        return y + 3;
+        if !inline.is_empty() {
+            y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
+        } else if had_block {
+            y += carry as i32;
+        }
+        y
     }
 
-    let content_x = x + st.padding_left as i32;
-    let content_w = (w - st.padding_left as i32).max(20);
+    /// Lay one block-level box: rule / list bullet / preformatted / normal flow.
+    fn layout_block(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        let y = y0;
+        if st.is_rule {
+            self.ops.push(DrawOp::Rect { x, y: y + 1, w: w.max(1), h: 1, color: self.theme.rule });
+            return y + 3;
+        }
 
-    if st.display == Display::ListItem {
-        let s = 4;
-        let by = y + (st.font_px * 0.55) as i32;
-        ops.push(DrawOp::Rect { x: content_x - 12, y: by, w: s, h: s, color: theme.muted });
+        let content_x = x + st.padding_left as i32;
+        let content_w = (w - st.padding_left as i32).max(20);
+
+        if st.display == Display::ListItem {
+            let s = 4;
+            let by = y + (st.font_px * 0.55) as i32;
+            self.ops.push(DrawOp::Rect { x: content_x - 12, y: by, w: s, h: s, color: self.theme.muted });
+        }
+
+        if st.pre {
+            return layout_pre(self.font, el, st, content_x, content_w, y, &mut self.ops);
+        }
+
+        self.layout_children(&el.children, st, content_x, content_w, y)
     }
-
-    if st.pre {
-        return layout_pre(font, el, st, content_x, content_w, y, ops);
-    }
-
-    layout_children(font, &el.children, st, content_x, content_w, y, theme, ops, links)
 }
 
 /// `white-space: pre` — honor newlines and runs of spaces; no word-wrap.
@@ -253,29 +258,26 @@ fn gather_text(el: &Element, out: &mut String) {
     }
 }
 
-/// Collect an inline element's subtree into the current inline run (recursing
-/// through nested inline elements, carrying each one's style + link href).
-fn collect_inline(
-    font: &Font,
-    el: &Element,
-    st: &ComputedStyle,
-    href: Option<&str>,
-    theme: &Theme,
-    inline: &mut Inline,
-) {
-    if st.is_break {
-        inline.brk();
-        return;
-    }
-    let href = if st.is_link { el.attr("href").or(href) } else { href };
-    for c in &el.children {
-        match c {
-            Node::Text(t) => inline.text(font, t, st, href),
-            Node::Element(ce) => {
-                let cs = style::resolve(ce, st, theme);
-                match cs.display {
-                    Display::None => {}
-                    _ => collect_inline(font, ce, &cs, href, theme, inline),
+impl Ctx<'_> {
+    /// Collect an inline element's subtree into the current inline run
+    /// (recursing through nested inline elements, carrying each one's style +
+    /// link href). `el` is already on `self.path` when this is called.
+    fn collect_inline(&mut self, el: &Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline) {
+        if st.is_break {
+            inline.brk();
+            return;
+        }
+        let href = if st.is_link { el.attr("href").or(href) } else { href };
+        for c in &el.children {
+            match c {
+                Node::Text(t) => inline.text(self.font, t, st, href),
+                Node::Element(ce) => {
+                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path);
+                    if cs.display != Display::None {
+                        self.path.push(ElemInfo::of(ce));
+                        self.collect_inline(ce, &cs, href, inline);
+                        self.path.pop();
+                    }
                 }
             }
         }
@@ -471,7 +473,8 @@ mod tests {
 
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
-        layout(&font(), &dom, w, &Theme::DARK)
+        let sheet = crate::css::collect(&dom);
+        layout(&font(), &dom, &sheet, w, &Theme::DARK)
     }
 
     fn texts(l: &Layout) -> Vec<(i32, i32, &str)> {
@@ -535,6 +538,33 @@ mod tests {
         let ital = l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, italic: true, .. } if text == "eye"));
         assert!(bold, "bold run");
         assert!(ital, "italic run");
+    }
+
+    #[test]
+    fn author_style_block_colours_and_selects() {
+        // A type rule colours all <p>; a descendant rule colours links inside
+        // .box only; specificity: #id beats the type rule on the same element.
+        let l = lay(
+            "<html><head><style>\
+             p { color: #ff0000 } \
+             .box a { color: #00ff00 } \
+             #hi { color: #0000ff }\
+             </style></head><body>\
+             <p>red</p>\
+             <p id=\"hi\">blue</p>\
+             <div class=\"box\"><a href=\"/x\">green</a></div>\
+             </body></html>",
+            2000,
+        );
+        let color_of = |t: &str| {
+            l.ops.iter().find_map(|o| match o {
+                DrawOp::Text { text, color, .. } if text == t => Some(*color),
+                _ => None,
+            })
+        };
+        assert_eq!(color_of("red"), Some(Rgb(255, 0, 0)));
+        assert_eq!(color_of("blue"), Some(Rgb(0, 0, 255))); // #id wins over p
+        assert_eq!(color_of("green"), Some(Rgb(0, 255, 0))); // .box a matched
     }
 
     #[test]
