@@ -132,6 +132,12 @@ const MAX_CSS_LINKS: usize = 16;
 static mut CSS_BUF: [u8; CSS_CAP] = [0; CSS_CAP];
 static mut CSS_LEN: usize = 0;
 
+// Scratch buffer to fetch one <img>'s bytes into before decoding.
+const IMG_FETCH_CAP: usize = 6 * 1024 * 1024;
+const MAX_IMAGES: usize = 16;
+static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
+static mut IMAGES_DIRTY: bool = false;
+
 const PAYLOAD_CAP: usize = URL_CAP;
 static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
 
@@ -233,10 +239,42 @@ fn fetch(url: &str) -> bool {
     bump_content_gen();
     if len > 0 {
         fetch_stylesheets(url);
+        unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
     } else {
         unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
     }
     n >= 0
+}
+
+/// Fetch the page's `<img>` sources and hand them to the engine to decode.
+/// Runs in the main loop (needs `&mut engine`); bounded by MAX_IMAGES.
+fn refresh_images(engine: &mut Engine) {
+    unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(false) };
+    let srcs = beak_engine::image_srcs(html_str());
+    if srcs.is_empty() {
+        engine.set_images(&[]);
+        return;
+    }
+    let base = url_str().to_string();
+    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
+    let mut pairs: alloc::vec::Vec<(String, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
+    for src in srcs.iter().take(MAX_IMAGES) {
+        let abs = resolve(&base, src);
+        let n = unsafe {
+            npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst as i32, IMG_FETCH_CAP as i32)
+        };
+        if n > 0 {
+            let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) }.to_vec();
+            pairs.push((src.clone(), bytes));
+        }
+    }
+    engine.set_images(&pairs);
+    bump_content_gen(); // re-layout so decoded images replace placeholders
+    mark_dirty();
+}
+
+fn images_dirty() -> bool {
+    unsafe { core::ptr::addr_of!(IMAGES_DIRTY).read() }
 }
 
 /// Fetch every `<link rel=stylesheet>` of the just-loaded page into CSS_BUF
@@ -727,7 +765,9 @@ fn poll_event() -> PollResult {
 // ── Heap: a real free-list allocator (32 MB). The font (persistent) + each
 //    frame's layout + paint buffer are freed on drop, unlike a bump heap. ───
 
-const HEAP_SIZE: usize = 32 * 1024 * 1024;
+// 64 MB: fits the font + layout + per-frame paint buffer + decoded page images
+// (the image decode budget is ~24 MB; a bump from 32 MB gives headroom).
+const HEAP_SIZE: usize = 64 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 #[global_allocator]
@@ -803,6 +843,11 @@ pub extern "C" fn _start() {
     let mut cache: Option<(Layout, i32, u32)> = None;
     let mut last_bg = unsafe { npk_theme_token(0) };
     loop {
+        // A fresh page: fetch its images (blocking) and hand them to the engine
+        // before painting, so decoded images replace placeholders in one pass.
+        if images_dirty() {
+            refresh_images(&mut engine);
+        }
         match poll_event() {
             PollResult::Event(ev) => {
                 if handle(&engine, ev, &cache) {

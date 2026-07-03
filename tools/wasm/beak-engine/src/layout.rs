@@ -14,6 +14,7 @@
 //! Scroll-independent: computed once per (content, width); `raster::paint`
 //! draws the visible slice at any offset. Flex/Grid/floats/position come next.
 
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -21,6 +22,7 @@ use fontdue::Font;
 
 use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
+use crate::image::{Image, ImageMap};
 use crate::style::{
     self, ComputedStyle, CrossAlign, Display, FlexBasis, GridTrack, Justify, Len, Position,
     BASE_FONT_PX,
@@ -126,6 +128,8 @@ pub enum DrawOp {
     Text { x: i32, y: i32, size: f32, color: Rgb, bold: bool, italic: bool, text: String },
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgb },
+    /// A decoded image, scaled to `w`×`h` at blit time.
+    Image { x: i32, y: i32, w: i32, h: i32, img: Rc<Image> },
 }
 
 /// A clickable link's document-space rectangle.
@@ -185,6 +189,7 @@ struct Ctx<'a> {
     font: &'a Font,
     theme: &'a Theme,
     sheet: &'a Stylesheet,
+    images: &'a ImageMap,
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     path: Vec<ElemInfo>, // root → … → current parent
@@ -194,7 +199,14 @@ struct Ctx<'a> {
 }
 
 /// Lay a document out into a scroll-independent display list.
-pub fn layout(font: &Font, dom: &Dom, sheet: &Stylesheet, width: u32, theme: &Theme) -> Layout {
+pub fn layout(
+    font: &Font,
+    dom: &Dom,
+    sheet: &Stylesheet,
+    images: &ImageMap,
+    width: u32,
+    theme: &Theme,
+) -> Layout {
     let root = ComputedStyle::root(theme);
     let cx = PAD;
     let cw = (width as i32 - 2 * PAD).max(60);
@@ -202,6 +214,7 @@ pub fn layout(font: &Font, dom: &Dom, sheet: &Stylesheet, width: u32, theme: &Th
         font,
         theme,
         sheet,
+        images,
         ops: Vec::new(),
         links: Vec::new(),
         path: Vec::new(),
@@ -241,6 +254,20 @@ impl Ctx<'_> {
             };
             let st = style::resolve(el, parent, self.theme, self.sheet, &self.path);
             if st.display == Display::None {
+                continue;
+            }
+            // `<img>`: block-level box for v1 (its own line), decoded or a
+            // labelled placeholder. Inline images (icons in text) come later.
+            if el.tag == "img" {
+                if !inline.is_empty() {
+                    y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
+                    inline = Inline::new();
+                    carry = 0.0;
+                }
+                y += 4;
+                y = self.layout_img(el, &st, x, w, y);
+                y += 4;
+                had_block = true;
                 continue;
             }
             // `position:absolute`/`fixed` are out of flow → laid at a
@@ -332,6 +359,53 @@ impl Ctx<'_> {
 
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
         y
+    }
+
+    /// Lay an `<img>` box: size from `width`/`height` (attr or CSS) or the
+    /// decoded intrinsic size, scaled down to fit the content width (aspect
+    /// preserved). A decoded image → `DrawOp::Image`; a missing/undecodable one
+    /// → a bordered placeholder with its `alt` text.
+    fn layout_img(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        let img = el.attr("src").and_then(|s| self.images.get(s)).cloned();
+        let (iw, ih) = img.as_ref().map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0));
+
+        let attr_px = |n: &str| {
+            el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+        };
+        let avail = w as f32;
+        let mut bw = st.width.px(avail).or_else(|| attr_px("width")).unwrap_or(if iw > 0.0 { iw } else { 320.0 });
+        let mut bh = match attr_px("height") {
+            Some(h) => h,
+            None if iw > 0.0 => bw * ih / iw,
+            None => bw * 0.60,
+        };
+        if bw > avail {
+            bh *= avail / bw;
+            bw = avail;
+        }
+        let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
+
+        if let Some(img) = img {
+            self.ops.push(DrawOp::Image { x, y, w: bw, h: bh, img });
+        } else {
+            let c = self.theme.rule;
+            self.ops.push(DrawOp::Rect { x, y, w: bw, h: 1, color: c });
+            self.ops.push(DrawOp::Rect { x, y: y + bh - 1, w: bw, h: 1, color: c });
+            self.ops.push(DrawOp::Rect { x, y, w: 1, h: bh, color: c });
+            self.ops.push(DrawOp::Rect { x: x + bw - 1, y, w: 1, h: bh, color: c });
+            let alt = el.attr("alt").unwrap_or("").trim();
+            let label = if alt.is_empty() { "[Bild]" } else { alt };
+            self.ops.push(DrawOp::Text {
+                x: x + 8,
+                y: y + 6,
+                size: 14.0,
+                color: self.theme.muted,
+                bold: false,
+                italic: false,
+                text: label.to_string(),
+            });
+        }
+        y + bh
     }
 
     /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
@@ -732,11 +806,9 @@ impl Ctx<'_> {
     fn shift_ops(&mut self, o0: usize, o1: usize, l0: usize, l1: usize, dx: i32, dy: i32) {
         for op in &mut self.ops[o0..o1] {
             match op {
-                DrawOp::Text { x, y, .. } => {
-                    *x += dx;
-                    *y += dy;
-                }
-                DrawOp::Rect { x, y, .. } => {
+                DrawOp::Text { x, y, .. }
+                | DrawOp::Rect { x, y, .. }
+                | DrawOp::Image { x, y, .. } => {
                     *x += dx;
                     *y += dy;
                 }
@@ -1032,7 +1104,7 @@ mod tests {
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom);
-        layout(&font(), &dom, &sheet, w, &Theme::DARK)
+        layout(&font(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK)
     }
 
     fn texts(l: &Layout) -> Vec<(i32, i32, &str)> {
@@ -1194,6 +1266,15 @@ mod tests {
             _ => None,
         }).unwrap();
         assert!((190..=250).contains(&x), "container centered+padded → x≈220, got {x}");
+    }
+
+    #[test]
+    fn img_without_decoded_pixels_shows_placeholder() {
+        // No images set → a sized placeholder box (border rects) + the alt text.
+        let l = lay("<body><img src=\"/x.png\" alt=\"Foto\" width=\"200\" height=\"100\"></body>", 800);
+        let rects = l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
+        assert!(rects >= 4, "placeholder draws a 4-edge border");
+        assert!(l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Foto")));
     }
 
     #[test]

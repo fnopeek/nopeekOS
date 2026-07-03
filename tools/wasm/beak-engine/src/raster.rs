@@ -23,6 +23,8 @@ pub struct Engine {
     glyphs: RefCell<HashMap<(u32, u32), (Metrics, Vec<u8>)>>,
     /// Page colours (theme-resolved by the shell; dark until then).
     theme: Theme,
+    /// Decoded page images keyed by `<img src>` (set by the shell each nav).
+    images: crate::image::ImageMap,
 }
 
 impl Default for Engine {
@@ -41,6 +43,7 @@ impl Engine {
             font,
             glyphs: RefCell::new(HashMap::new()),
             theme: Theme::DARK,
+            images: crate::image::ImageMap::new(),
         }
     }
 
@@ -48,6 +51,12 @@ impl Engine {
     /// palette so the page follows light/dark).
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+    }
+
+    /// Decode + store the page's images (the shell fetches the bytes). Replaces
+    /// any previous set; call once per navigation before laying out.
+    pub fn set_images(&mut self, pairs: &[(alloc::string::String, Vec<u8>)]) {
+        self.images = crate::image::decode_all(pairs);
     }
 
     /// Parse + lay out a document at `width`. Scroll-independent. Collects the
@@ -63,14 +72,14 @@ impl Engine {
     pub fn layout_ext(&self, html: &str, external_css: &str, width: u32) -> Layout {
         let dom = crate::dom::parse(html);
         let sheet = crate::css::collect_all(&dom, external_css);
-        crate::layout::layout(&self.font, &dom, &sheet, width, &self.theme)
+        crate::layout::layout(&self.font, &dom, &sheet, &self.images, width, &self.theme)
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
     /// (reader mode; BROWSER.md §9.7 "never worse than clean content").
     pub fn layout_ua(&self, html: &str, width: u32) -> Layout {
         let dom = crate::dom::parse(html);
-        crate::layout::layout(&self.font, &dom, &crate::css::Stylesheet::empty(), width, &self.theme)
+        crate::layout::layout(&self.font, &dom, &crate::css::Stylesheet::empty(), &self.images, width, &self.theme)
     }
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
@@ -89,6 +98,13 @@ impl Engine {
                         continue; // fully off-screen line → skip
                     }
                     self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, text);
+                }
+                DrawOp::Image { x, y, w: iw, h: ih, img } => {
+                    let vy = *y - scroll_y;
+                    if vy > hi || vy + *ih < 0 {
+                        continue;
+                    }
+                    blit_image(out, wi, hi, *x, vy, *iw, *ih, img);
                 }
             }
         }
@@ -188,4 +204,44 @@ fn blend(out: &mut [u8], w: i32, x: i32, y: i32, c: Rgb, a: u8) {
     out[i + 1] = ((c.1 as u32 * a + out[i + 1] as u32 * ia) / 255) as u8; // G
     out[i + 2] = ((c.0 as u32 * a + out[i + 2] as u32 * ia) / 255) as u8; // R
     out[i + 3] = 255;
+}
+
+/// Nearest-neighbour scale a decoded `img` (BGRA) into a `dw`×`dh` box at
+/// (dx, dy), alpha-blending over `out`. Clipped to the buffer.
+fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32, img: &crate::image::Image) {
+    if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
+        return;
+    }
+    let (iw, ih) = (img.w as i32, img.h as i32);
+    for ry in 0..dh {
+        let py = dy + ry;
+        if py < 0 || py >= h {
+            continue;
+        }
+        let sy = (ry * ih / dh).clamp(0, ih - 1);
+        for rx in 0..dw {
+            let px = dx + rx;
+            if px < 0 || px >= w {
+                continue;
+            }
+            let sx = (rx * iw / dw).clamp(0, iw - 1);
+            let si = ((sy * iw + sx) * 4) as usize;
+            let a = img.bgra[si + 3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let di = idx(w, px, py);
+            if a == 255 {
+                out[di] = img.bgra[si];
+                out[di + 1] = img.bgra[si + 1];
+                out[di + 2] = img.bgra[si + 2];
+            } else {
+                let ia = 255 - a;
+                out[di] = ((img.bgra[si] as u32 * a + out[di] as u32 * ia) / 255) as u8;
+                out[di + 1] = ((img.bgra[si + 1] as u32 * a + out[di + 1] as u32 * ia) / 255) as u8;
+                out[di + 2] = ((img.bgra[si + 2] as u32 * a + out[di + 2] as u32 * ia) / 255) as u8;
+            }
+            out[di + 3] = 255;
+        }
+    }
 }
