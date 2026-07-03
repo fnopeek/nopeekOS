@@ -286,6 +286,7 @@ pub fn clear() {
     if !is_active() { return; }
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     if let Some(t) = term_mut(idx) { t.clear(); }
+    clear_selection(idx);
 }
 
 /// Clear a specific terminal by index (for WASM apps on worker cores).
@@ -294,6 +295,7 @@ pub fn clear_idx(idx: usize) {
         t.clear();
         DIRTY.store(true, Ordering::Release);
     }
+    clear_selection(idx);
 }
 
 /// Per-core output redirect (indexed by LAPIC ID, 255 = no redirect).
@@ -420,6 +422,175 @@ fn theme_prompt() -> u32 {
         crate::shade::widgets::abi::Token::Accent) & 0x00FF_FFFF
 }
 
+/// Selection highlight colour from the active theme (muted accent behind
+/// the selected glyphs).
+fn theme_selection() -> u32 {
+    crate::shade::widgets::palette::resolve(
+        crate::shade::widgets::abi::Token::AccentMuted) & 0x00FF_FFFF
+}
+
+// ── Mouse text selection (drag to mark, Ctrl+Shift+C to copy) ─────────
+//
+// A cell is identified by (absolute logical line, byte column). Absolute
+// line numbers survive scrolling; they alias back into the ring via
+// `% MAX_LINES`, so a selection older than MAX_LINES lines is silently
+// clamped (transient — you copy right after selecting). Only one terminal
+// carries a selection at a time.
+
+#[derive(Clone, Copy)]
+struct Selection {
+    term_idx: usize,
+    /// Text rect captured at press so a drag can clamp even off-window.
+    rx: i32, ry: i32, rw: u32, rh: u32,
+    anchor: (usize, usize),  // (abs_line, col)
+    head:   (usize, usize),
+    active: bool,            // true while the mouse button is held
+}
+
+static SELECTION: Mutex<Option<Selection>> = Mutex::new(None);
+
+/// Ordered (lo, hi) endpoints — tuples compare (line, then col).
+fn sel_bounds(s: &Selection) -> ((usize, usize), (usize, usize)) {
+    if s.anchor <= s.head { (s.anchor, s.head) } else { (s.head, s.anchor) }
+}
+
+/// Map a screen pixel to a terminal cell `(abs_line, col)`, clamped to the
+/// grid. Mirrors the geometry in `render_to_window` exactly (monospace
+/// `char_size(1)`, `visible_lines` snapshot, soft-wrap into `cols`-wide
+/// segments) so the highlight lands on the glyph under the cursor.
+pub fn cell_at(idx: usize, rx: i32, ry: i32, rw: u32, rh: u32, mx: i32, my: i32)
+    -> Option<(usize, usize)>
+{
+    let term = term_ref(idx)?;
+    let (char_w, char_h) = crate::gui::font::char_size(1);
+    if char_w == 0 || char_h == 0 { return None; }
+    let cols = (rw / char_w) as usize;
+    let visible_rows = (rh / char_h) as usize;
+    if cols == 0 || visible_rows == 0 { return None; }
+
+    let lens: alloc::vec::Vec<usize> =
+        term.visible_lines(visible_rows).map(|(_, len)| len).collect();
+    let start_line = (term.total + 1)
+        .saturating_sub(term.scroll_offset)
+        .saturating_sub(lens.len());
+
+    // Soft-wrap each logical line into cols-wide segments (same as render).
+    let mut segs: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
+    for (li, &len) in lens.iter().enumerate() {
+        if len == 0 { segs.push((li, 0, 0)); continue; }
+        let mut s = 0usize;
+        while s < len { let e = (s + cols).min(len); segs.push((li, s, e)); s = e; }
+    }
+    let first_seg = segs.len().saturating_sub(visible_rows);
+    let disp = segs.len() - first_seg;
+    if disp == 0 { return None; }
+
+    let row = ((((my - ry).max(0)) as u32) / char_h) as usize;
+    let row = row.min(disp - 1);
+    let (li, s, e) = segs[first_seg + row];
+    let col_in_seg = ((((mx - rx).max(0)) as u32) / char_w) as usize;
+    let col = (s + col_in_seg).min(e); // clamp within this seg's byte range
+    Some((start_line + li, col))
+}
+
+/// Begin a selection at the click cell (collapsed). No-op if the point
+/// resolves outside the grid.
+pub fn selection_begin(idx: usize, rx: i32, ry: i32, rw: u32, rh: u32, mx: i32, my: i32) -> bool {
+    match cell_at(idx, rx, ry, rw, rh, mx, my) {
+        Some(cell) => {
+            *SELECTION.lock() = Some(Selection {
+                term_idx: idx, rx, ry, rw, rh, anchor: cell, head: cell, active: true,
+            });
+            true
+        }
+        None => false,
+    }
+}
+
+/// Extend the active selection's moving end to `(mx, my)`. Returns true if
+/// the selection changed (caller re-renders). Clamps to the press-time
+/// rect, so dragging past the window edge keeps extending.
+pub fn selection_extend(mx: i32, my: i32) -> bool {
+    let mut g = SELECTION.lock();
+    let sel = match g.as_mut() { Some(s) if s.active => s, _ => return false };
+    match cell_at(sel.term_idx, sel.rx, sel.ry, sel.rw, sel.rh, mx, my) {
+        Some(cell) if cell != sel.head => { sel.head = cell; true }
+        _ => false,
+    }
+}
+
+/// End the drag. A collapsed (single-click) selection is dropped so a plain
+/// click doesn't leave a zero-width highlight. Returns true if state changed.
+pub fn selection_end() -> bool {
+    let mut g = SELECTION.lock();
+    match g.as_mut() {
+        Some(sel) => {
+            sel.active = false;
+            if sel.anchor == sel.head { *g = None; }
+            true
+        }
+        None => false,
+    }
+}
+
+/// True while a drag is in progress (caller keeps routing moves to us).
+pub fn selection_dragging() -> bool {
+    SELECTION.lock().as_ref().map_or(false, |s| s.active)
+}
+
+/// Copy the current selection to the kernel clipboard. Gathers each covered
+/// logical line's byte range, trims trailing spaces, joins with '\n'.
+pub fn copy_selection() {
+    let sel = match *SELECTION.lock() { Some(s) => s, None => return };
+    let (lo, hi) = sel_bounds(&sel);
+    let term = match term_ref(sel.term_idx) { Some(t) => t, None => return };
+
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    for line in lo.0..=hi.0 {
+        let ridx = line % MAX_LINES;
+        let len = term.lens[ridx];
+        let c0 = (if line == lo.0 { lo.1 } else { 0 }).min(len);
+        let c1 = (if line == hi.0 { hi.1 } else { len }).min(len);
+        let mut seg_end = c1;
+        // Trim trailing spaces on the copied segment (avoids grid padding).
+        while seg_end > c0 && term.lines[ridx][seg_end - 1] == b' ' { seg_end -= 1; }
+        if seg_end > c0 {
+            out.extend_from_slice(&term.lines[ridx][c0..seg_end]);
+        }
+        if line != hi.0 { out.push(b'\n'); }
+    }
+    if !out.is_empty() {
+        crate::shade::clipboard::set_text(&out);
+    }
+}
+
+/// Paste the clipboard into the focused terminal by injecting its bytes into
+/// the keyboard stream — the interactive loop then consumes them exactly as
+/// typed input. Newlines act as Enter (run the line), matching terminals.
+/// Bounded to the keyboard ring so a huge paste can't overflow it.
+pub fn paste_clipboard() {
+    let bytes = match crate::shade::clipboard::get_text() { Some(b) => b, None => return };
+    let mut injected = 0usize;
+    for &b in bytes.iter() {
+        let c = match b {
+            b'\n' | b'\r' => b'\n',
+            b'\t'         => b' ',
+            0x20..=0x7E   => b,
+            _             => continue,
+        };
+        crate::keyboard::inject_byte(c);
+        injected += 1;
+        if injected >= 256 { break; } // keyboard ring is 512; leave headroom
+    }
+}
+
+/// Drop the selection if it belongs to terminal `idx` (its content just
+/// changed under it, e.g. on clear — the absolute lines no longer map).
+pub fn clear_selection(idx: usize) {
+    let mut g = SELECTION.lock();
+    if g.as_ref().map_or(false, |s| s.term_idx == idx) { *g = None; }
+}
+
 /// Render a specific terminal's content into a window region.
 pub fn render_to_window(
     shadow: *mut u8,
@@ -463,6 +634,18 @@ pub fn render_to_window(
     }
     let first_seg = segs.len().saturating_sub(visible_rows);
 
+    // Absolute line number of the first snapshot line — lets each wrapped
+    // segment map back to (abs_line) for the selection test below.
+    let start_line = (term.total + 1)
+        .saturating_sub(term.scroll_offset)
+        .saturating_sub(lines.len());
+    // Selection bounds for THIS terminal, if a selection covers it.
+    let sel_bounds_opt = match SELECTION.lock().as_ref() {
+        Some(s) if s.term_idx == terminal_idx as usize => Some(sel_bounds(s)),
+        _ => None,
+    };
+    let sel_color = theme_selection();
+
     let fg = theme_fg();
     let prompt_color = theme_prompt();
 
@@ -494,6 +677,26 @@ pub fn render_to_window(
                 }
             } else {
                 crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
+            }
+        }
+
+        // Selection highlight — overdraw the selected byte range of this
+        // wrapped segment with a muted-accent background so the glyphs read
+        // as selected. Per-line column range intersected with this seg [s,e).
+        if let Some((lo, hi)) = sel_bounds_opt {
+            let abs_line = start_line + li;
+            if abs_line >= lo.0 && abs_line <= hi.0 {
+                let line_len = lines[li].1;
+                let csel0 = if abs_line == lo.0 { lo.1 } else { 0 };
+                let csel1 = if abs_line == hi.0 { hi.1 } else { line_len };
+                let a = csel0.max(s);
+                let b = csel1.min(e);
+                if b > a {
+                    if let Ok(seltext) = core::str::from_utf8(&line_data[a..b]) {
+                        crate::gui::font::draw_str(shadow, info, seltext,
+                            x + (a - s) as u32 * char_w, py, fg, Some(sel_color), 1);
+                    }
+                }
             }
         }
     }

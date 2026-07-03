@@ -784,7 +784,9 @@ pub fn handle_action(action: input::ShadeAction) {
         match action {
             ShadeAction::CloseWindow
             | ShadeAction::SpawnLauncher
-            | ShadeAction::Lock => {}
+            | ShadeAction::Lock
+            | ShadeAction::Copy
+            | ShadeAction::Paste => {}
             _ => return,
         }
     }
@@ -941,6 +943,23 @@ pub fn handle_action(action: input::ShadeAction) {
         }
         ShadeAction::SpawnLauncher => {
             spawn_launcher();
+        }
+        // Ctrl+Shift+C / V. In a terminal (where Ctrl+C stays SIGINT) copy
+        // the mouse selection / paste into the input line; in a widget app
+        // copy or paste the focused Input/TextArea selection.
+        ShadeAction::Copy => {
+            if focused_is_terminal() {
+                terminal::copy_selection();
+            } else if let Some(wid) = focused_widget_id() {
+                widgets::clipboard_copy(wid);
+            }
+        }
+        ShadeAction::Paste => {
+            if focused_is_terminal() {
+                terminal::paste_clipboard();
+            } else if let Some(wid) = focused_widget_id() {
+                widgets::clipboard_paste(wid);
+            }
         }
     }
 }
@@ -1443,6 +1462,14 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         }
     }
 
+    // Terminal text selection (drag to mark; Ctrl+Shift+C copies). After the
+    // scrollbar strip so a press on the bar scrolls instead of selecting.
+    {
+        let (mx, my) = cursor::atomic_pos();
+        let (btn, prev) = cursor::atomic_buttons();
+        update_terminal_selection(mx, my, btn & 1 != 0, prev & 1 != 0);
+    }
+
     // Hover routing — deduplicated per window. Runs on every move so the
     // app can react even when no buttons changed.
     let (hx, hy) = cursor::atomic_pos();
@@ -1491,6 +1518,15 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         }
     }
 
+    // Widget text selection — after the button block (press_at has focused
+    // the clicked Input/TextArea) and independent of it (so pure drag-moves,
+    // which raise no button change, still extend the selection).
+    {
+        let (mx, my) = cursor::atomic_pos();
+        let (btn, prev) = cursor::atomic_buttons();
+        update_widget_text_selection(mx, my, btn & 1 != 0, prev & 1 != 0);
+    }
+
     // If nothing above scheduled a real render (no button, no drag, no
     // DEFERRED set by a hover/focus change), this was a pure positional
     // move → flag a cheap cursor-only render (recompose + blit just the
@@ -1502,6 +1538,62 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         CURSOR_MOVED.store(true, Ordering::Relaxed);
     } else {
         CURSOR_MOVED.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Terminal drag-selection state machine. A press inside a terminal's text
+/// area begins a selection; holding + moving extends it; release ends it.
+/// Geometry is captured at press so a drag can run past the window edge.
+/// Doesn't consume the event — a plain LMB drag in a terminal never moves
+/// the window, so the normal focus/click flow runs alongside.
+fn update_terminal_selection(mx: i32, my: i32, lmb: bool, was: bool) {
+    if terminal::selection_dragging() {
+        let changed = if lmb {
+            terminal::selection_extend(mx, my)
+        } else {
+            terminal::selection_end()
+        };
+        if changed {
+            terminal::mark_dirty();
+            with_compositor(|comp| {
+                if let Some(fid) = comp.focused {
+                    if let Some(win) = comp.window_mut(fid) { win.dirty = true; }
+                }
+            });
+            render_damaged();
+        }
+        return;
+    }
+    if lmb && !was {
+        if let Some(hit) = with_compositor(|c| c.scroll_hit_at(mx, my)).flatten() {
+            if hit.is_terminal {
+                let (rx, ry, rw, rh) = hit.text_rect;
+                if mx >= rx && mx < rx + rw as i32 && my >= ry && my < ry + rh as i32 {
+                    // Collapsed selection draws nothing; the click's focus
+                    // redraw covers the (empty) initial state.
+                    terminal::selection_begin(hit.term_idx as usize, rx, ry, rw, rh, mx, my);
+                }
+            }
+        }
+    }
+}
+
+/// Widget text drag-selection for the focused Input/TextArea. Mirrors
+/// `update_terminal_selection`; the widget helpers re-render themselves.
+/// Runs AFTER the compositor's button block so `press_at` has already moved
+/// focus onto the clicked text widget.
+fn update_widget_text_selection(mx: i32, my: i32, lmb: bool, was: bool) {
+    let wid = match focused_widget_id() {
+        Some(w) => w,
+        None => { widgets::text_select_cancel(); return; }
+    };
+    if widgets::text_selecting() {
+        if lmb { widgets::text_select_extend(wid, mx, my); }
+        else   { widgets::text_select_end(wid); }
+        return;
+    }
+    if lmb && !was {
+        widgets::text_select_begin(wid, mx, my);
     }
 }
 
