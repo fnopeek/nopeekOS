@@ -8,3 +8,16 @@ description = "Portable browser engine core for beak (nopeekOS) — pure no_std+
 # rlib: the nopeek shell (wasm) and native tests both depend on this.
 
 [dependencies]
+# fontdue: TTF glyph rasteriser (same crate + version the kernel UI uses).
+# no_std, pure Rust → ports to the desktop adapter too (BROWSER.md §10).
+# The LAYOUT engine is hand-rolled; fontdue only turns glyph outlines into
+# coverage bitmaps (infrastructure, not "the engine").
+[dependencies.fontdue]
+version = "0.9"
+default-features = false
+features = ["hashbrown"]
+
+[dependencies.hashbrown]
+version = "0.14"
+default-features = false
+features = ["ahash"]

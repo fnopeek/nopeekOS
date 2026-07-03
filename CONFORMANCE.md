@@ -1,0 +1,104 @@
+# CONFORMANCE.md — beak standards tracker ("Strichliste")
+
+Living coverage tracker for the native browser engine (`beak-engine`). The
+web is a set of precisely-specified, separately-testable standards; this file
+records **what we implement and how well we conform** — measured against the
+official test suites, not self-graded.
+
+> Principle (same as [[feedback-test-on-hw]] / messen-nicht-raten): the
+> standard is the single source of truth, and conformance is an *oracle-graded
+> number*, not an opinion. Build standard-first, track the number, never drift.
+
+## The oracles
+
+| Area | Canonical test suite | How we run it |
+|------|----------------------|---------------|
+| **CSS** | **Web Platform Tests** (WPT) CSS reftests + the CSS2.1 suite | render test → render reference → **pixel-compare** (our host renderer does this NOW, no browser needed) |
+| **HTML parsing** | WPT `html/` + html5lib-tests (tokenizer + tree-construction JSON) | feed input → compare our DOM to the expected tree (data-driven, host) |
+| **DOM / CSSOM** | WPT `dom/`, `cssom/` (testharness.js) | needs our JS engine to drive → arrives with Stage 1+ |
+| **JavaScript** | **test262** (ECMAScript) | pure `.js` + asserts, no browser → run once the JS engine exists |
+| Milestones | Acid1 / Acid2 / Acid3 | famous whole-page reftests — nice north-star checkpoints |
+
+Reftests + html5lib-tests + test262 are all **data files we run natively** on
+the dev box (§10). testharness.js-based tests need the JS engine first.
+
+## Legend
+
+`❌` none · `🟡` partial · `✅` solid · `%` = share of the mapped suite passing
+(filled in once we wire that suite into the host harness).
+
+---
+
+## HTML
+
+| Feature | Spec | Status | Notes |
+|---------|------|--------|-------|
+| Tokenizer (tags, text, attrs) | WHATWG HTML §13.2 | 🟡 | tolerant subset; not the full state machine |
+| Comments `<!-- -->` | §13.2 | ✅ | incl. inner markup / multiline |
+| Character references (entities) | §13.2 | 🟡 | named common set + numeric `&#…;` / `&#x…;` |
+| Tree construction (real DOM) | §13.2.6 | ❌ | slice-0 emits flat `Block`s, not a node tree |
+| `<script>`/`<style>` raw-text | §13.2 | 🟡 | content skipped (not yet executed/applied) |
+
+## CSS — parsing & cascade
+
+| Feature | Spec | Status | Notes |
+|---------|------|--------|-------|
+| Tokenizer / parser | css-syntax-3 | ❌ | no author CSS parsed yet |
+| Selectors (type/class/id/desc/…) | selectors-4 | ❌ | |
+| Cascade, specificity, inheritance | css-cascade | ❌ | |
+| **UA default stylesheet** | HTML rendering §15 | 🟡 | styles are hardcoded in `layout.rs` today → **must become a real UA sheet** (h1{font-size:2em;font-weight:bold;…}) so we're standard-shaped from the start |
+| `getComputedStyle` (CSSOM) | cssom-1 | ❌ | needs DOM + JS |
+
+## CSS — layout
+
+| Feature | Spec | Status | Notes |
+|---------|------|--------|-------|
+| Block flow (vertical stacking) | CSS2.1 §9 | 🟡 | hand-rolled substrate exists |
+| Inline flow / line boxes | CSS2.1 §9.4.2 | 🟡 | greedy word-wrap only; no mixed-style runs |
+| Box model (margin/border/padding) | css-box-3 | 🟡 | margins only, crude |
+| Text wrapping / `white-space` | css-text-3 | 🟡 | collapse + wrap; no `pre`/`nowrap` |
+| Flexbox | css-flexbox-1 | ❌ | |
+| Grid | css-grid-2 | ❌ | |
+| Positioning (rel/abs/fixed/sticky) | css-position-3 | ❌ | |
+| Values & units (px/em/%/rem/…) | css-values-4 | ❌ | |
+
+## CSS — paint
+
+| Feature | Spec | Status | Notes |
+|---------|------|--------|-------|
+| Color / text color | css-color-4 | 🟡 | fixed theme colors, no `color:` yet |
+| Backgrounds / borders | css-backgrounds-3 | ❌ | |
+| Font size / weight / family | css-fonts-4 | 🟡 | size via layout; single font (Inter), no weight/family |
+| Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend (infrastructure) |
+| Transforms / opacity / filters | css-transforms/… | ❌ | §9 frontier |
+
+## Images
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| PNG decode | 🟡 | exists in iris; not wired into beak yet |
+| JPEG decode | ❌ | |
+| `<img>` layout + paint | ❌ | |
+
+## DOM + JavaScript
+
+| Feature | Spec | Status | Notes |
+|---------|------|--------|-------|
+| Live DOM tree + mutation | DOM | ❌ | Stage 2 |
+| Event loop / timers | HTML | ❌ | Stage 2 |
+| `fetch` / XHR | fetch | 🟡 | host `npk_http_request` exists; not exposed to JS |
+| ECMAScript language (test262) | ES2020 | ❌ | Stage 1 — own engine, grow as a subset ([[project-native-browser-beak]] §7-D1) |
+
+---
+
+## How this file is maintained
+
+1. **Standard-first:** implement a feature per its spec, not by eyeballing a
+   page. When in doubt, the spec + a reftest decide — never a guess.
+2. **Every increment updates a row here** (status and, once wired, the `%`).
+3. **Wire the suites into the host harness** as we go: CSS reftests +
+   html5lib-tests first (render/parse + compare, no JS needed), test262 when
+   the JS engine lands. Then the `%` columns become real, measured numbers.
+4. No silent drift: a non-standard shortcut gets a row + a note saying so.
+
+Related: `BROWSER.md` (architecture, §8 test262, §10 host-testability).
