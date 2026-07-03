@@ -170,6 +170,7 @@ pub enum IconId {
     SpeakerX            = 40,
     Minus               = 41,
     Plus                = 42,
+    Bird                = 43,
     // Appended only.
 }
 
