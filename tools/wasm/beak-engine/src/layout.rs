@@ -21,7 +21,7 @@ use fontdue::Font;
 
 use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
-use crate::style::{self, ComputedStyle, Display, BASE_FONT_PX};
+use crate::style::{self, ComputedStyle, CrossAlign, Display, FlexBasis, Justify, BASE_FONT_PX};
 
 /// 8-bit RGB. The rasteriser converts to the buffer's BGRA at blit time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,7 +164,7 @@ impl Ctx<'_> {
                             self.collect_inline(el, &st, None, &mut inline);
                             self.path.pop();
                         }
-                        Display::Block | Display::ListItem | Display::Table => {
+                        Display::Block | Display::ListItem | Display::Table | Display::Flex => {
                             if !inline.is_empty() {
                                 y = inline.flow(self.font, x, w, y, &mut self.ops, &mut self.links);
                                 inline = Inline::new();
@@ -173,11 +173,7 @@ impl Ctx<'_> {
                             let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
                             y += top as i32;
                             self.path.push(ElemInfo::of(el));
-                            y = if st.display == Display::Table {
-                                self.layout_table(el, &st, x, w, y)
-                            } else {
-                                self.layout_block(el, &st, x, w, y)
-                            };
+                            y = self.layout_box(el, &st, x, w, y);
                             self.path.pop();
                             carry = st.margin_bottom;
                             had_block = true;
@@ -252,7 +248,7 @@ impl Ctx<'_> {
         let mut minw = vec![0.0f32; ncols];
         for row in &rows {
             for (c, cell) in row.iter().enumerate().take(ncols) {
-                let (p, m) = self.cell_intrinsic(cell);
+                let (p, m) = self.intrinsic_width(cell);
                 pref[c] = pref[c].max(p);
                 minw[c] = minw[c].max(m);
             }
@@ -293,18 +289,173 @@ impl Ctx<'_> {
         y
     }
 
-    /// (preferred, minimum) content width of a cell: preferred = all text on one
+    /// (preferred, minimum) content width of a box: preferred = all text on one
     /// line, minimum = the widest single word. Approximated over concatenated
-    /// text (ignores nested font sizes) — fine for the auto-width heuristic.
-    fn cell_intrinsic(&self, cell: &Element) -> (f32, f32) {
+    /// text (ignores nested font sizes) — fine for auto table/flex sizing.
+    fn intrinsic_width(&self, el: &Element) -> (f32, f32) {
         let mut text = String::new();
-        gather_text(cell, &mut text);
+        gather_text(el, &mut text);
         let pref = measure(self.font, text.trim(), BASE_FONT_PX);
         let min = text
             .split_whitespace()
             .map(|wd| measure(self.font, wd, BASE_FONT_PX))
             .fold(0.0f32, f32::max);
         (pref, min)
+    }
+
+    /// Dispatch a block-level box to the right formatting context.
+    fn layout_box(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        match st.display {
+            Display::Table => self.layout_table(el, st, x, w, y),
+            Display::Flex => self.layout_flex(el, st, x, w, y),
+            _ => self.layout_block(el, st, x, w, y),
+        }
+    }
+
+    /// Single-line flex layout (css-flexbox-1 subset): row or column direction,
+    /// `flex-grow`/`-shrink`/`-basis`, `gap`, `justify-content`, `align-items`/
+    /// `align-self`, `order`. No wrapping/reverse/`margin:auto` yet.
+    fn layout_flex(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        // Flex items = child elements (display:none excluded). Bare text between
+        // items is dropped (rare); a text-only "flex" box falls back to block.
+        let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
+        for c in &el.children {
+            if let Node::Element(ce) = c {
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path);
+                if cs.display != Display::None {
+                    items.push((ce, cs));
+                }
+            }
+        }
+        if items.is_empty() {
+            return self.layout_children(&el.children, st, x, w, y0);
+        }
+        items.sort_by_key(|(_, s)| s.order); // stable → equal order keeps DOM order
+
+        if st.flex_row {
+            self.flex_row(&items, st, x, w, y0)
+        } else {
+            self.flex_column(&items, st, x, w, y0)
+        }
+    }
+
+    fn flex_row(&mut self, items: &[(&Element, ComputedStyle)], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        let n = items.len();
+        let avail = w as f32;
+        let gap = st.gap;
+        let gaps_total = gap * (n as f32 - 1.0).max(0.0);
+
+        // Flex base main-size (width) per item, then resolve grow/shrink.
+        let mut base = alloc::vec![0.0f32; n];
+        for (i, (el, s)) in items.iter().enumerate() {
+            base[i] = match s.flex_basis {
+                FlexBasis::Px(p) => p,
+                FlexBasis::Pct(p) => p / 100.0 * avail,
+                FlexBasis::Auto => self.intrinsic_width(el).0,
+            };
+        }
+        let sum_base: f32 = base.iter().sum();
+        let free = avail - sum_base - gaps_total;
+        let mut size = base.clone();
+        if free > 0.5 {
+            let tg: f32 = items.iter().map(|(_, s)| s.flex_grow).sum();
+            if tg > 0.0 {
+                for (i, (_, s)) in items.iter().enumerate() {
+                    size[i] = base[i] + free * s.flex_grow / tg;
+                }
+            }
+        } else if free < -0.5 {
+            let ts: f32 = items.iter().enumerate().map(|(i, (_, s))| s.flex_shrink * base[i]).sum();
+            if ts > 0.0 {
+                for (i, (el, s)) in items.iter().enumerate() {
+                    let min = self.intrinsic_width(el).1;
+                    size[i] = (base[i] + free * (s.flex_shrink * base[i]) / ts).max(min);
+                }
+            }
+        }
+
+        // Distribute any leftover (grow didn't take) per justify-content.
+        let used: f32 = size.iter().sum::<f32>() + gaps_total;
+        let leftover = (avail - used).max(0.0);
+        let (offset, extra_gap) = match st.justify {
+            Justify::Start => (0.0, 0.0),
+            Justify::End => (leftover, 0.0),
+            Justify::Center => (leftover / 2.0, 0.0),
+            Justify::Between => (0.0, if n > 1 { leftover / (n as f32 - 1.0) } else { 0.0 }),
+            Justify::Around => (leftover / (2.0 * n as f32), leftover / n as f32),
+            Justify::Evenly => (leftover / (n as f32 + 1.0), leftover / (n as f32 + 1.0)),
+        };
+
+        // Lay each item as a block at its resolved width; record op range+height.
+        let mut main = x as f32 + offset;
+        let mut ranges: Vec<(usize, usize, i32)> = Vec::with_capacity(n); // (op0, link0, height)
+        for (i, (el, s)) in items.iter().enumerate() {
+            let iw = size[i].max(1.0) as i32;
+            let op0 = self.ops.len();
+            let link0 = self.links.len();
+            self.path.push(ElemInfo::of(el));
+            let bottom = self.layout_box(el, s, main as i32, iw, y0);
+            self.path.pop();
+            ranges.push((op0, link0, bottom - y0));
+            main += size[i] + gap + extra_gap;
+        }
+
+        // Cross-axis (vertical) alignment within the line box.
+        let line_cross = ranges.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
+        for (i, (_, s)) in items.iter().enumerate() {
+            let (op0, link0, h) = ranges[i];
+            let op1 = ranges.get(i + 1).map(|r| r.0).unwrap_or(self.ops.len());
+            let link1 = ranges.get(i + 1).map(|r| r.1).unwrap_or(self.links.len());
+            let dy = match s.align_self.unwrap_or(st.align_items) {
+                CrossAlign::Stretch | CrossAlign::Start => 0,
+                CrossAlign::Center => (line_cross - h) / 2,
+                CrossAlign::End => line_cross - h,
+            };
+            if dy != 0 {
+                self.shift_ops(op0, op1, link0, link1, dy);
+            }
+        }
+        y0 + line_cross
+    }
+
+    /// Column flex ≈ block stacking with `gap` + cross-axis (horizontal)
+    /// alignment. Height is content-driven (auto), so grow/shrink/justify along
+    /// the main axis don't apply.
+    fn flex_column(&mut self, items: &[(&Element, ComputedStyle)], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        let mut y = y0;
+        for (i, (el, s)) in items.iter().enumerate() {
+            let align = s.align_self.unwrap_or(st.align_items);
+            let iw = match align {
+                CrossAlign::Stretch => w,
+                _ => (self.intrinsic_width(el).0 as i32).clamp(1, w),
+            };
+            let ix = match align {
+                CrossAlign::Stretch | CrossAlign::Start => x,
+                CrossAlign::Center => x + (w - iw) / 2,
+                CrossAlign::End => x + (w - iw),
+            };
+            self.path.push(ElemInfo::of(el));
+            y = self.layout_box(el, s, ix, iw, y);
+            self.path.pop();
+            if i + 1 < items.len() {
+                y += st.gap as i32;
+            }
+        }
+        y
+    }
+
+    /// Shift a contiguous slice of already-emitted ops + links by `dy` (used to
+    /// place a flex item on the cross axis after the line's size is known).
+    fn shift_ops(&mut self, o0: usize, o1: usize, l0: usize, l1: usize, dy: i32) {
+        for op in &mut self.ops[o0..o1] {
+            match op {
+                DrawOp::Text { y, .. } => *y += dy,
+                DrawOp::Rect { y, .. } => *y += dy,
+            }
+        }
+        for lk in &mut self.links[l0..l1] {
+            lk.y += dy;
+        }
     }
 }
 
@@ -705,6 +856,33 @@ mod tests {
             l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, bold: true, .. } if text == "Land")),
             "th renders bold"
         );
+    }
+
+    #[test]
+    fn flex_row_places_items_side_by_side() {
+        // Two flex:1 items in a row → side by side, splitting the width, NOT
+        // stacked. Without flex they'd be one-below-the-other.
+        let l = lay(
+            "<body><div style=\"display:flex; gap:10px\">\
+             <div style=\"flex:1\">left</div>\
+             <div style=\"flex:1\">right</div>\
+             </div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let left = *t.iter().find(|(_, _, s)| *s == "left").expect("left");
+        let right = *t.iter().find(|(_, _, s)| *s == "right").expect("right");
+        assert_eq!(left.1, right.1, "row items share a y (not stacked)");
+        assert!(right.0 > left.0 + 200, "2nd item pushed right by the 1st's grown width");
+    }
+
+    #[test]
+    fn flex_justify_content_end_pushes_items_right() {
+        let start = lay("<body><div style=\"display:flex\"><span>x</span></div></body>", 800);
+        let end = lay("<body><div style=\"display:flex; justify-content:flex-end\"><span>x</span></div></body>", 800);
+        let sx = start.ops.iter().find_map(|o| match o { DrawOp::Text { x, text, .. } if text == "x" => Some(*x), _ => None }).unwrap();
+        let ex = end.ops.iter().find_map(|o| match o { DrawOp::Text { x, text, .. } if text == "x" => Some(*x), _ => None }).unwrap();
+        assert!(ex > sx + 400, "justify-content:flex-end moves the item far right");
     }
 
     #[test]

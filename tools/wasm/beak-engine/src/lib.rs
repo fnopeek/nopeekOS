@@ -67,6 +67,13 @@ aus einer <b>Author-CSS-Regel</b> im <code>&lt;style&gt;</code>-Block, nicht aus
 <tr><th>Fläche</th><td>17,11 km² — Wörter in einer Zelle brechen bei Bedarf um</td></tr>\
 </table>\
 <pre>fn main() {\n    println!(\"pre erhält Whitespace + Zeilen\");\n}</pre>\
+<div style=\"display:flex; gap:16px; justify-content:space-between\">\
+<div style=\"font-weight:bold\">Flexbox-Zeile</div><div>Anfang</div>\
+<div>Mitte</div><div style=\"color:#4fd1c5\">Ende (space-between)</div></div>\
+<div style=\"display:flex; gap:12px\">\
+<div style=\"flex:1; color:#e0662c\">flex:1 — linke Spalte</div>\
+<div style=\"flex:2\">flex:2 — rechte Spalte, doppelt so breit; Text bricht \
+innerhalb der Flex-Spalte um wenn er nicht in eine Zeile passt.</div></div>\
 <hr>\
 <h2>Nächste Schritte</h2>\
 <p>Tabellen-Layout und Flexbox/Grid — der Reihe nach. Die Engine bleibt portabel: \
