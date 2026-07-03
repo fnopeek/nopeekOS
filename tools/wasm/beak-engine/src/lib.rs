@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 pub mod layout;
 pub mod raster;
 
-pub use layout::Layout;
+pub use layout::{Layout, Rgb, Theme};
 pub use raster::Engine;
 
 /// A platform-neutral piece of rendered content. The engine parses HTML into
@@ -417,7 +417,7 @@ und Live-Test im OS. Die Engine ist portabel — dieselbe Rechnerei läuft auf d
         eng.paint(&lay, width, height, 0, &mut buf);
 
         // sanity: something was actually drawn (not pure background).
-        let bg_b = crate::layout::BG.2;
+        let bg_b = crate::layout::Theme::DARK.bg.2;
         assert!(buf.chunks(4).any(|p| p[0] != bg_b), "nothing rendered");
 
         std::fs::write("sample.bmp", to_bmp(&buf, width, height)).expect("write sample.bmp");

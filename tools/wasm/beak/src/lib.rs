@@ -41,6 +41,7 @@ unsafe extern "C" {
     fn npk_http_request(url_ptr: i32, url_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
+    fn npk_theme_token(token_id: i32) -> i32;
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
@@ -49,6 +50,30 @@ unsafe extern "C" {
 
 fn log(m: &str) {
     unsafe { npk_log_serial(m.as_ptr() as i32, m.len() as i32) };
+}
+
+/// Query one theme token's colour → Rgb (palette is 0xAARRGGBB, light/dark
+/// aware). This is why the page background follows the theme like the chrome.
+fn theme_rgb(token_id: i32) -> beak_engine::Rgb {
+    let c = unsafe { npk_theme_token(token_id) } as u32;
+    beak_engine::Rgb(((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
+}
+
+/// Resolve the page palette from the active theme (Surface bg, OnSurface text,
+/// Accent links …). Falls back to dark if the query returns nothing.
+fn query_theme() -> beak_engine::Theme {
+    let bg = theme_rgb(0); // Surface
+    if bg == beak_engine::Rgb(0, 0, 0) {
+        return beak_engine::Theme::DARK;
+    }
+    beak_engine::Theme {
+        bg,
+        text: theme_rgb(3),    // OnSurface
+        heading: theme_rgb(3), // OnSurface
+        link: theme_rgb(6),    // Accent
+        muted: theme_rgb(4),   // OnSurfaceMuted
+        rule: theme_rgb(8),    // Border
+    }
 }
 
 const CANVAS_ID: i32 = 1;
@@ -681,7 +706,8 @@ pub extern "C" fn _start() {
     render_chrome();
 
     log("[beak] parsing font…");
-    let engine = Engine::new();
+    let mut engine = Engine::new();
+    engine.set_theme(query_theme());
     log("[beak] engine ready");
 
     // Engine is up — fetch the launch URL now (if we were opened with one).
@@ -692,6 +718,7 @@ pub extern "C" fn _start() {
 
     // Cached layout: (Layout, width it was laid out at, content generation).
     let mut cache: Option<(Layout, i32, u32)> = None;
+    let mut last_bg = unsafe { npk_theme_token(0) };
     loop {
         match poll_event() {
             PollResult::Event(ev) => {
@@ -701,6 +728,16 @@ pub extern "C" fn _start() {
                 maybe_repaint(&engine, &mut cache);
             }
             PollResult::Empty => {
+                // Pick up a runtime theme switch (light ↔ dark) cheaply: one
+                // token read per idle frame; on change, re-resolve the palette
+                // and invalidate the layout so text colours update too.
+                let bg = unsafe { npk_theme_token(0) };
+                if bg != last_bg {
+                    engine.set_theme(query_theme());
+                    last_bg = bg;
+                    bump_content_gen();
+                    mark_dirty();
+                }
                 maybe_repaint(&engine, &mut cache);
                 unsafe {
                     let _ = npk_sleep(16);

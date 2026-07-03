@@ -1069,6 +1069,36 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_theme_token(token_id) -> RGBA u32 (0xAARRGGBB) for the ACTIVE theme
+    // (light/dark aware), or 0 for an unknown token. RENDER-gated. Lets an app
+    // that paints its own surface (e.g. the browser's Canvas) match the theme's
+    // colours instead of hardcoding them.
+    linker.func_wrap("env", "npk_theme_token",
+        |caller: Caller<'_, HostState>, token_id: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return 0;
+            }
+            use crate::shade::widgets::abi::Token;
+            let token = match token_id {
+                0 => Token::Surface,
+                1 => Token::SurfaceElevated,
+                2 => Token::SurfaceMuted,
+                3 => Token::OnSurface,
+                4 => Token::OnSurfaceMuted,
+                5 => Token::OnAccent,
+                6 => Token::Accent,
+                7 => Token::AccentMuted,
+                8 => Token::Border,
+                9 => Token::Success,
+                10 => Token::Warning,
+                11 => Token::Danger,
+                _ => return 0,
+            };
+            crate::shade::widgets::palette::resolve(token) as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_canvas_rect(canvas_id, out_ptr) -> 0 / -1
     // Writes the canvas widget's actual laid-out rect as 4 little-endian i32
     // [x, y, w, h] into out_ptr (16 bytes), so an app can paint its canvas
