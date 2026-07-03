@@ -987,11 +987,6 @@ fn compute_input_edit(
             return Some(p.clone());
         }
     }
-    if prev.map_or(false, |p| p.sel_anchor.is_some()) {
-        crate::kprintln!("[clip] REBUILD wipes sel: prev_anchor={:?} prev_vlen={} new_vlen={}",
-            prev.and_then(|p| p.sel_anchor),
-            prev.map(|p| p.value.len()).unwrap_or(0), value.len());
-    }
     Some(InputEditState::from_value(value))
 }
 
@@ -1089,8 +1084,6 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
         };
         edit.cursor = clamp_boundary(&edit.value, edit.cursor);
         let sel = edit.selection();
-        crate::kprintln!("[clip] key='{}' anchor={:?} cursor={} sel={:?} vlen={}",
-            letter as char, edit.sel_anchor, edit.cursor, sel, edit.value.len());
         match letter {
             b'a' => {
                 // Select all (anchor at start, caret at end).
@@ -1120,7 +1113,6 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
             b'v' => {
                 match crate::shade::clipboard::get_text() {
                     Some(bytes) => {
-                        crate::kprintln!("[clip] paste get_text len={}", bytes.len());
                         let mut text = match core::str::from_utf8(&bytes) {
                             Ok(s) => String::from(s),
                             Err(_) => return true, // ignore a non-UTF-8 paste
