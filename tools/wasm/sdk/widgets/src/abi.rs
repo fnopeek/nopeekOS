@@ -486,6 +486,11 @@ pub enum Event {
     /// payload is the launch argument (e.g. a file path). Lets an app
     /// be a singleton with tabs: a second open routes here as a new tab.
     Open(String),
+    /// Mouse wheel over a focused app that has no `Widget::Scroll` to consume
+    /// it. `dy` is already scaled to pixels (positive = scroll down). Apps
+    /// that render their own surface (e.g. the browser's Canvas) scroll their
+    /// own viewport in response; apps that ignore it are unaffected.
+    Wheel { dy: i32 },
     // Appended only.
 }
 

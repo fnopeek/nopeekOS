@@ -174,6 +174,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::InputChange { .. } => 5,
         Event::ContextAction(_)   => 6,
         Event::Open(_)            => 7,
+        Event::Wheel { .. }       => 8,
     }
 }
 
