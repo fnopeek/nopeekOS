@@ -117,7 +117,8 @@ impl Engine {
     /// `w * h * 4` BGRA bytes).
     pub fn paint(&self, layout: &Layout, w: u32, h: u32, scroll_y: i32, out: &mut [u8]) {
         let (wi, hi) = (w as i32, h as i32);
-        fill(out, wi, hi, 0, 0, wi, hi, self.theme.bg);
+        // Canvas = the propagated body background (falls back to theme bg).
+        fill(out, wi, hi, 0, 0, wi, hi, layout.bg);
         for op in &layout.ops {
             match op {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
