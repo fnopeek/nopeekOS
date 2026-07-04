@@ -421,6 +421,10 @@ fn strip_comments(css: &str) -> String {
                 i += 1;
             }
             i += 2;
+            // A comment is a token separator (css-syntax-3), NOT nothing —
+            // replace it with a space so `12px/* */solid` doesn't glue into
+            // `12pxsolid` (and `hsl(120/* */75%…)` tokenises correctly).
+            out.push(' ');
         } else {
             out.push(css[i..].chars().next().unwrap());
             i += css[i..].chars().next().unwrap().len_utf8();

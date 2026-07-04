@@ -123,6 +123,9 @@ pub struct ComputedStyle {
     pub width: Len,
     pub min_width: Len,
     pub max_width: Len, // Auto = no maximum
+    pub height: Len,
+    pub min_height: Len,
+    pub max_height: Len, // Auto = no maximum
     pub margin_top: f32,
     pub margin_bottom: f32,
     pub margin_left: Len,
@@ -177,6 +180,9 @@ impl ComputedStyle {
             width: Len::Auto,
             min_width: Len::Auto,
             max_width: Len::Auto,
+            height: Len::Auto,
+            min_height: Len::Auto,
+            max_height: Len::Auto,
             margin_top: 0.0,
             margin_bottom: 0.0,
             margin_left: Len::Px(0.0),
@@ -240,6 +246,9 @@ pub fn resolve(
         width: Len::Auto,
         min_width: Len::Auto,
         max_width: Len::Auto,
+        height: Len::Auto,
+        min_height: Len::Auto,
+        max_height: Len::Auto,
         margin_top: 0.0,
         margin_bottom: 0.0,
         margin_left: Len::Px(0.0),
@@ -475,6 +484,9 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "width" => s.width = parse_len(&v, s.font_px),
         "min-width" => s.min_width = parse_len(&v, s.font_px),
         "max-width" => s.max_width = if v == "none" { Len::Auto } else { parse_len(&v, s.font_px) },
+        "height" => s.height = parse_len(&v, s.font_px),
+        "min-height" => s.min_height = parse_len(&v, s.font_px),
+        "max-height" => s.max_height = if v == "none" { Len::Auto } else { parse_len(&v, s.font_px) },
         "box-sizing" => s.box_border = v == "border-box",
         "margin" => {
             let em = s.font_px;
