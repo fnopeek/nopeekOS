@@ -228,25 +228,6 @@ the bulk of the card's content.</p>\
         });
         let css = include_str!("../assets/bootstrap.min.css");
         let width = 1000u32;
-        let lay_ua = eng.layout_ua(BOOTSTRAP_SAMPLE, width);
-        // How many elements did the DOM actually parse?
-        fn count(e: &crate::dom::Element, els: &mut u32, txt: &mut u32) {
-            *els += 1;
-            for c in &e.children {
-                match c {
-                    crate::dom::Node::Element(ce) => count(ce, els, txt),
-                    crate::dom::Node::Text(t) if !t.trim().is_empty() => *txt += 1,
-                    _ => {}
-                }
-            }
-        }
-        let d = crate::dom::parse(BOOTSTRAP_SAMPLE);
-        let (mut els, mut txt) = (0u32, 0u32);
-        count(&d.root, &mut els, &mut txt);
-        std::eprintln!(
-            "  [diag] DOM: {} elements, {} non-empty text nodes | UA-only: {} ops, {} links, {}px",
-            els, txt, lay_ua.ops.len(), lay_ua.links.len(), lay_ua.height
-        );
         let lay = eng.layout_ext(BOOTSTRAP_SAMPLE, css, width);
         let height = lay.height.clamp(1, 4000);
         let mut buf = alloc::vec![0u8; (width * height * 4) as usize];

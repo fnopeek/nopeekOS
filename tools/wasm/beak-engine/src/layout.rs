@@ -355,6 +355,27 @@ impl Ctx<'_> {
         } else {
             self.layout_children(&el.children, st, content_x, content_w, y)
         };
+        // Explicit `height` sets the content-box height (border-box subtracts
+        // padding); `min/max-height` clamp it. `%` needs a definite containing-
+        // block height (usually auto → ignored), so only definite lengths apply.
+        let content_top = y0 + st.pad_top as i32;
+        let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
+        let px_h = |len: Len| match len {
+            Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
+            Len::Px(h) => Some(h as i32),
+            _ => None,
+        };
+        let mut content_h = (y - content_top).max(0);
+        if let Some(h) = px_h(st.height) {
+            content_h = h;
+        }
+        if let Some(mn) = px_h(st.min_height) {
+            content_h = content_h.max(mn);
+        }
+        if let Some(mx) = px_h(st.max_height) {
+            content_h = content_h.min(mx);
+        }
+        y = content_top + content_h;
         self.cb = prev_cb;
         y += st.pad_bottom as i32;
 
