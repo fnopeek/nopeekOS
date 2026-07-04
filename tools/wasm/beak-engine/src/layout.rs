@@ -146,6 +146,9 @@ pub struct Layout {
     pub links: Vec<LinkRect>,
     /// Total document height (px). May exceed the viewport → scroll.
     pub height: u32,
+    /// Canvas background — the `<body>` background propagated to the whole
+    /// viewport (CSS backgrounds §3.11.2), else the theme background.
+    pub bg: Rgb,
 }
 
 impl Layout {
@@ -234,7 +237,10 @@ pub fn layout(
     y = ctx.layout_children(&body.children, &body_style, cx, cw, y);
     y += PAD;
 
-    Layout { ops: ctx.ops, links: ctx.links, height: y.max(1) as u32 }
+    // The body's background propagates to the whole canvas (a bare `<body
+    // background>` fills the viewport, not just the body box).
+    let canvas_bg = body_style.bg.unwrap_or(theme.bg);
+    Layout { ops: ctx.ops, links: ctx.links, height: y.max(1) as u32, bg: canvas_bg }
 }
 
 impl Ctx<'_> {
