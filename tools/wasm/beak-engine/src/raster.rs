@@ -25,6 +25,8 @@ pub struct Engine {
     theme: Theme,
     /// Decoded page images keyed by `<img src>` (set by the shell each nav).
     images: crate::image::ImageMap,
+    /// Remaining decoded-BGRA budget for the current page (streaming decode).
+    img_budget: usize,
 }
 
 impl Default for Engine {
@@ -44,6 +46,7 @@ impl Engine {
             glyphs: RefCell::new(HashMap::new()),
             theme: Theme::DARK,
             images: crate::image::ImageMap::new(),
+            img_budget: crate::image::TOTAL_BUDGET,
         }
     }
 
@@ -53,10 +56,38 @@ impl Engine {
         self.theme = theme;
     }
 
-    /// Decode + store the page's images (the shell fetches the bytes). Replaces
-    /// any previous set; call once per navigation before laying out.
+    /// Start a fresh page's image set: clear the previous decode + reset the
+    /// per-page budget. The shell then fetches + `add_image`s each `<img>` ONE
+    /// AT A TIME (streaming) so the compressed bytes never pile up — decode the
+    /// image, keep only its pixels, reuse the same fetch scratch for the next.
+    pub fn images_begin(&mut self) {
+        self.images.clear();
+        self.img_budget = crate::image::TOTAL_BUDGET;
+    }
+
+    /// Decode ONE image and store it under `src`. The compressed `bytes` are
+    /// borrowed (dropped by the caller right after) — only the decoded pixels
+    /// are retained. Over-budget / undecodable → skipped (renders a
+    /// placeholder). Returns whether the image was stored.
+    pub fn add_image(&mut self, src: &str, bytes: &[u8]) -> bool {
+        if let Some(img) = crate::image::decode(bytes) {
+            if img.bgra.len() <= self.img_budget {
+                self.img_budget -= img.bgra.len();
+                self.images.insert(src.into(), alloc::rc::Rc::new(img));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Decode + store a whole batch at once (holds all compressed bytes) — kept
+    /// for tests / non-streaming callers; the shell uses `images_begin` +
+    /// `add_image` to avoid hoarding.
     pub fn set_images(&mut self, pairs: &[(alloc::string::String, Vec<u8>)]) {
-        self.images = crate::image::decode_all(pairs);
+        self.images_begin();
+        for (src, bytes) in pairs {
+            self.add_image(src, bytes);
+        }
     }
 
     /// Parse + lay out a document at `width`. Scroll-independent. Collects the

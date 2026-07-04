@@ -26,6 +26,16 @@ pub type ImageMap = HashMap<String, Rc<Image>>;
 /// huge asset can't exhaust the shell heap (it degrades to a placeholder).
 const MAX_PIXELS: usize = 4_000_000; // ~16 MB BGRA
 
+/// Allocate `n` zeroed bytes WITHOUT aborting on OOM — `try_reserve` returns
+/// `Err` instead of calling `handle_alloc_error`, so an oversize image degrades
+/// to a placeholder (decode → `None`) rather than killing the whole app/tab.
+fn zeroed(n: usize) -> Option<Vec<u8>> {
+    let mut v: Vec<u8> = Vec::new();
+    v.try_reserve_exact(n).ok()?;
+    v.resize(n, 0);
+    Some(v)
+}
+
 /// Decode image bytes. Returns `None` for unsupported formats / malformed data
 /// / oversize images (→ placeholder).
 pub fn decode(bytes: &[u8]) -> Option<Image> {
@@ -42,7 +52,8 @@ fn decode_png(data: &[u8]) -> Option<Image> {
     let mut pos = 8;
     let (mut width, mut height): (u32, u32) = (0, 0);
     let mut color_type: u8 = 0;
-    let mut idat: Vec<u8> = Vec::with_capacity(data.len());
+    let mut idat: Vec<u8> = Vec::new();
+    idat.try_reserve(data.len()).ok()?;
 
     while pos + 12 <= data.len() {
         let clen = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
@@ -70,6 +81,12 @@ fn decode_png(data: &[u8]) -> Option<Image> {
                 if color_type != 2 && color_type != 6 {
                     return None; // only RGB / RGBA
                 }
+                // Early dimension guard: reject an oversize image at IHDR (the
+                // FIRST chunk) so we never accumulate its IDAT / allocate raw +
+                // bgra — the OOM spike is bounded before it starts.
+                if (width as usize).saturating_mul(height as usize) > MAX_PIXELS {
+                    return None;
+                }
             }
             b"IDAT" => idat.extend_from_slice(&data[start..end]),
             b"IEND" => break,
@@ -96,7 +113,7 @@ fn decode_png(data: &[u8]) -> Option<Image> {
     }
 
     // Reverse the per-row PNG filters into raw samples.
-    let mut raw = alloc::vec![0u8; height as usize * stride];
+    let mut raw = zeroed(height as usize * stride)?;
     for y in 0..height as usize {
         let src = y * (1 + stride);
         let filter = decomp[src];
@@ -118,7 +135,7 @@ fn decode_png(data: &[u8]) -> Option<Image> {
     }
 
     let count = (width * height) as usize;
-    let mut bgra = alloc::vec![0u8; count * 4];
+    let mut bgra = zeroed(count * 4)?;
     for i in 0..count {
         let s = i * channels;
         let d = i * 4;
@@ -144,7 +161,7 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 
 /// Total decoded-pixel budget across a page — once exceeded, further images
 /// stay placeholders so an image-heavy page can't exhaust the shell heap.
-const TOTAL_BUDGET: usize = 24 * 1024 * 1024; // bytes of BGRA
+pub(crate) const TOTAL_BUDGET: usize = 24 * 1024 * 1024; // bytes of BGRA
 
 /// Decode a batch of (src, bytes) into an `ImageMap` (failures / over-budget →
 /// skipped, they render as placeholders).

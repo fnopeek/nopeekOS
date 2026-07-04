@@ -248,27 +248,29 @@ fn fetch(url: &str) -> bool {
 
 /// Fetch the page's `<img>` sources and hand them to the engine to decode.
 /// Runs in the main loop (needs `&mut engine`); bounded by MAX_IMAGES.
+///
+/// STREAMING: fetch one image → decode it now → keep only its pixels → reuse
+/// the same scratch buffer for the next. We never build a Vec of all the
+/// compressed image bytes (the old `pairs` approach peaked at ~16 blobs at
+/// once → the heap-OOM the fast keep-alive pool exposed).
 fn refresh_images(engine: &mut Engine) {
     unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(false) };
     let srcs = beak_engine::image_srcs(html_str());
-    if srcs.is_empty() {
-        engine.set_images(&[]);
-        return;
-    }
-    let base = url_str().to_string();
-    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let mut pairs: alloc::vec::Vec<(String, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
-    for src in srcs.iter().take(MAX_IMAGES) {
-        let abs = resolve(&base, src);
-        let n = unsafe {
-            npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst as i32, IMG_FETCH_CAP as i32)
-        };
-        if n > 0 {
-            let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) }.to_vec();
-            pairs.push((src.clone(), bytes));
+    engine.images_begin();
+    if !srcs.is_empty() {
+        let base = url_str().to_string();
+        let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
+        for src in srcs.iter().take(MAX_IMAGES) {
+            let abs = resolve(&base, src);
+            let n = unsafe {
+                npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst as i32, IMG_FETCH_CAP as i32)
+            };
+            if n > 0 {
+                let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
+                engine.add_image(src, bytes); // decode now, drop compressed
+            }
         }
     }
-    engine.set_images(&pairs);
     bump_content_gen(); // re-layout so decoded images replace placeholders
     mark_dirty();
 }
@@ -801,7 +803,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     } else {
         log("[beak] no location (likely alloc failure)");
     }
-    loop {}
+    // Trap — do NOT `loop {}`. A wasm `unreachable` makes `_start`'s host call
+    // return Err, so the kernel tears this instance down and frees its worker
+    // core. A busy loop would instead pin the core forever (fibers are
+    // cooperative → a spinning fiber never yields) = the "app panic freezes the
+    // machine" bug. Cleanly dying is the whole point of the per-tab sandbox.
+    core::arch::wasm32::unreachable()
 }
 
 #[unsafe(no_mangle)]
