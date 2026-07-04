@@ -226,6 +226,7 @@ pub fn resolve(
     theme: &Theme,
     sheet: &Stylesheet,
     ancestors: &[ElemInfo],
+    viewport_w: f32,
 ) -> ComputedStyle {
     // Start from the inherited slice; reset the non-inherited slice to initial.
     let mut s = ComputedStyle {
@@ -278,7 +279,7 @@ pub fn resolve(
     // Author `<style>` rules, applied low→high specificity (ties: doc order).
     if !sheet.is_empty() {
         let info = ElemInfo::of(el);
-        let mut matched = sheet.matched(&info, ancestors);
+        let mut matched = sheet.matched(&info, ancestors, viewport_w);
         matched.sort_by_key(|(spec, order, _)| (*spec, *order));
         for (_, _, decls) in matched {
             for (p, v) in decls {
@@ -831,44 +832,12 @@ fn parse_length(v: &str, em_base: f32) -> Option<f32> {
     }
 }
 
-/// Parse a CSS `<color>`: `#rgb`, `#rrggbb`, and the common named colours.
-/// `currentcolor`/`inherit` fall through to `None` (keep the inherited value).
+/// Parse a CSS `<color>`. Delegates to the full `color` module — hex
+/// (#rgb/#rgba/#rrggbb/#rrggbbaa), rgb()/rgba()/hsl()/hsla(), and all 148 CSS
+/// named colours. `None` keeps the inherited value (`currentcolor`/`inherit`/
+/// `transparent`/unparseable), preserving the caller's contract.
 fn parse_color(v: &str, _theme: &Theme) -> Option<Rgb> {
-    let v = v.trim();
-    if let Some(hex) = v.strip_prefix('#') {
-        return match hex.len() {
-            3 => {
-                let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
-                let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
-                let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
-                Some(Rgb(r * 17, g * 17, b * 17))
-            }
-            6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                Some(Rgb(r, g, b))
-            }
-            _ => None,
-        };
-    }
-    Some(match v {
-        "black" => Rgb(0, 0, 0),
-        "white" => Rgb(255, 255, 255),
-        "red" => Rgb(220, 38, 38),
-        "green" => Rgb(22, 163, 74),
-        "blue" => Rgb(37, 99, 235),
-        "gray" | "grey" => Rgb(128, 128, 128),
-        "silver" => Rgb(192, 192, 192),
-        "orange" => Rgb(234, 88, 12),
-        "yellow" => Rgb(202, 138, 4),
-        "purple" => Rgb(147, 51, 234),
-        "navy" => Rgb(30, 58, 138),
-        "teal" => Rgb(13, 148, 136),
-        "maroon" => Rgb(153, 27, 27),
-        "currentcolor" | "inherit" => return None,
-        _ => return None,
-    })
+    crate::color::parse_color(v)
 }
 
 #[cfg(test)]
@@ -888,7 +857,7 @@ mod tests {
     fn ua_sheet_gives_headings_size_weight_and_colour() {
         let dom = dom::parse("<body><h1>x</h1></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[]);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], 1000.0);
         assert_eq!(st.display, Display::Block);
         assert!(st.bold);
         assert!(st.font_px > BASE_FONT_PX * 1.5);
@@ -899,7 +868,7 @@ mod tests {
     fn inline_style_attribute_is_parsed() {
         let dom = dom::parse("<body><p style=\"color:#ff0000; font-weight:bold; font-size:20px\">x</p></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[]);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], 1000.0);
         assert_eq!(st.color, Rgb(255, 0, 0));
         assert!(st.bold);
         assert_eq!(st.font_px, 20.0);
@@ -914,7 +883,7 @@ mod tests {
         let sheet = css::parse(".lead { color: #ff0000; font-weight: bold }");
         let root = ComputedStyle::root(&theme);
         // 1st <p>: author sets red+bold, inline overrides colour to green.
-        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[]);
+        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[], 1000.0);
         assert_eq!(a.color, Rgb(0, 255, 0));
         assert!(a.bold);
         // 2nd <p>: author red+bold, no inline.
@@ -922,7 +891,7 @@ mod tests {
             dom::Node::Element(e) => e,
             _ => panic!(),
         };
-        let b = resolve(p2, &root, &theme, &sheet, &[]);
+        let b = resolve(p2, &root, &theme, &sheet, &[], 1000.0);
         assert_eq!(b.color, Rgb(255, 0, 0));
         assert!(b.bold);
     }
@@ -935,7 +904,7 @@ mod tests {
             let html = alloc::format!("<{tag}>x</{tag}>");
             let dom = dom::parse(&html);
             if let dom::Node::Element(e) = &dom.root.children[0] {
-                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[]);
+                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], 1000.0);
                 assert_eq!(st.display, Display::None, "{tag}");
             }
         }

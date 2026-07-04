@@ -16,12 +16,15 @@
 
 extern crate alloc;
 
+pub mod color;
 pub mod css;
 pub mod dom;
 pub mod image;
 pub mod layout;
 pub mod raster;
 pub mod style;
+pub mod values;
+pub mod vars;
 
 pub use dom::{parse, title, Dom, Element, Node};
 pub use image::{Image, ImageMap};
@@ -176,6 +179,81 @@ dieselbe Rechnerei läuft auf dem Desktop.</p>\
         std::fs::write("sample.bmp", to_bmp(&buf, width, height)).expect("write sample.bmp");
         std::eprintln!(
             "beak render: {}x{} px, {} draw ops, {} links → sample.bmp",
+            width, height, lay.ops.len(), lay.links.len()
+        );
+    }
+
+    // ── Bootstrap fidelity oracle ──────────────────────────────────────────
+    // Renders a representative Bootstrap 5 page with the REAL bootstrap.min.css
+    // (assets/) so we can measure "does it look as the author intended".
+    // Run: `cargo test --release render_bootstrap_to_bmp -- --nocapture`
+    // → writes `tools/wasm/beak-engine/bootstrap.bmp`.
+    const BOOTSTRAP_SAMPLE: &str = "<!DOCTYPE html><html><head><title>Bootstrap</title></head><body>\
+<nav class=\"navbar navbar-expand-lg navbar-dark bg-primary\"><div class=\"container\">\
+<a class=\"navbar-brand\" href=\"#\">beak</a>\
+<div class=\"navbar-nav\"><a class=\"nav-link active\" href=\"#\">Home</a>\
+<a class=\"nav-link\" href=\"#\">Features</a><a class=\"nav-link\" href=\"#\">About</a></div>\
+</div></nav>\
+<div class=\"container mt-4\"><div class=\"row\">\
+<div class=\"col-md-8\"><div class=\"card\"><div class=\"card-body\">\
+<h5 class=\"card-title\">Card Title</h5>\
+<p class=\"card-text\">Some quick example text to build on the card title and make up \
+the bulk of the card's content.</p>\
+<a href=\"#\" class=\"btn btn-primary\">Primary</a> \
+<a href=\"#\" class=\"btn btn-secondary\">Secondary</a></div></div></div>\
+<div class=\"col-md-4\">\
+<div class=\"alert alert-warning\" role=\"alert\">A warning alert with \
+<a href=\"#\" class=\"alert-link\">a link</a>.</div>\
+<span class=\"badge bg-success\">Success</span> <span class=\"badge bg-danger\">Danger</span>\
+</div></div>\
+<div class=\"row mt-4\">\
+<div class=\"col\"><div class=\"p-3 bg-light border\">Column one</div></div>\
+<div class=\"col\"><div class=\"p-3 bg-light border\">Column two</div></div>\
+<div class=\"col\"><div class=\"p-3 bg-light border\">Column three</div></div>\
+</div></div></body></html>";
+
+    #[test]
+    fn render_bootstrap_to_bmp() {
+        use crate::layout::{Rgb, Theme};
+        let mut eng = Engine::new();
+        // Bootstrap targets a light body; seed a light palette so an unresolved
+        // body background still reads correctly.
+        eng.set_theme(Theme {
+            bg: Rgb(255, 255, 255),
+            text: Rgb(33, 37, 41),
+            heading: Rgb(33, 37, 41),
+            link: Rgb(13, 110, 253),
+            muted: Rgb(108, 117, 125),
+            rule: Rgb(222, 226, 230),
+        });
+        let css = include_str!("../assets/bootstrap.min.css");
+        let width = 1000u32;
+        let lay_ua = eng.layout_ua(BOOTSTRAP_SAMPLE, width);
+        // How many elements did the DOM actually parse?
+        fn count(e: &crate::dom::Element, els: &mut u32, txt: &mut u32) {
+            *els += 1;
+            for c in &e.children {
+                match c {
+                    crate::dom::Node::Element(ce) => count(ce, els, txt),
+                    crate::dom::Node::Text(t) if !t.trim().is_empty() => *txt += 1,
+                    _ => {}
+                }
+            }
+        }
+        let d = crate::dom::parse(BOOTSTRAP_SAMPLE);
+        let (mut els, mut txt) = (0u32, 0u32);
+        count(&d.root, &mut els, &mut txt);
+        std::eprintln!(
+            "  [diag] DOM: {} elements, {} non-empty text nodes | UA-only: {} ops, {} links, {}px",
+            els, txt, lay_ua.ops.len(), lay_ua.links.len(), lay_ua.height
+        );
+        let lay = eng.layout_ext(BOOTSTRAP_SAMPLE, css, width);
+        let height = lay.height.clamp(1, 4000);
+        let mut buf = alloc::vec![0u8; (width * height * 4) as usize];
+        eng.paint(&lay, width, height, 0, &mut buf);
+        std::fs::write("bootstrap.bmp", to_bmp(&buf, width, height)).expect("write bootstrap.bmp");
+        std::eprintln!(
+            "bootstrap render: {}x{} px, {} ops, {} links → bootstrap.bmp",
             width, height, lay.ops.len(), lay.links.len()
         );
     }

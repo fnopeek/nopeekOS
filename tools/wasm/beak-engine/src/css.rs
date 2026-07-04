@@ -121,12 +121,34 @@ impl Selector {
     }
 }
 
+/// A parsed `@media` condition. We evaluate only the width features that
+/// Bootstrap and WordPress breakpoints rely on (`min-width`/`max-width`, in px)
+/// plus the `screen`/`all` media types; a query naming any other media type or
+/// feature (orientation, prefers-*, print, …) is marked `understood = false`
+/// and never matches, so we never mis-apply its rules.
+#[derive(Clone, Copy)]
+pub struct MediaCond {
+    min_width: Option<f32>,
+    max_width: Option<f32>,
+    understood: bool,
+}
+
+impl MediaCond {
+    fn matches(&self, viewport_w: f32) -> bool {
+        self.understood
+            && self.min_width.is_none_or(|m| viewport_w >= m)
+            && self.max_width.is_none_or(|m| viewport_w <= m)
+    }
+}
+
 /// One `selectors { declarations }` rule; `order` is document position (for
-/// same-specificity tie-breaking, last wins).
+/// same-specificity tie-breaking, last wins). `media` is the `@media`
+/// condition list it sits inside (comma = OR), or `None` when unconditional.
 pub struct Rule {
     selectors: Vec<Selector>,
     decls: Vec<(String, String)>,
     order: u32,
+    media: Option<Vec<MediaCond>>,
 }
 
 /// A parsed author stylesheet.
@@ -149,9 +171,17 @@ impl Stylesheet {
         &'a self,
         subject: &ElemInfo,
         ancestors: &[ElemInfo],
+        viewport_w: f32,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
         let mut out = Vec::new();
         for rule in &self.rules {
+            // Skip rules inside an `@media` block whose condition doesn't hold
+            // at this viewport width.
+            if let Some(conds) = &rule.media {
+                if !conds.iter().any(|c| c.matches(viewport_w)) {
+                    continue;
+                }
+            }
             let mut best: Option<u32> = None;
             for sel in &rule.selectors {
                 if sel.matches(subject, ancestors) {
@@ -181,6 +211,10 @@ pub fn collect_all(dom: &Dom, external: &str) -> Stylesheet {
     if css.trim().is_empty() {
         return Stylesheet::empty();
     }
+    // Expand CSS custom properties (`var(--x)`) as a pre-pass so the parser +
+    // cascade never see variables — modern sites (Bootstrap's `--bs-*`) lean
+    // on them heavily.
+    let css = crate::vars::resolve_vars(&css);
     parse(&css)
 }
 
@@ -231,49 +265,149 @@ fn gather_style_text(el: &Element, out: &mut String) {
     }
 }
 
-/// Parse a stylesheet body into rules (css-syntax-3 subset).
+/// Parse a stylesheet body into rules (css-syntax-3 subset). Descends INTO
+/// `@media` blocks (their rules apply conditionally on the viewport); other
+/// at-rules (`@keyframes`/`@font-face`/`@supports`/`@import`) are skipped.
 pub fn parse(css: &str) -> Stylesheet {
     let css = strip_comments(css);
-    let bytes = css.as_bytes();
     let mut rules = Vec::new();
-    let mut i = 0;
     let mut order = 0u32;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+    parse_into(&css, 0, css.len(), None, &mut rules, &mut order);
+    Stylesheet { rules }
+}
+
+/// Scan `css[start..end]` for rules, tagging each with the given `media`
+/// context, and recurse into nested `@media` blocks. `order` is threaded so
+/// document order is preserved across (and into) media blocks.
+fn parse_into(
+    css: &str,
+    start: usize,
+    end: usize,
+    media: Option<&Vec<MediaCond>>,
+    rules: &mut Vec<Rule>,
+    order: &mut u32,
+) {
+    let bytes = css.as_bytes();
+    let mut i = start;
+    while i < end {
+        while i < end && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
-        if i >= bytes.len() {
+        if i >= end {
             break;
         }
         if bytes[i] == b'@' {
-            i = skip_at_rule(bytes, i);
+            // Read the at-keyword to tell `@media` (descend) from the rest (skip).
+            let mut j = i + 1;
+            while j < end && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'-') {
+                j += 1;
+            }
+            if css[i + 1..j].eq_ignore_ascii_case("media") {
+                let mut k = j;
+                while k < end && bytes[k] != b'{' && bytes[k] != b';' {
+                    k += 1;
+                }
+                if k >= end || bytes[k] == b';' {
+                    i = (k + 1).min(end);
+                    continue;
+                }
+                let conds = parse_media_query(&css[j..k]);
+                let close = matching_brace(bytes, k, end);
+                parse_into(css, k + 1, close, Some(&conds), rules, order);
+                i = (close + 1).min(end);
+            } else {
+                i = skip_at_rule(bytes, i).min(end);
+            }
             continue;
         }
         let sel_start = i;
-        while i < bytes.len() && bytes[i] != b'{' && bytes[i] != b'}' {
+        while i < end && bytes[i] != b'{' && bytes[i] != b'}' {
             i += 1;
         }
-        if i >= bytes.len() || bytes[i] == b'}' {
+        if i >= end || bytes[i] == b'}' {
             break;
         }
         let sel_text = &css[sel_start..i];
         i += 1; // '{'
         let body_start = i;
-        while i < bytes.len() && bytes[i] != b'}' {
+        while i < end && bytes[i] != b'}' {
             i += 1;
         }
-        let body = &css[body_start..i.min(css.len())];
-        if i < bytes.len() {
+        let body = &css[body_start..i.min(end)];
+        if i < end {
             i += 1; // '}'
         }
         let selectors = parse_selector_list(sel_text);
         let decls = parse_decls(body);
         if !selectors.is_empty() && !decls.is_empty() {
-            rules.push(Rule { selectors, decls, order });
-            order += 1;
+            rules.push(Rule { selectors, decls, order: *order, media: media.cloned() });
+            *order += 1;
         }
     }
-    Stylesheet { rules }
+}
+
+/// Index of the `}` that closes the `{` at/after `open` (or `end` if unbalanced).
+fn matching_brace(bytes: &[u8], open: usize, end: usize) -> usize {
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < end {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    end
+}
+
+/// Parse a `@media` prelude (comma = OR) into conditions. Only `min-width`/
+/// `max-width` (px) plus the `screen`/`all`/`only` media types are evaluated;
+/// any other media type or feature marks that branch not-understood so it never
+/// matches (we never mis-apply a rule we cannot evaluate).
+fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
+    prelude
+        .split(',')
+        .map(|q| {
+            let mut cond = MediaCond { min_width: None, max_width: None, understood: true };
+            let ql = q.to_ascii_lowercase();
+            for part in ql.split("and") {
+                let p = part.trim();
+                if p.is_empty() {
+                    continue;
+                }
+                if let Some(inner) = p.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                    let mut kv = inner.splitn(2, ':');
+                    let feat = kv.next().unwrap_or("").trim();
+                    let val = kv.next().unwrap_or("").trim();
+                    match feat {
+                        "min-width" => cond.min_width = parse_px(val),
+                        "max-width" => cond.max_width = parse_px(val),
+                        _ => cond.understood = false,
+                    }
+                } else {
+                    for word in p.split_whitespace() {
+                        match word {
+                            "screen" | "all" | "only" => {}
+                            _ => cond.understood = false,
+                        }
+                    }
+                }
+            }
+            cond
+        })
+        .collect()
+}
+
+/// A media-feature `<length>` — px only (Bootstrap/WP breakpoints are all px).
+fn parse_px(v: &str) -> Option<f32> {
+    let v = v.trim();
+    v.strip_suffix("px").unwrap_or(v).trim().parse::<f32>().ok()
 }
 
 fn strip_comments(css: &str) -> String {
@@ -458,10 +592,10 @@ mod tests {
     #[test]
     fn parses_and_matches_type_class_id() {
         let ss = parse("p { color: red } .lead { font-weight: bold } #main { color: blue }");
-        assert!(!ss.matched(&info("p", None, &[]), &[]).is_empty());
-        assert!(!ss.matched(&info("div", None, &["lead"]), &[]).is_empty());
-        assert!(!ss.matched(&info("div", Some("main"), &[]), &[]).is_empty());
-        assert!(ss.matched(&info("span", None, &[]), &[]).is_empty());
+        assert!(!ss.matched(&info("p", None, &[]), &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("div", None, &["lead"]), &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("div", Some("main"), &[]), &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("span", None, &[]), &[], 1000.0).is_empty());
     }
 
     #[test]
@@ -471,19 +605,19 @@ mod tests {
         let div = info("div", None, &[]);
         let ul = info("ul", None, &[]);
         // nav a: matches an <a> with <nav> anywhere above
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()]).is_empty());
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()]).is_empty());
-        assert!(ss.matched(&info("a", None, &[]), &[div.clone()]).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()], 1000.0).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()], 1000.0).is_empty());
+        assert!(ss.matched(&info("a", None, &[]), &[div.clone()], 1000.0).is_empty());
         // ul > li: <li> whose IMMEDIATE parent is <ul>
-        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()]).is_empty());
-        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()]).is_empty());
+        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()], 1000.0).is_empty());
+        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()], 1000.0).is_empty());
     }
 
     #[test]
     fn specificity_ranks_id_over_class_over_type() {
         let ss = parse("p { color: a } p.x { color: b } #p { color: c }");
         let e = info("p", Some("p"), &["x"]);
-        let mut m = ss.matched(&e, &[]);
+        let mut m = ss.matched(&e, &[], 1000.0);
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         // ascending: type(p) < class(p.x) < id(#p)
         assert_eq!(m.len(), 3);
@@ -497,11 +631,13 @@ mod tests {
              a:hover { color: y } input[type=text] { color: z } \
              h1, h2 { color: ok }",
         );
-        // @media body dropped, :hover + [attr] selectors dropped …
-        assert!(ss.matched(&info("a", None, &[]), &[]).is_empty());
-        assert!(ss.matched(&info("input", None, &[]), &[]).is_empty());
-        // … but the plain "h1, h2" list still parsed.
-        assert!(!ss.matched(&info("h2", None, &[]), &[]).is_empty());
+        // :hover + [attr] selectors dropped (unsupported); the @media block is
+        // now DESCENDED (not dropped), but `screen` alone always matches so its
+        // `p` rule is fine either way …
+        assert!(ss.matched(&info("a", None, &[]), &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("input", None, &[]), &[], 1000.0).is_empty());
+        // … and the plain "h1, h2" list still parsed.
+        assert!(!ss.matched(&info("h2", None, &[]), &[], 1000.0).is_empty());
     }
 
     #[test]
@@ -519,7 +655,7 @@ mod tests {
         // external (red) parsed first, inline <style> (blue) after → blue wins.
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
         let ss = collect_all(&dom, "p { color: red }");
-        let mut m = ss.matched(&info("p", None, &[]), &[]);
+        let mut m = ss.matched(&info("p", None, &[]), &[], 1000.0);
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
         assert!(m[0].1 < m[1].1, "external rule has earlier document order");
@@ -530,7 +666,24 @@ mod tests {
         let dom = dom::parse("<html><head><style>p{color:red}</style></head>\
             <body><style>.x{color:blue}</style><p>hi</p></body></html>");
         let ss = collect(&dom);
-        assert!(!ss.matched(&info("p", None, &[]), &[]).is_empty());
-        assert!(!ss.matched(&info("span", None, &["x"]), &[]).is_empty());
+        assert!(!ss.matched(&info("p", None, &[]), &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("span", None, &["x"]), &[], 1000.0).is_empty());
+    }
+
+    #[test]
+    fn media_min_width_applies_only_above_breakpoint() {
+        // A `.col` base rule always applies; the `@media (min-width:768px)`
+        // override applies only at wide viewports.
+        let ss = parse(
+            ".col { color: red } @media (min-width: 768px) { .col { color: green } }",
+        );
+        let e = info("div", None, &["col"]);
+        // Wide (1000 ≥ 768): both rules present.
+        assert_eq!(ss.matched(&e, &[], 1000.0).len(), 2, "media rule applies wide");
+        // Narrow (500 < 768): only the base rule.
+        assert_eq!(ss.matched(&e, &[], 500.0).len(), 1, "media rule dropped narrow");
+        // An un-evaluable feature never matches (rule dropped both ways).
+        let ss2 = parse("@media (prefers-color-scheme: dark) { .col { color: blue } }");
+        assert!(ss2.matched(&e, &[], 1000.0).is_empty(), "unknown feature never applies");
     }
 }

@@ -196,6 +196,8 @@ struct Ctx<'a> {
     /// Positioned containing block (x, y, width) for `position:absolute`
     /// descendants — the nearest ancestor with `position != static`, else page.
     cb: (i32, i32, i32),
+    /// Viewport width (px) — the layout width — for `@media` evaluation.
+    viewport_w: f32,
 }
 
 /// Lay a document out into a scroll-independent display list.
@@ -219,6 +221,7 @@ pub fn layout(
         links: Vec::new(),
         path: Vec::new(),
         cb: (cx, PAD, cw), // initial containing block = the page content area
+        viewport_w: width as f32,
     };
 
     let mut y = PAD;
@@ -226,7 +229,7 @@ pub fn layout(
     // Resolve <body> itself so `body { … }` rules inherit into the page, and
     // put it on the ancestor path so `body p` / `.article p` selectors match.
     let body = dom.body();
-    let body_style = style::resolve(body, &root, theme, sheet, &[]);
+    let body_style = style::resolve(body, &root, theme, sheet, &[], width as f32);
     ctx.path.push(ElemInfo::of(body));
     y = ctx.layout_children(&body.children, &body_style, cx, cw, y);
     y += PAD;
@@ -252,7 +255,7 @@ impl Ctx<'_> {
                 }
                 Node::Element(el) => el,
             };
-            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path);
+            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path, self.viewport_w);
             if st.display == Display::None {
                 continue;
             }
@@ -433,7 +436,7 @@ impl Ctx<'_> {
         for c in &el.children {
             if let Node::Element(e) = c {
                 if e.tag == "caption" {
-                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path);
+                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, self.viewport_w);
                     self.path.push(ElemInfo::of(e));
                     y = self.layout_children(&e.children, &cs, x, w, y);
                     self.path.pop();
@@ -477,7 +480,7 @@ impl Ctx<'_> {
             let mut row_h = 0i32;
             for (c, cell) in row.iter().enumerate().take(ncols) {
                 let cw = colw[c] as i32;
-                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path);
+                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, self.viewport_w);
                 if cs.display == Display::None {
                     cx += cw + 2 * PADC;
                     continue;
@@ -534,7 +537,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path);
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
                 if cs.display != Display::None {
                     items.push((ce, cs));
                 }
@@ -644,7 +647,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path);
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
                 if cs.display != Display::None {
                     items.push((ce, cs));
                 }
@@ -877,7 +880,7 @@ impl Ctx<'_> {
             match c {
                 Node::Text(t) => inline.text(self.font, t, st, href),
                 Node::Element(ce) => {
-                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path);
+                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
                     if cs.display != Display::None {
                         self.path.push(ElemInfo::of(ce));
                         self.collect_inline(ce, &cs, href, inline);
