@@ -27,3 +27,9 @@ features = ["ahash"]
 version = "0.9"
 default-features = false
 features = ["with-alloc"]
+
+# libm: no_std transcendental math (powf/cbrtf/sinf/cosf) for CSS Color 4
+# colour-space conversions (lab/lch/oklab/oklch/color()). Pure Rust.
+[dependencies.libm]
+version = "0.2"
+default-features = false

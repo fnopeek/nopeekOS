@@ -43,6 +43,25 @@ pub fn parse_color(v: &str) -> Option<Rgb> {
     if let Some(inner) = fn_body(l, "hsl") {
         return parse_hsl(inner);
     }
+    // CSS Color 4 functional forms.
+    if let Some(inner) = fn_body(l, "hwb") {
+        return parse_hwb(inner);
+    }
+    if let Some(inner) = fn_body(l, "oklch") {
+        return parse_lch(inner, true);
+    }
+    if let Some(inner) = fn_body(l, "oklab") {
+        return parse_lab(inner, true);
+    }
+    if let Some(inner) = fn_body(l, "lch") {
+        return parse_lch(inner, false);
+    }
+    if let Some(inner) = fn_body(l, "lab") {
+        return parse_lab(inner, false);
+    }
+    if let Some(inner) = fn_body(l, "color") {
+        return parse_color_fn(inner);
+    }
     // Named colours. `transparent`/`currentcolor`/`inherit` are absent from the
     // table → fall through to `None` (= keep inherited), as the contract wants.
     named_color(l)
@@ -218,6 +237,271 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Rgb {
     )
 }
 
+// ── CSS Color 4: hwb / lab / lch / oklab / oklch / color() ─────────────────
+//
+// Each functional colour is converted to linear sRGB, gamma-encoded, and
+// simple-clipped into gamut. f32 throughout — the oracle's ±20/255 tolerance
+// is far looser than f32 rounding. Matrices/constants are the CSS Color 4
+// "Sample code for color conversions" values (drafts.csswg.org/css-color-4).
+
+/// Split off an optional `/ alpha` tail (dropped — no compositing yet).
+fn split_slash(inner: &str) -> &str {
+    match inner.split_once('/') {
+        Some((c, _a)) => c,
+        None => inner,
+    }
+}
+
+/// `hwb(H W B)` — hue + whiteness + blackness. W/B as `%` or fraction.
+fn parse_hwb(inner: &str) -> Option<Rgb> {
+    let t = tokens(split_slash(inner));
+    if t.len() != 3 {
+        return None;
+    }
+    let h = if t[0] == "none" { 0.0 } else { parse_hue(t[0])? };
+    let w = frac(t[1])?;
+    let bk = frac(t[2])?;
+    if w + bk >= 1.0 {
+        let g = round_u8(w / (w + bk) * 255.0);
+        return Some(Rgb(g, g, g));
+    }
+    // Tint/shade a pure-hue colour: c·(1−W−B) + W.
+    let base = hsl_to_rgb(h, 1.0, 0.5);
+    let mix = |c: u8| round_u8(((c as f32 / 255.0) * (1.0 - w - bk) + w) * 255.0);
+    Some(Rgb(mix(base.0), mix(base.1), mix(base.2)))
+}
+
+/// `lab(L a b)` / `oklab(L a b)`.
+fn parse_lab(inner: &str, ok: bool) -> Option<Rgb> {
+    let t = tokens(split_slash(inner));
+    if t.len() != 3 {
+        return None;
+    }
+    let l = lab_l(t[0], ok)?;
+    let a = lab_ab(t[1], ok)?;
+    let b = lab_ab(t[2], ok)?;
+    Some(if ok { oklab_to_rgb(l, a, b) } else { lab_to_rgb(l, a, b) })
+}
+
+/// `lch(L C H)` / `oklch(L C H)` — polar form of lab/oklab.
+fn parse_lch(inner: &str, ok: bool) -> Option<Rgb> {
+    let t = tokens(split_slash(inner));
+    if t.len() != 3 {
+        return None;
+    }
+    let l = lab_l(t[0], ok)?;
+    let c = lch_c(t[1], ok)?;
+    let h = if t[2] == "none" { 0.0 } else { parse_hue(t[2])? };
+    let rad = h * core::f32::consts::PI / 180.0;
+    let (a, b) = (c * libm::cosf(rad), c * libm::sinf(rad));
+    Some(if ok { oklab_to_rgb(l, a, b) } else { lab_to_rgb(l, a, b) })
+}
+
+/// `color(<space> c1 c2 c3 [/ a])` — predefined + xyz colour spaces.
+fn parse_color_fn(inner: &str) -> Option<Rgb> {
+    let t = tokens(split_slash(inner));
+    if t.len() != 4 {
+        return None;
+    }
+    let c = [num_or_pct(t[1])?, num_or_pct(t[2])?, num_or_pct(t[3])?];
+    let lin = match t[0] {
+        // `color(srgb …)` gives display (gamma) values directly.
+        "srgb" => return Some(gamma_to_rgb(c)),
+        "srgb-linear" => c,
+        "display-p3" => {
+            xyz_to_lin_srgb(mat(&P3_TO_XYZ_D65, [srgb_lin(c[0]), srgb_lin(c[1]), srgb_lin(c[2])]))
+        }
+        "a98-rgb" => {
+            xyz_to_lin_srgb(mat(&A98_TO_XYZ_D65, [a98_lin(c[0]), a98_lin(c[1]), a98_lin(c[2])]))
+        }
+        "prophoto-rgb" => xyz_to_lin_srgb(d50_to_d65(mat(
+            &PROPHOTO_TO_XYZ_D50,
+            [prophoto_lin(c[0]), prophoto_lin(c[1]), prophoto_lin(c[2])],
+        ))),
+        "rec2020" => xyz_to_lin_srgb(mat(
+            &REC2020_TO_XYZ_D65,
+            [rec2020_lin(c[0]), rec2020_lin(c[1]), rec2020_lin(c[2])],
+        )),
+        "xyz" | "xyz-d65" => xyz_to_lin_srgb(c),
+        "xyz-d50" => xyz_to_lin_srgb(d50_to_d65(c)),
+        _ => return None,
+    };
+    Some(lin_srgb_to_rgb(lin))
+}
+
+// — channel parsers —
+
+/// `%`→fraction, bare number as-is, `none`→0.
+fn frac(tok: &str) -> Option<f32> {
+    if tok == "none" {
+        return Some(0.0);
+    }
+    match tok.strip_suffix('%') {
+        Some(p) => Some(p.parse::<f32>().ok()? / 100.0),
+        None => tok.parse().ok(),
+    }
+}
+
+/// `color()` channel: `%`→fraction (100%=1.0), bare number as-is, `none`→0.
+fn num_or_pct(tok: &str) -> Option<f32> {
+    frac(tok)
+}
+
+/// lab/oklab lightness. lab: `%`=0..100 or number; oklab: `%`=0..1 or number.
+fn lab_l(tok: &str, ok: bool) -> Option<f32> {
+    if tok == "none" {
+        return Some(0.0);
+    }
+    match tok.strip_suffix('%') {
+        Some(p) => Some(p.parse::<f32>().ok()? / 100.0 * if ok { 1.0 } else { 100.0 }),
+        None => tok.parse().ok(),
+    }
+}
+
+/// lab/oklab a/b axis. `%` reference: lab ±125, oklab ±0.4.
+fn lab_ab(tok: &str, ok: bool) -> Option<f32> {
+    if tok == "none" {
+        return Some(0.0);
+    }
+    match tok.strip_suffix('%') {
+        Some(p) => Some(p.parse::<f32>().ok()? / 100.0 * if ok { 0.4 } else { 125.0 }),
+        None => tok.parse().ok(),
+    }
+}
+
+/// lch/oklch chroma (≥0). `%` reference: lch 150, oklch 0.4.
+fn lch_c(tok: &str, ok: bool) -> Option<f32> {
+    if tok == "none" {
+        return Some(0.0);
+    }
+    let v = match tok.strip_suffix('%') {
+        Some(p) => p.parse::<f32>().ok()? / 100.0 * if ok { 0.4 } else { 150.0 },
+        None => tok.parse().ok()?,
+    };
+    Some(v.max(0.0))
+}
+
+// — colour-space conversions —
+
+fn lab_to_rgb(l: f32, a: f32, b: f32) -> Rgb {
+    const K: f32 = 24389.0 / 27.0;
+    const E: f32 = 216.0 / 24389.0;
+    let fy = (l + 16.0) / 116.0;
+    let fx = a / 500.0 + fy;
+    let fz = fy - b / 200.0;
+    let xr = if fx * fx * fx > E { fx * fx * fx } else { (116.0 * fx - 16.0) / K };
+    let yr = if l > K * E { fy * fy * fy } else { l / K };
+    let zr = if fz * fz * fz > E { fz * fz * fz } else { (116.0 * fz - 16.0) / K };
+    // Scale by the D50 whitepoint, adapt to D65, project to linear sRGB.
+    let xyz_d50 = [xr * 0.9642956, yr, zr * 0.8251046];
+    lin_srgb_to_rgb(xyz_to_lin_srgb(d50_to_d65(xyz_d50)))
+}
+
+fn oklab_to_rgb(l: f32, a: f32, b: f32) -> Rgb {
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    let s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+    let (ll, mm, ss) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let lin = [
+        4.0767416621 * ll - 3.3077115913 * mm + 0.2309699292 * ss,
+        -1.2684380046 * ll + 2.6097574011 * mm - 0.3413193965 * ss,
+        -0.0041960863 * ll - 0.7034186147 * mm + 1.7076147010 * ss,
+    ];
+    lin_srgb_to_rgb(lin)
+}
+
+/// 3×3 (row-major) × vec3.
+fn mat(m: &[f32; 9], v: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+        m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+        m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+    ]
+}
+
+fn xyz_to_lin_srgb(xyz: [f32; 3]) -> [f32; 3] {
+    mat(&XYZ_D65_TO_LIN_SRGB, xyz)
+}
+fn d50_to_d65(xyz: [f32; 3]) -> [f32; 3] {
+    mat(&BRADFORD_D50_TO_D65, xyz)
+}
+
+/// Linear sRGB → gamma sRGB → clipped `Rgb`.
+fn lin_srgb_to_rgb(lin: [f32; 3]) -> Rgb {
+    Rgb(
+        round_u8(clamp(srgb_gamma(lin[0]), 0.0, 1.0) * 255.0),
+        round_u8(clamp(srgb_gamma(lin[1]), 0.0, 1.0) * 255.0),
+        round_u8(clamp(srgb_gamma(lin[2]), 0.0, 1.0) * 255.0),
+    )
+}
+
+/// Already-gamma sRGB fractions → clipped `Rgb`.
+fn gamma_to_rgb(c: [f32; 3]) -> Rgb {
+    Rgb(
+        round_u8(clamp(c[0], 0.0, 1.0) * 255.0),
+        round_u8(clamp(c[1], 0.0, 1.0) * 255.0),
+        round_u8(clamp(c[2], 0.0, 1.0) * 255.0),
+    )
+}
+
+// — transfer functions (gamma ↔ linear) —
+
+fn srgb_gamma(c: f32) -> f32 {
+    let (a, s) = (fabs(c), if c < 0.0 { -1.0 } else { 1.0 });
+    if a <= 0.0031308 { 12.92 * c } else { s * (1.055 * libm::powf(a, 1.0 / 2.4) - 0.055) }
+}
+fn srgb_lin(c: f32) -> f32 {
+    let (a, s) = (fabs(c), if c < 0.0 { -1.0 } else { 1.0 });
+    if a <= 0.04045 { c / 12.92 } else { s * libm::powf((a + 0.055) / 1.055, 2.4) }
+}
+fn a98_lin(c: f32) -> f32 {
+    let (a, s) = (fabs(c), if c < 0.0 { -1.0 } else { 1.0 });
+    s * libm::powf(a, 563.0 / 256.0)
+}
+fn prophoto_lin(c: f32) -> f32 {
+    let (a, s) = (fabs(c), if c < 0.0 { -1.0 } else { 1.0 });
+    if a <= 16.0 / 512.0 { c / 16.0 } else { s * libm::powf(a, 1.8) }
+}
+fn rec2020_lin(c: f32) -> f32 {
+    const AL: f32 = 1.09929682680944;
+    const BE: f32 = 0.018053968510807;
+    let (a, s) = (fabs(c), if c < 0.0 { -1.0 } else { 1.0 });
+    if a < BE * 4.5 { c / 4.5 } else { s * libm::powf((a + AL - 1.0) / AL, 1.0 / 0.45) }
+}
+
+// — matrices (linear space → XYZ, and XYZ → linear sRGB) —
+
+static XYZ_D65_TO_LIN_SRGB: [f32; 9] = [
+    3.2409699419045226, -1.537383177570094, -0.4986107602930034,
+    -0.9692436362808796, 1.8759675015077202, 0.04155505740717559,
+    0.05563007969699366, -0.20397695888897652, 1.0569715142428786,
+];
+static BRADFORD_D50_TO_D65: [f32; 9] = [
+    0.955473452704218, -0.0230985368742614, 0.0632593086610217,
+    -0.0283697069632081, 1.0099954580058226, 0.0210413989669430,
+    0.0123140016883199, -0.0205076964334779, 1.3303659366080753,
+];
+static P3_TO_XYZ_D65: [f32; 9] = [
+    0.4865709486482162, 0.26566769316909306, 0.19821728523436247,
+    0.2289745640697488, 0.6917385218365064, 0.079286914093745,
+    0.0, 0.04511338185890264, 1.043944368900976,
+];
+static A98_TO_XYZ_D65: [f32; 9] = [
+    0.5766690429101305, 0.1855582379065463, 0.1882286462349947,
+    0.29734497525053605, 0.6273635662554661, 0.07529145849399788,
+    0.02703136138641234, 0.07068885253582723, 0.9913375368376388,
+];
+static PROPHOTO_TO_XYZ_D50: [f32; 9] = [
+    0.7977604896723027, 0.13518583717574031, 0.0313493495815248,
+    0.2880711282292934, 0.7118432178101014, 0.00008565396060525902,
+    0.0, 0.0, 0.8251046025104601,
+];
+static REC2020_TO_XYZ_D65: [f32; 9] = [
+    0.6369580483012914, 0.14461690358620832, 0.16888097516417205,
+    0.2627002120112671, 0.6779980715188708, 0.05930171646986196,
+    0.0, 0.028072693049087428, 1.060985057710791,
+];
+
 // ── named colours ────────────────────────────────────────────────────────
 
 fn named_color(name: &str) -> Option<Rgb> {
@@ -226,8 +510,64 @@ fn named_color(name: &str) -> Option<Rgb> {
             return Some(Rgb(r, g, b));
         }
     }
+    for &(n, r, g, b) in SYSTEM.iter() {
+        if n == name {
+            return Some(Rgb(r, g, b));
+        }
+    }
     None
 }
+
+/// CSS system colours (CSS Color 4 §system-colors) with light-theme values.
+/// Deprecated keywords are aliased to their modern equivalent's value so the
+/// WPT "deprecated-sameas" reftests (which compare a deprecated colour to its
+/// modern target) render identically. Names are pre-lowercased for lookup.
+static SYSTEM: &[(&str, u8, u8, u8)] = &[
+    // modern
+    ("canvas", 255, 255, 255),
+    ("canvastext", 0, 0, 0),
+    ("linktext", 0, 0, 238),
+    ("visitedtext", 85, 26, 139),
+    ("activetext", 255, 0, 0),
+    ("buttonface", 240, 240, 240),
+    ("buttontext", 0, 0, 0),
+    ("buttonborder", 118, 118, 118),
+    ("field", 255, 255, 255),
+    ("fieldtext", 0, 0, 0),
+    ("highlight", 0, 120, 215),
+    ("highlighttext", 255, 255, 255),
+    ("selecteditem", 0, 120, 215),
+    ("selecteditemtext", 255, 255, 255),
+    ("mark", 255, 255, 0),
+    ("marktext", 0, 0, 0),
+    ("graytext", 128, 128, 128),
+    ("accentcolor", 0, 120, 215),
+    ("accentcolortext", 255, 255, 255),
+    // deprecated → aliased to a modern value (must match for -sameas reftests)
+    ("activeborder", 118, 118, 118),      // ButtonBorder
+    ("activecaption", 255, 255, 255),     // Canvas
+    ("appworkspace", 255, 255, 255),      // Canvas
+    ("background", 255, 255, 255),        // Canvas
+    ("buttonhighlight", 240, 240, 240),   // ButtonFace
+    ("buttonshadow", 240, 240, 240),      // ButtonFace
+    ("captiontext", 0, 0, 0),             // CanvasText
+    ("inactiveborder", 118, 118, 118),    // ButtonBorder
+    ("inactivecaption", 255, 255, 255),   // Canvas
+    ("inactivecaptiontext", 128, 128, 128), // GrayText
+    ("infobackground", 255, 255, 255),    // Canvas
+    ("infotext", 0, 0, 0),                // CanvasText
+    ("menu", 255, 255, 255),              // Canvas
+    ("menutext", 0, 0, 0),                // CanvasText
+    ("scrollbar", 255, 255, 255),         // Canvas
+    ("threeddarkshadow", 118, 118, 118),  // ButtonBorder
+    ("threedface", 240, 240, 240),        // ButtonFace
+    ("threedhighlight", 118, 118, 118),   // ButtonBorder
+    ("threedlightshadow", 118, 118, 118), // ButtonBorder
+    ("threedshadow", 118, 118, 118),      // ButtonBorder
+    ("window", 255, 255, 255),            // Canvas
+    ("windowframe", 118, 118, 118),       // ButtonBorder
+    ("windowtext", 0, 0, 0),              // CanvasText
+];
 
 /// The full CSS Color Module Level 4 extended colour keywords (148 entries,
 /// incl. the `aqua`/`cyan`, `fuchsia`/`magenta`, `gray`/`grey` synonyms and
@@ -522,5 +862,53 @@ mod tests {
     #[test]
     fn named_table_has_148_entries() {
         assert_eq!(NAMED.len(), 148);
+    }
+
+    // — CSS Color 4 —
+
+    fn close(got: Rgb, want: Rgb, tol: i32) {
+        let d = (got.0 as i32 - want.0 as i32)
+            .abs()
+            .max((got.1 as i32 - want.1 as i32).abs())
+            .max((got.2 as i32 - want.2 as i32).abs());
+        assert!(d <= tol, "got {got:?} want {want:?} (Δ={d})");
+    }
+
+    #[test]
+    fn hwb_pure_and_gray() {
+        close(parse_color("hwb(120 0% 0%)").unwrap(), Rgb(0, 255, 0), 1);
+        close(parse_color("hwb(0 50% 50%)").unwrap(), Rgb(128, 128, 128), 2);
+    }
+
+    #[test]
+    fn lab_lch_green() {
+        // CSS Color 4 sample: lab(46.2775% -47.5621 48.5837) ≈ #008000.
+        close(parse_color("lab(46.2775% -47.5621 48.5837)").unwrap(), Rgb(0, 128, 0), 3);
+        close(parse_color("lch(46.2775% 68 134.39)").unwrap(), Rgb(0, 128, 0), 4);
+    }
+
+    #[test]
+    fn oklab_oklch_red() {
+        // oklch red ≈ #ff0000.
+        close(parse_color("oklch(0.628 0.2577 29.23)").unwrap(), Rgb(255, 0, 0), 4);
+        close(parse_color("oklab(0.628 0.2249 0.1258)").unwrap(), Rgb(255, 0, 0), 4);
+    }
+
+    #[test]
+    fn color_fn_spaces() {
+        close(parse_color("color(srgb 0 0.5 0)").unwrap(), Rgb(0, 128, 0), 1);
+        close(parse_color("color(srgb-linear 1 1 1)").unwrap(), Rgb(255, 255, 255), 1);
+        // display-p3 green is out of sRGB gamut → clips near pure green.
+        close(parse_color("color(display-p3 0 1 0)").unwrap(), Rgb(0, 255, 0), 6);
+        close(parse_color("color(xyz 0 0 0)").unwrap(), Rgb(0, 0, 0), 1);
+    }
+
+    #[test]
+    fn system_colors_and_deprecated_aliases() {
+        assert_eq!(parse_color("Canvas"), Some(Rgb(255, 255, 255)));
+        assert_eq!(parse_color("CanvasText"), Some(Rgb(0, 0, 0)));
+        // Deprecated keyword renders identically to its modern target.
+        assert_eq!(parse_color("ActiveBorder"), parse_color("ButtonBorder"));
+        assert_eq!(parse_color("WindowText"), parse_color("CanvasText"));
     }
 }
