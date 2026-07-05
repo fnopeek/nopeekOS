@@ -83,6 +83,9 @@ pub enum Len {
     Auto,
     Px(f32),
     Pct(f32),
+    /// `calc()` in affine form `pct% of basis + px` — calc is linear in the
+    /// percentage basis, so any mix of `%`/px/em resolves to (pct, px).
+    Calc { pct: f32, px: f32 },
 }
 
 impl Len {
@@ -92,6 +95,7 @@ impl Len {
             Len::Auto => None,
             Len::Px(p) => Some(p),
             Len::Pct(p) => Some(p / 100.0 * cb),
+            Len::Calc { pct, px } => Some(pct / 100.0 * cb + px),
         }
     }
 }
@@ -150,6 +154,7 @@ pub struct ComputedStyle {
     // — flex container —
     pub flex_row: bool, // flex-direction: row (true) vs column (false)
     pub flex_wrap: bool,
+    pub flex_balance: bool, // flex-wrap: balance (css-flexbox-2 line balancing)
     pub justify: Justify,
     pub align_items: CrossAlign,
     pub gap: f32,
@@ -162,8 +167,24 @@ pub struct ComputedStyle {
     // — grid container —
     pub grid_ncols: u8,
     pub grid_tracks: [GridTrack; MAX_GRID_COLS],
+    pub grid_nrows: u8,
+    pub grid_row_tracks: [GridTrack; MAX_GRID_COLS],
+    pub grid_auto_rows: GridTrack,
+    pub grid_col_gap: f32,
+    pub grid_row_gap: f32,
+    pub justify_items: CrossAlign,
+    // `repeat(auto-fill/auto-fit, …)` in the columns: 0 = none, else the stored
+    // one-copy pattern spans `grid_col_fill_start .. +len` and is expanded to fill
+    // the container width at layout time.
+    pub grid_col_fill: u8,
+    pub grid_col_fill_start: u8,
+    pub grid_col_fill_len: u8,
     // — grid item —
     pub grid_col_span: u16,
+    pub grid_col_start: i16, // 0 = auto placement
+    pub grid_row_start: i16, // 0 = auto placement
+    pub grid_row_span: u16,
+    pub justify_self: Option<CrossAlign>,
 }
 
 impl ComputedStyle {
@@ -205,6 +226,7 @@ impl ComputedStyle {
             is_break: false,
             flex_row: true,
             flex_wrap: false,
+            flex_balance: false,
             justify: Justify::Start,
             align_items: CrossAlign::Stretch,
             gap: 0.0,
@@ -215,7 +237,20 @@ impl ComputedStyle {
             order: 0,
             grid_ncols: 0,
             grid_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+            grid_nrows: 0,
+            grid_row_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+            grid_auto_rows: GridTrack::Auto,
+            grid_col_gap: 0.0,
+            grid_row_gap: 0.0,
+            justify_items: CrossAlign::Stretch,
+            grid_col_fill: 0,
+            grid_col_fill_start: 0,
+            grid_col_fill_len: 0,
             grid_col_span: 1,
+            grid_col_start: 0,
+            grid_row_start: 0,
+            grid_row_span: 1,
+            justify_self: None,
         }
     }
 }
@@ -271,6 +306,7 @@ pub fn resolve(
         is_break: false,
         flex_row: true,
         flex_wrap: false,
+        flex_balance: false,
         justify: Justify::Start,
         align_items: CrossAlign::Stretch,
         gap: 0.0,
@@ -281,7 +317,20 @@ pub fn resolve(
         order: 0,
         grid_ncols: 0,
         grid_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+        grid_nrows: 0,
+        grid_row_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+        grid_auto_rows: GridTrack::Auto,
+        grid_col_gap: 0.0,
+        grid_row_gap: 0.0,
+        justify_items: CrossAlign::Stretch,
+        grid_col_fill: 0,
+        grid_col_fill_start: 0,
+        grid_col_fill_len: 0,
         grid_col_span: 1,
+        grid_col_start: 0,
+        grid_row_start: 0,
+        grid_row_span: 1,
+        justify_self: None,
     };
     ua_rule(&el.tag, parent, theme, &mut s);
 
@@ -454,7 +503,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "inline" | "inline-block" => Display::Inline,
                 "table" | "inline-table" => Display::Table,
                 "flex" | "inline-flex" => Display::Flex,
-                "grid" | "inline-grid" => Display::Grid,
+                "grid" | "inline-grid" | "grid-lanes" | "inline-grid-lanes" => Display::Grid,
                 _ => Display::Block,
             };
         }
@@ -515,12 +564,17 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         // — background + border —
         "background-color" | "background" => {
-            if v == "none" || v == "transparent" {
+            let vt = v.trim();
+            if vt == "none" || vt == "transparent" {
                 s.bg = None;
+            } else if let Some(c) = parse_color(vt, theme) {
+                // Whole value is a colour — handles space-separated function
+                // colours like `rgb(0% 50% 0%)` / `hsl(120 100% 25%)`.
+                s.bg = Some(c);
             } else {
                 // `background` shorthand may carry more than a colour → take the
                 // first token that parses as one; gradients/images are ignored.
-                for tok in v.split_whitespace() {
+                for tok in css_tokens(vt) {
                     if let Some(c) = parse_color(tok, theme) {
                         s.bg = Some(c);
                         break;
@@ -533,7 +587,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.border_color = None;
                 s.border_width = 0.0;
             } else {
-                for tok in v.split_whitespace() {
+                for tok in css_tokens(&v) {
                     if let Some(c) = parse_color(tok, theme) {
                         s.border_color = Some(c);
                     } else if let Some(bw) = parse_length(tok, s.font_px) {
@@ -565,13 +619,20 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         // — flex —
         "flex-direction" => s.flex_row = !v.starts_with("column"),
-        "flex-wrap" => s.flex_wrap = v.starts_with("wrap"),
+        "flex-wrap" => {
+            s.flex_balance = v == "balance";
+            s.flex_wrap = v.starts_with("wrap") || s.flex_balance;
+        }
         "flex-flow" => {
             for tok in v.split_whitespace() {
                 match tok {
                     "row" | "row-reverse" => s.flex_row = true,
                     "column" | "column-reverse" => s.flex_row = false,
                     "wrap" | "wrap-reverse" => s.flex_wrap = true,
+                    "balance" => {
+                        s.flex_wrap = true;
+                        s.flex_balance = true;
+                    }
                     "nowrap" => s.flex_wrap = false,
                     _ => {}
                 }
@@ -589,9 +650,28 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         "align-items" => s.align_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
         "align-self" => s.align_self = parse_cross(&v),
-        "gap" | "column-gap" | "row-gap" | "grid-gap" => {
-            let first = v.split_whitespace().next().unwrap_or(&v);
-            if let Some(g) = parse_length(first, s.font_px) {
+        // `gap` shorthand is `<row-gap> <column-gap>`; the longhands set one axis.
+        "gap" | "grid-gap" => {
+            let mut it = v.split_whitespace();
+            let row = it.next().and_then(|t| parse_length(t, s.font_px));
+            let col = it.next().and_then(|t| parse_length(t, s.font_px)).or(row);
+            if let Some(r) = row {
+                s.grid_row_gap = r;
+                s.gap = r;
+            }
+            if let Some(c) = col {
+                s.grid_col_gap = c;
+            }
+        }
+        "column-gap" => {
+            if let Some(g) = parse_length(v.trim(), s.font_px) {
+                s.grid_col_gap = g;
+                s.gap = g;
+            }
+        }
+        "row-gap" => {
+            if let Some(g) = parse_length(v.trim(), s.font_px) {
+                s.grid_row_gap = g;
                 s.gap = g;
             }
         }
@@ -615,11 +695,62 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         // — grid —
         "grid-template-columns" => {
-            let (n, tracks) = parse_grid_tracks(&v);
-            s.grid_ncols = n;
-            s.grid_tracks = tracks;
+            let t = parse_grid_tracks(&v);
+            s.grid_ncols = t.n;
+            s.grid_tracks = t.tracks;
+            s.grid_col_fill = t.fill;
+            s.grid_col_fill_start = t.fill_start;
+            s.grid_col_fill_len = t.fill_len;
         }
-        "grid-column" => s.grid_col_span = parse_col_span(&v),
+        "grid-template-rows" => {
+            let t = parse_grid_tracks(&v);
+            s.grid_nrows = t.n;
+            s.grid_row_tracks = t.tracks;
+        }
+        "grid-auto-rows" => s.grid_auto_rows = parse_track(v.trim()),
+        // `grid` / `grid-template` shorthand: `<rows> / <cols>` (areas/flow forms
+        // are not supported — they fall through to the row/column split).
+        "grid" | "grid-template" => {
+            if let Some((rows, cols)) = split_slash(&v) {
+                let r = parse_grid_tracks(rows.trim());
+                s.grid_nrows = r.n;
+                s.grid_row_tracks = r.tracks;
+                let c = parse_grid_tracks(cols.trim());
+                s.grid_ncols = c.n;
+                s.grid_tracks = c.tracks;
+                s.grid_col_fill = c.fill;
+                s.grid_col_fill_start = c.fill_start;
+                s.grid_col_fill_len = c.fill_len;
+            }
+        }
+        "grid-column" => {
+            let (start, span) = parse_line_placement(&v);
+            s.grid_col_start = start;
+            s.grid_col_span = span;
+        }
+        "grid-row" => {
+            let (start, span) = parse_line_placement(&v);
+            s.grid_row_start = start;
+            s.grid_row_span = span;
+        }
+        "grid-column-start" => s.grid_col_start = parse_line(v.trim()).unwrap_or(0),
+        "grid-row-start" => s.grid_row_start = parse_line(v.trim()).unwrap_or(0),
+        "justify-items" => s.justify_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
+        "justify-self" => s.justify_self = parse_cross(&v),
+        "place-items" => {
+            let mut it = v.split_whitespace();
+            let a = it.next().unwrap_or("");
+            let j = it.next().unwrap_or(a);
+            s.align_items = parse_cross(a).unwrap_or(CrossAlign::Stretch);
+            s.justify_items = parse_cross(j).unwrap_or(CrossAlign::Stretch);
+        }
+        "place-self" => {
+            let mut it = v.split_whitespace();
+            let a = it.next().unwrap_or("");
+            let j = it.next().unwrap_or(a);
+            s.align_self = parse_cross(a);
+            s.justify_self = parse_cross(j);
+        }
 
         _ => {}
     }
@@ -631,10 +762,36 @@ fn parse_len(v: &str, em: f32) -> Len {
     if v == "auto" {
         return Len::Auto;
     }
+    if v.len() >= 5 && v[..5].eq_ignore_ascii_case("calc(") {
+        if let Some(l) = parse_calc_affine(v, em) {
+            return l;
+        }
+    }
     if let Some(p) = v.strip_suffix('%') {
         return p.trim().parse::<f32>().map(Len::Pct).unwrap_or(Len::Auto);
     }
     parse_length(v, em).map(Len::Px).unwrap_or(Len::Auto)
+}
+
+/// Resolve a `calc()` to affine `(pct, px)` form via the full values resolver:
+/// evaluate with a %-basis of 0 (→ the px part) and 100 (→ px + pct), so any
+/// `%`/px/em mix collapses to `pct% of basis + px`. `rem` approximated by `em`,
+/// `vw`/`vh` unavailable here (0) — covers the common `calc(% ± px/em)` forms.
+fn parse_calc_affine(v: &str, em: f32) -> Option<Len> {
+    let at0 = crate::values::resolve_length(
+        v,
+        &crate::values::LenCtx { em, rem: em, pct_basis: 0.0, vw: 0.0, vh: 0.0 },
+    )?;
+    let at100 = crate::values::resolve_length(
+        v,
+        &crate::values::LenCtx { em, rem: em, pct_basis: 100.0, vw: 0.0, vh: 0.0 },
+    )?;
+    let pct = at100 - at0;
+    if (-0.001..0.001).contains(&pct) {
+        Some(Len::Px(at0))
+    } else {
+        Some(Len::Calc { pct, px: at0 })
+    }
 }
 
 /// Top/bottom margin: `auto` computes to 0 for block boxes.
@@ -659,30 +816,61 @@ fn four_values(v: &str) -> (&str, &str, &str, &str) {
     }
 }
 
-/// Parse `grid-template-columns` into (count, tracks), expanding `repeat(n, …)`.
+/// A parsed track list: `n` tracks in `tracks`, plus—if the source held a
+/// `repeat(auto-fill|auto-fit, …)`—the one-copy pattern's span (`fill_start` ..
+/// `+fill_len`) and `fill` kind (1 = auto-fill, 2 = auto-fit) so layout can
+/// expand it to the container width.
+pub struct TrackList {
+    pub n: u8,
+    pub tracks: [GridTrack; MAX_GRID_COLS],
+    pub fill: u8,
+    pub fill_start: u8,
+    pub fill_len: u8,
+}
+
+/// Parse a `grid-template-*` value, expanding `repeat(n, …)` and recording any
+/// `repeat(auto-fill|auto-fit, …)`. `[line-name]` tokens are skipped.
 /// Truncates at `MAX_GRID_COLS`.
-fn parse_grid_tracks(v: &str) -> (u8, [GridTrack; MAX_GRID_COLS]) {
+fn parse_grid_tracks(v: &str) -> TrackList {
     let mut tracks = [GridTrack::Auto; MAX_GRID_COLS];
     let mut n = 0usize;
+    let (mut fill, mut fill_start, mut fill_len) = (0u8, 0u8, 0u8);
     for tok in split_top_level(v) {
         if n >= MAX_GRID_COLS {
             break;
+        }
+        if tok.starts_with('[') {
+            continue; // line name — no track
         }
         let inner = tok.strip_prefix("repeat(").and_then(|s| s.strip_suffix(')'));
         if let Some(inner) = inner {
             let mut parts = inner.splitn(2, ',');
             let count_s = parts.next().unwrap_or("").trim();
-            let count = if count_s == "auto-fill" || count_s == "auto-fit" {
-                1
-            } else {
-                count_s.parse::<usize>().unwrap_or(1)
+            let sub = parse_grid_tracks(parts.next().unwrap_or("").trim());
+            let auto = match count_s {
+                "auto-fill" => 1u8,
+                "auto-fit" => 2u8,
+                _ => 0u8,
             };
-            let (sn, st) = parse_grid_tracks(parts.next().unwrap_or("").trim());
-            for _ in 0..count {
-                for t in st.iter().take(sn as usize) {
+            if auto != 0 {
+                // Store one copy; layout repeats it to fill the width.
+                fill = auto;
+                fill_start = n as u8;
+                fill_len = sub.n;
+                for t in sub.tracks.iter().take(sub.n as usize) {
                     if n < MAX_GRID_COLS {
                         tracks[n] = *t;
                         n += 1;
+                    }
+                }
+            } else {
+                let count = count_s.parse::<usize>().unwrap_or(1);
+                for _ in 0..count {
+                    for t in sub.tracks.iter().take(sub.n as usize) {
+                        if n < MAX_GRID_COLS {
+                            tracks[n] = *t;
+                            n += 1;
+                        }
                     }
                 }
             }
@@ -691,7 +879,7 @@ fn parse_grid_tracks(v: &str) -> (u8, [GridTrack; MAX_GRID_COLS]) {
             n += 1;
         }
     }
-    (n as u8, tracks)
+    TrackList { n: n as u8, tracks, fill, fill_start, fill_len }
 }
 
 fn parse_track(t: &str) -> GridTrack {
@@ -740,21 +928,58 @@ fn split_top_level(v: &str) -> alloc::vec::Vec<alloc::string::String> {
     out
 }
 
-/// `grid-column` → column span. Handles `span N`, `A / B`, `A / span N`, `A`.
-fn parse_col_span(v: &str) -> u16 {
-    if let Some((a, b)) = v.split_once('/') {
-        let b = b.trim();
-        if let Some(s) = b.strip_prefix("span") {
-            return s.trim().parse().unwrap_or(1);
+/// Split a value at the top-level `/` (respecting `repeat(…)`/`minmax(…)`
+/// parens), returning `(before, after)`. `None` if there is no top-level slash.
+fn split_slash(v: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (i, ch) in v.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '/' if depth == 0 => return Some((&v[..i], &v[i + 1..])),
+            _ => {}
         }
-        if let (Ok(a), Ok(b)) = (a.trim().parse::<i32>(), b.parse::<i32>()) {
-            return (b - a).max(1) as u16;
+    }
+    None
+}
+
+/// A single grid-line spec → its integer index (`0`/`None` for `auto`/named).
+fn parse_line(t: &str) -> Option<i16> {
+    let t = t.trim();
+    if t.is_empty() || t == "auto" {
+        return None;
+    }
+    t.parse::<i16>().ok()
+}
+
+/// `grid-column`/`grid-row` → `(start_line, span)`. `start_line == 0` means
+/// auto-placement. Handles `span N`, `A / B`, `A / span N`, `span N / B`, `A`.
+fn parse_line_placement(v: &str) -> (i16, u16) {
+    let v = v.trim();
+    if let Some((a, b)) = split_slash(v) {
+        let (a, b) = (a.trim(), b.trim());
+        let a_span = a.strip_prefix("span").map(|s| s.trim().parse::<u16>().unwrap_or(1));
+        let b_span = b.strip_prefix("span").map(|s| s.trim().parse::<u16>().unwrap_or(1));
+        match (a_span, b_span) {
+            (Some(sp), _) => {
+                // `span N / B` → end at B, start = B − N.
+                let start = parse_line(b).map(|bl| bl - sp as i16).unwrap_or(0);
+                (start, sp.max(1))
+            }
+            (None, Some(sp)) => (parse_line(a).unwrap_or(0), sp.max(1)),
+            (None, None) => {
+                let start = parse_line(a).unwrap_or(0);
+                let span = match (parse_line(a), parse_line(b)) {
+                    (Some(al), Some(bl)) if bl > al => (bl - al) as u16,
+                    _ => 1,
+                };
+                (start, span.max(1))
+            }
         }
-        1
     } else if let Some(s) = v.strip_prefix("span") {
-        s.trim().parse().unwrap_or(1)
+        (0, s.trim().parse().unwrap_or(1))
     } else {
-        1
+        (parse_line(v).unwrap_or(0), 1)
     }
 }
 
@@ -850,6 +1075,37 @@ fn parse_length(v: &str, em_base: f32) -> Option<f32> {
 /// `transparent`/unparseable), preserving the caller's contract.
 fn parse_color(v: &str, _theme: &Theme) -> Option<Rgb> {
     crate::color::parse_color(v)
+}
+
+/// Split a CSS value on top-level whitespace, keeping parenthesised groups
+/// (`rgb(0% 50% 0%)`, `calc(1px + 2px)`) intact as single tokens. Needed
+/// because CSS function values contain internal spaces that a naive
+/// `split_whitespace` would shred. Values here are ASCII, so byte slicing is
+/// safe on the whitespace/paren boundaries.
+fn css_tokens(v: &str) -> alloc::vec::Vec<&str> {
+    let mut out = alloc::vec::Vec::new();
+    let b = v.as_bytes();
+    let (mut depth, mut start): (i32, Option<usize>) = (0, None);
+    for i in 0..b.len() {
+        let c = b[i];
+        match c {
+            b'(' => depth += 1,
+            b')' => depth = (depth - 1).max(0),
+            _ => {}
+        }
+        let is_ws = matches!(c, b' ' | b'\t' | b'\n' | b'\r');
+        if depth == 0 && is_ws {
+            if let Some(s0) = start.take() {
+                out.push(&v[s0..i]);
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s0) = start {
+        out.push(&v[s0..]);
+    }
+    out
 }
 
 #[cfg(test)]

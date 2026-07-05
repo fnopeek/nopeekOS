@@ -1,8 +1,8 @@
 //! image.rs — raster image decode for `<img>`.
 //!
-//! PNG only for now (8-bit RGB/RGBA, non-interlaced) — the decoder ported from
-//! iris/wallpaper. JPEG is the common web case and comes next; until then a
-//! non-PNG `<img>` falls back to a labelled placeholder box in layout. The
+//! PNG (8-bit RGB/RGBA, non-interlaced, ported from iris/wallpaper) and JPEG
+//! (baseline + progressive, via the no_std zune-jpeg decoder). Other formats
+//! (SVG, GIF, WebP) fall back to a labelled placeholder box in layout. The
 //! shell fetches the bytes (the engine is host-free); the engine decodes them
 //! into `Image`s keyed by the original `src`, ready for layout + paint.
 
@@ -41,9 +41,48 @@ fn zeroed(n: usize) -> Option<Vec<u8>> {
 pub fn decode(bytes: &[u8]) -> Option<Image> {
     if bytes.len() >= 8 && bytes[0..8] == *b"\x89PNG\r\n\x1a\n" {
         decode_png(bytes)
+    } else if bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF] {
+        decode_jpeg(bytes)
     } else {
         None
     }
+}
+
+// ── JPEG (baseline + progressive, via zune-jpeg) ────────────────────────────
+
+fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
+    use zune_core::colorspace::ColorSpace;
+    use zune_core::options::DecoderOptions;
+    use zune_jpeg::JpegDecoder;
+
+    // Force interleaved RGB output (YCbCr and grayscale both convert to RGB),
+    // and cap decoded dimensions so a huge asset can't exhaust the heap.
+    let opts = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGB)
+        .set_max_width(8192)
+        .set_max_height(8192);
+    let mut dec = JpegDecoder::new_with_options(bytes, opts);
+    dec.decode_headers().ok()?;
+    let (w, h) = dec.dimensions()?; // (width, height) in px
+    if w == 0 || h == 0 || w.saturating_mul(h) > MAX_PIXELS {
+        return None;
+    }
+    let rgb = dec.decode().ok()?;
+    let count = w.checked_mul(h)?;
+    // Output is 3-channel RGB (we requested it); bail if the buffer is short.
+    if rgb.len() < count.checked_mul(3)? {
+        return None;
+    }
+    let mut bgra = zeroed(count.checked_mul(4)?)?;
+    for i in 0..count {
+        let s = i * 3;
+        let d = i * 4;
+        bgra[d] = rgb[s + 2]; // B
+        bgra[d + 1] = rgb[s + 1]; // G
+        bgra[d + 2] = rgb[s]; // R
+        bgra[d + 3] = 255;
+    }
+    Some(Image { bgra, w: w as u32, h: h as u32 })
 }
 
 // ── PNG (8-bit RGB/RGBA, non-interlaced) ────────────────────────────────────
