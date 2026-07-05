@@ -30,14 +30,24 @@ use nopeek_widgets::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
+// Declared capabilities: read + write (copy/move/rename/delete files) +
+// exec (npk_open launches the handler app) + render. Without this section
+// loft would get the default READ|EXEC|RENDER and could not mutate the FS.
+#[unsafe(link_section = ".npk.caps")]
+#[used]
+static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER];
+
 unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
+    fn npk_fs_copy(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
+    fn npk_fs_rename(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
     fn npk_open(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
     fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_window_set_clipboard_sink() -> i32;
     fn npk_close_widget() -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sleep(ms: i32) -> i32;
@@ -152,6 +162,22 @@ const ACT_HEADER_FILES:       u32 = 7_002;
 const ACT_HEADER_TYPE:        u32 = 7_003;
 const ACT_HEADER_MTIME:       u32 = 7_004;
 
+// File operations — shared by the Edit menu and the right-click context
+// menu; both act on the current selection (`grid_sel`).
+const ACT_EDIT_COPY:          u32 = 8_000;
+const ACT_EDIT_CUT:           u32 = 8_001;
+const ACT_EDIT_PASTE:         u32 = 8_002;
+const ACT_EDIT_RENAME:        u32 = 8_003;
+// Rename dialog buttons.
+const ACT_RENAME_SUBMIT:      u32 = 8_100;
+const ACT_RENAME_CANCEL:      u32 = 8_101;
+// Click-outside dismiss for the right-click context menu.
+const ACT_CTX_DISMISS:        u32 = 8_200;
+
+// NodeId the context-menu Popover anchors against — placed on the
+// selected item while the menu is open.
+const NODE_CTX_ANCHOR: u32 = 200;
+
 // NodeIds for menu-bar labels — used as Popover anchors.
 const NODE_MENU_FILE: u32 = 100;
 const NODE_MENU_EDIT: u32 = 101;
@@ -230,6 +256,23 @@ enum OpenMenu {
     Help,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClipMode {
+    /// Ctrl+C — paste keeps the source (content-addressed alias, cheap).
+    Copy,
+    /// Ctrl+X — paste moves the source (rename), then the clipboard clears.
+    Cut,
+}
+
+/// A pending copy/cut, set by Ctrl+C/X and consumed by Ctrl+V (paste).
+/// Holds the full source path + the bare name so paste can rebuild a
+/// destination in the current directory.
+struct Clip {
+    full: String,
+    name: String,
+    mode: ClipMode,
+}
+
 struct Loft {
     current:        String,
     history:        Vec<String>,
@@ -288,6 +331,18 @@ struct Loft {
     /// persistent mark so building "current/sub" each tick allocates
     /// nothing on the hot path.
     scratch:        String,
+    /// Pending copy/cut awaiting a paste. None = clipboard empty.
+    clipboard:      Option<Clip>,
+    /// True while the right-click context menu popover is showing.
+    ctx_open:       bool,
+    /// True while the rename dialog is showing. `rename_buf` holds the
+    /// edited name and `rename_old` the source's full path (captured when
+    /// the dialog opened, so a later selection change can't misdirect it).
+    rename_open:    bool,
+    rename_old:     String,
+    /// Pre-allocated (like `query`) so `clear` + `push_str` on every
+    /// InputChange stays inside the same heap block across `alloc_reset`.
+    rename_buf:     String,
 }
 
 impl Loft {
@@ -315,6 +370,11 @@ impl Loft {
             sort_asc:      true,
             stats_queue:   Vec::new(),
             scratch:       String::with_capacity(512),
+            clipboard:     None,
+            ctx_open:      false,
+            rename_open:   false,
+            rename_old:    String::new(),
+            rename_buf:    String::with_capacity(256),
         };
         lf.refresh();
         lf
@@ -556,6 +616,108 @@ impl Loft {
         if next > max { next = max; }
         self.grid_sel = Some(next as usize);
     }
+
+    // ── File operations ───────────────────────────────────────────────
+
+    /// The selected entry's name (in search mode a relative sub-path) and
+    /// dir flag, or None if nothing is selected.
+    fn selected(&self) -> Option<(String, bool)> {
+        let i = self.grid_sel?;
+        let &entry_idx = self.filtered.get(i)?;
+        let e = self.source().get(entry_idx)?;
+        Some((e.name.clone(), e.is_dir))
+    }
+
+    /// True if a paste is possible (clipboard holds something).
+    fn can_paste(&self) -> bool { self.clipboard.is_some() }
+
+    /// Ctrl+C — remember the selection for a keep-source paste.
+    fn do_copy(&mut self) {
+        if let Some((name, _)) = self.selected() {
+            self.clipboard = Some(Clip {
+                full: join(&self.current, &name),
+                name: basename(&name).to_string(),
+                mode: ClipMode::Copy,
+            });
+        }
+    }
+
+    /// Ctrl+X — remember the selection for a move paste.
+    fn do_cut(&mut self) {
+        if let Some((name, _)) = self.selected() {
+            self.clipboard = Some(Clip {
+                full: join(&self.current, &name),
+                name: basename(&name).to_string(),
+                mode: ClipMode::Cut,
+            });
+        }
+    }
+
+    /// Ctrl+V — copy or move the clipboard source into the current dir,
+    /// picking a collision-free name. A Cut clears the clipboard on success.
+    fn do_paste(&mut self) {
+        let (src, name, mode) = match self.clipboard.as_ref() {
+            Some(c) => (c.full.clone(), c.name.clone(), c.mode),
+            None => return,
+        };
+        let dest = self.unique_dest(&name);
+        let rc = match mode {
+            ClipMode::Copy => unsafe {
+                npk_fs_copy(src.as_ptr() as i32, src.len() as i32,
+                            dest.as_ptr() as i32, dest.len() as i32)
+            },
+            ClipMode::Cut => unsafe {
+                npk_fs_rename(src.as_ptr() as i32, src.len() as i32,
+                              dest.as_ptr() as i32, dest.len() as i32)
+            },
+        };
+        if rc == 0 {
+            if mode == ClipMode::Cut { self.clipboard = None; }
+            self.refresh();
+        } else {
+            log("[loft] paste failed");
+        }
+    }
+
+    /// Open the rename dialog pre-filled with the selection's name.
+    fn open_rename(&mut self) {
+        if let Some((name, _)) = self.selected() {
+            let base = basename(&name).to_string();
+            self.rename_old = join(&self.current, &name);
+            self.rename_buf.clear();
+            // Stay within the pre-allocated capacity so the InputChange
+            // mirror never reallocates (bump-heap discipline).
+            let max = self.rename_buf.capacity().min(base.len());
+            self.rename_buf.push_str(&base[..max]);
+            self.rename_open = true;
+            self.open_menu = None;
+            self.ctx_open = false;
+        }
+    }
+
+    /// Commit the rename dialog: move `rename_old` → current/<new name>.
+    fn commit_rename(&mut self) {
+        let new = self.rename_buf.trim();
+        // Reject empty / path-bearing names — rename stays in-place.
+        if new.is_empty() || new.contains('/') {
+            self.rename_open = false;
+            return;
+        }
+        let old = self.rename_old.clone();
+        let dest = join(&self.current, new);
+        self.rename_open = false;
+        if old == dest { return; }
+        let rc = unsafe {
+            npk_fs_rename(old.as_ptr() as i32, old.len() as i32,
+                          dest.as_ptr() as i32, dest.len() as i32)
+        };
+        if rc == 0 { self.refresh(); } else { log("[loft] rename failed"); }
+    }
+
+    /// A collision-free destination for `name` in the current directory.
+    fn unique_dest(&self, name: &str) -> String {
+        unique_in(&self.current, name)
+    }
 }
 
 // ── Render ────────────────────────────────────────────────────────────
@@ -563,7 +725,9 @@ impl Loft {
 fn render(lf: &Loft) -> Widget {
     let menu = render_menu_bar();
     let toolbar = render_toolbar(lf);
-    let body = render_body(lf);
+    // The rename dialog replaces the file area while it's up (same idiom
+    // as spell's "save as" dialog) so its Input is the only editable field.
+    let body = if lf.rename_open { render_rename_dialog(lf) } else { render_body(lf) };
 
     // Custom outer column instead of `prefab::panel`: panel's
     // Padding-Xs + Spacing-Md kept the menu-bar bg from reaching
@@ -592,6 +756,15 @@ fn render(lf: &Loft) -> Widget {
             on_dismiss: ActionId(ACT_MENU_DISMISS),
             modifiers:  alloc::vec![],
         });
+    } else if lf.ctx_open {
+        // Right-click context menu, floated at the selected item (which
+        // carries NODE_CTX_ANCHOR while the menu is open).
+        children.push(Widget::Popover {
+            anchor:     NodeId(NODE_CTX_ANCHOR),
+            child:      alloc::boxed::Box::new(prefab::popover_menu(&file_op_items(lf), None)),
+            on_dismiss: ActionId(ACT_CTX_DISMISS),
+            modifiers:  alloc::vec![],
+        });
     }
 
     Widget::Column {
@@ -599,6 +772,82 @@ fn render(lf: &Loft) -> Widget {
         spacing:   Spacing::None.as_u16(),
         align:     Align::Stretch,
         modifiers: alloc::vec![],
+    }
+}
+
+/// Copy / Cut / Paste / Rename items, shared by the Edit menu and the
+/// right-click context menu. Entries appear only when meaningful — Copy /
+/// Cut / Rename need a selection, Paste needs a filled clipboard.
+fn file_op_items(lf: &Loft) -> Vec<(String, ActionId)> {
+    let mut items: Vec<(String, ActionId)> = Vec::new();
+    let has_sel = lf.selected().is_some();
+    if has_sel {
+        items.push(("Kopieren".to_string(),     ActionId(ACT_EDIT_COPY)));
+        items.push(("Ausschneiden".to_string(), ActionId(ACT_EDIT_CUT)));
+    }
+    if lf.can_paste() {
+        items.push(("Einfügen".to_string(), ActionId(ACT_EDIT_PASTE)));
+    }
+    if has_sel {
+        items.push(("Umbenennen…".to_string(), ActionId(ACT_EDIT_RENAME)));
+    }
+    if items.is_empty() {
+        // Keep the surface non-empty so the click still reads as handled.
+        items.push(("(keine Aktion)".to_string(), ActionId(ACT_MENU_DISMISS)));
+    }
+    items
+}
+
+/// Wrap a grid/list item so the context-menu Popover has an anchor rect.
+/// Applied only to the selected item while the menu is open, so normal
+/// rendering is untouched.
+fn ctx_anchor_wrap(child: Widget) -> Widget {
+    Widget::Column {
+        children:  alloc::vec![child],
+        spacing:   0,
+        align:     Align::Stretch,
+        modifiers: alloc::vec![Modifier::NodeId(NodeId(NODE_CTX_ANCHOR))],
+    }
+}
+
+/// Modal rename dialog — mirrors spell's name dialog. Focus doesn't
+/// auto-jump on a re-commit, so the field must be clicked before typing
+/// (the footer hint says so); Enter commits, Esc cancels.
+fn render_rename_dialog(lf: &Loft) -> Widget {
+    let card = prefab::dialog(
+        "Umbenennen",
+        Widget::Column {
+            children: alloc::vec![
+                Widget::Text {
+                    content:   "Neuer Name:".to_string(),
+                    style:     TextStyle::Muted,
+                    modifiers: alloc::vec![],
+                },
+                prefab::input(&lf.rename_buf, "name", prefab::InputKind::Text,
+                              ActionId(ACT_RENAME_SUBMIT), None),
+                Widget::Row {
+                    children: alloc::vec![
+                        Widget::Spacer { flex: 1 },
+                        prefab::button("Abbrechen",  prefab::ButtonStyle::Ghost,   ActionId(ACT_RENAME_CANCEL)),
+                        prefab::button("Umbenennen", prefab::ButtonStyle::Primary, ActionId(ACT_RENAME_SUBMIT)),
+                    ],
+                    spacing:   Spacing::Sm.as_u16(),
+                    align:     Align::Center,
+                    modifiers: alloc::vec![],
+                },
+            ],
+            spacing:   Spacing::Md.as_u16(),
+            align:     Align::Stretch,
+            modifiers: alloc::vec![],
+        },
+        Some("Klicke ins Feld, dann Enter · Esc bricht ab"),
+        360,
+    );
+    Widget::Column {
+        children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
     }
 }
 
@@ -633,11 +882,7 @@ fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
         ),
         OpenMenu::Edit => (
             NODE_MENU_EDIT,
-            // Empty for now — kept so the dropdown surface still
-            // appears (visual feedback that the click registered).
-            prefab::popover_menu(&[
-                ("(no actions yet)".to_string(), ActionId(ACT_MENU_DISMISS)),
-            ], None),
+            prefab::popover_menu(&file_op_items(lf), None),
         ),
         OpenMenu::View => (
             NODE_MENU_VIEW,
@@ -804,12 +1049,14 @@ fn render_grid(lf: &Loft) -> Widget {
     let grid_children: Vec<Widget> = lf.filtered.iter().enumerate().map(|(ui_idx, &entry_idx)| {
         let e = &source[entry_idx];
         let icon = icon_for(e);
-        prefab::grid_item(
+        let selected = lf.grid_sel == Some(ui_idx);
+        let item = prefab::grid_item(
             icon, &e.name,
-            lf.grid_sel == Some(ui_idx),
+            selected,
             Some(ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32)),
             Some(ActionId(ACT_GRID_HOVER_BASE + ui_idx as u32)),
-        )
+        );
+        if lf.ctx_open && selected { ctx_anchor_wrap(item) } else { item }
     }).collect();
     prefab::grid(grid_children, GRID_COLS)
 }
@@ -831,11 +1078,12 @@ fn render_list(lf: &Loft) -> Widget {
     for (ui_idx, &entry_idx) in lf.filtered.iter().enumerate() {
         let e = &source[entry_idx];
         let selected = lf.grid_sel == Some(ui_idx);
-        rows.push(list_data_row(
+        let row = list_data_row(
             e, selected, browsing,
             ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32),
             ActionId(ACT_GRID_HOVER_BASE + ui_idx as u32),
-        ));
+        );
+        rows.push(if lf.ctx_open && selected { ctx_anchor_wrap(row) } else { row });
     }
     Widget::Column {
         children: rows,
@@ -993,13 +1241,36 @@ fn breadcrumb_for(path: &str) -> Widget {
 enum Outcome { Idle, Rerender, Exit }
 
 fn handle(lf: &mut Loft, ev: Event) -> Outcome {
+    // The rename dialog is modal: while it's up it owns Enter/Esc + its
+    // buttons, and InputChange feeds the name buffer. Every other event is
+    // swallowed so grid navigation doesn't run underneath the dialog.
+    if lf.rename_open {
+        return match ev {
+            Event::Key(KeyCode::Escape) => { lf.rename_open = false; Outcome::Rerender }
+            Event::Key(KeyCode::Enter)  => { lf.commit_rename(); Outcome::Rerender }
+            Event::InputChange { value } => {
+                lf.rename_buf.clear();
+                let max = lf.rename_buf.capacity().min(value.len());
+                lf.rename_buf.push_str(&value[..max]);
+                Outcome::Rerender
+            }
+            Event::Action(ActionId(id)) => handle_action(lf, id),
+            _ => Outcome::Idle,
+        };
+    }
+
     match ev {
         Event::Key(KeyCode::Escape) => {
-            // Two-step: first Escape clears a non-empty search,
-            // second Escape closes the window. Mirrors the
-            // common-cancel-then-quit pattern of macOS Finder /
-            // Spotlight / many editors.
-            if !lf.query.is_empty() {
+            // Cancel the most-specific overlay first, then clear a search,
+            // then quit — the common cancel-then-quit ladder (Finder /
+            // Spotlight / editors).
+            if lf.ctx_open {
+                lf.ctx_open = false;
+                Outcome::Rerender
+            } else if lf.open_menu.is_some() {
+                lf.open_menu = None;
+                Outcome::Rerender
+            } else if !lf.query.is_empty() {
                 lf.query.clear();
                 lf.refilter();
                 Outcome::Rerender
@@ -1018,6 +1289,8 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         }
         Event::Key(KeyCode::Right)     => { lf.select_delta_x( 1); Outcome::Rerender }
         Event::Key(KeyCode::Enter)     => { lf.open_selected(); Outcome::Rerender }
+        // F2 renames the selection — the familiar file-manager shortcut.
+        Event::Key(KeyCode::F(2))      => { lf.open_rename(); Outcome::Rerender }
         Event::Key(KeyCode::Backspace) => {
             // Same fall-through reasoning as Left/Right above —
             // Backspace inside a non-empty search is consumed by the
@@ -1025,6 +1298,11 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
             // as "go up" (Finder convention).
             lf.go_up(); Outcome::Rerender
         }
+        // Ctrl+C / X / V, delivered by the compositor because loft's grid
+        // isn't a text widget. Copy/cut arm the clipboard; paste applies it.
+        Event::Clipboard(ClipKind::Copy)  => { lf.do_copy();  Outcome::Rerender }
+        Event::Clipboard(ClipKind::Cut)   => { lf.do_cut();   Outcome::Rerender }
+        Event::Clipboard(ClipKind::Paste) => { lf.do_paste(); Outcome::Rerender }
         Event::InputChange { value } => {
             // Mirror the new buffer into our pre-mark `query` slot
             // (clear + push_str within capacity) so it survives the
@@ -1036,9 +1314,26 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
             lf.refilter();
             Outcome::Rerender
         }
+        // Right-click a file/folder → select it and open the context menu.
+        Event::ContextAction(ActionId(id)) => handle_context(lf, id),
         Event::Action(ActionId(id)) => handle_action(lf, id),
         _ => Outcome::Idle,
     }
+}
+
+/// Right-click dispatch: select the clicked grid/list item and raise the
+/// context menu popover anchored to it.
+fn handle_context(lf: &mut Loft, id: u32) -> Outcome {
+    if id >= ACT_GRID_CLICK_BASE && id < ACT_GRID_HOVER_BASE {
+        let ui_idx = (id - ACT_GRID_CLICK_BASE) as usize;
+        if ui_idx < lf.filtered.len() {
+            lf.grid_sel = Some(ui_idx);
+            lf.open_menu = None;
+            lf.ctx_open = true;
+            return Outcome::Rerender;
+        }
+    }
+    Outcome::Idle
 }
 
 fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
@@ -1092,6 +1387,18 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             log("[loft] About: nopeekOS file browser, v0.2.x");
             lf.open_menu = None;
             Outcome::Rerender
+        }
+        // File operations — from the Edit menu or the right-click context
+        // menu. Both close whichever menu raised them and act on the
+        // current selection / clipboard.
+        ACT_EDIT_COPY  => { lf.do_copy();  lf.open_menu = None; lf.ctx_open = false; Outcome::Rerender }
+        ACT_EDIT_CUT   => { lf.do_cut();   lf.open_menu = None; lf.ctx_open = false; Outcome::Rerender }
+        ACT_EDIT_PASTE => { lf.do_paste(); lf.open_menu = None; lf.ctx_open = false; Outcome::Rerender }
+        ACT_EDIT_RENAME => { lf.open_rename(); Outcome::Rerender }
+        ACT_RENAME_SUBMIT => { lf.commit_rename(); Outcome::Rerender }
+        ACT_RENAME_CANCEL => { lf.rename_open = false; Outcome::Rerender }
+        ACT_CTX_DISMISS => {
+            if lf.ctx_open { lf.ctx_open = false; Outcome::Rerender } else { Outcome::Idle }
         }
         // Column-header clicks → sort / toggle direction.
         ACT_HEADER_NAME  => { lf.set_sort(SortKey::Name);     Outcome::Rerender }
@@ -1367,6 +1674,62 @@ fn dir_exists(path: &str) -> bool {
     n > 0 && out[8] != 0
 }
 
+// ── Path helpers for file operations ──────────────────────────────────
+
+/// Join a directory path with a child name. npkFS uses slash paths and
+/// the filesystem root is the empty string, so a join off root omits the
+/// leading slash.
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() { name.to_string() } else { alloc::format!("{}/{}", dir, name) }
+}
+
+/// Final path component of a (possibly relative, search-mode) name.
+fn basename(name: &str) -> &str {
+    match name.rsplit_once('/') {
+        Some((_, b)) => b,
+        None => name,
+    }
+}
+
+/// True if any object (file or directory) exists at `path`.
+fn path_exists(path: &str) -> bool {
+    let mut out = [0u8; 17];
+    let n = unsafe {
+        npk_fs_stat(path.as_ptr() as i32, path.len() as i32, out.as_mut_ptr() as i32)
+    };
+    n > 0
+}
+
+/// Split a file name into (stem, extension-with-dot): "a.txt" → ("a",
+/// ".txt"); "README" → ("README", ""). A leading dot (dotfile) stays in
+/// the stem so the copy suffix lands before any real extension.
+fn split_ext(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    }
+}
+
+/// A collision-free full path for `name` inside `dir`. Appends " copy",
+/// then " copy 2", " copy 3"… before the extension until the path is free
+/// (Finder/Files idiom), capped so a pathological directory can't spin.
+fn unique_in(dir: &str, name: &str) -> String {
+    let base = join(dir, name);
+    if !path_exists(&base) { return base; }
+    let (stem, ext) = split_ext(name);
+    let mut n = 1u32;
+    loop {
+        let cand_name = if n == 1 {
+            alloc::format!("{} copy{}", stem, ext)
+        } else {
+            alloc::format!("{} copy {}{}", stem, n, ext)
+        };
+        let cand = join(dir, &cand_name);
+        if !path_exists(&cand) || n >= 999 { return cand; }
+        n += 1;
+    }
+}
+
 // Wire: name\0size_le_u64(8)\0is_dir_u8(1)\0mtime_le_u64(8) on
 // kernel ≥ v0.146; older kernels stop after is_dir (10 trailing
 // bytes). Parse defensively — accept either shape so the loft
@@ -1574,6 +1937,9 @@ pub extern "C" fn _start() {
     let mut idle_ticks: u32 = 0;
 
     commit_tree(&loft);
+    // The widget window exists after the first commit — opt into receiving
+    // Ctrl+C/X/V as Event::Clipboard so the shortcuts drive file operations.
+    unsafe { let _ = npk_window_set_clipboard_sink(); }
 
     loop {
         match poll_event() {

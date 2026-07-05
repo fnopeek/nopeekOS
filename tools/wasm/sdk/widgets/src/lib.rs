@@ -105,8 +105,8 @@ pub mod caps {
 
 // Re-export the core ABI types at the crate root for ergonomic use.
 pub use abi::{
-    Action, ActionId, Align, Axis, CanvasId, Density, EffectId, Event, Fill,
-    IconId, KeyCode, Modifier, MouseButton, NodeId, Palette, Point, Rect,
+    Action, ActionId, Align, Axis, CanvasId, ClipKind, Density, EffectId, Event,
+    Fill, IconId, KeyCode, Modifier, MouseButton, NodeId, Palette, Point, Rect,
     Role, Shadow, Size, Span, TextStyle, Token, Transition, Widget,
 };
 pub use app_meta::{AppMeta, AppMetaError, IconRef, APP_META_WIRE};

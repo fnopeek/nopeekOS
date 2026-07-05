@@ -32,7 +32,7 @@ pub mod animation;
 
 mod check_abi;
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -270,6 +270,27 @@ pub fn widget_window_exists(window_id: u32) -> bool {
 /// drop the now-orphaned queue.
 pub fn remove_event_queue(window_id: u32) {
     EVENT_QUEUES.lock().remove(&window_id);
+    CLIPBOARD_SINKS.lock().remove(&window_id);
+}
+
+// ── Clipboard-sink opt-in ─────────────────────────────────────────────
+//
+// A window that manages its own selection (e.g. loft's file grid) opts in
+// via `npk_window_set_clipboard_sink`. For a sink window, a Ctrl+C/X/V
+// chord that a focused text widget can't act on (copy/cut with no text
+// selection, paste into an empty single-line Input) is delivered to the
+// app as `Event::Clipboard` instead of being swallowed. Non-sink windows
+// keep the original behaviour, so existing apps' text paste is unaffected.
+static CLIPBOARD_SINKS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// Mark `window_id` as a clipboard sink (idempotent).
+pub fn set_clipboard_sink(window_id: u32) {
+    CLIPBOARD_SINKS.lock().insert(window_id);
+}
+
+/// True if `window_id` opted into `Event::Clipboard` delivery.
+pub fn is_clipboard_sink(window_id: u32) -> bool {
+    CLIPBOARD_SINKS.lock().contains(&window_id)
 }
 
 /// Deepest widget at (x, y) that declares an OnClick — returns the
@@ -1351,7 +1372,7 @@ pub fn handle_input_key(
     // Phase 1: confirm a focused text widget exists; capture its kind
     // (Input on_submit, or TextArea) + the window height for paging.
     // Drop the read lock before mutating.
-    let (is_textarea, on_submit, win_h) = {
+    let (is_textarea, on_submit, win_h, has_sel, value_empty) = {
         let scenes = SCENES.lock();
         let scene = match scenes.get(&window_id) {
             Some(s) => s,
@@ -1360,9 +1381,15 @@ pub fn handle_input_key(
         if scene.focus_path.is_empty() || scene.input_edit.is_none() {
             return false;
         }
+        // Selection presence + emptiness decide whether a clipboard chord
+        // is "text" or should fall through to the app (below).
+        let (has_sel, value_empty) = match scene.input_edit.as_ref() {
+            Some(e) => (e.selection().is_some(), e.value.is_empty()),
+            None    => (false, true),
+        };
         match widget_at_path(&scene.tree, &scene.focus_path) {
-            Some(abi::Widget::Input { on_submit, .. }) => (false, *on_submit, scene.height),
-            Some(abi::Widget::TextArea { .. })         => (true, abi::ActionId(u32::MAX), scene.height),
+            Some(abi::Widget::Input { on_submit, .. }) => (false, *on_submit, scene.height, has_sel, value_empty),
+            Some(abi::Widget::TextArea { .. })         => (true, abi::ActionId(u32::MAX), scene.height, has_sel, value_empty),
             _ => return false,
         }
     };
@@ -1383,8 +1410,36 @@ pub fn handle_input_key(
         _                          => None,
     };
     if let Some(letter) = clip_letter {
-        if matches!(letter, b'c' | b'x' | b'v' | b'a') {
+        // For a clipboard-sink window (loft), decide whether this chord is a
+        // TEXT op (consume it here) or should fall through to the app as a
+        // file/object clipboard op. A focused text field only owns the chord
+        // when it can act on text:
+        //   - Select-all: always text.
+        //   - Copy / Cut: only with a live selection — nothing selected means
+        //     nothing to copy as text, so let the app copy the selected file.
+        //   - Paste: a TextArea (an editor) always pastes text; a single-line
+        //     Input pastes text only when it's non-empty or has a selection.
+        //     An idle empty Input (loft's search box) lets the paste fall
+        //     through so the app pastes a file.
+        // Non-sink windows keep the original always-consume behaviour, so
+        // text paste in every other app is unchanged.
+        let text_op = if is_clipboard_sink(window_id) {
+            match letter {
+                b'a'        => true,
+                b'c' | b'x' => has_sel,
+                b'v'        => is_textarea || has_sel || !value_empty,
+                _           => false,
+            }
+        } else {
+            true
+        };
+        if text_op {
             return handle_clipboard_key(window_id, letter, is_textarea);
+        }
+        if matches!(letter, b'c' | b'x' | b'v') {
+            // Not a text op — return false so the caller's clipboard routing
+            // delivers `Event::Clipboard` to the focused app.
+            return false;
         }
     }
 
