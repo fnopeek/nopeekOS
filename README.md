@@ -1,88 +1,69 @@
 # nopeekOS
 
-**An AI-native operating system. Rethought from scratch.**
+**A capability-based operating system where every app and driver is a
+sandboxed WASM module.**
 
-Not a Unix clone. Not POSIX. No legacy from the '70s.
-A system where AI is the primary operator -- and the human is the conductor.
+A bare-metal Rust kernel. No Unix. No POSIX. No root. No legacy from
+the '70s. Apps, drivers, and even a from-scratch web browser all run
+inside the same WASM trust boundary — the only thing outside it is the
+microkernel itself.
 
 ---
 
 ## The Idea
 
-Why does an operating system look the way it does? Because in 1969 humans had to type every command manually. Because in 1984 a desktop metaphor was needed. Because in 2025 humans still manage processes, install drivers, and type `chmod 755`.
+Why does an operating system look the way it does? Mostly because of
+decisions made decades ago: processes because that's how 1969 hardware
+was shared, `chmod 755` because that's how 1984 multi-user Unix drew its
+lines, a filesystem tree because that's how you found things on a tape.
 
-nopeekOS flips the question: **What remains when you remove fifty years of assumptions?**
+nopeekOS asks a different question: **what does an OS look like if you
+start over today?**
 
-- A **Capability Vault** instead of permissions
-- A **WASM Sandbox** instead of processes
-- An **Intent Loop** instead of a shell
-- A **Content-Addressed Store** instead of a filesystem
-- **Runtime-generated tools** instead of pre-installed software
+- A **capability vault** instead of permissions — no `chmod`, no ACLs, no root
+- **WASM sandboxes** instead of processes — one trust boundary for everything
+- A **content-addressed store** (npkFS) instead of a filesystem tree
+- **Intents** instead of commands — express what you want, not the protocol
+- **Encrypted by default** — every byte on disk is AES-256-GCM at rest
 
-Everything else is generated at runtime.
+The kernel is written in Rust (`no_std`, nightly, x86_64) and boots
+straight from UEFI. Everything above it — the compositor, the panels,
+the file browser, the text editor, the WiFi driver, the web browser — is
+a signed, capability-gated WASM module.
 
 ---
 
 ## What It Can Do Today
 
+A tiling desktop with real apps, networking, encrypted storage, and a
+native web browser — running on bare metal (Intel N100 NUC, HP laptop)
+and in QEMU.
+
 ```
-npk> status                          # Full system overview (cores, RAM, disk, net)
-npk> store config version=1.0        # Store object (BLAKE3-hashed, encrypted at rest)
-npk> fetch config                    # Retrieve + decrypt + integrity check
-npk> list                            # All objects with hashes
-npk> run <module>                    # Execute WASM from npkFS (sandboxed, cap-gated)
-npk> ping google.ch                  # ICMP ping (with DNS resolution)
-npk> traceroute 8.8.8.8              # Network path tracing
-npk> resolve google.com              # DNS resolution
-npk> http example.com /              # HTTP GET (full TCP/IP stack)
-npk> https sandbox.nopeek.ch /       # HTTPS GET (TLS 1.3, AES-NI hardware crypto)
-npk> http example.com / > mypage     # Fetch and store in npkFS
-npk> update                          # OTA update (ECDSA P-384 signed, SHA-384 verified)
-npk> reboot                          # ACPI reset + PCI CF9 + triple-fault fallback
-npk> uname                           # Kernel version info
-npk> uptime                          # Time since boot
-npk> history                         # Last 32 commands (arrow up/down to recall)
-npk> lock                            # Lock system (clear keys)
-npk> passwd                          # Change passphrase
-npk> top                               # System monitor (WASM app: cores, memory, scheduler)
-npk> cores                             # Trustworthy per-core CPU instrumentation (idle-measured)
-npk> find report                       # Search npkFS object names
-npk> grep TODO notes                   # Search inside a stored object
-npk> install wallpaper                 # Install WASM module (signed, verified)
-npk> install top                       # Install system monitor app
-npk> install debug                     # Install remote debug shell
-npk> uninstall wallpaper               # Remove module
-npk> modules                          # List installed modules
-npk> debug 192.168.1.50 22222         # Reverse mirror — laptop: `nc -l 22222`
-npk> driver wifi                       # RTL8852BE bring-up + 3× scan (BSSID/SSID/ch)
-npk> wallpaper demo                    # Generate 3 demo wallpapers + auto-theme
-npk> wallpaper set ocean              # Set wallpaper (extracts theme colors)
-npk> wallpaper random                  # Random wallpaper from collection
-npk> wallpaper clear                   # Revert to aurora background
-npk> install drun                      # Mod+D app launcher (widget-kind)
-[ Mod+D ]                               # Open drun overlay — ↑↓ select, Enter launch, Esc close
-npk> install loft                      # File browser (widget-kind, list/grid view)
-npk> install spell                     # Text editor (tabs, syntax highlight, npkFS)
-npk> install iris                      # Image viewer (PNG, canvas escape-hatch)
-npk> install snap                      # Screenshot tool (full-screen capture → npkFS)
-npk> install aml                       # AML battery driver (vendor-independent % via firmware _BST/_BIF)
-npk> browser                           # Launch LibreWolf in a tiled microvm window (multi-vCPU)
-npk> gpu init                          # Initialize Intel Xe GPU (auto 4K@60Hz)
-npk> gpu 4k60                         # Switch to 4K@60Hz (HDMI 2.0 scrambling)
-npk> gpu 4k                           # Switch to 4K@30Hz
-npk> disk read 0                     # Raw sector hex dump
-npk> vmx                              # Probe virt extensions (VT-x or AMD-V)
-npk> microvm test                     # MicroVM substrate self-test (vendor-dispatched)
-npk> microvm linux                    # Boot Linux 6.18 LTS in MicroVM (Intel + AMD)
-npk> microvm shell hi                 # Inject "hi" into PID-1, capture echo
-                                      # → live `[guest]` earlyprintk on console
-npk> microvm linux                    # …also boots cage + LibreWolf (OTA
-                                      # bundle): a real GUI browser renders
-                                      # as a tiled window beside the terminal
+# Desktop
+Mod+D                    # App launcher (drun) — search + Enter to launch
+loft                     # File browser: grid/list, copy/cut/paste, sortable columns
+spell                    # Text editor: tabs, syntax highlight, save to npkFS
+iris                     # Image viewer (PNG)
+snap                     # Screenshot → npkFS
+beak                     # Native web browser (from scratch, no Linux)
+browser                  # LibreWolf in a Linux microVM (compatibility browser)
+
+# The intent loop (terminal)
+npk> status              # System overview (cores, RAM, disk, net)
+npk> store notes v=1     # Store an object (BLAKE3-addressed, encrypted at rest)
+npk> fetch notes         # Retrieve + decrypt + integrity-check
+npk> find report         # Search object names   ·   grep TODO notes
+npk> https nopeek.ch /   # HTTPS GET (TLS 1.3, hardware AES) — add `> page` to store
+npk> install <module>    # Fetch + verify (ECDSA P-384) a signed WASM module
+npk> update              # OTA kernel update (signed, SHA-384 verified)
+npk> driver wifi         # Bring up the AX200 WiFi driver + scan
+npk> cores               # Trustworthy per-core CPU instrumentation
 ```
 
-Every operation is capability-gated. No ambient authority. No root. No sudo.
-All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
+Every operation is capability-gated. No ambient authority, no sudo.
+Identity is your passphrase — no users, no accounts. All data encrypted
+at rest.
 
 ---
 
@@ -90,56 +71,29 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
 
 ```
  ┌──────────────────────────────────────────────────────────┐
- │  Linux Apps (LibreWolf, etc.)                            │
- │  MicroVM (VT-x or AMD-V, Mini-Linux, virtio bridges)    │
+ │  WASM apps & drivers (sandboxed, capability-gated)         │
+ │  shade  — tiling compositor (theme, panels, animation)     │
+ │  bar / dock  — top + bottom panels                         │
+ │  drun / loft / spell / iris / snap — launcher + apps       │
+ │  beak   — from-scratch web browser (HTML/CSS engine)       │
+ │  wifi / aml / audio_hda — hardware drivers as WASM         │
  ├──────────────────────────────────────────────────────────┤
- │  WASM Modules (sandboxed, capability-gated)              │
- │  shade.wasm — Compositor (tiling, borders, bar, theme)   │
- │  loop.wasm  — Intent Loop (command dispatch, terminal)   │
- │  wallpaper.wasm — PNG decoder + color extraction         │
- │  wifi.wasm  — RTL8852BE WiFi driver (PCIe, DMA, FW)     │
- │  bar/dock.wasm — top + bottom panels (npk_window_set_panel)│
- │  drun/loft.wasm — launcher + file browser                │
- │  spell.wasm — text editor   │  iris.wasm — image viewer  │
- │  snap.wasm — screenshot     │  Future: more user apps    │
+ │  MicroVM (compatibility layer)                             │
+ │  VT-x / AMD-V hypervisor · custom Linux 6.18 · virtio      │
+ │  bridges · 9p↔npkFS · runs LibreWolf as a tiled window     │
  ├──────────────────────────────────────────────────────────┤
- │  WASM Runtime                                            │
- │  wasmi v1.0 (interpreter, fuel-metered)                  │
- │  → Cranelift JIT (WASM → x86_64, near-native speed)     │
+ │  WASM runtime (wasmi, fuel-metered) + host ABI (npk_*)     │
+ │  npk_scene_commit — declarative widget rendering           │
+ │  npk_fs_* · npk_http_request · npk_input · npk_battery     │
+ │  npk_pci/mmio/dma — capability-gated driver ABI            │
  ├──────────────────────────────────────────────────────────┤
- │  Host-Function API (npk_*)                               │
- │  npk_layer_write/composite — Layer-based rendering       │
- │  npk_fb_info — Screen dimensions, scale                  │
- │  npk_input_poll — Keyboard/mouse events                  │
- │  npk_fs_* — npkFS access    │  npk_net_* — Network      │
- │  npk_pci_*/mmio_*/dma_* — Driver ABI (capability-gated) │
+ │  Kernel (Rust, no_std)                                     │
+ │  SMP scheduler (work-stealing + stackful fibers)           │
+ │  npkFS v3 (content-addressed, CoW, encrypted)              │
+ │  Crypto (AES-256-GCM · BLAKE3 · TLS 1.3 · ECDSA P-384)     │
+ │  Capability vault · network stack · GPU HAL · drivers      │
  ├──────────────────────────────────────────────────────────┤
- │  SMP Scheduler              │  Layer Compositor          │
- │  Work-stealing pool         │  Background / Chrome /     │
- │  Core 0 = Kernel/IRQ        │  Text / Cursor layers      │
- │  Cores 1..N = Workers       │  Dirty-region compositing  │
- │  MONITOR/MWAIT wakeup       │  GPU BCS blit (ExecList)   │
- ├──────────────────────────────────────────────────────────┤
- │  npkFS v3                   │  Crypto Engine             │
- │  Content-addressed trees    │  AES-256-GCM (HW AES-NI)  │
- │  CoW B-tree, BLAKE3 (AVX2) │  BLAKE3 hashing (AVX2)    │
- │  NVMe queue depth 128       │  TLS 1.3: X25519 + P-384  │
- │  In-place AEAD decrypt      │  ECDSA P-384 signatures   │
- ├──────────────────────────────────────────────────────────┤
- │  Capability Vault           │  OTA Updates               │
- │  256-bit tokens, deny-all   │  ECDSA P-384 signed        │
- │  Passphrase identity        │  SHA-384 verified           │
- │  Temporal scoping, audit    │  npk install (modules)     │
- ├──────────────────────────────────────────────────────────┤
- │  GPU HAL                    │  Network Stack             │
- │  GOP (QEMU/VBox/any HW)    │  Ethernet, ARP, IPv4       │
- │  Intel Xe (4K@60Hz HDMI)   │  ICMP, UDP, TCP            │
- │  VirtIO GPU (planned)       │  DNS, DHCP, NTP, HTTP/S   │
- ├──────────────────────────────────────────────────────────┤
- │  Kernel Core (Rust, no_std, Microkernel)                 │
- │  SMP (N cores), 64GB Paging, Heap, IDT, ACPI, Serial    │
- ├──────────────────────────────────────────────────────────┤
- │  Hardware: x86_64, UEFI                                  │
+ │  Hardware: x86_64, UEFI                                    │
  └──────────────────────────────────────────────────────────┘
 ```
 
@@ -147,902 +101,200 @@ All data encrypted at rest. Passphrase-based identity -- no users, no accounts.
 
 ## Core Principles
 
-### Capabilities, Not Permissions
+### Capabilities, not permissions
 
-No `chmod`, no ACLs, no root, no sudo.
-Every resource requires a cryptographic token (256-bit, CSPRNG, post-quantum safe).
-WASM modules receive delegated capabilities with limited rights and expiry.
-Everything is audited.
+No `chmod`, no ACLs, no root, no sudo. Every resource requires a
+256-bit cryptographic token (CSPRNG, Grover-resistant). Tokens delegate
+with monotonically shrinking rights, expire on a tick clock, and can be
+revoked transitively. Everything is audited. **Deny by default:** without
+a token, nothing happens.
 
-**Security model: Deny by Default.** Without a token, nothing happens.
+### WASM as the universal execution model
 
-### Intents, Not Commands
+Every app and every driver is a WASM module — loaded from npkFS,
+BLAKE3-verified before execution, fuel-metered, and given exactly the
+capabilities it declares in a 1-byte `.npk.caps` section (default:
+READ + EXECUTE + RENDER, never WRITE). A hardware driver reaches its
+device through capability-gated `npk_pci_*` / `npk_mmio_*` / `npk_dma_*`
+host functions — the same sandbox contains a text editor and a WiFi
+stack. A guest trap kills exactly one instance, nothing else.
 
-Instead of `curl -X GET http://...`, you say: `http example.com /`.
-The system handles DNS, TCP, HTTP -- the user expresses intent, not protocol details.
+### Content-addressed storage (npkFS)
 
-### Content-Addressed Storage (npkFS)
+No paths as identity, no hierarchy in the on-disk format. Objects are
+identified by their BLAKE3 hash; directories are Git-style tree objects.
+Copy-on-write B-tree, dedup on write, AES-256-GCM at rest, per-entry
+mtime, mark-and-sweep GC. Apps still see opaque path strings — the tree
+is content-addressed underneath.
 
-No paths. No hierarchy. Every object identified by its BLAKE3 hash.
-SSD-native: Copy-on-Write B-tree, rotating superblock, batch TRIM/DISCARD.
-Store a web page: `http example.com / > mypage` -- content-addressed caching.
+### Intents, not commands
 
-### WASM as Universal Execution
-
-Every execution is a sandboxed WASM module:
-- Loaded from npkFS, BLAKE3-verified before execution
-- Each module gets its own delegated capability token (READ+EXECUTE, 60s TTL)
-- Fuel-metered: 10M instruction budget prevents infinite loops
-- Host functions capability-gated: `npk_fetch` needs READ, `npk_store` needs WRITE
-
----
-
-## Completed Phases
-
-### Phase 1 -- Bare Metal Boot
-
-- [x] UEFI boot (PE32+ Application via OVMF / firmware, long mode in)
-- [x] Physical Memory Manager (bitmap allocator, contiguous allocation for DMA)
-- [x] Heap Allocator (linked-list, first-fit, coalescing)
-- [x] Virtual Memory (4-level paging, NX bit, 64GB identity-mapped via 1GB huge pages)
-- [x] Interrupts (IDT + PIC, 100Hz timer)
-- [x] Serial Console (COM1, 115200 baud, line editing)
-- [x] VGA Boot Banner
-
-### Phase 2 -- Capability System
-
-- [x] Capability Vault (256-bit random token IDs (post-quantum safe))
-- [x] CSPRNG (RFC 7539, RDRAND-seeded, forward secrecy)
-- [x] Token delegation with rights monotonicity
-- [x] Temporal scoping (tick-based expiry)
-- [x] Transitive revocation
-- [x] Audit log (ring buffer, all operations logged)
-- [x] Intent-capability coupling (every intent checked)
-
-### Phase 3 -- WASM Runtime
-
-- [x] wasmi v1.0 interpreter (no_std)
-- [x] Fuel metering (10M instruction budget, prevents hangs)
-- [x] Module loading from npkFS (BLAKE3 integrity check)
-- [x] Per-module delegated capabilities (READ+EXECUTE, 60s TTL)
-- [x] Host functions: `npk_log`, `npk_print`, `npk_fetch`, `npk_store`
-
-### Phase 4 -- Block I/O + npkFS
-
-- [x] PCI bus scanner (config space via 0xCF8/0xCFC)
-- [x] virtio-blk driver (legacy PCI, 4KB block API, TRIM/DISCARD)
-- [x] npkFS: Copy-on-Write B-tree (19 entries/leaf, 56 keys/internal, recursive split)
-- [x] BLAKE3 content hashing + B-tree node checksums
-- [x] 8-slot rotating superblock (SSD wear leveling)
-- [x] LRU block cache (64 slots, 256KB, write coalescing)
-- [x] 2-phase journal (crash-safe deferred frees, idempotent replay)
-- [x] Indirect extent blocks (3 direct + chained indirect, unlimited file size)
-- [x] Batch TRIM/DISCARD (merged adjacent ranges)
-- [x] Next-fit allocator (amortized O(1) block allocation)
-- [x] Intents: `store`, `fetch`, `delete`, `list`, `fsinfo`, `disk read/write`
-
-### Phase 5 -- Network Stack
-
-- [x] virtio-net driver (legacy PCI, RX/TX virtqueues, 32 RX buffers)
-- [x] Ethernet frame handling
-- [x] ARP (request/reply, 16-entry cache)
-- [x] IPv4 (send/receive, header checksum, custom TTL)
-- [x] ICMP (ping/pong, TTL exceeded for traceroute)
-- [x] UDP (stateless, port-based listeners)
-- [x] TCP (full state machine, no Nagle, 40ms delayed ACK, 3 retries max 10s)
-- [x] DNS resolver (A records, 16-entry cache)
-- [x] DHCP client (auto-configure IP at boot)
-- [x] NTP client (SNTP, wall-clock time)
-- [x] HTTP client (`http <host> [path]`, response stored in npkFS with `>`)
-- [x] Traceroute, netstat
+Instead of `curl -X GET https://…`, you say `https example.com /`. The
+system owns DNS, TCP, TLS, HTTP — you express intent, not protocol.
 
 ---
 
-## Roadmap
+## What's Built
 
-### Phase 6 -- Crypto & Identity
+Grouped by subsystem. Kernel is at **v0.228.0**; the full change history
+lives in the git log and `memory/`.
 
-- [x] **AES-256-GCM AEAD encryption** — primary at-rest cipher, hardware-accelerated (AES-NI + PCLMULQDQ on N100)
-- [x] **BLAKE3 hashing** — AVX2 backend on x86_64, integrity verify on every read
-- [x] **SSE/AVX2 kernel bring-up** (v0.85.x) — CR4.OSFXSR/OSXMMEXCPT/OSXSAVE + XSETBV before first Rust instruction
-- [x] ChaCha20-Poly1305 AEAD (TLS_CHACHA20_POLY1305_SHA256 cipher-suite for peer compat)
-- [x] Passphrase-based identity (BLAKE3-KDF -> 256-bit master key, 16-byte per-install salt)
-- [x] Encryption at rest (all npkFS blobs AES-256-GCM, integrity verify via BLAKE3)
-- [ ] Post-quantum crypto: ML-KEM (Kyber) + ML-DSA (Dilithium), hybrid with X25519/Ed25519
-- [x] TLS 1.3 (RFC 8446, X25519 + ECDH P-384 key exchange)
-- [x] TLS 1.3: AES-128-GCM-SHA256 + AES-256-GCM-SHA384 cipher suites (via RustCrypto aes-gcm crate)
-- [x] HTTPS client (`https <host> [path]`)
-- [x] X.509 certificate chain validation
-- [x] Embedded root CAs (ISRG Root X1, DigiCert G2, AAA, GTS Root R1)
-- [x] SHA-256, HMAC-SHA256, HKDF, RSA PKCS#1 v1.5 verify (via RustCrypto `rsa` crate, v0.89.0)
-- [x] X.509 SAN (Subject Alternative Name) for TLS hostname verification
-- [x] **X.509 conformance** (v0.89.0) — KeyUsage, ExtendedKeyUsage, BasicConstraints `pathLenConstraint`, unknown-critical-extension reject
-- [x] **SHA-1 reject** (v0.89.0) — `sha1WithRSAEncryption` removed from accepted sig-algos
-- [x] ECDSA P-384 signature verification (OTA updates, PrehashVerifier)
-- [x] **TCP ISN — RFC 6528** (v0.89.0) — BLAKE3-keyed-hash of 4-tuple under per-boot CSPRNG secret + monotonic offset, replaces predictable tick-counter ISN
-- [x] **ARP active resolve** (v0.89.1) — `arp::resolve` helper + cache-miss `arp::request` so first SYN/UDP after cold boot uses real MAC, not L2 broadcast
+**Kernel & SMP** — UEFI PE32+ boot straight to long mode; 4-level paging
+with NX + write-combining; growable heap (64 MB → 2 GB). All cores boot
+(no limit) via a Chase-Lev work-stealing scheduler with MONITOR/MWAIT
+sleep, plus a stackful-fiber layer so blocking host calls yield instead
+of pinning a core. Per-core idle quiesces to real HLT.
 
-### Phase 7 -- Bare Metal (target: Intel N100 NUC)
+**Security & crypto** — 256-bit capability vault (delegation, temporal
+scoping, transitive revocation, audit log). AES-256-GCM at rest via
+AES-NI + PCLMULQDQ; BLAKE3 via AVX2. Full TLS 1.3 (RFC 8446, X25519 +
+ECDH P-384, three cipher suites, X.509 chain validation with 4 embedded
+root CAs) on RustCrypto primitives. Passphrase-derived identity
+(BLAKE3-KDF), no accounts. OTA updates signed with ECDSA P-384 + SHA-384.
 
-- [x] xHCI USB keyboard driver (BIOS handoff, HID boot protocol, disconnect detection)
-- [x] PS/2 keyboard (extended scancodes, arrow keys, lock-free ringbuffer)
-- [x] Intel I226-V Ethernet driver (igc, MMIO, RX/TX advanced descriptors, PCIe bridge)
-- [x] Framebuffer driver (UEFI GOP, double-buffer shadow A/B, 32-bit pixel write)
-- [x] TSC timer fallback (CPUID 0x15 calibration, replaces PIT on UEFI-only systems)
-- [x] NVMe driver (PCIe BAR0 MMIO, Admin/IO queues, Read/Write/TRIM)
-- [x] 64GB RAM support (1GB huge pages, dynamic memory detection)
-- [x] Tick-based USB timeouts (CPU-speed independent)
-- [x] ACPI power-off (RSDP, FADT, DSDT \_S5 parsing)
-- [x] Gateway routing, serial detection, dual xHCI controllers
-- [x] APIC timer (auto-detect PIT vs APIC, TSC-calibrated, 100Hz periodic)
-- [ ] SSH-compatible remote access (replaces old npk-shell prototype)
-- [x] USB mouse (HID boot protocol, xHCI multi-device, software cursor, click-to-focus, Mod+drag)
-- [x] IRQ-driven USB polling (APIC timer drains xHCI, atomic SPSC ring buffers)
-- [x] WASM driver model (drivers as sandboxed modules, capability-gated I/O)
-- [x] WiFi driver: RTL8852BE firmware download (WASM module, PCIe DMA, MFW container)
-- [ ] WiFi driver: MAC init, RF calibration, scan, association
-- [x] **RTL8153 USB-Ethernet** (v0.194.0, HW-validated on the HP notebook) —
-      xHCI bulk + r8152 class driver + netdev; wired LAN on first try (0bda:8153)
-- [x] **TCP Window Scaling** (v0.194.9) — RFC 7323 + 1 MiB receive buffer;
-      downloads went from a ~4 MB/s (64 KB-window) cap to ~gigabit
-- [x] **`aml.wasm` — AML interpreter as the first real WASM driver**
-      (v0.200.0, HW-validated on the HP) — runs the firmware's `_BST`/`_BIF`
-      AML methods (ACPICA-style) for a **vendor-independent battery %**, no
-      per-device offset hardcode. New `HARDWARE` capability (0x40) gates
-      firmware-driven EC reads/writes; the bar reads it via `npk_battery`
-- [x] **UEFI relocatable boot — HP notebook boots again** (v0.193.10) —
-      PIE/relocation fix, schliesslich 4 layered problems: Secure Boot,
-      non-relocatable image, oversized EFI, and the HP trapping a legacy-PIC
-      ICW1 write via SMI → reset (fix: mask the PIC + APIC timer only, PS/2
-      polling fallback)
+**npkFS v3** — content-addressed CoW B-tree, per-block BLAKE3, rotating
+superblock, LRU cache, journalled crash recovery, batch TRIM, dedup
+fastpath, per-entry mtime, auto-GC. ~480 MB/s write, ~370 MB/s read on
+an N100 (encrypted, on top of NVMe).
 
-### Phase 8 -- Human View
+**Networking** — Ethernet / ARP / IPv4 / ICMP / UDP / TCP from scratch,
+plus DNS, DHCP, NTP, and an HTTP/HTTPS client with a keep-alive
+connection pool and TCP window scaling (RFC 7323, ~gigabit).
 
-- [x] GUI login screen (Hyprlock-inspired: large clock, centered dots, pill input)
-- [x] Spleen bitmap font system (8x16, 16x32, 32x64, BSD 2-Clause licensed)
-- [x] Procedural aurora background (animated, per-frame generated)
-- [x] 4K auto-scaling (2x when resolution >1920px)
-- [x] Semi-transparent rounded rectangles with 4x4 subpixel anti-aliasing
-- [x] Damage tracking for efficient framebuffer updates
-- [x] OTA update system (`update` intent, ECDSA P-384 signed, SHA-384 verified, ESP FAT32 write)
-- [x] `build.sh release` for signing kernel + manifest generation
-- [x] HTTP/1.1 client (RFC 7230: Content-Length, chunked transfer, proper response parsing)
-- [x] `reboot` intent (ACPI reset register + PCI CF9 + keyboard controller + triple-fault)
-- [x] `uname`/`version`/`kernel`/`uptime` intents
-- [x] Command history (arrow up/down, 32 entries, ring buffer)
-- [x] AltGr support for Swiss German keyboard (@ # | [ ] { } \ ~)
-- [x] Purple `[npk]` accent color in boot output
-- [x] Shade compositor (Hyprland-inspired tiling WM, dwindle layout)
-- [x] Per-window terminal sessions (heap-allocated, no limit, independent input/output)
-- [x] Shadebar (Waybar-inspired: workspace indicators, clock, window title) — now a WASM panel (`bar.wasm`); the kernel keeps only the strut geometry + a native fallback
-- [x] **Battery indicator in the top bar** (v0.199→v0.200) — Phosphor battery
-      glyphs + live %; segment only shows when a battery responds. Reads via
-      the `aml.wasm` AML driver (see Phase 7), HW-validated on the HP notebook
-- [x] Window keybindings: Mod+Enter/Q/1-4/Arrows/Shift+Arrows/Ctrl+Arrows/F/V/PgUp/PgDn
-- [x] Smooth window swap animation (ease-out cubic, 250ms)
-- [x] Aurora background cache (render once, memcpy per region, ~100x faster)
-- [x] USB mouse input (xHCI HID, composite device support, multi-device)
-- [x] Software cursor overlay (truly lock-free, cached shadow_front AtomicPtr)
-- [x] Click-to-focus, Mod+LMB swap-drag, Mod+RMB resize-drag (throttled 33fps)
-- [x] Tiling-aware resize (adjusts dwindle split ratio, neighbors adapt)
-- [x] Text cursor navigation (Left/Right/Home/End, insert at position, history recall)
-- [x] KeyEvent abstraction (KeyCode + Modifiers, layout-independent, no ESC state machine)
-- [x] GPU modesetting (Intel Xe Gen 12.2, native 4K@60Hz HDMI 2.0 via DDI-B, DPLL1, combo PHY)
-- [x] HDMI 2.0 scrambling (GMBUS I2C, SCDC, DVI->HDMI mode switch, auto-fallback to 4K@30)
-- [x] Write-Combining framebuffer (PAT MSR, ~5-10x faster blits)
-- [x] USB keyboard key repeat (timer-based, 500ms delay, 50ms rate)
-- [x] Growable heap (64MB initial, on-demand 64MB chunks, max 2GB, local O(1) coalescing)
-- [x] Wallpaper demo (4 procedural themes, quarter-res, auto-theme extraction)
-- [x] BCS blitter engine (Gen 12 ExecList, GPU-accelerated compositing)
-- [x] GPU-composited cursor (save-under, eliminates blit race)
-- [x] **Platform window close button** (kernel v0.201→v0.204) — the compositor
-      draws a bare theme-coloured `X` near the top-right of every real window
-      (not per-app; light/dark aware, equal margins). Mouse-close without
-      Mod+Q. Suppressed on panels, launcher overlays (drun) and the browser
-- [x] **Light/dark theme for loop/terminal** (v0.202.x) — terminal windows
-      resolve fg/bg from the theme like widget apps; follow `theme=auto`
-      (wallpaper luminance), with extra wallpaper show-through in light mode
-- [x] **Auto-hide dock pushes tiles up** (v0.202.5) — when the dock reveals,
-      tiled windows glide up to make room (equal gap above/below) and glide
-      back down as it hides
-- [x] **Scrollable windows + draggable scrollbars** (v0.203→v0.204) —
-      `Widget::Scroll` became a real platform primitive (clip + wheel offset +
-      overlay scrollbar shown only on overflow) usable by any app; the loop
-      terminal and the spell editor scroll too. Mouse-wheel **and** drag the
-      thin overlay bar; the loop/terminal also soft-wraps long lines
-- [ ] VSync via PLANE_SURF double-buffer flip (zero-tearing + zero-latency)
-- [ ] Web rendering engine (long-term)
+**Drivers** — NVMe, xHCI USB (keyboard + mouse, HID boot protocol),
+Intel I226-V and RTL8153 USB Ethernet, Intel Xe GPU (native 4K@60Hz
+HDMI 2.0 + a Gen-12 BCS blitter for compositing), Intel HDA audio, an
+AML interpreter driving firmware `_BST`/`_BIF` for a vendor-independent
+battery %, and an Intel AX200 WiFi driver. WiFi, AML, and audio run as
+**WASM modules**; hardware drivers are ported 1:1 from Linux.
 
-### Phase 9 -- SMP & Event-Driven Architecture (in progress)
+**Desktop (Shade)** — Hyprland-style dwindle tiling compositor: rounded
+corners via SDF, light/dark `theme=auto` following wallpaper luminance,
+GPU-composited cursor, smooth swap animations, per-window scrolling. The
+top bar and bottom dock are themselves WASM **panels**, alpha-composited
+translucent over the wallpaper.
 
-The kernel is transitioning to an event-driven microkernel. Core 0 becomes a thin
-event dispatcher (IRQ + input + blit). All work moves to worker cores via the
-Chase-Lev work-stealing scheduler. SMP is live -- all cores boot and steal work.
+**Widget platform** — apps build a declarative `Widget` tree with the
+`nopeek_widgets` SDK and commit it through one host function; the
+compositor owns layout, rasterization (real Inter font metrics via
+fontdue), theming, and animation — apps never touch pixels. Popover,
+Scroll, TextArea (2-D caret + live syntax highlighting), self-editing
+Input, Phosphor icon atlas, per-app capabilities, and file associations
+(double-click → handler app) are all in.
 
-**SMP (Symmetric Multiprocessing)**
-- [x] ACPI MADT parsing (Type 0 Local APIC + Type 9 x2APIC, no core limit)
-- [x] AP trampoline (16-bit real -> 32-bit protected -> 64-bit long mode, copied to 0x8000)
-- [x] INIT-SIPI-SIPI AP startup (sequential boot, atomic readiness counter)
-- [x] Per-AP infrastructure (64KB stack, shared GDT/IDT/CR3, LAPIC enabled)
-- [x] Tested on Intel N100 NUC (4 cores) and QEMU (configurable via -smp)
-- [x] Work-stealing scheduler (Chase-Lev SPMC deque, 256 tasks/core)
-- [x] MONITOR/MWAIT wakeup (C1E sleep, nanosecond wake on memory write)
-- [x] spawn()/spawn_local() API with priority system (Critical/Interactive/Normal/Background)
-- [x] Global WORK_AVAILABLE signal (cache-line aligned, all APs monitor)
-- [x] Lock-free mouse cursor (AtomicI32 x/y, cached AtomicPtr shadow, no lock for movement)
-- [x] Intel HWP auto-scaling (per-core, efficiency→turbo, CPUID-based)
-- [x] WASM apps on worker cores (non-blocking, per-app key buffers)
-- [x] Double-buffer framebuffer (shadow A/B, render→back, swap, blit←front, commit_front)
-- [x] **`cores`/`cpu` — trustworthy per-core instrumentation** (v0.184.0):
-      idle measured directly via per-core HLT/MWAIT cycle counters
-      (`CORE_HALT_TSC`), not the self-reported busy-TSC the WASM `top`
-      uses. Reports true BUSY% (=100−halted), HALTS/s, avg C-state
-      residency, queue depth, measured ROLE. `top`'s busy% can't tell
-      halted from spinning; `cores` is the ground truth.
-- [x] **Idle path quiesces** (v0.186.0) — root cause was `cpu-pm=on`
-      (HLT/MWAIT passthrough so the vCPU thread never VM-exited → KVM never
-      parked it). Fix: per-core worker APIC timer (vec 50) + plain HLT idle
-      (VM-exits → host core actually frees) and `cpu-pm` dropped
-- [x] **Per-core APIC timer** (v0.186.0) — worker cores arm their own
-      100 Hz timer instead of waking via IPI only; the idle-quiesce prereq
-- [x] **Fiber / green-thread app scheduler** (`SCHEDULER_FIBERS.md`,
-      v0.188→v0.191, HW-validated 2026-06-01) — stackful coroutines: blocking
-      host calls (`npk_sleep`) yield, so loft + spell run side-by-side without
-      each pinning a core; the microvm vCPU runs as a dynamic pool fiber
-      (no wasted pinned core)
-- [x] **Guest-SMP (multi-vCPU)** (v0.193→v0.198, AMD + Intel/VMX
-      HW-validated) — one guest vCPU per distinct host worker core
-      (`fiber::admit`, VMX-root is per-core): MP table → LAPIC emulation →
-      per-vCPU APIC-ID → SIPI AP bring-up → cross-vCPU IPIs. The browser
-      boots on 2 vCPUs; AMD 6-core scales to 5. Idle vCPUs park (host CPU → 0)
-- [ ] Thermal load balancing (migrate tasks when core >80% busy)
+**Apps** — `loft` (file browser: sidebar, grid/list, sortable columns,
+copy/cut/paste/rename), `spell` (text editor: tabs, multi-language
+syntax highlight, markdown preview), `iris` (image viewer), `snap`
+(screenshot), `drun` (launcher), `top`/`cores` (system monitors).
 
-**Event-Driven Intent Architecture**
-- [x] IntentSession struct on heap (input_buf, cursor, history, cwd per window)
-- [x] Core 0 = event dispatcher only (never blocks >100μs)
-- [ ] handle_key() as fire-and-forget task on worker core
-- [x] execute_intent() spawns sub-tasks for heavy work
-- [x] HTTP/HTTPS as async worker task (non-blocking, UI stays responsive)
-- [x] OTA update as async worker task (non-blocking)
-- [x] Module install as async worker task (non-blocking)
+**MicroVM** — a per-app KVM-style hypervisor inside the kernel (Intel
+VT-x + EPT and AMD-V + NPT, vendor-symmetric), running a custom
+9.5 MB **Linux 6.18-nopeek** build. virtio-blk / -net / -gpu / -input
+backends, a 9p bridge that mounts npkFS into the guest, profile-image
+persistence, and guest-SMP (one vCPU per host worker core). It runs
+**LibreWolf** as a tiled window — the compatibility browser for the
+legacy web.
 
-**App Display API**
-- [x] `npk_print` / `npk_clear` — write/clear app's terminal display
-- [x] `npk_input_wait(timeout_ms)` — blocking wait for key or timeout
-- [x] `npk_sys_info(key)` — system information (cores, memory, freq, usage, processes)
-- [x] Per-app SPSC key buffers (one per terminal, heap-allocated)
-- [x] Inline key routing (shade keybinds intercepted, rest to app)
-- [x] OTA module updates (`update` checks kernel + WASM modules)
-- [x] Process tracking (per-app CPU time, memory, core, name, uptime)
-- [x] Windows registered in process table (each loop gets a PID)
-- [ ] Widget API (`npk_widget_list`, `npk_widget_input`, `npk_widget_select`)
+---
 
-**WASM Runtime**
-- [x] wasmi v1.0 interpreter (register-based, fuel-metered)
-- [x] Interactive execution on worker cores (1B fuel budget)
-- [x] Dynamic process table (BTreeMap, heap-allocated, unlimited PIDs)
+## beak — the native browser (current focus)
 
-**WASM Driver ABI**
-- [x] Hardware host functions: `npk_pci_config_read/write`, `npk_mmio_map/read/write`, `npk_dma_alloc`
-- [x] Device-bound capability validation (each MMIO/DMA call checked)
-- [x] PCI BAR auto-assignment + PCIe bridge window configuration
-- [x] DMA buffer allocation below 4GB (32-bit TX BD constraint)
-- [x] WiFi driver: RTL8852BE probe, power-on, XTAL SI, DLE/HFC, DMA rings
-- [x] WiFi driver: firmware download (MFW cv-matching, WD+H2C, BDRAM, all sections)
-- [x] WiFi driver: MAC init + full PHY table load (4212 regs), RFK baseline, set_channel
-- [x] WiFi driver: BB gain parser (config_bb_gain_ax, 66 entries, gain_error → HW)
-- [x] WiFi driver: 17 per-block DMAC/CMAC IMR enables + sys_init_ax re-assert
-- [x] WiFi driver: H2CREG transport (SCH_TX_EN async TX-pause), fw_log_cfg
-- [x] WiFi driver: full VIF init (port_update, dmac/cmac_tbl, macid_pause, role_maintain, join_info, addr_cam, default_cmac_tbl)
-- [x] WiFi driver: scan_offload (3× 13-channel sweep, BSSID/SSID/channel dedupe)
-- [x] WiFi driver: live beacon reception (Nachbar-APs + FritzBox im Scan sichtbar)
-- [ ] WiFi driver: RSSI per AP, OUI vendor lookup
-- [ ] WiFi driver: association (AUTH + ASSOC frames, 4-way WPA2 handshake, CCMP)
-- [ ] WiFi driver: data path (TX + encrypted RX)
+The microVM browser works, but a whole Linux + Firefox behind the WASM
+boundary is the one place nopeekOS leans on legacy. **beak** is the
+answer: a web browser built from scratch as a *single WASM app*, no
+Linux, no vendored engine.
 
-**Remote Debug (debug.wasm)**
-- [x] Terminal stream sink (64KB ringbuffer per terminal, `npk_stream_open/read`)
-- [x] Keyboard input injection (`npk_key_inject` into global KEY_BUF)
-- [x] TCP user-API as host fns (`npk_tcp_connect/send/recv/close`)
-- [x] Background WASM spawn (doesn't set `APP_RUNNING` → shell stays active)
-- [x] `debug <ip> <port>` intent dials out to `nc -l` listener for live mirror
+It renders HTML → a real DOM → a full CSS cascade
+(UA sheet → author `<style>` + selectors/specificity → inline) →
+layout → paint, all hand-rolled: block + inline flow, tables, flexbox,
+CSS Grid, the box model, positioning, external `<link>` stylesheets,
+CSS Color 4, `@media`, and PNG images. It fetches over the kernel's
+TLS stack, is theme-aware, and scrolls smoothly.
 
-**GPU Rendering**
-- [x] GPU HAL trait: init, set_mode, blit_rect_hw, flip, wait_vblank, supports_blit
-- [x] BCS Blitter Engine (Gen 12 ExecList/ELSQ, XY_FAST_COPY_BLT)
-- [x] GPU-accelerated compositing (shadow → MMIO via BCS, zero-CPU blit)
-- [x] GPU-composited cursor (save-under pattern, no MMIO overlay race)
-- [ ] VSync (PLANE_SURF double-buffer flip, zero-tearing + zero-latency)
-- [ ] VirtIO GPU backend (QEMU/VBox support)
-
-**Virtualization**
-- [x] MicroVM substrate (Intel VT-x + EPT, AMD-V + NPT — both live)
-- [x] Custom Linux 6.18.26-nopeek build (`microvm-linux/`, defconfig
-      + nopeek-virt overlay, VIRTIO_BLK/_NET/_PCI built-in, USB/Sound/
-      DRM/HID/ACPI/SMP raus → 9.5 MB bzImage)
-- [x] Rust PID-1 (`microvm-init` v0.3.x) reaches userspace, echoes
-      back, reads /dev/vda, brings eth0 up, sends UDP poke
-- [x] virtio-blk-pci end-to-end (12.2): PCI-bus emu, BAR sizing,
-      modern cap list, MMIO BAR-trap with guest page-walker, virtqueue
-      service, IRQ injection via VMCS/VMCB event-injection
-- [x] **profile-image persistence** (12.2.4): `sys/microvm/profile.img`
-      via npkFS auto-AES-256-GCM-encrypted, upsert API, 4 MB save
-      ~26 ms, load ~9 ms
-- [x] virtio-net-pci discovery + TX/RX (12.3.0–12.3.2): synthetic
-      gateway 10.99.0.1 mit MAC 52:54:00:6E:70:01, ARP-Reply mechanism,
-      first real IPv4 UDP frame from guest
-- [ ] 12.3.3 NAT zum Host-Stack + Cap-Filter (~300 LoC)
-- [ ] 12.3.4 curl/HTTPS-test from inside guest
-- [x] 12.4 virtio-gpu 2D scanout (kernel-only v0.158.0, blits to host framebuffer)
-- [x] 12.4c virtio-input device skeleton (slot 4, IRQ 12, evdev /dev/input/event0)
-- [x] **Linux userspace inside microvm** (v0.162.x — Alpine minirootfs + busybox shell
-      exec'd by our PID-1; `uname -a`, `ls /` output captured via /dev/kmsg)
-- [x] **Userspace bundle build pipeline** (v0.163.0 — `microvm-userspace/build.sh`
-      with `apk add` via unshare-chroot, distributed as OTA asset)
-- [x] **Cooperative microvm on Core 0** (v0.166–168 — R1: `VmContext`
-      open/run_slice/close, vmx+svm; non-blocking `microvm linux`,
-      bounded slices interleaved with Shade; relaunchable; idle guest
-      yields Core 0). Resolved without a dedicated core — see
-      `PHASE12_DISPLAY_BRIDGE.md`.
-- [x] **Shade↔microvm display bridge** (v0.167–168 — `WindowKind::
-      Surface`, per-window `GuestSurface`, virtio-gpu FLUSH → tiled
-      window scaled into its content rect; tiling invariant, never
-      fullscreen; render-on-FLUSH). Guest framebuffer composited as a
-      normal tile, HW-validated with a no-bundle PID-1 fb pattern.
-- [x] 12.4e virtio-input **keyboard** injection (v0.169.3, HW-validated
-      — Shade Surface branch → `INPUT_Q` → eventq + IRQ; every key
-      toggles the PID-1 react-test. Earned: advertise full 0..=255
-      EV_KEY bitmap; send press+SYN+**release**+SYN or the input core
-      de-dupes). Real per-scancode mapping = Phase B.
-- [x] 12.4e' virtio-input **absolute mouse/pointer** injection
-      (v0.170.5 — EV_ABS 0..32767 + EV_REL wheel + BTN_* in
-      `fill_ev_bits`; `forward_pointer_to_guest` called from
-      `handle_mouse` so it's race-free across every Core-0
-      poll_mouse consumer; HW-validated)
-- [x] strip throttled virtio-input diagnostics (v0.170.5)
-- [x] **guest timer IRQ0** (v0.171.0 — ~100 Hz from EXIT_INTR/
-      reason-1, svm+vmx; the microvm had no PIT/LAPIC timer so
-      every guest nanosleep/timerfd/poll-timeout hung. Unblocks
-      ALL real Linux userspace)
-- [x] **no VMRUN lifetime cap for window-bound VMs** (v0.171.1 —
-      a 60 fps compositor blew the cumulative 100 000-iter cap)
-- [x] **guest_mem + guest_fetch 256MB→1GB** (v0.171.3/.4 — two
-      stale `GUEST_RAM_BYTES` twins the RAM bump missed; bounded
-      virtio DMA / MMIO insn-fetch ≥ 256 MB → sqfs corruption /
-      NPF. Guest-RAM size lives in **5** synced places now)
-- [x] 12.6  **Phase B → LibreWolf — THE PHASE-12 END GOAL,
-      ACHIEVED (2026-05-16, QEMU/AMD).** A real privacy-first
-      GUI browser renders with readable text in a tiled
-      nopeekOS window beside a native terminal. Stack: cage
-      kiosk compositor + LibreWolf 144 + seatd + fonts, 261 MB
-      gzip-sqfs bundle (`librewolf-0.1.1`, GitHub-Releases large
-      lane), wlroots/pixman software render → virtio-gpu →
-      `WindowKind::Surface` tile. weston→cage pivot (lean,
-      one-surface-per-tile topology); userspace layer chain
-      (tmpfs `/run`, seatd daemon — Alpine libseat has no
-      builtin backend, XDG_RUNTIME_DIR on tmpfs); font/RTC fix
-      (no guest clock → epoch sqfs mtimes + prebuilt fc-cache)
-- [x] 12.6 polish (2026-05-21, kernel v0.172.54..63) — Browser is
-      daily-driver-capable on QEMU/AMD: D4 live-resize via virtio-
-      gpu EDID emulation + disconnect/reconnect cycle (every
-      Wayland compositor honors a real connector cycle the way it
-      ignores a mode-changed-while-connected hotplug); RAM bumped
-      1→2 GiB with B3 demand-paging (`DEMAND_ENABLED=true`) +
-      B4 multi-PD EPT/NPT (cap 3 GiB, PDPT[3] reserved for MMIO);
-      `wirklich standard` user.js — all the #11 cripples
-      removed (e10s/fission/sandbox/OCSP back to LibreWolf
-      defaults), only env-required + dark-mode prefs left;
-      `browser` top-level intent + `npk_run_intent` host fn +
-      drun "Browser" entry (drun 0.6.1 EntryKind::Module/Intent
-      dispatch); cursor composed INTO the back-shadow as the
-      final layer (eliminates the 60 Hz blit-vs-cursor-redraw
-      race, no more flicker over the browser tile); quiet guest
-      boot (`quiet loglevel=3` in cmdline) + stripped per-frame
-      device spam (~150 → ~15 launch trace lines).
-- [x] `./build.sh usb-full /dev/sdX` (+ `qemu-installer-full`) —
-      bakes the 261 MB LibreWolf userspace sqfs into the installer
-      kernel via include_bytes! (gated by `bundle-userspace` cargo
-      feature). USB grows ~30→290 MB but a fresh install has the
-      browser ready on first boot, no OTA round-trip. OTA keeps
-      working for later browser updates via manifest.large url=
-      override. Future microvm-backed apps plug in next to it.
-- [x] **Bare-metal NUC (Intel-VMX) — LibreWolf BOOTS on real hardware
-      (2026-05-22, v0.172.76/77).** The exit-reason-33 walls were NOT
-      the IA32E/CR/EFER triad (the dump proved it consistent) but
-      **ungated interrupt injection** (found data-driven, matched
-      against the real KVM source): gate the virtio-gpu D4 IRQ on
-      `pic.irq_unmasked(9)` (was injecting vector 0x29 into the tiny
-      32-gate boot IDT), and gate ALL reason-1 external-IRQ injects on
-      `vmcs::guest_interruptible()` (RFLAGS.IF=1, no shadow — Linux was
-      polling i8042 with IF=0 when the timer IRQ0 was injected). Durable
-      lesson: every VMX-vs-SVM divergence is "AMD VMRUN is lenient,
-      bare-metal Intel is strict." Intel perf still cooperative-Core-0
-      (un-gating A2 dedicated core for Intel is parked).
-- [x] **Profile persistence (2026-05-22)** — the profile.img virtio-blk
-      grown to a **64 MiB ext4 home image** (`sys/microvm/apps/browser/
-      home.img`), seeded from an embedded sparse-ext4 template (no
-      mke2fs in the guest, no inflate in the kernel). PID-1 mounts
-      `/dev/vda` ext4 at `/tmp/moz`; `save()` moved into `close()` so
-      Mod+Q AND the close button persist. Cache + glean telemetry
-      redirected to tmpfs so the image stays small.
-- [x] **virtio-9p host↔npkFS bridge (2026-05-22)** — new
-      `devices/virtio_9p_pci.rs` (slot 6) + a 9P2000.L server rooted +
-      CONFINED at `home/<user>/` (guest already has CONFIG_NET_9P_VIRTIO).
-      Read (attach/walk/getattr/readdir/lopen/read) + write (lcreate/
-      write/fsync/setattr/mkdir/unlinkat/renameat). **Browser downloads
-      land in npkFS `home/<user>/downloads`, live-visible + editable in
-      loft.** Capstone: opening `file:///tmp/npkhome/.open-in-loft`
-      (a synthetic magic file) pops loft on the host
-      (`shade::launch_app` via a Core-0 atomic handoff). `.ssh` /
-      `documents` are now just additional mounts.
-- [ ] File Open/Save dialog in the browser (the GTK file chooser may
-      not render in the cage kiosk → likely needs an XDG portal),
-      "open containing folder" cross-boundary action, loft start-path
-      for the exact folder. (Open polish, not blocking.)
-- [ ] 12.5  Picker bridge + B-mini virtiofs (per-app downloads folder)
-
-### Phase 10 -- Widget API & GUI Apps (in progress)
-
-Declarative GUI for WASM apps. Apps build a `Widget` tree via the
-`nopeek_widgets` SDK, serialize with postcard (version-prefixed), commit
-through **one** host function (`npk_scene_commit`). The Shade compositor
-owns layout, rasterization, GPU compositing, theming, animation. Apps
-never touch pixels, fonts, or the framebuffer.
-
-See `PHASE10_WIDGETS.md` for full architecture + ABI rules.
-
-**SDK** (`tools/wasm/sdk/widgets/`)
-- [x] Crate `nopeek_widgets 0.1.0` — no_std + alloc
-- [x] `Widget` / `Modifier` / `Event` / `Action` / `Token` / `IconId` / `Role` / `TextStyle` — all `#[non_exhaustive]`, append-only, wire-version pinned
-- [x] postcard serialize with `WIRE_VERSION = 0x01` prefix byte
-- [x] Compile-time variant-order lock (`check_abi.rs`)
-- [x] 8 host-side round-trip tests (tree, modifiers, events, reserved slots)
-
-**Kernel — Compositor pipeline** (`kernel/src/shade/widgets/`)
-- [x] ABI mirror of SDK with serde derives, postcard deserialize
-- [x] `npk_scene_commit(ptr, len)` host fn — RENDER capability-gated
-- [x] Serial pretty-printer for decoded tree + computed layout geometry
-- [x] Flexbox-lite layout engine (Column/Row, Spacer flex, Align Start/Center/End/Stretch, Padding)
-- [x] Real Inter Variable metrics via fontdue (`advance_width` / `measure` / `line_height` / `ascent` / `descent` / `cap_height` / `x_height`, kerning via `horizontal_kern`)
-- [x] `CpuRasterizer` impl — clear / rect / text (alpha-composited glyphs) / icon-stub / canvas memcpy
-- [x] Render walker — Widget + LayoutNode trees in lockstep, Background/Border modifiers → filled rects, variants → paint ops
-- [x] Persistent scene overlay in shade's render cycle (widget survives terminal redraws)
-- [x] Grid-aware placement (renders into focused window's content rect; fallback to centred preview)
-- [x] Clear on window close (`Mod+Shift+Q`)
-- [ ] Tile subdivision (512×512 tiles instead of one big window buffer)
-- [ ] Diff + per-app cache (skip unchanged nodes between commits)
-- [ ] Composition layers for opacity / transition / blur / shadow
-- [ ] BCS batched blit of dirty tiles
-
-**Font system** (`kernel/src/gui/text.rs`)
-- [x] Inter Variable v4.1 (OFL) shipped via bundled assets + npkFS (`sys/fonts/inter-variable`)
-- [x] BLAKE3-verified at load, fontdue-parsed
-- [x] Glyph cache keyed by `(glyph, size, weight)`, LRU-managed via GGTT slab slots
-- [ ] `tnum` tabular numerals enabled at load
-- [ ] Shaping (`rustybuzz`, ligatures, BiDi — deferred to v2)
-
-**GGTT slab allocator** (`kernel/src/gpu/ggtt_slab.rs`)
-- [x] 7 fixed-bucket sizes (1K/4K/16K/64K/256K/**1M primary**/4M) over 912 MB GGTT region
-- [x] Per-bucket freelist + LRU queue, eviction on overflow
-- [x] Self-test intent: 1000+ alloc/free cycles, leak-free
-- [x] Glyph atlas migrated to slab slots (CompSmall4K bucket)
-
-**Icons**
-- [x] Phosphor icon atlas (16/24/32/48/64 px logical, alpha-only) — build-time SVG rasterization
-- [x] `IconId` enum populated (18 Regular variants, append-only)
-
-**Events & interaction**
-- [x] Mouse hit-test against layout tree → `Event::Action(ActionId)`
-- [x] Keyboard → `Event::Key` routed to focused widget window (`read_line_with_tab` bailout, `npk_event_poll`)
-- [ ] Focus stack + Tab navigation (within-widget focus, not window focus)
-- [ ] `npk_event_wait` blocking host fn
-
-**Animation**
-- [x] Spring physics + linear curves, fixed-point Q16.16 scaffolding (v0.61.0)
-- [ ] Self-scheduling 60Hz tick while interpolating, dirty-driven otherwise (no active consumers yet)
-
-**Canvas (escape hatch)**
-- [ ] `npk_canvas_commit(canvas_id, pixels, w, h, canvas_cap)` — CANVAS cap separate from RENDER
-- [ ] Size caps: 4096×4096 px, 64 MB pixels total per app
-
-**Window configuration (app-driven)**
-- [x] `npk_window_set_overlay(w, h)` — app declares itself a centred overlay (bypasses tiling grid)
-- [x] `npk_window_set_modal(modal)` — app declares itself modal, shade suppresses focus-shift shortcuts while visible
-- [x] `npk_spawn_module(name_ptr, name_len)` — launcher apps spawn another module in a fresh terminal window (`loop + <app>` semantics)
-- [x] `npk_close_widget()` — app tears down its own widget window
-- [x] `npk_log_serial(ptr, len)` — direct serial logging, bypasses shade-terminal (safe when no loop is open)
-- [x] `npk_list_modules(buf, max)` — enumerate installed `sys/wasm/*` modules (filters `.version` sidecars)
-
-**First-party apps**
-- [x] `files-stub` — P10.2 dummy commit app, bundled + OTA (`install files-stub`)
-- [x] `drun` — Mod+D app launcher (centred overlay, modal, keyboard nav, Enter launches)
-- [x] `loft` — file browser (sidebar, toolbar, breadcrumb, grid/list view)
-- [x] `dock` — bottom auto-hide app dock (overlay launcher; reveals on a
-      free desktop / bottom hot-edge), `bar` — top status bar (workspace
-      pills, focused-window title, screen-centred clock, tray + power).
-      Both are WASM **panels** via `npk_window_set_panel(edge, behavior)`,
-      rendered with translucent alpha-composited pills (no halo) and
-      config-driven (`sys/config/dock`, `sys/config/bar`). See `PANEL.md`.
-
-**Window-manager integration**
-- [x] Widget-kind windows first-class in shade (own grid slot, rounded corners, separate from terminal windows)
-- [x] Per-window scene storage (`SCENES: BTreeMap<WindowId, WidgetScene>`)
-- [x] Widget follows focus / workspace switches correctly
-- [x] `Window.is_overlay` + `Window.modal` flags (set by app, not by kernel)
-- [x] Configurable launcher binding — `sys/config/launcher` (defaults to "drun")
-
-Progress milestones (per `PHASE10_WIDGETS.md`):
-- [x] P10.0 ABI freeze (`v0.50.7`)
-- [x] P10.1 SDK + fontdue + Inter Variable (`v0.51.0`)
-- [x] P10.2 `npk_scene_commit` + first end-to-end round-trip (`v0.54.0`)
-- [x] P10.3 Layout engine with real font metrics (`v0.55.0`)
-- [x] P10.4 GGTT slab allocator (`v0.56.0`)
-- [x] P10.5 CPU rasterizer + first visible render (`v0.57.0`–`.2`)
-- [x] P10.5b Widget-kind windows first-class in shade (`v0.58.0`)
-- [x] Widget polish — rounded corners, Opacity, theme integration (`v0.58.1`)
-- [x] P10.6 Diff+cache — payload-hash skip-render (`v0.59.0`, full diff pending)
-- [x] P10.7 Event routing — mouse hit-test + `npk_event_poll` (`v0.60.0`, keyboard/blocking pending)
-- [x] P10.8 Animation — Q16.16 math scaffold (`v0.61.0`, no active consumers yet)
-- [x] P10.9 Phosphor icon atlas (`v0.62.0`) — **last visual checkpoint, 18 icons shipped**
-- [x] drun — Mod+D app launcher (`v0.64.2` + drun `0.2.1`) — first interactive widget app, keyboard nav, modal overlay
-- [x] drun v0.5.1 (`v0.75.x`) — live search / hover / click, icon + title + subtitle, AppMeta custom-section, reads own metadata from each wasm
-- [x] SDK `style` + `prefab` modules — design tokens (Radius/Spacing/Padding) + cookbook (panel, searchbar, list_row, footer, badge, scroll_list)
-- [x] `Modifier::Tint(Token)` — icons inherit accent color from theme
-- [x] Two-theme palette (dark/light/auto) — curated surface/border/text per mode, wallpaper-derived accent with contrast adjust (`theme` intent)
-- [x] Rounded-rect 16×16 centered subpixel AA across chrome + widget rasterizer
-- [x] npkFS hardening — 6 write-path bugs fixed (`v0.73.x`): btree rightmost-child leak, TRIM partition-offset, indirect free-before-journal, store-leak on insert-fail, unjournaled indirect chain, partial-extent cache invalidation
-- [x] Aurora procedural BG retired — kernel default is solid grey, all pixel generation lives in `wallpaper.wasm`
-- [x] Wallpaper generator set — `solid`, `gradient` (2 & 4-corner bilinear), `pattern` (dots/stripes/checker/grid/noise), all inside `wallpaper.wasm`
-- [x] **P10.11 file browser** — `loft` shipped (`kernel v0.76.0` + `loft 0.1.x`). Thunar-clone with sidebar (PLACES + DEVICES), toolbar (back/forward/up/refresh), breadcrumb, icon-grid, file-type icon heuristic. Hand-rolled `Modifier::Padding(8)` later replaced by `prefab::sidebar_pane` in v2.
-- [x] **Vocab v2 — Tailwind-style modifiers + pseudo-state engine** (`kernel v0.77–0.79`, `sdk 0.2.0–0.4.0`):
-  - 9 new `Modifier` variants append-only — `Hover` / `Focus` / `Active` / `Disabled` / `WhenDensity` (each `Vec<Modifier>`), `Scale(u16)` Q8.8, `MinWidth` / `MaxWidth` (u16), `Rounded(u8)`. Wire-version stays `0x01`.
-  - New `Density` enum (`Compact <600 px / Regular 600–1200 / Spacious >1200`) drives `WhenDensity(d, …)` matching; `Motion` SDK helper (`Quick=120 / Normal=200 / Slow=400 ms`) lowers to existing `Transition::Linear`.
-  - Compositor tracks per-window `hover_path` / `focus_path` / `active_path`; `effective_modifiers` merges state mods with CSS `:hover`-ancestor semantics; `Disabled` overrides interactive states + propagates through hit-testing.
-  - **Tab / Shift+Tab** navigate focusable widgets in document order (DFS, wraparound, disabled-skipped). Click-to-focus + mouse-press → active state with re-rasterize triggered only when the tree has any pseudo-state mod (`has_pseudo` cache → zero cost on plain trees).
-  - `prefab::card` / `button` / `input` / `dialog` / `sidebar_pane` added; `prefab::searchbar` removed (subsumed by `input(Search)` with optional trailing widget). All interactive prefabs now ship Hover + Focus + (where appropriate) Active states out of the box.
-  - **`WIDGET_VOCAB.md`** at the repo root: single-file Tailwind-style cheat sheet for app developers and AI code-generators.
-- [x] `Widget::Input` and `Widget::Button` respect `Modifier::Background` instead of hardcoding `SurfaceElevated` / `Accent` — lets prefabs own the chrome.
-- [x] **SDF rounded corners** (`v0.79.4–.5`, kernel-only) — `gui/render.rs` switches the rounded-rect AA from 16×16 supersampling to a signed-distance-field + smoothstep pass with concentric two-arc geometry (Hyprland-style); border width is uniform across straights and curves. `fill_rounded_chrome_aa` gains a `paint_content` flag so widget windows leave the inner-full area transparent and the widget blit AAs against the chrome border via `rect_coverage_sdf` instead of leaking `win.bg_color` through the inner fringe.
-- [x] **Layout-rect fix** (`v0.80.0`, abi+kernel) — `place_axis` for Row/Column/Stack now returns `rect: container` instead of `rect: content`, so `Modifier::Background` / `Modifier::Border` paint on the full allocated rect and children sit inside the padded inner. drun's selected list-row finally has 16 px breathing room around its accent border; hover backgrounds cover the full row including padding.
-- [x] **`TextStyle::Heading`** (`v0.80.0`, ABI append, variant 5) — 18 px regular weight, sized between `Body` (14) and `Title` (24+bold). Used by `Widget::Input` placeholder + value so search bars read at a sensible size next to a 24 px magnifier icon. Wire-version stays `0x01`.
-- [x] **Mockup-grade prefab polish round 1–3** (drun `0.5.7–0.5.10`, loft `0.1.7–0.1.10`, sdk `0.4.1–0.5.1`) — Raycast/Spotlight selection style (SurfaceElevated card + Accent border instead of AccentMuted fill), `prefab::input` no longer paints its own SurfaceElevated bg (blends into panel), tighter `Spacing::Xxs` between rows, `prefab::footer` wraps in a Column with a trailing zero-size widget so `Spacing::Md` acts as bottom-margin, `prefab::input` does the same for top-margin, `prefab::panel` gains a `Padding::Xs` inset so dividers and rows breathe vs the chrome, `widgets::suppress_hover(window_id)` on intent-loop keyboard dispatch so arrow-key nav owns the highlight until the next mouse motion.
-- [x] **`Widget::Input` self-editing** (`v0.81.x` + sdk 0.6.0 + drun 0.6.0) — compositor owns the editor (cursor + key routing + caret render), apps mirror via `Event::InputChange`. Auto-focus on first commit picks the first Input in the tree. Drun's search + loft's filter both type-immediately on open.
-- [x] **Layout leaf-padding** (`v0.82.1`) — Text/Icon/Input/Checkbox/Canvas honour their own `Modifier::Padding` so `prefab::menu_bar` and `prefab::badge` finally render with breathing room between siblings.
-- [x] **Click-to-focus only on Inputs** (`v0.82.1`) — clicks on buttons / nav rows / menu items no longer steal keyboard focus from the search bar. Tab/Shift+Tab still walks every focusable.
-
-> **2026-04-28 — npkFS v2 + HW Crypto shipped (kernel v0.85.5).**
-> Phase 10 polish + loft work resumes from this point.
-
-- [ ] **Tile subdivision + full diff cache** (~3–5 d) — 512×512 grid + per-tile content-hash, hover/key change → only dirty tiles re-rasterized instead of whole window.
-- [ ] **Static visual effects** (`Shadow` / `Transition` / `Scale` outside pseudo-states) — needs compositing-layer pass (sub-tree → off-screen layer texture → blit with transform/effect). ~1 Woche, größerer Brocken.
-- [ ] **P10.10 Canvas escape hatch** — `npk_canvas_commit` + `CANVAS` cap, on hold bis ein konkreter Consumer (image viewer, chart) danach fragt.
-- [x] **Loft polish round 5** (kernel `v0.147.0`, loft `v0.2.5`, sdk `0.6.3`) — bump-allocator state-mutation panic fixed, `Modifier::Flex(u8)` flex-grow primitive added, `Modifier::NodeId` + `Widget::Popover` finalised, real menu dropdowns shipped (Datei / Bearbeiten / **Ansicht** / Gehe zu / Hilfe), View → Grid/List view toggle, **List view** with Name/Size/Type/Modified columns. Modified column reads npkFS v3 mtime via the extended `npk_fs_list` ABI.
-
-> **2026-05-29 — Text editor "Spell" + widget-platform build-out (kernel v0.175→v0.180.1, spell 0.5.3, loft 0.3.1, nopeek_widgets 0.11.0).** A real editor app, plus the platform pieces it needed.
-
-- [x] **`Widget::TextArea`** — multi-line editing, compositor-owned 2-D caret (arrows / Enter / line-relative Home-End / PageUp-Down, **Tab = 4 spaces**). `Span { start, len, token }` + `TextArea.spans` give **live syntax highlighting while typing** (app tokenizes, compositor paints coloured runs over the live buffer). (Per-line `Input` was rejected — no programmatic-focus host fn.)
-- [x] **Spell editor** (`tools/wasm/spell`) — loft design, **tabs** (VS-Code dedup: re-open focuses the tab), markdown preview + multi-language highlight (Rust/C/JS/Python/Shell/JSON/HTML/XML), open/save via npkFS, "save as" name dialog, **unsaved-changes guard on close**, real npkFS path in footer.
-- [x] **File associations** — `npk_open(app, arg)` + `npk_launch_arg()` + `Event::Open`: loft double-click opens a file with its handler app (ext→app map in loft + `sys/config/associations`, never in the kernel). Singleton routing → 2nd open = a tab in the running instance. Widget windows now titled with the module name.
-- [x] **Per-app capabilities** — apps declare rights in a 1-byte `.npk.caps` section; kernel grants exactly those (default never WRITE). Apps can't write `sys/wasm/` (anti-escalation). New `npk_home_dir` host fn.
-- [ ] **Text selection** (mouse-drag + Shift+Arrow) + Ctrl+S — both need modifier plumbing through `handle_input_key`. find/replace, caret line:col in footer, tab drag-reorder. *(next)*
-
-> **2026-06-01…04 — Daily-driver shell polish + first WASM hardware driver
-> (kernel v0.181→v0.204.1, loft 0.5.1, spell 0.5.4, bar 0.3.2).** A run of
-> usability + bring-up work across the desktop, the microvm, and the laptop.
-
-- [x] **Scroll, platform-wide** — `Widget::Scroll` is now a real primitive:
-      rasterizer clip rect, `measure(Scroll)` frees the scroll axis, per-window
-      wheel offset, overlay scrollbar shown only on overflow. loft (file list +
-      sidebar), the spell editor (`TextArea`) and markdown preview, and the
-      loop/terminal all scroll. **Mouse-wheel + draggable** scrollbars; the
-      loop **soft-wraps** long lines instead of truncating them.
-- [x] **Window close button + dock-push + theme** — see Phase 8: a platform
-      `X`, the auto-hide dock gliding tiles up, and light/dark theming of the
-      loop/terminal. loft gained sortable full-width columns (↑/↓), a "Files"
-      column and recursive folder sizes (progressive/non-blocking). spell +
-      loft footers removed as noise.
-- [x] **Battery in the bar + `aml.wasm`** — see Phases 7/8: the first real
-      WASM driver runs firmware AML for a vendor-independent battery %, shown
-      live in the top bar (HW-validated on the HP).
-- [x] **Browsing is usable** (v0.198.15, confirmed) — a chain of latency
-      fixes: DNS direct to 1.1.1.1 via L3-NAT, bounded adaptive halt-polling
-      (KVM model), and de-bufferbloating the host virtio-net RX ring (32→256)
-      with TX backpressure (upload 75→139 Mbit, latency 600→22 ms).
-- [x] **Fiber scheduler + Guest-SMP + HP UEFI boot** — see Phase 9 / Phase 7.
-
-### Phase 11 -- AI Integration (deferred → Phase 13+)
-
-Originally planned next, deprioritised in favour of Phase 12. Returns
-as a frontend feature once the MicroVM subsystem is mature enough to
-host AI services as their own apps.
-
-> **Phase 11 partial pull-forward (2026-05-05):** the reserved
-> `Widget::Popover` slot was implemented in the compositor as a real
-> overlay primitive (NodeId-anchored, click-outside-dismiss, layout
-> two-pass) so loft could ship menu dropdowns + a working View
-> mode-switcher. Tooltip / Menu still reserved-slot-only.
-
-### Phase 12 -- MicroVM — Intel 12.1.4 ✅, AMD 12.1.4 ✅ (vendor-symmetric)
-
-Per-app x86_64 KVM-style hypervisor inside the kernel so legacy Linux
-GUI apps (Browser first, Phase 12.6) can run sandboxed alongside
-WASM modules. Spec lives in `PHASE12_MICROVM.md`. Vendor-agnostic
-public API at `microvm::*` dispatches to either Intel VT-x (VMX)
-or AMD-V (SVM) based on CPUID-detected vendor.
-
-**Vendor HAL** (`v0.138.0`, kernel `microvm/cpu/`):
-- [x] CPUID leaf-0 vendor-string detect at boot → `Vendor::Intel /
-      Amd / Unknown`. `microvm::run_substrate_test` /
-      `microvm::run_linux` route to the matching backend; AMD-V on
-      Intel hosts and vice-versa cleanly return `NotSupported`.
-- [x] Linux loader (`microvm/linux/bzimage.rs`) is platform-agnostic
-      — writes into a host-mapped guest-RAM window without caring
-      whether EPT or NPT backs it.
-
-**Intel VT-x backend** (`microvm/cpu/vmx/`, v0.90 → v0.137.2):
-- [x] **VT-x bring-up** — VMXON / VMCS / VMCLEAR / VMPTRLD round-trip,
-      host-state setup with full VMREAD readback, TSS install (BSP).
-- [x] **VMLAUNCH against long-mode HLT-loop** — first VM-entry/exit.
-- [x] **EPT** — 256 MB non-identity guest window via 2 MB pages,
-      plus an MMIO scratch slot covering IOAPIC / HPET / LAPIC
-      (0xFEC00000–0xFF000000), lifted from the kernel's contiguous
-      frame allocator.
-- [x] **Real-mode + 32-bit prot mode unrestricted-guest** with
-      `unrestricted-guest` + `enable-EPT` + `INVPCID` + `RDTSCP` +
-      `USER_WAIT_PAUSE` + `XSAVES` secondary controls.
-- [x] **VMRESUME loop** with full guest GPR save/restore (asm), Rust-
-      side dispatch on exit reason: CPUID pass-through (with CET
-      bits masked), CR3-load handler, I/O-bitmap captures (port
-      0x80 + 0x3F8-0x3FF + i8042 0x60/0x64 + RTC 0x70/0x71),
-      RDMSR/WRMSR stub (AMD MSRs return 0, others ignore),
-      XSETBV-ack, EFER load/save + dynamic IA-32e sync, CR4
-      VMXE-shadow, EXCEPTION_BITMAP including #CP for CET-debug.
-- [x] **bzImage loader** — Alpine v3.23 vmlinuz-virt 6.18.26
-      (12 MB), shipped as bundled installer-asset, lands in npkFS at
-      `sys/microvm/linux-virt.bzImage` on fresh install. 32-bit boot
-      protocol entry: setup-section at guest 0x10000, kernel at
-      0x100000, boot_params at 0x90000 (3-entry e820), cmdline at
-      0x20000, %rsi = boot_params_phys, 256 MB guest RAM.
-- [x] **initramfs + Rust-PID-1 (v0.130)** — own `microvm-init`
-      crate under `microvm/linux/init/`: ~1.3 KB statically-linked
-      Linux ELF, no_std + no_main, raw syscalls. Bundled cpio.gz
-      shipped at `sys/microvm/initramfs.cpio.gz`.
-- [x] **12.1.4 echo round-trip (v0.137.2)** — `microvm shell <bytes>`
-      injects bytes into the 8250 RX FIFO before VMLAUNCH; PID-1
-      `ioperm(0x3F8, 8, 1)` + raw inb/outb echoes them back via
-      port-0x3F8 OUTs which trap as I/O VM-exits and the host
-      reassembles. Validated NUC bare-metal: `microvm shell hi`
-      → `[guest] [init] echo: hi`.
-- [x] **Trust boundary validated (v0.128)** — first `microvm linux`
-      froze the host because pin-based external-interrupt-exiting
-      was 0; fix routes external interrupts as VM exits. **VMX
-      hardware boundary held**, host recovered after Linux panic.
-
-**AMD-V (SVM) backend** (`microvm/cpu/svm/`, v0.139 → v0.143):
-- [x] **12.1.0a-svm** (v0.139.0) — CPUID 8000_0001 ECX[2] presence,
-      8000_000A revision + ASID count + feature bits (NPT, NRIPS,
-      decode-assists, VMSAVE/VMLOAD virtualization), VM_CR MSR
-      check for SVMDIS+SVMLOCK firmware seal.
-- [x] **12.1.0b-svm** (v0.139.0) — EFER.SVME enable, 4 KB host-save
-      area + VM_HSAVE_PA MSR, minimal VMCB (control + state-save),
-      real-mode HLT stub, CLGI/VMRUN/STGI bracketing per
-      APM §15.17. First `exit_reason=0x78` (HLT) on AMD nested SVM.
-- [x] **12.1.0c-svm** (v0.140.0) — full GuestRegs save/restore
-      around VMRUN. 14 GPRs (RAX/RSP excluded — CPU auto-handles),
-      callee-saved push/pop to honor `clobber_abi("C")`, struct-ptr
-      survives via host-save RSP. Mirrors `vmx::vmcs::run_guest_once`.
-- [x] **12.1.1a-svm** (v0.140.0) — Nested Page Tables: 3-page
-      footprint (PML4 + PDPT + PD), identity-map 256 MB via 2 MB
-      pages. `VMCB.NESTED_CTL.NP_ENABLE = 1`, `VMCB.NCR3 = NPT root`.
-      1 GB pages were tried first but KVM nested SVM has a quirk
-      with 1 GB-leaf NPT entries; 2 MB stays in the well-tested path.
-      Required a `core::sync::atomic::fence(SeqCst)` before VMRUN
-      to serialize VMCB writes against the consistency-check read
-      path on KVM nested SVM.
-- [x] **12.1.1b-svm** (v0.141.0) — 32-bit protected mode + I/O
-      VMEXIT. Stub `mov al, 0x4F; out 0x80, al; hlt` traps via
-      IOPM bit for port 0x80, returns `exit=0x7B (IOIO)`,
-      `qual=0x800110` (port 0x80, OUT, 8-bit, A32), `rax=0x4F`.
-      Validates the I/O-bitmap path used by Linux serial console.
-- [x] **12.1.1c-svm** (v0.142–v0.143) — Linux bzImage entry +
-      VMRUN/VMEXIT loop. `npt::allocate_window_npt` (non-identity
-      256 MB + MMIO scratch alias for IOAPIC/HPET/LAPIC),
-      `setup_vmcb_linux` (CS.base=0, RIP=code32_start, RSI=
-      boot_params_phys, 32-bit prot mode flat segments), exit
-      dispatcher for CPUID / IOIO / MSR / HLT / INTR / SHUTDOWN /
-      NPF. NRIP_SAVE used for RIP advancement.
-- [x] **12.1.1d-svm** (v0.143.0) — shared `SerialState` panic
-      scanner ports cleanly (matches `Kernel panic - not syncing:`,
-      tags subsequent triple-fault as expected reboot path).
-- [x] **12.1.3-svm** (v0.143.0) — initramfs + Rust-PID-1 reuse.
-      `bzimage::load_into_guest_ram` is platform-agnostic, plumbs
-      the same `microvm-init` ELF + cpio.gz used by VMX.
-- [x] **12.1.4-svm** (v0.143.0) — `microvm shell <bytes>` echo
-      round-trip on AMD. Validated against KVM nested SVM:
-      `microvm shell hi-svm` → `[guest] [init] echo: hi-svm` →
-      HLT after 41355 VM-exits — same shape as the Intel NUC
-      milestone.
-
-Three iterative fixes drove the SVM Linux entry from "compiles"
-to full userspace boot:
-- **MSRPM trap-all → pass-through** (8 KB zeroed, INTERCEPT_MSR_PROT
-  set so we can selectively trap later without re-plumbing). Lets
-  the CPU auto-load/save architectural state MSRs (EFER, FS/GS_BASE,
-  STAR/LSTAR, …) via the VMCB.SAVE area on every VMRUN/VMEXIT
-  (APM §15.11.1). Trap-all absorbed Linux's `WRMSR EFER=LME`
-  → CR0.PG dropped guest into legacy 32-bit paging instead of
-  long mode → triple-fault after 8 iters.
-- **Hide hypervisor CPUID** — leaf 1 ECX[31] cleared, leafs
-  0x4000_0000–0x4000_FFFF return zero. Without this, Linux saw
-  L1 KVM's signature through pass-through CPUID, enabled
-  kvm-clock, then divided by zero in `pvclock_tsc_khz` because
-  the corresponding WRMSR was absorbed and the pvclock struct
-  stayed zeroed.
-- **`tsc_early_khz=2000000`** in cmdline — AMD doesn't expose
-  CPUID 0x15 (TSC freq) so Linux falls back to PIT calibration,
-  which deadlocks against our zero-returning PIT IO emulation.
-  Hint short-circuits the calibration. Harmless on Intel.
-
-**Phase 12.2-12.6** (after both vendor backends complete 12.1.4):
-- [x] 12.2-12.4  Plumbing: virtio-blk/net/gpu/input backends,
-      profile-images, sqfs bundle loading, Display Bridge.
-- [x] 12.6       **LibreWolf in MicroVM — ACHIEVED (2026-05-16):**
-      a real privacy-first GUI browser renders with readable
-      text in a tiled nopeekOS window.
-- [x] 12.6 polish (2026-05-21, kernel v0.172.54..63) — Browser
-      daily-driver-capable: D4 live-resize, 2 GiB RAM (B3+B4),
-      `wirklich standard` user.js, `browser` intent + drun
-      integration, cursor-in-shadow flicker fix, `usb-full`
-      installer mode. See the Phase 9 Virtualization list above
-      for the detailed change list.
-- [ ] Bare-metal Intel-VMX validation — A2 vendor-gated v0.172.62,
-      VMX-cooperative entry-fail diag in flight (v0.172.63 VMCS
-      dump). Audit pending: port the SVM correctness fixes
-      (v34/35/36/38/42) to VMX equivalents.
-- [ ] 12.5       Picker bridge + B-mini virtiofs (deferred).
-
-### Phase 11.5 -- npkFS v3: Content-Addressed Directories + mtime ✅ DONE 2026-05-05
-
-Shipped in kernel v0.83.x (v2 first cut), bumped to v3 on 2026-05-05
-(kernel v0.146.0 + consolidation in v0.145.0). v1's path-as-key model
-is gone; v2 was Git-style trees with content-addressed directory
-objects + AES-256-GCM at-rest encryption; v3 added per-entry mtime so
-file managers can show modification timestamps + sort by change time.
-
-The `v2/` namespacing collapsed during the v3 bump — the storage
-layer is now a single flat tree under `kernel/src/storage/npkfs/`,
-with type names like `SuperblockRaw` / `BTreeEntryRaw` /
-`BTreeNodeHeader` instead of the old `V2*Raw` prefixes.
-
-- [x] Tree-object format (Git-style `(name, hash, kind, size, mtime, flags)` lists, encrypted)
-- [x] Walk-by-hash path resolution (`O(depth × log N)` instead of `O(N)`)
-- [x] `O(depth)` mutations + cheap rename + native `npk_fs_mkdir`
-- [x] Mark-and-sweep GC, snapshots fall out for free
-- [x] **mtime per TreeEntry** — UTC seconds since epoch, captured from RTC at write time. `npk_fs_list` ABI: 19-byte tail (was 10), `npk_fs_stat`: 17 bytes (was 9). Loft v0.2.5 surfaces it in the Modified column.
-- [x] Locked default directory tree (`sys/{config,wasm,fonts,icons,wallpapers}` + `home/<name>/{documents,downloads,pictures,projects,.trash}`) created by the installer
-- [x] Clean break v2 → v3 — mount-time guard halts with reinstall message on v2 disks (no in-place migration, by design)
-- [x] Host-fn path-string surface unchanged — apps didn't rebuild
-- [x] **Bundled wallpaper system** (kernel `v0.148.x`) — `release/assets/wallpapers/<name>.png` → `BUNDLED_ASSETS` → seed at install time to `sys/wallpapers/` + per-user copy to `home/<user>/pictures/wallpapers/`. First wallpaper: `npk01.png` (1920×1080).
-
-**Performance** (v0.88.8 testdisk on AirDisk 512GB SSD):
-
-| op | v0.85.5 (HW crypto baseline) | v0.88.8 (FS-stack opt) |
-|---|---|---|
-| 256 B write | 1736 iops | 1527 iops |
-| 256 B read | 4519 iops | 4583 iops |
-| 1 MB write (dedup hit) | 208 MB/s | **479 MB/s** |
-| 1 MB read | 216 MB/s | **411 MB/s** |
-| 16 MB write (dedup hit) | 158 MB/s | **759 MB/s** |
-| 16 MB read | 195 MB/s | **395 MB/s** |
-| 100 MB read | — | **406 MB/s** |
-| Raw NVMe read (1 MB extent, cache-warm) | — | 980–1175 MB/s |
-| Raw NVMe read (after sustained writes) | — | ~226 MB/s (SLC exhausted) |
-
-The v0.88.x stack of FS-level optimisations on top of v0.85's HW crypto:
-- NVMe PRP-list extent commands (1 cmd / extent vs 1 cmd / 4 KB block)
-- Up to 32 NVMe cmds in flight via `read_multi_extent` for fragmented blobs
-- `paths::store` stream-hashes the would-be Blob to dedup-skip encode + AES-GCM-encrypt
-- `storage::put` dedup fastpath before BLAKE3 + encrypt
-- `Object::decode` does in-place postcard prefix-shift (drain) instead of fresh-alloc + copy
-- `storage::get` drops redundant BLAKE3-verify (AES-GCM tag covers integrity)
-- Bridge layer no longer re-hashes plaintext after `v2::fs::read`
-
-Spec + design rationale: see [`NPKFS_V2.md`](NPKFS_V2.md).
+Fidelity is measured, not guessed: the engine is a portable, host-
+testable core with the official **WPT CSS reftests** (5,765 of them)
+vendored as a render-and-compare oracle. JavaScript is next (an
+interpreter, never a JIT — a JIT would need a hole in W^X), with
+test262 as its conformance oracle. Spec lives in `BROWSER.md`.
 
 ---
 
 ## Technical Decisions
 
-| Area | Choice | Rationale |
-|------|--------|-----------|
-| Language | Rust (no_std, nightly, edition 2024) | Memory safety without GC |
-| Boot | UEFI (PE32+ direct) | OVMF + modern firmware, no GRUB |
-| Target | x86_64 | Later aarch64 |
-| WASM | wasmi v1.0 | no_std, fuel metering |
-| Filesystem | npkFS | COW, BLAKE3, SSD-native |
-| Hashing | BLAKE3 | Fast, secure, streaming |
-| CSPRNG | RFC 7539 stream cipher | RDRAND seed, forward secrecy |
-| At-rest AEAD | **AES-256-GCM** (HW AES-NI + PCLMULQDQ) | npkFS blob encryption, ~200 MB/s sustained |
-| Hashing | **BLAKE3** (HW AVX2 backend) | Integrity verify on every read |
-| Kernel SIMD | SSE/AVX2 enabled (target-feature) | CR4 + XSETBV bring-up in boot.s/trampoline.s |
-| TLS AEAD | aes-gcm + ChaCha20-Poly1305 | All 3 TLS 1.3 cipher suites |
-| TLS | 1.3 (RFC 8446) | X25519 + P-384, 3 cipher suites |
-| Identity | Passphrase -> BLAKE3-KDF | No users, no accounts |
-| Key Exchange | X25519 + ECDH P-384 | Ephemeral, per-connection |
-| Certificates | X.509, 4 embedded root CAs | ISRG X1, DigiCert G2, AAA, GTS R1 |
-| Crypto libs | sha2, hmac, hkdf, aes-gcm, p256, p384, rsa | RustCrypto, audited, no_std |
-| Bitmap Font | Spleen (8x16, 16x32, 32x64) | BSD 2-Clause, clean glyphs |
-| OTA Updates | ECDSA P-384 + SHA-384 | Signed manifests, ESP FAT32 write (4MB reserved) |
-| TCP defaults | No Nagle, 40ms ACK, 3 retries | Optimized for request/response |
-| GPU | Intel Xe Gen 12.2 (ADL-N) | Display-only, 4K@60Hz HDMI 2.0, GGTT+WC aperture |
-| Compositor | Shade (native Rust) | Dwindle tiling, layer-based rendering |
-| Rendering | Layer compositor + double-buffer | Shadow A/B swap, selective partial render, dirty-region compositing |
-| GPU HAL | GOP + Intel Xe (+ VirtIO planned) | Vendor-neutral, same API for all backends |
-| Input | KeyEvent (KeyCode + Modifiers) | Layout-independent, no ESC state machines, foundation for configurable keybindings |
-| Mouse | xHCI HID boot protocol | Composite device, GPU-composited cursor (save-under), IRQ-driven polling |
-| USB Polling | APIC timer (100Hz) | IRQ drains xHCI -> atomic SPSC buffers, no main-thread HW access |
-| Heap | Growable (64MB->2GB) | On-demand 64MB chunks, local O(1) coalescing |
-| Terminals | Heap-allocated (AtomicPtr) | ~264KB per window, on-demand alloc/free, no artificial limit |
-| Animations | Ease-out cubic (250ms) | Integer math, tick-based, no floating point |
-| Intent Model | Event-driven, heap state | Fire-and-forget tasks, no Core blocked when idle |
-| Core 0 | Event dispatcher only | IRQ + input + blit, never blocks >100μs |
-| Linux apps (future) | MicroVM (VT-x / AMD-V) | Vendor HAL with Intel + AMD backends, Mini-Linux + virtio bridges |
-| Modules | npk install | ECDSA P-384 signed, SHA-384 verified, OTA from GitHub |
-| WiFi | RTL8852BE (WASM driver) | PCIe MMIO, DMA, MFW firmware download, capability-gated |
-| Driver ABI | Host functions (npk_pci_*, npk_mmio_*, npk_dma_*) | Stable ABI, device-bound, sandboxed |
-| SMP | N cores (no limit) | Core 0 = event dispatcher, Cores 1..N = work-stealing pool |
-| SMP Scheduler | Chase-Lev SPMC deque | Owner push/pop, thieves steal, MONITOR/MWAIT sleep |
-| SMP Wakeup | MONITOR/MWAIT | Nanosecond wake on memory write, HLT fallback |
-| Power | C-states per core | Idle cores sleep, wake on demand, thermal balancing |
+| Area | Choice | Why |
+|------|--------|-----|
+| Language | Rust (`no_std`, nightly, edition 2024) | Memory safety, no GC |
+| Boot | UEFI (PE32+ direct) | Modern firmware, no GRUB |
+| Sandbox | wasmi (interpreter, fuel-metered) | `no_std`, one trust boundary |
+| Filesystem | npkFS (content-addressed, CoW) | BLAKE3, SSD-native, encrypted |
+| At-rest AEAD | AES-256-GCM (AES-NI + PCLMULQDQ) | Hardware-accelerated |
+| Hashing | BLAKE3 (AVX2) | Fast, streaming, verify on read |
+| TLS | 1.3 (RFC 8446) | X25519 + P-384, RustCrypto |
+| OTA | ECDSA P-384 + SHA-384 | Signed kernel + modules |
+| Identity | Passphrase → BLAKE3-KDF | No users, no accounts |
+| GPU | Intel Xe Gen 12.2 | 4K@60Hz HDMI 2.0, BCS blitter |
+| Compositor | Shade (native Rust) | Dwindle tiling, layer-based |
+| SMP | N cores (no limit) | Work-stealing + stackful fibers |
+| Linux apps | MicroVM (VT-x / AMD-V) | Vendor HAL, mini-Linux + virtio |
+| Hardware drivers | Ported 1:1 from Linux | Linux is the reference truth |
 
 ---
 
 ## Performance
 
-**npkFS v2 on AirDisk 512GB SSD (kernel v0.88.8, testdisk):**
+npkFS on an N100 NUC (AirDisk 512 GB SSD, all figures **with**
+AES-256-GCM at rest + BLAKE3 on every operation):
 
-| Op | Throughput | IOPS |
-|----|------------|------|
-| 256 B write | 194 KB/s | 760 |
-| 256 B read | 714 KB/s | 2791 |
-| 4 KB write | 4467 KB/s | 1090 |
-| 4 KB read | 10173 KB/s | 2483 |
-| 64 KB write | 69 MB/s | 1059 |
-| 64 KB read | 130 MB/s | 1986 |
-| 1 MB write (dedup hit) | 479 MB/s | 457 |
-| 1 MB read | 411 MB/s | 392 |
-| 16 MB write (dedup hit) | 759 MB/s | 45 |
-| 16 MB read | 395 MB/s | 23 |
-| 100 MB write (dedup hit) | 785 MB/s | 7 |
-| 100 MB read | 406 MB/s | 3 |
-| **Total (mixed sizes)** | **W 491 MB/s, R 370 MB/s** | — |
+| Op | Throughput |
+|----|------------|
+| 1 MB write (dedup hit) | 479 MB/s |
+| 1 MB read | 411 MB/s |
+| 16 MB write (dedup hit) | 759 MB/s |
+| 100 MB read | 406 MB/s |
+| Mixed workload | W 491 MB/s · R 370 MB/s |
 
-Crypto throughput on the same N100:
-- BLAKE3 (AVX2): ~1670 MB/s
-- AES-256-GCM dec (AES-NI + PCLMULQDQ): ~715 MB/s
-- AES-256-GCM enc (AES-NI + PCLMULQDQ): ~622 MB/s
+Crypto on the same N100: BLAKE3 ~1670 MB/s, AES-256-GCM ~715 MB/s dec /
+~622 MB/s enc. Encrypted throughput lands near unencrypted ext4 on
+comparable hardware, at ~2 W over idle on a fanless 6 W TDP CPU.
 
-Burst power draw on N100: **+2W over idle** (idle 11W → burst 13W).
-Energy efficiency: ~11.5 nJ/byte read — 5× better than scalar
-software crypto, near-200 MB/s sustainable on a fanless 6W TDP CPU.
+---
 
-These numbers include: BLAKE3 content addressing on every put,
-AES-256-GCM AEAD on every read/write, CoW B-tree with CAP.MQES-aware
-NVMe queue (256 entries) + 256-slot DMA pool, 32 cmds in flight via
-PRP-list multi-extent path, in-place AEAD decrypt (zero-copy from
-staging), 4-phase journal. Around the level of unencrypted ext4
-throughput on similar hardware.
+## Build & Run
 
-The v0.88.x stack ate the per-op overhead: dedup fastpath in
-`storage::put` skips encrypt when the content hash already exists,
-stream-hash in `paths::store` skips the encode pass on a dedup hit,
-`Object::decode` shifts the postcard prefix off in-place rather than
-allocating a fresh `Vec`, and `read_multi_extent` keeps 32 NVMe cmds
-in flight across fragmented extents. Reads scale up: 1 MB → 16 MB →
-100 MB all land between 330 and 410 MB/s, only ~25 % off the raw
-NVMe ceiling of 1175 MB/s. The remaining gap is AES-GCM at 715 MB/s
-— an aggregated-GHASH custom path could lift it but is deferred for
-its own session.
+```bash
+# Prerequisites (Arch)
+rustup toolchain install nightly
+rustup component add rust-src --toolchain nightly
+sudo pacman -S edk2-ovmf mtools gdisk qemu-system-x86
+# or (Debian/Ubuntu): sudo apt install ovmf mtools gdisk qemu-system-x86
+
+# Run
+./build.sh build                 # Compile only
+./build.sh qemu                  # Serial console (4 cores)
+./build.sh qemu-gui              # Serial + VGA window
+./build.sh debug                 # + GDB stub on :1234
+./build.sh release               # Compile + sign (ECDSA P-384) → release/
+./build.sh usb /dev/sdX          # USB installer (~30 MB, browser via OTA)
+./build.sh usb-full /dev/sdX     # USB installer + LibreWolf bundle (~290 MB)
+```
+
+### Release + OTA flow
+
+Every kernel or module change ships to hardware through this loop:
+
+1. Bump the version (patch for a fix, minor for a feature).
+2. Rebuild changed WASM modules and copy them into `release/modules/`.
+3. `./build.sh release` — signs `kernel.efi` + all modules with
+   `update.key` (ECDSA P-384) and regenerates the manifests.
+4. Commit + push `release/` so `raw.githubusercontent.com/…/release/`
+   serves the signed artifacts.
+5. On the device: `update` (kernel) / `install <module>` (module) —
+   each verifies SHA-384 + the ECDSA signature against the embedded
+   root key in `kernel/src/crypto/update_key.rs` before touching disk.
+
+> Skipping `./build.sh release` means OTA users keep getting the *last*
+> signed release — a silent downgrade. It is mandatory after any
+> kernel/module commit.
 
 ---
 
@@ -1050,274 +302,70 @@ its own session.
 
 ```
 nopeekOS/
-├── build.sh                          # Build + QEMU/VirtualBox launch
-├── kernel/
-│   ├── Cargo.toml
-│   ├── linker.ld                     # Memory layout (2MB stack, ImageBase 0x10000000)
-│   └── src/
-│       ├── boot.s                    # UEFI _start (XSETBV, BSS, stack, call efi_main)
-│       ├── boot_uefi.rs              # UEFI Boot Services + ExitBootServices + install GDT
-│       ├── boot_info.rs              # Firmware-agnostic handoff (BootInfo, MemoryRegion)
-│       ├── main.rs                   # Kernel entry, boot sequence, module re-exports
-│       ├── interrupts.rs             # IDT + PIC + APIC timer
-│       ├── vga.rs                    # VGA text mode (boot banner)
-│       ├── config.rs                 # Runtime configuration
-│       │
-│       ├── drivers/                  # Hardware drivers
-│       │   ├── serial.rs             #   COM1 serial console + kprint macros
-│       │   ├── pci.rs                #   PCI bus scanner
-│       │   ├── nvme.rs               #   NVMe (PCIe, TRIM)
-│       │   ├── virtio_blk.rs         #   virtio block device
-│       │   ├── virtio_net.rs         #   virtio network device
-│       │   ├── intel_nic.rs          #   Intel I226-V Ethernet
-│       │   ├── xhci.rs              #   xHCI USB (keyboard + mouse)
-│       │   ├── keyboard.rs           #   PS/2 keyboard
-│       │   ├── framebuffer.rs        #   UEFI GOP framebuffer
-│       │   ├── rtc.rs                #   Real-time clock
-│       │   ├── blkdev.rs             #   Block device abstraction
-│       │   ├── netdev.rs             #   Network device abstraction
-│       │   └── acpi.rs               #   ACPI (power, MADT, table lookup)
-│       │
-│       ├── mm/                       # Memory management
-│       │   ├── memory.rs             #   Physical frame allocator (bitmap)
-│       │   ├── heap.rs               #   Growable heap (64MB->2GB)
-│       │   └── paging.rs             #   4-level paging, NX, WC
-│       │
-│       ├── security/                 # Security subsystem
-│       │   ├── capability.rs         #   Capability Vault (256-bit tokens)
-│       │   ├── audit.rs              #   Audit log ring buffer
-│       │   └── csprng.rs             #   CSPRNG (RFC 7539 stream cipher, RDRAND-seeded)
-│       │
-│       ├── crypto/                   # Cryptography engine
-│       │   ├── aead.rs               #   AES-256-GCM (HW AES-NI) + ChaCha20-Poly1305 (TLS only)
-│       │   ├── update_key.rs         #   ECDSA P-384 OTA signing key
-│       │   └── tls/                  #   TLS 1.3 stack
-│       │       ├── mod.rs            #     Handshake + record layer
-│       │       ├── sha256.rs         #     SHA-256/384 (via sha2 crate)
-│       │       ├── hmac.rs           #     HMAC/HKDF
-│       │       ├── x25519.rs         #     Curve25519 ECDH
-│       │       ├── rsa.rs            #     RSA PKCS#1 v1.5 verify
-│       │       ├── asn1.rs           #     ASN.1 DER parser
-│       │       ├── x509.rs           #     X.509 certificate parser
-│       │       └── certstore.rs      #     Root CAs + chain validation
-│       │
-│       ├── storage/                  # Storage subsystem
-│       │   ├── fat32.rs              #   FAT32 (ESP access for OTA)
-│       │   ├── gpt.rs                #   GPT partition detection
-│       │   └── npkfs/                #   Content-addressed filesystem
-│       │       ├── mod.rs            #     API: mkfs, mount, store, fetch
-│       │       ├── types.rs          #     On-disk format
-│       │       ├── btree.rs          #     COW B-tree
-│       │       ├── cache.rs          #     LRU block cache
-│       │       ├── bitmap.rs         #     Block allocation + TRIM
-│       │       ├── superblock.rs     #     Rotating superblock ring
-│       │       └── journal.rs        #     WAL for crash recovery
-│       │
-│       ├── smp/                      # Symmetric Multiprocessing
-│       │   ├── mod.rs                #   MADT parsing, SIPI, init
-│       │   ├── trampoline.s          #   AP boot (16->32->64 bit)
-│       │   └── per_core.rs           #   CoreInfo, AP entry
-│       │
-│       ├── net/                      # Network stack
-│       │   ├── mod.rs                #   Packet dispatch + poll
-│       │   ├── eth.rs                #   Ethernet
-│       │   ├── arp.rs                #   ARP
-│       │   ├── ipv4.rs               #   IPv4
-│       │   ├── icmp.rs               #   ICMP (ping, traceroute)
-│       │   ├── udp.rs                #   UDP
-│       │   ├── tcp.rs                #   TCP
-│       │   ├── dns.rs                #   DNS resolver
-│       │   ├── dhcp.rs               #   DHCP client
-│       │   └── ntp.rs                #   NTP time sync
-│       │
-│       ├── gpu/                      # GPU subsystem
-│       │   ├── mod.rs                #   Backend abstraction (GOP/Xe)
-│       │   ├── intel_xe.rs           #   Intel Xe Gen 12.2 display
-│       │   └── gop.rs                #   UEFI GOP fallback
-│       │
-│       ├── gui/                      # GUI subsystem
-│       │   ├── mod.rs                #   Module index
-│       │   ├── login.rs              #   Graphical login screen
-│       │   ├── background.rs         #   Procedural aurora
-│       │   ├── font.rs               #   Spleen bitmap fonts
-│       │   ├── render.rs             #   Rounded rects, gradients
-│       │   ├── theme.rs              #   Color themes
-│       │   └── layers.rs             #   Layer compositor
-│       │
-│       ├── shade/                    # Shade compositor (tiling WM)
-│       │   ├── mod.rs                #   Init, render, mouse, tick
-│       │   ├── compositor.rs         #   Dwindle tiling, swap anim
-│       │   ├── window.rs             #   Window metadata
-│       │   ├── bar.rs                #   Shadebar (workspaces, clock)
-│       │   ├── terminal.rs           #   Per-window terminal buffers
-│       │   ├── input.rs              #   Keybindings
-│       │   └── cursor.rs             #   Software mouse cursor
-│       │
-│       ├── intent/                   # Intent loop
-│       │   ├── mod.rs                #   Dispatch, CWD, tab-completion, key injection routing
-│       │   ├── fs.rs                 #   store, fetch, cat, grep, list
-│       │   ├── net.rs                #   ping, traceroute, resolve
-│       │   ├── http.rs               #   HTTP/HTTPS GET (async on worker core)
-│       │   ├── wasm.rs               #   run (interactive), run_background (debug.wasm)
-│       │   ├── system.rs             #   status, help, halt, config
-│       │   ├── install.rs            #   install <mod> — GH download + ECDSA verify
-│       │   ├── update.rs             #   OTA kernel update — GH download + ECDSA + ESP write
-│       │   └── auth.rs               #   lock, passwd
-│       │
-│       ├── input.rs                   # KeyEvent abstraction (KeyCode, Modifiers)
-│       ├── wasm.rs                   # WASM runtime + host functions (stream, tcp, key_inject)
-│       └── setup.rs                  # First-boot setup wizard
-│
-├── tools/wasm/debug/                 # Reverse debug shell (WASM module, ~1.6KB)
-│   └── src/
-│       ├── lib.rs                    #   Relay loop: stream ↔ TCP ↔ key inject
-│       └── host.rs                   #   Host function bindings
-├── tools/wasm/wifi/                  # WiFi driver (WASM module)
-│   └── src/
-│       ├── lib.rs                    #   Entry point, init + FW download sequence
-│       ├── host.rs                   #   Host function bindings (PCI, MMIO, DMA)
-│       ├── regs.rs                   #   RTL8852BE register definitions
-│       └── fw.rs                     #   MFW container parser, firmware upload
-```
-
----
-
-## Build & Run
-
-```bash
-# Prerequisites
-rustup toolchain install nightly
-rustup component add rust-src --toolchain nightly
-sudo pacman -S edk2-ovmf mtools gdisk qemu-system-x86   # Arch
-# or: sudo apt install ovmf mtools gdisk qemu-system-x86
-
-# Build + Run
-./build.sh qemu          # Serial console in terminal (4 cores)
-./build.sh qemu-gui      # Serial + VGA window
-./build.sh debug         # With GDB stub on :1234
-./build.sh build         # Compile only
-./build.sh release       # Build + sign kernel (ECDSA P-384) + generate manifest
-./build.sh usb /dev/sdX        # USB installer (~30 MB, browser via OTA)
-./build.sh usb-full /dev/sdX   # USB installer + LibreWolf bundle (~290 MB,
-                               # browser ready on first boot, no OTA needed)
-./build.sh qemu-installer-full # QEMU installer test with bundle baked in
-```
-
-### Release + OTA Flow (bare metal testing)
-
-Each feature lands on the NUC through this loop:
-
-1. **Bump** `kernel/Cargo.toml` version (patch for fix, minor for feature).
-2. **Build WASM modules** if changed:
-   `cd tools/wasm/<name> && cargo build --release --target wasm32-unknown-unknown`
-   then copy `target/wasm32-unknown-unknown/release/<name>.wasm` to
-   `release/modules/<name>.wasm` and update `release/modules/<name>.version`.
-3. **`./build.sh release`** — compiles the kernel, signs `kernel.efi` +
-   all `release/modules/*.wasm` with `update.key` (ECDSA P-384), regenerates
-   `release/manifest` and `release/modules/manifest` (sha384 + size per entry).
-4. **Commit + push** — all release artifacts go to `main` so
-   `raw.githubusercontent.com/fnopeek/nopeekOS/main/release/` serves them.
-5. **On the NUC:**
-   - `update` — `kernel/src/intent/update.rs`: fetches `release/manifest`, verifies
-     ECDSA signature over the new kernel, writes to the ESP FAT32 partition via
-     `storage/fat32.rs`. Reboots into the new kernel.
-   - `install <name>` — `kernel/src/intent/install.rs`: fetches
-     `release/modules/manifest`, matches `<name>`, downloads `.wasm` + `.sig`,
-     verifies sha384 + ECDSA, stores under `sys/wasm/<name>` in npkFS.
-   - `run <name>` loads and executes the module in a sandboxed WASM worker.
-
-Both verification paths share the embedded root key in `kernel/src/crypto/update_key.rs`
-and reject any artifact whose signature doesn't match.
-
-### First Boot (Intel N100 NUC)
-
-```
-[npk] AI-native Operating System v0.159.0
-[npk] Booting (UEFI)...
-[npk] Interrupts enabled.
-[npk] TSC: 806 MHz
-[npk] Physical memory: 15892 MB free (16 GB detected)
-[npk] Kernel footprint: 3104 KB
-[npk] Heap: 64 MB (grows on demand, max 2048 MB)
-[npk] Paging: 64 GB identity-mapped, NX enabled
-[npk] APIC timer: 100Hz (base=0xfee00000)
-[npk] smp: 4 cores detected (BSP + 3 APs)
-[npk] smp: 3/3 APs online
-[npk] HWP: 800-2700 MHz (auto-scaling, EPP=0)
-[npk] PCI: 8 devices
-[npk] nvme: KINGSTON SNV2S500G, TRIM=yes, 465 GB
-[npk] nvme: version 1.4.0, max queue 1024
-[npk] xhci: USB keyboard + mouse (HID boot protocol)
-[npk] Intel Xe GPU: ADL-N (device 46d0), 4K@60Hz HDMI 2.0
-[npk] Framebuffer: 3840x2160 @ BAR2+GGTT (32bpp, scale=2)
-[npk] Intel I226-V: link UP, MAC 48:21:0b:...
-[npk] WiFi: RTL8852BE (10ec:b852) probed, BAR2 MMIO assigned
-[npk] DHCP: configured 192.168.1.100
-[npk] npkfs: v2 mounted (root_tree=...)
-[npk] CSPRNG: ready (RDRAND-seeded)
-[npk] WASM runtime: wasmi v1.0 (fuel-metered)
-
-[npk] Welcome, Florian.
-[npk] System ready. Express your intent.
-
-~>
+├── build.sh                  # Build + QEMU/VirtualBox/USB
+├── kernel/src/
+│   ├── main.rs               # Entry, boot sequence
+│   ├── boot.s / boot_uefi.rs # UEFI _start, ExitBootServices, GDT
+│   ├── drivers/              # PCI, NVMe, xHCI, NICs, GPU, HDA, RTC, ...
+│   ├── mm/                   # Frame allocator, growable heap, paging
+│   ├── security/             # Capability vault, audit log, CSPRNG
+│   ├── crypto/               # AES-GCM, BLAKE3, TLS 1.3, OTA key
+│   ├── storage/npkfs/        # Content-addressed filesystem
+│   ├── net/                  # Ethernet → ARP → IPv4 → TCP/UDP, DNS/DHCP/NTP
+│   ├── smp/                  # MADT, SIPI, work-stealing + fibers
+│   ├── gpu/                  # GOP + Intel Xe backend
+│   ├── shade/                # Compositor: tiling, widgets, panels
+│   ├── intent/               # The intent loop (dispatch, fs, net, http, ...)
+│   ├── microvm/              # VT-x / AMD-V hypervisor + virtio + Linux loader
+│   └── wasm.rs               # WASM runtime + host functions (npk_*)
+└── tools/wasm/               # WASM apps & drivers
+    ├── beak/ + beak-engine/  #   Native browser + portable render engine
+    ├── loft/ spell/ iris/    #   File browser, editor, image viewer
+    ├── snap/ drun/ top/      #   Screenshot, launcher, monitor
+    ├── bar/ dock/ volume/    #   Panels + volume overlay
+    ├── wifi/ aml/ audio_hda/ #   Hardware drivers as WASM
+    └── sdk/widgets/          #   nopeek_widgets — declarative UI SDK
 ```
 
 ---
 
 ## Security Architecture
 
-1. **Deny by Default** -- Without a capability token, nothing happens
-2. **Encryption at Rest** -- All npkFS blobs encrypted with AES-256-GCM (hardware AES-NI), integrity-verified on read via BLAKE3
-3. **Passphrase Identity** -- No users, no accounts. Your passphrase IS your identity
-4. **256-bit Tokens** -- Post-quantum safe (Grover-resistant), CSPRNG
-5. **Least Privilege** -- WASM modules get only what they need (READ+EXECUTE, no WRITE)
-6. **Temporal Scoping** -- Module capabilities expire after 60 seconds
-7. **Audit Everything** -- Every token operation logged
-8. **Formal Boundaries** -- WASM sandbox is the trust boundary
-9. **No Ambient Authority** -- No root, no sudo, no privilege elevation
-10. **Fuel Metering** -- 10M instruction budget per module prevents DoS
-11. **TLS 1.3** -- All network communication encrypted (3 cipher suites, X25519 + P-384)
-12. **Signed OTA Updates** -- ECDSA P-384 signed kernel + modules, SHA-384 integrity check
+1. **Deny by default** — without a capability token, nothing happens
+2. **Encrypted at rest** — every npkFS blob is AES-256-GCM, verified on
+   read via BLAKE3
+3. **Passphrase identity** — no users, no accounts; your passphrase is
+   your identity
+4. **256-bit tokens** — CSPRNG, Grover-resistant, least-privilege
+5. **Temporal scoping** — module capabilities expire; rights only shrink
+   on delegation
+6. **One trust boundary** — the WASM sandbox contains apps *and* drivers
+7. **Signed OTA** — ECDSA P-384 kernel + modules, SHA-384 integrity
+8. **TLS 1.3 everywhere** — all network traffic encrypted
 
-> **Future: Code Signing Key Hierarchy**
->
-> Currently all artifacts (kernel, WASM modules) are signed with a single ECDSA P-384 key.
-> When third-party modules become possible, this needs to evolve:
-> - Separate keys for kernel vs. modules (compromise isolation)
-> - Per-publisher keys for third-party WASM apps
-> - Root key (offline) signs sub-keys; sub-keys sign artifacts
-> - Sub-key revocation mechanism (capability-based, temporal)
+> Before every commit: *"Can a WASM module escape its sandbox through
+> this change?"* If the answer isn't clearly **no**, it doesn't ship.
+
+Today all artifacts are signed with a single ECDSA P-384 key. When
+third-party modules become possible this evolves into a key hierarchy
+(offline root signs sub-keys, per-publisher keys, revocation).
 
 ---
 
 ## What nopeekOS Is NOT
 
-- **Not a Linux clone** -- no systemd, no ext4, no procfs
-- **Not POSIX** -- no fork(), no exec(), no pipes
-- **Not a unikernel** -- multi-intent, not single-purpose
-- **Not a container runtime** -- WASM modules are lighter than containers
-- **Not an academic experiment** -- every phase produces working code
-
----
-
-## Vision
-
-```
-Today:    Human installs app -> configures -> operates -> debugs
-Tomorrow: Human expresses intent -> system generates -> executes -> delivers
-```
-
-nopeekOS is the attempt to build "tomorrow".
-Without compromise to the past.
-From Luzern.
+- **Not a Linux clone** — no systemd, no ext4, no procfs
+- **Not POSIX** — no `fork()`, no `exec()`, no pipes
+- **Not a unikernel** — multi-app, not single-purpose
+- **Not a container runtime** — WASM modules are lighter than containers
+- **Not an academic experiment** — every phase produces working code
 
 ---
 
 ## License
 
-GPL-3.0 -- see [LICENSE](LICENSE)
+GPL-3.0 — see [LICENSE](LICENSE)
 
 ## Author
 
-nopeek -- [nopeek.ch](https://nopeek.ch)
+nopeek — [nopeek.ch](https://nopeek.ch) · from Luzern
