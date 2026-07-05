@@ -24,9 +24,43 @@ use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::image::{Image, ImageMap};
 use crate::style::{
-    self, ComputedStyle, CrossAlign, Display, FlexBasis, GridTrack, Justify, Len, Position,
-    BASE_FONT_PX,
+    self, ClearKind, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind, GridTrack, Justify,
+    Len, Position, BASE_FONT_PX,
 };
+
+/// An active float's exclusion rectangle (document space) within a block
+/// formatting context. Line boxes and later content avoid these.
+#[derive(Clone, Copy)]
+struct FloatRect {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+    is_left: bool, // float:left (true) vs float:right (false)
+}
+
+/// Whether a block-level box establishes a new block formatting context, so its
+/// border box must not overlap floats (CSS2.1 §9.4.1). We can detect the
+/// formatting-context displays (flex/grid/table); `overflow != visible` also
+/// does but isn't tracked in the style yet.
+fn establishes_bfc(st: &ComputedStyle) -> bool {
+    matches!(st.display, Display::Flex | Display::Grid | Display::Table)
+}
+
+/// Narrow the x-range `[cl, cr]` by floats overlapping the band `[top, bot)`.
+fn band_of(floats: &[FloatRect], top: i32, bot: i32, cl: i32, cr: i32) -> (i32, i32) {
+    let (mut l, mut r) = (cl, cr);
+    for f in floats {
+        if f.bottom > top && f.top < bot {
+            if f.is_left {
+                l = l.max(f.right);
+            } else {
+                r = r.min(f.left);
+            }
+        }
+    }
+    (l, r.max(l))
+}
 
 /// Resolve a block box's horizontal geometry within a containing block of
 /// content width `avail`: CSS2.1 §10.3.3 (used width + margins) plus the
@@ -201,6 +235,9 @@ struct Ctx<'a> {
     cb: (i32, i32, i32),
     /// Viewport width (px) — the layout width — for `@media` evaluation.
     viewport_w: f32,
+    /// Active floats in the current block formatting context — line boxes and
+    /// later blocks flow around them. Saved/restored when entering a new BFC.
+    floats: Vec<FloatRect>,
 }
 
 /// Lay a document out into a scroll-independent display list.
@@ -225,6 +262,7 @@ pub fn layout(
         path: Vec::new(),
         cb: (cx, PAD, cw), // initial containing block = the page content area
         viewport_w: width as f32,
+        floats: Vec::new(),
     };
 
     let mut y = PAD;
@@ -235,6 +273,9 @@ pub fn layout(
     let body_style = style::resolve(body, &root, theme, sheet, &[], width as f32);
     ctx.path.push(ElemInfo::of(body));
     y = ctx.layout_children(&body.children, &body_style, cx, cw, y);
+    // A float can extend below the last in-flow line — grow the page to contain it.
+    let float_bottom = ctx.floats.iter().map(|f| f.bottom).max().unwrap_or(0);
+    y = y.max(float_bottom);
     y += PAD;
 
     // The body's background propagates to the whole canvas (a bare `<body
@@ -244,6 +285,140 @@ pub fn layout(
 }
 
 impl Ctx<'_> {
+    /// Narrow an x-range `[cl, cr]` by any active floats overlapping the
+    /// vertical band `[top, bot)`. Returns the (left, right) available there.
+    fn float_band(&self, top: i32, bot: i32, cl: i32, cr: i32) -> (i32, i32) {
+        band_of(&self.floats, top, bot, cl, cr)
+    }
+
+    /// Position a block that establishes a new BFC so its border box does not
+    /// overlap active floats (CSS2.1 §9.5): shift it into the widest available
+    /// band at its top, dropping below any float a definite width can't fit
+    /// beside. Returns the adjusted (margin-box left, available width, top).
+    fn avoid_floats_bfc(&self, st: &ComputedStyle, x: i32, w: i32, y: i32) -> (i32, i32, i32) {
+        if self.floats.is_empty() {
+            return (x, w, y);
+        }
+        let ml = st.margin_left.px(w as f32).unwrap_or(0.0).max(0.0);
+        let mr = st.margin_right.px(w as f32).unwrap_or(0.0).max(0.0);
+        // Outer (margin-box) width a definite width demands; `auto` fills the band.
+        let need = match st.width {
+            Len::Auto => None,
+            other => other.px(w as f32).map(|v| {
+                let border = if st.box_border {
+                    v
+                } else {
+                    v + st.pad_left + st.pad_right + 2.0 * st.border_width
+                };
+                ceil_i32(border + ml + mr)
+            }),
+        };
+        let mut by = y;
+        loop {
+            let (bl, br) = self.float_band(by, by + 1, x, x + w);
+            let avail = br - bl;
+            let fits = match need {
+                Some(n) => n <= avail,
+                None => true,
+            };
+            if fits || avail >= w {
+                break;
+            }
+            let next = self.floats.iter().filter(|f| f.bottom > by).map(|f| f.bottom).min();
+            match next {
+                Some(nb) if nb > by => by = nb,
+                _ => break,
+            }
+        }
+        let (bl, br) = self.float_band(by, by + 1, x, x + w);
+        (bl.max(x), (br - bl).max(1), by)
+    }
+
+    /// The y at or below which floats on the cleared side(s) no longer intrude.
+    fn clear_below(&self, clear: ClearKind, y: i32) -> i32 {
+        let mut ny = y;
+        for f in &self.floats {
+            let hit = match clear {
+                ClearKind::Both => true,
+                ClearKind::Left => f.is_left,
+                ClearKind::Right => !f.is_left,
+                ClearKind::None => false,
+            };
+            if hit {
+                ny = ny.max(f.bottom);
+            }
+        }
+        ny
+    }
+
+    /// Place a `float:left|right` box (CSS2.1 §9.5.1). Computes the float's
+    /// margin-box width (shrink-to-fit for `auto`), finds the highest position
+    /// where that margin box fits beside earlier floats on either side (dropping
+    /// below the ones it can't fit beside), lays the box out isolated in its own
+    /// BFC, and records its margin box as an exclusion rect. Does not advance
+    /// normal flow. `x`/`w` are the BFC content box; `y` the static flow top.
+    fn place_float(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) {
+        let is_left = st.float == FloatKind::Left;
+        let ml = st.margin_left.px(w as f32).unwrap_or(0.0).max(0.0);
+        let mr = st.margin_right.px(w as f32).unwrap_or(0.0).max(0.0);
+        let pad_border = st.pad_left + st.pad_right + 2.0 * st.border_width;
+        // Content width: shrink-to-fit for `auto` (min(max(min-content, avail),
+        // preferred)); a definite width is used directly (may overflow the CB).
+        let content_w = match st.width {
+            Len::Auto => {
+                let (pref, min) = self.intrinsic_width(el);
+                let avail = (w as f32 - ml - mr - pad_border).max(0.0);
+                pref.min(avail).max(min).max(0.0)
+            }
+            other => {
+                let v = other.px(w as f32).unwrap_or(0.0);
+                if st.box_border { (v - pad_border).max(0.0) } else { v }
+            }
+        };
+        // Margin-box outer width (never below 1px, never the whole CB for a
+        // shrink-to-fit float, but a definite width may exceed the CB).
+        let fw = (ceil_i32(content_w + pad_border + ml + mr)).max(1);
+        // Float margins never collapse: the margin box top is the static flow
+        // position `y`. Drop below earlier floats until the margin box fits.
+        let mut fy = y;
+        loop {
+            let (bl, br) = self.float_band(fy, fy + 1, x, x + w);
+            if fw <= br - bl || br - bl >= w {
+                break;
+            }
+            let next = self
+                .floats
+                .iter()
+                .filter(|f| f.bottom > fy)
+                .map(|f| f.bottom)
+                .min();
+            match next {
+                Some(nb) if nb > fy => fy = nb,
+                _ => break,
+            }
+        }
+        let (bl, br) = self.float_band(fy, fy + 1, x, x + w);
+        // Margin-box left edge: left floats pack left, right floats pack right.
+        let mbox_left = if is_left { bl } else { (br - fw).max(bl) };
+        // The border box sits below the margin box top by `margin-top`.
+        let border_top = fy + st.margin_top as i32;
+        self.path.push(ElemInfo::of(el));
+        // The float's own contents establish a new BFC — isolate its inner floats.
+        let saved = core::mem::take(&mut self.floats);
+        // `layout_box` re-adds margin-left + padding from `mbox_left`; passing the
+        // margin-box width lets an `auto`-width child fill the shrink-to-fit box.
+        let border_bottom = self.layout_box(el, st, mbox_left, fw, border_top);
+        self.floats = saved;
+        self.path.pop();
+        self.floats.push(FloatRect {
+            left: mbox_left,
+            right: mbox_left + fw,
+            top: fy,
+            bottom: border_bottom + st.margin_bottom as i32,
+            is_left,
+        });
+    }
+
     /// Block formatting context: lay `nodes` as a vertical stack, grouping
     /// consecutive inline-level content into line boxes. Returns the y below
     /// the last child.
@@ -285,24 +460,49 @@ impl Ctx<'_> {
                 self.path.pop();
                 continue;
             }
+            // `float:left|right` — out of normal flow, placed at the BFC edge;
+            // following inline + blocks flow around it. Does not advance `y`.
+            if st.float != FloatKind::None {
+                self.place_float(el, &st, x, w, y);
+                continue;
+            }
             if st.display == Display::Inline {
                 self.path.push(ElemInfo::of(el));
-                self.collect_inline(el, &st, None, &mut inline);
+                self.collect_inline(el, &st, None, &mut inline, x, w, y);
                 self.path.pop();
                 continue;
             }
             // Block-level, in normal flow.
             if !inline.is_empty() {
-                y = inline.flow(self.font, self.theme, x, w, y, &mut self.ops, &mut self.links);
+                y = inline.flow(self.font, self.theme, x, w, y, &self.floats, &mut self.ops, &mut self.links);
                 inline = Inline::new();
                 carry = 0.0;
+            }
+            // `clear` drops the block below the relevant floats.
+            if st.clear != ClearKind::None {
+                let cleared = self.clear_below(st.clear, y);
+                if cleared > y {
+                    y = cleared;
+                    carry = 0.0;
+                }
             }
             let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
             y += top as i32;
             self.path.push(ElemInfo::of(el));
             let op0 = self.ops.len();
             let link0 = self.links.len();
-            y = self.layout_box(el, &st, x, w, y);
+            // A block that establishes a new BFC (flex/grid/table) has its border
+            // box kept clear of active floats (CSS2.1 §9.5): shift it beside them
+            // (or drop it below), and isolate its own content from the outer
+            // floats. A normal block instead overlaps them (its text wraps).
+            if establishes_bfc(&st) {
+                let (bx, bw, by) = self.avoid_floats_bfc(&st, x, w, y);
+                let saved = core::mem::take(&mut self.floats);
+                y = self.layout_box(el, &st, bx, bw, by);
+                self.floats = saved;
+            } else {
+                y = self.layout_box(el, &st, x, w, y);
+            }
             // `position:relative` stays in flow but its paint shifts by top/left.
             if st.position == Position::Relative {
                 let (dx, dy) = rel_offset(&st, w as f32);
@@ -315,7 +515,7 @@ impl Ctx<'_> {
             had_block = true;
         }
         if !inline.is_empty() {
-            y = inline.flow(self.font, self.theme, x, w, y, &mut self.ops, &mut self.links);
+            y = inline.flow(self.font, self.theme, x, w, y, &self.floats, &mut self.ops, &mut self.links);
         } else if had_block {
             y += carry as i32;
         }
@@ -1566,7 +1766,7 @@ impl Ctx<'_> {
     /// Collect an inline element's subtree into the current inline run
     /// (recursing through nested inline elements, carrying each one's style +
     /// link href). `el` is already on `self.path` when this is called.
-    fn collect_inline(&mut self, el: &Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline) {
+    fn collect_inline(&mut self, el: &Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline, bx: i32, bw: i32, by: i32) {
         if st.is_break {
             inline.brk();
             return;
@@ -1585,11 +1785,18 @@ impl Ctx<'_> {
                 Node::Text(t) => inline.text(self.font, t, st, href),
                 Node::Element(ce) => {
                     let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
-                    if cs.display != Display::None {
-                        self.path.push(ElemInfo::of(ce));
-                        self.collect_inline(ce, &cs, href, inline);
-                        self.path.pop();
+                    if cs.display == Display::None {
+                        continue;
                     }
+                    // A floated inline element leaves the inline flow and is placed
+                    // as a float; surrounding text wraps around it.
+                    if cs.float != FloatKind::None {
+                        self.place_float(ce, &cs, bx, bw, by);
+                        continue;
+                    }
+                    self.path.push(ElemInfo::of(ce));
+                    self.collect_inline(ce, &cs, href, inline, bx, bw, by);
+                    self.path.pop();
                 }
             }
         }
@@ -1682,15 +1889,19 @@ impl Inline {
         x: i32,
         w: i32,
         y0: i32,
+        floats: &[FloatRect],
         ops: &mut Vec<DrawOp>,
         links: &mut Vec<LinkRect>,
     ) -> i32 {
         let mut y = y0;
         let mut line: Vec<Placed> = Vec::new();
-        let mut pen = x as f32;
+        // Each line's usable [left, right] narrows around floats at its y-band.
+        let lh = ceil_i32(line_gap(font, BASE_FONT_PX)).max(1);
+        let (l0, r0) = band_of(floats, y, y + lh, x, x + w);
+        let mut pen = l0 as f32;
         let mut line_ascent = 0.0f32;
         let mut gap = 0.0f32;
-        let right = (x + w) as f32;
+        let mut right = r0 as f32;
 
         for item in &self.items {
             match item {
@@ -1700,7 +1911,9 @@ impl Inline {
                     } else {
                         y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
                     }
-                    pen = x as f32;
+                    let (bl, br) = band_of(floats, y, y + lh, x, x + w);
+                    pen = bl as f32;
+                    right = br as f32;
                     line_ascent = 0.0;
                     gap = 0.0;
                 }
@@ -1709,7 +1922,9 @@ impl Inline {
                     let sw = if *space_before { space_width(font, style.size) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ww > right {
                         y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
-                        pen = x as f32;
+                        let (bl, br) = band_of(floats, y, y + lh, x, x + w);
+                        pen = bl as f32;
+                        right = br as f32;
                         line_ascent = 0.0;
                         gap = 0.0;
                     }
@@ -1741,7 +1956,9 @@ impl Inline {
                     let sw = if *space_before { space_width(font, BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + bw as f32 > right {
                         y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
-                        pen = x as f32;
+                        let (bl, br) = band_of(floats, y, y + lh, x, x + w);
+                        pen = bl as f32;
+                        right = br as f32;
                         line_ascent = 0.0;
                         gap = 0.0;
                     }
