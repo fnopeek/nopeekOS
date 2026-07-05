@@ -315,6 +315,22 @@ fn parse_into(
                 let close = matching_brace(bytes, k, end);
                 parse_into(css, k + 1, close, Some(&conds), rules, order);
                 i = (close + 1).min(end);
+            } else if css[i + 1..j].eq_ignore_ascii_case("supports") {
+                // Descend into `@supports` when the condition holds; else skip
+                // the block (its rules never apply). Keeps any enclosing @media.
+                let mut k = j;
+                while k < end && bytes[k] != b'{' && bytes[k] != b';' {
+                    k += 1;
+                }
+                if k >= end || bytes[k] == b';' {
+                    i = (k + 1).min(end);
+                    continue;
+                }
+                let close = matching_brace(bytes, k, end);
+                if supports_cond(&css[j..k]) {
+                    parse_into(css, k + 1, close, media, rules, order);
+                }
+                i = (close + 1).min(end);
             } else {
                 i = skip_at_rule(bytes, i).min(end);
             }
@@ -364,6 +380,84 @@ fn matching_brace(bytes: &[u8], open: usize, end: usize) -> usize {
         i += 1;
     }
     end
+}
+
+/// Evaluate an `@supports` condition. Handles `not`, top-level `and`/`or`, and
+/// `(prop: value)` leaves. A colour-property leaf is supported iff the value
+/// parses as a colour; other feature leaves are assumed supported (render-what-
+/// the-author-intended bias — we implement most box/flex/grid properties).
+fn supports_cond(cond: &str) -> bool {
+    let c = cond.trim();
+    if c.is_empty() {
+        return false;
+    }
+    if let Some(rest) = strip_ci_prefix(c, "not ") {
+        return !supports_cond(rest);
+    }
+    if let Some(parts) = split_top(c, " and ") {
+        return parts.iter().all(|p| supports_cond(p));
+    }
+    if let Some(parts) = split_top(c, " or ") {
+        return parts.iter().any(|p| supports_cond(p));
+    }
+    // Unwrap one layer of grouping parens.
+    let inner = c.strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or(c).trim();
+    if inner != c
+        && (split_top(inner, " and ").is_some()
+            || split_top(inner, " or ").is_some()
+            || strip_ci_prefix(inner, "not ").is_some())
+    {
+        return supports_cond(inner);
+    }
+    match inner.split_once(':') {
+        Some((prop, val)) => supports_decl(prop.trim(), val.trim()),
+        None => false,
+    }
+}
+
+fn supports_decl(prop: &str, val: &str) -> bool {
+    let p = prop.to_ascii_lowercase();
+    if p == "color" || p == "background" || p == "fill" || p == "stroke" || p.ends_with("-color") {
+        return crate::color::parse_color(val).is_some();
+    }
+    !val.is_empty()
+}
+
+/// Case-insensitive prefix strip.
+fn strip_ci_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+/// Split `s` on `sep` at paren-depth 0. `None` if `sep` never occurs at top
+/// level (so the caller can treat `s` as a single term).
+fn split_top<'a>(s: &'a str, sep: &str) -> Option<Vec<&'a str>> {
+    let b = s.as_bytes();
+    let sb = sep.as_bytes();
+    let (mut depth, mut i, mut last) = (0i32, 0usize, 0usize);
+    let mut parts = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => depth = (depth - 1).max(0),
+            _ => {}
+        }
+        if depth == 0 && i + sb.len() <= b.len() && &b[i..i + sb.len()] == sb {
+            parts.push(s[last..i].trim());
+            i += sb.len();
+            last = i;
+            continue;
+        }
+        i += 1;
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(s[last..].trim());
+    Some(parts)
 }
 
 /// Parse a `@media` prelude (comma = OR) into conditions. Only `min-width`/
