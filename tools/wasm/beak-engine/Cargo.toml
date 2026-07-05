@@ -33,3 +33,13 @@ features = ["with-alloc"]
 [dependencies.libm]
 version = "0.2"
 default-features = false
+
+# zune-jpeg: no_std baseline+progressive JPEG decoder (the common web image
+# case). Pure Rust, alloc-only — same "infrastructure decoder" role as
+# miniz_oxide for PNG. Output forced to interleaved RGB, we pack to BGRA.
+[dependencies.zune-jpeg]
+version = "0.4"
+default-features = false
+[dependencies.zune-core]
+version = "0.4"
+default-features = false

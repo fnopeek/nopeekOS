@@ -550,63 +550,241 @@ impl Ctx<'_> {
         }
     }
 
-    /// Grid layout (css-grid-2 subset): explicit `grid-template-columns`
-    /// (px/%/fr/auto/`repeat`), row-major **auto-placement**, column `span`,
-    /// `gap`; row heights are content-driven (auto). No explicit line
-    /// placement, `grid-template-rows`/`areas`, dense flow, or item alignment.
+    /// Grid layout (css-grid-2 subset). Handles the container box model (width/
+    /// margins/padding/background/border/explicit height), explicit
+    /// `grid-template-columns`/`-rows` (px/%/fr/auto/`repeat`), `grid-auto-rows`,
+    /// the `grid`/`grid-template` `<rows> / <cols>` shorthand, row-major
+    /// auto-placement with explicit line placement (`grid-column`/`grid-row`,
+    /// start line + span), separate `row-gap`/`column-gap`, and item alignment
+    /// (`justify-items`/`align-items`/`justify-self`/`align-self`, incl. the
+    /// default `stretch`). Not yet: named lines/areas, `repeat(auto-fill)`,
+    /// dense packing, subgrid, or `align-content`/`justify-content`.
     fn layout_grid(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        let ncols = st.grid_ncols as usize;
-        // No template → fall back to normal block flow (single implicit column).
-        if ncols == 0 {
-            return self.layout_children(&el.children, st, x, w, y0);
+        // No template at all → a grid degenerates to a block box.
+        if st.grid_ncols == 0 && st.grid_nrows == 0 {
+            return self.layout_block(el, st, x, w, y0);
         }
 
+        // Container horizontal box (mirrors `layout_block`).
+        let (cw, off_left) = resolve_block_h(st, w as f32);
+        let content_x = x + off_left as i32;
+        let content_w = cw.max(1.0) as i32;
+        let box_left = content_x - st.pad_left as i32;
+        let box_w = content_w + (st.pad_left + st.pad_right) as i32;
+        let bg_idx = self.ops.len();
+        let content_top = y0 + st.pad_top as i32;
+
+        let prev_cb = self.cb;
+        if st.position != Position::Static {
+            self.cb = (content_x, content_top, content_w);
+        }
+        let content_h = self.grid_content(el, st, content_x, content_w, content_top);
+        self.cb = prev_cb;
+
+        // Explicit / min / max height clamp the content-box height.
+        let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
+        let px_h = |len: Len| match len {
+            Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
+            Len::Px(h) => Some(h as i32),
+            _ => None,
+        };
+        let mut ch = content_h;
+        if let Some(h) = px_h(st.height) {
+            ch = h;
+        }
+        if let Some(mn) = px_h(st.min_height) {
+            ch = ch.max(mn);
+        }
+        if let Some(mx) = px_h(st.max_height) {
+            ch = ch.min(mx);
+        }
+
+        let y = content_top + ch + st.pad_bottom as i32;
+        self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
+        y
+    }
+
+    /// Lay a grid container's items inside its content box `(x, w, y0)`, returning
+    /// the content-box height. `self.cb` is already set for the container.
+    fn grid_content(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        // Column tracks, expanding any `repeat(auto-fill/auto-fit, …)` to fill the
+        // container width.
+        let mut tracks: Vec<GridTrack> = st.grid_tracks[..st.grid_ncols as usize].to_vec();
+        if st.grid_col_fill != 0
+            && st.grid_col_fill_len > 0
+            && (st.grid_col_fill_start as usize + st.grid_col_fill_len as usize) <= tracks.len()
+        {
+            let start = st.grid_col_fill_start as usize;
+            let len = st.grid_col_fill_len as usize;
+            let avail = w as f32;
+            let g = st.grid_col_gap;
+            let px_of = |t: GridTrack| match t {
+                GridTrack::Fixed(p) => Some(p),
+                GridTrack::Pct(p) => Some(p / 100.0 * avail),
+                _ => None,
+            };
+            let mut pat_size = 0.0f32;
+            let mut definite = len > 0;
+            for &t in &tracks[start..start + len] {
+                match px_of(t) {
+                    Some(p) => pat_size += p,
+                    None => definite = false,
+                }
+            }
+            let per_rep = pat_size + len as f32 * g;
+            if definite && per_rep > 0.0 {
+                let fixed: f32 = tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i < start || *i >= start + len)
+                    .map(|(_, &t)| px_of(t).unwrap_or(0.0))
+                    .sum();
+                // `as i64` truncates toward zero (= floor for the positive ratio).
+                let count = (((avail - fixed + g) / per_rep) as i64).max(1) as usize;
+                let pat: Vec<GridTrack> = tracks[start..start + len].to_vec();
+                let mut nt: Vec<GridTrack> = tracks[..start].to_vec();
+                for _ in 0..count {
+                    if nt.len() + len > style::MAX_GRID_COLS {
+                        break;
+                    }
+                    nt.extend_from_slice(&pat);
+                }
+                nt.extend_from_slice(&tracks[start + len..]);
+                nt.truncate(style::MAX_GRID_COLS);
+                tracks = nt;
+            }
+        }
+        if tracks.is_empty() {
+            tracks.push(GridTrack::Auto); // rows-only grid → one implicit column
+        }
+        let ncols = tracks.len();
+
+        // Grid items = in-flow child elements; abspos children are out of flow.
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
                 let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
-                if cs.display != Display::None {
-                    items.push((ce, cs));
+                if cs.display == Display::None {
+                    continue;
                 }
+                if matches!(cs.position, Position::Absolute | Position::Fixed) {
+                    self.path.push(ElemInfo::of(ce));
+                    self.layout_abs(ce, &cs);
+                    self.path.pop();
+                    continue;
+                }
+                items.push((ce, cs));
             }
         }
-        if items.is_empty() {
-            return self.layout_children(&el.children, st, x, w, y0);
-        }
 
-        // Row-major auto-placement: (col, span, row) per item.
-        let mut place: Vec<(usize, usize, usize)> = Vec::with_capacity(items.len());
-        let (mut col, mut row) = (0usize, 0usize);
+        let col_gap = st.grid_col_gap;
+        let row_gap = st.grid_row_gap;
+
+        // Definite container content height (for %/fr row resolution).
+        let pad_v = st.pad_top + st.pad_bottom;
+        let def_h: Option<f32> = match st.height {
+            Len::Px(h) if st.box_border => Some((h - pad_v).max(0.0)),
+            Len::Px(h) => Some(h),
+            _ => None,
+        };
+
+        // — placement — (col, colspan, row, rowspan) per item, row-major flow
+        // honouring explicit `grid-column`/`grid-row` start lines + spans.
+        let resolve_col = |line: i16| -> usize {
+            if line > 0 {
+                (line as usize - 1).min(ncols - 1)
+            } else if line < 0 {
+                (ncols as i16 + line).clamp(0, ncols as i16 - 1) as usize
+            } else {
+                0
+            }
+        };
+        // Row line → 0-based row index; the row count is not yet known, so
+        // negative lines (relative to the last row) fall back to the first row.
+        let resolve_row = |line: i16| -> usize { (line.max(1) as usize) - 1 };
+        let colmask = |c: usize, span: usize| -> u32 {
+            let mut m = 0u32;
+            for k in c..(c + span).min(ncols) {
+                m |= 1u32 << k;
+            }
+            m
+        };
+        let fits = |occ: &Vec<u32>, r: usize, mask: u32, rspan: usize| -> bool {
+            (r..r + rspan).all(|rr| rr >= occ.len() || occ[rr] & mask == 0)
+        };
+        let mut occ: Vec<u32> = Vec::new();
+        let mut place: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(items.len());
+        let (mut cur_r, mut cur_c) = (0usize, 0usize);
         for (_, s) in &items {
-            let span = (s.grid_col_span as usize).clamp(1, ncols);
-            if col + span > ncols {
-                row += 1;
-                col = 0;
-            }
-            place.push((col, span, row));
-            col += span;
-            if col >= ncols {
-                row += 1;
-                col = 0;
-            }
-        }
-        let nrows = place.iter().map(|(_, _, r)| r + 1).max().unwrap_or(0);
-        let gap = st.gap;
+            let has_col = s.grid_col_start != 0;
+            let has_row = s.grid_row_start != 0;
+            let (col, cspan) = if has_col {
+                let c = resolve_col(s.grid_col_start);
+                (c, (s.grid_col_span as usize).clamp(1, ncols - c))
+            } else {
+                (usize::MAX, (s.grid_col_span as usize).clamp(1, ncols))
+            };
+            let rspan = (s.grid_row_span as usize).max(1);
 
-        // Column sizing: fixed/% resolve directly, `auto` = max content of its
-        // single-span items, `fr` splits the remaining space.
+            let (fc, fr) = if has_col && has_row {
+                (col, resolve_row(s.grid_row_start))
+            } else if has_col {
+                let mask = colmask(col, cspan);
+                let mut r = 0;
+                while !fits(&occ, r, mask, rspan) {
+                    r += 1;
+                }
+                (col, r)
+            } else if has_row {
+                let r = resolve_row(s.grid_row_start);
+                let mut c = 0;
+                while c + cspan <= ncols && !fits(&occ, r, colmask(c, cspan), rspan) {
+                    c += 1;
+                }
+                if c + cspan > ncols {
+                    c = 0;
+                }
+                (c, r)
+            } else {
+                let (mut r, mut c) = (cur_r, cur_c);
+                loop {
+                    if c + cspan > ncols {
+                        r += 1;
+                        c = 0;
+                    }
+                    if fits(&occ, r, colmask(c, cspan), rspan) {
+                        break;
+                    }
+                    c += 1;
+                }
+                cur_r = r;
+                cur_c = c + cspan;
+                (c, r)
+            };
+            let mask = colmask(fc, cspan);
+            while occ.len() < fr + rspan {
+                occ.push(0);
+            }
+            for rr in fr..fr + rspan {
+                occ[rr] |= mask;
+            }
+            place.push((fc, cspan, fr, rspan));
+        }
+
+        // — column sizing — fixed/% direct, `auto` = max-content of single-span
+        // items, `fr` splits the leftover.
         let avail = w as f32;
         let mut auto_content = vec![0.0f32; ncols];
         for (i, (el_i, _)) in items.iter().enumerate() {
-            let (c, span, _) = place[i];
-            if span == 1 {
+            let (c, cspan, _, _) = place[i];
+            if cspan == 1 {
                 auto_content[c] = auto_content[c].max(self.intrinsic_width(el_i).0);
             }
         }
         let mut colw = vec![0.0f32; ncols];
         let (mut fr_sum, mut used) = (0.0f32, 0.0f32);
         for c in 0..ncols {
-            match st.grid_tracks[c] {
+            match tracks[c] {
                 GridTrack::Fixed(px) => {
                     colw[c] = px;
                     used += px;
@@ -622,11 +800,11 @@ impl Ctx<'_> {
                 GridTrack::Fr(f) => fr_sum += f,
             }
         }
-        let gaps_w = gap * (ncols as f32 - 1.0).max(0.0);
+        let gaps_w = col_gap * (ncols as f32 - 1.0).max(0.0);
         let leftover = (avail - gaps_w - used).max(0.0);
         if fr_sum > 0.0 {
             for c in 0..ncols {
-                if let GridTrack::Fr(f) = st.grid_tracks[c] {
+                if let GridTrack::Fr(f) = tracks[c] {
                     colw[c] = leftover * f / fr_sum;
                 }
             }
@@ -635,166 +813,533 @@ impl Ctx<'_> {
         let mut acc = x as f32;
         for c in 0..ncols {
             colx[c] = acc;
-            acc += colw[c] + gap;
+            acc += colw[c] + col_gap;
         }
 
-        // Lay rows top to bottom; row height = tallest cell in the row.
-        let mut y = y0;
-        for r in 0..nrows {
-            let row_top = y;
-            let mut row_h = 0i32;
-            for (i, (el_i, s)) in items.iter().enumerate() {
-                let (c, span, ir) = place[i];
-                if ir != r {
-                    continue;
-                }
-                let mut iw = gap * (span as f32 - 1.0).max(0.0);
-                for k in 0..span {
-                    iw += colw[c + k];
-                }
-                self.path.push(ElemInfo::of(el_i));
-                let bottom = self.layout_box(el_i, s, colx[c] as i32, iw.max(1.0) as i32, row_top);
-                self.path.pop();
-                row_h = row_h.max(bottom - row_top);
+        // Per-item content-box horizontal placement (needed before measuring the
+        // natural height at that width).
+        let cell_width = |c: usize, span: usize| -> f32 {
+            let mut cw = col_gap * (span as f32 - 1.0).max(0.0);
+            for k in 0..span {
+                cw += colw[c + k];
             }
-            y = row_top + row_h;
-            if r + 1 < nrows {
-                y += gap as i32;
+            cw
+        };
+        let mut hpos: Vec<(f32, f32)> = Vec::with_capacity(items.len()); // (ix, iw)
+        let mut nat_h: Vec<i32> = Vec::with_capacity(items.len());
+        for (i, (el_i, s)) in items.iter().enumerate() {
+            let (c, cspan, _, _) = place[i];
+            let cw = cell_width(c, cspan);
+            let jself = s.justify_self.unwrap_or(st.justify_items);
+            let width_auto = matches!(s.width, Len::Auto);
+            let (ix, iw) = if jself == CrossAlign::Stretch && width_auto {
+                (colx[c], cw)
+            } else {
+                let uw = match s.width {
+                    Len::Auto => self.intrinsic_width(el_i).0,
+                    other => other.px(cw).unwrap_or(0.0),
+                }
+                .min(cw)
+                .max(1.0);
+                let ix = match jself {
+                    CrossAlign::End => colx[c] + cw - uw,
+                    CrossAlign::Center => colx[c] + (cw - uw) / 2.0,
+                    _ => colx[c],
+                };
+                (ix, uw)
+            };
+            let s_copy = *s;
+            let nh = self.measure_box_height(el_i, &s_copy, ix as i32, iw as i32, y0);
+            hpos.push((ix, iw));
+            nat_h.push(nh);
+        }
+
+        // — row sizing —
+        let nrows = occ.len().max(st.grid_nrows as usize);
+        let row_track = |r: usize| -> GridTrack {
+            if r < st.grid_nrows as usize {
+                st.grid_row_tracks[r]
+            } else {
+                st.grid_auto_rows
+            }
+        };
+        let row_def = |r: usize| -> Option<f32> {
+            match row_track(r) {
+                GridTrack::Fixed(px) => Some(px),
+                GridTrack::Pct(p) => def_h.map(|h| p / 100.0 * h),
+                _ => None,
+            }
+        };
+        let mut row_h = vec![0.0f32; nrows];
+        for r in 0..nrows {
+            if let Some(d) = row_def(r) {
+                row_h[r] = d;
             }
         }
-        y
+        for i in 0..items.len() {
+            let (_, _, r, rspan) = place[i];
+            if rspan == 1 && row_def(r).is_none() {
+                row_h[r] = row_h[r].max(nat_h[i] as f32);
+            }
+        }
+        for i in 0..items.len() {
+            let (_, _, r, rspan) = place[i];
+            if rspan > 1 {
+                let cur: f32 = (r..r + rspan).map(|rr| row_h[rr]).sum::<f32>()
+                    + row_gap * (rspan as f32 - 1.0);
+                if (cur as i32) < nat_h[i] {
+                    if let Some(last) = (r..r + rspan).rev().find(|&rr| row_def(rr).is_none()) {
+                        row_h[last] += nat_h[i] as f32 - cur;
+                    }
+                }
+            }
+        }
+        // `fr` rows share the container's leftover definite height.
+        if let Some(dh) = def_h {
+            let fr_rows: Vec<(usize, f32)> = (0..nrows)
+                .filter_map(|r| match row_track(r) {
+                    GridTrack::Fr(f) => Some((r, f)),
+                    _ => None,
+                })
+                .collect();
+            let frsum: f32 = fr_rows.iter().map(|(_, f)| f).sum();
+            if frsum > 0.0 {
+                let usedh: f32 =
+                    row_h.iter().sum::<f32>() + row_gap * (nrows as f32 - 1.0).max(0.0);
+                let extra = (dh - usedh).max(0.0);
+                for (r, f) in fr_rows {
+                    row_h[r] = extra * f / frsum;
+                }
+            }
+        }
+        let mut row_y = vec![0i32; nrows];
+        let mut yy = y0;
+        for r in 0..nrows {
+            row_y[r] = yy;
+            yy += row_h[r] as i32;
+            if r + 1 < nrows {
+                yy += row_gap as i32;
+            }
+        }
+
+        // — final item placement with cross-axis alignment / stretch —
+        for (i, (el_i, s)) in items.iter().enumerate() {
+            let (_, _, r, rspan) = place[i];
+            let (ix, iw) = hpos[i];
+            let cell_y = row_y[r];
+            let mut cell_h = row_gap * (rspan as f32 - 1.0).max(0.0);
+            for k in 0..rspan {
+                cell_h += row_h[r + k];
+            }
+            let aself = s.align_self.unwrap_or(st.align_items);
+            let height_auto = matches!(s.height, Len::Auto);
+            let mut s2 = *s;
+            if aself == CrossAlign::Stretch && height_auto && cell_h > 0.0 {
+                s2.height = Len::Px(cell_h);
+            }
+            let op0 = self.ops.len();
+            let link0 = self.links.len();
+            self.path.push(ElemInfo::of(el_i));
+            let bottom = self.layout_box(el_i, &s2, ix as i32, (iw as i32).max(1), cell_y);
+            self.path.pop();
+            let laid_h = bottom - cell_y;
+            let dy = match aself {
+                CrossAlign::Center => (cell_h as i32 - laid_h) / 2,
+                CrossAlign::End => cell_h as i32 - laid_h,
+                _ => 0,
+            };
+            if dy != 0 {
+                self.shift_ops(op0, self.ops.len(), link0, self.links.len(), 0, dy);
+            }
+        }
+
+        yy - y0
     }
 
-    /// Single-line flex layout (css-flexbox-1 subset): row or column direction,
-    /// `flex-grow`/`-shrink`/`-basis`, `gap`, `justify-content`, `align-items`/
-    /// `align-self`, `order`. No wrapping/reverse/`margin:auto` yet.
+    /// Lay a box just to measure its natural height, discarding the emitted ops
+    /// (used for grid auto-row sizing before the real placement pass).
+    fn measure_box_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        let (o, l) = (self.ops.len(), self.links.len());
+        let prev_cb = self.cb;
+        self.path.push(ElemInfo::of(el));
+        let bottom = self.layout_box(el, st, x, w.max(1), y);
+        self.path.pop();
+        self.ops.truncate(o);
+        self.links.truncate(l);
+        self.cb = prev_cb;
+        bottom - y
+    }
+
+    /// Flex layout (css-flexbox-1 subset): row/column direction, the container's
+    /// own box model (width/margins/padding/background/border/explicit height,
+    /// establishing the containing block), `flex-grow`/`-shrink`/`-basis` with
+    /// the automatic content minimum size, per-item margins (incl. `margin:auto`
+    /// on the main axis), `gap`, `justify-content`, `align-items`/`align-self`
+    /// (start/center/end/stretch), and `flex-wrap` (multi-line). Not yet:
+    /// reverse directions, `align-content`, baseline alignment.
     fn layout_flex(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        // Flex items = child elements (display:none excluded). Bare text between
-        // items is dropped (rare); a text-only "flex" box falls back to block.
+        // Flex items = in-flow child elements; abspos children are out of flow.
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
                 let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
-                if cs.display != Display::None {
-                    items.push((ce, cs));
+                if cs.display == Display::None {
+                    continue;
                 }
+                if matches!(cs.position, Position::Absolute | Position::Fixed) {
+                    self.path.push(ElemInfo::of(ce));
+                    self.layout_abs(ce, &cs);
+                    self.path.pop();
+                    continue;
+                }
+                items.push((ce, cs));
             }
         }
+        // Empty flex box: fall back to block so its own box decoration still paints.
         if items.is_empty() {
-            return self.layout_children(&el.children, st, x, w, y0);
+            return self.layout_block(el, st, x, w, y0);
         }
         items.sort_by_key(|(_, s)| s.order); // stable → equal order keeps DOM order
 
-        if st.flex_row {
-            self.flex_row(&items, st, x, w, y0)
-        } else {
-            self.flex_column(&items, st, x, w, y0)
-        }
-    }
+        // Container horizontal box (mirrors `layout_block`/`layout_grid`).
+        let (cw, off_left) = resolve_block_h(st, w as f32);
+        let content_x = x + off_left as i32;
+        let content_w = cw.max(1.0) as i32;
+        let box_left = content_x - st.pad_left as i32;
+        let box_w = content_w + (st.pad_left + st.pad_right) as i32;
+        let bg_idx = self.ops.len();
+        let content_top = y0 + st.pad_top as i32;
 
-    fn flex_row(&mut self, items: &[(&Element, ComputedStyle)], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        let n = items.len();
-        let avail = w as f32;
-        let gap = st.gap;
-        let gaps_total = gap * (n as f32 - 1.0).max(0.0);
-
-        // Flex base main-size (width) per item, then resolve grow/shrink.
-        let mut base = alloc::vec![0.0f32; n];
-        for (i, (el, s)) in items.iter().enumerate() {
-            base[i] = match s.flex_basis {
-                FlexBasis::Px(p) => p,
-                FlexBasis::Pct(p) => p / 100.0 * avail,
-                FlexBasis::Auto => self.intrinsic_width(el).0,
-            };
-        }
-        let sum_base: f32 = base.iter().sum();
-        let free = avail - sum_base - gaps_total;
-        let mut size = base.clone();
-        if free > 0.5 {
-            let tg: f32 = items.iter().map(|(_, s)| s.flex_grow).sum();
-            if tg > 0.0 {
-                for (i, (_, s)) in items.iter().enumerate() {
-                    size[i] = base[i] + free * s.flex_grow / tg;
-                }
-            }
-        } else if free < -0.5 {
-            let ts: f32 = items.iter().enumerate().map(|(i, (_, s))| s.flex_shrink * base[i]).sum();
-            if ts > 0.0 {
-                for (i, (el, s)) in items.iter().enumerate() {
-                    let min = self.intrinsic_width(el).1;
-                    size[i] = (base[i] + free * (s.flex_shrink * base[i]) / ts).max(min);
-                }
-            }
+        let prev_cb = self.cb;
+        if st.position != Position::Static {
+            self.cb = (content_x, content_top, content_w);
         }
 
-        // Distribute any leftover (grow didn't take) per justify-content.
-        let used: f32 = size.iter().sum::<f32>() + gaps_total;
-        let leftover = (avail - used).max(0.0);
-        let (offset, extra_gap) = match st.justify {
-            Justify::Start => (0.0, 0.0),
-            Justify::End => (leftover, 0.0),
-            Justify::Center => (leftover / 2.0, 0.0),
-            Justify::Between => (0.0, if n > 1 { leftover / (n as f32 - 1.0) } else { 0.0 }),
-            Justify::Around => (leftover / (2.0 * n as f32), leftover / n as f32),
-            Justify::Evenly => (leftover / (n as f32 + 1.0), leftover / (n as f32 + 1.0)),
+        // Definite container content height (for cross-stretch / main-axis flex).
+        let pad_v = st.pad_top + st.pad_bottom;
+        let def_h: Option<f32> = match st.height {
+            Len::Px(h) if st.box_border => Some((h - pad_v).max(0.0)),
+            Len::Px(h) => Some(h),
+            _ => None,
         };
 
-        // Lay each item as a block at its resolved width; record op range+height.
-        let mut main = x as f32 + offset;
-        let mut ranges: Vec<(usize, usize, i32)> = Vec::with_capacity(n); // (op0, link0, height)
-        for (i, (el, s)) in items.iter().enumerate() {
-            let iw = size[i].max(1.0) as i32;
-            let op0 = self.ops.len();
-            let link0 = self.links.len();
-            self.path.push(ElemInfo::of(el));
-            let bottom = self.layout_box(el, s, main as i32, iw, y0);
-            self.path.pop();
-            ranges.push((op0, link0, bottom - y0));
-            main += size[i] + gap + extra_gap;
+        let content_h = if st.flex_row {
+            self.flex_row(&items, st, content_x, content_w, content_top, def_h)
+        } else {
+            self.flex_column(&items, st, content_x, content_w, content_top, def_h)
+        };
+        self.cb = prev_cb;
+
+        // Explicit / min / max height clamp the content-box height.
+        let pad_vi = st.pad_top as i32 + st.pad_bottom as i32;
+        let px_h = |len: Len| match len {
+            Len::Px(h) if st.box_border => Some((h as i32 - pad_vi).max(0)),
+            Len::Px(h) => Some(h as i32),
+            _ => None,
+        };
+        let mut ch = content_h;
+        if let Some(h) = px_h(st.height) {
+            ch = h;
+        }
+        if let Some(mn) = px_h(st.min_height) {
+            ch = ch.max(mn);
+        }
+        if let Some(mx) = px_h(st.max_height) {
+            ch = ch.min(mx);
         }
 
-        // Cross-axis (vertical) alignment within the line box.
-        let line_cross = ranges.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
-        for (i, (_, s)) in items.iter().enumerate() {
-            let (op0, link0, h) = ranges[i];
-            let op1 = ranges.get(i + 1).map(|r| r.0).unwrap_or(self.ops.len());
-            let link1 = ranges.get(i + 1).map(|r| r.1).unwrap_or(self.links.len());
-            let dy = match s.align_self.unwrap_or(st.align_items) {
-                CrossAlign::Stretch | CrossAlign::Start => 0,
-                CrossAlign::Center => (line_cross - h) / 2,
-                CrossAlign::End => line_cross - h,
-            };
-            if dy != 0 {
-                self.shift_ops(op0, op1, link0, link1, 0, dy);
-            }
-        }
-        y0 + line_cross
+        let y = content_top + ch + st.pad_bottom as i32;
+        self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
+        y
     }
 
-    /// Column flex ≈ block stacking with `gap` + cross-axis (horizontal)
-    /// alignment. Height is content-driven (auto), so grow/shrink/justify along
-    /// the main axis don't apply.
-    fn flex_column(&mut self, items: &[(&Element, ComputedStyle)], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        let mut y = y0;
+    /// Row flex (main axis = horizontal, cross axis = vertical). `def_cross` is
+    /// the container's definite content height (cross size) if any. Returns the
+    /// content-box height consumed by all lines.
+    fn flex_row(
+        &mut self,
+        items: &[(&Element, ComputedStyle)],
+        st: &ComputedStyle,
+        x: i32,
+        w: i32,
+        y0: i32,
+        def_cross: Option<f32>,
+    ) -> i32 {
+        let avail = w as f32;
+        let main_gap = st.gap;
+        let line_gap = st.grid_row_gap; // cross-axis gap between wrapped lines
+
+        // — per-item metrics (content-box main size = width) —
+        let m = self.flex_metrics(items, avail, true);
+
+        // — line breaking (flex-wrap) —
+        let lines = flex_break_lines(&m, avail, main_gap, st.flex_wrap, st.flex_balance);
+
+        let mut cross_y = y0;
+        for line in &lines {
+            let (idx0, idx1) = (line.0, line.1);
+            let li = &m[idx0..idx1];
+            let ln = li.len();
+            let gaps_total = main_gap * (ln as f32 - 1.0).max(0.0);
+
+            // Resolve flexible lengths within this line's available main size.
+            let size = resolve_flex_line(li, avail, gaps_total);
+
+            // Leftover main space → justify-content, unless main-axis auto margins
+            // absorb it.
+            let used: f32 = li
+                .iter()
+                .zip(&size)
+                .map(|(it, &sz)| it.m_lead + it.m_trail + sz + it.main_pad)
+                .sum::<f32>()
+                + gaps_total;
+            let leftover = avail - used;
+            let n_auto: usize = li.iter().map(|it| it.m_lead_auto as usize + it.m_trail_auto as usize).sum();
+            let (offset, extra_gap, auto_each) = if leftover > 0.5 && n_auto > 0 {
+                (0.0, 0.0, leftover / n_auto as f32)
+            } else {
+                let lo = leftover.max(0.0);
+                let (o, g) = match st.justify {
+                    Justify::Start => (0.0, 0.0),
+                    Justify::End => (lo, 0.0),
+                    Justify::Center => (lo / 2.0, 0.0),
+                    Justify::Between => (0.0, if ln > 1 { lo / (ln as f32 - 1.0) } else { 0.0 }),
+                    Justify::Around => (lo / (2.0 * ln as f32), lo / ln as f32),
+                    Justify::Evenly => (lo / (ln as f32 + 1.0), lo / (ln as f32 + 1.0)),
+                };
+                (o, g, 0.0)
+            };
+
+            // Main-axis positions (border-box left) per item.
+            let mut item_x = alloc::vec![0.0f32; ln];
+            let mut main = x as f32 + offset;
+            for k in 0..ln {
+                main += li[k].m_lead + if li[k].m_lead_auto { auto_each } else { 0.0 };
+                item_x[k] = main;
+                let box_main = size[k] + li[k].main_pad;
+                main += box_main + li[k].m_trail + if li[k].m_trail_auto { auto_each } else { 0.0 }
+                    + main_gap + extra_gap;
+            }
+
+            // Natural cross size (height) at the resolved width, to size the line.
+            let mut h_nat = alloc::vec![0i32; ln];
+            for k in 0..ln {
+                let (el, s) = items[idx0 + k];
+                let s_meas = flex_item_style(&s, size[k], None, true);
+                h_nat[k] = self.measure_box_height(el, &s_meas, item_x[k] as i32, size[k].max(1.0) as i32, cross_y);
+            }
+
+            // Line cross size: a single unwrapped line fills a definite container
+            // height; otherwise it's the tallest item margin box.
+            let nat_line = (0..ln)
+                .map(|k| li[k].cm_lead as i32 + h_nat[k] + li[k].cm_trail as i32)
+                .max()
+                .unwrap_or(0);
+            let line_cross = if lines.len() == 1 {
+                def_cross.map(|c| c as i32).unwrap_or(nat_line)
+            } else {
+                nat_line
+            };
+
+            // Place each item within the line box on the cross axis.
+            for k in 0..ln {
+                let (el, s) = items[idx0 + k];
+                let align = s.align_self.unwrap_or(st.align_items);
+                let inner = (line_cross - li[k].cm_lead as i32 - li[k].cm_trail as i32).max(0);
+                let stretch = align == CrossAlign::Stretch && li[k].cross_auto;
+                let (forced_h, y) = if stretch {
+                    let target = clamp_cross(inner as f32, li[k].min_cross, li[k].max_cross);
+                    (Some(target), cross_y + li[k].cm_lead as i32)
+                } else {
+                    let h = h_nat[k];
+                    let y = match align {
+                        CrossAlign::End => cross_y + line_cross - li[k].cm_trail as i32 - h,
+                        CrossAlign::Center => cross_y + li[k].cm_lead as i32 + (inner - h) / 2,
+                        _ => cross_y + li[k].cm_lead as i32, // start / stretch-with-def-size / baseline
+                    };
+                    (None, y)
+                };
+                let s2 = flex_item_style(&s, size[k], forced_h, true);
+                self.path.push(ElemInfo::of(el));
+                let _ = self.layout_box(el, &s2, item_x[k] as i32, size[k].max(1.0) as i32, y);
+                self.path.pop();
+            }
+
+            cross_y += line_cross + line_gap as i32;
+        }
+        (cross_y - line_gap.max(0.0) as i32 - y0).max(0)
+    }
+
+    /// Column flex (main axis = vertical, cross axis = horizontal). `def_cross`
+    /// is the container's definite content height (main size) if any.
+    fn flex_column(
+        &mut self,
+        items: &[(&Element, ComputedStyle)],
+        st: &ComputedStyle,
+        x: i32,
+        w: i32,
+        y0: i32,
+        def_cross: Option<f32>,
+    ) -> i32 {
+        let n = items.len();
+        let avail = w as f32; // cross-axis available (width)
+        let gap = st.gap;
+
+        // Cross-axis (horizontal) width + position, plus main-axis (vertical)
+        // margins, per item. Cross axis is never flexed (grow/shrink are main).
+        let mut cross_w = alloc::vec![0.0f32; n];
+        let mut ix = alloc::vec![0i32; n];
+        let mut mm_lead = alloc::vec![0.0f32; n];
+        let mut mm_trail = alloc::vec![0.0f32; n];
+        let mut h_nat = alloc::vec![0i32; n];
         for (i, (el, s)) in items.iter().enumerate() {
+            let pad_h = s.pad_left + s.pad_right;
+            let to_content = |px: f32| if s.box_border { (px - pad_h).max(0.0) } else { px };
+            let ml = s.margin_left.px(avail).unwrap_or(0.0);
+            let mr = s.margin_right.px(avail).unwrap_or(0.0);
             let align = s.align_self.unwrap_or(st.align_items);
-            let iw = match align {
-                CrossAlign::Stretch => w,
-                _ => (self.intrinsic_width(el).0 as i32).clamp(1, w),
+            let width_auto = matches!(s.width, Len::Auto);
+            let stretch = align == CrossAlign::Stretch && width_auto;
+            let mut wd = if stretch {
+                (avail - ml - mr).max(1.0)
+            } else {
+                s.width.px(avail).map(to_content).unwrap_or_else(|| self.intrinsic_width(el).0)
             };
-            let ix = match align {
-                CrossAlign::Stretch | CrossAlign::Start => x,
-                CrossAlign::Center => x + (w - iw) / 2,
-                CrossAlign::End => x + (w - iw),
+            if let Some(mx) = s.max_width.px(avail) {
+                wd = wd.min(to_content(mx));
+            }
+            if let Some(mn) = s.min_width.px(avail) {
+                wd = wd.max(to_content(mn));
+            }
+            wd = wd.clamp(1.0, avail.max(1.0));
+            cross_w[i] = wd;
+            ix[i] = match align {
+                CrossAlign::End => x + (avail - mr - wd) as i32,
+                CrossAlign::Center => x + (ml + (avail - ml - mr - wd) / 2.0) as i32,
+                _ => x + ml as i32, // start / stretch
             };
+            mm_lead[i] = s.margin_top;
+            mm_trail[i] = s.margin_bottom;
+            let s_meas = flex_item_style(s, wd, None, false);
+            h_nat[i] = self.measure_box_height(el, &s_meas, ix[i], wd.max(1.0) as i32, y0);
+        }
+
+        // Total intrinsic main size (heights + vertical margins + gaps).
+        let gaps_total = gap * (n as f32 - 1.0).max(0.0);
+        let sum_h: f32 = (0..n).map(|i| mm_lead[i] + h_nat[i] as f32 + mm_trail[i]).sum();
+        let intrinsic = sum_h + gaps_total;
+        // A definite container height gives free main space → justify-content.
+        let free = def_cross.map(|c| c - intrinsic).unwrap_or(0.0).max(0.0);
+        let (offset, extra_gap) = match st.justify {
+            Justify::End => (free, 0.0),
+            Justify::Center => (free / 2.0, 0.0),
+            Justify::Between => (0.0, if n > 1 { free / (n as f32 - 1.0) } else { 0.0 }),
+            Justify::Around => (free / (2.0 * n as f32), free / n as f32),
+            Justify::Evenly => (free / (n as f32 + 1.0), free / (n as f32 + 1.0)),
+            Justify::Start => (0.0, 0.0),
+        };
+
+        let mut y = y0 as f32 + offset;
+        for (i, (el, s)) in items.iter().enumerate() {
+            y += mm_lead[i];
+            let s2 = flex_item_style(s, cross_w[i], None, false);
             self.path.push(ElemInfo::of(el));
-            y = self.layout_box(el, s, ix, iw, y);
+            let bottom = self.layout_box(el, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
             self.path.pop();
-            if i + 1 < items.len() {
-                y += st.gap as i32;
+            y = bottom as f32 + mm_trail[i];
+            if i + 1 < n {
+                y += gap + extra_gap;
             }
         }
-        y
+        let used = (y as i32 - y0).max(0);
+        match def_cross {
+            Some(c) => used.max(c as i32),
+            None => used,
+        }
+    }
+
+    /// Per-item flex metrics on the main axis (row: width; column: width used as
+    /// cross). `row` selects which margins/paddings are the main vs cross axis.
+    fn flex_metrics(&self, items: &[(&Element, ComputedStyle)], avail: f32, row: bool) -> Vec<FlexItem> {
+        let mut out = Vec::with_capacity(items.len());
+        for (el, s) in items {
+            let (main_pad, cross_pad) = if row {
+                (s.pad_left + s.pad_right, s.pad_top + s.pad_bottom)
+            } else {
+                (s.pad_top + s.pad_bottom, s.pad_left + s.pad_right)
+            };
+            // Main-axis leading/trailing margins (row: left/right; column: top/bottom).
+            let (m_lead_len, m_trail_len) = if row {
+                (s.margin_left, s.margin_right)
+            } else {
+                (Len::Px(s.margin_top), Len::Px(s.margin_bottom))
+            };
+            let m_lead_auto = matches!(m_lead_len, Len::Auto);
+            let m_trail_auto = matches!(m_trail_len, Len::Auto);
+            let m_lead = m_lead_len.px(avail).unwrap_or(0.0);
+            let m_trail = m_trail_len.px(avail).unwrap_or(0.0);
+            // Cross-axis margins.
+            let (cm_lead, cm_trail) = if row {
+                (s.margin_top, s.margin_bottom)
+            } else {
+                (s.margin_left.px(avail).unwrap_or(0.0), s.margin_right.px(avail).unwrap_or(0.0))
+            };
+            // The item's main-axis size property (row: width; column: height).
+            let (main_size, min_size, max_size) = if row {
+                (s.width, s.min_width, s.max_width)
+            } else {
+                (s.width, s.min_width, s.max_width) // column cross axis is width
+            };
+            let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
+            let spec = main_size.px(avail).map(to_content);
+            let (pref, minc) = self.intrinsic_width(el);
+            let base = match s.flex_basis {
+                FlexBasis::Px(p) => to_content(p),
+                FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
+                FlexBasis::Auto => spec.unwrap_or(pref),
+            };
+            // Automatic minimum size = min(content min, specified suggestion).
+            let mut floor = minc.min(spec.unwrap_or(minc));
+            if let Some(mn) = min_size.px(avail) {
+                floor = floor.max(to_content(mn));
+            }
+            let ceil = max_size.px(avail).map(to_content).unwrap_or(f32::INFINITY);
+            let hypo = base.clamp(floor.min(ceil), ceil);
+            // Cross-axis stretch is possible only when the cross size is auto.
+            let cross_auto = if row {
+                matches!(s.height, Len::Auto)
+            } else {
+                matches!(s.width, Len::Auto)
+            };
+            let (min_cross, max_cross) = if row {
+                (
+                    s.min_height.px(avail).unwrap_or(0.0),
+                    s.max_height.px(avail).unwrap_or(f32::INFINITY),
+                )
+            } else {
+                (0.0, f32::INFINITY)
+            };
+            out.push(FlexItem {
+                m_lead,
+                m_trail,
+                m_lead_auto,
+                m_trail_auto,
+                main_pad,
+                cross_pad,
+                cm_lead,
+                cm_trail,
+                base,
+                hypo,
+                floor,
+                ceil,
+                grow: s.flex_grow,
+                shrink: s.flex_shrink,
+                cross_auto,
+                min_cross,
+                max_cross,
+            });
+        }
+        out
     }
 
     /// Shift a contiguous slice of already-emitted ops + links by `(dx, dy)` —
@@ -816,6 +1361,138 @@ impl Ctx<'_> {
             lk.y += dy;
         }
     }
+}
+
+/// Resolved main-axis metrics for one flex item (all content-box px). Margins/
+/// paddings are split into the main axis (`m_*`, `main_pad`) and cross axis
+/// (`cm_*`, `cross_pad`) by the caller's direction.
+struct FlexItem {
+    m_lead: f32,
+    m_trail: f32,
+    m_lead_auto: bool,
+    m_trail_auto: bool,
+    main_pad: f32,
+    #[allow(dead_code)]
+    cross_pad: f32,
+    cm_lead: f32,
+    cm_trail: f32,
+    base: f32,
+    hypo: f32, // base clamped to [floor, ceil]
+    floor: f32,
+    ceil: f32,
+    grow: f32,
+    shrink: f32,
+    cross_auto: bool, // cross size is `auto` → eligible for stretch
+    min_cross: f32,
+    max_cross: f32,
+}
+
+/// Greedily fill lines until the next item's outer main size would overflow
+/// `cap` (at least one item per line).
+fn flex_pack_lines(m: &[FlexItem], cap: f32, gap: f32) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    let mut used = 0.0f32;
+    let mut count = 0usize;
+    for (i, it) in m.iter().enumerate() {
+        let outer = it.m_lead + it.m_trail + it.main_pad + it.hypo;
+        let add = if count == 0 { outer } else { outer + gap };
+        if count > 0 && used + add > cap + 0.5 {
+            lines.push((start, i));
+            start = i;
+            used = outer;
+            count = 1;
+        } else {
+            used += add;
+            count += 1;
+        }
+    }
+    lines.push((start, m.len()));
+    lines
+}
+
+/// Partition items into flex lines. Without `wrap`, one line holds everything.
+/// With `wrap`, greedily pack to `avail`. With `balance` (css-flexbox-2), pack
+/// into the fewest lines, then shrink the line capacity to the smallest value
+/// that still fits that many lines — evening the items across the lines.
+fn flex_break_lines(m: &[FlexItem], avail: f32, gap: f32, wrap: bool, balance: bool) -> Vec<(usize, usize)> {
+    if !wrap || m.is_empty() {
+        return alloc::vec![(0, m.len())];
+    }
+    let greedy = flex_pack_lines(m, avail, gap);
+    if !balance || greedy.len() <= 1 {
+        return greedy;
+    }
+    let target = greedy.len();
+    let max_item = m
+        .iter()
+        .map(|it| it.m_lead + it.m_trail + it.main_pad + it.hypo)
+        .fold(0.0f32, f32::max);
+    let (mut lo, mut hi) = (max_item, avail);
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if flex_pack_lines(m, mid, gap).len() <= target {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    flex_pack_lines(m, hi, gap)
+}
+
+/// Resolve flexible lengths for one line: grow into positive free space (by
+/// `flex-grow`) or shrink out of negative free space (by `flex-shrink × base`),
+/// each clamped to `[floor, ceil]`. Returns the used content main size per item.
+fn resolve_flex_line(li: &[FlexItem], avail: f32, gaps_total: f32) -> Vec<f32> {
+    let mut size: Vec<f32> = li.iter().map(|it| it.hypo).collect();
+    let sum: f32 = size.iter().sum();
+    let free = avail - sum - gaps_total;
+    if free > 0.5 {
+        let tg: f32 = li.iter().map(|it| it.grow).sum();
+        if tg > 0.0 {
+            for (i, it) in li.iter().enumerate() {
+                size[i] = (it.base + free * it.grow / tg).clamp(it.floor.min(it.ceil), it.ceil);
+            }
+        }
+    } else if free < -0.5 {
+        let ts: f32 = li.iter().map(|it| it.shrink * it.base).sum();
+        if ts > 0.0 {
+            for (i, it) in li.iter().enumerate() {
+                size[i] = (it.base + free * (it.shrink * it.base) / ts).clamp(it.floor.min(it.ceil), it.ceil);
+            }
+        }
+    }
+    size
+}
+
+/// Clamp a stretched cross size to the item's cross min/max.
+fn clamp_cross(v: f32, min: f32, max: f32) -> f32 {
+    v.max(min).min(max).max(0.0)
+}
+
+/// Build a flex item's style for layout: force its main-axis size (`main`,
+/// content-box) and, when stretching, its cross-axis size (`forced_cross`,
+/// border-box). Item margins are zeroed — the flex code positions the item by
+/// hand — while keeping the item's own box-sizing for padding conversion.
+fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row: bool) -> ComputedStyle {
+    let mut s2 = *s;
+    s2.margin_left = Len::Px(0.0);
+    s2.margin_right = Len::Px(0.0);
+    s2.margin_top = 0.0;
+    s2.margin_bottom = 0.0;
+    let main_px = |content: f32, pad: f32| Len::Px(if s.box_border { content + pad } else { content });
+    if row {
+        s2.width = main_px(main, s.pad_left + s.pad_right);
+        if let Some(c) = forced_cross {
+            let pad_v = s.pad_top + s.pad_bottom;
+            s2.height = Len::Px(if s.box_border { c } else { (c - pad_v).max(0.0) });
+        }
+    } else {
+        // Column: main axis is vertical (height), cross is horizontal (width).
+        s2.width = main_px(main, s.pad_left + s.pad_right);
+        let _ = forced_cross; // column forces cross via `width` above
+    }
+    s2
 }
 
 /// Flatten a table's rows (through `thead`/`tbody`/`tfoot`) into lists of cells.
@@ -1201,6 +1878,16 @@ mod tests {
             .collect()
     }
 
+    fn rects(l: &Layout) -> Vec<(i32, i32, i32, i32, Rgb)> {
+        l.ops
+            .iter()
+            .filter_map(|o| match o {
+                DrawOp::Rect { x, y, w, h, color } => Some((*x, *y, *w, *h, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn links_flow_inline_with_surrounding_text() {
         // "Hello <a>Wikipedia</a> and <a>Phosphor</a> here" must lay onto ONE
@@ -1414,6 +2101,71 @@ mod tests {
     }
 
     #[test]
+    fn flex_container_paints_its_own_box() {
+        // A flex container honours its own width/height/background (it establishes
+        // the box, not just a passthrough for its items).
+        let l = lay(
+            "<body><div style=\"display:flex; background:#112233; width:200px; height:50px\">\
+             <span>x</span></div></body>",
+            800,
+        );
+        let bg = l.ops.iter().find_map(|o| match o {
+            DrawOp::Rect { w, h, color, .. } if *color == Rgb(0x11, 0x22, 0x33) => Some((*w, *h)),
+            _ => None,
+        });
+        let (w, h) = bg.expect("flex container background rect emitted");
+        assert!((w - 200).abs() <= 2, "container width honoured (got {w})");
+        assert!((h - 50).abs() <= 2, "container height honoured (got {h})");
+    }
+
+    #[test]
+    fn flex_align_items_stretch_fills_cross_size() {
+        // Default align-items:stretch → an auto-height item fills the container's
+        // definite cross size (100px), not just its one-line content height.
+        let l = lay(
+            "<body><div style=\"display:flex; height:100px\">\
+             <span style=\"background:#00ff00\">x</span></div></body>",
+            800,
+        );
+        let h = l.ops.iter().find_map(|o| match o {
+            DrawOp::Rect { h, color, .. } if *color == Rgb(0, 0xff, 0) => Some(*h),
+            _ => None,
+        });
+        assert!(h.expect("green item rect") > 80, "stretched item ~fills the 100px cross size");
+    }
+
+    #[test]
+    fn flex_column_stacks_with_item_margins() {
+        // Column direction stacks items vertically; their (non-collapsing) margins
+        // separate them.
+        let l = lay(
+            "<body><div style=\"display:flex; flex-direction:column\">\
+             <div style=\"margin:10px\">a</div><div style=\"margin:10px\">b</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let a = *t.iter().find(|(_, _, s)| *s == "a").expect("a");
+        let b = *t.iter().find(|(_, _, s)| *s == "b").expect("b");
+        assert_eq!(a.0, b.0, "column items share a left edge");
+        assert!(b.1 > a.1 + 30, "b stacks below a with margin gap (got dy {})", b.1 - a.1);
+    }
+
+    #[test]
+    fn flex_wrap_moves_overflowing_item_to_next_line() {
+        // Two 120px items in a 200px wrap container → the 2nd wraps below the 1st.
+        let l = lay(
+            "<body><div style=\"display:flex; flex-wrap:wrap; width:200px\">\
+             <div style=\"width:120px\">a</div><div style=\"width:120px\">b</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let a = *t.iter().find(|(_, _, s)| *s == "a").expect("a");
+        let b = *t.iter().find(|(_, _, s)| *s == "b").expect("b");
+        assert_eq!(a.0, b.0, "wrapped item returns to the start edge");
+        assert!(b.1 > a.1, "the 2nd item wrapped onto a new line");
+    }
+
+    #[test]
     fn grid_places_items_in_columns_and_wraps_rows() {
         // 3 columns, 4 items → items 1-3 on row 1 (distinct x, same y), item 4
         // wraps to row 2 under item 1.
@@ -1445,6 +2197,92 @@ mod tests {
         let wide = *t.iter().find(|(_, _, s)| *s == "wide").unwrap();
         assert!(wide.1 > x.1, "spanning item wraps to the next row");
         assert_eq!(wide.0, x.0, "span-2 item starts at column 0");
+    }
+
+    #[test]
+    fn grid_template_rows_and_separate_gaps() {
+        // 2×2 grid, fixed 50px rows, `gap: 40px 20px` (row-gap 40, column-gap 20).
+        let l = lay(
+            "<body><div style=\"display:grid; grid-template-columns:100px 100px; \
+             grid-template-rows:50px 50px; gap:40px 20px\">\
+             <div>a</div><div>b</div><div>c</div><div>d</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let g = |s: &str| *t.iter().find(|(_, _, x)| *x == s).expect(s);
+        let (a, b, c) = (g("a"), g("b"), g("c"));
+        assert_eq!(b.0 - a.0, 120, "column gap 20 → track 100 + gap 20");
+        assert_eq!(c.0, a.0, "c under a in column 0");
+        assert_eq!(c.1 - a.1, 90, "row 50 + row-gap 40");
+    }
+
+    #[test]
+    fn grid_explicit_line_placement() {
+        // `grid-column: 3` puts the item in the third track (200px offset); a
+        // later `grid-row: 2` item drops to the second row.
+        let l = lay(
+            "<body><div style=\"display:grid; grid-template-columns:100px 100px 100px; \
+             grid-template-rows:50px 50px\">\
+             <div>x</div><div style=\"grid-column:3\">y</div>\
+             <div style=\"grid-row:2\">z</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let g = |s: &str| *t.iter().find(|(_, _, x)| *x == s).expect(s);
+        let (x, y, z) = (g("x"), g("y"), g("z"));
+        assert_eq!(y.0 - x.0, 200, "grid-column:3 → third track");
+        assert_eq!(y.1, x.1, "y stays on row 1");
+        assert_eq!(z.0, x.0, "z auto-flows into column 0");
+        assert_eq!(z.1 - x.1, 50, "grid-row:2 → second row (50px down)");
+    }
+
+    #[test]
+    fn grid_auto_fill_expands_to_container_width() {
+        // `repeat(auto-fill, 100px)` in a 300px grid → exactly 3 columns.
+        let l = lay(
+            "<body><div style=\"display:grid; width:300px; \
+             grid-template-columns:repeat(auto-fill,100px)\">\
+             <div>a</div><div>b</div><div>c</div><div>d</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let g = |s: &str| *t.iter().find(|(_, _, x)| *x == s).expect(s);
+        let (a, b, c, d) = (g("a"), g("b"), g("c"), g("d"));
+        assert_eq!(a.1, b.1, "a,b same row");
+        assert_eq!(b.1, c.1, "b,c same row (3 columns fit)");
+        assert_eq!(b.0 - a.0, 100);
+        assert_eq!(c.0 - b.0, 100);
+        assert_eq!(d.0, a.0, "4th item wraps under column 0");
+        assert!(d.1 > a.1, "4th item on the next row");
+    }
+
+    #[test]
+    fn grid_item_stretches_to_fixed_row_height() {
+        // An auto-height item defaults to `align-self: stretch` → its background
+        // fills the 80px explicit row.
+        let l = lay(
+            "<body><div style=\"display:grid; grid-template-columns:100px; \
+             grid-template-rows:80px\">\
+             <div style=\"background:#ff0000\">a</div></div></body>",
+            800,
+        );
+        let red = rects(&l).into_iter().find(|(_, _, _, _, c)| *c == Rgb(255, 0, 0));
+        assert_eq!(red.map(|r| r.3), Some(80), "item bg stretches to the 80px row");
+    }
+
+    #[test]
+    fn grid_shorthand_rows_slash_columns() {
+        // `grid: <rows> / <columns>` sets both track lists.
+        let l = lay(
+            "<body><div style=\"display:grid; grid:50px / 100px 100px\">\
+             <div>a</div><div>b</div></div></body>",
+            800,
+        );
+        let t = texts(&l);
+        let g = |s: &str| *t.iter().find(|(_, _, x)| *x == s).expect(s);
+        let (a, b) = (g("a"), g("b"));
+        assert_eq!(a.1, b.1, "two columns → same row");
+        assert_eq!(b.0 - a.0, 100, "second column at 100px");
     }
 
     #[test]
