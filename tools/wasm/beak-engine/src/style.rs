@@ -110,6 +110,23 @@ pub enum Position {
     Sticky,
 }
 
+/// CSS `float`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FloatKind {
+    None,
+    Left,
+    Right,
+}
+
+/// CSS `clear`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClearKind {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
 /// The subset of computed properties the renderer consumes. Split by CSS
 /// inheritance: font/colour/`white-space` inherit; box/`display` do not.
 #[derive(Clone, Copy)]
@@ -185,6 +202,9 @@ pub struct ComputedStyle {
     pub grid_row_start: i16, // 0 = auto placement
     pub grid_row_span: u16,
     pub justify_self: Option<CrossAlign>,
+    // — float —
+    pub float: FloatKind,
+    pub clear: ClearKind,
 }
 
 impl ComputedStyle {
@@ -251,6 +271,8 @@ impl ComputedStyle {
             grid_row_start: 0,
             grid_row_span: 1,
             justify_self: None,
+            float: FloatKind::None,
+            clear: ClearKind::None,
         }
     }
 }
@@ -331,6 +353,8 @@ pub fn resolve(
         grid_row_start: 0,
         grid_row_span: 1,
         justify_self: None,
+        float: FloatKind::None,
+        clear: ClearKind::None,
     };
     ua_rule(&el.tag, parent, theme, &mut s);
 
@@ -610,6 +634,21 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "fixed" => Position::Fixed,
                 "sticky" => Position::Sticky,
                 _ => Position::Static,
+            };
+        }
+        "float" => {
+            s.float = match v.as_str() {
+                "left" => FloatKind::Left,
+                "right" => FloatKind::Right,
+                _ => FloatKind::None,
+            };
+        }
+        "clear" => {
+            s.clear = match v.as_str() {
+                "left" => ClearKind::Left,
+                "right" => ClearKind::Right,
+                "both" => ClearKind::Both,
+                _ => ClearKind::None,
             };
         }
         "top" => s.top = parse_len(&v, s.font_px),
