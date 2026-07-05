@@ -1129,6 +1129,34 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     if crate::shade::widgets::handle_input_key(widget_wid, event.key, event.modifiers) {
                         continue;
                     }
+                    // Ctrl+C / X / V that no focused text widget claimed →
+                    // deliver a semantic clipboard event to a clipboard-sink
+                    // app (loft copies/moves the selected file). Gated on the
+                    // opt-in so non-sink apps never see the new event variant.
+                    // Normalize the same way handle_input_key does: PS/2 maps
+                    // Ctrl+C to control byte 0x03 (produced only when Ctrl was
+                    // held, so no mods check); Ctrl+X/V arrive as the letter
+                    // (or a control byte on xHCI) and need mods.ctrl.
+                    if crate::shade::widgets::is_clipboard_sink(widget_wid) {
+                        let clip_letter = match event.key {
+                            crate::input::KeyCode::Char(0x03) => Some(b'c'),
+                            crate::input::KeyCode::Char(b) if event.modifiers.ctrl =>
+                                Some(if b < 0x20 { b | 0x60 } else { b.to_ascii_lowercase() }),
+                            _ => None,
+                        };
+                        if let Some(kind) = clip_letter.and_then(|l| match l {
+                            b'c' => Some(crate::shade::widgets::abi::ClipKind::Copy),
+                            b'x' => Some(crate::shade::widgets::abi::ClipKind::Cut),
+                            b'v' => Some(crate::shade::widgets::abi::ClipKind::Paste),
+                            _ => None,
+                        }) {
+                            crate::shade::widgets::push_event(
+                                widget_wid,
+                                crate::shade::widgets::abi::Event::Clipboard(kind),
+                            );
+                            continue;
+                        }
+                    }
                     // Tab / Shift+Tab move focus between focusable widgets
                     // when the focused widget didn't consume Tab (i.e. not
                     // a TextArea). Falls through (key reaches the app) if

@@ -491,6 +491,25 @@ pub enum Event {
     /// that render their own surface (e.g. the browser's Canvas) scroll their
     /// own viewport in response; apps that ignore it are unaffected.
     Wheel { dy: i32 },
+    /// A clipboard chord (Ctrl+C / Ctrl+X / Ctrl+V) reached the focused
+    /// app because no focused text widget consumed it. Apps that manage
+    /// their own selection (e.g. loft's file grid) act on it — copy/cut
+    /// the selection, or paste into the current context. Apps that don't
+    /// care ignore it; the variant is append-only, so an app built
+    /// against an older SDK simply fails to decode it and skips (its
+    /// `postcard::from_bytes` returns `Err`, treated as "no event").
+    Clipboard(ClipKind),
+    // Appended only.
+}
+
+/// Which clipboard chord fired. See `Event::Clipboard`.
+#[repr(u8)]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipKind {
+    Copy = 0,
+    Cut  = 1,
+    Paste = 2,
     // Appended only.
 }
 

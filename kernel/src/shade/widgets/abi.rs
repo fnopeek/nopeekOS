@@ -548,6 +548,24 @@ pub enum Event {
     /// `dy` is pixel-scaled (positive = scroll down). Canvas/surface apps
     /// scroll their own viewport; others ignore it.
     Wheel { dy: i32 },
+    /// A clipboard chord (Ctrl+C / Ctrl+X / Ctrl+V) that no focused text
+    /// widget consumed, delivered to the focused app so it can act on its
+    /// own selection (e.g. loft copies/moves the selected file). Apps
+    /// built against an older SDK fail to decode this appended variant and
+    /// skip it — harmless. MUST stay in lockstep with the SDK copy in
+    /// `tools/wasm/sdk/widgets/src/abi.rs` (postcard variant order).
+    Clipboard(ClipKind),
+    // Appended only.
+}
+
+/// Which clipboard chord fired. See `Event::Clipboard`.
+#[repr(u8)]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClipKind {
+    Copy = 0,
+    Cut  = 1,
+    Paste = 2,
     // Appended only.
 }
 

@@ -132,6 +132,30 @@ pub fn delete(name: &str) -> Result<(), FsError> {
     fs::delete(path).map_err(path_to_fs_err)
 }
 
+/// Move `old` to `new` (rename / cross-directory move). `new` must not
+/// already exist; `old` must. Works for files and whole directories.
+pub fn rename(old: &str, new: &str) -> Result<(), FsError> {
+    let old = clean_path(old);
+    let new = clean_path(new);
+    validate(old)?;
+    validate(new)?;
+    if !exists_inner(old) { return Err(FsError::ObjectNotFound); }
+    if exists_inner(new) { return Err(FsError::ObjectExists); }
+    fs::rename(old, new).map_err(path_to_fs_err)
+}
+
+/// Copy `old` to `new`. Content-addressed alias — no data duplication,
+/// even for a whole directory. `new` must not exist; `old` must.
+pub fn copy(old: &str, new: &str) -> Result<(), FsError> {
+    let old = clean_path(old);
+    let new = clean_path(new);
+    validate(old)?;
+    validate(new)?;
+    if !exists_inner(old) { return Err(FsError::ObjectNotFound); }
+    if exists_inner(new) { return Err(FsError::ObjectExists); }
+    fs::copy(old, new).map_err(path_to_fs_err)
+}
+
 /// Flat list of every File in the tree, recursively. Format:
 /// `(slash_path, byte_size, blake3_hash)`. Walks the entire root tree.
 /// Acceptable until callers migrate to per-directory `fs::list(path)`.

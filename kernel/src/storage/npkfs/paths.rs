@@ -406,6 +406,38 @@ pub fn rename(root: &[u8; 32], old: &str, new: &str) -> Result<[u8; 32], PathErr
     insert_entry_at(&root1, &new_segs, renamed, /* allow_replace */ false)
 }
 
+/// Copy `old_path` to `new_path`. Content-addressed: the copy shares the
+/// source's `hash`, so a File aliases the same Blob and a Dir aliases the
+/// whole subtree — O(1), no data duplication, dedup keeps both alive.
+/// `new_path` must NOT already exist (no implicit overwrite).
+pub fn copy(root: &[u8; 32], old: &str, new: &str) -> Result<[u8; 32], PathError> {
+    let old_segs = parse_path(old)?;
+    let new_segs = parse_path(new)?;
+    if old_segs.is_empty() || new_segs.is_empty() {
+        return Err(PathError::InvalidPath);
+    }
+    if old_segs == new_segs {
+        return Err(PathError::AlreadyExists);
+    }
+
+    // Read the source entry (no mutation — walk_for_mutation only fetches).
+    let (parent_segs, name_seg) = old_segs.split_at(old_segs.len() - 1);
+    let trees = walk_for_mutation(root, parent_segs)?;
+    let leaf = trees.last().unwrap();
+    let src = leaf
+        .iter()
+        .find(|e| e.name == name_seg[0])
+        .cloned()
+        .ok_or(PathError::NotFound)?;
+
+    // Clone the entry under the new name; a copy is "new", so stamp mtime.
+    let mut copied = src;
+    copied.name = String::from(*new_segs.last().unwrap());
+    copied.mtime = now_unix();
+
+    insert_entry_at(root, &new_segs, copied, /* allow_replace */ false)
+}
+
 /// List the entries at `path`. Returns owned entries in sort order
 /// (Tree objects are stored sorted by `Object::tree_sorted`).
 pub fn list(root: &[u8; 32], path: &str) -> Result<Vec<TreeEntry>, PathError> {

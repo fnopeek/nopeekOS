@@ -1595,6 +1595,25 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_window_set_clipboard_sink() -> i32
+    // Opt the caller's widget window into Ctrl+C/X/V delivery as
+    // Event::Clipboard when a focused text widget can't act on the chord
+    // (copy/cut with no selection, paste into an empty single-line Input).
+    // Used by file managers so the shortcuts drive file operations without
+    // stealing text copy/paste from other apps. Returns 0 / -1.
+    linker.func_wrap("env", "npk_window_set_clipboard_sink",
+        |caller: Caller<'_, HostState>| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            let wid = caller.data().widget_window_id;
+            if wid == 0 { return -1; }
+            crate::shade::widgets::set_clipboard_sink(wid);
+            0
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_window_set_dock(w, h) -> i32
     // Turn the calling app's widget window into a bottom auto-hide dock:
     // overlay (no tiling strut), never modal, never focused on reveal,
@@ -2102,6 +2121,68 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 return -1;
             }
             match crate::npkfs::delete(&name) {
+                Ok(_) => 0,
+                Err(_) => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_fs_rename(old_ptr, old_len, new_ptr, new_len) -> i32
+    // Move/rename a single npkFS key (files and whole directories).
+    // Content-addressed, so even a directory move is O(1). WRITE-gated;
+    // neither path may touch the module store. Returns 0 / -1.
+    linker.func_wrap("env", "npk_fs_rename",
+        |caller: Caller<'_, HostState>, old_ptr: i32, old_len: i32,
+         new_ptr: i32, new_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+                return -1;
+            }
+            let old = match read_wasm_str(&caller, old_ptr, old_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let new = match read_wasm_str(&caller, new_ptr, new_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            // Neither source nor destination may be the module store —
+            // renaming into sys/wasm would plant an unverified module.
+            if is_module_store_path(&old) || is_module_store_path(&new) {
+                kprintln!("[npk] WASM: npk_fs_rename DENIED (sys/wasm is read-only to apps)");
+                return -1;
+            }
+            match crate::npkfs::rename(&old, &new) {
+                Ok(_) => 0,
+                Err(_) => -1,
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_fs_copy(old_ptr, old_len, new_ptr, new_len) -> i32
+    // Copy a single npkFS key (files and whole directories). Shares the
+    // source's content hash — no data duplication. WRITE-gated; neither
+    // path may touch the module store. Returns 0 / -1.
+    linker.func_wrap("env", "npk_fs_copy",
+        |caller: Caller<'_, HostState>, old_ptr: i32, old_len: i32,
+         new_ptr: i32, new_len: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+                return -1;
+            }
+            let old = match read_wasm_str(&caller, old_ptr, old_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let new = match read_wasm_str(&caller, new_ptr, new_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            if is_module_store_path(&old) || is_module_store_path(&new) {
+                kprintln!("[npk] WASM: npk_fs_copy DENIED (sys/wasm is read-only to apps)");
+                return -1;
+            }
+            match crate::npkfs::copy(&old, &new) {
                 Ok(_) => 0,
                 Err(_) => -1,
             }

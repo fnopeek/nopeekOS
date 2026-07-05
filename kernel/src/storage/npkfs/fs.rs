@@ -222,6 +222,15 @@ pub fn rename(old: &str, new: &str) -> Result<(), Error> {
     commit(new_root)
 }
 
+/// Copy `old` to `new`. Content-addressed alias (see `paths::copy`), so
+/// even a whole directory is an O(1) subtree share. `new` must not exist.
+pub fn copy(old: &str, new: &str) -> Result<(), Error> {
+    let _g = ROOT_MUTEX.lock();
+    let cur = current_root()?;
+    let new_root = paths::copy(&cur, old, new)?;
+    commit(new_root)
+}
+
 // ── Convenience: ensure a chain of dirs (mkdir -p) ────────────────────
 
 /// Ensure every parent dir of `path` exists. `path` itself is treated
