@@ -125,7 +125,12 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn wpt_reftests() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wpt");
+    // Default corpus lives in-repo; WPT_DIR overrides it (e.g. a large vetted
+    // scratch corpus) so we can measure a broad baseline without committing.
+    let root = match std::env::var("WPT_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wpt"),
+    };
     if !root.exists() {
         eprintln!("  [wpt] no tests/wpt dir — nothing to run");
         return;
