@@ -14,6 +14,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
+use alloc::vec::Vec;
 
 use beak_engine::{Engine, Layout};
 use linked_list_allocator::LockedHeap;
@@ -449,7 +450,7 @@ fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
 /// Re-layout + paint the visible slice into the canvas if it's dirty or the
 /// viewport resized. Paints only the viewport (bounded memory, any page
 /// length — long one-pagers just scroll).
-fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>) {
+fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &mut Vec<u8>) {
     let (_x, _y, w, h) = match canvas_rect() {
         Some(r) => r,
         None => return,
@@ -480,8 +481,15 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>) {
     let sy = scroll_y().clamp(0, max_scroll);
     set_scroll(sy);
 
-    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
-    engine.paint(layout, w as u32, h as u32, sy, &mut buf);
+    // Reuse a persistent paint buffer across frames — `engine.paint` fills every
+    // pixel (background first), so no re-zeroing is needed. A fresh
+    // `vec![0; w*h*4]` per frame was a ~5 MB alloc+zero+free on EVERY scroll
+    // repaint (heap churn + latency).
+    let need = (w as usize) * (h as usize) * 4;
+    if buf.len() != need {
+        buf.resize(need, 0);
+    }
+    engine.paint(layout, w as u32, h as u32, sy, buf);
     unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
 
     unsafe {
@@ -849,41 +857,61 @@ pub extern "C" fn _start() {
     // Cached layout: (Layout, width it was laid out at, content generation).
     let mut cache: Option<(Layout, i32, u32)> = None;
     let mut last_bg = unsafe { npk_theme_token(0) };
+    // Persistent paint buffer, reused across frames (see maybe_repaint).
+    let mut paint_buf: Vec<u8> = Vec::new();
     loop {
         // A fresh page: fetch its images (blocking) and hand them to the engine
         // before painting, so decoded images replace placeholders in one pass.
         if images_dirty() {
             refresh_images(&mut engine);
         }
-        match poll_event() {
-            PollResult::Event(ev) => {
-                if handle(&engine, ev, &cache) {
-                    render_chrome();
+        // Drain the ENTIRE event queue this tick, THEN repaint once. Wheel
+        // events used to be handled one-per-loop with a full repaint (and a
+        // ~5 MB buffer alloc) each — a burst of scroll notches backed up so the
+        // page scrolled slowly and "kept going" after the wheel stopped, AND
+        // the loop never reached the idle sleep, so the worker core span at
+        // 100% (never halting). Coalescing collapses the burst into one scroll
+        // step + one repaint.
+        let mut chrome = false;
+        let mut had_event = false;
+        loop {
+            match poll_event() {
+                PollResult::Event(ev) => {
+                    had_event = true;
+                    if handle(&engine, ev, &cache) {
+                        chrome = true;
+                    }
                 }
-                maybe_repaint(&engine, &mut cache);
+                PollResult::Empty => break,
+                PollResult::WindowGone => {
+                    unsafe {
+                        let _ = npk_close_widget();
+                    }
+                    return;
+                }
             }
-            PollResult::Empty => {
-                // Pick up a runtime theme switch (light ↔ dark) cheaply: one
-                // token read per idle frame; on change, re-resolve the palette
-                // and invalidate the layout so text colours update too.
-                let bg = unsafe { npk_theme_token(0) };
-                if bg != last_bg {
-                    engine.set_theme(query_theme());
-                    last_bg = bg;
-                    bump_content_gen();
-                    mark_dirty();
-                }
-                maybe_repaint(&engine, &mut cache);
-                unsafe {
-                    let _ = npk_sleep(16);
-                }
+        }
+        if chrome {
+            render_chrome();
+        }
+        if !had_event {
+            // Idle: pick up a runtime theme switch (light ↔ dark) cheaply — one
+            // token read per idle frame; on change, re-resolve the palette and
+            // invalidate the layout so text colours update too.
+            let bg = unsafe { npk_theme_token(0) };
+            if bg != last_bg {
+                engine.set_theme(query_theme());
+                last_bg = bg;
+                bump_content_gen();
+                mark_dirty();
             }
-            PollResult::WindowGone => {
-                unsafe {
-                    let _ = npk_close_widget();
-                }
-                return;
-            }
+        }
+        maybe_repaint(&engine, &mut cache, &mut paint_buf);
+        // ALWAYS yield so this worker core can halt — a cooperative fiber that
+        // never sleeps pins its core at 100%. A short nap while interacting
+        // stays responsive; a longer one when idle keeps the core asleep.
+        unsafe {
+            let _ = npk_sleep(if had_event { 4 } else { 16 });
         }
     }
 }
