@@ -25,7 +25,7 @@ use crate::dom::{Dom, Element, Node};
 use crate::image::{Image, ImageMap};
 use crate::style::{
     self, BorderSide, ClearKind, Clip, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
-    GridTrack, Justify, Len, Position, BASE_FONT_PX,
+    GridTrack, Justify, Len, Position, TableLayout, BASE_FONT_PX,
 };
 
 /// An active float's exclusion rectangle (document space) within a block
@@ -45,6 +45,27 @@ struct FloatRect {
 /// does but isn't tracked in the style yet.
 fn establishes_bfc(st: &ComputedStyle) -> bool {
     matches!(st.display, Display::Flex | Display::Grid | Display::Table)
+}
+
+/// The role a child element plays inside a table box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TableRole {
+    Row,
+    RowGroup,
+    Cell,
+    Other,
+}
+
+/// A table's content-box width available to its columns: the used `width`
+/// (resolved against `avail`) minus the table's own padding+border under
+/// `box-sizing: border-box`; `width: auto` falls back to the full available
+/// width so an auto-width fixed table still fills its container.
+fn table_content_width(st: &ComputedStyle, avail: f32) -> f32 {
+    match st.width.px(avail) {
+        Some(wd) if st.box_border => (wd - (st.pad_left + st.pad_right) - st.border_x()).max(0.0),
+        Some(wd) => wd.max(0.0),
+        None => avail.max(0.0),
+    }
 }
 
 /// Narrow the x-range `[cl, cr]` by floats overlapping the band `[top, bot)`.
@@ -729,13 +750,14 @@ impl Ctx<'_> {
         side(&mut self.ops, &st.border_right, (x + w - br, y, br, h));
     }
 
-    /// Simplified table layout: rows stack; cells sit in auto-width columns.
-    /// Column widths come from cell content (preferred, clamped to fit the
-    /// available width, never below the longest word). No colspan/rowspan/
-    /// border-collapse yet — enough to make infoboxes + data tables readable.
+    /// Simplified table layout. Two column models: `table-layout: auto` sizes
+    /// columns from cell content (readable infoboxes + data tables); `table-
+    /// layout: fixed` (CSS2 §17.5.2.1) takes column widths from the table/
+    /// `<col>`/first-row cell `width`s and distributes the rest, painting each
+    /// cell's own box (background/border/padding). Rows/cells are recognised by
+    /// HTML tag (`tr`/`td`/`th`/`thead`…) or `display: table-*`, with stray
+    /// cells wrapped into anonymous rows. No colspan/rowspan/border-collapse.
     fn layout_table(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        const PADC: i32 = 6; // per-cell padding
-
         // <caption> renders as a block above the grid.
         let mut y = y0;
         for c in &el.children {
@@ -750,58 +772,236 @@ impl Ctx<'_> {
         }
 
         let mut rows: Vec<Vec<&Element>> = Vec::new();
-        collect_rows(el, &mut rows);
+        self.collect_table_rows(el, st, &mut rows);
         rows.retain(|r| !r.is_empty());
         let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).min(64);
         if ncols == 0 {
             return y;
         }
 
-        // Intrinsic widths per column: preferred (whole content on one line)
-        // and minimum (longest single word — never wrap inside a word).
+        // `fixed` tables paint each cell's own box (backgrounds/borders are the
+        // point of the spec). The `auto` model leaves cell decoration to the
+        // block boxes inside each cell — painting per-cell backgrounds/borders
+        // there would (without collapsed-border resolution) draw borders that
+        // should be hidden and swatches the reference omits.
+        let (colw, paint_cells) = if st.table_layout == TableLayout::Fixed {
+            (self.fixed_columns(&rows, ncols, st, w), true)
+        } else {
+            (self.auto_columns(&rows, ncols, st, w), false)
+        };
+        // The table's own padding wraps the row grid (its border/background are
+        // left unpainted — collapsed borders aren't resolved here).
+        let inner_x = x + st.pad_left as i32;
+        let content_top = y + st.pad_top as i32;
+        let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top, paint_cells);
+        bottom + st.pad_bottom as i32
+    }
+
+    /// Auto table sizing (CSS2 §17.5.2.2, approximated): each column takes the
+    /// widest cell's *border-box* preferred width (content + that cell's
+    /// padding/border, or its explicit `width`). The table shrink-wraps to that,
+    /// shrinking columns proportionally (never below their minimum) only when
+    /// they overflow the available width; an explicit table `width` wider than
+    /// the content spreads the slack across columns.
+    fn auto_columns(&self, rows: &[Vec<&Element>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
-        for row in &rows {
+        for row in rows {
             for (c, cell) in row.iter().enumerate().take(ncols) {
+                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let frame = cs.pad_left + cs.pad_right + cs.border_x();
                 let (p, m) = self.intrinsic_width(cell);
-                pref[c] = pref[c].max(p);
-                minw[c] = minw[c].max(m);
+                let spec = match cs.width.px(w as f32) {
+                    Some(v) if cs.box_border => v,
+                    Some(v) => v + frame,
+                    None => 0.0,
+                };
+                pref[c] = pref[c].max((p + frame).max(spec));
+                minw[c] = minw[c].max((m + frame).max(spec));
             }
         }
-
-        // Resolve column content widths to fit `avail` (excluding cell padding).
-        let avail = (w - 2 * PADC * ncols as i32).max(ncols as i32 * 10) as f32;
+        let content_w = table_content_width(st, w as f32);
+        let table_auto = st.width == Len::Auto;
+        let cap = if table_auto { w as f32 } else { content_w };
         let total: f32 = pref.iter().sum();
         let mut colw = pref.clone();
-        if total > avail && total > 0.0 {
+        if total > cap && total > 0.0 {
             for c in 0..ncols {
-                colw[c] = (avail * pref[c] / total).max(minw[c]);
+                colw[c] = (cap * pref[c] / total).max(minw[c]);
+            }
+        } else if !table_auto && total < content_w && total > 0.0 {
+            let extra = (content_w - total) / ncols as f32;
+            for c in 0..ncols {
+                colw[c] += extra;
             }
         }
+        colw.iter().map(|v| (v + 0.5) as i32).collect()
+    }
 
-        // Lay each row: cells side by side, row height = tallest cell.
-        for row in &rows {
-            let mut cx = x;
-            let mut row_h = 0i32;
-            for (c, cell) in row.iter().enumerate().take(ncols) {
-                let cw = colw[c] as i32;
+    /// `table-layout: fixed` column sizing (CSS2 §17.5.2.1): column widths come
+    /// from the first row's cell `width`s (each a *border-box* width), and the
+    /// rest of the table's used width is split equally across the remaining
+    /// columns; content never widens a column.
+    fn fixed_columns(&self, rows: &[Vec<&Element>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+        let content_w = table_content_width(st, w as f32);
+        // Per-column border-box width; None = "auto" (share the leftover).
+        let mut fixed: Vec<Option<f32>> = vec![None; ncols];
+        if let Some(first) = rows.first() {
+            for (c, cell) in first.iter().enumerate().take(ncols) {
                 let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                if let Some(cw) = cs.width.px(content_w) {
+                    let border_box = if cs.box_border {
+                        cw
+                    } else {
+                        cw + cs.pad_left + cs.pad_right + cs.border_x()
+                    };
+                    fixed[c] = Some(border_box.max(0.0));
+                }
+            }
+        }
+        let sum_fixed: f32 = fixed.iter().filter_map(|o| *o).sum();
+        let auto_count = fixed.iter().filter(|o| o.is_none()).count();
+        let leftover = content_w - sum_fixed;
+        // Remaining table space is divided equally between auto columns; if every
+        // column is sized, the slack is spread over all of them instead.
+        let auto_w = if auto_count > 0 { (leftover / auto_count as f32).max(0.0) } else { 0.0 };
+        let extra = if auto_count == 0 && leftover > 0.0 { leftover / ncols as f32 } else { 0.0 };
+        fixed
+            .iter()
+            .map(|o| match o {
+                Some(v) => (v + extra + 0.5) as i32,
+                None => (auto_w + 0.5) as i32,
+            })
+            .collect()
+    }
+
+    /// Lay a table's rows given resolved (border-box) column widths. Cells sit
+    /// side by side; each cell box stretches to the row's tallest cell and paints
+    /// its own background/border, with content placed inside its padding.
+    fn lay_table_rows(&mut self, rows: &[Vec<&Element>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32, paint_cells: bool) -> i32 {
+        let mut y = y0;
+        for row in rows {
+            // Pass 1: resolve cell styles + measure the tallest cell.
+            let mut cells: Vec<(ComputedStyle, i32, i32, i32)> = Vec::new(); // (style, cell_x, content_x, content_w)
+            let mut cx = x;
+            for (c, cell) in row.iter().enumerate().take(ncols) {
+                let cw = colw[c];
+                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let content_x = cx + cs.border_left.width as i32 + cs.pad_left as i32;
+                let content_w = (cw - cs.border_x() as i32 - (cs.pad_left + cs.pad_right) as i32).max(0);
+                cells.push((cs, cx, content_x, content_w));
+                cx += cw;
+            }
+            // Row height = the tallest cell border-box (content, or explicit height).
+            let mut row_h = 0i32;
+            for (c, (cs, _, content_x, content_w)) in cells.iter().enumerate() {
+                let content_y = y + cs.border_top.width as i32 + cs.pad_top as i32;
+                let mut ch = if cs.display == Display::None {
+                    0
+                } else {
+                    self.measure_children_height(row[c], cs, *content_x, *content_w, content_y)
+                };
+                if let Len::Px(h) = cs.height {
+                    let hb = if cs.box_border {
+                        (h as i32 - (cs.pad_top + cs.pad_bottom) as i32 - cs.border_y() as i32).max(0)
+                    } else {
+                        h as i32
+                    };
+                    ch = ch.max(hb);
+                }
+                let cell_box_h = ch + (cs.pad_top + cs.pad_bottom) as i32 + cs.border_y() as i32;
+                row_h = row_h.max(cell_box_h);
+            }
+            // Pass 2: emit content + paint each cell's border-box at row height.
+            for (c, (cs, cell_x, content_x, content_w)) in cells.iter().enumerate() {
                 if cs.display == Display::None {
-                    cx += cw + 2 * PADC;
                     continue;
                 }
-                self.path.push(ElemInfo::of(cell));
-                let bottom = self.layout_children(&cell.children, &cs, cx + PADC, cw, y + PADC);
+                let content_y = y + cs.border_top.width as i32 + cs.pad_top as i32;
+                let bg_idx = self.ops.len();
+                self.path.push(ElemInfo::of(row[c]));
+                let _ = self.layout_children(&row[c].children, cs, *content_x, *content_w, content_y);
                 self.path.pop();
-                row_h = row_h.max(bottom - (y + PADC));
-                cx += cw + 2 * PADC;
+                if paint_cells {
+                    self.paint_box_decoration(cs, *cell_x, y, colw[c], row_h, bg_idx);
+                }
             }
-            let row_bottom = y + row_h + 2 * PADC;
-            // subtle row separator
-            self.ops.push(DrawOp::Rect { x, y: row_bottom, w: (cx - x).max(1), h: 1, color: self.theme.rule });
-            y = row_bottom + 1;
+            y += row_h;
         }
         y
+    }
+
+    /// Lay an element's children to measure their flowed height without emitting
+    /// any draw ops (used to size table rows before painting cell boxes).
+    fn measure_children_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        let (o, l) = (self.ops.len(), self.links.len());
+        self.path.push(ElemInfo::of(el));
+        let bottom = self.layout_children(&el.children, st, x, w.max(0), y);
+        self.path.pop();
+        self.ops.truncate(o);
+        self.links.truncate(l);
+        (bottom - y).max(0)
+    }
+
+    /// Classify a table child by tag, else by its computed `display` (CSS
+    /// tables). Only elements are passed in.
+    fn table_role(&self, e: &Element, parent: &ComputedStyle) -> TableRole {
+        match e.tag.as_str() {
+            "tr" => TableRole::Row,
+            "thead" | "tbody" | "tfoot" => TableRole::RowGroup,
+            "td" | "th" => TableRole::Cell,
+            "caption" | "col" | "colgroup" => TableRole::Other,
+            _ => {
+                let st = style::resolve(e, parent, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                match st.display {
+                    Display::TableRow => TableRole::Row,
+                    Display::TableRowGroup => TableRole::RowGroup,
+                    Display::TableCell => TableRole::Cell,
+                    _ => TableRole::Other,
+                }
+            }
+        }
+    }
+
+    /// Collect a table's rows (each a list of cell elements). Understands HTML
+    /// `tr`/`td` and `display: table-row`/`-cell`, recurses into row groups, and
+    /// wraps stray cells (cells that are direct table children) into anonymous
+    /// rows (CSS2 §17.2.1 anonymous table objects).
+    fn collect_table_rows<'a>(&self, el: &'a Element, parent: &ComputedStyle, rows: &mut Vec<Vec<&'a Element>>) {
+        let mut anon: Vec<&'a Element> = Vec::new();
+        for c in &el.children {
+            let Node::Element(e) = c else { continue };
+            match self.table_role(e, parent) {
+                TableRole::Row => {
+                    if !anon.is_empty() {
+                        rows.push(core::mem::take(&mut anon));
+                    }
+                    rows.push(self.collect_cells(e, parent));
+                }
+                TableRole::RowGroup => {
+                    if !anon.is_empty() {
+                        rows.push(core::mem::take(&mut anon));
+                    }
+                    self.collect_table_rows(e, parent, rows);
+                }
+                TableRole::Cell => anon.push(e),
+                TableRole::Other => {}
+            }
+        }
+        if !anon.is_empty() {
+            rows.push(anon);
+        }
+    }
+
+    /// The cell elements directly inside a row.
+    fn collect_cells<'a>(&self, row: &'a Element, parent: &ComputedStyle) -> Vec<&'a Element> {
+        row.children
+            .iter()
+            .filter_map(|c| match c {
+                Node::Element(e) if self.table_role(e, parent) == TableRole::Cell => Some(e),
+                _ => None,
+            })
+            .collect()
     }
 
     /// (preferred, minimum) content width of a box: preferred = all text on one
@@ -1792,29 +1992,6 @@ fn flex_item_style(s: &ComputedStyle, main: f32, forced_cross: Option<f32>, row:
         let _ = forced_cross; // column forces cross via `width` above
     }
     s2
-}
-
-/// Flatten a table's rows (through `thead`/`tbody`/`tfoot`) into lists of cells.
-fn collect_rows<'a>(el: &'a Element, rows: &mut Vec<Vec<&'a Element>>) {
-    for c in &el.children {
-        if let Node::Element(e) = c {
-            match e.tag.as_str() {
-                "tr" => {
-                    let cells = e
-                        .children
-                        .iter()
-                        .filter_map(|cc| match cc {
-                            Node::Element(ce) if ce.tag == "td" || ce.tag == "th" => Some(ce),
-                            _ => None,
-                        })
-                        .collect();
-                    rows.push(cells);
-                }
-                "thead" | "tbody" | "tfoot" => collect_rows(e, rows),
-                _ => {}
-            }
-        }
-    }
 }
 
 /// `white-space: pre` — honor newlines and runs of spaces; no word-wrap.

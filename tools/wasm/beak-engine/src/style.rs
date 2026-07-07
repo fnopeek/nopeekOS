@@ -33,6 +33,23 @@ pub enum Display {
     Flex,
     /// `display: grid` — grid formatting context (explicit columns + auto rows).
     Grid,
+    /// `display: table-row` — a row inside a (CSS) table. Laid by `layout_table`.
+    TableRow,
+    /// `display: table-row-group`/`-header-group`/`-footer-group`.
+    TableRowGroup,
+    /// `display: table-cell` — a cell inside a (CSS) table. Outside a table
+    /// context it degrades to a block box.
+    TableCell,
+}
+
+/// CSS `table-layout` — how a table computes its column widths.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TableLayout {
+    /// Column widths derived from content (the default, content-based sizing).
+    Auto,
+    /// CSS2 §17.5.2.1 fixed layout: widths come from the table/`<col>`/first-row
+    /// cell `width`s; content does not widen columns.
+    Fixed,
 }
 
 /// A `grid-template-columns` track size.
@@ -272,6 +289,8 @@ pub struct ComputedStyle {
     pub clear: ClearKind,
     // — clip (abs-positioned only) —
     pub clip: Clip,
+    // — table —
+    pub table_layout: TableLayout,
 }
 
 impl ComputedStyle {
@@ -355,6 +374,7 @@ impl ComputedStyle {
             float: FloatKind::None,
             clear: ClearKind::None,
             clip: Clip::Auto,
+            table_layout: TableLayout::Auto,
         }
     }
 }
@@ -445,6 +465,7 @@ pub fn resolve(
         float: FloatKind::None,
         clear: ClearKind::None,
         clip: Clip::Auto,
+        table_layout: TableLayout::Auto,
     };
     ua_rule(&el.tag, parent, theme, &mut s);
 
@@ -621,10 +642,16 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "list-item" => Display::ListItem,
                 "inline" | "inline-block" => Display::Inline,
                 "table" | "inline-table" => Display::Table,
+                "table-row" => Display::TableRow,
+                "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
+                "table-cell" => Display::TableCell,
                 "flex" | "inline-flex" => Display::Flex,
                 "grid" | "inline-grid" | "grid-lanes" | "inline-grid-lanes" => Display::Grid,
                 _ => Display::Block,
             };
+        }
+        "table-layout" => {
+            s.table_layout = if v == "fixed" { TableLayout::Fixed } else { TableLayout::Auto };
         }
         "color" => {
             if let Some(c) = parse_color(&v, theme) {
