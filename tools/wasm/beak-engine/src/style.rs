@@ -169,6 +169,23 @@ pub enum ClearKind {
     Both,
 }
 
+/// CSS 2.1 `clip` (§11.1.2). Applies only to absolutely-positioned boxes; the
+/// four offsets are resolved px from the element's border-box top-left corner
+/// (`top`/`bottom` from the top edge, `left`/`right` from the left edge). `None`
+/// on a side = `auto` = that border edge. `Inherit` is a transient value that
+/// `resolve` collapses to the parent's computed `clip`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Clip {
+    Auto,
+    Inherit,
+    Rect {
+        top: Option<f32>,
+        right: Option<f32>,
+        bottom: Option<f32>,
+        left: Option<f32>,
+    },
+}
+
 /// The subset of computed properties the renderer consumes. Split by CSS
 /// inheritance: font/colour/`white-space` inherit; box/`display` do not.
 #[derive(Clone, Copy)]
@@ -253,6 +270,8 @@ pub struct ComputedStyle {
     // — float —
     pub float: FloatKind,
     pub clear: ClearKind,
+    // — clip (abs-positioned only) —
+    pub clip: Clip,
 }
 
 impl ComputedStyle {
@@ -335,6 +354,7 @@ impl ComputedStyle {
             justify_self: None,
             float: FloatKind::None,
             clear: ClearKind::None,
+            clip: Clip::Auto,
         }
     }
 }
@@ -424,6 +444,7 @@ pub fn resolve(
         justify_self: None,
         float: FloatKind::None,
         clear: ClearKind::None,
+        clip: Clip::Auto,
     };
     ua_rule(&el.tag, parent, theme, &mut s);
 
@@ -441,6 +462,11 @@ pub fn resolve(
 
     if let Some(decls) = el.attr("style") {
         apply_declarations(decls, theme, &mut s);
+    }
+    // `clip: inherit` takes the parent's computed value (clip is not inherited
+    // by default, so this is resolved here rather than in the initial slice).
+    if matches!(s.clip, Clip::Inherit) {
+        s.clip = parent.clip;
     }
     s
 }
@@ -763,6 +789,35 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "both" => ClearKind::Both,
                 _ => ClearKind::None,
             };
+        }
+        "clip" => {
+            let vt = v.trim();
+            if vt == "auto" {
+                s.clip = Clip::Auto;
+            } else if vt == "inherit" {
+                s.clip = Clip::Inherit;
+            } else if let Some(inner) = vt
+                .strip_prefix("rect(")
+                .and_then(|x| x.strip_suffix(')'))
+            {
+                // Four <length>|auto components, comma- or space-separated.
+                let norm = inner.replace(',', " ");
+                let parts: alloc::vec::Vec<&str> = norm.split_whitespace().collect();
+                let comp = |t: &str| -> Option<Option<f32>> {
+                    if t == "auto" {
+                        Some(None)
+                    } else {
+                        parse_length(t, s.font_px).map(Some)
+                    }
+                };
+                if parts.len() == 4 {
+                    if let (Some(top), Some(right), Some(bottom), Some(left)) =
+                        (comp(parts[0]), comp(parts[1]), comp(parts[2]), comp(parts[3]))
+                    {
+                        s.clip = Clip::Rect { top, right, bottom, left };
+                    }
+                }
+            }
         }
         "top" => s.top = parse_len(&v, s.font_px),
         "right" => s.right = parse_len(&v, s.font_px),

@@ -24,7 +24,7 @@ use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::image::{Image, ImageMap};
 use crate::style::{
-    self, BorderSide, ClearKind, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
+    self, BorderSide, ClearKind, Clip, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
     GridTrack, Justify, Len, Position, BASE_FONT_PX,
 };
 
@@ -87,6 +87,46 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
         }
     }
     (cw.max(1.0), ml + st.pad_left + st.border_left.width)
+}
+
+/// Clip the display-list ops in `ops[start..]` to the document-space rectangle
+/// `[cl, ct) .. [cr, cb)`. Filled rects are intersected (pixel-exact); text and
+/// images are kept whole if their box overlaps the rect, dropped otherwise (a
+/// flat display list can't clip glyph runs mid-way). An empty rect removes the
+/// whole range — the CSS 2.1 `clip` case where nothing of the box is painted.
+fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: i32) {
+    if start >= ops.len() {
+        return;
+    }
+    if cr <= cl || cb <= ct {
+        ops.truncate(start);
+        return;
+    }
+    let tail = ops.split_off(start);
+    for op in tail {
+        match op {
+            DrawOp::Rect { x, y, w, h, color } => {
+                let nx = x.max(cl);
+                let ny = y.max(ct);
+                let nx1 = (x + w).min(cr);
+                let ny1 = (y + h).min(cb);
+                if nx1 > nx && ny1 > ny {
+                    ops.push(DrawOp::Rect { x: nx, y: ny, w: nx1 - nx, h: ny1 - ny, color });
+                }
+            }
+            DrawOp::Image { x, y, w, h, .. } => {
+                if x < cr && x + w > cl && y < cb && y + h > ct {
+                    ops.push(op);
+                }
+            }
+            DrawOp::Text { x, y, size, .. } => {
+                let bottom = y + size as i32 + 4;
+                if x < cr && y < cb && bottom > ct {
+                    ops.push(op);
+                }
+            }
+        }
+    }
 }
 
 /// `position:relative` paint offset (dx, dy): `left`/`top` win over `right`/
@@ -635,7 +675,28 @@ impl Ctx<'_> {
         };
         let py = cby as f32 + st.top.px(avail).unwrap_or(0.0);
         // layout_box → layout_block re-establishes the CB for its own children.
-        let _ = self.layout_box(el, st, px as i32, width.max(1.0) as i32, py as i32);
+        let w_i = width.max(1.0) as i32;
+        let start = self.ops.len();
+        let bottom = self.layout_box(el, st, px as i32, w_i, py as i32);
+
+        // `clip: rect(...)` (CSS 2.1 §11.1.2) — clip this box (and its
+        // descendants, all emitted into `ops[start..]`) to a rectangle whose
+        // offsets are measured from the border-box top-left corner.
+        if let Clip::Rect { top, right, bottom: cbot, left } = st.clip {
+            // Border box, mirroring `layout_block`'s geometry.
+            let (cw, off_left) = resolve_block_h(st, w_i as f32);
+            let ml = off_left - st.pad_left - st.border_left.width;
+            let bl = px as i32 + ml as i32; // border-box left
+            let bt = py as i32; // border-box top (== the y0 layout_block used)
+            let br = bl + cw as i32 + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
+            let bb = bottom; // border-box bottom (layout_box return)
+            // Clip edges (auto = the corresponding border edge).
+            let cl = bl + left.map(|v| v as i32).unwrap_or(0);
+            let cr = bl + right.map(|v| v as i32).unwrap_or(br - bl);
+            let ct = bt + top.map(|v| v as i32).unwrap_or(0);
+            let cb = bt + cbot.map(|v| v as i32).unwrap_or(bb - bt);
+            clip_ops(&mut self.ops, start, cl, ct, cr, cb);
+        }
     }
 
     /// Insert the block's `background-color` behind its content (at `bg_idx`)
