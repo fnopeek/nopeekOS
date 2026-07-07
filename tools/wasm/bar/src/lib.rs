@@ -82,10 +82,37 @@ unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
 #[global_allocator]
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
+// u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
+// even when the panic IS an allocation failure).
+static mut NUMBUF: [u8; 12] = [0; 12];
+fn u32_str(mut n: u32) -> &'static str {
+    let b = core::ptr::addr_of_mut!(NUMBUF) as *mut u8;
+    let buf = unsafe { core::slice::from_raw_parts_mut(b, 12) };
+    let mut i = 12;
+    if n == 0 {
+        i -= 1;
+        buf[i] = b'0';
+    }
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }
+}
+
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
     log("[bar] panic!");
-    loop {}
+    if let Some(loc) = info.location() {
+        log(loc.file());
+        log(u32_str(loc.line()));
+    }
+    // Trap — do NOT `loop {}`. A wasm `unreachable` makes `_start`'s host call
+    // return Err, so the kernel tears this instance down and frees its worker
+    // core. A busy loop pins the cooperative fiber forever → the whole core
+    // pegs at 100% (the "core spins, never halts" bug). Clean death > spin.
+    core::arch::wasm32::unreachable()
 }
 
 fn commit(bytes: &[u8]) -> i32 {
