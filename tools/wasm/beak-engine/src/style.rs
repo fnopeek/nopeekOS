@@ -75,6 +75,15 @@ pub enum FlexBasis {
     Pct(f32),
 }
 
+/// One edge of a box's border: its used width (px) and colour. A side paints
+/// only when `width > 0` AND `color` is set (`border-style:none`/no colour → no
+/// paint). The four sides are independent (`border-top`/`-right`/… may differ).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct BorderSide {
+    pub width: f32,
+    pub color: Option<Rgb>,
+}
+
 /// A CSS length keyword/value for the box model. `Auto` means "auto" (for
 /// width/margins) or "none" (for max-width). `%` is relative to the containing
 /// block's content width, resolved at layout time.
@@ -157,8 +166,10 @@ pub struct ComputedStyle {
     pub pad_left: f32,
     pub box_border: bool, // box-sizing: border-box
     pub bg: Option<Rgb>, // background-color (None = transparent)
-    pub border_color: Option<Rgb>,
-    pub border_width: f32, // uniform border (all sides)
+    pub border_top: BorderSide,
+    pub border_right: BorderSide,
+    pub border_bottom: BorderSide,
+    pub border_left: BorderSide,
     // — positioning —
     pub position: Position,
     pub top: Len,
@@ -208,6 +219,15 @@ pub struct ComputedStyle {
 }
 
 impl ComputedStyle {
+    /// Total horizontal border (left + right) contribution to the box.
+    pub fn border_x(&self) -> f32 {
+        self.border_left.width + self.border_right.width
+    }
+    /// Total vertical border (top + bottom) contribution to the box.
+    pub fn border_y(&self) -> f32 {
+        self.border_top.width + self.border_bottom.width
+    }
+
     /// The initial style for the document root, seeded from the theme.
     pub fn root(theme: &Theme) -> ComputedStyle {
         ComputedStyle {
@@ -234,8 +254,10 @@ impl ComputedStyle {
             pad_left: 0.0,
             box_border: false,
             bg: None,
-            border_color: None,
-            border_width: 0.0,
+            border_top: BorderSide::default(),
+            border_right: BorderSide::default(),
+            border_bottom: BorderSide::default(),
+            border_left: BorderSide::default(),
             position: Position::Static,
             top: Len::Auto,
             right: Len::Auto,
@@ -289,6 +311,7 @@ pub fn resolve(
     theme: &Theme,
     sheet: &Stylesheet,
     ancestors: &[ElemInfo],
+    prev_siblings: &[ElemInfo],
     viewport_w: f32,
 ) -> ComputedStyle {
     // Start from the inherited slice; reset the non-inherited slice to initial.
@@ -316,8 +339,10 @@ pub fn resolve(
         pad_left: 0.0,
         box_border: false,
         bg: None,
-        border_color: None,
-        border_width: 0.0,
+        border_top: BorderSide::default(),
+        border_right: BorderSide::default(),
+        border_bottom: BorderSide::default(),
+        border_left: BorderSide::default(),
         position: Position::Static,
         top: Len::Auto,
         right: Len::Auto,
@@ -361,7 +386,7 @@ pub fn resolve(
     // Author `<style>` rules, applied low→high specificity (ties: doc order).
     if !sheet.is_empty() {
         let info = ElemInfo::of(el);
-        let mut matched = sheet.matched(&info, ancestors, viewport_w);
+        let mut matched = sheet.matched(&info, ancestors, prev_siblings, viewport_w);
         matched.sort_by_key(|(spec, order, _)| (*spec, *order));
         for (_, _, decls) in matched {
             for (p, v) in decls {
@@ -554,12 +579,12 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.mono = v.contains("mono") || v.contains("courier") || v.contains("consol");
         }
         // — box model —
-        "width" => s.width = parse_len(&v, s.font_px),
-        "min-width" => s.min_width = parse_len(&v, s.font_px),
-        "max-width" => s.max_width = if v == "none" { Len::Auto } else { parse_len(&v, s.font_px) },
-        "height" => s.height = parse_len(&v, s.font_px),
-        "min-height" => s.min_height = parse_len(&v, s.font_px),
-        "max-height" => s.max_height = if v == "none" { Len::Auto } else { parse_len(&v, s.font_px) },
+        "width" => set_size(&mut s.width, &v, s.font_px),
+        "min-width" => set_size(&mut s.min_width, &v, s.font_px),
+        "max-width" => set_max(&mut s.max_width, &v, s.font_px),
+        "height" => set_size(&mut s.height, &v, s.font_px),
+        "min-height" => set_size(&mut s.min_height, &v, s.font_px),
+        "max-height" => set_max(&mut s.max_height, &v, s.font_px),
         "box-sizing" => s.box_border = v == "border-box",
         "margin" => {
             let em = s.font_px;
@@ -576,15 +601,15 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "padding" => {
             let em = s.font_px;
             let (t, r, b, l) = four_values(&v);
-            s.pad_top = parse_length(t, em).unwrap_or(0.0);
-            s.pad_right = parse_length(r, em).unwrap_or(0.0);
-            s.pad_bottom = parse_length(b, em).unwrap_or(0.0);
-            s.pad_left = parse_length(l, em).unwrap_or(0.0);
+            s.pad_top = parse_pad(t, em, 0.0);
+            s.pad_right = parse_pad(r, em, 0.0);
+            s.pad_bottom = parse_pad(b, em, 0.0);
+            s.pad_left = parse_pad(l, em, 0.0);
         }
-        "padding-top" => s.pad_top = parse_length(&v, s.font_px).unwrap_or(s.pad_top),
-        "padding-right" => s.pad_right = parse_length(&v, s.font_px).unwrap_or(s.pad_right),
-        "padding-bottom" => s.pad_bottom = parse_length(&v, s.font_px).unwrap_or(s.pad_bottom),
-        "padding-left" => s.pad_left = parse_length(&v, s.font_px).unwrap_or(s.pad_left),
+        "padding-top" => s.pad_top = parse_pad(&v, s.font_px, s.pad_top),
+        "padding-right" => s.pad_right = parse_pad(&v, s.font_px, s.pad_right),
+        "padding-bottom" => s.pad_bottom = parse_pad(&v, s.font_px, s.pad_bottom),
+        "padding-left" => s.pad_left = parse_pad(&v, s.font_px, s.pad_left),
 
         // — background + border —
         "background-color" | "background" => {
@@ -606,25 +631,69 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "border" | "border-top" | "border-bottom" | "border-left" | "border-right" => {
-            if v == "none" || v == "0" || v.starts_with("0 ") {
-                s.border_color = None;
-                s.border_width = 0.0;
-            } else {
-                for tok in css_tokens(&v) {
-                    if let Some(c) = parse_color(tok, theme) {
-                        s.border_color = Some(c);
-                    } else if let Some(bw) = parse_length(tok, s.font_px) {
-                        s.border_width = bw;
+        "border" => {
+            let side = parse_border_shorthand(&v, s.font_px, theme, s.color);
+            s.border_top = side;
+            s.border_right = side;
+            s.border_bottom = side;
+            s.border_left = side;
+        }
+        "border-top" => s.border_top = parse_border_shorthand(&v, s.font_px, theme, s.color),
+        "border-right" => s.border_right = parse_border_shorthand(&v, s.font_px, theme, s.color),
+        "border-bottom" => s.border_bottom = parse_border_shorthand(&v, s.font_px, theme, s.color),
+        "border-left" => s.border_left = parse_border_shorthand(&v, s.font_px, theme, s.color),
+        "border-width" => {
+            let em = s.font_px;
+            if let Some(t4) = four_sides(&css_tokens(&v)) {
+                for (side, tok) in [
+                    &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
+                ].into_iter().zip(t4) {
+                    if let Some(w) = border_width_kw(tok, em) {
+                        side.width = w;
                     }
-                }
-                if s.border_color.is_some() && s.border_width == 0.0 {
-                    s.border_width = 1.0; // `medium` default when only colour given
                 }
             }
         }
-        "border-color" => s.border_color = parse_color(&v, theme),
-        "border-width" => s.border_width = parse_length(&v, s.font_px).unwrap_or(s.border_width),
+        "border-color" => {
+            if let Some(t4) = four_sides(&css_tokens(&v)) {
+                for (side, tok) in [
+                    &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
+                ].into_iter().zip(t4) {
+                    if let Some(c) = parse_color(tok, theme) {
+                        side.color = Some(c);
+                    }
+                }
+            }
+        }
+        "border-style" => {
+            if let Some(t4) = four_sides(&css_tokens(&v)) {
+                for (side, tok) in [
+                    &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
+                ].into_iter().zip(t4) {
+                    if tok == "none" || tok == "hidden" {
+                        side.width = 0.0;
+                    }
+                }
+            }
+        }
+        "border-top-width" => set_side_width(&mut s.border_top, &v, s.font_px),
+        "border-right-width" => set_side_width(&mut s.border_right, &v, s.font_px),
+        "border-bottom-width" => set_side_width(&mut s.border_bottom, &v, s.font_px),
+        "border-left-width" => set_side_width(&mut s.border_left, &v, s.font_px),
+        "border-top-color" => s.border_top.color = parse_color(&v, theme).or(s.border_top.color),
+        "border-right-color" => s.border_right.color = parse_color(&v, theme).or(s.border_right.color),
+        "border-bottom-color" => s.border_bottom.color = parse_color(&v, theme).or(s.border_bottom.color),
+        "border-left-color" => s.border_left.color = parse_color(&v, theme).or(s.border_left.color),
+        "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
+            if v == "none" || v == "hidden" {
+                match prop {
+                    "border-top-style" => s.border_top.width = 0.0,
+                    "border-right-style" => s.border_right.width = 0.0,
+                    "border-bottom-style" => s.border_bottom.width = 0.0,
+                    _ => s.border_left.width = 0.0,
+                }
+            }
+        }
 
         // — positioning —
         "position" => {
@@ -796,20 +865,51 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 }
 
 /// A `<length>`/`auto`/`%` value for the box model.
-fn parse_len(v: &str, em: f32) -> Len {
+/// Fallible length parse. `None` = the value is invalid, so the caller must
+/// KEEP the previously-cascaded value — an invalid declaration is dropped, it
+/// does not reset the property to its default (CSS Syntax 3 §4). `auto` is a
+/// valid keyword and returns `Some(Len::Auto)`.
+fn parse_len_opt(v: &str, em: f32) -> Option<Len> {
     let v = v.trim();
     if v == "auto" {
-        return Len::Auto;
+        return Some(Len::Auto);
     }
     if v.len() >= 5 && v[..5].eq_ignore_ascii_case("calc(") {
-        if let Some(l) = parse_calc_affine(v, em) {
-            return l;
-        }
+        return parse_calc_affine(v, em);
     }
     if let Some(p) = v.strip_suffix('%') {
-        return p.trim().parse::<f32>().map(Len::Pct).unwrap_or(Len::Auto);
+        return p.trim().parse::<f32>().ok().map(Len::Pct);
     }
-    parse_length(v, em).map(Len::Px).unwrap_or(Len::Auto)
+    parse_length(v, em).map(Len::Px)
+}
+
+fn parse_len(v: &str, em: f32) -> Len {
+    parse_len_opt(v, em).unwrap_or(Len::Auto)
+}
+
+/// `width`/`height`/`min`/`max` reject negative used lengths as invalid.
+fn size_non_negative(l: &Len) -> bool {
+    match l {
+        Len::Px(p) | Len::Pct(p) => *p >= 0.0,
+        Len::Auto | Len::Calc { .. } => true,
+    }
+}
+
+/// Assign a size property only if the value is valid AND non-negative, else
+/// keep the prior value (invalid declaration dropped).
+fn set_size(slot: &mut Len, v: &str, em: f32) {
+    if let Some(l) = parse_len_opt(v, em).filter(size_non_negative) {
+        *slot = l;
+    }
+}
+
+/// `max-width`/`max-height`: `none` = no maximum (Auto); else a non-negative size.
+fn set_max(slot: &mut Len, v: &str, em: f32) {
+    if v.trim() == "none" {
+        *slot = Len::Auto;
+    } else if let Some(l) = parse_len_opt(v, em).filter(size_non_negative) {
+        *slot = l;
+    }
 }
 
 /// Resolve a `calc()` to affine `(pct, px)` form via the full values resolver:
@@ -841,6 +941,84 @@ fn margin_tb(v: &str, em: f32) -> f32 {
 /// Left/right margin keeps `auto` (drives centering / slack).
 fn margin_lr(v: &str, em: f32) -> Len {
     parse_len(v, em)
+}
+
+/// A padding length. Negative is invalid (padding ≥ 0) → keeps `prior`.
+fn parse_pad(v: &str, em: f32, prior: f32) -> f32 {
+    match parse_length(v.trim(), em) {
+        Some(p) if p >= 0.0 => p,
+        _ => prior,
+    }
+}
+
+/// A border-width keyword/length → px. `thin`/`medium`/`thick` = 1/3/5px.
+fn border_width_kw(tok: &str, em: f32) -> Option<f32> {
+    match tok.trim() {
+        "" => None,
+        "thin" => Some(1.0),
+        "medium" => Some(3.0),
+        "thick" => Some(5.0),
+        t => parse_length(t, em).map(|w| w.max(0.0)),
+    }
+}
+
+/// Assign one side's border width (keeps the prior value on an invalid one).
+fn set_side_width(side: &mut BorderSide, v: &str, em: f32) {
+    if let Some(w) = border_width_kw(v.trim(), em) {
+        side.width = w;
+    }
+}
+
+/// Parse a `border`/`border-<side>` shorthand (`<width> || <style> || <color>`,
+/// any order) into a side. `none`/`hidden` → no border. A specified border with
+/// no explicit colour uses `currentColor` (the element's `color`).
+fn parse_border_shorthand(v: &str, em: f32, theme: &Theme, current: Rgb) -> BorderSide {
+    let (mut width, mut color, mut none, mut styled) = (None, None, false, false);
+    for tok in css_tokens(v) {
+        match tok {
+            "none" | "hidden" => none = true,
+            "thin" => {
+                width = Some(1.0);
+                styled = true;
+            }
+            "medium" => {
+                width = Some(3.0);
+                styled = true;
+            }
+            "thick" => {
+                width = Some(5.0);
+                styled = true;
+            }
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
+                styled = true
+            }
+            _ => {
+                if let Some(c) = parse_color(tok, theme) {
+                    color = Some(c);
+                } else if let Some(w) = parse_length(tok, em) {
+                    width = Some(w.max(0.0));
+                }
+            }
+        }
+    }
+    if none {
+        return BorderSide { width: 0.0, color: None };
+    }
+    // `border-width` initial is 'medium' (3px) once a border is otherwise given.
+    let w = width.unwrap_or(if styled || color.is_some() { 3.0 } else { 0.0 });
+    let c = color.or(if w > 0.0 { Some(current) } else { None });
+    BorderSide { width: w, color: c }
+}
+
+/// Expand 1–4 CSS box-side tokens into [top, right, bottom, left].
+fn four_sides<'a>(toks: &[&'a str]) -> Option<[&'a str; 4]> {
+    match toks.len() {
+        1 => Some([toks[0], toks[0], toks[0], toks[0]]),
+        2 => Some([toks[0], toks[1], toks[0], toks[1]]),
+        3 => Some([toks[0], toks[1], toks[2], toks[1]]),
+        4 => Some([toks[0], toks[1], toks[2], toks[3]]),
+        _ => None,
+    }
 }
 
 /// Expand a 1–4 token box shorthand into (top, right, bottom, left).
@@ -1096,16 +1274,30 @@ fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
 /// `em_base`), and bare numbers (treated as px).
 fn parse_length(v: &str, em_base: f32) -> Option<f32> {
     let v = v.trim();
-    if let Some(n) = v.strip_suffix("px") {
-        n.trim().parse::<f32>().ok()
-    } else if let Some(n) = v.strip_suffix("rem").or_else(|| v.strip_suffix("em")) {
-        n.trim().parse::<f32>().ok().map(|f| f * em_base)
-    } else if let Some(n) = v.strip_suffix('%') {
-        // No containing measure here → treat % of em (rough; refined later).
-        n.trim().parse::<f32>().ok().map(|f| f * em_base / 100.0)
-    } else {
-        v.parse::<f32>().ok()
+    // Font-relative first so "rem" is matched before the "em" suffix eats it.
+    if let Some(n) = v.strip_suffix("rem").or_else(|| v.strip_suffix("em")) {
+        return n.trim().parse::<f32>().ok().map(|f| f * em_base);
     }
+    if let Some(n) = v.strip_suffix('%') {
+        // No containing measure here → treat % of em (rough; refined later).
+        return n.trim().parse::<f32>().ok().map(|f| f * em_base / 100.0);
+    }
+    // Absolute units → CSS reference pixels (1in = 96px, CSS Values 3 §5.2).
+    const ABS: &[(&str, f32)] = &[
+        ("px", 1.0),
+        ("pt", 96.0 / 72.0),
+        ("pc", 16.0),
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+        ("q", 96.0 / 25.4 / 4.0),
+    ];
+    for (suf, mul) in ABS {
+        if let Some(n) = v.strip_suffix(suf) {
+            return n.trim().parse::<f32>().ok().map(|f| f * mul);
+        }
+    }
+    v.parse::<f32>().ok()
 }
 
 /// Parse a CSS `<color>`. Delegates to the full `color` module — hex
@@ -1164,7 +1356,7 @@ mod tests {
     fn ua_sheet_gives_headings_size_weight_and_colour() {
         let dom = dom::parse("<body><h1>x</h1></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], 1000.0);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 1000.0);
         assert_eq!(st.display, Display::Block);
         assert!(st.bold);
         assert!(st.font_px > BASE_FONT_PX * 1.5);
@@ -1175,7 +1367,7 @@ mod tests {
     fn inline_style_attribute_is_parsed() {
         let dom = dom::parse("<body><p style=\"color:#ff0000; font-weight:bold; font-size:20px\">x</p></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], 1000.0);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 1000.0);
         assert_eq!(st.color, Rgb(255, 0, 0));
         assert!(st.bold);
         assert_eq!(st.font_px, 20.0);
@@ -1190,7 +1382,7 @@ mod tests {
         let sheet = css::parse(".lead { color: #ff0000; font-weight: bold }");
         let root = ComputedStyle::root(&theme);
         // 1st <p>: author sets red+bold, inline overrides colour to green.
-        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[], 1000.0);
+        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[], &[], 1000.0);
         assert_eq!(a.color, Rgb(0, 255, 0));
         assert!(a.bold);
         // 2nd <p>: author red+bold, no inline.
@@ -1198,7 +1390,7 @@ mod tests {
             dom::Node::Element(e) => e,
             _ => panic!(),
         };
-        let b = resolve(p2, &root, &theme, &sheet, &[], 1000.0);
+        let b = resolve(p2, &root, &theme, &sheet, &[], &[], 1000.0);
         assert_eq!(b.color, Rgb(255, 0, 0));
         assert!(b.bold);
     }
@@ -1211,7 +1403,7 @@ mod tests {
             let html = alloc::format!("<{tag}>x</{tag}>");
             let dom = dom::parse(&html);
             if let dom::Node::Element(e) = &dom.root.children[0] {
-                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], 1000.0);
+                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], &[], 1000.0);
                 assert_eq!(st.display, Display::None, "{tag}");
             }
         }

@@ -44,6 +44,10 @@ impl ElemInfo {
 enum Comb {
     Descendant,
     Child,
+    /// `A + B` — B's immediately preceding element sibling matches A.
+    Adjacent,
+    /// `A ~ B` — some preceding element sibling of B matches A.
+    General,
 }
 
 /// A compound selector: an optional type + optional id + zero-or-more classes.
@@ -82,12 +86,18 @@ impl Selector {
     /// compounds must match ancestors per their combinators. `ancestors` is
     /// root→…→parent order. Descendant matching is nearest-first (no backtrack —
     /// enough for content selectors; noted as a shortcut).
-    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo]) -> bool {
+    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo]) -> bool {
         let last = self.compounds.len() - 1;
         if !self.compounds[last].matches(subject) {
             return false;
         }
         let mut anc = ancestors.len() as isize - 1; // immediate parent
+        let mut sib = prev_siblings.len() as isize - 1; // immediately preceding sibling
+        // Sibling combinators (`+`/`~`) only resolve while we're still matching at
+        // the subject's own level — once an ancestor combinator moves the context
+        // up, we no longer have that ancestor's siblings, so drop rather than
+        // mis-apply (covers the common `A + B`, `A ~ B`, `.x .a + .b` cases).
+        let mut at_subject = true;
         let mut ci = last as isize - 1;
         while ci >= 0 {
             let comb = self.combs[ci as usize];
@@ -98,6 +108,7 @@ impl Selector {
                         return false;
                     }
                     anc -= 1;
+                    at_subject = false;
                 }
                 Comb::Descendant => {
                     let mut a = anc;
@@ -113,6 +124,31 @@ impl Selector {
                         return false;
                     }
                     anc = a - 1;
+                    at_subject = false;
+                }
+                Comb::Adjacent => {
+                    if !at_subject || sib < 0 || !comp.matches(&prev_siblings[sib as usize]) {
+                        return false;
+                    }
+                    sib -= 1;
+                }
+                Comb::General => {
+                    if !at_subject {
+                        return false;
+                    }
+                    let mut a = sib;
+                    let mut found = false;
+                    while a >= 0 {
+                        if comp.matches(&prev_siblings[a as usize]) {
+                            found = true;
+                            break;
+                        }
+                        a -= 1;
+                    }
+                    if !found {
+                        return false;
+                    }
+                    sib = a - 1;
                 }
             }
             ci -= 1;
@@ -171,6 +207,7 @@ impl Stylesheet {
         &'a self,
         subject: &ElemInfo,
         ancestors: &[ElemInfo],
+        prev_siblings: &[ElemInfo],
         viewport_w: f32,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
         let mut out = Vec::new();
@@ -184,7 +221,7 @@ impl Stylesheet {
             }
             let mut best: Option<u32> = None;
             for sel in &rule.selectors {
-                if sel.matches(subject, ancestors) {
+                if sel.matches(subject, ancestors, prev_siblings) {
                     best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
                 }
             }
@@ -269,7 +306,15 @@ fn gather_style_text(el: &Element, out: &mut String) {
 /// `@media` blocks (their rules apply conditionally on the viewport); other
 /// at-rules (`@keyframes`/`@font-face`/`@supports`/`@import`) are skipped.
 pub fn parse(css: &str) -> Stylesheet {
-    let css = strip_comments(css);
+    // XHTML `<style>` bodies wrap the CSS in a `<![CDATA[ … ]]>` marker (the
+    // CSS2.1 reftest suite does this pervasively). It's raw text to us, so strip
+    // the markers before parsing — real CSS never contains them.
+    let css = if css.contains("<![CDATA[") {
+        css.replace("<![CDATA[", " ").replace("]]>", " ")
+    } else {
+        String::from(css)
+    };
+    let css = strip_comments(&css);
     let mut rules = Vec::new();
     let mut order = 0u32;
     parse_into(&css, 0, css.len(), None, &mut rules, &mut order);
@@ -560,18 +605,29 @@ fn parse_selector_list(text: &str) -> Vec<Selector> {
 fn parse_selector(text: &str) -> Option<Selector> {
     let mut compounds: Vec<Compound> = Vec::new();
     let mut combs: Vec<Comb> = Vec::new();
-    let mut pending_child = false;
+    let mut pending = Comb::Descendant;
     for tok in tokenize_selector(text) {
-        if tok == ">" {
-            pending_child = true;
-            continue;
+        match tok.as_str() {
+            ">" => {
+                pending = Comb::Child;
+                continue;
+            }
+            "+" => {
+                pending = Comb::Adjacent;
+                continue;
+            }
+            "~" => {
+                pending = Comb::General;
+                continue;
+            }
+            _ => {}
         }
         let comp = parse_compound(&tok)?;
         if !compounds.is_empty() {
-            combs.push(if pending_child { Comb::Child } else { Comb::Descendant });
+            combs.push(pending);
         }
         compounds.push(comp);
-        pending_child = false;
+        pending = Comb::Descendant;
     }
     if compounds.is_empty() {
         return None;
@@ -589,11 +645,11 @@ fn tokenize_selector(text: &str) -> Vec<String> {
             if !cur.is_empty() {
                 out.push(core::mem::take(&mut cur));
             }
-        } else if ch == '>' {
+        } else if ch == '>' || ch == '+' || ch == '~' {
             if !cur.is_empty() {
                 out.push(core::mem::take(&mut cur));
             }
-            out.push(">".to_string());
+            out.push(ch.to_string());
         } else {
             cur.push(ch);
         }
@@ -690,10 +746,10 @@ mod tests {
     #[test]
     fn parses_and_matches_type_class_id() {
         let ss = parse("p { color: red } .lead { font-weight: bold } #main { color: blue }");
-        assert!(!ss.matched(&info("p", None, &[]), &[], 1000.0).is_empty());
-        assert!(!ss.matched(&info("div", None, &["lead"]), &[], 1000.0).is_empty());
-        assert!(!ss.matched(&info("div", Some("main"), &[]), &[], 1000.0).is_empty());
-        assert!(ss.matched(&info("span", None, &[]), &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("div", None, &["lead"]), &[], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("div", Some("main"), &[]), &[], &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("span", None, &[]), &[], &[], 1000.0).is_empty());
     }
 
     #[test]
@@ -703,19 +759,19 @@ mod tests {
         let div = info("div", None, &[]);
         let ul = info("ul", None, &[]);
         // nav a: matches an <a> with <nav> anywhere above
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()], 1000.0).is_empty());
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()], 1000.0).is_empty());
-        assert!(ss.matched(&info("a", None, &[]), &[div.clone()], 1000.0).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()], &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("a", None, &[]), &[div.clone()], &[], 1000.0).is_empty());
         // ul > li: <li> whose IMMEDIATE parent is <ul>
-        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()], 1000.0).is_empty());
-        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()], 1000.0).is_empty());
+        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()], &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()], &[], 1000.0).is_empty());
     }
 
     #[test]
     fn specificity_ranks_id_over_class_over_type() {
         let ss = parse("p { color: a } p.x { color: b } #p { color: c }");
         let e = info("p", Some("p"), &["x"]);
-        let mut m = ss.matched(&e, &[], 1000.0);
+        let mut m = ss.matched(&e, &[], &[], 1000.0);
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         // ascending: type(p) < class(p.x) < id(#p)
         assert_eq!(m.len(), 3);
@@ -732,10 +788,10 @@ mod tests {
         // :hover + [attr] selectors dropped (unsupported); the @media block is
         // now DESCENDED (not dropped), but `screen` alone always matches so its
         // `p` rule is fine either way …
-        assert!(ss.matched(&info("a", None, &[]), &[], 1000.0).is_empty());
-        assert!(ss.matched(&info("input", None, &[]), &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("a", None, &[]), &[], &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("input", None, &[]), &[], &[], 1000.0).is_empty());
         // … and the plain "h1, h2" list still parsed.
-        assert!(!ss.matched(&info("h2", None, &[]), &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("h2", None, &[]), &[], &[], 1000.0).is_empty());
     }
 
     #[test]
@@ -753,7 +809,7 @@ mod tests {
         // external (red) parsed first, inline <style> (blue) after → blue wins.
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
         let ss = collect_all(&dom, "p { color: red }");
-        let mut m = ss.matched(&info("p", None, &[]), &[], 1000.0);
+        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 1000.0);
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
         assert!(m[0].1 < m[1].1, "external rule has earlier document order");
@@ -764,8 +820,8 @@ mod tests {
         let dom = dom::parse("<html><head><style>p{color:red}</style></head>\
             <body><style>.x{color:blue}</style><p>hi</p></body></html>");
         let ss = collect(&dom);
-        assert!(!ss.matched(&info("p", None, &[]), &[], 1000.0).is_empty());
-        assert!(!ss.matched(&info("span", None, &["x"]), &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("span", None, &["x"]), &[], &[], 1000.0).is_empty());
     }
 
     #[test]
@@ -777,11 +833,11 @@ mod tests {
         );
         let e = info("div", None, &["col"]);
         // Wide (1000 ≥ 768): both rules present.
-        assert_eq!(ss.matched(&e, &[], 1000.0).len(), 2, "media rule applies wide");
+        assert_eq!(ss.matched(&e, &[], &[], 1000.0).len(), 2, "media rule applies wide");
         // Narrow (500 < 768): only the base rule.
-        assert_eq!(ss.matched(&e, &[], 500.0).len(), 1, "media rule dropped narrow");
+        assert_eq!(ss.matched(&e, &[], &[], 500.0).len(), 1, "media rule dropped narrow");
         // An un-evaluable feature never matches (rule dropped both ways).
         let ss2 = parse("@media (prefers-color-scheme: dark) { .col { color: blue } }");
-        assert!(ss2.matched(&e, &[], 1000.0).is_empty(), "unknown feature never applies");
+        assert!(ss2.matched(&e, &[], &[], 1000.0).is_empty(), "unknown feature never applies");
     }
 }

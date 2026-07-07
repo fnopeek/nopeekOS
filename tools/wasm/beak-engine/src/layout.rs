@@ -24,8 +24,8 @@ use crate::css::{ElemInfo, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::image::{Image, ImageMap};
 use crate::style::{
-    self, ClearKind, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind, GridTrack, Justify,
-    Len, Position, BASE_FONT_PX,
+    self, BorderSide, ClearKind, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
+    GridTrack, Justify, Len, Position, BASE_FONT_PX,
 };
 
 /// An active float's exclusion rectangle (document space) within a block
@@ -67,7 +67,9 @@ fn band_of(floats: &[FloatRect], top: i32, bot: i32, cl: i32, cr: i32) -> (i32, 
 /// §10.4 min/max-width redo. Returns (content-width, content-left-offset =
 /// margin-left + padding-left).
 fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
-    let pad = st.pad_left + st.pad_right;
+    // Horizontal padding + border both sit between the content box and the
+    // margin edge (border-box `width` includes them; content-box adds them).
+    let pad = st.pad_left + st.pad_right + st.border_x();
     let (mut cw, mut ml) = solve_h(st.width, st.margin_left, st.margin_right, avail, pad, st.box_border);
 
     if let Some(maxw) = st.max_width.px(avail) {
@@ -84,7 +86,7 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
             (cw, ml) = solve_h(Len::Px(redo), st.margin_left, st.margin_right, avail, pad, st.box_border);
         }
     }
-    (cw.max(1.0), ml + st.pad_left)
+    (cw.max(1.0), ml + st.pad_left + st.border_left.width)
 }
 
 /// `position:relative` paint offset (dx, dy): `left`/`top` win over `right`/
@@ -270,7 +272,7 @@ pub fn layout(
     // Resolve <body> itself so `body { … }` rules inherit into the page, and
     // put it on the ancestor path so `body p` / `.article p` selectors match.
     let body = dom.body();
-    let body_style = style::resolve(body, &root, theme, sheet, &[], width as f32);
+    let body_style = style::resolve(body, &root, theme, sheet, &[], &[], width as f32);
     ctx.path.push(ElemInfo::of(body));
     y = ctx.layout_children(&body.children, &body_style, cx, cw, y);
     // A float can extend below the last in-flow line — grow the page to contain it.
@@ -308,7 +310,7 @@ impl Ctx<'_> {
                 let border = if st.box_border {
                     v
                 } else {
-                    v + st.pad_left + st.pad_right + 2.0 * st.border_width
+                    v + st.pad_left + st.pad_right + st.border_x()
                 };
                 ceil_i32(border + ml + mr)
             }),
@@ -361,7 +363,7 @@ impl Ctx<'_> {
         let is_left = st.float == FloatKind::Left;
         let ml = st.margin_left.px(w as f32).unwrap_or(0.0).max(0.0);
         let mr = st.margin_right.px(w as f32).unwrap_or(0.0).max(0.0);
-        let pad_border = st.pad_left + st.pad_right + 2.0 * st.border_width;
+        let pad_border = st.pad_left + st.pad_right + st.border_x();
         // Content width: shrink-to-fit for `auto` (min(max(min-content, avail),
         // preferred)); a definite width is used directly (may overflow the CB).
         let content_w = match st.width {
@@ -427,6 +429,8 @@ impl Ctx<'_> {
         let mut inline = Inline::new();
         let mut carry = 0.0f32; // previous block's (collapsible) bottom margin
         let mut had_block = false;
+        // Preceding element siblings (document order) for `+`/`~` combinators.
+        let mut siblings: Vec<ElemInfo> = Vec::new();
 
         for node in nodes {
             let el = match node {
@@ -436,7 +440,8 @@ impl Ctx<'_> {
                 }
                 Node::Element(el) => el,
             };
-            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path, self.viewport_w);
+            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path, &siblings, self.viewport_w);
+            siblings.push(ElemInfo::of(el));
             if st.display == Display::None {
                 continue;
             }
@@ -535,11 +540,11 @@ impl Ctx<'_> {
         // Border-box geometry (the caller already advanced past margin-top → y0
         // is the border-box top). Background is inserted at `bg_idx` so it lands
         // behind the box's content; the border is drawn on top of the edges.
-        let box_left = content_x - st.pad_left as i32;
-        let box_w = content_w + (st.pad_left + st.pad_right) as i32;
+        let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
+        let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
 
-        let mut y = y0 + st.pad_top as i32;
+        let mut y = y0 + st.border_top.width as i32 + st.pad_top as i32;
         if st.is_rule {
             self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
             return y + 3 + st.pad_bottom as i32;
@@ -564,8 +569,8 @@ impl Ctx<'_> {
         // Explicit `height` sets the content-box height (border-box subtracts
         // padding); `min/max-height` clamp it. `%` needs a definite containing-
         // block height (usually auto → ignored), so only definite lengths apply.
-        let content_top = y0 + st.pad_top as i32;
-        let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
+        let content_top = y0 + st.border_top.width as i32 + st.pad_top as i32;
+        let pad_v = (st.pad_top + st.pad_bottom) as i32 + st.border_y() as i32;
         let px_h = |len: Len| match len {
             Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
             Len::Px(h) => Some(h as i32),
@@ -583,7 +588,7 @@ impl Ctx<'_> {
         }
         y = content_top + content_h;
         self.cb = prev_cb;
-        y += st.pad_bottom as i32;
+        y += st.pad_bottom as i32 + st.border_bottom.width as i32;
 
         self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
         y
@@ -640,15 +645,25 @@ impl Ctx<'_> {
         if let Some(bg) = st.bg {
             self.ops.insert(bg_idx, DrawOp::Rect { x, y, w, h, color: bg });
         }
-        if let Some(bc) = st.border_color {
-            let b = st.border_width as i32;
-            if b > 0 {
-                self.ops.push(DrawOp::Rect { x, y, w, h: b, color: bc }); // top
-                self.ops.push(DrawOp::Rect { x, y: y + h - b, w, h: b, color: bc }); // bottom
-                self.ops.push(DrawOp::Rect { x, y, w: b, h, color: bc }); // left
-                self.ops.push(DrawOp::Rect { x: x + w - b, y, w: b, h, color: bc }); // right
+        // Each side paints independently on the border-box edge.
+        let side = |ops: &mut Vec<DrawOp>, s: &BorderSide, rect: (i32, i32, i32, i32)| {
+            if let (Some(c), true) = (s.color, s.width > 0.0) {
+                let (rx, ry, rw, rh) = rect;
+                if rw > 0 && rh > 0 {
+                    ops.push(DrawOp::Rect { x: rx, y: ry, w: rw, h: rh, color: c });
+                }
             }
-        }
+        };
+        let (bt, br, bb, bl) = (
+            st.border_top.width as i32,
+            st.border_right.width as i32,
+            st.border_bottom.width as i32,
+            st.border_left.width as i32,
+        );
+        side(&mut self.ops, &st.border_top, (x, y, w, bt));
+        side(&mut self.ops, &st.border_bottom, (x, y + h - bb, w, bb));
+        side(&mut self.ops, &st.border_left, (x, y, bl, h));
+        side(&mut self.ops, &st.border_right, (x + w - br, y, br, h));
     }
 
     /// Simplified table layout: rows stack; cells sit in auto-width columns.
@@ -663,7 +678,7 @@ impl Ctx<'_> {
         for c in &el.children {
             if let Node::Element(e) = c {
                 if e.tag == "caption" {
-                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, self.viewport_w);
+                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
                     self.path.push(ElemInfo::of(e));
                     y = self.layout_children(&e.children, &cs, x, w, y);
                     self.path.pop();
@@ -707,7 +722,7 @@ impl Ctx<'_> {
             let mut row_h = 0i32;
             for (c, cell) in row.iter().enumerate().take(ncols) {
                 let cw = colw[c] as i32;
-                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, self.viewport_w);
+                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
                 if cs.display == Display::None {
                     cx += cw + 2 * PADC;
                     continue;
@@ -863,7 +878,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
                 if cs.display == Display::None {
                     continue;
                 }
@@ -1182,7 +1197,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
                 if cs.display == Display::None {
                     continue;
                 }
@@ -1784,7 +1799,7 @@ impl Ctx<'_> {
             match c {
                 Node::Text(t) => inline.text(self.font, t, st, href),
                 Node::Element(ce) => {
-                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, self.viewport_w);
+                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
                     if cs.display == Display::None {
                         continue;
                     }
