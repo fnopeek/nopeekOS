@@ -272,7 +272,7 @@ pub fn layout(
     // Resolve <body> itself so `body { … }` rules inherit into the page, and
     // put it on the ancestor path so `body p` / `.article p` selectors match.
     let body = dom.body();
-    let body_style = style::resolve(body, &root, theme, sheet, &[], &[], width as f32);
+    let body_style = style::resolve(body, &root, theme, sheet, &[], &[], 0, width as f32);
     ctx.path.push(ElemInfo::of(body));
     y = ctx.layout_children(&body.children, &body_style, cx, cw, y);
     // A float can extend below the last in-flow line — grow the page to contain it.
@@ -429,8 +429,10 @@ impl Ctx<'_> {
         let mut inline = Inline::new();
         let mut carry = 0.0f32; // previous block's (collapsible) bottom margin
         let mut had_block = false;
-        // Preceding element siblings (document order) for `+`/`~` combinators.
+        // Preceding element siblings (document order) for `+`/`~` combinators,
+        // and the total element-sibling count for `:nth-child`/`:last-child`.
         let mut siblings: Vec<ElemInfo> = Vec::new();
+        let sib_count = nodes.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
 
         for node in nodes {
             let el = match node {
@@ -440,7 +442,7 @@ impl Ctx<'_> {
                 }
                 Node::Element(el) => el,
             };
-            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path, &siblings, self.viewport_w);
+            let st = style::resolve(el, parent, self.theme, self.sheet, &self.path, &siblings, sib_count, self.viewport_w);
             siblings.push(ElemInfo::of(el));
             if st.display == Display::None {
                 continue;
@@ -678,7 +680,7 @@ impl Ctx<'_> {
         for c in &el.children {
             if let Node::Element(e) = c {
                 if e.tag == "caption" {
-                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
+                    let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                     self.path.push(ElemInfo::of(e));
                     y = self.layout_children(&e.children, &cs, x, w, y);
                     self.path.pop();
@@ -722,7 +724,7 @@ impl Ctx<'_> {
             let mut row_h = 0i32;
             for (c, cell) in row.iter().enumerate().take(ncols) {
                 let cw = colw[c] as i32;
-                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
+                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                 if cs.display == Display::None {
                     cx += cw + 2 * PADC;
                     continue;
@@ -878,7 +880,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                 if cs.display == Display::None {
                     continue;
                 }
@@ -931,6 +933,27 @@ impl Ctx<'_> {
         let mut place: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(items.len());
         let (mut cur_r, mut cur_c) = (0usize, 0usize);
         for (_, s) in &items {
+            // Named `grid-area` placement (from the container's grid-template-areas)
+            // takes priority over line/auto placement.
+            if s.grid_area != 0 {
+                if let Some(a) =
+                    st.grid_areas[..st.grid_area_count as usize].iter().find(|a| a.name == s.grid_area)
+                {
+                    let c0 = (a.c0 as usize).min(ncols.saturating_sub(1));
+                    let cspan = (a.c1 as usize).min(ncols).max(c0 + 1) - c0;
+                    let fr = a.r0 as usize;
+                    let rspan = (a.r1.saturating_sub(a.r0)).max(1) as usize;
+                    let mask = colmask(c0, cspan);
+                    while occ.len() < fr + rspan {
+                        occ.push(0);
+                    }
+                    for rr in fr..fr + rspan {
+                        occ[rr] |= mask;
+                    }
+                    place.push((c0, cspan, fr, rspan));
+                    continue;
+                }
+            }
             let has_col = s.grid_col_start != 0;
             let has_row = s.grid_row_start != 0;
             let (col, cspan) = if has_col {
@@ -1197,7 +1220,7 @@ impl Ctx<'_> {
         let mut items: Vec<(&Element, ComputedStyle)> = Vec::new();
         for c in &el.children {
             if let Node::Element(ce) = c {
-                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
+                let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                 if cs.display == Display::None {
                     continue;
                 }
@@ -1799,7 +1822,7 @@ impl Ctx<'_> {
             match c {
                 Node::Text(t) => inline.text(self.font, t, st, href),
                 Node::Element(ce) => {
-                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], self.viewport_w);
+                    let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                     if cs.display == Display::None {
                         continue;
                     }

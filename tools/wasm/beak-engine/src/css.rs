@@ -21,12 +21,14 @@ use alloc::vec::Vec;
 
 use crate::dom::{Dom, Element, Node};
 
-/// The identity a selector matches against: tag + id + classes.
+/// The identity a selector matches against: tag + id + classes + all attributes
+/// (names lowercased) for `[attr]` selectors.
 #[derive(Clone)]
 pub struct ElemInfo {
     pub tag: String,
     pub id: Option<String>,
     pub classes: Vec<String>,
+    pub attrs: Vec<(String, String)>,
 }
 
 impl ElemInfo {
@@ -36,7 +38,8 @@ impl ElemInfo {
             .attr("class")
             .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
             .unwrap_or_default();
-        ElemInfo { tag: el.tag.clone(), id, classes }
+        let attrs = el.attrs.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
+        ElemInfo { tag: el.tag.clone(), id, classes, attrs }
     }
 }
 
@@ -50,15 +53,93 @@ enum Comb {
     General,
 }
 
-/// A compound selector: an optional type + optional id + zero-or-more classes.
+/// An `[attr]` attribute selector with its match operator.
+#[derive(Clone, Copy)]
+enum AttrOp {
+    Exists,  // [a]
+    Eq,      // [a=v]
+    Includes, // [a~=v] — whitespace-separated word list contains v
+    Dash,    // [a|=v] — v or v-…
+    Prefix,  // [a^=v]
+    Suffix,  // [a$=v]
+    Substr,  // [a*=v]
+}
+
+struct AttrSel {
+    name: String,
+    op: AttrOp,
+    val: String,
+}
+
+impl AttrSel {
+    fn matches(&self, e: &ElemInfo) -> bool {
+        e.attrs.iter().any(|(k, v)| {
+            if *k != self.name {
+                return false;
+            }
+            match self.op {
+                AttrOp::Exists => true,
+                AttrOp::Eq => v == &self.val,
+                AttrOp::Includes => v.split_whitespace().any(|w| w == self.val),
+                AttrOp::Dash => v == &self.val || v.starts_with(&alloc::format!("{}-", self.val)),
+                AttrOp::Prefix => !self.val.is_empty() && v.starts_with(&self.val),
+                AttrOp::Suffix => !self.val.is_empty() && v.ends_with(&self.val),
+                AttrOp::Substr => !self.val.is_empty() && v.contains(&self.val),
+            }
+        })
+    }
+}
+
+/// A structural pseudo-class, evaluated against the element's 1-based index
+/// among its element siblings and the total sibling count `(index, count)`.
+#[derive(Clone, Copy)]
+enum Structural {
+    FirstChild,
+    LastChild,
+    OnlyChild,
+    NthChild(i32, i32),     // matches index == a*n + b for some n ≥ 0
+    NthLastChild(i32, i32), // same, counted from the end
+}
+
+impl Structural {
+    fn matches(&self, ctx: Option<(u32, u32)>) -> bool {
+        let Some((idx, count)) = ctx else { return false }; // no sibling context → can't evaluate
+        // i == a*n + b for some integer n ≥ 0 (handles a ≤ 0 too).
+        let nth = |a: i32, b: i32, i: u32| {
+            let i = i as i32;
+            if a == 0 {
+                i == b
+            } else {
+                let d = i - b;
+                d % a == 0 && d / a >= 0
+            }
+        };
+        match *self {
+            Structural::FirstChild => idx == 1,
+            Structural::LastChild => idx == count,
+            Structural::OnlyChild => count == 1,
+            Structural::NthChild(a, b) => nth(a, b, idx),
+            Structural::NthLastChild(a, b) => count >= idx && nth(a, b, count - idx + 1),
+        }
+    }
+}
+
+/// A compound selector: optional type + id + classes + `[attr]` + `:not(…)` +
+/// structural pseudo-classes, all of which must hold.
 struct Compound {
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
+    attrs: Vec<AttrSel>,
+    not: Vec<Compound>,
+    structural: Vec<Structural>,
 }
 
 impl Compound {
-    fn matches(&self, e: &ElemInfo) -> bool {
+    /// `ctx = Some((index, count))` provides the sibling position for structural
+    /// pseudo-classes; `None` (an ancestor with no known position) makes any
+    /// structural pseudo fail (the selector is dropped rather than mis-applied).
+    fn matches(&self, e: &ElemInfo, ctx: Option<(u32, u32)>) -> bool {
         if let Some(t) = &self.tag {
             if *t != e.tag {
                 return false;
@@ -69,7 +150,17 @@ impl Compound {
                 return false;
             }
         }
-        self.classes.iter().all(|c| e.classes.iter().any(|x| x == c))
+        if !self.classes.iter().all(|c| e.classes.iter().any(|x| x == c)) {
+            return false;
+        }
+        if !self.attrs.iter().all(|a| a.matches(e)) {
+            return false;
+        }
+        if self.structural.iter().any(|s| !s.matches(ctx)) {
+            return false;
+        }
+        // :not(x) — none of the negated compounds may match.
+        !self.not.iter().any(|n| n.matches(e, ctx))
     }
 }
 
@@ -86,9 +177,12 @@ impl Selector {
     /// compounds must match ancestors per their combinators. `ancestors` is
     /// root→…→parent order. Descendant matching is nearest-first (no backtrack —
     /// enough for content selectors; noted as a shortcut).
-    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo]) -> bool {
+    fn matches(&self, subject: &ElemInfo, ancestors: &[ElemInfo], prev_siblings: &[ElemInfo], sib_count: u32) -> bool {
+        // The subject's structural pseudo-classes evaluate against its 1-based
+        // sibling index (preceding count + 1) and the total sibling count.
+        let subj_ctx = Some((prev_siblings.len() as u32 + 1, sib_count));
         let last = self.compounds.len() - 1;
-        if !self.compounds[last].matches(subject) {
+        if !self.compounds[last].matches(subject, subj_ctx) {
             return false;
         }
         let mut anc = ancestors.len() as isize - 1; // immediate parent
@@ -104,7 +198,7 @@ impl Selector {
             let comp = &self.compounds[ci as usize];
             match comb {
                 Comb::Child => {
-                    if anc < 0 || !comp.matches(&ancestors[anc as usize]) {
+                    if anc < 0 || !comp.matches(&ancestors[anc as usize], None) {
                         return false;
                     }
                     anc -= 1;
@@ -114,7 +208,7 @@ impl Selector {
                     let mut a = anc;
                     let mut found = false;
                     while a >= 0 {
-                        if comp.matches(&ancestors[a as usize]) {
+                        if comp.matches(&ancestors[a as usize], None) {
                             found = true;
                             break;
                         }
@@ -127,7 +221,7 @@ impl Selector {
                     at_subject = false;
                 }
                 Comb::Adjacent => {
-                    if !at_subject || sib < 0 || !comp.matches(&prev_siblings[sib as usize]) {
+                    if !at_subject || sib < 0 || !comp.matches(&prev_siblings[sib as usize], None) {
                         return false;
                     }
                     sib -= 1;
@@ -139,7 +233,7 @@ impl Selector {
                     let mut a = sib;
                     let mut found = false;
                     while a >= 0 {
-                        if comp.matches(&prev_siblings[a as usize]) {
+                        if comp.matches(&prev_siblings[a as usize], None) {
                             found = true;
                             break;
                         }
@@ -208,6 +302,7 @@ impl Stylesheet {
         subject: &ElemInfo,
         ancestors: &[ElemInfo],
         prev_siblings: &[ElemInfo],
+        sib_count: u32,
         viewport_w: f32,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
         let mut out = Vec::new();
@@ -221,7 +316,7 @@ impl Stylesheet {
             }
             let mut best: Option<u32> = None;
             for sel in &rule.selectors {
-                if sel.matches(subject, ancestors, prev_siblings) {
+                if sel.matches(subject, ancestors, prev_siblings, sib_count) {
                     best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
                 }
             }
@@ -385,13 +480,51 @@ fn parse_into(
         while i < end && bytes[i] != b'{' && bytes[i] != b'}' {
             i += 1;
         }
-        if i >= end || bytes[i] == b'}' {
+        if i >= end {
             break;
+        }
+        // A `}` where a selector was expected is a stray close — usually the end
+        // of a nested style rule (`.a { .b { … } }`, which we flatten rather than
+        // support) or plain malformed CSS. css-syntax-3 error recovery: consume it
+        // and keep scanning. Aborting here (the old `break`) dropped the ENTIRE
+        // rest of a large sheet — Wikipedia's grid layout sits 174 KB past one
+        // such nested block, so a single `}` silently killed the whole page.
+        if bytes[i] == b'}' {
+            i += 1;
+            continue;
         }
         let sel_text = &css[sel_start..i];
         i += 1; // '{'
         let body_start = i;
-        while i < end && bytes[i] != b'}' {
+        // Scan to the MATCHING `}`, tracking `{}` depth (and skipping string
+        // literals so a `{`/`}` inside `content:"…"` doesn't miscount). Without
+        // depth tracking a nested rule's inner `}` ended the parent early and
+        // leaked its real closing `}` to the top level, desyncing the parser.
+        let mut depth = 1i32;
+        let mut quote = 0u8;
+        while i < end {
+            let c = bytes[i];
+            if quote != 0 {
+                if c == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    quote = 0;
+                }
+            } else {
+                match c {
+                    b'"' | b'\'' => quote = c,
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             i += 1;
         }
         let body = &css[body_start..i.min(end)];
@@ -640,18 +773,30 @@ fn parse_selector(text: &str) -> Option<Selector> {
 fn tokenize_selector(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
+    let mut depth = 0i32; // inside [...] or :not(...) — don't split on combinators there
     for ch in text.chars() {
-        if ch.is_whitespace() {
-            if !cur.is_empty() {
-                out.push(core::mem::take(&mut cur));
+        match ch {
+            '[' | '(' => {
+                depth += 1;
+                cur.push(ch);
             }
-        } else if ch == '>' || ch == '+' || ch == '~' {
-            if !cur.is_empty() {
-                out.push(core::mem::take(&mut cur));
+            ']' | ')' => {
+                depth = (depth - 1).max(0);
+                cur.push(ch);
             }
-            out.push(ch.to_string());
-        } else {
-            cur.push(ch);
+            _ if depth > 0 => cur.push(ch),
+            _ if ch.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(core::mem::take(&mut cur));
+                }
+            }
+            '>' | '+' | '~' => {
+                if !cur.is_empty() {
+                    out.push(core::mem::take(&mut cur));
+                }
+                out.push(ch.to_string());
+            }
+            _ => cur.push(ch),
         }
     }
     if !cur.is_empty() {
@@ -661,55 +806,169 @@ fn tokenize_selector(text: &str) -> Vec<String> {
 }
 
 fn parse_compound(tok: &str) -> Option<Compound> {
-    if tok.is_empty() || tok.contains([':', '[', ']', '+', '~', '(', ')']) {
-        return None; // unsupported selector features → drop the whole selector
+    if tok.is_empty() {
+        return None;
     }
-    let bytes = tok.as_bytes();
-    let mut tag = None;
-    let mut id = None;
-    let mut classes = Vec::new();
+    let b = tok.as_bytes();
+    let mut c = Compound {
+        tag: None,
+        id: None,
+        classes: Vec::new(),
+        attrs: Vec::new(),
+        not: Vec::new(),
+        structural: Vec::new(),
+    };
     let mut i = 0;
-    if bytes[0] == b'*' {
+    // Leading type selector or universal `*`.
+    if b[0] == b'*' {
         i = 1;
-    } else if bytes[0].is_ascii_alphabetic() {
+    } else if b[0].is_ascii_alphabetic() {
         let s = i;
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-') {
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-') {
             i += 1;
         }
-        tag = Some(tok[s..i].to_ascii_lowercase());
+        c.tag = Some(tok[s..i].to_ascii_lowercase());
     }
-    while i < bytes.len() {
-        let marker = bytes[i];
-        if marker != b'.' && marker != b'#' {
-            return None;
-        }
-        i += 1;
-        let s = i;
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b'_') {
-            i += 1;
-        }
-        if i == s {
-            return None;
-        }
-        if marker == b'.' {
-            classes.push(tok[s..i].to_string());
-        } else {
-            id = Some(tok[s..i].to_string());
+    while i < b.len() {
+        match b[i] {
+            b'.' | b'#' => {
+                let marker = b[i];
+                i += 1;
+                let s = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-' || b[i] == b'_') {
+                    i += 1;
+                }
+                if i == s {
+                    return None;
+                }
+                if marker == b'.' {
+                    c.classes.push(tok[s..i].to_string());
+                } else {
+                    c.id = Some(tok[s..i].to_string());
+                }
+            }
+            b'[' => {
+                let end = tok[i..].find(']')? + i;
+                c.attrs.push(parse_attr(&tok[i + 1..end])?);
+                i = end + 1;
+            }
+            b':' => {
+                let dbl = i + 1 < b.len() && b[i + 1] == b':';
+                i += if dbl { 2 } else { 1 };
+                let s = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-') {
+                    i += 1;
+                }
+                let name = tok[s..i].to_ascii_lowercase();
+                let arg = if i < b.len() && b[i] == b'(' {
+                    let end = tok[i..].find(')')? + i;
+                    let a = tok[i + 1..end].to_string();
+                    i = end + 1;
+                    Some(a)
+                } else {
+                    None
+                };
+                if dbl {
+                    return None; // ::before/::after — generated content, not rendered → drop
+                }
+                match (name.as_str(), arg) {
+                    ("not", Some(a)) => c.not.push(parse_compound(a.trim())?),
+                    ("first-child", None) => c.structural.push(Structural::FirstChild),
+                    ("last-child", None) => c.structural.push(Structural::LastChild),
+                    ("only-child", None) => c.structural.push(Structural::OnlyChild),
+                    ("nth-child", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        c.structural.push(Structural::NthChild(x, y));
+                    }
+                    ("nth-last-child", Some(a)) => {
+                        let (x, y) = parse_nth(&a)?;
+                        c.structural.push(Structural::NthLastChild(x, y));
+                    }
+                    _ => return None, // :hover/:checked/:root/… — unsupported → drop the selector
+                }
+            }
+            _ => return None,
         }
     }
-    Some(Compound { tag, id, classes })
+    Some(c)
+}
+
+/// Parse the inside of an `[attr…]` selector (`attr`, `attr=v`, `attr~=v`, …).
+fn parse_attr(inner: &str) -> Option<AttrSel> {
+    let inner = inner.trim();
+    for (pat, op) in [
+        ("~=", AttrOp::Includes),
+        ("|=", AttrOp::Dash),
+        ("^=", AttrOp::Prefix),
+        ("$=", AttrOp::Suffix),
+        ("*=", AttrOp::Substr),
+        ("=", AttrOp::Eq),
+    ] {
+        if let Some(p) = inner.find(pat) {
+            let name = inner[..p].trim().to_ascii_lowercase();
+            if name.is_empty() {
+                return None;
+            }
+            let mut val = inner[p + pat.len()..].trim();
+            // Drop a trailing case-sensitivity flag (`[a="x" i]`).
+            if let Some(s) = val.strip_suffix(" i").or_else(|| val.strip_suffix(" s")) {
+                val = s.trim();
+            }
+            if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
+                || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
+            {
+                val = &val[1..val.len() - 1];
+            }
+            return Some(AttrSel { name, op, val: val.to_string() });
+        }
+    }
+    let name = inner.to_ascii_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    Some(AttrSel { name, op: AttrOp::Exists, val: String::new() })
+}
+
+/// Parse an `An+B` micro-syntax (`2n+1`, `odd`, `even`, `3`, `-n+3`).
+fn parse_nth(s: &str) -> Option<(i32, i32)> {
+    let s = s.trim().to_ascii_lowercase();
+    match s.as_str() {
+        "even" => return Some((2, 0)),
+        "odd" => return Some((2, 1)),
+        _ => {}
+    }
+    if let Some(n) = s.find('n') {
+        let a = match s[..n].trim() {
+            "" | "+" => 1,
+            "-" => -1,
+            x => x.parse::<i32>().ok()?,
+        };
+        let rest = s[n + 1..].replace(' ', "");
+        let b = if rest.is_empty() { 0 } else { rest.parse::<i32>().ok()? };
+        Some((a, b))
+    } else {
+        Some((0, s.parse::<i32>().ok()?))
+    }
 }
 
 /// CSS specificity packed as (id<<20)|(class<<10)|type — enough headroom.
 fn specificity(compounds: &[Compound]) -> u32 {
     let (mut a, mut b, mut c) = (0u32, 0u32, 0u32);
-    for comp in compounds {
+    let mut acc = |comp: &Compound| {
         if comp.id.is_some() {
             a += 1;
         }
-        b += comp.classes.len() as u32;
+        // classes, `[attr]` and pseudo-classes all count at the class level.
+        b += (comp.classes.len() + comp.attrs.len() + comp.structural.len()) as u32;
         if comp.tag.is_some() {
             c += 1;
+        }
+    };
+    for comp in compounds {
+        acc(comp);
+        // `:not(x)` contributes its argument's specificity (css-selectors §16).
+        for n in &comp.not {
+            acc(n);
         }
     }
     (a << 20) | (b << 10) | c
@@ -740,16 +999,17 @@ mod tests {
             tag: tag.to_string(),
             id: id.map(|s| s.to_string()),
             classes: classes.iter().map(|s| s.to_string()).collect(),
+            attrs: Vec::new(),
         }
     }
 
     #[test]
     fn parses_and_matches_type_class_id() {
         let ss = parse("p { color: red } .lead { font-weight: bold } #main { color: blue }");
-        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 1000.0).is_empty());
-        assert!(!ss.matched(&info("div", None, &["lead"]), &[], &[], 1000.0).is_empty());
-        assert!(!ss.matched(&info("div", Some("main"), &[]), &[], &[], 1000.0).is_empty());
-        assert!(ss.matched(&info("span", None, &[]), &[], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("div", None, &["lead"]), &[], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("div", Some("main"), &[]), &[], &[], 0, 1000.0).is_empty());
+        assert!(ss.matched(&info("span", None, &[]), &[], &[], 0, 1000.0).is_empty());
     }
 
     #[test]
@@ -759,19 +1019,19 @@ mod tests {
         let div = info("div", None, &[]);
         let ul = info("ul", None, &[]);
         // nav a: matches an <a> with <nav> anywhere above
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()], &[], 1000.0).is_empty());
-        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()], &[], 1000.0).is_empty());
-        assert!(ss.matched(&info("a", None, &[]), &[div.clone()], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone()], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("a", None, &[]), &[nav.clone(), div.clone()], &[], 0, 1000.0).is_empty());
+        assert!(ss.matched(&info("a", None, &[]), &[div.clone()], &[], 0, 1000.0).is_empty());
         // ul > li: <li> whose IMMEDIATE parent is <ul>
-        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()], &[], 1000.0).is_empty());
-        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("li", None, &[]), &[ul.clone()], &[], 0, 1000.0).is_empty());
+        assert!(ss.matched(&info("li", None, &[]), &[ul.clone(), div.clone()], &[], 0, 1000.0).is_empty());
     }
 
     #[test]
     fn specificity_ranks_id_over_class_over_type() {
         let ss = parse("p { color: a } p.x { color: b } #p { color: c }");
         let e = info("p", Some("p"), &["x"]);
-        let mut m = ss.matched(&e, &[], &[], 1000.0);
+        let mut m = ss.matched(&e, &[], &[], 0, 1000.0);
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         // ascending: type(p) < class(p.x) < id(#p)
         assert_eq!(m.len(), 3);
@@ -788,10 +1048,10 @@ mod tests {
         // :hover + [attr] selectors dropped (unsupported); the @media block is
         // now DESCENDED (not dropped), but `screen` alone always matches so its
         // `p` rule is fine either way …
-        assert!(ss.matched(&info("a", None, &[]), &[], &[], 1000.0).is_empty());
-        assert!(ss.matched(&info("input", None, &[]), &[], &[], 1000.0).is_empty());
+        assert!(ss.matched(&info("a", None, &[]), &[], &[], 0, 1000.0).is_empty());
+        assert!(ss.matched(&info("input", None, &[]), &[], &[], 0, 1000.0).is_empty());
         // … and the plain "h1, h2" list still parsed.
-        assert!(!ss.matched(&info("h2", None, &[]), &[], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("h2", None, &[]), &[], &[], 0, 1000.0).is_empty());
     }
 
     #[test]
@@ -809,7 +1069,7 @@ mod tests {
         // external (red) parsed first, inline <style> (blue) after → blue wins.
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
         let ss = collect_all(&dom, "p { color: red }");
-        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 1000.0);
+        let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0);
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
         assert!(m[0].1 < m[1].1, "external rule has earlier document order");
@@ -820,8 +1080,8 @@ mod tests {
         let dom = dom::parse("<html><head><style>p{color:red}</style></head>\
             <body><style>.x{color:blue}</style><p>hi</p></body></html>");
         let ss = collect(&dom);
-        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 1000.0).is_empty());
-        assert!(!ss.matched(&info("span", None, &["x"]), &[], &[], 1000.0).is_empty());
+        assert!(!ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0).is_empty());
+        assert!(!ss.matched(&info("span", None, &["x"]), &[], &[], 0, 1000.0).is_empty());
     }
 
     #[test]
@@ -833,11 +1093,11 @@ mod tests {
         );
         let e = info("div", None, &["col"]);
         // Wide (1000 ≥ 768): both rules present.
-        assert_eq!(ss.matched(&e, &[], &[], 1000.0).len(), 2, "media rule applies wide");
+        assert_eq!(ss.matched(&e, &[], &[], 0, 1000.0).len(), 2, "media rule applies wide");
         // Narrow (500 < 768): only the base rule.
-        assert_eq!(ss.matched(&e, &[], &[], 500.0).len(), 1, "media rule dropped narrow");
+        assert_eq!(ss.matched(&e, &[], &[], 0, 500.0).len(), 1, "media rule dropped narrow");
         // An un-evaluable feature never matches (rule dropped both ways).
         let ss2 = parse("@media (prefers-color-scheme: dark) { .col { color: blue } }");
-        assert!(ss2.matched(&e, &[], &[], 1000.0).is_empty(), "unknown feature never applies");
+        assert!(ss2.matched(&e, &[], &[], 0, 1000.0).is_empty(), "unknown feature never applies");
     }
 }

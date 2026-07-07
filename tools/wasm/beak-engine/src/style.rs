@@ -47,6 +47,39 @@ pub enum GridTrack {
 /// Max explicit grid columns we track (content grids rarely exceed this).
 pub const MAX_GRID_COLS: usize = 16;
 
+/// Max named grid areas per container (page shells rarely exceed this).
+pub const GRID_AREAS_MAX: usize = 12;
+
+/// A `grid-template-areas` region: the area name (FNV-1a hash) and its half-open
+/// cell rectangle `[c0,c1) × [r0,r1)` in the template grid.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GridArea {
+    pub name: u32,
+    pub r0: u8,
+    pub r1: u8,
+    pub c0: u8,
+    pub c1: u8,
+}
+
+impl GridArea {
+    pub const EMPTY: GridArea = GridArea { name: 0, r0: 0, r1: 0, c0: 0, c1: 0 };
+}
+
+/// FNV-1a hash of a grid-area name (0 = "none"). Both `grid-template-areas` and
+/// `grid-area` values pass through `apply_one`'s lowercasing, so the hashes match.
+pub fn area_hash(name: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    if h == 0 {
+        1
+    } else {
+        h
+    }
+}
+
 /// `justify-content` — main-axis distribution of leftover space.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Justify {
@@ -201,6 +234,9 @@ pub struct ComputedStyle {
     pub grid_col_gap: f32,
     pub grid_row_gap: f32,
     pub justify_items: CrossAlign,
+    // `grid-template-areas` — named regions (container), 0-count = none.
+    pub grid_areas: [GridArea; GRID_AREAS_MAX],
+    pub grid_area_count: u8,
     // `repeat(auto-fill/auto-fit, …)` in the columns: 0 = none, else the stored
     // one-copy pattern spans `grid_col_fill_start .. +len` and is expanded to fill
     // the container width at layout time.
@@ -212,6 +248,7 @@ pub struct ComputedStyle {
     pub grid_col_start: i16, // 0 = auto placement
     pub grid_row_start: i16, // 0 = auto placement
     pub grid_row_span: u16,
+    pub grid_area: u32, // `grid-area: <name>` (FNV-1a hash, 0 = none)
     pub justify_self: Option<CrossAlign>,
     // — float —
     pub float: FloatKind,
@@ -285,6 +322,8 @@ impl ComputedStyle {
             grid_col_gap: 0.0,
             grid_row_gap: 0.0,
             justify_items: CrossAlign::Stretch,
+            grid_areas: [GridArea::EMPTY; GRID_AREAS_MAX],
+            grid_area_count: 0,
             grid_col_fill: 0,
             grid_col_fill_start: 0,
             grid_col_fill_len: 0,
@@ -292,6 +331,7 @@ impl ComputedStyle {
             grid_col_start: 0,
             grid_row_start: 0,
             grid_row_span: 1,
+            grid_area: 0,
             justify_self: None,
             float: FloatKind::None,
             clear: ClearKind::None,
@@ -312,6 +352,7 @@ pub fn resolve(
     sheet: &Stylesheet,
     ancestors: &[ElemInfo],
     prev_siblings: &[ElemInfo],
+    sib_count: u32,
     viewport_w: f32,
 ) -> ComputedStyle {
     // Start from the inherited slice; reset the non-inherited slice to initial.
@@ -370,6 +411,8 @@ pub fn resolve(
         grid_col_gap: 0.0,
         grid_row_gap: 0.0,
         justify_items: CrossAlign::Stretch,
+        grid_areas: [GridArea::EMPTY; GRID_AREAS_MAX],
+        grid_area_count: 0,
         grid_col_fill: 0,
         grid_col_fill_start: 0,
         grid_col_fill_len: 0,
@@ -377,6 +420,7 @@ pub fn resolve(
         grid_col_start: 0,
         grid_row_start: 0,
         grid_row_span: 1,
+        grid_area: 0,
         justify_self: None,
         float: FloatKind::None,
         clear: ClearKind::None,
@@ -386,7 +430,7 @@ pub fn resolve(
     // Author `<style>` rules, applied low→high specificity (ties: doc order).
     if !sheet.is_empty() {
         let info = ElemInfo::of(el);
-        let mut matched = sheet.matched(&info, ancestors, prev_siblings, viewport_w);
+        let mut matched = sheet.matched(&info, ancestors, prev_siblings, sib_count, viewport_w);
         matched.sort_by_key(|(spec, order, _)| (*spec, *order));
         for (_, _, decls) in matched {
             for (p, v) in decls {
@@ -816,9 +860,14 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.grid_row_tracks = t.tracks;
         }
         "grid-auto-rows" => s.grid_auto_rows = parse_track(v.trim()),
+        "grid-template-areas" => set_grid_areas(s, &v),
         // `grid` / `grid-template` shorthand: `<rows> / <cols>` (areas/flow forms
         // are not supported — they fall through to the row/column split).
         "grid" | "grid-template" => {
+            // The shorthand may carry `grid-template-areas` strings.
+            if v.contains('"') || v.contains('\'') {
+                set_grid_areas(s, &v);
+            }
             if let Some((rows, cols)) = split_slash(&v) {
                 let r = parse_grid_tracks(rows.trim());
                 s.grid_nrows = r.n;
@@ -843,6 +892,18 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         "grid-column-start" => s.grid_col_start = parse_line(v.trim()).unwrap_or(0),
         "grid-row-start" => s.grid_row_start = parse_line(v.trim()).unwrap_or(0),
+        "grid-area" => {
+            // `grid-area: <name>` (custom ident) → named placement. The numeric
+            // `row / col / …` form is left to grid-row/grid-column longhands.
+            let name = v.trim();
+            if !name.is_empty()
+                && !name.contains('/')
+                && name.parse::<i32>().is_err()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                s.grid_area = area_hash(name);
+            }
+        }
         "justify-items" => s.justify_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
         "justify-self" => s.justify_self = parse_cross(&v),
         "place-items" => {
@@ -1109,10 +1170,12 @@ fn parse_track(t: &str) -> GridTrack {
         GridTrack::Pct(p.trim().parse().unwrap_or(0.0))
     } else if t.starts_with("minmax(") {
         if t.contains("fr") { GridTrack::Fr(1.0) } else { GridTrack::Auto }
-    } else if let Some(px) = t.strip_suffix("px") {
-        GridTrack::Fixed(px.trim().parse().unwrap_or(0.0))
     } else {
-        t.parse::<f32>().map(GridTrack::Fixed).unwrap_or(GridTrack::Auto)
+        // A fixed length: px/rem/em/pt/cm/… (rem/em resolve against the root font).
+        match parse_length(t, BASE_FONT_PX) {
+            Some(px) => GridTrack::Fixed(px),
+            None => GridTrack::Auto,
+        }
     }
 }
 
@@ -1147,6 +1210,63 @@ fn split_top_level(v: &str) -> alloc::vec::Vec<alloc::string::String> {
 
 /// Split a value at the top-level `/` (respecting `repeat(…)`/`minmax(…)`
 /// parens), returning `(before, after)`. `None` if there is no top-level slash.
+/// Parse `grid-template-areas` strings into the container's named-area map. Each
+/// quoted string is a row; whitespace-separated tokens are cell names (`.` =
+/// empty). An area's rectangle is the bounding box of its cells.
+fn set_grid_areas(s: &mut ComputedStyle, v: &str) {
+    let bytes = v.as_bytes();
+    let mut names: alloc::vec::Vec<(u32, u8, u8, u8, u8)> = alloc::vec::Vec::new();
+    let (mut i, mut r) = (0usize, 0u8);
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\'' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let q = bytes[i];
+        i += 1;
+        let s0 = i;
+        while i < bytes.len() && bytes[i] != q {
+            i += 1;
+        }
+        let row = &v[s0..i.min(v.len())];
+        i += 1;
+        for (c, tok) in row.split_whitespace().enumerate() {
+            if tok == "." {
+                continue;
+            }
+            let (h, c) = (area_hash(tok), c as u8);
+            if let Some(a) = names.iter_mut().find(|a| a.0 == h) {
+                a.1 = a.1.min(r);
+                a.2 = a.2.max(r + 1);
+                a.3 = a.3.min(c);
+                a.4 = a.4.max(c + 1);
+            } else if names.len() < GRID_AREAS_MAX {
+                names.push((h, r, r + 1, c, c + 1));
+            }
+        }
+        r += 1;
+    }
+    if names.is_empty() {
+        return;
+    }
+    for (k, &(h, r0, r1, c0, c1)) in names.iter().enumerate() {
+        s.grid_areas[k] = GridArea { name: h, r0, r1, c0, c1 };
+    }
+    s.grid_area_count = names.len() as u8;
+    s.grid_nrows = s.grid_nrows.max(r);
+    // With no explicit `grid-template-columns`, the template width defines the
+    // (auto-sized) column tracks.
+    if s.grid_ncols == 0 {
+        let ncols = names.iter().map(|a| a.4).max().unwrap_or(0).min(MAX_GRID_COLS as u8);
+        for k in 0..ncols as usize {
+            s.grid_tracks[k] = GridTrack::Auto;
+        }
+        s.grid_ncols = ncols;
+    }
+}
+
 fn split_slash(v: &str) -> Option<(&str, &str)> {
     let mut depth = 0i32;
     for (i, ch) in v.char_indices() {
@@ -1356,7 +1476,7 @@ mod tests {
     fn ua_sheet_gives_headings_size_weight_and_colour() {
         let dom = dom::parse("<body><h1>x</h1></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 1000.0);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
         assert_eq!(st.display, Display::Block);
         assert!(st.bold);
         assert!(st.font_px > BASE_FONT_PX * 1.5);
@@ -1367,7 +1487,7 @@ mod tests {
     fn inline_style_attribute_is_parsed() {
         let dom = dom::parse("<body><p style=\"color:#ff0000; font-weight:bold; font-size:20px\">x</p></body>");
         let theme = Theme::DARK;
-        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 1000.0);
+        let st = resolve(first_el(&dom), &ComputedStyle::root(&theme), &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
         assert_eq!(st.color, Rgb(255, 0, 0));
         assert!(st.bold);
         assert_eq!(st.font_px, 20.0);
@@ -1382,7 +1502,7 @@ mod tests {
         let sheet = css::parse(".lead { color: #ff0000; font-weight: bold }");
         let root = ComputedStyle::root(&theme);
         // 1st <p>: author sets red+bold, inline overrides colour to green.
-        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[], &[], 1000.0);
+        let a = resolve(first_el(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0);
         assert_eq!(a.color, Rgb(0, 255, 0));
         assert!(a.bold);
         // 2nd <p>: author red+bold, no inline.
@@ -1390,7 +1510,7 @@ mod tests {
             dom::Node::Element(e) => e,
             _ => panic!(),
         };
-        let b = resolve(p2, &root, &theme, &sheet, &[], &[], 1000.0);
+        let b = resolve(p2, &root, &theme, &sheet, &[], &[], 0, 1000.0);
         assert_eq!(b.color, Rgb(255, 0, 0));
         assert!(b.bold);
     }
@@ -1403,7 +1523,7 @@ mod tests {
             let html = alloc::format!("<{tag}>x</{tag}>");
             let dom = dom::parse(&html);
             if let dom::Node::Element(e) = &dom.root.children[0] {
-                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], &[], 1000.0);
+                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
                 assert_eq!(st.display, Display::None, "{tag}");
             }
         }
