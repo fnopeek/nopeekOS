@@ -47,6 +47,73 @@ fn establishes_bfc(st: &ComputedStyle) -> bool {
     matches!(st.display, Display::Flex | Display::Grid | Display::Table)
 }
 
+/// A set of adjoining vertical margins (CSS2.1 §8.3.1). Collapsing margins do
+/// not simply take the maximum: the used value is the largest positive margin
+/// plus the most negative one (negatives are deducted from the positive max, or
+/// from zero when every adjoining margin is negative).
+#[derive(Clone, Copy, Default)]
+struct Collapse {
+    pos: f32,
+    neg: f32,
+}
+
+impl Collapse {
+    fn one(m: f32) -> Self {
+        let mut c = Self::default();
+        c.add(m);
+        c
+    }
+    /// Fold one more adjoining margin into the set.
+    fn add(&mut self, m: f32) {
+        if m >= 0.0 {
+            if m > self.pos {
+                self.pos = m;
+            }
+        } else if m < self.neg {
+            self.neg = m;
+        }
+    }
+    /// Fold another whole set of adjoining margins in.
+    fn merge(&mut self, o: Collapse) {
+        if o.pos > self.pos {
+            self.pos = o.pos;
+        }
+        if o.neg < self.neg {
+            self.neg = o.neg;
+        }
+    }
+    /// The single used margin the collapsed set resolves to.
+    fn value(self) -> f32 {
+        self.pos + self.neg
+    }
+}
+
+/// Result of flowing a run of block/inline children with margin collapsing.
+struct Flow {
+    /// Y of the bottom edge of the last committed (non-collapsing) content.
+    bottom: i32,
+    /// Trailing adjoining margin left open at the bottom (not yet committed).
+    open: Collapse,
+    /// Border-box top of the first committed content (valid iff `committed`).
+    first_top: i32,
+    /// Whether any content was committed (vs. everything collapsing through).
+    committed: bool,
+}
+
+/// Result of laying one block-level box in normal flow.
+struct BoxOut {
+    /// Border-box bottom (== `top_y` when the box collapses through).
+    bottom: i32,
+    /// Border-box top actually used.
+    top_y: i32,
+    /// Adjoining margin the box exposes to the next sibling / its parent: its
+    /// bottom margin, or — when it collapses through — its whole collapsed set.
+    open: Collapse,
+    /// The box has no content, border, padding or height: its top and bottom
+    /// margins are adjoining and it occupies no vertical space.
+    through: bool,
+}
+
 /// The role a child element plays inside a table box.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TableRole {
@@ -482,14 +549,34 @@ impl Ctx<'_> {
         });
     }
 
-    /// Block formatting context: lay `nodes` as a vertical stack, grouping
-    /// consecutive inline-level content into line boxes. Returns the y below
-    /// the last child.
+    /// Lay `nodes` as an independent block formatting context (a table cell,
+    /// grid item, the page root, …). Returns the y below the last child, with
+    /// the last in-flow block's bottom margin committed — margins do not
+    /// collapse out of an established BFC.
     fn layout_children(&mut self, nodes: &[Node], parent: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        let mut y = y0;
+        let flow = self.flow_children(nodes, parent, x, w, y0, Collapse::default());
+        flow.bottom + flow.open.value() as i32
+    }
+
+    /// Block formatting: lay `nodes` as a vertical stack, grouping consecutive
+    /// inline-level content into line boxes and collapsing adjoining vertical
+    /// margins (CSS2.1 §8.3.1). `anchor_y` is the collapse edge at entry (the
+    /// bottom of the previous content); `incoming` is any margin already open
+    /// there (e.g. a parent's top margin collapsing into its first child).
+    fn flow_children(
+        &mut self,
+        nodes: &[Node],
+        parent: &ComputedStyle,
+        x: i32,
+        w: i32,
+        anchor_y: i32,
+        incoming: Collapse,
+    ) -> Flow {
+        let mut anchor = anchor_y; // bottom of last committed content
+        let mut open = incoming; // adjoining margin not yet committed
+        let mut committed = false;
+        let mut first_top = anchor_y;
         let mut inline = Inline::new();
-        let mut carry = 0.0f32; // previous block's (collapsible) bottom margin
-        let mut had_block = false;
         // Preceding element siblings (document order) for `+`/`~` combinators,
         // and the total element-sibling count for `:nth-child`/`:last-child`.
         let mut siblings: Vec<ElemInfo> = Vec::new();
@@ -521,56 +608,67 @@ impl Ctx<'_> {
                 continue;
             }
             // `position:absolute`/`fixed` are out of flow → laid at a
-            // containing-block-relative position, not advancing `y`.
+            // containing-block-relative position, not advancing the flow.
             if matches!(st.position, Position::Absolute | Position::Fixed) {
                 self.path.push(ElemInfo::of(el));
                 self.layout_abs(el, &st);
                 self.path.pop();
                 continue;
             }
-            // `float:left|right` — out of normal flow, placed at the BFC edge;
-            // following inline + blocks flow around it. Does not advance `y`.
+            // `float:left|right` — out of normal flow, placed at the current
+            // flow edge; following inline + blocks flow around it.
             if st.float != FloatKind::None {
-                self.place_float(el, &st, x, w, y);
+                self.place_float(el, &st, x, w, anchor);
                 continue;
             }
             if st.display == Display::Inline {
                 self.path.push(ElemInfo::of(el));
-                self.collect_inline(el, &st, None, &mut inline, x, w, y);
+                self.collect_inline(el, &st, None, &mut inline, x, w, anchor);
                 self.path.pop();
                 continue;
             }
-            // Block-level, in normal flow.
+            // Block-level, in normal flow. Flush pending inline content first —
+            // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
-                y = inline.flow(self.font, self.theme, x, w, y, &self.floats, &mut self.ops, &mut self.links);
+                let ly = anchor + open.value() as i32;
+                let nb = inline.flow(self.font, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
+                if !committed {
+                    first_top = ly;
+                    committed = true;
+                }
+                anchor = nb;
+                open = Collapse::default();
                 inline = Inline::new();
-                carry = 0.0;
             }
-            // `clear` drops the block below the relevant floats.
+            // `clear` introduces clearance, dropping the block below the floats
+            // and separating margins: commit the open margin, then clear.
             if st.clear != ClearKind::None {
-                let cleared = self.clear_below(st.clear, y);
-                if cleared > y {
-                    y = cleared;
-                    carry = 0.0;
+                let base = anchor + open.value() as i32;
+                let cleared = self.clear_below(st.clear, base);
+                if cleared > base {
+                    anchor = cleared;
+                    open = Collapse::default();
                 }
             }
-            let top = if had_block { carry.max(st.margin_top) } else { st.margin_top };
-            y += top as i32;
             self.path.push(ElemInfo::of(el));
             let op0 = self.ops.len();
             let link0 = self.links.len();
-            // A block that establishes a new BFC (flex/grid/table) has its border
-            // box kept clear of active floats (CSS2.1 §9.5): shift it beside them
-            // (or drop it below), and isolate its own content from the outer
-            // floats. A normal block instead overlaps them (its text wraps).
-            if establishes_bfc(&st) {
-                let (bx, bw, by) = self.avoid_floats_bfc(&st, x, w, y);
+            // A block that establishes a new BFC (flex/grid/table) keeps its
+            // border box clear of active floats (CSS2.1 §9.5) and does not
+            // collapse its margins with its children; its top margin still
+            // collapses with the preceding flow, its bottom margin stays open.
+            let out = if establishes_bfc(&st) {
+                let mut t = open;
+                t.add(st.margin_top);
+                let by = anchor + t.value() as i32;
+                let (bx, bw, byy) = self.avoid_floats_bfc(&st, x, w, by);
                 let saved = core::mem::take(&mut self.floats);
-                y = self.layout_box(el, &st, bx, bw, by);
+                let bottom = self.layout_box(el, &st, bx, bw, byy);
                 self.floats = saved;
+                BoxOut { bottom, top_y: byy, open: Collapse::one(st.margin_bottom), through: false }
             } else {
-                y = self.layout_box(el, &st, x, w, y);
-            }
+                self.flow_block_impl(el, &st, x, w, anchor, open, false)
+            };
             // `position:relative` stays in flow but its paint shifts by top/left.
             if st.position == Position::Relative {
                 let (dx, dy) = rel_offset(&st, w as f32);
@@ -579,15 +677,29 @@ impl Ctx<'_> {
                 }
             }
             self.path.pop();
-            carry = st.margin_bottom;
-            had_block = true;
+            if out.through {
+                // Nothing committed: the box's margins stay adjoining.
+                open = out.open;
+            } else {
+                if !committed {
+                    first_top = out.top_y;
+                    committed = true;
+                }
+                anchor = out.bottom;
+                open = out.open;
+            }
         }
         if !inline.is_empty() {
-            y = inline.flow(self.font, self.theme, x, w, y, &self.floats, &mut self.ops, &mut self.links);
-        } else if had_block {
-            y += carry as i32;
+            let ly = anchor + open.value() as i32;
+            let nb = inline.flow(self.font, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
+            if !committed {
+                first_top = ly;
+                committed = true;
+            }
+            anchor = nb;
+            open = Collapse::default();
         }
-        y
+        Flow { bottom: anchor, open, first_top, committed }
     }
 
     /// Lay one block-level box with the CSS block box model: resolve the
@@ -596,65 +708,162 @@ impl Ctx<'_> {
     /// padding, then lay the content. This is what makes `max-width` + `margin:
     /// 0 auto` **centered containers** work.
     fn layout_block(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        // `isolated`: `y0` is the border-box top (the caller — a float, cell,
+        // flex item, abs box — already positioned it and owns its margins), so
+        // no parent/sibling margin collapsing applies to this box's own edges.
+        self.flow_block_impl(el, st, x, w, y0, Collapse::default(), true).bottom
+    }
+
+    /// Lay one block-level box with the CSS block box model and margin
+    /// collapsing. In flow (`isolated == false`), `base_y` is the collapse edge
+    /// and `incoming` the open adjoining margin: the box's top margin collapses
+    /// with them (and, if it has no top border/padding, with its first child);
+    /// its bottom margin collapses with its last child (auto height) and is
+    /// left open for the next sibling. When `isolated`, `base_y` is the
+    /// border-box top and margins are committed, not propagated.
+    fn flow_block_impl(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
         let (cw, off_left) = resolve_block_h(st, w as f32);
         let content_x = x + off_left as i32;
         let content_w = cw.max(1.0) as i32;
 
-        // Border-box geometry (the caller already advanced past margin-top → y0
-        // is the border-box top). Background is inserted at `bg_idx` so it lands
-        // behind the box's content; the border is drawn on top of the edges.
         let box_left = content_x - st.pad_left as i32 - st.border_left.width as i32;
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
 
-        let mut y = y0 + st.border_top.width as i32 + st.pad_top as i32;
+        let bt = st.border_top.width as i32;
+        let bb = st.border_bottom.width as i32;
+        let pt = st.pad_top as i32;
+        let pb = st.pad_bottom as i32;
+
+        // Top margin. In flow it collapses with the incoming margin; a box with
+        // no top border/padding also collapses it with its first child.
+        let mut top = incoming;
+        if !isolated {
+            top.add(st.margin_top);
+        }
+        let collapse_top = !isolated && bt == 0 && pt == 0;
+        // Provisional border-box top (exact unless the first child grows `top`).
+        let prov_top_y = if isolated { base_y } else { base_y + top.value() as i32 };
+
+        // Where children start, and what open margin flows into them.
+        let (child_anchor, child_incoming) = if collapse_top {
+            (base_y, top)
+        } else {
+            (prov_top_y + bt + pt, Collapse::default())
+        };
+
+        // `<hr>` renders a rule at the content top.
         if st.is_rule {
+            let y = prov_top_y + bt + pt;
             self.ops.push(DrawOp::Rect { x: content_x, y: y + 1, w: content_w.max(1), h: 1, color: self.theme.rule });
-            return y + 3 + st.pad_bottom as i32;
+            return BoxOut { bottom: y + 3 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false };
         }
         if st.display == Display::ListItem {
             let s = 4;
-            let by = y + (st.font_px * 0.55) as i32;
+            let by = prov_top_y + bt + pt + (st.font_px * 0.55) as i32;
             self.ops.push(DrawOp::Rect { x: content_x - 12, y: by, w: s, h: s, color: self.theme.muted });
         }
 
-        // A positioned block (`position != static`) becomes the containing
-        // block for its `absolute` descendants.
+        // A positioned block becomes the containing block for `absolute`
+        // descendants (border-box top ≈ `prov_top_y`).
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = (content_x, y0, content_w);
+            self.cb = (content_x, prov_top_y, content_w);
         }
-        y = if st.pre {
-            layout_pre(self.font, el, st, content_x, content_w, y, &mut self.ops)
+        let flow = if st.pre {
+            let ly = child_anchor + child_incoming.value() as i32;
+            let nb = layout_pre(self.font, el, st, content_x, content_w, ly, &mut self.ops);
+            Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true }
         } else {
-            self.layout_children(&el.children, st, content_x, content_w, y)
+            self.flow_children(&el.children, st, content_x, content_w, child_anchor, child_incoming)
         };
-        // Explicit `height` sets the content-box height (border-box subtracts
-        // padding); `min/max-height` clamp it. `%` needs a definite containing-
-        // block height (usually auto → ignored), so only definite lengths apply.
-        let content_top = y0 + st.border_top.width as i32 + st.pad_top as i32;
-        let pad_v = (st.pad_top + st.pad_bottom) as i32 + st.border_y() as i32;
-        let px_h = |len: Len| match len {
-            Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
-            Len::Px(h) => Some(h as i32),
-            _ => None,
-        };
-        let mut content_h = (y - content_top).max(0);
-        if let Some(h) = px_h(st.height) {
-            content_h = h;
-        }
-        if let Some(mn) = px_h(st.min_height) {
-            content_h = content_h.max(mn);
-        }
-        if let Some(mx) = px_h(st.max_height) {
-            content_h = content_h.min(mx);
-        }
-        y = content_top + content_h;
         self.cb = prev_cb;
-        y += st.pad_bottom as i32 + st.border_bottom.width as i32;
 
-        self.paint_box_decoration(st, box_left, y0, box_w, y - y0, bg_idx);
-        y
+        // Resolve the border-box top: when the top margin collapsed through, the
+        // box's border box sits at the first committed child's border-box top.
+        let border_top_y = if collapse_top && flow.committed { flow.first_top } else { prov_top_y };
+        let content_top = border_top_y + bt + pt;
+
+        // Explicit `height`/`min`/`max-height` (definite lengths only; `%` needs
+        // a definite CB height we don't track). Border-box subtracts pad+border.
+        let pad_v = pt + pb + bt + bb;
+        let px_h = |len: Len| -> Option<i32> {
+            match len {
+                Len::Px(h) if st.box_border => Some((h as i32 - pad_v).max(0)),
+                Len::Px(h) => Some(h as i32),
+                _ => None,
+            }
+        };
+        let out_bottom_margin = Collapse::one(if isolated { 0.0 } else { st.margin_bottom });
+
+        if !flow.committed {
+            // No in-flow content. Its explicit box height, if any.
+            let mut ch = 0;
+            if let Some(h) = px_h(st.height) {
+                ch = h;
+            }
+            if let Some(mn) = px_h(st.min_height) {
+                ch = ch.max(mn);
+            }
+            if let Some(mx) = px_h(st.max_height) {
+                ch = ch.min(mx);
+            }
+            // A box with no content, border, padding or height collapses through:
+            // its top and bottom margins are adjoining.
+            if collapse_top && bb == 0 && pb == 0 && ch == 0 {
+                let mut open = top;
+                open.merge(flow.open);
+                open.add(st.margin_bottom);
+                return BoxOut { bottom: base_y, top_y: base_y, open, through: true };
+            }
+            let box_bottom = border_top_y + bt + pt + ch + pb + bb;
+            self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
+            return BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_bottom_margin, through: false };
+        }
+
+        // Box with committed content. The last child's trailing margin
+        // (`flow.open`) collapses with this box's bottom margin only when the
+        // box has auto height and no bottom border/padding separating them.
+        let auto_height = !matches!(st.height, Len::Px(_));
+        let collapse_bottom = !isolated && bb == 0 && pb == 0 && auto_height;
+        let mut ch = (flow.bottom - content_top).max(0);
+        let out_open;
+        if collapse_bottom {
+            // `min-height` taller than the content introduces space below it,
+            // trapping the trailing margin inside the box.
+            let mn = px_h(st.min_height).unwrap_or(0);
+            if mn > ch {
+                ch = (flow.bottom + flow.open.value() as i32 - content_top).max(0).max(mn);
+                if let Some(mx) = px_h(st.max_height) {
+                    ch = ch.min(mx);
+                }
+                out_open = out_bottom_margin;
+            } else {
+                if let Some(mx) = px_h(st.max_height) {
+                    ch = ch.min(mx);
+                }
+                let mut o = flow.open;
+                o.add(st.margin_bottom);
+                out_open = o;
+            }
+        } else {
+            // Bottom border/padding or a definite height: commit the trailing
+            // child margin into the content box.
+            ch = (flow.bottom + flow.open.value() as i32 - content_top).max(0);
+            if let Some(h) = px_h(st.height) {
+                ch = h;
+            }
+            if let Some(mn) = px_h(st.min_height) {
+                ch = ch.max(mn);
+            }
+            if let Some(mx) = px_h(st.max_height) {
+                ch = ch.min(mx);
+            }
+            out_open = out_bottom_margin;
+        }
+        let box_bottom = content_top + ch + pb + bb;
+        self.paint_box_decoration(st, box_left, border_top_y, box_w, box_bottom - border_top_y, bg_idx);
+        BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_open, through: false }
     }
 
     /// The decoded image (if any) + natural box size for an `<img>`: from the
