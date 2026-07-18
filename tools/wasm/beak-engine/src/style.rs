@@ -232,6 +232,8 @@ pub struct ComputedStyle {
     pub pad_bottom: f32,
     pub pad_left: f32,
     pub box_border: bool, // box-sizing: border-box
+    pub contain_size: bool, // `contain: size`/`strict` — content contributes no size
+    pub contain_intrinsic: Option<(f32, f32)>, // `contain-intrinsic-size` (w, h) px
     pub bg: Option<Rgb>, // background-color (None = transparent)
     pub border_top: BorderSide,
     pub border_right: BorderSide,
@@ -328,6 +330,8 @@ impl ComputedStyle {
             pad_bottom: 0.0,
             pad_left: 0.0,
             box_border: false,
+            contain_size: false,
+            contain_intrinsic: None,
             bg: None,
             border_top: BorderSide::default(),
             border_right: BorderSide::default(),
@@ -419,6 +423,8 @@ pub fn resolve(
         pad_bottom: 0.0,
         pad_left: 0.0,
         box_border: false,
+        contain_size: false,
+        contain_intrinsic: None,
         bg: None,
         border_top: BorderSide::default(),
         border_right: BorderSide::default(),
@@ -683,6 +689,14 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "min-height" => set_size(&mut s.min_height, &v, s.font_px),
         "max-height" => set_max(&mut s.max_height, &v, s.font_px),
         "box-sizing" => s.box_border = v == "border-box",
+        "contain" => s.contain_size = v.split_whitespace().any(|k| k == "size" || k == "strict"),
+        "contain-intrinsic-size" => {
+            // definite length(s): one → both axes, two → (width, height).
+            let mut it = v.split_whitespace().filter_map(|t| parse_length(t, s.font_px));
+            if let Some(a) = it.next() {
+                s.contain_intrinsic = Some((a, it.next().unwrap_or(a)));
+            }
+        }
         "margin" => {
             let em = s.font_px;
             let (t, r, b, l) = four_values(&v);
