@@ -35,11 +35,25 @@ pub enum Display {
     Grid,
     /// `display: table-row` — a row inside a (CSS) table. Laid by `layout_table`.
     TableRow,
-    /// `display: table-row-group`/`-header-group`/`-footer-group`.
+    /// `display: table-row-group` — a plain row group (`<tbody>`).
     TableRowGroup,
+    /// `display: table-header-group` (`<thead>`) — its rows sort before every
+    /// other row group regardless of source order (CSS2.1 §17.2.1 / HTML §15).
+    TableHeaderGroup,
+    /// `display: table-footer-group` (`<tfoot>`) — its rows sort after every
+    /// other row group regardless of source order.
+    TableFooterGroup,
     /// `display: table-cell` — a cell inside a (CSS) table. Outside a table
     /// context it degrades to a block box.
     TableCell,
+    /// `display: table-column`/`table-column-group` (CSS2.1 §17.2.1): these
+    /// generate no box of their own (they only carry column properties, which
+    /// this engine's simplified table layout doesn't apply per-column). Kept
+    /// distinct from `Other`-ish content so `layout.rs` can tell a real column
+    /// marker (never rendered, regardless of what tag carries the value) apart
+    /// from arbitrary stray content (which anonymous-box-wraps instead).
+    TableColumn,
+    TableColumnGroup,
 }
 
 /// CSS `table-layout` — how a table computes its column widths.
@@ -480,6 +494,18 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
     }
 }
 
+/// The style for an anonymous box (CSS2.1 §17.2.1): inherited properties
+/// (color/font/…) come from `parent` exactly as for a real child, every
+/// non-inherited property is the CSS initial value (`inherit_reset`), and
+/// `display` is set to whatever box the layout algorithm needs to generate
+/// (`Table`/`TableRow`/`TableCell`/…) — an anonymous box has no source
+/// element, so nothing else can set it.
+pub fn anon_inherit(parent: &ComputedStyle, display: Display) -> ComputedStyle {
+    let mut s = inherit_reset(parent);
+    s.display = display;
+    s
+}
+
 /// Resolve an element's computed style by the cascade: inherit from `parent`,
 /// apply the UA rule for its tag, then matching author `<style>` rules (by
 /// specificity + order), then any inline `style="…"` (highest). `ancestors` is
@@ -817,8 +843,12 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "inline" | "inline-block" => Display::Inline,
                 "table" | "inline-table" => Display::Table,
                 "table-row" => Display::TableRow,
-                "table-row-group" | "table-header-group" | "table-footer-group" => Display::TableRowGroup,
+                "table-row-group" => Display::TableRowGroup,
+                "table-header-group" => Display::TableHeaderGroup,
+                "table-footer-group" => Display::TableFooterGroup,
                 "table-cell" => Display::TableCell,
+                "table-column" => Display::TableColumn,
+                "table-column-group" => Display::TableColumnGroup,
                 "flex" | "inline-flex" => Display::Flex,
                 "grid" | "inline-grid" | "grid-lanes" | "inline-grid-lanes" => Display::Grid,
                 _ => Display::Block,
