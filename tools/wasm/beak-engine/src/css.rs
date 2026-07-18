@@ -53,6 +53,18 @@ enum Comb {
     General,
 }
 
+/// Which generated-content pseudo-element (if any) a selector targets. Only
+/// `::before`/`::after` (single- or double-colon) are recognised; every other
+/// pseudo-element (`::first-line`, `::placeholder`, …) is unsupported and
+/// drops the whole selector at parse time, same as an unknown pseudo-class.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PseudoElem {
+    #[default]
+    None,
+    Before,
+    After,
+}
+
 /// An `[attr]` attribute selector with its match operator.
 #[derive(Clone, Copy)]
 enum AttrOp {
@@ -133,6 +145,9 @@ struct Compound {
     attrs: Vec<AttrSel>,
     not: Vec<Compound>,
     structural: Vec<Structural>,
+    /// `::before`/`::after` on this compound (only valid on the LAST compound
+    /// of a selector — checked in `parse_selector`).
+    pseudo: PseudoElem,
 }
 
 impl Compound {
@@ -170,6 +185,9 @@ pub struct Selector {
     compounds: Vec<Compound>,
     combs: Vec<Comb>,
     spec: u32,
+    /// `::before`/`::after` this selector targets (`None` = a normal
+    /// selector, matching the real element).
+    pseudo: PseudoElem,
 }
 
 impl Selector {
@@ -294,9 +312,11 @@ impl Stylesheet {
         self.rules.is_empty()
     }
 
-    /// All declaration blocks that match `subject` (given its `ancestors`),
-    /// each tagged with the winning selector's specificity + document order.
-    /// Caller sorts ascending and applies in order (later overrides earlier).
+    /// All declaration blocks that match `subject` itself (given its
+    /// `ancestors`) — i.e. selectors with no trailing `::before`/`::after`.
+    /// Each is tagged with the winning selector's specificity + document
+    /// order; caller sorts ascending and applies in order (later overrides
+    /// earlier).
     pub fn matched<'a>(
         &'a self,
         subject: &ElemInfo,
@@ -304,6 +324,32 @@ impl Stylesheet {
         prev_siblings: &[ElemInfo],
         sib_count: u32,
         viewport_w: f32,
+    ) -> Vec<(u32, u32, &'a [(String, String)])> {
+        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, viewport_w, PseudoElem::None)
+    }
+
+    /// Same as `matched`, but for `subject`'s `::before`/`::after` generated
+    /// box — only selectors ending in that pseudo-element are considered.
+    pub fn matched_pseudo<'a>(
+        &'a self,
+        subject: &ElemInfo,
+        ancestors: &[ElemInfo],
+        prev_siblings: &[ElemInfo],
+        sib_count: u32,
+        viewport_w: f32,
+        pseudo: PseudoElem,
+    ) -> Vec<(u32, u32, &'a [(String, String)])> {
+        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, viewport_w, pseudo)
+    }
+
+    fn matched_filtered<'a>(
+        &'a self,
+        subject: &ElemInfo,
+        ancestors: &[ElemInfo],
+        prev_siblings: &[ElemInfo],
+        sib_count: u32,
+        viewport_w: f32,
+        want: PseudoElem,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
         let mut out = Vec::new();
         for rule in &self.rules {
@@ -316,7 +362,7 @@ impl Stylesheet {
             }
             let mut best: Option<u32> = None;
             for sel in &rule.selectors {
-                if sel.matches(subject, ancestors, prev_siblings, sib_count) {
+                if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count) {
                     best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
                 }
             }
@@ -765,8 +811,16 @@ fn parse_selector(text: &str) -> Option<Selector> {
     if compounds.is_empty() {
         return None;
     }
+    // `::before`/`::after` may only sit on the LAST compound (the subject) —
+    // `a:before b` has no meaning, so treat it as an unsupported selector
+    // rather than mis-applying it to `b`.
+    let last = compounds.len() - 1;
+    if compounds.iter().enumerate().any(|(i, c)| i != last && c.pseudo != PseudoElem::None) {
+        return None;
+    }
+    let pseudo = compounds[last].pseudo;
     let spec = specificity(&compounds);
-    Some(Selector { compounds, combs, spec })
+    Some(Selector { compounds, combs, spec, pseudo })
 }
 
 /// Split into compound tokens + `>` tokens on whitespace / `>` boundaries.
@@ -817,6 +871,7 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         attrs: Vec::new(),
         not: Vec::new(),
         structural: Vec::new(),
+        pseudo: PseudoElem::None,
     };
     let mut i = 0;
     // Leading type selector or universal `*`.
@@ -868,10 +923,24 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                 } else {
                     None
                 };
-                if dbl {
-                    return None; // ::before/::after — generated content, not rendered → drop
-                }
                 match (name.as_str(), arg) {
+                    // `:before`/`::before` (legacy single-colon CSS2 syntax is
+                    // still valid per css-pseudo-4 §2.1) — generated content.
+                    ("before", None) => {
+                        if c.pseudo != PseudoElem::None {
+                            return None;
+                        }
+                        c.pseudo = PseudoElem::Before;
+                    }
+                    ("after", None) => {
+                        if c.pseudo != PseudoElem::None {
+                            return None;
+                        }
+                        c.pseudo = PseudoElem::After;
+                    }
+                    // Any other `::pseudo-element` (first-line, placeholder,
+                    // selection, …) is unsupported → drop rather than mis-apply.
+                    _ if dbl => return None,
                     ("not", Some(a)) => c.not.push(parse_compound(a.trim())?),
                     ("first-child", None) => c.structural.push(Structural::FirstChild),
                     ("last-child", None) => c.structural.push(Structural::LastChild),
@@ -961,6 +1030,10 @@ fn specificity(compounds: &[Compound]) -> u32 {
         // classes, `[attr]` and pseudo-classes all count at the class level.
         b += (comp.classes.len() + comp.attrs.len() + comp.structural.len()) as u32;
         if comp.tag.is_some() {
+            c += 1;
+        }
+        // A pseudo-element contributes like a type selector (css-cascade §5.8.3).
+        if comp.pseudo != PseudoElem::None {
             c += 1;
         }
     };
