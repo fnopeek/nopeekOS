@@ -801,6 +801,12 @@ impl Ctx<'_> {
             let mut ch = 0;
             if let Some(h) = px_h(st.height) {
                 ch = h;
+            } else if st.contain_size {
+                // Size containment: content contributes no size, so an auto
+                // height falls back to `contain-intrinsic-size`'s height.
+                if let Some((_, ih)) = st.contain_intrinsic {
+                    ch = ih as i32;
+                }
             }
             if let Some(mn) = px_h(st.min_height) {
                 ch = ch.max(mn);
