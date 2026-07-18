@@ -25,7 +25,7 @@ use crate::dom::{Dom, Element, Node};
 use crate::image::{Image, ImageMap};
 use crate::style::{
     self, BorderSide, ClearKind, Clip, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
-    GridTrack, Justify, Len, Position, TableLayout, BASE_FONT_PX,
+    GridTrack, Justify, Len, Position, TableLayout, ZIndex, BASE_FONT_PX,
 };
 
 /// An active float's exclusion rectangle (document space) within a block
@@ -368,6 +368,73 @@ struct Ctx<'a> {
     /// Active floats in the current block formatting context — line boxes and
     /// later blocks flow around them. Saved/restored when entering a new BFC.
     floats: Vec<FloatRect>,
+    /// Recorded `(z_index, op_start, op_end)` / `(z_index, link_start,
+    /// link_end)` ranges for the **outermost** positioned boxes with an
+    /// explicit (non-`auto`) `z-index` — one contiguous slice of `ops`/`links`
+    /// per box (CSS2.1 §9.9). `layout()` stable-sorts by `z_index` at the end
+    /// so negative levels paint behind, positive ones in front, and everything
+    /// else (`auto`/untracked) keeps its in-order position.
+    stack_ops: Vec<(i32, usize, usize)>,
+    stack_links: Vec<(i32, usize, usize)>,
+    /// Depth of currently-open *tracked* (recorded) stacking ranges. Only a
+    /// box at depth 0 gets recorded — a z-indexed box nested inside another
+    /// already-tracked one paints as part of its ancestor's range instead
+    /// (full nested stacking contexts, e.g. an explicit `z-index` inside
+    /// another explicit `z-index`, are out of scope — sibling ordering is
+    /// the common case these reftests need).
+    stack_depth: u32,
+}
+
+impl Ctx<'_> {
+    /// Whether `st` should open a new tracked stacking range right now: it is
+    /// positioned, has an explicit `z-index`, and isn't already nested inside
+    /// another tracked range.
+    fn should_track_stack(&self, st: &ComputedStyle) -> bool {
+        st.position != Position::Static && matches!(st.z_index, ZIndex::Value(_)) && self.stack_depth == 0
+    }
+
+    /// Record one box's emitted `ops[op_start..op_end]` / `links[link_start..
+    /// link_end]` as its own stacking-order unit. Empty ranges are skipped.
+    fn record_stack_entry(&mut self, z: i32, op_start: usize, op_end: usize, link_start: usize, link_end: usize) {
+        if op_end > op_start {
+            self.stack_ops.push((z, op_start, op_end));
+        }
+        if link_end > link_start {
+            self.stack_links.push((z, link_start, link_end));
+        }
+    }
+}
+
+/// Stable-reorder `items` so the tracked `(z_index, start, end)` ranges sort
+/// by `z_index` (negative before, positive after), while every byte NOT
+/// covered by a range — and any range at `z_index == 0` — keeps its original
+/// relative position (a plain stable sort with untracked spans implicitly
+/// keyed `0`). Ranges must be non-overlapping (guaranteed by `stack_depth`
+/// gating at collection time).
+fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, usize, usize)]) -> Vec<T> {
+    if ranges.is_empty() {
+        return items;
+    }
+    let mut sorted_ranges = ranges.to_vec();
+    sorted_ranges.sort_by_key(|r| r.1); // by start — already ascending, but be safe
+    let mut it = items.into_iter();
+    let mut cursor = 0usize;
+    let mut blocks: Vec<(i32, Vec<T>)> = Vec::new();
+    for (z, start, end) in sorted_ranges {
+        if start > cursor {
+            blocks.push((0, (&mut it).take(start - cursor).collect()));
+        }
+        blocks.push((z, (&mut it).take(end - start).collect()));
+        cursor = end;
+    }
+    let rest: Vec<T> = it.collect();
+    if !rest.is_empty() {
+        blocks.push((0, rest));
+    }
+    // Stable: equal-`z` blocks (all the untracked spans + any explicit
+    // `z-index: 0`) keep the relative order they were built in above.
+    blocks.sort_by_key(|(z, _)| *z);
+    blocks.into_iter().flat_map(|(_, v)| v).collect()
 }
 
 /// Lay a document out into a scroll-independent display list.
@@ -393,6 +460,9 @@ pub fn layout(
         cb: (cx, PAD, cw), // initial containing block = the page content area
         viewport_w: width as f32,
         floats: Vec::new(),
+        stack_ops: Vec::new(),
+        stack_links: Vec::new(),
+        stack_depth: 0,
     };
 
     let mut y = PAD;
@@ -411,7 +481,12 @@ pub fn layout(
     // The body's background propagates to the whole canvas (a bare `<body
     // background>` fills the viewport, not just the body box).
     let canvas_bg = body_style.bg.unwrap_or(theme.bg);
-    Layout { ops: ctx.ops, links: ctx.links, height: y.max(1) as u32, bg: canvas_bg }
+    // z-index stacking order (CSS2.1 §9.9 / Appendix E): reorder the flat,
+    // tree-order display list so negative-z ranges paint first (behind) and
+    // positive-z ranges paint last (in front) of everything else.
+    let ops = reorder_by_z(ctx.ops, &ctx.stack_ops);
+    let links = reorder_by_z(ctx.links, &ctx.stack_links);
+    Layout { ops, links, height: y.max(1) as u32, bg: canvas_bg }
 }
 
 impl Ctx<'_> {
@@ -653,6 +728,13 @@ impl Ctx<'_> {
             self.path.push(ElemInfo::of(el));
             let op0 = self.ops.len();
             let link0 = self.links.len();
+            // An explicit `z-index` on a positioned (relative/sticky) box
+            // opens a tracked stacking range (CSS2.1 §9.9), same as abspos —
+            // unless already nested inside another tracked range.
+            let track = self.should_track_stack(&st);
+            if track {
+                self.stack_depth += 1;
+            }
             // A block that establishes a new BFC (flex/grid/table) keeps its
             // border box clear of active floats (CSS2.1 §9.5) and does not
             // collapse its margins with its children; its top margin still
@@ -669,11 +751,19 @@ impl Ctx<'_> {
             } else {
                 self.flow_block_impl(el, &st, x, w, anchor, open, false)
             };
+            if track {
+                self.stack_depth -= 1;
+            }
             // `position:relative` stays in flow but its paint shifts by top/left.
             if st.position == Position::Relative {
                 let (dx, dy) = rel_offset(&st, w as f32);
                 if dx != 0 || dy != 0 {
                     self.shift_ops(op0, self.ops.len(), link0, self.links.len(), dx, dy);
+                }
+            }
+            if track {
+                if let ZIndex::Value(z) = st.z_index {
+                    self.record_stack_entry(z, op0, self.ops.len(), link0, self.links.len());
                 }
             }
             self.path.pop();
@@ -920,7 +1010,18 @@ impl Ctx<'_> {
         // layout_box → layout_block re-establishes the CB for its own children.
         let w_i = width.max(1.0) as i32;
         let start = self.ops.len();
+        let link_start = self.links.len();
+        // An explicit `z-index` on this positioned box opens a tracked
+        // stacking range for it (CSS2.1 §9.9) — unless it's already nested
+        // inside another tracked range, which absorbs it instead.
+        let track = self.should_track_stack(st);
+        if track {
+            self.stack_depth += 1;
+        }
         let bottom = self.layout_box(el, st, px as i32, w_i, py as i32);
+        if track {
+            self.stack_depth -= 1;
+        }
 
         // `clip: rect(...)` (CSS 2.1 §11.1.2) — clip this box (and its
         // descendants, all emitted into `ops[start..]`) to a rectangle whose
@@ -940,6 +1041,11 @@ impl Ctx<'_> {
             let cb = bt + cbot.map(|v| v as i32).unwrap_or(bb - bt);
             clip_ops(&mut self.ops, start, cl, ct, cr, cb);
         }
+        if track {
+            if let ZIndex::Value(z) = st.z_index {
+                self.record_stack_entry(z, start, self.ops.len(), link_start, self.links.len());
+            }
+        }
     }
 
     /// Insert the block's `background-color` behind its content (at `bg_idx`)
@@ -950,6 +1056,22 @@ impl Ctx<'_> {
         }
         if let Some(bg) = st.bg {
             self.ops.insert(bg_idx, DrawOp::Rect { x, y, w, h, color: bg });
+            // `insert` shifts every later op up by one slot — any already-
+            // recorded stacking range overlapping or after `bg_idx` (a
+            // descendant's tracked z-index range, recorded before this, its
+            // ancestor's, own background gets painted in) must shift too.
+            // Half-open `[s, e)`: a range that already ends at-or-before
+            // `bg_idx` is untouched (`e > bg_idx`, strict, is the covered
+            // check — `e == bg_idx` means the insertion lands right after
+            // the range, not inside it).
+            for (_, s, e) in &mut self.stack_ops {
+                if *s >= bg_idx {
+                    *s += 1;
+                }
+                if *e > bg_idx {
+                    *e += 1;
+                }
+            }
         }
         // Each side paints independently on the border-box edge.
         let side = |ops: &mut Vec<DrawOp>, s: &BorderSide, rect: (i32, i32, i32, i32)| {
