@@ -19,6 +19,7 @@ extern crate alloc;
 pub mod color;
 pub mod css;
 pub mod dom;
+pub mod fonts;
 pub mod image;
 pub mod layout;
 pub mod raster;

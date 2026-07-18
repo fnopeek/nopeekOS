@@ -274,6 +274,7 @@ pub struct ComputedStyle {
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
+    pub valign: i8, // vertical-align: super (+1) / sub (-1) / baseline (0) — not inherited
     // — flex container —
     pub flex_row: bool, // flex-direction: row (true) vs column (false)
     pub flex_wrap: bool,
@@ -372,6 +373,7 @@ impl ComputedStyle {
             is_link: false,
             is_rule: false,
             is_break: false,
+            valign: 0,
             flex_row: true,
             flex_wrap: false,
             flex_balance: false,
@@ -457,6 +459,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         is_link: false,
         is_rule: false,
         is_break: false,
+        valign: 0,
         flex_row: true,
         flex_wrap: false,
         flex_balance: false,
@@ -795,7 +798,16 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         "big" => s.font_px = em * 1.15,
         "mark" => s.color = theme.link,
         "br" => s.is_break = true,
-        // span / label / abbr / time / sup / sub / u / s / … → plain inline.
+        // Superscript / subscript: smaller, raised/lowered off the baseline.
+        "sup" => {
+            s.font_px = em * 0.75;
+            s.valign = 1;
+        }
+        "sub" => {
+            s.font_px = em * 0.75;
+            s.valign = -1;
+        }
+        // span / label / abbr / time / u / s / … → plain inline.
         _ => {}
     }
 }
