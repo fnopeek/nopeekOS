@@ -318,7 +318,7 @@ const PAD: i32 = 20;
 /// One paint instruction, positioned in document space (pre-scroll).
 pub enum DrawOp {
     /// A run of already-wrapped, same-style text; `y` is the run's top.
-    Text { x: i32, y: i32, size: f32, color: Rgb, bold: bool, italic: bool, text: String },
+    Text { x: i32, y: i32, size: f32, color: Rgb, bold: bool, italic: bool, mono: bool, text: String },
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgb },
     /// A decoded image, scaled to `w`×`h` at blit time.
@@ -382,7 +382,7 @@ fn line_gap(font: &Font, size: f32) -> f32 {
 /// selector matching). Bundling these keeps the recursive walkers from carrying
 /// a dozen arguments each.
 struct Ctx<'a> {
-    font: &'a Font,
+    fonts: &'a crate::fonts::Fonts,
     theme: &'a Theme,
     sheet: &'a Stylesheet,
     images: &'a ImageMap,
@@ -468,7 +468,7 @@ fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, usize, usize)]) -> Vec<T> {
 
 /// Lay a document out into a scroll-independent display list.
 pub fn layout(
-    font: &Font,
+    fonts: &crate::fonts::Fonts,
     dom: &Dom,
     sheet: &Stylesheet,
     images: &ImageMap,
@@ -479,7 +479,7 @@ pub fn layout(
     let cx = PAD;
     let cw = (width as i32 - 2 * PAD).max(60);
     let mut ctx = Ctx {
-        font,
+        fonts,
         theme,
         sheet,
         images,
@@ -699,7 +699,7 @@ impl Ctx<'_> {
         // be selected, so it can't generate one.
         if let Some(owner) = owner {
             if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::Before) {
-                inline.text(self.font, &text, &ps, None);
+                inline.text(&text, &ps, None);
             }
         }
         // Preceding element siblings (document order) for `+`/`~` combinators,
@@ -736,7 +736,7 @@ impl Ctx<'_> {
             };
             let el = match node {
                 Node::Text(t) => {
-                    inline.text(self.font, t, parent, None);
+                    inline.text(t, parent, None);
                     continue;
                 }
                 Node::Element(el) => el,
@@ -782,7 +782,7 @@ impl Ctx<'_> {
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.font, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -860,12 +860,12 @@ impl Ctx<'_> {
         // content (or starts its own, if the last child was block-level).
         if let Some(owner) = owner {
             if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::After) {
-                inline.text(self.font, &text, &ps, None);
+                inline.text(&text, &ps, None);
             }
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
-            let nb = inline.flow(self.font, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
+            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
             if !committed {
                 first_top = ly;
                 committed = true;
@@ -956,7 +956,7 @@ impl Ctx<'_> {
         }
         let flow = if st.pre {
             let ly = child_anchor + child_incoming.value() as i32;
-            let nb = layout_pre(self.font, el, st, content_x, content_w, ly, &mut self.ops);
+            let nb = layout_pre(self.fonts.pick(st.bold, st.italic, st.mono), el, st, content_x, content_w, ly, &mut self.ops);
             Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true }
         } else {
             self.flow_children(&el.children, st, Some(el), content_x, content_w, child_anchor, child_incoming)
@@ -1608,10 +1608,10 @@ impl Ctx<'_> {
         // multi-node run (several sibling text/inline nodes, as an anonymous
         // cell wraps) measures far wider than it will actually render.
         let collapsed = collapse_whitespace(&text);
-        let pref = measure(self.font, collapsed.trim(), size);
+        let pref = measure(self.fonts.regular(), collapsed.trim(), size);
         let min = collapsed
             .split_whitespace()
-            .map(|wd| measure(self.font, wd, size))
+            .map(|wd| measure(self.fonts.regular(), wd, size))
             .fold(0.0f32, f32::max);
         (pref, min)
     }
@@ -2664,6 +2664,7 @@ fn layout_pre(
                 color: st.color,
                 bold: st.bold,
                 italic: st.italic,
+                mono: st.mono,
                 text,
             });
         }
@@ -2722,11 +2723,11 @@ impl Ctx<'_> {
         // `el::before` — same anonymous-inline-box treatment as the block
         // path (`flow_children`), just feeding this inline run instead.
         if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::Before) {
-            inline.text(self.font, &text, &ps, href);
+            inline.text(&text, &ps, href);
         }
         for c in &el.children {
             match c {
-                Node::Text(t) => inline.text(self.font, t, st, href),
+                Node::Text(t) => inline.text(t, st, href),
                 Node::Element(ce) => {
                     let cs = style::resolve(ce, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                     if cs.display == Display::None {
@@ -2745,7 +2746,7 @@ impl Ctx<'_> {
             }
         }
         if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::After) {
-            inline.text(self.font, &text, &ps, href);
+            inline.text(&text, &ps, href);
         }
     }
 }
@@ -2760,6 +2761,8 @@ struct RunStyle {
     color: Rgb,
     bold: bool,
     italic: bool,
+    mono: bool,
+    valign: i8, // vertical-align: super (+1) / sub (-1) / baseline (0)
 }
 
 /// One inline item: a word, an atomic `<img>`, or a `<br>`.
@@ -2786,8 +2789,8 @@ impl Inline {
     }
 
     /// Add collapsed text from one text node under style `st`.
-    fn text(&mut self, _font: &Font, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        let rs = RunStyle { size: st.font_px, color: st.color, bold: st.bold, italic: st.italic };
+    fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
+        let rs = RunStyle { size: st.font_px, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign };
         let mut word = String::new();
         for ch in raw.chars() {
             if ch.is_whitespace() {
@@ -2831,7 +2834,7 @@ impl Inline {
     #[allow(clippy::too_many_arguments)]
     fn flow(
         &self,
-        font: &Font,
+        fonts: &crate::fonts::Fonts,
         theme: &Theme,
         x: i32,
         w: i32,
@@ -2840,10 +2843,14 @@ impl Inline {
         ops: &mut Vec<DrawOp>,
         links: &mut Vec<LinkRect>,
     ) -> i32 {
+        // Each word/segment measures with its own face (a monospace run advances
+        // differently from proportional Inter), so glyph positions match what
+        // the raster later paints via the same `Fonts::pick`.
+        let face = |s: &RunStyle| fonts.pick(s.bold, s.italic, s.mono);
         let mut y = y0;
         let mut line: Vec<Placed> = Vec::new();
         // Each line's usable [left, right] narrows around floats at its y-band.
-        let lh = ceil_i32(line_gap(font, BASE_FONT_PX)).max(1);
+        let lh = ceil_i32(line_gap(fonts.regular(), BASE_FONT_PX)).max(1);
         let (l0, r0) = band_of(floats, y, y + lh, x, x + w);
         let mut pen = l0 as f32;
         let mut line_ascent = 0.0f32;
@@ -2854,9 +2861,9 @@ impl Inline {
             match item {
                 Item::Break => {
                     if line.is_empty() {
-                        y += ceil_i32(line_gap(font, BASE_FONT_PX));
+                        y += ceil_i32(line_gap(fonts.regular(), BASE_FONT_PX));
                     } else {
-                        y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
                     }
                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                     pen = bl as f32;
@@ -2865,10 +2872,10 @@ impl Inline {
                     gap = 0.0;
                 }
                 Item::Word { text, style, href, space_before } => {
-                    let ww = measure(font, text, style.size);
-                    let sw = if *space_before { space_width(font, style.size) } else { 0.0 };
+                    let ww = measure(face(style), text, style.size);
+                    let sw = if *space_before { space_width(face(style), style.size) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ww > right {
-                        y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -2889,8 +2896,8 @@ impl Inline {
                         line.push(Placed::Text(Seg { x: sx, text: text.clone(), style: *style, href: href.clone() }));
                     }
                     pen += lead + ww;
-                    line_ascent = line_ascent.max(font.horizontal_line_metrics(style.size).map(|m| m.ascent).unwrap_or(style.size));
-                    gap = gap.max(line_gap(font, style.size));
+                    line_ascent = line_ascent.max(face(style).horizontal_line_metrics(style.size).map(|m| m.ascent).unwrap_or(style.size));
+                    gap = gap.max(line_gap(face(style), style.size));
                 }
                 Item::Image { img, w: iw, h: ih, href, alt, space_before } => {
                     // Fit the image to the content width, keeping aspect.
@@ -2900,9 +2907,9 @@ impl Inline {
                         bw = w as f32;
                     }
                     let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
-                    let sw = if *space_before { space_width(font, BASE_FONT_PX) } else { 0.0 };
+                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + bw as f32 > right {
-                        y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -2926,7 +2933,7 @@ impl Inline {
             }
         }
         if !line.is_empty() {
-            y = emit_line(font, theme, &mut line, y, line_ascent, gap, ops, links);
+            y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
         }
         y
     }
@@ -2951,7 +2958,7 @@ struct Seg {
 /// bottom-aligned to the baseline. Images in a link get a `LinkRect` too.
 #[allow(clippy::too_many_arguments)]
 fn emit_line(
-    font: &Font,
+    fonts: &crate::fonts::Fonts,
     theme: &Theme,
     line: &mut Vec<Placed>,
     y: i32,
@@ -2966,7 +2973,15 @@ fn emit_line(
     for placed in line.drain(..) {
         match placed {
             Placed::Text(seg) => {
-                let top = baseline - ascent_i(font, seg.style.size);
+                let font = fonts.pick(seg.style.bold, seg.style.italic, seg.style.mono);
+                let mut top = baseline - ascent_i(font, seg.style.size);
+                // vertical-align: raise a superscript, drop a subscript off the
+                // shared baseline (the run is already at its reduced sup/sub size).
+                match seg.style.valign {
+                    1 => top -= (seg.style.size * 0.42) as i32,
+                    -1 => top += (seg.style.size * 0.18) as i32,
+                    _ => {}
+                }
                 if let Some(h) = &seg.href {
                     let sw = measure(font, &seg.text, seg.style.size);
                     links.push(LinkRect { x: seg.x, y: line_top, w: ceil_i32(sw), h: box_h, href: h.clone() });
@@ -2978,6 +2993,7 @@ fn emit_line(
                     color: seg.style.color,
                     bold: seg.style.bold,
                     italic: seg.style.italic,
+                    mono: seg.style.mono,
                     text: seg.text,
                 });
             }
@@ -3002,6 +3018,7 @@ fn emit_line(
                             color: theme.muted,
                             bold: false,
                             italic: false,
+                            mono: false,
                             text: alt,
                         });
                     }
@@ -3016,20 +3033,15 @@ fn emit_line(
 mod tests {
     use super::*;
     use crate::dom;
-    use fontdue::{Font, FontSettings};
 
-    fn font() -> Font {
-        Font::from_bytes(
-            include_bytes!("../assets/inter.ttf") as &[u8],
-            FontSettings::default(),
-        )
-        .unwrap()
+    fn fonts() -> crate::fonts::Fonts {
+        crate::fonts::Fonts::new()
     }
 
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom);
-        layout(&font(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK)
     }
 
     fn texts(l: &Layout) -> Vec<(i32, i32, &str)> {
@@ -3103,6 +3115,21 @@ mod tests {
         let ital = l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, italic: true, .. } if text == "eye"));
         assert!(bold, "bold run");
         assert!(ital, "italic run");
+    }
+
+    #[test]
+    fn sup_is_smaller_and_raised_above_sub() {
+        let l = lay("<body><p>base<sup>up</sup><sub>dn</sub></p></body>", 2000);
+        let find = |t: &str| {
+            l.ops.iter().find_map(|o| match o {
+                DrawOp::Text { y, size, text, .. } if text == t => Some((*y, *size)),
+                _ => None,
+            })
+        };
+        let (up_y, up_sz) = find("up").expect("sup run");
+        let (dn_y, dn_sz) = find("dn").expect("sub run");
+        assert!(up_sz < BASE_FONT_PX && dn_sz < BASE_FONT_PX, "sup/sub render smaller");
+        assert!(up_y < dn_y, "superscript sits above subscript");
     }
 
     #[test]

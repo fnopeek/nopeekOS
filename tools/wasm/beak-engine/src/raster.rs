@@ -8,19 +8,18 @@
 
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use fontdue::{Font, FontSettings, Metrics};
+use fontdue::Metrics;
 use hashbrown::HashMap;
 
+use crate::fonts::Fonts;
 use crate::layout::{DrawOp, Layout, Rgb, Theme};
 
-static FONT_BYTES: &[u8] = include_bytes!("../assets/inter.ttf");
-
 pub struct Engine {
-    font: Font,
-    /// Rasterised-glyph cache keyed by (char, size-bits). fontdue's rasterise
-    /// is not free; without this every glyph is re-rasterised every frame,
-    /// which makes scrolling lag. Bounded by the glyph set the page uses.
-    glyphs: RefCell<HashMap<(u32, u32), (Metrics, Vec<u8>)>>,
+    fonts: Fonts,
+    /// Rasterised-glyph cache keyed by (char, size-bits, face-id). fontdue's
+    /// rasterise is not free; without this every glyph is re-rasterised every
+    /// frame, which makes scrolling lag. Bounded by the glyph set the page uses.
+    glyphs: RefCell<HashMap<(u32, u32, u32), (Metrics, Vec<u8>)>>,
     /// Page colours (theme-resolved by the shell; dark until then).
     theme: Theme,
     /// Decoded page images keyed by `<img src>` (set by the shell each nav).
@@ -36,13 +35,11 @@ impl Default for Engine {
 }
 
 impl Engine {
-    /// Parse the embedded Inter font. Cheap enough to build once and reuse
+    /// Parse the embedded font faces. Cheap enough to build once and reuse
     /// across page loads (the shell keeps one `Engine`).
     pub fn new() -> Engine {
-        let font = Font::from_bytes(FONT_BYTES, FontSettings::default())
-            .expect("embedded inter.ttf is a valid TrueType font");
         Engine {
-            font,
+            fonts: Fonts::new(),
             glyphs: RefCell::new(HashMap::new()),
             theme: Theme::DARK,
             images: crate::image::ImageMap::new(),
@@ -103,14 +100,14 @@ impl Engine {
     pub fn layout_ext(&self, html: &str, external_css: &str, width: u32) -> Layout {
         let dom = crate::dom::parse(html);
         let sheet = crate::css::collect_all(&dom, external_css);
-        crate::layout::layout(&self.font, &dom, &sheet, &self.images, width, &self.theme)
+        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, &self.theme)
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
     /// (reader mode; BROWSER.md §9.7 "never worse than clean content").
     pub fn layout_ua(&self, html: &str, width: u32) -> Layout {
         let dom = crate::dom::parse(html);
-        crate::layout::layout(&self.font, &dom, &crate::css::Stylesheet::empty(), &self.images, width, &self.theme)
+        crate::layout::layout(&self.fonts, &dom, &crate::css::Stylesheet::empty(), &self.images, width, &self.theme)
     }
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
@@ -124,12 +121,12 @@ impl Engine {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
                     fill(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *color);
                 }
-                DrawOp::Text { x, y, size, color, bold, italic, text } => {
+                DrawOp::Text { x, y, size, color, bold, italic, mono, text } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
                         continue; // fully off-screen line → skip
                     }
-                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, text);
+                    self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, text);
                 }
                 DrawOp::Image { x, y, w: iw, h: ih, img } => {
                     let vy = *y - scroll_y;
@@ -142,11 +139,8 @@ impl Engine {
         }
     }
 
-    /// Draw a run at `(x, y=run-top)`. `bold`/`italic` have no dedicated font
-    /// face (single Inter), so they're synthesised: **bold** = a 1px horizontal
-    /// smear (double-blend at px+1); *italic* = a faux slant sheared around the
-    /// baseline. Good enough to distinguish `<b>`/`<i>`; a real bold/italic
-    /// face is a later font-loading step.
+    /// Draw a run at `(x, y=run-top)` in the face selected by `bold`/`italic`/
+    /// `mono` (see `Fonts::pick`) — real weight/slant/monospace, no synthesis.
     #[allow(clippy::too_many_arguments)]
     fn draw_run(
         &self,
@@ -159,19 +153,18 @@ impl Engine {
         color: Rgb,
         bold: bool,
         italic: bool,
+        mono: bool,
         text: &str,
     ) {
-        let ascent = self
-            .font
-            .horizontal_line_metrics(size)
-            .map(|m| m.ascent)
-            .unwrap_or(size);
+        let font = self.fonts.pick(bold, italic, mono);
+        let face = Fonts::face_id(bold, italic, mono);
+        let ascent = font.horizontal_line_metrics(size).map(|m| m.ascent).unwrap_or(size);
         let baseline = y + ascent as i32;
         let mut pen = x as f32;
         for ch in text.chars() {
-            let key = (ch as u32, size.to_bits());
+            let key = (ch as u32, size.to_bits(), face);
             if !self.glyphs.borrow().contains_key(&key) {
-                let g = self.font.rasterize(ch, size);
+                let g = font.rasterize(ch, size);
                 self.glyphs.borrow_mut().insert(key, g);
             }
             let cache = self.glyphs.borrow();
@@ -183,22 +176,15 @@ impl Engine {
                 if py < 0 || py >= h {
                     continue;
                 }
-                let shear = if italic { (((baseline - py) as f32) * 0.21) as i32 } else { 0 };
                 let row = gy * m.width;
                 for gx in 0..m.width {
                     let a = cov[row + gx];
                     if a == 0 {
                         continue;
                     }
-                    let px = gx0 + gx as i32 + shear;
+                    let px = gx0 + gx as i32;
                     if px >= 0 && px < w {
                         blend(out, w, px, py, color, a);
-                    }
-                    if bold {
-                        let pxb = px + 1;
-                        if pxb >= 0 && pxb < w {
-                            blend(out, w, pxb, py, color, a);
-                        }
                     }
                 }
             }
