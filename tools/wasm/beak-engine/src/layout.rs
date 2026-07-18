@@ -114,13 +114,42 @@ struct BoxOut {
     through: bool,
 }
 
-/// The role a child element plays inside a table box.
+/// The role a child element plays inside a table box (CSS2.1 §17.2.1).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TableRole {
     Row,
     RowGroup,
+    /// `table-header-group` (`<thead>`) — rows sort before every other group.
+    HeaderGroup,
+    /// `table-footer-group` (`<tfoot>`) — rows sort after every other group.
+    FooterGroup,
     Cell,
+    /// `caption`/`col`/`colgroup` — recognised table structure that generates
+    /// no box of its own; never wrapped, never breaks a stray-content run.
+    Skip,
+    /// Anything else: text or an element that isn't a table part. A run of
+    /// consecutive `Other`/`Cell`/text nodes gets wrapped into an anonymous
+    /// box (a row, if found directly in a table/row-group; a cell, if found
+    /// directly in a row) rather than being silently dropped.
     Other,
+}
+
+/// A table cell box: a real `<td>`/`<th>`/`display:table-cell` element, or an
+/// anonymous cell wrapping a run of sibling nodes that CSS2.1 §17.2.1 requires
+/// boxing (stray text/inline content found directly inside a table row, or a
+/// stray element — including a lone cell — found directly inside a table).
+#[derive(Clone, Copy)]
+enum Cell<'a> {
+    Real(&'a Element),
+    Anon(&'a [Node]),
+}
+
+/// One segment of a `flow_children` node list: either a single node laid out
+/// normally, or a maximal run of stray table-part siblings (CSS2 §17.2.1)
+/// laid out together as one anonymous `table` box. See `segment_table_runs`.
+enum TableSeg<'a> {
+    Node(&'a Node),
+    Table(&'a [Node]),
 }
 
 /// A table's content-box width available to its columns: the used `width`
@@ -472,7 +501,15 @@ pub fn layout(
     let body = dom.body();
     let body_style = style::resolve(body, &root, theme, sheet, &[], &[], 0, width as f32);
     ctx.path.push(ElemInfo::of(body));
-    y = ctx.layout_children(&body.children, &body_style, body, cx, cw, y);
+    // A `display: table`/`flex`/`grid` `<body>` must itself establish that
+    // formatting context — otherwise its `table-row`/`-cell` children have no
+    // `table` ancestor and (correctly, per CSS2.1 §17.2.1) get wrapped in
+    // their own anonymous table, which is not what the author asked for.
+    y = if establishes_bfc(&body_style) {
+        ctx.layout_box(body, &body_style, cx, cw, y)
+    } else {
+        ctx.layout_children(&body.children, &body_style, Some(body), cx, cw, y)
+    };
     // A float can extend below the last in-flow line — grow the page to contain it.
     let float_bottom = ctx.floats.iter().map(|f| f.bottom).max().unwrap_or(0);
     y = y.max(float_bottom);
@@ -571,7 +608,7 @@ impl Ctx<'_> {
         // preferred)); a definite width is used directly (may overflow the CB).
         let content_w = match st.width {
             Len::Auto => {
-                let (pref, min) = self.intrinsic_width(el);
+                let (pref, min) = self.intrinsic_width(el, st.font_px);
                 let avail = (w as f32 - ml - mr - pad_border).max(0.0);
                 pref.min(avail).max(min).max(0.0)
             }
@@ -627,8 +664,11 @@ impl Ctx<'_> {
     /// Lay `nodes` as an independent block formatting context (a table cell,
     /// grid item, the page root, …). Returns the y below the last child, with
     /// the last in-flow block's bottom margin committed — margins do not
-    /// collapse out of an established BFC.
-    fn layout_children(&mut self, nodes: &[Node], parent: &ComputedStyle, owner: &Element, x: i32, w: i32, y0: i32) -> i32 {
+    /// collapse out of an established BFC. `owner` is the element these nodes
+    /// belong to, for `::before`/`::after` generated content — `None` for an
+    /// anonymous box (CSS2.1 §17.2.1 table objects): an anonymous box has no
+    /// source element, so it cannot be selected and cannot generate one.
+    fn layout_children(&mut self, nodes: &[Node], parent: &ComputedStyle, owner: Option<&Element>, x: i32, w: i32, y0: i32) -> i32 {
         let flow = self.flow_children(nodes, parent, owner, x, w, y0, Collapse::default());
         flow.bottom + flow.open.value() as i32
     }
@@ -642,7 +682,7 @@ impl Ctx<'_> {
         &mut self,
         nodes: &[Node],
         parent: &ComputedStyle,
-        owner: &Element,
+        owner: Option<&Element>,
         x: i32,
         w: i32,
         anchor_y: i32,
@@ -655,15 +695,45 @@ impl Ctx<'_> {
         let mut inline = Inline::new();
         // `owner::before` — an anonymous inline box carrying its `content`
         // string, inserted ahead of `owner`'s real children (CSS2.1 §12.1).
-        if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::Before) {
-            inline.text(self.font, &text, &ps, None);
+        // An anonymous `owner` (a table object with no source element) can't
+        // be selected, so it can't generate one.
+        if let Some(owner) = owner {
+            if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::Before) {
+                inline.text(self.font, &text, &ps, None);
+            }
         }
         // Preceding element siblings (document order) for `+`/`~` combinators,
         // and the total element-sibling count for `:nth-child`/`:last-child`.
         let mut siblings: Vec<ElemInfo> = Vec::new();
         let sib_count = nodes.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
 
-        for node in nodes {
+        // A run of `table-row`/`-row-group`/`-header-group`/`-footer-group`/
+        // `-cell` siblings found here (not already inside table/row layout)
+        // has no `table` ancestor: CSS2.1 §17.2.1 wraps the whole run in one
+        // anonymous `table` box rather than laying each part out as an
+        // ordinary block.
+        let segs = self.segment_table_runs(nodes, parent);
+        for seg in &segs {
+            let node = match seg {
+                TableSeg::Table(run) => {
+                    let anon_st = style::anon_inherit(parent, Display::Table);
+                    let mut t = open;
+                    t.add(anon_st.margin_top);
+                    let by = anchor + t.value() as i32;
+                    let (bx, bw, byy) = self.avoid_floats_bfc(&anon_st, x, w, by);
+                    let saved = core::mem::take(&mut self.floats);
+                    let bottom = self.layout_table_body(run, &anon_st, bx, bw, byy);
+                    self.floats = saved;
+                    if !committed {
+                        first_top = byy;
+                        committed = true;
+                    }
+                    anchor = bottom;
+                    open = Collapse::one(anon_st.margin_bottom);
+                    continue;
+                }
+                TableSeg::Node(node) => *node,
+            };
             let el = match node {
                 Node::Text(t) => {
                     inline.text(self.font, t, parent, None);
@@ -788,8 +858,10 @@ impl Ctx<'_> {
         // `owner::after` — appended behind the real children, before the
         // final line-box flush so it shares a line with trailing inline
         // content (or starts its own, if the last child was block-level).
-        if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::After) {
-            inline.text(self.font, &text, &ps, None);
+        if let Some(owner) = owner {
+            if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::After) {
+                inline.text(self.font, &text, &ps, None);
+            }
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
@@ -887,7 +959,7 @@ impl Ctx<'_> {
             let nb = layout_pre(self.font, el, st, content_x, content_w, ly, &mut self.ops);
             Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true }
         } else {
-            self.flow_children(&el.children, st, el, content_x, content_w, child_anchor, child_incoming)
+            self.flow_children(&el.children, st, Some(el), content_x, content_w, child_anchor, child_incoming)
         };
         self.cb = prev_cb;
 
@@ -1012,7 +1084,7 @@ impl Ctx<'_> {
         let width = match (st.width.px(avail), left, right) {
             (Some(wd), _, _) => wd,
             (None, Some(l), Some(r)) => (avail - l - r).max(0.0),
-            _ => self.intrinsic_width(el).0.min(avail), // shrink-to-fit
+            _ => self.intrinsic_width(el, st.font_px).0.min(avail), // shrink-to-fit
         };
         // Horizontal: an offset pins to the CB edge; with both `left`/`right`
         // auto the box keeps its **static position** (CSS2.1 §10.3.7).
@@ -1121,8 +1193,8 @@ impl Ctx<'_> {
     /// layout: fixed` (CSS2 §17.5.2.1) takes column widths from the table/
     /// `<col>`/first-row cell `width`s and distributes the rest, painting each
     /// cell's own box (background/border/padding). Rows/cells are recognised by
-    /// HTML tag (`tr`/`td`/`th`/`thead`…) or `display: table-*`, with stray
-    /// cells wrapped into anonymous rows. No colspan/rowspan/border-collapse.
+    /// HTML tag (`tr`/`td`/`th`/`thead`…) or `display: table-*`; anonymous
+    /// boxes fill any missing row/row-group/cell wrapper (CSS2 §17.2.1).
     fn layout_table(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // <caption> renders as a block above the grid.
         let mut y = y0;
@@ -1131,18 +1203,26 @@ impl Ctx<'_> {
                 if e.tag == "caption" {
                     let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                     self.path.push(ElemInfo::of(e));
-                    y = self.layout_children(&e.children, &cs, e, x, w, y);
+                    y = self.layout_children(&e.children, &cs, Some(e), x, w, y);
                     self.path.pop();
                 }
             }
         }
+        self.layout_table_body(&el.children, st, x, w, y)
+    }
 
-        let mut rows: Vec<Vec<&Element>> = Vec::new();
-        self.collect_table_rows(el, st, &mut rows);
+    /// The table's row grid (everything but `<caption>`): shared by a real
+    /// `<table>` (`el.children`, above) and an anonymous table synthesized in
+    /// `flow_children` around a stray run of table-part siblings that has no
+    /// `table`/`inline-table` ancestor (CSS2 §17.2.1) — an anonymous table
+    /// can't have a `<caption>` child (nothing selects an anonymous box), so
+    /// only the row-collection step is shared.
+    fn layout_table_body(&mut self, nodes: &[Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.is_empty());
         let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0).min(64);
         if ncols == 0 {
-            return y;
+            return y0;
         }
 
         // `fixed` tables paint each cell's own box (backgrounds/borders are the
@@ -1158,7 +1238,7 @@ impl Ctx<'_> {
         // The table's own padding wraps the row grid (its border/background are
         // left unpainted — collapsed borders aren't resolved here).
         let inner_x = x + st.pad_left as i32;
-        let content_top = y + st.pad_top as i32;
+        let content_top = y0 + st.pad_top as i32;
         let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top, paint_cells);
         bottom + st.pad_bottom as i32
     }
@@ -1169,14 +1249,14 @@ impl Ctx<'_> {
     /// shrinking columns proportionally (never below their minimum) only when
     /// they overflow the available width; an explicit table `width` wider than
     /// the content spreads the slack across columns.
-    fn auto_columns(&self, rows: &[Vec<&Element>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+    fn auto_columns(&self, rows: &[Vec<Cell>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
         for row in rows {
             for (c, cell) in row.iter().enumerate().take(ncols) {
-                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let cs = self.cell_style(cell, st);
                 let frame = cs.pad_left + cs.pad_right + cs.border_x();
-                let (p, m) = self.intrinsic_width(cell);
+                let (p, m) = self.intrinsic_width_cell(cell, cs.font_px);
                 let spec = match cs.width.px(w as f32) {
                     Some(v) if cs.box_border => v,
                     Some(v) => v + frame,
@@ -1208,13 +1288,13 @@ impl Ctx<'_> {
     /// from the first row's cell `width`s (each a *border-box* width), and the
     /// rest of the table's used width is split equally across the remaining
     /// columns; content never widens a column.
-    fn fixed_columns(&self, rows: &[Vec<&Element>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
+    fn fixed_columns(&self, rows: &[Vec<Cell>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
         let content_w = table_content_width(st, w as f32);
         // Per-column border-box width; None = "auto" (share the leftover).
         let mut fixed: Vec<Option<f32>> = vec![None; ncols];
         if let Some(first) = rows.first() {
             for (c, cell) in first.iter().enumerate().take(ncols) {
-                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let cs = self.cell_style(cell, st);
                 if let Some(cw) = cs.width.px(content_w) {
                     let border_box = if cs.box_border {
                         cw
@@ -1241,10 +1321,21 @@ impl Ctx<'_> {
             .collect()
     }
 
+    /// A cell's own computed style: a real cell resolves normally (`st` — the
+    /// table's style — stands in for its row's, an existing approximation);
+    /// an anonymous cell gets the CSS2.1 §17.2.1 anonymous-box style (inherited
+    /// properties from `st`, every other property at its initial value).
+    fn cell_style(&self, cell: &Cell, st: &ComputedStyle) -> ComputedStyle {
+        match cell {
+            Cell::Real(e) => style::resolve(e, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w),
+            Cell::Anon(_) => style::anon_inherit(st, Display::TableCell),
+        }
+    }
+
     /// Lay a table's rows given resolved (border-box) column widths. Cells sit
     /// side by side; each cell box stretches to the row's tallest cell and paints
     /// its own background/border, with content placed inside its padding.
-    fn lay_table_rows(&mut self, rows: &[Vec<&Element>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32, paint_cells: bool) -> i32 {
+    fn lay_table_rows(&mut self, rows: &[Vec<Cell>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32, paint_cells: bool) -> i32 {
         let mut y = y0;
         for row in rows {
             // Pass 1: resolve cell styles + measure the tallest cell.
@@ -1252,7 +1343,7 @@ impl Ctx<'_> {
             let mut cx = x;
             for (c, cell) in row.iter().enumerate().take(ncols) {
                 let cw = colw[c];
-                let cs = style::resolve(cell, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
+                let cs = self.cell_style(cell, st);
                 let content_x = cx + cs.border_left.width as i32 + cs.pad_left as i32;
                 let content_w = (cw - cs.border_x() as i32 - (cs.pad_left + cs.pad_right) as i32).max(0);
                 cells.push((cs, cx, content_x, content_w));
@@ -1265,7 +1356,7 @@ impl Ctx<'_> {
                 let mut ch = if cs.display == Display::None {
                     0
                 } else {
-                    self.measure_children_height(row[c], cs, *content_x, *content_w, content_y)
+                    self.measure_cell_height(&row[c], cs, *content_x, *content_w, content_y)
                 };
                 if let Len::Px(h) = cs.height {
                     let hb = if cs.box_border {
@@ -1285,9 +1376,16 @@ impl Ctx<'_> {
                 }
                 let content_y = y + cs.border_top.width as i32 + cs.pad_top as i32;
                 let bg_idx = self.ops.len();
-                self.path.push(ElemInfo::of(row[c]));
-                let _ = self.layout_children(&row[c].children, cs, row[c], *content_x, *content_w, content_y);
-                self.path.pop();
+                match row[c] {
+                    Cell::Real(e) => {
+                        self.path.push(ElemInfo::of(e));
+                        let _ = self.layout_children(&e.children, cs, Some(e), *content_x, *content_w, content_y);
+                        self.path.pop();
+                    }
+                    Cell::Anon(nodes) => {
+                        let _ = self.layout_children(nodes, cs, None, *content_x, *content_w, content_y);
+                    }
+                }
                 if paint_cells {
                     self.paint_box_decoration(cs, *cell_x, y, colw[c], row_h, bg_idx);
                 }
@@ -1302,11 +1400,26 @@ impl Ctx<'_> {
     fn measure_children_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l) = (self.ops.len(), self.links.len());
         self.path.push(ElemInfo::of(el));
-        let bottom = self.layout_children(&el.children, st, el, x, w.max(0), y);
+        let bottom = self.layout_children(&el.children, st, Some(el), x, w.max(0), y);
         self.path.pop();
         self.ops.truncate(o);
         self.links.truncate(l);
         (bottom - y).max(0)
+    }
+
+    /// Same as `measure_children_height`, for a table cell that may be an
+    /// anonymous box (no owning element to push on `self.path`).
+    fn measure_cell_height(&mut self, cell: &Cell, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        match cell {
+            Cell::Real(e) => self.measure_children_height(e, st, x, w, y),
+            Cell::Anon(nodes) => {
+                let (o, l) = (self.ops.len(), self.links.len());
+                let bottom = self.layout_children(nodes, st, None, x, w.max(0), y);
+                self.ops.truncate(o);
+                self.links.truncate(l);
+                (bottom - y).max(0)
+            }
+        }
     }
 
     /// Classify a table child by tag, else by its computed `display` (CSS
@@ -1314,74 +1427,238 @@ impl Ctx<'_> {
     fn table_role(&self, e: &Element, parent: &ComputedStyle) -> TableRole {
         match e.tag.as_str() {
             "tr" => TableRole::Row,
-            "thead" | "tbody" | "tfoot" => TableRole::RowGroup,
+            "thead" => TableRole::HeaderGroup,
+            "tbody" => TableRole::RowGroup,
+            "tfoot" => TableRole::FooterGroup,
             "td" | "th" => TableRole::Cell,
-            "caption" | "col" | "colgroup" => TableRole::Other,
+            "caption" | "col" | "colgroup" => TableRole::Skip,
             _ => {
                 let st = style::resolve(e, parent, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                 match st.display {
                     Display::TableRow => TableRole::Row,
                     Display::TableRowGroup => TableRole::RowGroup,
+                    Display::TableHeaderGroup => TableRole::HeaderGroup,
+                    Display::TableFooterGroup => TableRole::FooterGroup,
                     Display::TableCell => TableRole::Cell,
+                    Display::TableColumn | Display::TableColumnGroup => TableRole::Skip,
                     _ => TableRole::Other,
                 }
             }
         }
     }
 
-    /// Collect a table's rows (each a list of cell elements). Understands HTML
-    /// `tr`/`td` and `display: table-row`/`-cell`, recurses into row groups, and
-    /// wraps stray cells (cells that are direct table children) into anonymous
-    /// rows (CSS2 §17.2.1 anonymous table objects).
-    fn collect_table_rows<'a>(&self, el: &'a Element, parent: &ComputedStyle, rows: &mut Vec<Vec<&'a Element>>) {
-        let mut anon: Vec<&'a Element> = Vec::new();
-        for c in &el.children {
-            let Node::Element(e) = c else { continue };
-            match self.table_role(e, parent) {
-                TableRole::Row => {
-                    if !anon.is_empty() {
-                        rows.push(core::mem::take(&mut anon));
+    /// Collect a table's rows (CSS2 §17.2.1 anonymous table objects), in final
+    /// render order: any `table-header-group` rows first, then every other row
+    /// (plain `<tr>`/`table-row`, `table-row-group`, and any stray content
+    /// coalesced into anonymous rows) in document order, then any
+    /// `table-footer-group` rows last — regardless of their source order.
+    fn collect_table_rows<'a>(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<Vec<Cell<'a>>> {
+        let mut header = Vec::new();
+        let mut body = Vec::new();
+        let mut footer = Vec::new();
+        self.collect_rows_into(nodes, parent, &mut header, &mut body, &mut footer);
+        header.extend(body);
+        header.extend(footer);
+        header
+    }
+
+    /// Walk `nodes` (a table's or row-group's children), bucketing each row by
+    /// group kind. A child that is a `table-row`/`-row-group`/`-header-group`/
+    /// `-footer-group` is a proper table child and recurses/becomes a row
+    /// directly; any other maximal run of consecutive siblings (stray cells,
+    /// stray text, stray elements — anything that isn't a proper table child)
+    /// is wrapped in ONE anonymous row (whitespace-only text neither starts
+    /// nor breaks a run, and is dropped if it's all a run ever contained).
+    fn collect_rows_into<'a>(
+        &self,
+        nodes: &'a [Node],
+        parent: &ComputedStyle,
+        header: &mut Vec<Vec<Cell<'a>>>,
+        body: &mut Vec<Vec<Cell<'a>>>,
+        footer: &mut Vec<Vec<Cell<'a>>>,
+    ) {
+        let mut run_start: Option<usize> = None;
+        let mut run_has_content = false;
+        for (i, n) in nodes.iter().enumerate() {
+            let role = match n {
+                Node::Element(e) => Some(self.table_role(e, parent)),
+                Node::Text(_) => None,
+            };
+            match role {
+                Some(TableRole::Row) | Some(TableRole::RowGroup) | Some(TableRole::HeaderGroup) | Some(TableRole::FooterGroup) => {
+                    if let Some(s) = run_start.take() {
+                        if run_has_content {
+                            body.push(self.partition_cells(&nodes[s..i], parent));
+                        }
+                        run_has_content = false;
                     }
-                    rows.push(self.collect_cells(e, parent));
-                }
-                TableRole::RowGroup => {
-                    if !anon.is_empty() {
-                        rows.push(core::mem::take(&mut anon));
+                    let Node::Element(e) = n else { unreachable!() };
+                    match role {
+                        Some(TableRole::Row) => body.push(self.partition_cells(&e.children, parent)),
+                        Some(TableRole::RowGroup) => self.collect_rows_into(&e.children, parent, header, body, footer),
+                        Some(TableRole::HeaderGroup) => {
+                            let (mut h, mut b, mut f) = (Vec::new(), Vec::new(), Vec::new());
+                            self.collect_rows_into(&e.children, parent, &mut h, &mut b, &mut f);
+                            header.extend(h);
+                            header.extend(b);
+                            header.extend(f);
+                        }
+                        Some(TableRole::FooterGroup) => {
+                            let (mut h, mut b, mut f) = (Vec::new(), Vec::new(), Vec::new());
+                            self.collect_rows_into(&e.children, parent, &mut h, &mut b, &mut f);
+                            footer.extend(h);
+                            footer.extend(b);
+                            footer.extend(f);
+                        }
+                        _ => unreachable!(),
                     }
-                    self.collect_table_rows(e, parent, rows);
                 }
-                TableRole::Cell => anon.push(e),
-                TableRole::Other => {}
+                Some(TableRole::Skip) => {
+                    // `<caption>`/`<col>`/`<colgroup>` generate no box and are
+                    // fully transparent to the stray-content run around them.
+                }
+                _ => {
+                    // A stray cell, stray non-table element, or non-whitespace
+                    // text: not a proper table child, so it joins the run.
+                    let has_content = match n {
+                        Node::Text(t) => !t.trim().is_empty(),
+                        Node::Element(_) => true,
+                    };
+                    if run_start.is_none() {
+                        run_start = Some(i);
+                    }
+                    run_has_content |= has_content;
+                }
             }
         }
-        if !anon.is_empty() {
-            rows.push(anon);
+        if let Some(s) = run_start {
+            if run_has_content {
+                body.push(self.partition_cells(&nodes[s..], parent));
+            }
         }
     }
 
-    /// The cell elements directly inside a row.
-    fn collect_cells<'a>(&self, row: &'a Element, parent: &ComputedStyle) -> Vec<&'a Element> {
-        row.children
-            .iter()
-            .filter_map(|c| match c {
-                Node::Element(e) if self.table_role(e, parent) == TableRole::Cell => Some(e),
-                _ => None,
-            })
-            .collect()
+    /// Partition a row's children into cells (CSS2 §17.2.1): a proper
+    /// `table-cell` child stays its own (real) cell; any other maximal run of
+    /// consecutive siblings (stray text, stray non-cell elements) is wrapped in
+    /// ONE anonymous cell. Shared by a real `<tr>`'s children and an anonymous
+    /// row's coalesced node run.
+    fn partition_cells<'a>(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<Cell<'a>> {
+        let mut cells = Vec::new();
+        let mut run_start: Option<usize> = None;
+        let mut run_has_content = false;
+        for (i, n) in nodes.iter().enumerate() {
+            let role = match n {
+                Node::Element(e) => Some(self.table_role(e, parent)),
+                Node::Text(_) => None,
+            };
+            match role {
+                Some(TableRole::Cell) => {
+                    if let Some(s) = run_start.take() {
+                        if run_has_content {
+                            cells.push(Cell::Anon(&nodes[s..i]));
+                        }
+                        run_has_content = false;
+                    }
+                    let Node::Element(e) = n else { unreachable!() };
+                    cells.push(Cell::Real(e));
+                }
+                Some(TableRole::Skip) => {}
+                _ => {
+                    let has_content = match n {
+                        Node::Text(t) => !t.trim().is_empty(),
+                        Node::Element(_) => true,
+                    };
+                    if run_start.is_none() {
+                        run_start = Some(i);
+                    }
+                    run_has_content |= has_content;
+                }
+            }
+        }
+        if let Some(s) = run_start {
+            if run_has_content {
+                cells.push(Cell::Anon(&nodes[s..]));
+            }
+        }
+        cells
     }
 
     /// (preferred, minimum) content width of a box: preferred = all text on one
     /// line, minimum = the widest single word. Approximated over concatenated
-    /// text (ignores nested font sizes) — fine for auto table/flex sizing.
-    fn intrinsic_width(&self, el: &Element) -> (f32, f32) {
+    /// text at `size` px (ignores nested font sizes) — fine for auto table/
+    /// flex/grid sizing. `size` is the box's OWN font size (its caller's
+    /// resolved style) — using a fixed reference size here regressed nested
+    /// anonymous tables (CSS2.1 §17.2.1): a cell whose font differs from that
+    /// fixed size would get a column sized at the wrong scale, wrapping its
+    /// text far more (or less) than the sibling column an equal-text real
+    /// cell computes at its own (matching) font size.
+    fn intrinsic_width(&self, el: &Element, size: f32) -> (f32, f32) {
+        self.intrinsic_width_nodes(&el.children, size)
+    }
+
+    /// `intrinsic_width` over a bare node slice — an anonymous cell has no
+    /// owning element to gather text from.
+    fn intrinsic_width_nodes(&self, nodes: &[Node], size: f32) -> (f32, f32) {
         let mut text = String::new();
-        gather_text(el, &mut text);
-        let pref = measure(self.font, text.trim(), BASE_FONT_PX);
-        let min = text
+        gather_text(nodes, &mut text);
+        // `white-space: normal` collapses any run of whitespace (including the
+        // newlines/indentation between sibling tags in pretty-printed markup)
+        // to a single space before it's measured as one line — otherwise a
+        // multi-node run (several sibling text/inline nodes, as an anonymous
+        // cell wraps) measures far wider than it will actually render.
+        let collapsed = collapse_whitespace(&text);
+        let pref = measure(self.font, collapsed.trim(), size);
+        let min = collapsed
             .split_whitespace()
-            .map(|wd| measure(self.font, wd, BASE_FONT_PX))
+            .map(|wd| measure(self.font, wd, size))
             .fold(0.0f32, f32::max);
         (pref, min)
+    }
+
+    /// `intrinsic_width`, dispatching on whether the cell is real or anonymous.
+    fn intrinsic_width_cell(&self, cell: &Cell, size: f32) -> (f32, f32) {
+        match cell {
+            Cell::Real(e) => self.intrinsic_width(e, size),
+            Cell::Anon(nodes) => self.intrinsic_width_nodes(nodes, size),
+        }
+    }
+
+    /// Split `nodes` into pass-through single nodes and maximal runs of
+    /// `table-row`/`-row-group`/`-header-group`/`-footer-group`/`-cell`
+    /// siblings (whitespace-only text between them doesn't break a run). A run
+    /// found here has no `table`/`inline-table` ancestor — `flow_children`
+    /// wraps it in one anonymous `table` box (CSS2 §17.2.1) instead of laying
+    /// each part out as an ordinary block.
+    fn segment_table_runs<'a>(&self, nodes: &'a [Node], parent: &ComputedStyle) -> Vec<TableSeg<'a>> {
+        fn is_table_part(role: TableRole) -> bool {
+            matches!(role, TableRole::Row | TableRole::RowGroup | TableRole::HeaderGroup | TableRole::FooterGroup | TableRole::Cell)
+        }
+        let mut segs = Vec::with_capacity(nodes.len());
+        let mut i = 0;
+        while i < nodes.len() {
+            let starts_run = matches!(&nodes[i], Node::Element(e) if is_table_part(self.table_role(e, parent)));
+            if starts_run {
+                let mut last = i;
+                let mut j = i + 1;
+                while j < nodes.len() {
+                    match &nodes[j] {
+                        Node::Text(t) if t.trim().is_empty() => j += 1,
+                        Node::Element(e) if is_table_part(self.table_role(e, parent)) => {
+                            last = j;
+                            j += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                segs.push(TableSeg::Table(&nodes[i..=last]));
+                i = last + 1;
+            } else {
+                segs.push(TableSeg::Node(&nodes[i]));
+                i += 1;
+            }
+        }
+        segs
     }
 
     /// Dispatch a block-level box to the right formatting context.
@@ -1640,10 +1917,10 @@ impl Ctx<'_> {
         // items, `fr` splits the leftover.
         let avail = w as f32;
         let mut auto_content = vec![0.0f32; ncols];
-        for (i, (el_i, _)) in items.iter().enumerate() {
+        for (i, (el_i, s_i)) in items.iter().enumerate() {
             let (c, cspan, _, _) = place[i];
             if cspan == 1 {
-                auto_content[c] = auto_content[c].max(self.intrinsic_width(el_i).0);
+                auto_content[c] = auto_content[c].max(self.intrinsic_width(el_i, s_i.font_px).0);
             }
         }
         let mut colw = vec![0.0f32; ncols];
@@ -1701,7 +1978,7 @@ impl Ctx<'_> {
                 (colx[c], cw)
             } else {
                 let uw = match s.width {
-                    Len::Auto => self.intrinsic_width(el_i).0,
+                    Len::Auto => self.intrinsic_width(el_i, s.font_px).0,
                     other => other.px(cw).unwrap_or(0.0),
                 }
                 .min(cw)
@@ -2068,7 +2345,7 @@ impl Ctx<'_> {
             let mut wd = if stretch {
                 (avail - ml - mr).max(1.0)
             } else {
-                s.width.px(avail).map(to_content).unwrap_or_else(|| self.intrinsic_width(el).0)
+                s.width.px(avail).map(to_content).unwrap_or_else(|| self.intrinsic_width(el, s.font_px).0)
             };
             if let Some(mx) = s.max_width.px(avail) {
                 wd = wd.min(to_content(mx));
@@ -2157,7 +2434,7 @@ impl Ctx<'_> {
             };
             let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
             let spec = main_size.px(avail).map(to_content);
-            let (pref, minc) = self.intrinsic_width(el);
+            let (pref, minc) = self.intrinsic_width(el, s.font_px);
             let base = match s.flex_basis {
                 FlexBasis::Px(p) => to_content(p),
                 FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
@@ -2371,7 +2648,7 @@ fn layout_pre(
     ops: &mut Vec<DrawOp>,
 ) -> i32 {
     let mut raw = String::new();
-    gather_text(el, &mut raw);
+    gather_text(&el.children, &mut raw);
     // Browsers strip a single leading newline right after <pre>.
     let raw = raw.strip_prefix('\n').unwrap_or(&raw);
     let lh = ceil_i32(line_gap(font, st.font_px));
@@ -2395,13 +2672,33 @@ fn layout_pre(
     y
 }
 
-fn gather_text(el: &Element, out: &mut String) {
-    for c in &el.children {
+fn gather_text(nodes: &[Node], out: &mut String) {
+    for c in nodes {
         match c {
             Node::Text(t) => out.push_str(t),
-            Node::Element(e) => gather_text(e, out),
+            Node::Element(e) => gather_text(&e.children, out),
         }
     }
+}
+
+/// Collapse every run of whitespace to a single space (CSS2.1 `white-space:
+/// normal`), so measuring concatenated multi-node text (`intrinsic_width`)
+/// doesn't count source-formatting newlines/indentation as visible width.
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_ws = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !in_ws {
+                out.push(' ');
+            }
+            in_ws = true;
+        } else {
+            out.push(ch);
+            in_ws = false;
+        }
+    }
+    out
 }
 
 impl Ctx<'_> {
