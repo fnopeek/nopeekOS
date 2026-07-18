@@ -203,6 +203,17 @@ pub enum Clip {
     },
 }
 
+/// CSS `z-index` (CSS2.1 §9.9.1): `auto` or an integer stack level, valid only
+/// on a positioned box (`position != static`). `Inherit` is a transient value
+/// that `resolve` collapses to the parent's computed `z-index`, same pattern
+/// as `Clip::Inherit`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ZIndex {
+    Auto,
+    Value(i32),
+    Inherit,
+}
+
 /// The subset of computed properties the renderer consumes. Split by CSS
 /// inheritance: font/colour/`white-space` inherit; box/`display` do not.
 #[derive(Clone, Copy)]
@@ -245,6 +256,7 @@ pub struct ComputedStyle {
     pub right: Len,
     pub bottom: Len,
     pub left: Len,
+    pub z_index: ZIndex,
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
@@ -342,6 +354,7 @@ impl ComputedStyle {
             right: Len::Auto,
             bottom: Len::Auto,
             left: Len::Auto,
+            z_index: ZIndex::Auto,
             is_link: false,
             is_rule: false,
             is_break: false,
@@ -435,6 +448,7 @@ pub fn resolve(
         right: Len::Auto,
         bottom: Len::Auto,
         left: Len::Auto,
+        z_index: ZIndex::Auto,
         is_link: false,
         is_rule: false,
         is_break: false,
@@ -494,6 +508,10 @@ pub fn resolve(
     // by default, so this is resolved here rather than in the initial slice).
     if matches!(s.clip, Clip::Inherit) {
         s.clip = parent.clip;
+    }
+    // `z-index: inherit`, same pattern (z-index is not inherited by default).
+    if matches!(s.z_index, ZIndex::Inherit) {
+        s.z_index = parent.z_index;
     }
     s
 }
@@ -864,6 +882,18 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         "right" => s.right = parse_len(&v, s.font_px),
         "bottom" => s.bottom = parse_len(&v, s.font_px),
         "left" => s.left = parse_len(&v, s.font_px),
+        "z-index" => {
+            s.z_index = match v.as_str() {
+                "auto" => ZIndex::Auto,
+                "inherit" => ZIndex::Inherit,
+                other => match parse_saturating_i32(other) {
+                    Some(n) => ZIndex::Value(n),
+                    // Invalid <integer> → declaration ignored (keeps whatever
+                    // the cascade already had, per CSS error handling).
+                    None => s.z_index,
+                },
+            };
+        }
 
         // — flex —
         "flex-direction" => s.flex_row = !v.starts_with("column"),
@@ -1019,6 +1049,28 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         _ => {}
     }
+}
+
+/// A CSS `<integer>`, saturating to the 32-bit signed range instead of
+/// rejecting out-of-range literals as invalid (CSS Values & Units — Range
+/// Checking: values outside the supported range are clamped, not dropped).
+/// Accepts an optional leading `+`/`-` and ASCII digits only; `None` for
+/// anything else (empty, non-digit, signs-only).
+fn parse_saturating_i32(v: &str) -> Option<i32> {
+    let t = v.trim();
+    let (neg, digits) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut acc: i64 = 0;
+    for b in digits.bytes() {
+        acc = acc.saturating_mul(10).saturating_add((b - b'0') as i64);
+    }
+    let signed = if neg { -acc } else { acc };
+    Some(signed.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
 }
 
 /// A `<length>`/`auto`/`%` value for the box model.
