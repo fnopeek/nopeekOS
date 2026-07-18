@@ -20,7 +20,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use fontdue::Font;
 
-use crate::css::{ElemInfo, Stylesheet};
+use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::image::{Image, ImageMap};
 use crate::style::{
@@ -472,7 +472,7 @@ pub fn layout(
     let body = dom.body();
     let body_style = style::resolve(body, &root, theme, sheet, &[], &[], 0, width as f32);
     ctx.path.push(ElemInfo::of(body));
-    y = ctx.layout_children(&body.children, &body_style, cx, cw, y);
+    y = ctx.layout_children(&body.children, &body_style, body, cx, cw, y);
     // A float can extend below the last in-flow line — grow the page to contain it.
     let float_bottom = ctx.floats.iter().map(|f| f.bottom).max().unwrap_or(0);
     y = y.max(float_bottom);
@@ -628,8 +628,8 @@ impl Ctx<'_> {
     /// grid item, the page root, …). Returns the y below the last child, with
     /// the last in-flow block's bottom margin committed — margins do not
     /// collapse out of an established BFC.
-    fn layout_children(&mut self, nodes: &[Node], parent: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        let flow = self.flow_children(nodes, parent, x, w, y0, Collapse::default());
+    fn layout_children(&mut self, nodes: &[Node], parent: &ComputedStyle, owner: &Element, x: i32, w: i32, y0: i32) -> i32 {
+        let flow = self.flow_children(nodes, parent, owner, x, w, y0, Collapse::default());
         flow.bottom + flow.open.value() as i32
     }
 
@@ -642,6 +642,7 @@ impl Ctx<'_> {
         &mut self,
         nodes: &[Node],
         parent: &ComputedStyle,
+        owner: &Element,
         x: i32,
         w: i32,
         anchor_y: i32,
@@ -652,6 +653,11 @@ impl Ctx<'_> {
         let mut committed = false;
         let mut first_top = anchor_y;
         let mut inline = Inline::new();
+        // `owner::before` — an anonymous inline box carrying its `content`
+        // string, inserted ahead of `owner`'s real children (CSS2.1 §12.1).
+        if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::Before) {
+            inline.text(self.font, &text, &ps, None);
+        }
         // Preceding element siblings (document order) for `+`/`~` combinators,
         // and the total element-sibling count for `:nth-child`/`:last-child`.
         let mut siblings: Vec<ElemInfo> = Vec::new();
@@ -779,6 +785,12 @@ impl Ctx<'_> {
                 open = out.open;
             }
         }
+        // `owner::after` — appended behind the real children, before the
+        // final line-box flush so it shares a line with trailing inline
+        // content (or starts its own, if the last child was block-level).
+        if let Some((text, ps)) = self.pseudo(owner, parent, PseudoElem::After) {
+            inline.text(self.font, &text, &ps, None);
+        }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
             let nb = inline.flow(self.font, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
@@ -790,6 +802,16 @@ impl Ctx<'_> {
             open = Collapse::default();
         }
         Flow { bottom: anchor, open, first_top, committed }
+    }
+
+    /// `owner`'s `::before`/`::after` generated box, if `owner`'s own cascade
+    /// (already resolved as `own`) has a matching rule with a supported
+    /// `content` string. `self.path`'s last entry is always `owner` itself at
+    /// every call site (the uniform `path.push(ElemInfo::of(el))` before any
+    /// box-laying call), so its ancestors are everything before that.
+    fn pseudo(&self, owner: &Element, own: &ComputedStyle, kind: PseudoElem) -> Option<(String, ComputedStyle)> {
+        let anc = self.path.len().saturating_sub(1);
+        style::resolve_pseudo(owner, own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind)
     }
 
     /// Lay one block-level box with the CSS block box model: resolve the
@@ -865,7 +887,7 @@ impl Ctx<'_> {
             let nb = layout_pre(self.font, el, st, content_x, content_w, ly, &mut self.ops);
             Flow { bottom: nb, open: Collapse::default(), first_top: ly, committed: true }
         } else {
-            self.flow_children(&el.children, st, content_x, content_w, child_anchor, child_incoming)
+            self.flow_children(&el.children, st, el, content_x, content_w, child_anchor, child_incoming)
         };
         self.cb = prev_cb;
 
@@ -1109,7 +1131,7 @@ impl Ctx<'_> {
                 if e.tag == "caption" {
                     let cs = style::resolve(e, st, self.theme, self.sheet, &self.path, &[], 0, self.viewport_w);
                     self.path.push(ElemInfo::of(e));
-                    y = self.layout_children(&e.children, &cs, x, w, y);
+                    y = self.layout_children(&e.children, &cs, e, x, w, y);
                     self.path.pop();
                 }
             }
@@ -1264,7 +1286,7 @@ impl Ctx<'_> {
                 let content_y = y + cs.border_top.width as i32 + cs.pad_top as i32;
                 let bg_idx = self.ops.len();
                 self.path.push(ElemInfo::of(row[c]));
-                let _ = self.layout_children(&row[c].children, cs, *content_x, *content_w, content_y);
+                let _ = self.layout_children(&row[c].children, cs, row[c], *content_x, *content_w, content_y);
                 self.path.pop();
                 if paint_cells {
                     self.paint_box_decoration(cs, *cell_x, y, colw[c], row_h, bg_idx);
@@ -1280,7 +1302,7 @@ impl Ctx<'_> {
     fn measure_children_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let (o, l) = (self.ops.len(), self.links.len());
         self.path.push(ElemInfo::of(el));
-        let bottom = self.layout_children(&el.children, st, x, w.max(0), y);
+        let bottom = self.layout_children(&el.children, st, el, x, w.max(0), y);
         self.path.pop();
         self.ops.truncate(o);
         self.links.truncate(l);
@@ -2400,6 +2422,11 @@ impl Ctx<'_> {
             return;
         }
         let href = if st.is_link { el.attr("href").or(href) } else { href };
+        // `el::before` — same anonymous-inline-box treatment as the block
+        // path (`flow_children`), just feeding this inline run instead.
+        if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::Before) {
+            inline.text(self.font, &text, &ps, href);
+        }
         for c in &el.children {
             match c {
                 Node::Text(t) => inline.text(self.font, t, st, href),
@@ -2419,6 +2446,9 @@ impl Ctx<'_> {
                     self.path.pop();
                 }
             }
+        }
+        if let Some((text, ps)) = self.pseudo(el, st, PseudoElem::After) {
+            inline.text(self.font, &text, &ps, href);
         }
     }
 }

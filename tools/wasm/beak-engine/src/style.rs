@@ -15,7 +15,7 @@
 
 use alloc::string::String;
 
-use crate::css::{ElemInfo, Stylesheet};
+use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::Element;
 use crate::layout::{Rgb, Theme};
 
@@ -398,22 +398,13 @@ impl ComputedStyle {
 
 pub const BASE_FONT_PX: f32 = 16.0;
 
-/// Resolve an element's computed style by the cascade: inherit from `parent`,
-/// apply the UA rule for its tag, then matching author `<style>` rules (by
-/// specificity + order), then any inline `style="…"` (highest). `ancestors` is
-/// the root→…→parent chain, for descendant/child selector matching.
-pub fn resolve(
-    el: &Element,
-    parent: &ComputedStyle,
-    theme: &Theme,
-    sheet: &Stylesheet,
-    ancestors: &[ElemInfo],
-    prev_siblings: &[ElemInfo],
-    sib_count: u32,
-    viewport_w: f32,
-) -> ComputedStyle {
-    // Start from the inherited slice; reset the non-inherited slice to initial.
-    let mut s = ComputedStyle {
+/// The starting point for any freshly-resolved style: the inherited slice
+/// copied from `parent`, non-inherited properties reset to their CSS initial
+/// value. Shared by `resolve()` (a real element) and `resolve_pseudo()` (a
+/// `::before`/`::after` generated box, which inherits from its originating
+/// element the same way a child would).
+fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
+    ComputedStyle {
         font_px: parent.font_px,
         bold: parent.bold,
         italic: parent.italic,
@@ -486,7 +477,24 @@ pub fn resolve(
         clear: ClearKind::None,
         clip: Clip::Auto,
         table_layout: TableLayout::Auto,
-    };
+    }
+}
+
+/// Resolve an element's computed style by the cascade: inherit from `parent`,
+/// apply the UA rule for its tag, then matching author `<style>` rules (by
+/// specificity + order), then any inline `style="…"` (highest). `ancestors` is
+/// the root→…→parent chain, for descendant/child selector matching.
+pub fn resolve(
+    el: &Element,
+    parent: &ComputedStyle,
+    theme: &Theme,
+    sheet: &Stylesheet,
+    ancestors: &[ElemInfo],
+    prev_siblings: &[ElemInfo],
+    sib_count: u32,
+    viewport_w: f32,
+) -> ComputedStyle {
+    let mut s = inherit_reset(parent);
     ua_rule(&el.tag, parent, theme, &mut s);
 
     // Author `<style>` rules, applied low→high specificity (ties: doc order).
@@ -514,6 +522,148 @@ pub fn resolve(
         s.z_index = parent.z_index;
     }
     s
+}
+
+/// Resolve `el`'s `::before`/`::after` generated box: the winning `content`
+/// declaration (by the same specificity/order cascade as any other property)
+/// plus the pseudo-element's own computed style. Returns `None` when there is
+/// no matching rule, `content` is `none`/`normal`/unparseable (`attr()`,
+/// `counter()`, `open-quote`, `url()`, … are out of scope — CONFORMANCE.md's
+/// forward-compatible rule: produce nothing rather than mis-render), or the
+/// pseudo box itself computes to `display: none`.
+///
+/// `own` is `el`'s OWN already-resolved computed style — the pseudo box
+/// inherits from it exactly as a real child element would.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_pseudo(
+    el: &Element,
+    own: &ComputedStyle,
+    theme: &Theme,
+    sheet: &Stylesheet,
+    ancestors: &[ElemInfo],
+    prev_siblings: &[ElemInfo],
+    sib_count: u32,
+    viewport_w: f32,
+    pseudo: PseudoElem,
+) -> Option<(String, ComputedStyle)> {
+    if sheet.is_empty() {
+        return None;
+    }
+    let info = ElemInfo::of(el);
+    let mut matched = sheet.matched_pseudo(&info, ancestors, prev_siblings, sib_count, viewport_w, pseudo);
+    if matched.is_empty() {
+        return None;
+    }
+    matched.sort_by_key(|(spec, order, _)| (*spec, *order));
+    // The winning `content` value: later (higher-specificity/later-order)
+    // declarations override earlier ones, same as every other property.
+    let mut content_val: Option<&str> = None;
+    for (_, _, decls) in &matched {
+        for (p, v) in *decls {
+            if p == "content" {
+                content_val = Some(v.as_str());
+            }
+        }
+    }
+    let text = parse_content_string(content_val?)?;
+    let mut s = inherit_reset(own);
+    for (_, _, decls) in &matched {
+        for (p, v) in *decls {
+            if p != "content" {
+                apply_one(p, v, theme, &mut s);
+            }
+        }
+    }
+    // Layout only knows how to place the pseudo box as an anonymous INLINE
+    // text run (see `layout.rs`'s `pseudo()`); `display: none` produces no
+    // box. Any other display (`block`, `list-item`, …) is a box shape we
+    // don't lay out here — CONFORMANCE.md's forward-compatible rule: produce
+    // nothing rather than render it wrong. An explicit `width`/`height` is
+    // the same story a level down: `display: inline-block` computes to the
+    // same `Display::Inline` this engine uses for plain inline text (no
+    // separate inline-block box type), so a sized spacer (the common
+    // `content: "…"; display: inline-block; width: N%` idiom some reftest
+    // references use as an indent/spacer trick) would otherwise flow as
+    // plain unsized text instead of reserving that width — visibly wrong,
+    // so skip it too.
+    if s.display != Display::Inline || s.width != Len::Auto || s.height != Len::Auto {
+        return None;
+    }
+    Some((text, s))
+}
+
+/// Parse a CSS `content` value that is one or more concatenated `<string>`
+/// tokens (`"a" 'b'`) into the literal text they produce. Any other component
+/// (`attr()`, `counter()`/`counters()`, `open-quote`/`close-quote`/…,
+/// `url()`) is out of scope: rather than mis-render, the whole value produces
+/// no content — the caller then generates nothing, per CONFORMANCE.md's
+/// forward-compatible rule. `none`/`normal` also produce nothing (no box).
+///
+/// Handles css-syntax-3 §4.3.7 string escapes: `\` + 1-6 hex digits (+ one
+/// optional trailing whitespace) is a code point (`\A` = U+000A, the common
+/// "forced line break" idiom in generated content); `\` + an actual newline
+/// is a line continuation (produces nothing); `\` + any other character is
+/// that literal character.
+pub fn parse_content_string(v: &str) -> Option<String> {
+    let v = v.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
+        return None;
+    }
+    let mut out = String::new();
+    let mut chars = v.chars().peekable();
+    let mut any = false;
+    loop {
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        let Some(&q) = chars.peek() else { break };
+        if q != '"' && q != '\'' {
+            // Anything that isn't a quoted string (`attr(...)`, `counter(...)`,
+            // `open-quote`, a bare `url(...)`, …) — unsupported, so the whole
+            // value contributes nothing rather than a mangled partial string.
+            return None;
+        }
+        chars.next(); // opening quote
+        loop {
+            match chars.next() {
+                None => return None, // unterminated string → invalid value
+                Some(c) if c == q => break,
+                Some('\\') => match chars.peek().copied() {
+                    None => {}
+                    Some(c) if c == '\n' => {
+                        chars.next(); // escaped newline: line continuation, no output
+                    }
+                    Some(c) if c.is_ascii_hexdigit() => {
+                        let mut hex = String::new();
+                        while hex.len() < 6 {
+                            match chars.peek() {
+                                Some(h) if h.is_ascii_hexdigit() => {
+                                    hex.push(*h);
+                                    chars.next();
+                                }
+                                _ => break,
+                            }
+                        }
+                        if let Some(&w) = chars.peek() {
+                            if w.is_whitespace() {
+                                chars.next(); // one trailing whitespace terminates the escape
+                            }
+                        }
+                        if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            out.push(ch);
+                        }
+                    }
+                    Some(c) => {
+                        out.push(c);
+                        chars.next();
+                    }
+                },
+                Some(c) => out.push(c),
+            }
+        }
+        any = true;
+    }
+    if any { Some(out) } else { None }
 }
 
 /// The UA default stylesheet (HTML rendering §15), expressed as code over the
@@ -693,9 +843,15 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.font_px = px.clamp(6.0, 200.0);
             }
         }
-        "white-space" => {
-            s.pre = matches!(v.as_str(), "pre" | "pre-wrap" | "pre-line");
-        }
+        "white-space" => match v.as_str() {
+            "pre" | "pre-wrap" | "pre-line" => s.pre = true,
+            "normal" | "nowrap" => s.pre = false,
+            // `inherit`/`unset`/garbage: an invalid or non-recomputable value
+            // drops (CSS Syntax 3 §4), keeping whatever the cascade already
+            // set — for `inherit` specifically, that's already the parent's
+            // value, since `pre` is copied from `parent` before this runs.
+            _ => {}
+        },
         "font-family" => {
             s.mono = v.contains("mono") || v.contains("courier") || v.contains("consol");
         }
