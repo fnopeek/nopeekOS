@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 const MODULE_HOST: &str = "raw.githubusercontent.com";
 const MODULE_BASE: &str = "/fnopeek/nopeekOS/main/release/modules";
-const MAX_MODULE_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+const MAX_MODULE_SIZE: usize = 16 * 1024 * 1024; // 16 MB (buffer is min(content_length, cap), so no waste)
 const MAX_MANIFEST_SIZE: usize = 8192;
 const MAX_SIG_SIZE: usize = 512;
 
