@@ -611,7 +611,7 @@ impl Ctx<'_> {
             // containing-block-relative position, not advancing the flow.
             if matches!(st.position, Position::Absolute | Position::Fixed) {
                 self.path.push(ElemInfo::of(el));
-                self.layout_abs(el, &st);
+                self.layout_abs(el, &st, x, anchor + open.value() as i32);
                 self.path.pop();
                 continue;
             }
@@ -886,7 +886,7 @@ impl Ctx<'_> {
     /// from the containing block (`self.cb`) + `top`/`left`/`right`. `bottom`
     /// needs the CB height (unknown mid-flow) and is not resolved yet. The
     /// element is `el`, already pushed onto `self.path` by the caller.
-    fn layout_abs(&mut self, el: &Element, st: &ComputedStyle) {
+    fn layout_abs(&mut self, el: &Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
         let (cbx, cby, cbw) = self.cb;
         let avail = cbw as f32;
         let left = st.left.px(avail);
@@ -896,14 +896,21 @@ impl Ctx<'_> {
             (None, Some(l), Some(r)) => (avail - l - r).max(0.0),
             _ => self.intrinsic_width(el).0.min(avail), // shrink-to-fit
         };
+        // Horizontal: an offset pins to the CB edge; with both `left`/`right`
+        // auto the box keeps its **static position** (CSS2.1 §10.3.7).
         let px = if let Some(l) = left {
             cbx as f32 + l
         } else if let Some(r) = right {
             cbx as f32 + avail - r - width
         } else {
-            cbx as f32
+            static_x as f32
         };
-        let py = cby as f32 + st.top.px(avail).unwrap_or(0.0);
+        // Vertical: `top` pins to the CB top; auto `top` → static position
+        // (§10.6.4). (Explicit `bottom` needs the CB height, not yet tracked.)
+        let py = match st.top.px(avail) {
+            Some(t) => cby as f32 + t,
+            None => static_y as f32,
+        };
         // layout_box → layout_block re-establishes the CB for its own children.
         let w_i = width.max(1.0) as i32;
         let start = self.ops.len();
@@ -1356,7 +1363,7 @@ impl Ctx<'_> {
                 }
                 if matches!(cs.position, Position::Absolute | Position::Fixed) {
                     self.path.push(ElemInfo::of(ce));
-                    self.layout_abs(ce, &cs);
+                    self.layout_abs(ce, &cs, self.cb.0, self.cb.1);
                     self.path.pop();
                     continue;
                 }
@@ -1696,7 +1703,7 @@ impl Ctx<'_> {
                 }
                 if matches!(cs.position, Position::Absolute | Position::Fixed) {
                     self.path.push(ElemInfo::of(ce));
-                    self.layout_abs(ce, &cs);
+                    self.layout_abs(ce, &cs, self.cb.0, self.cb.1);
                     self.path.pop();
                     continue;
                 }
