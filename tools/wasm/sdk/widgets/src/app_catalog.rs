@@ -7,7 +7,7 @@
 //! the browser). Both `drun` and `dock` consume this so they show the
 //! same set of launchable apps.
 //!
-//! wasm32-only: it calls the `npk_list_modules` / `npk_fetch` host fns,
+//! wasm32-only: it calls the `npk_list_modules` / `npk_app_meta` host fns,
 //! so it's compiled out of host-side test builds of the SDK.
 
 use alloc::string::{String, ToString};
@@ -18,7 +18,11 @@ use crate::app_meta::{self, AppMeta, IconRef};
 
 unsafe extern "C" {
     fn npk_list_modules(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    // Kernel extracts just the `.npk.app_meta` custom section of sys/wasm/<name>
+    // and copies it here — no whole-module fetch, so module size is irrelevant
+    // (beak is >2 MB of embedded fonts; the old whole-module reader truncated it
+    // and dropped the app from the catalog).
+    fn npk_app_meta(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
 }
 
 /// What a catalog entry launches.
@@ -46,11 +50,10 @@ pub struct AppEntry {
 const LIST_BUF_SIZE: usize = 4096;
 static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
 
-// 2 MB covers every first-party module including wifi (~1.5 MB). Reused
-// per hydrate call — only the meta bytes are extracted, then the wasm
-// is discarded before the next fetch.
-const WASM_FETCH_BUF_SIZE: usize = 2 * 1024 * 1024;
-static mut WASM_FETCH_BUF: [u8; WASM_FETCH_BUF_SIZE] = [0; WASM_FETCH_BUF_SIZE];
+// The kernel returns just the app_meta payload (name + description + icon),
+// tens of bytes — 4 KB is ample and independent of module size.
+const META_BUF_SIZE: usize = 4096;
+static mut META_BUF: [u8; META_BUF_SIZE] = [0; META_BUF_SIZE];
 
 /// System / background / dev modules that are never user-launchable apps, so
 /// they don't clutter the launcher or dock. (Panels dock/bar/drun are excluded
@@ -116,19 +119,17 @@ fn hydrate_module(module_name: &str) -> Option<AppEntry> {
 }
 
 fn read_meta(name: &str) -> Option<AppMeta> {
-    let path = alloc::format!("sys/wasm/{}", name);
-    let buf_ptr = core::ptr::addr_of_mut!(WASM_FETCH_BUF) as *mut u8;
+    let buf_ptr = core::ptr::addr_of_mut!(META_BUF) as *mut u8;
     let n = unsafe {
-        npk_fetch(
-            path.as_ptr() as i32,
-            path.len() as i32,
+        npk_app_meta(
+            name.as_ptr() as i32,
+            name.len() as i32,
             buf_ptr as i32,
-            WASM_FETCH_BUF_SIZE as i32,
+            META_BUF_SIZE as i32,
         )
     };
     if n <= 0 { return None; }
-    let wasm = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    let meta_bytes = extract_custom_section(wasm, ".npk.app_meta")?;
+    let meta_bytes = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     app_meta::decode(meta_bytes).ok()
 }
 
@@ -137,47 +138,4 @@ fn icon_ref_to_id(r: &IconRef) -> IconId {
     match r {
         IconRef::Builtin(id) => *id,
     }
-}
-
-fn extract_custom_section<'a>(wasm: &'a [u8], target: &str) -> Option<&'a [u8]> {
-    if wasm.len() < 8 { return None; }
-    if &wasm[0..4] != b"\0asm" { return None; }
-    if &wasm[4..8] != &[0x01, 0x00, 0x00, 0x00] { return None; }
-    let mut cur = &wasm[8..];
-    while !cur.is_empty() {
-        let section_id = cur[0];
-        cur = &cur[1..];
-        let (size, consumed) = read_leb128_u32(cur)?;
-        cur = &cur[consumed..];
-        if size as usize > cur.len() { return None; }
-        let (payload, rest) = cur.split_at(size as usize);
-        cur = rest;
-        if section_id != 0 { continue; }
-        let (name_len, consumed) = match read_leb128_u32(payload) {
-            Some(p) => p,
-            None => continue,
-        };
-        let name_end = consumed + name_len as usize;
-        if name_end > payload.len() { continue; }
-        if &payload[consumed..name_end] == target.as_bytes() {
-            return Some(&payload[name_end..]);
-        }
-    }
-    None
-}
-
-fn read_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
-    let mut result: u32 = 0;
-    let mut shift: u32 = 0;
-    for (i, &b) in buf.iter().enumerate() {
-        if shift >= 32 { return None; }
-        let payload = (b & 0x7F) as u32;
-        if shift == 28 && (payload & !0x0F) != 0 { return None; }
-        result |= payload << shift;
-        if (b & 0x80) == 0 {
-            return Some((result, i + 1));
-        }
-        shift += 7;
-    }
-    None
 }
