@@ -68,9 +68,9 @@ pub fn resolve(token: Token) -> u32 {
     let t = if is_light { &LIGHT } else { &DARK };
 
     match token {
-        Token::Surface         => t.surface,
-        Token::SurfaceElevated => t.surface_elevated,
-        Token::SurfaceMuted    => t.surface_muted,
+        Token::Surface         => glass(t.surface, is_light),
+        Token::SurfaceElevated => glass(t.surface_elevated, is_light),
+        Token::SurfaceMuted    => glass(t.surface_muted, is_light),
         Token::Border          => t.border,
         Token::OnSurface       => t.on_surface,
         Token::OnSurfaceMuted  => t.on_surface_muted,
@@ -82,6 +82,34 @@ pub fn resolve(token: Token) -> u32 {
         Token::AccentMuted     => accent_muted(t.surface),
         Token::OnAccent        => on_accent(t.surface),
     }
+}
+
+/// A translucent glass-fill surface (Surface / SurfaceElevated / SurfaceMuted).
+/// In light mode these are near-white and, blended over a bright wallpaper,
+/// wash out / glare. Darken them proportionally to the wallpaper's overall
+/// luminance so every glass surface (loop, dock, bar, widget apps) keeps a
+/// steady readable tone regardless of how bright the background is. Dark mode
+/// (dark wallpapers) never had the problem, so it's left untouched.
+fn glass(color: u32, is_light: bool) -> u32 {
+    if !is_light { return color; }
+    let shift = light_glass_shift();
+    if shift == 0 { return color; }
+    darken(color, shift.min(255) as u8)
+}
+
+/// How many 0..255 steps to darken a light glass surface, driven by the
+/// wallpaper's overall luminance. Only bright wallpapers (from ~140 up) darken,
+/// ramping to full strength at pure white. Strength is tunable live via
+/// `set shade.light_tint <0..100>` (0 = off, 100 = maximum) without a rebuild.
+fn light_glass_shift() -> u32 {
+    let strength = crate::config::get("shade.light_tint")
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(70)
+        .min(100);
+    if strength == 0 { return 0; }
+    let l = crate::theme::avg_luminance() as u32; // 0..255
+    let over = l.saturating_sub(140); // 0..115; only bright wallpapers darken
+    (over * strength) / 100
 }
 
 pub fn is_light_theme() -> bool {
