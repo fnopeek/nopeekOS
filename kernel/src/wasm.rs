@@ -1275,6 +1275,56 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1
+    // Returns ONLY the `.npk.app_meta` custom-section payload of the module
+    // `sys/wasm/<name>`, extracted kernel-side. Launchers (drun/dock) read an
+    // app's icon/name/description with this WITHOUT fetching the whole module
+    // — beak carries >2 MB of embedded fonts, and the old client-side reader
+    // fetched the full wasm into a fixed 2 MB buffer, truncating beak so its
+    // trailing app_meta section was lost → the app vanished from the catalog.
+    // `name` is confined to a bare child of `sys/wasm/` (no path traversal).
+    // RENDER-gated like npk_list_modules.
+    linker.func_wrap("env", "npk_app_meta",
+        |mut caller: Caller<'_, HostState>, name_ptr: i32, name_len: i32,
+         buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+                return -1;
+            }
+            if name_len <= 0 || name_len > 64 || buf_max <= 0 { return -1; }
+
+            let name = match read_wasm_str(&caller, name_ptr, name_len) {
+                Some(s) => s,
+                None => return -1,
+            };
+            // Confine to sys/wasm/<bare-name>: reject any separator so a caller
+            // can't traverse out of the module directory.
+            if name.contains('/') { return -1; }
+            let path = alloc::format!("sys/wasm/{}", name);
+
+            let (content, _) = match crate::npkfs::fetch(&path) {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+
+            let meta = match extract_wasm_custom_section(&content, ".npk.app_meta") {
+                Some(m) => m,
+                None => return -1,
+            };
+
+            let write_len = meta.len().min(buf_max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            if start + write_len > data.len() { return -1; }
+            data[start..start + write_len].copy_from_slice(&meta[..write_len]);
+            write_len as i32
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_spawn_module(name_ptr, name_len) -> i32
     // Launch `sys/wasm/<name>` in a fresh terminal window and focus it.
     //
@@ -3326,6 +3376,54 @@ fn read_wasm_str(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Option<S
     let mut buf = alloc::vec![0u8; end - start];
     buf.copy_from_slice(&data[start..end]);
     core::str::from_utf8(&buf).ok().map(String::from)
+}
+
+/// Extract a WASM custom section's payload by name, walking the module header.
+/// Kernel-side counterpart to the reader that used to live in the SDK's
+/// app_catalog — here the whole (possibly multi-MB) module is available, so a
+/// section at the tail (like `.npk.app_meta`) is always found regardless of
+/// module size.
+fn extract_wasm_custom_section<'a>(wasm: &'a [u8], target: &str) -> Option<&'a [u8]> {
+    if wasm.len() < 8 || &wasm[0..4] != b"\0asm" || wasm[4..8] != [1, 0, 0, 0] {
+        return None;
+    }
+    let mut cur = &wasm[8..];
+    while !cur.is_empty() {
+        let section_id = cur[0];
+        cur = &cur[1..];
+        let (size, consumed) = read_wasm_leb128_u32(cur)?;
+        cur = &cur[consumed..];
+        if size as usize > cur.len() { return None; }
+        let (payload, rest) = cur.split_at(size as usize);
+        cur = rest;
+        if section_id != 0 { continue; } // custom sections only
+        let (name_len, nconsumed) = match read_wasm_leb128_u32(payload) {
+            Some(p) => p,
+            None => continue,
+        };
+        let name_end = nconsumed + name_len as usize;
+        if name_end > payload.len() { continue; }
+        if &payload[nconsumed..name_end] == target.as_bytes() {
+            return Some(&payload[name_end..]);
+        }
+    }
+    None
+}
+
+fn read_wasm_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
+    let mut result: u32 = 0;
+    let mut shift: u32 = 0;
+    for (i, &b) in buf.iter().enumerate() {
+        if shift >= 32 { return None; }
+        let payload = (b & 0x7F) as u32;
+        if shift == 28 && (payload & !0x0F) != 0 { return None; }
+        result |= payload << shift;
+        if (b & 0x80) == 0 {
+            return Some((result, i + 1));
+        }
+        shift += 7;
+    }
+    None
 }
 
 /// True if the calling WASM app owns the currently-focused widget window.
