@@ -60,6 +60,12 @@ impl Engine {
     pub fn images_begin(&mut self) {
         self.images.clear();
         self.img_budget = crate::image::TOTAL_BUDGET;
+        // Drop the previous page's rasterised glyphs. The cache is keyed by
+        // (char, size, face) and never evicts, so without this it grows across
+        // every navigation (and every distinct font size) until the heap OOMs.
+        // Bounding it to one page's working set costs only a lazy re-rasterise
+        // of the visible glyphs on the first paint after a nav.
+        self.glyphs.get_mut().clear();
     }
 
     /// Decode ONE image and store it under `src`. The compressed `bytes` are
