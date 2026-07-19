@@ -105,8 +105,12 @@ static CHROME_CACHE: spin::Mutex<Option<ChromeCache>> = spin::Mutex::new(None);
 fn chrome_key(x: u32, y: u32, w: u32, h: u32, focused: bool,
               ba: u32, bb: u32, b_op: u32, content_bg: u32, content_opacity: u32,
               rounding: u32, border: u32) -> u64 {
+    // The wallpaper generation is part of the key: the glass is composited over
+    // the backdrop pixels, so a same-theme wallpaper swap (which leaves every
+    // colour/geometry field unchanged) must still miss the cache and re-blend.
+    let wp_gen = crate::gui::background::wallpaper_generation();
     let mut k = 0xcbf29ce484222325u64;
-    for v in [x, y, w, h, focused as u32, ba, bb, b_op, content_bg, content_opacity, rounding, border] {
+    for v in [x, y, w, h, focused as u32, ba, bb, b_op, content_bg, content_opacity, rounding, border, wp_gen] {
         k ^= v as u64;
         k = k.wrapping_mul(0x0000_0100_0000_01b3);
     }

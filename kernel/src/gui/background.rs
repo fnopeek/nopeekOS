@@ -6,7 +6,7 @@
 //! 2. A user-supplied wallpaper copied in from `wallpaper.wasm`,
 //!    which also extracts a 16-colour theme palette via theme::.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::framebuffer::FbInfo;
 
 /// Default dark-grey background pixel (0xAARRGGBB).
@@ -20,6 +20,20 @@ static mut WALLPAPER: *mut u8 = core::ptr::null_mut();
 static mut WALLPAPER_W: u32 = 0;
 static mut WALLPAPER_H: u32 = 0;
 static WALLPAPER_SET: AtomicBool = AtomicBool::new(false);
+
+/// Bumped every time the wallpaper pixels change. Mixed into the compositor's
+/// translucent-glass cache key so a same-theme wallpaper swap invalidates it
+/// (the key otherwise tracks colour/geometry only, not the backdrop pixels —
+/// and set_wallpaper overwrites the buffer IN PLACE, so clearing the cache
+/// alone races a cross-core re-store under the unchanged key). Bump AFTER the
+/// pixel write with Release: a core that Acquire-observes the new generation
+/// also observes the finished new pixels.
+static WALLPAPER_GEN: AtomicU32 = AtomicU32::new(0);
+
+/// Generation counter of the active wallpaper (see WALLPAPER_GEN).
+pub fn wallpaper_generation() -> u32 {
+    WALLPAPER_GEN.load(Ordering::Acquire)
+}
 
 pub fn init() {}
 
@@ -83,6 +97,9 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
         WALLPAPER_H = target_h;
     }
     WALLPAPER_SET.store(true, Ordering::Release);
+    // After the pixels are fully written: invalidate the glass cache by moving
+    // the generation forward (Release pairs with the Acquire in the cache key).
+    WALLPAPER_GEN.fetch_add(1, Ordering::Release);
 
     let pixel_count = (w * h) as usize;
     let palette = crate::theme::extract_palette(pixels, pixel_count);
