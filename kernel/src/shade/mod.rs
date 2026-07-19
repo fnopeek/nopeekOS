@@ -342,6 +342,11 @@ pub fn force_redraw() {
     // Invalidate input line cache — will be rebuilt by render_window
     terminal::invalidate_input_cache();
 
+    // Drop the terminal-glass cache: its key doesn't track the wallpaper behind
+    // the translucent surface, so a same-theme wallpaper swap would keep the old
+    // backdrop until a theme change. A full redraw must re-composite the glass.
+    compositor::clear_chrome_cache();
+
     // Re-render background into Layer 0 if layers are active
     if crate::layers::is_initialized() {
         if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
