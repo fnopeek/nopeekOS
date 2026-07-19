@@ -1629,5 +1629,6 @@ pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)]
         ("shade.bar_margin", "6", "Bar strut gap to screen edge (px); bar.wasm reports its own height"),
         ("shade.rounding", "10", "Window corner radius (px at 1x)"),
         ("shade.opacity", "160", "Window background opacity (0-256, lower=more transparent)"),
+        ("shade.light_tint", "70", "Darken glass on bright wallpapers (0-100, light mode; higher=darker)"),
     ]
 }

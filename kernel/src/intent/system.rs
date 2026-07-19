@@ -1320,6 +1320,13 @@ pub fn intent_set(args: &str) {
         }
         crate::config::set(key, value);
         kprintln!("[npk] {} = {}", key, value);
+        // Live-apply rendering keys read fresh each frame (e.g.
+        // shade.light_tint) so tuning shows at once, not on the next
+        // incidental redraw. Struct-cached keys (opacity) still need a
+        // compositor rebuild — unchanged.
+        if key.starts_with("shade.") || key == "theme" {
+            crate::shade::force_redraw();
+        }
     } else {
         kprintln!("[npk] Usage: set <key> <value>");
         kprintln!("[npk] Keys: timezone, keyboard, lang");

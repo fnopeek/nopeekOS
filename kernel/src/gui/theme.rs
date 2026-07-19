@@ -3,7 +3,7 @@
 //! Colors are extracted via Median-Cut quantization from raw pixel data.
 //! The palette drives border gradients, shadebar, accent colors, etc.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// 16-color theme palette (pywal-compatible ordering).
 /// color0 = darkest (background), color1..7 = dominant, color8..15 = bright variants.
@@ -14,6 +14,12 @@ static mut BORDER_GRADIENT: (u32, u32) = (0, 0);
 
 /// Whether a custom theme is active (vs. aurora default).
 static THEME_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Wallpaper's overall average luminance (0..255), measured over the whole
+/// sampled image in `extract_palette`. Drives the light-mode glass tint so a
+/// bright wallpaper darkens the translucent surfaces instead of washing them
+/// out (see `shade::widgets::palette::resolve`). 0 until a wallpaper is set.
+static AVG_LUMINANCE: AtomicU32 = AtomicU32::new(0);
 
 /// Set the full 16-color palette and derive border gradient.
 pub fn set_palette(colors: &[u32; 16]) {
@@ -66,6 +72,11 @@ pub fn bg_color() -> u32 {
     unsafe { PALETTE[0] }
 }
 
+/// Wallpaper's overall average luminance (0..255); 0 if no wallpaper analysed.
+pub fn avg_luminance() -> u8 {
+    AVG_LUMINANCE.load(Ordering::Acquire) as u8
+}
+
 /// Get accent color (color1 — primary dominant).
 pub fn accent() -> u32 {
     unsafe { PALETTE[1] }
@@ -99,17 +110,28 @@ pub fn extract_palette(pixels: &[u8], pixel_count: usize) -> [u32; 16] {
     // Sample pixels (skip transparent, near-black, near-white)
     let mut samples = alloc::vec::Vec::new();
     let step = (pixel_count / 8192).max(1); // Sample ~8k pixels max
+    // Overall brightness = mean luminance over ALL sampled pixels, including
+    // the near-black / near-white ones the theming pass skips — that is the
+    // wallpaper's true perceived brightness, which the glass tint scales on.
+    let mut lum_sum: u64 = 0;
+    let mut lum_n: u64 = 0;
     for i in (0..pixel_count).step_by(step) {
         let off = i * 4;
         if off + 3 >= pixels.len() { break; }
         let b = pixels[off] as u32;
         let g = pixels[off + 1] as u32;
         let r = pixels[off + 2] as u32;
-        // Skip near-black and near-white (not useful for theming)
         let lum = (r * 299 + g * 587 + b * 114) / 1000;
+        lum_sum += lum as u64;
+        lum_n += 1;
+        // Skip near-black and near-white (not useful for theming)
         if lum < 15 || lum > 240 { continue; }
         samples.push((r, g, b));
     }
+    AVG_LUMINANCE.store(
+        if lum_n > 0 { (lum_sum / lum_n) as u32 } else { 0 },
+        Ordering::Release,
+    );
 
     if samples.is_empty() {
         return default_palette();
