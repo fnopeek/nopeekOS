@@ -977,6 +977,17 @@ impl Compositor {
                 .map(|w| w.id);
             if let Some(fid) = self.focused {
                 self.set_focused_flag(fid);
+                // Point ACTIVE_IDX + the cursor at the newly-focused window,
+                // same as focus_window. Without this, closing the focused
+                // window (Mod+Q or `exit`) leaves ACTIVE_IDX on the just-freed
+                // terminal → the loop serves a phantom terminal and its
+                // input/output/cursor fall through to the serial console.
+                if let Some(win) = self.windows.iter().find(|w| w.id == fid) {
+                    if win.kind == crate::shade::window::WindowKind::Terminal {
+                        terminal::set_active_terminal(win.terminal_idx);
+                        terminal::restore_cursor();
+                    }
+                }
             }
         }
 
