@@ -772,12 +772,15 @@ fn poll_event() -> PollResult {
     }
 }
 
-// ── Heap: a real free-list allocator (32 MB). The font (persistent) + each
+// ── Heap: a real free-list allocator. The six font faces (persistent) + each
 //    frame's layout + paint buffer are freed on drop, unlike a bump heap. ───
 
-// 64 MB: fits the font + layout + per-frame paint buffer + decoded page images
-// (the image decode budget is ~24 MB; a bump from 32 MB gives headroom).
-const HEAP_SIZE: usize = 64 * 1024 * 1024;
+// 128 MB: 64 MB was too tight for one heavy page — the image budget alone is
+// 24 MB, the six faces parse to ~6 MB, plus paint buffer + layout + glyph cache
+// + transient DOM/CSS peaked over the cap (OOM on real sites). wasmi backs the
+// linear memory with one contiguous alloc, so 128 MB is the safe headroom step;
+// go higher only if a specific page still trips it.
+const HEAP_SIZE: usize = 128 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 #[global_allocator]
