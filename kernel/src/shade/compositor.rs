@@ -159,6 +159,14 @@ fn chrome_cache_store(key: u64, x: u32, y: u32, w: u32, h: u32, shadow: *const u
     *CHROME_CACHE.lock() = Some(ChromeCache { key, w, h, px });
 }
 
+/// Drop the cached terminal-glass blit. The cache key covers colour/geometry
+/// but NOT the wallpaper pixels behind the translucent surface, so a same-theme
+/// wallpaper swap would otherwise keep compositing the old backdrop. Called on
+/// every full redraw (theme OR wallpaper change) to force a fresh composite.
+pub fn clear_chrome_cache() {
+    *CHROME_CACHE.lock() = None;
+}
+
 /// `render_window` so it sits over the window content. No disc / colour
 /// highlight (Florian's call): just the glyph, a touch larger so it reads
 /// as a button. The glyph takes the theme's `OnSurface` colour so it stays
