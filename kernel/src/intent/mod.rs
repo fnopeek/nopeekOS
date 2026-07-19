@@ -1429,6 +1429,23 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             continue;
         }
 
+        if input == "exit" || input == "quit" {
+            // Close this loop's window. Reuse the Mod+Q (CloseWindow) path:
+            // sync the session to the terminal buffer, close the focused
+            // window, then `continue` so run_loop re-acquires the now-focused
+            // terminal's session cleanly — never touching the &mut into
+            // SESSIONS that CloseWindow just freed ([[project-loop-pid-leak]]).
+            if crate::shade::is_active() {
+                sync_session_to_terminal(session);
+                crate::shade::handle_action(crate::shade::input::ShadeAction::CloseWindow);
+                continue;
+            }
+            // Serial console: no window to close.
+            kprintln!("exit: nothing to close on the serial console");
+            need_prompt = true;
+            continue;
+        }
+
         // Check if this intent can run on a worker core
         let verb = input.splitn(2, ' ').next().unwrap_or("");
         if !is_core0_intent(verb) && crate::shade::is_active() {
