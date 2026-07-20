@@ -234,6 +234,11 @@ pub enum ZIndex {
 pub struct ComputedStyle {
     // — inherited —
     pub font_px: f32,
+    /// The *parent's* font-size — the base for resolving this element's own
+    /// `font-size` in `em`/`%`/`inherit` (CSS: font-size em/% is parent-
+    /// relative, NOT relative to the value a UA/earlier rule already set).
+    /// Recomputed per element in `inherit_reset`; never compounds.
+    pub em_base: f32,
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
@@ -336,6 +341,7 @@ impl ComputedStyle {
     pub fn root(theme: &Theme) -> ComputedStyle {
         ComputedStyle {
             font_px: BASE_FONT_PX,
+            em_base: BASE_FONT_PX,
             bold: false,
             italic: false,
             mono: false,
@@ -422,6 +428,7 @@ pub const BASE_FONT_PX: f32 = 16.0;
 fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
     ComputedStyle {
         font_px: parent.font_px,
+        em_base: parent.font_px,
         bold: parent.bold,
         italic: parent.italic,
         mono: parent.mono,
@@ -881,7 +888,24 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.italic = matches!(v.as_str(), "italic" | "oblique");
         }
         "font-size" => {
-            if let Some(px) = parse_length(&v, s.font_px) {
+            // em/%/inherit/relative keywords resolve against the PARENT font
+            // (em_base), NOT the running value — so nothing compounds and a
+            // later cascade winner (incl. `inherit`) is exact, not multiplied.
+            let base = s.em_base;
+            let px = match v.as_str() {
+                "inherit" | "unset" => Some(base),
+                "xx-small" => Some(BASE_FONT_PX * 0.5625),
+                "x-small" => Some(BASE_FONT_PX * 0.625),
+                "small" => Some(BASE_FONT_PX * 0.8125),
+                "medium" => Some(BASE_FONT_PX),
+                "large" => Some(BASE_FONT_PX * 1.125),
+                "x-large" => Some(BASE_FONT_PX * 1.5),
+                "xx-large" => Some(BASE_FONT_PX * 2.0),
+                "larger" => Some(base * 1.2),
+                "smaller" => Some(base / 1.2),
+                _ => parse_length(&v, base),
+            };
+            if let Some(px) = px {
                 s.font_px = px.clamp(6.0, 200.0);
             }
         }
@@ -1514,8 +1538,13 @@ fn parse_track(t: &str) -> GridTrack {
         GridTrack::Fr(f.trim().parse().unwrap_or(1.0))
     } else if let Some(p) = t.strip_suffix('%') {
         GridTrack::Pct(p.trim().parse().unwrap_or(0.0))
-    } else if t.starts_with("minmax(") {
-        if t.contains("fr") { GridTrack::Fr(1.0) } else { GridTrack::Auto }
+    } else if let Some(inner) = t.strip_prefix("minmax(").and_then(|r| r.strip_suffix(')')) {
+        // minmax(min, max): size by the MAX (min=0 lets it shrink to fit). A
+        // bare max length must become a Fixed CAP — not unbounded `Auto`
+        // max-content, which blows a `minmax(0,59.25rem)` content column up to
+        // the whole article's unwrapped width.
+        let max_part = inner.split(',').nth(1).unwrap_or(inner).trim();
+        parse_track(max_part)
     } else {
         // A fixed length: px/rem/em/pt/cm/… (rem/em resolve against the root font).
         match parse_length(t, BASE_FONT_PX) {
@@ -1741,7 +1770,11 @@ fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
 fn parse_length(v: &str, em_base: f32) -> Option<f32> {
     let v = v.trim();
     // Font-relative first so "rem" is matched before the "em" suffix eats it.
-    if let Some(n) = v.strip_suffix("rem").or_else(|| v.strip_suffix("em")) {
+    // `rem` is ROOT-relative (not em_base) — else nested rem compounds wrongly.
+    if let Some(n) = v.strip_suffix("rem") {
+        return n.trim().parse::<f32>().ok().map(|f| f * BASE_FONT_PX);
+    }
+    if let Some(n) = v.strip_suffix("em") {
         return n.trim().parse::<f32>().ok().map(|f| f * em_base);
     }
     if let Some(n) = v.strip_suffix('%') {
