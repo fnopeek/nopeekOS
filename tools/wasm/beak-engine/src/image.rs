@@ -44,6 +44,8 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
         decode_png(bytes)
     } else if bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF] {
         decode_jpeg(bytes)
+    } else if crate::svg::looks_like_svg(bytes) {
+        crate::svg::render(bytes)
     } else {
         None
     }
