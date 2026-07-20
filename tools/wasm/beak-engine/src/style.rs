@@ -533,20 +533,42 @@ pub fn resolve(
     let mut s = inherit_reset(parent);
     ua_rule(&el.tag, parent, theme, &mut s);
 
-    // Author `<style>` rules, applied low→high specificity (ties: doc order).
+    // Author cascade WITH `!important` (CSS Cascade 4 §6.3): two passes. Normal
+    // declarations first (UA < author-normal < inline-normal), then `!important`
+    // on top (author-important < inline-important) — so an `!important` decl
+    // wins its property regardless of specificity/order.
+    let inline = el.attr("style");
     if !sheet.is_empty() {
         let info = ElemInfo::of(el);
         let mut matched = sheet.matched(&info, ancestors, prev_siblings, sib_count, viewport_w);
         matched.sort_by_key(|(spec, order, _)| (*spec, *order));
-        for (_, _, decls) in matched {
-            for (p, v) in decls {
-                apply_one(p, v, theme, &mut s);
+        // Pass 1 — normal <style> declarations, low→high specificity.
+        for (_, _, decls) in &matched {
+            for (p, v) in *decls {
+                let (val, imp) = split_important(v);
+                if !imp {
+                    apply_one(p, val, theme, &mut s);
+                }
             }
         }
-    }
-
-    if let Some(decls) = el.attr("style") {
-        apply_declarations(decls, theme, &mut s);
+        if let Some(decls) = inline {
+            apply_declarations_pass(decls, theme, &mut s, false);
+        }
+        // Pass 2 — `!important` <style> declarations, low→high specificity.
+        for (_, _, decls) in &matched {
+            for (p, v) in *decls {
+                let (val, imp) = split_important(v);
+                if imp {
+                    apply_one(p, val, theme, &mut s);
+                }
+            }
+        }
+        if let Some(decls) = inline {
+            apply_declarations_pass(decls, theme, &mut s, true);
+        }
+    } else if let Some(decls) = inline {
+        apply_declarations_pass(decls, theme, &mut s, false);
+        apply_declarations_pass(decls, theme, &mut s, true);
     }
     // `clip: inherit` takes the parent's computed value (clip is not inherited
     // by default, so this is resolved here rather than in the initial slice).
@@ -603,10 +625,16 @@ pub fn resolve_pseudo(
     }
     let text = parse_content_string(content_val?)?;
     let mut s = inherit_reset(own);
-    for (_, _, decls) in &matched {
-        for (p, v) in *decls {
-            if p != "content" {
-                apply_one(p, v, theme, &mut s);
+    for pass_imp in [false, true] {
+        for (_, _, decls) in &matched {
+            for (p, v) in *decls {
+                if p == "content" {
+                    continue;
+                }
+                let (val, imp) = split_important(v);
+                if imp == pass_imp {
+                    apply_one(p, val, theme, &mut s);
+                }
             }
         }
     }
@@ -832,18 +860,34 @@ fn heading(s: &mut ComputedStyle, theme: &Theme, em: f32, scale: f32, margin_em:
 /// declaration syntax (css-syntax-3), just without selectors — the same parser
 /// a `<style>` rule body will use. Unknown properties are ignored (forward
 /// compatible, like a browser).
-fn apply_declarations(decls: &str, theme: &Theme, s: &mut ComputedStyle) {
+/// Split a declaration value into (value, is_important). `!important` is a
+/// trailing flag (css-syntax-3): optional whitespace, then `!important`
+/// (case-insensitive).
+fn split_important(v: &str) -> (&str, bool) {
+    let t = v.trim_end();
+    let n = t.len();
+    if n >= 10 && t.is_char_boundary(n - 10) && t[n - 10..].eq_ignore_ascii_case("!important") {
+        (t[..n - 10].trim_end(), true)
+    } else {
+        (v, false)
+    }
+}
+
+/// Apply the `style="…"` declarations whose importance matches `important`, so
+/// callers run the two cascade passes. css-syntax-3 syntax, unknown props skipped.
+fn apply_declarations_pass(decls: &str, theme: &Theme, s: &mut ComputedStyle, important: bool) {
     for decl in decls.split(';') {
         let mut it = decl.splitn(2, ':');
         let prop = match it.next() {
             Some(p) => p.trim().to_ascii_lowercase(),
             None => continue,
         };
-        let val = match it.next() {
+        let raw = match it.next() {
             Some(v) => v.trim(),
             None => continue,
         };
-        if prop.is_empty() || val.is_empty() {
+        let (val, imp) = split_important(raw);
+        if prop.is_empty() || val.is_empty() || imp != important {
             continue;
         }
         apply_one(&prop, val, theme, s);
@@ -1892,6 +1936,27 @@ mod tests {
         let b = resolve(p2, &root, &theme, &sheet, &[], &[], 0, 1000.0);
         assert_eq!(b.color, Rgb(255, 0, 0));
         assert!(b.bold);
+    }
+
+    #[test]
+    fn important_beats_specificity_and_inline() {
+        let theme = Theme::DARK;
+        let root = ComputedStyle::root(&theme);
+        // !important on a low-specificity class beats a higher-specificity #id.
+        let dom = dom::parse("<body><p id=\"x\" class=\"b\">x</p></body>");
+        let sheet = css::parse("#x{color:#ff0000} .b{color:#00ff00 !important}");
+        let st = resolve(first_el(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0);
+        assert_eq!(st.color, Rgb(0, 255, 0), "!important beats #id specificity");
+        // author !important beats a normal inline style.
+        let dom2 = dom::parse("<body><p class=\"b\" style=\"color:#ff0000\">x</p></body>");
+        let sheet2 = css::parse(".b{color:#00ff00 !important}");
+        let st2 = resolve(first_el(&dom2), &root, &theme, &sheet2, &[], &[], 0, 1000.0);
+        assert_eq!(st2.color, Rgb(0, 255, 0), "author !important beats inline normal");
+        // a later normal declaration must NOT override an earlier !important.
+        let dom3 = dom::parse("<body><p class=\"b\">x</p></body>");
+        let sheet3 = css::parse(".b{color:#00ff00 !important} p{color:#ff0000}");
+        let st3 = resolve(first_el(&dom3), &root, &theme, &sheet3, &[], &[], 0, 1000.0);
+        assert_eq!(st3.color, Rgb(0, 255, 0), "normal cannot override !important");
     }
 
     #[test]
