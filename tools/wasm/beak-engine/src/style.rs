@@ -239,6 +239,8 @@ pub struct ComputedStyle {
     /// relative, NOT relative to the value a UA/earlier rule already set).
     /// Recomputed per element in `inherit_reset`; never compounds.
     pub em_base: f32,
+    /// The root element's computed `font-size` — the basis for `rem`.
+    pub rem_base: f32,
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
@@ -342,6 +344,7 @@ impl ComputedStyle {
         ComputedStyle {
             font_px: BASE_FONT_PX,
             em_base: BASE_FONT_PX,
+            rem_base: BASE_FONT_PX,
             bold: false,
             italic: false,
             mono: false,
@@ -420,6 +423,17 @@ impl ComputedStyle {
 
 pub const BASE_FONT_PX: f32 = 16.0;
 
+/// The two font-relative bases a length may need: `em` (the element's own
+/// font-size, or its inherited one while `font-size` itself is being resolved)
+/// and `rem` (the ROOT element's computed font-size). They differ the moment a
+/// document sets `html { font-size: … }` — the `62.5%` "1rem = 10px" idiom is
+/// everywhere, and treating `rem` as `em` scales such a page by 1.6x.
+#[derive(Clone, Copy, Debug)]
+pub struct Units {
+    pub em: f32,
+    pub rem: f32,
+}
+
 /// The starting point for any freshly-resolved style: the inherited slice
 /// copied from `parent`, non-inherited properties reset to their CSS initial
 /// value. Shared by `resolve()` (a real element) and `resolve_pseudo()` (a
@@ -429,6 +443,8 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
     ComputedStyle {
         font_px: parent.font_px,
         em_base: parent.font_px,
+        // `rem` is root-relative: inherited untouched, never reset per element.
+        rem_base: parent.rem_base,
         bold: parent.bold,
         italic: parent.italic,
         mono: parent.mono,
@@ -896,8 +912,20 @@ fn apply_declarations_pass(decls: &str, theme: &Theme, s: &mut ComputedStyle, im
 
 /// Apply a single `prop: val` declaration. Shared by inline styles now and by
 /// author `<style>` rules later.
+impl ComputedStyle {
+    /// The `em`/`rem` bases for parsing this element's declarations.
+    pub fn units(&self) -> Units {
+        Units { em: self.font_px, rem: self.rem_base }
+    }
+}
+
 pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
     let v = val.trim().to_ascii_lowercase();
+    // Font-relative bases for this element, taken once: `apply_one` handles a
+    // single declaration, so `font-size` (which uses its own inherited base)
+    // is the only property that could move them, and it does so for the NEXT
+    // call — matching the cascade's declaration order.
+    let u = s.units();
     match prop {
         "display" => {
             s.display = match v.as_str() {
@@ -947,7 +975,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "xx-large" => Some(BASE_FONT_PX * 2.0),
                 "larger" => Some(base * 1.2),
                 "smaller" => Some(base / 1.2),
-                _ => parse_length(&v, base),
+                _ => parse_length(&v, Units { em: base, rem: s.rem_base }),
             };
             if let Some(px) = px {
                 s.font_px = px.clamp(6.0, 200.0);
@@ -966,45 +994,45 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.mono = v.contains("mono") || v.contains("courier") || v.contains("consol");
         }
         // — box model —
-        "width" => set_size(&mut s.width, &v, s.font_px),
-        "min-width" => set_size(&mut s.min_width, &v, s.font_px),
-        "max-width" => set_max(&mut s.max_width, &v, s.font_px),
-        "height" => set_size(&mut s.height, &v, s.font_px),
-        "min-height" => set_size(&mut s.min_height, &v, s.font_px),
-        "max-height" => set_max(&mut s.max_height, &v, s.font_px),
+        "width" => set_size(&mut s.width, &v, u),
+        "min-width" => set_size(&mut s.min_width, &v, u),
+        "max-width" => set_max(&mut s.max_width, &v, u),
+        "height" => set_size(&mut s.height, &v, u),
+        "min-height" => set_size(&mut s.min_height, &v, u),
+        "max-height" => set_max(&mut s.max_height, &v, u),
         "box-sizing" => s.box_border = v == "border-box",
         "contain" => s.contain_size = v.split_whitespace().any(|k| k == "size" || k == "strict"),
         "contain-intrinsic-size" => {
             // definite length(s): one → both axes, two → (width, height).
-            let mut it = v.split_whitespace().filter_map(|t| parse_length(t, s.font_px));
+            let mut it = v.split_whitespace().filter_map(|t| parse_length(t, u));
             if let Some(a) = it.next() {
                 s.contain_intrinsic = Some((a, it.next().unwrap_or(a)));
             }
         }
         "margin" => {
-            let em = s.font_px;
+            let u = s.units();
             let (t, r, b, l) = four_values(&v);
-            s.margin_top = margin_tb(t, em);
-            s.margin_right = margin_lr(r, em);
-            s.margin_bottom = margin_tb(b, em);
-            s.margin_left = margin_lr(l, em);
+            s.margin_top = margin_tb(t, u);
+            s.margin_right = margin_lr(r, u);
+            s.margin_bottom = margin_tb(b, u);
+            s.margin_left = margin_lr(l, u);
         }
-        "margin-top" => s.margin_top = margin_tb(&v, s.font_px),
-        "margin-bottom" => s.margin_bottom = margin_tb(&v, s.font_px),
-        "margin-left" => s.margin_left = margin_lr(&v, s.font_px),
-        "margin-right" => s.margin_right = margin_lr(&v, s.font_px),
+        "margin-top" => s.margin_top = margin_tb(&v, u),
+        "margin-bottom" => s.margin_bottom = margin_tb(&v, u),
+        "margin-left" => s.margin_left = margin_lr(&v, u),
+        "margin-right" => s.margin_right = margin_lr(&v, u),
         "padding" => {
-            let em = s.font_px;
+            let u = s.units();
             let (t, r, b, l) = four_values(&v);
-            s.pad_top = parse_pad(t, em, 0.0);
-            s.pad_right = parse_pad(r, em, 0.0);
-            s.pad_bottom = parse_pad(b, em, 0.0);
-            s.pad_left = parse_pad(l, em, 0.0);
+            s.pad_top = parse_pad(t, u, 0.0);
+            s.pad_right = parse_pad(r, u, 0.0);
+            s.pad_bottom = parse_pad(b, u, 0.0);
+            s.pad_left = parse_pad(l, u, 0.0);
         }
-        "padding-top" => s.pad_top = parse_pad(&v, s.font_px, s.pad_top),
-        "padding-right" => s.pad_right = parse_pad(&v, s.font_px, s.pad_right),
-        "padding-bottom" => s.pad_bottom = parse_pad(&v, s.font_px, s.pad_bottom),
-        "padding-left" => s.pad_left = parse_pad(&v, s.font_px, s.pad_left),
+        "padding-top" => s.pad_top = parse_pad(&v, u, s.pad_top),
+        "padding-right" => s.pad_right = parse_pad(&v, u, s.pad_right),
+        "padding-bottom" => s.pad_bottom = parse_pad(&v, u, s.pad_bottom),
+        "padding-left" => s.pad_left = parse_pad(&v, u, s.pad_left),
 
         // — background + border —
         "background-color" | "background" => {
@@ -1027,23 +1055,23 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         "border" => {
-            let side = parse_border_shorthand(&v, s.font_px, theme, s.color);
+            let side = parse_border_shorthand(&v, u, theme, s.color);
             s.border_top = side;
             s.border_right = side;
             s.border_bottom = side;
             s.border_left = side;
         }
-        "border-top" => s.border_top = parse_border_shorthand(&v, s.font_px, theme, s.color),
-        "border-right" => s.border_right = parse_border_shorthand(&v, s.font_px, theme, s.color),
-        "border-bottom" => s.border_bottom = parse_border_shorthand(&v, s.font_px, theme, s.color),
-        "border-left" => s.border_left = parse_border_shorthand(&v, s.font_px, theme, s.color),
+        "border-top" => s.border_top = parse_border_shorthand(&v, u, theme, s.color),
+        "border-right" => s.border_right = parse_border_shorthand(&v, u, theme, s.color),
+        "border-bottom" => s.border_bottom = parse_border_shorthand(&v, u, theme, s.color),
+        "border-left" => s.border_left = parse_border_shorthand(&v, u, theme, s.color),
         "border-width" => {
-            let em = s.font_px;
+            let u = s.units();
             if let Some(t4) = four_sides(&css_tokens(&v)) {
                 for (side, tok) in [
                     &mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
                 ].into_iter().zip(t4) {
-                    if let Some(w) = border_width_kw(tok, em) {
+                    if let Some(w) = border_width_kw(tok, u) {
                         side.width = w;
                     }
                 }
@@ -1071,10 +1099,10 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "border-top-width" => set_side_width(&mut s.border_top, &v, s.font_px),
-        "border-right-width" => set_side_width(&mut s.border_right, &v, s.font_px),
-        "border-bottom-width" => set_side_width(&mut s.border_bottom, &v, s.font_px),
-        "border-left-width" => set_side_width(&mut s.border_left, &v, s.font_px),
+        "border-top-width" => set_side_width(&mut s.border_top, &v, u),
+        "border-right-width" => set_side_width(&mut s.border_right, &v, u),
+        "border-bottom-width" => set_side_width(&mut s.border_bottom, &v, u),
+        "border-left-width" => set_side_width(&mut s.border_left, &v, u),
         "border-top-color" => s.border_top.color = parse_color(&v, theme).or(s.border_top.color),
         "border-right-color" => s.border_right.color = parse_color(&v, theme).or(s.border_right.color),
         "border-bottom-color" => s.border_bottom.color = parse_color(&v, theme).or(s.border_bottom.color),
@@ -1132,7 +1160,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     if t == "auto" {
                         Some(None)
                     } else {
-                        parse_length(t, s.font_px).map(Some)
+                        parse_length(t, u).map(Some)
                     }
                 };
                 if parts.len() == 4 {
@@ -1144,10 +1172,10 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 }
             }
         }
-        "top" => s.top = parse_len(&v, s.font_px),
-        "right" => s.right = parse_len(&v, s.font_px),
-        "bottom" => s.bottom = parse_len(&v, s.font_px),
-        "left" => s.left = parse_len(&v, s.font_px),
+        "top" => s.top = parse_len(&v, u),
+        "right" => s.right = parse_len(&v, u),
+        "bottom" => s.bottom = parse_len(&v, u),
+        "left" => s.left = parse_len(&v, u),
         "z-index" => {
             s.z_index = match v.as_str() {
                 "auto" => ZIndex::Auto,
@@ -1197,8 +1225,8 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // `gap` shorthand is `<row-gap> <column-gap>`; the longhands set one axis.
         "gap" | "grid-gap" => {
             let mut it = v.split_whitespace();
-            let row = it.next().and_then(|t| parse_length(t, s.font_px));
-            let col = it.next().and_then(|t| parse_length(t, s.font_px)).or(row);
+            let row = it.next().and_then(|t| parse_length(t, u));
+            let col = it.next().and_then(|t| parse_length(t, u)).or(row);
             if let Some(r) = row {
                 s.grid_row_gap = r;
                 s.gap = r;
@@ -1208,13 +1236,13 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         "column-gap" => {
-            if let Some(g) = parse_length(v.trim(), s.font_px) {
+            if let Some(g) = parse_length(v.trim(), u) {
                 s.grid_col_gap = g;
                 s.gap = g;
             }
         }
         "row-gap" => {
-            if let Some(g) = parse_length(v.trim(), s.font_px) {
+            if let Some(g) = parse_length(v.trim(), u) {
                 s.grid_row_gap = g;
                 s.gap = g;
             }
@@ -1229,7 +1257,7 @@ pub fn apply_one(prop: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.flex_shrink = f;
             }
         }
-        "flex-basis" => s.flex_basis = parse_basis(&v, s.font_px),
+        "flex-basis" => s.flex_basis = parse_basis(&v, u),
         "order" => {
             if let Ok(o) = v.parse::<i32>() {
                 s.order = o;
@@ -1344,22 +1372,22 @@ fn parse_saturating_i32(v: &str) -> Option<i32> {
 /// KEEP the previously-cascaded value — an invalid declaration is dropped, it
 /// does not reset the property to its default (CSS Syntax 3 §4). `auto` is a
 /// valid keyword and returns `Some(Len::Auto)`.
-fn parse_len_opt(v: &str, em: f32) -> Option<Len> {
+fn parse_len_opt(v: &str, u: Units) -> Option<Len> {
     let v = v.trim();
     if v == "auto" {
         return Some(Len::Auto);
     }
     if v.len() >= 5 && v[..5].eq_ignore_ascii_case("calc(") {
-        return parse_calc_affine(v, em);
+        return parse_calc_affine(v, u);
     }
     if let Some(p) = v.strip_suffix('%') {
         return p.trim().parse::<f32>().ok().map(Len::Pct);
     }
-    parse_length(v, em).map(Len::Px)
+    parse_length(v, u).map(Len::Px)
 }
 
-fn parse_len(v: &str, em: f32) -> Len {
-    parse_len_opt(v, em).unwrap_or(Len::Auto)
+fn parse_len(v: &str, u: Units) -> Len {
+    parse_len_opt(v, u).unwrap_or(Len::Auto)
 }
 
 /// `width`/`height`/`min`/`max` reject negative used lengths as invalid.
@@ -1372,33 +1400,33 @@ fn size_non_negative(l: &Len) -> bool {
 
 /// Assign a size property only if the value is valid AND non-negative, else
 /// keep the prior value (invalid declaration dropped).
-fn set_size(slot: &mut Len, v: &str, em: f32) {
-    if let Some(l) = parse_len_opt(v, em).filter(size_non_negative) {
+fn set_size(slot: &mut Len, v: &str, u: Units) {
+    if let Some(l) = parse_len_opt(v, u).filter(size_non_negative) {
         *slot = l;
     }
 }
 
 /// `max-width`/`max-height`: `none` = no maximum (Auto); else a non-negative size.
-fn set_max(slot: &mut Len, v: &str, em: f32) {
+fn set_max(slot: &mut Len, v: &str, u: Units) {
     if v.trim() == "none" {
         *slot = Len::Auto;
-    } else if let Some(l) = parse_len_opt(v, em).filter(size_non_negative) {
+    } else if let Some(l) = parse_len_opt(v, u).filter(size_non_negative) {
         *slot = l;
     }
 }
 
 /// Resolve a `calc()` to affine `(pct, px)` form via the full values resolver:
 /// evaluate with a %-basis of 0 (→ the px part) and 100 (→ px + pct), so any
-/// `%`/px/em mix collapses to `pct% of basis + px`. `rem` approximated by `em`,
-/// `vw`/`vh` unavailable here (0) — covers the common `calc(% ± px/em)` forms.
-fn parse_calc_affine(v: &str, em: f32) -> Option<Len> {
+/// `%`/px/em mix collapses to `pct% of basis + px`. `vw`/`vh` unavailable here
+/// (0) — covers the common `calc(% ± px/em/rem)` forms.
+fn parse_calc_affine(v: &str, u: Units) -> Option<Len> {
     let at0 = crate::values::resolve_length(
         v,
-        &crate::values::LenCtx { em, rem: em, pct_basis: 0.0, vw: 0.0, vh: 0.0 },
+        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: 0.0, vh: 0.0 },
     )?;
     let at100 = crate::values::resolve_length(
         v,
-        &crate::values::LenCtx { em, rem: em, pct_basis: 100.0, vw: 0.0, vh: 0.0 },
+        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 100.0, vw: 0.0, vh: 0.0 },
     )?;
     let pct = at100 - at0;
     if (-0.001..0.001).contains(&pct) {
@@ -1409,37 +1437,37 @@ fn parse_calc_affine(v: &str, em: f32) -> Option<Len> {
 }
 
 /// Top/bottom margin: `auto` computes to 0 for block boxes.
-fn margin_tb(v: &str, em: f32) -> f32 {
-    if v.trim() == "auto" { 0.0 } else { parse_length(v, em).unwrap_or(0.0) }
+fn margin_tb(v: &str, u: Units) -> f32 {
+    if v.trim() == "auto" { 0.0 } else { parse_length(v, u).unwrap_or(0.0) }
 }
 
 /// Left/right margin keeps `auto` (drives centering / slack).
-fn margin_lr(v: &str, em: f32) -> Len {
-    parse_len(v, em)
+fn margin_lr(v: &str, u: Units) -> Len {
+    parse_len(v, u)
 }
 
 /// A padding length. Negative is invalid (padding ≥ 0) → keeps `prior`.
-fn parse_pad(v: &str, em: f32, prior: f32) -> f32 {
-    match parse_length(v.trim(), em) {
+fn parse_pad(v: &str, u: Units, prior: f32) -> f32 {
+    match parse_length(v.trim(), u) {
         Some(p) if p >= 0.0 => p,
         _ => prior,
     }
 }
 
 /// A border-width keyword/length → px. `thin`/`medium`/`thick` = 1/3/5px.
-fn border_width_kw(tok: &str, em: f32) -> Option<f32> {
+fn border_width_kw(tok: &str, u: Units) -> Option<f32> {
     match tok.trim() {
         "" => None,
         "thin" => Some(1.0),
         "medium" => Some(3.0),
         "thick" => Some(5.0),
-        t => parse_length(t, em).map(|w| w.max(0.0)),
+        t => parse_length(t, u).map(|w| w.max(0.0)),
     }
 }
 
 /// Assign one side's border width (keeps the prior value on an invalid one).
-fn set_side_width(side: &mut BorderSide, v: &str, em: f32) {
-    if let Some(w) = border_width_kw(v.trim(), em) {
+fn set_side_width(side: &mut BorderSide, v: &str, u: Units) {
+    if let Some(w) = border_width_kw(v.trim(), u) {
         side.width = w;
     }
 }
@@ -1447,7 +1475,7 @@ fn set_side_width(side: &mut BorderSide, v: &str, em: f32) {
 /// Parse a `border`/`border-<side>` shorthand (`<width> || <style> || <color>`,
 /// any order) into a side. `none`/`hidden` → no border. A specified border with
 /// no explicit colour uses `currentColor` (the element's `color`).
-fn parse_border_shorthand(v: &str, em: f32, theme: &Theme, current: Rgb) -> BorderSide {
+fn parse_border_shorthand(v: &str, u: Units, theme: &Theme, current: Rgb) -> BorderSide {
     let (mut width, mut color, mut none, mut styled) = (None, None, false, false);
     for tok in css_tokens(v) {
         match tok {
@@ -1470,7 +1498,7 @@ fn parse_border_shorthand(v: &str, em: f32, theme: &Theme, current: Rgb) -> Bord
             _ => {
                 if let Some(c) = parse_color(tok, theme) {
                     color = Some(c);
-                } else if let Some(w) = parse_length(tok, em) {
+                } else if let Some(w) = parse_length(tok, u) {
                     width = Some(w.max(0.0));
                 }
             }
@@ -1591,7 +1619,7 @@ fn parse_track(t: &str) -> GridTrack {
         parse_track(max_part)
     } else {
         // A fixed length: px/rem/em/pt/cm/… (rem/em resolve against the root font).
-        match parse_length(t, BASE_FONT_PX) {
+        match parse_length(t, Units { em: BASE_FONT_PX, rem: BASE_FONT_PX }) {
             Some(px) => GridTrack::Fixed(px),
             None => GridTrack::Auto,
         }
@@ -1749,14 +1777,14 @@ fn parse_cross(v: &str) -> Option<CrossAlign> {
     })
 }
 
-fn parse_basis(v: &str, em: f32) -> FlexBasis {
+fn parse_basis(v: &str, u: Units) -> FlexBasis {
     match v {
         "auto" | "content" | "max-content" | "min-content" | "fit-content" => FlexBasis::Auto,
         _ => {
             if let Some(pct) = v.strip_suffix('%') {
                 pct.trim().parse::<f32>().map(FlexBasis::Pct).unwrap_or(FlexBasis::Auto)
             } else {
-                parse_length(v, em).map(FlexBasis::Px).unwrap_or(FlexBasis::Auto)
+                parse_length(v, u).map(FlexBasis::Px).unwrap_or(FlexBasis::Auto)
             }
         }
     }
@@ -1792,7 +1820,7 @@ fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
         if let Ok(f) = tok.parse::<f32>() {
             nums.push(f);
         } else {
-            basis = Some(parse_basis(tok, s.font_px));
+            basis = Some(parse_basis(tok, s.units()));
         }
     }
     match nums.len() {
@@ -1811,19 +1839,19 @@ fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
 
 /// Parse a CSS `<length>` to px. Supports `px`, `em`/`rem` (relative to
 /// `em_base`), and bare numbers (treated as px).
-fn parse_length(v: &str, em_base: f32) -> Option<f32> {
+fn parse_length(v: &str, u: Units) -> Option<f32> {
     let v = v.trim();
     // Font-relative first so "rem" is matched before the "em" suffix eats it.
     // `rem` is ROOT-relative (not em_base) — else nested rem compounds wrongly.
     if let Some(n) = v.strip_suffix("rem") {
-        return n.trim().parse::<f32>().ok().map(|f| f * BASE_FONT_PX);
+        return n.trim().parse::<f32>().ok().map(|f| f * u.rem);
     }
     if let Some(n) = v.strip_suffix("em") {
-        return n.trim().parse::<f32>().ok().map(|f| f * em_base);
+        return n.trim().parse::<f32>().ok().map(|f| f * u.em);
     }
     if let Some(n) = v.strip_suffix('%') {
         // No containing measure here → treat % of em (rough; refined later).
-        return n.trim().parse::<f32>().ok().map(|f| f * em_base / 100.0);
+        return n.trim().parse::<f32>().ok().map(|f| f * u.em / 100.0);
     }
     // Absolute units → CSS reference pixels (1in = 96px, CSS Values 3 §5.2).
     const ABS: &[(&str, f32)] = &[
@@ -1966,10 +1994,24 @@ mod tests {
         for tag in ["head", "script", "style", "title"] {
             let html = alloc::format!("<{tag}>x</{tag}>");
             let dom = dom::parse(&html);
-            if let dom::Node::Element(e) = &dom.root.children[0] {
-                let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
-                assert_eq!(st.display, Display::None, "{tag}");
+            // Find by tag, not by position: the parser implies <html>/<body>
+            // around the fragment (HTML Standard §13.2.6).
+            fn find<'a>(el: &'a Element, tag: &str) -> Option<&'a Element> {
+                for c in &el.children {
+                    if let dom::Node::Element(e) = c {
+                        if e.tag == tag {
+                            return Some(e);
+                        }
+                        if let Some(f) = find(e, tag) {
+                            return Some(f);
+                        }
+                    }
+                }
+                None
             }
+            let e = find(&dom.root, tag).expect(tag);
+            let st = resolve(e, &root, &theme, &Stylesheet::empty(), &[], &[], 0, 1000.0);
+            assert_eq!(st.display, Display::None, "{tag}");
         }
     }
 }

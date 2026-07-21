@@ -508,7 +508,12 @@ pub fn layout(
     theme: &Theme,
     forms: &FormState,
 ) -> Layout {
-    let root = ComputedStyle::root(theme);
+    // The root element is never painted, but `html { … }` still cascades into
+    // the document — and its `font-size` is the basis for every `rem`.
+    let initial = ComputedStyle::root(theme);
+    let html_el = dom.root_element();
+    let mut root = style::resolve(html_el, &initial, theme, sheet, &[], &[], 0, width as f32);
+    root.rem_base = root.font_px;
     let cx = PAD;
     let cw = (width as i32 - 2 * PAD).max(60);
     let mut ctx = Ctx {
@@ -537,7 +542,10 @@ pub fn layout(
     // Resolve <body> itself so `body { … }` rules inherit into the page, and
     // put it on the ancestor path so `body p` / `.article p` selectors match.
     let body = dom.body();
-    let body_style = style::resolve(body, &root, theme, sheet, &[], &[], 0, width as f32);
+    let html_info = [ElemInfo::of(html_el)];
+    let anc: &[ElemInfo] = if core::ptr::eq(html_el, body) { &[] } else { &html_info };
+    let body_style = style::resolve(body, &root, theme, sheet, anc, &[], 0, width as f32);
+    ctx.path.extend_from_slice(anc);
     ctx.path.push(ElemInfo::of(body));
     // A `display: table`/`flex`/`grid` `<body>` must itself establish that
     // formatting context — otherwise its `table-row`/`-cell` children have no
@@ -555,7 +563,11 @@ pub fn layout(
 
     // The body's background propagates to the whole canvas (a bare `<body
     // background>` fills the viewport, not just the body box).
-    let canvas_bg = body_style.bg.unwrap_or(theme.bg);
+    // Canvas background (CSS 2.1 §14.2): the ROOT element's background is
+    // propagated to the canvas; `<body>`'s is used only when the root's is
+    // transparent. Honouring `html { color }` without this paints white text
+    // on a white canvas for every "this page should be green" reftest.
+    let canvas_bg = root.bg.or(body_style.bg).unwrap_or(theme.bg);
     // z-index stacking order (CSS2.1 §9.9 / Appendix E): reorder the flat,
     // tree-order display list so negative-z ranges paint first (behind) and
     // positive-z ranges paint last (in front) of everything else.

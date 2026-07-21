@@ -54,6 +54,15 @@ impl Dom {
     pub fn body(&self) -> &Element {
         find_tag(&self.root, "body").unwrap_or(&self.root)
     }
+
+    /// The document's root element (`<html>`), or the synthetic container when
+    /// the page has none. Its style has to be resolved even though it is never
+    /// painted: `html { font-size: … }` is what every `rem` resolves against,
+    /// and the `62.5%` "1rem = 10px" idiom is common enough that skipping it
+    /// scales a whole page.
+    pub fn root_element(&self) -> &Element {
+        find_tag(&self.root, "html").unwrap_or(&self.root)
+    }
 }
 
 /// First descendant element with tag `tag` (depth-first).
@@ -161,7 +170,46 @@ pub fn parse(html: &str) -> Dom {
         let el = stack.pop().unwrap();
         stack.last_mut().unwrap().children.push(Node::Element(el));
     }
-    Dom { root: stack.pop().unwrap() }
+    let mut root = stack.pop().unwrap();
+    imply_html_body(&mut root);
+    Dom { root }
+}
+
+/// HTML's tree construction inserts `<html>` and `<body>` even when the source
+/// omits the tags (HTML Standard §13.2.6), and both are ordinary elements the
+/// cascade can target. Without them a document that writes neither — routine in
+/// hand-written pages and test suites — has nothing for `html { … }` /
+/// `body { … }` to match, so those rules silently do nothing. `seq` is left at
+/// 0 on the implied elements: they carry no form state, and every parsed
+/// element keeps the index it was given.
+fn imply_html_body(root: &mut Element) {
+    fn make(tag: &str, children: Vec<Node>) -> Element {
+        Element { tag: String::from(tag), attrs: Vec::new(), children, seq: 0 }
+    }
+    fn is_tag(n: &Node, tag: &str) -> bool {
+        matches!(n, Node::Element(e) if e.tag == tag)
+    }
+    // Metadata stays a child of <html>, as the parser would place it in <head>.
+    fn is_metadata(n: &Node) -> bool {
+        matches!(n, Node::Element(e) if matches!(e.tag.as_str(),
+            "head" | "title" | "meta" | "link" | "base" | "style" | "script" | "noscript"))
+    }
+
+    if !root.children.iter().any(|c| is_tag(c, "html")) {
+        let kids = core::mem::take(&mut root.children);
+        root.children.push(Node::Element(make("html", kids)));
+    }
+    for c in &mut root.children {
+        if let Node::Element(html) = c {
+            if html.tag != "html" || html.children.iter().any(|k| is_tag(k, "body")) {
+                continue;
+            }
+            let (meta, rest): (Vec<Node>, Vec<Node>) =
+                core::mem::take(&mut html.children).into_iter().partition(is_metadata);
+            html.children = meta;
+            html.children.push(Node::Element(make("body", rest)));
+        }
+    }
 }
 
 /// The document `<title>` text, cleaned, if present.
