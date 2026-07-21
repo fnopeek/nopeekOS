@@ -212,6 +212,17 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
 /// images are kept whole if their box overlaps the rect, dropped otherwise (a
 /// flat display list can't clip glyph runs mid-way). An empty rect removes the
 /// whole range — the CSS 2.1 `clip` case where nothing of the box is painted.
+/// Slide a range of already-emitted draw ops vertically. Used to place a
+/// bottom-anchored absolutely positioned box, whose final y is only known once
+/// its height has been laid out.
+fn translate_ops(ops: &mut [DrawOp], dy: i32) {
+    for op in ops {
+        match op {
+            DrawOp::Rect { y, .. } | DrawOp::Text { y, .. } | DrawOp::Image { y, .. } => *y += dy,
+        }
+    }
+}
+
 fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: i32) {
     if start >= ops.len() {
         return;
@@ -505,6 +516,7 @@ pub fn layout(
     sheet: &Stylesheet,
     images: &ImageMap,
     width: u32,
+    viewport_h: u32,
     theme: &Theme,
     forms: &FormState,
 ) -> Layout {
@@ -526,10 +538,10 @@ pub fn layout(
         controls: Vec::new(),
         forms,
         path: Vec::new(),
-        // Initial containing block = the page content area. Its height is the
-        // viewport height, which the layout pass doesn't take (the page is a
-        // scroll of unbounded height) → indefinite.
-        cb: (cx, PAD, cw, None),
+        // Initial containing block: the viewport. Its height is definite —
+        // that is what makes `top:0; bottom:0` on a root-level abspos box
+        // stretch to the window rather than collapse (CSS 2.1 §10.1).
+        cb: (cx, PAD, cw, Some(viewport_h as i32)),
         viewport_w: width as f32,
         floats: Vec::new(),
         stack_ops: Vec::new(),
@@ -1234,9 +1246,8 @@ impl Ctx<'_> {
     }
 
     /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
-    /// from the containing block (`self.cb`) + `top`/`left`/`right`. `bottom`
-    /// needs the CB height (unknown mid-flow) and is not resolved yet. The
-    /// element is `el`, already pushed onto `self.path` by the caller.
+    /// from the containing block (`self.cb`) + `top`/`right`/`bottom`/`left`.
+    /// The element is `el`, already pushed onto `self.path` by the caller.
     fn layout_abs(&mut self, el: &Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
         let (cbx, cby, cbw, cbh) = self.cb;
         let avail = cbw as f32;
@@ -1256,27 +1267,54 @@ impl Ctx<'_> {
         } else {
             static_x as f32
         };
-        // Vertical: `top` pins to the CB top; auto `top` → static position
-        // (§10.6.4). A percentage resolves against the CB **height**, never its
-        // width (§9.3.2) — getting that wrong stretches every percentage-
-        // positioned layout by the CB's aspect ratio. With an indefinite CB
-        // height the percentage isn't resolvable during the parent's child
-        // walk, so it falls back to the static position like `auto`.
-        // (Explicit `bottom` additionally needs this box's own height, which
-        // `layout_box` only reports afterwards — still unimplemented.)
-        let top = match st.top {
-            Len::Pct(p) => cbh.map(|h| p / 100.0 * h as f32),
-            Len::Calc { pct, px } if pct != 0.0 => cbh.map(|h| pct / 100.0 * h as f32 + px),
-            other => other.px(0.0),
+        // Vertical offsets resolve against the CB **height**, never its width
+        // (§9.3.2) — getting that wrong stretches every percentage-positioned
+        // layout by the CB's aspect ratio. An indefinite CB height leaves a
+        // percentage unresolvable here (the parent's content height doesn't
+        // exist yet while its children are laid out), so it behaves as `auto`.
+        let vert = |len: Len| -> Option<f32> {
+            match len {
+                Len::Auto => None,
+                Len::Px(p) => Some(p),
+                Len::Pct(p) => cbh.map(|h| p / 100.0 * h as f32),
+                Len::Calc { pct, px } if pct == 0.0 => Some(px),
+                Len::Calc { pct, px } => cbh.map(|h| pct / 100.0 * h as f32 + px),
+            }
         };
-        let py = match top {
-            Some(t) => cby as f32 + t,
-            None => static_y as f32,
+        let top = vert(st.top);
+        let bottom = vert(st.bottom);
+
+        // §10.6.4: `top` + `bottom` with `height:auto` stretches the box to the
+        // gap between them. Over-constrained (all three given) → `bottom` is
+        // the one that gets ignored, which is what the `top` arm below does.
+        let mut st_owned = *st;
+        // NOTE: a percentage `height` here would also resolve against `cbh`
+        // (§10.5), but doing it in the abspos path ALONE measured worse: an
+        // in-flow `height:100%` parent still collapses to auto, and the
+        // mismatch between the two paths breaks more than it fixes. It belongs
+        // with general percentage-height support, not here.
+        let mut overridden = false;
+        if let (Some(t), Some(b), Some(h), Len::Auto) = (top, bottom, cbh, st.height) {
+            st_owned.height = Len::Px((h as f32 - t - b).max(0.0));
+            overridden = true;
+        }
+        let st = if overridden { &st_owned } else { st };
+
+        // `top` pins to the CB top; `bottom` pins the box's bottom edge, which
+        // needs its own height — only known once it is laid out. So lay it out
+        // at the static position and slide the finished box (and everything it
+        // emitted) into place. With neither offset the static position is the
+        // answer already (§10.6.4).
+        let (py, shift_to_bottom) = match (top, bottom, cbh) {
+            (Some(t), _, _) => (cby as f32 + t, None),
+            (None, Some(b), Some(h)) => (static_y as f32, Some(cby as f32 + h as f32 - b)),
+            _ => (static_y as f32, None),
         };
         // layout_box → layout_block re-establishes the CB for its own children.
         let w_i = width.max(1.0) as i32;
         let start = self.ops.len();
         let link_start = self.links.len();
+        let ctl_start = self.controls.len();
         // An explicit `z-index` on this positioned box opens a tracked
         // stacking range for it (CSS2.1 §9.9) — unless it's already nested
         // inside another tracked range, which absorbs it instead.
@@ -1284,10 +1322,29 @@ impl Ctx<'_> {
         if track {
             self.stack_depth += 1;
         }
-        let bottom = self.layout_box(el, st, px as i32, w_i, py as i32);
+        let box_bottom = self.layout_box(el, st, px as i32, w_i, py as i32);
         if track {
             self.stack_depth -= 1;
         }
+        // Bottom-anchored: now that the used height is known, translate the box
+        // (all ops/links/controls it just emitted) so its bottom edge lands on
+        // the offset. Indices stay valid — nothing is inserted or removed, so
+        // any stacking range recorded inside is untouched.
+        let bottom = if let Some(target) = shift_to_bottom {
+            let dy = (target - box_bottom as f32) as i32;
+            if dy != 0 {
+                translate_ops(&mut self.ops[start..], dy);
+                for l in &mut self.links[link_start..] {
+                    l.y += dy;
+                }
+                for c in &mut self.controls[ctl_start..] {
+                    c.y += dy;
+                }
+            }
+            box_bottom + dy
+        } else {
+            box_bottom
+        };
 
         // `clip: rect(...)` (CSS 2.1 §11.1.2) — clip this box (and its
         // descendants, all emitted into `ops[start..]`) to a rectangle whose
@@ -3563,7 +3620,7 @@ mod tests {
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, 800.0);
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK, &FormState::default())
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default())
     }
 
     fn texts(l: &Layout) -> Vec<(i32, i32, &str)> {
@@ -3765,7 +3822,7 @@ mod tests {
     fn lay_forms(html: &str, w: u32, st: &FormState) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom, 800.0);
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK, st)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, st)
     }
 
     #[test]
