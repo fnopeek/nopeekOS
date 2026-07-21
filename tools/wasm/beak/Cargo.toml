@@ -1,6 +1,6 @@
 [package]
 name = "beak"
-version = "0.1.38"
+version = "0.1.39"
 edition = "2024"
 description = "beak — the native, sandboxed web browser for nopeekOS. See BROWSER.md."
 
@@ -10,9 +10,15 @@ crate-type = ["cdylib"]
 [dependencies]
 nopeek_widgets = { path = "../sdk/widgets" }
 beak-engine = { path = "../beak-engine" }
-# Real free-list heap: fontdue does heavy transient allocation while parsing
-# the font, which a never-freeing bump allocator can't reclaim (OOM).
-linked_list_allocator = "0.10"
+# Real reclaiming heap: fontdue does heavy transient allocation while parsing
+# the fonts, which a never-freeing bump allocator can't reclaim (OOM). talc,
+# not linked_list_allocator: the latter is first-fit with an O(n) free-list walk
+# per alloc AND per dealloc, so fontdue's ~15k transient per-glyph Vecs fragment
+# it into a quadratic crawl. Measured on the six faces: 683 ms and *rising per
+# face* (18 → 302 ms) vs talc's 36 ms flat (5.7-6.3 ms each). Under the wasmi
+# interpreter that was the difference between a 10 s and a sub-second start.
+talc = { version = "4", default-features = false, features = ["lock_api"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "lock_api"] }
 
 [dependencies.postcard]
 version = "1.0"

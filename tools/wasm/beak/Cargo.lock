@@ -28,12 +28,13 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "beak"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "beak-engine",
- "linked_list_allocator",
  "nopeek_widgets",
  "postcard",
+ "spin",
+ "talc",
 ]
 
 [[package]]
@@ -122,15 +123,6 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
-
-[[package]]
-name = "linked_list_allocator"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b23ac50abb8261cb38c6e2a7192d3302e0836dac1628f6a93b82b4fad185897"
-dependencies = [
- "spinning_top",
-]
 
 [[package]]
 name = "lock_api"
@@ -231,10 +223,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "spinning_top"
-version = "0.2.5"
+name = "spin"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b9eb1a2f4c41445a3a0ff9abc5221c5fcd28e1f13cd7c0397706f9ac938ddb0"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]
@@ -248,6 +240,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "talc"
+version = "4.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]

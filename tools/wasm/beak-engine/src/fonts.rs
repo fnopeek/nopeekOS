@@ -30,7 +30,11 @@ impl Default for Fonts {
 impl Fonts {
     pub fn new() -> Fonts {
         fn load(bytes: &[u8]) -> Font {
-            Font::from_bytes(bytes, FontSettings::default()).expect("embedded font is valid TrueType")
+            // `load_substitutions` only feeds fontdue's glyph-INDEX API; we
+            // rasterise by char, and the subsetted faces carry no GSUB anyway
+            // (assets/subset.sh). Leaving it on just outlines dead glyphs.
+            let settings = FontSettings { load_substitutions: false, ..FontSettings::default() };
+            Font::from_bytes(bytes, settings).expect("embedded font is valid TrueType")
         }
         Fonts {
             regular: load(include_bytes!("../assets/inter.ttf")),

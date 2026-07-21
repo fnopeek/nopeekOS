@@ -18,10 +18,10 @@ use alloc::vec::Vec;
 
 use beak_engine::forms::{self, ControlKind, FormState, Forms};
 use beak_engine::{Engine, Layout};
-use linked_list_allocator::LockedHeap;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::{caps, prefab};
 use nopeek_widgets::*;
+use talc::{ClaimOnOom, Span, Talc, Talck};
 
 // ── App metadata + capabilities ───────────────────────────────────────────
 
@@ -1040,8 +1040,14 @@ fn poll_event() -> PollResult {
 const HEAP_SIZE: usize = 128 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
+// SAFETY: `HEAP` is a `static mut` we hand to the allocator exactly once, here,
+// before any allocation can happen (this is a `const` initialiser). Nothing else
+// ever reads or writes it, so the allocator holds the only reference.
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: Talck<spin::Mutex<()>, ClaimOnOom> = Talc::new(unsafe {
+    ClaimOnOom::new(Span::from_array(core::ptr::addr_of!(HEAP) as *mut [u8; HEAP_SIZE]))
+})
+.lock();
 
 // u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
 // even when the panic is an allocation failure).
@@ -1081,10 +1087,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // Init the heap FIRST — before any allocation.
-    unsafe {
-        ALLOCATOR.lock().init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_SIZE);
-    }
+    // No heap init here — talc claims `HEAP` lazily on the first allocation.
 
     // Launch argument: `npk_open("beak", "https://…")` → prime the address bar
     // now; the actual fetch waits until the font is parsed (below).
