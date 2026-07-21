@@ -417,9 +417,13 @@ struct Ctx<'a> {
     /// only; the shell owns it and re-lays out when it changes.
     forms: &'a FormState,
     path: Vec<ElemInfo>, // root → … → current parent
-    /// Positioned containing block (x, y, width) for `position:absolute`
-    /// descendants — the nearest ancestor with `position != static`, else page.
-    cb: (i32, i32, i32),
+    /// Positioned containing block (x, y, width, height) for
+    /// `position:absolute` descendants — the nearest ancestor with
+    /// `position != static`, else page. The height is `None` unless the
+    /// establishing box has an explicit one: abspos children are laid out
+    /// during the parent's child walk, so a content-derived height isn't
+    /// known yet. `top`/`bottom` percentages need it (CSS 2.1 §9.3.2).
+    cb: (i32, i32, i32, Option<i32>),
     /// Viewport width (px) — the layout width — for `@media` evaluation.
     viewport_w: f32,
     /// Active floats in the current block formatting context — line boxes and
@@ -517,7 +521,10 @@ pub fn layout(
         controls: Vec::new(),
         forms,
         path: Vec::new(),
-        cb: (cx, PAD, cw), // initial containing block = the page content area
+        // Initial containing block = the page content area. Its height is the
+        // viewport height, which the layout pass doesn't take (the page is a
+        // scroll of unbounded height) → indefinite.
+        cb: (cx, PAD, cw, None),
         viewport_w: width as f32,
         floats: Vec::new(),
         stack_ops: Vec::new(),
@@ -997,7 +1004,7 @@ impl Ctx<'_> {
         // descendants (border-box top ≈ `prov_top_y`).
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = (content_x, prov_top_y, content_w);
+            self.cb = (content_x, prov_top_y, content_w, definite_cb_height(st));
         }
         let flow = if st.pre {
             let ly = child_anchor + child_incoming.value() as i32;
@@ -1219,7 +1226,7 @@ impl Ctx<'_> {
     /// needs the CB height (unknown mid-flow) and is not resolved yet. The
     /// element is `el`, already pushed onto `self.path` by the caller.
     fn layout_abs(&mut self, el: &Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
-        let (cbx, cby, cbw) = self.cb;
+        let (cbx, cby, cbw, cbh) = self.cb;
         let avail = cbw as f32;
         let left = st.left.px(avail);
         let right = st.right.px(avail);
@@ -1238,8 +1245,19 @@ impl Ctx<'_> {
             static_x as f32
         };
         // Vertical: `top` pins to the CB top; auto `top` → static position
-        // (§10.6.4). (Explicit `bottom` needs the CB height, not yet tracked.)
-        let py = match st.top.px(avail) {
+        // (§10.6.4). A percentage resolves against the CB **height**, never its
+        // width (§9.3.2) — getting that wrong stretches every percentage-
+        // positioned layout by the CB's aspect ratio. With an indefinite CB
+        // height the percentage isn't resolvable during the parent's child
+        // walk, so it falls back to the static position like `auto`.
+        // (Explicit `bottom` additionally needs this box's own height, which
+        // `layout_box` only reports afterwards — still unimplemented.)
+        let top = match st.top {
+            Len::Pct(p) => cbh.map(|h| p / 100.0 * h as f32),
+            Len::Calc { pct, px } if pct != 0.0 => cbh.map(|h| pct / 100.0 * h as f32 + px),
+            other => other.px(0.0),
+        };
+        let py = match top {
             Some(t) => cby as f32 + t,
             None => static_y as f32,
         };
@@ -1876,7 +1894,7 @@ impl Ctx<'_> {
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = (content_x, content_top, content_w);
+            self.cb = (content_x, content_top, content_w, definite_cb_height(st));
         }
         let content_h = self.grid_content(el, st, content_x, content_w, content_top);
         self.cb = prev_cb;
@@ -2335,7 +2353,7 @@ impl Ctx<'_> {
 
         let prev_cb = self.cb;
         if st.position != Position::Static {
-            self.cb = (content_x, content_top, content_w);
+            self.cb = (content_x, content_top, content_w, definite_cb_height(st));
         }
 
         // Definite container content height (for cross-stretch / main-axis flex).
@@ -4089,5 +4107,19 @@ mod tests {
         assert_eq!(bullets, 2, "one bullet per li");
         // list text is indented past the plain content edge (PAD=20)
         assert!(texts(&l).iter().all(|(x, _, _)| *x > 20));
+    }
+}
+
+/// The definite **padding-box** height of a positioned box — what `top`/`bottom`
+/// percentages on its absolutely-positioned descendants resolve against
+/// (CSS 2.1 §9.3.2). Only an explicit `height` counts: abspos children are laid
+/// out during the parent's child walk, before its content height exists.
+fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
+    let pad_v = st.pad_top as i32 + st.pad_bottom as i32;
+    match st.height {
+        // `box-sizing:border-box` → the used height already spans the padding.
+        Len::Px(h) if st.box_border => Some(h as i32),
+        Len::Px(h) => Some(h as i32 + pad_v),
+        _ => None,
     }
 }
