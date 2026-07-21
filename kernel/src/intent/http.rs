@@ -533,6 +533,24 @@ pub fn https_get_streaming(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<usize, &'static str> {
+    https_get_streaming_ex(host, path, max_size, on_chunk, None)
+}
+
+/// As [`https_get_streaming`], but also reports the URL the body actually
+/// came from after following redirects.
+///
+/// A browser resolves a document's relative URLs against that *final*
+/// address (the document base URL, RFC 3986 §5.1.3). Without it every
+/// relative sub-resource is requested against the pre-redirect address and
+/// pays a second round-trip through the same redirect — which is what drove
+/// beak into Wikimedia's rate limit.
+pub fn https_get_streaming_ex(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+    mut final_url: Option<&mut String>,
+) -> Result<usize, &'static str> {
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
     for _ in 0..4 {
@@ -551,6 +569,12 @@ pub fn https_get_streaming(
             200..=299 => {
                 if total == 0 {
                     return Err("empty body");
+                }
+                if let Some(out) = final_url.as_deref_mut() {
+                    out.clear();
+                    out.push_str("https://");
+                    out.push_str(&cur_host);
+                    out.push_str(&cur_path);
                 }
                 return Ok(total);
             }
