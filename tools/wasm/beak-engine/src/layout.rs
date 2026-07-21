@@ -3550,7 +3550,7 @@ mod tests {
 
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
-        let sheet = crate::css::collect(&dom);
+        let sheet = crate::css::collect(&dom, 800.0);
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK, &FormState::default())
     }
 
@@ -3752,7 +3752,7 @@ mod tests {
     /// Lay out with live form state (what the shell does while the user types).
     fn lay_forms(html: &str, w: u32, st: &FormState) -> Layout {
         let dom = dom::parse(html);
-        let sheet = crate::css::collect(&dom);
+        let sheet = crate::css::collect(&dom, 800.0);
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK, st)
     }
 
