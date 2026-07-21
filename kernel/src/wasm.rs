@@ -60,6 +60,10 @@ struct HostState {
     /// Optional launch argument (e.g. a file path to open) the app reads
     /// via `npk_launch_arg`. None = launched without an argument.
     launch_arg: Option<String>,
+    /// URL the last `npk_http_request` body actually came from, after
+    /// redirects. Read back via `npk_http_final_url` — a browser needs it
+    /// as the document base URL for relative sub-resources.
+    http_final_url: Option<String>,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -343,6 +347,7 @@ fn wasm_worker_task(arg: u64) {
         widget_window_id: job.widget_window_id,
         module_name: String::from(name_str),
         launch_arg: job.launch_arg.clone(),
+        http_final_url: None,
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -437,6 +442,7 @@ pub fn execute_interactive(
         widget_window_id: 0,
         module_name: String::new(),
         launch_arg: None,
+        http_final_url: None,
     });
     store.set_fuel(INTERACTIVE_FUEL).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -481,6 +487,7 @@ fn execute_inner(
         widget_window_id: 0,
         module_name: String::new(),
         launch_arg: None,
+        http_final_url: None,
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -641,7 +648,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             };
 
             let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-            let res = crate::intent::http::https_get_streaming(
+            let mut final_url = String::new();
+            let res = crate::intent::http::https_get_streaming_ex(
                 &host, &path, cap,
                 &mut |chunk: &[u8]| -> Result<(), &'static str> {
                     if out.len() < cap {
@@ -650,7 +658,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                     }
                     Ok(())
                 },
+                Some(&mut final_url),
             );
+            // A failed request must not leave the previous request's final
+            // URL readable as if it were this one's.
+            caller.data_mut().http_final_url =
+                if res.is_ok() && !final_url.is_empty() { Some(final_url) } else { None };
             if res.is_err() { return -1; }
 
             let write_len = out.len().min(cap);
@@ -665,6 +678,41 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
                 write_len as i32
             } else {
                 -1
+            }
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_final_url(buf_ptr, buf_max) -> len, or -1
+    // The URL the last npk_http_request's body actually came from, after
+    // redirects. A browser resolves relative sub-resources against this
+    // (the document base URL) — resolving against the *requested* URL
+    // instead makes every sub-resource repeat the redirect. NET-gated.
+    linker.func_wrap("env", "npk_http_final_url",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+                return -1;
+            }
+            if buf_ptr < 0 || buf_max <= 0 { return -1; }
+            let url = match &caller.data().http_final_url {
+                Some(u) => u.clone(),
+                None => return -1,
+            };
+            let n = url.len().min(buf_max as usize);
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return -1,
+            };
+            let data = mem.data_mut(&mut caller);
+            let start = buf_ptr as usize;
+            // checked_add: a wrapping `start + n` would produce start > end and
+            // panic the KERNEL on the slice index — a guest-triggerable halt.
+            match start.checked_add(n) {
+                Some(end) if end <= data.len() => {
+                    data[start..end].copy_from_slice(&url.as_bytes()[..n]);
+                    n as i32
+                }
+                _ => -1,
             }
         },
     ).map_err(|_| WasmError::HostFunctionError)?;

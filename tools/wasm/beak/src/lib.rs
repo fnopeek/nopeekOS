@@ -41,6 +41,7 @@ unsafe extern "C" {
     fn npk_scene_commit(ptr: i32, len: i32) -> i32;
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
     fn npk_http_request(url_ptr: i32, url_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
     fn npk_theme_token(token_id: i32) -> i32;
@@ -139,6 +140,9 @@ const IMG_FETCH_CAP: usize = 6 * 1024 * 1024;
 const MAX_IMAGES: usize = 16;
 static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
 static mut IMAGES_DIRTY: bool = false;
+
+// Scratch for the kernel to write back the post-redirect URL of a fetch.
+static mut FINAL_URL_BUF: [u8; URL_CAP] = [0; URL_CAP];
 
 const PAYLOAD_CAP: usize = URL_CAP;
 static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
@@ -277,6 +281,18 @@ fn content_gen() -> u32 {
     unsafe { core::ptr::addr_of!(CONTENT_GEN).read() }
 }
 
+/// The URL the last fetch's body actually came from, after redirects.
+/// `None` if the kernel reported none (request failed, or an older kernel).
+fn fetched_from() -> Option<String> {
+    let dst = core::ptr::addr_of_mut!(FINAL_URL_BUF) as *mut u8;
+    let n = unsafe { npk_http_final_url(dst as i32, URL_CAP as i32) };
+    if n <= 0 {
+        return None;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
+    core::str::from_utf8(bytes).ok().map(|s| s.to_string())
+}
+
 /// Fetch `url` into HTML_BUF, then its linked stylesheets; resets scroll +
 /// marks dirty.
 fn fetch(url: &str) -> bool {
@@ -289,7 +305,14 @@ fn fetch(url: &str) -> bool {
     bump_content_gen();
     bump_nav_gen();
     if len > 0 {
-        fetch_stylesheets(url);
+        // Relative sub-resources resolve against the URL the document came
+        // FROM, not the one we asked for (RFC 3986 §5.1.3). Getting this
+        // wrong made every stylesheet and image repeat the document's own
+        // redirect — two requests each, which is what walked us into
+        // Wikimedia's rate limit (a wall of HTTP 429).
+        let base = fetched_from().unwrap_or_else(|| url.to_string());
+        set_url(&base);
+        fetch_stylesheets(&base);
         unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
     } else {
         unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
@@ -311,7 +334,20 @@ fn refresh_images(engine: &mut Engine) {
     if !srcs.is_empty() {
         let base = url_str().to_string();
         let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-        for src in srcs.iter().take(MAX_IMAGES) {
+        // The same src repeats all over a real page (icons, bullets, a logo in
+        // header and footer). The engine keys decoded images by src, so a
+        // repeat only re-fetched and re-decoded the identical bytes — wasted
+        // requests against the server's rate limit, and wasted MAX_IMAGES
+        // slots that real images needed.
+        let mut seen: Vec<&str> = Vec::new();
+        for src in srcs.iter() {
+            if seen.len() >= MAX_IMAGES {
+                break;
+            }
+            if seen.contains(&src.as_str()) {
+                continue;
+            }
+            seen.push(src);
             let abs = resolve(&base, src);
             let n = unsafe {
                 npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst as i32, IMG_FETCH_CAP as i32)
@@ -338,10 +374,15 @@ fn fetch_stylesheets(base: &str) {
     let base = base.to_string();
     let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
     let mut len = 0usize;
-    for (i, href) in links.iter().enumerate() {
-        if i >= MAX_CSS_LINKS || len + 8192 >= CSS_CAP {
+    let mut seen: Vec<&str> = Vec::new();
+    for href in links.iter() {
+        if seen.len() >= MAX_CSS_LINKS || len + 8192 >= CSS_CAP {
             break;
         }
+        if seen.contains(&href.as_str()) {
+            continue; // same sheet linked twice — fetching it again changes nothing
+        }
+        seen.push(href);
         let abs = resolve(&base, href);
         let remaining = (CSS_CAP - len - 1) as i32;
         let n = unsafe {
@@ -385,7 +426,9 @@ fn go(typed: &str) {
         s
     };
     fetch_url(&abs);
-    hist_push(&abs);
+    // Record where we LANDED, not where we aimed — otherwise every trip back
+    // through history replays the redirect.
+    hist_push(url_str());
 }
 
 /// A typed address that is not a URL becomes a web search. Marginalia is the
@@ -427,7 +470,7 @@ fn submit_form(page: &Page, activated: Option<u32>) -> bool {
         url.push_str(&sub.query);
     }
     fetch_url(&url);
-    hist_push(&url);
+    hist_push(url_str());
     true
 }
 
@@ -436,7 +479,9 @@ fn follow(href: &str) {
     let base = url_str().to_string();
     let abs = resolve(&base, href);
     fetch_url(&abs);
-    hist_push(&abs);
+    // Record where we LANDED, not where we aimed — otherwise every trip back
+    // through history replays the redirect.
+    hist_push(url_str());
 }
 
 // ── Back/forward history (fixed-size static ring of URLs) ──────────────────
