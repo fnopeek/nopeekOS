@@ -26,6 +26,13 @@ pub struct Engine {
     images: crate::image::ImageMap,
     /// Remaining decoded-BGRA budget for the current page (streaming decode).
     img_budget: usize,
+    /// Viewport height (px) — the initial containing block's height, which
+    /// `top`/`bottom`/`height` percentages on root-level absolutely positioned
+    /// boxes resolve against (CSS 2.1 §10.1). Device state like `theme`, not
+    /// page content, so it lives here rather than in every layout signature.
+    /// `Cell` for the same reason `glyphs` is a `RefCell`: the shell holds the
+    /// engine by shared reference across a frame.
+    viewport_h: core::cell::Cell<u32>,
 }
 
 impl Default for Engine {
@@ -44,6 +51,16 @@ impl Engine {
             theme: Theme::DARK,
             images: crate::image::ImageMap::new(),
             img_budget: crate::image::TOTAL_BUDGET,
+            // 600 keeps the historical behaviour of the reftest canvas for any
+            // caller that never sets it.
+            viewport_h: core::cell::Cell::new(600),
+        }
+    }
+
+    /// Tell the engine how tall the viewport is (see `viewport_h`).
+    pub fn set_viewport_h(&self, h: u32) {
+        if h > 0 {
+            self.viewport_h.set(h);
         }
     }
 
@@ -119,7 +136,7 @@ impl Engine {
     ) -> Layout {
         let dom = crate::dom::parse(html);
         let sheet = crate::css::collect_all(&dom, external_css, width as f32);
-        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, &self.theme, forms)
+        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, self.viewport_h.get(), &self.theme, forms)
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
@@ -137,6 +154,7 @@ impl Engine {
             &crate::css::Stylesheet::empty(),
             &self.images,
             width,
+            self.viewport_h.get(),
             &self.theme,
             forms,
         )

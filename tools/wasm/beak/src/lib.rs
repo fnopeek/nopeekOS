@@ -237,6 +237,11 @@ fn toggle_site_css() {
 /// Lay out the current page honoring the reader-mode toggle: full site CSS
 /// (external `<link>` + inline `<style>`) when on, UA-only when off.
 fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
+    // The viewport height is the initial containing block's height — what
+    // `top:0; bottom:0` on a root-level abspos box stretches to.
+    if let Some((_, _, _, h)) = canvas_rect() {
+        engine.set_viewport_h(h as u32);
+    }
     if use_site_css() {
         engine.layout_forms(html_str(), css_str(), w, state)
     } else {
