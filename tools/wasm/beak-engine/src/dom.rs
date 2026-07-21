@@ -24,11 +24,17 @@ pub struct Element {
     pub tag: String,
     pub attrs: Vec<(String, String)>,
     pub children: Vec<Node>,
+    /// Document-order index, assigned at parse time. A stable identity for one
+    /// element across re-layouts of the SAME document — form controls key their
+    /// live state (typed value, checked, focus) on it. Tree position can't serve
+    /// as the key: layout skips `display:none` subtrees, so any counter kept
+    /// during layout would drift from one kept during a plain DOM walk.
+    pub seq: u32,
 }
 
 impl Element {
-    fn new(tag: String) -> Element {
-        Element { tag, attrs: Vec::new(), children: Vec::new() }
+    fn new(tag: String, seq: u32) -> Element {
+        Element { tag, attrs: Vec::new(), children: Vec::new(), seq }
     }
 
     /// Value of `name` (case-insensitive, already lowercased at parse time).
@@ -84,7 +90,8 @@ const BLOCK_STARTERS: &[&str] = &[
 pub fn parse(html: &str) -> Dom {
     // Open-element stack; index 0 is the synthetic root and is never popped.
     let mut stack: Vec<Element> = Vec::with_capacity(16);
-    stack.push(Element::new("#root".to_string()));
+    let mut seq: u32 = 0;
+    stack.push(Element::new("#root".to_string(), seq));
 
     let bytes = html.as_bytes();
     let mut i = 0usize;
@@ -117,7 +124,8 @@ pub fn parse(html: &str) -> Dom {
             // Start tag. Apply the implied-end-tag recovery rules first.
             apply_implied_end_tags(&mut stack, &name);
 
-            let mut el = Element::new(name.clone());
+            seq += 1;
+            let mut el = Element::new(name.clone(), seq);
             parse_attrs(&raw, &mut el.attrs);
 
             if RAWTEXT.contains(&name.as_str()) {

@@ -16,6 +16,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use beak_engine::forms::{self, ControlKind, FormState, Forms};
 use beak_engine::{Engine, Layout};
 use linked_list_allocator::LockedHeap;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
@@ -181,6 +182,49 @@ fn css_str() -> &'static str {
     }
 }
 
+/// The current page's forms + the user's live edits to them. Rebuilt on every
+/// navigation (keyed on NAV_GEN, NOT the layout's content generation — a theme
+/// switch or an image arriving must not wipe what the user has typed).
+struct Page {
+    forms: Forms,
+    state: FormState,
+    nav: u32,
+}
+
+impl Page {
+    fn new() -> Page {
+        Page { forms: forms::Forms { forms: Vec::new(), controls: Vec::new() }, state: FormState::default(), nav: 0 }
+    }
+    /// Re-parse the document's forms if we have navigated since the last call.
+    fn sync(&mut self) {
+        let g = nav_gen();
+        if self.nav == g {
+            return;
+        }
+        self.nav = g;
+        self.forms = forms::collect(&beak_engine::parse(html_str()));
+        self.state.reset();
+    }
+    /// The focused control's current text + its kind.
+    fn focused(&self) -> Option<(&forms::Control, &str)> {
+        let seq = self.state.focus?;
+        let c = self.forms.get(seq)?;
+        Some((c, self.state.value(c)))
+    }
+}
+
+// Navigation generation — bumped ONLY by a real page load.
+static mut NAV_GEN: u32 = 0;
+fn nav_gen() -> u32 {
+    unsafe { core::ptr::addr_of!(NAV_GEN).read() }
+}
+fn bump_nav_gen() {
+    unsafe {
+        let p = core::ptr::addr_of_mut!(NAV_GEN);
+        p.write(p.read().wrapping_add(1));
+    }
+}
+
 // Reader-mode toggle: apply the site's own (external + <style>) CSS, or render
 // with just our UA sheet (BROWSER.md §9.7 — never worse than clean content).
 static mut USE_SITE_CSS: bool = true;
@@ -192,11 +236,11 @@ fn toggle_site_css() {
 }
 /// Lay out the current page honoring the reader-mode toggle: full site CSS
 /// (external `<link>` + inline `<style>`) when on, UA-only when off.
-fn do_layout(engine: &Engine, w: u32) -> Layout {
+fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
     if use_site_css() {
-        engine.layout_ext(html_str(), css_str(), w)
+        engine.layout_forms(html_str(), css_str(), w, state)
     } else {
-        engine.layout_ua(html_str(), w)
+        engine.layout_ua_forms(html_str(), w, state)
     }
 }
 fn payload_str(len: usize) -> &'static str {
@@ -238,6 +282,7 @@ fn fetch(url: &str) -> bool {
     set_scroll(0);
     mark_dirty();
     bump_content_gen();
+    bump_nav_gen();
     if len > 0 {
         fetch_stylesheets(url);
         unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(true) };
@@ -322,13 +367,63 @@ fn go(typed: &str) {
     }
     let abs = if t.starts_with("http://") || t.starts_with("https://") {
         t.to_string()
-    } else {
+    } else if looks_like_url(t) {
         let mut s = String::from("https://");
         s.push_str(t);
+        s
+    } else {
+        // Not an address → search the web for it (omnibox).
+        let mut s = String::from(SEARCH_URL);
+        let mut q = String::new();
+        forms::encode_query_value(t, &mut q);
+        s.push_str(&q);
         s
     };
     fetch_url(&abs);
     hist_push(&abs);
+}
+
+/// A typed address that is not a URL becomes a web search. Marginalia is the
+/// one engine that serves real results to a no-JS client (the others gate on
+/// browser fingerprinting — see the 2026-07-20 recon).
+const SEARCH_URL: &str = "https://marginalia-search.com/search?query=";
+
+/// Does this look like an address rather than a search phrase?
+fn looks_like_url(t: &str) -> bool {
+    if t.starts_with("http://") || t.starts_with("https://") {
+        return true;
+    }
+    if t.contains(' ') {
+        return false;
+    }
+    // A dotted host (example.com, de.wikipedia.org/wiki/X) or localhost.
+    let host = t.split(['/', '?', '#']).next().unwrap_or(t);
+    host == "localhost" || (host.contains('.') && !host.ends_with('.'))
+}
+
+/// Submit a form: build `action?name=value&…` and navigate there. GET only —
+/// a POST needs a request body, which `npk_http_request` cannot send yet.
+fn submit_form(page: &Page, activated: Option<u32>) -> bool {
+    let sub = match forms::submit(&page.forms, &page.state, activated) {
+        Some(s) => s,
+        None => return false,
+    };
+    if !sub.method_get {
+        log("[beak] POST-Formulare noch nicht unterstützt");
+        return false;
+    }
+    // An empty action targets the current document; either way the form data
+    // REPLACES the action's query string (HTML §4.10.21.3 "mutate action URL").
+    let base = url_str().to_string();
+    let action = if sub.action.is_empty() { base.clone() } else { resolve(&base, &sub.action) };
+    let mut url = action.split(['?', '#']).next().unwrap_or(&action).to_string();
+    if !sub.query.is_empty() {
+        url.push('?');
+        url.push_str(&sub.query);
+    }
+    fetch_url(&url);
+    hist_push(&url);
+    true
 }
 
 /// Follow a link href relative to the current page — new history entry.
@@ -450,7 +545,7 @@ fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
 /// Re-layout + paint the visible slice into the canvas if it's dirty or the
 /// viewport resized. Paints only the viewport (bounded memory, any page
 /// length — long one-pagers just scroll).
-fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &mut Vec<u8>) {
+fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &mut Vec<u8>, state: &FormState) {
     let (_x, _y, w, h) = match canvas_rect() {
         Some(r) => r,
         None => return,
@@ -473,7 +568,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, u32)>, buf: &
         Some((_, cw, cg)) => *cw != w || *cg != cur_gen,
     };
     if need_layout {
-        *cache = Some((do_layout(engine, w as u32), w, cur_gen));
+        *cache = Some((do_layout(engine, w as u32, state), w, cur_gen));
     }
     let layout = &cache.as_ref().unwrap().0;
 
@@ -632,13 +727,158 @@ fn dropdown_for(which: u8) -> Option<(u32, Widget)> {
     }
 }
 
+// ── in-page text editing (the compositor edits its own Input widgets; a
+//    control painted into our canvas is ours to edit) ──────────────────────
+
+fn prev_boundary(s: &str, i: usize) -> usize {
+    s[..i.min(s.len())].char_indices().next_back().map(|(j, _)| j).unwrap_or(0)
+}
+fn next_boundary(s: &str, i: usize) -> usize {
+    let i = i.min(s.len());
+    s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
+}
+
+/// Apply one key to the focused control. Returns true if the page must be
+/// re-laid-out (the control's painted text or caret changed).
+fn edit_key(page: &mut Page, key: KeyCode) -> bool {
+    let (seq, kind, mut value) = match page.focused() {
+        Some((c, v)) => (c.seq, c.kind, v.to_string()),
+        None => return false,
+    };
+    if !kind.is_text() {
+        // Space / Enter activate a button or toggle a box, like a browser.
+        return match key {
+            KeyCode::Enter | KeyCode::Char(b' ') => {
+                activate(page, seq);
+                true
+            }
+            KeyCode::Escape => {
+                page.state.focus = None;
+                true
+            }
+            _ => false,
+        };
+    }
+    let mut caret = page.state.caret.min(value.len());
+    match key {
+        KeyCode::Char(b) if (0x20..0x7F).contains(&b) => {
+            value.insert(caret, b as char);
+            caret += 1;
+        }
+        KeyCode::Backspace => {
+            if caret == 0 {
+                return false;
+            }
+            let p = prev_boundary(&value, caret);
+            value.replace_range(p..caret, "");
+            caret = p;
+        }
+        KeyCode::Delete => {
+            if caret >= value.len() {
+                return false;
+            }
+            let n = next_boundary(&value, caret);
+            value.replace_range(caret..n, "");
+        }
+        KeyCode::Left => caret = prev_boundary(&value, caret),
+        KeyCode::Right => caret = next_boundary(&value, caret),
+        KeyCode::Home => caret = 0,
+        KeyCode::End => caret = value.len(),
+        KeyCode::Escape => {
+            page.state.focus = None;
+            return true;
+        }
+        KeyCode::Enter => {
+            // Implicit submission (HTML §4.10.21.2): Enter in a text field
+            // activates the form's default button.
+            let activated = page
+                .forms
+                .get(seq)
+                .and_then(|c| c.form)
+                .and_then(|f| page.forms.default_button(f))
+                .map(|b| b.seq);
+            page.state.set_value(seq, value);
+            page.state.caret = caret;
+            submit_form(page, activated);
+            return true;
+        }
+        _ => return false,
+    }
+    page.state.set_value(seq, value);
+    page.state.caret = caret;
+    true
+}
+
+/// Click / keyboard activation of a control: submit, toggle, or take focus.
+fn activate(page: &mut Page, seq: u32) {
+    let kind = match page.forms.get(seq) {
+        Some(c) => c.kind,
+        None => return,
+    };
+    match kind {
+        ControlKind::Submit => {
+            page.state.focus = Some(seq);
+            submit_form(page, Some(seq));
+        }
+        ControlKind::Reset => {
+            page.state.reset();
+        }
+        ControlKind::Checkbox | ControlKind::Radio => {
+            page.state.focus = Some(seq);
+            let f = &page.forms;
+            page.state.toggle(f, seq);
+        }
+        ControlKind::Select => {
+            page.state.focus = Some(seq);
+            let f = &page.forms;
+            page.state.cycle_select(f, seq);
+        }
+        _ => {
+            // A text field takes focus with the caret at the end.
+            page.state.focus = Some(seq);
+            page.state.caret = page.forms.get(seq).map(|c| page.state.value(c).len()).unwrap_or(0);
+        }
+    }
+}
+
 /// Handle one event. Returns true if the chrome (address bar / title) should
 /// be re-committed.
-fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> bool {
+fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: &mut Page) -> bool {
     match ev {
         // Keep URL_BUF synced with the address-bar edit buffer.
         Event::InputChange { value } => {
             set_url(&value);
+            // Typing in the address bar means the compositor moved keyboard
+            // focus there — drop the page control's focus so only one caret
+            // blinks and Enter goes to the right place.
+            if page.state.focus.take().is_some() {
+                bump_content_gen();
+                mark_dirty();
+            }
+            false
+        }
+        // A page control has focus → the key is ours (the compositor only
+        // routes keys here when no chrome Input/TextArea consumed them).
+        Event::Key(k) if page.state.focus.is_some() => {
+            if edit_key(page, k) {
+                bump_content_gen();
+                mark_dirty();
+            }
+            false
+        }
+        // No control focused: the keys that reach us drive the viewport.
+        Event::Key(k) => {
+            let step = match k {
+                KeyCode::Down => 60,
+                KeyCode::Up => -60,
+                KeyCode::PageDown | KeyCode::Char(b' ') => 400,
+                KeyCode::PageUp => -400,
+                KeyCode::Home => i32::MIN / 2,
+                KeyCode::End => i32::MAX / 2,
+                _ => return false,
+            };
+            set_scroll(scroll_y().saturating_add(step));
+            mark_dirty();
             false
         }
         Event::Action(ActionId(id)) => match id {
@@ -723,12 +963,29 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>) -> boo
                     let cy = y - ry + scroll_y();
                     // Hit-test the cached layout if it still matches; else lay
                     // out on the fly (rare — only if a click races a resize).
-                    let href = match cache.as_ref() {
-                        Some((lay, cw, cg)) if *cw == w && *cg == content_gen() => {
-                            lay.hit_test(cx, cy).map(|s| s.to_string())
+                    let fresh;
+                    let lay = match cache.as_ref() {
+                        Some((lay, cw, cg)) if *cw == w && *cg == content_gen() => lay,
+                        _ => {
+                            fresh = do_layout(engine, w as u32, &page.state);
+                            &fresh
                         }
-                        _ => do_layout(engine, w as u32).hit_test(cx, cy).map(|s| s.to_string()),
                     };
+                    // A control wins over a link: a submit button inside an
+                    // <a>, or a field overlapping a link rect, is the target.
+                    if let Some(ctl) = lay.hit_control(cx, cy) {
+                        let seq = ctl.seq;
+                        activate(page, seq);
+                        bump_content_gen(); // repaint the focus ring / new value
+                        mark_dirty();
+                        return true;
+                    }
+                    let href = lay.hit_test(cx, cy).map(|s| s.to_string());
+                    // Clicking the page elsewhere blurs a focused control.
+                    if page.state.focus.take().is_some() {
+                        bump_content_gen();
+                        mark_dirty();
+                    }
                     if let Some(href) = href {
                         follow(&href);
                         return true;
@@ -859,6 +1116,8 @@ pub extern "C" fn _start() {
 
     // Cached layout: (Layout, width it was laid out at, content generation).
     let mut cache: Option<(Layout, i32, u32)> = None;
+    // The page's forms + the user's edits, rebuilt on every navigation.
+    let mut page = Page::new();
     let mut last_bg = unsafe { npk_theme_token(0) };
     // Persistent paint buffer, reused across frames (see maybe_repaint).
     let mut paint_buf: Vec<u8> = Vec::new();
@@ -868,6 +1127,8 @@ pub extern "C" fn _start() {
         if images_dirty() {
             refresh_images(&mut engine);
         }
+        // Pick up a navigation: re-parse the document's forms, drop old edits.
+        page.sync();
         // Drain the ENTIRE event queue this tick, THEN repaint once. Wheel
         // events used to be handled one-per-loop with a full repaint (and a
         // ~5 MB buffer alloc) each — a burst of scroll notches backed up so the
@@ -881,7 +1142,7 @@ pub extern "C" fn _start() {
             match poll_event() {
                 PollResult::Event(ev) => {
                     had_event = true;
-                    if handle(&engine, ev, &cache) {
+                    if handle(&engine, ev, &cache, &mut page) {
                         chrome = true;
                     }
                 }
@@ -909,7 +1170,7 @@ pub extern "C" fn _start() {
                 mark_dirty();
             }
         }
-        maybe_repaint(&engine, &mut cache, &mut paint_buf);
+        maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.

@@ -20,6 +20,7 @@ pub mod color;
 pub mod css;
 pub mod dom;
 pub mod fonts;
+pub mod forms;
 pub mod image;
 pub mod layout;
 pub mod raster;
@@ -126,6 +127,17 @@ auf echten Seiten jeder Block in einem Container.</div>\
 nicht ladbares:</p>\
 <img src=\"demo.png\" alt=\"Verlauf\" width=\"240\" height=\"160\">\
 <img src=\"fehlt.jpg\" alt=\"nicht geladen (JPEG folgt)\" width=\"240\" height=\"90\">\
+<hr>\
+<h2>Formulare (GET)</h2>\
+<form action=\"/search\">\
+<p>Suche: <input name=\"q\" value=\"nopeekOS\" size=\"22\"> <input type=\"submit\" value=\"Los\"> \
+<input type=\"checkbox\" name=\"exact\" checked> nur exakt \
+<select name=\"lang\"><option value=\"de\">Deutsch</option>\
+<option value=\"en\" selected>English</option></select></p>\
+<p><input name=\"leer\" placeholder=\"Platzhalter, wenn leer\" size=\"26\"> \
+<button>Senden</button></p>\
+<p><textarea name=\"msg\" rows=\"2\" cols=\"38\">Mehrzeiliger Text im textarea</textarea></p>\
+</form>\
 <hr>\
 <h2>Nächste Schritte</h2>\
 <p>Tabellen-Layout und Flexbox/Grid — der Reihe nach. Die Engine bleibt portabel: \
