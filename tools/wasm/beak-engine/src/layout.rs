@@ -22,6 +22,7 @@ use fontdue::Font;
 
 use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::{Dom, Element, Node};
+use crate::forms::{ControlKind, FormState};
 use crate::image::{Image, ImageMap};
 use crate::style::{
     self, BorderSide, ClearKind, Clip, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
@@ -334,9 +335,22 @@ pub struct LinkRect {
     pub href: String,
 }
 
+/// An interactive form control's document-space rectangle. The shell hit-tests
+/// these to give a control focus / activate it; `seq` identifies the element
+/// across re-layouts (`dom::Element::seq`).
+pub struct ControlRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub seq: u32,
+    pub kind: ControlKind,
+}
+
 pub struct Layout {
     pub ops: Vec<DrawOp>,
     pub links: Vec<LinkRect>,
+    pub controls: Vec<ControlRect>,
     /// Total document height (px). May exceed the viewport → scroll.
     pub height: u32,
     /// Canvas background — the `<body>` background propagated to the whole
@@ -353,6 +367,16 @@ impl Layout {
             .rev()
             .find(|l| x >= l.x && x < l.x + l.w && y >= l.y && y < l.y + l.h)
             .map(|l| l.href.as_str())
+    }
+
+    /// Form control at a document-space point. Checked BEFORE `hit_test` by the
+    /// shell: a control nested in a link (a search button inside an `<a>`) must
+    /// take the click itself.
+    pub fn hit_control(&self, x: i32, y: i32) -> Option<&ControlRect> {
+        self.controls
+            .iter()
+            .rev()
+            .find(|c| x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h)
     }
 }
 
@@ -388,6 +412,10 @@ struct Ctx<'a> {
     images: &'a ImageMap,
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
+    controls: Vec<ControlRect>,
+    /// Live form-control state (typed values, checked boxes, focus) — read
+    /// only; the shell owns it and re-lays out when it changes.
+    forms: &'a FormState,
     path: Vec<ElemInfo>, // root → … → current parent
     /// Positioned containing block (x, y, width) for `position:absolute`
     /// descendants — the nearest ancestor with `position != static`, else page.
@@ -474,6 +502,7 @@ pub fn layout(
     images: &ImageMap,
     width: u32,
     theme: &Theme,
+    forms: &FormState,
 ) -> Layout {
     let root = ComputedStyle::root(theme);
     let cx = PAD;
@@ -485,6 +514,8 @@ pub fn layout(
         images,
         ops: Vec::new(),
         links: Vec::new(),
+        controls: Vec::new(),
+        forms,
         path: Vec::new(),
         cb: (cx, PAD, cw), // initial containing block = the page content area
         viewport_w: width as f32,
@@ -523,7 +554,7 @@ pub fn layout(
     // positive-z ranges paint last (in front) of everything else.
     let ops = reorder_by_z(ctx.ops, &ctx.stack_ops);
     let links = reorder_by_z(ctx.links, &ctx.stack_links);
-    Layout { ops, links, height: y.max(1) as u32, bg: canvas_bg }
+    Layout { ops, links, controls: ctx.controls, height: y.max(1) as u32, bg: canvas_bg }
 }
 
 impl Ctx<'_> {
@@ -758,6 +789,19 @@ impl Ctx<'_> {
                 self.path.pop();
                 continue;
             }
+            // Form controls are atomic inline boxes too — and their children
+            // (a `<button>`'s label, a `<select>`'s options) never lay out as
+            // page content. Same treatment in `collect_inline`, since most
+            // controls sit inside inline context.
+            if let Some(kind) = crate::forms::kind_of(el) {
+                if kind != ControlKind::Hidden {
+                    self.path.push(ElemInfo::of(el));
+                    let ctl = self.control_box(el, &st, kind, w as f32);
+                    inline.control(ctl);
+                    self.path.pop();
+                }
+                continue;
+            }
             // `position:absolute`/`fixed` are out of flow → laid at a
             // containing-block-relative position, not advancing the flow.
             if matches!(st.position, Position::Absolute | Position::Fixed) {
@@ -782,7 +826,7 @@ impl Ctx<'_> {
             // a line box separates margins, so the open margin commits here.
             if !inline.is_empty() {
                 let ly = anchor + open.value() as i32;
-                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
+                let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links, &mut self.controls);
                 if !committed {
                     first_top = ly;
                     committed = true;
@@ -804,6 +848,7 @@ impl Ctx<'_> {
             self.path.push(ElemInfo::of(el));
             let op0 = self.ops.len();
             let link0 = self.links.len();
+            let ctl0 = self.controls.len();
             // An explicit `z-index` on a positioned (relative/sticky) box
             // opens a tracked stacking range (CSS2.1 §9.9), same as abspos —
             // unless already nested inside another tracked range.
@@ -834,7 +879,7 @@ impl Ctx<'_> {
             if st.position == Position::Relative {
                 let (dx, dy) = rel_offset(&st, w as f32);
                 if dx != 0 || dy != 0 {
-                    self.shift_ops(op0, self.ops.len(), link0, self.links.len(), dx, dy);
+                    self.shift_ops(op0, self.ops.len(), link0, self.links.len(), ctl0, dx, dy);
                 }
             }
             if track {
@@ -865,7 +910,7 @@ impl Ctx<'_> {
         }
         if !inline.is_empty() {
             let ly = anchor + open.value() as i32;
-            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links);
+            let nb = inline.flow(self.fonts, self.theme, x, w, ly, &self.floats, &mut self.ops, &mut self.links, &mut self.controls);
             if !committed {
                 first_top = ly;
                 committed = true;
@@ -1070,6 +1115,103 @@ impl Ctx<'_> {
             None => bw * 0.75,
         };
         (img, bw.max(1.0) as i32, bh.max(1.0) as i32)
+    }
+
+    /// Measure a form control and capture what it displays right now (the
+    /// user's typed value, else the authored default). Controls are atomic
+    /// inline boxes — they never wrap, and their children never lay out.
+    fn control_box(&self, el: &Element, st: &ComputedStyle, kind: ControlKind, avail: f32) -> CtlBox {
+        let font = self.fonts.pick(st.bold, st.italic, st.mono);
+        let size = st.font_px;
+        let ch_w = measure(font, "0", size).max(1.0);
+        let line = line_gap(font, size);
+        let default = default_value(el, kind);
+        let raw = self.forms.value_or(el.seq, &default).to_string();
+        let focused = self.forms.focus == Some(el.seq);
+
+        // What the box shows: typed text (bulleted for a password), the
+        // placeholder when empty, or a button/select label.
+        let (mut text, ghost) = match kind {
+            ControlKind::Password => (repeat_char('•', raw.chars().count()), false),
+            ControlKind::Text | ControlKind::TextArea if raw.is_empty() => {
+                (el.attr("placeholder").unwrap_or("").to_string(), true)
+            }
+            ControlKind::Select => {
+                let label = select_label(el, &raw);
+                (label, false)
+            }
+            ControlKind::Submit | ControlKind::Reset | ControlKind::Button => {
+                (button_label(el, kind, &raw), false)
+            }
+            ControlKind::File => ("Datei wählen".to_string(), true),
+            _ => (raw.clone(), false),
+        };
+        if matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
+            text.clear();
+        }
+
+        // Intrinsic size, then let a definite CSS width/height win (real pages
+        // size their search fields in CSS, not with `size=`).
+        let pad_x = CTL_PAD_X;
+        let (mut w, mut h) = match kind {
+            ControlKind::Checkbox | ControlKind::Radio => {
+                let s = (size * 0.9).max(12.0) as i32;
+                (s, s)
+            }
+            ControlKind::TextArea => {
+                let cols = el.attr("cols").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(30.0);
+                let rows = el.attr("rows").and_then(|r| r.trim().parse::<f32>().ok()).unwrap_or(3.0);
+                (
+                    (cols * ch_w) as i32 + 2 * pad_x + 2,
+                    (rows * line) as i32 + 2 * CTL_PAD_Y + 2,
+                )
+            }
+            ControlKind::Text | ControlKind::Password => {
+                let cols = el.attr("size").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(20.0);
+                (
+                    (cols * ch_w) as i32 + 2 * pad_x + 2,
+                    ceil_i32(line) + 2 * CTL_PAD_Y + 2,
+                )
+            }
+            ControlKind::Select => (
+                ceil_i32(measure(font, &text, size)) + 2 * pad_x + CTL_ARROW + 2,
+                ceil_i32(line) + 2 * CTL_PAD_Y + 2,
+            ),
+            _ => (
+                ceil_i32(measure(font, &text, size)) + 2 * (pad_x + 4) + 2,
+                ceil_i32(line) + 2 * CTL_PAD_Y + 2,
+            ),
+        };
+        if let Some(cw) = st.width.px(avail) {
+            // A CSS width is a content width unless `box-sizing: border-box`.
+            w = if st.box_border { cw as i32 } else { cw as i32 + 2 * pad_x + 2 };
+        }
+        if let Some(chh) = st.height.px(avail) {
+            h = if st.box_border { chh as i32 } else { chh as i32 + 2 * CTL_PAD_Y + 2 };
+        }
+        if let Some(mx) = st.max_width.px(avail) {
+            w = w.min(mx as i32);
+        }
+
+        // Caret: the shell keeps a byte offset; painting counts characters.
+        let caret = if focused && kind.is_text() {
+            Some(raw[..self.forms.caret.min(raw.len())].chars().count())
+        } else {
+            None
+        };
+        CtlBox {
+            seq: el.seq,
+            kind,
+            w: w.max(8),
+            h: h.max(8),
+            text,
+            ghost,
+            checked: self.forms.checked_or(el.seq, el.attr("checked").is_some()),
+            focused,
+            caret,
+            bg: st.bg,
+            style: RunStyle { size, color: st.color, bold: st.bold, italic: st.italic, mono: st.mono, valign: 0 },
+        }
     }
 
     /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
@@ -1398,12 +1540,13 @@ impl Ctx<'_> {
     /// Lay an element's children to measure their flowed height without emitting
     /// any draw ops (used to size table rows before painting cell boxes).
     fn measure_children_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
-        let (o, l) = (self.ops.len(), self.links.len());
+        let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
         self.path.push(ElemInfo::of(el));
         let bottom = self.layout_children(&el.children, st, Some(el), x, w.max(0), y);
         self.path.pop();
         self.ops.truncate(o);
         self.links.truncate(l);
+        self.controls.truncate(c);
         (bottom - y).max(0)
     }
 
@@ -1413,10 +1556,11 @@ impl Ctx<'_> {
         match cell {
             Cell::Real(e) => self.measure_children_height(e, st, x, w, y),
             Cell::Anon(nodes) => {
-                let (o, l) = (self.ops.len(), self.links.len());
+                let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
                 let bottom = self.layout_children(nodes, st, None, x, w.max(0), y);
                 self.ops.truncate(o);
                 self.links.truncate(l);
+                self.controls.truncate(c);
                 (bottom - y).max(0)
             }
         }
@@ -1594,6 +1738,16 @@ impl Ctx<'_> {
     /// text far more (or less) than the sibling column an equal-text real
     /// cell computes at its own (matching) font size.
     fn intrinsic_width(&self, el: &Element, size: f32) -> (f32, f32) {
+        // A control has no text children to measure — without this it sizes to
+        // 0 as a flex/grid item and disappears.
+        if let Some(kind) = crate::forms::kind_of(el) {
+            if kind == ControlKind::Hidden {
+                return (0.0, 0.0);
+            }
+            let st = ComputedStyle::root(self.theme);
+            let w = self.control_box(el, &st, kind, 0.0).w as f32;
+            return (w, w);
+        }
         self.intrinsic_width_nodes(&el.children, size)
     }
 
@@ -1663,6 +1817,31 @@ impl Ctx<'_> {
 
     /// Dispatch a block-level box to the right formatting context.
     fn layout_box(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
+        // A form control is atomic wherever it lands. `flow_children` and
+        // `collect_inline` catch the in-flow cases (so a field flows with the
+        // text beside it); this catches every other box-making path — flex and
+        // grid items, table cells, absolutely positioned controls. Real search
+        // boxes sit in `display:flex` rows, so missing this rendered NOTHING.
+        if let Some(kind) = crate::forms::kind_of(el) {
+            if kind == ControlKind::Hidden {
+                return y;
+            }
+            let mut ctl = self.control_box(el, st, kind, w as f32);
+            // Here the CALLER already resolved this box: `w` is the flex item's
+            // main size / the grid column / the table cell, and a definite
+            // height is the stretched cross size. Painting the control's own
+            // intrinsic size instead would overlap the next item and ignore the
+            // stretch every grid/flex item gets by default.
+            if !matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
+                ctl.w = w.max(8);
+                if let Some(hh) = st.height.px(w as f32) {
+                    ctl.h = (hh as i32).max(8);
+                }
+            }
+            let h_i = ctl.h;
+            paint_control(self.fonts, self.theme, &ctl, x, y, &mut self.ops, &mut self.controls);
+            return y + h_i;
+        }
         match st.display {
             Display::Table => self.layout_table(el, st, x, w, y),
             Display::Flex => self.layout_flex(el, st, x, w, y),
@@ -2081,6 +2260,7 @@ impl Ctx<'_> {
             }
             let op0 = self.ops.len();
             let link0 = self.links.len();
+            let ctl0 = self.controls.len();
             self.path.push(ElemInfo::of(el_i));
             let bottom = self.layout_box(el_i, &s2, ix as i32, (iw as i32).max(1), cell_y);
             self.path.pop();
@@ -2091,7 +2271,7 @@ impl Ctx<'_> {
                 _ => 0,
             };
             if dy != 0 {
-                self.shift_ops(op0, self.ops.len(), link0, self.links.len(), 0, dy);
+                self.shift_ops(op0, self.ops.len(), link0, self.links.len(), ctl0, 0, dy);
             }
         }
 
@@ -2101,13 +2281,14 @@ impl Ctx<'_> {
     /// Lay a box just to measure its natural height, discarding the emitted ops
     /// (used for grid auto-row sizing before the real placement pass).
     fn measure_box_height(&mut self, el: &Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
-        let (o, l) = (self.ops.len(), self.links.len());
+        let (o, l, c) = (self.ops.len(), self.links.len(), self.controls.len());
         let prev_cb = self.cb;
         self.path.push(ElemInfo::of(el));
         let bottom = self.layout_box(el, st, x, w.max(1), y);
         self.path.pop();
         self.ops.truncate(o);
         self.links.truncate(l);
+        self.controls.truncate(c);
         self.cb = prev_cb;
         bottom - y
     }
@@ -2487,7 +2668,7 @@ impl Ctx<'_> {
     /// Shift a contiguous slice of already-emitted ops + links by `(dx, dy)` —
     /// used to place a flex item on the cross axis, and to offset a
     /// `position:relative` box after it is laid in flow.
-    fn shift_ops(&mut self, o0: usize, o1: usize, l0: usize, l1: usize, dx: i32, dy: i32) {
+    fn shift_ops(&mut self, o0: usize, o1: usize, l0: usize, l1: usize, c0: usize, dx: i32, dy: i32) {
         for op in &mut self.ops[o0..o1] {
             match op {
                 DrawOp::Text { x, y, .. }
@@ -2501,6 +2682,12 @@ impl Ctx<'_> {
         for lk in &mut self.links[l0..l1] {
             lk.x += dx;
             lk.y += dy;
+        }
+        // Control hit rects must follow their painted box (relative offsets,
+        // flex cross-alignment) or clicks land where the box used to be.
+        for c in &mut self.controls[c0..] {
+            c.x += dx;
+            c.y += dy;
         }
     }
 }
@@ -2719,6 +2906,13 @@ impl Ctx<'_> {
             inline.image(img, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string());
             return;
         }
+        if let Some(kind) = crate::forms::kind_of(el) {
+            if kind != ControlKind::Hidden {
+                let ctl = self.control_box(el, st, kind, bw as f32);
+                inline.control(ctl);
+            }
+            return;
+        }
         let href = if st.is_link { el.attr("href").or(href) } else { href };
         // `el::before` — same anonymous-inline-box treatment as the block
         // path (`flow_children`), just feeding this inline run instead.
@@ -2765,11 +2959,274 @@ struct RunStyle {
     valign: i8, // vertical-align: super (+1) / sub (-1) / baseline (0)
 }
 
-/// One inline item: a word, an atomic `<img>`, or a `<br>`.
+/// One inline item: a word, an atomic `<img>`, a form control, or a `<br>`.
 enum Item {
     Word { text: String, style: RunStyle, href: Option<String>, space_before: bool },
     Image { img: Option<Rc<Image>>, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool },
+    Control { ctl: CtlBox, space_before: bool },
     Break,
+}
+
+// Form-control chrome metrics (px).
+const CTL_PAD_X: i32 = 6;
+const CTL_PAD_Y: i32 = 3;
+const CTL_ARROW: i32 = 14;
+
+/// A measured form control, ready to place on a line and paint.
+struct CtlBox {
+    seq: u32,
+    kind: ControlKind,
+    w: i32,
+    h: i32,
+    /// Displayed text: value, placeholder, or button/select label.
+    text: String,
+    /// `text` is a placeholder → paint it muted.
+    ghost: bool,
+    checked: bool,
+    focused: bool,
+    /// Caret position in characters, when this control has keyboard focus.
+    caret: Option<usize>,
+    /// The control's own `background-color`, if the page styled it.
+    bg: Option<Rgb>,
+    style: RunStyle,
+}
+
+/// The control's authored default value (what it shows before the user edits).
+fn default_value(el: &Element, kind: ControlKind) -> String {
+    match kind {
+        ControlKind::TextArea => {
+            let mut s = String::new();
+            gather_text(&el.children, &mut s);
+            s
+        }
+        ControlKind::Select => {
+            let (opts, sel) = crate::forms::options_of(el);
+            sel.or_else(|| opts.first().map(|(v, _)| v.clone())).unwrap_or_default()
+        }
+        _ => el.attr("value").unwrap_or("").to_string(),
+    }
+}
+
+fn repeat_char(c: char, n: usize) -> String {
+    let mut s = String::with_capacity(n);
+    for _ in 0..n.min(256) {
+        s.push(c);
+    }
+    s
+}
+
+/// Label of the currently selected `<option>` (falls back to the raw value).
+fn select_label(el: &Element, value: &str) -> String {
+    let (opts, _) = crate::forms::options_of(el);
+    opts.iter()
+        .find(|(v, _)| v == value)
+        .map(|(_, l)| l.clone())
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn button_label(el: &Element, kind: ControlKind, value: &str) -> String {
+    if el.tag == "button" {
+        let mut s = String::new();
+        gather_text(&el.children, &mut s);
+        let s = collapse_whitespace(&s).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    if !value.is_empty() {
+        return value.to_string();
+    }
+    match kind {
+        ControlKind::Reset => "Zurücksetzen".to_string(),
+        _ => "Absenden".to_string(),
+    }
+}
+
+/// Blend `t`/255 of `b` into `a` — control faces/borders are derived from the
+/// page theme so they read correctly on light and dark backgrounds alike.
+fn mix(a: Rgb, b: Rgb, t: u32) -> Rgb {
+    let f = |x: u8, y: u8| (((x as u32) * (255 - t) + (y as u32) * t) / 255) as u8;
+    Rgb(f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
+}
+
+/// Paint one control's chrome + text at (x, top) and record its hit rect.
+fn paint_control(
+    fonts: &crate::fonts::Fonts,
+    theme: &Theme,
+    ctl: &CtlBox,
+    x: i32,
+    top: i32,
+    ops: &mut Vec<DrawOp>,
+    controls: &mut Vec<ControlRect>,
+) {
+    let (w, h) = (ctl.w, ctl.h);
+    let font = fonts.pick(ctl.style.bold, ctl.style.italic, ctl.style.mono);
+    let border = if ctl.focused { theme.link } else { mix(theme.rule, theme.text, 40) };
+    // A page that styles its own button (`background-color`) wins; otherwise
+    // the UA face is derived from the theme so it reads on light and dark.
+    let face = ctl.bg.unwrap_or(match ctl.kind {
+        // Buttons get a raised face; text fields stay flat like the page.
+        ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File
+        | ControlKind::Select => mix(theme.bg, theme.text, 28),
+        _ => mix(theme.bg, theme.text, 8),
+    });
+
+    match ctl.kind {
+        ControlKind::Checkbox | ControlKind::Radio => {
+            ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+            stroke_rect(ops, x, top, w, h, border);
+            if ctl.checked {
+                let i = (w / 4).max(2);
+                ops.push(DrawOp::Rect {
+                    x: x + i,
+                    y: top + i,
+                    w: w - 2 * i,
+                    h: h - 2 * i,
+                    color: theme.link,
+                });
+            }
+        }
+        _ => {
+            ops.push(DrawOp::Rect { x, y: top, w, h, color: face });
+            stroke_rect(ops, x, top, w, h, border);
+            let tx = x + CTL_PAD_X + 1;
+            let lh = ceil_i32(line_gap(font, ctl.style.size));
+            let ty = top + (h - lh) / 2;
+            if ctl.kind == ControlKind::TextArea {
+                // Multi-line: honour hard newlines and wrap on width, top-
+                // aligned, clipped to the rows that fit in the box.
+                let inner_w = (w - 2 * CTL_PAD_X - 2).max(1) as f32;
+                let rows = ((h - 2 * CTL_PAD_Y - 2) / lh.max(1)).max(1);
+                let mut ly = top + CTL_PAD_Y + 1;
+                let color = if ctl.ghost { theme.muted } else { ctl.style.color };
+                for line in wrap_lines(font, &ctl.text, ctl.style.size, inner_w, rows as usize) {
+                    ops.push(DrawOp::Text {
+                        x: tx,
+                        y: ly,
+                        size: ctl.style.size,
+                        color,
+                        bold: ctl.style.bold,
+                        italic: ctl.style.italic,
+                        mono: ctl.style.mono,
+                        text: line,
+                    });
+                    ly += lh;
+                }
+                controls.push(ControlRect { x, y: top, w, h, seq: ctl.seq, kind: ctl.kind });
+                return;
+            }
+            if !ctl.text.is_empty() {
+                // Clip an over-long value to the box (no inner scrolling yet):
+                // keep the tail visible, which is where the caret is.
+                let inner = (w - 2 * CTL_PAD_X - 2).max(0) as f32;
+                let text = clip_text_tail(font, &ctl.text, ctl.style.size, inner);
+                // A button's label is centred in its box (HTML §button-layout);
+                // a field's value is not.
+                let tx = match ctl.kind {
+                    ControlKind::Submit | ControlKind::Reset | ControlKind::Button
+                    | ControlKind::File => {
+                        let tw = measure(font, &text, ctl.style.size);
+                        tx.max(x + ((w as f32 - tw) / 2.0) as i32)
+                    }
+                    _ => tx,
+                };
+                ops.push(DrawOp::Text {
+                    x: tx,
+                    y: ty,
+                    size: ctl.style.size,
+                    color: if ctl.ghost { theme.muted } else { ctl.style.color },
+                    bold: ctl.style.bold,
+                    italic: ctl.style.italic,
+                    mono: ctl.style.mono,
+                    text,
+                });
+            }
+            if ctl.kind == ControlKind::Select {
+                // A downward chevron, drawn as a stack of narrowing bars.
+                let cx = x + w - CTL_PAD_X - CTL_ARROW / 2;
+                let cy = top + h / 2 - 2;
+                for i in 0..4 {
+                    ops.push(DrawOp::Rect {
+                        x: cx - 4 + i,
+                        y: cy + i,
+                        w: 9 - 2 * i,
+                        h: 1,
+                        color: ctl.style.color,
+                    });
+                }
+            }
+            if let Some(caret) = ctl.caret {
+                let upto: String = ctl.text.chars().take(caret).collect();
+                let cw = measure(font, &upto, ctl.style.size);
+                let inner = (w - 2 * CTL_PAD_X - 2) as f32;
+                let cx = tx + cw.min(inner.max(0.0)) as i32;
+                ops.push(DrawOp::Rect {
+                    x: cx,
+                    y: ty + 1,
+                    w: 1,
+                    h: ceil_i32(line_gap(font, ctl.style.size)) - 2,
+                    color: theme.link,
+                });
+            }
+        }
+    }
+    controls.push(ControlRect { x, y: top, w, h, seq: ctl.seq, kind: ctl.kind });
+}
+
+fn stroke_rect(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, color: Rgb) {
+    ops.push(DrawOp::Rect { x, y, w, h: 1, color });
+    ops.push(DrawOp::Rect { x, y: y + h - 1, w, h: 1, color });
+    ops.push(DrawOp::Rect { x, y, w: 1, h, color });
+    ops.push(DrawOp::Rect { x: x + w - 1, y, w: 1, h, color });
+}
+
+/// Break `text` into at most `max_rows` lines that fit `max_w`, splitting on
+/// hard newlines first and then greedily on words (a `<textarea>`'s content).
+fn wrap_lines(font: &Font, text: &str, size: f32, max_w: f32, max_rows: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        if out.len() >= max_rows {
+            break;
+        }
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            let cand = if line.is_empty() {
+                word.to_string()
+            } else {
+                alloc::format!("{line} {word}")
+            };
+            if measure(font, &cand, size) <= max_w || line.is_empty() {
+                line = cand;
+            } else {
+                out.push(core::mem::take(&mut line));
+                if out.len() >= max_rows {
+                    return out;
+                }
+                line = word.to_string();
+            }
+        }
+        out.push(line);
+    }
+    out.truncate(max_rows);
+    out
+}
+
+/// Trim `text` from the LEFT until it fits `max_w` (the caret sits at the end
+/// of a field the user is typing into, so the tail is what matters).
+fn clip_text_tail(font: &Font, text: &str, size: f32, max_w: f32) -> String {
+    if measure(font, text, size) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0;
+    while start < chars.len() {
+        let s: String = chars[start..].iter().collect();
+        if measure(font, &s, size) <= max_w {
+            return s;
+        }
+        start += 1;
+    }
+    String::new()
 }
 
 /// Accumulates inline content, then flows it into line boxes. Whitespace
@@ -2823,6 +3280,13 @@ impl Inline {
         self.items.push(Item::Image { img, w, h, href: href.map(|s| s.to_string()), alt, space_before });
     }
 
+    /// Add an atomic form control to the inline run.
+    fn control(&mut self, ctl: CtlBox) {
+        let space_before = self.pending_space && !self.items.is_empty();
+        self.pending_space = false;
+        self.items.push(Item::Control { ctl, space_before });
+    }
+
     fn brk(&mut self) {
         self.items.push(Item::Break);
         self.pending_space = false;
@@ -2842,6 +3306,7 @@ impl Inline {
         floats: &[FloatRect],
         ops: &mut Vec<DrawOp>,
         links: &mut Vec<LinkRect>,
+        controls: &mut Vec<ControlRect>,
     ) -> i32 {
         // Each word/segment measures with its own face (a monospace run advances
         // differently from proportional Inter), so glyph positions match what
@@ -2863,7 +3328,7 @@ impl Inline {
                     if line.is_empty() {
                         y += ceil_i32(line_gap(fonts.regular(), BASE_FONT_PX));
                     } else {
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
                     }
                     let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                     pen = bl as f32;
@@ -2875,7 +3340,7 @@ impl Inline {
                     let ww = measure(face(style), text, style.size);
                     let sw = if *space_before { space_width(face(style), style.size) } else { 0.0 };
                     if !line.is_empty() && pen + sw + ww > right {
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -2909,7 +3374,7 @@ impl Inline {
                     let (bw, bh) = (bw.max(1.0) as i32, bh.max(1.0) as i32);
                     let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
                     if !line.is_empty() && pen + sw + bw as f32 > right {
-                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
                         let (bl, br) = band_of(floats, y, y + lh, x, x + w);
                         pen = bl as f32;
                         right = br as f32;
@@ -2930,19 +3395,41 @@ impl Inline {
                     line_ascent = line_ascent.max(bh as f32);
                     gap = gap.max(bh as f32 + 2.0);
                 }
+                Item::Control { ctl, space_before } => {
+                    let sw = if *space_before { space_width(fonts.regular(), BASE_FONT_PX) } else { 0.0 };
+                    if !line.is_empty() && pen + sw + ctl.w as f32 > right {
+                        y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
+                        let (bl, br) = band_of(floats, y, y + lh, x, x + w);
+                        pen = bl as f32;
+                        right = br as f32;
+                        line_ascent = 0.0;
+                        gap = 0.0;
+                    }
+                    let lead = if line.is_empty() { 0.0 } else { sw };
+                    let sx = (pen + lead) as i32;
+                    // The control's box sits ON the text baseline like an
+                    // inline-block, minus its bottom padding so a field and the
+                    // label beside it look aligned.
+                    line.push(Placed::Control { x: sx, ctl });
+                    pen += lead + ctl.w as f32;
+                    line_ascent = line_ascent.max(ctl.h as f32 - CTL_PAD_Y as f32);
+                    gap = gap.max(ctl.h as f32 + 2.0);
+                }
             }
         }
         if !line.is_empty() {
-            y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links);
+            y = emit_line(fonts, theme, &mut line, y, line_ascent, gap, ops, links, controls);
         }
         y
     }
 }
 
-/// One item placed on the current line: a same-style text run or an image.
-enum Placed {
+/// One item placed on the current line: a same-style text run, an image, or a
+/// form control (borrowed from the inline run — it is only measured once).
+enum Placed<'a> {
     Text(Seg),
     Image { x: i32, w: i32, h: i32, img: Option<Rc<Image>>, href: Option<String>, alt: String },
+    Control { x: i32, ctl: &'a CtlBox },
 }
 
 /// One same-style segment placed on the current line.
@@ -2960,12 +3447,13 @@ struct Seg {
 fn emit_line(
     fonts: &crate::fonts::Fonts,
     theme: &Theme,
-    line: &mut Vec<Placed>,
+    line: &mut Vec<Placed<'_>>,
     y: i32,
     line_ascent: f32,
     gap: f32,
     ops: &mut Vec<DrawOp>,
     links: &mut Vec<LinkRect>,
+    controls: &mut Vec<ControlRect>,
 ) -> i32 {
     let line_top = y;
     let baseline = y + line_ascent as i32;
@@ -2996,6 +3484,10 @@ fn emit_line(
                     mono: seg.style.mono,
                     text: seg.text,
                 });
+            }
+            Placed::Control { x, ctl } => {
+                let top = baseline - (ctl.h - CTL_PAD_Y);
+                paint_control(fonts, theme, ctl, x, top, ops, controls);
             }
             Placed::Image { x, w, h, img, href, alt } => {
                 let top = baseline - h; // image bottom sits on the baseline
@@ -3041,7 +3533,7 @@ mod tests {
     fn lay(html: &str, w: u32) -> Layout {
         let dom = dom::parse(html);
         let sheet = crate::css::collect(&dom);
-        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK)
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK, &FormState::default())
     }
 
     fn texts(l: &Layout) -> Vec<(i32, i32, &str)> {
@@ -3237,6 +3729,120 @@ mod tests {
         let rects = l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
         assert!(rects >= 4, "placeholder draws a 4-edge border");
         assert!(l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Foto")));
+    }
+
+    /// Lay out with live form state (what the shell does while the user types).
+    fn lay_forms(html: &str, w: u32, st: &FormState) -> Layout {
+        let dom = dom::parse(html);
+        let sheet = crate::css::collect(&dom);
+        layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, &Theme::DARK, st)
+    }
+
+    #[test]
+    fn form_controls_flow_inline_and_are_hit_testable() {
+        // A search form: label text, field and button share one line, and each
+        // control is clickable at its painted rect.
+        let l = lay(
+            "<body><form action=/s>Suche: <input name=q size=20>\
+             <input type=submit value=Los></form></body>",
+            2000,
+        );
+        assert_eq!(l.controls.len(), 2);
+        let (field, button) = (&l.controls[0], &l.controls[1]);
+        assert_eq!(field.kind, ControlKind::Text);
+        assert!(button.kind.is_submit());
+        assert_eq!(field.y, button.y, "field + button on the same line");
+        assert!(button.x >= field.x + field.w, "button follows the field");
+        // The label sits on that same line, to the left of the field.
+        let t = texts(&l);
+        let label = t.iter().find(|(_, _, s)| s.starts_with("Suche")).expect("label");
+        assert!(label.0 < field.x);
+        // Hit-test: a point inside the field finds the field, not the button.
+        let hit = l.hit_control(field.x + 4, field.y + 4).expect("hit");
+        assert_eq!(hit.seq, field.seq);
+        assert!(l.hit_control(field.x - 40, field.y + 4).is_none());
+        assert!(l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Los")));
+    }
+
+    #[test]
+    fn controls_render_once_in_flex_grid_and_table_contexts() {
+        // Real search boxes sit in a `display:flex` row, which reaches children
+        // through `layout_box` — NOT the in-flow walk. And table/grid sizing
+        // lays boxes out speculatively to measure them, discarding the ops; the
+        // control hit rects must be discarded with them or every control is
+        // recorded several times (at stale positions → clicks miss).
+        let l = lay(
+            "<body><form action=/s>\
+             <div style=\"display:flex\"><input name=q style=\"width:300px\"><button>Los</button></div>\
+             <div style=\"display:grid; grid-template-columns:1fr 1fr\"><input name=a><input name=b></div>\
+             <table><tr><td><input name=c></td><td>Text</td></tr></table>\
+             </form></body>",
+            1000,
+        );
+        assert_eq!(l.controls.len(), 5, "each control recorded exactly once");
+        let (field, button) = (&l.controls[0], &l.controls[1]);
+        // As a flex item the control fills the box flex resolved for it, so it
+        // sits flush beside its neighbour instead of overlapping it.
+        assert_eq!(field.w, 300, "CSS width sizes the flex item's control");
+        assert!(button.x >= field.x + field.w, "flex row places them side by side");
+        // Grid items stretch to their column (`justify-items: stretch`), share a
+        // row, and the table's control lands below both.
+        assert_eq!(l.controls[2].y, l.controls[3].y);
+        assert_eq!(l.controls[2].w, l.controls[3].w);
+        assert!(l.controls[2].w > 300, "1fr column stretches the field");
+        assert!(l.controls[4].y > l.controls[2].y);
+    }
+
+    #[test]
+    fn typed_value_and_caret_render_only_when_focused() {
+        let html = "<body><form action=/s><input name=q placeholder=Suchbegriff></form></body>";
+        // Empty + unfocused → the placeholder, no caret.
+        let l = lay(html, 800);
+        assert!(l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Suchbegriff")));
+        let seq = l.controls[0].seq;
+        let plain_rects = rects(&l).len();
+
+        // Typed + focused → the value, plus a 1px caret rect.
+        let mut st = FormState::default();
+        st.set_value(seq, "nopeek".to_string());
+        st.focus = Some(seq);
+        st.caret = 6;
+        let l2 = lay_forms(html, 800, &st);
+        assert!(l2.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "nopeek")));
+        assert!(!l2.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Suchbegriff")));
+        assert_eq!(rects(&l2).len(), plain_rects + 1, "the caret is the one extra rect");
+    }
+
+    #[test]
+    fn hidden_inputs_and_control_children_never_paint() {
+        // A hidden field takes no space; a <button>'s label paints inside the
+        // button, and a <select>'s options never leak into page text.
+        let l = lay(
+            "<body><form action=/s><input type=hidden name=t value=x>\
+             <select name=s><option value=a>Alpha<option value=b selected>Beta</select>\
+             <button>Senden</button></form></body>",
+            800,
+        );
+        assert_eq!(l.controls.len(), 2, "hidden input renders no box");
+        assert_eq!(l.controls[0].kind, ControlKind::Select);
+        let t = texts(&l);
+        assert!(t.iter().any(|(_, _, s)| *s == "Beta"), "select shows the selected option");
+        assert!(!t.iter().any(|(_, _, s)| *s == "Alpha"), "unselected options stay hidden");
+        assert!(t.iter().any(|(_, _, s)| *s == "Senden"));
+    }
+
+    #[test]
+    fn checkbox_paints_its_mark_only_when_checked() {
+        let html = "<body><form action=/s><input type=checkbox name=a></form></body>";
+        let l = lay(html, 800);
+        let seq = l.controls[0].seq;
+        let unchecked = rects(&l).len();
+        let mut st = FormState::default();
+        st.set_value(seq, String::new());
+        let f = crate::forms::collect(&dom::parse(html));
+        st.toggle(&f, seq);
+        let l2 = lay_forms(html, 800, &st);
+        assert_eq!(rects(&l2).len(), unchecked + 1, "the tick is one filled rect");
     }
 
     #[test]

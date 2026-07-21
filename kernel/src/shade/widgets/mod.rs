@@ -362,6 +362,21 @@ fn is_focusable(w: &abi::Widget) -> bool {
     modifiers_of_ref(w).iter().any(|m| matches!(m, abi::Modifier::OnClick(_)))
 }
 
+/// Does (x, y) land inside a `Widget::Canvas`?
+///
+/// A canvas draws its own content and routes its own keyboard input (the
+/// browser types into a page's form fields, a game reads keys). Pressing into
+/// one must therefore RELEASE a text widget's focus — otherwise the app's own
+/// address/search bar keeps swallowing every key and the canvas never sees one.
+fn hits_canvas(widget: &abi::Widget, layout: &layout::LayoutNode, x: i32, y: i32) -> bool {
+    if !rect_contains(layout.rect, x, y) { return false; }
+    if matches!(widget, abi::Widget::Canvas { .. }) { return true; }
+    widget_children_ref(widget)
+        .iter()
+        .zip(layout.children.iter())
+        .any(|(cw, cl)| hits_canvas(cw, cl, x, y))
+}
+
 // Deduplicated OnHover target per window. Compositor calls update_hover
 // on every MouseMove; we push Event::Action only when the hit changes.
 static LAST_HOVER: Mutex<BTreeMap<u32, abi::ActionId>> = Mutex::new(BTreeMap::new());
@@ -628,6 +643,10 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
             None    => return false,
         };
         let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
+        // A press into a canvas hands keyboard input to the app itself.
+        if hits_canvas(&scene.tree, &scene.layout_tree, x, y) {
+            (Some(None), press_path, scene.has_pseudo)
+        } else {
         let new_focus_opt: Option<Option<Vec<u32>>> = match press_path.as_ref() {
             // Input / TextArea under cursor → focus moves to it.
             Some(p) if matches!(
@@ -646,6 +665,7 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
             None    => None,
         };
         (new_focus_opt, press_path, scene.has_pseudo)
+        }
     };
 
     let (focus_changed, active_changed) = {

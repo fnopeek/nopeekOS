@@ -104,16 +104,42 @@ impl Engine {
     /// (the engine is host-free) and passes in. External CSS cascades before
     /// inline `<style>` (document/head order).
     pub fn layout_ext(&self, html: &str, external_css: &str, width: u32) -> Layout {
+        self.layout_forms(html, external_css, width, &crate::forms::FormState::default())
+    }
+
+    /// Like `layout_ext`, but paints the page's form controls with the user's
+    /// live state (typed text, checked boxes, focus + caret). The shell keeps
+    /// one `FormState` per page and re-lays out when it changes.
+    pub fn layout_forms(
+        &self,
+        html: &str,
+        external_css: &str,
+        width: u32,
+        forms: &crate::forms::FormState,
+    ) -> Layout {
         let dom = crate::dom::parse(html);
         let sheet = crate::css::collect_all(&dom, external_css);
-        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, &self.theme)
+        crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, &self.theme, forms)
     }
 
     /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
     /// (reader mode; BROWSER.md §9.7 "never worse than clean content").
     pub fn layout_ua(&self, html: &str, width: u32) -> Layout {
+        self.layout_ua_forms(html, width, &crate::forms::FormState::default())
+    }
+
+    /// Reader mode with live form state (see `layout_forms`).
+    pub fn layout_ua_forms(&self, html: &str, width: u32, forms: &crate::forms::FormState) -> Layout {
         let dom = crate::dom::parse(html);
-        crate::layout::layout(&self.fonts, &dom, &crate::css::Stylesheet::empty(), &self.images, width, &self.theme)
+        crate::layout::layout(
+            &self.fonts,
+            &dom,
+            &crate::css::Stylesheet::empty(),
+            &self.images,
+            width,
+            &self.theme,
+            forms,
+        )
     }
 
     /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
