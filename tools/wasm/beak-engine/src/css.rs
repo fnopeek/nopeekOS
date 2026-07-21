@@ -375,14 +375,14 @@ impl Stylesheet {
 }
 
 /// Gather + parse every `<style>` block in the document into one stylesheet.
-pub fn collect(dom: &Dom) -> Stylesheet {
-    collect_all(dom, "")
+pub fn collect(dom: &Dom, viewport_w: f32) -> Stylesheet {
+    collect_all(dom, "", viewport_w)
 }
 
 /// Author stylesheet = already-fetched external `<link>` CSS (document order:
 /// `<head>` first) followed by inline `<style>` blocks. The shell fetches the
 /// linked files (the engine is host-free) and hands their bytes in as `external`.
-pub fn collect_all(dom: &Dom, external: &str) -> Stylesheet {
+pub fn collect_all(dom: &Dom, external: &str, viewport_w: f32) -> Stylesheet {
     let mut css = String::from(external);
     css.push('\n');
     gather_style_text(&dom.root, &mut css);
@@ -392,7 +392,7 @@ pub fn collect_all(dom: &Dom, external: &str) -> Stylesheet {
     // Expand CSS custom properties (`var(--x)`) as a pre-pass so the parser +
     // cascade never see variables — modern sites (Bootstrap's `--bs-*`) lean
     // on them heavily.
-    let css = crate::vars::resolve_vars(&css);
+    let css = crate::vars::resolve_vars(&css, viewport_w);
     parse(&css)
 }
 
@@ -587,7 +587,7 @@ fn parse_into(
 }
 
 /// Index of the `}` that closes the `{` at/after `open` (or `end` if unbalanced).
-fn matching_brace(bytes: &[u8], open: usize, end: usize) -> usize {
+pub(crate) fn matching_brace(bytes: &[u8], open: usize, end: usize) -> usize {
     let mut depth = 0i32;
     let mut i = open;
     while i < end {
@@ -720,6 +720,13 @@ fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
             cond
         })
         .collect()
+}
+
+/// Does an `@media` prelude hold at this viewport width? Shared with the
+/// custom-property pre-pass, which must gate on exactly the same condition the
+/// cascade uses — otherwise a variable from a non-matching block leaks.
+pub(crate) fn media_matches(prelude: &str, viewport_w: f32) -> bool {
+    parse_media_query(prelude).iter().any(|c| c.matches(viewport_w))
 }
 
 /// A media-feature `<length>` — px only (Bootstrap/WP breakpoints are all px).
@@ -1141,7 +1148,7 @@ mod tests {
     fn external_css_cascades_before_inline_style() {
         // external (red) parsed first, inline <style> (blue) after → blue wins.
         let dom = dom::parse("<html><head><style>p{color:blue}</style></head><body><p>x</p></body></html>");
-        let ss = collect_all(&dom, "p { color: red }");
+        let ss = collect_all(&dom, "p { color: red }", 800.0);
         let mut m = ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0);
         m.sort_by_key(|(spec, order, _)| (*spec, *order));
         assert_eq!(m.len(), 2, "both external + inline rules match");
@@ -1152,7 +1159,7 @@ mod tests {
     fn collects_style_blocks_from_dom() {
         let dom = dom::parse("<html><head><style>p{color:red}</style></head>\
             <body><style>.x{color:blue}</style><p>hi</p></body></html>");
-        let ss = collect(&dom);
+        let ss = collect(&dom, 800.0);
         assert!(!ss.matched(&info("p", None, &[]), &[], &[], 0, 1000.0).is_empty());
         assert!(!ss.matched(&info("span", None, &["x"]), &[], &[], 0, 1000.0).is_empty());
     }

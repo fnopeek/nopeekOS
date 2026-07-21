@@ -118,7 +118,7 @@ impl Engine {
         forms: &crate::forms::FormState,
     ) -> Layout {
         let dom = crate::dom::parse(html);
-        let sheet = crate::css::collect_all(&dom, external_css);
+        let sheet = crate::css::collect_all(&dom, external_css, width as f32);
         crate::layout::layout(&self.fonts, &dom, &sheet, &self.images, width, &self.theme, forms)
     }
 
