@@ -82,6 +82,24 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 | JPEG decode | ❌ | common web case → next; JPEG `<img>` currently shows a placeholder |
 | `<img>` layout + paint | 🟡 | block-level image box (size from `width`/`height`/intrinsic, scaled to fit, aspect kept), decoded PNG blit (nearest-neighbour + alpha) or a labelled placeholder. Shell fetches the bytes (≤16/page, 24 MB decode budget). No inline images / `srcset` / `object-fit` |
 
+## Forms
+
+Measured: **16 / 21** vendored WPT reftests (`tests/wpt/html-forms`, from
+`html/rendering/widgets`). Only the *rendering* of controls is measurable this
+way — WPT tests submission behaviour through `testharness.js`, which needs JS,
+so `submit` is covered by unit tests against the real markup of live search
+boxes until Stage 1.
+
+| Feature | Spec | Status | Notes |
+|---------|------|--------|-------|
+| Control rendering (`input`/`button`/`select`/`textarea`) | HTML §4.10 + rendering §15.5 | 🟡 | atomic inline boxes wherever they land (in-flow, inline, flex/grid items, table cells); value/placeholder/label text, focus ring + caret, checkbox/radio mark, select chevron, multi-line textarea; author `background-color`/`width`/`height` honoured. No `appearance`, no native date/time/range widgets |
+| Button content layout | HTML §button-layout | 🟡 | label text centred in the box; the button's *children* are not laid out (an icon + markup inside a `<button>` collapses to its text) → the 3 `centering-00x` reftests fail on box size |
+| Text editing in a field | HTML §4.10.5 | 🟡 | insert/Backspace/Delete/arrows/Home/End + caret, per-control state; no selection, no clipboard, no IME, ASCII only |
+| Form submission (GET) | HTML §4.10.21/22 | ✅ | successful-control rules (named + enabled, only the activated button, checked boxes/radios), `application/x-www-form-urlencoded`, implicit submission via the default button, action query replaced |
+| Form submission (POST) | HTML §4.10.21 | ❌ | needs a request body — `npk_http_request` is GET-only |
+| Validation / `required` / `pattern` | HTML §4.10.20 | ❌ | reports through JS APIs → Stage 2 |
+| `<datalist>` / `<fieldset>` / `<label>` binding | HTML §4.10 | ❌ | labels render as plain text; clicking one does not focus its control |
+
 ## DOM + JavaScript
 
 | Feature | Spec | Status | Notes |
