@@ -6,6 +6,21 @@ use super::{parse_ip, resolve_path};
 
 const HTTP_MAX_RESPONSE: usize = 128 * 1024; // 128 KB
 
+/// How we identify ourselves. Deliberately NOT a borrowed browser string.
+///
+/// This used to read `Mozilla/5.0 (X11; Linux x86_64) beak/0.1`, added in the
+/// belief that the `Mozilla` prefix bought a friendlier rate-limit bucket at
+/// Wikimedia. Measured on 2026-07-22, that was wrong twice over: the 429s came
+/// from speaking HTTP/1.1, not from the name, and the same burst over h2 is
+/// served in full with this honest string. Sending *no* User-Agent is not an
+/// option either — that earns a 403, and Wikimedia's policy rightly asks for
+/// an identifiable client.
+///
+/// One string covers OTA as well as page fetches, since both go through this
+/// client. Splitting them would mean threading a parameter through every
+/// layer for little gain.
+pub(crate) const USER_AGENT: &str = "beak/0.1 (nopeekOS)";
+
 /// Streaming-download progress heartbeat interval. A large download
 /// on the synchronous path blocks the shell until it finishes; a
 /// line every 8 MiB is the "still alive, not crashed" signal so the
@@ -276,8 +291,8 @@ fn do_http_request(args: &str, use_tls: bool) {
     // Send HTTP GET
     let http_ver = if use_tls { "1.1" } else { "1.0" };
     let request = alloc::format!(
-        "GET {} HTTP/{}\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) beak/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-        path, http_ver, host
+        "GET {} HTTP/{}\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, http_ver, host, USER_AGENT
     );
 
     let send_ok = if let Some(ref mut sess) = tls_session {
@@ -687,6 +702,185 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     }
 }
 
+// ── HTTP/2 batch fetch ──────────────────────────────────────────────────────
+//
+// Used by the browser's sub-resource loading, NOT by OTA. OTA stays on the
+// HTTP/1.1 path deliberately: it works, it reaches gigabit, and it streams
+// into a sink, whereas an h2 response is buffered whole. Once this path has
+// proven itself on hardware, OTA can move over too.
+
+use super::http2::{self, Http2};
+
+const H2_POOL_SIZE: usize = 4;
+static H2_POOL: spin::Mutex<[Option<(String, Http2)>; H2_POOL_SIZE]> =
+    spin::Mutex::new([const { None }; H2_POOL_SIZE]);
+
+/// Hosts that turned out not to speak h2. Without this, every batch pays a
+/// fresh TLS handshake to re-learn the same answer.
+static H2_REFUSED: spin::Mutex<[Option<String>; H2_POOL_SIZE]> =
+    spin::Mutex::new([const { None }; H2_POOL_SIZE]);
+
+fn h2_refused(host: &str) -> bool {
+    H2_REFUSED.lock().iter().any(|s| s.as_deref() == Some(host))
+}
+
+fn mark_h2_refused(host: &str) {
+    let mut list = H2_REFUSED.lock();
+    if list.iter().any(|s| s.as_deref() == Some(host)) {
+        return;
+    }
+    for slot in list.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(String::from(host));
+            return;
+        }
+    }
+    list[0] = Some(String::from(host));
+}
+
+fn h2_take(host: &str) -> Option<Http2> {
+    let mut pool = H2_POOL.lock();
+    for slot in pool.iter_mut() {
+        if matches!(slot, Some((h, _)) if h == host) {
+            let (_, conn) = slot.take().unwrap();
+            if conn.is_healthy() {
+                return Some(conn);
+            }
+            let mut conn = conn;
+            conn.close();
+            return None;
+        }
+    }
+    None
+}
+
+fn h2_put(host: &str, conn: Http2) {
+    let mut pool = H2_POOL.lock();
+    for slot in pool.iter_mut() {
+        if slot.is_none() {
+            *slot = Some((String::from(host), conn));
+            return;
+        }
+    }
+    if let Some((_, mut old)) = pool[0].replace((String::from(host), conn)) {
+        old.close();
+    }
+}
+
+fn h2_open(host: &str) -> Option<Http2> {
+    if let Some(c) = h2_take(host) {
+        return Some(c);
+    }
+    if h2_refused(host) {
+        return None;
+    }
+    let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host))?;
+    // Warm the gateway ARP entry exactly as the h1 path does; without it the
+    // first SYN goes nowhere.
+    let gw = crate::net::ipv4::gateway();
+    crate::net::arp::request(gw);
+    for _ in 0..50_000 {
+        crate::net::poll();
+        core::hint::spin_loop();
+    }
+    match http2::connect(host, ip, 443) {
+        Ok(c) => Some(c),
+        Err(http2::Http2Error::NotNegotiated) => {
+            mark_h2_refused(host);
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// Fetch many URLs at once, multiplexed over one HTTP/2 connection per host
+/// where the peer offers h2, and falling back to the existing sequential
+/// HTTP/1.1 path where it does not.
+///
+/// Results are positional: entry `i` corresponds to `urls[i]`, and is `None`
+/// if that resource could not be fetched. A response with a 4xx/5xx status
+/// counts as a failure rather than returning the error page's body — the
+/// caller is loading images and stylesheets, and decoding an HTML error page
+/// as a PNG helps nobody.
+pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> {
+    let mut out: alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> = urls.iter().map(|_| None).collect();
+
+    // Split into per-host groups, keeping the original positions.
+    let mut parsed: alloc::vec::Vec<Option<(String, String)>> = alloc::vec::Vec::new();
+    for u in urls {
+        parsed.push(parse_url(u).ok());
+    }
+    let mut hosts: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for p in parsed.iter().flatten() {
+        if !hosts.contains(&p.0) {
+            hosts.push(p.0.clone());
+        }
+    }
+
+    for host in &hosts {
+        let idxs: alloc::vec::Vec<usize> = parsed
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p, Some((h, _)) if h == host))
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut served = false;
+        if let Some(mut conn) = h2_open(host) {
+            let paths: alloc::vec::Vec<&str> =
+                idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
+            match conn.get_all(host, &paths, USER_AGENT) {
+                Ok(results) => {
+                    let mut ok = 0usize;
+                    for (slot, res) in idxs.iter().zip(results) {
+                        match res {
+                            Ok(r) if (200..300).contains(&r.status) => {
+                                ok += 1;
+                                out[*slot] = Some(r.body);
+                            }
+                            // A redirect needs the h1 path's follow logic (it
+                            // may cross hosts); leave it unset and let the
+                            // per-URL fallback below pick it up.
+                            Ok(r) if (300..400).contains(&r.status) => {
+                                kprintln!("[npk]   h2 {} -> {}", r.status,
+                                    r.header("location").unwrap_or("(no location)"));
+                            }
+                            Ok(r) => kprintln!("[npk]   h2 HTTP {}", r.status),
+                            Err(e) => kprintln!("[npk]   h2 stream failed: {:?}", e),
+                        }
+                    }
+                    kprintln!("[npk]   h2 {}: {}/{} over one connection",
+                        host, ok, idxs.len());
+                    served = true;
+                    if conn.is_healthy() {
+                        h2_put(host, conn);
+                    } else {
+                        conn.close();
+                    }
+                }
+                Err(e) => {
+                    kprintln!("[npk]   h2 {} failed ({:?}) — falling back to HTTP/1.1", host, e);
+                    conn.close();
+                }
+            }
+        }
+
+        // Anything h2 did not deliver — no h2, a protocol error, or a
+        // redirect — falls back to the ordinary sequential fetch.
+        for &i in &idxs {
+            if out[i].is_some() {
+                continue;
+            }
+            let (h, p) = parsed[i].as_ref().unwrap();
+            if let Ok(body) = https_get(h, p, max_size) {
+                out[i] = Some(body);
+            }
+        }
+        let _ = served;
+    }
+    out
+}
+
 /// Exchange failure mode. `Retry` = failed in the send/header phase,
 /// before any body byte reached the sink → safe to retry on a fresh
 /// connection (this is how a stale pooled socket surfaces). `Fatal` =
@@ -738,8 +932,8 @@ fn https_exchange(
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, ExchangeErr> {
     let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) beak/0.1\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
-        path, host
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
+        path, host, USER_AGENT
     );
     if crate::tls::tls_send(&mut tls, request.as_bytes()).is_err() {
         // Stale pooled socket (or a send error) — nothing delivered, retry fresh.
@@ -1322,8 +1516,8 @@ fn http_get_once(
     let _poll_hz_guard = PollHzGuard;
 
     let request = alloc::format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) beak/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-        path, host
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, host, USER_AGENT
     );
     if crate::net::tcp::send(handle, request.as_bytes()).is_err() {
         let _ = crate::net::tcp::close(handle);

@@ -42,6 +42,17 @@ unsafe extern "C" {
     fn npk_event_poll(ptr: i32, max: i32) -> i32;
     fn npk_http_request(url_ptr: i32, url_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
+    /// Fetch a newline-separated list of URLs in one call, multiplexed over
+    /// HTTP/2 where the host offers it. Bodies land back-to-back in `out`;
+    /// `lens` receives one little-endian i32 per URL (bytes written, or -1).
+    fn npk_http_request_many(
+        urls_ptr: i32,
+        urls_len: i32,
+        out_ptr: i32,
+        out_max: i32,
+        lens_ptr: i32,
+        lens_max: i32,
+    ) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
     fn npk_theme_token(token_id: i32) -> i32;
@@ -139,6 +150,59 @@ static mut CSS_LEN: usize = 0;
 const IMG_FETCH_CAP: usize = 6 * 1024 * 1024;
 const MAX_IMAGES: usize = 16;
 static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
+
+/// How many images one batch asks for. Small on purpose: the batch is a
+/// blocking call, so a whole page in one go would freeze the window again —
+/// the very thing progressive loading fixed. Four is enough to overlap the
+/// round-trips while a turn of the loop stays short.
+const IMG_BATCH: usize = 4;
+
+/// Receives the per-URL length table from `npk_http_request_many`. Sized for
+/// the largest batch either caller asks for.
+static mut LENS_BUF: [u8; 4 * MAX_CSS_LINKS] = [0; 4 * MAX_CSS_LINKS];
+
+/// Fetch a batch of URLs into `dst`, returning each body as a slice.
+///
+/// Returns an empty vec if the host call fails, which the callers treat the
+/// same as "none of them loaded" — every one of them degrades to a
+/// placeholder or to unstyled content rather than to a blank page.
+fn fetch_batch(urls: &[String], dst: *mut u8, cap: usize) -> Vec<(usize, usize)> {
+    let mut blob = String::new();
+    for (i, u) in urls.iter().enumerate() {
+        if i > 0 {
+            blob.push('\n');
+        }
+        blob.push_str(u);
+    }
+    let lens = core::ptr::addr_of_mut!(LENS_BUF) as *mut u8;
+    let n = unsafe {
+        npk_http_request_many(
+            blob.as_ptr() as i32,
+            blob.len() as i32,
+            dst as i32,
+            cap as i32,
+            lens as i32,
+            (4 * MAX_CSS_LINKS) as i32,
+        )
+    };
+    let mut spans = Vec::new();
+    if n <= 0 {
+        return spans;
+    }
+    let mut off = 0usize;
+    for i in 0..(n as usize).min(urls.len()) {
+        let mut raw = [0u8; 4];
+        unsafe { core::ptr::copy_nonoverlapping(lens.add(i * 4), raw.as_mut_ptr(), 4) };
+        let len = i32::from_le_bytes(raw);
+        if len < 0 {
+            spans.push((0, 0)); // this one failed; keep positions aligned
+        } else {
+            spans.push((off, len as usize));
+            off += len as usize;
+        }
+    }
+    spans
+}
 static mut IMAGES_DIRTY: bool = false;
 
 // Scratch for the kernel to write back the post-redirect URL of a fetch.
@@ -357,20 +421,26 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
 /// scratch buffer for the next. We never hold all the compressed image bytes
 /// at once (the old `pairs` approach peaked at ~16 blobs → the heap-OOM the
 /// fast keep-alive pool exposed).
-fn fetch_next_image(engine: &mut Engine, pending: &mut Vec<String>) {
+fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>) {
     if pending.is_empty() {
         return;
     }
-    let src = pending.remove(0);
-    let abs = resolve(url_str(), &src);
+    let take = pending.len().min(IMG_BATCH);
+    let srcs: Vec<String> = pending.drain(..take).collect();
+    let urls: Vec<String> = srcs.iter().map(|s| resolve(url_str(), s)).collect();
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let n = unsafe {
-        npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst as i32, IMG_FETCH_CAP as i32)
-    };
-    if n > 0 {
-        let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
-        engine.add_image(&src, bytes); // decode now, drop compressed
-        bump_content_gen(); // re-layout so it replaces its placeholder
+    let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
+    let mut any = false;
+    for (src, (off, n)) in srcs.iter().zip(spans) {
+        if n == 0 {
+            continue; // failed or did not fit → keeps its placeholder
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+        engine.add_image(src, bytes); // decode now, drop compressed
+        any = true;
+    }
+    if any {
+        bump_content_gen(); // re-layout so they replace their placeholders
         mark_dirty();
     }
 }
@@ -385,25 +455,42 @@ fn images_dirty() -> bool {
 fn fetch_stylesheets(base: &str) {
     let links = beak_engine::stylesheet_links(html_str());
     let base = base.to_string();
-    let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
-    let mut len = 0usize;
-    let mut seen: Vec<&str> = Vec::new();
+    let mut urls: Vec<String> = Vec::new();
     for href in links.iter() {
-        if seen.len() >= MAX_CSS_LINKS || len + 8192 >= CSS_CAP {
+        if urls.len() >= MAX_CSS_LINKS {
             break;
         }
-        if seen.contains(&href.as_str()) {
-            continue; // same sheet linked twice — fetching it again changes nothing
-        }
-        seen.push(href);
         let abs = resolve(&base, href);
-        let remaining = (CSS_CAP - len - 1) as i32;
-        let n = unsafe {
-            npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst.add(len) as i32, remaining)
-        };
-        if n > 0 {
-            len += n as usize;
-            unsafe { *dst.add(len) = b'\n' };
+        // The same sheet linked twice fetches identical bytes; dedupe on the
+        // resolved URL, since two different hrefs can resolve to one file.
+        if !urls.contains(&abs) {
+            urls.push(abs);
+        }
+    }
+    let mut len = 0usize;
+    if !urls.is_empty() {
+        // One batch, not one request per sheet. Stylesheets are
+        // render-blocking — nothing paints until the last one arrives — so
+        // this is where overlapping the round-trips is worth the most.
+        // Fetched into a scratch buffer first because the bodies come back
+        // concatenated, and they need a separator between them: without one,
+        // a sheet not ending in `}` would merge into the next sheet's first
+        // rule.
+        let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
+        let spans = fetch_batch(&urls, scratch.as_mut_ptr(), CSS_CAP);
+        let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+        unsafe { scratch.set_len(total.min(CSS_CAP)) };
+
+        let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
+        for (off, n) in spans {
+            if n == 0 || off + n > scratch.len() || len + n + 1 >= CSS_CAP {
+                continue;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(scratch.as_ptr().add(off), dst.add(len), n);
+                len += n;
+                *dst.add(len) = b'\n';
+            }
             len += 1;
         }
     }
@@ -1239,9 +1326,10 @@ pub extern "C" fn _start() {
             }
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
-        // Text and layout are on screen now — pull in one image, then come
-        // back round and paint it. Scrolling keeps working in between.
-        fetch_next_image(&mut engine, &mut pending_imgs);
+        // Text and layout are on screen now — pull in the next few images,
+        // then come back round and paint them. Scrolling keeps working in
+        // between, because a batch is small.
+        fetch_next_images(&mut engine, &mut pending_imgs);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
