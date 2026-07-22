@@ -826,7 +826,9 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
             .collect();
 
         let mut served = false;
+        let t0 = crate::interrupts::ticks();
         if let Some(mut conn) = h2_open(host) {
+            let t_conn = crate::interrupts::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
             match conn.get_all(host, &paths, USER_AGENT) {
@@ -849,8 +851,12 @@ pub fn https_get_many(urls: &[String], max_size: usize) -> alloc::vec::Vec<Optio
                             Err(e) => kprintln!("[npk]   h2 stream failed: {:?}", e),
                         }
                     }
-                    kprintln!("[npk]   h2 {}: {}/{} over one connection",
-                        host, ok, idxs.len());
+                    // Split the time so a slow batch says WHERE it was slow:
+                    // a fresh TLS handshake, or the transfer itself.
+                    let now = crate::interrupts::ticks();
+                    kprintln!("[npk]   h2 {}: {}/{} over one connection ({} ms connect + {} ms transfer)",
+                        host, ok, idxs.len(),
+                        t_conn.wrapping_sub(t0) * 10, now.wrapping_sub(t_conn) * 10);
                     served = true;
                     if conn.is_healthy() {
                         h2_put(host, conn);

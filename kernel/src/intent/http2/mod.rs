@@ -534,25 +534,27 @@ impl Http2 {
 
     /// Read until `self.rx` holds at least `n` bytes. False means the peer
     /// closed first.
+    ///
+    /// `poll_rx_only`, NOT `poll`: the full poll also runs a shade render
+    /// pass, and calling that once per idle turn of a receive loop costs far
+    /// more than the receive itself — the HTTP/1.1 path learned this the hard
+    /// way (see the note on `tls_recv_poll`). Timeout is measured in ticks
+    /// rather than iterations so it means 15 seconds on any machine.
     fn fill_to(&mut self, n: usize) -> Result<bool, Http2Error> {
         let mut buf = vec![0u8; READ_BUF];
-        let mut idle = 0u32;
+        let start = crate::interrupts::ticks();
         while self.rx.len() < n {
+            crate::net::poll_rx_only();
             match crate::tls::tls_recv(&mut self.tls, &mut buf) {
                 Ok(0) => {
                     // Either a record carrying no application data (session
                     // tickets arrive this way) or nothing ready yet.
-                    idle += 1;
-                    if idle > 200_000 {
+                    if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                         return Err(Http2Error::Tls("timed out waiting for data"));
                     }
-                    crate::net::poll();
                     core::hint::spin_loop();
                 }
-                Ok(got) => {
-                    idle = 0;
-                    self.rx.extend_from_slice(&buf[..got]);
-                }
+                Ok(got) => self.rx.extend_from_slice(&buf[..got]),
                 Err(_) => return Ok(false),
             }
         }
