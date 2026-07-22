@@ -1422,6 +1422,17 @@ impl Ctx<'_> {
         if w <= 0 || h <= 0 {
             return;
         }
+        #[cfg(feature = "diag-boxes")]
+        if h > 700 || w > self.viewport_w as i32 {
+            let who = self.path.last().map(|e| {
+                let mut s = e.tag.clone();
+                if let Some(id) = &e.id { s.push('#'); s.push_str(id); }
+                for c in e.classes.iter().take(2) { s.push('.'); s.push_str(c); }
+                s
+            }).unwrap_or_else(|| String::from("?"));
+            extern crate std;
+            std::println!("[box] {who}: x={x} y={y} w={w} h={h}");
+        }
         if let Some(bg) = st.bg {
             self.ops.insert(bg_idx, DrawOp::Rect { x, y, w, h, color: bg });
             // `insert` shifts every later op up by one slot — any already-

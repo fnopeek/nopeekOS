@@ -378,11 +378,18 @@ static mut NAV_START_MS: i64 = 0;
 static mut NAV_REPORTED: bool = true;
 
 static mut CONTENT_GEN: u32 = 0;
-fn bump_content_gen() {
+/// Invalidate the layout cache. `why` is logged because a full re-layout is
+/// the single most expensive thing this app does (~4.7 s on device), so an
+/// unexpected one has to be attributable at a glance.
+fn bump_content_gen(why: &str) {
     unsafe {
         let p = core::ptr::addr_of_mut!(CONTENT_GEN);
         p.write(p.read().wrapping_add(1));
     }
+    let mut b = String::new();
+    b.push_str("[beak] relayout: ");
+    b.push_str(why);
+    log(&b);
 }
 fn content_gen() -> u32 {
     unsafe { core::ptr::addr_of!(CONTENT_GEN).read() }
@@ -415,7 +422,7 @@ fn fetch(url: &str) -> bool {
     unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(len) };
     set_scroll(0);
     mark_dirty();
-    bump_content_gen();
+    bump_content_gen("navigation");
     bump_nav_gen();
     if len > 0 {
         // Relative sub-resources resolve against the URL the document came
@@ -455,7 +462,7 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
             pending.push(src.clone());
         }
     }
-    bump_content_gen(); // lay out with placeholders
+    bump_content_gen("images-begin"); // lay out with placeholders
     mark_dirty();
     pending
 }
@@ -502,7 +509,7 @@ fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, guessed: &[
     }
     if any {
         if moved {
-            bump_content_gen(); // a guessed box moves once the real size lands
+            bump_content_gen("image-arrived"); // a guessed box moves once the real size lands
         }
         mark_dirty(); // otherwise just paint: the display list is unchanged
     }
@@ -1076,7 +1083,7 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
             // focus there — drop the page control's focus so only one caret
             // blinks and Enter goes to the right place.
             if page.state.focus.take().is_some() {
-                bump_content_gen();
+                bump_content_gen("addressbar-focus");
                 mark_dirty();
             }
             false
@@ -1085,7 +1092,7 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
         // routes keys here when no chrome Input/TextArea consumed them).
         Event::Key(k) if page.state.focus.is_some() => {
             if edit_key(page, k) {
-                bump_content_gen();
+                bump_content_gen("form-key");
                 mark_dirty();
             }
             false
@@ -1122,7 +1129,7 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
             }
             ACT_VIEW_TOGGLE_CSS => {
                 toggle_site_css();
-                bump_content_gen(); // force re-layout with/without site CSS
+                bump_content_gen("site-css-toggle"); // force re-layout with/without site CSS
                 mark_dirty();
                 set_open_menu(0);
                 true
@@ -1200,14 +1207,14 @@ fn handle(engine: &Engine, ev: Event, cache: &Option<(Layout, i32, u32)>, page: 
                     if let Some(ctl) = lay.hit_control(cx, cy) {
                         let seq = ctl.seq;
                         activate(page, seq);
-                        bump_content_gen(); // repaint the focus ring / new value
+                        bump_content_gen("control-activate"); // repaint the focus ring / new value
                         mark_dirty();
                         return true;
                     }
                     let href = lay.hit_test(cx, cy).map(|s| s.to_string());
                     // Clicking the page elsewhere blurs a focused control.
                     if page.state.focus.take().is_some() {
-                        bump_content_gen();
+                        bump_content_gen("control-blur");
                         mark_dirty();
                     }
                     if let Some(href) = href {
@@ -1395,7 +1402,7 @@ pub extern "C" fn _start() {
             if bg != last_bg {
                 engine.set_theme(query_theme());
                 last_bg = bg;
-                bump_content_gen();
+                bump_content_gen("theme-change");
                 mark_dirty();
             }
         }
