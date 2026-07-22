@@ -338,6 +338,9 @@ struct Fat32Reader {
     data_start: u32,
     /// Sectors per cluster
     spc: u32,
+    /// Total sectors in the partition (BPB TotSec32) — the bound for
+    /// allocating additional clusters.
+    total_sectors: u32,
 }
 
 impl Fat32Reader {
@@ -355,8 +358,9 @@ impl Fat32Reader {
         let num_fats = bs[16] as u32;
         let fat_size = u32::from_le_bytes([bs[36], bs[37], bs[38], bs[39]]);
         let data_start = reserved + num_fats * fat_size;
+        let total_sectors = u32::from_le_bytes([bs[32], bs[33], bs[34], bs[35]]);
 
-        Ok(Fat32Reader { part_start, fat_size, data_start, spc })
+        Ok(Fat32Reader { part_start, fat_size, data_start, spc, total_sectors })
     }
 
     fn read_sector(&self, rel_sector: u32, buf: &mut [u8; 512]) -> Result<(), &'static str> {
@@ -390,6 +394,35 @@ impl Fat32Reader {
     }
 
     /// Write a FAT entry (both copies).
+    /// Append one FREE cluster to the chain ending at `last`, and return it.
+    ///
+    /// The old code took `last + 1` on faith. In our ESP layout that happens
+    /// to be free, but a wrong guess would splice another file's cluster into
+    /// the kernel — silent corruption of the one file the machine boots from.
+    /// So scan the FAT for an entry that is actually 0.
+    fn extend_chain(&self, last: u32) -> Result<u32, &'static str> {
+        let usable = (self.total_sectors.saturating_sub(self.data_start)) / self.spc + 2;
+        let mut cand = last + 1;
+        while cand < usable {
+            if self.fat_entry(cand)? == 0 {
+                self.fat_write(last, cand)?;
+                self.fat_write(cand, FAT_EOC)?;
+                return Ok(cand);
+            }
+            cand += 1;
+        }
+        Err("ESP full: no free cluster to grow the kernel into")
+    }
+
+    /// Raw FAT entry for a cluster (0 = free).
+    fn fat_entry(&self, cluster: u32) -> Result<u32, &'static str> {
+        let offset = cluster as u64 * 4;
+        let mut sec = [0u8; 512];
+        self.read_sector(RESERVED_SECTORS + (offset / 512) as u32, &mut sec)?;
+        let o = (offset % 512) as usize;
+        Ok(u32::from_le_bytes([sec[o], sec[o + 1], sec[o + 2], sec[o + 3]]) & 0x0FFF_FFFF)
+    }
+
     fn fat_write(&self, cluster: u32, value: u32) -> Result<(), &'static str> {
         let offset_bytes = cluster as u64 * 4;
         let fat_sector = (offset_bytes / 512) as u32;
@@ -487,13 +520,9 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
     crate::kprintln!("[npk] ESP: BOOTX64.EFI at cluster {}, {} -> {} bytes ({}/{} clusters)",
         kernel_cl, old_size, data.len(), new_clusters, old_clusters);
 
-    // The real limit is the run create_esp reserved for this file, which
-    // chain_len just measured — no constant to drift out of date.
-    if new_clusters > old_clusters {
-        crate::kprintln!("[npk] ESP: need {} clusters, reservation is {}",
-            new_clusters, old_clusters);
-        return Err("kernel larger than its reserved ESP chain");
-    }
+    // No fixed limit: the chain grows into free clusters when the image
+    // outgrows it (see `extend_chain`). What must NOT happen is the chain
+    // shrinking back to the file size afterwards — see below.
 
     // Write data to existing clusters (follow FAT chain)
     let mut cl = kernel_cl;
@@ -517,24 +546,23 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
         clusters_used += 1;
 
         if clusters_used >= new_clusters && written >= data.len() {
-            // Mark this as end of chain
-            fs.fat_write(cl, FAT_EOC)?;
-            // Free remaining old clusters
-            if let Ok(Some(next)) = fs.fat_next(cl) {
-                free_chain(&fs, next)?;
-            }
+            // Done writing. Deliberately do NOT truncate the chain here.
+            //
+            // This used to set EOC at the last written cluster and free the
+            // rest, which quietly shrank the reservation to exactly the
+            // current image on every update — so OTA worked exactly once and
+            // the next, slightly larger kernel no longer fit ("need 8243
+            // clusters, reservation is 8241"). The chain being longer than
+            // the file is fine: the directory entry's size is what defines
+            // the file, and firmware reads only that many bytes.
             break;
         }
 
         match fs.fat_next(cl)? {
             Some(next) => cl = next,
             None => {
-                // Need more clusters — allocate after last known cluster
                 if clusters_used < new_clusters {
-                    let new_cl = cl + 1; // simple next-fit allocation
-                    fs.fat_write(cl, new_cl)?;
-                    fs.fat_write(new_cl, FAT_EOC)?;
-                    cl = new_cl;
+                    cl = fs.extend_chain(cl)?;
                 } else {
                     break;
                 }
