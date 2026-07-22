@@ -136,7 +136,7 @@ system owns DNS, TCP, TLS, HTTP — you express intent, not protocol.
 
 ## What's Built
 
-Grouped by subsystem. Kernel is at **v0.228.0**; the full change history
+Grouped by subsystem. Kernel is at **v0.228.12**; the full change history
 lives in the git log and `memory/`.
 
 **Kernel & SMP** — UEFI PE32+ boot straight to long mode; 4-level paging
@@ -204,18 +204,28 @@ boundary is the one place nopeekOS leans on legacy. **beak** is the
 answer: a web browser built from scratch as a *single WASM app*, no
 Linux, no vendored engine.
 
-It renders HTML → a real DOM → a full CSS cascade
-(UA sheet → author `<style>` + selectors/specificity → inline) →
-layout → paint, all hand-rolled: block + inline flow, tables, flexbox,
-CSS Grid, the box model, positioning, external `<link>` stylesheets,
-CSS Color 4, `@media`, and PNG images. It fetches over the kernel's
-TLS stack, is theme-aware, and scrolls smoothly.
+It renders HTML → a real DOM → a full CSS cascade (UA sheet → author
+`<style>` and external `<link>` sheets with selectors/specificity →
+inline → `!important`) → layout → paint, all hand-rolled: block +
+inline flow, tables, flexbox, CSS Grid, the box model, positioning,
+custom properties, `calc()`, `@media`, CSS Color 4, PNG images and an
+SVG subset. Plus **HTML forms** — typing into a page's search box and
+pressing Enter submits it, no JavaScript involved. It fetches over the
+kernel's TLS stack, is theme-aware, and scrolls smoothly.
 
-Fidelity is measured, not guessed: the engine is a portable, host-
-testable core with the official **WPT CSS reftests** (5,765 of them)
-vendored as a render-and-compare oracle. JavaScript is next (an
-interpreter, never a JIT — a JIT would need a hole in W^X), with
-test262 as its conformance oracle. Spec lives in `BROWSER.md`.
+Fidelity is measured, not guessed: the engine is a portable core with
+no host dependencies, and the official **WPT reftests** (5,786 of them)
+are vendored as a render-and-compare oracle that runs on the dev box —
+currently **3,626 passing** (1,898 fail, 262 inconclusive). Nearly every
+rendering bug this engine has had was found by rendering the real page
+to a bitmap on Linux, without booting the OS.
+
+Honest gaps: no JavaScript yet (Stage 1 — an interpreter, never a JIT,
+since a JIT would need a hole in W^X; test262 is its oracle), JPEG
+images fall back to placeholders, and the kernel still speaks only
+HTTP/1.1 — which parts of the web now rate-limit outright. Spec and
+status live in `BROWSER.md`, per-feature conformance in
+`CONFORMANCE.md`.
 
 ---
 

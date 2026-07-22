@@ -22,6 +22,26 @@ official test suites, not self-graded.
 Reftests + html5lib-tests + test262 are all **data files we run natively** on
 the dev box (§10). testharness.js-based tests need the JS engine first.
 
+### Current number (measured 2026-07-22, beak 0.1.44)
+
+```
+3626 pass / 1898 fail / 262 inconclusive   (of 5786 vendored reftests)
+```
+
+Run it: `cargo test --release --manifest-path tools/wasm/beak-engine/Cargo.toml
+--test wpt -- --nocapture` (~5 min). Redirect to a log and wait on it rather
+than watching a raw pipe — a piped run has been SIGTERM'd mid-way before.
+
+"Inconclusive" means the reference itself rendered blank, so the comparison
+says nothing about us either way. Those are excluded from the pass rate
+rather than counted as wins.
+
+**Reading the number honestly:** it can go *down* for a good reason. Fixing a
+half-masked bug flipped nine tests green→red once — they had only been green
+because two bugs cancelled out (we weren't painting `html{background:red}`,
+so there was no red to fail on). Never revert on the number alone; look at
+each case.
+
 ## Legend
 
 `❌` none · `🟡` partial · `✅` solid · `%` = share of the mapped suite passing
@@ -45,9 +65,10 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 |---------|------|--------|-------|
 | Tokenizer / parser | css-syntax-3 | 🟡 | `<style>` block parser (`css.rs`: rule list + selector list + declaration blocks, `/* */` comments, `@…{}`/`@…;` at-rules skipped) + inline `style="…"` + **external `<link rel=stylesheet>`** (shell fetches, cascades before `<style>`). Reader-mode toggle (UA-only) as a fallback. Not a full token stream |
 | Selectors (type/class/id/desc/…) | selectors-4 | 🟡 | type / `.class` / `#id` / `*`, compounds (`div.a#b`), **descendant** (space) + **child** (`>`) combinators, comma lists. No pseudo-classes/`[attr]`/`+`~` siblings (those selectors are dropped, not mis-applied) |
-| Cascade, specificity, inheritance | css-cascade | 🟡 | full order UA → author (**`(id,class,type)` specificity** + doc-order tie-break) → inline, plus inheritance. No `!important`/`@media`/external sheets |
+| Cascade, specificity, inheritance | css-cascade | 🟡 | full order UA → author (**`(id,class,type)` specificity** + doc-order tie-break) → inline, plus inheritance, plus a second **`!important`** pass on top (css-cascade-4 §6.3). External sheets and `@media` both cascade |
+| `!important` | css-cascade-4 §6.3 | ✅ | two-pass author cascade: an `!important` decl wins its property regardless of specificity, order or inline |
+| Custom properties / `var()` | css-variables-1 | 🟡 | `--x` collection + `var()` substitution with fallbacks; `@media`-aware, so dark-mode/mobile blocks don't leak into `:root` |
 | **UA default stylesheet** | HTML rendering §15 | ✅ | real UA sheet as data (`style.rs::ua_rule`): `display`, em-relative `font-size`, weight/italic/mono, `color` role, margins, list indent — no longer hardcoded in layout |
-| `getComputedStyle` (CSSOM) | cssom-1 | ❌ | needs DOM + JS |
 | `getComputedStyle` (CSSOM) | cssom-1 | ❌ | needs DOM + JS |
 
 ## CSS — layout
@@ -61,16 +82,16 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 | Tables (`table`/`tr`/`td`/`th`) | css-tables-3 | 🟡 | `layout.rs::layout_table`: rows stack, cells in auto-width columns (content-preferred, clamped to fit, wrap allowed), `th` bold, `<caption>`, row separators. No colspan/rowspan/border-collapse/`table-layout:fixed` |
 | Flexbox | css-flexbox-1 | 🟡 | `layout.rs::layout_flex` (single line): row/column direction, `flex-grow`/`-shrink`/`-basis` + `flex` shorthand, `gap`, `justify-content` (all 6), `align-items`/`align-self`, `order`. No wrap/reverse/`margin:auto`/baseline |
 | Grid | css-grid-2 | 🟡 | `layout.rs::layout_grid`: `grid-template-columns` (px/%/`fr`/`auto`/`repeat()`), row-major auto-placement, `grid-column: span N` / `A / B`, `gap`; auto row heights. No explicit line placement / `grid-template-rows`/`-areas` / dense flow / item alignment |
-| Positioning (rel/abs/fixed/sticky) | css-position-3 | 🟡 | `relative` (in-flow paint offset by top/left/right/bottom) + `absolute`/`fixed` (out of flow, positioned vs nearest `position!=static` ancestor's box / page; `top`/`left`/`right`). No `bottom`/`z-index`/true fixed-or-sticky scroll behaviour |
-| Values & units (px/em/%/rem/…) | css-values-4 | 🟡 | `px`/`em`/`rem`/`%` lengths, `auto`, `fr`, hex/named colours — parsed across box model / flex / grid. No `calc()`/`vw`/`vh`/`ch` |
+| Positioning (rel/abs/fixed/sticky) | css-position-3 | 🟡 | `relative` (in-flow paint offset) + `absolute`/`fixed` (out of flow, positioned vs nearest `position!=static` ancestor's box / page). `top`/`left`/`right`/**`bottom`** (§10.6.4, needs the viewport height); `top`/`bottom` percentages resolve against the containing block's **height** (§9.3.2). No `z-index` / true fixed-or-sticky scroll behaviour |
+| Values & units (px/em/%/rem/…) | css-values-4 | 🟡 | `values.rs`: `px`/`em`/`rem`/`%` lengths, `auto`, `fr`, plus **`calc()`** with `+ - * /` and nesting (one code path for a bare `16px`, a `50%` and a full `calc(100% - 3rem)`). `rem` resolves against the root element, not the parent. No `vw`/`vh`/`ch` |
 
 ## CSS — paint
 
 | Feature | Spec | Status | Notes |
 |---------|------|--------|-------|
-| Color / text color | css-color-4 | 🟡 | `color:` parsed (`#rgb`/`#rrggbb` + common named colours) via inline styles; theme roles otherwise. No `rgb()`/`hsl()` yet |
+| Color / text color | css-color-4 | ✅ | `color.rs`: `#rgb`/`#rrggbb`/`#rgba`, the named-colour table, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`/`color()`, alpha and modern slash syntax |
 | Backgrounds / borders | css-backgrounds-3 | 🟡 | `background`/`background-color` fill (behind content) + uniform `border` (4 edges) on block boxes; hex/named colours. No gradients/images/`border-radius`/per-side |
-| Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade; **weight** (synthetic bold smear) + **italic** (faux shear) — single Inter face, no real bold/italic/mono font loaded yet |
+| Font size / weight / family | css-fonts-4 | 🟡 | em-relative `font-size` cascade with correct compounding; **six real subsetted faces** (Inter regular/bold/italic/bold-italic + mono/mono-bold, `fonts.rs`) — synthetic bold/italic retired. No `@font-face` / webfonts / family fallback lists |
 | Glyph rasterisation + AA | — | ✅ | fontdue + coverage blend (infrastructure) |
 | Transforms / opacity / filters | css-transforms/… | ❌ | §9 frontier |
 
@@ -81,6 +102,21 @@ the dev box (§10). testharness.js-based tests need the JS engine first.
 | PNG decode | ✅ | `image.rs` (8-bit RGB/RGBA, non-interlaced, miniz_oxide inflate) — wired into `<img>` |
 | JPEG decode | ❌ | common web case → next; JPEG `<img>` currently shows a placeholder |
 | `<img>` layout + paint | 🟡 | block-level image box (size from `width`/`height`/intrinsic, scaled to fit, aspect kept), decoded PNG blit (nearest-neighbour + alpha) or a labelled placeholder. Shell fetches the bytes (≤16/page, 24 MB decode budget). No inline images / `srcset` / `object-fit` |
+
+## SVG
+
+Not yet oracle-graded — the WPT `svg/` reftests are not vendored, so these
+rows are self-assessed and marked as such (see "How this file is maintained").
+
+| Feature | Spec | Status | Notes |
+|---------|------|--------|-------|
+| Document + viewport | SVG 1.1 §7 | 🟡 | `svg.rs`: `width`/`height`/`viewBox` with uniform scaling; rendered as an inline replaced box, and via `<img src=*.svg>` |
+| Shapes | SVG 1.1 §9 | 🟡 | `rect`/`circle`/`ellipse`/`line`/`polyline`/`polygon` |
+| Paths | SVG 1.1 §8 | 🟡 | `M L H V C S Q T Z` (absolute + relative), flattened to polygons; no arcs (`A`) |
+| Fill + stroke | SVG 1.1 §11 | 🟡 | solid fills, even-odd/nonzero winding, stroke width + colour. No gradients, patterns, dash arrays, line joins/caps |
+| `<defs>` / `<use>` / groups | SVG 1.1 §5 | ❌ | not resolved |
+| Transforms | SVG 1.1 §7.6 | ❌ | `transform=` ignored |
+| Text | SVG 1.1 §10 | ❌ | `<text>` not rendered |
 
 ## Forms
 
