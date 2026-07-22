@@ -26,6 +26,7 @@ exclude = [
     "tools/wasm/wifid/harness",
     "tools/wasm/wifid/wasm",
     "tools/regen-icons",
+    "tools/hpack-test",
 ]
 resolver = "2"
 
