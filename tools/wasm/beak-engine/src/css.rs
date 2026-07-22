@@ -16,6 +16,7 @@
 //! External `<link>` stylesheets need a sub-resource fetch → later; the parser
 //! + cascade here are exactly what that will reuse.
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -300,13 +301,60 @@ pub struct Rule {
 }
 
 /// A parsed author stylesheet.
+///
+/// Rules are also indexed by the most selective simple selector in each
+/// selector's RIGHTMOST compound, because that one must match the subject for
+/// the whole selector to have a chance. Without the index every element is
+/// tested against every rule, which on a real page is the dominant cost of a
+/// page load: measured on an English Wikipedia article (183 KB HTML, 230 KB
+/// CSS) laying out took 159 ms with the site's stylesheet and 6.8 ms with an
+/// empty one — i.e. ~95 % of layout was selector matching. Under the WASM
+/// interpreter on the device that was 13 of the 14.6 seconds to first paint.
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    /// Candidate `(rule, selector)` pairs per bucket. A selector lives in
+    /// exactly one bucket, so collecting several buckets cannot produce
+    /// duplicates.
+    by_id: BTreeMap<String, Vec<(u32, u32)>>,
+    by_class: BTreeMap<String, Vec<(u32, u32)>>,
+    by_tag: BTreeMap<String, Vec<(u32, u32)>>,
+    /// Selectors whose rightmost compound names no tag, id or class (`*`,
+    /// `[attr]`, a bare `:not(...)`) — these must be tried for every element.
+    universal: Vec<(u32, u32)>,
 }
 
 impl Stylesheet {
     pub fn empty() -> Stylesheet {
-        Stylesheet { rules: Vec::new() }
+        Stylesheet {
+            rules: Vec::new(),
+            by_id: BTreeMap::new(),
+            by_class: BTreeMap::new(),
+            by_tag: BTreeMap::new(),
+            universal: Vec::new(),
+        }
+    }
+
+    /// Build the selector index. Called once after parsing.
+    fn build_index(&mut self) {
+        for (ri, rule) in self.rules.iter().enumerate() {
+            for (si, sel) in rule.selectors.iter().enumerate() {
+                let key = (ri as u32, si as u32);
+                let last = match sel.compounds.last() {
+                    Some(c) => c,
+                    None => continue,
+                };
+                // Most selective first: an id narrows far more than a tag.
+                if let Some(id) = &last.id {
+                    self.by_id.entry(id.clone()).or_default().push(key);
+                } else if let Some(cls) = last.classes.first() {
+                    self.by_class.entry(cls.clone()).or_default().push(key);
+                } else if let Some(tag) = &last.tag {
+                    self.by_tag.entry(tag.clone()).or_default().push(key);
+                } else {
+                    self.universal.push(key);
+                }
+            }
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
@@ -351,20 +399,48 @@ impl Stylesheet {
         viewport_w: f32,
         want: PseudoElem,
     ) -> Vec<(u32, u32, &'a [(String, String)])> {
+        // Only selectors whose rightmost compound could match this element are
+        // worth testing — that is what the index buys. Everything else is
+        // unchanged: same tests, same specificity, same result.
+        let mut cands: Vec<(u32, u32)> = Vec::new();
+        if let Some(id) = &subject.id {
+            if let Some(v) = self.by_id.get(id.as_str()) {
+                cands.extend_from_slice(v);
+            }
+        }
+        for c in &subject.classes {
+            if let Some(v) = self.by_class.get(c.as_str()) {
+                cands.extend_from_slice(v);
+            }
+        }
+        if let Some(v) = self.by_tag.get(subject.tag.as_str()) {
+            cands.extend_from_slice(v);
+        }
+        cands.extend_from_slice(&self.universal);
+        // Group by rule so one rule contributes one entry, at the highest
+        // specificity among its matching selectors (as before).
+        cands.sort_unstable();
+
         let mut out = Vec::new();
-        for rule in &self.rules {
+        let mut i = 0;
+        while i < cands.len() {
+            let ri = cands[i].0;
+            let rule = &self.rules[ri as usize];
             // Skip rules inside an `@media` block whose condition doesn't hold
             // at this viewport width.
-            if let Some(conds) = &rule.media {
-                if !conds.iter().any(|c| c.matches(viewport_w)) {
-                    continue;
-                }
-            }
+            let media_ok = match &rule.media {
+                Some(conds) => conds.iter().any(|c| c.matches(viewport_w)),
+                None => true,
+            };
             let mut best: Option<u32> = None;
-            for sel in &rule.selectors {
-                if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count) {
-                    best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
+            while i < cands.len() && cands[i].0 == ri {
+                if media_ok {
+                    let sel = &rule.selectors[cands[i].1 as usize];
+                    if sel.pseudo == want && sel.matches(subject, ancestors, prev_siblings, sib_count) {
+                        best = Some(best.map_or(sel.spec, |b| b.max(sel.spec)));
+                    }
                 }
+                i += 1;
             }
             if let Some(spec) = best {
                 out.push((spec, rule.order, rule.decls.as_slice()));
@@ -459,7 +535,15 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut order = 0u32;
     parse_into(&css, 0, css.len(), None, &mut rules, &mut order);
-    Stylesheet { rules }
+    let mut sheet = Stylesheet {
+        rules,
+        by_id: BTreeMap::new(),
+        by_class: BTreeMap::new(),
+        by_tag: BTreeMap::new(),
+        universal: Vec::new(),
+    };
+    sheet.build_index();
+    sheet
 }
 
 /// Scan `css[start..end]` for rules, tagging each with the given `media`
