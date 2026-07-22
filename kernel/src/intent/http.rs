@@ -253,8 +253,7 @@ fn do_http_request(args: &str, use_tls: bool) {
 
     // ARP resolve gateway
     let gw = crate::net::ipv4::gateway();
-    crate::net::arp::request(gw);
-    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+    let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
 
     let port = if use_tls { 443u16 } else { 80 };
     if !flags.silent {
@@ -686,10 +685,18 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     } else {
         crate::net::dns::resolve(host).ok_or("DNS resolution failed")?
     };
-    // ARP the gateway (cached after the first hit; only fresh connects reach here).
+    // Make sure the gateway's MAC is known before we SYN.
+    //
+    // This used to fire an ARP request and then spin 50_000 times over the
+    // FULL `net::poll()` — unconditionally, even when the MAC was already
+    // cached, and `net::poll()` also runs a shade render pass. So every fresh
+    // connect paid 50_000 render passes, and the price grew with whatever the
+    // browser had on screen: handshakes measured 350 ms against an empty page
+    // and 2250 ms once a real article was painted. `arp::resolve` returns
+    // immediately on a cache hit and otherwise polls only until the reply
+    // lands.
     let gw = crate::net::ipv4::gateway();
-    crate::net::arp::request(gw);
-    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+    let _ = crate::net::arp::resolve(gw, 100); // 1 s at 100 Hz
 
     kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443", host, ip[0], ip[1], ip[2], ip[3]);
     let handle = crate::net::tcp::connect(ip, 443).map_err(|_| "TCP connect failed")?;
@@ -775,14 +782,10 @@ fn h2_open(host: &str) -> Option<Http2> {
         return None;
     }
     let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host))?;
-    // Warm the gateway ARP entry exactly as the h1 path does; without it the
-    // first SYN goes nowhere.
+    // Gateway MAC, same as the h1 path (see `open_tls` for why this is a
+    // resolve and not a spin).
     let gw = crate::net::ipv4::gateway();
-    crate::net::arp::request(gw);
-    for _ in 0..50_000 {
-        crate::net::poll();
-        core::hint::spin_loop();
-    }
+    let _ = crate::net::arp::resolve(gw, 100);
     match http2::connect(host, ip, 443) {
         Ok(c) => Some(c),
         Err(http2::Http2Error::NotNegotiated) => {
@@ -1372,8 +1375,7 @@ fn bench_put(host: &str, path: &str, mb: usize) {
 fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'static str> {
     let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host)).ok_or("DNS/IP failed")?;
     let gw = crate::net::ipv4::gateway();
-    crate::net::arp::request(gw);
-    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+    let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
     let handle = crate::net::tcp::connect(ip, 80).map_err(|_| "TCP connect failed")?;
     crate::interrupts::set_worker_poll_hz(10_000);
     struct PollHzGuard;
@@ -1504,8 +1506,7 @@ fn http_get_once(
     };
     kprintln!("[npk]   {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
     let gw = crate::net::ipv4::gateway();
-    crate::net::arp::request(gw);
-    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+    let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
 
     kprintln!("[npk]   TCP connect {}:80 ...", host);
     let handle = crate::net::tcp::connect(ip, 80).map_err(|_| "TCP connect failed")?;
