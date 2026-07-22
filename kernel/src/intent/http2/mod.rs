@@ -612,7 +612,9 @@ pub fn connect(host: &str, ip: [u8; 4], port: u16) -> Result<Http2, Http2Error> 
         "[npk]   h2 connect {} -> {}.{}.{}.{}:{}",
         host, ip[0], ip[1], ip[2], ip[3], port
     );
+    let t_tcp = crate::interrupts::ticks();
     let handle = crate::net::tcp::connect(ip, port).map_err(|_| Http2Error::Tls("TCP connect failed"))?;
+    let t_tls = crate::interrupts::ticks();
     let tls = match crate::tls::tls_connect_alpn(handle, host, &["h2", "http/1.1"]) {
         Ok(s) => s,
         Err(_) => {
@@ -620,6 +622,11 @@ pub fn connect(host: &str, ip: [u8; 4], port: u16) -> Result<Http2, Http2Error> 
             return Err(Http2Error::Tls("TLS handshake failed"));
         }
     };
+    // Which leg is slow? The connect swings between ~200 ms and ~2100 ms
+    // across runs; 2 s is about a retransmission timeout, so name the leg.
+    kprintln!("[npk]   h2 tcp {} ms + tls {} ms",
+        t_tls.wrapping_sub(t_tcp) * 10,
+        crate::interrupts::ticks().wrapping_sub(t_tls) * 10);
     match tls.alpn() {
         Some("h2") => Http2::start(tls),
         other => {

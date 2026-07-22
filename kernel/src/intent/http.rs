@@ -680,11 +680,13 @@ fn finish_conn(host: &str, tls: crate::tls::TlsSession, reusable: bool) {
 
 /// Fresh DNS + ARP + TCP + TLS to `host:443`. Only paid on a pool miss.
 fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
+    let t_dns = crate::interrupts::ticks();
     let ip = if let Some(ip) = parse_ip(host) {
         ip
     } else {
         crate::net::dns::resolve(host).ok_or("DNS resolution failed")?
     };
+    let t_arp = crate::interrupts::ticks();
     // Make sure the gateway's MAC is known before we SYN.
     //
     // This used to fire an ARP request and then spin 50_000 times over the
@@ -697,16 +699,26 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     // lands.
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // 1 s at 100 Hz
+    let t_tcp = crate::interrupts::ticks();
 
-    kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443", host, ip[0], ip[1], ip[2], ip[3]);
     let handle = crate::net::tcp::connect(ip, 443).map_err(|_| "TCP connect failed")?;
-    match crate::tls::tls_connect(handle, host) {
+    let t_tls = crate::interrupts::ticks();
+    let out = match crate::tls::tls_connect(handle, host) {
         Ok(s) => Ok(s),
         Err(_) => {
             let _ = crate::net::tcp::close(handle);
             Err("TLS handshake failed")
         }
-    }
+    };
+    // Split so a slow connect names its own culprit. The whole thing swings
+    // between ~200 ms and ~2100 ms across runs, and 2 s is suspiciously
+    // exactly a retransmission timeout — this says which leg waits.
+    let done = crate::interrupts::ticks();
+    kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443 (dns {} + arp {} + tcp {} + tls {} ms)",
+        host, ip[0], ip[1], ip[2], ip[3],
+        t_arp.wrapping_sub(t_dns) * 10, t_tcp.wrapping_sub(t_arp) * 10,
+        t_tls.wrapping_sub(t_tcp) * 10, done.wrapping_sub(t_tls) * 10);
+    out
 }
 
 // ── HTTP/2 batch fetch ──────────────────────────────────────────────────────
@@ -781,11 +793,16 @@ fn h2_open(host: &str) -> Option<Http2> {
     if h2_refused(host) {
         return None;
     }
+    let t_dns = crate::interrupts::ticks();
     let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host))?;
+    let t_arp = crate::interrupts::ticks();
     // Gateway MAC, same as the h1 path (see `open_tls` for why this is a
     // resolve and not a spin).
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100);
+    let t_conn = crate::interrupts::ticks();
+    kprintln!("[npk]   h2 pre-connect {} (dns {} + arp {} ms)",
+        host, t_arp.wrapping_sub(t_dns) * 10, t_conn.wrapping_sub(t_arp) * 10);
     match http2::connect(host, ip, 443) {
         Ok(c) => Some(c),
         Err(http2::Http2Error::NotNegotiated) => {
