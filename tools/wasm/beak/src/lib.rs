@@ -320,46 +320,59 @@ fn fetch(url: &str) -> bool {
     n >= 0
 }
 
-/// Fetch the page's `<img>` sources and hand them to the engine to decode.
-/// Runs in the main loop (needs `&mut engine`); bounded by MAX_IMAGES.
+/// Start a page's image load: drop the old pixels and return the list of
+/// sources still to fetch. Touches the network NOT AT ALL, so the first paint
+/// can happen right after it.
 ///
-/// STREAMING: fetch one image → decode it now → keep only its pixels → reuse
-/// the same scratch buffer for the next. We never build a Vec of all the
-/// compressed image bytes (the old `pairs` approach peaked at ~16 blobs at
-/// once → the heap-OOM the fast keep-alive pool exposed).
-fn refresh_images(engine: &mut Engine) {
+/// The same src repeats all over a real page (icons, bullets, a logo in header
+/// and footer). The engine keys decoded images by src, so a repeat only
+/// re-fetched and re-decoded identical bytes — wasted requests against the
+/// server's rate limit, and wasted MAX_IMAGES slots that real images needed.
+fn begin_images(engine: &mut Engine) -> Vec<String> {
     unsafe { core::ptr::addr_of_mut!(IMAGES_DIRTY).write(false) };
-    let srcs = beak_engine::image_srcs(html_str());
     engine.images_begin();
-    if !srcs.is_empty() {
-        let base = url_str().to_string();
-        let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-        // The same src repeats all over a real page (icons, bullets, a logo in
-        // header and footer). The engine keys decoded images by src, so a
-        // repeat only re-fetched and re-decoded the identical bytes — wasted
-        // requests against the server's rate limit, and wasted MAX_IMAGES
-        // slots that real images needed.
-        let mut seen: Vec<&str> = Vec::new();
-        for src in srcs.iter() {
-            if seen.len() >= MAX_IMAGES {
-                break;
-            }
-            if seen.contains(&src.as_str()) {
-                continue;
-            }
-            seen.push(src);
-            let abs = resolve(&base, src);
-            let n = unsafe {
-                npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst as i32, IMG_FETCH_CAP as i32)
-            };
-            if n > 0 {
-                let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
-                engine.add_image(src, bytes); // decode now, drop compressed
-            }
+    let mut pending: Vec<String> = Vec::new();
+    for src in beak_engine::image_srcs(html_str()).iter() {
+        if pending.len() >= MAX_IMAGES {
+            break;
+        }
+        if !pending.iter().any(|s| s == src) {
+            pending.push(src.clone());
         }
     }
-    bump_content_gen(); // re-layout so decoded images replace placeholders
+    bump_content_gen(); // lay out with placeholders
     mark_dirty();
+    pending
+}
+
+/// Fetch exactly ONE pending image and hand it to the engine to decode.
+///
+/// One per main-loop turn, NOT a batch: images are not render-blocking (only
+/// stylesheets are), so the page must already be on screen and scrollable
+/// while they trickle in. Fetches are blocking, and a rate-limited host can
+/// stall one for seconds — batching them froze the whole app until the last
+/// one landed.
+///
+/// STREAMING: fetch → decode now → keep only its pixels → reuse the same
+/// scratch buffer for the next. We never hold all the compressed image bytes
+/// at once (the old `pairs` approach peaked at ~16 blobs → the heap-OOM the
+/// fast keep-alive pool exposed).
+fn fetch_next_image(engine: &mut Engine, pending: &mut Vec<String>) {
+    if pending.is_empty() {
+        return;
+    }
+    let src = pending.remove(0);
+    let abs = resolve(url_str(), &src);
+    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
+    let n = unsafe {
+        npk_http_request(abs.as_ptr() as i32, abs.len() as i32, dst as i32, IMG_FETCH_CAP as i32)
+    };
+    if n > 0 {
+        let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
+        engine.add_image(&src, bytes); // decode now, drop compressed
+        bump_content_gen(); // re-layout so it replaces its placeholder
+        mark_dirty();
+    }
 }
 
 fn images_dirty() -> bool {
@@ -1174,11 +1187,13 @@ pub extern "C" fn _start() {
     let mut last_bg = unsafe { npk_theme_token(0) };
     // Persistent paint buffer, reused across frames (see maybe_repaint).
     let mut paint_buf: Vec<u8> = Vec::new();
+    // Image sources of the current page still to fetch, one per loop turn.
+    let mut pending_imgs: Vec<String> = Vec::new();
     loop {
-        // A fresh page: fetch its images (blocking) and hand them to the engine
-        // before painting, so decoded images replace placeholders in one pass.
+        // A fresh page: note which images it wants, but do NOT fetch them here
+        // — that runs after the repaint below, one per turn.
         if images_dirty() {
-            refresh_images(&mut engine);
+            pending_imgs = begin_images(&mut engine);
         }
         // Pick up a navigation: re-parse the document's forms, drop old edits.
         page.sync();
@@ -1224,11 +1239,14 @@ pub extern "C" fn _start() {
             }
         }
         maybe_repaint(&engine, &mut cache, &mut paint_buf, &page.state);
+        // Text and layout are on screen now — pull in one image, then come
+        // back round and paint it. Scrolling keeps working in between.
+        fetch_next_image(&mut engine, &mut pending_imgs);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
         unsafe {
-            let _ = npk_sleep(if had_event { 4 } else { 16 });
+            let _ = npk_sleep(if had_event || !pending_imgs.is_empty() { 4 } else { 16 });
         }
     }
 }
