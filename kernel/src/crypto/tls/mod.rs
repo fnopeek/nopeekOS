@@ -12,6 +12,7 @@ pub mod asn1;
 pub mod x509;
 pub mod certstore;
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use sha256::Sha256;
 use crate::{crypto, csprng, net::tcp};
@@ -40,6 +41,7 @@ const EXT_SUPPORTED_VERSIONS: u16 = 0x002B;
 const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_SUPPORTED_GROUPS: u16 = 0x000A;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000D;
+const EXT_ALPN: u16 = 0x0010;
 
 // Named groups
 const GROUP_SECP384R1: u16 = 0x0018;
@@ -331,11 +333,20 @@ pub struct TlsSession {
     server_app_iv: [u8; 12],
     client_seq: u64,
     server_seq: u64,
+    /// Protocol the server picked from our ALPN offer (RFC 7301). `None` when
+    /// we offered nothing or the server stayed silent — then HTTP/1.1 is
+    /// implied, since that is what an ALPN-less connection has always meant.
+    alpn: Option<String>,
 }
 
 impl TlsSession {
     pub fn cipher_name(&self) -> &'static str {
         self.cipher.name()
+    }
+
+    /// The negotiated ALPN protocol, e.g. `"h2"` or `"http/1.1"`.
+    pub fn alpn(&self) -> Option<&str> {
+        self.alpn.as_deref()
     }
 
     /// True while the underlying TCP connection is still usable for
@@ -375,6 +386,17 @@ impl From<tcp::TcpError> for TlsError {
 
 /// Establish a TLS 1.3 connection over an existing TCP handle.
 pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsError> {
+    tls_connect_alpn(tcp_handle, hostname, &[])
+}
+
+/// As `tls_connect`, but offering an ALPN protocol list (RFC 7301) in
+/// preference order, e.g. `&["h2", "http/1.1"]`. The pick is readable
+/// afterwards via `TlsSession::alpn`.
+pub fn tls_connect_alpn(
+    tcp_handle: usize,
+    hostname: &str,
+    alpn_offer: &[&str],
+) -> Result<TlsSession, TlsError> {
     // Generate ephemeral key pairs for both groups
     let x25519_private = csprng::random_256();
     let x25519_public = x25519::x25519_base(&x25519_private);
@@ -382,7 +404,7 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     let client_random = csprng::random_256();
 
     // === ClientHello ===
-    let client_hello = build_client_hello(&client_random, &x25519_public, &p384_keypair.public_uncompressed, hostname);
+    let client_hello = build_client_hello(&client_random, &x25519_public, &p384_keypair.public_uncompressed, hostname, alpn_offer);
     send_record(tcp_handle, CT_HANDSHAKE, &client_hello)?;
 
     // === ServerHello ===
@@ -436,6 +458,7 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
     let mut _cert_verify_sig: Vec<u8> = Vec::new();
     let mut _cert_verify_algo: u16 = 0;
     let mut server_finished: Vec<u8> = Vec::new();
+    let mut negotiated_alpn: Option<String> = None;
 
     loop {
         let (ct, record) = recv_record(tcp_handle)?;
@@ -482,6 +505,7 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
             match hs_type {
                 HT_ENCRYPTED_EXTENSIONS => {
                     transcript.update(hs_msg);
+                    negotiated_alpn = parse_alpn_extension(&inner[pos + 4..hs_end]);
                 }
                 HT_CERTIFICATE => {
                     transcript.update(hs_msg);
@@ -595,6 +619,7 @@ pub fn tls_connect(tcp_handle: usize, hostname: &str) -> Result<TlsSession, TlsE
         server_app_iv,
         client_seq: 0,
         server_seq: 0,
+        alpn: negotiated_alpn,
     })
 }
 
@@ -676,7 +701,7 @@ pub fn tls_close(session: &mut TlsSession) -> Result<(), TlsError> {
 // Internal helpers
 // ============================================================
 
-fn build_client_hello(random: &[u8; 32], x25519_pub: &[u8; 32], p384_pub: &[u8; 97], hostname: &str) -> Vec<u8> {
+fn build_client_hello(random: &[u8; 32], x25519_pub: &[u8; 32], p384_pub: &[u8; 97], hostname: &str, alpn_offer: &[&str]) -> Vec<u8> {
     let mut extensions = Vec::new();
 
     // SNI extension
@@ -724,6 +749,26 @@ fn build_client_hello(random: &[u8; 32], x25519_pub: &[u8; 32], p384_pub: &[u8; 
     put_u16(&mut extensions, 0x0503); // ecdsa_secp384r1_sha384
     put_u16(&mut extensions, 0x0805); // rsa_pss_rsae_sha384
 
+    // ALPN (RFC 7301) — omitted entirely when we offer nothing, which keeps
+    // the ClientHello byte-identical to what shipped before.
+    if !alpn_offer.is_empty() {
+        let mut list = Vec::new();
+        for proto in alpn_offer {
+            let bytes = proto.as_bytes();
+            if bytes.is_empty() || bytes.len() > 255 {
+                continue; // a protocol name is a 1-byte-prefixed string
+            }
+            list.push(bytes.len() as u8);
+            list.extend_from_slice(bytes);
+        }
+        if !list.is_empty() {
+            put_u16(&mut extensions, EXT_ALPN);
+            put_u16(&mut extensions, (list.len() + 2) as u16); // list_len field + list
+            put_u16(&mut extensions, list.len() as u16);
+            extensions.extend_from_slice(&list);
+        }
+    }
+
     // Build ClientHello body
     let mut body = Vec::new();
     body.push(TLS_VERSION_12[0]); // Legacy version
@@ -755,6 +800,40 @@ fn build_client_hello(random: &[u8; 32], x25519_pub: &[u8; 32], p384_pub: &[u8; 
     put_u24(&mut msg, body.len());
     msg.extend_from_slice(&body);
     msg
+}
+
+/// Pull the server's ALPN pick out of an EncryptedExtensions body (RFC 7301
+/// §3.2). `data` starts at the 2-byte extension-list length. The server sends
+/// exactly one protocol name; anything malformed yields `None`, which the
+/// caller reads as "no ALPN" and thus HTTP/1.1.
+fn parse_alpn_extension(data: &[u8]) -> Option<String> {
+    if data.len() < 2 {
+        return None;
+    }
+    let list_len = ((data[0] as usize) << 8) | data[1] as usize;
+    let end = core::cmp::min(2 + list_len, data.len());
+    let mut pos = 2;
+    while pos + 4 <= end {
+        let ext_type = ((data[pos] as u16) << 8) | data[pos + 1] as u16;
+        let ext_len = ((data[pos + 2] as usize) << 8) | data[pos + 3] as usize;
+        let body = pos + 4;
+        if body + ext_len > end {
+            return None;
+        }
+        if ext_type == EXT_ALPN && ext_len >= 3 {
+            // ProtocolNameList: u16 list length, then u8-prefixed names.
+            let name_len = data[body + 2] as usize;
+            let name = body + 3;
+            if name + name_len <= body + ext_len {
+                return core::str::from_utf8(&data[name..name + name_len])
+                    .ok()
+                    .map(|s| s.to_string());
+            }
+            return None;
+        }
+        pos = body + ext_len;
+    }
+    None
 }
 
 fn build_sni_extension(hostname: &str) -> Vec<u8> {

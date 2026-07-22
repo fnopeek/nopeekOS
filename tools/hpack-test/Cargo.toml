@@ -1,0 +1,8 @@
+[package]
+name = "hpack-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Host-side oracle for the kernel's HPACK implementation. Not part of the
+# kernel build; excluded from the root workspace.
