@@ -371,15 +371,16 @@ pub struct Layout {
     /// Canvas background — the `<body>` background propagated to the whole
     /// viewport (CSS backgrounds §3.11.2), else the theme background.
     pub bg: Rgb,
-    /// True when some `<img>` box had to be sized without its pixels and
-    /// without both `width`/`height` attributes.
+    /// `src`s whose `<img>` box was GUESSED (no pixels yet, and no
+    /// `width`/`height` pair to size it definitely).
     ///
-    /// The shell uses this to decide what an arriving image costs: `false`
-    /// means every image box is already definite, so newly decoded pixels
-    /// only need a REPAINT; `true` means a decode can still move the page and
-    /// a re-layout is warranted. On a real article that is the difference
-    /// between ~15 ms and ~145 ms per batch of images.
-    pub intrinsic_images_pending: bool,
+    /// The shell uses this to decide what an arriving image costs: a `src`
+    /// that is NOT in here has a definite box, so its pixels only need a
+    /// REPAINT; one that is in here can still move the page when it decodes,
+    /// which warrants a re-layout. On a real article that is the difference
+    /// between ~15 ms and ~145 ms — and under the device's WASM interpreter,
+    /// between a page that scrolls while it loads and one that freezes.
+    pub guessed_image_srcs: Vec<String>,
 }
 
 impl Layout {
@@ -434,10 +435,15 @@ struct Ctx<'a> {
     theme: &'a Theme,
     sheet: &'a Stylesheet,
     images: &'a ImageMap,
-    /// Set when an `<img>` box had to be sized without its pixels AND without
-    /// both `width`/`height` attributes. Only then does a later decode move
-    /// the page, so only then must the shell re-lay-out rather than repaint.
-    intrinsic_pending: core::cell::Cell<bool>,
+    /// `src`s whose `<img>` box had to be GUESSED — no decoded pixels and no
+    /// `width`/`height` pair. Only for these does a later decode move the
+    /// page, so only their arrival justifies a re-layout.
+    ///
+    /// A plain bool here was wrong: one image that never arrives (a 403, an
+    /// undecodable format) kept it true forever, so every later batch forced
+    /// a full re-layout even when all of ITS images had definite boxes. On a
+    /// real article that was 5.7 s of frozen UI per batch.
+    guessed: core::cell::RefCell<Vec<String>>,
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     controls: Vec<ControlRect>,
@@ -550,7 +556,7 @@ pub fn layout(
         theme,
         sheet,
         images,
-        intrinsic_pending: core::cell::Cell::new(false),
+        guessed: core::cell::RefCell::new(Vec::new()),
         ops: Vec::new(),
         links: Vec::new(),
         controls: Vec::new(),
@@ -609,7 +615,7 @@ pub fn layout(
         controls: ctx.controls,
         height: y.max(1) as u32,
         bg: canvas_bg,
-        intrinsic_images_pending: ctx.intrinsic_pending.get(),
+        guessed_image_srcs: ctx.guessed.into_inner(),
     }
 }
 
@@ -1163,7 +1169,7 @@ impl Ctx<'_> {
     /// fallback. Not clamped to the line width — `flow` fits it when placing.
     /// Size an `<img>` box.
     ///
-    /// Also records, via `intrinsic_pending`, whether this box had to guess:
+    /// Also records, via `guessed`, whether this box had to guess:
     /// with both `width` and `height` given the geometry is definite and the
     /// pixels arriving later change nothing, so the shell can repaint instead
     /// of re-laying-out. Without them the box depends on the decoded size, and
@@ -1174,7 +1180,9 @@ impl Ctx<'_> {
         let attr = |n: &str| el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
         let (aw, ah) = (attr("width"), attr("height"));
         if img.is_none() && (aw.is_none() || ah.is_none()) {
-            self.intrinsic_pending.set(true);
+            if let Some(src) = el.attr("src") {
+                self.guessed.borrow_mut().push(String::from(src));
+            }
         }
         let bw = aw.unwrap_or(if iw > 0.0 { iw } else { 100.0 });
         let bh = match ah {
@@ -3842,7 +3850,7 @@ mod tests {
         }).collect();
         assert_eq!(img.len(), 1, "one image op");
         assert_eq!(img[0], (200, 100, "/x.png", "Foto"));
-        assert!(!l.intrinsic_images_pending, "definite width+height → repaint suffices");
+        assert!(l.guessed_image_srcs.is_empty(), "definite width+height → repaint suffices");
     }
 
     #[test]
@@ -3850,7 +3858,7 @@ mod tests {
         // No width/height and no decoded pixels → the box is a guess, so a
         // later decode really does move the page and the shell must re-lay-out.
         let l = lay("<body><img src=\"/x.png\" alt=\"Foto\"></body>", 800);
-        assert!(l.intrinsic_images_pending, "guessed box → re-layout needed");
+        assert_eq!(l.guessed_image_srcs, vec!["/x.png".to_string()], "guessed box → re-layout needed");
     }
 
     /// Lay out with live form state (what the shell does while the user types).
