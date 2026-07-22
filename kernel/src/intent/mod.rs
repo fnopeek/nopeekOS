@@ -6,10 +6,6 @@
 mod auth;
 mod fs;
 pub(crate) mod http;
-// Nothing calls into it yet, so every item inside reads as dead code. REMOVE
-// this allow when the fetch path starts using it — it would then hide real
-// unused-code warnings.
-#[allow(dead_code)]
 pub(crate) mod http2;
 mod net;
 mod system;

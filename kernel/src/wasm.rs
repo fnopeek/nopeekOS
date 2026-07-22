@@ -667,18 +667,73 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
             if res.is_err() { return -1; }
 
             let write_len = out.len().min(cap);
-            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
+            // Bounds-checked write: buf_ptr is guest-controlled, and a
+            // wrapping `start + len` would panic the KERNEL on the slice index.
+            write_wasm_bytes(&mut caller, buf_ptr, &out[..write_len])
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_http_request_many(urls_ptr, urls_len, out_ptr, out_max,
+    //                       lens_ptr, lens_max) -> count, or -1
+    //
+    // Fetch many URLs in ONE call, multiplexed over HTTP/2 where the host
+    // offers it. `urls` is a newline-separated list; the bodies are written
+    // back-to-back into `out`, and `lens` receives one little-endian i32 per
+    // URL — the byte count written, or -1 for a resource that failed or did
+    // not fit. The guest walks `lens` to slice `out`.
+    //
+    // Exists because sequential HTTP/1.1 sub-resource fetching is what walks
+    // a page into rate limits and spends a round-trip per file. NET-gated,
+    // same capability as npk_http_request.
+    linker.func_wrap("env", "npk_http_request_many",
+        |mut caller: Caller<'_, HostState>, urls_ptr: i32, urls_len: i32,
+         out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32| -> i32 {
+            let cap_id = caller.data().cap_id;
+            if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
+                kprintln!("[npk] WASM: npk_http_request_many DENIED (cap_id={:08x}, {:?})",
+                    capability::short_id(&cap_id), e);
+                return -1;
+            }
+            if out_max <= 0 || lens_max <= 0 || out_ptr < 0 || lens_ptr < 0 { return -1; }
+
+            let blob = match read_wasm_str(&caller, urls_ptr, urls_len) {
+                Some(s) => s,
                 None => return -1,
             };
-            let data = mem.data_mut(&mut caller);
-            let start = buf_ptr as usize;
-            if start + write_len <= data.len() {
-                data[start..start + write_len].copy_from_slice(&out[..write_len]);
-                write_len as i32
-            } else {
-                -1
+            let urls: alloc::vec::Vec<String> = blob
+                .split('\n')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            // Bound the work a single call can ask for, and make sure the
+            // guest actually gave us room for one length per URL.
+            const MAX_URLS: usize = 64;
+            if urls.is_empty() || urls.len() > MAX_URLS { return -1; }
+            if (lens_max as usize) < urls.len() * 4 { return -1; }
+
+            let total_cap = out_max as usize;
+            let bodies = crate::intent::http::https_get_many(&urls, total_cap);
+
+            let mut blobs: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let mut lens: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            for body in bodies {
+                let n: i32 = match body {
+                    // Drop a body that would overrun the caller's buffer
+                    // rather than truncating it — half an image decodes to
+                    // garbage, whereas a missing one draws a placeholder.
+                    Some(b) if blobs.len() + b.len() <= total_cap => {
+                        blobs.extend_from_slice(&b);
+                        b.len() as i32
+                    }
+                    _ => -1,
+                };
+                lens.extend_from_slice(&n.to_le_bytes());
             }
+
+            if write_wasm_bytes(&mut caller, lens_ptr, &lens) < 0 { return -1; }
+            if !blobs.is_empty() && write_wasm_bytes(&mut caller, out_ptr, &blobs) < 0 { return -1; }
+            urls.len() as i32
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
