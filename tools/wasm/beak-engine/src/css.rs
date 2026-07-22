@@ -312,26 +312,63 @@ pub struct Rule {
 /// interpreter on the device that was 13 of the 14.6 seconds to first paint.
 pub struct Stylesheet {
     rules: Vec<Rule>,
-    /// Candidate `(rule, selector)` pairs per bucket. A selector lives in
-    /// exactly one bucket, so collecting several buckets cannot produce
-    /// duplicates.
+    /// Selectors targeting real elements.
+    normal: Index,
+    /// Selectors ending in `::before`/`::after`, kept apart because the
+    /// cascade runs THREE times per element (the element, then each
+    /// generated box). Sharing one index made each pass walk the other
+    /// two passes' candidates only to reject them.
+    pseudo: Index,
+}
+
+/// Candidate `(rule, selector)` pairs bucketed by the most selective simple
+/// selector of a selector's rightmost compound. A selector lives in exactly
+/// one bucket, so collecting several buckets cannot produce duplicates.
+#[derive(Default)]
+struct Index {
     by_id: BTreeMap<String, Vec<(u32, u32)>>,
     by_class: BTreeMap<String, Vec<(u32, u32)>>,
     by_tag: BTreeMap<String, Vec<(u32, u32)>>,
-    /// Selectors whose rightmost compound names no tag, id or class (`*`,
-    /// `[attr]`, a bare `:not(...)`) — these must be tried for every element.
+    /// Rightmost compound names no tag, id or class (`*`, `[attr]`, a bare
+    /// `:not(...)`) — must be tried for every element.
     universal: Vec<(u32, u32)>,
+}
+
+impl Index {
+    fn insert(&mut self, key: (u32, u32), last: &Compound) {
+        // Most selective first: an id narrows far more than a tag.
+        if let Some(id) = &last.id {
+            self.by_id.entry(id.clone()).or_default().push(key);
+        } else if let Some(cls) = last.classes.first() {
+            self.by_class.entry(cls.clone()).or_default().push(key);
+        } else if let Some(tag) = &last.tag {
+            self.by_tag.entry(tag.clone()).or_default().push(key);
+        } else {
+            self.universal.push(key);
+        }
+    }
+
+    fn candidates(&self, subject: &ElemInfo, out: &mut Vec<(u32, u32)>) {
+        if let Some(id) = &subject.id {
+            if let Some(v) = self.by_id.get(id.as_str()) {
+                out.extend_from_slice(v);
+            }
+        }
+        for c in &subject.classes {
+            if let Some(v) = self.by_class.get(c.as_str()) {
+                out.extend_from_slice(v);
+            }
+        }
+        if let Some(v) = self.by_tag.get(subject.tag.as_str()) {
+            out.extend_from_slice(v);
+        }
+        out.extend_from_slice(&self.universal);
+    }
 }
 
 impl Stylesheet {
     pub fn empty() -> Stylesheet {
-        Stylesheet {
-            rules: Vec::new(),
-            by_id: BTreeMap::new(),
-            by_class: BTreeMap::new(),
-            by_tag: BTreeMap::new(),
-            universal: Vec::new(),
-        }
+        Stylesheet { rules: Vec::new(), normal: Index::default(), pseudo: Index::default() }
     }
 
     /// Build the selector index. Called once after parsing.
@@ -343,15 +380,10 @@ impl Stylesheet {
                     Some(c) => c,
                     None => continue,
                 };
-                // Most selective first: an id narrows far more than a tag.
-                if let Some(id) = &last.id {
-                    self.by_id.entry(id.clone()).or_default().push(key);
-                } else if let Some(cls) = last.classes.first() {
-                    self.by_class.entry(cls.clone()).or_default().push(key);
-                } else if let Some(tag) = &last.tag {
-                    self.by_tag.entry(tag.clone()).or_default().push(key);
+                if sel.pseudo == PseudoElem::None {
+                    self.normal.insert(key, last);
                 } else {
-                    self.universal.push(key);
+                    self.pseudo.insert(key, last);
                 }
             }
         }
@@ -403,20 +435,8 @@ impl Stylesheet {
         // worth testing — that is what the index buys. Everything else is
         // unchanged: same tests, same specificity, same result.
         let mut cands: Vec<(u32, u32)> = Vec::new();
-        if let Some(id) = &subject.id {
-            if let Some(v) = self.by_id.get(id.as_str()) {
-                cands.extend_from_slice(v);
-            }
-        }
-        for c in &subject.classes {
-            if let Some(v) = self.by_class.get(c.as_str()) {
-                cands.extend_from_slice(v);
-            }
-        }
-        if let Some(v) = self.by_tag.get(subject.tag.as_str()) {
-            cands.extend_from_slice(v);
-        }
-        cands.extend_from_slice(&self.universal);
+        let index = if want == PseudoElem::None { &self.normal } else { &self.pseudo };
+        index.candidates(subject, &mut cands);
         // Group by rule so one rule contributes one entry, at the highest
         // specificity among its matching selectors (as before).
         cands.sort_unstable();
@@ -535,13 +555,7 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut order = 0u32;
     parse_into(&css, 0, css.len(), None, &mut rules, &mut order);
-    let mut sheet = Stylesheet {
-        rules,
-        by_id: BTreeMap::new(),
-        by_class: BTreeMap::new(),
-        by_tag: BTreeMap::new(),
-        universal: Vec::new(),
-    };
+    let mut sheet = Stylesheet { rules, normal: Index::default(), pseudo: Index::default() };
     sheet.build_index();
     sheet
 }

@@ -472,13 +472,13 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
 /// scratch buffer for the next. We never hold all the compressed image bytes
 /// at once (the old `pairs` approach peaked at ~16 blobs → the heap-OOM the
 /// fast keep-alive pool exposed).
-/// `needs_relayout` comes from the last layout: false means every `<img>` box
-/// was already definite (both dimensions authored), so arriving pixels change
-/// no geometry and a repaint is enough. That is the difference between ~15 ms
-/// and ~145 ms of engine work per batch on a real article — and under the
-/// wasmi interpreter on the device, between a page that scrolls while it
-/// loads and one that does not.
-fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, needs_relayout: bool) {
+/// `guessed` lists the `src`s whose box the last layout had to guess. Only if
+/// one of THOSE arrives does the page move and a re-layout pay for itself;
+/// everything else is a repaint. That is ~15 ms instead of ~145 ms of engine
+/// work per batch on a real article — and under the wasmi interpreter on the
+/// device, the difference between a page that scrolls while it loads and one
+/// that freezes for seconds at a time.
+fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, guessed: &[String]) {
     if pending.is_empty() {
         return;
     }
@@ -488,6 +488,7 @@ fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, needs_relay
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = fetch_batch(&urls, dst, IMG_FETCH_CAP);
     let mut any = false;
+    let mut moved = false;
     for (src, (off, n)) in srcs.iter().zip(spans) {
         if n == 0 {
             continue; // failed or did not fit → keeps its placeholder
@@ -495,9 +496,12 @@ fn fetch_next_images(engine: &mut Engine, pending: &mut Vec<String>, needs_relay
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
         engine.add_image(src, bytes); // decode now, drop compressed
         any = true;
+        if guessed.iter().any(|g| g == src) {
+            moved = true;
+        }
     }
     if any {
-        if needs_relayout {
+        if moved {
             bump_content_gen(); // a guessed box moves once the real size lands
         }
         mark_dirty(); // otherwise just paint: the display list is unchanged
@@ -1399,10 +1403,11 @@ pub extern "C" fn _start() {
         // Text and layout are on screen now — pull in the next few images,
         // then come back round and paint them. Scrolling keeps working in
         // between, because a batch is small.
-        let needs_relayout = cache
+        let guessed: Vec<String> = cache
             .as_ref()
-            .map_or(true, |(l, _, _): &(Layout, i32, u32)| l.intrinsic_images_pending);
-        fetch_next_images(&mut engine, &mut pending_imgs, needs_relayout);
+            .map(|(l, _, _): &(Layout, i32, u32)| l.guessed_image_srcs.clone())
+            .unwrap_or_default();
+        fetch_next_images(&mut engine, &mut pending_imgs, &guessed);
         // ALWAYS yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
