@@ -10,6 +10,10 @@ const RESERVED_SECTORS: u32 = 32;
 const NUM_FATS: u8 = 2;
 const SECTORS_PER_CLUSTER: u32 = 1;
 const ROOT_CLUSTER: u32 = 2;
+/// Floor for the kernel's reserved cluster run (16 MiB at 512 B/cluster).
+/// Generous on purpose: the ESP is 64 MB and re-laying-out the FAT during an
+/// OTA is not something we want to implement.
+const MIN_KERNEL_RESERVED: u32 = 32768;
 
 /// FAT32 entry: end of chain
 const FAT_EOC: u32 = 0x0FFF_FFFF;
@@ -196,9 +200,25 @@ impl Fat32Writer {
         self.write_sector(sector, &sec)
     }
 
-    /// Write file data starting at given cluster
-    fn write_file_data(&self, first_cluster: u32, data: &[u8]) -> Result<(), &'static str> {
+    /// Write file data starting at `first_cluster`, refusing to run past the
+    /// `max_clusters` that were reserved for it.
+    ///
+    /// Without that bound this wrote happily past the end of the file's FAT
+    /// chain: the directory entry then advertised the full size while the
+    /// chain stopped short, so anything following the chain — i.e. the UEFI
+    /// firmware — read a truncated image and refused to boot, with the file
+    /// still listing at the right size. Silent corruption; fail loudly instead.
+    fn write_file_data(
+        &self,
+        first_cluster: u32,
+        data: &[u8],
+        max_clusters: u32,
+    ) -> Result<(), &'static str> {
         let sectors = (data.len() + 511) / 512;
+        let needed = (sectors as u32 + SECTORS_PER_CLUSTER - 1) / SECTORS_PER_CLUSTER;
+        if needed > max_clusters {
+            return Err("file larger than its reserved cluster chain");
+        }
         for i in 0..sectors {
             let mut sec = [0u8; 512];
             let start = i * 512;
@@ -253,18 +273,30 @@ pub fn create_esp(
     let efi_cl = fs.alloc_clusters(1);    // cluster 3: /EFI
     let efiboot_cl = fs.alloc_clusters(1); // cluster 4: /EFI/BOOT
 
-    // Reserve 8192 clusters (4 MB at 512 B/cluster) for the kernel
-    // image — covers OTA growth without re-laying-out the FAT. The
-    // initial file may be smaller, but the reservation lets `update`
-    // overwrite without needing to find new clusters.
-    const KERNEL_RESERVED: u32 = 8192;
-    let kernel_cl = fs.alloc_clusters(KERNEL_RESERVED);
+    // Reserve a contiguous run for the kernel image, so a later OTA can
+    // overwrite it in place without re-laying-out the FAT.
+    //
+    // This used to be a flat 8192 clusters = 4 MiB, which the kernel quietly
+    // outgrew: the image was written past the end of its own chain and the
+    // machine stopped booting. Derive it from the image instead — double the
+    // current size, with a floor — so the reservation tracks reality and
+    // still leaves room to grow.
+    let kernel_clusters = ((kernel_efi.len() + 511) / 512) as u32;
+    let reserved = (kernel_clusters.saturating_mul(2)).max(MIN_KERNEL_RESERVED);
+
+    // The FAT itself only spans so many clusters; refuse rather than lay down
+    // a filesystem whose chains point past the data area.
+    let usable = fs.total_sectors.saturating_sub(fs.data_start) / SECTORS_PER_CLUSTER;
+    if reserved + 3 >= usable {
+        return Err("ESP too small for the kernel image");
+    }
+    let kernel_cl = fs.alloc_clusters(reserved);
 
     // FAT chains
     fs.write_fat_chain(root_cl, 1)?;
     fs.write_fat_chain(efi_cl, 1)?;
     fs.write_fat_chain(efiboot_cl, 1)?;
-    fs.write_fat_chain(kernel_cl, KERNEL_RESERVED)?;
+    fs.write_fat_chain(kernel_cl, reserved)?;
 
     // Root: /EFI, marker file
     fs.write_directory(root_cl, &[
@@ -288,7 +320,7 @@ pub fn create_esp(
         ),
     ])?;
 
-    fs.write_file_data(kernel_cl, kernel_efi)?;
+    fs.write_file_data(kernel_cl, kernel_efi, reserved)?;
 
     Ok(())
 }
@@ -455,10 +487,12 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
     crate::kprintln!("[npk] ESP: BOOTX64.EFI at cluster {}, {} -> {} bytes ({}/{} clusters)",
         kernel_cl, old_size, data.len(), new_clusters, old_clusters);
 
-    // Safety check: kernel must stay within 4MB (8192 sectors)
-    const MAX_KERNEL_CLUSTERS: u32 = 8192;
-    if new_clusters > MAX_KERNEL_CLUSTERS {
-        return Err("kernel too large for ESP (exceeds 4MB limit)");
+    // The real limit is the run create_esp reserved for this file, which
+    // chain_len just measured — no constant to drift out of date.
+    if new_clusters > old_clusters {
+        crate::kprintln!("[npk] ESP: need {} clusters, reservation is {}",
+            new_clusters, old_clusters);
+        return Err("kernel larger than its reserved ESP chain");
     }
 
     // Write data to existing clusters (follow FAT chain)
