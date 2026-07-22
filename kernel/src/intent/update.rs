@@ -9,7 +9,16 @@ use alloc::vec::Vec;
 
 const UPDATE_HOST: &str = "raw.githubusercontent.com";
 const UPDATE_BASE: &str = "/fnopeek/nopeekOS/main/release";
-const MAX_KERNEL_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+/// Hard ceiling on a kernel image we are willing to buffer. NOT the download
+/// bound — that comes from the signed manifest (see below), so this only has
+/// to be "implausible", not "current size plus guesswork".
+///
+/// It used to be 4 MiB and used directly as the download cap. When the kernel
+/// crossed 4 MiB the fetch was silently truncated there, and OTA failed with a
+/// confusing `Size mismatch` — the updater on the device could no longer
+/// install any kernel, including the one that fixes this. Deriving the bound
+/// from the manifest means the cap can never again drift away from reality.
+const MAX_KERNEL_SIZE: usize = 64 * 1024 * 1024;
 const MAX_MANIFEST_SIZE: usize = 4096;
 const MAX_ASSET_MANIFEST_SIZE: usize = 16 * 1024;
 /// 512 MB ceiling for OTA assets. The userspace bundle with Mesa/Wayland
@@ -133,16 +142,27 @@ pub fn intent_update(_args: &str) {
     } else {
         kprintln!("[npk] Size: {} bytes", manifest.size);
 
-        // 2. Download kernel (UEFI PE+ binary)
+        // 2. Download kernel (UEFI PE+ binary).
+        //
+        // The bound is the manifest's own size, not a fixed constant, so a
+        // growing kernel can never again outgrow its downloader. The manifest
+        // is not yet authenticated at this point — the SHA-384 and signature
+        // checks below are what make it trustworthy — so it is only allowed to
+        // *lower* our appetite, never raise it past MAX_KERNEL_SIZE.
+        if manifest.size == 0 || manifest.size > MAX_KERNEL_SIZE {
+            kprintln!("[npk] Refusing implausible kernel size: {} bytes (max {})",
+                manifest.size, MAX_KERNEL_SIZE);
+            return;
+        }
         kprintln!("[npk] Downloading kernel.efi ({} KB)...", manifest.size / 1024);
         let kernel_path = alloc::format!("{}/kernel.efi", UPDATE_BASE);
-        let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, MAX_KERNEL_SIZE) {
+        let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, manifest.size) {
             Ok(d) => d,
             Err(e) => { kprintln!("[npk] Download failed: {}", e); return; }
         };
 
         if kernel_data.len() != manifest.size {
-            kprintln!("[npk] Size mismatch: got {} expected {}", kernel_data.len(), manifest.size);
+            kprintln!("[npk] Short download: got {} of {} bytes", kernel_data.len(), manifest.size);
             return;
         }
 
