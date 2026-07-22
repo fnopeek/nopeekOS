@@ -14,7 +14,6 @@
 //! Scroll-independent: computed once per (content, width); `raster::paint`
 //! draws the visible slice at any offset. Flex/Grid/floats/position come next.
 
-use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -23,7 +22,7 @@ use fontdue::Font;
 use crate::css::{ElemInfo, PseudoElem, Stylesheet};
 use crate::dom::{Dom, Element, Node};
 use crate::forms::{ControlKind, FormState};
-use crate::image::{Image, ImageMap};
+use crate::image::ImageMap;
 use crate::style::{
     self, BorderSide, ClearKind, Clip, ComputedStyle, CrossAlign, Display, FlexBasis, FloatKind,
     GridTrack, Justify, Len, Position, TableLayout, ZIndex, BASE_FONT_PX,
@@ -334,7 +333,12 @@ pub enum DrawOp {
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgb },
     /// A decoded image, scaled to `w`×`h` at blit time.
-    Image { x: i32, y: i32, w: i32, h: i32, img: Rc<Image> },
+    /// An `<img>` box. Carries the `src` KEY, not the decoded pixels: the
+    /// rasteriser looks the image up when it paints, and draws a placeholder
+    /// on a miss. That way an image arriving after layout costs a repaint
+    /// instead of a full re-layout — which on a real article is the
+    /// difference between ~15 ms and ~145 ms, per image batch.
+    Image { x: i32, y: i32, w: i32, h: i32, src: String, alt: String },
 }
 
 /// A clickable link's document-space rectangle.
@@ -367,6 +371,15 @@ pub struct Layout {
     /// Canvas background — the `<body>` background propagated to the whole
     /// viewport (CSS backgrounds §3.11.2), else the theme background.
     pub bg: Rgb,
+    /// True when some `<img>` box had to be sized without its pixels and
+    /// without both `width`/`height` attributes.
+    ///
+    /// The shell uses this to decide what an arriving image costs: `false`
+    /// means every image box is already definite, so newly decoded pixels
+    /// only need a REPAINT; `true` means a decode can still move the page and
+    /// a re-layout is warranted. On a real article that is the difference
+    /// between ~15 ms and ~145 ms per batch of images.
+    pub intrinsic_images_pending: bool,
 }
 
 impl Layout {
@@ -421,6 +434,10 @@ struct Ctx<'a> {
     theme: &'a Theme,
     sheet: &'a Stylesheet,
     images: &'a ImageMap,
+    /// Set when an `<img>` box had to be sized without its pixels AND without
+    /// both `width`/`height` attributes. Only then does a later decode move
+    /// the page, so only then must the shell re-lay-out rather than repaint.
+    intrinsic_pending: core::cell::Cell<bool>,
     ops: Vec<DrawOp>,
     links: Vec<LinkRect>,
     controls: Vec<ControlRect>,
@@ -533,6 +550,7 @@ pub fn layout(
         theme,
         sheet,
         images,
+        intrinsic_pending: core::cell::Cell::new(false),
         ops: Vec::new(),
         links: Vec::new(),
         controls: Vec::new(),
@@ -585,7 +603,14 @@ pub fn layout(
     // positive-z ranges paint last (in front) of everything else.
     let ops = reorder_by_z(ctx.ops, &ctx.stack_ops);
     let links = reorder_by_z(ctx.links, &ctx.stack_links);
-    Layout { ops, links, controls: ctx.controls, height: y.max(1) as u32, bg: canvas_bg }
+    Layout {
+        ops,
+        links,
+        controls: ctx.controls,
+        height: y.max(1) as u32,
+        bg: canvas_bg,
+        intrinsic_images_pending: ctx.intrinsic_pending.get(),
+    }
 }
 
 impl Ctx<'_> {
@@ -814,9 +839,10 @@ impl Ctx<'_> {
             // `collect_inline`; this catches direct children of any display.
             if el.tag == "img" {
                 self.path.push(ElemInfo::of(el));
-                let (img, iw, ih) = self.img_box(el);
+                let (iw, ih) = self.img_box(el);
                 let alt = el.attr("alt").unwrap_or("").trim().to_string();
-                inline.image(img, iw, ih, None, alt);
+                let src = el.attr("src").unwrap_or("").to_string();
+                inline.image(src, iw, ih, None, alt);
                 self.path.pop();
                 continue;
             }
@@ -1135,17 +1161,28 @@ impl Ctx<'_> {
     /// The decoded image (if any) + natural box size for an `<img>`: from the
     /// `width`/`height` attributes, else the decoded intrinsic size, else a
     /// fallback. Not clamped to the line width — `flow` fits it when placing.
-    fn img_box(&self, el: &Element) -> (Option<Rc<Image>>, i32, i32) {
-        let img = el.attr("src").and_then(|s| self.images.get(s)).cloned();
-        let (iw, ih) = img.as_ref().map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0));
+    /// Size an `<img>` box.
+    ///
+    /// Also records, via `intrinsic_pending`, whether this box had to guess:
+    /// with both `width` and `height` given the geometry is definite and the
+    /// pixels arriving later change nothing, so the shell can repaint instead
+    /// of re-laying-out. Without them the box depends on the decoded size, and
+    /// a later decode really does move the page.
+    fn img_box(&self, el: &Element) -> (i32, i32) {
+        let img = el.attr("src").and_then(|s| self.images.get(s));
+        let (iw, ih) = img.map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0));
         let attr = |n: &str| el.attr(n).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
-        let bw = attr("width").unwrap_or(if iw > 0.0 { iw } else { 100.0 });
-        let bh = match attr("height") {
+        let (aw, ah) = (attr("width"), attr("height"));
+        if img.is_none() && (aw.is_none() || ah.is_none()) {
+            self.intrinsic_pending.set(true);
+        }
+        let bw = aw.unwrap_or(if iw > 0.0 { iw } else { 100.0 });
+        let bh = match ah {
             Some(h) => h,
             None if iw > 0.0 => bw * ih / iw,
             None => bw * 0.75,
         };
-        (img, bw.max(1.0) as i32, bh.max(1.0) as i32)
+        (bw.max(1.0) as i32, bh.max(1.0) as i32)
     }
 
     /// Measure a form control and capture what it displays right now (the
@@ -2989,8 +3026,9 @@ impl Ctx<'_> {
         // thumbnails) is an atomic inline box; carry the enclosing link so it
         // stays clickable.
         if el.tag == "img" {
-            let (img, iw, ih) = self.img_box(el);
-            inline.image(img, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string());
+            let (iw, ih) = self.img_box(el);
+            let src = el.attr("src").unwrap_or("").to_string();
+            inline.image(src, iw, ih, href, el.attr("alt").unwrap_or("").trim().to_string());
             return;
         }
         if let Some(kind) = crate::forms::kind_of(el) {
@@ -3049,7 +3087,7 @@ struct RunStyle {
 /// One inline item: a word, an atomic `<img>`, a form control, or a `<br>`.
 enum Item {
     Word { text: String, style: RunStyle, href: Option<String>, space_before: bool },
-    Image { img: Option<Rc<Image>>, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool },
+    Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool },
     Control { ctl: CtlBox, space_before: bool },
     Break,
 }
@@ -3361,10 +3399,10 @@ impl Inline {
 
     /// Add an atomic `<img>` (decoded or a placeholder) to the inline run,
     /// carrying the enclosing link so an image-in-a-link stays clickable.
-    fn image(&mut self, img: Option<Rc<Image>>, w: i32, h: i32, href: Option<&str>, alt: String) {
+    fn image(&mut self, src: String, w: i32, h: i32, href: Option<&str>, alt: String) {
         let space_before = self.pending_space && !self.items.is_empty();
         self.pending_space = false;
-        self.items.push(Item::Image { img, w, h, href: href.map(|s| s.to_string()), alt, space_before });
+        self.items.push(Item::Image { src, w, h, href: href.map(|s| s.to_string()), alt, space_before });
     }
 
     /// Add an atomic form control to the inline run.
@@ -3451,7 +3489,7 @@ impl Inline {
                     line_ascent = line_ascent.max(face(style).horizontal_line_metrics(style.size).map(|m| m.ascent).unwrap_or(style.size));
                     gap = gap.max(line_gap(face(style), style.size));
                 }
-                Item::Image { img, w: iw, h: ih, href, alt, space_before } => {
+                Item::Image { src, w: iw, h: ih, href, alt, space_before } => {
                     // Fit the image to the content width, keeping aspect.
                     let (mut bw, mut bh) = (*iw as f32, *ih as f32);
                     if bw > w as f32 {
@@ -3474,7 +3512,7 @@ impl Inline {
                         x: sx,
                         w: bw,
                         h: bh,
-                        img: img.clone(),
+                        src: src.clone(),
                         href: href.clone(),
                         alt: alt.clone(),
                     });
@@ -3515,7 +3553,7 @@ impl Inline {
 /// form control (borrowed from the inline run — it is only measured once).
 enum Placed<'a> {
     Text(Seg),
-    Image { x: i32, w: i32, h: i32, img: Option<Rc<Image>>, href: Option<String>, alt: String },
+    Image { x: i32, w: i32, h: i32, src: String, href: Option<String>, alt: String },
     Control { x: i32, ctl: &'a CtlBox },
 }
 
@@ -3576,32 +3614,14 @@ fn emit_line(
                 let top = baseline - (ctl.h - CTL_PAD_Y);
                 paint_control(fonts, theme, ctl, x, top, ops, controls);
             }
-            Placed::Image { x, w, h, img, href, alt } => {
+            Placed::Image { x, w, h, src, href, alt } => {
                 let top = baseline - h; // image bottom sits on the baseline
                 if let Some(href) = &href {
                     links.push(LinkRect { x, y: top, w, h, href: href.clone() });
                 }
-                if let Some(img) = img {
-                    ops.push(DrawOp::Image { x, y: top, w, h, img });
-                } else {
-                    let c = theme.rule;
-                    ops.push(DrawOp::Rect { x, y: top, w, h: 1, color: c });
-                    ops.push(DrawOp::Rect { x, y: top + h - 1, w, h: 1, color: c });
-                    ops.push(DrawOp::Rect { x, y: top, w: 1, h, color: c });
-                    ops.push(DrawOp::Rect { x: x + w - 1, y: top, w: 1, h, color: c });
-                    if !alt.is_empty() && w > 24 {
-                        ops.push(DrawOp::Text {
-                            x: x + 4,
-                            y: top + 4,
-                            size: 13.0,
-                            color: theme.muted,
-                            bold: false,
-                            italic: false,
-                            mono: false,
-                            text: alt,
-                        });
-                    }
-                }
+                // Emitted whether or not the pixels have arrived — the
+                // rasteriser draws the placeholder when the lookup misses.
+                ops.push(DrawOp::Image { x, y: top, w, h, src, alt });
             }
         }
     }
@@ -3810,12 +3830,27 @@ mod tests {
     }
 
     #[test]
-    fn img_without_decoded_pixels_shows_placeholder() {
-        // No images set → a sized placeholder box (border rects) + the alt text.
+    fn img_box_is_emitted_and_sized_before_its_pixels_arrive() {
+        // With both dimensions given, the box is definite: layout emits ONE
+        // image op carrying the src, at the authored size, and does NOT need
+        // the pixels. Drawing the placeholder is the rasteriser's job now, so
+        // the arriving image is a repaint rather than a re-layout.
         let l = lay("<body><img src=\"/x.png\" alt=\"Foto\" width=\"200\" height=\"100\"></body>", 800);
-        let rects = l.ops.iter().filter(|o| matches!(o, DrawOp::Rect { .. })).count();
-        assert!(rects >= 4, "placeholder draws a 4-edge border");
-        assert!(l.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Foto")));
+        let img: Vec<_> = l.ops.iter().filter_map(|o| match o {
+            DrawOp::Image { w, h, src, alt, .. } => Some((*w, *h, src.as_str(), alt.as_str())),
+            _ => None,
+        }).collect();
+        assert_eq!(img.len(), 1, "one image op");
+        assert_eq!(img[0], (200, 100, "/x.png", "Foto"));
+        assert!(!l.intrinsic_images_pending, "definite width+height → repaint suffices");
+    }
+
+    #[test]
+    fn img_without_dimensions_flags_a_relayout() {
+        // No width/height and no decoded pixels → the box is a guess, so a
+        // later decode really does move the page and the shell must re-lay-out.
+        let l = lay("<body><img src=\"/x.png\" alt=\"Foto\"></body>", 800);
+        assert!(l.intrinsic_images_pending, "guessed box → re-layout needed");
     }
 
     /// Lay out with live form state (what the shell does while the user types).

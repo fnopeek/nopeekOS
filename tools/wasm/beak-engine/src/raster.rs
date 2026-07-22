@@ -178,14 +178,47 @@ impl Engine {
                     }
                     self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, text);
                 }
-                DrawOp::Image { x, y, w: iw, h: ih, img } => {
+                DrawOp::Image { x, y, w: iw, h: ih, src, alt } => {
                     let vy = *y - scroll_y;
                     if vy > hi || vy + *ih < 0 {
                         continue;
                     }
-                    blit_image(out, wi, hi, *x, vy, *iw, *ih, img);
+                    // Look the pixels up at PAINT time, so an image that
+                    // arrives after layout needs only a repaint. A miss (not
+                    // fetched yet, or an undecodable format) draws the
+                    // placeholder that layout used to emit as separate ops.
+                    match self.images.get(src) {
+                        Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img),
+                        None => self.draw_img_placeholder(out, wi, hi, *x, vy, *iw, *ih, alt),
+                    }
                 }
             }
+        }
+    }
+
+    /// The box an `<img>` shows while its pixels are missing: a thin frame
+    /// plus the alt text. Lives here rather than in layout so that an image
+    /// arriving later swaps the placeholder for the picture without the
+    /// display list changing at all.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_img_placeholder(
+        &self,
+        out: &mut [u8],
+        wi: i32,
+        hi: i32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        alt: &str,
+    ) {
+        let c = self.theme.rule;
+        fill(out, wi, hi, x, y, w, 1, c);
+        fill(out, wi, hi, x, y + h - 1, w, 1, c);
+        fill(out, wi, hi, x, y, 1, h, c);
+        fill(out, wi, hi, x + w - 1, y, 1, h, c);
+        if !alt.is_empty() && w > 24 {
+            self.draw_run(out, wi, hi, x + 4, y + 4, 13.0, self.theme.muted, false, false, false, alt);
         }
     }
 
